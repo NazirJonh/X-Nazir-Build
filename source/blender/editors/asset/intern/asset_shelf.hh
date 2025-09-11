@@ -10,6 +10,9 @@
 
 #include "BLI_function_ref.hh"
 
+#include "DNA_asset_types.h"
+#include "DNA_listBase.h"
+
 namespace blender {
 
 struct ARegion;
@@ -82,6 +85,38 @@ void settings_set_catalog_path_enabled(AssetShelf &shelf,
 void settings_foreach_enabled_catalog_path(
     const AssetShelf &shelf,
     FunctionRef<void(const asset_system::AssetCatalogPath &catalog_path)> fn);
+
+/**
+ * Check if a catalog path is collapsed in the asset shelf settings.
+ */
+bool settings_is_catalog_path_collapsed(const AssetShelfSettings &settings,
+                                        const asset_system::AssetCatalogPath &path);
+
+/**
+ * Set the collapsed state of a catalog path in the asset shelf settings.
+ */
+void settings_set_catalog_path_collapsed(AssetShelfSettings &settings,
+                                         const asset_system::AssetCatalogPath &path,
+                                         bool collapsed);
+
+/**
+ * Toggle the collapsed state of a catalog path in the asset shelf settings.
+ */
+void settings_toggle_catalog_path_collapsed(AssetShelfSettings &settings,
+                                            const asset_system::AssetCatalogPath &path);
+
+/**
+ * Set the collapsed state of a catalog path directly in a list (for FileSelectParams).
+ */
+void settings_set_catalog_path_collapsed_in_listbase(ListBaseT<AssetCatalogState> &catalog_states,
+                                                     const asset_system::AssetCatalogPath &path,
+                                                     bool collapsed);
+
+/**
+ * Clean up old catalog states to prevent memory bloat.
+ * Removes entries older than 30 days and keeps only the most recently used entries.
+ */
+void settings_cleanup_old_catalog_states(AssetShelfSettings &settings, int keep_count);
 
 }  // namespace ed::asset::shelf
 }  // namespace blender

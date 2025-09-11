@@ -207,9 +207,22 @@ struct AssetWeakReference {
 #endif
 };
 
-struct AssetCatalogPathLink {
-  struct AssetCatalogPathLink *next = nullptr, *prev = nullptr;
+struct AssetCatalogState {
+  struct AssetCatalogState *next = nullptr, *prev = nullptr;
+
+  /** Full catalog path. */
   char *path = nullptr;
+  /** Padding pointer for 32-bit compatibility. */
+  void *_pad_ptr = nullptr;
+
+  /** Hash of the full catalog path. */
+  uint64_t path_hash = 0;
+
+  /** Time when this item was last used (in seconds since epoch). Used to remove old entries. */
+  uint32_t last_used = 0;
+
+  char is_collapsed = true;
+  char _pad[3] = {};
 };
 
 }  // namespace blender

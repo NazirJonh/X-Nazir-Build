@@ -561,12 +561,15 @@ void AbstractTreeViewItem::collapse_chevron_click_fn(bContext *C,
    * lookup the hovered item via context here. */
 
   const wmWindow *win = CTX_wm_window(C);
+
   const ARegion *region = CTX_wm_region_popup(C) ? CTX_wm_region_popup(C) : CTX_wm_region(C);
   AbstractViewItem *hovered_abstract_item = region_views_find_item_at(
       *region, win->runtime->eventstate->xy);
 
   auto *hovered_item = reinterpret_cast<AbstractTreeViewItem *>(hovered_abstract_item);
-  BLI_assert(hovered_item != nullptr);
+  if (!hovered_item) {
+    return;
+  }
 
   hovered_item->toggle_collapsed_from_view(*C);
   /* When collapsing an item with an active child, make this collapsed item active instead so the
@@ -730,6 +733,7 @@ bool AbstractTreeViewItem::set_collapsed(const bool collapsed)
   if (!this->is_collapsible()) {
     return false;
   }
+
   if (collapsed == !is_open_) {
     return false;
   }

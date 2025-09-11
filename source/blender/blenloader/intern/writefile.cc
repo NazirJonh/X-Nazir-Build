@@ -1241,6 +1241,9 @@ static void write_userdef(BlendWriter *writer, const UserDef *userdef)
     writer->write_struct(&shelf_settings);
     BKE_asset_catalog_path_list_blend_write(writer, shelf_settings.enabled_catalog_paths);
   }
+  for (const bUserAssetBrowserSettings &browser_settings : userdef->asset_browser_settings) {
+    BKE_preferences_asset_browser_settings_blend_write(writer, &browser_settings);
+  }
 
   for (const uiStyle &style : userdef->uistyles) {
     writer->write_struct(&style);

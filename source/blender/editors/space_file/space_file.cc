@@ -14,10 +14,14 @@
 
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
+#include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
 
 #include "BKE_appdir.hh"
+#include "BKE_asset.hh"
+#include "DNA_asset_types.h"
+
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_lib_query.hh"
@@ -129,6 +133,9 @@ static void file_free(SpaceLink *sl)
   folder_history_list_free(sfile);
 
   MEM_SAFE_DELETE(sfile->params);
+  if (sfile->asset_params) {
+    BKE_asset_catalog_path_list_free(sfile->asset_params->catalog_states);
+  }
   MEM_SAFE_DELETE(sfile->asset_params);
   if (sfile->runtime != nullptr) {
     BKE_reports_free(&sfile->runtime->is_blendfile_readable_reports);
@@ -191,6 +198,16 @@ static SpaceLink *file_duplicate(SpaceLink *sl)
   if (sfileo->asset_params) {
     sfilen->asset_params = static_cast<FileAssetSelectParams *>(
         MEM_dupalloc(sfileo->asset_params));
+    /* Duplicate catalog collapsed states list. */
+    BLI_listbase_clear(&sfilen->asset_params->catalog_states);
+    for (const AssetCatalogState &state : sfileo->asset_params->catalog_states) {
+      AssetCatalogState *new_state = MEM_new<AssetCatalogState>(__func__);
+      new_state->path = BLI_strdup(state.path);
+      new_state->path_hash = state.path_hash;
+      new_state->is_collapsed = state.is_collapsed;
+      new_state->last_used = state.last_used;
+      BLI_addtail(&sfilen->asset_params->catalog_states, new_state);
+    }
   }
 
   sfilen->folder_histories = folder_history_list_duplicate(&sfileo->folder_histories);
@@ -499,6 +516,20 @@ static void file_main_region_listener(const wmRegionListenerParams *listener_par
       break;
     case NC_ID:
       if (ELEM(wmn->action, NA_SELECTED, NA_ACTIVATED, NA_RENAME)) {
+        ED_region_tag_redraw(region);
+      }
+      break;
+    case NC_ASSET:
+      /* Handle asset catalog changes and asset list updates */
+      if (ELEM(wmn->data,
+               ND_ASSET_LIST,
+               ND_ASSET_CATALOGS,
+               ND_ASSET_LIST_READING,
+               ND_ASSET_LIST_PREVIEW))
+      {
+        ED_region_tag_redraw(region);
+      }
+      if (ELEM(wmn->action, NA_ADDED, NA_REMOVED, NA_EDITED)) {
         ED_region_tag_redraw(region);
       }
       break;
@@ -979,6 +1010,12 @@ static void file_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
       default:
         sfile->asset_params->import_method = FILE_ASSET_IMPORT_FOLLOW_PREFS;
     }
+    /* Read catalog collapsed states list. */
+    BLO_read_struct_list(reader, AssetCatalogState, &sfile->asset_params->catalog_states);
+    /* Read path strings for each catalog collapsed state. */
+    for (AssetCatalogState &catalog_path : sfile->asset_params->catalog_states.items_mutable()) {
+      BLO_read_string(reader, &catalog_path.path);
+    }
   }
 }
 
@@ -1001,6 +1038,11 @@ static void file_space_blend_write(BlendWriter *writer, SpaceLink *sl)
   }
   if (sfile->asset_params) {
     writer->write_struct(sfile->asset_params);
+    /* Write catalog collapsed states list. */
+    for (const AssetCatalogState &catalog_path : sfile->asset_params->catalog_states) {
+      writer->write_struct(&catalog_path);
+      writer->write_string(catalog_path.path);
+    }
   }
 }
 

@@ -580,6 +580,14 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     FOREACH_NODETREE_END;
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 27)) {
+    /* Asset Browser catalog collapse states are now stored per-library in user preferences
+     * (#bUserAssetBrowserSettings in #UserDef). The new #AssetCatalogState struct replaces
+     * the old #AssetCatalogPathLink with additional fields for collapse state, LRU tracking,
+     * and path hashing. Existing files will start with empty state lists, equivalent to the
+     * previous behavior where all catalogs were expanded by default. */
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

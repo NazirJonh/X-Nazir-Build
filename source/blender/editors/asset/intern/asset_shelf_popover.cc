@@ -30,7 +30,45 @@
 
 #include "WM_api.hh"
 
+#include "../../space_file/file_intern.hh"
+
 namespace blender::ed::asset::shelf {
+
+class AssetShelfCatalogTreeViewItem : public ui::BasicTreeViewItem {
+  AssetShelf &shelf_;
+  std::string catalog_path_;
+
+ public:
+  AssetShelfCatalogTreeViewItem(const std::string &name,
+                                AssetShelf &shelf,
+                                const std::string &catalog_path)
+      : BasicTreeViewItem(name), shelf_(shelf), catalog_path_(catalog_path)
+  {
+  }
+
+  /** Check if this catalog should be collapsed based on saved state. */
+  std::optional<bool> should_be_collapsed() const override
+  {
+    /* Check if this catalog path is collapsed in the asset shelf settings */
+    asset_system::AssetCatalogPath catalog_path(catalog_path_);
+    bool is_collapsed = settings_is_catalog_path_collapsed(shelf_.settings, catalog_path);
+
+    return is_collapsed;
+  }
+
+  /** Set the collapsed state for this catalog and save it. */
+  bool set_collapsed(bool collapsed) override
+  {
+    /* Call parent implementation first */
+    bool result = BasicTreeViewItem::set_collapsed(collapsed);
+
+    /* Save the collapsed state in the asset shelf settings */
+    asset_system::AssetCatalogPath catalog_path(catalog_path_);
+    settings_set_catalog_path_collapsed(shelf_.settings, catalog_path, collapsed);
+
+    return result;
+  }
+};
 
 class StaticPopupShelves {
  public:
@@ -144,21 +182,23 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
         [this]() { return settings_is_all_catalog_active(shelf_.settings); });
     all_item.uncollapse_by_default();
 
-    catalog_tree_.foreach_root_item([&, this](
-                                        const asset_system::AssetCatalogTreeItem &catalog_item) {
-      ui::BasicTreeViewItem &item = this->build_catalog_items_recursive(all_item, catalog_item);
-      item.uncollapse_by_default();
-    });
+    catalog_tree_.foreach_root_item(
+        [&, this](const asset_system::AssetCatalogTreeItem &catalog_item) {
+          AssetShelfCatalogTreeViewItem &item = this->build_catalog_items_recursive(all_item,
+                                                                                    catalog_item);
+          item.uncollapse_by_default();
+        });
   }
 
-  ui::BasicTreeViewItem &build_catalog_items_recursive(
+  AssetShelfCatalogTreeViewItem &build_catalog_items_recursive(
       ui::TreeViewOrItem &parent_view_item,
       const asset_system::AssetCatalogTreeItem &catalog_item) const
   {
-    ui::BasicTreeViewItem &view_item = parent_view_item.add_tree_item<ui::BasicTreeViewItem>(
-        catalog_item.get_name());
-
     std::string catalog_path = catalog_item.catalog_path().str();
+    AssetShelfCatalogTreeViewItem &view_item =
+        parent_view_item.add_tree_item<AssetShelfCatalogTreeViewItem>(
+            catalog_item.get_name(), const_cast<AssetShelf &>(shelf_), catalog_path);
+
     view_item.set_on_activate_fn([this, catalog_path](bContext &C, ui::BasicTreeViewItem &) {
       settings_set_active_catalog(shelf_.settings, catalog_path);
       send_redraw_notifier(C);
@@ -170,7 +210,7 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
     const int parent_count = view_item.count_parents() + 1;
 
     catalog_item.foreach_child([&, this](const asset_system::AssetCatalogTreeItem &child) {
-      ui::BasicTreeViewItem &child_item = build_catalog_items_recursive(view_item, child);
+      AssetShelfCatalogTreeViewItem &child_item = build_catalog_items_recursive(view_item, child);
 
       /* Uncollapse to some level (gives quick access, but don't let the tree get too big). */
       if (parent_count < 3) {
@@ -179,6 +219,19 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
     });
 
     return view_item;
+  }
+
+  /** Listen for asset catalog notifications to update the tree view. */
+  bool listen(const wmNotifier &notifier) const override
+  {
+    switch (notifier.category) {
+      case NC_ASSET:
+        if (ELEM(notifier.data, ND_ASSET_CATALOGS)) {
+          return true;
+        }
+        break;
+    }
+    return false;
   }
 };
 

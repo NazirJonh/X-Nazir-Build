@@ -878,12 +878,15 @@ ENUM_OPERATORS(AssetShelf_InstanceFlag);
 struct AssetShelfSettings {
   AssetLibraryReference asset_library_reference;
 
-  ListBaseT<AssetCatalogPathLink> enabled_catalog_paths = {nullptr, nullptr};
+  ListBaseT<AssetCatalogState> enabled_catalog_paths = {nullptr, nullptr};
   /** If not set (null or empty string), all assets will be displayed ("All" catalog behavior). */
   const char *active_catalog_path = nullptr;
 
   /** For filtering assets displayed in the asset view. */
   char search_string[64] = "";
+
+  /** Collapsed state of catalog paths in the catalog selector. */
+  ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
 
   short preview_size = 0;
   AssetShelfSettings_DisplayFlag display_flag = {};

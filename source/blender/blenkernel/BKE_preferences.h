@@ -15,10 +15,15 @@ namespace blender {
 
 struct BlendWriter;
 struct UserDef;
-struct bUserExtensionRepo;
+
+struct AssetLibraryReference;
+struct bUserAssetBrowserSettings;
+
 struct bUserAssetLibrary;
 struct bUserAssetShelfSettings;
 class StringRef;
+
+struct bUserExtensionRepo;
 
 /* -------------------------------------------------------------------- */
 /** \name Preferences File
@@ -32,6 +37,33 @@ namespace bke::preferences {
 bool exists();
 
 }  // namespace bke::preferences
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name #bUserAssetBrowserSettings
+ * \{ */
+
+bUserAssetBrowserSettings *BKE_preferences_asset_browser_settings_get(
+    const UserDef *userdef, const char *library_identifier);
+bUserAssetBrowserSettings *BKE_preferences_asset_browser_settings_get_from_library_ref(
+    UserDef *userdef, const struct AssetLibraryReference *library_ref);
+bool BKE_preferences_asset_browser_settings_is_catalog_collapsed(const UserDef *userdef,
+                                                                 const char *library_identifier,
+                                                                 const char *catalog_path);
+void BKE_preferences_asset_browser_settings_set_catalog_collapsed(UserDef *userdef,
+                                                                  const char *library_identifier,
+                                                                  const char *catalog_path,
+                                                                  bool collapsed);
+void BKE_preferences_asset_browser_settings_toggle_catalog_collapsed(
+    UserDef *userdef, const char *library_identifier, const char *catalog_path);
+void BKE_preferences_asset_browser_settings_cleanup(UserDef *userdef);
+void BKE_preferences_asset_browser_settings_clear_all(UserDef *userdef);
+
+void BKE_preferences_asset_browser_settings_blend_write(
+    struct BlendWriter *writer, const struct bUserAssetBrowserSettings *settings);
+void BKE_preferences_asset_browser_settings_blend_read_data(
+    struct BlendDataReader *reader, struct bUserAssetBrowserSettings *settings);
 
 /** \} */
 
@@ -217,6 +249,15 @@ bool BKE_preferences_asset_shelf_settings_is_catalog_path_enabled(const UserDef 
 bool BKE_preferences_asset_shelf_settings_ensure_catalog_path_enabled(UserDef *userdef,
                                                                       const char *shelf_idname,
                                                                       const char *catalog_path);
+
+/* Asset Browser Settings Management */
+void BKE_preferences_asset_browser_settings_cleanup_old(UserDef *userdef,
+                                                        const char *library_identifier,
+                                                        int target_count);
+void BKE_preferences_asset_browser_settings_cleanup_all_old(UserDef *userdef);
+void BKE_preferences_asset_browser_settings_cleanup_startup(UserDef *userdef);
+int BKE_preferences_asset_browser_settings_get_catalog_count(const UserDef *userdef,
+                                                             const char *library_identifier);
 
 /** \} */
 

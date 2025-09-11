@@ -86,16 +86,66 @@ void BKE_asset_metadata_read(BlendDataReader *reader, AssetMetaData *asset_data)
 void BKE_asset_weak_reference_write(BlendWriter *writer, const AssetWeakReference *weak_ref);
 void BKE_asset_weak_reference_read(BlendDataReader *reader, AssetWeakReference *weak_ref);
 
-void BKE_asset_catalog_path_list_free(ListBaseT<AssetCatalogPathLink> &catalog_path_list);
-ListBaseT<AssetCatalogPathLink> BKE_asset_catalog_path_list_duplicate(
-    const ListBaseT<AssetCatalogPathLink> &catalog_path_list);
+void BKE_asset_catalog_path_list_free(ListBaseT<AssetCatalogState> &catalog_path_list);
+ListBaseT<AssetCatalogState> BKE_asset_catalog_path_list_duplicate(
+    const ListBaseT<AssetCatalogState> &catalog_path_list);
 void BKE_asset_catalog_path_list_blend_write(
-    BlendWriter *writer, const ListBaseT<AssetCatalogPathLink> &catalog_path_list);
-void BKE_asset_catalog_path_list_blend_read_data(
-    BlendDataReader *reader, ListBaseT<AssetCatalogPathLink> &catalog_path_list);
-bool BKE_asset_catalog_path_list_has_path(const ListBaseT<AssetCatalogPathLink> &catalog_path_list,
+    BlendWriter *writer, const ListBaseT<AssetCatalogState> &catalog_path_list);
+void BKE_asset_catalog_path_list_blend_read_data(BlendDataReader *reader,
+                                                 ListBaseT<AssetCatalogState> &catalog_path_list);
+bool BKE_asset_catalog_path_list_has_path(const ListBaseT<AssetCatalogState> &catalog_path_list,
                                           const char *catalog_path);
-void BKE_asset_catalog_path_list_add_path(ListBaseT<AssetCatalogPathLink> &catalog_path_list,
+void BKE_asset_catalog_path_list_add_path(ListBaseT<AssetCatalogState> &catalog_path_list,
                                           const char *catalog_path);
+
+/**
+ * Check if a catalog path is collapsed in the given list.
+ * Returns false if the path is not found (default to expanded state).
+ */
+bool BKE_asset_catalog_path_is_collapsed(const ListBaseT<AssetCatalogState> &catalog_path_list,
+                                         const char *catalog_path);
+
+/* Asset catalog state management functions */
+
+/**
+ * Set the collapsed state for a catalog path in the given list.
+ * Creates a new entry if the path doesn't exist.
+ */
+void BKE_asset_catalog_state_set_collapsed(ListBaseT<AssetCatalogState> &catalog_state_list,
+                                           const char *catalog_path,
+                                           bool collapsed);
+
+/**
+ * Get the collapsed state for a catalog path from the given list.
+ * Returns default_state if the path is not found.
+ */
+bool BKE_asset_catalog_state_get_collapsed(const ListBaseT<AssetCatalogState> &catalog_state_list,
+                                           const char *catalog_path,
+                                           bool default_state);
+
+/**
+ * Toggle the collapsed state for a catalog path in the given list.
+ */
+void BKE_asset_catalog_state_toggle_collapsed(ListBaseT<AssetCatalogState> &catalog_state_list,
+                                              const char *catalog_path,
+                                              bool default_state);
+
+/**
+ * Free all catalog state entries in the list.
+ */
+void BKE_asset_catalog_state_list_free(ListBaseT<AssetCatalogState> &catalog_state_list);
+
+/**
+ * Duplicate a catalog state list.
+ */
+void BKE_asset_catalog_state_list_duplicate(ListBaseT<AssetCatalogState> &dest_list,
+                                            const ListBaseT<AssetCatalogState> &src_list);
+
+/**
+ * Clean up old catalog state entries based on last used time.
+ * Keeps only the most recently used entries up to max_entries.
+ */
+void BKE_asset_catalog_state_cleanup_old(ListBaseT<AssetCatalogState> &catalog_state_list,
+                                         int max_entries);
 
 }  // namespace blender

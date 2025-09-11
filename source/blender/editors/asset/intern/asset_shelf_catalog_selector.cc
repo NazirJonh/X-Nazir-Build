@@ -8,6 +8,8 @@
  * Catalog tree-view to enable/disable catalogs in the asset shelf settings.
  */
 
+#include <optional>
+
 #include "AS_asset_catalog.hh"
 #include "AS_asset_catalog_tree.hh"
 
@@ -70,7 +72,7 @@ class AssetCatalogSelectorTree : public ui::AbstractTreeView {
     catalog_tree_.foreach_root_item(
         [this](const asset_system::AssetCatalogTreeItem &catalog_item) {
           Item &item = build_catalog_items_recursive(*this, catalog_item);
-          item.uncollapse_by_default();
+          /* Use saved collapsed state instead of forcing uncollapse */
         });
   }
 
@@ -83,10 +85,7 @@ class AssetCatalogSelectorTree : public ui::AbstractTreeView {
     catalog_item.foreach_child([&, this](const asset_system::AssetCatalogTreeItem &child) {
       Item &child_item = build_catalog_items_recursive(view_item, child);
 
-      /* Uncollapse to some level (gives quick access, but don't let the tree get too big). */
-      if (parent_count < 2) {
-        child_item.uncollapse_by_default();
-      }
+      /* Use saved collapsed state instead of forcing uncollapse */
     });
 
     return view_item;
@@ -94,8 +93,22 @@ class AssetCatalogSelectorTree : public ui::AbstractTreeView {
 
   void update_shelf_settings_from_enabled_catalogs();
 
+  /** Listen for asset catalog notifications to update the tree view. */
+  bool listen(const wmNotifier &notifier) const override
+  {
+    switch (notifier.category) {
+      case NC_ASSET:
+        if (ELEM(notifier.data, ND_ASSET_CATALOGS)) {
+          return true;
+        }
+        break;
+    }
+    return false;
+  }
+
   class Item : public ui::BasicTreeViewItem {
     const asset_system::AssetCatalogTreeItem &catalog_item_;
+    AssetShelf &shelf_;
     /* Is the catalog path enabled in this redraw? Set on construction, updated by the UI (which
      * gets a pointer to it). The UI needs it as char. */
     char catalog_path_enabled_ = false;
@@ -104,6 +117,7 @@ class AssetCatalogSelectorTree : public ui::AbstractTreeView {
     Item(const asset_system::AssetCatalogTreeItem &catalog_item, AssetShelf &shelf)
         : ui::BasicTreeViewItem(catalog_item.get_name()),
           catalog_item_(catalog_item),
+          shelf_(shelf),
           catalog_path_enabled_(
               settings_is_catalog_path_enabled(shelf, catalog_item.catalog_path()))
     {
@@ -134,6 +148,27 @@ class AssetCatalogSelectorTree : public ui::AbstractTreeView {
     asset_system::AssetCatalogPath catalog_path() const
     {
       return catalog_item_.catalog_path();
+    }
+
+    /** Check if this catalog should be collapsed based on saved state. */
+    std::optional<bool> should_be_collapsed() const override
+    {
+      return settings_is_catalog_path_collapsed(shelf_.settings, catalog_item_.catalog_path());
+    }
+
+    /** Set the collapsed state for this catalog and save it. */
+    bool set_collapsed(bool collapsed) override
+    {
+      /* Call parent implementation first to update UI state */
+      bool result = BasicTreeViewItem::set_collapsed(collapsed);
+      if (!result) {
+        return false;
+      }
+
+      /* Save the collapsed state in the asset shelf settings */
+      settings_set_catalog_path_collapsed(
+          shelf_.settings, catalog_item_.catalog_path(), collapsed);
+      return true;
     }
 
     void build_row(ui::Layout &row) override

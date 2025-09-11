@@ -24,6 +24,7 @@
 
 #include "AS_asset_representation.hh"
 
+#include "DNA_asset_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_enums.h"
 #include "DNA_space_types.h"
@@ -33,6 +34,7 @@
 
 #include "BLI_fileops.h"
 #include "BLI_fnmatch.h"
+#include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
@@ -116,6 +118,23 @@ static void fileselect_ensure_updated_asset_params(SpaceFile *sfile)
     asset_params->asset_library_ref.custom_library_index = -1;
     asset_params->import_method = FILE_ASSET_IMPORT_FOLLOW_PREFS;
     asset_params->import_flags = FILE_ASSET_IMPORT_INSTANCE_COLLECTIONS_ON_LINK;
+    /* Initialize catalog collapsed states list. */
+    BLI_listbase_clear(&asset_params->catalog_states);
+
+    /* Initialize from global preferences for compatibility */
+    bUserAssetBrowserSettings *global_settings =
+        BKE_preferences_asset_browser_settings_get_from_library_ref(
+            &U, &asset_params->asset_library_ref);
+    if (global_settings) {
+      for (const AssetCatalogState &global_state : global_settings->catalog_states) {
+        AssetCatalogState *new_state = MEM_new<AssetCatalogState>(__func__);
+        new_state->path = BLI_strdup(global_state.path);
+        new_state->path_hash = global_state.path_hash;
+        new_state->is_collapsed = global_state.is_collapsed;
+        new_state->last_used = global_state.last_used;
+        BLI_addtail(&asset_params->catalog_states, new_state);
+      }
+    }
   }
 
   FileSelectParams *base_params = &asset_params->base_params;

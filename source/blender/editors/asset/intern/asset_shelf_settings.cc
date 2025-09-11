@@ -10,19 +10,25 @@
 
 #include "AS_asset_catalog_path.hh"
 
+#include "DNA_asset_types.h"
 #include "DNA_defs.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 
 #include "BLO_read_write.hh"
 
+#include "BLI_hash.h"
 #include "BLI_listbase.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
+#include "BLI_time.h"
 
 #include "BKE_asset.hh"
 #include "BKE_preferences.h"
 #include "BKE_screen.hh"
+
+#include "MEM_guardedalloc.h"
 
 #include "asset_shelf.hh"
 
@@ -48,6 +54,9 @@ AssetShelfSettings &AssetShelfSettings::operator=(const AssetShelfSettings &othe
   if (this->enabled_catalog_paths != other.enabled_catalog_paths) {
     BKE_asset_catalog_path_list_free(this->enabled_catalog_paths);
   }
+  if (this->catalog_states != other.catalog_states) {
+    BKE_asset_catalog_path_list_free(this->catalog_states);
+  }
   if (this->active_catalog_path != other.active_catalog_path) {
     MEM_SAFE_DELETE(this->active_catalog_path);
   }
@@ -62,6 +71,7 @@ AssetShelfSettings &AssetShelfSettings::operator=(const AssetShelfSettings &othe
     this->active_catalog_path = BLI_strdup(other.active_catalog_path);
   }
   this->enabled_catalog_paths = BKE_asset_catalog_path_list_duplicate(other.enabled_catalog_paths);
+  this->catalog_states = BKE_asset_catalog_path_list_duplicate(other.catalog_states);
 
   return *this;
 }
@@ -69,6 +79,7 @@ AssetShelfSettings &AssetShelfSettings::operator=(const AssetShelfSettings &othe
 AssetShelfSettings::~AssetShelfSettings()
 {
   BKE_asset_catalog_path_list_free(enabled_catalog_paths);
+  BKE_asset_catalog_path_list_free(catalog_states);
   MEM_SAFE_DELETE(active_catalog_path);
 }
 
@@ -79,13 +90,25 @@ void settings_blend_write(BlendWriter *writer, const AssetShelfSettings &setting
   writer->write_struct(&settings);
 
   BKE_asset_catalog_path_list_blend_write(writer, settings.enabled_catalog_paths);
+  BKE_asset_catalog_path_list_blend_write(writer, settings.catalog_states);
   writer->write_string(settings.active_catalog_path);
 }
 
 void settings_blend_read_data(BlendDataReader *reader, AssetShelfSettings &settings)
 {
   BKE_asset_catalog_path_list_blend_read_data(reader, settings.enabled_catalog_paths);
+  BKE_asset_catalog_path_list_blend_read_data(reader, settings.catalog_states);
   BLO_read_string(reader, &settings.active_catalog_path);
+
+  /* Restore hash values if missing (for backward compatibility) */
+  for (AssetCatalogState &collapsed_state : settings.catalog_states.items_mutable()) {
+    if (collapsed_state.path && collapsed_state.path_hash == 0) {
+      collapsed_state.path_hash = BLI_hash_string(collapsed_state.path);
+    }
+    if (collapsed_state.last_used == 0) {
+      collapsed_state.last_used = uint32_t(BLI_time_now_seconds());
+    }
+  }
 }
 
 void settings_set_active_catalog(AssetShelfSettings &settings,
@@ -117,8 +140,7 @@ static bool use_enabled_catalogs_from_prefs(const AssetShelf &shelf)
   return shelf.type && (shelf.type->flag & ASSET_SHELF_TYPE_FLAG_STORE_CATALOGS_IN_PREFS);
 }
 
-static const ListBaseT<AssetCatalogPathLink> *get_enabled_catalog_path_list(
-    const AssetShelf &shelf)
+static const ListBaseT<AssetCatalogState> *get_enabled_catalog_path_list(const AssetShelf &shelf)
 {
   if (use_enabled_catalogs_from_prefs(shelf)) {
     bUserAssetShelfSettings *pref_settings = BKE_preferences_asset_shelf_settings_get(
@@ -128,15 +150,15 @@ static const ListBaseT<AssetCatalogPathLink> *get_enabled_catalog_path_list(
   return &shelf.settings.enabled_catalog_paths;
 }
 
-static ListBaseT<AssetCatalogPathLink> *get_enabled_catalog_path_list(AssetShelf &shelf)
+static ListBaseT<AssetCatalogState> *get_enabled_catalog_path_list(AssetShelf &shelf)
 {
-  return const_cast<ListBaseT<AssetCatalogPathLink> *>(
+  return const_cast<ListBaseT<AssetCatalogState> *>(
       get_enabled_catalog_path_list(const_cast<const AssetShelf &>(shelf)));
 }
 
 void settings_clear_enabled_catalogs(AssetShelf &shelf)
 {
-  ListBaseT<AssetCatalogPathLink> *enabled_catalog_paths = get_enabled_catalog_path_list(shelf);
+  ListBaseT<AssetCatalogState> *enabled_catalog_paths = get_enabled_catalog_path_list(shelf);
   if (enabled_catalog_paths) {
     BKE_asset_catalog_path_list_free(*enabled_catalog_paths);
     BLI_assert(BLI_listbase_is_empty(enabled_catalog_paths));
@@ -146,8 +168,7 @@ void settings_clear_enabled_catalogs(AssetShelf &shelf)
 bool settings_is_catalog_path_enabled(const AssetShelf &shelf,
                                       const asset_system::AssetCatalogPath &path)
 {
-  const ListBaseT<AssetCatalogPathLink> *enabled_catalog_paths = get_enabled_catalog_path_list(
-      shelf);
+  const ListBaseT<AssetCatalogState> *enabled_catalog_paths = get_enabled_catalog_path_list(shelf);
   if (!enabled_catalog_paths) {
     return false;
   }
@@ -177,15 +198,47 @@ void settings_foreach_enabled_catalog_path(
     const AssetShelf &shelf,
     FunctionRef<void(const asset_system::AssetCatalogPath &catalog_path)> fn)
 {
-  const ListBaseT<AssetCatalogPathLink> *enabled_catalog_paths = get_enabled_catalog_path_list(
-      shelf);
+  const ListBaseT<AssetCatalogState> *enabled_catalog_paths = get_enabled_catalog_path_list(shelf);
   if (!enabled_catalog_paths) {
     return;
   }
 
-  for (const AssetCatalogPathLink &path_link : *enabled_catalog_paths) {
+  for (const AssetCatalogState &path_link : *enabled_catalog_paths) {
     fn(asset_system::AssetCatalogPath(path_link.path));
   }
+}
+
+bool settings_is_catalog_path_collapsed(const AssetShelfSettings &settings,
+                                        const asset_system::AssetCatalogPath &path)
+{
+  /* Default to expanded state for paths not yet in the saved state list, matching the
+   * original uncollapse_by_default() behavior used before state persistence was added. */
+  return BKE_asset_catalog_state_get_collapsed(settings.catalog_states, path.c_str(), false);
+}
+
+void settings_set_catalog_path_collapsed(AssetShelfSettings &settings,
+                                         const asset_system::AssetCatalogPath &path,
+                                         bool collapsed)
+{
+  BKE_asset_catalog_state_set_collapsed(settings.catalog_states, path.c_str(), collapsed);
+}
+
+void settings_toggle_catalog_path_collapsed(AssetShelfSettings &settings,
+                                            const asset_system::AssetCatalogPath &path)
+{
+  BKE_asset_catalog_state_toggle_collapsed(settings.catalog_states, path.c_str(), true);
+}
+
+void settings_set_catalog_path_collapsed_in_listbase(ListBaseT<AssetCatalogState> &catalog_states,
+                                                     const asset_system::AssetCatalogPath &path,
+                                                     bool collapsed)
+{
+  BKE_asset_catalog_state_set_collapsed(catalog_states, path.c_str(), collapsed);
+}
+
+void settings_cleanup_old_catalog_states(AssetShelfSettings &settings, int keep_count)
+{
+  BKE_asset_catalog_state_cleanup_old(settings.catalog_states, keep_count);
 }
 
 }  // namespace ed::asset::shelf

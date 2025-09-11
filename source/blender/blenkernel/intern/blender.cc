@@ -391,6 +391,12 @@ void BKE_blender_userdef_data_free(UserDef *userdef, bool clear_fonts)
   }
   BLI_listbase_clear(&userdef->asset_shelves_settings);
 
+  for (bUserAssetBrowserSettings &settings : userdef->asset_browser_settings.items_mutable()) {
+    BKE_asset_catalog_path_list_free(settings.catalog_states);
+    MEM_delete(&settings);
+  }
+  BLI_listbase_clear(&userdef->asset_browser_settings);
+
   BLI_freelistN(&userdef->uistyles);
   BLI_freelistN(&userdef->uifonts);
   BLI_freelistN(&userdef->themes);

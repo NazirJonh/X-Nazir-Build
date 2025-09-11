@@ -377,7 +377,7 @@ void asset_reading_region_listen_fn(const wmRegionListenerParams *params)
 
   switch (wmn->category) {
     case NC_ASSET:
-      if (ELEM(wmn->data, ND_ASSET_LIST_READING, ND_ASSET_LIST_PREVIEW)) {
+      if (ELEM(wmn->data, ND_ASSET_LIST_READING, ND_ASSET_LIST_PREVIEW, ND_ASSET_CATALOGS)) {
         ED_region_tag_refresh_ui(region);
       }
       break;
@@ -440,6 +440,27 @@ bool is_loaded(const AssetLibraryReference *library_reference)
   return list->is_loaded();
 }
 
+/* Helper function to check if two asset library references are compatible for catalog
+ * synchronization */
+static bool asset_library_references_compatible_for_sync(
+    const AssetLibraryReference &current_library_ref,
+    const AssetLibraryReference &change_library_ref)
+{
+  /* Exact match */
+  if (current_library_ref == change_library_ref) {
+    return true;
+  }
+
+  /* If one is "All Libraries", it should sync with any specific library */
+  if (current_library_ref.type == ASSET_LIBRARY_ALL ||
+      change_library_ref.type == ASSET_LIBRARY_ALL)
+  {
+    return true;
+  }
+
+  return false;
+}
+
 static void foreach_visible_asset_browser_showing_library(
     const AssetLibraryReference &library_reference,
     const wmWindowManager *wm,
@@ -453,7 +474,10 @@ static void foreach_visible_asset_browser_showing_library(
       if (area->spacetype == SPACE_FILE) {
         SpaceFile *sfile = reinterpret_cast<SpaceFile *>(area->spacedata.first);
         if (sfile->browse_mode == FILE_BROWSE_MODE_ASSETS) {
-          if (sfile->asset_params && sfile->asset_params->asset_library_ref == library_reference) {
+          if (sfile->asset_params &&
+              asset_library_references_compatible_for_sync(sfile->asset_params->asset_library_ref,
+                                                           library_reference))
+          {
             fn(*sfile);
           }
         }

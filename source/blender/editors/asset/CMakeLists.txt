@@ -18,6 +18,7 @@ set(INC_SYS
 )
 
 set(SRC
+  intern/asset_browser_settings.cc
   intern/asset_catalog.cc
   intern/asset_filter.cc
   intern/asset_import.cc

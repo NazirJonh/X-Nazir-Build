@@ -26,6 +26,16 @@
     .custom_library_index = -1, \
   }
 
+#define _DNA_DEFAULT_AssetCatalogState \
+  { \
+    .next = NULL, \
+    .prev = NULL, \
+    .path_hash = 0, \
+    .path = NULL, \
+    .is_collapsed = true, \
+    .last_used = 0, \
+  }
+
 /** \} */
 
 /* clang-format on */

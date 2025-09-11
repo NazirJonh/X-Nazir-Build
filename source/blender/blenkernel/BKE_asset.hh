@@ -93,3 +93,51 @@ void BKE_asset_catalog_path_list_blend_read_data(BlendDataReader *reader,
 bool BKE_asset_catalog_path_list_has_path(const ListBase &catalog_path_list,
                                           const char *catalog_path);
 void BKE_asset_catalog_path_list_add_path(ListBase &catalog_path_list, const char *catalog_path);
+
+/**
+ * Check if a catalog path is collapsed in the given list.
+ * Returns false if the path is not found (default to expanded state).
+ */
+bool BKE_asset_catalog_path_is_collapsed(const ListBase &catalog_path_list,
+                                         const char *catalog_path);
+
+/* Asset catalog state management functions */
+
+/**
+ * Set the collapsed state for a catalog path in the given list.
+ * Creates a new entry if the path doesn't exist.
+ */
+void BKE_asset_catalog_state_set_collapsed(ListBase &catalog_state_list,
+                                           const char *catalog_path,
+                                           bool collapsed);
+
+/**
+ * Get the collapsed state for a catalog path from the given list.
+ * Returns default_state if the path is not found.
+ */
+bool BKE_asset_catalog_state_get_collapsed(const ListBase &catalog_state_list,
+                                           const char *catalog_path,
+                                           bool default_state);
+
+/**
+ * Toggle the collapsed state for a catalog path in the given list.
+ */
+void BKE_asset_catalog_state_toggle_collapsed(ListBase &catalog_state_list,
+                                              const char *catalog_path,
+                                              bool default_state);
+
+/**
+ * Free all catalog state entries in the list.
+ */
+void BKE_asset_catalog_state_list_free(ListBase &catalog_state_list);
+
+/**
+ * Duplicate a catalog state list.
+ */
+void BKE_asset_catalog_state_list_duplicate(ListBase &dest_list, const ListBase &src_list);
+
+/**
+ * Clean up old catalog state entries based on last used time.
+ * Keeps only the most recently used entries up to max_entries.
+ */
+void BKE_asset_catalog_state_cleanup_old(ListBase &catalog_state_list, int max_entries);

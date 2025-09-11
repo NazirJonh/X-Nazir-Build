@@ -197,7 +197,20 @@ typedef struct AssetWeakReference {
 #endif
 } AssetWeakReference;
 
-struct AssetCatalogPathLink {
-  struct AssetCatalogPathLink *next, *prev;
+typedef struct AssetCatalogState {
+  struct AssetCatalogState *next, *prev;
+
+  /** Full catalog path. */
   char *path;
-};
+  /** Padding pointer for 32-bit compatibility. */
+  void *_pad_ptr;
+
+  /** Hash of the full catalog path. */
+  uint64_t path_hash;
+
+  /** Time when this item was last used (in seconds since epoch). Used to remove old entries. */
+  uint32_t last_used;
+
+  char is_collapsed;
+  char _pad[3];
+} AssetCatalogState;

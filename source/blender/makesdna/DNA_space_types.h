@@ -463,9 +463,15 @@ typedef struct FileAssetSelectParams {
    * catalog to show. */
   bUUID catalog_id;
 
+  /** List of #AssetCatalogState for storing catalog collapsed states. */
+  ListBase catalog_collapsed_states;
+  void *_pad1;
+
   short import_method; /* eFileAssetImportMethod */
   short import_flags;  /* eFileImportFlags */
   char _pad2[4];
+  /** Additional padding for 32-bit compatibility. */
+  void *_pad3;
 } FileAssetSelectParams;
 
 /**

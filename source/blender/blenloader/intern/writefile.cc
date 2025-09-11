@@ -1103,6 +1103,11 @@ static void write_userdef(BlendWriter *writer, const UserDef *userdef)
     BLO_write_struct(writer, bUserAssetShelfSettings, shelf_settings);
     BKE_asset_catalog_path_list_blend_write(writer, shelf_settings->enabled_catalog_paths);
   }
+  LISTBASE_FOREACH (
+      const bUserAssetBrowserSettings *, browser_settings, &userdef->asset_browser_settings)
+  {
+    BKE_preferences_asset_browser_settings_blend_write(writer, browser_settings);
+  }
 
   LISTBASE_FOREACH (const uiStyle *, style, &userdef->uistyles) {
     BLO_write_struct(writer, uiStyle, style);

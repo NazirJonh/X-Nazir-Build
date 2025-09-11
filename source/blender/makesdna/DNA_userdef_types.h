@@ -244,6 +244,19 @@ typedef struct bUserScriptDirectory {
 } bUserScriptDirectory;
 
 /**
+ * Settings for asset browser, stored in the user preferences so they are persistent across
+ * sessions and areas.
+ */
+typedef struct bUserAssetBrowserSettings {
+  struct bUserAssetBrowserSettings *next, *prev;
+
+  /** Asset library identifier. */
+  char library_name[/*MAX_NAME*/ 64];
+
+  ListBase catalog_collapsed_states; /* #AssetCatalogState */
+} bUserAssetBrowserSettings;
+
+/**
  * Settings for an asset shelf, stored in the Preferences. Most settings are still stored in the
  * asset shelf instance in #AssetShelfSettings. This is just for the options that should be shared
  * as Preferences.
@@ -409,6 +422,7 @@ typedef struct UserDef {
   struct ListBase asset_libraries;
   /** #bUserExtensionRepo */
   struct ListBase extension_repos;
+  struct ListBase asset_browser_settings; /* #bUserAssetBrowserSettings */
   struct ListBase asset_shelves_settings; /* #bUserAssetShelfSettings */
 
   char keyconfigstr[64];

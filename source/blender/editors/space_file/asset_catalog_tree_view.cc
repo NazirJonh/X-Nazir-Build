@@ -6,6 +6,7 @@
  * \ingroup spfile
  */
 
+#include "DNA_asset_types.h"
 #include "DNA_space_types.h"
 
 #include "AS_asset_catalog.hh"
@@ -13,14 +14,21 @@
 #include "AS_asset_library.hh"
 
 #include "BKE_asset.hh"
+#include "BKE_preferences.h"
 
+#include "BLI_hash.h"
 #include "BLI_listbase.h"
+#include "BLI_string.h"
 #include "BLI_string_ref.hh"
+#include "BLI_time.h"
+
+#include "MEM_guardedalloc.h"
 
 #include "BLT_translation.hh"
 
 #include "ED_asset.hh"
 #include "ED_asset_catalog.hh"
+#include "ED_asset_shelf.hh"
 #include "ED_fileselect.hh"
 #include "ED_undo.hh"
 
@@ -95,6 +103,13 @@ class AssetCatalogTreeViewItem : public ui::BasicTreeViewItem {
   std::unique_ptr<ui::AbstractViewItemDragController> create_drag_controller() const override;
   /** Add dropping support for catalog items. */
   std::unique_ptr<ui::TreeViewItemDropTarget> create_drop_target() override;
+
+  /** Check if this catalog should be collapsed based on saved state. */
+  std::optional<bool> should_be_collapsed() const override;
+  /** Set the collapsed state for this catalog and save it. */
+  bool set_collapsed(bool collapsed) override;
+  /** Called when collapse state changes through UI interaction. */
+  void on_collapse_change(bContext &C, bool is_collapsed) override;
 };
 
 class AssetCatalogDragController : public ui::AbstractViewItemDragController {
@@ -185,8 +200,8 @@ AssetCatalogTreeView::AssetCatalogTreeView(asset_system::AssetLibrary *library,
                                            SpaceFile &space_file)
     : asset_library_(library), params_(params), space_file_(space_file)
 {
-  if (library) {
-    catalog_tree_ = &library->catalog_service().catalog_tree();
+  if (asset_library_) {
+    catalog_tree_ = &asset_library_->catalog_service().catalog_tree();
   }
   else {
     catalog_tree_ = nullptr;
@@ -358,6 +373,134 @@ std::unique_ptr<ui::AbstractViewItemDragController> AssetCatalogTreeViewItem::
 {
   return std::make_unique<AssetCatalogDragController>(
       static_cast<AssetCatalogTreeView &>(this->get_tree_view()), catalog_item_);
+}
+
+std::optional<bool> AssetCatalogTreeViewItem::should_be_collapsed() const
+{
+  const AssetCatalogTreeView &tree_view = static_cast<const AssetCatalogTreeView &>(
+      this->get_tree_view());
+
+  const asset_system::AssetLibrary *asset_library = tree_view.asset_library_;
+  if (!asset_library) {
+    return std::nullopt;
+  }
+
+  const AssetCatalogPath catalog_path = catalog_item_.catalog_path();
+  const std::string path_str = catalog_path.str();
+
+  const FileAssetSelectParams *file_params = tree_view.params_;
+  if (!file_params || path_str.empty()) {
+    return std::nullopt;
+  }
+
+  bool is_collapsed = BKE_asset_catalog_state_get_collapsed(
+      file_params->catalog_collapsed_states, path_str.c_str(), false);
+
+  return is_collapsed;
+}
+
+bool AssetCatalogTreeViewItem::set_collapsed(bool collapsed)
+{
+  const AssetCatalogTreeView &tree_view = static_cast<const AssetCatalogTreeView &>(
+      this->get_tree_view());
+
+  const asset_system::AssetLibrary *asset_library = tree_view.asset_library_;
+  if (!asset_library) {
+    return false;
+  }
+
+  const AssetCatalogPath catalog_path = catalog_item_.catalog_path();
+
+  /* Call parent implementation first to update UI state */
+  bool result = BasicTreeViewItem::set_collapsed(collapsed);
+  if (!result) {
+    return false;
+  }
+
+  FileAssetSelectParams *file_params = tree_view.params_;
+  if (!file_params) {
+    return false;
+  }
+
+  /* Save collapsed state using generalized function */
+  BKE_asset_catalog_state_set_collapsed(
+      file_params->catalog_collapsed_states, catalog_path.c_str(), collapsed);
+
+  /* Send notification only to current region, not globally */
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_FILE_PARAMS, nullptr);
+
+  return true;
+}
+
+void AssetCatalogTreeViewItem::on_collapse_change(bContext &C, bool is_collapsed)
+{
+
+  /* Get the tree view to access asset library and params */
+  AssetCatalogTreeView &tree_view = static_cast<AssetCatalogTreeView &>(get_tree_view());
+  const asset_system::AssetLibrary *asset_library = tree_view.asset_library_;
+  if (!asset_library) {
+    return;
+  }
+
+  const AssetCatalogPath catalog_path = catalog_item_.catalog_path();
+  const std::string path_str = catalog_path.str();
+
+  /* Get library identifier from AssetLibraryReference */
+  const AssetLibraryReference *library_ref = &tree_view.params_->asset_library_ref;
+  bUserAssetBrowserSettings *settings =
+      BKE_preferences_asset_browser_settings_get_from_library_ref(&U, library_ref);
+
+  if (!settings) {
+    return;
+  }
+
+  /* Use global preferences to set collapsed state for current library */
+  BKE_preferences_asset_browser_settings_set_catalog_collapsed(
+      &U, settings->library_name, path_str.c_str(), is_collapsed);
+
+  /* Send notification to update all Asset Browser areas across all windows */
+  WM_main_add_notifier(NC_ASSET | ND_ASSET_LIST, nullptr);
+
+  /* Synchronize catalog state between "All Libraries" and specific libraries */
+  if (library_ref->type == ASSET_LIBRARY_ALL) {
+    /* If we're in "All Libraries" mode, sync to all other library types */
+
+    /* Sync to Local library */
+    AssetLibraryReference local_ref = {};
+    local_ref.type = ASSET_LIBRARY_LOCAL;
+    local_ref.custom_library_index = -1;
+    bUserAssetBrowserSettings *local_settings =
+        BKE_preferences_asset_browser_settings_get_from_library_ref(&U, &local_ref);
+    if (local_settings) {
+      BKE_preferences_asset_browser_settings_set_catalog_collapsed(
+          &U, local_settings->library_name, path_str.c_str(), is_collapsed);
+    }
+
+    /* Sync to Essentials library */
+    AssetLibraryReference essentials_ref = {};
+    essentials_ref.type = ASSET_LIBRARY_ESSENTIALS;
+    essentials_ref.custom_library_index = -1;
+    bUserAssetBrowserSettings *essentials_settings =
+        BKE_preferences_asset_browser_settings_get_from_library_ref(&U, &essentials_ref);
+    if (essentials_settings) {
+      BKE_preferences_asset_browser_settings_set_catalog_collapsed(
+          &U, essentials_settings->library_name, path_str.c_str(), is_collapsed);
+    }
+  }
+  else {
+    /* If we're in a specific library mode, sync to "All Libraries" */
+    AssetLibraryReference all_ref = {};
+    all_ref.type = ASSET_LIBRARY_ALL;
+    all_ref.custom_library_index = -1;
+    bUserAssetBrowserSettings *all_settings =
+        BKE_preferences_asset_browser_settings_get_from_library_ref(&U, &all_ref);
+    if (all_settings) {
+      BKE_preferences_asset_browser_settings_set_catalog_collapsed(
+          &U, all_settings->library_name, path_str.c_str(), is_collapsed);
+    }
+  }
+
+  WM_main_add_notifier(NC_ASSET | ND_ASSET_CATALOGS, nullptr);
 }
 
 /* ---------------------------------------------------------------------- */

@@ -157,6 +157,7 @@ SDNA_DEFAULT_DECL_STRUCT(ActionLayer);
 SDNA_DEFAULT_DECL_STRUCT(ActionStrip);
 
 /* DNA_asset_defaults.h */
+SDNA_DEFAULT_DECL_STRUCT(AssetCatalogState);
 SDNA_DEFAULT_DECL_STRUCT(AssetMetaData);
 SDNA_DEFAULT_DECL_STRUCT(AssetLibraryReference);
 
@@ -411,6 +412,7 @@ const void *DNA_default_table[SDNA_TYPE_MAX] = {
     SDNA_DEFAULT_DECL(ActionStrip),
 
     /* DNA_asset_defaults.h */
+    SDNA_DEFAULT_DECL(AssetCatalogState),
     SDNA_DEFAULT_DECL(AssetMetaData),
     SDNA_DEFAULT_DECL(AssetLibraryReference),
 

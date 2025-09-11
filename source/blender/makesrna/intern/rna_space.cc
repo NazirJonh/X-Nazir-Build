@@ -3752,6 +3752,20 @@ static void rna_FileAssetSelectParams_catalog_id_set(PointerRNA *ptr, const char
   params->asset_catalog_visibility = FILE_SHOW_ASSETS_FROM_CATALOG;
 }
 
+/* Catalog collapsed states collection functions */
+static void rna_FileAssetSelectParams_catalog_collapsed_states_begin(
+    CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  FileAssetSelectParams *params = static_cast<FileAssetSelectParams *>(ptr->data);
+  rna_iterator_listbase_begin(iter, ptr, &params->catalog_collapsed_states, nullptr);
+}
+
+static int rna_FileAssetSelectParams_catalog_collapsed_states_length(PointerRNA *ptr)
+{
+  FileAssetSelectParams *params = static_cast<FileAssetSelectParams *>(ptr->data);
+  return BLI_listbase_count(&params->catalog_collapsed_states);
+}
+
 #else
 
 static const EnumPropertyItem dt_uv_items[] = {
@@ -7604,6 +7618,20 @@ static void rna_def_fileselect_asset_params(BlenderRNA *brna)
                            "Create instances for collections when appending, rather than adding "
                            "them directly to the scene");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_FILE_PARAMS, nullptr);
+
+  prop = RNA_def_property(srna, "catalog_collapsed_states", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "AssetCatalogPathLink");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_FileAssetSelectParams_catalog_collapsed_states_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    "rna_FileAssetSelectParams_catalog_collapsed_states_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop, "Catalog Collapsed States", "List of collapsed catalog states in the asset browser");
 }
 
 static void rna_def_filemenu_entry(BlenderRNA *brna)
@@ -9046,6 +9074,48 @@ static void rna_def_space_spreadsheet(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_SPREADSHEET, nullptr);
 }
 
+static void rna_def_asset_catalog_path_link(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "AssetCatalogPathLink", nullptr);
+  RNA_def_struct_sdna(srna, "AssetCatalogState");
+  RNA_def_struct_ui_text(
+      srna, "Asset Catalog Path Link", "Link to an asset catalog path with collapsed state");
+
+  prop = RNA_def_property(srna, "path", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "path");
+  RNA_def_property_ui_text(prop, "Path", "Asset catalog path");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+
+  prop = RNA_def_property(srna, "is_collapsed", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "is_collapsed", 1);
+  RNA_def_property_ui_text(
+      prop, "Is Collapsed", "Whether this catalog path is collapsed in the tree view");
+}
+
+static void rna_def_asset_catalog_collapsed_state(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "AssetCatalogState", nullptr);
+  RNA_def_struct_sdna(srna, "AssetCatalogState");
+  RNA_def_struct_ui_text(
+      srna, "Asset Catalog Collapsed State", "Collapsed state of an asset catalog path");
+
+  prop = RNA_def_property(srna, "path", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "path");
+  RNA_def_property_ui_text(prop, "Path", "Asset catalog path");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+
+  prop = RNA_def_property(srna, "is_collapsed", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "is_collapsed", 1);
+  RNA_def_property_ui_text(
+      prop, "Is Collapsed", "Whether this catalog path is collapsed in the tree view");
+}
+
 void RNA_def_space(BlenderRNA *brna)
 {
   rna_def_space(brna);
@@ -9056,6 +9126,8 @@ void RNA_def_space(BlenderRNA *brna)
   rna_def_fileselect_entry(brna);
   rna_def_fileselect_params(brna);
   rna_def_fileselect_asset_params(brna);
+  rna_def_asset_catalog_path_link(brna);
+  rna_def_asset_catalog_collapsed_state(brna);
   rna_def_fileselect_idfilter(brna);
   rna_def_fileselect_asset_idfilter(brna);
   rna_def_filemenu_entry(brna);

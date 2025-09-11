@@ -835,6 +835,9 @@ typedef struct AssetShelfSettings {
   /** For filtering assets displayed in the asset view. */
   char search_string[64];
 
+  /** Collapsed state of catalog paths in the catalog selector. */
+  ListBase catalog_collapsed_states; /* #AssetCatalogState */
+
   short preview_size;
   short display_flag; /* #AssetShelfSettings_DisplayFlag */
   char _pad1[4];

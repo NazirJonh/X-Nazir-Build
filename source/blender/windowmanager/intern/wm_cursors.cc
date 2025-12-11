@@ -395,6 +395,7 @@ static bool window_set_custom_cursor(wmWindow *win, const BCursor &cursor)
 
 void WM_cursor_set(wmWindow *win, int curs)
 {
+  printf("LOG: WM_cursor_set(win=%p, curs=%d) called from %s\n", (void*)win, curs, __func__);
   /* Option to not use any OS-supplied cursors is needed for testing. */
   const bool use_only_custom_cursors = false;
 

@@ -11,7 +11,10 @@
  * - #UI_OT_eyedropper_color
  */
 
+
 #include "MEM_guardedalloc.h"
+
+#include <cstdio>
 
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
@@ -42,10 +45,14 @@
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf_types.hh"
 
-#include "WM_api.hh"
 #include "WM_types.hh"
+#include "wm_window.hh"
 
 #include "interface_intern.hh"
+
+#include "eyedropper_intern.hh"
+
+#include "WM_api.hh"
 
 #include "ED_clip.hh"
 #include "ED_image.hh"
@@ -55,7 +62,6 @@
 
 #include "RE_pipeline.h"
 
-#include "eyedropper_intern.hh"
 
 namespace blender::ui {
 
@@ -78,16 +84,73 @@ struct Eyedropper {
   int cb_win_event_xy[2] = {};
   void *draw_handle_sample_text = nullptr;
   char sample_text[MAX_NAME] = {};
+  float current_col[3] = {}; /* current color under cursor */
 
   bNode *crypto_node = nullptr;
   CryptomatteSession *cryptomatte_session = nullptr;
   ViewportColorSampleSession *viewport_session = nullptr;
+  
+  wmTimer *timer = nullptr; /* Timer for updating preview outside Blender window */
+  void (*old_cursor_fn)(wmWindow *, ScrArea *, ARegion *) = nullptr;
+  ARegionType *region_type = nullptr;
 };
 
-static void eyedropper_draw_cb(const wmWindow * /*window*/, void *arg)
+static void eyedropper_region_cursor(wmWindow *win, ScrArea * /*area*/, ARegion * /*region*/)
+{
+  WM_cursor_set(win, WM_CURSOR_EYEDROPPER);
+}
+
+static void eyedropper_draw_cb(const wmWindow *window, void *arg)
 {
   Eyedropper *eye = static_cast<Eyedropper *>(arg);
-  eyedropper_draw_cursor_text_region(eye->cb_win_event_xy, eye->sample_text);
+
+  if (!window || !eye) {
+    return;
+  }
+
+  /* Получаем координаты курсора в координатах окна, в котором происходит отрисовка.
+   * Пытаемся получить актуальную позицию курсора через GHOST API. */
+  int current_xy[2] = {0, 0};
+  bool coords_valid = false;
+  
+  if (window->runtime && window->runtime->ghostwin) {
+    /* Пытаемся получить актуальную позицию курсора относительно окна */
+    if (wm_cursor_position_get(const_cast<wmWindow *>(window), &current_xy[0], &current_xy[1])) {
+      coords_valid = true;
+    }
+  }
+  
+  /* Если не удалось получить позицию через GHOST, используем сохраненные координаты.
+   * Но нужно убедиться, что они в правильной системе координат для этого окна. */
+  if (!coords_valid) {
+    if (window->runtime && window->runtime->eventstate) {
+      current_xy[0] = window->runtime->eventstate->xy[0];
+      current_xy[1] = window->runtime->eventstate->xy[1];
+      coords_valid = true;
+    }
+    else {
+      /* Используем сохраненные координаты как fallback */
+      current_xy[0] = eye->cb_win_event_xy[0];
+      current_xy[1] = eye->cb_win_event_xy[1];
+    }
+  }
+
+  /* Draw color swatch for regular color picking. */
+  if (!eye->crypto_node) {
+    float display_col[3];
+    copy_v3_v3(display_col, eye->current_col);
+
+    /* Convert from linear rgb space to display space for preview. */
+    if (eye->display) {
+      IMB_colormanagement_scene_linear_to_display_v3(display_col, eye->display);
+    }
+
+    /* Используем окно, в котором происходит отрисовка, и координаты в pixel space окна */
+    eyedropper_draw_cursor_color_region(window, current_xy, display_col);
+  }
+
+  /* Draw text for cryptomatte. */
+  eyedropper_draw_cursor_text_region(current_xy, eye->sample_text);
 }
 
 static bool eyedropper_init(bContext *C, wmOperator *op)
@@ -135,23 +198,37 @@ static bool eyedropper_init(bContext *C, wmOperator *op)
   if (eye->ptr.type == RNA_CompositorNodeCryptomatteV2) {
     eye->crypto_node = static_cast<bNode *>(eye->ptr.data);
     eye->cryptomatte_session = ntreeCompositCryptomatteSession(eye->crypto_node);
-    eye->cb_win = CTX_wm_window(C);
-    eye->draw_handle_sample_text = WM_draw_cb_activate(eye->cb_win, eyedropper_draw_cb, eye);
   }
 
-  if (prop_subtype != PROP_COLOR) {
-    Scene *scene = CTX_data_scene(C);
-    const char *display_device;
+  /* Always activate draw callback for color preview. */
+  eye->cb_win = CTX_wm_window(C);
+  eye->draw_handle_sample_text = WM_draw_cb_activate(eye->cb_win, eyedropper_draw_cb, eye);
 
-    display_device = scene->display_settings.display_device;
-    eye->display = IMB_colormanagement_display_get_named(display_device);
+  /* Mouse capture is handled by the timer system for outside-window tracking */
 
-    /* store initial color */
-    if (eye->display) {
-      IMB_colormanagement_display_to_scene_linear_v3(col, eye->display);
-    }
+  /* Add timer for updating preview when mouse is outside Blender window. */
+  wmWindowManager *wm = CTX_wm_manager(C);
+  eye->timer = WM_event_timer_add(wm, eye->cb_win, TIMER, 0.02); /* 50 FPS update rate. */
+
+  /* Set up color management for all color properties. */
+  Scene *scene = CTX_data_scene(C);
+  const char *display_device = scene->display_settings.display_device;
+  eye->display = IMB_colormanagement_display_get_named(display_device);
+
+  /* For gamma corrected colors, convert initial color from display to linear space
+   * to match the format expected by eyedropper_color_set */
+  if (prop_subtype == PROP_COLOR_GAMMA && eye->display) {
+    IMB_colormanagement_display_to_scene_linear_v3(col, eye->display);
   }
   copy_v3_v3(eye->init_col, col);
+
+  // region-level override
+  ARegion *region = CTX_wm_region(C);
+  if (region && region->runtime->type) {
+    eye->region_type = region->runtime->type;
+    eye->old_cursor_fn = region->runtime->type->cursor;
+    region->runtime->type->cursor = eyedropper_region_cursor;
+  }
 
   return true;
 }
@@ -160,7 +237,17 @@ static void eyedropper_exit(bContext *C, wmOperator *op)
 {
   Eyedropper *eye = static_cast<Eyedropper *>(op->customdata);
   wmWindow *window = CTX_wm_window(C);
-  WM_cursor_modal_restore(window);
+
+  /* Mouse capture is handled by the timer system */
+
+  /* Remove timer. */
+  if (eye->timer) {
+    wmWindowManager *wm = CTX_wm_manager(C);
+    WM_event_timer_remove(wm, window, eye->timer);
+    eye->timer = nullptr;
+  }
+
+  /* Cursor will be automatically restored when the modal operation ends */
 
   ED_workspace_status_text(C, nullptr);
 
@@ -179,8 +266,14 @@ static void eyedropper_exit(bContext *C, wmOperator *op)
     eye->viewport_session = nullptr;
   }
 
-  op->customdata = nullptr;
+  // restore region-level cursor
+  if (eye->region_type) {
+    eye->region_type->cursor = eye->old_cursor_fn;
+  }
+
   MEM_delete(eye);
+
+  // Screen-level eyedropper cleanup
 }
 
 /* *** eyedropper_color_ helper functions *** */
@@ -445,9 +538,33 @@ bool eyedropper_color_sample_fl(bContext *C,
 
   int event_xy_win[2];
   wmWindow *win = WM_window_find_under_cursor(CTX_wm_window(C), event_xy, event_xy_win);
+  
+  /* Периодические debug сообщения (каждые 60 кадров) */
+  static int debug_counter = 0;
+  debug_counter++;
+  if (debug_counter % 60 == 0) {
+    printf("DEBUG: eyedropper_color_sample_fl: event_xy=(%d, %d), found win=%p\n", 
+           event_xy[0], event_xy[1], (void *)win);
+  }
+  
   if (win) {
     bScreen *screen = WM_window_get_active_screen(win);
     area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, event_xy_win);
+  }
+
+  /* Update cursor position for drawing color swatch */
+  if (eye) {
+    /* В Windows используем оригинальные координаты для отрисовки превью,
+       так как они уже в правильной системе координат */
+    eye->cb_win_event_xy[0] = event_xy[0];
+    eye->cb_win_event_xy[1] = event_xy[1];
+
+    if (win && win != eye->cb_win && eye->draw_handle_sample_text) {
+      WM_draw_cb_exit(eye->cb_win, eye->draw_handle_sample_text);
+      eye->cb_win = win;
+      eye->draw_handle_sample_text = WM_draw_cb_activate(eye->cb_win, eyedropper_draw_cb, eye);
+      ED_region_tag_redraw(CTX_wm_region(C));
+    }
   }
 
   if (area) {
@@ -522,12 +639,21 @@ static void eyedropper_color_set(bContext *C, Eyedropper *eye, const float col[3
   /* to maintain alpha */
   RNA_property_float_get_array_at_most(&eye->ptr, eye->prop, col_conv, ARRAY_SIZE(col_conv));
 
-  /* convert from linear rgb space to display space */
-  if (eye->display) {
+  /* Color from eyedropper_color_sample_fl is already in scene linear space,
+   * so we need to check the property subtype to determine if conversion is needed */
+  const enum PropertySubType prop_subtype = RNA_property_subtype(eye->prop);
+  
+  if (prop_subtype == PROP_COLOR_GAMMA && eye->display) {
+    /* For gamma corrected color properties, convert from linear to display space */
     copy_v3_v3(col_conv, col);
     IMB_colormanagement_scene_linear_to_display_v3(col_conv, eye->display);
   }
+  else if (prop_subtype == PROP_COLOR) {
+    /* For linear color properties (like shader node sockets), use the color as-is */
+    copy_v3_v3(col_conv, col);
+  }
   else {
+    /* For other color properties, use the color as-is */
     copy_v3_v3(col_conv, col);
   }
 
@@ -588,14 +714,102 @@ static void eyedropper_color_sample_text_update(bContext *C,
   }
 }
 
+static void eyedropper_color_update_current(bContext *C,
+                                           Eyedropper *eye,
+                                           const int event_xy[2])
+{
+  float col[3];
+
+  /* Update current color for display. */
+  if (eye->crypto_node) {
+    if (eyedropper_cryptomatte_sample_fl(C, eye, event_xy, col)) {
+      copy_v3_v3(eye->current_col, col);
+    }
+  }
+  else {
+    if (eyedropper_color_sample_fl(C, eye, event_xy, col)) {
+      /* Use the sampled color directly for preview without color space conversion. */
+      copy_v3_v3(eye->current_col, col);
+    }
+  }
+}
+
+static void eyedropper_update_preview(bContext *C, Eyedropper *eye, const int event_xy[2])
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (eye->draw_handle_sample_text) {
+    /* Update cursor position immediately for smooth preview. */
+    int event_xy_win[2];
+    wmWindow *win = WM_window_find_under_cursor(CTX_wm_window(C), event_xy, event_xy_win);
+    if (win) {
+      /* Курсор внутри окна Blender - используем координаты события */
+      eye->cb_win_event_xy[0] = event_xy[0];
+      eye->cb_win_event_xy[1] = event_xy[1];
+    }
+    else {
+      /* Курсор вне окна Blender - получаем актуальную позицию курсора 
+       * в координатах окна, которое обрабатывает отрисовку (eye->cb_win) */
+      if (wm_cursor_position_get(eye->cb_win, &eye->cb_win_event_xy[0], &eye->cb_win_event_xy[1])) {
+        /* Координаты уже в пространстве клиента eye->cb_win */
+      }
+      else {
+        /* Fallback: используем координаты события как есть */
+        eye->cb_win_event_xy[0] = event_xy[0];
+        eye->cb_win_event_xy[1] = event_xy[1];
+      }
+    }
+
+    eyedropper_color_sample_text_update(C, eye, event_xy);
+    eyedropper_color_update_current(C, eye, event_xy);
+
+    /* Force immediate redraw to reduce cursor lag. */
+    if (win) {
+      ARegion *region = CTX_wm_region(C);
+      if (wm && region) {
+        /* Tag paint cursor for immediate redraw. */
+        WM_paint_cursor_tag_redraw(win, region);
+        /* Tag region for cursor redraw. */
+        ED_region_tag_redraw_cursor(region);
+        /* Force immediate screen refresh. */
+        ED_screen_refresh(C, wm, win);
+      }
+    }
+    else {
+      /* When sampling outside a window, we can't rely on a region for redraw. */
+      WM_main_add_notifier(NC_WM | ND_DRAW, nullptr);
+      if (wm) {
+        ED_screen_refresh(C, wm, eye->cb_win);
+      }
+    }
+  }
+}
+
 static void eyedropper_cancel(bContext *C, wmOperator *op)
 {
   Eyedropper *eye = static_cast<Eyedropper *>(op->customdata);
   if (eye->is_set) {
     eyedropper_color_set(C, eye, eye->init_col);
   }
+
+  /* Restore cursor before exit */
+  wmWindow *window = CTX_wm_window(C);
+  WM_cursor_modal_restore(window);
+
   eyedropper_exit(C, op);
 }
+
+static void eyedropper_confirm(bContext *C, wmOperator *op)
+{
+  /* Restore cursor before exit */
+  wmWindow *window = CTX_wm_window(C);
+  WM_cursor_modal_restore(window);
+
+  eyedropper_exit(C, op);
+}
+
+/* Forward declarations */
+static void eyedropper_modal_handle_mousemove(bContext *C, wmOperator *op, const wmEvent *event, Eyedropper *eye);
+static void eyedropper_modal_handle_timer(bContext *C, wmOperator *op, const wmEvent *event, Eyedropper *eye);
 
 /* main modal status check */
 static wmOperatorStatus eyedropper_modal(bContext *C, wmOperator *op, const wmEvent *event)
@@ -613,7 +827,7 @@ static wmOperatorStatus eyedropper_modal(bContext *C, wmOperator *op, const wmEv
         if (eye->accum_tot == 0) {
           eyedropper_color_sample(C, eye, event->xy);
         }
-        eyedropper_exit(C, op);
+        eyedropper_confirm(C, op);
         /* Could support finished & undo-skip. */
         return is_undo ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
       }
@@ -630,38 +844,88 @@ static wmOperatorStatus eyedropper_modal(bContext *C, wmOperator *op, const wmEv
     }
   }
   else if (ISMOUSE_MOTION(event->type)) {
-    if (eye->accum_start) {
-      /* button is pressed so keep sampling */
-      eyedropper_color_sample(C, eye, event->xy);
-      WorkspaceStatus status(C);
-      status.item(TIP_("Drag to continue sampling, release when done"), ICON_MOUSE_MOVE);
-    }
-    else {
-      WorkspaceStatus status(C);
-      status.opmodal(IFACE_("Confirm"), op->type, EYE_MODAL_SAMPLE_CONFIRM);
-      status.opmodal(IFACE_("Cancel"), op->type, EYE_MODAL_CANCEL);
-#ifdef __APPLE__
-      status.item(TIP_("Press 'Enter' to sample outside of a Blender window"), ICON_INFO);
-#endif
-    }
-
-    if (eye->draw_handle_sample_text) {
-      eyedropper_color_sample_text_update(C, eye, event->xy);
-    }
+    eyedropper_modal_handle_mousemove(C, op, event, eye);
+  }
+  else if (event->type == TIMER && event->customdata == eye->timer) {
+    eyedropper_modal_handle_timer(C, op, event, eye);
   }
 
   return OPERATOR_RUNNING_MODAL;
 }
 
+static void eyedropper_modal_handle_mousemove(bContext *C, wmOperator *op, const wmEvent *event, Eyedropper *eye)
+{
+  /* Периодические debug сообщения (каждые 70 кадров) */
+  static int debug_counter = 0;
+  debug_counter++;
+  if (debug_counter % 70 == 0) {
+    printf("DEBUG: eyedropper_modal_handle_mousemove: MOUSE_MOTION at (%d, %d) on eye->cb_win=%p, accum_start=%s\n",
+           event->xy[0], event->xy[1], (void *)eye->cb_win, eye->accum_start ? "true" : "false");
+  }
+  
+  if (eye->accum_start) {
+    /* button is pressed so keep sampling */
+    eyedropper_color_sample(C, eye, event->xy);
+    WorkspaceStatus status(C);
+    status.item(TIP_("Drag to continue sampling, release when done"), ICON_MOUSE_MOVE);
+  }
+  else {
+    WorkspaceStatus status(C);
+    status.opmodal(IFACE_("Confirm"), op->type, EYE_MODAL_SAMPLE_CONFIRM);
+    status.opmodal(IFACE_("Cancel"), op->type, EYE_MODAL_CANCEL);
+#ifdef __APPLE__
+    status.item(TIP_("Press 'Enter' to sample outside of a Blender window"), ICON_INFO);
+#endif
+  }
+
+  eyedropper_update_preview(C, eye, event->xy);
+}
+
+static void eyedropper_modal_handle_timer(bContext *C, wmOperator * /*op*/, const wmEvent * /*event*/, Eyedropper *eye)
+{
+  /* Timer event for updating preview when mouse is outside Blender window. */
+  
+  int mouse_xy[2];
+  wmWindow *win = CTX_wm_window(C);
+
+  /* Периодические debug сообщения (каждые 80 кадров) */
+  static int debug_counter = 0;
+  debug_counter++;
+  if (debug_counter % 80 == 0) {
+    printf("DEBUG: eyedropper_modal_handle_timer: TIMER event for eye->cb_win=%p, win=%p\n", 
+           (void *)eye->cb_win, (void *)win);
+  }
+
+  /* Get current mouse position from window event state. */
+  if (win && win->runtime && win->runtime->eventstate) {
+    mouse_xy[0] = win->runtime->eventstate->xy[0];
+    mouse_xy[1] = win->runtime->eventstate->xy[1];
+    
+    if (debug_counter % 80 == 0) {
+      printf("DEBUG: eyedropper_modal_handle_timer: TIMER using coords from win->eventstate: (%d, %d) from win=%p\n",
+             mouse_xy[0], mouse_xy[1], (void *)win);
+    }
+    
+    /* В Windows используем оригинальные координаты для отрисовки превью */
+    eyedropper_update_preview(C, eye, mouse_xy);
+  }
+  else {
+    if (debug_counter % 80 == 0) {
+      printf("DEBUG: eyedropper_modal_handle_timer: TIMER - no win or win->eventstate\n");
+    }
+  }
+}
+
 /* Modal Operator init */
 static wmOperatorStatus eyedropper_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
 {
+  wmWindow *win = CTX_wm_window(C);
+  WM_cursor_modal_set(win, WM_CURSOR_EYEDROPPER);
+
   /* init */
   if (eyedropper_init(C, op)) {
-    wmWindow *win = CTX_wm_window(C);
     /* Workaround for de-activating the button clearing the cursor, see #76794 */
     context_active_but_clear(C, win, CTX_wm_region(C));
-    WM_cursor_modal_set(win, WM_CURSOR_EYEDROPPER);
 
     /* add temp handler */
     WM_event_add_modal_handler(C, op);
@@ -723,3 +987,103 @@ void UI_OT_eyedropper_color(wmOperatorType *ot)
 }
 
 }  // namespace blender::ui
+
+/* ===================== Screen-level Eyedropper Operator ===================== */
+
+using namespace blender::ui;
+
+static bool eyedropper_screen_poll(bContext *C)
+{
+  /* Проверяем только наличие окна и экрана, не региона! */
+  return (CTX_wm_window(C) != nullptr && CTX_wm_screen(C) != nullptr);
+}
+
+static wmOperatorStatus eyedropper_screen_invoke(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  wmWindow *win = CTX_wm_window(C);
+  Eyedropper *eye = MEM_new<Eyedropper>(__func__);
+  op->customdata = eye;
+
+  WM_cursor_modal_set(win, WM_CURSOR_EYEDROPPER);
+
+  if (eyedropper_init(C, op)) {
+    /* Очищаем активную кнопку, чтобы не было сброса курсора */
+    context_active_but_clear(C, win, nullptr);
+    /* Добавляем modal handler на уровне экрана */
+    WM_event_add_modal_handler(C, op);
+    return OPERATOR_RUNNING_MODAL;
+  }
+  return OPERATOR_PASS_THROUGH;
+}
+
+static wmOperatorStatus eyedropper_screen_modal(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  wmWindow *win = CTX_wm_window(C);
+  Eyedropper *eye = static_cast<Eyedropper *>(op->customdata);
+
+  if (event->type == EVT_MODAL_MAP) {
+    switch (event->val) {
+      case EYE_MODAL_CANCEL:
+        eyedropper_cancel(C, op);
+        return OPERATOR_CANCELLED;
+      case EYE_MODAL_SAMPLE_CONFIRM:
+        if (eye->accum_tot == 0) {
+          eyedropper_color_sample(C, eye, event->xy);
+        }
+        eyedropper_confirm(C, op);
+        return OPERATOR_FINISHED;
+      case EYE_MODAL_SAMPLE_BEGIN:
+        eye->accum_start = true;
+        eyedropper_color_sample(C, eye, event->xy);
+        break;
+      case EYE_MODAL_SAMPLE_RESET:
+        eye->accum_tot = 0;
+        zero_v3(eye->accum_col);
+        eyedropper_color_sample(C, eye, event->xy);
+        break;
+    }
+  }
+  else if (ISMOUSE_MOTION(event->type)) {
+    eyedropper_color_sample(C, eye, event->xy);
+    eyedropper_update_preview(C, eye, event->xy);
+  }
+  else if (event->type == TIMER && event->customdata == eye->timer) {
+    int mouse_xy[2];
+    wmWindow *win = CTX_wm_window(C);
+    if (win && win->runtime && win->runtime->eventstate) {
+      mouse_xy[0] = win->runtime->eventstate->xy[0];
+      mouse_xy[1] = win->runtime->eventstate->xy[1];
+      eyedropper_update_preview(C, eye, mouse_xy);
+    }
+  }
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static void eyedropper_screen_cancel(bContext *C, wmOperator *op)
+{
+  eyedropper_cancel(C, op);
+}
+
+void SCREEN_OT_eyedropper_color(wmOperatorType *ot)
+{
+  ot->name = "Eyedropper (Screen-level)";
+  ot->idname = "SCREEN_OT_eyedropper_color";
+  ot->description = "Sample a color from anywhere on the screen (screen-level modal)";
+
+  ot->invoke = eyedropper_screen_invoke;
+  ot->modal = eyedropper_screen_modal;
+  ot->cancel = eyedropper_screen_cancel;
+  ot->poll = eyedropper_screen_poll;
+
+  ot->flag = OPTYPE_UNDO | OPTYPE_BLOCKING | OPTYPE_INTERNAL;
+
+  PropertyRNA *prop;
+  prop = RNA_def_string(ot->srna,
+                        "prop_data_path",
+                        nullptr,
+                        0,
+                        "Data Path",
+                        "Path of property to be set with the depth");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+}
+

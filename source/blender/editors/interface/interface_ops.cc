@@ -78,6 +78,7 @@
 namespace blender {
 
 extern void PyC_FileAndNum_Safe(const char **r_filename, int *r_lineno);
+extern void SCREEN_OT_eyedropper_color(wmOperatorType *ot);
 
 namespace ui {
 
@@ -3050,6 +3051,7 @@ void operatortypes_ui()
   WM_operatortype_append(UI_OT_eyedropper_bone);
   WM_operatortype_append(UI_OT_eyedropper_grease_pencil_color);
   WM_menutype_add(UI_MT_color_space_select());
+  WM_operatortype_append(SCREEN_OT_eyedropper_color);
 }
 
 void keymap_ui(wmKeyConfig *keyconf)

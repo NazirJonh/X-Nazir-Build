@@ -1113,7 +1113,8 @@ bool GHOST_WindowCocoa::isDialog() const
 GHOST_TSuccess GHOST_WindowCocoa::setWindowCursorVisibility(bool visible)
 {
   @autoreleasepool {
-    if (window_.isVisible) {
+    /* For eyedropper cursor, set visibility globally even when window is not visible */
+    if (getCursorShape() == GHOST_kStandardCursorEyedropper || window_.isVisible) {
       loadCursor(visible, getCursorShape());
     }
   }
@@ -1157,7 +1158,9 @@ GHOST_TSuccess GHOST_WindowCocoa::setWindowCursorGrab(GHOST_TGrabCursorMode mode
 GHOST_TSuccess GHOST_WindowCocoa::setWindowCursorShape(GHOST_TStandardCursor shape)
 {
   @autoreleasepool {
-    if (window_.isVisible) {
+    /* For eyedropper cursor, set it globally even when window is not visible
+     * to ensure it displays correctly when sampling outside Blender window */
+    if (shape == GHOST_kStandardCursorEyedropper || window_.isVisible) {
       loadCursor(getCursorVisibility(), shape);
     }
   }

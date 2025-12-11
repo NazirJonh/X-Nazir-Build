@@ -2400,6 +2400,7 @@ void ED_region_floating_init(ARegion *region)
 
 void ED_region_cursor_set(wmWindow *win, ScrArea *area, ARegion *region)
 {
+  printf("LOG: ED_region_cursor_set(win=%p, area=%p, region=%p) called from %s\n", (void*)win, (void*)area, (void*)region, __func__);
   if (region != nullptr) {
     if ((region->runtime->gizmo_map != nullptr) &&
         WM_gizmomap_cursor_set(region->runtime->gizmo_map, win))

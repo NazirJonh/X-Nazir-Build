@@ -2079,15 +2079,33 @@ LRESULT WINAPI GHOST_SystemWin32::s_wndProc(HWND hwnd, uint msg, WPARAM wParam, 
            * The DefWindowProc function uses this message to set the cursor to an
            * arrow if it is not in the client area.
            */
+          /*printf("DEBUG: WM_SETCURSOR: HTCLIENT=%s, window cursor shape=%d (eyedropper=%d)\n",
+                 (LOWORD(lParam) == HTCLIENT) ? "true" : "false", 
+                 (int)window->getCursorShape(), 
+                 (int)GHOST_kStandardCursorEyedropper);
+          */
           if (LOWORD(lParam) == HTCLIENT) {
             /* Load the current cursor. */
+           /* printf("DEBUG: WM_SETCURSOR: Inside client area, loading cursor shape %d\n", (int)window->getCursorShape());
             window->loadCursor(window->getCursorVisibility(), window->getCursorShape());
+            */
             /* Bypass call to #DefWindowProc. */
             return 0;
           }
           else {
-            /* Outside of client area show standard cursor. */
-            window->loadCursor(true, GHOST_kStandardCursorDefault);
+            /* For eyedropper cursor, show it globally even outside client area
+             * to ensure it displays correctly when sampling outside Blender window */
+            if (window->getCursorShape() == GHOST_kStandardCursorEyedropper) {
+              /*printf("DEBUG: WM_SETCURSOR: Outside client area, eyedropper detected, loading eyedropper cursor\n");
+              window->loadCursor(window->getCursorVisibility(), GHOST_kStandardCursorEyedropper);
+              *//* Bypass call to #DefWindowProc. */
+              return 0;
+            }
+            else {
+              //printf("DEBUG: WM_SETCURSOR: Outside client area, loading default cursor\n");
+              /* Outside of client area show standard cursor. */
+              window->loadCursor(true, GHOST_kStandardCursorDefault);
+            }
           }
           break;
         }

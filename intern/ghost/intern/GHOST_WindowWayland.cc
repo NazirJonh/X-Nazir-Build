@@ -1884,7 +1884,9 @@ GHOST_TSuccess GHOST_WindowWayland::setWindowCursorShape(GHOST_TStandardCursor s
   cursor_shape_ = shape;
 
   GHOST_TSuccess ok;
-  if (is_active) {
+  /* For eyedropper cursor, set it globally even when window is not active
+   * to ensure it displays correctly when sampling outside Blender window */
+  if (is_active || shape == GHOST_kStandardCursorEyedropper) {
     ok = system_->cursor_shape_set(cursor_shape_);
     GHOST_TSuccess ok_test = ok;
     if (ok == GHOST_kFailure) {

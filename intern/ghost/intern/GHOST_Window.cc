@@ -289,3 +289,15 @@ bool GHOST_Window::getModifiedState()
 {
   return is_unsaved_changes_;
 }
+
+GHOST_TSuccess GHOST_Window::setWindowCursorVisibility(bool visible)
+{
+  cursor_visible_ = visible;
+  return GHOST_kSuccess;
+}
+
+GHOST_TSuccess GHOST_Window::setWindowCursorShape(GHOST_TStandardCursor cursorShape)
+{
+  cursor_shape_ = cursorShape;
+  return GHOST_kSuccess;
+}

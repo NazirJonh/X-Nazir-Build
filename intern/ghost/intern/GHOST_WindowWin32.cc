@@ -795,7 +795,13 @@ void GHOST_WindowWin32::loadCursor(bool visible, GHOST_TStandardCursor shape) co
 
 GHOST_TSuccess GHOST_WindowWin32::setWindowCursorVisibility(bool visible)
 {
-  if (::GetForegroundWindow() == h_wnd_) {
+  if (getCursorShape() == GHOST_kStandardCursorEyedropper) {
+    /* For eyedropper cursor, ALWAYS set visibility globally, regardless of window focus.
+     * This ensures it displays correctly when sampling outside Blender window */
+    loadCursor(visible, getCursorShape());
+  }
+  else if (::GetForegroundWindow() == h_wnd_) {
+    /* For other cursors, only set when window is in foreground */
     loadCursor(visible, getCursorShape());
   }
 
@@ -841,10 +847,17 @@ GHOST_TSuccess GHOST_WindowWin32::setWindowCursorGrab(GHOST_TGrabCursorMode mode
 
 GHOST_TSuccess GHOST_WindowWin32::setWindowCursorShape(GHOST_TStandardCursor cursor_shape)
 {
-  if (::GetForegroundWindow() == h_wnd_) {
+  if (cursor_shape == GHOST_kStandardCursorEyedropper) {
+    /* For eyedropper cursor, ALWAYS set it globally, regardless of window focus.
+     * This ensures it displays correctly when sampling outside Blender window */
+    loadCursor(getCursorVisibility(), cursor_shape);
+  }
+  else if (::GetForegroundWindow() == h_wnd_) {
+    /* For other cursors, only set when window is in foreground */
     loadCursor(getCursorVisibility(), cursor_shape);
   }
 
+  cursor_shape_ = cursor_shape;
   return GHOST_kSuccess;
 }
 

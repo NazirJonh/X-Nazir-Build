@@ -166,6 +166,10 @@ float GPU_polygon_offset_calc(const float (*winmat)[4], float viewdist, float di
  */
 void GPU_polygon_offset(float viewdist, float dist);
 
+/* Reset matrix stack to base level while preserving current matrices.
+ * Useful after Python callbacks that may leave the stack in an inconsistent state. */
+void GPU_matrix_stack_reset_to_base();
+
 /* Python API needs to be able to inspect the stack so errors raise exceptions
  * instead of crashing. */
 #ifdef USE_GPU_PY_MATRIX_API

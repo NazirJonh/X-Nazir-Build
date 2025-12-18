@@ -685,6 +685,25 @@ int GPU_matrix_stack_level_get_projection()
   return int(state->projection_stack.top);
 }
 
+void GPU_matrix_stack_reset_to_base()
+{
+  GPUMatrixState *state = Context::get()->matrix_state;
+  /* Save current matrices. */
+  float saved_model_view[4][4];
+  float saved_projection[4][4];
+  copy_m4_m4(saved_model_view, ModelView);
+  copy_m4_m4(saved_projection, Projection);
+  
+  /* Reset stack to base level. */
+  state->model_view_stack.top = 0;
+  state->projection_stack.top = 0;
+  
+  /* Restore matrices at base level. */
+  copy_m4_m4(ModelView, saved_model_view);
+  copy_m4_m4(Projection, saved_projection);
+  gpu_matrix_state_active_set_dirty(true);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

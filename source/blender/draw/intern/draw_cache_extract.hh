@@ -190,6 +190,10 @@ struct MeshBatchList {
   gpu::Batch *surface_viewer_attribute;
   gpu::Batch *paint_overlay_verts;
   gpu::Batch *paint_overlay_surface;
+  /* Sculpt Mode Custom Overlays (for Python addons) */
+  gpu::Batch *sculpt_custom_triangles;
+  gpu::Batch *sculpt_custom_edges;
+  gpu::Batch *sculpt_custom_vertices;
 };
 
 #define MBC_BATCH_LEN (sizeof(MeshBatchList) / sizeof(void *))
@@ -231,6 +235,10 @@ enum DRWBatchFlag : uint64_t {
   MBC_VIEWER_ATTRIBUTE_OVERLAY = (1u << MBC_BATCH_INDEX(surface_viewer_attribute)),
   MBC_PAINT_OVERLAY_VERTS = (uint64_t(1u) << MBC_BATCH_INDEX(paint_overlay_verts)),
   MBC_PAINT_OVERLAY_SURFACE = (uint64_t(1u) << MBC_BATCH_INDEX(paint_overlay_surface)),
+  /* Sculpt Mode Custom Overlays (for Python addons) */
+  MBC_SCULPT_CUSTOM_TRIANGLES = (uint64_t(1u) << MBC_BATCH_INDEX(sculpt_custom_triangles)),
+  MBC_SCULPT_CUSTOM_EDGES = (uint64_t(1u) << MBC_BATCH_INDEX(sculpt_custom_edges)),
+  MBC_SCULPT_CUSTOM_VERTICES = (uint64_t(1u) << MBC_BATCH_INDEX(sculpt_custom_vertices)),
   MBC_SURFACE_PER_MAT = (uint64_t(1u) << MBC_BATCH_LEN),
 };
 ENUM_OPERATORS(DRWBatchFlag);

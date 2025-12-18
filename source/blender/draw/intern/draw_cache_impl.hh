@@ -59,6 +59,8 @@ void DRW_curve_batch_cache_free(Curve *cu);
 void DRW_mesh_batch_cache_dirty_tag(Mesh *mesh, eMeshBatchDirtyMode mode);
 void DRW_mesh_batch_cache_validate(Mesh &mesh);
 void DRW_mesh_batch_cache_free(draw::MeshBatchCache *batch_cache);
+/* Clear sculpt custom flags from static map. Internal implementation. */
+void DRW_mesh_batch_cache_clear_sculpt_custom_flags(const Mesh &mesh, const Object *ob);
 
 void DRW_lattice_batch_cache_dirty_tag(Lattice *lt, int mode);
 void DRW_lattice_batch_cache_validate(Lattice *lt);
@@ -213,6 +215,16 @@ gpu::Batch *DRW_mesh_batch_cache_get_surface_sculpt(Object &object, Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_weights(Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_sculpt_overlays(Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_viewer_attribute(Mesh &mesh);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Sculpt-Mode Custom Overlay Drawing (for Python addons)
+ * \{ */
+
+blender::gpu::Batch *DRW_mesh_batch_cache_get_sculpt_custom_triangles(Mesh &mesh, Object *ob = nullptr);
+blender::gpu::Batch *DRW_mesh_batch_cache_get_sculpt_custom_edges(Mesh &mesh, Object *ob = nullptr);
+blender::gpu::Batch *DRW_mesh_batch_cache_get_sculpt_custom_vertices(Mesh &mesh, Object *ob = nullptr);
 
 /** \} */
 

@@ -628,6 +628,9 @@ struct View3DOverlay {
   /** Weight paint mode settings. */
   int wpaint_flag = 0;
 
+  /** Vertex paint channel display flags (R=bit0, G=bit1, B=bit2, A=bit3, Grayscale=bit4). */
+  int vertex_paint_channel_flag = 7;  // 0x07 = R+G+B enabled by default, Alpha and Grayscale disabled
+
   /** Alpha for texture, weight, vertex paint overlay. */
   float texture_paint_mode_opacity = 1.0f;
   float vertex_paint_mode_opacity = 1.0f;
@@ -666,6 +669,8 @@ struct View3DOverlay {
 
   /** Curves sculpt mode settings. */
   float sculpt_curves_cage_opacity = 0;
+
+  char _pad[4] = {};
 };
 
 struct View3D_Runtime {

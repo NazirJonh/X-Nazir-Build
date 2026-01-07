@@ -2,6 +2,8 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
+#include <cstdio>
+
 #include "workbench_private.hh"
 
 namespace blender::workbench {
@@ -48,6 +50,17 @@ void MeshPass::init_subpasses(ePipelineType pipeline, eLightingType lighting, bo
   }
 }
 
+void MeshPass::set_vertex_paint_channel_mask(const float4 &mask)
+{
+  vertex_paint_channel_mask_ = mask;
+}
+
+void MeshPass::set_vertex_paint_grayscale(bool grayscale)
+{
+  vertex_paint_grayscale_ = grayscale ? 1 : 0;
+  printf("[DEBUG] set_vertex_paint_grayscale: %d\n", vertex_paint_grayscale_);
+}
+
 PassMain::Sub &MeshPass::get_subpass(eGeometryType geometry_type, eShaderType shader_type)
 {
   static std::string pass_names[geometry_type_len][shader_type_len] = {};
@@ -61,7 +74,15 @@ PassMain::Sub &MeshPass::get_subpass(eGeometryType geometry_type, eShaderType sh
     sub_pass = &sub(pass_name.c_str());
     sub_pass->shader_set(
         ShaderCache::get().prepass_get(geometry_type, pipeline_, lighting_, shader_type, clip_));
+    printf("[DEBUG] get_subpass: CREATED new subpass %s\n", pass_name.c_str());
   }
+  printf("[DEBUG] get_subpass: push_constant mask=(%.1f,%.1f,%.1f,%.1f), grayscale=%d (ptr)\n",
+         vertex_paint_channel_mask_.x, vertex_paint_channel_mask_.y,
+         vertex_paint_channel_mask_.z, vertex_paint_channel_mask_.w,
+         vertex_paint_grayscale_);
+  /* Use pointer version to deference at submit time, allowing dynamic updates. */
+  sub_pass->push_constant("vertex_paint_channel_mask", &vertex_paint_channel_mask_);
+  sub_pass->push_constant("vertex_paint_grayscale", &vertex_paint_grayscale_);
 
   return *sub_pass;
 }
@@ -92,8 +113,9 @@ PassMain::Sub &MeshPass::get_subpass(eGeometryType geometry_type,
       return sub_pass;
     };
 
-    return *texture_subpass_map_.lookup_or_add_cb(
+    PassMain::Sub *result = texture_subpass_map_.lookup_or_add_cb(
         {*texture->gpu.texture, texture->sampler_state, geometry_type}, add_cb);
+    return *result;
   }
 
   return get_subpass(geometry_type, eShaderType::MATERIAL);
@@ -116,13 +138,16 @@ void OpaquePass::sync(const SceneState &scene_state, SceneResources &resources)
   gbuffer_in_front_ps_.init_pass(resources, in_front_state, scene_state.clip_planes.size());
   gbuffer_in_front_ps_.state_stencil(uint8_t(StencilBits::OBJECT_IN_FRONT), 0xFF, 0x00);
   gbuffer_in_front_ps_.init_subpasses(ePipelineType::OPAQUE, scene_state.lighting_type, clip);
+  gbuffer_in_front_ps_.set_vertex_paint_channel_mask(scene_state.vertex_paint_channel_mask);
+  gbuffer_in_front_ps_.set_vertex_paint_grayscale(scene_state.vertex_paint_grayscale);
 
   state |= DRW_STATE_STENCIL_NEQUAL;
   gbuffer_ps_.init_pass(resources, state, scene_state.clip_planes.size());
   gbuffer_ps_.state_stencil(
       uint8_t(StencilBits::OBJECT), 0xFF, uint8_t(StencilBits::OBJECT_IN_FRONT));
   gbuffer_ps_.init_subpasses(ePipelineType::OPAQUE, scene_state.lighting_type, clip);
-
+  gbuffer_ps_.set_vertex_paint_channel_mask(scene_state.vertex_paint_channel_mask);
+  gbuffer_ps_.set_vertex_paint_grayscale(scene_state.vertex_paint_grayscale);
   deferred_ps_.init();
   deferred_ps_.state_set(DRW_STATE_WRITE_COLOR);
   deferred_ps_.shader_set(ShaderCache::get().resolve_get(scene_state.lighting_type,
@@ -149,6 +174,7 @@ void OpaquePass::draw(Manager &manager,
   if (is_empty()) {
     return;
   }
+
   gbuffer_material_tx.acquire(resolution,
                               gpu::TextureFormat::SFLOAT_16_16_16_16,
                               GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_ATTACHMENT);
@@ -241,11 +267,15 @@ void TransparentPass::sync(const SceneState &scene_state, SceneResources &resour
       uint8_t(StencilBits::OBJECT), 0xFF, uint8_t(StencilBits::OBJECT_IN_FRONT));
   accumulation_ps_.clear_color(float4(0.0f, 0.0f, 0.0f, 1.0f));
   accumulation_ps_.init_subpasses(ePipelineType::TRANSPARENT, scene_state.lighting_type, clip);
+  accumulation_ps_.set_vertex_paint_channel_mask(scene_state.vertex_paint_channel_mask);
+  accumulation_ps_.set_vertex_paint_grayscale(scene_state.vertex_paint_grayscale);
 
   accumulation_in_front_ps_.init_pass(resources, state, scene_state.clip_planes.size());
   accumulation_in_front_ps_.clear_color(float4(0.0f, 0.0f, 0.0f, 1.0f));
   accumulation_in_front_ps_.init_subpasses(
       ePipelineType::TRANSPARENT, scene_state.lighting_type, clip);
+  accumulation_in_front_ps_.set_vertex_paint_channel_mask(scene_state.vertex_paint_channel_mask);
+  accumulation_in_front_ps_.set_vertex_paint_grayscale(scene_state.vertex_paint_grayscale);
 
   resolve_ps_.init();
   resolve_ps_.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA);
@@ -263,6 +293,7 @@ void TransparentPass::draw(Manager &manager,
   if (is_empty()) {
     return;
   }
+
   accumulation_tx.acquire(resolution,
                           gpu::TextureFormat::SFLOAT_16_16_16_16,
                           GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_ATTACHMENT);
@@ -317,6 +348,8 @@ void TransparentDepthPass::sync(const SceneState &scene_state, SceneResources &r
   in_front_ps_.init_pass(resources, in_front_state, scene_state.clip_planes.size());
   in_front_ps_.state_stencil(uint8_t(StencilBits::OBJECT_IN_FRONT), 0xFF, 0x00);
   in_front_ps_.init_subpasses(ePipelineType::OPAQUE, eLightingType::FLAT, clip);
+  in_front_ps_.set_vertex_paint_channel_mask(scene_state.vertex_paint_channel_mask);
+  in_front_ps_.set_vertex_paint_grayscale(scene_state.vertex_paint_grayscale);
 
   merge_ps_.init();
   merge_ps_.shader_set(ShaderCache::get().merge_depth.get());
@@ -332,6 +365,8 @@ void TransparentDepthPass::sync(const SceneState &scene_state, SceneResources &r
   main_ps_.state_stencil(
       uint8_t(StencilBits::OBJECT), 0xFF, uint8_t(StencilBits::OBJECT_IN_FRONT));
   main_ps_.init_subpasses(ePipelineType::OPAQUE, eLightingType::FLAT, clip);
+  main_ps_.set_vertex_paint_channel_mask(scene_state.vertex_paint_channel_mask);
+  main_ps_.set_vertex_paint_grayscale(scene_state.vertex_paint_grayscale);
 }
 
 void TransparentDepthPass::draw(Manager &manager, View &view, SceneResources &resources)

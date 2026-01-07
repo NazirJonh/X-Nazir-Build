@@ -629,7 +629,7 @@ struct View3DOverlay {
   int wpaint_flag = 0;
 
   /** Vertex paint channel display flags (R=bit0, G=bit1, B=bit2, A=bit3). */
-  int vertex_paint_channel_flag = 15;  // 0xF = all channels enabled (RGBA)
+  int vertex_paint_channel_flag = 15;  // 0xF = all channels enabled by default (RGBA)
 
   /** Alpha for texture, weight, vertex paint overlay. */
   float texture_paint_mode_opacity = 1.0f;

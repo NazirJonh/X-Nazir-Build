@@ -896,6 +896,98 @@ static void rna_Space_show_region_header_update(bContext *C, PointerRNA *ptr)
   rna_Space_bool_from_region_flag_update_by_type(C, ptr, RGN_TYPE_HEADER, RGN_FLAG_HIDDEN);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Vertex Paint Channel Display Access
+ * \{ */
+
+static View3DOverlay *rna_Space_view3d_overlay_get(PointerRNA *ptr)
+{
+  View3D *v3d = static_cast<View3D *>(ptr->data);
+  return &v3d->overlay;
+}
+
+static bool rna_Space_show_vertex_paint_r_get(PointerRNA *ptr)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  return (overlay->vertex_paint_channel_flag & V3D_OVERLAY_VPAINT_SHOW_R) != 0;
+}
+
+static void rna_Space_show_vertex_paint_r_set(PointerRNA *ptr, bool value)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  int new_flag = overlay->vertex_paint_channel_flag;
+  SET_FLAG_FROM_TEST(new_flag, value, V3D_OVERLAY_VPAINT_SHOW_R);
+  
+  /* Ensure at least one channel is enabled. */
+  if (new_flag == 0) {
+    /* Keep R channel enabled if trying to disable all channels. */
+    new_flag = V3D_OVERLAY_VPAINT_SHOW_R;
+  }
+  overlay->vertex_paint_channel_flag = new_flag;
+}
+
+static bool rna_Space_show_vertex_paint_g_get(PointerRNA *ptr)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  return (overlay->vertex_paint_channel_flag & V3D_OVERLAY_VPAINT_SHOW_G) != 0;
+}
+
+static void rna_Space_show_vertex_paint_g_set(PointerRNA *ptr, bool value)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  int new_flag = overlay->vertex_paint_channel_flag;
+  SET_FLAG_FROM_TEST(new_flag, value, V3D_OVERLAY_VPAINT_SHOW_G);
+  
+  /* Ensure at least one channel is enabled. */
+  if (new_flag == 0) {
+    /* Keep G channel enabled if trying to disable all channels. */
+    new_flag = V3D_OVERLAY_VPAINT_SHOW_G;
+  }
+  overlay->vertex_paint_channel_flag = new_flag;
+}
+
+static bool rna_Space_show_vertex_paint_b_get(PointerRNA *ptr)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  return (overlay->vertex_paint_channel_flag & V3D_OVERLAY_VPAINT_SHOW_B) != 0;
+}
+
+static void rna_Space_show_vertex_paint_b_set(PointerRNA *ptr, bool value)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  int new_flag = overlay->vertex_paint_channel_flag;
+  SET_FLAG_FROM_TEST(new_flag, value, V3D_OVERLAY_VPAINT_SHOW_B);
+  
+  /* Ensure at least one channel is enabled. */
+  if (new_flag == 0) {
+    /* Keep B channel enabled if trying to disable all channels. */
+    new_flag = V3D_OVERLAY_VPAINT_SHOW_B;
+  }
+  overlay->vertex_paint_channel_flag = new_flag;
+}
+
+static bool rna_Space_show_vertex_paint_a_get(PointerRNA *ptr)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  return (overlay->vertex_paint_channel_flag & V3D_OVERLAY_VPAINT_SHOW_A) != 0;
+}
+
+static void rna_Space_show_vertex_paint_a_set(PointerRNA *ptr, bool value)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  int new_flag = overlay->vertex_paint_channel_flag;
+  SET_FLAG_FROM_TEST(new_flag, value, V3D_OVERLAY_VPAINT_SHOW_A);
+  
+  /* Ensure at least one channel is enabled. */
+  if (new_flag == 0) {
+    /* Keep A channel enabled if trying to disable all channels. */
+    new_flag = V3D_OVERLAY_VPAINT_SHOW_A;
+  }
+  overlay->vertex_paint_channel_flag = new_flag;
+}
+
+/** \} */
+
 /* Footer Region. */
 static bool rna_Space_show_region_footer_get(PointerRNA *ptr)
 {
@@ -5062,22 +5154,26 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
 
   /* Vertex Paint Channel Display */
   prop = RNA_def_property(srna, "show_vertex_paint_r", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.vertex_paint_channel_flag", V3D_OVERLAY_VPAINT_SHOW_R);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Space_show_vertex_paint_r_get", "rna_Space_show_vertex_paint_r_set");
   RNA_def_property_ui_text(prop, "R", "Show red channel in vertex paint mode");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   prop = RNA_def_property(srna, "show_vertex_paint_g", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.vertex_paint_channel_flag", V3D_OVERLAY_VPAINT_SHOW_G);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Space_show_vertex_paint_g_get", "rna_Space_show_vertex_paint_g_set");
   RNA_def_property_ui_text(prop, "G", "Show green channel in vertex paint mode");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   prop = RNA_def_property(srna, "show_vertex_paint_b", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.vertex_paint_channel_flag", V3D_OVERLAY_VPAINT_SHOW_B);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Space_show_vertex_paint_b_get", "rna_Space_show_vertex_paint_b_set");
   RNA_def_property_ui_text(prop, "B", "Show blue channel in vertex paint mode");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   prop = RNA_def_property(srna, "show_vertex_paint_a", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.vertex_paint_channel_flag", V3D_OVERLAY_VPAINT_SHOW_A);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Space_show_vertex_paint_a_get", "rna_Space_show_vertex_paint_a_set");
   RNA_def_property_ui_text(prop, "A", "Show alpha channel in vertex paint mode");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 

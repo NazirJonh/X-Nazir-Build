@@ -17,13 +17,24 @@ struct Materials {
                          float3 &color,
                          float &alpha,
                          float &roughness,
-                         float &metallic)
+                         float &metallic,
+                         const float4 channel_mask)
   {
     float4 data = materials_data[handle];
-    color = (data.r == -1) ? vertex_color : data.rgb;
+    
+    /* Apply channel mask to vertex color */
+    float3 masked_vertex_color = vertex_color * channel_mask.rgb;
+    
+    color = (data.r == -1) ? masked_vertex_color : data.rgb;
 
     uint encoded_data = floatBitsToUint(data.w);
     alpha = float((encoded_data >> 16u) & 0xFFu) * (1.0f / 255.0f);
+    
+    /* Apply alpha channel mask */
+    if (data.r == -1 && channel_mask.a < 0.5f) {
+      alpha = 1.0f;  /* If A channel is disabled, show as fully opaque */
+    }
+    
     roughness = float((encoded_data >> 8u) & 0xFFu) * (1.0f / 255.0f);
     metallic = float(encoded_data & 0xFFu) * (1.0f / 255.0f);
   }

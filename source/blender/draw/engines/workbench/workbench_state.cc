@@ -17,6 +17,8 @@
 #include "DEG_depsgraph_query.hh"
 
 #include "DNA_world_types.h"
+#include "DNA_view3d_types.h"
+#include "DNA_view3d_enums.h"
 
 #include "ED_paint.hh"
 #include "ED_view3d.hh"
@@ -252,6 +254,21 @@ void SceneState::init(const DRWContext *context,
                              scene->toolsettings->sculpt->paint.debug_flags &
                                  PAINT_DEBUG_SHOW_BVH_NODES :
                              false;
+
+  /* Initialize vertex paint channel mask from overlay settings */
+  if (context && context->v3d) {
+    const int channel_flag = context->v3d->overlay.vertex_paint_channel_flag;
+    vertex_paint_channel_mask = float4(
+        (channel_flag & V3D_OVERLAY_VPAINT_SHOW_R) ? 1.0f : 0.0f,
+        (channel_flag & V3D_OVERLAY_VPAINT_SHOW_G) ? 1.0f : 0.0f,
+        (channel_flag & V3D_OVERLAY_VPAINT_SHOW_B) ? 1.0f : 0.0f,
+        (channel_flag & V3D_OVERLAY_VPAINT_SHOW_A) ? 1.0f : 0.0f
+    );
+  }
+  else {
+    /* Default: all channels enabled if context is not available */
+    vertex_paint_channel_mask = float4(1.0f);
+  }
 };
 
 static bool mesh_has_color_attribute(const Mesh &mesh)

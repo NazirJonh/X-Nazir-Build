@@ -183,6 +183,9 @@ struct SceneState {
 
   bool show_paint_bvh_debug = false;
 
+  /** Vertex paint channel mask (r, g, b, a). 1.0 = show, 0.0 = hide */
+  float4 vertex_paint_channel_mask = float4(1.0f);
+
   void init(const DRWContext *context, bool scene_updated, Object *camera_ob = nullptr);
 };
 
@@ -304,6 +307,7 @@ class MeshPass : public PassMain {
   ePipelineType pipeline_;
   eLightingType lighting_;
   bool clip_;
+  float4 vertex_paint_channel_mask_ = float4(1.0f);
 
   bool is_empty_ = false;
 
@@ -317,6 +321,7 @@ class MeshPass : public PassMain {
 
   void init_pass(SceneResources &resources, DRWState state, int clip_planes);
   void init_subpasses(ePipelineType pipeline, eLightingType lighting, bool clip);
+  void set_vertex_paint_channel_mask(const float4 &mask);
 
   PassMain::Sub &get_subpass(eGeometryType geometry_type,
                              const MaterialTexture *texture = nullptr);

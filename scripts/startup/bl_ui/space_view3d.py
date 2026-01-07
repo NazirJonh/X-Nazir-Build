@@ -7657,6 +7657,12 @@ class VIEW3D_PT_overlay_vertex_paint(Panel):
         col.active = display_all
 
         col.prop(overlay, "vertex_paint_mode_opacity")
+        # Channel Display Toggle Buttons
+        row = col.row(align=True)
+        row.prop(overlay, "show_vertex_paint_r", text="R", toggle=True)
+        row.prop(overlay, "show_vertex_paint_g", text="G", toggle=True)
+        row.prop(overlay, "show_vertex_paint_b", text="B", toggle=True)
+        row.prop(overlay, "show_vertex_paint_a", text="A", toggle=True)
         col.prop(overlay, "show_paint_wire")
 
 

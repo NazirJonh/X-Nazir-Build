@@ -5060,6 +5060,27 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Show Wire", "Use wireframe display in painting modes");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  /* Vertex Paint Channel Display */
+  prop = RNA_def_property(srna, "show_vertex_paint_r", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.vertex_paint_channel_flag", V3D_OVERLAY_VPAINT_SHOW_R);
+  RNA_def_property_ui_text(prop, "R", "Show red channel in vertex paint mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_vertex_paint_g", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.vertex_paint_channel_flag", V3D_OVERLAY_VPAINT_SHOW_G);
+  RNA_def_property_ui_text(prop, "G", "Show green channel in vertex paint mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_vertex_paint_b", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.vertex_paint_channel_flag", V3D_OVERLAY_VPAINT_SHOW_B);
+  RNA_def_property_ui_text(prop, "B", "Show blue channel in vertex paint mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_vertex_paint_a", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.vertex_paint_channel_flag", V3D_OVERLAY_VPAINT_SHOW_A);
+  RNA_def_property_ui_text(prop, "A", "Show alpha channel in vertex paint mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   prop = RNA_def_property(srna, "show_wpaint_contours", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "overlay.wpaint_flag", V3D_OVERLAY_WPAINT_CONTOURS);
   RNA_def_property_ui_text(

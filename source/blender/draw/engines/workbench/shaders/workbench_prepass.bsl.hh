@@ -121,6 +121,9 @@ struct Mesh {
   [[legacy_info]] ShaderCreateInfo drw_clipped;
 
   [[compilation_constant]] const bool use_clipping;
+
+  /** Vertex paint channel mask (r, g, b, a). 1.0 = show, 0.0 = hide */
+  [[push_constant]] const float4 vertex_paint_channel_mask;
 };
 
 [[vertex]] void vert_mesh([[resource_table]] Mesh &mesh,
@@ -147,7 +150,8 @@ struct Mesh {
                               v_out.color,
                               v_out.alpha,
                               v_out.roughness,
-                              v_out.metallic);
+                              v_out.metallic,
+                              mesh.vertex_paint_channel_mask);
 }
 
 struct Curves {
@@ -162,6 +166,9 @@ struct Curves {
   [[sampler(WB_CURVES_COLOR_SLOT) /*, frequency(batch)*/]] samplerBuffer ac;
   [[sampler(WB_CURVES_UV_SLOT) /*, frequency(batch)*/]] samplerBuffer au;
   [[push_constant]] const int emitter_object_id;
+  
+  /** Vertex paint channel mask (r, g, b, a). 1.0 = show, 0.0 = hide */
+  [[push_constant]] const float4 vertex_paint_channel_mask;
 };
 
 [[vertex]] void vert_curves([[resource_table]] Curves &curves,
@@ -206,7 +213,8 @@ struct Curves {
                               v_out.color,
                               v_out.alpha,
                               v_out.roughness,
-                              v_out.metallic);
+                              v_out.metallic,
+                              curves.vertex_paint_channel_mask);
 
   /* Hairs have lots of layer and can rapidly become the most prominent surface.
    * So we lower their alpha artificially. */
@@ -228,6 +236,9 @@ struct PointCloud {
   [[legacy_info]] ShaderCreateInfo drw_clipped;
 
   [[compilation_constant]] const bool use_clipping;
+  
+  /** Vertex paint channel mask (r, g, b, a). 1.0 = show, 0.0 = hide */
+  [[push_constant]] const float4 vertex_paint_channel_mask;
 };
 
 [[vertex]] void vert_pointcloud([[resource_table]] PointCloud &point_cloud,
@@ -256,7 +267,8 @@ struct PointCloud {
                               v_out.color,
                               v_out.alpha,
                               v_out.roughness,
-                              v_out.metallic);
+                              v_out.metallic,
+                              point_cloud.vertex_paint_channel_mask);
 
   v_out.object_id = int(drw_resource_id() & 0xFFFFu) + 1;
 }

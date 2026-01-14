@@ -912,41 +912,72 @@ static void rna_view3d_overlay_vertex_paint_channel_set(PointerRNA *ptr,
                                                         const bool value,
                                                         const int channel_flag)
 {
+  printf("\n[DEBUG] === rna_view3d_overlay_vertex_paint_channel_set START ===\n");
+  printf("[DEBUG] value=%d, channel_flag=0x%x\n", value, channel_flag);
+  
   View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
   View3D *v3d = static_cast<View3D *>(ptr->data);
+  printf("[DEBUG] overlay=%p, v3d=%p\n", (void*)overlay, (void*)v3d);
 
-  int new_flag = overlay->vertex_paint_channel_flag;
+  int old_flag = overlay->vertex_paint_channel_flag;
+  int new_flag = old_flag;
   SET_FLAG_FROM_TEST(new_flag, value, channel_flag);
 
   if (new_flag == 0) {
     new_flag = channel_flag;
+    printf("[DEBUG] flag was 0, forced to channel_flag\n");
   }
   overlay->vertex_paint_channel_flag = new_flag;
+  printf("[DEBUG] flag: 0x%x -> 0x%x\n", old_flag, new_flag);
 
   bScreen *screen = ptr->owner_id ? reinterpret_cast<bScreen *>(ptr->owner_id) : nullptr;
+  printf("[DEBUG] ptr->owner_id=%p (screen=%p)\n", ptr->owner_id, (void*)screen);
+
   if (screen != nullptr) {
+    int areas_found = 0;
     for (ScrArea &area : screen->areabase) {
-      if (area.spacetype != SPACE_VIEW3D) {
-        continue;
+      if (area.spacetype == SPACE_VIEW3D) {
+        View3D *area_v3d = static_cast<View3D *>(area.spacedata.first);
+        if (area_v3d == v3d) {
+          printf("[DEBUG] FOUND matching View3D area=%p, tagging redraw\n", (void*)&area);
+          ED_area_tag_redraw_regiontype(&area, RGN_TYPE_WINDOW);
+          ED_area_tag_refresh(&area);
+          areas_found++;
+        }
       }
-      View3D *area_v3d = static_cast<View3D *>(area.spacedata.first);
-      if (area_v3d == v3d) {
-        ED_area_tag_redraw_regiontype(&area, RGN_TYPE_WINDOW);
-        break;
-      }
+    }
+    if (areas_found == 0) {
+      printf("[DEBUG] WARNING: No matching View3D area found in screen!\n");
     }
   }
 
-  WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+  printf("[DEBUG] Adding notifier NC_WINDOW | ND_SPACE_VIEW3D (combined)\n");
+  WM_main_add_notifier(NC_WINDOW | ND_SPACE_VIEW3D, nullptr);
 
-  if (screen != nullptr && G_MAIN && G_MAIN->wm.first) {
+  if (G_MAIN) {
     wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);
-    for (wmWindow &win : wm->windows) {
-      if (WM_window_get_active_screen(&win) == screen) {
-        WM_event_add_mousemove(&win);
+    if (wm) {
+      int win_idx = 0;
+      int mousemove_sent = 0;
+      for (wmWindow &win : wm->windows) {
+        bScreen *win_screen = WM_window_get_active_screen(&win);
+        bool screen_match = (win_screen == screen);
+        printf("[DEBUG] Window[%d]=%p, screen=%p (match=%d)\n", win_idx, (void*)&win, (void*)win_screen, screen_match);
+        if (screen_match || screen == nullptr) {
+          WM_event_add_mousemove(&win);
+          mousemove_sent++;
+        }
+        win_idx++;
       }
+      printf("[DEBUG] WM_event_add_mousemove sent to %d/%d windows\n", mousemove_sent, win_idx);
+    } else {
+      printf("[DEBUG] ERROR: G_MAIN->wm.first is NULL\n");
     }
+  } else {
+    printf("[DEBUG] ERROR: G_MAIN is NULL\n");
   }
+  
+  printf("[DEBUG] === rna_view3d_overlay_vertex_paint_channel_set END ===\n\n");
 }
 
 static bool rna_Space_show_vertex_paint_r_get(PointerRNA *ptr)
@@ -1320,6 +1351,7 @@ static void rna_SpaceView3D_retopology_update(Main * /*bmain*/, Scene *scene, Po
 
 static void rna_SpaceView3D_show_overlay_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
+  printf("[DEBUG] rna_SpaceView3D_show_overlay_update: start, ptr->data=%p\n", ptr->data);
   /* If Retopology is enabled, toggling overlays can change the visibility of active object. */
   const View3D *v3d = static_cast<View3D *>(ptr->data);
   if (v3d->overlay.edit_flag & V3D_OVERLAY_EDIT_RETOPOLOGY) {

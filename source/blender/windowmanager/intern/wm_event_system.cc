@@ -736,6 +736,14 @@ void wm_event_do_notifiers(bContext *C)
       MEM_freeN(note);
       continue;
     }
+    
+    if (note->category == NC_SPACE && note->data == ND_SPACE_VIEW3D) {
+      printf("[DEBUG] wm_event_do_notifiers: Processing NC_SPACE|ND_SPACE_VIEW3D notifier\n");
+    }
+    if (note->category == NC_WINDOW && note->data == ND_SPACE_VIEW3D) {
+      printf("[DEBUG] wm_event_do_notifiers: Processing NC_WINDOW|ND_SPACE_VIEW3D notifier\n");
+    }
+    
     /* NOTE: no need to set `wm->runtime->notifier_current` since it's been removed from the queue.
      */
 
@@ -4383,6 +4391,7 @@ void wm_event_do_handlers(bContext *C)
 
     /* Only add mouse-move when the event queue was read entirely. */
     if (win.addmousemove && win.runtime->eventstate) {
+      printf("[DEBUG] wm_event_add_mousemove_processing: win=%p, generating MOUSEMOVE event\n", (void*)&win);
       wmEvent tevent = *(win.runtime->eventstate);
       // printf("adding MOUSEMOVE %d %d\n", tevent.xy[0], tevent.xy[1]);
       tevent.type = MOUSEMOVE;
@@ -5233,6 +5242,7 @@ static void WM_event_remove_handler(ListBaseT<wmEventHandler> *handlers, wmEvent
 
 void WM_event_add_mousemove(wmWindow *win)
 {
+  printf("[DEBUG] WM_event_add_mousemove: win=%p, setting addmousemove=1\n", (void*)win);
   win->addmousemove = 1;
 }
 

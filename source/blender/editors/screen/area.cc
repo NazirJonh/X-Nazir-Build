@@ -484,6 +484,11 @@ void ED_region_do_draw(bContext *C, ARegion *region)
   ScrArea *area = CTX_wm_area(C);
   ARegionType *at = region->runtime->type;
 
+  if (area && area->spacetype == SPACE_VIEW3D && region->regiontype == RGN_TYPE_WINDOW) {
+    printf("[DEBUG] ED_region_do_draw: VIEW3D WINDOW region=%p, do_draw=0x%x\n", 
+           (void*)region, region->runtime->do_draw);
+  }
+
   /* see BKE_spacedata_draw_locks() */
   if (at->do_lock) {
     return;
@@ -626,6 +631,11 @@ void ED_region_tag_redraw(ARegion *region)
                                   RGN_DRAW_EDITOR_OVERLAYS);
     region->runtime->do_draw |= RGN_DRAW;
     region->runtime->drawrct = rcti{};
+    printf("[DEBUG] ED_region_tag_redraw: region=%p, set RGN_DRAW flag\n", (void*)region);
+  } else if (region) {
+    printf("[DEBUG] ED_region_tag_redraw: region=%p, SKIPPED (RGN_DRAWING already set)\n", (void*)region);
+  } else {
+    printf("[DEBUG] ED_region_tag_redraw: region is NULL!\n");
   }
 }
 
@@ -712,11 +722,18 @@ void ED_area_tag_redraw_no_rebuild(ScrArea *area)
 void ED_area_tag_redraw_regiontype(ScrArea *area, int regiontype)
 {
   if (area) {
+    printf("[DEBUG] ED_area_tag_redraw_regiontype: area=%p, regiontype=%d\n", (void*)area, regiontype);
+    int regions_tagged = 0;
     for (ARegion &region : area->regionbase) {
       if (region.regiontype == regiontype) {
+        printf("[DEBUG]   tagging region=%p, regiontype=%d\n", (void*)&region, region.regiontype);
         ED_region_tag_redraw(&region);
+        regions_tagged++;
       }
     }
+    printf("[DEBUG] ED_area_tag_redraw_regiontype: tagged %d regions\n", regions_tagged);
+  } else {
+    printf("[DEBUG] ED_area_tag_redraw_regiontype: area is NULL!\n");
   }
 }
 

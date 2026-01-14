@@ -16,9 +16,11 @@
 #include "BKE_context.hh"
 #include "BKE_geometry_set.hh"
 #include "BKE_movieclip.hh"
+#include "BKE_screen.hh"
 
 #include "ED_asset.hh"
 #include "ED_buttons.hh"
+#include "ED_screen.hh"
 #include "ED_spreadsheet.hh"
 
 #include "BLI_string.h"
@@ -906,6 +908,47 @@ static View3DOverlay *rna_Space_view3d_overlay_get(PointerRNA *ptr)
   return &v3d->overlay;
 }
 
+static void rna_view3d_overlay_vertex_paint_channel_set(PointerRNA *ptr,
+                                                        const bool value,
+                                                        const int channel_flag)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  View3D *v3d = static_cast<View3D *>(ptr->data);
+
+  int new_flag = overlay->vertex_paint_channel_flag;
+  SET_FLAG_FROM_TEST(new_flag, value, channel_flag);
+
+  if (new_flag == 0) {
+    new_flag = channel_flag;
+  }
+  overlay->vertex_paint_channel_flag = new_flag;
+
+  bScreen *screen = ptr->owner_id ? reinterpret_cast<bScreen *>(ptr->owner_id) : nullptr;
+  if (screen != nullptr) {
+    for (ScrArea &area : screen->areabase) {
+      if (area.spacetype != SPACE_VIEW3D) {
+        continue;
+      }
+      View3D *area_v3d = static_cast<View3D *>(area.spacedata.first);
+      if (area_v3d == v3d) {
+        ED_area_tag_redraw_regiontype(&area, RGN_TYPE_WINDOW);
+        break;
+      }
+    }
+  }
+
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  if (screen != nullptr && G_MAIN && G_MAIN->wm.first) {
+    wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);
+    for (wmWindow &win : wm->windows) {
+      if (WM_window_get_active_screen(&win) == screen) {
+        WM_event_add_mousemove(&win);
+      }
+    }
+  }
+}
+
 static bool rna_Space_show_vertex_paint_r_get(PointerRNA *ptr)
 {
   View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
@@ -914,16 +957,7 @@ static bool rna_Space_show_vertex_paint_r_get(PointerRNA *ptr)
 
 static void rna_Space_show_vertex_paint_r_set(PointerRNA *ptr, bool value)
 {
-  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
-  int new_flag = overlay->vertex_paint_channel_flag;
-  SET_FLAG_FROM_TEST(new_flag, value, V3D_OVERLAY_VPAINT_SHOW_R);
-  
-  /* Ensure at least one channel is enabled. */
-  if (new_flag == 0) {
-    /* Keep R channel enabled if trying to disable all channels. */
-    new_flag = V3D_OVERLAY_VPAINT_SHOW_R;
-  }
-  overlay->vertex_paint_channel_flag = new_flag;
+  rna_view3d_overlay_vertex_paint_channel_set(ptr, value, V3D_OVERLAY_VPAINT_SHOW_R);
 }
 
 static bool rna_Space_show_vertex_paint_g_get(PointerRNA *ptr)
@@ -934,16 +968,7 @@ static bool rna_Space_show_vertex_paint_g_get(PointerRNA *ptr)
 
 static void rna_Space_show_vertex_paint_g_set(PointerRNA *ptr, bool value)
 {
-  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
-  int new_flag = overlay->vertex_paint_channel_flag;
-  SET_FLAG_FROM_TEST(new_flag, value, V3D_OVERLAY_VPAINT_SHOW_G);
-  
-  /* Ensure at least one channel is enabled. */
-  if (new_flag == 0) {
-    /* Keep G channel enabled if trying to disable all channels. */
-    new_flag = V3D_OVERLAY_VPAINT_SHOW_G;
-  }
-  overlay->vertex_paint_channel_flag = new_flag;
+  rna_view3d_overlay_vertex_paint_channel_set(ptr, value, V3D_OVERLAY_VPAINT_SHOW_G);
 }
 
 static bool rna_Space_show_vertex_paint_b_get(PointerRNA *ptr)
@@ -954,16 +979,7 @@ static bool rna_Space_show_vertex_paint_b_get(PointerRNA *ptr)
 
 static void rna_Space_show_vertex_paint_b_set(PointerRNA *ptr, bool value)
 {
-  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
-  int new_flag = overlay->vertex_paint_channel_flag;
-  SET_FLAG_FROM_TEST(new_flag, value, V3D_OVERLAY_VPAINT_SHOW_B);
-  
-  /* Ensure at least one channel is enabled. */
-  if (new_flag == 0) {
-    /* Keep B channel enabled if trying to disable all channels. */
-    new_flag = V3D_OVERLAY_VPAINT_SHOW_B;
-  }
-  overlay->vertex_paint_channel_flag = new_flag;
+  rna_view3d_overlay_vertex_paint_channel_set(ptr, value, V3D_OVERLAY_VPAINT_SHOW_B);
 }
 
 static bool rna_Space_show_vertex_paint_a_get(PointerRNA *ptr)
@@ -974,16 +990,7 @@ static bool rna_Space_show_vertex_paint_a_get(PointerRNA *ptr)
 
 static void rna_Space_show_vertex_paint_a_set(PointerRNA *ptr, bool value)
 {
-  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
-  int new_flag = overlay->vertex_paint_channel_flag;
-  SET_FLAG_FROM_TEST(new_flag, value, V3D_OVERLAY_VPAINT_SHOW_A);
-  
-  /* Ensure at least one channel is enabled. */
-  if (new_flag == 0) {
-    /* Keep A channel enabled if trying to disable all channels. */
-    new_flag = V3D_OVERLAY_VPAINT_SHOW_A;
-  }
-  overlay->vertex_paint_channel_flag = new_flag;
+  rna_view3d_overlay_vertex_paint_channel_set(ptr, value, V3D_OVERLAY_VPAINT_SHOW_A);
 }
 
 /** \} */

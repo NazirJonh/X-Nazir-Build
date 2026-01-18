@@ -1444,7 +1444,20 @@ static bool view3d_lasso_select(bContext *C,
           bke::crazyspace::GeometryDeformation deformation =
               bke::crazyspace::get_evaluated_curves_deformation(*vc->depsgraph, *vc->obedit);
           const bke::AttrDomain selection_domain = bke::AttrDomain(curves_id.selection_domain);
-          const IndexRange elements(curves.attributes().domain_size(selection_domain));
+          
+          IndexMaskMemory hide_memory;
+          IndexMask elements;
+          if (selection_domain == bke::AttrDomain::Point) {
+            const VArray<bool> hide_point = *curves.attributes().lookup_or_default<bool>(
+                ".hide_point", bke::AttrDomain::Point, false);
+            elements = IndexMask::from_bools_inverse(curves.points_range(), hide_point, hide_memory);
+          }
+          else if (selection_domain == bke::AttrDomain::Curve) {
+            const VArray<bool> hide_curve = *curves.attributes().lookup_or_default<bool>(
+                ".hide_curve", bke::AttrDomain::Curve, false);
+            elements = IndexMask::from_bools_inverse(curves.curves_range(), hide_curve, hide_memory);
+          }
+          
           const float4x4 projection = ED_view3d_ob_project_mat_get(vc->rv3d, vc->obedit);
           changed = ed::curves::select_lasso(*vc,
                                              curves,
@@ -3235,7 +3248,20 @@ static bool ed_curves_select_pick(bContext &C, const int mval[2], const SelectPi
               bke::crazyspace::get_evaluated_curves_deformation(*vc.depsgraph, curves_ob);
           const bke::CurvesGeometry &curves = curves_id.geometry.wrap();
           const float4x4 projection = ED_view3d_ob_project_mat_get(vc.rv3d, &curves_ob);
-          const IndexMask elements(curves.attributes().domain_size(selection_domain));
+          
+          IndexMaskMemory hide_memory;
+          IndexMask elements;
+          if (selection_domain == bke::AttrDomain::Point) {
+            const VArray<bool> hide_point = *curves.attributes().lookup_or_default<bool>(
+                ".hide_point", bke::AttrDomain::Point, false);
+            elements = IndexMask::from_bools_inverse(curves.points_range(), hide_point, hide_memory);
+          }
+          else if (selection_domain == bke::AttrDomain::Curve) {
+            const VArray<bool> hide_curve = *curves.attributes().lookup_or_default<bool>(
+                ".hide_curve", bke::AttrDomain::Curve, false);
+            elements = IndexMask::from_bools_inverse(curves.curves_range(), hide_curve, hide_memory);
+          }
+          
           const auto range_consumer =
               [&](IndexRange range, Span<float3> positions, StringRef selection_attribute_name) {
                 IndexMask mask = elements.slice_content(range);
@@ -4568,7 +4594,20 @@ static wmOperatorStatus view3d_box_select_exec(bContext *C, wmOperator *op)
               bke::crazyspace::get_evaluated_curves_deformation(*vc.depsgraph, *vc.obedit);
           const bke::AttrDomain selection_domain = bke::AttrDomain(curves_id.selection_domain);
           const float4x4 projection = ED_view3d_ob_project_mat_get(vc.rv3d, vc.obedit);
-          const IndexRange elements(curves.attributes().domain_size(selection_domain));
+          
+          IndexMaskMemory hide_memory;
+          IndexMask elements;
+          if (selection_domain == bke::AttrDomain::Point) {
+            const VArray<bool> hide_point = *curves.attributes().lookup_or_default<bool>(
+                ".hide_point", bke::AttrDomain::Point, false);
+            elements = IndexMask::from_bools_inverse(curves.points_range(), hide_point, hide_memory);
+          }
+          else if (selection_domain == bke::AttrDomain::Curve) {
+            const VArray<bool> hide_curve = *curves.attributes().lookup_or_default<bool>(
+                ".hide_curve", bke::AttrDomain::Curve, false);
+            elements = IndexMask::from_bools_inverse(curves.curves_range(), hide_curve, hide_memory);
+          }
+          
           changed = ed::curves::select_box(vc,
                                            curves,
                                            deformation,

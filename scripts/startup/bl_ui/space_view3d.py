@@ -5907,6 +5907,8 @@ class VIEW3D_MT_edit_curves(Menu):
 
         layout.separator()
 
+        layout.operator("curves.hide")
+        layout.operator("curves.reveal")
         layout.operator("curves.separate")
         layout.operator("curves.delete")
 

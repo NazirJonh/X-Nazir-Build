@@ -347,6 +347,7 @@ gpu::VertBuf *curves_pos_buffer_get(Object *object)
 
   CurvesEvalCache &cache = curves_get_eval_cache(curves);
   cache.ensure_positions(module, curves.geometry.wrap());
+  cache.ensure_hide_attributes(curves.geometry.wrap());
 
   return cache.evaluated_pos_rad_buf.get();
 }
@@ -464,12 +465,27 @@ void curves_bind_resources_implementation(PassT &sub_ps,
   curves_infos.half_cylinder_face_count = face_per_segment;
   curves_infos.vertex_per_segment = face_per_segment < 2 ? (face_per_segment + 1) :
                                                            ((face_per_segment + 1) * 2 + 1);
+  curves_infos.use_hide_filtering = cache.use_hide_filtering;
 
   curves_infos.push_update();
 
   sub_ps.bind_ubo("drw_curves", curves_infos);
   sub_ps.bind_texture("curves_pos_rad_buf", cache.evaluated_pos_rad_buf);
   sub_ps.bind_texture("curves_indirection_buf", indirection_buf);
+
+  if (cache.hide_point_buf) {
+    sub_ps.bind_texture("curves_hide_point_buf", cache.hide_point_buf);
+  }
+  else {
+    sub_ps.bind_texture("curves_hide_point_buf", module.dummy_vbo);
+  }
+
+  if (cache.hide_curve_buf) {
+    sub_ps.bind_texture("curves_hide_curve_buf", cache.hide_curve_buf);
+  }
+  else {
+    sub_ps.bind_texture("curves_hide_curve_buf", module.dummy_vbo);
+  }
 }
 
 void curves_bind_resources(PassMain::Sub &sub_ps,
@@ -522,6 +538,7 @@ gpu::Batch *curves_sub_pass_setup_implementation(PassT &sub_ps,
   CurvesModule &module = *drw_get().data->curves_module;
 
   curves_cache.ensure_positions(module, curves);
+  curves_cache.ensure_hide_attributes(curves);
   curves_cache.ensure_attributes(module, curves, gpu_material);
 
   gpu::VertBufPtr &indirection_buf = curves_cache.indirection_buf_get(

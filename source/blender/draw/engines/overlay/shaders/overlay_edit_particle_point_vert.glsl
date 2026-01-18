@@ -44,6 +44,12 @@ void main()
   }
 #endif
 
+#ifdef CURVES_POINT
+  if (hide > 0.5) {
+    DISCARD_VERTEX
+  }
+#endif
+
   float3 world_pos = drw_point_object_to_world(pos);
   gl_Position = drw_point_world_to_homogenous(world_pos);
   float end_point_size_factor = 1.0f;

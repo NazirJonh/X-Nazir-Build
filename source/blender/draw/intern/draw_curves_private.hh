@@ -175,6 +175,15 @@ struct CurvesEvalCache {
   /** Buffer containing offsets to the start of each `nurbs::BasisCache` for each curve. */
   gpu::VertBufPtr basis_cache_offset_buf;
 
+  /* --- Hide Attributes. --- */
+
+  /** Hide state per point. Nullptr if no hide attribute exists. */
+  gpu::VertBufPtr hide_point_buf;
+  /** Hide state per curve. Nullptr if no hide attribute exists. */
+  gpu::VertBufPtr hide_curve_buf;
+  /** Flag to enable hide filtering in shaders. */
+  bool use_hide_filtering = false;
+
   /* --- Generic Attributes. --- */
 
   /** Attributes currently being drawn or about to be drawn. */
@@ -209,6 +218,7 @@ struct CurvesEvalCache {
                          const GPUMaterial *gpu_material);
 
   void ensure_common(const bke::CurvesGeometry &curves);
+  void ensure_hide_attributes(const bke::CurvesGeometry &curves);
   void ensure_bezier(const bke::CurvesGeometry &curves);
   void ensure_nurbs(const bke::CurvesGeometry &curves);
 

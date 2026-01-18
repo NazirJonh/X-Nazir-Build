@@ -46,6 +46,8 @@
 namespace blender {
 
 static const char *ATTR_POSITION = "position";
+static const char *ATTR_HIDE_POINT = ".hide_point";
+static const char *ATTR_HIDE_CURVE = ".hide_curve";
 
 static void curves_init_data(ID *id)
 {

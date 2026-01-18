@@ -156,6 +156,18 @@ float3 point_position_get(uint point_id)
   return texelFetch(curves_pos_rad_buf, int(point_id)).rgb;
 }
 
+bool point_is_hidden(uint point_id)
+{
+  const auto &curves_hide_point_buf = buffer_get(draw_curves, curves_hide_point_buf);
+  return texelFetch(curves_hide_point_buf, int(point_id)).r > 0.5f;
+}
+
+bool curve_is_hidden(uint curve_id)
+{
+  const auto &curves_hide_curve_buf = buffer_get(draw_curves, curves_hide_curve_buf);
+  return texelFetch(curves_hide_curve_buf, int(curve_id)).r > 0.5f;
+}
+
 struct Point {
   /* Position of the evaluated curve point (not the shape / cylinder point). */
   float3 P;
@@ -188,6 +200,14 @@ Point point_get(uint vertex_id)
   pt.P = (restart_strip) ? float3(NAN_FLT) : pos_rad.xyz;
   pt.radius = pos_rad.w;
   pt.azimuthal_offset = azimuthal_offset_get(segment);
+
+  const bool use_hide_filtering = buffer_get(draw_curves_infos, drw_curves).use_hide_filtering != 0u;
+  if (use_hide_filtering) {
+    if (curve_is_hidden(uint(pt.curve_id)) || point_is_hidden(uint(pt.point_id))) {
+      pt.P = float3(NAN_FLT);
+      return pt;
+    }
+  }
 
   if (pt.curve_segment == 0) {
     /* Hair root. */

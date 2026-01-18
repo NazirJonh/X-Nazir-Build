@@ -29,6 +29,7 @@
 #include "BKE_bvhutils.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
+#include "BKE_curves_hide.hh"
 #include "BKE_customdata.hh"
 #include "BKE_geometry_set.hh"
 #include "BKE_layer.hh"
@@ -1500,6 +1501,185 @@ static void CURVES_OT_switch_direction(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
+namespace hide {
+
+static wmOperatorStatus exec(bContext *C, wmOperator *op)
+{
+  const bool unselected = RNA_boolean_get(op->ptr, "unselected");
+  printf("DEBUG: CURVES_OT_hide operator called\n");
+  printf("DEBUG: unselected = %s\n", unselected ? "true" : "false");
+
+  for (Curves *curves_id : get_unique_editable_curves(*C)) {
+    printf("DEBUG: Processing curves_id\n");
+
+    Object *object = nullptr;
+    CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
+      if (ob->type == OB_CURVES && id_cast<Curves *>(ob->data) == curves_id) {
+        object = ob;
+        break;
+      }
+    }
+    CTX_DATA_END;
+
+    if (!object) {
+      printf("DEBUG: No object found for curves_id\n");
+      continue;
+    }
+
+    printf("DEBUG: Object found: %s\n", object->id.name + 2);
+
+    bke::CurvesGeometry &curves = curves_id->geometry.wrap();
+    IndexMaskMemory memory;
+
+    printf("DEBUG: Selection domain: %s\n", 
+           bke::AttrDomain(curves_id->selection_domain) == bke::AttrDomain::Point ? "Point" : "Curve");
+
+    switch (bke::AttrDomain(curves_id->selection_domain)) {
+      case bke::AttrDomain::Point: {
+        const IndexMask selection = retrieve_selected_points(*curves_id, memory);
+        printf("DEBUG: Point selection size: %d\n", int(selection.size()));
+        if (selection.is_empty()) {
+          printf("DEBUG: Point selection is empty, skipping\n");
+          continue;
+        }
+
+        if (unselected) {
+          IndexMaskMemory unselected_memory;
+          IndexMask unselected_mask = IndexMask::from_difference(
+              IndexRange(curves.points_num()), selection, unselected_memory);
+          printf("DEBUG: Hiding unselected points, mask size: %d\n", int(unselected_mask.size()));
+          blender::ed::sculpt_paint::curves_hide::hide_points(
+              *object, unselected_mask, blender::ed::sculpt_paint::VisAction::Hide);
+        }
+        else {
+          printf("DEBUG: Hiding selected points, mask size: %d\n", int(selection.size()));
+          blender::ed::sculpt_paint::curves_hide::hide_points(
+              *object, selection, blender::ed::sculpt_paint::VisAction::Hide);
+        }
+        break;
+      }
+      case bke::AttrDomain::Curve: {
+        const IndexMask selection = retrieve_selected_curves(*curves_id, memory);
+        printf("DEBUG: Curve selection size: %d\n", int(selection.size()));
+        if (selection.is_empty()) {
+          printf("DEBUG: Curve selection is empty, skipping\n");
+          continue;
+        }
+
+        if (unselected) {
+          IndexMaskMemory unselected_memory;
+          IndexMask unselected_mask = IndexMask::from_difference(
+              IndexRange(curves.curves_num()), selection, unselected_memory);
+          printf("DEBUG: Hiding unselected curves, mask size: %d\n", int(unselected_mask.size()));
+          blender::ed::sculpt_paint::curves_hide::hide_curves(
+              *object, unselected_mask, blender::ed::sculpt_paint::VisAction::Hide);
+        }
+        else {
+          printf("DEBUG: Hiding selected curves, mask size: %d\n", int(selection.size()));
+          blender::ed::sculpt_paint::curves_hide::hide_curves(
+              *object, selection, blender::ed::sculpt_paint::VisAction::Hide);
+        }
+        break;
+      }
+      default:
+        printf("DEBUG: Unknown selection domain\n");
+        BLI_assert_unreachable();
+        break;
+    }
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_GEOM | ND_SELECT, &curves_id->id);
+  }
+
+  printf("DEBUG: CURVES_OT_hide operator finished\n");
+  return OPERATOR_FINISHED;
+}
+
+}  // namespace hide
+
+static void CURVES_OT_hide(wmOperatorType *ot)
+{
+  ot->name = "Hide";
+  ot->idname = __func__;
+  ot->description = "Hide (un)selected curves or points";
+
+  ot->exec = hide::exec;
+  ot->poll = editable_curves_in_edit_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_boolean(ot->srna, "unselected", false, "Unselected", "Hide unselected rather than selected");
+}
+
+namespace reveal {
+
+static wmOperatorStatus exec(bContext *C, wmOperator *op)
+{
+  const bool select = RNA_boolean_get(op->ptr, "select");
+
+  for (Curves *curves_id : get_unique_editable_curves(*C)) {
+    Object *object = nullptr;
+    CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
+      if (ob->type == OB_CURVES && id_cast<Curves *>(ob->data) == curves_id) {
+        object = ob;
+        break;
+      }
+    }
+    CTX_DATA_END;
+
+    if (!object) {
+      continue;
+    }
+
+    IndexMaskMemory memory;
+
+    switch (bke::AttrDomain(curves_id->selection_domain)) {
+      case bke::AttrDomain::Point: {
+        if (select) {
+          const IndexMask selection = retrieve_selected_points(*curves_id, memory);
+          if (!selection.is_empty()) {
+            blender::ed::sculpt_paint::curves_hide::hide_points(
+                *object, selection, blender::ed::sculpt_paint::VisAction::Show);
+          }
+        }
+        blender::ed::sculpt_paint::curves_hide::show_all(*object);
+        break;
+      }
+      case bke::AttrDomain::Curve: {
+        if (select) {
+          const IndexMask selection = retrieve_selected_curves(*curves_id, memory);
+          if (!selection.is_empty()) {
+            blender::ed::sculpt_paint::curves_hide::hide_curves(
+                *object, selection, blender::ed::sculpt_paint::VisAction::Show);
+          }
+        }
+        blender::ed::sculpt_paint::curves_hide::show_all(*object);
+        break;
+      }
+      default:
+        BLI_assert_unreachable();
+        break;
+    }
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+}  // namespace reveal
+
+static void CURVES_OT_reveal(wmOperatorType *ot)
+{
+  ot->name = "Reveal";
+  ot->idname = __func__;
+  ot->description = "Reveal hidden curves or points";
+
+  ot->exec = reveal::exec;
+  ot->poll = editable_curves_in_edit_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_boolean(ot->srna, "select", true, "Select", "Select revealed elements");
+}
+
 namespace subdivide {
 
 static wmOperatorStatus exec(bContext *C, wmOperator *op)
@@ -1859,6 +2039,8 @@ void operatortypes_curves()
   WM_operatortype_append(CURVES_OT_separate);
   WM_operatortype_append(CURVES_OT_split);
   WM_operatortype_append(CURVES_OT_surface_set);
+  WM_operatortype_append(CURVES_OT_hide);
+  WM_operatortype_append(CURVES_OT_reveal);
   WM_operatortype_append(CURVES_OT_delete);
   WM_operatortype_append(CURVES_OT_duplicate);
   WM_operatortype_append(CURVES_OT_tilt_clear);

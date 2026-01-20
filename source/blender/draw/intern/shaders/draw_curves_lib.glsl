@@ -123,6 +123,18 @@ int point_id_get(Segment segment, Indirection indirection)
   return int(segment.id) - indirection.curve_id;
 }
 
+bool is_point_hidden(int point_id)
+{
+  const auto &curves_hide_point_buf = buffer_get(draw_curves, curves_hide_point_buf);
+  return texelFetch(curves_hide_point_buf, point_id).x != 0.0f;
+}
+
+bool is_curve_hidden(int curve_id)
+{
+  const auto &curves_hide_curve_buf = buffer_get(draw_curves, curves_hide_curve_buf);
+  return texelFetch(curves_hide_curve_buf, curve_id).x != 0.0f;
+}
+
 float azimuthal_offset_get(Segment segment)
 {
   const auto &drw_curves = buffer_get(draw_curves_infos, drw_curves);
@@ -200,6 +212,18 @@ Point point_get(uint vertex_id)
   else {
     pt.T = pt.P - point_position_get(uint(pt.point_id - 1));
   }
+
+  const auto &drw_curves = buffer_get(draw_curves_infos, drw_curves);
+
+  if (drw_curves.use_hide_filtering != 0u) {
+    if (is_curve_hidden(pt.curve_id)) {
+      pt.P = float3(NAN_FLT);
+    }
+    else if (is_point_hidden(pt.point_id)) {
+      pt.P = float3(NAN_FLT);
+    }
+  }
+
   return pt;
 }
 

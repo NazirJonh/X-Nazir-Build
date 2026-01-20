@@ -42,6 +42,10 @@ void main()
   {
     DISCARD_VERTEX
   }
+
+  if (hide > 0.5) {
+    DISCARD_VERTEX
+  }
 #endif
 
   float3 world_pos = drw_point_object_to_world(pos);

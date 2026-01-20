@@ -89,6 +89,10 @@ struct CurvesBatchCache {
   /* Selection of original points. */
   gpu::VertBuf *edit_points_selection;
 
+  /* Hide state for edit mode. */
+  gpu::VertBuf *edit_points_hide;
+  gpu::VertBuf *edit_curves_hide;
+
   gpu::IndexBuf *edit_handles_ibo;
 
   gpu::Batch *edit_curves_lines;
@@ -127,6 +131,8 @@ static void clear_edit_data(CurvesBatchCache *cache)
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_points_rad);
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_points_data);
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_points_selection);
+  GPU_VERTBUF_DISCARD_SAFE(cache->edit_points_hide);
+  GPU_VERTBUF_DISCARD_SAFE(cache->edit_curves_hide);
   GPU_INDEXBUF_DISCARD_SAFE(cache->edit_handles_ibo);
 
   GPU_BATCH_DISCARD_SAFE(cache->edit_points);
@@ -410,6 +416,44 @@ static void create_edit_points_selection(const OffsetIndices<int> points_by_curv
                                        selection_right,
                                        data.slice(handle_range_right(points_num, bezier_offsets)));
   }
+}
+
+static void create_edit_points_hide(const OffsetIndices<int> points_by_curve,
+                                    const int curves_num,
+                                    const bke::AttributeAccessor attributes,
+                                    gpu::VertBuf &vbo_points,
+                                    gpu::VertBuf &vbo_curves)
+{
+  static const GPUVertFormat format_float = GPU_vertformat_from_attribute(
+      "hide", gpu::VertAttrType::SFLOAT_32);
+  GPU_vertbuf_init_with_format(vbo_points, format_float);
+  GPU_vertbuf_data_alloc(vbo_points, points_by_curve.total_size());
+
+  GPU_vertbuf_init_with_format(vbo_curves, format_float);
+  GPU_vertbuf_data_alloc(vbo_curves, curves_num);
+
+  const VArray<bool> hide_point = *attributes.lookup<bool>(".hide_point", bke::AttrDomain::Point);
+  const VArray<bool> hide_curve = *attributes.lookup<bool>(".hide_curve", bke::AttrDomain::Curve);
+
+  MutableSpan<float> vbo_data_points = vbo_points.data<float>();
+  MutableSpan<float> vbo_data_curves = vbo_curves.data<float>();
+
+  threading::parallel_for(IndexRange(curves_num), 1024, [&](const IndexRange range) {
+    for (const int curve_i : range) {
+      const IndexRange points = points_by_curve[curve_i];
+      const bool curve_hidden = !hide_curve.is_empty() && hide_curve[curve_i];
+
+      vbo_data_curves[curve_i] = curve_hidden ? 1.0f : 0.0f;
+
+      for (const int point_i : points) {
+        bool point_hidden = curve_hidden;
+        if (!hide_point.is_empty()) {
+          point_hidden = hide_point[point_i] || curve_hidden;
+        }
+        vbo_data_points[point_i] = point_hidden ? 1.0f : 0.0f;
+      }
+    }
+  });
 }
 
 static void create_lines_ibo_no_cyclic(const OffsetIndices<int> points_by_curve,
@@ -748,6 +792,40 @@ void CurvesEvalCache::ensure_common(const bke::CurvesGeometry &curves)
   this->curves_type_buf = gpu::VertBuf::from_varray(curves.curve_types());
   this->curves_resolution_buf = gpu::VertBuf::from_varray(curves.resolution());
   this->curves_cyclic_buf = gpu::VertBuf::from_varray(curves.cyclic());
+}
+
+void CurvesEvalCache::ensure_hide_attributes(const bke::CurvesGeometry &curves)
+{
+  if (this->hide_point_buf || this->hide_curve_buf) {
+    return;
+  }
+
+  this->ensure_common(curves);
+
+  const bke::AttributeAccessor attributes = curves.attributes();
+
+  const VArray<bool> hide_point = *attributes.lookup<bool>(".hide_point", bke::AttrDomain::Point);
+  const VArray<bool> hide_curve = *attributes.lookup<bool>(".hide_curve", bke::AttrDomain::Curve);
+
+  if (!hide_point.is_empty() && !hide_curve.is_empty()) {
+    if (const std::optional<bool> single_point = hide_point.get_if_single()) {
+      if (const std::optional<bool> single_curve = hide_curve.get_if_single()) {
+        if (!*single_point && !*single_curve) {
+          return;
+        }
+      }
+    }
+  }
+
+  if (!hide_point.is_empty()) {
+    this->hide_point_buf = gpu::VertBuf::from_varray(hide_point);
+    this->use_hide_filtering = true;
+  }
+
+  if (!hide_curve.is_empty()) {
+    this->hide_curve_buf = gpu::VertBuf::from_varray(hide_curve);
+    this->use_hide_filtering = true;
+  }
 }
 
 void CurvesEvalCache::ensure_bezier(const bke::CurvesGeometry &curves)
@@ -1097,6 +1175,8 @@ void DRW_curves_batch_cache_create_requested(Object *ob)
     DRW_vbo_request(cache.edit_points, &cache.edit_points_rad);
     DRW_vbo_request(cache.edit_points, &cache.edit_points_data);
     DRW_vbo_request(cache.edit_points, &cache.edit_points_selection);
+    DRW_vbo_request(cache.edit_points, &cache.edit_points_hide);
+    DRW_vbo_request(cache.edit_points, &cache.edit_curves_hide);
     is_edit_data_needed = true;
   }
   if (DRW_batch_requested(cache.sculpt_cage, GPU_PRIM_LINE_STRIP)) {
@@ -1104,6 +1184,8 @@ void DRW_curves_batch_cache_create_requested(Object *ob)
     DRW_vbo_request(cache.sculpt_cage, &cache.edit_points_pos);
     DRW_vbo_request(cache.sculpt_cage, &cache.edit_points_data);
     DRW_vbo_request(cache.sculpt_cage, &cache.edit_points_selection);
+    DRW_vbo_request(cache.sculpt_cage, &cache.edit_points_hide);
+    DRW_vbo_request(cache.sculpt_cage, &cache.edit_curves_hide);
     is_edit_data_needed = true;
   }
   if (DRW_batch_requested(cache.edit_handles, GPU_PRIM_LINES)) {
@@ -1112,6 +1194,8 @@ void DRW_curves_batch_cache_create_requested(Object *ob)
     DRW_vbo_request(cache.edit_handles, &cache.edit_points_rad);
     DRW_vbo_request(cache.edit_handles, &cache.edit_points_data);
     DRW_vbo_request(cache.edit_handles, &cache.edit_points_selection);
+    DRW_vbo_request(cache.edit_handles, &cache.edit_points_hide);
+    DRW_vbo_request(cache.edit_handles, &cache.edit_curves_hide);
     is_edit_data_needed = true;
   }
   if (DRW_batch_requested(cache.edit_curves_lines, GPU_PRIM_LINE_STRIP)) {
@@ -1188,6 +1272,13 @@ void DRW_curves_batch_cache_create_requested(Object *ob)
   if (DRW_vbo_requested(cache.edit_points_selection)) {
     create_edit_points_selection(
         points_by_curve, bezier_curves, bezier_offsets, attributes, *cache.edit_points_selection);
+  }
+  if (DRW_vbo_requested(cache.edit_points_hide)) {
+    create_edit_points_hide(points_by_curve,
+                            curves_orig.curves_num(),
+                            attributes,
+                            *cache.edit_points_hide,
+                            *cache.edit_curves_hide);
   }
   if (DRW_ibo_requested(cache.edit_handles_ibo)) {
     calc_edit_handles_ibo(points_by_curve,

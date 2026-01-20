@@ -12,6 +12,11 @@ VERTEX_SHADER_CREATE_INFO(overlay_edit_curve_point)
 
 void main()
 {
+  if (hide > 0.5) {
+    gl_Position = float4(0.0f, 0.0f, -3e36f, 0.0f);
+    return;
+  }
+
   /* Reuse the FREESTYLE flag to determine is GPencil. */
   bool is_gpencil = ((data & EDGE_FREESTYLE) != 0u);
   if ((data & VERT_SELECTED) != 0u) {

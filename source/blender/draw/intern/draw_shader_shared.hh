@@ -546,8 +546,9 @@ struct [[host_shared]] CurvesInfos {
   uint vertex_per_segment;
   /* Edge count for the visible half cylinder. Equal to face count + 1. */
   uint half_cylinder_face_count;
+  /* Enable hide filtering in shaders. */
+  uint use_hide_filtering;
   uint _pad0;
-  uint _pad1;
 };
 
 #pragma pack(push, 4)

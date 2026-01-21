@@ -5995,6 +5995,7 @@ class VIEW3D_MT_edit_curves(Menu):
 
         layout.separator()
 
+        layout.menu("VIEW3D_MT_edit_curves_showhide")
         layout.operator("curves.separate")
         layout.operator("curves.delete")
 
@@ -6017,6 +6018,10 @@ class VIEW3D_MT_edit_curves_segments(Menu):
 
         layout.operator("curves.subdivide")
         layout.operator("curves.switch_direction")
+
+
+class VIEW3D_MT_edit_curves_showhide(ShowHideMenu, Menu):
+    _operator_name = "curves"
 
 
 class VIEW3D_MT_edit_curves_context_menu(Menu):
@@ -9440,6 +9445,7 @@ classes = (
     VIEW3D_MT_edit_curves_add,
     VIEW3D_MT_edit_curves_segments,
     VIEW3D_MT_edit_curves_control_points,
+    VIEW3D_MT_edit_curves_showhide,
     VIEW3D_MT_edit_curves_context_menu,
     VIEW3D_MT_edit_pointcloud,
     VIEW3D_MT_object_mode_pie,

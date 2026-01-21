@@ -3417,6 +3417,10 @@ def km_curves(params):
         ("curves.select_less", {"type": 'PAGE_DOWN', "value": 'PRESS', "repeat": True}, None),
         # Delete
         ("curves.delete", {"type": 'DEL', "value": 'PRESS'}, None),
+        # Hide/Reveal
+        ("curves.reveal", {"type": 'H', "value": 'PRESS', "alt": True}, None),
+        ("curves.hide", {"type": 'H', "value": 'PRESS'}, {"properties": [("unselected", False)]}),
+        ("curves.hide", {"type": 'H', "value": 'PRESS', "shift": True}, {"properties": [("unselected", True)]}),
         # Proportional Editing
         ("wm.context_toggle", {"type": 'B', "value": 'PRESS'},
          {"properties": [("data_path", "tool_settings.use_proportional_edit")]}),

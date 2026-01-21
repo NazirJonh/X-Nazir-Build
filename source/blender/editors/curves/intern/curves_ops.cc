@@ -29,6 +29,7 @@
 #include "BKE_bvhutils.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
+#include "BKE_curves_hide.hh"
 #include "BKE_customdata.hh"
 #include "BKE_geometry_set.hh"
 #include "BKE_layer.hh"
@@ -1334,6 +1335,140 @@ static void CURVES_OT_duplicate(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
+namespace curves_hide {
+
+static wmOperatorStatus hide_exec(bContext *C, wmOperator *op)
+{
+  const bool unselected = RNA_boolean_get(op->ptr, "unselected");
+
+  for (Curves *curves_id : get_unique_editable_curves(*C)) {
+    Object *object = nullptr;
+    CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
+      if (ob->type == OB_CURVES && id_cast<Curves *>(ob->data) == curves_id) {
+        object = ob;
+        break;
+      }
+    }
+    CTX_DATA_END;
+
+    if (!object) {
+      continue;
+    }
+
+    bke::CurvesGeometry &curves = curves_id->geometry.wrap();
+    IndexMaskMemory memory;
+
+    switch (bke::AttrDomain(curves_id->selection_domain)) {
+      case bke::AttrDomain::Point: {
+        const IndexMask selection = retrieve_selected_points(*curves_id, memory);
+        if (selection.is_empty()) {
+          continue;
+        }
+
+        if (unselected) {
+          IndexMaskMemory unselected_memory;
+          IndexMask unselected_mask = IndexMask::from_difference(
+              IndexRange(curves.points_num()), selection, unselected_memory);
+          blender::bke::curves::hide::hide_points(
+              *object, unselected_mask, blender::bke::curves::VisAction::Hide);
+        }
+        else {
+          blender::bke::curves::hide::hide_points(
+              *object, selection, blender::bke::curves::VisAction::Hide);
+        }
+        break;
+      }
+      case bke::AttrDomain::Curve: {
+        const IndexMask selection = retrieve_selected_curves(*curves_id, memory);
+        if (selection.is_empty()) {
+          continue;
+        }
+
+        if (unselected) {
+          IndexMaskMemory unselected_memory;
+          IndexMask unselected_mask = IndexMask::from_difference(
+              IndexRange(curves.curves_num()), selection, unselected_memory);
+          blender::bke::curves::hide::hide_curves(
+              *object, unselected_mask, blender::bke::curves::VisAction::Hide);
+        }
+        else {
+          blender::bke::curves::hide::hide_curves(
+              *object, selection, blender::bke::curves::VisAction::Hide);
+        }
+        break;
+      }
+      default:
+        BLI_assert_unreachable();
+        break;
+    }
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_GEOM | ND_SELECT, &curves_id->id);
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+}  // namespace curves_hide
+
+static void CURVES_OT_hide(wmOperatorType *ot)
+{
+  ot->name = "Hide";
+  ot->idname = __func__;
+  ot->description = "Hide selected or unselected control points or curves";
+
+  ot->exec = curves_hide::hide_exec;
+  ot->poll = editable_curves_in_edit_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_boolean(
+      ot->srna, "unselected", false, "Unselected", "Hide unselected rather than selected");
+}
+
+namespace curves_reveal {
+
+static wmOperatorStatus reveal_exec(bContext *C, wmOperator *op)
+{
+  const bool select = RNA_boolean_get(op->ptr, "select");
+  for (Curves *curves_id : get_unique_editable_curves(*C)) {
+    Object *object = nullptr;
+    CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
+      if (ob->type == OB_CURVES && id_cast<Curves *>(ob->data) == curves_id) {
+        object = ob;
+        break;
+      }
+    }
+    CTX_DATA_END;
+
+    if (!object) {
+      continue;
+    }
+
+    blender::bke::curves::hide::show_all(*object, select);
+
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_GEOM | ND_SELECT, &curves_id->id);
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+}  // namespace curves_reveal
+
+static void CURVES_OT_reveal(wmOperatorType *ot)
+{
+  ot->name = "Reveal";
+  ot->idname = __func__;
+  ot->description = "Reveal all hidden control points and curves";
+
+  ot->exec = curves_reveal::reveal_exec;
+  ot->poll = editable_curves_in_edit_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_boolean(ot->srna, "select", true, "Select", "Select the revealed elements");
+}
+
 namespace clear_tilt {
 
 static wmOperatorStatus exec(bContext *C, wmOperator * /*op*/)
@@ -1866,6 +2001,8 @@ void operatortypes_curves()
   WM_operatortype_append(CURVES_OT_surface_set);
   WM_operatortype_append(CURVES_OT_delete);
   WM_operatortype_append(CURVES_OT_duplicate);
+  WM_operatortype_append(CURVES_OT_hide);
+  WM_operatortype_append(CURVES_OT_reveal);
   WM_operatortype_append(CURVES_OT_tilt_clear);
   WM_operatortype_append(CURVES_OT_cyclic_toggle);
   WM_operatortype_append(CURVES_OT_curve_type_set);

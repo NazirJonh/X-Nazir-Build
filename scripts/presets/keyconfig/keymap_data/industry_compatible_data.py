@@ -3463,6 +3463,10 @@ def km_sculpt_curves(params):
          "ctrl": True}, {"properties": [("action", 'DESELECT')]}),
         ("curves.select_all", {"type": 'I', "value": 'PRESS', "ctrl": True}, {"properties": [("action", 'INVERT')]}),
         ("sculpt_curves.select_grow", {"type": 'A', "value": 'PRESS', "shift": True}, {}),
+        # Hide/Reveal
+        ("sculpt_curves.reveal", {"type": 'H', "value": 'PRESS', "alt": True}, None),
+        ("sculpt_curves.hide", {"type": 'H', "value": 'PRESS'}, {"properties": [("unselected", False)]}),
+        ("sculpt_curves.hide", {"type": 'H', "value": 'PRESS', "shift": True}, {"properties": [("unselected", True)]}),
         # Density
         ("sculpt_curves.min_distance_edit", {"type": 'D', "value": 'PRESS', "ctrl": True}, {}),
         # Tools

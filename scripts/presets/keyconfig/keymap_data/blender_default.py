@@ -5512,6 +5512,7 @@ def km_sculpt_curves(params):
         *_template_items_select_actions(params, "curves.select_all"),
         ("sculpt_curves.min_distance_edit", {"type": 'R', "value": 'PRESS'}, {}),
         ("sculpt_curves.select_grow", {"type": 'A', "value": 'PRESS', "shift": True}, {}),
+        *_template_items_hide_reveal_actions("sculpt_curves.hide", "sculpt_curves.reveal"),
         *_template_asset_shelf_popup("VIEW3D_AST_brush_sculpt_curves", params.spacebar_action),
     ])
 

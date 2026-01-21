@@ -2370,9 +2370,9 @@ class VIEW3D_MT_select_edit_curves(Menu):
     def draw(self, _context):
         layout = self.layout
 
-        layout.operator("curves.select_all", text="All").action = 'SELECT'
-        layout.operator("curves.select_all", text="None").action = 'DESELECT'
-        layout.operator("curves.select_all", text="Invert").action = 'INVERT'
+        layout.operator("sculpt_curves.select_all", text="All").action = 'SELECT'
+        layout.operator("sculpt_curves.select_all", text="None").action = 'DESELECT'
+        layout.operator("sculpt_curves.select_all", text="Invert").action = 'INVERT'
 
         layout.separator()
 
@@ -3904,6 +3904,14 @@ class VIEW3D_MT_sculpt_curves(Menu):
         layout.operator("curves.convert_to_particle_system", text="Convert to Particle System")
 
         layout.template_node_operator_asset_menu_items(catalog_path="Curves")
+
+        layout.separator()
+
+        layout.menu("VIEW3D_MT_sculpt_curves_showhide", text="Show/Hide")
+
+
+class VIEW3D_MT_sculpt_curves_showhide(ShowHideMenu, Menu):
+    _operator_name = "sculpt_curves"
 
 
 class VIEW3D_MT_mask(Menu):
@@ -9314,6 +9322,7 @@ classes = (
     VIEW3D_MT_edit_curves_select_more_less,
     VIEW3D_MT_select_edit_curves,
     VIEW3D_MT_select_sculpt_curves,
+    VIEW3D_MT_sculpt_curves_showhide,
     VIEW3D_MT_mesh_add,
     VIEW3D_MT_curve_add,
     VIEW3D_MT_surface_add,

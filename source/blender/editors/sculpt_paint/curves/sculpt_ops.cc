@@ -1366,6 +1366,81 @@ static void SCULPT_CURVES_OT_reveal(wmOperatorType *ot)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Select All Operator
+ * \{ */
+
+namespace select_all {
+
+static bool has_anything_selected(const Span<Curves *> curves_ids)
+{
+  return std::any_of(curves_ids.begin(), curves_ids.end(), [](const Curves *curves_id) {
+    return ed::curves::has_anything_selected_visible(
+        curves_id->geometry.wrap(), bke::AttrDomain(curves_id->selection_domain));
+  });
+}
+
+static wmOperatorStatus select_all_exec(bContext *C, wmOperator *op)
+{
+  int action = RNA_enum_get(op->ptr, "action");
+
+  VectorSet<Curves *> unique_curves = curves::get_unique_editable_curves(*C);
+
+  if (action == SEL_TOGGLE) {
+    bool has_selected = has_anything_selected(unique_curves);
+    action = has_selected ? SEL_DESELECT : SEL_SELECT;
+  }
+
+  for (Curves *curves_id : unique_curves) {
+    bke::CurvesGeometry &curves = curves_id->geometry.wrap();
+    const bke::AttrDomain selection_domain = bke::AttrDomain(curves_id->selection_domain);
+
+    IndexMaskMemory mask_memory;
+    const IndexMask visible_mask = bke::curves::hide::get_visible_mask(
+        curves, selection_domain, mask_memory);
+
+    bke::SpanAttributeWriter<float> attribute = float_selection_ensure(*curves_id);
+    MutableSpan<float> selection = attribute.span;
+
+    visible_mask.foreach_index([&](const int element_i) {
+      if (action == SEL_SELECT) {
+        selection[element_i] = 1.0f;
+      }
+      else if (action == SEL_DESELECT) {
+        selection[element_i] = 0.0f;
+      }
+      else if (action == SEL_INVERT) {
+        selection[element_i] = 1.0f - selection[element_i];
+      }
+    });
+
+    attribute.finish();
+
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_GEOM | ND_DATA, curves_id);
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+static void SCULPT_CURVES_OT_select_all(wmOperatorType *ot)
+{
+  ot->name = "(De)select All";
+  ot->idname = __func__;
+  ot->description = "(De)select all control points";
+
+  ot->exec = select_all_exec;
+  ot->poll = curves::editable_curves_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  WM_operator_properties_select_all(ot);
+}
+
+/** \} */
+
+}  // namespace select_all
+
 
 }  // namespace ed::sculpt_paint
 
@@ -1381,6 +1456,7 @@ void ED_operatortypes_sculpt_curves()
   WM_operatortype_append(SCULPT_CURVES_OT_select_random);
   WM_operatortype_append(SCULPT_CURVES_OT_select_grow);
   WM_operatortype_append(SCULPT_CURVES_OT_min_distance_edit);
+  WM_operatortype_append(select_all::SCULPT_CURVES_OT_select_all);
   WM_operatortype_append(SCULPT_CURVES_OT_hide);
   WM_operatortype_append(SCULPT_CURVES_OT_reveal);
 }

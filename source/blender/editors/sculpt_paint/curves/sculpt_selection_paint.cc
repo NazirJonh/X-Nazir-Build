@@ -175,6 +175,11 @@ struct SelectionPaintOperationExecutor {
           continue;
         }
 
+        const int curve_i = curves_->point_to_curve_map()[point_i];
+        if (bke::curves::hide::curve_is_hidden(*curves_, curve_i)) {
+          continue;
+        }
+
         const float3 pos_cu = math::transform_point(brush_transform_inv,
                                                     deformation.positions[point_i]);
 
@@ -230,6 +235,11 @@ struct SelectionPaintOperationExecutor {
     threading::parallel_for(curves_->points_range(), 1024, [&](const IndexRange point_range) {
       for (const int i : point_range) {
         if (bke::curves::hide::point_is_hidden(*curves_, i)) {
+          continue;
+        }
+
+        const int curve_i = curves_->point_to_curve_map()[i];
+        if (bke::curves::hide::curve_is_hidden(*curves_, curve_i)) {
           continue;
         }
 

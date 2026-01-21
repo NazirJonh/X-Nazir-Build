@@ -819,9 +819,6 @@ void CurvesEvalCache::ensure_hide_attributes(const bke::CurvesGeometry &curves)
 
   if (!hide_point.is_empty()) {
     this->hide_point_buf = gpu::VertBuf::from_varray(hide_point);
-    /* NOTE: Do NOT set use_hide_filtering = true here.
-     * Hide attributes should NOT be used to filter curves in viewport render.
-     * They are only for sculpt mode selection highlighting. */
   }
 
   if (!hide_curve.is_empty()) {

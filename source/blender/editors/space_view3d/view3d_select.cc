@@ -45,6 +45,7 @@
 #include "BKE_crazyspace.hh"
 #include "BKE_curve.hh"
 #include "BKE_curves.hh"
+#include "BKE_curves_hide.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_grease_pencil.hh"
 #include "BKE_layer.hh"
@@ -1252,10 +1253,12 @@ static bool curves_select_lasso(const ViewContext &vc,
       bke::crazyspace::get_evaluated_curves_deformation(*vc.depsgraph, *object);
   const bke::AttrDomain selection_domain = bke::AttrDomain(curves_id.selection_domain);
   const float4x4 projection = ED_view3d_ob_project_mat_get(vc.rv3d, object);
-  const IndexRange elements(curves.attributes().domain_size(selection_domain));
+  IndexMaskMemory mask_memory;
+  const IndexMask visible_mask = bke::curves::hide::get_visible_mask(
+      curves, selection_domain, mask_memory);
 
   return ed::curves::select_lasso(
-      vc, curves, deformation, projection, elements, elements, selection_domain, mcoords, sel_op);
+      vc, curves, deformation, projection, visible_mask, visible_mask, selection_domain, mcoords, sel_op);
 }
 
 static bool do_curves_sculpt_lasso_select(const ViewContext &vc,
@@ -3236,10 +3239,12 @@ static bool ed_curves_select_pick(bContext &C, const int mval[2], const SelectPi
               bke::crazyspace::get_evaluated_curves_deformation(*vc.depsgraph, curves_ob);
           const bke::CurvesGeometry &curves = curves_id.geometry.wrap();
           const float4x4 projection = ED_view3d_ob_project_mat_get(vc.rv3d, &curves_ob);
-          const IndexMask elements(curves.attributes().domain_size(selection_domain));
+          IndexMaskMemory mask_memory;
+          const IndexMask visible_mask = bke::curves::hide::get_visible_mask(
+              curves, selection_domain, mask_memory);
           const auto range_consumer =
               [&](IndexRange range, Span<float3> positions, StringRef selection_attribute_name) {
-                IndexMask mask = elements.slice_content(range);
+                IndexMask mask = visible_mask.slice_content(range);
 
                 std::optional<ed::curves::FindClosestData> new_closest_elem =
                     ed::curves::closest_elem_find_screen_space(vc,
@@ -4521,10 +4526,12 @@ static bool do_curves_select_box(const ViewContext &vc,
       bke::crazyspace::get_evaluated_curves_deformation(*vc.depsgraph, *object);
   const bke::AttrDomain selection_domain = bke::AttrDomain(curves_id.selection_domain);
   const float4x4 projection = ED_view3d_ob_project_mat_get(vc.rv3d, object);
-  const IndexRange elements(curves.attributes().domain_size(selection_domain));
+  IndexMaskMemory mask_memory;
+  const IndexMask visible_mask = bke::curves::hide::get_visible_mask(
+      curves, selection_domain, mask_memory);
 
   return ed::curves::select_box(
-      vc, curves, deformation, projection, elements, elements, selection_domain, *rect, sel_op);
+      vc, curves, deformation, projection, visible_mask, visible_mask, selection_domain, *rect, sel_op);
 }
 
 static bool do_curves_sculpt_box_select(const ViewContext &vc,

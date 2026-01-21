@@ -316,6 +316,9 @@ bool has_anything_selected(const bke::CurvesGeometry &curves,
                            bke::AttrDomain selection_domain,
                            const IndexMask &mask);
 
+bool has_anything_selected_visible(const bke::CurvesGeometry &curves,
+                                   bke::AttrDomain selection_domain);
+
 /**
  * Return true if any element in the span is selected, on either domain with either type.
  */

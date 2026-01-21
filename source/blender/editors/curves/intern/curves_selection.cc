@@ -16,6 +16,7 @@
 #include "BKE_attribute.hh"
 #include "BKE_crazyspace.hh"
 #include "BKE_curves.hh"
+#include "BKE_curves_hide.hh"
 #include "BKE_curves_utils.hh"
 
 #include "ED_curves.hh"
@@ -414,6 +415,15 @@ bool has_anything_selected(const bke::CurvesGeometry &curves, bke::AttrDomain se
 {
   return has_anything_selected(
       curves, selection_domain, IndexRange(curves.attributes().domain_size(selection_domain)));
+}
+
+bool has_anything_selected_visible(const bke::CurvesGeometry &curves,
+                                   bke::AttrDomain selection_domain)
+{
+  IndexMaskMemory memory;
+  const IndexMask visible_mask = bke::curves::hide::get_visible_mask(
+      curves, selection_domain, memory);
+  return has_anything_selected(curves, selection_domain, visible_mask);
 }
 
 bool has_anything_selected(const bke::CurvesGeometry &curves,

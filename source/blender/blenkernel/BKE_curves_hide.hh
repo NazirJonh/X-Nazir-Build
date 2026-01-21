@@ -145,6 +145,20 @@ void sync_hide_from_points_to_curves(Curves &curves_id);
  */
 void sync_hide_from_curves_to_points(Curves &curves_id);
 
+/**
+ * Get a mask of visible elements (points or curves) in the curves.
+ * This function filters out hidden elements and returns an IndexMask
+ * containing only the indices of visible elements.
+ *
+ * \param curves: The curves geometry to get the visible mask for.
+ * \param domain: The domain (point or curve) to get the mask for.
+ * \param memory: Memory allocation for the index mask.
+ * \return An IndexMask containing the indices of visible elements.
+ */
+IndexMask get_visible_mask(const CurvesGeometry &curves,
+                           AttrDomain domain,
+                           IndexMaskMemory &memory);
+
 }  // namespace hide
 
 }  // namespace curves

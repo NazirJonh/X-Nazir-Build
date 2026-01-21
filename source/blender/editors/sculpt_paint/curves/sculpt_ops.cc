@@ -17,6 +17,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
+#include "BKE_curves_hide.hh"
 #include "BKE_modifier.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
@@ -332,6 +333,28 @@ static void curves_sculptmode_enter(bContext *C)
   ED_paint_cursor_start(&curves_sculpt->paint, curves_sculpt_poll_view3d);
   paint_init_pivot(ob, scene, paint);
 
+  /* Prepare hide/selection system: ensure float selection attribute exists.
+   * Check for visible selected elements (ignoring hidden ones).
+   * This will be used by hide/reveal operators in future PR. */
+  if (ob->type == OB_CURVES) {
+    Curves *curves_id = reinterpret_cast<Curves *>(ob->data);
+    bke::CurvesGeometry &curves = curves_id->geometry.wrap();
+
+    const bool was_anything_selected = ed::curves::has_anything_selected_visible(
+        curves, bke::AttrDomain(curves_id->selection_domain));
+
+    /* If nothing was selected before, select everything to make the tools work. */
+
+    if (!was_anything_selected) {
+      bke::SpanAttributeWriter<float> attribute = float_selection_ensure(*curves_id);
+      attribute.finish();
+    }
+    else {
+      bke::SpanAttributeWriter<float> attribute = float_selection_ensure(*curves_id);
+      attribute.finish();
+    }
+  }
+
   /* Necessary to change the object mode on the evaluated object. */
   DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
   WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
@@ -407,7 +430,8 @@ static wmOperatorStatus select_random_exec(bContext *C, wmOperator *op)
 
   for (Curves *curves_id : unique_curves) {
     CurvesGeometry &curves = curves_id->geometry.wrap();
-    const bool was_anything_selected = curves::has_anything_selected(curves);
+    const bool was_anything_selected = ed::curves::has_anything_selected_visible(
+        curves, bke::AttrDomain(curves_id->selection_domain));
 
     bke::SpanAttributeWriter<float> attribute = float_selection_ensure(*curves_id);
     MutableSpan<float> selection = attribute.span;

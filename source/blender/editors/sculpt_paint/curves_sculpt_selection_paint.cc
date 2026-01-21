@@ -14,6 +14,7 @@
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
+#include "BKE_curves_hide.hh"
 #include "BKE_paint.hh"
 
 #include "DEG_depsgraph.hh"
@@ -170,6 +171,10 @@ struct SelectionPaintOperationExecutor {
 
     threading::parallel_for(curves_->points_range(), 1024, [&](const IndexRange point_range) {
       for (const int point_i : point_range) {
+        if (bke::curves::hide::point_is_hidden(*curves_, point_i)) {
+          continue;
+        }
+
         const float3 pos_cu = math::transform_point(brush_transform_inv,
                                                     deformation.positions[point_i]);
 
@@ -224,6 +229,10 @@ struct SelectionPaintOperationExecutor {
 
     threading::parallel_for(curves_->points_range(), 1024, [&](const IndexRange point_range) {
       for (const int i : point_range) {
+        if (bke::curves::hide::point_is_hidden(*curves_, i)) {
+          continue;
+        }
+
         const float3 pos_old_cu = deformation.positions[i];
 
         /* Compute distance to the brush. */
@@ -271,6 +280,10 @@ struct SelectionPaintOperationExecutor {
 
     threading::parallel_for(curves_->curves_range(), 1024, [&](const IndexRange curves_range) {
       for (const int curve_i : curves_range) {
+        if (bke::curves::hide::curve_is_hidden(*curves_, curve_i)) {
+          continue;
+        }
+
         const float max_weight = threading::parallel_reduce(
             points_by_curve[curve_i].drop_back(1),
             1024,
@@ -337,6 +350,10 @@ struct SelectionPaintOperationExecutor {
 
     threading::parallel_for(curves_->curves_range(), 1024, [&](const IndexRange curves_range) {
       for (const int curve_i : curves_range) {
+        if (bke::curves::hide::curve_is_hidden(*curves_, curve_i)) {
+          continue;
+        }
+
         const float max_weight = threading::parallel_reduce(
             points_by_curve[curve_i].drop_back(1),
             1024,

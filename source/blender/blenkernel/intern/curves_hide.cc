@@ -12,6 +12,7 @@
 #include "BKE_object.hh"
 
 #include "BLI_array_utils.hh"
+#include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
 #include "BLI_set.hh"
 #include "BLI_span.hh"
@@ -351,6 +352,42 @@ void sync_hide_from_curves_to_points(Curves &curves_id)
   });
 
   hide_point.finish();
+}
+
+IndexMask get_visible_mask(const CurvesGeometry &curves,
+                           AttrDomain domain,
+                           IndexMaskMemory &memory)
+{
+  const AttributeAccessor attributes = curves.attributes();
+  const int64_t domain_size = curves.attributes().domain_size(domain);
+
+  if (domain == AttrDomain::Point) {
+    const VArray hide_point = *attributes.lookup<bool>(".hide_point", AttrDomain::Point);
+    if (hide_point.is_empty()) {
+      return IndexMask(domain_size);
+    }
+    const VArraySpan<bool> hide_point_span(hide_point);
+    IndexMask mask = IndexMask::from_predicate(IndexRange(domain_size),
+                                               GrainSize(4096),
+                                               memory,
+                                               [&](const int i) { return !hide_point_span[i]; });
+    return mask;
+  }
+
+  if (domain == AttrDomain::Curve) {
+    const VArray hide_curve = *attributes.lookup<bool>(".hide_curve", AttrDomain::Curve);
+    if (hide_curve.is_empty()) {
+      return IndexMask(domain_size);
+    }
+    const VArraySpan<bool> hide_curve_span(hide_curve);
+    IndexMask mask = IndexMask::from_predicate(IndexRange(domain_size),
+                                               GrainSize(4096),
+                                               memory,
+                                               [&](const int i) { return !hide_curve_span[i]; });
+    return mask;
+  }
+
+  return IndexMask(domain_size);
 }
 
 }  // namespace blender::bke::curves::hide

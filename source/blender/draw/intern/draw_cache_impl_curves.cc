@@ -419,6 +419,8 @@ static void create_edit_points_selection(const OffsetIndices<int> points_by_curv
 }
 
 static void create_edit_points_hide(const OffsetIndices<int> points_by_curve,
+                                    const IndexMask &bezier_curves,
+                                    const OffsetIndices<int> bezier_offsets,
                                     const int curves_num,
                                     const bke::AttributeAccessor attributes,
                                     gpu::VertBuf &vbo_points,
@@ -426,8 +428,9 @@ static void create_edit_points_hide(const OffsetIndices<int> points_by_curve,
 {
   static const GPUVertFormat format_float = GPU_vertformat_from_attribute(
       "hide", gpu::VertAttrType::SFLOAT_32);
+  const int points_num = points_by_curve.total_size();
   GPU_vertbuf_init_with_format(vbo_points, format_float);
-  GPU_vertbuf_data_alloc(vbo_points, points_by_curve.total_size());
+  GPU_vertbuf_data_alloc(vbo_points, handles_and_points_num(points_num, bezier_offsets));
 
   GPU_vertbuf_init_with_format(vbo_curves, format_float);
   GPU_vertbuf_data_alloc(vbo_curves, curves_num);
@@ -454,6 +457,38 @@ static void create_edit_points_hide(const OffsetIndices<int> points_by_curve,
       }
     }
   });
+
+  if (!bezier_curves.is_empty()) {
+    Vector<float> hide_values;
+    hide_values.resize(points_num);
+    threading::parallel_for(IndexRange(curves_num), 1024, [&](const IndexRange range) {
+      for (const int curve_i : range) {
+        const IndexRange points = points_by_curve[curve_i];
+        const bool curve_hidden = !hide_curve.is_empty() && hide_curve[curve_i];
+
+        for (const int point_i : points) {
+          bool point_hidden = curve_hidden;
+          if (!hide_point.is_empty()) {
+            point_hidden = hide_point[point_i] || curve_hidden;
+          }
+          hide_values[point_i] = point_hidden ? 1.0f : 0.0f;
+        }
+      }
+    });
+
+    array_utils::gather_group_to_group(
+        points_by_curve,
+        bezier_offsets,
+        bezier_curves,
+        hide_values.as_span(),
+        vbo_data_points.slice(handle_range_left(points_num, bezier_offsets)));
+    array_utils::gather_group_to_group(
+        points_by_curve,
+        bezier_offsets,
+        bezier_curves,
+        hide_values.as_span(),
+        vbo_data_points.slice(handle_range_right(points_num, bezier_offsets)));
+  }
 }
 
 static void create_lines_ibo_no_cyclic(const OffsetIndices<int> points_by_curve,
@@ -1273,6 +1308,8 @@ void DRW_curves_batch_cache_create_requested(Object *ob)
   }
   if (DRW_vbo_requested(cache.edit_points_hide)) {
     create_edit_points_hide(points_by_curve,
+                            bezier_curves,
+                            bezier_offsets,
                             curves_orig.curves_num(),
                             attributes,
                             *cache.edit_points_hide,

@@ -129,6 +129,20 @@ void eyedropper_draw_cursor_color_region(const wmWindow *window, const int xy[2]
     return;
   }
 
+  /* Проверяем, что окно не минимизировано (избегаем проблем с GPU драйверами) */
+#ifdef WIN32
+  GHOST_TWindowState state = GHOST_GetWindowState(
+      static_cast<GHOST_WindowHandle>(window->runtime->ghostwin));
+  if (state == GHOST_kWindowStateMinimized) {
+    return;
+  }
+#endif
+
+  /* Проверяем, что GPU контекст доступен */
+  if (!window->runtime->gpuctx) {
+    return;
+  }
+
   /* Размеры элементов превью */
   const float radius = U.widget_unit * 1.1f;
   const float border_width = 2.5f;
@@ -146,12 +160,35 @@ void eyedropper_draw_cursor_color_region(const wmWindow *window, const int xy[2]
     return;
   }
   
-  /* Координаты xy находятся в pixel space окна (относительные координаты внутри окна) */
+  /* Координаты xy находятся в pixel space окна (относительные координаты внутри окна).
+   * WM_window_rect_calc возвращает прямоугольник от (0, 0) до (width, height),
+   * где (0, 0) - левый нижний угол клиентской области окна (без заголовка).
+   * Когда курсор на заголовке окна, координата Y может быть отрицательной или
+   * выходить за пределы клиентской области. */
   const int cursor_x = xy[0];
   const int cursor_y = xy[1];
   
-  /* Проверяем валидность координат (избегаем слишком больших значений) */
-  if (abs(cursor_x) > 100000 || abs(cursor_y) > 100000) {
+  /* Проверяем валидность координат (избегаем слишком больших значений и отрицательных) */
+  if (cursor_x < -10000 || cursor_x > 100000 || cursor_y < -10000 || cursor_y > 100000) {
+    return;
+  }
+  
+  /* Проверяем, находятся ли координаты в пределах клиентской области окна.
+   * WM_window_rect_calc возвращает только клиентскую область (без заголовка окна).
+   * Если курсор на заголовке окна, координата Y будет отрицательной или выходить
+   * за пределы клиентской области. В этом случае не рисуем превью. */
+  const int margin = 100;
+  
+  /* Строгая проверка для Y: если координата отрицательная, курсор точно на заголовке или вне окна */
+  if (cursor_y < 0) {
+    return;
+  }
+  
+  /* Проверяем, находятся ли координаты в пределах клиентской области с небольшим запасом */
+  if (cursor_y > window_height + margin) {
+    return;
+  }
+  if (cursor_x < -margin || cursor_x > window_width + margin) {
     return;
   }
   
@@ -174,20 +211,16 @@ void eyedropper_draw_cursor_color_region(const wmWindow *window, const int xy[2]
     center_y = float(cursor_y) + offset;
   }
   
-  /* Финальная проверка границ окна */
+  /* Финальная проверка границ окна с учетом всех элементов */
   const float half_size = preview_size / 2.0f;
-  if (center_x - half_size < 0.0f) {
-    center_x = half_size + border_width;
-  }
-  if (center_x + half_size > float(window_width)) {
-    center_x = float(window_width) - half_size - border_width;
-  }
-  if (center_y - half_size < 0.0f) {
-    center_y = half_size + border_width;
-  }
-  if (center_y + half_size > float(window_height)) {
-    center_y = float(window_height) - half_size - border_width;
-  }
+  const float min_x = half_size + border_width;
+  const float max_x = float(window_width) - half_size - border_width;
+  const float min_y = half_size + border_width;
+  const float max_y = float(window_height) - half_size - border_width;
+  
+  /* Ограничиваем координаты границами окна */
+  center_x = std::max(min_x, std::min(max_x, center_x));
+  center_y = std::max(min_y, std::min(max_y, center_y));
   
   /* Проверяем валидность финальных координат (избегаем NaN/Inf) */
   if (!std::isfinite(center_x) || !std::isfinite(center_y) || 
@@ -195,36 +228,78 @@ void eyedropper_draw_cursor_color_region(const wmWindow *window, const int xy[2]
     return;
   }
   
+  /* Проверяем, что превью не выходит за границы окна после всех корректировок */
+  if (center_x - half_size < 0.0f || center_x + half_size > float(window_width) ||
+      center_y - half_size < 0.0f || center_y + half_size > float(window_height)) {
+    return;
+  }
+  
+  /* Дополнительные проверки для предотвращения сбоя GPU драйвера */
+  if (radius <= 0.0f || radius > 1000.0f) {
+    return;
+  }
+  if (half_size <= 0.0f || half_size > float(window_width) || half_size > float(window_height)) {
+    return;
+  }
+  
+  /* Проверяем валидность цветов (должны быть в диапазоне [0, 1]) */
+  if (!std::isfinite(color[0]) || !std::isfinite(color[1]) || !std::isfinite(color[2])) {
+    return;
+  }
+  
   /* Цвета для отрисовки */
   float shadow_color[4] = {0.0f, 0.0f, 0.0f, 0.3f};
   float border_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-  float color_rgba[4] = {color[0], color[1], color[2], 1.0f};
-  
-  /* Рисуем затенение (смещенный круг) */
-  const rctf shadow_rect = {
-    center_x - radius + shadow_offset,
-    center_x + radius + shadow_offset,
-    center_y - radius - shadow_offset,
-    center_y + radius - shadow_offset
+  float color_rgba[4] = {
+    std::max(0.0f, std::min(1.0f, color[0])),
+    std::max(0.0f, std::min(1.0f, color[1])),
+    std::max(0.0f, std::min(1.0f, color[2])),
+    1.0f
   };
+  
+  /* Вычисляем прямоугольники и проверяем их валидность */
+  const float shadow_xmin = center_x - radius + shadow_offset;
+  const float shadow_xmax = center_x + radius + shadow_offset;
+  const float shadow_ymin = center_y - radius - shadow_offset;
+  const float shadow_ymax = center_y + radius - shadow_offset;
+  
+  if (shadow_xmin >= shadow_xmax || shadow_ymin >= shadow_ymax ||
+      !std::isfinite(shadow_xmin) || !std::isfinite(shadow_xmax) ||
+      !std::isfinite(shadow_ymin) || !std::isfinite(shadow_ymax)) {
+    return;
+  }
+  
+  const rctf shadow_rect = {shadow_xmin, shadow_xmax, shadow_ymin, shadow_ymax};
   draw_roundbox_4fv(&shadow_rect, true, radius, shadow_color);
   
   /* Рисуем белый контур */
-  const rctf border_rect = {
-    center_x - radius - border_width,
-    center_x + radius + border_width,
-    center_y - radius - border_width,
-    center_y + radius + border_width
-  };
+  const float border_xmin = center_x - radius - border_width;
+  const float border_xmax = center_x + radius + border_width;
+  const float border_ymin = center_y - radius - border_width;
+  const float border_ymax = center_y + radius + border_width;
+  
+  if (border_xmin >= border_xmax || border_ymin >= border_ymax ||
+      !std::isfinite(border_xmin) || !std::isfinite(border_xmax) ||
+      !std::isfinite(border_ymin) || !std::isfinite(border_ymax)) {
+    return;
+  }
+  
+  const rctf border_rect = {border_xmin, border_xmax, border_ymin, border_ymax};
   draw_roundbox_4fv(&border_rect, true, radius + border_width, border_color);
   
   /* Рисуем цветной круг внутри */
-  const rctf color_rect = {
-    center_x - radius,
-    center_x + radius,
-    center_y - radius,
-    center_y + radius
-  };
+  const float color_xmin = center_x - radius;
+  const float color_xmax = center_x + radius;
+  const float color_ymin = center_y - radius;
+  const float color_ymax = center_y + radius;
+  
+  if (color_xmin >= color_xmax || color_ymin >= color_ymax ||
+      !std::isfinite(color_xmin) || !std::isfinite(color_xmax) ||
+      !std::isfinite(color_ymin) || !std::isfinite(color_ymax)) {
+    return;
+  }
+  
+  const rctf color_rect = {color_xmin, color_xmax, color_ymin, color_ymax};
   draw_roundbox_4fv(&color_rect, true, radius, color_rgba);
 }
 

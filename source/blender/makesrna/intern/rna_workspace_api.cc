@@ -196,13 +196,15 @@ void RNA_api_workspace_tool(StructRNA *srna)
   func = RNA_def_function(
       srna, "operator_properties_for_tool", "rna_WorkSpaceTool_operator_properties_for_tool");
   RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(
+      func, "Get operator properties for a specific tool without activating it");
   parm = RNA_def_string(func, "tool", nullptr, MAX_NAME, "Tool Identifier", "");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_string(func, "operator", nullptr, 0, "Operator Identifier", "");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   /* return */
   parm = RNA_def_pointer(func, "result", "OperatorProperties", "", "");
-  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_RNAPTR);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
   RNA_def_function_return(func, parm);
 
   /* Access gizmo-group options (optionally create). */

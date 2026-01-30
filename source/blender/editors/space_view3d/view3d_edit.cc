@@ -1103,7 +1103,8 @@ static wmOperatorStatus view3d_cursor3d_invoke(bContext *C, wmOperator *op, cons
     BLI_assert(scene != nullptr);
     BLI_assert(view_layer != nullptr);
 
-    /* Search for ToolRef slot for 3D View in current mode */
+    /* Search for ToolRef slot for 3D View in current mode.
+     * This allows reading tool settings without activating the tool. */
     bToolKey tkey{};
     tkey.space_type = SPACE_VIEW3D;
     tkey.mode = WM_toolsystem_mode_from_spacetype(scene, view_layer, nullptr, SPACE_VIEW3D);
@@ -1111,17 +1112,21 @@ static wmOperatorStatus view3d_cursor3d_invoke(bContext *C, wmOperator *op, cons
     bToolRef *tref = WM_toolsystem_ref_find(workspace, &tkey);
 
     if (tref) {
-      /* Read orientation from builtin.cursor tool properties explicitly (without activation). */
-      PointerRNA tool_ptr;
-      if (WM_toolsystem_ref_properties_get_from_operator_for_tool(
-              tref, "builtin.cursor", op->type, &tool_ptr))
-      {
-        PropertyRNA *orientation_prop = RNA_struct_find_property(&tool_ptr, "orientation");
-        if (orientation_prop) {
-          orientation = eV3DCursorOrient(RNA_enum_get(&tool_ptr, "orientation"));
+      /* Check if the builtin.cursor tool exists before accessing its properties.
+       * This prevents reading orphaned properties from tools that may have been removed. */
+      if (WM_toolsystem_tool_exists_in_workspace(C, workspace, &tkey, "builtin.cursor")) {
+        /* Read orientation from builtin.cursor tool properties explicitly (without activation). */
+        PointerRNA tool_ptr;
+        if (WM_toolsystem_ref_properties_get_from_operator_for_tool(
+                tref, "builtin.cursor", op->type, &tool_ptr))
+        {
+          PropertyRNA *orientation_prop = RNA_struct_find_property(&tool_ptr, "orientation");
+          if (orientation_prop) {
+            orientation = eV3DCursorOrient(RNA_enum_get(&tool_ptr, "orientation"));
 
-          /* Set the orientation in the operator so ED_view3d_cursor3d_update uses it */
-          RNA_enum_set(op->ptr, "orientation", orientation);
+            /* Set the orientation in the operator so ED_view3d_cursor3d_update uses it */
+            RNA_enum_set(op->ptr, "orientation", orientation);
+          }
         }
       }
     }

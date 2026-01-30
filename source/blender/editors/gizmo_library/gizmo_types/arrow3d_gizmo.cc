@@ -28,6 +28,7 @@
 #include "BKE_context.hh"
 
 #include "GPU_immediate.hh"
+
 #include "GPU_immediate_util.hh"
 #include "GPU_matrix.hh"
 #include "GPU_select.hh"
@@ -65,6 +66,7 @@ struct ArrowGizmo3D {
 struct ArrowGizmoInteraction {
   GizmoInteraction inter;
   float init_arrow_length;
+  void *snap_context;
 };
 
 /* -------------------------------------------------------------------- */
@@ -342,6 +344,7 @@ static wmOperatorStatus gizmo_arrow_modal(bContext *C,
     return OPERATOR_RUNNING_MODAL;
   }
   ArrowGizmo3D *arrow = reinterpret_cast<ArrowGizmo3D *>(gz);
+  ArrowGizmoInteraction *arrow_inter = static_cast<ArrowGizmoInteraction *>(gz->interaction_data);
   ARegion *region = CTX_wm_region(C);
   RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
 
@@ -394,7 +397,81 @@ static wmOperatorStatus gizmo_arrow_modal(bContext *C,
   facdir = dot_v3v3(arrow_no, offset) < 0.0f ? -1 : 1;
 
   GizmoCommonData *data = &arrow->data;
-  const float ofs_new = facdir * len_v3(offset);
+  float ofs_new = facdir * len_v3(offset);
+
+  /* Apply increment snapping if enabled. */
+  printf("[GIZMO_SNAP] Modal callback called, ofs_new=%.4f\n", ofs_new);
+
+  void *snap_params_ptr = WM_gizmo_snap_params_get(gz);
+  if (snap_params_ptr) {
+    printf("[GIZMO_SNAP] snap_params is NOT NULL\n");
+    bool use_snap = WM_gizmo_snap_use_snap_get(snap_params_ptr);
+    uint32_t snap_mode = WM_gizmo_snap_mode_get(snap_params_ptr);
+    printf("[GIZMO_SNAP] use_snap=%d, snap_mode=0x%x\n", use_snap, snap_mode);
+
+    /* Check if snap is enabled (globally or via Ctrl modifier). */
+    bool snap_enabled = (event->modifier & KM_CTRL);
+    printf("[GIZMO_SNAP] snap_enabled=%d (Ctrl modifier held)\n", snap_enabled);
+
+    if (snap_enabled && use_snap) {
+      printf("[GIZMO_SNAP] Entering snap logic\n");
+      const bool use_precision = (tweak_flag & WM_GIZMO_TWEAK_PRECISE) != 0;
+      printf("[GIZMO_SNAP] use_precision=%d\n", use_precision);
+
+      /* Apply increment snapping if enabled. */
+      if (snap_mode & SCE_SNAP_TO_INCREMENT) {
+        printf("[GIZMO_SNAP] Applying increment snapping\n");
+        bool snapped = WM_gizmo_snap_increment_apply(snap_params_ptr, use_precision, &ofs_new);
+        printf("[GIZMO_SNAP] Snap applied=%d, new offset=%.4f\n", snapped, ofs_new);
+      }
+      else {
+        printf("[GIZMO_SNAP] Increment snap mode not set, skipping\n");
+      }
+
+      /* Geometry snapping (vertex/edge/face). */
+      if (arrow_inter->snap_context && (snap_mode & (SCE_SNAP_TO_VERTEX | SCE_SNAP_TO_EDGE | SCE_SNAP_TO_FACE))) {
+        printf("[GIZMO_SNAP] Geometry snapping enabled, snap_mode=0x%x\n", snap_mode);
+
+        float mval[2] = {float(event->mval[0]), float(event->mval[1])};
+        float snapped_location[3] = {0.0f, 0.0f, 0.0f};
+        float snapped_normal[3] = {0.0f, 0.0f, 0.0f};
+
+        int snap_result = WM_gizmo_snap_to_geometry(arrow_inter->snap_context,
+                                                     snap_params_ptr,
+                                                     mval,
+                                                     snapped_location,
+                                                     snapped_normal);
+        printf("[GIZMO_SNAP] Geometry snap result: %d\n", snap_result);
+
+        if (snap_result != SCE_SNAP_TO_NONE) {
+          /* Project snapped location onto arrow direction. */
+          float arrow_origin[3];
+          copy_v3_v3(arrow_origin, inter->init_matrix_basis[3]);
+
+          float snapped_offset[3];
+          sub_v3_v3v3(snapped_offset, snapped_location, arrow_origin);
+
+          /* Project offset onto arrow direction. */
+          float arrow_dir[3];
+          normalize_v3_v3(arrow_dir, arrow->gizmo.matrix_basis[2]);
+
+          float projected_offset = dot_v3v3(snapped_offset, arrow_dir);
+          ofs_new = projected_offset;
+
+          printf("[GIZMO_SNAP] Geometry snap applied: offset=%.4f\n", ofs_new);
+        }
+      }
+      else {
+        printf("[GIZMO_SNAP] Geometry snap context not available or geometry snap modes not set\n");
+      }
+    }
+    else {
+      printf("[GIZMO_SNAP] Skipping snap: snap_enabled=%d, use_snap=%d\n", snap_enabled, use_snap);
+    }
+  }
+  else {
+    printf("[GIZMO_SNAP] ERROR: snap_params is NULL!\n");
+  }
 
   wmGizmoProperty *gz_prop = WM_gizmo_target_property_find(gz, "offset");
 
@@ -432,7 +509,7 @@ static void gizmo_arrow_setup(wmGizmo *gz)
   arrow->data.range_fac = 1.0f;
 }
 
-static wmOperatorStatus gizmo_arrow_invoke(bContext * /*C*/, wmGizmo *gz, const wmEvent *event)
+static wmOperatorStatus gizmo_arrow_invoke(bContext *C, wmGizmo *gz, const wmEvent *event)
 {
   ArrowGizmo3D *arrow = reinterpret_cast<ArrowGizmo3D *>(gz);
   ArrowGizmoInteraction *arrow_inter = MEM_callocN<ArrowGizmoInteraction>(__func__);
@@ -454,6 +531,8 @@ static wmOperatorStatus gizmo_arrow_invoke(bContext * /*C*/, wmGizmo *gz, const 
 
   arrow_inter->init_arrow_length = RNA_float_get(gz->ptr, "length");
 
+  arrow_inter->snap_context = WM_gizmo_snap_context_create(C);
+
   gz->interaction_data = arrow_inter;
 
   return OPERATOR_RUNNING_MODAL;
@@ -474,6 +553,12 @@ static void gizmo_arrow_exit(bContext *C, wmGizmo *gz, const bool cancel)
   GizmoCommonData *data = &arrow->data;
   wmGizmoProperty *gz_prop = WM_gizmo_target_property_find(gz, "offset");
   const bool is_prop_valid = WM_gizmo_target_property_is_valid(gz_prop);
+
+  ArrowGizmoInteraction *arrow_inter = static_cast<ArrowGizmoInteraction *>(gz->interaction_data);
+  if (arrow_inter && arrow_inter->snap_context) {
+    WM_gizmo_snap_context_destroy(arrow_inter->snap_context);
+    arrow_inter->snap_context = nullptr;
+  }
 
   if (cancel) {
     GizmoInteraction *inter = static_cast<GizmoInteraction *>(gz->interaction_data);

@@ -36,6 +36,7 @@
 /* Own includes. */
 #include "wm_gizmo_intern.hh"
 #include "wm_gizmo_wmapi.hh"
+#include "wm_gizmo_snap.hh"
 
 namespace blender {
 
@@ -154,6 +155,13 @@ void WM_gizmo_free(wmGizmo *gz)
     if (gz_prop.custom_func.free_fn) {
       gz_prop.custom_func.free_fn(gz, &gz_prop);
     }
+  }
+
+  /* Free snap parameters if allocated. */
+  if (gz->snap_params) {
+    using namespace wm::gizmo;
+    MEM_delete(static_cast<GizmoSnapParams *>(gz->snap_params));
+    gz->snap_params = nullptr;
   }
 
   /* Explicit calling of the destructor is needed here because allocation still happens 'the C
@@ -740,6 +748,60 @@ bool WM_gizmo_context_check_drawstep(const bContext *C, eWM_GizmoFlagMapDrawStep
     }
   }
   return true;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Gizmo Snapping API
+ * \{ */
+
+void WM_gizmo_snap_enable(wmGizmo *gz, const eSnapMode snap_mode, const eSnapTransformMode transform_mode)
+{
+  using namespace wm::gizmo;
+  
+  if (!gz->snap_params) {
+    gz->snap_params = MEM_new<GizmoSnapParams>("GizmoSnapParams");
+  }
+  
+  GizmoSnapParams *snap_params = static_cast<GizmoSnapParams *>(gz->snap_params);
+  snap_params->use_snap = true;
+  snap_params->snap_mode = snap_mode;
+  snap_params->transform_mode = transform_mode;
+}
+
+void WM_gizmo_snap_disable(wmGizmo *gz)
+{
+  if (gz->snap_params) {
+    using namespace wm::gizmo;
+    GizmoSnapParams *snap_params = static_cast<GizmoSnapParams *>(gz->snap_params);
+    snap_params->use_snap = false;
+  }
+}
+
+void WM_gizmo_snap_set_constraint_axis(wmGizmo *gz, const float axis[3])
+{
+  using namespace wm::gizmo;
+  
+  if (!gz->snap_params) {
+    gz->snap_params = MEM_new<GizmoSnapParams>("GizmoSnapParams");
+  }
+  
+  GizmoSnapParams *snap_params = static_cast<GizmoSnapParams *>(gz->snap_params);
+  copy_v3_v3(snap_params->constraint_axis, axis);
+  snap_params->use_constraint = true;
+}
+
+void WM_gizmo_snap_set_increment(wmGizmo *gz, const float increment)
+{
+  using namespace wm::gizmo;
+  
+  if (!gz->snap_params) {
+    gz->snap_params = MEM_new<GizmoSnapParams>("GizmoSnapParams");
+  }
+  
+  GizmoSnapParams *snap_params = static_cast<GizmoSnapParams *>(gz->snap_params);
+  snap_params->increment = increment;
 }
 
 /** \} */

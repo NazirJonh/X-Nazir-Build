@@ -202,6 +202,32 @@ class LinearGizmo : public NodeGizmos {
   void create_gizmos(wmGizmoGroup &gzgroup) override
   {
     gizmo_ = WM_gizmo_new("GIZMO_GT_arrow_3d", &gzgroup, nullptr);
+    
+    /* Enable snapping for Linear Gizmo.
+     * Start with increment snapping, add geometry snapping support. */
+    WM_gizmo_snap_enable(gizmo_, 
+                        eSnapMode(SCE_SNAP_TO_INCREMENT | SCE_SNAP_TO_VERTEX | 
+                                 SCE_SNAP_TO_EDGE | SCE_SNAP_TO_FACE),
+                        SCE_SNAP_TRANSFORM_MODE_TRANSLATE);
+    
+    /* TODO: Geometry snapping (vertex/edge/face) implementation in progress.
+     * Current status:
+     * - ✅ Increment snapping: WORKING
+     * - 🚧 Vertex snapping: IN PROGRESS
+     * - 🚧 Edge snapping: IN PROGRESS  
+     * - 🚧 Face snapping: IN PROGRESS
+     * 
+     * Implementation plan:
+     * 1. Create GizmoSnapContext in modal handler
+     * 2. Call snap_to_geometry() during drag
+     * 3. Project snap point onto gizmo axis
+     * 4. Apply snapped offset to value
+     * 5. Add visual feedback (optional)
+     * 
+     * Reference:
+     * - wm_gizmo_snap.cc: GizmoSnapContext class
+     * - transform_snap_object.cc: snap_object_project_view3d()
+     */
   }
 
   Vector<wmGizmo *> get_all_gizmos() override

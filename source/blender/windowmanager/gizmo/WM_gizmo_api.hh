@@ -48,6 +48,18 @@ struct wmOperatorType;
 struct wmWindow;
 struct wmWindowManager;
 
+/* Forward declarations for snap types from DNA_scene_types.h */
+enum eSnapMode : int;
+enum eSnapTransformMode : int;
+
+/* Forward declarations for snap implementation types. */
+namespace wm {
+namespace gizmo {
+struct GizmoSnapParams;
+class GizmoSnapContext;
+}
+}
+
 /* -------------------------------------------------------------------- */
 /* #wmGizmo. */
 
@@ -470,6 +482,160 @@ void WM_gizmo_group_remove_by_tool(bContext *C,
                                    const bToolRef *tref);
 
 void WM_gizmo_group_tag_remove(wmGizmoGroup *gzgroup);
+
+/* -------------------------------------------------------------------- */
+/** \name Gizmo Snapping
+ * \{ */
+
+/**
+ * Enable snapping for a gizmo with specified parameters.
+ * 
+ * \param gz: The gizmo to enable snapping for.
+ * \param snap_mode: Type of snapping (increment, grid, etc.).
+ * \param transform_mode: Transform mode for filtering (translate/rotate/scale).
+ */
+void WM_gizmo_snap_enable(wmGizmo *gz, eSnapMode snap_mode, eSnapTransformMode transform_mode);
+
+/**
+ * Disable snapping for a gizmo.
+ * 
+ * \param gz: The gizmo to disable snapping for.
+ */
+void WM_gizmo_snap_disable(wmGizmo *gz);
+
+/**
+ * Set constraint axis for 1D snapping (for linear gizmos).
+ * 
+ * \param gz: The gizmo to set constraint for.
+ * \param axis: Constraint axis in world space.
+ */
+void WM_gizmo_snap_set_constraint_axis(wmGizmo *gz, const float axis[3]);
+
+/**
+ * Set custom increment value for snapping.
+ * 
+ * \param gz: The gizmo to set increment for.
+ * \param increment: Increment value (0 = use scene default).
+ */
+void WM_gizmo_snap_set_increment(wmGizmo *gz, float increment);
+
+/**
+ * Apply increment snapping to a value.
+ * 
+ * \param snap_params: Snap parameters from gizmo (as void*).
+ * \param use_precision: Apply precision modifier (Shift key).
+ * \param value: Value to snap (in/out parameter).
+ * \return: True if snapping was applied.
+ */
+bool WM_gizmo_snap_increment_apply(void *snap_params, bool use_precision, float *value);
+
+/**
+ * Check if snap is enabled for a gizmo.
+ * 
+ * \param gz: The gizmo to check.
+ * \return: True if snap is enabled and parameters are available.
+ */
+bool WM_gizmo_snap_is_enabled(const wmGizmo *gz);
+
+/**
+ * Get use_snap flag from snap parameters.
+ * 
+ * \param snap_params: Snap parameters pointer (as void*).
+ * \return: True if snapping is enabled.
+ */
+bool WM_gizmo_snap_use_snap_get(void *snap_params);
+
+/**
+ * Get snap mode bitmask from snap parameters.
+ * 
+ * \param snap_params: Snap parameters pointer (as void*).
+ * \return: Snap mode bitmask.
+ */
+uint32_t WM_gizmo_snap_mode_get(void *snap_params);
+
+/**
+ * Get snap parameters from a gizmo.
+ * 
+ * \param gz: The gizmo to get snap parameters from.
+ * \return: Pointer to snap parameters, or nullptr if not enabled.
+ */
+void *WM_gizmo_snap_params_get(wmGizmo *gz);
+
+/* -------------------------------------------------------------------- */
+/** \name Geometry Snapping (Vertex/Edge/Face)
+ * \{ */
+
+/**
+ * Create a snap context for geometry snapping operations.
+ * 
+ * \param C: Context for accessing scene data.
+ * \return: Opaque pointer to GizmoSnapContext, or nullptr on failure.
+ */
+void *WM_gizmo_snap_context_create(const bContext *C);
+
+/**
+ * Destroy a snap context created by WM_gizmo_snap_context_create.
+ * 
+ * \param snap_context: Opaque pointer to GizmoSnapContext.
+ */
+void WM_gizmo_snap_context_destroy(void *snap_context);
+
+/**
+ * Perform geometry snapping for a gizmo.
+ * 
+ * \param snap_context: Opaque pointer to GizmoSnapContext.
+ * \param snap_params: Snap parameters from gizmo.
+ * \param mval: Current mouse position in region coordinates.
+ * \param r_location: Snapped world-space location (output).
+ * \param r_normal: Snapped world-space normal (output, optional).
+ * \return: Snap mode that was used (SCE_SNAP_TO_VERTEX/EDGE/FACE), or SCE_SNAP_TO_NONE.
+ */
+int WM_gizmo_snap_to_geometry(void *snap_context,
+                               void *snap_params,
+                               const float mval[2],
+                               float r_location[3],
+                               float r_normal[3]);
+
+/**
+ * Project a snapped point onto a constraint axis.
+ * Used for Linear Gizmo to constrain snap along axis.
+ * 
+ * \param snap_location: Snapped location in world space.
+ * \param axis_origin: Origin point of constraint axis.
+ * \param axis_direction: Direction of constraint axis (normalized).
+ * \param r_offset: Offset along axis (output).
+ * \return: True if projection was successful.
+ */
+bool WM_gizmo_snap_project_to_axis(const float snap_location[3],
+                                    const float axis_origin[3],
+                                    const float axis_direction[3],
+                                    float *r_offset);
+
+/**
+ * Get last snapped location from snap context.
+ * 
+ * \param snap_context: Opaque pointer to GizmoSnapContext.
+ * \param r_location: Last snapped world-space location (output).
+ */
+void WM_gizmo_snap_get_last_location(void *snap_context, float r_location[3]);
+
+/**
+ * Get last snapped normal from snap context.
+ * 
+ * \param snap_context: Opaque pointer to GizmoSnapContext.
+ * \param r_normal: Last snapped world-space normal (output).
+ */
+void WM_gizmo_snap_get_last_normal(void *snap_context, float r_normal[3]);
+
+/**
+ * Check if last snap operation was successful.
+ * 
+ * \param snap_context: Opaque pointer to GizmoSnapContext.
+ * \return: True if last snap was valid.
+ */
+bool WM_gizmo_snap_is_last_valid(void *snap_context);
+
+/** \} */
 
 /* Wrap Group Type Callbacks. */
 

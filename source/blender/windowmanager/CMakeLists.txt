@@ -56,6 +56,7 @@ set(SRC
   gizmo/intern/wm_gizmo_group.cc
   gizmo/intern/wm_gizmo_group_type.cc
   gizmo/intern/wm_gizmo_map.cc
+  gizmo/intern/wm_gizmo_snap.cc
   gizmo/intern/wm_gizmo_target_props.cc
   gizmo/intern/wm_gizmo_type.cc
   message_bus/intern/wm_message_bus.cc
@@ -83,6 +84,7 @@ set(SRC
   gizmo/wm_gizmo_fn.hh
   gizmo/wm_gizmo_wmapi.hh
   gizmo/intern/wm_gizmo_intern.hh
+  gizmo/intern/wm_gizmo_snap.hh
   message_bus/intern/wm_message_bus_intern.hh
   message_bus/wm_message_bus.hh
 )

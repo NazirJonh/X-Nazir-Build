@@ -296,6 +296,9 @@ struct wmGizmo {
   /** Redraw tag. */
   bool do_draw;
 
+  /** Snap parameters for this gizmo (optional, nullptr if not used). */
+  void *snap_params;
+
   /** Temporary data (assume dirty). */
   union {
     float f;

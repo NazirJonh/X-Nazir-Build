@@ -1397,4 +1397,43 @@ void WM_toolsystem_ref_properties_ensure_for_tool_ex(bToolRef *tref,
   *r_ptr = RNA_pointer_create_discrete(nullptr, type, prop);
 }
 
+bool WM_toolsystem_tool_exists_in_workspace(bContext *C,
+                                            WorkSpace *workspace,
+                                            const bToolKey *tkey,
+                                            const char *tool_idname)
+{
+  if (tool_idname == nullptr || tool_idname[0] == '\0') {
+    return false;
+  }
+
+  bToolRef *tref_current = WM_toolsystem_ref_find(workspace, tkey);
+  char current_idname[64] = "";
+  if (tref_current != nullptr) {
+    STRNCPY(current_idname, tref_current->idname);
+  }
+
+  wmOperatorType *ot = WM_operatortype_find("WM_OT_tool_set_by_id", false);
+  if (ot == nullptr) {
+    return false;
+  }
+
+  PointerRNA op_props = WM_operator_properties_create_ptr(ot);
+  RNA_string_set(&op_props, "name", tool_idname);
+  RNA_enum_set(&op_props, "space_type", tkey->space_type);
+  RNA_boolean_set(&op_props, "cycle", false);
+
+  int op_result = WM_operator_name_call_ptr(
+      C, ot, wm::OpCallContext::ExecDefault, &op_props, nullptr);
+
+  WM_operator_properties_free(&op_props);
+
+  bool tool_exists = (op_result == OPERATOR_FINISHED);
+
+  if (current_idname[0] != '\0') {
+    WM_toolsystem_ref_set_by_id_ex(C, workspace, tkey, current_idname, false);
+  }
+
+  return tool_exists;
+}
+
 }  // namespace blender

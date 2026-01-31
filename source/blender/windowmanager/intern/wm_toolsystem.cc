@@ -1345,4 +1345,56 @@ void WM_toolsystem_ref_properties_init_for_keymap(bToolRef *tref,
   }
 }
 
+// ---- Explicit-tool property access (read without activation) ----
+IDProperty *WM_toolsystem_ref_properties_get_tool_idprops(bToolRef *tref, const char *tool_idname)
+{
+  if (tref == nullptr || tool_idname == nullptr || tool_idname[0] == '\0') {
+    return nullptr;
+  }
+  IDProperty *group = tref->properties;
+  if (group == nullptr) {
+    return nullptr;
+  }
+  return IDP_GetPropertyFromGroup(group, tool_idname);
+}
+
+IDProperty *WM_toolsystem_ref_properties_ensure_tool_idprops(bToolRef *tref,
+                                                             const char *tool_idname)
+{
+  if (tref == nullptr || tool_idname == nullptr || tool_idname[0] == '\0') {
+    return nullptr;
+  }
+  if (tref->properties == nullptr) {
+    tref->properties = blender::bke::idprop::create_group(__func__).release();
+  }
+  return idprops_ensure_named_group(tref->properties, tool_idname);
+}
+
+bool WM_toolsystem_ref_properties_get_for_tool_ex(bToolRef *tref,
+                                                  const char *tool_idname,
+                                                  const char *idname,
+                                                  StructRNA *type,
+                                                  PointerRNA *r_ptr)
+{
+  IDProperty *group = WM_toolsystem_ref_properties_get_tool_idprops(tref, tool_idname);
+  IDProperty *prop = group ? IDP_GetPropertyFromGroup(group, idname) : nullptr;
+  *r_ptr = RNA_pointer_create_discrete(nullptr, type, prop);
+  return (prop != nullptr);
+}
+
+void WM_toolsystem_ref_properties_ensure_for_tool_ex(bToolRef *tref,
+                                                     const char *tool_idname,
+                                                     const char *idname,
+                                                     StructRNA *type,
+                                                     PointerRNA *r_ptr)
+{
+  IDProperty *group = WM_toolsystem_ref_properties_ensure_tool_idprops(tref, tool_idname);
+  if (group == nullptr) {
+    *r_ptr = RNA_pointer_create_discrete(nullptr, type, nullptr);
+    return;
+  }
+  IDProperty *prop = idprops_ensure_named_group(group, idname);
+  *r_ptr = RNA_pointer_create_discrete(nullptr, type, prop);
+}
+
 }  // namespace blender

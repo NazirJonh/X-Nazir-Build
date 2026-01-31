@@ -146,6 +146,63 @@ void WM_toolsystem_ref_properties_init_for_keymap(bToolRef *tref,
                                                   PointerRNA *src_ptr,
                                                   wmOperatorType *ot);
 
+/* -------------------------------------------------------------------- */
+/** \name Explicit Tool Property Access
+ * \{ */
+
+/**
+ * Get the IDProperty group for a specific tool by tool_idname.
+ * Useful for reading tool settings without activating the tool.
+ */
+IDProperty *WM_toolsystem_ref_properties_get_tool_idprops(bToolRef *tref, const char *tool_idname);
+
+/**
+ * Ensure the IDProperty group exists for a specific tool by tool_idname.
+ * Creates the group if it doesn't exist. Use this when modifying properties.
+ */
+IDProperty *WM_toolsystem_ref_properties_ensure_tool_idprops(bToolRef *tref,
+                                                             const char *tool_idname);
+
+/**
+ * Get operator properties for a specific tool without activation.
+ * \return True if the properties exist.
+ */
+bool WM_toolsystem_ref_properties_get_for_tool_ex(bToolRef *tref,
+                                                  const char *tool_idname,
+                                                  const char *idname,
+                                                  StructRNA *type,
+                                                  PointerRNA *r_ptr);
+
+/**
+ * Ensure operator properties exist for a specific tool.
+ * Creates properties if they don't exist.
+ */
+void WM_toolsystem_ref_properties_ensure_for_tool_ex(bToolRef *tref,
+                                                     const char *tool_idname,
+                                                     const char *idname,
+                                                     StructRNA *type,
+                                                     PointerRNA *r_ptr);
+
+#define WM_toolsystem_ref_properties_get_from_operator_for_tool(tref, tool_idname, ot, r_ptr) \
+  WM_toolsystem_ref_properties_get_for_tool_ex(tref, tool_idname, (ot)->idname, (ot)->srna, r_ptr)
+
+#define WM_toolsystem_ref_properties_ensure_from_operator_for_tool(tref, tool_idname, ot, r_ptr) \
+  WM_toolsystem_ref_properties_ensure_for_tool_ex( \
+      tref, tool_idname, (ot)->idname, (ot)->srna, r_ptr)
+
+/**
+ * Check if a tool exists in the specified workspace and mode.
+ * Uses the WM_OT_tool_set_by_id operator to validate tool existence.
+ *
+ * \return true if the tool exists and can be activated.
+ */
+bool WM_toolsystem_tool_exists_in_workspace(bContext *C,
+                                            WorkSpace *workspace,
+                                            const bToolKey *tkey,
+                                            const char *tool_idname);
+
+/** \} */
+
 /**
  * Use to update the active tool (shown in the top bar) in the least disruptive way.
  *

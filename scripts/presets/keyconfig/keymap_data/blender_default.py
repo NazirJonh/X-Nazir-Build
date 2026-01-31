@@ -7471,15 +7471,25 @@ def km_node_editor_tool_add_reroute(params):
 # Tool System (3D View, Generic)
 
 def km_3d_view_tool_cursor(params):
+
+    items = [
+        ("view3d.cursor3d", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+        # Don't use `tool_maybe_tweak_event` since it conflicts with `PRESS` that places the cursor.
+        ("transform.translate", params.tool_tweak_event,
+         {"properties": [("release_confirm", True), ("cursor_transform", True)]}),
+    ]
+
+    # Add Shift+Click support to tool keymap (this will use tool properties!)
+    if params.cursor_set_event:
+        items.append(("view3d.cursor3d", params.cursor_set_event, None))
+        if params.cursor_tweak_event:
+            items.append(("transform.translate", params.cursor_tweak_event,
+                         {"properties": [("release_confirm", True), ("cursor_transform", True)]}))
+
     return (
         "3D View Tool: Cursor",
         {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
-        {"items": [
-            ("view3d.cursor3d", {"type": params.tool_mouse, "value": 'PRESS'}, None),
-            # Don't use `tool_maybe_tweak_event` since it conflicts with `PRESS` that places the cursor.
-            ("transform.translate", params.tool_tweak_event,
-             {"properties": [("release_confirm", True), ("cursor_transform", True)]}),
-        ]},
+        {"items": items},
     )
 
 

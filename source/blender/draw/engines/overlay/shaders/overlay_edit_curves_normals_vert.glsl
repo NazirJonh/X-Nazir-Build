@@ -1,10 +1,10 @@
-/* SPDX-FileCopyrightText: 2018-2022 Blender Authors
+/* SPDX-FileCopyrightText: 2018-2025 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "infos/overlay_edit_mode_infos.hh"
 
-VERTEX_SHADER_CREATE_INFO(overlay_edit_curve_normals)
+VERTEX_SHADER_CREATE_INFO(overlay_edit_curves_normals)
 
 #include "draw_model_lib.glsl"
 #include "draw_view_clipping_lib.glsl"

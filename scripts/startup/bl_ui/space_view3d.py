@@ -7554,6 +7554,12 @@ class VIEW3D_PT_overlay_edit_curves(Panel):
         row = col.row()
         row.prop(overlay, "display_handle", text="Handles")
 
+        row = col.row()
+        row.prop(overlay, "show_curve_normals", text="")
+        sub = row.row()
+        sub.active = overlay.show_curve_normals
+        sub.prop(overlay, "normals_length", text="Normals")
+
 
 class VIEW3D_PT_overlay_sculpt(Panel):
     bl_space_type = 'VIEW_3D'

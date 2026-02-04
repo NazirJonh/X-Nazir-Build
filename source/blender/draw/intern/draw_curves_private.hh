@@ -13,7 +13,9 @@
 
 #include "GPU_shader.hh"
 #include "GPU_vertex_buffer.hh"
+#include "GPU_vertex_format.hh"
 
+#include "BLI_math_vector_types.hh"
 #include "BLI_vector_set.hh"
 
 #include "draw_pass.hh"
@@ -274,6 +276,46 @@ void curves_bind_resources(draw::PassSimple::Sub &sub_ps,
                            GPUMaterial *gpu_material,
                            gpu::VertBufPtr &indirection_buf,
                            std::optional<StringRef> active_uv_name);
+
+/* -------------------------------------------------------------------- */
+/** \name Curve Normals Visualization
+ * \{ */
+
+/**
+ * Shared utilities for curve normals visualization VBO creation.
+ * Used by both legacy curves (draw_cache_impl_curve.cc) and new curves
+ * (draw_cache_impl_curves.cc) for edit mode normals display.
+ */
+class CurveNormalsFormat {
+ public:
+  struct AttrIds {
+    uint pos, nor, tan, rad;
+  };
+
+  static const GPUVertFormat &get(bool hq_normals);
+  static AttrIds get_attr_ids(bool hq_normals);
+};
+
+void curves_normals_set_vertex(gpu::VertBuf &vbo,
+                               const CurveNormalsFormat::AttrIds &attr,
+                               uint index,
+                               const float3 &pos,
+                               const float3 &nor,
+                               const float3 &tan,
+                               float radius,
+                               bool hq_normals);
+
+/**
+ * Scale radius for normals display.
+ * New Curves use default radius 0.01, legacy curves use 1.0.
+ * This scales to match legacy visual appearance.
+ */
+inline float scale_radius_for_normals_display(float radius)
+{
+  return (radius < 0.02f) ? 1.0f : radius * 100.0f;
+}
+
+/** \} */
 
 }  // namespace draw
 }  // namespace blender

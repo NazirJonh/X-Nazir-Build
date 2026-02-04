@@ -1573,6 +1573,32 @@ def brush_texture_settings(layout, brush, sculpt):
     layout.prop(tex_slot, "offset")
     layout.prop(tex_slot, "scale")
 
+    # Triplanar mapping parameters
+    if tex_slot.map_mode == 'TRIPLANAR':
+        layout.separator()
+        col = layout.column(heading="Triplanar")
+        col.prop(tex_slot, "triplanar_origin", text="Origin")
+        col.prop(tex_slot, "triplanar_scale", text="Scale")
+        col.prop(tex_slot, "triplanar_sharpness", text="Sharpness")
+
+    elif tex_slot.map_mode == 'CUBE':
+        layout.separator()
+        col = layout.column(heading="Cube")
+        col.prop(tex_slot, "cube_origin", text="Origin")
+        col.prop(tex_slot, "cube_scale", text="Scale")
+
+    elif tex_slot.map_mode == 'OCTAHEDRAL':
+        layout.separator()
+        col = layout.column(heading="Octahedral")
+        col.prop(tex_slot, "octahedral_origin", text="Origin")
+        col.prop(tex_slot, "octahedral_scale", text="Scale")
+
+    elif tex_slot.map_mode == 'EQUAL_AREA':
+        layout.separator()
+        col = layout.column(heading="Equal-Area")
+        col.prop(tex_slot, "equal_area_origin", text="Origin")
+        col.prop(tex_slot, "equal_area_scale", text="Scale")
+
     if sculpt:
         # texture_sample_bias
         layout.prop(brush, "texture_sample_bias", slider=True, text="Sample Bias")

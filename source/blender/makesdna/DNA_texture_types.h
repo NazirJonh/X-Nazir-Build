@@ -282,6 +282,10 @@ enum {
   MTEX_MAP_MODE_AREA = 3,
   MTEX_MAP_MODE_RANDOM = 4,
   MTEX_MAP_MODE_STENCIL = 5,
+  MTEX_MAP_MODE_TRIPLANAR = 6,
+  MTEX_MAP_MODE_CUBE = 7,
+  MTEX_MAP_MODE_OCTAHEDRAL = 8,
+  MTEX_MAP_MODE_EQUAL_AREA = 9,
 };
 
 /** #MTex::brush_angle_mode. */
@@ -330,6 +334,27 @@ struct MTex {
   float kinkfac = 1.0f, kinkampfac = 1.0f, roughfac = 1.0f, padensfac = 1.0f, gravityfac = 1.0f;
   float lifefac = 1.0f, sizefac = 1.0f, ivelfac = 1.0f, fieldfac = 1.0f;
   float twistfac = 1.0f;
+
+  /* Triplanar projection parameters - added at end to preserve DNA alignment. */
+  float triplanar_origin[3] = {0.0f, 0.0f, 0.0f};
+  float triplanar_scale = 1.0f;
+  float triplanar_sharpness = 2.0f;
+  char _pad_triplanar[4] = {}; /* Padding to maintain alignment. */
+
+  /* Cube projection parameters */
+  float cube_origin[3] = {0.0f, 0.0f, 0.0f};
+  float cube_scale = 1.0f;
+  char _pad_cube[8] = {};
+
+  /* Octahedral projection parameters */
+  float octahedral_origin[3] = {0.0f, 0.0f, 0.0f};
+  float octahedral_scale = 1.0f;
+  char _pad_octahedral[8] = {};
+
+  /* Equal-Area projection parameters */
+  float equal_area_origin[3] = {0.0f, 0.0f, 0.0f};
+  float equal_area_scale = 1.0f;
+  char _pad_equal_area[8] = {};
 };
 
 /** \} */

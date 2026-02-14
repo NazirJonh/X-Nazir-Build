@@ -2216,6 +2216,23 @@ static void rna_def_curves_sculpt_options(BlenderRNA *brna)
                            "Curve Parameter Falloff",
                            "Falloff that is applied from the tip to the root of each curve");
   RNA_def_property_update(prop, 0, "rna_BrushCurvesSculptSettings_update");
+
+  prop = RNA_def_property(srna, "use_brush_highlight", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "brush_highlight_enabled", 1);
+  RNA_def_property_ui_text(prop, "Brush Highlight", "Show highlight for affected curves");
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
+
+  prop = RNA_def_property(srna, "brush_highlight_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "brush_highlight_opacity");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop, "Highlight Opacity", "Opacity for brush highlight");
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
+
+  prop = RNA_def_property(srna, "brush_highlight_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "brush_highlight_color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_ui_text(prop, "Highlight Color", "Color for brush highlight");
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
 }
 
 static void rna_def_brush(BlenderRNA *brna)

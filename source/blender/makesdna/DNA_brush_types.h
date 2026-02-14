@@ -159,6 +159,13 @@ struct BrushCurvesSculptSettings {
   uint8_t density_mode = 0;
   char _pad[7] = {};
   struct CurveMapping *curve_parameter_falloff = nullptr;
+
+  /** Brush highlight settings. */
+  char brush_highlight_enabled = true;
+  char _pad2[3] = {};
+  float brush_highlight_opacity = 0.5f;
+  float brush_highlight_color[3] = {1.0f, 0.5f, 0.0f};
+  char _pad3[4] = {};
 };
 
 /** Max number of propagation steps for automasking settings. */

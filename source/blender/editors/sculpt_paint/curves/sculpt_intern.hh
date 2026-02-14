@@ -8,6 +8,7 @@
 
 #include "../paint_intern.hh"
 
+#include "BLI_index_mask.hh"
 #include "BLI_vector.hh"
 
 #include "BKE_attribute.hh"
@@ -113,6 +114,24 @@ void remember_stroke_position(CurvesSculpt &curves_sculpt, const float3 &brush_p
 Vector<float4x4> get_symmetry_brush_transforms(eCurvesSymmetryType symmetry);
 
 bke::SpanAttributeWriter<float> float_selection_ensure(Curves &curves_id);
+
+bke::SpanAttributeWriter<float> brush_highlight_ensure(Curves &curves_id);
+
+/**
+ * Clear the brush highlight attribute (set all values to 0).
+ * Call this when the brush stroke ends or when exiting sculpt mode.
+ */
+void clear_brush_highlight(Curves &curves_id);
+
+void update_brush_highlight(const CurvesGeometry &curves,
+                            const Curves &curves_id,
+                            const Span<float3> positions,
+                            const IndexMask &point_mask,
+                            const float3 &brush_pos_cu,
+                            const float brush_radius_cu,
+                            const Brush *brush,
+                            const float strength,
+                            MutableSpan<float> highlight);
 
 /** See #move_last_point_and_resample. */
 struct MoveAndResampleBuffers {

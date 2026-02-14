@@ -89,6 +89,9 @@ struct CurvesBatchCache {
   /* Selection of original points. */
   gpu::VertBuf *edit_points_selection;
 
+  /* Brush highlight attribute for sculpt mode. */
+  gpu::VertBuf *brush_highlight_buf;
+
   gpu::IndexBuf *edit_handles_ibo;
 
   gpu::Batch *edit_curves_lines;
@@ -127,6 +130,7 @@ static void clear_edit_data(CurvesBatchCache *cache)
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_points_rad);
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_points_data);
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_points_selection);
+  GPU_VERTBUF_DISCARD_SAFE(cache->brush_highlight_buf);
   GPU_INDEXBUF_DISCARD_SAFE(cache->edit_handles_ibo);
 
   GPU_BATCH_DISCARD_SAFE(cache->edit_points);
@@ -1013,6 +1017,101 @@ gpu::Batch *DRW_curves_batch_cache_get_edit_curves_lines(Curves *curves)
 {
   CurvesBatchCache &cache = get_batch_cache(*curves);
   return DRW_batch_request(&cache.edit_curves_lines);
+}
+
+gpu::VertBuf *DRW_curves_batch_cache_get_brush_highlight(Curves *curves)
+{
+  static int cache_debug_counter = 0;
+  cache_debug_counter++;
+  bool do_debug = (cache_debug_counter % 60 == 1);
+
+  CurvesBatchCache &cache = get_batch_cache(*curves);
+  const bke::CurvesGeometry &curves_geometry = curves->geometry.wrap();
+
+  if (curves_geometry.is_empty()) {
+    if (do_debug) printf("[BrushHighlight]   curves_geometry is empty!\n");
+    return nullptr;
+  }
+
+  const int points_num = curves_geometry.points_num();
+
+  /* Check if buffer needs to be recreated (point count changed or buffer doesn't exist) */
+  bool need_recreate = false;
+  if (!cache.brush_highlight_buf) {
+    need_recreate = true;
+  }
+  else if (GPU_vertbuf_get_vertex_len(cache.brush_highlight_buf) != points_num) {
+    GPU_VERTBUF_DISCARD_SAFE(cache.brush_highlight_buf);
+    need_recreate = true;
+  }
+
+  if (need_recreate) {
+    if (do_debug) {
+      printf("[BrushHighlight] get_brush_highlight: creating buffer, points=%d\n", points_num);
+    }
+
+    static const GPUVertFormat format = GPU_vertformat_from_attribute(
+        "data", gpu::VertAttrType::SFLOAT_32);
+    cache.brush_highlight_buf = GPU_vertbuf_create_with_format_ex(format, GPU_USAGE_STATIC);
+    GPU_vertbuf_data_alloc(*cache.brush_highlight_buf, points_num);
+  }
+
+  /* Safety check - buffer should exist at this point */
+  if (!cache.brush_highlight_buf) {
+    if (do_debug) printf("[BrushHighlight]   ERROR: buffer is null after creation!\n");
+    return nullptr;
+  }
+
+  /* Read attribute data directly into buffer using GPU_vertbuf_attr_fill */
+  bke::AttributeReader<float> highlight_reader = curves_geometry.attributes().lookup<float>(
+      ".brush_highlight");
+
+  if (highlight_reader) {
+    if (do_debug) {
+      printf("[BrushHighlight]   .brush_highlight attribute FOUND, updating buffer\n");
+    }
+
+    /* Materialize attribute data into a temporary buffer then upload */
+    Array<float> temp_data(points_num);
+    highlight_reader.varray.materialize(temp_data);
+
+    /* Use GPU_vertbuf_attr_fill to upload data */
+    GPU_vertbuf_attr_fill(cache.brush_highlight_buf, 0, temp_data.data());
+
+    /* Check if there are non-zero values */
+    if (do_debug) {
+      float min_val = 999.0f, max_val = -999.0f;
+      int non_zero_count = 0;
+      for (float v : temp_data) {
+        if (v > 0.001f) non_zero_count++;
+        min_val = std::min(min_val, v);
+        max_val = std::max(max_val, v);
+      }
+      printf("[BrushHighlight]   values: min=%.3f max=%.3f non_zero_count=%d\n",
+             min_val, max_val, non_zero_count);
+    }
+  }
+  else {
+    if (do_debug) {
+      printf("[BrushHighlight]   .brush_highlight attribute NOT FOUND, filling zeros\n");
+    }
+    Array<float> zeros(points_num, 0.0f);
+    GPU_vertbuf_attr_fill(cache.brush_highlight_buf, 0, zeros.data());
+  }
+
+  return cache.brush_highlight_buf;
+}
+
+void DRW_curves_batch_cache_tag_brush_highlight_update(Curves *curves)
+{
+  if (curves == nullptr) {
+    return;
+  }
+  CurvesBatchCache *cache = curves->batch_cache;
+  if (cache) {
+    /* Discard brush highlight buffer to force recreation on next access */
+    GPU_VERTBUF_DISCARD_SAFE(cache->brush_highlight_buf);
+  }
 }
 
 gpu::VertBufPtr &DRW_curves_texture_for_evaluated_attribute(Curves *curves,

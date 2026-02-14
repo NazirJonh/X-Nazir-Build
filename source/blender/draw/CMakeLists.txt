@@ -816,7 +816,11 @@ set(GLSL_SRC
   engines/overlay/shaders/overlay_particle_shape_frag.glsl
   engines/overlay/shaders/overlay_point_varying_color_frag.glsl
   engines/overlay/shaders/overlay_point_varying_color_varying_outline_aa_frag.glsl
+  engines/overlay/shaders/overlay_sculpt_curves_brush_highlight_frag.glsl
+  engines/overlay/shaders/overlay_sculpt_curves_brush_highlight_vert.glsl
   engines/overlay/shaders/overlay_sculpt_curves_cage_vert.glsl
+  engines/overlay/shaders/overlay_sculpt_curves_points_frag.glsl
+  engines/overlay/shaders/overlay_sculpt_curves_points_vert.glsl
   engines/overlay/shaders/overlay_sculpt_curves_selection_frag.glsl
   engines/overlay/shaders/overlay_sculpt_curves_selection_vert.glsl
   engines/overlay/shaders/overlay_sculpt_mask_frag.glsl

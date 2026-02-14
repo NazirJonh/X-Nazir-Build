@@ -8,6 +8,10 @@
 #include "sculpt_cloth.hh"
 #include "sculpt_cloth_vbd.hh"
 
+#include <cstdio>
+
+#define CLOTH_VBD_DEBUG(...) printf("[CLOTH_VBD] " __VA_ARGS__); fflush(stdout)
+
 #include "MEM_guardedalloc.h"
 
 #include "BLI_array_utils.hh"
@@ -1416,8 +1420,15 @@ void do_simulation_step(const Depsgraph &depsgraph,
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
 
+  /* Flag to indicate VBD was used (skip CPU solve but still update mesh) */
+  bool vbd_solved = false;
+
+  CLOTH_VBD_DEBUG("do_simulation_step() - use_vbd=%d, vbd_solver=%p\n",
+                  cloth_sim.use_vbd, cloth_sim.vbd_solver.get());
+
   /* Try GPU VBD solver first if enabled */
   if (cloth_sim.use_vbd && cloth_sim.vbd_solver) {
+    CLOTH_VBD_DEBUG("Using VBD GPU solver\n");
     namespace vbd = cloth::vbd;
 
     /* Upload simulation data to VBD solver (includes constraints) */
@@ -1437,17 +1448,25 @@ void do_simulation_step(const Depsgraph &depsgraph,
     params.solver_factor = 0.6f;  /* CLOTH_SOLVER_DISPLACEMENT_FACTOR */
     params.collision_stiffness = 1e6f;
 
+    CLOTH_VBD_DEBUG("VBD params: total_vertices=%d, total_springs=%d\n",
+                    params.total_vertices, params.total_springs);
+
     /* Upload brush parameters if available */
     if (ss.cache) {
       params.brush_location = float4(ss.cache->location_symm, 0.0f);
+      CLOTH_VBD_DEBUG("Using brush cache: location=(%f,%f,%f)\n",
+                      ss.cache->location_symm.x, ss.cache->location_symm.y, ss.cache->location_symm.z);
       if (brush) {
         params.brush_delta = float4(ss.cache->grab_delta_symm, 0.0f);
         params.brush_radius = ss.cache->radius;
         params.brush_strength = brush->alpha;
         params.brush_type = brush->cloth_deform_type;
+        CLOTH_VBD_DEBUG("Brush: radius=%f, strength=%f, type=%d\n",
+                        params.brush_radius, params.brush_strength, params.brush_type);
       }
     }
     else {
+      CLOTH_VBD_DEBUG("No brush cache available\n");
       params.brush_location = float4(0.0f);
       params.brush_delta = float4(0.0f);
       params.brush_radius = 0.0f;
@@ -1456,17 +1475,24 @@ void do_simulation_step(const Depsgraph &depsgraph,
     }
 
     /* Run VBD step */
+    CLOTH_VBD_DEBUG("Calling VBD step()\n");
     cloth_sim.vbd_solver->step(params);
+    CLOTH_VBD_DEBUG("VBD step() complete\n");
 
     /* Download results to simulation data */
     cloth_sim.vbd_solver->download_to_simulation_data(cloth_sim);
+    CLOTH_VBD_DEBUG("Downloaded results to simulation data\n");
 
-    /* Update mesh positions - need to apply changes to actual mesh */
-    /* This is handled similarly to the CPU path below */
+    vbd_solved = true;
+  }
+  else {
+    CLOTH_VBD_DEBUG("VBD not enabled or solver not initialized - using CPU path\n");
   }
 
-  /* Update the constraints. */
-  cloth_brush_satisfy_constraints(depsgraph, object, brush, cloth_sim);
+  /* Update the constraints (skip if VBD already solved) */
+  if (!vbd_solved) {
+    cloth_brush_satisfy_constraints(depsgraph, object, brush, cloth_sim);
+  }
 
   const float3 sim_location = cloth_brush_simulation_location_get(ss, brush);
 
@@ -1494,7 +1520,10 @@ void do_simulation_step(const Depsgraph &depsgraph,
         const auto_mask::Cache *automasking = auto_mask::active_cache_get(ss);
         auto_mask::calc_vert_factors(depsgraph, object, automasking, nodes[i], verts, factors);
 
-        solve_verts_simulation(object, brush, sim_location, verts, factors, tls, cloth_sim);
+        /* Skip CPU solve if VBD already solved */
+        if (!vbd_solved) {
+          solve_verts_simulation(object, brush, sim_location, verts, factors, tls, cloth_sim);
+        }
 
         tls.translations.resize(verts.size());
         const MutableSpan<float3> translations = tls.translations;
@@ -1534,7 +1563,10 @@ void do_simulation_step(const Depsgraph &depsgraph,
         auto_mask::calc_grids_factors(depsgraph, object, automasking, nodes[i], grids, factors);
 
         const Span<int> verts = calc_vert_indices_grids(key, grids, tls.vert_indices);
-        solve_verts_simulation(object, brush, sim_location, verts, factors, tls, cloth_sim);
+        /* Skip CPU solve if VBD already solved */
+        if (!vbd_solved) {
+          solve_verts_simulation(object, brush, sim_location, verts, factors, tls, cloth_sim);
+        }
 
         for (const int grid : grids) {
           const IndexRange grid_range = bke::ccg::grid_range(key, grid);
@@ -1566,7 +1598,10 @@ void do_simulation_step(const Depsgraph &depsgraph,
         auto_mask::calc_vert_factors(depsgraph, object, automasking, nodes[i], verts, factors);
 
         const Span<int> vert_indices = calc_vert_indices_bmesh(verts, tls.vert_indices);
-        solve_verts_simulation(object, brush, sim_location, vert_indices, factors, tls, cloth_sim);
+        /* Skip CPU solve if VBD already solved */
+        if (!vbd_solved) {
+          solve_verts_simulation(object, brush, sim_location, vert_indices, factors, tls, cloth_sim);
+        }
 
         for (BMVert *vert : verts) {
           copy_v3_v3(vert->co, cloth_sim.pos[BM_elem_index_get(vert)]);
@@ -1828,11 +1863,15 @@ std::unique_ptr<SimulationData> brush_simulation_create(const Depsgraph &depsgra
   cloth_sim_initialize_default_node_state(ob, *cloth_sim);
 
   /* Initialize VBD GPU solver (disabled by default, enable for testing) */
-  cloth_sim->use_vbd = ture;  /* Set to true to enable GPU VBD solver */
+  cloth_sim->use_vbd = true;  /* Set to true to enable GPU VBD solver */
+  CLOTH_VBD_DEBUG("brush_simulation_create() - use_vbd=%d, totverts=%d\n",
+                  cloth_sim->use_vbd, totverts);
   if (cloth_sim->use_vbd) {
     namespace vbd = cloth::vbd;
+    CLOTH_VBD_DEBUG("Creating VBD solver\n");
     cloth_sim->vbd_solver = std::make_unique<vbd::VBDSolver>();
     cloth_sim->vbd_solver->init(totverts);
+    CLOTH_VBD_DEBUG("VBD solver created and initialized\n");
   }
 
   return cloth_sim;

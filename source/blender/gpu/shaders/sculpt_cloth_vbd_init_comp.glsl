@@ -5,6 +5,7 @@
 /**
  * VBD initialization compute shader.
  * Computes inertial position: y = x + h*v + h²*a_ext
+ * Also initializes new_positions buffer for the iteration.
  */
 
 #include "gpu_shader_math_vector_lib.glsl"
@@ -36,4 +37,7 @@ void main()
 
   /* Initialize acceleration to gravity */
   accelerations[vertex_id] = float4(a_ext, 0.0);
+
+  /* Initialize new_positions with current positions for the solve pass */
+  new_positions[vertex_id] = float4(x, 0.0);
 }

@@ -19,6 +19,7 @@ void compute_spring_contribution(float3 xi,
                                   float3 xj,
                                   float rest_length,
                                   float stiffness,
+                                  float scale,
                                   out float3 force,
                                   out float3x3 hessian)
 {
@@ -34,14 +35,17 @@ void compute_spring_contribution(float3 xi,
   float3 n = diff / len;
   float stretch = len - rest_length;
 
-  /* Force: f = -k * stretch * n */
-  force = -stiffness * stretch * n;
+  /* Force: f = -k * stretch * n
+   * Scale by time_step_sq_inv to balance with inertial term
+   */
+  float scaled_stiffness = stiffness * scale;
+  force = -scaled_stiffness * stretch * n;
 
   /* Hessian: H = k * (n*n^T + (1 - rest/len) * (I - n*n^T)) */
   float3x3 nnt = outerProduct(n, n);
   float factor = 1.0 - rest_length / len;
   float3x3 I_minus_nnt = float3x3(1.0) - nnt;
-  hessian = stiffness * (nnt + factor * I_minus_nnt);
+  hessian = scaled_stiffness * (nnt + factor * I_minus_nnt);
 }
 
 void main()
@@ -53,14 +57,13 @@ void main()
 
   /* Only process vertices of the current color */
   if (colors[vertex_id] != current_color) {
-    new_positions[vertex_id] = positions[vertex_id];
+    /* Don't write to new_positions - keep the value from previous color or init */
     return;
   }
 
-  /* Skip if factor is zero (pinned) */
+  /* Skip if factor is zero (pinned) - keep existing new_positions value */
   float factor = factors[vertex_id];
   if (factor < 1e-6) {
-    new_positions[vertex_id] = positions[vertex_id];
     return;
   }
 
@@ -76,6 +79,9 @@ void main()
   int adj_start = adj_offsets[vertex_id];
   int adj_end = adj_offsets[vertex_id + 1];
 
+  /* Use sqrt of time_step_sq_inv for more moderate scaling (~62.5 instead of 3906) */
+  float spring_scale = sqrt(time_step_sq_inv);
+
   for (int i = adj_start; i < adj_end; i++) {
     int neighbor = adj_list[i];
     int spring_idx = adj_spring_idx[i];
@@ -84,10 +90,20 @@ void main()
     float rest_length = spring.z;
     float stiffness = spring.w;
 
-    float3 xj = positions[neighbor].xyz;
+    /* Read neighbor position from the correct buffer */
+    float3 xj;
+    int neighbor_color = colors[neighbor];
+    if (neighbor_color < current_color) {
+      xj = new_positions[neighbor].xyz;
+    }
+    else {
+      xj = positions[neighbor].xyz;
+    }
+
     float3 spring_force;
     float3x3 spring_hessian;
-    compute_spring_contribution(xi, xj, rest_length, stiffness, spring_force, spring_hessian);
+    /* Use moderate scaling to balance springs with inertial term */
+    compute_spring_contribution(xi, xj, rest_length, stiffness, spring_scale, spring_force, spring_hessian);
 
     force += spring_force;
     hessian += spring_hessian;

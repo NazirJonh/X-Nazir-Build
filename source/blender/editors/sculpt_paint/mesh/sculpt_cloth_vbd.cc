@@ -11,6 +11,7 @@
 
 #include "BLI_index_range.hh"
 #include "BLI_math_base.hh"
+#include "BLI_math_vector.hh"
 #include "BLI_utildefines.h"
 
 #include "GPU_compute.hh"
@@ -18,6 +19,11 @@
 #include "GPU_state.hh"
 #include "GPU_storage_buffer.hh"
 #include "GPU_uniform_buffer.hh"
+
+#include <cfloat>
+#include <cstdio>
+
+#define VBD_DEBUG(...) printf("[VBD] " __VA_ARGS__); fflush(stdout)
 
 namespace blender::ed::sculpt_paint::cloth::vbd {
 
@@ -32,6 +38,8 @@ static constexpr float DEFAULT_TIME_STEP = 1.0f / 60.0f;
 
 void VBDSolver::init(int vertex_count)
 {
+  VBD_DEBUG("init() called with vertex_count=%d\n", vertex_count);
+
   vertices_.vertex_count = vertex_count;
 
   vertices_.positions.reinitialize(vertex_count);
@@ -50,6 +58,8 @@ void VBDSolver::init(int vertex_count)
 
   gpu_.is_initialized = false;
   gpu_.needs_upload = true;
+
+  VBD_DEBUG("init() complete - arrays initialized\n");
 }
 
 /* --------------------------------------------------------
@@ -58,22 +68,57 @@ void VBDSolver::init(int vertex_count)
 
 void VBDSolver::upload_from_simulation_data(const SimulationData &sim)
 {
+  VBD_DEBUG("upload_from_simulation_data() called\n");
+  VBD_DEBUG("  sim.pos.size()=%zu, sim.prev_pos.size()=%zu\n",
+            sim.pos.size(), sim.prev_pos.size());
+  VBD_DEBUG("  sim.softbody_pos.size()=%zu, sim.deformation_pos.size()=%zu\n",
+            sim.softbody_pos.size(), sim.deformation_pos.size());
+  VBD_DEBUG("  sim.length_constraints.size()=%zu\n", sim.length_constraints.size());
+
   const int num_verts = vertices_.vertex_count;
 
-  /* Copy positions */
+  /* Copy positions - only if source arrays have data */
+  int copied_positions = 0;
   for (const int i : IndexRange(num_verts)) {
     if (i < sim.pos.size()) {
       vertices_.positions[i] = sim.pos[i];
+      copied_positions++;
+    }
+    if (i < sim.prev_pos.size()) {
       vertices_.prev_positions[i] = sim.prev_pos[i];
+    }
+    /* Softbody - may be empty if softbody_strength is 0 */
+    if (sim.softbody_pos.size() > 0 && i < sim.softbody_pos.size()) {
       vertices_.softbody_pos[i] = sim.softbody_pos[i];
+    }
+    else {
+      vertices_.softbody_pos[i] = float3(0.0f);
+    }
+    /* Deformation - may be empty if needs_deform_coords is false */
+    if (sim.deformation_pos.size() > 0 && i < sim.deformation_pos.size()) {
       vertices_.deformation_pos[i] = sim.deformation_pos[i];
+    }
+    else {
+      vertices_.deformation_pos[i] = vertices_.positions[i];
+    }
+    if (sim.deformation_strength.size() > 0 && i < sim.deformation_strength.size()) {
       vertices_.deformation_strength[i] = sim.deformation_strength[i];
+    }
+    else {
+      vertices_.deformation_strength[i] = 0.0f;
+    }
+    if (sim.length_constraint_tweak.size() > 0 && i < sim.length_constraint_tweak.size()) {
       vertices_.constraint_tweak[i] = sim.length_constraint_tweak[i];
     }
+    else {
+      vertices_.constraint_tweak[i] = 0.0f;
+    }
   }
+  VBD_DEBUG("  Copied %d positions from sim\n", copied_positions);
 
   /* Initialize masses */
   const float mass = sim.mass;
+  VBD_DEBUG("  mass=%f, damping=%f\n", mass, sim.damping);
   vertices_.masses.fill(mass);
   for (const int i : IndexRange(num_verts)) {
     vertices_.masses_inv[i] = (mass > 0.0f) ? (1.0f / mass) : 1.0f;
@@ -81,6 +126,7 @@ void VBDSolver::upload_from_simulation_data(const SimulationData &sim)
 
   /* Build constraints from length_constraints */
   constraints_.spring_count = sim.length_constraints.size();
+  VBD_DEBUG("  spring_count=%d\n", constraints_.spring_count);
   constraints_.spring_v1.reinitialize(constraints_.spring_count);
   constraints_.spring_v2.reinitialize(constraints_.spring_count);
   constraints_.spring_rest_length.reinitialize(constraints_.spring_count);
@@ -98,9 +144,11 @@ void VBDSolver::upload_from_simulation_data(const SimulationData &sim)
 
   /* Build adjacency list */
   this->build_adjacency_from_springs();
+  VBD_DEBUG("  Built adjacency list, adj_list.size()=%zu\n", constraints_.adj_list.size());
 
   /* Compute vertex colors */
   compute_vertex_colors(constraints_, vertices_.vertex_count);
+  VBD_DEBUG("  Computed vertex colors, max_color=%d\n", constraints_.max_color);
 
   /* Copy node states */
   constraints_.node_states = sim.node_state;
@@ -109,6 +157,8 @@ void VBDSolver::upload_from_simulation_data(const SimulationData &sim)
   vertices_.constraint_factors.fill(1.0f);
 
   gpu_.needs_upload = true;
+
+  VBD_DEBUG("upload_from_simulation_data() complete\n");
 }
 
 void VBDSolver::build_adjacency_from_springs()
@@ -160,8 +210,10 @@ void VBDSolver::download_to_simulation_data(SimulationData &sim)
   const int num_verts = vertices_.vertex_count;
   for (const int i : IndexRange(num_verts)) {
     if (i < sim.pos.size()) {
+      /* Save current position to prev_pos BEFORE updating (like CPU solver does) */
+      sim.prev_pos[i] = sim.pos[i];
+      /* Now update with new position from GPU */
       sim.pos[i] = vertices_.positions[i];
-      sim.prev_pos[i] = vertices_.prev_positions[i];
     }
   }
 }
@@ -173,12 +225,16 @@ void VBDSolver::download_to_simulation_data(SimulationData &sim)
 void VBDSolver::ensure_gpu_buffers()
 {
   if (gpu_.is_initialized) {
+    VBD_DEBUG("ensure_gpu_buffers() - already initialized\n");
     return;
   }
 
   const int N = vertices_.vertex_count;
   const int M = constraints_.spring_count;
   const int adj_size = constraints_.adj_list.size();
+
+  VBD_DEBUG("ensure_gpu_buffers() - creating GPU buffers\n");
+  VBD_DEBUG("  N=%d (vertices), M=%d (springs), adj_size=%d\n", N, M, adj_size);
 
   /* Create vertex SSBOs */
   gpu_.positions_ssbo = GPU_storagebuf_create_ex(
@@ -219,11 +275,24 @@ void VBDSolver::ensure_gpu_buffers()
       N * sizeof(float4), nullptr, GPU_USAGE_DYNAMIC, "VBD Softbody Pos");
 
   /* Load shaders */
+  VBD_DEBUG("  Loading shaders...\n");
   shader_init_ = GPU_shader_create_from_info_name("sculpt_cloth_vbd_init");
   shader_solve_ = GPU_shader_create_from_info_name("sculpt_cloth_vbd_solve");
   shader_integrate_ = GPU_shader_create_from_info_name("sculpt_cloth_vbd_integrate");
 
+  if (shader_init_ == nullptr) {
+    VBD_DEBUG("  ERROR: Failed to load init shader!\n");
+  }
+  if (shader_solve_ == nullptr) {
+    VBD_DEBUG("  ERROR: Failed to load solve shader!\n");
+  }
+  if (shader_integrate_ == nullptr) {
+    VBD_DEBUG("  ERROR: Failed to load integrate shader!\n");
+  }
+
   gpu_.is_initialized = true;
+  VBD_DEBUG("ensure_gpu_buffers() complete - shaders loaded: init=%p, solve=%p, integrate=%p\n",
+            shader_init_, shader_solve_, shader_integrate_);
 }
 
 void VBDSolver::upload_to_gpu()
@@ -294,13 +363,39 @@ void VBDSolver::upload_to_gpu()
 void VBDSolver::download_from_gpu()
 {
   const int N = vertices_.vertex_count;
+  VBD_DEBUG("download_from_gpu() - N=%d\n", N);
   Array<float4> positions_4d(N);
 
   GPU_storagebuf_sync_to_host(gpu_.positions_ssbo);
   GPU_storagebuf_read(gpu_.positions_ssbo, positions_4d.data());
 
+  int nonzero_count = 0;
+  float3 min_pos(FLT_MAX, FLT_MAX, FLT_MAX);
+  float3 max_pos(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+  float3 sum_pos(0.0f, 0.0f, 0.0f);
+
   for (const int i : IndexRange(N)) {
     vertices_.positions[i] = positions_4d[i].xyz();
+    if (math::length(vertices_.positions[i]) > 0.001f) {
+      nonzero_count++;
+    }
+    min_pos = math::min(min_pos, vertices_.positions[i]);
+    max_pos = math::max(max_pos, vertices_.positions[i]);
+    sum_pos += vertices_.positions[i];
+  }
+
+  float3 avg_pos = sum_pos / float(N);
+  VBD_DEBUG("download_from_gpu() - %d/%d positions are non-zero\n", nonzero_count, N);
+  VBD_DEBUG("  Position bounds: min=(%f, %f, %f), max=(%f, %f, %f)\n",
+            min_pos.x, min_pos.y, min_pos.z, max_pos.x, max_pos.y, max_pos.z);
+  VBD_DEBUG("  Average position: (%f, %f, %f)\n", avg_pos.x, avg_pos.y, avg_pos.z);
+
+  if (N > 0) {
+    VBD_DEBUG("  First 3 positions:\n");
+    for (int i = 0; i < math::min(3, N); i++) {
+      VBD_DEBUG("    [%d]: (%f, %f, %f)\n", i,
+                vertices_.positions[i].x, vertices_.positions[i].y, vertices_.positions[i].z);
+    }
   }
 }
 
@@ -310,13 +405,25 @@ void VBDSolver::download_from_gpu()
 
 void VBDSolver::step(const VBDParams &params)
 {
+  VBD_DEBUG("step() called\n");
+  VBD_DEBUG("  total_vertices=%d, total_springs=%d\n", params.total_vertices, params.total_springs);
+  VBD_DEBUG("  num_iterations=%d, max_color=%d\n", params.num_iterations, params.max_color);
+  VBD_DEBUG("  time_step=%f, damping=%f, solver_factor=%f\n",
+            params.time_step, params.damping, params.solver_factor);
+  VBD_DEBUG("  gravity=(%f, %f, %f)\n", params.gravity.x, params.gravity.y, params.gravity.z);
+
   ensure_gpu_buffers();
   upload_to_gpu();
 
   const int N = params.total_vertices;
   const int groups_x = (N + THREADS_PER_GROUP - 1) / THREADS_PER_GROUP;
+  VBD_DEBUG("  groups_x=%d\n", groups_x);
 
-  /* Stage 1: Initialize inertial positions */
+  /* Stage 1: Initialize inertial positions (y = x + h*v + h²*g)
+   * prev_positions contains the previous frame's positions (uploaded from sim.prev_pos)
+   * velocity = (positions - prev_positions) / dt
+   */
+  VBD_DEBUG("  Stage 1: Initialize inertial positions\n");
   GPU_shader_bind(shader_init_);
 
   /* Set push constants */
@@ -330,11 +437,14 @@ void VBDSolver::step(const VBDParams &params)
   GPU_storagebuf_bind(gpu_.prev_positions_ssbo, 1);
   GPU_storagebuf_bind(gpu_.y_ssbo, 2);
   GPU_storagebuf_bind(gpu_.accelerations_ssbo, 3);
+  GPU_storagebuf_bind(gpu_.new_positions_ssbo, 4);
 
   GPU_compute_dispatch(shader_init_, groups_x, 1, 1);
   GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
 
   /* Stage 2: VBD iterations */
+  VBD_DEBUG("  Stage 2: VBD iterations (%d iterations, %d colors)\n",
+            params.num_iterations, params.max_color + 1);
   for (int iter = 0; iter < params.num_iterations; iter++) {
     /* Process each color */
     for (int c = 0; c <= params.max_color; c++) {
@@ -365,22 +475,33 @@ void VBDSolver::step(const VBDParams &params)
 
       GPU_compute_dispatch(shader_solve_, groups_x, 1, 1);
       GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-
-      /* Copy new_positions to positions (swap buffers) */
-      /* For now, we do this by binding new_positions as read and positions as write */
-      /* This is handled in the integrate shader */
     }
+
+    /* Swap buffers between iterations: positions = new_positions */
+    GPU_shader_bind(shader_integrate_);
+    GPU_shader_uniform_1i(shader_integrate_, "total_vertices", N);
+    GPU_shader_uniform_1f(shader_integrate_, "time_step_inv", params.time_step_inv);
+    GPU_shader_uniform_1f(shader_integrate_, "damping", 0.0f);  /* 0 = just swap */
+
+    GPU_storagebuf_bind(gpu_.positions_ssbo, 0);
+    GPU_storagebuf_bind(gpu_.prev_positions_ssbo, 1);
+    GPU_storagebuf_bind(gpu_.accelerations_ssbo, 2);
+    GPU_storagebuf_bind(gpu_.new_positions_ssbo, 3);
+
+    GPU_compute_dispatch(shader_integrate_, groups_x, 1, 1);
+    GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
   }
 
-  /* Stage 3: Integration (compute velocities, swap buffers) */
-  GPU_shader_bind(shader_integrate_);
+  /* Stage 3: Final update - positions = new_positions */
+  VBD_DEBUG("  Stage 3: Final integration\n");
 
-  /* Set push constants */
+  GPU_shader_bind(shader_integrate_);
   GPU_shader_uniform_1i(shader_integrate_, "total_vertices", N);
   GPU_shader_uniform_1f(shader_integrate_, "time_step_inv", params.time_step_inv);
-  GPU_shader_uniform_1f(shader_integrate_, "damping", params.damping);
+  /* Use damping > 0 to trigger velocity computation in shader */
+  GPU_shader_uniform_1f(shader_integrate_, "damping",
+                        (params.damping > 0.0f) ? params.damping : 0.001f);
 
-  /* Bind SSBOs for integrate shader */
   GPU_storagebuf_bind(gpu_.positions_ssbo, 0);
   GPU_storagebuf_bind(gpu_.prev_positions_ssbo, 1);
   GPU_storagebuf_bind(gpu_.accelerations_ssbo, 2);
@@ -392,7 +513,9 @@ void VBDSolver::step(const VBDParams &params)
   GPU_shader_unbind();
 
   /* Download results */
+  VBD_DEBUG("  Downloading results from GPU\n");
   download_from_gpu();
+  VBD_DEBUG("step() complete\n");
 }
 
 /* --------------------------------------------------------

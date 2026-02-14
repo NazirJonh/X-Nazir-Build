@@ -256,27 +256,29 @@ struct [[host_shared]] TestOutput {
 
 /* VBD (Vertex Block Descent) Cloth Simulation Parameters */
 struct [[host_shared]] VBDParams {
-  float4 gravity;
-  float time_step;
-  float time_step_inv;
-  float time_step_sq_inv;
-  float damping;
-  int total_vertices;
-  int total_springs;
-  int num_iterations;
-  int current_color;
-  int max_color;
-  float solver_factor;
-  float collision_stiffness;
-  float _pad0;  /* Padding to align brush_location to 16 bytes */
-  float4 brush_location;
-  float4 brush_delta;
-  float brush_radius;
-  float brush_strength;
-  int brush_type;
-  int _pad1;
-  float _pad2;
-  float _pad3;
+  float4 gravity;                 /* offset 0, size 16 */
+  float time_step;                /* offset 16, size 4 */
+  float time_step_inv;            /* offset 20, size 4 */
+  float time_step_sq_inv;         /* offset 24, size 4 */
+  float damping;                  /* offset 28, size 4 */
+  int total_vertices;             /* offset 32, size 4 */
+  int total_springs;              /* offset 36, size 4 */
+  int num_iterations;             /* offset 40, size 4 */
+  int current_color;              /* offset 44, size 4 */
+  int max_color;                  /* offset 48, size 4 */
+  float solver_factor;            /* offset 52, size 4 */
+  float collision_stiffness;      /* offset 56, size 4 */
+  float _pad0;                    /* offset 60, size 4 - aligns brush_location to 64 */
+  float4 brush_location;          /* offset 64, size 16 */
+  float4 brush_delta;             /* offset 80, size 16 */
+  float brush_radius;             /* offset 96, size 4 */
+  float brush_strength;           /* offset 100, size 4 */
+  int brush_type;                 /* offset 104, size 4 */
+  int _pad1;                      /* offset 108, size 4 */
+  float _pad2;                    /* offset 112, size 4 */
+  float _pad3;                    /* offset 116, size 4 - total 120, pad to 128 */
+  float _pad4;                    /* offset 120, size 4 */
+  float _pad5;                    /* offset 124, size 4 - total 128 */
 };
 
 #ifdef GPU_SHADER

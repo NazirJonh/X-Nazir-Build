@@ -112,6 +112,7 @@ set(SRC
   mesh/sculpt_transform.cc
   mesh/sculpt_trim.cc
   mesh/sculpt_undo.cc
+  mesh/sculpt_cloth_vbd.cc
 
   paint_intern.hh
 
@@ -141,6 +142,7 @@ set(SRC
   mesh/sculpt_pose.hh
   mesh/sculpt_smooth.hh
   mesh/sculpt_undo.hh
+  mesh/sculpt_cloth_vbd.hh
 
   mesh/brushes/bmesh_topology_rake.cc
   mesh/brushes/clay.cc

@@ -506,6 +506,7 @@ set(GLSL_SRC
   shaders/infos/gpu_shader_simple_lighting_infos.hh
   shaders/infos/gpu_shader_text_infos.hh
   shaders/infos/gpu_srgb_to_framebuffer_space_infos.hh
+  shaders/infos/sculpt_cloth_vbd_infos.hh
 
   shaders/gpu_shader_depth_only_frag.glsl
   shaders/gpu_shader_uniform_color_frag.glsl
@@ -561,6 +562,10 @@ set(GLSL_SRC
   shaders/gpu_shader_keyframe_shape_frag.glsl
 
   shaders/gpu_shader_sequencer_scope_comp.glsl
+  shaders/sculpt_cloth_vbd_init_comp.glsl
+  shaders/sculpt_cloth_vbd_solve_comp.glsl
+  shaders/sculpt_cloth_vbd_integrate_comp.glsl
+  shaders/sculpt_cloth_vbd_forces_comp.glsl
   shaders/gpu_shader_sequencer_scope_frag.glsl
   shaders/gpu_shader_sequencer_strips_vert.glsl
   shaders/gpu_shader_sequencer_strips_frag.glsl

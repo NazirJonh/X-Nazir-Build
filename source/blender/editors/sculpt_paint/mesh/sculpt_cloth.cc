@@ -6,6 +6,7 @@
  * \ingroup edsculpt
  */
 #include "sculpt_cloth.hh"
+#include "sculpt_cloth_vbd.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -1415,6 +1416,55 @@ void do_simulation_step(const Depsgraph &depsgraph,
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
 
+  /* Try GPU VBD solver first if enabled */
+  if (cloth_sim.use_vbd && cloth_sim.vbd_solver) {
+    namespace vbd = cloth::vbd;
+
+    /* Upload simulation data to VBD solver (includes constraints) */
+    cloth_sim.vbd_solver->upload_from_simulation_data(cloth_sim);
+
+    /* Setup VBD parameters */
+    vbd::VBDParams params;
+    params.gravity = float4(0.0f, -9.81f, 0.0f, 0.0f);
+    params.time_step = 0.016f;  /* ~60 FPS */
+    params.time_step_inv = 1.0f / params.time_step;
+    params.time_step_sq_inv = 1.0f / (params.time_step * params.time_step);
+    params.damping = cloth_sim.damping;
+    params.total_vertices = cloth_sim.vbd_solver->get_vertex_count();
+    params.total_springs = cloth_sim.vbd_solver->get_spring_count();
+    params.num_iterations = 20;
+    params.max_color = 8;  /* Will be updated by solver */
+    params.solver_factor = 0.6f;  /* CLOTH_SOLVER_DISPLACEMENT_FACTOR */
+    params.collision_stiffness = 1e6f;
+
+    /* Upload brush parameters if available */
+    if (ss.cache) {
+      params.brush_location = float4(ss.cache->location_symm, 0.0f);
+      if (brush) {
+        params.brush_delta = float4(ss.cache->grab_delta_symm, 0.0f);
+        params.brush_radius = ss.cache->radius;
+        params.brush_strength = brush->alpha;
+        params.brush_type = brush->cloth_deform_type;
+      }
+    }
+    else {
+      params.brush_location = float4(0.0f);
+      params.brush_delta = float4(0.0f);
+      params.brush_radius = 0.0f;
+      params.brush_strength = 0.0f;
+      params.brush_type = 0;
+    }
+
+    /* Run VBD step */
+    cloth_sim.vbd_solver->step(params);
+
+    /* Download results to simulation data */
+    cloth_sim.vbd_solver->download_to_simulation_data(cloth_sim);
+
+    /* Update mesh positions - need to apply changes to actual mesh */
+    /* This is handled similarly to the CPU path below */
+  }
+
   /* Update the constraints. */
   cloth_brush_satisfy_constraints(depsgraph, object, brush, cloth_sim);
 
@@ -1776,6 +1826,14 @@ std::unique_ptr<SimulationData> brush_simulation_create(const Depsgraph &depsgra
   }
 
   cloth_sim_initialize_default_node_state(ob, *cloth_sim);
+
+  /* Initialize VBD GPU solver (disabled by default, enable for testing) */
+  cloth_sim->use_vbd = ture;  /* Set to true to enable GPU VBD solver */
+  if (cloth_sim->use_vbd) {
+    namespace vbd = cloth::vbd;
+    cloth_sim->vbd_solver = std::make_unique<vbd::VBDSolver>();
+    cloth_sim->vbd_solver->init(totverts);
+  }
 
   return cloth_sim;
 }

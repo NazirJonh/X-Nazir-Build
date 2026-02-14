@@ -16,6 +16,8 @@
 
 #include "BKE_collision.h"
 
+#include <memory>
+
 namespace blender {
 
 struct Brush;
@@ -26,6 +28,11 @@ class Node;
 }
 
 namespace ed::sculpt_paint::cloth {
+
+/* Forward declaration for VBD solver */
+namespace vbd {
+class VBDSolver;
+}
 
 /* Cloth Simulation. */
 enum NodeSimState {
@@ -102,6 +109,10 @@ struct SimulationData {
   int totnode;
   Map<const bke::pbvh::Node *, int> node_state_index;
   Array<NodeSimState> node_state;
+
+  /* VBD GPU solver (optional) */
+  std::unique_ptr<vbd::VBDSolver> vbd_solver;
+  bool use_vbd = false;
 
   ~SimulationData();
 };

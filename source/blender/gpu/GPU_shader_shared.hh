@@ -254,6 +254,31 @@ struct [[host_shared]] TestOutput {
   int _pad0;
 };
 
+/* VBD (Vertex Block Descent) Cloth Simulation Parameters */
+struct [[host_shared]] VBDParams {
+  float4 gravity;
+  float time_step;
+  float time_step_inv;
+  float time_step_sq_inv;
+  float damping;
+  int total_vertices;
+  int total_springs;
+  int num_iterations;
+  int current_color;
+  int max_color;
+  float solver_factor;
+  float collision_stiffness;
+  float _pad0;  /* Padding to align brush_location to 16 bytes */
+  float4 brush_location;
+  float4 brush_delta;
+  float brush_radius;
+  float brush_strength;
+  int brush_type;
+  int _pad1;
+  float _pad2;
+  float _pad3;
+};
+
 #ifdef GPU_SHADER
 TestOutput test_output(
     TestOutputRawData expect, TestOutputRawData result, bool status, int line, uint type)

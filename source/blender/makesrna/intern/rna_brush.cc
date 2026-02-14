@@ -309,6 +309,7 @@ const EnumPropertyItem rna_enum_brush_curves_sculpt_brush_type_items[] = {
     {CURVES_SCULPT_BRUSH_TYPE_PUFF, "PUFF", 0, "Puff", ""},
     {CURVES_SCULPT_BRUSH_TYPE_SMOOTH, "SMOOTH", 0, "Smooth", ""},
     {CURVES_SCULPT_BRUSH_TYPE_SLIDE, "SLIDE", 0, "Slide", ""},
+    {CURVES_SCULPT_BRUSH_TYPE_CUT, "CUT", 0, "Cut", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -2215,6 +2216,22 @@ static void rna_def_curves_sculpt_options(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Curve Parameter Falloff",
                            "Falloff that is applied from the tip to the root of each curve");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvesSculptSettings_update");
+
+  prop = RNA_def_property(srna, "use_cut_keep_points", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_CURVES_SCULPT_FLAG_CUT_KEEP_POINTS);
+  RNA_def_property_ui_text(prop,
+                           "Keep Point Count",
+                           "Keep the number of control points constant by proportionally "
+                           "compressing the remaining points instead of deleting them");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvesSculptSettings_update");
+
+  prop = RNA_def_property(srna, "minimum_trim_length", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_range(prop, 0.0f, 1000.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 0.001, 3);
+  RNA_def_property_ui_text(prop,
+                           "Minimum Trim Length",
+                           "Minimum length when cutting curves. Set to 0 to delete curves completely");
   RNA_def_property_update(prop, 0, "rna_BrushCurvesSculptSettings_update");
 }
 

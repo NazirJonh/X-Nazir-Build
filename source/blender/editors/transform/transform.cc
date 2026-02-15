@@ -157,6 +157,46 @@ static void convertViewVec2D(View2D *v2d, float r_vec[3], int dx, int dy)
   r_vec[2] = 0.0f;
 }
 
+/**
+ * Convert screen delta to view delta with rotation compensation.
+ *
+ * The GPU view matrix applies rotation R(+θ) when rendering UV to screen.
+ * When the user moves the mouse in screen space, we need to apply the
+ * INVERSE rotation R(-θ) to get the correct UV-space delta.
+ *
+ * Formula: UV_delta = R(-θ) * screen_delta
+ *
+ * Uses pre-cached sin/cos values for performance.
+ * For inverse rotation: cos(-θ) = cos(θ), sin(-θ) = -sin(θ)
+ */
+static void convertViewVec2D_rotated(View2D *v2d,
+                                     float r_vec[3],
+                                     int dx,
+                                     int dy,
+                                     float rotation_cos,
+                                     float rotation_sin)
+{
+  /* First convert to view space without rotation. */
+  convertViewVec2D(v2d, r_vec, dx, dy);
+
+  if (rotation_sin != 0.0f) {
+    /* Apply INVERSE rotation to the delta vector using cached values.
+     * cos(-θ) = cos(θ), sin(-θ) = -sin(θ) */
+    float cos_r = rotation_cos;
+    float sin_r = -rotation_sin;
+    float x = r_vec[0];
+    float y = r_vec[1];
+
+    printf("[ROT_COMP] BEFORE rotation: r_vec=[%.6f, %.6f]\n", x, y);
+    printf("[ROT_COMP]   cos(-θ)=%.6f, sin(-θ)=%.6f\n", cos_r, sin_r);
+
+    r_vec[0] = x * cos_r - y * sin_r;
+    r_vec[1] = x * sin_r + y * cos_r;
+
+    printf("[ROT_COMP] AFTER rotation: r_vec=[%.6f, %.6f]\n", r_vec[0], r_vec[1]);
+  }
+}
+
 static void convertViewVec2D_mask(View2D *v2d, float r_vec[3], int dx, int dy)
 {
   float divx = BLI_rcti_size_x(&v2d->mask);
@@ -195,6 +235,14 @@ void convertViewVec(TransInfo *t, float r_vec[3], double dx, double dy)
     }
   }
   else if (t->spacetype == SPACE_IMAGE) {
+    SpaceImage *sima = static_cast<SpaceImage *>(t->area->spacedata.first);
+
+    printf("[CONVERT_VEC] SPACE_IMAGE: dx=%.1f, dy=%.1f\n", dx, dy);
+    printf("[CONVERT_VEC]   options: CTX_CURSOR=%d, CTX_MASK=%d, CTX_PAINT_CURVE=%d\n",
+           (t->options & CTX_CURSOR) ? 1 : 0,
+           (t->options & CTX_MASK) ? 1 : 0,
+           (t->options & CTX_PAINT_CURVE) ? 1 : 0);
+
     if (t->options & CTX_MASK) {
       convertViewVec2D_mask(static_cast<View2D *>(t->view), r_vec, dx, dy);
     }
@@ -203,11 +251,20 @@ void convertViewVec(TransInfo *t, float r_vec[3], double dx, double dy)
       r_vec[1] = dy;
     }
     else {
-      convertViewVec2D(static_cast<View2D *>(t->view), r_vec, dx, dy);
+      /* Use rotation-compensated conversion for UV editing. */
+      float rotation_cos = sima ? sima->rotation_cos : 1.0f;
+      float rotation_sin = sima ? sima->rotation_sin : 0.0f;
+      printf("[CONVERT_VEC]   rotation: %.4f rad (%.1f deg)\n",
+             sima ? sima->rotation : 0.0f,
+             sima ? RAD2DEGF(sima->rotation) : 0.0f);
+      convertViewVec2D_rotated(static_cast<View2D *>(t->view), r_vec, dx, dy, rotation_cos, rotation_sin);
+      printf("[CONVERT_VEC]   after rotation: r_vec=[%.4f, %.4f]\n", r_vec[0], r_vec[1]);
     }
 
     r_vec[0] *= t->aspect[0];
     r_vec[1] *= t->aspect[1];
+
+    printf("[CONVERT_VEC]   after aspect: r_vec=[%.4f, %.4f]\n", r_vec[0], r_vec[1]);
   }
   else if (ELEM(t->spacetype, SPACE_GRAPH, SPACE_NLA)) {
     convertViewVec2D(static_cast<View2D *>(t->view), r_vec, dx, dy);
@@ -314,13 +371,28 @@ void projectIntViewEx(TransInfo *t, const float vec[3], int adr[2], const eV3DPr
       adr[1] = vec[1];
     }
     else {
+      /* Regular UV editing - use rotation-compensated projection. */
       float v[2];
+
+      printf("[PROJECT_VIEW] SPACE_IMAGE: vec=[%.4f, %.4f, %.4f]\n", vec[0], vec[1], vec[2]);
+      printf("[PROJECT_VIEW]   options: CTX_CURSOR=%d, CTX_MASK=%d\n",
+             (t->options & CTX_CURSOR) ? 1 : 0,
+             (t->options & CTX_MASK) ? 1 : 0);
+      printf("[PROJECT_VIEW]   aspect: [%.4f, %.4f]\n", t->aspect[0], t->aspect[1]);
 
       v[0] = vec[0] / t->aspect[0];
       v[1] = vec[1] / t->aspect[1];
 
-      ui::view2d_view_to_region(
-          static_cast<const View2D *>(t->view), v[0], v[1], &adr[0], &adr[1]);
+      printf("[PROJECT_VIEW]   v before projection: [%.4f, %.4f]\n", v[0], v[1]);
+      printf("[PROJECT_VIEW]   sima->rotation: %.4f rad (%.1f deg)\n",
+             sima->rotation, RAD2DEGF(sima->rotation));
+
+      ED_image_point_pos__reverse_rotated(sima, t->region, v, v);
+
+      printf("[PROJECT_VIEW]   v after projection: [%.4f, %.4f]\n", v[0], v[1]);
+
+      adr[0] = v[0];
+      adr[1] = v[1];
     }
   }
   else if (t->spacetype == SPACE_ACTION) {

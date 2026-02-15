@@ -106,6 +106,79 @@ void ED_image_point_pos__reverse(SpaceImage *sima,
                                  const ARegion *region,
                                  const float co[2],
                                  float r_co[2]);
+
+/* Const versions of coordinate conversion functions for use in rotation wrappers. */
+void ED_image_mouse_pos_const(const SpaceImage *sima,
+                               const ARegion *region,
+                               const int mval[2],
+                               float co[2]);
+void ED_image_point_pos_const(const SpaceImage *sima,
+                               const ARegion *region,
+                               float x,
+                               float y,
+                               float *r_x,
+                               float *r_y);
+void ED_image_point_pos__reverse_const(const SpaceImage *sima,
+                                        const ARegion *region,
+                                        const float co[2],
+                                        float r_co[2]);
+
+/**
+ * Mouse position in image space, compensated for canvas rotation.
+ * Use this instead of ED_image_mouse_pos() when the canvas may be rotated
+ * and you need coordinates that map correctly to the actual image/UV data.
+ *
+ * \param sima: SpaceImage containing the rotation value.
+ * \param region: Region for coordinate conversion.
+ * \param mval: Mouse position in region coordinates (event->mval).
+ * \param r_co: Result in UV/image coordinates (0..1 range), rotation-compensated.
+ */
+void ED_image_mouse_pos_rotated(const SpaceImage *sima,
+                                 const ARegion *region,
+                                 const int mval[2],
+                                 float r_co[2]);
+
+/**
+ * Convert UV/image coordinates to screen coordinates, compensated for canvas rotation.
+ * This is the inverse of ED_image_mouse_pos_rotated().
+ *
+ * \param sima: SpaceImage containing the rotation value.
+ * \param region: Region for coordinate conversion.
+ * \param co: UV/image coordinates (0..1 range).
+ * \param r_co: Result in screen/region coordinates.
+ */
+void ED_image_view_to_region_rotated(const SpaceImage *sima,
+                                      const ARegion *region,
+                                      const float co[2],
+                                      float r_co[2]);
+
+/**
+ * Point position in image space (float version), compensated for canvas rotation.
+ * Same as ED_image_point_pos() but with rotation compensation.
+ */
+void ED_image_point_pos_rotated(SpaceImage *sima,
+                                 const ARegion *region,
+                                 float x,
+                                 float y,
+                                 float *r_x,
+                                 float *r_y);
+
+/**
+ * Convert UV/image coordinates to screen coordinates (float version), compensated for rotation.
+ * Same as ED_image_point_pos__reverse() but with rotation compensation.
+ */
+void ED_image_point_pos__reverse_rotated(SpaceImage *sima,
+                                          const ARegion *region,
+                                          const float co[2],
+                                          float r_co[2]);
+
+/**
+ * Update cached sin/cos values for canvas rotation.
+ * Must be called whenever sima->rotation is changed.
+ * This avoids repeated sin/cos calculations in coordinate conversion functions.
+ */
+void ED_space_image_rotation_cache_update(SpaceImage *sima);
+
 /**
  * This is more a user-level functionality, for going to `next/prev` used slot,
  * Stepping onto the last unused slot too.

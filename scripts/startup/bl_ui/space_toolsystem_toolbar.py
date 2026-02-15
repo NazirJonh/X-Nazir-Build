@@ -2527,6 +2527,20 @@ class _defs_image_generic:
             draw_settings=draw_settings,
         )
 
+    @ToolDef.from_fn
+    def rotate_canvas():
+        return dict(
+            idname="builtin.rotate_canvas",
+            label="Rotate Canvas",
+            description=(
+                "Rotate the canvas view interactively"
+            ),
+            icon="ops.transform.rotate",
+            cursor='ROTATE',
+            keymap=(),
+            operator="image.view_rotate_interactive",
+        )
+
 
 class _defs_image_mask_transform:
 
@@ -3497,6 +3511,7 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
         ],
         'VIEW': [
             _defs_image_generic.sample,
+            _defs_image_generic.rotate_canvas,
             *_tools_annotate,
         ],
         'UV': [
@@ -3512,6 +3527,8 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_image_uv_sculpt.grab,
             _defs_image_uv_sculpt.relax,
             _defs_image_uv_sculpt.pinch,
+            None,
+            _defs_image_generic.rotate_canvas,
         ],
         'MASK': [
             *_tools_mask_select,
@@ -3523,6 +3540,8 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             None,
             # TODO: Make interactive placement before adding primitive tools
             # *_tools_mask_primitive,
+            None,
+            _defs_image_generic.rotate_canvas,
         ],
         'PAINT': [
             _brush_tool,
@@ -3533,6 +3552,8 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_texture_paint.mask,
             None,
             *_tools_annotate,
+            None,
+            _defs_image_generic.rotate_canvas,
         ],
     }
 

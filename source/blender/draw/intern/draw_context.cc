@@ -16,6 +16,7 @@
 #include "BLI_map.hh"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix_types.hh"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_string.h"
@@ -469,6 +470,57 @@ void DRWContext::acquire_data()
 
       float4x4 viewmat;
       BLI_rctf_transform_calc_m4_pivot_min(&v2d->cur, &region_space, viewmat.ptr());
+
+      if (this->space_data && this->space_data->spacetype == SPACE_IMAGE) {
+        SpaceImage *sima = reinterpret_cast<SpaceImage *>(this->space_data);
+        printf("[ROTATION DEBUG] SPACE_IMAGE detected, rotation=%.4f rad (%.1f deg), pivot=[%.4f, %.4f]\n",
+               sima->rotation, RAD2DEGF(sima->rotation), sima->rotation_pivot[0], sima->rotation_pivot[1]);
+        if (sima->rotation != 0.0f) {
+          float rotmat[4][4], t1[4][4], r[4][4], t2[4][4], tmp[4][4];
+          float pivot[3] = {sima->rotation_pivot[0], sima->rotation_pivot[1], 0.0f};
+
+          /* Create transform: Translate(Pivot) * Rotate(Angle) * Translate(-Pivot) */
+
+          /* 1. Translate to origin */
+          unit_m4(t1);
+          translate_m4(t1, -pivot[0], -pivot[1], 0.0f);
+
+          /* 2. Rotate */
+          unit_m4(r);
+          rotate_m4(r, 'Z', sima->rotation);
+
+          /* 3. Translate back */
+          unit_m4(t2);
+          translate_m4(t2, pivot[0], pivot[1], 0.0f);
+
+          /* Combine: T2 * R * T1 */
+          mul_m4_m4m4(tmp, r, t1);
+          mul_m4_m4m4(rotmat, t2, tmp);
+
+          printf("[ROTATION DEBUG] rotmat:\n");
+          printf("  [%.4f %.4f %.4f %.4f]\n", rotmat[0][0], rotmat[0][1], rotmat[0][2], rotmat[0][3]);
+          printf("  [%.4f %.4f %.4f %.4f]\n", rotmat[1][0], rotmat[1][1], rotmat[1][2], rotmat[1][3]);
+          printf("  [%.4f %.4f %.4f %.4f]\n", rotmat[2][0], rotmat[2][1], rotmat[2][2], rotmat[2][3]);
+          printf("  [%.4f %.4f %.4f %.4f]\n", rotmat[3][0], rotmat[3][1], rotmat[3][2], rotmat[3][3]);
+
+          printf("[ROTATION DEBUG] viewmat BEFORE:\n");
+          printf("  [%.4f %.4f %.4f %.4f]\n", viewmat[0][0], viewmat[0][1], viewmat[0][2], viewmat[0][3]);
+          printf("  [%.4f %.4f %.4f %.4f]\n", viewmat[1][0], viewmat[1][1], viewmat[1][2], viewmat[1][3]);
+          printf("  [%.4f %.4f %.4f %.4f]\n", viewmat[2][0], viewmat[2][1], viewmat[2][2], viewmat[2][3]);
+          printf("  [%.4f %.4f %.4f %.4f]\n", viewmat[3][0], viewmat[3][1], viewmat[3][2], viewmat[3][3]);
+
+          /* Apply to viewmat: ViewMat = ViewMat * RotMat */
+          float viewmat_copy[4][4];
+          copy_m4_m4(viewmat_copy, (float(*)[4])viewmat.ptr());
+          mul_m4_m4m4((float(*)[4])viewmat.ptr(), viewmat_copy, rotmat);
+
+          printf("[ROTATION DEBUG] viewmat AFTER:\n");
+          printf("  [%.4f %.4f %.4f %.4f]\n", viewmat[0][0], viewmat[0][1], viewmat[0][2], viewmat[0][3]);
+          printf("  [%.4f %.4f %.4f %.4f]\n", viewmat[1][0], viewmat[1][1], viewmat[1][2], viewmat[1][3]);
+          printf("  [%.4f %.4f %.4f %.4f]\n", viewmat[2][0], viewmat[2][1], viewmat[2][2], viewmat[2][3]);
+          printf("  [%.4f %.4f %.4f %.4f]\n", viewmat[3][0], viewmat[3][1], viewmat[3][2], viewmat[3][3]);
+        }
+      }
 
       float4x4 winmat = float4x4::identity();
       winmat[0][0] = winmat[1][1] = 2.0f;

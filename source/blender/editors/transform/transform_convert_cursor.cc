@@ -23,6 +23,16 @@
 #include "transform.hh"
 #include "transform_convert.hh"
 
+/* Debug flag for cursor transform. Set to 1 to enable debug output. */
+#define CURSOR_TRANSFORM_DEBUG 1
+
+#if CURSOR_TRANSFORM_DEBUG
+#  include <cstdio>
+#  define CURSOR_DEBUG_PRINT(...) printf(__VA_ARGS__)
+#else
+#  define CURSOR_DEBUG_PRINT(...)
+#endif
+
 namespace blender::ed::transform {
 
 /* -------------------------------------------------------------------- */
@@ -33,6 +43,18 @@ static void createTransCursor_2D_impl(TransInfo *t, float cursor_location[2])
 {
   TransData *td;
   TransData2D *td2d;
+
+  CURSOR_DEBUG_PRINT("\n=== createTransCursor_2D_impl ===\n");
+  CURSOR_DEBUG_PRINT("  cursor_location: [%.4f, %.4f]\n", cursor_location[0], cursor_location[1]);
+  CURSOR_DEBUG_PRINT("  t->aspect: [%.4f, %.4f]\n", t->aspect[0], t->aspect[1]);
+  CURSOR_DEBUG_PRINT("  t->spacetype: %d (SPACE_IMAGE=%d)\n", t->spacetype, SPACE_IMAGE);
+
+  if (t->spacetype == SPACE_IMAGE) {
+    SpaceImage *sima = static_cast<SpaceImage *>(t->area->spacedata.first);
+    CURSOR_DEBUG_PRINT("  sima->rotation: %.4f rad (%.1f deg)\n", sima->rotation, RAD2DEGF(sima->rotation));
+    CURSOR_DEBUG_PRINT("  sima->rotation_pivot: [%.4f, %.4f]\n", sima->rotation_pivot[0], sima->rotation_pivot[1]);
+  }
+
   {
     BLI_assert(t->data_container_len == 1);
     TransDataContainer *tc = t->data_container;
@@ -52,6 +74,8 @@ static void createTransCursor_2D_impl(TransInfo *t, float cursor_location[2])
   td2d->loc[1] = cursor_location[1] * t->aspect[1];
   td2d->loc[2] = 0.0f;
 
+  CURSOR_DEBUG_PRINT("  td2d->loc (scaled): [%.4f, %.4f, %.4f]\n", td2d->loc[0], td2d->loc[1], td2d->loc[2]);
+
   copy_v3_v3(td->center, td2d->loc);
 
   unit_m3(td->mtx);
@@ -69,11 +93,19 @@ static void recalcData_cursor_2D_impl(TransInfo *t)
   TransData2D *td2d = tc->data_2d;
   float aspect_inv[2];
 
+  CURSOR_DEBUG_PRINT("\n=== recalcData_cursor_2D_impl ===\n");
+  CURSOR_DEBUG_PRINT("  t->aspect: [%.4f, %.4f]\n", t->aspect[0], t->aspect[1]);
+  CURSOR_DEBUG_PRINT("  td->loc: [%.4f, %.4f, %.4f]\n", td->loc[0], td->loc[1], td->loc[2]);
+  CURSOR_DEBUG_PRINT("  td->iloc: [%.4f, %.4f, %.4f]\n", td->iloc[0], td->iloc[1], td->iloc[2]);
+
   aspect_inv[0] = 1.0f / t->aspect[0];
   aspect_inv[1] = 1.0f / t->aspect[1];
 
   td2d->loc2d[0] = td->loc[0] * aspect_inv[0];
   td2d->loc2d[1] = td->loc[1] * aspect_inv[1];
+
+  CURSOR_DEBUG_PRINT("  aspect_inv: [%.4f, %.4f]\n", aspect_inv[0], aspect_inv[1]);
+  CURSOR_DEBUG_PRINT("  td2d->loc2d (result): [%.4f, %.4f]\n", td2d->loc2d[0], td2d->loc2d[1]);
 
   DEG_id_tag_update(&t->scene->id, ID_RECALC_SYNC_TO_EVAL);
 }

@@ -98,6 +98,15 @@ class IMAGE_MT_view(Menu):
 
         layout.separator()
 
+        # Canvas Rotation
+        layout.label(text="Canvas Rotation", icon='DRIVER_ROTATIONAL_DIFFERENCE')
+        row = layout.row()
+        row.operator("image.view_rotate_ccw", text="Rotate 90° CCW", icon='LOOP_BACK')
+        row.operator("image.view_rotate_cw", text="Rotate 90° CW", icon='LOOP_FORWARDS')
+        layout.operator("image.view_rotate_reset", text="Reset Rotation", icon='FILE_REFRESH')
+
+        layout.separator()
+
         if show_render:
             layout.operator("image.render_border")
             layout.operator("image.clear_render_border")

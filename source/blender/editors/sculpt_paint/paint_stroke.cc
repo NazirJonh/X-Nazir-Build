@@ -402,6 +402,12 @@ bool PaintStroke::update(bContext *C,
     }
   }
 
+  if (do_random_mask) {
+    if (ELEM(brush.mask_mtex.brush_map_mode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_RANDOM)) {
+      paint_runtime.brush_rotation_sec += brush.mask_mtex.rot;
+    }
+  }
+
   if (!location_sampled) {
     if (mode != PaintMode::Texture2D) {
       if (this->get_location(r_location, mouse, original_)) {

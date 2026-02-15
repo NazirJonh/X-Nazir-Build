@@ -530,10 +530,29 @@ static bool paint_draw_tex_overlay(Paint *paint,
           paint_runtime->draw_anchored ? paint_runtime->anchored_initial_mouse[1] : y,
       };
 
-      /* Brush rotation. */
+      float brush_rot = primary ? paint_runtime->brush_rotation :
+                                  paint_runtime->brush_rotation_sec;
+      float total_rotation = brush_rot;
+
+      {
+        static bool did_print = false;
+        static float last_brush_rot = 0.0f;
+        static float last_mtex_rot = 0.0f;
+        if (!did_print || last_mtex_rot != mtex->rot || last_brush_rot != brush_rot) {
+          did_print = true;
+          last_brush_rot = brush_rot;
+          last_mtex_rot = mtex->rot;
+          printf("[TexOverlay] map=%d mode=%d mtex.rot=%.2f brush=%.2f total=%.2f (deg)\n",
+                 int(mtex->brush_map_mode),
+                 int(mode),
+                 mtex->rot * 180.0f / M_PI,
+                 brush_rot * 180.0f / M_PI,
+                 total_rotation * 180.0f / M_PI);
+        }
+      }
+
       GPU_matrix_translate_2fv(center);
-      GPU_matrix_rotate_2d(
-          RAD2DEGF(primary ? paint_runtime->brush_rotation : paint_runtime->brush_rotation_sec));
+      GPU_matrix_rotate_2d(RAD2DEGF(total_rotation));
       GPU_matrix_translate_2f(-center[0], -center[1]);
 
       /* Scale based on tablet pressure. */

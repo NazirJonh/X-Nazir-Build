@@ -33,6 +33,11 @@ static void createTransCursor_2D_impl(TransInfo *t, float cursor_location[2])
 {
   TransData *td;
   TransData2D *td2d;
+
+  if (t->spacetype == SPACE_IMAGE) {
+    SpaceImage *sima = static_cast<SpaceImage *>(t->area->spacedata.first);
+  }
+
   {
     BLI_assert(t->data_container_len == 1);
     TransDataContainer *tc = t->data_container;

@@ -35,6 +35,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include "ED_asset_shelf.hh"
+#include "ED_gizmo_utils.hh"
 #include "ED_image.hh"
 #include "ED_mask.hh"
 #include "ED_node.hh"
@@ -225,6 +226,10 @@ static void image_operatortypes()
   WM_operatortype_append(IMAGE_OT_view_zoom_out);
   WM_operatortype_append(IMAGE_OT_view_zoom_ratio);
   WM_operatortype_append(IMAGE_OT_view_zoom_border);
+  WM_operatortype_append(IMAGE_OT_view_rotate_cw);
+  WM_operatortype_append(IMAGE_OT_view_rotate_ccw);
+  WM_operatortype_append(IMAGE_OT_view_rotate_reset);
+  WM_operatortype_append(IMAGE_OT_view_rotate_interactive);
 #ifdef WITH_INPUT_NDOF
   WM_operatortype_append(IMAGE_OT_view_ndof);
 #endif

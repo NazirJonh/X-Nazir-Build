@@ -14,6 +14,7 @@
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 
+#include "ED_image.hh"
 #include "ED_view3d.hh"
 #include "UI_view2d.hh"
 
@@ -68,8 +69,11 @@ class Cursor : Overlay {
     }
     else {
       const SpaceImage *sima = reinterpret_cast<const SpaceImage *>(state.space_data);
-      ui::view2d_view_to_region(
-          &state.region->v2d, sima->cursor[0], sima->cursor[1], &pixel_coord[0], &pixel_coord[1]);
+      /* Use rotation-compensated projection for 2D cursor in Image Editor. */
+      float cursor_screen[2];
+      ED_image_view_to_region_rotated(sima, state.region, sima->cursor, cursor_screen);
+      pixel_coord[0] = cursor_screen[0];
+      pixel_coord[1] = cursor_screen[1];
     }
 
     float4x4 cursor_mat = math::from_scale<float4x4>(float2(U.widget_unit));

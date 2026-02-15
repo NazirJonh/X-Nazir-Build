@@ -2269,17 +2269,17 @@ static wmOperatorStatus uv_set_2d_cursor_exec(bContext *C, wmOperator *op)
 static wmOperatorStatus uv_set_2d_cursor_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   ARegion *region = CTX_wm_region(C);
+  SpaceImage *sima = CTX_wm_space_image(C);
   float location[2];
 
   if (region->regiontype == RGN_TYPE_WINDOW) {
-    SpaceImage *sima = CTX_wm_space_image(C);
     if (sima && ED_space_image_show_cache_and_mval_over(sima, region, event->mval)) {
       return OPERATOR_PASS_THROUGH;
     }
   }
 
-  ui::view2d_region_to_view(
-      &region->v2d, event->mval[0], event->mval[1], &location[0], &location[1]);
+  /* Use rotation-compensated coordinates for correct cursor position when canvas is rotated. */
+  ED_image_mouse_pos_rotated(sima, region, event->mval, location);
   RNA_float_set_array(op->ptr, "location", location);
 
   return uv_set_2d_cursor_exec(C, op);

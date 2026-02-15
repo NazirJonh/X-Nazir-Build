@@ -15,15 +15,15 @@ set(INC_SYS
 )
 
 set(SRC
-  image_buttons.cc
-  image_draw.cc
-  image_edit.cc
-  image_ops.cc
-  image_sequence.cc
-  image_undo.cc
-  space_image.cc
+    image_buttons.cc
+    image_draw.cc
+    image_edit.cc
+    image_ops.cc
+    image_sequence.cc
+    image_undo.cc
+    space_image.cc
 
-  image_intern.hh
+    image_intern.hh
 )
 
 set(LIB

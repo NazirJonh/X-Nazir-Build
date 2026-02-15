@@ -16,6 +16,7 @@
 #include "BLI_map.hh"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix_types.hh"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_string.h"
@@ -469,6 +470,37 @@ void DRWContext::acquire_data()
 
       float4x4 viewmat;
       BLI_rctf_transform_calc_m4_pivot_min(&v2d->cur, &region_space, viewmat.ptr());
+
+      if (this->space_data && this->space_data->spacetype == SPACE_IMAGE) {
+        SpaceImage *sima = reinterpret_cast<SpaceImage *>(this->space_data);
+        if (sima->rotation != 0.0f) {
+          float rotmat[4][4], t1[4][4], r[4][4], t2[4][4], tmp[4][4];
+          float pivot[3] = {sima->rotation_pivot[0], sima->rotation_pivot[1], 0.0f};
+
+          /* Create transform: Translate(Pivot) * Rotate(Angle) * Translate(-Pivot) */
+
+          /* 1. Translate to origin */
+          unit_m4(t1);
+          translate_m4(t1, -pivot[0], -pivot[1], 0.0f);
+
+          /* 2. Rotate */
+          unit_m4(r);
+          rotate_m4(r, 'Z', sima->rotation);
+
+          /* 3. Translate back */
+          unit_m4(t2);
+          translate_m4(t2, pivot[0], pivot[1], 0.0f);
+
+          /* Combine: T2 * R * T1 */
+          mul_m4_m4m4(tmp, r, t1);
+          mul_m4_m4m4(rotmat, t2, tmp);
+
+          /* Apply to viewmat: ViewMat = ViewMat * RotMat */
+          float viewmat_copy[4][4];
+          copy_m4_m4(viewmat_copy, (float (*)[4])viewmat.ptr());
+          mul_m4_m4m4((float (*)[4])viewmat.ptr(), viewmat_copy, rotmat);
+        }
+      }
 
       float4x4 winmat = float4x4::identity();
       winmat[0][0] = winmat[1][1] = 2.0f;

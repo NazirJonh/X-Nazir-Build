@@ -15,8 +15,10 @@ set(INC_SYS
 
 set(SRC
   space_userpref.cc
+  userpref_asset_library_tree_view.cc
   userpref_ops.cc
 
+  userpref_asset_library_tree_view.hh
   userpref_intern.hh
 )
 

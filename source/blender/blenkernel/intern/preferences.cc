@@ -235,6 +235,237 @@ bUserAssetLibrary *BKE_preferences_remote_asset_library_add(UserDef *userdef,
   return library;
 }
 
+bUserAssetLibrary *BKE_preferences_asset_library_folder_add(UserDef *userdef,
+                                                            const char *name,
+                                                            bUserAssetLibrary *parent)
+{
+  bUserAssetLibrary *folder = MEM_new<bUserAssetLibrary>(__func__);
+
+  folder->type = USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER;
+  folder->parent = parent;
+  folder->dirpath[0] = '\0';
+  folder->remote_url[0] = '\0';
+  folder->import_method = ASSET_IMPORT_PACK;
+  folder->flag = ASSET_LIBRARY_RELATIVE_PATH;
+
+  if (name) {
+    BKE_preferences_asset_library_name_set(userdef, folder, name);
+  }
+
+  /* Insert the folder in the correct position in the list:
+   * after the parent and all its descendants. */
+  if (parent) {
+    bUserAssetLibrary *insert_after = parent;
+
+    /* Find the last descendant of the parent. */
+    for (bUserAssetLibrary &item : userdef->asset_libraries) {
+      if (item.parent == parent) {
+        insert_after = &item;
+      }
+    }
+
+    BLI_insertlinkafter(&userdef->asset_libraries, insert_after, folder);
+  }
+  else {
+    /* For root level folders, add to the end of the list. */
+    BLI_addtail(&userdef->asset_libraries, folder);
+  }
+
+  return folder;
+}
+
+void BKE_preferences_asset_library_move_to_folder(UserDef *userdef,
+                                                  bUserAssetLibrary *library,
+                                                  bUserAssetLibrary *new_parent)
+{
+  if (library->parent == new_parent) {
+    return; /* Already in the correct folder. */
+  }
+
+  /* Prevent moving a folder into itself or its descendants. */
+  if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+    bUserAssetLibrary *current = new_parent;
+    while (current) {
+      if (current == library) {
+        return; /* Cannot move folder into itself. */
+      }
+      current = current->parent;
+    }
+  }
+
+  library->parent = new_parent;
+
+  /* Remove from current position. */
+  BLI_remlink(&userdef->asset_libraries, library);
+
+  /* Insert in the correct position. */
+  if (new_parent) {
+    bUserAssetLibrary *insert_after = new_parent;
+
+    /* Find the last descendant of the new parent. */
+    for (bUserAssetLibrary &item : userdef->asset_libraries) {
+      if (item.parent == new_parent) {
+        insert_after = &item;
+      }
+    }
+
+    BLI_insertlinkafter(&userdef->asset_libraries, insert_after, library);
+  }
+  else {
+    /* For root level, add to the end of the list. */
+    BLI_addtail(&userdef->asset_libraries, library);
+  }
+}
+
+bool BKE_preferences_asset_library_is_folder(const bUserAssetLibrary *library)
+{
+  return library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER;
+}
+
+bool BKE_preferences_asset_library_can_delete(const UserDef *userdef,
+                                              const bUserAssetLibrary *library)
+{
+  if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+    /* Folders can only be deleted if they are empty. */
+    for (const bUserAssetLibrary &item : userdef->asset_libraries) {
+      if (item.parent == library) {
+        return false; /* Folder has children. */
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * Reorder an asset library or folder within its parent.
+ * \param userdef: The user preferences.
+ * \param library: The library or folder to reorder.
+ * \param target: The target library or folder to reorder relative to.
+ * \param location: Where to place the library relative to the target (Before, After, Into).
+ * \return True if the reorder was successful.
+ */
+bool BKE_preferences_asset_library_reorder(UserDef *userdef,
+                                           bUserAssetLibrary *library,
+                                           bUserAssetLibrary *target,
+                                           const int location)
+{
+  if (!library || !target || library == target) {
+    return false;
+  }
+
+  /* Prevent moving a folder into itself or its descendants. */
+  if (location == 0 /* Into */) { /* MoveLocation::Into = 0 */
+    if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      bUserAssetLibrary *current = target;
+      while (current) {
+        if (current == library) {
+          return false; /* Cannot move folder into itself. */
+        }
+        current = current->parent;
+      }
+    }
+  }
+
+  bUserAssetLibrary *new_parent = nullptr;
+
+  if (location == 0) {
+    /* Into: Move into the target folder. */
+    if (target->type != USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      return false; /* Can only move into folders. */
+    }
+    new_parent = target;
+  }
+  else {
+    /* Before/After: Move to the same parent as the target. */
+    new_parent = target->parent;
+  }
+
+  /* If moving a folder, we need to move all its descendants as well.
+   * First, collect all items in the subtree. */
+  blender::Vector<bUserAssetLibrary *> items_to_move;
+  items_to_move.append(library);
+
+  if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+    for (bUserAssetLibrary &item : userdef->asset_libraries) {
+      /* Check if item is a descendant of library. */
+      bUserAssetLibrary *current_parent = item.parent;
+      bool is_descendant = false;
+
+      while (current_parent) {
+        if (current_parent == library) {
+          is_descendant = true;
+          break;
+        }
+        current_parent = current_parent->parent;
+      }
+
+      if (is_descendant) {
+        items_to_move.append(&item);
+      }
+    }
+  }
+
+  /* Remove all items from current position (in reverse order to maintain relative positions). */
+  for (int i = items_to_move.size() - 1; i >= 0; i--) {
+    BLI_remlink(&userdef->asset_libraries, items_to_move[i]);
+  }
+
+  /* Set new parent only for the main item being moved.
+   * Descendant items keep their internal parent relationships. */
+  library->parent = new_parent;
+
+  /* Insert the main item in the correct position. */
+  if (location == 1) { /* MoveLocation::Before = 1 */
+    BLI_insertlinkbefore(&userdef->asset_libraries, target, library);
+  }
+  else if (location == 2) { /* MoveLocation::After = 2 */
+    BLI_insertlinkafter(&userdef->asset_libraries, target, library);
+  }
+  else {
+    /* Into: Insert after the last descendant of the new parent. */
+    if (new_parent) {
+      bUserAssetLibrary *insert_after = new_parent;
+
+      /* Find the last descendant in the entire subtree of the new parent.
+       * We need to check all items and find the one with the deepest nesting
+       * that has new_parent as an ancestor. */
+      for (bUserAssetLibrary &item : userdef->asset_libraries) {
+        /* Check if item is a descendant of new_parent. */
+        bUserAssetLibrary *current_parent = item.parent;
+        bool is_descendant = false;
+
+        while (current_parent) {
+          if (current_parent == new_parent) {
+            is_descendant = true;
+            break;
+          }
+          current_parent = current_parent->parent;
+        }
+
+        if (is_descendant) {
+          /* This item is a descendant, check if it's the last one. */
+          /* We want the last item in the subtree, so we keep updating insert_after
+           * as we iterate through the list. */
+          insert_after = &item;
+        }
+      }
+
+      BLI_insertlinkafter(&userdef->asset_libraries, insert_after, library);
+    }
+    else {
+      /* For root level, add to the end of the list. */
+      BLI_addtail(&userdef->asset_libraries, library);
+    }
+  }
+
+  /* Insert all descendant items after the main item, maintaining their relative order. */
+  for (int i = 1; i < items_to_move.size(); i++) {
+    BLI_insertlinkafter(&userdef->asset_libraries, items_to_move[i - 1], items_to_move[i]);
+  }
+
+  return true;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

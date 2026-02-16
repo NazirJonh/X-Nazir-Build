@@ -612,20 +612,35 @@ struct bUserMenuItem_Prop {
   char _pad0[4] = {};
 };
 
+/**
+ * Type of asset library item in Preferences.
+ * Used to distinguish between actual asset libraries and folder containers.
+ */
+enum eUserAssetLibraryItemType {
+  /** Regular asset library with a path on disk. */
+  USER_ASSET_LIBRARY_ITEM_TYPE_LEAF = 0,
+  /** Folder/container for organizing asset libraries. */
+  USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER = 1,
+};
+
 struct bUserAssetLibrary {
   struct bUserAssetLibrary *next = nullptr, *prev = nullptr;
+  /** Parent folder for hierarchical organization. nullptr for root level items. */
+  struct bUserAssetLibrary *parent = nullptr;
 
   char name[/*MAX_NAME*/ 64] = "";
   /** The path on disk for this asset library. For remote libraries
    * (#ASSET_LIBRARY_USE_REMOTE_URL), this is the download cache directory, where already
-   * downloaded assets will be placed. */
+   * downloaded assets will be placed. Empty for folder containers. */
   char dirpath[/*FILE_MAX*/ 1024] = "";
   /** Only for remote asset libraries (#ASSET_LIBRARY_USE_REMOTE_URL is set). */
   char remote_url[/*FILE_MAX*/ 1024];
 
   short import_method = ASSET_IMPORT_PACK;  /* eAssetImportMethod */
   short flag = ASSET_LIBRARY_RELATIVE_PATH; /* eAssetLibrary_Flag */
-  char _pad0[4] = {};
+  /** Type of item: #eUserAssetLibraryItemType (LEAF for library, FOLDER for container). */
+  short type = USER_ASSET_LIBRARY_ITEM_TYPE_LEAF;
+  char _pad0[2] = {};
 };
 
 enum eUserExtensionRepo_Flag {

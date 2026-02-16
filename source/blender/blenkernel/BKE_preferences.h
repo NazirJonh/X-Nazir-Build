@@ -105,6 +105,49 @@ bool BKE_preferences_asset_library_is_valid(const UserDef *userdef,
 
 void BKE_preferences_asset_library_default_add(struct UserDef *userdef) ATTR_NONNULL();
 
+/**
+ * Create a new folder for organizing asset libraries.
+ * \param parent: Parent folder (nullptr for root level).
+ */
+struct bUserAssetLibrary *BKE_preferences_asset_library_folder_add(struct UserDef *userdef,
+                                                                   const char *name,
+                                                                   struct bUserAssetLibrary *parent)
+    ATTR_NONNULL(1);
+
+/**
+ * Move an asset library or folder to a different parent folder.
+ * \param library: The library or folder to move.
+ * \param new_parent: The new parent folder (nullptr for root level).
+ */
+void BKE_preferences_asset_library_move_to_folder(struct UserDef *userdef,
+                                                  struct bUserAssetLibrary *library,
+                                                  struct bUserAssetLibrary *new_parent)
+    ATTR_NONNULL(1, 2);
+
+/**
+ * Check if the library is a folder (container for other libraries).
+ */
+bool BKE_preferences_asset_library_is_folder(const struct bUserAssetLibrary *library) ATTR_NONNULL()
+    ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Check if the library can be deleted.
+ * Folders can only be deleted if they are empty.
+ */
+bool BKE_preferences_asset_library_can_delete(const struct UserDef *userdef,
+                                              const struct bUserAssetLibrary *library) ATTR_NONNULL()
+    ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Reorder an asset library or folder within its parent.
+ * \param location: Where to place the library relative to the target:
+ *                  0 = Into, 1 = Before, 2 = After.
+ */
+bool BKE_preferences_asset_library_reorder(UserDef *userdef,
+                                           bUserAssetLibrary *library,
+                                           bUserAssetLibrary *target,
+                                           const int location) ATTR_NONNULL(1, 2, 3);
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

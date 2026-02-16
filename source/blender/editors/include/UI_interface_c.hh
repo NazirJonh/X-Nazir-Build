@@ -2510,6 +2510,11 @@ void uiTemplateOperatorPropertyButs(
 }  // namespace ui
 void template_header3D_mode(ui::Layout *layout, bContext *C);
 void uiTemplateEditModeSelection(ui::Layout *layout, bContext *C);
+
+/**
+ * Show GN Selection Mode selector (Vertex/Edge/Face) in header.
+ */
+void uiTemplateGNSelectionMode(struct ui::Layout *layout, struct bContext *C);
 namespace ui {
 void uiTemplateReportsBanner(Layout *layout, bContext *C);
 void uiTemplateInputStatus(Layout *layout, bContext *C);

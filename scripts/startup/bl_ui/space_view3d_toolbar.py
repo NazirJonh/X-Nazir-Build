@@ -232,6 +232,31 @@ class VIEW3D_PT_tools_posemode_options(View3DPanel, Panel):
         layout.label(text="Affect Only")
         layout.prop(tool_settings, "use_transform_pivot_point_align", text="Locations")
 
+
+# ********** default tools for GN Selection Mode ****************
+
+
+class VIEW3D_PT_tools_gn_selection_select(View3DPanel, Panel):
+    bl_category = "Tool"
+    bl_context = ".gn_selection"
+    bl_label = "Select"
+
+    def draw(self, context):
+        layout = self.layout
+
+        # Domain selector
+        row = layout.row(align=True)
+        row.operator("gn.select_mode", text="", icon='VERTEXSEL').type = 0
+        row.operator("gn.select_mode", text="", icon='EDGESEL').type = 1
+        row.operator("gn.select_mode", text="", icon='FACESEL').type = 2
+
+        layout.separator()
+
+        # Selection operators
+        layout.operator("gn.selection_confirm", text="Confirm")
+        layout.operator("gn.selection_cancel", text="Cancel")
+
+
 # ********** default tools for paint modes ****************
 
 
@@ -2349,6 +2374,7 @@ classes = (
     VIEW3D_PT_tools_meshedit_options_uvs,
     VIEW3D_PT_tools_armatureedit_options,
     VIEW3D_PT_tools_posemode_options,
+    VIEW3D_PT_tools_gn_selection_select,
 
     VIEW3D_PT_slots_projectpaint,
     VIEW3D_PT_slots_paint_canvas,

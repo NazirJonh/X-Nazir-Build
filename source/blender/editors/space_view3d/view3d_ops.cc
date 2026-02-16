@@ -261,9 +261,13 @@ void view3d_operatortypes()
 
   /* GN Selection Mode operators */
   WM_operatortype_append(GN_OT_select);
+  WM_operatortype_append(GN_OT_select_box);
+  WM_operatortype_append(GN_OT_select_lasso);
+  WM_operatortype_append(GN_OT_select_circle);
   WM_operatortype_append(GN_OT_selection_confirm);
   WM_operatortype_append(GN_OT_selection_cancel);
   WM_operatortype_append(OBJECT_OT_gn_selection_mode_set);
+  WM_operatortype_append(GN_OT_select_mode);
 
   ed::transform::transform_operatortypes();
 }

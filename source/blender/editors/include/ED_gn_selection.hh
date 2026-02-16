@@ -59,6 +59,21 @@ bool ED_gn_selection_mode_active(const Object *ob);
 void GN_OT_select(wmOperatorType *ot);
 
 /**
+ * Box select elements in GN Selection Mode.
+ */
+void GN_OT_select_box(wmOperatorType *ot);
+
+/**
+ * Lasso select elements in GN Selection Mode.
+ */
+void GN_OT_select_lasso(wmOperatorType *ot);
+
+/**
+ * Circle select elements in GN Selection Mode.
+ */
+void GN_OT_select_circle(wmOperatorType *ot);
+
+/**
  * Confirm selection and exit GN Selection Mode.
  */
 void GN_OT_selection_confirm(wmOperatorType *ot);

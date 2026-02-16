@@ -65,6 +65,7 @@ set(SRC
   view3d_snap.cc
   view3d_utils.cc
   view3d_view.cc
+  view3d_gn_selection.cc
 
   view3d_intern.hh
   view3d_navigate.hh

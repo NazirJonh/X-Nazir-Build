@@ -233,6 +233,7 @@ class NODE_MT_gn_geometry_read_base(node_add_menu.NodeMenu):
 
     def draw(self, context):
         layout = self.layout
+        self.node_operator(layout, "GeometryNode3DViewSelection")
         self.node_operator(layout, "GeometryNodeInputID")
         self.node_operator(layout, "GeometryNodeInputIndex")
         self.node_operator(layout, "GeometryNodeInputNamedAttribute", search_weight=1.0)

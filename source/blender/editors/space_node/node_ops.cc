@@ -8,6 +8,7 @@
 
 #include "DNA_node_types.h"
 
+#include "ED_gn_selection.hh"
 #include "ED_node_c.hh"
 #include "ED_screen.hh"
 
@@ -122,6 +123,10 @@ void node_operatortypes()
   WM_operatortype_append(NODE_OT_sockets_sync);
 
   WM_operatortype_append(NODE_OT_link_drag_operation_test);
+
+  /* GN Selection Mode operators */
+  WM_operatortype_append(NODE_OT_gn_selection_enter);
+  WM_operatortype_append(NODE_OT_gn_selection_clear);
 
   for (bke::bNodeType *ntype : bke::node_types_get()) {
     if (ntype->register_operators) {

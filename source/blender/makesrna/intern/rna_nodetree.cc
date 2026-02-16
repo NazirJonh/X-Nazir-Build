@@ -7084,6 +7084,41 @@ static void def_fn_random_value(BlenderRNA * /*brna*/, StructRNA *srna)
   RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_socket_update");
 }
 
+static void rna_def_geo_3d_view_selection(BlenderRNA * /*brna*/, StructRNA *srna)
+{
+  PropertyRNA *prop;
+
+  RNA_def_struct_sdna_from(srna, "NodeGeometry3DViewSelection", "storage");
+
+  static const EnumPropertyItem mode_items[] = {
+      {0, "INPUT", 0, "Input", "Output selection as a field"},
+      {1, "CAPTURE", 0, "Capture", "Store selection as attribute on geometry"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "attribute_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "attribute_name");
+  RNA_def_property_ui_text(prop, "Attribute", "Name of the selection attribute");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
+
+  prop = RNA_def_property(srna, "domain", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "domain");
+  RNA_def_property_enum_items(prop, rna_enum_attribute_domain_without_corner_items);
+  RNA_def_property_ui_text(prop, "Domain", "Element domain for selection");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
+
+  prop = RNA_def_property(srna, "mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "mode");
+  RNA_def_property_enum_items(prop, mode_items);
+  RNA_def_property_ui_text(prop, "Mode", "How to output the selection");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
+
+  prop = RNA_def_property(srna, "selection_count", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "selected_ids_num");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Selection Count", "Number of selected elements");
+}
+
 static void def_geo_distribute_points_on_faces(BlenderRNA * /*brna*/, StructRNA *srna)
 {
   PropertyRNA *prop;
@@ -10070,6 +10105,7 @@ static void rna_def_nodes(BlenderRNA *brna)
   define("FunctionNode", "FunctionNodeTransposeMatrix");
   define("FunctionNode", "FunctionNodeValueToString");
 
+  define("GeometryNode", "GeometryNode3DViewSelection", rna_def_geo_3d_view_selection);
   define("GeometryNode", "GeometryNodeAccumulateField");
   define("GeometryNode", "GeometryNodeAttributeDomainSize");
   define("GeometryNode", "GeometryNodeAttributeStatistic");

@@ -144,7 +144,7 @@ class GizmoSnapContext {
   eSnapMode snap_to_geometry(const GizmoSnapParams *snap_params,
                              const float mval[2],
                              float r_location[3],
-                             float r_normal[3]);
+                             float *r_normal);
   
   /**
    * Project a snapped point onto a constraint axis.

@@ -345,6 +345,9 @@ static wmOperatorStatus gizmo_arrow_modal(bContext *C,
   }
   ArrowGizmo3D *arrow = reinterpret_cast<ArrowGizmo3D *>(gz);
   ArrowGizmoInteraction *arrow_inter = static_cast<ArrowGizmoInteraction *>(gz->interaction_data);
+  if (!arrow_inter) {
+    return OPERATOR_CANCELLED;
+  }
   ARegion *region = CTX_wm_region(C);
   RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
 

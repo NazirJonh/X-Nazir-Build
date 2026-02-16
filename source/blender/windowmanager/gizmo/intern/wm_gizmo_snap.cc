@@ -200,12 +200,10 @@ GizmoSnapContext::GizmoSnapContext(const bContext *C) : C_(C)
 
 GizmoSnapContext::~GizmoSnapContext()
 {
-  /* TODO: Destroy snap context when implemented.
-   * Currently snap_context_ is nullptr, so nothing to destroy.
-   */
   if (snap_context_) {
-    /* ed::transform::snap_object_context_destroy(
-     *     static_cast<ed::transform::SnapObjectContext *>(snap_context_)); */
+    using namespace ed::transform;
+    snap_object_context_destroy(static_cast<SnapObjectContext *>(snap_context_));
+    snap_context_ = nullptr;
   }
 }
 
@@ -237,7 +235,7 @@ void GizmoSnapContext::get_snap_params(const GizmoSnapParams *gizmo_snap_params,
 eSnapMode GizmoSnapContext::snap_to_geometry(const GizmoSnapParams *snap_params,
                                              const float mval[2],
                                              float r_location[3],
-                                             float r_normal[3])
+                                             float *r_normal)
 {
   printf("[GIZMO_SNAP_GEOM] Called with mval=[%.0f, %.0f]\n", mval[0], mval[1]);
 
@@ -413,16 +411,15 @@ int WM_gizmo_snap_to_geometry(void *snap_context,
   if (!snap_context || !snap_params) {
     return SCE_SNAP_TO_NONE;
   }
-  
+
   auto *ctx = static_cast<wm::gizmo::GizmoSnapContext *>(snap_context);
   auto *params = static_cast<const wm::gizmo::GizmoSnapParams *>(snap_params);
-  
-  float normal[3] = {0.0f, 0.0f, 0.0f};
-  if (!r_normal) {
-    r_normal = normal;
-  }
-  
-  return ctx->snap_to_geometry(params, mval, r_location, r_normal);
+
+  /* Use local buffer if caller doesn't care about normal. */
+  float normal_local[3] = {0.0f, 0.0f, 0.0f};
+  float *normal_ptr = r_normal ? r_normal : normal_local;
+
+  return ctx->snap_to_geometry(params, mval, r_location, normal_ptr);
 }
 
 bool WM_gizmo_snap_project_to_axis(const float snap_location[3],

@@ -106,6 +106,7 @@ set(SRC
   mesh/sculpt_ops.cc
   mesh/sculpt_paint_color.cc
   mesh/sculpt_paint_image.cc
+  mesh/gpu_paint_context.cc
   mesh/sculpt_pose.cc
   mesh/sculpt_project.cc
   mesh/sculpt_smooth.cc
@@ -137,6 +138,7 @@ set(SRC
   mesh/sculpt_gesture.hh
   mesh/sculpt_hide.hh
   mesh/sculpt_intern.hh
+  mesh/gpu_paint_context.hh
   mesh/sculpt_islands.hh
   mesh/sculpt_pose.hh
   mesh/sculpt_smooth.hh

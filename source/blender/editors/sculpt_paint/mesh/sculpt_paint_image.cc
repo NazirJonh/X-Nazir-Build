@@ -29,9 +29,13 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
 
+#include "gpu_paint_context.hh"
 #include "mesh_brush_common.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_intern.hh"
+
+#include "GPU_capabilities.hh"
+#include "GPU_compute.hh"
 
 namespace blender {
 
@@ -250,6 +254,43 @@ static BitVector<> init_uv_primitives_brush_test(SculptSession &ss,
   return brush_test;
 }
 
+/**
+ * Check if GPU paint path should be used for the given image buffer and brush.
+ * Returns true if:
+ * - Image buffer is valid and within texture size limits
+ * - Brush texture (if any) is GPU-compatible
+ */
+static bool should_use_gpu_path(const ImBuf *image_buffer, const Brush &brush)
+{
+  if (image_buffer == nullptr) {
+    return false;
+  }
+
+  /* Check texture size limits. */
+  const int max_texture_size = GPU_max_texture_size();
+  if (image_buffer->x > max_texture_size || image_buffer->y > max_texture_size) {
+    return false;
+  }
+
+  /* Check brush texture GPU compatibility. */
+  const MTex *mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
+  if (!is_brush_texture_gpu_compatible(mtex)) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Thread-local GPU paint context for compute shader painting.
+ * Reused across paint operations for better performance.
+ */
+static GPU_PaintContext &get_gpu_paint_context()
+{
+  static thread_local GPU_PaintContext gpu_context;
+  return gpu_context;
+}
+
 static void do_paint_pixels(const Depsgraph &depsgraph,
                             Object &object,
                             const Paint &paint,
@@ -292,6 +333,12 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
 
   ImageUser image_user = *image_data.image_user;
   bool pixels_updated = false;
+
+  /* Try to use GPU path for this node. */
+  bool use_gpu_path = false;
+  GPU_PaintContext *gpu_context_ptr = nullptr;
+  gpu::Texture *gpu_texture = nullptr;
+
   for (UDIMTilePixels &tile_data : node_data.tiles) {
     for (ImageTile &tile : image_data.image->tiles) {
       ImageTileWrapper image_tile(&tile);
@@ -303,44 +350,94 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
           continue;
         }
 
-        if (image_buffer->float_buffer.data != nullptr) {
-          kernel_float4.init_brush_color(image_buffer, brush_color);
+        /* Check if we can use GPU path for this tile. */
+        use_gpu_path = should_use_gpu_path(image_buffer, brush);
+
+        if (use_gpu_path) {
+          /* Prepare GPU texture for painting. */
+          gpu_texture = prepare_ibuf_for_gpu_paint(image_buffer);
+          if (gpu_texture == nullptr) {
+            use_gpu_path = false;
+          }
+        }
+
+        if (use_gpu_path) {
+          /* GPU painting path. */
+          GPU_PaintContext &gpu_context = get_gpu_paint_context();
+          gpu_context.ensure_resources();
+
+          /* Update brush parameters. */
+          gpu_context.update_brush_params(brush, ss, ss.cache->invert);
+
+          /* Upload geometry data (vertex positions and triangles). */
+          gpu_context.upload_geometry_data(positions, pbvh_data.vert_tris);
+
+          /* Collect all pixel rows for this tile. */
+          Vector<PackedPixelRow> gpu_pixel_rows;
+          for (const PackedPixelRow &pixel_row : tile_data.pixel_rows) {
+            if (brush_test[pixel_row.uv_primitive_index]) {
+              gpu_pixel_rows.append(pixel_row);
+            }
+          }
+
+          if (!gpu_pixel_rows.is_empty()) {
+            /* Upload pixel data. */
+            int num_rows = gpu_context.upload_pixel_data(gpu_pixel_rows);
+
+            /* Dispatch compute shader. */
+            gpu_context.dispatch_paint(gpu_texture, num_rows);
+
+            /* Synchronize GPU for potential undo operations. */
+            gpu_context.synchronize();
+
+            /* Mark all rows as dirty. */
+            for (const PackedPixelRow &pixel_row : gpu_pixel_rows) {
+              tile_data.mark_dirty(pixel_row);
+            }
+            pixels_updated = true;
+          }
         }
         else {
-          kernel_byte4.init_brush_color(image_buffer, brush_color);
-        }
-
-        for (const PackedPixelRow &pixel_row : tile_data.pixel_rows) {
-          if (!brush_test[pixel_row.uv_primitive_index]) {
-            continue;
-          }
-
-          pixel_positions.resize(pixel_row.num_pixels);
-          calc_pixel_row_positions(
-              positions, pbvh_data.vert_tris, node_data.uv_primitives, pixel_row, pixel_positions);
-
-          factors.resize(pixel_positions.size());
-          factors.fill(1.0f);
-
-          distances.resize(pixel_positions.size());
-          calc_brush_distances(
-              ss, pixel_positions, eBrushFalloffShape(brush.falloff_shape), distances);
-          filter_distances_with_radius(cache.radius, distances, factors);
-          apply_hardness_to_distances(cache, distances);
-          calc_brush_strength_factors(cache, brush, distances, factors);
-          calc_brush_texture_factors(ss, brush, pixel_positions, factors);
-          scale_factors(factors, cache.bstrength);
-
-          bool pixels_painted = false;
+          /* CPU painting path (original implementation). */
           if (image_buffer->float_buffer.data != nullptr) {
-            pixels_painted = kernel_float4.paint(brush, pixel_row, factors, image_buffer);
+            kernel_float4.init_brush_color(image_buffer, brush_color);
           }
           else {
-            pixels_painted = kernel_byte4.paint(brush, pixel_row, factors, image_buffer);
+            kernel_byte4.init_brush_color(image_buffer, brush_color);
           }
 
-          if (pixels_painted) {
-            tile_data.mark_dirty(pixel_row);
+          for (const PackedPixelRow &pixel_row : tile_data.pixel_rows) {
+            if (!brush_test[pixel_row.uv_primitive_index]) {
+              continue;
+            }
+
+            pixel_positions.resize(pixel_row.num_pixels);
+            calc_pixel_row_positions(
+                positions, pbvh_data.vert_tris, node_data.uv_primitives, pixel_row, pixel_positions);
+
+            factors.resize(pixel_positions.size());
+            factors.fill(1.0f);
+
+            distances.resize(pixel_positions.size());
+            calc_brush_distances(
+                ss, pixel_positions, eBrushFalloffShape(brush.falloff_shape), distances);
+            filter_distances_with_radius(cache.radius, distances, factors);
+            apply_hardness_to_distances(cache, distances);
+            calc_brush_strength_factors(cache, brush, distances, factors);
+            calc_brush_texture_factors(ss, brush, pixel_positions, factors);
+            scale_factors(factors, cache.bstrength);
+
+            bool pixels_painted = false;
+            if (image_buffer->float_buffer.data != nullptr) {
+              pixels_painted = kernel_float4.paint(brush, pixel_row, factors, image_buffer);
+            }
+            else {
+              pixels_painted = kernel_byte4.paint(brush, pixel_row, factors, image_buffer);
+            }
+
+            if (pixels_painted) {
+              tile_data.mark_dirty(pixel_row);
+            }
           }
         }
 
@@ -417,6 +514,12 @@ static void do_push_undo_tile(Image &image, ImageUser &image_user, bke::pbvh::No
     ImBuf *image_buffer = BKE_image_acquire_ibuf(&image, &local_image_user, nullptr);
     if (image_buffer == nullptr) {
       continue;
+    }
+
+    /* Synchronize GPU to CPU before undo push if needed.
+     * This ensures undo system has access to the latest GPU-painted data. */
+    if (image_buffer->gpu.texture != nullptr) {
+      sync_gpu_to_cpu(image_buffer);
     }
 
     push_undo(node_data, image, image_user, image_tile, *image_buffer, &tmpibuf);

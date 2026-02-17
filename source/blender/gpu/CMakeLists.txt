@@ -470,10 +470,12 @@ endif()
 
 set(GLSL_SRC
   GPU_shader_shared.hh
+  GPU_paint_shared.hh
 
   shaders/infos/gpu_clip_planes_infos.hh
   shaders/infos/gpu_index_load_infos.hh
   shaders/infos/gpu_interface_infos.hh
+  shaders/infos/gpu_paint_infos.hh
   shaders/infos/gpu_shader_2D_area_borders_infos.hh
   shaders/infos/gpu_shader_2D_checker_infos.hh
   shaders/infos/gpu_shader_2D_diag_stripes_infos.hh
@@ -560,6 +562,7 @@ set(GLSL_SRC
   shaders/gpu_shader_keyframe_shape_vert.glsl
   shaders/gpu_shader_keyframe_shape_frag.glsl
 
+  shaders/gpu_paint_comp.glsl
   shaders/gpu_shader_sequencer_scope_comp.glsl
   shaders/gpu_shader_sequencer_scope_frag.glsl
   shaders/gpu_shader_sequencer_strips_vert.glsl
@@ -926,6 +929,7 @@ if(WITH_GTESTS)
       tests/framebuffer_test.cc
       tests/immediate_test.cc
       tests/index_buffer_test.cc
+      tests/paint_test.cc
       tests/push_constants_test.cc
       tests/shader_create_info_test.cc
       tests/shader_preprocess_test.cc

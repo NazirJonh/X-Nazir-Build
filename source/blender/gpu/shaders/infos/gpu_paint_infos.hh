@@ -15,8 +15,8 @@
 
 GPU_SHADER_CREATE_INFO(gpu_paint_compute_base)
 LOCAL_GROUP_SIZE(1)
-/* Target image for painting. */
-IMAGE(0, SFLOAT_32_32_32_32, read_write, image2D, target_image)
+/* Target image for painting. Use slot 5 to avoid conflicts. */
+IMAGE(5, SFLOAT_32_32_32_32, read_write, image2D, target_image)
 /* Brush texture (optional). */
 SAMPLER(0, sampler2D, brush_texture)
 /* Vertex positions for triangle vertices. */
@@ -27,7 +27,8 @@ STORAGE_BUF(1, read, uint3, triangles[])
 STORAGE_BUF(2, read, float, automask_factors[])
 /* Pixel rows for processing - each row uses 2 uint4:
  * [0]: barycentric.x (as float bits), barycentric.y (as float bits), image_coord.x, image_coord.y
- * [1]: uv_primitive_index, num_pixels, padding, padding */
+ * [1]: tri_index (converted from uv_primitive_index on CPU), num_pixels,
+ *      delta_bary_u (as float bits), delta_bary_v (as float bits) */
 STORAGE_BUF(3, read, uint4, pixel_rows[])
 /* Push constants for brush parameters. */
 PUSH_CONSTANT(int2, image_size)

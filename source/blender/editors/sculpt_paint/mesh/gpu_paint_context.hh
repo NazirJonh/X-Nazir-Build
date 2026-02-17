@@ -32,6 +32,7 @@ struct SculptSession;
 
 namespace blender::bke::pbvh::pixels {
 struct PackedPixelRow;
+struct UVPrimitivePaintInput;
 }
 
 namespace blender::ed::sculpt_paint::paint::image {
@@ -150,9 +151,13 @@ class GPU_PaintContext {
 
   /**
    * Upload pixel row data to GPU.
-   * Returns the number of rows uploaded.
+   * @param pixel_rows The pixel rows to upload.
+   * @param uv_primitives Array to convert uv_primitive_index to tri_index.
+   * @return The number of rows uploaded.
    */
-  int upload_pixel_data(const Span<bke::pbvh::pixels::PackedPixelRow> &pixel_rows);
+  int upload_pixel_data(
+      const Span<bke::pbvh::pixels::PackedPixelRow> &pixel_rows,
+      const Span<bke::pbvh::pixels::UVPrimitivePaintInput> &uv_primitives);
 
   /**
    * Upload vertex positions and triangle indices.

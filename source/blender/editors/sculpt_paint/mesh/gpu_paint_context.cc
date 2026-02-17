@@ -107,9 +107,15 @@ void GPU_PaintContext::create_shader()
 {
   paint_shader_ = GPU_shader_create_from_info_name("gpu_paint_compute");
 
-  /* If shader doesn't exist yet, that's okay - fallback to CPU will be used. */
-  if (paint_shader_ == nullptr) {
-    /* Shader creation failed, will use CPU path. */
+  /* Debug: verify shader creation. */
+  static bool shader_debug_printed = false;
+  if (!shader_debug_printed) {
+    if (paint_shader_) {
+      printf("GPU Paint: Shader 'gpu_paint_compute' created successfully\n");
+    } else {
+      printf("GPU Paint: FAILED to create shader 'gpu_paint_compute' - will use CPU path\n");
+    }
+    shader_debug_printed = true;
   }
 }
 
@@ -157,6 +163,20 @@ void GPU_PaintContext::update_brush_params(const Brush &brush,
     brush_radius_ = ss.cache->radius;
     brush_strength_ = ss.cache->bstrength;
     invert_ = (invert || ss.cache->invert) ? 1 : 0;
+
+    /* Debug output for brush params. */
+    static bool debug_printed = false;
+    if (!debug_printed) {
+      printf("GPU Paint Brush: location=(%.3f, %.3f, %.3f), radius=%.3f, "
+             "strength=%.3f, hardness=%.3f\n",
+             brush_location_.x,
+             brush_location_.y,
+             brush_location_.z,
+             brush_radius_,
+             brush_strength_,
+             brush.hardness);
+      debug_printed = true;
+    }
   }
   else {
     brush_location_ = float3(ss.cursor_location);
@@ -189,7 +209,8 @@ void GPU_PaintContext::set_brush_texture(gpu::Texture *texture, const MTex * /*m
 }
 
 int GPU_PaintContext::upload_pixel_data(
-    const Span<bke::pbvh::pixels::PackedPixelRow> &pixel_rows)
+    const Span<bke::pbvh::pixels::PackedPixelRow> &pixel_rows,
+    const Span<bke::pbvh::pixels::UVPrimitivePaintInput> &uv_primitives)
 {
   if (pixel_rows.is_empty()) {
     return 0;
@@ -197,24 +218,51 @@ int GPU_PaintContext::upload_pixel_data(
 
   /* Pack data into uint4 format (2 uint4 per row):
    * [0]: barycentric.x (float bits), barycentric.y (float bits), image_coord.x, image_coord.y
-   * [1]: uv_primitive_index, num_pixels, 0, 0 */
+   * [1]: tri_index, num_pixels, delta_bary_u (float bits), delta_bary_v (float bits)
+   *
+   * delta_barycentric_coord_u is needed to interpolate position for each pixel in the row.
+   */
   Vector<uint4> packed_data;
   packed_data.reserve(pixel_rows.size() * 2);
+
+  /* Debug: verify first few packed values. */
+  static int pack_debug_counter = 0;
 
   for (const auto &row : pixel_rows) {
     float2 barycentric = float2(row.start_barycentric_coord);
     uint2 image_coord = uint2(row.start_image_coordinate);
+
+    /* Get delta barycentric from UVPrimitivePaintInput. */
+    const auto &uv_prim = uv_primitives[row.uv_primitive_index];
+    float2 delta_bary = uv_prim.delta_barycentric_coord_u;
+
+    /* Debug: print first row's packed data. */
+    if (pack_debug_counter < 3 && &row == &pixel_rows[0]) {
+      printf("GPU Pack: bary=(%.4f,%.4f) delta_bary=(%.6f,%.6f) tri=%d npix=%u\n",
+             barycentric.x, barycentric.y,
+             delta_bary.x, delta_bary.y,
+             uv_prim.tri_index, row.num_pixels);
+      pack_debug_counter++;
+    }
 
     /* Pack barycentric coordinates as float bits. */
     uint bary_x, bary_y;
     memcpy(&bary_x, &barycentric.x, sizeof(float));
     memcpy(&bary_y, &barycentric.y, sizeof(float));
 
+    /* Pack delta barycentric as float bits. */
+    uint delta_bary_u, delta_bary_v;
+    memcpy(&delta_bary_u, &delta_bary.x, sizeof(float));
+    memcpy(&delta_bary_v, &delta_bary.y, sizeof(float));
+
     /* First uint4: barycentric + image coords. */
     packed_data.append(uint4(bary_x, bary_y, image_coord.x, image_coord.y));
 
-    /* Second uint4: primitive index + pixel count + padding. */
-    packed_data.append(uint4(row.uv_primitive_index, row.num_pixels, 0, 0));
+    /* Second uint4: tri_index + pixel count + delta barycentric.
+     * CRITICAL: uv_primitive_index is an index into uv_primitives array,
+     * not a direct triangle index. We must convert it here. */
+    uint tri_index = uv_prim.tri_index;
+    packed_data.append(uint4(tri_index, row.num_pixels, delta_bary_u, delta_bary_v));
   }
 
   /* Create or resize storage buffer.
@@ -382,6 +430,8 @@ void GPU_PaintContext::dispatch_paint(gpu::Texture *target_texture)
 void GPU_PaintContext::dispatch_paint(gpu::Texture *target_texture, int num_pixel_rows)
 {
   if (!paint_shader_ || target_texture == nullptr || num_pixel_rows <= 0) {
+    printf("GPU Paint: dispatch_paint early return - shader=%p tex=%p rows=%d\n",
+           paint_shader_, target_texture, num_pixel_rows);
     return;
   }
 
@@ -392,9 +442,11 @@ void GPU_PaintContext::dispatch_paint(gpu::Texture *target_texture, int num_pixe
 
   GPU_shader_bind(paint_shader_);
 
-  /* Bind target texture as image. */
-  int image_binding = GPU_shader_get_sampler_binding(paint_shader_, "target_image");
-  GPU_texture_image_bind(target_texture, image_binding);
+  /* Bind target texture as image.
+   * NOTE: Use the slot number directly from shader info (IMAGE slot 5).
+   * GPU_shader_get_sampler_binding doesn't work for IMAGE declarations. */
+  const int kImageSlot = 5;
+  GPU_texture_image_bind(target_texture, kImageSlot);
 
   /* Bind all other resources. */
   bind_resources(image_size, num_pixel_rows);

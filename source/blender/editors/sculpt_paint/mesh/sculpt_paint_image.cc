@@ -336,7 +336,6 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
 
   /* Try to use GPU path for this node. */
   bool use_gpu_path = false;
-  GPU_PaintContext *gpu_context_ptr = nullptr;
   gpu::Texture *gpu_texture = nullptr;
 
   for (UDIMTilePixels &tile_data : node_data.tiles) {
@@ -381,8 +380,70 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
           }
 
           if (!gpu_pixel_rows.is_empty()) {
-            /* Upload pixel data. */
-            int num_rows = gpu_context.upload_pixel_data(gpu_pixel_rows);
+            /* Debug: Print sample pixel rows info. */
+            static int debug_counter = 0;
+            if (debug_counter < 3) {
+              printf("GPU Paint: === Total %zu pixel rows ===\n", gpu_pixel_rows.size());
+
+              /* Print first row. */
+              {
+                const auto &row = gpu_pixel_rows[0];
+                const auto &uv_prim = node_data.uv_primitives[row.uv_primitive_index];
+                printf("  [0] uv_prim=%u -> tri=%u, pixels=%u, bary=(%.4f,%.4f), "
+                       "delta_bary=(%.6f,%.6f), img=(%u,%u)\n",
+                       row.uv_primitive_index,
+                       uv_prim.tri_index,
+                       row.num_pixels,
+                       row.start_barycentric_coord.x,
+                       row.start_barycentric_coord.y,
+                       uv_prim.delta_barycentric_coord_u.x,
+                       uv_prim.delta_barycentric_coord_u.y,
+                       row.start_image_coordinate.x,
+                       row.start_image_coordinate.y);
+              }
+
+              /* Print middle row. */
+              if (gpu_pixel_rows.size() > 1) {
+                size_t mid = gpu_pixel_rows.size() / 2;
+                const auto &row = gpu_pixel_rows[mid];
+                const auto &uv_prim = node_data.uv_primitives[row.uv_primitive_index];
+                printf("  [%zu] uv_prim=%u -> tri=%u, pixels=%u, bary=(%.4f,%.4f), "
+                       "delta_bary=(%.6f,%.6f), img=(%u,%u)\n",
+                       mid,
+                       row.uv_primitive_index,
+                       uv_prim.tri_index,
+                       row.num_pixels,
+                       row.start_barycentric_coord.x,
+                       row.start_barycentric_coord.y,
+                       uv_prim.delta_barycentric_coord_u.x,
+                       uv_prim.delta_barycentric_coord_u.y,
+                       row.start_image_coordinate.x,
+                       row.start_image_coordinate.y);
+              }
+
+              /* Print last row. */
+              if (gpu_pixel_rows.size() > 2) {
+                size_t last = gpu_pixel_rows.size() - 1;
+                const auto &row = gpu_pixel_rows[last];
+                const auto &uv_prim = node_data.uv_primitives[row.uv_primitive_index];
+                printf("  [%zu] uv_prim=%u -> tri=%u, pixels=%u, bary=(%.4f,%.4f), "
+                       "delta_bary=(%.6f,%.6f), img=(%u,%u)\n",
+                       last,
+                       row.uv_primitive_index,
+                       uv_prim.tri_index,
+                       row.num_pixels,
+                       row.start_barycentric_coord.x,
+                       row.start_barycentric_coord.y,
+                       uv_prim.delta_barycentric_coord_u.x,
+                       uv_prim.delta_barycentric_coord_u.y,
+                       row.start_image_coordinate.x,
+                       row.start_image_coordinate.y);
+              }
+              debug_counter++;
+            }
+
+            /* Upload pixel data with uv_primitives for tri_index conversion. */
+            int num_rows = gpu_context.upload_pixel_data(gpu_pixel_rows, node_data.uv_primitives);
 
             /* Dispatch compute shader. */
             gpu_context.dispatch_paint(gpu_texture, num_rows);

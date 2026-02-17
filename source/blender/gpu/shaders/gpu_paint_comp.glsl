@@ -174,35 +174,28 @@ void main()
   /* Unpack image coordinates. */
   uint2 start_image_coord = row_part_a.zw;
 
-  /* Unpack primitive index and pixel count. */
-  uint uv_primitive_index = row_part_b.x;
+  /* Unpack triangle index, pixel count, and delta barycentric.
+   * NOTE: tri_index is already converted from uv_primitive_index on CPU. */
+  uint tri_index = row_part_b.x;
   uint num_pixels = row_part_b.y;
+  float2 delta_barycentric = float2(
+    uintBitsToFloat(row_part_b.z),
+    uintBitsToFloat(row_part_b.w)
+  );
 
-  /* Calculate pixel position from barycentric coordinates. */
-  float3 pixel_pos = calc_pixel_position(uv_primitive_index, start_barycentric);
-
-  /* Calculate brush distance and falloff. */
-  float distance = calc_brush_distance(pixel_pos, brush_location, falloff_shape);
-  float falloff = calc_falloff(distance, brush_radius, hardness);
-
-  /* Early exit if outside brush radius. */
-  if (falloff <= 0.0) {
+  /* DEBUG: Test simple write to verify image binding works.
+   * Write red color based on row_index to see pattern. */
+  if (row_index < 10u) {
+    for (uint i = 0u; i < num_pixels; i++) {
+      int2 image_coord = int2(start_image_coord) + int2(int(i), 0);
+      if (all(greaterThanEqual(image_coord, int2(0))) &&
+          all(lessThan(image_coord, image_size))) {
+        float4 debug_color = float4(1.0, 0.0, 0.0, 1.0);  /* Red */
+        imageStore(target_image, image_coord, debug_color);
+      }
+    }
     return;
   }
-
-  /* Sample brush texture (if available). */
-  float4 tex_color = sample_brush_texture(pixel_pos, brush_location);
-
-  /* Apply automasking (if available). */
-  if (has_automask != 0) {
-    falloff *= automask_factors[row_index];
-  }
-
-  /* Calculate final paint factor. */
-  float factor = falloff * brush_strength;
-
-  /* Apply brush texture influence. */
-  factor *= tex_color.a;
 
   /* Process each pixel in the row. */
   for (uint i = 0u; i < num_pixels; i++) {
@@ -214,6 +207,34 @@ void main()
     {
       continue;
     }
+
+    /* Calculate pixel position from barycentric coordinates.
+     * CRITICAL: Each pixel has different barycentric coords, so different 3D position! */
+    float2 pixel_barycentric = start_barycentric + delta_barycentric * float(i);
+    float3 pixel_pos = calc_pixel_position(tri_index, pixel_barycentric);
+
+    /* Calculate brush distance and falloff for THIS pixel. */
+    float distance = calc_brush_distance(pixel_pos, brush_location, falloff_shape);
+    float falloff = calc_falloff(distance, brush_radius, hardness);
+
+    /* Skip if outside brush radius. */
+    if (falloff <= 0.0) {
+      continue;
+    }
+
+    /* Sample brush texture (if available). */
+    float4 tex_color = sample_brush_texture(pixel_pos, brush_location);
+
+    /* Apply automasking (if available). */
+    if (has_automask != 0) {
+      falloff *= automask_factors[row_index];
+    }
+
+    /* Calculate final paint factor. */
+    float factor = falloff * brush_strength;
+
+    /* Apply brush texture influence. */
+    factor *= tex_color.a;
 
     /* Read current pixel color. */
     float4 current_color = imageLoad(target_image, image_coord);

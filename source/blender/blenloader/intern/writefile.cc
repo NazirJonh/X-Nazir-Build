@@ -1217,7 +1217,13 @@ static void write_userdef(BlendWriter *writer, const UserDef *userdef)
     writer->write_struct(&script_dir);
   }
 
+    CLOG_INFO(&LOG, "Writing asset libraries to file: %d libraries", BLI_listbase_count(&userdef->asset_libraries));
   for (const bUserAssetLibrary &asset_library_ref : userdef->asset_libraries) {
+    CLOG_INFO(&LOG,
+              "  Writing library: name='%s', type=%s, parent_name='%s'",
+              asset_library_ref.name,
+              asset_library_ref.type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER ? "FOLDER" : "LEAF",
+              asset_library_ref.parent_name[0] ? asset_library_ref.parent_name : "(root)");
     writer->write_struct(&asset_library_ref);
   }
 
@@ -2373,3 +2379,4 @@ bool BLO_write_is_undo(BlendWriter *writer)
 /** \} */
 
 }  // namespace blender
+

@@ -22,6 +22,8 @@
 #include "BKE_asset.hh"
 #include "BKE_preferences.h"
 
+#include "CLG_log.h"
+
 #include "BLT_translation.hh"
 
 #include "BLO_read_write.hh"
@@ -31,6 +33,8 @@
 namespace blender {
 
 #define U BLI_STATIC_ASSERT(false, "Global 'U' not allowed, only use arguments passed in!")
+
+static CLG_LogRef LOG = {"bke.preferences"};
 
 /* -------------------------------------------------------------------- */
 /** \name Preferences File
@@ -51,6 +55,190 @@ bool exists()
 }
 
 }  // namespace bke::preferences
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Asset Library Hierarchy Helpers
+ * \{ */
+
+namespace blender::bke::preferences {
+
+/**
+ * Find an asset library by name using linear search in the linked list.
+ * Used primarily during hierarchy restoration after file loading.
+ *
+ * @param userdef: The UserDef structure containing asset libraries.
+ * @param name: The name to search for. Must not be NULL.
+ * @return: Pointer to the asset library with matching name, or nullptr if not found.
+ * @note: The search is case-sensitive and uses full name matching.
+ */
+static bUserAssetLibrary *find_asset_library_by_name(const UserDef *userdef,
+                                                     const char *name)
+{
+  if (!name || name[0] == '\0') {
+    return nullptr;
+  }
+
+  for (bUserAssetLibrary *lib = static_cast<bUserAssetLibrary *>(userdef->asset_libraries.first);
+       lib;
+       lib = lib->next) {
+    if (STREQ(lib->name, name)) {
+      return lib;
+    }
+  }
+
+  return nullptr;
+}
+
+/**
+ * Build a temporary map from library name to pointer for fast lookup during hierarchy processing.
+ * Useful when doing multiple lookups in the entire list.
+ *
+ * @param userdef: The UserDef structure containing asset libraries.
+ * @return: A map from library name to library pointer.
+ * @note: The map becomes invalid if the list is modified.
+ */
+static Map<StringRef, bUserAssetLibrary *> build_asset_library_name_map(
+    const UserDef *userdef)
+{
+  Map<StringRef, bUserAssetLibrary *> map;
+  for (bUserAssetLibrary *lib = static_cast<bUserAssetLibrary *>(userdef->asset_libraries.first);
+       lib;
+       lib = lib->next) {
+    map.add(lib->name, lib);
+  }
+  return map;
+}
+
+/**
+ * Update both the parent pointer and parent_name when changing a library's parent.
+ * This ensures parent_name and parent pointer stay synchronized.
+ *
+ * @param library: The library whose parent is being changed.
+ * @param new_parent: The new parent library, or nullptr for root level.
+ * @note: This is an internal helper function.
+ */
+static void update_asset_library_parent_name(bUserAssetLibrary *library,
+                                             bUserAssetLibrary *new_parent)
+{
+  CLOG_INFO(&LOG,
+            "Updating parent for library '%s': old_parent_name='%s' -> new_parent='%s'",
+            library->name,
+            library->parent_name[0] ? library->parent_name : "(root)",
+            new_parent ? new_parent->name : "(root)");
+
+  library->parent = new_parent;
+
+  if (new_parent) {
+    STRNCPY(library->parent_name, new_parent->name);
+    CLOG_INFO(&LOG, "  -> parent_name set to: '%s'", library->parent_name);
+  } else {
+    library->parent_name[0] = '\0';
+    CLOG_INFO(&LOG, "  -> parent_name cleared (root level)");
+  }
+}
+
+/**
+ * Restore parent pointers from parent_name strings in the asset library hierarchy.
+ *
+ * Performs two passes:
+ * 1. First pass: Restore parent pointers from parent_name
+ * 2. Second pass: Detect and break cycles (shouldn't happen normally, but defensive)
+ *
+ * This function must be called after loading UserDef from a file.
+ *
+ * @param userdef: The UserDef structure with asset libraries.
+ * @note: Any broken parent_name references will result in the library being placed at root level.
+ */
+void restore_asset_library_hierarchy(UserDef *userdef)
+{
+  CLOG_INFO(&LOG, "=== Starting asset library hierarchy restoration ===");
+  CLOG_INFO(&LOG, "Total asset libraries to restore: %d", BLI_listbase_count(&userdef->asset_libraries));
+
+  /* First pass: restore parent pointers from parent_name */
+  int restored_count = 0;
+  int not_found_count = 0;
+
+  for (bUserAssetLibrary *lib = static_cast<bUserAssetLibrary *>(userdef->asset_libraries.first);
+       lib;
+       lib = lib->next) {
+    CLOG_INFO(&LOG,
+              "Library [%d]: name='%s', type=%s, parent_name='%s'",
+              restored_count + not_found_count,
+              lib->name,
+              lib->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER ? "FOLDER" : "LEAF",
+              lib->parent_name[0] ? lib->parent_name : "(root)");
+
+    lib->parent = find_asset_library_by_name(userdef, lib->parent_name);
+
+    if (lib->parent) {
+      restored_count++;
+      CLOG_INFO(&LOG,
+                "  -> Parent found: '%s'",
+                lib->parent->name);
+    }
+    else if (lib->parent_name[0]) {
+      not_found_count++;
+      CLOG_WARN(&LOG,
+                "  -> Parent NOT found for parent_name='%s' - library will be at root level",
+                lib->parent_name);
+    }
+  }
+
+  CLOG_INFO(&LOG,
+            "First pass complete: %d parent pointers restored, %d not found",
+            restored_count,
+            not_found_count);
+
+  /* Second pass: detect and break cycles */
+  int cycles_broken = 0;
+  for (bUserAssetLibrary *lib = static_cast<bUserAssetLibrary *>(userdef->asset_libraries.first);
+       lib;
+       lib = lib->next) {
+    if (lib->parent) {
+      /* Walk up the hierarchy and check for cycles by counting depth.
+       * If we exceed a reasonable depth (e.g., 1000), assume there's a cycle. */
+      const int MAX_DEPTH = 1000;
+      int depth = 0;
+      bUserAssetLibrary *current = lib->parent;
+
+      while (current && depth < MAX_DEPTH) {
+        /* Check if we've reached the current library again (cycle) */
+        if (current == lib) {
+          /* Cycle detected - break it by clearing parent */
+          CLOG_WARN(&LOG,
+                    "Cycle detected! Breaking cycle at library '%s'",
+                    lib->name);
+          lib->parent = nullptr;
+          lib->parent_name[0] = '\0';
+          cycles_broken++;
+          break;
+        }
+        current = current->parent;
+        depth++;
+      }
+
+      if (depth >= MAX_DEPTH && current) {
+        /* Very deep hierarchy - likely a cycle, break it */
+        CLOG_WARN(&LOG,
+                  "Very deep hierarchy (depth=%d) at library '%s' - likely a cycle, breaking",
+                  depth,
+                  lib->name);
+        lib->parent = nullptr;
+        lib->parent_name[0] = '\0';
+        cycles_broken++;
+      }
+    }
+  }
+
+  CLOG_INFO(&LOG,
+            "Second pass complete: %d cycles detected and broken",
+            cycles_broken);
+  CLOG_INFO(&LOG, "=== Asset library hierarchy restoration complete ===");
+}
+
+}  // namespace blender::bke::preferences
 
 /** \} */
 
@@ -197,7 +385,7 @@ const int8_t REMOTE_LIBRARY_DIRNAME_LEN = 16;
  * user-chosen. the URL is a more stable identifier. And if there happen to be multiple libraries
  * in the preferences, with the same URL, they'll share the same cache.
  */
-static void asset_library_directory_name(blender::StringRef remote_url,
+static void asset_library_directory_name(StringRef remote_url,
                                          /* Buffer for the directory name + null-terminator. */
                                          char identifier_buf[REMOTE_LIBRARY_DIRNAME_LEN + 1])
 {
@@ -242,7 +430,8 @@ bUserAssetLibrary *BKE_preferences_asset_library_folder_add(UserDef *userdef,
   bUserAssetLibrary *folder = MEM_new<bUserAssetLibrary>(__func__);
 
   folder->type = USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER;
-  folder->parent = parent;
+  /* Set parent using helper function to keep parent_name synchronized. */
+  blender::bke::preferences::update_asset_library_parent_name(folder, parent);
   folder->dirpath[0] = '\0';
   folder->remote_url[0] = '\0';
   folder->import_method = ASSET_IMPORT_PACK;
@@ -293,7 +482,8 @@ void BKE_preferences_asset_library_move_to_folder(UserDef *userdef,
     }
   }
 
-  library->parent = new_parent;
+  /* Update parent using helper function to keep parent_name synchronized. */
+  blender::bke::preferences::update_asset_library_parent_name(library, new_parent);
 
   /* Remove from current position. */
   BLI_remlink(&userdef->asset_libraries, library);
@@ -382,7 +572,7 @@ bool BKE_preferences_asset_library_reorder(UserDef *userdef,
 
   /* If moving a folder, we need to move all its descendants as well.
    * First, collect all items in the subtree. */
-  blender::Vector<bUserAssetLibrary *> items_to_move;
+  Vector<bUserAssetLibrary *> items_to_move;
   items_to_move.append(library);
 
   if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
@@ -935,4 +1125,18 @@ bool BKE_preferences_asset_shelf_settings_ensure_catalog_path_enabled(UserDef *u
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Asset Library Hierarchy Restoration (Public API)
+ * \{ */
+
+void BKE_preferences_asset_library_restore_hierarchy(UserDef *userdef)
+{
+  blender::bke::preferences::restore_asset_library_hierarchy(userdef);
+}
+
+/** \} */
+
 }  // namespace blender
+
+
+

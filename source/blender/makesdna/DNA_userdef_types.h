@@ -625,8 +625,9 @@ enum eUserAssetLibraryItemType {
 
 struct bUserAssetLibrary {
   struct bUserAssetLibrary *next = nullptr, *prev = nullptr;
-  /** Parent folder for hierarchical organization. nullptr for root level items. */
-  struct bUserAssetLibrary *parent = nullptr;
+  /** Parent folder name for hierarchical organization. Empty string for root level items.
+   * Used for DNA serialization - the parent pointer is restored from this after loading. */
+  char parent_name[/*MAX_NAME*/ 64] = "";
 
   char name[/*MAX_NAME*/ 64] = "";
   /** The path on disk for this asset library. For remote libraries
@@ -641,6 +642,11 @@ struct bUserAssetLibrary {
   /** Type of item: #eUserAssetLibraryItemType (LEAF for library, FOLDER for container). */
   short type = USER_ASSET_LIBRARY_ITEM_TYPE_LEAF;
   char _pad0[2] = {};
+
+  /* Runtime field (not serialized by DNA) */
+  /** Runtime pointer to parent folder. Restored from parent_name after loading.
+   * This field is NOT saved to disk - it's reconstructed when reading the file. */
+  struct bUserAssetLibrary *parent = nullptr;
 };
 
 enum eUserExtensionRepo_Flag {

@@ -148,6 +148,19 @@ bool BKE_preferences_asset_library_reorder(UserDef *userdef,
                                            bUserAssetLibrary *target,
                                            const int location) ATTR_NONNULL(1, 2, 3);
 
+/**
+ * Restore parent pointers from parent_name strings in the asset library hierarchy.
+ *
+ * This function must be called after reading UserDef from a file to reconstruct
+ * the parent-child relationships between asset libraries. It restores the runtime
+ * parent pointers from the parent_name strings that are saved in the DNA.
+ *
+ * Also performs cycle detection and breaks cycles if found (defensive programming).
+ *
+ * @param userdef: The UserDef structure with asset libraries.
+ */
+void BKE_preferences_asset_library_restore_hierarchy(UserDef *userdef);
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

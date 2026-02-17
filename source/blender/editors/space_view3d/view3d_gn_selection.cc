@@ -17,6 +17,7 @@
 #include "BLI_array.hh"
 #include "BLI_index_range.hh"
 #include "BLI_lasso_2d.hh"
+#include "BLI_listbase.h"
 #include "BLI_math_vector.hh"
 #include "BLI_rect.h"
 #include "BLI_set.hh"
@@ -268,9 +269,7 @@ void ED_gn_selection_mode_exit(bContext *C, bool confirm)
 /**
  * Get the evaluated mesh from the object with Geometry Nodes modifier applied.
  */
-static const Mesh *gn_selection_get_evaluated_mesh(const Scene *scene,
-                                                   Object *ob,
-                                                   Depsgraph *depsgraph)
+static const Mesh *gn_selection_get_evaluated_mesh(Object *ob, Depsgraph *depsgraph)
 {
   if (!ob) {
     return nullptr;
@@ -309,6 +308,23 @@ static bool gn_selection_apply(Set<int> &selection,
   return false;
 }
 
+/**
+ * Get human-readable domain name for feedback messages.
+ */
+static const char *gn_selection_domain_name(bke::AttrDomain domain)
+{
+  switch (domain) {
+    case bke::AttrDomain::Point:
+      return "vertex";
+    case bke::AttrDomain::Edge:
+      return "edge";
+    case bke::AttrDomain::Face:
+      return "face";
+    default:
+      return "element";
+  }
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -317,7 +333,11 @@ static bool gn_selection_apply(Set<int> &selection,
 
 static bool gn_select_poll(bContext *C)
 {
-  return ED_gn_selection_mode_active(CTX_data_active_object(C));
+  Object *ob = CTX_data_active_object(C);
+  bool active = ED_gn_selection_mode_active(ob);
+  GN_DEBUG_PRINT("gn_select_poll: ob=%p, gn_selection_mode_data=%p, active=%d\n",
+         (void *)ob, (void *)gn_selection_mode_data, active);
+  return active;
 }
 
 static wmOperatorStatus gn_select_exec(bContext *C, wmOperator *op)
@@ -326,7 +346,6 @@ static wmOperatorStatus gn_select_exec(bContext *C, wmOperator *op)
 
   GN_DEBUG_PRINT("=== gn_select_exec (single click) START ===\n");
 
-  Scene *scene = CTX_data_scene(C);
   Object *ob = CTX_data_active_object(C);
   GNSelectionModeData *data = ED_gn_selection_mode_data_get(ob);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
@@ -411,6 +430,14 @@ static wmOperatorStatus gn_select_exec(bContext *C, wmOperator *op)
     if (gn_selection_apply(data->current_selection, hit_index, sel_op, true)) {
       GN_DEBUG_PRINT("Selection changed! New size: %zu\n", data->current_selection.size());
       data->selection_changed = true;
+
+      /* Feedback: Report to Info Editor */
+      BKE_reportf(op->reports,
+                  RPT_INFO,
+                  "Selected %s %d (total: %zu)",
+                  gn_selection_domain_name(data->domain),
+                  hit_index,
+                  data->current_selection.size());
     }
   }
   else {
@@ -431,6 +458,7 @@ static wmOperatorStatus gn_select_exec(bContext *C, wmOperator *op)
 
 static wmOperatorStatus gn_select_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  GN_DEBUG_PRINT("=== gn_select_invoke (LEFTMOUSE clicked) ===\n");
   RNA_int_set_array(op->ptr, "mouse", event->mval);
   return gn_select_exec(C, op);
 }
@@ -483,7 +511,6 @@ static wmOperatorStatus gn_select_box_exec(bContext *C, wmOperator *op)
 {
   GN_DEBUG_PRINT("=== gn_select_box_exec START ===\n");
 
-  Scene *scene = CTX_data_scene(C);
   Object *ob = CTX_data_active_object(C);
   GNSelectionModeData *data = ED_gn_selection_mode_data_get(ob);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
@@ -525,7 +552,7 @@ static wmOperatorStatus gn_select_box_exec(bContext *C, wmOperator *op)
   userdata.changed = false;
 
   /* Get evaluated mesh */
-  const Mesh *mesh = gn_selection_get_evaluated_mesh(scene, ob, depsgraph);
+  const Mesh *mesh = gn_selection_get_evaluated_mesh(ob, depsgraph);
   if (!mesh) {
     GN_DEBUG_PRINT("ERROR: No evaluated mesh\n");
     return OPERATOR_CANCELLED;
@@ -616,6 +643,14 @@ static wmOperatorStatus gn_select_box_exec(bContext *C, wmOperator *op)
   if (userdata.changed) {
     data->selection_changed = true;
     GN_DEBUG_PRINT("Selection size now: %zu\n", data->current_selection.size());
+
+    /* Feedback: Report to Info Editor */
+    BKE_reportf(op->reports,
+                RPT_INFO,
+                "Box selected %zu %ss (total: %zu)",
+                data->current_selection.size(),
+                gn_selection_domain_name(data->domain),
+                data->current_selection.size());
   }
 
   GN_DEBUG_PRINT("=== gn_select_box_exec END ===\n");
@@ -626,11 +661,13 @@ static wmOperatorStatus gn_select_box_exec(bContext *C, wmOperator *op)
 
 static wmOperatorStatus gn_select_box_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  GN_DEBUG_PRINT("=== gn_select_box_invoke ===\n");
   return WM_gesture_box_invoke(C, op, event);
 }
 
 static wmOperatorStatus gn_select_box_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  GN_DEBUG_PRINT("=== gn_select_box_modal ===\n");
   return WM_gesture_box_modal(C, op, event);
 }
 
@@ -690,7 +727,6 @@ static wmOperatorStatus gn_select_lasso_exec(bContext *C, wmOperator *op)
 {
   GN_DEBUG_PRINT("=== gn_select_lasso_exec START ===\n");
 
-  Scene *scene = CTX_data_scene(C);
   Object *ob = CTX_data_active_object(C);
   GNSelectionModeData *data = ED_gn_selection_mode_data_get(ob);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
@@ -741,7 +777,7 @@ static wmOperatorStatus gn_select_lasso_exec(bContext *C, wmOperator *op)
   userdata.changed = false;
 
   /* Get evaluated mesh */
-  const Mesh *mesh = gn_selection_get_evaluated_mesh(scene, ob, depsgraph);
+  const Mesh *mesh = gn_selection_get_evaluated_mesh(ob, depsgraph);
   if (!mesh) {
     GN_DEBUG_PRINT("ERROR: No evaluated mesh\n");
     return OPERATOR_CANCELLED;
@@ -826,6 +862,14 @@ static wmOperatorStatus gn_select_lasso_exec(bContext *C, wmOperator *op)
   if (userdata.changed) {
     data->selection_changed = true;
     GN_DEBUG_PRINT("Selection size now: %zu\n", data->current_selection.size());
+
+    /* Feedback: Report to Info Editor */
+    BKE_reportf(op->reports,
+                RPT_INFO,
+                "Lasso selected %zu %ss (total: %zu)",
+                data->current_selection.size(),
+                gn_selection_domain_name(data->domain),
+                data->current_selection.size());
   }
 
   GN_DEBUG_PRINT("=== gn_select_lasso_exec END ===\n");
@@ -886,7 +930,6 @@ static wmOperatorStatus gn_select_circle_exec(bContext *C, wmOperator *op)
 {
   GN_DEBUG_PRINT("=== gn_select_circle_exec START ===\n");
 
-  Scene *scene = CTX_data_scene(C);
   Object *ob = CTX_data_active_object(C);
   GNSelectionModeData *data = ED_gn_selection_mode_data_get(ob);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
@@ -934,7 +977,7 @@ static wmOperatorStatus gn_select_circle_exec(bContext *C, wmOperator *op)
   userdata.changed = false;
 
   /* Get evaluated mesh */
-  const Mesh *mesh = gn_selection_get_evaluated_mesh(scene, ob, depsgraph);
+  const Mesh *mesh = gn_selection_get_evaluated_mesh(ob, depsgraph);
   if (!mesh) {
     GN_DEBUG_PRINT("ERROR: No evaluated mesh\n");
     return OPERATOR_CANCELLED;
@@ -1023,6 +1066,14 @@ static wmOperatorStatus gn_select_circle_exec(bContext *C, wmOperator *op)
   if (userdata.changed) {
     data->selection_changed = true;
     GN_DEBUG_PRINT("Selection size now: %zu\n", data->current_selection.size());
+
+    /* Feedback: Report to Info Editor */
+    BKE_reportf(op->reports,
+                RPT_INFO,
+                "Circle selected %zu %ss (total: %zu)",
+                data->current_selection.size(),
+                gn_selection_domain_name(data->domain),
+                data->current_selection.size());
   }
 
   GN_DEBUG_PRINT("=== gn_select_circle_exec END ===\n");
@@ -1222,27 +1273,45 @@ static void keymap_item_add(wmKeyMap *keymap,
   params.value = value;
   params.modifier = modifier;
   params.direction = direction;
-  WM_keymap_add_item(keymap, idname, &params);
+  wmKeyMapItem *kmi = WM_keymap_add_item(keymap, idname, &params);
+  GN_DEBUG_PRINT("  Added keymap item: %s (type=%d, kmi=%p)\n", idname, type, (void *)kmi);
+}
+
+static bool gn_selection_keymap_poll(bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  bool result = ED_gn_selection_mode_active(ob);
+  // Note: Debug disabled to reduce log spam - poll is called very frequently
+  // GN_DEBUG_PRINT("gn_selection_keymap_poll: ob=%p, mode=%d, data=%p, result=%d\n",
+  //        (void *)ob, ob ? int(ob->mode) : -1, (void *)gn_selection_mode_data, result);
+  (void)ob;  // Suppress unused variable warning
+  return result;
 }
 
 void view3d_keymap_gn_selection(wmKeyConfig *keyconf)
 {
+  GN_DEBUG_PRINT("=== view3d_keymap_gn_selection START ===\n");
+
   wmKeyMap *keymap = WM_keymap_ensure(keyconf, "GN Selection Mode", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  GN_DEBUG_PRINT("Keymap created/found: %p, items before: %d\n", (void *)keymap, BLI_listbase_count(&keymap->items));
+
+  /* Set poll function to only activate when GN Selection mode is active */
+  keymap->poll = gn_selection_keymap_poll;
 
   /* Selection */
+  GN_DEBUG_PRINT("Adding GN_OT_select (LEFTMOUSE)...\n");
   keymap_item_add(keymap, "GN_OT_select", LEFTMOUSE, KM_PRESS, 0, KM_ANY);
   keymap_item_add(keymap, "GN_OT_select", LEFTMOUSE, KM_PRESS, KM_SHIFT, KM_ANY);
   keymap_item_add(keymap, "GN_OT_select", LEFTMOUSE, KM_PRESS, KM_CTRL, KM_ANY);
 
-  /* Box select - B key */
-  keymap_item_add(keymap, "GN_OT_select_box", EVT_BKEY, KM_PRESS, 0, KM_ANY);
+  /* Box select - F17 key (for testing) */
+  keymap_item_add(keymap, "GN_OT_select_box", EVT_F17KEY, KM_PRESS, 0, KM_ANY);
 
-  /* Lasso select - Ctrl+Shift+RMB */
-  keymap_item_add(keymap, "GN_OT_select_lasso", RIGHTMOUSE, KM_PRESS, KM_CTRL | KM_SHIFT, KM_ANY);
-  keymap_item_add(keymap, "GN_OT_select_lasso", RIGHTMOUSE, KM_PRESS, KM_CTRL | KM_SHIFT | KM_SHIFT, KM_ANY);
+  /* Lasso select - F18 key */
+  keymap_item_add(keymap, "GN_OT_select_lasso", EVT_F18KEY, KM_PRESS, 0, KM_ANY);
 
-  /* Circle select - C key */
-  keymap_item_add(keymap, "GN_OT_select_circle", EVT_CKEY, KM_PRESS, 0, KM_ANY);
+  /* Circle select - F19 key */
+  keymap_item_add(keymap, "GN_OT_select_circle", EVT_F19KEY, KM_PRESS, 0, KM_ANY);
 
   /* Confirmation */
   keymap_item_add(keymap, "GN_OT_selection_confirm", EVT_RETKEY, KM_PRESS, 0, KM_ANY);
@@ -1258,6 +1327,49 @@ void view3d_keymap_gn_selection(wmKeyConfig *keyconf)
   keymap_item_add(keymap, "GN_OT_select_mode", EVT_ONEKEY, KM_PRESS, 0, KM_ANY);
   keymap_item_add(keymap, "GN_OT_select_mode", EVT_TWOKEY, KM_PRESS, 0, KM_ANY);
   keymap_item_add(keymap, "GN_OT_select_mode", EVT_THREEKEY, KM_PRESS, 0, KM_ANY);
+
+  GN_DEBUG_PRINT("=== view3d_keymap_gn_selection END, items count: %d ===\n", BLI_listbase_count(&keymap->items));
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Tool Keymaps
+ * \{ */
+
+void view3d_keymap_gn_selection_tools(wmKeyConfig *keyconf)
+{
+  GN_DEBUG_PRINT("=== view3d_keymap_gn_selection_tools START ===\n");
+
+  /* Tool: Select */
+  wmKeyMap *km_select = WM_keymap_ensure(
+      keyconf, "GN Selection Tool: Select", SPACE_VIEW3D, RGN_TYPE_WINDOW);
+  keymap_item_add(km_select, "GN_OT_select", LEFTMOUSE, KM_PRESS, 0, KM_ANY);
+  keymap_item_add(km_select, "GN_OT_select", LEFTMOUSE, KM_PRESS, KM_SHIFT, KM_ANY);
+  keymap_item_add(km_select, "GN_OT_select", LEFTMOUSE, KM_PRESS, KM_CTRL, KM_ANY);
+
+  /* Tool: Box */
+  wmKeyMap *km_box = WM_keymap_ensure(
+      keyconf, "GN Selection Tool: Box", SPACE_VIEW3D, RGN_TYPE_WINDOW);
+  keymap_item_add(km_box, "GN_OT_select_box", LEFTMOUSE, KM_PRESS, 0, KM_ANY);
+  keymap_item_add(km_box, "GN_OT_select_box", LEFTMOUSE, KM_PRESS, KM_SHIFT, KM_ANY);
+  keymap_item_add(km_box, "GN_OT_select_box", LEFTMOUSE, KM_PRESS, KM_CTRL, KM_ANY);
+
+  /* Tool: Lasso */
+  wmKeyMap *km_lasso = WM_keymap_ensure(
+      keyconf, "GN Selection Tool: Lasso", SPACE_VIEW3D, RGN_TYPE_WINDOW);
+  keymap_item_add(km_lasso, "GN_OT_select_lasso", LEFTMOUSE, KM_PRESS, 0, KM_ANY);
+  keymap_item_add(km_lasso, "GN_OT_select_lasso", LEFTMOUSE, KM_PRESS, KM_SHIFT, KM_ANY);
+  keymap_item_add(km_lasso, "GN_OT_select_lasso", LEFTMOUSE, KM_PRESS, KM_CTRL, KM_ANY);
+
+  /* Tool: Circle */
+  wmKeyMap *km_circle = WM_keymap_ensure(
+      keyconf, "GN Selection Tool: Circle", SPACE_VIEW3D, RGN_TYPE_WINDOW);
+  keymap_item_add(km_circle, "GN_OT_select_circle", LEFTMOUSE, KM_PRESS, 0, KM_ANY);
+  keymap_item_add(km_circle, "GN_OT_select_circle", LEFTMOUSE, KM_PRESS, KM_SHIFT, KM_ANY);
+  keymap_item_add(km_circle, "GN_OT_select_circle", LEFTMOUSE, KM_PRESS, KM_CTRL, KM_ANY);
+
+  GN_DEBUG_PRINT("=== view3d_keymap_gn_selection_tools END ===\n");
 }
 
 /** \} */

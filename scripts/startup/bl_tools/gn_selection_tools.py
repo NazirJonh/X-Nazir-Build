@@ -3,51 +3,93 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
-from bpy.types import ToolDef
+from bl_ui.space_toolsystem_common import ToolDef
 
 
-def gn_selection_toolbar_draw(context, layout, tool):
-    """Draw additional options for GN Selection tool."""
-    obj = context.active_object
-    if not obj:
-        return
+class _defs_gn_selection:
+    """GN Selection Mode tool definitions."""
 
-    layout.label(text="Selection Domain:")
+    @ToolDef.from_fn
+    def select():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("GN_OT_select_mode")
+            if props:
+                row = layout.row(align=True)
+                row.prop_enum(props, "type", value=0, text="", icon='VERTEXSEL')
+                row.prop_enum(props, "type", value=1, text="", icon='EDGESEL')
+                row.prop_enum(props, "type", value=2, text="", icon='FACESEL')
 
-    # Use operator buttons to switch domain
-    row = layout.row(align=True)
-    props = row.operator("gn.select_mode", text="", icon='VERTEXSEL')
-    props.type = 0  # Point/Vertex
-    props = row.operator("gn.select_mode", text="", icon='EDGESEL')
-    props.type = 1  # Edge
-    props = row.operator("gn.select_mode", text="", icon='FACESEL')
-    props.type = 2  # Face
+        return dict(
+            idname="gn.select",
+            label="Select",
+            description="Select elements in GN Selection Mode",
+            icon="ops.generic.select",
+            cursor='CROSSHAIR',
+            keymap="GN Selection Tool: Select",
+            draw_settings=draw_settings,
+        )
 
+    @ToolDef.from_fn
+    def box():
+        def draw_settings(_context, layout, tool):
+            props = tool.operator_properties("GN_OT_select_box")
+            row = layout.row()
+            row.use_property_split = False
+            row.prop(props, "mode", text="", expand=True, icon_only=True)
 
-class _GN_SelectTool:
-    """Base class for GN Selection tools"""
+        return dict(
+            idname="gn.select_box",
+            label="Select Box",
+            description="Box select elements in GN Selection Mode",
+            icon="ops.generic.select_box",
+            cursor='CROSSHAIR',
+            keymap="GN Selection Tool: Box",
+            draw_settings=draw_settings,
+        )
 
-    @staticmethod
-    def gn_select_draw_settings(context, layout, tool):
-        gn_selection_toolbar_draw(context, layout, tool)
+    @ToolDef.from_fn
+    def lasso():
+        def draw_settings(_context, layout, tool):
+            props = tool.operator_properties("GN_OT_select_lasso")
+            row = layout.row()
+            row.use_property_split = False
+            row.prop(props, "mode", text="", expand=True, icon_only=True)
 
+        return dict(
+            idname="gn.select_lasso",
+            label="Select Lasso",
+            description="Lasso select elements in GN Selection Mode",
+            icon="ops.generic.select_lasso",
+            cursor='CROSSHAIR',
+            keymap="GN Selection Tool: Lasso",
+            draw_settings=draw_settings,
+        )
 
-@ToolDef.from_fn
-def GN_SELECT():
-    return dict(
-        idname="gn.select",
-        label="Select",
-        description="Select elements in GN Selection Mode",
-        icon="ops.generic.select",
-        cursor='CROSSHAIR',
-        keymap="GN Selection",
-    )
+    @ToolDef.from_fn
+    def circle():
+        def draw_settings(_context, layout, tool):
+            props = tool.operator_properties("GN_OT_select_circle")
+            row = layout.row()
+            row.use_property_split = False
+            row.prop(props, "mode", text="", expand=True, icon_only=True)
+            layout.prop(props, "radius")
 
+        def draw_cursor(_context, tool, xy):
+            from gpu_extras.presets import draw_circle_2d
+            props = tool.operator_properties("GN_OT_select_circle")
+            radius = props.radius
+            draw_circle_2d(xy, (1.0,) * 4, radius, segments=32)
 
-def get_tool_list(space_type, context_mode):
-    """Get the tool list for a given space type and context mode."""
-    from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
-    return ToolSelectPanelHelper._tool_class_from_space_type(space_type).tools_from_context(context_mode)
+        return dict(
+            idname="gn.select_circle",
+            label="Select Circle",
+            description="Circle select elements in GN Selection Mode",
+            icon="ops.generic.select_circle",
+            cursor='CROSSHAIR',
+            keymap="GN Selection Tool: Circle",
+            draw_settings=draw_settings,
+            draw_cursor=draw_cursor,
+        )
 
 
 def register():

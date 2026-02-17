@@ -114,6 +114,12 @@ void GN_OT_select_mode(wmOperatorType *ot);
  */
 void view3d_keymap_gn_selection(wmKeyConfig *keyconf);
 
+/**
+ * Register GN Selection Tool keymaps.
+ * These keymaps activate only when the corresponding tool is selected.
+ */
+void view3d_keymap_gn_selection_tools(wmKeyConfig *keyconf);
+
 /** \} */
 
 }  // namespace blender

@@ -289,6 +289,9 @@ void view3d_keymap(wmKeyConfig *keyconf)
 
   /* GN Selection Mode keymap */
   view3d_keymap_gn_selection(keyconf);
+
+  /* GN Selection Tool keymaps */
+  view3d_keymap_gn_selection_tools(keyconf);
 }
 
 /** \} */

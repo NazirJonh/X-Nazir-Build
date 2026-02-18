@@ -1649,13 +1649,21 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
     /* Calculate position for drawing. */
     float pos_x, pos_y;
     if (is_single_glyph) {
-      /* Center the icon horizontally and vertically in the tab. */
+      /* Center the icon horizontally and vertically in the tab.
+       * BLF_position sets the baseline, so we need to account for ascender/descender. */
       const float glyph_width = BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX);
-      const float glyph_height = BLF_height(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX);
+      const int ascender_i = BLF_ascender(fontid);
+      const int descender_i = BLF_descender(fontid);
+      const float ascender = float(ascender_i);
+      const float descender = float(descender_i);
+      const float glyph_height = ascender - descender;  /* Total visual height. */
+
       const float tab_center_x = float(rct->xmin + rct->xmax) * 0.5f;
       const float tab_center_y = float(rct->ymin + rct->ymax) * 0.5f;
+
+      /* Position baseline so glyph is centered. */
       pos_x = tab_center_x - glyph_width * 0.5f;
-      pos_y = tab_center_y - glyph_height * 0.5f;
+      pos_y = tab_center_y - glyph_height * 0.5f - descender;  /* Adjust for baseline. */
     }
     else {
       /* Text positioning with rotation. */

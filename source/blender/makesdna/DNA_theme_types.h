@@ -184,6 +184,7 @@ typedef struct ThemeCommon {
 typedef struct uiWidgetColors {
   unsigned char outline[4];
   unsigned char outline_sel[4];
+  unsigned char icon_selection[4];
   unsigned char inner[4];
   unsigned char inner_sel[4];
   unsigned char item[4];
@@ -193,6 +194,7 @@ typedef struct uiWidgetColors {
   char _pad0[3];
   short shadetop, shadedown;
   float roundness;
+  char _pad1[4];
 } uiWidgetColors;
 
 typedef struct uiWidgetStateColors {
@@ -497,6 +499,12 @@ typedef struct ThemeCollectionColor {
   unsigned char color[4];
 } ThemeCollectionColor;
 
+#define GLYPH_COLOR_TOT 8
+
+typedef struct ThemeGlyphColor {
+  unsigned char color[4];
+} ThemeGlyphColor;
+
 typedef struct ThemeStripColor {
   unsigned char color[4];
 } ThemeStripColor;
@@ -555,6 +563,9 @@ typedef struct bTheme {
 
   /* See COLLECTION_COLOR_TOT for the number of collection colors. */
   ThemeCollectionColor collection_color[8];
+
+  /* See GLYPH_COLOR_TOT for the number of category tab glyph colors. */
+  ThemeGlyphColor glyph_color[8];
 
   /* See STRIP_COLOR_TOT for the total number of strip colors. */
   ThemeStripColor strip_color[9];

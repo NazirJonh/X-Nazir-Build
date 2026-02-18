@@ -12,6 +12,7 @@
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_quaternion_types.hh"
 
+#include "DNA_category_tabs_types.h" /* for CategoryTabsState */
 #include "DNA_defs.h"
 #include "DNA_listBase.h"
 #include "DNA_object_types.h"
@@ -820,6 +821,11 @@ struct View3D {
 
   /** Path to the viewer node that is currently previewed. This is retrieved from the workspace. */
   ViewerPath viewer_path;
+
+  /** Per-editor Category Tabs / Tag Bar state (see #CategoryTabsState). */
+  CategoryTabsState tabs_state;
+
+  char _pad2[4] = {0};
 
   /** Runtime evaluation data (keep last). */
   View3D_Runtime runtime;

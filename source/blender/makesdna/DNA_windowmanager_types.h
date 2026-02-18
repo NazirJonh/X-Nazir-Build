@@ -108,6 +108,126 @@ ENUM_OPERATORS(eWM_OutlinerSyncSelectDirty)
   (WM_OUTLINER_SYNC_SELECT_FROM_OBJECT | WM_OUTLINER_SYNC_SELECT_FROM_EDIT_BONE | \
    WM_OUTLINER_SYNC_SELECT_FROM_POSE_BONE | WM_OUTLINER_SYNC_SELECT_FROM_SEQUENCE)
 
+/* -------------------------------------------------------------------- */
+/** \name Category Glyph Mappings
+ * \{ */
+
+/**
+ * Stores a mapping from category name to glyph character.
+ * Used for default mappings and user overrides.
+ */
+typedef struct CategoryGlyphItem {
+  struct CategoryGlyphItem *next, *prev;
+  /** Space type identifier (eSpace_Type), or -1 for global categories. */
+  int space_type;
+  /** Category name (e.g., "Item", "View"). */
+  char category[64];
+  /** UTF-8 glyph character from Material Symbols font. */
+  char glyph[8];
+  /** Custom color for glyph (RGB 0.0-1.0), {0,0,0} = use theme color. */
+  float color[3];
+  /** User-defined display name for category (empty = use category). */
+  char display_name[32];
+  /** Default glyph for reset functionality. */
+  char default_glyph[8];
+  /** Default display name for reset functionality. */
+  char default_display_name[32];
+  /** Tags assigned to this category (semicolon-separated). Synced from Python for UI display only. */
+  char tags[256];
+  /** Stable icon key for resolver/persistence (builtin/manual/provider specific key). */
+  char icon_key[128];
+  /** Optional icon path for manual/provider resolve (persistent, not runtime icon handle). */
+  char icon_path[1024];
+  /** Stable icon provider id (for example extension/addon provider key). */
+  char icon_provider[128];
+  /** Icon source selector (auto/manual/off). */
+  int icon_source;
+  /** Stored fallback letter derived from display_name to avoid recomputation. */
+  char first_letter[8];
+  /** Glyph source selector (auto=stored/default glyph, first_letter=force category first letter). */
+  int glyph_mode;
+  /** True when category is from Python DEFAULT_CATEGORY_GLYPHS (single source of truth for reserved tabs). */
+  char is_reserved;
+  char _pad[7];
+  /** Extension ID that introduced this category (e.g. "blender_org/brushstroke_tools"). */
+  char source_extension[128];
+  /** True when category has not yet been assigned to a tag by the user. */
+  char pending_tag_assignment;
+  /** True when user selected "Without Tag" in preview mode (before Save). */
+  char without_tag_preview;
+  char _pad2[2];
+  /** Bitfield of space types (eSpace_Type) where this category was discovered. */
+  uint32_t discovered_in_spaces;
+  /** Bitfield of mode flags where this category was discovered. */
+  uint32_t discovered_in_modes;
+  /** Mode flag when extension was installed (for mode-aware filtering when discovered_in_modes == 0). */
+  uint32_t install_mode_flag;
+} CategoryGlyphItem;
+
+/**
+ * Tag definition for category tabs.
+ * Stored in wmWindowManager.category_tags.
+ */
+typedef struct CategoryTagDef {
+  struct CategoryTagDef *next, *prev;
+  /** Tag name. */
+  char name[32];
+  /** Tag glyph (single UTF-8 character). */
+  char glyph[8];
+  /** Tag color (RGB 0.0-1.0). */
+  float color[3];
+  /** Mode flags for tag filtering. */
+  uint32_t mode_flags;
+  /** Blender icon identifier (e.g., "OBJECT_DATAMODE"). Matches CategoryGlyphItem::icon_key size. */
+  char icon_key[128];
+  /** Icon source: 0=GLYPH (use glyph field), 1=ICON (use icon_key). */
+  int icon_source;
+  char _pad1[4]; /* Alignment padding */
+} CategoryTagDef;
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tag Mode Flags
+ * \{ */
+
+/**
+ * Mode flags for category tag filtering.
+ * Used to show/hide tags based on the current object mode.
+ */
+enum class CategoryTagMode : uint32_t {
+  NONE = 0,
+  OBJECT_MODE = (1 << 0),
+  EDIT_MODE = (1 << 1),
+  SCULPT_MODE = (1 << 2),
+  VERTEX_PAINT = (1 << 3),
+  WEIGHT_PAINT = (1 << 4),
+  TEXTURE_PAINT = (1 << 5),
+  UV_EDIT = (1 << 6),
+  POSE_MODE = (1 << 7),
+  GEOMETRY_NODES = (1 << 8),
+  SHADER_EDITOR = (1 << 9),
+  IMAGE_PAINT = (1 << 10),
+  /* Detailed edit modes for bl_context matching (mesh_edit, curve_edit, etc.) */
+  MESH_EDIT = (1 << 11),
+  CURVE_EDIT = (1 << 12),
+  SURFACE_EDIT = (1 << 13),
+  ARMATURE_EDIT = (1 << 14),
+  LATTICE_EDIT = (1 << 15),
+  META_EDIT = (1 << 16),
+  FONT_EDIT = (1 << 17),
+  GREASE_PENCIL_EDIT = (1 << 18),
+  POINTCLOUD_EDIT = (1 << 19),
+  VOLUME_EDIT = (1 << 20),
+  /* Mask for all edit modes */
+  EDIT_MODE_MASK = EDIT_MODE | MESH_EDIT | CURVE_EDIT | SURFACE_EDIT |
+                   ARMATURE_EDIT | LATTICE_EDIT | META_EDIT | FONT_EDIT |
+                   GREASE_PENCIL_EDIT | POINTCLOUD_EDIT | VOLUME_EDIT,
+  ALL = 0xFFFFFFFF
+};
+
+/** \} */
+
+/** \} */
+
 /** Window-manager is saved, tag WMAN. */
 struct wmWindowManager {
 #ifdef __cplusplus
@@ -119,6 +239,18 @@ struct wmWindowManager {
 
   ListBaseT<wmWindow> windows = {nullptr, nullptr};
 
+  /* The following three lists are runtime-only: they are rebuilt by Python on startup and are
+   * neither written to the file nor relinked on read, so they hold no persistent data. */
+  /** Default glyph mappings for category tabs (auto-filled on startup). */
+  ListBase category_glyph_mappings = {nullptr, nullptr};
+  /** User-defined glyph overrides for category tabs. */
+  ListBase category_glyph_overrides = {nullptr, nullptr};
+  /** Tag definitions for category tabs (stored in wm.category_tags). */
+  ListBase category_tags = {nullptr, nullptr};
+
+  /** Temporary storage for category name during dialog save (UTF-8 safe via RNA). */
+  char category_tab_save_category[64] = {};
+
   /** Set on file read. */
   eWM_InitFlag init_flag = {};
   char _pad0[1] = {};
@@ -129,11 +261,24 @@ struct wmWindowManager {
 
   /** Set after selection to notify outliner to sync. Stores type of selection */
   eWM_OutlinerSyncSelectDirty outliner_sync_select_dirty = {};
+  /** Active index for category tags UI list. */
+  int category_tags_active_index = 0;
+
+  /** Mode filter for category tags in popup (`CategoryTagMode`, 0 = all tags, 1+ = current mode). */
+  char category_tag_filter_mode = 0;
+  char _pad_filter[1] = {};
+  /** Show tag names in Tag Bar buttons (Glyph+Name vs Glyph-only mode). */
+  char show_tag_names = 0;
+  /** Show tag names only for active tags, inactive tags show glyph-only. */
+  char show_tag_names_active_only = 0;
+  char _pad3[4] = {};
 
   /** Available/pending extensions updates. */
   eWM_ExtensionsUpdates extensions_updates = {};
   /** Number of blocked & installed extensions. */
   int extensions_blocked = 0;
+
+  char _pad1[4] = {};
 
   /** Timer for auto save. */
   struct wmTimer *autosavetimer = nullptr;
@@ -516,3 +661,4 @@ struct wmOperator {
 };
 
 }  // namespace blender
+

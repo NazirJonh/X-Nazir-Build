@@ -9,14 +9,17 @@
 #include "DNA_object_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
+#include "DNA_view3d_types.h"
 
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
+#include "BLI_string.h"
 
 #include "BKE_appdir.hh"
 #include "BKE_blender_copybuffer.hh"
 #include "BKE_blendfile.hh"
 #include "BKE_context.hh"
+#include "BKE_screen.hh"
 #include "BKE_report.hh"
 
 #include "BLO_readfile.hh"
@@ -30,6 +33,10 @@
 #include "ED_outliner.hh"
 #include "ED_screen.hh"
 #include "ED_transform.hh"
+
+#include "UI_interface_c.hh"
+#include "../interface/interface_intern.hh"
+#include "../interface/interface_tag_bar.hh"
 
 #include "view3d_intern.hh"
 #include "view3d_navigate.hh"
@@ -183,6 +190,419 @@ static void VIEW3D_OT_pastebuffer(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Tag Bar Filter Toggle Operator
+ * \{ */
+
+/* Debug flag for tag bar toggle operator.
+ * Set to true to enable detailed logging of tag toggle operations. */
+static constexpr bool TAG_BAR_TOGGLE_DEBUG_ENABLED = false;
+
+static bool view3d_tag_bar_toggle_poll(bContext *C)
+{
+  const ScrArea *area = CTX_wm_area(C);
+  if (!area) {
+    if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+      printf("[TAG_BAR_TOGGLE_POLL] area is NULL\n");
+    }
+    return false;
+  }
+
+  using namespace blender::ui;
+  TagFilterStateRef state{};
+  const bool result = tag_filter_state_from_area(area, &state) && state.active_tags;
+  if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+    printf("[TAG_BAR_TOGGLE_POLL] area=%p spacetype=%d result=%d\n",
+           (void*)area, area->spacetype, result);
+  }
+  /* Only require that we can get tag filter state from area.
+   * Don't require filter_enabled to be true - user should be able to
+   * toggle tags even when filter is off (to enable filtering). */
+  return result;
+}
+
+static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  ScrArea *area = CTX_wm_area(C);
+  if (!area) {
+    return OPERATOR_CANCELLED;
+  }
+
+  char tag_name[64];
+  RNA_string_get(op->ptr, "tag_name", tag_name);
+
+  using namespace blender::ui;
+
+  /* Special handling for "New Add-ons!" button */
+  if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+    printf("[TAG_BAR_TOGGLE] tag_name='%s' comparing with 'New Add-ons!'\n", tag_name);
+  }
+  if (STREQ(tag_name, "New Add-ons!")) {
+    ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
+    const bool is_currently_active = is_new_addon_filter_active(area);
+    if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+      printf("[TAG_BAR_TOGGLE] 'New Add-ons!' detected, is_currently_active=%d\n", is_currently_active);
+    }
+
+    if (is_currently_active) {
+      /* Filter is active - deactivate it.
+       * Do NOT hide N-Panel - user wants to see all categories.
+       * Restore saved tags or show all categories if no tags were saved. */
+      if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+        printf("[TAG_BAR_TOGGLE] Deactivating 'New Add-ons!' filter, was_auto_activated=%d\n",
+               is_new_addon_filter_auto_activated(area));
+      }
+      set_new_addon_filter_active(area, false);
+      if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+        printf("[TAG_BAR_TOGGLE] After deactivation: is_new_addon_filter_active=%d auto_activated=%d\n",
+               is_new_addon_filter_active(area), is_new_addon_filter_auto_activated(area));
+      }
+
+      /* Restore saved tags or clear to show all categories */
+      TagFilterStateRef state{};
+      if (tag_filter_state_from_area(area, &state) && state.active_tags) {
+        char *saved_tags = get_saved_tag_filter_tags(area);
+        if (saved_tags && saved_tags[0] != '\0') {
+          BLI_strncpy(state.active_tags, saved_tags, 256);
+        }
+        else {
+          /* No saved tags - show all categories (empty string) */
+          state.active_tags[0] = '\0';
+        }
+      }
+
+      /* Ensure first visible category is active */
+      if (region_ui) {
+        ui::panel_category_tabs_ensure_active_visible(C, region_ui);
+      }
+    }
+    else {
+      /* Filter is not active - activate and show N-Panel */
+      if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+        printf("[TAG_BAR_TOGGLE] Activating 'New Add-ons!' filter\n");
+      }
+      set_new_addon_filter_active(area, true);
+      if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+        printf("[TAG_BAR_TOGGLE] After activation: is_new_addon_filter_active=%d auto_activated=%d\n",
+               is_new_addon_filter_active(area), is_new_addon_filter_auto_activated(area));
+      }
+
+      /* Save current tags before clearing (so we can restore later) */
+      TagFilterStateRef state{};
+      if (tag_filter_state_from_area(area, &state) && state.active_tags) {
+        const bool has_active_tags = (state.active_tags[0] != '\0');
+        set_saved_tag_filter_tags(area, state.active_tags);
+        state.active_tags[0] = '\0';
+
+        /* If no tags were selected, disable the tag filter to show all categories.
+         * This allows user to see all categories when clicking "New Add-ons!" without
+         * any tag filter active. */
+        if (!has_active_tags && state.filter_enabled) {
+          *state.filter_enabled = 0;
+        }
+      }
+
+      /* Open N-Panel if hidden */
+      if (region_ui && (region_ui->flag & RGN_FLAG_HIDDEN)) {
+        ED_region_toggle_hidden(C, region_ui);
+      }
+
+      /* Ensure first visible category is active */
+      if (region_ui) {
+        ui::panel_category_tabs_ensure_active_visible(C, region_ui);
+      }
+    }
+
+    WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+    WM_event_add_notifier(C, NC_SPACE | ND_CATEGORY_GLYPHS, nullptr);
+    ED_area_tag_redraw(area);
+    return OPERATOR_FINISHED;
+  }
+
+  TagFilterStateRef state{};
+  if (!tag_filter_state_from_area(area, &state) || !state.active_tags || !state.filter_enabled) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Deactivate "New Add-on!" filter when clicking on a normal tag. */
+  if (is_new_addon_filter_active(area)) {
+    /* Clear saved tags since user is manually selecting tags */
+    set_saved_tag_filter_tags(area, "");
+    set_new_addon_filter_active(area, false);
+  }
+
+  /* Remember filter state BEFORE any changes - needed for N-Panel hide logic. */
+  const bool was_filter_enabled_before = *state.filter_enabled != 0;
+
+  /* Get current active category BEFORE changing tags. */
+  ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
+  const char *current_category = nullptr;
+  if (region_ui) {
+    current_category = ui::panel_category_active_get(region_ui, false);
+  }
+
+  /* Build tag combination key for current state (before toggle). */
+  char current_tag_key[256];
+  ui::tag_build_combination_key(state.active_tags, current_tag_key, sizeof(current_tag_key));
+
+  /* Save current category for current tag combination. */
+  if (current_category && current_category[0]) {
+    ui::tag_save_last_active_category(C, current_tag_key, current_category);
+  }
+
+  /* Check if Shift is pressed for multi-select */
+  const bool shift_pressed = (event->modifier & KM_SHIFT) != 0;
+
+  /* Copy current active tags to work with */
+  char tags_copy[256];
+  BLI_strncpy(tags_copy, state.active_tags, sizeof(tags_copy));
+
+
+
+  /* Check if tag is already in the list */
+  bool tag_found = false;
+  char *tag = strtok(tags_copy, ",;");
+  while (tag != nullptr) {
+    while (*tag == ' ') {
+      tag++;
+    }
+    if (STREQ(tag, tag_name)) {
+      tag_found = true;
+      break;
+    }
+    tag = strtok(nullptr, ",;");
+  }
+
+  /* Toggle: add if not found, remove if found */
+  char new_tags[256] = "";
+  const bool was_removing_tag = tag_found; /* Remember if we're removing a tag */
+
+  if (!tag_found) {
+    /* Add the tag to the list */
+    if (shift_pressed) {
+      /* Multi-select: add to existing tags */
+      if (state.active_tags[0] != '\0') {
+        SNPRINTF(new_tags, "%s,%s", state.active_tags, tag_name);
+      }
+      else {
+        BLI_strncpy(new_tags, tag_name, sizeof(new_tags));
+      }
+    }
+    else {
+      /* Single-select: replace all tags with this one */
+      BLI_strncpy(new_tags, tag_name, sizeof(new_tags));
+    }
+  }
+  else {
+    /* Remove the tag from the list */
+    char temp[256];
+    BLI_strncpy(temp, state.active_tags, sizeof(temp));
+    char *token = strtok(temp, ",;");
+    bool first = true;
+    while (token != nullptr) {
+      while (*token == ' ') {
+        token++;
+      }
+      if (!STREQ(token, tag_name)) {
+        if (!first) {
+          BLI_strncat(new_tags, ",", sizeof(new_tags));
+        }
+        BLI_strncat(new_tags, token, sizeof(new_tags));
+        first = false;
+      }
+      token = strtok(nullptr, ",;");
+    }
+  }
+
+  /* Update the active tags string */
+  BLI_strncpy(state.active_tags, new_tags, 256);
+
+  /* Handle filter state based on whether tags were removed or added. */
+  if (was_removing_tag) {
+    /* Tag was removed - don't force enable filter, keep filter state unchanged */
+    *state.filter_enabled = 0;  /* Keep filter OFF if all tags removed */
+  }
+  else {
+    /* Tag was added - enable filter */
+    *state.filter_enabled = 1;
+  }
+
+  /* After updating tags, try to restore saved category for the new combination. */
+  if (region_ui) {
+    char new_tag_key[256];
+    ui::tag_build_combination_key(state.active_tags, new_tag_key, sizeof(new_tag_key));
+
+    char saved_category[64];
+    if (ui::tag_get_last_active_category(C, new_tag_key, saved_category, sizeof(saved_category))) {
+      /* Check if saved category is visible with new tag filter. */
+      const wmWindowManager *wm = CTX_wm_manager(C);
+      if (ui::panel_category_is_visible_by_tags(C, wm, saved_category)) {
+        ui::panel_category_active_set(region_ui, saved_category);
+      }
+      else {
+        /* Fall back to first visible category. */
+        ui::panel_category_tabs_ensure_active_visible(C, region_ui);
+      }
+    }
+    else {
+      /* No saved category - use default behavior (ensure active is visible). */
+      ui::panel_category_tabs_ensure_active_visible(C, region_ui);
+    }
+  }
+
+  /* Check N-Panel visibility before toggling */
+  const bool was_npanel_hidden = region_ui && (region_ui->flag & RGN_FLAG_HIDDEN);
+
+  /* Open N-Panel (Sidebar) if it's hidden, so users can see filtered categories */
+  if (was_npanel_hidden) {
+    ED_region_toggle_hidden(C, region_ui);
+  }
+  /* Hide N-Panel only if: filter was enabled before AND we removed the last tag. */
+  else if (was_filter_enabled_before && was_removing_tag && new_tags[0] == '\0') {
+    /* No more tags active and filter was on - hide N-Panel */
+    ED_region_toggle_hidden(C, region_ui);
+  }
+
+  /* Trigger redraw to update category order for new tag combination */
+  WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  WM_event_add_notifier(C, NC_SPACE | ND_CATEGORY_GLYPHS, nullptr);
+  ED_area_tag_redraw(area);
+
+  return OPERATOR_FINISHED;
+}
+
+static void VIEW3D_OT_tag_bar_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Tag Filter";
+  ot->idname = "VIEW3D_OT_tag_bar_toggle";
+  ot->description = "Toggle a tag filter in the 3D View tag bar";
+
+  ot->invoke = view3d_tag_bar_toggle_invoke;
+  ot->poll = view3d_tag_bar_toggle_poll;
+
+  ot->flag = OPTYPE_REGISTER;
+
+  RNA_def_string(ot->srna, "tag_name", nullptr, 64, "Tag Name", "Name of the tag to toggle");
+}
+
+/** \name Tag Bar Filter Toggle Operator
+ * \{ */
+
+static bool view3d_tag_bar_filter_toggle_poll(bContext *C)
+{
+  const ScrArea *area = CTX_wm_area(C);
+  if (!area) {
+    return false;
+  }
+
+  using namespace blender::ui;
+  TagFilterStateRef state{};
+  return tag_filter_state_from_area(area, &state) && state.active_tags && state.filter_enabled;
+}
+
+static wmOperatorStatus view3d_tag_bar_filter_toggle_exec(bContext *C, wmOperator * /*op*/)
+{
+  ScrArea *area = CTX_wm_area(C);
+  if (!area) {
+    return OPERATOR_CANCELLED;
+  }
+
+  using namespace blender::ui;
+  TagFilterStateRef state{};
+  if (!tag_filter_state_from_area(area, &state) || !state.active_tags || !state.filter_enabled) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Get runtime data for saving/restoring tags */
+  TagBarRuntimeData *data = get_tag_bar_data_global(C);
+  if (!data) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Deactivate "New Add-on!" filter when toggling normal filter. */
+  if (is_new_addon_filter_active(area)) {
+    /* Clear saved tags since user is manually toggling filter */
+    set_saved_tag_filter_tags(area, "");
+    set_new_addon_filter_active(area, false);
+  }
+
+  ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
+
+  /* Toggle the filter enabled flag */
+  *state.filter_enabled = *state.filter_enabled ? 0 : 1;
+
+  if (*state.filter_enabled) {
+    /* Filter INACTIVE -> ACTIVE: Restore saved tags and show N-Panel */
+    if (data->saved_tags[0] != '\0') {
+      BLI_strncpy(state.active_tags, data->saved_tags, 256);
+    }
+    else {
+      /* No saved tags - clear active tags so show all categories when filter is enabled. */
+      state.active_tags[0] = '\0';
+    }
+
+    /* Restore last active category for this tag combination. */
+    if (region_ui) {
+      char tag_key[256];
+      tag_build_combination_key(state.active_tags, tag_key, sizeof(tag_key));
+      char saved_category[64];
+      if (tag_get_last_active_category(C, tag_key, saved_category, sizeof(saved_category))) {
+        const wmWindowManager *wm = CTX_wm_manager(C);
+        if (ui::panel_category_is_visible_by_tags(C, wm, saved_category)) {
+          ui::panel_category_active_set(region_ui, saved_category);
+        }
+        else {
+          ui::panel_category_tabs_ensure_active_visible(C, region_ui);
+        }
+      }
+      else {
+        ui::panel_category_tabs_ensure_active_visible(C, region_ui);
+      }
+    }
+
+    /* Open N-Panel if it's hidden */
+    if (region_ui && (region_ui->flag & RGN_FLAG_HIDDEN)) {
+      ED_region_toggle_hidden(C, region_ui);
+    }
+  }
+  else {
+    /* Filter ACTIVE -> INACTIVE: Save tags and current category. */
+    BLI_strncpy(data->saved_tags, state.active_tags, sizeof(data->saved_tags));
+
+    if (region_ui) {
+      const char *current_category = ui::panel_category_active_get(region_ui, false);
+      if (current_category && current_category[0]) {
+        char tag_key[256];
+        ui::tag_build_combination_key(state.active_tags, tag_key, sizeof(tag_key));
+        ui::tag_save_last_active_category(C, tag_key, current_category);
+      }
+    }
+    /* Note: Don't clear active_tag_filter_tags - keep them for next activation */
+  }
+
+  /* Trigger redraw to update UI */
+  WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  WM_event_add_notifier(C, NC_SPACE | ND_CATEGORY_GLYPHS, nullptr);
+  ED_region_tag_redraw(CTX_wm_region(C));
+  ED_area_tag_redraw(area);
+
+  return OPERATOR_FINISHED;
+}
+
+static void VIEW3D_OT_tag_bar_filter_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Tag Filtering";
+  ot->idname = "VIEW3D_OT_tag_bar_filter_toggle";
+  ot->description = "Toggle tag filtering on/off (when off, all categories are shown)";
+
+  ot->exec = view3d_tag_bar_filter_toggle_exec;
+  ot->poll = view3d_tag_bar_filter_toggle_poll;
+
+  ot->flag = OPTYPE_REGISTER;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Registration
  * \{ */
 
@@ -238,6 +658,8 @@ void view3d_operatortypes()
   WM_operatortype_append(VIEW3D_OT_navigate);
   WM_operatortype_append(VIEW3D_OT_copybuffer);
   WM_operatortype_append(VIEW3D_OT_pastebuffer);
+  WM_operatortype_append(VIEW3D_OT_tag_bar_toggle);
+  WM_operatortype_append(VIEW3D_OT_tag_bar_filter_toggle);
 
   WM_operatortype_append(VIEW3D_OT_object_mode_pie_or_toggle);
 

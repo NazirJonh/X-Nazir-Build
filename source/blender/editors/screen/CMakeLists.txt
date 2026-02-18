@@ -5,9 +5,11 @@
 set(INC
   ../asset
   ../include
+  ../interface
   ../space_graph
   ../../makesrna
   ../../nodes
+  ../../python
   # RNA_prototypes.hh
   ${CMAKE_BINARY_DIR}/source/blender/makesrna
 )
@@ -20,6 +22,7 @@ set(SRC
   area_query.cc
   area_utils.cc
   glutil.cc
+  screen_category_tabs_ops.cc
   screen_context.cc
   screen_draw.cc
   screen_edit.cc
@@ -56,6 +59,10 @@ set(LIB
 
 if(WITH_HEADLESS)
   add_definitions(-DWITH_HEADLESS)
+endif()
+
+if(WITH_PYTHON)
+  add_definitions(-DWITH_PYTHON)
 endif()
 
 blender_add_lib(bf_editor_screen "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")

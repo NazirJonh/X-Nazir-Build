@@ -15,7 +15,9 @@
 #include "BKE_context.hh"
 #include "BKE_icons.hh"
 
+#include "BLF_api.hh"
 #include "BLI_index_range.hh"
+#include "BLI_string.h"
 
 #include "WM_types.hh"
 
@@ -27,6 +29,7 @@
 #include "interface_intern.hh"
 
 #include "UI_grid_view.hh"
+#include "UI_glyph_grid_view.hh"
 
 namespace blender::ui {
 
@@ -658,5 +661,118 @@ std::optional<bool> PreviewGridItem::should_be_active() const
   }
   return std::nullopt;
 }
+
+/* ---------------------------------------------------------------------- */
+/** \name Glyph Grid Item
+ * \{ */
+
+GlyphGridItem::GlyphGridItem(StringRef identifier, StringRef unicode, StringRef name)
+    : AbstractGridViewItem(identifier), unicode_(unicode), name_(name)
+{
+}
+
+void GlyphGridItem::build_grid_tile(const bContext & /*C*/, Layout &layout) const
+{
+  const GridViewStyle &style = this->get_view().get_style();
+  Block *block = layout.block();
+
+  /* Create button with unicode glyph as text */
+  Button *but = uiDefBut(block,
+                         ButtonType::Label,
+                         unicode_.c_str(),  /* unicode glyph as button text */
+                         0,                  /* x */
+                         0,                  /* y */
+                         style.tile_width,
+                         style.tile_height,
+                         nullptr,            /* poin */
+                         0.0,                /* min */
+                         0.0,                /* max */
+                         name_.c_str());     /* tooltip = name */
+
+  but->emboss = EmbossType::None;
+  
+  /* Ensure text is centered by clearing any alignment flags */
+  but->drawflag &= ~(BUT_TEXT_LEFT | BUT_TEXT_RIGHT);
+}
+
+void GlyphGridItem::set_on_select_fn(OnSelectFn fn)
+{
+  on_select_fn_ = fn;
+}
+
+std::optional<bool> GlyphGridItem::should_be_active() const
+{
+  return std::nullopt;
+}
+
+void GlyphGridItem::on_activate(bContext &C)
+{
+  if (on_select_fn_) {
+    on_select_fn_(C, unicode_);
+  }
+}
+
+/** \} */
+
+/* ---------------------------------------------------------------------- */
+/** \name Glyph Grid View
+ * \{ */
+
+GlyphGridView::GlyphGridView() : AbstractGridView() {}
+
+void GlyphGridView::set_glyphs(const Vector<std::pair<std::string, std::string>> &glyphs)
+{
+  glyphs_ = glyphs;
+}
+
+void GlyphGridView::set_search_filter(StringRef search_filter)
+{
+  search_filter_ = search_filter;
+}
+
+void GlyphGridView::set_on_glyph_select_fn(OnGlyphSelectFn fn)
+{
+  on_glyph_select_fn_ = fn;
+}
+
+void GlyphGridView::build_items()
+{
+  for (int64_t i = 0; i < glyphs_.size(); i++) {
+    const auto &[unicode, name] = glyphs_[i];
+
+    /* Filter by search string if set */
+    if (!search_filter_.empty()) {
+      /* Convert search filter to lowercase for case-insensitive matching */
+      std::string search_lower = search_filter_;
+      std::transform(search_lower.begin(), search_lower.end(), search_lower.begin(), ::tolower);
+
+      /* Check if unicode or name matches search */
+      std::string unicode_lower = unicode;
+      std::transform(unicode_lower.begin(), unicode_lower.end(), unicode_lower.begin(), ::tolower);
+
+      std::string name_lower = name;
+      std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+
+      if (unicode_lower.find(search_lower) == std::string::npos &&
+          name_lower.find(search_lower) == std::string::npos) {
+        continue; /* Skip non-matching glyphs */
+      }
+    }
+
+    /* Create unique identifier for each glyph */
+    std::string identifier = "glyph_" + std::to_string(i);
+
+    GlyphGridItem &item = this->add_item<GlyphGridItem>(identifier, unicode, name);
+
+    /* Set the selection callback */
+    if (on_glyph_select_fn_) {
+      item.set_on_select_fn([this](bContext &C, const std::string &unicode) {
+        on_glyph_select_fn_(C, unicode);
+      });
+    }
+  }
+}
+
+/** \} */
 
 }  // namespace blender::ui

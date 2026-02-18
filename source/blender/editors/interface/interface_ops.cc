@@ -3229,6 +3229,18 @@ void operatortypes_ui()
   WM_operatortype_append(UI_OT_view_item_navigate);
   WM_operatortype_append(UI_OT_view_item_focus);
 
+  WM_operatortype_append(UI_OT_category_tab_drag);
+  WM_operatortype_append(UI_OT_category_quick_focus);
+
+  /* Switch to reserved category for reserved-only extensions */
+  WM_operatortype_append(UI_OT_switch_to_reserved_category);
+
+  /* Centered popup operator wrapper */
+  centered_popup_operator_register();
+
+  /* Category tab icon picker */
+  WM_operatortype_append(SCREEN_OT_category_tab_icon_picker);
+
   WM_operatortype_append(UI_OT_override_add_button);
   WM_operatortype_append(UI_OT_override_remove_button);
   WM_operatortype_append(UI_OT_override_idtemplate_make);

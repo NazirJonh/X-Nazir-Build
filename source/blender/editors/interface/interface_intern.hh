@@ -21,14 +21,41 @@
 #include "BKE_fcurve.hh"
 
 #include "DNA_listBase.h"
+#include "DNA_vec_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "RNA_types.hh"
 
 #include "UI_interface.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
+#include "interface_tag_bar.hh"
 struct IconTextOverlay;
 namespace blender {
+
+/** ===================================================================== */
+/** \name Global Debug Flags for Logging Control
+ *  \{ */
+
+/** Enable/disable drag-and-drop texture debug logging (interface_drop_image.cc). */
+extern bool g_drop_image_debug_enabled;
+
+/** Enable/disable UI button tag debug logging (interface.cc). */
+extern bool g_ui_button_tag_debug_enabled;
+
+/** Enable/disable UI button function application debug logging (interface_handlers.cc). */
+extern bool g_ui_apply_but_func_debug_enabled;
+
+/** Enable/disable tag filter debug logging (interface_tab_categories.cc). */
+extern bool g_tag_filter_debug_enabled;
+
+/** Enable/disable unassigned category function debug logging (interface_panel.cc). */
+extern bool g_unassigned_func_debug_enabled;
+
+/** Enable/disable tag bar debug logging (interface_tag_bar.cc). */
+extern bool g_tag_bar_debug_enabled;
+
+/** \} */
 
 struct AnimationEvalContext;
 struct ARegion;
@@ -41,6 +68,7 @@ struct ImBuf;
 struct LayoutPanelHeader;
 struct Main;
 struct Scene;
+struct ScrArea;
 struct uiListType;
 struct uiStyle;
 struct uiWidgetColors;
@@ -60,6 +88,12 @@ struct SafetyRect;
 struct HandleButtonData;
 struct Layout;
 struct UndoStack_Text;
+
+/**
+ * Compute vertical padding between category tabs for zoom factor.
+ */
+int category_tabs_vertical_padding_calc(float zoom);
+
 /* ****************** general defines ************** */
 
 #define RNA_ENUM_VALUE -2
@@ -503,6 +537,28 @@ struct ButtonLabel : public Button {
   bool draw_icon_border = false;
 };
 
+/** Derived struct for #ButtonType::Tag
+ * Represents a unified button with checkbox, colored glyph, and text label.
+ * Used for tag selection UI with checkbox toggle, optional emoji, and display text.
+ */
+struct ButtonTag : public Button {
+  char glyph[8] = {};        /**< UTF-8 glyph character (max 1 emoji, ~4 bytes) */
+  float color[3] = {0};      /**< RGB color for glyph (0.0-1.0), clamped at creation */
+  bool has_color = false;    /**< Whether custom color is set (optimization flag) */
+
+  /** Icon support - icon takes priority over glyph when set */
+  int icon_id = 0;           /**< Blender internal icon ID (BIFIconID), 0 = none */
+  char icon_path[1024] = {}; /**< Path to external icon file (used if icon_id is 0) */
+
+  char *context_menu_operator = nullptr; /**< Operator for right-click context menu */
+  char *operator_param_name = nullptr;   /**< Parameter name to pass to context menu operator */
+  char *operator_param_value = nullptr;  /**< Parameter value to pass to context menu operator */
+  std::string tooltip_storage; /**< Storage for tooltip text (StringRef doesn't own the data) */
+
+  /** Default constructor - initializes all members via default initializers */
+  ButtonTag() : Button() {}
+};
+
 /** Derived struct for #ButtonType::Scroll. */
 struct ButtonScrollBar : public Button {
   /** Actual visual height of UI list (in rows). */
@@ -817,6 +873,443 @@ struct SafetyRect {
   rctf parent;
   rctf safety;
 };
+
+/**
+ * Runtime state for category tab drag operation.
+ * Stored in ARegionRuntime::category_tabs_drag_state during drag.
+ */
+struct CategoryDragState {
+  bool is_dragging = false;
+  char drag_category_id[64] = "";
+  int drag_start_y = 0;
+  int drag_tab_height = 0;
+  int drag_top_edge_offset = 0;     /* Offset from click point to top edge of tab */
+  int drag_bottom_edge_offset = 0;  /* Offset from click point to bottom edge of tab */
+  int original_index = 0;           /* Original position of dragged tab */
+  int current_insert_index = 0;
+  int min_insert_index = 0;         /* Minimum allowed insert index for dragged tab */
+  int max_insert_index = 0;         /* Maximum allowed insert index for dragged tab */
+  float drag_offset_y = 0.0f;
+  float prev_drag_offset_y = 0.0f;  /* Previous frame's offset, for detecting direction change */
+  int tab_v_pad = 0;
+
+  /* Insert zone boundaries for visual shift calculation */
+  int insert_y_start = 0;
+  int insert_y_end = 0;
+
+  int initial_scroll = 0;
+
+  bool is_reserved = false;
+  int current_mouse_x = 0;
+  int current_mouse_y = 0;
+  ARegion *tooltip_region = nullptr;
+  int tooltip_initial_x = 0;  /* Initial X position of tooltip, fixed during drag */
+  bool tooltip_hidden = false; /* True when tooltip is hidden because cursor left region */
+  int tooltip_width = 0;      /* Saved tooltip width for restoration */
+  int tooltip_height = 0;     /* Saved tooltip height for restoration */
+
+  void *scroll_timer = nullptr;
+};
+
+/* `interface_tag_bar.hh` - TagButton and TagBarRuntimeData are defined there */
+
+/* `interface_tab_categories.cc` */
+
+/**
+ * Check if a category should be visible based on tag filtering and current mode.
+ * Used by category cycling to skip hidden categories.
+ */
+bool panel_category_is_visible_by_tags(const bContext *C,
+                                       const wmWindowManager *wm,
+                                       const char *category);
+
+/**
+ * Get the current object mode as a CategoryTagMode bitmask.
+ */
+uint32_t get_current_tag_mode_flag(const bContext *C);
+
+/**
+ * Check if a ListBase containing category tags appears to be valid.
+ */
+bool category_tag_list_is_valid(const ListBase *list);
+
+/**
+ * Check if a ListBase containing CategoryGlyphItem appears to be valid.
+ */
+bool category_glyph_list_is_valid(const ListBase *list);
+
+/**
+ * Look up tags string for a category from window manager mappings.
+ * \param space_type: Space type identifier, -1 for global categories.
+ */
+const char *category_tags_string_lookup(const wmWindowManager *wm,
+                                        const char *category,
+                                        int space_type = -1);
+
+/**
+ * Get the first active tag from the current tag filter.
+ * Returns nullptr if no tag is active.
+ */
+const char *category_active_tag_first_get(const bContext *C);
+
+/**
+ * Check if a tag name exists in a semicolon-separated tags string.
+ */
+bool category_has_tag(const char *tags_string, const char *tag_name);
+
+/**
+ * Convert hex glyph code to UTF-8 string.
+ */
+bool tag_glyph_hex_to_utf8(const char *input, char r_utf8[8]);
+
+/**
+ * Get display name for a category tab (from overrides, mappings, or panel types).
+ */
+const char *panel_category_tooltip_name_get(const ARegion *region,
+                                            const wmWindowManager *wm,
+                                            const char *category_idname);
+
+/**
+ * Scroll to show the active category tab when user presses numpad period.
+ */
+int ui_panel_category_show_active_tab(const ScrArea *area, ARegion *region, const int mval[2]);
+
+/**
+ * Get categories in custom order (from workspace settings).
+ * Returns a vector of category pointers sorted according to user's custom order.
+ */
+Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region);
+
+/** Category quick focus operator (F7) for searching category tabs. */
+void UI_OT_category_quick_focus(wmOperatorType *ot);
+
+/**
+ * Insert/move a category into the ordered list for the current tag combination.
+ * Used by drag & drop on category tabs.
+ */
+void category_tabs_apply_drop_insert(bContext *C,
+                                      ARegion *region,
+                                      const char *category_id,
+                                      const char *target_category_id,
+                                      bool insert_above,
+                                      const char *tag_name = nullptr);
+
+/**
+ * Set up deferred category activation for viewport (WINDOW region) extension drops.
+ * This is called from screen_ops.cc when an extension is dropped into a viewport
+ * (not onto category tabs). It enables reserved-only extension detection and
+ * automatic switching to reserved categories (e.g., "Edit" for Bool Tool).
+ */
+void category_tabs_setup_viewport_drop_deferred(const bContext *C,
+                                                 const char *extension_id,
+                                                 int space_type,
+                                                 uint32_t mode_flag);
+
+/**
+ * Safe category activation that waits for extension installation signals.
+ * Use this instead of direct panel_category_active_set when activation
+ * might be triggered by extension installation.
+ */
+void panel_category_active_set_safe(const bContext *C,
+                                   ARegion *region,
+                                   const char *category_id,
+                                   bool check_extension = true);
+
+/**
+ * Check if a category is unassigned (pending tag assignment) for the given context.
+ * Returns true if the category has a source_extension, pending_tag_assignment=true,
+ * no tags assigned, and was discovered in the given space/mode context.
+ * Reserved categories always return false.
+ */
+bool category_is_unassigned_for_context(const wmWindowManager *wm,
+                                        const CategoryGlyphItem *category,
+                                        int space_type,
+                                        uint32_t current_mode_flag);
+
+/**
+ * Count categories that are unassigned (pending tag assignment) for the given context.
+ * Iterates wm->category_glyph_mappings and counts entries where
+ * category_is_unassigned_for_context() returns true.
+ */
+int get_unassigned_categories_count(const wmWindowManager *wm,
+                                    int space_type,
+                                    uint32_t current_mode_flag);
+
+/**
+ * Count categories that are unassigned AND actually exist in the region's panel list.
+ * This filters out pending categories whose panels are not visible due to poll() returning false.
+ */
+int get_unassigned_categories_count_for_region(const wmWindowManager *wm,
+                                                const ARegion *region,
+                                                int space_type,
+                                                uint32_t current_mode_flag);
+
+/**
+ * Returns true if there is at least one unassigned category for the given context,
+ * i.e. the "New Add-on!" virtual tag should be shown in the Tag Bar.
+ */
+bool should_show_new_addon_tag(const wmWindowManager *wm,
+                                int space_type,
+                                uint32_t current_mode_flag);
+
+/**
+ * Returns true if there is at least one unassigned category that exists in the region.
+ * Use this when you have access to the region to avoid showing "New Add-on!" for
+ * categories whose panels are not visible (e.g., due to poll() returning false).
+ */
+bool should_show_new_addon_tag_for_region(const wmWindowManager *wm,
+                                           const ARegion *region,
+                                           int space_type,
+                                           uint32_t current_mode_flag);
+
+/**
+ * Check if all categories from an extension are reserved categories.
+ * Returns true if the extension only adds panels to reserved categories (like Bool Tool → Edit).
+ * Such extensions should not show "New Add-ons!" button, but instead auto-switch to the reserved tab.
+ */
+bool extension_has_only_reserved_categories(const wmWindowManager *wm,
+                                            const char *source_extension);
+
+/**
+ * Find the reserved category for an extension and switch to it.
+ * Used for reserved-only extensions like Bool Tool that add panels only to reserved categories.
+ * 
+ * \param C              Blender context.
+ * \param region         Region where tabs are drawn.
+ * \param source_extension Extension package ID.
+ * \param space_type     Space type to search in.
+ * \return True if a reserved category was found and activated.
+ */
+bool switch_to_reserved_category_for_extension(const bContext *C,
+                                               ARegion *region,
+                                               const char *source_extension,
+                                               int space_type);
+
+/**
+ * Set extension drop preview state.
+ * Called from screen_ops drop handlers to show ghost tab during hover.
+ * \param target_category_id: Category being hovered (can be empty for regions without tabs).
+ * \param target_index: Index of target category in ordered list (-1 if no tabs).
+ * \param insert_above: true = ghost appears above target, false = below.
+ * \param tab_height: Height for ghost tab rectangle.
+ * \param tab_v_pad: Vertical padding between tabs.
+ */
+void category_tabs_extension_preview_set(ARegion *region,
+                                         const char *target_category_id,
+                                         int target_index,
+                                         bool insert_above,
+                                         int tab_height,
+                                         int tab_v_pad,
+                                         int cursor_y);
+
+/**
+ * Clear extension drop preview state.
+ * Must be called when drag leaves region or drop completes/cancels.
+ */
+void category_tabs_extension_preview_clear(ARegion *region);
+
+/**
+ * Check if extension drop preview is active for a region.
+ */
+bool category_tabs_extension_preview_is_active(const ARegion *region);
+
+/**
+ * Hit-test category tab under mouse for extension drop.
+ * Uses visual ordered categories and stable tab rects (without preview feedback shift).
+ *
+ * \return true when a tab is found under cursor.
+ */
+bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
+                                                    ARegion *region,
+                                                    int mouse_x_local,
+                                                    int mouse_y_local,
+                                                    int hit_margin,
+                                                    const char **r_target_category_id,
+                                                    int *r_target_index,
+                                                    bool *r_insert_above,
+                                                    int *r_tab_height);
+
+/**
+ * Check if the "New Add-on!" filter is currently active for the given area.
+ * When active, only pending (unassigned) categories are shown.
+ */
+bool is_new_addon_filter_active(const ScrArea *area);
+
+/**
+ * Set the "New Add-on!" filter active state for the given area.
+ */
+void set_new_addon_filter_active(ScrArea *area, bool active);
+
+/**
+ * Set the "New Add-on!" filter active state with auto-activation flag.
+ */
+void set_new_addon_filter_active(ScrArea *area, bool active, bool auto_activated);
+
+/**
+ * Check if the "New Add-on!" filter was auto-activated (not by user).
+ */
+bool is_new_addon_filter_auto_activated(const ScrArea *area);
+
+/**
+ * Get the saved tag filter tags for the given area.
+ * These tags are saved when "New Add-on!" filter is activated and restored when deactivated.
+ * Returns pointer to the saved tags string (may be empty string), or nullptr if unsupported space.
+ */
+char *get_saved_tag_filter_tags(const ScrArea *area);
+
+/**
+ * Set the saved tag filter tags for the given area.
+ * Used to preserve tag selection when toggling "New Add-on!" filter.
+ */
+void set_saved_tag_filter_tags(ScrArea *area, const char *tags);
+
+/**
+ * Get the glyph string for the "New Add-on!" virtual tag button.
+ * Returns the hex glyph string "\uf23a".
+ */
+const char *get_new_addon_tag_glyph();
+
+/**
+ * Fill r_color with the RGB color for the "New Add-on!" virtual tag button.
+ * Color is green: [0.0, 0.6, 0.02].
+ */
+void get_new_addon_tag_color(float r_color[3]);
+
+/* `interface_tab_categories_edit.cc` */
+
+/**
+ * External access to dialog operator pointer (for Reset/Save buttons).
+ */
+extern wmOperator *category_tab_current_dialog_op;
+
+/**
+ * External access to popup block pointer (for Save button to close popup).
+ */
+extern ui::Block *category_tab_popup_block;
+
+/**
+ * Track last closed popup time and category to prevent immediate reopen.
+ */
+extern double category_tab_popup_close_time;
+extern char category_tab_last_closed_category[];
+
+/**
+ * Hex/UTF-8 conversion utilities.
+ */
+bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8_max);
+bool process_glyph_input(const char *input, char *output, size_t output_max);
+void utf8_to_hex_codepoint(const char *input, char *output, size_t output_max);
+bool is_display_glyph_codepoint(unsigned int codepoint);
+bool is_single_glyph_str(const char *str);
+
+/**
+ * Category tab shared utility helpers.
+ */
+bool category_tab_first_utf8_char_copy(const char *input, char *output, size_t output_max);
+bool category_tab_glyph_is_fallback_letter(const char *glyph, const char *category);
+float category_tabs_zoom_value_get(const ScrArea *area,
+                                   eUserPref_CategoryTabsDisplayMode display_mode);
+int category_tabs_min_width_get(const ScrArea *area,
+                                float aspect,
+                                eUserPref_CategoryTabsDisplayMode display_mode);
+int category_tab_icon_id_resolve_from_path(const char *icon_path);
+int category_tab_icon_id_resolve_from_key_path(const char *icon_key, const char *icon_path);
+void category_tab_split_tags(const char *tags,
+                             Vector<std::string> &r_tags,
+                             const char *delimiters = ",;");
+std::string category_tab_escape_for_python_literal(const char *input);
+bool category_tab_parse_json_string_array_minimal(const char *json,
+                                                  Vector<std::string> &r_items);
+std::string category_tab_decode_json_unicode(const char *str);
+
+/**
+ * Category lookup utilities.
+ */
+const char *find_panel_label_for_category(ARegion *region, const char *category);
+bool extract_leading_glyph(const char *input,
+                           char *glyph_hex_out,
+                           size_t glyph_hex_max,
+                           char *text_out,
+                           size_t text_max);
+/**
+ * Find a category glyph item with global fallback (space_type = -1).
+ * Used by interface_panel.cc for tooltip source extension display.
+ */
+const CategoryGlyphItem *category_glyph_item_find_with_global_fallback_const(
+    const ListBase &items, const char *category, const int space_type);
+
+/**
+ * Check if a category is reserved (from DEFAULT_CATEGORY_GLYPHS in Python).
+ * Reserved categories always use their standard glyph and cannot be changed.
+ */
+bool category_is_reserved(const wmWindowManager *wm, const char *category_id);
+
+/**
+ * Popup callbacks (exported for operators).
+ */
+void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data);
+void category_tab_edit_popup_ok_cb(bContext *C, void *user_data, int retval);
+void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int event);
+void tag_icon_live_update_cb(bContext *C, void *arg_op, int event);
+bool category_tab_edit_dialog_is_open_for_category(const char *category);
+
+/**
+ * Try to auto-detect an extension's icon.png/icon.webp for the given category.
+ * Searches extension directories for matching icon files.
+ * Returns true if an icon was found, filling r_icon_path and r_icon_provider.
+ */
+bool category_tab_try_auto_detect_extension_icon(bContext *C,
+                                                  const char *category,
+                                                  char r_icon_path[1024],
+                                                  char r_icon_provider[128]);
+
+/**
+ * Menu registration.
+ */
+void category_tag_filter_menu_register();
+void category_tag_filter_toggle_menu_register();
+
+/**
+ * Popup-local tag filter operator.
+ */
+void SCREEN_OT_category_tab_popup_filter_set(wmOperatorType *ot);
+
+/**
+ * Centered popup operator registration.
+ */
+void centered_popup_operator_register();
+
+/**
+ * Category tab icon picker operator.
+ */
+void SCREEN_OT_category_tab_icon_picker(wmOperatorType *ot);
+
+/**
+ * Popup block creation.
+ */
+ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_data);
+
+/**
+ * Shared Category Tab enums (single source of truth across interface/screen modules).
+ */
+enum eCategoryTabIconSource {
+  CATEGORY_TAB_ICON_SOURCE_AUTO = 0,
+  CATEGORY_TAB_ICON_SOURCE_MANUAL = 1,
+  CATEGORY_TAB_ICON_SOURCE_OFF = 2,
+};
+
+enum eCategoryTabGlyphMode {
+  CATEGORY_TAB_GLYPH_MODE_AUTO = 0,
+  CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER = 1,
+};
+
+/**
+ * Dialog invoke/exec.
+ */
+bool category_tab_edit_poll(bContext *C);
+wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C, wmOperator *op, const wmEvent *event);
+wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op);
+
 /* `interface.cc` */
 
 void fontscale(float *points, float aspect);
@@ -875,6 +1368,11 @@ void button_v3_get(Button *but, float vec[3]);
 void button_v3_set(Button *but, const float vec[3]);
 void button_v4_get(Button *but, float vec[4]);
 void button_v4_set(Button *but, const float vec[4]);
+/**
+ * Set custom text/icon color for a button (RGBA 0-255).
+ * Used for colored labels and glyphs.
+ */
+void button_color_set(Button *but, const uchar color[4]);
 
 void hsvcircle_vals_from_pos(
     const rcti *rect, float mx, float my, float *r_val_rad, float *r_val_dist);
@@ -1264,6 +1762,12 @@ LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int
 /** Apply scroll to layout panels when the main panel is used in popups. */
 void layout_panel_popup_scroll_apply(Panel *panel, const float dy);
 
+/** Category tab drag operator for reordering tabs. */
+void UI_OT_category_tab_drag(wmOperatorType *ot);
+
+/** Switch to reserved category for reserved-only extensions. */
+void UI_OT_switch_to_reserved_category(wmOperatorType *ot);
+
 /**
  * Draws in resolution of 48x4 colors.
  */
@@ -1508,6 +2012,14 @@ void draw_preview_item_stateless(const uiFontStyle *fstyle,
  */
 #define UI_POPUP_MENU_TOP int(10 * UI_SCALE_FAC)
 
+/* Category tab drag thresholds */
+#define CATEGORY_DRAG_THRESHOLD_PX 5
+#define CATEGORY_DRAG_DELAY_SEC 0.15
+
+/* Category tag create popup width - used in C++ (interface_tag_bar.cc) and Python (space_userpref.py).
+ * IMPORTANT: Keep this value in sync with wm.category_tag_create operator invoke_props_dialog() */
+#define UI_CATEGORY_TAG_CREATE_POPUP_WIDTH 430
+
 #define UI_PIXEL_AA_JITTER 8
 extern const float ui_pixel_jitter[UI_PIXEL_AA_JITTER][2];
 
@@ -1568,6 +2080,13 @@ void layout_list_set_labels_active(Layout *layout);
 void item_menutype_func(bContext *C, Layout *layout, void *arg_mt);
 void item_paneltype_func(bContext *C, Layout *layout, void *arg_pt);
 
+/* `interface_panel.cc` */
+
+/**
+ * Toggle panel open/closed state and return the new state.
+ */
+bool ui_layout_panel_toggle_open(const bContext *C, LayoutPanelHeader *header);
+
 /* `interface_button_group.cc` */
 
 /**
@@ -1577,6 +2096,13 @@ void item_paneltype_func(bContext *C, Layout *layout, void *arg_pt);
 void block_new_button_group(Block *block, ButtonGroupFlag flag);
 void button_group_add_but(Block *block, Button *but);
 void button_group_replace_but_ptr(Block *block, const Button *old_but_ptr, Button *new_but);
+
+/* `interface.cc` - Button factory */
+
+/**
+ * Factory function to create a button of the specified type.
+ */
+std::unique_ptr<Button> but_new(ButtonType type);
 
 /* `interface_drag.cc` */
 
@@ -1697,6 +2223,19 @@ Block *block_find_mouse_over(const ARegion *region, const wmEvent *event, bool o
 
 Button *region_find_first_but_test_flag(ARegion *region, int flag_include, int flag_exclude);
 Button *region_find_active_but(ARegion *region) ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Get the active button from the context, respecting popup regions.
+ * Used by operators that need to access the button's RNA data.
+ */
+Button *context_active_but_get_respect_popup(const bContext *C);
+
+/**
+ * Get the active operator from the context, respecting popup regions.
+ * Used by templates that need to access the operator's RNA data.
+ */
+wmOperator *context_active_operator_get(const bContext *C);
+
 bool region_contains_point_px(const ARegion *region, const int xy[2])
     ATTR_NONNULL(1, 2) ATTR_WARN_UNUSED_RESULT;
 bool region_contains_rect_px(const ARegion *region, const rcti *rect_px);
@@ -1808,6 +2347,19 @@ uiListType *UI_UL_cache_file_layers();
 ID *template_id_liboverride_hierarchy_make(
     bContext *C, Main *bmain, ID *owner_id, ID *id, const char **r_undo_push_label);
 
+/* -------------------------------------------------------------------- */
+/** \name Glyph Search Functions
+ * \{ */
+
+/**
+ * Call Python glyph search API and return results.
+ * This function is used by glyph template functions to search for glyphs.
+ */
+Vector<std::pair<std::string, std::string>> glyph_search_call_python(
+    bContext *C, const char *query, const char *category, int max_results);
+
+/** \} */
+
 /**
  * Functions in this namespace are only exposed for unit testing purposes, and
  * should not be used outside of the files where they are defined.
@@ -1864,7 +2416,69 @@ int paste_property_drivers(Span<FCurve *> src_drivers,
                            PointerRNA *dst_ptr,
                            PropertyRNA *dst_prop);
 
+/* -------------------------------------------------------------------- */
+/** \name Internal Glyph Template Functions (with callback support)
+ * \{ */
+
+/**
+ * Internal version of uiTemplateGlyphInputRow with custom callback support.
+ * Used by category tab edit UI for custom "More glyphs" button behavior.
+ */
+void uiTemplateGlyphInputRowWithCallback(Layout *layout,
+                                        bContext *C,
+                                        PointerRNA *ptr,
+                                        const char *glyph_propname,
+                                        const char *search_propname,
+                                        bool has_search,
+                                        bool has_code,
+                                        const char *category,
+                                        ButtonHandleFunc more_glyphs_callback,
+                                        void *callback_user_data);
+
+/**
+ * Internal version of uiTemplateGlyphSearchResults with custom callback support.
+ * Used by category tab edit UI for custom search result button behavior.
+ */
+void uiTemplateGlyphSearchResultsWithCallback(Layout *layout,
+                                              bContext *C,
+                                              PointerRNA *ptr,
+                                              const char *search_propname,
+                                              const char *category,
+                                              const char *color_propname,
+                                              int max_results,
+                                              ButtonHandleFunc result_callback,
+                                              void *callback_user_data);
+
+/**
+ * Internal version of uiTemplateGlyphSelector with custom callback support.
+ * Combines all glyph UI components with full callback customization.
+ */
+void uiTemplateGlyphSelectorWithCallback(Layout *layout,
+                                        bContext *C,
+                                        PointerRNA *ptr,
+                                        const char *glyph_propname,
+                                        const char *search_propname,
+                                        const char *color_propname,
+                                        const char *category,
+                                        bool show_preview,
+                                        bool show_search,
+                                        bool show_code,
+                                        ButtonHandleFunc more_glyphs_callback,
+                                        void *callback_user_data,
+                                        ButtonHandleFunc result_callback);
+
+/** \} */
+
 }  // namespace internal
+
+/**
+ * Get the current object mode as a CategoryTagMode bitmask.
+ * Used by category tag filtering to determine which tags to show.
+ */
+uint32_t get_current_tag_mode_flag(const bContext *C);
+
+/** Glyph picker grid operator. */
+void WM_OT_glyph_picker_grid(wmOperatorType *ot);
 
 }  // namespace ui
 }  // namespace blender

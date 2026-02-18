@@ -850,6 +850,8 @@ def km_screen(params):
         ("render.view_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
         ("render.view_show", {"type": 'F11', "value": 'PRESS'}, None),
         ("render.play_rendered_anim", {"type": 'F11', "value": 'PRESS', "ctrl": True}, None),
+        # Sidebar category quick focus
+        ("ui.category_quick_focus", {"type": 'F7', "value": 'PRESS'}, None),
     ])
 
     if not params.legacy:
@@ -1607,7 +1609,10 @@ def km_view3d_generic(params):
             params,
             toolbar_key={"type": 'T', "value": 'PRESS'},
             sidebar_key={"type": 'N', "value": 'PRESS'},
-        )
+        ),
+        # Tag Bar toggle.
+        ("wm.context_toggle", {"type": 'T', "value": 'PRESS', "shift": True},
+         {"properties": [("data_path", "space_data.show_region_tag_bar")]})
     ])
 
     return keymap
@@ -2138,6 +2143,9 @@ def km_image_generic(params):
             toolbar_key={"type": 'T', "value": 'PRESS'},
             sidebar_key={"type": 'N', "value": 'PRESS'},
         ),
+        # Tag Bar toggle.
+        ("wm.context_toggle", {"type": 'T', "value": 'PRESS', "shift": True},
+         {"properties": [("data_path", "space_data.show_region_tag_bar")]}),
         ("image.new", {"type": 'N', "value": 'PRESS', "alt": True}, None),
         ("image.open", {"type": 'O', "value": 'PRESS', "alt": True}, None),
         ("image.reload", {"type": 'R', "value": 'PRESS', "alt": True}, None),
@@ -2259,6 +2267,9 @@ def km_node_generic(params):
             toolbar_key={"type": 'T', "value": 'PRESS'},
             sidebar_key={"type": 'N', "value": 'PRESS'},
         ),
+        # Tag Bar toggle.
+        ("wm.context_toggle", {"type": 'T', "value": 'PRESS', "shift": True},
+         {"properties": [("data_path", "space_data.show_region_tag_bar")]}),
     ])
 
     return keymap
@@ -5433,11 +5444,12 @@ def km_sculpt(params):
              ("asset_library_type", 'ESSENTIALS'),
              ("relative_asset_identifier", "brushes/essentials_brushes-mesh_sculpt.blend/Brush/Grab"),
          ]}),
-        ("brush.asset_activate", {"type": 'T', "value": 'PRESS', "shift": True},
-         {"properties": [
-             ("asset_library_type", 'ESSENTIALS'),
-             ("relative_asset_identifier", "brushes/essentials_brushes-mesh_sculpt.blend/Brush/Scrape/Fill"),
-         ]}),
+        # Disabled: Shift + T is now used for Tag Bar toggle.
+        # ("brush.asset_activate", {"type": 'T', "value": 'PRESS', "shift": True},
+        #  {"properties": [
+        #      ("asset_library_type", 'ESSENTIALS'),
+        #      ("relative_asset_identifier", "brushes/essentials_brushes-mesh_sculpt.blend/Brush/Scrape/Fill"),
+        #  ]}),
         ("brush.asset_activate", {"type": 'C', "value": 'PRESS'},
          {"properties": [
              ("asset_library_type", 'ESSENTIALS'),

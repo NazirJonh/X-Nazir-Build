@@ -2429,6 +2429,7 @@ static void apply_but(
     case ButtonType::But:
     case ButtonType::Decorator:
     case ButtonType::PreviewTile:
+    case ButtonType::Tag:
       apply_but_BUT(C, but, data);
       break;
     case ButtonType::Text:
@@ -4073,8 +4074,8 @@ static void textedit_prev_but(Block *block, Button *actbut, HandleButtonData *da
 
 static char unicode_input[10] = {0};
 
-static int ui_handle_unicode_input(uiBut *but,
-                                   uiHandleButtonData *data,
+static int ui_handle_unicode_input(Button *but,
+                                   HandleButtonData *data,
                                    const wmEvent *event,
                                    bool *changed)
 {
@@ -4091,7 +4092,7 @@ static int ui_handle_unicode_input(uiBut *but,
         char utf8[10] = {0};
         char32_t utf32[2] = {val, 0};
         const int utf8_buf_len = BLI_str_utf32_as_utf8(utf8, utf32, 5);
-        *changed = ui_textedit_insert_buf(but, data, utf8, utf8_buf_len);
+        *changed = textedit_insert_buf(but, data->text_edit, utf8, utf8_buf_len);
         return *changed ? WM_UI_HANDLER_BREAK : WM_UI_HANDLER_CONTINUE;
       }
     }
@@ -9234,6 +9235,9 @@ static int do_button(bContext *C, Block *block, Button *but, const wmEvent *even
       retval = do_but_BLOCK(C, but, data, event);
       break;
     case ButtonType::ButMenu:
+    case ButtonType::Tag:
+      /* Tag buttons behave like simple push buttons: a click invokes the operator
+       * attached via #button_operator_set (see #ui_apply_but). */
       retval = do_but_BUT(C, but, data, event);
       break;
     case ButtonType::Color:
@@ -12736,7 +12740,7 @@ static int handle_menus_recursive(bContext *C,
           ARegion *prev_region_popup = CTX_wm_region_popup(C);
           /* Set the current context popup region so the handler context can access to it. */
           CTX_wm_region_popup_set(C, menu->region);
-          panel_drag_collapse_handler_add(C, !layout_panel_toggle_open(C, header));
+          panel_drag_collapse_handler_add(C, !ui_layout_panel_toggle_open(C, header));
           /* Restore previous popup region. */
           CTX_wm_region_popup_set(C, prev_region_popup);
           retval = WM_UI_HANDLER_BREAK;
@@ -12876,6 +12880,107 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
       (event->xy[0] != event->prev_xy[0] || event->xy[1] != event->prev_xy[1]))
   {
     blocks_set_tooltips(region, true);
+  }
+
+  /* Handle category tab tooltips - only init timer when entering a different tab. */
+  if (event->type == MOUSEMOVE && !but && panel_category_tabs_is_visible(region)) {
+    static char prev_category_idname[64] = "";
+    static const ARegion *prev_category_region = nullptr;
+
+    /* Find which tab (if any) the mouse is over. */
+    const char *current_category = nullptr;
+    bool over_settings_button = false;
+
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
+        current_category = pc_dyn.idname;
+        break;
+      }
+    }
+
+    /* Check if mouse is over the settings button. */
+    if (!current_category) {
+      const rcti *settings_rct = &region->runtime->category_tabs_settings_rect;
+      if (BLI_rcti_isect_pt(settings_rct, event->mval[0], event->mval[1])) {
+        over_settings_button = true;
+      }
+    }
+
+    const bool category_changed = (prev_category_region != region) ||
+                                   (current_category == nullptr) ||
+                                   !STREQ(prev_category_idname, current_category ? current_category : "");
+
+    if ((current_category || over_settings_button) && category_changed) {
+      /* Entered a new tab or settings button, start tooltip timer. */
+      STRNCPY(prev_category_idname, current_category ? current_category : "");
+      prev_category_region = region;
+      panel_category_tooltip_timer_init(C, region);
+    }
+    else if (!current_category && !over_settings_button && prev_category_region == region) {
+      /* Left the tab area, clear tracking. */
+      prev_category_idname[0] = '\0';
+    }
+  }
+
+  /* Handle right-click on category tabs for edit dialog. */
+  if (event->type == RIGHTMOUSE && event->val == KM_PRESS) {
+    if (panel_category_tabs_is_visible(region)) {
+      /* Check if mouse is over a category tab. */
+      for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+        if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
+          /* Check if editing is locked. */
+          if (!U.category_tabs_lock_edit) {
+            /* Prevent opening a new dialog if one is already open for the same category,
+             * or if a dialog for the same category was just closed (within 0.5 seconds).
+             * This prevents data corruption when right-clicking multiple times on the same tab. */
+            bool should_prevent = false;
+
+            /* Check if dialog is currently open */
+            if (category_tab_current_dialog_op) {
+              char existing_category[64];
+              RNA_string_get(category_tab_current_dialog_op->ptr, "category", existing_category);
+              if (STREQ(existing_category, pc_dyn.idname)) {
+                should_prevent = true;
+              }
+            }
+
+            /* Check if dialog was just closed for the same category */
+            if (!should_prevent && category_tab_last_closed_category[0] != '\0') {
+              double time_since_close = BLI_time_now_seconds() - category_tab_popup_close_time;
+              if (time_since_close < 0.1 && STREQ(category_tab_last_closed_category, pc_dyn.idname)) {
+                should_prevent = true;
+              }
+            }
+
+            if (should_prevent) {
+              /* Same category dialog is already open or just closed - ignore this click. */
+              return WM_UI_HANDLER_BREAK;
+            }
+
+            /* Invoke edit dialog. */
+            wmOperatorType *ot = WM_operatortype_find("SCREEN_OT_category_tab_edit_dialog", false);
+            if (ot) {
+              WM_operator_name_call_ptr(
+                  C, ot, wm::OpCallContext::InvokeDefault, nullptr, event);
+            }
+            return WM_UI_HANDLER_BREAK;
+          }
+          else {
+            /* Editing is locked - show report message to user. */
+            ReportList *reports = CTX_wm_reports(C);
+            if (reports) {
+              BKE_report(reports,
+                         RPT_INFO,
+                         "Category editing is locked. Disable \"Lock Category Editing\" in "
+                         "Preferences to edit.");
+              WM_report_banner_show(CTX_wm_manager(C), CTX_wm_window(C));
+            }
+            return WM_UI_HANDLER_BREAK;
+          }
+          break;
+        }
+      }
+    }
   }
 
   /* Always do this, to reliably update view and UI-list item highlighting, even if

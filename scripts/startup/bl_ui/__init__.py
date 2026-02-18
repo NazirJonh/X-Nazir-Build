@@ -91,6 +91,7 @@ _modules = [
     "space_view3d",
     "space_view3d_sidebar",
     "space_view3d_toolbar",
+    "glyph_library",
 
     # XXX, keep last so panels show after all other tool options.
     "properties_workspace",
@@ -124,6 +125,7 @@ def register():
 
     space_filebrowser.register_props()
     properties_paint_common.register()
+    space_userpref.register()
 
     from bpy.props import (
         EnumProperty,
@@ -187,6 +189,7 @@ def register():
 def unregister():
     from bpy.utils import unregister_class
 
+    space_userpref.unregister()
     properties_paint_common.unregister()
 
     for mod in reversed(_modules_loaded):

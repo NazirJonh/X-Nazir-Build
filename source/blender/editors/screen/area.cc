@@ -3294,8 +3294,7 @@ void ED_region_panels_layout_ex(const bContext *C,
                            BKE_regiontype_uses_category_tabs(region->runtime->type);
   /* offset panels for small vertical tab area */
   const char *category = nullptr;
-  const int category_tabs_width = round_fl_to_int(ui::view2d_scale_get_x(&region->v2d) *
-                                                   UI_PANEL_CATEGORY_MARGIN_WIDTH *
+  const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH *
                                                    U.category_tabs_zoom);
   int margin_x = 0;
   const bool region_layout_based = region->flag & RGN_FLAG_DYNAMIC_SIZE;

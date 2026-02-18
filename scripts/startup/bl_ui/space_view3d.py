@@ -3,11 +3,16 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
+
+TAG_DEBUG = True  # Set to True to enable debug output for tag operations
+
 from bpy.types import (
     Header,
     Menu,
+    Operator,
     Panel,
-    SurfaceCurve
+    SurfaceCurve,
+    UIList,
 )
 from bl_ui.properties_paint_common import (
     UnifiedPaintPanel,
@@ -29,6 +34,75 @@ from bpy.app.translations import (
     pgettext_rpt as rpt_,
     contexts as i18n_contexts,
 )
+from bpy.props import (
+    StringProperty,
+    EnumProperty,
+)
+
+# Register temporary property for tag context menu communication
+if not hasattr(bpy.types.WindowManager, "tag_context_menu_name"):
+    bpy.types.WindowManager.tag_context_menu_name = StringProperty(
+        name="Tag Context Menu Name",
+        description="Temporary storage for selected tag name in context menu",
+        default="",
+        options={'HIDDEN'}
+    )
+
+
+# View3D-local tag ordering cache used by Tag Order Management popover.
+# Intentionally separated from `space_userpref._tag_order_cache`.
+_view3d_tag_order_cache = []
+
+
+def _sync_view3d_tag_order_cache(wm):
+    """Synchronize View3D-local tag order cache with current WM tags."""
+    if not wm or not hasattr(wm, "category_tags"):
+        return []
+
+    current_names = [tag.name for tag in wm.category_tags]
+    if not current_names:
+        _view3d_tag_order_cache.clear()
+        return []
+
+    current_names_set = set(current_names)
+    cached_set = set(_view3d_tag_order_cache)
+
+    disappeared = cached_set - current_names_set
+    appeared = current_names_set - cached_set
+
+    if disappeared and len(disappeared) == len(appeared):
+        # Likely a rename — replace old names with new names in-place
+        # to preserve the original position in the order.
+        appeared_list = list(appeared)
+        synced_order = list(_view3d_tag_order_cache)
+        for i, name in enumerate(synced_order):
+            if name in disappeared:
+                synced_order[i] = appeared_list.pop()
+    else:
+        # Normal sync: keep existing order for known tags.
+        synced_order = [name for name in _view3d_tag_order_cache if name in current_names_set]
+        # Append newly created tags at the end.
+        for name in current_names:
+            if name not in set(synced_order):
+                synced_order.append(name)
+
+    _view3d_tag_order_cache.clear()
+    _view3d_tag_order_cache.extend(synced_order)
+    return synced_order
+
+
+def _get_visible_tag_names_in_view3d_order(wm, context):
+    """Return visible tag names sorted by View3D-local order cache."""
+    ordered_names = _sync_view3d_tag_order_cache(wm)
+    tag_by_name = {tag.name: tag for tag in wm.category_tags}
+
+    visible_names = []
+    for name in ordered_names:
+        tag = tag_by_name.get(name)
+        if tag and _is_tag_visible_in_mode(tag, context):
+            visible_names.append(name)
+
+    return visible_names
 
 
 def _toggle_xray_operator(layout, context, text=None):
@@ -1140,6 +1214,741 @@ class VIEW3D_HT_header(Header):
         return 'CLIPUV_DEHLT' if mask_enabled else 'CLIPUV_HLT'
 
 
+class VIEW3D_HT_tag_bar(Header):
+    """Tag bar region for displaying tag buttons and external addon buttons.
+
+    Addons can append their draw functions to this class to add buttons to the tag bar.
+    Buttons are drawn from left to right, with addon buttons appearing before the tag filter buttons.
+
+    Example:
+        def my_tag_bar_draw(self, context):
+            layout = self.layout
+            layout.operator("my.operator", text="", icon='MY_ICON')
+
+        VIEW3D_HT_tag_bar.append(my_tag_bar_draw)
+    """
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'TAG_BAR'
+
+    def draw(self, context):
+        pass  # Addons can append their draw functions here
+
+
+class VIEW3D_OT_tag_move(Operator):
+    """Move tag left or right in the tag bar"""
+    bl_idname = "view3d.tag_move"
+    bl_label = "Move Tag"
+    bl_options = {'REGISTER', 'UNDO'}
+
+
+    
+    direction: EnumProperty(
+        name="Direction",
+        description="Direction to move the tag",
+        items=[
+            ('UP', "Up", "Move tag up in the list (left in tag bar)"),
+            ('DOWN', "Down", "Move tag down in the list (right in tag bar)"),
+            ('LEFT', "Left", "Move tag left in the tag bar"),
+            ('RIGHT', "Right", "Move tag right in the tag bar"),
+        ],
+        default='UP',
+        options={'HIDDEN'}
+    )
+
+    def execute(self, context):
+        from bl_ui.glyph_tag_system.api import state, _save_tag_order_only
+
+        wm = context.window_manager
+
+        # Get the active tag index from UIList
+        if not hasattr(wm, 'category_tags_active_index'):
+            self.report({'ERROR'}, "No tag selected")
+            return {'CANCELLED'}
+
+        # Convert filtered view index to actual collection index
+        filtered_index = wm.category_tags_active_index
+        if TAG_DEBUG:
+            print(f"DEBUG move: filtered_index={filtered_index}")
+        actual_index = _get_filtered_tag_to_actual_index(wm, filtered_index)
+        if TAG_DEBUG:
+            print(f"DEBUG move: actual_index={actual_index}")
+            for i, tag in enumerate(wm.category_tags):
+                print(f"  Collection[{i}] = '{tag.name}'")
+
+        if actual_index < 0:
+            self.report({'ERROR'}, "Invalid tag selection (filter mismatch)")
+            return {'CANCELLED'}
+
+        # Get current tag order from cache (from space_userpref module)
+        tag_order = list(state.tag_order_cache)  # Make a copy
+        if TAG_DEBUG:
+            print(f"DEBUG move: tag_order={tag_order}")
+        active_tag = wm.category_tags[actual_index]
+
+        # If tag not in order, add it
+        if active_tag.name not in tag_order:
+            tag_order.append(active_tag.name)
+
+        # Find current position
+        try:
+            current_index = tag_order.index(active_tag.name)
+        except ValueError:
+            self.report({'ERROR'}, f"Tag '{active_tag.name}' not found in order")
+            return {'CANCELLED'}
+
+        # Calculate new position
+        if self.direction in {'UP', 'LEFT'}:
+            new_index = max(0, current_index - 1)
+        else:  # DOWN, RIGHT
+            new_index = min(len(tag_order) - 1, current_index + 1)
+
+        # Move tag
+        if new_index != current_index:
+            tag_order.pop(current_index)
+            tag_order.insert(new_index, active_tag.name)
+
+            # Update the cache in space_userpref module
+            state.tag_order_cache.clear()
+            state.tag_order_cache.extend(tag_order)
+
+            # Reorder wm.category_tags collection using C++ function
+            # This reorders existing items without destroying/recreating them
+            tags = wm.category_tags
+            names_str = ','.join(tag_order)
+            tags.reorder_from_names(names_str)
+
+            # Update UIList active index
+            # We need to convert the new actual position to filtered view index
+            new_filtered_index = _get_actual_to_filtered_index(wm, new_index)
+            if new_filtered_index >= 0:
+                wm.category_tags_active_index = new_filtered_index
+            # else: keep current index if tag is not visible
+
+            # Save to JSON - use order-only function to avoid rebuilding WM collection
+            _save_tag_order_only()
+
+            # Update UI
+            context.area.tag_redraw()
+
+            direction_map = {
+                'UP': "up",
+                'DOWN': "down",
+                'LEFT': "left",
+                'RIGHT': "right",
+            }
+            direction_text = direction_map.get(self.direction, "up")
+            self.report({'INFO'}, f"Moved '{active_tag.name}' {direction_text}")
+
+        return {'FINISHED'}
+
+
+class VIEW3D_OT_tag_context_menu(Operator):
+    """Show context menu for currently selected tag in UIList"""
+    bl_idname = "view3d.tag_context_menu"
+    bl_label = "Tag Context Menu"
+    bl_options = {'REGISTER'}
+
+    def invoke(self, context, event):
+        wm = context.window_manager
+
+        # Get currently selected tag from UIList
+        if not hasattr(wm, 'category_tags_active_index'):
+            self.report({'ERROR'}, "No tag selected")
+            return {'CANCELLED'}
+
+        actual_index = wm.category_tags_active_index
+
+        if actual_index < 0 or actual_index >= len(wm.category_tags):
+            self.report({'ERROR'}, "Invalid tag selection")
+            return {'CANCELLED'}
+
+        # Get the selected tag
+        selected_tag = wm.category_tags[actual_index]
+
+        # Save tag_name in window_manager for the menu (temporary)
+        wm.tag_context_menu_name = selected_tag.name
+
+        # Call the context menu
+        bpy.ops.wm.call_menu(name="VIEW3D_MT_tag_context_menu")
+        return {'FINISHED'}
+
+
+class VIEW3D_MT_tag_context_menu(Menu):
+    """Context menu for tag buttons"""
+    bl_label = "Tag Options"
+
+    def draw(self, context):
+        layout = self.layout
+
+        wm = context.window_manager
+
+        # Get tag_name from window_manager (set by operator)
+        tag_name = getattr(wm, 'tag_context_menu_name', '')
+        if not tag_name:
+            layout.label(text="No tag selected")
+            return
+
+        # Find tag and its index
+        tag_index = -1
+        tag = None
+        for i, t in enumerate(wm.category_tags):
+            if t.name == tag_name:
+                tag_index = i
+                tag = t
+                break
+
+        if not tag:
+            layout.label(text="Tag not found")
+            return
+
+        # Show tag preview (glyph + name)
+        row = layout.row()
+        row.label(text=f"{tag.glyph} {tag.name}")
+
+        layout.separator()
+
+        # Move Left button (disabled if first)
+        op = layout.operator("view3d.tag_move", text="Move Left", icon='TRIA_LEFT')
+        op.tag_name = tag_name
+        op.direction = 'LEFT'
+        if tag_index == 0:
+            op = layout.operator("view3d.tag_move", text="Move Left (disabled)", icon='TRIA_LEFT')
+            op.enabled = False
+
+        # Move Right button (disabled if last)
+        op = layout.operator("view3d.tag_move", text="Move Right", icon='TRIA_RIGHT')
+        op.tag_name = tag_name
+        op.direction = 'RIGHT'
+        if tag_index == len(wm.category_tags) - 1:
+            op = layout.operator("view3d.tag_move", text="Move Right (disabled)", icon='TRIA_RIGHT')
+            op.enabled = False
+
+        layout.separator()
+
+        # Other options
+        layout.operator("wm.call_menu", text="Manage Tags...", icon='PREFERENCES').name = "USERPREF_MT_category_tags"
+        layout.operator("wm.category_tag_add", text="New Tag...", icon='ADD')
+        # Delete uses current active tag from UIList, no need to specify tag_name
+        layout.operator("wm.category_tag_delete", text="Delete Tag", icon='X')
+
+        layout.separator()
+
+        # Reset order option
+        layout.operator("view3d.tag_order_reset", text="Reset Order", icon='FILE_REFRESH')
+
+
+class VIEW3D_OT_tag_order_reset(Operator):
+    """Reset tag order to default (by usage count)"""
+    bl_idname = "view3d.tag_order_reset"
+    bl_label = "Reset Tag Order"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        # Clear state.tag_order_cache and rebuild WM collection
+        from bl_ui.glyph_tag_system.api import state, sync_glyph_mappings_to_wm
+
+        state.tag_order_cache.clear()
+
+        # Rebuild WM collection in default order
+        sync_glyph_mappings_to_wm()
+
+        # Update UI
+        context.area.tag_redraw()
+
+        self.report({'INFO'}, "Tag order reset to default")
+        return {'FINISHED'}
+
+
+def _is_tag_visible_in_mode(tag, context):
+    """Check if tag is visible (has a valid glyph OR icon) and is active for current editor mode."""
+    # Check if tag has glyph OR icon (icon_source == 1 and icon_key not empty)
+    icon_source_val = getattr(tag, "icon_source", 0)
+    icon_key_val = getattr(tag, "icon_key", "")
+    has_glyph = bool(tag.glyph)
+    has_icon = (icon_source_val == 1 and bool(icon_key_val))
+
+    if not has_glyph and not has_icon:
+        return False
+
+    try:
+        glyph = tag.glyph
+        if all(c in "0123456789abcdefABCDEF" for c in glyph) and len(glyph) <= 8:
+            pass # Valid hex formatting
+    except Exception:
+        pass
+
+    if tag.mode_flags == 0:
+        return True
+
+    from bl_ui.glyph_tag_system.api import (
+        get_current_tag_mode_flag,
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG,
+        _CATEGORY_TAG_EDIT_MODE_MASK,
+    )
+
+    current_mode_flag = get_current_tag_mode_flag(context)
+    if current_mode_flag == 0:
+        return True
+
+    # Direct mode match
+    if tag.mode_flags & current_mode_flag:
+        return True
+
+    # Special handling for edit modes: if tag has EDIT_MODE flag and we're in
+    # any detailed edit mode (MESH_EDIT, CURVE_EDIT, etc.), the tag should be visible.
+    # This matches the C++ EDIT_MODE_MASK logic in interface_tag_bar.cc.
+    EDIT_MODE_FLAG = _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0)
+    if (current_mode_flag & _CATEGORY_TAG_EDIT_MODE_MASK) and (tag.mode_flags & EDIT_MODE_FLAG):
+        return True
+
+    return False
+
+
+class VIEW3D_UL_tag_order_list(UIList):
+    """UIList for displaying and managing tag order - only shows tags visible in current mode"""
+    bl_idname = "VIEW3D_UL_tag_order_list"
+
+    def filter_items(self, context, data, propname):
+        wm = context.window_manager
+        if not wm or not wm.category_tags:
+            return ([], [])
+
+        visible_names = _get_visible_tag_names_in_view3d_order(wm, context)
+
+        name_to_actual_index = {tag.name: i for i, tag in enumerate(wm.category_tags)}
+        visible_actual_indices = [
+            name_to_actual_index[name]
+            for name in visible_names
+            if name in name_to_actual_index
+        ]
+
+        filtered_flags = [0] * len(wm.category_tags)
+        for index in visible_actual_indices:
+            filtered_flags[index] = self.bitflag_filter_item
+
+        visible_index_set = set(visible_actual_indices)
+        hidden_actual_indices = [
+            i for i in range(len(wm.category_tags))
+            if i not in visible_index_set
+        ]
+
+        # Reorder visible items according to View3D-local cache;
+        # hidden items are kept after visible items.
+        desired_order = visible_actual_indices + hidden_actual_indices
+
+        # UIList expects a per-item sort key array (length == collection length),
+        # not an ordered list of indices.
+        order_keys = [0] * len(wm.category_tags)
+        for rank, index in enumerate(desired_order):
+            order_keys[index] = rank
+
+        return (filtered_flags, order_keys)
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        """Draw tag item with icon/glyph and name, similar to Preferences list."""
+        layout.emboss = 'NONE'
+
+        # Determine icon source like in USERPREF_UL_category_tags
+        icon_source_val = getattr(item, "icon_source", 0)
+        icon_key_val = getattr(item, "icon_key", "")
+        glyph_val = getattr(item, "glyph", "")
+
+        # DEBUG
+        if TAG_DEBUG:
+            print(f"[VIEW3D_UL_tag_order_list] tag='{item.name}' icon_source={icon_source_val} icon_key='{icon_key_val}' glyph='{glyph_val}'")
+
+        use_icon = (icon_source_val == 1 and icon_key_val)
+        use_glyph = (not use_icon and glyph_val)
+
+        # Use split layout like in Preferences for consistent appearance
+        split = layout.split(factor=0.15, align=True)
+
+        # Left: Icon or Glyph (fixed relative width)
+        col_glyph = split.column()
+        col_glyph.ui_units_x = 4
+
+        if use_icon:
+            # Display Blender icon with tag color tint
+            col_glyph.colored_label(
+                text="",
+                icon=icon_key_val,
+                color_r=item.color[0],
+                color_g=item.color[1],
+                color_b=item.color[2]
+            )
+        elif use_glyph:
+            try:
+                # Convert hex string to glyph character
+                glyph_char = chr(int(glyph_val, 16))
+                col_glyph.colored_label(
+                    text=glyph_char,
+                    icon='NONE',
+                    color_r=item.color[0],
+                    color_g=item.color[1],
+                    color_b=item.color[2]
+                )
+            except:
+                col_glyph.label(text="", icon='DOT')
+        else:
+            col_glyph.label(text="", icon='DOT')
+
+        # Right: Name
+        col_name = split.column()
+        col_name.label(text=item.name, translate=False)
+
+    def invoke(self, context, event):
+        pass
+
+
+class VIEW3D_OT_tag_move_up(Operator):
+    """Move tag up in the list"""
+    bl_idname = "view3d.tag_move_up"
+    bl_label = "Move Tag Up"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        wm = context.window_manager
+
+        if not hasattr(wm, 'category_tags_active_index'):
+            self.report({'ERROR'}, "No tag selected")
+            return {'CANCELLED'}
+
+        actual_index = wm.category_tags_active_index
+
+        if actual_index < 0 or actual_index >= len(wm.category_tags):
+            self.report({'ERROR'}, "Invalid tag selection")
+            return {'CANCELLED'}
+
+        active_tag = wm.category_tags[actual_index]
+        active_tag_name = active_tag.name
+
+        visible_names = _get_visible_tag_names_in_view3d_order(wm, context)
+        if active_tag_name not in visible_names:
+            return {'FINISHED'}
+
+        visible_index = visible_names.index(active_tag_name)
+        if visible_index <= 0:
+            return {'FINISHED'}
+
+        target_name = visible_names[visible_index - 1]
+
+        order_cache = _sync_view3d_tag_order_cache(wm)
+        try:
+            active_pos = order_cache.index(active_tag_name)
+            target_pos = order_cache.index(target_name)
+        except ValueError:
+            self.report({'ERROR'}, "Tag order cache mismatch")
+            return {'CANCELLED'}
+
+        moved_tag_name = order_cache.pop(active_pos)
+        order_cache.insert(target_pos, moved_tag_name)
+
+        _view3d_tag_order_cache.clear()
+        _view3d_tag_order_cache.extend(order_cache)
+
+        # Persist view3d tag order to JSON using global tag order cache.
+        # NOTE: go through set_tag_order() (the _state accessor) rather than reassigning
+        # space_userpref._tag_order_cache directly — that would create a shadow attribute
+        # and orphan the single-owner object in bl_ui.glyph_tag_system._state.
+        try:
+            from bl_ui.glyph_tag_system import api
+            api.set_tag_order(order_cache)
+            api._save_tag_order_only()
+        except Exception:
+            pass
+
+        # Reorder wm.category_tags ListBase to match new order.
+        # This updates C++ side and sends ND_CATEGORY_GLYPHS notifier.
+        if hasattr(wm.category_tags, 'reorder_from_names'):
+            wm.category_tags.reorder_from_names(",".join(order_cache))
+
+        # Find new index of the moved tag after reordering
+        new_index = order_cache.index(active_tag_name)
+        wm.category_tags_active_index = new_index
+        context.area.tag_redraw()
+
+        self.report({'INFO'}, f"Moved '{active_tag.name}' up")
+        return {'FINISHED'}
+
+
+class VIEW3D_OT_tag_move_down(Operator):
+    """Move tag down in the list"""
+    bl_idname = "view3d.tag_move_down"
+    bl_label = "Move Tag Down"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        wm = context.window_manager
+
+        if not hasattr(wm, 'category_tags_active_index'):
+            self.report({'ERROR'}, "No tag selected")
+            return {'CANCELLED'}
+
+        actual_index = wm.category_tags_active_index
+
+        if actual_index < 0 or actual_index >= len(wm.category_tags):
+            self.report({'ERROR'}, "Invalid tag selection")
+            return {'CANCELLED'}
+
+        active_tag = wm.category_tags[actual_index]
+        active_tag_name = active_tag.name
+
+        visible_names = _get_visible_tag_names_in_view3d_order(wm, context)
+        if active_tag_name not in visible_names:
+            return {'FINISHED'}
+
+        visible_index = visible_names.index(active_tag_name)
+        if visible_index >= (len(visible_names) - 1):
+            return {'FINISHED'}
+
+        target_name = visible_names[visible_index + 1]
+
+        order_cache = _sync_view3d_tag_order_cache(wm)
+        try:
+            active_pos = order_cache.index(active_tag_name)
+            target_pos = order_cache.index(target_name)
+        except ValueError:
+            self.report({'ERROR'}, "Tag order cache mismatch")
+            return {'CANCELLED'}
+
+        moved_tag_name = order_cache.pop(active_pos)
+        insert_index = target_pos if target_pos > active_pos else (target_pos + 1)
+        order_cache.insert(insert_index, moved_tag_name)
+
+        _view3d_tag_order_cache.clear()
+        _view3d_tag_order_cache.extend(order_cache)
+
+        # Persist view3d tag order to JSON using global tag order cache.
+        # NOTE: go through set_tag_order() (the _state accessor) rather than reassigning
+        # space_userpref._tag_order_cache directly — that would create a shadow attribute
+        # and orphan the single-owner object in bl_ui.glyph_tag_system._state.
+        try:
+            from bl_ui.glyph_tag_system import api
+            api.set_tag_order(order_cache)
+            api._save_tag_order_only()
+        except Exception:
+            pass
+
+        # Reorder wm.category_tags ListBase to match new order.
+        # This updates C++ side and sends ND_CATEGORY_GLYPHS notifier.
+        if hasattr(wm.category_tags, 'reorder_from_names'):
+            wm.category_tags.reorder_from_names(",".join(order_cache))
+
+        # Find new index of the moved tag after reordering
+        new_index = order_cache.index(active_tag_name)
+        wm.category_tags_active_index = new_index
+        context.area.tag_redraw()
+
+        self.report({'INFO'}, f"Moved '{active_tag.name}' down")
+        return {'FINISHED'}
+
+
+class VIEW3D_HT_tag_bar_tags(Header):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'TAG_BAR'
+
+    @staticmethod
+    def get_tags_in_display_order(tags, order_cache):
+        """Sort tags according to _tag_order_cache, with new tags at the end"""
+        if not order_cache:
+            return tags
+        
+        tag_dict = {tag.name: tag for tag in tags}
+        ordered_tags = []
+        
+        # Add tags in cache order
+        for name in order_cache:
+            if name in tag_dict:
+                ordered_tags.append(tag_dict[name])
+        
+        # Add new tags (not in cache) at the end
+        for tag in tags:
+            if tag.name not in order_cache:
+                ordered_tags.append(tag)
+        
+        return ordered_tags
+    
+    @staticmethod
+    def is_tag_active_for_mode(tag, mode_string):
+        """Check if tag is active for the current mode based on mode_flags"""
+        if not tag.mode_flags:
+            return True  # No mode restrictions
+        
+        mode_bit_map = {
+            'OBJECT': 0,
+            'EDIT_MESH': 1,
+            'SCULPT': 2,
+            'PAINT_VERTEX': 3,
+            'PAINT_WEIGHT': 4,
+            'PAINT_TEXTURE': 5,
+            'PARTICLE_EDIT': 6,
+            'POSE': 7,
+            'PAINT_GPENCIL': 8,
+            'EDIT_GPENCIL': 9,
+            'SCULPT_GPENCIL': 10,
+            'WEIGHT_GPENCIL': 11,
+            'VERTEX_GPENCIL': 12,
+        }
+        
+        # Find matching mode bit
+        bit = None
+        for mode, bit_val in mode_bit_map.items():
+            if mode in mode_string:
+                bit = bit_val
+                break
+        
+        if bit is None:
+            return True  # Unknown mode, show all tags
+        
+        return bool(tag.mode_flags & (1 << bit))
+
+    def draw(self, context):
+        layout = self.layout
+        layout.separator_spacer()
+
+        wm = context.window_manager
+        v3d = context.space_data
+        area = context.area
+
+        # Check for pending (unassigned) categories from new add-ons.
+        # Use the shared helper so View3D matches the editor-wide tag-bar rules.
+        from bl_ui.glyph_tag_system.api import _get_unassigned_categories_count_for_space
+        unassigned_count = _get_unassigned_categories_count_for_space(context, 1, "VIEW3D:")
+
+        # Create a row for tag buttons and filter toggle with compact spacing
+        row = layout.row(align=True)
+
+        # Draw "New Add-on!" button if there are pending categories
+        if unassigned_count > 0:
+            # Check if New Add-on filter is active
+            new_addon_active = getattr(v3d, "new_addon_filter_active", False) if v3d else False
+
+            # Draw the button with green color - use Material Symbols glyph
+            row.tag_button(
+                "view3d.tag_bar_toggle",
+                tag_name="New Add-ons!",  # Must match C++ STREQ check
+                glyph="\uf23a",  # Material Symbols "new_releases" icon
+                color_r=0.0,
+                color_g=0.8,
+                color_b=0.2,
+                depress=new_addon_active,
+                center_glyph=False,
+                tooltip=f"Show {unassigned_count} new add-on categories",
+            )
+            row.separator()
+
+        # Get active tags as comma-separated string
+        active_tags = getattr(v3d, "active_tag_filter_tags", "")
+
+        tag_use_count = {}
+        for item in wm.category_glyph_mappings:
+            tags = item.tags
+            if not tags:
+                continue
+            for tag_name in tags.split(';'):
+                tag_name = tag_name.strip()
+                if tag_name:
+                    tag_use_count[tag_name] = tag_use_count.get(tag_name, 0) + 1
+
+        def glyph_display(glyph):
+            if not glyph:
+                return ""
+            try:
+                if all(c in "0123456789abcdefABCDEF" for c in glyph) and len(glyph) <= 8:
+                    return chr(int(glyph, 16))
+            except Exception:
+                pass
+            return glyph
+
+        # Parse active tags string into a set for quick lookup
+        active_tags_set = set()
+        if active_tags:
+            for tag_name in active_tags.split(','):
+                tag_name = tag_name.strip()
+                if tag_name:
+                    active_tags_set.add(tag_name)
+
+        view3d_order_cache = _sync_view3d_tag_order_cache(wm)
+        tags_sorted = self.get_tags_in_display_order(
+            list(wm.category_tags),
+            list(view3d_order_cache) if view3d_order_cache else []
+        )
+
+        # Create a row for tag buttons and filter toggle with compact spacing
+        row = layout.row(align=True)
+
+        # Show message if no tags exist at all
+        if not wm.category_tags:
+            op = row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD')
+            op.operator_idname = 'wm.category_tag_create'
+            op.width = 430
+            row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
+            return
+
+        # Filter tag list to only include those with glyphs or icons and active for current mode
+        mode_string = context.mode
+        tags_to_show = [t for t in tags_sorted
+                       if (glyph_display(t.glyph) or (t.icon_source == 1 and t.icon_key))
+                       and self.is_tag_active_for_mode(t, mode_string)]
+
+        # Show message if no visible tags exist
+        if not tags_to_show:
+            op = row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD')
+            op.operator_idname = 'wm.category_tag_create'
+            op.width = 430
+            row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
+            return
+
+        for i, tag in enumerate(tags_to_show):
+            glyph = glyph_display(tag.glyph)
+
+            # Check if this tag is in the active set
+            depress = tag.name in active_tags_set
+
+            # Check if we should show tag names (Glyph+Name mode vs Glyph-only mode)
+            show_names = getattr(wm, "show_tag_names", False)
+            show_active_only = getattr(wm, "show_tag_names_active_only", False)
+
+            # Center glyph logic:
+            # - If show_names is False: center all glyphs (Glyph-only mode)
+            # - If show_names is True and show_active_only is False: show text for all tags
+            # - If show_names is True and show_active_only is True:
+            #   - Active tags: show text (left-aligned)
+            #   - Inactive tags: center glyph only
+            center_glyph = not show_names or (show_active_only and not depress)
+
+            if not tag.name:
+                continue
+
+            row.tag_button(
+                "view3d.tag_bar_toggle",
+                tag_name=tag.name,
+                glyph=glyph,
+                color_r=tag.color[0],
+                color_g=tag.color[1],
+                color_b=tag.color[2],
+                depress=depress,
+                center_glyph=center_glyph,
+                tooltip=tag.name,
+            )
+
+            # Add separator between tag buttons (but not after the last one)
+            if i < len(tags_to_show) - 1:
+                row.separator()
+
+        # Add separator before filter toggle button
+        if tags_to_show:
+            row.separator()
+
+        # Filter toggle button & popover - like Gizmo/Overlay pattern
+        v3d = context.space_data
+        depress = v3d.tag_filter_enabled if v3d else False
+        row.operator("view3d.tag_bar_filter_toggle", text="", icon='FILTER', depress=depress)
+        sub = row.row(align=True)
+        sub.popover(panel="VIEW3D_PT_tag_bar_filter_popover", text="", icon='DOWNARROW_HLT')
+
+
+
 class VIEW3D_MT_editor_menus(Menu):
     bl_label = ""
 
@@ -1460,6 +2269,7 @@ class VIEW3D_MT_view(Menu):
         layout.prop(view, "show_region_toolbar")
         layout.prop(view, "show_region_ui")
         layout.prop(view, "show_region_tool_header")
+        layout.prop(view, "show_region_tag_bar")
         layout.prop(view, "show_region_asset_shelf")
         layout.prop(view, "show_region_hud")
 
@@ -9270,6 +10080,15 @@ class VIEW3D_AST_brush_gpencil_weight(AssetShelfHiddenByDefault, View3DAssetShel
 classes = (
     VIEW3D_HT_header,
     VIEW3D_HT_tool_header,
+    VIEW3D_HT_tag_bar,
+    VIEW3D_OT_tag_move,
+    VIEW3D_OT_tag_move_up,
+    VIEW3D_OT_tag_move_down,
+    VIEW3D_OT_tag_context_menu,
+    VIEW3D_MT_tag_context_menu,
+    VIEW3D_OT_tag_order_reset,
+    VIEW3D_UL_tag_order_list,
+    VIEW3D_HT_tag_bar_tags,
     VIEW3D_MT_editor_menus,
     VIEW3D_MT_transform,
     VIEW3D_MT_transform_object,
@@ -9539,6 +10358,15 @@ classes = (
     VIEW3D_PT_greasepencil_weight_context_menu,
 )
 
+
+def register():
+    # WindowManager properties are already registered at module import
+    pass
+
+def unregister():
+    # Clean up WindowManager properties
+    if hasattr(bpy.types.WindowManager, "tag_context_menu_name"):
+        del bpy.types.WindowManager.tag_context_menu_name
 
 if __name__ == "__main__":  # only for live edit.
     from bpy.utils import register_class

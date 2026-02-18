@@ -39,6 +39,29 @@ from bpy.app.translations import (
 )
 
 
+def _image_current_tag_mode_flag(sima):
+    # Resolve the tag-bar mode bit from the single source of truth in
+    # glyph_tag_system.defaults (never hard-code the bit positions here).
+    from bl_ui.glyph_tag_system.api import _CATEGORY_TAG_MODE_NAME_TO_FLAG as _flags
+    if sima.mode == 'PAINT':
+        return _flags.get("IMAGE_PAINT", 0)
+    if sima.mode == 'UV':
+        return _flags.get("UV_EDIT", 0)
+    return _flags.get("IMAGE_PAINT", 0)
+
+
+def _tag_glyph_display(glyph):
+    # Thin wrapper over the shared helper; see `bl_ui._category_tag_bar`.
+    from bl_ui._category_tag_bar import tag_glyph_display
+    return tag_glyph_display(glyph)
+
+
+def _image_visible_tags_for_current_mode(context):
+    from bl_ui._category_tag_bar import visible_tags_for_current_mode
+    mode_flag = _image_current_tag_mode_flag(context.space_data)
+    return visible_tags_for_current_mode(context.window_manager, mode_flag)
+
+
 class ImagePaintPanel(UnifiedPaintPanel):
     bl_space_type = 'IMAGE_EDITOR'
     bl_region_type = 'UI'
@@ -78,6 +101,7 @@ class IMAGE_MT_view(Menu):
         layout.prop(sima, "show_region_toolbar")
         layout.prop(sima, "show_region_ui")
         layout.prop(sima, "show_region_tool_header")
+        layout.prop(sima, "show_region_tag_bar")
         layout.prop(sima, "show_region_asset_shelf")
         layout.prop(sima, "show_region_hud")
 
@@ -996,6 +1020,75 @@ class IMAGE_MT_editor_menus(Menu):
             layout.menu("MASK_MT_mask")
 
 
+class IMAGE_HT_tag_bar(Header):
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'TAG_BAR'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.separator_spacer()
+
+        sima = context.space_data
+        wm = context.window_manager
+        row = layout.row(align=True)
+
+        if not sima.show_region_tag_bar:
+            return
+
+        active_tags = getattr(sima, "active_tag_filter_tags", "")
+        active_tags_set = set()
+        if active_tags:
+            for tag_name in active_tags.split(','):
+                tag_name = tag_name.strip()
+                if tag_name:
+                    active_tags_set.add(tag_name)
+
+        tags = _image_visible_tags_for_current_mode(context)
+
+        if not wm.category_tags or not tags:
+            op = row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD')
+            op.operator_idname = 'wm.category_tag_create'
+            op.width = 430
+            row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
+            return
+
+        show_names = getattr(wm, "show_tag_names", False)
+        show_active_only = getattr(wm, "show_tag_names_active_only", False)
+
+        for i, tag in enumerate(tags):
+            glyph = _tag_glyph_display(tag.glyph)
+            depress = tag.name in active_tags_set
+            center_glyph = not show_names or (show_active_only and not depress)
+
+            if not tag.name:
+                continue
+
+            row.tag_button(
+                "view3d.tag_bar_toggle",
+                tag_name=tag.name,
+                glyph=glyph,
+                color_r=tag.color[0],
+                color_g=tag.color[1],
+                color_b=tag.color[2],
+                depress=depress,
+                center_glyph=center_glyph,
+                tooltip=tag.name,
+            )
+
+            if i < len(tags) - 1:
+                row.separator()
+
+        row.separator()
+        row.operator(
+            "view3d.tag_bar_filter_toggle",
+            text="",
+            icon='FILTER',
+            depress=bool(getattr(sima, "tag_filter_enabled", False)),
+        )
+        sub = row.row(align=True)
+        sub.popover(panel="VIEW3D_PT_tag_bar_filter_popover", text="", icon='DOWNARROW_HLT')
+
+
 class IMAGE_MT_mask_context_menu(Menu):
     bl_label = "Mask"
 
@@ -1863,6 +1956,7 @@ classes = (
     IMAGE_MT_view_pie,
     IMAGE_HT_tool_header,
     IMAGE_HT_header,
+    IMAGE_HT_tag_bar,
     IMAGE_MT_editor_menus,
     IMAGE_PT_active_tool,
     IMAGE_PT_mask,

@@ -2865,13 +2865,45 @@ static void read_undo_tag_all_noundo_ids(FileData *fd)
     BKE_library_foreach_ID_link(
         nullptr,
         id_iter,
-        [&no_undo_ids](LibraryIDLinkCallbackData *cb_data) -> int {
+        [&no_undo_ids, old_bmain](LibraryIDLinkCallbackData *cb_data) -> int {
           ID *id_owner = cb_data->owner_id;
           ID *id = *cb_data->id_pointer;
 
           BLI_assert(BLO_readfile_id_runtime_tags(*id_owner).used_by_no_undo_id);
           UNUSED_VARS_NDEBUG(id_owner);
-          if (!id || BLO_readfile_id_runtime_tags(*id).used_by_no_undo_id) {
+
+          /* Guard against dangling ID pointers after undo.
+           * When undo is performed after operations that create new IDs and link them
+           * to 'no undo' data (like brushes), the referenced ID may be freed while
+           * the pointer in the 'no undo' data still holds the old address.
+           * Accessing this dangling pointer would crash, so skip invalid references. */
+          if (!id) {
+            return IDWALK_RET_NOP;
+          }
+
+          /* Validate that the ID pointer is actually in old_bmain.
+           * This catches dangling pointers that point to freed memory.
+           * Using BKE_id_pointer_is_valid is safe because it only compares pointers
+           * in the list, without dereferencing the potentially invalid ID data. */
+          bool id_is_valid = false;
+          if (old_bmain->split_mains) {
+            for (Main *old_bmain_iter : *old_bmain->split_mains) {
+              if (BKE_id_pointer_is_valid(old_bmain_iter, id)) {
+                id_is_valid = true;
+                break;
+              }
+            }
+          }
+          else {
+            /* Fallback: check in old_bmain directly if split_mains is not available. */
+            id_is_valid = BKE_id_pointer_is_valid(old_bmain, id);
+          }
+          if (!id_is_valid) {
+            /* This ID pointer is dangling (freed memory). Skip it to avoid crash. */
+            return IDWALK_RET_NOP;
+          }
+
+          if (BLO_readfile_id_runtime_tags(*id).used_by_no_undo_id) {
             return IDWALK_RET_NOP;
           }
 

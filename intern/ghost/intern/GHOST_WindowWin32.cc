@@ -604,6 +604,23 @@ GHOST_TSuccess GHOST_WindowWin32::setOrder(GHOST_TWindowOrder order)
   {
     return GHOST_kFailure;
   }
+
+  if (order == GHOST_kWindowOrderTop) {
+    if (::SetForegroundWindow(h_wnd_) == FALSE) {
+      const HWND foreground_window = ::GetForegroundWindow();
+      if (foreground_window != nullptr) {
+        const DWORD window_thread = ::GetWindowThreadProcessId(h_wnd_, nullptr);
+        const DWORD foreground_thread = ::GetWindowThreadProcessId(foreground_window, nullptr);
+        if (window_thread != 0 && foreground_thread != 0 && window_thread != foreground_thread) {
+          if (::AttachThreadInput(window_thread, foreground_thread, TRUE) != FALSE) {
+            ::SetForegroundWindow(h_wnd_);
+            ::AttachThreadInput(window_thread, foreground_thread, FALSE);
+          }
+        }
+      }
+    }
+  }
+
   return GHOST_kSuccess;
 }
 

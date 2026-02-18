@@ -20,9 +20,13 @@
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_xr_types.h"
 
+#include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
@@ -44,6 +48,9 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_report.hh"
+#include "BKE_screen.hh"
+
+#include "ED_screen.hh"
 
 #include "SEQ_effects.hh"
 #include "SEQ_iterator.hh"
@@ -59,6 +66,111 @@
 namespace blender {
 
 // static CLG_LogRef LOG = {"blend.doversion"};
+
+/* Ensure editors that support category filtering have the TAG_BAR region. */
+static void do_versions_ensure_spaces_have_tag_bar_region(Main *bmain)
+{
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      if (ELEM(area.spacetype, SPACE_VIEW3D, SPACE_PROPERTIES, SPACE_NODE, SPACE_IMAGE)) {
+        ARegion *region = do_versions_ensure_region(
+            &area.regionbase, RGN_TYPE_TAG_BAR, __func__, RGN_TYPE_TOOLS);
+
+        ARegion *insert_after = nullptr;
+        ARegion *alignment_source = nullptr;
+        if (ELEM(area.spacetype, SPACE_NODE, SPACE_IMAGE)) {
+          ARegion *tools_region = nullptr;
+          ARegion *ui_region = nullptr;
+          ARegion *header_region = nullptr;
+          ARegion *tool_header_region = nullptr;
+          for (ARegion &iter_region : area.regionbase) {
+            if (iter_region.regiontype == RGN_TYPE_TOOLS && tools_region == nullptr) {
+              tools_region = &iter_region;
+            }
+            else if (iter_region.regiontype == RGN_TYPE_UI && ui_region == nullptr) {
+              ui_region = &iter_region;
+            }
+            else if (iter_region.regiontype == RGN_TYPE_HEADER && header_region == nullptr) {
+              header_region = &iter_region;
+            }
+            else if (iter_region.regiontype == RGN_TYPE_TOOL_HEADER && tool_header_region == nullptr) {
+              tool_header_region = &iter_region;
+            }
+          }
+
+          /* Match VIEW_3D behavior: left toolbar is processed before top TAG_BAR so TAG_BAR does not
+           * push down the toolbar. */
+          if (tools_region && ui_region &&
+              BLI_findindex(&area.regionbase, tools_region) > BLI_findindex(&area.regionbase, ui_region))
+          {
+            BLI_remlink(&area.regionbase, tools_region);
+            BLI_insertlinkbefore(&area.regionbase, ui_region, tools_region);
+          }
+
+          /* Keep TAG_BAR stacked like in VIEW_3D:
+           * below tool/header rows, not affecting left toolbar, and before side UI region
+           * in region traversal order. */
+          insert_after = tools_region ? tools_region : (tool_header_region ? tool_header_region : header_region);
+          alignment_source = tool_header_region ? tool_header_region : header_region;
+          if (insert_after != nullptr && insert_after != region) {
+            BLI_remlink(&area.regionbase, region);
+            BLI_insertlinkafter(&area.regionbase, insert_after, region);
+          }
+          if (ui_region && BLI_findindex(&area.regionbase, region) > BLI_findindex(&area.regionbase, ui_region)) {
+            BLI_remlink(&area.regionbase, region);
+            BLI_insertlinkbefore(&area.regionbase, ui_region, region);
+          }
+        }
+
+        region->regiontype = RGN_TYPE_TAG_BAR;
+        region->alignment = alignment_source ? alignment_source->alignment : RGN_ALIGN_TOP;
+        if (ELEM(area.spacetype, SPACE_NODE, SPACE_IMAGE)) {
+          region->flag |= RGN_FLAG_HIDDEN;
+        }
+        else {
+          region->flag &= ~RGN_FLAG_HIDDEN;
+        }
+        region->overlap = true;
+      }
+    }
+  }
+}
+
+static void do_versions_init_tag_filter_state_in_spaces(Main *bmain)
+{
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        if (sl.spacetype == SPACE_NODE) {
+          SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
+          snode->tabs_state.active_tag_filter_tags[0] = '\0';
+          snode->tabs_state.tag_filter_enabled = 0;
+          snode->tabs_state.tag_bar_scroll_offset = 0;
+        }
+        else if (sl.spacetype == SPACE_IMAGE) {
+          SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+          sima->tabs_state.active_tag_filter_tags[0] = '\0';
+          sima->tabs_state.tag_filter_enabled = 0;
+          sima->tabs_state.tag_bar_scroll_offset = 0;
+        }
+      }
+
+      if (ELEM(area.spacetype, SPACE_VIEW3D, SPACE_PROPERTIES, SPACE_NODE, SPACE_IMAGE)) {
+        ARegion *region = do_versions_ensure_region(
+            &area.regionbase, RGN_TYPE_TAG_BAR, __func__, RGN_TYPE_TOOLS);
+        region->regiontype = RGN_TYPE_TAG_BAR;
+        region->alignment = RGN_ALIGN_TOP;
+        /* Keep the tag bar hidden by default for Node/Image editors, visible elsewhere. */
+        if (ELEM(area.spacetype, SPACE_NODE, SPACE_IMAGE)) {
+          region->flag |= RGN_FLAG_HIDDEN;
+        }
+        else {
+          region->flag &= ~RGN_FLAG_HIDDEN;
+        }
+      }
+    }
+  }
+}
 
 static void version_geometry_nodes_properties(FileData &fd,
                                               Main &bmain,
@@ -260,6 +372,113 @@ static void sanitize_node_tree_interface_socket_identifiers(bNodeTree &node_tree
         }
       }
     }
+  }
+}
+
+static void do_versions_init_category_tabs_display_and_zoom_in_spaces(Main *bmain)
+{
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        switch (sl.spacetype) {
+          case SPACE_VIEW3D: {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            v3d->tabs_state.category_tabs_display_mode = U.category_tabs_display_mode;
+            v3d->tabs_state.category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            v3d->tabs_state.category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            v3d->tabs_state.category_tabs_zoom_text = U.category_tabs_zoom_text;
+            break;
+          }
+          case SPACE_PROPERTIES: {
+            SpaceProperties *sbuts = reinterpret_cast<SpaceProperties *>(&sl);
+            sbuts->tabs_state.category_tabs_display_mode = U.category_tabs_display_mode;
+            sbuts->tabs_state.category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            sbuts->tabs_state.category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            sbuts->tabs_state.category_tabs_zoom_text = U.category_tabs_zoom_text;
+            break;
+          }
+          case SPACE_NODE: {
+            SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
+            snode->tabs_state.category_tabs_display_mode = U.category_tabs_display_mode;
+            snode->tabs_state.category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            snode->tabs_state.category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            snode->tabs_state.category_tabs_zoom_text = U.category_tabs_zoom_text;
+            break;
+          }
+          case SPACE_IMAGE: {
+            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+            sima->tabs_state.category_tabs_display_mode = U.category_tabs_display_mode;
+            sima->tabs_state.category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            sima->tabs_state.category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            sima->tabs_state.category_tabs_zoom_text = U.category_tabs_zoom_text;
+            break;
+          }
+          default:
+            break;
+        }
+      }
+    }
+  }
+}
+
+/* Heal corrupt per-space category-tab zoom factors. The valid range is [0.5, 2.5]; a stored 0.0
+ * (from spaces written before the zoom feature, or copied from a 0.0 preference) collapses every
+ * category tab to zero width and makes the tab bar disappear. Only non-positive values are reset,
+ * so user-customized zooms are preserved. */
+static void do_versions_fix_category_tabs_zoom_in_spaces(Main *bmain)
+{
+  auto heal = [](float &zoom) {
+    if (zoom <= 0.0f) {
+      zoom = 1.0f;
+    }
+  };
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        switch (sl.spacetype) {
+          case SPACE_VIEW3D: {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            heal(v3d->tabs_state.category_tabs_zoom_icon);
+            heal(v3d->tabs_state.category_tabs_zoom_mixed);
+            heal(v3d->tabs_state.category_tabs_zoom_text);
+            break;
+          }
+          case SPACE_PROPERTIES: {
+            SpaceProperties *sbuts = reinterpret_cast<SpaceProperties *>(&sl);
+            heal(sbuts->tabs_state.category_tabs_zoom_icon);
+            heal(sbuts->tabs_state.category_tabs_zoom_mixed);
+            heal(sbuts->tabs_state.category_tabs_zoom_text);
+            break;
+          }
+          case SPACE_NODE: {
+            SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
+            heal(snode->tabs_state.category_tabs_zoom_icon);
+            heal(snode->tabs_state.category_tabs_zoom_mixed);
+            heal(snode->tabs_state.category_tabs_zoom_text);
+            break;
+          }
+          case SPACE_IMAGE: {
+            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+            heal(sima->tabs_state.category_tabs_zoom_icon);
+            heal(sima->tabs_state.category_tabs_zoom_mixed);
+            heal(sima->tabs_state.category_tabs_zoom_text);
+            break;
+          }
+          default:
+            break;
+        }
+      }
+    }
+  }
+}
+
+static void do_versions_clear_category_runtime_lists_in_wm(Main *bmain)
+{
+  for (wmWindowManager &wm : bmain->wm) {
+    BLI_listbase_clear(&wm.category_glyph_mappings);
+    BLI_listbase_clear(&wm.category_glyph_overrides);
+    BLI_listbase_clear(&wm.category_tags);
+    wm.category_tags_active_index = 0;
   }
 }
 
@@ -543,8 +762,129 @@ static void version_solid_color_width_height_defaults(Main &bmain)
   }
 }
 
+static void do_versions_init_tag_category_memory(Main *bmain)
+{
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        switch (sl.spacetype) {
+          case SPACE_VIEW3D: {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            v3d->tabs_state.tag_last_active_categories[0] = '\0';
+            break;
+          }
+          case SPACE_PROPERTIES: {
+            SpaceProperties *sbuts = reinterpret_cast<SpaceProperties *>(&sl);
+            sbuts->tabs_state.tag_last_active_categories[0] = '\0';
+            break;
+          }
+          case SPACE_NODE: {
+            SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
+            snode->tabs_state.tag_last_active_categories[0] = '\0';
+            break;
+          }
+          case SPACE_IMAGE: {
+            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+            sima->tabs_state.tag_last_active_categories[0] = '\0';
+            break;
+          }
+          default:
+            break;
+        }
+      }
+    }
+  }
+}
+
+/* Migrate the legacy ``tag_last_active_categories`` packed string into the structured
+ * #CategoryTabsState.last_active_categories array. The packed format is '\n'-separated
+ * "tags:category" records (the tag key may contain ';' but never ':' or '\n'). */
+static void do_versions_structure_last_active_categories(CategoryTabsState &state)
+{
+  state.last_active_num = 0;
+  const char *cursor = state.tag_last_active_categories;
+  while (*cursor != '\0' && state.last_active_num < CATEGORY_LAST_ACTIVE_MAX) {
+    const char *record_end = cursor;
+    while (*record_end != '\0' && *record_end != '\n') {
+      record_end++;
+    }
+    /* The first ':' separates the tag key from the category id. */
+    const char *colon = cursor;
+    while (colon < record_end && *colon != ':') {
+      colon++;
+    }
+    if (colon < record_end) {
+      CategoryLastActive &slot = state.last_active_categories[state.last_active_num];
+      int tags_ncpy = int(colon - cursor) + 1;
+      if (tags_ncpy > int(sizeof(slot.tags))) {
+        tags_ncpy = int(sizeof(slot.tags));
+      }
+      BLI_strncpy(slot.tags, cursor, tags_ncpy);
+      int cat_ncpy = int(record_end - (colon + 1)) + 1;
+      if (cat_ncpy > int(sizeof(slot.category))) {
+        cat_ncpy = int(sizeof(slot.category));
+      }
+      BLI_strncpy(slot.category, colon + 1, cat_ncpy);
+      state.last_active_num++;
+    }
+    cursor = (*record_end == '\n') ? record_end + 1 : record_end;
+  }
+  /* The packed string is no longer used at runtime. */
+  state.tag_last_active_categories[0] = '\0';
+}
+
+static void do_versions_structure_tag_category_memory(Main *bmain)
+{
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        switch (sl.spacetype) {
+          case SPACE_VIEW3D:
+            do_versions_structure_last_active_categories(
+                reinterpret_cast<View3D *>(&sl)->tabs_state);
+            break;
+          case SPACE_PROPERTIES:
+            do_versions_structure_last_active_categories(
+                reinterpret_cast<SpaceProperties *>(&sl)->tabs_state);
+            break;
+          case SPACE_NODE:
+            do_versions_structure_last_active_categories(
+                reinterpret_cast<SpaceNode *>(&sl)->tabs_state);
+            break;
+          case SPACE_IMAGE:
+            do_versions_structure_last_active_categories(
+                reinterpret_cast<SpaceImage *>(&sl)->tabs_state);
+            break;
+          default:
+            break;
+        }
+      }
+    }
+  }
+}
+
 void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 {
+  /* Category runtime lists in WM are rebuilt by Python on startup and must never be trusted from
+   * blend-file contents (older experimental files may contain stale raw pointers here).
+   * Clear unconditionally for all 5.2 loads before any Python-side sync touches them. */
+  do_versions_clear_category_runtime_lists_in_wm(bmain);
+
+  /* Add TAG_BAR region to editors that support category filtering. */
+  do_versions_ensure_spaces_have_tag_bar_region(bmain);
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 8)) {
+    do_versions_init_tag_category_memory(bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 5)) {
+    do_versions_init_tag_filter_state_in_spaces(bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 6)) {
+    do_versions_init_category_tabs_display_and_zoom_in_spaces(bmain);
+  }
+
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 1)) {
     for (Scene &scene : bmain->scenes) {
       scene.r.mode |= R_SAVE_OUTPUT;
@@ -911,6 +1251,15 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  /* Subversion 45 is reserved by the `Global-Sculpt-Mode-Mesh-V5-Merge-Patch` branch. */
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 46)) {
+    do_versions_fix_category_tabs_zoom_in_spaces(bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 47)) {
+    do_versions_structure_tag_category_memory(bmain);
   }
 
   /**

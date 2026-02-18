@@ -1,6 +1,6 @@
 #!/bin/sh
 BF_DIST_BIN=$(dirname "$(readlink -f "$0")")
-BF_PROGRAM="blender"
+BF_PROGRAM="X-NazirSculpt"
 
 # Attempt to preload system TBB library if it is newer than the one we bundled.
 # This solves problems with the Intel ray-tracing library using this newer TBB

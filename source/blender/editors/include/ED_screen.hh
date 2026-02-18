@@ -187,7 +187,9 @@ const rcti *ED_region_visible_rect(ARegion *region);
 bool ED_region_is_overlap(int spacetype, int regiontype);
 
 int ED_region_snap_size_test(const ARegion *region);
+int ED_region_snap_size_test_with_area(const ARegion *region, const ScrArea *area);
 bool ED_region_snap_size_apply(ARegion *region, int snap_flag);
+bool ED_region_snap_size_apply_with_area(ARegion *region, int snap_flag, const ScrArea *area);
 
 /* message_bus callbacks */
 void ED_region_do_msg_notify_tag_redraw(bContext *C,
@@ -237,6 +239,11 @@ int ED_area_icon(const ScrArea *area);
 int ED_screen_area_active(const bContext *C);
 void ED_screen_global_areas_refresh(wmWindow *win);
 void ED_screen_global_areas_sync(wmWindow *win);
+/**
+ * Initialize category tabs hover handler for the window.
+ * Called during window creation to ensure cross-area hover state management.
+ */
+void ED_screen_category_tabs_handlers_ensure(wmWindow *win);
 /** Only exported for WM. */
 void ED_area_do_listen(wmSpaceTypeListenerParams *params);
 void ED_area_tag_redraw(ScrArea *area);
@@ -564,6 +571,17 @@ void ED_operatortypes_screen();
 /* called in `spacetypes.cc`. */
 void ED_keymap_screen(wmKeyConfig *keyconf);
 /**
+ * Register SCREEN_OT_category_tab_extension_drop operator early.
+ * Must be called before #ED_operatortypes_userpref() so the dropbox
+ * can be added with higher priority than PREFERENCES_OT_extension_url_drop.
+ */
+void ED_operatortypes_screen_extension_drop();
+/**
+ * Register category-tab extension dropbox in "Window" dropboxmap.
+ * Must be called after operator registration, before userpref dropboxes.
+ */
+void ED_dropbox_category_extension();
+/**
  * Workspace key-maps.
  */
 void ED_operatortypes_workspace();
@@ -750,6 +768,12 @@ void ED_region_generic_tools_region_message_subscribe(
  */
 int ED_region_generic_tools_region_snap_size(const ARegion *region, int size, int axis);
 int ED_region_generic_panel_region_snap_size(const ARegion *region, int size, int axis);
+int ED_region_generic_panel_region_snap_size_with_area(const ScrArea *area,
+                                                       const ARegion *region,
+                                                       int size,
+                                                       int axis);
+eUserPref_CategoryTabsDisplayMode ED_category_tabs_display_mode_get(const ScrArea *area);
+float ED_category_tabs_zoom_get(const ScrArea *area);
 
 /* `area_query.cc` */
 
@@ -763,14 +787,18 @@ bool ED_region_overlap_isect_xy_with_margin(const ARegion *region,
                                             const int event_xy[2],
                                             int margin);
 
-bool ED_region_panel_category_gutter_calc_rect(const ARegion *region, rcti *r_region_gutter);
-bool ED_region_panel_category_gutter_isect_xy(const ARegion *region, const int event_xy[2]);
+bool ED_region_panel_category_gutter_calc_rect(const ScrArea *area,
+                                               const ARegion *region,
+                                               rcti *r_region_gutter);
+bool ED_region_panel_category_gutter_isect_xy(const ScrArea *area,
+                                              const ARegion *region,
+                                              const int event_xy[2]);
 
 /**
  * \note This may return true for multiple overlapping regions.
  * If it matters, check overlapped regions first (#ARegion.overlap).
  */
-bool ED_region_contains_xy(const ARegion *region, const int event_xy[2]);
+bool ED_region_contains_xy(const ScrArea *area, const ARegion *region, const int event_xy[2]);
 /**
  * Similar to #BKE_area_find_region_xy() but when \a event_xy intersects an overlapping region,
  * this returns the region that is visually under the cursor. E.g. when over the

@@ -343,6 +343,11 @@ else()
     target_link_libraries(blender PRIVATE blender_cpu_check)
   endif()
   if(WIN32)
+    set_target_properties(blender PROPERTIES OUTPUT_NAME "X-NazirSculpt")
+  elseif(UNIX AND NOT APPLE)
+    set_target_properties(blender PROPERTIES OUTPUT_NAME "X-NazirSculpt")
+  endif()
+  if(WIN32)
     add_executable(blender-launcher WIN32
       blender_launcher_win32.c
       ${CMAKE_SOURCE_DIR}/release/windows/icons/winblender.rc
@@ -516,6 +521,12 @@ endif()
 # fonts
 install(
   DIRECTORY ${CMAKE_SOURCE_DIR}/release/datafiles/fonts
+  DESTINATION ${TARGETDIR_VER}/datafiles
+)
+
+# author image
+install(
+  FILES ${CMAKE_SOURCE_DIR}/release/datafiles/autor_image.png
   DESTINATION ${TARGETDIR_VER}/datafiles
 )
 
@@ -764,7 +775,7 @@ if(UNIX AND NOT APPLE)
 
     # none of the other files are needed currently
   elseif(WITH_INSTALL_PORTABLE)
-    set(BLENDER_BIN "blender")
+    set(BLENDER_BIN "X-NazirSculpt")
     install(
       TARGETS blender
       DESTINATION "."
@@ -804,7 +815,7 @@ if(UNIX AND NOT APPLE)
     endif()
   else()
     # main blender binary
-    set(BLENDER_BIN "bin/blender")
+    set(BLENDER_BIN "bin/X-NazirSculpt")
     install(
       TARGETS blender
       DESTINATION "./bin"
@@ -1172,6 +1183,15 @@ elseif(WIN32)
         set(WITH_WINDOWS_RELEASE_STRIPPED_PDB off)
       endif()
     endif()
+
+    # Copy author image to build output for development builds.
+    add_custom_command(
+      TARGET blender POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/release/datafiles/autor_image.png
+        ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/${TARGETDIR_VER}/datafiles/autor_image.png
+      COMMENT "Copying autor_image.png to build output"
+    )
 
     if(WITH_WINDOWS_RELEASE_STRIPPED_PDB)
       # Icky hack for older CMAKE from https://stackoverflow.com/a/21198501
@@ -1686,7 +1706,7 @@ elseif(WIN32)
 elseif(APPLE)
   if(NOT WITH_PYTHON_MODULE)
     # Uppercase name for app bundle.
-    set_target_properties(blender PROPERTIES OUTPUT_NAME Blender)
+    set_target_properties(blender PROPERTIES OUTPUT_NAME "X-NazirSculpt")
   endif()
 
   set(OSX_APP_SOURCEDIR ${CMAKE_SOURCE_DIR}/release/darwin/Blender.app)
@@ -1737,7 +1757,7 @@ elseif(APPLE)
     COMMAND SetFile -d ${SETFILE_DATE} -m ${SETFILE_DATE} ${EXECUTABLE_OUTPUT_PATH}/Blender.app
   )
 
-  set(BLENDER_BIN "bin/blender")
+  set(BLENDER_BIN "bin/X-NazirSculpt")
   install(
     TARGETS blender
     DESTINATION "."
@@ -2081,7 +2101,8 @@ endif()
 # Setup launcher
 
 if(WIN32 AND NOT WITH_PYTHON_MODULE)
-  set(BLENDER_BIN "blender.exe")
+  set(BLENDER_BIN "X-NazirSculpt.exe")
+  set_target_properties(blender-launcher PROPERTIES OUTPUT_NAME "X-NazirSculpt-launcher")
   install(
     TARGETS blender blender-launcher
     COMPONENT Blender

@@ -68,6 +68,10 @@ namespace blender::ui {
 /* Used e.g. by placeholders and unit hint completion. */
 #define UI_INPUT_HINT_ALPHA 0.33f
 
+/* Glyph darkening/brightening factors for tag buttons */
+#define TAG_GLYPH_DARKEN_INACTIVE 0.25f      /* Darken inactive glyphs */
+#define TAG_GLYPH_BRIGHTEN_HOVER 0.15f       /* Brighten on hover */
+
 /* visual types for drawing */
 /* for time being separated from functional types */
 enum class WidgetStyle {
@@ -171,6 +175,24 @@ static void color_blend_v4_v4v4(uchar r_col[4],
   r_col[1] = (faci * col1[1] + facm * col2[1]) / 256;
   r_col[2] = (faci * col1[2] + facm * col2[2]) / 256;
   r_col[3] = (faci * col1[3] + facm * col2[3]) / 256;
+}
+
+/* Darken a 3-channel color by multiplying by (1.0 - factor) */
+static void color_darken_3uc(uchar color[3], const float factor)
+{
+  BLI_assert(factor >= 0.0f && factor <= 1.0f);
+  for (int i = 0; i < 3; i++) {
+    color[i] = uchar(color[i] * (1.0f - factor));
+  }
+}
+
+/* Brighten a 3-channel color by blending towards white */
+static void color_brighten_3uc(uchar color[3], const float factor)
+{
+  BLI_assert(factor >= 0.0f && factor <= 1.0f);
+  for (int i = 0; i < 3; i++) {
+    color[i] = std::min(255, color[i] + int((255 - color[i]) * factor));
+  }
 }
 
 static void color_ensure_contrast_v3(uchar cp[3], const uchar cp_other[3], int contrast)
@@ -5227,6 +5249,408 @@ static void widget_draw_extra_mask(const bContext *C, Button *but, WidgetType *w
   widgetbase_draw(&wtb, &wt->wcol);
 }
 
+/* Custom draw function for ButtonType::Tag */
+static void widget_draw_tag(const bContext *C,
+                            uiStyle *style,
+                            const ThemeUI *tui,
+                            const WidgetStateInfo *state_in,
+                            Button *but,
+                            const rcti *rect)
+{
+  /* Safety check: ensure button exists and is correct type */
+  if (!but || but->type != ButtonType::Tag) {
+    return;
+  }
+
+  const ButtonTag *tag_but = static_cast<const ButtonTag *>(but);
+
+  const uiFontStyle *fstyle = &style->widget;
+
+  /* Minimal spacing inside button - layout system handles spacing between buttons */
+  const int box_padding_x = 2 * UI_SCALE_FAC;  /* Small padding inside box */
+  const int box_padding_y = 4 * UI_SCALE_FAC;  /* More vertical padding for better appearance */
+
+  /* Calculate content area (inside box padding) */
+  rcti content_rect;
+  content_rect.xmin = rect->xmin + box_padding_x;
+  content_rect.xmax = rect->xmax - box_padding_x;
+  content_rect.ymin = rect->ymin + box_padding_y;
+  content_rect.ymax = rect->ymax - box_padding_y;
+
+  int offset_x = content_rect.xmin;
+
+  /* Create state if not provided */
+  WidgetStateInfo local_state = {0};
+  if (state_in) {
+    local_state = *state_in;
+  } else {
+    local_state.but_flag = but->flag;
+    local_state.but_drawflag = but->drawflag;
+    local_state.emboss = but->emboss;
+    if (but->flag & UI_SELECT_DRAW) {
+      local_state.but_flag |= UI_SELECT;
+    }
+  }
+  const WidgetStateInfo *state = &local_state;
+
+  /* Determine if this is preference mode button (no checkbox) */
+  const bool is_pref_mode = (but->drawflag & BUT_TAG_PREF_MODE) != 0;
+
+  /* Check if button should draw background (BUT_TAG_NO_BACKGROUND flag = skip background unless hovered) */
+  const bool no_background = (but->drawflag & BUT_TAG_NO_BACKGROUND) != 0;
+
+  /* Box container: draw the background box (like the layout.box() effect). */
+  {
+    WidgetBase wtb_box;
+    widget_init(&wtb_box);
+
+    /* Use box colors from theme so tag buttons follow the active theme. */
+    uiWidgetColors wcol_box = tui->wcol_box;
+
+    /* Keep the theme outline but force it fully opaque for visibility. */
+    wcol_box.outline[3] = 255;
+
+    /* Force fully opaque background for the inactive state (override theme transparency). */
+    if (!(state->but_flag & (UI_HOVER | UI_SELECT))) {
+      wcol_box.inner[3] = 255;
+    }
+
+    /* Handle active state - custom styling for active tag button. */
+    if (state->but_flag & UI_SELECT) {
+      /* Use the theme's active inner color, fully opaque. */
+      copy_v3_v3_uchar(wcol_box.inner, tui->wcol_box.inner_sel);
+      wcol_box.inner[3] = 255;
+      /* Use theme outline color for active button and darken it by 46%. */
+      wcol_box.outline[0] = uchar(tui->editor_outline_active[0] * 0.54f);
+      wcol_box.outline[1] = uchar(tui->editor_outline_active[1] * 0.54f);
+      wcol_box.outline[2] = uchar(tui->editor_outline_active[2] * 0.54f);
+      wcol_box.outline[3] = 255;
+    }
+
+    /* Apply hover effect - lighten background slightly, keep theme outline. */
+    if (state->but_flag & UI_HOVER && !(state->but_flag & UI_SELECT)) {
+      /* Slightly lighten inner color on hover. */
+      wcol_box.inner[0] = std::min(255, wcol_box.inner[0] + 15);
+      wcol_box.inner[1] = std::min(255, wcol_box.inner[1] + 15);
+      wcol_box.inner[2] = std::min(255, wcol_box.inner[2] + 15);
+      wcol_box.inner[3] = 255;  /* Keep fully opaque. */
+      wcol_box.outline[3] = 255;
+    }
+
+    /* Calculate rounded corners based on alignment */
+    /* In preference mode, if button has BUT_ALIGN_RIGHT flag, it means there's a button to the right,
+     * so we should not round the right corners to create seamless appearance */
+    int round_corners = CNR_ALL;
+    if (is_pref_mode && (but->drawflag & BUT_ALIGN)) {
+      /* Check alignment flags to determine which corners to round */
+      if (but->drawflag & BUT_ALIGN_RIGHT) {
+        /* Button has another button to its right - remove right corner rounding */
+        round_corners &= ~(CNR_TOP_RIGHT | CNR_BOTTOM_RIGHT);
+      }
+      /* If button is on the left edge (has left alignment), keep left corners rounded */
+      /* If button is in the middle (has both left and right), round no corners (fully flat) */
+      if ((but->drawflag & BUT_ALIGN_LEFT) && (but->drawflag & BUT_ALIGN_RIGHT)) {
+        /* Button is in the middle of a group - round no corners */
+        round_corners = 0;
+      }
+    }
+
+    /* Skip drawing background if BUT_TAG_NO_BACKGROUND is set and not hovered/active */
+    if (!no_background || (state->but_flag & (UI_HOVER | UI_SELECT))) {
+      /* Draw rounded box background */
+      const float rad = widget_radius_from_rcti(rect, &wcol_box);
+      round_box_edges(&wtb_box, round_corners, rect, rad);
+      wtb_box.draw_emboss = false;
+      widgetbase_draw(&wtb_box, &wcol_box);
+
+      /* Flush cache so contents draw on top of box background */
+      GPU_blend(GPU_BLEND_ALPHA);
+      widgetbase_draw_cache_flush();
+      GPU_blend(GPU_BLEND_NONE);
+    }
+  }
+
+  /* Part 1: draw checkbox (left side) using the standard widget_optionbut.
+   * Skip for preference mode buttons (BUT_TAG_PREF_MODE). */
+  rcti checkbox_rect = {0};
+
+  if (!is_pref_mode) {
+    /* Add proper padding from left edge of box */
+    const int left_padding = UI_UNIT_X / 4;  /* Space from left edge */
+    offset_x += left_padding;
+
+    /* Create checkbox rect - use smaller square checkbox, not full height */
+    const int checkbox_square_size = BLI_rcti_size_y(&content_rect);
+    checkbox_rect.xmin = offset_x;
+    checkbox_rect.xmax = offset_x + checkbox_square_size;
+    checkbox_rect.ymin = content_rect.ymin;
+    checkbox_rect.ymax = content_rect.ymax;
+
+    /* Use standard Blender checkbox drawing - handles all states and theme colors correctly */
+    uiWidgetColors wcol_option = tui->wcol_option;  /* Use proper checkbox colors from theme */
+    widget_optionbut(&wcol_option, &checkbox_rect, state, 0, 1.0f);
+
+    /* Update offset to after checkbox (no extra spacing) */
+    offset_x = checkbox_rect.xmax;
+  } else {
+    /* In preference mode, add proper padding from left edge */
+    const int left_padding = UI_UNIT_X / 6;  /* Smaller space from left edge in pref mode */
+    offset_x += left_padding;
+  }
+
+  /* Part 2: draw icon or colored glyph (mutually exclusive).
+   * Icon takes priority over glyph when set. */
+
+  /* Calculate available width for content after checkbox */
+  const int available_width = content_rect.xmax - offset_x;
+
+  /* Minimum width for glyph/icon (small square) */
+  const int min_glyph_width = UI_UNIT_X * 0.5f;  /* Reduced threshold for compact buttons */
+
+  /* Resolve icon_id from icon_path if needed */
+  int resolved_icon_id = tag_but->icon_id;
+  if (resolved_icon_id == 0 && tag_but->icon_path[0] != '\0') {
+    resolved_icon_id = category_tab_icon_id_resolve_from_path(tag_but->icon_path);
+  }
+
+  /* Determine what to draw: icon > glyph > nothing */
+  const bool has_icon = (resolved_icon_id > 0);
+  const bool has_glyph = !has_icon && tag_but->glyph[0] != '\0';
+  bool glyph_was_shown = false;  /* Track if glyph/icon was actually drawn */
+  float glyph_width = 0.0f;  /* Track width for text clipping */
+
+  /* Draw icon (takes priority over glyph). */
+  if (has_icon) {
+    /* Check if we have enough space to show icon */
+    const bool show_icon = available_width >= (min_glyph_width * 0.5f);
+
+    if (show_icon) {
+      glyph_was_shown = true;
+
+      /* Calculate icon size based on button height - increased 2x */
+      const int icon_size = int((BLI_rcti_size_y(&content_rect) - 4 * UI_SCALE_FAC) * 1.0f);
+      const float icon_draw_size = std::max(float(icon_size), 15.0f * UI_SCALE_FAC);
+
+      /* Calculate icon position - center vertically */
+      const float center_y = (content_rect.ymin + content_rect.ymax) / 2.0f;
+      const float icon_pos_y = center_y - icon_draw_size / 2.0f;
+
+      /* Calculate horizontal position */
+      float icon_pos_x;
+      if (is_pref_mode && (but->drawflag & BUT_TAG_CENTER_GLYPH)) {
+        /* Center icon when center_glyph flag is set */
+        const float center_x = (content_rect.xmin + content_rect.xmax) / 2.0f;
+        icon_pos_x = center_x - icon_draw_size / 2.0f;
+      } else {
+        /* Left-aligned */
+        icon_pos_x = float(offset_x);
+      }
+
+      /* Get icon tint color */
+      uchar icon_tint[4] = {255, 255, 255, 255};
+
+      /* Check if the icon is monochrome (can be tinted). */
+      const bool is_monochrome = icon_is_monochrome(resolved_icon_id);
+
+      /* Apply custom color ONLY to monochrome icons. */
+      if (is_monochrome && tag_but->has_color) {
+        icon_tint[0] = uchar(tag_but->color[0] * 255.0f);
+        icon_tint[1] = uchar(tag_but->color[1] * 255.0f);
+        icon_tint[2] = uchar(tag_but->color[2] * 255.0f);
+      }
+      else if (is_monochrome) {
+        /* Default for monochrome icons if no tag color. */
+        uchar theme_icon_color[4];
+        if (icon_get_theme_color(resolved_icon_id, theme_icon_color)) {
+          copy_v4_v4_uchar(icon_tint, theme_icon_color);
+        }
+      }
+      /* Else: multi-color SVG - keep white tint (100% original color). */
+
+      /* Apply state adjustments */
+      if (!(state->but_flag & UI_SELECT)) {
+        color_darken_3uc(icon_tint, TAG_GLYPH_DARKEN_INACTIVE);
+      }
+      if (state->but_flag & UI_HOVER) {
+        color_brighten_3uc(icon_tint, TAG_GLYPH_BRIGHTEN_HOVER);
+      }
+
+      /* Dim icon if space is tight */
+      if (available_width < min_glyph_width) {
+        icon_tint[3] = uchar(icon_tint[3] * 0.5f);
+      }
+
+      /* Draw icon */
+      const float icon_aspect = float(ICON_DEFAULT_WIDTH) / icon_draw_size;
+      GPU_blend(GPU_BLEND_ALPHA);
+      icon_draw_ex(icon_pos_x,
+                   icon_pos_y,
+                   resolved_icon_id,
+                   icon_aspect,
+                   1.0f,  /* alpha */
+                   0.0f,  /* saturation */
+                   icon_tint,
+                   false,
+                   UI_NO_ICON_OVERLAY_TEXT);
+      GPU_blend(GPU_BLEND_NONE);
+
+      /* Update glyph width for text clipping */
+      glyph_width = icon_draw_size;
+
+      /* Update offset to after icon so text doesn't overlap */
+      offset_x += int(glyph_width);
+    }
+  }
+  /* Draw glyph (fallback when no icon). */
+  else if (has_glyph) {
+    /* Setup font for drawing */
+    fontstyle_set(fstyle);
+    if (fstyle->uifont_id >= 0) {
+      /* Get text color - use custom color if set */
+      uchar text_color[4];
+      if (tag_but->has_color) {
+        /* Adjust brightness for visibility - ensure minimum Value */
+        /* Convert to HSV and ensure minimum Value of 0.4f for visibility */
+        float h, s, v;
+        rgb_to_hsv(tag_but->color[0], tag_but->color[1], tag_but->color[2], &h, &s, &v);
+        v = std::max(0.4f, v);  /* Minimum brightness */
+
+        /* Convert back to RGB (returns float 0-1) */
+        float rgb_temp[3];
+        hsv_to_rgb(h, s, v, &rgb_temp[0], &rgb_temp[1], &rgb_temp[2]);
+
+        /* Convert to uchar 0-255 */
+        text_color[0] = uchar(rgb_temp[0] * 255.0f);
+        text_color[1] = uchar(rgb_temp[1] * 255.0f);
+        text_color[2] = uchar(rgb_temp[2] * 255.0f);
+        text_color[3] = 255;
+      } else {
+        copy_v4_v4_uchar(text_color, tui->wcol_regular.text);
+      }
+
+      /* Apply color adjustments based on button state */
+      if (!(state->but_flag & UI_SELECT)) {
+        /* Inactive button: darken glyph */
+        color_darken_3uc(text_color, TAG_GLYPH_DARKEN_INACTIVE);
+      }
+      if (state->but_flag & UI_HOVER) {
+        /* Hover: brighten glyph */
+        color_brighten_3uc(text_color, TAG_GLYPH_BRIGHTEN_HOVER);
+      }
+
+      /* Calculate glyph width first */
+      glyph_width = BLF_width(fstyle->uifont_id, tag_but->glyph, strlen(tag_but->glyph));
+
+      /* Check if we have enough space to show glyph (with some padding) */
+      /* Reduced threshold for compact buttons - show glyph if at least 50% of minimum width */
+      const bool show_glyph = available_width >= (min_glyph_width * 0.5f);
+
+      if (show_glyph) {
+        glyph_was_shown = true;  /* Mark that glyph is visible */
+
+        /* Dim glyph if space is very tight */
+        float glyph_alpha = 1.0f;
+        if (available_width < min_glyph_width) {
+          glyph_alpha = 0.5f;  /* Dim glyph when very cramped */
+          text_color[3] = uchar(text_color[3] * glyph_alpha);
+        }
+
+        /* Calculate glyph position - center vertically using proper font metrics */
+        const int glyph_height = BLF_ascender(fstyle->uifont_id) + BLF_descender(fstyle->uifont_id);
+        const float glyph_y = content_rect.ymin + ceil(0.5f * (BLI_rcti_size_y(&content_rect) - glyph_height));
+
+        /* For preference mode (no checkbox), check if we should center glyph */
+        float glyph_x;
+        if (is_pref_mode) {
+          /* Center glyph if BUT_TAG_CENTER_GLYPH flag is set (glyph-only buttons like tag bar) */
+          /* Otherwise align left (glyph + text layout like category buttons) */
+          const bool center_glyph = (but->drawflag & BUT_TAG_CENTER_GLYPH) != 0;
+          if (center_glyph) {
+            /* Center glyph in the entire content area when glyph-only (like tag bar buttons) */
+            const float content_center_x = (content_rect.xmin + content_rect.xmax) / 2.0f;
+            glyph_x = content_center_x - (glyph_width / 2.0f);
+          } else {
+            /* Left-aligned when there's text (glyph + text layout) */
+            glyph_x = float(offset_x);
+          }
+        } else {
+          /* Left-aligned after checkbox */
+          glyph_x = float(offset_x);
+        }
+
+        BLF_color4f(fstyle->uifont_id,
+                    text_color[0] / 255.0f,
+                    text_color[1] / 255.0f,
+                    text_color[2] / 255.0f,
+                    text_color[3] / 255.0f);
+        BLF_position(fstyle->uifont_id, glyph_x, glyph_y, 0.0f);
+        BLF_draw(fstyle->uifont_id, tag_but->glyph, strlen(tag_but->glyph));
+      }
+
+      /* Update offset to after glyph (no spacing) */
+      offset_x += int(glyph_width);
+    }
+  }
+
+  /* Proper spacing between glyph/icon and text - or just start if no glyph and no icon */
+  if (!has_glyph && !has_icon && !is_pref_mode) {
+    offset_x = checkbox_rect.xmax;
+  }
+
+  /* Spacing between icon/glyph and text label.
+   * Icons get a bit more breathing room than glyphs. */
+  const int icon_text_spacing = has_icon ? int(5 * UI_SCALE_FAC) : int(2 * UI_SCALE_FAC);
+  offset_x += icon_text_spacing;
+
+  /* Part 3: draw tag name text. */
+
+  /* Calculate remaining width for text */
+  const int remaining_width = content_rect.xmax - offset_x;
+
+  /* Only show text if there's minimal space */
+  const bool show_text = !but->str.empty() && (remaining_width >= UI_UNIT_X);
+
+  /* Draw text directly for left alignment */
+  fontstyle_set(fstyle);
+  if (show_text && fstyle->uifont_id >= 0) {
+    /* Text color - use theme color */
+    BLF_color4f(fstyle->uifont_id,
+                tui->wcol_regular.text[0] / 255.0f,
+                tui->wcol_regular.text[1] / 255.0f,
+                tui->wcol_regular.text[2] / 255.0f,
+                tui->wcol_regular.text[3] / 255.0f);
+
+    /* Calculate text position - left aligned, vertically centered in content area */
+    const float text_x = float(offset_x);  /* Left aligned */
+    const int text_height = BLF_ascender(fstyle->uifont_id) + BLF_descender(fstyle->uifont_id);
+    const float text_y = content_rect.ymin + ceil(0.5f * (BLI_rcti_size_y(&content_rect) - text_height));  /* Vertically centered */
+
+    BLF_position(fstyle->uifont_id, text_x, text_y, 0.0f);
+
+    /* Clip text to fit available width (same as standard buttons) */
+    rcti text_rect;
+    text_rect.xmin = offset_x;
+    text_rect.xmax = content_rect.xmax;
+    text_rect.ymin = content_rect.ymin;
+    text_rect.ymax = content_rect.ymax;
+
+    /* Prepare text buffer for clipping */
+    char clipped_text[UI_MAX_DRAW_STR];
+    STRNCPY(clipped_text, but->str.c_str());
+
+    /* Use text_clip_middle_ex to clip text */
+    const int clip_margin = int(0.25f * U.widget_unit / but->block->aspect + 0.5f);
+    const float text_okwidth = float(max_ii(BLI_rcti_size_x(&text_rect) - clip_margin, 0));
+    const float minwidth = UI_ICON_SIZE / but->block->aspect * 2.0f;
+    text_clip_middle_ex(fstyle, clipped_text, text_okwidth, minwidth, UI_MAX_DRAW_STR, '\0');
+
+    /* Draw the clipped text */
+    BLF_draw(fstyle->uifont_id, clipped_text, strlen(clipped_text));
+  }
+
+  (void)C;  /* Suppress unused warning */
+}
+
 static WidgetType *widget_type(WidgetStyle type)
 {
   bTheme *btheme = theme::theme_get();
@@ -5486,13 +5910,44 @@ static int widget_roundbox_set(Button *but, rcti *rect)
   return roundbox;
 }
 
+/**
+ * Determine widget type for popover buttons.
+ *
+ * Popover buttons automatically draw a small arrow indicator to show they open a menu.
+ * However, when the button already has a directional icon (arrow/triangle), this creates
+ * a duplicate arrow which looks incorrect.
+ *
+ * Examples of affected icons:
+ * - ICON_DOWNARROW_HLT: Used in VIEW3D_PT_tag_bar_filter_popover
+ * - ICON_TRIA_DOWN: Used in USERPREF_PT_tag_mode_filter_popover
+ * - ICON_RIGHTARROW: Used for collapsible panel indicators
+ *
+ * Solution: Check if the button's icon is already directional (arrow/triangle),
+ * and skip drawing the additional menu arrow in that case.
+ */
 static WidgetType *popover_widget_type(Button *but, rcti *rect)
 {
   /* We could use a flag for this, but for now just check size,
    * add up/down arrows if there is room. */
   if ((but->str.empty() && but->icon && (BLI_rcti_size_x(rect) < BLI_rcti_size_y(rect) + 2)) ||
       /* disable for brushes also */
-      (but->flag & BUT_ICON_PREVIEW))
+      (but->flag & BUT_ICON_PREVIEW) ||
+      /* Don't draw menu arrow if button already has a directional icon (avoids duplicate arrows).
+       * Note: this matches by icon and so applies to every popover button using these icons,
+       * not only category-tab/tag popovers. No existing button discriminator reliably narrows
+       * this to tab/tag popovers without introducing a new public flag in a shared header. */
+      ELEM(but->icon,
+           ICON_RIGHTARROW,
+           ICON_DOWNARROW_HLT,
+           ICON_RIGHTARROW_THIN,
+           ICON_TRIA_DOWN,
+           ICON_TRIA_LEFT,
+           ICON_TRIA_RIGHT,
+           ICON_TRIA_UP,
+           ICON_TRIA_DOWN_BAR,
+           ICON_TRIA_LEFT_BAR,
+           ICON_TRIA_RIGHT_BAR,
+           ICON_TRIA_UP_BAR))
   {
     /* No arrows. */
     return widget_type(WidgetStyle::MenuIconRadio);
@@ -5523,6 +5978,10 @@ void draw_button(const bContext *C, ARegion *region, uiStyle *style, Button *but
         break;
       case ButtonType::Label:
         widget_draw_text_icon(&style->widget, &tui->wcol_menu_back, but, rect);
+        break;
+      case ButtonType::Tag:
+        /* Tag button - custom drawing with checkbox, glyph, and text */
+        widget_draw_tag(C, style, tui, nullptr, but, rect);
         break;
       case ButtonType::Sepr:
         break;
@@ -5564,6 +6023,10 @@ void draw_button(const bContext *C, ARegion *region, uiStyle *style, Button *but
       case ButtonType::NodeSocket:
         wt = widget_type(WidgetStyle::NodeSocket);
         break;
+      case ButtonType::Tag:
+        /* Tag button - custom drawing with checkbox, glyph, and text */
+        widget_draw_tag(C, style, tui, nullptr, but, rect);
+        break;
       default:
         wt = widget_type(WidgetStyle::Icon);
         break;
@@ -5589,6 +6052,11 @@ void draw_button(const bContext *C, ARegion *region, uiStyle *style, Button *but
         if (!(but->flag & UI_HAS_ICON)) {
           but->drawflag |= BUT_NO_TEXT_PADDING;
         }
+        break;
+
+      case ButtonType::Tag:
+        /* Tag button - custom drawing with checkbox, glyph, and text */
+        widget_draw_tag(C, style, tui, nullptr, but, rect);
         break;
 
       case ButtonType::Sepr:
@@ -5864,9 +6332,10 @@ void draw_button(const bContext *C, ARegion *region, uiStyle *style, Button *but
       GPU_blend(GPU_BLEND_ALPHA);
     }
 
-    if (but->type == ButtonType::Label && !(but->flag & UI_HAS_ICON) && but->col[3] != 0) {
-      /* Optionally use button color for text color if label without icon.
-       * For example, ensuring that the Splash version text is always white. */
+    if (but->col[3] != 0 &&
+        ((but->type == ButtonType::Label && !(but->flag & UI_HAS_ICON)) ||
+         (but->drawflag & BUT_TEXT_USE_COL)))
+    {
       copy_v4_v4_uchar(wt->wcol.text, but->col);
     }
 

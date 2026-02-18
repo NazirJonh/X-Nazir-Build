@@ -14,25 +14,38 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <string>
 
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_math_vector.h"
+#include "BLI_path_utils.hh"
+#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
 
+#include "DNA_object_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
+#include "DNA_windowmanager_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_preferences.h"
 #include "BKE_screen.hh"
+#include "BKE_workspace.hh"
 
 #include "RNA_access.hh"
+#include "RNA_prototypes.hh"
 
 #include "BLF_api.hh"
 
@@ -43,6 +56,7 @@
 
 #include "UI_interface_c.hh"
 #include "UI_interface_icons.hh"
+#include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 #include "UI_view2d.hh"
 
@@ -53,7 +67,9 @@
 
 #include "RNA_prototypes.hh"
 
-#include "interface_intern.hh"
+#include "interface_tag_bar.hh"
+
+#include "interface_intern.hh" /* own include */
 
 namespace blender::ui {
 
@@ -329,7 +345,7 @@ void panels_free_instanced(const bContext *C, ARegion *region)
     if ((panel.type->flag & PANEL_TYPE_INSTANCED) == 0) {
       continue;
     }
-    /* Make sure any active handler is removed from this panel or its children before deleting
+    /* Make sure any active handler is removed from this this panel or its children before deleting
      * them. */
     if (C != nullptr) {
       panel_exit_state_recursive(C, panel);
@@ -863,7 +879,7 @@ void panel_drawname_set(Panel *panel, StringRef name)
   panel->drawname = BLI_strdupn(name.data(), name.size());
 }
 
-static void offset_panel_block(Block *block)
+static void ui_offset_panel_block(Block *block)
 {
   const uiStyle *style = style_get_dpi();
 
@@ -1412,295 +1428,10 @@ bool panel_should_show_background(const ARegion *region, const PanelType *panel_
 /** \name Category Drawing (Tabs)
  * \{ */
 
-#define TABS_PADDING_BETWEEN_FACTOR 4.0f
-#define TABS_PADDING_TEXT_FACTOR 6.0f
-
 static constexpr const char *panel_category_tabs_block_name = "panel_category_tabs";
-
-static void panel_region_width_set(ARegion *region, const float aspect, int unscaled_size);
-
-static void expand_panel_region(bContext &C, ARegion *region)
-{
-  const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
-                       (BLI_rcti_size_y(&region->v2d.mask) + 1);
-  const bool too_narrow = BLI_rcti_size_x(&region->winrct) <=
-                          int((UI_PANEL_CATEGORY_MIN_WIDTH + PANEL_MIN_DRAW_WIDTH) * UI_SCALE_FAC /
-                              aspect);
-  if (!too_narrow) {
-    return;
-  }
-  /* Enlarge region. */
-  int new_width = region->runtime->type->prefsizex ? region->runtime->type->prefsizex : 250;
-
-  if (new_width < int(UI_PANEL_CATEGORY_MIN_WIDTH + PANEL_MIN_DRAW_WIDTH)) {
-    region->runtime->type->prefsizex = UI_SIDEBAR_PANEL_WIDTH;
-    new_width = UI_SIDEBAR_PANEL_WIDTH;
-  }
-
-  panel_region_width_set(region, aspect, new_width);
-  WM_event_add_notifier(&C, NC_SCREEN | NA_EDITED, nullptr);
-  ED_region_tag_redraw(region);
-  /* Reset scroll to the top (#38348). */
-  view2d_offset(&region->v2d, -1.0f, 1.0f);
-}
-
-static void expand_panel_region_on_category_change(bContext &C,
-                                                   StringRef category,
-                                                   StringRef active)
-{
-  ARegion *region = CTX_wm_region(&C);
-  if (category == active) {
-    return;
-  }
-  expand_panel_region(C, region);
-}
-
-void panel_category_tabs_draw_all(const bContext *C,
-                                  ARegion *region,
-                                  const char *category_id_active)
-{
-  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
-  View2D *v2d = &region->v2d;
-  const uiStyle *style = style_get();
-  const uiFontStyle *fstyle = &style->widget;
-  fontstyle_set(fstyle);
-  const int fontid = fstyle->uifont_id;
-  const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
-                       (BLI_rcti_size_y(&region->v2d.mask) + 1);
-  const float zoom = 1.0f / aspect;
-  const int px = U.pixelsize;
-  const int category_tabs_width = std::round(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
-  const float dpi_fac = UI_SCALE_FAC;
-  /* Padding of tabs around text. */
-  const int tab_v_pad_text = round_fl_to_int(TABS_PADDING_TEXT_FACTOR * dpi_fac * zoom) + 2 * px;
-  /* Padding between tabs. */
-  const int tab_v_pad = round_fl_to_int(TABS_PADDING_BETWEEN_FACTOR * dpi_fac * zoom);
-
-  /* Primary theme colors. */
-  uchar theme_col_back[4];
-  /* Draw the background. */
-  uchar theme_col_tab_bg[4];
-  theme::get_color_4ubv(TH_TAB_BACK, theme_col_tab_bg);
-  theme::get_color_4ubv(TH_BACK, theme_col_back);
-  const bool is_alpha = (region->overlap && (theme_col_back[3] != 255));
-
-  /* Draw background. */
-  if (!is_alpha || theme_col_tab_bg[3] != 0) {
-    uint pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
-    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-    if (is_alpha) {
-      GPU_blend(GPU_BLEND_ALPHA);
-      immUniformColor4ubv(theme_col_tab_bg);
-    }
-    else {
-      immUniformColor3ubv(theme_col_tab_bg);
-    }
-
-    if (is_left) {
-      immRectf(pos,
-               v2d->mask.xmin,
-               v2d->mask.ymin,
-               v2d->mask.xmin + category_tabs_width,
-               v2d->mask.ymax);
-    }
-    else {
-      immRectf(pos,
-               v2d->mask.xmax - category_tabs_width,
-               v2d->mask.ymin,
-               v2d->mask.xmax + 1,
-               v2d->mask.ymax);
-    }
-
-    if (is_alpha) {
-      GPU_blend(GPU_BLEND_NONE);
-    }
-
-    immUnbindProgram();
-  }
-  /* If the area is too small to show panels, then don't show any tabs as active. */
-  const bool too_narrow = BLI_rcti_size_x(&region->winrct) <
-                          int((UI_PANEL_CATEGORY_MIN_WIDTH + PANEL_MIN_DRAW_WIDTH) * UI_SCALE_FAC /
-                              aspect);
-  /* #widget_roundbox_set has this correction, keep in sync. */
-  const int align_pad = (!region->overlap && !is_left) ? px : 0;
-  /* Same for all tabs. */
-  const int rct_xmin = is_left ? (v2d->mask.xmin + 3) :
-                                 (v2d->mask.xmax - category_tabs_width + align_pad);
-  const int rct_xmax = is_left ? (v2d->mask.xmin + category_tabs_width) : (v2d->mask.xmax - 3);
-  /* NOTE: This block is created in window coordinates. */
-  Block *block = block_begin(C, region, panel_category_tabs_block_name, EmbossType::Emboss);
-
-  const int w = (rct_xmax - rct_xmin);
-
-  Layout &layout = block_layout(block,
-                                LayoutDirection::Vertical,
-                                LayoutType::VerticalBar,
-                                rct_xmin,
-                                v2d->mask.ymax - 1,
-                                w,
-                                0,
-                                0,
-                                ui::style_get_dpi());
-  Layout &col = layout.column(true);
-  col.alignment_set(LayoutAlign::Center);
-
-  uiDefBut(block, ButtonType::Sepr, "", 0, 0, w, tab_v_pad, nullptr, 0.0, 0.0, "");
-
-  const bool compact = U.uiflag2 & USER_UIFLAG2_PANEL_TABS_COMPACT;
-
-  /* Check the region type supports categories to avoid an assert
-   * for showing 3D view panels in the properties space. */
-  if (BKE_regiontype_uses_category_tabs(region->runtime->type)) {
-    BLI_assert(panel_category_is_visible(region));
-  }
-  float fstyle_points = fstyle->points;
-  fontscale(&fstyle_points, aspect);
-  BLF_size(fontid, fstyle_points * UI_SCALE_FAC);
-
-  PointerRNA ptr = RNA_pointer_create_discrete(
-      reinterpret_cast<ID *>(CTX_wm_screen(C)), RNA_Region, region);
-  PropertyRNA *prop = RNA_struct_find_property(&ptr, "active_panel_category");
-  for (auto [i, pc_dyn] : region->runtime->panels_category.enumerate()) {
-    Button *button = nullptr;
-    const char *category_id = pc_dyn.idname;
-    const char *category_id_draw = IFACE_(category_id);
-    const int category_width = round_fl_to_int(
-        compact ? 0 : BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
-
-    const int h = compact ? w + align_pad : category_width + tab_v_pad_text * 2;
-
-    if (compact && pc_dyn.icon != ICON_NONE) {
-      button = uiDefIconButR_prop(
-          block, ButtonType::Tab, pc_dyn.icon, 0, 0, w, h, &ptr, prop, -1, 0, i, nullptr);
-    }
-    else {
-      std::string title = category_id_draw;
-      if (compact) {
-        size_t category_draw_len = BLF_DRAW_STR_DUMMY_MAX;
-
-        int char_offset1 = BLI_str_utf8_offset_from_index(category_id_draw, category_draw_len, 1);
-        if (char_offset1 > 2) {
-          /* Only a single complex character, symbol, or emoji. */
-          title = std::string(category_id_draw, char_offset1);
-        }
-        else {
-          int char_offset2 = BLI_str_utf8_offset_from_index(
-              category_id_draw, category_draw_len, 2);
-          char *space = BLI_strcasestr(category_id_draw, " ");
-          if (char_offset2 == 2 && isupper(category_id_draw[1])) {
-            /* First two characters are Latin with second uppercase. */
-            title = std::string(category_id_draw, char_offset2);
-          }
-          else if (space && category_draw_len > (space - category_id_draw)) {
-            /* First characters from each of the first two words. */
-            title = std::string(category_id_draw, char_offset1) + std::string(space + 1, 1);
-          }
-          else {
-            /* First two characters of a single word. */
-            title = std::string(category_id_draw, char_offset2);
-          }
-        }
-      }
-      button = uiDefIconTextButR_prop(
-          block, ButtonType::Tab, ICON_NONE, title, 0, 0, w, h, &ptr, prop, -1, 0, i, nullptr);
-      button->text_direction = compact ? TextDirection::Default :
-                                         (is_left ? TextDirection::Up : TextDirection::Down);
-    }
-    button->flag |= ui::BUT_DRAG_LOCK_X;
-    if (compact) {
-      button_func_quick_tooltip_set(
-          button, [category = std::string(category_id)](const blender::ui::Button * /*but*/) {
-            return TIP_(category);
-          });
-      /* Avoid default enum button tooltip for `RNA_Region::active_panel_category`. */
-      button_func_tooltip_custom_set_cpp(
-          *button, [category = std::string(category_id)](bContext & /*C*/, ui::TooltipData &data) {
-            tooltip_text_field_add(
-                data, TIP_(category), {}, TIP_STYLE_HEADER, TIP_LC_NORMAL, false);
-          });
-    }
-    else {
-      /* Avoid default enum button tooltip for `RNA_Region::active_panel_category`. */
-      button_drawflag_enable(button, BUT_NO_TOOLTIP);
-    }
-    button_func_set(button,
-                    [category = std::string(category_id),
-                     active = std::string(category_id_active)](bContext &C) -> void {
-                      expand_panel_region_on_category_change(C, category, active);
-                    });
-    button_func_pushed_state_set(
-        button,
-        [category = std::string(category_id),
-         active = std::string(category_id_active),
-         too_narrow](const Button &) -> bool { return category == active && !too_narrow; });
-    if (pc_dyn.next) {
-      uiDefBut(block, ButtonType::Sepr, "", 0, 0, w, tab_v_pad, nullptr, 0.0, 0.0, "");
-    }
-  }
-  uiDefBut(block, ButtonType::Sepr, "", 0, 0, w, tab_v_pad, nullptr, 0.0, 0.0, "");
-
-  const int2 co = block_layout_resolve(block);
-  const int max_scroll = std::max(-co.y, 0);
-  const int scroll = std::clamp(region->category_scroll, 0, max_scroll);
-  region->category_scroll = scroll;
-  block_end(C, block);
-  block->aspect = aspect;
-
-  block_translate(block, 0, region->category_scroll);
-
-  /* Align buttons the panel content when region overlap is disabled. */
-  if (!is_alpha) {
-    for (Button &button : block->buttons()) {
-      button.drawflag |= is_left ? BUT_ALIGN_RIGHT : BUT_ALIGN_LEFT;
-    }
-  }
-
-  block_draw(C, block);
-
-  /* Avoid buttons being aligned to the region on redraws. */
-  for (Button &button : block->buttons()) {
-    button.drawflag &= ~BUT_ALIGN_ALL;
-  }
-}
-
-#undef TABS_PADDING_BETWEEN_FACTOR
-#undef TABS_PADDING_TEXT_FACTOR
 
 /** \} */
 
-static int panel_category_show_active_tab(const bContext &C, ARegion *region, const int mval[2])
-{
-  if (!ED_region_panel_category_gutter_isect_xy(region, mval)) {
-    return WM_UI_HANDLER_CONTINUE;
-  }
-
-  BLI_assert(BKE_regiontype_uses_category_tabs(region->runtime->type));
-
-  const View2D *v2d = &region->v2d;
-  const Block *block = region->runtime->block_name_map.lookup_as(panel_category_tabs_block_name);
-  if (!block) {
-    return WM_UI_HANDLER_BREAK;
-  }
-  PointerRNA ptr = RNA_pointer_create_discrete(
-      reinterpret_cast<ID *>(CTX_wm_screen(&C)), RNA_Region, region);
-  PropertyRNA *prop = RNA_struct_find_property(&ptr, "active_panel_category");
-  for (auto [i, pc_dyn] : region->runtime->panels_category.enumerate()) {
-    const bool is_active = STREQ(pc_dyn.idname, region->runtime->category);
-    if (!is_active) {
-      continue;
-    }
-    for (Button &button : block->buttons()) {
-      if (button.rnapoin.data == region && button.rnaprop == prop && button.hardmax == i) {
-        region->category_scroll = -(button.rect.ymax - region->category_scroll - v2d->mask.ymax);
-        break;
-      }
-    }
-    break;
-  }
-  ED_region_tag_redraw(region);
-  return WM_UI_HANDLER_BREAK;
-}
 /* -------------------------------------------------------------------- */
 /** \name Panel Alignment
  * \{ */
@@ -1895,7 +1626,7 @@ static bool uiAlignPanelStep(ARegion *region, const float factor, const bool dra
   return changed;
 }
 
-static void panels_size(ARegion *region, int *r_x, int *r_y)
+static void ui_panels_size(ARegion *region, int *r_x, int *r_y)
 {
   int sizex = 0;
   int sizey = 0;
@@ -1931,7 +1662,7 @@ static void panels_size(ARegion *region, int *r_x, int *r_y)
   *r_y = sizey;
 }
 
-static void do_animate(bContext *C, Panel *panel)
+static void ui_do_animate(bContext *C, Panel *panel)
 {
   HandlePanelData *data = static_cast<HandlePanelData *>(panel->activedata);
   ARegion *region = CTX_wm_region(C);
@@ -2009,7 +1740,7 @@ void panels_end(const bContext *C, ARegion *region, int *r_x, int *r_y)
   /* Offset contents. */
   for (Block &block : region->runtime->uiblocks) {
     if (block.active && block.panel) {
-      offset_panel_block(&block);
+      ui_offset_panel_block(&block);
 
       /* Update bounds for all "views" in this block. Usually this is done in #block_end(), but
        * that wouldn't work because of the offset applied above. */
@@ -2029,7 +1760,7 @@ void panels_end(const bContext *C, ARegion *region, int *r_x, int *r_y)
   }
 
   /* Compute size taken up by panels. */
-  panels_size(region, r_x, r_y);
+  ui_panels_size(region, r_x, r_y);
 }
 
 /** \} */
@@ -2039,7 +1770,7 @@ void panels_end(const bContext *C, ARegion *region, int *r_x, int *r_y)
  * \{ */
 
 #define DRAG_REGION_PAD (PNL_HEADER * 0.5)
-static void do_drag(const bContext *C, const wmEvent *event, Panel *panel)
+static void ui_do_drag(const bContext *C, const wmEvent *event, Panel *panel)
 {
   HandlePanelData *data = static_cast<HandlePanelData *>(panel->activedata);
   ARegion *region = CTX_wm_region(C);
@@ -2079,10 +1810,90 @@ LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int
   return nullptr;
 }
 
-static PanelMouseState panel_mouse_state_get(const Block *block,
-                                             const Panel *panel,
-                                             const int mx,
-                                             const int my)
+Vector<CategoryTagUIRecord> get_tags_for_category_ui(const wmWindowManager *wm,
+                                                     const char *category,
+                                                     uint32_t filter_mode_flag,
+                                                     int space_type)
+{
+  Vector<CategoryTagUIRecord> records;
+  if (wm == nullptr || category == nullptr) {
+    return records;
+  }
+
+  if (!category_tag_list_is_valid(&wm->category_tags)) {
+    return records;
+  }
+
+  const char *tags_string = category_tags_string_lookup(wm, category, space_type);
+
+  /* Build the visible tags as typed records consumed directly by the edit dialog. An empty
+   * result means "no tags" (callers gate the Tags UI on that). */
+  for (const CategoryTagDef *tag = static_cast<const CategoryTagDef *>(wm->category_tags.first); tag;
+       tag = static_cast<const CategoryTagDef *>(tag->next))
+  {
+    if (tag->name[0] == '\0') {
+      continue;
+    }
+
+    /* Apply filter logic:
+     * - filter_mode_flag == 0: show all tags
+     * - otherwise: show tags for selected mode + tags marked for all modes (mode_flags == 0)
+     */
+    bool include_tag = false;
+
+    if (filter_mode_flag == 0) {
+      /* Show all tags. */
+      include_tag = true;
+    }
+    else {
+      /* Show tags for selected mode or all modes. */
+      include_tag = (tag->mode_flags == 0) || (tag->mode_flags & filter_mode_flag);
+    }
+
+    if (!include_tag) {
+      continue;
+    }
+
+    const bool is_active = category_has_tag(tags_string, tag->name);
+
+    char glyph_utf8[8] = "";
+    const char *glyph_out = "";
+    if (tag->glyph[0] != '\0') {
+      if (tag_glyph_hex_to_utf8(tag->glyph, glyph_utf8)) {
+        glyph_out = glyph_utf8;
+      }
+      else {
+        glyph_out = tag->glyph;
+      }
+    }
+
+    int icon_id = ICON_NONE;
+    if (tag->icon_source == 1 && tag->icon_key[0] != '\0') {
+      icon_id = category_tab_icon_id_resolve_from_key_path(tag->icon_key, nullptr);
+    }
+
+    CategoryTagUIRecord record{};
+    BLI_strncpy(record.name, tag->name, sizeof(record.name));
+    BLI_strncpy(record.glyph, glyph_out, sizeof(record.glyph));
+    record.is_active = is_active ? 1 : 0;
+    record.color[0] = tag->color[0];
+    record.color[1] = tag->color[1];
+    record.color[2] = tag->color[2];
+    /* Mirror the previous "non-black" test the consumer used to derive `has_color`. */
+    record.has_color = (record.color[0] > 0.001f || record.color[1] > 0.001f ||
+                        record.color[2] > 0.001f);
+    record.icon_id = icon_id;
+    record.icon_source = tag->icon_source;
+    records.append(record);
+  }
+
+  return records;
+}
+
+static PanelMouseState ui_panel_mouse_state_get(const Block *block,
+                                                const Panel *panel,
+                                                const int mx,
+                                                const int my)
 {
   if (!IN_RANGE(float(mx), block->rect.xmin, block->rect.xmax)) {
     return PANEL_MOUSE_OUTSIDE;
@@ -2109,15 +1920,15 @@ struct PanelDragCollapseHandle {
   int xy_init[2];
 };
 
-static void panel_drag_collapse_handler_remove(bContext * /*C*/, void *userdata)
+static void ui_panel_drag_collapse_handler_remove(bContext * /*C*/, void *userdata)
 {
   PanelDragCollapseHandle *dragcol_data = static_cast<PanelDragCollapseHandle *>(userdata);
   MEM_delete(dragcol_data);
 }
 
-static void panel_drag_collapse(const bContext *C,
-                                const PanelDragCollapseHandle *dragcol_data,
-                                const int xy_dst[2])
+static void ui_panel_drag_collapse(const bContext *C,
+                                   const PanelDragCollapseHandle *dragcol_data,
+                                   const int xy_dst[2])
 {
   ARegion *region = CTX_wm_region_popup(C);
   if (!region) {
@@ -2188,7 +1999,7 @@ static void panel_drag_collapse(const bContext *C,
  * that was first dragged over. If it was open all affected panels including the initial
  * one are closed and vice versa.
  */
-static int panel_drag_collapse_handler(bContext *C, const wmEvent *event, void *userdata)
+static int ui_panel_drag_collapse_handler(bContext *C, const wmEvent *event, void *userdata)
 {
   wmWindow *win = CTX_wm_window(C);
   PanelDragCollapseHandle *dragcol_data = static_cast<PanelDragCollapseHandle *>(userdata);
@@ -2196,7 +2007,7 @@ static int panel_drag_collapse_handler(bContext *C, const wmEvent *event, void *
 
   switch (event->type) {
     case MOUSEMOVE:
-      panel_drag_collapse(C, dragcol_data, event->xy);
+      ui_panel_drag_collapse(C, dragcol_data, event->xy);
 
       retval = WM_UI_HANDLER_BREAK;
       break;
@@ -2204,11 +2015,11 @@ static int panel_drag_collapse_handler(bContext *C, const wmEvent *event, void *
       if (event->val == KM_RELEASE) {
         /* Done! */
         WM_event_remove_ui_handler(&win->runtime->modalhandlers,
-                                   panel_drag_collapse_handler,
-                                   panel_drag_collapse_handler_remove,
+                                   ui_panel_drag_collapse_handler,
+                                   ui_panel_drag_collapse_handler_remove,
                                    dragcol_data,
                                    true);
-        panel_drag_collapse_handler_remove(C, dragcol_data);
+        ui_panel_drag_collapse_handler_remove(C, dragcol_data);
       }
       /* Don't let any left-mouse event fall through! */
       retval = WM_UI_HANDLER_BREAK;
@@ -2232,13 +2043,13 @@ void panel_drag_collapse_handler_add(const bContext *C, const bool was_open)
 
   WM_event_add_ui_handler(C,
                           &win->runtime->modalhandlers,
-                          panel_drag_collapse_handler,
-                          panel_drag_collapse_handler_remove,
+                          ui_panel_drag_collapse_handler,
+                          ui_panel_drag_collapse_handler_remove,
                           dragcol_data,
                           eWM_EventHandlerFlag(0));
 }
 
-bool layout_panel_toggle_open(const bContext *C, LayoutPanelHeader *header)
+bool ui_layout_panel_toggle_open(const bContext *C, LayoutPanelHeader *header)
 {
   const bool is_open = RNA_boolean_get(&header->open_owner_ptr, header->open_prop_name.c_str());
   RNA_boolean_set(&header->open_owner_ptr, header->open_prop_name.c_str(), !is_open);
@@ -2249,7 +2060,7 @@ bool layout_panel_toggle_open(const bContext *C, LayoutPanelHeader *header)
   return !is_open;
 }
 
-static void handle_layout_panel_header(
+static void ui_handle_layout_panel_header(
     bContext *C, const Block *block, const int /*mx*/, const int my, const int event_type)
 {
   Panel *panel = block->panel;
@@ -2259,7 +2070,7 @@ static void handle_layout_panel_header(
   if (header == nullptr) {
     return;
   }
-  const bool new_state = layout_panel_toggle_open(C, header);
+  const bool new_state = ui_layout_panel_toggle_open(C, header);
   ED_region_tag_redraw(CTX_wm_region(C));
   WM_tooltip_clear(C, CTX_wm_window(C));
 
@@ -2274,12 +2085,12 @@ static void handle_layout_panel_header(
  *
  * \param mx: The mouse x coordinate, in panel space.
  */
-static void handle_panel_header(const bContext *C,
-                                const Block *block,
-                                const int mx,
-                                const int event_type,
-                                const bool ctrl,
-                                const bool shift)
+static void ui_handle_panel_header(const bContext *C,
+                                   const Block *block,
+                                   const int mx,
+                                   const int event_type,
+                                   const bool ctrl,
+                                   const bool shift)
 {
   Panel *panel = block->panel;
   ARegion *region = CTX_wm_region(C);
@@ -2402,7 +2213,7 @@ PanelCategoryStack *panel_category_active_find(ARegion *region, const char *idna
       &region->panels_category_active, idname, offsetof(PanelCategoryStack, idname)));
 }
 
-static void panel_category_active_set(ARegion *region, const char *idname, bool fallback)
+static void ui_panel_category_active_set(ARegion *region, const char *idname, bool fallback)
 {
   ListBaseT<PanelCategoryStack> *lb = &region->panels_category_active;
   PanelCategoryStack *pc_act = panel_category_active_find(region, idname);
@@ -2445,7 +2256,7 @@ static void panel_category_active_set(ARegion *region, const char *idname, bool 
 
 void panel_category_active_set(ARegion *region, const char *idname)
 {
-  panel_category_active_set(region, idname, false);
+  ui_panel_category_active_set(region, idname, false);
 }
 
 void panel_category_index_active_set(ARegion *region, const int index)
@@ -2456,13 +2267,13 @@ void panel_category_index_active_set(ARegion *region, const int index)
     return;
   }
 
-  panel_category_active_set(region, pc_dyn->idname, false);
+  ui_panel_category_active_set(region, pc_dyn->idname, false);
 }
 
 void panel_category_active_set_default(ARegion *region, const char *idname)
 {
   if (!panel_category_active_find(region, idname)) {
-    panel_category_active_set(region, idname, true);
+    ui_panel_category_active_set(region, idname, true);
   }
 }
 
@@ -2478,12 +2289,442 @@ const char *panel_category_active_get(ARegion *region, bool set_fallback)
     PanelCategoryDyn *pc_dyn = static_cast<PanelCategoryDyn *>(
         region->runtime->panels_category.first);
     if (pc_dyn) {
-      panel_category_active_set(region, pc_dyn->idname, true);
+      ui_panel_category_active_set(region, pc_dyn->idname, true);
       return pc_dyn->idname;
     }
   }
 
   return nullptr;
+}
+
+static PanelCategoryDyn *panel_categories_find_mouse_over(ARegion *region, const wmEvent *event)
+{
+  BLI_assert(BKE_regiontype_uses_category_tabs(region->runtime->type));
+
+  for (PanelCategoryDyn &ptd : region->runtime->panels_category) {
+    if (BLI_rcti_isect_pt(&ptd.rect, event->mval[0], event->mval[1])) {
+      return &ptd;
+    }
+  }
+
+  return nullptr;
+}
+
+bool panel_category_is_mouse_over(ARegion *region, const wmEvent *event)
+{
+  if (!panel_category_tabs_is_visible(region)) {
+    return false;
+  }
+  return panel_categories_find_mouse_over(region, event) != nullptr;
+}
+
+bool panel_category_tabs_settings_contains(ARegion *region, const int mval[2])
+{
+  if (!panel_category_tabs_is_visible(region)) {
+    return false;
+  }
+
+  const rcti *rct = &region->runtime->category_tabs_settings_rect;
+
+  /* Check if mval is inside the settings button rect. */
+  return BLI_rcti_isect_pt(rct, mval[0], mval[1]);
+}
+
+void panel_category_tabs_settings_popover_open(bContext *C, ARegion *region)
+{
+  /* Store click time for hover reset timeout. */
+  region->runtime->category_tabs_settings_click_time = BLI_time_now_seconds();
+
+  wmWindow *win = CTX_wm_window(C);
+  if (!win || !win->runtime->eventstate) {
+    WM_operator_name_call(C, "VIEW3D_OT_category_tabs_settings", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
+    return;
+  }
+
+  /* Determine if tabs are on the left or right side of the region. */
+  const bool is_left = (RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT);
+
+  /* Popup width is 240 pixels (set in Python operator), convert with scale. */
+  const int popup_width = 240 * UI_SCALE_FAC;
+  /* Add extra margin for spacing. */
+  const int popup_margin = 10 * UI_SCALE_FAC;
+
+  /* Position popup next to the settings button. */
+  int popup_x;
+  if (is_left) {
+    /* Tabs on left side: position popup to the right of the settings button. */
+    popup_x = region->winrct.xmin + region->runtime->category_tabs_settings_rect.xmax + popup_margin;
+  }
+  else {
+    /* Tabs on right side: position popup to the left of the settings button. */
+    popup_x = region->winrct.xmin + region->runtime->category_tabs_settings_rect.xmin - popup_width - popup_margin;
+  }
+
+  /* Use vertical center of settings button for Y position. */
+  const int button_center_y = region->winrct.ymin +
+                               (region->runtime->category_tabs_settings_rect.ymin +
+                                region->runtime->category_tabs_settings_rect.ymax) / 2;
+
+  /* Save original mouse position. */
+  int orig_xy[2];
+  copy_v2_v2_int(orig_xy, win->runtime->eventstate->xy);
+
+  /* Also need to update eventstate->mval which is local to region! */
+  wmEvent *event = win->runtime->eventstate;
+  int orig_mval[2] = {event->mval[0], event->mval[1]};
+
+  /* Calculate local mval coordinates for popup positioning. */
+  event->mval[0] = popup_x - region->winrct.xmin;
+  event->mval[1] = button_center_y - region->winrct.ymin;
+
+  /* Set mouse position to the left of all tabs for popup positioning. */
+  win->runtime->eventstate->xy[0] = popup_x;
+  win->runtime->eventstate->xy[1] = button_center_y;
+
+  /* Invoke the Python operator which shows the settings popup. */
+  WM_operator_name_call(C, "VIEW3D_OT_category_tabs_settings", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
+
+  /* Restore original mouse position. */
+  copy_v2_v2_int(win->runtime->eventstate->xy, orig_xy);
+  event->mval[0] = orig_mval[0];
+  event->mval[1] = orig_mval[1];
+}
+
+static ARegion *ui_panel_category_tooltip_init(
+    bContext *C, ARegion *region, int * /*pass*/, double * /*r_pass_delay*/, bool *r_exit_on_event)
+{
+  *r_exit_on_event = true;
+
+  wmWindow *win = CTX_wm_window(C);
+  const wmEvent *event = win->runtime->eventstate;
+
+  if (!region) {
+    return nullptr;
+  }
+
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm && !BLI_listbase_is_empty(&wm->runtime->drags)) {
+    for (const wmDrag &drag : wm->runtime->drags) {
+      if (drag.type == WM_DRAG_PATH) {
+        const char *path = WM_drag_get_single_path(&drag);
+        if (path && BLI_path_extension_check_n(path, ".zip", ".blend_extension", nullptr)) {
+          return nullptr;
+        }
+      }
+      else if (drag.type == WM_DRAG_STRING) {
+        const std::string &str = WM_drag_get_string(&drag);
+        if (str.empty()) {
+          continue;
+        }
+        const char *cstr = str.c_str();
+        if (BKE_preferences_remote_scheme_end(cstr) == 0) {
+          continue;
+        }
+        if (str.find('\n') != std::string::npos) {
+          continue;
+        }
+        std::string str_strip;
+        const char *cstr_maybe_copy = cstr;
+        size_t param_char = str.find('?');
+        if (param_char != std::string::npos) {
+          str_strip = str.substr(0, param_char);
+          cstr_maybe_copy = str_strip.c_str();
+        }
+        const char *cstr_ext = BLI_path_extension(cstr_maybe_copy);
+        if (cstr_ext && STRCASEEQ(cstr_ext, ".zip")) {
+          return nullptr;
+        }
+        if (BKE_preferences_extension_repo_find_by_remote_url_prefix(&U, cstr, true)) {
+          return nullptr;
+        }
+      }
+    }
+  }
+
+  /* Get display mode from preferences.
+   * In TEXT_ONLY mode the category name is already visible, so don't show tooltips.
+   * In GLYPHS_ONLY and GLYPHS_TEXT (Mixed) modes, tooltips are useful. */
+  const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(
+      CTX_wm_area(C));
+
+  if (display_mode == USER_CATEGORY_TABS_TEXT_ONLY) {
+    return nullptr;
+  }
+
+  /* Calculate mval from screen coordinates. */
+  int mval[2];
+  mval[0] = event->xy[0] - region->winrct.xmin;
+  mval[1] = event->xy[1] - region->winrct.ymin;
+
+  /* Determine if tabs are on the left or right side. */
+  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+
+  /* Get window manager for category display name lookup. */
+  wm = CTX_wm_manager(C);
+
+  /* Find the category tab under the mouse. */
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (BLI_rcti_isect_pt(&pc_dyn.rect, mval[0], mval[1])) {
+      const char *category_idname = pc_dyn.idname;
+
+      std::string tooltip_text;
+
+      if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY ||
+          display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT)
+      {
+        /* In GLYPHS_ONLY and GLYPHS_TEXT modes, show the category display name from mappings,
+         * or the category name itself if not configured in mappings.
+         * For categories not in mappings, panel label is used as fallback
+         * (handles special cases like "Script 3" where category name is a glyph). */
+        const char *category_display_name = panel_category_tooltip_name_get(region, wm, category_idname);
+        tooltip_text = IFACE_(category_display_name);
+      }
+      else {
+        /* In TEXT_ONLY mode, collect panel names in this category. */
+        Vector<std::string> panel_names;
+        for (const Panel &panel : region->panels) {
+          if (panel.type && STREQ(panel.type->category, category_idname)) {
+            const char *label = CTX_IFACE_(panel.type->translation_context, panel.type->label);
+            if (label && label[0]) {
+              panel_names.append(label);
+            }
+          }
+        }
+
+        if (!panel_names.is_empty()) {
+          /* Join panel names with commas. */
+          tooltip_text = panel_names[0];
+          for (int i = 1; i < panel_names.size(); i++) {
+            tooltip_text += ", " + panel_names[i];
+          }
+        }
+        else {
+          /* Fallback to category name if no panels found. */
+          const char *category_display_name = panel_category_tooltip_name_get(region, wm, category_idname);
+          tooltip_text = IFACE_(category_display_name);
+        }
+      }
+
+      /* Position tooltip to avoid overlapping the tab.
+       * Convert tab rect from region-local to screen coordinates.
+       * Use mouse Y position for the rect to keep tooltip aligned with cursor vertically. */
+      rcti tab_rect_screen;
+      tab_rect_screen.xmin = region->winrct.xmin + pc_dyn.rect.xmin;
+      tab_rect_screen.xmax = region->winrct.xmin + pc_dyn.rect.xmax;
+      /* Use mouse Y position to keep tooltip vertically aligned with cursor. */
+      tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
+      tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
+
+      /* Account for visual effect expansion when hovering over a tab.
+       * When visual effect is enabled and the tab is hovered, it expands
+       * horizontally, so the tooltip needs extra offset to avoid overlap.
+       * We must expand tab_rect_screen because ui_tooltip_create_with_data
+       * uses init_rect_overlap to calculate tooltip position. */
+      if (U.category_tabs_visual_effect) {
+        const int tab_width = pc_dyn.rect.xmax - pc_dyn.rect.xmin;
+        const int extra_width = round_fl_to_int(tab_width * (UI_TABS_VISUAL_EFFECT_SCALE - 1.0f));
+        const int available_extra_width = is_left ?
+                                              std::max(region->winrct.xmax - tab_rect_screen.xmax, 0) :
+                                              std::max(tab_rect_screen.xmin - region->winrct.xmin, 0);
+        const int applied_extra_width = std::min(extra_width, available_extra_width);
+        if (is_left) {
+          /* Tab expands to the right when hovered. */
+          tab_rect_screen.xmax += applied_extra_width;
+        }
+        else {
+          /* Tab expands to the left when hovered. */
+          tab_rect_screen.xmin -= applied_extra_width;
+        }
+      }
+
+      int position[2];
+      if (is_left) {
+        /* Tabs on left side: position tooltip to the right of tabs. */
+        position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN;
+      }
+      else {
+        /* Tabs on right side: position tooltip to the left of tabs. */
+        position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN;
+      }
+      position[1] = event->xy[1];
+
+      /* Use init_rect_overlap to ensure tooltip doesn't overlap the tab.
+       * For tabs on right side, prefer left side positioning first. */
+      const bool prefer_left = !is_left;
+      return tooltip_create_from_text(
+          C, tooltip_text.c_str(), position, &tab_rect_screen, prefer_left);
+    }
+  }
+
+  /* Check if mouse is over the settings button. */
+  const rcti *settings_rct = &region->runtime->category_tabs_settings_rect;
+  if (BLI_rcti_isect_pt(settings_rct, mval[0], mval[1])) {
+    /* Show tooltip for settings button. */
+    const char *tooltip_text = IFACE_("Display Mode Settings");
+
+    /* Position tooltip to avoid overlapping the button.
+     * Convert button rect from region-local to screen coordinates. */
+    rcti settings_rect_screen;
+    settings_rect_screen.xmin = region->winrct.xmin + settings_rct->xmin;
+    settings_rect_screen.xmax = region->winrct.xmin + settings_rct->xmax;
+    settings_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
+    settings_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
+
+    int position[2];
+    if (is_left) {
+      /* Tabs on left side: position tooltip to the right of button. */
+      position[0] = settings_rect_screen.xmax + UI_POPUP_MARGIN;
+    }
+    else {
+      /* Tabs on right side: position tooltip to the left of button. */
+      position[0] = settings_rect_screen.xmin - UI_POPUP_MARGIN;
+    }
+    position[1] = event->xy[1];
+
+    const bool prefer_left = !is_left;
+    return tooltip_create_from_text(
+        C, tooltip_text, position, &settings_rect_screen, prefer_left);
+  }
+
+  return nullptr;
+}
+
+static ARegion *ui_panel_category_active_tooltip_init(
+    bContext *C, ARegion *region, int *pass, double *r_pass_delay, bool *r_exit_on_event)
+{
+  *r_exit_on_event = true;
+
+  if (*pass == 1) {
+    return nullptr; /* Hide after delay. */
+  }
+
+  /* pass == 0 */
+  *pass = 1;
+  *r_pass_delay = 2.0; /* Hide after 2 seconds. */
+
+  if (region == nullptr) {
+    return nullptr;
+  }
+
+  const char *category_idname = panel_category_active_get(region, false);
+  if (category_idname == nullptr) {
+    return nullptr;
+  }
+
+  /* Get window manager for category display name lookup. */
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  /* In GLYPHS_ONLY mode, show the category display name from mappings,
+   * or the category name itself if not configured in mappings.
+   * This matches the behavior of hover tooltips. */
+  const char *category_display_name = panel_category_tooltip_name_get(region, wm, category_idname);
+  const char *tooltip_prefix = IFACE_("Active tab: ");
+  const char *tooltip_suffix = IFACE_(category_display_name);
+
+  wmWindow *win = CTX_wm_window(C);
+  const wmEvent *event = win->runtime->eventstate;
+
+  /* Find the category tab for the active category. */
+  const PanelCategoryDyn *pc_dyn = panel_category_find(region, category_idname);
+  
+  rcti tab_rect_screen;
+  bool use_tab_rect = false;
+
+  int position[2];
+
+  if (pc_dyn) {
+      tab_rect_screen.xmin = region->winrct.xmin + pc_dyn->rect.xmin;
+      tab_rect_screen.xmax = region->winrct.xmin + pc_dyn->rect.xmax;
+      tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
+      tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
+
+      const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+
+
+      if (is_left) {
+        tab_rect_screen.xmax += 8;
+        position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN / 4;
+      }
+      else {
+        tab_rect_screen.xmin -= 8;
+        position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN / 4;
+      }
+      position[1] = event->xy[1];
+      use_tab_rect = true;
+  } else {
+      position[0] = event->xy[0];
+      position[1] = event->xy[1] - UI_POPUP_MARGIN / 4;
+  }
+
+  /* Tooltip always follows cursor Y position. */
+
+  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+  const bool prefer_left = !is_left;
+
+  const uiStyle *style = style_get();
+  uiFontStyle fstyle = style->tooltip;
+  fontstyle_set(&fstyle);
+  BLF_size(fstyle.uifont_id, fstyle.points * UI_SCALE_FAC);
+  const int font_id = fstyle.uifont_id;
+
+  int max_text_width = 0;
+  for (const PanelCategoryDyn &pc_dyn_it : region->runtime->panels_category) {
+    /* Use display name (without glyphs) for width calculation,
+     * matching the tooltip text behavior. */
+    const char *category_display_name_it = panel_category_tooltip_name_get(
+        region, wm, pc_dyn_it.idname);
+    const std::string text_it = std::string("Active tab: ") + IFACE_(category_display_name_it);
+    ResultBLF info = {0};
+    const int text_width = BLF_width(font_id, text_it.c_str(), text_it.size(), &info);
+    max_text_width = max_ii(max_text_width, text_width);
+  }
+
+  const int lineh = BLF_height_max(font_id);
+  int min_width = max_text_width + int(round(lineh * 1.95f));
+
+  /* When panels are expanded, match tooltip width to the panel content area width. */
+  {
+    ScrArea *area = CTX_wm_area(C);
+    if (area) {
+      const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
+      const float category_tabs_zoom = category_tabs_zoom_value_get(area, display_mode);
+      const float raw_aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
+                               1.0f :
+                               (static_cast<Block *>(region->runtime->uiblocks.first))->aspect;
+      const float aspect = (std::abs(raw_aspect - 1.0f) < 0.001f) ? 1.0f : raw_aspect;
+      const float zoom = (1.0f / aspect) * category_tabs_zoom;
+      const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
+      const int category_tabs_min_w = category_tabs_min_width_get(area, aspect, display_mode);
+      const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_w;
+
+      if (!too_narrow) {
+        const int panel_content_width = region->winx - category_tabs_width - 2 * UI_PANEL_MARGIN_X;
+        min_width = max_ii(min_width, panel_content_width);
+      }
+    }
+  }
+
+  return tooltip_create_from_text_with_colored_suffix_fixed_width(C,
+                                                                 tooltip_prefix,
+                                                                 tooltip_suffix,
+                                                                 TIP_LC_ACTIVE,
+                                                                 position,
+                                                                 use_tab_rect ? &tab_rect_screen : nullptr,
+                                                                 prefer_left,
+                                                                 min_width,
+                                                                 true,
+                                                                 1.5f);
+}
+
+void panel_category_tooltip_timer_init(bContext *C, ARegion *region)
+{
+  wmWindow *win = CTX_wm_window(C);
+  ScrArea *area = CTX_wm_area(C);
+
+  if ((U.flag & USER_TOOLTIPS) == 0) {
+    return;
+  }
+
+  WM_tooltip_timer_init(C, win, area, region, ui_panel_category_tooltip_init);
 }
 
 void panel_category_add(ARegion *region, const char *name, int icon)
@@ -2532,9 +2773,25 @@ static bool panel_categories_tab_is_mouse_over(ARegion *region, const wmEvent *e
   return BLI_rcti_isect_pt(&rect, event->mval[0], event->mval[1]);
 }
 
-static int handle_panel_category_cycling(const wmEvent *event,
-                                         ARegion *region,
-                                         const Button *active_but)
+/**
+ * Handle tab cycling with Ctrl+MouseWheel or Ctrl+Tab.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * TAB CYCLING BEHAVIOR
+ * ─────────────────────────────────────────────────────────────────────────────
+ * - Cycles through VISIBLE categories only (respects tag filtering)
+ * - Stops at first/last visible category (no wrapping)
+ * - Skips hidden categories (filtered by panel_category_is_visible_by_tags)
+ *
+ * Controls:
+ * - Ctrl+WheelDown / Ctrl+Tab: next category
+ * - Ctrl+WheelUp / Ctrl+Shift+Tab: previous category
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+static int ui_handle_panel_category_cycling(bContext *C,
+                                            const wmEvent *event,
+                                            ARegion *region,
+                                            const Button *active_but)
 {
   BLI_assert(BKE_regiontype_uses_category_tabs(region->runtime->type));
 
@@ -2552,29 +2809,42 @@ static int handle_panel_category_cycling(const wmEvent *event,
   else {
     const char *category = panel_category_active_get(region, false);
     if (LIKELY(category)) {
-      PanelCategoryDyn *pc_dyn = panel_category_find(region, category);
-      /* Cyclic behavior between categories
-       * using Ctrl+Tab (+Shift for backwards) or Ctrl+Wheel Up/Down. */
-      if (LIKELY(pc_dyn) && (event->modifier & KM_CTRL)) {
-        if (is_mousewheel) {
-          /* We can probably get rid of this and only allow Ctrl-Tabbing. */
-          pc_dyn = (event->type == WHEELDOWNMOUSE) ? pc_dyn->next : pc_dyn->prev;
-        }
-        else {
-          const bool backwards = event->modifier & KM_SHIFT;
-          pc_dyn = backwards ? pc_dyn->prev : pc_dyn->next;
-          if (!pc_dyn) {
-            /* Proper cyclic behavior, back to first/last category (only used for ctrl+tab). */
-            pc_dyn = backwards ?
-                         static_cast<PanelCategoryDyn *>(region->runtime->panels_category.last) :
-                         static_cast<PanelCategoryDyn *>(region->runtime->panels_category.first);
+      if (event->modifier & KM_CTRL) {
+        const bool backwards = is_mousewheel ? (event->type == WHEELUPMOUSE) :
+                                               (event->modifier & KM_SHIFT);
+
+        /* Get categories in custom order (respects user's reorder from drag & drop). */
+        Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
+
+        /* Find current category index in the ordered list. */
+        int current_index = -1;
+        for (int i = 0; i < ordered_categories.size(); i++) {
+          if (STREQ(ordered_categories[i]->idname, category)) {
+            current_index = i;
+            break;
           }
         }
 
-        if (pc_dyn) {
-          /* Intentionally don't reset scroll in this case,
-           * allowing for quick browsing between tabs. */
-          panel_category_active_set(region, pc_dyn->idname);
+        if (current_index >= 0) {
+          /* Find next category in the ordered list.
+           * Stops at first/last visible category (no wrapping). */
+          int next_index = backwards ? (current_index - 1) : (current_index + 1);
+
+          if (next_index >= 0 && next_index < ordered_categories.size()) {
+            PanelCategoryDyn *next = ordered_categories[next_index];
+            ui::panel_category_active_set_safe(C, region, next->idname);
+
+            /* Save to tag category memory. */
+            using namespace blender::ui;
+            TagFilterStateRef state{};
+            if (tag_filter_state_from_area(CTX_wm_area(C), &state) && state.active_tags &&
+                state.filter_enabled && *state.filter_enabled)
+            {
+              char tag_key[256];
+              tag_build_combination_key(state.active_tags, tag_key, sizeof(tag_key));
+              tag_save_last_active_category(C, tag_key, next->idname);
+            }
+          }
         }
         return WM_UI_HANDLER_BREAK;
       }
@@ -2584,7 +2854,7 @@ static int handle_panel_category_cycling(const wmEvent *event,
   return WM_UI_HANDLER_CONTINUE;
 }
 
-static void panel_region_width_set(ARegion *region, const float aspect, int unscaled_size)
+static void ui_panel_region_width_set(ARegion *region, const float aspect, int unscaled_size)
 {
   const float size_new = unscaled_size / aspect;
   if (region->alignment & RGN_ALIGN_RIGHT) {
@@ -2608,7 +2878,201 @@ int handler_panel_region(bContext *C,
                          ARegion *region,
                          const Button *active_but)
 {
-  if (event->val == KM_RELEASE) {
+  /* Handle mouse motion for settings button hover state. */
+  if (ISMOUSE_MOTION(event->type)) {
+    if (panel_category_tabs_is_visible(region)) {
+      /* Check if mouse is over the settings button and trigger redraw for hover effect. */
+      const rcti *rct = &region->runtime->category_tabs_settings_rect;
+
+      /* Check if mouse is inside the region bounds first. */
+      const bool mouse_in_region = BLI_rcti_isect_pt(&region->winrct, event->xy[0], event->xy[1]);
+      const bool is_over_settings = mouse_in_region && BLI_rcti_isect_pt(rct, event->mval[0], event->mval[1]);
+
+      if (is_over_settings != region->runtime->category_tabs_settings_hover) {
+        if (is_over_settings) {
+          /* Hover just became true - record the time. */
+          region->runtime->category_tabs_settings_hover_time = BLI_time_now_seconds();
+          region->runtime->category_tabs_settings_hover = true;
+          ED_region_tag_redraw(region);
+        }
+        else {
+          /* Hover just became false. */
+          region->runtime->category_tabs_settings_hover = false;
+          ED_region_tag_redraw(region);
+        }
+      }
+
+      /* Check if mouse is over any category tab for hover effect. */
+      bool is_over_any_tab = false;
+      for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+        if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
+          is_over_any_tab = true;
+          break;
+        }
+      }
+      /* Redraw on mouse motion in region to update hover effect (including when leaving a tab). */
+      if (mouse_in_region) {
+        ED_region_tag_redraw(region);
+      }
+
+      /* Check for drag threshold exceeded to start category tab drag */
+      if (region->runtime->category_tabs_drag_pending_id[0] != '\0') {
+        const int drag_delta_y = abs(event->mval[1] - region->runtime->category_tabs_drag_start_y);
+        const double time_elapsed = BLI_time_now_seconds() -
+                                     region->runtime->category_tabs_drag_start_time;
+
+        if (drag_delta_y > CATEGORY_DRAG_THRESHOLD_PX ||
+            time_elapsed > CATEGORY_DRAG_DELAY_SEC)
+        {
+          /* Drag & drop is always allowed, independent of Allow Edit Category Data setting. */
+
+          /* Start the drag operator */
+          wmOperatorType *ot = WM_operatortype_find("UI_OT_category_tab_drag", true);
+          if (ot) {
+            /* Clear pending state before invoking operator */
+            region->runtime->category_tabs_drag_pending_id[0] = '\0';
+
+            /* Create a modified event with the original start position */
+            wmEvent drag_event = *event;
+            drag_event.mval[1] = region->runtime->category_tabs_drag_start_y;
+
+            WM_operator_name_call_ptr(C, ot, wm::OpCallContext::InvokeDefault, nullptr, &drag_event);
+            /* Return BREAK - modal operator now handles events */
+            return WM_UI_HANDLER_BREAK;
+          }
+        }
+      }
+    }
+
+    /* Note: Hover state reset for ALL regions is now handled by the area-level
+     * hover handler (area_category_tabs_hover_handler) which runs for all regions
+     * in an area, ensuring hover resets when mouse moves between regions. */
+
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  /* We only use KM_PRESS events in this function, so it's simpler to return early. */
+  if (event->val != KM_PRESS) {
+    /* Handle LEFTMOUSE RELEASE for pending drag state */
+    if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+      if (region->runtime->category_tabs_drag_pending_id[0] != '\0') {
+        /* This was a click, not a drag - handle normally */
+        PanelCategoryDyn *pc_dyn = panel_category_find(region,
+                                                        region->runtime->category_tabs_drag_pending_id);
+        if (pc_dyn) {
+          const char *previous_active = panel_category_active_get(region, false);
+          const bool already_active = STREQ(pc_dyn->idname, previous_active);
+          /* Handle previous active tab ID for Sticky inactive behavior mode. */
+          const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(
+              CTX_wm_area(C));
+          const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
+          const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                       U.category_tabs_show_active_name);
+
+          if (!already_active) {
+            if (is_sticky_inactive && is_sticky_mode && previous_active && previous_active[0]) {
+              /* Sticky inactive mode: save previous active tab for later display in minimized state */
+              STRNCPY(region->runtime->category_tabs_previous_active_id, previous_active);
+            }
+            else {
+              /* Default inactive mode: clear previous_active_id so old tab returns to normal width */
+              region->runtime->category_tabs_previous_active_id[0] = '\0';
+            }
+          }
+
+          panel_category_active_set(region, pc_dyn->idname);
+
+          /* Save to tag category memory. */
+          using namespace blender::ui;
+          TagFilterStateRef state{};
+          if (tag_filter_state_from_area(CTX_wm_area(C), &state) && state.active_tags &&
+              state.filter_enabled && *state.filter_enabled)
+          {
+            char tag_key[256];
+            tag_build_combination_key(state.active_tags, tag_key, sizeof(tag_key));
+            tag_save_last_active_category(C, tag_key, pc_dyn->idname);
+          }
+
+          /* Reset tab name hidden flag when switching to a different tab */
+          if (!already_active) {
+            region->runtime->category_tabs_active_name_hidden = false;
+          }
+
+          const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
+                               (BLI_rcti_size_y(&region->v2d.mask) + 1);
+          const int category_tabs_min_width = category_tabs_min_width_get(
+              CTX_wm_area(C), aspect, display_mode);
+          const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_width;
+          const int category_tabs_min_width_unscaled = int(
+              std::ceil(float(category_tabs_min_width) * aspect / UI_SCALE_FAC));
+
+          if (already_active && !too_narrow) {
+            /* Minimize region when clicking on already active tab.
+             * This applies to both Default and Sticky inactive modes - the panel should always
+             * collapse unless the region is already minimized. */
+            const bool is_sticky_inactive = (U.category_tabs_inactive_behavior ==
+                                             USER_CATEGORY_TABS_INACTIVE_STICKY);
+            const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                         U.category_tabs_show_active_name);
+
+            /* Save current active tab as previous_active (for Sticky inactive mode - to show name
+             * in collapsed state). This allows the tab to show its name even when the panel is
+             * minimized. */
+            if (is_sticky_inactive && is_sticky_mode) {
+              const char *current_active = panel_category_active_get(region, false);
+              if (current_active && current_active[0]) {
+                STRNCPY(region->runtime->category_tabs_previous_active_id, current_active);
+              }
+            }
+            else {
+              /* Default inactive mode: clear previous_active_id when minimizing. */
+              region->runtime->category_tabs_previous_active_id[0] = '\0';
+            }
+
+            region->runtime->type->prefsizex = int(float(BLI_rcti_size_x(&region->winrct) + 1) /
+                                                   UI_SCALE_FAC * aspect);
+            ui_panel_region_width_set(region, aspect, category_tabs_min_width_unscaled);
+
+            /* In Icon mode with Show Active Tab Name, do NOT hide the tab name.
+             * In Sticky inactive mode, we want to show the name for the previous active tab
+             * (minimized state). */
+            const bool is_icon_mode_with_name = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                                 U.category_tabs_show_active_name);
+            if (is_icon_mode_with_name) {
+              /* Keep the name visible for the previous active tab in Sticky inactive mode. */
+              region->runtime->category_tabs_active_name_hidden = false;
+            }
+
+            WM_main_add_notifier(NC_WINDOW, nullptr);
+            WM_main_add_notifier(NC_SCREEN | NA_EDITED, nullptr);
+          }
+          else if (too_narrow) {
+            /* Enlarge region. */
+            const int new_width = region->runtime->type->prefsizex ?
+                                      region->runtime->type->prefsizex :
+                                      250;
+            ui_panel_region_width_set(region, aspect, new_width);
+
+            /* Reset tab name hidden flag when enlarging region from minimized state */
+            if (already_active) {
+              region->runtime->category_tabs_active_name_hidden = false;
+            }
+
+            WM_main_add_notifier(NC_WINDOW, nullptr);
+            WM_main_add_notifier(NC_SCREEN | NA_EDITED, nullptr);
+          }
+
+          ED_region_tag_redraw(region);
+
+          /* Reset scroll to the top (#38348). */
+          view2d_offset(&region->v2d, -1.0f, 1.0f);
+        }
+
+        /* Clear pending state */
+        region->runtime->category_tabs_drag_pending_id[0] = '\0';
+        return WM_UI_HANDLER_BREAK;
+      }
+    }
     return WM_UI_HANDLER_CONTINUE;
   }
 
@@ -2621,53 +3085,64 @@ int handler_panel_region(bContext *C,
 
   /* Handle category tabs. */
   if (panel_category_tabs_is_visible(region)) {
-    if (event->type == LEFTMOUSE && event->val == KM_PRESS &&
-        panel_categories_tab_is_mouse_over(region, event))
-    {
-      const Button *active_button = region_find_active_but(region);
-      /* Expand/collapse panels when clicking the active category button. */
-      PointerRNA ptr = RNA_pointer_create_discrete(
-          reinterpret_cast<ID *>(CTX_wm_screen(C)), RNA_Region, region);
-      const int val = RNA_enum_get(&ptr, "active_panel_category");
-      if (active_button && active_button->hardmax == val) {
-        const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
-                             (BLI_rcti_size_y(&region->v2d.mask) + 1);
-        const bool too_narrow = BLI_rcti_size_x(&region->winrct) <
-                                int(std::floor(
-                                    (UI_PANEL_CATEGORY_MIN_WIDTH + PANEL_MIN_DRAW_WIDTH) *
-                                    UI_SCALE_FAC / aspect));
-        if (too_narrow) {
-          expand_panel_region(*C, region);
-        }
-        else {
-          /* Minimize region. */
-          region->runtime->type->prefsizex = int(float(BLI_rcti_size_x(&region->winrct) + 1) /
-                                                 UI_SCALE_FAC * aspect);
-          panel_region_width_set(region, aspect, UI_PANEL_CATEGORY_MIN_WIDTH);
-          WM_event_add_notifier(C, NC_SCREEN | NA_EDITED, nullptr);
-          ED_region_tag_redraw(region);
-          /* Reset scroll to the top (#38348). */
-          view2d_offset(&region->v2d, -1.0f, 1.0f);
-        }
-        /* Do not break event, let click drag activate panel categories. */
+    if (event->type == LEFTMOUSE) {
+      /* Check settings button first (it's at the bottom). */
+      if (panel_category_tabs_settings_contains(region, event->mval)) {
+        panel_category_tabs_settings_popover_open(C, region);
+        ED_region_tag_redraw(region);
+        return WM_UI_HANDLER_BREAK;
+      }
+
+      PanelCategoryDyn *pc_dyn = panel_categories_find_mouse_over(region, event);
+      if (pc_dyn) {
+        /* Store pending drag state - allow drag for all categories for now */
+        STRNCPY(region->runtime->category_tabs_drag_pending_id, pc_dyn->idname);
+        region->runtime->category_tabs_drag_start_y = event->mval[1];
+        region->runtime->category_tabs_drag_start_time = BLI_time_now_seconds();
+        /* Return CONTINUE to keep receiving MOUSEMOVE events for drag detection */
+        retval = WM_UI_HANDLER_CONTINUE;
       }
     }
     else if (((event->type == EVT_TABKEY) && (event->modifier & KM_CTRL)) ||
              ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE))
     {
       /* Cycle tabs. */
-      WM_tooltip_clear(C, CTX_wm_window(C));
-      retval = handle_panel_category_cycling(event, region, active_but);
+      retval = ui_handle_panel_category_cycling(C, event, region, active_but);
+      if (retval == WM_UI_HANDLER_BREAK) {
+        /* Show or update tooltip with active tab name. */
+        wmWindow *win = CTX_wm_window(C);
+        const wmWindowManager *wm = CTX_wm_manager(C);
+        const char *category_idname = panel_category_active_get(region, false);
+
+        if (category_idname) {
+          /* Use display name (without glyphs) for tooltip,
+           * matching the behavior of hover tooltips. */
+          const char *category_display_name = panel_category_tooltip_name_get(
+              region, wm, category_idname);
+          const char *tooltip_prefix = IFACE_("Active tab: ");
+          const char *tooltip_suffix = IFACE_(category_display_name);
+
+          /* Try to update existing tooltip first to avoid flickering.
+           * We only update if the current tooltip was created with the same init function,
+           * ensuring it has the correct custom position and fixed width. */
+          if (!WM_tooltip_update_text_and_suffix(C,
+                                                 win,
+                                                 tooltip_prefix,
+                                                 tooltip_suffix,
+                                                 ui_panel_category_active_tooltip_init))
+          {
+            /* No existing tooltip - create new one. */
+            WM_tooltip_immediate_init(C,
+                                      win,
+                                      CTX_wm_area(C),
+                                      region,
+                                      ui_panel_category_active_tooltip_init);
+          }
+        }
+      }
     }
-    else if (event->type == EVT_PADPERIOD) {
-      WM_tooltip_clear(C, CTX_wm_window(C));
-      retval = panel_category_show_active_tab(*C, region, event->xy);
-    }
-    else if ((event->type == RIGHTMOUSE) && panel_categories_tab_is_mouse_over(region, event)) {
-      BLI_assert(retval == WM_UI_HANDLER_CONTINUE);
-      retval = WM_UI_HANDLER_BREAK;
-      WM_tooltip_clear(C, CTX_wm_window(C));
-      popup_context_menu_for_panel(C, region, nullptr);
+    if (event->type == EVT_PADPERIOD) {
+      retval = ui_panel_category_show_active_tab(CTX_wm_area(C), region, event->xy);
     }
   }
 
@@ -2692,7 +3167,7 @@ int handler_panel_region(bContext *C,
     int my = event->xy[1];
     window_to_block(region, &block, &mx, &my);
 
-    const PanelMouseState mouse_state = panel_mouse_state_get(&block, panel, mx, my);
+    const PanelMouseState mouse_state = ui_panel_mouse_state_get(&block, panel, mx, my);
 
     if (has_panel_header && mouse_state != PANEL_MOUSE_OUTSIDE) {
       /* Mark panels that have been interacted with so their expansion
@@ -2704,7 +3179,7 @@ int handler_panel_region(bContext *C,
        * active button handling. */
       if ((event->type == EVT_AKEY) && (event->modifier == 0)) {
         retval = WM_UI_HANDLER_BREAK;
-        handle_panel_header(
+        ui_handle_panel_header(
             C, &block, mx, event->type, event->modifier & KM_CTRL, event->modifier & KM_SHIFT);
         break;
       }
@@ -2727,7 +3202,7 @@ int handler_panel_region(bContext *C,
       /* All mouse clicks inside panel headers should return in break. */
       if (ELEM(event->type, EVT_RETKEY, EVT_PADENTER, LEFTMOUSE)) {
         retval = WM_UI_HANDLER_BREAK;
-        handle_panel_header(
+        ui_handle_panel_header(
             C, &block, mx, event->type, event->modifier & KM_CTRL, event->modifier & KM_SHIFT);
       }
       else if (event->type == RIGHTMOUSE) {
@@ -2739,7 +3214,7 @@ int handler_panel_region(bContext *C,
     if (mouse_state == PANEL_MOUSE_INSIDE_LAYOUT_PANEL_HEADER) {
       if (ELEM(event->type, EVT_RETKEY, EVT_PADENTER, LEFTMOUSE)) {
         retval = WM_UI_HANDLER_BREAK;
-        handle_layout_panel_header(C, &block, mx, my, event->type);
+        ui_handle_layout_panel_header(C, &block, mx, my, event->type);
       }
     }
   }
@@ -2747,12 +3222,12 @@ int handler_panel_region(bContext *C,
   return retval;
 }
 
-static void panel_custom_data_set_recursive(Panel *panel, PointerRNA *custom_data)
+static void ui_panel_custom_data_set_recursive(Panel *panel, PointerRNA *custom_data)
 {
   panel->runtime->custom_data_ptr = custom_data;
 
   for (Panel &child_panel : panel->children) {
-    panel_custom_data_set_recursive(&child_panel, custom_data);
+    ui_panel_custom_data_set_recursive(&child_panel, custom_data);
   }
 }
 
@@ -2771,7 +3246,7 @@ void panel_custom_data_set(Panel *panel, PointerRNA *custom_data)
     MEM_delete(panel->runtime->custom_data_ptr);
   }
 
-  panel_custom_data_set_recursive(panel, custom_data);
+  ui_panel_custom_data_set_recursive(panel, custom_data);
 }
 
 PointerRNA *panel_custom_data_get(const Panel *panel)
@@ -2792,7 +3267,7 @@ PointerRNA *region_panel_custom_data_under_cursor(const bContext *C, const wmEve
       int mx = event->xy[0];
       int my = event->xy[1];
       window_to_block(region, &block, &mx, &my);
-      const int mouse_state = panel_mouse_state_get(&block, panel, mx, my);
+      const int mouse_state = ui_panel_mouse_state_get(&block, panel, mx, my);
       if (ELEM(mouse_state, PANEL_MOUSE_INSIDE_CONTENT, PANEL_MOUSE_INSIDE_HEADER)) {
         return panel_custom_data_get(panel);
       }
@@ -2814,7 +3289,7 @@ bool panel_can_be_pinned(const Panel *panel)
  * \{ */
 
 /* NOTE: this is modal handler and should not swallow events for animation. */
-static int handler_panel(bContext *C, const wmEvent *event, void *userdata)
+static int ui_handler_panel(bContext *C, const wmEvent *event, void *userdata)
 {
   Panel *panel = static_cast<Panel *>(userdata);
   HandlePanelData *data = static_cast<HandlePanelData *>(panel->activedata);
@@ -2825,15 +3300,15 @@ static int handler_panel(bContext *C, const wmEvent *event, void *userdata)
   }
   else if (event->type == MOUSEMOVE) {
     if (data->state == PANEL_STATE_DRAG) {
-      do_drag(C, event, panel);
+      ui_do_drag(C, event, panel);
     }
   }
   else if (event->type == TIMER && event->customdata == data->animtimer) {
     if (data->state == PANEL_STATE_ANIMATION) {
-      do_animate(C, panel);
+      ui_do_animate(C, panel);
     }
     else if (data->state == PANEL_STATE_DRAG) {
-      do_drag(C, event, panel);
+      ui_do_drag(C, event, panel);
     }
   }
 
@@ -2845,7 +3320,7 @@ static int handler_panel(bContext *C, const wmEvent *event, void *userdata)
   return WM_UI_HANDLER_BREAK;
 }
 
-static void handler_remove_panel(bContext *C, void *userdata)
+static void ui_handler_remove_panel(bContext *C, void *userdata)
 {
   Panel *panel = static_cast<Panel *>(userdata);
 
@@ -2864,8 +3339,8 @@ static void panel_handle_data_ensure(const bContext *C,
     panel->activedata = MEM_new_zeroed<HandlePanelData>(__func__);
     WM_event_add_ui_handler(C,
                             &win->runtime->modalhandlers,
-                            handler_panel,
-                            handler_remove_panel,
+                            ui_handler_panel,
+                            ui_handler_remove_panel,
                             panel,
                             eWM_EventHandlerFlag(0));
   }
@@ -2934,7 +3409,7 @@ static void panel_activate_state(const bContext *C, Panel *panel, const HandlePa
     panel->activedata = nullptr;
 
     WM_event_remove_ui_handler(
-        &win->runtime->modalhandlers, handler_panel, handler_remove_panel, panel, false);
+        &win->runtime->modalhandlers, ui_handler_panel, ui_handler_remove_panel, panel, false);
   }
 
   ED_region_tag_redraw(region);
@@ -2945,6 +3420,319 @@ void panel_stop_animation(const bContext *C, Panel *panel)
   if (panel->activedata) {
     panel_activate_state(C, panel, PANEL_STATE_EXIT);
   }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name New Add-on Tag Helper Functions
+ * \{ */
+
+/**
+ * Convert eSpace_Type enum value to the flag bit used in discovered_in_spaces.
+ * This mapping must match SPACE_TO_FLAG in space_userpref.py.
+ */
+static uint32_t space_type_to_flag(int space_type)
+{
+  /* Mapping from eSpace_Type enum to flag bits.
+   * This must match SPACE_TO_FLAG in space_userpref.py exactly. */
+  switch (space_type) {
+    case SPACE_VIEW3D:     return (1u << 0);   /* SPACE_VIEW3D = 0 */
+    case SPACE_GRAPH:      return (1u << 1);   /* SPACE_GRAPH = 1 */
+    case SPACE_OUTLINER:   return (1u << 2);   /* SPACE_OUTLINER = 2 */
+    case SPACE_PROPERTIES: return (1u << 3);   /* SPACE_PROPERTIES = 3 */
+    case SPACE_FILE:       return (1u << 4);   /* SPACE_FILE = 4 */
+    case SPACE_IMAGE:      return (1u << 5);   /* SPACE_IMAGE = 5 */
+    case SPACE_INFO:       return (1u << 6);   /* SPACE_INFO = 6 */
+    case SPACE_SEQ:        return (1u << 7);   /* SPACE_SEQ = 7 */
+    case SPACE_TEXT:       return (1u << 9);   /* SPACE_TEXT = 9 */
+    case SPACE_ACTION:     return (1u << 12);  /* SPACE_ACTION = 12 */
+    case SPACE_NLA:        return (1u << 13);  /* SPACE_NLA = 13 */
+    case SPACE_NODE:       return (1u << 11);  /* SPACE_NODE = 16, but flag = 1<<11 */
+    case SPACE_CLIP:       return (1u << 14);  /* SPACE_CLIP = 14 */
+    case SPACE_SPREADSHEET: return (1u << 15); /* SPACE_SPREADSHEET = 15 */
+    default:               return 0;
+  }
+}
+
+/**
+ * Check if any NON-RESERVED category from the same extension was processed by user.
+ *
+ * A category is considered "processed" if:
+ * - It has tags assigned (tags[0] != '\0')
+ * - OR pending_tag_assignment is false (user selected "Without Tag" or assigned a tag)
+ *
+ * RESERVED categories (like "Item", "Tool", "View") are IGNORED because they are
+ * standard Blender categories that extensions may use but don't "own".
+ *
+ * This ensures that when a user assigns a tag to one category of an extension,
+ * all categories of that extension are considered "read" across all modes/spaces.
+ */
+static bool extension_has_tagged_category(const wmWindowManager *wm,
+                                          const char *source_extension)
+{
+  if (!wm || !source_extension || source_extension[0] == '\0') {
+    return false;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+           wm->category_glyph_mappings.first);
+       item;
+       item = item->next)
+  {
+    if (!STREQ(item->source_extension, source_extension)) {
+      continue;
+    }
+
+    /* Skip reserved categories - extensions don't "own" them */
+    if (item->is_reserved) {
+      continue;
+    }
+
+    /* A category is considered "processed" only when BOTH:
+     * 1. pending_tag_assignment is false (user clicked Save)
+     * 2. Has tags assigned (user assigned a tag, not "Without Tag")
+     *
+     * In preview mode, pending_tag_assignment stays true, so the extension
+     * is NOT considered "tagged" yet - this keeps categories visible in "New Add-ons!"
+     * until user clicks Save. */
+    if (!item->pending_tag_assignment && item->tags[0] != '\0') {
+      return true;
+    }
+
+    /* Was processed by user with "Without Tag" (pending=false, no tags) */
+    if (!item->pending_tag_assignment && item->tags[0] == '\0') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if all categories from the same extension are reserved.
+ * This handles cases like Bool Tool, which creates a pending category "Bool Tool"
+ * but all its panels are actually in the reserved category "Edit".
+ * Such extensions should not show "New Add-ons!" button.
+ */
+bool extension_has_only_reserved_categories(const wmWindowManager *wm,
+                                            const char *source_extension)
+{
+  if (!wm || !source_extension || source_extension[0] == '\0') {
+    return false;
+  }
+
+  bool has_any_category = false;
+  bool has_reserved_with_panels = false;
+  bool has_non_reserved_without_panels = false;
+  bool has_non_reserved_with_panels = false;
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+           wm->category_glyph_mappings.first);
+       item;
+       item = item->next)
+  {
+    if (STREQ(item->source_extension, source_extension)) {
+      has_any_category = true;
+      if (item->is_reserved) {
+        /* Reserved category with panels (discovered_in_spaces != 0 means it has panels). */
+        if (item->discovered_in_spaces != 0) {
+          has_reserved_with_panels = true;
+        }
+      }
+      else {
+        /* Non-reserved category: check if it has panels. */
+        if (item->discovered_in_spaces == 0) {
+          has_non_reserved_without_panels = true;
+        }
+        else {
+          has_non_reserved_with_panels = true;
+        }
+      }
+    }
+  }
+
+  /* If extension has a reserved category with panels AND a non-reserved category without panels,
+   * it means the non-reserved category is a "ghost" (like Bool Tool's "Bool Tool" category).
+   * All actual panels are in the reserved category, so the extension is considered "read". */
+  if (has_reserved_with_panels && has_non_reserved_without_panels && !has_non_reserved_with_panels) {
+    return true;
+  }
+
+  /* If extension has categories and all of them are reserved, return true. */
+  return has_any_category && !has_non_reserved_without_panels && !has_non_reserved_with_panels;
+}
+
+bool category_is_unassigned_for_context(const wmWindowManager *wm,
+                                        const CategoryGlyphItem *category,
+                                        int space_type,
+                                        uint32_t current_mode_flag)
+{
+  if (!wm || !category) {
+    return false;
+  }
+
+  /* Reserved categories are never considered unassigned. */
+  if (category->is_reserved) {
+    return false;
+  }
+
+  /* Must have a source extension. */
+  if (category->source_extension[0] == '\0') {
+    return false;
+  }
+
+  /* If pending_tag_assignment is true, the category is still "new" and unassigned,
+   * even if it has preview tags. This keeps it visible in "New Add-ons!" until user clicks Save.
+   * Only consider it "assigned" when pending_tag_assignment is false AND it has tags. */
+  if (!category->pending_tag_assignment && category->tags[0] != '\0') {
+    return false;
+  }
+
+  /* If pending_tag_assignment is false and no tags, user selected "Without Tag" and saved. */
+  if (!category->pending_tag_assignment) {
+    return false;
+  }
+
+  /* NEW: If ANY category from the same extension has tags, this extension is considered "read".
+   * This prevents showing "New Add-ons!" for VCol Edit in Edit Mode when Ucupaint
+   * already has a tag assigned in Object Mode. */
+  if (extension_has_tagged_category(wm, category->source_extension)) {
+    return false;
+  }
+
+  /* NEW: If ALL categories from the same extension are reserved, this extension is considered "read".
+   * This prevents showing "New Add-ons!" for extensions like Bool Tool, which creates a pending
+   * category "Bool Tool" but all its panels are actually in the reserved category "Edit". */
+  if (extension_has_only_reserved_categories(wm, category->source_extension)) {
+    return false;
+  }
+
+  /* Check that this category was discovered in the given space type.
+   * space_type == -1 means global (match any).
+   * discovered_in_spaces == 0 means "any space" (legacy / unknown source),
+   * so do not reject in that case. */
+  if (space_type != -1 && category->discovered_in_spaces != 0) {
+    const uint32_t space_flag = space_type_to_flag(space_type);
+    if ((category->discovered_in_spaces & space_flag) == 0) {
+      return false;
+    }
+  }
+
+  /* Check that this category was discovered in the given mode.
+   * Skip mode check for SPACE_NODE because Node Editor modes (Geometry Nodes, Shader Editor)
+   * are different from 3D View modes and were often set incorrectly during drag-drop.
+   * Also skip if current_mode_flag == 0 (not filtering).
+   *
+   * For mode filtering, use:
+   * - discovered_in_modes if available (panels with bl_context)
+   * - install_mode_flag as fallback (mode when extension was installed, for panels without bl_context)
+   */
+  if (space_type != SPACE_NODE && current_mode_flag != 0) {
+    /* Use discovered_in_modes if available, otherwise fall back to install_mode_flag.
+     * This handles extensions where panels don't specify bl_context but we know
+     * the mode where the extension was installed. */
+    uint32_t effective_mode_flags = category->discovered_in_modes;
+    if (effective_mode_flags == 0 && category->install_mode_flag != 0) {
+      effective_mode_flags = category->install_mode_flag;
+    }
+
+    /* If we have mode flags to filter by, check for match. */
+    if (effective_mode_flags != 0 && (effective_mode_flags & current_mode_flag) == 0) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Check if a category exists in the region's panel categories list.
+ * This verifies that the category has at least one visible panel in the current context.
+ */
+static bool category_exists_in_region(const ARegion *region, const char *category_id)
+{
+  if (!region || !region->runtime || !category_id || category_id[0] == '\0') {
+    return false;
+  }
+
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (STREQ(pc_dyn.idname, category_id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int get_unassigned_categories_count(const wmWindowManager *wm,
+                                    int space_type,
+                                    uint32_t current_mode_flag)
+{
+  if (!wm) {
+    return 0;
+  }
+
+  int count = 0;
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+           wm->category_glyph_mappings.first);
+       item;
+       item = item->next)
+  {
+    if (category_is_unassigned_for_context(wm, item, space_type, current_mode_flag)) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+int get_unassigned_categories_count_for_region(const wmWindowManager *wm,
+                                                const ARegion *region,
+                                                int space_type,
+                                                uint32_t current_mode_flag)
+{
+  if (!wm || !region) {
+    return 0;
+  }
+
+  int count = 0;
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+           wm->category_glyph_mappings.first);
+       item;
+       item = item->next)
+  {
+    /* First check if category is unassigned for context */
+    if (!category_is_unassigned_for_context(wm, item, space_type, current_mode_flag)) {
+      continue;
+    }
+
+    /* Then verify the category actually exists in the region's panel list.
+     * This filters out categories that are pending but whose panels are not visible
+     * (e.g., due to poll() returning false). */
+    if (category_exists_in_region(region, item->category)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+bool should_show_new_addon_tag(const wmWindowManager *wm,
+                               int space_type,
+                               uint32_t current_mode_flag)
+{
+  const int count = get_unassigned_categories_count(wm, space_type, current_mode_flag);
+  return count > 0;
+}
+
+bool should_show_new_addon_tag_for_region(const wmWindowManager *wm,
+                                           const ARegion *region,
+                                           int space_type,
+                                           uint32_t current_mode_flag)
+{
+  if (!wm || !region) {
+    return false;
+  }
+
+  return get_unassigned_categories_count_for_region(wm, region, space_type, current_mode_flag) > 0;
 }
 
 /** \} */

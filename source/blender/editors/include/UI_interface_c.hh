@@ -17,6 +17,7 @@
 #include "BLI_compiler_attrs.h"
 #include "BLI_enum_flags.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_vector.hh"
 #include "BLI_string_utf8_symbols.h"
 #include "BLI_sys_types.h" /* size_t */
 
@@ -62,6 +63,7 @@ struct MenuType;
 struct rctf;
 struct rcti;
 struct uiFontStyle;
+struct uiLayout;
 struct uiList;
 struct uiStyle;
 struct uiWidgetColors;
@@ -322,6 +324,11 @@ enum {
    * and inherited by sub-menus from their parent.
    */
   BLOCK_NO_ACCELERATOR_KEYS = 1 << 27,
+  /**
+   * Prevent the popup from being closed by clicking outside or pressing Escape.
+   * The user must explicitly interact with a button inside the block to close it.
+   */
+  BLOCK_POPUP_MODAL = 1 << 28,
 };
 
 /** #PopupBlockHandle.menuretval */
@@ -446,6 +453,14 @@ enum {
 #define UI_PANEL_CATEGORY_MARGIN_WIDTH \
   (((U.uiflag2 & USER_UIFLAG2_PANEL_TABS_COMPACT) ? 1.4f : 1.0f) * U.widget_unit)
 
+/* Scale factor for tab visual effect (hover/active expansion). */
+#define UI_TABS_VISUAL_EFFECT_SCALE 1.2f
+
+/* Scale factor for panel/scrollbar margin when visual effect is enabled.
+ * This can be adjusted independently to fine-tune the spacing.
+ * Lower values = less margin, higher values = more margin. */
+#define UI_TABS_VISUAL_EFFECT_MARGIN 1.15f
+
 /* Minimum width for a panel showing only category tabs. */
 #define UI_PANEL_CATEGORY_MIN_WIDTH ((U.uiflag2 & USER_UIFLAG2_PANEL_TABS_COMPACT) ? 32.0f : 26.0f)
 /* Minimum width for a panel showing content and category tabs. */
@@ -465,6 +480,12 @@ static constexpr int PANEL_MIN_DRAW_WIDTH = 20;
  * (except for the 'align' ones)!
  */
 enum {
+  /** Tag button preference mode (no checkbox, with delete button). */
+  BUT_TAG_PREF_MODE = 1 << 0,
+  /** Skip background unless hovered/active. */
+  BUT_TAG_NO_BACKGROUND = 1 << 9,
+  /** Center glyph in tag button (used for glyph-only buttons like tag bar). */
+  BUT_TAG_CENTER_GLYPH = 1 << 10,
   /** Text and icon alignment (by default, they are centered). */
   BUT_TEXT_LEFT = 1 << 1,
   BUT_ICON_LEFT = 1 << 2,
@@ -479,6 +500,7 @@ enum {
   BUT_NO_TEXT_PADDING = 1 << 6,
   /** Do not add the usual padding around preview image drawing, use the size of the button. */
   BUT_NO_PREVIEW_PADDING = 1 << 7,
+  BUT_TEXT_USE_COL = 1 << 8,
 
   /* Button align flag, for drawing groups together.
    * Used in 'Block.flag', take care! */
@@ -564,6 +586,7 @@ enum class ButtonType : int8_t {
   Scroll,
   Block,
   Label,
+  Tag,        /**< Tag button with checkbox, colored glyph, and text label */
   KeyEvent,
   HsvCube,
   /** Menu (often used in headers), `*_MENU` with different draw-type. */
@@ -1508,6 +1531,163 @@ Button *uiDefIconPreviewBut(Block *block,
 Button *uiDefButImage(
     Block *block, void *imbuf, int x, int y, short width, short height, const uchar color[4]);
 Button *uiDefButAlert(Block *block, AlertIcon icon, int x, int y, short width, short height);
+
+/** Create a unified tag button with checkbox, glyph, and text label.
+ *
+ * This is the primary function for creating ButtonTag widgets.
+ *
+ * @param block The UI block to add button to (must be non-NULL)
+ * @param tag_name The display name for the tag (must be non-empty, non-NULL)
+ * @param glyph Optional UTF-8 glyph/emoji (can be NULL or empty string)
+ * @param color Optional RGB color pointer. values clamped to [0.0-1.0]. NULL for default
+ * @param is_active Whether the tag is currently selected (sets UI_SELECT_DRAW flag)
+ * @param is_pref_mode Whether to use preference mode (no checkbox, for category settings UI)
+ * @param center_glyph Whether to center glyph in button (for glyph-only buttons)
+ * @param icon_id Blender internal icon ID (0 = none, icon takes priority over glyph)
+ * @param icon_path Optional path to external icon file (used if icon_id is 0)
+ * @param x, y Position in the UI block coordinate system
+ * @param width, height Button dimensions in pixels
+ * @param tip Optional tooltip text (can be NULL)
+ * @return Pointer to created Button (cast to ButtonTag* internally)
+ */
+Button *uiDefButTag(Block *block,
+                    const char *tag_name,
+                    const char *glyph,
+                    const float *color,
+                    bool is_active,
+                    bool is_pref_mode,
+                    bool center_glyph,
+                    int icon_id,
+                    const char *icon_path,
+                    int x, int y, short width, short height,
+                    const char *tip);
+
+/**
+ * Create a Tag button in preference mode (no checkbox, for category assignment UI).
+ * Convenience wrapper around uiDefButTag() with is_pref_mode=true.
+ *
+ * @param block The UI block to add button to
+ * @param tag_name The display name for the tag
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color Optional RGB color for glyph
+ * @param center_glyph Whether to center glyph in button
+ * @param icon_id Blender internal icon ID (0 = none)
+ * @param icon_path Optional path to external icon file
+ * @param x, y Position in the UI block
+ * @param width, height Button dimensions
+ * @param tip Optional tooltip text
+ * @return Pointer to created ButtonTag
+ */
+Button *uiDefButTagPref(Block *block,
+                        const char *tag_name,
+                        const char *glyph,
+                        const float *color,
+                        bool center_glyph,
+                        int icon_id,
+                        const char *icon_path,
+                        int x, int y, short width, short height,
+                        const char *tip);
+
+/**
+ * Create a Tag button in preference mode (no checkbox) from RNA.
+ * Called by RNA system when Python code calls layout.tag_button_pref().
+ *
+ * @param layout The UI layout (must be non-NULL)
+ * @param tag_name Display name (must be non-NULL, non-empty)
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color RGB color for glyph (3 floats)
+ * @param x Position X
+ * @param y Position Y
+ * @param width Button width
+ * @param height Button height
+ * @param icon_id Blender internal icon ID (0 = none)
+ * @param icon_path Optional path to external icon file
+ */
+extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
+                                              const char *tag_name,
+                                              const char *glyph,
+                                              const float *color,
+                                              int x, int y, int width, int height,
+                                              int icon_id,
+                                              const char *icon_path);
+
+/**
+ * Create a row layout with Tag button for preference mode.
+ *
+ * This function creates a row layout with align=true and adds a Tag button
+ * to it. The returned layout can be used to add additional buttons (e.g., delete button).
+ *
+ * @param layout The parent layout container
+ * @param tag_name The display name for the tag
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color Optional RGB color for glyph (values 0.0-1.0)
+ * @param width Button width (0 for automatic)
+ * @param height Button height (0 for automatic)
+ * @param no_background Skip background rendering (only show on hover/active)
+ * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @param center_glyph Center glyph in button (for glyph-only buttons)
+ * @param icon_id Blender internal icon ID (0 = none)
+ * @param icon_path Optional path to external icon file
+ * @param operator_name Optional operator name to assign to button click
+ * @param context_menu_operator Optional operator name for right-click context menu
+ * @param operator_param_name Optional parameter name to pass to context menu operator
+ * @param operator_param_value Optional parameter value to pass to context menu operator
+ * @return Pointer to the row layout with Tag button added
+ */
+uiLayout *uiDefButTagRow(uiLayout *layout,
+                         const char *tag_name,
+                         const char *glyph,
+                         const float *color,
+                         int width,
+                         int height,
+                         bool no_background,
+                         bool align,
+                         bool center_glyph,
+                         int icon_id,
+                         const char *icon_path,
+                         const char *operator_name,
+                         const char *context_menu_operator,
+                         const char *operator_param_name,
+                         const char *operator_param_value);
+
+/**
+ * Create a row layout with Tag button for preference mode from RNA.
+ * Called by RNA system when Python code calls layout.tag_button_pref_row().
+ *
+ * @param layout The UI layout (must be non-NULL)
+ * @param tag_name Display name (must be non-NULL, non-empty)
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color RGB color for glyph (3 floats)
+ * @param width Button width (0 = auto)
+ * @param height Button height (0 = auto)
+ * @param no_background Skip background rendering unless hovered/active
+ * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @param center_glyph Center glyph in button (for glyph-only buttons)
+ * @param icon_key Blender internal icon identifier string (e.g. 'PLAY', 'SELECT_EXTEND')
+ * @param icon_path Optional path to external icon file (used if icon_key is empty)
+ * @param operator_name Optional operator name to assign to button click
+ * @param context_menu_operator Optional operator name for right-click context menu
+ * @param operator_param_name Optional parameter name for context menu operator
+ * @param operator_param_value Optional parameter value for context menu operator
+ * @return Pointer to the row layout with Tag button added, or NULL on error
+ */
+extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
+    blender::ui::Layout *layout,
+    const char *tag_name,
+    const char *glyph,
+    const float *color,
+    int width,
+    int height,
+    bool no_background,
+    bool align,
+    bool center_glyph,
+    const char *icon_key,
+    const char *icon_path,
+    const char *operator_name,
+    const char *context_menu_operator,
+    const char *operator_param_name,
+    const char *operator_param_value);
+
 /** Button containing both string label and icon. */
 Button *uiDefIconTextBut(Block *block,
                          ButtonTypeWithPointerType but_and_ptr_type,
@@ -2242,6 +2422,9 @@ bool panel_can_be_pinned(const Panel *panel);
 
 bool panel_category_is_visible(const ARegion *region);
 bool panel_category_tabs_is_visible(const ARegion *region);
+bool panel_category_is_visible_by_tags(const bContext *C,
+                                       const blender::wmWindowManager *wm,
+                                       const char *category_idname);
 void panel_category_add(ARegion *region, const char *name, int icon = 0);
 PanelCategoryDyn *panel_category_find(const ARegion *region, const char *idname);
 int panel_category_index_find(ARegion *region, const char *idname);
@@ -2253,11 +2436,35 @@ void panel_category_index_active_set(ARegion *region, const int index);
 void panel_category_active_set_default(ARegion *region, const char *idname);
 void panel_category_clear_all(ARegion *region);
 /**
+ * Ensure the active category is visible. If not, switch to the first visible category.
+ */
+void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *region);
+/**
  * Draw vertical tabs on the left side of the region, one tab per category.
  */
 void panel_category_tabs_draw_all(const bContext *C,
                                   ARegion *region,
                                   const char *category_id_active);
+
+/**
+ * Check if mouse is over a category tab and return true if so.
+ */
+bool panel_category_is_mouse_over(ARegion *region, const wmEvent *event);
+
+/**
+ * Check if the mouse is over the category tabs settings button.
+ */
+bool panel_category_tabs_settings_contains(ARegion *region, const int mval[2]);
+
+/**
+ * Open the category tabs settings popup dialog.
+ */
+void panel_category_tabs_settings_popover_open(bContext *C, ARegion *region);
+
+/**
+ * Initialize tooltip timer for category tabs.
+ */
+void panel_category_tooltip_timer_init(bContext *C, ARegion *region);
 
 void panel_stop_animation(const bContext *C, Panel *panel);
 
@@ -2312,6 +2519,7 @@ bool panel_list_matches_data(ARegion *region,
  * as screen/ if ED_KEYMAP_UI is set, or internally in popup functions. */
 
 void region_handlers_add(ListBaseT<wmEventHandler> *handlers);
+void screen_category_tabs_hover_handler_add(ListBaseT<wmEventHandler> *handlers);
 void popup_handlers_add(bContext *C,
                         ListBaseT<wmEventHandler> *handlers,
                         PopupBlockHandle *popup,
@@ -2342,6 +2550,11 @@ void exit();
 void update_text_styles();
 
 void invalidate_text_wrap_cache(const ARegion &region);
+
+/* Category tab edit dialog preview variables - used for live preview */
+extern char category_tab_preview_glyph[8];
+extern char category_tab_preview_first_letter[8];
+extern float category_tab_preview_color[3];
 
 #define UI_UNIT_X ((void)0, U.widget_unit)
 #define UI_UNIT_Y ((void)0, U.widget_unit)
@@ -2642,6 +2855,72 @@ void uiTemplateMenuSearch(Layout *layout);
  */
 void uiTemplateOperatorPropertyButs(
     const bContext *C, Layout *layout, wmOperator *op, eButLabelAlign label_align, short flag);
+
+/**
+ * Lookup glyph for a category tab.
+ * Checks user overrides, panel type, mappings, and defaults.
+ * Returns the glyph string (may be fallback first letter).
+ * \param r_is_fallback_letter: Set to true if returned glyph is fallback (first letter).
+ * \param r_color: If not null, receives custom color (or zero if using theme).
+ */
+const char *panel_category_glyph_lookup(const wmWindowManager *wm,
+                                        const char *category,
+                                        const PanelType *panel_type,
+                                        bool *r_is_fallback_letter,
+                                        float r_color[3],
+                                        int space_type = -1);
+
+bool panel_category_first_letter_lookup(const wmWindowManager *wm,
+                                        const char *category,
+                                        int space_type,
+                                        char r_letter[8]);
+
+/**
+ * One tag prepared for the category edit dialog's Tags panel. Produced by
+ * #get_tags_for_category_ui (from #wmWindowManager::category_tags) and consumed directly by the
+ * dialog renderer. Passing typed records avoids the in-process JSON round-trip that the previous
+ * string-based channel used.
+ */
+struct CategoryTagUIRecord {
+  char name[64];
+  char glyph[16];
+  int is_active;
+  float color[3]; /* Meaningful only when `has_color` is true. */
+  bool has_color;
+  int icon_id;
+  int icon_source;
+};
+
+/**
+ * Return the tags relevant to `category` for the edit dialog, filtered by `filter_mode_flag`
+ * (0 = all tags). An empty vector means "no tags"; callers gate the Tags UI layout on that.
+ */
+Vector<CategoryTagUIRecord> get_tags_for_category_ui(const wmWindowManager *wm,
+                                                     const char *category,
+                                                     uint32_t filter_mode_flag,
+                                                     int space_type = -1);
+
+/**
+ * Get the current object mode as a CategoryTagMode bitmask.
+ */
+uint32_t get_current_tag_mode_flag(const bContext *C);
+
+/**
+ * Check if a category is reserved (from DEFAULT_CATEGORY_GLYPHS).
+ * Reserved categories cannot have their display name changed.
+ * \return True if the category is reserved.
+ */
+bool category_is_reserved(const wmWindowManager *wm, const char *category_id);
+
+/**
+ * Check if a category has pending tag assignment flag set.
+ * (i.e., it's a new extension category that hasn't been assigned a tag yet)
+ * \return True if the category has pending tag assignment.
+ */
+bool category_has_pending_tag_assignment(const wmWindowManager *wm,
+                                          const char *category_id,
+                                          int space_type);
+
 }  // namespace ui
 void template_header3D_mode(ui::Layout *layout, bContext *C);
 void uiTemplateEditModeSelection(ui::Layout *layout, bContext *C);
@@ -2782,6 +3061,53 @@ void template_node_inputs(Layout *layout, bContext *C, PointerRNA *ptr);
 
 void template_collection_importer(Layout *layout, bContext *C);
 void template_collection_exporters(Layout *layout, bContext *C);
+
+void uiTemplateColorGlyphPresets(Layout *layout,
+                                 bContext *C,
+                                 PointerRNA *ptr,
+                                 const char *propname);
+
+void uiTemplateGlyphInputRow(Layout *layout,
+                             bContext *C,
+                             PointerRNA *ptr,
+                             const char *glyph_propname,
+                             const char *search_propname,
+                             bool has_search,
+                             bool has_code,
+                             const char *category);
+
+void uiTemplateGlyphPreview(Layout *layout,
+                            bContext *C,
+                            const char *glyph_unicode,
+                            PointerRNA *ptr,
+                            const char *color_propname,
+                            float size_multiplier);
+
+void uiTemplateIconPreview(Layout *layout,
+                            bContext *C,
+                            const char *icon_key,
+                            PointerRNA *ptr,
+                            const char *color_propname,
+                            float size_multiplier);
+
+void uiTemplateGlyphSearchResults(Layout *layout,
+                                  bContext *C,
+                                  PointerRNA *ptr,
+                                  const char *search_propname,
+                                  const char *category,
+                                  const char *color_propname,
+                                  int max_results);
+
+void uiTemplateGlyphSelector(Layout *layout,
+                             bContext *C,
+                             PointerRNA *ptr,
+                             const char *glyph_propname,
+                             const char *search_propname,
+                             const char *color_propname,
+                             const char *category,
+                             bool show_preview,
+                             bool show_search,
+                             bool show_code);
 }  // namespace ui
 
 namespace ed::object::shapekey {
@@ -3061,6 +3387,51 @@ ARegion *tooltip_create_from_search_item_generic(bContext *C,
                                                  const ARegion *searchbox_region,
                                                  const rcti *item_rect,
                                                  ID *id);
+
+/**
+ * Create a tooltip from a simple text string.
+ * \param position: Screen coordinates for the tooltip position.
+ */
+ARegion *tooltip_create_from_text(bContext *C, const char *text, const int position[2]);
+
+/**
+ * Create a tooltip from a simple text string, avoiding overlap with a given rectangle.
+ * \param position: Screen coordinates for the tooltip position.
+ * \param init_rect_overlap: Rectangle to avoid overlapping (in screen coordinates).
+ *                           The tooltip will be positioned to not overlap this area.
+ * \param prefer_left: If true, try left side first, then right. Otherwise right first.
+ */
+ARegion *tooltip_create_from_text(bContext *C,
+                                  const char *text,
+                                  const int position[2],
+                                  const rcti *init_rect_overlap,
+                                  bool prefer_left);
+
+ARegion *tooltip_create_from_text_fixed_width(bContext *C,
+                                             const char *text,
+                                             const int position[2],
+                                             const rcti *init_rect_overlap,
+                                             bool prefer_left,
+                                             int min_width);
+
+/**
+ * Create a tooltip with colored suffix text.
+ * The main text uses the default color, the suffix uses a specified color.
+ * \param suffix_color: Color ID for the suffix text part.
+ */
+ARegion *tooltip_create_from_text_with_colored_suffix_fixed_width(
+    bContext *C,
+    const char *text,
+    const char *suffix,
+    TooltipColorID suffix_color,
+    const int position[2],
+    const rcti *init_rect_overlap,
+    bool prefer_left,
+    int min_width,
+    bool center_text = false,
+    float height_scale = 1.0f);
+
+bool tooltip_region_update_text(ARegion *region, const char *text);
 
 /* How long before a tool-tip shows. */
 #define UI_TOOLTIP_DELAY 0.5

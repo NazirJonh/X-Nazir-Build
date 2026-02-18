@@ -15,6 +15,7 @@
 #include "DNA_gpencil_legacy_types.h"
 #include "DNA_lightprobe_types.h"
 #include "DNA_object_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_view3d_types.h"
 
@@ -64,7 +65,16 @@
 
 #include "RNA_access.hh"
 
+#include "BLT_translation.hh"
+
 #include "UI_interface.hh"
+#include "UI_interface_c.hh"
+#include "UI_interface_layout.hh"
+#include "UI_resources.hh"
+#include "UI_view2d.hh"
+#include "BLF_api.hh"
+#include "../interface/interface_intern.hh"
+#include "../interface/interface_tag_bar.hh"
 
 #include "BLO_read_write.hh"
 
@@ -214,6 +224,34 @@ static SpaceLink *view3d_create(const ScrArea * /*area*/, const Scene *scene)
   region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
   region->flag = RGN_FLAG_HIDDEN | RGN_FLAG_HIDDEN_BY_USER;
 
+  /* tool shelf */
+  region = BKE_area_region_new();
+
+  BLI_addtail(&v3d->regionbase, region);
+  region->regiontype = RGN_TYPE_TOOLS;
+  region->alignment = RGN_ALIGN_LEFT;
+  region->flag = RGN_FLAG_HIDDEN;
+
+  /* tag bar - horizontal category filter bar, below tool settings */
+  /* Overlay region that floats on top of the 3D viewport */
+  region = BKE_area_region_new();
+
+  BLI_addtail(&v3d->regionbase, region);
+  region->regiontype = RGN_TYPE_TAG_BAR;
+  region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
+  /* The tag bar is visible by default in the 3D viewport (no RGN_FLAG_HIDDEN), unlike the
+   * Image/Node/Properties editors where it starts hidden. */
+  region->flag = eRegion_Flag(0);  /* No special flags - overlay region */
+  region->overlap = true;  /* Float on top with transparent background */
+
+  /* buttons/list view */
+  region = BKE_area_region_new();
+
+  BLI_addtail(&v3d->regionbase, region);
+  region->regiontype = RGN_TYPE_UI;
+  region->alignment = RGN_ALIGN_RIGHT;
+  region->flag = RGN_FLAG_HIDDEN;
+
   /* asset shelf */
   region = BKE_area_region_new();
 
@@ -227,22 +265,6 @@ static SpaceLink *view3d_create(const ScrArea * /*area*/, const Scene *scene)
   BLI_addtail(&v3d->regionbase, region);
   region->regiontype = RGN_TYPE_ASSET_SHELF_HEADER;
   region->alignment = RGN_ALIGN_BOTTOM | RGN_ALIGN_HIDE_WITH_PREV;
-
-  /* tool shelf */
-  region = BKE_area_region_new();
-
-  BLI_addtail(&v3d->regionbase, region);
-  region->regiontype = RGN_TYPE_TOOLS;
-  region->alignment = RGN_ALIGN_LEFT;
-  region->flag = RGN_FLAG_HIDDEN;
-
-  /* buttons/list view */
-  region = BKE_area_region_new();
-
-  BLI_addtail(&v3d->regionbase, region);
-  region->regiontype = RGN_TYPE_UI;
-  region->alignment = RGN_ALIGN_RIGHT;
-  region->flag = RGN_FLAG_HIDDEN;
 
   /* main region */
   region = BKE_area_region_new();
@@ -980,16 +1002,145 @@ static void view3d_main_region_cursor(wmWindow *win, ScrArea *area, ARegion *reg
 /* add handlers, stuff you only do once or on area/region changes */
 static void view3d_header_region_init(wmWindowManager *wm, ARegion *region)
 {
+  using namespace blender::ui;
+
   wmKeyMap *keymap = WM_keymap_ensure(
       wm->runtime->defaultconf, "3D View Generic", SPACE_VIEW3D, RGN_TYPE_WINDOW);
 
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
 
+  /* Add custom event handler for Ctrl + Mouse Wheel tag cycling in header */
+  WM_event_add_ui_handler(
+      nullptr,
+      &region->runtime->handlers,
+      ui::tag_bar_region_handler,
+      nullptr,
+      nullptr,
+      eWM_EventHandlerFlag(0));
+
   ED_region_header_init(region);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Tag Bar Region Callbacks
+ * \{ */
+
+/**
+ * Initialize the tag bar region.
+ */
+static void view3d_tag_bar_region_init(wmWindowManager *wm, ARegion *region)
+{
+  using namespace blender::ui;
+
+  /* Add UI handlers for button interaction (mouse click, hover, etc) */
+  ui::region_handlers_add(&region->runtime->handlers);
+
+  /* Add custom event handler for Ctrl + Mouse Wheel tag cycling */
+  WM_event_add_ui_handler(
+      nullptr,
+      &region->runtime->handlers,
+      ui::tag_bar_region_handler,
+      nullptr,
+      nullptr,
+      eWM_EventHandlerFlag(0));
+
+  /* Initialize View2D for scrolling */
+  ED_region_header_init(region);
+
+  /* Force update of tag bar data on first draw */
+  tag_bar_mark_all_dirty();
+
+  UNUSED_VARS(wm);
+}
+
+/**
+ * Snap size callback for the tag bar region.
+ * For TOP-aligned regions, the Y axis (index 1) controls height.
+ * The tag bar can be resized smaller but not larger than UI_UNIT_Y.
+ */
+static int view3d_tag_bar_region_snap_size(const ARegion * /*region*/, int size, int axis)
+{
+  if (axis == 1) {
+    /* Maximum height is UI_UNIT_Y, but can be resized smaller */
+    return min_ii(size, UI_UNIT_Y);
+  }
+  return size;
+}
+
+/**
+ * Listener for tag bar region notifications.
+ * Handles mode changes, scene updates, and tag data updates.
+ */
+static void view3d_tag_bar_region_listener(const wmRegionListenerParams *params)
+{
+  using namespace blender::ui;
+  ARegion *region = params->region;
+  const wmNotifier *wmn = params->notifier;
+
+  switch (wmn->category) {
+    case NC_SCENE:
+      /* Scene changes that affect tag bar display */
+      switch (wmn->data) {
+        case ND_MODE:           /* Mode changed (Object <-> Sculpt <-> Edit) */
+          ED_region_tag_redraw(region);
+          break;
+        case ND_OB_ACTIVE:      /* Active object changed */
+          ED_region_tag_redraw(region);
+          break;
+        case ND_OB_SELECT:      /* Selection changed */
+          ED_region_tag_redraw(region);
+          break;
+        case ND_TOOLSETTINGS:   /* Tool settings changed */
+          ED_region_tag_redraw(region);
+          break;
+      }
+      break;
+    case NC_SPACE:
+      /* Space-specific changes */
+      if (wmn->data == ND_SPACE_VIEW3D) {
+        ED_region_tag_redraw(region);
+      }
+      break;
+    case NC_WM:
+      /* Window manager changes - tag data updated */
+      if (wmn->data == ND_CATEGORY_GLYPHS) {
+        /* Mark all tag bar data as dirty for update on next draw */
+        tag_bar_mark_all_dirty();
+        ED_region_tag_redraw(region);
+      }
+      break;
+  }
+}
+
+/**
+ * Draw callback for the tag bar region.
+ * The region is at the top (RGN_ALIGN_TOP), spanning full width.
+ * Draws external addon buttons (left) and tag filter buttons (right).
+ */
+static void view3d_tag_bar_region_draw(const bContext *C, ARegion *region)
+{
+  /* Run per-mode tag filter save/restore BEFORE Python draws the header.
+   * Python reads the RNA `active_tag_filter_tags` property (backed by
+   * v3d->tabs_state.active_tag_filter_tags) directly, so the restore must
+   * happen here - before ED_region_header() calls the Python Header classes.
+   * get_tag_bar_data_global() contains the mode-change detection logic that
+   * writes the restored tag back into v3d->tabs_state.active_tag_filter_tags. */
+  blender::ui::get_tag_bar_data_global(C);
+
+  /* Standard header draw - Python draws everything via Header classes:
+   * - VIEW3D_HT_tag_bar: external addon buttons (left)
+   * - VIEW3D_HT_tag_bar_tags: tags + "New Add-on!" button + filter (right)
+   */
+  ED_region_header(C, region);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+
 static void view3d_header_region_draw(const bContext *C, ARegion *region)
 {
+  /* Draw the standard header */
   ED_region_header(C, region);
 }
 
@@ -1398,11 +1549,9 @@ static void view3d_tools_region_draw(const bContext *C, ARegion *region)
 static void view3d_tools_header_region_draw(const bContext *C, ARegion *region)
 {
   ED_region_header_with_button_sections(
-      C,
-      region,
-      (RGN_ALIGN_ENUM_FROM_MASK(region->alignment) == RGN_ALIGN_TOP) ?
-          ui::ButtonSectionsAlign::Top :
-          ui::ButtonSectionsAlign::Bottom);
+      C, region, (RGN_ALIGN_ENUM_FROM_MASK(region->alignment) == RGN_ALIGN_TOP) ?
+                      ui::ButtonSectionsAlign::Top :
+                      ui::ButtonSectionsAlign::Bottom);
 }
 
 /* add handlers, stuff you only do once or on area/region changes */
@@ -1645,6 +1794,21 @@ void ED_spacetype_view3d()
   BLI_addhead(&st->regiontypes, art);
 
   view3d_buttons_register(art);
+
+  /* regions: tag bar - horizontal category filter bar */
+  art = MEM_new_zeroed<ARegionType>("spacetype view3d tag bar region");
+  art->regionid = RGN_TYPE_TAG_BAR;
+  art->prefsizex = 0;  /* Not used for TOP-aligned regions (full width) */
+  art->prefsizey = UI_UNIT_Y;  /* Height of the tag bar (one button height) */
+  art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D;
+  art->listener = view3d_tag_bar_region_listener;
+  art->init = view3d_tag_bar_region_init;
+  art->draw = view3d_tag_bar_region_draw;
+  art->snap_size = view3d_tag_bar_region_snap_size;
+  BLI_addhead(&st->regiontypes, art);
+
+  /* Register tag bar filter popover panel (with UIList) */
+  blender::ui::tag_bar_filter_popover_panel_register(art);
 
   /* regions: tool(bar) */
   art = MEM_new_zeroed<ARegionType>("spacetype view3d tools region");

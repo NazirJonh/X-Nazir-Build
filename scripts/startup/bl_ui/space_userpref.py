@@ -3,10 +3,17 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
+import json
+import os
+import re
+import time
+from contextlib import contextmanager
 from bpy.types import (
     Header,
     Menu,
+    Operator,
     Panel,
+    PropertyGroup,
     UIList,
 )
 from bpy.app.translations import (
@@ -15,6 +22,81 @@ from bpy.app.translations import (
     pgettext_rpt as rpt_,
 )
 from bl_ui.utils import PresetPanel
+# Category Tabs / Glyph / Tag system: the whole implementation lives in the
+# ``bl_ui.glyph_tag_system`` package behind its ``api`` facade. This module keeps
+# only the Preferences UI; it imports the system's registrable classes and the
+# lifecycle helpers it needs for register()/unregister() from that facade.
+from bl_ui.glyph_tag_system.api import (
+    # Registration lifecycle helpers.
+    is_glyph_system_registered,
+    set_glyph_system_registered,
+    _register_glyph_handlers,
+    _unregister_glyph_handlers,
+    _load_glyph_mappings_from_file,
+    # PropertyGroups.
+    CategoryTagItem,
+    CategoryTagAssignment,
+    # Operators.
+    USERPREF_OT_save_category_glyphs,
+    USERPREF_OT_sync_category_glyphs,
+    USERPREF_OT_category_tag_create,
+    USERPREF_OT_category_tag_add,
+    USERPREF_OT_category_tag_edit,
+    USERPREF_OT_category_tag_delete,
+    USERPREF_OT_category_tag_move,
+    USERPREF_OT_mark_all_unassigned_as_distributed,
+    WM_OT_category_tag_pick_icon,
+    USERPREF_OT_category_tag_toggle,
+    USERPREF_OT_category_clear_tags,
+    USERPREF_OT_category_tag_filter_set_mode,
+    USERPREF_OT_category_tag_remove_from_category,
+    VIEW3D_OT_category_tabs_settings,
+    USERPREF_OT_tag_mode_toggle,
+    USERPREF_OT_tag_mode_select_all,
+    USERPREF_OT_tag_mode_select_none,
+    USERPREF_OT_category_tag_set_display_mode,
+    WM_OT_debug_tag_bar_state,
+    # UI: panels, popovers, list.
+    USERPREF_PT_tag_mode_filter_popover,
+    USERPREF_PT_tag_management,
+    USERPREF_PT_custom_icon_picker,
+    USERPREF_UL_category_tags,
+)
+
+
+# -----------------------------------------------------------------------------
+# Category Glyph Mappings - JSON-based storage
+
+
+# ============================================================================
+# RESERVED CATEGORIES (currently disabled, kept for future use)
+# Uncomment and add back to DEFAULT_CATEGORY_GLYPHS if needed
+# ============================================================================
+# "Data": {"glyph": "\ue23e", "display_name": "", "color": [0.0, 0.0, 0.0],
+#          "default_glyph": "\ue23e", "default_display_name": ""},       # database
+# "Constraints": {"glyph": "\ue8d2", "display_name": "", "color": [0.0, 0.0, 0.0],
+#                 "default_glyph": "\ue8d2", "default_display_name": ""}, # rule
+# "Volume": {"glyph": "\ue2c8", "display_name": "", "color": [0.0, 0.0, 0.0],
+#            "default_glyph": "\ue2c8", "default_display_name": ""},     # folder_open
+# "Script": {"glyph": "\ue86f", "display_name": "", "color": [0.0, 0.0, 0.0],
+#            "default_glyph": "\ue86f", "default_display_name": ""},     # terminal
+# "Sound": {"glyph": "\ue3a1", "display_name": "", "color": [0.0, 0.0, 0.0],
+#           "default_glyph": "\ue3a1", "default_display_name": ""},      # speaker
+# "Surface": {"glyph": "\ue76c", "display_name": "", "color": [0.0, 0.0, 0.0],
+#             "default_glyph": "\ue76c", "default_display_name": ""},    # waves
+# "Particles": {"glyph": "\ue3d4", "display_name": "", "color": [0.0, 0.0, 0.0],
+#               "default_glyph": "\ue3d4", "default_display_name": ""},  # science
+# "Curve": {"glyph": "\ue148", "display_name": "", "color": [0.0, 0.0, 0.0],
+#           "default_glyph": "\ue148", "default_display_name": ""},      # timeline
+# "Modifiers": {"glyph": "\ue429", "display_name": "", "color": [0.0, 0.0, 0.0],
+#               "default_glyph": "\ue429", "default_display_name": ""},  # palette
+# "Physics": {"glyph": "\ue3d4", "display_name": "", "color": [0.0, 0.0, 0.0],
+#             "default_glyph": "\ue3d4", "default_display_name": ""},    # science
+# "World": {"glyph": "\ue88e", "display_name": "", "color": [0.0, 0.0, 0.0],
+#           "default_glyph": "\ue88e", "default_display_name": ""},      # public
+# "Material": {"glyph": "\ue429", "display_name": "", "color": [0.0, 0.0, 0.0],
+#              "default_glyph": "\ue429", "default_display_name": ""},   # palette
+# ============================================================================
 
 
 # -----------------------------------------------------------------------------
@@ -304,6 +386,35 @@ class USERPREF_PT_interface_accessibility(InterfacePanel, CenterAlignMixIn, Pane
         flow = layout.grid_flow(row_major=False, columns=0, even_columns=True, even_rows=False, align=False)
 
         flow.prop(view, "use_reduce_motion")
+
+
+class USERPREF_PT_interface_display_tab_sizes(InterfacePanel, CenterAlignMixIn, Panel):
+    bl_label = "Category Tab Settings"
+    bl_parent_id = "USERPREF_PT_interface_display"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, _context):
+        self.layout.label(icon='FUND')
+
+    def draw_centered(self, context, layout):
+        prefs = context.preferences
+        view = prefs.view
+
+        col = layout.column()
+        split = col.split(factor=0.4)
+        split.label(text="Default Display Mode")
+        subrow = split.row(align=True)
+        subrow.use_property_split = False
+        subrow.prop_enum(view, "category_tabs_display_mode", "GLYPHS_ONLY", text="Icon")
+        subrow.prop_enum(view, "category_tabs_display_mode", "GLYPHS_TEXT", text="Mixed")
+        subrow.prop_enum(view, "category_tabs_display_mode", "TEXT_ONLY", text="Text")
+
+        col.separator()
+
+        col.label(text="Size")
+        col.prop(view, "category_tabs_zoom_icon", text="Icon")
+        col.prop(view, "category_tabs_zoom_mixed", text="Mixed")
+        col.prop(view, "category_tabs_zoom_text", text="Text")
 
 
 class USERPREF_PT_interface_editors(InterfacePanel, CenterAlignMixIn, Panel):
@@ -1124,6 +1235,7 @@ class PreferenceThemeWidgetColorPanel:
         col = flow.column(align=True)
         col.prop(widget_style, "inner", slider=True)
         col.prop(widget_style, "inner_sel", text="Selected", slider=True)
+        col.prop(widget_style, "icon_selection", text="Icon Selection", slider=True)
 
         col = flow.column(align=True)
         col.prop(widget_style, "outline")
@@ -1426,6 +1538,25 @@ class USERPREF_PT_theme_strip_colors(ThemePanel, CenterAlignMixIn, Panel):
 
         flow = layout.grid_flow(row_major=False, columns=2, even_columns=True, even_rows=False, align=False)
         for i, ui in enumerate(theme.strip_color, 1):
+            flow.prop(ui, "color", text=iface_("Color {:d}").format(i), translate=False)
+
+
+class USERPREF_PT_theme_glyph_colors(ThemePanel, CenterAlignMixIn, Panel):
+    bl_label = "Glyph Colors"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, _context):
+        layout = self.layout
+
+        layout.label(icon='FUND')
+
+    def draw_centered(self, context, layout):
+        theme = context.preferences.themes[0]
+
+        layout.use_property_split = True
+
+        flow = layout.grid_flow(row_major=False, columns=2, even_columns=True, even_rows=False, align=False)
+        for i, ui in enumerate(theme.glyph_color, 1):
             flow.prop(ui, "color", text=iface_("Color {:d}").format(i), translate=False)
 
 
@@ -2967,6 +3098,134 @@ class ExperimentalPanel:
         return bpy.app.version_cycle == "alpha"
 
 
+class USERPREF_PT_about_build(Panel):
+    """Panel for build information and custom features in Preferences."""
+    bl_space_type = 'PREFERENCES'
+    bl_region_type = 'WINDOW'
+    bl_context = "build_features"  # Using existing context
+    bl_label = "About Build"
+    bl_icon = 'COLORSET_11_VEC'
+
+    @classmethod
+    def poll(cls, _context):
+        # Always show this panel for custom builds
+        return True
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+
+        # Build Information Section
+        box = layout.box()
+        col = box.column()
+
+        # Title with alert icon
+        row = col.row()
+        row.alert = True
+        row.label(text="Experimental Build", icon='ERROR')
+
+        col.separator()
+
+        # Build details
+        col.label(text="Build Created by: Nazir Galimov", icon='USER')
+        col.separator()
+        col.label(text="This is a custom build with a prototype of an advanced tab management system.", icon='INFO')
+        col.separator()
+        col.label(text="Use at your own risk. Do not use it to create important files for production.", icon='ERROR')
+
+        col.separator()
+
+        # Additional info
+        col.label(text="To leave a review, use the button >>>Support and Send FEEDBACK<<<", icon='HEART')
+
+        # About the author — collapsible panel
+        header, body = layout.panel("about_author", default_closed=True)
+        header.label(text="About the Author", icon='COMMUNITY')
+        if body:
+            # Author image
+            import os
+            # Ensure previews module is loaded
+            import bpy.utils.previews
+            image_path = os.path.join(
+                bpy.utils.resource_path('LOCAL'),
+                'datafiles', 'autor_image.png'
+            )
+            if os.path.isfile(image_path):
+                if not hasattr(USERPREF_PT_about_build, "_preview_collection"):
+                    pcoll = bpy.utils.previews.new()
+                    pcoll.author_image = pcoll.load("AUTHOR_IMAGE", image_path, 'IMAGE')
+                    USERPREF_PT_about_build._preview_collection = pcoll
+                pcoll = USERPREF_PT_about_build._preview_collection
+                if "AUTHOR_IMAGE" in pcoll:
+                    body.template_icon(pcoll["AUTHOR_IMAGE"].icon_id, scale=6.0)
+
+            box = body.box()
+            col = box.column(align=True)
+            col.label(text="Six years ago, I discovered Blender and immediately "
+                          "knew it would become my main tool.")
+            col.label(text="Since then, I\u2019ve been creating 3D models and "
+                          "constantly working to improve my workflow.")
+            col.separator()
+            col.label(text="The industry is going through a difficult period "
+                          "right now, and like many 3D artists, I\u2019ve lost my job.")
+            col.label(text="Working on Blender has helped me stay confident "
+                          "and keep moving forward.")
+            col.separator()
+            col.label(text="This prototype is the result of over a month of work.")
+            col.label(text="It reflects my vision of what Blender could become "
+                          "in the future.")
+            col.label(text="Bringing these ideas into the core software would "
+                          "require several months of focused development, ")
+            col.label(text="which is why I\u2019m asking for your support.")
+            col.separator()
+            col.label(text="I understand that this is not a perfect solution. "
+                          "But in my view, it is a step forward.")
+            col.separator()
+            col.label(text="The future of this project largely depends on you.")
+            col.label(text="Share information about it with your friends ")
+            col.label(text="on YouTube, Twitter, and other social media platforms.")
+
+            col.label(text="Feel free to share your feedback using the "
+                          ">>>Support and Send FEEDBACK<<< button.")
+            col.separator()
+            col.label(text="Thank you for your support, and have a great day!")
+
+        # Build Features Section
+        prefs = context.preferences
+        build_features = prefs.build_features
+
+        # Features header
+        box = layout.box()
+        box.label(text="Custom features for this experimental build:", icon='INFO')
+        box.separator()
+
+        # Feature toggles
+        col = box.column()
+        col.prop(build_features, "use_enhanced_paint_system")
+        col.prop(build_features, "use_custom_feature_2")
+        col.prop(build_features, "use_custom_feature_3")
+
+        # Feedback Section
+        box = layout.box()
+        col = box.column()
+        col.label(text="We value your feedback on this experimental build:", icon='COMMUNITY')
+        col.separator()
+
+        # Tutorial videos link
+        row = col.row()
+        row.alignment = 'LEFT'
+        row.label(text="Watch tutorial videos:")
+        col.alignment = 'LEFT'
+        col.link(url="https://www.youtube.com/@XNazirBuild", text="X-Nazir Sculpt YouTube Channel", icon='URL')
+        col.alignment = 'EXPAND'
+        col.separator()
+
+        # Feedback button
+        col2 = col.column()
+        col2.scale_y = 1.5
+        col2.operator("wm.url_open", text=">>>Support and Send FEEDBACK<<<", icon='FUND').url = "https://xnazirbuildfeedback.carrd.co/"
+
+
 """
 # Example panel, leave it here so we always have a template to follow even
 # after the features are gone from the experimental panel.
@@ -3032,6 +3291,7 @@ class USERPREF_PT_experimental_tweaks(ExperimentalPanel, Panel):
 
 """
 
+
 # -----------------------------------------------------------------------------
 # Class Registration
 
@@ -3046,6 +3306,23 @@ classes = (
     USERPREF_MT_editor_menus,
     USERPREF_MT_view,
     USERPREF_MT_save_load,
+    USERPREF_OT_save_category_glyphs,
+    USERPREF_OT_sync_category_glyphs,
+
+    # Tag system classes
+    CategoryTagItem,
+    CategoryTagAssignment,
+    USERPREF_OT_category_tag_create,
+    USERPREF_OT_category_tag_add,
+    USERPREF_OT_category_tag_edit,
+    USERPREF_OT_category_tag_delete,
+    USERPREF_OT_category_tag_move,
+    USERPREF_OT_mark_all_unassigned_as_distributed,
+    WM_OT_category_tag_pick_icon,
+    USERPREF_OT_category_tag_toggle,
+    USERPREF_OT_category_clear_tags,
+    USERPREF_OT_category_tag_filter_set_mode,
+    WM_OT_debug_tag_bar_state,  # Debug operator for tag bar state
 
     USERPREF_PT_interface_display,
     USERPREF_PT_interface_editors,
@@ -3053,6 +3330,7 @@ classes = (
     USERPREF_PT_interface_statusbar,
     USERPREF_PT_interface_translation,
     USERPREF_PT_interface_accessibility,
+    USERPREF_PT_interface_display_tab_sizes,
     USERPREF_PT_interface_text,
     USERPREF_PT_interface_menus,
     USERPREF_PT_interface_menus_mouse_over,
@@ -3101,6 +3379,7 @@ classes = (
     USERPREF_PT_theme_bone_color_sets,
     USERPREF_PT_theme_collection_colors,
     USERPREF_PT_theme_strip_colors,
+    USERPREF_PT_theme_glyph_colors,
 
     USERPREF_PT_file_paths_data,
     USERPREF_PT_file_paths_render,
@@ -3146,22 +3425,78 @@ classes = (
     # Popovers.
     USERPREF_PT_ndof_settings,
     USERPREF_PT_addons_filter,
+    USERPREF_PT_tag_mode_filter_popover,
+
+    # Operators.
+    VIEW3D_OT_category_tabs_settings,
+    USERPREF_OT_tag_mode_toggle,
+    USERPREF_OT_tag_mode_select_all,
+    USERPREF_OT_tag_mode_select_none,
+    USERPREF_OT_category_tag_set_display_mode,
+    USERPREF_OT_category_tag_remove_from_category,
 
     USERPREF_PT_experimental_new_features,
     USERPREF_PT_experimental_prototypes,
+    USERPREF_PT_about_build,
     # USERPREF_PT_experimental_tweaks,
 
     USERPREF_PT_developer_tools,
 
+    USERPREF_PT_tag_management,
+    USERPREF_PT_custom_icon_picker,
     # UI lists
     USERPREF_UL_extension_repos,
+    USERPREF_UL_category_tags,
 
     # Add dynamically generated editor theme panels last,
     # so they show up last in the theme section.
     *ThemeGenericClassGenerator.generate_panel_classes_from_theme_areas(),
 )
 
+
+def register():
+    """Register the category/tag glyph system runtime state.
+
+    Registers the WindowManager RNA property and application handlers, and
+    performs the initial (lazy-safe) load of glyph mappings from disk.
+    """
+    if is_glyph_system_registered():
+        return
+
+    if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
+        bpy.types.WindowManager.category_tag_glyph_hex = bpy.props.StringProperty(
+            default="", options={'HIDDEN'})
+
+    _register_glyph_handlers()
+
+    # Load mappings now that handlers are in place. The cache is also loaded
+    # lazily on first access, so this is safe to call at most once here.
+    _load_glyph_mappings_from_file()
+
+    set_glyph_system_registered(True)
+
+
+def unregister():
+    """Unregister the category/tag glyph system runtime state."""
+    if not is_glyph_system_registered():
+        return
+
+    _unregister_glyph_handlers()
+
+    if hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
+        del bpy.types.WindowManager.category_tag_glyph_hex
+
+    set_glyph_system_registered(False)
+
+
+# NOTE: The glyph system lifecycle is driven by bl_ui/__init__.py, which calls
+# register()/unregister() above (alongside the other submodules that need custom
+# registration). No import-time side effects are performed here.
+
+
 if __name__ == "__main__":  # only for live edit.
     from bpy.utils import register_class
     for cls in classes:
         register_class(cls)
+
+

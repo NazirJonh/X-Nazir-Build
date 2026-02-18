@@ -60,6 +60,7 @@ static void workspace_free_data(ID *id)
 
   workspace->owner_ids.free_no_destruct();
   workspace->layouts.free_no_destruct();
+  workspace->category_order.free_no_destruct();
 
   while (!workspace->tools.is_empty()) {
     BKE_workspace_tool_remove(workspace, static_cast<bToolRef *>(workspace->tools.first));
@@ -90,6 +91,7 @@ static void workspace_copy_data(
   workspace_dst->object_mode = workspace_src->object_mode;
   workspace_dst->order = workspace_src->order;
   BLI_duplicatelist(&workspace_dst->owner_ids, &workspace_src->owner_ids);
+  BLI_duplicatelist(&workspace_dst->category_order, &workspace_src->category_order);
 
   /* TODO(@ideasman42): tools */
   workspace_dst->tools.clear_no_delete();
@@ -137,6 +139,7 @@ static void workspace_blend_write(BlendWriter *writer, ID *id, const void *id_ad
   writer->write_struct_list(&workspace->layouts);
   writer->write_struct_list(&workspace->hook_layout_relations);
   writer->write_struct_list(&workspace->owner_ids);
+  writer->write_struct_list(&workspace->category_order);
   writer->write_struct_list(&workspace->tools);
   for (bToolRef &tref : workspace->tools) {
     if (tref.properties) {
@@ -154,6 +157,7 @@ static void workspace_blend_read_data(BlendDataReader *reader, ID *id)
   BLO_read_struct_list(reader, WorkSpaceLayout, &workspace->layouts);
   BLO_read_struct_list(reader, WorkSpaceDataRelation, &workspace->hook_layout_relations);
   BLO_read_struct_list(reader, wmOwnerID, &workspace->owner_ids);
+  BLO_read_struct_list(reader, WorkspaceCategoryOrder, &workspace->category_order);
   BLO_read_struct_list(reader, bToolRef, &workspace->tools);
 
   for (WorkSpaceDataRelation &relation : workspace->hook_layout_relations) {

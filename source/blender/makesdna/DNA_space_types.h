@@ -10,6 +10,7 @@
 #pragma once
 
 #include "DNA_asset_types.h"
+#include "DNA_category_tabs_types.h" /* for CategoryTabsState */
 #include "DNA_color_types.h" /* for Histogram */
 #include "DNA_defs.h"
 #include "DNA_image_types.h" /* ImageUser */
@@ -162,6 +163,17 @@ struct SpaceProperties {
   ID *pinid = nullptr;
 
   void *texuser = nullptr;
+
+  /**
+   * Runtime cache for tag buttons (reset when tags change).
+   * Pointer to TagBarRuntimeData.
+   */
+  void *tag_bar_cache = nullptr;
+
+  /** Per-editor Category Tabs / Tag Bar state (see #CategoryTabsState). */
+  CategoryTabsState tabs_state;
+
+  char _pad2[4] = {0};
 
   /* Doesn't necessarily need to be a pointer, but runtime structs are still written to files. */
   struct SpaceProperties_Runtime *runtime = nullptr;
@@ -699,6 +711,11 @@ struct SpaceImage {
 
   MaskSpaceInfo mask_info;
   SpaceImageOverlay overlay;
+
+  /** Per-editor Category Tabs / Tag Bar state (see #CategoryTabsState). */
+  CategoryTabsState tabs_state;
+
+  char _pad_tag_filter2[4] = {0};
 };
 
 /** \} */
@@ -902,6 +919,17 @@ struct SpaceNode {
   char _pad2[7] = {};
 
   SpaceNodeOverlay overlay;
+
+  /** Per-editor Category Tabs / Tag Bar state (see #CategoryTabsState). */
+  CategoryTabsState tabs_state;
+
+  /** Whether user manually hid the tag bar (prevents auto-show for new add-ons). */
+  char tag_bar_manually_hidden = 0;
+  /** Whether tag bar was auto-shown due to new add-ons detection. */
+  char has_new_addon_auto_shown = 0;
+  char _pad_node_tag[2] = {0, 0};
+
+  char _pad_tag_filter2[8] = {0};
 
   ed::space_node::SpaceNode_Runtime *runtime = nullptr;
 };

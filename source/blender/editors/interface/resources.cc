@@ -77,6 +77,32 @@ namespace theme {
 /** \name Themes
  * \{ */
 
+static void ensure_theme_glyph_presets_initialized(bTheme *btheme)
+{
+  if (!btheme) {
+    return;
+  }
+
+  /* The glyph color presets are considered uninitialized only when every preset is fully zeroed
+   * (a freshly allocated theme that has never been initialized). A deliberately customized preset
+   * (for example a black color with alpha 0) keeps the other presets non-zero, so it is preserved
+   * instead of being silently overwritten on every theme update. */
+  bool all_presets_zeroed = true;
+  for (int i = 0; i < GLYPH_COLOR_TOT; i++) {
+    const uchar *theme_col = btheme->glyph_color[i].color;
+    if (theme_col[0] != 0 || theme_col[1] != 0 || theme_col[2] != 0 || theme_col[3] != 0) {
+      all_presets_zeroed = false;
+      break;
+    }
+  }
+
+  if (all_presets_zeroed) {
+    for (int i = 0; i < GLYPH_COLOR_TOT; i++) {
+      copy_v4_v4_uchar(btheme->glyph_color[i].color, U_theme_default.glyph_color[i].color);
+    }
+  }
+}
+
 const uchar *get_color_ptr(bTheme *btheme, int spacetype, int colorid)
 {
   ThemeSpace *ts = nullptr;
@@ -322,6 +348,9 @@ const uchar *get_color_ptr(bTheme *btheme, int spacetype, int colorid)
           break;
         case TH_TAB_OUTLINE_ACTIVE:
           cp = btheme->tui.wcol_tab.outline_sel;
+          break;
+        case TH_TAB_ICON_SELECTION:
+          cp = btheme->tui.wcol_tab.icon_selection;
           break;
         case TH_TAB_BACK:
           cp = btheme->regions.sidebars.tab_back;
@@ -1136,6 +1165,12 @@ const uchar *get_color_ptr(bTheme *btheme, int spacetype, int colorid)
 
 void init_default()
 {
+  for (bTheme *theme_iter = static_cast<bTheme *>(U.themes.first); theme_iter;
+       theme_iter = theme_iter->next)
+  {
+    ensure_theme_glyph_presets_initialized(theme_iter);
+  }
+
   /* We search for the theme with the default name. */
   bTheme *btheme = static_cast<bTheme *>(
       BLI_findstring(&U.themes, U_theme_default.name, offsetof(bTheme, name)));
@@ -1175,6 +1210,8 @@ void theme_set(int spacetype, int regionid)
     g_theme_state.spacetype = SPACE_VIEW3D;
     g_theme_state.regionid = RGN_TYPE_WINDOW;
   }
+
+  ensure_theme_glyph_presets_initialized(g_theme_state.theme);
 }
 
 bTheme *theme_get()

@@ -23,6 +23,7 @@
 #pragma once
 
 #include "BLI_compiler_attrs.h"
+#include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_sys_types.h"
 
@@ -248,6 +249,71 @@ struct BPy_RunErrInfo {
                                                     const char *expr,
                                                     BPy_RunErrInfo *err_info,
                                                     char **r_value) ATTR_NONNULL(1, 3, 5);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Call a Module Function with Typed Arguments
+ *
+ * Unlike the `BPY_run_string_*` family above, these do not compile any Python source text:
+ * `module_name` is imported, `func_name` is looked up on it and called directly through the
+ * C-API with arguments converted from #BPy_CallArg. This lets callers outside `source/blender/python`
+ * invoke a known Python entry point with arbitrary user strings (paths, names, tags) without
+ * ever having to escape them for interpolation into a script.
+ * \{ */
+
+/**
+ * A single positional or keyword argument for #BPY_run_module_func and friends.
+ * `keyword`: nullptr for a positional argument, otherwise the Python parameter name.
+ */
+struct BPy_CallArg {
+  const char *keyword = nullptr;
+  enum class Type : uint8_t { STRING, INT, DOUBLE, BOOL, STRING_LIST, DOUBLE_LIST } type =
+      Type::STRING;
+  const char *as_string = nullptr;
+  int64_t as_int = 0;
+  double as_double = 0.0;
+  bool as_bool = false;
+  Span<const char *> as_string_list = {};
+  Span<double> as_double_list = {};
+};
+
+/**
+ * Import `module_name`, call `module_name.func_name(*positional_args, **keyword_args)` (split
+ * from `args` by `BPy_CallArg::keyword`) and discard the return value.
+ *
+ * \param C: See \ref common_args.
+ * \param err_info: See \ref common_args.
+ * \return Success.
+ */
+bool BPY_run_module_func(bContext *C,
+                         const char *module_name,
+                         const char *func_name,
+                         Span<BPy_CallArg> args,
+                         BPy_RunErrInfo *err_info = nullptr);
+
+/**
+ * As #BPY_run_module_func, interpreting the return value as an integer or pointer.
+ */
+[[nodiscard]] bool BPY_run_module_func_as_intptr(bContext *C,
+                                                 const char *module_name,
+                                                 const char *func_name,
+                                                 Span<BPy_CallArg> args,
+                                                 BPy_RunErrInfo *err_info,
+                                                 intptr_t *r_value);
+
+/**
+ * As #BPY_run_module_func, serializing the return value with Python's `json.dumps(...,
+ * ensure_ascii=False)` and returning the resulting text.
+ *
+ * \param r_value: Allocated with #MEM_new_array_uninitialized (free with `MEM_delete`).
+ */
+[[nodiscard]] bool BPY_run_module_func_as_json(bContext *C,
+                                               const char *module_name,
+                                               const char *func_name,
+                                               Span<BPy_CallArg> args,
+                                               BPy_RunErrInfo *err_info,
+                                               char **r_value);
 
 /** \} */
 

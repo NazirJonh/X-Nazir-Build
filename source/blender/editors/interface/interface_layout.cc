@@ -16,6 +16,7 @@
 
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "BLI_array.hh"
 #include "BLI_dynstr.h"
@@ -31,6 +32,7 @@
 
 #include "BKE_context.hh"
 #include "BKE_global.hh"
+#include "BLF_api.hh"
 #include "BKE_idprop.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_path_templates.hh"
@@ -2970,7 +2972,25 @@ static Button *item_menu(Layout *layout,
     }
     else if (force_menu) {
       pad_factor.text = 1.85;
-      pad_factor.icon_only = 0.6f;
+      /* Use compact icon_only padding for directional icons to avoid overly wide buttons.
+       * Directional icons (arrows/triangles) already indicate the menu action,
+       * so they don't need extra space like regular menu buttons.
+       * Note: this is matched by icon and so applies to every header force-menu button
+       * using these icons (not only category-tab/tag buttons). The button does not exist
+       * yet at this point, so no button-level discriminator is available to narrow it. */
+      const bool is_directional_icon = ELEM(icon,
+                                            ICON_RIGHTARROW,
+                                            ICON_DOWNARROW_HLT,
+                                            ICON_RIGHTARROW_THIN,
+                                            ICON_TRIA_DOWN,
+                                            ICON_TRIA_LEFT,
+                                            ICON_TRIA_RIGHT,
+                                            ICON_TRIA_UP,
+                                            ICON_TRIA_DOWN_BAR,
+                                            ICON_TRIA_LEFT_BAR,
+                                            ICON_TRIA_RIGHT_BAR,
+                                            ICON_TRIA_UP_BAR);
+      pad_factor.icon_only = is_directional_icon ? 0.0f : 0.6f;
     }
     else {
       pad_factor.text = 0.75f;
@@ -3297,6 +3317,206 @@ Button *uiItemL_ex(
   }
 
   return but;
+}
+
+Button *uiItemL_colored(Layout *layout, const StringRef name, int icon, const float color[3])
+{
+  Button *but = uiItem_simple(layout, name, icon);
+
+  /* Set custom text color (RGB 0.0-1.0 -> 0-255) */
+  if (color && (color[0] > 0.0f || color[1] > 0.0f || color[2] > 0.0f)) {
+    uchar color_uchar[4];
+    color_uchar[0] = uchar(color[0] * 255.0f);
+    color_uchar[1] = uchar(color[1] * 255.0f);
+    color_uchar[2] = uchar(color[2] * 255.0f);
+    color_uchar[3] = 255;
+    button_color_set(but, color_uchar);
+  }
+
+  return but;
+}
+
+PointerRNA uiItemFullO_colored(Layout *layout,
+                               const char *opname,
+                               std::optional<StringRef> name,
+                               int icon,
+                               const wm::OpCallContext context,
+                               const eUI_Item_Flag flag,
+                               const float color[3])
+{
+  wmOperatorType *ot = WM_operatortype_find(opname, false);
+  if (!ot) {
+    return PointerRNA_NULL;
+  }
+
+  PointerRNA opptr = PointerRNA_NULL;
+  Button *but = uiItemFullO_ptr_ex(layout, ot, name, icon, context, flag, &opptr);
+
+  /* Set custom text color (RGB 0.0-1.0 -> 0-255) */
+  if (but && color && (color[0] > 0.0f || color[1] > 0.0f || color[2] > 0.0f)) {
+    uchar color_uchar[4];
+    color_uchar[0] = uchar(color[0] * 255.0f);
+    color_uchar[1] = uchar(color[1] * 255.0f);
+    color_uchar[2] = uchar(color[2] * 255.0f);
+    color_uchar[3] = 255;
+    button_color_set(but, color_uchar);
+  }
+
+  return opptr;
+}
+
+PointerRNA uiItemTagButtonWithOperator(Layout *layout,
+                                       const char *opname,
+                                       const char *tag_name,
+                                       const char *glyph,
+                                       const float *color,
+                                       bool is_active,
+                                       bool center_glyph,
+                                       const char *tooltip,
+                                       const char *context_menu_operator,
+                                       const char *operator_param_name,
+                                       const char *operator_param_value)
+{
+  using namespace blender::ui;
+
+  Block *block = layout->block();
+
+  /* Resolve icon from tag definition in window manager if possible. */
+  int icon_id = ICON_NONE;
+  const char *icon_path_found = "";
+  
+  if (tag_name && tag_name[0] != '\0') {
+    bContext *C = static_cast<bContext *>(block->evil_C);
+    wmWindowManager *wm = CTX_wm_manager(C);
+    if (wm && category_tag_list_is_valid(&wm->category_tags)) {
+      for (const CategoryTagDef *tag_def = static_cast<const CategoryTagDef *>(wm->category_tags.first);
+           tag_def;
+           tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
+      {
+        if (STREQ(tag_def->name, tag_name)) {
+          if (tag_def->icon_source == 1 && tag_def->icon_key[0] != '\0') {
+            /* Use our specialized resolver to handle FUND and other special icons. */
+            icon_id = category_tab_icon_id_resolve_from_key_path(tag_def->icon_key, nullptr);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  /* Calculate button width based on content (icon + glyph + text) */
+  short width;
+  if (center_glyph) {
+    /* Glyph-only mode: fixed small width */
+    width = short(UI_UNIT_X * 1.5f);
+  }
+  else {
+    /* Glyph + Text mode: calculate actual width needed */
+    const uiStyle *style = layout->root()->style;
+    const uiFontStyle *fstyle = &style->widget;
+
+    /* Calculate glyph width */
+    float glyph_width = 0.0f;
+    if (glyph && glyph[0] != '\0') {
+      /* Use stable fixed glyph width based on UI_UNIT_Y (already DPI-scaled).
+       * BLF_width() is unreliable in layout context because the font may not be set up yet. */
+      glyph_width = UI_UNIT_Y * 0.92f;
+    }
+    
+    /* If no glyph but has icon, reserve space for icon */
+    if (glyph_width == 0.0f && icon_id != ICON_NONE) {
+      glyph_width = UI_UNIT_Y * 0.7f;
+    }
+
+    /* Calculate text width using fontstyle_string_width which correctly sets up the font
+     * before measuring. This gives accurate pixel width for the tag label.
+     *
+     * NOTE: BLF_set_default() is called first to ensure the font is properly initialized
+     * in the current context. Without this, BLF_width returns 0 for the first few calls
+     * because the font hasn't been used yet in this draw pass. */
+    float text_width = 0.0f;
+    if (tag_name && tag_name[0] != '\0') {
+      BLF_set_default();
+      text_width = float(fontstyle_string_width(fstyle, tag_name));
+    }
+
+    /* Gap between glyph/icon and text. Matches icon_text_spacing in widget_draw_tag:
+     * icons get 5*scale, glyphs get 2*scale. */
+    const float glyph_text_gap = (icon_id != ICON_NONE) ? 5.0f * UI_SCALE_FAC : 2.0f * UI_SCALE_FAC;
+
+    /* Padding: must match the actual draw code overhead exactly.
+     * Draw left:  box_padding_x(2*scale) + left_padding(UI_UNIT_X/6)
+     * Draw right: box_padding_x(2*scale) + clip_margin(0.25*widget_unit)
+     * For icon buttons the gap is 3px wider, so reduce pad_right accordingly. */
+    const float pad_left  = 2.0f * UI_SCALE_FAC + UI_UNIT_X / 6.0f;
+    const float pad_right = 2.0f * UI_SCALE_FAC + 0.25f * UI_UNIT_Y
+                            - ((icon_id != ICON_NONE) ? 3.0f * UI_SCALE_FAC : 0.0f);
+
+    /* Total width = left_pad + glyph + gap + text + right_pad */
+    width = short(round_fl_to_int(pad_left + glyph_width + glyph_text_gap + text_width + pad_right));
+
+    /* Ensure minimum width for usability (same as glyph-only mode). */
+    width = std::max(width, short(UI_UNIT_X * 1.5f));  }
+
+  /* Create Tag button with preference mode (no checkbox) */
+  Button *raw_but = uiDefButTag(block,
+                                (tag_name && tag_name[0] != '\0') ? tag_name : "Tag",
+                                glyph ? glyph : "",
+                                color,
+                                is_active,
+                                true,         /* is_pref_mode - NO CHECKBOX */
+                                center_glyph, /* Center glyph in button */
+                                icon_id, icon_path_found, /* resolved icon_id */
+                                0, 0,
+                                width,        /* calculated width */
+                                UI_UNIT_Y,    /* height */
+                                tooltip);     /* tooltip text */
+
+  if (!raw_but) {
+    return PointerRNA_NULL;
+  }
+  /* Cast to ButtonTag for access to tooltip_storage */
+  BLI_assert(raw_but->type == ButtonType::Tag);
+  ButtonTag *tag_but = static_cast<ButtonTag*>(raw_but);
+
+  /* Save context menu parameters */
+  if (context_menu_operator) {
+    tag_but->context_menu_operator = BLI_strdup(context_menu_operator);
+  }
+  if (operator_param_name) {
+    tag_but->operator_param_name = BLI_strdup(operator_param_name);
+  }
+  if (operator_param_value) {
+    tag_but->operator_param_value = BLI_strdup(operator_param_value);
+  }
+
+  /* Find operator type */
+  wmOperatorType *ot = WM_operatortype_find(opname, false);
+  if (!ot) {
+    return PointerRNA_NULL;
+  }
+
+  /* Attach operator to the button */
+  button_operator_set(tag_but, ot, wm::OpCallContext::InvokeDefault);
+
+  /* Get operator properties pointer - create a copy for return like layout->op() does.
+   * The property group is already allocated by button_operator_ptr_ensure with the
+   * operator's actual RNA type (ot->srna); reuse it so Python can set properties that
+   * will be used when the operator is executed. */
+  PointerRNA *op_ptr = button_operator_ptr_ensure(tag_but);
+  if (!op_ptr) {
+    if (g_ui_button_tag_debug_enabled) {
+      printf("DEBUG: uiItemTagButtonWithOperator FAILED: button_operator_ptr_ensure returned nullptr\n");
+    }
+    return PointerRNA_NULL;
+  }
+
+  /* Set the tag_name property in the operator properties so the operator receives the
+   * tag_name when executed. */
+  RNA_string_set(op_ptr, "tag_name", tag_name);
+
+  /* Copy the PointerRNA - this copies the pointer to the property group. */
+  return *op_ptr;
 }
 
 void Layout::label(const StringRef name, int icon)

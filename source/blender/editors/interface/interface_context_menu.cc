@@ -594,6 +594,31 @@ bool popup_context_menu_for_button(bContext *C, Button *but, const wmEvent *even
       layout.separator();
     }
   }
+  else if (but->type == ButtonType::Tag) {
+    ButtonTag *tag_but = static_cast<ButtonTag *>(but);
+
+    if (tag_but->context_menu_operator && tag_but->context_menu_operator[0] != '\0') {
+      layout.separator();
+
+      /* Use ExecDefault to call exec() directly instead of invoke() */
+      PointerRNA op_ptr = layout.op(tag_but->context_menu_operator,
+                                    "Context",
+                                    ICON_NONE,
+                                    wm::OpCallContext::ExecDefault,
+                                    UI_ITEM_NONE);
+
+      /* Set operator parameter if name and value are provided */
+      if (tag_but->operator_param_name && tag_but->operator_param_name[0] != '\0' &&
+          tag_but->operator_param_value && tag_but->operator_param_value[0] != '\0') {
+        RNA_string_set(&op_ptr, tag_but->operator_param_name, tag_but->operator_param_value);
+      }
+
+      /* Copy button context to operator - only if context exists */
+      if (but->context) {
+        layout.context_copy(but->context);
+      }
+    }
+  }
   else if (but->rnapoin.data && but->rnaprop) {
     PointerRNA *ptr = &but->rnapoin;
     PropertyRNA *prop = but->rnaprop;

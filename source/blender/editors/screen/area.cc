@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -1264,6 +1265,58 @@ static void region_azone_tab_plus(ScrArea *area, AZone *az, ARegion *region)
   BLI_rcti_init(&az->rect, az->x1, az->x2, az->y1, az->y2);
 }
 
+/**
+ * Create a tab button with custom X offset from the left edge of the region.
+ * This allows creating multiple buttons on the same edge (e.g., for Tag Bar).
+ *
+ * \param area: The screen area containing the region.
+ * \param az: The action zone to configure.
+ * \param region: The region the button is for.
+ * \param edge: The edge direction (e.g., AE_TOP_TO_BOTTOMRIGHT).
+ * \param x_offset: Distance from the left edge of the region to the button.
+ * \param tab_size_x: Width of the button.
+ * \param tab_size_y: Height of the button.
+ */
+static void region_azone_tab_plus_with_offset(ScrArea *area,
+                                              AZone *az,
+                                              ARegion *region,
+                                              const AZEdge edge,
+                                              const float x_offset,
+                                              const float tab_size_x,
+                                              const float tab_size_y)
+{
+  switch (edge) {
+    case AE_TOP_TO_BOTTOMRIGHT: {
+      int add = (region->winrct.ymax == area->totrct.ymin) ? 1 : 0;
+      az->x1 = region->winrct.xmin + x_offset;
+      az->y1 = region->winrct.ymax - U.pixelsize;
+      az->x2 = az->x1 + tab_size_x;
+      az->y2 = region->winrct.ymax - add + tab_size_y;
+      break;
+    }
+    case AE_BOTTOM_TO_TOPLEFT:
+      az->x1 = region->winrct.xmin + x_offset;
+      az->y1 = region->winrct.ymin - tab_size_y;
+      az->x2 = az->x1 + tab_size_x;
+      az->y2 = region->winrct.ymin + U.pixelsize;
+      break;
+    case AE_LEFT_TO_TOPRIGHT:
+      az->x1 = region->winrct.xmin - tab_size_y;
+      az->y1 = region->winrct.ymax - x_offset;
+      az->x2 = region->winrct.xmin + U.pixelsize;
+      az->y2 = az->y1 - tab_size_x;
+      break;
+    case AE_RIGHT_TO_TOPLEFT:
+      az->x1 = region->winrct.xmax - U.pixelsize;
+      az->y1 = region->winrct.ymax - x_offset;
+      az->x2 = region->winrct.xmax + tab_size_y;
+      az->y2 = az->y1 - tab_size_x;
+      break;
+  }
+  /* rect needed for mouse pointer test */
+  BLI_rcti_init(&az->rect, az->x1, az->x2, az->y1, az->y2);
+}
+
 static bool region_azone_edge_poll(const ScrArea *area,
                                    const ARegion *region,
                                    const bool is_fullscreen)
@@ -1388,9 +1441,103 @@ static void region_azones_add_edge(ScrArea *area,
   }
 }
 
+/**
+ * Create two toggle buttons for the Tag Bar region instead of one.
+ * The buttons are positioned away from the edge for better accessibility.
+ *
+ * For hidden regions: Creates two buttons at approximately 25% and 75% of the region width.
+ * For visible regions: Creates a standard edge zone for resizing.
+ *
+ * \param area: The screen area containing the Tag Bar.
+ * \param region: The Tag Bar region (RGN_TYPE_TAG_BAR).
+ * \param is_fullscreen: Whether the area is in fullscreen mode.
+ */
+static void region_azones_tag_bar_add_double(ScrArea *area,
+                                             ARegion *region,
+                                             const bool is_fullscreen)
+{
+  const bool is_hidden = (region->flag & (RGN_FLAG_HIDDEN | RGN_FLAG_TOO_SMALL));
+
+  if (!region_azone_edge_poll(area, region, is_fullscreen)) {
+    return;
+  }
+
+  const AZEdge edge = (region->alignment == RGN_ALIGN_TOP) ?
+                      AE_BOTTOM_TO_TOPLEFT : AE_TOP_TO_BOTTOMRIGHT;
+
+  /* For visible region, create standard edge zone for resizing */
+  if (!is_hidden) {
+    AZone *az = MEM_new<AZone>("actionzone");
+    BLI_addtail(&(area->actionzones), az);
+    az->type = AZONE_REGION;
+    az->region = region;
+    az->edge = edge;
+    region_azone_edge(area, az, region);
+    region_azones_scrollbars_init(area, region);
+    return;
+  }
+
+  /* For hidden region, create two toggle buttons */
+  const int region_width = BLI_rcti_size_x(&region->winrct);
+
+  /* Minimum width required for double buttons */
+  const int min_width_for_double = 150 * UI_SCALE_FAC;
+
+  /* If region is too narrow, use standard single button */
+  if (region_width < min_width_for_double) {
+    region_azone_edge_init(area, region, edge, is_fullscreen);
+    return;
+  }
+
+  /* Button sizes */
+  const float tab_size_x = 1.2f * U.widget_unit;
+  const float tab_size_y = 0.5f * U.widget_unit;
+
+  /* Calculate button positions:
+   * Button 1: near left edge
+   * Button 2: near right edge
+   * Each button has a small margin from its respective edge
+   */
+  const float margin_from_edge = 4.0f * U.widget_unit;
+
+  /* Button 1: positioned from left edge. The inset is expressed relative to the (already
+   * DPI-scaled) widget unit so the offset stays correct on HiDPI displays. */
+  const float button1_x = margin_from_edge - 1.9f * U.widget_unit;
+
+  /* Button 2: positioned from right edge */
+  const float button2_x = region_width - margin_from_edge - tab_size_x;
+
+  /* Create first toggle button (near left edge) */
+  AZone *az1 = MEM_new<AZone>("tag bar toggle button 1");
+  BLI_addtail(&(area->actionzones), az1);
+  az1->type = AZONE_REGION;
+  az1->region = region;
+  az1->edge = edge;
+  region_azone_tab_plus_with_offset(
+      area, az1, region, edge, button1_x, tab_size_x, tab_size_y);
+
+  /* Create second toggle button (near right edge) */
+  AZone *az2 = MEM_new<AZone>("tag bar toggle button 2");
+  BLI_addtail(&(area->actionzones), az2);
+  az2->type = AZONE_REGION;
+  az2->region = region;
+  az2->edge = edge;
+  region_azone_tab_plus_with_offset(
+      area, az2, region, edge, button2_x, tab_size_x, tab_size_y);
+
+  /* Add scrollbars if needed */
+  region_azones_scrollbars_init(area, region);
+}
+
 static void region_azones_add(const bScreen *screen, ScrArea *area, ARegion *region)
 {
   const bool is_fullscreen = screen->state == SCREENFULL;
+
+  /* Special handling for Tag Bar - create double toggle buttons */
+  if (region->regiontype == RGN_TYPE_TAG_BAR) {
+    region_azones_tag_bar_add_double(area, region, is_fullscreen);
+    return;
+  }
 
   /* Only display tab or icons when the header region is hidden
    * (not the tool header - they overlap). */
@@ -1531,7 +1678,7 @@ static void region_overlap_fix(ScrArea *area, ARegion *region)
 
 bool ED_region_is_overlap(const int spacetype, const int regiontype)
 {
-  if (regiontype == RGN_TYPE_HUD) {
+  if (ELEM(regiontype, RGN_TYPE_HUD, RGN_TYPE_TAG_BAR)) {
     return true;
   }
   if ((U.uiflag2 & USER_REGION_OVERLAP) == 0) {
@@ -1548,14 +1695,13 @@ bool ED_region_is_overlap(const int spacetype, const int regiontype)
 
     case SPACE_VIEW3D:
       if (regiontype == RGN_TYPE_HEADER) {
-        /* Only treat as overlapped if there is transparency. */
-        bTheme *theme = ui::theme::theme_get();
-        return theme->space_view3d.header[3] != 255;
+        return false;
       }
       return ELEM(regiontype,
                   RGN_TYPE_TOOLS,
                   RGN_TYPE_UI,
                   RGN_TYPE_TOOL_PROPS,
+                  RGN_TYPE_TAG_BAR,
                   RGN_TYPE_FOOTER,
                   RGN_TYPE_TOOL_HEADER,
                   RGN_TYPE_ASSET_SHELF,
@@ -1578,6 +1724,9 @@ bool ED_region_is_overlap(const int spacetype, const int regiontype)
       return false;
   }
 }
+
+/* Left inset (in widget units) reserved on the node-editor tag bar for the node path controls. */
+static constexpr float UI_NODE_PATH_TAG_BAR_RESERVE_UNITS = 30.0f;
 
 static void region_rect_recursive(
     ScrArea *area, ARegion *region, rcti *remainder, rcti *overlap_remainder, int quad)
@@ -1652,6 +1801,9 @@ static void region_rect_recursive(
   }
   else if (region->regiontype == RGN_TYPE_ASSET_SHELF_HEADER) {
     prefsizey = asset::shelf::header_region_size();
+  }
+  else if (region->regiontype == RGN_TYPE_TAG_BAR) {
+    prefsizey = UI_SCALE_FAC * (region->sizey > 1 ? region->sizey + 0.5f : region->runtime->type->prefsizey);
   }
   else if (ED_area_is_global(area)) {
     prefsizey = ED_region_global_size_y();
@@ -1729,6 +1881,17 @@ static void region_rect_recursive(
 
       region->winrct = *winrct;
 
+      if (region->regiontype == RGN_TYPE_TAG_BAR && area->spacetype == SPACE_NODE) {
+        /* Reserve space on the left of the node-editor tag bar for the node path controls
+         * (the FILE_PARENT button), so it stays clickable even when the tag bar is full width.
+         * The reserve is unconditional because the path controls may appear or disappear after
+         * this layout pass runs; the width is expressed relative to the DPI-scaled widget unit. */
+        const int node_tag_bar_left_reserve = int(UI_NODE_PATH_TAG_BAR_RESERVE_UNITS *
+                                                  U.widget_unit);
+        region->winrct.xmin = min_ii(region->winrct.xmax,
+                                     region->winrct.xmin + node_tag_bar_left_reserve);
+      }
+
       if (alignment == RGN_ALIGN_TOP) {
         region->winrct.ymin = region->winrct.ymax - prefsizey + 1;
         winrct->ymax = region->winrct.ymin - 1;
@@ -1763,7 +1926,17 @@ static void region_rect_recursive(
       }
       else if (has_tabs) {
         /* Too narrow for content so show only the category tabs. */
-        const int cat_min = int(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / aspect);
+        const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
+        const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(
+            area);
+        const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                            display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                               UI_TABS_VISUAL_EFFECT_MARGIN :
+                                               1.0f;
+        const float category_tabs_min_width = std::max(
+            UI_PANEL_CATEGORY_MIN_WIDTH,
+            UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom * visual_effect_margin);
+        const int cat_min = int(std::ceil(UI_SCALE_FAC * category_tabs_min_width / aspect));
         region->winrct = *winrct;
         if (alignment == RGN_ALIGN_RIGHT) {
           region->winrct.xmin = region->winrct.xmax - cat_min + 1;
@@ -3341,7 +3514,10 @@ void ED_region_panels_layout_ex(const bContext *C,
                            BKE_regiontype_uses_category_tabs(region->runtime->type);
   /* offset panels for small vertical tab area */
   const char *category = nullptr;
-  const int category_tabs_width = UI_PANEL_CATEGORY_MARGIN_WIDTH;
+  /* Get zoom based on display mode. */
+  const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
+  const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH *
+                                                   category_tabs_zoom);
   int margin_x = 0;
   const bool region_layout_based = region->flag & RGN_FLAG_DYNAMIC_SIZE;
   bool update_tot_size = true;
@@ -3618,6 +3794,7 @@ void ED_region_panels_layout(const bContext *C, ARegion *region)
 
 void ED_region_panels_draw(const bContext *C, ARegion *region)
 {
+  const ScrArea *area = CTX_wm_area(C);
   View2D *v2d = &region->v2d;
   const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
                        (BLI_rcti_size_y(&region->v2d.mask) + 1);
@@ -3640,10 +3817,21 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
 
   /* draw panels if they are large enough. */
   const bool has_category_tabs = ui::panel_category_tabs_is_visible(region);
-  const short min_draw_size = has_category_tabs ?
-                                  short(UI_PANEL_CATEGORY_MIN_WIDTH + ui::PANEL_MIN_DRAW_WIDTH) :
-                                  std::min(region->runtime->type->prefsizex,
-                                           ui::PANEL_MIN_DRAW_WIDTH);
+  short min_draw_size = std::min(region->runtime->type->prefsizex, ui::PANEL_MIN_DRAW_WIDTH);
+  if (has_category_tabs) {
+    /* The tab gutter is zoomable, so its minimum width cannot be the fixed
+     * #UI_PANEL_CATEGORY_MIN_WIDTH upstream uses; derive it from the current zoom instead. */
+    const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
+    const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
+    const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                        display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                           UI_TABS_VISUAL_EFFECT_MARGIN :
+                                           1.0f;
+    const int tabs_only_min_draw_size = int(std::ceil(
+        std::max(UI_PANEL_CATEGORY_MIN_WIDTH,
+                 UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom * visual_effect_margin)));
+    min_draw_size = short(tabs_only_min_draw_size + ui::PANEL_MIN_DRAW_WIDTH);
+  }
   if (region->winx >= (min_draw_size * UI_SCALE_FAC / aspect)) {
     ui::panels_draw(C, region);
   }
@@ -3653,6 +3841,8 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
 
   /* Set in layout. */
   if (has_category_tabs && region->runtime->category) {
+    /* Ensure the active category is visible after tag filtering */
+    ui::panel_category_tabs_ensure_active_visible(C, region);
     ui::panel_category_tabs_draw_all(C, region, region->runtime->category);
   }
 
@@ -3665,8 +3855,24 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
   {
     use_mask = true;
     ui::view2d_mask_from_win(v2d, &mask);
+    /* Get zoom based on display mode. */
+    const float category_tabs_zoom_local = ED_category_tabs_zoom_get(area);
+
+    /* Check if vertical scrollbar is actually needed (content exceeds visible area).
+     * Only apply visual effect margin when scrollbar is visible to avoid
+     * unnecessary spacing when there's no scrollbar. */
+    const bool needs_vertical_scroll = (v2d->scroll & V2D_SCROLL_VERTICAL) &&
+                                       (BLI_rctf_size_y(&v2d->tot) > BLI_rctf_size_y(&v2d->cur));
+    const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
+    const float visual_effect_margin =
+        (U.category_tabs_visual_effect && display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+         needs_vertical_scroll) ?
+            UI_TABS_VISUAL_EFFECT_MARGIN :
+            1.0f;
     const int category_width = round_fl_to_int(ui::view2d_scale_get_x(&region->v2d) *
-                                               UI_PANEL_CATEGORY_MARGIN_WIDTH);
+                                               UI_PANEL_CATEGORY_MARGIN_WIDTH *
+                                               category_tabs_zoom_local *
+                                               visual_effect_margin);
     if (alignment == RGN_ALIGN_RIGHT) {
       mask.xmax -= category_width;
     }
@@ -3942,7 +4148,9 @@ void ED_region_header_layout(const bContext *C, ARegion *region)
 
     /* In most cases there is only ever one header, it never makes sense to draw more than one
      * header in the same region, this results in overlapping buttons, see: #60195. */
-    break;
+    if (region->regiontype != RGN_TYPE_TAG_BAR) {
+      break;
+    }
   }
 
   if (!region_layout_based) {
@@ -4472,11 +4680,23 @@ void ED_region_message_subscribe(wmRegionMessageSubscribeParams *params)
 
 int ED_region_snap_size_test(const ARegion *region)
 {
+  return ED_region_snap_size_test_with_area(region, nullptr);
+}
+
+int ED_region_snap_size_test_with_area(const ARegion *region, const ScrArea *area)
+{
   /* Use a larger value because toggling scrollbars can jump in size. */
   const int snap_match_threshold = 16;
   if (region->runtime->type->snap_size != nullptr) {
-    const int snap_size_x = region->runtime->type->snap_size(region, region->sizex, 0);
-    const int snap_size_y = region->runtime->type->snap_size(region, region->sizey, 1);
+    const auto snap_size_fn = region->runtime->type->snap_size;
+    const int snap_size_x = (snap_size_fn == ED_region_generic_panel_region_snap_size) ?
+                                ED_region_generic_panel_region_snap_size_with_area(
+                                    area, region, region->sizex, 0) :
+                                snap_size_fn(region, region->sizex, 0);
+    const int snap_size_y = (snap_size_fn == ED_region_generic_panel_region_snap_size) ?
+                                ED_region_generic_panel_region_snap_size_with_area(
+                                    area, region, region->sizey, 1) :
+                                snap_size_fn(region, region->sizey, 1);
     return (((abs(region->sizex - snap_size_x) <= snap_match_threshold) << 0) |
             ((abs(region->sizey - snap_size_y) <= snap_match_threshold) << 1));
   }
@@ -4485,17 +4705,29 @@ int ED_region_snap_size_test(const ARegion *region)
 
 bool ED_region_snap_size_apply(ARegion *region, int snap_flag)
 {
+  return ED_region_snap_size_apply_with_area(region, snap_flag, nullptr);
+}
+
+bool ED_region_snap_size_apply_with_area(ARegion *region, int snap_flag, const ScrArea *area)
+{
   bool changed = false;
   if (region->runtime->type->snap_size != nullptr) {
+    const auto snap_size_fn = region->runtime->type->snap_size;
     if (snap_flag & (1 << 0)) {
-      short snap_size = region->runtime->type->snap_size(region, region->sizex, 0);
+      short snap_size = (snap_size_fn == ED_region_generic_panel_region_snap_size) ?
+                            short(ED_region_generic_panel_region_snap_size_with_area(
+                                area, region, region->sizex, 0)) :
+                            short(snap_size_fn(region, region->sizex, 0));
       if (snap_size != region->sizex) {
         region->sizex = snap_size;
         changed = true;
       }
     }
     if (snap_flag & (1 << 1)) {
-      short snap_size = region->runtime->type->snap_size(region, region->sizey, 1);
+      short snap_size = (snap_size_fn == ED_region_generic_panel_region_snap_size) ?
+                            short(ED_region_generic_panel_region_snap_size_with_area(
+                                area, region, region->sizey, 1)) :
+                            short(snap_size_fn(region, region->sizey, 1));
       if (snap_size != region->sizey) {
         region->sizey = snap_size;
         changed = true;

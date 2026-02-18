@@ -1022,6 +1022,12 @@ void BKE_id_tag_clear_atomic(ID *id, int tag);
 /** Check that given ID pointer actually is in given `bmain`. */
 bool BKE_id_is_in_main(Main *bmain, ID *id);
 /**
+ * Safe version of #BKE_id_is_in_main that doesn't dereference the ID pointer.
+ * This is useful for validating potentially dangling pointers after undo operations.
+ * Unlike #BKE_id_is_in_main, this function won't crash if the ID pointer is invalid.
+ */
+bool BKE_id_pointer_is_valid(Main *bmain, const ID *id);
+/**
  * Check that given ID pointer actually is in G_MAIN.
  * Main intended use is for debug asserts in places we cannot easily get rid of #G_MAIN.
  */

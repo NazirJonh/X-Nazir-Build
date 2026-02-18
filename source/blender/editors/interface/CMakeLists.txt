@@ -32,8 +32,10 @@ set(SRC
   interface_anim.cc
   interface_button_group.cc
   interface_button_sections.cc
+  interface_category_py_bridge.cc
   interface_context_menu.cc
   interface_context_path.cc
+  interface_debug_flags.cc
   interface_drag.cc
   interface_draw.cc
   interface_drop.cc
@@ -57,10 +59,22 @@ set(SRC
   regions/interface_regions.cc
   interface_string_search.cc
   interface_style.cc
+  interface_tab_categories.cc
+  interface_tab_categories_draw.cc
+  interface_tab_categories_edit.cc
+  interface_tab_categories_edit_intern.hh
+  interface_tab_categories_edit_live.cc
+  interface_tab_categories_edit_popups.cc
+  interface_tab_categories_intern.hh
+  interface_tab_categories_lookup.cc
+  interface_tab_categories_operators.cc
+  interface_tab_categories_reserved.cc
+  interface_tab_utils.cc
   templates/interface_template_asset_shelf_popover.cc
   templates/interface_template_attribute_search.cc
   templates/interface_template_bone_collection_tree.cc
   templates/interface_template_cache_file.cc
+  templates/interface_template_color_glyph.cc
   templates/interface_template_color_management.cc
   templates/interface_template_color_picker.cc
   templates/interface_template_color_ramp.cc
@@ -69,6 +83,7 @@ set(SRC
   templates/interface_template_curve_mapping.cc
   templates/interface_template_curve_profile.cc
   templates/interface_template_event.cc
+  templates/interface_template_glyph.cc
   templates/interface_template_grease_pencil_layer_search.cc
   templates/interface_template_grease_pencil_layer_tree.cc
   templates/interface_template_icon.cc
@@ -93,6 +108,8 @@ set(SRC
   templates/interface_template_status.cc
   templates/interface_template_strip_modifiers.cc
   templates/interface_templates.cc
+  interface_tag_bar.cc
+  interface_tag_bar.hh
   interface_undo.cc
   interface_utils.cc
   interface_widgets.cc
@@ -111,6 +128,7 @@ set(SRC
   buttons/interface_textbox.hh
   eyedroppers/eyedropper_intern.hh
   templates/interface_templates_intern.hh
+  interface_category_py_bridge.hh
   interface_intern.hh
   regions/interface_regions_intern.hh
   view2d/view2d_intern.hh

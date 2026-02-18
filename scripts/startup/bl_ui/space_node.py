@@ -4,6 +4,24 @@
 
 import bpy
 import rna_prop_ui
+import time
+
+# Global debug flag for Node Editor operations - set to False to disable debug output
+NODE_EDITOR_DEBUG_ENABLED = False
+
+# Log deduplication for repetitive debug messages
+_node_logged_messages = set()
+
+def _node_log_once(message):
+    """Print a log message only once per session to avoid log flooding."""
+    if not NODE_EDITOR_DEBUG_ENABLED:
+        return
+    msg_hash = hash(message)
+    if msg_hash not in _node_logged_messages:
+        if len(_node_logged_messages) > 500:
+            _node_logged_messages.clear()
+        _node_logged_messages.add(msg_hash)
+        print(message)
 
 from bpy.types import (
     Header,
@@ -36,6 +54,69 @@ from bl_ui.properties_data_light import (
     DATA_PT_EEVEE_light,
 )
 from bl_operators.geometry_nodes import geometry_modifier_poll
+
+
+def _node_current_tag_mode_flag(snode):
+    # Resolve the tag-bar mode bit from the single source of truth in
+    # glyph_tag_system.defaults (never hard-code the bit positions here).
+    from bl_ui.glyph_tag_system.api import _CATEGORY_TAG_MODE_NAME_TO_FLAG as _flags
+    if snode.tree_type == 'GeometryNodeTree':
+        return _flags.get("GEOMETRY_NODES", 0)
+    if snode.tree_type == 'ShaderNodeTree':
+        return _flags.get("SHADER_EDITOR", 0)
+    return _flags.get("SHADER_EDITOR", 0)
+
+
+def _tag_glyph_display(glyph):
+    # Thin wrapper over the shared helper; see `bl_ui._category_tag_bar`.
+    from bl_ui._category_tag_bar import tag_glyph_display
+    return tag_glyph_display(glyph)
+
+
+def _node_visible_tags_for_current_mode(context):
+    from bl_ui._category_tag_bar import visible_tags_for_current_mode
+    wm = context.window_manager
+    snode = context.space_data
+    mode_flag = _node_current_tag_mode_flag(snode)
+
+    # Get tags from WM (normal mode).
+    wm_tags = list(visible_tags_for_current_mode(wm, mode_flag))
+
+    # In preview mode, also include tags from cache that aren't in WM yet
+    try:
+        from bl_ui.glyph_tag_system.api import state, _CATEGORY_TAG_DEFAULT_MODE_FLAGS
+
+        if state.preview_mode_active and state.all_tags_cache:
+            # Get existing WM tag names to avoid duplicates
+            existing_tag_names = {tag.name for tag in wm.category_tags}
+
+            # Create temporary tag objects from cache for preview
+            for tag_name, tag_data in state.all_tags_cache.items():
+                if tag_name not in existing_tag_names and isinstance(tag_data, dict):
+                    glyph = tag_data.get("glyph", "")
+                    tag_mode_flags = tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS)
+                    
+                    if glyph and (tag_mode_flags == 0 or (tag_mode_flags & mode_flag)):
+                        # Create a simple object with required attributes for display
+                        class PreviewTag:
+                            def __init__(self, name, glyph, color, mode_flags):
+                                self.name = name
+                                self.glyph = glyph
+                                self.color = color or [1.0, 1.0, 1.0]
+                                self.mode_flags = mode_flags
+                        
+                        preview_tag = PreviewTag(
+                            tag_name, 
+                            glyph, 
+                            tag_data.get("color", [1.0, 1.0, 1.0]),
+                            tag_mode_flags
+                        )
+                        wm_tags.append(preview_tag)
+                        
+    except ImportError:
+        pass  # Fallback to WM tags only if import fails
+    
+    return wm_tags
 
 
 class NODE_HT_header(Header):
@@ -259,6 +340,42 @@ class NODE_HT_header(Header):
         sub.active = overlay.show_overlays and row.active
         sub.popover(panel="NODE_PT_overlay", text="")
 
+        # Auto-show tag bar if there are unassigned categories
+        # This must be in the header (not tag bar) because tag bar draw isn't called when hidden
+        if not snode.show_region_tag_bar:
+            unassigned_count = _get_unassigned_categories_count_for_node_editor(context)
+            has_auto_shown = getattr(snode, 'has_new_addon_auto_shown', False)
+            manually_hidden = getattr(snode, 'tag_bar_manually_hidden', False)
+
+            # Debug: log auto-show state
+            _node_log_once(f"[TAG_BAR_AUTO] unassigned={unassigned_count}, show_bar={snode.show_region_tag_bar}, "
+                           f"has_auto_shown={has_auto_shown}, manually_hidden={manually_hidden}")
+
+            # Only auto-show if:
+            # 1. There are unassigned categories
+            # 2. User has NOT manually hidden the tag bar
+            # 3. We have NOT already done auto-show for this session
+            if unassigned_count > 0 and not manually_hidden and not has_auto_shown:
+                if NODE_EDITOR_DEBUG_ENABLED:
+                    print(f"[TAG_BAR_AUTO] Auto-showing tag bar (unassigned={unassigned_count})")
+                # Set auto-shown flag BEFORE showing tag bar so C++ callback knows this is auto-show
+                try:
+                    snode.has_new_addon_auto_shown = True
+                except (AttributeError, TypeError):
+                    pass
+                snode.show_region_tag_bar = True
+        else:
+            # Tag bar is visible - reset auto-shown flag when no more unassigned
+            # Note: Do NOT reset tag_bar_manually_hidden here - only C++ callback does that
+            has_auto_shown = getattr(snode, 'has_new_addon_auto_shown', False)
+            if has_auto_shown:
+                unassigned_count = _get_unassigned_categories_count_for_node_editor(context)
+                if unassigned_count == 0:
+                    try:
+                        snode.has_new_addon_auto_shown = False
+                    except (AttributeError, TypeError):
+                        pass
+
 
 class NODE_PT_gizmo_display(Panel):
     bl_space_type = 'NODE_EDITOR'
@@ -294,6 +411,148 @@ class NODE_MT_editor_menus(Menu):
         layout.menu("NODE_MT_select")
         layout.menu("NODE_MT_add")
         layout.menu("NODE_MT_node")
+
+
+def _get_unassigned_categories_count_for_node_editor(context):
+    """Count unassigned categories for Node Editor context.
+
+    Delegates to the shared Python helper so the Node Editor and View3D
+    "New Add-ons!" visibility stay in sync.
+    """
+    try:
+        from bl_ui.glyph_tag_system.api import _get_unassigned_categories_count_for_space
+        return _get_unassigned_categories_count_for_space(context, 16, "NODE:")
+    except Exception as e:
+        print(f"[NODE_TAG_BAR] Error checking unassigned categories: {e}")
+        return 0
+
+
+class NODE_HT_tag_bar(Header):
+    bl_space_type = 'NODE_EDITOR'
+    bl_region_type = 'TAG_BAR'
+
+    def draw(self, context):
+        # PERF: Profile draw time
+        _draw_start = time.perf_counter()
+        
+        layout = self.layout
+        layout.separator_spacer()
+
+        snode = context.space_data
+        wm = context.window_manager
+        row = layout.row(align=True)
+
+        # Tag bar is visible - just draw the content
+        # Auto-show logic is in NODE_HT_header.draw()
+
+        active_tags = getattr(snode, "active_tag_filter_tags", "")
+        active_tags_set = set()
+        if active_tags:
+            for tag_name in active_tags.split(','):
+                tag_name = tag_name.strip()
+                if tag_name:
+                    active_tags_set.add(tag_name)
+
+        # PERF: Time before visible_tags
+        _vt_start = time.perf_counter()
+        tags = _node_visible_tags_for_current_mode(context)
+        _vt_elapsed = (time.perf_counter() - _vt_start) * 1000
+
+        # PERF: Time unassigned count calculation
+        _uc_start = time.perf_counter()
+        unassigned_count = _get_unassigned_categories_count_for_node_editor(context)
+        _uc_elapsed = (time.perf_counter() - _uc_start) * 1000
+
+        show_names = getattr(wm, "show_tag_names", False)
+        show_active_only = getattr(wm, "show_tag_names_active_only", False)
+
+        if not wm.category_tags or not tags:
+            # Show "New Add-ons!" button even when no tags exist
+            if unassigned_count > 0:
+                new_addon_active = getattr(snode, "new_addon_filter_active", False)
+                row.tag_button(
+                    "view3d.tag_bar_toggle",
+                    tag_name="New Add-ons!",
+                    glyph="\uf23a",  # Material Symbols "new_releases" icon (Unicode character)
+                    color_r=0.0,   # Green color
+                    color_g=0.8,
+                    color_b=0.2,
+                    depress=new_addon_active,
+                    center_glyph=False,  # Show both glyph and text
+                    tooltip=f"Show {unassigned_count} new add-on categories",
+                )
+                row.separator()
+
+            op = row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD')
+            op.operator_idname = 'wm.category_tag_create'
+            op.width = 430
+            row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
+            return
+
+        for i, tag in enumerate(tags):
+            glyph = _tag_glyph_display(tag.glyph)
+            depress = tag.name in active_tags_set
+            center_glyph = not show_names or (show_active_only and not depress)
+
+            if not tag.name:
+                continue
+
+            row.tag_button(
+                "view3d.tag_bar_toggle",
+                tag_name=tag.name,
+                glyph=glyph,
+                color_r=tag.color[0],
+                color_g=tag.color[1],
+                color_b=tag.color[2],
+                depress=depress,
+                center_glyph=center_glyph,
+                tooltip=tag.name,
+            )
+
+            if i < len(tags) - 1:
+                row.separator()
+
+        # Add "New Add-ons!" button if there are unassigned categories (already calculated above)
+        if unassigned_count > 0:
+            row.separator()
+
+            # Check if "New Add-ons!" filter is currently active
+            new_addon_active = getattr(snode, "new_addon_filter_active", False)
+
+            # Show "New Add-ons!" with glyph icon and text
+            # Green color to indicate new items
+            new_addon_row = row.row(align=True)
+
+            new_addon_row.tag_button(
+                "view3d.tag_bar_toggle",
+                tag_name="New Add-ons!",
+                glyph="\uf23a",  # Material Symbols "new_releases" icon (Unicode character)
+                color_r=0.0,   # Green color
+                color_g=0.8,
+                color_b=0.2,
+                depress=new_addon_active,
+                center_glyph=False,  # Always show both glyph and text
+                tooltip=f"Show {unassigned_count} new add-on categories",
+            )
+
+        row.separator()
+        row.operator(
+            "view3d.tag_bar_filter_toggle",
+            text="",
+            icon='FILTER',
+            depress=bool(getattr(snode, "tag_filter_enabled", False)),
+        )
+        sub = row.row(align=True)
+        sub.popover(panel="VIEW3D_PT_tag_bar_filter_popover", text="", icon='DOWNARROW_HLT')
+        
+        # PERF: Log total draw time and component timings
+        _draw_elapsed = (time.perf_counter() - _draw_start) * 1000
+        if not hasattr(NODE_HT_tag_bar.draw, '_call_count'):
+            NODE_HT_tag_bar.draw._call_count = 0
+        NODE_HT_tag_bar.draw._call_count += 1
+        # Log first 10 calls and every 100th call after
+        if NODE_HT_tag_bar.draw._call_count <= 10 or NODE_HT_tag_bar.draw._call_count % 100 == 0:
+            _node_log_once(f"[PERF] NODE_HT_tag_bar.draw #{NODE_HT_tag_bar.draw._call_count}: total={_draw_elapsed:.3f}ms, visible_tags={_vt_elapsed:.3f}ms, unassigned_count={_uc_elapsed:.3f}ms (count={unassigned_count})")
 
 
 class NODE_MT_add(node_add_menu.AddNodeMenu):
@@ -366,6 +625,7 @@ class NODE_MT_view(Menu):
 
         layout.prop(snode, "show_region_toolbar")
         layout.prop(snode, "show_region_ui")
+        layout.prop(snode, "show_region_tag_bar")
 
         if is_compositor:
             layout.prop(snode, "show_region_asset_shelf")
@@ -1221,8 +1481,24 @@ class NODE_AST_compositor(bpy.types.AssetShelf):
         return True
 
 
+class SCREEN_OT_tag_bar_auto_show(bpy.types.Operator):
+    """Show the tag bar to manage new add-on categories"""
+    bl_idname = "screen.tag_bar_auto_show"
+    bl_label = "Show Tag Bar"
+    bl_description = "Show the tag bar to manage new add-on categories"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        space = context.space_data
+        if space and hasattr(space, 'show_region_tag_bar'):
+            space.show_region_tag_bar = True
+        return {'FINISHED'}
+
+
 classes = (
     NODE_HT_header,
+    NODE_HT_tag_bar,
+    SCREEN_OT_tag_bar_auto_show,
     NODE_MT_editor_menus,
     NODE_MT_add,
     NODE_MT_swap,

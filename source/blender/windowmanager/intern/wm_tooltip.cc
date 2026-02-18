@@ -20,6 +20,14 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+/* Forward declaration from interface_region_tooltip.cc */
+namespace blender::ui {
+bool tooltip_region_update_text(ARegion *region, const char *text);
+bool tooltip_region_update_text_and_suffix(ARegion *region,
+                                           const char *text,
+                                           const char *suffix);
+}
+
 namespace blender {
 
 static double g_tooltip_time_closed;
@@ -143,6 +151,44 @@ void WM_tooltip_refresh(bContext *C, wmWindow *win)
     }
     WM_tooltip_init(C, win);
   }
+}
+
+bool WM_tooltip_update_text(bContext *C, wmWindow *win, const char *text, wmTooltipInitFn init)
+{
+  (void)C;  /* Unused - tooltip update is handled through region */
+  bScreen *screen = WM_window_get_active_screen(win);
+  if (screen->tool_tip == nullptr || screen->tool_tip->region == nullptr) {
+    return false;
+  }
+
+  /* If an initialization function is provided, ensure the current tooltip
+   * matches it. This prevents standard tooltips (e.g., tab names) from
+   * being hijacked with custom scroll tooltip text while retaining
+   * their original position and width. */
+  if (init && screen->tool_tip->init != init) {
+    return false;
+  }
+
+  return ui::tooltip_region_update_text(screen->tool_tip->region, text);
+}
+
+bool WM_tooltip_update_text_and_suffix(bContext *C,
+                                       wmWindow *win,
+                                       const char *text,
+                                       const char *suffix,
+                                       wmTooltipInitFn init)
+{
+  (void)C; /* Unused - tooltip update is handled through region */
+  bScreen *screen = WM_window_get_active_screen(win);
+  if (screen->tool_tip == nullptr || screen->tool_tip->region == nullptr) {
+    return false;
+  }
+
+  if (init && screen->tool_tip->init != init) {
+    return false;
+  }
+
+  return ui::tooltip_region_update_text_and_suffix(screen->tool_tip->region, text, suffix);
 }
 
 }  // namespace blender

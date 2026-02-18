@@ -1423,9 +1423,10 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
   fontstyle_set(fstyle);
   const int fontid = fstyle->uifont_id;
   float fstyle_points = fstyle->points;
-  const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
-                       (BLI_rcti_size_y(&region->v2d.mask) + 1);
-  const float zoom = 1.0f / aspect;
+  const float aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
+                           1.0f :
+                           (static_cast<Block *>(region->runtime->uiblocks.first))->aspect;
+  const float zoom = (1.0f / aspect) * U.category_tabs_zoom;
   const int px = U.pixelsize;
   const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
   const float dpi_fac = UI_SCALE_FAC;
@@ -1475,7 +1476,7 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
   BLF_enable(fontid, BLF_ROTATION);
   BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
   fontscale(&fstyle_points, aspect);
-  BLF_size(fontid, fstyle_points * UI_SCALE_FAC);
+  BLF_size(fontid, fstyle_points * UI_SCALE_FAC * U.category_tabs_zoom);
 
   /* Check the region type supports categories to avoid an assert
    * for showing 3D view panels in the properties space. */
@@ -1621,7 +1622,8 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
     /* Offset toward the middle of the rect. */
     const int text_v_ofs = round_fl_to_int(float(rct_xmax - rct_xmin) * 0.5f);
     /* Offset down as the font size increases. */
-    const int text_size_offset = round_fl_to_int(fstyle_points * UI_SCALE_FAC * 0.35f);
+    const int text_size_offset = round_fl_to_int(fstyle_points * UI_SCALE_FAC *
+                                                 U.category_tabs_zoom * 0.35f);
 
     BLF_position(fontid,
                  is_left ? rct->xmax - text_v_ofs + text_size_offset :

@@ -75,7 +75,8 @@ bool ED_region_panel_category_gutter_calc_rect(const ARegion *region, rcti *r_re
   *r_region_gutter = region->winrct;
   if (ui::panel_category_tabs_is_visible(region)) {
     const int category_tabs_width = round_fl_to_int(ui::view2d_scale_get_x(&region->v2d) *
-                                                    UI_PANEL_CATEGORY_MARGIN_WIDTH);
+                                                    UI_PANEL_CATEGORY_MARGIN_WIDTH *
+                                                    U.category_tabs_zoom);
     const int alignment = RGN_ALIGN_ENUM_FROM_MASK(region->alignment);
 
     if (alignment == RGN_ALIGN_LEFT) {

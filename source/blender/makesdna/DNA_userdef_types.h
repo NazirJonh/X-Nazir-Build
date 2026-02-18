@@ -946,6 +946,9 @@ struct UserDef {
 
   /** Setting for UI scale (fractional), before screen DPI has been applied. */
   float ui_scale = 1.0;
+  /** Zoom scale for category tabs in sidebar regions (1.0 = default size). */
+  float category_tabs_zoom = 1.0f;
+  char _pad19[4] = {};
   /**
    * Setting for UI line width.
    *

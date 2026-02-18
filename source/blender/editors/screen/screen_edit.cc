@@ -47,6 +47,7 @@
 #include "RNA_enum_types.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_c.hh"
 
 #include "WM_message.hh"
 #include "WM_toolsystem.hh"
@@ -1345,6 +1346,16 @@ void ED_screen_global_areas_refresh(wmWindow *win)
 
   screen_global_topbar_area_refresh(win, screen);
   screen_global_statusbar_area_refresh(win, screen);
+}
+
+void ED_screen_category_tabs_handlers_ensure(wmWindow *win)
+{
+  /* Add category tabs hover handler for cross-area hover state management.
+   * This handler ensures that hover state for category tabs settings buttons
+   * is properly reset when mouse moves between different areas.
+   * The handler is added at the window level so it receives events for all
+   * areas/regions on the screen. */
+  ui::screen_category_tabs_hover_handler_add(&win->runtime->handlers);
 }
 
 /* -------------------------------------------------------------------- */

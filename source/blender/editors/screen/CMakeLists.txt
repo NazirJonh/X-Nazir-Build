@@ -8,6 +8,7 @@ set(INC
   ../space_graph
   ../../makesrna
   ../../nodes
+  ../../python
   # RNA_prototypes.hh
   ${CMAKE_BINARY_DIR}/source/blender/makesrna
 )
@@ -56,6 +57,10 @@ set(LIB
 
 if(WITH_HEADLESS)
   add_definitions(-DWITH_HEADLESS)
+endif()
+
+if(WITH_PYTHON)
+  add_definitions(-DWITH_PYTHON)
 endif()
 
 blender_add_lib(bf_editor_screen "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")

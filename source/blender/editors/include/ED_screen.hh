@@ -237,6 +237,11 @@ int ED_area_icon(const ScrArea *area);
 int ED_screen_area_active(const bContext *C);
 void ED_screen_global_areas_refresh(wmWindow *win);
 void ED_screen_global_areas_sync(wmWindow *win);
+/**
+ * Initialize category tabs hover handler for the window.
+ * Called during window creation to ensure cross-area hover state management.
+ */
+void ED_screen_category_tabs_handlers_ensure(wmWindow *win);
 /** Only exported for WM. */
 void ED_area_do_listen(wmSpaceTypeListenerParams *params);
 void ED_area_tag_redraw(ScrArea *area);

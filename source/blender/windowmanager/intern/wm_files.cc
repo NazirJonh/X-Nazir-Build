@@ -47,6 +47,7 @@
 #include "BLI_time.h"
 #include "BLI_timer.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 #include BLI_SYSTEM_PID_H
 
 #include "BLO_core_blend_header.hh"
@@ -704,6 +705,14 @@ static void wm_file_read_post(bContext *C,
   const bool reset_app_template = params->reset_app_template;
 
   bool addons_loaded = false;
+
+  /* Clear category glyph mappings after file load.
+   * These may contain garbage pointers from the old file's memory space.
+   * They will be re-initialized from JSON by Python callbacks. */
+  if (wm != nullptr) {
+    BLI_listbase_clear(&wm->category_glyph_mappings);
+    BLI_listbase_clear(&wm->category_glyph_overrides);
+  }
 
   if (use_data) {
     if (!G.background) {
@@ -2095,6 +2104,52 @@ static bool wm_file_write_check_with_report_on_failure(Main *bmain,
 }
 
 /**
+ * Temporarily clear category glyph mappings for file save.
+ * These are runtime-only data that should not be saved to .blend files.
+ * Stores the original data to restore after save.
+ */
+struct CategoryGlyphMappingsBackup {
+  ListBase mappings;
+  ListBase overrides;
+  ListBase tags;
+};
+
+static void wm_category_glyph_mappings_backup_and_clear(Main *bmain,
+                                                         blender::Vector<CategoryGlyphMappingsBackup> &backups)
+{
+  /* Backup and clear category glyph mappings from all window managers. */
+  for (wmWindowManager &wm : bmain->wm) {
+    CategoryGlyphMappingsBackup backup;
+    /* Store the original list pointers. */
+    backup.mappings = wm.category_glyph_mappings;
+    backup.overrides = wm.category_glyph_overrides;
+    backup.tags = wm.category_tags;
+    backups.append(backup);
+
+    /* Clear the ListBase pointers to prevent writing data to file. */
+    BLI_listbase_clear(&wm.category_glyph_mappings);
+    BLI_listbase_clear(&wm.category_glyph_overrides);
+    BLI_listbase_clear(&wm.category_tags);
+  }
+}
+
+static void wm_category_glyph_mappings_restore(Main *bmain,
+                                                blender::Vector<CategoryGlyphMappingsBackup> &backups)
+{
+  /* Restore category glyph mappings after file save. */
+  int i = 0;
+  for (wmWindowManager &wm : bmain->wm) {
+    if (i < backups.size()) {
+      /* Restore the original list pointers. */
+      wm.category_glyph_mappings = backups[i].mappings;
+      wm.category_glyph_overrides = backups[i].overrides;
+      wm.category_tags = backups[i].tags;
+      i++;
+    }
+  }
+}
+
+/**
  * \see #wm_homefile_write_exec wraps #BLO_write_file in a similar way.
  */
 static bool wm_file_write(bContext *C,
@@ -2107,6 +2162,9 @@ static bool wm_file_write(bContext *C,
   Main *bmain = CTX_data_main(C);
   BlendThumbnail *thumb = nullptr, *main_thumb = nullptr;
   ImBuf *ibuf_thumb = nullptr;
+
+  /* Backup for category glyph mappings - will be cleared during save and restored after. */
+  blender::Vector<CategoryGlyphMappingsBackup> glyph_mappings_backup;
 
   /* NOTE: used to replace the file extension (to ensure `.blend`),
    * no need to now because the operator ensures,
@@ -2214,6 +2272,12 @@ static bool wm_file_write(bContext *C,
   /* XXX(ton): temp solution to solve bug, real fix coming. */
   bmain->recovered = false;
 
+  /* Backup and clear category glyph mappings before save - these are runtime-only data
+   * loaded from JSON, not saved to .blend files. This prevents crashes when
+   * loading files that contain garbage pointers in these ListBase structures.
+   * The data is restored after save to keep the UI working. */
+  wm_category_glyph_mappings_backup_and_clear(bmain, glyph_mappings_backup);
+
   BlendFileWriteParams blend_write_params{};
   blend_write_params.remap_mode = remap_mode;
   blend_write_params.use_save_versions = true;
@@ -2221,6 +2285,9 @@ static bool wm_file_write(bContext *C,
   blend_write_params.thumb = thumb;
 
   const bool success = BLO_write_file(bmain, filepath, fileflags, &blend_write_params, reports);
+
+  /* Restore category glyph mappings after save to keep UI working. */
+  wm_category_glyph_mappings_restore(bmain, glyph_mappings_backup);
 
   if (success) {
     const bool do_history_file_update = (G.background == false) &&

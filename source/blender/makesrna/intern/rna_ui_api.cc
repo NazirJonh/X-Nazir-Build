@@ -536,6 +536,23 @@ static void rna_uiItemL(Layout *layout,
   layout->label(text.value_or(""), icon);
 }
 
+static void rna_uiItemL_colored(Layout *layout,
+                                const char *name,
+                                const char *text_ctxt,
+                                bool translate,
+                                int icon,
+                                float color_r,
+                                float color_g,
+                                float color_b)
+{
+  /* Get translated name (label). */
+  std::optional<StringRefNull> text = rna_translate_ui_text(
+      name, text_ctxt, nullptr, nullptr, translate);
+
+  float color[3] = {color_r, color_g, color_b};
+  uiItemL_colored(layout, text.value_or(""), icon, color);
+}
+
 static void rna_uiItemM(Layout *layout,
                         const char *menuname,
                         const char *name,
@@ -1663,6 +1680,14 @@ void RNA_api_ui_layout(StructRNA *srna)
   api_ui_item_common(func);
   parm = RNA_def_property(func, "icon_value", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_ui_text(parm, "Icon Value", "Override automatic icon of the item");
+
+  func = RNA_def_function(srna, "colored_label", "rna_uiItemL_colored");
+  RNA_def_function_ui_description(
+      func, "Item. Displays text with a custom color (RGB 0.0-1.0) and/or icon in the layout.");
+  api_ui_item_common(func);
+  parm = RNA_def_float(func, "color_r", 0.0f, 0.0f, 1.0f, "Red", "Red component (0.0-1.0)", 0.0f, 1.0f);
+  parm = RNA_def_float(func, "color_g", 0.0f, 0.0f, 1.0f, "Green", "Green component (0.0-1.0)", 0.0f, 1.0f);
+  parm = RNA_def_float(func, "color_b", 0.0f, 0.0f, 1.0f, "Blue", "Blue component (0.0-1.0)", 0.0f, 1.0f);
 
   func = RNA_def_function(srna, "menu", "rna_uiItemM");
   parm = RNA_def_string(func, "menu", nullptr, 0, "", "Identifier of the menu");

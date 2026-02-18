@@ -6,6 +6,7 @@ import bpy
 from bpy.types import (
     Header,
     Menu,
+    Operator,
     Panel,
     UIList,
 )
@@ -15,6 +16,106 @@ from bpy.app.translations import (
     pgettext_rpt as rpt_,
 )
 from bl_ui.utils import PresetPanel
+
+
+# -----------------------------------------------------------------------------
+# Category Glyph Mappings
+
+# Default category glyph mappings (Material Symbols)
+DEFAULT_CATEGORY_GLYPHS = {
+    # Common categories
+    "Item": "\ueb75",       # visibility // \ue68e \\
+    "View": "\uf4c9",       # visibility \uf4c9 \ue417
+    "Edit": "\ue3c9",       # edit
+    "Tool": "\uea3b",       # construction
+    "Asset": "\ue2c7",      # folder
+    "Options": "\ue5d4",    # settings \ue5d4 \ue8b8
+
+    # Editor-specific
+    "Animation": "\uf8f0",  # motion_photos_on \ue167 \uefdc \uf8f0
+    "Physics": "\ue3d4",    # science
+    "World": "\ue88e",      # public
+    "Material": "\ue429",   # palette
+    "Modifiers": "\ue429",  # palette
+    "Texture": "\ue40a",    # texture
+    "Particles": "\ue3d4",  # science
+    "Curve": "\ue148",      # timeline
+    "Mesh": "\ue204",       # category
+    "Object": "\ue8d4",     # select_all
+    "Scene": "\ue8f9",      # dashboard
+    "Render": "\ue439",     # photo_camera
+    "Script": "\ue86f",     # terminal
+    "Sound": "\ue3a1",      # speaker
+    "Surface": "\ue76c",    # waves
+    "Volume": "\ue2c8",     # folder_open
+    "Constraints": "\ue8d2", # rule
+    "Data": "\ue23e",       # database
+    "Node": "\ue1b8",       # account_tree
+}
+
+_glyph_mappings_registered = False
+
+
+def register_category_glyph_mappings():
+    """Register default glyph mappings for category tabs."""
+    global _glyph_mappings_registered
+
+    print("[GLYPH DEBUG] register_category_glyph_mappings() called")
+
+    try:
+        wm = bpy.context.window_manager
+        if wm is None:
+            print("[GLYPH DEBUG] window_manager is None!")
+            return False
+
+        print(f"[GLYPH DEBUG] wm exists, has category_glyph_mappings: {hasattr(wm, 'category_glyph_mappings')}")
+
+        # Clear existing mappings
+        wm.category_glyph_mappings.clear()
+
+        # Add default mappings
+        count = 0
+        for category, glyph in DEFAULT_CATEGORY_GLYPHS.items():
+            item = wm.category_glyph_mappings.new(category=category)
+            item.glyph = glyph
+            count += 1
+            if count <= 3:
+                print(f"[GLYPH DEBUG] Added: category='{category}', glyph={repr(glyph)}")
+
+        print(f"[GLYPH DEBUG] Total {count} mappings registered")
+        print(f"[GLYPH DEBUG] wm.category_glyph_mappings length: {len(wm.category_glyph_mappings)}")
+
+        _glyph_mappings_registered = True
+        return True
+    except (AttributeError, RuntimeError) as e:
+        # Window manager not available yet
+        print(f"[GLYPH DEBUG] Exception: {e}")
+        return False
+
+
+def _ensure_glyph_mappings():
+    """Ensure glyph mappings are registered. Called from various places."""
+    print(f"[GLYPH DEBUG] _ensure_glyph_mappings() called, registered={_glyph_mappings_registered}")
+    if not _glyph_mappings_registered:
+        register_category_glyph_mappings()
+
+
+@bpy.app.handlers.persistent
+def _on_load_post(dummy):
+    """Register glyph mappings after file load."""
+    print("[GLYPH DEBUG] _on_load_post handler called")
+    register_category_glyph_mappings()
+
+
+# Register handler for file loads
+print("[GLYPH DEBUG] Module loading, registering handlers...")
+if _on_load_post not in bpy.app.handlers.load_post:
+    bpy.app.handlers.load_post.append(_on_load_post)
+    print("[GLYPH DEBUG] Handler registered")
+
+# Try to register immediately if window manager is available
+print("[GLYPH DEBUG] Attempting immediate registration...")
+register_category_glyph_mappings()
 
 
 # -----------------------------------------------------------------------------
@@ -230,7 +331,6 @@ class USERPREF_PT_interface_display(InterfacePanel, CenterAlignMixIn, Panel):
 
         col.prop(view, "ui_scale", text="Resolution Scale")
         col.prop(view, "ui_line_width", text="Line Width")
-        col.prop(view, "category_tabs_zoom", text="Category Tabs Size")
         col.prop(view, "show_splash", text="Splash Screen")
         col.prop(view, "show_developer_ui")
 
@@ -3101,6 +3201,59 @@ class USERPREF_PT_experimental_tweaks(ExperimentalPanel, Panel):
 """
 
 # -----------------------------------------------------------------------------
+# Category Tabs Settings Popup
+
+class VIEW3D_OT_category_tabs_settings(Operator):
+    """Adjust category tabs size"""
+    bl_idname = "view3d.category_tabs_settings"
+    bl_label = "Settings Tabs"
+    bl_description = "Adjust category tabs size"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def draw(self, context):
+        layout = self.layout
+        prefs = context.preferences
+        view = prefs.view
+
+        # Display mode buttons
+        layout.label(text="Display Mode")
+        row = layout.row(align=True)
+
+        # Use enum property directly with expanded display
+        row.prop_enum(view, "category_tabs_display_mode", "GLYPHS_ONLY", text="Icon")
+        row.prop_enum(view, "category_tabs_display_mode", "GLYPHS_TEXT", text="Mixed")
+        row.prop_enum(view, "category_tabs_display_mode", "TEXT_ONLY", text="Text")
+
+        # Size slider - different property based on mode
+        layout.separator()
+        if view.category_tabs_display_mode == 'GLYPHS_ONLY':
+            layout.prop(view, "category_tabs_zoom_icon", text="Icon Size")
+        elif view.category_tabs_display_mode == 'GLYPHS_TEXT':
+            layout.prop(view, "category_tabs_zoom_mixed", text="Mixed Size")
+        else:  # TEXT_ONLY
+            layout.prop(view, "category_tabs_zoom_text", text="Text Size")
+
+        # Show active tab name option - only enabled in Icon mode
+        layout.separator()
+        row = layout.row()
+        row.active = view.category_tabs_display_mode == 'GLYPHS_ONLY'
+        row.prop(view, "category_tabs_show_active_name", text="Show Active Tab Name")
+
+        # Allow editing category data
+        layout.separator()
+        layout.prop(view, "category_tabs_allow_edit", text="Allow Edit Category Data")
+
+    def execute(self, context):
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        # Ensure glyph mappings are registered when opening settings
+        _ensure_glyph_mappings()
+        wm = context.window_manager
+        return wm.invoke_popup(self, width=200)
+
+
+# -----------------------------------------------------------------------------
 # Class Registration
 
 # Order of registration defines order in UI,
@@ -3213,6 +3366,9 @@ classes = (
     # Popovers.
     USERPREF_PT_ndof_settings,
     USERPREF_PT_addons_filter,
+
+    # Operators.
+    VIEW3D_OT_category_tabs_settings,
 
     USERPREF_PT_experimental_new_features,
     USERPREF_PT_experimental_prototypes,

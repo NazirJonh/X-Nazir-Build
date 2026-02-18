@@ -1759,8 +1759,14 @@ void blo_do_versions_userdef(UserDef *userdef)
     userdef->uiflag2 |= USER_UIFLAG2_SHOW_ONLINE_ASSETS;
   }
 
-  if (userdef->category_tabs_zoom == 0.0f) {
-    userdef->category_tabs_zoom = 1.0f;
+  if (userdef->category_tabs_zoom_icon == 0.0f) {
+    userdef->category_tabs_zoom_icon = 1.0f;
+  }
+  if (userdef->category_tabs_zoom_mixed == 0.0f) {
+    userdef->category_tabs_zoom_mixed = 1.0f;
+  }
+  if (userdef->category_tabs_zoom_text == 0.0f) {
+    userdef->category_tabs_zoom_text = 1.0f;
   }
 
   /**

@@ -208,6 +208,25 @@ static const EnumPropertyItem rna_enum_preferences_asset_import_method_items[] =
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_category_tabs_display_mode_items[] = {
+    {USER_CATEGORY_TABS_GLYPHS_ONLY,
+     "GLYPHS_ONLY",
+     0,
+     "Glyphs Only",
+     "Show only glyph icons in category tabs"},
+    {USER_CATEGORY_TABS_GLYPHS_TEXT,
+     "GLYPHS_TEXT",
+     0,
+     "Mixed",
+     "Show both glyph icons and text in category tabs"},
+    {USER_CATEGORY_TABS_TEXT_ONLY,
+     "TEXT_ONLY",
+     0,
+     "Text Only",
+     "Show only text in category tabs"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 }  // namespace blender
 
 #ifdef RNA_RUNTIME
@@ -5013,11 +5032,43 @@ static void rna_def_userdef_view(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 0.5f, 3.0f, 1, 2);
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
-  prop = RNA_def_property(srna, "category_tabs_zoom", PROP_FLOAT, PROP_NONE);
+  prop = RNA_def_property(srna, "category_tabs_zoom_icon", PROP_FLOAT, PROP_NONE);
   RNA_def_property_ui_text(
-      prop, "Category Tabs Zoom", "Scale factor for category tabs in sidebar regions");
+      prop, "Icon Size", "Scale factor for category tabs in Icon mode");
   RNA_def_property_range(prop, 0.5f, 3.0f);
   RNA_def_property_ui_range(prop, 0.5f, 4.0f, 0.1, 2);
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_ui_text(
+      prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
+  RNA_def_property_range(prop, 0.5f, 3.0f);
+  RNA_def_property_ui_range(prop, 0.5f, 4.0f, 0.1, 2);
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_ui_text(
+      prop, "Text Size", "Scale factor for category tabs in Text mode");
+  RNA_def_property_range(prop, 0.5f, 3.0f);
+  RNA_def_property_ui_range(prop, 0.5f, 4.0f, 0.1, 2);
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_display_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_display_mode");
+  RNA_def_property_enum_items(prop, rna_enum_category_tabs_display_mode_items);
+  RNA_def_property_ui_text(prop, "Category Tabs Display Mode", "How to display category tabs");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_allow_edit", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_allow_edit", 1);
+  RNA_def_property_ui_text(prop, "Allow Edit Category Data", "Enable editing category tab name, glyph and color");
+  RNA_def_property_ui_icon(prop, ICON_UNLOCKED, true);
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_show_active_name", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_show_active_name", 1);
+  RNA_def_property_ui_text(prop, "Show Active Tab Name",
+                           "Show category name for active tab in Icon mode");
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
   prop = RNA_def_property(srna, "border_width", PROP_INT, PROP_NONE);

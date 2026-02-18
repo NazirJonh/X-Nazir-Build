@@ -14,25 +14,33 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
+#include "BLI_set.hh"
 
 #include "BLT_translation.hh"
 
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
+#include "DNA_windowmanager_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BKE_context.hh"
 #include "BKE_screen.hh"
+#include "BKE_workspace.hh"
 
 #include "RNA_access.hh"
+#include "RNA_prototypes.hh"
 
 #include "BLF_api.hh"
 
@@ -43,6 +51,7 @@
 
 #include "UI_interface_c.hh"
 #include "UI_interface_icons.hh"
+#include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 #include "UI_view2d.hh"
 
@@ -1403,8 +1412,969 @@ bool panel_should_show_background(const ARegion *region, const PanelType *panel_
 
 #define TABS_PADDING_BETWEEN_FACTOR 4.0f
 #define TABS_PADDING_TEXT_FACTOR 6.0f
+#define TABS_GLYPH_TEXT_GAP_FACTOR 6.0f
+#define TABS_SETTINGS_ICON "\ue5d3"  /* Material Symbols: settings/gear \ue5c5   \ue5d3           */
 
-void panel_category_tabs_draw_all(ARegion *region, const char *category_id_active)
+/* Glyph darkening factor for inactive tabs (0.0 = no change, 1.0 = black). */
+#define TABS_GLYPH_DARKEN_BASE 0.15f    /* Darkening for inactive tabs without hover. */
+
+/* Tab background brightening factors for inactive tabs (0.0 = no change, 1.0 = white). */
+#define TABS_BG_BRIGHTEN_BASE 0.0f        /* Base brightening for inactive tab background (disabled by default). */
+#define TABS_BG_BRIGHTEN_HOVER 0.05f       /* Brightening when mouse hovers over inactive tab (disabled by default). */ 
+
+static void panel_category_tabs_draw_settings_button(const bContext *C,
+                                                      ARegion *region,
+                                                      const float zoom,
+                                                      const uchar theme_col_tab_text[3])
+{
+  const uiStyle *style = style_get();
+  const int fontid = style->widget.uifont_id;
+
+  /* Use pre-calculated rect (with scroll already applied). */
+  const rcti *rct = &region->runtime->category_tabs_settings_rect;
+
+  /* Validate hover state - check if mouse is actually over the button. */
+  bool is_hover = region->runtime->category_tabs_settings_hover;
+  wmWindow *win = CTX_wm_window(C);
+
+  const double current_time = BLI_time_now_seconds();
+  const double time_since_click = current_time - region->runtime->category_tabs_settings_click_time;
+  const double time_since_hover = current_time - region->runtime->category_tabs_settings_hover_time;
+
+  /* Auto-reset hover after 2 seconds if mouse is not over button.
+   * This ensures the button doesn't stay highlighted forever when mouse leaves
+   * and no redraw events are triggered.
+   * Note: The area-level hover handler also resets hover when mouse moves
+   * between regions, so this timeout is a fallback safety mechanism.
+   */
+  const bool hover_timeout_expired = time_since_hover > 2.0;
+  const bool recent_click = time_since_click < 0.5;
+
+  if (win && win->runtime->eventstate) {
+    /* Check if mouse is in this region and over the button. */
+    const int mx = win->runtime->eventstate->xy[0] - region->winrct.xmin;
+    const int my = win->runtime->eventstate->xy[1] - region->winrct.ymin;
+    const bool mouse_in_region = BLI_rcti_isect_pt(&region->winrct,
+                                                   win->runtime->eventstate->xy[0],
+                                                   win->runtime->eventstate->xy[1]);
+    const bool actually_over = mouse_in_region && BLI_rcti_isect_pt(rct, mx, my);
+
+    /* Update hover state:
+     * - If mouse is over button: set hover true, update hover_time
+     * - If mouse is NOT over button AND hover_timeout expired: reset hover false
+     * - Otherwise: keep current hover state (popup might be open)
+     */
+    if (actually_over) {
+      if (!is_hover) {
+        /* Hover just became true - update timestamp. */
+        region->runtime->category_tabs_settings_hover_time = current_time;
+      }
+      is_hover = true;
+    }
+    else if (hover_timeout_expired) {
+      /* Timeout expired - reset hover regardless of popup state. */
+      is_hover = false;
+    }
+
+    /* Update stored hover state. */
+    region->runtime->category_tabs_settings_hover = is_hover;
+  }
+
+  /* Draw the button background (same style as inactive tab, or active when hovered). */
+  bTheme *btheme = theme::theme_get();
+  const float tab_curve_radius = btheme->tui.wcol_tab.roundness * U.widget_unit * zoom;
+  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+  const int roundboxtype = region->overlap ? CNR_ALL :
+                                             (is_left ? (CNR_TOP_LEFT | CNR_BOTTOM_LEFT) :
+                                                        (CNR_TOP_RIGHT | CNR_BOTTOM_RIGHT));
+
+  float theme_col_tab_bg[4];
+  float theme_col_tab_outline[4];
+  if (is_hover) {
+    /* Use active tab colors when hovered. */
+    theme::get_color_4fv(TH_TAB_ACTIVE, theme_col_tab_bg);
+  }
+  else {
+    /* Use inactive tab colors normally. */
+    theme::get_color_4fv(TH_TAB_INACTIVE, theme_col_tab_bg);
+  }
+  theme::get_color_4fv(TH_TAB_OUTLINE, theme_col_tab_outline);
+
+  GPU_blend(GPU_BLEND_ALPHA);
+
+  rctf box_rect;
+  box_rect.xmin = float(rct->xmin);
+  box_rect.xmax = float(rct->xmax);
+  box_rect.ymin = float(rct->ymin);
+  box_rect.ymax = float(rct->ymax);
+
+  draw_roundbox_corner_set(roundboxtype);
+  draw_roundbox_4fv(&box_rect, true, tab_curve_radius, theme_col_tab_bg);
+  draw_roundbox_4fv(&box_rect, false, tab_curve_radius, theme_col_tab_outline);
+
+  /* Draw the settings icon. */
+  const float glyph_width = BLF_width(fontid, TABS_SETTINGS_ICON, BLF_DRAW_STR_DUMMY_MAX);
+  const int ascender_i = BLF_ascender(fontid);
+  const int descender_i = BLF_descender(fontid);
+  const float ascender = float(ascender_i);
+  const float descender = float(descender_i);
+  const float glyph_height = ascender - descender;
+
+  const float tab_center_x = float(rct->xmin + rct->xmax) * 0.5f;
+  const float tab_center_y = float(rct->ymin + rct->ymax) * 0.5f;
+
+  float pos_x = tab_center_x - glyph_width * 0.5f;
+  float pos_y = tab_center_y - glyph_height * 0.5f - descender;
+
+  /* Use highlighted text color when hovered. */
+  uchar theme_col_text_hi[3];
+  theme::get_color_3ubv(TH_TAB_TEXT_HI, theme_col_text_hi);
+
+  BLF_disable(fontid, BLF_ROTATION);
+  BLF_position(fontid, pos_x, pos_y, 0.0f);
+  BLF_color3ubv(fontid, is_hover ? theme_col_text_hi : theme_col_tab_text);
+  BLF_draw(fontid, TABS_SETTINGS_ICON, BLF_DRAW_STR_DUMMY_MAX);
+
+  GPU_blend(GPU_BLEND_NONE);
+}
+
+/**
+ * Lookup glyph for a category using priority chain:
+ * 1. User override
+ * 2. PanelType.icon_glyph
+ * 3. Global mapping
+ * 4. First character fallback
+ */
+/* Default glyph mappings - Material Symbols font */
+static const struct {
+  const char *category;
+  const char *glyph;
+} default_glyph_mappings[] = {
+    {"Item", "\ue8f4"},       /* visibility */
+    {"View", "\ue417"},       /* visibility */
+    {"Edit", "\ue3c9"},       /* edit */
+    {"Tool", "\ue166"},       /* construction */
+    {"Asset", "\ue2c7"},      /* folder */
+    {"Options", "\ue8b8"},    /* settings */
+    {"Animation", "\ue71b"},  /* motion_photos_on */
+    {"Physics", "\ue3d4"},    /* science */
+    {"World", "\ue88e"},      /* public */
+    {"Material", "\ue429"},   /* palette */
+    {"Modifiers", "\ue429"},  /* palette */
+    {"Texture", "\ue40a"},    /* texture */
+    {"Particles", "\ue3d4"},  /* science */
+    {"Curve", "\ue148"},      /* timeline */
+    {"Mesh", "\ue204"},       /* category */
+    {"Object", "\ue8d4"},     /* select_all */
+    {"Scene", "\ue8f9"},      /* dashboard */
+    {"Render", "\ue439"},     /* photo_camera */
+    {"Script", "\ue86f"},     /* terminal */
+    {"Sound", "\ue3a1"},      /* speaker */
+    {"Surface", "\ue76c"},    /* waves */
+    {"Volume", "\ue2c8"},     /* folder_open */
+    {"Constraints", "\ue8d2"}, /* rule */
+    {"Data", "\ue23e"},       /* database */
+    {"Node", "\ue1b8"},       /* account_tree */
+    {nullptr, nullptr},
+};
+
+/* Lookup glyph in static default mappings */
+static const char *lookup_default_glyph(const char *category)
+{
+  for (int i = 0; default_glyph_mappings[i].category != nullptr; i++) {
+    if (STREQ(default_glyph_mappings[i].category, category)) {
+      return default_glyph_mappings[i].glyph;
+    }
+  }
+  return nullptr;
+}
+
+const char *panel_category_glyph_lookup(const wmWindowManager *wm,
+                                        const char *category,
+                                        const PanelType *panel_type,
+                                        bool *r_is_fallback_letter,
+                                        bool *r_is_reserved, /* true if from DEFAULT or wm.mappings */
+                                        float r_color[3])
+{
+  /* Initialize outputs. */
+  if (r_is_fallback_letter) {
+    *r_is_fallback_letter = false;
+  }
+  if (r_is_reserved) {
+    *r_is_reserved = false;
+  }
+  /* Initialize color to black (use theme). */
+  if (r_color) {
+    zero_v3(r_color);
+  }
+
+  /* 1. Check user overrides in wm->category_glyph_overrides.
+   * If override has a glyph, use it immediately.
+   * If override only has color (empty glyph), save color and continue looking for glyph. */
+  if (wm) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        /* If override has a glyph, use it and return immediately. */
+        if (item->glyph[0] != '\0') {
+          if (r_is_reserved) {
+            *r_is_reserved = true;
+          }
+          if (r_color) {
+            copy_v3_v3(r_color, item->color);
+          }
+          return item->glyph;
+        }
+        /* Override has no glyph but has color - save color and continue looking for glyph. */
+        if (r_color && !is_zero_v3(item->color)) {
+          copy_v3_v3(r_color, item->color);
+        }
+        break;  /* Found override entry, don't search further in overrides */
+      }
+    }
+  }
+
+  /* 2. Check global mappings in wm->category_glyph_mappings (registered by Python). */
+  if (wm && !BLI_listbase_is_empty(&wm->category_glyph_mappings)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        if (r_is_reserved) {
+          *r_is_reserved = true;  /* wm mappings are reserved */
+        }
+        /* Only set color if not already set by override. */
+        if (r_color && is_zero_v3(r_color) && !is_zero_v3(item->color)) {
+          copy_v3_v3(r_color, item->color);
+        }
+        return item->glyph;
+      }
+    }
+  }
+
+  /* 3. Check PanelType.icon_glyph. */
+  if (panel_type && panel_type->icon_glyph && panel_type->icon_glyph[0]) {
+    /* Check for color override even if glyph comes from PanelType.
+     * This allows setting color via category_glyph_overrides or category_glyph_mappings. */
+    if (r_color && is_zero_v3(r_color)) {
+      /* Check overrides for color (without requiring glyph in override). */
+      if (wm) {
+        for (const CategoryGlyphItem *item =
+                 static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+             item;
+             item = static_cast<const CategoryGlyphItem *>(item->next))
+        {
+          if (STREQ(item->category, category) && !is_zero_v3(item->color)) {
+            copy_v3_v3(r_color, item->color);
+            break;
+          }
+        }
+      }
+      /* Check mappings for color if not found in overrides. */
+      if (is_zero_v3(r_color) && wm && !BLI_listbase_is_empty(&wm->category_glyph_mappings)) {
+        for (const CategoryGlyphItem *item =
+                 static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+             item;
+             item = static_cast<const CategoryGlyphItem *>(item->next))
+        {
+          if (STREQ(item->category, category) && !is_zero_v3(item->color)) {
+            copy_v3_v3(r_color, item->color);
+            break;
+          }
+        }
+      }
+    }
+    return panel_type->icon_glyph;
+  }
+
+  /* 4. Check static default mappings. */
+  const char *glyph = lookup_default_glyph(category);
+  if (glyph) {
+    if (r_is_reserved) {
+      *r_is_reserved = true;  /* Defaults are reserved */
+    }
+    return glyph;
+  }
+
+  /* 5. Fallback: return first character of category. */
+  if (r_is_fallback_letter) {
+    *r_is_fallback_letter = true;
+  }
+  /* Extract first UTF-8 character into static buffer. */
+  static char first_char_buf[8];
+  const int char_size = BLI_str_utf8_size_safe(category);
+  if (char_size > 0 && char_size < int(sizeof(first_char_buf))) {
+    memcpy(first_char_buf, category, char_size);
+    first_char_buf[char_size] = '\0';
+    return first_char_buf;
+  }
+  return category;
+}
+
+/**
+ * Lookup display name for a category.
+ * Returns user override if exists, otherwise returns the category name itself.
+ */
+static const char *panel_category_display_name_lookup(const wmWindowManager *wm,
+                                                        const char *category)
+{
+  if (wm) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        if (item->display_name[0] != '\0') {
+          return item->display_name;
+        }
+        break;
+      }
+    }
+  }
+  return category;
+}
+
+/**
+ * Check if a string is a single glyph (not regular text).
+ * Used to determine if the category is using an icon glyph.
+ */
+static bool is_single_glyph_str(const char *str)
+{
+  if (!str || !str[0]) {
+    return false;
+  }
+
+  const int utf8_char_size = BLI_str_utf8_size_safe(str);
+  const size_t len = BLI_strnlen(str, 64);
+
+  /* Single ASCII character or single UTF-8 character. */
+  return (len == 1) || (utf8_char_size > 0 && size_t(utf8_char_size) == len);
+}
+
+/**
+ * Set glyph color: custom color if set, otherwise theme color.
+ * Returns true if custom color was applied.
+ * \param r_color: Output RGB color that was set (in ubyte format).
+ */
+static bool set_glyph_color(const int fontid,
+                            const float custom_color[3],
+                            const bool is_active,
+                            const unsigned char theme_col_text[3],
+                            const unsigned char theme_col_text_sel[3],
+                            unsigned char r_color[3])
+{
+  if (!is_zero_v3(custom_color)) {
+    BLF_color3fv_alpha(fontid, custom_color, 1.0f);
+    r_color[0] = uchar(custom_color[0] * 255);
+    r_color[1] = uchar(custom_color[1] * 255);
+    r_color[2] = uchar(custom_color[2] * 255);
+    return true;
+  }
+  const unsigned char *col = is_active ? theme_col_text_sel : theme_col_text;
+  BLF_color3ubv(fontid, col);
+  r_color[0] = col[0];
+  r_color[1] = col[1];
+  r_color[2] = col[2];
+  return false;
+}
+
+/**
+ * Brighten a color by interpolating towards white.
+ * \param color: RGB color to brighten (modified in-place)
+ * \param factor: Brightening factor (0.0 = no change, 1.0 = white)
+ */
+static void brighten_color_3ub(uchar color[3], const float factor)
+{
+  BLI_assert(factor >= 0.0f && factor <= 1.0f);
+
+  for (int i = 0; i < 3; i++) {
+    color[i] = uchar(color[i] + (255 - color[i]) * factor);
+  }
+}
+
+/**
+ * Darken a color by interpolating towards black.
+ * \param color: RGB color to darken (modified in-place)
+ * \param factor: Darkening factor (0.0 = no change, 1.0 = black)
+ */
+static void darken_color_3ub(uchar color[3], const float factor)
+{
+  BLI_assert(factor >= 0.0f && factor <= 1.0f);
+
+  for (int i = 0; i < 3; i++) {
+    color[i] = uchar(color[i] * (1.0f - factor));
+  }
+}
+
+/**
+ * Brighten an RGBA color by interpolating towards white.
+ * \param color: RGBA color to brighten (modified in-place)
+ * \param factor: Brightening factor (0.0 = no change, 1.0 = white)
+ */
+static void brighten_color_4fv(float color[4], const float factor)
+{
+  BLI_assert(factor >= 0.0f && factor <= 1.0f);
+
+  for (int i = 0; i < 3; i++) {
+    color[i] = color[i] + (1.0f - color[i]) * factor;
+  }
+  /* Alpha remains unchanged. */
+}
+
+/**
+ * Apply darkening to color and set it as BLF color if needed.
+ * \param fontid: Font ID for BLF functions
+ * \param color: RGB color to darken (modified in-place) and set
+ * \param darken_factor: Factor to darken (0.0 = no change, 1.0 = black)
+ */
+static void apply_glyph_darkening(const int fontid, uchar color[3], const float darken_factor)
+{
+  if (darken_factor <= 0.0f) {
+    return;
+  }
+
+  darken_color_3ub(color, darken_factor);
+  BLF_color3ubv(fontid, color);
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Drag & Drop Helpers
+ * \{ */
+
+/**
+ * Check if a category is reserved (cannot be reordered).
+ *
+ * In Blender this is already encoded in the glyph-lookup logic:
+ * - defaults (static mappings) are reserved
+ * - wm mappings/overrides that specify a glyph are reserved
+ */
+static bool category_is_reserved_for_reorder(const wmWindowManager *wm, const char *category_id)
+{
+  bool is_reserved = false;
+  panel_category_glyph_lookup(wm, category_id, nullptr, nullptr, &is_reserved, nullptr);
+  return is_reserved;
+}
+
+/**
+ * Get the current index of a category in the workspace order,
+ * or its default position if not in workspace order.
+ */
+static int get_category_order_index(const bContext *C, ARegion *region, const char *category_id)
+{
+  WorkSpace *workspace = CTX_wm_workspace(C);
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  ScrArea *area = CTX_wm_area(C);
+  const int space_type = area ? area->spacetype : 0;
+  const int region_type = region->regiontype;
+
+  /* Look up in workspace order */
+  int user_index = 0;
+  for (WorkspaceCategoryOrder *order =
+           static_cast<WorkspaceCategoryOrder *>(workspace->category_order.first);
+       order;
+       order = order->next)
+  {
+    if (order->space_type == space_type && order->region_type == region_type) {
+      if (STREQ(order->category_id, category_id)) {
+        return user_index;
+      }
+      user_index++;
+    }
+  }
+
+  /* Not found in order - return default position */
+  int default_index = 0;
+  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (STREQ(pc_dyn.idname, category_id)) {
+      return default_index;
+    }
+    default_index++;
+  }
+
+  return 0;
+}
+
+/**
+ * Calculate the insert index based on cursor position during drag.
+ */
+static int calculate_insert_index(const wmWindowManager *wm,
+                                  ARegion *region,
+                                  CategoryDragState *state)
+{
+  int index = 0;
+
+  /* Iterate through all tabs (allow all categories for now) */
+  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    /* Skip the dragged tab */
+    if (STREQ(pc_dyn.idname, state->drag_category_id)) {
+      continue;
+    }
+
+    const int tab_height = BLI_rcti_size_y(&pc_dyn.rect);
+    const int tab_center_y = pc_dyn.rect.ymax - tab_height / 2;
+    const int cursor_y = state->drag_start_y + int(state->drag_offset_y);
+
+    /* If cursor is above tab center, insert before it */
+    if (cursor_y > tab_center_y) {
+      return index;
+    }
+
+    index++;
+  }
+
+  return index; /* Insert at end */
+}
+
+/**
+ * Update the insert zone boundaries for visual shift calculation.
+ */
+static void update_insert_zone(const wmWindowManager *wm,
+                               ARegion *region,
+                               CategoryDragState *state)
+{
+  int current_index = 0;
+  int y_accumulated = 0;
+
+  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    const int tab_height = BLI_rcti_size_y(&pc_dyn.rect);
+
+    if (current_index == state->current_insert_index) {
+      /* Found insert position */
+      state->insert_y_start = y_accumulated;
+      state->insert_y_end = y_accumulated + tab_height + state->tab_v_pad;
+      return;
+    }
+
+    if (!STREQ(pc_dyn.idname, state->drag_category_id)) {
+      y_accumulated += tab_height + state->tab_v_pad;
+    }
+    current_index++;
+  }
+
+  /* Insert at end */
+  state->insert_y_start = y_accumulated;
+  state->insert_y_end = y_accumulated + state->drag_tab_height + state->tab_v_pad;
+}
+
+/**
+ * Clear category order for a specific region in the workspace.
+ */
+static void workspace_category_order_clear(WorkSpace *workspace, int space_type, int region_type)
+{
+  WorkspaceCategoryOrder *order = static_cast<WorkspaceCategoryOrder *>(
+      workspace->category_order.first);
+  WorkspaceCategoryOrder *order_next;
+
+  while (order) {
+    order_next = order->next;
+    if (order->space_type == space_type && order->region_type == region_type) {
+      BLI_remlink(&workspace->category_order, order);
+      MEM_delete(order);
+    }
+    order = order_next;
+  }
+}
+
+/**
+ * Apply the new category order and save to Workspace.
+ */
+static void apply_category_order(bContext *C, ARegion *region, CategoryDragState *state)
+{
+  printf("[DRAG DEBUG] apply_category_order called for '%s', insert_index=%d\n",
+         state->drag_category_id, state->current_insert_index);
+
+  WorkSpace *workspace = CTX_wm_workspace(C);
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  ScrArea *area = CTX_wm_area(C);
+  const int space_type = area ? area->spacetype : 0;
+  const int region_type = region->regiontype;
+
+  printf("[DRAG DEBUG] space_type=%d, region_type=%d\n", space_type, region_type);
+
+  /* Build final order - allow ALL categories for now (ignore reserved check) */
+  Vector<std::string> final_order;
+  int insert_idx = 0;
+
+  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    printf("[DRAG DEBUG] Processing category '%s', insert_idx=%d\n", pc_dyn.idname, insert_idx);
+
+    /* Insert dragged category at correct position */
+    if (insert_idx == state->current_insert_index) {
+      printf("[DRAG DEBUG] Inserting dragged '%s' at position %d\n",
+             state->drag_category_id, insert_idx);
+      final_order.append(state->drag_category_id);
+    }
+
+    /* Add other categories */
+    if (!STREQ(pc_dyn.idname, state->drag_category_id)) {
+      final_order.append(pc_dyn.idname);
+      insert_idx++;
+    }
+  }
+
+  /* If not inserted yet, add to end */
+  if (insert_idx <= state->current_insert_index &&
+      !final_order.contains(state->drag_category_id))
+  {
+    printf("[DRAG DEBUG] Adding dragged '%s' at end\n", state->drag_category_id);
+    final_order.append(state->drag_category_id);
+  }
+
+  printf("[DRAG DEBUG] Final order has %zu items:\n", final_order.size());
+  for (int i = 0; i < final_order.size(); i++) {
+    printf("[DRAG DEBUG]   %d: %s\n", i, final_order[i].c_str());
+  }
+
+  /* Clear old order for this region */
+  workspace_category_order_clear(workspace, space_type, region_type);
+
+  /* Save new order */
+  for (int i = 0; i < final_order.size(); i++) {
+    WorkspaceCategoryOrder *item = MEM_new<WorkspaceCategoryOrder>(__func__);
+    item->space_type = space_type;
+    item->region_type = region_type;
+    STRNCPY(item->category_id, final_order[i].c_str());
+    item->order_index = i;
+    BLI_addtail(&workspace->category_order, item);
+    printf("[DRAG DEBUG] Saved: order_index=%d, category='%s'\n", i, final_order[i].c_str());
+  }
+
+  /* Notify of change */
+  WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
+}
+
+/**
+ * Get categories in workspace order, with unlisted categories appended at end.
+ */
+static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region)
+{
+  WorkSpace *workspace = CTX_wm_workspace(C);
+  ScrArea *area = CTX_wm_area(C);
+  const int space_type = area ? area->spacetype : 0;
+  const int region_type = region->regiontype;
+
+  printf("[DRAG DEBUG] get_ordered_categories: space_type=%d, region_type=%d\n", space_type, region_type);
+
+  /* Map of existing categories for quick lookup */
+  Map<std::string, PanelCategoryDyn *> existing;
+  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    existing.add(std::string(pc_dyn.idname), &pc_dyn);
+  }
+
+  /* Collect workspace order entries for this region */
+  Vector<std::pair<int, std::string>> workspace_order;
+  int order_count = 0;
+  for (WorkspaceCategoryOrder *order =
+           static_cast<WorkspaceCategoryOrder *>(workspace->category_order.first);
+       order;
+       order = order->next)
+  {
+    printf("[DRAG DEBUG]   Checking order: space=%d, region=%d, category='%s', index=%d\n",
+           order->space_type, order->region_type, order->category_id, order->order_index);
+    if (order->space_type == space_type && order->region_type == region_type) {
+      workspace_order.append(std::make_pair(order->order_index, std::string(order->category_id)));
+      order_count++;
+    }
+  }
+
+  printf("[DRAG DEBUG] Found %d workspace order entries for this region\n", order_count);
+
+  /* Sort by order_index */
+  std::sort(workspace_order.begin(), workspace_order.end());
+
+  /* Build result list */
+  Vector<PanelCategoryDyn *> result;
+  Set<std::string> added;
+
+  /* First add in workspace order */
+  for (const auto &item : workspace_order) {
+    PanelCategoryDyn **pc = existing.lookup_ptr(item.second);
+    if (pc && !added.contains(item.second)) {
+      result.append(*pc);
+      added.add(item.second);
+      printf("[DRAG DEBUG]   Added from workspace order: '%s'\n", item.second.c_str());
+    }
+  }
+
+  /* Then add remaining categories (new ones not in workspace order) */
+  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    std::string id(pc_dyn.idname);
+    if (!added.contains(id)) {
+      result.append(&pc_dyn);
+      added.add(id);
+      printf("[DRAG DEBUG]   Added from default order: '%s'\n", id.c_str());
+    }
+  }
+
+  printf("[DRAG DEBUG] get_ordered_categories returning %zu items\n", result.size());
+  return result;
+}
+
+/** \} */
+
+
+/**
+ * Draw the content (glyph and/or text) of a single category tab.
+ *
+ * Unified helper that handles all display modes:
+ * - GLYPHS_ONLY: single glyph centered, or glyph+text when active with show_active_name
+ * - GLYPHS_TEXT: glyph at top + rotated text below
+ * - TEXT_ONLY: rotated text
+ *
+ * \param rct: Target rectangle for drawing.
+ * \param rct_xmin, rct_xmax: Column bounds for text X positioning (may differ from rct for
+ *                             dragged tabs).
+ * \param darken_factor: Darkening for inactive tabs (0.0 = none).
+ */
+static void ui_panel_category_draw_content(
+    const ARegion *region,
+    const wmWindowManager *wm,
+    const char *category_id,
+    const char *category_id_draw,
+    const rcti *rct,
+    const int rct_xmin,
+    const int rct_xmax,
+    const bool is_active,
+    const bool is_left,
+    const eUserPref_CategoryTabsDisplayMode display_mode,
+    const int fontid,
+    const uiFontStyle *fstyle,
+    const float fstyle_points,
+    const float zoom,
+    const float category_tabs_zoom,
+    const int tab_v_pad_text,
+    const float darken_factor,
+    const uchar theme_col_tab_text[3],
+    const uchar theme_col_tab_text_sel[3])
+{
+  /* Look up glyph for this category. */
+  bool is_fallback_letter = false;
+  bool is_reserved_glyph = false;
+  float glyph_color[3] = {0.0f, 0.0f, 0.0f};
+  const char *glyph = panel_category_glyph_lookup(
+      wm, category_id, nullptr, &is_fallback_letter, &is_reserved_glyph, glyph_color);
+  const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
+
+  /* Decide whether to draw dual mode (glyph/letter at top + rotated text below)
+   * or single item (just a glyph centered, or just text rotated). */
+  bool draw_dual = false;
+  const char *text_for_name = category_id_draw;
+
+  if (display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT && has_glyph) {
+    draw_dual = true;
+  }
+  else if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+           U.category_tabs_show_active_name && is_active)
+  {
+    if (has_glyph) {
+      /* Glyph categories: always show glyph + text when active.
+       * If category name is a single glyph, resolve text from panel label. */
+      draw_dual = true;
+      if (is_single_glyph_str(category_id_draw)) {
+        for (const PanelType &pt : region->runtime->type->paneltypes) {
+          if (pt.category && STREQ(pt.category, category_id)) {
+            const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+            if (panel_label && panel_label[0]) {
+              text_for_name = panel_label;
+              break;
+            }
+          }
+        }
+      }
+    }
+    else if (is_fallback_letter) {
+      draw_dual = true;
+      if (is_single_glyph_str(category_id_draw)) {
+        for (const PanelType &pt : region->runtime->type->paneltypes) {
+          if (pt.category && STREQ(pt.category, category_id)) {
+            const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+            if (panel_label && panel_label[0]) {
+              text_for_name = panel_label;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /* Helper lambda for shadow setup/teardown. */
+  auto shadow_enable = [&]() {
+    if (fstyle->shadow) {
+      BLF_enable(fontid, BLF_SHADOW);
+      const float shadow_color[4] = {
+          fstyle->shadowcolor, fstyle->shadowcolor, fstyle->shadowcolor, fstyle->shadowalpha};
+      BLF_shadow(fontid, FontShadowType(fstyle->shadow), shadow_color);
+      BLF_shadow_offset(fontid, fstyle->shadx, fstyle->shady);
+    }
+  };
+  auto shadow_disable = [&]() {
+    if (fstyle->shadow) {
+      BLF_disable(fontid, BLF_SHADOW);
+    }
+  };
+
+  if (draw_dual) {
+    /* === Dual mode: glyph/letter at top, rotated text below === */
+    BLF_disable(fontid, BLF_ROTATION);
+
+    const float glyph_width = BLF_width(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX);
+    const float ascender = float(BLF_ascender(fontid));
+    const float descender = float(BLF_descender(fontid));
+    const float glyph_height = ascender - descender;
+
+    /* Position glyph from top of tab. Fallback letters get a small upward shift. */
+    const float tab_center_x = float(rct->xmin + rct->xmax) * 0.5f;
+    const float extra_shift = is_fallback_letter ? (4.0f * UI_SCALE_FAC) : 0.0f;
+    const float glyph_pos_y = float(rct->ymax) - glyph_height - (tab_v_pad_text - extra_shift);
+
+    BLF_position(fontid, tab_center_x - glyph_width * 0.5f, glyph_pos_y - descender, 0.0f);
+    uchar glyph_color_out[3];
+    set_glyph_color(
+        fontid, glyph_color, is_active, theme_col_tab_text, theme_col_tab_text_sel, glyph_color_out);
+    if (!is_active && darken_factor > 0.0f) {
+      apply_glyph_darkening(fontid, glyph_color_out, darken_factor);
+    }
+
+    shadow_enable();
+    BLF_draw(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX);
+    shadow_disable();
+
+    /* Draw rotated text below glyph. */
+    BLF_enable(fontid, BLF_ROTATION);
+    BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+
+    const int text_v_ofs = round_fl_to_int(float(rct_xmax - rct_xmin) * 0.5f);
+    const int text_size_offset = round_fl_to_int(fstyle_points * UI_SCALE_FAC *
+                                                  category_tabs_zoom * 0.35f);
+    const float text_pos_x = is_left ? rct->xmax - text_v_ofs + text_size_offset :
+                                        rct->xmin + text_v_ofs - text_size_offset;
+
+    const int glyph_h = round_fl_to_int(BLF_height(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
+    const int glyph_text_gap = round_fl_to_int(TABS_GLYPH_TEXT_GAP_FACTOR * UI_SCALE_FAC * zoom);
+    const float text_pos_y = is_left ? rct->ymin + tab_v_pad_text + glyph_text_gap :
+                                        rct->ymax - tab_v_pad_text - glyph_h - glyph_text_gap;
+
+    BLF_position(fontid, text_pos_x, text_pos_y, 0.0f);
+
+    /* Text color: use active color for active tabs, apply darkening for inactive. */
+    if (!is_active && darken_factor > 0.0f) {
+      uchar text_color[3] = {theme_col_tab_text[0], theme_col_tab_text[1], theme_col_tab_text[2]};
+      darken_color_3ub(text_color, darken_factor);
+      BLF_color3ubv(fontid, text_color);
+    }
+    else {
+      BLF_color3ubv(fontid, is_active ? theme_col_tab_text_sel : theme_col_tab_text);
+    }
+
+    shadow_enable();
+    BLF_draw(fontid, text_for_name, BLF_DRAW_STR_DUMMY_MAX);
+    shadow_disable();
+
+    BLF_disable(fontid, BLF_ROTATION);
+    return;
+  }
+
+  /* === Single item mode === */
+  const char *draw_str;
+  bool draw_as_glyph;
+  bool should_rotate = false;
+
+  switch (display_mode) {
+    case USER_CATEGORY_TABS_GLYPHS_ONLY:
+      draw_str = glyph;
+      draw_as_glyph = !is_fallback_letter;
+      should_rotate = false;
+      break;
+    case USER_CATEGORY_TABS_GLYPHS_TEXT:
+      draw_str = category_id_draw;
+      draw_as_glyph = is_single_glyph_str(category_id_draw);
+      should_rotate = !draw_as_glyph;
+      break;
+    case USER_CATEGORY_TABS_TEXT_ONLY:
+    default:
+      if (is_single_glyph_str(category_id_draw)) {
+        const char *panel_label = nullptr;
+        for (const PanelType &pt : region->runtime->type->paneltypes) {
+          if (pt.category && STREQ(pt.category, category_id)) {
+            panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+            if (panel_label && panel_label[0]) {
+              break;
+            }
+          }
+        }
+        draw_str = panel_label ? panel_label : category_id_draw;
+      }
+      else {
+        draw_str = category_id_draw;
+      }
+      draw_as_glyph = false;
+      should_rotate = true;
+      break;
+  }
+
+  /* Position. */
+  if (!should_rotate) {
+    BLF_disable(fontid, BLF_ROTATION);
+    const float gw = BLF_width(fontid, draw_str, BLF_DRAW_STR_DUMMY_MAX);
+    const float asc = float(BLF_ascender(fontid));
+    const float desc = float(BLF_descender(fontid));
+    const float gh = asc - desc;
+    const float cx = float(rct->xmin + rct->xmax) * 0.5f;
+    const float cy = float(rct->ymin + rct->ymax) * 0.5f;
+    BLF_position(fontid, cx - gw * 0.5f, cy - gh * 0.5f - desc, 0.0f);
+  }
+  else {
+    BLF_enable(fontid, BLF_ROTATION);
+    BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+    const int text_v_ofs = round_fl_to_int(float(rct_xmax - rct_xmin) * 0.5f);
+    const int text_size_offset = round_fl_to_int(fstyle_points * UI_SCALE_FAC *
+                                                  category_tabs_zoom * 0.35f);
+    const float px = is_left ? rct->xmax - text_v_ofs + text_size_offset :
+                               rct->xmin + text_v_ofs - text_size_offset;
+    const float py = is_left ? rct->ymin + tab_v_pad_text : rct->ymax - tab_v_pad_text;
+    BLF_position(fontid, px, py, 0.0f);
+  }
+
+  /* Color. */
+  if (draw_as_glyph) {
+    uchar glyph_color_out[3];
+    set_glyph_color(
+        fontid, glyph_color, is_active, theme_col_tab_text, theme_col_tab_text_sel, glyph_color_out);
+    apply_glyph_darkening(fontid, glyph_color_out, darken_factor);
+  }
+  else {
+    uchar text_color[3];
+    if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY && !is_zero_v3(glyph_color)) {
+      text_color[0] = uchar(glyph_color[0] * 255);
+      text_color[1] = uchar(glyph_color[1] * 255);
+      text_color[2] = uchar(glyph_color[2] * 255);
+    }
+    else {
+      text_color[0] = is_active ? theme_col_tab_text_sel[0] : theme_col_tab_text[0];
+      text_color[1] = is_active ? theme_col_tab_text_sel[1] : theme_col_tab_text[1];
+      text_color[2] = is_active ? theme_col_tab_text_sel[2] : theme_col_tab_text[2];
+    }
+    if (darken_factor > 0.0f) {
+      darken_color_3ub(text_color, darken_factor);
+    }
+    BLF_color3ubv(fontid, text_color);
+  }
+
+  shadow_enable();
+  BLF_draw(fontid, draw_str, BLF_DRAW_STR_DUMMY_MAX);
+  shadow_disable();
+
+  BLF_disable(fontid, BLF_ROTATION);
+}
+
+void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char *category_id_active)
 {
   // #define USE_FLAT_INACTIVE
   const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
@@ -1417,7 +2387,36 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
   const float aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
                            1.0f :
                            (static_cast<Block *>(region->runtime->uiblocks.first))->aspect;
-  const float zoom = (1.0f / aspect) * U.category_tabs_zoom;
+
+  /* Check for drag state */
+  CategoryDragState *drag_state = static_cast<CategoryDragState *>(
+      region->runtime->category_tabs_drag_state);
+  const bool is_dragging = (drag_state != nullptr && drag_state->is_dragging);
+  const char *drag_category_id = is_dragging ? drag_state->drag_category_id : "";
+
+  /* Get display mode from preferences. */
+  const eUserPref_CategoryTabsDisplayMode display_mode =
+      static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+
+  /* Get zoom based on display mode. */
+  float category_tabs_zoom;
+  switch (display_mode) {
+    case USER_CATEGORY_TABS_GLYPHS_ONLY:
+      category_tabs_zoom = U.category_tabs_zoom_icon;
+      break;
+    case USER_CATEGORY_TABS_GLYPHS_TEXT:
+      category_tabs_zoom = U.category_tabs_zoom_mixed;
+      break;
+    case USER_CATEGORY_TABS_TEXT_ONLY:
+    default:
+      category_tabs_zoom = U.category_tabs_zoom_text;
+      break;
+  }
+  const float zoom = (1.0f / aspect) * category_tabs_zoom;
+
+  /* Get window manager for glyph lookup. */
+  const wmWindowManager *wm = CTX_wm_manager(C);
+
   const int px = U.pixelsize;
   const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
   const float dpi_fac = UI_SCALE_FAC;
@@ -1439,6 +2438,7 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
   /* Intentionally don't scale by 'px'. */
   const int rct_xmin = is_left ? v2d->mask.xmin + 3 : (v2d->mask.xmax - category_tabs_width);
   const int rct_xmax = is_left ? v2d->mask.xmin + category_tabs_width : (v2d->mask.xmax - 3);
+
   int y_ofs = tab_v_pad;
 
   /* Primary theme colors. */
@@ -1464,10 +2464,8 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
 
   is_alpha = (region->overlap && (theme_col_back[3] != 255));
 
-  BLF_enable(fontid, BLF_ROTATION);
-  BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
   fontscale(&fstyle_points, aspect);
-  BLF_size(fontid, fstyle_points * UI_SCALE_FAC * U.category_tabs_zoom);
+  BLF_size(fontid, fstyle_points * UI_SCALE_FAC * category_tabs_zoom);
 
   /* Check the region type supports categories to avoid an assert
    * for showing 3D view panels in the properties space. */
@@ -1475,13 +2473,117 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
     BLI_assert(panel_category_is_visible(region));
   }
 
-  /* Calculate tab rectangle for each panel. */
-  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+  /* Get mouse position for hover detection. */
+  wmWindow *win = CTX_wm_window(C);
+  int mouse_x = 0, mouse_y = 0;
+  bool mouse_in_region = false;
+  if (win && win->runtime->eventstate) {
+    mouse_x = win->runtime->eventstate->xy[0] - region->winrct.xmin;
+    mouse_y = win->runtime->eventstate->xy[1] - region->winrct.ymin;
+    mouse_in_region = BLI_rcti_isect_pt(&region->winrct,
+                                        win->runtime->eventstate->xy[0],
+                                        win->runtime->eventstate->xy[1]);
+  }
+
+  /* Get ordered categories from workspace */
+  Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
+
+  /* Calculate tab rectangle for each panel using ordered list. */
+  for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+    PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
     rcti *rct = &pc_dyn.rect;
     const char *category_id = pc_dyn.idname;
-    const char *category_id_draw = IFACE_(category_id);
-    const int category_width = round_fl_to_int(
-        BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+    const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
+
+    /* Get glyph for this category using priority chain. */
+    bool is_fallback_letter = false;
+    bool is_reserved_glyph = false;
+    float glyph_color[3] = {0.0f, 0.0f, 0.0f};
+    const char *glyph = panel_category_glyph_lookup(wm, category_id, nullptr, &is_fallback_letter, &is_reserved_glyph, glyph_color);
+    const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
+
+    /* Calculate width based on display mode. */
+    int category_width;
+    switch (display_mode) {
+      case USER_CATEGORY_TABS_GLYPHS_ONLY:
+        /* Icon mode: ALL glyphs/letters are rotated (-90 for right, +90 for left).
+           So always calculate rotated width.
+         */
+        BLF_enable(fontid, BLF_ROTATION);
+        BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+        category_width = round_fl_to_int(BLF_width(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
+        BLF_disable(fontid, BLF_ROTATION);
+
+        /* Expand for active tab name if option enabled and this is active tab */
+        if (U.category_tabs_show_active_name && STREQ(category_id, category_id_active)) {
+          /* Get text to display:
+           * - For single glyph category_id: find panel label
+           * - For fallback letter: use category_id_draw (the category name)
+           */
+          const char *text_for_name = category_id_draw;
+          if (is_single_glyph_str(category_id_draw)) {
+            for (const PanelType &pt : region->runtime->type->paneltypes) {
+              if (pt.category && STREQ(pt.category, category_id)) {
+                const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+                if (panel_label && panel_label[0]) {
+                  text_for_name = panel_label;
+                  break;
+                }
+              }
+            }
+          }
+          /* For fallback letters, use category_id_draw directly (matches DRAW code) */
+          BLF_enable(fontid, BLF_ROTATION);
+          BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+          const int text_w = round_fl_to_int(BLF_width(fontid, text_for_name, BLF_DRAW_STR_DUMMY_MAX));
+          BLF_disable(fontid, BLF_ROTATION);
+          const int glyph_text_gap = round_fl_to_int(TABS_GLYPH_TEXT_GAP_FACTOR * UI_SCALE_FAC * zoom);
+          category_width += text_w + glyph_text_gap;
+        }
+        break;
+
+      case USER_CATEGORY_TABS_GLYPHS_TEXT:
+        /* Glyph + text combined width. */
+        if (has_glyph) {
+          const int glyph_h = round_fl_to_int(BLF_height(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
+          BLF_enable(fontid, BLF_ROTATION);
+          BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+          const int text_w = round_fl_to_int(BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+          BLF_disable(fontid, BLF_ROTATION);
+          const int glyph_text_gap = round_fl_to_int(TABS_GLYPH_TEXT_GAP_FACTOR * UI_SCALE_FAC * zoom);
+          category_width = glyph_h + text_w + glyph_text_gap;
+        }
+        else {
+          BLF_enable(fontid, BLF_ROTATION);
+          BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+          category_width = round_fl_to_int(BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+          BLF_disable(fontid, BLF_ROTATION);
+        }
+        break;
+
+      case USER_CATEGORY_TABS_TEXT_ONLY:
+      default: {
+        /* Text-only mode: display text VERTICALLY with rotation. */
+        /* If category_id is a single glyph, find panel label to use instead. */
+        const char *text_for_size = category_id_draw;
+        if (is_single_glyph_str(category_id_draw)) {
+          for (const PanelType &pt : region->runtime->type->paneltypes) {
+            if (pt.category && STREQ(pt.category, category_id)) {
+              const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+              if (panel_label && panel_label[0]) {
+                text_for_size = panel_label;
+                break;
+              }
+            }
+          }
+        }
+        BLF_enable(fontid, BLF_ROTATION);
+        BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+        category_width = round_fl_to_int(BLF_width(fontid, text_for_size, BLF_DRAW_STR_DUMMY_MAX));
+        BLF_disable(fontid, BLF_ROTATION);
+        break;
+      }
+    }
 
     rct->xmin = rct_xmin;
     rct->xmax = rct_xmax;
@@ -1492,13 +2594,32 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
     y_ofs += category_width + tab_v_pad + (tab_v_pad_text * 2);
   }
 
-  const int max_scroll = max_ii(y_ofs - BLI_rcti_size_y(&v2d->mask), 0);
+  /* Calculate settings button rect (last element, scrolls with tabs). */
+  const int settings_icon_height = round_fl_to_int(BLF_height(fontid, TABS_SETTINGS_ICON, BLF_DRAW_STR_DUMMY_MAX));
+  const int settings_button_height = settings_icon_height + (tab_v_pad_text * 2);
+  rcti *settings_rct = &region->runtime->category_tabs_settings_rect;
+  if (!BLI_listbase_is_empty(&region->runtime->panels_category)) {
+    settings_rct->xmin = rct_xmin;
+    settings_rct->xmax = rct_xmax;
+    settings_rct->ymin = v2d->mask.ymax - (y_ofs + settings_button_height);
+    settings_rct->ymax = v2d->mask.ymax - y_ofs;
+  }
+
+  /* Include settings button height in max_scroll calculation so it stays visible when scrolling. */
+  const int total_content_height = y_ofs + settings_button_height + tab_v_pad;
+  const int max_scroll = max_ii(total_content_height - BLI_rcti_size_y(&v2d->mask), 0);
   const int scroll = clamp_i(region->category_scroll, 0, max_scroll);
   region->category_scroll = scroll;
   for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     rcti *rct = &pc_dyn.rect;
     rct->ymin += scroll;
     rct->ymax += scroll;
+  }
+
+  /* Apply scroll to settings button rect. */
+  if (!BLI_listbase_is_empty(&region->runtime->panels_category)) {
+    settings_rct->ymin += scroll;
+    settings_rct->ymax += scroll;
   }
 
   /* Begin drawing. */
@@ -1538,10 +2659,52 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
   const bool too_narrow = BLI_rcti_size_x(&region->winrct) <=
                           int(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / aspect);
 
-  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    const rcti *rct = &pc_dyn.rect;
+  /* Track current index for drag shift calculation */
+  int current_display_index = 0;
+
+  for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+    PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
+
+    /* Skip drawing the dragged tab in its normal position */
+    if (is_dragging && STREQ(pc_dyn.idname, drag_category_id)) {
+      current_display_index++;
+      continue;
+    }
+
+    /* Calculate Y shift for visual feedback during drag.
+     * Only shift tabs that are between original position and insert position.
+     */
+    int y_shift = 0;
+    if (is_dragging) {
+      const int insert_idx = drag_state->current_insert_index;
+      const int original_idx = drag_state->original_index;
+
+      if (insert_idx > original_idx) {
+        /* Moving DOWN: shift tabs between original+1 and insert UP to fill gap */
+        if (current_display_index > original_idx && current_display_index <= insert_idx) {
+          y_shift = drag_state->drag_tab_height + tab_v_pad;
+        }
+      }
+      else if (insert_idx < original_idx) {
+        /* Moving UP: shift tabs between insert and original-1 DOWN to make room */
+        if (current_display_index >= insert_idx && current_display_index < original_idx) {
+          y_shift = -drag_state->drag_tab_height - tab_v_pad;
+        }
+      }
+      /* If insert_idx == original_idx, no shift needed */
+    }
+
+    /* Apply shift to drawing rect */
+    rcti shifted_rect = pc_dyn.rect;
+    shifted_rect.ymin += y_shift;
+    shifted_rect.ymax += y_shift;
+
+    /* Use shifted rect as the main drawing rect */
+    const rcti *rct = &shifted_rect;
+
     if (rct->ymin > v2d->mask.ymax) {
       /* Scrolled outside the top of the view, check the next tab. */
+      current_display_index++;
       continue;
     }
     if (rct->ymax < v2d->mask.ymin) {
@@ -1549,15 +2712,34 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
       break;
     }
     const char *category_id = pc_dyn.idname;
-    const char *category_id_draw = IFACE_(category_id);
+    const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
     size_t category_draw_len = BLF_DRAW_STR_DUMMY_MAX;
     const bool is_active = !too_narrow && STREQ(category_id, category_id_active);
+
+    /* Increment display index after processing */
+    current_display_index++;
+
+    /* Check if mouse is hovering over this tab. */
+    const bool is_hover = BLI_rcti_isect_pt(rct, mouse_x, mouse_y);
+
+    /* Calculate darkening factor for non-active tabs in all modes.
+     * Darken only when inactive AND not hovering (hover shows original color). */
+    float darken_factor = 0.0f;
+    if (!is_active && !is_hover) {
+      darken_factor = TABS_GLYPH_DARKEN_BASE;
+    }
+
+    /* Calculate background brightening for inactive tabs (all modes). */
+    float bg_brighten_factor = 0.0f;
+    if (!is_active) {
+      bg_brighten_factor = is_hover ? TABS_BG_BRIGHTEN_HOVER : TABS_BG_BRIGHTEN_BASE;
+    }
 
     GPU_blend(GPU_BLEND_ALPHA);
 
 #ifdef USE_FLAT_INACTIVE
     /* Draw line between inactive tabs. */
-    if (is_active == false && is_active_prev == false && pc_dyn->prev) {
+    if (is_active == false && is_active_prev == false && pc_dyn.prev) {
       pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
       immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
       immUniformColor3fvAlpha(theme_col_tab_outline, 0.3f);
@@ -1584,10 +2766,20 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
       box_rect.ymin = rct->ymin;
       box_rect.ymax = rct->ymax;
 
+      /* Prepare tab background color with brightening for inactive tabs. */
+      float tab_bg_color[4];
+      if (is_active) {
+        copy_v4_v4(tab_bg_color, theme_col_tab_active);
+      }
+      else {
+        copy_v4_v4(tab_bg_color, theme_col_tab_inactive);
+        brighten_color_4fv(tab_bg_color, bg_brighten_factor);
+      }
+
       draw_roundbox_4fv(&box_rect,
                         true,
                         tab_curve_radius,
-                        is_active ? theme_col_tab_active : theme_col_tab_inactive);
+                        tab_bg_color);
       draw_roundbox_4fv(&box_rect,
                         false,
                         tab_curve_radius,
@@ -1598,7 +2790,7 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
         pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
         immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
 
-        immUniformColor4fv(is_active ? theme_col_tab_active : theme_col_tab_inactive);
+        immUniformColor4fv(tab_bg_color);
         immRectf(pos,
                  is_left ? rct->xmax - px : rct->xmin,
                  rct->ymin + px,
@@ -1609,35 +2801,26 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
     }
 
     /* Tab titles. */
+    ui_panel_category_draw_content(region,
+                                   wm,
+                                   category_id,
+                                   category_id_draw,
+                                   rct,
+                                   rct_xmin,
+                                   rct_xmax,
+                                   is_active,
+                                   is_left,
+                                   display_mode,
+                                   fontid,
+                                   fstyle,
+                                   fstyle_points,
+                                   zoom,
+                                   category_tabs_zoom,
+                                   tab_v_pad_text,
+                                   darken_factor,
+                                   theme_col_tab_text,
+                                   theme_col_tab_text_sel);
 
-    /* Offset toward the middle of the rect. */
-    const int text_v_ofs = round_fl_to_int(float(rct_xmax - rct_xmin) * 0.5f);
-    /* Offset down as the font size increases. */
-    const int text_size_offset = round_fl_to_int(fstyle_points * UI_SCALE_FAC *
-                                                 U.category_tabs_zoom * 0.35f);
-
-    BLF_position(fontid,
-                 is_left ? rct->xmax - text_v_ofs + text_size_offset :
-                           rct->xmin + text_v_ofs - text_size_offset,
-                 is_left ? rct->ymin + tab_v_pad_text : rct->ymax - tab_v_pad_text,
-                 0.0f);
-    BLF_color3ubv(fontid, is_active ? theme_col_tab_text_sel : theme_col_tab_text);
-
-    if (fstyle->shadow) {
-      BLF_enable(fontid, BLF_SHADOW);
-      const float shadow_color[4] = {
-          fstyle->shadowcolor, fstyle->shadowcolor, fstyle->shadowcolor, fstyle->shadowalpha};
-      BLF_shadow(fontid, FontShadowType(fstyle->shadow), shadow_color);
-      BLF_shadow_offset(fontid, fstyle->shadx, fstyle->shady);
-    }
-
-    BLF_draw(fontid, category_id_draw, category_draw_len);
-
-    if (fstyle->shadow) {
-      BLF_disable(fontid, BLF_SHADOW);
-    }
-
-    GPU_blend(GPU_BLEND_NONE);
 
     /* Not essential, but allows events to be handled right up to the region edge (#38171). */
     if (is_left) {
@@ -1648,6 +2831,192 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
     }
   }
 
+  /* Draw settings button (last element, scrolls with tabs). */
+  if (!BLI_listbase_is_empty(&region->runtime->panels_category)) {
+    /* Only draw if visible (after scroll). */
+    const rcti *settings_rct = &region->runtime->category_tabs_settings_rect;
+    if (settings_rct->ymin <= v2d->mask.ymax && settings_rct->ymax >= v2d->mask.ymin) {
+      panel_category_tabs_draw_settings_button(C, region, zoom, theme_col_tab_text);
+    }
+  }
+
+  /* Draw the dragged tab at cursor position and ghost tab at insert position */
+  if (is_dragging) {
+    PanelCategoryDyn *drag_tab = nullptr;
+    for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (STREQ(pc_dyn.idname, drag_category_id)) {
+        drag_tab = &pc_dyn;
+        break;
+      }
+    }
+
+    if (drag_tab) {
+      const int insert_idx = drag_state->current_insert_index;
+      const int original_idx = drag_state->original_index;
+      const int tab_h = drag_state->drag_tab_height;
+
+      /* Find the tab at insert position to determine ghost location */
+      PanelCategoryDyn *insert_position_tab = nullptr;
+      int current_idx = 0;
+      for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+        if (STREQ(pc_dyn_ptr->idname, drag_category_id)) {
+          continue;
+        }
+        if (current_idx == insert_idx) {
+          insert_position_tab = pc_dyn_ptr;
+          break;
+        }
+        current_idx++;
+      }
+
+      /* Draw ghost tab at insert position */
+      if (insert_position_tab || insert_idx >= int(ordered_categories.size()) - 1) {
+        rcti ghost_rect = drag_tab->rect;
+        
+        /* Find the tab to position relative to.
+         * If inserting before a tab, position above it.
+         * If appending (insert_position_tab is NULL), position below the last visible tab. */
+        PanelCategoryDyn *target_tab = insert_position_tab;
+        bool position_above = true;
+        int target_orig_idx = -1;
+
+        if (target_tab) {
+          /* Need to find the original index of the target tab for shift calculation */
+          int loop_idx = 0;
+          for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+            if (pc_dyn_ptr == target_tab) {
+              target_orig_idx = loop_idx;
+              break;
+            }
+            loop_idx++;
+          }
+        }
+        else {
+          /* Append case: use last visible tab */
+          int loop_idx = 0;
+          for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+            if (STREQ(pc_dyn_ptr->idname, drag_category_id)) {
+              loop_idx++;
+              continue;
+            }
+            target_tab = pc_dyn_ptr;
+            target_orig_idx = loop_idx;
+            loop_idx++;
+          }
+          position_above = false;
+        }
+
+        if (target_tab && target_orig_idx != -1) {
+          /* Calculate the visual shift that was applied to the target tab. */
+          int target_shift_y = 0;
+          if (insert_idx > original_idx) {
+            if (target_orig_idx > original_idx && target_orig_idx <= insert_idx) {
+              target_shift_y = tab_h + tab_v_pad;
+            }
+          }
+          else if (insert_idx < original_idx) {
+            if (target_orig_idx >= insert_idx && target_orig_idx < original_idx) {
+              target_shift_y = -tab_h - tab_v_pad;
+            }
+          }
+
+          /* Apply shift to target rect before calculating ghost position */
+          rcti target_rect = target_tab->rect;
+          target_rect.ymin += target_shift_y;
+          target_rect.ymax += target_shift_y;
+
+          if (position_above) {
+            /* Ghost appears above the target tab */
+            ghost_rect.ymin = target_rect.ymax + tab_v_pad;
+            ghost_rect.ymax = target_rect.ymax + tab_h + tab_v_pad;
+          }
+          else {
+            /* Ghost appears below the target tab */
+            ghost_rect.ymin = target_rect.ymin - tab_h - tab_v_pad;
+            ghost_rect.ymax = target_rect.ymin - tab_v_pad;
+          }
+        }
+
+        /* Draw ghost tab (semi-transparent placeholder at insert position) */
+        {
+          rctf ghost_box_rect;
+          ghost_box_rect.xmin = float(ghost_rect.xmin);
+          ghost_box_rect.xmax = float(ghost_rect.xmax);
+          ghost_box_rect.ymin = float(ghost_rect.ymin);
+          ghost_box_rect.ymax = float(ghost_rect.ymax);
+
+          /* Very transparent background for ghost */
+          float ghost_bg_color[4];
+          copy_v4_v4(ghost_bg_color, theme_col_tab_active);
+          ghost_bg_color[3] = 0.3f;  /* More transparent */
+
+          GPU_blend(GPU_BLEND_ALPHA);
+          draw_roundbox_corner_set(roundboxtype);
+          draw_roundbox_4fv(&ghost_box_rect, true, tab_curve_radius, ghost_bg_color);
+
+          /* Dashed outline for ghost */
+          float ghost_outline[4];
+          copy_v3_v3(ghost_outline, theme_col_tab_outline_sel);
+          ghost_outline[3] = 0.5f;
+          draw_roundbox_4fv(&ghost_box_rect, false, tab_curve_radius, ghost_outline);
+
+          GPU_blend(GPU_BLEND_NONE);
+        }
+      }
+
+      /* Calculate dragged tab position (follows cursor) */
+      rcti drag_rect = drag_tab->rect;
+      const int offset_y = int(drag_state->drag_offset_y);
+      drag_rect.ymin += offset_y;
+      drag_rect.ymax += offset_y;
+
+      /* Draw the dragged tab with alpha */
+      {
+        rctf box_rect;
+        box_rect.xmin = float(drag_rect.xmin);
+        box_rect.xmax = float(drag_rect.xmax);
+        box_rect.ymin = float(drag_rect.ymin);
+        box_rect.ymax = float(drag_rect.ymax);
+
+        /* Semi-transparent background */
+        float drag_bg_color[4];
+        copy_v4_v4(drag_bg_color, theme_col_tab_active);
+        drag_bg_color[3] = 0.7f;  /* Semi-transparent */
+
+        GPU_blend(GPU_BLEND_ALPHA);
+        draw_roundbox_corner_set(roundboxtype);
+        draw_roundbox_4fv(&box_rect, true, tab_curve_radius, drag_bg_color);
+        draw_roundbox_4fv(&box_rect, false, tab_curve_radius, theme_col_tab_outline_sel);
+
+        /* Draw the tab content (glyph/text) */
+        const char *category_id = drag_tab->idname;
+        const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
+        const rcti *rct = &drag_rect;
+
+        ui_panel_category_draw_content(region,
+                                       wm,
+                                       category_id,
+                                       category_id_draw,
+                                       rct,
+                                       rct->xmin,
+                                       rct->xmax,
+                                       true, /* always treat dragged tab as active for styling */
+                                       is_left,
+                                       display_mode,
+                                       fontid,
+                                       fstyle,
+                                       fstyle_points,
+                                       zoom,
+                                       category_tabs_zoom,
+                                       tab_v_pad_text,
+                                       0.0f, /* no darkening for dragged tab */
+                                       theme_col_tab_text,
+                                       theme_col_tab_text_sel);
+
+      }
+    }
+  }
+
   GPU_line_smooth(false);
 
   BLF_disable(fontid, BLF_ROTATION);
@@ -1655,6 +3024,7 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
 
 #undef TABS_PADDING_BETWEEN_FACTOR
 #undef TABS_PADDING_TEXT_FACTOR
+#undef TABS_GLYPH_TEXT_GAP_FACTOR
 
 /** \} */
 
@@ -2482,6 +3852,234 @@ static PanelCategoryDyn *panel_categories_find_mouse_over(ARegion *region, const
   return nullptr;
 }
 
+bool panel_category_is_mouse_over(ARegion *region, const wmEvent *event)
+{
+  if (!panel_category_tabs_is_visible(region)) {
+    return false;
+  }
+  return panel_categories_find_mouse_over(region, event) != nullptr;
+}
+
+bool panel_category_tabs_settings_contains(ARegion *region, const int mval[2])
+{
+  if (!panel_category_tabs_is_visible(region)) {
+    return false;
+  }
+
+  const rcti *rct = &region->runtime->category_tabs_settings_rect;
+
+  /* Check if mval is inside the settings button rect. */
+  return BLI_rcti_isect_pt(rct, mval[0], mval[1]);
+}
+
+void panel_category_tabs_settings_popover_open(bContext *C, ARegion *region)
+{
+  /* Store click time for hover reset timeout. */
+  region->runtime->category_tabs_settings_click_time = BLI_time_now_seconds();
+
+  /* Invoke the Python operator which shows the settings popup. */
+  WM_operator_name_call(C, "VIEW3D_OT_category_tabs_settings", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
+}
+
+static ARegion *ui_panel_category_tooltip_init(
+    bContext *C, ARegion *region, int * /*pass*/, double * /*r_pass_delay*/, bool *r_exit_on_event)
+{
+  *r_exit_on_event = true;
+
+  wmWindow *win = CTX_wm_window(C);
+  const wmEvent *event = win->runtime->eventstate;
+
+  if (!region) {
+    return nullptr;
+  }
+
+  /* Get display mode from preferences.
+   * In TEXT_ONLY mode the category name is already visible, so don't show tooltips.
+   * In GLYPHS_ONLY and GLYPHS_TEXT (Mixed) modes, tooltips are useful. */
+  const eUserPref_CategoryTabsDisplayMode display_mode =
+      static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+
+  if (display_mode == USER_CATEGORY_TABS_TEXT_ONLY) {
+    return nullptr;
+  }
+
+  /* Calculate mval from screen coordinates. */
+  int mval[2];
+  mval[0] = event->xy[0] - region->winrct.xmin;
+  mval[1] = event->xy[1] - region->winrct.ymin;
+
+  /* Determine if tabs are on the left or right side. */
+  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+
+  /* Find the category tab under the mouse. */
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (BLI_rcti_isect_pt(&pc_dyn.rect, mval[0], mval[1])) {
+      const char *category_idname = pc_dyn.idname;
+
+      /* Check if category is a single glyph (icon). */
+      const int utf8_char_size = BLI_str_utf8_size_safe(category_idname);
+      const size_t category_len = BLI_strnlen(category_idname, 64);
+      const bool is_single_glyph = (category_len == 1) ||
+                                    (utf8_char_size > 0 && size_t(utf8_char_size) == category_len);
+
+      std::string tooltip_text;
+
+      if (is_single_glyph) {
+        /* For glyph categories, collect panel names in this category. */
+        Vector<std::string> panel_names;
+        for (const Panel &panel : region->panels) {
+          if (panel.type && STREQ(panel.type->category, category_idname)) {
+            const char *label = CTX_IFACE_(panel.type->translation_context, panel.type->label);
+            if (label && label[0]) {
+              panel_names.append(label);
+            }
+          }
+        }
+
+        if (!panel_names.is_empty()) {
+          /* Join panel names with commas. */
+          tooltip_text = panel_names[0];
+          for (int i = 1; i < panel_names.size(); i++) {
+            tooltip_text += ", " + panel_names[i];
+          }
+        }
+        else {
+          /* Fallback to category name if no panels found. */
+          tooltip_text = IFACE_(category_idname);
+        }
+      }
+      else {
+        /* For text categories in GLYPHS_ONLY mode, still show tooltip with category name. */
+        tooltip_text = IFACE_(category_idname);
+      }
+
+      /* Position tooltip to avoid overlapping the tab.
+       * Convert tab rect from region-local to screen coordinates.
+       * Use mouse Y position for the rect to keep tooltip aligned with cursor vertically. */
+      rcti tab_rect_screen;
+      tab_rect_screen.xmin = region->winrct.xmin + pc_dyn.rect.xmin;
+      tab_rect_screen.xmax = region->winrct.xmin + pc_dyn.rect.xmax;
+      /* Use mouse Y position to keep tooltip vertically aligned with cursor. */
+      tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
+      tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
+
+      int position[2];
+      if (is_left) {
+        /* Tabs on left side: position tooltip to the right of tabs. */
+        position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN;
+      }
+      else {
+        /* Tabs on right side: position tooltip to the left of tabs. */
+        position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN;
+      }
+      position[1] = event->xy[1];
+
+      /* Use init_rect_overlap to ensure tooltip doesn't overlap the tab.
+       * For tabs on right side, prefer left side positioning first. */
+      const bool prefer_left = !is_left;
+      return tooltip_create_from_text(
+          C, tooltip_text.c_str(), position, &tab_rect_screen, prefer_left);
+    }
+  }
+
+  return nullptr;
+}
+
+static ARegion *ui_panel_category_active_tooltip_init(
+    bContext *C, ARegion *region, int *pass, double *r_pass_delay, bool *r_exit_on_event)
+{
+  *r_exit_on_event = true;
+
+  if (*pass == 1) {
+    return nullptr; /* Hide after delay. */
+  }
+
+  /* pass == 0 */
+  *pass = 1;
+  *r_pass_delay = 2.0; /* Hide after 2 seconds. */
+
+  if (region == nullptr) {
+    return nullptr;
+  }
+
+  const char *category_idname = panel_category_active_get(region, false);
+  if (category_idname == nullptr) {
+    return nullptr;
+  }
+
+  const std::string tooltip_text = std::string("Active tab: ") + IFACE_(category_idname);
+
+  wmWindow *win = CTX_wm_window(C);
+  const wmEvent *event = win->runtime->eventstate;
+
+  /* Find the category tab for the active category. */
+  const PanelCategoryDyn *pc_dyn = panel_category_find(region, category_idname);
+  
+  rcti tab_rect_screen;
+  bool use_tab_rect = false;
+
+  int position[2];
+
+  if (pc_dyn) {
+      tab_rect_screen.xmin = region->winrct.xmin + pc_dyn->rect.xmin;
+      tab_rect_screen.xmax = region->winrct.xmin + pc_dyn->rect.xmax;
+      tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
+      tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
+      
+      const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+      if (is_left) {
+        position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN / 4;
+      }
+      else {
+        position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN / 4;
+      }
+      position[1] = event->xy[1];
+      use_tab_rect = true;
+  } else {
+      position[0] = event->xy[0];
+      position[1] = event->xy[1] - UI_POPUP_MARGIN / 4;
+  }
+
+  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+  const bool prefer_left = !is_left;
+
+  const uiStyle *style = style_get();
+  uiFontStyle fstyle = style->tooltip;
+  fontstyle_set(&fstyle);
+  BLF_size(fstyle.uifont_id, fstyle.points * UI_SCALE_FAC);
+  const int font_id = fstyle.uifont_id;
+
+  int max_text_width = 0;
+  for (const PanelCategoryDyn &pc_dyn_it : region->runtime->panels_category) {
+    const std::string text_it = std::string("Active tab: ") + IFACE_(pc_dyn_it.idname);
+    ResultBLF info = {0};
+    const int text_width = BLF_width(font_id, text_it.c_str(), text_it.size(), &info);
+    max_text_width = max_ii(max_text_width, text_width);
+  }
+
+  const int lineh = BLF_height_max(font_id);
+  const int min_width = max_text_width + int(round(lineh * 1.95f));
+
+  return tooltip_create_from_text_fixed_width(C,
+                                             tooltip_text.c_str(),
+                                             position,
+                                             use_tab_rect ? &tab_rect_screen : nullptr,
+                                             prefer_left,
+                                             min_width);
+}
+
+void panel_category_tooltip_timer_init(bContext *C, ARegion *region)
+{
+  wmWindow *win = CTX_wm_window(C);
+  ScrArea *area = CTX_wm_area(C);
+
+  if ((U.flag & USER_TOOLTIPS) == 0) {
+    return;
+  }
+
+  WM_tooltip_timer_init(C, win, area, region, ui_panel_category_tooltip_init);
+}
+
 void panel_category_add(ARegion *region, const char *name)
 {
   PanelCategoryDyn *pc_dyn = MEM_new<PanelCategoryDyn>(__func__);
@@ -2578,13 +4176,127 @@ int handler_panel_region(bContext *C,
                          ARegion *region,
                          const Button *active_but)
 {
-  /* Mouse-move events are handled by separate handlers for dragging and drag collapsing. */
+  /* Handle mouse motion for settings button hover state. */
   if (ISMOUSE_MOTION(event->type)) {
+    if (panel_category_tabs_is_visible(region)) {
+      /* Check if mouse is over the settings button and trigger redraw for hover effect. */
+      const rcti *rct = &region->runtime->category_tabs_settings_rect;
+
+      /* Check if mouse is inside the region bounds first. */
+      const bool mouse_in_region = BLI_rcti_isect_pt(&region->winrct, event->xy[0], event->xy[1]);
+      const bool is_over_settings = mouse_in_region && BLI_rcti_isect_pt(rct, event->mval[0], event->mval[1]);
+
+      if (is_over_settings != region->runtime->category_tabs_settings_hover) {
+        if (is_over_settings) {
+          /* Hover just became true - record the time. */
+          region->runtime->category_tabs_settings_hover_time = BLI_time_now_seconds();
+        }
+        region->runtime->category_tabs_settings_hover = is_over_settings;
+        ED_region_tag_redraw(region);
+      }
+
+      /* Check if mouse is over any category tab for hover effect. */
+      bool is_over_any_tab = false;
+      for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+        if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
+          is_over_any_tab = true;
+          break;
+        }
+      }
+      /* Redraw on mouse motion in region to update hover effect (including when leaving a tab). */
+      if (mouse_in_region) {
+        ED_region_tag_redraw(region);
+      }
+
+      /* Check for drag threshold exceeded to start category tab drag */
+      if (region->runtime->category_tabs_drag_pending_id[0] != '\0') {
+        const int drag_delta_y = abs(event->mval[1] - region->runtime->category_tabs_drag_start_y);
+        const double time_elapsed = BLI_time_now_seconds() -
+                                     region->runtime->category_tabs_drag_start_time;
+
+        printf("[DRAG DEBUG] MOUSEMOVE: pending_id='%s', delta_y=%d, time=%.3f\n",
+               region->runtime->category_tabs_drag_pending_id,
+               drag_delta_y,
+               time_elapsed);
+
+        if (drag_delta_y > CATEGORY_DRAG_THRESHOLD_PX ||
+            time_elapsed > CATEGORY_DRAG_DELAY_SEC)
+        {
+          printf("[DRAG DEBUG] THRESHOLD EXCEEDED! Starting operator...\n");
+          /* Start the drag operator */
+          wmOperatorType *ot = WM_operatortype_find("UI_OT_category_tab_drag", true);
+          printf("[DRAG DEBUG] Operator found: %p\n", (void*)ot);
+          if (ot) {
+            /* Clear pending state before invoking operator */
+            region->runtime->category_tabs_drag_pending_id[0] = '\0';
+
+            /* Create a modified event with the original start position */
+            wmEvent drag_event = *event;
+            drag_event.mval[1] = region->runtime->category_tabs_drag_start_y;
+
+            printf("[DRAG DEBUG] Calling WM_operator_name_call_ptr...\n");
+            WM_operator_name_call_ptr(C, ot, wm::OpCallContext::InvokeDefault, nullptr, &drag_event);
+            /* Return BREAK - modal operator now handles events */
+            return WM_UI_HANDLER_BREAK;
+          }
+        }
+      }
+    }
+
+    /* Note: Hover state reset for ALL regions is now handled by the area-level
+     * hover handler (area_category_tabs_hover_handler) which runs for all regions
+     * in an area, ensuring hover resets when mouse moves between regions. */
+
     return WM_UI_HANDLER_CONTINUE;
   }
 
   /* We only use KM_PRESS events in this function, so it's simpler to return early. */
   if (event->val != KM_PRESS) {
+    /* Handle LEFTMOUSE RELEASE for pending drag state */
+    if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+      printf("[DRAG DEBUG] LEFTMOUSE RELEASE, pending_id='%s'\n", region->runtime->category_tabs_drag_pending_id);
+      if (region->runtime->category_tabs_drag_pending_id[0] != '\0') {
+        printf("[DRAG DEBUG] RELEASE with pending - this was a CLICK, not a drag\n");
+        /* This was a click, not a drag - handle normally */
+        PanelCategoryDyn *pc_dyn = panel_category_find(region,
+                                                        region->runtime->category_tabs_drag_pending_id);
+        if (pc_dyn) {
+          const bool already_active = STREQ(pc_dyn->idname,
+                                            panel_category_active_get(region, false));
+          panel_category_active_set(region, pc_dyn->idname);
+
+          const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
+                               (BLI_rcti_size_y(&region->v2d.mask) + 1);
+          const bool too_narrow = BLI_rcti_size_x(&region->winrct) <=
+                                  int(std::ceil(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC /
+                                                aspect));
+          if (too_narrow) {
+            /* Enlarge region. */
+            const int new_width = region->runtime->type->prefsizex ?
+                                      region->runtime->type->prefsizex :
+                                      250;
+            ui_panel_region_width_set(region, aspect, new_width);
+            WM_event_add_notifier(C, NC_SCREEN | NA_EDITED, nullptr);
+          }
+          else if (already_active) {
+            /* Minimize region. */
+            region->runtime->type->prefsizex = int(float(BLI_rcti_size_x(&region->winrct) + 1) /
+                                                   UI_SCALE_FAC * aspect);
+            ui_panel_region_width_set(region, aspect, UI_PANEL_CATEGORY_MIN_WIDTH);
+            WM_event_add_notifier(C, NC_SCREEN | NA_EDITED, nullptr);
+          }
+
+          ED_region_tag_redraw(region);
+
+          /* Reset scroll to the top (#38348). */
+          view2d_offset(&region->v2d, -1.0f, 1.0f);
+        }
+
+        /* Clear pending state */
+        region->runtime->category_tabs_drag_pending_id[0] = '\0';
+        return WM_UI_HANDLER_BREAK;
+      }
+    }
     return WM_UI_HANDLER_CONTINUE;
   }
 
@@ -2598,39 +4310,25 @@ int handler_panel_region(bContext *C,
   /* Handle category tabs. */
   if (panel_category_tabs_is_visible(region)) {
     if (event->type == LEFTMOUSE) {
+      /* Check settings button first (it's at the bottom). */
+      if (panel_category_tabs_settings_contains(region, event->mval)) {
+        panel_category_tabs_settings_popover_open(C, region);
+        ED_region_tag_redraw(region);
+        return WM_UI_HANDLER_BREAK;
+      }
+
       PanelCategoryDyn *pc_dyn = panel_categories_find_mouse_over(region, event);
       if (pc_dyn) {
-        const bool already_active = STREQ(pc_dyn->idname,
-                                          panel_category_active_get(region, false));
-        panel_category_active_set(region, pc_dyn->idname);
-
-        const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
-                             (BLI_rcti_size_y(&region->v2d.mask) + 1);
-        const bool too_narrow = BLI_rcti_size_x(&region->winrct) <=
-                                int(std::ceil(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC /
-                                              aspect));
-        if (too_narrow) {
-          /* Enlarge region. */
-          const int new_width = region->runtime->type->prefsizex ?
-                                    region->runtime->type->prefsizex :
-                                    250;
-          ui_panel_region_width_set(region, aspect, new_width);
-          WM_event_add_notifier(C, NC_SCREEN | NA_EDITED, nullptr);
-        }
-        else if (already_active) {
-          /* Minimize region. */
-          region->runtime->type->prefsizex = int(float(BLI_rcti_size_x(&region->winrct) + 1) /
-                                                 UI_SCALE_FAC * aspect);
-          ui_panel_region_width_set(region, aspect, UI_PANEL_CATEGORY_MIN_WIDTH);
-          WM_event_add_notifier(C, NC_SCREEN | NA_EDITED, nullptr);
-        }
-
-        ED_region_tag_redraw(region);
-
-        /* Reset scroll to the top (#38348). */
-        view2d_offset(&region->v2d, -1.0f, 1.0f);
-
-        retval = WM_UI_HANDLER_BREAK;
+        /* Store pending drag state - allow drag for all categories for now */
+        printf("[DRAG DEBUG] LEFTMOUSE PRESS on tab: %s, mval_y=%d\n", pc_dyn->idname, event->mval[1]);
+        STRNCPY(region->runtime->category_tabs_drag_pending_id, pc_dyn->idname);
+        region->runtime->category_tabs_drag_start_y = event->mval[1];
+        region->runtime->category_tabs_drag_start_time = BLI_time_now_seconds();
+        printf("[DRAG DEBUG] Pending state saved: pending_id='%s', start_y=%d\n",
+               region->runtime->category_tabs_drag_pending_id,
+               region->runtime->category_tabs_drag_start_y);
+        /* Return CONTINUE to keep receiving MOUSEMOVE events for drag detection */
+        retval = WM_UI_HANDLER_CONTINUE;
       }
     }
     else if (((event->type == EVT_TABKEY) && (event->modifier & KM_CTRL)) ||
@@ -2638,6 +4336,14 @@ int handler_panel_region(bContext *C,
     {
       /* Cycle tabs. */
       retval = ui_handle_panel_category_cycling(event, region, active_but);
+      if (retval == WM_UI_HANDLER_BREAK) {
+        /* Show tooltip with active tab name, then hide after delay. */
+        WM_tooltip_immediate_init(C,
+                                  CTX_wm_window(C),
+                                  CTX_wm_area(C),
+                                  region,
+                                  ui_panel_category_active_tooltip_init);
+      }
     }
     if (event->type == EVT_PADPERIOD) {
       retval = ui_panel_category_show_active_tab(region, event->xy);
@@ -2910,6 +4616,160 @@ void panel_stop_animation(const bContext *C, Panel *panel)
   if (panel->activedata) {
     panel_activate_state(C, panel, PANEL_STATE_EXIT);
   }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Drag Operator
+ * \{ */
+
+static bool category_tab_drag_poll(bContext *C)
+{
+  ARegion *region = CTX_wm_region(C);
+  if (region == nullptr) {
+    return false;
+  }
+  if (!panel_category_tabs_is_visible(region)) {
+    return false;
+  }
+  return true;
+}
+
+static wmOperatorStatus category_tab_drag_invoke(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent *event)
+{
+  printf("[DRAG DEBUG] category_tab_drag_invoke called! mval=(%d,%d)\n", event->mval[0], event->mval[1]);
+
+  ARegion *region = CTX_wm_region(C);
+  if (region == nullptr) {
+    printf("[DRAG DEBUG] INVOKE CANCELLED: region is null\n");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Find clicked tab */
+  PanelCategoryDyn *clicked_pc = nullptr;
+  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
+      clicked_pc = &pc_dyn;
+      printf("[DRAG DEBUG] Found clicked tab: %s\n", clicked_pc->idname);
+      break;
+    }
+  }
+
+  if (clicked_pc == nullptr) {
+    printf("[DRAG DEBUG] INVOKE CANCELLED: no tab found at mouse position\n");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Initialize drag state (allow all categories for now) */
+  printf("[DRAG DEBUG] Initializing drag state for '%s'\n", clicked_pc->idname);
+  CategoryDragState *state = MEM_new<CategoryDragState>(__func__);
+  state->is_dragging = true;
+  STRNCPY(state->drag_category_id, clicked_pc->idname);
+  state->drag_start_y = event->mval[1];
+  state->drag_tab_height = BLI_rcti_size_y(&clicked_pc->rect);
+  state->original_index = get_category_order_index(C, region, clicked_pc->idname);
+  state->current_insert_index = state->original_index;
+  state->drag_offset_y = 0.0f;
+  state->tab_v_pad = 0;  /* Will be calculated during draw */
+
+  op->customdata = state;
+
+  /* Store initial state in region runtime */
+  region->runtime->category_tabs_drag_state = state;
+
+  printf("[DRAG DEBUG] Adding modal handler, returning RUNNING_MODAL\n");
+  WM_event_add_modal_handler(C, op);
+  ED_region_tag_redraw(region);
+
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus category_tab_drag_modal(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent *event)
+{
+  ARegion *region = CTX_wm_region(C);
+  CategoryDragState *state = static_cast<CategoryDragState *>(op->customdata);
+
+  printf("[DRAG DEBUG] modal called, event type=%d, val=%d\n", event->type, event->val);
+
+  if (region == nullptr || state == nullptr) {
+    printf("[DRAG DEBUG] modal CANCELLED: region=%p, state=%p\n", (void*)region, (void*)state);
+    return OPERATOR_CANCELLED;
+  }
+
+  switch (event->type) {
+    case MOUSEMOVE: {
+      /* Update drag offset */
+      state->drag_offset_y = float(event->mval[1] - state->drag_start_y);
+      printf("[DRAG DEBUG] modal MOUSEMOVE: offset_y=%.1f\n", state->drag_offset_y);
+
+      /* Calculate new insert index */
+      const wmWindowManager *wm = CTX_wm_manager(C);
+      state->current_insert_index = calculate_insert_index(wm, region, state);
+      update_insert_zone(wm, region, state);
+
+      ED_region_tag_redraw(region);
+      break;
+    }
+
+    case LEFTMOUSE:
+      if (event->val == KM_RELEASE) {
+        printf("[DRAG DEBUG] modal LEFTMOUSE RELEASE - applying order\n");
+        /* Apply the new order */
+        apply_category_order(C, region, state);
+
+        /* Cleanup */
+        region->runtime->category_tabs_drag_state = nullptr;
+        MEM_delete(state);
+        op->customdata = nullptr;
+
+        ED_region_tag_redraw(region);
+        return OPERATOR_FINISHED;
+      }
+      break;
+
+    case EVT_ESCKEY:
+    case RIGHTMOUSE:
+      printf("[DRAG DEBUG] modal CANCEL by user (ESC/RMB)\n");
+      /* Cancel drag */
+      region->runtime->category_tabs_drag_state = nullptr;
+      MEM_delete(state);
+      op->customdata = nullptr;
+
+      ED_region_tag_redraw(region);
+      return OPERATOR_CANCELLED;
+  }
+
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static void category_tab_drag_cancel(bContext *C, wmOperator *op)
+{
+  ARegion *region = CTX_wm_region(C);
+  if (region && region->runtime->category_tabs_drag_state) {
+    MEM_delete(static_cast<CategoryDragState *>(op->customdata));
+    region->runtime->category_tabs_drag_state = nullptr;
+    op->customdata = nullptr;
+    ED_region_tag_redraw(region);
+  }
+}
+
+void UI_OT_category_tab_drag(wmOperatorType *ot)
+{
+  ot->name = "Category Tab Drag";
+  ot->idname = "UI_OT_category_tab_drag";
+  ot->description = "Drag to reorder category tabs";
+
+  ot->invoke = category_tab_drag_invoke;
+  ot->modal = category_tab_drag_modal;
+  ot->cancel = category_tab_drag_cancel;
+  ot->poll = category_tab_drag_poll;
+
+  ot->flag = OPTYPE_INTERNAL;
 }
 
 /** \} */

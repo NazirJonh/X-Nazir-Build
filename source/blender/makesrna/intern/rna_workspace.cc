@@ -432,6 +432,27 @@ static void rna_def_workspace_tools(BlenderRNA *brna, PropertyRNA *cprop)
   RNA_def_function_return(func, parm);
 }
 
+static void rna_def_workspace_category_order(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "WorkspaceCategoryOrder", nullptr);
+  RNA_def_struct_sdna(srna, "WorkspaceCategoryOrder");
+  RNA_def_struct_ui_text(
+      srna, "Workspace Category Order", "Order of a category tab in a workspace");
+
+  prop = RNA_def_property(srna, "category_id", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "category_id");
+  RNA_def_property_ui_text(prop, "Category ID", "Identifier of the category");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+
+  prop = RNA_def_property(srna, "order_index", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "order_index");
+  RNA_def_property_ui_text(prop, "Order Index", "Position in the order list");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+}
+
 static void rna_def_workspace(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -462,6 +483,12 @@ static void rna_def_workspace(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "wmOwnerID");
   RNA_def_property_ui_text(prop, "UI Tags", "");
   rna_def_workspace_owner_ids(brna, prop);
+
+  prop = RNA_def_property(srna, "category_order", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "category_order", nullptr);
+  RNA_def_property_struct_type(prop, "WorkspaceCategoryOrder");
+  RNA_def_property_ui_text(
+      prop, "Category Order", "Custom order for category tabs in this workspace");
 
   prop = RNA_def_property(srna, "tools", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_collection_sdna(prop, nullptr, "tools", nullptr);
@@ -516,6 +543,7 @@ static void rna_def_workspace(BlenderRNA *brna)
 void RNA_def_workspace(BlenderRNA *brna)
 {
   rna_def_workspace_owner(brna);
+  rna_def_workspace_category_order(brna);
   rna_def_workspace_tool(brna);
 
   rna_def_workspace(brna);

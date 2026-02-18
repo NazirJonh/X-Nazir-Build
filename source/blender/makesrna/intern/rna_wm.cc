@@ -38,6 +38,9 @@
 #  include "BLI_string_utf8.h"
 
 #  include "BKE_keyconfig.h"
+#  include "BKE_report.hh"
+
+#  include "MEM_guardedalloc.h"
 #  include "BKE_main.hh"
 #  include "BKE_report.hh"
 #  include "BKE_wm_runtime.hh"
@@ -659,6 +662,82 @@ const EnumPropertyItem rna_enum_wm_report_items[] = {
 #  endif
 
 namespace blender {
+
+/* Forward declarations for category glyph callbacks. */
+static CategoryGlyphItem *rna_wm_category_glyph_mapping_new(wmWindowManager *wm, const char *category);
+static void rna_wm_category_glyph_mapping_remove(wmWindowManager *wm, ReportList *reports, PointerRNA *item_ptr);
+static void rna_wm_category_glyph_mapping_clear(wmWindowManager *wm);
+static CategoryGlyphItem *rna_wm_category_glyph_override_new(wmWindowManager *wm, const char *category);
+static void rna_wm_category_glyph_override_remove(wmWindowManager *wm, ReportList *reports, PointerRNA *item_ptr);
+static void rna_wm_category_glyph_override_clear(wmWindowManager *wm);
+
+/* Callback functions for category_glyph_mappings collection. */
+static CategoryGlyphItem *rna_wm_category_glyph_mapping_new(wmWindowManager *wm, const char *category)
+{
+  CategoryGlyphItem *item = MEM_new_zeroed<CategoryGlyphItem>(__func__);
+  if (category) {
+    STRNCPY(item->category, category);
+  }
+  BLI_addtail(&wm->category_glyph_mappings, item);
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  return item;
+}
+
+static void rna_wm_category_glyph_mapping_remove(wmWindowManager *wm,
+                                                   ReportList *reports,
+                                                   PointerRNA *item_ptr)
+{
+  CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(item_ptr->data);
+
+  if (BLI_findindex(&wm->category_glyph_mappings, item) == -1) {
+    BKE_report(reports, RPT_ERROR, "Category glyph mapping not found");
+    return;
+  }
+
+  BLI_freelinkN(&wm->category_glyph_mappings, item);
+  item_ptr->invalidate();
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+static void rna_wm_category_glyph_mapping_clear(wmWindowManager *wm)
+{
+  BLI_freelistN(&wm->category_glyph_mappings);
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+/* Callback functions for category_glyph_overrides collection. */
+static CategoryGlyphItem *rna_wm_category_glyph_override_new(wmWindowManager *wm, const char *category)
+{
+  CategoryGlyphItem *item = MEM_new_zeroed<CategoryGlyphItem>(__func__);
+  if (category) {
+    STRNCPY(item->category, category);
+  }
+  BLI_addtail(&wm->category_glyph_overrides, item);
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  return item;
+}
+
+static void rna_wm_category_glyph_override_remove(wmWindowManager *wm,
+                                                    ReportList *reports,
+                                                    PointerRNA *item_ptr)
+{
+  CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(item_ptr->data);
+
+  if (BLI_findindex(&wm->category_glyph_overrides, item) == -1) {
+    BKE_report(reports, RPT_ERROR, "Category glyph override not found");
+    return;
+  }
+
+  BLI_freelinkN(&wm->category_glyph_overrides, item);
+  item_ptr->invalidate();
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+static void rna_wm_category_glyph_override_clear(wmWindowManager *wm)
+{
+  BLI_freelistN(&wm->category_glyph_overrides);
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
 
 static wmOperator *rna_OperatorProperties_find_operator(PointerRNA *ptr)
 {
@@ -2893,6 +2972,91 @@ static void rna_def_wm_keyconfigs(BlenderRNA *brna, PropertyRNA *cprop)
   RNA_api_keyconfigs(srna);
 }
 
+static void rna_def_category_glyph_item(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "CategoryGlyphItem", nullptr);
+  RNA_def_struct_ui_text(srna, "Category Glyph Item", "Mapping from category name to glyph");
+
+  prop = RNA_def_property(srna, "category", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "category");
+  RNA_def_property_ui_text(prop, "Category", "Category name");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "glyph", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "glyph");
+  RNA_def_property_ui_text(prop, "Glyph", "UTF-8 glyph character from Material Symbols");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_float_default(prop, 0.0f);
+  RNA_def_property_ui_text(prop, "Color", "Custom glyph color (black = use theme color)");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+}
+
+static void rna_def_category_glyph_mappings(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "CategoryGlyphMappingCollection");
+  srna = RNA_def_struct(brna, "CategoryGlyphMappingCollection", nullptr);
+  RNA_def_struct_sdna(srna, "wmWindowManager");
+  RNA_def_struct_ui_text(srna, "Category Glyph Mappings", "Collection of category glyph mappings");
+
+  func = RNA_def_function(srna, "new", "rna_wm_category_glyph_mapping_new");
+  RNA_def_function_ui_description(func, "Add a new glyph mapping");
+  RNA_def_string(func, "category", nullptr, sizeof(CategoryGlyphItem::category), "Category", "Category name");
+  /* return type */
+  parm = RNA_def_pointer(func, "item", "CategoryGlyphItem", "", "Newly added mapping");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_wm_category_glyph_mapping_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove a glyph mapping");
+  parm = RNA_def_pointer(func, "item", "CategoryGlyphItem", "", "Mapping to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "clear", "rna_wm_category_glyph_mapping_clear");
+  RNA_def_function_ui_description(func, "Remove all glyph mappings");
+}
+
+static void rna_def_category_glyph_overrides(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "CategoryGlyphOverrideCollection");
+  srna = RNA_def_struct(brna, "CategoryGlyphOverrideCollection", nullptr);
+  RNA_def_struct_sdna(srna, "wmWindowManager");
+  RNA_def_struct_ui_text(srna, "Category Glyph Overrides", "Collection of user category glyph overrides");
+
+  func = RNA_def_function(srna, "new", "rna_wm_category_glyph_override_new");
+  RNA_def_function_ui_description(func, "Add a new glyph override");
+  RNA_def_string(func, "category", nullptr, sizeof(CategoryGlyphItem::category), "Category", "Category name");
+  /* return type */
+  parm = RNA_def_pointer(func, "item", "CategoryGlyphItem", "", "Newly added override");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_wm_category_glyph_override_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove a glyph override");
+  parm = RNA_def_pointer(func, "item", "CategoryGlyphItem", "", "Override to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "clear", "rna_wm_category_glyph_override_clear");
+  RNA_def_function_ui_description(func, "Remove all glyph overrides");
+}
+
 static void rna_def_windowmanager(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -2937,6 +3101,16 @@ static void rna_def_windowmanager(BlenderRNA *brna)
                                     nullptr);
   RNA_def_property_ui_text(prop, "Key Configurations", "Registered key configurations");
   rna_def_wm_keyconfigs(brna, prop);
+
+  prop = RNA_def_property(srna, "category_glyph_mappings", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "CategoryGlyphItem");
+  RNA_def_property_ui_text(prop, "Category Glyph Mappings", "Default glyph mappings for category tabs");
+  rna_def_category_glyph_mappings(brna, prop);
+
+  prop = RNA_def_property(srna, "category_glyph_overrides", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "CategoryGlyphItem");
+  RNA_def_property_ui_text(prop, "Category Glyph Overrides", "User-defined glyph overrides for category tabs");
+  rna_def_category_glyph_overrides(brna, prop);
 
   prop = RNA_def_property(srna, "xr_session_settings", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "xr.session_settings");
@@ -3345,6 +3519,7 @@ void RNA_def_wm(BlenderRNA *brna)
   rna_def_popovermenu(brna);
   rna_def_piemenu(brna);
   rna_def_window(brna);
+  rna_def_category_glyph_item(brna);
   rna_def_windowmanager(brna);
   rna_def_keyconfig_prefs(brna);
   rna_def_keyconfig(brna);

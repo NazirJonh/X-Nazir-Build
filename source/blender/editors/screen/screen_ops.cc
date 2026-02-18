@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 #include <fmt/format.h>
 
 #include "MEM_guardedalloc.h"
@@ -15,6 +16,8 @@
 #include "BLI_build_config.h"
 #include "BLI_listbase.h"
 #include "BLI_math_rotation.h"
+#include "BLI_string.h"
+#include "BLI_string_utf8.h"
 #include "BLI_math_vector.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
@@ -33,6 +36,7 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
+#include "DNA_windowmanager_types.h"
 #include "DNA_workspace_types.h"
 
 #include "BKE_callbacks.hh"
@@ -80,9 +84,12 @@
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 #include "UI_view2d.hh"
+
+#include "BLF_api.hh"
 
 #include "GPU_capabilities.hh"
 
@@ -6908,6 +6915,885 @@ static void SCREEN_OT_delete(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Category Tab Edit Dialog Operator
+ * \{ */
+
+/* Static buffers for preview callback - updated by live update callback */
+static char category_tab_preview_glyph[8] = "";
+static float category_tab_preview_color[3] = {0.0f, 0.0f, 0.0f};
+
+/* Static pointer to current dialog operator - needed for Reset/Save buttons */
+static wmOperator *category_tab_current_dialog_op = nullptr;
+
+/* Static pointer to popup block - needed for Save button to close popup */
+static ui::Block *category_tab_popup_block = nullptr;
+
+static bool category_tab_edit_poll(bContext *C)
+{
+  if (U.category_tabs_allow_edit) {
+    return false;
+  }
+  return ED_operator_regionactive(C);
+}
+
+/**
+ * Cancel callback for category tab edit popup.
+ * Restores original values if user cancels without saving.
+ */
+static void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
+{
+  wmOperator *op = static_cast<wmOperator *>(user_data);
+
+  char category[64];
+  RNA_string_get(op->ptr, "category", category);
+
+  /* Get original values saved when dialog was opened */
+  char original_display_name[64] = "";
+  char original_glyph[16] = "";
+  float original_color[3] = {0.0f, 0.0f, 0.0f};
+  bool original_has_override = false;
+
+  RNA_string_get(op->ptr, "original_display_name", original_display_name);
+  RNA_string_get(op->ptr, "original_glyph", original_glyph);
+  RNA_float_get_array(op->ptr, "original_color", original_color);
+  original_has_override = RNA_boolean_get(op->ptr, "original_has_override");
+
+  wmWindowManager *wm = CTX_wm_manager(C);
+
+  /* Find current override (may have been created by live preview) */
+  CategoryGlyphItem *item = nullptr;
+  for (CategoryGlyphItem *it =
+           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+       it;
+       it = static_cast<CategoryGlyphItem *>(it->next))
+  {
+    if (STREQ(it->category, category)) {
+      item = it;
+      break;
+    }
+  }
+
+  if (original_has_override) {
+    /* There was an override before - restore original values */
+    if (!item) {
+      /* Override was deleted by live preview - recreate it */
+      item = MEM_new<CategoryGlyphItem>(__func__);
+      STRNCPY(item->category, category);
+      BLI_addtail(&wm->category_glyph_overrides, item);
+    }
+    STRNCPY(item->display_name, original_display_name);
+    STRNCPY(item->glyph, original_glyph);
+    copy_v3_v3(item->color, original_color);
+  }
+  else {
+    /* There was no override before - remove any created by live preview */
+    if (item) {
+      BLI_remlink(&wm->category_glyph_overrides, item);
+      MEM_delete(item);
+    }
+  }
+
+  /* Clear dialog operator pointer and popup block */
+  category_tab_current_dialog_op = nullptr;
+  category_tab_popup_block = nullptr;
+
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+/**
+ * OK callback for category tab edit popup.
+ * Called when popup closes with OK (Save button).
+ * Properties are already updated by live preview, we just need to clear pointers.
+ */
+static void category_tab_edit_popup_ok_cb(bContext * /*C*/, void * /*user_data*/, int /*retval*/)
+{
+  /* Clear dialog operator pointer and popup block */
+  category_tab_current_dialog_op = nullptr;
+  category_tab_popup_block = nullptr;
+}
+
+/**
+ * Check if a string is a valid hex codepoint (e.g., "e5d2", "E5D2", "0xe5d2").
+ * Converts hex codepoint to UTF-8 character if valid.
+ * Uses the same conversion method as ui_handle_unicode_input().
+ *
+ * \param input: Input string to parse (may be hex code or direct UTF-8 char).
+ * \param utf8_out: Output buffer for UTF-8 character.
+ * \param utf8_max: Size of output buffer.
+ * \return true if input was a hex code and was converted, false otherwise.
+ */
+static bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8_max)
+{
+  if (!input || !input[0]) {
+    return false;
+  }
+
+  const char *hex_start = input;
+
+  /* Skip optional "0x" or "0X" prefix */
+  if (input[0] == '0' && (input[1] == 'x' || input[1] == 'X')) {
+    hex_start = input + 2;
+    if (!hex_start[0]) {
+      return false;
+    }
+  }
+
+  /* Check if remaining string is a valid hex number (1-6 hex digits for Unicode) */
+  size_t hex_len = strlen(hex_start);
+  if (hex_len == 0 || hex_len > 6) {
+    return false;
+  }
+
+  /* Verify all characters are hex digits */
+  for (size_t i = 0; i < hex_len; i++) {
+    if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
+      return false;
+    }
+  }
+
+  /* Parse hex to unsigned int using Blender's method (same as ui_handle_unicode_input) */
+  uint val = strtoul(hex_start, nullptr, 16);
+
+  /* Validate Unicode codepoint range (same check as ui_handle_unicode_input) */
+  if (val < 32 || val > 0x10FFFF) {
+    return false;
+  }
+
+  /* Convert to UTF-8 using the same method as ui_handle_unicode_input */
+  char32_t utf32[2] = {char32_t(val), 0};
+  const int utf8_len = BLI_str_utf32_as_utf8(utf8_out, utf32, utf8_max);
+
+  return utf8_len > 0;
+}
+
+/**
+ * Process glyph input: convert hex codepoint (e.g., "e5d2") to UTF-8 character.
+ * If input is not a hex code, returns the input as-is.
+ *
+ * \param input: Raw glyph input from user.
+ * \param output: Output buffer for processed glyph.
+ * \param output_max: Size of output buffer.
+ */
+static void process_glyph_input(const char *input, char *output, size_t output_max)
+{
+  if (!input || !input[0]) {
+    output[0] = '\0';
+    return;
+  }
+
+  /* Try to convert as hex codepoint first */
+  if (hex_codepoint_to_utf8(input, output, output_max)) {
+    return;
+  }
+
+  /* Not a hex code - use input directly (might be direct UTF-8 char) */
+  BLI_strncpy(output, input, output_max);
+}
+
+/**
+ * Live update callback for category tab edit popup.
+ * Updates category_glyph_overrides immediately when properties change,
+ * enabling real-time preview without clicking Save.
+ */
+static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
+{
+  wmOperator *op = static_cast<wmOperator *>(arg_op);
+
+  /* Guard: If the dialog is closing/cancelled, the global pointer will be null.
+    * Stop processing to avoid resurrecting deleted overrides.
+    */
+   if (category_tab_current_dialog_op != op) {
+     return;
+   }
+ 
+   char category[64];
+   RNA_string_get(op->ptr, "category", category);
+
+  float color[3];
+  RNA_float_get_array(op->ptr, "color", color);
+
+  char glyph_raw[16];
+  RNA_string_get(op->ptr, "glyph", glyph_raw);
+
+  /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character */
+  char glyph[8];
+  process_glyph_input(glyph_raw, glyph, sizeof(glyph));
+
+  /* Update the override immediately for live preview */
+  wmWindowManager *wm = CTX_wm_manager(C);
+
+  /* Look up default glyph for preview fallback (when user input is empty) */
+  const char *default_glyph = blender::ui::panel_category_glyph_lookup(
+      wm, category, nullptr, nullptr, nullptr, nullptr);
+
+  /* Update preview buffers for popup preview.
+   * Use the processed glyph from property, or fall back to default lookup.
+   */
+  copy_v3_v3(category_tab_preview_color, color);
+  if (glyph[0] != '\0') {
+    STRNCPY(category_tab_preview_glyph, glyph);
+  }
+  else if (default_glyph) {
+    STRNCPY(category_tab_preview_glyph, default_glyph);
+  }
+  else {
+    category_tab_preview_glyph[0] = '\0';
+  }
+
+  CategoryGlyphItem *item = nullptr;
+
+  /* Find existing override */
+  for (CategoryGlyphItem *it =
+           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+       it;
+       it = static_cast<CategoryGlyphItem *>(it->next))
+  {
+    if (STREQ(it->category, category)) {
+      item = it;
+      break;
+    }
+  }
+
+  /* Create if not found */
+  if (!item) {
+    item = MEM_new<CategoryGlyphItem>(__func__);
+    STRNCPY(item->category, category);
+    item->display_name[0] = '\0';  /* Will be set on Save */
+    item->glyph[0] = '\0';
+    zero_v3(item->color);
+    BLI_addtail(&wm->category_glyph_overrides, item);
+  }
+
+  /* Update color for live preview */
+  copy_v3_v3(item->color, color);
+
+  /* Update glyph in override.
+   * Save the processed glyph if user has entered something.
+   * Note: We always save the glyph because panel_category_glyph_lookup returns
+   * the override glyph if it exists, which would cause a false "match" condition.
+   */
+  if (glyph[0] != '\0') {
+    /* User has entered a glyph - save it to override */
+    STRNCPY(item->glyph, glyph);
+  }
+  else {
+    /* Empty glyph - clear override glyph to use defaults */
+    item->glyph[0] = '\0';
+  }
+
+  /* Trigger redraw to show the updated color */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+/**
+ * Custom block creation for category tab edit popup with live preview.
+ */
+static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_data)
+{
+  wmOperator *op = static_cast<wmOperator *>(user_data);
+  const uiStyle *style = ui::style_get_dpi();
+
+  /* Calculate dialog width - increased for better visibility */
+  const int dialog_width = 400 * UI_SCALE_FAC;
+
+  ui::Block *block = block_begin(C, region, __func__, ui::EmbossType::Emboss);
+  block_flag_disable(block, ui::BLOCK_LOOP);
+  block_theme_style_set(block, ui::BLOCK_THEME_STYLE_POPUP);
+  popup_dummy_panel_set(region, block, op->idname);
+
+  /* Keep popup open while editing - important for live preview */
+  block_flag_enable(block, ui::BLOCK_KEEP_OPEN | ui::BLOCK_NUMSELECT);
+
+  /* Store block pointer for Save button to close popup */
+  category_tab_popup_block = block;
+
+  /* Set up live update callback - this is the key for instant preview */
+  block_func_handle_set(block, category_tab_edit_live_update_cb, op);
+
+  /* Create layout */
+  ui::Layout &layout = ui::block_layout(block,
+                                        ui::LayoutDirection::Vertical,
+                                        ui::LayoutType::Panel,
+                                        0,
+                                        0,
+                                        dialog_width,
+                                        0,
+                                        0,
+                                        style);
+
+  /* Title */
+  uiItemL_ex(&layout, IFACE_("Edit Category Tab"), ICON_NONE, true, false);
+  layout.separator(0.2f, ui::LayoutSeparatorType::Line);
+  layout.separator(0.5f);
+
+  /* Get category for button wiring */
+  char category[64];
+  RNA_string_get(op->ptr, "category", category);
+
+  /* Category name field - TEXT ONLY, no glyph */
+  char display_name[64] = "";
+  RNA_string_get(op->ptr, "display_name", display_name);
+
+  /* If display_name is empty, use category as default */
+  if (display_name[0] == '\0') {
+    RNA_string_set(op->ptr, "display_name", category);
+  }
+
+  /* Label and property on same line */
+  layout.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
+
+  layout.separator();
+
+  /* Color picker - triggers live updates via block_func_handle_set */
+  layout.prop(op->ptr, "color", UI_ITEM_NONE, IFACE_("Glyph Color"), ICON_NONE);
+
+  layout.separator();
+
+  /* Change Icon section */
+  layout.label(IFACE_("Change Icon"), ICON_NONE);
+
+  /* Search field */
+  ui::Layout &row_search = layout.row(false);
+  row_search.prop(op->ptr, "glyph_search", UI_ITEM_NONE, "", ICON_VIEWZOOM);
+
+  /* Glyph field */
+  ui::Layout &row_glyph = layout.row(false);
+  row_glyph.prop(op->ptr, "glyph", UI_ITEM_NONE, IFACE_("Glyph"), ICON_NONE);
+
+  layout.separator();
+
+  /* Glyph Preview - show current glyph centered with custom color */
+  char glyph_raw[16] = "";
+  RNA_string_get(op->ptr, "glyph", glyph_raw);
+
+  /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character */
+  char glyph[8] = "";
+  process_glyph_input(glyph_raw, glyph, sizeof(glyph));
+
+  /* Get custom color */
+  float color[3];
+  RNA_float_get_array(op->ptr, "color", color);
+
+  /* Get the proper glyph for preview.
+   * If glyph property is set, use the processed glyph.
+   * Otherwise, use panel_category_glyph_lookup to get the default/mapped glyph.
+   */
+  wmWindowManager *wm = CTX_wm_manager(C);
+  const char *preview_glyph = nullptr;
+
+  if (glyph[0] != '\0') {
+    /* User has set a custom glyph - use the processed glyph */
+    preview_glyph = glyph;
+  }
+  else {
+    /* No custom glyph - lookup the default glyph for this category */
+    preview_glyph = blender::ui::panel_category_glyph_lookup(
+        wm, category, nullptr, nullptr, nullptr, nullptr);
+  }
+
+  /* Initialize preview buffers (will be updated by live update callback) */
+  if (preview_glyph) {
+    STRNCPY(category_tab_preview_glyph, preview_glyph);
+  }
+  else {
+    category_tab_preview_glyph[0] = '\0';
+  }
+  copy_v3_v3(category_tab_preview_color, color);
+
+  /* Create centered row for preview */
+  ui::Layout &preview_row = layout.row(false);
+  preview_row.alignment_set(ui::LayoutAlign::Center);
+
+  /* Get block and create preview button */
+  ui::Block *preview_block = preview_row.block();
+  const int preview_size = int(style->widget.points * UI_SCALE_FAC * 3.0f);
+
+  /* Create custom button with draw callback */
+  ui::Button *preview_but = uiDefBut(
+      preview_block,
+      ui::ButtonType::Extra,
+      "",
+      0,
+      0,
+      preview_size,
+      preview_size,
+      nullptr,
+      0.0f,
+      0.0f,
+      std::nullopt);
+
+  /* Set draw callback to render glyph with color */
+  button_func_drawextra_set(preview_block,
+    [style](const bContext * /*C*/, rcti *rect) {
+      /* Get font - 2x the tab size for preview */
+      const int fontid = BLF_default();
+      const float font_size = style->widget.points * UI_SCALE_FAC * 2.0f;
+      BLF_size(fontid, font_size);
+
+      /* Set custom color from file-scope static buffer (updated by live update callback) */
+      BLF_color3fv_alpha(fontid, category_tab_preview_color, 1.0f);
+
+      /* Calculate center position */
+      const float glyph_width = BLF_width(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
+      const float glyph_height = BLF_height(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
+
+      const float rect_width = BLI_rcti_size_x(rect);
+      const float rect_height = BLI_rcti_size_y(rect);
+      const float x = rect->xmin + (rect_width - glyph_width) / 2.0f;
+      const float y = rect->ymin + (rect_height - glyph_height) / 2.0f;
+
+      /* Draw glyph */
+      BLF_position(fontid, x, y, 0.0f);
+      BLF_draw(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
+    });
+
+  /* Use the button to prevent unused variable warning */
+  (void)preview_but;
+
+  layout.separator();
+
+  /* Buttons row: Reset | Cancel | Save */
+  ui::Layout &split = layout.split(0.4f, false);
+  ui::Layout &row_left = split.row(true);
+
+  /* Reset button (left aligned) */
+  PointerRNA reset_ptr = row_left.op("SCREEN_OT_category_tab_reset", IFACE_("Reset"), ICON_LOOP_BACK);
+  RNA_string_set(&reset_ptr, "category", category);
+
+  /* Spacer and right-aligned buttons */
+  ui::Layout &row_right = split.row(true);
+  row_right.separator_spacer();
+  row_right.op("SCREEN_OT_category_tab_edit_dialog_cancel", IFACE_("Cancel"), ICON_NONE);
+  row_right.op("SCREEN_OT_category_tab_edit_dialog_save", IFACE_("Save"), ICON_CHECKMARK);
+
+  /* Set block bounds - centered like the original dialog */
+  block_bounds_set_centered(block, 6 * UI_SCALE_FAC);
+
+  return block;
+}
+
+static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
+                                                         wmOperator *op,
+                                                         const wmEvent *event)
+{
+  /* Get category from mouse position */
+  ARegion *region = CTX_wm_region(C);
+  if (!region || !ui::panel_category_tabs_is_visible(region)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Find which tab the mouse is over */
+  const int mx = event->mval[0];
+  const int my = event->mval[1];
+
+  const char *category = nullptr;
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (BLI_rcti_isect_pt(&pc_dyn.rect, mx, my)) {
+      category = pc_dyn.idname;
+      break;
+    }
+  }
+
+  if (!category) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Store category name in operator properties */
+  RNA_string_set(op->ptr, "category", category);
+
+  /* Check for existing override and populate properties */
+  wmWindowManager *wm = CTX_wm_manager(C);
+  bool has_override = false;
+  for (CategoryGlyphItem *item =
+           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+       item;
+       item = static_cast<CategoryGlyphItem *>(item->next))
+  {
+    if (STREQ(item->category, category)) {
+      RNA_string_set(op->ptr, "display_name", item->display_name);
+      RNA_string_set(op->ptr, "glyph", item->glyph);
+      RNA_float_set_array(op->ptr, "color", item->color);
+      has_override = true;
+      break;
+    }
+  }
+
+  /* If no override, use panel_category_glyph_lookup to get current glyph and color */
+  if (!has_override) {
+    float glyph_color[3] = {0.0f, 0.0f, 0.0f};
+    bool is_fallback = false;
+    bool is_reserved = false;
+
+    /* Get current glyph using the lookup function from blender::ui namespace */
+    const char *current_glyph = blender::ui::panel_category_glyph_lookup(
+        wm, category, nullptr, &is_fallback, &is_reserved, glyph_color);
+
+    if (current_glyph) {
+      RNA_string_set(op->ptr, "glyph", current_glyph);
+    }
+    if (!is_zero_v3(glyph_color)) {
+      RNA_float_set_array(op->ptr, "color", glyph_color);
+    }
+  }
+
+  /* Save original values for cancel functionality */
+  char current_display_name[64] = "";
+  char current_glyph[16] = "";
+  float current_color[3] = {0.0f, 0.0f, 0.0f};
+
+  RNA_string_get(op->ptr, "display_name", current_display_name);
+  RNA_string_get(op->ptr, "glyph", current_glyph);
+  RNA_float_get_array(op->ptr, "color", current_color);
+
+  RNA_string_set(op->ptr, "original_display_name", current_display_name);
+  RNA_string_set(op->ptr, "original_glyph", current_glyph);
+  RNA_float_set_array(op->ptr, "original_color", current_color);
+  RNA_boolean_set(op->ptr, "original_has_override", has_override);
+
+  /* Store pointer to dialog operator for Reset/Save button access */
+  category_tab_current_dialog_op = op;
+
+  /* Open custom popup with live preview support using public API */
+  ui::popup_block_ex(C,
+                     category_tab_edit_block_create,
+                     category_tab_edit_popup_ok_cb,
+                     category_tab_edit_popup_cancel_cb,
+                     op,
+                     op);
+
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
+{
+  char category[64];
+  RNA_string_get(op->ptr, "category", category);
+
+  char display_name[64];
+  RNA_string_get(op->ptr, "display_name", display_name);
+
+  char glyph_raw[16];
+  RNA_string_get(op->ptr, "glyph", glyph_raw);
+
+  /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character */
+  char glyph[8];
+  process_glyph_input(glyph_raw, glyph, sizeof(glyph));
+
+  float color[3];
+  RNA_float_get_array(op->ptr, "color", color);
+
+  /* Get or create override */
+  wmWindowManager *wm = CTX_wm_manager(C);
+  CategoryGlyphItem *item = nullptr;
+
+  for (CategoryGlyphItem *it =
+           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+       it;
+       it = static_cast<CategoryGlyphItem *>(it->next))
+  {
+    if (STREQ(it->category, category)) {
+      item = it;
+      break;
+    }
+  }
+
+  if (!item) {
+    item = MEM_new<CategoryGlyphItem>(__func__);
+    STRNCPY(item->category, category);
+    BLI_addtail(&wm->category_glyph_overrides, item);
+  }
+
+  /* Look up what the default glyph would be for this category.
+   * This tells us if the current glyph is a fallback letter or a reserved glyph.
+   */
+  bool is_fallback = false;
+  bool is_reserved = false;
+  const char *default_glyph = blender::ui::panel_category_glyph_lookup(
+      wm, category, nullptr, &is_fallback, &is_reserved, nullptr);
+
+  /* Update values */
+  STRNCPY(item->display_name, display_name);
+  copy_v3_v3(item->color, color);
+
+  /* Only save glyph to override if user has changed it from the default.
+   * If glyph matches the default (especially fallback letters), leave it empty
+   * so that the lookup function will return the correct is_fallback status.
+   */
+  if (glyph[0] != '\0' && default_glyph && !STREQ(glyph, default_glyph)) {
+    /* User has set a custom glyph different from default */
+    STRNCPY(item->glyph, glyph);
+  }
+  else {
+    /* Glyph is same as default or empty - clear override glyph to preserve
+     * fallback letter detection in the drawing code. */
+    item->glyph[0] = '\0';
+  }
+
+  /* Clear dialog operator pointer */
+  category_tab_current_dialog_op = nullptr;
+
+  /* Redraw */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+
+  return OPERATOR_FINISHED;
+}
+
+static void category_tab_edit_dialog_layout(bContext * /*C*/, wmOperator *op)
+{
+  ui::Layout &layout = *op->layout;
+
+  /* Category name field */
+  char category[64];
+  RNA_string_get(op->ptr, "category", category);
+
+  char display_name[64] = "";
+  RNA_string_get(op->ptr, "display_name", display_name);
+
+  /* If display_name is empty, use category as default */
+  if (display_name[0] == '\0') {
+    RNA_string_set(op->ptr, "display_name", category);
+  }
+
+  /* Label and property on same line */
+  layout.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name:"), ICON_NONE);
+
+  layout.separator();
+
+  /* Change Icon section */
+  layout.label(IFACE_("Change Icon:"), ICON_NONE);
+
+  /* Search field */
+  ui::Layout &row_search = layout.row(false);
+  row_search.prop(op->ptr, "glyph_search", UI_ITEM_NONE, "", ICON_VIEWZOOM);
+
+  /* TODO: Grid of glyphs - this requires custom template or operator */
+  /* For now, just show current glyph */
+  ui::Layout &row_glyph = layout.row(false);
+  row_glyph.prop(op->ptr, "glyph", UI_ITEM_NONE, IFACE_("Glyph:"), ICON_NONE);
+
+  layout.separator();
+
+  /* Color picker */
+  layout.prop(op->ptr, "color", UI_ITEM_NONE, IFACE_("Glyph Color:"), ICON_NONE);
+
+  layout.separator();
+
+  /* Buttons row: Reset | Cancel | Save */
+  ui::Layout &split = layout.split(0.4f, false);
+  ui::Layout &row_left = split.row(true);
+
+  /* Reset button (left aligned) */
+  PointerRNA reset_ptr = row_left.op("SCREEN_OT_category_tab_reset", IFACE_("Reset"), ICON_LOOP_BACK);
+  RNA_string_set(&reset_ptr, "category", category);
+
+  /* Spacer and right-aligned buttons */
+  ui::Layout &row_right = split.row(true);
+  row_right.separator_spacer();
+  row_right.op("SCREEN_OT_category_tab_edit_dialog_cancel", IFACE_("Cancel"), ICON_NONE);
+  row_right.op("SCREEN_OT_category_tab_edit_dialog_save", IFACE_("Save"), ICON_CHECKMARK);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Reset Operator
+ * \{ */
+
+static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
+{
+  char category[64];
+  RNA_string_get(op->ptr, "category", category);
+
+  wmWindowManager *wm = CTX_wm_manager(C);
+
+  /* Find and remove override */
+  for (CategoryGlyphItem *item =
+           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+       item;
+       )
+  {
+    CategoryGlyphItem *next = static_cast<CategoryGlyphItem *>(item->next);
+    if (STREQ(item->category, category)) {
+      BLI_remlink(&wm->category_glyph_overrides, item);
+      MEM_delete(item);
+      break;
+    }
+    item = next;
+  }
+
+  /* Get default values for the category */
+  bool is_fallback = false;
+  bool is_reserved = false;
+  float default_color[3] = {0.0f, 0.0f, 0.0f};
+
+  const char *default_glyph = blender::ui::panel_category_glyph_lookup(
+      wm, category, nullptr, &is_fallback, &is_reserved, default_color);
+
+  /* Update dialog operator properties to reflect defaults in UI */
+  if (category_tab_current_dialog_op) {
+    RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", category);
+    if (default_glyph) {
+      RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", default_glyph);
+    }
+    else {
+      RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", "");
+    }
+    RNA_float_set_array(category_tab_current_dialog_op->ptr, "color", default_color);
+    RNA_string_set(category_tab_current_dialog_op->ptr, "glyph_search", "");
+  }
+
+  /* Also update this operator's properties (for consistency) */
+  RNA_string_set(op->ptr, "display_name", category);
+  if (default_glyph) {
+    RNA_string_set(op->ptr, "glyph", default_glyph);
+  }
+  else {
+    RNA_string_set(op->ptr, "glyph", "");
+  }
+  RNA_float_set_array(op->ptr, "color", default_color);
+  RNA_string_set(op->ptr, "glyph_search", "");
+
+  /* Update preview buffers for popup preview */
+  if (default_glyph) {
+    STRNCPY(category_tab_preview_glyph, default_glyph);
+  }
+  else {
+    category_tab_preview_glyph[0] = '\0';
+  }
+  copy_v3_v3(category_tab_preview_color, default_color);
+
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+static void SCREEN_OT_category_tab_reset(wmOperatorType *ot)
+{
+  ot->name = "Reset Category Tab";
+  ot->idname = "SCREEN_OT_category_tab_reset";
+  ot->description = "Reset category tab to default";
+
+  ot->exec = category_tab_reset_exec;
+  ot->poll = category_tab_edit_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_string(ot->srna, "category", nullptr, 64, "Category", "Category identifier");
+  RNA_def_string(ot->srna, "display_name", nullptr, 64, "Display Name", "Reset display name");
+  RNA_def_string(ot->srna, "glyph", nullptr, 8, "Glyph", "Reset glyph");
+  RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Reset search");
+  RNA_def_float_color(ot->srna, "color", 3, nullptr, 0.0f, 1.0f, "Color", "Reset color", 0.0f, 1.0f);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Edit Dialog Cancel Operator
+ * \{ */
+
+static wmOperatorStatus category_tab_edit_dialog_cancel_exec(bContext *C, wmOperator * /*op*/)
+{
+  if (!category_tab_popup_block || !category_tab_current_dialog_op) {
+    return OPERATOR_CANCELLED;
+  }
+
+  wmOperator *op = category_tab_current_dialog_op;
+  ui::Block *block = category_tab_popup_block;
+  wmWindow *win = CTX_wm_window(C);
+
+  /* Trigger cancel callback to restore values */
+  category_tab_edit_popup_cancel_cb(C, op);
+
+  /* Close popup */
+  ui::popup_menu_retval_set(block, ui::RETURN_CANCEL, true);
+  ui::popup_block_close(C, win, block);
+
+  return OPERATOR_FINISHED;
+}
+
+static void SCREEN_OT_category_tab_edit_dialog_cancel(wmOperatorType *ot)
+{
+  ot->name = "Cancel Category Tab Edit";
+  ot->idname = "SCREEN_OT_category_tab_edit_dialog_cancel";
+  ot->description = "Cancel editing category tab";
+
+  ot->exec = category_tab_edit_dialog_cancel_exec;
+  ot->poll = category_tab_edit_poll;
+
+  ot->flag = 0;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Edit Dialog Save Operator
+ * \{ */
+
+static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperator * /*op*/)
+{
+  /* Live preview already updated the override. We just need to close the popup. */
+  if (!category_tab_popup_block) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Set return value to OK using public API - this will trigger popup close */
+  ui::popup_menu_retval_set(category_tab_popup_block, ui::RETURN_OK, true);
+
+  /* Get window and close popup */
+  wmWindow *win = CTX_wm_window(C);
+  ui::popup_block_close(C, win, category_tab_popup_block);
+
+  return OPERATOR_FINISHED;
+}
+
+static void SCREEN_OT_category_tab_edit_dialog_save(wmOperatorType *ot)
+{
+  ot->name = "Save Category Tab Edit";
+  ot->idname = "SCREEN_OT_category_tab_edit_dialog_save";
+  ot->description = "Save category tab changes";
+
+  ot->exec = category_tab_edit_dialog_save_exec;
+  ot->poll = category_tab_edit_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Edit Dialog Operator
+ * \{ */
+
+static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
+{
+  ot->name = "Edit Category Tab";
+  ot->idname = "SCREEN_OT_category_tab_edit_dialog";
+  ot->description = "Edit category tab name, glyph and color";
+
+  ot->invoke = category_tab_edit_dialog_invoke;
+  ot->exec = category_tab_edit_dialog_exec;
+  ot->poll = category_tab_edit_poll;
+  ot->ui = category_tab_edit_dialog_layout;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_string(ot->srna, "category", nullptr, 64, "Category", "Category identifier");
+  RNA_def_string(ot->srna, "display_name", nullptr, 64, "Display Name", "Custom display name");
+  RNA_def_string(ot->srna, "glyph", nullptr, 16, "Glyph", "Hex codepoint (e.g., e5d2) or UTF-8 character");
+  RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Search glyphs");
+  PropertyRNA *prop = RNA_def_float_color(ot->srna, "color", 3, nullptr, 0.0f, 1.0f, "Color", "Glyph color", 0.0f, 1.0f);
+  RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);
+
+  /* Original values for cancel functionality */
+  RNA_def_string(ot->srna, "original_display_name", nullptr, 64, "Original Display Name", "");
+  RNA_def_string(ot->srna, "original_glyph", nullptr, 16, "Original Glyph", "");
+  prop = RNA_def_float_color(ot->srna, "original_color", 3, nullptr, 0.0f, 1.0f, "Original Color", "", 0.0f, 1.0f);
+  RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);
+  RNA_def_boolean(ot->srna, "original_has_override", false, "Original Has Override", "");
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Region Alpha Blending Operator
  *
  * Implementation NOTE: a disappearing region needs at least 1 last draw with
@@ -7336,6 +8222,12 @@ void ED_operatortypes_screen()
   /* New/delete. */
   WM_operatortype_append(SCREEN_OT_new);
   WM_operatortype_append(SCREEN_OT_delete);
+
+  /* Category tabs. */
+  WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog);
+  WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_cancel);
+  WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_save);
+  WM_operatortype_append(SCREEN_OT_category_tab_reset);
 }
 
 /** \} */

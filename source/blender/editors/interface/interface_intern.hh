@@ -758,6 +758,26 @@ struct SafetyRect {
   rctf parent;
   rctf safety;
 };
+
+/**
+ * Runtime state for category tab drag operation.
+ * Stored in ARegionRuntime::category_tabs_drag_state during drag.
+ */
+struct CategoryDragState {
+  bool is_dragging = false;
+  char drag_category_id[64] = "";
+  int drag_start_y = 0;
+  int drag_tab_height = 0;
+  int original_index = 0;        /* Original position of dragged tab */
+  int current_insert_index = 0;
+  float drag_offset_y = 0.0f;
+  int tab_v_pad = 0;
+
+  /* Insert zone boundaries for visual shift calculation */
+  int insert_y_start = 0;
+  int insert_y_end = 0;
+};
+
 /* `interface.cc` */
 
 void fontscale(float *points, float aspect);
@@ -1170,6 +1190,9 @@ LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int
 /** Apply scroll to layout panels when the main panel is used in popups. */
 void layout_panel_popup_scroll_apply(Panel *panel, const float dy);
 
+/** Category tab drag operator for reordering tabs. */
+void UI_OT_category_tab_drag(wmOperatorType *ot);
+
 /**
  * Draws in resolution of 48x4 colors.
  */
@@ -1413,6 +1436,10 @@ void draw_preview_item_stateless(const uiFontStyle *fstyle,
  * Note this value must be sufficient to draw a popover arrow to avoid cropping it.
  */
 #define UI_POPUP_MENU_TOP (int)(10 * UI_SCALE_FAC)
+
+/* Category tab drag thresholds */
+#define CATEGORY_DRAG_THRESHOLD_PX 5
+#define CATEGORY_DRAG_DELAY_SEC 0.15
 
 #define UI_PIXEL_AA_JITTER 8
 extern const float ui_pixel_jitter[UI_PIXEL_AA_JITTER][2];

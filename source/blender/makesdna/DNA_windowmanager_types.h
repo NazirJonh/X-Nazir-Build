@@ -104,6 +104,29 @@ enum {
   (WM_OUTLINER_SYNC_SELECT_FROM_OBJECT | WM_OUTLINER_SYNC_SELECT_FROM_EDIT_BONE | \
    WM_OUTLINER_SYNC_SELECT_FROM_POSE_BONE | WM_OUTLINER_SYNC_SELECT_FROM_SEQUENCE)
 
+/* -------------------------------------------------------------------- */
+/** \name Category Glyph Mappings
+ * \{ */
+
+/**
+ * Stores a mapping from category name to glyph character.
+ * Used for default mappings and user overrides.
+ */
+typedef struct CategoryGlyphItem {
+  struct CategoryGlyphItem *next, *prev;
+  /** Category name (e.g., "Item", "View"). */
+  char category[64];
+  /** UTF-8 glyph character from Material Symbols font. */
+  char glyph[8];
+  /** Custom color for glyph (RGB 0.0-1.0), {0,0,0} = use theme color. */
+  float color[3];
+  /** User-defined display name for category (empty = use category). */
+  char display_name[64];
+  char _pad[4];
+} CategoryGlyphItem;
+
+/** \} */
+
 /** Window-manager is saved, tag WMAN. */
 struct wmWindowManager {
 #ifdef __cplusplus
@@ -114,6 +137,11 @@ struct wmWindowManager {
   ID id;
 
   ListBaseT<wmWindow> windows = {nullptr, nullptr};
+
+  /** Default glyph mappings for category tabs (auto-filled on startup). */
+  ListBase category_glyph_mappings = {nullptr, nullptr};
+  /** User-defined glyph overrides for category tabs. */
+  ListBase category_glyph_overrides = {nullptr, nullptr};
 
   /** Set on file read. */
   uint8_t init_flag = 0;

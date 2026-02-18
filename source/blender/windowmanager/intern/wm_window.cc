@@ -690,7 +690,7 @@ static std::string wm_window_title_text(
     }
   }
 
-  win_title.append(fmt::format(" - Blender {}", BKE_blender_version_string()));
+  win_title.append(fmt::format(" - X-Nazir Sculpt {}", "0.0.1"));
 
   return win_title;
 }
@@ -1191,6 +1191,9 @@ static void wm_window_ghostwindow_ensure(wmWindowManager *wm, wmWindow *win, boo
 
   /* Add top-bar. */
   ED_screen_global_areas_refresh(win);
+
+  /* Initialize category tabs hover handler for cross-area hover state management. */
+  ED_screen_category_tabs_handlers_ensure(win);
 }
 
 void wm_window_ghostwindows_ensure(wmWindowManager *wm)
@@ -1991,6 +1994,67 @@ static bool ghost_event_proc(const GHOST_IEvent *ghost_event, GHOST_TUserDataPtr
       }
       break;
     }
+    case GHOST_kEventDraggingEntered:
+    case GHOST_kEventDraggingUpdated: {
+      /* Start the drag already while the OS drag is hovering (before #DropDone) so a drag preview
+       * is shown, used by the category-tabs extension-drop feature. The drag list is created only
+       * once (guarded by #drags being empty) and freed again on #GHOST_kEventDraggingExited. */
+      const GHOST_TEventDragnDropData *ddd = static_cast<const GHOST_TEventDragnDropData *>(data);
+
+      if (win->active == 0) {
+        wm_window_raise(win);
+      }
+
+      /* Ensure the event state matches modifiers (window was inactive). */
+      wm_window_update_eventstate_modifiers(wm, win, event_time_ms);
+      /* Entering window, update mouse position (without sending an event). */
+      wm_window_update_eventstate(win);
+
+      if (BLI_listbase_is_empty(&wm->runtime->drags) && ddd && ddd->data) {
+        if (ddd->dataType == GHOST_kDragnDropTypeFilenames) {
+          const GHOST_TStringArray *stra = static_cast<const GHOST_TStringArray *>(ddd->data);
+          if (stra->count) {
+            int icon = ED_file_extension_icon(reinterpret_cast<char *>(stra->strings[0]));
+            wmDragPath *path_data = WM_drag_create_path_data(
+                Span(reinterpret_cast<char **>(stra->strings), stra->count));
+            WM_event_start_drag(C, icon, WM_DRAG_PATH, path_data, WM_DRAG_NOP);
+          }
+        }
+        else if (ddd->dataType == GHOST_kDragnDropTypeString) {
+          std::string *str = MEM_new<std::string>(__func__, static_cast<const char *>(ddd->data));
+          WM_event_start_drag(C, ICON_NONE, WM_DRAG_STRING, str, WM_DRAG_FREE_DATA);
+        }
+      }
+
+      if (ddd) {
+        wmEvent event;
+        wm_event_init_from_window(win, &event); /* Copy last state, like mouse coords. */
+        event.type = MOUSEMOVE;
+        event.val = KM_NOTHING;
+        copy_v2_v2_int(event.prev_xy, event.xy);
+
+        copy_v2_v2_int(event.xy, &ddd->x);
+        wm_cursor_position_from_ghost_screen_coords(win, &event.xy[0], &event.xy[1]);
+
+        /* The values from #wm_window_update_eventstate may not match (under WAYLAND they don't)
+         * Write this into the event state. */
+        copy_v2_v2_int(win->runtime->eventstate->xy, event.xy);
+
+        event.flag = eWM_EventFlag(0);
+        WM_event_add(win, &event);
+      }
+
+      break;
+    }
+    case GHOST_kEventDraggingExited: {
+      wm_drags_exit(wm, win);
+      WM_drag_free_list(&wm->runtime->drags);
+
+      if (bScreen *screen = WM_window_get_active_screen(win)) {
+        screen->do_draw_drag = true;
+      }
+      break;
+    }
     case GHOST_kEventDraggingDropDone: {
       const GHOST_TEventDragnDropData *ddd = static_cast<const GHOST_TEventDragnDropData *>(data);
 
@@ -2036,26 +2100,28 @@ static bool ghost_event_proc(const GHOST_IEvent *ghost_event, GHOST_TUserDataPtr
 
       /* Add drag data to wm for paths. */
 
-      if (ddd->dataType == GHOST_kDragnDropTypeFilenames) {
-        const GHOST_TStringArray *stra = static_cast<const GHOST_TStringArray *>(ddd->data);
+      if (BLI_listbase_is_empty(&wm->runtime->drags)) {
+        if (ddd->dataType == GHOST_kDragnDropTypeFilenames) {
+          const GHOST_TStringArray *stra = static_cast<const GHOST_TStringArray *>(ddd->data);
 
-        if (stra->count) {
-          CLOG_INFO(WM_LOG_EVENTS, "Drop %d files:", stra->count);
-          for (const char *path : Span(reinterpret_cast<char **>(stra->strings), stra->count)) {
-            CLOG_INFO(WM_LOG_EVENTS, "%s", path);
+          if (stra->count) {
+            CLOG_INFO(WM_LOG_EVENTS, "Drop %d files:", stra->count);
+            for (const char *path : Span(reinterpret_cast<char **>(stra->strings), stra->count)) {
+              CLOG_INFO(WM_LOG_EVENTS, "%s", path);
+            }
+            /* Try to get icon type from extension of the first path. */
+            int icon = ED_file_extension_icon(reinterpret_cast<char *>(stra->strings[0]));
+            wmDragPath *path_data = WM_drag_create_path_data(
+                Span(reinterpret_cast<char **>(stra->strings), stra->count));
+            WM_event_start_drag(C, icon, WM_DRAG_PATH, path_data, WM_DRAG_NOP);
+            /* Void pointer should point to string, it makes a copy. */
           }
-          /* Try to get icon type from extension of the first path. */
-          int icon = ED_file_extension_icon(reinterpret_cast<char *>(stra->strings[0]));
-          wmDragPath *path_data = WM_drag_create_path_data(
-              Span(reinterpret_cast<char **>(stra->strings), stra->count));
-          WM_event_start_drag(C, icon, WM_DRAG_PATH, path_data, WM_DRAG_NOP);
-          /* Void pointer should point to string, it makes a copy. */
         }
-      }
-      else if (ddd->dataType == GHOST_kDragnDropTypeString) {
-        /* Drop an arbitrary string. */
-        std::string *str = MEM_new<std::string>(__func__, static_cast<const char *>(ddd->data));
-        WM_event_start_drag(C, ICON_NONE, WM_DRAG_STRING, str, WM_DRAG_FREE_DATA);
+        else if (ddd->dataType == GHOST_kDragnDropTypeString) {
+          /* Drop an arbitrary string. */
+          std::string *str = MEM_new<std::string>(__func__, static_cast<const char *>(ddd->data));
+          WM_event_start_drag(C, ICON_NONE, WM_DRAG_STRING, str, WM_DRAG_FREE_DATA);
+        }
       }
 
       break;

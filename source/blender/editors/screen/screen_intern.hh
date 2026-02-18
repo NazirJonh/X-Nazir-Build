@@ -264,4 +264,18 @@ void SCREEN_OT_screenshot_area(wmOperatorType *ot);
 
 bool workspace_layout_set_poll(const WorkSpaceLayout *layout);
 
+/* `screen_category_tabs_ops.cc` */
+
+/**
+ * Register category tab operators (called from ED_operatortypes_screen).
+ */
+void ED_operatortypes_screen_category_tabs();
+
+/**
+ * Get RGB color from preset value for category tabs.
+ * \param preset: Color preset value (-1 for NONE, 0-7 for color presets)
+ * \param r_color: Output RGB color array (3 floats, 0.0-1.0 range)
+ */
+void category_tab_color_preset_to_rgb(const int preset, float r_color[3]);
+
 }  // namespace blender

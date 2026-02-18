@@ -431,6 +431,12 @@ static void do_versions_theme(const UserDef *userdef, bTheme *btheme)
     FROM_DEFAULT_V4_UCHAR(space_view3d.gp_wire_edit);
   }
 
+  if (!USER_VERSION_ATLEAST(502, 4)) {
+    for (int i = 0; i < GLYPH_COLOR_TOT; i++) {
+      copy_v4_v4_uchar(btheme->glyph_color[i].color, U_theme_default.glyph_color[i].color);
+    }
+  }
+
   if (!USER_VERSION_ATLEAST(502, 8)) {
     FROM_DEFAULT_V4_UCHAR(tui.link);
   }
@@ -1748,6 +1754,13 @@ void blo_do_versions_userdef(UserDef *userdef)
         userdef, "NODE_AST_compositor", "Utilities");
   }
 
+  if (!USER_VERSION_ATLEAST(500, 117)) {
+    /* Initialize new tab icon selection color property. */
+    for (bTheme &btheme : userdef->themes) {
+      copy_v4_v4_uchar(btheme.tui.wcol_tab.icon_selection, U_theme_default.tui.wcol_tab.icon_selection);
+    }
+  }
+
   if (!USER_VERSION_ATLEAST(501, 17)) {
     userdef->flag |= USER_HIDE_DOT_DATABLOCK;
   }
@@ -1765,11 +1778,69 @@ void blo_do_versions_userdef(UserDef *userdef)
     userdef->geometry_nodes_stack_limit = 100;
   }
 
+  if (!USER_VERSION_ATLEAST(502, 13)) {
+    userdef->geometry_nodes_stack_limit = 100;
+  }
+
+  if (!USER_VERSION_ATLEAST(502, 16)) {
+    if (userdef->category_tabs_zoom_icon == 0.0f) {
+      userdef->category_tabs_zoom_icon = 1.0f;
+    }
+    if (userdef->category_tabs_zoom_mixed == 0.0f) {
+      userdef->category_tabs_zoom_mixed = 1.0f;
+    }
+    if (userdef->category_tabs_zoom_text == 0.0f) {
+      userdef->category_tabs_zoom_text = 1.0f;
+    }
+    userdef->category_tabs_inactive_behavior = USER_CATEGORY_TABS_INACTIVE_DEFAULT;
+    userdef->category_tabs_shape = USER_CATEGORY_TABS_SHAPE_CAPSULE;
+  }
+
+  if (!USER_VERSION_ATLEAST(502, 4)) {
+    userdef->category_tabs_hide_reserved_inactive_text = false;
+  }
+
+  if (!USER_VERSION_ATLEAST(502, 15)) {
+    /* Ensure category_tabs_mixed_show_* fields are enabled for existing preferences. */
+    userdef->category_tabs_mixed_show_glyphs = true;
+    userdef->category_tabs_mixed_show_first_letter = true;
+    userdef->category_tabs_mixed_show_icons = true;
+    /* Ensure Visual Effect is enabled by default. */
+    userdef->category_tabs_visual_effect = true;
+    /* Ensure Show Drag Tooltips is enabled by default. */
+    userdef->category_tabs_show_drag_tooltips = true;
+    /* Ensure Outline is disabled by default. */
+    userdef->category_tabs_visual_outline = false;
+    /* Ensure Show Active Tab Name is disabled by default. */
+    userdef->category_tabs_show_active_name = false;
+    /* Set default outline color to #5C5C5CFF. */
+    userdef->category_tabs_visual_outline_color[0] = 92;
+    userdef->category_tabs_visual_outline_color[1] = 92;
+    userdef->category_tabs_visual_outline_color[2] = 92;
+    userdef->category_tabs_visual_outline_color[3] = 255;
+  }
+
   if (!USER_VERSION_ATLEAST(502, 35)) {
     /* Instead of removing the flag entirely, it is forced to be on. Once it is 100% certain the
      * Remote Asset Libraries feature will be shipped with 5.2 (which depends on other factors than
      * just code), the flag can be removed. */
     userdef->experimental.use_remote_asset_libraries = true;
+  }
+
+  if (!USER_VERSION_ATLEAST(502, 42)) {
+    /* Heal corrupt category-tab zoom factors. The valid range is [0.5, 2.5]; a stored 0.0 (from
+     * preferences saved before the zoom feature existed) collapses every category tab to zero
+     * width and makes the tab bar disappear. The earlier 502.16 heal no longer fires for these
+     * preferences, so re-run it. Only non-positive values are reset to keep customized zooms. */
+    if (userdef->category_tabs_zoom_icon <= 0.0f) {
+      userdef->category_tabs_zoom_icon = 1.0f;
+    }
+    if (userdef->category_tabs_zoom_mixed <= 0.0f) {
+      userdef->category_tabs_zoom_mixed = 1.0f;
+    }
+    if (userdef->category_tabs_zoom_text <= 0.0f) {
+      userdef->category_tabs_zoom_text = 1.0f;
+    }
   }
 
   /**

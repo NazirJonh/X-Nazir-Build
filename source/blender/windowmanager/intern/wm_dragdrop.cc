@@ -9,6 +9,7 @@
  */
 
 #include <cstring>
+#include <cstdio>
 #include <functional>
 
 #include "AS_asset_representation.hh"
@@ -70,6 +71,10 @@
 #include <fmt/format.h>
 
 namespace blender {
+
+namespace ui {
+void category_tabs_extension_preview_clear(ARegion *region);
+}
 
 /* ****************************************************** */
 
@@ -377,6 +382,18 @@ void wm_drags_exit(wmWindowManager *wm, wmWindow *win)
 
   wm_dragdrop_free_timer(wm, win);
 
+  /* Clear extension drop preview state for all regions in all windows. */
+  for (wmWindow &window : wm->windows) {
+    const bScreen *screen = WM_window_get_active_screen(&window);
+    if (screen) {
+      for (ScrArea &area : screen->areabase) {
+        for (ARegion &region : area.regionbase) {
+          ui::category_tabs_extension_preview_clear(&region);
+        }
+      }
+    }
+  }
+
   /* Active area should always redraw, even if canceled. */
   int event_xy_target[2];
   wmWindow *target_win = WM_window_find_under_cursor(
@@ -531,6 +548,15 @@ static wmDropBox *dropbox_active(bContext *C,
             continue;
           }
 
+          /* This dropbox's poll succeeded but also set #disabled_info (e.g. a category-tab
+           * extension drop blocked by the active filter). The dropbox claims this position, so
+           * stop searching and show the disabled message instead of letting a later dropbox match.
+           * Only this dropbox's own poll can set the hint here, so the effect stays local to it. */
+          if (drag->drop_state.disabled_info.has_value()) {
+            CTX_store_set(C, nullptr);
+            return nullptr;
+          }
+
           const wm::OpCallContext opcontext = wm_drop_operator_context_get(&drop);
           if (drop.ot && WM_operator_poll_context(C, drop.ot, opcontext)) {
             /* Get dropbox tooltip now, #wm_drag_draw_tooltip can use a different draw context. */
@@ -675,6 +701,9 @@ static void wm_drop_update_active(bContext *C, wmDrag *drag, const wmEvent *even
   if (!drag->drop_state.active_dropbox) {
     drag->drop_state.ui_context.reset();
   }
+  if (drag->drop_state.active_dropbox && win->active == 0) {
+    wm_window_raise(win);
+  }
 }
 
 void wm_drop_prepare(bContext *C, wmDrag *drag, wmDropBox *drop)
@@ -729,6 +758,7 @@ void wm_drags_handle_events(bContext *C, const wmEvent *event)
   }
 
   bool any_active = false;
+  bool any_disabled = false;
   for (wmDrag &drag : wm->runtime->drags) {
     switch (event->type) {
       case MOUSEMOVE:
@@ -744,13 +774,19 @@ void wm_drags_handle_events(bContext *C, const wmEvent *event)
       if (dropbox->on_event_while_hover) {
         dropbox->on_event_while_hover(C, *dropbox, event);
       }
+      /* Check if drop is disabled (e.g., blocked by filter) */
+      if (drag.drop_state.disabled_info.has_value()) {
+        any_disabled = true;
+      }
     }
   }
 
   /* Change the cursor to display that dropping isn't possible here. But only if there is something
    * being dragged actually. Cursor will be restored in #wm_drags_exit(). */
   if (!wm->runtime->drags.is_empty() && ELEM(event->type, MOUSEMOVE, EVT_DROP)) {
-    WM_cursor_modal_set(CTX_wm_window(C), any_active ? WM_CURSOR_DEFAULT : WM_CURSOR_STOP);
+    /* Show stop cursor if no active dropbox OR if drop is disabled. */
+    WM_cursor_modal_set(CTX_wm_window(C),
+                        (any_active && !any_disabled) ? WM_CURSOR_DEFAULT : WM_CURSOR_STOP);
   }
 }
 

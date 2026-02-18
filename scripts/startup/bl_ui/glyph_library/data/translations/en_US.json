@@ -1,0 +1,110 @@
+{
+  "version": "1.0.0",
+  "locale": "en_US",
+  "glyphs": {
+    "settings": {
+      "name": "Settings",
+      "keywords": ["configure", "preferences", "options", "setup"]
+    },
+    "search": {
+      "name": "Search",
+      "keywords": ["find", "lookup", "magnify", "locate"]
+    },
+    "home": {
+      "name": "Home",
+      "keywords": ["house", "main", "start", "beginning"]
+    },
+    "info": {
+      "name": "Information",
+      "keywords": ["details", "about", "help", "data"]
+    },
+    "help": {
+      "name": "Help",
+      "keywords": ["question", "support", "assistance", "guide"]
+    },
+    "add": {
+      "name": "Add",
+      "keywords": ["plus", "create", "new", "insert"]
+    },
+    "edit": {
+      "name": "Edit",
+      "keywords": ["modify", "change", "pencil", "update"]
+    },
+    "delete": {
+      "name": "Delete",
+      "keywords": ["remove", "trash", "bin", "erase"]
+    },
+    "save": {
+      "name": "Save",
+      "keywords": ["disk", "store", "keep", "preserve"]
+    },
+    "share": {
+      "name": "Share",
+      "keywords": ["send", "export", "distribute", "publish"]
+    },
+    "menu": {
+      "name": "Menu",
+      "keywords": ["hamburger", "list", "options", "navigation"]
+    },
+    "close": {
+      "name": "Close",
+      "keywords": ["x", "cancel", "exit", "dismiss"]
+    },
+    "more_vert": {
+      "name": "More Options",
+      "keywords": ["dots", "vertical", "options", "menu"]
+    },
+    "refresh": {
+      "name": "Refresh",
+      "keywords": ["reload", "update", "sync", "renew"]
+    },
+    "navigate_before": {
+      "name": "Previous",
+      "keywords": ["back", "previous", "left", "backward"]
+    },
+    "navigate_next": {
+      "name": "Next",
+      "keywords": ["forward", "next", "right", "advance"]
+    },
+    "folder": {
+      "name": "Folder",
+      "keywords": ["directory", "storage", "organize", "container"]
+    },
+    "description": {
+      "name": "Document",
+      "keywords": ["document", "text", "file", "paper"]
+    },
+    "image": {
+      "name": "Image",
+      "keywords": ["picture", "photo", "media", "graphic"]
+    },
+    "category": {
+      "name": "Category",
+      "keywords": ["group", "organize", "classify", "sort"]
+    }
+  },
+  "categories": {
+    "action": "Action",
+    "alert": "Alert",
+    "av": "Audio/Video",
+    "communication": "Communication",
+    "content": "Content",
+    "device": "Device",
+    "editor": "Editor",
+    "file": "File",
+    "hardware": "Hardware",
+    "image": "Image",
+    "maps": "Maps",
+    "navigation": "Navigation",
+    "places": "Places",
+    "search": "Search",
+    "social": "Social",
+    "toggle": "Toggle"
+  },
+  "ui_labels": {
+    "search_glyphs": "Search Glyphs",
+    "select_glyph": "Select Glyph",
+    "glyph_picker": "Glyph Picker",
+    "browse_glyphs": "Browse Glyphs"
+  }
+}

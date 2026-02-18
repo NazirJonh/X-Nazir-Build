@@ -37,6 +37,21 @@ class AssetRepresentation;
 namespace ui {
 struct Layout;
 struct Block;
+enum class PopupAttachDirection : int8_t;
+/**
+ * Runtime state for extension drop preview on category tabs.
+ * Stored in ARegionRuntime::extension_drop_preview_state during hover.
+ * This is a preview-only state - it does NOT affect actual category order.
+ */
+struct ExtensionDropPreviewState {
+  bool active = false;
+  char target_category_id[64] = ""; /* Category being hovered (empty if no tabs exist) */
+  int target_index = -1;              /* Index of target category in ordered list */
+  bool insert_above = false;          /* true = insert above target, false = below */
+  int tab_height = 0;                 /* Height of tab for ghost sizing */
+  int tab_v_pad = 0;                  /* Vertical padding between tabs */
+  int cursor_y = 0;                   /* Cursor Y position for accurate ghost positioning */
+};
 }  // namespace ui
 
 struct ARegion;
@@ -357,6 +372,8 @@ struct PanelType {
   const char *description;
   int icon;
   char translation_context[BKE_ST_MAXNAME];
+  /** Optional: custom glyph for category tabs (UTF-8 Material Symbols character). */
+  const char *icon_glyph;
   /** For buttons window. */
   char context[BKE_ST_MAXNAME];
   /** For category tabs. */
@@ -567,6 +584,37 @@ struct ARegionRuntime {
 
   /** Dummy panel used in popups so they can support layout panels. */
   Panel *popup_block_panel = nullptr;
+
+  /** Category tabs settings button rect for hit-testing and popover positioning. */
+  rcti category_tabs_settings_rect = {};
+  /** Category tabs settings button hover state. */
+  bool category_tabs_settings_hover = false;
+  /** Time when settings button was last clicked (for popup open detection). */
+  double category_tabs_settings_click_time = 0.0;
+  /** Time when hover state was last set to true (for auto-reset timeout). */
+  double category_tabs_settings_hover_time = 0.0;
+
+  /** Opaque pointer used by editors for category-tabs dragging state (runtime only). */
+  void *category_tabs_drag_state = nullptr;
+  /** Preview state for extension drop (ghost tab visualization during hover). */
+  ui::ExtensionDropPreviewState extension_drop_preview_state = {};
+
+  /** Pending category ID for drag detection (cleared when drag starts or click completes). */
+  char category_tabs_drag_pending_id[64] = "";
+
+  /** Y position where drag was initiated (mval). */
+  int category_tabs_drag_start_y = 0;
+
+  /** Time when drag was initiated (for threshold detection). */
+  double category_tabs_drag_start_time = 0.0;
+
+  /** When true, active tab name is hidden (collapsed) even if Show Active Tab Name is enabled.
+   * Used in Default mode when clicking on active tab to temporarily hide the name. */
+  bool category_tabs_active_name_hidden = false;
+
+  /** Previous active tab ID (used in Sticky mode to show name for recently deactivated tab).
+   * Empty string when no previous tab exists. */
+  char category_tabs_previous_active_id[64] = "";
 };
 
 }  // namespace bke

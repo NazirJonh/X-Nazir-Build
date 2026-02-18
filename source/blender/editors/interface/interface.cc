@@ -3704,6 +3704,14 @@ static void but_free_type_specific(Button *but)
       }
       break;
     }
+    case ButtonType::Tag: {
+      ButtonTag *tag_but = static_cast<ButtonTag *>(but);
+      /* Free strings allocated with BLI_strdup(). */
+      MEM_SAFE_DELETE(tag_but->context_menu_operator);
+      MEM_SAFE_DELETE(tag_but->operator_param_name);
+      MEM_SAFE_DELETE(tag_but->operator_param_value);
+      break;
+    }
     default:
       break;
   }
@@ -4285,7 +4293,7 @@ void block_cm_to_display_space_v3(Block *block, float pixel[3])
 /**
  * Factory function: Allocate button and set #Button.type.
  */
-static std::unique_ptr<Button> but_new(const ButtonType type)
+std::unique_ptr<Button> but_new(const ButtonType type)
 {
   std::unique_ptr<Button> but{};
 
@@ -4340,6 +4348,9 @@ static std::unique_ptr<Button> but_new(const ButtonType type)
       break;
     case ButtonType::Label:
       but = std::make_unique<ButtonLabel>();
+      break;
+    case ButtonType::Tag:
+      but = std::make_unique<ButtonTag>();
       break;
     case ButtonType::Scroll:
       but = std::make_unique<ButtonScrollBar>();
@@ -5169,6 +5180,421 @@ Button *uiDefButAlert(Block *block, AlertIcon icon, int x, int y, short width, s
     return uiDefButImage(block, ibuf, x, y, ibuf->x, ibuf->y, btheme->tui.wcol_menu_back.text);
   }
   return nullptr;
+}
+
+Button *uiDefButTag(Block *block,
+                    const char *tag_name,
+                    const char *glyph,
+                    const float *color,
+                    bool is_active,
+                    bool is_pref_mode,
+                    bool center_glyph,
+                    int icon_id,
+                    const char *icon_path,
+                    int x, int y, short width, short height,
+                    const char *tip)
+{
+  /* Validate input. */
+  if (!block || !tag_name || tag_name[0] == '\0') {
+    BLI_assert(0 && "uiDefButTag: block and non-empty tag_name are required");
+    return nullptr;
+  }
+
+  /* Create button using the factory function. */
+  block->buttons_ptrs.append(but_new(ButtonType::Tag));
+  ButtonTag *tag_but = static_cast<ButtonTag *>(block->buttons_ptrs.last().get());
+
+  /* Initialize base button fields. */
+  tag_but->rect.xmin = x;
+  tag_but->rect.ymin = y;
+  tag_but->rect.xmax = x + width;
+  tag_but->rect.ymax = y + height;
+  tag_but->flag = 0;
+
+  /* Copy button text (tag name). */
+  tag_but->str = tag_name;
+
+  /* Set tooltip if provided - store a copy since StringRef doesn't own the data. */
+  if (tip) {
+    tag_but->tooltip_storage = tip;
+    /* Note: don't set tag_but->tip since it's a StringRef and may become invalid.
+     * Instead, button_string_get_tooltip will use tooltip_storage for Tag buttons. */
+  }
+
+  /* Set block reference. */
+  tag_but->block = block;
+
+  /* Copy and validate the glyph. */
+  if (glyph && glyph[0] != '\0') {
+    /* Note: glyph must be valid UTF-8. */
+    BLI_strncpy(tag_but->glyph, glyph, sizeof(tag_but->glyph));
+    if (g_ui_button_tag_debug_enabled) {
+      printf("DEBUG: uiDefButTag: glyph set to '%s' (len=%zu)\n", tag_but->glyph, strlen(tag_but->glyph));
+    }
+  } else {
+    tag_but->glyph[0] = '\0';
+    if (g_ui_button_tag_debug_enabled) {
+      printf("DEBUG: uiDefButTag: glyph is empty\n");
+    }
+  }
+
+  /* Copy and clamp the color. */
+  if (color) {
+    /* Clamp color values to the [0.0, 1.0] range. CLAMP mutates the variable,
+     * so copy first then clamp. */
+    tag_but->color[0] = color[0];
+    tag_but->color[1] = color[1];
+    tag_but->color[2] = color[2];
+    CLAMP(tag_but->color[0], 0.0f, 1.0f);
+    CLAMP(tag_but->color[1], 0.0f, 1.0f);
+    CLAMP(tag_but->color[2], 0.0f, 1.0f);
+
+    /* Mark as having custom color if any component is significant. */
+    tag_but->has_color = (tag_but->color[0] > 0.001f ||
+                          tag_but->color[1] > 0.001f ||
+                          tag_but->color[2] > 0.001f);
+  } else {
+    /* No custom color - use theme default. */
+    tag_but->has_color = false;
+    zero_v3(tag_but->color);
+  }
+
+  /* Set icon (takes priority over glyph when set). */
+  tag_but->icon_id = icon_id;
+  if (icon_path && icon_path[0] != '\0') {
+    BLI_strncpy(tag_but->icon_path, icon_path, sizeof(tag_but->icon_path));
+  } else {
+    tag_but->icon_path[0] = '\0';
+  }
+
+  /* Debug: Log icon data. */
+  if (g_ui_button_tag_debug_enabled) {
+    printf("DEBUG: uiDefButTag: icon_id=%d, icon_path='%s'\n", icon_id, icon_path ? icon_path : "(null)");
+  }
+
+  /* Set active/selected state. */
+  if (is_active) {
+    tag_but->flag |= UI_SELECT_DRAW;
+  }
+
+  /* Set preference mode. */
+  if (is_pref_mode) {
+    button_drawflag_enable(tag_but, BUT_TAG_PREF_MODE);
+  }
+
+  /* Set glyph centering. */
+  if (center_glyph) {
+    button_drawflag_enable(tag_but, BUT_TAG_CENTER_GLYPH);
+  }
+
+  /* If current layout is set, add button as ButtonItem to the layout system.
+   * This is required for proper positioning and layout resolution. */
+  if (block->curlayout) {
+    layout_add_but(block->curlayout, tag_but);
+  }
+
+  button_update(tag_but);
+
+  return tag_but;
+}
+
+/**
+ * Create a Tag button in preference mode (no checkbox, for category assignment UI).
+ * This is a convenience wrapper around uiDefButTag() that sets is_pref_mode=true.
+ *
+ * \param block: The UI block to add button to.
+ * \param tag_name: The display name for the tag.
+ * \param glyph: Optional UTF-8 glyph/emoji.
+ * \param color: Optional RGB color for glyph.
+ * \param center_glyph: Whether to center glyph in button.
+ * \param icon_id: Blender internal icon ID (0 = none).
+ * \param icon_path: Optional path to external icon file.
+ * \param x, y: Position in the UI block.
+ * \param width, height: Button dimensions.
+ * \param tip: Optional tooltip text.
+ * \return Pointer to created ButtonTag.
+ */
+Button *uiDefButTagPref(Block *block,
+                        const char *tag_name,
+                        const char *glyph,
+                        const float *color,
+                        bool center_glyph,
+                        int icon_id,
+                        const char *icon_path,
+                        int x, int y, short width, short height,
+                        const char *tip)
+{
+  /* Preference mode: no checkbox, is_active=false */
+  return uiDefButTag(block, (tag_name && tag_name[0] != '\0') ? tag_name : "Tag", glyph, color, false, true, center_glyph, icon_id, icon_path, x, y, width, height, tip);
+}
+
+/**
+ * Create a Tag button in preference mode (no checkbox) from RNA.
+ * This function is called by the RNA system when Python code calls layout.tag_button_pref().
+ *
+ * \param layout: The UI layout (must be non-null).
+ * \param tag_name: Display name (must be non-null, non-empty).
+ * \param glyph: Optional UTF-8 glyph/emoji.
+ * \param color: RGB color for glyph (3 floats).
+ * \param x: Position X (ignored, layout system determines position).
+ * \param y: Position Y (ignored, layout system determines position).
+ * \param width: Button width (0 = auto from text content).
+ * \param height: Button height (0 = auto from UI_UNIT_Y).
+ */
+extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
+                                              const char *tag_name,
+                                              const char *glyph,
+                                              const float *color,
+                                              int x, int y, int width, int height,
+                                              int icon_id,
+                                              const char *icon_path)
+{
+  using namespace blender::ui;
+
+  /* Silence unused parameter warnings - position is determined by layout system */
+  (void)x;
+  (void)y;
+
+  if (!layout || !tag_name || tag_name[0] == '\0') {
+    return;
+  }
+
+  /* Get block from layout */
+  Block *block = layout->block();
+  if (!block) {
+    return;
+  }
+
+  /* Calculate automatic sizes if not provided */
+  if (width <= 0) {
+    width = UI_UNIT_X * 10;  /* Default width for preference mode buttons */
+  }
+  if (height <= 0) {
+    height = UI_UNIT_Y;  /* Use standard height to match operator buttons */
+  }
+
+  /* Set current layout for button creation */
+  block_layout_set_current(block, layout);
+
+  /* Create preference mode Tag button */
+  uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, false, icon_id, icon_path ? icon_path : "", 0, 0, (short)width, (short)height, nullptr);
+}
+
+/**
+ * Create a box layout with Tag button for preference mode.
+ *
+ * This function creates a box container with a row layout (align=true) inside
+ * and adds a Tag button to the row. The returned layout can be used to add
+ * additional buttons (e.g., delete button). The box provides a visual frame
+ * around the Tag button and any additional buttons added to the row.
+ *
+ * \param layout: The parent layout container.
+ * \param tag_name: The display name for the tag.
+ * \param glyph: Optional UTF-8 glyph/emoji.
+ * \param color: Optional RGB color for glyph (values 0.0-1.0).
+ * \param width: Button width (0 for automatic).
+ * \param height: Button height (0 for automatic).
+ * \param no_background: Skip background rendering (only show on hover/active).
+ * \param align: Align buttons together for seamless appearance (true = seamless, false = with gap).
+ * \param operator_name: Optional operator name to assign to button click.
+ * \param context_menu_operator: Optional operator name for right-click context menu.
+ * \param operator_param_name: Optional parameter name for context menu operator.
+ * \param operator_param_value: Optional parameter value for context menu operator.
+ * \return Pointer to the row layout with Tag button added (inside the box).
+ */
+uiLayout *uiDefButTagRow(uiLayout *layout,
+                         const char *tag_name,
+                         const char *glyph,
+                         const float *color,
+                         int width,
+                         int height,
+                         bool no_background,
+                         bool align,
+                         bool center_glyph,
+                         int icon_id,
+                         const char *icon_path,
+                         const char *operator_name,
+                         const char *context_menu_operator,
+                         const char *operator_param_name,
+                         const char *operator_param_value)
+{
+  using namespace blender::ui;
+
+  /* Validate input. */
+  if (!layout) {
+    BLI_assert(0 && "uiDefButTagRow: layout is required");
+    return nullptr;
+  }
+  if (!tag_name || tag_name[0] == '\0') {
+    BLI_assert(0 && "uiDefButTagRow: non-empty tag_name is required");
+    return nullptr;
+  }
+
+  /* Create box container with a row layout inside. */
+  Layout *layout_cpp = reinterpret_cast<Layout *>(layout);
+  Layout &box = layout_cpp->box();
+  Layout &row = box.row(align);
+
+  /* Get block from layout. */
+  Block *block = row.block();
+  if (!block) {
+    return nullptr;
+  }
+
+  /* Calculate automatic size if needed. */
+  if (width <= 0) {
+    width = UI_UNIT_X * 10;
+  }
+  if (height <= 0) {
+    height = UI_UNIT_Y;  /* Use standard height to match operator buttons */
+  }
+
+  /* Create tag button in preference mode. */
+  block_layout_set_current(block, &row);
+  Button *tag_but = uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, center_glyph, icon_id, icon_path, 0, 0, (short)width, (short)height, nullptr);
+  if (!tag_but) {
+    return reinterpret_cast<uiLayout *>(&row);
+  }
+
+  /* Set flags if requested. */
+  if (no_background) {
+    button_drawflag_enable(tag_but, BUT_TAG_NO_BACKGROUND);
+  }
+
+  /* Assign operator if provided. */
+  if (operator_name && operator_name[0] != '\0') {
+    wmOperatorType *ot = WM_operatortype_find(operator_name, false);
+    if (ot) {
+      button_operator_set(tag_but, ot, wm::OpCallContext::ExecDefault);
+    }
+  }
+
+  /* Store context menu operator and parameters. */
+  ButtonTag *tag_but_casted = static_cast<ButtonTag *>(tag_but);
+  if (context_menu_operator && context_menu_operator[0] != '\0') {
+    tag_but_casted->context_menu_operator = BLI_strdup(context_menu_operator);
+  }
+  if (operator_param_name && operator_param_name[0] != '\0') {
+    tag_but_casted->operator_param_name = BLI_strdup(operator_param_name);
+  }
+  if (operator_param_value && operator_param_value[0] != '\0') {
+    tag_but_casted->operator_param_value = BLI_strdup(operator_param_value);
+  }
+
+  /* Return row layout for additional buttons. */
+  return reinterpret_cast<uiLayout *>(&row);
+}
+
+/**
+ * Create a box layout with Tag button for preference mode from RNA.
+ * This function is called by the RNA system when Python code calls layout.tag_button_pref_row().
+ * The box provides a visual frame around the Tag button and any additional buttons.
+ *
+ * \param layout: The UI layout (must be non-null).
+ * \param tag_name: Display name (must be non-null, non-empty).
+ * \param glyph: Optional UTF-8 glyph/emoji.
+ * \param color: RGB color for glyph (3 floats).
+ * \param width: Button width (0 = auto).
+ * \param height: Button height (0 = auto).
+ * \param no_background: Skip background rendering (only show on hover/active).
+ * \param align: Align buttons together for seamless appearance (true = seamless, false = with gap).
+ * \param operator_name: Optional operator name to assign to button click.
+ * \param context_menu_operator: Optional operator name for right-click context menu.
+ * \param operator_param_name: Optional parameter name for context menu operator.
+ * \param operator_param_value: Optional parameter value for context menu operator.
+ * \return Pointer to the row layout with Tag button added (inside the box), or null on error.
+ */
+extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
+    blender::ui::Layout *layout,
+    const char *tag_name,
+    const char *glyph,
+    const float *color,
+    int width,
+    int height,
+    bool no_background,
+    bool align,
+    bool center_glyph,
+    const char *icon_key,
+    const char *icon_path,
+    const char *operator_name,
+    const char *context_menu_operator,
+    const char *operator_param_name,
+    const char *operator_param_value)
+{
+  using namespace blender::ui;
+
+  /* Validate input. */
+  if (!layout) {
+    BLI_assert(0 && "rna_uiLayout_tag_button_pref_row: layout is required");
+    return nullptr;
+  }
+  if (!tag_name || tag_name[0] == '\0') {
+    BLI_assert(0 && "rna_uiLayout_tag_button_pref_row: non-empty tag_name is required");
+    return nullptr;
+  }
+
+  /* Create box container with a row layout inside. */
+  Layout *layout_cpp = layout;
+  Layout &box = layout_cpp->box();
+  Layout &row = box.row(align);
+
+  /* Get block from layout. */
+  Block *block = row.block();
+  if (!block) {
+    return nullptr;
+  }
+
+  /* Calculate automatic size if needed. */
+  if (width <= 0) {
+    width = UI_UNIT_X * 10;
+  }
+  if (height <= 0) {
+    height = UI_UNIT_Y;  /* Use standard height to match operator buttons */
+  }
+
+  /* Resolve icon from key and path. */
+  int icon_id = category_tab_icon_id_resolve_from_key_path(icon_key, icon_path);
+
+  /* Debug: Log resolved icon. */
+  if (g_ui_button_tag_debug_enabled) {
+    printf("DEBUG: rna_uiLayout_tag_button_pref_row: icon_key='%s', icon_path='%s', resolved icon_id=%d\n",
+           icon_key ? icon_key : "(null)", icon_path ? icon_path : "(null)", icon_id);
+  }
+
+  /* Create tag button in preference mode. */
+  block_layout_set_current(block, &row);
+  Button *tag_but = uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, center_glyph, icon_id, icon_path ? icon_path : "", 0, 0, (short)width, (short)height, nullptr);
+  if (!tag_but) {
+    return &row;
+  }
+
+  /* Set flags if requested. */
+  if (no_background) {
+    button_drawflag_enable(tag_but, BUT_TAG_NO_BACKGROUND);
+  }
+
+  /* Assign operator if provided. */
+  if (operator_name && operator_name[0] != '\0') {
+    wmOperatorType *ot = WM_operatortype_find(operator_name, false);
+    if (ot) {
+      button_operator_set(tag_but, ot, wm::OpCallContext::ExecDefault);
+    }
+  }
+
+  /* Store context menu operator and parameters. */
+  ButtonTag *tag_but_casted = static_cast<ButtonTag *>(tag_but);
+  if (context_menu_operator && context_menu_operator[0] != '\0') {
+    tag_but_casted->context_menu_operator = BLI_strdup(context_menu_operator);
+  }
+  if (operator_param_name && operator_param_name[0] != '\0') {
+    tag_but_casted->operator_param_name = BLI_strdup(operator_param_name);
+  }
+  if (operator_param_value && operator_param_value[0] != '\0') {
+    tag_but_casted->operator_param_value = BLI_strdup(operator_param_value);
+  }
+
+  /* Return row layout for additional buttons. */
+  return &row;
 }
 
 void button_enum_prop_value_set(Button *but, int retval)
@@ -6580,9 +7006,19 @@ std::string button_string_get_tooltip(bContext &C, Button &but)
   if (but.tip_func) {
     return but.tip_func(&C, but.tip_arg, but.tip);
   }
+
+  /* For Tag buttons, use the stored tooltip copy since StringRef doesn't own data */
+  if (but.type == ButtonType::Tag) {
+    const ButtonTag *tag_but = static_cast<const ButtonTag*>(&but);
+    if (!tag_but->tooltip_storage.empty()) {
+      return tag_but->tooltip_storage;
+    }
+  }
+
   if (!but.tip.is_empty()) {
     return but.tip;
   }
+
   return button_string_get_rna_tooltip(C, but);
 }
 

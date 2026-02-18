@@ -70,12 +70,16 @@ bool ED_region_overlap_isect_any_xy(const ScrArea *area, const int event_xy[2])
   return false;
 }
 
-bool ED_region_panel_category_gutter_calc_rect(const ARegion *region, rcti *r_region_gutter)
+bool ED_region_panel_category_gutter_calc_rect(const ScrArea *area,
+                                               const ARegion *region,
+                                               rcti *r_region_gutter)
 {
   *r_region_gutter = region->winrct;
   if (ui::panel_category_tabs_is_visible(region)) {
+    const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
     const int category_tabs_width = round_fl_to_int(ui::view2d_scale_get_x(&region->v2d) *
-                                                    UI_PANEL_CATEGORY_MARGIN_WIDTH);
+                                                    UI_PANEL_CATEGORY_MARGIN_WIDTH *
+                                                    category_tabs_zoom);
     const int alignment = RGN_ALIGN_ENUM_FROM_MASK(region->alignment);
 
     if (alignment == RGN_ALIGN_LEFT) {
@@ -92,10 +96,12 @@ bool ED_region_panel_category_gutter_calc_rect(const ARegion *region, rcti *r_re
   return false;
 }
 
-bool ED_region_panel_category_gutter_isect_xy(const ARegion *region, const int event_xy[2])
+bool ED_region_panel_category_gutter_isect_xy(const ScrArea *area,
+                                              const ARegion *region,
+                                              const int event_xy[2])
 {
   rcti region_gutter;
-  if (ED_region_panel_category_gutter_calc_rect(region, &region_gutter)) {
+  if (ED_region_panel_category_gutter_calc_rect(area, region, &region_gutter)) {
     return BLI_rcti_isect_pt_v(&region_gutter, event_xy);
   }
   return false;
@@ -143,7 +149,7 @@ bool ED_region_overlap_isect_xy_with_margin(const ARegion *region,
           ED_region_overlap_isect_y_with_margin(region, event_xy[1], margin));
 }
 
-bool ED_region_contains_xy(const ARegion *region, const int event_xy[2])
+bool ED_region_contains_xy(const ScrArea *area, const ARegion *region, const int event_xy[2])
 {
   /* Only use the margin when inside the region. */
   if (BLI_rcti_isect_pt_v(&region->winrct, event_xy)) {
@@ -172,7 +178,7 @@ bool ED_region_contains_xy(const ARegion *region, const int event_xy[2])
           }
         }
         else if (ELEM(alignment, RGN_ALIGN_LEFT, RGN_ALIGN_RIGHT)) {
-          if (ED_region_panel_category_gutter_isect_xy(region, event_xy)) {
+          if (ED_region_panel_category_gutter_isect_xy(area, region, event_xy)) {
             /* pass */
           }
           else if (!ED_region_overlap_isect_y_with_margin(region, event_xy[1], overlap_margin)) {
@@ -206,7 +212,7 @@ ARegion *ED_area_find_region_xy_visual(const ScrArea *area,
       continue;
     }
     if (ELEM(regiontype, RGN_TYPE_ANY, region.regiontype)) {
-      if (ED_region_contains_xy(&region, event_xy)) {
+      if (ED_region_contains_xy(area, &region, event_xy)) {
         return &region;
       }
     }
@@ -217,7 +223,7 @@ ARegion *ED_area_find_region_xy_visual(const ScrArea *area,
       continue;
     }
     if (ELEM(regiontype, RGN_TYPE_ANY, region.regiontype)) {
-      if (ED_region_contains_xy(&region, event_xy)) {
+      if (ED_region_contains_xy(area, &region, event_xy)) {
         return &region;
       }
     }

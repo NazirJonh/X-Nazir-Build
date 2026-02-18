@@ -3,10 +3,17 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
+import json
+import os
+import re
+import time
+from contextlib import contextmanager
 from bpy.types import (
     Header,
     Menu,
+    Operator,
     Panel,
+    PropertyGroup,
     UIList,
 )
 from bpy.app.translations import (
@@ -15,7 +22,680 @@ from bpy.app.translations import (
     pgettext_rpt as rpt_,
 )
 from bl_ui.utils import PresetPanel
+# Pure-data constants for the Category Tabs / Glyph / Tag system (extracted from this module).
+from bl_ui.glyph_tag_system.defaults import (
+    BL_CONTEXT_TO_MODE_FLAG,
+    CURRENT_JSON_VERSION,
+    DEFAULT_CATEGORY_GLYPHS,
+    DEFAULT_TAG_GLYPH_HEX,
+    GLYPHS_FILENAME,
+    MODE_TO_FLAG,
+    POPULAR_ADDONS_DB_ENABLED,
+    RESERVED_CATEGORY_PRIORITY,
+    SAVE_DEBUG,
+    SPACE_TO_FLAG,
+    TAG_BACKUP_ENABLED,
+    TAG_DEBUG,
+    _CATEGORY_TAG_ALL_MODE_FLAGS,
+    _CATEGORY_TAG_DEFAULT_MODE_FLAGS,
+    _CATEGORY_TAG_FILTER_ENUM_TO_FLAG,
+    _CATEGORY_TAG_MODES,
+    _CATEGORY_TAG_MODE_FLAG_TO_NAME,
+    _CATEGORY_TAG_MODE_ID_TO_BIT,
+    _CATEGORY_TAG_MODE_NAME_TO_FLAG,
+    _FLAG_TO_MODE,
+    _FLAG_TO_SPACE,
+)
 
+from bl_ui.glyph_tag_system.conversions import (
+    _category_order_decode,
+    _category_order_encode,
+    _flags_to_mode_names,
+    _glyph_to_hex,
+    _glyph_to_unicode_escape,
+    _hex_to_glyph,
+    _is_single_edit_apart,
+    _is_single_glyph,
+    _is_valid_category_name,
+    _make_cache_key,
+    _mode_names_to_flags,
+    _normalize_category_key,
+    _space_type_id_to_str,
+    _space_type_str_to_id,
+    _unicode_escape_to_glyph,
+    flags_to_modes,
+    flags_to_spaces,
+    modes_to_flags,
+    spaces_to_flags,
+    _tag_display_mode_from_data,
+    _tag_icon_source_from_display_mode,
+    get_reserved_category_priority,
+)
+
+from bl_ui.glyph_tag_system.log import (
+    _MAX_LOG_CACHE_SIZE,
+    _log_once,
+    _logged_messages_cache,
+    _package_match_log_once,
+    _package_match_logged,
+    _pref_log_once,
+    _pref_logged_messages,
+    _sync_miss_log_once,
+    _sync_miss_logged,
+    _tag_logged_messages,
+    category_debug_print,
+    save_debug_print,
+    tag_log,
+)
+
+# JSON schema migrations (extracted from this module).
+from bl_ui.glyph_tag_system.migrations import (
+    _normalize_category_data,
+    migrate_json_data,
+)
+
+# Import glyph library for integration
+try:
+    from bl_ui.glyph_library import get_glyph_library
+except ImportError:
+    get_glyph_library = None
+
+# Import performance profiling utilities
+try:
+    from .space_userpref_perf import profile_block, profile_function, print_perf_summary
+except ImportError:
+    # Fallback if profiling module not available
+    from contextlib import contextmanager
+    @contextmanager
+    def profile_block(name):
+        yield
+    def profile_function(func):
+        return func
+    def print_perf_summary():
+        pass
+
+# -----------------------------------------------------------------------------
+# Tag System - Infrastructure Utilities (CleanPanels patterns)
+
+
+def _is_popular_addons_database_extension(extension_id):
+    """Check if extension_id is Popular Addons Database."""
+    if not isinstance(extension_id, str):
+        return False
+    normalized = _normalize_category_key(extension_id)
+    return normalized.endswith("popularaddonsdatabase") or normalized == "popularaddonsdatabase"
+
+
+# Glyph cache — persistence, category data, and glyph setters (extracted from this module).
+# Re-imported here to preserve the existing module-attribute contract.
+from bl_ui.glyph_tag_system.glyph_cache import (
+    _ensure_category_panel_label,
+    _find_panel_label_for_category,
+    _get_category_data,
+    _get_glyphs_filepath,
+    _integrate_glyph_library,
+    _is_collection_safe,
+    _is_reserved_category_name,
+    _load_glyph_mappings_from_file,
+    _save_glyph_mappings_to_file,
+    _set_category_data_internal,
+    assign_tag_to_category,
+    filter_categories_by_tags,
+    get_all_category_glyphs,
+    get_categories_for_tag,
+    get_category_data,
+    get_category_display_name,
+    get_category_glyph,
+    get_category_glyph_data,
+    get_category_icon_data,
+    get_default_display_name,
+    get_default_glyph,
+    is_category_visible_by_tags,
+    mark_all_unassigned_categories_as_without_tag,
+    mark_category_from_extension,
+    reset_category_glyphs_to_defaults,
+    reset_category_to_defaults,
+    set_category_data,
+    set_category_glyph,
+)
+
+# Category ordering management (extracted from this module).
+# Re-imported here to preserve the existing module-attribute contract.
+from bl_ui.glyph_tag_system.ordering import (
+    clear_category_order,
+    get_all_category_orders,
+    get_category_order,
+    set_category_order,
+)
+
+# Tag CRUD and category-tag associations (extracted from this module).
+# Re-imported here to preserve the existing module-attribute contract.
+from bl_ui.glyph_tag_system.tags_cache import (
+    _generate_unique_tag_name,
+    _get_mode_flags_for_tag,
+    _set_mode_flags_for_tag,
+    _sync_single_tag_to_wm,
+    _validate_icon_key,
+    add_category_tag,
+    create_tag,
+    delete_tag,
+    generate_unique_tag_name,
+    get_all_tags,
+    get_category_tags,
+    get_tag_data,
+    get_tag_name_by_index,
+    get_tag_names,
+    get_tags_for_category_ui,
+    remove_category_tag,
+    rename_tag,
+    set_category_tags,
+    toggle_category_tag,
+    update_tag,
+)
+
+
+# Mode-flag resolution (extracted from this module into glyph_tag_system.modes).
+# Re-imported here to preserve the existing module-attribute contract.
+from bl_ui.glyph_tag_system.modes import (
+    _get_tag_filter_mode_flag_from_wm,
+    get_current_tag_mode_flag,
+)
+
+
+def _get_unassigned_categories_count_for_space(context,
+                                               space_type,
+                                               space_flag,
+                                               _order_key=None):
+    """Count unassigned extension categories for a specific editor space.
+
+    Mirrors the C++ unassigned-category predicate so Python headers stay in sync
+    with the shared tag-bar behavior.
+
+    IMPORTANT: This function checks _glyph_cache instead of wm.category_glyph_mappings
+    to respect preview mode. In preview mode, WM may have tags but pending_tag_assignment
+    stays True in cache, so categories remain visible in "New Add-ons!" until Save.
+    """
+    global _glyph_cache
+
+    # PERF: Start timing
+    _count_start = time.perf_counter()
+
+    wm = getattr(context, "window_manager", None)
+    if wm is None:
+        return 0
+
+    # OPTIMIZATION: REMOVED calls to _merge_discovered_categories() and sync_glyph_mappings_to_wm()
+    # These were being called EVERY time category count was checked (multiple times per UI draw)
+    # causing severe performance issues. Discovery now only happens at initial load.
+    # CRITICAL FIX: This was causing 790 panel scans on EVERY count check!
+    
+    current_mode_flag = get_current_tag_mode_flag(context)
+    count = 0
+
+    # Check cache instead of WM to respect preview mode
+    _cache_iterations = 0
+    for cache_key, cat_data in _glyph_cache.items():
+        _cache_iterations += 1
+        if not isinstance(cache_key, tuple) or len(cache_key) != 2:
+            continue
+
+        # Only check global entries (space_type=-1)
+        cache_space_type, category_name = cache_key
+        if cache_space_type != -1:
+            continue
+
+        if not isinstance(cat_data, dict):
+            continue
+
+        # Get values from cache
+        is_reserved = category_name in DEFAULT_CATEGORY_GLYPHS
+        source_extension = cat_data.get("source_extension", "")
+        pending_assignment = cat_data.get("pending_tag_assignment", False)
+        tags = cat_data.get("tags", [])
+
+        # Convert discovered_spaces from list to flags
+        disc_spaces_list = cat_data.get("discovered_in_spaces", [])
+        if isinstance(disc_spaces_list, list):
+            discovered_spaces = spaces_to_flags(disc_spaces_list)
+        else:
+            discovered_spaces = 0
+
+        # Convert discovered_modes from list to flags
+        disc_modes_list = cat_data.get("discovered_in_modes", [])
+        if isinstance(disc_modes_list, list):
+            discovered_modes = modes_to_flags(disc_modes_list)
+        else:
+            discovered_modes = 0
+
+        # Get install_mode_flag for mode-aware filtering
+        # This is set when extension is installed and panels don't specify bl_context
+        install_mode_flag = cat_data.get("install_mode_flag", 0)
+
+        has_no_tags = not tags or (hasattr(tags, "__len__") and len(tags) == 0)
+
+        # Mirror C++ category_is_unassigned_for_context logic:
+        # - discovered_spaces == 0 means "any space" (legacy/unknown source)
+        # - discovered_spaces != 0 must match the current space_flag
+        space_matches = (discovered_spaces == 0) or (discovered_spaces & space_flag)
+
+        # Detailed logging for debugging "New Add-ons!" filter issues
+        if source_extension and pending_assignment:
+            category_debug_print(f"[NEW ADDONS DEBUG] Checking category={category_name!r}: "
+                               f"source_ext={source_extension!r}, pending={pending_assignment}, "
+                               f"tags={tags}, discovered_spaces={disc_spaces_list}, "
+                               f"discovered_modes={disc_modes_list}")
+
+        if (not is_reserved and
+                source_extension and
+                pending_assignment and
+                has_no_tags and
+                space_matches and
+                not _extension_has_tagged_category(wm, source_extension) and
+                not _extension_has_only_reserved_categories(wm, source_extension)):
+            # Mode check: skip for SPACE_NODE (16), or if no mode filtering
+            # Mirror C++: current_mode_flag == 0 or discovered_modes == 0 means "any mode"
+            # BUT: for categories from extensions with discovered_modes == 0, use install_mode_flag
+            # to filter by the mode where extension was installed
+            effective_mode_flags = discovered_modes if discovered_modes != 0 else install_mode_flag
+            if space_type == 16 or current_mode_flag == 0 or effective_mode_flags == 0 or (effective_mode_flags & current_mode_flag):
+                count += 1
+                category_debug_print(f"[NEW ADDONS DEBUG] ✓ COUNTED: {category_name!r}")
+            else:
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED mode check: {category_name!r} "
+                                   f"(current_mode_flag={current_mode_flag:#x}, discovered_modes={discovered_modes:#x}, "
+                                   f"install_mode_flag={install_mode_flag:#x})")
+        elif source_extension and pending_assignment:
+            # Log why category was NOT counted
+            if is_reserved:
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: is_reserved={is_reserved}")
+            elif not has_no_tags:
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: has_tags={not has_no_tags}")
+            elif not space_matches:
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: space_matches={space_matches} "
+                                   f"(discovered_spaces={discovered_spaces:#x}, space_flag={space_flag:#x})")
+            elif _extension_has_tagged_category(wm, source_extension):
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: extension has tagged category")
+            elif _extension_has_only_reserved_categories(wm, source_extension):
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: extension has only reserved categories")
+
+    # PERF: Log timing for EVERY call to capture Get Extension panel performance
+    _count_elapsed = (time.perf_counter() - _count_start) * 1000
+    if not hasattr(_get_unassigned_categories_count_for_space, '_call_count'):
+        _get_unassigned_categories_count_for_space._call_count = 0
+    _get_unassigned_categories_count_for_space._call_count += 1
+    
+    # Log every call when in Preferences context (space_type 19 = USERPREF)
+    # This captures performance when Get Extension panel is opened
+    if space_type == 19 or _get_unassigned_categories_count_for_space._call_count <= 10:
+        category_debug_print(f"[PERF] _get_unassigned_categories_count_for_space: {_count_elapsed:.3f}ms (cache iterations={_cache_iterations}, call #{_get_unassigned_categories_count_for_space._call_count}, space_type={space_type})")
+    
+    return count
+
+
+def _extension_has_tagged_category(wm, source_extension: str) -> bool:
+    """Check if an extension has at least one NON-RESERVED category that was processed by user.
+
+    A category is considered "processed" if:
+    - It has tags assigned (tags list is not empty)
+    - OR pending_tag_assignment is False (user selected "Without Tag" or assigned a tag AND saved)
+
+    RESERVED categories (like "Item", "Tool", "View") are IGNORED because they are
+    standard Blender categories that extensions may use but don't "own". An extension
+    shouldn't be considered "processed" just because it uses a reserved category.
+
+    This handles the case where an extension creates multiple category aliases
+    (e.g., "Texel Density" and "Texel Density Checker") and user processes only one.
+
+    IMPORTANT: This function checks _glyph_cache instead of wm.category_glyph_mappings
+    because in preview mode, WM is updated for C++ UI visibility but pending_tag_assignment
+    remains True in cache. This prevents categories from disappearing from "New Add-ons!"
+    before user clicks Save.
+    """
+    global _glyph_cache
+
+    if not source_extension:
+        return False
+
+    # Check cache instead of WM to respect preview mode
+    for cache_key, cat_data in _glyph_cache.items():
+        if not isinstance(cache_key, tuple) or len(cache_key) != 2:
+            continue
+
+        # Only check global entries (space_type=-1)
+        space_type_val, category_name = cache_key
+        if space_type_val != -1:
+            continue
+
+        if not isinstance(cat_data, dict):
+            continue
+
+        if cat_data.get("source_extension", "") != source_extension:
+            continue
+
+        # Skip reserved categories - extensions don't "own" them
+        if category_name in DEFAULT_CATEGORY_GLYPHS:
+            continue
+
+        # Has explicit tags assigned AND saved (pending_tag_assignment is False)
+        # In preview mode, tags may be added but pending_tag_assignment stays True
+        if cat_data.get("tags", []) and not cat_data.get("pending_tag_assignment", True):
+            return True
+
+        # Was processed by user AND saved (pending_tag_assignment=False)
+        # This means user clicked Save after assigning tag or selecting "Without Tag"
+        if not cat_data.get("pending_tag_assignment", True):
+            return True
+
+    return False
+
+
+def _extension_has_only_reserved_categories(wm, source_extension: str) -> bool:
+    """Check if extension only has reserved categories (with panels) or non-reserved without panels.
+
+    IMPORTANT: This function checks _glyph_cache instead of wm.category_glyph_mappings
+    to be consistent with _extension_has_tagged_category and respect preview mode.
+    """
+    global _glyph_cache
+
+    if not source_extension:
+        return False
+
+    has_any_category = False
+    has_reserved_with_panels = False
+    has_non_reserved_without_panels = False
+    has_non_reserved_with_panels = False
+
+    for cache_key, cat_data in _glyph_cache.items():
+        if not isinstance(cache_key, tuple) or len(cache_key) != 2:
+            continue
+
+        # Only check global entries (space_type=-1)
+        space_type_val, category_name = cache_key
+        if space_type_val != -1:
+            continue
+
+        if not isinstance(cat_data, dict):
+            continue
+
+        if cat_data.get("source_extension", "") != source_extension:
+            continue
+
+        has_any_category = True
+        is_reserved = category_name in DEFAULT_CATEGORY_GLYPHS
+
+        # Get discovered_spaces as flags
+        disc_spaces = cat_data.get("discovered_in_spaces", [])
+        if isinstance(disc_spaces, list):
+            discovered_spaces = 0
+            for space_str in disc_spaces:
+                discovered_spaces |= SPACE_TO_FLAG.get(space_str, 0)
+        else:
+            discovered_spaces = 0
+
+        if is_reserved:
+            if discovered_spaces != 0:
+                has_reserved_with_panels = True
+        else:
+            if discovered_spaces == 0:
+                has_non_reserved_without_panels = True
+            else:
+                has_non_reserved_with_panels = True
+
+    if has_reserved_with_panels and has_non_reserved_without_panels and not has_non_reserved_with_panels:
+        return True
+
+    return has_any_category and not has_non_reserved_without_panels and not has_non_reserved_with_panels
+
+
+# Atomic / safe JSON persistence helpers (extracted from this module into
+# glyph_tag_system.persistence). Re-imported here to preserve the existing
+# module-attribute contract.
+from bl_ui.glyph_tag_system.persistence import (
+    safe_file_write,
+    load_json_safely,
+    create_backup,
+)
+
+
+# -----------------------------------------------------------------------------
+# Category Glyph Mappings - JSON-based storage
+
+
+# ============================================================================
+# RESERVED CATEGORIES (currently disabled, kept for future use)
+# Uncomment and add back to DEFAULT_CATEGORY_GLYPHS if needed
+# ============================================================================
+# "Data": {"glyph": "\ue23e", "display_name": "", "color": [0.0, 0.0, 0.0],
+#          "default_glyph": "\ue23e", "default_display_name": ""},       # database
+# "Constraints": {"glyph": "\ue8d2", "display_name": "", "color": [0.0, 0.0, 0.0],
+#                 "default_glyph": "\ue8d2", "default_display_name": ""}, # rule
+# "Volume": {"glyph": "\ue2c8", "display_name": "", "color": [0.0, 0.0, 0.0],
+#            "default_glyph": "\ue2c8", "default_display_name": ""},     # folder_open
+# "Script": {"glyph": "\ue86f", "display_name": "", "color": [0.0, 0.0, 0.0],
+#            "default_glyph": "\ue86f", "default_display_name": ""},     # terminal
+# "Sound": {"glyph": "\ue3a1", "display_name": "", "color": [0.0, 0.0, 0.0],
+#           "default_glyph": "\ue3a1", "default_display_name": ""},      # speaker
+# "Surface": {"glyph": "\ue76c", "display_name": "", "color": [0.0, 0.0, 0.0],
+#             "default_glyph": "\ue76c", "default_display_name": ""},    # waves
+# "Particles": {"glyph": "\ue3d4", "display_name": "", "color": [0.0, 0.0, 0.0],
+#               "default_glyph": "\ue3d4", "default_display_name": ""},  # science
+# "Curve": {"glyph": "\ue148", "display_name": "", "color": [0.0, 0.0, 0.0],
+#           "default_glyph": "\ue148", "default_display_name": ""},      # timeline
+# "Modifiers": {"glyph": "\ue429", "display_name": "", "color": [0.0, 0.0, 0.0],
+#               "default_glyph": "\ue429", "default_display_name": ""},  # palette
+# "Physics": {"glyph": "\ue3d4", "display_name": "", "color": [0.0, 0.0, 0.0],
+#             "default_glyph": "\ue3d4", "default_display_name": ""},    # science
+# "World": {"glyph": "\ue88e", "display_name": "", "color": [0.0, 0.0, 0.0],
+#           "default_glyph": "\ue88e", "default_display_name": ""},      # public
+# "Material": {"glyph": "\ue429", "display_name": "", "color": [0.0, 0.0, 0.0],
+#              "default_glyph": "\ue429", "default_display_name": ""},   # palette
+# ============================================================================
+
+# In-memory cache of glyph mappings: (space_type, category) -> data
+# space_type = -1 for global categories, specific space_type for space-specific
+# NOTE: the state objects live in bl_ui.glyph_tag_system._state (single owner).
+# They are imported here so that (a) in-place mutation is shared by reference and
+# (b) the existing module-attribute contract (C++ bridge, editor modules) is preserved.
+# Full reassignments MUST go through the _state accessor helpers, never ``X = ...`` here.
+from bl_ui.glyph_tag_system._state import _glyph_cache as _glyph_cache  # noqa: F811,F401
+from bl_ui.glyph_tag_system._state import _glyph_cache_loaded as _glyph_cache_loaded  # noqa: F811,F401
+# Accessor helpers: use these instead of ``X = ...`` for any state object that is
+# imported by reference elsewhere (otherwise the reassignment orphans the shared object).
+from bl_ui.glyph_tag_system._state import (
+    reset_glyph_cache,
+    reset_all_tags_cache,
+    set_tag_order,
+    reset_category_orders_cache,
+    reset_icon_detection_session_checked,
+    reset_last_discovered_ext_panel_categories,
+    set_last_discovered_category_sources,
+    reset_last_discovered_category_sources,
+    set_glyph_cache_loaded,
+    set_pending_extension_context,
+    set_install_from_disk_just_occurred,
+    set_sync_in_progress,
+    set_initial_load_complete,
+    set_auto_sync_timer,
+    set_background_sync_timer,
+    increment_background_sync_run_count,
+    reset_background_sync_run_count,
+    set_auto_save_pending,
+    set_auto_save_glyph_pending,
+    set_auto_save_glyph_skip_wm_sync,
+    set_glyph_save_lock,
+    set_pending_display_mode_change,
+    set_display_mode_debounce_timer_running,
+    set_discovery_debounce_timer,
+    set_in_ui_draw,
+    set_glyph_system_registered,
+    reset_merge_discovery_cache,
+    reset_icon_detection_cache,
+    is_glyph_system_registered,
+)
+
+
+
+
+
+
+# -----------------------------------------------------------------------------
+# Extension pending-tag: space/mode flag conversion helpers
+
+
+
+
+
+
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# Extension post-install context
+# ---------------------------------------------------------------------------
+
+# Pending extension context: set by extension_post_install_handler() so that
+# the next call to _merge_discovered_categories() can mark newly discovered
+# categories as originating from that extension.
+from bl_ui.glyph_tag_system._state import _pending_extension_context as _pending_extension_context  # noqa: F811,F401
+
+# Flag to indicate that an extension was just installed from disk (Install from Disk operator).
+# This is used to optimize Python file scanning - we only scan Python files for bl_category
+# when an extension is installed from disk, not for drag-and-drop installs.
+from bl_ui.glyph_tag_system._state import _install_from_disk_just_occurred as _install_from_disk_just_occurred  # noqa: F811,F401
+
+# Preview mode flag: set to True during tag preview in edit dialog to prevent
+# automatic WM synchronization that would cause categories to disappear from "New Add-ons!" filter
+from bl_ui.glyph_tag_system._state import _preview_mode_active as _preview_mode_active  # noqa: F811,F401
+
+# ============================================================================
+# PERFORMANCE OPTIMIZATION: Caching and debouncing
+# ============================================================================
+
+# Cache for _merge_discovered_categories() results to avoid repeated scanning.
+# Lives in _state so it can be reset centrally via reset_merge_discovery_cache().
+from bl_ui.glyph_tag_system._state import _merge_discovery_cache as _merge_discovery_cache  # noqa: F811,F401
+
+# Cache for icon detection to avoid repeated disk scans
+from bl_ui.glyph_tag_system._state import _icon_detection_cache as _icon_detection_cache  # noqa: F811,F401
+
+# Session-level tracking to avoid redundant icon checks within a single merge operation
+from bl_ui.glyph_tag_system._state import _icon_detection_session_checked as _icon_detection_session_checked  # noqa: F811,F401
+
+# Debounce timer for heavy operations
+from bl_ui.glyph_tag_system._state import _discovery_debounce_timer as _discovery_debounce_timer  # noqa: F811,F401
+
+# Flag to track if we're in a UI draw call (avoid heavy operations during drawing)
+from bl_ui.glyph_tag_system._state import _in_ui_draw as _in_ui_draw  # noqa: F811,F401
+
+# Minimum time between discovery merges (in seconds)
+_DISCOVERY_DEBOUNCE_INTERVAL = 2.0
+
+# Maximum cache age for icon detection (in seconds)
+_ICON_CACHE_MAX_AGE = 300.0  # 5 minutes
+
+# Flag to completely disable Python file scanning for bl_category
+_DISABLE_PYTHON_FILE_SCANNING = False
+
+# Cache for extension manifest keys to avoid repeated file scanning
+from bl_ui.glyph_tag_system._state import _extension_manifest_keys_cache as _extension_manifest_keys_cache  # noqa: F811,F401
+
+# Store the mapping between discovered extension panel categories and their extension_id
+# This is used as fallback when extension_post_install_handler is called with empty extension_id
+from bl_ui.glyph_tag_system._state import _last_discovered_ext_panel_categories as _last_discovered_ext_panel_categories  # noqa: F811,F401
+
+
+from bl_ui.glyph_tag_system.discovery import (
+    set_preview_mode_active,
+    _scan_extension_icon_path,
+    extension_post_install_handler,
+    _extension_id_match_keys,
+    _extension_ids_match,
+    _get_discovery_source_priority,
+    _pick_canonical_category_name,
+    _manifest_field_match_keys,
+    _extension_manifest_match_keys,
+    _auto_detect_extension_icon_path,
+    _discover_active_categories,
+    _merge_discovered_categories,
+)
+from bl_ui.glyph_tag_system.wm_sync import (
+    toggle_category_tag_no_save,
+    clear_category_tags_no_save,
+    restore_category_tags_from_string,
+    restore_category_glyph_from_snapshot,
+    update_category_tags_in_wm,
+    _set_without_tag_preview_state_in_wm,
+    _is_without_tag_preview_selected_in_wm,
+    finalize_category_tag_changes,
+    sync_glyph_mappings_to_wm,
+    _background_discovery_sync,
+    _start_background_sync,
+    _stop_background_sync,
+    _auto_sync_to_wm,
+    _sync_glyph_mappings_to_wm_impl,
+    register_category_glyph_mappings,
+    sync_wm_to_glyph_cache,
+    _sync_wm_to_glyph_cache_impl,
+)
+from bl_ui.glyph_tag_system.handlers import (
+    is_zero_v3,
+    _cancel_deferred_auto_save,
+    _auto_save_tags,
+    _deferred_save,
+    _auto_save_glyph_mappings,
+    _deferred_save_glyphs,
+    _schedule_display_mode_change,
+    _process_pending_display_mode_change,
+    _sync_mode_flags_from_wm_to_cache,
+    _save_tags_to_json,
+    _save_tag_order_only,
+    tag_enum_items_callback,
+    _on_load_post,
+    _on_save_pre,
+    _on_extension_repos_update_post,
+    _on_version_update,
+    _register_glyph_handlers,
+    _unregister_glyph_handlers,
+)
+from bl_ui.glyph_tag_system.properties import (
+    CategoryTagItem,
+    CategoryTagAssignment,
+    TagModeItem,
+    get_tag_mode_item,
+    with_context_check,
+)
+from bl_ui.glyph_tag_system.operators import (
+    USERPREF_OT_category_tag_remove_from_category,
+    USERPREF_OT_save_category_glyphs,
+    USERPREF_OT_sync_category_glyphs,
+    USERPREF_OT_category_tag_filter_set_mode,
+    USERPREF_OT_category_tag_create,
+    USERPREF_OT_category_tag_add,
+    USERPREF_OT_category_tag_edit,
+    WM_OT_category_tag_set_display_mode,
+    WM_OT_category_tag_pick_icon,
+    USERPREF_OT_category_tag_delete,
+    USERPREF_OT_mark_all_unassigned_as_distributed,
+    USERPREF_OT_category_tag_move,
+    USERPREF_OT_category_tag_toggle,
+    USERPREF_OT_category_clear_tags,
+    USERPREF_OT_category_tag_filter_set,
+)
+from bl_ui.glyph_tag_system.tag_ui import (
+    VIEW3D_OT_category_tabs_settings,
+    USERPREF_UL_category_tags,
+    TagsPanel,
+    USERPREF_OT_tag_mode_toggle,
+    USERPREF_OT_tag_mode_select_all,
+    USERPREF_OT_tag_mode_select_none,
+    USERPREF_OT_category_tag_set_display_mode,
+    USERPREF_PT_tag_mode_filter_popover,
+    USERPREF_PT_tag_management,
+    USERPREF_PT_custom_icon_picker,
+    WM_OT_debug_tag_bar_state,
+)
 
 # -----------------------------------------------------------------------------
 # Main Header
@@ -304,6 +984,35 @@ class USERPREF_PT_interface_accessibility(InterfacePanel, CenterAlignMixIn, Pane
         flow = layout.grid_flow(row_major=False, columns=0, even_columns=True, even_rows=False, align=False)
 
         flow.prop(view, "use_reduce_motion")
+
+
+class USERPREF_PT_interface_display_tab_sizes(InterfacePanel, CenterAlignMixIn, Panel):
+    bl_label = "Category Tab Settings"
+    bl_parent_id = "USERPREF_PT_interface_display"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, _context):
+        self.layout.label(icon='FUND')
+
+    def draw_centered(self, context, layout):
+        prefs = context.preferences
+        view = prefs.view
+
+        col = layout.column()
+        split = col.split(factor=0.4)
+        split.label(text="Default Display Mode")
+        subrow = split.row(align=True)
+        subrow.use_property_split = False
+        subrow.prop_enum(view, "category_tabs_display_mode", "GLYPHS_ONLY", text="Icon")
+        subrow.prop_enum(view, "category_tabs_display_mode", "GLYPHS_TEXT", text="Mixed")
+        subrow.prop_enum(view, "category_tabs_display_mode", "TEXT_ONLY", text="Text")
+
+        col.separator()
+
+        col.label(text="Size")
+        col.prop(view, "category_tabs_zoom_icon", text="Icon")
+        col.prop(view, "category_tabs_zoom_mixed", text="Mixed")
+        col.prop(view, "category_tabs_zoom_text", text="Text")
 
 
 class USERPREF_PT_interface_editors(InterfacePanel, CenterAlignMixIn, Panel):
@@ -1124,6 +1833,7 @@ class PreferenceThemeWidgetColorPanel:
         col = flow.column(align=True)
         col.prop(widget_style, "inner", slider=True)
         col.prop(widget_style, "inner_sel", text="Selected", slider=True)
+        col.prop(widget_style, "icon_selection", text="Icon Selection", slider=True)
 
         col = flow.column(align=True)
         col.prop(widget_style, "outline")
@@ -1426,6 +2136,25 @@ class USERPREF_PT_theme_strip_colors(ThemePanel, CenterAlignMixIn, Panel):
 
         flow = layout.grid_flow(row_major=False, columns=2, even_columns=True, even_rows=False, align=False)
         for i, ui in enumerate(theme.strip_color, 1):
+            flow.prop(ui, "color", text=iface_("Color {:d}").format(i), translate=False)
+
+
+class USERPREF_PT_theme_glyph_colors(ThemePanel, CenterAlignMixIn, Panel):
+    bl_label = "Glyph Colors"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, _context):
+        layout = self.layout
+
+        layout.label(icon='FUND')
+
+    def draw_centered(self, context, layout):
+        theme = context.preferences.themes[0]
+
+        layout.use_property_split = True
+
+        flow = layout.grid_flow(row_major=False, columns=2, even_columns=True, even_rows=False, align=False)
+        for i, ui in enumerate(theme.glyph_color, 1):
             flow.prop(ui, "color", text=iface_("Color {:d}").format(i), translate=False)
 
 
@@ -3052,6 +3781,134 @@ class ExperimentalPanel:
         return bpy.app.version_cycle == "alpha"
 
 
+class USERPREF_PT_about_build(Panel):
+    """Panel for build information and custom features in Preferences."""
+    bl_space_type = 'PREFERENCES'
+    bl_region_type = 'WINDOW'
+    bl_context = "build_features"  # Using existing context
+    bl_label = "About Build"
+    bl_icon = 'COLORSET_11_VEC'
+
+    @classmethod
+    def poll(cls, _context):
+        # Always show this panel for custom builds
+        return True
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+
+        # Build Information Section
+        box = layout.box()
+        col = box.column()
+
+        # Title with alert icon
+        row = col.row()
+        row.alert = True
+        row.label(text="Experimental Build", icon='ERROR')
+
+        col.separator()
+
+        # Build details
+        col.label(text="Build Created by: Nazir Galimov", icon='USER')
+        col.separator()
+        col.label(text="This is a custom build with a prototype of an advanced tab management system.", icon='INFO')
+        col.separator()
+        col.label(text="Use at your own risk. Do not use it to create important files for production.", icon='ERROR')
+
+        col.separator()
+
+        # Additional info
+        col.label(text="To leave a review, use the button >>>Support and Send FEEDBACK<<<", icon='HEART')
+
+        # About the author — collapsible panel
+        header, body = layout.panel("about_author", default_closed=True)
+        header.label(text="About the Author", icon='COMMUNITY')
+        if body:
+            # Author image
+            import os
+            # Ensure previews module is loaded
+            import bpy.utils.previews
+            image_path = os.path.join(
+                bpy.utils.resource_path('LOCAL'),
+                'datafiles', 'autor_image.png'
+            )
+            if os.path.isfile(image_path):
+                if not hasattr(USERPREF_PT_about_build, "_preview_collection"):
+                    pcoll = bpy.utils.previews.new()
+                    pcoll.author_image = pcoll.load("AUTHOR_IMAGE", image_path, 'IMAGE')
+                    USERPREF_PT_about_build._preview_collection = pcoll
+                pcoll = USERPREF_PT_about_build._preview_collection
+                if "AUTHOR_IMAGE" in pcoll:
+                    body.template_icon(pcoll["AUTHOR_IMAGE"].icon_id, scale=6.0)
+
+            box = body.box()
+            col = box.column(align=True)
+            col.label(text="Six years ago, I discovered Blender and immediately "
+                          "knew it would become my main tool.")
+            col.label(text="Since then, I\u2019ve been creating 3D models and "
+                          "constantly working to improve my workflow.")
+            col.separator()
+            col.label(text="The industry is going through a difficult period "
+                          "right now, and like many 3D artists, I\u2019ve lost my job.")
+            col.label(text="Working on Blender has helped me stay confident "
+                          "and keep moving forward.")
+            col.separator()
+            col.label(text="This prototype is the result of over a month of work.")
+            col.label(text="It reflects my vision of what Blender could become "
+                          "in the future.")
+            col.label(text="Bringing these ideas into the core software would "
+                          "require several months of focused development, ")
+            col.label(text="which is why I\u2019m asking for your support.")
+            col.separator()
+            col.label(text="I understand that this is not a perfect solution. "
+                          "But in my view, it is a step forward.")
+            col.separator()
+            col.label(text="The future of this project largely depends on you.")
+            col.label(text="Share information about it with your friends ")
+            col.label(text="on YouTube, Twitter, and other social media platforms.")
+
+            col.label(text="Feel free to share your feedback using the "
+                          ">>>Support and Send FEEDBACK<<< button.")
+            col.separator()
+            col.label(text="Thank you for your support, and have a great day!")
+
+        # Build Features Section
+        prefs = context.preferences
+        build_features = prefs.build_features
+
+        # Features header
+        box = layout.box()
+        box.label(text="Custom features for this experimental build:", icon='INFO')
+        box.separator()
+
+        # Feature toggles
+        col = box.column()
+        col.prop(build_features, "use_enhanced_paint_system")
+        col.prop(build_features, "use_custom_feature_2")
+        col.prop(build_features, "use_custom_feature_3")
+
+        # Feedback Section
+        box = layout.box()
+        col = box.column()
+        col.label(text="We value your feedback on this experimental build:", icon='COMMUNITY')
+        col.separator()
+
+        # Tutorial videos link
+        row = col.row()
+        row.alignment = 'LEFT'
+        row.label(text="Watch tutorial videos:")
+        col.alignment = 'LEFT'
+        col.link(url="https://www.youtube.com/@XNazirBuild", text="X-Nazir Sculpt YouTube Channel", icon='URL')
+        col.alignment = 'EXPAND'
+        col.separator()
+
+        # Feedback button
+        col2 = col.column()
+        col2.scale_y = 1.5
+        col2.operator("wm.url_open", text=">>>Support and Send FEEDBACK<<<", icon='FUND').url = "https://xnazirbuildfeedback.carrd.co/"
+
+
 """
 # Example panel, leave it here so we always have a template to follow even
 # after the features are gone from the experimental panel.
@@ -3117,6 +3974,7 @@ class USERPREF_PT_experimental_tweaks(ExperimentalPanel, Panel):
 
 """
 
+
 # -----------------------------------------------------------------------------
 # Class Registration
 
@@ -3131,6 +3989,25 @@ classes = (
     USERPREF_MT_editor_menus,
     USERPREF_MT_view,
     USERPREF_MT_save_load,
+    USERPREF_OT_save_category_glyphs,
+    USERPREF_OT_sync_category_glyphs,
+
+    # Tag system classes
+    CategoryTagItem,
+    CategoryTagAssignment,
+    USERPREF_OT_category_tag_create,
+    USERPREF_OT_category_tag_add,
+    USERPREF_OT_category_tag_edit,
+    USERPREF_OT_category_tag_delete,
+    USERPREF_OT_category_tag_move,
+    USERPREF_OT_mark_all_unassigned_as_distributed,
+    WM_OT_category_tag_set_display_mode,
+    WM_OT_category_tag_pick_icon,
+    USERPREF_OT_category_tag_toggle,
+    USERPREF_OT_category_clear_tags,
+    USERPREF_OT_category_tag_filter_set,
+    USERPREF_OT_category_tag_filter_set_mode,
+    WM_OT_debug_tag_bar_state,  # Debug operator for tag bar state
 
     USERPREF_PT_interface_display,
     USERPREF_PT_interface_editors,
@@ -3138,6 +4015,7 @@ classes = (
     USERPREF_PT_interface_statusbar,
     USERPREF_PT_interface_translation,
     USERPREF_PT_interface_accessibility,
+    USERPREF_PT_interface_display_tab_sizes,
     USERPREF_PT_interface_text,
     USERPREF_PT_interface_menus,
     USERPREF_PT_interface_menus_mouse_over,
@@ -3186,6 +4064,7 @@ classes = (
     USERPREF_PT_theme_bone_color_sets,
     USERPREF_PT_theme_collection_colors,
     USERPREF_PT_theme_strip_colors,
+    USERPREF_PT_theme_glyph_colors,
 
     USERPREF_PT_file_paths_data,
     USERPREF_PT_file_paths_render,
@@ -3232,23 +4111,84 @@ classes = (
     # Popovers.
     USERPREF_PT_ndof_settings,
     USERPREF_PT_addons_filter,
+    USERPREF_PT_tag_mode_filter_popover,
+
+    # Operators.
+    VIEW3D_OT_category_tabs_settings,
+    USERPREF_OT_tag_mode_toggle,
+    USERPREF_OT_tag_mode_select_all,
+    USERPREF_OT_tag_mode_select_none,
+    USERPREF_OT_category_tag_set_display_mode,
+    USERPREF_OT_category_tag_remove_from_category,
 
     USERPREF_PT_experimental_new_features,
     USERPREF_PT_experimental_prototypes,
+    USERPREF_PT_about_build,
     # USERPREF_PT_experimental_tweaks,
 
     USERPREF_PT_developer_tools,
 
+    USERPREF_PT_tag_management,
+    USERPREF_PT_custom_icon_picker,
     # UI lists
     USERPREF_UL_asset_libraries,
     USERPREF_UL_extension_repos,
+    USERPREF_UL_category_tags,
 
     # Add dynamically generated editor theme panels last,
     # so they show up last in the theme section.
     *ThemeGenericClassGenerator.generate_panel_classes_from_theme_areas(),
 )
 
+
+# Track whether the glyph system lifecycle has been set up, so register() is
+# idempotent and unregister() only reverses an active registration.
+from bl_ui.glyph_tag_system._state import _glyph_system_registered as _glyph_system_registered  # noqa: F811,F401
+
+
+def register():
+    """Register the category/tag glyph system runtime state.
+
+    Registers the WindowManager RNA property and application handlers, and
+    performs the initial (lazy-safe) load of glyph mappings from disk.
+    """
+    if is_glyph_system_registered():
+        return
+
+    if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
+        bpy.types.WindowManager.category_tag_glyph_hex = bpy.props.StringProperty(
+            default="", options={'HIDDEN'})
+
+    _register_glyph_handlers()
+
+    # Load mappings now that handlers are in place. The cache is also loaded
+    # lazily on first access, so this is safe to call at most once here.
+    _load_glyph_mappings_from_file()
+
+    set_glyph_system_registered(True)
+
+
+def unregister():
+    """Unregister the category/tag glyph system runtime state."""
+    if not is_glyph_system_registered():
+        return
+
+    _unregister_glyph_handlers()
+
+    if hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
+        del bpy.types.WindowManager.category_tag_glyph_hex
+
+    set_glyph_system_registered(False)
+
+
+# NOTE: The glyph system lifecycle is driven by bl_ui/__init__.py, which calls
+# register()/unregister() above (alongside the other submodules that need custom
+# registration). No import-time side effects are performed here.
+
+
 if __name__ == "__main__":  # only for live edit.
     from bpy.utils import register_class
     for cls in classes:
         register_class(cls)
+
+

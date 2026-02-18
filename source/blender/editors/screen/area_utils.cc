@@ -8,9 +8,15 @@
  * Helper functions for area/region API.
  */
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "BKE_screen.hh"
+
+#include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
+#include "DNA_view3d_types.h"
 
 #include "BLI_rect.h"
 #include "BLI_utildefines.h"
@@ -22,6 +28,134 @@
 #include "UI_interface.hh"
 
 namespace blender {
+
+eUserPref_CategoryTabsDisplayMode ED_category_tabs_display_mode_get(const ScrArea *area)
+{
+  if (!area || !area->spacedata.first) {
+    return static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(v3d->category_tabs_display_mode);
+    }
+    case SPACE_PROPERTIES: {
+      const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(sbuts->category_tabs_display_mode);
+    }
+    case SPACE_NODE: {
+      const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(snode->category_tabs_display_mode);
+    }
+    case SPACE_IMAGE: {
+      const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(sima->category_tabs_display_mode);
+    }
+    default:
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+  }
+}
+
+float ED_category_tabs_zoom_get(const ScrArea *area)
+{
+  float category_tabs_zoom = 1.0f;
+
+  if (area && area->spacedata.first) {
+    switch (area->spacetype) {
+      case SPACE_VIEW3D: {
+        const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
+        switch (ED_category_tabs_display_mode_get(area)) {
+          case USER_CATEGORY_TABS_GLYPHS_ONLY:
+            category_tabs_zoom = v3d->category_tabs_zoom_icon;
+            break;
+          case USER_CATEGORY_TABS_GLYPHS_TEXT:
+            category_tabs_zoom = v3d->category_tabs_zoom_mixed;
+            break;
+          case USER_CATEGORY_TABS_TEXT_ONLY:
+          default:
+            category_tabs_zoom = v3d->category_tabs_zoom_text;
+            break;
+        }
+        break;
+      }
+      case SPACE_PROPERTIES: {
+        const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
+        switch (ED_category_tabs_display_mode_get(area)) {
+          case USER_CATEGORY_TABS_GLYPHS_ONLY:
+            category_tabs_zoom = sbuts->category_tabs_zoom_icon;
+            break;
+          case USER_CATEGORY_TABS_GLYPHS_TEXT:
+            category_tabs_zoom = sbuts->category_tabs_zoom_mixed;
+            break;
+          case USER_CATEGORY_TABS_TEXT_ONLY:
+          default:
+            category_tabs_zoom = sbuts->category_tabs_zoom_text;
+            break;
+        }
+        break;
+      }
+      case SPACE_NODE: {
+        const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
+        switch (ED_category_tabs_display_mode_get(area)) {
+          case USER_CATEGORY_TABS_GLYPHS_ONLY:
+            category_tabs_zoom = snode->category_tabs_zoom_icon;
+            break;
+          case USER_CATEGORY_TABS_GLYPHS_TEXT:
+            category_tabs_zoom = snode->category_tabs_zoom_mixed;
+            break;
+          case USER_CATEGORY_TABS_TEXT_ONLY:
+          default:
+            category_tabs_zoom = snode->category_tabs_zoom_text;
+            break;
+        }
+        break;
+      }
+      case SPACE_IMAGE: {
+        const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
+        switch (ED_category_tabs_display_mode_get(area)) {
+          case USER_CATEGORY_TABS_GLYPHS_ONLY:
+            category_tabs_zoom = sima->category_tabs_zoom_icon;
+            break;
+          case USER_CATEGORY_TABS_GLYPHS_TEXT:
+            category_tabs_zoom = sima->category_tabs_zoom_mixed;
+            break;
+          case USER_CATEGORY_TABS_TEXT_ONLY:
+          default:
+            category_tabs_zoom = sima->category_tabs_zoom_text;
+            break;
+        }
+        break;
+      }
+      default:
+        category_tabs_zoom = 0.0f;
+        break;
+    }
+  }
+
+  if (category_tabs_zoom > 0.0f) {
+    return category_tabs_zoom;
+  }
+
+  /* Per-space value is invalid (e.g. 0.0 from a stale .blend or userpref that predates the
+   * zoom feature). Fall back to the matching user preference, and finally to 1.0 if that is
+   * also invalid. The valid UI range is [0.5, 2.5], so a non-positive value here is corrupt;
+   * never return it, or every category tab collapses to zero width and the bar disappears. */
+  float pref_zoom;
+  switch (ED_category_tabs_display_mode_get(area)) {
+    case USER_CATEGORY_TABS_GLYPHS_ONLY:
+      pref_zoom = U.category_tabs_zoom_icon;
+      break;
+    case USER_CATEGORY_TABS_GLYPHS_TEXT:
+      pref_zoom = U.category_tabs_zoom_mixed;
+      break;
+    case USER_CATEGORY_TABS_TEXT_ONLY:
+    default:
+      pref_zoom = U.category_tabs_zoom_text;
+      break;
+  }
+  return (pref_zoom > 0.0f) ? pref_zoom : 1.0f;
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Generic Tool System Region Callbacks
@@ -72,6 +206,14 @@ int ED_region_generic_tools_region_snap_size(const ARegion *region, int size, in
 
 int ED_region_generic_panel_region_snap_size(const ARegion *region, int size, int axis)
 {
+  return ED_region_generic_panel_region_snap_size_with_area(nullptr, region, size, axis);
+}
+
+int ED_region_generic_panel_region_snap_size_with_area(const ScrArea *area,
+                                                       const ARegion *region,
+                                                       int size,
+                                                       int axis)
+{
   if (axis == 0) {
     if (!ui::panel_category_tabs_is_visible(region)) {
       return size;
@@ -80,7 +222,22 @@ int ED_region_generic_panel_region_snap_size(const ARegion *region, int size, in
     /* Using Y axis avoids slight feedback loop when adjusting X. */
     const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
                          (BLI_rcti_size_y(&region->v2d.mask) + 1);
-    return int(UI_PANEL_CATEGORY_MIN_WIDTH / aspect);
+    const float safe_aspect = std::max(aspect, 0.0001f);
+    const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
+    const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
+    const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                        display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                           UI_TABS_VISUAL_EFFECT_MARGIN :
+                                           1.0f;
+    const float zoom = (1.0f / safe_aspect) * category_tabs_zoom;
+
+    const int category_tabs_width = int(
+        std::lround(double(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom * visual_effect_margin)));
+    const int legacy_min_width =
+        int(std::ceil(double(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / safe_aspect)));
+    const int category_tabs_min_width = std::max(category_tabs_width, legacy_min_width);
+
+    return int(std::ceil(float(category_tabs_min_width) * safe_aspect / UI_SCALE_FAC));
   }
   return size;
 }

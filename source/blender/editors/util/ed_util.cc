@@ -52,6 +52,8 @@
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 
+#include "../interface/interface_tag_bar.hh" /* for blender::ui::tag_bar_runtime_free_all */
+
 #include "RNA_access.hh"
 
 #include "WM_api.hh"
@@ -230,6 +232,10 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
   if (!bmain) {
     return;
   }
+
+  /* Free the process-global Category-Tabs tag bar runtime cache deterministically (on quit and
+   * before a file load), so it never leaks and never holds a dangling window-manager pointer. */
+  blender::ui::tag_bar_runtime_free_all();
 
   /* Frees all edit-mode undo-steps. */
   if (do_undo_system && G_MAIN->wm.first) {

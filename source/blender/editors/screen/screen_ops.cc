@@ -6,8 +6,11 @@
  * \ingroup edscr
  */
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <string>
 #include <fmt/format.h>
 
 #include "MEM_guardedalloc.h"
@@ -15,9 +18,13 @@
 #include "BLI_build_config.h"
 #include "BLI_listbase.h"
 #include "BLI_math_rotation.h"
+#include "BLI_string.h"
+#include "BLI_string_utf8.h"
 #include "BLI_math_vector.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
+#include "BLI_path_utils.hh"
+#include "BLI_rect.h"
 
 #include "BLT_translation.hh"
 
@@ -33,6 +40,8 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
+#include "DNA_windowmanager_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_workspace_types.h"
 
 #include "BKE_callbacks.hh"
@@ -47,11 +56,17 @@
 #include "BKE_main.hh"
 #include "BKE_mask.hh"
 #include "BKE_object.hh"
+#include "BKE_preferences.h"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
 #include "BKE_sound.hh"
 #include "BKE_workspace.hh"
+
+#ifdef WITH_PYTHON
+#  include "BPY_extern.hh"
+#  include "BPY_extern_run.hh"
+#endif
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -81,15 +96,25 @@
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 #include "UI_view2d.hh"
 
+#include "BLF_api.hh"
+
 #include "GPU_capabilities.hh"
+#include "GPU_state.hh"
 
 #include "wm_window.hh"
 
 #include "screen_intern.hh" /* own module include */
+
+/* For category tab functions from interface module. The interface module directory is on the
+ * include path, so this resolves without relative `..` navigation. Provides UI_SELECT_DRAW and
+ * the Button type. */
+#include "interface_intern.hh"
+#include "interface_tag_bar.hh"
 
 namespace blender {
 
@@ -3439,6 +3464,25 @@ static wmOperatorStatus region_scale_modal(bContext *C, wmOperator *op, const wm
             rmd->region->sizex = sizex_test;
           }
         }
+
+        if (rmd->region->runtime->type &&
+            BKE_regiontype_uses_category_tabs(rmd->region->runtime->type))
+        {
+          const float category_tabs_zoom = ED_category_tabs_zoom_get(rmd->area);
+          const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(
+              rmd->area);
+          const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                              display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                                 UI_TABS_VISUAL_EFFECT_MARGIN :
+                                                 1.0f;
+          const float category_tabs_min_width = std::max(
+              UI_PANEL_CATEGORY_MIN_WIDTH,
+              UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom * visual_effect_margin);
+          const int category_tabs_min_sizex = int(
+              std::ceil(category_tabs_min_width * aspect_x / UI_SCALE_FAC));
+          rmd->region->sizex = short(max_ii(int(rmd->region->sizex), category_tabs_min_sizex));
+        }
+
         BLI_assert(rmd->region->sizex <= rmd->maxsize);
 
         if (size_no_snap < UI_UNIT_X / aspect_x) {
@@ -3480,6 +3524,14 @@ static wmOperatorStatus region_scale_modal(bContext *C, wmOperator *op, const wm
         /* Clamp before snapping, so the snapping doesn't use a size that's invalid anyway. It will
          * check for and respect the max-height too. */
         CLAMP(rmd->region->sizey, 0, rmd->maxsize);
+
+        /* Tag bar has a maximum height of UI_UNIT_Y (one button) */
+        if (rmd->region->regiontype == RGN_TYPE_TAG_BAR) {
+          const int max_tag_bar_height = (UI_UNIT_Y + 0.5f) / UI_SCALE_FAC;
+          if (rmd->region->sizey > max_tag_bar_height) {
+            rmd->region->sizey = max_tag_bar_height;
+          }
+        }
 
         if (rmd->region->runtime->type->snap_size) {
           short sizey_test = rmd->region->runtime->type->snap_size(
@@ -3551,7 +3603,21 @@ static wmOperatorStatus region_scale_modal(bContext *C, wmOperator *op, const wm
                                  (BLI_rctf_size_x(&rmd->region->v2d.cur) /
                                   (BLI_rcti_size_x(&rmd->region->v2d.mask) + 1)) :
                                  1.0f;
-        if (float(rmd->region->sizex) * aspect > UI_PANEL_CATEGORY_MIN_WIDTH) {
+        float min_width_for_pref = UI_PANEL_CATEGORY_MIN_WIDTH;
+        if (rmd->region->runtime->type && BKE_regiontype_uses_category_tabs(rmd->region->runtime->type)) {
+          const float category_tabs_zoom = ED_category_tabs_zoom_get(rmd->area);
+          const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(
+              rmd->area);
+          const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                              display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                                 UI_TABS_VISUAL_EFFECT_MARGIN :
+                                                 1.0f;
+          min_width_for_pref = std::max(UI_PANEL_CATEGORY_MIN_WIDTH,
+                                        UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom *
+                                            visual_effect_margin);
+        }
+
+        if (float(rmd->region->sizex) * aspect > min_width_for_pref) {
           /* Save this as new runtime preferred size. */
           rmd->region->runtime->type->prefsizex = int(float(rmd->region->sizex) * aspect);
         }
@@ -7579,11 +7645,328 @@ static void SCREEN_OT_workspace_cycle(wmOperatorType *ot)
                "Direction to cycle through");
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Extension Drop Operator
+ * \{ */
+
+static std::string category_tab_extension_dragged_name(wmDrag *drag)
+{
+  if (!drag) {
+    return "";
+  }
+
+  if (drag->type == WM_DRAG_PATH) {
+    const char *path = WM_drag_get_single_path(drag);
+    if (!path || path[0] == '\0') {
+      return "";
+    }
+    const char *basename = BLI_path_basename(path);
+    return (basename && basename[0]) ? std::string(basename) : "";
+  }
+
+  if (drag->type == WM_DRAG_STRING) {
+    const std::string &url = WM_drag_get_string(drag);
+    if (url.empty()) {
+      return "";
+    }
+    std::string url_strip = url;
+    const size_t param_pos = url_strip.find_first_of("?#");
+    if (param_pos != std::string::npos) {
+      url_strip = url_strip.substr(0, param_pos);
+    }
+    const char *basename = BLI_path_basename(url_strip.c_str());
+    return (basename && basename[0]) ? std::string(basename) : "";
+  }
+
+  return "";
+}
+
+#ifdef WITH_PYTHON
+/* Fully qualified Python function used to register the pending extension context after a drop.
+ * Centralized here so a rename on the Python side only needs to be mirrored in one place. */
+static const char *category_tab_extension_post_install_handler =
+    "__import__('bl_ui.space_userpref', fromlist=['']).extension_post_install_handler";
+
+/* Escape a string so it can be safely embedded inside a single-quoted Python string literal.
+ * Handles backslash, single quote and common control characters to avoid syntax errors or
+ * code injection when the value originates from a file name or URL. */
+static std::string category_tab_python_escape(const std::string &value)
+{
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (const char c : value) {
+    switch (c) {
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '\'':
+        escaped += "\\'";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default:
+        escaped += c;
+        break;
+    }
+  }
+  return escaped;
+}
+#endif
+
+static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
+                                                           wmOperator *op,
+                                                           const wmEvent *event)
+{
+  std::string url = RNA_string_get(op->ptr, "url");
+  if (url.empty()) {
+    BKE_report(op->reports, RPT_ERROR, "Extension URL or path not provided");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Resolve drop target from cursor position first.
+   * `CTX_wm_region(C)` may point to a different region than the one that accepted the dropbox,
+   * which would incorrectly skip category-tab flow and break deferred tag assignment. */
+  bScreen *screen = CTX_wm_screen(C);
+  ScrArea *area_under_cursor = nullptr;
+  ARegion *region = nullptr;
+  if (screen && event) {
+    area_under_cursor = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, event->xy);
+    if (area_under_cursor) {
+      region = ED_area_find_region_xy_visual(area_under_cursor, RGN_TYPE_ANY, event->xy);
+
+      /* Block drop on tabs when "New Add-ons!" filter is active.
+       * This check is also in poll, but we verify here for safety. */
+      if (region && BKE_regiontype_uses_category_tabs(region->runtime->type) &&
+          ED_region_panel_category_gutter_isect_xy(area_under_cursor, region, event->xy) &&
+          ui::is_new_addon_filter_active(area_under_cursor))
+      {
+        BKE_report(op->reports,
+                   RPT_WARNING,
+                   "Cannot drop on tabs while 'New Add-ons!' is active. Switch to a tag first.");
+        return OPERATOR_CANCELLED;
+      }
+    }
+  }
+
+  if (!region) {
+    region = CTX_wm_region(C);
+  }
+
+  const ARegion *drop_region = region;
+
+  auto region_uses_category_tabs = [](const ARegion *region_test) {
+    return region_test && region_test->runtime &&
+           BKE_regiontype_uses_category_tabs(region_test->runtime->type);
+  };
+
+  /* If visual region under cursor is an overlapping sidebar/header, recover the actual
+   * category-tabs region from the same area so tab-drop flow still executes.
+   *
+   * IMPORTANT: Do not do this for WINDOW region drops.
+   * Dropping into 3D Viewport WINDOW must stay in viewport flow (pending/no-tag assignment)
+   * instead of being treated as a tab drop. */
+  if (!region_uses_category_tabs(region) && area_under_cursor && drop_region &&
+      drop_region->regiontype != RGN_TYPE_WINDOW)
+  {
+    for (ARegion *region_iter = static_cast<ARegion *>(area_under_cursor->regionbase.first);
+         region_iter;
+         region_iter = static_cast<ARegion *>(region_iter->next))
+    {
+      if (region_uses_category_tabs(region_iter)) {
+        region = region_iter;
+        break;
+      }
+    }
+  }
+
+  const bool region_supports_category_tabs = region_uses_category_tabs(region);
+  const bool is_window_drop_region = drop_region && drop_region->regiontype == RGN_TYPE_WINDOW;
+  const bool treat_as_tab_drop = region_supports_category_tabs && !is_window_drop_region;
+
+  const bool url_is_file = STRPREFIX(url.c_str(), "file://");
+  const bool url_is_online = STRPREFIX(url.c_str(), "http://") ||
+                             STRPREFIX(url.c_str(), "https://");
+  const bool url_is_remote = url_is_file | url_is_online;
+
+  /* NOTE: searching for hard-coded add-on name isn't great.
+   * Needed since #WM_dropbox_add expects the operator to exist on startup. */
+  const char *idname_external = url_is_remote ? "extensions.package_install" :
+                                                "extensions.package_install_files";
+  bool use_url = true;
+
+  if (url_is_online && (G.f & G_FLAG_INTERNET_ALLOW) == 0) {
+    idname_external = "extensions.userpref_allow_online_popup";
+    use_url = false;
+  }
+
+  /* If this isn't a real tab drop (e.g. viewport WINDOW), set pending extension context via Python
+   * so that newly discovered categories will be marked with pending_tag_assignment=true */
+#ifdef WITH_PYTHON
+  /* Extract extension ID from URL for the pending context - needed for both tab and viewport drops */
+  std::string extension_id;
+  if (url_is_online) {
+    /* URL format: https://extensions.blender.org/.../add-on-hot-node-v1.2.1.zip?... */
+    size_t last_slash = url.find_last_of('/');
+    size_t dot_zip = url.find(".zip", last_slash);
+    if (last_slash != std::string::npos && dot_zip != std::string::npos) {
+      extension_id = url.substr(last_slash + 1, dot_zip - last_slash - 1);
+    }
+  }
+  else if (url_is_file) {
+    /* File format: file:///path/to/add-on-hot-node-v1.2.1.zip */
+    std::string path = url.substr(7);  /* Skip "file://" */
+    size_t last_slash = path.find_last_of('/');
+    size_t dot_zip = path.find(".zip", last_slash);
+    if (last_slash != std::string::npos && dot_zip != std::string::npos) {
+      extension_id = path.substr(last_slash + 1, dot_zip - last_slash - 1);
+    }
+  }
+
+  ScrArea *area = area_under_cursor ? area_under_cursor : CTX_wm_area(C);
+  int space_type = area ? area->spacetype : -1;
+  uint32_t mode_flag = ui::get_current_tag_mode_flag(C);
+
+  if (!treat_as_tab_drop) {
+    /* Set up C++ deferred activation for reserved-only extension detection.
+     * This enables automatic switching to reserved categories (e.g., "Edit" for Bool Tool)
+     * when an extension's panels only go into reserved categories. */
+    ui::category_tabs_setup_viewport_drop_deferred(C, extension_id.c_str(), space_type, mode_flag);
+
+    /* Call Python extension_post_install_handler to set _pending_extension_context. */
+    const std::string extension_id_escaped = category_tab_python_escape(extension_id);
+    char python_expr[1024];
+    SNPRINTF(python_expr,
+             "%s('%s', %d, %u)",
+             category_tab_extension_post_install_handler,
+             extension_id_escaped.c_str(),
+             space_type,
+             mode_flag);
+
+    const char *imports_none[] = {nullptr};
+    if (!BPY_run_string_exec(C, imports_none, python_expr)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Failed to register pending extension context for \"%s\"",
+                  extension_id.c_str());
+    }
+  }
+#else
+  UNUSED_VARS(url_is_file, url_is_online);
+#endif
+
+  const std::string category = RNA_string_get(op->ptr, "category");
+  const std::string target_category = RNA_string_get(op->ptr, "target_category");
+  const bool insert_above = RNA_boolean_get(op->ptr, "insert_above");
+  const std::string tag_name = RNA_string_get(op->ptr, "tag_name");
+
+  /* Arm deferred activation BEFORE install starts.
+   * The install operator may synchronously emit extension repo update callbacks and/or
+   * register categories before returning, so preparing after invoke can miss both. */
+  if (!category.empty() && treat_as_tab_drop) {
+    ui::category_tabs_apply_drop_insert(C,
+                                        region,
+                                        category.c_str(),
+                                        target_category.empty() ? category.c_str() :
+                                                                    target_category.c_str(),
+                                        insert_above,
+                                        tag_name.empty() ? nullptr : tag_name.c_str());
+  }
+
+  wmOperatorType *ot = WM_operatortype_find(idname_external, true);
+  wmOperatorStatus retval = OPERATOR_CANCELLED;
+  if (ot) {
+    PointerRNA props_ptr = WM_operator_properties_create_ptr(ot);
+    if (use_url) {
+      RNA_string_set(&props_ptr, "url", url.c_str());
+    }
+    /* For category-tab drop, enabling on install is expected so that panels register immediately
+     * and a category can appear without restarting Blender. */
+    if (RNA_struct_find_property(&props_ptr, "enable_on_install")) {
+      RNA_boolean_set(&props_ptr, "enable_on_install", true);
+    }
+    /* Some extension flows may still not enable add-ons even when `enable_on_install` is true
+     * (or it may be ignored by UI). Force enable for this internal drop operator. */
+    if (RNA_struct_find_property(&props_ptr, "force_enable_on_install")) {
+      RNA_boolean_set(&props_ptr, "force_enable_on_install", true);
+    }
+    retval = WM_operator_name_call_ptr(C, ot, wm::OpCallContext::InvokeDefault, &props_ptr, event);
+    WM_operator_properties_free(&props_ptr);
+  }
+  else {
+    BKE_reportf(op->reports, RPT_ERROR, "Extension operator not found \"%s\"", idname_external);
+    return OPERATOR_CANCELLED;
+  }
+
+
+#ifdef WITH_PYTHON
+  if (!category.empty() && treat_as_tab_drop) {
+    /* For tab drops, call Python extension_post_install_handler with tag_already_assigned=True.
+     * This tells Python NOT to set pending_tag_assignment=True for new categories,
+     * so "New Add-ons!" button won't appear for tab drops (category will be visible
+     * in the general list without tag filtering). */
+    if (!extension_id.empty()) {
+      const std::string extension_id_escaped = category_tab_python_escape(extension_id);
+      char python_expr[1024];
+      SNPRINTF(python_expr,
+               "%s('%s', %d, %u, True)",
+               category_tab_extension_post_install_handler,
+               extension_id_escaped.c_str(),
+               space_type,
+               mode_flag);
+
+      const char *imports_none[] = {nullptr};
+      if (!BPY_run_string_exec(C, imports_none, python_expr)) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Failed to register pending extension context for \"%s\"",
+                    extension_id.c_str());
+      }
+    }
+  }
+#endif
+
+  return retval;
+}
+
+static void SCREEN_OT_category_tab_extension_drop(wmOperatorType *ot)
+{
+  ot->name = "Category Tab Extension Drop";
+  ot->description = "Handle dropping extension file onto category tab";
+  ot->idname = "SCREEN_OT_category_tab_extension_drop";
+
+  ot->invoke = category_tab_extension_drop_invoke;
+
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_string(ot->srna, "url", nullptr, 0, "URL", "Location of the extension to install");
+  RNA_def_string(ot->srna, "category", nullptr, 0, "Category", "Target category tab");
+  RNA_def_string(ot->srna, "target_category", nullptr, 0, "Target", "Target tab for insert");
+  RNA_def_boolean(
+      ot->srna, "insert_above", true, "Insert Above", "Insert above the target tab");
+  RNA_def_string(ot->srna, "tag_name", nullptr, 0, "Tag Name", "Active tag to assign to new category");
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Assigning Operator Types
+/** \name Category Tab Extension Drop Operator (Early Registration)
  * \{ */
+
+void ED_operatortypes_screen_extension_drop()
+{
+  /* Register this operator early (before PREFERENCES_OT_extension_url_drop)
+   * so the dropbox can be added with higher priority. */
+  WM_operatortype_append(SCREEN_OT_category_tab_extension_drop);
+}
+
+/** \} */
 
 void ED_operatortypes_screen()
 {
@@ -7622,6 +8005,8 @@ void ED_operatortypes_screen()
   WM_operatortype_append(SCREEN_OT_space_type_set_or_cycle);
   WM_operatortype_append(SCREEN_OT_space_context_cycle);
   WM_operatortype_append(SCREEN_OT_workspace_cycle);
+  /* SCREEN_OT_category_tab_extension_drop is registered early in
+   * ED_operatortypes_screen_extension_drop() to allow dropbox priority. */
 
   /* Frame changes. */
   WM_operatortype_append(SCREEN_OT_frame_offset);
@@ -7637,6 +8022,12 @@ void ED_operatortypes_screen()
   /* New/delete. */
   WM_operatortype_append(SCREEN_OT_new);
   WM_operatortype_append(SCREEN_OT_delete);
+
+  /* Category tabs operators. */
+  ED_operatortypes_screen_category_tabs();
+
+  /* Register category tag filter toggle menu. */
+  blender::ui::category_tag_filter_toggle_menu_register();
 }
 
 /** \} */
@@ -7676,6 +8067,609 @@ static void blend_file_drop_copy(bContext * /*C*/, wmDrag *drag, wmDropBox *drop
 {
   /* copy drag path to properties */
   RNA_string_set(drop->ptr, "filepath", WM_drag_get_single_path(drag));
+}
+
+/**
+ * Check if drag data represents an extension (URL or local path).
+ * Supports both WM_DRAG_STRING (URL from website) and WM_DRAG_PATH (local .zip file).
+ */
+static bool category_tab_extension_drag_is_extension(wmDrag *drag)
+{
+  if (drag->type == WM_DRAG_PATH) {
+    const char *path = WM_drag_get_single_path(drag);
+    if (path && BLI_path_extension_check_n(path, ".zip", ".blend_extension", nullptr)) {
+      return true;
+    }
+  }
+  else if (drag->type == WM_DRAG_STRING) {
+    const std::string &str = WM_drag_get_string(drag);
+    const char *cstr = str.c_str();
+
+    /* Only URL formatted text. */
+    if (BKE_preferences_remote_scheme_end(cstr) == 0) {
+      return false;
+    }
+
+    /* Only single line strings. */
+    if (str.find('\n') != std::string::npos) {
+      return false;
+    }
+
+    /* Check for .zip extension (strip URL parameters first). */
+    std::string str_strip;
+    const char *cstr_maybe_copy = cstr;
+    size_t param_char = str.find('?');
+    if (param_char != std::string::npos) {
+      str_strip = str.substr(0, param_char);
+      cstr_maybe_copy = str_strip.c_str();
+    }
+
+    const char *cstr_ext = BLI_path_extension(cstr_maybe_copy);
+    if (cstr_ext && STRCASEEQ(cstr_ext, ".zip")) {
+      return true;
+    }
+
+    /* Check for known repository prefix. */
+    if (BKE_preferences_extension_repo_find_by_remote_url_prefix(&U, cstr, true)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void category_tab_extension_preview_clear_all_in_screen(bScreen *screen)
+{
+  if (!screen) {
+    return;
+  }
+
+  for (ScrArea &area_iter : screen->areabase) {
+    for (ARegion &region_iter : area_iter.regionbase) {
+      if (region_iter.runtime && ui::category_tabs_extension_preview_is_active(&region_iter)) {
+        ui::category_tabs_extension_preview_clear(&region_iter);
+      }
+    }
+  }
+}
+
+static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
+{
+  /* Check if drag data is an extension (URL or path). */
+  if (!category_tab_extension_drag_is_extension(drag)) {
+    return false;
+  }
+
+  bScreen *screen = CTX_wm_screen(C);
+  if (!screen) {
+    return false;
+  }
+
+  ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, event->xy);
+  if (!area) {
+    category_tab_extension_preview_clear_all_in_screen(screen);
+    return false;
+  }
+
+  ARegion *region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, event->xy);
+  if (!region) {
+    category_tab_extension_preview_clear_all_in_screen(screen);
+    return false;
+  }
+
+  /* Allow extension drops in any region - even if it doesn't support category tabs.
+   * This is needed because an extension may create categories in OTHER editors
+   * (e.g., dropping in 3D Viewport but extension adds category in Shader Editor).
+   * The invoke function will handle the different cases appropriately. */
+  const bool region_supports_category_tabs = BKE_regiontype_uses_category_tabs(region->runtime->type);
+  if (!region_supports_category_tabs) {
+    category_tab_extension_preview_clear_all_in_screen(screen);
+    /* Clear any previous disabled_info when moving to non-tab region */
+    drag->drop_state.disabled_info = std::nullopt;
+    /* Accept the drop - invoke will set pending extension context via Python */
+    return true;
+  }
+
+  /* For regions that support category tabs but don't have any visible yet,
+   * we need to check if the drop is in a reasonable location for creating tabs. */
+  const bool has_visible_tabs = ui::panel_category_tabs_is_visible(region);
+  if (!has_visible_tabs) {
+    /* Clear any previous disabled_info when no tabs visible */
+    drag->drop_state.disabled_info = std::nullopt;
+
+    /* For regions without visible tabs, allow drops in the left/right edge area where tabs would appear */
+    const int alignment = RGN_ALIGN_ENUM_FROM_MASK(region->alignment);
+    const int mx_local = event->xy[0] - region->winrct.xmin;
+    const int region_width = region->winrct.xmax - region->winrct.xmin;
+    /* Approximate width where tabs would appear. */
+    const int tab_area_width = int(50.0f * UI_SCALE_FAC);
+
+    bool in_tab_area = false;
+    if (alignment == RGN_ALIGN_LEFT && mx_local <= tab_area_width) {
+      in_tab_area = true;
+    }
+    else if (alignment == RGN_ALIGN_RIGHT && mx_local >= (region_width - tab_area_width)) {
+      in_tab_area = true;
+    }
+
+    if (!in_tab_area) {
+      ui::category_tabs_extension_preview_clear(region);
+      return false;
+    }
+
+    return true;
+  }
+
+  /* For regions with visible tabs, use the standard gutter intersection check */
+  if (has_visible_tabs) {
+    if (!ED_region_panel_category_gutter_isect_xy(area, region, event->xy)) {
+      ui::category_tabs_extension_preview_clear(region);
+      return false;
+    }
+
+    /* When "New Add-ons!" filter is active, don't allow drag & drop onto tabs.
+     * This filter is for viewing categories, not for assigning tags via drag.
+     * User should first switch to a tag or disable filter before dropping.
+     * Return true but set disabled_info to show error tooltip and stop cursor. */
+    if (ui::is_new_addon_filter_active(area)) {
+      drag->drop_state.disabled_info = RPT_("Cannot drop on tabs while 'New Add-ons!' is active. Switch to a tag first.");
+      ui::category_tabs_extension_preview_clear(region);
+      /* Return true so tooltip/droptip can show the disabled message */
+      return true;
+    }
+  }
+  /* For regions without visible tabs, we already checked the tab creation area above */
+
+  const int mx_local = event->xy[0] - region->winrct.xmin;
+  const int my_local = event->xy[1] - region->winrct.ymin;
+
+  /* For regions with visible tabs, check if drop hits an existing tab */
+  if (has_visible_tabs) {
+    const char *hovered_category_id = nullptr;
+    int hovered_target_index = -1;
+    bool insert_above = false;
+    const int hit_margin = int(5.0f * UI_SCALE_FAC);
+    if (ui::category_tabs_extension_drop_target_from_mouse(C,
+                                                            region,
+                                                            mx_local,
+                                                            my_local,
+                                                            hit_margin,
+                                                            &hovered_category_id,
+                                                            &hovered_target_index,
+                                                            &insert_above,
+                                                            nullptr)) {
+      /* Clear any previous disabled_info when drop is allowed */
+      drag->drop_state.disabled_info = std::nullopt;
+      return true;
+    }
+
+    ui::category_tabs_extension_preview_clear(region);
+    return false;
+  }
+  else {
+    /* For regions without visible tabs, we already validated the drop location above */
+    return true;
+  }
+}
+
+static void category_tab_extension_drop_draw_droptip(bContext *C,
+                                                      wmWindow *win,
+                                                      wmDrag *drag,
+                                                      const int xy[2])
+{
+  bScreen *screen = CTX_wm_screen(C);
+  if (!screen) {
+    if (drag && drag->drop_state.region_from && drag->drop_state.region_from->runtime) {
+      ui::category_tabs_extension_preview_clear(drag->drop_state.region_from);
+    }
+    return;
+  }
+
+  ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, xy);
+  if (!area) {
+    category_tab_extension_preview_clear_all_in_screen(screen);
+    return;
+  }
+
+  ARegion *region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, xy);
+  if (!region) {
+    category_tab_extension_preview_clear_all_in_screen(screen);
+    return;
+  }
+  /* Allow extension drops if the region type supports category tabs, even if none are currently visible */
+  if (!BKE_regiontype_uses_category_tabs(region->runtime->type)) {
+    category_tab_extension_preview_clear_all_in_screen(screen);
+    return;
+  }
+
+  /* Clear preview from other regions when drag moves to a new region.
+   * This ensures ghost tabs don't persist when cursor leaves a region. */
+  for (ScrArea &area_iter : screen->areabase) {
+    for (ARegion &region_iter : area_iter.regionbase) {
+      if (&region_iter != region && region_iter.runtime &&
+          ui::category_tabs_extension_preview_is_active(&region_iter)) {
+        ui::category_tabs_extension_preview_clear(&region_iter);
+      }
+    }
+  }
+
+  const bool has_visible_tabs = ui::panel_category_tabs_is_visible(region);
+  const int mx_local = xy[0] - region->winrct.xmin;
+  const int my_local = xy[1] - region->winrct.ymin;
+
+  const char *hovered_category_id = nullptr;
+  int target_index = -1;
+  bool insert_above = false;
+  int hovered_tab_height = 0;
+
+  if (has_visible_tabs) {
+    /* Standard gutter intersection check for regions with visible tabs */
+    if (!ED_region_panel_category_gutter_isect_xy(area, region, xy)) {
+      ui::category_tabs_extension_preview_clear(region);
+      return;
+    }
+
+    /* If drop is disabled (e.g., "New Add-ons!" filter active), don't draw ghost tab.
+     * The disabled_info message will be shown by the drag & drop system. */
+    if (drag->drop_state.disabled_info.has_value()) {
+      ui::category_tabs_extension_preview_clear(region);
+      return;
+    }
+
+    const int hit_margin = int(5.0f * UI_SCALE_FAC);
+    if (!ui::category_tabs_extension_drop_target_from_mouse(C,
+                                                             region,
+                                                             mx_local,
+                                                             my_local,
+                                                             hit_margin,
+                                                             &hovered_category_id,
+                                                             &target_index,
+                                                             &insert_above,
+                                                             &hovered_tab_height)) {
+      ui::category_tabs_extension_preview_clear(region);
+      return;
+    }
+  }
+  else {
+    if (ui::category_tabs_extension_preview_is_active(region)) {
+      ui::category_tabs_extension_preview_clear(region);
+    }
+
+    /* For regions without visible tabs, validate drop location for tab creation */
+    const int alignment = RGN_ALIGN_ENUM_FROM_MASK(region->alignment);
+    const int region_width = region->winrct.xmax - region->winrct.xmin;
+    const int tab_area_width = int(50.0f * UI_SCALE_FAC);
+
+    bool in_tab_area = false;
+    if (alignment == RGN_ALIGN_LEFT && mx_local <= tab_area_width) {
+      in_tab_area = true;
+    }
+    else if (alignment == RGN_ALIGN_RIGHT && mx_local >= (region_width - tab_area_width)) {
+      in_tab_area = true;
+    }
+
+    if (!in_tab_area) {
+      ui::category_tabs_extension_preview_clear(region);
+      return;
+    }
+
+    /* hovered_tab remains nullptr for regions without visible tabs */
+  }
+
+  const View2D *v2d = &region->v2d;
+  const float aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
+                           1.0f :
+                           (static_cast<ui::Block *>(region->runtime->uiblocks.first))->aspect;
+  const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
+  const float zoom = (1.0f / aspect) * category_tabs_zoom;
+  const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
+  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+  const int rct_xmin_local = is_left ? v2d->mask.xmin + 3 : (v2d->mask.xmax - category_tabs_width);
+  const int rct_xmax_local = is_left ? v2d->mask.xmin + category_tabs_width : (v2d->mask.xmax - 3);
+
+  /* Set extension drop preview state for ghost visualization.
+   * Only set preview for regions with visible tabs - ghost will be drawn in panel_category_tabs_draw_all. */
+  if (has_visible_tabs) {
+    /* Calculate tab height and padding for preview */
+    const int tab_height = hovered_tab_height > 0 ? hovered_tab_height : round_fl_to_int(UI_UNIT_Y * zoom);
+    const int tab_v_pad = ui::category_tabs_vertical_padding_calc(zoom);
+
+    ui::category_tabs_extension_preview_set(region,
+                                             hovered_category_id ? hovered_category_id : "",
+                                             target_index,
+                                             insert_above,
+                                             tab_height,
+                                             tab_v_pad,
+                                             my_local);
+  }
+  /* For regions WITHOUT visible tabs, draw the old-style insert indicator.
+   * For regions WITH visible tabs, the ghost tab is drawn in panel_category_tabs_draw_all. */
+  if (!has_visible_tabs) {
+    /* Convert tab rect to screen coordinates */
+    rcti tab_rect;
+    tab_rect.xmin = rct_xmin_local + region->winrct.xmin;
+    tab_rect.xmax = rct_xmax_local + region->winrct.xmin;
+    tab_rect.ymin = region->winrct.ymin + my_local - 15; /* Center around cursor */
+    tab_rect.ymax = region->winrct.ymin + my_local + 15;
+
+    /* Calculate insert indicator position */
+    const int indicator_height = round_fl_to_int(3.0f * UI_SCALE_FAC);
+    const int indicator_margin = round_fl_to_int(2.0f * UI_SCALE_FAC);
+
+    rcti insert_rect;
+    insert_rect.xmin = tab_rect.xmin;
+    insert_rect.xmax = tab_rect.xmax;
+
+    if (insert_above) {
+      insert_rect.ymin = tab_rect.ymax + indicator_margin;
+      insert_rect.ymax = tab_rect.ymax + indicator_margin + indicator_height;
+    }
+    else {
+      insert_rect.ymin = tab_rect.ymin - indicator_margin - indicator_height;
+      insert_rect.ymax = tab_rect.ymin - indicator_margin;
+    }
+
+    /* Get theme colors for insert indicator */
+    float insert_color[4];
+    float insert_outline[4];
+    ui::theme::get_color_4fv(TH_TAB_ACTIVE, insert_color);
+    ui::theme::get_color_4fv(TH_TAB_OUTLINE_ACTIVE, insert_outline);
+
+    /* Make indicator more visible */
+    insert_color[3] = 0.8f;
+    insert_outline[3] = 1.0f;
+
+    wmWindowViewport_ex(win, 0.0f);
+    GPU_blend(GPU_BLEND_ALPHA);
+
+    /* Draw insert indicator as a rounded rectangle */
+    rctf indicator_box;
+    indicator_box.xmin = float(insert_rect.xmin);
+    indicator_box.xmax = float(insert_rect.xmax);
+    indicator_box.ymin = float(insert_rect.ymin);
+    indicator_box.ymax = float(insert_rect.ymax);
+
+    bTheme *btheme = ui::theme::theme_get();
+    const float indicator_radius = btheme->tui.wcol_tab.roundness * U.widget_unit * 0.5f;
+
+    ui::draw_roundbox_corner_set(ui::CNR_ALL);
+    ui::draw_roundbox_4fv(&indicator_box, true, indicator_radius, insert_color);
+    ui::draw_roundbox_4fv(&indicator_box, false, indicator_radius, insert_outline);
+
+    GPU_blend(GPU_BLEND_NONE);
+  }
+}
+
+static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
+{
+  /* Always copy URL first - needed even when region doesn't support category tabs */
+  if (drag->type == WM_DRAG_PATH) {
+    const char *path = WM_drag_get_single_path(drag);
+    if (path && path[0]) {
+      /* Python extension code expects raw file path, not URL format */
+      RNA_string_set(drop->ptr, "url", path);
+    }
+    else {
+      RNA_string_set(drop->ptr, "url", "");
+    }
+  }
+  else if (drag->type == WM_DRAG_STRING) {
+    const std::string &str = WM_drag_get_string(drag);
+    RNA_string_set(drop->ptr, "url", str.c_str());
+  }
+
+  ARegion *region = nullptr;
+  ScrArea *area_under_cursor = nullptr;
+
+  const wmWindow *win = CTX_wm_window(C);
+  bScreen *screen = CTX_wm_screen(C);
+  const wmEvent *event_state = (win && win->runtime) ? win->runtime->eventstate : nullptr;
+
+  if (screen && event_state) {
+    const int mouse_xy[2] = {event_state->xy[0], event_state->xy[1]};
+    area_under_cursor = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, mouse_xy);
+    if (area_under_cursor) {
+      region = ED_area_find_region_xy_visual(area_under_cursor, RGN_TYPE_ANY, mouse_xy);
+
+      auto region_uses_visible_tabs = [](const ARegion *region_test) {
+        return region_test && region_test->runtime &&
+               BKE_regiontype_uses_category_tabs(region_test->runtime->type) &&
+               ui::panel_category_tabs_is_visible(const_cast<ARegion *>(region_test));
+      };
+
+      if (!region_uses_visible_tabs(region)) {
+        for (ARegion *region_iter = static_cast<ARegion *>(area_under_cursor->regionbase.first);
+             region_iter;
+             region_iter = static_cast<ARegion *>(region_iter->next))
+        {
+          if (region_uses_visible_tabs(region_iter)) {
+            region = region_iter;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (!region) {
+    region = drag->drop_state.region_from;
+  }
+  std::string preview_target_category;
+  bool preview_insert_above = false;
+  bool preview_valid = false;
+
+  if (region && region->runtime) {
+    const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
+    if (preview.active && preview.target_category_id[0] != '\0') {
+      preview_target_category = preview.target_category_id;
+      preview_insert_above = preview.insert_above;
+      preview_valid = true;
+    }
+  }
+
+  /* Clear extension drop preview state when drop is applied.
+   * This ensures ghost tab is removed immediately. */
+  if (region && region->runtime) {
+    ui::category_tabs_extension_preview_clear(region);
+  }
+
+  if (!region || !ui::panel_category_tabs_is_visible(region)) {
+    /* Region doesn't support category tabs - just set URL and return.
+     * Invoke will handle setting pending extension context. */
+    return;
+  }
+
+  screen = CTX_wm_screen(C);
+  if (!screen) {
+    return;
+  }
+
+  if (!win || !win->runtime->eventstate) {
+    return;
+  }
+
+  const int mouse_x = win->runtime->eventstate->xy[0];
+  const int mouse_y = win->runtime->eventstate->xy[1];
+  const int mouse_xy[2] = {mouse_x, mouse_y};
+
+  /* Resolve target area from current cursor position.
+   * `drag->drop_state.area_from` may point to the source area where drag began,
+   * which can belong to another editor and yields wrong active tag state.
+   *
+   * IMPORTANT: For tag filter state, we MUST use the area that contains the region
+   * with category tabs, NOT the area under the mouse cursor. When dragging from
+   * File Browser to 3D Viewport tabs, the mouse may still be over File Browser,
+   * but we need the tag state from 3D Viewport where the tabs actually are. */
+  ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, mouse_xy);
+  if (!area) {
+    area = drag->drop_state.area_from;
+  }
+  if (!area) {
+    return;
+  }
+
+  /* Use the area that owns the region with category tabs for tag state lookup.
+   * This ensures we get the correct tag filter state from the target editor. */
+  ScrArea *area_for_tag = area;
+  for (ScrArea *area_iter = static_cast<ScrArea *>(screen->areabase.first);
+       area_iter;
+       area_iter = static_cast<ScrArea *>(area_iter->next))
+  {
+    for (ARegion *region_iter = static_cast<ARegion *>(area_iter->regionbase.first);
+         region_iter;
+         region_iter = static_cast<ARegion *>(region_iter->next))
+    {
+      if (region_iter == region) {
+        area_for_tag = area_iter;
+        break;
+      }
+    }
+    if (area_for_tag != area) {
+      break;
+    }
+  }
+
+  const int mx_local = mouse_x - region->winrct.xmin;
+  const int my_local = mouse_y - region->winrct.ymin;
+
+  const char *category = nullptr;
+  bool insert_above = false;
+
+  if (preview_valid) {
+    category = preview_target_category.c_str();
+    insert_above = preview_insert_above;
+  }
+  else {
+    const char *hovered_category_id = nullptr;
+    const int hit_margin = int(5.0f * UI_SCALE_FAC);
+    if (!ui::category_tabs_extension_drop_target_from_mouse(C,
+                                                             region,
+                                                             mx_local,
+                                                             my_local,
+                                                             hit_margin,
+                                                             &hovered_category_id,
+                                                             nullptr,
+                                                             &insert_above,
+                                                             nullptr)) {
+      return;
+    }
+    category = hovered_category_id;
+  }
+
+  if (!category || category[0] == '\0') {
+    return;
+  }
+
+  RNA_string_set(drop->ptr, "category", category);
+  RNA_string_set(drop->ptr, "target_category", category);
+  RNA_boolean_set(drop->ptr, "insert_above", insert_above);
+
+  /* Get active tag from tag bar for deferred assignment to new category.
+   * IMPORTANT: Only assign tag if filter is actually ENABLED (filter_enabled != 0).
+   * When filter is disabled (e.g., via "Tag Filter Tag" toggle), the category
+   * should go to the general list without a tag, even if active_tags contains
+   * a tag name from a previous selection.
+   *
+   * Use area_for_tag (the area that owns the region with category tabs) instead
+   * of area (which may be under the mouse cursor in a different editor). */
+  blender::ui::TagFilterStateRef tag_state{};
+  const char *resolved_tag_name = "";
+  if (blender::ui::tag_filter_state_from_area(area_for_tag, &tag_state) && tag_state.active_tags &&
+      tag_state.filter_enabled && *tag_state.filter_enabled)
+  {
+    resolved_tag_name = tag_state.active_tags;
+    RNA_string_set(drop->ptr, "tag_name", resolved_tag_name);
+  }
+  else {
+    RNA_string_set(drop->ptr, "tag_name", "");
+  }
+}
+
+static std::string category_tab_extension_drop_tooltip(bContext *C,
+                                                       wmDrag *drag,
+                                                       const int xy[2],
+                                                       wmDropBox * /*drop*/)
+{
+  /* Use region_from if available, otherwise try to get region from current context.
+   * This is needed because tooltip is called before region_from is set on first frame. */
+  ARegion *region = drag->drop_state.region_from;
+  if (!region) {
+    bScreen *screen = CTX_wm_screen(C);
+    if (screen) {
+      ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, xy);
+      if (area) {
+        region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, xy);
+      }
+    }
+  }
+
+  if (!region || !ui::panel_category_tabs_is_visible(region)) {
+    return "";
+  }
+
+  const int mx_local = xy[0] - region->winrct.xmin;
+  const int my_local = xy[1] - region->winrct.ymin;
+
+  const char *category = nullptr;
+  const int hit_margin = int(5.0f * UI_SCALE_FAC);
+  ui::category_tabs_extension_drop_target_from_mouse(C,
+                                                      region,
+                                                      mx_local,
+                                                      my_local,
+                                                      hit_margin,
+                                                      &category,
+                                                      nullptr,
+                                                      nullptr,
+                                                      nullptr);
+
+  if (!category) {
+    return "";
+  }
+
+  const std::string extension_name = category_tab_extension_dragged_name(drag);
+  if (!extension_name.empty()) {
+    return fmt::format(fmt::runtime("Install '{}' → '{}'"), extension_name, category);
+  }
+  return fmt::format(fmt::runtime("Install extension → '{}'"), category);
 }
 
 static bool screen_drop_scene_poll(bContext *C, wmDrag *drag, const wmEvent * /*event*/)
@@ -7743,7 +8737,35 @@ void ED_keymap_screen(wmKeyConfig *keyconf)
                  WM_drag_free_imported_drag_ID,
                  screen_drop_scene_tooltip);
 
+  /* Category-tab extension dropbox should be handled by UI region handlers
+   * so it takes precedence over window-level extension dropboxes (Preferences). */
+  ListBaseT<wmDropBox> *lb_ui = WM_dropboxmap_find("User Interface", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  wmDropBox *drop = WM_dropbox_add(lb_ui,
+                                  "SCREEN_OT_category_tab_extension_drop",
+                                  category_tab_extension_drop_poll,
+                                  category_tab_extension_drop_copy,
+                                  nullptr,
+                                  category_tab_extension_drop_tooltip);
+  drop->draw_droptip = category_tab_extension_drop_draw_droptip;
+
   keymap_modal_set(keyconf);
+}
+
+void ED_dropbox_category_extension()
+{
+  /* Register category-tab extension dropbox in "Window" dropboxmap BEFORE
+   * PREFERENCES_OT_extension_url_drop so our poll is checked first.
+   * This is needed for drops in 3D Viewport and other areas where region
+   * doesn't support category tabs, allowing us to set pending extension context
+   * so "New Add-on!" virtual tag can appear in appropriate editors. */
+  ListBaseT<wmDropBox> *lb_win = WM_dropboxmap_find("Window", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  wmDropBox *drop_win = WM_dropbox_add(lb_win,
+                                        "SCREEN_OT_category_tab_extension_drop",
+                                        category_tab_extension_drop_poll,
+                                        category_tab_extension_drop_copy,
+                                        nullptr,
+                                        category_tab_extension_drop_tooltip);
+  drop_win->draw_droptip = category_tab_extension_drop_draw_droptip;
 }
 
 /** \} */

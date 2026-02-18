@@ -87,6 +87,10 @@ void ED_spacetypes_init()
   ED_spacetype_topbar();
   spreadsheet::register_spacetype();
 
+  /* Register category-tab extension drop operator BEFORE userpref operators
+   * so the dropbox can be added with higher priority. */
+  ED_operatortypes_screen_extension_drop();
+
   /* Register operator types for screen and all spaces. */
   ED_operatortypes_userpref();
   ED_operatortypes_workspace();

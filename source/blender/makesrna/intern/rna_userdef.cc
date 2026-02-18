@@ -54,6 +54,7 @@ const EnumPropertyItem rna_enum_preference_section_items[] = {
     RNA_ENUM_ITEM_SEPR,
     {USER_SECTION_ADDONS, "ADDONS", 0, "Add-ons", "Manage add-ons installed via Extensions"},
     {USER_SECTION_THEME, "THEMES", 0, "Themes", "Edit and save themes installed via Extensions"},
+    {USER_SECTION_TAGS, "TAGS", ICON_FUND, "Category Tags", "Manage category tab tags"},
 #if 0 /* def WITH_USERDEF_WORKSPACES */
     RNA_ENUM_ITEM_SEPR,
     {USER_SECTION_WORKSPACE_CONFIG, "WORKSPACE_CONFIG", 0, "Configuration File", ""},
@@ -73,6 +74,7 @@ const EnumPropertyItem rna_enum_preference_section_items[] = {
     RNA_ENUM_ITEM_SEPR,
     {USER_SECTION_DEVELOPER_TOOLS, "DEVELOPER_TOOLS", 0, "Developer Tools", ""},
     {USER_SECTION_EXPERIMENTAL, "EXPERIMENTAL", 0, "Experimental", ""},
+    {USER_SECTION_BUILD_FEATURES, "BUILD_FEATURES", ICON_INFO, "About Build", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -225,6 +227,53 @@ static const EnumPropertyItem rna_enum_preferences_extension_repo_source_type_it
      0,
      "System",
      "Read-only repository provided by the system"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_category_tabs_display_mode_items[] = {
+    {USER_CATEGORY_TABS_GLYPHS_ONLY,
+     "GLYPHS_ONLY",
+     0,
+     "Glyphs Only",
+     "Show only glyph icons in category tabs"},
+    {USER_CATEGORY_TABS_GLYPHS_TEXT,
+     "GLYPHS_TEXT",
+     0,
+     "Mixed",
+     "Show both glyph icons and text in category tabs"},
+    {USER_CATEGORY_TABS_TEXT_ONLY,
+     "TEXT_ONLY",
+     0,
+     "Text Only",
+     "Show only text in category tabs"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_category_tabs_inactive_behavior_items[] = {
+    {USER_CATEGORY_TABS_INACTIVE_DEFAULT,
+     "DEFAULT",
+     0,
+     "Default",
+     "Inactive tabs render normally with glyph or first letter"},
+    {USER_CATEGORY_TABS_INACTIVE_STICKY,
+     "STICKY",
+     0,
+     "Sticky Tab",
+     "Inactive tab keeps its size when becoming inactive in Icon mode"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_category_tabs_shape_items[] = {
+    {USER_CATEGORY_TABS_SHAPE_BOX,
+     "BOX",
+     0,
+     "Box Shape",
+     "Square shaped tabs in Icon mode"},
+    {USER_CATEGORY_TABS_SHAPE_CAPSULE,
+     "CAPSULE",
+     0,
+     "Capsule Shape",
+     "Elongated tabs in Icon mode"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1796,6 +1845,11 @@ static void rna_def_userdef_theme_ui_wcol(BlenderRNA *brna)
   prop = RNA_def_property(srna, "outline_sel", PROP_FLOAT, PROP_COLOR_GAMMA);
   RNA_def_property_array(prop, 4);
   RNA_def_property_ui_text(prop, "Outline Selected", "");
+  RNA_def_property_update(prop, 0, "rna_userdef_theme_update");
+
+  prop = RNA_def_property(srna, "icon_selection", PROP_FLOAT, PROP_COLOR_GAMMA);
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_ui_text(prop, "Icon Selection", "Color for selected tab icons");
   RNA_def_property_update(prop, 0, "rna_userdef_theme_update");
 
   prop = RNA_def_property(srna, "inner", PROP_FLOAT, PROP_COLOR_GAMMA);
@@ -4245,6 +4299,22 @@ static void rna_def_userdef_theme_collection_color(BlenderRNA *brna)
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 }
 
+static void rna_def_userdef_theme_glyph_color(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "ThemeGlyphColor", nullptr);
+  RNA_def_struct_sdna(srna, "ThemeGlyphColor");
+  RNA_def_struct_ui_text(srna, "Theme Glyph Color", "Theme settings for category tab glyph colors");
+
+  prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR_GAMMA);
+  RNA_def_property_float_sdna(prop, nullptr, "color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_ui_text(prop, "Color", "Glyph Color");
+  RNA_def_property_update(prop, 0, "rna_userdef_theme_update");
+}
+
 static void rna_def_userdef_theme_strip_color(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -4593,6 +4663,12 @@ static void rna_def_userdef_themes(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "ThemeCollectionColor");
   RNA_def_property_ui_text(prop, "Collection Color", "");
 
+  prop = RNA_def_property(srna, "glyph_color", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_NEVER_NULL);
+  RNA_def_property_collection_sdna(prop, nullptr, "glyph_color", "");
+  RNA_def_property_struct_type(prop, "ThemeGlyphColor");
+  RNA_def_property_ui_text(prop, "Glyph Color", "");
+
   prop = RNA_def_property(srna, "strip_color", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_flag(prop, PROP_NEVER_NULL);
   RNA_def_property_collection_sdna(prop, nullptr, "strip_color", "");
@@ -4820,6 +4896,7 @@ static void rna_def_userdef_dothemes(BlenderRNA *brna)
   rna_def_userdef_theme_space_spreadsheet(brna);
   rna_def_userdef_theme_colorset(brna);
   rna_def_userdef_theme_collection_color(brna);
+  rna_def_userdef_theme_glyph_color(brna);
   rna_def_userdef_theme_strip_color(brna);
   rna_def_userdef_themes(brna);
 }
@@ -5084,6 +5161,133 @@ static void rna_def_userdef_view(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.5f, 6.0f);
   RNA_def_property_ui_range(prop, 0.5f, 3.0f, 1, 2);
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_and_text_update");
+
+  prop = RNA_def_property(srna, "category_tabs_zoom_icon", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_ui_text(
+      prop, "Size", "Scale factor for category tabs in Icon mode");
+  RNA_def_property_range(prop, 0.5f, 2.5f);
+  RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_mixed");
+  RNA_def_property_ui_text(
+      prop, "Size", "Scale factor for category tabs in Mixed mode");
+  RNA_def_property_range(prop, 0.5f, 2.5f);
+  RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_text");
+  RNA_def_property_ui_text(
+      prop, "Size", "Scale factor for category tabs in Text mode");
+  RNA_def_property_range(prop, 0.5f, 2.5f);
+  RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_display_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_display_mode");
+  RNA_def_property_enum_items(prop, rna_enum_category_tabs_display_mode_items);
+  RNA_def_property_ui_text(prop, "Category Tabs Display Mode", "How to display category tabs");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_inactive_behavior", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_inactive_behavior");
+  RNA_def_property_enum_items(prop, rna_enum_category_tabs_inactive_behavior_items);
+  RNA_def_property_ui_text(prop, "Inactive Tab Behavior", "How inactive tabs behave when becoming inactive in Icon mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_shape", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_shape");
+  RNA_def_property_enum_items(prop, rna_enum_category_tabs_shape_items);
+  RNA_def_property_ui_text(prop, "Tab Shape", "Shape of tabs in Icon mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_lock_edit", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_lock_edit", 1);
+  RNA_def_property_ui_text(
+      prop, "Lock Category Editing", "Disable editing of category tab name, glyph and color");
+  RNA_def_property_ui_icon(prop, ICON_LOCKED, true);
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_show_active_name", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_show_active_name", 1);
+  RNA_def_property_ui_text(prop, "Show Active Tab Name",
+                           "Show category name for active tab in Icon mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_show_drag_tooltips", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_show_drag_tooltips", 1);
+  RNA_def_property_ui_text(prop, "Show Drag Tooltips",
+                           "Show category name tooltips when dragging tabs in Icon mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_text_mode_show_color_indicator", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_text_mode_show_color_indicator", 1);
+  RNA_def_property_ui_text(prop, "Show Color Indicator",
+                           "Show color indicator bar in Text mode for categories with custom glyph colors");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_text_mode_show_colored_text", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_text_mode_show_colored_text", 1);
+  RNA_def_property_ui_text(prop, "Show Colored Text",
+                           "Show colored text in Text mode for categories with custom glyph colors");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_hide_reserved_inactive_text", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_hide_reserved_inactive_text", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Reserved Tabs: Icons Only",
+      "In Mixed/Text modes, show only icons for inactive reserved categories");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS (optional per-type visibility in Mixed mode) --- */
+  prop = RNA_def_property(srna, "category_tabs_mixed_show_glyphs", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_mixed_show_glyphs", 1);
+  RNA_def_property_ui_text(prop, "Show Glyphs",
+                           "Show custom glyphs in Mixed mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_mixed_show_first_letter", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_mixed_show_first_letter", 1);
+  RNA_def_property_ui_text(prop, "Show First Letter",
+                           "Show first letter fallback in Mixed mode for categories without custom glyph");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_mixed_show_icons", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_mixed_show_icons", 1);
+  RNA_def_property_ui_text(prop, "Show Icons",
+                           "Show resolved icons in Mixed mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+  /* --- END: MIXED_MODE_CONTENT_FLAGS --- */
+
+  prop = RNA_def_property(srna, "category_tabs_visual_effect", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_visual_effect", 1);
+  RNA_def_property_ui_text(prop, "Visual Effect",
+                           "Scale category tabs on hover and when active in Icon mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_visual_outline", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_visual_outline", 1);
+  RNA_def_property_ui_text(prop, "Visual Outline",
+                           "Show outline effect on active tab in Icon mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_visual_outline_color", PROP_FLOAT, PROP_COLOR_GAMMA);
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_ui_text(prop, "Outline Color",
+                           "Custom color for the visual outline effect on active tab");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_custom_icon_directory", PROP_STRING, PROP_DIRPATH);
+  RNA_def_property_string_sdna(prop, nullptr, "category_tabs_custom_icon_dir");
+  RNA_def_property_string_maxlength(prop, FILE_MAXDIR);
+  RNA_def_property_ui_text(
+      prop,
+      "Custom Icon Directory",
+      "Default directory opened by the custom icon picker for category tabs");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
 
   prop = RNA_def_property(srna, "border_width", PROP_INT, PROP_NONE);
   RNA_def_property_ui_text(prop, "Border Width", "Size of the padding around each editor.");
@@ -7711,6 +7915,36 @@ static void rna_def_userdef_experimental(BlenderRNA *brna)
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 }
 
+static void rna_def_userdef_build_features(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "PreferencesBuildFeatures", nullptr);
+  RNA_def_struct_sdna(srna, "UserDef_BuildFeatures");
+  RNA_def_struct_nested(brna, srna, "Preferences");
+  RNA_def_struct_ui_text(srna, "Build Features", "Custom build features");
+
+  prop = RNA_def_property(srna, "use_enhanced_paint_system", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_enhanced_paint_system", 1);
+  RNA_def_property_ui_text(
+      prop, "Enhanced Paint System",
+      "Enable enhanced paint system with gradient tools and texture painting in Sculpt mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "use_custom_feature_2", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_custom_feature_2", 1);
+  RNA_def_property_ui_text(
+      prop, "Custom Feature 2", "Enable custom feature 2 for this build");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "use_custom_feature_3", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_custom_feature_3", 1);
+  RNA_def_property_ui_text(
+      prop, "Custom Feature 3", "Enable custom feature 3 for this build");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+}
+
 static void rna_def_userdef_addon_collection(BlenderRNA *brna, PropertyRNA *cprop)
 {
   StructRNA *srna;
@@ -7878,6 +8112,14 @@ void RNA_def_userdef(BlenderRNA *brna)
       "Experimental",
       "Settings for features that are still early in their development stage");
 
+  prop = RNA_def_property(srna, "build_features", PROP_POINTER, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_NEVER_NULL);
+  RNA_def_property_struct_type(prop, "PreferencesBuildFeatures");
+  RNA_def_property_ui_text(
+      prop,
+      "Build Features",
+      "Custom features specific to this build");
+
   prop = RNA_def_int_vector(srna,
                             "version",
                             3,
@@ -7934,6 +8176,7 @@ void RNA_def_userdef(BlenderRNA *brna)
   rna_def_userdef_pathcompare(brna);
   rna_def_userdef_apps(brna);
   rna_def_userdef_experimental(brna);
+  rna_def_userdef_build_features(brna);
 
   USERDEF_TAG_DIRTY_PROPERTY_UPDATE_DISABLE;
 }

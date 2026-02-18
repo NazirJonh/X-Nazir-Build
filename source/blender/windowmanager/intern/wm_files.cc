@@ -47,6 +47,7 @@
 #include "BLI_time.h"
 #include "BLI_timer.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 #include BLI_SYSTEM_PID_H
 
 #include "BLO_core_blend_header.hh"
@@ -705,6 +706,11 @@ static void wm_file_read_post(bContext *C,
   const bool reset_app_template = params->reset_app_template;
 
   bool addons_loaded = false;
+
+  /* The category glyph mappings, overrides and tags are runtime-only lists that may contain
+   * garbage pointers from the loaded file's memory space. They are cleared (for all three lists)
+   * by versioning, see #do_versions_clear_category_runtime_lists_in_wm, so there is no need to
+   * clear them again here. */
 
   if (use_data) {
     if (!G.background) {
@@ -2095,6 +2101,54 @@ static bool wm_file_write_check_with_report_on_failure(Main *bmain,
 }
 
 /**
+ * Backup of the runtime-only category lists of a single #wmWindowManager.
+ *
+ * These lists (`category_glyph_mappings`, `category_glyph_overrides` and `category_tags`) are
+ * runtime data that should not be written to .blend files. The proper fix is to skip these lists
+ * while writing the window manager in `writefile.cc` (DNA write-skip); until that is in place we
+ * temporarily detach the lists from every #wmWindowManager around #BLO_write_file and restore them
+ * afterwards. The backup also stores the owning window manager so restore does not rely on the
+ * iteration order of `bmain->wm` matching between clear and restore.
+ */
+struct CategoryGlyphMappingsBackup {
+  wmWindowManager *wm;
+  ListBase mappings;
+  ListBase overrides;
+  ListBase tags;
+};
+
+static void wm_category_glyph_mappings_backup_and_clear(
+    Main *bmain, blender::Vector<CategoryGlyphMappingsBackup> &backups)
+{
+  /* Detach the runtime category lists from all window managers so they are not written. */
+  for (wmWindowManager &wm : bmain->wm) {
+    CategoryGlyphMappingsBackup backup;
+    backup.wm = &wm;
+    /* Store the original list pointers. */
+    backup.mappings = wm.category_glyph_mappings;
+    backup.overrides = wm.category_glyph_overrides;
+    backup.tags = wm.category_tags;
+    backups.append(backup);
+
+    /* Clear the ListBase pointers to prevent writing data to file. */
+    BLI_listbase_clear(&wm.category_glyph_mappings);
+    BLI_listbase_clear(&wm.category_glyph_overrides);
+    BLI_listbase_clear(&wm.category_tags);
+  }
+}
+
+static void wm_category_glyph_mappings_restore(
+    const blender::Vector<CategoryGlyphMappingsBackup> &backups)
+{
+  /* Restore the runtime category lists onto their original window managers. */
+  for (const CategoryGlyphMappingsBackup &backup : backups) {
+    backup.wm->category_glyph_mappings = backup.mappings;
+    backup.wm->category_glyph_overrides = backup.overrides;
+    backup.wm->category_tags = backup.tags;
+  }
+}
+
+/**
  * \see #wm_homefile_write_exec wraps #BLO_write_file in a similar way.
  */
 static bool wm_file_write(bContext *C,
@@ -2107,6 +2161,9 @@ static bool wm_file_write(bContext *C,
   Main *bmain = CTX_data_main(C);
   BlendThumbnail *thumb = nullptr, *main_thumb = nullptr;
   ImBuf *ibuf_thumb = nullptr;
+
+  /* Backup for category glyph mappings - will be cleared during save and restored after. */
+  blender::Vector<CategoryGlyphMappingsBackup> glyph_mappings_backup;
 
   /* NOTE: used to replace the file extension (to ensure `.blend`),
    * no need to now because the operator ensures,
@@ -2214,6 +2271,12 @@ static bool wm_file_write(bContext *C,
   /* XXX(ton): temp solution to solve bug, real fix coming. */
   bmain->recovered = false;
 
+  /* Backup and clear category glyph mappings before save - these are runtime-only data
+   * loaded from JSON, not saved to .blend files. This prevents crashes when
+   * loading files that contain garbage pointers in these ListBase structures.
+   * The data is restored after save to keep the UI working. */
+  wm_category_glyph_mappings_backup_and_clear(bmain, glyph_mappings_backup);
+
   BlendFileWriteParams blend_write_params{};
   blend_write_params.remap_mode = remap_mode;
   blend_write_params.use_save_versions = true;
@@ -2221,6 +2284,9 @@ static bool wm_file_write(bContext *C,
   blend_write_params.thumb = thumb;
 
   const bool success = BLO_write_file(bmain, filepath, fileflags, &blend_write_params, reports);
+
+  /* Restore category glyph mappings after save to keep UI working. */
+  wm_category_glyph_mappings_restore(glyph_mappings_backup);
 
   if (success) {
     const bool do_history_file_update = (G.background == false) &&

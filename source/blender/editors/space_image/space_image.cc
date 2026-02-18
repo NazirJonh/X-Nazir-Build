@@ -46,8 +46,8 @@
 #include "ED_transform.hh"
 #include "ED_util.hh"
 #include "ED_uvedit.hh"
-
 #include "NOD_compositor_gizmos.hh"
+#include "../interface/interface_tag_bar.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -162,20 +162,30 @@ static SpaceLink *image_create(const ScrArea * /*area*/, const Scene * /*scene*/
   region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
   region->flag = RGN_FLAG_HIDDEN | RGN_FLAG_HIDDEN_BY_USER;
 
-  /* buttons/list view */
-  region = BKE_area_region_new();
-
-  BLI_addtail(&simage->regionbase, region);
-  region->regiontype = RGN_TYPE_UI;
-  region->alignment = RGN_ALIGN_RIGHT;
-  region->flag = RGN_FLAG_HIDDEN;
-
   /* scopes/uv sculpt/paint */
   region = BKE_area_region_new();
 
   BLI_addtail(&simage->regionbase, region);
   region->regiontype = RGN_TYPE_TOOLS;
   region->alignment = RGN_ALIGN_LEFT;
+  region->flag = RGN_FLAG_HIDDEN;
+
+  /* tag bar */
+  region = BKE_area_region_new();
+  BLI_addtail(&simage->regionbase, region);
+  region->regiontype = RGN_TYPE_TAG_BAR;
+  region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
+  /* The tag bar starts hidden in the Image editor (unlike the 3D viewport, where it is visible by
+   * default); the user reveals it on demand. */
+  region->flag = RGN_FLAG_HIDDEN;
+  region->overlap = true;
+
+  /* buttons/list view */
+  region = BKE_area_region_new();
+
+  BLI_addtail(&simage->regionbase, region);
+  region->regiontype = RGN_TYPE_UI;
+  region->alignment = RGN_ALIGN_RIGHT;
   region->flag = RGN_FLAG_HIDDEN;
 
   /* main area */
@@ -1309,6 +1319,14 @@ static void image_space_blend_write(BlendWriter *writer, SpaceLink *sl)
   writer->write_struct_cast<SpaceImage>(sl);
 }
 
+static int image_tag_bar_region_snap_size(const ARegion * /*region*/, int size, int axis)
+{
+  if (axis == 1) {
+    return (size < UI_UNIT_Y) ? size : UI_UNIT_Y;
+  }
+  return size;
+}
+
 /**************************** spacetype *****************************/
 
 void ED_spacetype_image()
@@ -1402,6 +1420,21 @@ void ED_spacetype_image()
   art->draw = image_header_region_draw;
 
   BLI_addhead(&st->regiontypes, art);
+
+  /* regions: tag bar */
+  art = MEM_new_zeroed<ARegionType>("spacetype image tag bar region");
+  art->regionid = RGN_TYPE_TAG_BAR;
+  art->prefsizex = 0;
+  art->prefsizey = UI_UNIT_Y;
+  art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D;
+  art->listener = ui::buttons_tag_bar_region_listener;
+  art->message_subscribe = ui::buttons_tag_bar_region_message_subscribe;
+  art->init = ui::buttons_tag_bar_region_init;
+  art->draw = ui::buttons_tag_bar_region_draw;
+  art->snap_size = image_tag_bar_region_snap_size;
+  BLI_addhead(&st->regiontypes, art);
+
+  ui::tag_bar_filter_popover_panel_register(art);
 
   /* regions: asset shelf */
   art = MEM_new_zeroed<ARegionType>("spacetype image asset shelf region");

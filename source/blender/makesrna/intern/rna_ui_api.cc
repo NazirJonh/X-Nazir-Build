@@ -578,23 +578,105 @@ static void rna_uiItemL(Layout *layout,
   layout->label(text.value_or(""), icon);
 }
 
-static void rna_layout_link(Layout *layout,
-                            const char *url,
-                            const char *name,
-                            const char *text_ctxt,
-                            bool translate,
-                            int icon,
-                            int icon_value)
+static void rna_uiItemLink(Layout *layout,
+                           const char *url,
+                           const char *name,
+                           const char *text_ctxt,
+                           bool translate,
+                           int icon,
+                           int icon_value)
+{
+  std::optional<StringRefNull> text = rna_translate_ui_text(
+      name, text_ctxt, nullptr, nullptr, translate);
+  if (icon_value && !icon) {
+    icon = icon_value;
+  }
+  layout->link(url ? url : "", text.value_or(""), icon);
+}
+
+static void rna_uiItemL_colored(Layout *layout,
+                                const char *name,
+                                const char *text_ctxt,
+                                bool translate,
+                                int icon,
+                                float color_r,
+                                float color_g,
+                                float color_b)
 {
   /* Get translated name (label). */
   std::optional<StringRefNull> text = rna_translate_ui_text(
       name, text_ctxt, nullptr, nullptr, translate);
 
+  float color[3] = {color_r, color_g, color_b};
+  uiItemL_colored(layout, text.value_or(""), icon, color);
+}
+
+static PointerRNA rna_uiItemO_colored(Layout *layout,
+                                      const char *opname,
+                                      const char *name,
+                                      const char *text_ctxt,
+                                      bool translate,
+                                      int icon,
+                                      bool emboss,
+                                      bool depress,
+                                      int icon_value,
+                                      const float search_weight,
+                                      float color_r,
+                                      float color_g,
+                                      float color_b)
+{
+  wmOperatorType *ot;
+
+  ot = WM_operatortype_find(opname, false); /* print error next */
+  if (!ot || !ot->srna) {
+    RNA_warning_bare(
+        "UILayout.operator_with_color(): %s '%s'", ot ? "operator missing srna" : "unknown operator", opname);
+    return PointerRNA_NULL;
+  }
+
+  /* Get translated name (label). */
+  std::optional<StringRefNull> text = rna_translate_ui_text(
+      name, text_ctxt, ot->srna, nullptr, translate);
+
   if (icon_value && !icon) {
     icon = icon_value;
   }
+  ui::eUI_Item_Flag flag = UI_ITEM_NONE;
+  if (emboss == false) {
+    flag |= ui::ITEM_R_NO_BG;
+  }
+  if (depress) {
+    flag |= ui::ITEM_O_DEPRESS;
+  }
 
-  layout->link(url, text.value_or(""), icon);
+  const float prev_weight = layout->search_weight();
+  layout->search_weight_set(search_weight);
+
+  float color[3] = {color_r, color_g, color_b};
+  PointerRNA opptr = uiItemFullO_colored(
+      layout, opname, text, icon, layout->operator_context(), flag, color);
+
+  layout->search_weight_set(prev_weight);
+  return opptr;
+}
+
+static PointerRNA rna_uiItemTagButton(Layout *layout,
+                                      const char *opname,
+                                      const char *tag_name,
+                                      const char *glyph,
+                                      float color_r,
+                                      float color_g,
+                                      float color_b,
+                                      bool depress,
+                                      bool center_glyph,
+                                      const char *tooltip,
+                                      const char *context_menu_operator,
+                                      const char *operator_param_name,
+                                      const char *operator_param_value)
+{
+  float color[3] = {color_r, color_g, color_b};
+  return uiItemTagButtonWithOperator(layout, opname, tag_name, glyph, color, depress, center_glyph, tooltip,
+                                     context_menu_operator, operator_param_name, operator_param_value);
 }
 
 static void rna_uiItemM(Layout *layout,
@@ -844,18 +926,18 @@ void rna_template_list(Layout *layout,
   }
 
   ui::template_uilist(layout,
-                      C,
-                      listtype_name,
-                      list_id,
-                      dataptr,
-                      propname,
-                      active_dataptr,
-                      active_propname,
-                      item_dyntip_propname,
-                      rows,
-                      maxrows,
-                      layout_type,
-                      flags);
+                    C,
+                    listtype_name,
+                    list_id,
+                    dataptr,
+                    propname,
+                    active_dataptr,
+                    active_propname,
+                    item_dyntip_propname,
+                    rows,
+                    maxrows,
+                    layout_type,
+                    flags);
 }
 
 static void rna_template_cache_file(Layout *layout,
@@ -897,10 +979,10 @@ static void rna_template_cache_file_time_settings(Layout *layout,
   ui::template_cache_file_time_settings(layout, &fileptr);
 }
 
-static void rna_template_uilist_flags(Layout *layout,
-                                      bContext *C,
-                                      PointerRNA *ptr,
-                                      const char *propname)
+static void rna_template_list_flags(Layout *layout,
+                                    bContext *C,
+                                    PointerRNA *ptr,
+                                    const char *propname)
 {
   PointerRNA fileptr;
   if (!ui::template_cache_file_pointer(ptr, propname, &fileptr)) {
@@ -1741,18 +1823,78 @@ void RNA_api_ui_layout(StructRNA *srna)
   parm = RNA_def_property(func, "icon_value", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_ui_text(parm, "Icon Value", "Override automatic icon of the item");
 
-  func = RNA_def_function(srna, "link", "rna_layout_link");
-  RNA_def_function_ui_description(func, "Item. Displays a url that can be clicked in the layout.");
-  prop = RNA_def_string(func, "url", nullptr, 0, "", "");
-  RNA_def_property_flag(prop, PROP_NEVER_NULL);
-  prop = RNA_def_string(func, "text", nullptr, 0, "", "Override automatic text of the item");
-  RNA_def_property_clear_flag(prop, PROP_NEVER_NULL);
-  api_ui_item_common_translation(func);
-  prop = RNA_def_property(func, "icon", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_icon_items);
-  RNA_def_property_ui_text(prop, "Icon", "Override automatic icon of the item");
+  func = RNA_def_function(srna, "link", "rna_uiItemLink");
+  RNA_def_function_ui_description(
+      func,
+      "Item. Displays a clickable URL link. Text becomes underlined on hover.");
+  parm = RNA_def_string(func, "url", nullptr, 0, "URL", "URL to open in the web browser");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  api_ui_item_common(func);
   parm = RNA_def_property(func, "icon_value", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_ui_text(parm, "Icon Value", "Override automatic icon of the item");
+
+  func = RNA_def_function(srna, "colored_label", "rna_uiItemL_colored");
+  RNA_def_function_ui_description(
+      func, "Item. Displays text with a custom color (RGB 0.0-1.0) and/or icon in the layout.");
+  api_ui_item_common(func);
+  parm = RNA_def_float(func, "color_r", 0.0f, 0.0f, 1.0f, "Red", "Red component (0.0-1.0)", 0.0f, 1.0f);
+  parm = RNA_def_float(func, "color_g", 0.0f, 0.0f, 1.0f, "Green", "Green component (0.0-1.0)", 0.0f, 1.0f);
+  parm = RNA_def_float(func, "color_b", 0.0f, 0.0f, 1.0f, "Blue", "Blue component (0.0-1.0)", 0.0f, 1.0f);
+
+  func = RNA_def_function(srna, "operator_with_color", "rna_uiItemO_colored");
+  RNA_def_function_ui_description(
+      func,
+      "Item. Places a button into the layout to call an Operator with custom text color.");
+  parm = RNA_def_string(func, "operator", nullptr, 0, "", "Identifier of the operator");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  api_ui_item_common(func);
+  parm = RNA_def_property(func, "icon_value", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_ui_text(parm, "Icon Value", "Override automatic icon of the item");
+  RNA_def_boolean(func, "emboss", true, "", "Draw the button itself, not just the icon/text");
+  RNA_def_boolean(func, "depress", false, "", "Draw pressed in");
+  RNA_def_float(func,
+                "search_weight",
+                0.0f,
+                -FLT_MAX,
+                FLT_MAX,
+                "Search Weight",
+                "Influences the sorting when using menu-search",
+                -FLT_MAX,
+                FLT_MAX);
+  RNA_def_float(func, "color_r", 0.0f, 0.0f, 1.0f, "Red", "Red component (0.0-1.0)", 0.0f, 1.0f);
+  RNA_def_float(func, "color_g", 0.0f, 0.0f, 1.0f, "Green", "Green component (0.0-1.0)", 0.0f, 1.0f);
+  RNA_def_float(func, "color_b", 0.0f, 0.0f, 1.0f, "Blue", "Blue component (0.0-1.0)", 0.0f, 1.0f);
+  parm = RNA_def_pointer(
+      func, "properties", "OperatorProperties", "", "Operator properties to fill in");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "tag_button", "rna_uiItemTagButton");
+  RNA_def_function_ui_description(
+      func,
+      "Item. Creates a Tag button with a colored glyph/emoji and attaches an operator.");
+  parm = RNA_def_string(func, "operator", nullptr, 0, "", "Identifier of the operator");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "tag_name", nullptr, 0, "", "Tag name identifier (required for internal tracking)");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "glyph", nullptr, 0, "", "UTF-8 glyph/emoji character to display");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_float(func, "color_r", 1.0f, 0.0f, 1.0f, "Red", "Red component (0.0-1.0)", 0.0f, 1.0f);
+  RNA_def_float(func, "color_g", 1.0f, 0.0f, 1.0f, "Green", "Green component (0.0-1.0)", 0.0f, 1.0f);
+  RNA_def_float(func, "color_b", 1.0f, 0.0f, 1.0f, "Blue", "Blue component (0.0-1.0)", 0.0f, 1.0f);
+  RNA_def_boolean(func, "depress", false, "", "Draw pressed in");
+  RNA_def_boolean(func, "center_glyph", false, "", "Center glyph in button (for glyph-only buttons)");
+  parm = RNA_def_string(func, "tooltip", nullptr, 0, "", "Tooltip text to display on hover");
+  parm = RNA_def_string(func, "context_menu_operator", nullptr, 0, "", "Operator to call on right-click context menu");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "operator_param_name", nullptr, 0, "", "Parameter name to pass to context menu operator");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "operator_param_value", nullptr, 0, "", "Parameter value to pass to context menu operator");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_pointer(
+      func, "properties", "OperatorProperties", "", "Operator properties to fill in");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_function_return(func, parm);
 
   func = RNA_def_function(srna, "menu", "rna_uiItemM");
   parm = RNA_def_string(func, "menu", nullptr, 0, "", "Identifier of the menu");
@@ -2030,6 +2172,116 @@ void RNA_api_ui_layout(StructRNA *srna)
   func = RNA_def_function(srna, "template_collection_exporters", "template_collection_exporters");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   RNA_def_function_ui_description(func, "Generates the UI layout for collection exporters");
+
+  func = RNA_def_function(srna, "template_color_glyph_presets", "ui::uiTemplateColorGlyphPresets");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func, "Color preset buttons with Material Icons glyphs for quick color selection");
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take property");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "property", nullptr, 0, "", "Identifier of property in data");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "template_glyph_input_row", "ui::uiTemplateGlyphInputRow");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "Creates a row with glyph input fields and buttons (Search/Code, More glyphs, Paste)");
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take properties");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "glyph_property", nullptr, 0, "", "Identifier of glyph property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func,
+                        "search_property",
+                        nullptr,
+                        0,
+                        "",
+                        "Identifier of search property (optional)");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_boolean(func,
+                         "has_search",
+                         true,
+                         "",
+                         "Whether to show the search field");
+  parm = RNA_def_boolean(func, "has_code", true, "", "Whether to show the code field");
+  parm = RNA_def_string(func, "category", nullptr, 0, "", "Category for context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "template_glyph_preview", "ui::uiTemplateGlyphPreview");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(func, "Creates a centered preview button showing a glyph");
+  parm = RNA_def_string(func, "glyph_unicode", nullptr, 0, "", "Unicode glyph character");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take color property");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "color_property", nullptr, 0, "", "Identifier of color property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_float(func,
+                       "size_multiplier",
+                       2.0f,
+                       0.5f,
+                       5.0f,
+                       "",
+                       "Size multiplier for the preview glyph",
+                       0.5f,
+                       5.0f);
+
+  func = RNA_def_function(srna, "template_icon_preview", "ui::uiTemplateIconPreview");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(func, "Creates a centered preview button showing a Blender icon with optional color tint");
+  parm = RNA_def_string(func, "icon_key", nullptr, 0, "", "Blender icon identifier (e.g., 'FUND', 'OBJECT_DATAMODE')");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take color property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  parm = RNA_def_string(func, "color_property", nullptr, 0, "", "Identifier of color property for icon tint");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), ParameterFlag(0));
+  parm = RNA_def_float(func,
+                       "size_multiplier",
+                       2.0f,
+                       0.5f,
+                       5.0f,
+                       "",
+                       "Size multiplier for the preview icon",
+                       0.5f,
+                       5.0f);
+
+  func = RNA_def_function(srna, "template_glyph_search_results", "ui::uiTemplateGlyphSearchResults");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(func, "Creates dynamic buttons for glyph search results");
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take search property");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "search_property", nullptr, 0, "", "Identifier of search query property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "category", nullptr, 0, "", "Category for glyph search");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "color_property", nullptr, 0, "", "Identifier of color property");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_int(func,
+                     "max_results",
+                     50,
+                     1,
+                     200,
+                     "",
+                     "Maximum number of search results to show",
+                     1,
+                     200);
+
+  func = RNA_def_function(srna, "template_glyph_selector", "ui::uiTemplateGlyphSelector");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(func, "Creates a complete glyph selector with input, search results, and preview");
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take properties");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "glyph_property", nullptr, 0, "", "Identifier of glyph property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "search_property", nullptr, 0, "", "Identifier of search query property");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "color_property", nullptr, 0, "", "Identifier of color property");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "category", nullptr, 0, "", "Category for glyph search");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_boolean(func, "show_preview", true, "", "Show glyph preview");
+  parm = RNA_def_boolean(func, "show_search", true, "", "Show search field");
+  parm = RNA_def_boolean(func, "show_code", true, "", "Show code input field");
 
   func = RNA_def_function(srna, "template_constraints", "template_constraints");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
@@ -2461,7 +2713,7 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_function_ui_description(func, "Show cache files time settings");
   api_ui_item_rna_common(func);
 
-  func = RNA_def_function(srna, "template_cache_file_layers", "rna_template_uilist_flags");
+  func = RNA_def_function(srna, "template_cache_file_layers", "rna_template_list_flags");
   RNA_def_function_ui_description(func, "Show cache files override layers properties");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   api_ui_item_rna_common(func);
@@ -2568,6 +2820,90 @@ void RNA_api_ui_layout(StructRNA *srna)
   func = RNA_def_function(srna, "template_shape_key_tree", "ed::object::shapekey::template_tree");
   RNA_def_function_ui_description(func, "Shape Key tree view");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+
+  /* Tag button in preference mode (no checkbox, for category assignment UI) */
+  func = RNA_def_function(srna, "tag_button_pref", "rna_uiLayout_tag_button_pref");
+  RNA_def_function_ui_description(func,
+                                  "Create a Tag button in preference mode (no checkbox) "
+                                  "for displaying categories assigned to a tag");
+  parm = RNA_def_string(func, "tag_name", nullptr, 0, "", "Tag name to display");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "glyph", nullptr, 0, "", "Optional UTF-8 glyph/emoji character");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  /* Color parameter - passing as 3 floats */
+  parm = RNA_def_float_vector(func,
+                              "color",
+                              3,
+                              nullptr,
+                              0.0f,
+                              1.0f,
+                              "",
+                              "RGB color for glyph (0.0-1.0)",
+                              0.0f,
+                              1.0f);
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  /* Position and size parameters */
+  parm = RNA_def_int(func, "x", 0, INT_MIN, INT_MAX, "", "X position", INT_MIN, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "y", 0, INT_MIN, INT_MAX, "", "Y position", INT_MIN, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "width", 0, 0, INT_MAX, "", "Button width", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "height", 0, 0, INT_MAX, "", "Button height", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  /* Icon parameters - icon takes priority over glyph when set */
+  parm = RNA_def_int(func, "icon_id", 0, 0, INT_MAX, "", "Blender internal icon ID (0 = none)", 0, INT_MAX);
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "icon_path", nullptr, 0, "", "Path to external icon file (used if icon_id is 0)");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+
+  /* Tag button row in preference mode (no checkbox, for category assignment UI) */
+  func = RNA_def_function(srna, "tag_button_pref_row", "rna_uiLayout_tag_button_pref_row");
+  RNA_def_function_ui_description(func,
+                                  "Create a box container with a row layout containing a Tag button in preference mode. "
+                                  "The box provides a visual frame around the Tag button and any additional buttons. "
+                                  "Returns the row layout so additional buttons can be added.");
+  parm = RNA_def_string(func, "tag_name", nullptr, 0, "", "Tag name to display");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "glyph", nullptr, 0, "", "Optional UTF-8 glyph/emoji character");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  /* Color parameter - passing as 3 floats */
+  parm = RNA_def_float_vector(func,
+                              "color",
+                              3,
+                              nullptr,
+                              0.0f,
+                              1.0f,
+                              "",
+                              "RGB color for glyph (0.0-1.0)",
+                              0.0f,
+                              1.0f);
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  /* Size parameters */
+  parm = RNA_def_int(func, "width", 0, 0, INT_MAX, "", "Button width (0 for automatic)", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "height", 0, 0, INT_MAX, "", "Button height (0 for automatic)", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "no_background", false, "", "Skip background rendering (only show on hover/active)");
+  parm = RNA_def_boolean(func, "align", true, "", "Align buttons together for seamless appearance");
+  parm = RNA_def_boolean(func, "center_glyph", false, "", "Center glyph in button (for glyph-only buttons)");
+  /* Icon parameters - icon takes priority over glyph when set */
+  parm = RNA_def_string(func, "icon_key", nullptr, 0, "", "Blender internal icon identifier (e.g. 'PLAY', 'SELECT_EXTEND')");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "icon_path", nullptr, 0, "", "Path to external icon file (used if icon_key is empty)");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  /* Operator parameters */
+  parm = RNA_def_string(func, "operator", nullptr, 0, "", "Operator to call on button click");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "context_menu_operator", nullptr, 0, "", "Operator for right-click context menu");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "operator_param_name", nullptr, 0, "", "Parameter name for context menu operator");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "operator_param_value", nullptr, 0, "", "Parameter value for context menu operator");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  /* Return value: the row layout */
+  parm = RNA_def_pointer(func, "row_layout", "UILayout", "", "Row layout with Tag button (inside the box)");
+  RNA_def_function_return(func, parm);
 }
 
 }  // namespace blender

@@ -1121,6 +1121,22 @@ bool icon_get_theme_color(int icon_id, uchar color[4])
   return theme::get_icon_color_4ubv(di->data.texture.theme_color, color);
 }
 
+bool icon_is_monochrome(int icon_id)
+{
+  Icon *icon = BKE_icon_get(icon_id);
+  if (icon == nullptr) {
+    return false;
+  }
+
+  DrawInfo *di = icon_ensure_drawinfo(icon);
+  if (di->type == ICON_TYPE_SVG_MONO) {
+    return true;
+  }
+  
+  /* Fallback: any icon with a theme color is meant to be monochromatic. */
+  return (di->data.texture.theme_color != 0);
+}
+
 void icons_init()
 {
 #ifndef WITH_HEADLESS

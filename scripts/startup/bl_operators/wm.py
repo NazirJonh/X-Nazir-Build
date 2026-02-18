@@ -3436,6 +3436,18 @@ class WM_MT_splash(Menu):
         layout.operator_context = 'EXEC_DEFAULT'
         layout.emboss = 'PULLDOWN_MENU'
 
+        # Feedback button centered above everything
+        split_fb = layout.split(factor=0.23)
+        split_fb.column()  # left spacer
+        row_feedback = split_fb.column()
+        row_feedback.scale_x = 2.0
+        row_feedback.operator("wm.url_open", text=">>>Support and Send FEEDBACK<<<", icon='FUND').url = "https://xnazirbuildfeedback.carrd.co/"
+
+        col_sep = layout.column()
+        col_sep.separator()
+        col_sep.separator(type='LINE')
+        col_sep.separator()
+
         split = layout.split()
 
         # Templates
@@ -3482,7 +3494,7 @@ class WM_MT_splash(Menu):
 
         col2 = split.column()
 
-        col2.operator("wm.url_open_preset", text="What's New", icon='URL').type = 'RELEASE_NOTES'
+        col2.operator("wm.url_open", text="X-Nazir Sculpt YouTube Channel", icon='URL').url = "https://www.youtube.com/@XNazirBuild"
         col2.operator("wm.url_open_preset", text="Donate to Blender", icon='FUND').type = 'FUND'
 
         layout.separator()
@@ -3530,7 +3542,7 @@ class WM_MT_splash_about(Menu):
         col = split.column(align=True)
         col.emboss = 'PULLDOWN_MENU'
         col.operator("wm.url_open_preset", text="Donate", icon='FUND').type = 'FUND'
-        col.operator("wm.url_open_preset", text="What's New", icon='URL').type = 'RELEASE_NOTES'
+        col.operator("wm.url_open", text="What's New", icon='URL').url = "https://xnazirbuildfeedback.carrd.co/"
         col.separator(factor=2.0)
         col.operator("wm.url_open_preset", text="Credits", icon='URL').type = 'CREDITS'
         col.operator("wm.url_open", text="License", icon='URL').url = "https://www.blender.org/about/license/"

@@ -1531,6 +1531,11 @@ static ui::Block *wm_block_dialog_create(bContext *C, ARegion *region, void *use
   block_theme_style_set(block, ui::BLOCK_THEME_STYLE_POPUP);
   popup_dummy_panel_set(region, block, op->idname);
 
+  /* Register the operator in the block so that context_active_operator_get()
+   * can find it from child popups (like the glyph picker).
+   * free=false because the operator lifetime is managed by wmOpPopUp. */
+  block_set_active_operator(block, op, false);
+
   if (data->mouse_move_quit) {
     block_flag_enable(block, ui::BLOCK_MOVEMOUSE_QUIT);
   }
@@ -4254,6 +4259,7 @@ void wm_operatortypes_register()
   WM_operatortype_append(WM_OT_operator_defaults);
   WM_operatortype_append(WM_OT_splash);
   WM_operatortype_append(WM_OT_splash_about);
+  WM_operatortype_append(WM_OT_test_build_warning);
   WM_operatortype_append(WM_OT_search_menu);
   WM_operatortype_append(WM_OT_search_operator);
   WM_operatortype_append(WM_OT_search_single_menu);

@@ -315,6 +315,10 @@ struct PanelCategoryDyn {
   struct PanelCategoryDyn *next = nullptr, *prev = nullptr;
   char idname[64] = "";
   int icon = 0;
+  /* Screen-space rect of the category tab, populated on draw from the tab layout
+   * button geometry. Kept as a compatibility bridge for tooltip and mouse-over code
+   * after the panel category tabs were refactored to use layout buttons. */
+  rcti rect = {};
 };
 
 /** Region stack of active tabs. */
@@ -699,8 +703,12 @@ enum eRegion_Type : short {
   RGN_TYPE_ASSET_SHELF = 14,
   RGN_TYPE_ASSET_SHELF_HEADER = 15,
   RGN_TYPE_SCRUBBING = 16,
+  /* Horizontal tag bar for category filtering in upper-right corner.
+   * Values 16-19 are intentionally left reserved for upstream region types, so this feature's
+   * region keeps a stable value of 20 and avoids clashing with new core region types. */
+  RGN_TYPE_TAG_BAR = 20,
 
-#define RGN_TYPE_NUM (RGN_TYPE_SCRUBBING + 1)
+#define RGN_TYPE_NUM (RGN_TYPE_TAG_BAR + 1)
 };
 
 /** Use for function args. */

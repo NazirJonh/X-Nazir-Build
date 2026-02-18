@@ -750,7 +750,9 @@ struct XrNavigation {
 struct UserDef_Runtime {
   /** Mark as changed so the preferences are saved on exit. */
   char is_dirty = 0;
-  char _pad0[7] = {};
+  /** Set to 1 after the test-build warning popup has been shown once. */
+  char test_build_warning_shown = 0;
+  char _pad0[6] = {};
 };
 
 /* Toggles for unfinished 2.8 UserPref design. */
@@ -780,6 +782,8 @@ enum eUserPref_Section : char {
   USER_SECTION_EXTENSIONS = 17,
   USER_SECTION_DEVELOPER_TOOLS = 18,
   USER_SECTION_ASSETS = 19,
+  USER_SECTION_TAGS = 20,
+  USER_SECTION_BUILD_FEATURES = 21,
 };
 
 /** #UserDef_SpaceData.flag (State of the user preferences UI). */
@@ -864,6 +868,26 @@ struct UserDef_Experimental {
   (((userdef)->flag & USER_DEVELOPER_UI) && ((userdef)->experimental).member)
 
 /**
+ * Custom build features - experimental options specific to this build.
+ * These are always available (not sanitized in release builds).
+ */
+struct UserDef_BuildFeatures {
+  /* Add your custom build feature flags here. */
+  char use_enhanced_paint_system = 0;
+  char use_custom_feature_2 = 0;
+  char use_custom_feature_3 = 0;
+  char _pad[5] = {};
+};
+
+#define USER_BUILD_FEATURE_TEST(userdef, member) (((userdef)->build_features).member)
+
+/**
+ * Check if enhanced paint system is enabled.
+ * Use this to guard all Speed Paint integration code.
+ */
+#define USE_ENHANCED_PAINT_SYSTEM() USER_BUILD_FEATURE_TEST(&U, use_enhanced_paint_system)
+
+/**
  * Container to store multiple directory paths and a name for each as a #ListBase.
  */
 struct bUserScriptDirectory {
@@ -887,6 +911,32 @@ struct bUserAssetShelfSettings {
 
   ListBaseT<AssetCatalogPathLink> enabled_catalog_paths = {nullptr, nullptr};
 };
+
+/** Category tabs display mode for #UserDef.category_tabs_display_mode. */
+typedef enum eUserPref_CategoryTabsDisplayMode {
+  /** Show only glyphs (icons). */
+  USER_CATEGORY_TABS_GLYPHS_ONLY = 0,
+  /** Show glyphs and text. */
+  USER_CATEGORY_TABS_GLYPHS_TEXT = 1,
+  /** Show only text. */
+  USER_CATEGORY_TABS_TEXT_ONLY = 2,
+} eUserPref_CategoryTabsDisplayMode;
+
+/** Category tabs inactive behavior for #UserDef.category_tabs_inactive_behavior. */
+typedef enum eUserPref_CategoryTabsInactiveBehavior {
+  /** Default behavior - inactive tabs render normally. */
+  USER_CATEGORY_TABS_INACTIVE_DEFAULT = 0,
+  /** Sticky tab - inactive tab keeps its size when becoming inactive. */
+  USER_CATEGORY_TABS_INACTIVE_STICKY = 1,
+} eUserPref_CategoryTabsInactiveBehavior;
+
+/** Category tabs shape for #UserDef.category_tabs_shape. */
+typedef enum eUserPref_CategoryTabsShape {
+  /** Box shape - square tabs. */
+  USER_CATEGORY_TABS_SHAPE_BOX = 0,
+  /** Capsule shape - elongated tabs. */
+  USER_CATEGORY_TABS_SHAPE_CAPSULE = 1,
+} eUserPref_CategoryTabsShape;
 
 /**
  * Main user preferences data, typically accessed from #U.
@@ -981,6 +1031,49 @@ struct UserDef {
 
   /** Setting for UI scale (fractional), before screen DPI has been applied. */
   float ui_scale = 1.0;
+  /** Zoom scale for category tabs in Icon mode (1.0 = default size). */
+  float category_tabs_zoom_icon = 1.0f;
+  /** Zoom scale for category tabs in Mixed mode (1.0 = default size). */
+  float category_tabs_zoom_mixed = 1.0f;
+  /** Zoom scale for category tabs in Text mode (1.0 = default size). */
+  float category_tabs_zoom_text = 1.0f;
+  /** Display mode for category tabs. */
+  char category_tabs_display_mode = USER_CATEGORY_TABS_GLYPHS_TEXT;
+  /** Behavior for inactive tabs in Icon mode. */
+  char category_tabs_inactive_behavior = USER_CATEGORY_TABS_INACTIVE_DEFAULT;
+  /** Shape for tabs in Icon mode. */
+  char category_tabs_shape = USER_CATEGORY_TABS_SHAPE_CAPSULE;
+  /** Show category name for active tab in Icon mode. */
+  char category_tabs_show_active_name = false;
+  /** Show tooltips when dragging tabs in Icon mode. */
+  char category_tabs_show_drag_tooltips = true;
+  /** Lock editing of category tab data (name, glyph, color). When true, editing is disabled. */
+  char category_tabs_lock_edit = false;
+  /** Show color indicator bar in Text mode for categories with custom glyph colors. */
+  char category_tabs_text_mode_show_color_indicator = false;
+  /** Show colored text in Text mode for categories with custom glyph colors. */
+  char category_tabs_text_mode_show_colored_text = false;
+  /** In Mixed/Text modes, show only glyphs for inactive reserved categories. */
+  char category_tabs_hide_reserved_inactive_text = false;
+
+  /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS (optional per-type visibility in Mixed mode) --- */
+  /** In Mixed mode, show custom glyphs for categories. */
+  char category_tabs_mixed_show_glyphs = true;
+  /** In Mixed mode, show first letter fallback for categories without custom glyph. */
+  char category_tabs_mixed_show_first_letter = true;
+  /** In Mixed mode, show resolved icons for categories. */
+  char category_tabs_mixed_show_icons = true;
+  /* --- END: MIXED_MODE_CONTENT_FLAGS --- */
+
+  /** Visual effect (scale on hover/active) for category tabs in Icon mode. */
+  char category_tabs_visual_effect = true;
+  /** Visual outline effect for active tab. */
+  char category_tabs_visual_outline = false;
+  char _pad7[2] = {};
+  /** Custom color for visual outline effect (RGBA). */
+  unsigned char category_tabs_visual_outline_color[4] = {92, 92, 92, 255};
+  /** Default directory used by the "Pick Custom Icon File" browser for category tabs. */
+  char category_tabs_custom_icon_dir[/*FILE_MAXDIR*/ 768] = "";
   /**
    * Setting for UI line width.
    *
@@ -1263,6 +1356,9 @@ struct UserDef {
   UserDef_TempWinBounds stored_bounds;
 
   UserDef_Experimental experimental;
+
+  /** Custom build features - always available. */
+  UserDef_BuildFeatures build_features;
 
   /** Runtime data (keep last). */
   UserDef_Runtime runtime;

@@ -27,6 +27,14 @@ class STATUSBAR_HT_header(Header):
         row = layout.row()
         row.alignment = 'RIGHT'
 
+        # Custom status data - Experimental build indicator
+        row.alert = True
+        row.label(text="Experimental build by Nazir Galimov")
+        row.alert = False
+
+        # About Build popover button
+        row.popover(panel="STATUSBAR_PT_experimental_build", text="About Build", icon='INFO')
+
         # Stats & Info
         layout.template_status_info()
 

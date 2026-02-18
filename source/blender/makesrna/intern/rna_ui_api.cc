@@ -536,23 +536,21 @@ static void rna_uiItemL(Layout *layout,
   layout->label(text.value_or(""), icon);
 }
 
-static void rna_layout_link(Layout *layout,
-                            const char *url,
-                            const char *name,
-                            const char *text_ctxt,
-                            bool translate,
-                            int icon,
-                            int icon_value)
+static void rna_uiItemL_colored(Layout *layout,
+                                const char *name,
+                                const char *text_ctxt,
+                                bool translate,
+                                int icon,
+                                float color_r,
+                                float color_g,
+                                float color_b)
 {
   /* Get translated name (label). */
   std::optional<StringRefNull> text = rna_translate_ui_text(
       name, text_ctxt, nullptr, nullptr, translate);
 
-  if (icon_value && !icon) {
-    icon = icon_value;
-  }
-
-  layout->link(url, text.value_or(""), icon);
+  float color[3] = {color_r, color_g, color_b};
+  uiItemL_colored(layout, text.value_or(""), icon, color);
 }
 
 static void rna_uiItemM(Layout *layout,
@@ -801,19 +799,19 @@ void rna_template_list(Layout *layout,
     flags |= ui::TEMPLATE_LIST_SORT_LOCK;
   }
 
-  ui::template_uilist(layout,
-                      C,
-                      listtype_name,
-                      list_id,
-                      dataptr,
-                      propname,
-                      active_dataptr,
-                      active_propname,
-                      item_dyntip_propname,
-                      rows,
-                      maxrows,
-                      layout_type,
-                      flags);
+  ui::template_list(layout,
+                    C,
+                    listtype_name,
+                    list_id,
+                    dataptr,
+                    propname,
+                    active_dataptr,
+                    active_propname,
+                    item_dyntip_propname,
+                    rows,
+                    maxrows,
+                    layout_type,
+                    flags);
 }
 
 static void rna_template_cache_file(Layout *layout,
@@ -855,17 +853,17 @@ static void rna_template_cache_file_time_settings(Layout *layout,
   ui::template_cache_file_time_settings(layout, &fileptr);
 }
 
-static void rna_template_uilist_flags(Layout *layout,
-                                      bContext *C,
-                                      PointerRNA *ptr,
-                                      const char *propname)
+static void rna_template_list_flags(Layout *layout,
+                                    bContext *C,
+                                    PointerRNA *ptr,
+                                    const char *propname)
 {
   PointerRNA fileptr;
   if (!ui::template_cache_file_pointer(ptr, propname, &fileptr)) {
     return;
   }
 
-  ui::template_uilist_flags(layout, C, &fileptr);
+  ui::template_list_flags(layout, C, &fileptr);
 }
 
 static void rna_uiTemplatePathBuilder(Layout *layout,
@@ -1683,18 +1681,13 @@ void RNA_api_ui_layout(StructRNA *srna)
   parm = RNA_def_property(func, "icon_value", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_ui_text(parm, "Icon Value", "Override automatic icon of the item");
 
-  func = RNA_def_function(srna, "link", "rna_layout_link");
-  RNA_def_function_ui_description(func, "Item. Displays a url that can be clicked in the layout.");
-  prop = RNA_def_string(func, "url", nullptr, 0, "", "");
-  RNA_def_property_flag(prop, PROP_NEVER_NULL);
-  prop = RNA_def_string(func, "text", nullptr, 0, "", "Override automatic text of the item");
-  RNA_def_property_clear_flag(prop, PROP_NEVER_NULL);
-  api_ui_item_common_translation(func);
-  prop = RNA_def_property(func, "icon", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_icon_items);
-  RNA_def_property_ui_text(prop, "Icon", "Override automatic icon of the item");
-  parm = RNA_def_property(func, "icon_value", PROP_INT, PROP_UNSIGNED);
-  RNA_def_property_ui_text(parm, "Icon Value", "Override automatic icon of the item");
+  func = RNA_def_function(srna, "colored_label", "rna_uiItemL_colored");
+  RNA_def_function_ui_description(
+      func, "Item. Displays text with a custom color (RGB 0.0-1.0) and/or icon in the layout.");
+  api_ui_item_common(func);
+  parm = RNA_def_float(func, "color_r", 0.0f, 0.0f, 1.0f, "Red", "Red component (0.0-1.0)", 0.0f, 1.0f);
+  parm = RNA_def_float(func, "color_g", 0.0f, 0.0f, 1.0f, "Green", "Green component (0.0-1.0)", 0.0f, 1.0f);
+  parm = RNA_def_float(func, "color_b", 0.0f, 0.0f, 1.0f, "Blue", "Blue component (0.0-1.0)", 0.0f, 1.0f);
 
   func = RNA_def_function(srna, "menu", "rna_uiItemM");
   parm = RNA_def_string(func, "menu", nullptr, 0, "", "Identifier of the menu");
@@ -2403,7 +2396,7 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_function_ui_description(func, "Show cache files time settings");
   api_ui_item_rna_common(func);
 
-  func = RNA_def_function(srna, "template_cache_file_layers", "rna_template_uilist_flags");
+  func = RNA_def_function(srna, "template_cache_file_layers", "rna_template_list_flags");
   RNA_def_function_ui_description(func, "Show cache files override layers properties");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   api_ui_item_rna_common(func);

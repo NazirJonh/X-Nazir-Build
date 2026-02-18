@@ -104,6 +104,75 @@ enum {
   (WM_OUTLINER_SYNC_SELECT_FROM_OBJECT | WM_OUTLINER_SYNC_SELECT_FROM_EDIT_BONE | \
    WM_OUTLINER_SYNC_SELECT_FROM_POSE_BONE | WM_OUTLINER_SYNC_SELECT_FROM_SEQUENCE)
 
+/* -------------------------------------------------------------------- */
+/** \name Category Glyph Mappings
+ * \{ */
+
+/**
+ * Stores a mapping from category name to glyph character.
+ * Used for default mappings and user overrides.
+ */
+typedef struct CategoryGlyphItem {
+  struct CategoryGlyphItem *next, *prev;
+  /** Category name (e.g., "Item", "View"). */
+  char category[64];
+  /** UTF-8 glyph character from Material Symbols font. */
+  char glyph[8];
+  /** Custom color for glyph (RGB 0.0-1.0), {0,0,0} = use theme color. */
+  float color[3];
+  /** User-defined display name for category (empty = use category). */
+  char display_name[32];
+  /** Default glyph for reset functionality. */
+  char default_glyph[8];
+  /** Default display name for reset functionality. */
+  char default_display_name[32];
+  /** Tags assigned to this category (semicolon-separated). Synced from Python for UI display only. */
+  char tags[256];
+  char _pad[4];
+} CategoryGlyphItem;
+
+/**
+ * Tag definition for category tabs.
+ * Stored in wmWindowManager.category_tags.
+ */
+typedef struct CategoryTagDef {
+  struct CategoryTagDef *next, *prev;
+  /** Tag name. */
+  char name[32];
+  /** Tag glyph (single UTF-8 character). */
+  char glyph[8];
+  /** Tag color (RGB 0.0-1.0). */
+  float color[3];
+  /** Mode flags for tag filtering. */
+  uint32_t mode_flags;
+  char _pad0[8];
+} CategoryTagDef;
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tag Mode Flags
+ * \{ */
+
+/**
+ * Mode flags for category tag filtering.
+ * Used to show/hide tags based on the current object mode.
+ */
+enum class CategoryTagMode : uint32_t {
+  NONE = 0,
+  OBJECT_MODE = (1 << 0),
+  EDIT_MODE = (1 << 1),
+  SCULPT_MODE = (1 << 2),
+  VERTEX_PAINT = (1 << 3),
+  WEIGHT_PAINT = (1 << 4),
+  TEXTURE_PAINT = (1 << 5),
+  UV_EDIT = (1 << 6),
+  POSE_MODE = (1 << 7),
+  ALL = 0xFFFFFFFF
+};
+
+/** \} */
+
+/** \} */
+
 /** Window-manager is saved, tag WMAN. */
 struct wmWindowManager {
 #ifdef __cplusplus
@@ -115,6 +184,16 @@ struct wmWindowManager {
 
   ListBaseT<wmWindow> windows = {nullptr, nullptr};
 
+  /** Default glyph mappings for category tabs (auto-filled on startup). */
+  ListBase category_glyph_mappings = {nullptr, nullptr};
+  /** User-defined glyph overrides for category tabs. */
+  ListBase category_glyph_overrides = {nullptr, nullptr};
+  /** Tag definitions for category tabs (stored in wm.category_tags). */
+  ListBase category_tags = {nullptr, nullptr};
+
+  /** Temporary storage for category name during dialog save (UTF-8 safe via RNA). */
+  char category_tab_save_category[64] = {};
+
   /** Set on file read. */
   uint8_t init_flag = 0;
   char _pad0[1] = {};
@@ -125,11 +204,20 @@ struct wmWindowManager {
 
   /** Set after selection to notify outliner to sync. Stores type of selection */
   short outliner_sync_select_dirty = 0;
+  /** Active index for category tags UI list. */
+  int category_tags_active_index = 0;
+
+  /** Filter settings for category tags in popup. */
+  char category_tag_filter_show_all_modes = 0;
+  char category_tag_filter_current_mode = 0;
+  char _pad3[6] = {};
 
   /** Available/pending extensions updates. */
   int extensions_updates = 0;
   /** Number of blocked & installed extensions. */
   int extensions_blocked = 0;
+
+  char _pad1[4] = {};
 
   /** Timer for auto save. */
   struct wmTimer *autosavetimer = nullptr;

@@ -38,12 +38,19 @@
 #  include "BLI_string_utf8.h"
 
 #  include "BKE_keyconfig.h"
+#  include "BKE_report.hh"
+
+#  include "MEM_guardedalloc.h"
 #  include "BKE_main.hh"
 #  include "BKE_report.hh"
 #  include "BKE_wm_runtime.hh"
 #  include "BKE_workspace.hh"
 
 #  include "wm_event_system.hh"
+
+#  ifdef WITH_PYTHON
+#    include "BPY_extern_run.hh"
+#  endif
 
 namespace blender {
 
@@ -656,9 +663,222 @@ const EnumPropertyItem rna_enum_wm_report_items[] = {
 
 #  ifdef WITH_PYTHON
 #    include "BPY_extern.hh"
+#    include "BPY_extern_run.hh"
 #  endif
 
 namespace blender {
+
+/* Forward declarations for category glyph callbacks. */
+static CategoryGlyphItem *rna_wm_category_glyph_mapping_new(wmWindowManager *wm, const char *category);
+static void rna_wm_category_glyph_mapping_remove(wmWindowManager *wm, ReportList *reports, PointerRNA *item_ptr);
+static void rna_wm_category_glyph_mapping_clear(wmWindowManager *wm);
+static CategoryGlyphItem *rna_wm_category_glyph_override_new(wmWindowManager *wm, const char *category);
+static void rna_wm_category_glyph_override_remove(wmWindowManager *wm, ReportList *reports, PointerRNA *item_ptr);
+static void rna_wm_category_glyph_override_clear(wmWindowManager *wm);
+static CategoryTagDef *rna_wm_category_tag_def_new(wmWindowManager *wm, const char *name);
+static void rna_wm_category_tag_def_remove(wmWindowManager *wm, ReportList *reports, PointerRNA *item_ptr);
+static void rna_wm_category_tag_def_clear(wmWindowManager *wm);
+
+/* Callback functions for category_glyph_mappings collection. */
+static CategoryGlyphItem *rna_wm_category_glyph_mapping_new(wmWindowManager *wm, const char *category)
+{
+  CategoryGlyphItem *item = MEM_new_zeroed<CategoryGlyphItem>(__func__);
+  if (category) {
+    STRNCPY(item->category, category);
+  }
+  BLI_addtail(&wm->category_glyph_mappings, item);
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  return item;
+}
+
+static void rna_wm_category_glyph_mapping_remove(wmWindowManager *wm,
+                                                   ReportList *reports,
+                                                   PointerRNA *item_ptr)
+{
+  CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(item_ptr->data);
+
+  if (BLI_findindex(&wm->category_glyph_mappings, item) == -1) {
+    BKE_report(reports, RPT_ERROR, "Category glyph mapping not found");
+    return;
+  }
+
+  BLI_freelinkN(&wm->category_glyph_mappings, item);
+  item_ptr->invalidate();
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+static void rna_wm_category_glyph_mapping_clear(wmWindowManager *wm)
+{
+  /* After file read, the list may contain garbage pointers from the old file's memory space.
+   * We need to safely handle both cases:
+   * 1. Valid list with properly allocated items (from runtime operations)
+   * 2. Invalid list with garbage pointers (from file read)
+   *
+   * Check if the list appears valid by verifying the first item's prev pointer is null
+   * (as it should be for the first item in a proper linked list). */
+  if (wm->category_glyph_mappings.first != nullptr) {
+    CategoryGlyphItem *first = static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+
+    /* Check for obviously invalid pointers that indicate corruption from file read:
+     * - prev should be NULL for the first item
+     * - next should not be obviously invalid values like -1 or small numbers
+     * - The pointer itself should be within reasonable memory range
+     */
+    bool list_appears_valid = false;
+
+    if (first->prev == nullptr) {
+      /* First item's prev is correctly null, check next pointer */
+      if (first->next == nullptr) {
+        /* Single item list, this is valid */
+        list_appears_valid = true;
+      }
+      else if (first->next != reinterpret_cast<void *>(static_cast<intptr_t>(-1)) &&
+               first->next != reinterpret_cast<void *>(static_cast<intptr_t>(0x1)) &&
+               reinterpret_cast<uintptr_t>(first->next) > 0x10000)
+      {
+        /* Next pointer appears to be a valid address */
+        list_appears_valid = true;
+      }
+    }
+
+    if (list_appears_valid) {
+      /* List appears valid, free items properly. */
+      BLI_freelistN(&wm->category_glyph_mappings);
+    }
+    else {
+      /* List is corrupted, just clear the pointers without freeing. */
+      BLI_listbase_clear(&wm->category_glyph_mappings);
+    }
+  }
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+/* Callback functions for category_glyph_overrides collection. */
+static CategoryGlyphItem *rna_wm_category_glyph_override_new(wmWindowManager *wm, const char *category)
+{
+  CategoryGlyphItem *item = MEM_new_zeroed<CategoryGlyphItem>(__func__);
+  if (category) {
+    STRNCPY(item->category, category);
+  }
+  BLI_addtail(&wm->category_glyph_overrides, item);
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  return item;
+}
+
+static void rna_wm_category_glyph_override_remove(wmWindowManager *wm,
+                                                    ReportList *reports,
+                                                    PointerRNA *item_ptr)
+{
+  CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(item_ptr->data);
+
+  if (BLI_findindex(&wm->category_glyph_overrides, item) == -1) {
+    BKE_report(reports, RPT_ERROR, "Category glyph override not found");
+    return;
+  }
+
+  BLI_freelinkN(&wm->category_glyph_overrides, item);
+  item_ptr->invalidate();
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+static void rna_wm_category_glyph_override_clear(wmWindowManager *wm)
+{
+  /* After file read, the list may contain garbage pointers from the old file's memory space.
+   * We need to safely handle both cases:
+   * 1. Valid list with properly allocated items (from runtime operations)
+   * 2. Invalid list with garbage pointers (from file read)
+   *
+   * Check if the list appears valid by verifying the first item's prev pointer is null
+   * (as it should be for the first item in a proper linked list). */
+  if (wm->category_glyph_overrides.first != nullptr) {
+    CategoryGlyphItem *first = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+
+    /* Check for obviously invalid pointers that indicate corruption from file read:
+     * - prev should be NULL for the first item
+     * - next should not be obviously invalid values like -1 or small numbers
+     * - The pointer itself should be within reasonable memory range
+     */
+    bool list_appears_valid = false;
+
+    if (first->prev == nullptr) {
+      /* First item's prev is correctly null, check next pointer */
+      if (first->next == nullptr) {
+        /* Single item list, this is valid */
+        list_appears_valid = true;
+      }
+      else if (first->next != reinterpret_cast<void *>(static_cast<intptr_t>(-1)) &&
+               first->next != reinterpret_cast<void *>(static_cast<intptr_t>(0x1)) &&
+               reinterpret_cast<uintptr_t>(first->next) > 0x10000)
+      {
+        /* Next pointer appears to be a valid address */
+        list_appears_valid = true;
+      }
+    }
+
+    if (list_appears_valid) {
+      /* List appears valid, free items properly. */
+      BLI_freelistN(&wm->category_glyph_overrides);
+    }
+    else {
+      /* List is corrupted, just clear the pointers without freeing. */
+      BLI_listbase_clear(&wm->category_glyph_overrides);
+    }
+  }
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+static CategoryTagDef *rna_wm_category_tag_def_new(wmWindowManager *wm, const char *name)
+{
+  CategoryTagDef *item = MEM_new_zeroed<CategoryTagDef>(__func__);
+  if (name) {
+    STRNCPY(item->name, name);
+  }
+  BLI_addtail(&wm->category_tags, item);
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  return item;
+}
+
+static void rna_wm_category_tag_def_remove(wmWindowManager *wm, ReportList *reports, PointerRNA *item_ptr)
+{
+  CategoryTagDef *item = static_cast<CategoryTagDef *>(item_ptr->data);
+
+  if (BLI_findindex(&wm->category_tags, item) == -1) {
+    BKE_report(reports, RPT_ERROR, "Category tag not found");
+    return;
+  }
+
+  BLI_freelinkN(&wm->category_tags, item);
+  item_ptr->invalidate();
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+static void rna_wm_category_tag_def_clear(wmWindowManager *wm)
+{
+  if (wm->category_tags.first != nullptr) {
+    CategoryTagDef *first = static_cast<CategoryTagDef *>(wm->category_tags.first);
+
+    bool list_appears_valid = false;
+    if (first->prev == nullptr) {
+      if (first->next == nullptr) {
+        list_appears_valid = true;
+      }
+      else if (first->next != reinterpret_cast<void *>(static_cast<intptr_t>(-1)) &&
+               first->next != reinterpret_cast<void *>(static_cast<intptr_t>(0x1)) &&
+               reinterpret_cast<uintptr_t>(first->next) > 0x10000)
+      {
+        list_appears_valid = true;
+      }
+    }
+
+    if (list_appears_valid) {
+      BLI_freelistN(&wm->category_tags);
+    }
+    else {
+      BLI_listbase_clear(&wm->category_tags);
+    }
+  }
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
 
 static wmOperator *rna_OperatorProperties_find_operator(PointerRNA *ptr)
 {
@@ -2173,6 +2393,20 @@ static void rna_KeyMapItem_update(Main * /*bmain*/, Scene * /*scene*/, PointerRN
   WM_keyconfig_update_tag(nullptr, kmi);
 }
 
+/* Update callback for CategoryTagDef properties - saves to JSON on change. */
+static void rna_CategoryTagDef_update(bContext *C, PointerRNA * /*ptr*/)
+{
+#  ifdef WITH_PYTHON
+  const char *imports[] = {"bpy", nullptr};
+  const char *save_cmd =
+      "from bl_ui.space_userpref import sync_wm_to_glyph_cache\n"
+      "sync_wm_to_glyph_cache()\n";
+  BPY_run_string_exec(C, imports, save_cmd);
+#  else
+  (void)C;
+#  endif
+}
+
 }  // namespace blender
 
 #else /* RNA_RUNTIME */
@@ -2929,31 +3163,175 @@ static void rna_def_wm_keyconfigs(BlenderRNA *brna, PropertyRNA *cprop)
   RNA_api_keyconfigs(srna);
 }
 
-static void rna_def_report(BlenderRNA *brna)
+static void rna_def_category_glyph_item(BlenderRNA *brna)
 {
   StructRNA *srna;
   PropertyRNA *prop;
 
-  srna = RNA_def_struct(brna, "Report", nullptr);
-  RNA_def_struct_sdna(srna, "Report");
-  RNA_def_struct_ui_text(srna, "Report", "Report entry");
+  srna = RNA_def_struct(brna, "CategoryGlyphItem", nullptr);
+  RNA_def_struct_ui_text(srna, "Category Glyph Item", "Mapping from category name to glyph");
 
-  prop = RNA_def_property(srna, "session_uid", PROP_INT, PROP_NONE);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_int_funcs(prop, "rna_Report_session_uid_get", nullptr, nullptr);
-  RNA_def_property_ui_text(prop, "Session UID", "Unique per-session report identifier");
+  prop = RNA_def_property(srna, "category", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "category");
+  RNA_def_property_ui_text(prop, "Category", "Category name");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
 
-  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_enum_items(prop, rna_enum_wm_report_items);
-  RNA_def_property_enum_funcs(prop, "rna_Report_type_get", nullptr, nullptr);
-  RNA_def_property_ui_text(prop, "Type", "Report type (severity)");
+  prop = RNA_def_property(srna, "glyph", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "glyph");
+  RNA_def_property_ui_text(prop, "Glyph", "UTF-8 glyph character from Material Symbols");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
 
-  prop = RNA_def_property(srna, "message", PROP_STRING, PROP_NONE);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_string_funcs(
-      prop, "rna_Report_message_get", "rna_Report_message_length", nullptr);
-  RNA_def_property_ui_text(prop, "Message", "Report message text");
+  prop = RNA_def_property(srna, "display_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "display_name");
+  RNA_def_property_ui_text(prop, "Display Name", "Custom display name for the category tab");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_float_default(prop, 0.0f);
+  RNA_def_property_ui_text(prop, "Color", "Custom glyph color (black = use theme color)");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "default_glyph", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "default_glyph");
+  RNA_def_property_ui_text(prop, "Default Glyph", "Default glyph for reset functionality");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "default_display_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "default_display_name");
+  RNA_def_property_ui_text(prop, "Default Display Name", "Default display name for reset functionality");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "tags", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "tags");
+  RNA_def_property_ui_text(prop, "Tags", "Semicolon-separated tag names (synced from Python for UI display)");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+}
+
+static void rna_def_category_tag_def(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "CategoryTagDef", nullptr);
+  RNA_def_struct_ui_text(srna, "Category Tag", "Tag definition for category tabs");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_property_ui_text(prop, "Name", "Tag name");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
+
+  prop = RNA_def_property(srna, "glyph", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "glyph");
+  RNA_def_property_ui_text(prop, "Glyph", "UTF-8 glyph character or hex code-point");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
+
+  prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_float_default(prop, 0.0f);
+  RNA_def_property_ui_text(prop, "Color", "Tag color (black = use theme color)");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
+
+  /* Mode flags for filtering */
+  prop = RNA_def_property(srna, "mode_flags", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "mode_flags");
+  RNA_def_property_ui_text(prop, "Mode Flags", "Bitmask of modes where this tag is active (0 = all modes)");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
+}
+
+static void rna_def_category_glyph_mappings(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "CategoryGlyphMappingCollection");
+  srna = RNA_def_struct(brna, "CategoryGlyphMappingCollection", nullptr);
+  RNA_def_struct_sdna(srna, "wmWindowManager");
+  RNA_def_struct_ui_text(srna, "Category Glyph Mappings", "Collection of category glyph mappings");
+
+  func = RNA_def_function(srna, "new", "rna_wm_category_glyph_mapping_new");
+  RNA_def_function_ui_description(func, "Add a new glyph mapping");
+  RNA_def_string(func, "category", nullptr, sizeof(CategoryGlyphItem::category), "Category", "Category name");
+  /* return type */
+  parm = RNA_def_pointer(func, "item", "CategoryGlyphItem", "", "Newly added mapping");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_wm_category_glyph_mapping_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove a glyph mapping");
+  parm = RNA_def_pointer(func, "item", "CategoryGlyphItem", "", "Mapping to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "clear", "rna_wm_category_glyph_mapping_clear");
+  RNA_def_function_ui_description(func, "Remove all glyph mappings");
+}
+
+static void rna_def_category_tag_defs(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "CategoryTagDefCollection");
+  srna = RNA_def_struct(brna, "CategoryTagDefCollection", nullptr);
+  RNA_def_struct_sdna(srna, "wmWindowManager");
+  RNA_def_struct_ui_text(srna, "Category Tags", "Collection of category tag definitions");
+
+  func = RNA_def_function(srna, "new", "rna_wm_category_tag_def_new");
+  RNA_def_function_ui_description(func, "Add a new category tag");
+  RNA_def_string(func, "name", nullptr, sizeof(CategoryTagDef::name), "Name", "Tag name");
+  parm = RNA_def_pointer(func, "item", "CategoryTagDef", "", "Newly added tag");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_wm_category_tag_def_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove a category tag");
+  parm = RNA_def_pointer(func, "item", "CategoryTagDef", "", "Tag to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "clear", "rna_wm_category_tag_def_clear");
+  RNA_def_function_ui_description(func, "Remove all category tags");
+}
+
+static void rna_def_category_glyph_overrides(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "CategoryGlyphOverrideCollection");
+  srna = RNA_def_struct(brna, "CategoryGlyphOverrideCollection", nullptr);
+  RNA_def_struct_sdna(srna, "wmWindowManager");
+  RNA_def_struct_ui_text(srna, "Category Glyph Overrides", "Collection of user category glyph overrides");
+
+  func = RNA_def_function(srna, "new", "rna_wm_category_glyph_override_new");
+  RNA_def_function_ui_description(func, "Add a new glyph override");
+  RNA_def_string(func, "category", nullptr, sizeof(CategoryGlyphItem::category), "Category", "Category name");
+  /* return type */
+  parm = RNA_def_pointer(func, "item", "CategoryGlyphItem", "", "Newly added override");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_wm_category_glyph_override_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove a glyph override");
+  parm = RNA_def_pointer(func, "item", "CategoryGlyphItem", "", "Override to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "clear", "rna_wm_category_glyph_override_clear");
+  RNA_def_function_ui_description(func, "Remove all glyph overrides");
+>>>>>>> 84e5ccdb079 (Refactor category tab drawing logic to handle single glyphs and improve text positioning)
 }
 
 static void rna_def_windowmanager(BlenderRNA *brna)
@@ -3013,6 +3391,47 @@ static void rna_def_windowmanager(BlenderRNA *brna)
                                     nullptr);
   RNA_def_property_ui_text(prop, "Key Configurations", "Registered key configurations");
   rna_def_wm_keyconfigs(brna, prop);
+
+  prop = RNA_def_property(srna, "category_glyph_mappings", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "category_glyph_mappings", nullptr);
+  RNA_def_property_struct_type(prop, "CategoryGlyphItem");
+  RNA_def_property_ui_text(prop, "Category Glyph Mappings", "Default glyph mappings for category tabs");
+  rna_def_category_glyph_mappings(brna, prop);
+
+  prop = RNA_def_property(srna, "category_glyph_overrides", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "category_glyph_overrides", nullptr);
+  RNA_def_property_struct_type(prop, "CategoryGlyphItem");
+  RNA_def_property_ui_text(prop, "Category Glyph Overrides", "User-defined glyph overrides for category tabs");
+  rna_def_category_glyph_overrides(brna, prop);
+
+  prop = RNA_def_property(srna, "category_tags", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "category_tags", nullptr);
+  RNA_def_property_struct_type(prop, "CategoryTagDef");
+  RNA_def_property_ui_text(prop, "Category Tags", "Tag definitions for category tabs");
+  rna_def_category_tag_defs(brna, prop);
+
+  prop = RNA_def_property(srna, "category_tags_active_index", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "category_tags_active_index");
+  RNA_def_property_ui_text(prop, "Active Tag", "Index of the active tag in the list");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "category_tag_filter_show_all_modes", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tag_filter_show_all_modes", 1);
+  RNA_def_property_ui_text(
+      prop, "Show All Modes", "Show tags for all modes in the category tab popup");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "category_tag_filter_current_mode", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tag_filter_current_mode", 1);
+  RNA_def_property_ui_text(
+      prop, "Show Current Mode", "Show tags for the current mode in the category tab popup");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "category_tab_save_category", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "category_tab_save_category");
+  RNA_def_property_ui_text(
+      prop, "Category Tab Save Category", "Temporary storage for category name during save dialog");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "xr_session_settings", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "xr.session_settings");
@@ -3429,7 +3848,8 @@ void RNA_def_wm(BlenderRNA *brna)
   rna_def_popovermenu(brna);
   rna_def_piemenu(brna);
   rna_def_window(brna);
-  rna_def_report(brna);
+  rna_def_category_glyph_item(brna);
+  rna_def_category_tag_def(brna);
   rna_def_windowmanager(brna);
   rna_def_keyconfig_prefs(brna);
   rna_def_keyconfig(brna);

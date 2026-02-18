@@ -3034,6 +3034,8 @@ void operatortypes_ui()
   WM_operatortype_append(UI_OT_view_item_select);
   WM_operatortype_append(UI_OT_view_item_delete);
 
+  WM_operatortype_append(UI_OT_category_tab_drag);
+
   WM_operatortype_append(UI_OT_override_add_button);
   WM_operatortype_append(UI_OT_override_remove_button);
   WM_operatortype_append(UI_OT_override_idtemplate_make);

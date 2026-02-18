@@ -2283,9 +2283,33 @@ void panel_category_index_active_set(ARegion *region, const int index);
 void panel_category_active_set_default(ARegion *region, const char *idname);
 void panel_category_clear_all(ARegion *region);
 /**
+ * Ensure the active category is visible. If not, switch to the first visible category.
+ */
+void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *region);
+/**
  * Draw vertical tabs on the left side of the region, one tab per category.
  */
-void panel_category_tabs_draw_all(ARegion *region, const char *category_id_active);
+void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char *category_id_active);
+
+/**
+ * Check if mouse is over a category tab and return true if so.
+ */
+bool panel_category_is_mouse_over(ARegion *region, const wmEvent *event);
+
+/**
+ * Check if the mouse is over the category tabs settings button.
+ */
+bool panel_category_tabs_settings_contains(ARegion *region, const int mval[2]);
+
+/**
+ * Open the category tabs settings popup dialog.
+ */
+void panel_category_tabs_settings_popover_open(bContext *C, ARegion *region);
+
+/**
+ * Initialize tooltip timer for category tabs.
+ */
+void panel_category_tooltip_timer_init(bContext *C, ARegion *region);
 
 void panel_stop_animation(const bContext *C, Panel *panel);
 
@@ -2340,6 +2364,7 @@ bool panel_list_matches_data(ARegion *region,
  * as screen/ if ED_KEYMAP_UI is set, or internally in popup functions. */
 
 void region_handlers_add(ListBaseT<wmEventHandler> *handlers);
+void screen_category_tabs_hover_handler_add(ListBaseT<wmEventHandler> *handlers);
 void popup_handlers_add(bContext *C,
                         ListBaseT<wmEventHandler> *handlers,
                         PopupBlockHandle *popup,
@@ -2661,6 +2686,38 @@ void uiTemplateMenuSearch(Layout *layout);
  */
 void uiTemplateOperatorPropertyButs(
     const bContext *C, Layout *layout, wmOperator *op, eButLabelAlign label_align, short flag);
+
+/**
+ * Lookup glyph for a category tab.
+ * Checks user overrides, panel type, mappings, and defaults.
+ * Returns the glyph string (may be fallback first letter).
+ * \param r_is_fallback_letter: Set to true if returned glyph is fallback (first letter).
+ * \param r_color: If not null, receives custom color (or zero if using theme).
+ */
+const char *panel_category_glyph_lookup(const wmWindowManager *wm,
+                                        const char *category,
+                                        const PanelType *panel_type,
+                                        bool *r_is_fallback_letter,
+                                        float r_color[3]);
+
+std::string get_tags_for_category_ui(const wmWindowManager *wm,
+                                      const char *category,
+                                      bool filter_show_all_modes,
+                                      bool filter_current_mode,
+                                      uint32_t current_mode_flag);
+
+/**
+ * Get the current object mode as a CategoryTagMode bitmask.
+ */
+uint32_t get_current_tag_mode_flag(const bContext *C);
+
+/**
+ * Check if a category is reserved (from DEFAULT_CATEGORY_GLYPHS).
+ * Reserved categories cannot have their display name changed.
+ * \return True if the category is reserved.
+ */
+bool category_is_reserved(const wmWindowManager *wm, const char *category_id);
+
 }  // namespace ui
 void template_header3D_mode(ui::Layout *layout, bContext *C);
 void uiTemplateEditModeSelection(ui::Layout *layout, bContext *C);
@@ -3078,6 +3135,34 @@ ARegion *tooltip_create_from_search_item_generic(bContext *C,
                                                  const ARegion *searchbox_region,
                                                  const rcti *item_rect,
                                                  ID *id);
+
+/**
+ * Create a tooltip from a simple text string.
+ * \param position: Screen coordinates for the tooltip position.
+ */
+ARegion *tooltip_create_from_text(bContext *C, const char *text, const int position[2]);
+
+/**
+ * Create a tooltip from a simple text string, avoiding overlap with a given rectangle.
+ * \param position: Screen coordinates for the tooltip position.
+ * \param init_rect_overlap: Rectangle to avoid overlapping (in screen coordinates).
+ *                           The tooltip will be positioned to not overlap this area.
+ * \param prefer_left: If true, try left side first, then right. Otherwise right first.
+ */
+ARegion *tooltip_create_from_text(bContext *C,
+                                  const char *text,
+                                  const int position[2],
+                                  const rcti *init_rect_overlap,
+                                  bool prefer_left);
+
+ARegion *tooltip_create_from_text_fixed_width(bContext *C,
+                                             const char *text,
+                                             const int position[2],
+                                             const rcti *init_rect_overlap,
+                                             bool prefer_left,
+                                             int min_width);
+
+bool tooltip_region_update_text(ARegion *region, const char *text);
 
 /* How long before a tool-tip shows. */
 #define UI_TOOLTIP_DELAY 0.5

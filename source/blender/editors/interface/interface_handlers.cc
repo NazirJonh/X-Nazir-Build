@@ -3884,8 +3884,8 @@ static void textedit_prev_but(Block *block, Button *actbut, HandleButtonData *da
 
 static char unicode_input[10] = {0};
 
-static int ui_handle_unicode_input(uiBut *but,
-                                   uiHandleButtonData *data,
+static int ui_handle_unicode_input(Button *but,
+                                   HandleButtonData *data,
                                    const wmEvent *event,
                                    bool *changed)
 {
@@ -3902,7 +3902,7 @@ static int ui_handle_unicode_input(uiBut *but,
         char utf8[10] = {0};
         char32_t utf32[2] = {val, 0};
         const int utf8_buf_len = BLI_str_utf32_as_utf8(utf8, utf32, 5);
-        *changed = ui_textedit_insert_buf(but, data, utf8, utf8_buf_len);
+        *changed = ui_textedit_insert_buf(but, data->text_edit, utf8, utf8_buf_len);
         return *changed ? WM_UI_HANDLER_BREAK : WM_UI_HANDLER_CONTINUE;
       }
     }
@@ -12364,6 +12364,58 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
     blocks_set_tooltips(region, true);
   }
 
+  /* Handle category tab tooltips - only init timer when entering a different tab. */
+  if (event->type == MOUSEMOVE && !but && panel_category_tabs_is_visible(region)) {
+    static char prev_category_idname[64] = "";
+    static const ARegion *prev_category_region = nullptr;
+
+    /* Find which tab (if any) the mouse is over. */
+    const char *current_category = nullptr;
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
+        current_category = pc_dyn.idname;
+        break;
+      }
+    }
+
+    const bool category_changed = (prev_category_region != region) ||
+                                   (current_category == nullptr) ||
+                                   !STREQ(prev_category_idname, current_category ? current_category : "");
+
+    if (current_category && category_changed) {
+      /* Entered a new tab, start tooltip timer. */
+      STRNCPY(prev_category_idname, current_category);
+      prev_category_region = region;
+      panel_category_tooltip_timer_init(C, region);
+    }
+    else if (!current_category && prev_category_region == region) {
+      /* Left the tab area, clear tracking. */
+      prev_category_idname[0] = '\0';
+    }
+  }
+
+  /* Handle right-click on category tabs for edit dialog. */
+  if (event->type == RIGHTMOUSE && event->val == KM_PRESS) {
+    if (panel_category_tabs_is_visible(region)) {
+      /* Check if mouse is over a category tab. */
+      for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+        if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
+          /* Check if editing is allowed. */
+          if (!U.category_tabs_allow_edit) {
+            /* Invoke edit dialog. */
+            wmOperatorType *ot = WM_operatortype_find("SCREEN_OT_category_tab_edit_dialog", false);
+            if (ot) {
+              WM_operator_name_call_ptr(
+                  C, ot, wm::OpCallContext::InvokeDefault, nullptr, event);
+            }
+            return WM_UI_HANDLER_BREAK;
+          }
+          break;
+        }
+      }
+    }
+  }
+
   /* Always do this, to reliably update view and UI-list item highlighting, even if
    * the mouse hovers a button nested in the item (it's an overlapping layout). */
   handle_viewlist_items_hover(event, region);
@@ -12698,6 +12750,142 @@ static void popup_handler_remove(bContext *C, void *userdata)
   /* delayed apply callbacks */
   apply_but_funcs_after(C);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Screen Category Tabs Hover Handler
+ * \{ */
+
+/**
+ * Handler for screen-level category tabs hover state management.
+ * This handler runs at the screen level (not area or region level) and ensures
+ * that hover state is properly reset when mouse moves between regions AND areas.
+ *
+ * The key difference from area/region handlers is that this is called for ALL
+ * regions in ALL areas on the screen, ensuring cross-area hover reset works.
+ *
+ * Performance: Only processes mouse motion events. Early exit if no regions
+ * have visible tabs with hover=true. Minimal overhead for regions without
+ * category tabs (just 2 function calls + 1 boolean check per region).
+ */
+static int screen_category_tabs_hover_handler(bContext *C, const wmEvent *event, void * /*userdata*/)
+{
+  /* Only handle mouse motion events. */
+  if (!ISMOUSE_MOTION(event->type)) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  bScreen *screen = CTX_wm_screen(C);
+  if (!screen) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  wmWindow *win = CTX_wm_window(C);
+  if (!win || !win->runtime->eventstate) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  const int mouse_x = win->runtime->eventstate->xy[0];
+  const int mouse_y = win->runtime->eventstate->xy[1];
+  const double current_time = BLI_time_now_seconds();
+
+  /* Check all regions in ALL areas on this screen for hover state reset.
+   * This loop is very fast because:
+   * - Most regions don't have category tabs (early continue)
+   * - When hover=false, we skip immediately
+   * - Only when hover=true we do rect checking */
+  for (ScrArea &area_check : screen->areabase) {
+    for (ARegion &region_check : area_check.regionbase) {
+      /* Fast skip - most regions don't have category tabs */
+      if (!panel_category_tabs_is_visible(&region_check)) {
+        continue;
+      }
+
+      const bool mouse_in_this_region = BLI_rcti_isect_pt(&region_check.winrct,
+                                                           mouse_x, mouse_y);
+
+      /* Handle settings button hover state. */
+      if (region_check.runtime->category_tabs_settings_hover) {
+        /* At this point we have a region with visible tabs AND hover=true.
+         * Check if we should reset hover state. */
+        if (!mouse_in_this_region) {
+          /* Mouse left the region - check if we should reset hover. */
+          const double time_since_click = current_time -
+                                          region_check.runtime->category_tabs_settings_click_time;
+          /* Only reset if popup timeout has passed (0.5 seconds). */
+          if (time_since_click > 0.5) {
+            region_check.runtime->category_tabs_settings_hover = false;
+            ED_region_tag_redraw(&region_check);
+          }
+        }
+        else {
+          /* Mouse is in region - check if it's over the button. */
+          const int mx_local = mouse_x - region_check.winrct.xmin;
+          const int my_local = mouse_y - region_check.winrct.ymin;
+          const bool mouse_over_button = BLI_rcti_isect_pt(
+              &region_check.runtime->category_tabs_settings_rect, mx_local, my_local);
+
+          if (!mouse_over_button) {
+            const double time_since_click = current_time -
+                                            region_check.runtime->category_tabs_settings_click_time;
+            if (time_since_click > 0.5) {
+              region_check.runtime->category_tabs_settings_hover = false;
+              ED_region_tag_redraw(&region_check);
+            }
+          }
+        }
+      }
+
+      /* Handle category tabs hover effect - check if mouse is over any tab.
+       * If mouse is in region but NOT over any tab, trigger redraw to reset hover. */
+      if (mouse_in_this_region) {
+        const int mx_local = mouse_x - region_check.winrct.xmin;
+        const int my_local = mouse_y - region_check.winrct.ymin;
+
+        bool is_over_any_tab = false;
+        for (const PanelCategoryDyn &pc_dyn : region_check.runtime->panels_category) {
+          if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
+            is_over_any_tab = true;
+            break;
+          }
+        }
+
+        /* If mouse is in region but not over any tab - need to redraw to reset hover. */
+        if (!is_over_any_tab) {
+          ED_region_tag_redraw(&region_check);
+        }
+      }
+      else {
+        /* Mouse left this region entirely - trigger redraw to reset tab hover effect. */
+        ED_region_tag_redraw(&region_check);
+      }
+    }
+  }
+
+  return WM_UI_HANDLER_CONTINUE;
+}
+
+static void screen_category_tabs_hover_handler_remove(bContext * /*C*/, void * /*userdata*/)
+{
+  /* Nothing to clean up - no user data allocated. */
+}
+
+void screen_category_tabs_hover_handler_add(ListBaseT<wmEventHandler> *handlers)
+{
+  WM_event_remove_ui_handler(handlers,
+                             screen_category_tabs_hover_handler,
+                             screen_category_tabs_hover_handler_remove,
+                             nullptr,
+                             false);
+  WM_event_add_ui_handler(
+      nullptr,
+      handlers,
+      screen_category_tabs_hover_handler,
+      screen_category_tabs_hover_handler_remove,
+      nullptr,
+      eWM_EventHandlerFlag(0));
+}
+
+/** \} */
 
 void region_handlers_add(ListBaseT<wmEventHandler> *handlers)
 {

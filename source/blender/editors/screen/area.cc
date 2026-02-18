@@ -3317,8 +3317,22 @@ void ED_region_panels_layout_ex(const bContext *C,
                            BKE_regiontype_uses_category_tabs(region->runtime->type);
   /* offset panels for small vertical tab area */
   const char *category = nullptr;
+  /* Get zoom based on display mode. */
+  float category_tabs_zoom;
+  switch (static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode)) {
+    case USER_CATEGORY_TABS_GLYPHS_ONLY:
+      category_tabs_zoom = U.category_tabs_zoom_icon;
+      break;
+    case USER_CATEGORY_TABS_GLYPHS_TEXT:
+      category_tabs_zoom = U.category_tabs_zoom_mixed;
+      break;
+    case USER_CATEGORY_TABS_TEXT_ONLY:
+    default:
+      category_tabs_zoom = U.category_tabs_zoom_text;
+      break;
+  }
   const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH *
-                                                   U.category_tabs_zoom);
+                                                   category_tabs_zoom);
   int margin_x = 0;
   const bool region_layout_based = region->flag & RGN_FLAG_DYNAMIC_SIZE;
   bool update_tot_size = true;
@@ -3628,7 +3642,9 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
 
   /* Set in layout. */
   if (has_category_tabs && region->runtime->category) {
-    ui::panel_category_tabs_draw_all(region, region->runtime->category);
+    /* Ensure the active category is visible after tag filtering */
+    ui::panel_category_tabs_ensure_active_visible(C, region);
+    ui::panel_category_tabs_draw_all(C, region, region->runtime->category);
   }
 
   /* scrollers */
@@ -3640,9 +3656,23 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
   {
     use_mask = true;
     ui::view2d_mask_from_win(v2d, &mask);
+    /* Get zoom based on display mode. */
+    float category_tabs_zoom_local;
+    switch (static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode)) {
+      case USER_CATEGORY_TABS_GLYPHS_ONLY:
+        category_tabs_zoom_local = U.category_tabs_zoom_icon;
+        break;
+      case USER_CATEGORY_TABS_GLYPHS_TEXT:
+        category_tabs_zoom_local = U.category_tabs_zoom_mixed;
+        break;
+      case USER_CATEGORY_TABS_TEXT_ONLY:
+      default:
+        category_tabs_zoom_local = U.category_tabs_zoom_text;
+        break;
+    }
     const int category_width = round_fl_to_int(ui::view2d_scale_get_x(&region->v2d) *
                                                UI_PANEL_CATEGORY_MARGIN_WIDTH *
-                                               U.category_tabs_zoom);
+                                               category_tabs_zoom_local);
     if (alignment == RGN_ALIGN_RIGHT) {
       mask.xmax -= category_width;
     }

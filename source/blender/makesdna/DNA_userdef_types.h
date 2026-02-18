@@ -752,6 +752,7 @@ enum eUserPref_Section {
   USER_SECTION_EXTENSIONS = 17,
   USER_SECTION_DEVELOPER_TOOLS = 18,
   USER_SECTION_ASSETS = 19,
+  USER_SECTION_TAGS = 20,
 };
 
 /** #UserDef_SpaceData.flag (State of the user preferences UI). */
@@ -859,6 +860,16 @@ struct bUserAssetShelfSettings {
   ListBaseT<AssetCatalogPathLink> enabled_catalog_paths = {nullptr, nullptr};
 };
 
+/** Category tabs display mode for #UserDef.category_tabs_display_mode. */
+typedef enum eUserPref_CategoryTabsDisplayMode {
+  /** Show only glyphs (icons). */
+  USER_CATEGORY_TABS_GLYPHS_ONLY = 0,
+  /** Show glyphs and text. */
+  USER_CATEGORY_TABS_GLYPHS_TEXT = 1,
+  /** Show only text. */
+  USER_CATEGORY_TABS_TEXT_ONLY = 2,
+} eUserPref_CategoryTabsDisplayMode;
+
 /**
  * Main user preferences data, typically accessed from #U.
  * See: #BKE_blendfile_userdef_from_defaults & #BKE_blendfile_userdef_read.
@@ -946,9 +957,19 @@ struct UserDef {
 
   /** Setting for UI scale (fractional), before screen DPI has been applied. */
   float ui_scale = 1.0;
-  /** Zoom scale for category tabs in sidebar regions (1.0 = default size). */
-  float category_tabs_zoom = 1.0f;
-  char _pad19[4] = {};
+  /** Zoom scale for category tabs in Icon mode (1.0 = default size). */
+  float category_tabs_zoom_icon = 1.0f;
+  /** Zoom scale for category tabs in Mixed mode (1.0 = default size). */
+  float category_tabs_zoom_mixed = 1.0f;
+  /** Zoom scale for category tabs in Text mode (1.0 = default size). */
+  float category_tabs_zoom_text = 1.0f;
+  /** Display mode for category tabs. */
+  char category_tabs_display_mode = USER_CATEGORY_TABS_GLYPHS_TEXT;
+  /** Show category name for active tab in Icon mode. */
+  char category_tabs_show_active_name = true;
+  /** Lock editing of category tab data (name, glyph, color). When true, editing is disabled. */
+  char category_tabs_allow_edit = false;
+  char _pad19[1] = {};
   /**
    * Setting for UI line width.
    *

@@ -985,6 +985,11 @@ PropertySplitWrapper uiItemPropertySplitWrapperCreate(Layout *parent_layout);
 
 Button *uiItemL_ex(Layout *layout, StringRef name, int icon, bool highlight, bool redalert);
 /**
+ * Label with custom text color (RGB 0.0-1.0).
+ * Used for displaying colored glyphs and other custom colored text.
+ */
+Button *uiItemL_colored(Layout *layout, StringRef name, int icon, const float color[3]);
+/**
  * Helper to add a label using a property split layout if needed. After calling this the
  * active layout will be the one to place the labeled items in. An additional layout may be
  * returned to place decorator buttons in.

@@ -357,6 +357,8 @@ struct PanelType {
   /** For panel tooltip. */
   const char *description;
   char translation_context[BKE_ST_MAXNAME];
+  /** Optional: custom glyph for category tabs (UTF-8 Material Symbols character). */
+  const char *icon_glyph;
   /** For buttons window. */
   char context[BKE_ST_MAXNAME];
   /** For category tabs. */
@@ -567,6 +569,27 @@ struct ARegionRuntime {
 
   /** Dummy panel used in popups so they can support layout panels. */
   Panel *popup_block_panel = nullptr;
+
+  /** Category tabs settings button rect for hit-testing and popover positioning. */
+  rcti category_tabs_settings_rect = {};
+  /** Category tabs settings button hover state. */
+  bool category_tabs_settings_hover = false;
+  /** Time when settings button was last clicked (for popup open detection). */
+  double category_tabs_settings_click_time = 0.0;
+  /** Time when hover state was last set to true (for auto-reset timeout). */
+  double category_tabs_settings_hover_time = 0.0;
+
+  /** Opaque pointer used by editors for category-tabs dragging state (runtime only). */
+  void *category_tabs_drag_state = nullptr;
+
+  /** Pending category ID for drag detection (cleared when drag starts or click completes). */
+  char category_tabs_drag_pending_id[64] = "";
+
+  /** Y position where drag was initiated (mval). */
+  int category_tabs_drag_start_y = 0;
+
+  /** Time when drag was initiated (for threshold detection). */
+  double category_tabs_drag_start_time = 0.0;
 };
 
 }  // namespace bke

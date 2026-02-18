@@ -137,6 +137,26 @@ struct wmOwnerID {
   char name[128] = "";
 };
 
+/**
+ * Stores custom order for category tabs within a specific region.
+ * Saved as part of the workspace, allowing different workspaces
+ * to have different tab orders.
+ */
+struct WorkspaceCategoryOrder {
+  struct WorkspaceCategoryOrder *next = nullptr, *prev = nullptr;
+
+  /** Space type identifier (eSpace_Type). */
+  int space_type = 0;
+  /** Region type identifier (eRegion_Type). */
+  int region_type = 0;
+  /** Category identifier (bl_category from PanelType). */
+  char category_id[64] = "";
+  /** Position in the order list (0 = top). */
+  int order_index = 0;
+
+  char _pad[4] = {};
+};
+
 enum eWorkSpaceFlags {
   WORKSPACE_USE_FILTER_BY_ORIGIN = (1 << 1),
   WORKSPACE_USE_PIN_SCENE = (1 << 2),
@@ -161,6 +181,13 @@ struct WorkSpace {
   ListBaseT<wmOwnerID> owner_ids = {nullptr, nullptr};
 
   ListBaseT<bToolRef> tools = {nullptr, nullptr};
+
+  /**
+   * Custom order for category tabs per region.
+   * Each item specifies the order for a specific category in a specific region.
+   * Categories not in this list are displayed in their default order at the end.
+   */
+  ListBaseT<WorkspaceCategoryOrder> category_order = {nullptr, nullptr};
 
   /** Optional, scene to switch to when enabling this workspace (NULL to disable). Cleared on
    * link/append. */

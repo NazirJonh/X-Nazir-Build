@@ -1189,6 +1189,9 @@ static void wm_window_ghostwindow_ensure(wmWindowManager *wm, wmWindow *win, boo
 
   /* Add top-bar. */
   ED_screen_global_areas_refresh(win);
+
+  /* Initialize category tabs hover handler for cross-area hover state management. */
+  ED_screen_category_tabs_handlers_ensure(win);
 }
 
 void wm_window_ghostwindows_ensure(wmWindowManager *wm)

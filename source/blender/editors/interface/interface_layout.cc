@@ -3225,6 +3225,23 @@ Button *uiItemL_ex(
   return but;
 }
 
+Button *uiItemL_colored(Layout *layout, const StringRef name, int icon, const float color[3])
+{
+  Button *but = uiItem_simple(layout, name, icon);
+
+  /* Set custom text color (RGB 0.0-1.0 -> 0-255) */
+  if (color && (color[0] > 0.0f || color[1] > 0.0f || color[2] > 0.0f)) {
+    uchar color_uchar[4];
+    color_uchar[0] = uchar(color[0] * 255.0f);
+    color_uchar[1] = uchar(color[1] * 255.0f);
+    color_uchar[2] = uchar(color[2] * 255.0f);
+    color_uchar[3] = 255;
+    button_color_set(but, color_uchar);
+  }
+
+  return but;
+}
+
 void Layout::label(const StringRef name, int icon)
 {
   uiItem_simple(this, name, icon);

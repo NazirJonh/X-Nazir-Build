@@ -12206,6 +12206,36 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
     ui_blocks_set_tooltips(region, true);
   }
 
+  /* Handle category tab tooltips - only init timer when entering a different tab. */
+  if (event->type == MOUSEMOVE && !but && panel_category_tabs_is_visible(region)) {
+    static char prev_category_idname[64] = "";
+    static const ARegion *prev_category_region = nullptr;
+
+    /* Find which tab (if any) the mouse is over. */
+    const char *current_category = nullptr;
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
+        current_category = pc_dyn.idname;
+        break;
+      }
+    }
+
+    const bool category_changed = (prev_category_region != region) ||
+                                   (current_category == nullptr) ||
+                                   !STREQ(prev_category_idname, current_category ? current_category : "");
+
+    if (current_category && category_changed) {
+      /* Entered a new tab, start tooltip timer. */
+      STRNCPY(prev_category_idname, current_category);
+      prev_category_region = region;
+      panel_category_tooltip_timer_init(C, region);
+    }
+    else if (!current_category && prev_category_region == region) {
+      /* Left the tab area, clear tracking. */
+      prev_category_idname[0] = '\0';
+    }
+  }
+
   /* Always do this, to reliably update view and UI-list item highlighting, even if
    * the mouse hovers a button nested in the item (it's an overlapping layout). */
   ui_handle_viewlist_items_hover(event, region);

@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "MEM_guardedalloc.h"
 
@@ -23,6 +24,7 @@
 #include "BLI_string_utf8.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
 
@@ -2525,6 +2527,97 @@ static PanelCategoryDyn *panel_categories_find_mouse_over(ARegion *region, const
   }
 
   return nullptr;
+}
+
+bool panel_category_is_mouse_over(ARegion *region, const wmEvent *event)
+{
+  if (!panel_category_tabs_is_visible(region)) {
+    return false;
+  }
+  return panel_categories_find_mouse_over(region, event) != nullptr;
+}
+
+static ARegion *ui_panel_category_tooltip_init(
+    bContext *C, ARegion *region, int * /*pass*/, double * /*r_pass_delay*/, bool *r_exit_on_event)
+{
+  *r_exit_on_event = true;
+
+  wmWindow *win = CTX_wm_window(C);
+  const wmEvent *event = win->runtime->eventstate;
+
+  if (!region) {
+    return nullptr;
+  }
+
+  /* Calculate mval from screen coordinates. */
+  int mval[2];
+  mval[0] = event->xy[0] - region->winrct.xmin;
+  mval[1] = event->xy[1] - region->winrct.ymin;
+
+  /* Find the category tab under the mouse. */
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (BLI_rcti_isect_pt(&pc_dyn.rect, mval[0], mval[1])) {
+      const char *category_idname = pc_dyn.idname;
+
+      /* Check if category is a single glyph (icon). */
+      const int utf8_char_size = BLI_str_utf8_size_safe(category_idname);
+      const size_t category_len = BLI_strnlen(category_idname, 64);
+      const bool is_single_glyph = (category_len == 1) ||
+                                    (utf8_char_size > 0 && size_t(utf8_char_size) == category_len);
+
+      std::string tooltip_text;
+
+      if (is_single_glyph) {
+        /* For glyph categories, collect panel names in this category. */
+        Vector<std::string> panel_names;
+        for (const Panel &panel : region->panels) {
+          if (panel.type && STREQ(panel.type->category, category_idname)) {
+            const char *label = CTX_IFACE_(panel.type->translation_context, panel.type->label);
+            if (label && label[0]) {
+              panel_names.append(label);
+            }
+          }
+        }
+
+        if (!panel_names.is_empty()) {
+          /* Join panel names with commas. */
+          tooltip_text = panel_names[0];
+          for (int i = 1; i < panel_names.size(); i++) {
+            tooltip_text += ", " + panel_names[i];
+          }
+        }
+        else {
+          /* Fallback to category name if no panels found. */
+          tooltip_text = IFACE_(category_idname);
+        }
+      }
+      else {
+        /* For text categories, use the category name. */
+        tooltip_text = IFACE_(category_idname);
+      }
+
+      int position[2] = {event->xy[0], int(event->xy[1] - (UI_POPUP_MARGIN / 2))};
+      return tooltip_create_from_text(C, tooltip_text.c_str(), position);
+    }
+  }
+
+  return nullptr;
+}
+
+void panel_category_tooltip_timer_init(bContext *C, ARegion *region)
+{
+  wmWindow *win = CTX_wm_window(C);
+  ScrArea *area = CTX_wm_area(C);
+
+  printf("[DEBUG] panel_category_tooltip_timer_init called\n");
+
+  if ((U.flag & USER_TOOLTIPS) == 0) {
+    printf("[DEBUG] panel_category_tooltip_timer_init: tooltips disabled\n");
+    return;
+  }
+
+  printf("[DEBUG] panel_category_tooltip_timer_init: calling WM_tooltip_timer_init\n");
+  WM_tooltip_timer_init(C, win, area, region, ui_panel_category_tooltip_init);
 }
 
 void panel_category_add(ARegion *region, const char *name)

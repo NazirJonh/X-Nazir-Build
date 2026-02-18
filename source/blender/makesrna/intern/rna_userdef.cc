@@ -5013,6 +5013,13 @@ static void rna_def_userdef_view(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 0.5f, 3.0f, 1, 2);
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
+  prop = RNA_def_property(srna, "category_tabs_zoom", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_ui_text(
+      prop, "Category Tabs Zoom", "Scale factor for category tabs in sidebar regions");
+  RNA_def_property_range(prop, 0.5f, 3.0f);
+  RNA_def_property_ui_range(prop, 0.5f, 4.0f, 0.1, 2);
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
   prop = RNA_def_property(srna, "border_width", PROP_INT, PROP_NONE);
   RNA_def_property_ui_text(prop, "Border Width", "Size of the padding around each editor.");
   RNA_def_property_range(prop, 1.0f, 10.0f);

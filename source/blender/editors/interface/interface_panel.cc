@@ -1464,8 +1464,6 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
 
   is_alpha = (region->overlap && (theme_col_back[3] != 255));
 
-  BLF_enable(fontid, BLF_ROTATION);
-  BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
   fontscale(&fstyle_points, aspect);
   BLF_size(fontid, fstyle_points * UI_SCALE_FAC * U.category_tabs_zoom);
 
@@ -1480,8 +1478,27 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
     rcti *rct = &pc_dyn.rect;
     const char *category_id = pc_dyn.idname;
     const char *category_id_draw = IFACE_(category_id);
-    const int category_width = round_fl_to_int(
-        BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+
+    /* Check if single glyph for proper size calculation. */
+    const int utf8_char_size_calc = BLI_str_utf8_size_safe(category_id_draw);
+    const size_t category_len_calc = BLI_strnlen(category_id_draw, 32);
+    const bool is_single_glyph_calc = (category_len_calc == 1) ||
+                                       (utf8_char_size_calc > 0 &&
+                                        size_t(utf8_char_size_calc) == category_len_calc);
+
+    int category_width;
+    if (is_single_glyph_calc) {
+      /* For single glyphs (icons), use the glyph height as the tab height. */
+      category_width = round_fl_to_int(BLF_height(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+    }
+    else {
+      /* For text, enable rotation temporarily to get correct width measurement. */
+      BLF_enable(fontid, BLF_ROTATION);
+      BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+      category_width = round_fl_to_int(
+          BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+      BLF_disable(fontid, BLF_ROTATION);
+    }
 
     rct->xmin = rct_xmin;
     rct->xmax = rct_xmax;
@@ -1610,17 +1627,45 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
 
     /* Tab titles. */
 
-    /* Offset toward the middle of the rect. */
-    const int text_v_ofs = round_fl_to_int(float(rct_xmax - rct_xmin) * 0.5f);
-    /* Offset down as the font size increases. */
-    const int text_size_offset = round_fl_to_int(fstyle_points * UI_SCALE_FAC *
-                                                 U.category_tabs_zoom * 0.35f);
+    /* Check if category is a single glyph (for Material Symbols icons).
+     * Single glyph = single Unicode codepoint, which can be 1-4 bytes in UTF-8. */
+    const int utf8_char_size = BLI_str_utf8_size_safe(category_id_draw);
+    const size_t category_len = BLI_strnlen(category_id_draw, 32);
+    const bool is_single_glyph = (category_len == 1) ||  /* Single ASCII character. */
+                                  (utf8_char_size > 0 &&
+                                   size_t(utf8_char_size) == category_len);  /* Single UTF-8 character. */
 
-    BLF_position(fontid,
-                 is_left ? rct->xmax - text_v_ofs + text_size_offset :
-                           rct->xmin + text_v_ofs - text_size_offset,
-                 is_left ? rct->ymin + tab_v_pad_text : rct->ymax - tab_v_pad_text,
-                 0.0f);
+    /* Single glyphs don't need rotation, text needs 90 degree rotation. */
+    if (is_single_glyph) {
+      BLF_disable(fontid, BLF_ROTATION);
+    }
+    else {
+      BLF_enable(fontid, BLF_ROTATION);
+      BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+    }
+
+    /* Calculate position for drawing. */
+    float pos_x, pos_y;
+    if (is_single_glyph) {
+      /* Center the icon horizontally and vertically in the tab. */
+      const float glyph_width = BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX);
+      const float glyph_height = BLF_height(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX);
+      const float tab_center_x = float(rct->xmin + rct->xmax) * 0.5f;
+      const float tab_center_y = float(rct->ymin + rct->ymax) * 0.5f;
+      pos_x = tab_center_x - glyph_width * 0.5f;
+      pos_y = tab_center_y - glyph_height * 0.5f;
+    }
+    else {
+      /* Text positioning with rotation. */
+      const int text_v_ofs = round_fl_to_int(float(rct_xmax - rct_xmin) * 0.5f);
+      const int text_size_offset = round_fl_to_int(fstyle_points * UI_SCALE_FAC *
+                                                   U.category_tabs_zoom * 0.35f);
+      pos_x = is_left ? rct->xmax - text_v_ofs + text_size_offset :
+                        rct->xmin + text_v_ofs - text_size_offset;
+      pos_y = is_left ? rct->ymin + tab_v_pad_text : rct->ymax - tab_v_pad_text;
+    }
+
+    BLF_position(fontid, pos_x, pos_y, 0.0f);
     BLF_color3ubv(fontid, is_active ? theme_col_tab_text_sel : theme_col_tab_text);
 
     if (fstyle->shadow) {

@@ -3864,8 +3864,8 @@ static void ui_textedit_prev_but(Block *block, Button *actbut, HandleButtonData 
 
 static char unicode_input[10] = {0};
 
-static int ui_handle_unicode_input(uiBut *but,
-                                   uiHandleButtonData *data,
+static int ui_handle_unicode_input(Button *but,
+                                   HandleButtonData *data,
                                    const wmEvent *event,
                                    bool *changed)
 {
@@ -3882,7 +3882,7 @@ static int ui_handle_unicode_input(uiBut *but,
         char utf8[10] = {0};
         char32_t utf32[2] = {val, 0};
         const int utf8_buf_len = BLI_str_utf32_as_utf8(utf8, utf32, 5);
-        *changed = ui_textedit_insert_buf(but, data, utf8, utf8_buf_len);
+        *changed = ui_textedit_insert_buf(but, data->text_edit, utf8, utf8_buf_len);
         return *changed ? WM_UI_HANDLER_BREAK : WM_UI_HANDLER_CONTINUE;
       }
     }

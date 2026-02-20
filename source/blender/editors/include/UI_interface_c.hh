@@ -2146,6 +2146,16 @@ void panel_category_clear_all(ARegion *region);
  */
 void panel_category_tabs_draw_all(ARegion *region, const char *category_id_active);
 
+/**
+ * Check if mouse is over a category tab and return true if so.
+ */
+bool panel_category_is_mouse_over(ARegion *region, const wmEvent *event);
+
+/**
+ * Initialize tooltip timer for category tabs.
+ */
+void panel_category_tooltip_timer_init(bContext *C, ARegion *region);
+
 void panel_stop_animation(const bContext *C, Panel *panel);
 
 /* Panel custom data. */
@@ -2937,6 +2947,12 @@ ARegion *tooltip_create_from_search_item_generic(bContext *C,
                                                  const ARegion *searchbox_region,
                                                  const rcti *item_rect,
                                                  ID *id);
+
+/**
+ * Create a tooltip from a simple text string.
+ * \param position: Screen coordinates for the tooltip position.
+ */
+ARegion *tooltip_create_from_text(bContext *C, const char *text, const int position[2]);
 
 /* How long before a tool-tip shows. */
 #define UI_TOOLTIP_DELAY 0.5

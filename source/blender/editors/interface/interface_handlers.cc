@@ -3859,6 +3859,61 @@ static void ui_textedit_prev_but(Block *block, Button *actbut, HandleButtonData 
 }
 
 /**
+ * Allow holding Alt, enter Unicode character code, release alt, to get special characters.
+ */
+
+static char unicode_input[10] = {0};
+
+static int ui_handle_unicode_input(Button *but,
+                                   HandleButtonData *data,
+                                   const wmEvent *event,
+                                   bool *changed)
+{
+  if (ELEM(event->type, EVT_LEFTALTKEY, EVT_RIGHTALTKEY)) {
+    if (event->val == KM_PRESS) {
+      /* Alt first held down, so clear any saved input. */
+      unicode_input[0] = 0;
+      return WM_UI_HANDLER_CONTINUE;
+    }
+    else if (event->val == KM_RELEASE && unicode_input[0]) {
+      /* Alt released so deal with any previous entry. */
+      uint val = strtoul(unicode_input, NULL, 16);
+      if (val > 31 && val < 0x10FFFF) {
+        char utf8[10] = {0};
+        char32_t utf32[2] = {val, 0};
+        const int utf8_buf_len = BLI_str_utf32_as_utf8(utf8, utf32, 5);
+        *changed = ui_textedit_insert_buf(but, data->text_edit, utf8, utf8_buf_len);
+        return *changed ? WM_UI_HANDLER_BREAK : WM_UI_HANDLER_CONTINUE;
+      }
+    }
+  }
+
+  if (event->modifier & KM_ALT && event->val == KM_PRESS) {
+    /* Holding Alt while pressing a key. */
+    char ch = 0;
+    if ((event->type >= EVT_ZEROKEY && event->type <= EVT_NINEKEY) ||
+        (event->type >= EVT_AKEY && event->type <= EVT_FKEY))
+    {
+      ch = event->type;
+    }
+    else if (event->type >= EVT_PAD0 && event->type <= EVT_PAD9) {
+      ch = event->type - 102;
+    }
+
+    if (ch) {
+      int len = BLI_strnlen(unicode_input, ARRAY_SIZE(unicode_input));
+      if (len < ARRAY_SIZE(unicode_input) - 1) {
+        unicode_input[len] = ch;
+        unicode_input[len + 1] = 0;
+        return WM_UI_HANDLER_BREAK;
+      }
+    }
+  }
+
+  return WM_UI_HANDLER_CONTINUE;
+}
+
+/**
  * Return the jump type used for cursor motion & back-space/delete actions.
  */
 static eStrCursorJumpType ui_textedit_jump_type_from_event(const wmEvent *event)
@@ -4029,6 +4084,8 @@ static int ui_do_but_textedit(
       break;
     }
   }
+
+  retval = ui_handle_unicode_input(but, data, event, &changed);
 
   if (event->val == KM_PRESS && !is_ime_composing) {
     switch (event->type) {
@@ -12146,6 +12203,36 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
       (event->xy[0] != event->prev_xy[0] || event->xy[1] != event->prev_xy[1]))
   {
     ui_blocks_set_tooltips(region, true);
+  }
+
+  /* Handle category tab tooltips - only init timer when entering a different tab. */
+  if (event->type == MOUSEMOVE && !but && panel_category_tabs_is_visible(region)) {
+    static char prev_category_idname[64] = "";
+    static const ARegion *prev_category_region = nullptr;
+
+    /* Find which tab (if any) the mouse is over. */
+    const char *current_category = nullptr;
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
+        current_category = pc_dyn.idname;
+        break;
+      }
+    }
+
+    const bool category_changed = (prev_category_region != region) ||
+                                   (current_category == nullptr) ||
+                                   !STREQ(prev_category_idname, current_category ? current_category : "");
+
+    if (current_category && category_changed) {
+      /* Entered a new tab, start tooltip timer. */
+      STRNCPY(prev_category_idname, current_category);
+      prev_category_region = region;
+      panel_category_tooltip_timer_init(C, region);
+    }
+    else if (!current_category && prev_category_region == region) {
+      /* Left the tab area, clear tracking. */
+      prev_category_idname[0] = '\0';
+    }
   }
 
   /* Always do this, to reliably update view and UI-list item highlighting, even if

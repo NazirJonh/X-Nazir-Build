@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "MEM_guardedalloc.h"
 
@@ -23,6 +24,7 @@
 #include "BLI_string_utf8.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
 
@@ -1417,7 +1419,7 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
   const float aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
                            1.0f :
                            (static_cast<Block *>(region->runtime->uiblocks.first))->aspect;
-  const float zoom = 1.0f / aspect;
+  const float zoom = (1.0f / aspect) * U.category_tabs_zoom;
   const int px = U.pixelsize;
   const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
   const float dpi_fac = UI_SCALE_FAC;
@@ -1464,10 +1466,8 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
 
   is_alpha = (region->overlap && (theme_col_back[3] != 255));
 
-  BLF_enable(fontid, BLF_ROTATION);
-  BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
   fontscale(&fstyle_points, aspect);
-  BLF_size(fontid, fstyle_points * UI_SCALE_FAC);
+  BLF_size(fontid, fstyle_points * UI_SCALE_FAC * U.category_tabs_zoom);
 
   /* Check the region type supports categories to avoid an assert
    * for showing 3D view panels in the properties space. */
@@ -1480,8 +1480,27 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
     rcti *rct = &pc_dyn.rect;
     const char *category_id = pc_dyn.idname;
     const char *category_id_draw = IFACE_(category_id);
-    const int category_width = round_fl_to_int(
-        BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+
+    /* Check if single glyph for proper size calculation. */
+    const int utf8_char_size_calc = BLI_str_utf8_size_safe(category_id_draw);
+    const size_t category_len_calc = BLI_strnlen(category_id_draw, 32);
+    const bool is_single_glyph_calc = (category_len_calc == 1) ||
+                                       (utf8_char_size_calc > 0 &&
+                                        size_t(utf8_char_size_calc) == category_len_calc);
+
+    int category_width;
+    if (is_single_glyph_calc) {
+      /* For single glyphs (icons), use the glyph height as the tab height. */
+      category_width = round_fl_to_int(BLF_height(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+    }
+    else {
+      /* For text, enable rotation temporarily to get correct width measurement. */
+      BLF_enable(fontid, BLF_ROTATION);
+      BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+      category_width = round_fl_to_int(
+          BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+      BLF_disable(fontid, BLF_ROTATION);
+    }
 
     rct->xmin = rct_xmin;
     rct->xmax = rct_xmax;
@@ -1610,16 +1629,53 @@ void panel_category_tabs_draw_all(ARegion *region, const char *category_id_activ
 
     /* Tab titles. */
 
-    /* Offset toward the middle of the rect. */
-    const int text_v_ofs = round_fl_to_int(float(rct_xmax - rct_xmin) * 0.5f);
-    /* Offset down as the font size increases. */
-    const int text_size_offset = round_fl_to_int(fstyle_points * UI_SCALE_FAC * 0.35f);
+    /* Check if category is a single glyph (for Material Symbols icons).
+     * Single glyph = single Unicode codepoint, which can be 1-4 bytes in UTF-8. */
+    const int utf8_char_size = BLI_str_utf8_size_safe(category_id_draw);
+    const size_t category_len = BLI_strnlen(category_id_draw, 32);
+    const bool is_single_glyph = (category_len == 1) ||  /* Single ASCII character. */
+                                  (utf8_char_size > 0 &&
+                                   size_t(utf8_char_size) == category_len);  /* Single UTF-8 character. */
 
-    BLF_position(fontid,
-                 is_left ? rct->xmax - text_v_ofs + text_size_offset :
-                           rct->xmin + text_v_ofs - text_size_offset,
-                 is_left ? rct->ymin + tab_v_pad_text : rct->ymax - tab_v_pad_text,
-                 0.0f);
+    /* Single glyphs don't need rotation, text needs 90 degree rotation. */
+    if (is_single_glyph) {
+      BLF_disable(fontid, BLF_ROTATION);
+    }
+    else {
+      BLF_enable(fontid, BLF_ROTATION);
+      BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+    }
+
+    /* Calculate position for drawing. */
+    float pos_x, pos_y;
+    if (is_single_glyph) {
+      /* Center the icon horizontally and vertically in the tab.
+       * BLF_position sets the baseline, so we need to account for ascender/descender. */
+      const float glyph_width = BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX);
+      const int ascender_i = BLF_ascender(fontid);
+      const int descender_i = BLF_descender(fontid);
+      const float ascender = float(ascender_i);
+      const float descender = float(descender_i);
+      const float glyph_height = ascender - descender;  /* Total visual height. */
+
+      const float tab_center_x = float(rct->xmin + rct->xmax) * 0.5f;
+      const float tab_center_y = float(rct->ymin + rct->ymax) * 0.5f;
+
+      /* Position baseline so glyph is centered. */
+      pos_x = tab_center_x - glyph_width * 0.5f;
+      pos_y = tab_center_y - glyph_height * 0.5f - descender;  /* Adjust for baseline. */
+    }
+    else {
+      /* Text positioning with rotation. */
+      const int text_v_ofs = round_fl_to_int(float(rct_xmax - rct_xmin) * 0.5f);
+      const int text_size_offset = round_fl_to_int(fstyle_points * UI_SCALE_FAC *
+                                                   U.category_tabs_zoom * 0.35f);
+      pos_x = is_left ? rct->xmax - text_v_ofs + text_size_offset :
+                        rct->xmin + text_v_ofs - text_size_offset;
+      pos_y = is_left ? rct->ymin + tab_v_pad_text : rct->ymax - tab_v_pad_text;
+    }
+
+    BLF_position(fontid, pos_x, pos_y, 0.0f);
     BLF_color3ubv(fontid, is_active ? theme_col_tab_text_sel : theme_col_tab_text);
 
     if (fstyle->shadow) {
@@ -2479,6 +2535,97 @@ static PanelCategoryDyn *panel_categories_find_mouse_over(ARegion *region, const
   }
 
   return nullptr;
+}
+
+bool panel_category_is_mouse_over(ARegion *region, const wmEvent *event)
+{
+  if (!panel_category_tabs_is_visible(region)) {
+    return false;
+  }
+  return panel_categories_find_mouse_over(region, event) != nullptr;
+}
+
+static ARegion *ui_panel_category_tooltip_init(
+    bContext *C, ARegion *region, int * /*pass*/, double * /*r_pass_delay*/, bool *r_exit_on_event)
+{
+  *r_exit_on_event = true;
+
+  wmWindow *win = CTX_wm_window(C);
+  const wmEvent *event = win->runtime->eventstate;
+
+  if (!region) {
+    return nullptr;
+  }
+
+  /* Calculate mval from screen coordinates. */
+  int mval[2];
+  mval[0] = event->xy[0] - region->winrct.xmin;
+  mval[1] = event->xy[1] - region->winrct.ymin;
+
+  /* Find the category tab under the mouse. */
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (BLI_rcti_isect_pt(&pc_dyn.rect, mval[0], mval[1])) {
+      const char *category_idname = pc_dyn.idname;
+
+      /* Check if category is a single glyph (icon). */
+      const int utf8_char_size = BLI_str_utf8_size_safe(category_idname);
+      const size_t category_len = BLI_strnlen(category_idname, 64);
+      const bool is_single_glyph = (category_len == 1) ||
+                                    (utf8_char_size > 0 && size_t(utf8_char_size) == category_len);
+
+      std::string tooltip_text;
+
+      if (is_single_glyph) {
+        /* For glyph categories, collect panel names in this category. */
+        Vector<std::string> panel_names;
+        for (const Panel &panel : region->panels) {
+          if (panel.type && STREQ(panel.type->category, category_idname)) {
+            const char *label = CTX_IFACE_(panel.type->translation_context, panel.type->label);
+            if (label && label[0]) {
+              panel_names.append(label);
+            }
+          }
+        }
+
+        if (!panel_names.is_empty()) {
+          /* Join panel names with commas. */
+          tooltip_text = panel_names[0];
+          for (int i = 1; i < panel_names.size(); i++) {
+            tooltip_text += ", " + panel_names[i];
+          }
+        }
+        else {
+          /* Fallback to category name if no panels found. */
+          tooltip_text = IFACE_(category_idname);
+        }
+      }
+      else {
+        /* For text categories, use the category name. */
+        tooltip_text = IFACE_(category_idname);
+      }
+
+      int position[2] = {event->xy[0], int(event->xy[1] - (UI_POPUP_MARGIN / 2))};
+      return tooltip_create_from_text(C, tooltip_text.c_str(), position);
+    }
+  }
+
+  return nullptr;
+}
+
+void panel_category_tooltip_timer_init(bContext *C, ARegion *region)
+{
+  wmWindow *win = CTX_wm_window(C);
+  ScrArea *area = CTX_wm_area(C);
+
+  printf("[DEBUG] panel_category_tooltip_timer_init called\n");
+
+  if ((U.flag & USER_TOOLTIPS) == 0) {
+    printf("[DEBUG] panel_category_tooltip_timer_init: tooltips disabled\n");
+    return;
+  }
+
+  printf("[DEBUG] panel_category_tooltip_timer_init: calling WM_tooltip_timer_init\n");
+  WM_tooltip_timer_init(C, win, area, region, ui_panel_category_tooltip_init);
 }
 
 void panel_category_add(ARegion *region, const char *name)

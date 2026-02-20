@@ -1970,6 +1970,15 @@ ARegion *tooltip_create_from_search_item_generic(bContext *C,
   return ui_tooltip_create_with_data(C, std::move(data), init_position, nullptr);
 }
 
+ARegion *tooltip_create_from_text(bContext *C, const char *text, const int position[2])
+{
+  std::unique_ptr<TooltipData> data = std::make_unique<TooltipData>();
+  tooltip_text_field_add(*data, text, {}, TIP_STYLE_NORMAL, TIP_LC_NORMAL);
+
+  float init_position[2] = {float(position[0]), float(position[1])};
+  return ui_tooltip_create_with_data(C, std::move(data), init_position, nullptr);
+}
+
 void tooltip_free(bContext *C, bScreen *screen, ARegion *region)
 {
   region_temp_remove(C, screen, region);

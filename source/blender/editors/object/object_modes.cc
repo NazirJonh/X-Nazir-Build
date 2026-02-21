@@ -571,16 +571,49 @@ static wmOperatorStatus object_transfer_mode_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
   if (!mode_compat_test(ob_dst, mode_src)) {
-    BKE_reportf(op->reports,
-                RPT_ERROR,
-                "Current mode of source object '%s' is not compatible with target object '%s'",
-                ob_src->id.name + 2,
-                ob_dst->id.name + 2);
+    /* Mode not compatible with target object.
+     * Exit to Object Mode, activate target, and enter Edit Mode for compatible objects. */
+    Main *bmain = CTX_data_main(C);
+    Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+    ViewLayer *view_layer = CTX_data_view_layer(C);
+
+    /* Store the original mode in restore_mode so we can restore it when switching back. */
+    ob_src->restore_mode = mode_src;
+
+    eObjectMode old_mode = eObjectMode(ob_src->mode);
+    ed_object_mode_generic_exit_ex(bmain, depsgraph, scene, ob_src, false);
+
+    if (ob_src->mode == OB_MODE_OBJECT || (ob_src->mode & old_mode) == 0) {
+      BKE_view_layer_synced_ensure(scene, view_layer);
+      Base *base_dst = BKE_view_layer_base_find(view_layer, ob_dst);
+      BKE_view_layer_base_deselect_all(scene, view_layer);
+      BKE_view_layer_base_select_and_set_active(view_layer, base_dst);
+
+      DEG_id_tag_update(&scene->id, ID_RECALC_SELECT);
+      WM_event_add_notifier(C, NC_SCENE | ND_OB_SELECT, scene);
+      ED_outliner_select_sync_from_object_tag(C);
+      WM_toolsystem_update_from_context_view3d(C);
+
+      /* Try to enter Edit Mode if the target object supports it. */
+      if (mode_compat_test(ob_dst, OB_MODE_EDIT)) {
+        mode_set_ex(C, OB_MODE_EDIT, true, op->reports);
+      }
+
+      return OPERATOR_FINISHED;
+    }
     return OPERATOR_CANCELLED;
   }
 
+  /* Check if target object has restore_mode set (from previous incompatible switch).
+   * If so, use that mode instead of the source mode. */
+  eObjectMode mode_to_transfer = mode_src;
+  if (ob_dst->restore_mode != OB_MODE_OBJECT) {
+    mode_to_transfer = eObjectMode(ob_dst->restore_mode);
+    ob_dst->restore_mode = OB_MODE_OBJECT;
+  }
+
   const bool mode_transferred = object_transfer_mode_to_base(
-      C, op, scene, ob_src, ob_dst, mode_src);
+      C, op, scene, ob_src, ob_dst, mode_to_transfer);
   if (!mode_transferred) {
     /* Error report should have been set by #object_transfer_mode_to_base call here. */
     return OPERATOR_CANCELLED;

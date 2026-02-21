@@ -11,12 +11,19 @@
 
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_modifier_types.h"
+#include "DNA_node_types.h"
+
+#include "ED_gn_selection.hh"
 
 #include "BLI_utildefines.h"
 
 #include "BKE_context.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_layer.hh"
+#include "BKE_modifier.hh"
+#include "BKE_node_legacy_types.hh"
+#include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
 
 #include "DEG_depsgraph.hh"
@@ -107,6 +114,69 @@ void uiTemplateEditModeSelection(ui::Layout *layout, bContext *C)
   RNA_enum_set(&op_ptr, "type", SCE_SELECT_FACE);
 }
 
+void uiTemplateGNSelectionMode(ui::Layout *layout, bContext *C)
+{
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  BKE_view_layer_synced_ensure(scene, view_layer);
+  Object *ob = BKE_view_layer_active_object_get(view_layer);
+
+  if (!ob || !ED_gn_selection_mode_active(ob)) {
+    return;
+  }
+
+  /* Get current domain from the active selection node */
+  int8_t current_domain = 0; /* Default to Point/Vertex */
+
+  NodesModifierData *nmd = reinterpret_cast<NodesModifierData *>(
+      BKE_modifiers_findby_type(ob, ModifierType::eModifierType_Nodes));
+  if (nmd && nmd->node_group) {
+    /* Find the 3D View Selection node */
+    for (bNode *node : nmd->node_group->all_nodes()) {
+      if (node->type_legacy == GEO_NODE_3D_VIEW_SELECTION && node->storage) {
+        NodeGeometry3DViewSelection *storage =
+            static_cast<NodeGeometry3DViewSelection *>(node->storage);
+        current_domain = storage->domain;
+        break;
+      }
+    }
+  }
+
+  ui::Layout &row = layout->row(true);
+
+  wmOperatorType *ot = WM_operatortype_find("GN_OT_select_mode", true);
+  if (!ot) {
+    return;
+  }
+
+  /* Map domain values to buttons:
+   * AttrDomain::Point = 0 (for mesh, this is vertex)
+   * AttrDomain::Edge = 1
+   * AttrDomain::Face = 2
+   */
+
+  PointerRNA op_ptr = row.op(ot,
+                             "",
+                             ICON_VERTEXSEL,
+                             wm::OpCallContext::InvokeDefault,
+                             (current_domain == 0) ? ui::ITEM_O_DEPRESS : UI_ITEM_NONE);
+  RNA_int_set(&op_ptr, "type", 0);
+
+  op_ptr = row.op(ot,
+                  "",
+                  ICON_EDGESEL,
+                  wm::OpCallContext::InvokeDefault,
+                  (current_domain == 1) ? ui::ITEM_O_DEPRESS : UI_ITEM_NONE);
+  RNA_int_set(&op_ptr, "type", 1);
+
+  op_ptr = row.op(ot,
+                  "",
+                  ICON_FACESEL,
+                  wm::OpCallContext::InvokeDefault,
+                  (current_domain == 2) ? ui::ITEM_O_DEPRESS : UI_ITEM_NONE);
+  RNA_int_set(&op_ptr, "type", 2);
+}
+
 static void uiTemplatePaintModeSelection(ui::Layout *layout, bContext *C)
 {
   const Scene *scene = CTX_data_scene(C);
@@ -150,6 +220,10 @@ void template_header3D_mode(ui::Layout *layout, bContext *C)
                               OB_MODE_TEXTURE_PAINT));
 
   uiTemplateEditModeSelection(layout, C);
+
+  /* Add GN Selection Mode selector */
+  uiTemplateGNSelectionMode(layout, C);
+
   if ((obedit == nullptr) && is_paint) {
     uiTemplatePaintModeSelection(layout, C);
   }

@@ -27,6 +27,7 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "ED_gn_selection.hh"
 #include "ED_outliner.hh"
 #include "ED_screen.hh"
 #include "ED_transform.hh"
@@ -258,6 +259,16 @@ void view3d_operatortypes()
   WM_operatortype_append(VIEW3D_OT_ruler_add);
   WM_operatortype_append(VIEW3D_OT_ruler_remove);
 
+  /* GN Selection Mode operators */
+  WM_operatortype_append(GN_OT_select);
+  WM_operatortype_append(GN_OT_select_box);
+  WM_operatortype_append(GN_OT_select_lasso);
+  WM_operatortype_append(GN_OT_select_circle);
+  WM_operatortype_append(GN_OT_selection_confirm);
+  WM_operatortype_append(GN_OT_selection_cancel);
+  WM_operatortype_append(OBJECT_OT_gn_selection_mode_set);
+  WM_operatortype_append(GN_OT_select_mode);
+
   ed::transform::transform_operatortypes();
 }
 
@@ -275,6 +286,12 @@ void view3d_keymap(wmKeyConfig *keyconf)
   viewzoom_modal_keymap(keyconf);
   viewdolly_modal_keymap(keyconf);
   viewplace_modal_keymap(keyconf);
+
+  /* GN Selection Mode keymap */
+  view3d_keymap_gn_selection(keyconf);
+
+  /* GN Selection Tool keymaps */
+  view3d_keymap_gn_selection_tools(keyconf);
 }
 
 /** \} */

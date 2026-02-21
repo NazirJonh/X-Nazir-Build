@@ -29,6 +29,8 @@ from bl_ui.properties_paint_common import (
     BrushAssetShelf,
 )
 
+from bl_tools.gn_selection_tools import _defs_gn_selection
+
 
 def kmi_to_string_or_none(kmi):
     return kmi.to_string() if kmi else "<none>"
@@ -3687,6 +3689,17 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         ),
     )
 
+    # GN Selection Mode tools - appear in Object Mode toolbar
+    # but only function when GN Selection Mode is active
+    _tools_gn_selection = (
+        (
+            _defs_gn_selection.select,
+            _defs_gn_selection.box,
+            _defs_gn_selection.circle,
+            _defs_gn_selection.lasso,
+        ),
+    )
+
     _tools_grease_pencil_primitives = (
         (
             _defs_grease_pencil_paint.box,
@@ -3729,6 +3742,8 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             *_tools_default,
             None,
             _tools_view3d_add,
+            None,
+            *_tools_gn_selection,
         ],
         'POSE': [
             *_tools_default,

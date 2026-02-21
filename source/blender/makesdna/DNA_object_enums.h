@@ -28,6 +28,7 @@ enum eObjectMode {
   OB_MODE_WEIGHT_GREASE_PENCIL = 1 << 10,
   OB_MODE_VERTEX_GREASE_PENCIL = 1 << 11,
   OB_MODE_SCULPT_CURVES = 1 << 12,
+  OB_MODE_GN_SELECTION = 1 << 13,
 };
 
 /** #Object.dt, #View3DShading.type */

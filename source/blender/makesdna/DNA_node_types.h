@@ -3911,4 +3911,40 @@ struct NodeStoreBundleItem {
   char _pad = {};
 };
 
+/**
+ * Storage for 3D View Selection node.
+ */
+struct NodeGeometry3DViewSelection {
+  DNA_DEFINE_CXX_METHODS(NodeGeometry3DViewSelection)
+
+  /** User-defined attribute name for storing selection. */
+  char attribute_name[64] = "";
+
+  /* Pointers first (8-byte aligned) */
+  int *selected_ids = nullptr;
+  int *selected_indices = nullptr;
+
+  /* Then uint64_t (8-byte aligned) */
+  uint64_t geometry_hash = 0;
+
+  /* Then int (4-byte aligned) */
+  int selected_ids_num = 0;
+  int selected_indices_num = 0;
+  int element_count = 0;
+
+  /** Selection domain: Point=0, Edge=1, Face=2 (matches AttrDomain enum). */
+  int8_t domain = 0;
+
+  /** Node mode: Input=0, Capture=1. */
+  int8_t mode = 0;
+
+  /** Storage mode: ID-based=0, Frozen=1. */
+  int8_t storage_mode = 0;
+
+  /** Data format version for forward compatibility. */
+  int8_t version = 1;
+
+  char _pad[8] = {};
+};
+
 }  // namespace blender

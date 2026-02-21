@@ -367,6 +367,11 @@ static void view3d_main_region_init(wmWindowManager *wm, ARegion *region)
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Pose", SPACE_EMPTY, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
 
+  /* GN Selection Mode - must be before Object Mode to intercept events */
+  keymap = WM_keymap_ensure(
+      wm->runtime->defaultconf, "GN Selection Mode", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
+
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Object Mode", SPACE_EMPTY, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
 

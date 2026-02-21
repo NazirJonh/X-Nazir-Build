@@ -46,4 +46,11 @@ void ED_buttons_set_context(const bContext *C,
                             PointerRNA *ptr,
                             int context);
 
+/**
+ * Get the current modifier drop state.
+ * \param r_index: The index where the modifier would be inserted.
+ * \return True if a modifier drag is active and over the properties editor.
+ */
+bool ED_buttons_modifier_drop_active(int *r_index);
+
 }  // namespace blender

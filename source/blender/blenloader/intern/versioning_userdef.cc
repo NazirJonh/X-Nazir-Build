@@ -1759,6 +1759,14 @@ void blo_do_versions_userdef(UserDef *userdef)
     userdef->uiflag2 |= USER_UIFLAG2_SHOW_ONLINE_ASSETS;
   }
 
+  /* Initialize asset library folder support fields. */
+  if (!USER_VERSION_ATLEAST(502, 4)) {
+    for (bUserAssetLibrary &library : userdef->asset_libraries) {
+      library.parent = nullptr;
+      library.type = USER_ASSET_LIBRARY_ITEM_TYPE_LEAF;
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a USER_VERSION_ATLEAST check.

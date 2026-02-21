@@ -562,7 +562,7 @@ class _draw_tool_settings_context_mode:
             header=True,
         )
 
-        if brush.curves_sculpt_brush_type not in {'ADD', 'DELETE'}:
+        if brush.curves_sculpt_brush_type not in {'ADD', 'DELETE', 'CUT'}:
             use_strength_pressure = brush.curves_sculpt_brush_type not in {'SLIDE'}
             UnifiedPaintPanel.prop_unified(
                 layout,
@@ -624,6 +624,9 @@ class _draw_tool_settings_context_mode:
             layout.popover("VIEW3D_PT_curves_sculpt_add_shape", text="Curve Shape")
         elif curves_tool == 'SLIDE':
             layout.popover("VIEW3D_PT_tools_brush_falloff")
+        elif curves_tool == 'CUT':
+            layout.prop(brush, "falloff_shape", expand=True)
+            layout.popover("VIEW3D_PT_curves_sculpt_cut_options", text="Cut Options")
 
         return True
 
@@ -9098,6 +9101,26 @@ class VIEW3D_PT_curves_sculpt_grow_shrink_scaling(Panel):
         layout.prop(brush.curves_sculpt_settings, "minimum_length")
 
 
+class VIEW3D_PT_curves_sculpt_cut_options(Panel):
+    # Only for popover, these are dummy values.
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'WINDOW'
+    bl_label = "Curves Sculpt Cut Options"
+    bl_ui_units_x = 12
+
+    def draw(self, context):
+        layout = self.layout
+
+        layout.use_property_split = True
+        layout.use_property_decorate = False  # No animation.
+
+        settings = UnifiedPaintPanel.paint_settings(context)
+        brush = settings.brush
+
+        layout.prop(brush.curves_sculpt_settings, "use_cut_keep_points")
+        layout.prop(brush.curves_sculpt_settings, "minimum_trim_length", text="Minimum Length")
+
+
 class VIEW3D_PT_viewport_debug(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
@@ -9443,6 +9466,7 @@ classes = (
     VIEW3D_PT_curves_sculpt_add_shape,
     VIEW3D_PT_curves_sculpt_parameter_falloff,
     VIEW3D_PT_curves_sculpt_grow_shrink_scaling,
+    VIEW3D_PT_curves_sculpt_cut_options,
     VIEW3D_PT_viewport_debug,
     VIEW3D_PT_active_spline,
     VIEW3D_AST_brush_sculpt,

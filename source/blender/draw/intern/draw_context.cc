@@ -93,6 +93,11 @@
 /* only for callbacks */
 #include "draw_cache_impl.hh"
 
+/* Forward declaration to ensure visibility. */
+namespace blender::draw {
+void DRW_mesh_batch_cache_clear_sculpt_custom_flags(const Mesh &mesh, const Object *ob);
+}
+
 #include "engines/compositor/compositor_engine.h"
 #include "engines/eevee/eevee_engine.h"
 #include "engines/external/external_engine.h"
@@ -1227,6 +1232,13 @@ static void drw_callbacks_post_scene(DRWContext &draw_ctx)
 
     ED_region_draw_cb_draw(draw_ctx.evil_C, draw_ctx.region, REGION_DRAW_POST_VIEW);
 
+    /* Python callbacks can leave matrix stack in an inconsistent state.
+     * Reset stack to base level to prevent overflow when drawing gizmos. */
+    GPU_matrix_stack_reset_to_base();
+    /* Restore matrices that were set before the callback. */
+    GPU_matrix_projection_set(rv3d->winmat);
+    GPU_matrix_set(rv3d->viewmat);
+
 #ifdef WITH_XR_OPENXR
     /* XR callbacks (controllers, custom draw functions) for session mirror. */
     if ((v3d->flag & V3D_XR_SESSION_MIRROR) != 0) {
@@ -1758,6 +1770,11 @@ void DRW_render_to_image(
 
   /* End GPU workload Boundary */
   GPU_render_end();
+}
+
+void DRW_mesh_batch_cache_clear_sculpt_custom_flags(const Mesh &mesh, const Object *ob)
+{
+  blender::draw::DRW_mesh_batch_cache_clear_sculpt_custom_flags(mesh, ob);
 }
 
 void DRW_render_object_iter(

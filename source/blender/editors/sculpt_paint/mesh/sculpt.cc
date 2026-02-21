@@ -789,6 +789,10 @@ void SCULPT_tag_update_overlays(bContext *C)
   RegionView3D *rv3d = CTX_wm_region_view3d(C);
   if (!BKE_sculptsession_use_pbvh_draw(&ob, rv3d)) {
     DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+    if (ob.type == OB_MESH && ob.data) {
+      Mesh *mesh = static_cast<Mesh *>(ob.data);
+      BKE_mesh_batch_cache_dirty_tag(mesh, BKE_MESH_BATCH_DIRTY_SCULPT_CUSTOM);
+    }
   }
 }
 
@@ -5118,6 +5122,41 @@ static void tag_mesh_positions_changed(Object &object, const bool use_pbvh_draw)
       object.runtime->bounds_eval = mesh.bounds_min_max();
     }
   }
+
+  /* Invalidate custom sculpt batches when mesh positions change */
+  // #region agent log
+  {
+    static unsigned long long counter = 0;
+    FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+    if (f) {
+      fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"sculpt.cc:5252\",\"message\":\"INVALIDATION_CALL: tag_mesh_positions_changed calling dirty_tag\",\"data\":{\"mesh_id\":\"%p\",\"object_id\":\"%p\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\"}\n",
+              counter++, &mesh, &object);
+      fclose(f);
+    }
+  }
+  // #endregion
+  BKE_mesh_batch_cache_dirty_tag(&mesh, BKE_MESH_BATCH_DIRTY_SCULPT_CUSTOM);
+  
+  /* CRITICAL: After invalidating batches, we need to ensure viewport redraw happens.
+   * However, we can't call ED_region_tag_redraw directly from here because we don't have
+   * access to bContext. Instead, we rely on flush_update_step to call ED_region_tag_redraw.
+   * 
+   * If viewport doesn't redraw, the issue is likely that flush_update_step is not being
+   * called after geometry changes, or it's called but ED_region_tag_redraw doesn't trigger
+   * a redraw of the custom overlay.
+   * 
+   * For now, we log this event so we can track when batches are invalidated. */
+  // #region agent log
+  {
+    static unsigned long long counter = 0;
+    FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+    if (f) {
+      fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"sculpt.cc:5263\",\"message\":\"INVALIDATION_CALL: After dirty_tag - viewport should redraw via flush_update_step\",\"data\":{\"mesh_id\":\"%p\",\"object_id\":\"%p\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"J\"}\n",
+              counter++, &mesh, &object);
+      fclose(f);
+    }
+  }
+  // #endregion
 }
 
 void flush_update_step(bContext *C, const UpdateType update_type)
@@ -5159,7 +5198,14 @@ void flush_update_step(ViewContext &vc, Object &object, const UpdateType update_
     DEG_id_tag_update(&object.id, ID_RECALC_GEOMETRY);
   }
 
-  ED_region_tag_redraw(vc.region);
+  /* Always invalidate custom sculpt batches when geometry is updated,
+   * regardless of whether pbvh_draw is used, because mesh positions may have changed. */
+  if (ob.type == OB_MESH && ob.data) {
+    Mesh *mesh = static_cast<Mesh *>(ob.data);
+    BKE_mesh_batch_cache_dirty_tag(mesh, BKE_MESH_BATCH_DIRTY_SCULPT_CUSTOM);
+  }
+
+  ED_region_tag_redraw(&region);
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   if (update_type == UpdateType::Position && !ss.shapekey_active) {
@@ -5245,6 +5291,13 @@ void flush_update_done(ViewContext &vc,
 
   if (need_tag) {
     DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+  }
+
+  /* Always invalidate custom sculpt batches when geometry update is done,
+   * regardless of need_tag, because mesh may have been modified during stroke. */
+  if (ob.type == OB_MESH && ob.data) {
+    Mesh *mesh = static_cast<Mesh *>(ob.data);
+    BKE_mesh_batch_cache_dirty_tag(mesh, BKE_MESH_BATCH_DIRTY_SCULPT_CUSTOM);
   }
 }
 
@@ -5446,6 +5499,7 @@ void store_mesh_from_eval(const wmOperator &op,
   DEG_id_tag_update(&mesh.id, ID_RECALC_SHADING);
   if (!use_pbvh_draw || entire_mesh_changed) {
     DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+    BKE_mesh_batch_cache_dirty_tag(&mesh, BKE_MESH_BATCH_DIRTY_SCULPT_CUSTOM);
   }
 }
 

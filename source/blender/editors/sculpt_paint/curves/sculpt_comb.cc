@@ -32,6 +32,8 @@
 
 #include "WM_api.hh"
 
+#include "draw/intern/draw_cache_impl.hh"
+
 #include <numeric>
 
 /**
@@ -108,7 +110,12 @@ struct CombOperationExecutor {
     curves_ob_orig_ = ctx_.object;
     curves_id_orig_ = id_cast<Curves *>(curves_ob_orig_->data);
     curves_orig_ = &curves_id_orig_->geometry.wrap();
+
+    printf("[BrushHighlight] CombOperation::execute: is_first=%d, points=%d\n",
+           stroke_extension.is_first, curves_orig_->points_num());
+
     if (curves_orig_->is_empty()) {
+      printf("[BrushHighlight]   curves is empty, returning\n");
       return;
     }
 
@@ -131,6 +138,7 @@ struct CombOperationExecutor {
     brush_pos_diff_re_ = brush_pos_re_ - brush_pos_prev_re_;
 
     if (stroke_extension.is_first) {
+      printf("[BrushHighlight]   first stroke, initializing\n");
       if (falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE || (U.uiflag & USER_ORBIT_SELECTION)) {
         this->initialize_spherical_brush_reference_point();
       }
@@ -156,6 +164,11 @@ struct CombOperationExecutor {
       return;
     }
 
+    printf("[BrushHighlight]   stroke extended, brush_pos=(%.1f, %.1f), brush_3d_.position_cu=(%.2f, %.2f, %.2f), radius=%.2f\n",
+           brush_pos_re_.x, brush_pos_re_.y,
+           self.brush_3d_.position_cu.x, self.brush_3d_.position_cu.y, self.brush_3d_.position_cu.z,
+           self.brush_3d_.radius_cu);
+
     Array<bool> changed_curves(curves_orig_->curves_num(), false);
 
     if (falloff_shape == PAINT_FALLOFF_SHAPE_TUBE) {
@@ -177,6 +190,32 @@ struct CombOperationExecutor {
     self_->constraint_solver_.solve_step(*curves_orig_, changed_curves_mask, surface, transforms_);
 
     curves_orig_->tag_positions_changed();
+
+    /* Debug: check if brush highlight code path is reached */
+    static int comb_debug_counter = 0;
+    comb_debug_counter++;
+    if (comb_debug_counter % 60 == 1) {
+      printf("[BrushHighlight] comb on_stroke_extended: updating highlight\n");
+    }
+
+    /* Always update brush highlight (removed Sphere-only condition) */
+    {
+      bke::SpanAttributeWriter<float> brush_highlight = brush_highlight_ensure(*curves_id_orig_);
+      update_brush_highlight(*curves_orig_,
+                             *curves_id_orig_,
+                             curves_orig_->positions(),
+                             IndexMask(curves_orig_->points_range()),
+                             self_->brush_3d_.position_cu,
+                             self_->brush_3d_.radius_cu * brush_radius_factor_,
+                             brush_,
+                             brush_strength_,
+                             brush_highlight.span);
+      brush_highlight.finish();
+
+      /* Force draw cache update so GPU buffer is recreated with new data */
+      draw::DRW_curves_batch_cache_tag_brush_highlight_update(curves_id_orig_);
+    }
+
     DEG_id_tag_update(&curves_id_orig_->id, ID_RECALC_GEOMETRY);
     WM_main_add_notifier(NC_GEOM | ND_DATA, &curves_id_orig_->id);
     ED_region_tag_redraw(ctx_.region);

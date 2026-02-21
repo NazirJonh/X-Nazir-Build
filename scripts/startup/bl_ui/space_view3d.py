@@ -7564,6 +7564,10 @@ class VIEW3D_PT_overlay_sculpt_curves(Panel):
         subrow.active = overlay.show_sculpt_curves_cage
         subrow.prop(overlay, "sculpt_curves_cage_opacity", text="Cage Opacity")
 
+        row = layout.row(align=True)
+        row.active = overlay.show_overlays
+        row.prop(overlay, "sculpt_curves_brush_highlight_opacity", text="Brush Highlight")
+
 
 class VIEW3D_PT_overlay_bones(Panel):
     bl_space_type = 'VIEW_3D'

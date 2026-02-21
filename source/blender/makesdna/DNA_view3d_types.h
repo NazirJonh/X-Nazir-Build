@@ -666,6 +666,10 @@ struct View3DOverlay {
 
   /** Curves sculpt mode settings. */
   float sculpt_curves_cage_opacity = 0;
+  /** Brush highlight opacity for curves sculpt mode. */
+  float sculpt_curves_brush_highlight_opacity = 1.0f;
+
+  char _pad0[4];
 };
 
 struct View3D_Runtime {

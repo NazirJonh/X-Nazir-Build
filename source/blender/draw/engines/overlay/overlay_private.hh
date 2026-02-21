@@ -506,6 +506,8 @@ class ShaderModule {
   StaticShader pointcloud_points = shader_clippable("overlay_edit_pointcloud");
   StaticShader sculpt_curves = shader_clippable("overlay_sculpt_curves_selection");
   StaticShader sculpt_curves_cage = shader_clippable("overlay_sculpt_curves_cage");
+  StaticShader sculpt_curves_brush_highlight = shader_clippable("overlay_sculpt_curves_brush_highlight");
+  StaticShader sculpt_curves_points = shader_clippable("overlay_sculpt_curves_points");
   StaticShader sculpt_mesh = shader_clippable("overlay_sculpt_mask");
   StaticShader uniform_color = shader_clippable("overlay_uniform_color");
   StaticShader uv_analysis_stretch_angle = {"overlay_edit_uv_stretching_angle"};

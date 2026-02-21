@@ -5358,6 +5358,13 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  prop = RNA_def_property(srna, "sculpt_curves_brush_highlight_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "overlay.sculpt_curves_brush_highlight_opacity");
+  RNA_def_property_ui_text(
+      prop, "Brush Highlight Opacity", "Opacity of the brush highlight in curves sculpt mode");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   prop = RNA_def_property(srna, "sculpt_mode_face_sets_opacity", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_sdna(prop, nullptr, "overlay.sculpt_mode_face_sets_opacity");
   RNA_def_property_ui_text(prop, "Sculpt Face Sets Opacity", "");

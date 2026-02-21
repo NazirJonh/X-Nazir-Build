@@ -63,3 +63,50 @@ ADDITIONAL_INFO(draw_globals)
 GPU_SHADER_CREATE_END()
 
 CREATE_INFO_VARIANT(overlay_sculpt_curves_cage_clipped, overlay_sculpt_curves_cage, drw_clipped)
+
+GPU_SHADER_INTERFACE_INFO(overlay_sculpt_curves_brush_highlight_iface)
+SMOOTH(float, highlight_intensity)
+GPU_SHADER_INTERFACE_END()
+
+GPU_SHADER_CREATE_INFO(overlay_sculpt_curves_brush_highlight)
+DO_STATIC_COMPILATION()
+PUSH_CONSTANT(float, brush_highlight_opacity)
+SAMPLER(2, samplerBuffer, brush_highlight_tx)
+VERTEX_OUT(overlay_sculpt_curves_brush_highlight_iface)
+VERTEX_SOURCE("overlay_sculpt_curves_brush_highlight_vert.glsl")
+FRAGMENT_SOURCE("overlay_sculpt_curves_brush_highlight_frag.glsl")
+FRAGMENT_OUT(0, float4, out_color)
+ADDITIONAL_INFO(draw_view)
+ADDITIONAL_INFO(draw_modelmat)
+ADDITIONAL_INFO(draw_globals)
+ADDITIONAL_INFO(draw_curves)
+ADDITIONAL_INFO(draw_curves_infos)
+GPU_SHADER_CREATE_END()
+
+CREATE_INFO_VARIANT(overlay_sculpt_curves_brush_highlight_clipped,
+                    overlay_sculpt_curves_brush_highlight,
+                    drw_clipped)
+
+GPU_SHADER_INTERFACE_INFO(overlay_sculpt_curves_points_iface)
+SMOOTH(float3, finalColor)
+GPU_SHADER_INTERFACE_END()
+
+GPU_SHADER_CREATE_INFO(overlay_sculpt_curves_points)
+DO_STATIC_COMPILATION()
+PUSH_CONSTANT(float, brush_highlight_opacity)
+PUSH_CONSTANT(float3, brush_highlight_color)
+SAMPLER(2, samplerBuffer, brush_highlight_tx)
+VERTEX_OUT(overlay_sculpt_curves_points_iface)
+VERTEX_SOURCE("overlay_sculpt_curves_points_vert.glsl")
+FRAGMENT_SOURCE("overlay_sculpt_curves_points_frag.glsl")
+FRAGMENT_OUT(0, float4, outColor)
+ADDITIONAL_INFO(draw_view)
+ADDITIONAL_INFO(draw_modelmat)
+ADDITIONAL_INFO(draw_globals)
+ADDITIONAL_INFO(draw_curves)
+ADDITIONAL_INFO(draw_curves_infos)
+GPU_SHADER_CREATE_END()
+
+CREATE_INFO_VARIANT(overlay_sculpt_curves_points_clipped,
+                    overlay_sculpt_curves_points,
+                    drw_clipped)

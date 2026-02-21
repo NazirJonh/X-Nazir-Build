@@ -152,6 +152,13 @@ gpu::Batch *DRW_curves_batch_cache_get_edit_points(Curves *curves);
 gpu::Batch *DRW_curves_batch_cache_get_sculpt_curves_cage(Curves *curves);
 gpu::Batch *DRW_curves_batch_cache_get_edit_curves_handles(Curves *curves);
 gpu::Batch *DRW_curves_batch_cache_get_edit_curves_lines(Curves *curves);
+gpu::VertBuf *DRW_curves_batch_cache_get_brush_highlight(Curves *curves);
+
+/**
+ * Tag the brush highlight buffer as needing update.
+ * Call this after modifying the .brush_highlight attribute.
+ */
+void DRW_curves_batch_cache_tag_brush_highlight_update(Curves *curves);
 
 void DRW_curves_batch_cache_create_requested(Object *ob);
 

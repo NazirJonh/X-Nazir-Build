@@ -162,6 +162,21 @@ struct PuffOperationExecutor {
     self_->constraint_solver_.solve_step(*curves_, curves_mask, surface_, transforms_);
 
     curves_->tag_positions_changed();
+
+    if (falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE || (U.uiflag & USER_ORBIT_SELECTION)) {
+      bke::SpanAttributeWriter<float> brush_highlight = brush_highlight_ensure(*curves_id_);
+      update_brush_highlight(*curves_,
+                             *curves_id_,
+                             curves_->positions(),
+                             IndexMask(curves_->points_range()),
+                             self.brush_3d_.position_cu,
+                             self.brush_3d_.radius_cu * brush_radius_factor_,
+                             brush_,
+                             brush_strength_,
+                             brush_highlight.span);
+      brush_highlight.finish();
+    }
+
     DEG_id_tag_update(&curves_id_->id, ID_RECALC_GEOMETRY);
     WM_main_add_notifier(NC_GEOM | ND_DATA, &curves_id_->id);
     ED_region_tag_redraw(ctx_.region);

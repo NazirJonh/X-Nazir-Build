@@ -755,6 +755,12 @@ void BKE_brush_init_curves_sculpt_settings(Brush *brush)
   settings->curve_radius = 0.01f;
   settings->density_add_attempts = 100;
   settings->curve_parameter_falloff = BKE_curvemapping_add(1, 0.0f, 0.0f, 1.0f, 1.0f);
+
+  settings->brush_highlight_enabled = true;
+  settings->brush_highlight_opacity = 0.5f;
+  settings->brush_highlight_color[0] = 1.0f;
+  settings->brush_highlight_color[1] = 0.5f;
+  settings->brush_highlight_color[2] = 0.0f;
 }
 
 void BKE_brush_tag_unsaved_changes(Brush *brush)

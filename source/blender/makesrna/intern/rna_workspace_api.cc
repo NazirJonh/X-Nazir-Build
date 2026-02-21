@@ -23,6 +23,9 @@
 
 #  include "BLI_string.h"
 
+#  include "WM_api.hh"
+#  include "WM_toolsystem.hh"
+
 #  include "BKE_paint.hh"
 #  include "BKE_report.hh"
 
@@ -85,6 +88,33 @@ static PointerRNA rna_WorkSpaceTool_operator_properties(bToolRef *tref,
     return ptr;
   }
 
+  BKE_reportf(reports, RPT_ERROR, "Operator '%s' not found!", idname);
+  return PointerRNA_NULL;
+}
+
+static PointerRNA rna_WorkSpaceTool_operator_properties_for_tool(ID *id,
+                                                                 bToolRef *tref,
+                                                                 bContext *C,
+                                                                 ReportList *reports,
+                                                                 const char *tool_idname,
+                                                                 const char *idname)
+{
+  WorkSpace *workspace = id_cast<WorkSpace *>(id);
+  bToolKey tkey;
+  tkey.space_type = tref->space_type;
+  tkey.mode = tref->mode;
+
+  if (!WM_toolsystem_tool_exists_in_workspace(C, workspace, &tkey, tool_idname)) {
+    BKE_reportf(reports, RPT_ERROR, "Tool '%s' not found in this context!", tool_idname);
+    return PointerRNA_NULL;
+  }
+
+  wmOperatorType *ot = WM_operatortype_find(idname, true);
+  if (ot != nullptr) {
+    PointerRNA ptr;
+    WM_toolsystem_ref_properties_ensure_from_operator_for_tool(tref, tool_idname, ot, &ptr);
+    return ptr;
+  }
   BKE_reportf(reports, RPT_ERROR, "Operator '%s' not found!", idname);
   return PointerRNA_NULL;
 }
@@ -173,6 +203,23 @@ void RNA_api_workspace_tool(StructRNA *srna)
   /* return */
   parm = RNA_def_pointer(func, "result", "OperatorProperties", "", "");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_RNAPTR);
+  RNA_def_function_return(func, parm);
+
+  /* Access tool operator options for explicit tool_idname (optionally create).
+   * Similar to operator_properties() but allows reading/setting properties for a specific tool
+   * without it being active. Properties are created if they don't exist. */
+  func = RNA_def_function(
+      srna, "operator_properties_for_tool", "rna_WorkSpaceTool_operator_properties_for_tool");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS | FUNC_USE_CONTEXT | FUNC_USE_SELF_ID);
+  RNA_def_function_ui_description(
+      func, "Get operator properties for a specific tool without activating it");
+  parm = RNA_def_string(func, "tool", nullptr, MAX_NAME, "Tool Identifier", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "operator", nullptr, 0, "Operator Identifier", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  /* return */
+  parm = RNA_def_pointer(func, "result", "OperatorProperties", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
   RNA_def_function_return(func, parm);
 
   /* Access gizmo-group options (optionally create). */

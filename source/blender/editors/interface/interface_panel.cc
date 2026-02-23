@@ -2142,7 +2142,6 @@ static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, AReg
 
 /** \} */
 
-
 /**
  * Draw the content (glyph and/or text) of a single category tab.
  *
@@ -2989,7 +2988,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
       /* Calculate dragged tab position (follows cursor) */
       rcti drag_rect = drag_tab->rect;
-      
+
       /* Adjust for scroll change since drag start so the tab follows the mouse */
       const int scroll_diff = region->category_scroll - drag_state->initial_scroll;
       drag_rect.ymin -= scroll_diff;
@@ -3029,7 +3028,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                                        rct,
                                        rct->xmin,
                                        rct->xmax,
-                                       true, /* always treat dragged tab as active for styling */
+                                       STREQ(category_id, category_id_active), /* show text only if dragged tab is actually active */
                                        is_left,
                                        display_mode,
                                        fontid,

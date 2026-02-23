@@ -4682,6 +4682,10 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
 
   printf("[DRAG DEBUG] Adding modal handler, returning RUNNING_MODAL\n");
   WM_event_add_modal_handler(C, op);
+
+  /* Set grab cursor during drag */
+  WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_HAND_CLOSED);
+
   ED_region_tag_redraw(region);
 
   return OPERATOR_RUNNING_MODAL;
@@ -4698,6 +4702,7 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
 
   if (region == nullptr || state == nullptr) {
     printf("[DRAG DEBUG] modal CANCELLED: region=%p, state=%p\n", (void*)region, (void*)state);
+    WM_cursor_modal_restore(CTX_wm_window(C));
     return OPERATOR_CANCELLED;
   }
 
@@ -4727,6 +4732,8 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
         MEM_delete(state);
         op->customdata = nullptr;
 
+        WM_cursor_modal_restore(CTX_wm_window(C));
+
         ED_region_tag_redraw(region);
         return OPERATOR_FINISHED;
       }
@@ -4739,6 +4746,8 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
       region->runtime->category_tabs_drag_state = nullptr;
       MEM_delete(state);
       op->customdata = nullptr;
+
+      WM_cursor_modal_restore(CTX_wm_window(C));
 
       ED_region_tag_redraw(region);
       return OPERATOR_CANCELLED;
@@ -4754,6 +4763,9 @@ static void category_tab_drag_cancel(bContext *C, wmOperator *op)
     MEM_delete(static_cast<CategoryDragState *>(op->customdata));
     region->runtime->category_tabs_drag_state = nullptr;
     op->customdata = nullptr;
+
+    WM_cursor_modal_restore(CTX_wm_window(C));
+
     ED_region_tag_redraw(region);
   }
 }

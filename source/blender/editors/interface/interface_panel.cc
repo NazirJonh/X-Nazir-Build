@@ -2966,6 +2966,12 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
       /* Calculate dragged tab position (follows cursor) */
       rcti drag_rect = drag_tab->rect;
+      
+      /* Adjust for scroll change since drag start so the tab follows the mouse */
+      const int scroll_diff = region->category_scroll - drag_state->initial_scroll;
+      drag_rect.ymin -= scroll_diff;
+      drag_rect.ymax -= scroll_diff;
+
       const int offset_y = int(drag_state->drag_offset_y);
       drag_rect.ymin += offset_y;
       drag_rect.ymax += offset_y;
@@ -4692,12 +4698,16 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   state->original_index = get_category_order_index(C, region, clicked_pc->idname);
   state->current_insert_index = state->original_index;
   state->drag_offset_y = 0.0f;
+  state->initial_scroll = region->category_scroll;
   state->tab_v_pad = 0;  /* Will be calculated during draw */
 
   op->customdata = state;
 
   /* Store initial state in region runtime */
   region->runtime->category_tabs_drag_state = state;
+
+  /* Start auto-scroll timer */
+  state->scroll_timer = WM_event_timer_add(CTX_wm_manager(C), CTX_wm_window(C), TIMER, 0.02f);
 
   printf("[DRAG DEBUG] Adding modal handler, returning RUNNING_MODAL\n");
   WM_event_add_modal_handler(C, op);
@@ -4717,36 +4727,99 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
   ARegion *region = CTX_wm_region(C);
   CategoryDragState *state = static_cast<CategoryDragState *>(op->customdata);
 
-  printf("[DRAG DEBUG] modal called, event type=%d, val=%d\n", event->type, event->val);
-
   if (region == nullptr || state == nullptr) {
-    printf("[DRAG DEBUG] modal CANCELLED: region=%p, state=%p\n", (void*)region, (void*)state);
+    if (state && state->scroll_timer) {
+      WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), (wmTimer *)state->scroll_timer);
+      state->scroll_timer = nullptr;
+    }
     WM_cursor_modal_restore(CTX_wm_window(C));
     return OPERATOR_CANCELLED;
   }
 
-  switch (event->type) {
-    case MOUSEMOVE: {
+  const bool is_timer = (event->type == TIMER && event->customdata == state->scroll_timer);
+
+  if (is_timer || event->type == MOUSEMOVE || event->type == WHEELUPMOUSE || event->type == WHEELDOWNMOUSE) {
+    if (event->type == MOUSEMOVE) {
       /* Update drag offset */
       state->drag_offset_y = float(event->mval[1] - state->drag_start_y);
-      printf("[DRAG DEBUG] modal MOUSEMOVE: offset_y=%.1f\n", state->drag_offset_y);
+    }
 
+    View2D *v2d = &region->v2d;
+    bool scrolled = false;
+    float scroll_amount = 0.0f;
+
+    if (event->type == WHEELUPMOUSE) {
+      scroll_amount = -20.0f * U.pixelsize;
+      printf("[DRAG DEBUG] WHEELUPMOUSE detected. scroll_amount=%.2f\n", scroll_amount);
+    }
+    else if (event->type == WHEELDOWNMOUSE) {
+      scroll_amount = 20.0f * U.pixelsize;
+      printf("[DRAG DEBUG] WHEELDOWNMOUSE detected. scroll_amount=%.2f\n", scroll_amount);
+    }
+    else {
+      /* Auto-scroll */
+      const float edge_margin = 30.0f * U.pixelsize;
+      const float auto_scroll_speed = 10.0f * U.pixelsize;
+      /* Use calculated mouse Y because TIMER event might not have valid mval */
+      int current_mouse_y = state->drag_start_y + (int)state->drag_offset_y;
+
+      if (current_mouse_y > region->winrct.ymax - region->winrct.ymin - edge_margin) {
+        scroll_amount = -auto_scroll_speed;
+        printf("[DRAG DEBUG] Auto-scroll UP triggered. y=%d margin=%.1f\n", current_mouse_y, edge_margin);
+      }
+      else if (current_mouse_y < edge_margin) {
+        scroll_amount = auto_scroll_speed;
+        printf("[DRAG DEBUG] Auto-scroll DOWN triggered. y=%d margin=%.1f\n", current_mouse_y, edge_margin);
+      }
+    }
+
+    if (scroll_amount != 0.0f) {
+      printf("[DRAG DEBUG] Attempting scroll. category_scroll=%d\n", region->category_scroll);
+
+      const int old_scroll = region->category_scroll;
+
+      /* Apply scroll */
+      region->category_scroll += (int)scroll_amount;
+
+      /* Note: Clamping happens in panel_category_tabs_draw_all during redraw.
+       * We rely on that to keep category_scroll within valid bounds. */
+
+      if (old_scroll != region->category_scroll) {
+        scrolled = true;
+        ED_region_tag_redraw(region);
+        printf("[DRAG DEBUG] Scrolled success. New category_scroll=%d\n", region->category_scroll);
+      }
+      else {
+        printf("[DRAG DEBUG] Scroll unchanged.\n");
+      }
+    }
+
+    if (scrolled || event->type == MOUSEMOVE) {
       /* Calculate new insert index */
       const wmWindowManager *wm = CTX_wm_manager(C);
       state->current_insert_index = calculate_insert_index(wm, region, state);
       update_insert_zone(wm, region, state);
-
       ED_region_tag_redraw(region);
-      break;
     }
 
+    if (is_timer) {
+      return OPERATOR_RUNNING_MODAL;
+    }
+    /* Consume mouse move and wheel events */
+    return OPERATOR_RUNNING_MODAL;
+  }
+
+  switch (event->type) {
     case LEFTMOUSE:
       if (event->val == KM_RELEASE) {
-        printf("[DRAG DEBUG] modal LEFTMOUSE RELEASE - applying order\n");
         /* Apply the new order */
         apply_category_order(C, region, state);
 
         /* Cleanup */
+        if (state->scroll_timer) {
+          WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), (wmTimer *)state->scroll_timer);
+          state->scroll_timer = nullptr;
+        }
         region->runtime->category_tabs_drag_state = nullptr;
         MEM_delete(state);
         op->customdata = nullptr;
@@ -4760,8 +4833,11 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
 
     case EVT_ESCKEY:
     case RIGHTMOUSE:
-      printf("[DRAG DEBUG] modal CANCEL by user (ESC/RMB)\n");
       /* Cancel drag */
+      if (state->scroll_timer) {
+        WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), (wmTimer *)state->scroll_timer);
+        state->scroll_timer = nullptr;
+      }
       region->runtime->category_tabs_drag_state = nullptr;
       MEM_delete(state);
       op->customdata = nullptr;
@@ -4779,7 +4855,14 @@ static void category_tab_drag_cancel(bContext *C, wmOperator *op)
 {
   ARegion *region = CTX_wm_region(C);
   if (region && region->runtime->category_tabs_drag_state) {
-    MEM_delete(static_cast<CategoryDragState *>(op->customdata));
+    CategoryDragState *state = static_cast<CategoryDragState *>(op->customdata);
+
+    if (state && state->scroll_timer) {
+      WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), (wmTimer *)state->scroll_timer);
+      state->scroll_timer = nullptr;
+    }
+
+    MEM_delete(state);
     region->runtime->category_tabs_drag_state = nullptr;
     op->customdata = nullptr;
 

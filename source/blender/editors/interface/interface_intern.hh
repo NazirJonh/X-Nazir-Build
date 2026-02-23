@@ -776,6 +776,10 @@ struct CategoryDragState {
   /* Insert zone boundaries for visual shift calculation */
   int insert_y_start = 0;
   int insert_y_end = 0;
+
+  int initial_scroll = 0;
+
+  void *scroll_timer = nullptr;
 };
 
 /* `interface.cc` */

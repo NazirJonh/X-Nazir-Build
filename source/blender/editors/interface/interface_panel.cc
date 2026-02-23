@@ -4341,12 +4341,24 @@ int handler_panel_region(bContext *C,
       /* Cycle tabs. */
       retval = ui_handle_panel_category_cycling(event, region, active_but);
       if (retval == WM_UI_HANDLER_BREAK) {
-        /* Show tooltip with active tab name, then hide after delay. */
-        WM_tooltip_immediate_init(C,
-                                  CTX_wm_window(C),
-                                  CTX_wm_area(C),
-                                  region,
-                                  ui_panel_category_active_tooltip_init);
+        /* Show or update tooltip with active tab name. */
+        wmWindow *win = CTX_wm_window(C);
+        const char *category_idname = panel_category_active_get(region, false);
+
+        if (category_idname) {
+          const std::string tooltip_text = std::string("Active tab: ") +
+                                           IFACE_(category_idname);
+
+          /* Try to update existing tooltip first to avoid flickering. */
+          if (!WM_tooltip_update_text(C, win, tooltip_text.c_str())) {
+            /* No existing tooltip - create new one. */
+            WM_tooltip_immediate_init(C,
+                                      win,
+                                      CTX_wm_area(C),
+                                      region,
+                                      ui_panel_category_active_tooltip_init);
+          }
+        }
       }
     }
     if (event->type == EVT_PADPERIOD) {

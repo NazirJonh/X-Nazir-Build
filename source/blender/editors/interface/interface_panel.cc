@@ -1915,16 +1915,22 @@ static int get_category_order_index(const bContext *C, ARegion *region, const ch
     }
     default_index++;
   }
-
   return 0;
 }
+
+/**
+ * Get ordered categories based on workspace customization.
+ * Forward declaration - defined later in this file.
+ */
+static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region);
 
 /**
  * Calculate the insert index based on cursor position during drag.
  * The insert index is clamped to never be less than the number of reserved
  * tabs at the start - non-reserved tabs can only be placed after reserved ones.
  */
-static int calculate_insert_index(const wmWindowManager *wm,
+static int calculate_insert_index(const bContext *C,
+                                  const wmWindowManager *wm,
                                   ARegion *region,
                                   CategoryDragState *state)
 {
@@ -1933,15 +1939,42 @@ static int calculate_insert_index(const wmWindowManager *wm,
 
   int index = 0;
 
+  /* Get ordered categories from workspace */
+  Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
+
   /* Iterate through all tabs (allow all categories for now) */
-  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+  for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+    PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
     /* Skip the dragged tab */
     if (STREQ(pc_dyn.idname, state->drag_category_id)) {
       continue;
     }
 
     const int tab_height = BLI_rcti_size_y(&pc_dyn.rect);
-    const int tab_center_y = pc_dyn.rect.ymax - tab_height / 2;
+
+    /* Calculate the current visual shift of this tab to prevent jumping (hysteresis). */
+    int y_shift = 0;
+    if (!state->is_reserved) {
+      /* Map the loop index (which skips dragged tab) to current_display_index */
+      int curr_disp = index;
+      if (index >= state->original_index) {
+        curr_disp++; /* Shift upward if we are past the originally pulled tab slot */
+      }
+
+      if (state->current_insert_index > state->original_index) {
+        if (curr_disp > state->original_index && curr_disp <= state->current_insert_index) {
+          y_shift = state->drag_tab_height + state->tab_v_pad;
+        }
+      }
+      else if (state->current_insert_index < state->original_index) {
+        if (curr_disp >= state->current_insert_index && curr_disp < state->original_index) {
+          y_shift = -state->drag_tab_height - state->tab_v_pad;
+        }
+      }
+    }
+
+    /* Shift the visual center exactly by the same amount the view does */
+    const int tab_center_y = (pc_dyn.rect.ymax + y_shift) - tab_height / 2;
     const int cursor_y = state->drag_start_y + int(state->drag_offset_y);
 
     /* If cursor is above tab center, insert before it */
@@ -1959,14 +1992,19 @@ static int calculate_insert_index(const wmWindowManager *wm,
 /**
  * Update the insert zone boundaries for visual shift calculation.
  */
-static void update_insert_zone(const wmWindowManager * /*wm*/,
+static void update_insert_zone(const bContext *C,
+                               const wmWindowManager * /*wm*/,
                                ARegion *region,
                                CategoryDragState *state)
 {
   int current_index = 0;
   int y_accumulated = 0;
 
-  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+  /* Get ordered categories from workspace */
+  Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
+
+  for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+    PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
     const int tab_height = BLI_rcti_size_y(&pc_dyn.rect);
 
     if (current_index == state->current_insert_index) {
@@ -2025,7 +2063,10 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
   Vector<std::string> final_order;
   int insert_idx = 0;
 
-  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+  Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
+
+  for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+    PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
     printf("[DRAG DEBUG] Processing category '%s', insert_idx=%d\n", pc_dyn.idname, insert_idx);
 
     /* Insert dragged category at correct position */
@@ -4741,7 +4782,17 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   STRNCPY(state->drag_category_id, clicked_pc->idname);
   state->drag_start_y = event->mval[1];
   state->drag_tab_height = BLI_rcti_size_y(&clicked_pc->rect);
-  state->original_index = get_category_order_index(C, region, clicked_pc->idname);
+
+  /* Calculate original index based on visual order, not workspace order value */
+  int visual_index = 0;
+  Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
+  for (PanelCategoryDyn *pc_dyn : ordered_categories) {
+    if (STREQ(pc_dyn->idname, clicked_pc->idname)) {
+      break;
+    }
+    visual_index++;
+  }
+  state->original_index = visual_index;
   state->current_insert_index = state->original_index;
   state->drag_offset_y = 0.0f;
   state->initial_scroll = region->category_scroll;
@@ -4884,8 +4935,8 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
     if (scrolled || event->type == MOUSEMOVE) {
       /* Calculate new insert index */
       const wmWindowManager *wm = CTX_wm_manager(C);
-      state->current_insert_index = calculate_insert_index(wm, region, state);
-      update_insert_zone(wm, region, state);
+      state->current_insert_index = calculate_insert_index(C, wm, region, state);
+      update_insert_zone(C, wm, region, state);
 
       /* Check if cursor is over a reserved tab and update cursor accordingly */
       bool over_reserved = false;

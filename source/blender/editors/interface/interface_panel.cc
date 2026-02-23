@@ -1975,10 +1975,23 @@ static int calculate_insert_index(const bContext *C,
 
     /* Shift the visual center exactly by the same amount the view does */
     const int tab_center_y = (pc_dyn.rect.ymax + y_shift) - tab_height / 2;
-    const int cursor_y = state->drag_start_y + int(state->drag_offset_y);
 
-    /* If cursor is above tab center, insert before it */
-    if (cursor_y > tab_center_y) {
+    /* Use appropriate edge of dragged tab based on actual direction of movement.
+     * Compare current offset with previous frame's offset to detect direction.
+     * When moving up, use top edge; when moving down, use bottom edge. */
+    int edge_offset;
+    if (state->drag_offset_y > state->prev_drag_offset_y) {
+      /* Moving up - use top edge */
+      edge_offset = state->drag_top_edge_offset;
+    }
+    else {
+      /* Moving down or stationary - use bottom edge */
+      edge_offset = state->drag_bottom_edge_offset;
+    }
+    const int effective_y = state->drag_start_y + edge_offset + int(state->drag_offset_y);
+
+    /* If effective position is above this tab's center, insert before it */
+    if (effective_y > tab_center_y) {
       /* Clamp to minimum index - can't insert before reserved tabs */
       return max_ii(index, min_insert_index);
     }
@@ -2049,15 +2062,10 @@ static void workspace_category_order_clear(WorkSpace *workspace, int space_type,
  */
 static void apply_category_order(bContext *C, ARegion *region, CategoryDragState *state)
 {
-  printf("[DRAG DEBUG] apply_category_order called for '%s', insert_index=%d\n",
-         state->drag_category_id, state->current_insert_index);
-
   WorkSpace *workspace = CTX_wm_workspace(C);
   ScrArea *area = CTX_wm_area(C);
   const int space_type = area ? area->spacetype : 0;
   const int region_type = region->regiontype;
-
-  printf("[DRAG DEBUG] space_type=%d, region_type=%d\n", space_type, region_type);
 
   /* Build final order - allow ALL categories for now (ignore reserved check) */
   Vector<std::string> final_order;
@@ -2067,12 +2075,9 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
 
   for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
     PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
-    printf("[DRAG DEBUG] Processing category '%s', insert_idx=%d\n", pc_dyn.idname, insert_idx);
 
     /* Insert dragged category at correct position */
     if (insert_idx == state->current_insert_index) {
-      printf("[DRAG DEBUG] Inserting dragged '%s' at position %d\n",
-             state->drag_category_id, insert_idx);
       final_order.append(state->drag_category_id);
     }
 
@@ -2087,13 +2092,7 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
   if (insert_idx <= state->current_insert_index &&
       !final_order.contains(state->drag_category_id))
   {
-    printf("[DRAG DEBUG] Adding dragged '%s' at end\n", state->drag_category_id);
     final_order.append(state->drag_category_id);
-  }
-
-  printf("[DRAG DEBUG] Final order has %zu items:\n", final_order.size());
-  for (int i = 0; i < final_order.size(); i++) {
-    printf("[DRAG DEBUG]   %d: %s\n", i, final_order[i].c_str());
   }
 
   /* Clear old order for this region */
@@ -2107,7 +2106,6 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
     STRNCPY(item->category_id, final_order[i].c_str());
     item->order_index = i;
     BLI_addtail(&workspace->category_order, item);
-    printf("[DRAG DEBUG] Saved: order_index=%d, category='%s'\n", i, final_order[i].c_str());
   }
 
   /* Notify of change */
@@ -2124,8 +2122,6 @@ static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, AReg
   const int space_type = area ? area->spacetype : 0;
   const int region_type = region->regiontype;
 
-  printf("[DRAG DEBUG] get_ordered_categories: space_type=%d, region_type=%d\n", space_type, region_type);
-
   /* Map of existing categories for quick lookup */
   Map<std::string, PanelCategoryDyn *> existing;
   for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
@@ -2134,21 +2130,15 @@ static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, AReg
 
   /* Collect workspace order entries for this region */
   Vector<std::pair<int, std::string>> workspace_order;
-  int order_count = 0;
   for (WorkspaceCategoryOrder *order =
            static_cast<WorkspaceCategoryOrder *>(workspace->category_order.first);
        order;
        order = order->next)
   {
-    printf("[DRAG DEBUG]   Checking order: space=%d, region=%d, category='%s', index=%d\n",
-           order->space_type, order->region_type, order->category_id, order->order_index);
     if (order->space_type == space_type && order->region_type == region_type) {
       workspace_order.append(std::make_pair(order->order_index, std::string(order->category_id)));
-      order_count++;
     }
   }
-
-  printf("[DRAG DEBUG] Found %d workspace order entries for this region\n", order_count);
 
   /* Sort by order_index */
   std::sort(workspace_order.begin(), workspace_order.end());
@@ -2163,7 +2153,6 @@ static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, AReg
     if (pc && !added.contains(item.second)) {
       result.append(*pc);
       added.add(item.second);
-      printf("[DRAG DEBUG]   Added from workspace order: '%s'\n", item.second.c_str());
     }
   }
 
@@ -2173,11 +2162,9 @@ static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, AReg
     if (!added.contains(id)) {
       result.append(&pc_dyn);
       added.add(id);
-      printf("[DRAG DEBUG]   Added from default order: '%s'\n", id.c_str());
     }
   }
 
-  printf("[DRAG DEBUG] get_ordered_categories returning %zu items\n", result.size());
   return result;
 }
 
@@ -4293,11 +4280,6 @@ int handler_panel_region(bContext *C,
         const double time_elapsed = BLI_time_now_seconds() -
                                      region->runtime->category_tabs_drag_start_time;
 
-        printf("[DRAG DEBUG] MOUSEMOVE: pending_id='%s', delta_y=%d, time=%.3f\n",
-               region->runtime->category_tabs_drag_pending_id,
-               drag_delta_y,
-               time_elapsed);
-
         if (drag_delta_y > CATEGORY_DRAG_THRESHOLD_PX ||
             time_elapsed > CATEGORY_DRAG_DELAY_SEC)
         {
@@ -4305,10 +4287,8 @@ int handler_panel_region(bContext *C,
              return WM_UI_HANDLER_CONTINUE;
            }
 
-          printf("[DRAG DEBUG] THRESHOLD EXCEEDED! Starting operator...\n");
           /* Start the drag operator */
           wmOperatorType *ot = WM_operatortype_find("UI_OT_category_tab_drag", true);
-          printf("[DRAG DEBUG] Operator found: %p\n", (void*)ot);
           if (ot) {
             /* Clear pending state before invoking operator */
             region->runtime->category_tabs_drag_pending_id[0] = '\0';
@@ -4317,7 +4297,6 @@ int handler_panel_region(bContext *C,
             wmEvent drag_event = *event;
             drag_event.mval[1] = region->runtime->category_tabs_drag_start_y;
 
-            printf("[DRAG DEBUG] Calling WM_operator_name_call_ptr...\n");
             WM_operator_name_call_ptr(C, ot, wm::OpCallContext::InvokeDefault, nullptr, &drag_event);
             /* Return BREAK - modal operator now handles events */
             return WM_UI_HANDLER_BREAK;
@@ -4337,9 +4316,7 @@ int handler_panel_region(bContext *C,
   if (event->val != KM_PRESS) {
     /* Handle LEFTMOUSE RELEASE for pending drag state */
     if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
-      printf("[DRAG DEBUG] LEFTMOUSE RELEASE, pending_id='%s'\n", region->runtime->category_tabs_drag_pending_id);
       if (region->runtime->category_tabs_drag_pending_id[0] != '\0') {
-        printf("[DRAG DEBUG] RELEASE with pending - this was a CLICK, not a drag\n");
         /* This was a click, not a drag - handle normally */
         PanelCategoryDyn *pc_dyn = panel_category_find(region,
                                                         region->runtime->category_tabs_drag_pending_id);
@@ -4403,13 +4380,9 @@ int handler_panel_region(bContext *C,
       PanelCategoryDyn *pc_dyn = panel_categories_find_mouse_over(region, event);
       if (pc_dyn) {
         /* Store pending drag state - allow drag for all categories for now */
-        printf("[DRAG DEBUG] LEFTMOUSE PRESS on tab: %s, mval_y=%d\n", pc_dyn->idname, event->mval[1]);
         STRNCPY(region->runtime->category_tabs_drag_pending_id, pc_dyn->idname);
         region->runtime->category_tabs_drag_start_y = event->mval[1];
         region->runtime->category_tabs_drag_start_time = BLI_time_now_seconds();
-        printf("[DRAG DEBUG] Pending state saved: pending_id='%s', start_y=%d\n",
-               region->runtime->category_tabs_drag_pending_id,
-               region->runtime->category_tabs_drag_start_y);
         /* Return CONTINUE to keep receiving MOUSEMOVE events for drag detection */
         retval = WM_UI_HANDLER_CONTINUE;
       }
@@ -4738,11 +4711,8 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
                                                   wmOperator *op,
                                                   const wmEvent *event)
 {
-  printf("[DRAG DEBUG] category_tab_drag_invoke called! mval=(%d,%d)\n", event->mval[0], event->mval[1]);
-
   ARegion *region = CTX_wm_region(C);
   if (region == nullptr) {
-    printf("[DRAG DEBUG] INVOKE CANCELLED: region is null\n");
     return OPERATOR_CANCELLED;
   }
 
@@ -4751,13 +4721,11 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
       clicked_pc = &pc_dyn;
-      printf("[DRAG DEBUG] Found clicked tab: %s\n", clicked_pc->idname);
       break;
     }
   }
 
   if (clicked_pc == nullptr) {
-    printf("[DRAG DEBUG] INVOKE CANCELLED: no tab found at mouse position\n");
     return OPERATOR_CANCELLED;
   }
 
@@ -4766,13 +4734,11 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   panel_category_glyph_lookup(CTX_wm_manager(C), clicked_pc->idname, nullptr, nullptr, &is_reserved_glyph, nullptr);
 
   /* Initialize drag state (allow all categories for now) */
-  printf("[DRAG DEBUG] Initializing drag state for '%s'\n", clicked_pc->idname);
   CategoryDragState *state = MEM_new<CategoryDragState>(__func__);
   state->is_dragging = true;
   state->is_reserved = is_reserved_glyph;
 
   if (is_reserved_glyph) {
-    printf("[DRAG DEBUG] Reserved tab '%s' - entering modal for tooltip\n", clicked_pc->idname);
     /* Create persistent tooltip */
     const char *msg = "Reserved (Cannot Reorder)";
     state->tooltip_region = tooltip_create_from_text(C, msg, event->xy);
@@ -4782,6 +4748,12 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   STRNCPY(state->drag_category_id, clicked_pc->idname);
   state->drag_start_y = event->mval[1];
   state->drag_tab_height = BLI_rcti_size_y(&clicked_pc->rect);
+
+  /* Calculate offsets from click point to tab edges.
+   * When moving up, we use top edge; when moving down, we use bottom edge.
+   * This provides intuitive insert position feedback regardless of click position. */
+  state->drag_top_edge_offset = clicked_pc->rect.ymax - event->mval[1];
+  state->drag_bottom_edge_offset = clicked_pc->rect.ymin - event->mval[1];
 
   /* Calculate original index based on visual order, not workspace order value */
   int visual_index = 0;
@@ -4806,7 +4778,6 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   /* Start auto-scroll timer */
   state->scroll_timer = WM_event_timer_add(CTX_wm_manager(C), CTX_wm_window(C), TIMER, 0.02f);
 
-  printf("[DRAG DEBUG] Adding modal handler, returning RUNNING_MODAL\n");
   WM_event_add_modal_handler(C, op);
 
   /* Set grab cursor during drag */
@@ -4878,7 +4849,8 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
 
   if (is_timer || event->type == MOUSEMOVE || event->type == WHEELUPMOUSE || event->type == WHEELDOWNMOUSE) {
     if (event->type == MOUSEMOVE) {
-      /* Update drag offset */
+      /* Save previous offset for direction detection, then update */
+      state->prev_drag_offset_y = state->drag_offset_y;
       state->drag_offset_y = float(event->mval[1] - state->drag_start_y);
     }
 
@@ -4888,11 +4860,9 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
 
     if (event->type == WHEELUPMOUSE) {
       scroll_amount = -20.0f * U.pixelsize;
-      printf("[DRAG DEBUG] WHEELUPMOUSE detected. scroll_amount=%.2f\n", scroll_amount);
     }
     else if (event->type == WHEELDOWNMOUSE) {
       scroll_amount = 20.0f * U.pixelsize;
-      printf("[DRAG DEBUG] WHEELDOWNMOUSE detected. scroll_amount=%.2f\n", scroll_amount);
     }
     else {
       /* Auto-scroll */
@@ -4903,17 +4873,13 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
 
       if (current_mouse_y > region->winrct.ymax - region->winrct.ymin - edge_margin) {
         scroll_amount = -auto_scroll_speed;
-        printf("[DRAG DEBUG] Auto-scroll UP triggered. y=%d margin=%.1f\n", current_mouse_y, edge_margin);
       }
       else if (current_mouse_y < edge_margin) {
         scroll_amount = auto_scroll_speed;
-        printf("[DRAG DEBUG] Auto-scroll DOWN triggered. y=%d margin=%.1f\n", current_mouse_y, edge_margin);
       }
     }
 
     if (scroll_amount != 0.0f) {
-      printf("[DRAG DEBUG] Attempting scroll. category_scroll=%d\n", region->category_scroll);
-
       const int old_scroll = region->category_scroll;
 
       /* Apply scroll */
@@ -4925,10 +4891,6 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
       if (old_scroll != region->category_scroll) {
         scrolled = true;
         ED_region_tag_redraw(region);
-        printf("[DRAG DEBUG] Scrolled success. New category_scroll=%d\n", region->category_scroll);
-      }
-      else {
-        printf("[DRAG DEBUG] Scroll unchanged.\n");
       }
     }
 

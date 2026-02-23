@@ -768,9 +768,12 @@ struct CategoryDragState {
   char drag_category_id[64] = "";
   int drag_start_y = 0;
   int drag_tab_height = 0;
-  int original_index = 0;        /* Original position of dragged tab */
+  int drag_top_edge_offset = 0;     /* Offset from click point to top edge of tab */
+  int drag_bottom_edge_offset = 0;  /* Offset from click point to bottom edge of tab */
+  int original_index = 0;           /* Original position of dragged tab */
   int current_insert_index = 0;
   float drag_offset_y = 0.0f;
+  float prev_drag_offset_y = 0.0f;  /* Previous frame's offset, for detecting direction change */
   int tab_v_pad = 0;
 
   /* Insert zone boundaries for visual shift calculation */

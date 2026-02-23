@@ -779,6 +779,11 @@ struct CategoryDragState {
 
   int initial_scroll = 0;
 
+  bool is_reserved = false;
+  int current_mouse_x = 0;
+  int current_mouse_y = 0;
+  ARegion *tooltip_region = nullptr;
+
   void *scroll_timer = nullptr;
 };
 

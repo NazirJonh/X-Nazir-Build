@@ -1448,7 +1448,7 @@ static void panel_category_tabs_draw_settings_button(const bContext *C,
    * between regions, so this timeout is a fallback safety mechanism.
    */
   const bool hover_timeout_expired = time_since_hover > 2.0;
-  const bool recent_click = time_since_click < 0.5;
+  UNUSED_VARS(time_since_click);
 
   if (win && win->runtime->eventstate) {
     /* Check if mouse is in this region and over the button. */
@@ -1862,13 +1862,32 @@ static bool category_is_reserved_for_reorder(const wmWindowManager *wm, const ch
 }
 
 /**
+ * Count the number of reserved tabs at the beginning of the category list.
+ * These tabs cannot be reordered and act as a "header" - non-reserved tabs
+ * can only be placed after them.
+ */
+static int count_reserved_tabs_at_start(const wmWindowManager *wm, ARegion *region)
+{
+  int reserved_count = 0;
+  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (category_is_reserved_for_reorder(wm, pc_dyn.idname)) {
+      reserved_count++;
+    }
+    else {
+      /* Stop counting at first non-reserved tab - reserved tabs are contiguous at start */
+      break;
+    }
+  }
+  return reserved_count;
+}
+
+/**
  * Get the current index of a category in the workspace order,
  * or its default position if not in workspace order.
  */
 static int get_category_order_index(const bContext *C, ARegion *region, const char *category_id)
 {
   WorkSpace *workspace = CTX_wm_workspace(C);
-  const wmWindowManager *wm = CTX_wm_manager(C);
   ScrArea *area = CTX_wm_area(C);
   const int space_type = area ? area->spacetype : 0;
   const int region_type = region->regiontype;
@@ -1902,11 +1921,16 @@ static int get_category_order_index(const bContext *C, ARegion *region, const ch
 
 /**
  * Calculate the insert index based on cursor position during drag.
+ * The insert index is clamped to never be less than the number of reserved
+ * tabs at the start - non-reserved tabs can only be placed after reserved ones.
  */
 static int calculate_insert_index(const wmWindowManager *wm,
                                   ARegion *region,
                                   CategoryDragState *state)
 {
+  /* Get the minimum insert index (after all reserved tabs) */
+  const int min_insert_index = count_reserved_tabs_at_start(wm, region);
+
   int index = 0;
 
   /* Iterate through all tabs (allow all categories for now) */
@@ -1922,7 +1946,8 @@ static int calculate_insert_index(const wmWindowManager *wm,
 
     /* If cursor is above tab center, insert before it */
     if (cursor_y > tab_center_y) {
-      return index;
+      /* Clamp to minimum index - can't insert before reserved tabs */
+      return max_ii(index, min_insert_index);
     }
 
     index++;
@@ -1934,7 +1959,7 @@ static int calculate_insert_index(const wmWindowManager *wm,
 /**
  * Update the insert zone boundaries for visual shift calculation.
  */
-static void update_insert_zone(const wmWindowManager *wm,
+static void update_insert_zone(const wmWindowManager * /*wm*/,
                                ARegion *region,
                                CategoryDragState *state)
 {
@@ -1990,7 +2015,6 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
          state->drag_category_id, state->current_insert_index);
 
   WorkSpace *workspace = CTX_wm_workspace(C);
-  const wmWindowManager *wm = CTX_wm_manager(C);
   ScrArea *area = CTX_wm_area(C);
   const int space_type = area ? area->spacetype : 0;
   const int region_type = region->regiontype;
@@ -2666,7 +2690,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
 
     /* Skip drawing the dragged tab in its normal position */
-    if (is_dragging && STREQ(pc_dyn.idname, drag_category_id)) {
+    if (is_dragging && !drag_state->is_reserved && STREQ(pc_dyn.idname, drag_category_id)) {
       current_display_index++;
       continue;
     }
@@ -2675,7 +2699,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
      * Only shift tabs that are between original position and insert position.
      */
     int y_shift = 0;
-    if (is_dragging) {
+    if (is_dragging && !drag_state->is_reserved) {
       const int insert_idx = drag_state->current_insert_index;
       const int original_idx = drag_state->original_index;
 
@@ -2713,7 +2737,6 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     }
     const char *category_id = pc_dyn.idname;
     const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
-    size_t category_draw_len = BLF_DRAW_STR_DUMMY_MAX;
     const bool is_active = !too_narrow && STREQ(category_id, category_id_active);
 
     /* Increment display index after processing */
@@ -2841,7 +2864,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   }
 
   /* Draw the dragged tab at cursor position and ghost tab at insert position */
-  if (is_dragging) {
+  if (is_dragging && !drag_state->is_reserved) {
     PanelCategoryDyn *drag_tab = nullptr;
     for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
       if (STREQ(pc_dyn.idname, drag_category_id)) {
@@ -3022,6 +3045,9 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       }
     }
   }
+
+  /* Draw tooltip for reserved tabs during drag attempt */
+  /* Tooltip is handled by CategoryDragState->tooltip_region created in invoke/modal */
 
   GPU_line_smooth(false);
 
@@ -3959,6 +3985,13 @@ static ARegion *ui_panel_category_tooltip_init(
         tooltip_text = IFACE_(category_idname);
       }
 
+      /* Check if category is reserved (cannot be reordered). */
+      bool is_reserved_glyph = false;
+      panel_category_glyph_lookup(CTX_wm_manager(C), category_idname, nullptr, nullptr, &is_reserved_glyph, nullptr);
+      if (is_reserved_glyph) {
+        tooltip_text += " (Reserved)";
+      }
+
       /* Position tooltip to avoid overlapping the tab.
        * Convert tab rect from region-local to screen coordinates.
        * Use mouse Y position for the rect to keep tooltip aligned with cursor vertically. */
@@ -4688,10 +4721,24 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
+  /* Check if reserved (cannot be reordered) */
+  bool is_reserved_glyph = false;
+  panel_category_glyph_lookup(CTX_wm_manager(C), clicked_pc->idname, nullptr, nullptr, &is_reserved_glyph, nullptr);
+
   /* Initialize drag state (allow all categories for now) */
   printf("[DRAG DEBUG] Initializing drag state for '%s'\n", clicked_pc->idname);
   CategoryDragState *state = MEM_new<CategoryDragState>(__func__);
   state->is_dragging = true;
+  state->is_reserved = is_reserved_glyph;
+
+  if (is_reserved_glyph) {
+    printf("[DRAG DEBUG] Reserved tab '%s' - entering modal for tooltip\n", clicked_pc->idname);
+    /* Create persistent tooltip */
+    const char *msg = "Reserved (Cannot Reorder)";
+    state->tooltip_region = tooltip_create_from_text(C, msg, event->xy);
+  }
+  state->current_mouse_x = event->mval[0];
+  state->current_mouse_y = event->mval[1];
   STRNCPY(state->drag_category_id, clicked_pc->idname);
   state->drag_start_y = event->mval[1];
   state->drag_tab_height = BLI_rcti_size_y(&clicked_pc->rect);
@@ -4713,7 +4760,7 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   WM_event_add_modal_handler(C, op);
 
   /* Set grab cursor during drag */
-  WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_HAND_CLOSED);
+  WM_cursor_modal_set(CTX_wm_window(C), state->is_reserved ? WM_CURSOR_HAND : WM_CURSOR_HAND_CLOSED);
 
   ED_region_tag_redraw(region);
 
@@ -4737,6 +4784,47 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
   }
 
   const bool is_timer = (event->type == TIMER && event->customdata == state->scroll_timer);
+
+  /* Special handling for reserved tabs (tooltip only) */
+  if (state->is_reserved) {
+    if (event->type == MOUSEMOVE) {
+      if (state->tooltip_region) {
+        int dx = event->mval[0] - state->current_mouse_x;
+        int dy = event->mval[1] - state->current_mouse_y;
+        BLI_rcti_translate(&state->tooltip_region->winrct, dx, dy);
+      }
+      state->current_mouse_x = event->mval[0];
+      state->current_mouse_y = event->mval[1];
+      ED_region_tag_redraw(region);
+    }
+    
+    /* Finish on mouse release or leaving region */
+    bool finish = (event->type == LEFTMOUSE && event->val == KM_RELEASE);
+    if (!finish && (event->mval[0] < 0 || event->mval[0] > region->winx ||
+                    event->mval[1] < 0 || event->mval[1] > region->winy))
+    {
+      finish = true;
+    }
+
+    if (finish) {
+      if (state->tooltip_region) {
+        tooltip_free(C, CTX_wm_screen(C), state->tooltip_region);
+        state->tooltip_region = nullptr;
+      }
+      if (state->scroll_timer) {
+        WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), (wmTimer *)state->scroll_timer);
+        state->scroll_timer = nullptr;
+      }
+      region->runtime->category_tabs_drag_state = nullptr;
+      MEM_delete(state);
+      op->customdata = nullptr;
+      WM_cursor_modal_restore(CTX_wm_window(C));
+      ED_region_tag_redraw(region);
+      return OPERATOR_FINISHED;
+    }
+    
+    return OPERATOR_RUNNING_MODAL;
+  }
 
   if (is_timer || event->type == MOUSEMOVE || event->type == WHEELUPMOUSE || event->type == WHEELDOWNMOUSE) {
     if (event->type == MOUSEMOVE) {
@@ -4799,6 +4887,22 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
       const wmWindowManager *wm = CTX_wm_manager(C);
       state->current_insert_index = calculate_insert_index(wm, region, state);
       update_insert_zone(wm, region, state);
+
+      /* Check if cursor is over a reserved tab and update cursor accordingly */
+      bool over_reserved = false;
+      for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+        if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
+          if (category_is_reserved_for_reorder(wm, pc_dyn.idname)) {
+            over_reserved = true;
+          }
+          break;
+        }
+      }
+
+      /* Set cursor: STOP if over reserved tab, otherwise closed hand for dragging */
+      WM_cursor_modal_set(CTX_wm_window(C),
+                          over_reserved ? WM_CURSOR_STOP : WM_CURSOR_HAND_CLOSED);
+
       ED_region_tag_redraw(region);
     }
 
@@ -4812,10 +4916,16 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
   switch (event->type) {
     case LEFTMOUSE:
       if (event->val == KM_RELEASE) {
-        /* Apply the new order */
-        apply_category_order(C, region, state);
+        /* Apply the new order (only for non-reserved tabs) */
+        if (!state->is_reserved) {
+          apply_category_order(C, region, state);
+        }
 
         /* Cleanup */
+        if (state->tooltip_region) {
+          tooltip_free(C, CTX_wm_screen(C), state->tooltip_region);
+          state->tooltip_region = nullptr;
+        }
         if (state->scroll_timer) {
           WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), (wmTimer *)state->scroll_timer);
           state->scroll_timer = nullptr;
@@ -4834,6 +4944,10 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
     case EVT_ESCKEY:
     case RIGHTMOUSE:
       /* Cancel drag */
+      if (state->tooltip_region) {
+        tooltip_free(C, CTX_wm_screen(C), state->tooltip_region);
+        state->tooltip_region = nullptr;
+      }
       if (state->scroll_timer) {
         WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), (wmTimer *)state->scroll_timer);
         state->scroll_timer = nullptr;
@@ -4846,6 +4960,9 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
 
       ED_region_tag_redraw(region);
       return OPERATOR_CANCELLED;
+      
+    default:
+      break;
   }
 
   return OPERATOR_RUNNING_MODAL;
@@ -4856,6 +4973,11 @@ static void category_tab_drag_cancel(bContext *C, wmOperator *op)
   ARegion *region = CTX_wm_region(C);
   if (region && region->runtime->category_tabs_drag_state) {
     CategoryDragState *state = static_cast<CategoryDragState *>(op->customdata);
+
+    if (state && state->tooltip_region) {
+      tooltip_free(C, CTX_wm_screen(C), state->tooltip_region);
+      state->tooltip_region = nullptr;
+    }
 
     if (state && state->scroll_timer) {
       WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), (wmTimer *)state->scroll_timer);

@@ -4222,6 +4222,10 @@ int handler_panel_region(bContext *C,
         if (drag_delta_y > CATEGORY_DRAG_THRESHOLD_PX ||
             time_elapsed > CATEGORY_DRAG_DELAY_SEC)
         {
+          if (U.category_tabs_allow_edit) {
+             return WM_UI_HANDLER_CONTINUE;
+           }
+
           printf("[DRAG DEBUG] THRESHOLD EXCEEDED! Starting operator...\n");
           /* Start the drag operator */
           wmOperatorType *ot = WM_operatortype_find("UI_OT_category_tab_drag", true);
@@ -4631,6 +4635,9 @@ static bool category_tab_drag_poll(bContext *C)
     return false;
   }
   if (!panel_category_tabs_is_visible(region)) {
+    return false;
+  }
+  if (U.category_tabs_allow_edit) {
     return false;
   }
   return true;

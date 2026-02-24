@@ -1896,6 +1896,62 @@ static const char *panel_category_display_name_lookup(const wmWindowManager *wm,
 }
 
 /**
+ * Get category display name for tooltip.
+ * Returns user override if exists, otherwise looks up panel label from panel types,
+ * otherwise returns the category name itself.
+ * This is different from panel_category_display_name_lookup which doesn't check panel types.
+ */
+static const char *panel_category_tooltip_name_get(const ARegion *region,
+                                                   const wmWindowManager *wm,
+                                                   const char *category_idname)
+{
+  /* 1. Check user overrides first */
+  if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category_idname)) {
+        if (item->display_name[0] != '\0') {
+          return item->display_name;
+        }
+        break;
+      }
+    }
+  }
+
+  /* 2. Check global mappings */
+  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category_idname)) {
+        if (item->display_name[0] != '\0') {
+          return item->display_name;
+        }
+        break;
+      }
+    }
+  }
+
+  /* 3. Look up panel label from panel types */
+  for (const PanelType &pt : region->runtime->type->paneltypes) {
+    if (pt.category && STREQ(pt.category, category_idname)) {
+      const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+      if (panel_label && panel_label[0]) {
+        return panel_label;
+      }
+    }
+  }
+
+  /* 4. Fallback to category name itself */
+  return category_idname;
+}
+
+/**
  * Check if a string is a single glyph (not regular text).
  * Used to determine if the category is using an icon glyph.
  */
@@ -4221,21 +4277,23 @@ static ARegion *ui_panel_category_tooltip_init(
   /* Determine if tabs are on the left or right side. */
   const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
 
+  /* Get window manager for category display name lookup. */
+  const wmWindowManager *wm = CTX_wm_manager(C);
+
   /* Find the category tab under the mouse. */
   for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     if (BLI_rcti_isect_pt(&pc_dyn.rect, mval[0], mval[1])) {
       const char *category_idname = pc_dyn.idname;
 
-      /* Check if category is a single glyph (icon). */
-      const int utf8_char_size = BLI_str_utf8_size_safe(category_idname);
-      const size_t category_len = BLI_strnlen(category_idname, 64);
-      const bool is_single_glyph = (category_len == 1) ||
-                                    (utf8_char_size > 0 && size_t(utf8_char_size) == category_len);
-
       std::string tooltip_text;
 
-      if (is_single_glyph) {
-        /* For glyph categories, collect panel names in this category. */
+      if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) {
+        /* In GLYPHS_ONLY mode, show the category display name (from user override or panel label). */
+        const char *category_display_name = panel_category_tooltip_name_get(region, wm, category_idname);
+        tooltip_text = IFACE_(category_display_name);
+      }
+      else {
+        /* In GLYPHS_TEXT mode, collect panel names in this category. */
         Vector<std::string> panel_names;
         for (const Panel &panel : region->panels) {
           if (panel.type && STREQ(panel.type->category, category_idname)) {
@@ -4255,12 +4313,9 @@ static ARegion *ui_panel_category_tooltip_init(
         }
         else {
           /* Fallback to category name if no panels found. */
-          tooltip_text = IFACE_(category_idname);
+          const char *category_display_name = panel_category_tooltip_name_get(region, wm, category_idname);
+          tooltip_text = IFACE_(category_display_name);
         }
-      }
-      else {
-        /* For text categories in GLYPHS_ONLY mode, still show tooltip with category name. */
-        tooltip_text = IFACE_(category_idname);
       }
 
       /* Position tooltip to avoid overlapping the tab.

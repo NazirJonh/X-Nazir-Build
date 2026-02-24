@@ -1918,7 +1918,7 @@ static void apply_glyph_darkening(const int fontid, uchar color[3], const float 
  * - Categories with fallback letter
  * - Categories with user overrides
  */
-static bool category_is_reserved(const wmWindowManager *wm, const char *category_id)
+bool category_is_reserved(const wmWindowManager *wm, const char *category_id)
 {
   /* 1. Check wm.category_glyph_mappings (Python DEFAULT_CATEGORY_GLYPHS) */
   if (wm) {
@@ -2637,7 +2637,6 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
     /* Get glyph for this category using priority chain. */
     bool is_fallback_letter = false;
-    bool is_reserved_glyph = category_is_reserved(wm, category_id);
     float glyph_color[3] = {0.0f, 0.0f, 0.0f};
     const char *glyph = panel_category_glyph_lookup(wm, category_id, nullptr, &is_fallback_letter, glyph_color);
     const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
@@ -4947,7 +4946,6 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
       state->drag_offset_y = float(event->mval[1] - state->drag_start_y);
     }
 
-    View2D *v2d = &region->v2d;
     bool scrolled = false;
     float scroll_amount = 0.0f;
 

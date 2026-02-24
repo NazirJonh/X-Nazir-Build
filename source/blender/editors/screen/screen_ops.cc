@@ -7230,6 +7230,9 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
   char category[64];
   RNA_string_get(op->ptr, "category", category);
 
+  /* Get window manager for checking reserved categories */
+  wmWindowManager *wm = CTX_wm_manager(C);
+
   /* Category name field - TEXT ONLY, no glyph */
   char display_name[64] = "";
   RNA_string_get(op->ptr, "display_name", display_name);
@@ -7239,8 +7242,20 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
     RNA_string_set(op->ptr, "display_name", category);
   }
 
+  /* Check if category is reserved (from DEFAULT_CATEGORY_GLYPHS).
+   * Reserved categories cannot have their display name changed. */
+  bool is_reserved = blender::ui::category_is_reserved(wm, category);
+
   /* Label and property on same line */
-  layout.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
+  if (is_reserved) {
+    /* Reserved categories: show field as read-only (disabled) */
+    ui::Layout &row = layout.row(false);
+    row.enabled_set(false);
+    row.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
+  }
+  else {
+    layout.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
+  }
 
   layout.separator();
 
@@ -7278,7 +7293,6 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
    * If glyph property is set, use the processed glyph.
    * Otherwise, use panel_category_glyph_lookup to get the default/mapped glyph.
    */
-  wmWindowManager *wm = CTX_wm_manager(C);
   const char *preview_glyph = nullptr;
 
   if (glyph[0] != '\0') {

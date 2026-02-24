@@ -2555,6 +2555,13 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
                                         bool *r_is_fallback_letter,
                                         float r_color[3]);
 
+/**
+ * Check if a category is reserved (from DEFAULT_CATEGORY_GLYPHS).
+ * Reserved categories cannot have their display name changed.
+ * \return True if the category is reserved.
+ */
+bool category_is_reserved(const wmWindowManager *wm, const char *category_id);
+
 }  // namespace ui
 void template_header3D_mode(ui::Layout *layout, bContext *C);
 void uiTemplateEditModeSelection(ui::Layout *layout, bContext *C);

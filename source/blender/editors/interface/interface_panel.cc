@@ -1674,8 +1674,21 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
       if (STREQ(item->category, category)) {
-        /* If override has a glyph, use it and return immediately. */
+        /* If override has a glyph AND it's not a fallback letter, use it and return immediately. */
         if (item->glyph[0] != '\0') {
+          /* Check if this is actually a fallback letter (first char of category). */
+          const int category_first_char_size = BLI_str_utf8_size_safe(category);
+          if (category_first_char_size > 0 &&
+              STREQLEN(item->glyph, category, category_first_char_size) &&
+              item->glyph[category_first_char_size] == '\0')
+          {
+            /* Glyph is the first character of category - treat as fallback letter.
+             * Save color and continue to fallback. */
+            if (r_color && !is_zero_v3(item->color)) {
+              copy_v3_v3(r_color, item->color);
+            }
+            break;
+          }
           if (r_color) {
             copy_v3_v3(r_color, item->color);
           }
@@ -1702,8 +1715,20 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
         if (r_color && is_zero_v3(r_color) && !is_zero_v3(item->color)) {
           copy_v3_v3(r_color, item->color);
         }
-        /* Only return if glyph is not empty. If empty, continue to fallback. */
+        /* Only return if glyph is not empty AND not a fallback letter.
+         * A glyph that matches the first character of the category is a fallback letter,
+         * even if it was saved in the mapping. */
         if (item->glyph[0] != '\0') {
+          /* Check if this is actually a fallback letter (first char of category). */
+          const int category_first_char_size = BLI_str_utf8_size_safe(category);
+          if (category_first_char_size > 0 &&
+              STREQLEN(item->glyph, category, category_first_char_size) &&
+              item->glyph[category_first_char_size] == '\0')
+          {
+            /* Glyph is the first character of category - treat as fallback letter.
+             * Continue to fallback to set is_fallback_letter=true. */
+            break;
+          }
           return item->glyph;
         }
         break; /* Found entry but glyph is empty - continue to fallback. */

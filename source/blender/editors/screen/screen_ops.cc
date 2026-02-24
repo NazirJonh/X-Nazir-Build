@@ -7024,8 +7024,6 @@ static void category_tab_edit_popup_ok_cb(bContext * /*C*/, void * /*user_data*/
  */
 static bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8_max)
 {
-  printf("[DEBUG hex_to_utf8] input='%s'\n", input ? input : "(null)");
-  
   if (!input || !input[0]) {
     return false;
   }
@@ -7042,8 +7040,6 @@ static bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8
 
   /* Check if remaining string is a valid hex number (1-6 hex digits for Unicode) */
   size_t hex_len = strlen(hex_start);
-  printf("[DEBUG hex_to_utf8] hex_start='%s', hex_len=%zu\n", hex_start, hex_len);
-  
   if (hex_len == 0 || hex_len > 6) {
     return false;
   }
@@ -7051,15 +7047,12 @@ static bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8
   /* Verify all characters are hex digits */
   for (size_t i = 0; i < hex_len; i++) {
     if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
-      printf("[DEBUG hex_to_utf8] Invalid hex digit at pos %zu: '%c' (0x%02x)\n", 
-             i, hex_start[i], (unsigned char)hex_start[i]);
       return false;
     }
   }
 
   /* Parse hex to unsigned int using Blender's method (same as ui_handle_unicode_input) */
   uint val = strtoul(hex_start, nullptr, 16);
-  printf("[DEBUG hex_to_utf8] codepoint=%u (0x%x)\n", val, val);
 
   /* Validate Unicode codepoint range (same check as ui_handle_unicode_input) */
   if (val < 32 || val > 0x10FFFF) {
@@ -7073,12 +7066,6 @@ static bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8
   if (utf8_len > 0 && size_t(utf8_len) < utf8_max) {
     utf8_out[utf8_len] = '\0';
   }
-  
-  printf("[DEBUG hex_to_utf8] utf8_len=%d, output bytes: ", utf8_len);
-  for (int i = 0; i <= utf8_len && i < 8; i++) {
-    printf("%02x ", (unsigned char)utf8_out[i]);
-  }
-  printf("\n");
 
   return utf8_len > 0;
 }
@@ -7138,6 +7125,117 @@ static void utf8_to_hex_codepoint(const char *input, char *output, size_t output
 }
 
 /**
+ * Check if a codepoint is likely a display glyph (icon) rather than a regular letter.
+ * Glyphs are typically in:
+ * - Private Use Areas: U+E000-U+F8FF, U+F0000-U+FFFFD, U+100000-U+10FFFD
+ * - Symbol ranges: U+2600-U+27BF, U+1F300-U+1FAFF
+ */
+static bool is_display_glyph_codepoint(unsigned int codepoint)
+{
+  /* Private Use Areas (font icons like Font Awesome) */
+  if ((codepoint >= 0xE000 && codepoint <= 0xF8FF) ||
+      (codepoint >= 0xF0000 && codepoint <= 0xFFFFD) ||
+      (codepoint >= 0x100000 && codepoint <= 0x10FFFD)) {
+    return true;
+  }
+  /* Common symbol ranges */
+  if ((codepoint >= 0x2600 && codepoint <= 0x27BF) ||
+      (codepoint >= 0x1F300 && codepoint <= 0x1FAFF)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Check if a string consists of a single UTF-8 character (glyph).
+ */
+static bool is_single_glyph_str(const char *str)
+{
+  if (!str || !str[0]) {
+    return false;
+  }
+  const int utf8_char_size = BLI_str_utf8_size_safe(str);
+  const size_t len = BLI_strnlen(str, 64);
+  return (len == 1) || (utf8_char_size > 0 && size_t(utf8_char_size) == len);
+}
+
+/**
+ * Find panel label for a category by searching paneltypes.
+ * Used when category display name is just a glyph - we need the actual text name.
+ */
+static const char *find_panel_label_for_category(ARegion *region, const char *category)
+{
+  if (!region || !region->runtime || !region->runtime->type || !category) {
+    return nullptr;
+  }
+  
+  for (const PanelType &pt : region->runtime->type->paneltypes) {
+    if (pt.category && STREQ(pt.category, category)) {
+      const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+      if (panel_label && panel_label[0]) {
+        return panel_label;
+      }
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * Extract leading glyph from display name.
+ * If the string starts with a glyph character followed by space, extract it.
+ * Returns the glyph in hex format and the remaining text without the glyph.
+ *
+ * \param input: Full display name potentially starting with glyph.
+ * \param glyph_hex_out: Output buffer for extracted glyph hex code.
+ * \param glyph_hex_max: Size of glyph hex output buffer.
+ * \param text_out: Output buffer for remaining text (without glyph).
+ * \param text_max: Size of text output buffer.
+ * \return true if a glyph was extracted, false otherwise.
+ */
+static bool extract_leading_glyph(const char *input,
+                                  char *glyph_hex_out,
+                                  size_t glyph_hex_max,
+                                  char *text_out,
+                                  size_t text_max)
+{
+  if (!input || !input[0]) {
+    glyph_hex_out[0] = '\0';
+    text_out[0] = '\0';
+    return false;
+  }
+
+  /* Get first UTF-8 character */
+  const int first_char_len = BLI_str_utf8_size_safe(input);
+  if (first_char_len <= 0) {
+    glyph_hex_out[0] = '\0';
+    BLI_strncpy(text_out, input, text_max);
+    return false;
+  }
+
+  /* Extract first character as codepoint */
+  unsigned int codepoint = BLI_str_utf8_as_unicode_safe(input);
+  
+  /* Check if it's a display glyph */
+  if (!is_display_glyph_codepoint(codepoint)) {
+    glyph_hex_out[0] = '\0';
+    BLI_strncpy(text_out, input, text_max);
+    return false;
+  }
+
+  /* Convert glyph to hex */
+  BLI_snprintf(glyph_hex_out, glyph_hex_max, "%x", codepoint);
+
+  /* Skip the glyph character and any following space */
+  const char *rest = input + first_char_len;
+  while (*rest == ' ') {
+    rest++;
+  }
+
+  BLI_strncpy(text_out, rest, text_max);
+  return true;
+}
+
+/**
  * Live update callback for category tab edit popup.
  * Updates category_glyph_overrides immediately when properties change,
  * enabling real-time preview without clicking Save.
@@ -7161,12 +7259,6 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
 
   char glyph_raw[16];
   RNA_string_get(op->ptr, "glyph", glyph_raw);
-
-  printf("[DEBUG live_update] glyph_raw='%s', bytes: ", glyph_raw);
-  for (int i = 0; glyph_raw[i]; i++) {
-    printf("%02x ", (unsigned char)glyph_raw[i]);
-  }
-  printf("\n");
 
   /* Validate glyph input: must be empty or valid hex code (1-6 hex digits) */
   bool glyph_valid = true;
@@ -7218,12 +7310,6 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
   if (glyph_valid && glyph_raw[0] != '\0') {
     process_glyph_input(glyph_raw, glyph, sizeof(glyph));
   }
-
-  printf("[DEBUG live_update] glyph='%s', bytes: ", glyph);
-  for (int i = 0; glyph[i]; i++) {
-    printf("%02x ", (unsigned char)glyph[i]);
-  }
-  printf("\n");
 
   /* Update the override immediately for live preview */
   wmWindowManager *wm = CTX_wm_manager(C);
@@ -7351,7 +7437,43 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
 
   /* If display_name is empty, use category as default */
   if (display_name[0] == '\0') {
-    RNA_string_set(op->ptr, "display_name", category);
+    /* Extract any leading glyph from category name (shouldn't happen, but be safe) */
+    char extracted_glyph[16];
+    char clean_name[64];
+    if (extract_leading_glyph(category, extracted_glyph, sizeof(extracted_glyph),
+                              clean_name, sizeof(clean_name))) {
+      /* If clean_name is empty after extraction, find panel label */
+      if (clean_name[0] == '\0') {
+        ARegion *region = CTX_wm_region(C);
+        const char *panel_label = find_panel_label_for_category(region, category);
+        if (panel_label) {
+          STRNCPY(clean_name, panel_label);
+        }
+      }
+      RNA_string_set(op->ptr, "display_name", clean_name);
+      /* Also set the extracted glyph if glyph field is empty */
+      char current_glyph[16];
+      RNA_string_get(op->ptr, "glyph", current_glyph);
+      if (current_glyph[0] == '\0') {
+        RNA_string_set(op->ptr, "glyph", extracted_glyph);
+      }
+    }
+    else {
+      /* Check if category is a single glyph - find panel label */
+      if (is_single_glyph_str(category)) {
+        ARegion *region = CTX_wm_region(C);
+        const char *panel_label = find_panel_label_for_category(region, category);
+        if (panel_label) {
+          RNA_string_set(op->ptr, "display_name", panel_label);
+        }
+        else {
+          RNA_string_set(op->ptr, "display_name", category);
+        }
+      }
+      else {
+        RNA_string_set(op->ptr, "display_name", category);
+      }
+    }
   }
 
   /* Check if category is reserved (from DEFAULT_CATEGORY_GLYPHS).
@@ -7590,10 +7712,31 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
        item = static_cast<CategoryGlyphItem *>(item->next))
   {
     if (STREQ(item->category, category)) {
-      RNA_string_set(op->ptr, "display_name", item->display_name);
-      /* Convert glyph to hex code for display */
+      /* Extract any leading glyph from display_name */
+      char extracted_glyph[16];
+      char clean_display_name[64];
+      extract_leading_glyph(item->display_name, extracted_glyph, sizeof(extracted_glyph),
+                           clean_display_name, sizeof(clean_display_name));
+      
+      /* If display_name is empty after glyph extraction, find panel label */
+      if (clean_display_name[0] == '\0') {
+        const char *panel_label = find_panel_label_for_category(region, category);
+        if (panel_label) {
+          STRNCPY(clean_display_name, panel_label);
+        }
+      }
+      
+      RNA_string_set(op->ptr, "display_name", clean_display_name);
+      
+      /* Use extracted glyph if item->glyph is empty, otherwise use item->glyph */
       char hex_code[16];
-      utf8_to_hex_codepoint(item->glyph, hex_code, sizeof(hex_code));
+      if (item->glyph[0] != '\0') {
+        utf8_to_hex_codepoint(item->glyph, hex_code, sizeof(hex_code));
+      } else if (extracted_glyph[0] != '\0') {
+        STRNCPY(hex_code, extracted_glyph);
+      } else {
+        hex_code[0] = '\0';
+      }
       RNA_string_set(op->ptr, "glyph", hex_code);
       RNA_float_set_array(op->ptr, "color", item->color);
       has_override = true;
@@ -7618,6 +7761,14 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     }
     if (!is_zero_v3(glyph_color)) {
       RNA_float_set_array(op->ptr, "color", glyph_color);
+    }
+    
+    /* Set display_name: if category is a single glyph, find panel label */
+    if (is_single_glyph_str(category)) {
+      const char *panel_label = find_panel_label_for_category(region, category);
+      if (panel_label) {
+        RNA_string_set(op->ptr, "display_name", panel_label);
+      }
     }
   }
 
@@ -7769,7 +7920,7 @@ static wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *o
   return OPERATOR_FINISHED;
 }
 
-static void category_tab_edit_dialog_layout(bContext * /*C*/, wmOperator *op)
+static void category_tab_edit_dialog_layout(bContext *C, wmOperator *op)
 {
   ui::Layout &layout = *op->layout;
 
@@ -7782,7 +7933,32 @@ static void category_tab_edit_dialog_layout(bContext * /*C*/, wmOperator *op)
 
   /* If display_name is empty, use category as default */
   if (display_name[0] == '\0') {
-    RNA_string_set(op->ptr, "display_name", category);
+    /* Extract any leading glyph from category name (shouldn't happen, but be safe) */
+    char extracted_glyph[16];
+    char clean_name[64];
+    if (extract_leading_glyph(category, extracted_glyph, sizeof(extracted_glyph),
+                              clean_name, sizeof(clean_name))) {
+      RNA_string_set(op->ptr, "display_name", clean_name);
+      /* Also set the extracted glyph if glyph field is empty */
+      char current_glyph[16];
+      RNA_string_get(op->ptr, "glyph", current_glyph);
+      if (current_glyph[0] == '\0') {
+        RNA_string_set(op->ptr, "glyph", extracted_glyph);
+      }
+    }
+    else {
+      /* Check if category is a single glyph - find panel label */
+      if (is_single_glyph_str(category)) {
+        ARegion *region = CTX_wm_region(C);
+        const char *panel_label = find_panel_label_for_category(region, category);
+        if (panel_label) {
+          RNA_string_set(op->ptr, "display_name", panel_label);
+        }
+        else {
+          RNA_string_set(op->ptr, "display_name", category);
+        }
+      }
+    }
   }
 
   /* Label and property on same line */
@@ -7861,7 +8037,17 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
 
   /* Update dialog operator properties to reflect defaults in UI */
   if (category_tab_current_dialog_op) {
-    RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", category);
+    /* Extract any leading glyph from category name (shouldn't happen, but be safe) */
+    char extracted_glyph[16];
+    char clean_name[64];
+    if (extract_leading_glyph(category, extracted_glyph, sizeof(extracted_glyph),
+                              clean_name, sizeof(clean_name))) {
+      RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", clean_name);
+    }
+    else {
+      RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", category);
+    }
+    
     if (default_glyph) {
       /* Convert UTF-8 glyph back to hex code for the glyph field */
       char glyph_hex[16];
@@ -7912,8 +8098,6 @@ static wmOperatorStatus category_tab_paste_glyph_exec(bContext *C, wmOperator *o
   int clipboard_len;
   char *clipboard_text = WM_clipboard_text_get(false, true, &clipboard_len);
   
-  printf("[DEBUG paste_glyph] clipboard_len=%d\n", clipboard_len);
-  
   if (!clipboard_text || !clipboard_text[0]) {
     if (clipboard_text) {
       MEM_delete(clipboard_text);
@@ -7921,13 +8105,6 @@ static wmOperatorStatus category_tab_paste_glyph_exec(bContext *C, wmOperator *o
     BKE_report(op->reports, RPT_WARNING, "Clipboard is empty");
     return OPERATOR_CANCELLED;
   }
-  
-  /* Debug: print raw clipboard bytes */
-  printf("[DEBUG paste_glyph] raw clipboard bytes: ");
-  for (int i = 0; i < clipboard_len && i < 20; i++) {
-    printf("%02x ", (unsigned char)clipboard_text[i]);
-  }
-  printf("\n");
   
   /* Validate clipboard content as hex code */
   const char *hex_start = clipboard_text;
@@ -7943,8 +8120,6 @@ static wmOperatorStatus category_tab_paste_glyph_exec(bContext *C, wmOperator *o
                          hex_start[hex_len - 1] == '\r' || hex_start[hex_len - 1] == '\n')) {
     hex_len--;
   }
-  
-  printf("[DEBUG paste_glyph] hex_start='%s', hex_len=%zu\n", hex_start, hex_len);
   
   bool valid = true;
   
@@ -7973,13 +8148,8 @@ static wmOperatorStatus category_tab_paste_glyph_exec(bContext *C, wmOperator *o
   memcpy(hex_clean, hex_start, 4);
   hex_clean[4] = '\0';
   
-  printf("[DEBUG paste_glyph] hex_clean='%s', bytes: %02x %02x %02x %02x %02x\n",
-         hex_clean, (unsigned char)hex_clean[0], (unsigned char)hex_clean[1],
-         (unsigned char)hex_clean[2], (unsigned char)hex_clean[3], (unsigned char)hex_clean[4]);
-  
   /* Validate Unicode codepoint range */
   uint val = strtoul(hex_clean, nullptr, 16);
-  printf("[DEBUG paste_glyph] codepoint value=%u (0x%x)\n", val, val);
   
   if (val < 32 || val > 0x10FFFF) {
     MEM_delete(clipboard_text);
@@ -7992,22 +8162,11 @@ static wmOperatorStatus category_tab_paste_glyph_exec(bContext *C, wmOperator *o
   RNA_string_get(op->ptr, "category", category);
   
   /* Set glyph in operator properties */
-  printf("[DEBUG paste_glyph] Setting glyph='%s' to operator props\n", hex_clean);
   RNA_string_set(op->ptr, "glyph", hex_clean);
   
   /* Update the dialog operator if it exists */
   if (category_tab_current_dialog_op) {
-    printf("[DEBUG paste_glyph] Setting glyph='%s' to dialog operator\n", hex_clean);
     RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", hex_clean);
-    
-    /* Verify what was actually set */
-    char verify[16];
-    RNA_string_get(category_tab_current_dialog_op->ptr, "glyph", verify);
-    printf("[DEBUG paste_glyph] Verified dialog glyph='%s', bytes: ", verify);
-    for (int i = 0; verify[i]; i++) {
-      printf("%02x ", (unsigned char)verify[i]);
-    }
-    printf("\n");
   }
   
   MEM_delete(clipboard_text);

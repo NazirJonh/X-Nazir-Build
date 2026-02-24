@@ -7353,10 +7353,17 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
   if (!item) {
     item = MEM_new<CategoryGlyphItem>(__func__);
     STRNCPY(item->category, category);
-    item->display_name[0] = '\0';  /* Will be set on Save */
+    item->display_name[0] = '\0';
     item->glyph[0] = '\0';
     zero_v3(item->color);
     BLI_addtail(&wm->category_glyph_overrides, item);
+  }
+
+  /* Update display_name for live preview */
+  char display_name[64];
+  RNA_string_get(op->ptr, "display_name", display_name);
+  if (display_name[0] != '\0') {
+    STRNCPY(item->display_name, display_name);
   }
 
   /* Update color for live preview */

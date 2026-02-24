@@ -121,12 +121,12 @@ typedef struct CategoryGlyphItem {
   /** Custom color for glyph (RGB 0.0-1.0), {0,0,0} = use theme color. */
   float color[3];
   /** User-defined display name for category (empty = use category). */
-  char display_name[21];
+  char display_name[32];
   /** Default glyph for reset functionality. */
   char default_glyph[8];
   /** Default display name for reset functionality. */
-  char default_display_name[21];
-  char _pad[2];
+  char default_display_name[32];
+  char _pad[4];
 } CategoryGlyphItem;
 
 /** \} */

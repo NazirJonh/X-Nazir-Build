@@ -6952,7 +6952,7 @@ static void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   RNA_string_get(op->ptr, "category", category);
 
   /* Get original values saved when dialog was opened */
-  char original_display_name[21] = "";
+  char original_display_name[32] = "";
   char original_glyph[16] = "";
   float original_color[3] = {0.0f, 0.0f, 0.0f};
   bool original_has_override = false;
@@ -7371,7 +7371,7 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
   }
 
   /* Update display_name for live preview */
-  char display_name[21];
+  char display_name[32];
   RNA_string_get(op->ptr, "display_name", display_name);
   if (display_name[0] != '\0') {
     STRNCPY(item->display_name, display_name);
@@ -7450,7 +7450,7 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
   wmWindowManager *wm = CTX_wm_manager(C);
 
   /* Category name field - TEXT ONLY, no glyph */
-  char display_name[21] = "";
+  char display_name[32] = "";
   RNA_string_get(op->ptr, "display_name", display_name);
 
   /* If display_name is empty, use category as default */
@@ -7734,7 +7734,7 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     if (STREQ(item->category, category)) {
       /* Extract any leading glyph from display_name */
       char extracted_glyph[16];
-      char clean_display_name[21];
+      char clean_display_name[32];
       extract_leading_glyph(item->display_name, extracted_glyph, sizeof(extracted_glyph),
                            clean_display_name, sizeof(clean_display_name));
 
@@ -7794,7 +7794,7 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   }
 
   /* If display_name is still empty, use panel label or category */
-  char current_display_name[21] = "";
+  char current_display_name[32] = "";
   RNA_string_get(op->ptr, "display_name", current_display_name);
   if (current_display_name[0] == '\0') {
     /* Set display_name: if category is a single glyph, find panel label */
@@ -7866,7 +7866,7 @@ static wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *o
   char category[64];
   RNA_string_get(op->ptr, "category", category);
 
-  char display_name[21];
+  char display_name[32];
   RNA_string_get(op->ptr, "display_name", display_name);
 
   char glyph_raw[16];
@@ -7989,7 +7989,7 @@ static void category_tab_edit_dialog_layout(bContext *C, wmOperator *op)
   char category[64];
   RNA_string_get(op->ptr, "category", category);
 
-  char display_name[21] = "";
+  char display_name[32] = "";
   RNA_string_get(op->ptr, "display_name", display_name);
 
   /* If display_name is empty, use category as default */
@@ -8387,7 +8387,7 @@ static void SCREEN_OT_category_tab_reset(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
   RNA_def_string(ot->srna, "category", nullptr, 64, "Category", "Category identifier");
-  RNA_def_string(ot->srna, "display_name", nullptr, 21, "Display Name", "Reset display name");
+  RNA_def_string(ot->srna, "display_name", nullptr, 32, "Display Name", "Reset display name");
   RNA_def_string(ot->srna, "glyph", nullptr, 8, "Glyph", "Reset glyph");
   RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Reset search");
   RNA_def_float_color(ot->srna, "color", 3, nullptr, 0.0f, 1.0f, "Color", "Reset color", 0.0f, 1.0f);
@@ -8496,14 +8496,14 @@ static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
   RNA_def_string(ot->srna, "category", nullptr, 64, "Category", "Category identifier");
-  RNA_def_string(ot->srna, "display_name", nullptr, 21, "Display Name", "Custom display name");
+  RNA_def_string(ot->srna, "display_name", nullptr, 32, "Display Name", "Custom display name");
   RNA_def_string(ot->srna, "glyph", nullptr, 16, "Glyph Code", "Hex codepoint (e.g., e5d2)");
   RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Search glyphs");
   PropertyRNA *prop = RNA_def_float_color(ot->srna, "color", 3, nullptr, 0.0f, 1.0f, "Color", "Glyph color", 0.0f, 1.0f);
   RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);
 
   /* Original values for cancel functionality */
-  RNA_def_string(ot->srna, "original_display_name", nullptr, 21, "Original Display Name", "");
+  RNA_def_string(ot->srna, "original_display_name", nullptr, 32, "Original Display Name", "");
   RNA_def_string(ot->srna, "original_glyph", nullptr, 16, "Original Glyph", "");
   prop = RNA_def_float_color(ot->srna, "original_color", 3, nullptr, 0.0f, 1.0f, "Original Color", "", 0.0f, 1.0f);
   RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);

@@ -7024,6 +7024,8 @@ static void category_tab_edit_popup_ok_cb(bContext * /*C*/, void * /*user_data*/
  */
 static bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8_max)
 {
+  printf("[DEBUG hex_to_utf8] input='%s'\n", input ? input : "(null)");
+  
   if (!input || !input[0]) {
     return false;
   }
@@ -7040,6 +7042,8 @@ static bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8
 
   /* Check if remaining string is a valid hex number (1-6 hex digits for Unicode) */
   size_t hex_len = strlen(hex_start);
+  printf("[DEBUG hex_to_utf8] hex_start='%s', hex_len=%zu\n", hex_start, hex_len);
+  
   if (hex_len == 0 || hex_len > 6) {
     return false;
   }
@@ -7047,47 +7051,90 @@ static bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8
   /* Verify all characters are hex digits */
   for (size_t i = 0; i < hex_len; i++) {
     if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
+      printf("[DEBUG hex_to_utf8] Invalid hex digit at pos %zu: '%c' (0x%02x)\n", 
+             i, hex_start[i], (unsigned char)hex_start[i]);
       return false;
     }
   }
 
   /* Parse hex to unsigned int using Blender's method (same as ui_handle_unicode_input) */
   uint val = strtoul(hex_start, nullptr, 16);
+  printf("[DEBUG hex_to_utf8] codepoint=%u (0x%x)\n", val, val);
 
   /* Validate Unicode codepoint range (same check as ui_handle_unicode_input) */
   if (val < 32 || val > 0x10FFFF) {
     return false;
   }
 
-  /* Convert to UTF-8 using the same method as ui_handle_unicode_input */
-  char32_t utf32[2] = {char32_t(val), 0};
-  const int utf8_len = BLI_str_utf32_as_utf8(utf8_out, utf32, utf8_max);
+  /* Convert to UTF-8 using Blender's built-in function */
+  const int utf8_len = BLI_str_utf8_from_unicode(val, utf8_out, utf8_max);
+  
+  /* BLI_str_utf8_from_unicode does NOT null-terminate, so we must do it */
+  if (utf8_len > 0 && size_t(utf8_len) < utf8_max) {
+    utf8_out[utf8_len] = '\0';
+  }
+  
+  printf("[DEBUG hex_to_utf8] utf8_len=%d, output bytes: ", utf8_len);
+  for (int i = 0; i <= utf8_len && i < 8; i++) {
+    printf("%02x ", (unsigned char)utf8_out[i]);
+  }
+  printf("\n");
 
   return utf8_len > 0;
 }
 
 /**
  * Process glyph input: convert hex codepoint (e.g., "e5d2") to UTF-8 character.
- * If input is not a hex code, returns the input as-is.
+ * Only accepts valid hex codes (1-6 hex digits, optional 0x prefix).
+ * Returns empty string for invalid input.
  *
  * \param input: Raw glyph input from user.
  * \param output: Output buffer for processed glyph.
  * \param output_max: Size of output buffer.
+ * \return true if input was valid and converted, false otherwise.
  */
-static void process_glyph_input(const char *input, char *output, size_t output_max)
+static bool process_glyph_input(const char *input, char *output, size_t output_max)
+{
+  if (!input || !input[0]) {
+    output[0] = '\0';
+    return false;
+  }
+
+  /* Try to convert as hex codepoint first */
+  if (hex_codepoint_to_utf8(input, output, output_max)) {
+    return true;
+  }
+
+  /* Invalid input - return empty string */
+  output[0] = '\0';
+  return false;
+}
+
+/**
+ * Convert UTF-8 character to hex codepoint (e.g., "◒" -> "e5d2").
+ * Returns empty string if input is empty or invalid.
+ *
+ * \param input: UTF-8 character string.
+ * \param output: Output buffer for hex code.
+ * \param output_max: Size of output buffer.
+ */
+static void utf8_to_hex_codepoint(const char *input, char *output, size_t output_max)
 {
   if (!input || !input[0]) {
     output[0] = '\0';
     return;
   }
 
-  /* Try to convert as hex codepoint first */
-  if (hex_codepoint_to_utf8(input, output, output_max)) {
+  /* Convert UTF-8 to codepoint using Blender's built-in function */
+  unsigned int codepoint = BLI_str_utf8_as_unicode_safe(input);
+
+  if (codepoint == BLI_UTF8_ERR || codepoint == 0) {
+    output[0] = '\0';
     return;
   }
 
-  /* Not a hex code - use input directly (might be direct UTF-8 char) */
-  BLI_strncpy(output, input, output_max);
+  /* Format as lowercase hex without "0x" prefix */
+  BLI_snprintf(output, output_max, "%x", codepoint);
 }
 
 /**
@@ -7105,7 +7152,7 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
    if (category_tab_current_dialog_op != op) {
      return;
    }
- 
+
    char category[64];
    RNA_string_get(op->ptr, "category", category);
 
@@ -7115,25 +7162,87 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
   char glyph_raw[16];
   RNA_string_get(op->ptr, "glyph", glyph_raw);
 
-  /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character */
+  printf("[DEBUG live_update] glyph_raw='%s', bytes: ", glyph_raw);
+  for (int i = 0; glyph_raw[i]; i++) {
+    printf("%02x ", (unsigned char)glyph_raw[i]);
+  }
+  printf("\n");
+
+  /* Validate glyph input: must be empty or valid hex code (1-6 hex digits) */
+  bool glyph_valid = true;
+  if (glyph_raw[0] != '\0') {
+    /* Check total string length (including optional 0x prefix) */
+    size_t total_len = strlen(glyph_raw);
+    if (total_len > 8) {  /* Max: "0x" + 6 hex digits */
+      glyph_valid = false;
+    }
+    else {
+      const char *hex_start = glyph_raw;
+
+      /* Skip optional "0x" or "0X" prefix */
+      if (glyph_raw[0] == '0' && (glyph_raw[1] == 'x' || glyph_raw[1] == 'X')) {
+        hex_start = glyph_raw + 2;
+      }
+
+      /* Check if remaining string is a valid hex number (1-6 hex digits for Unicode) */
+      size_t hex_len = strlen(hex_start);
+
+      if (hex_len == 0 || hex_len > 6) {
+        glyph_valid = false;
+      }
+      else {
+        /* Verify all characters are hex digits */
+        for (size_t i = 0; i < hex_len; i++) {
+          if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
+            glyph_valid = false;
+            break;
+          }
+        }
+      }
+
+      if (glyph_valid) {
+        /* Validate Unicode codepoint range */
+        uint val = strtoul(hex_start, nullptr, 16);
+        if (val < 32 || val > 0x10FFFF) {
+          glyph_valid = false;
+        }
+      }
+    }
+  }
+
+  /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character.
+   * Only process if input is valid hex. */
   char glyph[8];
-  process_glyph_input(glyph_raw, glyph, sizeof(glyph));
+  glyph[0] = '\0';
+
+  if (glyph_valid && glyph_raw[0] != '\0') {
+    process_glyph_input(glyph_raw, glyph, sizeof(glyph));
+  }
+
+  printf("[DEBUG live_update] glyph='%s', bytes: ", glyph);
+  for (int i = 0; glyph[i]; i++) {
+    printf("%02x ", (unsigned char)glyph[i]);
+  }
+  printf("\n");
 
   /* Update the override immediately for live preview */
   wmWindowManager *wm = CTX_wm_manager(C);
 
-  /* Look up default glyph for preview fallback (when user input is empty) */
+  /* Look up default glyph for preview fallback (when user input is empty or invalid) */
   const char *default_glyph = blender::ui::panel_category_glyph_lookup(
       wm, category, nullptr, nullptr, nullptr);
 
   /* Update preview buffers for popup preview.
-   * Use the processed glyph from property, or fall back to default lookup.
+   * Use the processed glyph from valid input, or fall back to default lookup.
+   * Invalid input shows the default glyph (not the invalid text).
    */
   copy_v3_v3(category_tab_preview_color, color);
   if (glyph[0] != '\0') {
+    /* Valid custom glyph - show it */
     STRNCPY(category_tab_preview_glyph, glyph);
   }
   else if (default_glyph) {
+    /* Empty or invalid input - show default glyph for this category */
     STRNCPY(category_tab_preview_glyph, default_glyph);
   }
   else {
@@ -7167,14 +7276,17 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
   /* Update color for live preview */
   copy_v3_v3(item->color, color);
 
-  /* Update glyph in override.
+  /* Update glyph in override only if valid.
    * Save the processed glyph if user has entered something.
    * Note: We always save the glyph because panel_category_glyph_lookup returns
    * the override glyph if it exists, which would cause a false "match" condition.
    */
-  if (glyph[0] != '\0') {
-    /* User has entered a glyph - save it to override */
+  if (glyph_valid && glyph[0] != '\0') {
+    /* User has entered a valid glyph - save it to override */
     STRNCPY(item->glyph, glyph);
+  }
+  else if (!glyph_valid) {
+    /* Invalid glyph - don't update override, keep previous value */
   }
   else {
     /* Empty glyph - clear override glyph to use defaults */
@@ -7271,9 +7383,60 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
   ui::Layout &row_search = layout.row(false);
   row_search.prop(op->ptr, "glyph_search", UI_ITEM_NONE, "", ICON_VIEWZOOM);
 
-  /* Glyph field */
+  /* Glyph field with Paste button */
   ui::Layout &row_glyph = layout.row(false);
-  row_glyph.prop(op->ptr, "glyph", UI_ITEM_NONE, IFACE_("Glyph"), ICON_NONE);
+  row_glyph.prop(op->ptr, "glyph", UI_ITEM_NONE, IFACE_("Glyph Code"), ICON_NONE);
+  ui::Layout &row_glyph_btn = row_glyph.row(true);
+  /* Paste button - allows pasting hex code from clipboard (Ctrl+V) */
+  PointerRNA paste_ptr = row_glyph_btn.op("SCREEN_OT_category_tab_paste_glyph", "", ICON_PASTEDOWN);
+  RNA_string_set(&paste_ptr, "category", category);
+
+  /* Validate glyph input and show warning if invalid */
+  char glyph_raw_check[16] = "";
+  RNA_string_get(op->ptr, "glyph", glyph_raw_check);
+  
+  bool glyph_valid = true;
+  if (glyph_raw_check[0] != '\0') {
+    /* Check total string length */
+    size_t total_len = strlen(glyph_raw_check);
+    if (total_len > 8) {
+      glyph_valid = false;
+    }
+    else {
+      const char *hex_start = glyph_raw_check;
+      
+      /* Skip optional "0x" prefix */
+      if (glyph_raw_check[0] == '0' && (glyph_raw_check[1] == 'x' || glyph_raw_check[1] == 'X')) {
+        hex_start = glyph_raw_check + 2;
+      }
+      
+      size_t hex_len = strlen(hex_start);
+      
+      if (hex_len == 0 || hex_len > 6) {
+        glyph_valid = false;
+      }
+      else {
+        for (size_t i = 0; i < hex_len; i++) {
+          if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
+            glyph_valid = false;
+            break;
+          }
+        }
+      }
+      
+      if (glyph_valid) {
+        uint val = strtoul(hex_start, nullptr, 16);
+        if (val < 32 || val > 0x10FFFF) {
+          glyph_valid = false;
+        }
+      }
+    }
+  }
+  
+  /* Show warning if glyph is invalid */
+  if (!glyph_valid && glyph_raw_check[0] != '\0') {
+    layout.label("Invalid hex code (use 1-6 hex digits, e.g., e5d2)", ICON_ERROR);
+  }
 
   layout.separator();
 
@@ -7281,9 +7444,12 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
   char glyph_raw[16] = "";
   RNA_string_get(op->ptr, "glyph", glyph_raw);
 
-  /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character */
+  /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character.
+   * Only process if input is valid hex. */
   char glyph[8] = "";
-  process_glyph_input(glyph_raw, glyph, sizeof(glyph));
+  if (glyph_valid && glyph_raw[0] != '\0') {
+    process_glyph_input(glyph_raw, glyph, sizeof(glyph));
+  }
 
   /* Get custom color */
   float color[3];
@@ -7425,7 +7591,10 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   {
     if (STREQ(item->category, category)) {
       RNA_string_set(op->ptr, "display_name", item->display_name);
-      RNA_string_set(op->ptr, "glyph", item->glyph);
+      /* Convert glyph to hex code for display */
+      char hex_code[16];
+      utf8_to_hex_codepoint(item->glyph, hex_code, sizeof(hex_code));
+      RNA_string_set(op->ptr, "glyph", hex_code);
       RNA_float_set_array(op->ptr, "color", item->color);
       has_override = true;
       break;
@@ -7442,7 +7611,10 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
         wm, category, nullptr, &is_fallback, glyph_color);
 
     if (current_glyph) {
-      RNA_string_set(op->ptr, "glyph", current_glyph);
+      /* Convert glyph to hex code for display */
+      char hex_code[16];
+      utf8_to_hex_codepoint(current_glyph, hex_code, sizeof(hex_code));
+      RNA_string_set(op->ptr, "glyph", hex_code);
     }
     if (!is_zero_v3(glyph_color)) {
       RNA_float_set_array(op->ptr, "color", glyph_color);
@@ -7488,8 +7660,55 @@ static wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *o
   char glyph_raw[16];
   RNA_string_get(op->ptr, "glyph", glyph_raw);
 
+  /* Validate glyph input: must be empty or valid hex code (1-6 hex digits) */
+  if (glyph_raw[0] != '\0') {
+    /* Check total string length (including optional 0x prefix) */
+    size_t total_len = strlen(glyph_raw);
+    if (total_len > 8) {  /* Max: "0x" + 6 hex digits */
+      BKE_report(op->reports, RPT_ERROR, "Glyph Code is too long (max 6 hex digits)");
+      return OPERATOR_CANCELLED;
+    }
+
+    const char *hex_start = glyph_raw;
+
+    /* Skip optional "0x" or "0X" prefix */
+    if (glyph_raw[0] == '0' && (glyph_raw[1] == 'x' || glyph_raw[1] == 'X')) {
+      hex_start = glyph_raw + 2;
+    }
+
+    /* Check if remaining string is a valid hex number (1-6 hex digits for Unicode) */
+    size_t hex_len = strlen(hex_start);
+    bool valid = true;
+
+    if (hex_len == 0 || hex_len > 6) {
+      valid = false;
+    }
+    else {
+      /* Verify all characters are hex digits */
+      for (size_t i = 0; i < hex_len; i++) {
+        if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
+          valid = false;
+          break;
+        }
+      }
+    }
+
+    if (!valid) {
+      BKE_report(op->reports, RPT_ERROR, "Glyph Code must be 1-6 hex digits (e.g., e5d2)");
+      return OPERATOR_CANCELLED;
+    }
+
+    /* Validate Unicode codepoint range */
+    uint val = strtoul(hex_start, nullptr, 16);
+    if (val < 32 || val > 0x10FFFF) {
+      BKE_report(op->reports, RPT_ERROR, "Glyph Code must be a valid Unicode codepoint (0020-10FFFF)");
+      return OPERATOR_CANCELLED;
+    }
+  }
+
   /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character */
   char glyph[8];
+  glyph[0] = '\0';
   process_glyph_input(glyph_raw, glyph, sizeof(glyph));
 
   float color[3];
@@ -7644,7 +7863,10 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   if (category_tab_current_dialog_op) {
     RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", category);
     if (default_glyph) {
-      RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", default_glyph);
+      /* Convert UTF-8 glyph back to hex code for the glyph field */
+      char glyph_hex[16];
+      utf8_to_hex_codepoint(default_glyph, glyph_hex, sizeof(glyph_hex));
+      RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", glyph_hex);
     }
     else {
       RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", "");
@@ -7656,7 +7878,10 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   /* Also update this operator's properties (for consistency) */
   RNA_string_set(op->ptr, "display_name", category);
   if (default_glyph) {
-    RNA_string_set(op->ptr, "glyph", default_glyph);
+    /* Convert UTF-8 glyph back to hex code for the glyph field */
+    char glyph_hex[16];
+    utf8_to_hex_codepoint(default_glyph, glyph_hex, sizeof(glyph_hex));
+    RNA_string_set(op->ptr, "glyph", glyph_hex);
   }
   else {
     RNA_string_set(op->ptr, "glyph", "");
@@ -7676,6 +7901,145 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   WM_main_add_notifier(NC_WINDOW, nullptr);
   return OPERATOR_FINISHED;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Paste Glyph Operator
+ * \{ */
+
+static wmOperatorStatus category_tab_paste_glyph_exec(bContext *C, wmOperator *op)
+{
+  /* Get text from clipboard */
+  int clipboard_len;
+  char *clipboard_text = WM_clipboard_text_get(false, true, &clipboard_len);
+  
+  printf("[DEBUG paste_glyph] clipboard_len=%d\n", clipboard_len);
+  
+  if (!clipboard_text || !clipboard_text[0]) {
+    if (clipboard_text) {
+      MEM_delete(clipboard_text);
+    }
+    BKE_report(op->reports, RPT_WARNING, "Clipboard is empty");
+    return OPERATOR_CANCELLED;
+  }
+  
+  /* Debug: print raw clipboard bytes */
+  printf("[DEBUG paste_glyph] raw clipboard bytes: ");
+  for (int i = 0; i < clipboard_len && i < 20; i++) {
+    printf("%02x ", (unsigned char)clipboard_text[i]);
+  }
+  printf("\n");
+  
+  /* Validate clipboard content as hex code */
+  const char *hex_start = clipboard_text;
+  
+  /* Skip optional "0x" or "0X" prefix */
+  if (clipboard_text[0] == '0' && (clipboard_text[1] == 'x' || clipboard_text[1] == 'X')) {
+    hex_start = clipboard_text + 2;
+  }
+  
+  /* Trim trailing whitespace/newlines */
+  size_t hex_len = strlen(hex_start);
+  while (hex_len > 0 && (hex_start[hex_len - 1] == ' ' || hex_start[hex_len - 1] == '\t' ||
+                         hex_start[hex_len - 1] == '\r' || hex_start[hex_len - 1] == '\n')) {
+    hex_len--;
+  }
+  
+  printf("[DEBUG paste_glyph] hex_start='%s', hex_len=%zu\n", hex_start, hex_len);
+  
+  bool valid = true;
+  
+  /* Check length (exactly 4 hex digits) */
+  if (hex_len != 4) {
+    valid = false;
+  }
+  else {
+    /* Verify all characters are hex digits */
+    for (size_t i = 0; i < hex_len; i++) {
+      if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
+        valid = false;
+        break;
+      }
+    }
+  }
+  
+  if (!valid) {
+    MEM_delete(clipboard_text);
+    BKE_report(op->reports, RPT_ERROR, "Clipboard must contain exactly 4 hex digits (e.g., f1c8)");
+    return OPERATOR_CANCELLED;
+  }
+  
+  /* Copy exactly 4 hex digits to clean buffer */
+  char hex_clean[5];
+  memcpy(hex_clean, hex_start, 4);
+  hex_clean[4] = '\0';
+  
+  printf("[DEBUG paste_glyph] hex_clean='%s', bytes: %02x %02x %02x %02x %02x\n",
+         hex_clean, (unsigned char)hex_clean[0], (unsigned char)hex_clean[1],
+         (unsigned char)hex_clean[2], (unsigned char)hex_clean[3], (unsigned char)hex_clean[4]);
+  
+  /* Validate Unicode codepoint range */
+  uint val = strtoul(hex_clean, nullptr, 16);
+  printf("[DEBUG paste_glyph] codepoint value=%u (0x%x)\n", val, val);
+  
+  if (val < 32 || val > 0x10FFFF) {
+    MEM_delete(clipboard_text);
+    BKE_report(op->reports, RPT_ERROR, "Invalid Unicode codepoint (must be 0020-10FFFF)");
+    return OPERATOR_CANCELLED;
+  }
+  
+  /* Get category from operator properties */
+  char category[64];
+  RNA_string_get(op->ptr, "category", category);
+  
+  /* Set glyph in operator properties */
+  printf("[DEBUG paste_glyph] Setting glyph='%s' to operator props\n", hex_clean);
+  RNA_string_set(op->ptr, "glyph", hex_clean);
+  
+  /* Update the dialog operator if it exists */
+  if (category_tab_current_dialog_op) {
+    printf("[DEBUG paste_glyph] Setting glyph='%s' to dialog operator\n", hex_clean);
+    RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", hex_clean);
+    
+    /* Verify what was actually set */
+    char verify[16];
+    RNA_string_get(category_tab_current_dialog_op->ptr, "glyph", verify);
+    printf("[DEBUG paste_glyph] Verified dialog glyph='%s', bytes: ", verify);
+    for (int i = 0; verify[i]; i++) {
+      printf("%02x ", (unsigned char)verify[i]);
+    }
+    printf("\n");
+  }
+  
+  MEM_delete(clipboard_text);
+  
+  /* Trigger live update */
+  if (category_tab_current_dialog_op) {
+    wmOperator *dialog_op = category_tab_current_dialog_op;
+    
+    /* Call live update callback */
+    category_tab_edit_live_update_cb(C, dialog_op, 0);
+  }
+  
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+static void SCREEN_OT_category_tab_paste_glyph(wmOperatorType *ot)
+{
+  ot->name = "Paste Glyph Code";
+  ot->idname = "SCREEN_OT_category_tab_paste_glyph";
+  ot->description = "Paste glyph hex code from clipboard (Ctrl+V)";
+
+  ot->exec = category_tab_paste_glyph_exec;
+  ot->poll = category_tab_edit_poll;
+
+  ot->flag = OPTYPE_REGISTER;
+
+  RNA_def_string(ot->srna, "category", nullptr, 64, "Category", "Category identifier");
+  RNA_def_string(ot->srna, "glyph", nullptr, 16, "Glyph", "Hex codepoint");
+}
+
+/** \} */
 
 static void SCREEN_OT_category_tab_reset(wmOperatorType *ot)
 {
@@ -7789,7 +8153,7 @@ static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
 
   RNA_def_string(ot->srna, "category", nullptr, 64, "Category", "Category identifier");
   RNA_def_string(ot->srna, "display_name", nullptr, 64, "Display Name", "Custom display name");
-  RNA_def_string(ot->srna, "glyph", nullptr, 16, "Glyph", "Hex codepoint (e.g., e5d2) or UTF-8 character");
+  RNA_def_string(ot->srna, "glyph", nullptr, 16, "Glyph Code", "Hex codepoint (e.g., e5d2)");
   RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Search glyphs");
   PropertyRNA *prop = RNA_def_float_color(ot->srna, "color", 3, nullptr, 0.0f, 1.0f, "Color", "Glyph color", 0.0f, 1.0f);
   RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);
@@ -8239,6 +8603,7 @@ void ED_operatortypes_screen()
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_cancel);
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_save);
   WM_operatortype_append(SCREEN_OT_category_tab_reset);
+  WM_operatortype_append(SCREEN_OT_category_tab_paste_glyph);
 }
 
 /** \} */

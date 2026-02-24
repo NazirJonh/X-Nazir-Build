@@ -1441,6 +1441,10 @@ static void panel_category_tabs_draw_settings_button(const bContext *C,
   const double time_since_click = current_time - region->runtime->category_tabs_settings_click_time;
   const double time_since_hover = current_time - region->runtime->category_tabs_settings_hover_time;
 
+  /* Check if drag is active - if so, don't set hover. */
+  const bool drag_active = (region->runtime->category_tabs_drag_state != nullptr);
+  const bool drag_pending = (region->runtime->category_tabs_drag_pending_id[0] != '\0');
+
   /* Auto-reset hover after 2 seconds if mouse is not over button.
    * This ensures the button doesn't stay highlighted forever when mouse leaves
    * and no redraw events are triggered.
@@ -1460,11 +1464,16 @@ static void panel_category_tabs_draw_settings_button(const bContext *C,
     const bool actually_over = mouse_in_region && BLI_rcti_isect_pt(rct, mx, my);
 
     /* Update hover state:
-     * - If mouse is over button: set hover true, update hover_time
+     * - If mouse is over button AND drag not active: set hover true, update hover_time
      * - If mouse is NOT over button AND hover_timeout expired: reset hover false
+     * - If drag is active: reset hover false
      * - Otherwise: keep current hover state (popup might be open)
      */
-    if (actually_over) {
+    if (drag_active || drag_pending) {
+      /* Drag is active - don't show hover. */
+      is_hover = false;
+    }
+    else if (actually_over) {
       if (!is_hover) {
         /* Hover just became true - update timestamp. */
         region->runtime->category_tabs_settings_hover_time = current_time;
@@ -4335,9 +4344,14 @@ int handler_panel_region(bContext *C,
         if (is_over_settings) {
           /* Hover just became true - record the time. */
           region->runtime->category_tabs_settings_hover_time = BLI_time_now_seconds();
+          region->runtime->category_tabs_settings_hover = true;
+          ED_region_tag_redraw(region);
         }
-        region->runtime->category_tabs_settings_hover = is_over_settings;
-        ED_region_tag_redraw(region);
+        else {
+          /* Hover just became false. */
+          region->runtime->category_tabs_settings_hover = false;
+          ED_region_tag_redraw(region);
+        }
       }
 
       /* Check if mouse is over any category tab for hover effect. */
@@ -4852,6 +4866,7 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
 
   /* Store initial state in region runtime */
   region->runtime->category_tabs_drag_state = state;
+  region->runtime->category_tabs_drag_pending_id[0] = '\0';  /* Clear pending */
 
   /* Start auto-scroll timer */
   state->scroll_timer = WM_event_timer_add(CTX_wm_manager(C), CTX_wm_window(C), TIMER, 0.02f);

@@ -121,8 +121,8 @@ typedef struct CategoryGlyphItem {
   /** Custom color for glyph (RGB 0.0-1.0), {0,0,0} = use theme color. */
   float color[3];
   /** User-defined display name for category (empty = use category). */
-  char display_name[64];
-  char _pad[4];
+  char display_name[21];
+  char _pad[7];
 } CategoryGlyphItem;
 
 /** \} */

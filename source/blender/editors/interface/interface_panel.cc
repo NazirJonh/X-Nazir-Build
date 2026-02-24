@@ -4263,12 +4263,6 @@ static ARegion *ui_panel_category_tooltip_init(
         tooltip_text = IFACE_(category_idname);
       }
 
-      /* Check if category is reserved (cannot be reordered). */
-      bool is_reserved_glyph = category_is_reserved(CTX_wm_manager(C), category_idname);
-      if (is_reserved_glyph) {
-        tooltip_text += " (Reserved)";
-      }
-
       /* Position tooltip to avoid overlapping the tab.
        * Convert tab rect from region-local to screen coordinates.
        * Use mouse Y position for the rect to keep tooltip aligned with cursor vertically. */
@@ -4994,7 +4988,8 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
 
   if (is_reserved_glyph) {
     /* Create persistent tooltip */
-    const char *msg = "Reserved (Cannot Reorder)";
+    char msg[128];
+    SNPRINTF(msg, "%s (Cannot Reorder)", IFACE_(clicked_pc->idname));
     state->tooltip_region = tooltip_create_from_text(C, msg, event->xy);
   }
   state->current_mouse_x = event->mval[0];

@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
+import json
+import os
+import re
 from bpy.types import (
     Header,
     Menu,
@@ -19,103 +22,954 @@ from bl_ui.utils import PresetPanel
 
 
 # -----------------------------------------------------------------------------
-# Category Glyph Mappings
+# Category Glyph Mappings - JSON-based storage
 
 # Default category glyph mappings (Material Symbols)
+# Structure: {category: {"glyph": str, "display_name": str, "color": [r, g, b],
+#                        "default_glyph": str, "default_display_name": str}}
 DEFAULT_CATEGORY_GLYPHS = {
     # Common categories
-    "Item": "\ueb75",       # visibility // \ue68e \\
-    "View": "\uf4c9",       # visibility \uf4c9 \ue417
-    "Edit": "\ue3c9",       # edit
-    "Tool": "\uea3b",       # construction
-    "Asset": "\ue2c7",      # folder
-    "Options": "\ue5d4",    # settings \ue5d4 \ue8b8
+    "Item": {"glyph": "\ueb75", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ueb75", "default_display_name": ""},       # visibility
+    "View": {"glyph": "\uf4c9", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\uf4c9", "default_display_name": ""},       # visibility
+    "Edit": {"glyph": "\ue3c9", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ue3c9", "default_display_name": ""},       # edit
+    "Tool": {"glyph": "\uea3b", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\uea3b", "default_display_name": ""},       # construction
+    "Asset": {"glyph": "\ue2c7", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ue2c7", "default_display_name": ""},      # folder
+    "Options": {"glyph": "\ue5d4", "display_name": "", "color": [0.0, 0.0, 0.0],
+                "default_glyph": "\ue5d4", "default_display_name": ""},    # settings
 
     # Editor-specific
-    "Animation": "\uf8f0",  # motion_photos_on \ue167 \uefdc \uf8f0
-    "Physics": "\ue3d4",    # science
-    "World": "\ue88e",      # public
-    "Material": "\ue429",   # palette
-    "Modifiers": "\ue429",  # palette
-    "Texture": "\ue40a",    # texture
-    "Particles": "\ue3d4",  # science
-    "Curve": "\ue148",      # timeline
-    "Mesh": "\ue204",       # category
-    "Object": "\ue8d4",     # select_all
-    "Scene": "\ue8f9",      # dashboard
-    "Render": "\ue439",     # photo_camera
-    "Script": "\ue86f",     # terminal
-    "Sound": "\ue3a1",      # speaker
-    "Surface": "\ue76c",    # waves
-    "Volume": "\ue2c8",     # folder_open
-    "Constraints": "\ue8d2", # rule
-    "Data": "\ue23e",       # database
-    "Node": "\ue1b8",       # account_tree
+    "Animation": {"glyph": "\uf8f0", "display_name": "", "color": [0.0, 0.0, 0.0],
+                  "default_glyph": "\uf8f0", "default_display_name": ""},  # motion_photos_on
+    "Physics": {"glyph": "\ue3d4", "display_name": "", "color": [0.0, 0.0, 0.0],
+                "default_glyph": "\ue3d4", "default_display_name": ""},    # science
+    "World": {"glyph": "\ue88e", "display_name": "", "color": [0.0, 0.0, 0.0],
+              "default_glyph": "\ue88e", "default_display_name": ""},      # public
+    "Material": {"glyph": "\ue429", "display_name": "", "color": [0.0, 0.0, 0.0],
+                 "default_glyph": "\ue429", "default_display_name": ""},   # palette
+    "Modifiers": {"glyph": "\ue429", "display_name": "", "color": [0.0, 0.0, 0.0],
+                  "default_glyph": "\ue429", "default_display_name": ""},  # palette
+    "Texture": {"glyph": "\ue40a", "display_name": "", "color": [0.0, 0.0, 0.0],
+                "default_glyph": "\ue40a", "default_display_name": ""},    # texture
+    "Particles": {"glyph": "\ue3d4", "display_name": "", "color": [0.0, 0.0, 0.0],
+                  "default_glyph": "\ue3d4", "default_display_name": ""},  # science
+    "Curve": {"glyph": "\ue148", "display_name": "", "color": [0.0, 0.0, 0.0],
+              "default_glyph": "\ue148", "default_display_name": ""},      # timeline
+    "Mesh": {"glyph": "\ue204", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ue204", "default_display_name": ""},       # category
+    "Object": {"glyph": "\ue8d4", "display_name": "", "color": [0.0, 0.0, 0.0],
+               "default_glyph": "\ue8d4", "default_display_name": ""},     # select_all
+    "Scene": {"glyph": "\ue8f9", "display_name": "", "color": [0.0, 0.0, 0.0],
+              "default_glyph": "\ue8f9", "default_display_name": ""},      # dashboard
+    "Render": {"glyph": "\ue439", "display_name": "", "color": [0.0, 0.0, 0.0],
+               "default_glyph": "\ue439", "default_display_name": ""},     # photo_camera
+    "Script": {"glyph": "\ue86f", "display_name": "", "color": [0.0, 0.0, 0.0],
+               "default_glyph": "\ue86f", "default_display_name": ""},     # terminal
+    "Sound": {"glyph": "\ue3a1", "display_name": "", "color": [0.0, 0.0, 0.0],
+              "default_glyph": "\ue3a1", "default_display_name": ""},      # speaker
+    "Surface": {"glyph": "\ue76c", "display_name": "", "color": [0.0, 0.0, 0.0],
+                "default_glyph": "\ue76c", "default_display_name": ""},    # waves
+    "Volume": {"glyph": "\ue2c8", "display_name": "", "color": [0.0, 0.0, 0.0],
+               "default_glyph": "\ue2c8", "default_display_name": ""},     # folder_open
+    "Constraints": {"glyph": "\ue8d2", "display_name": "", "color": [0.0, 0.0, 0.0],
+                    "default_glyph": "\ue8d2", "default_display_name": ""}, # rule
+    "Data": {"glyph": "\ue23e", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ue23e", "default_display_name": ""},       # database
+    "Node": {"glyph": "\ue1b8", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ue1b8", "default_display_name": ""},       # account_tree
 }
 
-_glyph_mappings_registered = False
+# In-memory cache of glyph mappings
+_glyph_cache = {}
+_glyph_cache_loaded = False
+
+# JSON file name in config directory
+GLYPHS_FILENAME = "category_glyphs.json"
 
 
-def register_category_glyph_mappings():
-    """Register default glyph mappings for category tabs."""
-    global _glyph_mappings_registered
+def _get_glyphs_filepath():
+    """Get the path to the glyph mappings JSON file."""
+    import bpy.utils
+    config_dir = bpy.utils.user_resource('CONFIG')
+    if config_dir:
+        return os.path.join(config_dir, GLYPHS_FILENAME)
+    return None
 
-    print("[GLYPH DEBUG] register_category_glyph_mappings() called")
+
+def _glyph_to_unicode_escape(glyph):
+    """Convert a glyph character to \\uXXXX format for reliable JSON storage."""
+    if not glyph:
+        return ""
+    # Convert to Unicode escape sequence
+    result = ""
+    for char in glyph:
+        code_point = ord(char)
+        if code_point > 127:  # Non-ASCII characters
+            result += f"\\u{code_point:04x}"
+        else:
+            result += char
+    return result
+
+
+def _unicode_escape_to_glyph(escape_str):
+    """Convert \\uXXXX format back to glyph character."""
+    if not escape_str:
+        return ""
+
+    # Pattern to match \uXXXX
+    pattern = r'\\u([0-9a-fA-F]{4})'
+
+    def replace_escape(match):
+        code_point = int(match.group(1), 16)
+        return chr(code_point)
+
+    return re.sub(pattern, replace_escape, escape_str)
+
+
+def _is_valid_category_name(name):
+    """Check if a category name is valid (not a glyph or empty)."""
+    if not name:
+        return False
+    # Category name should not be a single Unicode character (glyph)
+    # and should contain at least one ASCII letter or digit
+    if len(name) <= 2:
+        # Single or double character - check if it's a glyph (high Unicode)
+        for char in name:
+            if ord(char) > 0xE000:  # Private Use Area - likely a glyph
+                return False
+    return any(c.isalnum() for c in name)
+
+
+def _is_single_glyph(name):
+    """Check if a string is a single glyph character (high Unicode)."""
+    if not name:
+        return False
+    # Check if it's a single character in the Private Use Area (glyph)
+    if len(name) == 1 and ord(name) > 0xE000:
+        return True
+    # Also check for UTF-8 encoded glyph (might be 1-4 bytes)
+    if len(name) <= 4:
+        for char in name:
+            if ord(char) > 0xE000:
+                return True
+    return False
+
+
+def _normalize_category_data(category_data):
+    """Normalize category data to the new format with glyph, display_name, color, and defaults."""
+    default_entry = {
+        "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
+        "default_glyph": "", "default_display_name": "", "base_type": "text_only"
+    }
+
+    if isinstance(category_data, str):
+        # Old format: just a glyph string (may be in \uXXXX format)
+        glyph = _unicode_escape_to_glyph(category_data) if '\\u' in category_data else category_data
+        base_type = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
+        return {"glyph": glyph, "display_name": "", "color": [0.0, 0.0, 0.0],
+                "default_glyph": glyph, "default_display_name": "", "base_type": base_type}
+    elif isinstance(category_data, dict):
+        # New format: dict with glyph, display_name, color, default_glyph, default_display_name, base_type
+        entry = default_entry.copy()
+
+        # Current values
+        if "glyph" in category_data:
+            glyph_str = category_data["glyph"]
+            if glyph_str and '\\u' in glyph_str:
+                entry["glyph"] = _unicode_escape_to_glyph(glyph_str)
+            else:
+                entry["glyph"] = glyph_str
+        if "display_name" in category_data:
+            entry["display_name"] = category_data["display_name"]
+        if "color" in category_data:
+            color = category_data["color"]
+            if isinstance(color, (list, tuple)) and len(color) >= 3:
+                entry["color"] = list(color[:3])
+
+        # Default values (for reset)
+        if "default_glyph" in category_data and category_data["default_glyph"]:
+            glyph_str = category_data["default_glyph"]
+            if glyph_str and '\\u' in glyph_str:
+                entry["default_glyph"] = _unicode_escape_to_glyph(glyph_str)
+            else:
+                entry["default_glyph"] = glyph_str
+        else:
+            # If no default_glyph or it's empty, use current glyph as default
+            entry["default_glyph"] = entry["glyph"]
+
+        if "default_display_name" in category_data:
+            entry["default_display_name"] = category_data["default_display_name"]
+        else:
+            # If no default_display_name, use empty string
+            entry["default_display_name"] = ""
+
+        # Base type (for reset): glyph_only, glyph_text, or text_only
+        if "base_type" in category_data:
+            entry["base_type"] = category_data["base_type"]
+        else:
+            # Determine base_type from current values
+            if entry["glyph"]:
+                entry["base_type"] = "glyph_text"
+            else:
+                entry["base_type"] = "text_only"
+
+        return entry
+    else:
+        return default_entry
+
+
+def _load_glyph_mappings_from_file():
+    """Load glyph mappings from JSON file."""
+    global _glyph_cache, _glyph_cache_loaded
+
+    filepath = _get_glyphs_filepath()
+    print(f"[GLYPH] JSON storage path: {filepath}")
+
+    if filepath and os.path.exists(filepath):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                raw_mappings = data.get('mappings', {})
+
+                def _has_user_customizations_raw(category_data):
+                    """Check if category has user customizations (display_name or color)."""
+                    if isinstance(category_data, dict):
+                        display_name = category_data.get("display_name", "")
+                        color = category_data.get("color", [0.0, 0.0, 0.0])
+                        return bool(display_name) or color != [0.0, 0.0, 0.0]
+                    return False
+
+                # Normalize all entries to new format (backward compatibility)
+                _glyph_cache = {}
+                skipped_count = 0
+                for category, category_data in raw_mappings.items():
+                    # Skip invalid category names (glyphs as names) ONLY if they have no user customizations
+                    if not _is_valid_category_name(category):
+                        normalized = _normalize_category_data(category_data)
+                        if not _has_user_customizations_raw(normalized):
+                            skipped_count += 1
+                            continue
+                        # If has user customizations, load it even with invalid name
+                        print(f"[GLYPH] Loading category with user customizations: {repr(category)}")
+
+                    _glyph_cache[category] = _normalize_category_data(category_data)
+
+                _glyph_cache_loaded = True
+                if skipped_count > 0:
+                    print(f"[GLYPH] Skipped {skipped_count} categories with invalid names and no customizations")
+                print(f"[GLYPH] Loaded {len(_glyph_cache)} mappings from {filepath}")
+                return True
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"[GLYPH] Error loading mappings: {e}")
+    else:
+        print(f"[GLYPH] JSON file does not exist, using defaults")
+
+    # Use defaults if file doesn't exist or error
+    _glyph_cache = DEFAULT_CATEGORY_GLYPHS.copy()
+    _glyph_cache_loaded = True
+    print(f"[GLYPH] Using {len(_glyph_cache)} default mappings")
+    return False
+
+
+def _save_glyph_mappings_to_file():
+    """Save glyph mappings to JSON file with glyphs in \\uXXXX format."""
+    filepath = _get_glyphs_filepath()
+    if not filepath:
+        print(f"[GLYPH] Cannot save: no valid config directory path")
+        return False
 
     try:
-        wm = bpy.context.window_manager
-        if wm is None:
-            print("[GLYPH DEBUG] window_manager is None!")
+        # Ensure directory exists
+        config_dir = os.path.dirname(filepath)
+        if not os.path.exists(config_dir):
+            print(f"[GLYPH] Creating config directory: {config_dir}")
+            os.makedirs(config_dir, exist_ok=True)
+
+        def _has_user_customizations(category_data):
+            """Check if category has user customizations (display_name or color)."""
+            if isinstance(category_data, dict):
+                display_name = category_data.get("display_name", "")
+                color = category_data.get("color", [0.0, 0.0, 0.0])
+                # Check if display_name is not empty or color is not default black
+                return bool(display_name) or color != [0.0, 0.0, 0.0]
             return False
 
-        print(f"[GLYPH DEBUG] wm exists, has category_glyph_mappings: {hasattr(wm, 'category_glyph_mappings')}")
+        # Convert glyphs to Unicode escape format for reliable storage
+        mappings_to_save = {}
+        skipped_count = 0
+        for category, category_data in _glyph_cache.items():
+            # Skip invalid category names (glyphs as names) ONLY if they have no user customizations
+            if not _is_valid_category_name(category):
+                if not _has_user_customizations(category_data):
+                    skipped_count += 1
+                    continue
+                # If has user customizations, save it even with invalid name
+                print(f"[GLYPH] Saving category with user customizations: {repr(category)}")
 
-        # Clear existing mappings
-        wm.category_glyph_mappings.clear()
+            if isinstance(category_data, dict):
+                # Debug for key categories
+                if category in ["Item", "View", "Tool", "Edit"]:
+                    print(f"[GLYPH SAVE] Saving '{category}': glyph={repr(category_data.get('glyph'))}, "
+                          f"default_glyph={repr(category_data.get('default_glyph'))}")
 
-        # Add default mappings
-        count = 0
-        for category, glyph in DEFAULT_CATEGORY_GLYPHS.items():
-            item = wm.category_glyph_mappings.new(category=category)
-            item.glyph = glyph
-            count += 1
-            if count <= 3:
-                print(f"[GLYPH DEBUG] Added: category='{category}', glyph={repr(glyph)}")
+                mappings_to_save[category] = {
+                    "glyph": _glyph_to_unicode_escape(category_data.get("glyph", "")),
+                    "display_name": category_data.get("display_name", ""),
+                    "color": category_data.get("color", [0.0, 0.0, 0.0]),
+                    "default_glyph": _glyph_to_unicode_escape(category_data.get("default_glyph", "")),
+                    "default_display_name": category_data.get("default_display_name", ""),
+                    "base_type": category_data.get("base_type", "text_only")
+                }
+            elif isinstance(category_data, str):
+                # Old format - convert to new format
+                glyph = _unicode_escape_to_glyph(category_data) if '\\u' in category_data else category_data
+                base_type = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
+                mappings_to_save[category] = {
+                    "glyph": _glyph_to_unicode_escape(glyph),
+                    "display_name": "",
+                    "color": [0.0, 0.0, 0.0],
+                    "default_glyph": _glyph_to_unicode_escape(glyph),
+                    "default_display_name": "",
+                    "base_type": base_type
+                }
 
-        print(f"[GLYPH DEBUG] Total {count} mappings registered")
-        print(f"[GLYPH DEBUG] wm.category_glyph_mappings length: {len(wm.category_glyph_mappings)}")
+        if skipped_count > 0:
+            print(f"[GLYPH] Skipped {skipped_count} categories with invalid names and no customizations")
 
-        _glyph_mappings_registered = True
+        data = {
+            'version': 2,  # Version 2 uses \\uXXXX format for glyphs
+            'mappings': mappings_to_save
+        }
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print(f"[GLYPH] Saved {len(mappings_to_save)} mappings to {filepath}")
         return True
-    except (AttributeError, RuntimeError) as e:
-        # Window manager not available yet
-        print(f"[GLYPH DEBUG] Exception: {e}")
+    except IOError as e:
+        print(f"[GLYPH] Error saving mappings to {filepath}: {e}")
         return False
 
 
-def _ensure_glyph_mappings():
-    """Ensure glyph mappings are registered. Called from various places."""
-    print(f"[GLYPH DEBUG] _ensure_glyph_mappings() called, registered={_glyph_mappings_registered}")
-    if not _glyph_mappings_registered:
-        register_category_glyph_mappings()
+def get_category_glyph(category):
+    """Get the glyph for a category name."""
+    global _glyph_cache, _glyph_cache_loaded
+
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+
+    entry = _glyph_cache.get(category, None)
+    if entry and isinstance(entry, dict):
+        return entry.get("glyph", None)
+    return None
+
+
+def get_category_data(category):
+    """Get the full data (glyph, display_name, color, defaults) for a category name."""
+    global _glyph_cache, _glyph_cache_loaded
+
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+
+    return _glyph_cache.get(category, None)
+
+
+def get_default_glyph(category):
+    """Get the default glyph for a category name."""
+    global _glyph_cache, _glyph_cache_loaded
+
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+
+    entry = _glyph_cache.get(category, None)
+    if entry and isinstance(entry, dict):
+        result = entry.get("default_glyph", entry.get("glyph", ""))
+        print(f"[GLYPH] get_default_glyph('{category}') = '{result}'")
+        return result
+    print(f"[GLYPH] get_default_glyph('{category}') = '' (not found)")
+    return ""
+
+
+def get_default_display_name(category):
+    """Get the default display name for a category name."""
+    global _glyph_cache, _glyph_cache_loaded
+
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+
+    entry = _glyph_cache.get(category, None)
+    if entry and isinstance(entry, dict):
+        result = entry.get("default_display_name", "")
+        print(f"[GLYPH] get_default_display_name('{category}') = '{result}'")
+        return result
+    print(f"[GLYPH] get_default_display_name('{category}') = '' (not found)")
+    return ""
+
+
+def set_category_glyph(category, glyph, save=True):
+    """Set the glyph for a category name."""
+    global _glyph_cache
+
+    if category not in _glyph_cache:
+        _glyph_cache[category] = {
+            "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
+            "default_glyph": "", "default_display_name": ""
+        }
+
+    # Ensure the entry has all required fields
+    entry = _glyph_cache[category]
+    if "default_glyph" not in entry:
+        entry["default_glyph"] = entry.get("glyph", "")
+    if "default_display_name" not in entry:
+        entry["default_display_name"] = entry.get("display_name", "")
+
+    if glyph:
+        _glyph_cache[category]["glyph"] = glyph
+    else:
+        # Remove the category if glyph is empty
+        if category in _glyph_cache:
+            del _glyph_cache[category]
+
+    if save:
+        _save_glyph_mappings_to_file()
+
+
+def set_category_data(category, glyph=None, display_name=None, color=None, save=True):
+    """Set the full data (glyph, display_name, color) for a category name."""
+    global _glyph_cache
+
+    if category not in _glyph_cache:
+        _glyph_cache[category] = {
+            "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
+            "default_glyph": "", "default_display_name": ""
+        }
+
+    # Ensure the entry has all required fields
+    entry = _glyph_cache[category]
+    if "default_glyph" not in entry:
+        entry["default_glyph"] = entry.get("glyph", "")
+    if "default_display_name" not in entry:
+        entry["default_display_name"] = entry.get("display_name", "")
+
+    if glyph is not None:
+        _glyph_cache[category]["glyph"] = glyph
+    if display_name is not None:
+        _glyph_cache[category]["display_name"] = display_name
+    if color is not None:
+        _glyph_cache[category]["color"] = list(color[:3]) if len(color) >= 3 else [0.0, 0.0, 0.0]
+
+    if save:
+        _save_glyph_mappings_to_file()
+
+
+def reset_category_to_defaults(category, save=True):
+    """Reset a single category to its default values (glyph and display_name).
+
+    Color is always reset to [0.0, 0.0, 0.0].
+    Returns the default glyph and display_name.
+    """
+    global _glyph_cache, _glyph_cache_loaded
+
+    print(f"[GLYPH RESET] reset_category_to_defaults called for: '{category}'")
+
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+
+    if category not in _glyph_cache:
+        print(f"[GLYPH RESET] Category '{category}' not found in cache!")
+        return "", ""
+
+    entry = _glyph_cache[category]
+    print(f"[GLYPH RESET] Current entry: {entry}")
+
+    default_glyph = entry.get("default_glyph", entry.get("glyph", ""))
+    default_display_name = entry.get("default_display_name", "")
+
+    print(f"[GLYPH RESET] default_glyph='{default_glyph}', default_display_name='{default_display_name}'")
+
+    # Reset to defaults
+    entry["glyph"] = default_glyph
+    entry["display_name"] = default_display_name
+    entry["color"] = [0.0, 0.0, 0.0]
+
+    print(f"[GLYPH RESET] After reset entry: {entry}")
+
+    if save:
+        _save_glyph_mappings_to_file()
+
+    return default_glyph, default_display_name
+
+
+def get_all_category_glyphs():
+    """Get all category glyph mappings."""
+    global _glyph_cache, _glyph_cache_loaded
+
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+
+    return _glyph_cache.copy()
+
+
+def reset_category_glyphs_to_defaults():
+    """Reset all glyph mappings to defaults."""
+    global _glyph_cache
+
+    _glyph_cache = DEFAULT_CATEGORY_GLYPHS.copy()
+    _save_glyph_mappings_to_file()
+
+
+def _discover_active_categories():
+    """Discover all active categories from registered panels including addon panels."""
+    discovered_categories = set()
+
+    try:
+        import bpy.types
+        from bpy.types import Panel
+
+        # Method 1: Check all registered types that are Panel subclasses
+        for type_name in dir(bpy.types):
+            try:
+                type_obj = getattr(bpy.types, type_name)
+                # Check if it's a Panel class with bl_category
+                if hasattr(type_obj, 'bl_category') and type_obj.bl_category:
+                    discovered_categories.add(type_obj.bl_category)
+            except (AttributeError, TypeError):
+                continue
+
+        # Method 2: Use Panel.__subclasses__() to find all registered panels
+        try:
+            for panel_class in Panel.__subclasses__():
+                if hasattr(panel_class, 'bl_category') and panel_class.bl_category:
+                    discovered_categories.add(panel_class.bl_category)
+        except Exception as e:
+            print(f"[GLYPH] Warning: Could not get Panel subclasses: {e}")
+
+        # Method 3: Check _bli_register_classes if available (internal Blender registry)
+        try:
+            import _bpy
+            if hasattr(_bpy, 'types'):
+                for attr_name in dir(_bpy.types):
+                    try:
+                        attr = getattr(_bpy.types, attr_name)
+                        if hasattr(attr, 'bl_category') and attr.bl_category:
+                            discovered_categories.add(attr.bl_category)
+                    except (AttributeError, TypeError):
+                        continue
+        except ImportError:
+            pass
+
+        print(f"[GLYPH] Discovered {len(discovered_categories)} active categories: {sorted(discovered_categories)}")
+        return discovered_categories
+
+    except Exception as e:
+        print(f"[GLYPH] Error discovering categories: {e}")
+        import traceback
+        traceback.print_exc()
+        return set()
+
+
+def _merge_discovered_categories():
+    """Merge discovered categories with cached mappings, adding defaults for new ones."""
+    global _glyph_cache
+
+    discovered = _discover_active_categories()
+    if not discovered:
+        return False
+
+    # Find categories that are in the discovered set but not in cache
+    new_categories = discovered - set(_glyph_cache.keys())
+
+    if new_categories:
+        print(f"[GLYPH] Found {len(new_categories)} new categories: {sorted(new_categories)}")
+
+        # Assign default glyphs to new categories
+        # Use Material Symbols Unicode icons for consistency
+        default_glyphs = {
+            'Tool': '\ue91f',      # construction
+            'View': '\ue8f4',      # visibility
+            'Edit': '\ue3c9',      # edit
+            'Modifier': '\ue8d8',  # tune
+            'Modifiers': '\ue8d8', # tune
+            'Constraint': '\ue157', # link
+            'Constraints': '\ue157', # link
+            'Physics': '\ue3ca',   # science
+            'Particle': '\ue064',  # grain
+            'Particles': '\ue064', # grain
+            'Cache': '\ue8b8',     # storage
+            'Proxy': '\ue8c6',     # sync_alt
+            'Strip': '\ue01b',     # movie
+            'Animation': '\ue037', # play_arrow
+            'Keyframe': '\ue897',  # timeline
+            'Track': '\ue55c',     # track_changes
+            'Solve': '\ue8b0',     # calculate
+            'Stabilization': '\ue3c0', # tune
+            'Mask': '\ue3b8',      # face_retouching_natural
+            'Annotation': '\ue3ae', # edit
+            'Footage': '\ue04b',   # movie_creation
+            'Action': '\ue037',    # play_arrow
+            'Shape Key': '\ue3d3', # tune
+            'Material': '\ue429',  # palette
+            'Texture': '\ue40a',   # texture
+            'Node': '\ue1b8',      # account_tree
+            'Script': '\ue86f',    # terminal
+            'Render': '\ue439',    # photo_camera
+            'Scene': '\ue8f9',     # dashboard
+            'World': '\ue88e',     # public
+            'Asset': '\ue2c7',     # folder
+            'Options': '\ue5d4',   # settings
+            'Item': '\ueb75',      # visibility
+            'Data': '\ue23e',      # database
+        }
+
+        # Add new categories with appropriate glyphs
+        for category in new_categories:
+            # Use specific glyph if available
+            glyph = default_glyphs.get(category)
+            if glyph is None:
+                # Check if category name is a single glyph (addon category with glyph as name)
+                if _is_single_glyph(category):
+                    glyph = category  # Use the glyph from category name
+                else:
+                    # No glyph - leave empty to use fallback letter (first char of category name)
+                    glyph = ""
+
+            # Determine base_type
+            if glyph and _is_single_glyph(category):
+                base_type = "glyph_only"
+            elif glyph:
+                base_type = "glyph_text"
+            else:
+                base_type = "text_only"
+
+            _glyph_cache[category] = {
+                "glyph": glyph,
+                "display_name": "",
+                "color": [0.0, 0.0, 0.0],
+                "default_glyph": glyph,
+                "default_display_name": "",
+                "base_type": base_type
+            }
+            print(f"[GLYPH] Added new category '{category}' with glyph '{glyph}', base_type={base_type}")
+
+        # Save updated cache to file
+        if _save_glyph_mappings_to_file():
+            print(f"[GLYPH] Saved {len(new_categories)} new category mappings to JSON")
+            return True
+        else:
+            print(f"[GLYPH] Failed to save new category mappings")
+
+    else:
+        print(f"[GLYPH] No new categories found (all {len(discovered)} are cached)")
+
+    return len(new_categories) > 0
+
+
+def _is_collection_safe(collection):
+    """Check if a bpy_prop_collection is safe to access without triggering crashes."""
+    try:
+        # Test access without triggering iteration - just check if we can get the RNA type
+        # This is a minimal operation that shouldn't trigger ListBase traversal
+        _ = collection.bl_rna
+        return True
+    except (AttributeError, RuntimeError, ReferenceError):
+        return False
+
+
+def sync_glyph_mappings_to_wm():
+    """Sync in-memory glyph mappings to window manager collection.
+
+    Note: The collections are cleared in C++ code before file save and after file load
+    to prevent crashes from garbage pointers. This function only adds new items.
+    """
+    global _glyph_cache, _glyph_cache_loaded
+
+    print(f"[GLYPH SYNC] sync_glyph_mappings_to_wm called, cache has {len(_glyph_cache)} entries")
+
+    def _has_user_customizations(category_data):
+        """Check if category has user customizations (display_name or color)."""
+        if isinstance(category_data, dict):
+            display_name = category_data.get("display_name", "")
+            color = category_data.get("color", [0.0, 0.0, 0.0])
+            return bool(display_name) or color != [0.0, 0.0, 0.0]
+        return False
+
+    try:
+        wm = bpy.context.window_manager
+        if wm is None or not hasattr(wm, 'category_glyph_mappings'):
+            print("[GLYPH] WindowManager or collections not available")
+            return False
+
+        # Clear existing mappings to avoid duplicates
+        old_count = len(wm.category_glyph_mappings)
+        while len(wm.category_glyph_mappings) > 0:
+            wm.category_glyph_mappings.remove(0)
+        print(f"[GLYPH SYNC] Cleared {old_count} existing mappings")
+
+        # Add current mappings from cache
+        added_count = 0
+        skipped_invalid = 0
+        try:
+            for category, category_data in _glyph_cache.items():
+                try:
+                    # Skip invalid category names ONLY if they have no user customizations
+                    if not _is_valid_category_name(category):
+                        if not _has_user_customizations(category_data):
+                            skipped_invalid += 1
+                            continue
+
+                    # Normalize data to ensure it has all required fields
+                    if isinstance(category_data, str):
+                        # Old format - convert to new format
+                        normalized_data = {"glyph": category_data, "display_name": "", "color": [0.0, 0.0, 0.0]}
+                    elif isinstance(category_data, dict):
+                        normalized_data = category_data
+                    else:
+                        continue
+
+                    glyph_val = normalized_data.get("glyph", "")
+                    display_name_val = normalized_data.get("display_name", "")
+                    color_val = normalized_data.get("color", [0.0, 0.0, 0.0])
+                    default_glyph_val = normalized_data.get("default_glyph", glyph_val)
+                    default_display_name_val = normalized_data.get("default_display_name", "")
+
+                    item = wm.category_glyph_mappings.new(category=category)
+                    item.glyph = glyph_val
+                    item.display_name = display_name_val
+                    item.color = (color_val[0], color_val[1], color_val[2])
+                    item.default_glyph = default_glyph_val
+                    item.default_display_name = default_display_name_val
+                    added_count += 1
+
+                    # Debug: show what was synced for key categories
+                    if category in ["Item", "View", "Tool", "Edit"]:
+                        print(f"[GLYPH SYNC] Synced '{category}': glyph='{glyph_val}', display_name='{display_name_val}'")
+                except Exception as e:
+                    print(f"[GLYPH] Error adding mapping for {category}: {e}")
+
+        except Exception as e:
+            print(f"[GLYPH] Critical error during mapping addition: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+        if skipped_invalid > 0:
+            print(f"[GLYPH] Skipped {skipped_invalid} categories with invalid names and no customizations")
+        print(f"[GLYPH] Successfully synced {added_count}/{len(_glyph_cache)} mappings to WM")
+        return added_count > 0
+    except Exception as e:
+        print(f"[GLYPH] Error syncing to WM: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def register_category_glyph_mappings():
+    """Register glyph mappings. Loads from file, discovers addon categories, and syncs to WM."""
+    global _glyph_cache_loaded
+
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+
+    # Discover and merge any new categories from active addons
+    try:
+        _merge_discovered_categories()
+    except Exception as e:
+        print(f"[GLYPH] Error during category discovery: {e}")
+        # Continue even if discovery fails - we can still sync existing categories
+
+    return sync_glyph_mappings_to_wm()
+
+
+def sync_wm_to_glyph_cache():
+    """Sync glyph mappings from window manager collection back to cache and JSON.
+
+    This function reads user changes from category_glyph_overrides and
+    category_glyph_mappings in WM and saves them to the JSON file.
+    """
+    global _glyph_cache
+
+    try:
+        wm = bpy.context.window_manager
+        if wm is None or not hasattr(wm, 'category_glyph_mappings'):
+            print("[GLYPH] Cannot sync from WM: WindowManager not available")
+            return False
+
+        # Check if collections are safe to access
+        if not _is_collection_safe(wm.category_glyph_mappings):
+            print("[GLYPH] Cannot sync from WM: collections not safe")
+            return False
+
+        changes_detected = False
+        print("[GLYPH] Starting sync from WM to cache...")
+
+        # Sync from category_glyph_mappings (default mappings)
+        try:
+            mappings_count = 0
+            for item in wm.category_glyph_mappings:
+                category = item.category
+                if not category or category == "__test__":
+                    continue
+
+                mappings_count += 1
+
+                # Get current cached data or create new entry
+                if category not in _glyph_cache:
+                    _glyph_cache[category] = {"glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0]}
+
+                cached_entry = _glyph_cache[category]
+
+                # Check if any values changed
+                if cached_entry.get("glyph", "") != item.glyph:
+                    cached_entry["glyph"] = item.glyph
+                    changes_detected = True
+
+                if cached_entry.get("display_name", "") != item.display_name:
+                    cached_entry["display_name"] = item.display_name
+                    changes_detected = True
+
+                cached_color = cached_entry.get("color", [0.0, 0.0, 0.0])
+                item_color = list(item.color[:3])
+                if cached_color != item_color:
+                    cached_entry["color"] = item_color
+                    changes_detected = True
+
+                # Also sync default values
+                if hasattr(item, 'default_glyph') and item.default_glyph:
+                    if cached_entry.get("default_glyph", "") != item.default_glyph:
+                        cached_entry["default_glyph"] = item.default_glyph
+                        changes_detected = True
+
+                if hasattr(item, 'default_display_name') and item.default_display_name:
+                    if cached_entry.get("default_display_name", "") != item.default_display_name:
+                        cached_entry["default_display_name"] = item.default_display_name
+                        changes_detected = True
+
+            print(f"[GLYPH] Processed {mappings_count} items from category_glyph_mappings")
+        except Exception as e:
+            print(f"[GLYPH] Error reading from category_glyph_mappings: {e}")
+
+        # Sync from category_glyph_overrides (user overrides)
+        if _is_collection_safe(wm.category_glyph_overrides):
+            try:
+                overrides_count = 0
+                for item in wm.category_glyph_overrides:
+                    category = item.category
+                    if not category or category == "__test__":
+                        continue
+
+                    overrides_count += 1
+                    print(f"[GLYPH] Override found: category='{category}', glyph='{item.glyph}', display_name='{item.display_name}', color={list(item.color[:3])}")
+
+                    # Get current cached data or create new entry
+                    if category not in _glyph_cache:
+                        _glyph_cache[category] = {"glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0]}
+
+                    cached_entry = _glyph_cache[category]
+
+                    # Overrides take precedence
+                    if item.glyph:
+                        if cached_entry.get("glyph", "") != item.glyph:
+                            cached_entry["glyph"] = item.glyph
+                            changes_detected = True
+                            print(f"[GLYPH] Updated glyph for '{category}'")
+
+                    if item.display_name:
+                        if cached_entry.get("display_name", "") != item.display_name:
+                            cached_entry["display_name"] = item.display_name
+                            changes_detected = True
+                            print(f"[GLYPH] Updated display_name for '{category}'")
+
+                    # Always save color from override (even if zero - user explicitly set it)
+                    item_color = list(item.color[:3])
+                    if cached_entry.get("color", [0.0, 0.0, 0.0]) != item_color:
+                        cached_entry["color"] = item_color
+                        changes_detected = True
+                        print(f"[GLYPH] Updated color for '{category}' to {item_color}")
+
+                print(f"[GLYPH] Processed {overrides_count} items from category_glyph_overrides")
+            except Exception as e:
+                print(f"[GLYPH] Error reading from category_glyph_overrides: {e}")
+
+        # Save to JSON if changes were detected
+        if changes_detected:
+            if _save_glyph_mappings_to_file():
+                print(f"[GLYPH] Saved {len(_glyph_cache)} category mappings from WM to JSON")
+            else:
+                print("[GLYPH] Failed to save category mappings from WM")
+
+        return changes_detected
+
+    except Exception as e:
+        print(f"[GLYPH] Error syncing from WM: {e}")
+        return False
+
+
+def is_zero_v3(color):
+    """Check if a 3-component color is all zeros."""
+    return color[0] == 0.0 and color[1] == 0.0 and color[2] == 0.0
+
+
+class USERPREF_OT_save_category_glyphs(Operator):
+    """Save category glyph settings to preferences file"""
+    bl_idname = "wm.save_category_glyphs"
+    bl_label = "Save Category Glyphs"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    def execute(self, context):
+        # Sync from WM to cache and save to JSON
+        sync_wm_to_glyph_cache()
+        return {'FINISHED'}
+
+
+class USERPREF_OT_sync_category_glyphs(Operator):
+    """Sync category glyph settings from window manager to file"""
+    bl_idname = "wm.sync_category_glyphs"
+    bl_label = "Sync Category Glyphs"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    def execute(self, context):
+        # Sync from WM to cache and save to JSON
+        if sync_wm_to_glyph_cache():
+            self.report({'INFO'}, "Category glyphs synchronized")
+        else:
+            self.report({'WARNING'}, "No changes to synchronize")
+        return {'FINISHED'}
 
 
 @bpy.app.handlers.persistent
 def _on_load_post(dummy):
-    """Register glyph mappings after file load."""
-    print("[GLYPH DEBUG] _on_load_post handler called")
+    """Load glyph mappings after file load."""
     register_category_glyph_mappings()
 
 
-# Register handler for file loads
-print("[GLYPH DEBUG] Module loading, registering handlers...")
+@bpy.app.handlers.persistent
+def _on_save_pre(dummy):
+    """Sync glyph mappings from WM to JSON before saving preferences."""
+    sync_wm_to_glyph_cache()
+
+
+@bpy.app.handlers.persistent
+def _on_version_update(dummy):
+    """Sync category glyphs after Blender version update or addon enable/disable."""
+    # Re-discover categories in case new addons were enabled
+    try:
+        _merge_discovered_categories()
+        sync_glyph_mappings_to_wm()
+    except Exception as e:
+        print(f"[GLYPH] Error during version update sync: {e}")
+
+
+# Register handlers
 if _on_load_post not in bpy.app.handlers.load_post:
     bpy.app.handlers.load_post.append(_on_load_post)
-    print("[GLYPH DEBUG] Handler registered")
 
-# Try to register immediately if window manager is available
-print("[GLYPH DEBUG] Attempting immediate registration...")
-register_category_glyph_mappings()
+if _on_save_pre not in bpy.app.handlers.save_pre:
+    bpy.app.handlers.save_pre.append(_on_save_pre)
+
+# Load mappings on module import
+_load_glyph_mappings_from_file()
 
 
 # -----------------------------------------------------------------------------
@@ -3248,7 +4102,7 @@ class VIEW3D_OT_category_tabs_settings(Operator):
 
     def invoke(self, context, event):
         # Ensure glyph mappings are registered when opening settings
-        _ensure_glyph_mappings()
+        register_category_glyph_mappings()
         wm = context.window_manager
         return wm.invoke_popup(self, width=200)
 
@@ -3267,6 +4121,8 @@ classes = (
     USERPREF_MT_editor_menus,
     USERPREF_MT_view,
     USERPREF_MT_save_load,
+    USERPREF_OT_save_category_glyphs,
+    USERPREF_OT_sync_category_glyphs,
 
     USERPREF_PT_interface_display,
     USERPREF_PT_interface_editors,

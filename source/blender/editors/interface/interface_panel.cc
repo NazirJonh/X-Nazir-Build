@@ -1598,6 +1598,57 @@ static const char *lookup_default_glyph(const char *category)
   return nullptr;
 }
 
+/**
+ * Check if a ListBase containing CategoryGlyphItem appears to be valid.
+ * After file read, the list may contain garbage pointers from the old file's memory space.
+ * We check if the first item's prev pointer is null (as expected for first item).
+ */
+static bool category_glyph_list_is_valid(const ListBase *list)
+{
+  if (list == nullptr || list->first == nullptr) {
+    return true; /* Empty list is valid. */
+  }
+
+  const CategoryGlyphItem *first = static_cast<const CategoryGlyphItem *>(list->first);
+
+  /* First item should have prev == nullptr. If not, list is corrupted. */
+  if (first->prev != nullptr) {
+    return false;
+  }
+
+  /* Check for obviously invalid next pointer (like -1 which is 0xFFFFFFFF...). */
+  if (first->next == reinterpret_cast<const void *>(static_cast<intptr_t>(-1))) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Check if a ListBase containing WorkspaceCategoryOrder appears to be valid.
+ * After file read, the list may contain garbage pointers from the old file's memory space.
+ */
+static bool workspace_category_order_list_is_valid(const ListBase *list)
+{
+  if (list == nullptr || list->first == nullptr) {
+    return true; /* Empty list is valid. */
+  }
+
+  const WorkspaceCategoryOrder *first = static_cast<const WorkspaceCategoryOrder *>(list->first);
+
+  /* First item should have prev == nullptr. If not, list is corrupted. */
+  if (first->prev != nullptr) {
+    return false;
+  }
+
+  /* Check for obviously invalid next pointer (like -1 which is 0xFFFFFFFF...). */
+  if (first->next == reinterpret_cast<const void *>(static_cast<intptr_t>(-1))) {
+    return false;
+  }
+
+  return true;
+}
+
 const char *panel_category_glyph_lookup(const wmWindowManager *wm,
                                         const char *category,
                                         const PanelType *panel_type,
@@ -1616,7 +1667,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
   /* 1. Check user overrides in wm->category_glyph_overrides.
    * If override has a glyph, use it immediately.
    * If override only has color (empty glyph), save color and continue looking for glyph. */
-  if (wm) {
+  if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
          item;
@@ -1640,18 +1691,22 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
   }
 
   /* 2. Check global mappings in wm->category_glyph_mappings (registered by Python). */
-  if (wm && !BLI_listbase_is_empty(&wm->category_glyph_mappings)) {
+  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
          item;
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
       if (STREQ(item->category, category)) {
-        /* Only set color if not already set by override. */
+        /* Save color if available, even if glyph is empty. */
         if (r_color && is_zero_v3(r_color) && !is_zero_v3(item->color)) {
           copy_v3_v3(r_color, item->color);
         }
-        return item->glyph;
+        /* Only return if glyph is not empty. If empty, continue to fallback. */
+        if (item->glyph[0] != '\0') {
+          return item->glyph;
+        }
+        break; /* Found entry but glyph is empty - continue to fallback. */
       }
     }
   }
@@ -1662,7 +1717,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
      * This allows setting color via category_glyph_overrides or category_glyph_mappings. */
     if (r_color && is_zero_v3(r_color)) {
       /* Check overrides for color (without requiring glyph in override). */
-      if (wm) {
+      if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
         for (const CategoryGlyphItem *item =
                  static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
              item;
@@ -1675,7 +1730,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
         }
       }
       /* Check mappings for color if not found in overrides. */
-      if (is_zero_v3(r_color) && wm && !BLI_listbase_is_empty(&wm->category_glyph_mappings)) {
+      if (is_zero_v3(r_color) && wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
         for (const CategoryGlyphItem *item =
                  static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
              item;
@@ -1733,7 +1788,7 @@ static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
   if (r_source_type) *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_FALLBACK;
 
   /* 1. Check global mappings (registered by Python DEFAULT_CATEGORY_GLYPHS) */
-  if (wm && !BLI_listbase_is_empty(&wm->category_glyph_mappings)) {
+  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
          item;
@@ -1775,12 +1830,13 @@ static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
 
 /**
  * Lookup display name for a category.
- * Returns user override if exists, otherwise returns the category name itself.
+ * Returns user override if exists, otherwise checks global mappings, otherwise returns the category name itself.
  */
 static const char *panel_category_display_name_lookup(const wmWindowManager *wm,
                                                         const char *category)
 {
-  if (wm) {
+  /* 1. Check user overrides first */
+  if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
          item;
@@ -1794,6 +1850,23 @@ static const char *panel_category_display_name_lookup(const wmWindowManager *wm,
       }
     }
   }
+
+  /* 2. Check global mappings */
+  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        if (item->display_name[0] != '\0') {
+          return item->display_name;
+        }
+        break;
+      }
+    }
+  }
+
   return category;
 }
 
@@ -1905,40 +1978,97 @@ static void apply_glyph_darkening(const int fontid, uchar color[3], const float 
  * \{ */
 
 /**
+ * Check if a category name is a glyph (high Unicode character).
+ * Glyph names are typically used by addons and should not be considered reserved.
+ */
+static bool category_name_is_glyph(const char *category_id)
+{
+  if (category_id == nullptr || category_id[0] == '\0') {
+    return false;
+  }
+
+  /* Check if the category name is a single high Unicode character (glyph).
+   * Glyphs from Material Symbols are in the Private Use Area (0xE000-0xF8FF)
+   * or other high Unicode ranges. */
+  const size_t len = strlen(category_id);
+
+  /* Single UTF-8 character that's a high Unicode glyph */
+  if (len <= 4) {
+    /* Decode first UTF-8 character */
+    unsigned int codepoint = 0;
+    if ((category_id[0] & 0x80) == 0) {
+      /* ASCII - not a glyph */
+      return false;
+    }
+    else if ((category_id[0] & 0xE0) == 0xC0) {
+      /* 2-byte UTF-8 */
+      codepoint = (category_id[0] & 0x1F) << 6;
+      if (category_id[1]) {
+        codepoint |= (category_id[1] & 0x3F);
+      }
+    }
+    else if ((category_id[0] & 0xF0) == 0xE0) {
+      /* 3-byte UTF-8 */
+      codepoint = (category_id[0] & 0x0F) << 12;
+      if (category_id[1]) {
+        codepoint |= (category_id[1] & 0x3F) << 6;
+      }
+      if (category_id[2]) {
+        codepoint |= (category_id[2] & 0x3F);
+      }
+    }
+    else if ((category_id[0] & 0xF8) == 0xF0) {
+      /* 4-byte UTF-8 */
+      codepoint = (category_id[0] & 0x07) << 18;
+      if (category_id[1]) {
+        codepoint |= (category_id[1] & 0x3F) << 12;
+      }
+      if (category_id[2]) {
+        codepoint |= (category_id[2] & 0x3F) << 6;
+      }
+      if (category_id[3]) {
+        codepoint |= (category_id[3] & 0x3F);
+      }
+    }
+
+    /* Check if codepoint is in Private Use Area or other glyph ranges */
+    if (codepoint >= 0xE000 && codepoint <= 0xF8FF) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Check if a category is reserved (cannot be reordered).
  * This checks ONLY the base source (DEFAULT/mappings), NOT overrides.
  * User overrides (color, glyph) should NOT affect reserved status.
  *
  * Reserved categories are:
- * - Categories in wm.category_glyph_mappings (from DEFAULT_CATEGORY_GLYPHS)
+ * - Categories in wm.category_glyph_mappings (from DEFAULT_CATEGORY_GLYPHS) with TEXT names
  * - Categories in static default_glyph_mappings
  *
  * NOT reserved:
+ * - Categories with glyph names (high Unicode) - these are from addons
  * - Categories with PanelType.icon_glyph (addons)
  * - Categories with fallback letter
  * - Categories with user overrides
  */
 bool category_is_reserved(const wmWindowManager *wm, const char *category_id)
 {
-  /* 1. Check wm.category_glyph_mappings (Python DEFAULT_CATEGORY_GLYPHS) */
-  if (wm) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      if (STREQ(item->category, category_id)) {
-        return true;
-      }
-    }
+  /* Categories with glyph names (high Unicode) are from addons and NOT reserved */
+  if (category_name_is_glyph(category_id)) {
+    return false;
   }
 
-  /* 2. Check static default_glyph_mappings */
+  /* Only check static default_glyph_mappings (built-in Blender categories).
+   * Do NOT check category_glyph_mappings as it contains all categories including addons. */
   if (lookup_default_glyph(category_id)) {
     return true;
   }
 
-  /* 3. PanelType.icon_glyph and fallback are NOT reserved */
+  /* PanelType.icon_glyph and fallback are NOT reserved */
   return false;
 }
 
@@ -1984,16 +2114,18 @@ static int get_category_order_index(const bContext *C, ARegion *region, const ch
 
   /* Look up in workspace order */
   int user_index = 0;
-  for (WorkspaceCategoryOrder *order =
-           static_cast<WorkspaceCategoryOrder *>(workspace->category_order.first);
-       order;
-       order = order->next)
-  {
-    if (order->space_type == space_type && order->region_type == region_type) {
-      if (STREQ(order->category_id, category_id)) {
-        return user_index;
+  if (workspace_category_order_list_is_valid(&workspace->category_order)) {
+    for (WorkspaceCategoryOrder *order =
+             static_cast<WorkspaceCategoryOrder *>(workspace->category_order.first);
+         order;
+         order = order->next)
+    {
+      if (order->space_type == space_type && order->region_type == region_type) {
+        if (STREQ(order->category_id, category_id)) {
+          return user_index;
+        }
+        user_index++;
       }
-      user_index++;
     }
   }
 
@@ -2133,6 +2265,10 @@ static void update_insert_zone(const bContext *C,
  */
 static void workspace_category_order_clear(WorkSpace *workspace, int space_type, int region_type)
 {
+  if (!workspace_category_order_list_is_valid(&workspace->category_order)) {
+    return;
+  }
+
   WorkspaceCategoryOrder *order = static_cast<WorkspaceCategoryOrder *>(
       workspace->category_order.first);
   WorkspaceCategoryOrder *order_next;
@@ -2220,13 +2356,15 @@ static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, AReg
 
   /* Collect workspace order entries for this region */
   Vector<std::pair<int, std::string>> workspace_order;
-  for (WorkspaceCategoryOrder *order =
-           static_cast<WorkspaceCategoryOrder *>(workspace->category_order.first);
-       order;
-       order = order->next)
-  {
-    if (order->space_type == space_type && order->region_type == region_type) {
-      workspace_order.append(std::make_pair(order->order_index, std::string(order->category_id)));
+  if (workspace_category_order_list_is_valid(&workspace->category_order)) {
+    for (WorkspaceCategoryOrder *order =
+             static_cast<WorkspaceCategoryOrder *>(workspace->category_order.first);
+         order;
+         order = order->next)
+    {
+      if (order->space_type == space_type && order->region_type == region_type) {
+        workspace_order.append(std::make_pair(order->order_index, std::string(order->category_id)));
+      }
     }
   }
 

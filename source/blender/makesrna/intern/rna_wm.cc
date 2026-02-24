@@ -701,7 +701,47 @@ static void rna_wm_category_glyph_mapping_remove(wmWindowManager *wm,
 
 static void rna_wm_category_glyph_mapping_clear(wmWindowManager *wm)
 {
-  BLI_freelistN(&wm->category_glyph_mappings);
+  /* After file read, the list may contain garbage pointers from the old file's memory space.
+   * We need to safely handle both cases:
+   * 1. Valid list with properly allocated items (from runtime operations)
+   * 2. Invalid list with garbage pointers (from file read)
+   *
+   * Check if the list appears valid by verifying the first item's prev pointer is null
+   * (as it should be for the first item in a proper linked list). */
+  if (wm->category_glyph_mappings.first != nullptr) {
+    CategoryGlyphItem *first = static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+
+    /* Check for obviously invalid pointers that indicate corruption from file read:
+     * - prev should be NULL for the first item
+     * - next should not be obviously invalid values like -1 or small numbers
+     * - The pointer itself should be within reasonable memory range
+     */
+    bool list_appears_valid = false;
+
+    if (first->prev == nullptr) {
+      /* First item's prev is correctly null, check next pointer */
+      if (first->next == nullptr) {
+        /* Single item list, this is valid */
+        list_appears_valid = true;
+      }
+      else if (first->next != reinterpret_cast<void *>(static_cast<intptr_t>(-1)) &&
+               first->next != reinterpret_cast<void *>(static_cast<intptr_t>(0x1)) &&
+               reinterpret_cast<uintptr_t>(first->next) > 0x10000)
+      {
+        /* Next pointer appears to be a valid address */
+        list_appears_valid = true;
+      }
+    }
+
+    if (list_appears_valid) {
+      /* List appears valid, free items properly. */
+      BLI_freelistN(&wm->category_glyph_mappings);
+    }
+    else {
+      /* List is corrupted, just clear the pointers without freeing. */
+      BLI_listbase_clear(&wm->category_glyph_mappings);
+    }
+  }
   WM_main_add_notifier(NC_WINDOW, nullptr);
 }
 
@@ -735,7 +775,47 @@ static void rna_wm_category_glyph_override_remove(wmWindowManager *wm,
 
 static void rna_wm_category_glyph_override_clear(wmWindowManager *wm)
 {
-  BLI_freelistN(&wm->category_glyph_overrides);
+  /* After file read, the list may contain garbage pointers from the old file's memory space.
+   * We need to safely handle both cases:
+   * 1. Valid list with properly allocated items (from runtime operations)
+   * 2. Invalid list with garbage pointers (from file read)
+   *
+   * Check if the list appears valid by verifying the first item's prev pointer is null
+   * (as it should be for the first item in a proper linked list). */
+  if (wm->category_glyph_overrides.first != nullptr) {
+    CategoryGlyphItem *first = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+
+    /* Check for obviously invalid pointers that indicate corruption from file read:
+     * - prev should be NULL for the first item
+     * - next should not be obviously invalid values like -1 or small numbers
+     * - The pointer itself should be within reasonable memory range
+     */
+    bool list_appears_valid = false;
+
+    if (first->prev == nullptr) {
+      /* First item's prev is correctly null, check next pointer */
+      if (first->next == nullptr) {
+        /* Single item list, this is valid */
+        list_appears_valid = true;
+      }
+      else if (first->next != reinterpret_cast<void *>(static_cast<intptr_t>(-1)) &&
+               first->next != reinterpret_cast<void *>(static_cast<intptr_t>(0x1)) &&
+               reinterpret_cast<uintptr_t>(first->next) > 0x10000)
+      {
+        /* Next pointer appears to be a valid address */
+        list_appears_valid = true;
+      }
+    }
+
+    if (list_appears_valid) {
+      /* List appears valid, free items properly. */
+      BLI_freelistN(&wm->category_glyph_overrides);
+    }
+    else {
+      /* List is corrupted, just clear the pointers without freeing. */
+      BLI_listbase_clear(&wm->category_glyph_overrides);
+    }
+  }
   WM_main_add_notifier(NC_WINDOW, nullptr);
 }
 
@@ -2990,12 +3070,27 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Glyph", "UTF-8 glyph character from Material Symbols");
   RNA_def_property_update(prop, NC_WINDOW, nullptr);
 
+  prop = RNA_def_property(srna, "display_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "display_name");
+  RNA_def_property_ui_text(prop, "Display Name", "Custom display name for the category tab");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
   prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_float_sdna(prop, nullptr, "color");
   RNA_def_property_array(prop, 3);
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_float_default(prop, 0.0f);
   RNA_def_property_ui_text(prop, "Color", "Custom glyph color (black = use theme color)");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "default_glyph", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "default_glyph");
+  RNA_def_property_ui_text(prop, "Default Glyph", "Default glyph for reset functionality");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "default_display_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "default_display_name");
+  RNA_def_property_ui_text(prop, "Default Display Name", "Default display name for reset functionality");
   RNA_def_property_update(prop, NC_WINDOW, nullptr);
 }
 
@@ -3103,11 +3198,13 @@ static void rna_def_windowmanager(BlenderRNA *brna)
   rna_def_wm_keyconfigs(brna, prop);
 
   prop = RNA_def_property(srna, "category_glyph_mappings", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "category_glyph_mappings", nullptr);
   RNA_def_property_struct_type(prop, "CategoryGlyphItem");
   RNA_def_property_ui_text(prop, "Category Glyph Mappings", "Default glyph mappings for category tabs");
   rna_def_category_glyph_mappings(brna, prop);
 
   prop = RNA_def_property(srna, "category_glyph_overrides", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "category_glyph_overrides", nullptr);
   RNA_def_property_struct_type(prop, "CategoryGlyphItem");
   RNA_def_property_ui_text(prop, "Category Glyph Overrides", "User-defined glyph overrides for category tabs");
   rna_def_category_glyph_overrides(brna, prop);

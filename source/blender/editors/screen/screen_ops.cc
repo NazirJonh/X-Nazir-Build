@@ -57,6 +57,10 @@
 #include "BKE_sound.hh"
 #include "BKE_workspace.hh"
 
+#ifdef WITH_PYTHON
+#  include "BPY_extern.hh"
+#endif
+
 #include "WM_api.hh"
 #include "WM_types.hh"
 
@@ -7315,12 +7319,17 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
   wmWindowManager *wm = CTX_wm_manager(C);
 
   /* Look up default glyph for preview fallback (when user input is empty or invalid) */
+  bool is_fallback = false;
   const char *default_glyph = blender::ui::panel_category_glyph_lookup(
-      wm, category, nullptr, nullptr, nullptr);
+      wm, category, nullptr, &is_fallback, nullptr);
+
+  printf("[GLYPH PREVIEW] category='%s', user_glyph='%s', default_glyph='%s', is_fallback=%d\n",
+         category, glyph, default_glyph ? default_glyph : "(null)", is_fallback);
 
   /* Update preview buffers for popup preview.
    * Use the processed glyph from valid input, or fall back to default lookup.
    * Invalid input shows the default glyph (not the invalid text).
+   * Fallback letter is also shown in preview.
    */
   copy_v3_v3(category_tab_preview_color, color);
   if (glyph[0] != '\0') {
@@ -7328,12 +7337,14 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
     STRNCPY(category_tab_preview_glyph, glyph);
   }
   else if (default_glyph) {
-    /* Empty or invalid input - show default glyph for this category */
+    /* Empty or invalid input - show default glyph (including fallback letter) */
     STRNCPY(category_tab_preview_glyph, default_glyph);
   }
   else {
     category_tab_preview_glyph[0] = '\0';
   }
+
+  printf("[GLYPH PREVIEW] preview_glyph='%s'\n", category_tab_preview_glyph);
 
   CategoryGlyphItem *item = nullptr;
 
@@ -7713,6 +7724,8 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   /* Check for existing override and populate properties */
   wmWindowManager *wm = CTX_wm_manager(C);
   bool has_override = false;
+
+  /* First check category_glyph_overrides (user changes in current session) */
   for (CategoryGlyphItem *item =
            static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
        item;
@@ -7724,7 +7737,7 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
       char clean_display_name[21];
       extract_leading_glyph(item->display_name, extracted_glyph, sizeof(extracted_glyph),
                            clean_display_name, sizeof(clean_display_name));
-      
+
       /* If display_name is empty after glyph extraction, find panel label */
       if (clean_display_name[0] == '\0') {
         const char *panel_label = find_panel_label_for_category(region, category);
@@ -7732,9 +7745,9 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
           STRNCPY(clean_display_name, panel_label);
         }
       }
-      
+
       RNA_string_set(op->ptr, "display_name", clean_display_name);
-      
+
       /* Use extracted glyph if item->glyph is empty, otherwise use item->glyph */
       char hex_code[16];
       if (item->glyph[0] != '\0') {
@@ -7751,39 +7764,80 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     }
   }
 
-  /* If no override, use panel_category_glyph_lookup to get current glyph and color */
+  /* If no override, check category_glyph_mappings (saved settings from JSON) */
   if (!has_override) {
-    float glyph_color[3] = {0.0f, 0.0f, 0.0f};
-    bool is_fallback = false;
+    for (CategoryGlyphItem *item =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        /* Load display_name from mappings */
+        if (item->display_name[0] != '\0') {
+          RNA_string_set(op->ptr, "display_name", item->display_name);
+        }
 
-    /* Get current glyph using the lookup function from blender::ui namespace */
-    const char *current_glyph = blender::ui::panel_category_glyph_lookup(
-        wm, category, nullptr, &is_fallback, glyph_color);
+        /* Load glyph */
+        if (item->glyph[0] != '\0') {
+          char hex_code[16];
+          utf8_to_hex_codepoint(item->glyph, hex_code, sizeof(hex_code));
+          RNA_string_set(op->ptr, "glyph", hex_code);
+        }
 
-    if (current_glyph) {
-      /* Convert glyph to hex code for display */
-      char hex_code[16];
-      utf8_to_hex_codepoint(current_glyph, hex_code, sizeof(hex_code));
-      RNA_string_set(op->ptr, "glyph", hex_code);
+        /* Load color if not default black */
+        if (!is_zero_v3(item->color)) {
+          RNA_float_set_array(op->ptr, "color", item->color);
+        }
+        break;
+      }
     }
-    if (!is_zero_v3(glyph_color)) {
-      RNA_float_set_array(op->ptr, "color", glyph_color);
-    }
-    
+  }
+
+  /* If display_name is still empty, use panel label or category */
+  char current_display_name[21] = "";
+  RNA_string_get(op->ptr, "display_name", current_display_name);
+  if (current_display_name[0] == '\0') {
     /* Set display_name: if category is a single glyph, find panel label */
     if (is_single_glyph_str(category)) {
       const char *panel_label = find_panel_label_for_category(region, category);
       if (panel_label) {
         RNA_string_set(op->ptr, "display_name", panel_label);
       }
+    } else {
+      RNA_string_set(op->ptr, "display_name", category);
+    }
+  }
+
+  /* If glyph is still empty, use panel_category_glyph_lookup */
+  char current_glyph[16] = "";
+  RNA_string_get(op->ptr, "glyph", current_glyph);
+  if (current_glyph[0] == '\0') {
+    float glyph_color[3] = {0.0f, 0.0f, 0.0f};
+    bool is_fallback = false;
+
+    const char *default_glyph = blender::ui::panel_category_glyph_lookup(
+        wm, category, nullptr, &is_fallback, glyph_color);
+
+    if (default_glyph) {
+      char hex_code[16];
+      utf8_to_hex_codepoint(default_glyph, hex_code, sizeof(hex_code));
+      RNA_string_set(op->ptr, "glyph", hex_code);
+    }
+  }
+
+  /* If color is still default, check from lookup */
+  float current_color[3] = {0.0f, 0.0f, 0.0f};
+  RNA_float_get_array(op->ptr, "color", current_color);
+  if (is_zero_v3(current_color)) {
+    float glyph_color[3] = {0.0f, 0.0f, 0.0f};
+    bool is_fallback = false;
+    blender::ui::panel_category_glyph_lookup(wm, category, nullptr, &is_fallback, glyph_color);
+    if (!is_zero_v3(glyph_color)) {
+      RNA_float_set_array(op->ptr, "color", glyph_color);
     }
   }
 
   /* Save original values for cancel functionality */
-  char current_display_name[21] = "";
-  char current_glyph[16] = "";
-  float current_color[3] = {0.0f, 0.0f, 0.0f};
-
   RNA_string_get(op->ptr, "display_name", current_display_name);
   RNA_string_get(op->ptr, "glyph", current_glyph);
   RNA_float_get_array(op->ptr, "color", current_color);
@@ -8020,6 +8074,61 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
 
   wmWindowManager *wm = CTX_wm_manager(C);
 
+  /* Default values - read from category_glyph_mappings */
+  const char *default_glyph = nullptr;
+  const char *default_display_name = nullptr;
+  float default_color[3] = {0.0f, 0.0f, 0.0f};
+  CategoryGlyphItem *mapping_item = nullptr;
+
+  /* Read default values from category_glyph_mappings */
+  printf("[GLYPH RESET C++] Reading default values from WM mappings...\n");
+  if (wm->category_glyph_mappings.first != nullptr) {
+    for (CategoryGlyphItem *item =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        mapping_item = item;
+        printf("[GLYPH RESET C++] Found mapping for '%s': glyph='%s', display_name='%s', "
+               "default_glyph='%s', default_display_name='%s'\n",
+               category,
+               item->glyph,
+               item->display_name,
+               item->default_glyph,
+               item->default_display_name);
+
+        /* For glyph-named categories, the category itself IS the default glyph.
+         * Ignore stored default_glyph as it may be incorrect from previous versions. */
+        if (is_single_glyph_str(category)) {
+          default_glyph = category;
+          printf("[GLYPH RESET C++] Category is a glyph, using category as default_glyph\n");
+        }
+        else {
+          /* Use default_glyph if available, otherwise use current glyph */
+          if (item->default_glyph[0] != '\0') {
+            default_glyph = item->default_glyph;
+          }
+          else if (item->glyph[0] != '\0') {
+            default_glyph = item->glyph;
+          }
+        }
+        /* Use default_display_name if available */
+        if (item->default_display_name[0] != '\0') {
+          default_display_name = item->default_display_name;
+        }
+        break;
+      }
+    }
+  }
+  else {
+    printf("[GLYPH RESET C++] WM mappings is empty!\n");
+  }
+
+  printf("[GLYPH RESET C++] Final values: glyph='%s', display_name='%s'\n",
+         default_glyph ? default_glyph : "(null)",
+         default_display_name ? default_display_name : "(null)");
+
   /* Find and remove override */
   for (CategoryGlyphItem *item =
            static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
@@ -8030,31 +8139,69 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     if (STREQ(item->category, category)) {
       BLI_remlink(&wm->category_glyph_overrides, item);
       MEM_delete(item);
+      printf("[GLYPH RESET C++] Removed override for '%s'\n", category);
       break;
     }
     item = next;
   }
 
-  /* Get default values for the category */
-  bool is_fallback = false;
-  float default_color[3] = {0.0f, 0.0f, 0.0f};
+  /* Update mapping with default values (so sync_wm_to_glyph_cache will save them) */
+  if (mapping_item != nullptr) {
+    if (default_glyph) {
+      STRNCPY(mapping_item->glyph, default_glyph);
+    }
+    /* Always reset display_name - use default if available, otherwise clear it */
+    if (default_display_name) {
+      STRNCPY(mapping_item->display_name, default_display_name);
+    }
+    else {
+      mapping_item->display_name[0] = '\0';
+    }
+    copy_v3_v3(mapping_item->color, default_color);
+    printf("[GLYPH RESET C++] Updated mapping: glyph='%s', display_name='%s'\n",
+           mapping_item->glyph,
+           mapping_item->display_name);
+  }
 
-  const char *default_glyph = blender::ui::panel_category_glyph_lookup(
-      wm, category, nullptr, &is_fallback, default_color);
+  /* Call Python to sync changes back to JSON file */
+#ifdef WITH_PYTHON
+  {
+    const char *imports[] = {"bpy", nullptr};
+    BPY_run_string_exec(
+        C,
+        imports,
+        "from bl_ui.space_userpref import sync_wm_to_glyph_cache\n"
+        "sync_wm_to_glyph_cache()\n");
+  }
+#endif
 
   /* Update dialog operator properties to reflect defaults in UI */
   if (category_tab_current_dialog_op) {
-    /* Extract any leading glyph from category name (shouldn't happen, but be safe) */
-    char extracted_glyph[16];
-    char clean_name[64];
-    if (extract_leading_glyph(category, extracted_glyph, sizeof(extracted_glyph),
-                              clean_name, sizeof(clean_name))) {
-      RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", clean_name);
+    /* Use stored default_display_name if available, otherwise find appropriate name */
+    if (default_display_name != nullptr && default_display_name[0] != '\0') {
+      RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", default_display_name);
     }
     else {
-      RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", category);
+      /* If category is a single glyph, find panel label for display name */
+      if (is_single_glyph_str(category)) {
+        ARegion *region = CTX_wm_region(C);
+        const char *panel_label = find_panel_label_for_category(region, category);
+        printf("[GLYPH RESET C++] Looking for panel label for glyph category '%s': %s\n",
+               category, panel_label ? panel_label : "(not found)");
+        if (panel_label) {
+          RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", panel_label);
+        }
+        else {
+          /* For glyph categories without panel label, leave display_name empty
+           * (will show panel label when rendered) */
+          RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", "");
+        }
+      }
+      else {
+        RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", category);
+      }
     }
-    
+
     if (default_glyph) {
       /* Convert UTF-8 glyph back to hex code for the glyph field */
       char glyph_hex[16];
@@ -8064,14 +8211,36 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     else {
       RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", "");
     }
+    /* Color is always reset to black (0,0,0) */
     RNA_float_set_array(category_tab_current_dialog_op->ptr, "color", default_color);
     RNA_string_set(category_tab_current_dialog_op->ptr, "glyph_search", "");
+
+    /* Trigger live update to refresh preview and override */
+    category_tab_edit_live_update_cb(C, category_tab_current_dialog_op, 0);
   }
 
   /* Also update this operator's properties (for consistency) */
-  RNA_string_set(op->ptr, "display_name", category);
+  if (default_display_name != nullptr && default_display_name[0] != '\0') {
+    RNA_string_set(op->ptr, "display_name", default_display_name);
+  }
+  else {
+    /* If category is a single glyph, find panel label for display name */
+    if (is_single_glyph_str(category)) {
+      ARegion *region = CTX_wm_region(C);
+      const char *panel_label = find_panel_label_for_category(region, category);
+      if (panel_label) {
+        RNA_string_set(op->ptr, "display_name", panel_label);
+      }
+      else {
+        /* For glyph categories without panel label, leave display_name empty */
+        RNA_string_set(op->ptr, "display_name", "");
+      }
+    }
+    else {
+      RNA_string_set(op->ptr, "display_name", category);
+    }
+  }
   if (default_glyph) {
-    /* Convert UTF-8 glyph back to hex code for the glyph field */
     char glyph_hex[16];
     utf8_to_hex_codepoint(default_glyph, glyph_hex, sizeof(glyph_hex));
     RNA_string_set(op->ptr, "glyph", glyph_hex);
@@ -8082,14 +8251,13 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   RNA_float_set_array(op->ptr, "color", default_color);
   RNA_string_set(op->ptr, "glyph_search", "");
 
-  /* Update preview buffers for popup preview */
-  if (default_glyph) {
-    STRNCPY(category_tab_preview_glyph, default_glyph);
+  /* Force redraw of the popup to update glyph preview */
+  if (category_tab_popup_block) {
+    ARegion *region = CTX_wm_region(C);
+    if (region) {
+      ED_region_tag_redraw(region);
+    }
   }
-  else {
-    category_tab_preview_glyph[0] = '\0';
-  }
-  copy_v3_v3(category_tab_preview_color, default_color);
 
   WM_main_add_notifier(NC_WINDOW, nullptr);
   return OPERATOR_FINISHED;
@@ -8275,6 +8443,16 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
   if (!category_tab_popup_block) {
     return OPERATOR_CANCELLED;
   }
+
+  /* Sync glyph overrides from WM to JSON file via Python */
+#ifdef WITH_PYTHON
+  const char *imports[] = {"bpy", nullptr};
+  BPY_run_string_exec(
+      C,
+      imports,
+      "from bl_ui.space_userpref import sync_wm_to_glyph_cache\n"
+      "sync_wm_to_glyph_cache()\n");
+#endif
 
   /* Set return value to OK using public API - this will trigger popup close */
   ui::popup_menu_retval_set(category_tab_popup_block, ui::RETURN_OK, true);

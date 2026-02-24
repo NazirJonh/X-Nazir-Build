@@ -2553,7 +2553,6 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
                                         const char *category,
                                         const PanelType *panel_type,
                                         bool *r_is_fallback_letter,
-                                        bool *r_is_reserved,
                                         float r_color[3]);
 
 }  // namespace ui

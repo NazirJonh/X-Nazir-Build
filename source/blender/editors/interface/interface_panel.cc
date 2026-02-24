@@ -1593,15 +1593,11 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
                                         const char *category,
                                         const PanelType *panel_type,
                                         bool *r_is_fallback_letter,
-                                        bool *r_is_reserved, /* true if from DEFAULT or wm.mappings */
                                         float r_color[3])
 {
   /* Initialize outputs. */
   if (r_is_fallback_letter) {
     *r_is_fallback_letter = false;
-  }
-  if (r_is_reserved) {
-    *r_is_reserved = false;
   }
   /* Initialize color to black (use theme). */
   if (r_color) {
@@ -1620,9 +1616,6 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
       if (STREQ(item->category, category)) {
         /* If override has a glyph, use it and return immediately. */
         if (item->glyph[0] != '\0') {
-          if (r_is_reserved) {
-            *r_is_reserved = true;
-          }
           if (r_color) {
             copy_v3_v3(r_color, item->color);
           }
@@ -1645,9 +1638,6 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
       if (STREQ(item->category, category)) {
-        if (r_is_reserved) {
-          *r_is_reserved = true;  /* wm mappings are reserved */
-        }
         /* Only set color if not already set by override. */
         if (r_color && is_zero_v3(r_color) && !is_zero_v3(item->color)) {
           copy_v3_v3(r_color, item->color);
@@ -1695,9 +1685,6 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
   /* 4. Check static default mappings. */
   const char *glyph = lookup_default_glyph(category);
   if (glyph) {
-    if (r_is_reserved) {
-      *r_is_reserved = true;  /* Defaults are reserved */
-    }
     return glyph;
   }
 
@@ -1706,6 +1693,67 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
     *r_is_fallback_letter = true;
   }
   /* Extract first UTF-8 character into static buffer. */
+  static char first_char_buf[8];
+  const int char_size = BLI_str_utf8_size_safe(category);
+  if (char_size > 0 && char_size < int(sizeof(first_char_buf))) {
+    memcpy(first_char_buf, category, char_size);
+    first_char_buf[char_size] = '\0';
+    return first_char_buf;
+  }
+  return category;
+}
+
+enum eCategoryGlyphBaseSource {
+  CATEGORY_GLYPH_BASE_SOURCE_MAPPING,
+  CATEGORY_GLYPH_BASE_SOURCE_PANEL_TYPE,
+  CATEGORY_GLYPH_BASE_SOURCE_DEFAULT,
+  CATEGORY_GLYPH_BASE_SOURCE_FALLBACK,
+};
+
+/**
+ * Lookup the base glyph source for a category, without user overrides.
+ * Used for reset functionality, comparison, and drag-and-drop tracking.
+ */
+static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
+                                                     const char *category,
+                                                     const PanelType *panel_type,
+                                                     bool *r_is_reserved = nullptr,
+                                                     eCategoryGlyphBaseSource *r_source_type = nullptr)
+{
+  if (r_is_reserved) *r_is_reserved = false;
+  if (r_source_type) *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_FALLBACK;
+
+  /* 1. Check global mappings (registered by Python DEFAULT_CATEGORY_GLYPHS) */
+  if (wm && !BLI_listbase_is_empty(&wm->category_glyph_mappings)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        if (r_is_reserved) *r_is_reserved = true;
+        if (r_source_type) *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_MAPPING;
+        return item->glyph;
+      }
+    }
+  }
+
+  /* 2. Check static default mappings */
+  const char *glyph = lookup_default_glyph(category);
+  if (glyph) {
+    if (r_is_reserved) *r_is_reserved = true;
+    if (r_source_type) *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_DEFAULT;
+    return glyph;
+  }
+
+  /* 3. Check PanelType.icon_glyph. */
+  if (panel_type && panel_type->icon_glyph && panel_type->icon_glyph[0]) {
+    if (r_source_type) *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_PANEL_TYPE;
+    return panel_type->icon_glyph;
+  }
+
+  /* 4. Fallback: return first character of category. */
+  if (r_source_type) *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_FALLBACK;
   static char first_char_buf[8];
   const int char_size = BLI_str_utf8_size_safe(category);
   if (char_size > 0 && char_size < int(sizeof(first_char_buf))) {
@@ -1849,16 +1897,49 @@ static void apply_glyph_darkening(const int fontid, uchar color[3], const float 
 
 /**
  * Check if a category is reserved (cannot be reordered).
+ * This checks ONLY the base source (DEFAULT/mappings), NOT overrides.
+ * User overrides (color, glyph) should NOT affect reserved status.
  *
- * In Blender this is already encoded in the glyph-lookup logic:
- * - defaults (static mappings) are reserved
- * - wm mappings/overrides that specify a glyph are reserved
+ * Reserved categories are:
+ * - Categories in wm.category_glyph_mappings (from DEFAULT_CATEGORY_GLYPHS)
+ * - Categories in static default_glyph_mappings
+ *
+ * NOT reserved:
+ * - Categories with PanelType.icon_glyph (addons)
+ * - Categories with fallback letter
+ * - Categories with user overrides
+ */
+static bool category_is_reserved(const wmWindowManager *wm, const char *category_id)
+{
+  /* 1. Check wm.category_glyph_mappings (Python DEFAULT_CATEGORY_GLYPHS) */
+  if (wm) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category_id)) {
+        return true;
+      }
+    }
+  }
+
+  /* 2. Check static default_glyph_mappings */
+  if (lookup_default_glyph(category_id)) {
+    return true;
+  }
+
+  /* 3. PanelType.icon_glyph and fallback are NOT reserved */
+  return false;
+}
+
+/**
+ * Check if a category is reserved (cannot be reordered).
+ * This is the public API wrapper for backwards compatibility.
  */
 static bool category_is_reserved_for_reorder(const wmWindowManager *wm, const char *category_id)
 {
-  bool is_reserved = false;
-  panel_category_glyph_lookup(wm, category_id, nullptr, nullptr, &is_reserved, nullptr);
-  return is_reserved;
+  return category_is_reserved(wm, category_id);
 }
 
 /**
@@ -2206,10 +2287,9 @@ static void ui_panel_category_draw_content(
 {
   /* Look up glyph for this category. */
   bool is_fallback_letter = false;
-  bool is_reserved_glyph = false;
   float glyph_color[3] = {0.0f, 0.0f, 0.0f};
   const char *glyph = panel_category_glyph_lookup(
-      wm, category_id, nullptr, &is_fallback_letter, &is_reserved_glyph, glyph_color);
+      wm, category_id, nullptr, &is_fallback_letter, glyph_color);
   const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
 
   /* Decide whether to draw dual mode (glyph/letter at top + rotated text below)
@@ -2548,9 +2628,9 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
     /* Get glyph for this category using priority chain. */
     bool is_fallback_letter = false;
-    bool is_reserved_glyph = false;
+    bool is_reserved_glyph = category_is_reserved(wm, category_id);
     float glyph_color[3] = {0.0f, 0.0f, 0.0f};
-    const char *glyph = panel_category_glyph_lookup(wm, category_id, nullptr, &is_fallback_letter, &is_reserved_glyph, glyph_color);
+    const char *glyph = panel_category_glyph_lookup(wm, category_id, nullptr, &is_fallback_letter, glyph_color);
     const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
 
     /* Calculate width based on display mode. */
@@ -4013,8 +4093,7 @@ static ARegion *ui_panel_category_tooltip_init(
       }
 
       /* Check if category is reserved (cannot be reordered). */
-      bool is_reserved_glyph = false;
-      panel_category_glyph_lookup(CTX_wm_manager(C), category_idname, nullptr, nullptr, &is_reserved_glyph, nullptr);
+      bool is_reserved_glyph = category_is_reserved(CTX_wm_manager(C), category_idname);
       if (is_reserved_glyph) {
         tooltip_text += " (Reserved)";
       }
@@ -4730,8 +4809,7 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   }
 
   /* Check if reserved (cannot be reordered) */
-  bool is_reserved_glyph = false;
-  panel_category_glyph_lookup(CTX_wm_manager(C), clicked_pc->idname, nullptr, nullptr, &is_reserved_glyph, nullptr);
+  bool is_reserved_glyph = category_is_reserved(CTX_wm_manager(C), clicked_pc->idname);
 
   /* Initialize drag state (allow all categories for now) */
   CategoryDragState *state = MEM_new<CategoryDragState>(__func__);

@@ -7124,7 +7124,7 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
 
   /* Look up default glyph for preview fallback (when user input is empty) */
   const char *default_glyph = blender::ui::panel_category_glyph_lookup(
-      wm, category, nullptr, nullptr, nullptr, nullptr);
+      wm, category, nullptr, nullptr, nullptr);
 
   /* Update preview buffers for popup preview.
    * Use the processed glyph from property, or fall back to default lookup.
@@ -7288,7 +7288,7 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
   else {
     /* No custom glyph - lookup the default glyph for this category */
     preview_glyph = blender::ui::panel_category_glyph_lookup(
-        wm, category, nullptr, nullptr, nullptr, nullptr);
+        wm, category, nullptr, nullptr, nullptr);
   }
 
   /* Initialize preview buffers (will be updated by live update callback) */
@@ -7422,11 +7422,10 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   if (!has_override) {
     float glyph_color[3] = {0.0f, 0.0f, 0.0f};
     bool is_fallback = false;
-    bool is_reserved = false;
 
     /* Get current glyph using the lookup function from blender::ui namespace */
     const char *current_glyph = blender::ui::panel_category_glyph_lookup(
-        wm, category, nullptr, &is_fallback, &is_reserved, glyph_color);
+        wm, category, nullptr, &is_fallback, glyph_color);
 
     if (current_glyph) {
       RNA_string_set(op->ptr, "glyph", current_glyph);
@@ -7504,12 +7503,11 @@ static wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *o
   }
 
   /* Look up what the default glyph would be for this category.
-   * This tells us if the current glyph is a fallback letter or a reserved glyph.
+   * This tells us if the current glyph is a fallback letter.
    */
   bool is_fallback = false;
-  bool is_reserved = false;
   const char *default_glyph = blender::ui::panel_category_glyph_lookup(
-      wm, category, nullptr, &is_fallback, &is_reserved, nullptr);
+      wm, category, nullptr, &is_fallback, nullptr);
 
   /* Update values */
   STRNCPY(item->display_name, display_name);
@@ -7623,11 +7621,10 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
 
   /* Get default values for the category */
   bool is_fallback = false;
-  bool is_reserved = false;
   float default_color[3] = {0.0f, 0.0f, 0.0f};
 
   const char *default_glyph = blender::ui::panel_category_glyph_lookup(
-      wm, category, nullptr, &is_fallback, &is_reserved, default_color);
+      wm, category, nullptr, &is_fallback, default_color);
 
   /* Update dialog operator properties to reflect defaults in UI */
   if (category_tab_current_dialog_op) {

@@ -101,6 +101,7 @@
 #include "wm_window.hh"
 
 #include "screen_intern.hh" /* own module include */
+#include "../interface/interface_intern.hh" /* for UI_SELECT_DRAW and Button */
 
 namespace blender {
 
@@ -7410,8 +7411,8 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
   wmOperator *op = static_cast<wmOperator *>(user_data);
   const uiStyle *style = ui::style_get_dpi();
 
-  /* Calculate dialog width - increased for better visibility */
-  const int dialog_width = 400 * UI_SCALE_FAC;
+  /* Calculate dialog width - increased for better visibility and tag grid */
+  const int dialog_width = 450 * UI_SCALE_FAC;
 
   ui::Block *block = block_begin(C, region, __func__, ui::EmbossType::Emboss);
   block_flag_disable(block, ui::BLOCK_LOOP);
@@ -7673,74 +7674,156 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
 
   layout.separator();
 
-  /* Tags section */
-  layout.separator(0.2f, ui::LayoutSeparatorType::Line);
-  layout.separator(0.5f);
-  layout.label(IFACE_("Tags"), ICON_NONE);
-
+  /* Tags section in a sub-panel */
   const std::string tags_data = blender::ui::get_tags_for_category_ui(wm, category);
 
-  if (!tags_data.empty()) {
-    /* Use a row layout with Left alignment - buttons won't stretch to fill width */
-    ui::Layout &tags_row = layout.row(false);
-    tags_row.alignment_set(ui::LayoutAlign::Left);
+  ui::PanelLayout tags_panel = layout.panel(C, "tags_list", false);
 
-    const char *cursor = tags_data.c_str();
-    char tag_name[64];
-    char tag_glyph[16];
-    int is_active;
+  /* Add label and "New Tag" button to panel header */
+  if (tags_panel.header) {
+    tags_panel.header->label(IFACE_("Tags list"), ICON_NONE);
+    ui::Layout &header_row = tags_panel.header->row(true);
+    header_row.alignment_set(ui::LayoutAlign::Right);
+    header_row.scale_x_set(1.0f);  /* Increase button width */
+    PointerRNA new_tag_ptr = header_row.op("wm.category_tag_create", IFACE_("New tag"), ICON_ADD);
+    RNA_string_set(&new_tag_ptr, "name", "");
+  }
 
-    while (*cursor != '\0') {
-      int i = 0;
-      while (*cursor != '|' && *cursor != '\0' && i < 63) {
-        tag_name[i++] = *cursor++;
-      }
-      tag_name[i] = '\0';
+  if (tags_panel.body) {
+    ui::Layout &tags_body = *tags_panel.body;
+    if (!tags_data.empty()) {
+      /* Create centered container for the grid */
+      ui::Layout &centered_row = tags_body.row(false);
+      centered_row.alignment_set(ui::LayoutAlign::Center);
 
-      if (*cursor == '|') {
-        cursor++;
-      }
+      /* Use grid_flow for automatic column wrapping (max 3 columns) */
+      ui::Layout &tags_grid = centered_row.grid_flow(false, 3, true, false, true);
 
-      i = 0;
-      while (*cursor != '|' && *cursor != '\0' && i < 15) {
-        tag_glyph[i++] = *cursor++;
-      }
-      tag_glyph[i] = '\0';
+      const char *cursor = tags_data.c_str();
+      char tag_name[64];
+      char tag_glyph[16];
+      char tag_color[32];
+      int is_active;
 
-      if (*cursor == '|') {
-        cursor++;
-      }
+      while (*cursor != '\0') {
+        int i = 0;
+        while (*cursor != '|' && *cursor != '\0' && i < 63) {
+          tag_name[i++] = *cursor++;
+        }
+        tag_name[i] = '\0';
 
-      is_active = 0;
-      while (*cursor >= '0' && *cursor <= '9') {
-        is_active = is_active * 10 + (*cursor - '0');
-        cursor++;
-      }
+        if (*cursor == '|') {
+          cursor++;
+        }
 
-      if (tag_name[0] != '\0') {
-        const char *label = (tag_glyph[0] != '\0') ? tag_glyph : tag_name;
+        i = 0;
+        while (*cursor != '|' && *cursor != '\0' && i < 15) {
+          tag_glyph[i++] = *cursor++;
+        }
+        tag_glyph[i] = '\0';
 
-        /* Create compact toggle button */
-        PointerRNA toggle_ptr = tags_row.op("wm.category_tag_toggle",
-                                            IFACE_(label),
-                                            is_active ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT);
-        RNA_string_set(&toggle_ptr, "category", category);
-        RNA_string_set(&toggle_ptr, "tag_name", tag_name);
-      }
+        if (*cursor == '|') {
+          cursor++;
+        }
 
-      if (*cursor == ';') {
-        cursor++;
+        is_active = 0;
+        while (*cursor >= '0' && *cursor <= '9') {
+          is_active = is_active * 10 + (*cursor - '0');
+          cursor++;
+        }
+
+        /* Parse color (format: r,g,b where r,g,b are 0.0-1.0) */
+        if (*cursor == '|') {
+          cursor++;
+          i = 0;
+          while (*cursor != ';' && *cursor != '\0' && i < 31) {
+            tag_color[i++] = *cursor++;
+          }
+          tag_color[i] = '\0';
+        }
+        else {
+          tag_color[0] = '\0';
+        }
+
+        if (tag_name[0] != '\0') {
+          /* Create a sub-row for this tag: [checkbox] [colored_glyph] [name] */
+          ui::Layout &tag_item = tags_grid.row(true);
+          tag_item.alignment_set(ui::LayoutAlign::Left);
+
+          /* Parse color for the glyph label */
+          float color_rgb[3] = {0.0f, 0.0f, 0.0f};
+          bool has_custom_color = false;
+          if (tag_color[0] != '\0') {
+            if (sscanf(tag_color, "%f,%f,%f", &color_rgb[0], &color_rgb[1], &color_rgb[2]) == 3) {
+              if (color_rgb[0] > 0.001f || color_rgb[1] > 0.001f || color_rgb[2] > 0.001f) {
+                has_custom_color = true;
+              }
+            }
+          }
+
+          ui::Block *block = tag_item.block();
+          wmOperatorType *ot = WM_operatortype_find("wm.category_tag_toggle", false);
+
+          /* 1. Small checkbox toggle (no text) */
+          ui::Button *toggle_but = uiDefButO_ptr(block,
+                                                 ui::ButtonType::Checkbox,
+                                                 ot,
+                                                 wm::OpCallContext::ExecDefault,
+                                                 "",
+                                                 0,
+                                                 0,
+                                                 UI_UNIT_X,
+                                                 UI_UNIT_Y,
+                                                 std::nullopt);
+
+          /* Set operator properties */
+          PointerRNA *op_ptr = button_operator_ptr_ensure(toggle_but);
+          RNA_string_set(op_ptr, "category", category);
+          RNA_string_set(op_ptr, "tag_name", tag_name);
+
+          /* Set active state for toggle */
+          if (is_active) {
+            toggle_but->flag |= ui::UI_SELECT_DRAW;
+          }
+
+          /* 2. Colored glyph label (if glyph exists) */
+          if (tag_glyph[0] != '\0') {
+            ui::Button *glyph_but = uiDefBut(
+                block, ui::ButtonType::Label, tag_glyph, 0, 0, UI_UNIT_X, UI_UNIT_Y, nullptr, 0, 0, "");
+
+            if (has_custom_color) {
+              uchar color_uchar[4];
+              color_uchar[0] = uchar(color_rgb[0] * 255.0f);
+              color_uchar[1] = uchar(color_rgb[1] * 255.0f);
+              color_uchar[2] = uchar(color_rgb[2] * 255.0f);
+              color_uchar[3] = 255;
+              button_color_set(glyph_but, color_uchar);
+            }
+          }
+
+          /* 3. Tag name label */
+          uiDefBut(block,
+                   ui::ButtonType::Label,
+                   IFACE_(tag_name),
+                   0,
+                   0,
+                   UI_UNIT_X * 5,
+                   UI_UNIT_Y,
+                   nullptr,
+                   0,
+                   0,
+                   "");
+        }
+
+        if (*cursor == ';') {
+          cursor++;
+        }
       }
     }
+    else {
+      tags_body.label(IFACE_("No tags. Click 'New' to create."), ICON_INFO);
+    }
   }
-  else {
-    layout.label(IFACE_("No tags. Click 'New' to create."), ICON_INFO);
-  }
-
-  /* Button to create new tag */
-  ui::Layout &tags_btn_row = layout.row(false);
-  PointerRNA new_tag_ptr = tags_btn_row.op("wm.category_tag_create", IFACE_("New Tag"), ICON_ADD);
-  RNA_string_set(&new_tag_ptr, "name", "");
 
   layout.separator();
 

@@ -127,7 +127,7 @@ typedef struct CategoryGlyphItem {
   /** Default display name for reset functionality. */
   char default_display_name[32];
   /** Tags assigned to this category (semicolon-separated, e.g., "tag1;tag2"). */
-  char tags[128];
+  char tags[32];
   char _pad[4];
 } CategoryGlyphItem;
 

@@ -3963,6 +3963,11 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm, const char *cate
     result.append(glyph_out);
     result.push_back('|');
     result.append(is_active ? "1" : "0");
+    /* Add color in format r,g,b (0.0-1.0) */
+    result.push_back('|');
+    char color_str[32];
+    SNPRINTF(color_str, "%.3f,%.3f,%.3f", tag->color[0], tag->color[1], tag->color[2]);
+    result.append(color_str);
   }
 
   return result;

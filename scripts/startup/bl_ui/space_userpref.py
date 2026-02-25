@@ -601,10 +601,11 @@ def get_tag_names():
 def get_tags_for_category_ui(category):
     """
     Get all tags formatted for C++ UI display.
-    Returns string: "name|glyph|is_active;name2|glyph2|is_active2;..."
+    Returns string: "name|glyph|is_active|r,g,b;name2|glyph2|is_active2|r,g,b;..."
     - name: tag name
     - glyph: unicode glyph character
     - is_active: 1 if assigned to category, 0 otherwise
+    - r,g,b: RGB color values (0.0-1.0)
     """
     all_tags = get_all_tags()
     category_tags = set(get_category_tags(category))
@@ -615,8 +616,11 @@ def get_tags_for_category_ui(category):
     for name, data in all_tags.items():
         glyph = data.get("glyph", "")
         is_active = "1" if name in category_tags else "0"
+        color = data.get("color", [0.0, 0.0, 0.0])
+        # Format color as r,g,b with 3 decimal places
+        color_str = f"{color[0]:.3f},{color[1]:.3f},{color[2]:.3f}"
         # Use | as separator between fields, ; between tags
-        parts.append(f"{name}|{glyph}|{is_active}")
+        parts.append(f"{name}|{glyph}|{is_active}|{color_str}")
 
     result = ";".join(parts)
     tag_log(f"get_tags_for_category_ui result: '{result}'")
@@ -627,6 +631,10 @@ def get_tag_data(tag_name):
     """Get glyph and color for a specific tag."""
     tags = get_all_tags()
     return tags.get(tag_name, {"glyph": "", "color": [0.0, 0.0, 0.0]})
+
+
+# Default glyph hex for tags when none is specified (FontAwesome tag icon)
+DEFAULT_TAG_GLYPH_HEX = "e866"
 
 
 def create_tag(tag_name, glyph="", color=None, auto_save=True):
@@ -646,6 +654,10 @@ def create_tag(tag_name, glyph="", color=None, auto_save=True):
 
     if tag_name in _all_tags_cache:
         return False, f"Tag '{tag_name}' already exists"
+
+    # Use default glyph if none provided - convert hex to Unicode
+    if not glyph:
+        glyph = _hex_to_glyph(DEFAULT_TAG_GLYPH_HEX)
 
     _all_tags_cache[tag_name] = {
         "glyph": glyph,

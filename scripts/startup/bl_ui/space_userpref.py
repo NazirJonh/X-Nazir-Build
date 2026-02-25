@@ -6,11 +6,16 @@ import bpy
 import json
 import os
 import re
+import shutil
+import time
+from contextlib import contextmanager
+from datetime import datetime
 from bpy.types import (
     Header,
     Menu,
     Operator,
     Panel,
+    PropertyGroup,
     UIList,
 )
 from bpy.app.translations import (
@@ -19,6 +24,85 @@ from bpy.app.translations import (
     pgettext_rpt as rpt_,
 )
 from bl_ui.utils import PresetPanel
+
+
+# -----------------------------------------------------------------------------
+# Tag System - Infrastructure Utilities (CleanPanels patterns)
+
+TAG_DEBUG = True
+TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
+
+def tag_log(message, level="INFO"):
+    """Logging for tag system operations."""
+    if TAG_DEBUG or level == "ERROR":
+        print(f"[TAGS][{level}] {message}")
+
+
+@contextmanager
+def safe_file_write(filepath):
+    """Atomic file write with rollback on error."""
+    temp_path = f"{filepath}.tmp"
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            yield f
+        # Atomic rename on success
+        os.replace(temp_path, filepath)
+        tag_log(f"Saved: {filepath}")
+    except Exception as e:
+        # Remove temp file on error
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        tag_log(f"Failed to save {filepath}: {e}", "ERROR")
+        raise e
+
+
+def load_json_safely(filepath, default_structure):
+    """Load JSON with fallback to defaults on corruption."""
+    if not os.path.exists(filepath):
+        tag_log(f"File not found: {filepath}, creating defaults")
+        return default_structure
+
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        tag_log(f"Loaded: {filepath}")
+        return data
+    except json.JSONDecodeError as e:
+        tag_log(f"JSON corrupted: {e}", "ERROR")
+        # Rename corrupted file for recovery
+        os.rename(filepath, f"{filepath}.corrupted_{int(time.time())}")
+        return default_structure
+    except Exception as e:
+        tag_log(f"Load error: {e}", "ERROR")
+        return default_structure
+
+
+def create_backup(filepath):
+    """Create timestamped backup before overwriting."""
+    if not TAG_BACKUP_ENABLED:
+        return None
+    if not os.path.exists(filepath):
+        return None
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{filepath}.backup_{timestamp}"
+
+    # Keep only last 5 backups
+    backup_dir = os.path.dirname(filepath)
+    basename = os.path.basename(filepath)
+    existing_backups = sorted([
+        f for f in os.listdir(backup_dir)
+        if f.startswith(basename) and ".backup_" in f
+    ])
+
+    while len(existing_backups) >= 5:
+        old_backup = os.path.join(backup_dir, existing_backups.pop(0))
+        os.remove(old_backup)
+        tag_log(f"Removed old backup: {old_backup}")
+
+    shutil.copy(filepath, backup_path)
+    tag_log(f"Created backup: {backup_path}")
+    return backup_path
 
 
 # -----------------------------------------------------------------------------
@@ -87,6 +171,12 @@ DEFAULT_CATEGORY_GLYPHS = {
 _glyph_cache = {}
 _glyph_cache_loaded = False
 
+# In-memory cache of all tags (tag_name -> {glyph, color})
+_all_tags_cache = {}
+
+# Current JSON format version
+CURRENT_JSON_VERSION = 3
+
 # JSON file name in config directory
 GLYPHS_FILENAME = "category_glyphs.json"
 
@@ -130,6 +220,44 @@ def _unicode_escape_to_glyph(escape_str):
     return re.sub(pattern, replace_escape, escape_str)
 
 
+def _hex_to_glyph(hex_str):
+    """Convert hex string (e.g., 'f3c1' or '0xf3c1') to Unicode glyph character.
+
+    Args:
+        hex_str: Hex string with optional '0x' prefix
+
+    Returns:
+        Unicode character, or empty string if input is empty,
+        or original string if conversion fails
+    """
+    if not hex_str:
+        return ""
+    # Strip optional 0x prefix
+    if hex_str.lower().startswith('0x'):
+        hex_str = hex_str[2:]
+    try:
+        code_point = int(hex_str, 16)
+        return chr(code_point)
+    except (ValueError, OverflowError):
+        tag_log(f"Invalid hex string for glyph: '{hex_str}'", "WARN")
+        return hex_str  # Return as-is if not valid hex
+
+
+def _glyph_to_hex(glyph):
+    """Convert Unicode glyph character to hex string (e.g., 'f3c1').
+
+    Note: Only single-character glyphs are fully supported.
+    For multi-character strings, only the first character is converted.
+    """
+    if not glyph:
+        return ""
+    if len(glyph) == 1:
+        return format(ord(glyph), 'x')
+    # For multi-character strings, return first char's hex
+    tag_log(f"Multi-character glyph '{repr(glyph)}', using first char only", "WARN")
+    return format(ord(glyph[0]), 'x')
+
+
 def _is_valid_category_name(name):
     """Check if a category name is valid (not a glyph or empty)."""
     if not name:
@@ -160,10 +288,11 @@ def _is_single_glyph(name):
 
 
 def _normalize_category_data(category_data):
-    """Normalize category data to the new format with glyph, display_name, color, and defaults."""
+    """Normalize category data to the new format with glyph, display_name, color, defaults, and tags."""
     default_entry = {
         "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
-        "default_glyph": "", "default_display_name": "", "base_type": "text_only"
+        "default_glyph": "", "default_display_name": "", "base_type": "text_only",
+        "tags": []  # NEW: array of tag names
     }
 
     if isinstance(category_data, str):
@@ -171,9 +300,10 @@ def _normalize_category_data(category_data):
         glyph = _unicode_escape_to_glyph(category_data) if '\\u' in category_data else category_data
         base_type = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
         return {"glyph": glyph, "display_name": "", "color": [0.0, 0.0, 0.0],
-                "default_glyph": glyph, "default_display_name": "", "base_type": base_type}
+                "default_glyph": glyph, "default_display_name": "", "base_type": base_type,
+                "tags": []}
     elif isinstance(category_data, dict):
-        # New format: dict with glyph, display_name, color, default_glyph, default_display_name, base_type
+        # New format: dict with glyph, display_name, color, default_glyph, default_display_name, base_type, tags
         entry = default_entry.copy()
 
         # Current values
@@ -217,72 +347,154 @@ def _normalize_category_data(category_data):
             else:
                 entry["base_type"] = "text_only"
 
+        # NEW: Tags
+        if "tags" in category_data:
+            tags = category_data["tags"]
+            if isinstance(tags, list):
+                entry["tags"] = [str(t) for t in tags]
+
         return entry
     else:
         return default_entry
 
 
+# -----------------------------------------------------------------------------
+# JSON Migration Functions
+
+def migrate_v1_to_v2(data):
+    """Migrate v1 (string values) to v2 (dict with glyph/color)."""
+    tag_log("Migrating JSON v1 → v2")
+    mappings = {}
+    for cat_name, glyph_str in data.get("mappings", {}).items():
+        if isinstance(glyph_str, str):
+            mappings[cat_name] = _normalize_category_data(glyph_str)
+    return {"version": 2, "mappings": mappings}
+
+
+def migrate_v2_to_v3(data):
+    """Migrate v2 to v3 (add all_tags and tags arrays)."""
+    tag_log("Migrating JSON v2 → v3")
+    data["all_tags"] = {}  # Empty tag registry
+    for cat_data in data.get("mappings", {}).values():
+        if isinstance(cat_data, dict):
+            cat_data["tags"] = []
+    data["version"] = 3
+    return data
+
+
+MIGRATORS = {
+    1: migrate_v1_to_v2,
+    2: migrate_v2_to_v3,
+}
+
+
+def migrate_json_data(data):
+    """Migrate data to current version with validation."""
+    version = data.get("version", 1)
+
+    while version < CURRENT_JSON_VERSION:
+        migrator = MIGRATORS.get(version)
+        if not migrator:
+            raise ValueError(f"Unknown JSON version: {version}")
+        data = migrator(data)
+        version = data.get("version", version + 1)
+        tag_log(f"Migrated to version {version}")
+
+    # Validate final structure
+    if "all_tags" not in data:
+        data["all_tags"] = {}
+    if "mappings" not in data:
+        data["mappings"] = {}
+
+    return data
+
+
 def _load_glyph_mappings_from_file():
-    """Load glyph mappings from JSON file."""
-    global _glyph_cache, _glyph_cache_loaded
+    """Load glyph mappings from JSON file with migration support."""
+    global _glyph_cache, _glyph_cache_loaded, _all_tags_cache
 
     filepath = _get_glyphs_filepath()
     print(f"[GLYPH] JSON storage path: {filepath}")
 
-    if filepath and os.path.exists(filepath):
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                raw_mappings = data.get('mappings', {})
+    default_structure = {
+        "version": CURRENT_JSON_VERSION,
+        "all_tags": {},
+        "mappings": {}
+    }
 
-                def _has_user_customizations_raw(category_data):
-                    """Check if category has user customizations (display_name or color)."""
-                    if isinstance(category_data, dict):
-                        display_name = category_data.get("display_name", "")
-                        color = category_data.get("color", [0.0, 0.0, 0.0])
-                        return bool(display_name) or color != [0.0, 0.0, 0.0]
-                    return False
-
-                # Normalize all entries to new format (backward compatibility)
-                _glyph_cache = {}
-                skipped_count = 0
-                for category, category_data in raw_mappings.items():
-                    # Skip invalid category names (glyphs as names) ONLY if they have no user customizations
-                    if not _is_valid_category_name(category):
-                        normalized = _normalize_category_data(category_data)
-                        if not _has_user_customizations_raw(normalized):
-                            skipped_count += 1
-                            continue
-                        # If has user customizations, load it even with invalid name
-                        print(f"[GLYPH] Loading category with user customizations: {repr(category)}")
-
-                    _glyph_cache[category] = _normalize_category_data(category_data)
-
-                _glyph_cache_loaded = True
-                if skipped_count > 0:
-                    print(f"[GLYPH] Skipped {skipped_count} categories with invalid names and no customizations")
-                print(f"[GLYPH] Loaded {len(_glyph_cache)} mappings from {filepath}")
-                return True
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"[GLYPH] Error loading mappings: {e}")
-    else:
-        print(f"[GLYPH] JSON file does not exist, using defaults")
-
-    # Use defaults if file doesn't exist or error
-    _glyph_cache = DEFAULT_CATEGORY_GLYPHS.copy()
-    _glyph_cache_loaded = True
-    print(f"[GLYPH] Using {len(_glyph_cache)} default mappings")
-    return False
-
-
-def _save_glyph_mappings_to_file():
-    """Save glyph mappings to JSON file with glyphs in \\uXXXX format."""
-    filepath = _get_glyphs_filepath()
     if not filepath:
-        print(f"[GLYPH] Cannot save: no valid config directory path")
+        print(f"[GLYPH] No valid config path, using defaults")
+        _glyph_cache = DEFAULT_CATEGORY_GLYPHS.copy()
+        _all_tags_cache = {}
+        _glyph_cache_loaded = True
         return False
 
-    try:
+    data = load_json_safely(filepath, default_structure)
+
+    # Migrate if needed
+    if data.get("version", 1) < CURRENT_JSON_VERSION:
+        create_backup(filepath)  # Backup before migration
+        data = migrate_json_data(data)
+        _save_glyph_mappings_to_file(data)  # Save migrated data
+
+    # Load into caches
+    _glyph_cache = {}
+    raw_mappings = data.get('mappings', {})
+
+    def _has_user_customizations_raw(category_data):
+        """Check if category has user customizations (display_name, color, or tags)."""
+        if isinstance(category_data, dict):
+            display_name = category_data.get("display_name", "")
+            color = category_data.get("color", [0.0, 0.0, 0.0])
+            tags = category_data.get("tags", [])
+            return bool(display_name) or color != [0.0, 0.0, 0.0] or bool(tags)
+        return False
+
+    skipped_count = 0
+    for category, category_data in raw_mappings.items():
+        # Skip invalid category names (glyphs as names) ONLY if they have no user customizations
+        if not _is_valid_category_name(category):
+            normalized = _normalize_category_data(category_data)
+            if not _has_user_customizations_raw(normalized):
+                skipped_count += 1
+                continue
+            # If has user customizations, load it even with invalid name
+            print(f"[GLYPH] Loading category with user customizations: {repr(category)}")
+
+        _glyph_cache[category] = _normalize_category_data(category_data)
+
+    # Load all_tags cache - convert hex glyphs to Unicode
+    raw_tags = data.get("all_tags", {})
+    _all_tags_cache = {}
+    for tag_name, tag_data in raw_tags.items():
+        if isinstance(tag_data, dict):
+            _all_tags_cache[tag_name] = {
+                "glyph": _hex_to_glyph(tag_data.get("glyph", "")),
+                "color": tag_data.get("color", [0.0, 0.0, 0.0])
+            }
+        else:
+            _all_tags_cache[tag_name] = tag_data
+
+    _glyph_cache_loaded = True
+    if skipped_count > 0:
+        print(f"[GLYPH] Skipped {skipped_count} categories with invalid names and no customizations")
+    print(f"[GLYPH] Loaded {len(_glyph_cache)} mappings, {len(_all_tags_cache)} tags from {filepath}")
+    return True
+
+
+def _save_glyph_mappings_to_file(data=None):
+    """Save glyph mappings to JSON file with glyphs in \\uXXXX format."""
+    global _glyph_cache, _all_tags_cache
+
+    filepath = _get_glyphs_filepath()
+    if not filepath:
+        tag_log("No filepath for saving", "ERROR")
+        return False
+
+    # Create backup before overwriting
+    create_backup(filepath)
+
+    if data is None:
         # Ensure directory exists
         config_dir = os.path.dirname(filepath)
         if not os.path.exists(config_dir):
@@ -290,12 +502,13 @@ def _save_glyph_mappings_to_file():
             os.makedirs(config_dir, exist_ok=True)
 
         def _has_user_customizations(category_data):
-            """Check if category has user customizations (display_name or color)."""
+            """Check if category has user customizations (display_name, color, or tags)."""
             if isinstance(category_data, dict):
                 display_name = category_data.get("display_name", "")
                 color = category_data.get("color", [0.0, 0.0, 0.0])
-                # Check if display_name is not empty or color is not default black
-                return bool(display_name) or color != [0.0, 0.0, 0.0]
+                tags = category_data.get("tags", [])
+                # Check if display_name is not empty, color is not default black, or has tags
+                return bool(display_name) or color != [0.0, 0.0, 0.0] or bool(tags)
             return False
 
         # Convert glyphs to Unicode escape format for reliable storage
@@ -322,7 +535,8 @@ def _save_glyph_mappings_to_file():
                     "color": category_data.get("color", [0.0, 0.0, 0.0]),
                     "default_glyph": _glyph_to_unicode_escape(category_data.get("default_glyph", "")),
                     "default_display_name": category_data.get("default_display_name", ""),
-                    "base_type": category_data.get("base_type", "text_only")
+                    "base_type": category_data.get("base_type", "text_only"),
+                    "tags": category_data.get("tags", [])  # NEW: Save tags
                 }
             elif isinstance(category_data, str):
                 # Old format - convert to new format
@@ -334,23 +548,324 @@ def _save_glyph_mappings_to_file():
                     "color": [0.0, 0.0, 0.0],
                     "default_glyph": _glyph_to_unicode_escape(glyph),
                     "default_display_name": "",
-                    "base_type": base_type
+                    "base_type": base_type,
+                    "tags": []
                 }
 
         if skipped_count > 0:
             print(f"[GLYPH] Skipped {skipped_count} categories with invalid names and no customizations")
 
+        # Convert tag glyphs to hex for storage
+        tags_to_save = {}
+        for tag_name, tag_data in _all_tags_cache.items():
+            if isinstance(tag_data, dict):
+                tags_to_save[tag_name] = {
+                    "glyph": _glyph_to_hex(tag_data.get("glyph", "")),
+                    "color": tag_data.get("color", [0.0, 0.0, 0.0])
+                }
+            else:
+                tags_to_save[tag_name] = tag_data
+
         data = {
-            'version': 2,  # Version 2 uses \\uXXXX format for glyphs
+            'version': CURRENT_JSON_VERSION,
+            'all_tags': tags_to_save,
             'mappings': mappings_to_save
         }
-        with open(filepath, 'w', encoding='utf-8') as f:
+
+    try:
+        with safe_file_write(filepath) as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        print(f"[GLYPH] Saved {len(mappings_to_save)} mappings to {filepath}")
+        tag_log(f"Saved {len(_glyph_cache)} categories, {len(_all_tags_cache)} tags")
         return True
-    except IOError as e:
-        print(f"[GLYPH] Error saving mappings to {filepath}: {e}")
+    except Exception as e:
+        tag_log(f"Save failed: {e}", "ERROR")
         return False
+
+
+# -----------------------------------------------------------------------------
+# Tag Management Functions
+
+def get_all_tags():
+    """Get all available tags as dict."""
+    global _all_tags_cache, _glyph_cache_loaded
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+    return _all_tags_cache.copy()
+
+
+def get_tag_names():
+    """Get list of tag names only."""
+    return list(get_all_tags().keys())
+
+
+def get_tags_for_category_ui(category):
+    """
+    Get all tags formatted for C++ UI display.
+    Returns string: "name|glyph|is_active;name2|glyph2|is_active2;..."
+    - name: tag name
+    - glyph: unicode glyph character
+    - is_active: 1 if assigned to category, 0 otherwise
+    """
+    all_tags = get_all_tags()
+    category_tags = set(get_category_tags(category))
+
+    tag_log(f"get_tags_for_category_ui('{category}'): {len(all_tags)} tags found")
+
+    parts = []
+    for name, data in all_tags.items():
+        glyph = data.get("glyph", "")
+        is_active = "1" if name in category_tags else "0"
+        # Use | as separator between fields, ; between tags
+        parts.append(f"{name}|{glyph}|{is_active}")
+
+    result = ";".join(parts)
+    tag_log(f"get_tags_for_category_ui result: '{result}'")
+    return result
+
+
+def get_tag_data(tag_name):
+    """Get glyph and color for a specific tag."""
+    tags = get_all_tags()
+    return tags.get(tag_name, {"glyph": "", "color": [0.0, 0.0, 0.0]})
+
+
+def create_tag(tag_name, glyph="", color=None, auto_save=True):
+    """
+    Create a new tag.
+
+    Returns:
+        (success: bool, message: str)
+    """
+    global _all_tags_cache
+
+    if not tag_name:
+        return False, "Tag name cannot be empty"
+
+    if len(tag_name) > 32:
+        return False, "Tag name too long (max 32 chars)"
+
+    if tag_name in _all_tags_cache:
+        return False, f"Tag '{tag_name}' already exists"
+
+    _all_tags_cache[tag_name] = {
+        "glyph": glyph,
+        "color": list(color) if color else [0.0, 0.0, 0.0]
+    }
+
+    tag_log(f"Created tag: {tag_name}")
+
+    if auto_save:
+        _auto_save_tags()
+
+    return True, f"Tag '{tag_name}' created"
+
+
+def update_tag(tag_name, glyph=None, color=None, auto_save=True):
+    """Update an existing tag's glyph and/or color."""
+    global _all_tags_cache
+
+    if tag_name not in _all_tags_cache:
+        return False, f"Tag '{tag_name}' not found"
+
+    if glyph is not None:
+        _all_tags_cache[tag_name]["glyph"] = glyph
+    if color is not None:
+        _all_tags_cache[tag_name]["color"] = list(color)
+
+    tag_log(f"Updated tag: {tag_name}")
+
+    if auto_save:
+        _auto_save_tags()
+
+    return True, f"Tag '{tag_name}' updated"
+
+
+def delete_tag(tag_name, auto_save=True):
+    """Delete a tag from registry and all category assignments."""
+    global _all_tags_cache, _glyph_cache
+
+    if tag_name not in _all_tags_cache:
+        return False, f"Tag '{tag_name}' not found"
+
+    del _all_tags_cache[tag_name]
+
+    # Remove from all categories
+    for cat_name, cat_data in _glyph_cache.items():
+        if "tags" in cat_data and tag_name in cat_data["tags"]:
+            cat_data["tags"].remove(tag_name)
+            tag_log(f"Removed '{tag_name}' from category '{cat_name}'")
+
+    tag_log(f"Deleted tag: {tag_name}")
+
+    if auto_save:
+        _auto_save_tags()
+
+    return True, f"Tag '{tag_name}' deleted"
+
+
+def get_category_tags(category):
+    """Get list of tag names assigned to a category."""
+    global _glyph_cache, _glyph_cache_loaded
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+    cat_data = _glyph_cache.get(category, {})
+    return list(cat_data.get("tags", []))
+
+
+def set_category_tags(category, tags, auto_save=True):
+    """Set tags for a category (replaces existing)."""
+    global _glyph_cache, _all_tags_cache
+
+    if category not in _glyph_cache:
+        # Create entry if not exists
+        _glyph_cache[category] = _normalize_category_data({})
+
+    # Validate tags exist
+    valid_tags = [t for t in tags if t in _all_tags_cache]
+    invalid_tags = set(tags) - set(valid_tags)
+
+    if invalid_tags:
+        tag_log(f"Warning: Unknown tags ignored: {invalid_tags}", "WARN")
+
+    _glyph_cache[category]["tags"] = valid_tags
+    tag_log(f"Set tags for '{category}': {valid_tags}")
+
+    if auto_save:
+        _auto_save_tags()
+
+    return True, f"Tags set for '{category}'"
+
+
+def add_category_tag(category, tag_name, auto_save=True):
+    """Add a single tag to a category."""
+    global _glyph_cache, _all_tags_cache
+
+    if tag_name not in _all_tags_cache:
+        return False, f"Tag '{tag_name}' not found"
+
+    if category not in _glyph_cache:
+        _glyph_cache[category] = _normalize_category_data({})
+
+    if "tags" not in _glyph_cache[category]:
+        _glyph_cache[category]["tags"] = []
+
+    if tag_name in _glyph_cache[category]["tags"]:
+        return True, f"Tag '{tag_name}' already assigned to '{category}'"
+
+    _glyph_cache[category]["tags"].append(tag_name)
+    tag_log(f"Added tag '{tag_name}' to '{category}'")
+
+    if auto_save:
+        _auto_save_tags()
+
+    return True, f"Tag '{tag_name}' added to '{category}'"
+
+
+def remove_category_tag(category, tag_name, auto_save=True):
+    """Remove a single tag from a category."""
+    global _glyph_cache
+
+    if category not in _glyph_cache:
+        return False, f"Category '{category}' not found"
+
+    cat_tags = _glyph_cache[category].get("tags", [])
+
+    if tag_name not in cat_tags:
+        return True, f"Tag '{tag_name}' not assigned to '{category}'"
+
+    cat_tags.remove(tag_name)
+    tag_log(f"Removed tag '{tag_name}' from '{category}'")
+
+    if auto_save:
+        _auto_save_tags()
+
+    return True, f"Tag '{tag_name}' removed from '{category}'"
+
+
+def toggle_category_tag(category, tag_name, auto_save=True):
+    """Toggle a tag on/off for a category."""
+    tags = get_category_tags(category)
+    if tag_name in tags:
+        return remove_category_tag(category, tag_name, auto_save)
+    else:
+        return add_category_tag(category, tag_name, auto_save)
+
+
+# -----------------------------------------------------------------------------
+# Category Filtering by Tags
+
+# Reserved categories that are always visible (from DEFAULT_CATEGORY_GLYPHS)
+RESERVED_CATEGORIES = frozenset({
+    "View", "Select", "Add", "Object", "Item",
+    "Tool", "Node", "Options", "Export", "Import",
+    "Edit", "Asset", "Animation", "Physics", "World",
+    "Material", "Modifiers", "Texture", "Particles",
+    "Curve", "Mesh", "Scene", "Render", "Script",
+    "Sound", "Surface", "Volume", "Constraints", "Data",
+    # Add more as needed
+})
+
+# TODO: Add preference U.category_filter_hide_reserved (bool, default false)
+# When true, reserved tabs also respect tag filtering
+
+
+def is_category_visible_by_tags(category_name, active_filter_tags):
+    """
+    Check if a category should be visible based on tag filtering.
+
+    Rules:
+    1. Reserved categories are ALWAYS visible (by default)
+    2. If active_filter_tags is empty or None, show all categories
+    3. Category is visible if it has at least one of the active tags (OR logic)
+
+    Args:
+        category_name: Name of the category to check
+        active_filter_tags: List/set of active tag names, or None/empty for all
+
+    Returns:
+        bool: True if category should be visible
+    """
+    # Reserved categories are always visible
+    # TODO: Check U.category_filter_hide_reserved preference
+    if category_name in RESERVED_CATEGORIES:
+        return True
+
+    # No filtering - show all
+    if not active_filter_tags:
+        return True
+
+    # Convert to set for fast lookup
+    active_set = set(active_filter_tags)
+
+    # "All" filter shows everything
+    if "All" in active_set:
+        return True
+
+    # Check tag intersection (OR logic)
+    category_tags = set(get_category_tags(category_name))
+
+    # Categories without tags are only visible with "All" filter
+    if not category_tags:
+        return False
+
+    return bool(category_tags & active_set)
+
+
+def filter_categories_by_tags(category_list, active_filter_tags):
+    """
+    Filter a list of categories by active tags.
+
+    Args:
+        category_list: List of category names
+        active_filter_tags: List/set of active tag names
+
+    Returns:
+        List of visible category names
+    """
+    return [
+        cat for cat in category_list
+        if is_category_visible_by_tags(cat, active_filter_tags)
+    ]
 
 
 def get_category_glyph(category):
@@ -688,11 +1203,12 @@ def sync_glyph_mappings_to_wm():
     print(f"[GLYPH SYNC] sync_glyph_mappings_to_wm called, cache has {len(_glyph_cache)} entries")
 
     def _has_user_customizations(category_data):
-        """Check if category has user customizations (display_name or color)."""
+        """Check if category has user customizations (display_name, color, or tags)."""
         if isinstance(category_data, dict):
             display_name = category_data.get("display_name", "")
             color = category_data.get("color", [0.0, 0.0, 0.0])
-            return bool(display_name) or color != [0.0, 0.0, 0.0]
+            tags = category_data.get("tags", [])
+            return bool(display_name) or color != [0.0, 0.0, 0.0] or bool(tags)
         return False
 
     try:
@@ -703,9 +1219,25 @@ def sync_glyph_mappings_to_wm():
 
         # Clear existing mappings to avoid duplicates
         old_count = len(wm.category_glyph_mappings)
-        while len(wm.category_glyph_mappings) > 0:
-            wm.category_glyph_mappings.remove(0)
+        for item in list(wm.category_glyph_mappings):
+            wm.category_glyph_mappings.remove(item)
         print(f"[GLYPH SYNC] Cleared {old_count} existing mappings")
+
+        # Sync available tags (definitions) into wm.category_tags if available
+        if hasattr(wm, "category_tags"):
+            old_tag_count = len(wm.category_tags)
+            for item in list(wm.category_tags):
+                wm.category_tags.remove(item)
+            print(f"[GLYPH SYNC] Cleared {old_tag_count} existing tag definitions")
+
+            for tag_name in sorted(_all_tags_cache.keys()):
+                tag_data = _all_tags_cache[tag_name]
+                glyph_hex = _glyph_to_hex(tag_data.get("glyph", "")) if isinstance(tag_data, dict) else ""
+                color_val = tag_data.get("color", [0.0, 0.0, 0.0]) if isinstance(tag_data, dict) else [0.0, 0.0, 0.0]
+                tag_item = wm.category_tags.new(name=tag_name)
+                tag_item.glyph = glyph_hex
+                tag_item.color = (color_val[0], color_val[1], color_val[2])
+            print(f"[GLYPH SYNC] Synced {len(wm.category_tags)} tag definitions to WM")
 
         # Add current mappings from cache
         added_count = 0
@@ -733,6 +1265,7 @@ def sync_glyph_mappings_to_wm():
                     color_val = normalized_data.get("color", [0.0, 0.0, 0.0])
                     default_glyph_val = normalized_data.get("default_glyph", glyph_val)
                     default_display_name_val = normalized_data.get("default_display_name", "")
+                    tags_val = normalized_data.get("tags", [])
 
                     item = wm.category_glyph_mappings.new(category=category)
                     item.glyph = glyph_val
@@ -740,6 +1273,13 @@ def sync_glyph_mappings_to_wm():
                     item.color = (color_val[0], color_val[1], color_val[2])
                     item.default_glyph = default_glyph_val
                     item.default_display_name = default_display_name_val
+                    if hasattr(item, "tags"):
+                        if isinstance(tags_val, (list, tuple)):
+                            item.tags = ";".join([t for t in tags_val if isinstance(t, str) and t])
+                        elif isinstance(tags_val, str):
+                            item.tags = tags_val
+                        else:
+                            item.tags = ""
                     added_count += 1
 
                     # Debug: show what was synced for key categories
@@ -788,7 +1328,7 @@ def sync_wm_to_glyph_cache():
     This function reads user changes from category_glyph_overrides and
     category_glyph_mappings in WM and saves them to the JSON file.
     """
-    global _glyph_cache
+    global _glyph_cache, _all_tags_cache
 
     try:
         wm = bpy.context.window_manager
@@ -835,6 +1375,13 @@ def sync_wm_to_glyph_cache():
                     cached_entry["color"] = item_color
                     changes_detected = True
 
+                if hasattr(item, "tags"):
+                    tags_str = item.tags or ""
+                    tags_list = [t for t in tags_str.split(";") if t]
+                    if cached_entry.get("tags", []) != tags_list:
+                        cached_entry["tags"] = tags_list
+                        changes_detected = True
+
                 # Also sync default values
                 if hasattr(item, 'default_glyph') and item.default_glyph:
                     if cached_entry.get("default_glyph", "") != item.default_glyph:
@@ -849,6 +1396,34 @@ def sync_wm_to_glyph_cache():
             print(f"[GLYPH] Processed {mappings_count} items from category_glyph_mappings")
         except Exception as e:
             print(f"[GLYPH] Error reading from category_glyph_mappings: {e}")
+
+        # Sync tag definitions from wm.category_tags (if available)
+        # Only update cache if WM has data - don't wipe cache with empty WM data
+        if hasattr(wm, "category_tags") and _is_collection_safe(wm.category_tags):
+            try:
+                new_tags_cache = {}
+                for tag_item in wm.category_tags:
+                    tag_name = getattr(tag_item, "name", "")
+                    if not tag_name:
+                        continue
+                    glyph_hex = getattr(tag_item, "glyph", "") or ""
+                    glyph = _hex_to_glyph(glyph_hex) if glyph_hex else ""
+                    color = list(getattr(tag_item, "color", (0.0, 0.0, 0.0))[:3])
+                    new_tags_cache[tag_name] = {"glyph": glyph, "color": color}
+
+                # Only update if WM has tags OR our cache is empty (initial load)
+                if new_tags_cache and _all_tags_cache != new_tags_cache:
+                    _all_tags_cache = new_tags_cache
+                    changes_detected = True
+                    print(f"[GLYPH] Synced {len(_all_tags_cache)} tag definitions from WM")
+                elif not new_tags_cache and not _all_tags_cache:
+                    # Both empty, nothing to do
+                    pass
+                elif not new_tags_cache and _all_tags_cache:
+                    # WM is empty but cache has data - sync cache TO WM instead
+                    print(f"[GLYPH] WM category_tags empty, preserving {len(_all_tags_cache)} cached tags")
+            except Exception as e:
+                print(f"[GLYPH] Error reading from category_tags: {e}")
 
         # Sync from category_glyph_overrides (user overrides)
         if _is_collection_safe(wm.category_glyph_overrides):
@@ -935,6 +1510,252 @@ class USERPREF_OT_sync_category_glyphs(Operator):
             self.report({'INFO'}, "Category glyphs synchronized")
         else:
             self.report({'WARNING'}, "No changes to synchronize")
+        return {'FINISHED'}
+
+
+# -----------------------------------------------------------------------------
+# Tag System - PropertyGroups and Operators
+
+_auto_save_pending = False
+
+
+def _auto_save_tags():
+    """Mark that tags need to be saved (called from update callbacks)."""
+    global _auto_save_pending
+    _auto_save_pending = True
+    sync_glyph_mappings_to_wm()
+    # Use timer to batch saves
+    if not bpy.app.timers.is_registered(_deferred_save):
+        bpy.app.timers.register(_deferred_save, first_interval=0.5)
+
+
+def _deferred_save():
+    """Deferred save to batch multiple changes."""
+    global _auto_save_pending
+    if _auto_save_pending:
+        _save_tags_to_json()
+        _auto_save_pending = False
+    return None  # Don't repeat timer
+
+
+def _save_tags_to_json():
+    """Save tags to JSON file."""
+    sync_glyph_mappings_to_wm()
+    _save_glyph_mappings_to_file()
+
+
+class CategoryTagItem(PropertyGroup):
+    """Single tag with glyph and color."""
+    name: bpy.props.StringProperty(
+        name="Name",
+        description="Tag name",
+        maxlen=32
+    )
+    glyph: bpy.props.StringProperty(
+        name="Glyph",
+        description="Unicode glyph character",
+        default="",
+        update=lambda self, ctx: _auto_save_tags()  # Auto-save
+    )
+    color: bpy.props.FloatVectorProperty(
+        name="Color",
+        subtype='COLOR_GAMMA',
+        size=3,
+        min=0.0,
+        max=1.0,
+        default=(0.0, 0.0, 0.0),
+        update=lambda self, ctx: _auto_save_tags()  # Auto-save
+    )
+
+
+class CategoryTagAssignment(PropertyGroup):
+    """Assignment of a tag to a category."""
+    tag_name: bpy.props.StringProperty(name="Tag Name")
+
+
+def with_context_check(func):
+    """Decorator to verify context before RNA operations."""
+    def wrapper(self, context):
+        if context is None:
+            self.report({'ERROR'}, "No context available")
+            return {'CANCELLED'}
+        if context.window_manager is None:
+            self.report({'ERROR'}, "Window manager not available")
+            return {'CANCELLED'}
+        return func(self, context)
+    return wrapper
+
+
+class USERPREF_OT_category_tag_create(Operator):
+    """Create a new category tag"""
+    bl_idname = "wm.category_tag_create"
+    bl_label = "Create Tag"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    name: bpy.props.StringProperty(
+        name="Name",
+        description="Tag name",
+        maxlen=32
+    )
+    glyph: bpy.props.StringProperty(
+        name="Glyph",
+        description="Unicode glyph",
+        default=""
+    )
+    color: bpy.props.FloatVectorProperty(
+        name="Color",
+        subtype='COLOR_GAMMA',
+        size=3,
+        min=0.0,
+        max=1.0,
+        default=(0.0, 0.0, 0.0)
+    )
+
+    @with_context_check
+    def execute(self, context):
+        # Convert hex glyph to Unicode character
+        glyph = _hex_to_glyph(self.glyph) if self.glyph else ""
+        success, message = create_tag(
+            self.name,
+            glyph,
+            list(self.color)
+        )
+        if success:
+            self.report({'INFO'}, message)
+            context.area.tag_redraw()
+            return {'FINISHED'}
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+
+class USERPREF_OT_category_tag_edit(Operator):
+    """Edit an existing tag"""
+    bl_idname = "wm.category_tag_edit"
+    bl_label = "Edit Tag"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    name: bpy.props.StringProperty(name="Tag Name")
+    glyph: bpy.props.StringProperty(name="Glyph")
+    color: bpy.props.FloatVectorProperty(
+        name="Color",
+        subtype='COLOR_GAMMA',
+        size=3,
+        min=0.0,
+        max=1.0
+    )
+
+    def invoke(self, context, event):
+        # Load current values - convert Unicode glyph to hex for display
+        tag_data = get_tag_data(self.name)
+        self.glyph = _glyph_to_hex(tag_data["glyph"])
+        self.color = tag_data["color"]
+        return context.window_manager.invoke_props_dialog(self)
+
+    @with_context_check
+    def execute(self, context):
+        # Convert hex glyph to Unicode character
+        glyph = _hex_to_glyph(self.glyph) if self.glyph else ""
+        success, message = update_tag(
+            self.name,
+            glyph,
+            list(self.color)
+        )
+        if success:
+            self.report({'INFO'}, message)
+            context.area.tag_redraw()
+            return {'FINISHED'}
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+
+class USERPREF_OT_category_tag_delete(Operator):
+    """Delete a tag and remove from all categories"""
+    bl_idname = "wm.category_tag_delete"
+    bl_label = "Delete Tag"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    name: bpy.props.StringProperty(name="Tag Name")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(
+            self,
+            event,
+            message=f"Delete tag '{self.name}'?\nIt will be removed from all categories."
+        )
+
+    @with_context_check
+    def execute(self, context):
+        success, message = delete_tag(self.name)
+        if success:
+            self.report({'INFO'}, message)
+            context.area.tag_redraw()
+            return {'FINISHED'}
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+
+def tag_enum_items_callback(self, context):
+    """Dynamic enum callback for tag selection."""
+    tags = get_tag_names()
+    if not tags:
+        return [('__none__', "No tags available", "Create a tag first")]
+    return [(tag, tag, f"Tag: {tag}") for tag in tags]
+
+
+class USERPREF_OT_category_tag_toggle(Operator):
+    """Toggle a tag on/off for the current category"""
+    bl_idname = "wm.category_tag_toggle"
+    bl_label = "Toggle Category Tag"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    category: bpy.props.StringProperty(name="Category")
+    tag_name: bpy.props.StringProperty(
+        name="Tag",
+        description="Tag name to toggle",
+        maxlen=32
+    )
+
+    @with_context_check
+    def execute(self, context):
+        if not self.tag_name:
+            self.report({'WARNING'}, "No tag specified.")
+            return {'CANCELLED'}
+        success, message = toggle_category_tag(
+            self.category,
+            self.tag_name,
+            auto_save=True
+        )
+        if success:
+            context.area.tag_redraw()
+            return {'FINISHED'}
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+
+class USERPREF_OT_category_tag_filter_set(Operator):
+    """Set the active tag filter"""
+    bl_idname = "wm.category_tag_filter_set"
+    bl_label = "Set Tag Filter"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    tags: bpy.props.StringProperty(
+        name="Tags",
+        description="Comma-separated tag names, or 'All' for no filter"
+    )
+
+    def execute(self, context):
+        # Parse comma-separated tags
+        if self.tags.lower() == "all":
+            tag_list = []
+        else:
+            tag_list = [t.strip() for t in self.tags.split(",") if t.strip()]
+
+        # Store in preferences
+        context.preferences.category_filter_tags = tag_list
+        context.area.tag_redraw()
         return {'FINISHED'}
 
 
@@ -4123,6 +4944,15 @@ classes = (
     USERPREF_MT_save_load,
     USERPREF_OT_save_category_glyphs,
     USERPREF_OT_sync_category_glyphs,
+
+    # Tag system classes
+    CategoryTagItem,
+    CategoryTagAssignment,
+    USERPREF_OT_category_tag_create,
+    USERPREF_OT_category_tag_edit,
+    USERPREF_OT_category_tag_delete,
+    USERPREF_OT_category_tag_toggle,
+    USERPREF_OT_category_tag_filter_set,
 
     USERPREF_PT_interface_display,
     USERPREF_PT_interface_editors,

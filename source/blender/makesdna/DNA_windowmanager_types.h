@@ -126,8 +126,25 @@ typedef struct CategoryGlyphItem {
   char default_glyph[8];
   /** Default display name for reset functionality. */
   char default_display_name[32];
+  /** Tags assigned to this category (semicolon-separated, e.g., "tag1;tag2"). */
+  char tags[128];
   char _pad[4];
 } CategoryGlyphItem;
+
+/**
+ * Tag definition for category tabs.
+ * Stored in wmWindowManager.category_tags.
+ */
+typedef struct CategoryTagDef {
+  struct CategoryTagDef *next, *prev;
+  /** Tag name. */
+  char name[32];
+  /** Tag glyph (single UTF-8 character). */
+  char glyph[8];
+  /** Tag color (RGB 0.0-1.0). */
+  float color[3];
+  char _pad[4];
+} CategoryTagDef;
 
 /** \} */
 
@@ -146,6 +163,8 @@ struct wmWindowManager {
   ListBase category_glyph_mappings = {nullptr, nullptr};
   /** User-defined glyph overrides for category tabs. */
   ListBase category_glyph_overrides = {nullptr, nullptr};
+  /** Tag definitions for category tabs (stored in wm.category_tags). */
+  ListBase category_tags = {nullptr, nullptr};
 
   /** Set on file read. */
   uint8_t init_flag = 0;

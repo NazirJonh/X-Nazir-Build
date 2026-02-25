@@ -1649,6 +1649,94 @@ static bool workspace_category_order_list_is_valid(const ListBase *list)
   return true;
 }
 
+static bool category_tag_list_is_valid(const ListBase *list)
+{
+  if (list == nullptr || list->first == nullptr) {
+    return true;
+  }
+
+  const CategoryTagDef *first = static_cast<const CategoryTagDef *>(list->first);
+  if (first->prev != nullptr) {
+    return false;
+  }
+  if (first->next == reinterpret_cast<const void *>(static_cast<intptr_t>(-1))) {
+    return false;
+  }
+  return true;
+}
+
+static const char *category_tags_string_lookup(const wmWindowManager *wm, const char *category)
+{
+  if (wm == nullptr || category == nullptr) {
+    return "";
+  }
+
+  /* Tags are stored in category_glyph_mappings, not in overrides.
+   * Overrides only contain display_name and color customizations. */
+  if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        return item->tags;
+      }
+    }
+  }
+  return "";
+}
+
+static bool category_has_tag(const char *tags_string, const char *tag_name)
+{
+  if (tags_string == nullptr || tags_string[0] == '\0') {
+    return false;
+  }
+  if (tag_name == nullptr || tag_name[0] == '\0') {
+    return false;
+  }
+
+  const size_t tag_name_len = strlen(tag_name);
+  const char *p = tags_string;
+  while (*p != '\0') {
+    const char *start = p;
+    while (*p != '\0' && *p != ';') {
+      p++;
+    }
+    const size_t len = size_t(p - start);
+    if (len == tag_name_len && STREQLEN(start, tag_name, len)) {
+      return true;
+    }
+    if (*p == ';') {
+      p++;
+    }
+  }
+  return false;
+}
+
+static bool tag_glyph_hex_to_utf8(const char *input, char r_utf8[8])
+{
+  r_utf8[0] = '\0';
+
+  if (input == nullptr || input[0] == '\0') {
+    return false;
+  }
+
+  const char *hex_str = input;
+  if (hex_str[0] == '0' && (hex_str[1] == 'x' || hex_str[1] == 'X')) {
+    hex_str += 2;
+  }
+
+  char *end = nullptr;
+  const unsigned long code_point = strtoul(hex_str, &end, 16);
+  if (end == hex_str || *end != '\0' || code_point > 0x10FFFFul) {
+    return false;
+  }
+
+  const size_t len = BLI_str_utf8_from_unicode(uint(code_point), r_utf8, 8);
+  return len != 0;
+}
+
 const char *panel_category_glyph_lookup(const wmWindowManager *wm,
                                         const char *category,
                                         const PanelType *panel_type,
@@ -2180,6 +2268,37 @@ static int count_reserved_tabs_at_start(const wmWindowManager *wm, ARegion *regi
     }
   }
   return reserved_count;
+}
+
+/**
+ * Check if a category should be visible based on tag filtering.
+ *
+ * Rules:
+ * 1. Reserved categories are ALWAYS visible (by default)
+ * 2. If no active filter, show all categories
+ * 3. Category is visible if it has at least one of the active tags (OR logic)
+ *
+ * TODO: Implement Python API integration to get active filter tags.
+ * For now, always returns true (no filtering).
+ */
+static bool panel_category_is_visible_by_tags(const bContext * /*C*/,
+                                               const wmWindowManager *wm,
+                                               const char *category)
+{
+  /* Reserved categories are always visible */
+  if (category_is_reserved_for_reorder(wm, category)) {
+    return true;
+  }
+
+  /* TODO: Get active filter tags from preferences or Python API.
+   * Example implementation:
+   *   - Call Python: bl_ui.space_userpref.is_category_visible_by_tags(category, active_tags)
+   *   - Or use RNA property: U.category_filter_active_tags
+   *
+   * For now, always return true (no filtering).
+   */
+  (void)category;  /* Suppress unused parameter warning */
+  return true;
 }
 
 /**
@@ -3023,6 +3142,11 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
     PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
 
+    /* Skip categories hidden by tag filter */
+    if (!panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
+      continue;
+    }
+
     /* Skip drawing the dragged tab in its normal position */
     if (is_dragging && !drag_state->is_reserved && STREQ(pc_dyn.idname, drag_category_id)) {
       current_display_index++;
@@ -3797,6 +3921,51 @@ LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int
     }
   }
   return nullptr;
+}
+
+std::string get_tags_for_category_ui(const wmWindowManager *wm, const char *category)
+{
+  if (wm == nullptr || category == nullptr) {
+    return {};
+  }
+  if (!category_tag_list_is_valid(&wm->category_tags)) {
+    return {};
+  }
+
+  const char *tags_string = category_tags_string_lookup(wm, category);
+
+  std::string result;
+  for (const CategoryTagDef *tag = static_cast<const CategoryTagDef *>(wm->category_tags.first); tag;
+       tag = static_cast<const CategoryTagDef *>(tag->next))
+  {
+    if (tag->name[0] == '\0') {
+      continue;
+    }
+
+    const bool is_active = category_has_tag(tags_string, tag->name);
+
+    char glyph_utf8[8] = "";
+    const char *glyph_out = "";
+    if (tag->glyph[0] != '\0') {
+      if (tag_glyph_hex_to_utf8(tag->glyph, glyph_utf8)) {
+        glyph_out = glyph_utf8;
+      }
+      else {
+        glyph_out = tag->glyph;
+      }
+    }
+
+    if (!result.empty()) {
+      result.push_back(';');
+    }
+    result.append(tag->name);
+    result.push_back('|');
+    result.append(glyph_out);
+    result.push_back('|');
+    result.append(is_active ? "1" : "0");
+  }
+
+  return result;
 }
 
 static PanelMouseState ui_panel_mouse_state_get(const Block *block,

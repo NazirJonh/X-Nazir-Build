@@ -2111,6 +2111,7 @@ static bool wm_file_write_check_with_report_on_failure(Main *bmain,
 struct CategoryGlyphMappingsBackup {
   ListBase mappings;
   ListBase overrides;
+  ListBase tags;
 };
 
 static void wm_category_glyph_mappings_backup_and_clear(Main *bmain,
@@ -2122,11 +2123,13 @@ static void wm_category_glyph_mappings_backup_and_clear(Main *bmain,
     /* Store the original list pointers. */
     backup.mappings = wm.category_glyph_mappings;
     backup.overrides = wm.category_glyph_overrides;
+    backup.tags = wm.category_tags;
     backups.append(backup);
 
     /* Clear the ListBase pointers to prevent writing data to file. */
     BLI_listbase_clear(&wm.category_glyph_mappings);
     BLI_listbase_clear(&wm.category_glyph_overrides);
+    BLI_listbase_clear(&wm.category_tags);
   }
 }
 
@@ -2140,6 +2143,7 @@ static void wm_category_glyph_mappings_restore(Main *bmain,
       /* Restore the original list pointers. */
       wm.category_glyph_mappings = backups[i].mappings;
       wm.category_glyph_overrides = backups[i].overrides;
+      wm.category_tags = backups[i].tags;
       i++;
     }
   }

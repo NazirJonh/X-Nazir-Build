@@ -59,6 +59,7 @@
 
 #ifdef WITH_PYTHON
 #  include "BPY_extern.hh"
+#  include "BPY_extern_run.hh"
 #endif
 
 #include "WM_api.hh"
@@ -7669,6 +7670,77 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
 
   /* Use the button to prevent unused variable warning */
   (void)preview_but;
+
+  layout.separator();
+
+  /* Tags section */
+  layout.separator(0.2f, ui::LayoutSeparatorType::Line);
+  layout.separator(0.5f);
+  layout.label(IFACE_("Tags"), ICON_NONE);
+
+  const std::string tags_data = blender::ui::get_tags_for_category_ui(wm, category);
+
+  if (!tags_data.empty()) {
+    /* Use a row layout with Left alignment - buttons won't stretch to fill width */
+    ui::Layout &tags_row = layout.row(false);
+    tags_row.alignment_set(ui::LayoutAlign::Left);
+
+    const char *cursor = tags_data.c_str();
+    char tag_name[64];
+    char tag_glyph[16];
+    int is_active;
+
+    while (*cursor != '\0') {
+      int i = 0;
+      while (*cursor != '|' && *cursor != '\0' && i < 63) {
+        tag_name[i++] = *cursor++;
+      }
+      tag_name[i] = '\0';
+
+      if (*cursor == '|') {
+        cursor++;
+      }
+
+      i = 0;
+      while (*cursor != '|' && *cursor != '\0' && i < 15) {
+        tag_glyph[i++] = *cursor++;
+      }
+      tag_glyph[i] = '\0';
+
+      if (*cursor == '|') {
+        cursor++;
+      }
+
+      is_active = 0;
+      while (*cursor >= '0' && *cursor <= '9') {
+        is_active = is_active * 10 + (*cursor - '0');
+        cursor++;
+      }
+
+      if (tag_name[0] != '\0') {
+        const char *label = (tag_glyph[0] != '\0') ? tag_glyph : tag_name;
+
+        /* Create compact toggle button */
+        PointerRNA toggle_ptr = tags_row.op("wm.category_tag_toggle",
+                                            IFACE_(label),
+                                            is_active ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT);
+        RNA_string_set(&toggle_ptr, "category", category);
+        RNA_string_set(&toggle_ptr, "tag_name", tag_name);
+      }
+
+      if (*cursor == ';') {
+        cursor++;
+      }
+    }
+  }
+  else {
+    layout.label(IFACE_("No tags. Click 'New' to create."), ICON_INFO);
+  }
+
+  /* Button to create new tag */
+  ui::Layout &tags_btn_row = layout.row(false);
+  PointerRNA new_tag_ptr = tags_btn_row.op("wm.category_tag_create", IFACE_("New Tag"), ICON_ADD);
+  RNA_string_set(&new_tag_ptr, "name", "");
 
   layout.separator();
 

@@ -2555,6 +2555,8 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
                                         bool *r_is_fallback_letter,
                                         float r_color[3]);
 
+std::string get_tags_for_category_ui(const wmWindowManager *wm, const char *category);
+
 /**
  * Check if a category is reserved (from DEFAULT_CATEGORY_GLYPHS).
  * Reserved categories cannot have their display name changed.

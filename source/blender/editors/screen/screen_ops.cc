@@ -7781,8 +7781,8 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
       /* Create centered container for the grid */
       ui::Layout &centered_row = tags_body.row(false);
       centered_row.alignment_set(ui::LayoutAlign::Center);
-
-      /* Use grid_flow for automatic column wrapping (max 3 columns, row-major) */
+//GridTags 
+      /* Use grid_flow for automatic column wrapping (max 3 columns, row-major) */ 
       ui::Layout &tags_grid = centered_row.grid_flow(true, 3, true, false, true);
 
       const char *cursor = tags_data.c_str();
@@ -7832,8 +7832,9 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
         }
 
         if (tag_name[0] != '\0') {
-          /* Create a sub-row for this tag: [checkbox] [colored_glyph] [name] */
-          ui::Layout &tag_item = tags_grid.row(true);
+          /* Create a box container for this tag to visually unify elements */
+          ui::Layout &tag_box = tags_grid.box();
+          ui::Layout &tag_item = tag_box.row(true);
           tag_item.alignment_set(ui::LayoutAlign::Left);
 
           /* Parse color for the glyph label */

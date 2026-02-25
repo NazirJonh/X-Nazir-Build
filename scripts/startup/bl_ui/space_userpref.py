@@ -823,6 +823,9 @@ def set_category_tags(category, tags, auto_save=True):
     _glyph_cache[category]["tags"] = valid_tags
     tag_log(f"Set tags for '{category}': {valid_tags}")
 
+    # Update WM override for sync
+    update_category_tags_in_wm(category)
+
     if auto_save:
         _auto_save_tags()
 
@@ -848,6 +851,9 @@ def add_category_tag(category, tag_name, auto_save=True):
     _glyph_cache[category]["tags"].append(tag_name)
     tag_log(f"Added tag '{tag_name}' to '{category}'")
 
+    # Update WM override for sync
+    update_category_tags_in_wm(category)
+
     if auto_save:
         _auto_save_tags()
 
@@ -869,6 +875,9 @@ def remove_category_tag(category, tag_name, auto_save=True):
     cat_tags.remove(tag_name)
     tag_log(f"Removed tag '{tag_name}' from '{category}'")
 
+    # Update WM override for sync
+    update_category_tags_in_wm(category)
+
     if auto_save:
         _auto_save_tags()
 
@@ -882,6 +891,52 @@ def toggle_category_tag(category, tag_name, auto_save=True):
         return remove_category_tag(category, tag_name, auto_save)
     else:
         return add_category_tag(category, tag_name, auto_save)
+
+
+def toggle_category_tag_no_save(category, tag_name):
+    """Toggle a tag on/off for a category WITHOUT auto-saving to JSON.
+    
+    This is used for live preview in the edit dialog. Changes are only
+    persisted when the user clicks Save.
+    """
+    tags = get_category_tags(category)
+    if tag_name in tags:
+        return remove_category_tag(category, tag_name, auto_save=False)
+    else:
+        return add_category_tag(category, tag_name, auto_save=False)
+
+
+def update_category_tags_in_wm(category):
+    """Update the tags for a category in WM category_glyph_overrides.
+    
+    This ensures that changes to tags in _glyph_cache are reflected in WM
+    so that sync_wm_to_glyph_cache can save them to JSON.
+    """
+    try:
+        wm = bpy.context.window_manager
+        if wm is None or not hasattr(wm, 'category_glyph_overrides'):
+            return
+        
+        # Find or create override entry for this category
+        override_item = None
+        for item in wm.category_glyph_overrides:
+            if item.category == category:
+                override_item = item
+                break
+        
+        if override_item is None:
+            override_item = wm.category_glyph_overrides.new(category=category)
+        
+        # Get current tags from cache
+        current_tags = get_category_tags(category)
+        
+        # Update tags in override (semicolon-separated string)
+        if hasattr(override_item, 'tags'):
+            override_item.tags = ";".join(current_tags)
+            
+        tag_log(f"Updated WM override tags for '{category}': {current_tags}")
+    except Exception as e:
+        tag_log(f"Error updating WM override tags: {e}", "ERROR")
 
 
 # -----------------------------------------------------------------------------
@@ -1532,6 +1587,15 @@ def sync_wm_to_glyph_cache():
                         changes_detected = True
                         print(f"[GLYPH] Updated color for '{category}' to {item_color}")
 
+                    # Sync tags from override (semicolon-separated string -> list)
+                    if hasattr(item, "tags") and item.tags:
+                        tags_str = item.tags or ""
+                        tags_list = [t.strip() for t in tags_str.split(";") if t.strip()]
+                        if cached_entry.get("tags", []) != tags_list:
+                            cached_entry["tags"] = tags_list
+                            changes_detected = True
+                            print(f"[GLYPH] Updated tags for '{category}': {tags_list}")
+
                 print(f"[GLYPH] Processed {overrides_count} items from category_glyph_overrides")
             except Exception as e:
                 print(f"[GLYPH] Error reading from category_glyph_overrides: {e}")
@@ -2140,10 +2204,11 @@ class USERPREF_OT_category_tag_toggle(Operator):
         if not self.tag_name:
             self.report({'WARNING'}, "No tag specified.")
             return {'CANCELLED'}
-        success, message = toggle_category_tag(
+        # Use no-save version for live preview in edit dialog
+        # Changes are persisted only when user clicks Save
+        success, message = toggle_category_tag_no_save(
             self.category,
-            self.tag_name,
-            auto_save=True
+            self.tag_name
         )
         if success:
             context.area.tag_redraw()

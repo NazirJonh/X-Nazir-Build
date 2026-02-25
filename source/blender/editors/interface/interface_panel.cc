@@ -1672,8 +1672,20 @@ static const char *category_tags_string_lookup(const wmWindowManager *wm, const 
     return "";
   }
 
-  /* Tags are stored in category_glyph_mappings, not in overrides.
-   * Overrides only contain display_name and color customizations. */
+  /* First check overrides - user changes take precedence */
+  if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        return item->tags;
+      }
+    }
+  }
+
+  /* Tags are stored in category_glyph_mappings (default mappings from JSON) */
   if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);

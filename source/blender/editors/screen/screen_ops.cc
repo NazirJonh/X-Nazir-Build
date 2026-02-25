@@ -6957,11 +6957,13 @@ static void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   char original_display_name[32] = "";
   char original_glyph[16] = "";
   float original_color[3] = {0.0f, 0.0f, 0.0f};
+  char original_tags[256] = "";
   bool original_has_override = false;
 
   RNA_string_get(op->ptr, "original_display_name", original_display_name);
   RNA_string_get(op->ptr, "original_glyph", original_glyph);
   RNA_float_get_array(op->ptr, "original_color", original_color);
+  RNA_string_get(op->ptr, "original_tags", original_tags);
   original_has_override = RNA_boolean_get(op->ptr, "original_has_override");
 
   wmWindowManager *wm = CTX_wm_manager(C);
@@ -6990,12 +6992,27 @@ static void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
     STRNCPY(item->display_name, original_display_name);
     STRNCPY(item->glyph, original_glyph);
     copy_v3_v3(item->color, original_color);
+    /* Restore original tags */
+    STRNCPY(item->tags, original_tags);
   }
   else {
     /* There was no override before - remove any created by live preview */
     if (item) {
-      BLI_remlink(&wm->category_glyph_overrides, item);
-      MEM_delete(item);
+      /* Check if override has any user changes besides tags/glyph/color/display_name */
+      bool has_changes = (item->display_name[0] != '\0' || item->glyph[0] != '\0' ||
+                          !is_zero_v3(item->color) || (item->tags[0] != '\0' && original_tags[0] == '\0'));
+      
+      if (!has_changes) {
+        BLI_remlink(&wm->category_glyph_overrides, item);
+        MEM_delete(item);
+      }
+      else {
+        /* Keep override but restore original values */
+        STRNCPY(item->display_name, original_display_name);
+        STRNCPY(item->glyph, original_glyph);
+        copy_v3_v3(item->color, original_color);
+        STRNCPY(item->tags, original_tags);
+      }
     }
   }
 
@@ -8099,6 +8116,41 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   RNA_float_set_array(op->ptr, "original_color", current_color);
   RNA_boolean_set(op->ptr, "original_has_override", has_override);
 
+  /* Save original tags for cancel functionality - read from WM mappings/overrides */
+  char original_tags[256] = "";
+  const char *tags_str = nullptr;
+  
+  /* First check overrides */
+  for (CategoryGlyphItem *item =
+           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+       item;
+       item = static_cast<CategoryGlyphItem *>(item->next))
+  {
+    if (STREQ(item->category, category)) {
+      tags_str = item->tags;
+      break;
+    }
+  }
+  
+  /* If no override, check mappings */
+  if (!tags_str || tags_str[0] == '\0') {
+    for (CategoryGlyphItem *item =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        tags_str = item->tags;
+        break;
+      }
+    }
+  }
+  
+  if (tags_str) {
+    STRNCPY(original_tags, tags_str);
+  }
+  RNA_string_set(op->ptr, "original_tags", original_tags);
+
   /* Store pointer to dialog operator for Reset/Save button access */
   category_tab_current_dialog_op = op;
 
@@ -8381,51 +8433,8 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
          default_glyph ? default_glyph : "(null)",
          default_display_name ? default_display_name : "(null)");
 
-  /* Find and remove override */
-  for (CategoryGlyphItem *item =
-           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-       item;
-       )
-  {
-    CategoryGlyphItem *next = static_cast<CategoryGlyphItem *>(item->next);
-    if (STREQ(item->category, category)) {
-      BLI_remlink(&wm->category_glyph_overrides, item);
-      MEM_delete(item);
-      printf("[GLYPH RESET C++] Removed override for '%s'\n", category);
-      break;
-    }
-    item = next;
-  }
-
-  /* Update mapping with default values (so sync_wm_to_glyph_cache will save them) */
-  if (mapping_item != nullptr) {
-    if (default_glyph) {
-      STRNCPY(mapping_item->glyph, default_glyph);
-    }
-    /* Always reset display_name - use default if available, otherwise clear it */
-    if (default_display_name) {
-      STRNCPY(mapping_item->display_name, default_display_name);
-    }
-    else {
-      mapping_item->display_name[0] = '\0';
-    }
-    copy_v3_v3(mapping_item->color, default_color);
-    printf("[GLYPH RESET C++] Updated mapping: glyph='%s', display_name='%s'\n",
-           mapping_item->glyph,
-           mapping_item->display_name);
-  }
-
-  /* Call Python to sync changes back to JSON file */
-#ifdef WITH_PYTHON
-  {
-    const char *imports[] = {"bpy", nullptr};
-    BPY_run_string_exec(
-        C,
-        imports,
-        "from bl_ui.space_userpref import sync_wm_to_glyph_cache\n"
-        "sync_wm_to_glyph_cache()\n");
-  }
-#endif
+  /* NOTE: We do NOT remove override here. Reset only updates the dialog UI properties.
+   * Changes will be applied only when user clicks Save. */
 
   /* Update dialog operator properties to reflect defaults in UI */
   if (category_tab_current_dialog_op) {
@@ -8471,7 +8480,37 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     category_tab_edit_live_update_cb(C, category_tab_current_dialog_op, 0);
   }
 
-  /* Also update this operator's properties (for consistency) */
+  /* Reset tags: set empty tags in WM override.
+   * This updates the UI immediately. If user clicks Cancel, original tags will be restored. */
+  CategoryGlyphItem *reset_item = nullptr;
+  for (CategoryGlyphItem *it =
+           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+       it;
+       it = static_cast<CategoryGlyphItem *>(it->next))
+  {
+    if (STREQ(it->category, category)) {
+      reset_item = it;
+      break;
+    }
+  }
+  
+  if (!reset_item) {
+    reset_item = MEM_new<CategoryGlyphItem>(__func__);
+    STRNCPY(reset_item->category, category);
+    BLI_addtail(&wm->category_glyph_overrides, reset_item);
+  }
+  /* Set empty tags - this will clear tags in UI */
+  reset_item->tags[0] = '\0';
+
+  /* Force redraw of the popup to update tag UI */
+  if (category_tab_popup_block) {
+    ARegion *region = CTX_wm_region(C);
+    if (region) {
+      ED_region_tag_redraw(region);
+    }
+  }
+  
+  WM_main_add_notifier(NC_WINDOW, nullptr);
   if (default_display_name != nullptr && default_display_name[0] != '\0') {
     RNA_string_set(op->ptr, "display_name", default_display_name);
   }
@@ -8763,6 +8802,7 @@ static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
   prop = RNA_def_float_color(ot->srna, "original_color", 3, nullptr, 0.0f, 1.0f, "Original Color", "", 0.0f, 1.0f);
   RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);
   RNA_def_boolean(ot->srna, "original_has_override", false, "Original Has Override", "");
+  RNA_def_string(ot->srna, "original_tags", nullptr, 256, "Original Tags", "Semicolon-separated tag names");
 }
 
 /** \} */

@@ -7003,6 +7003,9 @@ static void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   category_tab_current_dialog_op = nullptr;
   category_tab_popup_block = nullptr;
 
+  /* Show info message that changes were discarded */
+  WM_global_report(RPT_INFO, "Category tab changes discarded");
+
   WM_main_add_notifier(NC_WINDOW, nullptr);
 }
 
@@ -8654,12 +8657,12 @@ static wmOperatorStatus category_tab_edit_dialog_cancel_exec(bContext *C, wmOper
     return OPERATOR_CANCELLED;
   }
 
-  wmOperator *op = category_tab_current_dialog_op;
+  wmOperator *dialog_op = category_tab_current_dialog_op;
   ui::Block *block = category_tab_popup_block;
   wmWindow *win = CTX_wm_window(C);
 
-  /* Trigger cancel callback to restore values */
-  category_tab_edit_popup_cancel_cb(C, op);
+  /* Trigger cancel callback to restore values (also shows report) */
+  category_tab_edit_popup_cancel_cb(C, dialog_op);
 
   /* Close popup */
   ui::popup_menu_retval_set(block, ui::RETURN_CANCEL, true);
@@ -8677,7 +8680,7 @@ static void SCREEN_OT_category_tab_edit_dialog_cancel(wmOperatorType *ot)
   ot->exec = category_tab_edit_dialog_cancel_exec;
   ot->poll = category_tab_edit_poll;
 
-  ot->flag = 0;
+  ot->flag = OPTYPE_REGISTER;  /* Show reports in status bar */
 }
 
 /** \} */
@@ -8686,7 +8689,7 @@ static void SCREEN_OT_category_tab_edit_dialog_cancel(wmOperatorType *ot)
 /** \name Category Tab Edit Dialog Save Operator
  * \{ */
 
-static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperator * /*op*/)
+static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperator *op)
 {
   /* Live preview already updated the override. We just need to close the popup. */
   if (!category_tab_popup_block) {
@@ -8709,6 +8712,9 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
   /* Get window and close popup */
   wmWindow *win = CTX_wm_window(C);
   ui::popup_block_close(C, win, category_tab_popup_block);
+
+  /* Show success message */
+  BKE_report(op->reports, RPT_INFO, "Category tab settings saved");
 
   return OPERATOR_FINISHED;
 }

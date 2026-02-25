@@ -4669,25 +4669,34 @@ static ARegion *ui_panel_category_active_tooltip_init(
       position[1] = event->xy[1] - UI_POPUP_MARGIN / 4;
   }
 
-  /* Position tooltip at window center if area is large (> 50% of window height). */
+  /* ─────────────────────────────────────────────────────────────────────────────
+   * TAB SCROLL TOOLTIP POSITIONING
+   * ─────────────────────────────────────────────────────────────────────────────
+   * When scrolling through tabs with Ctrl+MouseWheel, position the tooltip:
+   * - At window center Y if editor area > 50% of window height (large editor)
+   * - At mouse cursor Y if editor area <= 50% of window height (small editor)
+   *
+   * Configurable parameters:
+   * - Threshold: win_size[1] / 2 (50% of window height)
+   * - Both position[1] and tab_rect_screen Y must be updated for correct positioning
+   * ───────────────────────────────────────────────────────────────────────────── */
   ScrArea *area = CTX_wm_area(C);
-  printf("DEBUG tooltip: area=%p\n", (void *)area);
   if (area) {
     const int2 win_size = WM_window_native_pixel_size(win);
     const int area_height = BLI_rcti_size_y(&area->totrct);
-    printf("DEBUG tooltip: win_size=(%d, %d), area_height=%d, threshold=%d, is_large=%d\n",
-           win_size[0], win_size[1], area_height, win_size[1] / 2, area_height > win_size[1] / 2);
+    const int threshold = win_size[1] / 2;  /* 50% of window height */
 
-    if (area_height > win_size[1] / 2) {
-      /* Center of window by Y (in screen coordinates). */
+    if (area_height > threshold) {
+      /* Large editor: position tooltip at window center. */
       rcti win_rect;
       WM_window_rect_calc(win, &win_rect);
       position[1] = BLI_rcti_cent_y(&win_rect);
-      printf("DEBUG tooltip: CENTER MODE - win_rect=(%d,%d,%d,%d), center_y=%d\n",
-             win_rect.xmin, win_rect.ymin, win_rect.xmax, win_rect.ymax, position[1]);
-    } else {
-      printf("DEBUG tooltip: MOUSE MODE - position[1]=%d (mouse y=%d)\n",
-             position[1], event->xy[1]);
+      /* Update tab_rect_screen Y so tooltip_create_from_text_fixed_width
+       * positions correctly relative to the centered rect. */
+      if (use_tab_rect) {
+        tab_rect_screen.ymin = position[1] - UI_UNIT_Y / 2;
+        tab_rect_screen.ymax = position[1] + UI_UNIT_Y / 2;
+      }
     }
   }
 
@@ -4746,6 +4755,21 @@ void panel_category_clear_all(ARegion *region)
   BLI_freelistN(&region->runtime->panels_category);
 }
 
+/**
+ * Handle tab cycling with Ctrl+MouseWheel or Ctrl+Tab.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * TAB CYCLING BEHAVIOR
+ * ─────────────────────────────────────────────────────────────────────────────
+ * - Cycles through VISIBLE categories only (respects tag filtering)
+ * - Stops at first/last visible category (no wrapping)
+ * - Skips hidden categories (filtered by panel_category_is_visible_by_tags)
+ *
+ * Controls:
+ * - Ctrl+WheelDown / Ctrl+Tab: next category
+ * - Ctrl+WheelUp / Ctrl+Shift+Tab: previous category
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
 static int ui_handle_panel_category_cycling(bContext *C,
                                             const wmEvent *event,
                                             ARegion *region,
@@ -4774,25 +4798,16 @@ static int ui_handle_panel_category_cycling(bContext *C,
     const char *category = panel_category_active_get(region, false);
     if (LIKELY(category)) {
       PanelCategoryDyn *pc_dyn = panel_category_find(region, category);
-      /* Cyclic behavior between categories
-       * using Ctrl+Tab (+Shift for backwards) or Ctrl+Wheel Up/Down. */
       if (LIKELY(pc_dyn) && (event->modifier & KM_CTRL)) {
         const bool backwards = is_mousewheel ? (event->type == WHEELUPMOUSE) : (event->modifier & KM_SHIFT);
 
         /* Find next visible category, skipping hidden ones.
-         * Stop at first/last visible category without wrapping. */
+         * Stops at first/last visible category (no wrapping). */
         PanelCategoryDyn *next = backwards ? pc_dyn->prev : pc_dyn->next;
 
-        while (next) {
-          if (panel_category_is_visible_by_tags(C, wm, next->idname)) {
-            break;
-          }
-          printf("DEBUG cycling: skipping hidden category '%s'\n", next->idname);
+        while (next && !panel_category_is_visible_by_tags(C, wm, next->idname)) {
           next = backwards ? next->prev : next->next;
         }
-
-        printf("DEBUG cycling: current='%s', next='%s', backwards=%d\n",
-               category, next ? next->idname : "(null)", backwards);
 
         if (next) {
           /* Intentionally don't reset scroll in this case,

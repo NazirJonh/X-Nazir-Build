@@ -3331,6 +3331,11 @@ static void rna_def_windowmanager(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Category Tags", "Tag definitions for category tabs");
   rna_def_category_tag_defs(brna, prop);
 
+  prop = RNA_def_property(srna, "category_tags_active_index", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "category_tags_active_index");
+  RNA_def_property_ui_text(prop, "Active Tag", "Index of the active tag in the list");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
   prop = RNA_def_property(srna, "xr_session_settings", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "xr.session_settings");
   RNA_def_property_flag(prop, PROP_NEVER_NULL);

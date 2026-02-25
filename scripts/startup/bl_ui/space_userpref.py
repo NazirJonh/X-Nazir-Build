@@ -174,8 +174,11 @@ _glyph_cache_loaded = False
 # In-memory cache of all tags (tag_name -> {glyph, color})
 _all_tags_cache = {}
 
+# Tag order for preserving manual ordering
+_tag_order_cache = []
+
 # Current JSON format version
-CURRENT_JSON_VERSION = 3
+CURRENT_JSON_VERSION = 4  # Bumped for tag_order support
 
 # JSON file name in config directory
 GLYPHS_FILENAME = "category_glyphs.json"
@@ -382,9 +385,19 @@ def migrate_v2_to_v3(data):
     return data
 
 
+def migrate_v3_to_v4(data):
+    """Migrate v3 to v4 (add tag_order for manual ordering)."""
+    tag_log("Migrating JSON v3 → v4")
+    # tag_order will be populated on next save from WM collection order
+    data["tag_order"] = []
+    data["version"] = 4
+    return data
+
+
 MIGRATORS = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
+    3: migrate_v3_to_v4,
 }
 
 
@@ -474,6 +487,10 @@ def _load_glyph_mappings_from_file():
             }
         else:
             _all_tags_cache[tag_name] = tag_data
+
+    # Load tag order for preserving manual ordering
+    global _tag_order_cache
+    _tag_order_cache = data.get("tag_order", [])
 
     _glyph_cache_loaded = True
     if skipped_count > 0:
@@ -566,9 +583,19 @@ def _save_glyph_mappings_to_file(data=None):
             else:
                 tags_to_save[tag_name] = tag_data
 
+        # Get tag order from wm.category_tags (preserves manual ordering)
+        tag_order = []
+        try:
+            wm = bpy.context.window_manager
+            if hasattr(wm, 'category_tags') and _is_collection_safe(wm.category_tags):
+                tag_order = [tag.name for tag in wm.category_tags]
+        except Exception:
+            pass
+
         data = {
             'version': CURRENT_JSON_VERSION,
             'all_tags': tags_to_save,
+            'tag_order': tag_order,  # NEW: Save tag order
             'mappings': mappings_to_save
         }
 
@@ -1242,7 +1269,17 @@ def sync_glyph_mappings_to_wm():
                 wm.category_tags.remove(item)
             print(f"[GLYPH SYNC] Cleared {old_tag_count} existing tag definitions")
 
-            for tag_name in sorted(_all_tags_cache.keys()):
+            # Use tag_order if available, otherwise sort alphabetically
+            if _tag_order_cache:
+                # Use saved order, but only include tags that still exist
+                tag_names = [t for t in _tag_order_cache if t in _all_tags_cache]
+                # Add any new tags not in order list (at the end, sorted)
+                new_tags = sorted([t for t in _all_tags_cache.keys() if t not in _tag_order_cache])
+                tag_names.extend(new_tags)
+            else:
+                tag_names = sorted(_all_tags_cache.keys())
+
+            for tag_name in tag_names:
                 tag_data = _all_tags_cache[tag_name]
                 glyph_hex = _glyph_to_hex(tag_data.get("glyph", "")) if isinstance(tag_data, dict) else ""
                 color_val = tag_data.get("color", [0.0, 0.0, 0.0]) if isinstance(tag_data, dict) else [0.0, 0.0, 0.0]
@@ -1532,11 +1569,11 @@ _auto_save_pending = False
 
 
 def _auto_save_tags():
-    """Mark that tags need to be saved (called from update callbacks)."""
+    """Mark that tags need to be saved (called from update callbacks).
+    Does NOT sync to WM - only schedules a JSON save."""
     global _auto_save_pending
     _auto_save_pending = True
-    sync_glyph_mappings_to_wm()
-    # Use timer to batch saves
+    # Use timer to batch saves (no sync - WM already has the data)
     if not bpy.app.timers.is_registered(_deferred_save):
         bpy.app.timers.register(_deferred_save, first_interval=0.5)
 
@@ -1648,6 +1685,13 @@ class USERPREF_OT_category_tag_create(Operator):
                 tag_log(f"Auto-assigned tag '{self.name}' to category '{self.category}'")
 
             self.report({'INFO'}, message)
+
+            # Set active index to the new tag
+            for i, t in enumerate(context.window_manager.category_tags):
+                if t.name == self.name:
+                    context.window_manager.category_tags_active_index = i
+                    break
+
             context.area.tag_redraw()
             return {'FINISHED'}
         self.report({'ERROR'}, message)
@@ -1703,24 +1747,130 @@ class USERPREF_OT_category_tag_delete(Operator):
     bl_label = "Delete Tag"
     bl_options = {'REGISTER', 'INTERNAL'}
 
-    name: bpy.props.StringProperty(name="Tag Name")
-
     def invoke(self, context, event):
+        wm = context.window_manager
+        active_idx = wm.category_tags_active_index
+        tags = wm.category_tags
+
+        if not (0 <= active_idx < len(tags)):
+            self.report({'ERROR'}, "No tag selected")
+            return {'CANCELLED'}
+
+        tag_name = tags[active_idx].name
         return context.window_manager.invoke_confirm(
             self,
             event,
-            message=f"Delete tag '{self.name}'?\nIt will be removed from all categories."
+            message=f"Delete tag '{tag_name}'?\nIt will be removed from all categories."
         )
 
     @with_context_check
     def execute(self, context):
-        success, message = delete_tag(self.name)
+        wm = context.window_manager
+        active_idx = wm.category_tags_active_index
+        tags = wm.category_tags
+
+        if not (0 <= active_idx < len(tags)):
+            self.report({'ERROR'}, "No tag selected")
+            return {'CANCELLED'}
+
+        tag = tags[active_idx]
+        tag_name = tag.name
+
+        success, message = delete_tag(tag_name)
         if success:
+            # Adjust active index if needed
+            if len(tags) > 0:
+                wm.category_tags_active_index = min(active_idx, len(tags) - 1)
+            else:
+                wm.category_tags_active_index = 0
+
             self.report({'INFO'}, message)
             context.area.tag_redraw()
             return {'FINISHED'}
+
         self.report({'ERROR'}, message)
         return {'CANCELLED'}
+
+
+class USERPREF_OT_category_tag_move(Operator):
+    """Move a tag up or down in the list"""
+    bl_idname = "wm.category_tag_move"
+    bl_label = "Move Tag"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    direction: bpy.props.EnumProperty(
+        name="Direction",
+        description="Move direction",
+        items=[
+            ('UP', "Up", "Move tag up"),
+            ('DOWN', "Down", "Move tag down"),
+        ],
+        default='UP'
+    )
+
+    @with_context_check
+    def execute(self, context):
+        wm = context.window_manager
+        active_idx = wm.category_tags_active_index
+        tags = wm.category_tags
+
+        print(f"[TAG MOVE] Execute called: direction={self.direction}, active_idx={active_idx}, len(tags)={len(tags)}")
+
+        if not (0 <= active_idx < len(tags)):
+            self.report({'ERROR'}, "No tag selected")
+            return {'CANCELLED'}
+
+        # Calculate new index
+        if self.direction == 'UP':
+            if active_idx == 0:
+                print(f"[TAG MOVE] Already at top, cancelling")
+                return {'CANCELLED'}
+            new_idx = active_idx - 1
+        else:  # DOWN
+            if active_idx >= len(tags) - 1:
+                print(f"[TAG MOVE] Already at bottom, cancelling")
+                return {'CANCELLED'}
+            new_idx = active_idx + 1
+
+        print(f"[TAG MOVE] Moving tag from index {active_idx} to {new_idx}")
+
+        # Save all tags data
+        tags_data = []
+        for i, tag in enumerate(tags):
+            print(f"[TAG MOVE]   Tag {i}: {tag.name}")
+            tags_data.append({
+                'name': tag.name,
+                'glyph': tag.glyph,
+                'color': tuple(tag.color)
+            })
+
+        # Swap the two items in the list
+        tags_data[active_idx], tags_data[new_idx] = tags_data[new_idx], tags_data[active_idx]
+        print(f"[TAG MOVE] After swap: {[t['name'] for t in tags_data]}")
+
+        # Clear and rebuild collection in new order
+        while len(tags) > 0:
+            tags.remove(tags[0])
+
+        for data in tags_data:
+            new_tag = tags.new()
+            new_tag.name = data['name']
+            new_tag.glyph = data['glyph']
+            new_tag.color = data['color']
+
+        print(f"[TAG MOVE] Rebuilt collection with {len(tags)} tags")
+        wm.category_tags_active_index = new_idx
+
+        # Update tag order cache for persistence
+        global _tag_order_cache
+        _tag_order_cache = [t['name'] for t in tags_data]
+        print(f"[TAG MOVE] Updated tag_order_cache: {_tag_order_cache}")
+
+        # Save directly to JSON (no sync - WM already has correct order)
+        _save_tags_to_json()
+        context.area.tag_redraw()
+        self.report({'INFO'}, f"Moved tag {self.direction}")
+        return {'FINISHED'}
 
 
 def tag_enum_items_callback(self, context):
@@ -4955,6 +5105,50 @@ class VIEW3D_OT_category_tabs_settings(Operator):
 
 
 # -----------------------------------------------------------------------------
+# Category Tags UIList
+
+class USERPREF_UL_category_tags(UIList):
+    """UI List for displaying category tags with colored glyphs."""
+
+    def draw_item(self, context, layout, _data, item, _icon, _active_data, _active_propname, _index):
+        tag = item
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            # Use split to ensure consistent alignment of name column
+            row = layout.split(factor=0.1, align=True)
+            # Left: Glyph with fixed width
+            if tag.glyph:
+                glyph_char = _hex_to_glyph(tag.glyph)
+                row.colored_label(
+                    text=glyph_char,
+                    icon='NONE',
+                    color_r=tag.color[0],
+                    color_g=tag.color[1],
+                    color_b=tag.color[2]
+                )
+            else:
+                row.label(text="", icon='DOT')
+            # Right: Name (aligned to left edge of its column)
+            row.label(text=tag.name, translate=False)
+        elif self.layout_type == 'GRID':
+            layout.alignment = 'CENTER'
+            if tag.glyph:
+                glyph_char = _hex_to_glyph(tag.glyph)
+                layout.label(text=glyph_char, translate=False)
+            else:
+                layout.label(text="", icon='DOT')
+
+    def filter_items(self, _context, data, propname):
+        """Return items in their natural order (no sorting, preserves manual order)."""
+        items = list(getattr(data, propname))
+
+        # No sorting - preserve collection order
+        flags = [self.bitflag_filter_item] * len(items)
+        indices = list(range(len(items)))
+
+        return flags, indices
+
+
+# -----------------------------------------------------------------------------
 # Category Tags Panel
 
 class TagsPanel:
@@ -4977,77 +5171,72 @@ class USERPREF_PT_tags(TagsPanel, Panel):
 
         layout.separator()
 
-        # Tag definitions section
-        box = layout.box()
-        col = box.column()
+        # Main container box
+        main_box = layout.box()
 
-        # Header row with create button
-        header_row = col.row()
-        header_row.label(text="Tag Definitions", icon='BOOKMARKS')
-        header_row.operator("wm.category_tag_create", text="", icon='ADD').category = ""
+        # Two-column layout inside the box
+        main_row = main_box.row()
 
-        # List all tag definitions
-        if wm.category_tags:
-            for tag in wm.category_tags:
-                row = col.row(align=True)
+        # === Left: Tag list with buttons ===
+        left_container = main_row.row()
 
-                # Tag glyph with color - convert hex to actual character
-                if tag.glyph:
-                    glyph_char = _hex_to_glyph(tag.glyph)
-                    row.colored_label(text=glyph_char,
-                                     icon='NONE',
-                                     color_r=tag.color[0],
-                                     color_g=tag.color[1],
-                                     color_b=tag.color[2])
-                row.label(text=tag.name, translate=False)
+        # template_list
+        left_container.template_list(
+            "USERPREF_UL_category_tags", "",
+            wm, "category_tags",
+            wm, "category_tags_active_index",
+            rows=1, maxrows=20
+        )
 
-                # Edit and delete buttons
-                props = row.operator("wm.category_tag_edit", text="", icon='GREASEPENCIL')
-                props.name = tag.name
-                props = row.operator("wm.category_tag_delete", text="", icon='X')
-                props.name = tag.name
+        # Buttons to the right of list
+        col_btn = left_container.column(align=True)
+        col_btn.operator("wm.category_tag_create", text="", icon='ADD')
+        col_btn.operator("wm.category_tag_delete", text="", icon='REMOVE')
+        col_btn.separator()
+        col_btn.operator("wm.category_tag_move", text="", icon='TRIA_UP').direction = 'UP'
+        col_btn.operator("wm.category_tag_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
+
+        # === Right: Detail panel ===
+        col_right = main_row.column()
+
+        # Get selected tag
+        active_idx = wm.category_tags_active_index
+        tags = wm.category_tags
+        tag = tags[active_idx] if 0 <= active_idx < len(tags) else None
+
+        if tag:
+            # Preview section (first)
+            preview_box = col_right.box()
+            preview_box.label(text="Preview (as in tabs):")
+
+            preview_row = preview_box.row()
+            preview_row.alignment = 'LEFT'
+            if tag.glyph:
+                glyph_char = _hex_to_glyph(tag.glyph)
+                preview_row.colored_label(
+                    text=glyph_char,
+                    icon='NONE',
+                    color_r=tag.color[0],
+                    color_g=tag.color[1],
+                    color_b=tag.color[2]
+                )
+            preview_row.label(text=tag.name, translate=False)
+
+            # Edit section (second)
+            col_right.separator()
+            col_right.label(text="Edit Tag", icon='GREASEPENCIL')
+
+            box = col_right.box()
+            box.use_property_split = True
+            box.prop(tag, "name", text="Name")
+            box.prop(tag, "glyph", text="Glyph")
+            box.prop(tag, "color", text="Color")
+
         else:
-            col.label(text="No tags defined. Click '+' to create tags.", icon='INFO')
-
-        layout.separator()
-
-        # Category assignments section
-        box = layout.box()
-        col = box.column()
-        col.label(text="Category Tag Assignments", icon='OUTLINER')
-
-        # List categories with their assigned tags
-        if wm.category_glyph_mappings or wm.category_glyph_overrides:
-            # Collect all unique category names
-            categories = set()
-            for item in wm.category_glyph_mappings:
-                categories.add(item.category)
-            for item in wm.category_glyph_overrides:
-                categories.add(item.category)
-
-            for category in sorted(categories):
-                row = col.row(align=True)
-                row.label(text=category, translate=False)
-
-                # Show assigned tags
-                tags_str = ""
-                for item in wm.category_glyph_overrides:
-                    if item.category == category and item.tags:
-                        tags_str = item.tags.replace(";", ", ")
-                        break
-                if not tags_str:
-                    for item in wm.category_glyph_mappings:
-                        if item.category == category and item.tags:
-                            tags_str = item.tags.replace(";", ", ")
-                            break
-
-                if tags_str:
-                    row.label(text=tags_str, translate=False)
-                else:
-                    row.label(text="No tags", translate=False)
-        else:
-            col.label(text="No categories found. Open a panel editor to generate categories.", icon='INFO')
-            col.label(text="No categories found. Open a panel editor to generate categories.", icon='INFO')
+            # No tag selected or list is empty
+            col_right.label(text="Select a tag to edit", icon='INFO')
+            if len(tags) == 0:
+                col_right.label(text="Click '+' to create a tag", icon='ADD')
 
 
 # -----------------------------------------------------------------------------
@@ -5073,6 +5262,7 @@ classes = (
     USERPREF_OT_category_tag_create,
     USERPREF_OT_category_tag_edit,
     USERPREF_OT_category_tag_delete,
+    USERPREF_OT_category_tag_move,
     USERPREF_OT_category_tag_toggle,
     USERPREF_OT_category_tag_filter_set,
 
@@ -5189,6 +5379,7 @@ classes = (
     # UI lists
     USERPREF_UL_asset_libraries,
     USERPREF_UL_extension_repos,
+    USERPREF_UL_category_tags,
 
     # Add dynamically generated editor theme panels last,
     # so they show up last in the theme section.

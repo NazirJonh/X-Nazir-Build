@@ -176,11 +176,15 @@ struct wmWindowManager {
 
   /** Set after selection to notify outliner to sync. Stores type of selection */
   short outliner_sync_select_dirty = 0;
+  /** Active index for category tags UI list. */
+  int category_tags_active_index = 0;
 
   /** Available/pending extensions updates. */
   int extensions_updates = 0;
   /** Number of blocked & installed extensions. */
   int extensions_blocked = 0;
+
+  char _pad1[4] = {};
 
   /** Timer for auto save. */
   struct wmTimer *autosavetimer = nullptr;

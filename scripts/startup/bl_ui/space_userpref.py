@@ -887,15 +887,11 @@ def toggle_category_tag(category, tag_name, auto_save=True):
 # -----------------------------------------------------------------------------
 # Category Filtering by Tags
 
-# Reserved categories that are always visible (from DEFAULT_CATEGORY_GLYPHS)
-RESERVED_CATEGORIES = frozenset({
-    "View", "Select", "Add", "Object", "Item",
-    "Tool", "Node", "Options", "Export", "Import",
-    "Edit", "Asset", "Animation", "Physics", "World",
-    "Material", "Modifiers", "Texture", "Particles",
-    "Curve", "Mesh", "Scene", "Render", "Script",
-    "Sound", "Surface", "Volume", "Constraints", "Data",
-    # Add more as needed
+# Reserved categories that are always visible
+# Generated from DEFAULT_CATEGORY_GLYPHS + additional system categories
+RESERVED_CATEGORIES = frozenset(DEFAULT_CATEGORY_GLYPHS.keys()) | frozenset({
+    # Additional system categories not in DEFAULT_CATEGORY_GLYPHS
+    "Select", "Add", "Export", "Import",
 })
 
 # TODO: Add preference U.category_filter_hide_reserved (bool, default false)
@@ -1192,49 +1188,14 @@ def _merge_discovered_categories():
     if new_categories:
         print(f"[GLYPH] Found {len(new_categories)} new categories: {sorted(new_categories)}")
 
-        # Assign default glyphs to new categories
-        # Use Material Symbols Unicode icons for consistency
-        default_glyphs = {
-            'Tool': '\ue91f',      # construction
-            'View': '\ue8f4',      # visibility
-            'Edit': '\ue3c9',      # edit
-            'Modifier': '\ue8d8',  # tune
-            'Modifiers': '\ue8d8', # tune
-            'Constraint': '\ue157', # link
-            'Constraints': '\ue157', # link
-            'Physics': '\ue3ca',   # science
-            'Particle': '\ue064',  # grain
-            'Particles': '\ue064', # grain
-            'Cache': '\ue8b8',     # storage
-            'Proxy': '\ue8c6',     # sync_alt
-            'Strip': '\ue01b',     # movie
-            'Animation': '\ue037', # play_arrow
-            'Keyframe': '\ue897',  # timeline
-            'Track': '\ue55c',     # track_changes
-            'Solve': '\ue8b0',     # calculate
-            'Stabilization': '\ue3c0', # tune
-            'Mask': '\ue3b8',      # face_retouching_natural
-            'Annotation': '\ue3ae', # edit
-            'Footage': '\ue04b',   # movie_creation
-            'Action': '\ue037',    # play_arrow
-            'Shape Key': '\ue3d3', # tune
-            'Material': '\ue429',  # palette
-            'Texture': '\ue40a',   # texture
-            'Node': '\ue1b8',      # account_tree
-            'Script': '\ue86f',    # terminal
-            'Render': '\ue439',    # photo_camera
-            'Scene': '\ue8f9',     # dashboard
-            'World': '\ue88e',     # public
-            'Asset': '\ue2c7',     # folder
-            'Options': '\ue5d4',   # settings
-            'Item': '\ueb75',      # visibility
-            'Data': '\ue23e',      # database
-        }
-
-        # Add new categories with appropriate glyphs
+        # Add new categories with appropriate glyphs from DEFAULT_CATEGORY_GLYPHS
         for category in new_categories:
-            # Use specific glyph if available
-            glyph = default_glyphs.get(category)
+            # First check if category exists in DEFAULT_CATEGORY_GLYPHS
+            if category in DEFAULT_CATEGORY_GLYPHS:
+                default_data = DEFAULT_CATEGORY_GLYPHS[category]
+                glyph = default_data.get("glyph", "")
+            else:
+                glyph = None
             if glyph is None:
                 # Check if category name is a single glyph (addon category with glyph as name)
                 if _is_single_glyph(category):

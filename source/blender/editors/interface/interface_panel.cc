@@ -4654,7 +4654,7 @@ static ARegion *ui_panel_category_active_tooltip_init(
       tab_rect_screen.xmax = region->winrct.xmin + pc_dyn->rect.xmax;
       tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
       tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
-      
+
       const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
       if (is_left) {
         position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN / 4;
@@ -4667,6 +4667,28 @@ static ARegion *ui_panel_category_active_tooltip_init(
   } else {
       position[0] = event->xy[0];
       position[1] = event->xy[1] - UI_POPUP_MARGIN / 4;
+  }
+
+  /* Position tooltip at window center if area is large (> 50% of window height). */
+  ScrArea *area = CTX_wm_area(C);
+  printf("DEBUG tooltip: area=%p\n", (void *)area);
+  if (area) {
+    const int2 win_size = WM_window_native_pixel_size(win);
+    const int area_height = BLI_rcti_size_y(&area->totrct);
+    printf("DEBUG tooltip: win_size=(%d, %d), area_height=%d, threshold=%d, is_large=%d\n",
+           win_size[0], win_size[1], area_height, win_size[1] / 2, area_height > win_size[1] / 2);
+
+    if (area_height > win_size[1] / 2) {
+      /* Center of window by Y (in screen coordinates). */
+      rcti win_rect;
+      WM_window_rect_calc(win, &win_rect);
+      position[1] = BLI_rcti_cent_y(&win_rect);
+      printf("DEBUG tooltip: CENTER MODE - win_rect=(%d,%d,%d,%d), center_y=%d\n",
+             win_rect.xmin, win_rect.ymin, win_rect.xmax, win_rect.ymax, position[1]);
+    } else {
+      printf("DEBUG tooltip: MOUSE MODE - position[1]=%d (mouse y=%d)\n",
+             position[1], event->xy[1]);
+    }
   }
 
   const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
@@ -4724,12 +4746,14 @@ void panel_category_clear_all(ARegion *region)
   BLI_freelistN(&region->runtime->panels_category);
 }
 
-static int ui_handle_panel_category_cycling(const wmEvent *event,
+static int ui_handle_panel_category_cycling(bContext *C,
+                                            const wmEvent *event,
                                             ARegion *region,
                                             const Button *active_but)
 {
   BLI_assert(BKE_regiontype_uses_category_tabs(region->runtime->type));
 
+  const wmWindowManager *wm = CTX_wm_manager(C);
   const bool is_mousewheel = ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE);
   const bool inside_tabregion =
       ((RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT) ?
@@ -4753,25 +4777,27 @@ static int ui_handle_panel_category_cycling(const wmEvent *event,
       /* Cyclic behavior between categories
        * using Ctrl+Tab (+Shift for backwards) or Ctrl+Wheel Up/Down. */
       if (LIKELY(pc_dyn) && (event->modifier & KM_CTRL)) {
-        if (is_mousewheel) {
-          /* We can probably get rid of this and only allow Ctrl-Tabbing. */
-          pc_dyn = (event->type == WHEELDOWNMOUSE) ? pc_dyn->next : pc_dyn->prev;
-        }
-        else {
-          const bool backwards = event->modifier & KM_SHIFT;
-          pc_dyn = backwards ? pc_dyn->prev : pc_dyn->next;
-          if (!pc_dyn) {
-            /* Proper cyclic behavior, back to first/last category (only used for ctrl+tab). */
-            pc_dyn = backwards ?
-                         static_cast<PanelCategoryDyn *>(region->runtime->panels_category.last) :
-                         static_cast<PanelCategoryDyn *>(region->runtime->panels_category.first);
+        const bool backwards = is_mousewheel ? (event->type == WHEELUPMOUSE) : (event->modifier & KM_SHIFT);
+
+        /* Find next visible category, skipping hidden ones.
+         * Stop at first/last visible category without wrapping. */
+        PanelCategoryDyn *next = backwards ? pc_dyn->prev : pc_dyn->next;
+
+        while (next) {
+          if (panel_category_is_visible_by_tags(C, wm, next->idname)) {
+            break;
           }
+          printf("DEBUG cycling: skipping hidden category '%s'\n", next->idname);
+          next = backwards ? next->prev : next->next;
         }
 
-        if (pc_dyn) {
+        printf("DEBUG cycling: current='%s', next='%s', backwards=%d\n",
+               category, next ? next->idname : "(null)", backwards);
+
+        if (next) {
           /* Intentionally don't reset scroll in this case,
            * allowing for quick browsing between tabs. */
-          panel_category_active_set(region, pc_dyn->idname);
+          panel_category_active_set(region, next->idname);
         }
         return WM_UI_HANDLER_BREAK;
       }
@@ -4959,7 +4985,7 @@ int handler_panel_region(bContext *C,
              ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE))
     {
       /* Cycle tabs. */
-      retval = ui_handle_panel_category_cycling(event, region, active_but);
+      retval = ui_handle_panel_category_cycling(C, event, region, active_but);
       if (retval == WM_UI_HANDLER_BREAK) {
         /* Show or update tooltip with active tab name. */
         wmWindow *win = CTX_wm_window(C);

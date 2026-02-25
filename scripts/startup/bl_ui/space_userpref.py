@@ -4955,6 +4955,102 @@ class VIEW3D_OT_category_tabs_settings(Operator):
 
 
 # -----------------------------------------------------------------------------
+# Category Tags Panel
+
+class TagsPanel:
+    bl_space_type = 'PREFERENCES'
+    bl_region_type = 'WINDOW'
+    bl_context = "tags"
+
+
+class USERPREF_PT_tags(TagsPanel, Panel):
+    bl_label = "Category Tags"
+    bl_options = {'HIDE_HEADER'}
+
+    def draw(self, context):
+        layout = self.layout
+        wm = context.window_manager
+
+        # Header with description
+        row = layout.row()
+        row.label(text="Manage tags for category tabs. Tags help organize and filter panels.", icon='TAG')
+
+        layout.separator()
+
+        # Tag definitions section
+        box = layout.box()
+        col = box.column()
+
+        # Header row with create button
+        header_row = col.row()
+        header_row.label(text="Tag Definitions", icon='BOOKMARKS')
+        header_row.operator("wm.category_tag_create", text="", icon='ADD').category = ""
+
+        # List all tag definitions
+        if wm.category_tags:
+            for tag in wm.category_tags:
+                row = col.row(align=True)
+
+                # Tag glyph with color - convert hex to actual character
+                if tag.glyph:
+                    glyph_char = _hex_to_glyph(tag.glyph)
+                    row.colored_label(text=glyph_char,
+                                     icon='NONE',
+                                     color_r=tag.color[0],
+                                     color_g=tag.color[1],
+                                     color_b=tag.color[2])
+                row.label(text=tag.name, translate=False)
+
+                # Edit and delete buttons
+                props = row.operator("wm.category_tag_edit", text="", icon='GREASEPENCIL')
+                props.name = tag.name
+                props = row.operator("wm.category_tag_delete", text="", icon='X')
+                props.name = tag.name
+        else:
+            col.label(text="No tags defined. Click '+' to create tags.", icon='INFO')
+
+        layout.separator()
+
+        # Category assignments section
+        box = layout.box()
+        col = box.column()
+        col.label(text="Category Tag Assignments", icon='OUTLINER')
+
+        # List categories with their assigned tags
+        if wm.category_glyph_mappings or wm.category_glyph_overrides:
+            # Collect all unique category names
+            categories = set()
+            for item in wm.category_glyph_mappings:
+                categories.add(item.category)
+            for item in wm.category_glyph_overrides:
+                categories.add(item.category)
+
+            for category in sorted(categories):
+                row = col.row(align=True)
+                row.label(text=category, translate=False)
+
+                # Show assigned tags
+                tags_str = ""
+                for item in wm.category_glyph_overrides:
+                    if item.category == category and item.tags:
+                        tags_str = item.tags.replace(";", ", ")
+                        break
+                if not tags_str:
+                    for item in wm.category_glyph_mappings:
+                        if item.category == category and item.tags:
+                            tags_str = item.tags.replace(";", ", ")
+                            break
+
+                if tags_str:
+                    row.label(text=tags_str, translate=False)
+                else:
+                    row.label(text="No tags", translate=False)
+        else:
+            col.label(text="No categories found. Open a panel editor to generate categories.", icon='INFO')
+            col.label(text="No categories found. Open a panel editor to generate categories.", icon='INFO')
+
+
+# -----------------------------------------------------------------------------
 # Class Registration
 
 # Order of registration defines order in UI,
@@ -5087,6 +5183,8 @@ classes = (
     # USERPREF_PT_experimental_tweaks,
 
     USERPREF_PT_developer_tools,
+
+    USERPREF_PT_tags,
 
     # UI lists
     USERPREF_UL_asset_libraries,

@@ -7773,6 +7773,10 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
     PointerRNA new_tag_ptr = header_row.op("wm.category_tag_create", IFACE_("New tag"), ICON_ADD);
     RNA_string_set(&new_tag_ptr, "name", "");
     RNA_string_set(&new_tag_ptr, "category", category);
+
+    /* Button to open Preferences in Tags section */
+    PointerRNA prefs_ptr = header_row.op("SCREEN_OT_userpref_show", "", ICON_PREFERENCES);
+    RNA_enum_set(&prefs_ptr, "section", USER_SECTION_TAGS);
   }
 
   if (tags_panel.body) {

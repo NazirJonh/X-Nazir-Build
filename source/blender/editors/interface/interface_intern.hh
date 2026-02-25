@@ -848,6 +848,11 @@ void button_v3_get(Button *but, float vec[3]);
 void button_v3_set(Button *but, const float vec[3]);
 void button_v4_get(Button *but, float vec[4]);
 void button_v4_set(Button *but, const float vec[4]);
+/**
+ * Set custom text/icon color for a button (RGBA 0-255).
+ * Used for colored labels and glyphs.
+ */
+void button_color_set(Button *but, const uchar color[4]);
 
 void hsvcircle_vals_from_pos(
     const rcti *rect, float mx, float my, float *r_val_rad, float *r_val_dist);

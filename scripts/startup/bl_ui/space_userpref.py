@@ -1599,7 +1599,7 @@ def with_context_check(func):
 
 
 class USERPREF_OT_category_tag_create(Operator):
-    """Create a new category tag"""
+    """Create a new category tag and assign it to the current category"""
     bl_idname = "wm.category_tag_create"
     bl_label = "Create Tag"
     bl_options = {'REGISTER', 'INTERNAL'}
@@ -1608,6 +1608,11 @@ class USERPREF_OT_category_tag_create(Operator):
         name="Name",
         description="Tag name",
         maxlen=32
+    )
+    category: bpy.props.StringProperty(
+        name="Category",
+        description="Category to assign the tag to",
+        default=""
     )
     glyph: bpy.props.StringProperty(
         name="Glyph",
@@ -1625,6 +1630,10 @@ class USERPREF_OT_category_tag_create(Operator):
 
     @with_context_check
     def execute(self, context):
+        if not self.name:
+            self.report({'ERROR'}, "Tag name cannot be empty")
+            return {'CANCELLED'}
+
         # Convert hex glyph to Unicode character
         glyph = _hex_to_glyph(self.glyph) if self.glyph else ""
         success, message = create_tag(
@@ -1633,6 +1642,11 @@ class USERPREF_OT_category_tag_create(Operator):
             list(self.color)
         )
         if success:
+            # If category is specified, assign the tag to it
+            if self.category:
+                add_category_tag(self.category, self.name, auto_save=True)
+                tag_log(f"Auto-assigned tag '{self.name}' to category '{self.category}'")
+
             self.report({'INFO'}, message)
             context.area.tag_redraw()
             return {'FINISHED'}

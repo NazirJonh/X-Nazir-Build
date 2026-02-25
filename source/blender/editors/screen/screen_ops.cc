@@ -7679,14 +7679,100 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
 
   ui::PanelLayout tags_panel = layout.panel(C, "tags_list", false);
 
-  /* Add label and "New Tag" button to panel header */
+  /* Add label, active tag glyphs, and "New Tag" button to panel header */
   if (tags_panel.header) {
     tags_panel.header->label(IFACE_("Tags list"), ICON_NONE);
+
+    /* Show active tags as colored glyph buttons in header */
+    if (!tags_data.empty()) {
+      ui::Layout &glyphs_row = tags_panel.header->row(true);
+      glyphs_row.alignment_set(ui::LayoutAlign::Center);
+
+      const char *cursor = tags_data.c_str();
+      char tag_name[64];
+      char tag_glyph[16];
+      char tag_color[32];
+      int is_active;
+
+      while (*cursor != '\0') {
+        /* Parse tag name */
+        int i = 0;
+        while (*cursor != '|' && *cursor != '\0' && i < 63) {
+          tag_name[i++] = *cursor++;
+        }
+        tag_name[i] = '\0';
+        if (*cursor == '|') cursor++;
+
+        /* Parse glyph */
+        i = 0;
+        while (*cursor != '|' && *cursor != '\0' && i < 15) {
+          tag_glyph[i++] = *cursor++;
+        }
+        tag_glyph[i] = '\0';
+        if (*cursor == '|') cursor++;
+
+        /* Parse is_active */
+        is_active = 0;
+        while (*cursor >= '0' && *cursor <= '9') {
+          is_active = is_active * 10 + (*cursor - '0');
+          cursor++;
+        }
+
+        /* Parse color */
+        if (*cursor == '|') {
+          cursor++;
+          i = 0;
+          while (*cursor != ';' && *cursor != '\0' && i < 31) {
+            tag_color[i++] = *cursor++;
+          }
+          tag_color[i] = '\0';
+        }
+        else {
+          tag_color[0] = '\0';
+        }
+
+        /* Only show colored glyph for active tags */
+        if (tag_name[0] != '\0' && is_active && tag_glyph[0] != '\0') {
+          float color_rgb[3] = {0.0f, 0.0f, 0.0f};
+          bool has_color = false;
+          if (tag_color[0] != '\0') {
+            if (sscanf(tag_color, "%f,%f,%f", &color_rgb[0], &color_rgb[1], &color_rgb[2]) == 3) {
+              if (color_rgb[0] > 0.001f || color_rgb[1] > 0.001f || color_rgb[2] > 0.001f) {
+                has_color = true;
+              }
+            }
+          }
+
+          /* Create colored glyph label */
+          ui::Block *block = glyphs_row.block();
+          ui::Button *glyph_but = uiDefBut(
+              block, ui::ButtonType::Label, tag_glyph, 0, 0, UI_UNIT_X, UI_UNIT_Y, nullptr, 0, 0, std::nullopt);
+
+          /* Set tooltip with tag name (copy string to avoid dangling pointer) */
+          std::string tag_name_copy = tag_name;
+          glyph_but->tip_quick_func = [tag_name_copy](const ui::Button *) { return tag_name_copy; };
+
+          /* Set color if available */
+          if (has_color) {
+            uchar color_uchar[4];
+            color_uchar[0] = uchar(color_rgb[0] * 255.0f);
+            color_uchar[1] = uchar(color_rgb[1] * 255.0f);
+            color_uchar[2] = uchar(color_rgb[2] * 255.0f);
+            color_uchar[3] = 255;
+            button_color_set(glyph_but, color_uchar);
+          }
+        }
+
+        if (*cursor == ';') cursor++;
+      }
+    }
+
     ui::Layout &header_row = tags_panel.header->row(true);
     header_row.alignment_set(ui::LayoutAlign::Right);
-    header_row.scale_x_set(1.0f);  /* Increase button width */
+    header_row.scale_x_set(1.0f);
     PointerRNA new_tag_ptr = header_row.op("wm.category_tag_create", IFACE_("New tag"), ICON_ADD);
     RNA_string_set(&new_tag_ptr, "name", "");
+    RNA_string_set(&new_tag_ptr, "category", category);
   }
 
   if (tags_panel.body) {
@@ -7696,8 +7782,8 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
       ui::Layout &centered_row = tags_body.row(false);
       centered_row.alignment_set(ui::LayoutAlign::Center);
 
-      /* Use grid_flow for automatic column wrapping (max 3 columns) */
-      ui::Layout &tags_grid = centered_row.grid_flow(false, 3, true, false, true);
+      /* Use grid_flow for automatic column wrapping (max 3 columns, row-major) */
+      ui::Layout &tags_grid = centered_row.grid_flow(true, 3, true, false, true);
 
       const char *cursor = tags_data.c_str();
       char tag_name[64];

@@ -143,8 +143,33 @@ typedef struct CategoryTagDef {
   char glyph[8];
   /** Tag color (RGB 0.0-1.0). */
   float color[3];
-  char _pad[4];
+  /** Mode flags for tag filtering. */
+  uint32_t mode_flags;
+  char _pad0[8];
 } CategoryTagDef;
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tag Mode Flags
+ * \{ */
+
+/**
+ * Mode flags for category tag filtering.
+ * Used to show/hide tags based on the current object mode.
+ */
+enum class CategoryTagMode : uint32_t {
+  NONE = 0,
+  OBJECT_MODE = (1 << 0),
+  EDIT_MODE = (1 << 1),
+  SCULPT_MODE = (1 << 2),
+  VERTEX_PAINT = (1 << 3),
+  WEIGHT_PAINT = (1 << 4),
+  TEXTURE_PAINT = (1 << 5),
+  UV_EDIT = (1 << 6),
+  POSE_MODE = (1 << 7),
+  ALL = 0xFFFFFFFF
+};
+
+/** \} */
 
 /** \} */
 

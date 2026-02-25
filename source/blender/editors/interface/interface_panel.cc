@@ -30,6 +30,7 @@
 
 #include "BLT_translation.hh"
 
+#include "DNA_object_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
@@ -2271,17 +2272,44 @@ static int count_reserved_tabs_at_start(const wmWindowManager *wm, ARegion *regi
 }
 
 /**
- * Check if a category should be visible based on tag filtering.
+ * Get the current object mode as a CategoryTagMode bitmask.
+ */
+static CategoryTagMode get_current_tag_mode(const bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (!ob) {
+    return CategoryTagMode::OBJECT_MODE;
+  }
+
+  switch (ob->mode) {
+    case OB_MODE_OBJECT:
+      return CategoryTagMode::OBJECT_MODE;
+    case OB_MODE_EDIT:
+      return CategoryTagMode::EDIT_MODE;
+    case OB_MODE_SCULPT:
+      return CategoryTagMode::SCULPT_MODE;
+    case OB_MODE_VERTEX_PAINT:
+      return CategoryTagMode::VERTEX_PAINT;
+    case OB_MODE_WEIGHT_PAINT:
+      return CategoryTagMode::WEIGHT_PAINT;
+    case OB_MODE_TEXTURE_PAINT:
+      return CategoryTagMode::TEXTURE_PAINT;
+    case OB_MODE_POSE:
+      return CategoryTagMode::POSE_MODE;
+    default:
+      return CategoryTagMode::OBJECT_MODE;
+  }
+}
+
+/**
+ * Check if a category should be visible based on tag filtering and current mode.
  *
  * Rules:
- * 1. Reserved categories are ALWAYS visible (by default)
- * 2. If no active filter, show all categories
- * 3. Category is visible if it has at least one of the active tags (OR logic)
- *
- * TODO: Implement Python API integration to get active filter tags.
- * For now, always returns true (no filtering).
+ * 1. Reserved categories are ALWAYS visible
+ * 2. Categories without tags are ALWAYS visible
+ * 3. Category is visible if it has at least one tag active in current mode
  */
-static bool panel_category_is_visible_by_tags(const bContext * /*C*/,
+static bool panel_category_is_visible_by_tags(const bContext *C,
                                                const wmWindowManager *wm,
                                                const char *category)
 {
@@ -2290,15 +2318,52 @@ static bool panel_category_is_visible_by_tags(const bContext * /*C*/,
     return true;
   }
 
-  /* TODO: Get active filter tags from preferences or Python API.
-   * Example implementation:
-   *   - Call Python: bl_ui.space_userpref.is_category_visible_by_tags(category, active_tags)
-   *   - Or use RNA property: U.category_filter_active_tags
-   *
-   * For now, always return true (no filtering).
-   */
-  (void)category;  /* Suppress unused parameter warning */
-  return true;
+  /* Get tags assigned to this category */
+  const char *tags_string = category_tags_string_lookup(wm, category);
+  if (tags_string == nullptr || tags_string[0] == '\0') {
+    return true; /* No tags = always visible */
+  }
+
+  /* Get current mode */
+  CategoryTagMode current_mode = get_current_tag_mode(C);
+  uint32_t current_mode_flag = static_cast<uint32_t>(current_mode);
+
+  /* Parse semicolon-separated tags and check if any is active in current mode */
+  char tag_name[64];
+  const char *cursor = tags_string;
+
+  while (*cursor) {
+    /* Extract tag name */
+    int i = 0;
+    while (*cursor && *cursor != ';' && i < 63) {
+      tag_name[i++] = *cursor++;
+    }
+    tag_name[i] = '\0';
+    if (*cursor == ';') {
+      cursor++;
+    }
+
+    /* Skip empty tags */
+    if (tag_name[0] == '\0') {
+      continue;
+    }
+
+    /* Find tag definition and check mode */
+    for (const CategoryTagDef *tag = static_cast<const CategoryTagDef *>(
+             wm->category_tags.first);
+         tag;
+         tag = static_cast<const CategoryTagDef *>(tag->next))
+    {
+      if (STREQ(tag->name, tag_name)) {
+        /* mode_flags == 0 means all modes active */
+        if (tag->mode_flags == 0 || (tag->mode_flags & current_mode_flag)) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false; /* No active tags found for current mode */
 }
 
 /**
@@ -2540,6 +2605,7 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
 
 /**
  * Get categories in workspace order, with unlisted categories appended at end.
+ * Only returns categories that are visible based on tag filtering.
  */
 static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region)
 {
@@ -2547,11 +2613,15 @@ static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, AReg
   ScrArea *area = CTX_wm_area(C);
   const int space_type = area ? area->spacetype : 0;
   const int region_type = region->regiontype;
+  const wmWindowManager *wm = CTX_wm_manager(C);
 
   /* Map of existing categories for quick lookup */
   Map<std::string, PanelCategoryDyn *> existing;
   for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    existing.add(std::string(pc_dyn.idname), &pc_dyn);
+    /* Only include categories that are visible by tag filtering */
+    if (panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
+      existing.add(std::string(pc_dyn.idname), &pc_dyn);
+    }
   }
 
   /* Collect workspace order entries for this region */
@@ -2587,7 +2657,7 @@ static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, AReg
   /* Then add remaining categories (new ones not in workspace order) */
   for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     std::string id(pc_dyn.idname);
-    if (!added.contains(id)) {
+    if (!added.contains(id) && panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
       result.append(&pc_dyn);
       added.add(id);
     }
@@ -3141,11 +3211,6 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
   for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
     PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
-
-    /* Skip categories hidden by tag filter */
-    if (!panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
-      continue;
-    }
 
     /* Skip drawing the dragged tab in its normal position */
     if (is_dragging && !drag_state->is_reserved && STREQ(pc_dyn.idname, drag_category_id)) {

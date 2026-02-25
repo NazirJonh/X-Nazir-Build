@@ -178,7 +178,7 @@ _all_tags_cache = {}
 _tag_order_cache = []
 
 # Current JSON format version
-CURRENT_JSON_VERSION = 4  # Bumped for tag_order support
+CURRENT_JSON_VERSION = 5  # Bumped for mode_flags support
 
 # JSON file name in config directory
 GLYPHS_FILENAME = "category_glyphs.json"
@@ -290,12 +290,50 @@ def _is_single_glyph(name):
     return False
 
 
+def _mode_names_to_flags(mode_names):
+    """Convert list of mode names to bitmask."""
+    mode_map = {
+        "OBJECT_MODE": 1 << 0,
+        "EDIT_MODE": 1 << 1,
+        "SCULPT_MODE": 1 << 2,
+        "VERTEX_PAINT": 1 << 3,
+        "WEIGHT_PAINT": 1 << 4,
+        "TEXTURE_PAINT": 1 << 5,
+        "UV_EDIT": 1 << 6,
+        "POSE_MODE": 1 << 7,
+    }
+    flags = 0
+    for name in mode_names:
+        flags |= mode_map.get(name, 0)
+    return flags
+
+
+def _flags_to_mode_names(flags):
+    """Convert bitmask to list of mode names."""
+    mode_map = {
+        1 << 0: "OBJECT_MODE",
+        1 << 1: "EDIT_MODE",
+        1 << 2: "SCULPT_MODE",
+        1 << 3: "VERTEX_PAINT",
+        1 << 4: "WEIGHT_PAINT",
+        1 << 5: "TEXTURE_PAINT",
+        1 << 6: "UV_EDIT",
+        1 << 7: "POSE_MODE",
+    }
+    names = []
+    for bit, name in mode_map.items():
+        if flags & bit:
+            names.append(name)
+    return names
+
+
 def _normalize_category_data(category_data):
     """Normalize category data to the new format with glyph, display_name, color, defaults, and tags."""
     default_entry = {
         "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
         "default_glyph": "", "default_display_name": "", "base_type": "text_only",
-        "tags": []  # NEW: array of tag names
+        "tags": [],  # NEW: array of tag names
+        "mode_flags": []  # NEW: array of mode names
     }
 
     if isinstance(category_data, str):
@@ -394,10 +432,23 @@ def migrate_v3_to_v4(data):
     return data
 
 
+def migrate_v4_to_v5(data):
+    """Migrate from v4 to v5: add mode_flags to tags."""
+    tag_log("Migrating JSON v4 → v5")
+    # Add empty mode_flags to all tags (empty = all modes active)
+    if "tags" in data:
+        for tag in data["tags"]:
+            if isinstance(tag, dict) and "mode_flags" not in tag:
+                tag["mode_flags"] = []  # Empty = all modes
+    data["version"] = 5
+    return data
+
+
 MIGRATORS = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
     3: migrate_v3_to_v4,
+    4: migrate_v4_to_v5,
 }
 
 
@@ -483,7 +534,8 @@ def _load_glyph_mappings_from_file():
         if isinstance(tag_data, dict):
             _all_tags_cache[tag_name] = {
                 "glyph": _hex_to_glyph(tag_data.get("glyph", "")),
-                "color": tag_data.get("color", [0.0, 0.0, 0.0])
+                "color": tag_data.get("color", [0.0, 0.0, 0.0]),
+                "mode_flags": tag_data.get("mode_flags", 0b111)
             }
         else:
             _all_tags_cache[tag_name] = tag_data
@@ -578,7 +630,8 @@ def _save_glyph_mappings_to_file(data=None):
             if isinstance(tag_data, dict):
                 tags_to_save[tag_name] = {
                     "glyph": _glyph_to_hex(tag_data.get("glyph", "")),
-                    "color": tag_data.get("color", [0.0, 0.0, 0.0])
+                    "color": tag_data.get("color", [0.0, 0.0, 0.0]),
+                    "mode_flags": tag_data.get("mode_flags", 0b111)
                 }
             else:
                 tags_to_save[tag_name] = tag_data
@@ -688,7 +741,8 @@ def create_tag(tag_name, glyph="", color=None, auto_save=True):
 
     _all_tags_cache[tag_name] = {
         "glyph": glyph,
-        "color": list(color) if color else [0.0, 0.0, 0.0]
+        "color": list(color) if color else [0.0, 0.0, 0.0],
+        "mode_flags": 0b111  # Default: Object, Edit, Sculpt modes
     }
 
     tag_log(f"Created tag: {tag_name}")
@@ -1286,6 +1340,9 @@ def sync_glyph_mappings_to_wm():
                 tag_item = wm.category_tags.new(name=tag_name)
                 tag_item.glyph = glyph_hex
                 tag_item.color = (color_val[0], color_val[1], color_val[2])
+                # НОВОЕ: Sync mode flags
+                mode_flags_val = tag_data.get("mode_flags", 0b111) if isinstance(tag_data, dict) else 0b111
+                tag_item.mode_flags = mode_flags_val
             print(f"[GLYPH SYNC] Synced {len(wm.category_tags)} tag definitions to WM")
 
         # Add current mappings from cache
@@ -1458,7 +1515,9 @@ def sync_wm_to_glyph_cache():
                     glyph_hex = getattr(tag_item, "glyph", "") or ""
                     glyph = _hex_to_glyph(glyph_hex) if glyph_hex else ""
                     color = list(getattr(tag_item, "color", (0.0, 0.0, 0.0))[:3])
-                    new_tags_cache[tag_name] = {"glyph": glyph, "color": color}
+                    # НОВОЕ: Sync mode flags
+                    mode_flags = getattr(tag_item, "mode_flags", 0b111)
+                    new_tags_cache[tag_name] = {"glyph": glyph, "color": color, "mode_flags": mode_flags}
 
                 # Only update if WM has tags OR our cache is empty (initial load)
                 if new_tags_cache and _all_tags_cache != new_tags_cache:
@@ -1587,8 +1646,26 @@ def _deferred_save():
     return None  # Don't repeat timer
 
 
+def _sync_mode_flags_from_wm_to_cache():
+    """Sync mode flags from Python CategoryTagItem to _all_tags_cache.
+    This captures UI changes to mode checkboxes before saving."""
+    global _all_tags_cache
+    try:
+        # Get Python tag collection
+        tags_collection = get_tags_collection()
+        for tag_item in tags_collection:
+            tag_name = tag_item.name
+            if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
+                # Update mode_flags from Python CategoryTagItem
+                _all_tags_cache[tag_name]["mode_flags"] = tag_item.get_mode_flags()
+    except Exception as e:
+        print(f"[GLYPH] Error syncing mode flags: {e}")
+
+
 def _save_tags_to_json():
     """Save tags to JSON file."""
+    # НОВОЕ: First sync mode flags from WM items to cache (captures UI changes)
+    _sync_mode_flags_from_wm_to_cache()
     sync_glyph_mappings_to_wm()
     _save_glyph_mappings_to_file()
 
@@ -1616,10 +1693,213 @@ class CategoryTagItem(PropertyGroup):
         update=lambda self, ctx: _auto_save_tags()  # Auto-save
     )
 
+    # НОВОЕ: Режимы для фильтрации
+    mode_object: bpy.props.BoolProperty(
+        name="Object Mode",
+        default=True,
+        update=lambda self, ctx: _auto_save_tags()
+    )
+    mode_edit: bpy.props.BoolProperty(
+        name="Edit Mode",
+        default=True,
+        update=lambda self, ctx: _auto_save_tags()
+    )
+    mode_sculpt: bpy.props.BoolProperty(
+        name="Sculpt Mode",
+        default=True,
+        update=lambda self, ctx: _auto_save_tags()
+    )
+    mode_vertex_paint: bpy.props.BoolProperty(
+        name="Vertex Paint",
+        default=False,
+        update=lambda self, ctx: _auto_save_tags()
+    )
+    mode_weight_paint: bpy.props.BoolProperty(
+        name="Weight Paint",
+        default=False,
+        update=lambda self, ctx: _auto_save_tags()
+    )
+    mode_texture_paint: bpy.props.BoolProperty(
+        name="Texture Paint",
+        default=False,
+        update=lambda self, ctx: _auto_save_tags()
+    )
+    mode_uv_edit: bpy.props.BoolProperty(
+        name="UV Edit",
+        default=False,
+        update=lambda self, ctx: _auto_save_tags()
+    )
+
+    def get_mode_flags(self):
+        """Convert boolean mode properties to bitmask."""
+        flags = 0
+        if self.mode_object:
+            flags |= 1 << 0  # OBJECT_MODE
+        if self.mode_edit:
+            flags |= 1 << 1  # EDIT_MODE
+        if self.mode_sculpt:
+            flags |= 1 << 2  # SCULPT_MODE
+        if self.mode_vertex_paint:
+            flags |= 1 << 3  # VERTEX_PAINT
+        if self.mode_weight_paint:
+            flags |= 1 << 4  # WEIGHT_PAINT
+        if self.mode_texture_paint:
+            flags |= 1 << 5  # TEXTURE_PAINT
+        if self.mode_uv_edit:
+            flags |= 1 << 6  # UV_EDIT
+        return flags
+
+    def set_mode_flags(self, flags):
+        """Set boolean mode properties from bitmask."""
+        self.mode_object = bool(flags & (1 << 0))
+        self.mode_edit = bool(flags & (1 << 1))
+        self.mode_sculpt = bool(flags & (1 << 2))
+        self.mode_vertex_paint = bool(flags & (1 << 3))
+        self.mode_weight_paint = bool(flags & (1 << 4))
+        self.mode_texture_paint = bool(flags & (1 << 5))
+        self.mode_uv_edit = bool(flags & (1 << 6))
+
 
 class CategoryTagAssignment(PropertyGroup):
     """Assignment of a tag to a category."""
     tag_name: bpy.props.StringProperty(name="Tag Name")
+
+
+class TagModeItem:
+    """Wrapper class for tag mode editing.
+    Provides boolean properties for UI that sync with _all_tags_cache.
+    """
+    def __init__(self, tag_name):
+        self._tag_name = tag_name
+        self._load_from_cache()
+
+    def _load_from_cache(self):
+        """Load mode flags from cache."""
+        global _all_tags_cache
+        tag_data = _all_tags_cache.get(self._tag_name, {})
+        mode_flags = tag_data.get("mode_flags", 0b111) if isinstance(tag_data, dict) else 0b111
+
+        self._mode_object = bool(mode_flags & (1 << 0))
+        self._mode_edit = bool(mode_flags & (1 << 1))
+        self._mode_sculpt = bool(mode_flags & (1 << 2))
+        self._mode_vertex_paint = bool(mode_flags & (1 << 3))
+        self._mode_weight_paint = bool(mode_flags & (1 << 4))
+        self._mode_texture_paint = bool(mode_flags & (1 << 5))
+        self._mode_uv_edit = bool(mode_flags & (1 << 6))
+
+    def _save_to_cache(self):
+        """Save mode flags to cache."""
+        global _all_tags_cache
+        if self._tag_name in _all_tags_cache and isinstance(_all_tags_cache[self._tag_name], dict):
+            flags = 0
+            if self._mode_object:
+                flags |= 1 << 0
+            if self._mode_edit:
+                flags |= 1 << 1
+            if self._mode_sculpt:
+                flags |= 1 << 2
+            if self._mode_vertex_paint:
+                flags |= 1 << 3
+            if self._mode_weight_paint:
+                flags |= 1 << 4
+            if self._mode_texture_paint:
+                flags |= 1 << 5
+            if self._mode_uv_edit:
+                flags |= 1 << 6
+            _all_tags_cache[self._tag_name]["mode_flags"] = flags
+
+    @property
+    def mode_object(self):
+        return self._mode_object
+
+    @mode_object.setter
+    def mode_object(self, value):
+        self._mode_object = value
+        self._save_to_cache()
+
+    @property
+    def mode_edit(self):
+        return self._mode_edit
+
+    @mode_edit.setter
+    def mode_edit(self, value):
+        self._mode_edit = value
+        self._save_to_cache()
+
+    @property
+    def mode_sculpt(self):
+        return self._mode_sculpt
+
+    @mode_sculpt.setter
+    def mode_sculpt(self, value):
+        self._mode_sculpt = value
+        self._save_to_cache()
+
+    @property
+    def mode_vertex_paint(self):
+        return self._mode_vertex_paint
+
+    @mode_vertex_paint.setter
+    def mode_vertex_paint(self, value):
+        self._mode_vertex_paint = value
+        self._save_to_cache()
+
+    @property
+    def mode_weight_paint(self):
+        return self._mode_weight_paint
+
+    @mode_weight_paint.setter
+    def mode_weight_paint(self, value):
+        self._mode_weight_paint = value
+        self._save_to_cache()
+
+    @property
+    def mode_texture_paint(self):
+        return self._mode_texture_paint
+
+    @mode_texture_paint.setter
+    def mode_texture_paint(self, value):
+        self._mode_texture_paint = value
+        self._save_to_cache()
+
+    @property
+    def mode_uv_edit(self):
+        return self._mode_uv_edit
+
+    @mode_uv_edit.setter
+    def mode_uv_edit(self, value):
+        self._mode_uv_edit = value
+        self._save_to_cache()
+
+
+def get_tag_mode_item(tag_name):
+    """Get a TagModeItem for the given tag name."""
+    return TagModeItem(tag_name)
+
+
+def get_tag_name_by_index(idx):
+    """Get tag name by index from wm.category_tags."""
+    wm = bpy.context.window_manager
+    if wm and hasattr(wm, 'category_tags') and 0 <= idx < len(wm.category_tags):
+        return wm.category_tags[idx].name
+    return None
+
+
+def _get_mode_flags_for_tag(tag_name):
+    """Get mode flags for a tag from _all_tags_cache."""
+    global _all_tags_cache
+    if tag_name in _all_tags_cache:
+        tag_data = _all_tags_cache[tag_name]
+        if isinstance(tag_data, dict):
+            return tag_data.get("mode_flags", 0b111)
+    return 0b111
+
+
+def _set_mode_flags_for_tag(tag_name, mode_flags):
+    """Set mode flags for a tag in _all_tags_cache."""
+    global _all_tags_cache
+    if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
+        _all_tags_cache[tag_name]["mode_flags"] = mode_flags
 
 
 def with_context_check(func):
@@ -5157,6 +5437,176 @@ class TagsPanel:
     bl_context = "tags"
 
 
+class USERPREF_OT_tag_mode_toggle(Operator):
+    """Toggle a specific mode for the current tag."""
+    bl_idname = "userpref.tag_mode_toggle"
+    bl_label = "Toggle Mode"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    mode: bpy.props.EnumProperty(
+        items=[
+            ('OBJECT', "Object Mode", ""),
+            ('EDIT', "Edit Mode", ""),
+            ('SCULPT', "Sculpt Mode", ""),
+            ('VERTEX_PAINT', "Vertex Paint", ""),
+            ('WEIGHT_PAINT', "Weight Paint", ""),
+            ('TEXTURE_PAINT', "Texture Paint", ""),
+            ('UV_EDIT', "UV Edit", ""),
+        ]
+    )
+
+    def execute(self, context):
+        global _all_tags_cache
+
+        wm = context.window_manager
+        idx = wm.category_tags_active_index
+
+        if not wm or not hasattr(wm, 'category_tags'):
+            return {'CANCELLED'}
+
+        if idx < 0 or idx >= len(wm.category_tags):
+            return {'CANCELLED'}
+
+        tag_name = wm.category_tags[idx].name
+        if tag_name not in _all_tags_cache:
+            return {'CANCELLED'}
+
+        tag_data = _all_tags_cache[tag_name]
+        if not isinstance(tag_data, dict):
+            return {'CANCELLED'}
+
+        mode_flags = tag_data.get("mode_flags", 0b111)
+
+        # Map mode to bit position
+        mode_bits = {
+            'OBJECT': 0,
+            'EDIT': 1,
+            'SCULPT': 2,
+            'VERTEX_PAINT': 3,
+            'WEIGHT_PAINT': 4,
+            'TEXTURE_PAINT': 5,
+            'UV_EDIT': 6,
+        }
+
+        bit = mode_bits.get(self.mode, 0)
+        mode_flags ^= (1 << bit)  # Toggle bit
+
+        tag_data["mode_flags"] = mode_flags
+
+        # Sync to WM
+        if idx < len(wm.category_tags):
+            wm.category_tags[idx].mode_flags = mode_flags
+
+        return {'FINISHED'}
+
+
+class USERPREF_OT_tag_mode_select_all(Operator):
+    """Select all modes for the current tag."""
+    bl_idname = "userpref.tag_mode_select_all"
+    bl_label = "Select All Modes"
+
+    def execute(self, context):
+        global _all_tags_cache
+
+        wm = context.window_manager
+        idx = wm.category_tags_active_index
+
+        if not wm or not hasattr(wm, 'category_tags'):
+            return {'CANCELLED'}
+
+        if idx < 0 or idx >= len(wm.category_tags):
+            return {'CANCELLED'}
+
+        tag_name = wm.category_tags[idx].name
+        if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
+            _all_tags_cache[tag_name]["mode_flags"] = 0b1111111  # All 7 modes
+            wm.category_tags[idx].mode_flags = 0b1111111
+
+        return {'FINISHED'}
+
+
+class USERPREF_OT_tag_mode_select_none(Operator):
+    """Deselect all modes for the current tag."""
+    bl_idname = "userpref.tag_mode_select_none"
+    bl_label = "Select None"
+
+    def execute(self, context):
+        global _all_tags_cache
+
+        wm = context.window_manager
+        idx = wm.category_tags_active_index
+
+        if not wm or not hasattr(wm, 'category_tags'):
+            return {'CANCELLED'}
+
+        if idx < 0 or idx >= len(wm.category_tags):
+            return {'CANCELLED'}
+
+        tag_name = wm.category_tags[idx].name
+        if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
+            _all_tags_cache[tag_name]["mode_flags"] = 0
+            wm.category_tags[idx].mode_flags = 0
+
+        return {'FINISHED'}
+
+
+class USERPREF_PT_tag_mode_filter_popover(Panel):
+    """Popover panel for selecting tag filter modes."""
+    bl_label = "Filter Mode"
+    bl_idname = "USERPREF_PT_tag_mode_filter_popover"
+    bl_space_type = 'PREFERENCES'
+    bl_region_type = 'HEADER'
+
+    @classmethod
+    def poll(cls, context):
+        wm = context.window_manager
+        if not wm or not hasattr(wm, 'category_tags'):
+            return False
+        idx = wm.category_tags_active_index
+        return 0 <= idx < len(wm.category_tags)
+
+    def draw(self, context):
+        layout = self.layout
+        wm = context.window_manager
+        idx = wm.category_tags_active_index
+
+        if not wm or not hasattr(wm, 'category_tags'):
+            layout.label(text="No tags available")
+            return
+
+        if idx < 0 or idx >= len(wm.category_tags):
+            layout.label(text="No tag selected")
+            return
+
+        tag_name = wm.category_tags[idx].name
+        mode_flags = _get_mode_flags_for_tag(tag_name)
+
+        # Mode definitions: (bit, label, icon_off, icon_on)
+        modes = [
+            (0, "Object Mode", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
+            (1, "Edit Mode", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
+            (2, "Sculpt Mode", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
+            (3, "Vertex Paint", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
+            (4, "Weight Paint", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
+            (5, "Texture Paint", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
+            (6, "UV Edit", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
+        ]
+
+        mode_keys = ['OBJECT', 'EDIT', 'SCULPT', 'VERTEX_PAINT', 'WEIGHT_PAINT', 'TEXTURE_PAINT', 'UV_EDIT']
+
+        col = layout.column()
+        for i, (bit, label, icon_off, icon_on) in enumerate(modes):
+            is_active = bool(mode_flags & (1 << bit))
+            icon = icon_on if is_active else icon_off
+            op = col.operator("userpref.tag_mode_toggle", text=label, icon=icon)
+            op.mode = mode_keys[i]
+
+        # Quick buttons
+        row = layout.row()
+        row.operator("userpref.tag_mode_select_all", text="All")
+        row.operator("userpref.tag_mode_select_none", text="None")
+
+
 class USERPREF_PT_tags(TagsPanel, Panel):
     bl_label = "Category Tags"
     bl_options = {'HIDE_HEADER'}
@@ -5231,6 +5681,11 @@ class USERPREF_PT_tags(TagsPanel, Panel):
             box.prop(tag, "name", text="Name")
             box.prop(tag, "glyph", text="Glyph")
             box.prop(tag, "color", text="Color")
+
+            # Filter Mode button
+            row = box.row()
+            row.label(text="Filter Mode:")
+            row.popover("USERPREF_PT_tag_mode_filter_popover", text="", icon='TRIA_DOWN')
 
         else:
             # No tag selected or list is empty
@@ -5364,9 +5819,13 @@ classes = (
     # Popovers.
     USERPREF_PT_ndof_settings,
     USERPREF_PT_addons_filter,
+    USERPREF_PT_tag_mode_filter_popover,
 
     # Operators.
     VIEW3D_OT_category_tabs_settings,
+    USERPREF_OT_tag_mode_toggle,
+    USERPREF_OT_tag_mode_select_all,
+    USERPREF_OT_tag_mode_select_none,
 
     USERPREF_PT_experimental_new_features,
     USERPREF_PT_experimental_prototypes,

@@ -7674,10 +7674,12 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
 
   layout.separator();
 
-  /* Tags section in a sub-panel */
+  /* Tags section in a sub-panel - only show for non-reserved categories */
   const std::string tags_data = blender::ui::get_tags_for_category_ui(wm, category);
 
-  ui::PanelLayout tags_panel = layout.panel(C, "tags_list", false);
+  /* Don't show tags panel for reserved categories */
+  if (!is_reserved) {
+    ui::PanelLayout tags_panel = layout.panel(C, "tags_list", false);
 
   /* Add label, active tag glyphs, and "New Tag" button to panel header */
   if (tags_panel.header) {
@@ -7915,6 +7917,7 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
       tags_body.label(IFACE_("No tags. Click 'New' to create."), ICON_INFO);
     }
   }
+  } /* End of !is_reserved check for tags panel */
 
   layout.separator();
 

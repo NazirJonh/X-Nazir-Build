@@ -3180,6 +3180,12 @@ static void rna_def_category_tag_def(BlenderRNA *brna)
   RNA_def_property_float_default(prop, 0.0f);
   RNA_def_property_ui_text(prop, "Color", "Tag color (black = use theme color)");
   RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  // NEW: Mode flags for filtering
+  prop = RNA_def_property(srna, "mode_flags", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "mode_flags");
+  RNA_def_property_ui_text(prop, "Mode Flags", "Bitmask of modes where this tag is active (0 = all modes)");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
 }
 
 static void rna_def_category_glyph_mappings(BlenderRNA *brna, PropertyRNA *cprop)

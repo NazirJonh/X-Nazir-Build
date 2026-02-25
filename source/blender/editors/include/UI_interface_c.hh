@@ -2142,6 +2142,10 @@ void panel_category_index_active_set(ARegion *region, const int index);
 void panel_category_active_set_default(ARegion *region, const char *idname);
 void panel_category_clear_all(ARegion *region);
 /**
+ * Ensure the active category is visible. If not, switch to the first visible category.
+ */
+void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *region);
+/**
  * Draw vertical tabs on the left side of the region, one tab per category.
  */
 void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char *category_id_active);

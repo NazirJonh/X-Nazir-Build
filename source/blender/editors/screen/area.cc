@@ -3619,6 +3619,8 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
 
   /* Set in layout. */
   if (has_category_tabs && region->runtime->category) {
+    /* Ensure the active category is visible after tag filtering */
+    ui::panel_category_tabs_ensure_active_visible(C, region);
     ui::panel_category_tabs_draw_all(C, region, region->runtime->category);
   }
 

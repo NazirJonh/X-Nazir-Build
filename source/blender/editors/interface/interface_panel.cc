@@ -2225,7 +2225,7 @@ static bool category_name_is_glyph(const char *category_id)
  * - Categories with fallback letter
  * - Categories with user overrides
  */
-bool category_is_reserved(const wmWindowManager *wm, const char *category_id)
+bool category_is_reserved(const wmWindowManager * /*wm*/, const char *category_id)
 {
   /* Categories with glyph names (high Unicode) are from addons and NOT reserved */
   if (category_name_is_glyph(category_id)) {
@@ -2310,8 +2310,8 @@ static CategoryTagMode get_current_tag_mode(const bContext *C)
  * 3. Category is visible if it has at least one tag active in current mode
  */
 static bool panel_category_is_visible_by_tags(const bContext *C,
-                                               const wmWindowManager *wm,
-                                               const char *category)
+                                                const wmWindowManager *wm,
+                                                const char *category)
 {
   /* Reserved categories are always visible */
   if (category_is_reserved_for_reorder(wm, category)) {
@@ -2601,6 +2601,31 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
 
   /* Notify of change */
   WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
+}
+
+/**
+ * Ensure the active category is visible. If not, switch to the first visible category.
+ * This is called when tag filtering changes to prevent having an invisible active category.
+ */
+void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *region)
+{
+  if (!panel_category_tabs_is_visible(region)) {
+    return;
+  }
+
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  const char *current_active = panel_category_active_get(region, false);
+  
+  /* Check if current active category is still visible */
+  if (current_active && panel_category_is_visible_by_tags(C, wm, current_active)) {
+    return; /* Current active is still visible, nothing to do */
+  }
+
+  /* Current active is not visible, find first visible category */
+  Vector<PanelCategoryDyn *> visible_categories = get_ordered_categories(C, region);
+  if (!visible_categories.is_empty()) {
+    panel_category_active_set(region, visible_categories[0]->idname);
+  }
 }
 
 /**

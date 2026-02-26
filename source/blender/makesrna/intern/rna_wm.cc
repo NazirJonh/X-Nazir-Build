@@ -3342,6 +3342,12 @@ static void rna_def_windowmanager(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Active Tag", "Index of the active tag in the list");
   RNA_def_property_update(prop, NC_WINDOW, nullptr);
 
+  prop = RNA_def_property(srna, "category_tab_save_category", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "category_tab_save_category");
+  RNA_def_property_ui_text(
+      prop, "Category Tab Save Category", "Temporary storage for category name during save dialog");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
   prop = RNA_def_property(srna, "xr_session_settings", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "xr.session_settings");
   RNA_def_property_flag(prop, PROP_NEVER_NULL);

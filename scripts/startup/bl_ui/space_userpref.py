@@ -593,10 +593,10 @@ def _save_glyph_mappings_to_file(data=None):
                 print(f"[GLYPH] Saving category with user customizations: {repr(category)}")
 
             if isinstance(category_data, dict):
-                # Debug for key categories
-                if category in ["Item", "View", "Tool", "Edit"]:
-                    print(f"[GLYPH SAVE] Saving '{category}': glyph={repr(category_data.get('glyph'))}, "
-                          f"default_glyph={repr(category_data.get('default_glyph'))}")
+                # Debug: print tags for all categories with tags
+                cat_tags = category_data.get("tags", [])
+                if cat_tags:
+                    print(f"[GLYPH SAVE] Category '{category}' has tags: {cat_tags}")
 
                 mappings_to_save[category] = {
                     "glyph": _glyph_to_unicode_escape(category_data.get("glyph", "")),
@@ -656,9 +656,13 @@ def _save_glyph_mappings_to_file(data=None):
         with safe_file_write(filepath) as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         tag_log(f"Saved {len(_glyph_cache)} categories, {len(_all_tags_cache)} tags")
+        print(f"[GLYPH SAVE] Successfully saved to {filepath}")
         return True
     except Exception as e:
         tag_log(f"Save failed: {e}", "ERROR")
+        print(f"[GLYPH SAVE] Error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -915,7 +919,12 @@ def update_category_tags_in_wm(category):
     try:
         wm = bpy.context.window_manager
         if wm is None or not hasattr(wm, 'category_glyph_overrides'):
+            tag_log(f"update_category_tags_in_wm: WM or overrides not available", "ERROR")
             return
+        
+        # Get current tags from cache
+        current_tags = get_category_tags(category)
+        tag_log(f"update_category_tags_in_wm: category='{category}', tags={current_tags}")
         
         # Find or create override entry for this category
         override_item = None
@@ -926,17 +935,18 @@ def update_category_tags_in_wm(category):
         
         if override_item is None:
             override_item = wm.category_glyph_overrides.new(category=category)
-        
-        # Get current tags from cache
-        current_tags = get_category_tags(category)
+            tag_log(f"update_category_tags_in_wm: Created new override for '{category}'")
         
         # Update tags in override (semicolon-separated string)
         if hasattr(override_item, 'tags'):
             override_item.tags = ";".join(current_tags)
+            tag_log(f"update_category_tags_in_wm: Set WM override tags for '{category}' to '{override_item.tags}'")
             
-        tag_log(f"Updated WM override tags for '{category}': {current_tags}")
+        tag_log(f"update_category_tags_in_wm: Completed for '{category}'")
     except Exception as e:
-        tag_log(f"Error updating WM override tags: {e}", "ERROR")
+        tag_log(f"update_category_tags_in_wm: Error: {e}", "ERROR")
+        import traceback
+        traceback.print_exc()
 
 
 # -----------------------------------------------------------------------------
@@ -1559,11 +1569,11 @@ def sync_wm_to_glyph_cache():
                         continue
 
                     overrides_count += 1
-                    print(f"[GLYPH] Override found: category='{category}', glyph='{item.glyph}', display_name='{item.display_name}', color={list(item.color[:3])}")
+                    print(f"[GLYPH SYNC] Override found: category='{category}', glyph='{item.glyph}', display_name='{item.display_name}', color={list(item.color[:3])}, tags='{item.tags}'")
 
                     # Get current cached data or create new entry
                     if category not in _glyph_cache:
-                        _glyph_cache[category] = {"glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0]}
+                        _glyph_cache[category] = {"glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": []}
 
                     cached_entry = _glyph_cache[category]
 
@@ -1572,33 +1582,38 @@ def sync_wm_to_glyph_cache():
                         if cached_entry.get("glyph", "") != item.glyph:
                             cached_entry["glyph"] = item.glyph
                             changes_detected = True
-                            print(f"[GLYPH] Updated glyph for '{category}'")
+                            print(f"[GLYPH SYNC] Updated glyph for '{category}'")
 
                     if item.display_name:
                         if cached_entry.get("display_name", "") != item.display_name:
                             cached_entry["display_name"] = item.display_name
                             changes_detected = True
-                            print(f"[GLYPH] Updated display_name for '{category}'")
+                            print(f"[GLYPH SYNC] Updated display_name for '{category}'")
 
                     # Always save color from override (even if zero - user explicitly set it)
                     item_color = list(item.color[:3])
                     if cached_entry.get("color", [0.0, 0.0, 0.0]) != item_color:
                         cached_entry["color"] = item_color
                         changes_detected = True
-                        print(f"[GLYPH] Updated color for '{category}' to {item_color}")
+                        print(f"[GLYPH SYNC] Updated color for '{category}' to {item_color}")
 
                     # Sync tags from override (semicolon-separated string -> list)
-                    if hasattr(item, "tags") and item.tags:
+                    if hasattr(item, "tags"):
                         tags_str = item.tags or ""
                         tags_list = [t.strip() for t in tags_str.split(";") if t.strip()]
+                        print(f"[GLYPH SYNC] Processing tags for '{category}': WM tags='{tags_str}' -> list={tags_list}, cache tags={cached_entry.get('tags', [])}")
                         if cached_entry.get("tags", []) != tags_list:
                             cached_entry["tags"] = tags_list
                             changes_detected = True
-                            print(f"[GLYPH] Updated tags for '{category}': {tags_list}")
+                            print(f"[GLYPH SYNC] Updated tags for '{category}': {tags_list}")
+                        else:
+                            print(f"[GLYPH SYNC] Tags unchanged for '{category}'")
 
-                print(f"[GLYPH] Processed {overrides_count} items from category_glyph_overrides")
+                print(f"[GLYPH SYNC] Processed {overrides_count} items from category_glyph_overrides")
             except Exception as e:
-                print(f"[GLYPH] Error reading from category_glyph_overrides: {e}")
+                print(f"[GLYPH SYNC] Error reading from category_glyph_overrides: {e}")
+                import traceback
+                traceback.print_exc()
 
         # Save to JSON if changes were detected
         if changes_detected:
@@ -1606,6 +1621,13 @@ def sync_wm_to_glyph_cache():
                 print(f"[GLYPH] Saved {len(_glyph_cache)} category mappings from WM to JSON")
             else:
                 print("[GLYPH] Failed to save category mappings from WM")
+        else:
+            # No changes detected, but still save to ensure tags are persisted
+            # This is important when Save is clicked after tag changes
+            if _save_glyph_mappings_to_file():
+                print(f"[GLYPH] Saved {len(_glyph_cache)} category mappings to JSON (no changes detected)")
+            else:
+                print("[GLYPH] Failed to save category mappings to JSON")
 
         return changes_detected
 

@@ -191,6 +191,9 @@ struct wmWindowManager {
   /** Tag definitions for category tabs (stored in wm.category_tags). */
   ListBase category_tags = {nullptr, nullptr};
 
+  /** Temporary storage for category name during dialog save (UTF-8 safe via RNA). */
+  char category_tab_save_category[64] = {};
+
   /** Set on file read. */
   uint8_t init_flag = 0;
   char _pad0[1] = {};

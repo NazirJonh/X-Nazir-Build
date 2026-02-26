@@ -8735,14 +8735,55 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
     return OPERATOR_CANCELLED;
   }
 
-  /* Sync glyph overrides from WM to JSON file via Python */
+  /* Get category from the dialog operator (not from this operator) */
+  char category[64] = "";
+  if (category_tab_current_dialog_op) {
+    RNA_string_get(category_tab_current_dialog_op->ptr, "category", category);
+  }
+  
+  if (category[0] == '\0') {
+    printf("[GLYPH SAVE C++] ERROR: No category found!\n");
+    return OPERATOR_CANCELLED;
+  }
+  
+  printf("[GLYPH SAVE C++] Starting save for category: '%s'\n", category);
+
+  /* Sync tags from Python cache to WM override, then save everything to JSON */
 #ifdef WITH_PYTHON
+  /* Store category in WM property (UTF-8 safe via RNA) */
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm) {
+    PointerRNA wm_ptr = RNA_pointer_create_discrete(&wm->id, RNA_WindowManager, wm);
+    RNA_string_set(&wm_ptr, "category_tab_save_category", category);
+  }
+
+  printf("[GLYPH SAVE C++] WITH_PYTHON defined, starting Python sync\n");
+
+  /* Simple Python call - category read from WM property (UTF-8 safe) */
   const char *imports[] = {"bpy", nullptr};
-  BPY_run_string_exec(
-      C,
-      imports,
-      "from bl_ui.space_userpref import sync_wm_to_glyph_cache\n"
-      "sync_wm_to_glyph_cache()\n");
+  const char *save_cmd =
+      "from bl_ui.space_userpref import update_category_tags_in_wm, get_category_tags, sync_wm_to_glyph_cache\n"
+      "import bpy\n"
+      "wm = bpy.context.window_manager\n"
+      "category = wm.category_tab_save_category\n"
+      "wm.category_tab_save_category = ''\n"
+      "print(f'[GLYPH SAVE PY] Category from WM property: {category}')\n"
+      "if category:\n"
+      "    tags = get_category_tags(category)\n"
+      "    print(f'[GLYPH SAVE PY] Tags in _glyph_cache for {category}: {tags}')\n"
+      "    update_category_tags_in_wm(category)\n"
+      "    print(f'[GLYPH SAVE PY] Tags synced to WM override')\n"
+      "    result = sync_wm_to_glyph_cache()\n"
+      "    print(f'[GLYPH SAVE PY] sync_wm_to_glyph_cache returned: {result}')\n"
+      "else:\n"
+      "    print('[GLYPH SAVE PY] ERROR: No category found in WM property')\n";
+
+  printf("[GLYPH SAVE C++] Running save_cmd...\n");
+  int result = BPY_run_string_exec(C, imports, save_cmd);
+  printf("[GLYPH SAVE C++] save_cmd returned %d\n", result);
+  printf("[GLYPH SAVE C++] Save completed\n");
+#else
+  printf("[GLYPH SAVE C++] WITH_PYTHON NOT defined!\n");
 #endif
 
   /* Set return value to OK using public API - this will trigger popup close */
@@ -8754,6 +8795,8 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
 
   /* Show success message */
   BKE_report(op->reports, RPT_INFO, "Category tab settings saved");
+  
+  printf("[GLYPH SAVE C++] Popup closed, save finished\n");
 
   return OPERATOR_FINISHED;
 }

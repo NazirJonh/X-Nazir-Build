@@ -734,7 +734,7 @@ def create_tag(tag_name, glyph="", color=None, auto_save=True):
     Returns:
         (success: bool, message: str)
     """
-    global _all_tags_cache
+    global _all_tags_cache, _tag_order_cache
 
     if not tag_name:
         return False, "Tag name cannot be empty"
@@ -754,6 +754,10 @@ def create_tag(tag_name, glyph="", color=None, auto_save=True):
         "color": list(color) if color else [0.0, 0.0, 0.0],
         "mode_flags": 0b111  # Default: Object, Edit, Sculpt modes
     }
+
+    # Always add new tags to the end of the order list
+    if tag_name not in _tag_order_cache:
+        _tag_order_cache.append(tag_name)
 
     tag_log(f"Created tag: {tag_name}")
 
@@ -785,12 +789,16 @@ def update_tag(tag_name, glyph=None, color=None, auto_save=True):
 
 def delete_tag(tag_name, auto_save=True):
     """Delete a tag from registry and all category assignments."""
-    global _all_tags_cache, _glyph_cache
+    global _all_tags_cache, _glyph_cache, _tag_order_cache
 
     if tag_name not in _all_tags_cache:
         return False, f"Tag '{tag_name}' not found"
 
     del _all_tags_cache[tag_name]
+
+    # Remove from order cache
+    if tag_name in _tag_order_cache:
+        _tag_order_cache.remove(tag_name)
 
     # Remove from all categories
     for cat_name, cat_data in _glyph_cache.items():
@@ -1371,15 +1379,16 @@ def _sync_glyph_mappings_to_wm_impl():
                 wm.category_tags.remove(item)
             print(f"[GLYPH SYNC] Cleared {old_tag_count} existing tag definitions")
 
-            # Use tag_order if available, otherwise sort alphabetically
+            # Use tag_order if available, otherwise use cache insertion order (added to end)
             if _tag_order_cache:
                 # Use saved order, but only include tags that still exist
                 tag_names = [t for t in _tag_order_cache if t in _all_tags_cache]
-                # Add any new tags not in order list (at the end, sorted)
-                new_tags = sorted([t for t in _all_tags_cache.keys() if t not in _tag_order_cache])
+                # Add any new tags not in order list (at the end)
+                new_tags = [t for t in _all_tags_cache.keys() if t not in _tag_order_cache]
                 tag_names.extend(new_tags)
             else:
-                tag_names = sorted(_all_tags_cache.keys())
+                # Default: insertion order (added to end)
+                tag_names = list(_all_tags_cache.keys())
 
             for tag_name in tag_names:
                 tag_data = _all_tags_cache[tag_name]
@@ -2065,6 +2074,9 @@ class USERPREF_OT_category_tag_create(Operator):
 
             self.report({'INFO'}, message)
 
+            # Sync to WM to update the UI list immediately
+            sync_glyph_mappings_to_wm()
+
             # Set active index to the new tag
             for i, t in enumerate(context.window_manager.category_tags):
                 if t.name == self.name:
@@ -2114,6 +2126,10 @@ class USERPREF_OT_category_tag_edit(Operator):
         )
         if success:
             self.report({'INFO'}, message)
+
+            # Sync to WM to update the UI list immediately
+            sync_glyph_mappings_to_wm()
+
             context.area.tag_redraw()
             return {'FINISHED'}
         self.report({'ERROR'}, message)
@@ -2157,7 +2173,11 @@ class USERPREF_OT_category_tag_delete(Operator):
 
         success, message = delete_tag(tag_name)
         if success:
+            # Sync to WM to update the UI list immediately
+            sync_glyph_mappings_to_wm()
+
             # Adjust active index if needed
+            tags = wm.category_tags
             if len(tags) > 0:
                 wm.category_tags_active_index = min(active_idx, len(tags) - 1)
             else:
@@ -5735,7 +5755,7 @@ class USERPREF_PT_tags(TagsPanel, Panel):
             "USERPREF_UL_category_tags", "",
             wm, "category_tags",
             wm, "category_tags_active_index",
-            rows=1, maxrows=20
+            rows=25, maxrows=64
         )
 
         # Buttons to the right of list

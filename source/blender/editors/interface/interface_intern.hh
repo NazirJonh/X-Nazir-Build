@@ -802,6 +802,53 @@ struct CategoryDragState {
   void *scroll_timer = nullptr;
 };
 
+/* `interface_tab_categories.cc` */
+
+/**
+ * Check if a category should be visible based on tag filtering and current mode.
+ * Used by category cycling to skip hidden categories.
+ */
+bool panel_category_is_visible_by_tags(const bContext *C,
+                                       const wmWindowManager *wm,
+                                       const char *category);
+
+/**
+ * Get the current object mode as a CategoryTagMode bitmask.
+ */
+uint32_t get_current_tag_mode_flag(const bContext *C);
+
+/**
+ * Check if a ListBase containing category tags appears to be valid.
+ */
+bool category_tag_list_is_valid(const ListBase *list);
+
+/**
+ * Look up tags string for a category from window manager mappings.
+ */
+const char *category_tags_string_lookup(const wmWindowManager *wm, const char *category);
+
+/**
+ * Check if a tag name exists in a semicolon-separated tags string.
+ */
+bool category_has_tag(const char *tags_string, const char *tag_name);
+
+/**
+ * Convert hex glyph code to UTF-8 string.
+ */
+bool tag_glyph_hex_to_utf8(const char *input, char r_utf8[8]);
+
+/**
+ * Get display name for a category tab (from overrides, mappings, or panel types).
+ */
+const char *panel_category_tooltip_name_get(const ARegion *region,
+                                            const wmWindowManager *wm,
+                                            const char *category_idname);
+
+/**
+ * Scroll to show the active category tab when user presses numpad period.
+ */
+int ui_panel_category_show_active_tab(ARegion *region, const int mval[2]);
+
 /* `interface.cc` */
 
 void fontscale(float *points, float aspect);

@@ -174,6 +174,12 @@ _glyph_cache_loaded = False
 # In-memory cache of all tags (tag_name -> {glyph, color})
 _all_tags_cache = {}
 
+# Guard flag to prevent recursive sync calls
+_sync_in_progress = False
+
+# Flag to indicate initial load is complete (callbacks should not save during load)
+_initial_load_complete = False
+
 # Tag order for preserving manual ordering
 _tag_order_cache = []
 
@@ -1317,6 +1323,22 @@ def sync_glyph_mappings_to_wm():
     Note: The collections are cleared in C++ code before file save and after file load
     to prevent crashes from garbage pointers. This function only adds new items.
     """
+    global _glyph_cache, _glyph_cache_loaded, _sync_in_progress
+
+    # Prevent recursive calls
+    if _sync_in_progress:
+        print("[GLYPH SYNC] sync_glyph_mappings_to_wm: sync already in progress, skipping")
+        return False
+
+    _sync_in_progress = True
+    try:
+        return _sync_glyph_mappings_to_wm_impl()
+    finally:
+        _sync_in_progress = False
+
+
+def _sync_glyph_mappings_to_wm_impl():
+    """Implementation of sync_glyph_mappings_to_wm."""
     global _glyph_cache, _glyph_cache_loaded
 
     print(f"[GLYPH SYNC] sync_glyph_mappings_to_wm called, cache has {len(_glyph_cache)} entries")
@@ -1439,7 +1461,10 @@ def sync_glyph_mappings_to_wm():
 
 def register_category_glyph_mappings():
     """Register glyph mappings. Loads from file, discovers addon categories, and syncs to WM."""
-    global _glyph_cache_loaded
+    global _glyph_cache_loaded, _initial_load_complete
+
+    # Reset flag at start of registration
+    _initial_load_complete = False
 
     if not _glyph_cache_loaded:
         _load_glyph_mappings_from_file()
@@ -1451,7 +1476,13 @@ def register_category_glyph_mappings():
         print(f"[GLYPH] Error during category discovery: {e}")
         # Continue even if discovery fails - we can still sync existing categories
 
-    return sync_glyph_mappings_to_wm()
+    result = sync_glyph_mappings_to_wm()
+
+    # Mark initial load as complete - callbacks can now save
+    _initial_load_complete = True
+    print("[GLYPH] Initial load complete, auto-save callbacks enabled")
+
+    return result
 
 
 def sync_wm_to_glyph_cache():
@@ -1460,6 +1491,27 @@ def sync_wm_to_glyph_cache():
     This function reads user changes from category_glyph_overrides and
     category_glyph_mappings in WM and saves them to the JSON file.
     """
+    global _glyph_cache, _all_tags_cache, _sync_in_progress, _initial_load_complete
+
+    # Don't save during initial load
+    if not _initial_load_complete:
+        print("[GLYPH SYNC] sync_wm_to_glyph_cache: initial load not complete, skipping save")
+        return False
+
+    # Prevent recursive calls
+    if _sync_in_progress:
+        print("[GLYPH SYNC] sync_wm_to_glyph_cache: sync already in progress, skipping")
+        return False
+
+    _sync_in_progress = True
+    try:
+        return _sync_wm_to_glyph_cache_impl()
+    finally:
+        _sync_in_progress = False
+
+
+def _sync_wm_to_glyph_cache_impl():
+    """Implementation of sync_wm_to_glyph_cache."""
     global _glyph_cache, _all_tags_cache
 
     try:

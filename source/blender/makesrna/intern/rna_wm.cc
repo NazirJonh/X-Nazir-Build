@@ -48,6 +48,10 @@
 
 #  include "wm_event_system.hh"
 
+#  ifdef WITH_PYTHON
+#    include "BPY_extern_run.hh"
+#  endif
+
 namespace blender {
 
 static const EnumPropertyItem event_mouse_type_items[] = {
@@ -659,6 +663,7 @@ const EnumPropertyItem rna_enum_wm_report_items[] = {
 
 #  ifdef WITH_PYTHON
 #    include "BPY_extern.hh"
+#    include "BPY_extern_run.hh"
 #  endif
 
 namespace blender {
@@ -2352,6 +2357,20 @@ static void rna_KeyMapItem_update(Main * /*bmain*/, Scene * /*scene*/, PointerRN
   WM_keyconfig_update_tag(nullptr, kmi);
 }
 
+/* Update callback for CategoryTagDef properties - saves to JSON on change. */
+static void rna_CategoryTagDef_update(bContext *C, PointerRNA * /*ptr*/)
+{
+#  ifdef WITH_PYTHON
+  const char *imports[] = {"bpy", nullptr};
+  const char *save_cmd =
+      "from bl_ui.space_userpref import sync_wm_to_glyph_cache\n"
+      "sync_wm_to_glyph_cache()\n";
+  BPY_run_string_exec(C, imports, save_cmd);
+#  else
+  (void)C;
+#  endif
+}
+
 }  // namespace blender
 
 #else /* RNA_RUNTIME */
@@ -3166,12 +3185,14 @@ static void rna_def_category_tag_def(BlenderRNA *brna)
   prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "name");
   RNA_def_property_ui_text(prop, "Name", "Tag name");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
 
   prop = RNA_def_property(srna, "glyph", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "glyph");
   RNA_def_property_ui_text(prop, "Glyph", "UTF-8 glyph character or hex code-point");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
 
   prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_float_sdna(prop, nullptr, "color");
@@ -3179,13 +3200,15 @@ static void rna_def_category_tag_def(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_float_default(prop, 0.0f);
   RNA_def_property_ui_text(prop, "Color", "Tag color (black = use theme color)");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
 
-  // NEW: Mode flags for filtering
+  /* Mode flags for filtering */
   prop = RNA_def_property(srna, "mode_flags", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "mode_flags");
   RNA_def_property_ui_text(prop, "Mode Flags", "Bitmask of modes where this tag is active (0 = all modes)");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
 }
 
 static void rna_def_category_glyph_mappings(BlenderRNA *brna, PropertyRNA *cprop)

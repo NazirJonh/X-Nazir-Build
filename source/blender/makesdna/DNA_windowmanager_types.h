@@ -126,8 +126,8 @@ typedef struct CategoryGlyphItem {
   char default_glyph[8];
   /** Default display name for reset functionality. */
   char default_display_name[32];
-  /** Tags assigned to this category (semicolon-separated, e.g., "tag1;tag2"). */
-  char tags[32];
+  /** Tags assigned to this category (semicolon-separated). Synced from Python for UI display only. */
+  char tags[256];
   char _pad[4];
 } CategoryGlyphItem;
 

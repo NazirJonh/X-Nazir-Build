@@ -925,10 +925,10 @@ def toggle_category_tag_no_save(category, tag_name):
 
 
 def update_category_tags_in_wm(category):
-    """Update the tags for a category in WM category_glyph_overrides.
+    """Update the tags for a category in WM for UI display.
     
-    This ensures that changes to tags in _glyph_cache are reflected in WM
-    so that sync_wm_to_glyph_cache can save them to JSON.
+    Tags are stored in _glyph_cache and JSON for persistence.
+    They are also synced to WM category_glyph_overrides for C++ UI display.
     """
     try:
         wm = bpy.context.window_manager
@@ -936,11 +936,9 @@ def update_category_tags_in_wm(category):
             tag_log(f"update_category_tags_in_wm: WM or overrides not available", "ERROR")
             return
         
-        # Get current tags from cache
         current_tags = get_category_tags(category)
         tag_log(f"update_category_tags_in_wm: category='{category}', tags={current_tags}")
         
-        # Find or create override entry for this category
         override_item = None
         for item in wm.category_glyph_overrides:
             if item.category == category:
@@ -951,7 +949,6 @@ def update_category_tags_in_wm(category):
             override_item = wm.category_glyph_overrides.new(category=category)
             tag_log(f"update_category_tags_in_wm: Created new override for '{category}'")
         
-        # Update tags in override (semicolon-separated string)
         if hasattr(override_item, 'tags'):
             override_item.tags = ";".join(current_tags)
             tag_log(f"update_category_tags_in_wm: Set WM override tags for '{category}' to '{override_item.tags}'")
@@ -1515,13 +1512,13 @@ def _sync_glyph_mappings_to_wm_impl():
                     item.color = (color_val[0], color_val[1], color_val[2])
                     item.default_glyph = default_glyph_val
                     item.default_display_name = default_display_name_val
-                    if hasattr(item, "tags"):
-                        if isinstance(tags_val, (list, tuple)):
-                            item.tags = ";".join([t for t in tags_val if isinstance(t, str) and t])
-                        elif isinstance(tags_val, str):
-                            item.tags = tags_val
-                        else:
-                            item.tags = ""
+                    # Sync tags to WM for UI display (semicolon-separated string)
+                    if hasattr(item, "tags") and isinstance(tags_val, (list, tuple)):
+                        tags_str = ";".join([t for t in tags_val if isinstance(t, str) and t])
+                        item.tags = tags_str
+                        # Debug: log categories with tags
+                        if tags_str:
+                            print(f"[GLYPH SYNC] Synced tags for category repr={repr(category)}, len={len(category)}, ord={[ord(c) for c in category]}, tags='{tags_str}'")
                     added_count += 1
 
                     # Debug: show what was synced for key categories
@@ -1647,12 +1644,8 @@ def _sync_wm_to_glyph_cache_impl():
                     cached_entry["color"] = item_color
                     changes_detected = True
 
-                if hasattr(item, "tags"):
-                    tags_str = item.tags or ""
-                    tags_list = [t for t in tags_str.split(";") if t]
-                    if cached_entry.get("tags", []) != tags_list:
-                        cached_entry["tags"] = tags_list
-                        changes_detected = True
+                # Tags are NOT synced from WM to cache to avoid truncation issues
+                # Tags are stored only in _glyph_cache and JSON
 
                 # Also sync default values
                 if hasattr(item, 'default_glyph') and item.default_glyph:
@@ -1709,7 +1702,7 @@ def _sync_wm_to_glyph_cache_impl():
                         continue
 
                     overrides_count += 1
-                    print(f"[GLYPH SYNC] Override found: category='{category}', glyph='{item.glyph}', display_name='{item.display_name}', color={list(item.color[:3])}, tags='{item.tags}'")
+                    print(f"[GLYPH SYNC] Override found: category='{category}', glyph='{item.glyph}', display_name='{item.display_name}', color={list(item.color[:3])}")
 
                     # Get current cached data or create new entry
                     if category not in _glyph_cache:
@@ -1737,17 +1730,8 @@ def _sync_wm_to_glyph_cache_impl():
                         changes_detected = True
                         print(f"[GLYPH SYNC] Updated color for '{category}' to {item_color}")
 
-                    # Sync tags from override (semicolon-separated string -> list)
-                    if hasattr(item, "tags"):
-                        tags_str = item.tags or ""
-                        tags_list = [t.strip() for t in tags_str.split(";") if t.strip()]
-                        print(f"[GLYPH SYNC] Processing tags for '{category}': WM tags='{tags_str}' -> list={tags_list}, cache tags={cached_entry.get('tags', [])}")
-                        if cached_entry.get("tags", []) != tags_list:
-                            cached_entry["tags"] = tags_list
-                            changes_detected = True
-                            print(f"[GLYPH SYNC] Updated tags for '{category}': {tags_list}")
-                        else:
-                            print(f"[GLYPH SYNC] Tags unchanged for '{category}'")
+                    # Tags are NOT synced from WM to cache to avoid truncation issues
+                    # Tags are stored only in _glyph_cache and JSON
 
                 print(f"[GLYPH SYNC] Processed {overrides_count} items from category_glyph_overrides")
             except Exception as e:
@@ -1838,13 +1822,13 @@ def _sync_mode_flags_from_wm_to_cache():
     This captures UI changes to mode checkboxes before saving."""
     global _all_tags_cache
     try:
-        # Get Python tag collection
-        tags_collection = get_tags_collection()
-        for tag_item in tags_collection:
+        wm = bpy.context.window_manager
+        if not wm or not hasattr(wm, 'category_tags'):
+            return
+        for tag_item in wm.category_tags:
             tag_name = tag_item.name
             if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
-                # Update mode_flags from Python CategoryTagItem
-                _all_tags_cache[tag_name]["mode_flags"] = tag_item.get_mode_flags()
+                _all_tags_cache[tag_name]["mode_flags"] = tag_item.mode_flags
     except Exception as e:
         print(f"[GLYPH] Error syncing mode flags: {e}")
 

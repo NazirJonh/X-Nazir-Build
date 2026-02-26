@@ -7041,7 +7041,6 @@ static void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
     STRNCPY(item->display_name, original_display_name);
     STRNCPY(item->glyph, original_glyph);
     copy_v3_v3(item->color, original_color);
-    /* Restore original tags */
     STRNCPY(item->tags, original_tags);
   }
   else {
@@ -7394,9 +7393,6 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
   const char *default_glyph = blender::ui::panel_category_glyph_lookup(
       wm, category, nullptr, &is_fallback, nullptr);
 
-  printf("[GLYPH PREVIEW] category='%s', user_glyph='%s', default_glyph='%s', is_fallback=%d\n",
-         category, glyph, default_glyph ? default_glyph : "(null)", is_fallback);
-
   /* Update preview buffers for popup preview.
    * Use the processed glyph from valid input, or fall back to default lookup.
    * Invalid input shows the default glyph (not the invalid text).
@@ -7414,8 +7410,6 @@ static void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*ev
   else {
     category_tab_preview_glyph[0] = '\0';
   }
-
-  printf("[GLYPH PREVIEW] preview_glyph='%s'\n", category_tab_preview_glyph);
 
   CategoryGlyphItem *item = nullptr;
 
@@ -7822,6 +7816,7 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
 
           /* Create colored glyph label */
           ui::Block *block = glyphs_row.block();
+          ui::block_layout_set_current(block, &glyphs_row);
           ui::Button *glyph_but = uiDefBut(
               block, ui::ButtonType::Label, tag_glyph, 0, 0, UI_UNIT_X, UI_UNIT_Y, nullptr, 0, 0, std::nullopt);
 
@@ -7937,6 +7932,7 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
           }
 
           ui::Block *block = tag_item.block();
+          ui::block_layout_set_current(block, &tag_item);
           wmOperatorType *ot = WM_operatortype_find("wm.category_tag_toggle", false);
 
           /* 1. Small checkbox toggle (no text) */
@@ -8169,10 +8165,6 @@ static wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   }
 
   /* Save original values for cancel functionality */
-  RNA_string_get(op->ptr, "display_name", current_display_name);
-  RNA_string_get(op->ptr, "glyph", current_glyph);
-  RNA_float_get_array(op->ptr, "color", current_color);
-
   RNA_string_set(op->ptr, "original_display_name", current_display_name);
   RNA_string_set(op->ptr, "original_glyph", current_glyph);
   RNA_float_set_array(op->ptr, "original_color", current_color);
@@ -8446,8 +8438,6 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   float default_color[3] = {0.0f, 0.0f, 0.0f};
   CategoryGlyphItem *mapping_item = nullptr;
 
-  /* Read default values from category_glyph_mappings */
-  printf("[GLYPH RESET C++] Reading default values from WM mappings...\n");
   if (wm->category_glyph_mappings.first != nullptr) {
     for (CategoryGlyphItem *item =
              static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
@@ -8456,19 +8446,9 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     {
       if (STREQ(item->category, category)) {
         mapping_item = item;
-        printf("[GLYPH RESET C++] Found mapping for '%s': glyph='%s', display_name='%s', "
-               "default_glyph='%s', default_display_name='%s'\n",
-               category,
-               item->glyph,
-               item->display_name,
-               item->default_glyph,
-               item->default_display_name);
 
-        /* For glyph-named categories, the category itself IS the default glyph.
-         * Ignore stored default_glyph as it may be incorrect from previous versions. */
         if (is_single_glyph_str(category)) {
           default_glyph = category;
-          printf("[GLYPH RESET C++] Category is a glyph, using category as default_glyph\n");
         }
         else {
           /* Use default_glyph if available, otherwise use current glyph */
@@ -8487,18 +8467,7 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
       }
     }
   }
-  else {
-    printf("[GLYPH RESET C++] WM mappings is empty!\n");
-  }
 
-  printf("[GLYPH RESET C++] Final values: glyph='%s', display_name='%s'\n",
-         default_glyph ? default_glyph : "(null)",
-         default_display_name ? default_display_name : "(null)");
-
-  /* NOTE: We do NOT remove override here. Reset only updates the dialog UI properties.
-   * Changes will be applied only when user clicks Save. */
-
-  /* Update dialog operator properties to reflect defaults in UI */
   if (category_tab_current_dialog_op) {
     /* Use stored default_display_name if available, otherwise find appropriate name */
     if (default_display_name != nullptr && default_display_name[0] != '\0') {
@@ -8509,8 +8478,6 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
       if (is_single_glyph_str(category)) {
         ARegion *region = CTX_wm_region(C);
         const char *panel_label = find_panel_label_for_category(region, category);
-        printf("[GLYPH RESET C++] Looking for panel label for glyph category '%s': %s\n",
-               category, panel_label ? panel_label : "(not found)");
         if (panel_label) {
           RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", panel_label);
         }
@@ -8561,7 +8528,7 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     STRNCPY(reset_item->category, category);
     BLI_addtail(&wm->category_glyph_overrides, reset_item);
   }
-  /* Set empty tags - this will clear tags in UI */
+  /* Clear tags in WM override - this updates UI to show no tags selected */
   reset_item->tags[0] = '\0';
 
   /* Force redraw of the popup to update tag UI */
@@ -8804,13 +8771,9 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
   }
   
   if (category[0] == '\0') {
-    printf("[GLYPH SAVE C++] ERROR: No category found!\n");
     return OPERATOR_CANCELLED;
   }
-  
-  printf("[GLYPH SAVE C++] Starting save for category: '%s'\n", category);
 
-  /* Sync tags from Python cache to WM override, then save everything to JSON */
 #ifdef WITH_PYTHON
   /* Store category in WM property (UTF-8 safe via RNA) */
   wmWindowManager *wm = CTX_wm_manager(C);
@@ -8819,9 +8782,6 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
     RNA_string_set(&wm_ptr, "category_tab_save_category", category);
   }
 
-  printf("[GLYPH SAVE C++] WITH_PYTHON defined, starting Python sync\n");
-
-  /* Simple Python call - category read from WM property (UTF-8 safe) */
   const char *imports[] = {"bpy", nullptr};
   const char *save_cmd =
       "from bl_ui.space_userpref import update_category_tags_in_wm, get_category_tags, sync_wm_to_glyph_cache\n"
@@ -8838,27 +8798,17 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
       "    result = sync_wm_to_glyph_cache()\n"
       "    print(f'[GLYPH SAVE PY] sync_wm_to_glyph_cache returned: {result}')\n"
       "else:\n"
-      "    print('[GLYPH SAVE PY] ERROR: No category found in WM property')\n";
+"    print('[GLYPH SAVE PY] ERROR: No category found in WM property')\n";
 
-  printf("[GLYPH SAVE C++] Running save_cmd...\n");
-  int result = BPY_run_string_exec(C, imports, save_cmd);
-  printf("[GLYPH SAVE C++] save_cmd returned %d\n", result);
-  printf("[GLYPH SAVE C++] Save completed\n");
-#else
-  printf("[GLYPH SAVE C++] WITH_PYTHON NOT defined!\n");
+  BPY_run_string_exec(C, imports, save_cmd);
 #endif
 
-  /* Set return value to OK using public API - this will trigger popup close */
   ui::popup_menu_retval_set(category_tab_popup_block, ui::RETURN_OK, true);
 
-  /* Get window and close popup */
   wmWindow *win = CTX_wm_window(C);
   ui::popup_block_close(C, win, category_tab_popup_block);
 
-  /* Show success message */
   BKE_report(op->reports, RPT_INFO, "Category tab settings saved");
-  
-  printf("[GLYPH SAVE C++] Popup closed, save finished\n");
 
   return OPERATOR_FINISHED;
 }

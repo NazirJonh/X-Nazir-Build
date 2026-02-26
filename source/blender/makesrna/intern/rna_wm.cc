@@ -3170,7 +3170,7 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "tags", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "tags");
-  RNA_def_property_ui_text(prop, "Tags", "Semicolon-separated tag names assigned to this category");
+  RNA_def_property_ui_text(prop, "Tags", "Semicolon-separated tag names (synced from Python for UI display)");
   RNA_def_property_update(prop, NC_WINDOW, nullptr);
 }
 

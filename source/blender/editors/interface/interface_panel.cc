@@ -1672,7 +1672,6 @@ static const char *category_tags_string_lookup(const wmWindowManager *wm, const 
     return "";
   }
 
-  /* First check overrides - user changes take precedence */
   if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
@@ -1685,7 +1684,6 @@ static const char *category_tags_string_lookup(const wmWindowManager *wm, const 
     }
   }
 
-  /* Tags are stored in category_glyph_mappings (default mappings from JSON) */
   if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
@@ -1697,6 +1695,7 @@ static const char *category_tags_string_lookup(const wmWindowManager *wm, const 
       }
     }
   }
+  return "";
   return "";
 }
 
@@ -4033,6 +4032,7 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm,
   if (wm == nullptr || category == nullptr) {
     return {};
   }
+
   if (!category_tag_list_is_valid(&wm->category_tags)) {
     return {};
   }
@@ -4048,24 +4048,20 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm,
     }
 
     /* Apply filter logic:
-     * - Both off: only tags with mode_flags == 0 (all modes)
+     * - Both off: show all tags (default behavior)
      * - show_all_modes on: show all tags
      * - current_mode on: tags for current mode (mode_flags == 0 || mode_flags & current_mode_flag)
      * - Both on: combined (union of both conditions)
      */
     bool include_tag = false;
 
-    if (filter_show_all_modes) {
-      /* Show all tags */
+    if (filter_show_all_modes || !filter_current_mode) {
+      /* Show all tags (default when both filters are off, or when show_all_modes is on) */
       include_tag = true;
     }
-    else if (filter_current_mode) {
+    else {
       /* Show tags for current mode or all modes */
       include_tag = (tag->mode_flags == 0) || (tag->mode_flags & current_mode_flag);
-    }
-    else {
-      /* Default: only tags without mode restriction (all modes) */
-      include_tag = (tag->mode_flags == 0);
     }
 
     if (!include_tag) {

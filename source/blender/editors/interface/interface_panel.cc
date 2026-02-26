@@ -2286,30 +2286,30 @@ static int count_reserved_tabs_at_start(const wmWindowManager *wm, ARegion *regi
 /**
  * Get the current object mode as a CategoryTagMode bitmask.
  */
-static CategoryTagMode get_current_tag_mode(const bContext *C)
+uint32_t get_current_tag_mode_flag(const bContext *C)
 {
   Object *ob = CTX_data_active_object(C);
   if (!ob) {
-    return CategoryTagMode::OBJECT_MODE;
+    return static_cast<uint32_t>(CategoryTagMode::OBJECT_MODE);
   }
 
   switch (ob->mode) {
     case OB_MODE_OBJECT:
-      return CategoryTagMode::OBJECT_MODE;
+      return static_cast<uint32_t>(CategoryTagMode::OBJECT_MODE);
     case OB_MODE_EDIT:
-      return CategoryTagMode::EDIT_MODE;
+      return static_cast<uint32_t>(CategoryTagMode::EDIT_MODE);
     case OB_MODE_SCULPT:
-      return CategoryTagMode::SCULPT_MODE;
+      return static_cast<uint32_t>(CategoryTagMode::SCULPT_MODE);
     case OB_MODE_VERTEX_PAINT:
-      return CategoryTagMode::VERTEX_PAINT;
+      return static_cast<uint32_t>(CategoryTagMode::VERTEX_PAINT);
     case OB_MODE_WEIGHT_PAINT:
-      return CategoryTagMode::WEIGHT_PAINT;
+      return static_cast<uint32_t>(CategoryTagMode::WEIGHT_PAINT);
     case OB_MODE_TEXTURE_PAINT:
-      return CategoryTagMode::TEXTURE_PAINT;
+      return static_cast<uint32_t>(CategoryTagMode::TEXTURE_PAINT);
     case OB_MODE_POSE:
-      return CategoryTagMode::POSE_MODE;
+      return static_cast<uint32_t>(CategoryTagMode::POSE_MODE);
     default:
-      return CategoryTagMode::OBJECT_MODE;
+      return static_cast<uint32_t>(CategoryTagMode::OBJECT_MODE);
   }
 }
 
@@ -2337,8 +2337,7 @@ static bool panel_category_is_visible_by_tags(const bContext *C,
   }
 
   /* Get current mode */
-  CategoryTagMode current_mode = get_current_tag_mode(C);
-  uint32_t current_mode_flag = static_cast<uint32_t>(current_mode);
+  uint32_t current_mode_flag = get_current_tag_mode_flag(C);
 
   /* Parse semicolon-separated tags and check if any is active in current mode */
   char tag_name[64];
@@ -4025,7 +4024,11 @@ LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int
   return nullptr;
 }
 
-std::string get_tags_for_category_ui(const wmWindowManager *wm, const char *category)
+std::string get_tags_for_category_ui(const wmWindowManager *wm,
+                                      const char *category,
+                                      bool filter_show_all_modes,
+                                      bool filter_current_mode,
+                                      uint32_t current_mode_flag)
 {
   if (wm == nullptr || category == nullptr) {
     return {};
@@ -4041,6 +4044,31 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm, const char *cate
        tag = static_cast<const CategoryTagDef *>(tag->next))
   {
     if (tag->name[0] == '\0') {
+      continue;
+    }
+
+    /* Apply filter logic:
+     * - Both off: only tags with mode_flags == 0 (all modes)
+     * - show_all_modes on: show all tags
+     * - current_mode on: tags for current mode (mode_flags == 0 || mode_flags & current_mode_flag)
+     * - Both on: combined (union of both conditions)
+     */
+    bool include_tag = false;
+
+    if (filter_show_all_modes) {
+      /* Show all tags */
+      include_tag = true;
+    }
+    else if (filter_current_mode) {
+      /* Show tags for current mode or all modes */
+      include_tag = (tag->mode_flags == 0) || (tag->mode_flags & current_mode_flag);
+    }
+    else {
+      /* Default: only tags without mode restriction (all modes) */
+      include_tag = (tag->mode_flags == 0);
+    }
+
+    if (!include_tag) {
       continue;
     }
 

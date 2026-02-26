@@ -963,6 +963,85 @@ def update_category_tags_in_wm(category):
         traceback.print_exc()
 
 
+def get_categories_for_tag(tag_name):
+    """Get a list of all categories that use a specific tag."""
+    global _glyph_cache, _glyph_cache_loaded
+    
+    # Ensure cache is loaded
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+        
+    categories = []
+    for cat_name, cat_data in _glyph_cache.items():
+        if isinstance(cat_data, dict) and tag_name in cat_data.get("tags", []):
+            categories.append(cat_name)
+    return sorted(categories)
+
+
+def get_category_display_name(category):
+    """Get the display name for a category (user-defined or default)."""
+    global _glyph_cache, _glyph_cache_loaded
+    
+    # Ensure cache is loaded
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+        
+    if category in _glyph_cache:
+        cat_data = _glyph_cache[category]
+        if isinstance(cat_data, dict):
+            # 1. User defined display name
+            display_name = cat_data.get("display_name", "")
+            if display_name:
+                return display_name
+            # 2. Default display name
+            default_name = cat_data.get("default_display_name", "")
+            if default_name:
+                return default_name
+    # 3. Fallback to ID
+    return category
+
+
+def get_category_glyph_data(category):
+    """Get glyph, color, and display name for a category."""
+    global _glyph_cache, _glyph_cache_loaded
+    
+    # Ensure cache is loaded
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+        
+    if category in _glyph_cache:
+        cat_data = _glyph_cache[category]
+        if isinstance(cat_data, str):
+            # Old format - just glyph
+            return cat_data, [0.0, 0.0, 0.0], category
+        elif isinstance(cat_data, dict):
+            glyph = cat_data.get("glyph", "")
+            color = cat_data.get("color", [0.0, 0.0, 0.0])
+            display_name = cat_data.get("display_name", "") or cat_data.get("default_display_name", "") or category
+            return glyph, color, display_name
+            
+    return "", [0.0, 0.0, 0.0], category
+
+
+class USERPREF_OT_category_tag_remove_from_category(Operator):
+    """Remove this tag from a specific category"""
+    bl_idname = "wm.category_tag_remove_from_category"
+    bl_label = "Remove Tag from Category"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    category: bpy.props.StringProperty(name="Category")
+    tag_name: bpy.props.StringProperty(name="Tag")
+
+    def execute(self, context):
+        success, message = remove_category_tag(self.category, self.tag_name, auto_save=True)
+        if success:
+            self.report({'INFO'}, message)
+            context.area.tag_redraw()
+            return {'FINISHED'}
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+
 # -----------------------------------------------------------------------------
 # Category Filtering by Tags
 
@@ -5513,12 +5592,15 @@ class USERPREF_UL_category_tags(UIList):
     def draw_item(self, context, layout, _data, item, _icon, _active_data, _active_propname, _index):
         tag = item
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
-            # Use split to ensure consistent alignment of name column
-            row = layout.split(factor=0.1, align=True)
-            # Left: Glyph with fixed width
+            # Use a split with a fixed factor to separate glyph and name
+            # factor=0.15 gives enough space for the glyph even when resized
+            split = layout.split(factor=0.15, align=True)
+            
+            # Left: Glyph (fixed relative width)
+            col_glyph = split.column()
             if tag.glyph:
                 glyph_char = _hex_to_glyph(tag.glyph)
-                row.colored_label(
+                col_glyph.colored_label(
                     text=glyph_char,
                     icon='NONE',
                     color_r=tag.color[0],
@@ -5526,9 +5608,11 @@ class USERPREF_UL_category_tags(UIList):
                     color_b=tag.color[2]
                 )
             else:
-                row.label(text="", icon='DOT')
-            # Right: Name (aligned to left edge of its column)
-            row.label(text=tag.name, translate=False)
+                col_glyph.label(text="", icon='DOT')
+            
+            # Right: Name (will be truncated if not enough space)
+            col_name = split.column()
+            col_name.label(text=tag.name, translate=False)
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
             if tag.glyph:
@@ -5701,25 +5785,32 @@ class USERPREF_PT_tag_mode_filter_popover(Panel):
         tag_name = wm.category_tags[idx].name
         mode_flags = _get_mode_flags_for_tag(tag_name)
 
-        # Mode definitions: (bit, label, icon_off, icon_on)
+        # Mode definitions: (bit, label, mode_icon)
         modes = [
-            (0, "Object Mode", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
-            (1, "Edit Mode", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
-            (2, "Sculpt Mode", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
-            (3, "Vertex Paint", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
-            (4, "Weight Paint", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
-            (5, "Texture Paint", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
-            (6, "UV Edit", 'CHECKBOX_DEHLT', 'CHECKBOX_HLT'),
+            (0, "Object Mode", 'OBJECT_DATAMODE'),
+            (1, "Edit Mode", 'EDITMODE_HLT'),
+            (2, "Sculpt Mode", 'SCULPTMODE_HLT'),
+            (3, "Vertex Paint", 'VPAINT_HLT'),
+            (4, "Weight Paint", 'WPAINT_HLT'),
+            (5, "Texture Paint", 'TPAINT_HLT'),
+            (6, "UV Edit", 'UV'),
         ]
 
         mode_keys = ['OBJECT', 'EDIT', 'SCULPT', 'VERTEX_PAINT', 'WEIGHT_PAINT', 'TEXTURE_PAINT', 'UV_EDIT']
 
-        col = layout.column()
-        for i, (bit, label, icon_off, icon_on) in enumerate(modes):
+        col = layout.column(align=True)
+        for i, (bit, label, mode_icon) in enumerate(modes):
             is_active = bool(mode_flags & (1 << bit))
-            icon = icon_on if is_active else icon_off
-            op = col.operator("userpref.tag_mode_toggle", text=label, icon=icon)
-            op.mode = mode_keys[i]
+            check_icon = 'CHECKBOX_HLT' if is_active else 'CHECKBOX_DEHLT'
+            
+            row = col.row(align=True)
+            # Left part: Checkbox icon
+            op_check = row.operator("userpref.tag_mode_toggle", text="", icon=check_icon, emboss=False)
+            op_check.mode = mode_keys[i]
+            
+            # Right part: Mode icon and label
+            op_label = row.operator("userpref.tag_mode_toggle", text=label, icon=mode_icon, emboss=False)
+            op_label.mode = mode_keys[i]
 
         # Quick buttons
         row = layout.row()
@@ -5755,7 +5846,7 @@ class USERPREF_PT_tags(TagsPanel, Panel):
             "USERPREF_UL_category_tags", "",
             wm, "category_tags",
             wm, "category_tags_active_index",
-            rows=25, maxrows=64
+            rows=22, maxrows=64
         )
 
         # Buttons to the right of list
@@ -5805,7 +5896,74 @@ class USERPREF_PT_tags(TagsPanel, Panel):
             # Filter Mode button
             row = box.row()
             row.label(text="Filter Mode:")
+            
+            # Show active mode icons at a glance
+            m_flags = _get_mode_flags_for_tag(tag.name)
+            m_icons = [
+                (0, 'OBJECT_DATAMODE'),
+                (1, 'EDITMODE_HLT'),
+                (2, 'SCULPTMODE_HLT'),
+                (3, 'VPAINT_HLT'),
+                (4, 'WPAINT_HLT'),
+                (5, 'TPAINT_HLT'),
+                (6, 'UV'),
+            ]
+            
+            icon_row = row.row(align=True)
+            any_mode = False
+            for bit, m_icon in m_icons:
+                if m_flags & (1 << bit):
+                    icon_row.label(text="", icon=m_icon)
+                    any_mode = True
+            
+            if not any_mode:
+                icon_row.label(text="", icon='RESTRICT_SELECT_ON')
+
             row.popover("USERPREF_PT_tag_mode_filter_popover", text="", icon='TRIA_DOWN')
+
+            # Categories using this tag
+            col_right.separator()
+            col_right.label(text="Categories using this tag:", icon='FILE_PARENT')
+            
+            cats_box = col_right.box()
+            categories = get_categories_for_tag(tag.name)
+            
+            if categories:
+                # Use automatic columns (columns=0) but force each item to be compact
+                cats_flow = cats_box.grid_flow(row_major=True, columns=0, even_columns=False, even_rows=False, align=False)
+                
+                for cat in categories:
+                    # Create an aligned row inside the flow to prevent the box from stretching
+                    item_row = cats_flow.row()
+                    item_row.alignment = 'LEFT'
+                    
+                    # Create a box for each category to look like a "chip"
+                    tag_box = item_row.box()
+                    # Each "chip" (glyph + name + X) is in its own aligned row within the box
+                    row = tag_box.row(align=True)
+                    
+                    # Get all visual data for the category
+                    glyph, color, display_name = get_category_glyph_data(cat)
+                    
+                    # Glyph with its color
+                    if glyph:
+                        row.colored_label(
+                            text=glyph,
+                            icon='NONE',
+                            color_r=color[0],
+                            color_g=color[1],
+                            color_b=color[2]
+                        )
+                        
+                    # Category name as a simple label (not clickable)
+                    row.label(text=display_name, translate=False)
+                    
+                    # Only 'X' icon is an active operator button
+                    op_x = row.operator("wm.category_tag_remove_from_category", text="", icon='X', emboss=False)
+                    op_x.category = cat
+                    op_x.tag_name = tag.name
+            else:
+                cats_box.label(text="No categories using this tag", icon='INFO')
 
         else:
             # No tag selected or list is empty
@@ -5946,6 +6104,7 @@ classes = (
     USERPREF_OT_tag_mode_toggle,
     USERPREF_OT_tag_mode_select_all,
     USERPREF_OT_tag_mode_select_none,
+    USERPREF_OT_category_tag_remove_from_category,
 
     USERPREF_PT_experimental_new_features,
     USERPREF_PT_experimental_prototypes,

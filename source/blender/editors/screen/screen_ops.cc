@@ -6934,6 +6934,55 @@ static wmOperator *category_tab_current_dialog_op = nullptr;
 /* Static pointer to popup block - needed for Save button to close popup */
 static ui::Block *category_tab_popup_block = nullptr;
 
+/**
+ * Draw function for category tag filter menu.
+ */
+static void category_tag_filter_menu_draw(const bContext *C, Menu *menu)
+{
+  ui::Layout &layout = *menu->layout;
+  wmWindowManager *wm = CTX_wm_manager(C);
+
+  layout.label(IFACE_("Filter Tags"), ICON_NONE);
+  layout.separator();
+
+  PointerRNA wm_ptr = RNA_pointer_create_discrete(&wm->id, RNA_WindowManager, wm);
+  layout.prop(&wm_ptr, "category_tag_filter_show_all_modes", UI_ITEM_NONE, IFACE_("All Modes"), ICON_NONE);
+  layout.prop(&wm_ptr, "category_tag_filter_current_mode", UI_ITEM_NONE, IFACE_("Current Mode"), ICON_NONE);
+}
+
+/**
+ * Poll function for category tag filter menu.
+ */
+static bool category_tag_filter_menu_poll(const bContext *C, MenuType * /*mt*/)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  return wm != nullptr;
+}
+
+/**
+ * Register the category tag filter menu type.
+ * Called once during screen initialization.
+ */
+static MenuType *category_tag_filter_menu_type = nullptr;
+
+static void category_tag_filter_menu_register()
+{
+  if (category_tag_filter_menu_type != nullptr) {
+    return;  /* Already registered */
+  }
+
+  MenuType *mt = MEM_new_zeroed<MenuType>(__func__);
+  STRNCPY_UTF8(mt->idname, "SCREEN_MT_category_tag_filter");
+  STRNCPY_UTF8(mt->label, N_("Filter Tags"));
+  STRNCPY_UTF8(mt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  mt->description = N_("Filter tags by mode in category tab popup");
+  mt->poll = category_tag_filter_menu_poll;
+  mt->draw = category_tag_filter_menu_draw;
+
+  WM_menutype_add(mt);
+  category_tag_filter_menu_type = mt;
+}
+
 static bool category_tab_edit_poll(bContext *C)
 {
   if (U.category_tabs_allow_edit) {
@@ -7695,7 +7744,13 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
   layout.separator();
 
   /* Tags section in a sub-panel - only show for non-reserved categories */
-  const std::string tags_data = blender::ui::get_tags_for_category_ui(wm, category);
+  /* Get filter settings from window manager */
+  const bool filter_show_all_modes = wm->category_tag_filter_show_all_modes;
+  const bool filter_current_mode = wm->category_tag_filter_current_mode;
+  const uint32_t current_mode_flag = blender::ui::get_current_tag_mode_flag(C);
+
+  const std::string tags_data = blender::ui::get_tags_for_category_ui(
+      wm, category, filter_show_all_modes, filter_current_mode, current_mode_flag);
 
   /* Don't show tags panel for reserved categories */
   if (!is_reserved) {
@@ -7796,6 +7851,13 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
     RNA_string_set(&new_tag_ptr, "name", "");
     RNA_string_set(&new_tag_ptr, "category", category);
 
+    header_row.separator();
+
+    /* Filter menu - toggle visibility of tags by mode */
+    header_row.menu("SCREEN_MT_category_tag_filter", "", ICON_FILTER);
+
+    header_row.separator();
+
     /* Button to open Preferences in Tags section */
     PointerRNA prefs_ptr = header_row.op("SCREEN_OT_userpref_show", "", ICON_PREFERENCES);
     RNA_enum_set(&prefs_ptr, "section", USER_SECTION_TAGS);
@@ -7809,7 +7871,7 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
       centered_row.alignment_set(ui::LayoutAlign::Center);
 //GridTags 
       /* Use grid_flow for automatic column wrapping (max 3 columns, row-major) */ 
-      ui::Layout &tags_grid = centered_row.grid_flow(true, 3, true, false, true);
+      ui::Layout &tags_grid = centered_row.grid_flow(true, 3, true, false, false);
 
       const char *cursor = tags_data.c_str();
       char tag_name[64];
@@ -7920,7 +7982,7 @@ static ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, v
                    IFACE_(tag_name),
                    0,
                    0,
-                   UI_UNIT_X * 5,
+                   UI_UNIT_X * 4,
                    UI_UNIT_Y,
                    nullptr,
                    0,
@@ -9286,6 +9348,9 @@ void ED_operatortypes_screen()
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_save);
   WM_operatortype_append(SCREEN_OT_category_tab_reset);
   WM_operatortype_append(SCREEN_OT_category_tab_paste_glyph);
+
+  /* Register menu types. */
+  category_tag_filter_menu_register();
 }
 
 /** \} */

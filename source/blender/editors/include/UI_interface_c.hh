@@ -2559,7 +2559,16 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
                                         bool *r_is_fallback_letter,
                                         float r_color[3]);
 
-std::string get_tags_for_category_ui(const wmWindowManager *wm, const char *category);
+std::string get_tags_for_category_ui(const wmWindowManager *wm,
+                                      const char *category,
+                                      bool filter_show_all_modes,
+                                      bool filter_current_mode,
+                                      uint32_t current_mode_flag);
+
+/**
+ * Get the current object mode as a CategoryTagMode bitmask.
+ */
+uint32_t get_current_tag_mode_flag(const bContext *C);
 
 /**
  * Check if a category is reserved (from DEFAULT_CATEGORY_GLYPHS).

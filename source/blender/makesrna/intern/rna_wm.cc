@@ -3365,6 +3365,18 @@ static void rna_def_windowmanager(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Active Tag", "Index of the active tag in the list");
   RNA_def_property_update(prop, NC_WINDOW, nullptr);
 
+  prop = RNA_def_property(srna, "category_tag_filter_show_all_modes", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tag_filter_show_all_modes", 1);
+  RNA_def_property_ui_text(
+      prop, "Show All Modes", "Show tags for all modes in the category tab popup");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
+  prop = RNA_def_property(srna, "category_tag_filter_current_mode", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tag_filter_current_mode", 1);
+  RNA_def_property_ui_text(
+      prop, "Show Current Mode", "Show tags for the current mode in the category tab popup");
+  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+
   prop = RNA_def_property(srna, "category_tab_save_category", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "category_tab_save_category");
   RNA_def_property_ui_text(

@@ -207,6 +207,11 @@ struct wmWindowManager {
   /** Active index for category tags UI list. */
   int category_tags_active_index = 0;
 
+  /** Filter settings for category tags in popup. */
+  char category_tag_filter_show_all_modes = 0;
+  char category_tag_filter_current_mode = 0;
+  char _pad3[6] = {};
+
   /** Available/pending extensions updates. */
   int extensions_updates = 0;
   /** Number of blocked & installed extensions. */

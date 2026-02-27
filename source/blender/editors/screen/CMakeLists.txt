@@ -5,6 +5,7 @@
 set(INC
   ../asset
   ../include
+  ../interface
   ../space_graph
   ../../makesrna
   ../../nodes
@@ -21,6 +22,7 @@ set(SRC
   area_query.cc
   area_utils.cc
   glutil.cc
+  screen_category_tabs_ops.cc
   screen_context.cc
   screen_draw.cc
   screen_edit.cc

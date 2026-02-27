@@ -43,6 +43,7 @@ set(SRC
   interface_ops.cc
   interface_panel.cc
   interface_tab_categories.cc
+  interface_tab_categories_edit.cc
   interface_query.cc
   regions/interface_region_color_picker.cc
   regions/interface_region_hud.cc

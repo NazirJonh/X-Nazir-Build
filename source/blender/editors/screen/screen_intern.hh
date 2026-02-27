@@ -250,4 +250,11 @@ void SCREEN_OT_screenshot_area(wmOperatorType *ot);
 
 bool workspace_layout_set_poll(const WorkSpaceLayout *layout);
 
+/* `screen_category_tabs_ops.cc` */
+
+/**
+ * Register category tab operators (called from ED_operatortypes_screen).
+ */
+void ED_operatortypes_screen_category_tabs();
+
 }  // namespace blender

@@ -2350,8 +2350,10 @@ static ARegion *ui_panel_category_tooltip_init(
 
       std::string tooltip_text;
 
-      if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) {
-        /* In GLYPHS_ONLY mode, show the category display name from mappings,
+      if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY ||
+          display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT)
+      {
+        /* In GLYPHS_ONLY and GLYPHS_TEXT modes, show the category display name from mappings,
          * or the category name itself if not configured in mappings.
          * For categories not in mappings, panel label is used as fallback
          * (handles special cases like "Script 3" where category name is a glyph). */
@@ -2359,7 +2361,7 @@ static ARegion *ui_panel_category_tooltip_init(
         tooltip_text = IFACE_(category_display_name);
       }
       else {
-        /* In GLYPHS_TEXT mode, collect panel names in this category. */
+        /* In TEXT_ONLY mode, collect panel names in this category. */
         Vector<std::string> panel_names;
         for (const Panel &panel : region->panels) {
           if (panel.type && STREQ(panel.type->category, category_idname)) {

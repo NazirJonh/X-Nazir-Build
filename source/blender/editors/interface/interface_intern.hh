@@ -798,6 +798,7 @@ struct CategoryDragState {
   int current_mouse_x = 0;
   int current_mouse_y = 0;
   ARegion *tooltip_region = nullptr;
+  int tooltip_initial_x = 0;  /* Initial X position of tooltip, fixed during drag */
 
   void *scroll_timer = nullptr;
 };

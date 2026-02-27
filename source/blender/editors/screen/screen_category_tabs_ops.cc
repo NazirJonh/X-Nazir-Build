@@ -22,6 +22,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
 
@@ -50,6 +51,7 @@
 #include "WM_types.hh"
 
 #include "UI_interface_c.hh"
+#include "UI_resources.hh"
 
 #include "screen_intern.hh"
 
@@ -70,6 +72,46 @@ using ui::category_tab_edit_dialog_exec;
 using ui::find_panel_label_for_category;
 using ui::is_single_glyph_str;
 using ui::utf8_to_hex_codepoint;
+
+/* -------------------------------------------------------------------- */
+/** \name Color Presets Enum
+ * \{ */
+
+/** Category tab color preset values (matches COLLECTION_COLOR_* from DNA) */
+enum CategoryTabColorPreset {
+  CATEGORY_TAB_COLOR_NONE = -1,
+  CATEGORY_TAB_COLOR_01 = 0,
+  CATEGORY_TAB_COLOR_02 = 1,
+  CATEGORY_TAB_COLOR_03 = 2,
+  CATEGORY_TAB_COLOR_04 = 3,
+  CATEGORY_TAB_COLOR_05 = 4,
+  CATEGORY_TAB_COLOR_06 = 5,
+  CATEGORY_TAB_COLOR_07 = 6,
+  CATEGORY_TAB_COLOR_08 = 7,
+};
+
+/** Get RGB color from preset value (reads from theme) */
+void category_tab_color_preset_to_rgb(const int preset, float r_color[3])
+{
+  if (preset == CATEGORY_TAB_COLOR_NONE) {
+    zero_v3(r_color);
+    return;
+  }
+
+  bTheme *btheme = ui::theme::theme_get();
+  /* Theme colors are stored as 0-7, matching our preset values */
+  if (preset >= 0 && preset < 8) {
+    const uchar *color_uchar = btheme->collection_color[preset].color;
+    r_color[0] = color_uchar[0] / 255.0f;
+    r_color[1] = color_uchar[1] / 255.0f;
+    r_color[2] = color_uchar[2] / 255.0f;
+  }
+  else {
+    zero_v3(r_color);
+  }
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Category Tab Reset Operator
@@ -482,6 +524,49 @@ static void SCREEN_OT_category_tab_edit_dialog_save(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Category Tab Color Preset Operator
+ * \{ */
+
+static wmOperatorStatus category_tab_color_preset_exec(bContext *C, wmOperator *op)
+{
+  if (!category_tab_current_dialog_op) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Get preset value from operator property */
+  const int preset = RNA_int_get(op->ptr, "preset");
+
+  /* Get RGB color from preset */
+  float color[3];
+  category_tab_color_preset_to_rgb(preset, color);
+
+  /* Set the color in the dialog operator */
+  RNA_float_set_array(category_tab_current_dialog_op->ptr, "color", color);
+
+  /* Trigger live update to refresh preview */
+  category_tab_edit_live_update_cb(C, category_tab_current_dialog_op, 0);
+
+  return OPERATOR_FINISHED;
+}
+
+static void SCREEN_OT_category_tab_color_preset(wmOperatorType *ot)
+{
+  ot->name = "Set Category Tab Color Preset";
+  ot->idname = "SCREEN_OT_category_tab_color_preset";
+  ot->description = "Set category tab color from preset";
+
+  ot->exec = category_tab_color_preset_exec;
+  /* Only works when dialog is open */
+  ot->poll = [](bContext * /*C*/) { return category_tab_current_dialog_op != nullptr; };
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+
+  RNA_def_int(ot->srna, "preset", -1, -1, 7, "Preset", "Color preset value (-1 for NONE, 0-7 for colors)", -1, 7);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Category Tab Edit Dialog Operator
  * \{ */
 
@@ -529,6 +614,7 @@ void ED_operatortypes_screen_category_tabs()
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog);
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_cancel);
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_save);
+  WM_operatortype_append(SCREEN_OT_category_tab_color_preset);
   WM_operatortype_append(SCREEN_OT_category_tab_reset);
   WM_operatortype_append(SCREEN_OT_category_tab_paste_glyph);
 }

@@ -589,6 +589,43 @@ DEF_ICON_LAYERGROUP_COLOR_DRAW(08, LAYERGROUP_COLOR_08);
 
 #  undef DEF_ICON_LAYERGROUP_COLOR_DRAW
 
+static void vicon_category_tab_color_draw(
+    short color_tag, float x, float y, float w, float /*h*/, float /*alpha*/)
+{
+  bTheme *btheme = theme::theme_get();
+  const ThemeCollectionColor *category_tab_color = &btheme->collection_color[color_tag];
+
+  const float aspect = float(ICON_DEFAULT_WIDTH) / w;
+
+  icon_draw_ex(x,
+               y,
+               ICON_GROUP,
+               aspect,
+               1.0f,
+               0.0f,
+               category_tab_color->color,
+               btheme->tui.icon_border_intensity > 0.0f,
+               UI_NO_ICON_OVERLAY_TEXT);
+}
+
+#  define DEF_ICON_CATEGORY_TAB_COLOR_DRAW(index, color) \
+    static void vicon_category_tab_color_draw_##index( \
+        float x, float y, float w, float h, float alpha, const uchar * /*mono_rgba[4]*/) \
+    { \
+      vicon_category_tab_color_draw(color, x, y, w, h, alpha); \
+    }
+
+DEF_ICON_CATEGORY_TAB_COLOR_DRAW(01, 0);
+DEF_ICON_CATEGORY_TAB_COLOR_DRAW(02, 1);
+DEF_ICON_CATEGORY_TAB_COLOR_DRAW(03, 2);
+DEF_ICON_CATEGORY_TAB_COLOR_DRAW(04, 3);
+DEF_ICON_CATEGORY_TAB_COLOR_DRAW(05, 4);
+DEF_ICON_CATEGORY_TAB_COLOR_DRAW(06, 5);
+DEF_ICON_CATEGORY_TAB_COLOR_DRAW(07, 6);
+DEF_ICON_CATEGORY_TAB_COLOR_DRAW(08, 7);
+
+#  undef DEF_ICON_CATEGORY_TAB_COLOR_DRAW
+
 #  define DEF_ICON_NODE_SOCKET_DRAW(name, socket_type) \
     static void icon_node_socket_draw_##name( \
         float x, float y, float w, float h, float alpha, const uchar * /*mono_rgba[4]*/) \
@@ -989,6 +1026,15 @@ static void init_internal_icons()
   def_internal_vicon(ICON_LAYERGROUP_COLOR_06, vicon_layergroup_color_draw_06);
   def_internal_vicon(ICON_LAYERGROUP_COLOR_07, vicon_layergroup_color_draw_07);
   def_internal_vicon(ICON_LAYERGROUP_COLOR_08, vicon_layergroup_color_draw_08);
+
+  def_internal_vicon(ICON_CATEGORY_TAB_COLOR_01, vicon_category_tab_color_draw_01);
+  def_internal_vicon(ICON_CATEGORY_TAB_COLOR_02, vicon_category_tab_color_draw_02);
+  def_internal_vicon(ICON_CATEGORY_TAB_COLOR_03, vicon_category_tab_color_draw_03);
+  def_internal_vicon(ICON_CATEGORY_TAB_COLOR_04, vicon_category_tab_color_draw_04);
+  def_internal_vicon(ICON_CATEGORY_TAB_COLOR_05, vicon_category_tab_color_draw_05);
+  def_internal_vicon(ICON_CATEGORY_TAB_COLOR_06, vicon_category_tab_color_draw_06);
+  def_internal_vicon(ICON_CATEGORY_TAB_COLOR_07, vicon_category_tab_color_draw_07);
+  def_internal_vicon(ICON_CATEGORY_TAB_COLOR_08, vicon_category_tab_color_draw_08);
 
   def_internal_vicon(ICON_NODE_SOCKET_FLOAT, icon_node_socket_draw_float);
   def_internal_vicon(ICON_NODE_SOCKET_VECTOR, icon_node_socket_draw_vector);

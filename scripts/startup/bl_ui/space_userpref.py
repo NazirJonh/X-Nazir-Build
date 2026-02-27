@@ -727,6 +727,22 @@ def get_tag_data(tag_name):
 DEFAULT_TAG_GLYPH_HEX = "e866"
 
 
+def generate_unique_tag_name():
+    """Generate a unique tag name (Tag, Tag.001, Tag.002, etc.)."""
+    tags = get_all_tags()
+    base_name = "New Tag"
+    if base_name not in tags:
+        return base_name
+
+    # Check for existing numbered names
+    i = 1
+    while True:
+        name = f"{base_name}.{i:03d}"
+        if name not in tags:
+            return name
+        i += 1
+
+
 def create_tag(tag_name, glyph="", color=None, auto_save=True):
     """
     Create a new tag.
@@ -2100,7 +2116,8 @@ class USERPREF_OT_category_tag_create(Operator):
     category: bpy.props.StringProperty(
         name="Category",
         description="Category to assign the tag to",
-        default=""
+        default="",
+        options={'HIDDEN'}
     )
     glyph: bpy.props.StringProperty(
         name="Glyph",
@@ -2153,6 +2170,43 @@ class USERPREF_OT_category_tag_create(Operator):
 
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
+
+
+class USERPREF_OT_category_tag_add(Operator):
+    """Add a new tag with default name (for quick list addition)"""
+    bl_idname = "wm.category_tag_add"
+    bl_label = "Add Tag"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    @with_context_check
+    def execute(self, context):
+        # Generate unique default name
+        tag_name = generate_unique_tag_name()
+
+        # Create tag with default glyph and color
+        glyph = _hex_to_glyph(DEFAULT_TAG_GLYPH_HEX)
+        success, message = create_tag(
+            tag_name,
+            glyph,
+            [0.0, 0.0, 0.0]
+        )
+
+        if success:
+            # Sync to WM to update the UI list immediately
+            sync_glyph_mappings_to_wm()
+
+            # Set active index to the new tag
+            for i, t in enumerate(context.window_manager.category_tags):
+                if t.name == tag_name:
+                    context.window_manager.category_tags_active_index = i
+                    break
+
+            context.area.tag_redraw()
+            self.report({'INFO'}, f"Added '{tag_name}'")
+            return {'FINISHED'}
+
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
 
 
 class USERPREF_OT_category_tag_edit(Operator):
@@ -5847,7 +5901,7 @@ class USERPREF_PT_tags(TagsPanel, Panel):
 
         # Buttons to the right of list
         col_btn = left_container.column(align=True)
-        col_btn.operator("wm.category_tag_create", text="", icon='ADD')
+        col_btn.operator("wm.category_tag_add", text="", icon='ADD')
         col_btn.operator("wm.category_tag_delete", text="", icon='REMOVE')
         col_btn.separator()
         col_btn.operator("wm.category_tag_move", text="", icon='TRIA_UP').direction = 'UP'
@@ -5989,6 +6043,7 @@ classes = (
     CategoryTagItem,
     CategoryTagAssignment,
     USERPREF_OT_category_tag_create,
+    USERPREF_OT_category_tag_add,
     USERPREF_OT_category_tag_edit,
     USERPREF_OT_category_tag_delete,
     USERPREF_OT_category_tag_move,

@@ -941,7 +941,7 @@ struct UserDef {
   /** #eUserpref_UI_Flag2. */
   char uiflag2 = USER_REGION_OVERLAP | USER_UIFLAG2_SHOW_ONLINE_ASSETS;
   char gpu_flag = USER_GPU_FLAG_OVERLAY_SMOOTH_WIRE | USER_GPU_FLAG_SUBDIVISION_EVALUATION;
-  char _pad8[6] = {};
+  char _pad8[2] = {};
   /* Experimental flag for app-templates to make changes to behavior
    * which are outside the scope of typical preferences. */
   char app_flag = 0;
@@ -971,6 +971,9 @@ struct UserDef {
   char category_tabs_show_drag_tooltips = false;
   /** Lock editing of category tab data (name, glyph, color). When true, editing is disabled. */
   char category_tabs_allow_edit = false;
+  /** Show color indicator bar in Text mode for categories with custom glyph colors. */
+  char category_tabs_text_mode_show_color_indicator = true;
+  char _pad7[3] = {0, 0, 0};
   /**
    * Setting for UI line width.
    *

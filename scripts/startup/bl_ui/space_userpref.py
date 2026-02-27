@@ -5644,6 +5644,11 @@ class VIEW3D_OT_category_tabs_settings(Operator):
         row.active = view.category_tabs_display_mode == 'GLYPHS_ONLY'
         row.prop(view, "category_tabs_show_active_name", text="Show Active Tab Name")
 
+        # Show color indicator option - only enabled in Text mode
+        row = layout.row()
+        row.active = view.category_tabs_display_mode == 'TEXT_ONLY'
+        row.prop(view, "category_tabs_text_mode_show_color_indicator", text="Show Color Indicator")
+
         # Show drag tooltips option - only enabled in Icon mode
         row = layout.row()
         row.active = view.category_tabs_display_mode == 'GLYPHS_ONLY'

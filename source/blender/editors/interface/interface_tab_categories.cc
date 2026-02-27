@@ -1817,6 +1817,11 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
     const bool is_active = !too_narrow && STREQ(category_id, category_id_active);
 
+    /* Get glyph color for color indicator in TEXT_ONLY mode. */
+    bool is_fallback_letter = false;
+    float glyph_color[3] = {0.0f, 0.0f, 0.0f};
+    panel_category_glyph_lookup(wm, category_id, nullptr, &is_fallback_letter, glyph_color);
+
     current_display_index++;
 
     const bool is_hover = BLI_rcti_isect_pt(rct, mouse_x, mouse_y);
@@ -1853,6 +1858,30 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       draw_roundbox_4fv(&box_rect, true, tab_curve_radius, tab_bg_color);
       draw_roundbox_4fv(&box_rect, false, tab_curve_radius,
                         is_active ? theme_col_tab_outline_sel : theme_col_tab_outline);
+
+      /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
+      if (display_mode == USER_CATEGORY_TABS_TEXT_ONLY &&
+          U.category_tabs_text_mode_show_color_indicator) {
+        /* Check if custom glyph color is assigned (non-zero means custom color set). */
+        if (glyph_color[0] != 0.0f || glyph_color[1] != 0.0f || glyph_color[2] != 0.0f) {
+          const int indicator_thickness = round_fl_to_int(1.0f * UI_SCALE_FAC);
+
+          /* For left-aligned tabs: indicator on left edge (outer edge). */
+          /* For right-aligned tabs: indicator on right edge (outer edge). */
+          const int indicator_xmin = is_left ? rct->xmin : rct->xmax - indicator_thickness;
+          const int indicator_xmax = indicator_xmin + indicator_thickness;
+
+          /* Setup GPU for immediate mode rectangle drawing. */
+          pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
+          immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+          float indicator_color[4] = {glyph_color[0], glyph_color[1], glyph_color[2], 0.8f};
+          immUniformColor4fv(indicator_color);
+          immRectf(pos, float(indicator_xmin), float(rct->ymin), float(indicator_xmax), float(rct->ymax));
+
+          immUnbindProgram();
+        }
+      }
 
       if (!region->overlap) {
         pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);

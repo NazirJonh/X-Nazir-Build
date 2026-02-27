@@ -5078,6 +5078,12 @@ static void rna_def_userdef_view(BlenderRNA *brna)
                            "Show category name tooltips when dragging tabs in Icon mode");
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
+  prop = RNA_def_property(srna, "category_tabs_text_mode_show_color_indicator", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_text_mode_show_color_indicator", 1);
+  RNA_def_property_ui_text(prop, "Show Color Indicator",
+                           "Show color indicator bar in Text mode for categories with custom glyph colors");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
   prop = RNA_def_property(srna, "border_width", PROP_INT, PROP_NONE);
   RNA_def_property_ui_text(prop, "Border Width", "Size of the padding around each editor.");
   RNA_def_property_range(prop, 1.0f, 10.0f);

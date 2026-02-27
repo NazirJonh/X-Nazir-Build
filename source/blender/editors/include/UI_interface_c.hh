@@ -477,6 +477,7 @@ enum {
   BUT_NO_TEXT_PADDING = 1 << 6,
   /** Do not add the usual padding around preview image drawing, use the size of the button. */
   BUT_NO_PREVIEW_PADDING = 1 << 7,
+  BUT_TEXT_USE_COL = 1 << 8,
 
   /* Button align flag, for drawing groups together.
    * Used in 'Block.flag', take care! */

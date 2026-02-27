@@ -5421,9 +5421,10 @@ void draw_button(const bContext *C, ARegion *region, uiStyle *style, Button *but
       GPU_blend(GPU_BLEND_ALPHA);
     }
 
-    if (but->type == ButtonType::Label && !(but->flag & UI_HAS_ICON) && but->col[3] != 0) {
-      /* Optionally use button color for text color if label without icon.
-       * For example, ensuring that the Splash version text is always white. */
+    if (but->col[3] != 0 &&
+        ((but->type == ButtonType::Label && !(but->flag & UI_HAS_ICON)) ||
+         (but->drawflag & BUT_TEXT_USE_COL)))
+    {
       copy_v4_v4_uchar(wt->wcol.text, but->col);
     }
 

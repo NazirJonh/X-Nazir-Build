@@ -571,7 +571,7 @@ static void SCREEN_OT_category_tab_color_preset(wmOperatorType *ot)
 /** \name Tag Color Preset Operator
  * \{ */
 
-#define DEBUG_TAG_COLOR_PRESET 0
+#define DEBUG_TAG_COLOR_PRESET 1
 
 static wmOperatorStatus tag_color_preset_exec(bContext *C, wmOperator *op)
 {

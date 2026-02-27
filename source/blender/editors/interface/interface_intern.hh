@@ -1769,6 +1769,13 @@ Block *block_find_mouse_over(const ARegion *region, const wmEvent *event, bool o
 
 Button *region_find_first_but_test_flag(ARegion *region, int flag_include, int flag_exclude);
 Button *region_find_active_but(ARegion *region) ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Get the active button from the context, respecting popup regions.
+ * Used by operators that need to access the button's RNA data.
+ */
+Button *context_active_but_get_respect_popup(const bContext *C);
+
 bool region_contains_point_px(const ARegion *region, const int xy[2])
     ATTR_NONNULL(1, 2) ATTR_WARN_UNUSED_RESULT;
 bool region_contains_rect_px(const ARegion *region, const rcti *rect_px);

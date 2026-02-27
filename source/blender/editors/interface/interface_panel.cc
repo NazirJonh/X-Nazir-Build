@@ -2351,7 +2351,10 @@ static ARegion *ui_panel_category_tooltip_init(
       std::string tooltip_text;
 
       if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) {
-        /* In GLYPHS_ONLY mode, show the category display name (from user override or panel label). */
+        /* In GLYPHS_ONLY mode, show the category display name from mappings,
+         * or the category name itself if not configured in mappings.
+         * For categories not in mappings, panel label is used as fallback
+         * (handles special cases like "Script 3" where category name is a glyph). */
         const char *category_display_name = panel_category_tooltip_name_get(region, wm, category_idname);
         tooltip_text = IFACE_(category_display_name);
       }

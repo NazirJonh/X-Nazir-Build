@@ -562,7 +562,7 @@ const char *panel_category_tooltip_name_get(const ARegion *region,
                                              const wmWindowManager *wm,
                                              const char *category_idname)
 {
-  /* 1. Check user overrides first */
+  /* 1. Check user overrides first. If category is in overrides and has display_name, use it. */
   if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
@@ -573,12 +573,14 @@ const char *panel_category_tooltip_name_get(const ARegion *region,
         if (item->display_name[0] != '\0') {
           return item->display_name;
         }
-        break;
+        /* Category is in overrides but display_name is empty - use category name. */
+        return category_idname;
       }
     }
   }
 
-  /* 2. Check global mappings */
+  /* 2. Check global mappings. If category is in mappings and has display_name, use it. */
+  bool found_in_mappings = false;
   if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
@@ -586,25 +588,35 @@ const char *panel_category_tooltip_name_get(const ARegion *region,
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
       if (STREQ(item->category, category_idname)) {
+        found_in_mappings = true;
         if (item->display_name[0] != '\0') {
           return item->display_name;
         }
-        break;
+        /* Category is in mappings but display_name is empty - use category name. */
+        return category_idname;
       }
     }
   }
 
-  /* 3. Look up panel label from panel types */
-  for (const PanelType &pt : region->runtime->type->paneltypes) {
-    if (pt.category && STREQ(pt.category, category_idname)) {
-      const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-      if (panel_label && panel_label[0]) {
-        return panel_label;
+  /* 3. For reserved categories (built-in Blender categories), use category name. */
+  if (category_is_reserved(wm, category_idname)) {
+    return category_idname;
+  }
+
+  /* 4. For categories NOT in mappings (not explicitly configured), look up panel label.
+   * This handles special cases like "Script 3" where category name contains only a glyph. */
+  if (!found_in_mappings) {
+    for (const PanelType &pt : region->runtime->type->paneltypes) {
+      if (pt.category && STREQ(pt.category, category_idname)) {
+        const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+        if (panel_label && panel_label[0]) {
+          return panel_label;
+        }
       }
     }
   }
 
-  /* 4. Fallback to category name itself */
+  /* 5. Fallback to category name itself */
   return category_idname;
 }
 

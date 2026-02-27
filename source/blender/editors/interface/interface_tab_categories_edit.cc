@@ -656,176 +656,222 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
    * Reserved categories cannot have their display name changed. */
   bool is_reserved = category_is_reserved(wm, category);
 
-  /* Label and property on same line */
+  /* Properties layout with split for consistent alignment */
+  ui::Layout &col_props = layout.column(false);
+  col_props.use_property_split_set(true);
+
+  /* Category Name - check if reserved for read-only */
   if (is_reserved) {
     /* Reserved categories: show field as read-only (disabled) */
-    ui::Layout &row = layout.row(false);
-    row.enabled_set(false);
-    row.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
+    ui::Layout &row_name = col_props.row(false);
+    row_name.enabled_set(false);
+    row_name.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
   }
   else {
-    layout.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
+    col_props.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
   }
 
-  layout.separator();
-
   /* Color picker - triggers live updates via block_func_handle_set */
-  layout.prop(op->ptr, "color", UI_ITEM_NONE, IFACE_("Glyph Color"), ICON_NONE);
+  col_props.prop(op->ptr, "color", UI_ITEM_NONE, IFACE_("Glyph Color"), ICON_NONE);
 
   layout.separator();
 
-  /* Change Icon section */
-  layout.label(IFACE_("Change Icon"), ICON_NONE);
+  /* Change Icon panel */
+  ui::PanelLayout icon_panel = layout.panel(C, "change_icon", false);
 
-  /* Search field */
-  ui::Layout &row_search = layout.row(false);
-  row_search.prop(op->ptr, "glyph_search", UI_ITEM_NONE, "", ICON_VIEWZOOM);
+  if (icon_panel.header) {
+    icon_panel.header->label(IFACE_("Change the display"), ICON_NONE);
+  }
 
-  /* Glyph field with Paste button */
-  ui::Layout &row_glyph = layout.row(false);
-  row_glyph.prop(op->ptr, "glyph", UI_ITEM_NONE, IFACE_("Glyph Code"), ICON_NONE);
-  ui::Layout &row_glyph_btn = row_glyph.row(true);
-  /* Paste button - allows pasting hex code from clipboard (Ctrl+V) */
-  PointerRNA paste_ptr = row_glyph_btn.op("SCREEN_OT_category_tab_paste_glyph", "", ICON_PASTEDOWN);
-  RNA_string_set(&paste_ptr, "category", category);
+  if (icon_panel.body) {
+    /* Properties for glyph search and code */
+    ui::Layout &col_glyph = icon_panel.body->column(false);
 
-  /* Validate glyph input and show warning if invalid */
-  char glyph_raw_check[16] = "";
-  RNA_string_get(op->ptr, "glyph", glyph_raw_check);
+    /* Row with Search Glyph on left and Code with Paste on right */
+    ui::Layout &row_search_glyph = col_glyph.row(false);
+    ui::Layout &split_search_glyph = row_search_glyph.split(0.7f, false);
 
-  bool glyph_valid = true;
-  if (glyph_raw_check[0] != '\0') {
-    /* Check total string length */
-    size_t total_len = strlen(glyph_raw_check);
-    if (total_len > 8) {
-      glyph_valid = false;
-    }
-    else {
-      const char *hex_start = glyph_raw_check;
+    /* Left side: Search Glyph field - right aligned */
+    ui::Layout &col_search = split_search_glyph.column(false);
 
-      /* Skip optional "0x" prefix */
-      if (glyph_raw_check[0] == '0' &&
-          (glyph_raw_check[1] == 'x' || glyph_raw_check[1] == 'X'))
-      {
-        hex_start = glyph_raw_check + 2;
-      }
+    /* Search field - use split to control width, align right side */
+    ui::Layout &split_search = col_search.split(0.89f, false);
+    ui::Layout &search_row = split_search.row(false);
+    search_row.alignment_set(ui::LayoutAlign::Right);
+    search_row.prop(op->ptr, "glyph_search", UI_ITEM_NONE, IFACE_("Glyph"), ICON_VIEWZOOM);
 
-      size_t hex_len = strlen(hex_start);
+    /* Right side: Glyph button, Code with Paste button - aligned right */
+    ui::Layout &col_glyph_code = split_search_glyph.column(false);
+    col_glyph_code.alignment_set(ui::LayoutAlign::Right);
+    ui::Layout &row_code = col_glyph_code.row(true);
+    row_code.fixed_size_set(true);
 
-      if (hex_len == 0 || hex_len > 6) {
+    /* Glyph button f02f - before Code */
+    char glyph_btn[8] = "";
+    process_glyph_input("f02f", glyph_btn, sizeof(glyph_btn));
+    ui::Block *search_block = row_code.block();
+    ui::block_layout_set_current(search_block, &row_code);
+    ui::Button *glyph_but = uiDefBut(search_block,
+                                      ui::ButtonType::But,
+                                      glyph_btn,
+                                      0,
+                                      0,
+                                      UI_UNIT_X * 1.5f,
+                                      UI_UNIT_Y,
+                                      nullptr,
+                                      0,
+                                      0,
+                                      std::nullopt);
+    /* Set tooltip for glyph button */
+    glyph_but->tip_quick_func = [](const ui::Button *) { return "More glyphs"; };
+    (void)glyph_but;
+
+    /* Code field with Paste button */
+    ui::Layout &row_glyph = row_code.row(true);
+    row_glyph.prop(op->ptr, "glyph", UI_ITEM_NONE, IFACE_("Code"), ICON_NONE);
+    ui::Layout &row_glyph_btn = row_glyph.row(true);
+    /* Paste button - allows pasting hex code from clipboard (Ctrl+V) */
+    PointerRNA paste_ptr = row_glyph_btn.op("SCREEN_OT_category_tab_paste_glyph", "", ICON_PASTEDOWN);
+    RNA_string_set(&paste_ptr, "category", category);
+
+    /* Validate glyph input and show warning if invalid */
+    char glyph_raw_check[16] = "";
+    RNA_string_get(op->ptr, "glyph", glyph_raw_check);
+
+    bool glyph_valid = true;
+    if (glyph_raw_check[0] != '\0') {
+      /* Check total string length */
+      size_t total_len = strlen(glyph_raw_check);
+      if (total_len > 8) {
         glyph_valid = false;
       }
       else {
-        for (size_t i = 0; i < hex_len; i++) {
-          if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
+        const char *hex_start = glyph_raw_check;
+
+        /* Skip optional "0x" prefix */
+        if (glyph_raw_check[0] == '0' &&
+            (glyph_raw_check[1] == 'x' || glyph_raw_check[1] == 'X'))
+        {
+          hex_start = glyph_raw_check + 2;
+        }
+
+        size_t hex_len = strlen(hex_start);
+
+        if (hex_len == 0 || hex_len > 6) {
+          glyph_valid = false;
+        }
+        else {
+          for (size_t i = 0; i < hex_len; i++) {
+            if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
+              glyph_valid = false;
+              break;
+            }
+          }
+        }
+
+        if (glyph_valid) {
+          uint val = strtoul(hex_start, nullptr, 16);
+          if (val < 32 || val > 0x10FFFF) {
             glyph_valid = false;
-            break;
           }
         }
       }
-
-      if (glyph_valid) {
-        uint val = strtoul(hex_start, nullptr, 16);
-        if (val < 32 || val > 0x10FFFF) {
-          glyph_valid = false;
-        }
-      }
     }
+
+    /* Show warning if glyph is invalid */
+    if (!glyph_valid && glyph_raw_check[0] != '\0') {
+      col_glyph.label("Invalid hex code (use 1-6 hex digits, e.g., e5d2)", ICON_ERROR);
+    }
+
+    icon_panel.body->separator();
+
+    /* Glyph Preview - show current glyph centered with custom color */
+    char glyph_raw[16] = "";
+    RNA_string_get(op->ptr, "glyph", glyph_raw);
+
+    /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character.
+     * Only process if input is valid hex. */
+    char glyph[8] = "";
+    if (glyph_valid && glyph_raw[0] != '\0') {
+      process_glyph_input(glyph_raw, glyph, sizeof(glyph));
+    }
+
+    /* Get custom color */
+    float color_preview[3];
+    RNA_float_get_array(op->ptr, "color", color_preview);
+
+    /* Get the proper glyph for preview.
+     * If glyph property is set, use the processed glyph.
+     * Otherwise, use panel_category_glyph_lookup to get the default/mapped glyph.
+     */
+    const char *preview_glyph = nullptr;
+
+    if (glyph[0] != '\0') {
+      /* User has set a custom glyph - use the processed glyph */
+      preview_glyph = glyph;
+    }
+    else {
+      /* No custom glyph - lookup the default glyph for this category */
+      preview_glyph = panel_category_glyph_lookup(wm, category, nullptr, nullptr, nullptr);
+    }
+
+    /* Initialize preview buffers (will be updated by live update callback) */
+    if (preview_glyph) {
+      STRNCPY(category_tab_preview_glyph, preview_glyph);
+    }
+    else {
+      category_tab_preview_glyph[0] = '\0';
+    }
+    copy_v3_v3(category_tab_preview_color, color_preview);
+
+    /* Create centered row for preview */
+    ui::Layout &preview_row = icon_panel.body->row(false);
+    preview_row.alignment_set(ui::LayoutAlign::Center);
+
+    /* Get block and create preview button */
+    ui::Block *preview_block = preview_row.block();
+    const int preview_size = int(style->widget.points * UI_SCALE_FAC * 3.0f);
+
+    /* Create custom button with draw callback */
+    ui::Button *preview_but = uiDefBut(preview_block,
+                                       ui::ButtonType::Extra,
+                                       "",
+                                       0,
+                                       0,
+                                       preview_size,
+                                       preview_size,
+                                       nullptr,
+                                       0.0f,
+                                       0.0f,
+                                       std::nullopt);
+
+    /* Set draw callback to render glyph with color */
+    button_func_drawextra_set(preview_block, [style](const bContext * /*C*/, rcti *rect) {
+      /* Get font - 2x the tab size for preview */
+      const int fontid = BLF_default();
+      const float font_size = style->widget.points * UI_SCALE_FAC * 2.0f;
+      BLF_size(fontid, font_size);
+
+      /* Set custom color from file-scope static buffer (updated by live update callback) */
+      BLF_color3fv_alpha(fontid, category_tab_preview_color, 1.0f);
+
+      /* Calculate center position */
+      const float glyph_width = BLF_width(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
+      const float glyph_height = BLF_height(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
+
+      const float rect_width = BLI_rcti_size_x(rect);
+      const float rect_height = BLI_rcti_size_y(rect);
+      const float x = rect->xmin + (rect_width - glyph_width) / 2.0f;
+      const float y = rect->ymin + (rect_height - glyph_height) / 2.0f;
+
+      /* Draw glyph */
+      BLF_position(fontid, x, y, 0.0f);
+      BLF_draw(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
+    });
+
+    /* Use the button to prevent unused variable warning */
+    (void)preview_but;
   }
-
-  /* Show warning if glyph is invalid */
-  if (!glyph_valid && glyph_raw_check[0] != '\0') {
-    layout.label("Invalid hex code (use 1-6 hex digits, e.g., e5d2)", ICON_ERROR);
-  }
-
-  layout.separator();
-
-  /* Glyph Preview - show current glyph centered with custom color */
-  char glyph_raw[16] = "";
-  RNA_string_get(op->ptr, "glyph", glyph_raw);
-
-  /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character.
-   * Only process if input is valid hex. */
-  char glyph[8] = "";
-  if (glyph_valid && glyph_raw[0] != '\0') {
-    process_glyph_input(glyph_raw, glyph, sizeof(glyph));
-  }
-
-  /* Get custom color */
-  float color[3];
-  RNA_float_get_array(op->ptr, "color", color);
-
-  /* Get the proper glyph for preview.
-   * If glyph property is set, use the processed glyph.
-   * Otherwise, use panel_category_glyph_lookup to get the default/mapped glyph.
-   */
-  const char *preview_glyph = nullptr;
-
-  if (glyph[0] != '\0') {
-    /* User has set a custom glyph - use the processed glyph */
-    preview_glyph = glyph;
-  }
-  else {
-    /* No custom glyph - lookup the default glyph for this category */
-    preview_glyph = panel_category_glyph_lookup(wm, category, nullptr, nullptr, nullptr);
-  }
-
-  /* Initialize preview buffers (will be updated by live update callback) */
-  if (preview_glyph) {
-    STRNCPY(category_tab_preview_glyph, preview_glyph);
-  }
-  else {
-    category_tab_preview_glyph[0] = '\0';
-  }
-  copy_v3_v3(category_tab_preview_color, color);
-
-  /* Create centered row for preview */
-  ui::Layout &preview_row = layout.row(false);
-  preview_row.alignment_set(ui::LayoutAlign::Center);
-
-  /* Get block and create preview button */
-  ui::Block *preview_block = preview_row.block();
-  const int preview_size = int(style->widget.points * UI_SCALE_FAC * 3.0f);
-
-  /* Create custom button with draw callback */
-  ui::Button *preview_but = uiDefBut(preview_block,
-                                     ui::ButtonType::Extra,
-                                     "",
-                                     0,
-                                     0,
-                                     preview_size,
-                                     preview_size,
-                                     nullptr,
-                                     0.0f,
-                                     0.0f,
-                                     std::nullopt);
-
-  /* Set draw callback to render glyph with color */
-  button_func_drawextra_set(preview_block, [style](const bContext * /*C*/, rcti *rect) {
-    /* Get font - 2x the tab size for preview */
-    const int fontid = BLF_default();
-    const float font_size = style->widget.points * UI_SCALE_FAC * 2.0f;
-    BLF_size(fontid, font_size);
-
-    /* Set custom color from file-scope static buffer (updated by live update callback) */
-    BLF_color3fv_alpha(fontid, category_tab_preview_color, 1.0f);
-
-    /* Calculate center position */
-    const float glyph_width = BLF_width(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
-    const float glyph_height = BLF_height(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
-
-    const float rect_width = BLI_rcti_size_x(rect);
-    const float rect_height = BLI_rcti_size_y(rect);
-    const float x = rect->xmin + (rect_width - glyph_width) / 2.0f;
-    const float y = rect->ymin + (rect_height - glyph_height) / 2.0f;
-
-    /* Draw glyph */
-    BLF_position(fontid, x, y, 0.0f);
-    BLF_draw(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
-  });
-
-  /* Use the button to prevent unused variable warning */
-  (void)preview_but;
 
   layout.separator();
 

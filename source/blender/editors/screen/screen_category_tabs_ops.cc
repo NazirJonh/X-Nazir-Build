@@ -567,6 +567,86 @@ static void SCREEN_OT_category_tab_color_preset(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Tag Color Preset Operator
+ * \{ */
+
+static wmOperatorStatus tag_color_preset_exec(bContext *C, wmOperator *op)
+{
+  /* Get tag name and property name from operator parameters */
+  char tag_name[64];
+  char propname[64];
+  RNA_string_get(op->ptr, "tag_name", tag_name);
+  RNA_string_get(op->ptr, "propname", propname);
+
+  /* Get preset value and convert to RGB */
+  const int preset = RNA_int_get(op->ptr, "preset");
+  float color[3];
+  category_tab_color_preset_to_rgb(preset, color);
+
+  /* Get Window Manager */
+  wmWindowManager *wm = CTX_wm_manager(C);
+
+  /* Try to find the tag in category_tags collection (for existing tags) */
+  CategoryTagDef *tag = nullptr;
+  if (tag_name[0] != '\0') {
+    for (CategoryTagDef *item = static_cast<CategoryTagDef *>(wm->category_tags.first);
+         item;
+         item = static_cast<CategoryTagDef *>(item->next))
+    {
+      if (STREQ(item->name, tag_name)) {
+        tag = item;
+        break;
+      }
+    }
+  }
+
+  PointerRNA ptr;
+  PropertyRNA *prop;
+
+  if (tag) {
+    /* Existing tag - create PointerRNA to the tag in WM */
+    ptr = RNA_pointer_create_discrete(&wm->id, RNA_CategoryTagDef, tag);
+    prop = RNA_struct_find_property(&ptr, propname);
+    if (!prop) {
+      return OPERATOR_CANCELLED;
+    }
+  }
+  else {
+    /* New tag (not in WM yet) - not currently supported
+     * For New Tag popup, use the standard color picker instead */
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Verify property type (must be float color array) */
+  if (RNA_property_type(prop) != PROP_FLOAT) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Set the color property */
+  RNA_property_float_set_array(&ptr, prop, color);
+  RNA_property_update(C, &ptr, prop);
+
+  return OPERATOR_FINISHED;
+}
+
+static void WM_OT_tag_color_preset(wmOperatorType *ot)
+{
+  ot->name = "Set Tag Color Preset";
+  ot->idname = "WM_OT_tag_color_preset";
+  ot->description = "Set tag color from preset";
+
+  ot->exec = tag_color_preset_exec;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+
+  RNA_def_string(ot->srna, "tag_name", nullptr, 64, "Tag Name", "Name of the tag to set color for");
+  RNA_def_string(ot->srna, "propname", nullptr, 64, "Property Name", "Name of the color property");
+  RNA_def_int(ot->srna, "preset", -1, -1, 7, "Preset", "Color preset value (-1 for NONE, 0-7 for colors)", -1, 7);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Category Tab Edit Dialog Operator
  * \{ */
 
@@ -615,6 +695,7 @@ void ED_operatortypes_screen_category_tabs()
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_cancel);
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_save);
   WM_operatortype_append(SCREEN_OT_category_tab_color_preset);
+  WM_operatortype_append(WM_OT_tag_color_preset);
   WM_operatortype_append(SCREEN_OT_category_tab_reset);
   WM_operatortype_append(SCREEN_OT_category_tab_paste_glyph);
 }

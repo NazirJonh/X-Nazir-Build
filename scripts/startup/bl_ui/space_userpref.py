@@ -5896,18 +5896,19 @@ class USERPREF_PT_tags(TagsPanel, Panel):
         # Main container box
         main_box = layout.box()
 
-        # Two-column layout inside the box
-        main_row = main_box.row()
+        # Two-column layout inside the box - split for proportional sizing
+        # 30% for UI List (left), 70% for detail panel (right)
+        split = main_box.split(factor=0.35)
 
         # === Left: Tag list with buttons ===
-        left_container = main_row.row()
+        left_container = split.row()
 
         # template_list
         left_container.template_list(
             "USERPREF_UL_category_tags", "",
             wm, "category_tags",
             wm, "category_tags_active_index",
-            rows=22, maxrows=64
+            rows=25, maxrows=64
         )
 
         # Buttons to the right of list
@@ -5919,7 +5920,7 @@ class USERPREF_PT_tags(TagsPanel, Panel):
         col_btn.operator("wm.category_tag_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
 
         # === Right: Detail panel ===
-        col_right = main_row.column()
+        col_right = split.column()
 
         # Get selected tag
         active_idx = wm.category_tags_active_index

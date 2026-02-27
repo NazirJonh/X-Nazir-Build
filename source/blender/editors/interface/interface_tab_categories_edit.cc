@@ -269,16 +269,20 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
 
   /* Get original values saved when dialog was opened */
   char original_display_name[32] = "";
-  char original_glyph[16] = "";
+  char original_glyph_hex[16] = "";
   float original_color[3] = {0.0f, 0.0f, 0.0f};
   char original_tags[256] = "";
   bool original_has_override = false;
 
   RNA_string_get(op->ptr, "original_display_name", original_display_name);
-  RNA_string_get(op->ptr, "original_glyph", original_glyph);
+  RNA_string_get(op->ptr, "original_glyph", original_glyph_hex);
   RNA_float_get_array(op->ptr, "original_color", original_color);
   RNA_string_get(op->ptr, "original_tags", original_tags);
   original_has_override = RNA_boolean_get(op->ptr, "original_has_override");
+
+  /* Convert hex glyph back to UTF-8 for restoration */
+  char original_glyph_utf8[8] = "";
+  process_glyph_input(original_glyph_hex, original_glyph_utf8, sizeof(original_glyph_utf8));
 
   wmWindowManager *wm = CTX_wm_manager(C);
 
@@ -304,7 +308,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
       BLI_addtail(&wm->category_glyph_overrides, item);
     }
     STRNCPY(item->display_name, original_display_name);
-    STRNCPY(item->glyph, original_glyph);
+    STRNCPY(item->glyph, original_glyph_utf8);
     copy_v3_v3(item->color, original_color);
     STRNCPY(item->tags, original_tags);
   }
@@ -323,7 +327,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
       else {
         /* Keep override but restore original values */
         STRNCPY(item->display_name, original_display_name);
-        STRNCPY(item->glyph, original_glyph);
+        STRNCPY(item->glyph, original_glyph_utf8);
         copy_v3_v3(item->color, original_color);
         STRNCPY(item->tags, original_tags);
       }

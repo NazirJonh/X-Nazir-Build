@@ -671,9 +671,6 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
     col_props.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
   }
 
-  /* Color picker - triggers live updates via block_func_handle_set */
-  col_props.prop(op->ptr, "color", UI_ITEM_NONE, IFACE_("Glyph Color"), ICON_NONE);
-
   layout.separator();
 
   /* Change Icon panel */
@@ -871,6 +868,20 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
 
     /* Use the button to prevent unused variable warning */
     (void)preview_but;
+  }
+
+  /* Color panel */
+  ui::PanelLayout color_panel = layout.panel(C, "glyph_color", false);
+
+  if (color_panel.header) {
+    color_panel.header->label(IFACE_("Color"), ICON_NONE);
+  }
+
+  if (color_panel.body) {
+    /* Color picker - triggers live updates via block_func_handle_set */
+    ui::Layout &col_color = color_panel.body->column(false);
+    col_color.use_property_split_set(true);
+    col_color.prop(op->ptr, "color", UI_ITEM_NONE, IFACE_("Glyph Color"), ICON_NONE);
   }
 
   layout.separator();

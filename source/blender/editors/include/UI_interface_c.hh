@@ -2859,6 +2859,11 @@ void template_node_inputs(Layout *layout, bContext *C, PointerRNA *ptr);
 
 void template_collection_importer(Layout *layout, bContext *C);
 void template_collection_exporters(Layout *layout, bContext *C);
+
+void uiTemplateColorGlyphPresets(Layout *layout,
+                                 bContext *C,
+                                 PointerRNA *ptr,
+                                 const char *propname);
 }  // namespace ui
 
 namespace ed::object::shapekey {

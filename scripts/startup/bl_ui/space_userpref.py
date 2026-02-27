@@ -2168,6 +2168,17 @@ class USERPREF_OT_category_tag_create(Operator):
         self.report({'ERROR'}, message)
         return {'CANCELLED'}
 
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(self, "name")
+        layout.prop(self, "glyph")
+
+        # Color presets with glyph buttons
+        layout.label(text="Color:")
+        row = layout.row()
+        row.template_color_glyph_presets(self.properties, "color")
+
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
 
@@ -5941,7 +5952,11 @@ class USERPREF_PT_tags(TagsPanel, Panel):
             box.use_property_split = True
             box.prop(tag, "name", text="Name")
             box.prop(tag, "glyph", text="Glyph")
-            box.prop(tag, "color", text="Color")
+
+            # Color presets with glyph buttons
+            box.label(text="Color:")
+            row = box.row()
+            row.template_color_glyph_presets(tag, "color")
 
             # Filter Mode button
             row = box.row()

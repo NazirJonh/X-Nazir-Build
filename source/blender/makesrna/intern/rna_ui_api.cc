@@ -1965,6 +1965,15 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   RNA_def_function_ui_description(func, "Generates the UI layout for collection exporters");
 
+  func = RNA_def_function(srna, "template_color_glyph_presets", "ui::uiTemplateColorGlyphPresets");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func, "Color preset buttons with Material Icons glyphs for quick color selection");
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take property");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "property", nullptr, 0, "", "Identifier of property in data");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
   func = RNA_def_function(srna, "template_constraints", "template_constraints");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   RNA_def_function_ui_description(func, "Generates the panels for the constraint stack");

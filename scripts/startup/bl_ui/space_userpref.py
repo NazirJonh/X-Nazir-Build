@@ -5599,8 +5599,8 @@ class USERPREF_PT_experimental_tweaks(ExperimentalPanel, Panel):
 class VIEW3D_OT_category_tabs_settings(Operator):
     """Adjust category tabs size"""
     bl_idname = "view3d.category_tabs_settings"
-    bl_label = "Settings Tabs"
-    bl_description = "Adjust category tabs size"
+    bl_label = "Display Mode Settings"
+    bl_description = "Adjust display mode settings for category tabs"
     bl_options = {'REGISTER', 'UNDO'}
 
     def draw(self, context):

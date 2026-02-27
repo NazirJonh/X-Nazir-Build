@@ -2415,6 +2415,36 @@ static ARegion *ui_panel_category_tooltip_init(
     }
   }
 
+  /* Check if mouse is over the settings button. */
+  const rcti *settings_rct = &region->runtime->category_tabs_settings_rect;
+  if (BLI_rcti_isect_pt(settings_rct, mval[0], mval[1])) {
+    /* Show tooltip for settings button. */
+    const char *tooltip_text = IFACE_("Display Mode Settings");
+
+    /* Position tooltip to avoid overlapping the button.
+     * Convert button rect from region-local to screen coordinates. */
+    rcti settings_rect_screen;
+    settings_rect_screen.xmin = region->winrct.xmin + settings_rct->xmin;
+    settings_rect_screen.xmax = region->winrct.xmin + settings_rct->xmax;
+    settings_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
+    settings_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
+
+    int position[2];
+    if (is_left) {
+      /* Tabs on left side: position tooltip to the right of button. */
+      position[0] = settings_rect_screen.xmax + UI_POPUP_MARGIN;
+    }
+    else {
+      /* Tabs on right side: position tooltip to the left of button. */
+      position[0] = settings_rect_screen.xmin - UI_POPUP_MARGIN;
+    }
+    position[1] = event->xy[1];
+
+    const bool prefer_left = !is_left;
+    return tooltip_create_from_text(
+        C, tooltip_text, position, &settings_rect_screen, prefer_left);
+  }
+
   return nullptr;
 }
 

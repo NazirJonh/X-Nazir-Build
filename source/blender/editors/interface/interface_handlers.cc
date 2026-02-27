@@ -12371,6 +12371,8 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
 
     /* Find which tab (if any) the mouse is over. */
     const char *current_category = nullptr;
+    bool over_settings_button = false;
+
     for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
       if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
         current_category = pc_dyn.idname;
@@ -12378,17 +12380,25 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
       }
     }
 
+    /* Check if mouse is over the settings button. */
+    if (!current_category) {
+      const rcti *settings_rct = &region->runtime->category_tabs_settings_rect;
+      if (BLI_rcti_isect_pt(settings_rct, event->mval[0], event->mval[1])) {
+        over_settings_button = true;
+      }
+    }
+
     const bool category_changed = (prev_category_region != region) ||
                                    (current_category == nullptr) ||
                                    !STREQ(prev_category_idname, current_category ? current_category : "");
 
-    if (current_category && category_changed) {
-      /* Entered a new tab, start tooltip timer. */
-      STRNCPY(prev_category_idname, current_category);
+    if ((current_category || over_settings_button) && category_changed) {
+      /* Entered a new tab or settings button, start tooltip timer. */
+      STRNCPY(prev_category_idname, current_category ? current_category : "");
       prev_category_region = region;
       panel_category_tooltip_timer_init(C, region);
     }
-    else if (!current_category && prev_category_region == region) {
+    else if (!current_category && !over_settings_button && prev_category_region == region) {
       /* Left the tab area, clear tracking. */
       prev_category_idname[0] = '\0';
     }

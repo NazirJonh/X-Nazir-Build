@@ -54,6 +54,11 @@
 #include "interface_intern.hh"
 #include "regions/interface_regions_intern.hh"
 
+#ifdef WITH_PYTHON
+#  include "BPY_extern.hh"
+#  include "BPY_extern_run.hh"
+#endif
+
 namespace blender::ui {
 
 /* -------------------------------------------------------------------- */
@@ -337,6 +342,32 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   /* Clear dialog operator pointer and popup block */
   category_tab_current_dialog_op = nullptr;
   category_tab_popup_block = nullptr;
+
+#ifdef WITH_PYTHON
+  /* Restore tags in Python _glyph_cache to revert live preview changes. */
+  if (category[0] != '\0') {
+    wmWindowManager *wm_ptr = CTX_wm_manager(C);
+    if (wm_ptr) {
+      PointerRNA wm_ptr_rna = RNA_pointer_create_discrete(&wm_ptr->id, RNA_WindowManager, wm_ptr);
+      RNA_string_set(&wm_ptr_rna, "category_tab_save_category", category);
+
+      const char *imports[] = {"bpy", nullptr};
+      char restore_cmd[512];
+      BLI_snprintf(restore_cmd,
+                   sizeof(restore_cmd),
+                   "from bl_ui.space_userpref import restore_category_tags_from_string\n"
+                   "import bpy\n"
+                   "wm = bpy.context.window_manager\n"
+                   "category = wm.category_tab_save_category\n"
+                   "wm.category_tab_save_category = ''\n"
+                   "if category:\n"
+                   "    restore_category_tags_from_string(category, r'''%s''')\n",
+                   original_tags);
+
+      BPY_run_string_exec(C, imports, restore_cmd);
+    }
+  }
+#endif
 
   /* Show info message that changes were discarded */
   WM_global_report(RPT_INFO, "Category tab changes discarded");

@@ -940,6 +940,20 @@ def toggle_category_tag_no_save(category, tag_name):
         return add_category_tag(category, tag_name, auto_save=False)
 
 
+def restore_category_tags_from_string(category, tags_string):
+    """Restore category tags from a semicolon-separated string.
+
+    This is used when cancelling the edit dialog to revert changes.
+    """
+    if not tags_string:
+        tags = []
+    else:
+        tags = [t.strip() for t in tags_string.split(';') if t.strip()]
+
+    tag_log(f"Restoring tags for '{category}' from string: '{tags_string}' -> {tags}")
+    return set_category_tags(category, tags, auto_save=False)
+
+
 def update_category_tags_in_wm(category):
     """Update the tags for a category in WM for UI display.
     

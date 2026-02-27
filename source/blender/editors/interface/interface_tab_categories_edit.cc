@@ -368,8 +368,6 @@ static void category_tag_filter_menu_draw(const bContext *C, Menu *menu)
   layout.separator();
 
   PointerRNA wm_ptr = RNA_pointer_create_discrete(&wm->id, RNA_WindowManager, wm);
-  layout.prop(
-      &wm_ptr, "category_tag_filter_show_all_modes", UI_ITEM_NONE, IFACE_("All Modes"), ICON_NONE);
   layout.prop(&wm_ptr,
               "category_tag_filter_current_mode",
               UI_ITEM_NONE,
@@ -946,7 +944,11 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
   const bool filter_current_mode = wm->category_tag_filter_current_mode;
   const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
 
-  const std::string tags_data = get_tags_for_category_ui(
+  /* Get all active tags for the header (unfiltered) */
+  const std::string tags_data_header = get_tags_for_category_ui(wm, category, true, false, 0);
+
+  /* Get filtered tags for the body list */
+  const std::string tags_data_body = get_tags_for_category_ui(
       wm, category, filter_show_all_modes, filter_current_mode, current_mode_flag);
 
   /* Don't show tags panel for reserved categories */
@@ -958,11 +960,11 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
       tags_panel.header->label(IFACE_("Tags list"), ICON_NONE);
 
       /* Show active tags as colored glyph buttons in header */
-      if (!tags_data.empty()) {
+      if (!tags_data_header.empty()) {
         ui::Layout &glyphs_row = tags_panel.header->row(true);
         glyphs_row.alignment_set(ui::LayoutAlign::Center);
 
-        const char *cursor = tags_data.c_str();
+        const char *cursor = tags_data_header.c_str();
         char tag_name[64];
         char tag_glyph[16];
         char tag_color[32];
@@ -1079,7 +1081,7 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
 
     if (tags_panel.body) {
       ui::Layout &tags_body = *tags_panel.body;
-      if (!tags_data.empty()) {
+      if (!tags_data_body.empty()) {
         /* Create centered container for the grid */
         ui::Layout &centered_row = tags_body.row(false);
         centered_row.alignment_set(ui::LayoutAlign::Center);
@@ -1087,7 +1089,7 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
         /* Use grid_flow for automatic column wrapping (max 3 columns, row-major) */
         ui::Layout &tags_grid = centered_row.grid_flow(true, 3, true, false, false);
 
-        const char *cursor = tags_data.c_str();
+        const char *cursor = tags_data_body.c_str();
         char tag_name[64];
         char tag_glyph[16];
         char tag_color[32];

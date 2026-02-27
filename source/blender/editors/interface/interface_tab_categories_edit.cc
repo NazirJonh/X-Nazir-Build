@@ -880,46 +880,58 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
   if (color_panel.body) {
     ui::Layout &col_color = color_panel.body->column(false);
 
-    /* Color picker - for custom color selection */
-    col_color.use_property_split_set(true);
-    col_color.prop(op->ptr, "color", UI_ITEM_NONE, IFACE_("Color"), ICON_NONE);
-
-    col_color.separator();
-
-    /* Color preset buttons - shows colored icon buttons for quick color selection */
+    /* Centered row for preset buttons and custom color picker */
     ui::Layout &presets_row = col_color.row(true);
-    presets_row.alignment_set(ui::LayoutAlign::Left);
+    presets_row.alignment_set(ui::LayoutAlign::Center);
     presets_row.emboss_set(ui::EmbossType::Pulldown);
+
+    /* Get block for creating buttons */
+    ui::Block *block = presets_row.block();
+    ui::block_layout_set_current(block, &presets_row);
 
     /* Get operator type */
     wmOperatorType *ot = WM_operatortype_find("SCREEN_OT_category_tab_color_preset", false);
-
-    /* Color preset icons - using CATEGORY_TAB_COLOR icons which are vicon and show actual colors */
-    const int color_icons[] = {
-        ICON_X,                       /* NONE */
-        ICON_CATEGORY_TAB_COLOR_01,   /* Red */
-        ICON_CATEGORY_TAB_COLOR_02,   /* Orange */
-        ICON_CATEGORY_TAB_COLOR_03,   /* Yellow */
-        ICON_CATEGORY_TAB_COLOR_04,   /* Green */
-        ICON_CATEGORY_TAB_COLOR_05,   /* Turquoise */
-        ICON_CATEGORY_TAB_COLOR_06,   /* Blue */
-        ICON_CATEGORY_TAB_COLOR_07,   /* Purple */
-        ICON_CATEGORY_TAB_COLOR_08,   /* Pink */
-    };
+    bTheme *btheme = theme::theme_get();
 
     /* Create button for each color preset (9 buttons: NONE + 8 colors) */
     for (int i = 0; i < 9; i++) {
       const int preset = i - 1;  /* -1 to 7 */
 
-      PointerRNA op_ptr = presets_row.op(ot->idname,
-                                         "",
-                                         color_icons[i],
-                                         wm::OpCallContext::ExecDefault,
-                                         UI_ITEM_NONE);
+      ui::Button *but = uiDefButO_ptr(block,
+                                      ui::ButtonType::But,
+                                      ot,
+                                      wm::OpCallContext::ExecDefault,
+                                      (i == 0) ? "" : "\xEE\xA6\x97",
+                                      0,
+                                      0,
+                                      UI_UNIT_X * 1.5f,
+                                      UI_UNIT_Y,
+                                      std::nullopt);
+
+      if (i == 0) {
+        def_but_icon(but, ICON_X, UI_HAS_ICON);
+        but->col[0] = 0;
+        but->col[1] = 0;
+        but->col[2] = 0;
+        but->col[3] = 0;
+        but->drawflag &= ~BUT_TEXT_USE_COL;
+      }
+      else {
+        const ThemeCollectionColor *category_tab_color = &btheme->collection_color[preset];
+        button_color_set(but, category_tab_color->color);
+        but->drawflag |= BUT_TEXT_USE_COL;
+      }
 
       /* Set operator properties */
-      RNA_int_set(&op_ptr, "preset", preset);
+      PointerRNA *op_ptr = button_operator_ptr_ensure(but);
+      RNA_int_set(op_ptr, "preset", preset);
     }
+
+    /* Custom color picker - minimal size, immediately after presets */
+    presets_row.separator();
+    ui::Layout &picker_col = presets_row.column(false);
+    picker_col.ui_units_x_set(1.0f);
+    picker_col.prop(op->ptr, "color", ui::ITEM_R_ICON_ONLY, "", ICON_NONE);
   }
 
   layout.separator();

@@ -849,6 +849,61 @@ const char *panel_category_tooltip_name_get(const ARegion *region,
  */
 int ui_panel_category_show_active_tab(ARegion *region, const int mval[2]);
 
+/* `interface_tab_categories_edit.cc` */
+
+/**
+ * External access to dialog operator pointer (for Reset/Save buttons).
+ */
+extern wmOperator *category_tab_current_dialog_op;
+
+/**
+ * External access to popup block pointer (for Save button to close popup).
+ */
+extern ui::Block *category_tab_popup_block;
+
+/**
+ * Hex/UTF-8 conversion utilities.
+ */
+bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8_max);
+bool process_glyph_input(const char *input, char *output, size_t output_max);
+void utf8_to_hex_codepoint(const char *input, char *output, size_t output_max);
+bool is_display_glyph_codepoint(unsigned int codepoint);
+bool is_single_glyph_str(const char *str);
+
+/**
+ * Category lookup utilities.
+ */
+const char *find_panel_label_for_category(ARegion *region, const char *category);
+bool extract_leading_glyph(const char *input,
+                           char *glyph_hex_out,
+                           size_t glyph_hex_max,
+                           char *text_out,
+                           size_t text_max);
+
+/**
+ * Popup callbacks (exported for operators).
+ */
+void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data);
+void category_tab_edit_popup_ok_cb(bContext *C, void *user_data, int retval);
+void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int event);
+
+/**
+ * Menu registration.
+ */
+void category_tag_filter_menu_register();
+
+/**
+ * Popup block creation.
+ */
+ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_data);
+
+/**
+ * Dialog invoke/exec.
+ */
+bool category_tab_edit_poll(bContext *C);
+wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C, wmOperator *op, const wmEvent *event);
+wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op);
+
 /* `interface.cc` */
 
 void fontscale(float *points, float aspect);

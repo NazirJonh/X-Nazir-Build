@@ -151,8 +151,16 @@ static Block *color_glyph_preset_popup_callback(bContext *C, ARegion *region, vo
     Layout &row = layout.row(true);
     row.alignment_set(LayoutAlign::Left);
 
-    /* Create operator button */
-    const char *button_text = (i == 0) ? IFACE_("None") : "  ";
+    /* Create button text with glyph and label */
+    char button_text[64];
+    if (i == 0) {
+      STRNCPY(button_text, IFACE_("None"));
+    }
+    else {
+      /* Format: "⦗ Set Color Tag 1" etc */
+      SNPRINTF(button_text, "\xEE\xA6\x97 %s %d", IFACE_("Set Color"), preset + 1);
+    }
+
     Button *but = uiDefButO_ptr(
         block,
         ButtonType::But,
@@ -161,7 +169,7 @@ static Block *color_glyph_preset_popup_callback(bContext *C, ARegion *region, vo
         button_text,
         0,
         0,
-        UI_UNIT_X * 8,
+        UI_UNIT_X * 5.5f,
         UI_UNIT_Y,
         std::nullopt);
 
@@ -172,11 +180,17 @@ static Block *color_glyph_preset_popup_callback(bContext *C, ARegion *region, vo
     if (i == 0) {
       /* NONE button - show X icon */
       def_but_icon(but, ICON_X, UI_HAS_ICON);
+      but->col[0] = 0;
+      but->col[1] = 0;
+      but->col[2] = 0;
+      but->col[3] = 0;
+      but->drawflag &= ~BUT_TEXT_USE_COL;
     }
     else {
-      /* Color preset button - show colored box */
+      /* Color preset button - show colored glyph */
       const ThemeCollectionColor *category_tab_color = &btheme->collection_color[preset];
       button_color_set(but, category_tab_color->color);
+      but->drawflag |= BUT_TEXT_USE_COL;
     }
 
     /* Set operator properties */
@@ -200,12 +214,6 @@ static Block *color_glyph_preset_popup_callback(bContext *C, ARegion *region, vo
            ptr->data, prop);
 #endif
   }
-
-  layout.separator();
-
-  /* Custom color picker at the bottom */
-  Layout &picker_row = layout.row(true);
-  picker_row.prop(ptr, propname, ITEM_R_ICON_ONLY, std::nullopt, ICON_COLOR);
 
   /* Set popup bounds and direction after all content is created */
   block_bounds_set_normal(block, 0.3f * U.widget_unit);

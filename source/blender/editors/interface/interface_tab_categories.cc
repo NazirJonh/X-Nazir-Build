@@ -2245,7 +2245,8 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   }
 
   /* Check if reserved (cannot be reordered) */
-  bool is_reserved_glyph = category_is_reserved(CTX_wm_manager(C), clicked_pc->idname);
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  bool is_reserved_glyph = category_is_reserved(wm, clicked_pc->idname);
 
   /* Initialize drag state (allow all categories for now) */
   CategoryDragState *state = MEM_new<CategoryDragState>(__func__);

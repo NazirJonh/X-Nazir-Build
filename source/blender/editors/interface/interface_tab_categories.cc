@@ -941,7 +941,7 @@ static int get_category_order_index(const bContext *C, ARegion *region, const ch
 }
 
 /* Forward declaration */
-static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region);
+Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region);
 
 static int calculate_insert_index(const bContext *C,
                                   const wmWindowManager *wm,
@@ -1115,7 +1115,7 @@ void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *regio
   }
 }
 
-static Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region)
+Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region)
 {
   WorkSpace *workspace = CTX_wm_workspace(C);
   ScrArea *area = CTX_wm_area(C);

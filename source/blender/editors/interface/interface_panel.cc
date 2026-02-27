@@ -2589,7 +2589,6 @@ static int ui_handle_panel_category_cycling(bContext *C,
 {
   BLI_assert(BKE_regiontype_uses_category_tabs(region->runtime->type));
 
-  const wmWindowManager *wm = CTX_wm_manager(C);
   const bool is_mousewheel = ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE);
   const bool inside_tabregion =
       ((RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT) ?
@@ -2609,22 +2608,31 @@ static int ui_handle_panel_category_cycling(bContext *C,
   else {
     const char *category = panel_category_active_get(region, false);
     if (LIKELY(category)) {
-      PanelCategoryDyn *pc_dyn = panel_category_find(region, category);
-      if (LIKELY(pc_dyn) && (event->modifier & KM_CTRL)) {
-        const bool backwards = is_mousewheel ? (event->type == WHEELUPMOUSE) : (event->modifier & KM_SHIFT);
+      if (event->modifier & KM_CTRL) {
+        const bool backwards = is_mousewheel ? (event->type == WHEELUPMOUSE) :
+                                               (event->modifier & KM_SHIFT);
 
-        /* Find next visible category, skipping hidden ones.
-         * Stops at first/last visible category (no wrapping). */
-        PanelCategoryDyn *next = backwards ? pc_dyn->prev : pc_dyn->next;
+        /* Get categories in custom order (respects user's reorder from drag & drop). */
+        Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
 
-        while (next && !panel_category_is_visible_by_tags(C, wm, next->idname)) {
-          next = backwards ? next->prev : next->next;
+        /* Find current category index in the ordered list. */
+        int current_index = -1;
+        for (int i = 0; i < ordered_categories.size(); i++) {
+          if (STREQ(ordered_categories[i]->idname, category)) {
+            current_index = i;
+            break;
+          }
         }
 
-        if (next) {
-          /* Intentionally don't reset scroll in this case,
-           * allowing for quick browsing between tabs. */
-          panel_category_active_set(region, next->idname);
+        if (current_index >= 0) {
+          /* Find next category in the ordered list.
+           * Stops at first/last visible category (no wrapping). */
+          int next_index = backwards ? (current_index - 1) : (current_index + 1);
+
+          if (next_index >= 0 && next_index < ordered_categories.size()) {
+            PanelCategoryDyn *next = ordered_categories[next_index];
+            panel_category_active_set(region, next->idname);
+          }
         }
         return WM_UI_HANDLER_BREAK;
       }

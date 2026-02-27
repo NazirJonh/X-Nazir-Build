@@ -849,6 +849,12 @@ const char *panel_category_tooltip_name_get(const ARegion *region,
  */
 int ui_panel_category_show_active_tab(ARegion *region, const int mval[2]);
 
+/**
+ * Get categories in custom order (from workspace settings).
+ * Returns a vector of category pointers sorted according to user's custom order.
+ */
+Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region);
+
 /* `interface_tab_categories_edit.cc` */
 
 /**

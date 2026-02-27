@@ -2438,7 +2438,13 @@ static ARegion *ui_panel_category_active_tooltip_init(
     return nullptr;
   }
 
-  const std::string tooltip_text = std::string("Active tab: ") + IFACE_(category_idname);
+  /* Get window manager for category display name lookup. */
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  /* In GLYPHS_ONLY mode, show the category display name from mappings,
+   * or the category name itself if not configured in mappings.
+   * This matches the behavior of hover tooltips. */
+  const char *category_display_name = panel_category_tooltip_name_get(region, wm, category_idname);
+  const std::string tooltip_text = std::string("Active tab: ") + IFACE_(category_display_name);
 
   wmWindow *win = CTX_wm_window(C);
   const wmEvent *event = win->runtime->eventstate;
@@ -2513,7 +2519,11 @@ static ARegion *ui_panel_category_active_tooltip_init(
 
   int max_text_width = 0;
   for (const PanelCategoryDyn &pc_dyn_it : region->runtime->panels_category) {
-    const std::string text_it = std::string("Active tab: ") + IFACE_(pc_dyn_it.idname);
+    /* Use display name (without glyphs) for width calculation,
+     * matching the tooltip text behavior. */
+    const char *category_display_name_it = panel_category_tooltip_name_get(
+        region, wm, pc_dyn_it.idname);
+    const std::string text_it = std::string("Active tab: ") + IFACE_(category_display_name_it);
     ResultBLF info = {0};
     const int text_width = BLF_width(font_id, text_it.c_str(), text_it.size(), &info);
     max_text_width = max_ii(max_text_width, text_width);
@@ -2806,11 +2816,16 @@ int handler_panel_region(bContext *C,
       if (retval == WM_UI_HANDLER_BREAK) {
         /* Show or update tooltip with active tab name. */
         wmWindow *win = CTX_wm_window(C);
+        const wmWindowManager *wm = CTX_wm_manager(C);
         const char *category_idname = panel_category_active_get(region, false);
 
         if (category_idname) {
+          /* Use display name (without glyphs) for tooltip,
+           * matching the behavior of hover tooltips. */
+          const char *category_display_name = panel_category_tooltip_name_get(
+              region, wm, category_idname);
           const std::string tooltip_text = std::string("Active tab: ") +
-                                           IFACE_(category_idname);
+                                           IFACE_(category_display_name);
 
           /* Try to update existing tooltip first to avoid flickering. */
           if (!WM_tooltip_update_text(C, win, tooltip_text.c_str())) {

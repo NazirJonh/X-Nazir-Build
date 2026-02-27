@@ -2306,8 +2306,62 @@ void panel_category_tabs_settings_popover_open(bContext *C, ARegion *region)
   /* Store click time for hover reset timeout. */
   region->runtime->category_tabs_settings_click_time = BLI_time_now_seconds();
 
+  wmWindow *win = CTX_wm_window(C);
+  if (!win || !win->runtime->eventstate) {
+    WM_operator_name_call(C, "VIEW3D_OT_category_tabs_settings", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
+    return;
+  }
+
+  /* Position popup to the left of all tabs. Find the leftmost edge. */
+  int tabs_leftmost = region->runtime->category_tabs_settings_rect.xmin;
+
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (pc_dyn.rect.xmin < tabs_leftmost) {
+      tabs_leftmost = pc_dyn.rect.xmin;
+    }
+  }
+
+  /* Also check settings button. */
+  if (region->runtime->category_tabs_settings_rect.xmin < tabs_leftmost) {
+    tabs_leftmost = region->runtime->category_tabs_settings_rect.xmin;
+  }
+
+  /* Popup width is 200 pixels (set in Python operator), convert with scale. */
+  const int popup_width = 200 * UI_SCALE_FAC;
+  /* Add extra margin for spacing. */
+  const int popup_margin = 10 * UI_SCALE_FAC;
+
+  /* Position popup to the LEFT of all tabs. */
+  const int popup_x = region->winrct.xmin + tabs_leftmost - popup_width - popup_margin;
+
+  /* Use vertical center of settings button for Y position. */
+  const int button_center_y = region->winrct.ymin +
+                               (region->runtime->category_tabs_settings_rect.ymin +
+                                region->runtime->category_tabs_settings_rect.ymax) / 2;
+
+  /* Save original mouse position. */
+  int orig_xy[2];
+  copy_v2_v2_int(orig_xy, win->runtime->eventstate->xy);
+
+  /* Also need to update eventstate->mval which is local to region! */
+  wmEvent *event = win->runtime->eventstate;
+  int orig_mval[2] = {event->mval[0], event->mval[1]};
+
+  /* Calculate local mval coordinates for popup positioning. */
+  event->mval[0] = popup_x - region->winrct.xmin;
+  event->mval[1] = button_center_y - region->winrct.ymin;
+
+  /* Set mouse position to the left of all tabs for popup positioning. */
+  win->runtime->eventstate->xy[0] = popup_x;
+  win->runtime->eventstate->xy[1] = button_center_y;
+
   /* Invoke the Python operator which shows the settings popup. */
   WM_operator_name_call(C, "VIEW3D_OT_category_tabs_settings", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
+
+  /* Restore original mouse position. */
+  copy_v2_v2_int(win->runtime->eventstate->xy, orig_xy);
+  event->mval[0] = orig_mval[0];
+  event->mval[1] = orig_mval[1];
 }
 
 static ARegion *ui_panel_category_tooltip_init(

@@ -1308,8 +1308,19 @@ static void ui_panel_category_draw_content(
   bool draw_dual = false;
   const char *text_for_name = category_id_draw;
 
-  if (display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT && has_glyph) {
+  if (display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT && (has_glyph || is_fallback_letter)) {
     draw_dual = true;
+    if (is_fallback_letter && is_single_glyph_str(category_id_draw)) {
+      for (const PanelType &pt : region->runtime->type->paneltypes) {
+        if (pt.category && STREQ(pt.category, category_id)) {
+          const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+          if (panel_label && panel_label[0]) {
+            text_for_name = panel_label;
+            break;
+          }
+        }
+      }
+    }
   }
   else if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
            U.category_tabs_show_active_name && is_active)
@@ -1648,12 +1659,24 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
         }
         break;
 
-      case USER_CATEGORY_TABS_GLYPHS_TEXT:
-        if (has_glyph) {
+      case USER_CATEGORY_TABS_GLYPHS_TEXT: {
+        const char *text_for_width = category_id_draw;
+        if (has_glyph || is_fallback_letter) {
+          if (is_fallback_letter && is_single_glyph_str(category_id_draw)) {
+            for (const PanelType &pt : region->runtime->type->paneltypes) {
+              if (pt.category && STREQ(pt.category, category_id)) {
+                const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+                if (panel_label && panel_label[0]) {
+                  text_for_width = panel_label;
+                  break;
+                }
+              }
+            }
+          }
           const int glyph_h = round_fl_to_int(BLF_height(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
           BLF_enable(fontid, BLF_ROTATION);
           BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
-          const int text_w = round_fl_to_int(BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+          const int text_w = round_fl_to_int(BLF_width(fontid, text_for_width, BLF_DRAW_STR_DUMMY_MAX));
           BLF_disable(fontid, BLF_ROTATION);
           const int glyph_text_gap = round_fl_to_int(TABS_GLYPH_TEXT_GAP_FACTOR * UI_SCALE_FAC * zoom);
           category_width = glyph_h + text_w + glyph_text_gap;
@@ -1665,6 +1688,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
           BLF_disable(fontid, BLF_ROTATION);
         }
         break;
+      }
 
       case USER_CATEGORY_TABS_TEXT_ONLY:
       default: {

@@ -2254,10 +2254,86 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   state->is_reserved = is_reserved_glyph;
 
   if (is_reserved_glyph) {
-    /* Create persistent tooltip */
+    /* Create persistent tooltip with proper alignment to avoid overlapping tabs. */
     char msg[128];
     SNPRINTF(msg, "%s (Cannot Reorder)", IFACE_(clicked_pc->idname));
-    state->tooltip_region = tooltip_create_from_text(C, msg, event->xy);
+
+    /* Use the same positioning logic as hover tooltips. */
+    const bool is_left = (RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT);
+
+    /* Position tooltip to avoid overlapping the tab.
+     * Convert tab rect from region-local to screen coordinates. */
+    rcti tab_rect_screen;
+    tab_rect_screen.xmin = region->winrct.xmin + clicked_pc->rect.xmin;
+    tab_rect_screen.xmax = region->winrct.xmin + clicked_pc->rect.xmax;
+    tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
+    tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
+
+    int position[2];
+    if (is_left) {
+      position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN;
+    }
+    else {
+      position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN;
+    }
+    position[1] = event->xy[1];
+
+    const bool prefer_left = !is_left;
+    state->tooltip_region = tooltip_create_from_text(
+        C, msg, position, &tab_rect_screen, prefer_left);
+    /* Store initial X position to keep tooltip fixed horizontally during drag. */
+    state->tooltip_initial_x = state->tooltip_region->winrct.xmin;
+  }
+  else {
+    /* Check if we need to show category name tooltip for Icon mode.
+     * Show tooltip in Icon mode when:
+     * - Show Drag Tooltips is enabled
+     * - AND (Show Active Tab Name is OFF, OR category is not the active one)
+     * This helps users identify tabs when only icons are visible. */
+    const eUserPref_CategoryTabsDisplayMode display_mode =
+        static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+    const bool is_active = STREQ(clicked_pc->idname, region->runtime->category);
+
+    if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+        U.category_tabs_show_drag_tooltips &&
+        !(U.category_tabs_show_active_name && is_active))
+    {
+      /* Get category display name using the same method as hover tooltips. */
+      const char *category_display_name = panel_category_tooltip_name_get(region, wm, clicked_pc->idname);
+      if (category_display_name && category_display_name[0]) {
+        /* Create tooltip with proper alignment to avoid overlapping tabs.
+         * Uses the same positioning logic as hover tooltips. */
+        const bool is_left = (RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT);
+
+        /* Position tooltip to avoid overlapping the tab.
+         * Convert tab rect from region-local to screen coordinates.
+         * Use mouse Y position to keep tooltip aligned with cursor vertically. */
+        rcti tab_rect_screen;
+        tab_rect_screen.xmin = region->winrct.xmin + clicked_pc->rect.xmin;
+        tab_rect_screen.xmax = region->winrct.xmin + clicked_pc->rect.xmax;
+        /* Use mouse Y position to keep tooltip vertically aligned with cursor. */
+        tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
+        tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
+
+        int position[2];
+        if (is_left) {
+          /* Tabs on left side: position tooltip to the right of tabs. */
+          position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN;
+        }
+        else {
+          /* Tabs on right side: position tooltip to the left of tabs. */
+          position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN;
+        }
+        position[1] = event->xy[1];
+
+        /* For tabs on right side, prefer left side positioning first. */
+        const bool prefer_left = !is_left;
+        state->tooltip_region = tooltip_create_from_text(
+            C, IFACE_(category_display_name), position, &tab_rect_screen, prefer_left);
+        /* Store initial X position to keep tooltip fixed horizontally during drag. */
+        state->tooltip_initial_x = state->tooltip_region->winrct.xmin;
+      }
+    }
   }
   state->current_mouse_x = event->mval[0];
   state->current_mouse_y = event->mval[1];
@@ -2326,19 +2402,24 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
 
   const bool is_timer = (event->type == TIMER && event->customdata == state->scroll_timer);
 
+  /* Update tooltip position on mouse move (for all categories with tooltip).
+   * Keep tooltip fixed horizontally (X), only move vertically (Y) with cursor. */
+  if (event->type == MOUSEMOVE && state->tooltip_region) {
+    int dy = event->mval[1] - state->current_mouse_y;
+    /* Move tooltip only vertically, keep horizontal position fixed. */
+    state->tooltip_region->winrct.ymin += dy;
+    state->tooltip_region->winrct.ymax += dy;
+    /* Ensure X position stays at initial value. */
+    int width = BLI_rcti_size_x(&state->tooltip_region->winrct);
+    state->tooltip_region->winrct.xmin = state->tooltip_initial_x;
+    state->tooltip_region->winrct.xmax = state->tooltip_initial_x + width;
+    state->current_mouse_x = event->mval[0];
+    state->current_mouse_y = event->mval[1];
+    ED_region_tag_redraw(region);
+  }
+
   /* Special handling for reserved tabs (tooltip only) */
   if (state->is_reserved) {
-    if (event->type == MOUSEMOVE) {
-      if (state->tooltip_region) {
-        int dx = event->mval[0] - state->current_mouse_x;
-        int dy = event->mval[1] - state->current_mouse_y;
-        BLI_rcti_translate(&state->tooltip_region->winrct, dx, dy);
-      }
-      state->current_mouse_x = event->mval[0];
-      state->current_mouse_y = event->mval[1];
-      ED_region_tag_redraw(region);
-    }
-
     /* Finish on mouse release or leaving region */
     bool finish = (event->type == LEFTMOUSE && event->val == KM_RELEASE);
     if (!finish && (event->mval[0] < 0 || event->mval[0] > region->winx ||

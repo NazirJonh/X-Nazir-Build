@@ -152,6 +152,7 @@ void WM_tooltip_refresh(bContext *C, wmWindow *win)
 
 bool WM_tooltip_update_text(bContext *C, wmWindow *win, const char *text)
 {
+  (void)C;  /* Unused - tooltip update is handled through region */
   bScreen *screen = WM_window_get_active_screen(win);
   if (screen->tool_tip == nullptr || screen->tool_tip->region == nullptr) {
     return false;

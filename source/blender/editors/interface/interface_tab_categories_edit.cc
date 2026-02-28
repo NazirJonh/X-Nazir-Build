@@ -75,7 +75,7 @@ static float category_tab_preview_color[3] = {0.0f, 0.0f, 0.0f};
 wmOperator *category_tab_current_dialog_op = nullptr;
 
 /* Static pointer to popup block - needed for Save button to close popup */
-ui::Block *category_tab_popup_block = nullptr;
+Block *category_tab_popup_block = nullptr;
 
 /** \} */
 
@@ -394,7 +394,7 @@ static MenuType *category_tag_filter_menu_type = nullptr;
 
 static void category_tag_filter_menu_draw(const bContext *C, Menu *menu)
 {
-  ui::Layout &layout = *menu->layout;
+  Layout &layout = *menu->layout;
   wmWindowManager *wm = CTX_wm_manager(C);
 
   layout.label(IFACE_("Filter Tags"), ICON_NONE);
@@ -1003,6 +1003,116 @@ static void glyph_search_result_button_cb(bContext *C, void *arg1, void *arg2)
   WM_main_add_notifier(NC_WINDOW, nullptr);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Glyph Grid Popup
+ * \{ */
+
+/**
+ * Data structure for glyph grid popup.
+ * Stores the operator and glyphs to display.
+ */
+struct GlyphGridPopupData {
+  wmOperator *op;
+  Vector<std::pair<std::string, std::string>> glyphs;
+  std::string category;
+  PopupBlockHandle *popup_handle;
+
+  GlyphGridPopupData(wmOperator *op_,
+                     Vector<std::pair<std::string, std::string>> glyphs_,
+                     std::string category_)
+      : op(op_), glyphs(std::move(glyphs_)), category(std::move(category_)), popup_handle(nullptr)
+  {
+  }
+};
+
+/**
+ * Block creation function for glyph grid popup.
+ * Creates a popup with Grid View for selecting glyphs.
+ */
+static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *arg)
+{
+  GlyphGridPopupData *popup_data = static_cast<GlyphGridPopupData *>(arg);
+
+  /* Create block */
+  Block *block = block_begin(C, region, "glyph_grid_popup", EmbossType::Emboss);
+  block_flag_enable(block, BLOCK_LOOP | BLOCK_MOVEMOUSE_QUIT);
+  block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
+
+  /* Set popup size */
+  const int popup_width = 600 * UI_SCALE_FAC;
+  const int bounds_offset[2] = {0, 0};
+  block_bounds_set_popup(block, 6 * UI_SCALE_FAC, bounds_offset);
+
+  /* Create layout */
+  Layout &layout = block_layout(block,
+                                LayoutDirection::Vertical,
+                                LayoutType::Panel,
+                                0,
+                                0,
+                                popup_width,
+                                0,
+                                0,
+                                style_get());
+
+  /* Add title */
+  Layout &title_row = layout.row(false);
+  title_row.label("Select Glyph", ICON_NONE);
+  layout.separator();
+
+  /* Create Grid View */
+  std::unique_ptr<GlyphGridView> grid_view_ptr = std::make_unique<GlyphGridView>();
+  GlyphGridView *grid_view = grid_view_ptr.get();
+
+  grid_view->set_glyphs(popup_data->glyphs);
+  grid_view->set_category(popup_data->category);
+
+  /* Set tile size for better visibility */
+  grid_view->set_tile_size(UI_UNIT_X * 2, UI_UNIT_Y * 2);
+
+  /* Set the selection callback */
+  grid_view->set_on_glyph_select_fn(
+      [popup_data](bContext &C, const std::string &unicode) {
+        /* Convert unicode to hex codepoint */
+        char hex_code[16] = "";
+        utf8_to_hex_codepoint(unicode.c_str(), hex_code, sizeof(hex_code));
+
+        /* Set the glyph property */
+        RNA_string_set(popup_data->op->ptr, "glyph", hex_code);
+
+        /* Clear the search field */
+        RNA_string_set(popup_data->op->ptr, "glyph_search", "");
+
+        /* Trigger live update to refresh preview */
+        category_tab_edit_live_update_cb(&C, popup_data->op, 0);
+
+        /* Close the popup */
+        if (popup_data->popup_handle) {
+          popup_data->popup_handle->menuretval = RETURN_OK;
+        }
+
+        /* Trigger redraw */
+        WM_main_add_notifier(NC_WINDOW, nullptr);
+      });
+
+  /* Add grid view to block and build it */
+  AbstractGridView *view = block_add_view(*block, "glyph_grid", std::move(grid_view_ptr));
+
+  /* Build the grid view */
+  GridViewBuilder builder(*block);
+  builder.build_grid_view(*C, *view, layout);
+
+  return block;
+}
+
+/**
+ * Free function for glyph grid popup data.
+ */
+static void glyph_grid_popup_free(void *arg)
+{
+  GlyphGridPopupData *popup_data = static_cast<GlyphGridPopupData *>(arg);
+  delete popup_data;
+}
+
 /**
  * Callback for the "More glyphs" button.
  * Opens the Grid View popup for selecting glyphs.
@@ -1028,39 +1138,26 @@ static void glyph_more_glyphs_button_cb(bContext *C, void *arg1, void * /*arg2*/
     return;
   }
 
-  /* Create a Grid View and populate it with glyphs */
-  auto *grid_view = new ui::GlyphGridView();
-  grid_view->set_glyphs(glyphs);
-  grid_view->set_category(category);
+  /* Create popup data */
+  GlyphGridPopupData *popup_data = new GlyphGridPopupData(op, glyphs, category);
 
-  /* Set the selection callback */
-  grid_view->set_on_glyph_select_fn([op](bContext &C, const std::string &unicode) {
-    /* Convert unicode to hex codepoint */
-    char hex_code[16] = "";
-    utf8_to_hex_codepoint(unicode.c_str(), hex_code, sizeof(hex_code));
+  /* Create and show popup */
+  PopupBlockHandle *handle = popup_block_create(
+      C, nullptr, nullptr, glyph_grid_popup_block_create, nullptr, popup_data, glyph_grid_popup_free, false);
 
-    /* Set the glyph property */
-    RNA_string_set(op->ptr, "glyph", hex_code);
+  /* Store handle for closing popup from callback */
+  popup_data->popup_handle = handle;
 
-    /* Clear the search field */
-    RNA_string_set(op->ptr, "glyph_search", "");
+  /* Make it a popup */
+  handle->popup = true;
 
-    /* Trigger live update to refresh preview */
-    category_tab_edit_live_update_cb(&C, op, 0);
-
-    /* Close the popup */
-    if (category_tab_popup_block) {
-      block_flag_disable(category_tab_popup_block, ui::BLOCK_KEEP_OPEN);
-    }
-
-    /* Trigger redraw */
-    WM_main_add_notifier(NC_WINDOW, nullptr);
-  });
-
-  /* TODO: Open popup with Grid View
-   * This requires creating a popup block and building the grid view in it
-   */
+  /* Add handlers */
+  wmWindow *window = CTX_wm_window(C);
+  popup_handlers_add(C, &window->runtime->modalhandlers, handle, 0);
+  WM_event_add_mousemove(window);
 }
+
+/** \} */
 
 /** \} */
 
@@ -1068,21 +1165,21 @@ static void glyph_more_glyphs_button_cb(bContext *C, void *arg1, void * /*arg2*/
 /** \name Popup Block Creation
  * \{ */
 
-ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_data)
+Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_data)
 {
   wmOperator *op = static_cast<wmOperator *>(user_data);
-  const uiStyle *style = ui::style_get_dpi();
+  const uiStyle *style = style_get_dpi();
 
   /* Calculate dialog width - increased for better visibility and tag grid */
   const int dialog_width = 450 * UI_SCALE_FAC;
 
-  ui::Block *block = block_begin(C, region, __func__, ui::EmbossType::Emboss);
-  block_flag_disable(block, ui::BLOCK_LOOP);
-  block_theme_style_set(block, ui::BLOCK_THEME_STYLE_POPUP);
+  Block *block = block_begin(C, region, __func__, EmbossType::Emboss);
+  block_flag_disable(block, BLOCK_LOOP);
+  block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
   popup_dummy_panel_set(region, block, op->idname);
 
   /* Keep popup open while editing - important for live preview */
-  block_flag_enable(block, ui::BLOCK_KEEP_OPEN | ui::BLOCK_NUMSELECT);
+  block_flag_enable(block, BLOCK_KEEP_OPEN | BLOCK_NUMSELECT);
 
   /* Store block pointer for Save button to close popup */
   category_tab_popup_block = block;
@@ -1091,9 +1188,9 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
   block_func_handle_set(block, category_tab_edit_live_update_cb, op);
 
   /* Create layout */
-  ui::Layout &layout = ui::block_layout(block,
-                                         ui::LayoutDirection::Vertical,
-                                         ui::LayoutType::Panel,
+  Layout &layout = block_layout(block,
+                                         LayoutDirection::Vertical,
+                                         LayoutType::Panel,
                                          0,
                                          0,
                                          dialog_width,
@@ -1103,7 +1200,7 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
 
   /* Title */
   uiItemL_ex(&layout, IFACE_("Edit Category Tab"), ICON_NONE, true, false);
-  layout.separator(0.2f, ui::LayoutSeparatorType::Line);
+  layout.separator(0.2f, LayoutSeparatorType::Line);
   layout.separator(0.5f);
 
   /* Get category for button wiring */
@@ -1164,13 +1261,13 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
   bool is_reserved = category_is_reserved(wm, category);
 
   /* Properties layout with split for consistent alignment */
-  ui::Layout &col_props = layout.column(false);
+  Layout &col_props = layout.column(false);
   col_props.use_property_split_set(true);
 
   /* Category Name - check if reserved for read-only */
   if (is_reserved) {
     /* Reserved categories: show field as read-only (disabled) */
-    ui::Layout &row_name = col_props.row(false);
+    Layout &row_name = col_props.row(false);
     row_name.enabled_set(false);
     row_name.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
   }
@@ -1181,7 +1278,7 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
   layout.separator();
 
   /* Change Icon panel */
-  ui::PanelLayout icon_panel = layout.panel(C, "change_icon", false);
+  PanelLayout icon_panel = layout.panel(C, "change_icon", false);
 
   if (icon_panel.header) {
     icon_panel.header->label(IFACE_("Change the display"), ICON_NONE);
@@ -1189,19 +1286,19 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
 
   if (icon_panel.body) {
     /* Properties for glyph search and code */
-    ui::Layout &col_glyph = icon_panel.body->column(false);
+    Layout &col_glyph = icon_panel.body->column(false);
 
     /* Row with Search Glyph on left and Code with Paste on right */
-    ui::Layout &row_search_glyph = col_glyph.row(false);
-    ui::Layout &split_search_glyph = row_search_glyph.split(0.7f, false);
+    Layout &row_search_glyph = col_glyph.row(false);
+    Layout &split_search_glyph = row_search_glyph.split(0.7f, false);
 
     /* Left side: Search Glyph field - right aligned */
-    ui::Layout &col_search = split_search_glyph.column(false);
+    Layout &col_search = split_search_glyph.column(false);
 
     /* Search field - use split to control width, align right side */
-    ui::Layout &split_search = col_search.split(0.89f, false);
-    ui::Layout &search_row = split_search.row(false);
-    search_row.alignment_set(ui::LayoutAlign::Right);
+    Layout &split_search = col_search.split(0.89f, false);
+    Layout &search_row = split_search.row(false);
+    search_row.alignment_set(LayoutAlign::Right);
     search_row.prop(op->ptr, "glyph_search", UI_ITEM_NONE, IFACE_("Glyph"), ICON_VIEWZOOM);
 
     /* Display search results if glyph_search field is not empty */
@@ -1210,11 +1307,11 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
 
     if (glyph_search_query[0] != '\0') {
       /* Create a row for search results */
-      ui::Layout &results_row = col_glyph.row(false);
-      results_row.alignment_set(ui::LayoutAlign::Center);
+      Layout &results_row = col_glyph.row(false);
+      results_row.alignment_set(LayoutAlign::Center);
 
       /* Create grid for search result buttons (5 columns) */
-      ui::Layout &results_grid = results_row.grid_flow(true, 5, true, false, false);
+      Layout &results_grid = results_row.grid_flow(true, 5, true, false, false);
 
       /* Call Python API to search glyphs */
       char category[64];
@@ -1243,11 +1340,11 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
           const std::string &glyph_name = result.second;
 
           /* Create button with glyph */
-          ui::Block *result_block = results_grid.block();
-          ui::block_layout_set_current(result_block, &results_grid);
+          Block *result_block = results_grid.block();
+          block_layout_set_current(result_block, &results_grid);
 
-          ui::Button *result_but = uiDefBut(result_block,
-                                             ui::ButtonType::But,
+          Button *result_but = uiDefBut(result_block,
+                                             ButtonType::But,
                                              glyph_unicode.c_str(),
                                              0,
                                              0,
@@ -1263,7 +1360,7 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
           result_but->drawflag |= BUT_TEXT_USE_COL;
 
           /* Set tooltip with glyph name */
-          result_but->tip_quick_func = [glyph_name](const ui::Button *) { return glyph_name; };
+          result_but->tip_quick_func = [glyph_name](const Button *) { return glyph_name; };
 
           /* Add callback to set the glyph when clicked */
           char *glyph_unicode_copy = MEM_new_array<char>(glyph_unicode.length() + 1, __func__);
@@ -1274,18 +1371,18 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
     }
 
     /* Right side: Glyph button, Code with Paste button - aligned right */
-    ui::Layout &col_glyph_code = split_search_glyph.column(false);
-    col_glyph_code.alignment_set(ui::LayoutAlign::Right);
-    ui::Layout &row_code = col_glyph_code.row(true);
+    Layout &col_glyph_code = split_search_glyph.column(false);
+    col_glyph_code.alignment_set(LayoutAlign::Right);
+    Layout &row_code = col_glyph_code.row(true);
     row_code.fixed_size_set(true);
 
     /* Glyph button f02f - before Code */
     char glyph_btn[8] = "";
     process_glyph_input("f02f", glyph_btn, sizeof(glyph_btn));
-    ui::Block *search_block = row_code.block();
-    ui::block_layout_set_current(search_block, &row_code);
-    ui::Button *glyph_but = uiDefBut(search_block,
-                                      ui::ButtonType::But,
+    Block *search_block = row_code.block();
+    block_layout_set_current(search_block, &row_code);
+    Button *glyph_but = uiDefBut(search_block,
+                                      ButtonType::But,
                                       glyph_btn,
                                       0,
                                       0,
@@ -1296,16 +1393,16 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
                                       0,
                                       std::nullopt);
     /* Set tooltip for glyph button */
-    glyph_but->tip_quick_func = [](const ui::Button *) { return "More glyphs"; };
+    glyph_but->tip_quick_func = [](const Button *) { return "More glyphs"; };
     
     /* Add callback to open Grid View when clicked */
     button_func_set(glyph_but, glyph_more_glyphs_button_cb, op, nullptr);
     (void)glyph_but;
 
     /* Code field with Paste button */
-    ui::Layout &row_glyph = row_code.row(true);
+    Layout &row_glyph = row_code.row(true);
     row_glyph.prop(op->ptr, "glyph", UI_ITEM_NONE, IFACE_("Code"), ICON_NONE);
-    ui::Layout &row_glyph_btn = row_glyph.row(true);
+    Layout &row_glyph_btn = row_glyph.row(true);
     /* Paste button - allows pasting hex code from clipboard (Ctrl+V) */
     PointerRNA paste_ptr = row_glyph_btn.op("SCREEN_OT_category_tab_paste_glyph", "", ICON_PASTEDOWN);
     RNA_string_set(&paste_ptr, "category", category);
@@ -1434,16 +1531,16 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
     copy_v3_v3(category_tab_preview_color, color_preview);
 
     /* Create centered row for preview */
-    ui::Layout &preview_row = icon_panel.body->row(false);
-    preview_row.alignment_set(ui::LayoutAlign::Center);
+    Layout &preview_row = icon_panel.body->row(false);
+    preview_row.alignment_set(LayoutAlign::Center);
 
     /* Get block and create preview button */
-    ui::Block *preview_block = preview_row.block();
+    Block *preview_block = preview_row.block();
     const int preview_size = int(style->widget.points * UI_SCALE_FAC * 3.0f);
 
     /* Create custom button with draw callback */
-    ui::Button *preview_but = uiDefBut(preview_block,
-                                       ui::ButtonType::Extra,
+    Button *preview_but = uiDefBut(preview_block,
+                                       ButtonType::Extra,
                                        "",
                                        0,
                                        0,
@@ -1483,23 +1580,23 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
   }
 
   /* Color panel */
-  ui::PanelLayout color_panel = layout.panel(C, "glyph_color", false);
+  PanelLayout color_panel = layout.panel(C, "glyph_color", false);
 
   if (color_panel.header) {
     color_panel.header->label(IFACE_("Color"), ICON_NONE);
   }
 
   if (color_panel.body) {
-    ui::Layout &col_color = color_panel.body->column(false);
+    Layout &col_color = color_panel.body->column(false);
 
     /* Centered row for preset buttons and custom color picker */
-    ui::Layout &presets_row = col_color.row(true);
-    presets_row.alignment_set(ui::LayoutAlign::Center);
-    presets_row.emboss_set(ui::EmbossType::Pulldown);
+    Layout &presets_row = col_color.row(true);
+    presets_row.alignment_set(LayoutAlign::Center);
+    presets_row.emboss_set(EmbossType::Pulldown);
 
     /* Get block for creating buttons */
-    ui::Block *block = presets_row.block();
-    ui::block_layout_set_current(block, &presets_row);
+    Block *block = presets_row.block();
+    block_layout_set_current(block, &presets_row);
 
     /* Get operator type */
     wmOperatorType *ot = WM_operatortype_find("SCREEN_OT_category_tab_color_preset", false);
@@ -1509,8 +1606,8 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
     for (int i = 0; i < 9; i++) {
       const int preset = i - 1;  /* -1 to 7 */
 
-      ui::Button *but = uiDefButO_ptr(block,
-                                      ui::ButtonType::But,
+      Button *but = uiDefButO_ptr(block,
+                                      ButtonType::But,
                                       ot,
                                       wm::OpCallContext::ExecDefault,
                                       (i == 0) ? "" : "\xEE\xA6\x97",
@@ -1541,9 +1638,9 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
 
     /* Custom color picker - minimal size, immediately after presets */
     presets_row.separator();
-    ui::Layout &picker_col = presets_row.column(false);
+    Layout &picker_col = presets_row.column(false);
     picker_col.ui_units_x_set(1.0f);
-    picker_col.prop(op->ptr, "color", ui::ITEM_R_ICON_ONLY, "", ICON_NONE);
+    picker_col.prop(op->ptr, "color", ITEM_R_ICON_ONLY, "", ICON_NONE);
   }
 
   layout.separator();
@@ -1563,7 +1660,7 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
 
   /* Don't show tags panel for reserved categories */
   if (!is_reserved) {
-    ui::PanelLayout tags_panel = layout.panel(C, "tags_list", false);
+    PanelLayout tags_panel = layout.panel(C, "tags_list", false);
 
     /* Add label, active tag glyphs, and "New Tag" button to panel header */
     if (tags_panel.header) {
@@ -1571,8 +1668,8 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
 
       /* Show active tags as colored glyph buttons in header */
       if (!tags_data_header.empty()) {
-        ui::Layout &glyphs_row = tags_panel.header->row(true);
-        glyphs_row.alignment_set(ui::LayoutAlign::Center);
+        Layout &glyphs_row = tags_panel.header->row(true);
+        glyphs_row.alignment_set(LayoutAlign::Center);
 
         const char *cursor = tags_data_header.c_str();
         char tag_name[64];
@@ -1635,10 +1732,10 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
             }
 
             /* Create colored glyph label */
-            ui::Block *block = glyphs_row.block();
-            ui::block_layout_set_current(block, &glyphs_row);
-            ui::Button *glyph_but = uiDefBut(block,
-                                              ui::ButtonType::Label,
+            Block *block = glyphs_row.block();
+            block_layout_set_current(block, &glyphs_row);
+            Button *glyph_but = uiDefBut(block,
+                                              ButtonType::Label,
                                               tag_glyph,
                                               0,
                                               0,
@@ -1651,7 +1748,7 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
 
             /* Set tooltip with tag name (copy string to avoid dangling pointer) */
             std::string tag_name_copy = tag_name;
-            glyph_but->tip_quick_func = [tag_name_copy](const ui::Button *) { return tag_name_copy; };
+            glyph_but->tip_quick_func = [tag_name_copy](const Button *) { return tag_name_copy; };
 
             /* Set color if available */
             if (has_color) {
@@ -1670,8 +1767,8 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
         }
       }
 
-      ui::Layout &header_row = tags_panel.header->row(true);
-      header_row.alignment_set(ui::LayoutAlign::Right);
+      Layout &header_row = tags_panel.header->row(true);
+      header_row.alignment_set(LayoutAlign::Right);
       header_row.scale_x_set(1.0f);
       PointerRNA new_tag_ptr = header_row.op("wm.category_tag_create", IFACE_("New tag"), ICON_ADD);
       RNA_string_set(&new_tag_ptr, "name", "");
@@ -1690,14 +1787,14 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
     }
 
     if (tags_panel.body) {
-      ui::Layout &tags_body = *tags_panel.body;
+      Layout &tags_body = *tags_panel.body;
       if (!tags_data_body.empty()) {
         /* Create centered container for the grid */
-        ui::Layout &centered_row = tags_body.row(false);
-        centered_row.alignment_set(ui::LayoutAlign::Center);
+        Layout &centered_row = tags_body.row(false);
+        centered_row.alignment_set(LayoutAlign::Center);
 
         /* Use grid_flow for automatic column wrapping (max 3 columns, row-major) */
-        ui::Layout &tags_grid = centered_row.grid_flow(true, 3, true, false, false);
+        Layout &tags_grid = centered_row.grid_flow(true, 3, true, false, false);
 
         const char *cursor = tags_data_body.c_str();
         char tag_name[64];
@@ -1747,11 +1844,11 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
 
           if (tag_name[0] != '\0') {
             /* Create row layout for the tag button */
-            ui::Layout &tag_item = tags_grid.row(true);
-            tag_item.alignment_set(ui::LayoutAlign::Left);
+            Layout &tag_item = tags_grid.row(true);
+            tag_item.alignment_set(LayoutAlign::Left);
 
-            ui::Block *block = tag_item.block();
-            ui::block_layout_set_current(block, &tag_item);
+            Block *block = tag_item.block();
+            block_layout_set_current(block, &tag_item);
 
             /* Parse color for the glyph */
             float color_rgb[3] = {0.0f, 0.0f, 0.0f};
@@ -1766,7 +1863,7 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
             }
 
             /* Create unified Tag button with box container effect */
-            ui::Button *tag_but = uiDefButTag(block,
+            Button *tag_but = uiDefButTag(block,
                                               IFACE_(tag_name),
                                               tag_glyph,
                                               has_custom_color ? color_rgb : nullptr,
@@ -1803,15 +1900,15 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
   layout.separator();
 
   /* Buttons row: Reset | Cancel | Save */
-  ui::Layout &split = layout.split(0.4f, false);
-  ui::Layout &row_left = split.row(true);
+  Layout &split = layout.split(0.4f, false);
+  Layout &row_left = split.row(true);
 
   /* Reset button (left aligned) */
   PointerRNA reset_ptr = row_left.op("SCREEN_OT_category_tab_reset", IFACE_("Reset"), ICON_LOOP_BACK);
   RNA_string_set(&reset_ptr, "category", category);
 
   /* Spacer and right-aligned buttons */
-  ui::Layout &row_right = split.row(true);
+  Layout &row_right = split.row(true);
   row_right.separator_spacer();
   row_right.op("SCREEN_OT_category_tab_edit_dialog_cancel", IFACE_("Cancel"), ICON_NONE);
   row_right.op("SCREEN_OT_category_tab_edit_dialog_save", IFACE_("Save"), ICON_CHECKMARK);
@@ -2031,7 +2128,7 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   category_tab_current_dialog_op = op;
 
   /* Open custom popup with live preview support using public API */
-  ui::popup_block_ex(C,
+  popup_block_ex(C,
                      category_tab_edit_block_create,
                      category_tab_edit_popup_ok_cb,
                      category_tab_edit_popup_cancel_cb,

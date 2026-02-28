@@ -22,6 +22,7 @@
 
 #include "RNA_access.hh"
 
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_view2d.hh"
 #include "interface_intern.hh"
@@ -545,20 +546,29 @@ void GlyphGridItem::build_grid_tile(const bContext & /*C*/, Layout &layout) cons
   const GridViewStyle &style = this->get_view().get_style();
   Block *block = layout.block();
 
-  /* Create a button that displays the unicode glyph */
+  /* Debug: Check if unicode is valid */
+  if (unicode_.empty()) {
+    printf("[GLYPH ITEM] Warning: unicode_ is empty!\n");
+  }
+
+  /* Create a button with the unicode glyph as centered text
+   * Use ButtonType::But type which uses widget_draw_text_icon for drawing
+   */
   Button *but = uiDefBut(block,
-                         ButtonType::PreviewTile,
-                         unicode_.c_str(),
-                         0,
-                         0,
+                         ButtonType::But,
+                         unicode_.c_str(),  /* unicode glyph as text (str) */
+                         0,                 /* x */
+                         0,                 /* y */
                          style.tile_width,
                          style.tile_height,
-                         nullptr,
-                         0,
-                         0,
-                         "");
+                         nullptr,           /* poin */
+                         0.0,               /* min */
+                         0.0,               /* max */
+                         unicode_.c_str()); /* tip (tooltip) */
 
   but->emboss = EmbossType::None;
+
+  /* Button text is centered by default - no flag needed */
 }
 
 void GlyphGridItem::set_on_select_fn(OnSelectFn fn)
@@ -591,9 +601,9 @@ void GlyphGridView::set_glyphs(const Vector<std::pair<std::string, std::string>>
   glyphs_ = glyphs;
 }
 
-void GlyphGridView::set_category(StringRef category)
+void GlyphGridView::set_search_filter(StringRef search_filter)
 {
-  category_ = category;
+  search_filter_ = search_filter;
 }
 
 void GlyphGridView::set_on_glyph_select_fn(OnGlyphSelectFn fn)
@@ -605,6 +615,25 @@ void GlyphGridView::build_items()
 {
   for (int64_t i = 0; i < glyphs_.size(); i++) {
     const auto &[unicode, name] = glyphs_[i];
+
+    /* Filter by search string if set */
+    if (!search_filter_.empty()) {
+      /* Convert search filter to lowercase for case-insensitive matching */
+      std::string search_lower = search_filter_;
+      std::transform(search_lower.begin(), search_lower.end(), search_lower.begin(), ::tolower);
+
+      /* Check if unicode or name matches search */
+      std::string unicode_lower = unicode;
+      std::transform(unicode_lower.begin(), unicode_lower.end(), unicode_lower.begin(), ::tolower);
+
+      std::string name_lower = name;
+      std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+
+      if (unicode_lower.find(search_lower) == std::string::npos &&
+          name_lower.find(search_lower) == std::string::npos) {
+        continue; /* Skip non-matching glyphs */
+      }
+    }
 
     /* Create unique identifier for each glyph */
     std::string identifier = "glyph_" + std::to_string(i);

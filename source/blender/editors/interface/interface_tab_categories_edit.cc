@@ -14,6 +14,7 @@
  * - Callbacks for popup cancel/ok
  */
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -52,6 +53,7 @@
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 #include "UI_glyph_grid_view.hh"
+#include "UI_tree_view.hh"
 
 #include "interface_intern.hh"
 #include "regions/interface_regions_intern.hh"
@@ -1009,65 +1011,180 @@ static void glyph_search_result_button_cb(bContext *C, void *arg1, void *arg2)
 
 /**
  * Data structure for glyph grid popup.
- * Stores the operator and glyphs to display.
+ * Stores the operator, glyphs, categories and UI state.
  */
 struct GlyphGridPopupData {
   wmOperator *op;
-  Vector<std::pair<std::string, std::string>> glyphs;
-  std::string category;
+  Vector<std::pair<std::string, std::string>> glyphs; /* (unicode, name) pairs */
+  std::string current_category; /* Currently selected category filter */
+  Vector<std::string> categories; /* All available categories */
+  std::string search_string; /* Search filter */
   PopupBlockHandle *popup_handle;
 
   GlyphGridPopupData(wmOperator *op_,
                      Vector<std::pair<std::string, std::string>> glyphs_,
-                     std::string category_)
-      : op(op_), glyphs(std::move(glyphs_)), category(std::move(category_)), popup_handle(nullptr)
+                     std::string category_,
+                     Vector<std::string> categories_)
+      : op(op_),
+        glyphs(std::move(glyphs_)),
+        current_category(std::move(category_)),
+        categories(std::move(categories_)),
+        search_string(""),
+        popup_handle(nullptr)
   {
   }
 };
 
+/* -------------------------------------------------------------------- */
+/** \name Glyph Category Tree View
+ * \{ */
+
+/**
+ * Tree view for displaying and selecting glyph categories.
+ * Similar to Asset Shelf's catalog tree.
+ */
+class GlyphCategoryTreeView : public AbstractTreeView {
+  /** Reference to the popup data to update selected category */
+  GlyphGridPopupData *popup_data_;
+
+ public:
+  GlyphCategoryTreeView(GlyphGridPopupData *popup_data) : popup_data_(popup_data) {}
+
+  void build_tree() override
+  {
+    /* "ALL" item - shows all glyphs regardless of category (default) */
+    BasicTreeViewItem &all_item = this->add_tree_item<BasicTreeViewItem>(IFACE_("ALL"));
+    all_item.set_on_activate_fn([this](bContext &C, BasicTreeViewItem &) {
+      popup_data_->current_category = "ALL";
+      send_redraw_notifier(C);
+    });
+    all_item.set_is_active_fn([this]() -> bool {
+      return popup_data_->current_category == "ALL" || popup_data_->current_category.empty();
+    });
+    all_item.uncollapse_by_default();
+
+    /* Add each category as a tree item */
+    for (const std::string &category : popup_data_->categories) {
+      if (category == "ALL") {
+        continue; /* Skip ALL, already added above */
+      }
+
+      BasicTreeViewItem &category_item = this->add_tree_item<BasicTreeViewItem>(category);
+      category_item.set_on_activate_fn([this, category](bContext &C, BasicTreeViewItem &) {
+        popup_data_->current_category = category;
+        send_redraw_notifier(C);
+      });
+      category_item.set_is_active_fn([this, category]() -> bool {
+        return popup_data_->current_category == category;
+      });
+    }
+
+    /* Keep the popup open when clicking a category */
+    this->set_popup_keep_open();
+  }
+
+ private:
+  void send_redraw_notifier(const bContext &C)
+  {
+    WM_main_add_notifier(NC_WINDOW, nullptr);
+  }
+};
+
+/** \} */
+
+constexpr int GLYPH_POPUP_LEFT_COL_WIDTH = 12;
+constexpr int GLYPH_POPUP_RIGHT_COL_WIDTH = 45;
+
 /**
  * Block creation function for glyph grid popup.
- * Creates a popup with Grid View for selecting glyphs.
+ * Creates a popup with category tree view (left), search (top right), and grid view (right).
+ * Similar layout to Asset Shelf popup.
  */
 static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *arg)
 {
   GlyphGridPopupData *popup_data = static_cast<GlyphGridPopupData *>(arg);
+
+  /* Sync search string from RNA property */
+  char search_buf[256] = "";
+  RNA_string_get(popup_data->op->ptr, "glyph_search", search_buf);
+  popup_data->search_string = search_buf;
 
   /* Create block */
   Block *block = block_begin(C, region, "glyph_grid_popup", EmbossType::Emboss);
   block_flag_enable(block, BLOCK_LOOP | BLOCK_MOVEMOUSE_QUIT);
   block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
 
-  /* Set popup size */
-  const int popup_width = 600 * UI_SCALE_FAC;
-  const int bounds_offset[2] = {0, 0};
+  /* Set popup size - similar to Asset Shelf, but with fixed height */
+  const int popup_width = (GLYPH_POPUP_LEFT_COL_WIDTH + GLYPH_POPUP_RIGHT_COL_WIDTH) * UI_UNIT_X;
+  const int popup_height = 35 * UI_UNIT_Y; /* Fixed height with scroll */
+  /* Offset to position popup nicely */
+  const int bounds_offset[2] = {-15 * UI_UNIT_X, 2 * UI_UNIT_Y};
   block_bounds_set_popup(block, 6 * UI_SCALE_FAC, bounds_offset);
 
-  /* Create layout */
+  /* Create main layout */
   Layout &layout = block_layout(block,
                                 LayoutDirection::Vertical,
                                 LayoutType::Panel,
                                 0,
                                 0,
                                 popup_width,
-                                0,
+                                popup_height,
                                 0,
                                 style_get());
 
-  /* Add title */
-  Layout &title_row = layout.row(false);
-  title_row.label("Select Glyph", ICON_NONE);
-  layout.separator();
+  /* Create two-column layout like Asset Shelf */
+  Layout &row = layout.row(false);
+
+  /* Left column: Category tree view */
+  Layout &left_col = row.column(false);
+  left_col.ui_units_x_set(GLYPH_POPUP_LEFT_COL_WIDTH);
+  left_col.fixed_size_set(true);
+
+  /* Add category tree view to left column */
+  std::unique_ptr<GlyphCategoryTreeView> category_tree_ptr =
+      std::make_unique<GlyphCategoryTreeView>(popup_data);
+  AbstractTreeView *category_tree =
+      block_add_view(*block, "glyph_category_tree", std::move(category_tree_ptr));
+  TreeViewBuilder::build_tree_view(*C, *category_tree, left_col);
+
+  /* Right column: Search + Grid view */
+  Layout &right_col = row.column(false);
+
+  /* Add search field at top of right column */
+  Layout &search_row = right_col.row(false);
+
+  /* Create RNA pointer for search filter property - use op->ptr directly */
+  PointerRNA *op_ptr = popup_data->op->ptr;
+
+  /* Use prop() to create search field, similar to Asset Shelf */
+  search_row.prop(op_ptr,
+                  "glyph_search",
+                  /* Force the button to be active in a semi-modal state. */
+                  ITEM_R_TEXT_BUT_FORCE_SEMI_MODAL_ACTIVE,
+                  "",
+                  ICON_VIEWZOOM);
+
+  /* Grid view below search - with scroll support */
+  Layout &grid_col = right_col.column(false);
+  /* Enable vertical scroll for the grid */
+  grid_col.ui_units_x_set(GLYPH_POPUP_RIGHT_COL_WIDTH);
+  grid_col.fixed_size_set(true);
+
+  /* Create scrollable container for grid */
+  Layout &scroll_col = grid_col.column(false);
+  scroll_col.ui_units_y_set(30 * UI_UNIT_Y); /* Fixed height with scroll */
+  scroll_col.fixed_size_set(true);
 
   /* Create Grid View */
   std::unique_ptr<GlyphGridView> grid_view_ptr = std::make_unique<GlyphGridView>();
   GlyphGridView *grid_view = grid_view_ptr.get();
 
   grid_view->set_glyphs(popup_data->glyphs);
-  grid_view->set_category(popup_data->category);
+  /* Don't set category filter for now - categories will be handled by Python API */
+  grid_view->set_search_filter(popup_data->search_string);
 
-  /* Set tile size for better visibility */
-  grid_view->set_tile_size(UI_UNIT_X * 2, UI_UNIT_Y * 2);
+  /* Set tile size - larger for better preview like Asset Shelf */
+  grid_view->set_tile_size(UI_UNIT_X * 4, UI_UNIT_Y * 4);
 
   /* Set the selection callback */
   grid_view->set_on_glyph_select_fn(
@@ -1095,11 +1212,11 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
       });
 
   /* Add grid view to block and build it */
-  AbstractGridView *view = block_add_view(*block, "glyph_grid", std::move(grid_view_ptr));
+  AbstractGridView *grid = block_add_view(*block, "glyph_grid", std::move(grid_view_ptr));
 
   /* Build the grid view */
   GridViewBuilder builder(*block);
-  builder.build_grid_view(*C, *view, layout);
+  builder.build_grid_view(*C, *grid, scroll_col);
 
   return block;
 }
@@ -1115,7 +1232,7 @@ static void glyph_grid_popup_free(void *arg)
 
 /**
  * Callback for the "More glyphs" button.
- * Opens the Grid View popup for selecting glyphs.
+ * Opens the Grid View popup for selecting glyphs with category tree and search.
  */
 static void glyph_more_glyphs_button_cb(bContext *C, void *arg1, void * /*arg2*/)
 {
@@ -1125,21 +1242,46 @@ static void glyph_more_glyphs_button_cb(bContext *C, void *arg1, void * /*arg2*/
     return;
   }
 
-  /* Get the category from op->ptr */
-  char category[64] = "";
-  RNA_string_get(op->ptr, "category", category);
+  /* Get the current category from op->ptr */
+  char current_category[64] = "";
+  RNA_string_get(op->ptr, "category", current_category);
 
-  /* Call Python API to get all glyphs for the category */
-  auto glyphs = glyph_search_call_python(C, "", category, 500);
+  /* Predefined glyph categories (will be expanded in the future) */
+  Vector<std::string> all_categories;
+  all_categories.append("ALL"); /* Default category - all glyphs */
+  /* Future categories will be added here:
+   * all_categories.append("Actions");
+   * all_categories.append("Activities");
+   * all_categories.append("Android");
+   * all_categories.append("Audio & Video");
+   * all_categories.append("Business");
+   * all_categories.append("Communicate");
+   * all_categories.append("Hardware");
+   * all_categories.append("Home");
+   * all_categories.append("Household");
+   * all_categories.append("Images");
+   * all_categories.append("Maps");
+   * all_categories.append("Others");
+   * all_categories.append("Privacy");
+   * all_categories.append("Social");
+   * all_categories.append("Text");
+   * all_categories.append("Transit");
+   * all_categories.append("Travel");
+   * all_categories.append("UI actions");
+   */
+
+  /* Call Python API to get ALL glyphs (empty category = all) */
+  auto glyphs = glyph_search_call_python(C, "", "", 1000);
 
   if (glyphs.is_empty()) {
     /* No glyphs found, show a message */
-    WM_global_report(RPT_WARNING, "No glyphs found for this category");
+    WM_global_report(RPT_WARNING, "No glyphs found");
     return;
   }
 
-  /* Create popup data */
-  GlyphGridPopupData *popup_data = new GlyphGridPopupData(op, glyphs, category);
+  /* Create popup data with current category and all categories */
+  GlyphGridPopupData *popup_data = new GlyphGridPopupData(
+      op, glyphs, current_category, all_categories);
 
   /* Create and show popup */
   PopupBlockHandle *handle = popup_block_create(

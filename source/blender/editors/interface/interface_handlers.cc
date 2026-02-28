@@ -2394,6 +2394,10 @@ static void ui_apply_but(
     case ButtonType::CheckboxN:
       ui_apply_but_TOG(C, but, data);
       break;
+    case ButtonType::Tag:
+      /* Toggle the checkbox state for Tag button */
+      ui_apply_but_TOG(C, but, data);
+      break;
     case ButtonType::ListRow:
     case ButtonType::Row:
       ui_apply_but_ROW(C, block, but, data);
@@ -8634,6 +8638,10 @@ static int ui_do_button(bContext *C, Block *block, Button *but, const wmEvent *e
     case ButtonType::Checkbox:
     case ButtonType::CheckboxN:
     case ButtonType::Row:
+      retval = ui_do_but_TOG(C, but, data, event);
+      break;
+    case ButtonType::Tag:
+      /* Handle click event for Tag button */
       retval = ui_do_but_TOG(C, but, data, event);
       break;
     case ButtonType::ViewItem:

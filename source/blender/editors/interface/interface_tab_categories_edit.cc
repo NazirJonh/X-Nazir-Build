@@ -42,6 +42,8 @@
 #include "ED_screen.hh"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
+#include "RNA_path.hh"
 #include "RNA_prototypes.hh"
 
 #include "BLF_api.hh"
@@ -1230,14 +1232,59 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
         char hex_code[16] = "";
         utf8_to_hex_codepoint(unicode.c_str(), hex_code, sizeof(hex_code));
 
-        /* Set the glyph property */
+        /* Set the glyph property of the operator itself */
         RNA_string_set(popup_data->op->ptr, "glyph", hex_code);
+
+        /* Set the target property if specified (RNA path) */
+        char target_prop[256] = "";
+        RNA_string_get(popup_data->op->ptr, "target_property", target_prop);
+        if (target_prop[0] != '\0') {
+          const char *target_prop_path = target_prop;
+          if (STRPREFIX(target_prop_path, "window_manager.")) {
+            target_prop_path += strlen("window_manager.");
+          }
+
+          PointerRNA target_ptr;
+          PropertyRNA *prop;
+          int index;
+
+          bool resolved = false;
+          if (STRPREFIX(target_prop_path, "active_operator.")) {
+            const char *active_op_path = target_prop_path + strlen("active_operator.");
+            wmOperator *active_op = context_active_operator_get(&C);
+            if (active_op && active_op->ptr) {
+              if (RNA_path_resolve_full(active_op->ptr, active_op_path, &target_ptr, &prop, &index))
+              {
+                RNA_property_string_set(&target_ptr, prop, hex_code);
+                resolved = true;
+              }
+            }
+          }
+          else {
+            /* Try resolving from window manager as root. */
+            wmWindowManager *wm = CTX_wm_manager(&C);
+            PointerRNA root_ptr = RNA_id_pointer_create(&wm->id);
+            if (RNA_path_resolve_full(&root_ptr, target_prop_path, &target_ptr, &prop, &index)) {
+              RNA_property_string_set(&target_ptr, prop, hex_code);
+              resolved = true;
+            }
+          }
+
+          if (!resolved) {
+            /* Fallback: try resolving from the picker operator itself (relative path). */
+            if (RNA_path_resolve_full(popup_data->op->ptr, target_prop_path, &target_ptr, &prop, &index)) {
+              RNA_property_string_set(&target_ptr, prop, hex_code);
+            }
+          }
+        }
 
         /* Clear the search field */
         RNA_string_set(popup_data->op->ptr, "glyph_search", "");
 
-        /* Trigger live update to refresh preview */
-        category_tab_edit_live_update_cb(&C, popup_data->op, 0);
+        /* Trigger live update to refresh preview - only for category tab edit dialog */
+        if (STREQ(popup_data->op->idname, "SCREEN_OT_category_tab_edit_dialog")) {
+          category_tab_edit_live_update_cb(&C, popup_data->op, 0);
+        }
 
         /* Close the popup */
         if (popup_data->popup_handle) {
@@ -1341,6 +1388,66 @@ static void glyph_more_glyphs_button_cb(bContext *C, void *arg1, void * /*arg2*/
   popup_handlers_add(C, &window->runtime->modalhandlers, handle, 0);
   WM_event_add_mousemove(window);
 }
+
+/**
+ * Operator to open the glyph picker grid from Python or other places.
+ */
+static wmOperatorStatus glyph_picker_grid_invoke(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent * /*event*/)
+{
+  /* Predefined glyph categories */
+  Vector<std::string> all_categories;
+  all_categories.append("ALL");
+
+  /* Get glyphs from cache */
+  const auto &cached_glyphs = glyph_cache_get(C);
+  if (cached_glyphs.is_empty()) {
+    WM_global_report(RPT_WARNING, "No glyphs found");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Create a copy of glyphs for popup data */
+  blender::Vector<std::pair<std::string, std::string>> glyphs = cached_glyphs;
+
+  /* Get initial category and search string from operator properties if provided */
+  char initial_category[64] = "";
+  RNA_string_get(op->ptr, "category", initial_category);
+
+  /* Create popup data */
+  GlyphGridPopupData *popup_data = new GlyphGridPopupData(
+      op, std::move(glyphs), initial_category, all_categories);
+
+  /* Create and show popup */
+  PopupBlockHandle *handle = popup_block_create(
+      C, nullptr, nullptr, glyph_grid_popup_block_create, nullptr, popup_data, glyph_grid_popup_free, false);
+
+  popup_data->popup_handle = handle;
+  handle->popup = true;
+
+  /* Add handlers */
+  wmWindow *window = CTX_wm_window(C);
+  popup_handlers_add(C, &window->runtime->modalhandlers, handle, 0);
+  WM_event_add_mousemove(window);
+
+  return OPERATOR_RUNNING_MODAL;
+}
+
+void WM_OT_glyph_picker_grid(wmOperatorType *ot)
+{
+  ot->name = "Glyph Picker";
+  ot->idname = "WM_OT_glyph_picker_grid";
+  ot->description = "Open a grid-based glyph picker popup";
+
+  ot->invoke = glyph_picker_grid_invoke;
+  ot->poll = ED_operator_regionactive;
+
+  /* Properties */
+   RNA_def_string(ot->srna, "category", nullptr, 64, "Category", "Initial category to show");
+   RNA_def_string(ot->srna, "glyph", nullptr, 16, "Glyph", "Selected glyph hex code (output)");
+   RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Search string");
+   RNA_def_string(ot->srna, "target_property", nullptr, 256, "Target Property", "RNA path to property that will receive the glyph hex code");
+ }
 
 /** \} */
 

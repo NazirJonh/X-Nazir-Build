@@ -884,6 +884,7 @@ void ED_operatortypes_screen_category_tabs()
   WM_operatortype_append(WM_OT_tag_color_preset);
   WM_operatortype_append(SCREEN_OT_category_tab_reset);
   WM_operatortype_append(SCREEN_OT_category_tab_paste_glyph);
+  WM_operatortype_append(ui::WM_OT_glyph_picker_grid);
 }
 
 /** \} */

@@ -60,6 +60,7 @@ struct MenuType;
 struct rctf;
 struct rcti;
 struct uiFontStyle;
+struct uiLayout;
 struct uiList;
 struct uiStyle;
 struct uiWidgetColors;
@@ -463,6 +464,8 @@ enum {
  * (except for the 'align' ones)!
  */
 enum {
+  /** Tag button preference mode (no checkbox, with delete button). */
+  BUT_TAG_PREF_MODE = 1 << 0,
   /** Text and icon alignment (by default, they are centered). */
   BUT_TEXT_LEFT = 1 << 1,
   BUT_ICON_LEFT = 1 << 2,
@@ -1541,6 +1544,7 @@ Button *uiDefButAlert(Block *block, AlertIcon icon, int x, int y, short width, s
  * @param glyph Optional UTF-8 glyph/emoji (can be NULL or empty string)
  * @param color Optional RGB color pointer, values clamped to [0.0-1.0]. NULL for default
  * @param is_active Whether the tag is currently selected (sets UI_SELECT_DRAW flag)
+ * @param is_pref_mode Whether to use preference mode (no checkbox, for category settings UI)
  * @param x, y Position in the UI block coordinate system
  * @param width, height Button dimensions in pixels
  * @param tip Optional tooltip text (can be NULL)
@@ -1551,8 +1555,48 @@ Button *uiDefButTag(Block *block,
                     const char *glyph,
                     const float *color,
                     bool is_active,
+                    bool is_pref_mode,
                     int x, int y, short width, short height,
                     const char *tip);
+
+/**
+ * Create a Tag button in preference mode (no checkbox, for category assignment UI).
+ * Convenience wrapper around uiDefButTag() with is_pref_mode=true.
+ *
+ * @param block The UI block to add button to
+ * @param tag_name The display name for the tag
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color Optional RGB color for glyph
+ * @param x, y Position in the UI block
+ * @param width, height Button dimensions
+ * @param tip Optional tooltip text
+ * @return Pointer to created ButtonTag
+ */
+Button *uiDefButTagPref(Block *block,
+                        const char *tag_name,
+                        const char *glyph,
+                        const float *color,
+                        int x, int y, short width, short height,
+                        const char *tip);
+
+/**
+ * Create a Tag button in preference mode (no checkbox) from RNA.
+ * Called by RNA system when Python code calls layout.tag_button_pref().
+ *
+ * @param layout The UI layout (must be non-NULL)
+ * @param tag_name Display name (must be non-NULL, non-empty)
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color RGB color for glyph (3 floats)
+ * @param x Position X
+ * @param y Position Y
+ * @param width Button width
+ * @param height Button height
+ */
+extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
+                                              const char *tag_name,
+                                              const char *glyph,
+                                              const float *color,
+                                              int x, int y, int width, int height);
 
 /** Button containing both string label and icon. */
 Button *uiDefIconTextBut(Block *block,

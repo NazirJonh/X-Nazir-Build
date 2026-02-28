@@ -5125,6 +5125,7 @@ Button *uiDefButTag(Block *block,
                     const char *glyph,
                     const float *color,
                     bool is_active,
+                    bool is_pref_mode,
                     int x, int y, short width, short height,
                     const char *tip)
 {
@@ -5209,6 +5210,14 @@ Button *uiDefButTag(Block *block,
   }
 
   /* ============================================================
+   * SET PREFERENCE MODE
+   * ============================================================ */
+
+  if (is_pref_mode) {
+    button_drawflag_enable(tag_but, BUT_TAG_PREF_MODE);
+  }
+
+  /* ============================================================
    * ADD TO LAYOUT SYSTEM
    * ============================================================ */
 
@@ -5225,6 +5234,76 @@ Button *uiDefButTag(Block *block,
   button_update(tag_but);
 
   return tag_but;
+}
+
+/**
+ * Create a Tag button in preference mode (no checkbox, for category assignment UI).
+ * This is a convenience wrapper around uiDefButTag() that sets is_pref_mode=true.
+ *
+ * @param block The UI block to add button to
+ * @param tag_name The display name for the tag
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color Optional RGB color for glyph
+ * @param x, y Position in the UI block
+ * @param width, height Button dimensions
+ * @param tip Optional tooltip text
+ * @return Pointer to created ButtonTag
+ */
+Button *uiDefButTagPref(Block *block,
+                        const char *tag_name,
+                        const char *glyph,
+                        const float *color,
+                        int x, int y, short width, short height,
+                        const char *tip)
+{
+  /* Preference mode: no checkbox, is_active=false */
+  return uiDefButTag(block, tag_name, glyph, color, false, true, x, y, width, height, tip);
+}
+
+/**
+ * Create a Tag button in preference mode (no checkbox) from RNA.
+ * This function is called by the RNA system when Python code calls layout.tag_button_pref().
+ *
+ * @param layout The UI layout (must be non-NULL)
+ * @param tag_name Display name (must be non-NULL, non-empty)
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color RGB color for glyph (3 floats)
+ * @param x Position X (ignored, layout system determines position)
+ * @param y Position Y (ignored, layout system determines position)
+ * @param width Button width (0 = auto from text content)
+ * @param height Button height (0 = auto from UI_UNIT_Y)
+ */
+extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
+                                              const char *tag_name,
+                                              const char *glyph,
+                                              const float *color,
+                                              int x, int y, int width, int height)
+{
+  using namespace blender::ui;
+
+  if (!layout || !tag_name || tag_name[0] == '\0') {
+    return;
+  }
+
+  /* Get block from layout */
+  Block *block = layout->block();
+  if (!block) {
+    return;
+  }
+
+  /* Calculate automatic sizes if not provided */
+  if (width <= 0) {
+    width = UI_UNIT_X * 10;  /* Default width for preference mode buttons */
+  }
+  if (height <= 0) {
+    height = (int)(UI_UNIT_Y * 1.2f);  /* Default height for preference mode buttons */
+  }
+
+  /* Set current layout for button creation */
+  block_layout_set_current(block, layout);
+
+  /* Create preference mode Tag button */
+  uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, 0, 0, (short)width, (short)height, nullptr);
 }
 
 void button_retval_set(Button *but, int retval)

@@ -6014,41 +6014,36 @@ class USERPREF_PT_tags(TagsPanel, Panel):
             # Categories using this tag
             col_right.separator()
             col_right.label(text="Categories using this tag:", icon='FILE_PARENT')
-            
+
             cats_box = col_right.box()
             categories = get_categories_for_tag(tag.name)
-            
+
             if categories:
                 # Use automatic columns (columns=0) but force each item to be compact
                 cats_flow = cats_box.grid_flow(row_major=True, columns=0, even_columns=False, even_rows=False, align=False)
-                
+
                 for cat in categories:
-                    # Create an aligned row inside the flow to prevent the box from stretching
+                    # Create an aligned row inside the flow
                     item_row = cats_flow.row()
                     item_row.alignment = 'LEFT'
-                    
-                    # Create a box for each category to look like a "chip"
-                    tag_box = item_row.box()
-                    # Each "chip" (glyph + name + X) is in its own aligned row within the box
-                    row = tag_box.row(align=True)
-                    
+
+                    # Create a row for the tag button + delete button
+                    row = item_row.row(align=True)
+
                     # Get all visual data for the category
                     glyph, color, display_name = get_category_glyph_data(cat)
-                    
-                    # Glyph with its color
-                    if glyph:
-                        row.colored_label(
-                            text=glyph,
-                            icon='NONE',
-                            color_r=color[0],
-                            color_g=color[1],
-                            color_b=color[2]
-                        )
-                        
-                    # Category name as a simple label (not clickable)
-                    row.label(text=display_name, translate=False)
-                    
-                    # Only 'X' icon is an active operator button
+
+                    # Create preference mode Tag button (no checkbox)
+                    # Using the C++ API through layout.tag_button_pref()
+                    # Pass 0 for width/height to let the system calculate automatically
+                    row.tag_button_pref(
+                        tag_name=display_name,
+                        glyph=glyph if glyph else "",
+                        color=(color[0], color[1], color[2]) if glyph else (0.0, 0.0, 0.0),
+                        x=0, y=0, width=0, height=0
+                    )
+
+                    # Delete button (X)
                     op_x = row.operator("wm.category_tag_remove_from_category", text="", icon='X', emboss=False)
                     op_x.category = cat
                     op_x.tag_name = tag.name

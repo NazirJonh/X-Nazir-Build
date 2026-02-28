@@ -4871,26 +4871,35 @@ static void widget_draw_tag(const bContext *C,
 
   /* ============================================================
    * PART 1: Draw checkbox (left side) - using standard Blender widget_optionbut
+   * Skip for preference mode buttons (BUT_TAG_PREF_MODE)
    * ============================================================ */
 
-  /* Add small padding from left edge of box */
-  const int left_padding = 3 * UI_SCALE_FAC;
-  offset_x += left_padding;
+  const bool is_pref_mode = (but->drawflag & BUT_TAG_PREF_MODE) != 0;
+  rcti checkbox_rect = {0};
 
-  /* Create checkbox rect - use smaller square checkbox, not full height */
-  const int checkbox_square_size = BLI_rcti_size_y(&content_rect);
-  rcti checkbox_rect;
-  checkbox_rect.xmin = offset_x;
-  checkbox_rect.xmax = offset_x + checkbox_square_size;
-  checkbox_rect.ymin = content_rect.ymin;
-  checkbox_rect.ymax = content_rect.ymax;
+  if (!is_pref_mode) {
+    /* Add small padding from left edge of box */
+    const int left_padding = 3 * UI_SCALE_FAC;
+    offset_x += left_padding;
 
-  /* Use standard Blender checkbox drawing - handles all states and theme colors correctly */
-  uiWidgetColors wcol_option = tui->wcol_option;  /* Use proper checkbox colors from theme */
-  widget_optionbut(&wcol_option, &checkbox_rect, state, 0, 1.0f);
+    /* Create checkbox rect - use smaller square checkbox, not full height */
+    const int checkbox_square_size = BLI_rcti_size_y(&content_rect);
+    checkbox_rect.xmin = offset_x;
+    checkbox_rect.xmax = offset_x + checkbox_square_size;
+    checkbox_rect.ymin = content_rect.ymin;
+    checkbox_rect.ymax = content_rect.ymax;
 
-  /* Update offset to after checkbox (no extra spacing) */
-  offset_x = checkbox_rect.xmax;
+    /* Use standard Blender checkbox drawing - handles all states and theme colors correctly */
+    uiWidgetColors wcol_option = tui->wcol_option;  /* Use proper checkbox colors from theme */
+    widget_optionbut(&wcol_option, &checkbox_rect, state, 0, 1.0f);
+
+    /* Update offset to after checkbox (no extra spacing) */
+    offset_x = checkbox_rect.xmax;
+  } else {
+    /* In preference mode, add smaller padding from left edge */
+    const int left_padding = 2 * UI_SCALE_FAC;
+    offset_x += left_padding;
+  }
 
   /* ============================================================
    * PART 2: Draw colored glyph (if present)
@@ -4929,7 +4938,7 @@ static void widget_draw_tag(const bContext *C,
   }
 
   /* Small spacing between glyph/text and checkbox - or just start if no glyph */
-  if (tag_but->glyph[0] == '\0') {
+  if (tag_but->glyph[0] == '\0' && !is_pref_mode) {
     offset_x = checkbox_rect.xmax;
   }
   const int small_spacing = 2 * UI_SCALE_FAC;

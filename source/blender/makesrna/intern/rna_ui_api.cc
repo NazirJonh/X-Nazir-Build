@@ -2511,6 +2511,37 @@ void RNA_api_ui_layout(StructRNA *srna)
   func = RNA_def_function(srna, "template_shape_key_tree", "ed::object::shapekey::template_tree");
   RNA_def_function_ui_description(func, "Shape Key tree view");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+
+  /* Tag button in preference mode (no checkbox, for category assignment UI) */
+  func = RNA_def_function(srna, "tag_button_pref", "rna_uiLayout_tag_button_pref");
+  RNA_def_function_ui_description(func,
+                                  "Create a Tag button in preference mode (no checkbox) "
+                                  "for displaying categories assigned to a tag");
+  parm = RNA_def_string(func, "tag_name", nullptr, 0, "", "Tag name to display");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "glyph", nullptr, 0, "", "Optional UTF-8 glyph/emoji character");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  /* Color parameter - passing as 3 floats */
+  parm = RNA_def_float_vector(func,
+                              "color",
+                              3,
+                              nullptr,
+                              0.0f,
+                              1.0f,
+                              "",
+                              "RGB color for glyph (0.0-1.0)",
+                              0.0f,
+                              1.0f);
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  /* Position and size parameters */
+  parm = RNA_def_int(func, "x", 0, INT_MIN, INT_MAX, "", "X position", INT_MIN, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "y", 0, INT_MIN, INT_MAX, "", "Y position", INT_MIN, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "width", 0, 0, INT_MAX, "", "Button width", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "height", 0, 0, INT_MAX, "", "Button height", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
 }
 
 }  // namespace blender

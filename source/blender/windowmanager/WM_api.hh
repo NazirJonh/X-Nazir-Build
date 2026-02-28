@@ -2239,7 +2239,7 @@ void WM_tooltip_refresh(bContext *C, wmWindow *win);
  * Returns true if tooltip exists and was updated, false otherwise.
  * Use for smooth tooltip updates during category tab scrolling.
  */
-bool WM_tooltip_update_text(bContext *C, wmWindow *win, const char *text);
+bool WM_tooltip_update_text(bContext *C, wmWindow *win, const char *text, wmTooltipInitFn init = nullptr);
 double WM_tooltip_time_closed();
 
 /* `wm_utils.cc` */

@@ -2918,8 +2918,11 @@ int handler_panel_region(bContext *C,
           const std::string tooltip_text = std::string("Active tab: ") +
                                            IFACE_(category_display_name);
 
-          /* Try to update existing tooltip first to avoid flickering. */
-          if (!WM_tooltip_update_text(C, win, tooltip_text.c_str())) {
+          /* Try to update existing tooltip first to avoid flickering.
+           * We only update if the current tooltip was created with the same init function,
+           * ensuring it has the correct custom position and fixed width. */
+          if (!WM_tooltip_update_text(C, win, tooltip_text.c_str(), 
+                                      ui_panel_category_active_tooltip_init)) {
             /* No existing tooltip - create new one. */
             WM_tooltip_immediate_init(C,
                                       win,

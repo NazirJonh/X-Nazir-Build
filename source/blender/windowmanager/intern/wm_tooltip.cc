@@ -150,11 +150,19 @@ void WM_tooltip_refresh(bContext *C, wmWindow *win)
   }
 }
 
-bool WM_tooltip_update_text(bContext *C, wmWindow *win, const char *text)
+bool WM_tooltip_update_text(bContext *C, wmWindow *win, const char *text, wmTooltipInitFn init)
 {
   (void)C;  /* Unused - tooltip update is handled through region */
   bScreen *screen = WM_window_get_active_screen(win);
   if (screen->tool_tip == nullptr || screen->tool_tip->region == nullptr) {
+    return false;
+  }
+
+  /* If an initialization function is provided, ensure the current tooltip
+   * matches it. This prevents standard tooltips (e.g., tab names) from
+   * being hijacked with custom scroll tooltip text while retaining
+   * their original position and width. */
+  if (init && screen->tool_tip->init != init) {
     return false;
   }
 

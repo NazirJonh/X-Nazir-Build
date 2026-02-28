@@ -4801,12 +4801,10 @@ static void widget_draw_tag(const bContext *C,
   const ButtonTag *tag_but = static_cast<const ButtonTag *>(but);
 
   const uiFontStyle *fstyle = &style->widget;
-  const int checkbox_size = BLI_rcti_size_y(rect);
 
   /* Minimal spacing inside button - layout system handles spacing between buttons */
   const int box_padding_x = 2 * UI_SCALE_FAC;  /* Small padding inside box */
   const int box_padding_y = 4 * UI_SCALE_FAC;  /* More vertical padding for better appearance */
-  const int element_spacing = 0;  /* No spacing between elements inside button */
 
   /* Calculate content area (inside box padding) */
   rcti content_rect;

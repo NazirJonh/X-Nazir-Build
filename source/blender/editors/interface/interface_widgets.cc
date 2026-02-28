@@ -4839,20 +4839,21 @@ static void widget_draw_tag(const bContext *C,
     WidgetBase wtb_box;
     widget_init(&wtb_box);
 
-    /* Use box colors from theme (like UI_WTYPE_BOX) */
+    /* Use box colors from theme */
     uiWidgetColors wcol_box = tui->wcol_box;
 
-    /* Apply hover effect to box if needed - more visible hover */
+    /* Handle active state - use option.selected colors for active button (checkbox is checked) */
+    if (state->but_flag & UI_SELECT) {
+      /* For active button, use the selected color from wcol_option (blue in default theme) */
+      copy_v4_v4_uchar(wcol_box.inner, tui->wcol_option.inner_sel);
+      copy_v4_v4_uchar(wcol_box.outline, tui->wcol_option.outline_sel);
+    }
+
+    /* Apply hover effect to box if needed */
     if (state->but_flag & UI_HOVER) {
-      /* Blend with selected color for more noticeable hover effect */
-      uchar old_inner[4];
-      copy_v4_v4_uchar(old_inner, wcol_box.inner);
-
-      /* Blend inner color with text color (more visible than default hover) */
+      /* Blend inner color with text color for hover effect */
       color_blend_v3_v3(wcol_box.inner, wcol_box.text, 0.08f);
-
-      /* Ensure full opacity for visible hover */
-      wcol_box.inner[3] = 180;  /* Semi-transparent but more visible */
+      wcol_box.inner[3] = 180;
       wcol_box.outline[3] = 180;
     }
 

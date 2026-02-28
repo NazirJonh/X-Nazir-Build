@@ -529,6 +529,17 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
     /* Empty or invalid input - show default glyph (including fallback letter) */
     STRNCPY(category_tab_preview_glyph, default_glyph);
   }
+  else if (is_fallback) {
+    /* default_glyph is nullptr but is_fallback is true - use first char of category */
+    const int first_char_size = BLI_str_utf8_size_safe(category);
+    if (first_char_size > 0) {
+      memcpy(category_tab_preview_glyph, category, first_char_size);
+      category_tab_preview_glyph[first_char_size] = '\0';
+    }
+    else {
+      category_tab_preview_glyph[0] = '\0';
+    }
+  }
   else {
     category_tab_preview_glyph[0] = '\0';
   }
@@ -554,6 +565,38 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
     item->display_name[0] = '\0';
     item->glyph[0] = '\0';
     zero_v3(item->color);
+    item->tags[0] = '\0';  /* Initialize tags as empty */
+
+    /* Preserve existing tags from mappings when creating new override.
+     * This prevents losing tags when user modifies display_name/glyph/color. */
+    const char *existing_tags = nullptr;
+
+    /* First check mappings for existing tags */
+    for (CategoryGlyphItem *map_item =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         map_item;
+         map_item = static_cast<CategoryGlyphItem *>(map_item->next))
+    {
+      if (STREQ(map_item->category, category) && map_item->tags[0] != '\0') {
+        existing_tags = map_item->tags;
+        break;
+      }
+    }
+
+    /* If no tags in mappings, try original_tags from op->ptr */
+    if (!existing_tags || existing_tags[0] == '\0') {
+      char original_tags[256];
+      RNA_string_get(op->ptr, "original_tags", original_tags);
+      if (original_tags[0] != '\0') {
+        existing_tags = original_tags;
+      }
+    }
+
+    /* Copy tags to new override if found */
+    if (existing_tags && existing_tags[0] != '\0') {
+      STRNCPY(item->tags, existing_tags);
+    }
+
     BLI_addtail(&wm->category_glyph_overrides, item);
   }
 
@@ -842,7 +885,18 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
     }
     else {
       /* No custom glyph - lookup the default glyph for this category */
-      preview_glyph = panel_category_glyph_lookup(wm, category, nullptr, nullptr, nullptr);
+      bool is_fallback_letter = false;
+      preview_glyph = panel_category_glyph_lookup(wm, category, nullptr, &is_fallback_letter, nullptr);
+
+      /* If lookup returns nullptr (glyph was explicitly cleared), use fallback letter */
+      if (preview_glyph == nullptr && is_fallback_letter) {
+        const int first_char_size = BLI_str_utf8_size_safe(category);
+        if (first_char_size > 0 && first_char_size < sizeof(category_tab_preview_glyph)) {
+          memcpy(category_tab_preview_glyph, category, first_char_size);
+          category_tab_preview_glyph[first_char_size] = '\0';
+          preview_glyph = category_tab_preview_glyph;  /* Mark as handled */
+        }
+      }
     }
 
     /* Initialize preview buffers (will be updated by live update callback) */

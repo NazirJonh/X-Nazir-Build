@@ -1167,12 +1167,14 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
           }
 
           if (tag_name[0] != '\0') {
-            /* Create a box container for this tag to visually unify elements */
-            ui::Layout &tag_box = tags_grid.box();
-            ui::Layout &tag_item = tag_box.row(true);
+            /* Create row layout for the tag button */
+            ui::Layout &tag_item = tags_grid.row(true);
             tag_item.alignment_set(ui::LayoutAlign::Left);
 
-            /* Parse color for the glyph label */
+            ui::Block *block = tag_item.block();
+            ui::block_layout_set_current(block, &tag_item);
+
+            /* Parse color for the glyph */
             float color_rgb[3] = {0.0f, 0.0f, 0.0f};
             bool has_custom_color = false;
             if (tag_color[0] != '\0') {
@@ -1184,68 +1186,27 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
               }
             }
 
-            ui::Block *block = tag_item.block();
-            ui::block_layout_set_current(block, &tag_item);
-            wmOperatorType *ot = WM_operatortype_find("wm.category_tag_toggle", false);
-
-            /* 1. Small checkbox toggle (no text) */
-            ui::Button *toggle_but = uiDefButO_ptr(block,
-                                                    ui::ButtonType::Checkbox,
-                                                    ot,
-                                                    wm::OpCallContext::ExecDefault,
-                                                    "",
-                                                    0,
-                                                    0,
-                                                    UI_UNIT_X,
-                                                    UI_UNIT_Y,
-                                                    std::nullopt);
+            /* Create unified Tag button with box container effect */
+            ui::Button *tag_but = uiDefButTag(block,
+                                              IFACE_(tag_name),
+                                              tag_glyph,
+                                              has_custom_color ? color_rgb : nullptr,
+                                              is_active,
+                                              0, 0,
+                                              UI_UNIT_X * 8,
+                                              UI_UNIT_Y * 1.5f,
+                                              nullptr);
 
             /* Set operator properties */
-            PointerRNA *op_ptr = button_operator_ptr_ensure(toggle_but);
-            RNA_string_set(op_ptr, "category", category);
-            RNA_string_set(op_ptr, "tag_name", tag_name);
-
-            /* Set active state for toggle */
-            if (is_active) {
-              toggle_but->flag |= ui::UI_SELECT_DRAW;
-            }
-
-            /* 2. Colored glyph label (if glyph exists) */
-            if (tag_glyph[0] != '\0') {
-              ui::Button *glyph_but = uiDefBut(block,
-                                               ui::ButtonType::Label,
-                                               tag_glyph,
-                                               0,
-                                               0,
-                                               UI_UNIT_X,
-                                               UI_UNIT_Y,
-                                               nullptr,
-                                               0,
-                                               0,
-                                               "");
-
-              if (has_custom_color) {
-                uchar color_uchar[4];
-                color_uchar[0] = uchar(color_rgb[0] * 255.0f);
-                color_uchar[1] = uchar(color_rgb[1] * 255.0f);
-                color_uchar[2] = uchar(color_rgb[2] * 255.0f);
-                color_uchar[3] = 255;
-                button_color_set(glyph_but, color_uchar);
+            wmOperatorType *ot = WM_operatortype_find("wm.category_tag_toggle", false);
+            if (ot) {
+              button_operator_set(tag_but, ot, wm::OpCallContext::ExecDefault);
+              PointerRNA *op_ptr = button_operator_ptr_ensure(tag_but);
+              if (op_ptr) {
+                RNA_string_set(op_ptr, "category", category);
+                RNA_string_set(op_ptr, "tag_name", tag_name);
               }
             }
-
-            /* 3. Tag name label */
-            uiDefBut(block,
-                     ui::ButtonType::Label,
-                     IFACE_(tag_name),
-                     0,
-                     0,
-                     UI_UNIT_X * 4,
-                     UI_UNIT_Y,
-                     nullptr,
-                     0,
-                     0,
-                     "");
           }
 
           if (*cursor == ';') {

@@ -561,6 +561,7 @@ enum class ButtonType : int8_t {
   Scroll,
   Block,
   Label,
+  Tag,        /**< Tag button with checkbox, colored glyph, and text label */
   KeyEvent,
   HsvCube,
   /** Menu (often used in headers), `*_MENU` with different draw-type. */
@@ -1530,6 +1531,29 @@ Button *uiDefIconPreviewBut(Block *block,
 Button *uiDefButImage(
     Block *block, void *imbuf, int x, int y, short width, short height, const uchar color[4]);
 Button *uiDefButAlert(Block *block, AlertIcon icon, int x, int y, short width, short height);
+
+/** Create a unified tag button with checkbox, glyph, and text label.
+ *
+ * This is the primary function for creating ButtonTag widgets.
+ *
+ * @param block The UI block to add button to (must be non-NULL)
+ * @param tag_name The display name for the tag (must be non-empty, non-NULL)
+ * @param glyph Optional UTF-8 glyph/emoji (can be NULL or empty string)
+ * @param color Optional RGB color pointer, values clamped to [0.0-1.0]. NULL for default
+ * @param is_active Whether the tag is currently selected (sets UI_SELECT_DRAW flag)
+ * @param x, y Position in the UI block coordinate system
+ * @param width, height Button dimensions in pixels
+ * @param tip Optional tooltip text (can be NULL)
+ * @return Pointer to created Button (cast to ButtonTag* internally)
+ */
+Button *uiDefButTag(Block *block,
+                    const char *tag_name,
+                    const char *glyph,
+                    const float *color,
+                    bool is_active,
+                    int x, int y, short width, short height,
+                    const char *tip);
+
 /** Button containing both string label and icon. */
 Button *uiDefIconTextBut(Block *block,
                          ButtonTypeWithPointerType but_and_ptr_type,

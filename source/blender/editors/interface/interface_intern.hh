@@ -456,6 +456,19 @@ struct ButtonLabel : public Button {
   float alpha_factor = 1.0f;
 };
 
+/** Derived struct for #ButtonType::Tag
+ * Represents a unified button with checkbox, colored glyph, and text label.
+ * Used for tag selection UI with checkbox toggle, optional emoji, and display text.
+ */
+struct ButtonTag : public Button {
+  char glyph[8] = {};        /**< UTF-8 glyph character (max 1 emoji, ~4 bytes) */
+  float color[3] = {0};      /**< RGB color for glyph (0.0-1.0), clamped at creation */
+  bool has_color = false;    /**< Whether custom color is set (optimization flag) */
+
+  /** Default constructor - initializes all members via default initializers */
+  ButtonTag() : Button() {}
+};
+
 /** Derived struct for #ButtonType::Scroll. */
 struct ButtonScrollBar : public Button {
   /** Actual visual height of UI list (in rows). */

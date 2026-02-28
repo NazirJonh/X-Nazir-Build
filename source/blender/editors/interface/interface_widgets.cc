@@ -4785,7 +4785,183 @@ static void widget_draw_extra_mask(const bContext *C, Button *but, WidgetType *w
   widgetbase_draw(&wtb, &wt->wcol);
 }
 
-static WidgetType *widget_type(WidgetStyle type)
+/* Custom draw function for ButtonType::Tag */
+static void widget_draw_tag(const bContext *C,
+                            uiStyle *style,
+                            const ThemeUI *tui,
+                            const WidgetStateInfo *state_in,
+                            Button *but,
+                            const rcti *rect)
+{
+  /* Safety check: ensure button exists and is correct type */
+  if (!but || but->type != ButtonType::Tag) {
+    return;
+  }
+
+  const ButtonTag *tag_but = static_cast<const ButtonTag *>(but);
+
+  const uiFontStyle *fstyle = &style->widget;
+  const int checkbox_size = BLI_rcti_size_y(rect);
+
+  /* Minimal spacing inside button - layout system handles spacing between buttons */
+  const int box_padding_x = 2 * UI_SCALE_FAC;  /* Small padding inside box */
+  const int box_padding_y = 4 * UI_SCALE_FAC;  /* More vertical padding for better appearance */
+  const int element_spacing = 0;  /* No spacing between elements inside button */
+
+  /* Calculate content area (inside box padding) */
+  rcti content_rect;
+  content_rect.xmin = rect->xmin + box_padding_x;
+  content_rect.xmax = rect->xmax - box_padding_x;
+  content_rect.ymin = rect->ymin + box_padding_y;
+  content_rect.ymax = rect->ymax - box_padding_y;
+
+  int offset_x = content_rect.xmin;
+
+  /* Create state if not provided */
+  WidgetStateInfo local_state = {0};
+  if (state_in) {
+    local_state = *state_in;
+  } else {
+    local_state.but_flag = but->flag;
+    local_state.but_drawflag = but->drawflag;
+    local_state.emboss = but->emboss;
+    if (but->flag & UI_SELECT_DRAW) {
+      local_state.but_flag |= UI_SELECT;
+    }
+  }
+  const WidgetStateInfo *state = &local_state;
+
+  /* ============================================================
+   * BOX CONTAINER: Draw background box (like layout.box() effect)
+   * ============================================================ */
+
+  {
+    WidgetBase wtb_box;
+    widget_init(&wtb_box);
+
+    /* Use box colors from theme (like UI_WTYPE_BOX) */
+    uiWidgetColors wcol_box = tui->wcol_box;
+
+    /* Apply hover effect to box if needed - more visible hover */
+    if (state->but_flag & UI_HOVER) {
+      /* Blend with selected color for more noticeable hover effect */
+      uchar old_inner[4];
+      copy_v4_v4_uchar(old_inner, wcol_box.inner);
+
+      /* Blend inner color with text color (more visible than default hover) */
+      color_blend_v3_v3(wcol_box.inner, wcol_box.text, 0.08f);
+
+      /* Ensure full opacity for visible hover */
+      wcol_box.inner[3] = 180;  /* Semi-transparent but more visible */
+      wcol_box.outline[3] = 180;
+    }
+
+    /* Draw rounded box background */
+    const float rad = widget_radius_from_rcti(rect, &wcol_box);
+    round_box_edges(&wtb_box, CNR_ALL, rect, rad);
+    wtb_box.draw_emboss = false;
+    widgetbase_draw(&wtb_box, &wcol_box);
+
+    /* Flush cache so contents draw on top of box background */
+    GPU_blend(GPU_BLEND_ALPHA);
+    widgetbase_draw_cache_flush();
+    GPU_blend(GPU_BLEND_NONE);
+  }
+
+  /* ============================================================
+   * PART 1: Draw checkbox (left side) - using standard Blender widget_optionbut
+   * ============================================================ */
+
+  /* Add small padding from left edge of box */
+  const int left_padding = 3 * UI_SCALE_FAC;
+  offset_x += left_padding;
+
+  /* Create checkbox rect - use smaller square checkbox, not full height */
+  const int checkbox_square_size = BLI_rcti_size_y(&content_rect);
+  rcti checkbox_rect;
+  checkbox_rect.xmin = offset_x;
+  checkbox_rect.xmax = offset_x + checkbox_square_size;
+  checkbox_rect.ymin = content_rect.ymin;
+  checkbox_rect.ymax = content_rect.ymax;
+
+  /* Use standard Blender checkbox drawing - handles all states and theme colors correctly */
+  uiWidgetColors wcol_option = tui->wcol_option;  /* Use proper checkbox colors from theme */
+  widget_optionbut(&wcol_option, &checkbox_rect, state, 0, 1.0f);
+
+  /* Update offset to after checkbox (no extra spacing) */
+  offset_x = checkbox_rect.xmax;
+
+  /* ============================================================
+   * PART 2: Draw colored glyph (if present)
+   * ============================================================ */
+
+  if (tag_but->glyph[0] != '\0') {
+    /* Setup font for drawing */
+    fontstyle_set(fstyle);
+    if (fstyle->uifont_id >= 0) {
+      /* Get text color - use custom color if set */
+      uchar text_color[4];
+      if (tag_but->has_color) {
+        text_color[0] = uchar(tag_but->color[0] * 255.0f);
+        text_color[1] = uchar(tag_but->color[1] * 255.0f);
+        text_color[2] = uchar(tag_but->color[2] * 255.0f);
+        text_color[3] = 255;
+      } else {
+        copy_v4_v4_uchar(text_color, tui->wcol_regular.text);
+      }
+
+      /* Draw glyph - immediately after checkbox, no spacing */
+      const float glyph_y = content_rect.ymin + (BLI_rcti_size_y(&content_rect) - fstyle->points) / 2.0f;
+
+      BLF_color4f(fstyle->uifont_id,
+                  text_color[0] / 255.0f,
+                  text_color[1] / 255.0f,
+                  text_color[2] / 255.0f,
+                  text_color[3] / 255.0f);
+      BLF_position(fstyle->uifont_id, float(offset_x), glyph_y, 0.0f);
+      BLF_draw(fstyle->uifont_id, tag_but->glyph, strlen(tag_but->glyph));
+
+      /* Update offset to after glyph (no spacing) */
+      const float glyph_width = BLF_width(fstyle->uifont_id, tag_but->glyph, strlen(tag_but->glyph));
+      offset_x += glyph_width;
+    }
+  }
+
+  /* Small spacing between glyph/text and checkbox - or just start if no glyph */
+  if (tag_but->glyph[0] == '\0') {
+    offset_x = checkbox_rect.xmax;
+  }
+  const int small_spacing = 2 * UI_SCALE_FAC;
+  offset_x += small_spacing;
+
+  /* ============================================================
+   * PART 3: Draw tag name text
+   * ============================================================ */
+
+  /* Draw text directly for left alignment */
+  fontstyle_set(fstyle);
+  if (fstyle->uifont_id >= 0) {
+    /* Text color - use theme color */
+    BLF_color4f(fstyle->uifont_id,
+                tui->wcol_regular.text[0] / 255.0f,
+                tui->wcol_regular.text[1] / 255.0f,
+                tui->wcol_regular.text[2] / 255.0f,
+                tui->wcol_regular.text[3] / 255.0f);
+
+    /* Calculate text position - left aligned, vertically centered in content area */
+    const float text_x = float(offset_x);  /* Left aligned */
+    const float text_y = content_rect.ymin + (BLI_rcti_size_y(&content_rect) - fstyle->points) / 2.0f;  /* Vertically centered */
+
+    BLF_position(fstyle->uifont_id, text_x, text_y, 0.0f);
+
+    /* Draw the text */
+    BLF_draw(fstyle->uifont_id, but->str.c_str(), but->str.size());
+  }
+
+  (void)C;  /* Suppress unused warning */
+}
+
+static WidgetType *widget_type(WidgetTypeEnum type)
 {
   bTheme *btheme = theme::theme_get();
 
@@ -5082,6 +5258,10 @@ void draw_button(const bContext *C, ARegion *region, uiStyle *style, Button *but
       case ButtonType::Label:
         widget_draw_text_icon(&style->widget, &tui->wcol_menu_back, but, rect);
         break;
+      case ButtonType::Tag:
+        /* Tag button - custom drawing with checkbox, glyph, and text */
+        widget_draw_tag(C, style, tui, nullptr, but, rect);
+        break;
       case ButtonType::Sepr:
         break;
       case ButtonType::SeprLine:
@@ -5122,6 +5302,10 @@ void draw_button(const bContext *C, ARegion *region, uiStyle *style, Button *but
       case ButtonType::NodeSocket:
         wt = widget_type(WidgetStyle::NodeSocket);
         break;
+      case ButtonType::Tag:
+        /* Tag button - custom drawing with checkbox, glyph, and text */
+        widget_draw_tag(C, style, tui, nullptr, but, rect);
+        break;
       default:
         wt = widget_type(WidgetStyle::Icon);
         break;
@@ -5147,6 +5331,11 @@ void draw_button(const bContext *C, ARegion *region, uiStyle *style, Button *but
         if (!(but->flag & UI_HAS_ICON)) {
           but->drawflag |= BUT_NO_TEXT_PADDING;
         }
+        break;
+
+      case ButtonType::Tag:
+        /* Tag button - custom drawing with checkbox, glyph, and text */
+        widget_draw_tag(C, style, tui, nullptr, but, rect);
         break;
 
       case ButtonType::Sepr:

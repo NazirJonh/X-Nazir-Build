@@ -4285,6 +4285,9 @@ static std::unique_ptr<Button> but_new(const ButtonType type)
     case ButtonType::Label:
       but = std::make_unique<ButtonLabel>();
       break;
+    case ButtonType::Tag:
+      but = std::make_unique<ButtonTag>();
+      break;
     case ButtonType::Scroll:
       but = std::make_unique<ButtonScrollBar>();
       break;
@@ -5115,6 +5118,113 @@ Button *uiDefButAlert(Block *block, AlertIcon icon, int x, int y, short width, s
     return uiDefButImage(block, ibuf, x, y, ibuf->x, ibuf->y, btheme->tui.wcol_menu_back.text);
   }
   return nullptr;
+}
+
+Button *uiDefButTag(Block *block,
+                    const char *tag_name,
+                    const char *glyph,
+                    const float *color,
+                    bool is_active,
+                    int x, int y, short width, short height,
+                    const char *tip)
+{
+  /* ============================================================
+   * INPUT VALIDATION & ERROR CHECKING
+   * ============================================================ */
+
+  if (!block || !tag_name || tag_name[0] == '\0') {
+    BLI_assert(0 && "uiDefButTag: block and non-empty tag_name are required");
+    return nullptr;
+  }
+
+  /* ============================================================
+   * CREATE BUTTON USING FACTORY FUNCTION
+   * ============================================================ */
+
+  block->buttons_ptrs.append(ui_but_new(ButtonType::Tag));
+  ButtonTag *tag_but = static_cast<ButtonTag *>(block->buttons_ptrs.last().get());
+
+  /* ============================================================
+   * INITIALIZE BASE BUTTON FIELDS
+   * ============================================================ */
+
+  tag_but->rect.xmin = x;
+  tag_but->rect.ymin = y;
+  tag_but->rect.xmax = x + width;
+  tag_but->rect.ymax = y + height;
+  tag_but->flag = 0;
+
+  /* Copy button text (tag name) */
+  tag_but->str = tag_name;
+
+  /* Set tooltip if provided */
+  if (tip) {
+    tag_but->tip = tip;
+  }
+
+  /* Set block reference */
+  tag_but->block = block;
+
+  /* ============================================================
+   * COPY & VALIDATE GLYPH
+   * ============================================================ */
+
+  if (glyph && glyph[0] != '\0') {
+    /* NOTE: glyph must be valid UTF-8 */
+    BLI_strncpy(tag_but->glyph, glyph, sizeof(tag_but->glyph));
+  } else {
+    tag_but->glyph[0] = '\0';
+  }
+
+  /* ============================================================
+   * COPY & CLAMP COLOR
+   * ============================================================ */
+
+  if (color) {
+    /* CRITICAL: Clamp color values to [0.0, 1.0] range */
+    /* CLAMP mutates the variable, so we copy first then clamp */
+    tag_but->color[0] = color[0];
+    tag_but->color[1] = color[1];
+    tag_but->color[2] = color[2];
+    CLAMP(tag_but->color[0], 0.0f, 1.0f);
+    CLAMP(tag_but->color[1], 0.0f, 1.0f);
+    CLAMP(tag_but->color[2], 0.0f, 1.0f);
+
+    /* Mark as having custom color if any component is significant */
+    tag_but->has_color = (tag_but->color[0] > 0.001f ||
+                          tag_but->color[1] > 0.001f ||
+                          tag_but->color[2] > 0.001f);
+  } else {
+    /* No custom color - use theme default */
+    tag_but->has_color = false;
+    zero_v3(tag_but->color);
+  }
+
+  /* ============================================================
+   * SET ACTIVE/SELECTED STATE
+   * ============================================================ */
+
+  if (is_active) {
+    tag_but->flag |= UI_SELECT_DRAW;
+  }
+
+  /* ============================================================
+   * ADD TO LAYOUT SYSTEM
+   * ============================================================ */
+
+  /* CRITICAL: If current layout is set, add button as ButtonItem to layout system.
+   * This is required for proper positioning and layout resolution. */
+  if (block->curlayout) {
+    layout_add_but(block->curlayout, tag_but);
+  }
+
+  /* ============================================================
+   * FINALIZE
+   * ============================================================ */
+
+  button_update(tag_but);
+
+  return tag_but;
 }
 
 void button_retval_set(Button *but, int retval)

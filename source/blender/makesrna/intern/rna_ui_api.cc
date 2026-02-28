@@ -2572,6 +2572,15 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_boolean(func, "no_background", false, "", "Skip background rendering (only show on hover/active)");
   parm = RNA_def_boolean(func, "align", true, "", "Align buttons together for seamless appearance");
+  /* Operator parameters */
+  parm = RNA_def_string(func, "operator", nullptr, 0, "", "Operator to call on button click");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "context_menu_operator", nullptr, 0, "", "Operator for right-click context menu");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "operator_param_name", nullptr, 0, "", "Parameter name for context menu operator");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "operator_param_value", nullptr, 0, "", "Parameter value for context menu operator");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
   /* Return value: the row layout */
   parm = RNA_def_pointer(func, "row_layout", "UILayout", "", "Row layout with Tag button (inside the box)");
   RNA_def_function_return(func, parm);

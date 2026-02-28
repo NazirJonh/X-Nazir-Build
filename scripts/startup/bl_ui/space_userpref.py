@@ -6038,7 +6038,11 @@ class USERPREF_PT_tags(TagsPanel, Panel):
                         width=0,  # Auto width
                         height=0,  # Auto height
                         no_background=True,
-                        align=False  # Align buttons together for seamless appearance
+                        align=False,  # Align buttons together for seamless appearance
+                        operator="",  # Optional operator for button click
+                        context_menu_operator="",  # TODO: Temporarily disabled
+                        operator_param_name="",  # TODO: Temporarily disabled
+                        operator_param_value=""  # TODO: Temporarily disabled
                     )
 
                     # Add delete button (X) to the same row - seamless appearance with borders

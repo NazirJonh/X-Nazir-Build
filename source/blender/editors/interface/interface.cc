@@ -3659,6 +3659,23 @@ static void but_free_type_specific(Button *but)
       }
       break;
     }
+    case ButtonType::Tag: {
+      ButtonTag *tag_but = static_cast<ButtonTag *>(but);
+      /* Free strings allocated with BLI_strdup() */
+      if (tag_but->context_menu_operator) {
+        MEM_delete_void(reinterpret_cast<void *>(tag_but->context_menu_operator));
+        tag_but->context_menu_operator = nullptr;
+      }
+      if (tag_but->operator_param_name) {
+        MEM_delete_void(reinterpret_cast<void *>(tag_but->operator_param_name));
+        tag_but->operator_param_name = nullptr;
+      }
+      if (tag_but->operator_param_value) {
+        MEM_delete_void(reinterpret_cast<void *>(tag_but->operator_param_value));
+        tag_but->operator_param_value = nullptr;
+      }
+      break;
+    }
     default:
       break;
   }
@@ -5326,6 +5343,8 @@ extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
  * @param height Button height (0 for automatic)
  * @param no_background Skip background rendering (only show on hover/active)
  * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @param operator_name Optional operator name to assign to button click
+ * @param context_menu_operator Optional operator name for right-click context menu
  * @return Pointer to the row layout with Tag button added (inside the box)
  */
 uiLayout *uiDefButTagRow(uiLayout *layout,
@@ -5335,7 +5354,11 @@ uiLayout *uiDefButTagRow(uiLayout *layout,
                          int width,
                          int height,
                          bool no_background,
-                         bool align)
+                         bool align,
+                         const char *operator_name,
+                         const char *context_menu_operator,
+                         const char *operator_param_name,
+                         const char *operator_param_value)
 {
   using namespace blender::ui;
 
@@ -5377,6 +5400,28 @@ uiLayout *uiDefButTagRow(uiLayout *layout,
     button_drawflag_enable(tag_but, BUT_TAG_NO_BACKGROUND);
   }
 
+  /* ASSIGN OPERATOR IF PROVIDED */
+  if (operator_name && operator_name[0] != '\0') {
+    wmOperatorType *ot = WM_operatortype_find(operator_name, false);
+    if (ot) {
+      button_operator_set(tag_but, ot, wm::OpCallContext::ExecDefault);
+    }
+  }
+
+  /* STORE CONTEXT MENU OPERATOR AND PARAMETERS */
+  if (context_menu_operator && context_menu_operator[0] != '\0') {
+    ButtonTag *tag_but_casted = static_cast<ButtonTag *>(tag_but);
+    tag_but_casted->context_menu_operator = BLI_strdup(context_menu_operator);
+  }
+  if (operator_param_name && operator_param_name[0] != '\0') {
+    ButtonTag *tag_but_casted = static_cast<ButtonTag *>(tag_but);
+    tag_but_casted->operator_param_name = BLI_strdup(operator_param_name);
+  }
+  if (operator_param_value && operator_param_value[0] != '\0') {
+    ButtonTag *tag_but_casted = static_cast<ButtonTag *>(tag_but);
+    tag_but_casted->operator_param_value = BLI_strdup(operator_param_value);
+  }
+
   /* RETURN ROW LAYOUT FOR ADDITIONAL BUTTONS */
   return reinterpret_cast<uiLayout *>(&row);
 }
@@ -5394,6 +5439,8 @@ uiLayout *uiDefButTagRow(uiLayout *layout,
  * @param height Button height (0 = auto)
  * @param no_background Skip background rendering (only show on hover/active)
  * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @param operator_name Optional operator name to assign to button click
+ * @param context_menu_operator Optional operator name for right-click context menu
  * @return Pointer to the row layout with Tag button added (inside the box), or NULL on error
  */
 extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
@@ -5404,7 +5451,11 @@ extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
     int width,
     int height,
     bool no_background,
-    bool align)
+    bool align,
+    const char *operator_name,
+    const char *context_menu_operator,
+    const char *operator_param_name,
+    const char *operator_param_value)
 {
   using namespace blender::ui;
 
@@ -5444,6 +5495,28 @@ extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
   /* SET NO_BACKGROUND FLAG IF REQUESTED */
   if (no_background && tag_but) {
     button_drawflag_enable(tag_but, BUT_TAG_NO_BACKGROUND);
+  }
+
+  /* ASSIGN OPERATOR IF PROVIDED */
+  if (operator_name && operator_name[0] != '\0') {
+    wmOperatorType *ot = WM_operatortype_find(operator_name, false);
+    if (ot) {
+      button_operator_set(tag_but, ot, wm::OpCallContext::ExecDefault);
+    }
+  }
+
+  /* STORE CONTEXT MENU OPERATOR AND PARAMETERS */
+  if (context_menu_operator && context_menu_operator[0] != '\0') {
+    ButtonTag *tag_but_casted = static_cast<ButtonTag *>(tag_but);
+    tag_but_casted->context_menu_operator = BLI_strdup(context_menu_operator);
+  }
+  if (operator_param_name && operator_param_name[0] != '\0') {
+    ButtonTag *tag_but_casted = static_cast<ButtonTag *>(tag_but);
+    tag_but_casted->operator_param_name = BLI_strdup(operator_param_name);
+  }
+  if (operator_param_value && operator_param_value[0] != '\0') {
+    ButtonTag *tag_but_casted = static_cast<ButtonTag *>(tag_but);
+    tag_but_casted->operator_param_value = BLI_strdup(operator_param_value);
   }
 
   /* RETURN ROW LAYOUT FOR ADDITIONAL BUTTONS */

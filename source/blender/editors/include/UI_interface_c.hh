@@ -1614,6 +1614,9 @@ extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
  * @param height Button height (0 for automatic)
  * @param no_background Skip background rendering (only show on hover/active)
  * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @param operator_name Optional operator name to assign to button click
+ * @param context_menu_operator Optional operator name for right-click context menu
+ * @param category_name Optional category name to pass as operator parameter
  * @return Pointer to the row layout with Tag button added
  */
 uiLayout *uiDefButTagRow(uiLayout *layout,
@@ -1623,7 +1626,11 @@ uiLayout *uiDefButTagRow(uiLayout *layout,
                          int width,
                          int height,
                          bool no_background,
-                         bool align);
+                         bool align,
+                         const char *operator_name,
+                         const char *context_menu_operator,
+                         const char *operator_param_name,
+                         const char *operator_param_value);
 
 /**
  * Create a row layout with Tag button for preference mode from RNA.
@@ -1637,6 +1644,10 @@ uiLayout *uiDefButTagRow(uiLayout *layout,
  * @param height Button height (0 = auto)
  * @param no_background Skip background rendering unless hovered/active
  * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @param operator_name Optional operator name to assign to button click
+ * @param context_menu_operator Optional operator name for right-click context menu
+ * @param operator_param_name Optional parameter name for context menu operator
+ * @param operator_param_value Optional parameter value for context menu operator
  * @return Pointer to the row layout with Tag button added, or NULL on error
  */
 extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
@@ -1647,7 +1658,11 @@ extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
     int width,
     int height,
     bool no_background,
-    bool align);
+    bool align,
+    const char *operator_name,
+    const char *context_menu_operator,
+    const char *operator_param_name,
+    const char *operator_param_value);
 
 /** Button containing both string label and icon. */
 Button *uiDefIconTextBut(Block *block,

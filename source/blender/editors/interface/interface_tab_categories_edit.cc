@@ -975,6 +975,43 @@ static blender::Vector<std::pair<std::string, std::string>> glyph_search_call_py
   return results;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Glyph Cache
+ * \{ */
+
+/* Static cache for glyphs - persists until explicitly cleared or Blender exits */
+static blender::Vector<std::pair<std::string, std::string>> g_glyph_cache;
+static bool g_glyph_cache_valid = false;
+
+/**
+ * Clear the glyph cache. Call this when glyphs need to be reloaded.
+ */
+static void glyph_cache_clear()
+{
+  g_glyph_cache.clear();
+  g_glyph_cache_valid = false;
+}
+
+/**
+ * Get glyphs from cache, or load them if cache is invalid.
+ * Returns a reference to the cached glyph vector.
+ */
+static const blender::Vector<std::pair<std::string, std::string>>& glyph_cache_get(bContext *C)
+{
+  if (!g_glyph_cache_valid) {
+    printf("[GLYPH CACHE] Cache miss, loading glyphs from Python...\n");
+    g_glyph_cache = glyph_search_call_python(C, "", "", 1000);
+    g_glyph_cache_valid = true;
+    printf("[GLYPH CACHE] Cached %d glyphs\n", int(g_glyph_cache.size()));
+  }
+  else {
+    printf("[GLYPH CACHE] Cache hit, using %d cached glyphs\n", int(g_glyph_cache.size()));
+  }
+  return g_glyph_cache;
+}
+
+/** \} */
+
 /**
  * Callback for when a search result button is clicked.
  * Sets the glyph code and updates the preview.
@@ -1114,12 +1151,11 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
   block_flag_enable(block, BLOCK_LOOP | BLOCK_MOVEMOUSE_QUIT);
   block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
 
-  /* Set popup size - similar to Asset Shelf, but with fixed height */
+  /* Set popup size - similar to Asset Shelf, but with larger height */
   const int popup_width = (GLYPH_POPUP_LEFT_COL_WIDTH + GLYPH_POPUP_RIGHT_COL_WIDTH) * UI_UNIT_X;
-  const int popup_height = 35 * UI_UNIT_Y; /* Fixed height with scroll */
-  /* Offset to position popup nicely */
-  const int bounds_offset[2] = {-15 * UI_UNIT_X, 2 * UI_UNIT_Y};
-  block_bounds_set_popup(block, 6 * UI_SCALE_FAC, bounds_offset);
+  const int popup_height = 175 * UI_UNIT_Y; /* 5x larger height (35 * 5 = 175) with scroll */
+  /* Center the popup on screen */
+  block_bounds_set_centered(block, 6 * UI_SCALE_FAC);
 
   /* Create main layout */
   Layout &layout = block_layout(block,
@@ -1138,6 +1174,7 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
   /* Left column: Category tree view */
   Layout &left_col = row.column(false);
   left_col.ui_units_x_set(GLYPH_POPUP_LEFT_COL_WIDTH);
+  left_col.ui_units_y_set(150); /* Match height with right column */
   left_col.fixed_size_set(true);
 
   /* Add category tree view to left column */
@@ -1149,6 +1186,8 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
 
   /* Right column: Search + Grid view */
   Layout &right_col = row.column(false);
+  right_col.ui_units_y_set(150); /* Set minimum height for right column */
+  right_col.fixed_size_set(true);
 
   /* Add search field at top of right column */
   Layout &search_row = right_col.row(false);
@@ -1172,8 +1211,6 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
 
   /* Create scrollable container for grid */
   Layout &scroll_col = grid_col.column(false);
-  scroll_col.ui_units_y_set(30 * UI_UNIT_Y); /* Fixed height with scroll */
-  scroll_col.fixed_size_set(true);
 
   /* Create Grid View */
   std::unique_ptr<GlyphGridView> grid_view_ptr = std::make_unique<GlyphGridView>();
@@ -1183,8 +1220,8 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
   /* Don't set category filter for now - categories will be handled by Python API */
   grid_view->set_search_filter(popup_data->search_string);
 
-  /* Set tile size - larger for better preview like Asset Shelf */
-  grid_view->set_tile_size(UI_UNIT_X * 4, UI_UNIT_Y * 4);
+  /* Set tile size - larger for better glyph visibility */
+  grid_view->set_tile_size(UI_UNIT_X * 2, UI_UNIT_Y * 2);
 
   /* Set the selection callback */
   grid_view->set_on_glyph_select_fn(
@@ -1217,7 +1254,10 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
   /* Build the grid view */
   GridViewBuilder builder(*block);
   builder.build_grid_view(*C, *grid, scroll_col);
-
+  
+  /* Add a large spacer to ensure minimum height */
+  scroll_col.separator_spacer();
+  
   return block;
 }
 
@@ -1270,18 +1310,21 @@ static void glyph_more_glyphs_button_cb(bContext *C, void *arg1, void * /*arg2*/
    * all_categories.append("UI actions");
    */
 
-  /* Call Python API to get ALL glyphs (empty category = all) */
-  auto glyphs = glyph_search_call_python(C, "", "", 1000);
+  /* Get glyphs from cache (loads from Python on first call) */
+  const auto &cached_glyphs = glyph_cache_get(C);
 
-  if (glyphs.is_empty()) {
+  if (cached_glyphs.is_empty()) {
     /* No glyphs found, show a message */
     WM_global_report(RPT_WARNING, "No glyphs found");
     return;
   }
 
+  /* Create a copy of glyphs for popup data (popup needs ownership) */
+  blender::Vector<std::pair<std::string, std::string>> glyphs = cached_glyphs;
+
   /* Create popup data with current category and all categories */
   GlyphGridPopupData *popup_data = new GlyphGridPopupData(
-      op, glyphs, current_category, all_categories);
+      op, std::move(glyphs), current_category, all_categories);
 
   /* Create and show popup */
   PopupBlockHandle *handle = popup_block_create(

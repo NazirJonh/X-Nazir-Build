@@ -15,6 +15,7 @@
 #include "BKE_context.hh"
 #include "BKE_icons.hh"
 
+#include "BLF_api.hh"
 #include "BLI_index_range.hh"
 #include "BLI_string.h"
 
@@ -541,34 +542,28 @@ GlyphGridItem::GlyphGridItem(StringRef identifier, StringRef unicode, StringRef 
 {
 }
 
-void GlyphGridItem::build_grid_tile(const bContext & /*C*/, Layout &layout) const
+void GlyphGridItem::build_grid_tile(const bContext &C, Layout &layout) const
 {
   const GridViewStyle &style = this->get_view().get_style();
   Block *block = layout.block();
 
-  /* Debug: Check if unicode is valid */
-  if (unicode_.empty()) {
-    printf("[GLYPH ITEM] Warning: unicode_ is empty!\n");
-  }
-
-  /* Create a button with the unicode glyph as centered text
-   * Use ButtonType::But type which uses widget_draw_text_icon for drawing
-   */
+  /* Create button with unicode glyph as text */
   Button *but = uiDefBut(block,
-                         ButtonType::But,
-                         unicode_.c_str(),  /* unicode glyph as text (str) */
-                         0,                 /* x */
-                         0,                 /* y */
+                         ButtonType::Label,
+                         unicode_.c_str(),  /* unicode glyph as button text */
+                         0,                  /* x */
+                         0,                  /* y */
                          style.tile_width,
                          style.tile_height,
-                         nullptr,           /* poin */
-                         0.0,               /* min */
-                         0.0,               /* max */
-                         unicode_.c_str()); /* tip (tooltip) */
+                         nullptr,            /* poin */
+                         0.0,                /* min */
+                         0.0,                /* max */
+                         name_.c_str());     /* tooltip = name */
 
   but->emboss = EmbossType::None;
-
-  /* Button text is centered by default - no flag needed */
+  
+  /* Ensure text is centered by clearing any alignment flags */
+  but->drawflag &= ~(BUT_TEXT_LEFT | BUT_TEXT_RIGHT);
 }
 
 void GlyphGridItem::set_on_select_fn(OnSelectFn fn)

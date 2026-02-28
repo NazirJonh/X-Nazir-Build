@@ -5345,6 +5345,8 @@ extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
  * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
  * @param operator_name Optional operator name to assign to button click
  * @param context_menu_operator Optional operator name for right-click context menu
+ * @param operator_param_name Optional parameter name for context menu operator
+ * @param operator_param_value Optional parameter value for context menu operator
  * @return Pointer to the row layout with Tag button added (inside the box)
  */
 uiLayout *uiDefButTagRow(uiLayout *layout,
@@ -5395,7 +5397,7 @@ uiLayout *uiDefButTagRow(uiLayout *layout,
   block_layout_set_current(block, &row);
   Button *tag_but = uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, 0, 0, (short)width, (short)height, nullptr);
 
-  /* SET NO_BACKGROUND FLAG IF REQUESTED */
+  /* SET FLAGS IF REQUESTED */
   if (no_background && tag_but) {
     button_drawflag_enable(tag_but, BUT_TAG_NO_BACKGROUND);
   }
@@ -5441,6 +5443,8 @@ uiLayout *uiDefButTagRow(uiLayout *layout,
  * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
  * @param operator_name Optional operator name to assign to button click
  * @param context_menu_operator Optional operator name for right-click context menu
+ * @param operator_param_name Optional parameter name for context menu operator
+ * @param operator_param_value Optional parameter value for context menu operator
  * @return Pointer to the row layout with Tag button added (inside the box), or NULL on error
  */
 extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
@@ -5492,7 +5496,7 @@ extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
   block_layout_set_current(block, &row);
   Button *tag_but = uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, 0, 0, (short)width, (short)height, nullptr);
 
-  /* SET NO_BACKGROUND FLAG IF REQUESTED */
+  /* SET FLAGS IF REQUESTED */
   if (no_background && tag_but) {
     button_drawflag_enable(tag_but, BUT_TAG_NO_BACKGROUND);
   }

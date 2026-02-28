@@ -4934,12 +4934,13 @@ static void widget_draw_tag(const bContext *C,
 
   /* Minimum width for glyph (small square for emoji) */
   const int min_glyph_width = UI_UNIT_X;
-  /* Threshold for showing text alongside glyph */
-  const int text_threshold = UI_UNIT_X * 4;
+  /* Threshold for showing text alongside glyph - lower threshold for better UX */
+  const int text_threshold = UI_UNIT_X * 2;  /* Text shows earlier, hides later */
 
   /* Track glyph width for text clipping */
   float glyph_width = 0.0f;
   bool has_glyph = tag_but->glyph[0] != '\0';
+  bool glyph_was_shown = false;  /* Track if glyph was actually drawn (not just space reserved) */
 
   if (has_glyph) {
     /* Setup font for drawing */
@@ -4963,6 +4964,8 @@ static void widget_draw_tag(const bContext *C,
       const bool show_glyph = available_width >= (min_glyph_width * 0.7f);
 
       if (show_glyph) {
+        glyph_was_shown = true;  /* Mark that glyph is visible */
+
         /* Dim glyph if space is very tight */
         float glyph_alpha = 1.0f;
         if (available_width < min_glyph_width) {
@@ -5001,8 +5004,8 @@ static void widget_draw_tag(const bContext *C,
   /* Calculate remaining width for text */
   const int remaining_width = content_rect.xmax - offset_x;
 
-  /* Determine if we should show text (only if enough space) */
-  const bool show_text = remaining_width >= text_threshold && !but->str.empty();
+  /* Only show text if there's minimal space */
+  const bool show_text = !but->str.empty() && (remaining_width >= UI_UNIT_X);
 
   /* Draw text directly for left alignment */
   fontstyle_set(fstyle);
@@ -5020,7 +5023,7 @@ static void widget_draw_tag(const bContext *C,
 
     BLF_position(fstyle->uifont_id, text_x, text_y, 0.0f);
 
-    /* Clip text to fit available width */
+    /* Clip text to fit available width (same as standard buttons) */
     rcti text_rect;
     text_rect.xmin = offset_x;
     text_rect.xmax = content_rect.xmax;

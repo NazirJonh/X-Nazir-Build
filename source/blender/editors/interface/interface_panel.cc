@@ -2312,27 +2312,24 @@ void panel_category_tabs_settings_popover_open(bContext *C, ARegion *region)
     return;
   }
 
-  /* Position popup to the left of all tabs. Find the leftmost edge. */
-  int tabs_leftmost = region->runtime->category_tabs_settings_rect.xmin;
-
-  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    if (pc_dyn.rect.xmin < tabs_leftmost) {
-      tabs_leftmost = pc_dyn.rect.xmin;
-    }
-  }
-
-  /* Also check settings button. */
-  if (region->runtime->category_tabs_settings_rect.xmin < tabs_leftmost) {
-    tabs_leftmost = region->runtime->category_tabs_settings_rect.xmin;
-  }
+  /* Determine if tabs are on the left or right side of the region. */
+  const bool is_left = (RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT);
 
   /* Popup width is 200 pixels (set in Python operator), convert with scale. */
   const int popup_width = 200 * UI_SCALE_FAC;
   /* Add extra margin for spacing. */
   const int popup_margin = 10 * UI_SCALE_FAC;
 
-  /* Position popup to the LEFT of all tabs. */
-  const int popup_x = region->winrct.xmin + tabs_leftmost - popup_width - popup_margin;
+  /* Position popup next to the settings button. */
+  int popup_x;
+  if (is_left) {
+    /* Tabs on left side: position popup to the right of the settings button. */
+    popup_x = region->winrct.xmin + region->runtime->category_tabs_settings_rect.xmax + popup_margin;
+  }
+  else {
+    /* Tabs on right side: position popup to the left of the settings button. */
+    popup_x = region->winrct.xmin + region->runtime->category_tabs_settings_rect.xmin - popup_width - popup_margin;
+  }
 
   /* Use vertical center of settings button for Y position. */
   const int button_center_y = region->winrct.ymin +

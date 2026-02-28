@@ -1355,6 +1355,9 @@ void layout_panel_popup_scroll_apply(Panel *panel, const float dy);
 /** Category tab drag operator for reordering tabs. */
 void UI_OT_category_tab_drag(wmOperatorType *ot);
 
+/** Glyph picker grid operator. */
+void WM_OT_glyph_picker_grid(wmOperatorType *ot);
+
 /**
  * Draws in resolution of 48x4 colors.
  */

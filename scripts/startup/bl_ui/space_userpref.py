@@ -2105,6 +2105,22 @@ class TagModeItem:
         self._mode_uv_edit = value
         self._save_to_cache()
 
+    def _glyph_update(self, context):
+        """Callback for glyph property change via RNA (e.g. from C++ picker)."""
+        if self.name:
+            update_tag(self.name, glyph=_hex_to_glyph(self.glyph))
+            # Sync back to cache and trigger redraw
+            sync_wm_to_glyph_cache()
+            context.area.tag_redraw()
+
+    def _color_update(self, context):
+        """Callback for color property change via RNA."""
+        if self.name:
+            update_tag(self.name, color=list(self.color))
+            # Sync back to cache and trigger redraw
+            sync_wm_to_glyph_cache()
+            context.area.tag_redraw()
+
 
 def get_tag_mode_item(tag_name):
     """Get a TagModeItem for the given tag name."""
@@ -2191,7 +2207,8 @@ class USERPREF_OT_category_tag_create(Operator):
         success, message = create_tag(
             self.name,
             glyph,
-            list(self.color)
+            list(self.color),
+            auto_save=True
         )
         if success:
             # If category is specified, assign the tag to it
@@ -2203,6 +2220,8 @@ class USERPREF_OT_category_tag_create(Operator):
 
             # Sync to WM to update the UI list immediately
             sync_glyph_mappings_to_wm()
+            # Also ensure saved to file
+            _auto_save_tags()
 
             # Set active index to the new tag
             for i, t in enumerate(context.window_manager.category_tags):
@@ -2219,7 +2238,11 @@ class USERPREF_OT_category_tag_create(Operator):
         layout = self.layout
         layout.use_property_split = True
         layout.prop(self, "name")
-        layout.prop(self, "glyph")
+        
+        row = layout.row(align=True)
+        row.prop(self, "glyph")
+        op = row.operator("wm.glyph_picker_grid", text=_hex_to_glyph("f02f"), icon='NONE')
+        op.target_property = "active_operator.glyph"
 
         # Color presets with glyph buttons
         layout.label(text="Color:")
@@ -2290,6 +2313,21 @@ class USERPREF_OT_category_tag_edit(Operator):
         self.color = tag_data["color"]
         return context.window_manager.invoke_props_dialog(self)
 
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(self, "name")
+        
+        row = layout.row(align=True)
+        row.prop(self, "glyph")
+        op = row.operator("wm.glyph_picker_grid", text=_hex_to_glyph("f02f"), icon='NONE')
+        op.target_property = "active_operator.glyph"
+
+        # Color presets with glyph buttons
+        layout.label(text="Color:")
+        row = layout.row()
+        row.template_color_glyph_presets(self.properties, "color")
+
     @with_context_check
     def execute(self, context):
         # Convert hex glyph to Unicode character
@@ -2297,13 +2335,16 @@ class USERPREF_OT_category_tag_edit(Operator):
         success, message = update_tag(
             self.name,
             glyph,
-            list(self.color)
+            list(self.color),
+            auto_save=True
         )
         if success:
             self.report({'INFO'}, message)
 
             # Sync to WM to update the UI list immediately
             sync_glyph_mappings_to_wm()
+            # Also ensure saved to file
+            _auto_save_tags()
 
             context.area.tag_redraw()
             return {'FINISHED'}
@@ -6009,7 +6050,11 @@ class USERPREF_PT_tags(TagsPanel, Panel):
             box = col_right.box()
             box.use_property_split = True
             box.prop(tag, "name", text="Name")
-            box.prop(tag, "glyph", text="Glyph")
+            
+            row = box.row(align=True)
+            row.prop(tag, "glyph", text="Glyph")
+            op = row.operator("wm.glyph_picker_grid", text=_hex_to_glyph("f02f"), icon='NONE')
+            op.target_property = f"category_tags[{active_idx}].glyph"
 
             # Color presets with glyph buttons
             box.label(text="Color:")

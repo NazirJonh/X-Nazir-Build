@@ -31,6 +31,9 @@ try:
 except ImportError:
     get_glyph_library = None
 
+if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
+    bpy.types.WindowManager.category_tag_glyph_hex = bpy.props.StringProperty(default="", options={'HIDDEN'})
+
 
 # -----------------------------------------------------------------------------
 # Tag System - Infrastructure Utilities (CleanPanels patterns)
@@ -2198,12 +2201,17 @@ class USERPREF_OT_category_tag_create(Operator):
 
     @with_context_check
     def execute(self, context):
+        # DEBUG: Проверяем значение glyph при сохранении
+        print(f"[DEBUG CREATE_TAG execute] self.glyph = '{self.glyph}'")
+        print(f"[DEBUG CREATE_TAG execute] self.name = '{self.name}'")
+
         if not self.name:
             self.report({'ERROR'}, "Tag name cannot be empty")
             return {'CANCELLED'}
 
         # Convert hex glyph to Unicode character
         glyph = _hex_to_glyph(self.glyph) if self.glyph else ""
+        print(f"[DEBUG CREATE_TAG execute] Converted glyph = '{glyph}'")
         success, message = create_tag(
             self.name,
             glyph,
@@ -2238,11 +2246,25 @@ class USERPREF_OT_category_tag_create(Operator):
         layout = self.layout
         layout.use_property_split = True
         layout.prop(self, "name")
-        
+
+        wm = context.window_manager
+        glyph_selected_hex = getattr(wm, "category_tag_glyph_hex", "")
+        if glyph_selected_hex:
+            self.glyph = glyph_selected_hex
+            wm.category_tag_glyph_hex = ""
+
         row = layout.row(align=True)
         row.prop(self, "glyph")
         op = row.operator("wm.glyph_picker_grid", text=_hex_to_glyph("f02f"), icon='NONE')
-        op.target_property = "active_operator.glyph"
+        op.target_property = "window_manager.category_tag_glyph_hex"
+
+        # DEBUG: Проверяем активный оператор
+        print(f"[DEBUG CREATE_TAG draw] context.active_operator = {context.active_operator}")
+        print(f"[DEBUG CREATE_TAG draw] self = {self}")
+        print(f"[DEBUG CREATE_TAG draw] self.as_pointer() = {self.as_pointer()}")
+        ptr = str(self.as_pointer())
+        print(f"[DEBUG CREATE_TAG draw] Setting target_operator_ptr = {ptr}")
+        op.target_operator_ptr = ptr
 
         # Color presets with glyph buttons
         layout.label(text="Color:")
@@ -2250,6 +2272,7 @@ class USERPREF_OT_category_tag_create(Operator):
         row.template_color_glyph_presets(self.properties, "color")
 
     def invoke(self, context, event):
+        context.window_manager.category_tag_glyph_hex = ""
         return context.window_manager.invoke_props_dialog(self)
 
 
@@ -2311,17 +2334,32 @@ class USERPREF_OT_category_tag_edit(Operator):
         tag_data = get_tag_data(self.name)
         self.glyph = _glyph_to_hex(tag_data["glyph"])
         self.color = tag_data["color"]
+        context.window_manager.category_tag_glyph_hex = ""
         return context.window_manager.invoke_props_dialog(self)
 
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
         layout.prop(self, "name")
-        
+
+        wm = context.window_manager
+        glyph_selected_hex = getattr(wm, "category_tag_glyph_hex", "")
+        if glyph_selected_hex:
+            self.glyph = glyph_selected_hex
+            wm.category_tag_glyph_hex = ""
+
         row = layout.row(align=True)
         row.prop(self, "glyph")
         op = row.operator("wm.glyph_picker_grid", text=_hex_to_glyph("f02f"), icon='NONE')
-        op.target_property = "active_operator.glyph"
+        op.target_property = "window_manager.category_tag_glyph_hex"
+
+        # DEBUG: Проверяем активный оператор
+        print(f"[DEBUG EDIT_TAG draw] context.active_operator = {context.active_operator}")
+        print(f"[DEBUG EDIT_TAG draw] self = {self}")
+        print(f"[DEBUG EDIT_TAG draw] self.as_pointer() = {self.as_pointer()}")
+        ptr = str(self.as_pointer())
+        print(f"[DEBUG EDIT_TAG draw] Setting target_operator_ptr = {ptr}")
+        op.target_operator_ptr = ptr
 
         # Color presets with glyph buttons
         layout.label(text="Color:")
@@ -2330,8 +2368,13 @@ class USERPREF_OT_category_tag_edit(Operator):
 
     @with_context_check
     def execute(self, context):
+        # DEBUG: Проверяем значение glyph при сохранении
+        print(f"[DEBUG EDIT_TAG execute] self.glyph = '{self.glyph}'")
+        print(f"[DEBUG EDIT_TAG execute] self.name = '{self.name}'")
+
         # Convert hex glyph to Unicode character
         glyph = _hex_to_glyph(self.glyph) if self.glyph else ""
+        print(f"[DEBUG EDIT_TAG execute] Converted glyph = '{glyph}'")
         success, message = update_tag(
             self.name,
             glyph,

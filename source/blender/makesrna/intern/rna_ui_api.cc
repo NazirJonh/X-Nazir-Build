@@ -2542,6 +2542,39 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_int(func, "height", 0, 0, INT_MAX, "", "Button height", 0, INT_MAX);
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  /* Tag button row in preference mode (no checkbox, for category assignment UI) */
+  func = RNA_def_function(srna, "tag_button_pref_row", "rna_uiLayout_tag_button_pref_row");
+  RNA_def_function_ui_description(func,
+                                  "Create a box container with a row layout containing a Tag button in preference mode. "
+                                  "The box provides a visual frame around the Tag button and any additional buttons. "
+                                  "Returns the row layout so additional buttons can be added.");
+  parm = RNA_def_string(func, "tag_name", nullptr, 0, "", "Tag name to display");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "glyph", nullptr, 0, "", "Optional UTF-8 glyph/emoji character");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  /* Color parameter - passing as 3 floats */
+  parm = RNA_def_float_vector(func,
+                              "color",
+                              3,
+                              nullptr,
+                              0.0f,
+                              1.0f,
+                              "",
+                              "RGB color for glyph (0.0-1.0)",
+                              0.0f,
+                              1.0f);
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  /* Size parameters */
+  parm = RNA_def_int(func, "width", 0, 0, INT_MAX, "", "Button width (0 for automatic)", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "height", 0, 0, INT_MAX, "", "Button height (0 for automatic)", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "no_background", false, "", "Skip background rendering (only show on hover/active)");
+  parm = RNA_def_boolean(func, "align", true, "", "Align buttons together for seamless appearance");
+  /* Return value: the row layout */
+  parm = RNA_def_pointer(func, "row_layout", "UILayout", "", "Row layout with Tag button (inside the box)");
+  RNA_def_function_return(func, parm);
 }
 
 }  // namespace blender

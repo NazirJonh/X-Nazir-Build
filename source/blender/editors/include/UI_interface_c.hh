@@ -466,6 +466,8 @@ enum {
 enum {
   /** Tag button preference mode (no checkbox, with delete button). */
   BUT_TAG_PREF_MODE = 1 << 0,
+  /** Skip background unless hovered/active. */
+  BUT_TAG_NO_BACKGROUND = 1 << 9,
   /** Text and icon alignment (by default, they are centered). */
   BUT_TEXT_LEFT = 1 << 1,
   BUT_ICON_LEFT = 1 << 2,
@@ -1597,6 +1599,55 @@ extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
                                               const char *glyph,
                                               const float *color,
                                               int x, int y, int width, int height);
+
+/**
+ * Create a row layout with Tag button for preference mode.
+ *
+ * This function creates a row layout with align=true and adds a Tag button
+ * to it. The returned layout can be used to add additional buttons (e.g., delete button).
+ *
+ * @param layout The parent layout container
+ * @param tag_name The display name for the tag
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color Optional RGB color for glyph (values 0.0-1.0)
+ * @param width Button width (0 for automatic)
+ * @param height Button height (0 for automatic)
+ * @param no_background Skip background rendering (only show on hover/active)
+ * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @return Pointer to the row layout with Tag button added
+ */
+uiLayout *uiDefButTagRow(uiLayout *layout,
+                         const char *tag_name,
+                         const char *glyph,
+                         const float *color,
+                         int width,
+                         int height,
+                         bool no_background,
+                         bool align);
+
+/**
+ * Create a row layout with Tag button for preference mode from RNA.
+ * Called by RNA system when Python code calls layout.tag_button_pref_row().
+ *
+ * @param layout The UI layout (must be non-NULL)
+ * @param tag_name Display name (must be non-NULL, non-empty)
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color RGB color for glyph (3 floats)
+ * @param width Button width (0 = auto)
+ * @param height Button height (0 = auto)
+ * @param no_background Skip background rendering unless hovered/active
+ * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @return Pointer to the row layout with Tag button added, or NULL on error
+ */
+extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
+    blender::ui::Layout *layout,
+    const char *tag_name,
+    const char *glyph,
+    const float *color,
+    int width,
+    int height,
+    bool no_background,
+    bool align);
 
 /** Button containing both string label and icon. */
 Button *uiDefIconTextBut(Block *block,

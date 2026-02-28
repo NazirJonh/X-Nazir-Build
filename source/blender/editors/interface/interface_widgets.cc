@@ -4831,6 +4831,12 @@ static void widget_draw_tag(const bContext *C,
   }
   const WidgetStateInfo *state = &local_state;
 
+  /* Determine if this is preference mode button (no checkbox) */
+  const bool is_pref_mode = (but->drawflag & BUT_TAG_PREF_MODE) != 0;
+
+  /* Check if button should draw background (BUT_TAG_NO_BACKGROUND flag = skip background unless hovered) */
+  const bool no_background = (but->drawflag & BUT_TAG_NO_BACKGROUND) != 0;
+
   /* ============================================================
    * BOX CONTAINER: Draw background box (like layout.box() effect)
    * ============================================================ */
@@ -4857,16 +4863,37 @@ static void widget_draw_tag(const bContext *C,
       wcol_box.outline[3] = 180;
     }
 
-    /* Draw rounded box background */
-    const float rad = widget_radius_from_rcti(rect, &wcol_box);
-    round_box_edges(&wtb_box, CNR_ALL, rect, rad);
-    wtb_box.draw_emboss = false;
-    widgetbase_draw(&wtb_box, &wcol_box);
+    /* Calculate rounded corners based on alignment */
+    /* In preference mode, if button has BUT_ALIGN_RIGHT flag, it means there's a button to the right,
+     * so we should not round the right corners to create seamless appearance */
+    int round_corners = CNR_ALL;
+    if (is_pref_mode && (but->drawflag & BUT_ALIGN)) {
+      /* Check alignment flags to determine which corners to round */
+      if (but->drawflag & BUT_ALIGN_RIGHT) {
+        /* Button has another button to its right - remove right corner rounding */
+        round_corners &= ~(CNR_TOP_RIGHT | CNR_BOTTOM_RIGHT);
+      }
+      /* If button is on the left edge (has left alignment), keep left corners rounded */
+      /* If button is in the middle (has both left and right), round no corners (fully flat) */
+      if ((but->drawflag & BUT_ALIGN_LEFT) && (but->drawflag & BUT_ALIGN_RIGHT)) {
+        /* Button is in the middle of a group - round no corners */
+        round_corners = 0;
+      }
+    }
 
-    /* Flush cache so contents draw on top of box background */
-    GPU_blend(GPU_BLEND_ALPHA);
-    widgetbase_draw_cache_flush();
-    GPU_blend(GPU_BLEND_NONE);
+    /* Skip drawing background if BUT_TAG_NO_BACKGROUND is set and not hovered/active */
+    if (!no_background || (state->but_flag & (UI_HOVER | UI_SELECT))) {
+      /* Draw rounded box background */
+      const float rad = widget_radius_from_rcti(rect, &wcol_box);
+      round_box_edges(&wtb_box, round_corners, rect, rad);
+      wtb_box.draw_emboss = false;
+      widgetbase_draw(&wtb_box, &wcol_box);
+
+      /* Flush cache so contents draw on top of box background */
+      GPU_blend(GPU_BLEND_ALPHA);
+      widgetbase_draw_cache_flush();
+      GPU_blend(GPU_BLEND_NONE);
+    }
   }
 
   /* ============================================================
@@ -4874,7 +4901,6 @@ static void widget_draw_tag(const bContext *C,
    * Skip for preference mode buttons (BUT_TAG_PREF_MODE)
    * ============================================================ */
 
-  const bool is_pref_mode = (but->drawflag & BUT_TAG_PREF_MODE) != 0;
   rcti checkbox_rect = {0};
 
   if (!is_pref_mode) {

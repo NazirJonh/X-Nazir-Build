@@ -5281,6 +5281,10 @@ extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
 {
   using namespace blender::ui;
 
+  /* Silence unused parameter warnings - position is determined by layout system */
+  (void)x;
+  (void)y;
+
   if (!layout || !tag_name || tag_name[0] == '\0') {
     return;
   }
@@ -5296,7 +5300,7 @@ extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
     width = UI_UNIT_X * 10;  /* Default width for preference mode buttons */
   }
   if (height <= 0) {
-    height = (int)(UI_UNIT_Y * 1.2f);  /* Default height for preference mode buttons */
+    height = UI_UNIT_Y;  /* Use standard height to match operator buttons */
   }
 
   /* Set current layout for button creation */
@@ -5304,6 +5308,146 @@ extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
 
   /* Create preference mode Tag button */
   uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, 0, 0, (short)width, (short)height, nullptr);
+}
+
+/**
+ * Create a box layout with Tag button for preference mode.
+ *
+ * This function creates a box container with a row layout (align=true) inside
+ * and adds a Tag button to the row. The returned layout can be used to add
+ * additional buttons (e.g., delete button). The box provides a visual frame
+ * around the Tag button and any additional buttons added to the row.
+ *
+ * @param layout The parent layout container
+ * @param tag_name The display name for the tag
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color Optional RGB color for glyph (values 0.0-1.0)
+ * @param width Button width (0 for automatic)
+ * @param height Button height (0 for automatic)
+ * @param no_background Skip background rendering (only show on hover/active)
+ * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @return Pointer to the row layout with Tag button added (inside the box)
+ */
+uiLayout *uiDefButTagRow(uiLayout *layout,
+                         const char *tag_name,
+                         const char *glyph,
+                         const float *color,
+                         int width,
+                         int height,
+                         bool no_background,
+                         bool align)
+{
+  using namespace blender::ui;
+
+  /* INPUT VALIDATION */
+  if (!layout) {
+    BLI_assert(0 && "uiDefButTagRow: layout is required");
+    return nullptr;
+  }
+  if (!tag_name || tag_name[0] == '\0') {
+    BLI_assert(0 && "uiDefButTagRow: non-empty tag_name is required");
+    return nullptr;
+  }
+
+  /* CREATE BOX CONTAINER WITH ROW LAYOUT INSIDE */
+  Layout *layout_cpp = reinterpret_cast<Layout *>(layout);
+  Layout &box = layout_cpp->box();
+  Layout &row = box.row(align);
+
+  /* Get block from layout */
+  Block *block = row.block();
+  if (!block) {
+    return nullptr;
+  }
+
+  /* CALCULATE AUTOMATIC SIZE IF NEEDED */
+  if (width <= 0) {
+    width = UI_UNIT_X * 10;
+  }
+  if (height <= 0) {
+    height = UI_UNIT_Y;  /* Use standard height to match operator buttons */
+  }
+
+  /* CREATE TAG BUTTON IN PREFERENCE MODE */
+  block_layout_set_current(block, &row);
+  Button *tag_but = uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, 0, 0, (short)width, (short)height, nullptr);
+
+  /* SET NO_BACKGROUND FLAG IF REQUESTED */
+  if (no_background && tag_but) {
+    button_drawflag_enable(tag_but, BUT_TAG_NO_BACKGROUND);
+  }
+
+  /* RETURN ROW LAYOUT FOR ADDITIONAL BUTTONS */
+  return reinterpret_cast<uiLayout *>(&row);
+}
+
+/**
+ * Create a box layout with Tag button for preference mode from RNA.
+ * This function is called by the RNA system when Python code calls layout.tag_button_pref_row().
+ * The box provides a visual frame around the Tag button and any additional buttons.
+ *
+ * @param layout The UI layout (must be non-NULL)
+ * @param tag_name Display name (must be non-NULL, non-empty)
+ * @param glyph Optional UTF-8 glyph/emoji
+ * @param color RGB color for glyph (3 floats)
+ * @param width Button width (0 = auto)
+ * @param height Button height (0 = auto)
+ * @param no_background Skip background rendering (only show on hover/active)
+ * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @return Pointer to the row layout with Tag button added (inside the box), or NULL on error
+ */
+extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
+    blender::ui::Layout *layout,
+    const char *tag_name,
+    const char *glyph,
+    const float *color,
+    int width,
+    int height,
+    bool no_background,
+    bool align)
+{
+  using namespace blender::ui;
+
+  /* INPUT VALIDATION */
+  if (!layout) {
+    BLI_assert(0 && "rna_uiLayout_tag_button_pref_row: layout is required");
+    return nullptr;
+  }
+  if (!tag_name || tag_name[0] == '\0') {
+    BLI_assert(0 && "rna_uiLayout_tag_button_pref_row: non-empty tag_name is required");
+    return nullptr;
+  }
+
+  /* CREATE BOX CONTAINER WITH ROW LAYOUT INSIDE */
+  Layout *layout_cpp = layout;
+  Layout &box = layout_cpp->box();
+  Layout &row = box.row(align);
+
+  /* Get block from layout */
+  Block *block = row.block();
+  if (!block) {
+    return nullptr;
+  }
+
+  /* CALCULATE AUTOMATIC SIZE IF NEEDED */
+  if (width <= 0) {
+    width = UI_UNIT_X * 10;
+  }
+  if (height <= 0) {
+    height = UI_UNIT_Y;  /* Use standard height to match operator buttons */
+  }
+
+  /* CREATE TAG BUTTON IN PREFERENCE MODE */
+  block_layout_set_current(block, &row);
+  Button *tag_but = uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, 0, 0, (short)width, (short)height, nullptr);
+
+  /* SET NO_BACKGROUND FLAG IF REQUESTED */
+  if (no_background && tag_but) {
+    button_drawflag_enable(tag_but, BUT_TAG_NO_BACKGROUND);
+  }
+
+  /* RETURN ROW LAYOUT FOR ADDITIONAL BUTTONS */
+  return &row;
 }
 
 void button_retval_set(Button *but, int retval)

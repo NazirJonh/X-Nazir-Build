@@ -6027,24 +6027,22 @@ class USERPREF_PT_tags(TagsPanel, Panel):
                     item_row = cats_flow.row()
                     item_row.alignment = 'LEFT'
 
-                    # Create a row for the tag button + delete button
-                    row = item_row.row(align=True)
-
                     # Get all visual data for the category
                     glyph, color, display_name = get_category_glyph_data(cat)
 
-                    # Create preference mode Tag button (no checkbox)
-                    # Using the C++ API through layout.tag_button_pref()
-                    # Pass 0 for width/height to let the system calculate automatically
-                    row.tag_button_pref(
+                    # Create row layout with Tag button (returns row for adding more buttons)
+                    tag_row = item_row.tag_button_pref_row(
                         tag_name=display_name,
                         glyph=glyph if glyph else "",
                         color=(color[0], color[1], color[2]) if glyph else (0.0, 0.0, 0.0),
-                        x=0, y=0, width=0, height=0
+                        width=0,  # Auto width
+                        height=0,  # Auto height
+                        no_background=True,
+                        align=False  # Align buttons together for seamless appearance
                     )
 
-                    # Delete button (X)
-                    op_x = row.operator("wm.category_tag_remove_from_category", text="", icon='X', emboss=False)
+                    # Add delete button (X) to the same row - seamless appearance with borders
+                    op_x = tag_row.operator("wm.category_tag_remove_from_category", text="", icon='X')
                     op_x.category = cat
                     op_x.tag_name = tag.name
             else:

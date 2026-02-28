@@ -16,6 +16,7 @@
 #include "BKE_icons.hh"
 
 #include "BLI_index_range.hh"
+#include "BLI_string.h"
 
 #include "WM_types.hh"
 
@@ -26,6 +27,7 @@
 #include "interface_intern.hh"
 
 #include "UI_grid_view.hh"
+#include "UI_glyph_grid_view.hh"
 
 namespace blender::ui {
 
@@ -528,5 +530,96 @@ std::optional<bool> PreviewGridItem::should_be_active() const
   }
   return std::nullopt;
 }
+
+/* ---------------------------------------------------------------------- */
+/** \name Glyph Grid Item
+ * \{ */
+
+GlyphGridItem::GlyphGridItem(StringRef identifier, StringRef unicode, StringRef name)
+    : AbstractGridViewItem(identifier), unicode_(unicode), name_(name)
+{
+}
+
+void GlyphGridItem::build_grid_tile(const bContext & /*C*/, Layout &layout) const
+{
+  const GridViewStyle &style = this->get_view().get_style();
+  Block *block = layout.block();
+
+  /* Create a button that displays the unicode glyph */
+  Button *but = uiDefBut(block,
+                         ButtonType::PreviewTile,
+                         unicode_.c_str(),
+                         0,
+                         0,
+                         style.tile_width,
+                         style.tile_height,
+                         nullptr,
+                         0,
+                         0,
+                         "");
+
+  but->emboss = EmbossType::None;
+}
+
+void GlyphGridItem::set_on_select_fn(OnSelectFn fn)
+{
+  on_select_fn_ = fn;
+}
+
+std::optional<bool> GlyphGridItem::should_be_active() const
+{
+  return std::nullopt;
+}
+
+void GlyphGridItem::on_activate(bContext &C)
+{
+  if (on_select_fn_) {
+    on_select_fn_(C, unicode_);
+  }
+}
+
+/** \} */
+
+/* ---------------------------------------------------------------------- */
+/** \name Glyph Grid View
+ * \{ */
+
+GlyphGridView::GlyphGridView() : AbstractGridView() {}
+
+void GlyphGridView::set_glyphs(const Vector<std::pair<std::string, std::string>> &glyphs)
+{
+  glyphs_ = glyphs;
+}
+
+void GlyphGridView::set_category(StringRef category)
+{
+  category_ = category;
+}
+
+void GlyphGridView::set_on_glyph_select_fn(OnGlyphSelectFn fn)
+{
+  on_glyph_select_fn_ = fn;
+}
+
+void GlyphGridView::build_items()
+{
+  for (int64_t i = 0; i < glyphs_.size(); i++) {
+    const auto &[unicode, name] = glyphs_[i];
+
+    /* Create unique identifier for each glyph */
+    std::string identifier = "glyph_" + std::to_string(i);
+
+    GlyphGridItem &item = this->add_item<GlyphGridItem>(identifier, unicode, name);
+
+    /* Set the selection callback */
+    if (on_glyph_select_fn_) {
+      item.set_on_select_fn([this](bContext &C, const std::string &unicode) {
+        on_glyph_select_fn_(C, unicode);
+      });
+    }
+  }
+}
+
+/** \} */
 
 }  // namespace blender::ui

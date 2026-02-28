@@ -25,6 +25,12 @@ from bpy.app.translations import (
 )
 from bl_ui.utils import PresetPanel
 
+# Import glyph library for integration
+try:
+    from bl_ui.glyph_library import get_glyph_library
+except ImportError:
+    get_glyph_library = None
+
 
 # -----------------------------------------------------------------------------
 # Tag System - Infrastructure Utilities (CleanPanels patterns)
@@ -1309,6 +1315,30 @@ def reset_category_glyphs_to_defaults():
     _save_glyph_mappings_to_file()
 
 
+def _integrate_glyph_library():
+    """Integrate glyph library with DEFAULT_CATEGORY_GLYPHS."""
+    if not get_glyph_library:
+        return
+    
+    try:
+        library = get_glyph_library()
+        if not library or not library.is_loaded:
+            return
+        
+        # For each category in DEFAULT_CATEGORY_GLYPHS, try to get the glyph name from library
+        for category, glyph_data in DEFAULT_CATEGORY_GLYPHS.items():
+            glyph_unicode = glyph_data.get('glyph', '')
+            if glyph_unicode:
+                # Try to find the glyph name in the library
+                glyph_obj = library.get_by_codepoint(glyph_unicode)
+                if glyph_obj:
+                    # Store the glyph name for reference
+                    glyph_data['glyph_name'] = glyph_obj.get('name', '')
+                    glyph_data['glyph_category'] = glyph_obj.get('category', '')
+    except Exception as e:
+        print(f"[GLYPH] Warning: Could not integrate glyph library: {e}")
+
+
 def _discover_active_categories():
     """Discover all active categories from registered panels including addon panels."""
     discovered_categories = set()
@@ -1583,6 +1613,9 @@ def register_category_glyph_mappings():
 
     if not _glyph_cache_loaded:
         _load_glyph_mappings_from_file()
+
+    # Integrate with glyph library if available
+    _integrate_glyph_library()
 
     # Discover and merge any new categories from active addons
     try:

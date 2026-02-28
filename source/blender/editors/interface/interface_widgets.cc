@@ -4929,7 +4929,19 @@ static void widget_draw_tag(const bContext *C,
    * PART 2: Draw colored glyph (if present)
    * ============================================================ */
 
-  if (tag_but->glyph[0] != '\0') {
+  /* Calculate available width for content after checkbox */
+  const int available_width = content_rect.xmax - offset_x;
+
+  /* Minimum width for glyph (small square for emoji) */
+  const int min_glyph_width = UI_UNIT_X;
+  /* Threshold for showing text alongside glyph */
+  const int text_threshold = UI_UNIT_X * 4;
+
+  /* Track glyph width for text clipping */
+  float glyph_width = 0.0f;
+  bool has_glyph = tag_but->glyph[0] != '\0';
+
+  if (has_glyph) {
     /* Setup font for drawing */
     fontstyle_set(fstyle);
     if (fstyle->uifont_id >= 0) {
@@ -4944,25 +4956,39 @@ static void widget_draw_tag(const bContext *C,
         copy_v4_v4_uchar(text_color, tui->wcol_regular.text);
       }
 
-      /* Draw glyph - immediately after checkbox, no spacing */
-      const float glyph_y = content_rect.ymin + (BLI_rcti_size_y(&content_rect) - fstyle->points) / 2.0f;
+      /* Calculate glyph width first */
+      glyph_width = BLF_width(fstyle->uifont_id, tag_but->glyph, strlen(tag_but->glyph));
 
-      BLF_color4f(fstyle->uifont_id,
-                  text_color[0] / 255.0f,
-                  text_color[1] / 255.0f,
-                  text_color[2] / 255.0f,
-                  text_color[3] / 255.0f);
-      BLF_position(fstyle->uifont_id, float(offset_x), glyph_y, 0.0f);
-      BLF_draw(fstyle->uifont_id, tag_but->glyph, strlen(tag_but->glyph));
+      /* Check if we have enough space to show glyph (with some padding) */
+      const bool show_glyph = available_width >= (min_glyph_width * 0.7f);
+
+      if (show_glyph) {
+        /* Dim glyph if space is very tight */
+        float glyph_alpha = 1.0f;
+        if (available_width < min_glyph_width) {
+          glyph_alpha = 0.5f;  /* Dim glyph when very cramped */
+          text_color[3] = uchar(text_color[3] * glyph_alpha);
+        }
+
+        /* Draw glyph - immediately after checkbox, no spacing */
+        const float glyph_y = content_rect.ymin + (BLI_rcti_size_y(&content_rect) - fstyle->points) / 2.0f;
+
+        BLF_color4f(fstyle->uifont_id,
+                    text_color[0] / 255.0f,
+                    text_color[1] / 255.0f,
+                    text_color[2] / 255.0f,
+                    text_color[3] / 255.0f);
+        BLF_position(fstyle->uifont_id, float(offset_x), glyph_y, 0.0f);
+        BLF_draw(fstyle->uifont_id, tag_but->glyph, strlen(tag_but->glyph));
+      }
 
       /* Update offset to after glyph (no spacing) */
-      const float glyph_width = BLF_width(fstyle->uifont_id, tag_but->glyph, strlen(tag_but->glyph));
-      offset_x += glyph_width;
+      offset_x += int(glyph_width);
     }
   }
 
   /* Small spacing between glyph/text and checkbox - or just start if no glyph */
-  if (tag_but->glyph[0] == '\0' && !is_pref_mode) {
+  if (!has_glyph && !is_pref_mode) {
     offset_x = checkbox_rect.xmax;
   }
   const int small_spacing = 2 * UI_SCALE_FAC;
@@ -4972,9 +4998,15 @@ static void widget_draw_tag(const bContext *C,
    * PART 3: Draw tag name text
    * ============================================================ */
 
+  /* Calculate remaining width for text */
+  const int remaining_width = content_rect.xmax - offset_x;
+
+  /* Determine if we should show text (only if enough space) */
+  const bool show_text = remaining_width >= text_threshold && !but->str.empty();
+
   /* Draw text directly for left alignment */
   fontstyle_set(fstyle);
-  if (fstyle->uifont_id >= 0) {
+  if (show_text && fstyle->uifont_id >= 0) {
     /* Text color - use theme color */
     BLF_color4f(fstyle->uifont_id,
                 tui->wcol_regular.text[0] / 255.0f,
@@ -4988,8 +5020,25 @@ static void widget_draw_tag(const bContext *C,
 
     BLF_position(fstyle->uifont_id, text_x, text_y, 0.0f);
 
-    /* Draw the text */
-    BLF_draw(fstyle->uifont_id, but->str.c_str(), but->str.size());
+    /* Clip text to fit available width */
+    rcti text_rect;
+    text_rect.xmin = offset_x;
+    text_rect.xmax = content_rect.xmax;
+    text_rect.ymin = content_rect.ymin;
+    text_rect.ymax = content_rect.ymax;
+
+    /* Prepare text buffer for clipping */
+    char clipped_text[UI_MAX_DRAW_STR];
+    STRNCPY(clipped_text, but->str.c_str());
+
+    /* Use text_clip_middle_ex to clip text */
+    const int clip_margin = int(0.25f * U.widget_unit / but->block->aspect + 0.5f);
+    const float text_okwidth = float(max_ii(BLI_rcti_size_x(&text_rect) - clip_margin, 0));
+    const float minwidth = UI_ICON_SIZE / but->block->aspect * 2.0f;
+    text_clip_middle_ex(fstyle, clipped_text, text_okwidth, minwidth, UI_MAX_DRAW_STR, '\0');
+
+    /* Draw the clipped text */
+    BLF_draw(fstyle->uifont_id, clipped_text, strlen(clipped_text));
   }
 
   (void)C;  /* Suppress unused warning */

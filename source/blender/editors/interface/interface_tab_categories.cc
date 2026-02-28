@@ -338,12 +338,24 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
     {
       if (STREQ(item->category, category)) {
         if (item->glyph[0] != '\0') {
-          /* Check if this is actually a fallback letter (first char of category). */
-          const int category_first_char_size = BLI_str_utf8_size_safe(category);
-          if (category_first_char_size > 0 &&
-              STREQLEN(item->glyph, category, category_first_char_size) &&
-              item->glyph[category_first_char_size] == '\0')
-          {
+          /* Check if this is actually a fallback letter (first char of category).
+           * A real glyph should be different from the category name or longer. */
+          const int glyph_len = strlen(item->glyph);
+          const int category_len = strlen(category);
+
+          /* Check if glyph is a single Unicode character that matches the first char of category.
+           * This indicates a fallback letter, not a custom glyph. */
+          bool is_fallback_letter = false;
+          if (glyph_len < category_len) {
+            /* Glyph is shorter than category - might be a fallback letter */
+            const uint glyph_code = BLI_str_utf8_as_unicode_safe(item->glyph);
+            const uint category_code = BLI_str_utf8_as_unicode_safe(category);
+            if (glyph_code == category_code && glyph_code != BLI_UTF8_ERR) {
+              is_fallback_letter = true;
+            }
+          }
+
+          if (is_fallback_letter) {
             /* Glyph is the first character of category - treat as fallback letter. */
             if (r_color && !is_zero_v3(item->color)) {
               copy_v3_v3(r_color, item->color);
@@ -355,11 +367,17 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
           }
           return item->glyph;
         }
-        /* Override has no glyph but has color - save color and continue looking. */
+        /* Override has no glyph - this means glyph was explicitly cleared.
+         * Return fallback letter (first character of category) instead of continuing search.
+         * This prevents finding old glyph in mappings when user clicks Reset. */
+        if (r_is_fallback_letter) {
+          *r_is_fallback_letter = true;
+        }
         if (r_color && !is_zero_v3(item->color)) {
           copy_v3_v3(r_color, item->color);
         }
-        break;
+        /* Return nullptr to indicate fallback letter should be used */
+        return nullptr;
       }
     }
   }
@@ -1303,6 +1321,23 @@ static void ui_panel_category_draw_content(
   float glyph_color[3] = {0.0f, 0.0f, 0.0f};
   const char *glyph = panel_category_glyph_lookup(
       wm, category_id, nullptr, &is_fallback_letter, glyph_color);
+
+  /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
+  char fallback_glyph_buf[8];
+  if (glyph == nullptr && is_fallback_letter) {
+    /* Get first character of category as fallback letter */
+    const int first_char_size = BLI_str_utf8_size_safe(category_id);
+    if (first_char_size > 0) {
+      memcpy(fallback_glyph_buf, category_id, first_char_size);
+      fallback_glyph_buf[first_char_size] = '\0';
+      glyph = fallback_glyph_buf;
+    }
+    else {
+      /* Fallback to category_id if we can't extract first char */
+      glyph = category_id;
+    }
+  }
+
   const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
 
   bool draw_dual = false;
@@ -1627,6 +1662,23 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     bool is_fallback_letter = false;
     float glyph_color[3] = {0.0f, 0.0f, 0.0f};
     const char *glyph = panel_category_glyph_lookup(wm, category_id, nullptr, &is_fallback_letter, glyph_color);
+
+    /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
+    char fallback_glyph_buf[8];
+    if (glyph == nullptr && is_fallback_letter) {
+      /* Get first character of category as fallback letter */
+      const int first_char_size = BLI_str_utf8_size_safe(category_id);
+      if (first_char_size > 0) {
+        memcpy(fallback_glyph_buf, category_id, first_char_size);
+        fallback_glyph_buf[first_char_size] = '\0';
+        glyph = fallback_glyph_buf;
+      }
+      else {
+        /* Fallback to category_id if we can't extract first char */
+        glyph = category_id;
+      }
+    }
+
     const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
 
     int category_width;

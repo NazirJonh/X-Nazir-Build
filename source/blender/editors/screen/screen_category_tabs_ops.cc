@@ -24,6 +24,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
+#include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
 
 #include "BLT_translation.hh"
@@ -124,6 +125,7 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   RNA_string_get(op->ptr, "category", category);
 
   wmWindowManager *wm = CTX_wm_manager(C);
+  ScrArea *area = CTX_wm_area(C);
 
   /* Default values - read from category_glyph_mappings */
   const char *default_glyph = nullptr;
@@ -140,21 +142,83 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
       if (STREQ(item->category, category)) {
         mapping_item = item;
 
-        if (is_single_glyph_str(category)) {
-          default_glyph = category;
-        }
-        else {
-          /* Use default_glyph if available, otherwise use current glyph */
+        /* Determine if this is a glyph-only category or a fallback letter category */
+        const bool is_glyph_only_category = is_single_glyph_str(category);
+
+        if (is_glyph_only_category) {
+          /* Glyph-only category: always use the glyph from JSON */
           if (item->default_glyph[0] != '\0') {
             default_glyph = item->default_glyph;
           }
           else if (item->glyph[0] != '\0') {
             default_glyph = item->glyph;
           }
+          /* Color is reset to black for glyph-only categories */
         }
+        else {
+          /* Not a glyph-only category.
+           * Check if there's a default_glyph that is NOT a fallback letter.
+           * This handles GLYPH_TEXT categories like 'Tool', 'View', 'Animation'.
+           */
+          bool has_valid_default_glyph = false;
+          if (item->default_glyph[0] != '\0') {
+            /* Check if default_glyph is different from category's first char (not a fallback) */
+            const int default_glyph_len = strlen(item->default_glyph);
+            const int category_len = strlen(category);
+
+            if (default_glyph_len < category_len) {
+              /* default_glyph is shorter - might be a fallback letter, check Unicode */
+              const uint default_glyph_code = BLI_str_utf8_as_unicode_safe(item->default_glyph);
+              const uint category_code = BLI_str_utf8_as_unicode_safe(category);
+              if (default_glyph_code != category_code || default_glyph_code == BLI_UTF8_ERR) {
+                /* Different codepoints - this is a real glyph, not a fallback */
+                has_valid_default_glyph = true;
+              }
+            }
+            else {
+              /* Same length or longer - this is a real glyph */
+              has_valid_default_glyph = true;
+            }
+          }
+
+          if (has_valid_default_glyph) {
+            /* Use default_glyph for GLYPH_TEXT categories */
+            default_glyph = item->default_glyph;
+
+            /* Update mappings to use default_glyph */
+            if (item->glyph[0] != '\0' && !STREQ(item->glyph, item->default_glyph)) {
+              STRNCPY(item->glyph, item->default_glyph);
+            }
+            /* Clear color to black in mappings */
+            if (!is_zero_v3(item->color)) {
+              zero_v3(item->color);
+            }
+          }
+          else {
+            /* Fallback letter category (TEXT_ONLY with no custom glyph).
+             * On Reset, clear to fallback letter. */
+            default_glyph = nullptr;  // Will clear glyph, showing fallback letter
+            /* Color remains black (will use theme color for fallback) */
+
+            /* IMPORTANT: Also clear glyph in mappings so it gets saved correctly to JSON.
+             * When override is empty, lookup will return nullptr (fallback letter),
+             * but we need to update mappings too so Save persists this state. */
+            if (item->glyph[0] != '\0') {
+              item->glyph[0] = '\0';
+            }
+            /* Also clear color to black in mappings */
+            if (!is_zero_v3(item->color)) {
+              zero_v3(item->color);
+            }
+          }
+        }
+
         /* Use default_display_name if available */
         if (item->default_display_name[0] != '\0') {
           default_display_name = item->default_display_name;
+        }
+        else if (item->display_name[0] != '\0') {
+          default_display_name = item->display_name;
         }
         break;
       }
@@ -194,7 +258,7 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     else {
       RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", "");
     }
-    /* Color is always reset to black (0,0,0) */
+    /* Reset color to black */
     RNA_float_set_array(category_tab_current_dialog_op->ptr, "color", default_color);
     RNA_string_set(category_tab_current_dialog_op->ptr, "glyph_search", "");
 
@@ -228,11 +292,42 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   if (category_tab_popup_block) {
     ARegion *region = CTX_wm_region(C);
     if (region) {
-      ED_region_tag_redraw(region);
+      ED_region_tag_redraw_no_rebuild(region);
+      ED_region_tag_refresh_ui(region);
     }
   }
 
+  /* Force redraw of all header regions in current area to update category tabs */
+  if (area) {
+    for (ARegion *region = static_cast<ARegion *>(area->regionbase.first); region;
+         region = static_cast<ARegion *>(region->next))
+    {
+      ED_region_tag_redraw(region);
+    }
+  }
+  else {
+    /* If area is null (popup context), iterate through all windows and screens */
+    wmWindow *win = static_cast<wmWindow *>(wm->windows.first);
+    while (win) {
+      bScreen *screen = WM_window_get_active_screen(win);
+      if (screen) {
+        for (ScrArea *area_iter = static_cast<ScrArea *>(screen->areabase.first); area_iter;
+             area_iter = static_cast<ScrArea *>(area_iter->next))
+        {
+          for (ARegion *region = static_cast<ARegion *>(area_iter->regionbase.first); region;
+               region = static_cast<ARegion *>(region->next))
+          {
+            ED_region_tag_redraw(region);
+          }
+        }
+      }
+      win = static_cast<wmWindow *>(win->next);
+    }
+  }
+
+  /* Force redraw of the screen to update category tabs in all areas */
   WM_main_add_notifier(NC_WINDOW, nullptr);
+  WM_main_add_notifier(NC_SCREEN | NA_EDITED, nullptr);
 
   if (default_display_name != nullptr && default_display_name[0] != '\0') {
     RNA_string_set(op->ptr, "display_name", default_display_name);
@@ -269,11 +364,43 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   if (category_tab_popup_block) {
     ARegion *region = CTX_wm_region(C);
     if (region) {
-      ED_region_tag_redraw(region);
+      ED_region_tag_redraw_no_rebuild(region);
+      ED_region_tag_refresh_ui(region);
     }
   }
 
+  /* Force redraw of all header regions in current area to update category tabs */
+  if (area) {
+    for (ARegion *region = static_cast<ARegion *>(area->regionbase.first); region;
+         region = static_cast<ARegion *>(region->next))
+    {
+      ED_region_tag_redraw(region);
+    }
+  }
+  else {
+    /* If area is null (popup context), iterate through all windows and screens */
+    wmWindow *win = static_cast<wmWindow *>(wm->windows.first);
+    while (win) {
+      bScreen *screen = WM_window_get_active_screen(win);
+      if (screen) {
+        for (ScrArea *area_iter = static_cast<ScrArea *>(screen->areabase.first); area_iter;
+             area_iter = static_cast<ScrArea *>(area_iter->next))
+        {
+          for (ARegion *region = static_cast<ARegion *>(area_iter->regionbase.first); region;
+               region = static_cast<ARegion *>(region->next))
+          {
+            ED_region_tag_redraw(region);
+          }
+        }
+      }
+      win = static_cast<wmWindow *>(win->next);
+    }
+  }
+
+  /* Force redraw of the screen to update category tabs in all areas */
   WM_main_add_notifier(NC_WINDOW, nullptr);
+  WM_main_add_notifier(NC_SCREEN | NA_EDITED, nullptr);
+
   return OPERATOR_FINISHED;
 }
 

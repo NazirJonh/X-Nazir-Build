@@ -1,0 +1,165 @@
+{
+  "version": "1.0.0",
+  "glyphs": [
+    {
+      "codepoint": "e5d4",
+      "name": "settings",
+      "unicode": "\ue5d4",
+      "category": "action",
+      "tags": ["configure", "preferences", "options"],
+      "popularity": 95
+    },
+    {
+      "codepoint": "e8b6",
+      "name": "search",
+      "unicode": "\ue8b6",
+      "category": "action",
+      "tags": ["find", "lookup", "magnify"],
+      "popularity": 90
+    },
+    {
+      "codepoint": "e5c3",
+      "name": "home",
+      "unicode": "\ue5c3",
+      "category": "action",
+      "tags": ["house", "main", "start"],
+      "popularity": 85
+    },
+    {
+      "codepoint": "e5c4",
+      "name": "info",
+      "unicode": "\ue5c4",
+      "category": "action",
+      "tags": ["information", "details", "about"],
+      "popularity": 80
+    },
+    {
+      "codepoint": "e5cd",
+      "name": "help",
+      "unicode": "\ue5cd",
+      "category": "action",
+      "tags": ["question", "support", "assistance"],
+      "popularity": 75
+    },
+    {
+      "codepoint": "e145",
+      "name": "add",
+      "unicode": "\ue145",
+      "category": "content",
+      "tags": ["plus", "create", "new"],
+      "popularity": 95
+    },
+    {
+      "codepoint": "e15b",
+      "name": "edit",
+      "unicode": "\ue15b",
+      "category": "editor",
+      "tags": ["modify", "change", "pencil"],
+      "popularity": 90
+    },
+    {
+      "codepoint": "e872",
+      "name": "delete",
+      "unicode": "\ue872",
+      "category": "action",
+      "tags": ["remove", "trash", "bin"],
+      "popularity": 85
+    },
+    {
+      "codepoint": "e5d2",
+      "name": "save",
+      "unicode": "\ue5d2",
+      "category": "content",
+      "tags": ["disk", "store", "keep"],
+      "popularity": 80
+    },
+    {
+      "codepoint": "e5d5",
+      "name": "share",
+      "unicode": "\ue5d5",
+      "category": "social",
+      "tags": ["send", "export", "distribute"],
+      "popularity": 75
+    },
+    {
+      "codepoint": "e5c8",
+      "name": "menu",
+      "unicode": "\ue5c8",
+      "category": "navigation",
+      "tags": ["hamburger", "list", "options"],
+      "popularity": 90
+    },
+    {
+      "codepoint": "e5c7",
+      "name": "close",
+      "unicode": "\ue5c7",
+      "category": "navigation",
+      "tags": ["x", "cancel", "exit"],
+      "popularity": 85
+    },
+    {
+      "codepoint": "e5c9",
+      "name": "more_vert",
+      "unicode": "\ue5c9",
+      "category": "navigation",
+      "tags": ["dots", "vertical", "options"],
+      "popularity": 70
+    },
+    {
+      "codepoint": "e5d0",
+      "name": "refresh",
+      "unicode": "\ue5d0",
+      "category": "navigation",
+      "tags": ["reload", "update", "sync"],
+      "popularity": 75
+    },
+    {
+      "codepoint": "e5cb",
+      "name": "navigate_before",
+      "unicode": "\ue5cb",
+      "category": "navigation",
+      "tags": ["back", "previous", "left"],
+      "popularity": 65
+    },
+    {
+      "codepoint": "e5cc",
+      "name": "navigate_next",
+      "unicode": "\ue5cc",
+      "category": "navigation",
+      "tags": ["forward", "next", "right"],
+      "popularity": 65
+    },
+    {
+      "codepoint": "e8f4",
+      "name": "folder",
+      "unicode": "\ue8f4",
+      "category": "file",
+      "tags": ["directory", "storage", "organize"],
+      "popularity": 80
+    },
+    {
+      "codepoint": "e873",
+      "name": "description",
+      "unicode": "\ue873",
+      "category": "file",
+      "tags": ["document", "text", "file"],
+      "popularity": 70
+    },
+    {
+      "codepoint": "e3f4",
+      "name": "image",
+      "unicode": "\ue3f4",
+      "category": "image",
+      "tags": ["picture", "photo", "media"],
+      "popularity": 75
+    },
+    {
+      "codepoint": "e574",
+      "name": "category",
+      "unicode": "\ue574",
+      "category": "action",
+      "tags": ["group", "organize", "classify"],
+      "popularity": 60
+    }
+  ]
+}

@@ -17,6 +17,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "MEM_guardedalloc.h"
 
@@ -50,6 +51,7 @@
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
+#include "UI_glyph_grid_view.hh"
 
 #include "interface_intern.hh"
 #include "regions/interface_regions_intern.hh"
@@ -634,6 +636,435 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Glyph Search Callback
+ * \{ */
+
+void category_tab_edit_glyph_search_cb(bContext * /*C*/, void *arg_op, int /*event*/)
+{
+  wmOperator *op = static_cast<wmOperator *>(arg_op);
+
+  /* Guard: If the dialog is closing/cancelled, the global pointer will be null */
+  if (category_tab_current_dialog_op != op) {
+    return;
+  }
+
+  char glyph_search_query[64];
+  RNA_string_get(op->ptr, "glyph_search", glyph_search_query);
+
+  /* TODO: Implement glyph search results display
+   * This callback will be triggered when the glyph_search field changes.
+   * It should:
+   * 1. Call Python API search_glyphs(query, category, max_results)
+   * 2. Store results in window_manager.glyph_search_results
+   * 3. Trigger redraw to update UI with search results
+   */
+
+  /* Trigger redraw to show search results */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Glyph Search Helper Functions
+ * \{ */
+
+/**
+ * Call Python API to search glyphs.
+ * Returns a list of glyph dictionaries with 'unicode' and 'name' keys.
+ * Uses BPY_run_string_as_string to execute Python code and parse JSON result.
+ */
+/**
+ * Helper function to safely print a string that might contain Unicode characters.
+ * Prints the hex codepoint representation for Unicode glyphs to avoid console encoding issues.
+ */
+static void safe_print_string(const char *label, const char *str)
+{
+  if (!str || !str[0]) {
+    printf("[%s] (empty)\n", label);
+    return;
+  }
+
+  /* Check if this is a single Unicode glyph character */
+  if (is_single_glyph_str(str)) {
+    char hex_cp[32] = "";
+    utf8_to_hex_codepoint(str, hex_cp, sizeof(hex_cp));
+    printf("[%s] U+%s\n", label, hex_cp);
+  }
+  else {
+    printf("[%s] %s\n", label, str);
+  }
+}
+
+/**
+ * Decode JSON Unicode escape sequences (like \uXXXX) to UTF-8.
+ * For example, "\ue5d4" becomes the actual UTF-8 bytes for U+E5D4.
+ *
+ * \param str: Input string with possible \uXXXX escapes
+ * \return Decoded UTF-8 string
+ */
+static std::string decode_json_unicode(const char *str)
+{
+  if (!str) {
+    return "";
+  }
+
+  std::string result;
+  size_t len = strlen(str);
+  size_t i = 0;
+
+  while (i < len) {
+    /* Check for Unicode escape sequence \uXXXX */
+    if (i + 5 < len && str[i] == '\\' && str[i + 1] == 'u') {
+      /* Parse 4 hex digits */
+      char hex_str[5] = {str[i + 2], str[i + 3], str[i + 4], str[i + 5], 0};
+
+      /* Convert hex string to integer */
+      uint32_t codepoint = 0;
+      for (int j = 0; j < 4; j++) {
+        char c = hex_str[j];
+        codepoint <<= 4;
+        if (c >= '0' && c <= '9') {
+          codepoint |= (c - '0');
+        }
+        else if (c >= 'a' && c <= 'f') {
+          codepoint |= (c - 'a' + 10);
+        }
+        else if (c >= 'A' && c <= 'F') {
+          codepoint |= (c - 'A' + 10);
+        }
+      }
+
+      /* Convert codepoint to UTF-8 */
+      char utf8_buf[5];
+      int utf8_len = 0;
+
+      if (codepoint <= 0x7F) {
+        /* 1 byte: 0xxxxxxx */
+        utf8_buf[0] = (char)codepoint;
+        utf8_len = 1;
+      }
+      else if (codepoint <= 0x7FF) {
+        /* 2 bytes: 110xxxxx 10xxxxxx */
+        utf8_buf[0] = (char)(0xC0 | (codepoint >> 6));
+        utf8_buf[1] = (char)(0x80 | (codepoint & 0x3F));
+        utf8_len = 2;
+      }
+      else if (codepoint <= 0xFFFF) {
+        /* 3 bytes: 1110xxxx 10xxxxxx 10xxxxxx */
+        utf8_buf[0] = (char)(0xE0 | (codepoint >> 12));
+        utf8_buf[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        utf8_buf[2] = (char)(0x80 | (codepoint & 0x3F));
+        utf8_len = 3;
+      }
+      else {
+        /* 4 bytes: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx */
+        utf8_buf[0] = (char)(0xF0 | (codepoint >> 18));
+        utf8_buf[1] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+        utf8_buf[2] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        utf8_buf[3] = (char)(0x80 | (codepoint & 0x3F));
+        utf8_len = 4;
+      }
+
+      result.append(utf8_buf, utf8_len);
+      i += 6; /* Skip \uXXXX */
+    }
+    else {
+      /* Copy character as-is */
+      result += str[i];
+      i++;
+    }
+  }
+
+  return result;
+}
+
+static blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
+    bContext *C, const char *query, const char *category, int max_results)
+{
+  blender::Vector<std::pair<std::string, std::string>> results;
+
+#ifdef WITH_PYTHON
+  /* Debug: Print input parameters safely */
+  printf("[GLYPH SEARCH] Query: '%s', ", query ? query : "");
+  safe_print_string("Category", category);
+  printf("[GLYPH SEARCH] Max: %d\n", max_results);
+
+  /* Build Python script to call glyph search and return JSON result */
+  /* Note: We don't pass category to Python due to encoding issues with Unicode glyph characters.
+   * Category filtering will be done in C++ after getting results. */
+
+  /* Escape query for Python string */
+  std::string escaped_query = query ? query : "";
+  size_t pos = 0;
+  while ((pos = escaped_query.find("\"", pos)) != std::string::npos) {
+    escaped_query.replace(pos, 1, "\\\"");
+    pos += 2;
+  }
+  /* Escape backslashes */
+  pos = 0;
+  while ((pos = escaped_query.find("\\", pos)) != std::string::npos) {
+    escaped_query.replace(pos, 1, "\\\\");
+    pos += 2;
+  }
+
+  /* Prepare Python imports array - only json needs to be imported */
+  const char *imports[] = {
+      "json",
+      nullptr
+  };
+
+  /* Create Python expression using __import__ to access the registry module */
+  /* This avoids the issue of imported modules not being in eval() scope */
+  char python_expr[2048];
+
+  snprintf(
+      python_expr,
+      sizeof(python_expr),
+      "json.dumps([{'unicode': g['unicode'], 'name': g['name']} "
+      "for g in __import__('bl_ui.glyph_library.registry', fromlist=['']).search_glyphs('%s', '', %d)])",
+      escaped_query.c_str(),
+      max_results);
+
+  printf("[GLYPH SEARCH] Python expr length: %d\n", int(strlen(python_expr)));
+
+  /* Print the Python expression for debugging */
+  printf("[GLYPH SEARCH] === Python expr ===\n");
+  printf("%s\n", python_expr);
+  printf("[GLYPH SEARCH] === End expr ===\n");
+
+  /* Execute Python expression and capture output */
+  char *result_str = nullptr;
+  char *err_msg = nullptr;
+  BPy_RunErrInfo err_info = {false, nullptr, "", &err_msg};
+
+  /* Use BPY_run_string_as_string with imports array */
+  bool success = BPY_run_string_as_string(C, imports, python_expr, &err_info, &result_str);
+  printf("[GLYPH SEARCH] BPY_run_string_as_string success: %d\n", success);
+
+  /* Print error details if failed */
+  if (!success) {
+    printf("[GLYPH SEARCH] Execution failed!\n");
+    if (err_msg) {
+      printf("[GLYPH SEARCH] Error string: %s\n", err_msg);
+      MEM_delete(err_msg);
+    }
+  }
+
+  if (success && result_str) {
+    /* Safe print of result (may contain Unicode) */
+    size_t result_len = strlen(result_str);
+    if (result_len > 200) {
+      printf("[GLYPH SEARCH] Result length: %zu bytes (first 150 chars)\n", result_len);
+      /* Print ascii-safe version */
+      for (size_t i = 0; i < 150 && i < result_len; i++) {
+        unsigned char c = (unsigned char)result_str[i];
+        if (c >= 32 && c <= 126) {
+          putchar(c);
+        }
+        else {
+          putchar('?');
+        }
+      }
+      printf("\n");
+    }
+    else {
+      printf("[GLYPH SEARCH] Result: %s\n", result_str);
+    }
+
+    /* Check if result is an error message */
+    if (strncmp(result_str, "{\"error\":", 9) == 0) {
+      printf("[GLYPH SEARCH] Python error: %s\n", result_str);
+      MEM_delete(result_str);
+      return results;
+    }
+
+    /* Check if result is empty array */
+    if (strcmp(result_str, "[]") == 0) {
+      printf("[GLYPH SEARCH] Empty result (no glyphs found)\n");
+      MEM_delete(result_str);
+      return results;
+    }
+
+    /* Parse JSON result */
+    const char *p = result_str;
+
+    /* Skip to array start */
+    while (*p && *p != '[') p++;
+    if (*p == '[') p++;
+    else {
+      printf("[GLYPH SEARCH] Result is not a JSON array: %s\n", result_str);
+      MEM_delete(result_str);
+      return results;
+    }
+
+    int parsed_count = 0;
+
+    /* Parse array elements */
+    while (*p && *p != ']') {
+      /* Skip to object start */
+      while (*p && *p != '{') p++;
+      if (*p == '{') p++;
+
+      std::string unicode;
+      std::string name;
+
+      /* Parse object fields */
+      while (*p && *p != '}') {
+        /* Parse unicode field */
+        if (strncmp(p, "\"unicode\":", 10) == 0) {
+          p += 10;
+          while (*p && *p != '"') p++;
+          if (*p == '"') p++;
+          const char *start = p;
+          while (*p && *p != '"') {
+            p++;
+          }
+          std::string raw_unicode = std::string(start, p - start);
+          /* Decode JSON Unicode escape sequences like \ue5d4 to actual UTF-8 */
+          unicode = decode_json_unicode(raw_unicode.c_str());
+          printf("[GLYPH SEARCH] Decoded unicode: '%s' -> ", raw_unicode.c_str());
+          safe_print_string("result", unicode.c_str());
+        }
+        /* Parse name field */
+        else if (strncmp(p, "\"name\":", 7) == 0) {
+          p += 7;
+          while (*p && *p != '"') p++;
+          if (*p == '"') p++;
+          const char *start = p;
+          while (*p && *p != '"') {
+            p++;
+          }
+          name = std::string(start, p - start);
+        }
+        else {
+          p++;
+        }
+      }
+
+      if (!unicode.empty() && !name.empty()) {
+        printf("[GLYPH SEARCH] Found glyph %d: name='%s', ", ++parsed_count, name.c_str());
+        safe_print_string("unicode", unicode.c_str());
+        results.append({unicode, name});
+
+        if (results.size() >= max_results) {
+          break;
+        }
+      }
+
+      /* Move to next object or end of array */
+      while (*p && *p != ',' && *p != ']') p++;
+      if (*p == ',' || *p == '}') p++;
+    }
+
+    MEM_delete(result_str);
+  }
+  else {
+    printf("[GLYPH SEARCH] Failed or no result\n");
+  }
+
+  printf("[GLYPH SEARCH] Total glyphs found: %d\n", int(results.size()));
+#else
+  (void)query;
+  (void)category;
+  (void)max_results;
+#endif
+
+  return results;
+}
+
+/**
+ * Callback for when a search result button is clicked.
+ * Sets the glyph code and updates the preview.
+ */
+static void glyph_search_result_button_cb(bContext *C, void *arg1, void *arg2)
+{
+  wmOperator *op = static_cast<wmOperator *>(arg1);
+  const char *glyph_unicode = static_cast<const char *>(arg2);
+
+  if (!op || !glyph_unicode) {
+    return;
+  }
+
+  /* Convert unicode to hex codepoint */
+  char hex_code[16] = "";
+  utf8_to_hex_codepoint(glyph_unicode, hex_code, sizeof(hex_code));
+
+  /* Set the glyph property */
+  RNA_string_set(op->ptr, "glyph", hex_code);
+
+  /* Clear the search field */
+  RNA_string_set(op->ptr, "glyph_search", "");
+
+  /* Trigger live update to refresh preview */
+  category_tab_edit_live_update_cb(C, op, 0);
+
+  /* Trigger redraw */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+/**
+ * Callback for the "More glyphs" button.
+ * Opens the Grid View popup for selecting glyphs.
+ */
+static void glyph_more_glyphs_button_cb(bContext *C, void *arg1, void * /*arg2*/)
+{
+  wmOperator *op = static_cast<wmOperator *>(arg1);
+
+  if (!op) {
+    return;
+  }
+
+  /* Get the category from op->ptr */
+  char category[64] = "";
+  RNA_string_get(op->ptr, "category", category);
+
+  /* Call Python API to get all glyphs for the category */
+  auto glyphs = glyph_search_call_python(C, "", category, 500);
+
+  if (glyphs.is_empty()) {
+    /* No glyphs found, show a message */
+    WM_global_report(RPT_WARNING, "No glyphs found for this category");
+    return;
+  }
+
+  /* Create a Grid View and populate it with glyphs */
+  auto *grid_view = new ui::GlyphGridView();
+  grid_view->set_glyphs(glyphs);
+  grid_view->set_category(category);
+
+  /* Set the selection callback */
+  grid_view->set_on_glyph_select_fn([op](bContext &C, const std::string &unicode) {
+    /* Convert unicode to hex codepoint */
+    char hex_code[16] = "";
+    utf8_to_hex_codepoint(unicode.c_str(), hex_code, sizeof(hex_code));
+
+    /* Set the glyph property */
+    RNA_string_set(op->ptr, "glyph", hex_code);
+
+    /* Clear the search field */
+    RNA_string_set(op->ptr, "glyph_search", "");
+
+    /* Trigger live update to refresh preview */
+    category_tab_edit_live_update_cb(&C, op, 0);
+
+    /* Close the popup */
+    if (category_tab_popup_block) {
+      block_flag_disable(category_tab_popup_block, ui::BLOCK_KEEP_OPEN);
+    }
+
+    /* Trigger redraw */
+    WM_main_add_notifier(NC_WINDOW, nullptr);
+  });
+
+  /* TODO: Open popup with Grid View
+   * This requires creating a popup block and building the grid view in it
+   */
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Popup Block Creation
  * \{ */
 
@@ -773,6 +1204,75 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
     search_row.alignment_set(ui::LayoutAlign::Right);
     search_row.prop(op->ptr, "glyph_search", UI_ITEM_NONE, IFACE_("Glyph"), ICON_VIEWZOOM);
 
+    /* Display search results if glyph_search field is not empty */
+    char glyph_search_query[64] = "";
+    RNA_string_get(op->ptr, "glyph_search", glyph_search_query);
+
+    if (glyph_search_query[0] != '\0') {
+      /* Create a row for search results */
+      ui::Layout &results_row = col_glyph.row(false);
+      results_row.alignment_set(ui::LayoutAlign::Center);
+
+      /* Create grid for search result buttons (5 columns) */
+      ui::Layout &results_grid = results_row.grid_flow(true, 5, true, false, false);
+
+      /* Call Python API to search glyphs */
+      char category[64];
+      RNA_string_get(op->ptr, "category", category);
+      auto search_results = glyph_search_call_python(C, glyph_search_query, category, 50);
+
+      /* Get category color for tinting glyph buttons */
+      float category_color[3];
+      RNA_float_get_array(op->ptr, "color", category_color);
+
+      /* Convert float RGB (0.0-1.0) to uchar RGB (0-255) for button_color_set */
+      uchar category_color_uchar[4];
+      category_color_uchar[0] = uchar(category_color[0] * 255.0f);
+      category_color_uchar[1] = uchar(category_color[1] * 255.0f);
+      category_color_uchar[2] = uchar(category_color[2] * 255.0f);
+      category_color_uchar[3] = 255; /* Alpha */
+
+      if (search_results.is_empty()) {
+        /* No results found */
+        results_grid.label(IFACE_("No glyphs found"), ICON_NONE);
+      }
+      else {
+        /* Create buttons for each search result */
+        for (const auto &result : search_results) {
+          const std::string &glyph_unicode = result.first;
+          const std::string &glyph_name = result.second;
+
+          /* Create button with glyph */
+          ui::Block *result_block = results_grid.block();
+          ui::block_layout_set_current(result_block, &results_grid);
+
+          ui::Button *result_but = uiDefBut(result_block,
+                                             ui::ButtonType::But,
+                                             glyph_unicode.c_str(),
+                                             0,
+                                             0,
+                                             UI_UNIT_X * 1.5f,
+                                             UI_UNIT_Y,
+                                             nullptr,
+                                             0,
+                                             0,
+                                             std::nullopt);
+
+          /* Apply category color to the button */
+          button_color_set(result_but, category_color_uchar);
+          result_but->drawflag |= BUT_TEXT_USE_COL;
+
+          /* Set tooltip with glyph name */
+          result_but->tip_quick_func = [glyph_name](const ui::Button *) { return glyph_name; };
+
+          /* Add callback to set the glyph when clicked */
+          char *glyph_unicode_copy = MEM_new_array<char>(glyph_unicode.length() + 1, __func__);
+          strcpy(glyph_unicode_copy, glyph_unicode.c_str());
+          button_func_set(result_but, glyph_search_result_button_cb, op, glyph_unicode_copy);
+        }
+      }
+    }
+
     /* Right side: Glyph button, Code with Paste button - aligned right */
     ui::Layout &col_glyph_code = split_search_glyph.column(false);
     col_glyph_code.alignment_set(ui::LayoutAlign::Right);
@@ -797,6 +1297,9 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
                                       std::nullopt);
     /* Set tooltip for glyph button */
     glyph_but->tip_quick_func = [](const ui::Button *) { return "More glyphs"; };
+    
+    /* Add callback to open Grid View when clicked */
+    button_func_set(glyph_but, glyph_more_glyphs_button_cb, op, nullptr);
     (void)glyph_but;
 
     /* Code field with Paste button */
@@ -874,8 +1377,10 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
     RNA_float_get_array(op->ptr, "color", color_preview);
 
     /* Get the proper glyph for preview.
-     * If glyph property is set, use the processed glyph.
-     * Otherwise, use panel_category_glyph_lookup to get the default/mapped glyph.
+     * Priority:
+     * 1. If glyph property is set, use the processed glyph.
+     * 2. If search has results, use the first found glyph.
+     * 3. Otherwise, use panel_category_glyph_lookup to get the default/mapped glyph.
      */
     const char *preview_glyph = nullptr;
 
@@ -884,17 +1389,37 @@ ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *us
       preview_glyph = glyph;
     }
     else {
-      /* No custom glyph - lookup the default glyph for this category */
-      bool is_fallback_letter = false;
-      preview_glyph = panel_category_glyph_lookup(wm, category, nullptr, &is_fallback_letter, nullptr);
+      /* Check if there's an active search with results */
+      char glyph_search_query[64] = "";
+      RNA_string_get(op->ptr, "glyph_search", glyph_search_query);
 
-      /* If lookup returns nullptr (glyph was explicitly cleared), use fallback letter */
-      if (preview_glyph == nullptr && is_fallback_letter) {
-        const int first_char_size = BLI_str_utf8_size_safe(category);
-        if (first_char_size > 0 && first_char_size < sizeof(category_tab_preview_glyph)) {
-          memcpy(category_tab_preview_glyph, category, first_char_size);
-          category_tab_preview_glyph[first_char_size] = '\0';
-          preview_glyph = category_tab_preview_glyph;  /* Mark as handled */
+      if (glyph_search_query[0] != '\0') {
+        /* Search is active - get first result for preview */
+        auto search_results = glyph_search_call_python(C, glyph_search_query, category, 1);
+        if (!search_results.is_empty()) {
+          /* Use first search result for preview */
+          const std::string &first_glyph_unicode = search_results[0].first;
+          if (!first_glyph_unicode.empty() && first_glyph_unicode.length() < sizeof(category_tab_preview_glyph)) {
+            strcpy(category_tab_preview_glyph, first_glyph_unicode.c_str());
+            preview_glyph = category_tab_preview_glyph;
+            printf("[GLYPH PREVIEW] Using search result: %s\n", first_glyph_unicode.c_str());
+          }
+        }
+      }
+
+      /* If no glyph from search, lookup the default glyph for this category */
+      if (preview_glyph == nullptr) {
+        bool is_fallback_letter = false;
+        preview_glyph = panel_category_glyph_lookup(wm, category, nullptr, &is_fallback_letter, nullptr);
+
+        /* If lookup returns nullptr (glyph was explicitly cleared), use fallback letter */
+        if (preview_glyph == nullptr && is_fallback_letter) {
+          const int first_char_size = BLI_str_utf8_size_safe(category);
+          if (first_char_size > 0 && first_char_size < sizeof(category_tab_preview_glyph)) {
+            memcpy(category_tab_preview_glyph, category, first_char_size);
+            category_tab_preview_glyph[first_char_size] = '\0';
+            preview_glyph = category_tab_preview_glyph;  /* Mark as handled */
+          }
         }
       }
     }

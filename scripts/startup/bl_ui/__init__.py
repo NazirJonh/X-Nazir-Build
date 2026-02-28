@@ -91,6 +91,7 @@ _modules = [
     "space_view3d",
     "space_view3d_sidebar",
     "space_view3d_toolbar",
+    "glyph_library",
 
     # XXX, keep last so panels show after all other tool options.
     "properties_workspace",

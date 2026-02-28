@@ -1,0 +1,69 @@
+{
+  "version": "1.0.0",
+  "categories": {
+    "action": {
+      "name": "Action",
+      "description": "Action icons for user interactions"
+    },
+    "alert": {
+      "name": "Alert",
+      "description": "Alert and notification icons"
+    },
+    "av": {
+      "name": "Audio/Video",
+      "description": "Media and playback controls"
+    },
+    "communication": {
+      "name": "Communication",
+      "description": "Communication and messaging icons"
+    },
+    "content": {
+      "name": "Content",
+      "description": "Content creation and editing"
+    },
+    "device": {
+      "name": "Device",
+      "description": "Device and hardware icons"
+    },
+    "editor": {
+      "name": "Editor",
+      "description": "Text and content editing tools"
+    },
+    "file": {
+      "name": "File",
+      "description": "File and folder management"
+    },
+    "hardware": {
+      "name": "Hardware",
+      "description": "Hardware and system icons"
+    },
+    "image": {
+      "name": "Image",
+      "description": "Image and photo related icons"
+    },
+    "maps": {
+      "name": "Maps",
+      "description": "Location and mapping icons"
+    },
+    "navigation": {
+      "name": "Navigation",
+      "description": "Navigation and directional icons"
+    },
+    "places": {
+      "name": "Places",
+      "description": "Location and place icons"
+    },
+    "search": {
+      "name": "Search",
+      "description": "Search and discovery icons"
+    },
+    "social": {
+      "name": "Social",
+      "description": "Social media and sharing icons"
+    },
+    "toggle": {
+      "name": "Toggle",
+      "description": "Toggle and switch controls"
+    }
+  }
+}

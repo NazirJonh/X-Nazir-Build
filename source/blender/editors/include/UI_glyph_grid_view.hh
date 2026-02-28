@@ -78,7 +78,7 @@ class GlyphGridView : public AbstractGridView {
  protected:
   Vector<std::pair<std::string, std::string>> glyphs_;  // (unicode, name) pairs
   OnGlyphSelectFn on_glyph_select_fn_;
-  std::string category_;
+  std::string search_filter_;
 
  public:
   GlyphGridView();
@@ -90,16 +90,17 @@ class GlyphGridView : public AbstractGridView {
   void set_glyphs(const Vector<std::pair<std::string, std::string>> &glyphs);
 
   /**
-   * Set the category for filtering glyphs.
+   * Set the search filter string.
+   * Filters glyphs by name (unicode or display name).
    */
-  void set_category(StringRef category);
+  void set_search_filter(StringRef search_filter);
 
   /**
    * Set a callback to execute when a glyph is selected.
    */
   void set_on_glyph_select_fn(OnGlyphSelectFn fn);
 
-  const std::string &get_category() const { return category_; }
+  const std::string &get_search_filter() const { return search_filter_; }
 
  protected:
   void build_items() override;

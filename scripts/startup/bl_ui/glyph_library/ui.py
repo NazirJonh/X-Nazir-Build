@@ -143,6 +143,7 @@ def register():
     )
     bpy.types.WindowManager.glyph_selected = bpy.props.StringProperty(default="")
     bpy.types.WindowManager.glyph_selected_name = bpy.props.StringProperty(default="")
+    bpy.types.WindowManager.glyph_selected_hex = bpy.props.StringProperty(default="")
 
 
 def unregister():
@@ -152,3 +153,4 @@ def unregister():
     del bpy.types.WindowManager.glyph_search_results
     del bpy.types.WindowManager.glyph_selected
     del bpy.types.WindowManager.glyph_selected_name
+    del bpy.types.WindowManager.glyph_selected_hex

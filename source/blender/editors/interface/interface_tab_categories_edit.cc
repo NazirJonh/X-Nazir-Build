@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -1231,13 +1232,16 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
         /* Convert unicode to hex codepoint */
         char hex_code[16] = "";
         utf8_to_hex_codepoint(unicode.c_str(), hex_code, sizeof(hex_code));
+        printf("[DEBUG C++] glyph_selected_callback: unicode='%s', hex_code='%s'\n", unicode.c_str(), hex_code);
 
         /* Set the glyph property of the operator itself */
         RNA_string_set(popup_data->op->ptr, "glyph", hex_code);
+        printf("[DEBUG C++] Set picker's own glyph property to '%s'\n", hex_code);
 
         /* Set the target property if specified (RNA path) */
         char target_prop[256] = "";
         RNA_string_get(popup_data->op->ptr, "target_property", target_prop);
+        printf("[DEBUG C++] glyph_selected_callback: target_property='%s'\n", target_prop);
         if (target_prop[0] != '\0') {
           const char *target_prop_path = target_prop;
           if (STRPREFIX(target_prop_path, "window_manager.")) {
@@ -1248,33 +1252,100 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
           PropertyRNA *prop;
           int index;
 
+          wmOperator *target_op = nullptr;
+          char target_op_ptr_str[64] = "";
+          RNA_string_get(popup_data->op->ptr, "target_operator_ptr", target_op_ptr_str);
+          printf("[DEBUG C++] target_operator_ptr='%s'\n", target_op_ptr_str);
+          if (target_op_ptr_str[0] != '\0') {
+            const uintptr_t target_op_ptr = uintptr_t(strtoull(target_op_ptr_str, nullptr, 10));
+            printf("[DEBUG C++] Converted target_op_ptr=%llu\n", (unsigned long long)target_op_ptr);
+            if (target_op_ptr != 0) {
+              wmWindowManager *wm = CTX_wm_manager(&C);
+              printf("[DEBUG C++] Searching for operator in wm->runtime->operators...\n");
+              int op_count = 0;
+              for (wmOperator *op_iter = static_cast<wmOperator *>(wm->runtime->operators.last);
+                   op_iter;
+                   op_iter = op_iter->prev)
+              {
+                op_count++;
+                printf("[DEBUG C++]   Checking op_iter=%llu (count=%d)\n",
+                       (unsigned long long)(uintptr_t)op_iter, op_count);
+                if ((uintptr_t)op_iter == target_op_ptr) {
+                  target_op = op_iter;
+                  printf("[DEBUG C++] FOUND target operator at %llu!\n", (unsigned long long)(uintptr_t)target_op);
+                  break;
+                }
+              }
+              printf("[DEBUG C++] Total operators scanned: %d\n", op_count);
+            }
+          } else {
+            printf("[DEBUG C++] target_operator_ptr is EMPTY!\n");
+          }
+
           bool resolved = false;
+          const bool is_active_operator_path = STRPREFIX(target_prop_path, "active_operator.");
+          const char *target_prop_path_for_operator = is_active_operator_path ?
+                                                          (target_prop_path + strlen("active_operator.")) :
+                                                          target_prop_path;
+
+          printf("[DEBUG C++] target_op=%p, target_op->ptr=%p\n", (void*)target_op, target_op ? (void*)target_op->ptr : nullptr);
+          printf("[DEBUG C++] target_prop_path_for_operator='%s'\n", target_prop_path_for_operator);
+          if (target_op && target_op->ptr) {
+            printf("[DEBUG C++] Attempting to resolve property from target_op...\n");
+            if (RNA_path_resolve_full(
+                    target_op->ptr, target_prop_path_for_operator, &target_ptr, &prop, &index))
+            {
+              printf("[DEBUG C++] SUCCESS: Property resolved, setting to '%s'\n", hex_code);
+              RNA_property_string_set(&target_ptr, prop, hex_code);
+              resolved = true;
+            } else {
+              printf("[DEBUG C++] FAILED: RNA_path_resolve_full returned false\n");
+            }
+          }
+
           if (STRPREFIX(target_prop_path, "active_operator.")) {
             const char *active_op_path = target_prop_path + strlen("active_operator.");
-            wmOperator *active_op = context_active_operator_get(&C);
-            if (active_op && active_op->ptr) {
-              if (RNA_path_resolve_full(active_op->ptr, active_op_path, &target_ptr, &prop, &index))
-              {
-                RNA_property_string_set(&target_ptr, prop, hex_code);
-                resolved = true;
+            printf("[DEBUG C++] Path starts with 'active_operator.', active_op_path='%s'\n", active_op_path);
+            if (!resolved) {
+              wmOperator *active_op = context_active_operator_get(&C);
+              printf("[DEBUG C++] active_op=%p, active_op->ptr=%p\n", (void*)active_op, active_op ? (void*)active_op->ptr : nullptr);
+              if (active_op && active_op->ptr) {
+                if (RNA_path_resolve_full(active_op->ptr, active_op_path, &target_ptr, &prop, &index))
+                {
+                  printf("[DEBUG C++] SUCCESS: Resolved via active_op, setting to '%s'\n", hex_code);
+                  RNA_property_string_set(&target_ptr, prop, hex_code);
+                  resolved = true;
+                } else {
+                  printf("[DEBUG C++] FAILED: RNA_path_resolve_full on active_op returned false\n");
+                }
               }
             }
           }
-          else {
+          if (!resolved) {
+            printf("[DEBUG C++] Not resolved yet, trying window manager root...\n");
             /* Try resolving from window manager as root. */
             wmWindowManager *wm = CTX_wm_manager(&C);
             PointerRNA root_ptr = RNA_id_pointer_create(&wm->id);
             if (RNA_path_resolve_full(&root_ptr, target_prop_path, &target_ptr, &prop, &index)) {
+              printf("[DEBUG C++] SUCCESS: Resolved via window manager, setting to '%s'\n", hex_code);
               RNA_property_string_set(&target_ptr, prop, hex_code);
               resolved = true;
+            } else {
+              printf("[DEBUG C++] FAILED: RNA_path_resolve_full on window manager returned false\n");
             }
           }
 
           if (!resolved) {
             /* Fallback: try resolving from the picker operator itself (relative path). */
+            printf("[DEBUG C++] Trying fallback: picker operator itself...\n");
             if (RNA_path_resolve_full(popup_data->op->ptr, target_prop_path, &target_ptr, &prop, &index)) {
+              printf("[DEBUG C++] Fallback SUCCESS: Setting picker's own property to '%s'\n", hex_code);
               RNA_property_string_set(&target_ptr, prop, hex_code);
+            } else {
+              printf("[DEBUG C++] Fallback FAILED: Could not resolve property\n");
             }
+          } else {
+            printf("[DEBUG C++] Property was successfully resolved (resolved=%d)\n", resolved);
           }
         }
 
@@ -1414,6 +1485,25 @@ static wmOperatorStatus glyph_picker_grid_invoke(bContext *C,
   char initial_category[64] = "";
   RNA_string_get(op->ptr, "category", initial_category);
 
+  wmOperator *active_op = context_active_operator_get(C);
+  printf("[DEBUG C++] glyph_picker_grid_invoke: active_op=%p, op=%p\n", (void*)active_op, (void*)op);
+  if (active_op && active_op != op && active_op->properties) {
+    char target_op_ptr_str[64];
+    BLI_snprintf(target_op_ptr_str,
+                 sizeof(target_op_ptr_str),
+                 "%llu",
+                 (unsigned long long)(uintptr_t)active_op);
+    printf("[DEBUG C++] Setting target_operator_ptr='%s' (active_op=%p)\n", target_op_ptr_str, (void*)active_op);
+    RNA_string_set(op->ptr, "target_operator_ptr", target_op_ptr_str);
+  } else {
+    printf("[DEBUG C++] active_op is null or same as op or no properties\n");
+  }
+
+  /* Debug: Check if target_operator_ptr was already set from Python */
+  char existing_target_ptr[64] = "";
+  RNA_string_get(op->ptr, "target_operator_ptr", existing_target_ptr);
+  printf("[DEBUG C++] Existing target_operator_ptr in op->ptr: '%s'\n", existing_target_ptr);
+
   /* Create popup data */
   GlyphGridPopupData *popup_data = new GlyphGridPopupData(
       op, std::move(glyphs), initial_category, all_categories);
@@ -1447,6 +1537,7 @@ void WM_OT_glyph_picker_grid(wmOperatorType *ot)
    RNA_def_string(ot->srna, "glyph", nullptr, 16, "Glyph", "Selected glyph hex code (output)");
    RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Search string");
    RNA_def_string(ot->srna, "target_property", nullptr, 256, "Target Property", "RNA path to property that will receive the glyph hex code");
+   RNA_def_string(ot->srna, "target_operator_ptr", nullptr, 64, "Target Operator Pointer", "Internal: pointer to target operator properties");
  }
 
 /** \} */

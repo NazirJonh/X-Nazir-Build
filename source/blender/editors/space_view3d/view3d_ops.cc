@@ -272,7 +272,9 @@ static wmOperatorStatus view3d_tag_bar_toggle_exec(bContext *C, wmOperator *op)
 
   printf("DEBUG: view3d_tag_bar_toggle_exec: new_tags='%s'\n", v3d->active_tag_filter_tags);
 
+  /* Trigger redraw to update category order for new tag combination */
   WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  WM_event_add_notifier(C, NC_SPACE | ND_CATEGORY_GLYPHS, nullptr);
   ED_area_tag_redraw(area);
 
   return OPERATOR_FINISHED;

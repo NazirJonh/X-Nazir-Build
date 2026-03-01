@@ -3326,8 +3326,16 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
     printf("DEBUG: uiItemTagButtonWithOperator FAILED: button_operator_ptr_ensure returned nullptr\n");
     return PointerRNA_NULL;
   }
-  ptr = *op_ptr;  /* Copy the PointerRNA, don't return the pointer directly */
-  printf("DEBUG: uiItemTagButtonWithOperator SUCCESS: op_ptr=%p\n", op_ptr);
+
+  /* IMPORTANT: Create a new property group for the returned PointerRNA */
+  /* This allows Python to set properties that will be used when the operator is executed */
+  op_ptr->data = bke::idprop::create_group("wmOperatorProperties").release();
+
+  /* Copy the PointerRNA - this copies the pointer to the property group */
+  ptr = *op_ptr;
+
+  printf("DEBUG: uiItemTagButtonWithOperator SUCCESS: op_ptr=%p, ptr.data=%p, ptr.type=%p\n",
+         op_ptr, ptr.data, ptr.type);
 
   return ptr;
 }

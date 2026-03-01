@@ -795,15 +795,21 @@ struct View3D {
 
   /**
    * Bitmask of active tags for category filtering in the tag bar.
-   * Each bit corresponds to a tag from mode_flags.
+   * Each bit corresponds to a tag from mode_flags (up to 64 tags).
    * 0 = all categories are visible.
+   * Split into low/high 32-bit parts for RNA compatibility.
    */
-  int active_tag_filter_mask = 0;
+  int active_tag_filter_mask_low = 0;
+  int active_tag_filter_mask_high = 0;
 
   /**
    * Horizontal scroll offset in the tag bar (in pixels).
    */
   int tag_bar_scroll_offset = 0;
+
+  int _pad2 = 0;
+
+  void *_pad1 = nullptr;
 
   /** Runtime evaluation data (keep last). */
   View3D_Runtime runtime;

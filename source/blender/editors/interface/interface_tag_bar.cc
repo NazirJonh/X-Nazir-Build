@@ -171,11 +171,11 @@ bool has_tag_in_string(const char *tags_string, const char *tag_name)
 }
 
 /**
- * Check if any active tag matches the given tag string.
+ * Check if any active tag matches the given tag string (OR logic).
  */
 bool has_any_tag_active(const wmWindowManager *wm,
                         const char *tags_string,
-                        int active_mask)
+                        int64_t active_mask)
 {
   if (active_mask == 0) {
     return true;  /* Filter not active - show all */
@@ -214,6 +214,56 @@ bool has_any_tag_active(const wmWindowManager *wm,
   }
 
   return false;
+}
+
+/**
+ * Check if ALL active tags match the given tag string (AND logic).
+ * When multiple tags are active, the category must have ALL of them to be visible.
+ */
+bool has_all_tags_active(const wmWindowManager *wm,
+                         const char *tags_string,
+                         int64_t active_mask)
+{
+  if (active_mask == 0) {
+    return true;  /* Filter not active - show all */
+  }
+
+  if (!tags_string || !tags_string[0]) {
+    return false;  /* No tags - hide */
+  }
+
+  /* First, collect all tag bits that the category has */
+  int64_t category_tag_bits = 0;
+
+  char tags_copy[256];
+  STRNCPY(tags_copy, tags_string);
+
+  char *tag = strtok(tags_copy, ",;");
+  while (tag != nullptr) {
+    while (*tag == ' ') {
+      tag++;
+    }
+
+    /* Find tag_def for this tag and add its bit to category_tag_bits */
+    if (wm && category_tag_list_is_valid(&wm->category_tags)) {
+      for (const CategoryTagDef *tag_def =
+               static_cast<const CategoryTagDef *>(wm->category_tags.first);
+           tag_def;
+           tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
+      {
+        if (STREQ(tag, tag_def->name)) {
+          category_tag_bits |= tag_def->mode_flags;
+          break;
+        }
+      }
+    }
+
+    tag = strtok(nullptr, ",;");
+  }
+
+  /* Check if ALL active tag bits are present in category's tags */
+  /* (active_mask & category_tag_bits) must equal active_mask for AND logic */
+  return (active_mask & category_tag_bits) == active_mask;
 }
 
 /**

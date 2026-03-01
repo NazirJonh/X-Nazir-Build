@@ -793,6 +793,18 @@ struct View3D {
   /** Path to the viewer node that is currently previewed. This is retrieved from the workspace. */
   ViewerPath viewer_path;
 
+  /**
+   * Bitmask of active tags for category filtering in the tag bar.
+   * Each bit corresponds to a tag from mode_flags.
+   * 0 = all categories are visible.
+   */
+  int active_tag_filter_mask = 0;
+
+  /**
+   * Horizontal scroll offset in the tag bar (in pixels).
+   */
+  int tag_bar_scroll_offset = 0;
+
   /** Runtime evaluation data (keep last). */
   View3D_Runtime runtime;
 };

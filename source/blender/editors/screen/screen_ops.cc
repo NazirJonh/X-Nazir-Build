@@ -37,6 +37,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_workspace_types.h"
 
 #include "BKE_callbacks.hh"
@@ -3261,6 +3262,14 @@ static wmOperatorStatus region_scale_modal(bContext *C, wmOperator *op, const wm
         /* Clamp before snapping, so the snapping doesn't use a size that's invalid anyway. It will
          * check for and respect the max-height too. */
         CLAMP(rmd->region->sizey, 0, rmd->maxsize);
+
+        /* Tag bar has a maximum height of UI_UNIT_Y (one button) */
+        if (rmd->region->regiontype == RGN_TYPE_TAG_BAR) {
+          const int max_tag_bar_height = (UI_UNIT_Y + 0.5f) / UI_SCALE_FAC;
+          if (rmd->region->sizey > max_tag_bar_height) {
+            rmd->region->sizey = max_tag_bar_height;
+          }
+        }
 
         if (rmd->region->runtime->type->snap_size) {
           short sizey_test = rmd->region->runtime->type->snap_size(

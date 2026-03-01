@@ -1034,12 +1034,13 @@ static void view3d_tag_bar_region_init(wmWindowManager *wm, ARegion *region)
 /**
  * Snap size callback for the tag bar region.
  * For TOP-aligned regions, axis 'y' controls height.
+ * The tag bar can be resized smaller but not larger than UI_UNIT_Y.
  */
 static int view3d_tag_bar_region_snap_size(const ARegion * /*region*/, int size, int axis)
 {
   if (axis == 'y') {
-    /* Snap height to UI_UNIT_Y (one button height) */
-    return max_ii(size, UI_UNIT_Y);
+    /* Maximum height is UI_UNIT_Y, but can be resized smaller */
+    return min_ii(size, UI_UNIT_Y);
   }
   return size;
 }
@@ -1079,8 +1080,7 @@ static void view3d_tag_bar_region_draw(const bContext *C, ARegion *region)
   printf("DEBUG: view3d_tag_bar_region_draw CALLED! region=%p\n", region);
 
   /* Get tag bar data */
-  wmWindowManager *wm = CTX_wm_manager(C);
-  TagBarRuntimeData *data = get_tag_bar_data_global(wm);
+  TagBarRuntimeData *data = get_tag_bar_data_global(C);
   if (!data || data->buttons.is_empty()) {
     printf("DEBUG: view3d_tag_bar_region_draw: No data or empty buttons - returning\n");
     return;

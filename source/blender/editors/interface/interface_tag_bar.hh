@@ -17,6 +17,7 @@ struct wmRegionMessageSubscribeParams;
 namespace blender {
 struct wmWindowManager;
 struct SpaceProperties;
+struct View3D;
 }
 
 namespace blender::ui {
@@ -54,10 +55,10 @@ struct Block;
 /**
  * Get or create tag bar runtime data from global cache.
  * Creates the data if it doesn't exist.
- * \param wm: Window manager
+ * \param C: Context (for accessing SpaceProperties)
  * \return Tag bar runtime data for this window manager
  */
-TagBarRuntimeData *get_tag_bar_data_global(const blender::wmWindowManager *wm);
+TagBarRuntimeData *get_tag_bar_data_global(const bContext *C);
 
 /**
  * Mark all cached tag bar data as needing update.
@@ -68,11 +69,11 @@ void tag_bar_mark_all_dirty();
 /**
  * Update tag bar buttons based on tags from window manager.
  * \param wm: Window manager containing tag definitions
- * \param sbuts: Unused parameter (kept for compatibility)
+ * \param v3d: View3D containing active_tag_filter_mask (can be nullptr)
  * \param data: Runtime data to update
  */
 void tag_bar_buttons_update(const blender::wmWindowManager *wm,
-                            blender::SpaceProperties * /*sbuts*/,
+                            blender::View3D *v3d,
                             TagBarRuntimeData *data);
 
 /**

@@ -1541,7 +1541,7 @@ bool ED_region_is_overlap(const int spacetype, const int regiontype)
                   RGN_TYPE_ASSET_SHELF_HEADER);
 
     case SPACE_VIEW3D:
-      if (ELEM(regiontype, RGN_TYPE_HEADER, RGN_TYPE_TOOL_HEADER)) {
+      if (regiontype == RGN_TYPE_HEADER) {
         return false;
       }
       return ELEM(regiontype,
@@ -1550,6 +1550,7 @@ bool ED_region_is_overlap(const int spacetype, const int regiontype)
                   RGN_TYPE_TOOL_PROPS,
                   RGN_TYPE_TAG_BAR,
                   RGN_TYPE_FOOTER,
+                  RGN_TYPE_TOOL_HEADER,
                   RGN_TYPE_ASSET_SHELF,
                   RGN_TYPE_ASSET_SHELF_HEADER);
 

@@ -1140,6 +1140,26 @@ class VIEW3D_HT_header(Header):
         return 'CLIPUV_DEHLT' if mask_enabled else 'CLIPUV_HLT'
 
 
+class VIEW3D_HT_tag_bar(Header):
+    """Tag bar region for displaying tag buttons and external addon buttons.
+
+    Addons can append their draw functions to this class to add buttons to the tag bar.
+    Buttons are drawn from left to right, with addon buttons appearing before the tag filter buttons.
+
+    Example:
+        def my_tag_bar_draw(self, context):
+            layout = self.layout
+            layout.operator("my.operator", text="", icon='MY_ICON')
+
+        VIEW3D_HT_tag_bar.append(my_tag_bar_draw)
+    """
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'TAG_BAR'
+
+    def draw(self, context):
+        pass  # Addons can append their draw functions here
+
+
 class VIEW3D_MT_editor_menus(Menu):
     bl_label = ""
 
@@ -9261,6 +9281,7 @@ class VIEW3D_AST_brush_gpencil_weight(AssetShelfHiddenByDefault, View3DAssetShel
 classes = (
     VIEW3D_HT_header,
     VIEW3D_HT_tool_header,
+    VIEW3D_HT_tag_bar,
     VIEW3D_MT_editor_menus,
     VIEW3D_MT_transform,
     VIEW3D_MT_transform_object,

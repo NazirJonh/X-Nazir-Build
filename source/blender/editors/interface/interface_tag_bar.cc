@@ -5,6 +5,7 @@
 
 #include <map>
 #include <optional>
+#include <algorithm>
 
 #include "interface_tag_bar.hh"
 #include "interface_intern.hh"
@@ -18,6 +19,8 @@
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_vector.hh"
+
+#include "MEM_guardedalloc.h"
 
 #include "BKE_context.hh"
 #include "BKE_screen.hh"
@@ -40,6 +43,20 @@
 #include "BLF_api.hh"
 
 namespace blender::ui {
+
+using blender::wmWindowManager;
+using blender::bContext;
+using blender::View3D;
+using blender::SpaceProperties;
+using blender::ScrArea;
+using blender::CategoryTagDef;
+using blender::ARegion;
+using blender::wmNotifier;
+using blender::wmEvent;
+using blender::wmRegionListenerParams;
+using blender::wmRegionMessageSubscribeParams;
+using blender::Vector;
+using blender::Span;
 
 /* Global cache for tag bar data, keyed by wmWindowManager pointer */
 static std::map<const wmWindowManager *, TagBarRuntimeData *> g_tag_bar_cache;
@@ -320,8 +337,12 @@ void tag_button_click_by_mode(bContext *C, void *arg1, void *arg2)
 
 void buttons_tag_bar_region_init(wmWindowManager *wm, ARegion *region)
 {
-  /* Add handlers for mouse events */
+  /* Initialize region for UI interaction */
+  ED_region_header_init(region);
+
+  /* Add UI handlers for button interaction (mouse click, hover, etc) */
   region_handlers_add(&region->runtime->handlers);
+
   UNUSED_VARS(wm);
 }
 
@@ -357,20 +378,20 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
     return;
   }
 
-  const uiStyle *style = ui::style_get_dpi();
+  const uiStyle *style = style_get_dpi();
   const float dpi_fac = UI_SCALE_FAC;
 
   /* No background drawing - overlay region is transparent */
 
   /* Create UI block for buttons */
-  ui::Block *block = ui::block_begin(C, region, __func__, ui::EmbossType::Emboss);
-  ui::Layout &layout = ui::block_layout(block,
-                                        ui::LayoutDirection::Horizontal,
-                                        ui::LayoutType::Header,
-                                        0, 0,
-                                        region->winx, region->winy,
-                                        0,
-                                        style);
+  Block *block = block_begin(C, region, __func__, EmbossType::Emboss);
+  Layout &layout = block_layout(block,
+                                LayoutDirection::Horizontal,
+                                LayoutType::Header,
+                                0, 0,
+                                region->winx, region->winy,
+                                0,
+                                style);
 
   /* Calculate scroll offset */
   int scroll_offset = sbuts->tag_bar_scroll_offset;
@@ -417,8 +438,8 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
       STRNCPY(button_label, btn.tag_name);
     }
 
-    ui::Button *but = uiDefBut(block,
-                               ui::ButtonType::ButToggle,
+    Button *but = uiDefBut(block,
+                                ButtonType::ButToggle,
                                button_label,
                                xco,
                                0,
@@ -460,15 +481,15 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 
   /* Scroll button (if needed) */
   if (data->total_width > region->winx) {
-    [[maybe_unused]] ui::Layout &row = layout.row(false);
-    uiDefBut(block, ui::ButtonType::Scroll, "",
+    [[maybe_unused]] Layout &row = layout.row(false);
+    uiDefBut(block, ButtonType::Scroll, "",
              0, 0, UI_UNIT_X, UI_UNIT_Y,
              &sbuts->tag_bar_scroll_offset, 0.0f, float(data->max_scroll),
              "");
   }
 
-  ui::block_end(C, block);
-  ui::block_draw(C, block);
+  block_end(C, block);
+  block_draw(C, block);
 }
 
 /**
@@ -503,21 +524,21 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
   }
 
   /* Draw a simple horizontal bar with tag buttons */
-  const uiStyle *style = ui::style_get_dpi();
+  const uiStyle *style = style_get_dpi();
   const float dpi_fac = UI_SCALE_FAC;
 
   /* Create UI block for tag buttons - use default positioning */
-  ui::Block *block = ui::block_begin(C, region, __func__, ui::EmbossType::Emboss);
-  ui::Layout &block_layout = ui::block_layout(block,
-                                              ui::LayoutDirection::Horizontal,
-                                              ui::LayoutType::Header,
-                                              0, 0,
-                                              region->winx, region->winy,
-                                              0,
-                                              style);
+  Block *block = block_begin(C, region, __func__, EmbossType::Emboss);
+  Layout &layout = block_layout(block,
+                                LayoutDirection::Horizontal,
+                                LayoutType::Header,
+                                0, 0,
+                                region->winx, region->winy,
+                                0,
+                                style);
 
   /* Create row for buttons with alignment */
-  [[maybe_unused]] ui::Layout &row = block_layout.row(true);  /* true = align items */
+  [[maybe_unused]] Layout &row = layout.row(true);  /* true = align items */
 
   /* Draw tag buttons */
   int xco = 0;
@@ -551,17 +572,17 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
       STRNCPY(button_label, btn.tag_name);
     }
 
-    ui::Button *but = uiDefBut(block,
-                               ui::ButtonType::ButToggle,
-                               button_label,
-                               xco,
-                               0,
-                               btn_width,
-                               UI_UNIT_Y - 4,
-                               nullptr,
-                               0.0f,
-                               0.0f,
-                               TIP_("Toggle category filter"));
+    Button *but = uiDefBut(block,
+                                ButtonType::ButToggle,
+                                button_label,
+                                xco,
+                                0,
+                                btn_width,
+                                UI_UNIT_Y - 4,
+                                nullptr,
+                                0.0f,
+                                0.0f,
+                                TIP_("Toggle category filter"));
 
     if (but) {
       /* Setup button colors and glyphs based on state */
@@ -598,8 +619,8 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
     xco += btn_width + 4;
   }
 
-  ui::block_end(C, block);
-  ui::block_draw(C, block);
+  block_end(C, block);
+  block_draw(C, block);
 
   printf("DEBUG: Drew %zu tag buttons\n", data->buttons.size());
 }
@@ -610,19 +631,24 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
  * \param C: Context
  * \param block: UI block to add buttons to
  * \param region: Region for size calculations
+ * \param start_x: X position to start drawing from (after external buttons)
  */
-void tag_bar_draw_in_layout(const bContext *C, ui::Block *block, ARegion *region)
+void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, int start_x)
 {
-  using namespace blender::ui;
+  printf("DEBUG: === tag_bar_draw_in_layout START === block=%p, region=%p, start_x=%d\n",
+         block, region, start_x);
 
   wmWindowManager *wm = CTX_wm_manager(C);
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
 
   if (!data || data->buttons.is_empty()) {
+    printf("DEBUG: tag_bar_draw_in_layout: No data or empty buttons\n");
     return;
   }
 
-  const uiStyle *style = ui::style_get_dpi();
+  printf("DEBUG: tag_bar_draw_in_layout: Drawing %zu buttons\n", data->buttons.size());
+
+  const uiStyle *style = style_get_dpi();
   const float dpi_fac = UI_SCALE_FAC;
 
   /* Calculate total buttons width for positioning */
@@ -648,10 +674,10 @@ void tag_bar_draw_in_layout(const bContext *C, ui::Block *block, ARegion *region
     total_buttons_width += glyph_width + text_width + UI_UNIT_X + UI_UNIT_X / 4;
   }
 
-  /* Start positioning from right if there's space, otherwise from left */
-  int xco = (total_buttons_width < region->winx) ? (region->winx - total_buttons_width - UI_UNIT_X / 2) :
-                                                   (UI_UNIT_X / 2);
-  const int yco = (region->winy - UI_UNIT_Y) / 2; /* Center vertically */
+  /* Start from the given position (after external buttons) with some padding.
+   * For TAG_BAR region, use y=0 (top-aligned region) with proper height. */
+  int xco = start_x + UI_UNIT_X / 2;
+  const int yco = 0;  /* TAG_BAR is top-aligned, y=0 is the top edge */
 
   for (TagButton &btn : data->buttons) {
     const int fontid = style->widget.uifont_id;
@@ -682,22 +708,22 @@ void tag_bar_draw_in_layout(const bContext *C, ui::Block *block, ARegion *region
       STRNCPY(button_label, btn.tag_name);
     }
 
-    ui::Button *but = uiDefBut(block,
-                               ui::ButtonType::ButToggle,
-                               button_label,
-                               xco,
-                               yco,
-                               btn_width,
-                               UI_UNIT_Y,
-                               nullptr,
-                               0.0f,
-                               0.0f,
-                               TIP_("Toggle category filter"));
+    Button *but = uiDefBut(block,
+                                ButtonType::ButToggle,
+                                button_label,
+                                xco,
+                                yco,
+                                btn_width,
+                                UI_UNIT_Y - 4,  /* Match header button height */
+                                nullptr,
+                                0.0f,
+                                0.0f,
+                                TIP_("Toggle category filter"));
 
     if (but) {
       /* Setup button colors and glyphs based on state */
       if (btn.is_active) {
-        /* Active button: background uses tag color. 
+        /* Active button: background uses tag color.
          * For ButToggle, but->col sets the "checked" background color. */
         rgb_float_to_uchar(but->col, btn.color);
         but->col[3] = 255;
@@ -710,8 +736,12 @@ void tag_bar_draw_in_layout(const bContext *C, ui::Block *block, ARegion *region
         but->drawflag |= BUT_TEXT_USE_COL;
       }
 
+      /* Set callback for button click */
       but->func = tag_button_click_by_mode;
       but->func_arg1 = wm;
+
+      printf("DEBUG: Tag button created: '%s' at x=%d, y=%d, w=%d, func=%p\n",
+             btn.tag_name, xco, yco, btn_width, (void*)but->func);
 
       /* Find the mode_flags for this tag */
       if (wm && category_tag_list_is_valid(&wm->category_tags)) {
@@ -733,6 +763,7 @@ void tag_bar_draw_in_layout(const bContext *C, ui::Block *block, ARegion *region
 
   /* Store total width for View2D scrolling */
   data->total_width = xco;
+  printf("DEBUG: === tag_bar_draw_in_layout END === total_width=%d\n", xco);
 }
 
 void buttons_tag_bar_region_listener(const wmRegionListenerParams *params)

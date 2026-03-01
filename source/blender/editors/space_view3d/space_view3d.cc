@@ -73,6 +73,7 @@
 #include "UI_resources.hh"
 #include "UI_view2d.hh"
 #include "BLF_api.hh"
+#include "../interface/interface_intern.hh"
 #include "../interface/interface_tag_bar.hh"
 
 #include "BLO_read_write.hh"
@@ -1019,16 +1020,27 @@ static void view3d_header_region_init(wmWindowManager *wm, ARegion *region)
  */
 static void view3d_tag_bar_region_init(wmWindowManager *wm, ARegion *region)
 {
-  printf("DEBUG: view3d_tag_bar_region_init called! region=%p, regiontype=%d\n",
+  printf("DEBUG: === view3d_tag_bar_region_init START === region=%p, regiontype=%d\n",
          region, region ? region->regiontype : -1);
+  printf("DEBUG:   region->winx=%d, region->winy=%d, alignment=%d\n",
+         region->winx, region->winy, region->alignment);
+
+  /* Add UI handlers for button interaction (mouse click, hover, etc) */
+  ui::region_handlers_add(&region->runtime->handlers);
+  printf("DEBUG:   UI handlers added, handler count=%d\n",
+         BLI_listbase_count(&region->runtime->handlers));
 
   /* Add keymap for basic interaction */
   wmKeyMap *keymap = WM_keymap_ensure(
       wm->runtime->defaultconf, "3D View Generic", SPACE_VIEW3D, RGN_TYPE_TAG_BAR);
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
+  printf("DEBUG:   Keymap added: %p\n", keymap);
 
   /* Initialize View2D for scrolling */
   ED_region_header_init(region);
+  printf("DEBUG:   View2D initialized: cur.xmin=%f, cur.xmax=%f\n",
+         region->v2d.cur.xmin, region->v2d.cur.xmax);
+  printf("DEBUG: === view3d_tag_bar_region_init END ===\n");
 }
 
 /**
@@ -1077,38 +1089,100 @@ static void view3d_tag_bar_region_draw(const bContext *C, ARegion *region)
 {
   using namespace blender::ui;
 
-  printf("DEBUG: view3d_tag_bar_region_draw CALLED! region=%p\n", region);
+  printf("DEBUG: === view3d_tag_bar_region_draw START === region=%p, winx=%d, winy=%d\n",
+         region, region->winx, region->winy);
 
   /* Get tag bar data */
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
   if (!data || data->buttons.is_empty()) {
     printf("DEBUG: view3d_tag_bar_region_draw: No data or empty buttons - returning\n");
+    printf("DEBUG:   data=%p, buttons.size()=%zu\n",
+           data, data ? data->buttons.size() : 0);
     return;
   }
   printf("DEBUG: view3d_tag_bar_region_draw: Drawing %zu buttons\n", data->buttons.size());
 
-  const uiStyle *style = ui::style_get_dpi();
+  const uiStyle *style = style_get_dpi();
   (void)style;  /* Unused */
 
   /* No background drawing - overlay region is transparent */
 
   /* Set view2d view matrix for scrolling (without scrollers) */
-  ui::view2d_view_ortho(&region->v2d);
+  view2d_view_ortho(&region->v2d);
+  printf("DEBUG: View2D ortho set, cur.xmin=%f, cur.xmax=%f, cur.ymin=%f, cur.ymax=%f\n",
+         region->v2d.cur.xmin, region->v2d.cur.xmax,
+         region->v2d.cur.ymin, region->v2d.cur.ymax);
 
-  /* Create UI block */
-  ui::Block *block = ui::block_begin(C, region, __func__, ui::EmbossType::Emboss);
+  /* Create layout for external addon buttons (left side) */
+  printf("DEBUG: Calling ED_region_header_layout...\n");
+  ED_region_header_layout(C, region);
+  printf("DEBUG: ED_region_header_layout done\n");
 
-  /* Draw tag buttons */
-  tag_bar_draw_in_layout(C, block, region);
+  /* Calculate the width used by external buttons from the header layout */
+  int external_buttons_width = 0;
+  int block_count = 0;
+  for (Block *header_block = static_cast<Block *>(region->runtime->uiblocks.first);
+       header_block;
+       header_block = header_block->next)
+  {
+    block_count++;
+    for (const std::unique_ptr<Button> &but_ptr : header_block->buttons_ptrs) {
+      Button *but = but_ptr.get();
+      int but_xmax = int(but->rect.xmax);
+      if (but_xmax > external_buttons_width) {
+        external_buttons_width = but_xmax;
+      }
+    }
+  }
+  printf("DEBUG: Found %d header blocks. External buttons width: %d\n", block_count, external_buttons_width);
 
-  /* Update View2D total rect for scrolling */
-  ui::view2d_totRect_set(&region->v2d, data->total_width + UI_UNIT_X, region->winy);
+  /* Create UI block for tag buttons */
+  Block *block = block_begin(C, region, __func__, EmbossType::Emboss);
+  printf("DEBUG: Tag bar block created: %p, name='%s'\n", block, block ? block->name : "null");
 
-  ui::block_end(C, block);
-  ui::block_draw(C, block);
+  /* Draw tag buttons (right side, after external buttons) */
+  printf("DEBUG: Calling tag_bar_draw_in_layout with start_x=%d\n", external_buttons_width);
+  tag_bar_draw_in_layout(C, block, region, external_buttons_width);
+
+  /* Check how many buttons were added to the block */
+  if (block) {
+    int tag_button_count = 0;
+    for (const std::unique_ptr<Button> &but_ptr : block->buttons_ptrs) {
+      tag_button_count++;
+    }
+    printf("DEBUG: Tag buttons in block: %d\n", tag_button_count);
+  }
+
+  /* End the tag bar block before drawing everything */
+  block_end(C, block);
+  printf("DEBUG: Block ended\n");
+
+  /* Update View2D total rect for scrolling - includes external buttons + tags + padding */
+  int total_content_width = external_buttons_width + data->total_width + UI_UNIT_X * 2;
+  printf("DEBUG: Total content width: %d (external=%d, tags=%d)\n",
+         total_content_width, external_buttons_width, data->total_width);
+  view2d_totRect_set(&region->v2d, total_content_width, region->winy);
+  printf("DEBUG: View2D tot set: tot.xmin=%f, tot.xmax=%f, tot.ymin=%f, tot.ymax=%f\n",
+         region->v2d.tot.xmin, region->v2d.tot.xmax,
+         region->v2d.tot.ymin, region->v2d.tot.ymax);
+
+  /* View2D matrix might have changed due to dynamic sized regions. */
+  blocklist_update_window_matrix(C, &region->runtime->uiblocks);
+  printf("DEBUG: Window matrix updated\n");
+
+  /* Count total blocks before drawing */
+  int total_blocks = 0;
+  for (Block *b = static_cast<Block *>(region->runtime->uiblocks.first); b; b = b->next) {
+    total_blocks++;
+  }
+  printf("DEBUG: Total blocks before draw: %d\n", total_blocks);
+
+  /* Draw all blocks in the region (external addon buttons + tag bar block) */
+  blocklist_draw(C, &region->runtime->uiblocks);
+  printf("DEBUG: === view3d_tag_bar_region_draw END ===\n");
 
   /* Restore view matrix. */
-  ui::view2d_view_restore(C);
+  view2d_view_restore(C);
 }
 
 /** \} */
@@ -1128,11 +1202,6 @@ static void view3d_header_region_listener(const wmRegionListenerParams *params)
 
   /* context changes */
   switch (wmn->category) {
-    case NC_WM:
-      if (wmn->data == ND_CATEGORY_GLYPHS) {
-        ED_region_tag_redraw(region);
-      }
-      break;
     case NC_SCENE:
       switch (wmn->data) {
         case ND_FRAME:

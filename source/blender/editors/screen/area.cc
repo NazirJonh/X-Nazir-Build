@@ -1525,7 +1525,7 @@ static void region_overlap_fix(ScrArea *area, ARegion *region)
 
 bool ED_region_is_overlap(const int spacetype, const int regiontype)
 {
-  if (regiontype == RGN_TYPE_HUD) {
+  if (ELEM(regiontype, RGN_TYPE_HUD, RGN_TYPE_TAG_BAR)) {
     return true;
   }
   if ((U.uiflag2 & USER_REGION_OVERLAP) == 0) {

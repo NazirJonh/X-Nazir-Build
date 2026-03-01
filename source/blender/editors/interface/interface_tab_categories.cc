@@ -65,6 +65,7 @@
 #include "GPU_state.hh"
 
 #include "interface_intern.hh"
+#include "interface_tag_bar.hh"
 #include "regions/interface_regions_intern.hh"
 
 namespace blender::ui {
@@ -157,7 +158,7 @@ static const char *lookup_default_glyph(const char *category)
  * Check if a ListBase containing CategoryGlyphItem appears to be valid.
  * After file read, the list may contain garbage pointers from the old file's memory space.
  */
-static bool category_glyph_list_is_valid(const ListBase *list)
+bool category_glyph_list_is_valid(const ListBase *list)
 {
   if (list == nullptr || list->first == nullptr) {
     return true; /* Empty list is valid. */
@@ -861,6 +862,30 @@ uint32_t get_current_tag_mode_flag(const bContext *C)
 /** \name Category Visibility by Tags
  * \{ */
 
+/**
+ * Check if the category passes the tag filter.
+ */
+static bool category_passes_tag_filter(const bContext *C, const char *category_idname)
+{
+  if (!C) {
+    return true;
+  }
+
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  const SpaceProperties *sbuts = CTX_wm_space_properties(C);
+
+  /* If filter is not active - show all */
+  if (!sbuts || sbuts->active_tag_filter_mask == 0) {
+    return true;
+  }
+
+  /* Get category tags */
+  const char *category_tags = category_tags_string_lookup(wm, category_idname);
+
+  /* Check if any active tag matches */
+  return has_any_tag_active(wm, category_tags, sbuts->active_tag_filter_mask);
+}
+
 bool panel_category_is_visible_by_tags(const bContext *C,
                                        const wmWindowManager *wm,
                                        const char *category)
@@ -868,6 +893,11 @@ bool panel_category_is_visible_by_tags(const bContext *C,
   /* Reserved categories are always visible */
   if (category_is_reserved_for_reorder(wm, category)) {
     return true;
+  }
+
+  /* Tag filtering - check horizontal tag bar filter */
+  if (!category_passes_tag_filter(C, category)) {
+    return false;
   }
 
   /* Get tags assigned to this category */

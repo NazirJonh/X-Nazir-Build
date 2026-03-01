@@ -663,8 +663,10 @@ enum eRegion_Type {
   RGN_TYPE_XR = 13,
   RGN_TYPE_ASSET_SHELF = 14,
   RGN_TYPE_ASSET_SHELF_HEADER = 15,
+  /* Horizontal tag bar for category filtering in upper-right corner. */
+  RGN_TYPE_TAG_BAR = 20,
 
-#define RGN_TYPE_NUM (RGN_TYPE_ASSET_SHELF_HEADER + 1)
+#define RGN_TYPE_NUM (RGN_TYPE_TAG_BAR + 1)
 };
 
 /** Use for function args. */

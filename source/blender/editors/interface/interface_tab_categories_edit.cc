@@ -1297,6 +1297,8 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
             {
               printf("[DEBUG C++] SUCCESS: Property resolved, setting to '%s'\n", hex_code);
               RNA_property_string_set(&target_ptr, prop, hex_code);
+              RNA_property_update(&C, &target_ptr, prop);
+              printf("[DEBUG C++] Called RNA_property_update after setting property!\n");
               resolved = true;
             } else {
               printf("[DEBUG C++] FAILED: RNA_path_resolve_full returned false\n");
@@ -1314,6 +1316,8 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
                 {
                   printf("[DEBUG C++] SUCCESS: Resolved via active_op, setting to '%s'\n", hex_code);
                   RNA_property_string_set(&target_ptr, prop, hex_code);
+                  RNA_property_update(&C, &target_ptr, prop);
+                  printf("[DEBUG C++] Called RNA_property_update (active_op)!\n");
                   resolved = true;
                 } else {
                   printf("[DEBUG C++] FAILED: RNA_path_resolve_full on active_op returned false\n");
@@ -1329,6 +1333,8 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
             if (RNA_path_resolve_full(&root_ptr, target_prop_path, &target_ptr, &prop, &index)) {
               printf("[DEBUG C++] SUCCESS: Resolved via window manager, setting to '%s'\n", hex_code);
               RNA_property_string_set(&target_ptr, prop, hex_code);
+              RNA_property_update(&C, &target_ptr, prop);
+              printf("[DEBUG C++] Called RNA_property_update (window manager)!\n");
               resolved = true;
             } else {
               printf("[DEBUG C++] FAILED: RNA_path_resolve_full on window manager returned false\n");
@@ -1341,6 +1347,8 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
             if (RNA_path_resolve_full(popup_data->op->ptr, target_prop_path, &target_ptr, &prop, &index)) {
               printf("[DEBUG C++] Fallback SUCCESS: Setting picker's own property to '%s'\n", hex_code);
               RNA_property_string_set(&target_ptr, prop, hex_code);
+              RNA_property_update(&C, &target_ptr, prop);
+              printf("[DEBUG C++] Called RNA_property_update (fallback)!\n");
             } else {
               printf("[DEBUG C++] Fallback FAILED: Could not resolve property\n");
             }

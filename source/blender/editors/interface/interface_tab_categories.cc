@@ -39,6 +39,7 @@
 #include "DNA_object_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_workspace_types.h"
 
@@ -872,10 +873,30 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
   }
 
   const wmWindowManager *wm = CTX_wm_manager(C);
-  const SpaceProperties *sbuts = CTX_wm_space_properties(C);
+  ScrArea *area = CTX_wm_area(C);
+
+  /* Get active filter mask from current space type */
+  int active_filter_mask = 0;
+
+  if (area) {
+    if (area->spacetype == SPACE_VIEW3D) {
+      /* Tag bar is in View3D */
+      View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+      if (v3d) {
+        active_filter_mask = v3d->active_tag_filter_mask;
+      }
+    }
+    else if (area->spacetype == SPACE_PROPERTIES) {
+      /* Tag bar might also be in Properties (for future use) */
+      SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
+      if (sbuts) {
+        active_filter_mask = sbuts->active_tag_filter_mask;
+      }
+    }
+  }
 
   /* If filter is not active - show all */
-  if (!sbuts || sbuts->active_tag_filter_mask == 0) {
+  if (active_filter_mask == 0) {
     return true;
   }
 
@@ -883,7 +904,7 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
   const char *category_tags = category_tags_string_lookup(wm, category_idname);
 
   /* Check if any active tag matches */
-  return has_any_tag_active(wm, category_tags, sbuts->active_tag_filter_mask);
+  return has_any_tag_active(wm, category_tags, active_filter_mask);
 }
 
 bool panel_category_is_visible_by_tags(const bContext *C,

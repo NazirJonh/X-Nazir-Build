@@ -11,6 +11,7 @@
 
 #include "DNA_userdef_types.h"
 #include "DNA_space_types.h"
+#include "DNA_view3d_types.h"
 
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
@@ -42,7 +43,6 @@ namespace blender::ui {
 
 /* Global cache for tag bar data, keyed by wmWindowManager pointer */
 static std::map<const wmWindowManager *, TagBarRuntimeData *> g_tag_bar_cache;
-static int g_active_tag_filter_mask = 0;  /* Global filter state */
 
 /* -------------------------------------------------------------------- */
 /** \name Public API
@@ -78,9 +78,20 @@ void tag_bar_mark_all_dirty()
  * Creates the data if it doesn't exist.
  * Updates data if needs_update flag is set.
  */
-TagBarRuntimeData *get_tag_bar_data_global(const wmWindowManager *wm)
+TagBarRuntimeData *get_tag_bar_data_global(const bContext *C)
 {
+  if (!C) {
+    printf("DEBUG: get_tag_bar_data_global: No context!\n");
+    return nullptr;
+  }
+
+  wmWindowManager *wm = CTX_wm_manager(C);
   printf("DEBUG: get_tag_bar_data_global called: wm=%p\n", wm);
+
+  if (!wm) {
+    printf("DEBUG: get_tag_bar_data_global: No wm!\n");
+    return nullptr;
+  }
 
   TagBarRuntimeData *data = g_tag_bar_cache[wm];
   printf("DEBUG: data from cache: %p, needs_update=%d\n",
@@ -92,10 +103,17 @@ TagBarRuntimeData *get_tag_bar_data_global(const wmWindowManager *wm)
     g_tag_bar_cache[wm] = data;
   }
 
+  /* Get View3D for filter state */
+  ScrArea *area = CTX_wm_area(C);
+  View3D *v3d = nullptr;
+  if (area && area->spacetype == SPACE_VIEW3D) {
+    v3d = static_cast<View3D *>(area->spacedata.first);
+  }
+
   /* Update data if needs_update flag is set */
   if (data->needs_update) {
-    printf("DEBUG: UPDATING TAG DATA! wm=%p, needs_update was true\n", wm);
-    tag_bar_buttons_update(wm, nullptr, data);
+    printf("DEBUG: UPDATING TAG DATA! wm=%p, v3d=%p, needs_update was true\n", wm, v3d);
+    tag_bar_buttons_update(wm, v3d, data);
     data->needs_update = false;
     printf("DEBUG: After update: buttons.size()=%zu\n", data->buttons.size());
   }
@@ -185,10 +203,10 @@ bool has_any_tag_active(const wmWindowManager *wm,
  * Update tag bar buttons based on tags from window manager.
  */
 void tag_bar_buttons_update(const wmWindowManager *wm,
-                            SpaceProperties * /*sbuts*/,
+                            View3D *v3d,
                             TagBarRuntimeData *data)
 {
-  printf("DEBUG: tag_bar_buttons_update called: wm=%p, data=%p\n", wm, data);
+  printf("DEBUG: tag_bar_buttons_update called: wm=%p, v3d=%p, data=%p\n", wm, v3d, data);
 
   if (!data) {
     return;
@@ -196,6 +214,10 @@ void tag_bar_buttons_update(const wmWindowManager *wm,
 
   data->buttons.clear();
   data->total_width = 0;
+
+  /* Get active filter mask from View3D */
+  int active_filter_mask = v3d ? v3d->active_tag_filter_mask : 0;
+  printf("DEBUG: active_filter_mask from v3d: %d\n", active_filter_mask);
 
   /* Iterate through all tags from wm */
   printf("DEBUG: wm=%p, category_tags valid=%d\n",
@@ -217,7 +239,7 @@ void tag_bar_buttons_update(const wmWindowManager *wm,
       copy_v3_v3(btn.color, tag_def->color);
       btn.is_visible = true;
       btn.is_hovered = false;
-      btn.is_active = (g_active_tag_filter_mask & tag_def->mode_flags) != 0;
+      btn.is_active = (active_filter_mask & tag_def->mode_flags) != 0;
 
       /* Count categories with this tag */
       btn.category_count = 0;
@@ -265,13 +287,30 @@ void tag_button_click_by_mode(bContext *C, void *arg1, void *arg2)
   wmWindowManager *wm = static_cast<wmWindowManager *>(arg1);
   const int mode_flags = POINTER_AS_INT(arg2);
 
-  /* Toggle the global filter */
-  g_active_tag_filter_mask ^= mode_flags;
+  /* Get View3D to update the filter mask */
+  ScrArea *area = CTX_wm_area(C);
+  View3D *v3d = nullptr;
+  if (area && area->spacetype == SPACE_VIEW3D) {
+    v3d = static_cast<View3D *>(area->spacedata.first);
+  }
+
+  printf("DEBUG: tag_button_click_by_mode: wm=%p, v3d=%p, mode_flags=%d\n",
+         wm, v3d, mode_flags);
+
+  /* Toggle the filter in View3D */
+  if (v3d) {
+    v3d->active_tag_filter_mask ^= mode_flags;
+    printf("DEBUG: Updated v3d->active_tag_filter_mask to %d\n",
+           v3d->active_tag_filter_mask);
+  }
+  else {
+    printf("DEBUG: No v3d found - cannot update filter!\n");
+  }
 
   /* Update cache and redraw */
-  TagBarRuntimeData *data = get_tag_bar_data_global(wm);
+  TagBarRuntimeData *data = get_tag_bar_data_global(C);
   if (data) {
-    tag_bar_buttons_update(wm, nullptr, data);
+    tag_bar_buttons_update(wm, v3d, data);
     data->needs_update = false;  /* Just updated, no need to update again */
   }
 
@@ -311,7 +350,7 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
   printf("DEBUG: wm=%p, category_tags=%p\n", wm, wm ? &wm->category_tags : nullptr);
 
   /* Get or create data */
-  TagBarRuntimeData *data = get_tag_bar_data_global(wm);
+  TagBarRuntimeData *data = get_tag_bar_data_global(C);
   printf("DEBUG: data=%p, buttons.size()=%zu\n", data, data ? data->buttons.size() : 0);
   if (!data || data->buttons.is_empty()) {
     printf("DEBUG: No data or empty buttons!\n");
@@ -456,7 +495,7 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
   printf("DEBUG: wm=%p, category_tags=%p\n", wm, wm ? &wm->category_tags : nullptr);
 
   /* Get or create data from global cache */
-  TagBarRuntimeData *data = get_tag_bar_data_global(wm);
+  TagBarRuntimeData *data = get_tag_bar_data_global(C);
   printf("DEBUG: data=%p, buttons.size()=%zu\n", data, data ? data->buttons.size() : 0);
   if (!data || data->buttons.is_empty()) {
     printf("DEBUG: No data or empty buttons!\n");
@@ -577,7 +616,7 @@ void tag_bar_draw_in_layout(const bContext *C, ui::Block *block, ARegion *region
   using namespace blender::ui;
 
   wmWindowManager *wm = CTX_wm_manager(C);
-  TagBarRuntimeData *data = get_tag_bar_data_global(wm);
+  TagBarRuntimeData *data = get_tag_bar_data_global(C);
 
   if (!data || data->buttons.is_empty()) {
     return;

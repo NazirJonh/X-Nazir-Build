@@ -209,13 +209,25 @@ static wmOperatorStatus view3d_tag_bar_toggle_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  const int mode_flags = RNA_int_get(op->ptr, "mode_flags");
-  printf("DEBUG: view3d_tag_bar_toggle_exec: mode_flags=%d, old_mask=%d\n",
-         mode_flags, v3d->active_tag_filter_mask);
+  const int64_t mode_flags = RNA_int_get(op->ptr, "mode_flags");
 
-  v3d->active_tag_filter_mask ^= mode_flags;
+  /* Combine current low/high parts into int64_t */
+  int64_t current_mask = (static_cast<int64_t>(v3d->active_tag_filter_mask_high) << 32) |
+                         static_cast<uint32_t>(v3d->active_tag_filter_mask_low);
 
-  printf("DEBUG: view3d_tag_bar_toggle_exec: new_mask=%d\n", v3d->active_tag_filter_mask);
+  printf("DEBUG: view3d_tag_bar_toggle_exec: mode_flags=%lld, old_mask=%lld\n",
+         mode_flags, current_mask);
+
+  /* Toggle the bit */
+  current_mask ^= mode_flags;
+
+  /* Split back into low/high parts */
+  v3d->active_tag_filter_mask_low = static_cast<int>(current_mask & 0xFFFFFFFF);
+  v3d->active_tag_filter_mask_high = static_cast<int>((current_mask >> 32) & 0xFFFFFFFF);
+
+  printf("DEBUG: view3d_tag_bar_toggle_exec: new_mask=%lld\n",
+         (static_cast<int64_t>(v3d->active_tag_filter_mask_high) << 32) |
+         static_cast<uint32_t>(v3d->active_tag_filter_mask_low));
 
   WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   ED_area_tag_redraw(area);

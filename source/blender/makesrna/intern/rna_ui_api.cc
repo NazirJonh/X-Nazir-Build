@@ -611,8 +611,16 @@ static PointerRNA rna_uiItemTagButton(Layout *layout,
                                       float color_b,
                                       bool depress)
 {
+  printf("DEBUG: rna_uiItemTagButton CALLED: opname=%s, tag_name=%s, glyph=%s\n",
+         opname, tag_name, glyph);
+
   float color[3] = {color_r, color_g, color_b};
-  return uiItemTagButtonWithOperator(layout, opname, tag_name, glyph, color, depress);
+  PointerRNA result = uiItemTagButtonWithOperator(layout, opname, tag_name, glyph, color, depress);
+
+  printf("DEBUG: rna_uiItemTagButton: result.data=%p, result.type=%p\n",
+         result.data, result.type);
+
+  return result;
 }
 
 static void rna_uiItemM(Layout *layout,

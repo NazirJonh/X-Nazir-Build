@@ -171,17 +171,21 @@ struct SpaceProperties {
 
   /**
    * Bitmask of active tags for category filtering.
-   * Each bit corresponds to a tag from mode_flags.
-   * 0 = all categories are visible.
+   * Each bit corresponds to a unique tag (up to 64 tags).
+   * 0 = all tags are visible.
+   * Split into low/high 32-bit parts for RNA compatibility.
    */
-  int active_tag_filter_mask = 0;
+  int active_tag_filter_mask_low = 0;
+  int active_tag_filter_mask_high = 0;
 
   /**
    * Horizontal scroll offset in the tag bar (in pixels).
    */
   int tag_bar_scroll_offset = 0;
 
-  char _pad1[8] = {};
+  int _pad2 = 0;
+
+  void *_pad1 = nullptr;
 
   /* Doesn't necessarily need to be a pointer, but runtime structs are still written to files. */
   struct SpaceProperties_Runtime *runtime = nullptr;

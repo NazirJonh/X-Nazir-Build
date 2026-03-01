@@ -865,6 +865,7 @@ uint32_t get_current_tag_mode_flag(const bContext *C)
 
 /**
  * Check if the category passes the tag filter.
+ * When multiple tags are active, ALL must be present in the category (AND logic).
  */
 static bool category_passes_tag_filter(const bContext *C, const char *category_idname)
 {
@@ -876,21 +877,25 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
   ScrArea *area = CTX_wm_area(C);
 
   /* Get active filter mask from current space type */
-  int active_filter_mask = 0;
+  int64_t active_filter_mask = 0;
 
   if (area) {
     if (area->spacetype == SPACE_VIEW3D) {
       /* Tag bar is in View3D */
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
       if (v3d) {
-        active_filter_mask = v3d->active_tag_filter_mask;
+        /* Combine low/high parts into int64_t */
+        active_filter_mask = (static_cast<int64_t>(v3d->active_tag_filter_mask_high) << 32) |
+                             static_cast<uint32_t>(v3d->active_tag_filter_mask_low);
       }
     }
     else if (area->spacetype == SPACE_PROPERTIES) {
       /* Tag bar might also be in Properties (for future use) */
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
       if (sbuts) {
-        active_filter_mask = sbuts->active_tag_filter_mask;
+        /* Combine low/high parts into int64_t */
+        active_filter_mask = (static_cast<int64_t>(sbuts->active_tag_filter_mask_high) << 32) |
+                             static_cast<uint32_t>(sbuts->active_tag_filter_mask_low);
       }
     }
   }
@@ -903,8 +908,8 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
   /* Get category tags */
   const char *category_tags = category_tags_string_lookup(wm, category_idname);
 
-  /* Check if any active tag matches */
-  return has_any_tag_active(wm, category_tags, active_filter_mask);
+  /* Check if ALL active tags match (AND logic) */
+  return has_all_tags_active(wm, category_tags, active_filter_mask);
 }
 
 bool panel_category_is_visible_by_tags(const bContext *C,

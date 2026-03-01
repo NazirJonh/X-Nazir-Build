@@ -93,7 +93,7 @@ void tag_bar_buttons_update(const blender::wmWindowManager *wm,
 bool has_tag_in_string(const char *tags_string, const char *tag_name);
 
 /**
- * Check if any active tag matches the given tag string.
+ * Check if any active tag matches the given tag string (OR logic).
  * \param wm: Window manager containing tag definitions
  * \param tags_string: Comma or semicolon separated tag list
  * \param active_mask: Bitmask of active tag filters
@@ -101,7 +101,19 @@ bool has_tag_in_string(const char *tags_string, const char *tag_name);
  */
 bool has_any_tag_active(const blender::wmWindowManager *wm,
                         const char *tags_string,
-                        int active_mask);
+                        int64_t active_mask);
+
+/**
+ * Check if ALL active tags match the given tag string (AND logic).
+ * When multiple tags are active, the category must have ALL of them to be visible.
+ * \param wm: Window manager containing tag definitions
+ * \param tags_string: Comma or semicolon separated tag list
+ * \param active_mask: Bitmask of active tag filters
+ * \return True if all active tags are present in the category, or if filter is disabled (mask=0)
+ */
+bool has_all_tags_active(const blender::wmWindowManager *wm,
+                         const char *tags_string,
+                         int64_t active_mask);
 
 /**
  * Callback for tag button click.

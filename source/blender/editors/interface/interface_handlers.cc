@@ -913,8 +913,12 @@ static void ui_apply_but_func(bContext *C, Button *but)
 {
   Block *block = but->block;
   if (!ui_afterfunc_check(block, but)) {
+    printf("DEBUG: ui_apply_but_func: ui_afterfunc_check returned false\n");
     return;
   }
+
+  printf("DEBUG: ui_apply_but_func: but type=%d, optype=%p, opptr=%p, opcontext=%d\n",
+         int(but->type), but->optype, but->opptr, int(but->opcontext));
 
   AfterFunc *after = ui_afterfunc_new();
 
@@ -956,6 +960,9 @@ static void ui_apply_but_func(bContext *C, Button *but)
     after->optype = but->optype;
     after->opcontext = but->opcontext;
     after->opptr = but->opptr;
+
+    printf("DEBUG: ui_apply_but_func: Copying optype=%p, opcontext=%d, opptr=%p to AfterFunc\n",
+           after->optype, int(after->opcontext), after->opptr);
 
     but->optype = nullptr;
     but->opcontext = wm::OpCallContext(0);
@@ -1247,7 +1254,11 @@ static void ui_apply_but_TOG(bContext *C, Button *but, HandleButtonData *data)
   }
 
   button_value_set(but, double(value_toggle));
-  if (ELEM(but->type, ButtonType::IconToggle, ButtonType::IconToggleN)) {
+
+  printf("DEBUG: ui_apply_but_TOG: but type=%d, optype=%p, opptr=%p\n",
+         int(but->type), but->optype, but->opptr);
+
+  if (ELEM(but->type, ButtonType::IconToggle, ButtonType::IconToggleN, ButtonType::Tag)) {
     button_update_edited(but);
   }
 

@@ -1170,10 +1170,8 @@ class VIEW3D_HT_tag_bar_tags(Header):
 
         wm = context.window_manager
         v3d = context.space_data
-        # Combine low/high parts into full 64-bit mask
-        mask_low = getattr(v3d, "active_tag_filter_mask_low", 0)
-        mask_high = getattr(v3d, "active_tag_filter_mask_high", 0)
-        active_mask = (mask_high << 32) | (mask_low & 0xFFFFFFFF)
+        # Get active tags as comma-separated string
+        active_tags = getattr(v3d, "active_tag_filter_tags", "")
 
         tag_use_count = {}
         for item in wm.category_glyph_mappings:
@@ -1195,32 +1193,25 @@ class VIEW3D_HT_tag_bar_tags(Header):
                 pass
             return glyph
 
-        tags_sorted = sorted(wm.category_tags, key=lambda t: (-tag_use_count.get(t.name, 0), t.name))
+        # Parse active tags string into a set for quick lookup
+        active_tags_set = set()
+        if active_tags:
+            for tag_name in active_tags.split(','):
+                tag_name = tag_name.strip()
+                if tag_name:
+                    active_tags_set.add(tag_name)
 
-        # Create a mapping from tag to unique filter bit
-        # Each tag gets a unique bit (1 << index) for filtering
-        # Supports up to 63 tags (Python int limit for bitwise operations)
-        tag_to_bit = {}
-        for i, tag in enumerate(tags_sorted):
-            if i >= 63:
-                print(f"WARNING: Too many tags for bitmask filter! Only first 63 supported. Tag: {tag.name}")
-                break
-            tag_to_bit[tag.name] = (1 << i)  # Unique bit for each tag: 1, 2, 4, 8, 16, ...
+        tags_sorted = sorted(wm.category_tags, key=lambda t: (-tag_use_count.get(t.name, 0), t.name))
 
         for tag in tags_sorted:
             glyph = glyph_display(tag.glyph)
             if not glyph:
                 continue
 
-            # Skip tags beyond the 63 limit
-            if tag.name not in tag_to_bit:
-                continue
+            # Check if this tag is in the active set
+            depress = tag.name in active_tags_set
 
-            # Use unique filter bit instead of mode_flags
-            filter_bit = tag_to_bit[tag.name]
-            depress = (active_mask & filter_bit) != 0
-
-            print(f"DEBUG: Creating tag button: tag.name={tag.name}, filter_bit={filter_bit}, depress={depress}")
+            print(f"DEBUG: Creating tag button: tag.name={tag.name}, depress={depress}")
             op = layout.tag_button(
                 "view3d.tag_bar_toggle",
                 tag_name=tag.name,
@@ -1231,11 +1222,6 @@ class VIEW3D_HT_tag_bar_tags(Header):
                 depress=depress,
             )
             print(f"DEBUG: tag_button returned: {op}, type={type(op)}")
-            if op is not None:
-                op.mode_flags = filter_bit
-                print(f"DEBUG: Set op.mode_flags={filter_bit}")
-            else:
-                print(f"WARNING: tag_button returned None for tag: {tag.name}")
 
 
 

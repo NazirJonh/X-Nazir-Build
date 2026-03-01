@@ -150,21 +150,40 @@ bool has_tag_in_string(const char *tags_string, const char *tag_name)
     return false;
   }
 
-  char tags_copy[256];
-  STRNCPY(tags_copy, tags_string);
+  const char *cursor = tags_string;
+  char tag[64];
 
-  char *tag = strtok(tags_copy, ",;");
-  while (tag != nullptr) {
+  while (*cursor) {
     /* Skip whitespace */
-    while (*tag == ' ') {
-      tag++;
+    while (*cursor == ' ') {
+      cursor++;
+    }
+
+    if (!*cursor) {
+      break;
+    }
+
+    int i = 0;
+    while (*cursor && *cursor != ',' && *cursor != ';' && i < 63) {
+      tag[i++] = *cursor++;
+    }
+
+    while (i > 0 && tag[i - 1] == ' ') {
+      i--;
+    }
+    tag[i] = '\0';
+
+    if (*cursor == ',' || *cursor == ';') {
+      cursor++;
+    }
+
+    if (tag[0] == '\0') {
+      continue;
     }
 
     if (STREQ(tag, tag_name)) {
       return true;
     }
-
-    tag = strtok(nullptr, ",;");
   }
 
   return false;
@@ -282,9 +301,12 @@ void tag_bar_buttons_update(const wmWindowManager *wm,
   data->buttons.clear();
   data->total_width = 0;
 
-  /* Get active filter mask from View3D */
-  int active_filter_mask = v3d ? v3d->active_tag_filter_mask : 0;
-  printf("DEBUG: active_filter_mask from v3d: %d\n", active_filter_mask);
+  /* Get active filter tags from View3D */
+  char active_tags[256] = "";
+  if (v3d) {
+    STRNCPY(active_tags, v3d->active_tag_filter_tags);
+  }
+  printf("DEBUG: active_tags from v3d: '%s'\n", active_tags);
 
   /* Iterate through all tags from wm */
   printf("DEBUG: wm=%p, category_tags valid=%d\n",
@@ -306,7 +328,8 @@ void tag_bar_buttons_update(const wmWindowManager *wm,
       copy_v3_v3(btn.color, tag_def->color);
       btn.is_visible = true;
       btn.is_hovered = false;
-      btn.is_active = (active_filter_mask & tag_def->mode_flags) != 0;
+      /* Check if this tag is in the active tags list */
+      btn.is_active = has_tag_in_string(active_tags, tag_def->name);
 
       /* Count categories with this tag */
       btn.category_count = 0;
@@ -361,18 +384,11 @@ void tag_button_click_by_mode(bContext *C, void *arg1, void *arg2)
     v3d = static_cast<View3D *>(area->spacedata.first);
   }
 
-  printf("DEBUG: tag_button_click_by_mode: wm=%p, v3d=%p, mode_flags=%d\n",
+  printf("DEBUG: tag_button_click_by_mode: wm=%p, v3d=%p, mode_flags=%d (deprecated, using operator instead)\n",
          wm, v3d, mode_flags);
 
-  /* Toggle the filter in View3D */
-  if (v3d) {
-    v3d->active_tag_filter_mask ^= mode_flags;
-    printf("DEBUG: Updated v3d->active_tag_filter_mask to %d\n",
-           v3d->active_tag_filter_mask);
-  }
-  else {
-    printf("DEBUG: No v3d found - cannot update filter!\n");
-  }
+  /* NOTE: This function is deprecated. Tag toggling is now handled by the operator in view3d_ops.cc.
+   * The operator directly modifies the active_tag_filter_tags string. */
 
   /* Update cache and redraw */
   TagBarRuntimeData *data = get_tag_bar_data_global(C);

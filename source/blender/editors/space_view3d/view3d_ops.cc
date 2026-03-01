@@ -13,6 +13,7 @@
 
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
+#include "BLI_string.h"
 
 #include "BKE_appdir.hh"
 #include "BKE_blender_copybuffer.hh"
@@ -209,25 +210,67 @@ static wmOperatorStatus view3d_tag_bar_toggle_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  const int64_t mode_flags = RNA_int_get(op->ptr, "mode_flags");
+  char tag_name[64];
+  RNA_string_get(op->ptr, "tag_name", tag_name);
 
-  /* Combine current low/high parts into int64_t */
-  int64_t current_mask = (static_cast<int64_t>(v3d->active_tag_filter_mask_high) << 32) |
-                         static_cast<uint32_t>(v3d->active_tag_filter_mask_low);
+  printf("DEBUG: view3d_tag_bar_toggle_exec: tag_name='%s', current_tags='%s'\n",
+         tag_name, v3d->active_tag_filter_tags);
 
-  printf("DEBUG: view3d_tag_bar_toggle_exec: mode_flags=%lld, old_mask=%lld\n",
-         mode_flags, current_mask);
+  /* Copy current active tags to work with */
+  char tags_copy[256];
+  STRNCPY_RLEN(tags_copy, v3d->active_tag_filter_tags);
 
-  /* Toggle the bit */
-  current_mask ^= mode_flags;
+  /* Check if tag is already in the list */
+  bool tag_found = false;
+  char *tag = strtok(tags_copy, ",;");
+  while (tag != nullptr) {
+    while (*tag == ' ') {
+      tag++;
+    }
+    if (STREQ(tag, tag_name)) {
+      tag_found = true;
+      break;
+    }
+    tag = strtok(nullptr, ",;");
+  }
 
-  /* Split back into low/high parts */
-  v3d->active_tag_filter_mask_low = static_cast<int>(current_mask & 0xFFFFFFFF);
-  v3d->active_tag_filter_mask_high = static_cast<int>((current_mask >> 32) & 0xFFFFFFFF);
+  /* Toggle: add if not found, remove if found */
+  char new_tags[256] = "";
 
-  printf("DEBUG: view3d_tag_bar_toggle_exec: new_mask=%lld\n",
-         (static_cast<int64_t>(v3d->active_tag_filter_mask_high) << 32) |
-         static_cast<uint32_t>(v3d->active_tag_filter_mask_low));
+  if (!tag_found) {
+    /* Add the tag to the list */
+    if (v3d->active_tag_filter_tags[0] != '\0') {
+      SNPRINTF(new_tags, "%s,%s", v3d->active_tag_filter_tags, tag_name);
+    }
+    else {
+      STRNCPY_RLEN(new_tags, tag_name);
+    }
+  }
+  else {
+    /* Remove the tag from the list */
+    char temp[256];
+    STRNCPY_RLEN(temp, v3d->active_tag_filter_tags);
+    char *token = strtok(temp, ",;");
+    bool first = true;
+    while (token != nullptr) {
+      while (*token == ' ') {
+        token++;
+      }
+      if (!STREQ(token, tag_name)) {
+        if (!first) {
+          BLI_strncat(new_tags, ",", sizeof(new_tags));
+        }
+        BLI_strncat(new_tags, token, sizeof(new_tags));
+        first = false;
+      }
+      token = strtok(nullptr, ",;");
+    }
+  }
+
+  /* Update the active tags string */
+  STRNCPY_RLEN(v3d->active_tag_filter_tags, new_tags);
+
+  printf("DEBUG: view3d_tag_bar_toggle_exec: new_tags='%s'\n", v3d->active_tag_filter_tags);
 
   WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   ED_area_tag_redraw(area);
@@ -246,7 +289,7 @@ static void VIEW3D_OT_tag_bar_toggle(wmOperatorType *ot)
 
   ot->flag = OPTYPE_REGISTER;
 
-  RNA_def_int(ot->srna, "mode_flags", 0, INT_MIN, INT_MAX, "Mode Flags", "", INT_MIN, INT_MAX);
+  RNA_def_string(ot->srna, "tag_name", nullptr, 64, "Tag Name", "Name of the tag to toggle");
 }
 
 /** \} */

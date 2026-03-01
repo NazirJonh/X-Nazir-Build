@@ -79,7 +79,7 @@ static SpaceLink *buttons_create(const ScrArea * /*area*/, const Scene * /*scene
   sbuts->visible_tabs = uint(-1); /* 0xFFFFFFFF - All tabs visible by default. */
 
   /* Tag bar filter state */
-  sbuts->active_tag_filter_mask = 0;  /* All tags active by default */
+  sbuts->active_tag_filter_tags[0] = '\0';   /* Empty = all tags visible by default */
   sbuts->tag_bar_scroll_offset = 0;
   sbuts->tag_bar_cache = nullptr;
 

@@ -192,8 +192,11 @@ _initial_load_complete = False
 # Tag order for preserving manual ordering
 _tag_order_cache = []
 
+# Category order cache: tag_combination -> [category_id1, category_id2, ...]
+_category_orders_cache = {}
+
 # Current JSON format version
-CURRENT_JSON_VERSION = 5  # Bumped for mode_flags support
+CURRENT_JSON_VERSION = 6  # Bumped for category_orders support
 
 # JSON file name in config directory
 GLYPHS_FILENAME = "category_glyphs.json"
@@ -459,11 +462,22 @@ def migrate_v4_to_v5(data):
     return data
 
 
+def migrate_v5_to_v6(data):
+    """Migrate version 5 to 6: Add category_orders support."""
+    # Add empty category_orders dict if not present
+    if "category_orders" not in data:
+        data["category_orders"] = {}
+        print("[MIGRATION] v5->v6: Added category_orders section")
+    data["version"] = 6
+    return data
+
+
 MIGRATORS = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
     3: migrate_v3_to_v4,
     4: migrate_v4_to_v5,
+    5: migrate_v5_to_v6,
 }
 
 
@@ -484,6 +498,8 @@ def migrate_json_data(data):
         data["all_tags"] = {}
     if "mappings" not in data:
         data["mappings"] = {}
+    if "category_orders" not in data:
+        data["category_orders"] = {}
 
     return data
 
@@ -498,7 +514,8 @@ def _load_glyph_mappings_from_file():
     default_structure = {
         "version": CURRENT_JSON_VERSION,
         "all_tags": {},
-        "mappings": {}
+        "mappings": {},
+        "category_orders": {}
     }
 
     if not filepath:
@@ -558,6 +575,14 @@ def _load_glyph_mappings_from_file():
     # Load tag order for preserving manual ordering
     global _tag_order_cache
     _tag_order_cache = data.get("tag_order", [])
+
+    # Load category orders
+    global _category_orders_cache
+    _category_orders_cache = {}
+    raw_orders = data.get("category_orders", {})
+    for tag_key, category_list in raw_orders.items():
+        if isinstance(category_list, list):
+            _category_orders_cache[tag_key] = category_list
 
     _glyph_cache_loaded = True
     if skipped_count > 0:
@@ -663,8 +688,9 @@ def _save_glyph_mappings_to_file(data=None):
         data = {
             'version': CURRENT_JSON_VERSION,
             'all_tags': tags_to_save,
-            'tag_order': tag_order,  # NEW: Save tag order
-            'mappings': mappings_to_save
+            'tag_order': tag_order,  # Save tag order
+            'mappings': mappings_to_save,
+            'category_orders': _category_orders_cache  # Save category orders
         }
 
     try:
@@ -679,6 +705,52 @@ def _save_glyph_mappings_to_file(data=None):
         import traceback
         traceback.print_exc()
         return False
+
+
+# -----------------------------------------------------------------------------
+# Category Order Management Functions
+
+def get_category_order(tag_combination):
+    """
+    Get category order for a specific tag combination.
+    Args:
+        tag_combination: String like "" (no filter), "Modeling", or "Animation;Modeling"
+    Returns:
+        List of category IDs in order, or empty list if not found
+    """
+    global _category_orders_cache, _glyph_cache_loaded
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+    return _category_orders_cache.get(tag_combination, []).copy()
+
+
+def set_category_order(tag_combination, category_list):
+    """
+    Set category order for a specific tag combination.
+    Args:
+        tag_combination: String like "" (no filter), "Modeling", or "Animation;Modeling"
+        category_list: List of category IDs in order
+    """
+    global _category_orders_cache
+    _category_orders_cache[tag_combination] = category_list.copy()
+    # Trigger save
+    _save_glyph_mappings_to_file()
+
+
+def clear_category_order(tag_combination):
+    """Clear category order for a specific tag combination."""
+    global _category_orders_cache
+    if tag_combination in _category_orders_cache:
+        del _category_orders_cache[tag_combination]
+        _save_glyph_mappings_to_file()
+
+
+def get_all_category_orders():
+    """Get all category orders (for debugging/export)."""
+    global _category_orders_cache, _glyph_cache_loaded
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+    return _category_orders_cache.copy()
 
 
 # -----------------------------------------------------------------------------

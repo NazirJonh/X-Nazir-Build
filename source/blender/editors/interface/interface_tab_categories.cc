@@ -69,6 +69,11 @@
 #include "interface_tag_bar.hh"
 #include "regions/interface_regions_intern.hh"
 
+#ifdef WITH_PYTHON
+#  include "BPY_extern.hh"
+#  include "BPY_extern_run.hh"
+#endif
+
 namespace blender::ui {
 
 /* -------------------------------------------------------------------- */
@@ -1066,6 +1071,232 @@ static int get_category_order_index(const bContext *C, ARegion *region, const ch
   return 0;
 }
 
+/**
+ * Generate a unique key for the current active tag combination.
+ * Tags are sorted alphabetically to ensure consistent keys.
+ * Returns empty string for no filter, "Tag1;Tag2" for multiple tags.
+ */
+static std::string get_tag_combination_key(const wmWindowManager *wm, View3D *v3d)
+{
+  UNUSED_VARS(wm);  /* Reserved for future use */
+  
+  if (!v3d || v3d->active_tag_filter_tags[0] == '\0') {
+    return "";  /* No filter active */
+  }
+
+  /* Parse and collect tag names */
+  Vector<std::string> active_tags;
+  char tags_copy[256];
+  STRNCPY(tags_copy, v3d->active_tag_filter_tags);
+
+  char *tag = strtok(tags_copy, ",;");
+  while (tag != nullptr) {
+    while (*tag == ' ') {
+      tag++;
+    }
+    if (tag[0] != '\0') {
+      active_tags.append(std::string(tag));
+    }
+    tag = strtok(nullptr, ",;");
+  }
+
+  if (active_tags.is_empty()) {
+    return "";
+  }
+
+  /* Sort alphabetically for consistent keys */
+  std::sort(active_tags.begin(), active_tags.end());
+
+  /* Join with semicolons */
+  std::string key;
+  for (int i = 0; i < active_tags.size(); i++) {
+    if (i > 0) {
+      key += ";";
+    }
+    key += active_tags[i];
+  }
+
+  return key;
+}
+
+/**
+ * Load category order from JSON for a specific tag combination.
+ * Calls Python function get_category_order().
+ */
+static Vector<std::string> load_category_order_from_json(const bContext *C, const char *tag_key)
+{
+#ifdef WITH_PYTHON
+  Vector<std::string> result;
+
+  if (!C) {
+    return result;
+  }
+
+  /* Escape tag_key for Python string literal */
+  char escaped_key[256];
+  int j = 0;
+  for (int i = 0; tag_key[i] != '\0' && j < (int)sizeof(escaped_key) - 1; i++) {
+    char c = tag_key[i];
+    if (c == '\\' || c == '\'') {
+      if (j + 1 < (int)sizeof(escaped_key) - 1) {
+        escaped_key[j++] = '\\';
+        escaped_key[j++] = c;
+      }
+    }
+    else {
+      escaped_key[j++] = c;
+    }
+  }
+  escaped_key[j] = '\0';
+
+  /* Use json.dumps to convert Python list to JSON string for C++ parsing */
+  /* ensure_ascii=False to preserve Unicode characters (not escape them as \uXXXX) */
+  char python_expr[512];
+  SNPRINTF(python_expr,
+           "json.dumps(__import__('bl_ui.space_userpref', fromlist=['']).get_category_order('%s') or [], ensure_ascii=False)",
+           escaped_key);
+
+  /* Execute Python expression and capture output */
+  char *result_str = nullptr;
+  char *err_msg = nullptr;
+  BPy_RunErrInfo err_info = {false, nullptr, "", &err_msg};
+
+  /* BPY_run_string_as_string requires non-const context */
+  const char *imports_json[] = {"json", nullptr};
+  bool success = BPY_run_string_as_string(
+      const_cast<bContext *>(C),
+      imports_json,
+      python_expr,
+      &err_info,
+      &result_str);
+
+  if (!success) {
+    if (err_msg) {
+      MEM_delete(err_msg);
+    }
+    return result;
+  }
+
+  if (!result_str) {
+    return result;
+  }
+
+  /* Parse JSON array: ["Item", "Tool", ...] */
+  const char *p = result_str;
+
+  /* Skip to array start */
+  while (*p && *p != '[') p++;
+  if (*p == '[') p++;
+  else {
+    MEM_delete(result_str);
+    return result;
+  }
+
+  /* Parse array elements */
+  while (*p && *p != ']') {
+    /* Skip whitespace and commas */
+    while (*p && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t' || *p == ',')) p++;
+    if (*p == ']') break;
+
+    /* Skip to string start (JSON uses double quotes) */
+    if (*p != '"') {
+      p++;
+      continue;
+    }
+    p++; /* Skip opening quote */
+
+    const char *start = p;
+    /* Find end of string, handling escape sequences */
+    while (*p && *p != '"') {
+      if (*p == '\\' && *(p+1)) p += 2;
+      else p++;
+    }
+
+    if (*p == '"') {
+      std::string cat_id = std::string(start, p - start);
+      p++; /* Skip closing quote */
+      if (!cat_id.empty()) {
+        result.append(cat_id);
+      }
+    }
+  }
+
+  MEM_delete(result_str);
+  return result;
+#else
+  UNUSED_VARS(C, tag_key);
+  return Vector<std::string>();
+#endif
+}
+
+/**
+ * Save category order to JSON for a specific tag combination.
+ * Calls Python function set_category_order().
+ */
+static void save_category_order_to_json(const bContext *C,
+                                        const char *tag_key,
+                                        const Vector<std::string> &order)
+{
+#ifdef WITH_PYTHON
+  if (!C) {
+    return;
+  }
+
+  /* Build Python list of category IDs */
+  std::string python_list = "[";
+  for (int i = 0; i < order.size(); i++) {
+    if (i > 0) {
+      python_list += ", ";
+    }
+    python_list += "'";
+    /* Escape backslashes and quotes for Python string literal */
+    for (char c : order[i]) {
+      if (c == '\\') {
+        python_list += "\\\\";
+      }
+      else if (c == '\'') {
+        python_list += "\\'";
+      }
+      else {
+        python_list += c;
+      }
+    }
+    python_list += "'";
+  }
+  python_list += "]";
+
+  /* Escape tag_key for Python string literal */
+  char escaped_key[256];
+  int j = 0;
+  for (int i = 0; tag_key[i] != '\0' && j < (int)sizeof(escaped_key) - 1; i++) {
+    char c = tag_key[i];
+    if (c == '\\' || c == '\'') {
+      if (j + 1 < (int)sizeof(escaped_key) - 1) {
+        escaped_key[j++] = '\\';
+        escaped_key[j++] = c;
+      }
+    }
+    else {
+      escaped_key[j++] = c;
+    }
+  }
+  escaped_key[j] = '\0';
+
+  char python_cmd[8192];
+  SNPRINTF(python_cmd,
+           "from bl_ui.space_userpref import set_category_order\n"
+           "set_category_order('%s', %s)\n",
+           escaped_key,
+           python_list.c_str());
+
+  /* BPY_run_string_exec requires non-const context */
+  const char *imports_none[] = {nullptr};
+  BPY_run_string_exec(const_cast<bContext *>(C), imports_none, python_cmd);
+#else
+  UNUSED_VARS(C, tag_key, order);
+#endif
+}
+
 /* Forward declaration */
 Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region);
 
@@ -1183,6 +1414,15 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
   ScrArea *area = CTX_wm_area(C);
   const int space_type = area ? area->spacetype : 0;
   const int region_type = region->regiontype;
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  View3D *v3d = nullptr;
+
+  if (area && area->spacetype == SPACE_VIEW3D) {
+    v3d = static_cast<View3D *>(area->spacedata.first);
+  }
+
+  /* Get tag combination key for current filter state */
+  std::string tag_key = get_tag_combination_key(wm, v3d);
 
   Vector<std::string> final_order;
   int insert_idx = 0;
@@ -1208,6 +1448,10 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
     final_order.append(state->drag_category_id);
   }
 
+  /* Save to JSON for this tag combination */
+  save_category_order_to_json(C, tag_key.c_str(), final_order);
+
+  /* Also update WorkspaceCategoryOrder for backward compatibility */
   workspace_category_order_clear(workspace, space_type, region_type);
 
   for (int i = 0; i < final_order.size(); i++) {
@@ -1219,6 +1463,8 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
     BLI_addtail(&workspace->category_order, item);
   }
 
+  /* Trigger full redraw to ensure new order is used */
+  WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
 }
 
@@ -1243,11 +1489,19 @@ void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *regio
 
 Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region)
 {
-  WorkSpace *workspace = CTX_wm_workspace(C);
   ScrArea *area = CTX_wm_area(C);
-  const int space_type = area ? area->spacetype : 0;
-  const int region_type = region->regiontype;
   const wmWindowManager *wm = CTX_wm_manager(C);
+  View3D *v3d = nullptr;
+
+  if (area && area->spacetype == SPACE_VIEW3D) {
+    v3d = static_cast<View3D *>(area->spacedata.first);
+  }
+
+  /* Get tag combination key for current filter state */
+  std::string tag_key = get_tag_combination_key(wm, v3d);
+
+  /* Load order from JSON for this tag combination */
+  Vector<std::string> json_order = load_category_order_from_json(C, tag_key.c_str());
 
   /* Map of existing categories for quick lookup */
   Map<std::string, PanelCategoryDyn *> existing;
@@ -1258,37 +1512,21 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
     }
   }
 
-  /* Collect workspace order entries for this region */
-  Vector<std::pair<int, std::string>> workspace_order;
-  if (workspace_category_order_list_is_valid(&workspace->category_order)) {
-    for (WorkspaceCategoryOrder *order =
-             static_cast<WorkspaceCategoryOrder *>(workspace->category_order.first);
-         order;
-         order = order->next)
-    {
-      if (order->space_type == space_type && order->region_type == region_type) {
-        workspace_order.append(std::make_pair(order->order_index, std::string(order->category_id)));
-      }
-    }
-  }
-
-  /* Sort by order_index */
-  std::sort(workspace_order.begin(), workspace_order.end());
-
-  /* Build result list */
+  /* Build result list following JSON order */
   Vector<PanelCategoryDyn *> result;
   Set<std::string> added;
 
-  /* First add in workspace order */
-  for (const auto &item : workspace_order) {
-    PanelCategoryDyn **pc = existing.lookup_ptr(item.second);
-    if (pc && !added.contains(item.second)) {
+  /* First: categories in JSON order (skip missing - disabled addons) */
+  for (const std::string &cat_id : json_order) {
+    PanelCategoryDyn **pc = existing.lookup_ptr(cat_id);
+    if (pc && !added.contains(cat_id)) {
       result.append(*pc);
-      added.add(item.second);
+      added.add(cat_id);
     }
+    /* Else: category in JSON but not registered - skip silently (disabled addon) */
   }
 
-  /* Then add remaining categories (new ones not in workspace order) */
+  /* Then: remaining categories (new ones or not in JSON order) */
   for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     std::string id(pc_dyn.idname);
     if (!added.contains(id) && panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {

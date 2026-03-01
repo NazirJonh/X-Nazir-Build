@@ -5873,6 +5873,19 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Show Viewer", "Display non-final geometry from viewer nodes");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
+  prop = RNA_def_property(srna, "active_tag_filter_mask", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "active_tag_filter_mask");
+  RNA_def_property_ui_text(
+      prop, "Active Tag Filter Mask", "Bitmask of active tags for category filtering (0 = all)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
+  prop = RNA_def_property(srna, "tag_bar_scroll_offset", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "tag_bar_scroll_offset");
+  RNA_def_property_ui_text(prop, "Tag Bar Scroll Offset", "Horizontal scroll offset in the tag bar");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
   /* Nested Structs */
   prop = RNA_def_property(srna, "shading", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_NEVER_NULL);

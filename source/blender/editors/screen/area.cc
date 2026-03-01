@@ -3982,7 +3982,9 @@ void ED_region_header_layout(const bContext *C, ARegion *region)
 
     /* In most cases there is only ever one header, it never makes sense to draw more than one
      * header in the same region, this results in overlapping buttons, see: #60195. */
-    break;
+    if (region->regiontype != RGN_TYPE_TAG_BAR) {
+      break;
+    }
   }
 
   if (!region_layout_based) {

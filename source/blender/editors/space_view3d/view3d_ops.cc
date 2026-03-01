@@ -9,6 +9,7 @@
 #include "DNA_object_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
+#include "DNA_view3d_types.h"
 
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
@@ -183,6 +184,53 @@ static void VIEW3D_OT_pastebuffer(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Tag Bar Filter Toggle Operator
+ * \{ */
+
+static bool view3d_tag_bar_toggle_poll(bContext *C)
+{
+  const ScrArea *area = CTX_wm_area(C);
+  return area && area->spacetype == SPACE_VIEW3D;
+}
+
+static wmOperatorStatus view3d_tag_bar_toggle_exec(bContext *C, wmOperator *op)
+{
+  ScrArea *area = CTX_wm_area(C);
+  if (!area || area->spacetype != SPACE_VIEW3D) {
+    return OPERATOR_CANCELLED;
+  }
+
+  View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+  if (!v3d) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const int mode_flags = RNA_int_get(op->ptr, "mode_flags");
+  v3d->active_tag_filter_mask ^= mode_flags;
+
+  WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  ED_area_tag_redraw(area);
+
+  return OPERATOR_FINISHED;
+}
+
+static void VIEW3D_OT_tag_bar_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Tag Filter";
+  ot->idname = "VIEW3D_OT_tag_bar_toggle";
+  ot->description = "Toggle a tag filter in the 3D View tag bar";
+
+  ot->exec = view3d_tag_bar_toggle_exec;
+  ot->poll = view3d_tag_bar_toggle_poll;
+
+  ot->flag = OPTYPE_REGISTER;
+
+  RNA_def_int(ot->srna, "mode_flags", 0, INT_MIN, INT_MAX, "Mode Flags", "", INT_MIN, INT_MAX);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Registration
  * \{ */
 
@@ -238,6 +286,7 @@ void view3d_operatortypes()
   WM_operatortype_append(VIEW3D_OT_navigate);
   WM_operatortype_append(VIEW3D_OT_copybuffer);
   WM_operatortype_append(VIEW3D_OT_pastebuffer);
+  WM_operatortype_append(VIEW3D_OT_tag_bar_toggle);
 
   WM_operatortype_append(VIEW3D_OT_object_mode_pie_or_toggle);
 

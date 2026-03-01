@@ -1160,6 +1160,50 @@ class VIEW3D_HT_tag_bar(Header):
         pass  # Addons can append their draw functions here
 
 
+class VIEW3D_HT_tag_bar_tags(Header):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'TAG_BAR'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.separator_spacer()
+
+        wm = context.window_manager
+        v3d = context.space_data
+        active_mask = getattr(v3d, "active_tag_filter_mask", 0)
+
+        tag_use_count = {}
+        for item in wm.category_glyph_mappings:
+            tags = item.tags
+            if not tags:
+                continue
+            for tag_name in tags.split(';'):
+                tag_name = tag_name.strip()
+                if tag_name:
+                    tag_use_count[tag_name] = tag_use_count.get(tag_name, 0) + 1
+
+        def glyph_display(glyph):
+            if not glyph:
+                return ""
+            try:
+                if all(c in "0123456789abcdefABCDEF" for c in glyph) and len(glyph) <= 8:
+                    return chr(int(glyph, 16))
+            except Exception:
+                pass
+            return glyph
+
+        tags_sorted = sorted(wm.category_tags, key=lambda t: (-tag_use_count.get(t.name, 0), t.name))
+        for tag in tags_sorted:
+            label = tag.name
+            glyph = glyph_display(tag.glyph)
+            if glyph:
+                label = f"{glyph} {label}"
+
+            depress = bool(tag.mode_flags) and (active_mask & tag.mode_flags) != 0
+            op = layout.operator("view3d.tag_bar_toggle", text=label, depress=depress)
+            op.mode_flags = tag.mode_flags
+
+
 class VIEW3D_MT_editor_menus(Menu):
     bl_label = ""
 
@@ -9282,6 +9326,7 @@ classes = (
     VIEW3D_HT_header,
     VIEW3D_HT_tool_header,
     VIEW3D_HT_tag_bar,
+    VIEW3D_HT_tag_bar_tags,
     VIEW3D_MT_editor_menus,
     VIEW3D_MT_transform,
     VIEW3D_MT_transform_object,

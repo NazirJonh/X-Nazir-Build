@@ -1020,6 +1020,8 @@ static void view3d_header_region_init(wmWindowManager *wm, ARegion *region)
  */
 static void view3d_tag_bar_region_init(wmWindowManager *wm, ARegion *region)
 {
+  using namespace blender::ui;
+
   printf("DEBUG: === view3d_tag_bar_region_init START === region=%p, regiontype=%d\n",
          region, region ? region->regiontype : -1);
   printf("DEBUG:   region->winx=%d, region->winy=%d, alignment=%d\n",
@@ -1030,17 +1032,17 @@ static void view3d_tag_bar_region_init(wmWindowManager *wm, ARegion *region)
   printf("DEBUG:   UI handlers added, handler count=%d\n",
          BLI_listbase_count(&region->runtime->handlers));
 
-  /* Add keymap for basic interaction */
-  wmKeyMap *keymap = WM_keymap_ensure(
-      wm->runtime->defaultconf, "3D View Generic", SPACE_VIEW3D, RGN_TYPE_TAG_BAR);
-  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
-  printf("DEBUG:   Keymap added: %p\n", keymap);
-
   /* Initialize View2D for scrolling */
   ED_region_header_init(region);
   printf("DEBUG:   View2D initialized: cur.xmin=%f, cur.xmax=%f\n",
          region->v2d.cur.xmin, region->v2d.cur.xmax);
+
+  /* Force update of tag bar data on first draw */
+  tag_bar_mark_all_dirty();
+  printf("DEBUG:   Forced tag bar data update via tag_bar_mark_all_dirty()\n");
   printf("DEBUG: === view3d_tag_bar_region_init END ===\n");
+
+  UNUSED_VARS(wm);
 }
 
 /**
@@ -1059,6 +1061,7 @@ static int view3d_tag_bar_region_snap_size(const ARegion * /*region*/, int size,
 
 /**
  * Listener for tag bar region notifications.
+ * Handles mode changes, scene updates, and tag data updates.
  */
 static void view3d_tag_bar_region_listener(const wmRegionListenerParams *params)
 {
@@ -1070,7 +1073,36 @@ static void view3d_tag_bar_region_listener(const wmRegionListenerParams *params)
          wmn->category, wmn->data);
 
   switch (wmn->category) {
+    case NC_SCENE:
+      /* Scene changes that affect tag bar display */
+      switch (wmn->data) {
+        case ND_MODE:           /* Mode changed (Object <-> Sculpt <-> Edit) */
+          printf("DEBUG: view3d_tag_bar_region_listener: ND_MODE notification - triggering redraw\n");
+          ED_region_tag_redraw(region);
+          break;
+        case ND_OB_ACTIVE:      /* Active object changed */
+          printf("DEBUG: view3d_tag_bar_region_listener: ND_OB_ACTIVE notification - triggering redraw\n");
+          ED_region_tag_redraw(region);
+          break;
+        case ND_OB_SELECT:      /* Selection changed */
+          printf("DEBUG: view3d_tag_bar_region_listener: ND_OB_SELECT notification - triggering redraw\n");
+          ED_region_tag_redraw(region);
+          break;
+        case ND_TOOLSETTINGS:   /* Tool settings changed */
+          printf("DEBUG: view3d_tag_bar_region_listener: ND_TOOLSETTINGS notification - triggering redraw\n");
+          ED_region_tag_redraw(region);
+          break;
+      }
+      break;
+    case NC_SPACE:
+      /* Space-specific changes */
+      if (wmn->data == ND_SPACE_VIEW3D) {
+        printf("DEBUG: view3d_tag_bar_region_listener: ND_SPACE_VIEW3D notification - triggering redraw\n");
+        ED_region_tag_redraw(region);
+      }
+      break;
     case NC_WM:
+      /* Window manager changes - tag data updated */
       if (wmn->data == ND_CATEGORY_GLYPHS) {
         printf("DEBUG: view3d_tag_bar_region_listener: ND_CATEGORY_GLYPHS notification!\n");
         /* Mark all tag bar data as dirty for update on next draw */
@@ -1084,10 +1116,22 @@ static void view3d_tag_bar_region_listener(const wmRegionListenerParams *params)
 /**
  * Draw callback for the tag bar region.
  * The region is at the top (RGN_ALIGN_TOP), spanning full width.
+ * Draws external addon buttons (left) and tag filter buttons (right).
  */
 static void view3d_tag_bar_region_draw(const bContext *C, ARegion *region)
 {
   using namespace blender::ui;
+
+  const bool use_header_system = true;
+  if (use_header_system) {
+    printf("DEBUG: === view3d_tag_bar_region_draw START (header system) === region=%p, winx=%d, winy=%d\n",
+           region,
+           region->winx,
+           region->winy);
+    ED_region_header(C, region);
+    printf("DEBUG: === view3d_tag_bar_region_draw END (header system) ===\n");
+    return;
+  }
 
   printf("DEBUG: === view3d_tag_bar_region_draw START === region=%p, winx=%d, winy=%d\n",
          region, region->winx, region->winy);
@@ -1107,11 +1151,12 @@ static void view3d_tag_bar_region_draw(const bContext *C, ARegion *region)
 
   /* No background drawing - overlay region is transparent */
 
-  /* Set view2d view matrix for scrolling (without scrollers) */
+  /* Set view2d view matrix for scrolling */
   view2d_view_ortho(&region->v2d);
   printf("DEBUG: View2D ortho set, cur.xmin=%f, cur.xmax=%f, cur.ymin=%f, cur.ymax=%f\n",
          region->v2d.cur.xmin, region->v2d.cur.xmax,
          region->v2d.cur.ymin, region->v2d.cur.ymax);
+
 
   /* Create layout for external addon buttons (left side) */
   printf("DEBUG: Calling ED_region_header_layout...\n");
@@ -1136,9 +1181,9 @@ static void view3d_tag_bar_region_draw(const bContext *C, ARegion *region)
   }
   printf("DEBUG: Found %d header blocks. External buttons width: %d\n", block_count, external_buttons_width);
 
-  /* Create UI block for tag buttons */
+  /* Create UI block for tag buttons (right side) */
   Block *block = block_begin(C, region, __func__, EmbossType::Emboss);
-  printf("DEBUG: Tag bar block created: %p, name='%s'\n", block, block ? block->name : "null");
+  printf("DEBUG: Tag bar block created: %p, name='%s'\n", block, block ? block->name.c_str() : "null");
 
   /* Draw tag buttons (right side, after external buttons) */
   printf("DEBUG: Calling tag_bar_draw_in_layout with start_x=%d\n", external_buttons_width);
@@ -1153,7 +1198,7 @@ static void view3d_tag_bar_region_draw(const bContext *C, ARegion *region)
     printf("DEBUG: Tag buttons in block: %d\n", tag_button_count);
   }
 
-  /* End the tag bar block before drawing everything */
+  /* End the tag bar block */
   block_end(C, block);
   printf("DEBUG: Block ended\n");
 
@@ -1177,8 +1222,17 @@ static void view3d_tag_bar_region_draw(const bContext *C, ARegion *region)
   }
   printf("DEBUG: Total blocks before draw: %d\n", total_blocks);
 
-  /* Draw all blocks in the region (external addon buttons + tag bar block) */
-  blocklist_draw(C, &region->runtime->uiblocks);
+  /* Draw all blocks using standard function for proper UI event handling */
+  printf("DEBUG: Calling ED_region_header_draw for proper UI event handling...\n");
+  ED_region_header_draw(C, region);
+  printf("DEBUG: ED_region_header_draw done\n");
+  /* Free inactive blocks after drawing to prevent accumulation */
+  printf("DEBUG: Calling blocklist_free_inactive...\n");
+  blocklist_free_inactive(C, region);
+  printf("DEBUG: blocklist_free_inactive done\n");
+
+
+
   printf("DEBUG: === view3d_tag_bar_region_draw END ===\n");
 
   /* Restore view matrix. */

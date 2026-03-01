@@ -8,19 +8,30 @@
 #include "BLI_vector.hh"
 #include "DNA_vec_types.h" /* for rcti */
 
+namespace blender {
 struct ARegion;
 struct bContext;
 struct CategoryTagDef;
 struct wmRegionListenerParams;
 struct wmRegionMessageSubscribeParams;
-
-namespace blender {
 struct wmWindowManager;
 struct SpaceProperties;
 struct View3D;
 }
 
 namespace blender::ui {
+struct Layout;
+struct Block;
+}
+
+namespace blender::ui {
+
+using blender::ARegion;
+using blender::bContext;
+using blender::wmWindowManager;
+using blender::View3D;
+using blender::wmRegionListenerParams;
+using blender::wmRegionMessageSubscribeParams;
 
 /**
  * Data for a single tag button in the tag bar.
@@ -48,9 +59,6 @@ struct TagBarRuntimeData {
   int max_scroll = 0;        /**< Maximum scroll value */
   bool needs_update = true;  /**< Force update on first access */
 };
-
-struct Layout;
-struct Block;
 
 /**
  * Get or create tag bar runtime data from global cache.
@@ -142,8 +150,9 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region);
  * \param C: Context
  * \param block: UI block to add buttons to
  * \param region: Region for size calculations
+ * \param start_x: X position to start drawing from (after external buttons)
  */
-void tag_bar_draw_in_layout(const bContext *C, ui::Block *block, ARegion *region);
+void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, int start_x = 0);
 
 /**
  * Handle notifier events for the tag bar region.

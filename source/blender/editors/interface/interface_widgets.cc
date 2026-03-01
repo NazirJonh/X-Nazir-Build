@@ -4942,6 +4942,9 @@ static void widget_draw_tag(const bContext *C,
   bool has_glyph = tag_but->glyph[0] != '\0';
   bool glyph_was_shown = false;  /* Track if glyph was actually drawn (not just space reserved) */
 
+  printf("DEBUG: widget_draw_tag: has_glyph=%d, glyph='%s', available_width=%d\n",
+         has_glyph, tag_but->glyph, available_width);
+
   if (has_glyph) {
     /* Setup font for drawing */
     fontstyle_set(fstyle);
@@ -4960,8 +4963,13 @@ static void widget_draw_tag(const bContext *C,
       /* Calculate glyph width first */
       glyph_width = BLF_width(fstyle->uifont_id, tag_but->glyph, strlen(tag_but->glyph));
 
+      printf("DEBUG: widget_draw_tag: glyph_width=%.2f, min_glyph_width=%d\n",
+             glyph_width, min_glyph_width);
+
       /* Check if we have enough space to show glyph (with some padding) */
       const bool show_glyph = available_width >= (min_glyph_width * 0.7f);
+
+      printf("DEBUG: widget_draw_tag: show_glyph=%d\n", show_glyph);
 
       if (show_glyph) {
         glyph_was_shown = true;  /* Mark that glyph is visible */
@@ -4973,15 +4981,29 @@ static void widget_draw_tag(const bContext *C,
           text_color[3] = uchar(text_color[3] * glyph_alpha);
         }
 
-        /* Draw glyph - immediately after checkbox, no spacing */
+        /* Calculate glyph position */
         const float glyph_y = content_rect.ymin + (BLI_rcti_size_y(&content_rect) - fstyle->points) / 2.0f;
+
+        /* For preference mode (no checkbox), center glyph horizontally in content_rect */
+        float glyph_x;
+        if (is_pref_mode) {
+          /* Center glyph in the entire content area */
+          const float content_center_x = (content_rect.xmin + content_rect.xmax) / 2.0f;
+          glyph_x = content_center_x - (glyph_width / 2.0f);
+          printf("DEBUG: widget_draw_tag: Centered glyph at x=%.2f (content_center=%.2f, glyph_width=%.2f)\n",
+                 glyph_x, content_center_x, glyph_width);
+        } else {
+          /* Left-aligned after checkbox */
+          glyph_x = float(offset_x);
+          printf("DEBUG: widget_draw_tag: Drawing glyph at x=%d, y=%f\n", offset_x, glyph_y);
+        }
 
         BLF_color4f(fstyle->uifont_id,
                     text_color[0] / 255.0f,
                     text_color[1] / 255.0f,
                     text_color[2] / 255.0f,
                     text_color[3] / 255.0f);
-        BLF_position(fstyle->uifont_id, float(offset_x), glyph_y, 0.0f);
+        BLF_position(fstyle->uifont_id, glyph_x, glyph_y, 0.0f);
         BLF_draw(fstyle->uifont_id, tag_but->glyph, strlen(tag_but->glyph));
       }
 

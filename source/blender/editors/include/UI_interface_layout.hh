@@ -990,6 +990,46 @@ Button *uiItemL_ex(Layout *layout, StringRef name, int icon, bool highlight, boo
  */
 Button *uiItemL_colored(Layout *layout, StringRef name, int icon, const float color[3]);
 /**
+ * Create an operator button with custom text color.
+ * Similar to #uiItemFullO_ptr_ex but with color support.
+ *
+ * \param layout: Layout to add button to.
+ * \param opname: Operator identifier.
+ * \param name: Optional button text (label).
+ * \param icon: Optional icon.
+ * \param context: Operator execution context.
+ * \param flag: Additional button flags.
+ * \param color: RGB color for text (0.0-1.0), can be nullptr for default color.
+ * \return Operator properties pointer.
+ */
+PointerRNA uiItemFullO_colored(Layout *layout,
+                               const char *opname,
+                               std::optional<StringRef> name,
+                               int icon,
+                               const wm::OpCallContext context,
+                               const eUI_Item_Flag flag,
+                               const float color[3]);
+/**
+ * Create a Tag button with glyph, color, and operator.
+ * Tag buttons are special UI elements that display a colored glyph/emoji and can be
+ * attached to operators for toggle functionality.
+ *
+ * \param layout: Layout to add button to.
+ * \param opname: Operator identifier to attach to the button.
+ * \param tag_name: Name identifier for the tag (required, used for internal tracking).
+ * \param glyph: UTF-8 glyph/emoji character to display.
+ * \param color: RGB color for glyph (0.0-1.0), can be nullptr for default color.
+ * \param is_active: Whether the button is in pressed/active state.
+ * \return Operator properties pointer for setting parameters.
+ */
+PointerRNA uiItemTagButtonWithOperator(Layout *layout,
+                                       const char *opname,
+                                       const char *tag_name,
+                                       const char *glyph,
+                                       const float *color,
+                                       bool is_active);
+
+/**
  * Helper to add a label using a property split layout if needed. After calling this the
  * active layout will be the one to place the labeled items in. An additional layout may be
  * returned to place decorator buttons in.

@@ -553,6 +553,68 @@ static void rna_uiItemL_colored(Layout *layout,
   uiItemL_colored(layout, text.value_or(""), icon, color);
 }
 
+static PointerRNA rna_uiItemO_colored(Layout *layout,
+                                      const char *opname,
+                                      const char *name,
+                                      const char *text_ctxt,
+                                      bool translate,
+                                      int icon,
+                                      bool emboss,
+                                      bool depress,
+                                      int icon_value,
+                                      const float search_weight,
+                                      float color_r,
+                                      float color_g,
+                                      float color_b)
+{
+  wmOperatorType *ot;
+
+  ot = WM_operatortype_find(opname, false); /* print error next */
+  if (!ot || !ot->srna) {
+    RNA_warning_bare(
+        "UILayout.operator_with_color(): %s '%s'", ot ? "operator missing srna" : "unknown operator", opname);
+    return PointerRNA_NULL;
+  }
+
+  /* Get translated name (label). */
+  std::optional<StringRefNull> text = rna_translate_ui_text(
+      name, text_ctxt, ot->srna, nullptr, translate);
+
+  if (icon_value && !icon) {
+    icon = icon_value;
+  }
+  ui::eUI_Item_Flag flag = UI_ITEM_NONE;
+  if (emboss == false) {
+    flag |= ui::ITEM_R_NO_BG;
+  }
+  if (depress) {
+    flag |= ui::ITEM_O_DEPRESS;
+  }
+
+  const float prev_weight = layout->search_weight();
+  layout->search_weight_set(search_weight);
+
+  float color[3] = {color_r, color_g, color_b};
+  PointerRNA opptr = uiItemFullO_colored(
+      layout, opname, text, icon, layout->operator_context(), flag, color);
+
+  layout->search_weight_set(prev_weight);
+  return opptr;
+}
+
+static PointerRNA rna_uiItemTagButton(Layout *layout,
+                                      const char *opname,
+                                      const char *tag_name,
+                                      const char *glyph,
+                                      float color_r,
+                                      float color_g,
+                                      float color_b,
+                                      bool depress)
+{
+  float color[3] = {color_r, color_g, color_b};
+  return uiItemTagButtonWithOperator(layout, opname, tag_name, glyph, color, depress);
+}
+
 static void rna_uiItemM(Layout *layout,
                         const char *menuname,
                         const char *name,
@@ -1688,6 +1750,53 @@ void RNA_api_ui_layout(StructRNA *srna)
   parm = RNA_def_float(func, "color_r", 0.0f, 0.0f, 1.0f, "Red", "Red component (0.0-1.0)", 0.0f, 1.0f);
   parm = RNA_def_float(func, "color_g", 0.0f, 0.0f, 1.0f, "Green", "Green component (0.0-1.0)", 0.0f, 1.0f);
   parm = RNA_def_float(func, "color_b", 0.0f, 0.0f, 1.0f, "Blue", "Blue component (0.0-1.0)", 0.0f, 1.0f);
+
+  func = RNA_def_function(srna, "operator_with_color", "rna_uiItemO_colored");
+  RNA_def_function_ui_description(
+      func,
+      "Item. Places a button into the layout to call an Operator with custom text color.");
+  parm = RNA_def_string(func, "operator", nullptr, 0, "", "Identifier of the operator");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  api_ui_item_common(func);
+  parm = RNA_def_property(func, "icon_value", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_ui_text(parm, "Icon Value", "Override automatic icon of the item");
+  RNA_def_boolean(func, "emboss", true, "", "Draw the button itself, not just the icon/text");
+  RNA_def_boolean(func, "depress", false, "", "Draw pressed in");
+  RNA_def_float(func,
+                "search_weight",
+                0.0f,
+                -FLT_MAX,
+                FLT_MAX,
+                "Search Weight",
+                "Influences the sorting when using menu-search",
+                -FLT_MAX,
+                FLT_MAX);
+  RNA_def_float(func, "color_r", 0.0f, 0.0f, 1.0f, "Red", "Red component (0.0-1.0)", 0.0f, 1.0f);
+  RNA_def_float(func, "color_g", 0.0f, 0.0f, 1.0f, "Green", "Green component (0.0-1.0)", 0.0f, 1.0f);
+  RNA_def_float(func, "color_b", 0.0f, 0.0f, 1.0f, "Blue", "Blue component (0.0-1.0)", 0.0f, 1.0f);
+  parm = RNA_def_pointer(
+      func, "properties", "OperatorProperties", "", "Operator properties to fill in");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "tag_button", "rna_uiItemTagButton");
+  RNA_def_function_ui_description(
+      func,
+      "Item. Creates a Tag button with a colored glyph/emoji and attaches an operator.");
+  parm = RNA_def_string(func, "operator", nullptr, 0, "", "Identifier of the operator");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "tag_name", nullptr, 0, "", "Tag name identifier (required for internal tracking)");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "glyph", nullptr, 0, "", "UTF-8 glyph/emoji character to display");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_float(func, "color_r", 1.0f, 0.0f, 1.0f, "Red", "Red component (0.0-1.0)", 0.0f, 1.0f);
+  RNA_def_float(func, "color_g", 1.0f, 0.0f, 1.0f, "Green", "Green component (0.0-1.0)", 0.0f, 1.0f);
+  RNA_def_float(func, "color_b", 1.0f, 0.0f, 1.0f, "Blue", "Blue component (0.0-1.0)", 0.0f, 1.0f);
+  RNA_def_boolean(func, "depress", false, "", "Draw pressed in");
+  parm = RNA_def_pointer(
+      func, "properties", "OperatorProperties", "", "Operator properties to fill in");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_function_return(func, parm);
 
   func = RNA_def_function(srna, "menu", "rna_uiItemM");
   parm = RNA_def_string(func, "menu", nullptr, 0, "", "Identifier of the menu");

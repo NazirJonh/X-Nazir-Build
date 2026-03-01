@@ -3242,6 +3242,96 @@ Button *uiItemL_colored(Layout *layout, const StringRef name, int icon, const fl
   return but;
 }
 
+PointerRNA uiItemFullO_colored(Layout *layout,
+                               const char *opname,
+                               std::optional<StringRef> name,
+                               int icon,
+                               const wm::OpCallContext context,
+                               const eUI_Item_Flag flag,
+                               const float color[3])
+{
+  wmOperatorType *ot = WM_operatortype_find(opname, false);
+  if (!ot) {
+    return PointerRNA_NULL;
+  }
+
+  PointerRNA opptr = PointerRNA_NULL;
+  Button *but = uiItemFullO_ptr_ex(layout, ot, name, icon, context, flag, &opptr);
+
+  /* Set custom text color (RGB 0.0-1.0 -> 0-255) */
+  if (but && color && (color[0] > 0.0f || color[1] > 0.0f || color[2] > 0.0f)) {
+    uchar color_uchar[4];
+    color_uchar[0] = uchar(color[0] * 255.0f);
+    color_uchar[1] = uchar(color[1] * 255.0f);
+    color_uchar[2] = uchar(color[2] * 255.0f);
+    color_uchar[3] = 255;
+    button_color_set(but, color_uchar);
+  }
+
+  return opptr;
+}
+
+PointerRNA uiItemTagButtonWithOperator(Layout *layout,
+                                       const char *opname,
+                                       const char *tag_name,
+                                       const char *glyph,
+                                       const float *color,
+                                       bool is_active)
+{
+  using namespace blender::ui;
+
+  Block *block = layout->block();
+
+  printf("DEBUG: uiItemTagButtonWithOperator START: opname=%s, tag_name=%s, glyph=%s\n",
+         opname, tag_name, glyph);
+
+  /* Calculate button width based on glyph length */
+  /* Base width + glyph width (approximately 2 pixels per character) */
+  const short width = (glyph && glyph[0]) ? short(UI_UNIT_X * 1.5f) : short(UI_UNIT_X);
+
+  /* Create Tag button with preference mode (no checkbox) */
+  Button *tag_but = uiDefButTag(block,
+                                tag_name ? tag_name : "Tag",
+                                glyph ? glyph : "",
+                                color,
+                                is_active,
+                                true,         /* is_pref_mode - NO CHECKBOX */
+                                0, 0,
+                                width,        /* calculated width */
+                                UI_UNIT_Y,    /* height */
+                                nullptr);     /* tooltip */
+
+  if (!tag_but) {
+    printf("DEBUG: uiItemTagButtonWithOperator FAILED: uiDefButTag returned nullptr\n");
+    return PointerRNA_NULL;
+  }
+  printf("DEBUG: uiItemTagButtonWithOperator: button created at %p\n", tag_but);
+
+  /* Find operator type */
+  wmOperatorType *ot = WM_operatortype_find(opname, false);
+  if (!ot) {
+    printf("DEBUG: uiItemTagButtonWithOperator FAILED: operator '%s' not found\n", opname);
+    return PointerRNA_NULL;
+  }
+  printf("DEBUG: uiItemTagButtonWithOperator: operator found at %p\n", ot);
+
+  /* Attach operator to the button */
+  button_operator_set(tag_but, ot, wm::OpCallContext::InvokeDefault);
+  printf("DEBUG: uiItemTagButtonWithOperator: operator attached\n");
+
+  /* Get operator properties pointer - create a copy for return like layout->op() does */
+  PointerRNA ptr;
+  PointerRNA *op_ptr = button_operator_ptr_ensure(tag_but);
+  if (!op_ptr) {
+    printf("DEBUG: uiItemTagButtonWithOperator FAILED: button_operator_ptr_ensure returned nullptr\n");
+    return PointerRNA_NULL;
+  }
+  ptr = *op_ptr;  /* Copy the PointerRNA, don't return the pointer directly */
+  printf("DEBUG: uiItemTagButtonWithOperator SUCCESS: op_ptr=%p\n", op_ptr);
+
+  return ptr;
+}
+
 void Layout::label(const StringRef name, int icon)
 {
   uiItem_simple(this, name, icon);

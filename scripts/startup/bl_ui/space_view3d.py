@@ -1194,14 +1194,25 @@ class VIEW3D_HT_tag_bar_tags(Header):
 
         tags_sorted = sorted(wm.category_tags, key=lambda t: (-tag_use_count.get(t.name, 0), t.name))
         for tag in tags_sorted:
-            label = tag.name
             glyph = glyph_display(tag.glyph)
-            if glyph:
-                label = f"{glyph} {label}"
+            if not glyph:
+                continue
 
             depress = bool(tag.mode_flags) and (active_mask & tag.mode_flags) != 0
-            op = layout.operator("view3d.tag_bar_toggle", text=label, depress=depress)
-            op.mode_flags = tag.mode_flags
+            op = layout.tag_button(
+                "view3d.tag_bar_toggle",
+                tag_name=tag.name,
+                glyph=glyph,
+                color_r=tag.color[0],
+                color_g=tag.color[1],
+                color_b=tag.color[2],
+                depress=depress,
+            )
+            if op is not None:
+                op.mode_flags = tag.mode_flags
+            else:
+                print(f"WARNING: tag_button returned None for tag: {tag.name}")
+
 
 
 class VIEW3D_MT_editor_menus(Menu):

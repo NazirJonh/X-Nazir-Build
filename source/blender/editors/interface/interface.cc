@@ -5190,8 +5190,10 @@ Button *uiDefButTag(Block *block,
   if (glyph && glyph[0] != '\0') {
     /* NOTE: glyph must be valid UTF-8 */
     BLI_strncpy(tag_but->glyph, glyph, sizeof(tag_but->glyph));
+    printf("DEBUG: uiDefButTag: glyph set to '%s' (len=%zu)\n", tag_but->glyph, strlen(tag_but->glyph));
   } else {
     tag_but->glyph[0] = '\0';
+    printf("DEBUG: uiDefButTag: glyph is empty\n");
   }
 
   /* ============================================================

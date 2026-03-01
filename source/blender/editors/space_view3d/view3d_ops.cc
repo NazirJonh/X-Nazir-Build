@@ -195,18 +195,27 @@ static bool view3d_tag_bar_toggle_poll(bContext *C)
 
 static wmOperatorStatus view3d_tag_bar_toggle_exec(bContext *C, wmOperator *op)
 {
+  printf("DEBUG: view3d_tag_bar_toggle_exec CALLED!\n");
+
   ScrArea *area = CTX_wm_area(C);
   if (!area || area->spacetype != SPACE_VIEW3D) {
+    printf("DEBUG: view3d_tag_bar_toggle_exec: No area or wrong spacetype\n");
     return OPERATOR_CANCELLED;
   }
 
   View3D *v3d = static_cast<View3D *>(area->spacedata.first);
   if (!v3d) {
+    printf("DEBUG: view3d_tag_bar_toggle_exec: No v3d\n");
     return OPERATOR_CANCELLED;
   }
 
   const int mode_flags = RNA_int_get(op->ptr, "mode_flags");
+  printf("DEBUG: view3d_tag_bar_toggle_exec: mode_flags=%d, old_mask=%d\n",
+         mode_flags, v3d->active_tag_filter_mask);
+
   v3d->active_tag_filter_mask ^= mode_flags;
+
+  printf("DEBUG: view3d_tag_bar_toggle_exec: new_mask=%d\n", v3d->active_tag_filter_mask);
 
   WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   ED_area_tag_redraw(area);

@@ -170,13 +170,11 @@ struct SpaceProperties {
   void *tag_bar_cache = nullptr;
 
   /**
-   * Bitmask of active tags for category filtering.
-   * Each bit corresponds to a unique tag (up to 64 tags).
-   * 0 = all tags are visible.
-   * Split into low/high 32-bit parts for RNA compatibility.
+   * Comma-separated list of active tag names for category filtering.
+   * Empty string = all categories are visible.
+   * Multiple tags are AND-combined (category must have ALL active tags).
    */
-  int active_tag_filter_mask_low = 0;
-  int active_tag_filter_mask_high = 0;
+  char active_tag_filter_tags[256] = "";
 
   /**
    * Horizontal scroll offset in the tag bar (in pixels).

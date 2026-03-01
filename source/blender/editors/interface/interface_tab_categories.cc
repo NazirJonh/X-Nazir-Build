@@ -865,7 +865,7 @@ uint32_t get_current_tag_mode_flag(const bContext *C)
 
 /**
  * Check if the category passes the tag filter.
- * When multiple tags are active, ALL must be present in the category (AND logic).
+ * When multiple tags are active, category must have AT LEAST ONE of them (OR logic).
  */
 static bool category_passes_tag_filter(const bContext *C, const char *category_idname)
 {
@@ -876,40 +876,92 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
   const wmWindowManager *wm = CTX_wm_manager(C);
   ScrArea *area = CTX_wm_area(C);
 
-  /* Get active filter mask from current space type */
-  int64_t active_filter_mask = 0;
+  /* Get active filter tags string from current space type */
+  char active_tags[256] = "";
 
   if (area) {
     if (area->spacetype == SPACE_VIEW3D) {
       /* Tag bar is in View3D */
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
       if (v3d) {
-        /* Combine low/high parts into int64_t */
-        active_filter_mask = (static_cast<int64_t>(v3d->active_tag_filter_mask_high) << 32) |
-                             static_cast<uint32_t>(v3d->active_tag_filter_mask_low);
+        STRNCPY(active_tags, v3d->active_tag_filter_tags);
       }
     }
     else if (area->spacetype == SPACE_PROPERTIES) {
       /* Tag bar might also be in Properties (for future use) */
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
       if (sbuts) {
-        /* Combine low/high parts into int64_t */
-        active_filter_mask = (static_cast<int64_t>(sbuts->active_tag_filter_mask_high) << 32) |
-                             static_cast<uint32_t>(sbuts->active_tag_filter_mask_low);
+        STRNCPY(active_tags, sbuts->active_tag_filter_tags);
       }
     }
   }
 
-  /* If filter is not active - show all */
-  if (active_filter_mask == 0) {
+  /* If filter is not active (empty string) - show all */
+  if (active_tags[0] == '\0') {
     return true;
   }
 
   /* Get category tags */
   const char *category_tags = category_tags_string_lookup(wm, category_idname);
 
-  /* Check if ALL active tags match (AND logic) */
-  return has_all_tags_active(wm, category_tags, active_filter_mask);
+  /* Debug output for filtering */
+  printf("DEBUG: category_passes_tag_filter: idname='%s', active_tags='%s', category_tags='%s'\n",
+         category_idname ? category_idname : "null",
+         active_tags,
+         category_tags ? category_tags : "null");
+
+  /* If category has no tags - hide it (since filter is active) */
+  if (!category_tags || category_tags[0] == '\0') {
+    return false;
+  }
+
+  /* Check if ANY active tag is present in the category (OR logic) */
+  /* Parse active_tags (comma-separated) and verify at least one tag exists in category_tags */
+
+  const char *cursor = active_tags;
+  char active_tag[64];
+
+  while (*cursor) {
+    /* Skip leading spaces */
+    while (*cursor == ' ') {
+      cursor++;
+    }
+
+    if (!*cursor) {
+      break;
+    }
+
+    /* Extract tag name */
+    int i = 0;
+    while (*cursor && *cursor != ',' && *cursor != ';' && i < 63) {
+      active_tag[i++] = *cursor++;
+    }
+    
+    /* Process trailing spaces */
+    while (i > 0 && active_tag[i - 1] == ' ') {
+      i--;
+    }
+    active_tag[i] = '\0';
+
+    if (*cursor == ',' || *cursor == ';') {
+      cursor++;
+    }
+
+    if (active_tag[0] == '\0') {
+      continue;
+    }
+
+    printf("DEBUG:   Checking active_tag='%s' in category_tags='%s'\n", active_tag, category_tags);
+
+    /* Check if this active_tag exists in category_tags */
+    if (has_tag_in_string(category_tags, active_tag)) {
+      printf("DEBUG:   FOUND MATCH! category='%s' passes filter\n", category_idname);
+      return true;  // Found at least one matching tag
+    }
+  }
+
+  printf("DEBUG:   NO MATCH! category='%s' hidden\n", category_idname);
+  return false;  // No matching tags found in category
 }
 
 bool panel_category_is_visible_by_tags(const bContext *C,

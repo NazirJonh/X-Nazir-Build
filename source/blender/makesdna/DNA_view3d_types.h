@@ -794,13 +794,11 @@ struct View3D {
   ViewerPath viewer_path;
 
   /**
-   * Bitmask of active tags for category filtering in the tag bar.
-   * Each bit corresponds to a tag from mode_flags (up to 64 tags).
-   * 0 = all categories are visible.
-   * Split into low/high 32-bit parts for RNA compatibility.
+   * Comma-separated list of active tag names for category filtering.
+   * Empty string = all categories are visible.
+   * Multiple tags are AND-combined (category must have ALL active tags).
    */
-  int active_tag_filter_mask_low = 0;
-  int active_tag_filter_mask_high = 0;
+  char active_tag_filter_tags[256] = "";
 
   /**
    * Horizontal scroll offset in the tag bar (in pixels).

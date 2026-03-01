@@ -5873,24 +5873,13 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Show Viewer", "Display non-final geometry from viewer nodes");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
-  /* Active tag filter mask split into low/high 32-bit parts for RNA compatibility */
-  prop = RNA_def_property(srna, "active_tag_filter_mask_low", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "active_tag_filter_mask_low");
-  RNA_def_property_range(prop, 0, INT_MAX);
+  /* Active tag filter as comma-separated tag names */
+  prop = RNA_def_property(srna, "active_tag_filter_tags", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "active_tag_filter_tags");
   RNA_def_property_ui_text(
       prop,
-      "Active Tag Filter Mask (Low)",
-      "Low 32 bits of active tag bitmask for category filtering (0 = all)");
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
-  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
-
-  prop = RNA_def_property(srna, "active_tag_filter_mask_high", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "active_tag_filter_mask_high");
-  RNA_def_property_range(prop, 0, INT_MAX);
-  RNA_def_property_ui_text(
-      prop,
-      "Active Tag Filter Mask (High)",
-      "High 32 bits of active tag bitmask for category filtering (for tags 32-63)");
+      "Active Tag Filter Tags",
+      "Comma-separated list of active tag names for category filtering (empty = all visible)");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
@@ -6169,24 +6158,13 @@ static void rna_def_space_properties(BlenderRNA *brna)
                            "Change to the corresponding tab when outliner data icons are clicked");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
 
-  /* Active tag filter mask split into low/high 32-bit parts for RNA compatibility */
-  prop = RNA_def_property(srna, "active_tag_filter_mask_low", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "active_tag_filter_mask_low");
-  RNA_def_property_range(prop, 0, INT_MAX);
+  /* Active tag filter as comma-separated tag names */
+  prop = RNA_def_property(srna, "active_tag_filter_tags", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "active_tag_filter_tags");
   RNA_def_property_ui_text(
       prop,
-      "Active Tag Filter Mask (Low)",
-      "Low 32 bits of active tag bitmask for category filtering (0 = all)");
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
-  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
-
-  prop = RNA_def_property(srna, "active_tag_filter_mask_high", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "active_tag_filter_mask_high");
-  RNA_def_property_range(prop, 0, INT_MAX);
-  RNA_def_property_ui_text(
-      prop,
-      "Active Tag Filter Mask (High)",
-      "High 32 bits of active tag bitmask for category filtering (for tags 32-63)");
+      "Active Tag Filter Tags",
+      "Comma-separated list of active tag names for category filtering (empty = all visible)");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 

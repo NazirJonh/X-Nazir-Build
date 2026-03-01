@@ -3331,6 +3331,10 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
   /* This allows Python to set properties that will be used when the operator is executed */
   op_ptr->data = bke::idprop::create_group("wmOperatorProperties").release();
 
+  /* Set the tag_name property in the operator properties */
+  /* This ensures the operator receives the tag_name when executed */
+  RNA_string_set(op_ptr, "tag_name", tag_name);
+
   /* Copy the PointerRNA - this copies the pointer to the property group */
   ptr = *op_ptr;
 

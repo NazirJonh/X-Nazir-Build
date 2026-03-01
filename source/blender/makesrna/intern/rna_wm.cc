@@ -682,12 +682,14 @@ static void rna_wm_category_tag_def_clear(wmWindowManager *wm);
 /* Callback functions for category_glyph_mappings collection. */
 static CategoryGlyphItem *rna_wm_category_glyph_mapping_new(wmWindowManager *wm, const char *category)
 {
+  printf("DEBUG: rna_wm_category_glyph_mapping_new: category='%s'\n", category ? category : "(null)");
   CategoryGlyphItem *item = MEM_new_zeroed<CategoryGlyphItem>(__func__);
   if (category) {
     STRNCPY(item->category, category);
   }
   BLI_addtail(&wm->category_glyph_mappings, item);
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  printf("DEBUG: rna_wm_category_glyph_mapping_new: Notifier sent\n");
   return item;
 }
 
@@ -704,7 +706,7 @@ static void rna_wm_category_glyph_mapping_remove(wmWindowManager *wm,
 
   BLI_freelinkN(&wm->category_glyph_mappings, item);
   item_ptr->invalidate();
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
 static void rna_wm_category_glyph_mapping_clear(wmWindowManager *wm)
@@ -750,7 +752,7 @@ static void rna_wm_category_glyph_mapping_clear(wmWindowManager *wm)
       BLI_listbase_clear(&wm->category_glyph_mappings);
     }
   }
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
 /* Callback functions for category_glyph_overrides collection. */
@@ -761,7 +763,7 @@ static CategoryGlyphItem *rna_wm_category_glyph_override_new(wmWindowManager *wm
     STRNCPY(item->category, category);
   }
   BLI_addtail(&wm->category_glyph_overrides, item);
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   return item;
 }
 
@@ -778,7 +780,7 @@ static void rna_wm_category_glyph_override_remove(wmWindowManager *wm,
 
   BLI_freelinkN(&wm->category_glyph_overrides, item);
   item_ptr->invalidate();
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
 static void rna_wm_category_glyph_override_clear(wmWindowManager *wm)
@@ -824,17 +826,19 @@ static void rna_wm_category_glyph_override_clear(wmWindowManager *wm)
       BLI_listbase_clear(&wm->category_glyph_overrides);
     }
   }
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
 static CategoryTagDef *rna_wm_category_tag_def_new(wmWindowManager *wm, const char *name)
 {
+  printf("DEBUG: rna_wm_category_tag_def_new: name='%s'\n", name ? name : "(null)");
   CategoryTagDef *item = MEM_new_zeroed<CategoryTagDef>(__func__);
   if (name) {
     STRNCPY(item->name, name);
   }
   BLI_addtail(&wm->category_tags, item);
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  printf("DEBUG: rna_wm_category_tag_def_new: Notifier sent\n");
   return item;
 }
 
@@ -849,7 +853,7 @@ static void rna_wm_category_tag_def_remove(wmWindowManager *wm, ReportList *repo
 
   BLI_freelinkN(&wm->category_tags, item);
   item_ptr->invalidate();
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
 static void rna_wm_category_tag_def_clear(wmWindowManager *wm)
@@ -877,7 +881,7 @@ static void rna_wm_category_tag_def_clear(wmWindowManager *wm)
       BLI_listbase_clear(&wm->category_tags);
     }
   }
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
 static wmOperator *rna_OperatorProperties_find_operator(PointerRNA *ptr)
@@ -2396,12 +2400,16 @@ static void rna_KeyMapItem_update(Main * /*bmain*/, Scene * /*scene*/, PointerRN
 /* Update callback for CategoryTagDef properties - saves to JSON on change. */
 static void rna_CategoryTagDef_update(bContext *C, PointerRNA * /*ptr*/)
 {
+  printf("DEBUG: rna_CategoryTagDef_update CALLED! Sending NC_WM | ND_CATEGORY_GLYPHS\n");
 #  ifdef WITH_PYTHON
   const char *imports[] = {"bpy", nullptr};
   const char *save_cmd =
       "from bl_ui.space_userpref import sync_wm_to_glyph_cache\n"
       "sync_wm_to_glyph_cache()\n";
   BPY_run_string_exec(C, imports, save_cmd);
+  /* Notify UI to update after JSON save */
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  printf("DEBUG: rna_CategoryTagDef_update: Notifier sent!\n");
 #  else
   (void)C;
 #  endif
@@ -3174,17 +3182,17 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
   prop = RNA_def_property(srna, "category", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "category");
   RNA_def_property_ui_text(prop, "Category", "Category name");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 
   prop = RNA_def_property(srna, "glyph", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "glyph");
   RNA_def_property_ui_text(prop, "Glyph", "UTF-8 glyph character from Material Symbols");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 
   prop = RNA_def_property(srna, "display_name", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "display_name");
   RNA_def_property_ui_text(prop, "Display Name", "Custom display name for the category tab");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 
   prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_float_sdna(prop, nullptr, "color");
@@ -3192,22 +3200,22 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_float_default(prop, 0.0f);
   RNA_def_property_ui_text(prop, "Color", "Custom glyph color (black = use theme color)");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 
   prop = RNA_def_property(srna, "default_glyph", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "default_glyph");
   RNA_def_property_ui_text(prop, "Default Glyph", "Default glyph for reset functionality");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 
   prop = RNA_def_property(srna, "default_display_name", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "default_display_name");
   RNA_def_property_ui_text(prop, "Default Display Name", "Default display name for reset functionality");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 
   prop = RNA_def_property(srna, "tags", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "tags");
   RNA_def_property_ui_text(prop, "Tags", "Semicolon-separated tag names (synced from Python for UI display)");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
 static void rna_def_category_tag_def(BlenderRNA *brna)
@@ -3222,13 +3230,13 @@ static void rna_def_category_tag_def(BlenderRNA *brna)
   RNA_def_property_string_sdna(prop, nullptr, "name");
   RNA_def_property_ui_text(prop, "Name", "Tag name");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
-  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");
 
   prop = RNA_def_property(srna, "glyph", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "glyph");
   RNA_def_property_ui_text(prop, "Glyph", "UTF-8 glyph character or hex code-point");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
-  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");
 
   prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_float_sdna(prop, nullptr, "color");
@@ -3237,14 +3245,14 @@ static void rna_def_category_tag_def(BlenderRNA *brna)
   RNA_def_property_float_default(prop, 0.0f);
   RNA_def_property_ui_text(prop, "Color", "Tag color (black = use theme color)");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
-  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");
 
   /* Mode flags for filtering */
   prop = RNA_def_property(srna, "mode_flags", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "mode_flags");
   RNA_def_property_ui_text(prop, "Mode Flags", "Bitmask of modes where this tag is active (0 = all modes)");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
-  RNA_def_property_update(prop, NC_WINDOW, "rna_CategoryTagDef_update");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");
 }
 
 static void rna_def_category_glyph_mappings(BlenderRNA *brna, PropertyRNA *cprop)

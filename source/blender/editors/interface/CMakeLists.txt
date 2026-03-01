@@ -97,6 +97,8 @@ set(SRC
   templates/interface_templates.cc
   interface_undo.cc
   interface_utils.cc
+  interface_tag_bar.cc
+  interface_tag_bar.hh
   interface_widgets.cc
   resources.cc
   view2d/view2d.cc

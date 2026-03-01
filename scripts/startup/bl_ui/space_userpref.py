@@ -1533,8 +1533,10 @@ def _sync_glyph_mappings_to_wm_impl():
                 tag_data = _all_tags_cache[tag_name]
                 glyph_hex = _glyph_to_hex(tag_data.get("glyph", "")) if isinstance(tag_data, dict) else ""
                 color_val = tag_data.get("color", [0.0, 0.0, 0.0]) if isinstance(tag_data, dict) else [0.0, 0.0, 0.0]
+                print(f"[DEBUG PY] Creating tag '{tag_name}' with glyph='{glyph_hex}'")
                 tag_item = wm.category_tags.new(name=tag_name)
                 tag_item.glyph = glyph_hex
+                print(f"[DEBUG PY] Set tag '{tag_name}' glyph to '{glyph_hex}' -> tag_item.glyph='{tag_item.glyph}'")
                 tag_item.color = (color_val[0], color_val[1], color_val[2])
                 # НОВОЕ: Sync mode flags
                 mode_flags_val = tag_data.get("mode_flags", 0b111) if isinstance(tag_data, dict) else 0b111

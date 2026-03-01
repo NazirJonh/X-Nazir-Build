@@ -20,12 +20,14 @@
 #include "BKE_fcurve.hh"
 
 #include "DNA_listBase.h"
+#include "DNA_vec_types.h"
 
 #include "RNA_types.hh"
 
 #include "UI_interface.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
+#include "interface_tag_bar.hh"
 struct IconTextOverlay;
 namespace blender {
 
@@ -819,6 +821,8 @@ struct CategoryDragState {
   void *scroll_timer = nullptr;
 };
 
+/* `interface_tag_bar.hh` - TagButton and TagBarRuntimeData are defined there */
+
 /* `interface_tab_categories.cc` */
 
 /**
@@ -838,6 +842,11 @@ uint32_t get_current_tag_mode_flag(const bContext *C);
  * Check if a ListBase containing category tags appears to be valid.
  */
 bool category_tag_list_is_valid(const ListBase *list);
+
+/**
+ * Check if a ListBase containing CategoryGlyphItem appears to be valid.
+ */
+bool category_glyph_list_is_valid(const ListBase *list);
 
 /**
  * Look up tags string for a category from window manager mappings.

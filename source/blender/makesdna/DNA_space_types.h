@@ -163,6 +163,26 @@ struct SpaceProperties {
 
   void *texuser = nullptr;
 
+  /**
+   * Runtime cache for tag buttons (reset when tags change).
+   * Pointer to TagBarRuntimeData.
+   */
+  void *tag_bar_cache = nullptr;
+
+  /**
+   * Bitmask of active tags for category filtering.
+   * Each bit corresponds to a tag from mode_flags.
+   * 0 = all categories are visible.
+   */
+  int active_tag_filter_mask = 0;
+
+  /**
+   * Horizontal scroll offset in the tag bar (in pixels).
+   */
+  int tag_bar_scroll_offset = 0;
+
+  char _pad1[8] = {};
+
   /* Doesn't necessarily need to be a pointer, but runtime structs are still written to files. */
   struct SpaceProperties_Runtime *runtime = nullptr;
 };

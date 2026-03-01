@@ -13,6 +13,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_view2d_types.h"
 
 #include "BLI_bitmap.h"
@@ -54,6 +55,7 @@
 #include "BLO_read_write.hh"
 
 #include "buttons_intern.hh" /* own include */
+#include "../interface/interface_tag_bar.hh"
 
 namespace blender {
 
@@ -75,6 +77,11 @@ static SpaceLink *buttons_create(const ScrArea * /*area*/, const Scene * /*scene
   sbuts->spacetype = SPACE_PROPERTIES;
   sbuts->mainb = sbuts->mainbuser = BCONTEXT_OBJECT;
   sbuts->visible_tabs = uint(-1); /* 0xFFFFFFFF - All tabs visible by default. */
+
+  /* Tag bar filter state */
+  sbuts->active_tag_filter_mask = 0;  /* All tags active by default */
+  sbuts->tag_bar_scroll_offset = 0;
+  sbuts->tag_bar_cache = nullptr;
 
   /* header */
   region = BKE_area_region_new();

@@ -1541,17 +1541,15 @@ bool ED_region_is_overlap(const int spacetype, const int regiontype)
                   RGN_TYPE_ASSET_SHELF_HEADER);
 
     case SPACE_VIEW3D:
-      if (regiontype == RGN_TYPE_HEADER) {
-        /* Only treat as overlapped if there is transparency. */
-        bTheme *theme = ui::theme::theme_get();
-        return theme->space_view3d.header[3] != 255;
+      if (ELEM(regiontype, RGN_TYPE_HEADER, RGN_TYPE_TOOL_HEADER)) {
+        return false;
       }
       return ELEM(regiontype,
                   RGN_TYPE_TOOLS,
                   RGN_TYPE_UI,
                   RGN_TYPE_TOOL_PROPS,
+                  RGN_TYPE_TAG_BAR,
                   RGN_TYPE_FOOTER,
-                  RGN_TYPE_TOOL_HEADER,
                   RGN_TYPE_ASSET_SHELF,
                   RGN_TYPE_ASSET_SHELF_HEADER);
 
@@ -1644,6 +1642,9 @@ static void region_rect_recursive(
   else if (region->regiontype == RGN_TYPE_ASSET_SHELF_HEADER) {
     prefsizey = asset::shelf::header_region_size();
   }
+  else if (region->regiontype == RGN_TYPE_TAG_BAR) {
+    prefsizey = UI_SCALE_FAC * (region->sizey > 1 ? region->sizey + 0.5f : region->runtime->type->prefsizey);
+  }
   else if (ED_area_is_global(area)) {
     prefsizey = ED_region_global_size_y();
   }
@@ -1722,11 +1723,27 @@ static void region_rect_recursive(
 
       if (alignment == RGN_ALIGN_TOP) {
         region->winrct.ymin = region->winrct.ymax - prefsizey + 1;
-        winrct->ymax = region->winrct.ymin - 1;
+        if (!region->overlap) {
+          winrct->ymax = region->winrct.ymin - 1;
+          overlap_remainder->ymax = min_ii(overlap_remainder->ymax, winrct->ymax);
+        }
+        else {
+          /* Overlapping regions shouldn't push others. */
+          winrct->ymax = region->winrct.ymin - 1;
+        }
+        printf("DEBUG: Region %p (type %d) ALIGN_TOP: winrct.ymin=%d, winrct.ymax=%d, overlap_remainder.ymax=%d\n",
+               region, region->regiontype, region->winrct.ymin, region->winrct.ymax, overlap_remainder->ymax);
       }
       else {
         region->winrct.ymax = region->winrct.ymin + prefsizey - 1;
-        winrct->ymin = region->winrct.ymax + 1;
+        if (!region->overlap) {
+          winrct->ymin = region->winrct.ymax + 1;
+          overlap_remainder->ymin = max_ii(overlap_remainder->ymin, winrct->ymin);
+        }
+        else {
+          /* Overlapping regions shouldn't push others. */
+          winrct->ymin = region->winrct.ymax + 1;
+        }
       }
       BLI_rcti_sanitize(winrct);
     }
@@ -1776,11 +1793,27 @@ static void region_rect_recursive(
 
       if (alignment == RGN_ALIGN_RIGHT) {
         region->winrct.xmin = region->winrct.xmax - prefsizex + 1;
-        winrct->xmax = region->winrct.xmin - 1;
+        if (!region->overlap) {
+          winrct->xmax = region->winrct.xmin - 1;
+          overlap_remainder->xmax = min_ii(overlap_remainder->xmax, winrct->xmax);
+        }
+        else {
+          /* Overlapping regions shouldn't push others. */
+          winrct->xmax = region->winrct.xmin - 1;
+        }
+        printf("DEBUG: Region %p (type %d) ALIGN_RIGHT: winrct.ymin=%d, winrct.ymax=%d, overlap_remainder.ymax=%d\n",
+               region, region->regiontype, region->winrct.ymin, region->winrct.ymax, overlap_remainder->ymax);
       }
       else {
         region->winrct.xmax = region->winrct.xmin + prefsizex - 1;
-        winrct->xmin = region->winrct.xmax + 1;
+        if (!region->overlap) {
+          winrct->xmin = region->winrct.xmax + 1;
+          overlap_remainder->xmin = max_ii(overlap_remainder->xmin, winrct->xmin);
+        }
+        else {
+          /* Overlapping regions shouldn't push others. */
+          winrct->xmin = region->winrct.xmax + 1;
+        }
       }
       BLI_rcti_sanitize(winrct);
     }

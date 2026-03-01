@@ -31,6 +31,9 @@
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_screen.hh"
+
+#include "ED_screen.hh"
 
 #include "SEQ_iterator.hh"
 #include "SEQ_sequencer.hh"
@@ -44,6 +47,24 @@
 namespace blender {
 
 // static CLG_LogRef LOG = {"blend.doversion"};
+
+/* Ensure View3D spaces have the TAG_BAR region for category filtering. */
+static void do_versions_ensure_view3d_has_tag_bar_region(Main *bmain)
+{
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      if (area.spacetype != SPACE_VIEW3D) {
+        continue;
+      }
+
+      ARegion *region = do_versions_ensure_region(
+          &area.regionbase, RGN_TYPE_TAG_BAR, __func__, RGN_TYPE_TOOLS);
+      region->regiontype = RGN_TYPE_TAG_BAR;
+      region->alignment = RGN_ALIGN_TOP;
+      region->flag = 0;
+    }
+  }
+}
 
 static void version_geometry_nodes_properties(Main &bmain, Object &object, NodesModifierData &nmd)
 {
@@ -262,6 +283,9 @@ void do_versions_after_linking_520(FileData * /*fd*/, Main *bmain)
 
 void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 {
+  /* Add TAG_BAR region to existing View3D spaces */
+  do_versions_ensure_view3d_has_tag_bar_region(bmain);
+
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 1)) {
     for (Scene &scene : bmain->scenes) {
       scene.r.mode |= R_SAVE_OUTPUT;

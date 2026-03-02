@@ -2093,11 +2093,10 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
     int category_width;
     switch (display_mode) {
-      case USER_CATEGORY_TABS_GLYPHS_ONLY:
-        BLF_enable(fontid, BLF_ROTATION);
-        BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
-        category_width = round_fl_to_int(BLF_width(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
-        BLF_disable(fontid, BLF_ROTATION);
+      case USER_CATEGORY_TABS_GLYPHS_ONLY: {
+        /* Use glyph height (without rotation) for consistent sizing with GLYPHS_TEXT mode. */
+        const int glyph_h = round_fl_to_int(BLF_height(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
+        category_width = glyph_h;
 
         if (U.category_tabs_show_active_name && STREQ(category_id, category_id_active)) {
           const char *text_for_name = category_id_draw;
@@ -2120,6 +2119,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
           category_width += text_w + glyph_text_gap;
         }
         break;
+      }
 
       case USER_CATEGORY_TABS_GLYPHS_TEXT: {
         const char *text_for_width = category_id_draw;

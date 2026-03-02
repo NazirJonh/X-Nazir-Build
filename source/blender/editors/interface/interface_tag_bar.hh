@@ -10,6 +10,7 @@
 
 namespace blender {
 struct ARegion;
+struct ARegionType;
 struct bContext;
 struct CategoryTagDef;
 struct wmRegionListenerParams;
@@ -179,6 +180,21 @@ void buttons_tag_bar_region_listener(const wmRegionListenerParams *params);
  * \param params: Message subscribe parameters
  */
 void buttons_tag_bar_region_message_subscribe(const wmRegionMessageSubscribeParams *params);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Tag Bar Filter Popover Panel
+ * \{ */
+
+/**
+ * Register the tag bar filter popover panel for a given region type.
+ * This function should be called from each spacetype that uses the TAG_BAR region.
+ * The panel is added to the global panel type list so it can be used from anywhere.
+ *
+ * \param art: The region type to register the panel with (typically TAG_BAR region)
+ */
+void tag_bar_filter_popover_panel_register(ARegionType *art);
 
 /** \} */
 

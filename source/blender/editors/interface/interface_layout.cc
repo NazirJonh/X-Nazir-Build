@@ -2896,7 +2896,22 @@ static Button *item_menu(Layout *layout,
     }
     else if (force_menu) {
       pad_factor.text = 1.85;
-      pad_factor.icon_only = 0.6f;
+      /* Use compact icon_only padding for directional icons to avoid overly wide buttons.
+       * Directional icons (arrows/triangles) already indicate the menu action,
+       * so they don't need extra space like regular menu buttons. */
+      const bool is_directional_icon = ELEM(icon,
+                                            ICON_RIGHTARROW,
+                                            ICON_DOWNARROW_HLT,
+                                            ICON_RIGHTARROW_THIN,
+                                            ICON_TRIA_DOWN,
+                                            ICON_TRIA_LEFT,
+                                            ICON_TRIA_RIGHT,
+                                            ICON_TRIA_UP,
+                                            ICON_TRIA_DOWN_BAR,
+                                            ICON_TRIA_LEFT_BAR,
+                                            ICON_TRIA_RIGHT_BAR,
+                                            ICON_TRIA_UP_BAR);
+      pad_factor.icon_only = is_directional_icon ? 0.0f : 0.6f;
     }
     else {
       pad_factor.text = 0.75f;

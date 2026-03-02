@@ -1917,6 +1917,9 @@ void ED_spacetype_view3d()
   art->snap_size = view3d_tag_bar_region_snap_size;
   BLI_addhead(&st->regiontypes, art);
 
+  /* Register tag bar panels (including filter popover) */
+  blender::ui::tag_bar_filter_popover_panel_register(art);
+
   /* regions: tool(bar) */
   art = MEM_new_zeroed<ARegionType>("spacetype view3d tools region");
   art->regionid = RGN_TYPE_TOOLS;

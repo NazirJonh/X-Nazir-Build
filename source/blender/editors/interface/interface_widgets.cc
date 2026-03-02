@@ -5390,13 +5390,41 @@ static int widget_roundbox_set(Button *but, rcti *rect)
   return roundbox;
 }
 
+/**
+ * Determine widget type for popover buttons.
+ *
+ * Popover buttons automatically draw a small arrow indicator to show they open a menu.
+ * However, when the button already has a directional icon (arrow/triangle), this creates
+ * a duplicate arrow which looks incorrect.
+ *
+ * Examples of affected icons:
+ * - ICON_DOWNARROW_HLT: Used in VIEW3D_PT_tag_bar_filter_popover
+ * - ICON_TRIA_DOWN: Used in USERPREF_PT_tag_mode_filter_popover
+ * - ICON_RIGHTARROW: Used for collapsible panel indicators
+ *
+ * Solution: Check if the button's icon is already directional (arrow/triangle),
+ * and skip drawing the additional menu arrow in that case.
+ */
 static WidgetType *popover_widget_type(Button *but, rcti *rect)
 {
   /* We could use a flag for this, but for now just check size,
    * add up/down arrows if there is room. */
   if ((but->str.empty() && but->icon && (BLI_rcti_size_x(rect) < BLI_rcti_size_y(rect) + 2)) ||
       /* disable for brushes also */
-      (but->flag & BUT_ICON_PREVIEW))
+      (but->flag & BUT_ICON_PREVIEW) ||
+      /* Don't draw menu arrow if button already has a directional icon (avoids duplicate arrows) */
+      ELEM(but->icon,
+           ICON_RIGHTARROW,
+           ICON_DOWNARROW_HLT,
+           ICON_RIGHTARROW_THIN,
+           ICON_TRIA_DOWN,
+           ICON_TRIA_LEFT,
+           ICON_TRIA_RIGHT,
+           ICON_TRIA_UP,
+           ICON_TRIA_DOWN_BAR,
+           ICON_TRIA_LEFT_BAR,
+           ICON_TRIA_RIGHT_BAR,
+           ICON_TRIA_UP_BAR))
   {
     /* No arrows. */
     return widget_type(WidgetStyle::MenuIconRadio);

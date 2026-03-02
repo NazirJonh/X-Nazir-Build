@@ -2290,19 +2290,22 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
 
   layout.separator();
 
-  /* Buttons row: Reset | Cancel | Save */
-  Layout &split = layout.split(0.4f, false);
+  /* Buttons row: Reset | Save | Cancel */
+  Layout &split = layout.split(0.15f, false);
   Layout &row_left = split.row(true);
 
-  /* Reset button (left aligned) */
+  /* Reset button (left aligned, minimal width) */
   PointerRNA reset_ptr = row_left.op("SCREEN_OT_category_tab_reset", IFACE_("Reset"), ICON_LOOP_BACK);
   RNA_string_set(&reset_ptr, "category", category);
 
   /* Spacer and right-aligned buttons */
   Layout &row_right = split.row(true);
   row_right.separator_spacer();
+  /* Save button (active/default, no icon) */
+  row_right.active_default_set(true);
+  row_right.op("SCREEN_OT_category_tab_edit_dialog_save", IFACE_("Save"), ICON_NONE);
+  row_right.active_default_set(false);
   row_right.op("SCREEN_OT_category_tab_edit_dialog_cancel", IFACE_("Cancel"), ICON_NONE);
-  row_right.op("SCREEN_OT_category_tab_edit_dialog_save", IFACE_("Save"), ICON_CHECKMARK);
 
   /* Set block bounds - centered like the original dialog */
   block_bounds_set_centered(block, 6 * UI_SCALE_FAC);

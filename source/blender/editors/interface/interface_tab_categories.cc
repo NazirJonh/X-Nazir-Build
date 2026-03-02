@@ -2795,8 +2795,10 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
     const bool prefer_left = !is_left;
     state->tooltip_region = tooltip_create_from_text(
         C, msg, position, &tab_rect_screen, prefer_left);
-    /* Store initial X position to keep tooltip fixed horizontally during drag. */
+    /* Store initial X position and dimensions for tooltip management during drag. */
     state->tooltip_initial_x = state->tooltip_region->winrct.xmin;
+    state->tooltip_width = BLI_rcti_size_x(&state->tooltip_region->winrct);
+    state->tooltip_height = BLI_rcti_size_y(&state->tooltip_region->winrct);
   }
   else {
     /* Check if we need to show category name tooltip for Icon mode.
@@ -2844,8 +2846,10 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
         const bool prefer_left = !is_left;
         state->tooltip_region = tooltip_create_from_text(
             C, IFACE_(category_display_name), position, &tab_rect_screen, prefer_left);
-        /* Store initial X position to keep tooltip fixed horizontally during drag. */
+        /* Store initial X position and dimensions for tooltip management during drag. */
         state->tooltip_initial_x = state->tooltip_region->winrct.xmin;
+        state->tooltip_width = BLI_rcti_size_x(&state->tooltip_region->winrct);
+        state->tooltip_height = BLI_rcti_size_y(&state->tooltip_region->winrct);
       }
     }
   }
@@ -2917,16 +2921,50 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
   const bool is_timer = (event->type == TIMER && event->customdata == state->scroll_timer);
 
   /* Update tooltip position on mouse move (for all categories with tooltip).
-   * Keep tooltip fixed horizontally (X), only move vertically (Y) with cursor. */
+   * Keep tooltip fixed horizontally (X), only move vertically (Y) with cursor.
+   * Hide tooltip when cursor leaves the source region to avoid showing it in other areas. */
   if (event->type == MOUSEMOVE && state->tooltip_region) {
-    int dy = event->mval[1] - state->current_mouse_y;
-    /* Move tooltip only vertically, keep horizontal position fixed. */
-    state->tooltip_region->winrct.ymin += dy;
-    state->tooltip_region->winrct.ymax += dy;
-    /* Ensure X position stays at initial value. */
-    int width = BLI_rcti_size_x(&state->tooltip_region->winrct);
-    state->tooltip_region->winrct.xmin = state->tooltip_initial_x;
-    state->tooltip_region->winrct.xmax = state->tooltip_initial_x + width;
+    /* Check if cursor is within the source region bounds */
+    const bool cursor_in_region = (event->mval[0] >= 0 && event->mval[0] <= region->winx &&
+                                    event->mval[1] >= 0 && event->mval[1] <= region->winy);
+
+    if (cursor_in_region) {
+      /* Cursor is inside region - show and update tooltip position */
+      if (state->tooltip_hidden) {
+        /* Restore tooltip visibility - center on cursor with saved dimensions */
+        state->tooltip_hidden = false;
+        /* Use event->xy[1] for screen Y coordinate (available in modal handler) */
+        const int mouse_y_screen = event->xy[1];
+        /* Center tooltip vertically on cursor */
+        const int half_height = state->tooltip_height / 2;
+        state->tooltip_region->winrct.ymin = mouse_y_screen - half_height;
+        state->tooltip_region->winrct.ymax = mouse_y_screen + half_height;
+        /* Restore X position */
+        state->tooltip_region->winrct.xmin = state->tooltip_initial_x;
+        state->tooltip_region->winrct.xmax = state->tooltip_initial_x + state->tooltip_width;
+      }
+      else {
+        /* Normal update - move tooltip vertically with cursor */
+        int dy = event->mval[1] - state->current_mouse_y;
+        state->tooltip_region->winrct.ymin += dy;
+        state->tooltip_region->winrct.ymax += dy;
+        /* Ensure X position stays at initial value. */
+        state->tooltip_region->winrct.xmin = state->tooltip_initial_x;
+        state->tooltip_region->winrct.xmax = state->tooltip_initial_x + state->tooltip_width;
+      }
+    }
+    else {
+      /* Cursor is outside region - hide tooltip by moving it off-screen */
+      if (!state->tooltip_hidden) {
+        state->tooltip_hidden = true;
+      }
+      /* Move tooltip far off-screen to prevent it from being visible in other areas */
+      state->tooltip_region->winrct.xmin = -10000;
+      state->tooltip_region->winrct.xmax = -9999;
+      state->tooltip_region->winrct.ymin = -10000;
+      state->tooltip_region->winrct.ymax = -9999;
+    }
+
     state->current_mouse_x = event->mval[0];
     state->current_mouse_y = event->mval[1];
     ED_region_tag_redraw(region);

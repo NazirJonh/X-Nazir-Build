@@ -818,6 +818,9 @@ struct CategoryDragState {
   int current_mouse_y = 0;
   ARegion *tooltip_region = nullptr;
   int tooltip_initial_x = 0;  /* Initial X position of tooltip, fixed during drag */
+  bool tooltip_hidden = false; /* True when tooltip is hidden because cursor left region */
+  int tooltip_width = 0;      /* Saved tooltip width for restoration */
+  int tooltip_height = 0;     /* Saved tooltip height for restoration */
 
   void *scroll_timer = nullptr;
 };

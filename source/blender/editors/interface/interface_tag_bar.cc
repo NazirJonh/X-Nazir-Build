@@ -71,17 +71,11 @@ static std::map<const wmWindowManager *, TagBarRuntimeData *> g_tag_bar_cache;
  */
 void tag_bar_mark_all_dirty()
 {
-  printf("DEBUG: tag_bar_mark_all_dirty CALLED! Cache size: %zu\n", g_tag_bar_cache.size());
-  int count = 0;
   for (auto &entry : g_tag_bar_cache) {
     if (entry.second) {
-      printf("DEBUG:   Marking dirty: wm=%p, data=%p, was_dirty=%d\n",
-             entry.first, entry.second, entry.second->needs_update);
       entry.second->needs_update = true;
-      count++;
     }
   }
-  printf("DEBUG: tag_bar_mark_all_dirty DONE! Marked %d entries\n", count);
 }
 
 /** \} */
@@ -98,24 +92,18 @@ void tag_bar_mark_all_dirty()
 TagBarRuntimeData *get_tag_bar_data_global(const bContext *C)
 {
   if (!C) {
-    printf("DEBUG: get_tag_bar_data_global: No context!\n");
     return nullptr;
   }
 
   wmWindowManager *wm = CTX_wm_manager(C);
-  printf("DEBUG: get_tag_bar_data_global called: wm=%p\n", wm);
 
   if (!wm) {
-    printf("DEBUG: get_tag_bar_data_global: No wm!\n");
     return nullptr;
   }
 
   TagBarRuntimeData *data = g_tag_bar_cache[wm];
-  printf("DEBUG: data from cache: %p, needs_update=%d\n",
-         data, data ? data->needs_update : -1);
 
   if (!data) {
-    printf("DEBUG: Creating new TagBarRuntimeData\n");
     data = MEM_new<TagBarRuntimeData>(__func__);
     g_tag_bar_cache[wm] = data;
   }
@@ -129,13 +117,8 @@ TagBarRuntimeData *get_tag_bar_data_global(const bContext *C)
 
   /* Update data if needs_update flag is set */
   if (data->needs_update) {
-    printf("DEBUG: UPDATING TAG DATA! wm=%p, v3d=%p, needs_update was true\n", wm, v3d);
     tag_bar_buttons_update(wm, v3d, data);
     data->needs_update = false;
-    printf("DEBUG: After update: buttons.size()=%zu\n", data->buttons.size());
-  }
-  else {
-    printf("DEBUG: Skipping update - needs_update=false\n");
   }
 
   return data;
@@ -292,8 +275,6 @@ void tag_bar_buttons_update(const wmWindowManager *wm,
                             View3D *v3d,
                             TagBarRuntimeData *data)
 {
-  printf("DEBUG: tag_bar_buttons_update called: wm=%p, v3d=%p, data=%p\n", wm, v3d, data);
-
   if (!data) {
     return;
   }
@@ -306,25 +287,17 @@ void tag_bar_buttons_update(const wmWindowManager *wm,
   if (v3d) {
     STRNCPY(active_tags, v3d->active_tag_filter_tags);
   }
-  printf("DEBUG: active_tags from v3d: '%s'\n", active_tags);
 
   /* Iterate through all tags from wm */
-  printf("DEBUG: wm=%p, category_tags valid=%d\n",
-         wm, wm ? category_tag_list_is_valid(&wm->category_tags) : 0);
-
   if (wm && category_tag_list_is_valid(&wm->category_tags)) {
-    int tag_count = 0;
     for (const CategoryTagDef *tag_def =
              static_cast<const CategoryTagDef *>(wm->category_tags.first);
          tag_def;
          tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
     {
-      printf("DEBUG: Found tag: %s, glyph='%s', color=[%.2f,%.2f,%.2f]\n",
-             tag_def->name, tag_def->glyph, tag_def->color[0], tag_def->color[1], tag_def->color[2]);
       TagButton btn;
       STRNCPY(btn.tag_name, tag_def->name);
       STRNCPY(btn.glyph, tag_def->glyph);
-      printf("DEBUG:   Copied glyph to btn: btn.glyph='%s'\n", btn.glyph);
       copy_v3_v3(btn.color, tag_def->color);
       btn.is_visible = true;
       btn.is_hovered = false;
@@ -346,11 +319,7 @@ void tag_bar_buttons_update(const wmWindowManager *wm,
       }
 
       data->buttons.append(btn);
-      tag_count++;
     }
-    printf("DEBUG: Loaded %d tags\n", tag_count);
-  } else {
-    printf("DEBUG: No tags found!\n");
   }
 
   /* Sort by category count (highest first) */
@@ -361,8 +330,6 @@ void tag_bar_buttons_update(const wmWindowManager *wm,
               }
               return strcmp(a.tag_name, b.tag_name) < 0;
             });
-
-  printf("DEBUG: tag_bar_buttons_update done: buttons.size()=%zu\n", data->buttons.size());
 }
 
 /** \} */
@@ -383,9 +350,6 @@ void tag_button_click_by_mode(bContext *C, void *arg1, void *arg2)
   if (area && area->spacetype == SPACE_VIEW3D) {
     v3d = static_cast<View3D *>(area->spacedata.first);
   }
-
-  printf("DEBUG: tag_button_click_by_mode: wm=%p, v3d=%p, mode_flags=%d (deprecated, using operator instead)\n",
-         wm, v3d, mode_flags);
 
   /* NOTE: This function is deprecated. Tag toggling is now handled by the operator in view3d_ops.cc.
    * The operator directly modifies the active_tag_filter_tags string. */
@@ -419,28 +383,21 @@ void buttons_tag_bar_region_exit(wmWindowManager * /*wm*/, ARegion * /*region*/)
 
 void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 {
-  printf("DEBUG: buttons_tag_bar_region_draw called!\n");
-
   ScrArea *area = CTX_wm_area(C);
   if (!area) {
-    printf("DEBUG: No area!\n");
     return;
   }
 
   SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
   if (!sbuts) {
-    printf("DEBUG: No sbuts!\n");
     return;
   }
 
   wmWindowManager *wm = CTX_wm_manager(C);
-  printf("DEBUG: wm=%p, category_tags=%p\n", wm, wm ? &wm->category_tags : nullptr);
 
   /* Get or create data */
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
-  printf("DEBUG: data=%p, buttons.size()=%zu\n", data, data ? data->buttons.size() : 0);
   if (!data || data->buttons.is_empty()) {
-    printf("DEBUG: No data or empty buttons!\n");
     return;
   }
 
@@ -468,11 +425,7 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 
   /* Draw buttons via UI API */
   int xco = UI_UNIT_X / 2;
-  int btn_index = 0;
   for (TagButton &btn : data->buttons) {
-    printf("DEBUG: Creating button %d: tag='%s', btn.glyph='%s'\n",
-           btn_index++, btn.tag_name, btn.glyph);
-
     /* Calculate button width */
     const int fontid = style->widget.uifont_id;
     BLF_size(fontid, UI_UNIT_Y * 0.7f * dpi_fac);
@@ -487,8 +440,6 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
       else {
         display_glyph = btn.glyph;
       }
-      printf("DEBUG:   Converted '%s' -> display_glyph='%s' (utf8='%s')\n",
-             btn.glyph, display_glyph, glyph_utf8);
     }
 
     const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
@@ -564,28 +515,21 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
  */
 void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
 {
-  printf("DEBUG: buttons_tag_bar_draw_in_header called! region type=%d\n", region->regiontype);
-
   ScrArea *area = CTX_wm_area(C);
   if (!area) {
-    printf("DEBUG: No area!\n");
     return;
   }
 
   /* Only draw in View3D */
   if (area->spacetype != SPACE_VIEW3D) {
-    printf("DEBUG: Not View3D space (type=%d)!\n", area->spacetype);
     return;
   }
 
   wmWindowManager *wm = CTX_wm_manager(C);
-  printf("DEBUG: wm=%p, category_tags=%p\n", wm, wm ? &wm->category_tags : nullptr);
 
   /* Get or create data from global cache */
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
-  printf("DEBUG: data=%p, buttons.size()=%zu\n", data, data ? data->buttons.size() : 0);
   if (!data || data->buttons.is_empty()) {
-    printf("DEBUG: No data or empty buttons!\n");
     return;
   }
 
@@ -687,8 +631,6 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
 
   block_end(C, block);
   block_draw(C, block);
-
-  printf("DEBUG: Drew %zu tag buttons\n", data->buttons.size());
 }
 
 /**
@@ -701,43 +643,39 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
  */
 void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, int start_x)
 {
-  printf("DEBUG: === tag_bar_draw_in_layout START === block=%p, region=%p, start_x=%d\n",
-         block, region, start_x);
-
   wmWindowManager *wm = CTX_wm_manager(C);
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
 
-  if (!data || data->buttons.is_empty()) {
-    printf("DEBUG: tag_bar_draw_in_layout: No data or empty buttons\n");
+  if (!data) {
     return;
   }
-
-  printf("DEBUG: tag_bar_draw_in_layout: Drawing %zu buttons\n", data->buttons.size());
 
   const uiStyle *style = style_get_dpi();
   const float dpi_fac = UI_SCALE_FAC;
 
   /* Calculate total buttons width for positioning */
   int total_buttons_width = 0;
-  for (const TagButton &btn : data->buttons) {
-    const int fontid = style->widget.uifont_id;
-    BLF_size(fontid, UI_UNIT_Y * 0.7f * dpi_fac);
+  if (!data->buttons.is_empty()) {
+    for (const TagButton &btn : data->buttons) {
+      const int fontid = style->widget.uifont_id;
+      BLF_size(fontid, UI_UNIT_Y * 0.7f * dpi_fac);
 
-    /* Convert glyph from hex to UTF-8 for display */
-    char glyph_utf8[8] = "";
-    const char *display_glyph = "";
-    if (btn.glyph[0] != '\0') {
-      if (tag_glyph_hex_to_utf8(btn.glyph, glyph_utf8)) {
-        display_glyph = glyph_utf8;
+      /* Convert glyph from hex to UTF-8 for display */
+      char glyph_utf8[8] = "";
+      const char *display_glyph = "";
+      if (btn.glyph[0] != '\0') {
+        if (tag_glyph_hex_to_utf8(btn.glyph, glyph_utf8)) {
+          display_glyph = glyph_utf8;
+        }
+        else {
+          display_glyph = btn.glyph;
+        }
       }
-      else {
-        display_glyph = btn.glyph;
-      }
+
+      const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
+      const int glyph_width = (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
+      total_buttons_width += glyph_width + text_width + UI_UNIT_X + UI_UNIT_X / 4;
     }
-
-    const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-    const int glyph_width = (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
-    total_buttons_width += glyph_width + text_width + UI_UNIT_X + UI_UNIT_X / 4;
   }
 
   /* Start from the given position (after external buttons) with some padding.
@@ -745,7 +683,9 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
   int xco = start_x + UI_UNIT_X / 2;
   const int yco = 0;  /* TAG_BAR is top-aligned, y=0 is the top edge */
 
-  for (TagButton &btn : data->buttons) {
+  /* Draw tag buttons (if any exist) */
+  if (!data->buttons.is_empty()) {
+    for (TagButton &btn : data->buttons) {
     const int fontid = style->widget.uifont_id;
     BLF_size(fontid, UI_UNIT_Y * 0.7f * dpi_fac);
 
@@ -806,9 +746,6 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
       but->func = tag_button_click_by_mode;
       but->func_arg1 = wm;
 
-      printf("DEBUG: Tag button created: '%s' at x=%d, y=%d, w=%d, func=%p\n",
-             btn.tag_name, xco, yco, btn_width, (void*)but->func);
-
       /* Find the mode_flags for this tag */
       if (wm && category_tag_list_is_valid(&wm->category_tags)) {
         for (const CategoryTagDef *tag_def =
@@ -826,10 +763,10 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
 
     xco += btn_width + UI_UNIT_X / 4;
   }
+  }
 
   /* Store total width for View2D scrolling */
   data->total_width = xco;
-  printf("DEBUG: === tag_bar_draw_in_layout END === total_width=%d\n", xco);
 }
 
 void buttons_tag_bar_region_listener(const wmRegionListenerParams *params)
@@ -837,13 +774,9 @@ void buttons_tag_bar_region_listener(const wmRegionListenerParams *params)
   const wmNotifier *wmn = params->notifier;
   ARegion *region = params->region;
 
-  printf("DEBUG: buttons_tag_bar_region_listener: category=%d, data=%d\n",
-         wmn->category, wmn->data);
-
   switch (wmn->category) {
     case NC_WM:
       if (wmn->data == ND_CATEGORY_GLYPHS) {
-        printf("DEBUG: buttons_tag_bar_region_listener: ND_CATEGORY_GLYPHS received!\n");
         /* Mark all tag bar data as dirty - will be updated on next draw */
         tag_bar_mark_all_dirty();
         ED_region_tag_redraw(region);

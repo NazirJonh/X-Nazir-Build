@@ -33,6 +33,8 @@
 #include "ED_screen.hh"
 #include "ED_transform.hh"
 
+#include "../interface/interface_tag_bar.hh"
+
 #include "view3d_intern.hh"
 #include "view3d_navigate.hh"
 
@@ -294,6 +296,68 @@ static void VIEW3D_OT_tag_bar_toggle(wmOperatorType *ot)
   RNA_def_string(ot->srna, "tag_name", nullptr, 64, "Tag Name", "Name of the tag to toggle");
 }
 
+/** \name Tag Bar Filter Toggle Operator
+ * \{ */
+
+static bool view3d_tag_bar_filter_toggle_poll(bContext *C)
+{
+  const ScrArea *area = CTX_wm_area(C);
+  return area && area->spacetype == SPACE_VIEW3D;
+}
+
+static wmOperatorStatus view3d_tag_bar_filter_toggle_exec(bContext *C, wmOperator * /*op*/)
+{
+  ScrArea *area = CTX_wm_area(C);
+  if (!area || area->spacetype != SPACE_VIEW3D) {
+    return OPERATOR_CANCELLED;
+  }
+
+  View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+  if (!v3d) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Get runtime data for saving/restoring tags */
+  using namespace blender::ui;
+  TagBarRuntimeData *data = get_tag_bar_data_global(C);
+  if (!data) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool is_filter_active = (v3d->active_tag_filter_tags[0] != '\0');
+
+  if (is_filter_active) {
+    /* Filter ACTIVE -> INACTIVE: Save tags and clear */
+    STRNCPY(data->saved_tags, v3d->active_tag_filter_tags);
+    v3d->active_tag_filter_tags[0] = '\0';
+  }
+  else {
+    /* Filter INACTIVE -> ACTIVE: Restore saved tags */
+    if (data->saved_tags[0] != '\0') {
+      STRNCPY(v3d->active_tag_filter_tags, data->saved_tags);
+    }
+    /* If no saved tags, filter remains empty - user must select tags */
+  }
+
+  /* Trigger redraw to update UI */
+  WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  ED_region_tag_redraw(CTX_wm_region(C));
+
+  return OPERATOR_FINISHED;
+}
+
+static void VIEW3D_OT_tag_bar_filter_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Tag Filtering";
+  ot->idname = "VIEW3D_OT_tag_bar_filter_toggle";
+  ot->description = "Toggle tag filtering on/off (when off, all categories are shown)";
+
+  ot->exec = view3d_tag_bar_filter_toggle_exec;
+  ot->poll = view3d_tag_bar_filter_toggle_poll;
+
+  ot->flag = OPTYPE_REGISTER;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -353,6 +417,7 @@ void view3d_operatortypes()
   WM_operatortype_append(VIEW3D_OT_copybuffer);
   WM_operatortype_append(VIEW3D_OT_pastebuffer);
   WM_operatortype_append(VIEW3D_OT_tag_bar_toggle);
+  WM_operatortype_append(VIEW3D_OT_tag_bar_filter_toggle);
 
   WM_operatortype_append(VIEW3D_OT_object_mode_pie_or_toggle);
 

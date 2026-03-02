@@ -1203,6 +1203,9 @@ class VIEW3D_HT_tag_bar_tags(Header):
 
         tags_sorted = sorted(wm.category_tags, key=lambda t: (-tag_use_count.get(t.name, 0), t.name))
 
+        # Create a row for tag buttons and filter toggle with compact spacing
+        row = layout.row(align=True)
+
         for tag in tags_sorted:
             glyph = glyph_display(tag.glyph)
             if not glyph:
@@ -1212,7 +1215,7 @@ class VIEW3D_HT_tag_bar_tags(Header):
             depress = tag.name in active_tags_set
 
             print(f"DEBUG: Creating tag button: tag.name={tag.name}, depress={depress}")
-            op = layout.tag_button(
+            op = row.tag_button(
                 "view3d.tag_bar_toggle",
                 tag_name=tag.name,
                 glyph=glyph,
@@ -1222,6 +1225,11 @@ class VIEW3D_HT_tag_bar_tags(Header):
                 depress=depress,
             )
             print(f"DEBUG: tag_button returned: {op}, type={type(op)}")
+
+        # Filter toggle button - same row as tags for compact spacing
+        is_filter_active = bool(active_tags)
+        depress = is_filter_active
+        row.operator("view3d.tag_bar_filter_toggle", text="", icon='FILTER', depress=depress)
 
 
 

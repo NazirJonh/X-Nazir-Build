@@ -5839,26 +5839,23 @@ class VIEW3D_OT_category_tabs_settings(Operator):
         else:  # TEXT_ONLY
             layout.prop(view, "category_tabs_zoom_text", text="Text Size")
 
-        # Show active tab name option - only enabled in Icon mode
-        layout.separator()
-        row = layout.row()
-        row.active = view.category_tabs_display_mode == 'GLYPHS_ONLY'
-        row.prop(view, "category_tabs_show_active_name", text="Show Active Tab Name")
+        # Show active tab name option - only in Icon mode
+        if view.category_tabs_display_mode == 'GLYPHS_ONLY':
+            layout.separator()
+            layout.prop(view, "category_tabs_show_active_name", text="Show Active Tab Name")
 
-        # Show color indicator option - only enabled in Text mode
-        row = layout.row()
-        row.active = view.category_tabs_display_mode == 'TEXT_ONLY'
-        row.prop(view, "category_tabs_text_mode_show_color_indicator", text="Show Color Indicator")
+        # Show color indicator option - only in Text mode
+        if view.category_tabs_display_mode == 'TEXT_ONLY':
+            layout.separator()
+            layout.prop(view, "category_tabs_text_mode_show_color_indicator", text="Show Color Indicator")
 
-        # Show colored text option - only enabled in Text mode
-        row = layout.row()
-        row.active = view.category_tabs_display_mode == 'TEXT_ONLY'
-        row.prop(view, "category_tabs_text_mode_show_colored_text", text="Show Colored Text")
+        # Show colored text option - only in Text mode
+        if view.category_tabs_display_mode == 'TEXT_ONLY':
+            layout.prop(view, "category_tabs_text_mode_show_colored_text", text="Show Colored Text")
 
-        # Show drag tooltips option - only enabled in Icon mode
-        row = layout.row()
-        row.active = view.category_tabs_display_mode == 'GLYPHS_ONLY'
-        row.prop(view, "category_tabs_show_drag_tooltips", text="Show Drag Tooltips")
+        # Show drag tooltips option - only in Icon mode
+        if view.category_tabs_display_mode == 'GLYPHS_ONLY':
+            layout.prop(view, "category_tabs_show_drag_tooltips", text="Show Drag Tooltips")
 
         # Allow editing category data
         layout.separator()

@@ -2795,9 +2795,7 @@ int handler_panel_region(bContext *C,
         if (drag_delta_y > CATEGORY_DRAG_THRESHOLD_PX ||
             time_elapsed > CATEGORY_DRAG_DELAY_SEC)
         {
-          if (U.category_tabs_allow_edit) {
-             return WM_UI_HANDLER_CONTINUE;
-           }
+          /* Drag & drop is always allowed, independent of Allow Edit Category Data setting. */
 
           /* Start the drag operator */
           wmOperatorType *ot = WM_operatortype_find("UI_OT_category_tab_drag", true);

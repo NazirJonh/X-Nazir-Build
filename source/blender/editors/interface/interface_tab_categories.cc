@@ -2720,9 +2720,7 @@ static bool category_tab_drag_poll(bContext *C)
   if (!panel_category_tabs_is_visible(region)) {
     return false;
   }
-  if (U.category_tabs_allow_edit) {
-    return false;
-  }
+  /* Drag & drop is always allowed, independent of Allow Edit Category Data setting. */
   return true;
 }
 

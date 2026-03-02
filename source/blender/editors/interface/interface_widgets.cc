@@ -4876,9 +4876,9 @@ static void widget_draw_tag(const bContext *C,
 
     /* Set fully opaque background for inactive state (override theme transparency) */
     if (!(state->but_flag & (UI_HOVER | UI_SELECT))) {
-     wcol_box.inner[0] = 50;  /* R */
-    wcol_box.inner[1] = 50;  /* G */
-    wcol_box.inner[2] = 50;  /* B */     
+      wcol_box.inner[0] = 35;  /* R */
+      wcol_box.inner[1] = 35;  /* G */
+      wcol_box.inner[2] = 35;  /* B */     
       wcol_box.inner[3] = 255;  /* Fully opaque background */
     }
 
@@ -4886,14 +4886,14 @@ static void widget_draw_tag(const bContext *C,
     if (state->but_flag & UI_SELECT) {
       /* Keep white outline for active button (not theme outline) */
       /* Light gray background for active button (instead of theme blue) */
-      wcol_box.inner[0] = 70;  /* R */
-      wcol_box.inner[1] = 70;  /* G */
-      wcol_box.inner[2] = 70;  /* B */
+      wcol_box.inner[0] = 60;  /* R */
+      wcol_box.inner[1] = 60;  /* G */
+      wcol_box.inner[2] = 60;  /* B */
       wcol_box.inner[3] = 255;  /* A - fully opaque */
       /* Use theme outline color for active button and darken it by 56% */
-      wcol_box.outline[0] = uchar(tui->editor_outline_active[0] * 0.56f);
-      wcol_box.outline[1] = uchar(tui->editor_outline_active[1] * 0.56f);
-      wcol_box.outline[2] = uchar(tui->editor_outline_active[2] * 0.56f);
+      wcol_box.outline[0] = uchar(tui->editor_outline_active[0] * 0.54f);
+      wcol_box.outline[1] = uchar(tui->editor_outline_active[1] * 0.54f);
+      wcol_box.outline[2] = uchar(tui->editor_outline_active[2] * 0.54f);
       wcol_box.outline[3] = 255;
     }
 

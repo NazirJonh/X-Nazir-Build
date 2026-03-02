@@ -972,9 +972,9 @@ struct UserDef {
   /** Lock editing of category tab data (name, glyph, color). When true, editing is disabled. */
   char category_tabs_allow_edit = false;
   /** Show color indicator bar in Text mode for categories with custom glyph colors. */
-  char category_tabs_text_mode_show_color_indicator = true;
+  char category_tabs_text_mode_show_color_indicator = false;
   /** Show colored text in Text mode for categories with custom glyph colors. */
-  char category_tabs_text_mode_show_colored_text = true;
+  char category_tabs_text_mode_show_colored_text = false;
   char _pad7[2] = {0, 0};
   /**
    * Setting for UI line width.

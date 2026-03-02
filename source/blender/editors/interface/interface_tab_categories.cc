@@ -1875,10 +1875,18 @@ static void ui_panel_category_draw_content(
   else {
     uchar text_color[3];
     /* Use custom glyph color even for fallback letters or when in icon-only mode.
-     * Respect the 'Show Colored Text' preference in Text mode. */
+     * Respect the 'Show Colored Text' preference in Text mode.
+     * For active tab in TEXT_ONLY mode with colored text enabled: use standard color
+     * and show color indicator instead. */
     bool use_custom_color = !is_zero_v3(glyph_color);
-    if (display_mode == USER_CATEGORY_TABS_TEXT_ONLY && !U.category_tabs_text_mode_show_colored_text) {
-      use_custom_color = false;
+    if (display_mode == USER_CATEGORY_TABS_TEXT_ONLY) {
+      if (!U.category_tabs_text_mode_show_colored_text) {
+        use_custom_color = false;
+      }
+      else if (is_active) {
+        /* Active tab: use standard color, color indicator will be shown instead. */
+        use_custom_color = false;
+      }
     }
 
     if (use_custom_color) {
@@ -1913,21 +1921,39 @@ static void ui_panel_category_draw_content(
 /**
  * Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color.
  * This is used both for regular tabs and during drag & drop.
+ * When 'Show Colored Text' is enabled, only draw indicator for the active tab.
  */
 static void draw_category_tab_color_indicator(const rcti *rct,
                                                 const float glyph_color[3],
                                                 const bool is_left,
                                                 const eUserPref_CategoryTabsDisplayMode display_mode,
-                                                const bool show_color_indicator)
+                                                const bool show_color_indicator,
+                                                const bool is_active)
 {
-  /* Only draw indicator in TEXT_ONLY mode when setting is enabled. */
-  if (display_mode != USER_CATEGORY_TABS_TEXT_ONLY || !show_color_indicator) {
+  /* Only draw indicator in TEXT_ONLY mode. */
+  if (display_mode != USER_CATEGORY_TABS_TEXT_ONLY) {
     return;
   }
 
   /* Check if custom glyph color is assigned (non-zero means custom color set). */
   if (glyph_color[0] == 0.0f && glyph_color[1] == 0.0f && glyph_color[2] == 0.0f) {
     return;
+  }
+
+  /* Two modes for showing indicator:
+   * 1. When 'Show Colored Text' is enabled: show indicator ONLY for active tab.
+   * 2. When 'Show Colored Text' is disabled: respect 'Show Color Indicator' for all tabs. */
+  if (U.category_tabs_text_mode_show_colored_text) {
+    /* Colored text mode: indicator only for active tab. */
+    if (!is_active) {
+      return;
+    }
+  }
+  else {
+    /* Standard mode: use Show Color Indicator setting. */
+    if (!show_color_indicator) {
+      return;
+    }
   }
 
   const int indicator_thickness = round_fl_to_int(1.0f * UI_SCALE_FAC);
@@ -2309,7 +2335,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
       /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
       draw_category_tab_color_indicator(
-          rct, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator);
+          rct, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator, is_active);
 
       if (!region->overlap) {
         pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
@@ -2517,7 +2543,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
       /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
       draw_category_tab_color_indicator(
-          &drag_rect, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator);
+          &drag_rect, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator, true);
 
       const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
       const rcti *rct = &drag_rect;

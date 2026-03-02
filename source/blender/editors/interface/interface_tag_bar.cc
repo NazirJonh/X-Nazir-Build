@@ -38,6 +38,7 @@
 #include "ED_screen.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_c.hh"
 #include "UI_interface_icons.hh"
 #include "UI_resources.hh"
 
@@ -344,6 +345,7 @@ void tag_button_click_by_mode(bContext *C, void *arg1, void *arg2)
 {
   wmWindowManager *wm = static_cast<wmWindowManager *>(arg1);
   const int mode_flags = POINTER_AS_INT(arg2);
+  (void)mode_flags; /* Unused - deprecated function */
 
   /* Get View3D to update the filter mask */
   ScrArea *area = CTX_wm_area(C);
@@ -644,6 +646,7 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
  */
 void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, int start_x)
 {
+  (void)region; /* Reserved for future use */
   wmWindowManager *wm = CTX_wm_manager(C);
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
 
@@ -807,17 +810,93 @@ void buttons_tag_bar_region_message_subscribe(const wmRegionMessageSubscribePara
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Tag Order Tree View
+ * \{ */
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Tag Bar Filter Popover Panel
  * \{ */
 
 /**
  * Draw callback for the tag bar filter popover panel.
- * This panel provides additional filter options that can be accessed from the tag bar.
+ * This panel provides tag order management with UIList.
  */
-static void tag_bar_filter_popover_panel_draw(const bContext * /*C*/, Panel *panel)
+static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
 {
   ui::Layout &layout = *panel->layout;
-  layout.label(IFACE_("Pop-over работает!"), ICON_NONE);
+
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (!wm || !category_tag_list_is_valid(&wm->category_tags)) {
+    layout.label(IFACE_("No tags available"), ICON_NONE);
+    return;
+  }
+
+  /* Header with info */
+  layout.label(IFACE_("Tag Order Management"), ICON_NONE);
+  layout.separator();
+
+  /* Create RNA pointer for window manager */
+  PointerRNA wm_ptr = RNA_pointer_create_discrete(&wm->id, RNA_WindowManager, wm);
+
+  /* Calculate UIList size - show all tags but max 16 visible rows */
+  int tag_count = BLI_listbase_count(&wm->category_tags);
+  int visible_rows = tag_count > 16 ? 16 : tag_count;
+
+  /* UIList with tags */
+  ui::Layout &row = layout.row(false);
+  ui::Layout &list_col = row.column(true);
+
+  template_list(&list_col,
+                C,
+                "VIEW3D_UL_tag_order_list",  /* UIList type name */
+                "tag_order_list",             /* Unique list ID */
+                &wm_ptr,
+                "category_tags",             /* Collection property */
+                &wm_ptr,
+                "category_tags_active_index", /* Active index property */
+                nullptr,                     /* item_dyntip_propname */
+                visible_rows,                /* rows - show all tags (up to 16) */
+                16,                          /* maxrows - always 16 */
+                0,                           /* layout_type (UILST_LAYOUT_DEFAULT = 0) */
+                TEMPLATE_LIST_FLAG_NONE);    /* flags */
+
+  /* Move buttons column */
+  ui::Layout &button_col = row.column(true);
+
+  /* Move Up button - simple op call */
+  button_col.op("view3d.tag_move_up", "", ICON_TRIA_UP, wm::OpCallContext::ExecDefault, UI_ITEM_NONE);
+
+  /* Move Down button - simple op call */
+  button_col.op("view3d.tag_move_down", "", ICON_TRIA_DOWN, wm::OpCallContext::ExecDefault, UI_ITEM_NONE);
+
+  button_col.separator();
+
+  /* New Tag button - uses centered popup wrapper */
+  PointerRNA new_tag_ptr = button_col.op("wm.centered_popup_operator_wrapper",
+                                          "",
+                                          ICON_ADD,
+                                          wm::OpCallContext::InvokeDefault,
+                                          UI_ITEM_NONE);
+  RNA_string_set(&new_tag_ptr, "operator_idname", "wm.category_tag_create");
+
+  /* Delete Tag button - deletes currently selected tag */
+  button_col.op("wm.category_tag_delete",
+                "",
+                ICON_REMOVE,
+                wm::OpCallContext::InvokeDefault,
+                UI_ITEM_NONE);
+
+  button_col.separator();
+
+  /* Context menu button */
+  button_col.op("view3d.tag_context_menu", "", ICON_DOWNARROW_HLT, wm::OpCallContext::InvokeDefault, UI_ITEM_NONE);
+
+  button_col.separator();
+
+  /* Open preferences for full tag management */
+  button_col.op("screen.userpref_show", "", ICON_PREFERENCES, wm::OpCallContext::ExecDefault, UI_ITEM_NONE);
 }
 
 /**

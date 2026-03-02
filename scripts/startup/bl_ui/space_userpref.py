@@ -1991,6 +1991,41 @@ def _save_tags_to_json():
     _save_glyph_mappings_to_file()
 
 
+def _save_tag_order_only():
+    """Save only tag order to JSON without rebuilding WM collection.
+    This avoids potential memory issues when moving tags."""
+    global _all_tags_cache, _tag_order_cache, _category_orders_cache
+
+    filepath = _get_glyphs_filepath()
+    if not filepath:
+        print("[TAG ORDER] No filepath for saving")
+        return False
+
+    # Create backup
+    create_backup(filepath)
+
+    try:
+        # Load existing data to preserve other fields
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        # If load fails, create minimal data
+        data = {'version': CURRENT_JSON_VERSION}
+
+    # Update tag_order from cache
+    data['tag_order'] = list(_tag_order_cache)
+
+    # Save back to file
+    try:
+        with safe_file_write(filepath) as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print(f"[TAG ORDER] Saved order: {_tag_order_cache}")
+        return True
+    except Exception as e:
+        print(f"[TAG ORDER] Save failed: {e}")
+        return False
+
+
 class CategoryTagItem(PropertyGroup):
     """Single tag with glyph and color."""
     name: bpy.props.StringProperty(

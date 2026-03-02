@@ -1917,7 +1917,7 @@ void ED_spacetype_view3d()
   art->snap_size = view3d_tag_bar_region_snap_size;
   BLI_addhead(&st->regiontypes, art);
 
-  /* Register tag bar panels (including filter popover) */
+  /* Register tag bar filter popover panel (with UIList) */
   blender::ui::tag_bar_filter_popover_panel_register(art);
 
   /* regions: tool(bar) */

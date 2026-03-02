@@ -3292,7 +3292,10 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
                                        const char *glyph,
                                        const float *color,
                                        bool is_active,
-                                       const char *tooltip)
+                                       const char *tooltip,
+                                       const char *context_menu_operator,
+                                       const char *operator_param_name,
+                                       const char *operator_param_value)
 {
   using namespace blender::ui;
 
@@ -3319,6 +3322,17 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
   /* Cast to ButtonTag for access to tooltip_storage */
   BLI_assert(raw_but->type == ButtonType::Tag);
   ButtonTag *tag_but = static_cast<ButtonTag*>(raw_but);
+
+  /* Save context menu parameters */
+  if (context_menu_operator) {
+    tag_but->context_menu_operator = BLI_strdup(context_menu_operator);
+  }
+  if (operator_param_name) {
+    tag_but->operator_param_name = BLI_strdup(operator_param_name);
+  }
+  if (operator_param_value) {
+    tag_but->operator_param_value = BLI_strdup(operator_param_value);
+  }
 
   /* Find operator type */
   wmOperatorType *ot = WM_operatortype_find(opname, false);

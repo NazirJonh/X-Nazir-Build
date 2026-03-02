@@ -1594,7 +1594,10 @@ def km_view3d_generic(params):
             params,
             toolbar_key={"type": 'T', "value": 'PRESS'},
             sidebar_key={"type": 'N', "value": 'PRESS'},
-        )
+        ),
+        # Tag Bar toggle.
+        ("wm.context_toggle", {"type": 'T', "value": 'PRESS', "shift": True},
+         {"properties": [("data_path", "space_data.show_region_tag_bar")]})
     ])
 
     return keymap
@@ -5398,11 +5401,12 @@ def km_sculpt(params):
              ("asset_library_type", 'ESSENTIALS'),
              ("relative_asset_identifier", "brushes/essentials_brushes-mesh_sculpt.blend/Brush/Grab"),
          ]}),
-        ("brush.asset_activate", {"type": 'T', "value": 'PRESS', "shift": True},
-         {"properties": [
-             ("asset_library_type", 'ESSENTIALS'),
-             ("relative_asset_identifier", "brushes/essentials_brushes-mesh_sculpt.blend/Brush/Scrape/Fill"),
-         ]}),
+        # Disabled: Shift + T is now used for Tag Bar toggle.
+        # ("brush.asset_activate", {"type": 'T', "value": 'PRESS', "shift": True},
+        #  {"properties": [
+        #      ("asset_library_type", 'ESSENTIALS'),
+        #      ("relative_asset_identifier", "brushes/essentials_brushes-mesh_sculpt.blend/Brush/Scrape/Fill"),
+        #  ]}),
         ("brush.asset_activate", {"type": 'C', "value": 'PRESS'},
          {"properties": [
              ("asset_library_type", 'ESSENTIALS'),

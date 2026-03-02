@@ -1065,6 +1065,39 @@ static void rna_Space_show_region_asset_shelf_update(bContext *C, PointerRNA *pt
       C, ptr, RGN_TYPE_ASSET_SHELF_HEADER, RGN_FLAG_HIDDEN);
 }
 
+/* Tag Bar Region */
+static bool rna_Space_show_region_tag_bar_get(PointerRNA *ptr)
+{
+  return !rna_Space_bool_from_region_flag_get_by_type(ptr, RGN_TYPE_TAG_BAR, RGN_FLAG_HIDDEN);
+}
+static void rna_Space_show_region_tag_bar_set(PointerRNA *ptr, bool value)
+{
+  rna_Space_bool_from_region_flag_set_by_type(ptr, RGN_TYPE_TAG_BAR, RGN_FLAG_HIDDEN, !value);
+}
+static int rna_Space_show_region_tag_bar_editable(const PointerRNA *ptr, const char **r_info)
+{
+  ScrArea *area = rna_area_from_space(ptr);
+  ARegion *region = BKE_area_find_region_type(area, RGN_TYPE_TAG_BAR);
+
+  if (!region) {
+    return 0;
+  }
+
+  if (region->flag & RGN_FLAG_POLL_FAILED) {
+    if (r_info) {
+      *r_info = N_("The tag bar is not available in the current context");
+    }
+    return 0;
+  }
+
+  return PROP_EDITABLE;
+}
+
+static void rna_Space_show_region_tag_bar_update(bContext *C, PointerRNA *ptr)
+{
+  rna_Space_bool_from_region_flag_update_by_type(C, ptr, RGN_TYPE_TAG_BAR, RGN_FLAG_HIDDEN);
+}
+
 /** \} */
 
 static bool rna_Space_view2d_sync_get(PointerRNA *ptr)
@@ -4030,6 +4063,20 @@ static void rna_def_space_generic_show_region_toggles(StructRNA *srna, int regio
         "brushes in paint modes, or poses in Pose Mode)");
     RNA_def_property_update(prop, 0, "rna_Space_show_region_asset_shelf_update");
   }
+  if (region_type_mask & (1 << RGN_TYPE_TAG_BAR)) {
+    region_type_mask &= ~(1 << RGN_TYPE_TAG_BAR);
+
+    prop = RNA_def_property(srna, "show_region_tag_bar", PROP_BOOLEAN, PROP_NONE);
+    RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+    RNA_def_property_boolean_funcs(
+        prop, "rna_Space_show_region_tag_bar_get", "rna_Space_show_region_tag_bar_set");
+    RNA_def_property_editable_func(prop, "rna_Space_show_region_tag_bar_editable");
+    RNA_def_property_ui_text(
+        prop,
+        "Tag Bar",
+        "Display a region with tag buttons for filtering and quick access to categories");
+    RNA_def_property_update(prop, 0, "rna_Space_show_region_tag_bar_update");
+  }
   BLI_assert(region_type_mask == 0);
 }
 
@@ -5559,7 +5606,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   rna_def_space_generic_show_region_toggles(srna,
                                             ((1 << RGN_TYPE_TOOL_HEADER) | (1 << RGN_TYPE_TOOLS) |
                                              (1 << RGN_TYPE_UI) | (1 << RGN_TYPE_HUD) |
-                                             (1 << RGN_TYPE_ASSET_SHELF)));
+                                             (1 << RGN_TYPE_ASSET_SHELF) | (1 << RGN_TYPE_TAG_BAR)));
 
   prop = RNA_def_property(srna, "camera", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_EDITABLE);

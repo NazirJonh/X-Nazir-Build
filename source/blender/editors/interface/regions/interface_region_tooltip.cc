@@ -1091,7 +1091,10 @@ static std::unique_ptr<TooltipData> ui_tooltip_data_from_button_or_extra_icon(
       tooltip_text_field_add(*data, {}, {}, TIP_STYLE_SPACER, TIP_LC_NORMAL);
     }
     else {
-      but_tip = ui_tooltip_with_period(but_tip);
+      /* Tag buttons show tag names as tooltips - don't add period for them */
+      if (but->type != ButtonType::Tag) {
+        but_tip = ui_tooltip_with_period(but_tip);
+      }
       tooltip_text_field_add(*data, but_tip, {}, TIP_STYLE_HEADER, TIP_LC_NORMAL);
       if (but_label.empty()) {
         tooltip_text_field_add(*data, {}, {}, TIP_STYLE_SPACER, TIP_LC_NORMAL);

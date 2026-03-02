@@ -119,10 +119,26 @@ void category_tab_color_preset_to_rgb(const int preset, float r_color[3])
 /** \name Category Tab Reset Operator
  * \{ */
 
+static wmOperatorStatus category_tab_reset_invoke(bContext *C,
+                                                   wmOperator *op,
+                                                   const wmEvent *event)
+{
+  return WM_operator_props_popup_confirm_ex(
+      C, op, event,
+      IFACE_("Reset Category Data"),
+      CTX_IFACE_(BLT_I18NCONTEXT_OPERATOR_DEFAULT, "Confirm"));
+}
+
 static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
 {
   char category[64];
   RNA_string_get(op->ptr, "category", category);
+
+  /* Read checkbox flags for selective reset */
+  const bool reset_name = RNA_boolean_get(op->ptr, "reset_name");
+  const bool reset_glyph = RNA_boolean_get(op->ptr, "reset_glyph");
+  const bool reset_color = RNA_boolean_get(op->ptr, "reset_color");
+  const bool reset_tag = RNA_boolean_get(op->ptr, "reset_tag");
 
   wmWindowManager *wm = CTX_wm_manager(C);
   ScrArea *area = CTX_wm_area(C);
@@ -225,7 +241,8 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     }
   }
 
-  if (category_tab_current_dialog_op) {
+  /* Reset Name (Display Name) */
+  if (reset_name && category_tab_current_dialog_op) {
     /* Use stored default_display_name if available, otherwise find appropriate name */
     if (default_display_name != nullptr && default_display_name[0] != '\0') {
       RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", default_display_name);
@@ -248,45 +265,57 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
         RNA_string_set(category_tab_current_dialog_op->ptr, "display_name", category);
       }
     }
+  }
 
-    if (default_glyph) {
-      /* Convert UTF-8 glyph back to hex code for the glyph field */
-      char glyph_hex[16];
-      utf8_to_hex_codepoint(default_glyph, glyph_hex, sizeof(glyph_hex));
-      RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", glyph_hex);
+  if (category_tab_current_dialog_op) {
+    /* Reset Glyph */
+    if (reset_glyph) {
+      if (default_glyph) {
+        /* Convert UTF-8 glyph back to hex code for the glyph field */
+        char glyph_hex[16];
+        utf8_to_hex_codepoint(default_glyph, glyph_hex, sizeof(glyph_hex));
+        RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", glyph_hex);
+      }
+      else {
+        RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", "");
+      }
     }
-    else {
-      RNA_string_set(category_tab_current_dialog_op->ptr, "glyph", "");
-    }
+
     /* Reset color to black */
-    RNA_float_set_array(category_tab_current_dialog_op->ptr, "color", default_color);
+    if (reset_color) {
+      RNA_float_set_array(category_tab_current_dialog_op->ptr, "color", default_color);
+    }
     RNA_string_set(category_tab_current_dialog_op->ptr, "glyph_search", "");
 
     /* Trigger live update to refresh preview and override */
-    category_tab_edit_live_update_cb(C, category_tab_current_dialog_op, 0);
+    if (reset_name || reset_glyph || reset_color) {
+      category_tab_edit_live_update_cb(C, category_tab_current_dialog_op, 0);
+    }
   }
 
   /* Reset tags: set empty tags in WM override.
    * This updates the UI immediately. If user clicks Cancel, original tags will be restored. */
-  CategoryGlyphItem *reset_item = nullptr;
-  for (CategoryGlyphItem *it =
-           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-       it;
-       it = static_cast<CategoryGlyphItem *>(it->next))
-  {
-    if (STREQ(it->category, category)) {
-      reset_item = it;
-      break;
+  if (reset_tag) {
+    CategoryGlyphItem *reset_item = nullptr;
+    for (CategoryGlyphItem *it =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+         it;
+         it = static_cast<CategoryGlyphItem *>(it->next))
+    {
+      if (STREQ(it->category, category)) {
+        reset_item = it;
+        break;
+      }
     }
-  }
 
-  if (!reset_item) {
-    reset_item = MEM_new<CategoryGlyphItem>(__func__);
-    STRNCPY(reset_item->category, category);
-    BLI_addtail(&wm->category_glyph_overrides, reset_item);
+    if (!reset_item) {
+      reset_item = MEM_new<CategoryGlyphItem>(__func__);
+      STRNCPY(reset_item->category, category);
+      BLI_addtail(&wm->category_glyph_overrides, reset_item);
+    }
+    /* Clear tags in WM override - this updates UI to show no tags selected */
+    reset_item->tags[0] = '\0';
   }
-  /* Clear tags in WM override - this updates UI to show no tags selected */
-  reset_item->tags[0] = '\0';
 
   /* Force redraw of the popup to update tag UI */
   if (category_tab_popup_block) {
@@ -329,35 +358,45 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   WM_main_add_notifier(NC_WINDOW, nullptr);
   WM_main_add_notifier(NC_SCREEN | NA_EDITED, nullptr);
 
-  if (default_display_name != nullptr && default_display_name[0] != '\0') {
-    RNA_string_set(op->ptr, "display_name", default_display_name);
-  }
-  else {
-    /* If category is a single glyph, find panel label for display name */
-    if (is_single_glyph_str(category)) {
-      ARegion *region = CTX_wm_region(C);
-      const char *panel_label = find_panel_label_for_category(region, category);
-      if (panel_label) {
-        RNA_string_set(op->ptr, "display_name", panel_label);
-      }
-      else {
-        /* For glyph categories without panel label, leave display_name empty */
-        RNA_string_set(op->ptr, "display_name", "");
-      }
+  /* Reset Name in op->ptr */
+  if (reset_name) {
+    if (default_display_name != nullptr && default_display_name[0] != '\0') {
+      RNA_string_set(op->ptr, "display_name", default_display_name);
     }
     else {
-      RNA_string_set(op->ptr, "display_name", category);
+      /* If category is a single glyph, find panel label for display name */
+      if (is_single_glyph_str(category)) {
+        ARegion *region = CTX_wm_region(C);
+        const char *panel_label = find_panel_label_for_category(region, category);
+        if (panel_label) {
+          RNA_string_set(op->ptr, "display_name", panel_label);
+        }
+        else {
+          /* For glyph categories without panel label, leave display_name empty */
+          RNA_string_set(op->ptr, "display_name", "");
+        }
+      }
+      else {
+        RNA_string_set(op->ptr, "display_name", category);
+      }
     }
   }
-  if (default_glyph) {
-    char glyph_hex[16];
-    utf8_to_hex_codepoint(default_glyph, glyph_hex, sizeof(glyph_hex));
-    RNA_string_set(op->ptr, "glyph", glyph_hex);
+  /* Reset Glyph in op->ptr */
+  if (reset_glyph) {
+    if (default_glyph) {
+      char glyph_hex[16];
+      utf8_to_hex_codepoint(default_glyph, glyph_hex, sizeof(glyph_hex));
+      RNA_string_set(op->ptr, "glyph", glyph_hex);
+    }
+    else {
+      RNA_string_set(op->ptr, "glyph", "");
+    }
   }
-  else {
-    RNA_string_set(op->ptr, "glyph", "");
+  /* Reset Color in op->ptr */
+  if (reset_color) {
+    RNA_float_set_array(op->ptr, "color", default_color);
   }
-  RNA_float_set_array(op->ptr, "color", default_color);
+  /* Reset glyph_search (always reset when any reset is performed) */
   RNA_string_set(op->ptr, "glyph_search", "");
 
   /* Force redraw of the popup to update glyph preview */
@@ -410,16 +449,30 @@ static void SCREEN_OT_category_tab_reset(wmOperatorType *ot)
   ot->idname = "SCREEN_OT_category_tab_reset";
   ot->description = "Reset category tab to default";
 
+  ot->invoke = category_tab_reset_invoke;
   ot->exec = category_tab_reset_exec;
   ot->poll = category_tab_edit_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
-  RNA_def_string(ot->srna, "category", nullptr, 64, "Category", "Category identifier");
-  RNA_def_string(ot->srna, "display_name", nullptr, 32, "Display Name", "Reset display name");
-  RNA_def_string(ot->srna, "glyph", nullptr, 8, "Glyph", "Reset glyph");
-  RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Reset search");
-  RNA_def_float_color(ot->srna, "color", 3, nullptr, 0.0f, 1.0f, "Color", "Reset color", 0.0f, 1.0f);
+  /* Hidden properties for data passing (not shown in popup UI) */
+  PropertyRNA *prop;
+  prop = RNA_def_string(ot->srna, "category", nullptr, 64, "Category", "Category identifier");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_string(ot->srna, "display_name", nullptr, 32, "Display Name", "Reset display name");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_string(ot->srna, "glyph", nullptr, 8, "Glyph", "Reset glyph");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Reset search");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_float_color(ot->srna, "color", 3, nullptr, 0.0f, 1.0f, "Color", "Reset color", 0.0f, 1.0f);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  /* Checkbox options for selective reset (all default to true) - these are shown in popup */
+  RNA_def_boolean(ot->srna, "reset_name", true, "Name", "Reset category name");
+  RNA_def_boolean(ot->srna, "reset_glyph", true, "Glyph", "Reset glyph");
+  RNA_def_boolean(ot->srna, "reset_color", true, "Color", "Reset color");
+  RNA_def_boolean(ot->srna, "reset_tag", true, "Tag", "Reset tags");
 }
 
 /** \} */

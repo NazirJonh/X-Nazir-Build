@@ -58,6 +58,8 @@ struct TagBarRuntimeData {
   int scroll_offset = 0;     /**< Current scroll offset */
   int max_scroll = 0;        /**< Maximum scroll value */
   bool needs_update = true;  /**< Force update on first access */
+
+  char saved_tags[256] = ""; /**< Temporary storage for tags when filter is disabled */
 };
 
 /**

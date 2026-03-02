@@ -33,27 +33,20 @@ namespace blender {
 /* Ensure View3D spaces have the TAG_BAR region for category filtering. */
 static void do_versions_ensure_view3d_has_tag_bar_region(Main *bmain)
 {
-  printf("DO_VERSION: do_versions_ensure_view3d_has_tag_bar_region called!\n");
-
   int region_count = 0;
   for (bScreen &screen : bmain->screens) {
-    printf("DO_VERSION: Checking screen: %p\n", &screen);
     for (ScrArea &area : screen.areabase) {
-      printf("DO_VERSION: Checking area, spacetype=%d\n", area.spacetype);
       if (area.spacetype == SPACE_VIEW3D) {
         /* Check if TAG_BAR region already exists */
-        printf("DO_VERSION: Found VIEW_3D area, adding TAG_BAR region\n");
         ARegion *region = do_versions_ensure_region(&area.regionbase, RGN_TYPE_TAG_BAR, __func__, RGN_TYPE_TOOLS);
         /* Set up the region */
         region->regiontype = RGN_TYPE_TAG_BAR;
         region->alignment = RGN_ALIGN_TOP;  /* Top region, full width */
         region->flag = 0; /* Visible by default */
         region_count++;
-        printf("DO_VERSION: TAG_BAR region added: %p\n", region);
       }
     }
   }
-  printf("DO_VERSION: Added %d TAG_BAR regions\n", region_count);
 }
 
 /* Saving file extension is now a property of the the File Output node. So inherit this

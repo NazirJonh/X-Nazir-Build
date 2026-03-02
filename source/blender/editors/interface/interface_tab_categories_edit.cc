@@ -2051,7 +2051,17 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
 
   /* Don't show tags panel for reserved categories */
   if (!is_reserved) {
-    PanelLayout tags_panel = layout.panel(C, "tags_list", false);
+    /* Create unique panel idname per category so each category has its own collapse state */
+    char tags_panel_idname[128];
+    SNPRINTF(tags_panel_idname, "tags_list_%s", category);
+
+    /* Check if category has any active tags assigned */
+    const char *category_tags_string = category_tags_string_lookup(wm, category);
+    const bool category_has_tags = (category_tags_string && category_tags_string[0] != '\0');
+    /* Panel should be closed by default if category has tags, open if no tags */
+    const bool panel_default_closed = category_has_tags; /* true = closed, false = open */
+
+    PanelLayout tags_panel = layout.panel(C, tags_panel_idname, panel_default_closed);
 
     /* Add label, active tag glyphs, and "New Tag" button to panel header */
     if (tags_panel.header) {

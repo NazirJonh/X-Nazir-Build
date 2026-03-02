@@ -19,6 +19,7 @@
 #include "BKE_blender_copybuffer.hh"
 #include "BKE_blendfile.hh"
 #include "BKE_context.hh"
+#include "BKE_screen.hh"
 #include "BKE_report.hh"
 
 #include "BLO_readfile.hh"
@@ -274,6 +275,12 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
 
   /* Update the active tags string */
   STRNCPY_RLEN(v3d->active_tag_filter_tags, new_tags);
+
+  /* Open N-Panel (Sidebar) if it's hidden, so users can see filtered categories */
+  ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
+  if (region_ui && (region_ui->flag & RGN_FLAG_HIDDEN)) {
+    ED_region_toggle_hidden(C, region_ui);
+  }
 
   /* Trigger redraw to update category order for new tag combination */
   WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);

@@ -32,6 +32,7 @@
 #include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
+#include "BLI_time.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
@@ -81,6 +82,10 @@ wmOperator *category_tab_current_dialog_op = nullptr;
 
 /* Static pointer to popup block - needed for Save button to close popup */
 Block *category_tab_popup_block = nullptr;
+
+/* Track last closed popup time and category to prevent immediate reopen */
+double category_tab_popup_close_time = 0.0;
+char category_tab_last_closed_category[64] = "";
 
 /** \} */
 
@@ -274,10 +279,12 @@ bool extract_leading_glyph(const char *input,
 
 void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
 {
+  printf("[DEBUG CANCEL_CB] category_tab_edit_popup_cancel_cb called\n");
   wmOperator *op = static_cast<wmOperator *>(user_data);
 
   char category[64];
   RNA_string_get(op->ptr, "category", category);
+  printf("[DEBUG CANCEL_CB] Category: '%s'\n", category);
 
   /* Get original values saved when dialog was opened */
   char original_display_name[32] = "";
@@ -291,6 +298,9 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   RNA_float_get_array(op->ptr, "original_color", original_color);
   RNA_string_get(op->ptr, "original_tags", original_tags);
   original_has_override = RNA_boolean_get(op->ptr, "original_has_override");
+
+  printf("[DEBUG CANCEL_CB] original_display_name='%s', original_glyph='%s', original_has_override=%d\n",
+         original_display_name, original_glyph_hex, original_has_override);
 
   /* Convert hex glyph back to UTF-8 for restoration */
   char original_glyph_utf8[8] = "";
@@ -323,32 +333,46 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
     STRNCPY(item->glyph, original_glyph_utf8);
     copy_v3_v3(item->color, original_color);
     STRNCPY(item->tags, original_tags);
+    printf("[DEBUG CANCEL_CB] Restored original override: color=[%.2f,%.2f,%.2f]\n",
+           item->color[0], item->color[1], item->color[2]);
   }
   else {
     /* There was no override before - remove any created by live preview */
-    if (item) {
-      /* Check if override has any user changes besides tags/glyph/color/display_name */
-      bool has_changes = (item->display_name[0] != '\0' || item->glyph[0] != '\0' ||
-                          !is_zero_v3(item->color) ||
-                          (item->tags[0] != '\0' && original_tags[0] == '\0'));
+  if (item) {
+    /* Check if override has any user changes besides tags/glyph/color/display_name.
+     * Note: color is considered changed if it's not the original color.
+     */
+    bool color_changed = !is_zero_v3(item->color) && !compare_v3v3(item->color, original_color, 0.001f);
+    bool has_changes = (item->display_name[0] != '\0' || item->glyph[0] != '\0' ||
+                        color_changed ||
+                        (item->tags[0] != '\0' && original_tags[0] == '\0'));
 
-      if (!has_changes) {
-        BLI_remlink(&wm->category_glyph_overrides, item);
-        MEM_delete(item);
-      }
-      else {
-        /* Keep override but restore original values */
-        STRNCPY(item->display_name, original_display_name);
-        STRNCPY(item->glyph, original_glyph_utf8);
-        copy_v3_v3(item->color, original_color);
-        STRNCPY(item->tags, original_tags);
-      }
+    if (!has_changes) {
+      printf("[DEBUG CANCEL_CB] No changes, deleting temporary override\n");
+      BLI_remlink(&wm->category_glyph_overrides, item);
+      MEM_delete(item);
     }
+    else {
+      /* Keep override but restore original values */
+      printf("[DEBUG CANCEL_CB] Keeping override but restoring original: color=[%.2f,%.2f,%.2f]\n",
+             original_color[0], original_color[1], original_color[2]);
+      STRNCPY(item->display_name, original_display_name);
+      STRNCPY(item->glyph, original_glyph_utf8);
+      copy_v3_v3(item->color, original_color);
+      STRNCPY(item->tags, original_tags);
+    }
+  }
   }
 
   /* Clear dialog operator pointer and popup block */
   category_tab_current_dialog_op = nullptr;
   category_tab_popup_block = nullptr;
+
+  /* Record popup close time and category to prevent immediate reopen */
+  category_tab_popup_close_time = BLI_time_now_seconds();
+  STRNCPY(category_tab_last_closed_category, category);
+  printf("[DEBUG CANCEL_CB] Recorded popup close: time=%.3f, category='%s'\n",
+         category_tab_popup_close_time, category);
 
 #ifdef WITH_PYTHON
   /* Restore tags in Python _glyph_cache to revert live preview changes. */
@@ -380,13 +404,28 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   WM_global_report(RPT_INFO, "Category tab changes discarded");
 
   WM_main_add_notifier(NC_WINDOW, nullptr);
+  printf("[DEBUG CANCEL_CB] Cancel callback completed\n");
 }
 
-void category_tab_edit_popup_ok_cb(bContext * /*C*/, void * /*user_data*/, int /*retval*/)
+void category_tab_edit_popup_ok_cb(bContext *C, void *user_data, int /*retval*/)
 {
+  printf("[DEBUG OK_CB] category_tab_edit_popup_ok_cb called\n");
   /* Clear dialog operator pointer and popup block */
   category_tab_current_dialog_op = nullptr;
   category_tab_popup_block = nullptr;
+
+  /* Record popup close time and category */
+  if (user_data) {
+    wmOperator *op = static_cast<wmOperator *>(user_data);
+    char category[64];
+    RNA_string_get(op->ptr, "category", category);
+    category_tab_popup_close_time = BLI_time_now_seconds();
+    STRNCPY(category_tab_last_closed_category, category);
+    printf("[DEBUG OK_CB] Recorded popup close: time=%.3f, category='%s'\n",
+           category_tab_popup_close_time, category);
+  }
+
+  printf("[DEBUG OK_CB] OK callback completed\n");
 }
 
 /** \} */
@@ -1558,6 +1597,7 @@ void WM_OT_glyph_picker_grid(wmOperatorType *ot)
 
 Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_data)
 {
+  printf("[DEBUG BLOCK_CREATE] category_tab_edit_block_create called\n");
   wmOperator *op = static_cast<wmOperator *>(user_data);
   const uiStyle *style = style_get_dpi();
 
@@ -1574,6 +1614,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
 
   /* Store block pointer for Save button to close popup */
   category_tab_popup_block = block;
+  printf("[DEBUG BLOCK_CREATE] Created block, category_tab_popup_block = %p\n", (void *)block);
 
   /* Set up live update callback - this is the key for instant preview */
   block_func_handle_set(block, category_tab_edit_live_update_cb, op);
@@ -1597,6 +1638,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
   /* Get category for button wiring */
   char category[64];
   RNA_string_get(op->ptr, "category", category);
+  printf("[DEBUG BLOCK_CREATE] Creating block for category: '%s'\n", category);
 
   /* Get window manager for checking reserved categories */
   wmWindowManager *wm = CTX_wm_manager(C);
@@ -2341,6 +2383,64 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
                                                   wmOperator *op,
                                                   const wmEvent *event)
 {
+  /* Check if dialog was just closed for the same category to prevent immediate reopen
+   * caused by the same click that closed the popup. */
+  if (category_tab_last_closed_category[0] != '\0') {
+    double time_since_close = BLI_time_now_seconds() - category_tab_popup_close_time;
+    if (time_since_close < 0.1) {
+      /* Get category from mouse position to check if it matches */
+      ARegion *region = CTX_wm_region(C);
+      if (region && panel_category_tabs_is_visible(region)) {
+        for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+          if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
+            if (STREQ(category_tab_last_closed_category, pc_dyn.idname)) {
+              printf("[DEBUG INVOKE] BLOCKING REOPEN in invoke: time_since_close=%.3f, category='%s'\n",
+                     time_since_close, pc_dyn.idname);
+              return OPERATOR_CANCELLED;
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  printf("[DEBUG INVOKE] category_tab_edit_dialog_invoke called\n");
+  printf("[DEBUG INVOKE] category_tab_current_dialog_op = %p\n", (void *)category_tab_current_dialog_op);
+
+  /* Check if dialog is already open for the same category to prevent data corruption */
+  if (category_tab_current_dialog_op) {
+    char existing_category[64];
+    RNA_string_get(category_tab_current_dialog_op->ptr, "category", existing_category);
+    printf("[DEBUG INVOKE] Existing dialog open for category: '%s'\n", existing_category);
+
+    /* Get category from mouse position */
+    ARegion *region = CTX_wm_region(C);
+    if (region && panel_category_tabs_is_visible(region)) {
+      const int mx = event->mval[0];
+      const int my = event->mval[1];
+
+      const char *clicked_category = nullptr;
+      for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+        if (BLI_rcti_isect_pt(&pc_dyn.rect, mx, my)) {
+          clicked_category = pc_dyn.idname;
+          break;
+        }
+      }
+
+      printf("[DEBUG INVOKE] Clicked on category: '%s'\n", clicked_category ? clicked_category : "null");
+
+      /* If clicking on the same category that's already being edited, ignore */
+      if (clicked_category && STREQ(existing_category, clicked_category)) {
+        printf("[DEBUG INVOKE] SAME CATEGORY - returning CANCELLED\n");
+        return OPERATOR_CANCELLED;
+      }
+      printf("[DEBUG INVOKE] DIFFERENT CATEGORY - will open new dialog\n");
+    }
+  } else {
+    printf("[DEBUG INVOKE] No existing dialog, will open new one\n");
+  }
+
   /* Get category from mouse position */
   ARegion *region = CTX_wm_region(C);
   if (!region || !panel_category_tabs_is_visible(region)) {
@@ -2363,12 +2463,17 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
+  printf("[DEBUG INVOKE] Opening dialog for category: '%s'\n", category);
+
   /* Store category name in operator properties */
   RNA_string_set(op->ptr, "category", category);
 
   /* Check for existing override and populate properties */
   wmWindowManager *wm = CTX_wm_manager(C);
   bool has_override = false;
+  bool override_is_empty = false;
+
+  printf("[DEBUG INVOKE] Checking for existing override in category_glyph_overrides...\n");
 
   /* First check category_glyph_overrides (user changes in current session) */
   for (CategoryGlyphItem *item =
@@ -2377,6 +2482,17 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
        item = static_cast<CategoryGlyphItem *>(item->next))
   {
     if (STREQ(item->category, category)) {
+      printf("[DEBUG INVOKE] Found override in category_glyph_overrides for '%s'\n", category);
+      printf("[DEBUG INVOKE]   display_name='%s', glyph='%s'\n", item->display_name, item->glyph);
+
+      /* Check if override is empty (created by tag restore but has no actual data) */
+      if (item->display_name[0] == '\0' && item->glyph[0] == '\0' && is_zero_v3(item->color)) {
+        printf("[DEBUG INVOKE] Override is EMPTY - ignoring and will check mappings\n");
+        override_is_empty = true;
+        has_override = true; /* Mark as found but empty, so we skip checking mappings again */
+        break;
+      }
+
       /* Extract any leading glyph from display_name */
       char extracted_glyph[16];
       char clean_display_name[32];
@@ -2411,14 +2527,24 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     }
   }
 
-  /* If no override, check category_glyph_mappings (saved settings from JSON) */
-  if (!has_override) {
+  /* If no override OR override is empty, check category_glyph_mappings (saved settings from JSON) */
+  if (!has_override || override_is_empty) {
+    if (override_is_empty) {
+      printf("[DEBUG INVOKE] Override was empty, checking category_glyph_mappings for real data...\n");
+    } else {
+      printf("[DEBUG INVOKE] No override found, checking category_glyph_mappings...\n");
+    }
+    bool found_in_mappings = false;
     for (CategoryGlyphItem *item =
              static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
          item;
          item = static_cast<CategoryGlyphItem *>(item->next))
     {
       if (STREQ(item->category, category)) {
+        found_in_mappings = true;
+        printf("[DEBUG INVOKE] Found mapping in category_glyph_mappings for '%s'\n", category);
+        printf("[DEBUG INVOKE]   display_name='%s', glyph='%s', color=[%.2f,%.2f,%.2f]\n",
+               item->display_name, item->glyph, item->color[0], item->color[1], item->color[2]);
         /* Load display_name from mappings */
         if (item->display_name[0] != '\0') {
           RNA_string_set(op->ptr, "display_name", item->display_name);
@@ -2435,8 +2561,15 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
         if (!is_zero_v3(item->color)) {
           RNA_float_set_array(op->ptr, "color", item->color);
         }
+        /* When using mappings, mark as no override since data comes from JSON */
+        has_override = false;
         break;
       }
+    }
+    if (!found_in_mappings && !override_is_empty) {
+      printf("[DEBUG INVOKE] No mapping found either for '%s'\n", category);
+    } else if (override_is_empty && found_in_mappings) {
+      printf("[DEBUG INVOKE] Using data from mappings instead of empty override\n");
     }
   }
 
@@ -2493,6 +2626,9 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   RNA_float_set_array(op->ptr, "original_color", current_color);
   RNA_boolean_set(op->ptr, "original_has_override", has_override);
 
+  printf("[DEBUG INVOKE] Saved original values: display_name='%s', glyph='%s', color=[%.2f,%.2f,%.2f], has_override=%d\n",
+         current_display_name, current_glyph, current_color[0], current_color[1], current_color[2], has_override);
+
   /* Save original tags for cancel functionality - read from WM mappings/overrides */
   char original_tags[256] = "";
   const char *tags_str = nullptr;
@@ -2530,14 +2666,17 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
 
   /* Store pointer to dialog operator for Reset/Save button access */
   category_tab_current_dialog_op = op;
+  printf("[DEBUG INVOKE] Storing category_tab_current_dialog_op = %p\n", (void *)op);
 
   /* Open custom popup with live preview support using public API */
+  printf("[DEBUG INVOKE] Calling popup_block_ex...\n");
   popup_block_ex(C,
                      category_tab_edit_block_create,
                      category_tab_edit_popup_ok_cb,
                      category_tab_edit_popup_cancel_cb,
                      op,
                      op);
+  printf("[DEBUG INVOKE] popup_block_ex returned, returning OPERATOR_RUNNING_MODAL\n");
 
   return OPERATOR_RUNNING_MODAL;
 }

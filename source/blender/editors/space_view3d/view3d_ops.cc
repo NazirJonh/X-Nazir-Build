@@ -196,7 +196,7 @@ static bool view3d_tag_bar_toggle_poll(bContext *C)
   return area && area->spacetype == SPACE_VIEW3D;
 }
 
-static wmOperatorStatus view3d_tag_bar_toggle_exec(bContext *C, wmOperator *op)
+static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   ScrArea *area = CTX_wm_area(C);
   if (!area || area->spacetype != SPACE_VIEW3D) {
@@ -210,6 +210,9 @@ static wmOperatorStatus view3d_tag_bar_toggle_exec(bContext *C, wmOperator *op)
 
   char tag_name[64];
   RNA_string_get(op->ptr, "tag_name", tag_name);
+
+  /* Check if Shift is pressed for multi-select */
+  const bool shift_pressed = (event->modifier & KM_SHIFT) != 0;
 
   /* Copy current active tags to work with */
   char tags_copy[256];
@@ -234,10 +237,17 @@ static wmOperatorStatus view3d_tag_bar_toggle_exec(bContext *C, wmOperator *op)
 
   if (!tag_found) {
     /* Add the tag to the list */
-    if (v3d->active_tag_filter_tags[0] != '\0') {
-      SNPRINTF(new_tags, "%s,%s", v3d->active_tag_filter_tags, tag_name);
+    if (shift_pressed) {
+      /* Multi-select: add to existing tags */
+      if (v3d->active_tag_filter_tags[0] != '\0') {
+        SNPRINTF(new_tags, "%s,%s", v3d->active_tag_filter_tags, tag_name);
+      }
+      else {
+        STRNCPY_RLEN(new_tags, tag_name);
+      }
     }
     else {
+      /* Single-select: replace all tags with this one */
       STRNCPY_RLEN(new_tags, tag_name);
     }
   }
@@ -279,7 +289,7 @@ static void VIEW3D_OT_tag_bar_toggle(wmOperatorType *ot)
   ot->idname = "VIEW3D_OT_tag_bar_toggle";
   ot->description = "Toggle a tag filter in the 3D View tag bar";
 
-  ot->exec = view3d_tag_bar_toggle_exec;
+  ot->invoke = view3d_tag_bar_toggle_invoke;
   ot->poll = view3d_tag_bar_toggle_poll;
 
   ot->flag = OPTYPE_REGISTER;

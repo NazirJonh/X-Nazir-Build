@@ -3285,9 +3285,8 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
   printf("DEBUG: uiItemTagButtonWithOperator START: opname=%s, tag_name=%s, glyph=%s\n",
          opname, tag_name, glyph);
 
-  /* Calculate button width based on glyph length */
-  /* Base width + glyph width (approximately 2 pixels per character) */
-  const short width = (glyph && glyph[0]) ? short(UI_UNIT_X * 1.5f) : short(UI_UNIT_X);
+  /* Fixed width to match standard Blender buttons (1 UNIT) */
+  const short width = UI_UNIT_X;
 
   /* Create Tag button with preference mode (no checkbox) */
   Button *tag_but = uiDefButTag(block,

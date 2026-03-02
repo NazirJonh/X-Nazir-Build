@@ -64,6 +64,10 @@ namespace blender::ui {
 /* icons are 80% of height of button (16 pixels inside 20 height) */
 #define ICON_SIZE_FROM_BUTRECT(rect) (0.8f * BLI_rcti_size_y(rect))
 
+/* Glyph darkening/brightening factors for tag buttons */
+#define TAG_GLYPH_DARKEN_INACTIVE 0.25f      /* Darken inactive glyphs */
+#define TAG_GLYPH_BRIGHTEN_HOVER 0.15f       /* Brighten on hover */
+
 /* visual types for drawing */
 /* for time being separated from functional types */
 enum class WidgetStyle {
@@ -167,6 +171,24 @@ static void color_blend_v4_v4v4(uchar r_col[4],
   r_col[1] = (faci * col1[1] + facm * col2[1]) / 256;
   r_col[2] = (faci * col1[2] + facm * col2[2]) / 256;
   r_col[3] = (faci * col1[3] + facm * col2[3]) / 256;
+}
+
+/* Darken a 3-channel color by multiplying by (1.0 - factor) */
+static void color_darken_3uc(uchar color[3], const float factor)
+{
+  BLI_assert(factor >= 0.0f && factor <= 1.0f);
+  for (int i = 0; i < 3; i++) {
+    color[i] = uchar(color[i] * (1.0f - factor));
+  }
+}
+
+/* Brighten a 3-channel color by blending towards white */
+static void color_brighten_3uc(uchar color[3], const float factor)
+{
+  BLI_assert(factor >= 0.0f && factor <= 1.0f);
+  for (int i = 0; i < 3; i++) {
+    color[i] = std::min(255, color[i] + int((255 - color[i]) * factor));
+  }
 }
 
 static void color_ensure_contrast_v3(uchar cp[3], const uchar cp_other[3], int contrast)
@@ -4846,19 +4868,43 @@ static void widget_draw_tag(const bContext *C,
     /* Use box colors from theme */
     uiWidgetColors wcol_box = tui->wcol_box;
 
-    /* Handle active state - use option.selected colors for active button (checkbox is checked) */
-    if (state->but_flag & UI_SELECT) {
-      /* For active button, use the selected color from wcol_option (blue in default theme) */
-      copy_v4_v4_uchar(wcol_box.inner, tui->wcol_option.inner_sel);
-      copy_v4_v4_uchar(wcol_box.outline, tui->wcol_option.outline_sel);
+    /* Set white outline for better visibility (like standard Blender buttons) */
+    wcol_box.outline[0] = 100;  /* R */
+    wcol_box.outline[1] = 100;  /* G */
+    wcol_box.outline[2] = 100;  /* B */
+    wcol_box.outline[3] = 255;  /* A - fully opaque */
+
+    /* Set fully opaque background for inactive state (override theme transparency) */
+    if (!(state->but_flag & (UI_HOVER | UI_SELECT))) {
+     wcol_box.inner[0] = 50;  /* R */
+    wcol_box.inner[1] = 50;  /* G */
+    wcol_box.inner[2] = 50;  /* B */     
+      wcol_box.inner[3] = 255;  /* Fully opaque background */
     }
 
-    /* Apply hover effect to box if needed */
-    if (state->but_flag & UI_HOVER) {
-      /* Blend inner color with text color for hover effect */
-      color_blend_v3_v3(wcol_box.inner, wcol_box.text, 0.08f);
-      wcol_box.inner[3] = 180;
-      wcol_box.outline[3] = 180;
+    /* Handle active state - custom styling for active tag button */
+    if (state->but_flag & UI_SELECT) {
+      /* Keep white outline for active button (not theme outline) */
+      /* Light gray background for active button (instead of theme blue) */
+      wcol_box.inner[0] = 80;  /* R */
+      wcol_box.inner[1] = 80;  /* G */
+      wcol_box.inner[2] = 80;  /* B */
+      wcol_box.inner[3] = 255;  /* A - fully opaque */
+      /* Use theme outline color for active button */
+      copy_v4_v4_uchar(wcol_box.outline, tui->editor_outline_active);
+    }
+
+    /* Apply hover effect - lighten background slightly, keep white outline */
+    if (state->but_flag & UI_HOVER && !(state->but_flag & UI_SELECT)) {
+      /* Slightly lighten inner color on hover */
+      wcol_box.inner[0] = std::min(255, wcol_box.inner[0] + 15);
+      wcol_box.inner[1] = std::min(255, wcol_box.inner[1] + 15);
+      wcol_box.inner[2] = std::min(255, wcol_box.inner[2] + 15);
+      wcol_box.inner[3] = 255;  /* Keep fully opaque */
+      wcol_box.outline[0] = 100;  /* R */
+      wcol_box.outline[1] = 100;  /* G */
+      wcol_box.outline[2] = 100;  /* B */
+      wcol_box.outline[3] = 255;
     }
 
     /* Calculate rounded corners based on alignment */
@@ -4933,7 +4979,7 @@ static void widget_draw_tag(const bContext *C,
   const int available_width = content_rect.xmax - offset_x;
 
   /* Minimum width for glyph (small square for emoji) */
-  const int min_glyph_width = UI_UNIT_X;
+  const int min_glyph_width = UI_UNIT_X * 0.5f;  /* Reduced threshold for compact buttons */
   /* Threshold for showing text alongside glyph - lower threshold for better UX */
   const int text_threshold = UI_UNIT_X * 2;  /* Text shows earlier, hides later */
 
@@ -4942,9 +4988,6 @@ static void widget_draw_tag(const bContext *C,
   bool has_glyph = tag_but->glyph[0] != '\0';
   bool glyph_was_shown = false;  /* Track if glyph was actually drawn (not just space reserved) */
 
-  printf("DEBUG: widget_draw_tag: has_glyph=%d, glyph='%s', available_width=%d\n",
-         has_glyph, tag_but->glyph, available_width);
-
   if (has_glyph) {
     /* Setup font for drawing */
     fontstyle_set(fstyle);
@@ -4952,24 +4995,41 @@ static void widget_draw_tag(const bContext *C,
       /* Get text color - use custom color if set */
       uchar text_color[4];
       if (tag_but->has_color) {
-        text_color[0] = uchar(tag_but->color[0] * 255.0f);
-        text_color[1] = uchar(tag_but->color[1] * 255.0f);
-        text_color[2] = uchar(tag_but->color[2] * 255.0f);
+        /* Adjust brightness for visibility - ensure minimum Value */
+        /* Convert to HSV and ensure minimum Value of 0.4f for visibility */
+        float h, s, v;
+        rgb_to_hsv(tag_but->color[0], tag_but->color[1], tag_but->color[2], &h, &s, &v);
+        v = std::max(0.4f, v);  /* Minimum brightness */
+
+        /* Convert back to RGB (returns float 0-1) */
+        float rgb_temp[3];
+        hsv_to_rgb(h, s, v, &rgb_temp[0], &rgb_temp[1], &rgb_temp[2]);
+
+        /* Convert to uchar 0-255 */
+        text_color[0] = uchar(rgb_temp[0] * 255.0f);
+        text_color[1] = uchar(rgb_temp[1] * 255.0f);
+        text_color[2] = uchar(rgb_temp[2] * 255.0f);
         text_color[3] = 255;
       } else {
         copy_v4_v4_uchar(text_color, tui->wcol_regular.text);
       }
 
+      /* Apply color adjustments based on button state */
+      if (!(state->but_flag & UI_SELECT)) {
+        /* Inactive button: darken glyph */
+        color_darken_3uc(text_color, TAG_GLYPH_DARKEN_INACTIVE);
+      }
+      if (state->but_flag & UI_HOVER) {
+        /* Hover: brighten glyph */
+        color_brighten_3uc(text_color, TAG_GLYPH_BRIGHTEN_HOVER);
+      }
+
       /* Calculate glyph width first */
       glyph_width = BLF_width(fstyle->uifont_id, tag_but->glyph, strlen(tag_but->glyph));
 
-      printf("DEBUG: widget_draw_tag: glyph_width=%.2f, min_glyph_width=%d\n",
-             glyph_width, min_glyph_width);
-
       /* Check if we have enough space to show glyph (with some padding) */
-      const bool show_glyph = available_width >= (min_glyph_width * 0.7f);
-
-      printf("DEBUG: widget_draw_tag: show_glyph=%d\n", show_glyph);
+      /* Reduced threshold for compact buttons - show glyph if at least 50% of minimum width */
+      const bool show_glyph = available_width >= (min_glyph_width * 0.5f);
 
       if (show_glyph) {
         glyph_was_shown = true;  /* Mark that glyph is visible */
@@ -4981,8 +5041,9 @@ static void widget_draw_tag(const bContext *C,
           text_color[3] = uchar(text_color[3] * glyph_alpha);
         }
 
-        /* Calculate glyph position */
-        const float glyph_y = content_rect.ymin + (BLI_rcti_size_y(&content_rect) - fstyle->points) / 2.0f;
+        /* Calculate glyph position - center vertically using proper font metrics */
+        const int glyph_height = BLF_ascender(fstyle->uifont_id) + BLF_descender(fstyle->uifont_id);
+        const float glyph_y = content_rect.ymin + ceil(0.5f * (BLI_rcti_size_y(&content_rect) - glyph_height));
 
         /* For preference mode (no checkbox), center glyph horizontally in content_rect */
         float glyph_x;
@@ -4990,12 +5051,9 @@ static void widget_draw_tag(const bContext *C,
           /* Center glyph in the entire content area */
           const float content_center_x = (content_rect.xmin + content_rect.xmax) / 2.0f;
           glyph_x = content_center_x - (glyph_width / 2.0f);
-          printf("DEBUG: widget_draw_tag: Centered glyph at x=%.2f (content_center=%.2f, glyph_width=%.2f)\n",
-                 glyph_x, content_center_x, glyph_width);
         } else {
           /* Left-aligned after checkbox */
           glyph_x = float(offset_x);
-          printf("DEBUG: widget_draw_tag: Drawing glyph at x=%d, y=%f\n", offset_x, glyph_y);
         }
 
         BLF_color4f(fstyle->uifont_id,
@@ -5041,7 +5099,8 @@ static void widget_draw_tag(const bContext *C,
 
     /* Calculate text position - left aligned, vertically centered in content area */
     const float text_x = float(offset_x);  /* Left aligned */
-    const float text_y = content_rect.ymin + (BLI_rcti_size_y(&content_rect) - fstyle->points) / 2.0f;  /* Vertically centered */
+    const int text_height = BLF_ascender(fstyle->uifont_id) + BLF_descender(fstyle->uifont_id);
+    const float text_y = content_rect.ymin + ceil(0.5f * (BLI_rcti_size_y(&content_rect) - text_height));  /* Vertically centered */
 
     BLF_position(fstyle->uifont_id, text_x, text_y, 0.0f);
 

@@ -5175,9 +5175,11 @@ Button *uiDefButTag(Block *block,
   /* Copy button text (tag name) */
   tag_but->str = tag_name;
 
-  /* Set tooltip if provided */
+  /* Set tooltip if provided - store a copy since StringRef doesn't own the data */
   if (tip) {
-    tag_but->tip = tip;
+    tag_but->tooltip_storage = tip;
+    /* Note: don't set tag_but->tip since it's a StringRef and may become invalid.
+     * Instead, button_string_get_tooltip will use tooltip_storage for Tag buttons. */
   }
 
   /* Set block reference */
@@ -7367,9 +7369,19 @@ std::string button_string_get_tooltip(bContext &C, Button &but)
   if (but.tip_func) {
     return but.tip_func(&C, but.tip_arg, but.tip);
   }
+
+  /* For Tag buttons, use the stored tooltip copy since StringRef doesn't own data */
+  if (but.type == ButtonType::Tag) {
+    const ButtonTag *tag_but = static_cast<const ButtonTag*>(&but);
+    if (!tag_but->tooltip_storage.empty()) {
+      return tag_but->tooltip_storage;
+    }
+  }
+
   if (!but.tip.is_empty()) {
     return but.tip;
   }
+
   return button_string_get_rna_tooltip(C, but);
 }
 

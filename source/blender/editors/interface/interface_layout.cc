@@ -3276,20 +3276,18 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
                                        const char *tag_name,
                                        const char *glyph,
                                        const float *color,
-                                       bool is_active)
+                                       bool is_active,
+                                       const char *tooltip)
 {
   using namespace blender::ui;
 
   Block *block = layout->block();
 
-  printf("DEBUG: uiItemTagButtonWithOperator START: opname=%s, tag_name=%s, glyph=%s\n",
-         opname, tag_name, glyph);
-
   /* Fixed width to match standard Blender buttons (1 UNIT) */
   const short width = UI_UNIT_X * 1.5;
 
   /* Create Tag button with preference mode (no checkbox) */
-  Button *tag_but = uiDefButTag(block,
+  Button *raw_but = uiDefButTag(block,
                                 tag_name ? tag_name : "Tag",
                                 glyph ? glyph : "",
                                 color,
@@ -3298,25 +3296,23 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
                                 0, 0,
                                 width,        /* calculated width */
                                 UI_UNIT_Y,    /* height */
-                                nullptr);     /* tooltip */
+                                tooltip);     /* tooltip text */
 
-  if (!tag_but) {
-    printf("DEBUG: uiItemTagButtonWithOperator FAILED: uiDefButTag returned nullptr\n");
+  if (!raw_but) {
     return PointerRNA_NULL;
   }
-  printf("DEBUG: uiItemTagButtonWithOperator: button created at %p\n", tag_but);
+  /* Cast to ButtonTag for access to tooltip_storage */
+  BLI_assert(raw_but->type == ButtonType::Tag);
+  ButtonTag *tag_but = static_cast<ButtonTag*>(raw_but);
 
   /* Find operator type */
   wmOperatorType *ot = WM_operatortype_find(opname, false);
   if (!ot) {
-    printf("DEBUG: uiItemTagButtonWithOperator FAILED: operator '%s' not found\n", opname);
     return PointerRNA_NULL;
   }
-  printf("DEBUG: uiItemTagButtonWithOperator: operator found at %p\n", ot);
 
   /* Attach operator to the button */
   button_operator_set(tag_but, ot, wm::OpCallContext::InvokeDefault);
-  printf("DEBUG: uiItemTagButtonWithOperator: operator attached\n");
 
   /* Get operator properties pointer - create a copy for return like layout->op() does */
   PointerRNA ptr;
@@ -3336,9 +3332,6 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
 
   /* Copy the PointerRNA - this copies the pointer to the property group */
   ptr = *op_ptr;
-
-  printf("DEBUG: uiItemTagButtonWithOperator SUCCESS: op_ptr=%p, ptr.data=%p, ptr.type=%p\n",
-         op_ptr, ptr.data, ptr.type);
 
   return ptr;
 }

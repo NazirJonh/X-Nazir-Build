@@ -1027,7 +1027,8 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
                                        const char *tag_name,
                                        const char *glyph,
                                        const float *color,
-                                       bool is_active);
+                                       bool is_active,
+                                       const char *tooltip);
 
 /**
  * Helper to add a label using a property split layout if needed. After calling this the

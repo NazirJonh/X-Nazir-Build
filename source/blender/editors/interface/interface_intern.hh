@@ -469,6 +469,7 @@ struct ButtonTag : public Button {
   char *context_menu_operator = nullptr; /**< Operator for right-click context menu */
   char *operator_param_name = nullptr;   /**< Parameter name to pass to context menu operator */
   char *operator_param_value = nullptr;  /**< Parameter value to pass to context menu operator */
+  std::string tooltip_storage; /**< Storage for tooltip text (StringRef doesn't own the data) */
 
   /** Default constructor - initializes all members via default initializers */
   ButtonTag() : Button() {}

@@ -1732,8 +1732,6 @@ static void region_rect_recursive(
           /* Overlapping regions shouldn't push others. */
           winrct->ymax = region->winrct.ymin - 1;
         }
-        printf("DEBUG: Region %p (type %d) ALIGN_TOP: winrct.ymin=%d, winrct.ymax=%d, overlap_remainder.ymax=%d\n",
-               region, region->regiontype, region->winrct.ymin, region->winrct.ymax, overlap_remainder->ymax);
       }
       else {
         region->winrct.ymax = region->winrct.ymin + prefsizey - 1;
@@ -1802,8 +1800,6 @@ static void region_rect_recursive(
           /* Overlapping regions shouldn't push others. */
           winrct->xmax = region->winrct.xmin - 1;
         }
-        printf("DEBUG: Region %p (type %d) ALIGN_RIGHT: winrct.ymin=%d, winrct.ymax=%d, overlap_remainder.ymax=%d\n",
-               region, region->regiontype, region->winrct.ymin, region->winrct.ymax, overlap_remainder->ymax);
       }
       else {
         region->winrct.xmax = region->winrct.xmin + prefsizex - 1;

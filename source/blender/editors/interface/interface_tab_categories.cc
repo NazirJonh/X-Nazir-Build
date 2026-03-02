@@ -1921,6 +1921,50 @@ static void ui_panel_category_draw_content(
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Color Indicator Drawing
+ * \{ */
+
+/**
+ * Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color.
+ * This is used both for regular tabs and during drag & drop.
+ */
+static void draw_category_tab_color_indicator(const rcti *rct,
+                                                const float glyph_color[3],
+                                                const bool is_left,
+                                                const eUserPref_CategoryTabsDisplayMode display_mode,
+                                                const bool show_color_indicator)
+{
+  /* Only draw indicator in TEXT_ONLY mode when setting is enabled. */
+  if (display_mode != USER_CATEGORY_TABS_TEXT_ONLY || !show_color_indicator) {
+    return;
+  }
+
+  /* Check if custom glyph color is assigned (non-zero means custom color set). */
+  if (glyph_color[0] == 0.0f && glyph_color[1] == 0.0f && glyph_color[2] == 0.0f) {
+    return;
+  }
+
+  const int indicator_thickness = round_fl_to_int(1.0f * UI_SCALE_FAC);
+
+  /* For left-aligned tabs: indicator on left edge (outer edge). */
+  /* For right-aligned tabs: indicator on right edge (outer edge). */
+  const int indicator_xmin = is_left ? rct->xmin : rct->xmax - indicator_thickness;
+  const int indicator_xmax = indicator_xmin + indicator_thickness;
+
+  /* Setup GPU for immediate mode rectangle drawing. */
+  uint pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  float indicator_color[4] = {glyph_color[0], glyph_color[1], glyph_color[2], 0.8f};
+  immUniformColor4fv(indicator_color);
+  immRectf(pos, float(indicator_xmin), float(rct->ymin), float(indicator_xmax), float(rct->ymax));
+
+  immUnbindProgram();
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Main Drawing Function
  * \{ */
 
@@ -2278,28 +2322,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                         is_active ? theme_col_tab_outline_sel : theme_col_tab_outline);
 
       /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
-      if (display_mode == USER_CATEGORY_TABS_TEXT_ONLY &&
-          U.category_tabs_text_mode_show_color_indicator) {
-        /* Check if custom glyph color is assigned (non-zero means custom color set). */
-        if (glyph_color[0] != 0.0f || glyph_color[1] != 0.0f || glyph_color[2] != 0.0f) {
-          const int indicator_thickness = round_fl_to_int(1.0f * UI_SCALE_FAC);
-
-          /* For left-aligned tabs: indicator on left edge (outer edge). */
-          /* For right-aligned tabs: indicator on right edge (outer edge). */
-          const int indicator_xmin = is_left ? rct->xmin : rct->xmax - indicator_thickness;
-          const int indicator_xmax = indicator_xmin + indicator_thickness;
-
-          /* Setup GPU for immediate mode rectangle drawing. */
-          pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
-          immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-          float indicator_color[4] = {glyph_color[0], glyph_color[1], glyph_color[2], 0.8f};
-          immUniformColor4fv(indicator_color);
-          immRectf(pos, float(indicator_xmin), float(rct->ymin), float(indicator_xmax), float(rct->ymax));
-
-          immUnbindProgram();
-        }
-      }
+      draw_category_tab_color_indicator(
+          rct, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator);
 
       if (!region->overlap) {
         pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
@@ -2499,7 +2523,16 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       draw_roundbox_4fv(&box_rect, true, tab_curve_radius, drag_bg_color);
       draw_roundbox_4fv(&box_rect, false, tab_curve_radius, theme_col_tab_outline_sel);
 
+      /* Get glyph color for color indicator in TEXT_ONLY mode. */
+      bool is_fallback_letter = false;
+      float glyph_color[3] = {0.0f, 0.0f, 0.0f};
       const char *category_id = drag_tab->idname;
+      panel_category_glyph_lookup(wm, category_id, nullptr, &is_fallback_letter, glyph_color);
+
+      /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
+      draw_category_tab_color_indicator(
+          &drag_rect, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator);
+
       const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
       const rcti *rct = &drag_rect;
 

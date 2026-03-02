@@ -279,12 +279,10 @@ bool extract_leading_glyph(const char *input,
 
 void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
 {
-  printf("[DEBUG CANCEL_CB] category_tab_edit_popup_cancel_cb called\n");
   wmOperator *op = static_cast<wmOperator *>(user_data);
 
   char category[64];
   RNA_string_get(op->ptr, "category", category);
-  printf("[DEBUG CANCEL_CB] Category: '%s'\n", category);
 
   /* Get original values saved when dialog was opened */
   char original_display_name[32] = "";
@@ -298,9 +296,6 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   RNA_float_get_array(op->ptr, "original_color", original_color);
   RNA_string_get(op->ptr, "original_tags", original_tags);
   original_has_override = RNA_boolean_get(op->ptr, "original_has_override");
-
-  printf("[DEBUG CANCEL_CB] original_display_name='%s', original_glyph='%s', original_has_override=%d\n",
-         original_display_name, original_glyph_hex, original_has_override);
 
   /* Convert hex glyph back to UTF-8 for restoration */
   char original_glyph_utf8[8] = "";
@@ -333,8 +328,6 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
     STRNCPY(item->glyph, original_glyph_utf8);
     copy_v3_v3(item->color, original_color);
     STRNCPY(item->tags, original_tags);
-    printf("[DEBUG CANCEL_CB] Restored original override: color=[%.2f,%.2f,%.2f]\n",
-           item->color[0], item->color[1], item->color[2]);
   }
   else {
     /* There was no override before - remove any created by live preview */
@@ -348,14 +341,11 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
                         (item->tags[0] != '\0' && original_tags[0] == '\0'));
 
     if (!has_changes || !original_has_override) {
-      printf("[DEBUG CANCEL_CB] No changes or no original override, deleting temporary override\n");
       BLI_remlink(&wm->category_glyph_overrides, item);
       MEM_delete(item);
     }
     else {
       /* Keep override but restore original values */
-      printf("[DEBUG CANCEL_CB] Keeping override but restoring original: color=[%.2f,%.2f,%.2f]\n",
-             original_color[0], original_color[1], original_color[2]);
       STRNCPY(item->display_name, original_display_name);
       STRNCPY(item->glyph, original_glyph_utf8);
       copy_v3_v3(item->color, original_color);
@@ -371,8 +361,6 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   /* Record popup close time and category to prevent immediate reopen */
   category_tab_popup_close_time = BLI_time_now_seconds();
   STRNCPY(category_tab_last_closed_category, category);
-  printf("[DEBUG CANCEL_CB] Recorded popup close: time=%.3f, category='%s'\n",
-         category_tab_popup_close_time, category);
 
 #ifdef WITH_PYTHON
   /* Restore tags in Python _glyph_cache to revert live preview changes. */
@@ -404,12 +392,10 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   WM_global_report(RPT_INFO, "Category tab changes discarded");
 
   WM_main_add_notifier(NC_WINDOW, nullptr);
-  printf("[DEBUG CANCEL_CB] Cancel callback completed\n");
 }
 
 void category_tab_edit_popup_ok_cb(bContext * /*C*/, void *user_data, int /*retval*/)
 {
-  printf("[DEBUG OK_CB] category_tab_edit_popup_ok_cb called\n");
   /* Clear dialog operator pointer and popup block */
   category_tab_current_dialog_op = nullptr;
   category_tab_popup_block = nullptr;
@@ -421,11 +407,7 @@ void category_tab_edit_popup_ok_cb(bContext * /*C*/, void *user_data, int /*retv
     RNA_string_get(op->ptr, "category", category);
     category_tab_popup_close_time = BLI_time_now_seconds();
     STRNCPY(category_tab_last_closed_category, category);
-    printf("[DEBUG OK_CB] Recorded popup close: time=%.3f, category='%s'\n",
-           category_tab_popup_close_time, category);
   }
-
-  printf("[DEBUG OK_CB] OK callback completed\n");
 }
 
 /** \} */
@@ -664,19 +646,14 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   if (glyph_valid && glyph[0] != '\0') {
     /* User has entered a valid glyph - save it to override */
     STRNCPY(item->glyph, glyph);
-    printf("[DEBUG LIVE UPDATE] Saving valid glyph='%s' to override for '%s'\n", glyph, category);
   }
   else if (!glyph_valid) {
     /* Invalid glyph - don't update override, keep previous value */
-    printf("[DEBUG LIVE UPDATE] Invalid glyph for '%s' - keeping previous value\n", category);
   }
   else {
     /* Empty glyph - clear override glyph to use defaults */
     item->glyph[0] = '\0';
-    printf("[DEBUG LIVE UPDATE] Empty glyph for '%s' - clearing override glyph (will use fallback)\n", category);
   }
-  printf("[DEBUG LIVE UPDATE] Override state: category='%s' glyph='%s' color=[%.2f,%.2f,%.2f]\n",
-         item->category, item->glyph, item->color[0], item->color[1], item->color[2]);
 
   /* Trigger redraw to show the updated color */
   WM_main_add_notifier(NC_WINDOW, nullptr);
@@ -1277,16 +1254,13 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
         /* Convert unicode to hex codepoint */
         char hex_code[16] = "";
         utf8_to_hex_codepoint(unicode.c_str(), hex_code, sizeof(hex_code));
-        printf("[DEBUG C++] glyph_selected_callback: unicode='%s', hex_code='%s'\n", unicode.c_str(), hex_code);
 
         /* Set the glyph property of the operator itself */
         RNA_string_set(popup_data->op->ptr, "glyph", hex_code);
-        printf("[DEBUG C++] Set picker's own glyph property to '%s'\n", hex_code);
 
         /* Set the target property if specified (RNA path) */
         char target_prop[256] = "";
         RNA_string_get(popup_data->op->ptr, "target_property", target_prop);
-        printf("[DEBUG C++] glyph_selected_callback: target_property='%s'\n", target_prop);
         if (target_prop[0] != '\0') {
           const char *target_prop_path = target_prop;
           if (STRPREFIX(target_prop_path, "window_manager.")) {
@@ -1300,31 +1274,20 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
           wmOperator *target_op = nullptr;
           char target_op_ptr_str[64] = "";
           RNA_string_get(popup_data->op->ptr, "target_operator_ptr", target_op_ptr_str);
-          printf("[DEBUG C++] target_operator_ptr='%s'\n", target_op_ptr_str);
           if (target_op_ptr_str[0] != '\0') {
             const uintptr_t target_op_ptr = uintptr_t(strtoull(target_op_ptr_str, nullptr, 10));
-            printf("[DEBUG C++] Converted target_op_ptr=%llu\n", (unsigned long long)target_op_ptr);
             if (target_op_ptr != 0) {
               wmWindowManager *wm = CTX_wm_manager(&C);
-              printf("[DEBUG C++] Searching for operator in wm->runtime->operators...\n");
-              int op_count = 0;
               for (wmOperator *op_iter = static_cast<wmOperator *>(wm->runtime->operators.last);
                    op_iter;
                    op_iter = op_iter->prev)
               {
-                op_count++;
-                printf("[DEBUG C++]   Checking op_iter=%llu (count=%d)\n",
-                       (unsigned long long)(uintptr_t)op_iter, op_count);
                 if ((uintptr_t)op_iter == target_op_ptr) {
                   target_op = op_iter;
-                  printf("[DEBUG C++] FOUND target operator at %llu!\n", (unsigned long long)(uintptr_t)target_op);
                   break;
                 }
               }
-              printf("[DEBUG C++] Total operators scanned: %d\n", op_count);
             }
-          } else {
-            printf("[DEBUG C++] target_operator_ptr is EMPTY!\n");
           }
 
           bool resolved = false;
@@ -1333,72 +1296,47 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
                                                           (target_prop_path + strlen("active_operator.")) :
                                                           target_prop_path;
 
-          printf("[DEBUG C++] target_op=%p, target_op->ptr=%p\n", (void*)target_op, target_op ? (void*)target_op->ptr : nullptr);
-          printf("[DEBUG C++] target_prop_path_for_operator='%s'\n", target_prop_path_for_operator);
           if (target_op && target_op->ptr) {
-            printf("[DEBUG C++] Attempting to resolve property from target_op...\n");
             if (RNA_path_resolve_full(
                     target_op->ptr, target_prop_path_for_operator, &target_ptr, &prop, &index))
             {
-              printf("[DEBUG C++] SUCCESS: Property resolved, setting to '%s'\n", hex_code);
               RNA_property_string_set(&target_ptr, prop, hex_code);
               RNA_property_update(&C, &target_ptr, prop);
-              printf("[DEBUG C++] Called RNA_property_update after setting property!\n");
               resolved = true;
-            } else {
-              printf("[DEBUG C++] FAILED: RNA_path_resolve_full returned false\n");
             }
           }
 
           if (STRPREFIX(target_prop_path, "active_operator.")) {
             const char *active_op_path = target_prop_path + strlen("active_operator.");
-            printf("[DEBUG C++] Path starts with 'active_operator.', active_op_path='%s'\n", active_op_path);
             if (!resolved) {
               wmOperator *active_op = context_active_operator_get(&C);
-              printf("[DEBUG C++] active_op=%p, active_op->ptr=%p\n", (void*)active_op, active_op ? (void*)active_op->ptr : nullptr);
               if (active_op && active_op->ptr) {
                 if (RNA_path_resolve_full(active_op->ptr, active_op_path, &target_ptr, &prop, &index))
                 {
-                  printf("[DEBUG C++] SUCCESS: Resolved via active_op, setting to '%s'\n", hex_code);
                   RNA_property_string_set(&target_ptr, prop, hex_code);
                   RNA_property_update(&C, &target_ptr, prop);
-                  printf("[DEBUG C++] Called RNA_property_update (active_op)!\n");
                   resolved = true;
-                } else {
-                  printf("[DEBUG C++] FAILED: RNA_path_resolve_full on active_op returned false\n");
                 }
               }
             }
           }
           if (!resolved) {
-            printf("[DEBUG C++] Not resolved yet, trying window manager root...\n");
             /* Try resolving from window manager as root. */
             wmWindowManager *wm = CTX_wm_manager(&C);
             PointerRNA root_ptr = RNA_id_pointer_create(&wm->id);
             if (RNA_path_resolve_full(&root_ptr, target_prop_path, &target_ptr, &prop, &index)) {
-              printf("[DEBUG C++] SUCCESS: Resolved via window manager, setting to '%s'\n", hex_code);
               RNA_property_string_set(&target_ptr, prop, hex_code);
               RNA_property_update(&C, &target_ptr, prop);
-              printf("[DEBUG C++] Called RNA_property_update (window manager)!\n");
               resolved = true;
-            } else {
-              printf("[DEBUG C++] FAILED: RNA_path_resolve_full on window manager returned false\n");
             }
           }
 
           if (!resolved) {
             /* Fallback: try resolving from the picker operator itself (relative path). */
-            printf("[DEBUG C++] Trying fallback: picker operator itself...\n");
             if (RNA_path_resolve_full(popup_data->op->ptr, target_prop_path, &target_ptr, &prop, &index)) {
-              printf("[DEBUG C++] Fallback SUCCESS: Setting picker's own property to '%s'\n", hex_code);
               RNA_property_string_set(&target_ptr, prop, hex_code);
               RNA_property_update(&C, &target_ptr, prop);
-              printf("[DEBUG C++] Called RNA_property_update (fallback)!\n");
-            } else {
-              printf("[DEBUG C++] Fallback FAILED: Could not resolve property\n");
             }
-          } else {
-            printf("[DEBUG C++] Property was successfully resolved (resolved=%d)\n", resolved);
           }
         }
 
@@ -1539,23 +1477,14 @@ static wmOperatorStatus glyph_picker_grid_invoke(bContext *C,
   RNA_string_get(op->ptr, "category", initial_category);
 
   wmOperator *active_op = context_active_operator_get(C);
-  printf("[DEBUG C++] glyph_picker_grid_invoke: active_op=%p, op=%p\n", (void*)active_op, (void*)op);
   if (active_op && active_op != op && active_op->properties) {
     char target_op_ptr_str[64];
     BLI_snprintf(target_op_ptr_str,
                  sizeof(target_op_ptr_str),
                  "%llu",
                  (unsigned long long)(uintptr_t)active_op);
-    printf("[DEBUG C++] Setting target_operator_ptr='%s' (active_op=%p)\n", target_op_ptr_str, (void*)active_op);
     RNA_string_set(op->ptr, "target_operator_ptr", target_op_ptr_str);
-  } else {
-    printf("[DEBUG C++] active_op is null or same as op or no properties\n");
   }
-
-  /* Debug: Check if target_operator_ptr was already set from Python */
-  char existing_target_ptr[64] = "";
-  RNA_string_get(op->ptr, "target_operator_ptr", existing_target_ptr);
-  printf("[DEBUG C++] Existing target_operator_ptr in op->ptr: '%s'\n", existing_target_ptr);
 
   /* Create popup data */
   GlyphGridPopupData *popup_data = new GlyphGridPopupData(
@@ -1603,7 +1532,6 @@ void WM_OT_glyph_picker_grid(wmOperatorType *ot)
 
 Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_data)
 {
-  printf("[DEBUG BLOCK_CREATE] category_tab_edit_block_create called\n");
   wmOperator *op = static_cast<wmOperator *>(user_data);
   const uiStyle *style = style_get_dpi();
 
@@ -1620,7 +1548,6 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
 
   /* Store block pointer for Save button to close popup */
   category_tab_popup_block = block;
-  printf("[DEBUG BLOCK_CREATE] Created block, category_tab_popup_block = %p\n", (void *)block);
 
   /* Set up live update callback - this is the key for instant preview */
   block_func_handle_set(block, category_tab_edit_live_update_cb, op);
@@ -1644,7 +1571,6 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
   /* Get category for button wiring */
   char category[64];
   RNA_string_get(op->ptr, "category", category);
-  printf("[DEBUG BLOCK_CREATE] Creating block for category: '%s'\n", category);
 
   /* Get window manager for checking reserved categories */
   wmWindowManager *wm = CTX_wm_manager(C);
@@ -2400,8 +2326,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
         for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
           if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
             if (STREQ(category_tab_last_closed_category, pc_dyn.idname)) {
-              printf("[DEBUG INVOKE] BLOCKING REOPEN in invoke: time_since_close=%.3f, category='%s'\n",
-                     time_since_close, pc_dyn.idname);
               return OPERATOR_CANCELLED;
             }
             break;
@@ -2411,14 +2335,10 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     }
   }
 
-  printf("[DEBUG INVOKE] category_tab_edit_dialog_invoke called\n");
-  printf("[DEBUG INVOKE] category_tab_current_dialog_op = %p\n", (void *)category_tab_current_dialog_op);
-
   /* Check if dialog is already open for the same category to prevent data corruption */
   if (category_tab_current_dialog_op) {
     char existing_category[64];
     RNA_string_get(category_tab_current_dialog_op->ptr, "category", existing_category);
-    printf("[DEBUG INVOKE] Existing dialog open for category: '%s'\n", existing_category);
 
     /* Get category from mouse position */
     ARegion *region = CTX_wm_region(C);
@@ -2434,17 +2354,11 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
         }
       }
 
-      printf("[DEBUG INVOKE] Clicked on category: '%s'\n", clicked_category ? clicked_category : "null");
-
       /* If clicking on the same category that's already being edited, ignore */
       if (clicked_category && STREQ(existing_category, clicked_category)) {
-        printf("[DEBUG INVOKE] SAME CATEGORY - returning CANCELLED\n");
         return OPERATOR_CANCELLED;
       }
-      printf("[DEBUG INVOKE] DIFFERENT CATEGORY - will open new dialog\n");
     }
-  } else {
-    printf("[DEBUG INVOKE] No existing dialog, will open new one\n");
   }
 
   /* Get category from mouse position */
@@ -2469,8 +2383,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  printf("[DEBUG INVOKE] Opening dialog for category: '%s'\n", category);
-
   /* Store category name in operator properties */
   RNA_string_set(op->ptr, "category", category);
 
@@ -2479,8 +2391,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   bool has_override = false;
   bool override_is_empty = false;
 
-  printf("[DEBUG INVOKE] Checking for existing override in category_glyph_overrides...\n");
-
   /* First check category_glyph_overrides (user changes in current session) */
   for (CategoryGlyphItem *item =
            static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
@@ -2488,12 +2398,8 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
        item = static_cast<CategoryGlyphItem *>(item->next))
   {
     if (STREQ(item->category, category)) {
-      printf("[DEBUG INVOKE] Found override in category_glyph_overrides for '%s'\n", category);
-      printf("[DEBUG INVOKE]   display_name='%s', glyph='%s'\n", item->display_name, item->glyph);
-
       /* Check if override is empty (created by tag restore but has no actual data) */
       if (item->display_name[0] == '\0' && item->glyph[0] == '\0' && is_zero_v3(item->color)) {
-        printf("[DEBUG INVOKE] Override is EMPTY - ignoring and will check mappings\n");
         override_is_empty = true;
         has_override = true; /* Mark as found but empty, so we skip checking mappings again */
         break;
@@ -2535,11 +2441,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
 
   /* If no override OR override is empty, check category_glyph_mappings (saved settings from JSON) */
   if (!has_override || override_is_empty) {
-    if (override_is_empty) {
-      printf("[DEBUG INVOKE] Override was empty, checking category_glyph_mappings for real data...\n");
-    } else {
-      printf("[DEBUG INVOKE] No override found, checking category_glyph_mappings...\n");
-    }
     bool found_in_mappings = false;
     for (CategoryGlyphItem *item =
              static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
@@ -2548,9 +2449,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     {
       if (STREQ(item->category, category)) {
         found_in_mappings = true;
-        printf("[DEBUG INVOKE] Found mapping in category_glyph_mappings for '%s'\n", category);
-        printf("[DEBUG INVOKE]   display_name='%s', glyph='%s', color=[%.2f,%.2f,%.2f]\n",
-               item->display_name, item->glyph, item->color[0], item->color[1], item->color[2]);
         /* Load display_name from mappings */
         if (item->display_name[0] != '\0') {
           RNA_string_set(op->ptr, "display_name", item->display_name);
@@ -2571,11 +2469,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
         has_override = false;
         break;
       }
-    }
-    if (!found_in_mappings && !override_is_empty) {
-      printf("[DEBUG INVOKE] No mapping found either for '%s'\n", category);
-    } else if (override_is_empty && found_in_mappings) {
-      printf("[DEBUG INVOKE] Using data from mappings instead of empty override\n");
     }
   }
 
@@ -2632,9 +2525,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   RNA_float_set_array(op->ptr, "original_color", current_color);
   RNA_boolean_set(op->ptr, "original_has_override", has_override);
 
-  printf("[DEBUG INVOKE] Saved original values: display_name='%s', glyph='%s', color=[%.2f,%.2f,%.2f], has_override=%d\n",
-         current_display_name, current_glyph, current_color[0], current_color[1], current_color[2], has_override);
-
   /* Save original tags for cancel functionality - read from WM mappings/overrides */
   char original_tags[256] = "";
   const char *tags_str = nullptr;
@@ -2672,17 +2562,14 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
 
   /* Store pointer to dialog operator for Reset/Save button access */
   category_tab_current_dialog_op = op;
-  printf("[DEBUG INVOKE] Storing category_tab_current_dialog_op = %p\n", (void *)op);
 
   /* Open custom popup with live preview support using public API */
-  printf("[DEBUG INVOKE] Calling popup_block_ex...\n");
   popup_block_ex(C,
                      category_tab_edit_block_create,
                      category_tab_edit_popup_ok_cb,
                      category_tab_edit_popup_cancel_cb,
                      op,
                      op);
-  printf("[DEBUG INVOKE] popup_block_ex returned, returning OPERATOR_RUNNING_MODAL\n");
 
   return OPERATOR_RUNNING_MODAL;
 }

@@ -1246,10 +1246,13 @@ class VIEW3D_HT_tag_bar_tags(Header):
         if tags_with_glyphs:
             row.separator()
 
-        # Filter toggle button - same row as tags for compact spacing
+        # Filter toggle button & popover - like Gizmo/Overlay pattern
         is_filter_active = bool(active_tags)
         depress = is_filter_active
         row.operator("view3d.tag_bar_filter_toggle", text="", icon='FILTER', depress=depress)
+        sub = row.row(align=True)
+        sub.active = is_filter_active
+        sub.popover(panel="VIEW3D_PT_tag_bar_filter_popover", text="", icon='DOWNARROW_HLT') #TRIA_DOWN
 
 
 

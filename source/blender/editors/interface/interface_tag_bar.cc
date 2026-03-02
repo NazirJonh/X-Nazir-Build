@@ -18,6 +18,7 @@
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
+#include "BLI_string_utf8.h"
 #include "BLI_vector.hh"
 
 #include "MEM_guardedalloc.h"
@@ -801,6 +802,43 @@ void buttons_tag_bar_region_message_subscribe(const wmRegionMessageSubscribePara
   msg_sub_value_region_tag_redraw.notify = ED_region_do_msg_notify_tag_redraw;
 
   WM_msg_subscribe_rna_anon_prop(mbus, Window, view_layer, &msg_sub_value_region_tag_redraw);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Tag Bar Filter Popover Panel
+ * \{ */
+
+/**
+ * Draw callback for the tag bar filter popover panel.
+ * This panel provides additional filter options that can be accessed from the tag bar.
+ */
+static void tag_bar_filter_popover_panel_draw(const bContext * /*C*/, Panel *panel)
+{
+  ui::Layout &layout = *panel->layout;
+  layout.label(IFACE_("Pop-over работает!"), ICON_NONE);
+}
+
+/**
+ * Register the tag bar filter popover panel for a given region type.
+ * This function should be called from each spacetype that uses the TAG_BAR region.
+ *
+ * \param art: The region type to register the panel with (typically TAG_BAR region)
+ */
+void tag_bar_filter_popover_panel_register(ARegionType *art)
+{
+  PanelType *pt = MEM_new_zeroed<PanelType>("tag bar filter popover panel");
+  STRNCPY_UTF8(pt->idname, "VIEW3D_PT_tag_bar_filter_popover");
+  STRNCPY_UTF8(pt->label, N_("Tag Filter"));
+  STRNCPY_UTF8(pt->category, "");
+  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  pt->draw = tag_bar_filter_popover_panel_draw;
+  pt->ui_units_x = 10;  /* Width of popover in UI units */
+  BLI_addtail(&art->paneltypes, pt);
+
+  /* Add to global panel type list so popovers can find it from anywhere */
+  WM_paneltype_add(pt);
 }
 
 /** \} */

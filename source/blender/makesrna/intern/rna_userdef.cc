@@ -5035,21 +5035,21 @@ static void rna_def_userdef_view(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "category_tabs_zoom_icon", PROP_FLOAT, PROP_NONE);
   RNA_def_property_ui_text(
-      prop, "Icon Size", "Scale factor for category tabs in Icon mode");
+      prop, "Size", "Scale factor for category tabs in Icon mode");
   RNA_def_property_range(prop, 0.5f, 2.0f);
   RNA_def_property_ui_range(prop, 0.5f, 2.0f, 0.1, 2);
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
   RNA_def_property_ui_text(
-      prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
+      prop, "Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.0f);
   RNA_def_property_ui_range(prop, 0.5f, 2.0f, 0.1, 2);
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
   RNA_def_property_ui_text(
-      prop, "Text Size", "Scale factor for category tabs in Text mode");
+      prop, "Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.0f);
   RNA_def_property_ui_range(prop, 0.5f, 2.0f, 0.1, 2);
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");

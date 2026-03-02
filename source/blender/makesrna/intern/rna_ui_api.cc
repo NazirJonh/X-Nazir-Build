@@ -610,10 +610,14 @@ static PointerRNA rna_uiItemTagButton(Layout *layout,
                                       float color_g,
                                       float color_b,
                                       bool depress,
-                                      const char *tooltip)
+                                      const char *tooltip,
+                                      const char *context_menu_operator,
+                                      const char *operator_param_name,
+                                      const char *operator_param_value)
 {
   float color[3] = {color_r, color_g, color_b};
-  return uiItemTagButtonWithOperator(layout, opname, tag_name, glyph, color, depress, tooltip);
+  return uiItemTagButtonWithOperator(layout, opname, tag_name, glyph, color, depress, tooltip,
+                                     context_menu_operator, operator_param_name, operator_param_value);
 }
 
 static void rna_uiItemM(Layout *layout,
@@ -1795,6 +1799,12 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_float(func, "color_b", 1.0f, 0.0f, 1.0f, "Blue", "Blue component (0.0-1.0)", 0.0f, 1.0f);
   RNA_def_boolean(func, "depress", false, "", "Draw pressed in");
   parm = RNA_def_string(func, "tooltip", nullptr, 0, "", "Tooltip text to display on hover");
+  parm = RNA_def_string(func, "context_menu_operator", nullptr, 0, "", "Operator to call on right-click context menu");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "operator_param_name", nullptr, 0, "", "Parameter name to pass to context menu operator");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "operator_param_value", nullptr, 0, "", "Parameter value to pass to context menu operator");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
   parm = RNA_def_pointer(
       func, "properties", "OperatorProperties", "", "Operator properties to fill in");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);

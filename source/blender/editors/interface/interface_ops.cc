@@ -3036,6 +3036,9 @@ void operatortypes_ui()
 
   WM_operatortype_append(UI_OT_category_tab_drag);
 
+  /* Centered popup operator wrapper */
+  centered_popup_operator_register();
+
   WM_operatortype_append(UI_OT_override_add_button);
   WM_operatortype_append(UI_OT_override_remove_button);
   WM_operatortype_append(UI_OT_override_idtemplate_make);

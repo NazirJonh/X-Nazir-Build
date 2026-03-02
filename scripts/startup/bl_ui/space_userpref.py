@@ -2357,7 +2357,7 @@ class USERPREF_OT_category_tag_create(Operator):
 
     def invoke(self, context, event):
         context.window_manager.category_tag_glyph_hex = ""
-        return context.window_manager.invoke_props_dialog(self)
+        return context.window_manager.invoke_props_dialog(self, width=350)
 
 
 class USERPREF_OT_category_tag_add(Operator):
@@ -2419,7 +2419,7 @@ class USERPREF_OT_category_tag_edit(Operator):
         self.glyph = _glyph_to_hex(tag_data["glyph"])
         self.color = tag_data["color"]
         context.window_manager.category_tag_glyph_hex = ""
-        return context.window_manager.invoke_props_dialog(self)
+        return context.window_manager.invoke_props_dialog(self, width=350)
 
     def draw(self, context):
         layout = self.layout

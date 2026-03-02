@@ -23,7 +23,9 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_ID.h"
 #include "DNA_screen_types.h"
+#include "DNA_windowmanager_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
 
@@ -39,6 +41,7 @@
 #include "BLT_translation.hh"
 
 #include "BKE_context.hh"
+#include "BKE_idprop.hh"
 #include "BKE_screen.hh"
 
 #include "ED_screen.hh"
@@ -2691,6 +2694,119 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   WM_main_add_notifier(NC_WINDOW, nullptr);
 
   return OPERATOR_FINISHED;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Centered Popup Operator
+ *
+ * Wrapper operator that opens another operator's properties in a centered popup.
+ * This solves the issue where invoke_props_dialog in Python always positions
+ * the popup at mouse location instead of center.
+ * \{ */
+
+/**
+ * Open a centered popup dialog for the given operator.
+ * This is a wrapper around WM_operator_props_dialog_popup that ensures
+ * the popup is always centered regardless of message parameter.
+ */
+static wmOperatorStatus centered_popup_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
+{
+  char op_idname[64];
+  RNA_string_get(op->ptr, "operator_idname", op_idname);
+
+  /* Get the target operator type */
+  wmOperatorType *ot = WM_operatortype_find(op_idname, true);
+  if (!ot) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Get popup width from wrapper properties */
+  int width = RNA_int_get(op->ptr, "width");
+
+  /* Create a temporary operator instance with default properties.
+   * This will show in the dialog for user to fill in. */
+  PointerRNA *props_ptr = nullptr;
+  IDProperty *properties = nullptr;
+  WM_operator_properties_alloc(&props_ptr, &properties, ot->idname);
+  WM_operator_properties_sanitize(props_ptr, false);
+
+  /* Create operator for the popup dialog */
+  wmOperator *target_op = MEM_new<wmOperator>(__func__);
+  target_op->type = ot;
+  target_op->ptr = props_ptr;
+  target_op->properties = properties;
+  target_op->reports = op->reports;
+  target_op->flag = OP_IS_INVOKE;
+
+  /* Call WM_operator_props_dialog_popup with a dummy message to force centering.
+   * The function centers the popup when message is non-empty (line 1881 in wm_operators.cc):
+   * data->position = (message) ? WM_POPUP_POSITION_CENTER : WM_POPUP_POSITION_MOUSE;
+   *
+   * Note: The popup system takes ownership of target_op on success (OPERATOR_RUNNING_MODAL),
+   * so we don't need to clean up in that case.
+   */
+  wmOperatorStatus ret = WM_operator_props_dialog_popup(
+      C,
+      target_op,
+      width,
+      std::nullopt,  // title - use operator's default
+      std::nullopt,  // confirm_text
+      false,         // cancel_default
+      std::string(" ")  // dummy message to force centering (single space)
+  );
+
+  /* Clean up only on failure - popup system takes ownership on success */
+  if (ret != OPERATOR_RUNNING_MODAL) {
+    MEM_delete(target_op);
+    /* Clean up properties on failure since popup system won't take them */
+    if (properties) {
+      IDP_FreeProperty(properties);
+    }
+    /* Note: props_ptr is allocated by WM_operator_properties_alloc using MEM_new<PointerRNA>,
+     * so we need to use MEM_delete to free it. */
+    if (props_ptr) {
+      MEM_delete(props_ptr);
+    }
+  }
+
+  return ret;
+}
+
+static void CENTERED_OT_popup_operator_wrapper(wmOperatorType *ot)
+{
+  ot->name = "Centered Popup Operator";
+  ot->idname = "WM_OT_centered_popup_operator_wrapper";
+  ot->description = "Wrapper that opens an operator in a centered popup dialog";
+
+  ot->invoke = centered_popup_invoke;
+
+  RNA_def_string(
+      ot->srna,
+      "operator_idname",
+      nullptr,
+      64,
+      "Operator ID Name",
+      "The idname of the operator to open in popup (e.g., 'wm.category_tag_create')"
+  );
+
+  RNA_def_int(
+      ot->srna,
+      "width",
+      350,
+      100,
+      1000,
+      "Width",
+      "Popup width in pixels",
+      100,
+      1000
+  );
+}
+
+void centered_popup_operator_register()
+{
+  WM_operatortype_append(CENTERED_OT_popup_operator_wrapper);
 }
 
 /** \} */

@@ -932,6 +932,11 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int event);
 void category_tag_filter_menu_register();
 
 /**
+ * Centered popup operator registration.
+ */
+void centered_popup_operator_register();
+
+/**
  * Popup block creation.
  */
 ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_data);

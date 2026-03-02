@@ -67,7 +67,7 @@ class WM_OT_glyph_search(Operator):
         return {'FINISHED'}
     
     def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
+        return context.window_manager.invoke_props_dialog(self, width=400)
 
 
 class WM_OT_glyph_select(Operator):

@@ -1206,8 +1206,20 @@ class VIEW3D_HT_tag_bar_tags(Header):
         # Create a row for tag buttons and filter toggle with compact spacing
         row = layout.row(align=True)
 
+        # Show message if no tags exist at all
+        if not wm.category_tags:
+            row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD').operator_idname = 'wm.category_tag_create'
+            row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
+            return
+
         # Filter tag list to only include those with glyphs
         tags_with_glyphs = [t for t in tags_sorted if glyph_display(t.glyph)]
+
+        # Show message if no tags with glyphs exist
+        if not tags_with_glyphs:
+            row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD').operator_idname = 'wm.category_tag_create'
+            row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
+            return
 
         for i, tag in enumerate(tags_with_glyphs):
             glyph = glyph_display(tag.glyph)

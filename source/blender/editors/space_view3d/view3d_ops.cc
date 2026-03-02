@@ -198,25 +198,18 @@ static bool view3d_tag_bar_toggle_poll(bContext *C)
 
 static wmOperatorStatus view3d_tag_bar_toggle_exec(bContext *C, wmOperator *op)
 {
-  printf("DEBUG: view3d_tag_bar_toggle_exec CALLED!\n");
-
   ScrArea *area = CTX_wm_area(C);
   if (!area || area->spacetype != SPACE_VIEW3D) {
-    printf("DEBUG: view3d_tag_bar_toggle_exec: No area or wrong spacetype\n");
     return OPERATOR_CANCELLED;
   }
 
   View3D *v3d = static_cast<View3D *>(area->spacedata.first);
   if (!v3d) {
-    printf("DEBUG: view3d_tag_bar_toggle_exec: No v3d\n");
     return OPERATOR_CANCELLED;
   }
 
   char tag_name[64];
   RNA_string_get(op->ptr, "tag_name", tag_name);
-
-  printf("DEBUG: view3d_tag_bar_toggle_exec: tag_name='%s', current_tags='%s'\n",
-         tag_name, v3d->active_tag_filter_tags);
 
   /* Copy current active tags to work with */
   char tags_copy[256];
@@ -271,8 +264,6 @@ static wmOperatorStatus view3d_tag_bar_toggle_exec(bContext *C, wmOperator *op)
 
   /* Update the active tags string */
   STRNCPY_RLEN(v3d->active_tag_filter_tags, new_tags);
-
-  printf("DEBUG: view3d_tag_bar_toggle_exec: new_tags='%s'\n", v3d->active_tag_filter_tags);
 
   /* Trigger redraw to update category order for new tag combination */
   WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);

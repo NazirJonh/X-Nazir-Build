@@ -609,18 +609,11 @@ static PointerRNA rna_uiItemTagButton(Layout *layout,
                                       float color_r,
                                       float color_g,
                                       float color_b,
-                                      bool depress)
+                                      bool depress,
+                                      const char *tooltip)
 {
-  printf("DEBUG: rna_uiItemTagButton CALLED: opname=%s, tag_name=%s, glyph=%s\n",
-         opname, tag_name, glyph);
-
   float color[3] = {color_r, color_g, color_b};
-  PointerRNA result = uiItemTagButtonWithOperator(layout, opname, tag_name, glyph, color, depress);
-
-  printf("DEBUG: rna_uiItemTagButton: result.data=%p, result.type=%p\n",
-         result.data, result.type);
-
-  return result;
+  return uiItemTagButtonWithOperator(layout, opname, tag_name, glyph, color, depress, tooltip);
 }
 
 static void rna_uiItemM(Layout *layout,
@@ -1801,6 +1794,7 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_float(func, "color_g", 1.0f, 0.0f, 1.0f, "Green", "Green component (0.0-1.0)", 0.0f, 1.0f);
   RNA_def_float(func, "color_b", 1.0f, 0.0f, 1.0f, "Blue", "Blue component (0.0-1.0)", 0.0f, 1.0f);
   RNA_def_boolean(func, "depress", false, "", "Draw pressed in");
+  parm = RNA_def_string(func, "tooltip", nullptr, 0, "", "Tooltip text to display on hover");
   parm = RNA_def_pointer(
       func, "properties", "OperatorProperties", "", "Operator properties to fill in");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);

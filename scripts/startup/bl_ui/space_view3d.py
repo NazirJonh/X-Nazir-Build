@@ -1223,6 +1223,7 @@ class VIEW3D_HT_tag_bar_tags(Header):
                 color_g=tag.color[1],
                 color_b=tag.color[2],
                 depress=depress,
+                tooltip=tag.name,
             )
 
             # Add separator between tag buttons (but not after the last one)

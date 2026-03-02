@@ -347,8 +347,6 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
       if (STREQ(item->category, category)) {
-        printf("[DEBUG LOOKUP] Found override for '%s': glyph='%s' color=[%.2f,%.2f,%.2f]\n",
-               category, item->glyph, item->color[0], item->color[1], item->color[2]);
         if (item->glyph[0] != '\0') {
           /* Check if this is actually a fallback letter (first char of category).
            * A real glyph should be different from the category name or longer. */
@@ -396,13 +394,11 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
           }
           if (is_zero_v3(item->color) && item->display_name[0] == '\0') {
             /* No glyph, no color, no name - continue searching in mappings. */
-            printf("[DEBUG LOOKUP] Override is empty (no glyph, no color, no name) - continuing\n");
             continue;
           }
           /* If we have an override with color/name but no glyph, we should CONTINUE
            * searching in mappings and default mappings to find a real glyph before
            * falling back to the first character. */
-          printf("[DEBUG LOOKUP] Override has no glyph but has color/name - continuing to search for glyph\n");
           continue;
         }
       }
@@ -488,10 +484,8 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
   if (char_size > 0 && char_size < int(sizeof(first_char_buf))) {
     memcpy(first_char_buf, category, char_size);
     first_char_buf[char_size] = '\0';
-    printf("[DEBUG LOOKUP] Fallback: returning first_char_buf='%s' for '%s'\n", first_char_buf, category);
     return first_char_buf;
   }
-  printf("[DEBUG LOOKUP] Fallback: returning category='%s'\n", category);
   return category;
 }
 
@@ -936,12 +930,6 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
   /* Get category tags */
   const char *category_tags = category_tags_string_lookup(wm, category_idname);
 
-  /* Debug output for filtering */
-  printf("DEBUG: category_passes_tag_filter: idname='%s', active_tags='%s', category_tags='%s'\n",
-         category_idname ? category_idname : "null",
-         active_tags,
-         category_tags ? category_tags : "null");
-
   /* If category has no tags - hide it (since filter is active) */
   if (!category_tags || category_tags[0] == '\0') {
     return false;
@@ -968,7 +956,7 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
     while (*cursor && *cursor != ',' && *cursor != ';' && i < 63) {
       active_tag[i++] = *cursor++;
     }
-    
+
     /* Process trailing spaces */
     while (i > 0 && active_tag[i - 1] == ' ') {
       i--;
@@ -983,16 +971,12 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
       continue;
     }
 
-    printf("DEBUG:   Checking active_tag='%s' in category_tags='%s'\n", active_tag, category_tags);
-
     /* Check if this active_tag exists in category_tags */
     if (has_tag_in_string(category_tags, active_tag)) {
-      printf("DEBUG:   FOUND MATCH! category='%s' passes filter\n", category_idname);
       return true;  // Found at least one matching tag
     }
   }
 
-  printf("DEBUG:   NO MATCH! category='%s' hidden\n", category_idname);
   return false;  // No matching tags found in category
 }
 
@@ -1695,9 +1679,6 @@ static void ui_panel_category_draw_content(
   const char *glyph = panel_category_glyph_lookup(
       wm, category_id, nullptr, &is_fallback_letter, glyph_color);
 
-  printf("[DEBUG DRAW] category='%s' glyph_ptr=%p is_fallback_letter=%s\n",
-         category_id, (void*)glyph, is_fallback_letter ? "TRUE" : "FALSE");
-
   /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
   char fallback_glyph_buf[8];
   if (glyph == nullptr && is_fallback_letter) {
@@ -1707,17 +1688,14 @@ static void ui_panel_category_draw_content(
       memcpy(fallback_glyph_buf, category_id, first_char_size);
       fallback_glyph_buf[first_char_size] = '\0';
       glyph = fallback_glyph_buf;
-      printf("[DEBUG DRAW] glyph was nullptr, using fallback_glyph_buf='%s'\n", fallback_glyph_buf);
     }
     else {
       /* Fallback to category_id if we can't extract first char */
       glyph = category_id;
-      printf("[DEBUG DRAW] glyph was nullptr, using category_id='%s'\n", category_id);
     }
   }
 
   const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
-  printf("[DEBUG DRAW] has_glyph=%s (glyph='%s')\n", has_glyph ? "TRUE" : "FALSE", glyph);
 
   bool draw_dual = false;
   const char *text_for_name = category_id_draw;
@@ -1739,12 +1717,8 @@ static void ui_panel_category_draw_content(
   else if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
            U.category_tabs_show_active_name && is_active)
   {
-    printf("[DEBUG DRAW] GLYPHS_ONLY + ShowActiveName + IsActive: has_glyph=%s, is_fallback_letter=%s\n",
-           has_glyph ? "TRUE" : "FALSE", is_fallback_letter ? "TRUE" : "FALSE");
     if (has_glyph || is_fallback_letter) {
       draw_dual = true;
-      printf("[DEBUG DRAW] -> draw_dual=TRUE (%s path)\n",
-             has_glyph ? "has_glyph" : "is_fallback_letter");
       if (is_single_glyph_str(category_id_draw)) {
         for (const PanelType &pt : region->runtime->type->paneltypes) {
           if (pt.category && STREQ(pt.category, category_id)) {
@@ -1756,9 +1730,6 @@ static void ui_panel_category_draw_content(
           }
         }
       }
-    }
-    else {
-      printf("[DEBUG DRAW] -> draw_dual=FALSE\n");
     }
   }
 
@@ -1788,12 +1759,6 @@ static void ui_panel_category_draw_content(
     const float tab_center_x = float(rct->xmin + rct->xmax) * 0.5f;
     const float extra_shift = is_fallback_letter ? (4.0f * UI_SCALE_FAC) : 0.0f;
     const float glyph_pos_y = float(rct->ymax) - glyph_height - (tab_v_pad_text - extra_shift);
-
-    printf("[DEBUG DRAW] draw_dual=TRUE positioning: glyph='%s' is_fallback_letter=%s\n",
-           glyph, is_fallback_letter ? "TRUE" : "FALSE");
-    printf("[DEBUG DRAW]   extra_shift=%.2f, glyph_height=%.2f, tab_v_pad_text=%d\n",
-           extra_shift, glyph_height, tab_v_pad_text);
-    printf("[DEBUG DRAW]   glyph_pos_y=%.2f (rct->ymax=%d)\n", glyph_pos_y, rct->ymax);
 
     BLF_position(fontid, tab_center_x - glyph_width_val * 0.5f, glyph_pos_y - descender, 0.0f);
     uchar glyph_color_out[3];
@@ -1888,10 +1853,6 @@ static void ui_panel_category_draw_content(
     const float draw_pos_y = cy - gh * 0.5f - desc;
     BLF_position(fontid, cx - gw * 0.5f, draw_pos_y, 0.0f);
 
-    printf("[DEBUG DRAW] Centered positioning: draw_str='%s' draw_as_glyph=%s\n",
-           draw_str, draw_as_glyph ? "TRUE" : "FALSE");
-    printf("[DEBUG DRAW]   gh=%.2f, cy=%.2f, draw_pos_y=%.2f (rct ymin=%d, ymax=%d)\n",
-           gh, cy, draw_pos_y, rct->ymin, rct->ymax);
   }
   else {
     BLF_enable(fontid, BLF_ROTATION);

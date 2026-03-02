@@ -12417,6 +12417,15 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
             }
             return WM_UI_HANDLER_BREAK;
           }
+          else {
+            /* Editing is disabled - show report message to user. */
+            ReportList *reports = CTX_wm_reports(C);
+            if (reports) {
+              BKE_report(reports, RPT_INFO, "Enable 'Allow Edit Category Data' in Display Mode Settings to edit categories.");
+              WM_report_banner_show(CTX_wm_manager(C), CTX_wm_window(C));
+            }
+            return WM_UI_HANDLER_BREAK;
+          }
           break;
         }
       }

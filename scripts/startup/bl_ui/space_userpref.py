@@ -925,6 +925,11 @@ def set_category_tags(category, tags, auto_save=True):
     global _glyph_cache, _all_tags_cache
 
     if category not in _glyph_cache:
+        # If we are setting empty tags on a non-existent category, don't create it.
+        # This prevents "empty" overrides from being created during cancel/restore.
+        if not tags:
+            tag_log(f"set_category_tags: No tags to set for new category '{category}', skipping creation")
+            return True, "No tags to set"
         # Create entry if not exists
         _glyph_cache[category] = _normalize_category_data({})
 
@@ -1057,6 +1062,11 @@ def update_category_tags_in_wm(category):
                 break
         
         if override_item is None:
+            # Only create a new override if there are actually tags to store.
+            # If tags are empty and no override exists, we don't need to create one.
+            if not current_tags:
+                tag_log(f"update_category_tags_in_wm: No override and no tags, skipping creation for '{category}'")
+                return
             override_item = wm.category_glyph_overrides.new(category=category)
             tag_log(f"update_category_tags_in_wm: Created new override for '{category}'")
         
@@ -5839,6 +5849,11 @@ class VIEW3D_OT_category_tabs_settings(Operator):
         row = layout.row()
         row.active = view.category_tabs_display_mode == 'TEXT_ONLY'
         row.prop(view, "category_tabs_text_mode_show_color_indicator", text="Show Color Indicator")
+
+        # Show colored text option - only enabled in Text mode
+        row = layout.row()
+        row.active = view.category_tabs_display_mode == 'TEXT_ONLY'
+        row.prop(view, "category_tabs_text_mode_show_colored_text", text="Show Colored Text")
 
         # Show drag tooltips option - only enabled in Icon mode
         row = layout.row()

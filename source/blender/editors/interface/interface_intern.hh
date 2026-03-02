@@ -894,6 +894,12 @@ extern wmOperator *category_tab_current_dialog_op;
 extern ui::Block *category_tab_popup_block;
 
 /**
+ * Track last closed popup time and category to prevent immediate reopen.
+ */
+extern double category_tab_popup_close_time;
+extern char category_tab_last_closed_category[];
+
+/**
  * Hex/UTF-8 conversion utilities.
  */
 bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8_max);

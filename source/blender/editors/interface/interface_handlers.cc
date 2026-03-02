@@ -12379,6 +12379,36 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
         if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
           /* Check if editing is allowed. */
           if (!U.category_tabs_allow_edit) {
+            /* Prevent opening a new dialog if one is already open for the same category,
+             * or if a dialog for the same category was just closed (within 0.5 seconds).
+             * This prevents data corruption when right-clicking multiple times on the same tab. */
+            bool should_prevent = false;
+
+            /* Check if dialog is currently open */
+            if (category_tab_current_dialog_op) {
+              char existing_category[64];
+              RNA_string_get(category_tab_current_dialog_op->ptr, "category", existing_category);
+              if (STREQ(existing_category, pc_dyn.idname)) {
+                should_prevent = true;
+              }
+            }
+
+            /* Check if dialog was just closed for the same category */
+            if (!should_prevent && category_tab_last_closed_category[0] != '\0') {
+              double time_since_close = BLI_time_now_seconds() - category_tab_popup_close_time;
+              printf("[DEBUG HANDLER] Check close: time_since_close=%.3f, last_closed='%s', current='%s'\n",
+                     time_since_close, category_tab_last_closed_category, pc_dyn.idname);
+              if (time_since_close < 0.5 && STREQ(category_tab_last_closed_category, pc_dyn.idname)) {
+                printf("[DEBUG HANDLER] BLOCKING REOPEN (same click/immediate reopen)\n");
+                should_prevent = true;
+              }
+            }
+
+            if (should_prevent) {
+              /* Same category dialog is already open or just closed - ignore this click. */
+              return WM_UI_HANDLER_BREAK;
+            }
+
             /* Invoke edit dialog. */
             wmOperatorType *ot = WM_operatortype_find("SCREEN_OT_category_tab_edit_dialog", false);
             if (ot) {

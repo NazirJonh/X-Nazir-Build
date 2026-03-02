@@ -367,16 +367,29 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
             if (r_color && !is_zero_v3(item->color)) {
               copy_v3_v3(r_color, item->color);
             }
-            break;
+            /* If we found a fallback letter but NO color and NO display name override,
+             * it might be an "empty" override created for tags. Continue searching
+             * in mappings to find the real default color/glyph. */
+            if (is_zero_v3(item->color) && item->display_name[0] == '\0') {
+              continue;
+            }
+            if (r_is_fallback_letter) {
+              *r_is_fallback_letter = true;
+            }
+            return nullptr;
           }
           if (r_color) {
             copy_v3_v3(r_color, item->color);
           }
           return item->glyph;
         }
-        /* Override has no glyph - this means glyph was explicitly cleared.
-         * Return fallback letter (first character of category) instead of continuing search.
-         * This prevents finding old glyph in mappings when user clicks Reset. */
+        /* Override has no glyph - this means glyph was explicitly cleared OR
+         * this is an "empty" override created just for tags. */
+        if (is_zero_v3(item->color) && item->display_name[0] == '\0') {
+          /* No glyph, no color, no name - continue searching in mappings. */
+          continue;
+        }
+        /* Return fallback letter (first character of category) with override color/name. */
         if (r_is_fallback_letter) {
           *r_is_fallback_letter = true;
         }
@@ -1875,7 +1888,14 @@ static void ui_panel_category_draw_content(
   }
   else {
     uchar text_color[3];
-    if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY && !is_zero_v3(glyph_color)) {
+    /* Use custom glyph color even for fallback letters or when in icon-only mode.
+     * Respect the 'Show Colored Text' preference in Text mode. */
+    bool use_custom_color = !is_zero_v3(glyph_color);
+    if (display_mode == USER_CATEGORY_TABS_TEXT_ONLY && !U.category_tabs_text_mode_show_colored_text) {
+      use_custom_color = false;
+    }
+
+    if (use_custom_color) {
       text_color[0] = uchar(glyph_color[0] * 255);
       text_color[1] = uchar(glyph_color[1] * 255);
       text_color[2] = uchar(glyph_color[2] * 255);

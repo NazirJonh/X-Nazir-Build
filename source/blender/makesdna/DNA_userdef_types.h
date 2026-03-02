@@ -973,7 +973,9 @@ struct UserDef {
   char category_tabs_allow_edit = false;
   /** Show color indicator bar in Text mode for categories with custom glyph colors. */
   char category_tabs_text_mode_show_color_indicator = true;
-  char _pad7[3] = {0, 0, 0};
+  /** Show colored text in Text mode for categories with custom glyph colors. */
+  char category_tabs_text_mode_show_colored_text = true;
+  char _pad7[2] = {0, 0};
   /**
    * Setting for UI line width.
    *

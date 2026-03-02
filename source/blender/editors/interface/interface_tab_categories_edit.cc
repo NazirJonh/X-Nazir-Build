@@ -347,8 +347,8 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
                         color_changed ||
                         (item->tags[0] != '\0' && original_tags[0] == '\0'));
 
-    if (!has_changes) {
-      printf("[DEBUG CANCEL_CB] No changes, deleting temporary override\n");
+    if (!has_changes || !original_has_override) {
+      printf("[DEBUG CANCEL_CB] No changes or no original override, deleting temporary override\n");
       BLI_remlink(&wm->category_glyph_overrides, item);
       MEM_delete(item);
     }
@@ -407,7 +407,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   printf("[DEBUG CANCEL_CB] Cancel callback completed\n");
 }
 
-void category_tab_edit_popup_ok_cb(bContext *C, void *user_data, int /*retval*/)
+void category_tab_edit_popup_ok_cb(bContext * /*C*/, void *user_data, int /*retval*/)
 {
   printf("[DEBUG OK_CB] category_tab_edit_popup_ok_cb called\n");
   /* Clear dialog operator pointer and popup block */
@@ -664,14 +664,19 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   if (glyph_valid && glyph[0] != '\0') {
     /* User has entered a valid glyph - save it to override */
     STRNCPY(item->glyph, glyph);
+    printf("[DEBUG LIVE UPDATE] Saving valid glyph='%s' to override for '%s'\n", glyph, category);
   }
   else if (!glyph_valid) {
     /* Invalid glyph - don't update override, keep previous value */
+    printf("[DEBUG LIVE UPDATE] Invalid glyph for '%s' - keeping previous value\n", category);
   }
   else {
     /* Empty glyph - clear override glyph to use defaults */
     item->glyph[0] = '\0';
+    printf("[DEBUG LIVE UPDATE] Empty glyph for '%s' - clearing override glyph (will use fallback)\n", category);
   }
+  printf("[DEBUG LIVE UPDATE] Override state: category='%s' glyph='%s' color=[%.2f,%.2f,%.2f]\n",
+         item->category, item->glyph, item->color[0], item->color[1], item->color[2]);
 
   /* Trigger redraw to show the updated color */
   WM_main_add_notifier(NC_WINDOW, nullptr);
@@ -1181,6 +1186,7 @@ constexpr int GLYPH_POPUP_RIGHT_COL_WIDTH = 45;
  */
 static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *arg)
 {
+  UNUSED_VARS(C);
   GlyphGridPopupData *popup_data = static_cast<GlyphGridPopupData *>(arg);
 
   /* Sync search string from RNA property */

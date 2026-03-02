@@ -4869,9 +4869,9 @@ static void widget_draw_tag(const bContext *C,
     uiWidgetColors wcol_box = tui->wcol_box;
 
     /* Set white outline for better visibility (like standard Blender buttons) */
-    wcol_box.outline[0] = 100;  /* R */
-    wcol_box.outline[1] = 100;  /* G */
-    wcol_box.outline[2] = 100;  /* B */
+    wcol_box.outline[0] = 80;  /* R */
+    wcol_box.outline[1] = 80;  /* G */
+    wcol_box.outline[2] = 80;  /* B */
     wcol_box.outline[3] = 255;  /* A - fully opaque */
 
     /* Set fully opaque background for inactive state (override theme transparency) */
@@ -4886,12 +4886,15 @@ static void widget_draw_tag(const bContext *C,
     if (state->but_flag & UI_SELECT) {
       /* Keep white outline for active button (not theme outline) */
       /* Light gray background for active button (instead of theme blue) */
-      wcol_box.inner[0] = 80;  /* R */
-      wcol_box.inner[1] = 80;  /* G */
-      wcol_box.inner[2] = 80;  /* B */
+      wcol_box.inner[0] = 70;  /* R */
+      wcol_box.inner[1] = 70;  /* G */
+      wcol_box.inner[2] = 70;  /* B */
       wcol_box.inner[3] = 255;  /* A - fully opaque */
-      /* Use theme outline color for active button */
-      copy_v4_v4_uchar(wcol_box.outline, tui->editor_outline_active);
+      /* Use theme outline color for active button and darken it by 56% */
+      wcol_box.outline[0] = uchar(tui->editor_outline_active[0] * 0.56f);
+      wcol_box.outline[1] = uchar(tui->editor_outline_active[1] * 0.56f);
+      wcol_box.outline[2] = uchar(tui->editor_outline_active[2] * 0.56f);
+      wcol_box.outline[3] = 255;
     }
 
     /* Apply hover effect - lighten background slightly, keep white outline */

@@ -3286,7 +3286,7 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
          opname, tag_name, glyph);
 
   /* Fixed width to match standard Blender buttons (1 UNIT) */
-  const short width = UI_UNIT_X;
+  const short width = UI_UNIT_X * 1.5;
 
   /* Create Tag button with preference mode (no checkbox) */
   Button *tag_but = uiDefButTag(block,

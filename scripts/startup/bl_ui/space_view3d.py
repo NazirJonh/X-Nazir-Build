@@ -1206,16 +1206,16 @@ class VIEW3D_HT_tag_bar_tags(Header):
         # Create a row for tag buttons and filter toggle with compact spacing
         row = layout.row(align=True)
 
-        for tag in tags_sorted:
+        # Filter tag list to only include those with glyphs
+        tags_with_glyphs = [t for t in tags_sorted if glyph_display(t.glyph)]
+
+        for i, tag in enumerate(tags_with_glyphs):
             glyph = glyph_display(tag.glyph)
-            if not glyph:
-                continue
 
             # Check if this tag is in the active set
             depress = tag.name in active_tags_set
 
-            print(f"DEBUG: Creating tag button: tag.name={tag.name}, depress={depress}")
-            op = row.tag_button(
+            row.tag_button(
                 "view3d.tag_bar_toggle",
                 tag_name=tag.name,
                 glyph=glyph,
@@ -1224,7 +1224,14 @@ class VIEW3D_HT_tag_bar_tags(Header):
                 color_b=tag.color[2],
                 depress=depress,
             )
-            print(f"DEBUG: tag_button returned: {op}, type={type(op)}")
+
+            # Add separator between tag buttons (but not after the last one)
+            if i < len(tags_with_glyphs) - 1:
+                row.separator()
+
+        # Add separator before filter toggle button
+        if tags_with_glyphs:
+            row.separator()
 
         # Filter toggle button - same row as tags for compact spacing
         is_filter_active = bool(active_tags)

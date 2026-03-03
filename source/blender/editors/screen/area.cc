@@ -1258,6 +1258,58 @@ static void region_azone_tab_plus(ScrArea *area, AZone *az, ARegion *region)
   BLI_rcti_init(&az->rect, az->x1, az->x2, az->y1, az->y2);
 }
 
+/**
+ * Create a tab button with custom X offset from the left edge of the region.
+ * This allows creating multiple buttons on the same edge (e.g., for Tag Bar).
+ *
+ * \param area: The screen area containing the region.
+ * \param az: The action zone to configure.
+ * \param region: The region the button is for.
+ * \param edge: The edge direction (e.g., AE_TOP_TO_BOTTOMRIGHT).
+ * \param x_offset: Distance from the left edge of the region to the button.
+ * \param tab_size_x: Width of the button.
+ * \param tab_size_y: Height of the button.
+ */
+static void region_azone_tab_plus_with_offset(ScrArea *area,
+                                              AZone *az,
+                                              ARegion *region,
+                                              const AZEdge edge,
+                                              const float x_offset,
+                                              const float tab_size_x,
+                                              const float tab_size_y)
+{
+  switch (edge) {
+    case AE_TOP_TO_BOTTOMRIGHT: {
+      int add = (region->winrct.ymax == area->totrct.ymin) ? 1 : 0;
+      az->x1 = region->winrct.xmin + x_offset;
+      az->y1 = region->winrct.ymax - U.pixelsize;
+      az->x2 = az->x1 + tab_size_x;
+      az->y2 = region->winrct.ymax - add + tab_size_y;
+      break;
+    }
+    case AE_BOTTOM_TO_TOPLEFT:
+      az->x1 = region->winrct.xmin + x_offset;
+      az->y1 = region->winrct.ymin - tab_size_y;
+      az->x2 = az->x1 + tab_size_x;
+      az->y2 = region->winrct.ymin + U.pixelsize;
+      break;
+    case AE_LEFT_TO_TOPRIGHT:
+      az->x1 = region->winrct.xmin - tab_size_y;
+      az->y1 = region->winrct.ymax - x_offset;
+      az->x2 = region->winrct.xmin + U.pixelsize;
+      az->y2 = az->y1 - tab_size_x;
+      break;
+    case AE_RIGHT_TO_TOPLEFT:
+      az->x1 = region->winrct.xmax - U.pixelsize;
+      az->y1 = region->winrct.ymax - x_offset;
+      az->x2 = region->winrct.xmax + tab_size_y;
+      az->y2 = az->y1 - tab_size_x;
+      break;
+  }
+  /* rect needed for mouse pointer test */
+  BLI_rcti_init(&az->rect, az->x1, az->x2, az->y1, az->y2);
+}
+
 static bool region_azone_edge_poll(const ScrArea *area,
                                    const ARegion *region,
                                    const bool is_fullscreen)
@@ -1382,9 +1434,102 @@ static void region_azones_add_edge(ScrArea *area,
   }
 }
 
+/**
+ * Create two toggle buttons for the Tag Bar region instead of one.
+ * The buttons are positioned away from the edge for better accessibility.
+ *
+ * For hidden regions: Creates two buttons at approximately 25% and 75% of the region width.
+ * For visible regions: Creates a standard edge zone for resizing.
+ *
+ * \param area: The screen area containing the Tag Bar.
+ * \param region: The Tag Bar region (RGN_TYPE_TAG_BAR).
+ * \param is_fullscreen: Whether the area is in fullscreen mode.
+ */
+static void region_azones_tag_bar_add_double(ScrArea *area,
+                                             ARegion *region,
+                                             const bool is_fullscreen)
+{
+  const bool is_hidden = (region->flag & (RGN_FLAG_HIDDEN | RGN_FLAG_TOO_SMALL));
+
+  if (!region_azone_edge_poll(area, region, is_fullscreen)) {
+    return;
+  }
+
+  const AZEdge edge = (region->alignment == RGN_ALIGN_TOP) ?
+                      AE_BOTTOM_TO_TOPLEFT : AE_TOP_TO_BOTTOMRIGHT;
+
+  /* For visible region, create standard edge zone for resizing */
+  if (!is_hidden) {
+    AZone *az = MEM_new<AZone>("actionzone");
+    BLI_addtail(&(area->actionzones), az);
+    az->type = AZONE_REGION;
+    az->region = region;
+    az->edge = edge;
+    region_azone_edge(area, az, region);
+    region_azones_scrollbars_init(area, region);
+    return;
+  }
+
+  /* For hidden region, create two toggle buttons */
+  const int region_width = BLI_rcti_size_x(&region->winrct);
+
+  /* Minimum width required for double buttons */
+  const int min_width_for_double = 150 * UI_SCALE_FAC;
+
+  /* If region is too narrow, use standard single button */
+  if (region_width < min_width_for_double) {
+    region_azone_edge_init(area, region, edge, is_fullscreen);
+    return;
+  }
+
+  /* Button sizes */
+  const float tab_size_x = 1.2f * U.widget_unit;
+  const float tab_size_y = 0.5f * U.widget_unit;
+
+  /* Calculate button positions:
+   * Button 1: near left edge
+   * Button 2: near right edge
+   * Each button has a small margin from its respective edge
+   */
+  const float margin_from_edge = 4.0f * U.widget_unit;
+
+  /* Button 1: positioned from left edge */
+  const float button1_x = margin_from_edge - 38.0f;
+
+  /* Button 2: positioned from right edge */
+  const float button2_x = region_width - margin_from_edge - tab_size_x;
+
+  /* Create first toggle button (near left edge) */
+  AZone *az1 = MEM_new<AZone>("tag bar toggle button 1");
+  BLI_addtail(&(area->actionzones), az1);
+  az1->type = AZONE_REGION;
+  az1->region = region;
+  az1->edge = edge;
+  region_azone_tab_plus_with_offset(
+      area, az1, region, edge, button1_x, tab_size_x, tab_size_y);
+
+  /* Create second toggle button (near right edge) */
+  AZone *az2 = MEM_new<AZone>("tag bar toggle button 2");
+  BLI_addtail(&(area->actionzones), az2);
+  az2->type = AZONE_REGION;
+  az2->region = region;
+  az2->edge = edge;
+  region_azone_tab_plus_with_offset(
+      area, az2, region, edge, button2_x, tab_size_x, tab_size_y);
+
+  /* Add scrollbars if needed */
+  region_azones_scrollbars_init(area, region);
+}
+
 static void region_azones_add(const bScreen *screen, ScrArea *area, ARegion *region)
 {
   const bool is_fullscreen = screen->state == SCREENFULL;
+
+  /* Special handling for Tag Bar - create double toggle buttons */
+  if (region->regiontype == RGN_TYPE_TAG_BAR) {
+    region_azones_tag_bar_add_double(area, region, is_fullscreen);
+    return;
+  }
 
   /* Only display tab or icons when the header region is hidden
    * (not the tool header - they overlap). */

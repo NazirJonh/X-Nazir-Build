@@ -7,6 +7,9 @@
  */
 
 #include <cstdlib>
+#include <cstring>
+
+#include "MEM_guardedalloc.h"
 
 #include "DNA_scene_types.h"
 #include "DNA_windowmanager_types.h"
@@ -39,10 +42,7 @@
 
 #  include "BKE_keyconfig.h"
 #  include "BKE_report.hh"
-
-#  include "MEM_guardedalloc.h"
 #  include "BKE_main.hh"
-#  include "BKE_report.hh"
 #  include "BKE_wm_runtime.hh"
 #  include "BKE_workspace.hh"
 
@@ -646,6 +646,9 @@ const EnumPropertyItem rna_enum_wm_report_items[] = {
 
 #ifdef RNA_RUNTIME
 
+#  include "MEM_guardedalloc.h"
+#  include "BLI_listbase.h"
+#  include "BLI_string.h"
 #  include "BLI_string_utils.hh"
 
 #  include "WM_api.hh"
@@ -659,7 +662,6 @@ const EnumPropertyItem rna_enum_wm_report_items[] = {
 
 #  include "UI_interface.hh"
 
-#  include "MEM_guardedalloc.h"
 
 #  ifdef WITH_PYTHON
 #    include "BPY_extern.hh"
@@ -881,6 +883,76 @@ static void rna_wm_category_tag_def_clear(wmWindowManager *wm)
       BLI_listbase_clear(&wm->category_tags);
     }
   }
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+}
+
+/**
+ * Reorder category tags by name list without destroying/recreating items.
+ * This function reorganizes existing items in the collection to match the
+ * specified order, preserving all item data and avoiding memory allocation.
+ *
+ * \param wm: Window manager
+ * \param names_str: Comma-separated string of tag names in desired order
+ */
+static void rna_wm_category_tag_def_reorder(wmWindowManager *wm, const char *names_str)
+{
+  if (!names_str || !wm->category_tags.first) {
+    return;
+  }
+
+  /* Create a new list in the specified order by moving existing items */
+  ListBase new_list;
+  BLI_listbase_clear(&new_list);
+
+  /* Parse comma-separated names */
+  char *names_copy = BLI_strdup(names_str);
+  const char *sep = ",";
+  char *token = strtok(names_copy, sep);
+
+  while (token != nullptr) {
+    /* Trim whitespace */
+    char *name = token;
+    while (*name == ' ') {
+      name++;
+    }
+    char *end = name + strlen(name) - 1;
+    while (end > name && *end == ' ') {
+      *end = '\0';
+      end--;
+    }
+
+    if (name[0] != '\0') {
+      /* Find existing tag with this name */
+      CategoryTagDef *tag = static_cast<CategoryTagDef *>(wm->category_tags.first);
+      while (tag) {
+        if (STREQ(tag->name, name)) {
+          /* Found it - remove from old list and add to new */
+          BLI_remlink(&wm->category_tags, tag);
+          BLI_addtail(&new_list, tag);
+          break;
+        }
+        tag = tag->next;
+      }
+    }
+
+    token = strtok(nullptr, sep);
+  }
+
+  if (names_copy) {
+    MEM_delete_void(static_cast<void *>(names_copy));
+  }
+
+  /* Append any remaining items (not in order list) at the end */
+  while (wm->category_tags.first) {
+    CategoryTagDef *tag = static_cast<CategoryTagDef *>(wm->category_tags.first);
+    BLI_remlink(&wm->category_tags, tag);
+    BLI_addtail(&new_list, tag);
+  }
+
+  /* Replace old list with new ordered list */
+  wm->category_tags = new_list;
+
+  /* Single notification after reorder is complete */
   WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
@@ -3310,6 +3382,17 @@ static void rna_def_category_tag_defs(BlenderRNA *brna, PropertyRNA *cprop)
 
   func = RNA_def_function(srna, "clear", "rna_wm_category_tag_def_clear");
   RNA_def_function_ui_description(func, "Remove all category tags");
+
+  func = RNA_def_function(srna, "reorder_from_names", "rna_wm_category_tag_def_reorder");
+  RNA_def_function_ui_description(func,
+                                  "Reorder tags by list of names without destroying items");
+  parm = RNA_def_string(func,
+                        "names",
+                        nullptr,
+                        0,
+                        "Names",
+                        "Comma-separated list of tag names in desired order");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
 }
 
 static void rna_def_category_glyph_overrides(BlenderRNA *brna, PropertyRNA *cprop)

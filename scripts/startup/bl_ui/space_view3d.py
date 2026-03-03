@@ -1189,13 +1189,15 @@ class VIEW3D_OT_tag_move(Operator):
         items=[
             ('UP', "Up", "Move tag up in the list (left in tag bar)"),
             ('DOWN', "Down", "Move tag down in the list (right in tag bar)"),
+            ('LEFT', "Left", "Move tag left in the tag bar"),
+            ('RIGHT', "Right", "Move tag right in the tag bar"),
         ],
         default='UP',
         options={'HIDDEN'}
     )
 
     def execute(self, context):
-        from bl_ui.space_userpref import _tag_order_cache, _save_tags_to_json
+        from bl_ui.space_userpref import _tag_order_cache, _save_tag_order_only
 
         wm = context.window_manager
 
@@ -1204,16 +1206,17 @@ class VIEW3D_OT_tag_move(Operator):
             self.report({'ERROR'}, "No tag selected")
             return {'CANCELLED'}
 
-        active_index = wm.category_tags_active_index
+        # Convert filtered view index to actual collection index
+        filtered_index = wm.category_tags_active_index
+        actual_index = _get_filtered_tag_to_actual_index(wm, filtered_index)
 
-        # Validate index
-        if active_index < 0 or active_index >= len(wm.category_tags):
-            self.report({'ERROR'}, "Invalid tag selection")
+        if actual_index < 0:
+            self.report({'ERROR'}, "Invalid tag selection (filter mismatch)")
             return {'CANCELLED'}
 
         # Get current tag order from cache (from space_userpref module)
         tag_order = list(_tag_order_cache)  # Make a copy
-        active_tag = wm.category_tags[active_index]
+        active_tag = wm.category_tags[actual_index]
 
         # If tag not in order, add it
         if active_tag.name not in tag_order:
@@ -1227,9 +1230,9 @@ class VIEW3D_OT_tag_move(Operator):
             return {'CANCELLED'}
 
         # Calculate new position
-        if self.direction == 'UP':
+        if self.direction in {'UP', 'LEFT'}:
             new_index = max(0, current_index - 1)
-        else:  # DOWN
+        else:  # DOWN, RIGHT
             new_index = min(len(tag_order) - 1, current_index + 1)
 
         # Move tag
@@ -1241,17 +1244,32 @@ class VIEW3D_OT_tag_move(Operator):
             _tag_order_cache.clear()
             _tag_order_cache.extend(tag_order)
 
-            # Update UIList active index to point to the moved tag's NEW position in the sorted list
-            # The new position in the sorted list IS the new_index (in tag_order)
-            wm.category_tags_active_index = new_index
+            # Reorder wm.category_tags collection using C++ function
+            # This reorders existing items without destroying/recreating them
+            tags = wm.category_tags
+            names_str = ','.join(tag_order)
+            tags.reorder_from_names(names_str)
 
-            # Save to JSON
-            _save_tags_to_json()
+            # Update UIList active index
+            # We need to convert the new actual position to filtered view index
+            new_filtered_index = _get_actual_to_filtered_index(wm, new_index)
+            if new_filtered_index >= 0:
+                wm.category_tags_active_index = new_filtered_index
+            # else: keep current index if tag is not visible
+
+            # Save to JSON - use order-only function to avoid rebuilding WM collection
+            _save_tag_order_only()
 
             # Update UI
             context.area.tag_redraw()
 
-            direction_text = "up" if self.direction == 'UP' else "down"
+            direction_map = {
+                'UP': "up",
+                'DOWN': "down",
+                'LEFT': "left",
+                'RIGHT': "right",
+            }
+            direction_text = direction_map.get(self.direction, "up")
             self.report({'INFO'}, f"Moved '{active_tag.name}' {direction_text}")
 
         return {'FINISHED'}
@@ -1271,15 +1289,16 @@ class VIEW3D_OT_tag_context_menu(Operator):
             self.report({'ERROR'}, "No tag selected")
             return {'CANCELLED'}
 
-        active_index = wm.category_tags_active_index
+        # Convert filtered view index to actual collection index
+        filtered_index = wm.category_tags_active_index
+        actual_index = _get_filtered_tag_to_actual_index(wm, filtered_index)
 
-        # Validate index
-        if active_index < 0 or active_index >= len(wm.category_tags):
-            self.report({'ERROR'}, "Invalid tag selection")
+        if actual_index < 0:
+            self.report({'ERROR'}, "Invalid tag selection (filter mismatch)")
             return {'CANCELLED'}
 
         # Get the selected tag
-        selected_tag = wm.category_tags[active_index]
+        selected_tag = wm.category_tags[actual_index]
 
         # Save tag_name in window_manager for the menu (temporary)
         wm.tag_context_menu_name = selected_tag.name
@@ -1376,15 +1395,143 @@ class VIEW3D_OT_tag_order_reset(Operator):
 
 
 class VIEW3D_UL_tag_order_list(UIList):
-    """UIList for displaying and managing tag order"""
+    """UIList for displaying and managing tag order - only shows tags visible in current mode"""
     bl_idname = "VIEW3D_UL_tag_order_list"
+
+    def filter_items(self, context, data, propname):
+        """Filter tags to show only those visible in current mode (with glyph and active for mode).
+        Returns tuple (filter_flags, sort_order) as required by Blender UIList.
+        """
+        wm = context.window_manager
+        if not wm or not wm.category_tags:
+            return ([], [])
+
+        # Helper function to convert hex glyph to character
+        def glyph_display(glyph):
+            if not glyph:
+                return ""
+            try:
+                if all(c in "0123456789abcdefABCDEF" for c in glyph) and len(glyph) <= 8:
+                    return chr(int(glyph, 16))
+            except Exception:
+                pass
+            return glyph
+
+        # Get current mode
+        mode_string = context.mode
+
+        # DEBUG: Print mode to console
+        print(f"DEBUG filter_items: mode_string='{mode_string}'")
+
+        # Filter tags by:
+        # 1. Must have a glyph (not empty)
+        # 2. Must be active for current mode
+        filtered_flags = []
+        for item in wm.category_tags:
+            # DEBUG: Print tag info
+            print(f"  Tag: '{item.name}', mode_flags={item.mode_flags}, glyph='{item.glyph}'")
+
+            # Check if glyph exists and is not empty
+            if not glyph_display(item.glyph):
+                print(f"    -> HIDDEN (no glyph)")
+                filtered_flags.append(0)  # Show items without glyph (will be at end)
+                continue
+
+            # Check mode_flags - if mode_flags is 0, tag is active for all modes
+            if item.mode_flags == 0:
+                print(f"    -> VISIBLE (mode_flags=0, all modes)")
+                filtered_flags.append(0)  # Show (active for all modes)
+            else:
+                # Check if tag is active for current mode (same logic as in tag buttons)
+                mode_bit_map = {
+                    'OBJECT': 0,
+                    'EDIT_MESH': 1,
+                    'SCULPT': 2,
+                    'PAINT_VERTEX': 3,
+                    'PAINT_WEIGHT': 4,
+                    'PAINT_TEXTURE': 5,
+                    'PARTICLE_EDIT': 6,
+                    'POSE': 7,
+                }
+                mode_bit = mode_bit_map.get(mode_string, None)
+                # If mode is not in map, hide the tag (don't show in unknown modes)
+                if mode_bit is not None and (item.mode_flags & (1 << mode_bit)):
+                    print(f"    -> VISIBLE (mode_flags & (1 << {mode_bit}) = {item.mode_flags & (1 << mode_bit)})")
+                    filtered_flags.append(0)  # Show (active for current mode)
+                else:
+                    print(f"    -> HIDDEN (mode_flags={item.mode_flags}, bit={mode_bit})")
+                    filtered_flags.append(self.bitflag_filter_item)  # Hide
+            # Check if glyph exists and is not empty
+            if not glyph_display(item.glyph):
+                filtered_flags.append(0)  # Show items without glyph (will be at end)
+                continue
+
+            # Check mode_flags - if mode_flags is 0, tag is active for all modes
+            if item.mode_flags == 0:
+                filtered_flags.append(0)  # Show (active for all modes)
+            else:
+                # Check if tag is active for current mode (same logic as in tag buttons)
+                mode_bit_map = {
+                    'OBJECT': 0,
+                    'EDIT_MESH': 1,
+                    'SCULPT': 2,
+                    'PAINT_VERTEX': 3,
+                    'PAINT_WEIGHT': 4,
+                    'PAINT_TEXTURE': 5,
+                    'PARTICLE_EDIT': 6,
+                    'POSE': 7,
+                }
+                mode_bit = mode_bit_map.get(mode_string, None)
+                # DEBUG: Print mode_bit for first tag
+                if item == wm.category_tags[0]:
+                    print(f"  mode_bit={mode_bit}, checking mode_flags & (1 << mode_bit)")
+                # If mode is not in map, hide the tag (don't show in unknown modes)
+                if mode_bit is not None and (item.mode_flags & (1 << mode_bit)):
+                    filtered_flags.append(0)  # Show (active for current mode)
+                else:
+                    filtered_flags.append(self.bitflag_filter_item)  # Hide
+
+        # Return tuple: (filter_flags, sort_order)
+        # sort_order is empty list to keep original order
+        return (filtered_flags, [])
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         # Custom draw for tag items
         layout.emboss = 'NONE'
 
-        # Index number
-        layout.label(text=f"{index + 1}.", icon='NONE')
+        # Index number (only visible items are numbered)
+        visible_index = 0
+        wm = context.window_manager
+        if wm and wm.category_tags:
+            mode_string = context.mode
+            mode_bit_map = {
+                'OBJECT': 0,
+                'EDIT_MESH': 1,
+                'SCULPT': 2,
+                'PAINT_VERTEX': 3,
+                'PAINT_WEIGHT': 4,
+            }
+            mode_bit = mode_bit_map.get(mode_string, 0)
+
+            def glyph_display(glyph):
+                if not glyph:
+                    return ""
+                try:
+                    if all(c in "0123456789abcdefABCDEF" for c in glyph) and len(glyph) <= 8:
+                        return chr(int(glyph, 16))
+                except Exception:
+                    pass
+                return glyph
+
+            for check_item in wm.category_tags:
+                if not glyph_display(check_item.glyph):
+                    continue
+                if check_item.mode_flags == 0 or (check_item.mode_flags & (1 << mode_bit)):
+                    if check_item == item:
+                        break
+                    visible_index += 1
+
+        layout.label(text=f"{visible_index + 1}.", icon='NONE')
 
         # Tag icon/glyph
         if item.glyph:
@@ -1414,6 +1561,121 @@ class VIEW3D_UL_tag_order_list(UIList):
 
 
 
+def _get_filtered_tag_to_actual_index(wm, filtered_index):
+    """Convert UIList filtered view index to actual wm.category_tags collection index.
+
+    When UIList filtering is active, the visible index doesn't match the actual
+    collection index. This function maps from the filtered view position to the
+    actual position in wm.category_tags.
+
+    Returns the actual index in wm.category_tags, or -1 if not found.
+    """
+    if not wm or not wm.category_tags:
+        return -1
+
+    # Helper function to convert hex glyph to character
+    def glyph_display(glyph):
+        if not glyph:
+            return ""
+        try:
+            if all(c in "0123456789abcdefABCDEF" for c in glyph) and len(glyph) <= 8:
+                return chr(int(glyph, 16))
+        except Exception:
+            pass
+        return glyph
+
+    # Get current mode
+    import bpy
+    mode_string = bpy.context.mode
+
+    # Count visible items until we reach the filtered_index
+    visible_count = 0
+    for actual_index, item in enumerate(wm.category_tags):
+        # Check if item is visible (same logic as VIEW3D_UL_tag_order_list.filter_items)
+        # Items with glyph + matching mode_flags are HIDDEN (bitflag_filter_item)
+        # Items without glyph or NOT matching mode_flags are SHOWN (0)
+
+        if not glyph_display(item.glyph):
+            # Items without glyph are shown (at end)
+            is_visible = True
+        elif item.mode_flags == 0:
+            # mode_flags == 0 means active for all modes - these are SHOWN in filtered view
+            is_visible = True
+        else:
+            # Check mode-specific visibility
+            mode_bit_map = {
+                'OBJECT': 0,
+                'EDIT_MESH': 1,
+                'SCULPT': 2,
+                'PAINT_VERTEX': 3,
+                'PAINT_WEIGHT': 4,
+            }
+            mode_bit = mode_bit_map.get(mode_string, 0)
+            # Items matching current mode are SHOWN, non-matching are HIDDEN
+            is_visible = (item.mode_flags & (1 << mode_bit)) != 0
+
+        if is_visible:
+            if visible_count == filtered_index:
+                return actual_index
+            visible_count += 1
+
+    return -1
+
+
+def _get_actual_to_filtered_index(wm, actual_index):
+    """Convert actual wm.category_tags collection index to UIList filtered view index.
+
+    This is the inverse of _get_filtered_tag_to_actual_index.
+    Returns the filtered view index, or -1 if the item is not visible.
+    """
+    if not wm or not wm.category_tags:
+        return -1
+
+    if actual_index < 0 or actual_index >= len(wm.category_tags):
+        return -1
+
+    # Helper function to convert hex glyph to character
+    def glyph_display(glyph):
+        if not glyph:
+            return ""
+        try:
+            if all(c in "0123456789abcdefABCDEF" for c in glyph) and len(glyph) <= 8:
+                return chr(int(glyph, 16))
+        except Exception:
+            pass
+        return glyph
+
+    # Get current mode
+    import bpy
+    mode_string = bpy.context.mode
+
+    # Count visible items up to the actual_index
+    visible_count = 0
+    for i, item in enumerate(wm.category_tags):
+        # Check if item is visible
+        if not glyph_display(item.glyph):
+            is_visible = True
+        elif item.mode_flags == 0:
+            is_visible = True
+        else:
+            mode_bit_map = {
+                'OBJECT': 0,
+                'EDIT_MESH': 1,
+                'SCULPT': 2,
+                'PAINT_VERTEX': 3,
+                'PAINT_WEIGHT': 4,
+            }
+            mode_bit = mode_bit_map.get(mode_string, 0)
+            is_visible = (item.mode_flags & (1 << mode_bit)) != 0
+
+        if is_visible:
+            if i == actual_index:
+                return visible_count
+            visible_count += 1
+
+    return -1  # Item at actual_index is not visible
+
+
 class VIEW3D_OT_tag_move_up(Operator):
     """Move tag up in the list"""
     bl_idname = "view3d.tag_move_up"
@@ -1430,16 +1692,17 @@ class VIEW3D_OT_tag_move_up(Operator):
             self.report({'ERROR'}, "No tag selected")
             return {'CANCELLED'}
 
-        active_index = wm.category_tags_active_index
+        # Convert filtered view index to actual collection index
+        filtered_index = wm.category_tags_active_index
+        actual_index = _get_filtered_tag_to_actual_index(wm, filtered_index)
 
-        # Validate index
-        if active_index < 0 or active_index >= len(wm.category_tags):
-            self.report({'ERROR'}, "Invalid tag selection")
+        if actual_index < 0:
+            self.report({'ERROR'}, "Invalid tag selection (filter mismatch)")
             return {'CANCELLED'}
 
         # Get current tag order from cache (from space_userpref module)
         tag_order = list(_tag_order_cache)  # Make a copy
-        active_tag = wm.category_tags[active_index]
+        active_tag = wm.category_tags[actual_index]
 
         # If tag not in order, add it
         if active_tag.name not in tag_order:
@@ -1464,43 +1727,22 @@ class VIEW3D_OT_tag_move_up(Operator):
             _tag_order_cache.clear()
             _tag_order_cache.extend(tag_order)
 
-            # Rebuild wm.category_tags collection in the new order to sync UIList
+            # Reorder wm.category_tags collection using C++ function
+            # This function reorders existing items without destroying/recreating them
+            # avoiding memory invalidation issues with UIList pointers
             tags = wm.category_tags
-            tags_data = []
-            for tag in tags:
-                tags_data.append({
-                    'name': tag.name,
-                    'glyph': tag.glyph,
-                    'color': list(tag.color),
-                    'mode_flags': tag.mode_flags,
-                })
+            names_str = ','.join(tag_order)  # Comma-separated list of names
+            tags.reorder_from_names(names_str)
 
-            # Clear and rebuild collection in new order
-            while len(tags) > 0:
-                tags.remove(tags[0])
-
-            for tag_name in tag_order:
-                # Find the tag data
-                tag_data = next((t for t in tags_data if t['name'] == tag_name), None)
-                if tag_data:
-                    new_tag = tags.new()
-                    new_tag.name = tag_data['name']
-                    new_tag.glyph = tag_data['glyph']
-                    new_tag.color = tag_data['color']
-                    new_tag.mode_flags = tag_data['mode_flags']
-
-            # Add any remaining tags not in order (newly created)
-            for tag_data in tags_data:
-                if tag_data['name'] not in tag_order:
-                    new_tag = tags.new()
-                    new_tag.name = tag_data['name']
-                    new_tag.glyph = tag_data['glyph']
-                    new_tag.color = tag_data['color']
-                    new_tag.mode_flags = tag_data['mode_flags']
-
-            # Update UIList active index to point to the moved tag's NEW position in the sorted list
-            # The new position in the sorted list IS the new_index (in tag_order)
-            wm.category_tags_active_index = new_index
+            # Update UIList active index to point to the moved tag's NEW position
+            # After reorder, the moved tag is at position 'new_index' in the collection
+            # We need to convert this to the filtered view index
+            new_filtered_index = _get_actual_to_filtered_index(wm, new_index)
+            if new_filtered_index >= 0:
+                wm.category_tags_active_index = new_filtered_index
+            else:
+                # Tag is not visible in filtered view, set to safe default
+                wm.category_tags_active_index = 0
 
             # Save to JSON - use order-only function to avoid rebuilding WM collection
             _save_tag_order_only()
@@ -1529,16 +1771,17 @@ class VIEW3D_OT_tag_move_down(Operator):
             self.report({'ERROR'}, "No tag selected")
             return {'CANCELLED'}
 
-        active_index = wm.category_tags_active_index
+        # Convert filtered view index to actual collection index
+        filtered_index = wm.category_tags_active_index
+        actual_index = _get_filtered_tag_to_actual_index(wm, filtered_index)
 
-        # Validate index
-        if active_index < 0 or active_index >= len(wm.category_tags):
-            self.report({'ERROR'}, "Invalid tag selection")
+        if actual_index < 0:
+            self.report({'ERROR'}, "Invalid tag selection (filter mismatch)")
             return {'CANCELLED'}
 
         # Get current tag order from cache (from space_userpref module)
         tag_order = list(_tag_order_cache)  # Make a copy
-        active_tag = wm.category_tags[active_index]
+        active_tag = wm.category_tags[actual_index]
 
         # If tag not in order, add it
         if active_tag.name not in tag_order:
@@ -1563,43 +1806,22 @@ class VIEW3D_OT_tag_move_down(Operator):
             _tag_order_cache.clear()
             _tag_order_cache.extend(tag_order)
 
-            # Rebuild wm.category_tags collection in the new order to sync UIList
+            # Reorder wm.category_tags collection using C++ function
+            # This function reorders existing items without destroying/recreating them
+            # avoiding memory invalidation issues with UIList pointers
             tags = wm.category_tags
-            tags_data = []
-            for tag in tags:
-                tags_data.append({
-                    'name': tag.name,
-                    'glyph': tag.glyph,
-                    'color': list(tag.color),
-                    'mode_flags': tag.mode_flags,
-                })
+            names_str = ','.join(tag_order)  # Comma-separated list of names
+            tags.reorder_from_names(names_str)
 
-            # Clear and rebuild collection in new order
-            while len(tags) > 0:
-                tags.remove(tags[0])
-
-            for tag_name in tag_order:
-                # Find the tag data
-                tag_data = next((t for t in tags_data if t['name'] == tag_name), None)
-                if tag_data:
-                    new_tag = tags.new()
-                    new_tag.name = tag_data['name']
-                    new_tag.glyph = tag_data['glyph']
-                    new_tag.color = tag_data['color']
-                    new_tag.mode_flags = tag_data['mode_flags']
-
-            # Add any remaining tags not in order (newly created)
-            for tag_data in tags_data:
-                if tag_data['name'] not in tag_order:
-                    new_tag = tags.new()
-                    new_tag.name = tag_data['name']
-                    new_tag.glyph = tag_data['glyph']
-                    new_tag.color = tag_data['color']
-                    new_tag.mode_flags = tag_data['mode_flags']
-
-            # Update UIList active index to point to the moved tag's NEW position in the sorted list
-            # The new position in the sorted list IS the new_index (in tag_order)
-            wm.category_tags_active_index = new_index
+            # Update UIList active index to point to the moved tag's NEW position
+            # After reorder, the moved tag is at position 'new_index' in the collection
+            # We need to convert this to the filtered view index
+            new_filtered_index = _get_actual_to_filtered_index(wm, new_index)
+            if new_filtered_index >= 0:
+                wm.category_tags_active_index = new_filtered_index
+            else:
+                # Tag is not visible in filtered view, set to safe default
+                wm.category_tags_active_index = 0
 
             # Save to JSON - use order-only function to avoid rebuilding WM collection
             _save_tag_order_only()

@@ -119,7 +119,7 @@ TagBarRuntimeData *get_tag_bar_data_global(const bContext *C)
 
   /* Update data if needs_update flag is set */
   if (data->needs_update) {
-    tag_bar_buttons_update(wm, v3d, data);
+    tag_bar_buttons_update(C, wm, v3d, data);
     data->needs_update = false;
   }
 
@@ -272,8 +272,11 @@ bool has_all_tags_active(const wmWindowManager *wm,
 
 /**
  * Update tag bar buttons based on tags from window manager.
+ * Tags are stored in the order they appear in wm->category_tags ListBase,
+ * which matches the order from JSON's "tag_order" array.
  */
-void tag_bar_buttons_update(const wmWindowManager *wm,
+void tag_bar_buttons_update(const bContext *C,
+                            const wmWindowManager *wm,
                             View3D *v3d,
                             TagBarRuntimeData *data)
 {
@@ -290,7 +293,10 @@ void tag_bar_buttons_update(const wmWindowManager *wm,
     STRNCPY(active_tags, v3d->active_tag_filter_tags);
   }
 
-  /* Iterate through all tags from wm */
+  /* Get current mode string from context for filtering */
+  const char *mode_string = CTX_data_mode_string(C);
+
+  /* Iterate through all tags from wm in their original order (from JSON tag_order) */
   if (wm && category_tag_list_is_valid(&wm->category_tags)) {
     for (const CategoryTagDef *tag_def =
              static_cast<const CategoryTagDef *>(wm->category_tags.first);
@@ -301,7 +307,60 @@ void tag_bar_buttons_update(const wmWindowManager *wm,
       STRNCPY(btn.tag_name, tag_def->name);
       STRNCPY(btn.glyph, tag_def->glyph);
       copy_v3_v3(btn.color, tag_def->color);
-      btn.is_visible = true;
+
+      /* Check if this tag should be visible:
+       * 1. Must have a glyph (not empty)
+       * 2. Must be active for current mode (mode_flags check)
+       */
+      btn.is_visible = false;
+
+      /* Check if glyph exists and is not empty */
+      if (tag_def->glyph[0] == '\0') {
+        btn.is_visible = false;
+      }
+      else {
+        /* Check mode_flags - if mode_flags is 0, tag is active for all modes */
+        if (tag_def->mode_flags == 0) {
+          btn.is_visible = true;
+        }
+        else {
+          /* Check if tag is active for current mode
+           * Mode bit mapping matches Python code:
+           * OBJECT=0, EDIT_MESH=1, SCULPT=2, PAINT_VERTEX=3, PAINT_WEIGHT=4, etc.
+           */
+          int mode_bit = 0;
+          if (STREQ(mode_string, "OBJECT")) {
+            mode_bit = 0;
+          }
+          else if (STREQ(mode_string, "EDIT_MESH")) {
+            mode_bit = 1;
+          }
+          else if (STREQ(mode_string, "SCULPT")) {
+            mode_bit = 2;
+          }
+          else if (STREQ(mode_string, "PAINT_VERTEX")) {
+            mode_bit = 3;
+          }
+          else if (STREQ(mode_string, "PAINT_WEIGHT")) {
+            mode_bit = 4;
+          }
+          else if (STREQ(mode_string, "PAINT_TEXTURE")) {
+            mode_bit = 5;
+          }
+          else if (STREQ(mode_string, "PARTICLE_EDIT")) {
+            mode_bit = 6;
+          }
+          else if (STREQ(mode_string, "POSE")) {
+            mode_bit = 7;
+          }
+          else {
+            /* Default to OBJECT mode for unknown modes */
+            mode_bit = 0;
+          }
+          btn.is_visible = (tag_def->mode_flags & (1 << mode_bit)) != 0;
+        }
+      }
+
       btn.is_hovered = false;
       /* Check if this tag is in the active tags list */
       btn.is_active = has_tag_in_string(active_tags, tag_def->name);
@@ -320,18 +379,288 @@ void tag_bar_buttons_update(const wmWindowManager *wm,
         }
       }
 
+      /* Append button - order is preserved from wm->category_tags (JSON tag_order) */
       data->buttons.append(btn);
     }
   }
 
-  /* Sort by category count (highest first) */
-  std::sort(data->buttons.begin(), data->buttons.end(),
-            [](const TagButton &a, const TagButton &b) {
-              if (a.category_count != b.category_count) {
-                return a.category_count > b.category_count;
-              }
-              return strcmp(a.tag_name, b.tag_name) < 0;
-            });
+  /* NOTE: No sorting here! The order from wm->category_tags matches JSON's "tag_order".
+   * Python code uses _tag_order_cache which is loaded from JSON, and the ListBase
+   * is populated in that same order during JSON loading. */
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Tag Navigation Helper Functions
+ * \{ */
+
+/**
+ * Count the number of active tags in the tag filter string.
+ */
+static int count_active_tags(const char *active_tags)
+{
+  if (!active_tags || active_tags[0] == '\0') {
+    return 0;
+  }
+
+  char tags_copy[256];
+  STRNCPY(tags_copy, active_tags);
+
+  int count = 0;
+  char *tag = strtok(tags_copy, ",;");
+  while (tag != nullptr) {
+    while (*tag == ' ') {
+      tag++;
+    }
+    if (tag[0] != '\0') {
+      count++;
+    }
+    tag = strtok(nullptr, ",;");
+  }
+
+  return count;
+}
+
+/**
+ * Find the index of the currently active single tag among visible buttons.
+ * Returns -1 if no tag is active or multiple tags are active.
+ */
+static int find_active_single_tag_index(const TagBarRuntimeData *data)
+{
+  if (!data || data->buttons.is_empty()) {
+    return -1;
+  }
+
+  /* Find the single active tag button among visible ones */
+  int active_index = -1;
+  int visible_index = 0;
+  for (int i = 0; i < data->buttons.size(); i++) {
+    if (!data->buttons[i].is_visible) {
+      continue;  /* Skip invisible buttons */
+    }
+    if (data->buttons[i].is_active) {
+      if (active_index != -1) {
+        /* Multiple tags active */
+        return -1;
+      }
+      active_index = visible_index;
+    }
+    visible_index++;
+  }
+
+  return active_index;
+}
+
+/**
+ * Activate a specific tag by visible index, deactivating all others.
+ * tag_index is the index among visible buttons only.
+ * Returns true if successful.
+ */
+static bool activate_tag_by_index(bContext *C, int tag_index)
+{
+  if (!C || tag_index < 0) {
+    return false;
+  }
+
+  ScrArea *area = CTX_wm_area(C);
+  if (!area || area->spacetype != SPACE_VIEW3D) {
+    return false;
+  }
+
+  View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+  if (!v3d) {
+    return false;
+  }
+
+  TagBarRuntimeData *data = get_tag_bar_data_global(C);
+  if (!data) {
+    return false;
+  }
+
+  /* Find the tag at the given visible index */
+  int visible_index = 0;
+  const TagButton *target_btn = nullptr;
+  for (int i = 0; i < data->buttons.size(); i++) {
+    if (!data->buttons[i].is_visible) {
+      continue;  /* Skip invisible buttons */
+    }
+    if (visible_index == tag_index) {
+      target_btn = &data->buttons[i];
+      break;
+    }
+    visible_index++;
+  }
+
+  if (!target_btn) {
+    return false;  /* Invalid visible index */
+  }
+
+  /* Set the new active tag */
+  STRNCPY_RLEN(v3d->active_tag_filter_tags, target_btn->tag_name);
+
+  /* Enable tag filter */
+  v3d->tag_filter_enabled = 1;
+
+  /* Update button states immediately for next event handling */
+  wmWindowManager *wm = CTX_wm_manager(C);
+  tag_bar_buttons_update(C, wm, v3d, data);
+
+  /* Trigger redraw */
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  WM_event_add_notifier(C, NC_SPACE | ND_CATEGORY_GLYPHS, nullptr);
+  ED_area_tag_redraw(area);
+
+  return true;
+}
+
+/**
+ * Cycle through visible tags: move to next or previous tag.
+ * direction: 1 for next, -1 for previous
+ */
+static bool cycle_active_tag(bContext *C, int direction)
+{
+  if (!C) {
+    return false;
+  }
+
+  TagBarRuntimeData *data = get_tag_bar_data_global(C);
+  if (!data || data->buttons.is_empty()) {
+    return false;
+  }
+
+  ScrArea *area = CTX_wm_area(C);
+  if (!area || area->spacetype != SPACE_VIEW3D) {
+    return false;
+  }
+
+  View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+  if (!v3d) {
+    return false;
+  }
+
+  /* Count visible buttons */
+  int visible_count = 0;
+  for (const TagButton &btn : data->buttons) {
+    if (btn.is_visible) {
+      visible_count++;
+    }
+  }
+
+  if (visible_count == 0) {
+    return false;  /* No visible tags */
+  }
+
+  /* Only cycle if exactly one tag is active */
+  const int active_count = count_active_tags(v3d->active_tag_filter_tags);
+  if (active_count != 1) {
+    return false;
+  }
+
+  /* Find current active tag visible index */
+  int current_index = find_active_single_tag_index(data);
+  if (current_index == -1) {
+    return false;
+  }
+
+  /* Calculate next visible index with wrap-around */
+  int new_index = current_index + direction;
+  if (new_index < 0) {
+    new_index = visible_count - 1;  /* Wrap to last visible */
+  }
+  else if (new_index >= visible_count) {
+    new_index = 0;  /* Wrap to first visible */
+  }
+
+  return activate_tag_by_index(C, new_index);
+}
+
+/**
+ * Check if mouse position is within the tag bar region and tags are available.
+ * Returns true if the mouse is in a region where tag cycling should work.
+ */
+static bool is_mouse_over_tag_bar(const bContext *C, const wmEvent *event)
+{
+  if (!event || !C) {
+    return false;
+  }
+
+  ARegion *region = CTX_wm_region(C);
+  if (!region) {
+    return false;
+  }
+
+  /* Check if we're in a TAG_BAR region or HEADER region (where tags are drawn) */
+  if (region->regiontype != RGN_TYPE_TAG_BAR && region->regiontype != RGN_TYPE_HEADER) {
+    return false;
+  }
+
+  TagBarRuntimeData *data = get_tag_bar_data_global(C);
+  if (!data || data->buttons.is_empty()) {
+    return false;
+  }
+
+  /* Check if mouse is within the region bounds */
+  const int mx = event->xy[0];
+  const int my = event->xy[1];
+
+  /* Convert mouse coordinates to region-relative coordinates */
+  const int region_x = mx - region->winrct.xmin;
+  const int region_y = my - region->winrct.ymin;
+
+  /* For top-aligned regions (TAG_BAR, HEADER), check if y is within button height */
+  if (region_y < 0 || region_y > UI_UNIT_Y) {
+    return false;
+  }
+
+  /* Check if x is within the region */
+  if (region_x < 0 || region_x > region->winx) {
+    return false;
+  }
+
+  return true;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Tag Bar Event Handler
+ * \{ */
+
+/**
+ * Event handler for tag bar mouse wheel navigation.
+ * Handles Ctrl + Mouse Wheel to cycle through tags.
+ */
+int tag_bar_region_handler(bContext *C, const wmEvent *event, void * /*userdata*/)
+{
+  if (!event || !C) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  /* Only handle mouse wheel events */
+  if (event->type != blender::WHEELUPMOUSE && event->type != blender::WHEELDOWNMOUSE) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  /* Check if Ctrl modifier is pressed */
+  if ((event->modifier & blender::KM_CTRL) == 0) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  /* Check if mouse is over tag bar area */
+  if (!is_mouse_over_tag_bar(C, event)) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  /* Determine scroll direction */
+  const int direction = (event->type == blender::WHEELUPMOUSE) ? -1 : 1;
+
+  /* Cycle through tags */
+  if (cycle_active_tag(C, direction)) {
+    return WM_UI_HANDLER_BREAK;
+  }
+
+  return WM_UI_HANDLER_CONTINUE;
 }
 
 /** \} */
@@ -360,7 +689,7 @@ void tag_button_click_by_mode(bContext *C, void *arg1, void *arg2)
   /* Update cache and redraw */
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
   if (data) {
-    tag_bar_buttons_update(wm, v3d, data);
+    tag_bar_buttons_update(C, wm, v3d, data);
     data->needs_update = false;  /* Just updated, no need to update again */
   }
 
@@ -493,6 +822,12 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
           }
         }
       }
+
+      /* Store button rectangle for mouse hit testing */
+      btn.rect.xmin = but->rect.xmin;
+      btn.rect.xmax = but->rect.xmax;
+      btn.rect.ymin = but->rect.ymin;
+      btn.rect.ymax = but->rect.ymax;
     }
 
     xco += btn_width + UI_UNIT_X / 4;
@@ -627,6 +962,12 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
           }
         }
       }
+
+      /* Store button rectangle for mouse hit testing */
+      btn.rect.xmin = but->rect.xmin;
+      btn.rect.xmax = but->rect.xmax;
+      btn.rect.ymin = but->rect.ymin;
+      btn.rect.ymax = but->rect.ymax;
     }
 
     xco += btn_width + 4;
@@ -763,6 +1104,12 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
           }
         }
       }
+
+      /* Store button rectangle for mouse hit testing */
+      btn.rect.xmin = but->rect.xmin;
+      btn.rect.xmax = but->rect.xmax;
+      btn.rect.ymin = but->rect.ymin;
+      btn.rect.ymax = but->rect.ymax;
     }
 
     xco += btn_width + UI_UNIT_X / 4;

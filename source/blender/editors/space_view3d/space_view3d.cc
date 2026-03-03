@@ -1003,10 +1003,21 @@ static void view3d_main_region_cursor(wmWindow *win, ScrArea *area, ARegion *reg
 /* add handlers, stuff you only do once or on area/region changes */
 static void view3d_header_region_init(wmWindowManager *wm, ARegion *region)
 {
+  using namespace blender::ui;
+
   wmKeyMap *keymap = WM_keymap_ensure(
       wm->runtime->defaultconf, "3D View Generic", SPACE_VIEW3D, RGN_TYPE_WINDOW);
 
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
+
+  /* Add custom event handler for Ctrl + Mouse Wheel tag cycling in header */
+  WM_event_add_ui_handler(
+      nullptr,
+      &region->runtime->handlers,
+      ui::tag_bar_region_handler,
+      nullptr,
+      nullptr,
+      eWM_EventHandlerFlag(0));
 
   ED_region_header_init(region);
 }
@@ -1031,6 +1042,15 @@ static void view3d_tag_bar_region_init(wmWindowManager *wm, ARegion *region)
   ui::region_handlers_add(&region->runtime->handlers);
   printf("DEBUG:   UI handlers added, handler count=%d\n",
          BLI_listbase_count(&region->runtime->handlers));
+
+  /* Add custom event handler for Ctrl + Mouse Wheel tag cycling */
+  WM_event_add_ui_handler(
+      nullptr,
+      &region->runtime->handlers,
+      ui::tag_bar_region_handler,
+      nullptr,
+      nullptr,
+      eWM_EventHandlerFlag(0));
 
   /* Initialize View2D for scrolling */
   ED_region_header_init(region);

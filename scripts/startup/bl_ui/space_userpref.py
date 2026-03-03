@@ -5956,15 +5956,14 @@ class USERPREF_UL_category_tags(UIList):
             else:
                 layout.label(text="", icon='DOT')
 
-    def filter_items(self, _context, data, propname):
-        """Return items in their natural order (no sorting, preserves manual order)."""
-        items = list(getattr(data, propname))
+    def filter_items(self, context, data, propname):
+        """Show all tags without filtering - Preferences displays all tags for management."""
+        items = getattr(data, propname, None)
+        if not items:
+            return ([], [])
 
-        # No sorting - preserve collection order
-        flags = [self.bitflag_filter_item] * len(items)
-        indices = list(range(len(items)))
-
-        return flags, indices
+        # Return empty filter flags (show all items) and empty sort order (preserve original order)
+        return ([], [])
 
 
 # -----------------------------------------------------------------------------

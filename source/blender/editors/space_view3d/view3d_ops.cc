@@ -235,6 +235,7 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
 
   /* Toggle: add if not found, remove if found */
   char new_tags[256] = "";
+  const bool was_removing_tag = tag_found; /* Remember if we're removing a tag */
 
   if (!tag_found) {
     /* Add the tag to the list */
@@ -276,9 +277,20 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
   /* Update the active tags string */
   STRNCPY_RLEN(v3d->active_tag_filter_tags, new_tags);
 
-  /* Open N-Panel (Sidebar) if it's hidden, so users can see filtered categories */
+  /* Enable tag filter when user clicks on a tag */
+  v3d->tag_filter_enabled = 1;
+
+  /* Check N-Panel visibility before toggling */
   ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
-  if (region_ui && (region_ui->flag & RGN_FLAG_HIDDEN)) {
+  const bool was_npanel_hidden = region_ui && (region_ui->flag & RGN_FLAG_HIDDEN);
+
+  /* Open N-Panel (Sidebar) if it's hidden, so users can see filtered categories */
+  if (was_npanel_hidden) {
+    ED_region_toggle_hidden(C, region_ui);
+  }
+  /* Hide N-Panel if we removed the last active tag and N-Panel was visible before */
+  else if (was_removing_tag && new_tags[0] == '\0') {
+    /* No more tags active - hide N-Panel */
     ED_region_toggle_hidden(C, region_ui);
   }
 
@@ -332,24 +344,31 @@ static wmOperatorStatus view3d_tag_bar_filter_toggle_exec(bContext *C, wmOperato
     return OPERATOR_CANCELLED;
   }
 
-  const bool is_filter_active = (v3d->active_tag_filter_tags[0] != '\0');
+  /* Toggle the filter enabled flag */
+  v3d->tag_filter_enabled = v3d->tag_filter_enabled ? 0 : 1;
 
-  if (is_filter_active) {
-    /* Filter ACTIVE -> INACTIVE: Save tags and clear */
-    STRNCPY(data->saved_tags, v3d->active_tag_filter_tags);
-    v3d->active_tag_filter_tags[0] = '\0';
-  }
-  else {
-    /* Filter INACTIVE -> ACTIVE: Restore saved tags */
+  if (v3d->tag_filter_enabled) {
+    /* Filter INACTIVE -> ACTIVE: Restore saved tags and show N-Panel */
     if (data->saved_tags[0] != '\0') {
       STRNCPY(v3d->active_tag_filter_tags, data->saved_tags);
     }
-    /* If no saved tags, filter remains empty - user must select tags */
+    /* Open N-Panel if it's hidden */
+    ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
+    if (region_ui && (region_ui->flag & RGN_FLAG_HIDDEN)) {
+      ED_region_toggle_hidden(C, region_ui);
+    }
+  }
+  else {
+    /* Filter ACTIVE -> INACTIVE: Save tags */
+    STRNCPY(data->saved_tags, v3d->active_tag_filter_tags);
+    /* Note: Don't clear active_tag_filter_tags - keep them for next activation */
   }
 
   /* Trigger redraw to update UI */
   WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  WM_event_add_notifier(C, NC_SPACE | ND_CATEGORY_GLYPHS, nullptr);
   ED_region_tag_redraw(CTX_wm_region(C));
+  ED_area_tag_redraw(area);
 
   return OPERATOR_FINISHED;
 }

@@ -801,6 +801,14 @@ struct View3D {
   char active_tag_filter_tags[256] = "";
 
   /**
+   * Whether tag filtering is enabled (toggled via filter button).
+   * When false: all categories are shown regardless of tags.
+   * When true: only categories with matching active tags are shown.
+   */
+  char tag_filter_enabled = 0;
+  char _pad_tag_filter[7] = {0, 0, 0, 0, 0, 0, 0};
+
+  /**
    * Horizontal scroll offset in the tag bar (in pixels).
    */
   int tag_bar_scroll_offset = 0;

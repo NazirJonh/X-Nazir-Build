@@ -902,8 +902,9 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
   const wmWindowManager *wm = CTX_wm_manager(C);
   ScrArea *area = CTX_wm_area(C);
 
-  /* Get active filter tags string from current space type */
+  /* Get active filter tags string and filter enabled flag from current space type */
   char active_tags[256] = "";
+  bool filter_enabled = false;
 
   if (area) {
     if (area->spacetype == SPACE_VIEW3D) {
@@ -911,6 +912,7 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
       if (v3d) {
         STRNCPY(active_tags, v3d->active_tag_filter_tags);
+        filter_enabled = v3d->tag_filter_enabled;
       }
     }
     else if (area->spacetype == SPACE_PROPERTIES) {
@@ -918,13 +920,19 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
       if (sbuts) {
         STRNCPY(active_tags, sbuts->active_tag_filter_tags);
+        filter_enabled = sbuts->tag_filter_enabled;
       }
     }
   }
 
-  /* If filter is not active (empty string) - show all */
-  if (active_tags[0] == '\0') {
+  /* If filter is not enabled - show all categories */
+  if (!filter_enabled || filter_enabled == 0) {
     return true;
+  }
+
+  /* If filter is enabled but no tags selected - hide all (except reserved) */
+  if (active_tags[0] == '\0') {
+    return false;
   }
 
   /* Get category tags */

@@ -1766,8 +1766,8 @@ class VIEW3D_HT_tag_bar_tags(Header):
             row.separator()
 
         # Filter toggle button & popover - like Gizmo/Overlay pattern
-        is_filter_active = bool(active_tags)
-        depress = is_filter_active
+        v3d = context.space_data
+        depress = v3d.tag_filter_enabled if v3d else False
         row.operator("view3d.tag_bar_filter_toggle", text="", icon='FILTER', depress=depress)
         sub = row.row(align=True)
         sub.popover(panel="VIEW3D_PT_tag_bar_filter_popover", text="", icon='DOWNARROW_HLT')

@@ -870,6 +870,22 @@ typedef enum eUserPref_CategoryTabsDisplayMode {
   USER_CATEGORY_TABS_TEXT_ONLY = 2,
 } eUserPref_CategoryTabsDisplayMode;
 
+/** Category tabs inactive behavior for #UserDef.category_tabs_inactive_behavior. */
+typedef enum eUserPref_CategoryTabsInactiveBehavior {
+  /** Default behavior - inactive tabs render normally. */
+  USER_CATEGORY_TABS_INACTIVE_DEFAULT = 0,
+  /** Sticky tab - inactive tab keeps its size when becoming inactive. */
+  USER_CATEGORY_TABS_INACTIVE_STICKY = 1,
+} eUserPref_CategoryTabsInactiveBehavior;
+
+/** Category tabs shape for #UserDef.category_tabs_shape. */
+typedef enum eUserPref_CategoryTabsShape {
+  /** Box shape - square tabs. */
+  USER_CATEGORY_TABS_SHAPE_BOX = 0,
+  /** Capsule shape - elongated tabs. */
+  USER_CATEGORY_TABS_SHAPE_CAPSULE = 1,
+} eUserPref_CategoryTabsShape;
+
 /**
  * Main user preferences data, typically accessed from #U.
  * See: #BKE_blendfile_userdef_from_defaults & #BKE_blendfile_userdef_read.
@@ -965,6 +981,10 @@ struct UserDef {
   float category_tabs_zoom_text = 1.0f;
   /** Display mode for category tabs. */
   char category_tabs_display_mode = USER_CATEGORY_TABS_GLYPHS_TEXT;
+  /** Behavior for inactive tabs in Icon mode. */
+  char category_tabs_inactive_behavior = USER_CATEGORY_TABS_INACTIVE_DEFAULT;
+  /** Shape for tabs in Icon mode. */
+  char category_tabs_shape = USER_CATEGORY_TABS_SHAPE_CAPSULE;
   /** Show category name for active tab in Icon mode. */
   char category_tabs_show_active_name = true;
   /** Show tooltips when dragging tabs in Icon mode. */
@@ -975,7 +995,7 @@ struct UserDef {
   char category_tabs_text_mode_show_color_indicator = false;
   /** Show colored text in Text mode for categories with custom glyph colors. */
   char category_tabs_text_mode_show_colored_text = false;
-  char _pad7[2] = {0, 0};
+  char _pad7[8] = {};
   /**
    * Setting for UI line width.
    *

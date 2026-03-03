@@ -5878,6 +5878,18 @@ class VIEW3D_OT_category_tabs_settings(Operator):
         if view.category_tabs_display_mode == 'GLYPHS_ONLY':
             layout.separator()
             layout.prop(view, "category_tabs_show_active_name", text="Show Active Tab Name")
+            # Inactive tab behavior - only in Icon mode
+            layout.separator()
+            layout.label(text="Inactive Tab Settings")
+            row = layout.row(align=True)
+            row.prop_enum(view, "category_tabs_inactive_behavior", "DEFAULT", text="Default")
+            row.prop_enum(view, "category_tabs_inactive_behavior", "STICKY", text="Sticky Tab")
+            # Tab shape - only in Icon mode
+            layout.separator()
+            layout.label(text="Tab Shape")
+            row = layout.row(align=True)
+            row.prop_enum(view, "category_tabs_shape", "BOX", text="Box Shape")
+            row.prop_enum(view, "category_tabs_shape", "CAPSULE", text="Capsule Shape")
 
         # Show color indicator option - only in Text mode
         if view.category_tabs_display_mode == 'TEXT_ONLY':

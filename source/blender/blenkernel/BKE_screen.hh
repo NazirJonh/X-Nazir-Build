@@ -590,6 +590,10 @@ struct ARegionRuntime {
 
   /** Time when drag was initiated (for threshold detection). */
   double category_tabs_drag_start_time = 0.0;
+
+  /** When true, active tab name is hidden (collapsed) even if Show Active Tab Name is enabled.
+   * Used in Default mode when clicking on active tab to temporarily hide the name. */
+  bool category_tabs_active_name_hidden = false;
 };
 
 }  // namespace bke

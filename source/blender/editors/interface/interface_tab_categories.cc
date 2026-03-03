@@ -1723,7 +1723,8 @@ static void ui_panel_category_draw_content(
     }
   }
   else if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
-           U.category_tabs_show_active_name && is_active)
+           U.category_tabs_show_active_name && is_active &&
+           !region->runtime->category_tabs_active_name_hidden)
   {
     if (has_glyph || is_fallback_letter) {
       draw_dual = true;
@@ -2040,6 +2041,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
   const int rct_xmin = is_left ? v2d->mask.xmin + 3 : (v2d->mask.xmax - category_tabs_width);
   const int rct_xmax = is_left ? v2d->mask.xmin + category_tabs_width : (v2d->mask.xmax - 3);
+  const int square_size = rct_xmax - rct_xmin;
 
   int y_ofs = tab_v_pad;
 
@@ -2088,10 +2090,12 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     rcti *rct = &pc_dyn.rect;
     const char *category_id = pc_dyn.idname;
     const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
+    const bool is_active = category_id_active && STREQ(category_id, category_id_active);
 
     bool is_fallback_letter = false;
     float glyph_color[3] = {0.0f, 0.0f, 0.0f};
-    const char *glyph = panel_category_glyph_lookup(wm, category_id, nullptr, &is_fallback_letter, glyph_color);
+    const char *glyph = panel_category_glyph_lookup(
+        wm, category_id, nullptr, &is_fallback_letter, glyph_color);
 
     /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
     char fallback_glyph_buf[8];
@@ -2112,13 +2116,26 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
 
     int category_width;
+    int current_tab_v_pad_text = tab_v_pad_text;
+
     switch (display_mode) {
       case USER_CATEGORY_TABS_GLYPHS_ONLY: {
         /* Use glyph height (without rotation) for consistent sizing with GLYPHS_TEXT mode. */
         const int glyph_h = round_fl_to_int(BLF_height(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
         category_width = glyph_h;
 
-        if (U.category_tabs_show_active_name && STREQ(category_id, category_id_active)) {
+        if (U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_BOX) {
+          if (!is_active || !U.category_tabs_show_active_name ||
+              region->runtime->category_tabs_active_name_hidden)
+          {
+            current_tab_v_pad_text = 0;
+            category_width = square_size + 3.0; // Add padding for Box shape(No change value 3.0!)
+          }
+        }
+
+        if (U.category_tabs_show_active_name && !region->runtime->category_tabs_active_name_hidden)
+        {
+          /* Get text width for name expansion */
           const char *text_for_name = category_id_draw;
           if (is_single_glyph_str(category_id_draw)) {
             for (const PanelType &pt : region->runtime->type->paneltypes) {
@@ -2133,10 +2150,20 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
           }
           BLF_enable(fontid, BLF_ROTATION);
           BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
-          const int text_w = round_fl_to_int(BLF_width(fontid, text_for_name, BLF_DRAW_STR_DUMMY_MAX));
+          const int text_w = round_fl_to_int(
+              BLF_width(fontid, text_for_name, BLF_DRAW_STR_DUMMY_MAX));
           BLF_disable(fontid, BLF_ROTATION);
-          const int glyph_text_gap = round_fl_to_int(TABS_GLYPH_TEXT_GAP_FACTOR * UI_SCALE_FAC * zoom);
-          category_width += text_w + glyph_text_gap;
+          const int glyph_text_gap = round_fl_to_int(TABS_GLYPH_TEXT_GAP_FACTOR * UI_SCALE_FAC *
+                                                     zoom);
+
+          if (is_active) {
+            /* Both Capsule and Box: active tab expands with name */
+            category_width = glyph_h + text_w + glyph_text_gap;
+          }
+          else if (U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_CAPSULE) {
+            /* Capsule: inactive tabs stay square (glyph width) but keep vertical pads.
+             * Note: category_width is already glyph_h from initialization. */
+          }
         }
         break;
       }
@@ -2196,9 +2223,9 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
     rct->xmin = rct_xmin;
     rct->xmax = rct_xmax;
-    rct->ymin = v2d->mask.ymax - (y_ofs + category_width + (tab_v_pad_text * 2));
+    rct->ymin = v2d->mask.ymax - (y_ofs + category_width + (current_tab_v_pad_text * 2));
     rct->ymax = v2d->mask.ymax - (y_ofs);
-    y_ofs += category_width + tab_v_pad + (tab_v_pad_text * 2);
+    y_ofs += category_width + tab_v_pad + (current_tab_v_pad_text * 2);
   }
 
   const int settings_icon_height = round_fl_to_int(BLF_height(fontid, TABS_SETTINGS_ICON, BLF_DRAW_STR_DUMMY_MAX));
@@ -2297,7 +2324,18 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     }
     const char *category_id = pc_dyn.idname;
     const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
-    const bool is_active = !too_narrow && STREQ(category_id, category_id_active);
+    const bool is_active = !too_narrow && category_id_active && STREQ(category_id, category_id_active);
+
+    int current_tab_v_pad_text = tab_v_pad_text;
+    if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+        U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_BOX)
+    {
+      if (!is_active || !U.category_tabs_show_active_name ||
+          region->runtime->category_tabs_active_name_hidden)
+      {
+        current_tab_v_pad_text = 0;
+      }
+    }
 
     /* Get glyph color for color indicator in TEXT_ONLY mode. */
     bool is_fallback_letter = false;
@@ -2374,7 +2412,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                                    fstyle_points,
                                    zoom,
                                    category_tabs_zoom,
-                                   tab_v_pad_text,
+                                   current_tab_v_pad_text,
                                    darken_factor,
                                    theme_col_tab_text,
                                    theme_col_tab_text_sel);
@@ -2556,6 +2594,18 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
       const rcti *rct = &drag_rect;
 
+      const bool is_active_tab = category_id_active && STREQ(category_id, category_id_active);
+      int current_drag_tab_v_pad_text = tab_v_pad_text;
+      if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+          U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_BOX)
+      {
+        if (!is_active_tab || !U.category_tabs_show_active_name ||
+            region->runtime->category_tabs_active_name_hidden)
+        {
+          current_drag_tab_v_pad_text = 0;
+        }
+      }
+
       ui_panel_category_draw_content(region,
                                      wm,
                                      category_id,
@@ -2563,7 +2613,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                                      rct,
                                      rct->xmin,
                                      rct->xmax,
-                                     STREQ(category_id, category_id_active),
+                                     is_active_tab,
                                      is_left,
                                      display_mode,
                                      fontid,
@@ -2571,7 +2621,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                                      fstyle_points,
                                      zoom,
                                      category_tabs_zoom,
-                                     tab_v_pad_text,
+                                     current_drag_tab_v_pad_text,
                                      0.0f,
                                      theme_col_tab_text,
                                      theme_col_tab_text_sel);
@@ -2820,7 +2870,8 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
 
     if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
         U.category_tabs_show_drag_tooltips &&
-        !(U.category_tabs_show_active_name && is_active))
+        !(U.category_tabs_show_active_name && is_active &&
+          !region->runtime->category_tabs_active_name_hidden))
     {
       /* Get category display name using the same method as hover tooltips. */
       const char *category_display_name = panel_category_tooltip_name_get(region, wm, clicked_pc->idname);

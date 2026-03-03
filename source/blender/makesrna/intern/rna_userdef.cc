@@ -228,6 +228,34 @@ static const EnumPropertyItem rna_enum_category_tabs_display_mode_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_category_tabs_inactive_behavior_items[] = {
+    {USER_CATEGORY_TABS_INACTIVE_DEFAULT,
+     "DEFAULT",
+     0,
+     "Default",
+     "Inactive tabs render normally with glyph or first letter"},
+    {USER_CATEGORY_TABS_INACTIVE_STICKY,
+     "STICKY",
+     0,
+     "Sticky Tab",
+     "Inactive tab keeps its size when becoming inactive in Icon mode"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_category_tabs_shape_items[] = {
+    {USER_CATEGORY_TABS_SHAPE_BOX,
+     "BOX",
+     0,
+     "Box Shape",
+     "Square shaped tabs in Icon mode"},
+    {USER_CATEGORY_TABS_SHAPE_CAPSULE,
+     "CAPSULE",
+     0,
+     "Capsule Shape",
+     "Elongated tabs in Icon mode"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 }  // namespace blender
 
 #ifdef RNA_RUNTIME
@@ -5058,6 +5086,18 @@ static void rna_def_userdef_view(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_display_mode");
   RNA_def_property_enum_items(prop, rna_enum_category_tabs_display_mode_items);
   RNA_def_property_ui_text(prop, "Category Tabs Display Mode", "How to display category tabs");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_inactive_behavior", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_inactive_behavior");
+  RNA_def_property_enum_items(prop, rna_enum_category_tabs_inactive_behavior_items);
+  RNA_def_property_ui_text(prop, "Inactive Tab Behavior", "How inactive tabs behave when becoming inactive in Icon mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_shape", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_shape");
+  RNA_def_property_enum_items(prop, rna_enum_category_tabs_shape_items);
+  RNA_def_property_ui_text(prop, "Tab Shape", "Shape of tabs in Icon mode");
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
   prop = RNA_def_property(srna, "category_tabs_allow_edit", PROP_BOOLEAN, PROP_NONE);

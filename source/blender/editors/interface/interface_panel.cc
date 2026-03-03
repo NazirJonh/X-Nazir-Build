@@ -2728,11 +2728,17 @@ static int ui_handle_panel_category_cycling(bContext *C,
 static void ui_panel_region_width_set(ARegion *region, const float aspect, int unscaled_size)
 {
   const float size_new = unscaled_size / aspect;
+  printf("[DEBUG] ui_panel_region_width_set - unscaled_size=%d, aspect=%.3f, size_new=%.2f, final_width=%.2f\n",
+         unscaled_size, aspect, size_new, size_new * UI_SCALE_FAC);
   if (region->alignment & RGN_ALIGN_RIGHT) {
     region->winrct.xmin = region->winrct.xmax - (size_new * UI_SCALE_FAC);
+    printf("[DEBUG]   RGN_ALIGN_RIGHT - setting xmin=%d, xmax=%d\n",
+           region->winrct.xmin, region->winrct.xmax);
   }
   else {
     region->winrct.xmax = region->winrct.xmin + (size_new * UI_SCALE_FAC);
+    printf("[DEBUG]   NOT RGN_ALIGN_RIGHT - setting xmin=%d, xmax=%d\n",
+           region->winrct.xmin, region->winrct.xmax);
   }
   region->winx = size_new * UI_SCALE_FAC;
   region->sizex = size_new;
@@ -2742,6 +2748,7 @@ static void ui_panel_region_width_set(ARegion *region, const float aspect, int u
   region->v2d.mask.xmin = 0;
   region->v2d.mask.xmax = size_new * UI_SCALE_FAC;
   view2d_curRect_validate(&region->v2d);
+  printf("[DEBUG]   Final: region->winx=%d, region->sizex=%.2f\n", region->winx, region->sizex);
 }
 
 int handler_panel_region(bContext *C,
@@ -2833,30 +2840,84 @@ int handler_panel_region(bContext *C,
         if (pc_dyn) {
           const bool already_active = STREQ(pc_dyn->idname,
                                             panel_category_active_get(region, false));
+          printf("[DEBUG] Category tab click - idname='%s', already_active=%d, regiontype=%d\n",
+                 pc_dyn->idname, already_active, region->regiontype);
           panel_category_active_set(region, pc_dyn->idname);
+
+          /* Reset tab name hidden flag when switching to a different tab */
+          if (!already_active) {
+            region->runtime->category_tabs_active_name_hidden = false;
+            printf("[DEBUG] Switching to different tab - resetting active_name_hidden to false\n");
+          }
 
           const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
                                (BLI_rcti_size_y(&region->v2d.mask) + 1);
           const bool too_narrow = BLI_rcti_size_x(&region->winrct) <=
                                   int(std::ceil(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC /
                                                 aspect));
+          printf("[DEBUG] Panel width check - too_narrow=%d, width=%d, min_width=%d\n",
+                 too_narrow, BLI_rcti_size_x(&region->winrct),
+                 int(std::ceil(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / aspect)));
           if (too_narrow) {
             /* Enlarge region. */
             const int new_width = region->runtime->type->prefsizex ?
                                       region->runtime->type->prefsizex :
                                       250;
             ui_panel_region_width_set(region, aspect, new_width);
-            WM_event_add_notifier(C, NC_SCREEN | NA_EDITED, nullptr);
+
+            /* Reset tab name hidden flag when enlarging region from minimized state */
+            if (already_active) {
+              region->runtime->category_tabs_active_name_hidden = false;
+              printf("[DEBUG] Enlarging region - resetting active_name_hidden to false\n");
+            }
+
+            WM_main_add_notifier(NC_WINDOW, nullptr);
+            WM_main_add_notifier(NC_SCREEN | NA_EDITED, nullptr);
           }
           else if (already_active) {
-            /* Minimize region. */
-            region->runtime->type->prefsizex = int(float(BLI_rcti_size_x(&region->winrct) + 1) /
-                                                   UI_SCALE_FAC * aspect);
-            ui_panel_region_width_set(region, aspect, UI_PANEL_CATEGORY_MIN_WIDTH);
-            WM_event_add_notifier(C, NC_SCREEN | NA_EDITED, nullptr);
+            /* Check if we should minimize region or keep it sticky */
+            const eUserPref_CategoryTabsDisplayMode display_mode =
+                static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+            const bool is_sticky = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                    U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
+
+            printf("[DEBUG] already_active click - display_mode=%d, category_tabs_inactive_behavior=%d, is_sticky=%d\n",
+                   display_mode, U.category_tabs_inactive_behavior, is_sticky);
+
+            if (is_sticky) {
+              /* Sticky mode: Save current panel width but don't minimize region */
+              printf("[DEBUG] STICKY mode - saving prefsizex, NOT minimizing\n");
+              region->runtime->type->prefsizex = int(float(BLI_rcti_size_x(&region->winrct) + 1) /
+                                                     UI_SCALE_FAC * aspect);
+              WM_main_add_notifier(NC_WINDOW, nullptr);
+              WM_main_add_notifier(NC_SCREEN | NA_EDITED, nullptr);
+            }
+            else {
+              /* Default behavior: Always minimize region */
+              printf("[DEBUG] DEFAULT mode - minimizing region to UI_PANEL_CATEGORY_MIN_WIDTH\n");
+              region->runtime->type->prefsizex = int(float(BLI_rcti_size_x(&region->winrct) + 1) /
+                                                     UI_SCALE_FAC * aspect);
+              ui_panel_region_width_set(region, aspect, UI_PANEL_CATEGORY_MIN_WIDTH);
+              printf("[DEBUG] After minimize: region->winx=%d, BLI_rcti_size_x(&region->winrct)=%d\n",
+                     region->winx, BLI_rcti_size_x(&region->winrct));
+
+              /* Additionally: In Icon mode with Show Active Tab Name, toggle tab name collapse state */
+              const bool is_icon_mode_with_name = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                                    U.category_tabs_show_active_name);
+              if (is_icon_mode_with_name) {
+                region->runtime->category_tabs_active_name_hidden =
+                    !region->runtime->category_tabs_active_name_hidden;
+                printf("[DEBUG] DEFAULT mode - toggling active_name_hidden to %d\n",
+                       region->runtime->category_tabs_active_name_hidden);
+              }
+
+              WM_main_add_notifier(NC_WINDOW, nullptr);
+              WM_main_add_notifier(NC_SCREEN | NA_EDITED, nullptr);
+            }
           }
 
           ED_region_tag_redraw(region);
+          printf("[DEBUG] After redraw: region->winx=%d\n", region->winx);
 
           /* Reset scroll to the top (#38348). */
           view2d_offset(&region->v2d, -1.0f, 1.0f);

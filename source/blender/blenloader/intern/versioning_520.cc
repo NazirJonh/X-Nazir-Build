@@ -286,6 +286,13 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   /* Add TAG_BAR region to existing View3D spaces */
   do_versions_ensure_view3d_has_tag_bar_region(bmain);
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 4)) {
+    /* Initialize new category_tabs_inactive_behavior field to DEFAULT */
+    U.category_tabs_inactive_behavior = USER_CATEGORY_TABS_INACTIVE_DEFAULT;
+    /* Initialize new category_tabs_shape field to CAPSULE */
+    U.category_tabs_shape = USER_CATEGORY_TABS_SHAPE_CAPSULE;
+  }
+
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 1)) {
     for (Scene &scene : bmain->scenes) {
       scene.r.mode |= R_SAVE_OUTPUT;

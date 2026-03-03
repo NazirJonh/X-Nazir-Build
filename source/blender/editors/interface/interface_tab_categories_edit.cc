@@ -80,6 +80,9 @@ namespace blender::ui {
 static char category_tab_preview_glyph[8] = "";
 static float category_tab_preview_color[3] = {0.0f, 0.0f, 0.0f};
 
+/* Static pointer to preview button - updated when popup opens, used for live updates */
+static Button *category_tab_preview_button = nullptr;
+
 /* Static pointer to current dialog operator - needed for Reset/Save buttons */
 wmOperator *category_tab_current_dialog_op = nullptr;
 
@@ -360,6 +363,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   /* Clear dialog operator pointer and popup block */
   category_tab_current_dialog_op = nullptr;
   category_tab_popup_block = nullptr;
+  category_tab_preview_button = nullptr;
 
   /* Record popup close time and category to prevent immediate reopen */
   category_tab_popup_close_time = BLI_time_now_seconds();
@@ -402,6 +406,7 @@ void category_tab_edit_popup_ok_cb(bContext * /*C*/, void *user_data, int /*retv
   /* Clear dialog operator pointer and popup block */
   category_tab_current_dialog_op = nullptr;
   category_tab_popup_block = nullptr;
+  category_tab_preview_button = nullptr;
 
   /* Record popup close time and category */
   if (user_data) {
@@ -660,6 +665,10 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
 
   /* Trigger redraw to show the updated color */
   WM_main_add_notifier(NC_WINDOW, nullptr);
+
+  /* Note: Preview button uses custom draw callback that reads directly from
+   * category_tab_preview_glyph and category_tab_preview_color static buffers,
+   * which are already updated above. No button-specific update needed. */
 }
 
 /** \} */
@@ -1674,43 +1683,52 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
     RNA_string_get(op->ptr, "glyph_search", glyph_search_query);
 
     if (glyph_search_query[0] != '\0') {
-      /* Create a row for search results */
-      Layout &results_row = col_glyph.row(false);
+      /* Create a row for search results - same style as color presets */
+      Layout &results_row = col_glyph.row(true);
       results_row.alignment_set(LayoutAlign::Center);
+      results_row.emboss_set(EmbossType::Pulldown);
 
-      /* Create grid for search result buttons (5 columns) */
-      Layout &results_grid = results_row.grid_flow(true, 5, true, false, false);
+      /* Get block for creating buttons */
+      Block *result_block = results_row.block();
+      block_layout_set_current(result_block, &results_row);
 
       /* Call Python API to search glyphs */
       char category[64];
       RNA_string_get(op->ptr, "category", category);
       auto search_results = glyph_search_call_python(C, glyph_search_query, category, 50);
 
-      /* Get category color for tinting glyph buttons */
+      /* Get category color for tinting glyph buttons.
+       * If color is (0.0, 0.0, 0.0), use the theme text color for active tab instead,
+       * similar to how preview glyph and tabs render glyphs without custom color. */
       float category_color[3];
       RNA_float_get_array(op->ptr, "color", category_color);
 
       /* Convert float RGB (0.0-1.0) to uchar RGB (0-255) for button_color_set */
       uchar category_color_uchar[4];
-      category_color_uchar[0] = uchar(category_color[0] * 255.0f);
-      category_color_uchar[1] = uchar(category_color[1] * 255.0f);
-      category_color_uchar[2] = uchar(category_color[2] * 255.0f);
-      category_color_uchar[3] = 255; /* Alpha */
+      if (is_zero_v3(category_color)) {
+        /* No custom color - use active tab text color */
+        theme::get_color_3ubv(TH_TAB_TEXT_HI, category_color_uchar);
+        category_color_uchar[3] = 255; /* Alpha */
+      }
+      else {
+        /* Use custom category color */
+        category_color_uchar[0] = uchar(category_color[0] * 255.0f);
+        category_color_uchar[1] = uchar(category_color[1] * 255.0f);
+        category_color_uchar[2] = uchar(category_color[2] * 255.0f);
+        category_color_uchar[3] = 255; /* Alpha */
+      }
 
       if (search_results.is_empty()) {
         /* No results found */
-        results_grid.label(IFACE_("No glyphs found"), ICON_NONE);
+        results_row.label(IFACE_("No glyphs found"), ICON_NONE);
       }
       else {
-        /* Create buttons for each search result */
+        /* Create buttons for each search result - same style as color presets */
         for (const auto &result : search_results) {
           const std::string &glyph_unicode = result.first;
           const std::string &glyph_name = result.second;
 
-          /* Create button with glyph */
-          Block *result_block = results_grid.block();
-          block_layout_set_current(result_block, &results_grid);
-
+          /* Create button with glyph - same size and style as color presets */
           Button *result_but = uiDefBut(result_block,
                                              ButtonType::But,
                                              glyph_unicode.c_str(),
@@ -1723,7 +1741,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                                              0,
                                              std::nullopt);
 
-          /* Apply category color to the button */
+          /* Apply category color to the button - same as color presets */
           button_color_set(result_but, category_color_uchar);
           result_but->drawflag |= BUT_TEXT_USE_COL;
 
@@ -1906,7 +1924,9 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
     Block *preview_block = preview_row.block();
     const int preview_size = int(style->widget.points * UI_SCALE_FAC * 3.0f);
 
-    /* Create custom button with draw callback */
+    /* Create preview button using Extra type with custom draw callback.
+     * This allows full control over glyph size and positioning.
+     * Note: Background will be drawn, but glyph will be drawn on top. */
     Button *preview_but = uiDefBut(preview_block,
                                        ButtonType::Extra,
                                        "",
@@ -1919,11 +1939,14 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                                        0.0f,
                                        std::nullopt);
 
-    /* Set draw callback to render glyph with color */
+    /* Save pointer to preview button for live updates */
+    category_tab_preview_button = preview_but;
+
+    /* Set custom draw callback to render glyph with color */
     button_func_drawextra_set(preview_block, [style](const bContext *C, rcti *rect) {
-      /* Get font - 2x the tab size for preview */
+      /* Get font and set larger size for preview (2.5x the tab size) */
       const int fontid = BLF_default();
-      const float font_size = style->widget.points * UI_SCALE_FAC * 2.0f;
+      const float font_size = style->widget.points * UI_SCALE_FAC * 1.5f;
       BLF_size(fontid, font_size);
 
       /* Set custom color from file-scope static buffer (updated by live update callback).
@@ -1939,22 +1962,25 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         BLF_color3fv_alpha(fontid, category_tab_preview_color, 1.0f);
       }
 
-      /* Calculate center position */
+      /* Calculate center position with proper baseline adjustment.
+       * Use ascender/descender to correctly center glyph vertically. */
       const float glyph_width = BLF_width(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
-      const float glyph_height = BLF_height(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
+      const int ascender_i = BLF_ascender(fontid);
+      const int descender_i = BLF_descender(fontid);
+      const float ascender = float(ascender_i);
+      const float descender = float(descender_i);
+      const float glyph_height = ascender - descender;
 
-      const float rect_width = BLI_rcti_size_x(rect);
-      const float rect_height = BLI_rcti_size_y(rect);
-      const float x = rect->xmin + (rect_width - glyph_width) / 2.0f;
-      const float y = rect->ymin + (rect_height - glyph_height) / 2.0f;
+      const float rect_center_x = (rect->xmin + rect->xmax) * 0.5f;
+      const float rect_center_y = (rect->ymin + rect->ymax) * 0.5f;
+
+      const float x = rect_center_x - glyph_width * 0.5f;
+      const float y = rect_center_y - glyph_height * 0.5f - descender;
 
       /* Draw glyph */
       BLF_position(fontid, x, y, 0.0f);
       BLF_draw(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
     });
-
-    /* Use the button to prevent unused variable warning */
-    (void)preview_but;
   }
 
   /* Color panel */
@@ -2697,8 +2723,9 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     item->glyph[0] = '\0';
   }
 
-  /* Clear dialog operator pointer */
+  /* Clear dialog operator pointer and preview button */
   category_tab_current_dialog_op = nullptr;
+  category_tab_preview_button = nullptr;
 
   /* Redraw */
   WM_main_add_notifier(NC_WINDOW, nullptr);

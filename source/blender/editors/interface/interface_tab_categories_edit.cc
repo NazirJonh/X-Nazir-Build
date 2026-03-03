@@ -1665,18 +1665,39 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
     /* Properties for glyph search and code */
     Layout &col_glyph = icon_panel.body->column(false);
 
-    /* Row with Search Glyph on left and Code with Paste on right */
-    Layout &row_search_glyph = col_glyph.row(false);
-    Layout &split_search_glyph = row_search_glyph.split(0.7f, false);
+    /* Main row: left side has centered Search+More, right side has Code+Paste */
+    Layout &main_row = col_glyph.row(false);
+    Layout &split_main = main_row.split(0.69f, false);
 
-    /* Left side: Search Glyph field - right aligned */
-    Layout &col_search = split_search_glyph.column(false);
+    /* Left side: Search Glyph + More glyphs - centered */
+    Layout &left_side = split_main.row(true);
+    left_side.alignment_set(LayoutAlign::Right);
 
-    /* Search field - use split to control width, align right side */
-    Layout &split_search = col_search.split(0.89f, false);
-    Layout &search_row = split_search.row(false);
-    search_row.alignment_set(LayoutAlign::Right);
-    search_row.prop(op->ptr, "glyph_search", UI_ITEM_NONE, IFACE_("Glyph"), ICON_VIEWZOOM);
+    left_side.prop(op->ptr, "glyph_search", UI_ITEM_NONE, IFACE_("Glyph"), ICON_VIEWZOOM);
+
+    Block *more_glyphs_block = left_side.block();
+    block_layout_set_current(more_glyphs_block, &left_side);
+
+    char glyph_btn[8] = "";
+    process_glyph_input("f02f", glyph_btn, sizeof(glyph_btn));
+    Button *glyph_but = uiDefBut(more_glyphs_block,
+                                      ButtonType::But,
+                                      glyph_btn,
+                                      0,
+                                      0,
+                                      UI_UNIT_X * 1.5f,
+                                      UI_UNIT_Y,
+                                      nullptr,
+                                      0,
+                                      0,
+                                      std::nullopt);
+    glyph_but->tip_quick_func = [](const Button *) { return "More glyphs"; };
+    button_func_set(glyph_but, glyph_more_glyphs_button_cb, op, nullptr);
+    (void)glyph_but;
+
+    /* Right side: Code field + Paste button - right aligned */
+    Layout &right_side = split_main.row(true);
+    right_side.alignment_set(LayoutAlign::Right);
 
     /* Display search results if glyph_search field is not empty */
     char glyph_search_query[64] = "";
@@ -1756,37 +1777,8 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
       }
     }
 
-    /* Right side: Glyph button, Code with Paste button - aligned right */
-    Layout &col_glyph_code = split_search_glyph.column(false);
-    col_glyph_code.alignment_set(LayoutAlign::Right);
-    Layout &row_code = col_glyph_code.row(true);
-    row_code.fixed_size_set(true);
-
-    /* Glyph button f02f - before Code */
-    char glyph_btn[8] = "";
-    process_glyph_input("f02f", glyph_btn, sizeof(glyph_btn));
-    Block *search_block = row_code.block();
-    block_layout_set_current(search_block, &row_code);
-    Button *glyph_but = uiDefBut(search_block,
-                                      ButtonType::But,
-                                      glyph_btn,
-                                      0,
-                                      0,
-                                      UI_UNIT_X * 1.5f,
-                                      UI_UNIT_Y,
-                                      nullptr,
-                                      0,
-                                      0,
-                                      std::nullopt);
-    /* Set tooltip for glyph button */
-    glyph_but->tip_quick_func = [](const Button *) { return "More glyphs"; };
-    
-    /* Add callback to open Grid View when clicked */
-    button_func_set(glyph_but, glyph_more_glyphs_button_cb, op, nullptr);
-    (void)glyph_but;
-
-    /* Code field with Paste button */
-    Layout &row_glyph = row_code.row(true);
+    /* Code field with Paste button - in right side of split */
+    Layout &row_glyph = right_side.row(true);
     row_glyph.prop(op->ptr, "glyph", UI_ITEM_NONE, IFACE_("Code"), ICON_NONE);
     Layout &row_glyph_btn = row_glyph.row(true);
     /* Paste button - allows pasting hex code from clipboard (Ctrl+V) */

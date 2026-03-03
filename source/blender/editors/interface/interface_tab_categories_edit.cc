@@ -1920,14 +1920,24 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                                        std::nullopt);
 
     /* Set draw callback to render glyph with color */
-    button_func_drawextra_set(preview_block, [style](const bContext * /*C*/, rcti *rect) {
+    button_func_drawextra_set(preview_block, [style](const bContext *C, rcti *rect) {
       /* Get font - 2x the tab size for preview */
       const int fontid = BLF_default();
       const float font_size = style->widget.points * UI_SCALE_FAC * 2.0f;
       BLF_size(fontid, font_size);
 
-      /* Set custom color from file-scope static buffer (updated by live update callback) */
-      BLF_color3fv_alpha(fontid, category_tab_preview_color, 1.0f);
+      /* Set custom color from file-scope static buffer (updated by live update callback).
+       * If color is (0.0, 0.0, 0.0), use the theme text color instead, similar to how tabs
+       * render glyphs without custom color. The data remains (0.0, 0.0, 0.0) for system logic.
+       * Use TH_TAB_TEXT_HI (active tab color) since preview represents the active/selected state. */
+      if (is_zero_v3(category_tab_preview_color)) {
+        uchar theme_col_tab_text_hi[3];
+        theme::get_color_3ubv(TH_TAB_TEXT_HI, theme_col_tab_text_hi);
+        BLF_color3ubv(fontid, theme_col_tab_text_hi);
+      }
+      else {
+        BLF_color3fv_alpha(fontid, category_tab_preview_color, 1.0f);
+      }
 
       /* Calculate center position */
       const float glyph_width = BLF_width(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);

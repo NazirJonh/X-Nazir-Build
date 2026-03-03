@@ -1412,6 +1412,31 @@ def _is_tag_visible_in_mode(tag, mode_string):
     if tag.mode_flags == 0:
         return True
 
+    # --- EXTENSION GUIDE FOR NEW MODES AND EDITORS ---
+    # This system uses a bitmask (mode_flags) to define visibility. Each bit corresponds
+    # to a specific context (Mode or Editor Type).
+    #
+    # 1. ADDING NEW MODES (e.g., for 3D View):
+    #    Add the context.mode string to the map below and assign the next available bit (13, 14, etc.).
+    #    Ensure the corresponding C++ logic in 'interface_tag_bar.cc' or 'rna_wm.cc' 
+    #    uses the same bit-to-mode mapping.
+    #
+    # 2. SUPPORTING OTHER EDITORS (Node Editors, UV, Shader Editor):
+    #    Currently, this function mainly checks 'context.mode'. To support other Space Types,
+    #    you can modify this function to check 'context.space_data.type' (e.g., 'NODE_EDITOR').
+    #    Example: 
+    #       if context.space_data.type == 'NODE_EDITOR':
+    #           context_key = context.space_data.tree_type # (e.g., 'GeometryNodeTree')
+    #       else:
+    #           context_key = mode_string
+    #    
+    #    Assign dedicated bits for these editors (e.g., bit 15 for UV Editor, 16 for Shader, etc.).
+    #
+    # 3. BITMASK LIMIT:
+    #    Standard integers in Blender/C++ provide 32 bits. If you exceed 32 contexts, 
+    #    you'll need to use a second flag property.
+    # -------------------------------------------------
+
     mode_bit_map = {
         'OBJECT': 0,
         'EDIT_MESH': 1,

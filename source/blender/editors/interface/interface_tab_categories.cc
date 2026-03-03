@@ -1723,10 +1723,15 @@ static void ui_panel_category_draw_content(
     }
   }
   else if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
-           U.category_tabs_show_active_name && is_active &&
+           U.category_tabs_show_active_name &&
            !region->runtime->category_tabs_active_name_hidden)
   {
-    if (has_glyph || is_fallback_letter) {
+    /* Show name for active tab OR for the previous active tab (if it exists).
+     * The previous active tab is the one that was active before switching to another tab.
+     * This allows users to see which tab they just came from. */
+    const bool is_previous_active = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
+                                     STREQ(category_id, region->runtime->category_tabs_previous_active_id));
+    if ((is_active || is_previous_active) && (has_glyph || is_fallback_letter)) {
       draw_dual = true;
       if (is_single_glyph_str(category_id_draw)) {
         for (const PanelType &pt : region->runtime->type->paneltypes) {
@@ -2124,17 +2129,24 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
         const int glyph_h = round_fl_to_int(BLF_height(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
         category_width = glyph_h;
 
+        /* Determine if this tab should expand to show the name.
+         * Show name for active tab OR for the previous active tab (if it exists).
+         * The previous active tab is the one that was active before switching. */
+        const bool is_previous_active = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
+                                         STREQ(category_id, region->runtime->category_tabs_previous_active_id));
+        const bool should_expand_name = (U.category_tabs_show_active_name &&
+                                         !region->runtime->category_tabs_active_name_hidden &&
+                                         (is_active || is_previous_active));
+
         if (U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_BOX) {
-          if (!is_active || !U.category_tabs_show_active_name ||
-              region->runtime->category_tabs_active_name_hidden)
-          {
+          if (!should_expand_name) {
+            /* Box shape without name: use square size with no padding */
             current_tab_v_pad_text = 0;
             category_width = square_size + 3.0; // Add padding for Box shape(No change value 3.0!)
           }
         }
 
-        if (U.category_tabs_show_active_name && !region->runtime->category_tabs_active_name_hidden)
-        {
+        if (should_expand_name) {
           /* Get text width for name expansion */
           const char *text_for_name = category_id_draw;
           if (is_single_glyph_str(category_id_draw)) {
@@ -2156,14 +2168,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
           const int glyph_text_gap = round_fl_to_int(TABS_GLYPH_TEXT_GAP_FACTOR * UI_SCALE_FAC *
                                                      zoom);
 
-          if (is_active) {
-            /* Both Capsule and Box: active tab expands with name */
-            category_width = glyph_h + text_w + glyph_text_gap;
-          }
-          else if (U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_CAPSULE) {
-            /* Capsule: inactive tabs stay square (glyph width) but keep vertical pads.
-             * Note: category_width is already glyph_h from initialization. */
-          }
+          /* Expand tab width to show name */
+          category_width = glyph_h + text_w + glyph_text_gap;
         }
         break;
       }
@@ -2326,13 +2332,19 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
     const bool is_active = !too_narrow && category_id_active && STREQ(category_id, category_id_active);
 
+    /* Determine if this tab should expand to show the name.
+     * Show name for active tab OR for the previous active tab (if it exists). */
+    const bool is_previous_active = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
+                                     STREQ(category_id, region->runtime->category_tabs_previous_active_id));
+    const bool should_expand_name = (U.category_tabs_show_active_name &&
+                                     !region->runtime->category_tabs_active_name_hidden &&
+                                     (is_active || is_previous_active));
+
     int current_tab_v_pad_text = tab_v_pad_text;
     if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
         U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_BOX)
     {
-      if (!is_active || !U.category_tabs_show_active_name ||
-          region->runtime->category_tabs_active_name_hidden)
-      {
+      if (!should_expand_name) {
         current_tab_v_pad_text = 0;
       }
     }
@@ -2595,13 +2607,20 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       const rcti *rct = &drag_rect;
 
       const bool is_active_tab = category_id_active && STREQ(category_id, category_id_active);
+
+      /* Determine if this tab should expand to show the name.
+       * Show name for active tab OR for the previous active tab (if it exists). */
+      const bool is_previous_active = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
+                                       STREQ(category_id, region->runtime->category_tabs_previous_active_id));
+      const bool should_expand_name = (U.category_tabs_show_active_name &&
+                                       !region->runtime->category_tabs_active_name_hidden &&
+                                       (is_active_tab || is_previous_active));
+
       int current_drag_tab_v_pad_text = tab_v_pad_text;
       if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
           U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_BOX)
       {
-        if (!is_active_tab || !U.category_tabs_show_active_name ||
-            region->runtime->category_tabs_active_name_hidden)
-        {
+        if (!should_expand_name) {
           current_drag_tab_v_pad_text = 0;
         }
       }
@@ -2862,16 +2881,23 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
     /* Check if we need to show category name tooltip for Icon mode.
      * Show tooltip in Icon mode when:
      * - Show Drag Tooltips is enabled
-     * - AND (Show Active Tab Name is OFF, OR category is not the active one)
+     * - AND tab name is not visible (not active AND not previous active)
      * This helps users identify tabs when only icons are visible. */
     const eUserPref_CategoryTabsDisplayMode display_mode =
         static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
     const bool is_active = STREQ(clicked_pc->idname, region->runtime->category);
+    const bool is_previous_active = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
+                                     STREQ(clicked_pc->idname, region->runtime->category_tabs_previous_active_id));
+
+    /* Determine if the tab name is visible (no tooltip needed when name is shown).
+     * Show name for active tab OR for the previous active tab (if it exists). */
+    const bool show_tab_name = (U.category_tabs_show_active_name &&
+                                !region->runtime->category_tabs_active_name_hidden &&
+                                (is_active || is_previous_active));
 
     if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
         U.category_tabs_show_drag_tooltips &&
-        !(U.category_tabs_show_active_name && is_active &&
-          !region->runtime->category_tabs_active_name_hidden))
+        !show_tab_name)
     {
       /* Get category display name using the same method as hover tooltips. */
       const char *category_display_name = panel_category_tooltip_name_get(region, wm, clicked_pc->idname);

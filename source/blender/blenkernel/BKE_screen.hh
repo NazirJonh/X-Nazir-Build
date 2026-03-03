@@ -594,6 +594,10 @@ struct ARegionRuntime {
   /** When true, active tab name is hidden (collapsed) even if Show Active Tab Name is enabled.
    * Used in Default mode when clicking on active tab to temporarily hide the name. */
   bool category_tabs_active_name_hidden = false;
+
+  /** Previous active tab ID (used in Sticky mode to show name for recently deactivated tab).
+   * Empty string when no previous tab exists. */
+  char category_tabs_previous_active_id[64] = "";
 };
 
 }  // namespace bke

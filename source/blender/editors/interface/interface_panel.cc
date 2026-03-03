@@ -2728,17 +2728,11 @@ static int ui_handle_panel_category_cycling(bContext *C,
 static void ui_panel_region_width_set(ARegion *region, const float aspect, int unscaled_size)
 {
   const float size_new = unscaled_size / aspect;
-  printf("[DEBUG] ui_panel_region_width_set - unscaled_size=%d, aspect=%.3f, size_new=%.2f, final_width=%.2f\n",
-         unscaled_size, aspect, size_new, size_new * UI_SCALE_FAC);
   if (region->alignment & RGN_ALIGN_RIGHT) {
     region->winrct.xmin = region->winrct.xmax - (size_new * UI_SCALE_FAC);
-    printf("[DEBUG]   RGN_ALIGN_RIGHT - setting xmin=%d, xmax=%d\n",
-           region->winrct.xmin, region->winrct.xmax);
   }
   else {
     region->winrct.xmax = region->winrct.xmin + (size_new * UI_SCALE_FAC);
-    printf("[DEBUG]   NOT RGN_ALIGN_RIGHT - setting xmin=%d, xmax=%d\n",
-           region->winrct.xmin, region->winrct.xmax);
   }
   region->winx = size_new * UI_SCALE_FAC;
   region->sizex = size_new;
@@ -2748,7 +2742,6 @@ static void ui_panel_region_width_set(ARegion *region, const float aspect, int u
   region->v2d.mask.xmin = 0;
   region->v2d.mask.xmax = size_new * UI_SCALE_FAC;
   view2d_curRect_validate(&region->v2d);
-  printf("[DEBUG]   Final: region->winx=%d, region->sizex=%.2f\n", region->winx, region->sizex);
 }
 
 int handler_panel_region(bContext *C,
@@ -2840,14 +2833,22 @@ int handler_panel_region(bContext *C,
         if (pc_dyn) {
           const char *previous_active = panel_category_active_get(region, false);
           const bool already_active = STREQ(pc_dyn->idname, previous_active);
-          printf("[DEBUG] Category tab click - idname='%s', already_active=%d, regiontype=%d\n",
-                 pc_dyn->idname, already_active, region->regiontype);
+          /* Handle previous active tab ID for Sticky inactive behavior mode. */
+          const eUserPref_CategoryTabsDisplayMode display_mode =
+              static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+          const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
+          const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                       U.category_tabs_show_active_name);
 
-          /* Save previous active tab ID before switching (for Sticky mode).
-           * This allows showing the tab name for the recently deactivated tab. */
-          if (!already_active && previous_active && previous_active[0]) {
-            STRNCPY(region->runtime->category_tabs_previous_active_id, previous_active);
-            printf("[DEBUG] Saved previous active tab: '%s'\n", previous_active);
+          if (!already_active) {
+            if (is_sticky_inactive && is_sticky_mode && previous_active && previous_active[0]) {
+              /* Sticky inactive mode: save previous active tab for later display in minimized state */
+              STRNCPY(region->runtime->category_tabs_previous_active_id, previous_active);
+            }
+            else {
+              /* Default inactive mode: clear previous_active_id so old tab returns to normal width */
+              region->runtime->category_tabs_previous_active_id[0] = '\0';
+            }
           }
 
           panel_category_active_set(region, pc_dyn->idname);
@@ -2855,7 +2856,6 @@ int handler_panel_region(bContext *C,
           /* Reset tab name hidden flag when switching to a different tab */
           if (!already_active) {
             region->runtime->category_tabs_active_name_hidden = false;
-            printf("[DEBUG] Switching to different tab - resetting active_name_hidden to false\n");
           }
 
           const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
@@ -2863,9 +2863,6 @@ int handler_panel_region(bContext *C,
           const bool too_narrow = BLI_rcti_size_x(&region->winrct) <=
                                   int(std::ceil(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC /
                                                 aspect));
-          printf("[DEBUG] Panel width check - too_narrow=%d, width=%d, min_width=%d\n",
-                 too_narrow, BLI_rcti_size_x(&region->winrct),
-                 int(std::ceil(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / aspect)));
           if (too_narrow) {
             /* Enlarge region. */
             const int new_width = region->runtime->type->prefsizex ?
@@ -2876,7 +2873,6 @@ int handler_panel_region(bContext *C,
             /* Reset tab name hidden flag when enlarging region from minimized state */
             if (already_active) {
               region->runtime->category_tabs_active_name_hidden = false;
-              printf("[DEBUG] Enlarging region - resetting active_name_hidden to false\n");
             }
 
             WM_main_add_notifier(NC_WINDOW, nullptr);
@@ -2884,29 +2880,39 @@ int handler_panel_region(bContext *C,
           }
           else if (already_active) {
             /* Minimize region when clicking on already active tab.
-             * This applies to both Default and Sticky modes - the panel should always collapse. */
-            printf("[DEBUG] already_active click - minimizing region to UI_PANEL_CATEGORY_MIN_WIDTH\n");
+             * This applies to both Default and Sticky inactive modes - the panel should always collapse.
+             * In Sticky inactive mode: save current active tab as previous_active so it shows its name
+             * even when inactive (collapsed state). */
             const eUserPref_CategoryTabsDisplayMode display_mode =
                 static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+            const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
+            const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                         U.category_tabs_show_active_name);
 
-            /* Clear previous active tab ID when minimizing panel (the tab becomes fully collapsed). */
-            region->runtime->category_tabs_previous_active_id[0] = '\0';
-            printf("[DEBUG] Cleared previous active tab ID\n");
+            /* Save current active tab as previous_active (for Sticky inactive mode - to show name in collapsed state).
+             * This allows the tab to show its name even when the panel is minimized. */
+            if (is_sticky_inactive && is_sticky_mode) {
+              const char *current_active = panel_category_active_get(region, false);
+              if (current_active && current_active[0]) {
+                STRNCPY(region->runtime->category_tabs_previous_active_id, current_active);
+              }
+            }
+            else {
+              /* Default inactive mode: clear previous_active_id when minimizing */
+              region->runtime->category_tabs_previous_active_id[0] = '\0';
+            }
 
             region->runtime->type->prefsizex = int(float(BLI_rcti_size_x(&region->winrct) + 1) /
                                                    UI_SCALE_FAC * aspect);
             ui_panel_region_width_set(region, aspect, UI_PANEL_CATEGORY_MIN_WIDTH);
-            printf("[DEBUG] After minimize: region->winx=%d, BLI_rcti_size_x(&region->winrct)=%d\n",
-                   region->winx, BLI_rcti_size_x(&region->winrct));
 
-            /* Additionally: In Icon mode with Show Active Tab Name, toggle tab name collapse state */
+            /* In Icon mode with Show Active Tab Name, do NOT hide the tab name.
+             * In Sticky inactive mode, we want to show the name for the previous active tab (minimized state). */
             const bool is_icon_mode_with_name = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
                                                   U.category_tabs_show_active_name);
             if (is_icon_mode_with_name) {
-              region->runtime->category_tabs_active_name_hidden =
-                  !region->runtime->category_tabs_active_name_hidden;
-              printf("[DEBUG] Toggling active_name_hidden to %d\n",
-                     region->runtime->category_tabs_active_name_hidden);
+              /* Keep the name visible for the previous active tab in Sticky inactive mode */
+              region->runtime->category_tabs_active_name_hidden = false;
             }
 
             WM_main_add_notifier(NC_WINDOW, nullptr);
@@ -2914,7 +2920,6 @@ int handler_panel_region(bContext *C,
           }
 
           ED_region_tag_redraw(region);
-          printf("[DEBUG] After redraw: region->winx=%d\n", region->winx);
 
           /* Reset scroll to the top (#38348). */
           view2d_offset(&region->v2d, -1.0f, 1.0f);

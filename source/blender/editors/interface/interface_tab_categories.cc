@@ -1680,7 +1680,8 @@ static void ui_panel_category_draw_content(
     const int tab_v_pad_text,
     const float darken_factor,
     const uchar theme_col_tab_text[3],
-    const uchar theme_col_tab_text_sel[3])
+    const uchar theme_col_tab_text_sel[3],
+    const bool is_panel_minimized)
 {
   bool is_fallback_letter = false;
   float glyph_color[3] = {0.0f, 0.0f, 0.0f};
@@ -1726,10 +1727,15 @@ static void ui_panel_category_draw_content(
            U.category_tabs_show_active_name &&
            !region->runtime->category_tabs_active_name_hidden)
   {
-    /* Show name for active tab OR for the previous active tab (if it exists).
-     * The previous active tab is the one that was active before switching to another tab.
-     * This allows users to see which tab they just came from. */
-    const bool is_previous_active = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
+    /* Show name for active tab OR for the previous active tab (in minimized state).
+     * The previous active tab is set when clicking on active tab to minimize the panel.
+     * This allows users to see which tab they just collapsed.
+     * IMPORTANT: Previous active tab only shows name when panel is minimized (collapsed)
+     * AND inactive behavior is set to STICKY. */
+    const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
+    const bool is_previous_active = (is_sticky_inactive &&
+                                     is_panel_minimized &&
+                                     region->runtime->category_tabs_previous_active_id[0] != '\0' &&
                                      STREQ(category_id, region->runtime->category_tabs_previous_active_id));
     if ((is_active || is_previous_active) && (has_glyph || is_fallback_letter)) {
       draw_dual = true;
@@ -2035,6 +2041,9 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   const int px = U.pixelsize;
   const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
   const float dpi_fac = UI_SCALE_FAC;
+  /* Calculate too_narrow early - needed for width calculation in first loop */
+  const bool too_narrow = BLI_rcti_size_x(&region->winrct) <=
+                          int(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / aspect);
   const int tab_v_pad_text = round_fl_to_int(TABS_PADDING_TEXT_FACTOR * dpi_fac * zoom) + 2 * px;
   const int tab_v_pad = round_fl_to_int(TABS_PADDING_BETWEEN_FACTOR * dpi_fac * zoom);
   bTheme *btheme = theme::theme_get();
@@ -2095,7 +2104,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     rcti *rct = &pc_dyn.rect;
     const char *category_id = pc_dyn.idname;
     const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
-    const bool is_active = category_id_active && STREQ(category_id, category_id_active);
+    /* When panel is minimized (too_narrow), the active tab should not expand */
+    const bool is_active = !too_narrow && category_id_active && STREQ(category_id, category_id_active);
 
     bool is_fallback_letter = false;
     float glyph_color[3] = {0.0f, 0.0f, 0.0f};
@@ -2130,11 +2140,22 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
         category_width = glyph_h;
 
         /* Determine if this tab should expand to show the name.
-         * Show name for active tab OR for the previous active tab (if it exists).
-         * The previous active tab is the one that was active before switching. */
-        const bool is_previous_active = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
-                                         STREQ(category_id, region->runtime->category_tabs_previous_active_id));
-        const bool should_expand_name = (U.category_tabs_show_active_name &&
+         * Show name for active tab OR for the previous active tab (only in minimized state for STICKY mode).
+         *
+         * In DEFAULT inactive behavior mode: previous_active tab should NOT expand (stays glyph-only).
+         * In STICKY inactive behavior mode: previous_active tab expands to show name ONLY when panel is minimized.
+         */
+        const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
+        const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                     U.category_tabs_show_active_name);
+        /* Only use previous_active when BOTH sticky inactive AND sticky mode are enabled */
+        const bool can_show_previous = is_sticky_inactive && is_sticky_mode;
+        const bool is_previous_active_raw = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
+                                             STREQ(category_id, region->runtime->category_tabs_previous_active_id));
+        const bool is_previous_active = can_show_previous && too_narrow && is_previous_active_raw;
+        /* Active tab can expand in sticky mode. Previous active tab can expand only in sticky inactive mode. */
+        const bool should_expand_name = ((is_sticky_mode || is_active) &&
+                                         U.category_tabs_show_active_name &&
                                          !region->runtime->category_tabs_active_name_hidden &&
                                          (is_active || is_previous_active));
 
@@ -2285,8 +2306,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
   immUnbindProgram();
 
-  const bool too_narrow = BLI_rcti_size_x(&region->winrct) <=
-                          int(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / aspect);
+  /* too_narrow was calculated earlier for use in width calculation */
 
   int current_display_index = 0;
 
@@ -2333,10 +2353,20 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     const bool is_active = !too_narrow && category_id_active && STREQ(category_id, category_id_active);
 
     /* Determine if this tab should expand to show the name.
-     * Show name for active tab OR for the previous active tab (if it exists). */
-    const bool is_previous_active = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
-                                     STREQ(category_id, region->runtime->category_tabs_previous_active_id));
-    const bool should_expand_name = (U.category_tabs_show_active_name &&
+     * Show name for active tab OR for the previous active tab (only in minimized state for STICKY mode).
+     *
+     * In DEFAULT mode: previous_active tab should NOT expand (stays glyph-only).
+     * In STICKY inactive behavior mode: previous_active tab expands to show name ONLY when panel is minimized (too_narrow).
+     */
+    const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
+    const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                 U.category_tabs_show_active_name);
+    const bool can_show_previous = is_sticky_inactive && is_sticky_mode;
+    const bool is_previous_active_raw = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
+                                         STREQ(category_id, region->runtime->category_tabs_previous_active_id));
+    const bool is_previous_active = can_show_previous && too_narrow && is_previous_active_raw;
+    const bool should_expand_name = ((is_sticky_mode || is_active) &&
+                                     U.category_tabs_show_active_name &&
                                      !region->runtime->category_tabs_active_name_hidden &&
                                      (is_active || is_previous_active));
 
@@ -2427,7 +2457,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                                    current_tab_v_pad_text,
                                    darken_factor,
                                    theme_col_tab_text,
-                                   theme_col_tab_text_sel);
+                                   theme_col_tab_text_sel,
+                                   too_narrow);
 
     if (is_left) {
       pc_dyn.rect.xmin = v2d->mask.xmin;
@@ -2609,10 +2640,21 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       const bool is_active_tab = category_id_active && STREQ(category_id, category_id_active);
 
       /* Determine if this tab should expand to show the name.
-       * Show name for active tab OR for the previous active tab (if it exists). */
-      const bool is_previous_active = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
-                                       STREQ(category_id, region->runtime->category_tabs_previous_active_id));
-      const bool should_expand_name = (U.category_tabs_show_active_name &&
+       * Show name for active tab OR for the previous active tab (only in minimized state for STICKY mode).
+       *
+       * During drag: too_narrow check is not available, so use a basic flag.
+       * In STICKY inactive behavior mode (GLYPHS_ONLY + show_active_name), expand for previous_active.
+       * In DEFAULT inactive behavior mode: previous_active tab should NOT expand.
+       */
+      const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
+      const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                   U.category_tabs_show_active_name);
+      const bool can_show_previous = is_sticky_inactive && is_sticky_mode;
+      const bool is_previous_active_raw = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
+                                           STREQ(category_id, region->runtime->category_tabs_previous_active_id));
+      const bool is_previous_active = can_show_previous && is_previous_active_raw;
+      const bool should_expand_name = ((is_sticky_mode || is_active_tab) &&
+                                       U.category_tabs_show_active_name &&
                                        !region->runtime->category_tabs_active_name_hidden &&
                                        (is_active_tab || is_previous_active));
 
@@ -2643,7 +2685,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                                      current_drag_tab_v_pad_text,
                                      0.0f,
                                      theme_col_tab_text,
-                                     theme_col_tab_text_sel);
+                                     theme_col_tab_text_sel,
+                                     too_narrow);
     }
   }
 
@@ -2890,7 +2933,7 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
                                      STREQ(clicked_pc->idname, region->runtime->category_tabs_previous_active_id));
 
     /* Determine if the tab name is visible (no tooltip needed when name is shown).
-     * Show name for active tab OR for the previous active tab (if it exists). */
+     * Show name for active tab OR for the previous active tab (in collapsed state). */
     const bool show_tab_name = (U.category_tabs_show_active_name &&
                                 !region->runtime->category_tabs_active_name_hidden &&
                                 (is_active || is_previous_active));

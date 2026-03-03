@@ -13,6 +13,7 @@ struct ARegion;
 struct ARegionType;
 struct bContext;
 struct CategoryTagDef;
+struct wmEvent;
 struct wmRegionListenerParams;
 struct wmRegionMessageSubscribeParams;
 struct wmWindowManager;
@@ -29,6 +30,7 @@ namespace blender::ui {
 
 using blender::ARegion;
 using blender::bContext;
+using blender::wmEvent;
 using blender::wmWindowManager;
 using blender::View3D;
 using blender::wmRegionListenerParams;
@@ -79,11 +81,13 @@ void tag_bar_mark_all_dirty();
 
 /**
  * Update tag bar buttons based on tags from window manager.
+ * \param C: Context for getting current mode
  * \param wm: Window manager containing tag definitions
  * \param v3d: View3D containing active_tag_filter_mask (can be nullptr)
  * \param data: Runtime data to update
  */
-void tag_bar_buttons_update(const blender::wmWindowManager *wm,
+void tag_bar_buttons_update(const bContext *C,
+                            const blender::wmWindowManager *wm,
                             blender::View3D *v3d,
                             TagBarRuntimeData *data);
 
@@ -126,6 +130,16 @@ bool has_all_tags_active(const blender::wmWindowManager *wm,
  * \param arg2: Mode flags as int pointer
  */
 void tag_button_click_by_mode(bContext *C, void *arg1, void *arg2);
+
+/**
+ * Event handler for tag bar mouse wheel navigation.
+ * Handles Ctrl + Mouse Wheel to cycle through tags when exactly one tag is active.
+ * \param C: Context
+ * \param event: Window event
+ * \param userdata: User data (unused)
+ * \return WM_UI_HANDLER_BREAK if event was handled, WM_UI_HANDLER_CONTINUE otherwise
+ */
+int tag_bar_region_handler(bContext *C, const wmEvent *event, void *userdata);
 
 /** \name Region Callbacks */
 /** \{ */

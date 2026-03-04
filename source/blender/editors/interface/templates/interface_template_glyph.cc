@@ -6,6 +6,7 @@
  * \ingroup edinterface
  */
 
+#include "DNA_ID.h"
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
 
@@ -113,8 +114,50 @@ static bool process_glyph_input(const char *input, char *output, size_t output_m
 struct GlyphButtonCallbackData {
   char *category;           /* Category for glyph search */
   char *glyph_propname;     /* Property name to update with selected glyph */
-  PointerRNA *ptr;          /* PointerRNA containing the property */
+  wmOperator *target_op;    /* Resolved target operator owning the property */
+  IDProperty *target_op_properties;
 };
+
+/* Try to resolve the operator that owns the given OperatorProperties PointerRNA. */
+static wmOperator *glyph_find_operator_from_properties_ptr(const bContext *C, const PointerRNA *ptr)
+{
+  if (!C || !ptr || !ptr->data) {
+    return nullptr;
+  }
+
+  wmWindowManager *wm = CTX_wm_manager(C);
+  IDProperty *properties = static_cast<IDProperty *>(ptr->data);
+
+  if (wm && ptr->owner_id == &wm->id) {
+    for (wmOperator *op = static_cast<wmOperator *>(wm->runtime->operators.last); op; op = op->prev)
+    {
+      if (op && op->properties == properties) {
+        return op;
+      }
+    }
+  }
+
+  if (wm) {
+    for (wmOperator *op = static_cast<wmOperator *>(wm->runtime->operators.last); op; op = op->prev) {
+      if (!op || !op->ptr) {
+        continue;
+      }
+
+      if (op->ptr == ptr || op->ptr->data == ptr->data || op->properties == ptr->data) {
+        return op;
+      }
+    }
+  }
+
+  wmOperator *active_op = context_active_operator_get(C);
+  if (active_op && active_op->ptr) {
+    if (active_op->ptr == ptr || active_op->ptr->data == ptr->data || active_op->properties == ptr->data) {
+      return active_op;
+    }
+  }
+
+  return nullptr;
+}
 
 /* Callback function for the default "More glyphs" button */
 static void glyph_more_glyphs_default_cb(bContext *C, void *arg1, void * /*arg2*/)
@@ -130,6 +173,16 @@ static void glyph_more_glyphs_default_cb(bContext *C, void *arg1, void * /*arg2*
   printf("[GLYPH CALLBACK] data->category = '%s'\n", data->category ? data->category : "NULL");
   printf("[GLYPH CALLBACK] data->glyph_propname = '%s'\n", data->glyph_propname ? data->glyph_propname : "NULL");
 
+  wmOperator *active_op = context_active_operator_get(C);
+  printf("[GLYPH CALLBACK] context_active_operator_get = %p (idname='%s')\n",
+         (void *)active_op,
+         (active_op && active_op->idname) ? active_op->idname : "NULL");
+
+  wmOperator *target_op = data->target_op;
+  printf("[GLYPH CALLBACK] data->target_op = %p (idname='%s')\n",
+         (void *)target_op,
+         (target_op && target_op->idname) ? target_op->idname : "NULL");
+
   /* Open glyph grid popup using direct operator call */
   wmOperatorType *ot = WM_operatortype_find("WM_OT_glyph_picker_grid", false);
   if (ot) {
@@ -143,25 +196,32 @@ static void glyph_more_glyphs_default_cb(bContext *C, void *arg1, void * /*arg2*
       printf("[GLYPH CALLBACK] Set category = '%s'\n", data->category);
     }
 
-    /* Set target_property with active_operator prefix
-     * This tells the glyph picker to find the active operator and update its property
-     * The grid select callback has special handling for "active_operator.xxx" paths */
     if (data->glyph_propname && data->glyph_propname[0] != '\0') {
       char target_prop[128];
-      SNPRINTF(target_prop, "active_operator.%s", data->glyph_propname);
+      SNPRINTF(target_prop, "%s", data->glyph_propname);
       RNA_string_set(&op_ptr, "target_property", target_prop);
       printf("[GLYPH CALLBACK] Set target_property = '%s'\n", target_prop);
     }
 
-    /* НОВОЕ: Передаем точный указатель на целевой оператор */
-    wmOperator *current_active_op = context_active_operator_get(C);
-    if (current_active_op) {
+    if (target_op) {
       char target_op_ptr_str[64];
-      SNPRINTF(target_op_ptr_str, "%llu", (unsigned long long)(uintptr_t)current_active_op);
+      SNPRINTF(target_op_ptr_str, "%llu", (unsigned long long)(uintptr_t)target_op);
       RNA_string_set(&op_ptr, "target_operator_ptr", target_op_ptr_str);
       printf("[GLYPH TEMPLATE CALLBACK] Set target_operator_ptr = '%s' (op=%p, idname='%s')\n", 
-             target_op_ptr_str, (void*)current_active_op, 
-             current_active_op->idname ? current_active_op->idname : "NULL");
+             target_op_ptr_str,
+             (void *)target_op,
+             target_op->idname ? target_op->idname : "NULL");
+    }
+
+    if (data->target_op_properties) {
+      char target_op_props_ptr_str[64];
+      SNPRINTF(target_op_props_ptr_str,
+               "%llu",
+               (unsigned long long)(uintptr_t)data->target_op_properties);
+      RNA_string_set(&op_ptr, "target_operator_properties_ptr", target_op_props_ptr_str);
+      printf("[GLYPH TEMPLATE CALLBACK] Set target_operator_properties_ptr = '%s' (props=%p)\n",
+             target_op_props_ptr_str,
+             (void *)data->target_op_properties);
     }
 
     printf("[GLYPH CALLBACK] Calling WM_operator_name_call_ptr...\n");
@@ -248,34 +308,39 @@ static void ui_template_glyph_input_row_impl(Layout *layout,
     printf("[GLYPH TEMPLATE] Using custom callback\n");
     button_func_set(glyph_but, more_glyphs_callback, callback_user_data, nullptr);
   }
-  else if (category && category[0] != '\0') {
+  else {
     printf("[GLYPH TEMPLATE] === Setting up DEFAULT callback ===\n");
-    printf("[GLYPH TEMPLATE] category = '%s'\n", category);
+    printf("[GLYPH TEMPLATE] category = '%s'\n", category ? category : "");
     printf("[GLYPH TEMPLATE] glyph_propname = '%s'\n", glyph_propname);
     printf("[GLYPH TEMPLATE] ptr = %p\n", (void *)ptr);
 
     /* Default behavior: Open glyph grid popup with target operator info */
     GlyphButtonCallbackData *data = MEM_new<GlyphButtonCallbackData>(__func__);
 
-    /* Copy category */
-    data->category = MEM_new_array<char>(strlen(category) + 1, __func__);
-    strcpy(data->category, category);
+    /* Copy category (optional) */
+    if (category && category[0] != '\0') {
+      data->category = MEM_new_array<char>(strlen(category) + 1, __func__);
+      strcpy(data->category, category);
+    }
+    else {
+      data->category = nullptr;
+    }
 
     /* Copy glyph property name */
     data->glyph_propname = MEM_new_array<char>(strlen(glyph_propname) + 1, __func__);
     strcpy(data->glyph_propname, glyph_propname);
 
-    /* Store ptr for reference */
-    data->ptr = ptr;
+    /* Resolve and store target operator now (while PointerRNA is valid in this draw call). */
+    data->target_op = glyph_find_operator_from_properties_ptr(C, ptr);
+    data->target_op_properties = static_cast<IDProperty *>(ptr->data);
+    printf("[GLYPH TEMPLATE] Resolved data->target_op = %p (idname='%s')\n",
+           (void *)data->target_op,
+           (data->target_op && data->target_op->idname) ? data->target_op->idname : "NULL");
 
     printf("[GLYPH TEMPLATE] Created GlyphButtonCallbackData, setting button callback...\n");
     button_func_set(glyph_but, glyph_more_glyphs_default_cb, data, nullptr);
     printf("[GLYPH TEMPLATE] Button callback set successfully\n");
   }
-  else {
-    printf("[GLYPH TEMPLATE] WARNING: No callback set! category='%s'\n", category ? category : "NULL");
-  }
-  (void)glyph_but;
 
   /* Right side: Code field + Paste button - right aligned */
   if (has_code) {

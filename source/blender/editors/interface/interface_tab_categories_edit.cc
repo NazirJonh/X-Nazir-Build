@@ -1095,7 +1095,9 @@ static void glyph_search_result_button_cb(bContext *C, void *arg1, void *arg2)
  * Stores the operator, glyphs, categories and UI state.
  */
 struct GlyphGridPopupData {
-  wmOperator *op;
+  wmOperator *op; /* The picker operator (WM_OT_glyph_picker_grid) */
+  wmOperator *target_op; /* The target operator whose property should be updated (e.g., wm.category_tag_create) */
+  IDProperty *target_op_properties;
   Vector<std::pair<std::string, std::string>> glyphs; /* (unicode, name) pairs */
   std::string current_category; /* Currently selected category filter */
   Vector<std::string> categories; /* All available categories */
@@ -1103,10 +1105,14 @@ struct GlyphGridPopupData {
   PopupBlockHandle *popup_handle;
 
   GlyphGridPopupData(wmOperator *op_,
+                     wmOperator *target_op_,
+                     IDProperty *target_op_properties_,
                      Vector<std::pair<std::string, std::string>> glyphs_,
                      std::string category_,
                      Vector<std::string> categories_)
       : op(op_),
+        target_op(target_op_),
+        target_op_properties(target_op_properties_),
         glyphs(std::move(glyphs_)),
         current_category(std::move(category_)),
         categories(std::move(categories_)),
@@ -1184,13 +1190,14 @@ constexpr int GLYPH_POPUP_RIGHT_COL_WIDTH = 45;
  */
 static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *arg)
 {
-  UNUSED_VARS(C);
   GlyphGridPopupData *popup_data = static_cast<GlyphGridPopupData *>(arg);
 
-  /* Sync search string from RNA property */
-  char search_buf[256] = "";
-  RNA_string_get(popup_data->op->ptr, "glyph_search", search_buf);
-  popup_data->search_string = search_buf;
+  /* Sync search string from picker operator if available */
+  if (popup_data->op) {
+    char search_buf[256] = "";
+    RNA_string_get(popup_data->op->ptr, "glyph_search", search_buf);
+    popup_data->search_string = search_buf;
+  }
 
   /* Create block */
   Block *block = block_begin(C, region, "glyph_grid_popup", EmbossType::Emboss);
@@ -1235,19 +1242,19 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
   right_col.ui_units_y_set(150); /* Set minimum height for right column */
   right_col.fixed_size_set(true);
 
-  /* Add search field at top of right column */
-  Layout &search_row = right_col.row(false);
+  /* Add search field at top of right column - only if picker operator available */
+  Layout *search_row_ptr = nullptr;
+  if (popup_data->op) {
+    search_row_ptr = &right_col.row(false);
 
-  /* Create RNA pointer for search filter property - use op->ptr directly */
-  PointerRNA *op_ptr = popup_data->op->ptr;
-
-  /* Use prop() to create search field, similar to Asset Shelf */
-  search_row.prop(op_ptr,
-                  "glyph_search",
-                  /* Force the button to be active in a semi-modal state. */
-                  ITEM_R_TEXT_BUT_FORCE_SEMI_MODAL_ACTIVE,
-                  "",
-                  ICON_VIEWZOOM);
+    /* Use prop() to create search field, similar to Asset Shelf */
+    search_row_ptr->prop(popup_data->op->ptr,
+                    "glyph_search",
+                    /* Force the button to be active in a semi-modal state. */
+                    ITEM_R_TEXT_BUT_FORCE_SEMI_MODAL_ACTIVE,
+                    "",
+                    ICON_VIEWZOOM);
+  }
 
   /* Grid view below search - with scroll support */
   Layout &grid_col = right_col.column(false);
@@ -1280,13 +1287,17 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
         utf8_to_hex_codepoint(unicode.c_str(), hex_code, sizeof(hex_code));
         printf("[GLYPH GRID SELECT] hex_code = '%s'\n", hex_code);
 
-        /* Set the glyph property of the operator itself */
-        RNA_string_set(popup_data->op->ptr, "glyph", hex_code);
-        printf("[GLYPH GRID SELECT] Set picker op->ptr['glyph'] = '%s'\n", hex_code);
+        /* Set the glyph property of the picker operator if available */
+        if (popup_data->op) {
+          RNA_string_set(popup_data->op->ptr, "glyph", hex_code);
+          printf("[GLYPH GRID SELECT] Set picker op->ptr['glyph'] = '%s'\n", hex_code);
+        }
 
-        /* Set the target property if specified (RNA path) */
-        char target_prop[256] = "";
-        RNA_string_get(popup_data->op->ptr, "target_property", target_prop);
+        /* Get target property - from picker operator or use default "glyph" */
+        char target_prop[256] = "glyph";  /* Default to "glyph" property */
+        if (popup_data->op) {
+          RNA_string_get(popup_data->op->ptr, "target_property", target_prop);
+        }
         printf("[GLYPH GRID SELECT] target_property = '%s'\n", target_prop[0] != '\0' ? target_prop : "(empty)");
 
         if (target_prop[0] != '\0') {
@@ -1299,49 +1310,45 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
           PropertyRNA *prop;
           int index;
 
-          wmOperator *target_op = nullptr;
-          char target_op_ptr_str[64] = "";
-          RNA_string_get(popup_data->op->ptr, "target_operator_ptr", target_op_ptr_str);
-          printf("[GLYPH GRID SELECT] target_operator_ptr = '%s'\n", target_op_ptr_str[0] != '\0' ? target_op_ptr_str : "(empty)");
+          /* Use the directly stored target operator from popup data */
+          wmOperator *target_op = popup_data->target_op;
 
-          if (target_op_ptr_str[0] != '\0') {
-            const uintptr_t target_op_ptr = uintptr_t(strtoull(target_op_ptr_str, nullptr, 10));
-            printf("[GLYPH GRID SELECT] target_op_ptr (numeric) = %llu\n", (unsigned long long)target_op_ptr);
-            if (target_op_ptr != 0) {
-              wmWindowManager *wm = CTX_wm_manager(&C);
-              printf("[GLYPH GRID SELECT] Searching for operator in wm->runtime->operators...\n");
-              int op_count = 0;
+          printf("[GLYPH GRID SELECT] popup_data->target_op = %p\n", (void *)target_op);
+          if (target_op) {
+            printf("[GLYPH GRID SELECT] target_op->idname = '%s'\n", target_op->idname ? target_op->idname : "NULL");
+            printf("[GLYPH GRID SELECT] target_op->ptr = %p\n", (void *)target_op->ptr);
+          }
+
+          if (!target_op && popup_data->target_op_properties) {
+            wmWindowManager *wm = CTX_wm_manager(&C);
+            if (wm) {
               for (wmOperator *op_iter = static_cast<wmOperator *>(wm->runtime->operators.last);
                    op_iter;
                    op_iter = op_iter->prev)
               {
-                op_count++;
-                printf("[GLYPH GRID SELECT]   Checking op #%d: %p (idname='%s')\n",
-                       op_count, (void *)op_iter, op_iter->idname ? op_iter->idname : "NULL");
-                if ((uintptr_t)op_iter == target_op_ptr) {
+                if (op_iter && op_iter->properties == popup_data->target_op_properties) {
                   target_op = op_iter;
-                  printf("[GLYPH GRID SELECT]   FOUND target_op! idname='%s'\n", 
+                  printf("[GLYPH GRID SELECT] Resolved target_op by properties: %p (idname='%s')\n",
+                         (void *)target_op,
                          target_op->idname ? target_op->idname : "NULL");
                   break;
                 }
               }
-              printf("[GLYPH GRID SELECT] Total operators checked: %d\n", op_count);
             }
           }
-          else {
-            printf("[GLYPH GRID SELECT] WARNING: target_operator_ptr is empty, trying fallback...\n");
-            /* Fallback: try context_active_operator_get but with validation */
-            wmOperator *fallback_op = context_active_operator_get(&C);
-            if (fallback_op) {
-              printf("[GLYPH GRID SELECT] Fallback found active operator: %p (idname='%s')\n",
-                     (void*)fallback_op, fallback_op->idname ? fallback_op->idname : "NULL");
-              /* Only use fallback if it's a reasonable target (category edit or tag create) */
-              if (fallback_op->idname && 
-                  (STREQ(fallback_op->idname, "SCREEN_OT_category_tab_edit_dialog") ||
-                   STREQ(fallback_op->idname, "WM_OT_category_tag_create"))) {
-                target_op = fallback_op;
-                printf("[GLYPH GRID SELECT] Using fallback operator\n");
+
+          /* Fallback: if no target_op stored, try to find it through context */
+          if (!target_op) {
+            if (!popup_data->target_op_properties) {
+              printf("[GLYPH GRID SELECT] WARNING: popup_data->target_op is NULL, trying fallback...\n");
+              target_op = context_active_operator_get(&C);
+              if (target_op) {
+                printf("[GLYPH GRID SELECT] Fallback found active operator: %p (idname='%s')\n",
+                       (void*)target_op, target_op->idname ? target_op->idname : "NULL");
               }
+            }
+            else {
+              printf("[GLYPH GRID SELECT] popup_data->target_op is NULL, skipping active fallback because explicit target properties are set\n");
             }
           }
 
@@ -1354,9 +1361,41 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
           printf("[GLYPH GRID SELECT] target_prop_path = '%s'\n", target_prop_path);
           printf("[GLYPH GRID SELECT] is_active_operator_path = %s\n", is_active_operator_path ? "true" : "false");
           printf("[GLYPH GRID SELECT] target_prop_path_for_operator = '%s'\n", target_prop_path_for_operator);
-          printf("[GLYPH GRID SELECT] target_op = %p\n", (void *)target_op);
 
-          if (target_op && target_op->ptr) {
+          /* Primary path for invoke_props_dialog operators: write directly to the captured
+           * operator IDProperty group. This avoids routing through unrelated active operators. */
+          if (!resolved && popup_data->target_op_properties) {
+            if (strchr(target_prop_path_for_operator, '.') == nullptr &&
+                strchr(target_prop_path_for_operator, '[') == nullptr)
+            {
+              IDProperty *idprop = IDP_GetPropertyFromGroup(popup_data->target_op_properties,
+                                                            target_prop_path_for_operator);
+              if (!idprop) {
+                idprop = IDP_NewString(hex_code, target_prop_path_for_operator);
+                IDP_AddToGroup(popup_data->target_op_properties, idprop);
+                resolved = true;
+                printf("[GLYPH GRID SELECT] SUCCESS: Created and set IDProperty '%s' on target properties\n",
+                       target_prop_path_for_operator);
+              }
+              else if (idprop->type == IDP_STRING) {
+                IDP_AssignString(idprop, hex_code);
+                resolved = true;
+                printf("[GLYPH GRID SELECT] SUCCESS: Set IDProperty '%s' directly on target properties\n",
+                       target_prop_path_for_operator);
+              }
+              else {
+                printf("[GLYPH GRID SELECT] IDProperty '%s' exists but has non-string type=%d\n",
+                       target_prop_path_for_operator,
+                       idprop->type);
+              }
+            }
+            else {
+              printf("[GLYPH GRID SELECT] Skipping direct IDProperty write for complex path '%s'\n",
+                     target_prop_path_for_operator);
+            }
+          }
+
+          if (!resolved && target_op && target_op->ptr) {
             printf("[GLYPH GRID SELECT] Attempting RNA_path_resolve_full on target_op->ptr...\n");
             printf("[GLYPH GRID SELECT] Target operator: %p, idname='%s'\n", 
                    (void*)target_op, target_op->idname ? target_op->idname : "NULL");
@@ -1377,7 +1416,7 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
               printf("[GLYPH GRID SELECT] FAILED: RNA_path_resolve_full returned false\n");
             }
           }
-          else {
+          else if (!resolved) {
             printf("[GLYPH GRID SELECT] Cannot resolve: target_op=%p, target_op->ptr=%p\n",
                    (void *)target_op, target_op ? (void *)target_op->ptr : nullptr);
           }
@@ -1418,14 +1457,17 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
 
           if (!resolved) {
             /* Fallback: try resolving from the picker operator itself (relative path). */
-            printf("[GLYPH GRID SELECT] Trying fallback: picker operator relative path...\n");
-            if (RNA_path_resolve_full(popup_data->op->ptr, target_prop_path, &target_ptr, &prop, &index)) {
-              printf("[GLYPH GRID SELECT] SUCCESS: Resolved via picker operator!\n");
-              RNA_property_string_set(&target_ptr, prop, hex_code);
-              RNA_property_update(&C, &target_ptr, prop);
-            }
-            else {
-              printf("[GLYPH GRID SELECT] FAILED: Could not resolve via picker operator\n");
+            if (popup_data->op) {
+              printf("[GLYPH GRID SELECT] Trying fallback: picker operator relative path...\n");
+              if (RNA_path_resolve_full(popup_data->op->ptr, target_prop_path, &target_ptr, &prop, &index)) {
+                printf("[GLYPH GRID SELECT] SUCCESS: Resolved via picker operator!\n");
+                RNA_property_string_set(&target_ptr, prop, hex_code);
+                RNA_property_update(&C, &target_ptr, prop);
+                resolved = true;
+              }
+              else {
+                printf("[GLYPH GRID SELECT] FAILED: Could not resolve via picker operator\n");
+              }
             }
           }
 
@@ -1435,12 +1477,14 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
           printf("[GLYPH GRID SELECT] No target_property specified, skipping target update\n");
         }
 
-        /* Clear the search field */
-        RNA_string_set(popup_data->op->ptr, "glyph_search", "");
+        /* Clear the search field if picker operator available */
+        if (popup_data->op) {
+          RNA_string_set(popup_data->op->ptr, "glyph_search", "");
 
-        /* Trigger live update to refresh preview - only for category tab edit dialog */
-        if (STREQ(popup_data->op->idname, "SCREEN_OT_category_tab_edit_dialog")) {
-          category_tab_edit_live_update_cb(&C, popup_data->op, 0);
+          /* Trigger live update to refresh preview - only for category tab edit dialog */
+          if (popup_data->op->idname && STREQ(popup_data->op->idname, "SCREEN_OT_category_tab_edit_dialog")) {
+            category_tab_edit_live_update_cb(&C, popup_data->op, 0);
+          }
         }
 
         /* Close the popup */
@@ -1478,18 +1522,24 @@ static void glyph_grid_popup_free(void *arg)
 /**
  * Callback for the "More glyphs" button.
  * Opens the Grid View popup for selecting glyphs with category tree and search.
+ *
+ * Note: arg1 is the target operator (e.g., SCREEN_OT_category_tab_edit_dialog or wm.category_tag_create)
+ * whose property should be updated when a glyph is selected.
  */
 static void glyph_more_glyphs_button_cb(bContext *C, void *arg1, void * /*arg2*/)
 {
-  wmOperator *op = static_cast<wmOperator *>(arg1);
+  wmOperator *target_op = static_cast<wmOperator *>(arg1);
 
-  if (!op) {
+  if (!target_op) {
     return;
   }
 
-  /* Get the current category from op->ptr */
+  printf("[GLYPH BUTTON CB] target_op = %p (idname='%s')\n",
+         (void*)target_op, target_op->idname ? target_op->idname : "NULL");
+
+  /* Get the current category from target_op->ptr */
   char current_category[64] = "";
-  RNA_string_get(op->ptr, "category", current_category);
+  RNA_string_get(target_op->ptr, "category", current_category);
 
   /* Predefined glyph categories (will be expanded in the future) */
   Vector<std::string> all_categories;
@@ -1527,9 +1577,10 @@ static void glyph_more_glyphs_button_cb(bContext *C, void *arg1, void * /*arg2*/
   /* Create a copy of glyphs for popup data (popup needs ownership) */
   blender::Vector<std::pair<std::string, std::string>> glyphs = cached_glyphs;
 
-  /* Create popup data with current category and all categories */
+  /* Create popup data with picker op (nullptr here, will be set in glyph_grid_popup_block_create)
+   * and target_op (the operator whose property should be updated) */
   GlyphGridPopupData *popup_data = new GlyphGridPopupData(
-      op, std::move(glyphs), current_category, all_categories);
+      nullptr, target_op, target_op ? target_op->properties : nullptr, std::move(glyphs), current_category, all_categories);
 
   /* Create and show popup */
   PopupBlockHandle *handle = popup_block_create(
@@ -1572,25 +1623,94 @@ static wmOperatorStatus glyph_picker_grid_invoke(bContext *C,
   char initial_category[64] = "";
   RNA_string_get(op->ptr, "category", initial_category);
 
-  wmOperator *active_op = context_active_operator_get(C);
-  if (active_op && active_op != op && active_op->properties) {
-    char target_op_ptr_str[64];
-    BLI_snprintf(target_op_ptr_str,
-                 sizeof(target_op_ptr_str),
-                 "%llu",
-                 (unsigned long long)(uintptr_t)active_op);
-    RNA_string_set(op->ptr, "target_operator_ptr", target_op_ptr_str);
-    printf("[GLYPH PICKER INVOKE] Set target_operator_ptr = '%s' for active_op: %p (idname='%s')\n",
-           target_op_ptr_str, (void*)active_op, active_op->idname ? active_op->idname : "NULL");
-  }
-  else {
-    printf("[GLYPH PICKER INVOKE] No valid active operator found (active_op=%p, op=%p)\n",
-           (void*)active_op, (void*)op);
+  /* Try to get the target operator from target_operator_properties_ptr property first.
+   * This is set by glyph_more_glyphs_default_cb before invoking this operator. */
+  wmOperator *target_op = nullptr;
+  IDProperty *target_op_properties = nullptr;
+  bool has_explicit_target = false;
+  char target_op_props_ptr_str[64] = "";
+  RNA_string_get(op->ptr, "target_operator_properties_ptr", target_op_props_ptr_str);
+
+  printf("[GLYPH PICKER INVOKE] target_operator_properties_ptr from op->ptr = '%s'\n",
+         target_op_props_ptr_str[0] != '\0' ? target_op_props_ptr_str : "(empty)");
+
+  if (target_op_props_ptr_str[0] != '\0') {
+    has_explicit_target = true;
+    const uintptr_t target_props_ptr = uintptr_t(strtoull(target_op_props_ptr_str, nullptr, 10));
+    printf("[GLYPH PICKER INVOKE] Looking for operator with properties pointer %llu\n",
+           (unsigned long long)target_props_ptr);
+
+    if (target_props_ptr != 0) {
+      wmWindowManager *wm = CTX_wm_manager(C);
+      target_op_properties = reinterpret_cast<IDProperty *>(target_props_ptr);
+      for (wmOperator *op_iter = static_cast<wmOperator *>(wm->runtime->operators.last);
+           op_iter;
+           op_iter = op_iter->prev)
+      {
+        if (op_iter && op_iter->properties == target_op_properties) {
+          target_op = op_iter;
+          printf("[GLYPH PICKER INVOKE] FOUND target operator via properties %p (idname='%s')\n",
+                 (void *)target_op, target_op->idname ? target_op->idname : "NULL");
+          break;
+        }
+      }
+    }
   }
 
-  /* Create popup data */
+  /* Try to get the target operator from target_operator_ptr property next.
+   * This is set by glyph_more_glyphs_default_cb before invoking this operator. */
+  char target_op_ptr_str[64] = "";
+  RNA_string_get(op->ptr, "target_operator_ptr", target_op_ptr_str);
+
+  printf("[GLYPH PICKER INVOKE] target_operator_ptr from op->ptr = '%s'\n",
+         target_op_ptr_str[0] != '\0' ? target_op_ptr_str : "(empty)");
+
+  if (!target_op && target_op_ptr_str[0] != '\0') {
+    has_explicit_target = true;
+    /* Try to find the operator by pointer in wm->runtime->operators */
+    const uintptr_t target_op_ptr = uintptr_t(strtoull(target_op_ptr_str, nullptr, 10));
+    printf("[GLYPH PICKER INVOKE] Looking for operator with pointer %llu\n", (unsigned long long)target_op_ptr);
+
+    if (target_op_ptr != 0) {
+      wmWindowManager *wm = CTX_wm_manager(C);
+      for (wmOperator *op_iter = static_cast<wmOperator *>(wm->runtime->operators.last);
+           op_iter;
+           op_iter = op_iter->prev)
+      {
+        if ((uintptr_t)op_iter == target_op_ptr) {
+          target_op = op_iter;
+          printf("[GLYPH PICKER INVOKE] FOUND target operator %p (idname='%s')\n",
+                 (void*)target_op, target_op->idname ? target_op->idname : "NULL");
+          break;
+        }
+      }
+    }
+  }
+
+  /* Fallback: try context_active_operator_get only when no explicit target was provided.
+   * If explicit target data was provided but couldn't be resolved to a live operator,
+   * keep target_op null and rely on target_op_properties in the select callback. */
+  if (!target_op) {
+    if (!has_explicit_target) {
+      printf("[GLYPH PICKER INVOKE] target_op not found via ptr, trying context_active_operator_get...\n");
+      wmOperator *active_op = context_active_operator_get(C);
+      if (active_op && active_op != op) {
+        target_op = active_op;
+        printf("[GLYPH PICKER INVOKE] Using active operator %p (idname='%s')\n",
+               (void*)target_op, target_op->idname ? target_op->idname : "NULL");
+      }
+    }
+    else {
+      printf("[GLYPH PICKER INVOKE] Explicit target provided but no live operator found; "
+             "skipping active-operator fallback\n");
+    }
+  }
+
+  printf("[GLYPH PICKER INVOKE] Final target_op = %p\n", (void*)target_op);
+
+  /* Create popup data with both picker op and target op */
   GlyphGridPopupData *popup_data = new GlyphGridPopupData(
-      op, std::move(glyphs), initial_category, all_categories);
+      op, target_op, target_op_properties, std::move(glyphs), initial_category, all_categories);
 
   /* Create and show popup */
   PopupBlockHandle *handle = popup_block_create(
@@ -1622,6 +1742,7 @@ void WM_OT_glyph_picker_grid(wmOperatorType *ot)
    RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Search string");
    RNA_def_string(ot->srna, "target_property", nullptr, 256, "Target Property", "RNA path to property that will receive the glyph hex code");
    RNA_def_string(ot->srna, "target_operator_ptr", nullptr, 64, "Target Operator Pointer", "Internal: pointer to target operator properties");
+   RNA_def_string(ot->srna, "target_operator_properties_ptr", nullptr, 64, "Target Operator Properties Pointer", "Internal: pointer to target operator properties data");
  }
 
 /** \} */
@@ -2609,6 +2730,30 @@ static wmOperatorStatus centered_popup_invoke(bContext *C, wmOperator *op, const
   IDProperty *properties = nullptr;
   WM_operator_properties_alloc(&props_ptr, &properties, ot->idname);
   WM_operator_properties_sanitize(props_ptr, false);
+
+  /* Preserve invoke-time defaults for operators opened through this wrapper.
+   *
+   * `WM_operator_props_dialog_popup` shows operator properties directly and does not run the
+   * target operator's `invoke()`. `wm.category_tag_create` initializes a default glyph in its
+   * Python `invoke()` (`DEFAULT_TAG_GLYPH_HEX = "e866"`), so when opened via this wrapper the
+   * glyph/preview starts empty unless we seed the property here.
+   *
+   * Keep this targeted to avoid changing behavior of unrelated operators. */
+  if (STREQ(op_idname, "wm.category_tag_create")) {
+    PropertyRNA *glyph_prop = RNA_struct_find_property(props_ptr, "glyph");
+    if (glyph_prop && RNA_property_type(glyph_prop) == PROP_STRING) {
+      char glyph_value[16] = "";
+      RNA_property_string_get(props_ptr, glyph_prop, glyph_value);
+      if (glyph_value[0] == '\0') {
+        RNA_property_string_set(props_ptr, glyph_prop, "e866");
+      }
+    }
+
+    PropertyRNA *glyph_search_prop = RNA_struct_find_property(props_ptr, "glyph_search");
+    if (glyph_search_prop && RNA_property_type(glyph_search_prop) == PROP_STRING) {
+      RNA_property_string_set(props_ptr, glyph_search_prop, "");
+    }
+  }
 
   /* Create operator for the popup dialog */
   wmOperator *target_op = MEM_new<wmOperator>(__func__);

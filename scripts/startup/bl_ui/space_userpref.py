@@ -2367,6 +2367,11 @@ class USERPREF_OT_category_tag_create(Operator):
         return {'CANCELLED'}
 
     def draw(self, context):
+        print(
+            f"[DEBUG CREATE_TAG draw] self={self!r}, "
+            f"name='{self.name}', category='{self.category}', glyph='{self.glyph}', "
+            f"glyph_search='{self.glyph_search}'"
+        )
         layout = self.layout
         layout.use_property_split = True
         layout.prop(self, "name")
@@ -2389,10 +2394,18 @@ class USERPREF_OT_category_tag_create(Operator):
         row.template_color_glyph_presets(self.properties, "color")
 
     def invoke(self, context, event):
+        print(
+            f"[DEBUG CREATE_TAG invoke] self={self!r}, "
+            f"incoming category='{self.category}', name='{self.name}'"
+        )
         context.window_manager.category_tag_glyph_hex = ""
         self.glyph_search = ""
         # Set default glyph for tags (not category glyph)
         self.glyph = DEFAULT_TAG_GLYPH_HEX
+        print(
+            f"[DEBUG CREATE_TAG invoke] prepared glyph='{self.glyph}', "
+            f"glyph_search='{self.glyph_search}', category='{self.category}'"
+        )
         return context.window_manager.invoke_props_dialog(self, width=405)
 
 

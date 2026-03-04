@@ -740,26 +740,15 @@ static wmOperatorStatus category_tab_color_preset_exec(bContext *C, wmOperator *
   float color[3];
   category_tab_color_preset_to_rgb(preset, color);
 
-  /* Find target operator through active button's RNA data */
-  ui::Button *active_but = context_active_but_get_respect_popup(C);
-  wmOperator *target_op = nullptr;
-  
-  if (active_but && active_but->rnapoin.data) {
-    /* Check if active button is part of an operator */
-    PointerRNA *ptr = &active_but->rnapoin;
-    if (ptr->type && RNA_struct_is_a(ptr->type, RNA_Operator)) {
-      target_op = static_cast<wmOperator*>(ptr->data);
-      printf("[COLOR_PRESET] Found target operator via button: %p (idname='%s')\n", 
-             (void*)target_op, target_op->idname ? target_op->idname : "NULL");
-    }
-  }
-  
+  /* Find target operator - the active operator in the popup block */
+  wmOperator *target_op = ui::context_active_operator_get(C);
+
   if (!target_op) {
-    printf("[COLOR_PRESET] No target operator found via button context!\n");
+    printf("[COLOR_PRESET] No active operator found!\n");
     return OPERATOR_CANCELLED;
   }
 
-  printf("[COLOR_PRESET] Setting color [%.2f,%.2f,%.2f] on operator '%s'\n", 
+  printf("[COLOR_PRESET] Setting color [%.2f,%.2f,%.2f] on operator '%s'\n",
          color[0], color[1], color[2], target_op->idname ? target_op->idname : "NULL");
 
   /* Set the color in the target operator */
@@ -781,17 +770,9 @@ static void SCREEN_OT_category_tab_color_preset(wmOperatorType *ot)
   ot->description = "Set category tab color from preset";
 
   ot->exec = category_tab_color_preset_exec;
-  /* Works when there's an active button with RNA data */
-  ot->poll = [](bContext *C) { 
-    /* Check if there's an active button with operator RNA data */
-    ui::Button *active_but = context_active_but_get_respect_popup(C);
-    if (active_but && active_but->rnapoin.data) {
-      PointerRNA *ptr = &active_but->rnapoin;
-      if (ptr->type && RNA_struct_is_a(ptr->type, RNA_Operator)) {
-        return true;
-      }
-    }
-    return false; 
+  /* Works when there's an active operator (category edit or tag create) */
+  ot->poll = [](bContext *C) {
+    return ui::context_active_operator_get(C) != nullptr;
   };
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;

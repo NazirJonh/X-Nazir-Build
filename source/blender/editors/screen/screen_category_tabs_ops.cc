@@ -315,6 +315,29 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     }
     /* Clear tags in WM override - this updates UI to show no tags selected */
     reset_item->tags[0] = '\0';
+
+#ifdef WITH_PYTHON
+    /* Also clear tags in Python _glyph_cache to ensure consistency */
+    /* When user clicks a tag button after Reset, toggle_category_tag_no_save
+     * reads from _glyph_cache, so it must be in sync with WM override */
+    PointerRNA wm_ptr = RNA_pointer_create_discrete(&wm->id, RNA_WindowManager, wm);
+    RNA_string_set(&wm_ptr, "category_tab_save_category", category);
+
+    const char *imports[] = {"bpy", nullptr};
+    char reset_tags_cmd[512];
+    BLI_snprintf(reset_tags_cmd,
+                 sizeof(reset_tags_cmd),
+                 "from bl_ui.space_userpref import set_category_tags\n"
+                 "import bpy\n"
+                 "wm = bpy.context.window_manager\n"
+                 "category = wm.category_tab_save_category\n"
+                 "wm.category_tab_save_category = ''\n"
+                 "if category:\n"
+                 "    set_category_tags(category, [], auto_save=False)\n",
+                 category);
+
+    BPY_run_string_exec(C, imports, reset_tags_cmd);
+#endif
   }
 
   /* Force redraw of the popup to update tag UI */

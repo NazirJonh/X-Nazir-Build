@@ -46,6 +46,48 @@ if not hasattr(bpy.types.WindowManager, "tag_context_menu_name"):
     )
 
 
+# View3D-local tag ordering cache used by Tag Order Management popover.
+# Intentionally separated from `space_userpref._tag_order_cache`.
+_view3d_tag_order_cache = []
+
+
+def _sync_view3d_tag_order_cache(wm):
+    """Synchronize View3D-local tag order cache with current WM tags."""
+    if not wm or not hasattr(wm, "category_tags"):
+        return []
+
+    current_names = [tag.name for tag in wm.category_tags]
+    if not current_names:
+        _view3d_tag_order_cache.clear()
+        return []
+
+    # Keep existing order for known tags.
+    synced_order = [name for name in _view3d_tag_order_cache if name in current_names]
+
+    # Append newly created tags at the end.
+    for name in current_names:
+        if name not in synced_order:
+            synced_order.append(name)
+
+    _view3d_tag_order_cache.clear()
+    _view3d_tag_order_cache.extend(synced_order)
+    return synced_order
+
+
+def _get_visible_tag_names_in_view3d_order(wm, mode_string):
+    """Return visible tag names sorted by View3D-local order cache."""
+    ordered_names = _sync_view3d_tag_order_cache(wm)
+    tag_by_name = {tag.name: tag for tag in wm.category_tags}
+
+    visible_names = []
+    for name in ordered_names:
+        tag = tag_by_name.get(name)
+        if tag and _is_tag_visible_in_mode(tag, mode_string):
+            visible_names.append(name)
+
+    return visible_names
+
+
 def _toggle_xray_operator(layout, context, text=None):
     # The X-ray toggle has to have special logic since it affects a different property in pose mode.
     # See #70433 and #58661.
@@ -1475,15 +1517,30 @@ class VIEW3D_UL_tag_order_list(UIList):
             return ([], [])
 
         mode_string = context.mode
-        filtered_flags = []
-        
-        for item in wm.category_tags:
-            if _is_tag_visible_in_mode(item, mode_string):
-                filtered_flags.append(self.bitflag_filter_item)
-            else:
-                filtered_flags.append(0)
+        visible_names = _get_visible_tag_names_in_view3d_order(wm, mode_string)
 
-        return (filtered_flags, [])
+        name_to_actual_index = {tag.name: i for i, tag in enumerate(wm.category_tags)}
+        visible_actual_indices = [
+            name_to_actual_index[name]
+            for name in visible_names
+            if name in name_to_actual_index
+        ]
+
+        filtered_flags = [0] * len(wm.category_tags)
+        for index in visible_actual_indices:
+            filtered_flags[index] = self.bitflag_filter_item
+
+        visible_index_set = set(visible_actual_indices)
+        hidden_actual_indices = [
+            i for i in range(len(wm.category_tags))
+            if i not in visible_index_set
+        ]
+
+        # Reorder visible items according to View3D-local cache;
+        # hidden items are kept after visible items.
+        new_order = visible_actual_indices + hidden_actual_indices
+
+        return (filtered_flags, new_order)
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         """Draw tag item with glyph and name, similar to Preferences list."""
@@ -1529,8 +1586,6 @@ class VIEW3D_OT_tag_move_up(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        from bl_ui.space_userpref import _tag_order_cache, _save_tag_order_only
-
         wm = context.window_manager
 
         if not hasattr(wm, 'category_tags_active_index'):
@@ -1545,32 +1600,33 @@ class VIEW3D_OT_tag_move_up(Operator):
 
         active_tag = wm.category_tags[actual_index]
         mode_string = context.mode
+        active_tag_name = active_tag.name
 
-        # Find the previous visible tag in the COLLECTION
-        visible_before_actual = actual_index - 1
-        while visible_before_actual >= 0:
-            if _is_tag_visible_in_mode(wm.category_tags[visible_before_actual], mode_string):
-                break
-            visible_before_actual -= 1
-
-        if visible_before_actual < 0:
+        visible_names = _get_visible_tag_names_in_view3d_order(wm, mode_string)
+        if active_tag_name not in visible_names:
             return {'FINISHED'}
 
-        tag_order = [t.name for t in wm.category_tags]
+        visible_index = visible_names.index(active_tag_name)
+        if visible_index <= 0:
+            return {'FINISHED'}
 
-        moved_tag_name = tag_order.pop(actual_index)
-        tag_order.insert(visible_before_actual, moved_tag_name)
+        target_name = visible_names[visible_index - 1]
 
-        _tag_order_cache.clear()
-        _tag_order_cache.extend(tag_order)
+        order_cache = _sync_view3d_tag_order_cache(wm)
+        try:
+            active_pos = order_cache.index(active_tag_name)
+            target_pos = order_cache.index(target_name)
+        except ValueError:
+            self.report({'ERROR'}, "Tag order cache mismatch")
+            return {'CANCELLED'}
 
-        tags = wm.category_tags
-        names_str = ','.join(tag_order)
-        tags.reorder_from_names(names_str)
+        moved_tag_name = order_cache.pop(active_pos)
+        order_cache.insert(target_pos, moved_tag_name)
 
-        wm.category_tags_active_index = visible_before_actual
+        _view3d_tag_order_cache.clear()
+        _view3d_tag_order_cache.extend(order_cache)
 
-        _save_tag_order_only()
+        wm.category_tags_active_index = actual_index
         context.area.tag_redraw()
 
         self.report({'INFO'}, f"Moved '{active_tag.name}' up")
@@ -1584,8 +1640,6 @@ class VIEW3D_OT_tag_move_down(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        from bl_ui.space_userpref import _tag_order_cache, _save_tag_order_only
-
         wm = context.window_manager
 
         if not hasattr(wm, 'category_tags_active_index'):
@@ -1600,32 +1654,34 @@ class VIEW3D_OT_tag_move_down(Operator):
 
         active_tag = wm.category_tags[actual_index]
         mode_string = context.mode
+        active_tag_name = active_tag.name
 
-        # Find the next visible tag in the COLLECTION
-        visible_after_actual = actual_index + 1
-        while visible_after_actual < len(wm.category_tags):
-            if _is_tag_visible_in_mode(wm.category_tags[visible_after_actual], mode_string):
-                break
-            visible_after_actual += 1
-
-        if visible_after_actual >= len(wm.category_tags):
+        visible_names = _get_visible_tag_names_in_view3d_order(wm, mode_string)
+        if active_tag_name not in visible_names:
             return {'FINISHED'}
 
-        tag_order = [t.name for t in wm.category_tags]
+        visible_index = visible_names.index(active_tag_name)
+        if visible_index >= (len(visible_names) - 1):
+            return {'FINISHED'}
 
-        moved_tag_name = tag_order.pop(actual_index)
-        tag_order.insert(visible_after_actual, moved_tag_name)
+        target_name = visible_names[visible_index + 1]
 
-        _tag_order_cache.clear()
-        _tag_order_cache.extend(tag_order)
+        order_cache = _sync_view3d_tag_order_cache(wm)
+        try:
+            active_pos = order_cache.index(active_tag_name)
+            target_pos = order_cache.index(target_name)
+        except ValueError:
+            self.report({'ERROR'}, "Tag order cache mismatch")
+            return {'CANCELLED'}
 
-        tags = wm.category_tags
-        names_str = ','.join(tag_order)
-        tags.reorder_from_names(names_str)
+        moved_tag_name = order_cache.pop(active_pos)
+        insert_index = target_pos if target_pos > active_pos else (target_pos + 1)
+        order_cache.insert(insert_index, moved_tag_name)
 
-        wm.category_tags_active_index = visible_after_actual
+        _view3d_tag_order_cache.clear()
+        _view3d_tag_order_cache.extend(order_cache)
 
-        _save_tag_order_only()
+        wm.category_tags_active_index = actual_index
         context.area.tag_redraw()
 
         self.report({'INFO'}, f"Moved '{active_tag.name}' down")
@@ -1728,11 +1784,10 @@ class VIEW3D_HT_tag_bar_tags(Header):
                 if tag_name:
                     active_tags_set.add(tag_name)
 
-        # Get _tag_order_cache from space_userpref
-        from bl_ui.space_userpref import _tag_order_cache
+        view3d_order_cache = _sync_view3d_tag_order_cache(wm)
         tags_sorted = self.get_tags_in_display_order(
             list(wm.category_tags),
-            list(_tag_order_cache) if _tag_order_cache else []
+            list(view3d_order_cache) if view3d_order_cache else []
         )
 
         # Create a row for tag buttons and filter toggle with compact spacing

@@ -32,6 +32,8 @@
 
 #include "BLT_translation.hh"
 
+#include "BKE_idprop.hh"
+
 namespace blender::ui {
 
 /* -------------------------------------------------------------------- */
@@ -118,6 +120,14 @@ struct GlyphButtonCallbackData {
   IDProperty *target_op_properties;
 };
 
+/* Callback data for default glyph search result buttons. */
+struct GlyphSearchResultCallbackData {
+  char *glyph_propname;
+  char *search_propname;
+  wmOperator *target_op;
+  IDProperty *target_op_properties;
+};
+
 /* Try to resolve the operator that owns the given OperatorProperties PointerRNA. */
 static wmOperator *glyph_find_operator_from_properties_ptr(const bContext *C, const PointerRNA *ptr)
 {
@@ -157,6 +167,128 @@ static wmOperator *glyph_find_operator_from_properties_ptr(const bContext *C, co
   }
 
   return nullptr;
+}
+
+/* Default callback for glyph search result buttons when no custom callback is provided. */
+static void glyph_search_result_default_cb(bContext *C, void *arg1, void *arg2)
+{
+  GlyphSearchResultCallbackData *data = static_cast<GlyphSearchResultCallbackData *>(arg1);
+  const char *glyph_unicode = static_cast<const char *>(arg2);
+
+  if (!data || !glyph_unicode || glyph_unicode[0] == '\0') {
+    if (glyph_unicode) {
+      MEM_delete_void(static_cast<void *>(const_cast<char *>(glyph_unicode)));
+    }
+    if (data) {
+      if (data->glyph_propname) {
+        MEM_delete_void(static_cast<void *>(data->glyph_propname));
+      }
+      if (data->search_propname) {
+        MEM_delete_void(static_cast<void *>(data->search_propname));
+      }
+      MEM_delete(data);
+    }
+    return;
+  }
+
+  const uint codepoint = BLI_str_utf8_as_unicode_safe(glyph_unicode);
+  if (codepoint == BLI_UTF8_ERR || codepoint > 0x10FFFF) {
+    MEM_delete_void(static_cast<void *>(const_cast<char *>(glyph_unicode)));
+    if (data->glyph_propname) {
+      MEM_delete_void(static_cast<void *>(data->glyph_propname));
+    }
+    if (data->search_propname) {
+      MEM_delete_void(static_cast<void *>(data->search_propname));
+    }
+    MEM_delete(data);
+    return;
+  }
+
+  char hex_code[16];
+  SNPRINTF(hex_code, "%x", codepoint);
+
+  const char *glyph_propname = (data->glyph_propname && data->glyph_propname[0] != '\0') ?
+                                   data->glyph_propname :
+                                   "glyph";
+
+  const char *search_propname = (data->search_propname && data->search_propname[0] != '\0') ?
+                                    data->search_propname :
+                                    "glyph_search";
+
+  wmOperator *target_op = data->target_op;
+  if (!target_op && data->target_op_properties) {
+    wmWindowManager *wm = CTX_wm_manager(C);
+    if (wm) {
+      for (wmOperator *op_iter = static_cast<wmOperator *>(wm->runtime->operators.last); op_iter;
+           op_iter = op_iter->prev)
+      {
+        if (op_iter && op_iter->properties == data->target_op_properties) {
+          target_op = op_iter;
+          break;
+        }
+      }
+    }
+  }
+
+  bool glyph_applied = false;
+
+  /* Primary path for invoke_props_dialog: write directly to captured operator IDProperties. */
+  if (data->target_op_properties && strchr(glyph_propname, '.') == nullptr &&
+      strchr(glyph_propname, '[') == nullptr)
+  {
+    IDProperty *idprop = IDP_GetPropertyFromGroup(data->target_op_properties, glyph_propname);
+    if (!idprop) {
+      idprop = IDP_NewString(hex_code, glyph_propname);
+      IDP_AddToGroup(data->target_op_properties, idprop);
+      glyph_applied = true;
+    }
+    else if (idprop->type == IDP_STRING) {
+      IDP_AssignString(idprop, hex_code);
+      glyph_applied = true;
+    }
+  }
+
+  if (!glyph_applied && target_op && target_op->ptr) {
+    PropertyRNA *glyph_prop = RNA_struct_find_property(target_op->ptr, glyph_propname);
+    if (glyph_prop) {
+      RNA_property_string_set(target_op->ptr, glyph_prop, hex_code);
+      RNA_property_update(C, target_op->ptr, glyph_prop);
+      glyph_applied = true;
+    }
+  }
+
+  if (glyph_applied && target_op && target_op->ptr) {
+    PropertyRNA *search_prop = RNA_struct_find_property(target_op->ptr, search_propname);
+    if (search_prop) {
+      RNA_property_string_set(target_op->ptr, search_prop, "");
+      RNA_property_update(C, target_op->ptr, search_prop);
+    }
+  }
+  else if (glyph_applied && data->target_op_properties && strchr(search_propname, '.') == nullptr &&
+           strchr(search_propname, '[') == nullptr)
+  {
+    IDProperty *search_idprop = IDP_GetPropertyFromGroup(data->target_op_properties, search_propname);
+    if (!search_idprop) {
+      search_idprop = IDP_NewString("", search_propname);
+      IDP_AddToGroup(data->target_op_properties, search_idprop);
+    }
+    else if (search_idprop->type == IDP_STRING) {
+      IDP_AssignString(search_idprop, "");
+    }
+  }
+
+  if (glyph_applied) {
+    WM_main_add_notifier(NC_WINDOW, nullptr);
+  }
+
+  MEM_delete_void(static_cast<void *>(const_cast<char *>(glyph_unicode)));
+  if (data->glyph_propname) {
+    MEM_delete_void(static_cast<void *>(data->glyph_propname));
+  }
+  if (data->search_propname) {
+    MEM_delete_void(static_cast<void *>(data->search_propname));
+  }
+  MEM_delete(data);
 }
 
 /* Callback function for the default "More glyphs" button */
@@ -539,6 +671,7 @@ void uiTemplateGlyphPreview(Layout *layout,
 static void ui_template_glyph_search_results_impl(Layout *layout,
                                                   bContext *C,
                                                   PointerRNA *ptr,
+                                                  const char *glyph_propname,
                                                   const char *search_propname,
                                                   const char *category,
                                                   const char *color_propname,
@@ -629,12 +762,36 @@ static void ui_template_glyph_search_results_impl(Layout *layout,
       /* Set tooltip with glyph name */
       result_but->tip_quick_func = [glyph_name](const Button *) { return glyph_name; };
 
-      /* Add callback if provided */
+      /* Add callback if provided, otherwise use default behavior. */
       if (result_callback) {
         /* Copy glyph unicode for callback - will be freed by callback */
         char *glyph_unicode_copy = MEM_new_array<char>(glyph_unicode.length() + 1, __func__);
         strcpy(glyph_unicode_copy, glyph_unicode.c_str());
         button_func_set(result_but, result_callback, callback_user_data, glyph_unicode_copy);
+      }
+      else {
+        GlyphSearchResultCallbackData *default_data = MEM_new<GlyphSearchResultCallbackData>(__func__);
+
+        const char *target_glyph_propname =
+            (glyph_propname && glyph_propname[0] != '\0') ? glyph_propname : "glyph";
+        const char *target_search_propname =
+            (search_propname && search_propname[0] != '\0') ? search_propname : "glyph_search";
+
+        default_data->glyph_propname = MEM_new_array<char>(strlen(target_glyph_propname) + 1,
+                                                           __func__);
+        strcpy(default_data->glyph_propname, target_glyph_propname);
+
+        default_data->search_propname = MEM_new_array<char>(strlen(target_search_propname) + 1,
+                                                            __func__);
+        strcpy(default_data->search_propname, target_search_propname);
+
+        default_data->target_op = glyph_find_operator_from_properties_ptr(C, ptr);
+        default_data->target_op_properties = static_cast<IDProperty *>(ptr->data);
+
+        char *glyph_unicode_copy = MEM_new_array<char>(glyph_unicode.length() + 1, __func__);
+        strcpy(glyph_unicode_copy, glyph_unicode.c_str());
+
+        button_func_set(result_but, glyph_search_result_default_cb, default_data, glyph_unicode_copy);
       }
     }
   }
@@ -649,7 +806,7 @@ void uiTemplateGlyphSearchResults(Layout *layout,
                                   const char *color_propname,
                                   int max_results)
 {
-  ui_template_glyph_search_results_impl(layout, C, ptr, search_propname, category,
+  ui_template_glyph_search_results_impl(layout, C, ptr, nullptr, search_propname, category,
                                         color_propname, max_results, nullptr, nullptr);
 }
 
@@ -665,7 +822,7 @@ void uiTemplateGlyphSearchResultsWithCallback(Layout *layout,
                                               ButtonHandleFunc result_callback,
                                               void *callback_user_data)
 {
-  ui_template_glyph_search_results_impl(layout, C, ptr, search_propname, category,
+  ui_template_glyph_search_results_impl(layout, C, ptr, nullptr, search_propname, category,
                                         color_propname, max_results, result_callback, callback_user_data);
 }
 }  // namespace internal
@@ -713,7 +870,7 @@ static void ui_template_glyph_selector_impl(Layout *layout,
 
   /* Search results (only if search is enabled and search_propname is provided) */
   if (show_search && search_propname) {
-    ui_template_glyph_search_results_impl(layout, C, ptr, search_propname, category,
+    ui_template_glyph_search_results_impl(layout, C, ptr, glyph_propname, search_propname, category,
                                           color_propname, 50, result_callback, callback_user_data);
   }
 

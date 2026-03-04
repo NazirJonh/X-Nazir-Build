@@ -1187,9 +1187,82 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
   /* Create RNA pointer for window manager */
   PointerRNA wm_ptr = RNA_pointer_create_discrete(&wm->id, RNA_WindowManager, wm);
 
-  /* Calculate UIList size - show all tags but max 16 visible rows */
-  int tag_count = BLI_listbase_count(&wm->category_tags);
-  int visible_rows = tag_count > 16 ? 16 : tag_count;
+  /* Calculate UIList size - count visible tags for current mode + 1 extra slot */
+  const char *mode_string = CTX_data_mode_string(C);
+
+  /* Calculate mode_bit from mode_string */
+  int mode_bit = 0;
+  if (STREQ(mode_string, "OBJECT")) {
+    mode_bit = 0;
+  }
+  else if (STREQ(mode_string, "EDIT_MESH")) {
+    mode_bit = 1;
+  }
+  else if (STREQ(mode_string, "SCULPT")) {
+    mode_bit = 2;
+  }
+  else if (STREQ(mode_string, "PAINT_VERTEX")) {
+    mode_bit = 3;
+  }
+  else if (STREQ(mode_string, "PAINT_WEIGHT")) {
+    mode_bit = 4;
+  }
+  else if (STREQ(mode_string, "PAINT_TEXTURE")) {
+    mode_bit = 5;
+  }
+  else if (STREQ(mode_string, "PAINT_IMAGE")) {
+    mode_bit = 6;
+  }
+  else if (STREQ(mode_string, "SCULPT_CURVES")) {
+    mode_bit = 7;
+  }
+  else if (STREQ(mode_string, "EDIT_CURVES")) {
+    mode_bit = 8;
+  }
+  else if (STREQ(mode_string, "EDIT_ARMATURE")) {
+    mode_bit = 9;
+  }
+  else if (STREQ(mode_string, "EDIT_GPENCIL")) {
+    mode_bit = 10;
+  }
+  else if (STREQ(mode_string, "EDIT_TEXT")) {
+    mode_bit = 11;
+  }
+  else if (STREQ(mode_string, "POSE")) {
+    mode_bit = 12;
+  }
+  else if (STREQ(mode_string, "PARTICLE")) {
+    mode_bit = 13;
+  }
+  else {
+    mode_bit = 0; /* Default to OBJECT mode */
+  }
+
+  /* Count visible tags (with glyph + matching mode) */
+  int visible_tag_count = 0;
+  for (const CategoryTagDef *tag_def = static_cast<const CategoryTagDef *>(wm->category_tags.first);
+       tag_def;
+       tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
+  {
+    /* Check if tag has glyph */
+    if (tag_def->glyph[0] == '\0') {
+      continue;
+    }
+
+    /* Check if tag is active for current mode */
+    if (tag_def->mode_flags == 0 || (tag_def->mode_flags & (1 << mode_bit))) {
+      visible_tag_count++;
+    }
+  }
+
+  /* visible_rows = visible count + 1 extra slot, max 16 */
+  int visible_rows = visible_tag_count + 1;
+  if (visible_rows > 16) {
+    visible_rows = 16;
+  }
+  if (visible_rows < 2) {
+    visible_rows = 2; /* Minimum 2 rows for usability */
+  }
 
   /* UIList with tags */
   ui::Layout &row = layout.row(false);
@@ -1243,11 +1316,6 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
                 ICON_REMOVE,
                 wm::OpCallContext::InvokeDefault,
                 UI_ITEM_NONE);
-
-  button_col.separator();
-
-  /* Context menu button */
-  button_col.op("view3d.tag_context_menu", "", ICON_DOWNARROW_HLT, wm::OpCallContext::InvokeDefault, UI_ITEM_NONE);
 
   button_col.separator();
 

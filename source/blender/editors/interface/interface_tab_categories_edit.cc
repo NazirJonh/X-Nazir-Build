@@ -1654,6 +1654,9 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
   /* Set up live update callback - this is the key for instant preview */
   block_func_handle_set(block, category_tab_edit_live_update_cb, op);
 
+  /* Set active operator for the block - enables color preset buttons to find this operator */
+  block_set_active_operator(block, op, false);
+
   /* Create layout */
   Layout &layout = block_layout(block,
                                          LayoutDirection::Vertical,

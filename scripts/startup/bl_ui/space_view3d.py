@@ -1486,38 +1486,37 @@ class VIEW3D_UL_tag_order_list(UIList):
         return (filtered_flags, [])
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        """Draw tag item with glyph and name, similar to Preferences list."""
         layout.emboss = 'NONE'
 
-        visible_index = 0
-        wm = context.window_manager
-        if wm and wm.category_tags:
-            mode_string = context.mode
-            for check_item in wm.category_tags:
-                if _is_tag_visible_in_mode(check_item, mode_string):
-                    if check_item == item:
-                        break
-                    visible_index += 1
+        # Use split layout like in Preferences for consistent appearance
+        split = layout.split(factor=0.15, align=True)
 
-        layout.label(text=f"{visible_index + 1}.", icon='NONE')
-
+        # Left: Glyph (colored)
+        col_glyph = split.column()
         if item.glyph:
             try:
+                # Convert hex string to glyph character
                 glyph_val = int(item.glyph, 16) if item.glyph.startswith('0x') or item.glyph.startswith('0X') else int(item.glyph, 16)
                 if 0 < glyph_val <= 0x10FFFF:
-                    import ctypes
                     glyph_char = chr(glyph_val)
-                    layout.label(text=glyph_char, icon='NONE')
+                    col_glyph.colored_label(
+                        text=glyph_char,
+                        icon='NONE',
+                        color_r=item.color[0],
+                        color_g=item.color[1],
+                        color_b=item.color[2]
+                    )
                 else:
-                    layout.label(text=item.name, icon='TAG')
+                    col_glyph.label(text="", icon='DOT')
             except:
-                layout.label(text=item.name, icon='TAG')
+                col_glyph.label(text="", icon='DOT')
         else:
-            layout.label(text=item.name, icon='TAG')
+            col_glyph.label(text="", icon='DOT')
 
-        layout.label(text=item.name, icon='NONE')
-
-        if item.mode_flags:
-            layout.label(text=f"0x{item.mode_flags:X}", icon='NONE')
+        # Right: Name
+        col_name = split.column()
+        col_name.label(text=item.name, translate=False)
 
     def invoke(self, context, event):
         pass
@@ -1785,10 +1784,6 @@ class VIEW3D_HT_tag_bar_tags(Header):
                 depress=depress,
                 center_glyph=center_glyph,
                 tooltip=tag.name,
-                # NEW PARAMETERS (after C++ changes):
-                context_menu_operator="view3d.tag_context_menu",
-                operator_param_name="tag_name",
-                operator_param_value=tag.name,
             )
 
             # Add separator between tag buttons (but not after the last one)

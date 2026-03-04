@@ -65,6 +65,7 @@ set(SRC
   templates/interface_template_color_management.cc
   templates/interface_template_color_picker.cc
   templates/interface_template_color_glyph.cc
+  templates/interface_template_glyph.cc
   templates/interface_template_color_ramp.cc
   templates/interface_template_component_menu.cc
   templates/interface_template_constraint.cc

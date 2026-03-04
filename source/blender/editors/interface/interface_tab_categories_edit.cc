@@ -72,6 +72,11 @@
 
 namespace blender::ui {
 
+/* Import internal template functions with callback support */
+using internal::uiTemplateGlyphInputRowWithCallback;
+using internal::uiTemplateGlyphSearchResultsWithCallback;
+using internal::uiTemplateGlyphSelectorWithCallback;
+
 /* -------------------------------------------------------------------- */
 /** \name Static Variables for Preview and State
  * \{ */
@@ -817,7 +822,7 @@ static std::string decode_json_unicode(const char *str)
   return result;
 }
 
-static blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
+blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
     bContext *C, const char *query, const char *category, int max_results)
 {
   blender::Vector<std::pair<std::string, std::string>> results;
@@ -1076,6 +1081,9 @@ static void glyph_search_result_button_cb(bContext *C, void *arg1, void *arg2)
 
   /* Trigger redraw */
   WM_main_add_notifier(NC_WINDOW, nullptr);
+
+  /* Free the glyph unicode copy that was allocated with MEM_new_array */
+  MEM_delete_void(static_cast<void *>(const_cast<char *>(glyph_unicode)));
 }
 
 /* -------------------------------------------------------------------- */
@@ -1159,6 +1167,7 @@ class GlyphCategoryTreeView : public AbstractTreeView {
  private:
   void send_redraw_notifier(const bContext &C)
   {
+    UNUSED_VARS(C);
     WM_main_add_notifier(NC_WINDOW, nullptr);
   }
 };
@@ -1263,16 +1272,23 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
   /* Set the selection callback */
   grid_view->set_on_glyph_select_fn(
       [popup_data](bContext &C, const std::string &unicode) {
+        printf("[GLYPH GRID SELECT] === Glyph selected from grid ===\n");
+        printf("[GLYPH GRID SELECT] unicode = '%s'\n", unicode.c_str());
+
         /* Convert unicode to hex codepoint */
         char hex_code[16] = "";
         utf8_to_hex_codepoint(unicode.c_str(), hex_code, sizeof(hex_code));
+        printf("[GLYPH GRID SELECT] hex_code = '%s'\n", hex_code);
 
         /* Set the glyph property of the operator itself */
         RNA_string_set(popup_data->op->ptr, "glyph", hex_code);
+        printf("[GLYPH GRID SELECT] Set picker op->ptr['glyph'] = '%s'\n", hex_code);
 
         /* Set the target property if specified (RNA path) */
         char target_prop[256] = "";
         RNA_string_get(popup_data->op->ptr, "target_property", target_prop);
+        printf("[GLYPH GRID SELECT] target_property = '%s'\n", target_prop[0] != '\0' ? target_prop : "(empty)");
+
         if (target_prop[0] != '\0') {
           const char *target_prop_path = target_prop;
           if (STRPREFIX(target_prop_path, "window_manager.")) {
@@ -1286,18 +1302,45 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
           wmOperator *target_op = nullptr;
           char target_op_ptr_str[64] = "";
           RNA_string_get(popup_data->op->ptr, "target_operator_ptr", target_op_ptr_str);
+          printf("[GLYPH GRID SELECT] target_operator_ptr = '%s'\n", target_op_ptr_str[0] != '\0' ? target_op_ptr_str : "(empty)");
+
           if (target_op_ptr_str[0] != '\0') {
             const uintptr_t target_op_ptr = uintptr_t(strtoull(target_op_ptr_str, nullptr, 10));
+            printf("[GLYPH GRID SELECT] target_op_ptr (numeric) = %llu\n", (unsigned long long)target_op_ptr);
             if (target_op_ptr != 0) {
               wmWindowManager *wm = CTX_wm_manager(&C);
+              printf("[GLYPH GRID SELECT] Searching for operator in wm->runtime->operators...\n");
+              int op_count = 0;
               for (wmOperator *op_iter = static_cast<wmOperator *>(wm->runtime->operators.last);
                    op_iter;
                    op_iter = op_iter->prev)
               {
+                op_count++;
+                printf("[GLYPH GRID SELECT]   Checking op #%d: %p (idname='%s')\n",
+                       op_count, (void *)op_iter, op_iter->idname ? op_iter->idname : "NULL");
                 if ((uintptr_t)op_iter == target_op_ptr) {
                   target_op = op_iter;
+                  printf("[GLYPH GRID SELECT]   FOUND target_op! idname='%s'\n", 
+                         target_op->idname ? target_op->idname : "NULL");
                   break;
                 }
+              }
+              printf("[GLYPH GRID SELECT] Total operators checked: %d\n", op_count);
+            }
+          }
+          else {
+            printf("[GLYPH GRID SELECT] WARNING: target_operator_ptr is empty, trying fallback...\n");
+            /* Fallback: try context_active_operator_get but with validation */
+            wmOperator *fallback_op = context_active_operator_get(&C);
+            if (fallback_op) {
+              printf("[GLYPH GRID SELECT] Fallback found active operator: %p (idname='%s')\n",
+                     (void*)fallback_op, fallback_op->idname ? fallback_op->idname : "NULL");
+              /* Only use fallback if it's a reasonable target (category edit or tag create) */
+              if (fallback_op->idname && 
+                  (STREQ(fallback_op->idname, "SCREEN_OT_category_tab_edit_dialog") ||
+                   STREQ(fallback_op->idname, "WM_OT_category_tag_create"))) {
+                target_op = fallback_op;
+                printf("[GLYPH GRID SELECT] Using fallback operator\n");
               }
             }
           }
@@ -1308,48 +1351,88 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
                                                           (target_prop_path + strlen("active_operator.")) :
                                                           target_prop_path;
 
+          printf("[GLYPH GRID SELECT] target_prop_path = '%s'\n", target_prop_path);
+          printf("[GLYPH GRID SELECT] is_active_operator_path = %s\n", is_active_operator_path ? "true" : "false");
+          printf("[GLYPH GRID SELECT] target_prop_path_for_operator = '%s'\n", target_prop_path_for_operator);
+          printf("[GLYPH GRID SELECT] target_op = %p\n", (void *)target_op);
+
           if (target_op && target_op->ptr) {
+            printf("[GLYPH GRID SELECT] Attempting RNA_path_resolve_full on target_op->ptr...\n");
+            printf("[GLYPH GRID SELECT] Target operator: %p, idname='%s'\n", 
+                   (void*)target_op, target_op->idname ? target_op->idname : "NULL");
+            printf("[GLYPH GRID SELECT] Property path: '%s'\n", target_prop_path_for_operator);
+            
             if (RNA_path_resolve_full(
                     target_op->ptr, target_prop_path_for_operator, &target_ptr, &prop, &index))
             {
+              printf("[GLYPH GRID SELECT] SUCCESS: Resolved property on target_op!\n");
+              printf("[GLYPH GRID SELECT] Setting '%s' = '%s' on operator '%s'\n", 
+                     target_prop_path_for_operator, hex_code, 
+                     target_op->idname ? target_op->idname : "NULL");
               RNA_property_string_set(&target_ptr, prop, hex_code);
               RNA_property_update(&C, &target_ptr, prop);
               resolved = true;
             }
+            else {
+              printf("[GLYPH GRID SELECT] FAILED: RNA_path_resolve_full returned false\n");
+            }
+          }
+          else {
+            printf("[GLYPH GRID SELECT] Cannot resolve: target_op=%p, target_op->ptr=%p\n",
+                   (void *)target_op, target_op ? (void *)target_op->ptr : nullptr);
           }
 
-          if (STRPREFIX(target_prop_path, "active_operator.")) {
+          if (STRPREFIX(target_prop_path, "active_operator.") && !resolved) {
+            printf("[GLYPH GRID SELECT] Trying active_operator path...\n");
             const char *active_op_path = target_prop_path + strlen("active_operator.");
-            if (!resolved) {
-              wmOperator *active_op = context_active_operator_get(&C);
-              if (active_op && active_op->ptr) {
-                if (RNA_path_resolve_full(active_op->ptr, active_op_path, &target_ptr, &prop, &index))
-                {
-                  RNA_property_string_set(&target_ptr, prop, hex_code);
-                  RNA_property_update(&C, &target_ptr, prop);
-                  resolved = true;
-                }
+            wmOperator *active_op = context_active_operator_get(&C);
+            printf("[GLYPH GRID SELECT] context_active_operator_get returned: %p\n", (void *)active_op);
+            if (active_op) {
+              printf("[GLYPH GRID SELECT] active_op->idname = '%s'\n", active_op->idname ? active_op->idname : "NULL");
+            }
+            if (active_op && active_op->ptr) {
+              if (RNA_path_resolve_full(active_op->ptr, active_op_path, &target_ptr, &prop, &index))
+              {
+                printf("[GLYPH GRID SELECT] SUCCESS: Resolved via active_operator!\n");
+                RNA_property_string_set(&target_ptr, prop, hex_code);
+                RNA_property_update(&C, &target_ptr, prop);
+                resolved = true;
               }
             }
           }
           if (!resolved) {
             /* Try resolving from window manager as root. */
+            printf("[GLYPH GRID SELECT] Trying window manager root path...\n");
             wmWindowManager *wm = CTX_wm_manager(&C);
             PointerRNA root_ptr = RNA_id_pointer_create(&wm->id);
             if (RNA_path_resolve_full(&root_ptr, target_prop_path, &target_ptr, &prop, &index)) {
+              printf("[GLYPH GRID SELECT] SUCCESS: Resolved via WM root!\n");
               RNA_property_string_set(&target_ptr, prop, hex_code);
               RNA_property_update(&C, &target_ptr, prop);
               resolved = true;
+            }
+            else {
+              printf("[GLYPH GRID SELECT] FAILED: Could not resolve via WM root\n");
             }
           }
 
           if (!resolved) {
             /* Fallback: try resolving from the picker operator itself (relative path). */
+            printf("[GLYPH GRID SELECT] Trying fallback: picker operator relative path...\n");
             if (RNA_path_resolve_full(popup_data->op->ptr, target_prop_path, &target_ptr, &prop, &index)) {
+              printf("[GLYPH GRID SELECT] SUCCESS: Resolved via picker operator!\n");
               RNA_property_string_set(&target_ptr, prop, hex_code);
               RNA_property_update(&C, &target_ptr, prop);
             }
+            else {
+              printf("[GLYPH GRID SELECT] FAILED: Could not resolve via picker operator\n");
+            }
           }
+
+          printf("[GLYPH GRID SELECT] Final resolved = %s\n", resolved ? "true" : "false");
+        }
+        else {
+          printf("[GLYPH GRID SELECT] No target_property specified, skipping target update\n");
         }
 
         /* Clear the search field */
@@ -1367,6 +1450,7 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
 
         /* Trigger redraw */
         WM_main_add_notifier(NC_WINDOW, nullptr);
+        printf("[GLYPH GRID SELECT] === Glyph select callback END ===\n");
       });
 
   /* Add grid view to block and build it */
@@ -1496,6 +1580,12 @@ static wmOperatorStatus glyph_picker_grid_invoke(bContext *C,
                  "%llu",
                  (unsigned long long)(uintptr_t)active_op);
     RNA_string_set(op->ptr, "target_operator_ptr", target_op_ptr_str);
+    printf("[GLYPH PICKER INVOKE] Set target_operator_ptr = '%s' for active_op: %p (idname='%s')\n",
+           target_op_ptr_str, (void*)active_op, active_op->idname ? active_op->idname : "NULL");
+  }
+  else {
+    printf("[GLYPH PICKER INVOKE] No valid active operator found (active_op=%p, op=%p)\n",
+           (void*)active_op, (void*)op);
   }
 
   /* Create popup data */
@@ -1665,125 +1755,19 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
     /* Properties for glyph search and code */
     Layout &col_glyph = icon_panel.body->column(false);
 
-    /* Main row: left side has centered Search+More, right side has Code+Paste */
-    Layout &main_row = col_glyph.row(false);
-    Layout &split_main = main_row.split(0.69f, false);
-
-    /* Left side: Search Glyph + More glyphs - centered */
-    Layout &left_side = split_main.row(true);
-    left_side.alignment_set(LayoutAlign::Right);
-
-    left_side.prop(op->ptr, "glyph_search", UI_ITEM_NONE, IFACE_("Glyph"), ICON_VIEWZOOM);
-
-    Block *more_glyphs_block = left_side.block();
-    block_layout_set_current(more_glyphs_block, &left_side);
-
-    char glyph_btn[8] = "";
-    process_glyph_input("f02f", glyph_btn, sizeof(glyph_btn));
-    Button *glyph_but = uiDefBut(more_glyphs_block,
-                                      ButtonType::But,
-                                      glyph_btn,
-                                      0,
-                                      0,
-                                      UI_UNIT_X * 1.5f,
-                                      UI_UNIT_Y,
-                                      nullptr,
-                                      0,
-                                      0,
-                                      std::nullopt);
-    glyph_but->tip_quick_func = [](const Button *) { return "More glyphs"; };
-    button_func_set(glyph_but, glyph_more_glyphs_button_cb, op, nullptr);
-    (void)glyph_but;
-
-    /* Right side: Code field + Paste button - right aligned */
-    Layout &right_side = split_main.row(true);
-    right_side.alignment_set(LayoutAlign::Right);
-
-    /* Display search results if glyph_search field is not empty */
-    char glyph_search_query[64] = "";
-    RNA_string_get(op->ptr, "glyph_search", glyph_search_query);
-
-    if (glyph_search_query[0] != '\0') {
-      /* Create a row for search results - same style as color presets */
-      Layout &results_row = col_glyph.row(true);
-      results_row.alignment_set(LayoutAlign::Center);
-      results_row.emboss_set(EmbossType::Pulldown);
-
-      /* Get block for creating buttons */
-      Block *result_block = results_row.block();
-      block_layout_set_current(result_block, &results_row);
-
-      /* Call Python API to search glyphs */
-      char category[64];
-      RNA_string_get(op->ptr, "category", category);
-      auto search_results = glyph_search_call_python(C, glyph_search_query, category, 50);
-
-      /* Get category color for tinting glyph buttons.
-       * If color is (0.0, 0.0, 0.0), use the theme text color for active tab instead,
-       * similar to how preview glyph and tabs render glyphs without custom color. */
-      float category_color[3];
-      RNA_float_get_array(op->ptr, "color", category_color);
-
-      /* Convert float RGB (0.0-1.0) to uchar RGB (0-255) for button_color_set */
-      uchar category_color_uchar[4];
-      if (is_zero_v3(category_color)) {
-        /* No custom color - use active tab text color */
-        theme::get_color_3ubv(TH_TAB_TEXT_HI, category_color_uchar);
-        category_color_uchar[3] = 255; /* Alpha */
-      }
-      else {
-        /* Use custom category color */
-        category_color_uchar[0] = uchar(category_color[0] * 255.0f);
-        category_color_uchar[1] = uchar(category_color[1] * 255.0f);
-        category_color_uchar[2] = uchar(category_color[2] * 255.0f);
-        category_color_uchar[3] = 255; /* Alpha */
-      }
-
-      if (search_results.is_empty()) {
-        /* No results found */
-        results_row.label(IFACE_("No glyphs found"), ICON_NONE);
-      }
-      else {
-        /* Create buttons for each search result - same style as color presets */
-        for (const auto &result : search_results) {
-          const std::string &glyph_unicode = result.first;
-          const std::string &glyph_name = result.second;
-
-          /* Create button with glyph - same size and style as color presets */
-          Button *result_but = uiDefBut(result_block,
-                                             ButtonType::But,
-                                             glyph_unicode.c_str(),
-                                             0,
-                                             0,
-                                             UI_UNIT_X * 1.5f,
-                                             UI_UNIT_Y,
-                                             nullptr,
-                                             0,
-                                             0,
-                                             std::nullopt);
-
-          /* Apply category color to the button - same as color presets */
-          button_color_set(result_but, category_color_uchar);
-          result_but->drawflag |= BUT_TEXT_USE_COL;
-
-          /* Set tooltip with glyph name */
-          result_but->tip_quick_func = [glyph_name](const Button *) { return glyph_name; };
-
-          /* Add callback to set the glyph when clicked */
-          char *glyph_unicode_copy = MEM_new_array<char>(glyph_unicode.length() + 1, __func__);
-          strcpy(glyph_unicode_copy, glyph_unicode.c_str());
-          button_func_set(result_but, glyph_search_result_button_cb, op, glyph_unicode_copy);
-        }
-      }
-    }
-
-    /* Code field with Paste button - in right side of split */
-    Layout &row_glyph = right_side.row(true);
-    row_glyph.prop(op->ptr, "glyph", UI_ITEM_NONE, IFACE_("Code"), ICON_NONE);
-    Layout &row_glyph_btn = row_glyph.row(true);
-    /* Paste button - allows pasting hex code from clipboard (Ctrl+V) */
-    PointerRNA paste_ptr = row_glyph_btn.op("SCREEN_OT_category_tab_paste_glyph", "", ICON_PASTEDOWN);
-    RNA_string_set(&paste_ptr, "category", category);
+    uiTemplateGlyphSelectorWithCallback(&col_glyph,
+                                        C,
+                                        op->ptr,
+                                        "glyph",
+                                        "glyph_search",
+                                        "color",
+                                        category,
+                                        true,
+                                        true,
+                                        true,
+                                        glyph_more_glyphs_button_cb,
+                                        op,
+                                        glyph_search_result_button_cb);
 
     /* Validate glyph input and show warning if invalid */
     char glyph_raw_check[16] = "";
@@ -1834,145 +1818,6 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
       col_glyph.label("Invalid hex code (use 1-6 hex digits, e.g., e5d2)", ICON_ERROR);
     }
 
-    icon_panel.body->separator();
-
-    /* Glyph Preview - show current glyph centered with custom color */
-    char glyph_raw[16] = "";
-    RNA_string_get(op->ptr, "glyph", glyph_raw);
-
-    /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character.
-     * Only process if input is valid hex. */
-    char glyph[8] = "";
-    if (glyph_valid && glyph_raw[0] != '\0') {
-      process_glyph_input(glyph_raw, glyph, sizeof(glyph));
-    }
-
-    /* Get custom color */
-    float color_preview[3];
-    RNA_float_get_array(op->ptr, "color", color_preview);
-
-    /* Get the proper glyph for preview.
-     * Priority:
-     * 1. If glyph property is set, use the processed glyph.
-     * 2. If search has results, use the first found glyph.
-     * 3. Otherwise, use panel_category_glyph_lookup to get the default/mapped glyph.
-     */
-    const char *preview_glyph = nullptr;
-
-    if (glyph[0] != '\0') {
-      /* User has set a custom glyph - use the processed glyph */
-      preview_glyph = glyph;
-    }
-    else {
-      /* Check if there's an active search with results */
-      char glyph_search_query[64] = "";
-      RNA_string_get(op->ptr, "glyph_search", glyph_search_query);
-
-      if (glyph_search_query[0] != '\0') {
-        /* Search is active - get first result for preview */
-        auto search_results = glyph_search_call_python(C, glyph_search_query, category, 1);
-        if (!search_results.is_empty()) {
-          /* Use first search result for preview */
-          const std::string &first_glyph_unicode = search_results[0].first;
-          if (!first_glyph_unicode.empty() && first_glyph_unicode.length() < sizeof(category_tab_preview_glyph)) {
-            strcpy(category_tab_preview_glyph, first_glyph_unicode.c_str());
-            preview_glyph = category_tab_preview_glyph;
-            printf("[GLYPH PREVIEW] Using search result: %s\n", first_glyph_unicode.c_str());
-          }
-        }
-      }
-
-      /* If no glyph from search, lookup the default glyph for this category */
-      if (preview_glyph == nullptr) {
-        bool is_fallback_letter = false;
-        preview_glyph = panel_category_glyph_lookup(wm, category, nullptr, &is_fallback_letter, nullptr);
-
-        /* If lookup returns nullptr (glyph was explicitly cleared), use fallback letter */
-        if (preview_glyph == nullptr && is_fallback_letter) {
-          const int first_char_size = BLI_str_utf8_size_safe(category);
-          if (first_char_size > 0 && first_char_size < sizeof(category_tab_preview_glyph)) {
-            memcpy(category_tab_preview_glyph, category, first_char_size);
-            category_tab_preview_glyph[first_char_size] = '\0';
-            preview_glyph = category_tab_preview_glyph;  /* Mark as handled */
-          }
-        }
-      }
-    }
-
-    /* Initialize preview buffers (will be updated by live update callback) */
-    if (preview_glyph) {
-      STRNCPY(category_tab_preview_glyph, preview_glyph);
-    }
-    else {
-      category_tab_preview_glyph[0] = '\0';
-    }
-    copy_v3_v3(category_tab_preview_color, color_preview);
-
-    /* Create centered row for preview */
-    Layout &preview_row = icon_panel.body->row(false);
-    preview_row.alignment_set(LayoutAlign::Center);
-
-    /* Get block and create preview button */
-    Block *preview_block = preview_row.block();
-    const int preview_size = int(style->widget.points * UI_SCALE_FAC * 3.0f);
-
-    /* Create preview button using Extra type with custom draw callback.
-     * This allows full control over glyph size and positioning.
-     * Note: Background will be drawn, but glyph will be drawn on top. */
-    Button *preview_but = uiDefBut(preview_block,
-                                       ButtonType::Extra,
-                                       "",
-                                       0,
-                                       0,
-                                       preview_size,
-                                       preview_size,
-                                       nullptr,
-                                       0.0f,
-                                       0.0f,
-                                       std::nullopt);
-
-    /* Save pointer to preview button for live updates */
-    category_tab_preview_button = preview_but;
-
-    /* Set custom draw callback to render glyph with color */
-    button_func_drawextra_set(preview_block, [style](const bContext *C, rcti *rect) {
-      /* Get font and set larger size for preview (2.5x the tab size) */
-      const int fontid = BLF_default();
-      const float font_size = style->widget.points * UI_SCALE_FAC * 1.5f;
-      BLF_size(fontid, font_size);
-
-      /* Set custom color from file-scope static buffer (updated by live update callback).
-       * If color is (0.0, 0.0, 0.0), use the theme text color instead, similar to how tabs
-       * render glyphs without custom color. The data remains (0.0, 0.0, 0.0) for system logic.
-       * Use TH_TAB_TEXT_HI (active tab color) since preview represents the active/selected state. */
-      if (is_zero_v3(category_tab_preview_color)) {
-        uchar theme_col_tab_text_hi[3];
-        theme::get_color_3ubv(TH_TAB_TEXT_HI, theme_col_tab_text_hi);
-        BLF_color3ubv(fontid, theme_col_tab_text_hi);
-      }
-      else {
-        BLF_color3fv_alpha(fontid, category_tab_preview_color, 1.0f);
-      }
-
-      /* Calculate center position with proper baseline adjustment.
-       * Use ascender/descender to correctly center glyph vertically. */
-      const float glyph_width = BLF_width(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
-      const int ascender_i = BLF_ascender(fontid);
-      const int descender_i = BLF_descender(fontid);
-      const float ascender = float(ascender_i);
-      const float descender = float(descender_i);
-      const float glyph_height = ascender - descender;
-
-      const float rect_center_x = (rect->xmin + rect->xmax) * 0.5f;
-      const float rect_center_y = (rect->ymin + rect->ymax) * 0.5f;
-
-      const float x = rect_center_x - glyph_width * 0.5f;
-      const float y = rect_center_y - glyph_height * 0.5f - descender;
-
-      /* Draw glyph */
-      BLF_position(fontid, x, y, 0.0f);
-      BLF_draw(fontid, category_tab_preview_glyph, BLF_DRAW_STR_DUMMY_MAX);
-    });
   }
 
   /* Color panel */

@@ -2095,6 +2095,88 @@ void RNA_api_ui_layout(StructRNA *srna)
   parm = RNA_def_string(func, "property", nullptr, 0, "", "Identifier of property in data");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
 
+  func = RNA_def_function(srna, "template_glyph_input_row", "ui::uiTemplateGlyphInputRow");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "Creates a row with glyph input fields and buttons (Search/Code, More glyphs, Paste)");
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take properties");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "glyph_property", nullptr, 0, "", "Identifier of glyph property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func,
+                        "search_property",
+                        nullptr,
+                        0,
+                        "",
+                        "Identifier of search property (optional)");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_boolean(func,
+                         "has_search",
+                         true,
+                         "",
+                         "Whether to show the search field");
+  parm = RNA_def_boolean(func, "has_code", true, "", "Whether to show the code field");
+  parm = RNA_def_string(func, "category", nullptr, 0, "", "Category for context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "template_glyph_preview", "ui::uiTemplateGlyphPreview");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(func, "Creates a centered preview button showing a glyph");
+  parm = RNA_def_string(func, "glyph_unicode", nullptr, 0, "", "Unicode glyph character");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take color property");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "color_property", nullptr, 0, "", "Identifier of color property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_float(func,
+                       "size_multiplier",
+                       2.0f,
+                       0.5f,
+                       5.0f,
+                       "",
+                       "Size multiplier for the preview glyph",
+                       0.5f,
+                       5.0f);
+
+  func = RNA_def_function(srna, "template_glyph_search_results", "ui::uiTemplateGlyphSearchResults");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(func, "Creates dynamic buttons for glyph search results");
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take search property");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "search_property", nullptr, 0, "", "Identifier of search query property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "category", nullptr, 0, "", "Category for glyph search");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "color_property", nullptr, 0, "", "Identifier of color property");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_int(func,
+                     "max_results",
+                     50,
+                     1,
+                     200,
+                     "",
+                     "Maximum number of search results to show",
+                     1,
+                     200);
+
+  func = RNA_def_function(srna, "template_glyph_selector", "ui::uiTemplateGlyphSelector");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(func, "Creates a complete glyph selector with input, search results, and preview");
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take properties");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "glyph_property", nullptr, 0, "", "Identifier of glyph property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "search_property", nullptr, 0, "", "Identifier of search query property");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "color_property", nullptr, 0, "", "Identifier of color property");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "category", nullptr, 0, "", "Category for glyph search");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_boolean(func, "show_preview", true, "", "Show glyph preview");
+  parm = RNA_def_boolean(func, "show_search", true, "", "Show search field");
+  parm = RNA_def_boolean(func, "show_code", true, "", "Show code input field");
+
   func = RNA_def_function(srna, "template_constraints", "template_constraints");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   RNA_def_function_ui_description(func, "Generates the panels for the constraint stack");

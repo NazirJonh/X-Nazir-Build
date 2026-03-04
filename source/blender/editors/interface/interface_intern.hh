@@ -1379,9 +1379,6 @@ void layout_panel_popup_scroll_apply(Panel *panel, const float dy);
 /** Category tab drag operator for reordering tabs. */
 void UI_OT_category_tab_drag(wmOperatorType *ot);
 
-/** Glyph picker grid operator. */
-void WM_OT_glyph_picker_grid(wmOperatorType *ot);
-
 /**
  * Draws in resolution of 48x4 colors.
  */
@@ -1826,6 +1823,12 @@ Button *region_find_active_but(ARegion *region) ATTR_WARN_UNUSED_RESULT;
  */
 Button *context_active_but_get_respect_popup(const bContext *C);
 
+/**
+ * Get the active operator from the context, respecting popup regions.
+ * Used by templates that need to access the operator's RNA data.
+ */
+wmOperator *context_active_operator_get(const bContext *C);
+
 bool region_contains_point_px(const ARegion *region, const int xy[2])
     ATTR_NONNULL(1, 2) ATTR_WARN_UNUSED_RESULT;
 bool region_contains_rect_px(const ARegion *region, const rcti *rect_px);
@@ -1937,6 +1940,19 @@ uiListType *UI_UL_cache_file_layers();
 ID *template_id_liboverride_hierarchy_make(
     bContext *C, Main *bmain, ID *owner_id, ID *id, const char **r_undo_push_label);
 
+/* -------------------------------------------------------------------- */
+/** \name Glyph Search Functions
+ * \{ */
+
+/**
+ * Call Python glyph search API and return results.
+ * This function is used by glyph template functions to search for glyphs.
+ */
+Vector<std::pair<std::string, std::string>> glyph_search_call_python(
+    bContext *C, const char *query, const char *category, int max_results);
+
+/** \} */
+
 /**
  * Functions in this namespace are only exposed for unit testing purposes, and
  * should not be used outside of the files where they are defined.
@@ -1993,7 +2009,63 @@ int paste_property_drivers(Span<FCurve *> src_drivers,
                            PointerRNA *dst_ptr,
                            PropertyRNA *dst_prop);
 
+/* -------------------------------------------------------------------- */
+/** \name Internal Glyph Template Functions (with callback support)
+ * \{ */
+
+/**
+ * Internal version of uiTemplateGlyphInputRow with custom callback support.
+ * Used by category tab edit UI for custom "More glyphs" button behavior.
+ */
+void uiTemplateGlyphInputRowWithCallback(Layout *layout,
+                                        bContext *C,
+                                        PointerRNA *ptr,
+                                        const char *glyph_propname,
+                                        const char *search_propname,
+                                        bool has_search,
+                                        bool has_code,
+                                        const char *category,
+                                        ButtonHandleFunc more_glyphs_callback,
+                                        void *callback_user_data);
+
+/**
+ * Internal version of uiTemplateGlyphSearchResults with custom callback support.
+ * Used by category tab edit UI for custom search result button behavior.
+ */
+void uiTemplateGlyphSearchResultsWithCallback(Layout *layout,
+                                              bContext *C,
+                                              PointerRNA *ptr,
+                                              const char *search_propname,
+                                              const char *category,
+                                              const char *color_propname,
+                                              int max_results,
+                                              ButtonHandleFunc result_callback,
+                                              void *callback_user_data);
+
+/**
+ * Internal version of uiTemplateGlyphSelector with custom callback support.
+ * Combines all glyph UI components with full callback customization.
+ */
+void uiTemplateGlyphSelectorWithCallback(Layout *layout,
+                                        bContext *C,
+                                        PointerRNA *ptr,
+                                        const char *glyph_propname,
+                                        const char *search_propname,
+                                        const char *color_propname,
+                                        const char *category,
+                                        bool show_preview,
+                                        bool show_search,
+                                        bool show_code,
+                                        ButtonHandleFunc more_glyphs_callback,
+                                        void *callback_user_data,
+                                        ButtonHandleFunc result_callback);
+
+/** \} */
+
 }  // namespace internal
+
+/** Glyph picker grid operator. */
+void WM_OT_glyph_picker_grid(wmOperatorType *ot);
 
 }  // namespace ui
 }  // namespace blender

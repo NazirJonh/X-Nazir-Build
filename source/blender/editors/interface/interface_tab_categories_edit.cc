@@ -169,6 +169,47 @@ bool process_glyph_input(const char *input, char *output, size_t output_max)
   return false;
 }
 
+static bool validate_glyph_hex_input(const char *glyph_raw)
+{
+  if (!glyph_raw || glyph_raw[0] == '\0') {
+    return true;
+  }
+
+  /* Check total string length (including optional 0x prefix). */
+  const size_t total_len = strlen(glyph_raw);
+  if (total_len > 8) { /* Max: "0x" + 6 hex digits. */
+    return false;
+  }
+
+  const char *hex_start = glyph_raw;
+
+  /* Skip optional "0x" or "0X" prefix. */
+  if (glyph_raw[0] == '0' && (glyph_raw[1] == 'x' || glyph_raw[1] == 'X')) {
+    hex_start = glyph_raw + 2;
+  }
+
+  /* Check if remaining string is a valid hex number (1-6 hex digits for Unicode). */
+  const size_t hex_len = strlen(hex_start);
+  if (hex_len == 0 || hex_len > 6) {
+    return false;
+  }
+
+  /* Verify all characters are hex digits. */
+  for (size_t i = 0; i < hex_len; i++) {
+    if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
+      return false;
+    }
+  }
+
+  /* Validate Unicode codepoint range. */
+  const uint val = strtoul(hex_start, nullptr, 16);
+  if (val < 32 || val > 0x10FFFF) {
+    return false;
+  }
+
+  return true;
+}
+
 void utf8_to_hex_codepoint(const char *input, char *output, size_t output_max)
 {
   if (!input || !input[0]) {
@@ -497,47 +538,8 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   char glyph_raw[16];
   RNA_string_get(op->ptr, "glyph", glyph_raw);
 
-  /* Validate glyph input: must be empty or valid hex code (1-6 hex digits) */
-  bool glyph_valid = true;
-  if (glyph_raw[0] != '\0') {
-    /* Check total string length (including optional 0x prefix) */
-    size_t total_len = strlen(glyph_raw);
-    if (total_len > 8) { /* Max: "0x" + 6 hex digits */
-      glyph_valid = false;
-    }
-    else {
-      const char *hex_start = glyph_raw;
-
-      /* Skip optional "0x" or "0X" prefix */
-      if (glyph_raw[0] == '0' && (glyph_raw[1] == 'x' || glyph_raw[1] == 'X')) {
-        hex_start = glyph_raw + 2;
-      }
-
-      /* Check if remaining string is a valid hex number (1-6 hex digits for Unicode) */
-      size_t hex_len = strlen(hex_start);
-
-      if (hex_len == 0 || hex_len > 6) {
-        glyph_valid = false;
-      }
-      else {
-        /* Verify all characters are hex digits */
-        for (size_t i = 0; i < hex_len; i++) {
-          if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
-            glyph_valid = false;
-            break;
-          }
-        }
-      }
-
-      if (glyph_valid) {
-        /* Validate Unicode codepoint range */
-        uint val = strtoul(hex_start, nullptr, 16);
-        if (val < 32 || val > 0x10FFFF) {
-          glyph_valid = false;
-        }
-      }
-    }
-  }
+  /* Validate glyph input: must be empty or valid hex code (1-6 hex digits). */
+  const bool glyph_valid = validate_glyph_hex_input(glyph_raw);
 
   /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character.
    * Only process if input is valid hex. */
@@ -1893,49 +1895,11 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                                         op,
                                         glyph_search_result_button_cb);
 
-    /* Validate glyph input and show warning if invalid */
-    char glyph_raw_check[16] = "";
-    RNA_string_get(op->ptr, "glyph", glyph_raw_check);
+  /* Validate glyph input and show warning if invalid. */
+  char glyph_raw_check[16] = "";
+  RNA_string_get(op->ptr, "glyph", glyph_raw_check);
 
-    bool glyph_valid = true;
-    if (glyph_raw_check[0] != '\0') {
-      /* Check total string length */
-      size_t total_len = strlen(glyph_raw_check);
-      if (total_len > 8) {
-        glyph_valid = false;
-      }
-      else {
-        const char *hex_start = glyph_raw_check;
-
-        /* Skip optional "0x" prefix */
-        if (glyph_raw_check[0] == '0' &&
-            (glyph_raw_check[1] == 'x' || glyph_raw_check[1] == 'X'))
-        {
-          hex_start = glyph_raw_check + 2;
-        }
-
-        size_t hex_len = strlen(hex_start);
-
-        if (hex_len == 0 || hex_len > 6) {
-          glyph_valid = false;
-        }
-        else {
-          for (size_t i = 0; i < hex_len; i++) {
-            if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
-              glyph_valid = false;
-              break;
-            }
-          }
-        }
-
-        if (glyph_valid) {
-          uint val = strtoul(hex_start, nullptr, 16);
-          if (val < 32 || val > 0x10FFFF) {
-            glyph_valid = false;
-          }
-        }
-      }
-    }
+  const bool glyph_valid = validate_glyph_hex_input(glyph_raw_check);
 
     /* Show warning if glyph is invalid */
     if (!glyph_valid && glyph_raw_check[0] != '\0') {
@@ -2586,50 +2550,10 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   char glyph_raw[16];
   RNA_string_get(op->ptr, "glyph", glyph_raw);
 
-  /* Validate glyph input: must be empty or valid hex code (1-6 hex digits) */
-  if (glyph_raw[0] != '\0') {
-    /* Check total string length (including optional 0x prefix) */
-    size_t total_len = strlen(glyph_raw);
-    if (total_len > 8) { /* Max: "0x" + 6 hex digits */
-      BKE_report(op->reports, RPT_ERROR, "Glyph Code is too long (max 6 hex digits)");
-      return OPERATOR_CANCELLED;
-    }
-
-    const char *hex_start = glyph_raw;
-
-    /* Skip optional "0x" or "0X" prefix */
-    if (glyph_raw[0] == '0' && (glyph_raw[1] == 'x' || glyph_raw[1] == 'X')) {
-      hex_start = glyph_raw + 2;
-    }
-
-    /* Check if remaining string is a valid hex number (1-6 hex digits for Unicode) */
-    size_t hex_len = strlen(hex_start);
-    bool valid = true;
-
-    if (hex_len == 0 || hex_len > 6) {
-      valid = false;
-    }
-    else {
-      /* Verify all characters are hex digits */
-      for (size_t i = 0; i < hex_len; i++) {
-        if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
-          valid = false;
-          break;
-        }
-      }
-    }
-
-    if (!valid) {
-      BKE_report(op->reports, RPT_ERROR, "Glyph Code must be 1-6 hex digits (e.g., e5d2)");
-      return OPERATOR_CANCELLED;
-    }
-
-    /* Validate Unicode codepoint range */
-    uint val = strtoul(hex_start, nullptr, 16);
-    if (val < 32 || val > 0x10FFFF) {
-      BKE_report(op->reports, RPT_ERROR, "Glyph Code must be a valid Unicode codepoint (0020-10FFFF)");
-      return OPERATOR_CANCELLED;
-    }
+  /* Validate glyph input: must be empty or valid hex code (1-6 hex digits). */
+  if (!validate_glyph_hex_input(glyph_raw)) {
+    BKE_report(op->reports, RPT_ERROR, "Glyph Code must be 1-6 hex digits (e.g., e5d2)");
+    return OPERATOR_CANCELLED;
   }
 
   /* Process glyph input: convert hex code (e.g., "e5d2") to UTF-8 character */

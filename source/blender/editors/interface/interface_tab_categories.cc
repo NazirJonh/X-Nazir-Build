@@ -291,24 +291,7 @@ bool category_has_tag(const char *tags_string, const char *tag_name)
 bool tag_glyph_hex_to_utf8(const char *input, char r_utf8[8])
 {
   r_utf8[0] = '\0';
-
-  if (input == nullptr || input[0] == '\0') {
-    return false;
-  }
-
-  const char *hex_str = input;
-  if (hex_str[0] == '0' && (hex_str[1] == 'x' || hex_str[1] == 'X')) {
-    hex_str += 2;
-  }
-
-  char *end = nullptr;
-  const unsigned long code_point = strtoul(hex_str, &end, 16);
-  if (end == hex_str || *end != '\0' || code_point > 0x10FFFFul) {
-    return false;
-  }
-
-  const size_t len = BLI_str_utf8_from_unicode(uint(code_point), r_utf8, 8);
-  return len != 0;
+  return hex_codepoint_to_utf8(input, r_utf8, 8);
 }
 
 /** \} */
@@ -664,25 +647,6 @@ const char *panel_category_tooltip_name_get(const ARegion *region,
 
   /* 5. Fallback to category name itself */
   return category_idname;
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name String Utilities
- * \{ */
-
-static bool is_single_glyph_str(const char *str)
-{
-  if (!str || !str[0]) {
-    return false;
-  }
-
-  const int utf8_char_size = BLI_str_utf8_size_safe(str);
-  const size_t len = BLI_strnlen(str, 64);
-
-  /* Single ASCII character or single UTF-8 character. */
-  return (len == 1) || (utf8_char_size > 0 && size_t(utf8_char_size) == len);
 }
 
 /** \} */

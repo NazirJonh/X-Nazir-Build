@@ -532,14 +532,6 @@ void uiTemplateGlyphInputRowWithCallback(Layout *layout,
  * Creates a centered preview button showing a glyph with custom color.
  * \{ */
 
-/* Storage for preview callback data - per button instance */
-struct GlyphPreviewData {
-  bool is_set;
-  char glyph_unicode[8];
-  float color[3];
-  float size_multiplier;
-};
-
 /* Draw callback for preview button */
 static void glyph_preview_draw_cb(const bContext * /*C*/,
                                   rcti *rect,
@@ -597,15 +589,6 @@ void uiTemplateGlyphPreview(Layout *layout,
     return;
   }
 
-  /* Get color from RNA property */
-  float color[3] = {0.0f, 0.0f, 0.0f};
-  if (ptr && color_propname) {
-    PropertyRNA *prop = RNA_struct_find_property(ptr, color_propname);
-    if (prop) {
-      RNA_property_float_get_array(ptr, prop, color);
-    }
-  }
-
   /* Create centered row for preview */
   Layout &preview_row = layout->row(false);
   preview_row.alignment_set(LayoutAlign::Center);
@@ -617,50 +600,45 @@ void uiTemplateGlyphPreview(Layout *layout,
   const uiStyle *style = style_get_dpi();
   const int preview_size = int(style->widget.points * UI_SCALE_FAC * 2.0f * size_multiplier);
 
-  /* Create local preview data for this button instance */
-  GlyphPreviewData *preview_data = MEM_new<GlyphPreviewData>("GlyphPreviewData");
-  preview_data->is_set = true;
-  STRNCPY(preview_data->glyph_unicode, glyph_unicode);
-  copy_v3_v3(preview_data->color, color);
-  preview_data->size_multiplier = size_multiplier;
+  /* Copy callback data to keep it valid across redraws while popup stays open. */
+  const std::string glyph_unicode_copy = glyph_unicode;
+  const std::string color_propname_copy = color_propname ? color_propname : "";
+  const PointerRNA preview_ptr = ptr ? *ptr : PointerRNA_NULL;
+  const bool has_preview_ptr = ptr != nullptr;
 
   /* Create preview button using Extra type with custom draw callback */
   Button *preview_but = uiDefBut(preview_block,
-                                      ButtonType::Extra,
+                                       ButtonType::Extra,
                                       "",
                                       0,
-                                      0,
-                                      preview_size,
-                                      preview_size,
-                                      preview_data,
-                                      0.0f,
-                                      0.0f,
-                                      std::nullopt);
+                                       0,
+                                       preview_size,
+                                       preview_size,
+                                       nullptr,
+                                       0.0f,
+                                       0.0f,
+                                       std::nullopt);
 
-  /* Set custom draw callback with captured preview data */
-  button_func_drawextra_set(preview_block, 
-    [preview_data](const bContext *C, rcti *rect) {
-      if (!preview_data || !preview_data->is_set) {
-        return;
-      }
-      glyph_preview_draw_cb(C,
-                           rect,
-                           preview_data->glyph_unicode,
-                           preview_data->color,
-                           preview_data->size_multiplier);
-    });
-    
-  preview_but->tip_quick_func = [glyph_unicode](const Button *) {
-    return std::string("Glyph: ") + glyph_unicode;
+  /* Read color from RNA on every redraw for live-update preview in dialogs/popups. */
+  button_func_drawextra_set(preview_block,
+                            [glyph_unicode_copy, color_propname_copy, preview_ptr, has_preview_ptr, size_multiplier](
+                                const bContext *C, rcti *rect) {
+                              float draw_color[3] = {0.0f, 0.0f, 0.0f};
+                              if (has_preview_ptr && !color_propname_copy.empty()) {
+                                PointerRNA preview_ptr_local = preview_ptr;
+                                PropertyRNA *prop = RNA_struct_find_property(
+                                    &preview_ptr_local, color_propname_copy.c_str());
+                                if (prop) {
+                                  RNA_property_float_get_array(&preview_ptr_local, prop, draw_color);
+                                }
+                              }
+                              glyph_preview_draw_cb(
+                                  C, rect, glyph_unicode_copy.c_str(), draw_color, size_multiplier);
+                            });
+
+  preview_but->tip_quick_func = [glyph_unicode_copy](const Button *) {
+    return std::string("Glyph: ") + glyph_unicode_copy;
   };
-  
-  /* Set cleanup function to free preview data when button is destroyed */
-  preview_but->funcN = [](bContext *, void *arg1, void *) {
-    if (arg1) {
-      MEM_delete(static_cast<GlyphPreviewData *>(arg1));
-    }
-  };
-  preview_but->func_arg1 = preview_data;
 }
 
 /* -------------------------------------------------------------------- */

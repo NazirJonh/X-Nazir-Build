@@ -104,58 +104,8 @@ static bool category_name_is_glyph(const char *category_id);
 enum eCategoryGlyphBaseSource {
   CATEGORY_GLYPH_BASE_SOURCE_MAPPING,
   CATEGORY_GLYPH_BASE_SOURCE_PANEL_TYPE,
-  CATEGORY_GLYPH_BASE_SOURCE_DEFAULT,
   CATEGORY_GLYPH_BASE_SOURCE_FALLBACK,
 };
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Default Glyph Mappings
- * \{ */
-
-/* Default glyph mappings - Material Symbols font */
-static const struct {
-  const char *category;
-  const char *glyph;
-} default_glyph_mappings[] = {
-    {"Item", "\ue8f4"},        /* visibility */
-    {"View", "\ue417"},        /* visibility */
-    {"Edit", "\ue3c9"},        /* edit */
-    {"Tool", "\ue166"},        /* construction */
-    {"Asset", "\ue2c7"},       /* folder */
-    {"Options", "\ue8b8"},     /* settings */
-    {"Animation", "\ue71b"},   /* motion_photos_on */
-    {"Physics", "\ue3d4"},     /* science */
-    {"World", "\ue88e"},       /* public */
-    {"Material", "\ue429"},    /* palette */
-    {"Modifiers", "\ue429"},   /* palette */
-    {"Texture", "\ue40a"},     /* texture */
-    {"Particles", "\ue3d4"},   /* science */
-    {"Curve", "\ue148"},       /* timeline */
-    {"Mesh", "\ue204"},        /* category */
-    {"Object", "\ue8d4"},      /* select_all */
-    {"Scene", "\ue8f9"},       /* dashboard */
-    {"Render", "\ue439"},      /* photo_camera */
-    {"Script", "\ue86f"},      /* terminal */
-    {"Sound", "\ue3a1"},       /* speaker */
-    {"Surface", "\ue76c"},     /* waves */
-    {"Volume", "\ue2c8"},      /* folder_open */
-    {"Constraints", "\ue8d2"}, /* rule */
-    {"Data", "\ue23e"},        /* database */
-    {"Node", "\ue1b8"},        /* account_tree */
-    {nullptr, nullptr},
-};
-
-static const char *lookup_default_glyph(const char *category)
-{
-  for (int i = 0; default_glyph_mappings[i].category != nullptr; i++) {
-    if (STREQ(default_glyph_mappings[i].category, category)) {
-      return default_glyph_mappings[i].glyph;
-    }
-  }
-  return nullptr;
-}
 
 /** \} */
 
@@ -221,6 +171,25 @@ bool category_tag_list_is_valid(const ListBase *list)
     return false;
   }
   return true;
+}
+
+static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManager *wm,
+                                                            const char *category)
+{
+  if (!wm || !category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item =
+           static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+       item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (STREQ(item->category, category)) {
+      return item;
+    }
+  }
+  return nullptr;
 }
 
 /** \} */
@@ -388,32 +357,35 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
     }
   }
 
-  /* 2. Check global mappings in wm->category_glyph_mappings. */
-  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      if (STREQ(item->category, category)) {
-        if (r_color && is_zero_v3(r_color) && !is_zero_v3(item->color)) {
-          copy_v3_v3(r_color, item->color);
-        }
-        if (item->glyph[0] != '\0') {
-          /* Check if this is actually a fallback letter. */
-          const int category_first_char_size = BLI_str_utf8_size_safe(category);
-          if (category_first_char_size > 0 &&
-              STREQLEN(item->glyph, category, category_first_char_size) &&
-              item->glyph[category_first_char_size] == '\0')
-          {
-            /* Glyph is the first character of category - treat as fallback letter.
-             * Continue searching in mappings/defaults to find a real icon if possible. */
-            continue;
-          }
-          return item->glyph;
-        }
-        /* No glyph in mapping - continue searching for default mappings or fallback. */
-        continue;
+  /* 2. Check global mappings in wm->category_glyph_mappings.
+   * This collection is synced from Python and is the single source of truth. */
+  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category)) {
+    if (r_color && is_zero_v3(r_color) && !is_zero_v3(item->color)) {
+      copy_v3_v3(r_color, item->color);
+    }
+
+    if (item->glyph[0] != '\0') {
+      /* Check if this is actually a fallback letter. */
+      const int category_first_char_size = BLI_str_utf8_size_safe(category);
+      if (category_first_char_size > 0 &&
+          STREQLEN(item->glyph, category, category_first_char_size) &&
+          item->glyph[category_first_char_size] == '\0')
+      {
+        /* Fallback letter in current glyph: keep searching below for a real default glyph. */
+      }
+      else {
+        return item->glyph;
+      }
+    }
+
+    /* Use default glyph from mapping when current glyph is empty/fallback. */
+    if (item->default_glyph[0] != '\0') {
+      const int category_first_char_size = BLI_str_utf8_size_safe(category);
+      if (!(category_first_char_size > 0 &&
+            STREQLEN(item->default_glyph, category, category_first_char_size) &&
+            item->default_glyph[category_first_char_size] == '\0'))
+      {
+        return item->default_glyph;
       }
     }
   }
@@ -450,13 +422,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
     return panel_type->icon_glyph;
   }
 
-  /* 4. Check static default mappings. */
-  const char *glyph = lookup_default_glyph(category);
-  if (glyph) {
-    return glyph;
-  }
-
-  /* 5. Fallback: return first character of category. */
+  /* 4. Fallback: return first character of category. */
   if (r_is_fallback_letter) {
     /* If the category name itself is a glyph (high Unicode), don't treat it as a fallback letter.
      * This avoids adding extra_shift to these icons. */
@@ -491,38 +457,23 @@ static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
     *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_FALLBACK;
   }
 
-  /* 1. Check global mappings (registered by Python DEFAULT_CATEGORY_GLYPHS) */
-  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      if (STREQ(item->category, category)) {
-        if (r_is_reserved) {
-          *r_is_reserved = true;
-        }
-        if (r_source_type) {
-          *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_MAPPING;
-        }
-        return item->glyph;
-      }
-    }
-  }
-
-  /* 2. Check static default mappings */
-  const char *glyph = lookup_default_glyph(category);
-  if (glyph) {
+  /* 1. Check global mappings (synced from Python DEFAULT_CATEGORY_GLYPHS). */
+  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category)) {
     if (r_is_reserved) {
-      *r_is_reserved = true;
+      *r_is_reserved = (item->is_reserved != 0);
     }
     if (r_source_type) {
-      *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_DEFAULT;
+      *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_MAPPING;
     }
-    return glyph;
+    if (item->glyph[0] != '\0') {
+      return item->glyph;
+    }
+    if (item->default_glyph[0] != '\0') {
+      return item->default_glyph;
+    }
   }
 
-  /* 3. Check PanelType.icon_glyph. */
+  /* 2. Check PanelType.icon_glyph. */
   if (panel_type && panel_type->icon_glyph && panel_type->icon_glyph[0]) {
     if (r_source_type) {
       *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_PANEL_TYPE;
@@ -530,7 +481,7 @@ static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
     return panel_type->icon_glyph;
   }
 
-  /* 4. Fallback: return first character of category. */
+  /* 3. Fallback: return first character of category. */
   if (r_source_type) {
     *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_FALLBACK;
   }
@@ -777,16 +728,16 @@ static bool category_name_is_glyph(const char *category_id)
   return false;
 }
 
-bool category_is_reserved(const wmWindowManager * /*wm*/, const char *category_id)
+bool category_is_reserved(const wmWindowManager *wm, const char *category_id)
 {
   /* Categories with glyph names (high Unicode) are from addons and NOT reserved */
   if (category_name_is_glyph(category_id)) {
     return false;
   }
 
-  /* Only check static default_glyph_mappings (built-in Blender categories). */
-  if (lookup_default_glyph(category_id)) {
-    return true;
+  /* Single source of truth: Python marks reserved categories in wm.category_glyph_mappings. */
+  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category_id)) {
+    return (item->is_reserved != 0);
   }
 
   return false;
@@ -794,21 +745,51 @@ bool category_is_reserved(const wmWindowManager * /*wm*/, const char *category_i
 
 static bool category_is_reserved_for_reorder(const wmWindowManager *wm, const char *category_id)
 {
-  return category_is_reserved(wm, category_id);
-}
+  if (category_name_is_glyph(category_id)) {
+    return false;
+  }
 
-static int count_reserved_tabs_at_start(const wmWindowManager *wm, ARegion *region)
-{
-  int reserved_count = 0;
-  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    if (category_is_reserved_for_reorder(wm, pc_dyn.idname)) {
-      reserved_count++;
+  if (category_is_reserved(wm, category_id)) {
+    return true;
+  }
+
+  auto reserved_name_fallback = [](const char *idname) {
+    static const char *k_reserved_fallback[] = {
+        "Item",        "View",      "Edit",        "Tool",     "Asset",   "Options",
+        "Animation",   "Physics",   "World",       "Material", "Modifiers", "Texture",
+        "Particles",   "Curve",     "Mesh",        "Object",   "Scene",   "Render",
+        "Script",      "Sound",     "Surface",     "Volume",   "Constraints", "Data",
+        "Node",
+    };
+    for (const char *reserved_id : k_reserved_fallback) {
+      if (STREQ(idname, reserved_id)) {
+        return true;
+      }
     }
-    else {
-      break;
+    return false;
+  };
+
+  /* If reserved markers were not populated yet (or failed to sync), keep reorder protection
+   * for known built-in categories. */
+  bool has_any_reserved_marker = false;
+  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (item->is_reserved != 0) {
+        has_any_reserved_marker = true;
+        break;
+      }
     }
   }
-  return reserved_count;
+
+  if (!has_any_reserved_marker) {
+    return reserved_name_fallback(category_id);
+  }
+
+  return false;
 }
 
 /** \} */
@@ -1284,11 +1265,11 @@ static void save_category_order_to_json(const bContext *C,
 Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region);
 
 static int calculate_insert_index(const bContext *C,
-                                  const wmWindowManager *wm,
                                   ARegion *region,
                                   CategoryDragState *state)
 {
-  const int min_insert_index = count_reserved_tabs_at_start(wm, region);
+  const int min_insert_index = state->min_insert_index;
+  const int max_insert_index = state->max_insert_index;
   int index = 0;
 
   Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
@@ -1332,13 +1313,100 @@ static int calculate_insert_index(const bContext *C,
     const int effective_y = state->drag_start_y + edge_offset + int(state->drag_offset_y);
 
     if (effective_y > tab_center_y) {
-      return max_ii(index, min_insert_index);
+      return clamp_i(index, min_insert_index, max_insert_index);
     }
 
     index++;
   }
 
-  return index;
+  return clamp_i(index, min_insert_index, max_insert_index);
+}
+
+static void calculate_drag_insert_bounds(const wmWindowManager *wm,
+                                         const Vector<PanelCategoryDyn *> &ordered_categories,
+                                         const char *drag_category_id,
+                                         const bool drag_is_reserved,
+                                         int *r_min_insert_index,
+                                         int *r_max_insert_index)
+{
+  int drag_full_index = -1;
+  for (int i = 0; i < ordered_categories.size(); i++) {
+    if (STREQ(ordered_categories[i]->idname, drag_category_id)) {
+      drag_full_index = i;
+      break;
+    }
+  }
+
+  if (drag_full_index == -1) {
+    *r_min_insert_index = 0;
+    *r_max_insert_index = 0;
+    return;
+  }
+
+  int opposite_before = -1;
+  for (int i = drag_full_index - 1; i >= 0; i--) {
+    const bool is_reserved = category_is_reserved_for_reorder(wm, ordered_categories[i]->idname);
+    if (is_reserved != drag_is_reserved) {
+      opposite_before = i;
+      break;
+    }
+  }
+
+  int opposite_after = -1;
+  for (int i = drag_full_index + 1; i < ordered_categories.size(); i++) {
+    const bool is_reserved = category_is_reserved_for_reorder(wm, ordered_categories[i]->idname);
+    if (is_reserved != drag_is_reserved) {
+      opposite_after = i;
+      break;
+    }
+  }
+
+  const int total_non_drag = max_ii(int(ordered_categories.size()) - 1, 0);
+
+  int min_insert_index = 0;
+  if (opposite_before != -1) {
+    for (int i = 0; i <= opposite_before; i++) {
+      if (i == drag_full_index) {
+        continue;
+      }
+      min_insert_index++;
+    }
+  }
+
+  int max_insert_index = total_non_drag;
+  if (opposite_after != -1) {
+    max_insert_index = 0;
+    for (int i = 0; i < opposite_after; i++) {
+      if (i == drag_full_index) {
+        continue;
+      }
+      max_insert_index++;
+    }
+  }
+
+  if (min_insert_index > max_insert_index) {
+    min_insert_index = max_insert_index;
+  }
+
+  *r_min_insert_index = min_insert_index;
+  *r_max_insert_index = max_insert_index;
+}
+
+static bool category_order_is_crossing_reserved_boundary(const wmWindowManager *wm,
+                                                         const Vector<std::string> &order)
+{
+  bool seen_non_reserved = false;
+  for (const std::string &category_id : order) {
+    if (category_is_reserved_for_reorder(wm, category_id.c_str())) {
+      if (seen_non_reserved) {
+        return true;
+      }
+    }
+    else {
+      seen_non_reserved = true;
+    }
+  }
+  return false;
 }
 
 static void update_insert_zone(const bContext *C,
@@ -1409,13 +1477,15 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
 
   Vector<std::string> final_order;
   int insert_idx = 0;
+  const int safe_insert_index = clamp_i(
+      state->current_insert_index, state->min_insert_index, state->max_insert_index);
 
   Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
 
   for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
     PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
 
-    if (insert_idx == state->current_insert_index) {
+    if (insert_idx == safe_insert_index) {
       final_order.append(state->drag_category_id);
     }
 
@@ -1425,10 +1495,16 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
     }
   }
 
-  if (insert_idx <= state->current_insert_index &&
+  if (insert_idx <= safe_insert_index &&
       !final_order.contains(state->drag_category_id))
   {
     final_order.append(state->drag_category_id);
+  }
+
+  /* Safety net: never allow mixed ordering between reserved and non-reserved.
+   * If boundary crossing is detected, keep original order unchanged. */
+  if (category_order_is_crossing_reserved_boundary(wm, final_order)) {
+    return;
   }
 
   /* Save to JSON for this tag combination */
@@ -1670,12 +1746,19 @@ static void ui_panel_category_draw_content(
 
   const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
 
+  const bool use_reserved_inactive_icon_only =
+      U.category_tabs_hide_reserved_inactive_text && !is_active &&
+      ELEM(display_mode, USER_CATEGORY_TABS_GLYPHS_TEXT, USER_CATEGORY_TABS_TEXT_ONLY) &&
+      category_is_reserved_for_reorder(wm, category_id) && has_glyph;
+
   bool draw_dual = false;
   const char *text_for_name = category_id_draw;
 
-  if (display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT && (has_glyph || is_fallback_letter)) {
+  if (display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT && !use_reserved_inactive_icon_only &&
+      (has_glyph || is_fallback_letter))
+  {
     draw_dual = true;
-    if (is_fallback_letter && is_single_glyph_str(category_id_draw)) {
+    if (is_single_glyph_str(text_for_name)) {
       for (const PanelType &pt : region->runtime->type->paneltypes) {
         if (pt.category && STREQ(pt.category, category_id)) {
           const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
@@ -1793,37 +1876,44 @@ static void ui_panel_category_draw_content(
   bool draw_as_glyph;
   bool should_rotate = false;
 
-  switch (display_mode) {
-    case USER_CATEGORY_TABS_GLYPHS_ONLY:
-      draw_str = glyph;
-      draw_as_glyph = !is_fallback_letter;
-      should_rotate = false;
-      break;
-    case USER_CATEGORY_TABS_GLYPHS_TEXT:
-      draw_str = category_id_draw;
-      draw_as_glyph = is_single_glyph_str(category_id_draw);
-      should_rotate = !draw_as_glyph;
-      break;
-    case USER_CATEGORY_TABS_TEXT_ONLY:
-    default:
-      if (is_single_glyph_str(category_id_draw)) {
-        const char *panel_label = nullptr;
-        for (const PanelType &pt : region->runtime->type->paneltypes) {
-          if (pt.category && STREQ(pt.category, category_id)) {
-            panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-            if (panel_label && panel_label[0]) {
-              break;
+  if (use_reserved_inactive_icon_only) {
+    draw_str = glyph;
+    draw_as_glyph = true;
+    should_rotate = false;
+  }
+  else {
+    switch (display_mode) {
+      case USER_CATEGORY_TABS_GLYPHS_ONLY:
+        draw_str = glyph;
+        draw_as_glyph = !is_fallback_letter;
+        should_rotate = false;
+        break;
+      case USER_CATEGORY_TABS_GLYPHS_TEXT:
+        draw_str = category_id_draw;
+        draw_as_glyph = is_single_glyph_str(category_id_draw);
+        should_rotate = !draw_as_glyph;
+        break;
+      case USER_CATEGORY_TABS_TEXT_ONLY:
+      default:
+        if (is_single_glyph_str(category_id_draw)) {
+          const char *panel_label = nullptr;
+          for (const PanelType &pt : region->runtime->type->paneltypes) {
+            if (pt.category && STREQ(pt.category, category_id)) {
+              panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+              if (panel_label && panel_label[0]) {
+                break;
+              }
             }
           }
+          draw_str = panel_label ? panel_label : category_id_draw;
         }
-        draw_str = panel_label ? panel_label : category_id_draw;
-      }
-      else {
-        draw_str = category_id_draw;
-      }
-      draw_as_glyph = false;
-      should_rotate = true;
-      break;
+        else {
+          draw_str = category_id_draw;
+        }
+        draw_as_glyph = false;
+        should_rotate = true;
+        break;
+    }
   }
 
   if (!should_rotate) {
@@ -2093,6 +2183,10 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     }
 
     const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
+    const bool use_reserved_inactive_icon_only =
+        U.category_tabs_hide_reserved_inactive_text && !is_active &&
+        ELEM(display_mode, USER_CATEGORY_TABS_GLYPHS_TEXT, USER_CATEGORY_TABS_TEXT_ONLY) &&
+        category_is_reserved_for_reorder(wm, category_id) && has_glyph;
 
     int category_width;
     int current_tab_v_pad_text = tab_v_pad_text;
@@ -2160,9 +2254,14 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       }
 
       case USER_CATEGORY_TABS_GLYPHS_TEXT: {
+        if (use_reserved_inactive_icon_only) {
+          category_width = round_fl_to_int(BLF_height(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
+          break;
+        }
+
         const char *text_for_width = category_id_draw;
         if (has_glyph || is_fallback_letter) {
-          if (is_fallback_letter && is_single_glyph_str(category_id_draw)) {
+          if (is_single_glyph_str(text_for_width)) {
             for (const PanelType &pt : region->runtime->type->paneltypes) {
               if (pt.category && STREQ(pt.category, category_id)) {
                 const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
@@ -2202,6 +2301,11 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
       case USER_CATEGORY_TABS_TEXT_ONLY:
       default: {
+        if (use_reserved_inactive_icon_only) {
+          category_width = round_fl_to_int(BLF_height(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
+          break;
+        }
+
         const char *text_for_size = category_id_draw;
         if (is_single_glyph_str(category_id_draw)) {
           for (const PanelType &pt : region->runtime->type->paneltypes) {
@@ -2852,11 +2956,11 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  /* Check if reserved (cannot be reordered) */
+  /* Check if reserved (cannot be reordered). */
   const wmWindowManager *wm = CTX_wm_manager(C);
-  bool is_reserved_glyph = category_is_reserved(wm, clicked_pc->idname);
+  bool is_reserved_glyph = category_is_reserved_for_reorder(wm, clicked_pc->idname);
 
-  /* Initialize drag state (allow all categories for now) */
+  /* Initialize drag state */
   CategoryDragState *state = MEM_new<CategoryDragState>(__func__);
   state->is_dragging = true;
   state->is_reserved = is_reserved_glyph;
@@ -2978,6 +3082,19 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   }
   state->original_index = visual_index;
   state->current_insert_index = state->original_index;
+  state->min_insert_index = state->original_index;
+  state->max_insert_index = state->original_index;
+
+  calculate_drag_insert_bounds(wm,
+                               ordered_categories,
+                               state->drag_category_id,
+                               state->is_reserved,
+                               &state->min_insert_index,
+                               &state->max_insert_index);
+
+  state->current_insert_index = clamp_i(
+      state->current_insert_index, state->min_insert_index, state->max_insert_index);
+
   state->drag_offset_y = 0.0f;
   state->prev_drag_offset_y = 0.0f;
   state->initial_scroll = region->category_scroll;
@@ -3153,7 +3270,7 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
     if (scrolled || event->type == MOUSEMOVE) {
       /* Calculate new insert index */
       const wmWindowManager *wm = CTX_wm_manager(C);
-      state->current_insert_index = calculate_insert_index(C, wm, region, state);
+      state->current_insert_index = calculate_insert_index(C, region, state);
       update_insert_zone(C, wm, region, state);
 
       /* Check if cursor is over a reserved tab and update cursor accordingly */

@@ -1771,6 +1771,7 @@ class VIEW3D_HT_tag_bar_tags(Header):
                 color_g=tag.color[1],
                 color_b=tag.color[2],
                 depress=depress,
+                center_glyph=True,  # Center glyph in tag bar buttons
                 tooltip=tag.name,
                 # NEW PARAMETERS (after C++ changes):
                 context_menu_operator="view3d.tag_context_menu",

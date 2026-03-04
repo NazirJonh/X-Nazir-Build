@@ -2123,6 +2123,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                                               has_custom_color ? color_rgb : nullptr,
                                               is_active,
                                               false,  /* is_pref_mode - toggle button with checkbox */
+                                              false,  /* center_glyph - left align for category buttons */
                                               0, 0,
                                               UI_UNIT_X * 8,
                                               UI_UNIT_Y * 1.5f,

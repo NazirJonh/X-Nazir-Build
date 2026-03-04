@@ -5048,12 +5048,20 @@ static void widget_draw_tag(const bContext *C,
         const int glyph_height = BLF_ascender(fstyle->uifont_id) + BLF_descender(fstyle->uifont_id);
         const float glyph_y = content_rect.ymin + ceil(0.5f * (BLI_rcti_size_y(&content_rect) - glyph_height));
 
-        /* For preference mode (no checkbox), center glyph horizontally in content_rect */
+        /* For preference mode (no checkbox), check if we should center glyph */
         float glyph_x;
         if (is_pref_mode) {
-          /* Center glyph in the entire content area */
-          const float content_center_x = (content_rect.xmin + content_rect.xmax) / 2.0f;
-          glyph_x = content_center_x - (glyph_width / 2.0f);
+          /* Center glyph if BUT_TAG_CENTER_GLYPH flag is set (glyph-only buttons like tag bar) */
+          /* Otherwise align left (glyph + text layout like category buttons) */
+          const bool center_glyph = (but->drawflag & BUT_TAG_CENTER_GLYPH) != 0;
+          if (center_glyph) {
+            /* Center glyph in the entire content area when glyph-only (like tag bar buttons) */
+            const float content_center_x = (content_rect.xmin + content_rect.xmax) / 2.0f;
+            glyph_x = content_center_x - (glyph_width / 2.0f);
+          } else {
+            /* Left-aligned when there's text (glyph + text layout) */
+            glyph_x = float(offset_x);
+          }
         } else {
           /* Left-aligned after checkbox */
           glyph_x = float(offset_x);

@@ -468,6 +468,8 @@ enum {
   BUT_TAG_PREF_MODE = 1 << 0,
   /** Skip background unless hovered/active. */
   BUT_TAG_NO_BACKGROUND = 1 << 9,
+  /** Center glyph in tag button (used for glyph-only buttons like tag bar). */
+  BUT_TAG_CENTER_GLYPH = 1 << 10,
   /** Text and icon alignment (by default, they are centered). */
   BUT_TEXT_LEFT = 1 << 1,
   BUT_ICON_LEFT = 1 << 2,
@@ -1558,6 +1560,7 @@ Button *uiDefButTag(Block *block,
                     const float *color,
                     bool is_active,
                     bool is_pref_mode,
+                    bool center_glyph,
                     int x, int y, short width, short height,
                     const char *tip);
 
@@ -1659,6 +1662,7 @@ extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
     int height,
     bool no_background,
     bool align,
+    bool center_glyph,
     const char *operator_name,
     const char *context_menu_operator,
     const char *operator_param_name,

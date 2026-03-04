@@ -1787,9 +1787,7 @@ LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int
 
 std::string get_tags_for_category_ui(const wmWindowManager *wm,
                                       const char *category,
-                                      bool filter_show_all_modes,
-                                      bool filter_current_mode,
-                                      uint32_t current_mode_flag)
+                                      uint32_t filter_mode_flag)
 {
   if (wm == nullptr || category == nullptr) {
     return {};
@@ -1810,20 +1808,18 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm,
     }
 
     /* Apply filter logic:
-     * - Both off: show all tags (default behavior)
-     * - show_all_modes on: show all tags
-     * - current_mode on: tags for current mode (mode_flags == 0 || mode_flags & current_mode_flag)
-     * - Both on: combined (union of both conditions)
+     * - filter_mode_flag == 0: show all tags
+     * - otherwise: show tags for selected mode + tags marked for all modes (mode_flags == 0)
      */
     bool include_tag = false;
 
-    if (filter_show_all_modes || !filter_current_mode) {
-      /* Show all tags (default when both filters are off, or when show_all_modes is on) */
+    if (filter_mode_flag == 0) {
+      /* Show all tags. */
       include_tag = true;
     }
     else {
-      /* Show tags for current mode or all modes */
-      include_tag = (tag->mode_flags == 0) || (tag->mode_flags & current_mode_flag);
+      /* Show tags for selected mode or all modes. */
+      include_tag = (tag->mode_flags == 0) || (tag->mode_flags & filter_mode_flag);
     }
 
     if (!include_tag) {

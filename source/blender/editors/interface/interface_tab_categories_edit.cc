@@ -404,6 +404,25 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
       STRNCPY(item->tags, original_tags);
     }
   }
+
+  /* Reset operator can temporarily modify category_glyph_mappings (for example when resetting
+   * a fallback-letter category to an empty glyph). If user cancels the dialog and there was no
+   * original override, restore mapping glyph/color from dialog-open snapshot as well, otherwise
+   * UI may keep fallback state until restart even though changes were discarded. */
+  if (!original_has_override) {
+    for (CategoryGlyphItem *map_item =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         map_item;
+         map_item = static_cast<CategoryGlyphItem *>(map_item->next))
+    {
+      if (!STREQ(map_item->category, category)) {
+        continue;
+      }
+      STRNCPY(map_item->glyph, original_glyph_utf8);
+      copy_v3_v3(map_item->color, original_color);
+      break;
+    }
+  }
   }
 
   /* Clear dialog operator pointer and popup block */
@@ -482,9 +501,9 @@ static void category_tag_filter_menu_draw(const bContext *C, Menu *menu)
 
   PointerRNA wm_ptr = RNA_pointer_create_discrete(&wm->id, RNA_WindowManager, wm);
   layout.prop(&wm_ptr,
-              "category_tag_filter_current_mode",
+              "category_tag_filter_mode",
               UI_ITEM_NONE,
-              IFACE_("Current Mode"),
+              IFACE_("Mode"),
               ICON_NONE);
 }
 
@@ -1579,10 +1598,16 @@ static void glyph_more_glyphs_button_cb(bContext *C, void *arg1, void * /*arg2*/
   /* Create a copy of glyphs for popup data (popup needs ownership) */
   blender::Vector<std::pair<std::string, std::string>> glyphs = cached_glyphs;
 
-  /* Create popup data with picker op (nullptr here, will be set in glyph_grid_popup_block_create)
-   * and target_op (the operator whose property should be updated) */
+  /* Direct popup path (without WM_OT_glyph_picker_grid):
+   * use the dialog operator as `op` so glyph_search/glyph updates and live preview
+   * callbacks are applied immediately in the open edit dialog. */
   GlyphGridPopupData *popup_data = new GlyphGridPopupData(
-      nullptr, target_op, target_op ? target_op->properties : nullptr, std::move(glyphs), current_category, all_categories);
+      target_op,
+      target_op,
+      target_op ? target_op->properties : nullptr,
+      std::move(glyphs),
+      current_category,
+      all_categories);
 
   /* Create and show popup */
   PopupBlockHandle *handle = popup_block_create(
@@ -1975,17 +2000,43 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
   layout.separator();
 
   /* Tags section in a sub-panel - only show for non-reserved categories */
-  /* Get filter settings from window manager */
-  const bool filter_show_all_modes = wm->category_tag_filter_show_all_modes;
-  const bool filter_current_mode = wm->category_tag_filter_current_mode;
-  const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
+  /* Get filter mode from window manager (0 = all tags). */
+  uint32_t filter_mode_flag = 0;
+  switch (wm->category_tag_filter_mode) {
+    case 1:
+      filter_mode_flag = uint32_t(CategoryTagMode::OBJECT_MODE);
+      break;
+    case 2:
+      filter_mode_flag = uint32_t(CategoryTagMode::EDIT_MODE);
+      break;
+    case 3:
+      filter_mode_flag = uint32_t(CategoryTagMode::SCULPT_MODE);
+      break;
+    case 4:
+      filter_mode_flag = uint32_t(CategoryTagMode::VERTEX_PAINT);
+      break;
+    case 5:
+      filter_mode_flag = uint32_t(CategoryTagMode::WEIGHT_PAINT);
+      break;
+    case 6:
+      filter_mode_flag = uint32_t(CategoryTagMode::TEXTURE_PAINT);
+      break;
+    case 7:
+      filter_mode_flag = uint32_t(CategoryTagMode::UV_EDIT);
+      break;
+    case 8:
+      filter_mode_flag = uint32_t(CategoryTagMode::POSE_MODE);
+      break;
+    default:
+      filter_mode_flag = 0;
+      break;
+  }
 
   /* Get all active tags for the header (unfiltered) */
-  const std::string tags_data_header = get_tags_for_category_ui(wm, category, true, false, 0);
+  const std::string tags_data_header = get_tags_for_category_ui(wm, category, 0);
 
   /* Get filtered tags for the body list */
-  const std::string tags_data_body = get_tags_for_category_ui(
-      wm, category, filter_show_all_modes, filter_current_mode, current_mode_flag);
+  const std::string tags_data_body = get_tags_for_category_ui(wm, category, filter_mode_flag);
 
   /* Don't show tags panel for reserved categories */
   if (!is_reserved) {
@@ -2419,11 +2470,18 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
           RNA_string_set(op->ptr, "display_name", item->display_name);
         }
 
-        /* Load glyph */
+        /* Load glyph.
+         * For glyph-only categories, `category` itself is the canonical id/default glyph.
+         * Do not seed the editable glyph field with that intrinsic id value, otherwise live
+         * preview/save can treat it like a user-entered override. */
         if (item->glyph[0] != '\0') {
-          char hex_code[16];
-          utf8_to_hex_codepoint(item->glyph, hex_code, sizeof(hex_code));
-          RNA_string_set(op->ptr, "glyph", hex_code);
+          const bool is_glyph_only_category = is_single_glyph_str(category);
+          const bool is_intrinsic_category_glyph = is_glyph_only_category && STREQ(item->glyph, category);
+          if (!is_intrinsic_category_glyph) {
+            char hex_code[16];
+            utf8_to_hex_codepoint(item->glyph, hex_code, sizeof(hex_code));
+            RNA_string_set(op->ptr, "glyph", hex_code);
+          }
         }
 
         /* Load color if not default black */
@@ -2453,7 +2511,9 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     }
   }
 
-  /* If glyph is still empty, use panel_category_glyph_lookup */
+  /* If glyph is still empty, use panel_category_glyph_lookup.
+   * For glyph-only categories, avoid seeding with the intrinsic category-id glyph
+   * (same value as `category`) for the same reason as above. */
   char current_glyph[16] = "";
   RNA_string_get(op->ptr, "glyph", current_glyph);
   if (current_glyph[0] == '\0') {
@@ -2463,9 +2523,13 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     const char *default_glyph = panel_category_glyph_lookup(wm, category, nullptr, &is_fallback, glyph_color);
 
     if (default_glyph) {
+      const bool is_glyph_only_category = is_single_glyph_str(category);
+      const bool is_intrinsic_category_glyph = is_glyph_only_category && STREQ(default_glyph, category);
+      if (!is_intrinsic_category_glyph) {
       char hex_code[16];
       utf8_to_hex_codepoint(default_glyph, hex_code, sizeof(hex_code));
       RNA_string_set(op->ptr, "glyph", hex_code);
+      }
     }
   }
 
@@ -2585,11 +2649,59 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     BLI_addtail(&wm->category_glyph_overrides, item);
   }
 
-  /* Look up what the default glyph would be for this category.
-   * This tells us if the current glyph is a fallback letter.
+  /* Resolve base/default glyph from stable mappings first (canonical category key),
+   * and only then use lookup as a fallback.
+   *
+   * Rationale:
+   * - `panel_category_glyph_lookup()` is runtime-oriented and can be influenced by live override state.
+   * - Save logic must compare against a stable baseline (mapping default), otherwise custom glyphs can be
+   *   incorrectly treated as default and cleared.
    */
-  bool is_fallback = false;
-  const char *default_glyph = panel_category_glyph_lookup(wm, category, nullptr, &is_fallback, nullptr);
+  char default_glyph[8] = "";
+  bool default_glyph_found = false;
+
+  for (CategoryGlyphItem *map_item =
+           static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+       map_item;
+       map_item = static_cast<CategoryGlyphItem *>(map_item->next))
+  {
+    if (!STREQ(map_item->category, category)) {
+      continue;
+    }
+
+    if (map_item->default_glyph[0] != '\0') {
+      STRNCPY(default_glyph, map_item->default_glyph);
+      default_glyph_found = true;
+    }
+    else if (is_single_glyph_str(category) && map_item->glyph[0] != '\0') {
+      /* Glyph-only category: reset/default is its glyph value. */
+      STRNCPY(default_glyph, map_item->glyph);
+      default_glyph_found = true;
+    }
+    /* text_only categories intentionally keep default_glyph empty so reset falls back to first letter. */
+    break;
+  }
+
+  if (!default_glyph_found) {
+    /* Fallback for categories not present in mappings yet.
+     * Temporarily clear live override glyph to avoid self-matching. */
+    char previous_override_glyph[8] = "";
+    if (item->glyph[0] != '\0') {
+      STRNCPY(previous_override_glyph, item->glyph);
+      item->glyph[0] = '\0';
+    }
+
+    bool is_fallback = false;
+    const char *default_glyph_lookup = panel_category_glyph_lookup(
+        wm, category, nullptr, &is_fallback, nullptr);
+    if (default_glyph_lookup) {
+      STRNCPY(default_glyph, default_glyph_lookup);
+    }
+
+    if (previous_override_glyph[0] != '\0') {
+      STRNCPY(item->glyph, previous_override_glyph);
+    }
+  }
 
   /* Update values */
   STRNCPY(item->display_name, display_name);
@@ -2599,8 +2711,12 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
    * If glyph matches the default (especially fallback letters), leave it empty
    * so that the lookup function will return the correct is_fallback status.
    */
-  if (glyph[0] != '\0' && default_glyph && !STREQ(glyph, default_glyph)) {
+  if (glyph[0] != '\0' && default_glyph[0] != '\0' && !STREQ(glyph, default_glyph)) {
     /* User has set a custom glyph different from default */
+    STRNCPY(item->glyph, glyph);
+  }
+  else if (glyph[0] != '\0' && default_glyph[0] == '\0') {
+    /* No resolved default glyph (rare edge-case) - keep explicit user glyph. */
     STRNCPY(item->glyph, glyph);
   }
   else {

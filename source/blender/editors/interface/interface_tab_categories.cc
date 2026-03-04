@@ -2182,10 +2182,20 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
           category_width = glyph_h + text_w + glyph_text_gap;
         }
         else {
-          BLF_enable(fontid, BLF_ROTATION);
-          BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
-          category_width = round_fl_to_int(BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
-          BLF_disable(fontid, BLF_ROTATION);
+          /* Keep sizing behavior in sync with drawing code:
+           * - single-glyph labels are drawn as glyphs (not rotated text)
+           * - non-glyph labels are drawn as rotated text. */
+          if (is_single_glyph_str(category_id_draw)) {
+            category_width = round_fl_to_int(
+                BLF_height(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+          }
+          else {
+            BLF_enable(fontid, BLF_ROTATION);
+            BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+            category_width = round_fl_to_int(
+                BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+            BLF_disable(fontid, BLF_ROTATION);
+          }
         }
         break;
       }

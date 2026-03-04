@@ -1251,8 +1251,13 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
 
   button_col.separator();
 
-  /* Open preferences for full tag management */
-  button_col.op("screen.userpref_show", "", ICON_PREFERENCES, wm::OpCallContext::ExecDefault, UI_ITEM_NONE);
+  /* Open preferences for full tag management - jump to TAGS section */
+  PointerRNA prefs_ptr = button_col.op("screen.userpref_show",
+                                        "",
+                                        ICON_PREFERENCES,
+                                        wm::OpCallContext::ExecDefault,
+                                        UI_ITEM_NONE);
+  RNA_enum_set(&prefs_ptr, "section", USER_SECTION_TAGS);
 }
 
 /**

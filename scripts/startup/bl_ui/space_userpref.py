@@ -2391,7 +2391,9 @@ class USERPREF_OT_category_tag_create(Operator):
     def invoke(self, context, event):
         context.window_manager.category_tag_glyph_hex = ""
         self.glyph_search = ""
-        return context.window_manager.invoke_props_dialog(self, width=350)
+        # Set default glyph for tags (not category glyph)
+        self.glyph = DEFAULT_TAG_GLYPH_HEX
+        return context.window_manager.invoke_props_dialog(self, width=405)
 
 
 class USERPREF_OT_category_tag_add(Operator):

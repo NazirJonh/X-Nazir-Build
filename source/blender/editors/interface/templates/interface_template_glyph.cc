@@ -418,7 +418,7 @@ void uiTemplateGlyphPreview(Layout *layout,
   block_layout_set_current(preview_block, &preview_row);
 
   const uiStyle *style = style_get_dpi();
-  const int preview_size = int(style->widget.points * UI_SCALE_FAC * 3.0f * size_multiplier);
+  const int preview_size = int(style->widget.points * UI_SCALE_FAC * 2.0f * size_multiplier);
 
   /* Create local preview data for this button instance */
   GlyphPreviewData *preview_data = MEM_new<GlyphPreviewData>("GlyphPreviewData");

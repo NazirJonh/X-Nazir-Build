@@ -37,74 +37,6 @@
 namespace blender::ui {
 
 /* -------------------------------------------------------------------- */
-/** \name Glyph Utility Functions
- * \{ */
-
-/* Convert hex codepoint to UTF-8 character */
-static bool hex_codepoint_to_utf8(const char *hex, char *utf8_out, size_t utf8_max)
-{
-  if (!hex || !hex[0]) {
-    return false;
-  }
-
-  /* Skip optional "0x" prefix */
-  const char *hex_start = hex;
-  if (hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X')) {
-    hex_start = hex + 2;
-  }
-
-  /* Check if remaining string is valid hex */
-  size_t hex_len = strlen(hex_start);
-  if (hex_len == 0 || hex_len > 6) {
-    return false;
-  }
-
-  for (size_t i = 0; i < hex_len; i++) {
-    if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
-      return false;
-    }
-  }
-
-  /* Convert hex string to integer */
-  uint val = uint(strtoul(hex_start, nullptr, 16));
-
-  /* Validate Unicode codepoint range */
-  if (val < 32 || val > 0x10FFFF) {
-    return false;
-  }
-
-  /* Convert to UTF-8 using Blender's built-in function */
-  const int utf8_len = BLI_str_utf8_from_unicode(val, utf8_out, utf8_max);
-
-  /* BLI_str_utf8_from_unicode does NOT null-terminate, so we must do it */
-  if (utf8_len > 0 && size_t(utf8_len) < utf8_max) {
-    utf8_out[utf8_len] = '\0';
-  }
-
-  return utf8_len > 0;
-}
-
-/* Process glyph input - convert hex code to UTF-8 character */
-static bool process_glyph_input(const char *input, char *output, size_t output_max)
-{
-  if (!input || !input[0]) {
-    output[0] = '\0';
-    return false;
-  }
-
-  /* Try to convert as hex codepoint first */
-  if (hex_codepoint_to_utf8(input, output, output_max)) {
-    return true;
-  }
-
-  /* Invalid input - return empty string */
-  output[0] = '\0';
-  return false;
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
 /** \name Glyph Input Row Template
  *
  * Creates a row with glyph input fields and buttons:
@@ -294,55 +226,33 @@ static void glyph_search_result_default_cb(bContext *C, void *arg1, void *arg2)
 /* Callback function for the default "More glyphs" button */
 static void glyph_more_glyphs_default_cb(bContext *C, void *arg1, void * /*arg2*/)
 {
-  printf("[GLYPH CALLBACK] === glyph_more_glyphs_default_cb START ===\n");
-
   GlyphButtonCallbackData *data = static_cast<GlyphButtonCallbackData *>(arg1);
   if (!data) {
-    printf("[GLYPH CALLBACK] ERROR: data is NULL!\n");
     return;
   }
 
-  printf("[GLYPH CALLBACK] data->category = '%s'\n", data->category ? data->category : "NULL");
-  printf("[GLYPH CALLBACK] data->glyph_propname = '%s'\n", data->glyph_propname ? data->glyph_propname : "NULL");
-
-  wmOperator *active_op = context_active_operator_get(C);
-  printf("[GLYPH CALLBACK] context_active_operator_get = %p (idname='%s')\n",
-         (void *)active_op,
-         (active_op && active_op->idname) ? active_op->idname : "NULL");
-
   wmOperator *target_op = data->target_op;
-  printf("[GLYPH CALLBACK] data->target_op = %p (idname='%s')\n",
-         (void *)target_op,
-         (target_op && target_op->idname) ? target_op->idname : "NULL");
 
   /* Open glyph grid popup using direct operator call */
   wmOperatorType *ot = WM_operatortype_find("WM_OT_glyph_picker_grid", false);
   if (ot) {
-    printf("[GLYPH CALLBACK] Found WM_OT_glyph_picker_grid operator\n");
-
     PointerRNA op_ptr = WM_operator_properties_create_ptr(ot);
 
     /* Set category */
     if (data->category && data->category[0] != '\0') {
       RNA_string_set(&op_ptr, "category", data->category);
-      printf("[GLYPH CALLBACK] Set category = '%s'\n", data->category);
     }
 
     if (data->glyph_propname && data->glyph_propname[0] != '\0') {
       char target_prop[128];
       SNPRINTF(target_prop, "%s", data->glyph_propname);
       RNA_string_set(&op_ptr, "target_property", target_prop);
-      printf("[GLYPH CALLBACK] Set target_property = '%s'\n", target_prop);
     }
 
     if (target_op) {
       char target_op_ptr_str[64];
       SNPRINTF(target_op_ptr_str, "%llu", (unsigned long long)(uintptr_t)target_op);
       RNA_string_set(&op_ptr, "target_operator_ptr", target_op_ptr_str);
-      printf("[GLYPH TEMPLATE CALLBACK] Set target_operator_ptr = '%s' (op=%p, idname='%s')\n", 
-             target_op_ptr_str,
-             (void *)target_op,
-             target_op->idname ? target_op->idname : "NULL");
     }
 
     if (data->target_op_properties) {
@@ -351,19 +261,11 @@ static void glyph_more_glyphs_default_cb(bContext *C, void *arg1, void * /*arg2*
                "%llu",
                (unsigned long long)(uintptr_t)data->target_op_properties);
       RNA_string_set(&op_ptr, "target_operator_properties_ptr", target_op_props_ptr_str);
-      printf("[GLYPH TEMPLATE CALLBACK] Set target_operator_properties_ptr = '%s' (props=%p)\n",
-             target_op_props_ptr_str,
-             (void *)data->target_op_properties);
     }
 
-    printf("[GLYPH CALLBACK] Calling WM_operator_name_call_ptr...\n");
     WM_operator_name_call_ptr(C, ot, wm::OpCallContext::InvokeDefault, &op_ptr, nullptr);
-    printf("[GLYPH CALLBACK] WM_operator_name_call_ptr returned\n");
 
     WM_operator_properties_free(&op_ptr);
-  }
-  else {
-    printf("[GLYPH CALLBACK] ERROR: WM_OT_glyph_picker_grid operator not found!\n");
   }
 
   /* Clean up callback data */
@@ -374,8 +276,6 @@ static void glyph_more_glyphs_default_cb(bContext *C, void *arg1, void * /*arg2*
     MEM_delete_void(static_cast<void *>(data->glyph_propname));
   }
   MEM_delete(data);
-
-  printf("[GLYPH CALLBACK] === glyph_more_glyphs_default_cb END ===\n");
 }
 
 /* Internal implementation with callback support */
@@ -437,15 +337,9 @@ static void ui_template_glyph_input_row_impl(Layout *layout,
 
   /* Use provided callback if available, otherwise use default behavior */
   if (more_glyphs_callback) {
-    printf("[GLYPH TEMPLATE] Using custom callback\n");
     button_func_set(glyph_but, more_glyphs_callback, callback_user_data, nullptr);
   }
   else {
-    printf("[GLYPH TEMPLATE] === Setting up DEFAULT callback ===\n");
-    printf("[GLYPH TEMPLATE] category = '%s'\n", category ? category : "");
-    printf("[GLYPH TEMPLATE] glyph_propname = '%s'\n", glyph_propname);
-    printf("[GLYPH TEMPLATE] ptr = %p\n", (void *)ptr);
-
     /* Default behavior: Open glyph grid popup with target operator info */
     GlyphButtonCallbackData *data = MEM_new<GlyphButtonCallbackData>(__func__);
 
@@ -465,13 +359,7 @@ static void ui_template_glyph_input_row_impl(Layout *layout,
     /* Resolve and store target operator now (while PointerRNA is valid in this draw call). */
     data->target_op = glyph_find_operator_from_properties_ptr(C, ptr);
     data->target_op_properties = static_cast<IDProperty *>(ptr->data);
-    printf("[GLYPH TEMPLATE] Resolved data->target_op = %p (idname='%s')\n",
-           (void *)data->target_op,
-           (data->target_op && data->target_op->idname) ? data->target_op->idname : "NULL");
-
-    printf("[GLYPH TEMPLATE] Created GlyphButtonCallbackData, setting button callback...\n");
     button_func_set(glyph_but, glyph_more_glyphs_default_cb, data, nullptr);
-    printf("[GLYPH TEMPLATE] Button callback set successfully\n");
   }
 
   /* Right side: Code field + Paste button - right aligned */
@@ -826,21 +714,12 @@ static void ui_template_glyph_selector_impl(Layout *layout,
                                             void *callback_user_data,
                                             ButtonHandleFunc result_callback)
 {
-  printf("[GLYPH SELECTOR IMPL] === ui_template_glyph_selector_impl START ===\n");
-  printf("[GLYPH SELECTOR IMPL] glyph_propname = '%s'\n", glyph_propname ? glyph_propname : "NULL");
-  printf("[GLYPH SELECTOR IMPL] search_propname = '%s'\n", search_propname ? search_propname : "NULL");
-  printf("[GLYPH SELECTOR IMPL] category = '%s'\n", category ? category : "NULL");
-  printf("[GLYPH SELECTOR IMPL] more_glyphs_callback = %p\n", (void *)more_glyphs_callback);
-
   if (!layout || !ptr || !glyph_propname) {
-    printf("[GLYPH SELECTOR IMPL] ERROR: Invalid parameters! layout=%p, ptr=%p, glyph_propname=%s\n",
-           (void *)layout, (void *)ptr, glyph_propname ? glyph_propname : "NULL");
     return;
   }
 
   /* Input row with search/code fields and buttons */
   if (show_search || show_code) {
-    printf("[GLYPH SELECTOR IMPL] Calling ui_template_glyph_input_row_impl...\n");
     ui_template_glyph_input_row_impl(layout, C, ptr, glyph_propname, search_propname,
                                      show_search, show_code, category,
                                      more_glyphs_callback, callback_user_data);
@@ -884,19 +763,9 @@ void uiTemplateGlyphSelector(Layout *layout,
                              bool show_search,
                              bool show_code)
 {
-  printf("[GLYPH TEMPLATE SELECTOR] === uiTemplateGlyphSelector called ===\n");
-  printf("[GLYPH TEMPLATE SELECTOR] glyph_propname = '%s'\n", glyph_propname ? glyph_propname : "NULL");
-  printf("[GLYPH TEMPLATE SELECTOR] search_propname = '%s'\n", search_propname ? search_propname : "NULL");
-  printf("[GLYPH TEMPLATE SELECTOR] category = '%s'\n", category ? category : "NULL");
-  printf("[GLYPH TEMPLATE SELECTOR] show_preview = %d, show_search = %d, show_code = %d\n",
-         show_preview, show_search, show_code);
-  printf("[GLYPH TEMPLATE SELECTOR] ptr = %p\n", (void *)ptr);
-
   ui_template_glyph_selector_impl(layout, C, ptr, glyph_propname, search_propname,
                                   color_propname, category, show_preview, show_search, show_code,
                                   nullptr, nullptr, nullptr);
-
-  printf("[GLYPH TEMPLATE SELECTOR] === uiTemplateGlyphSelector finished ===\n");
 }
 
 /* Internal API with callback support */

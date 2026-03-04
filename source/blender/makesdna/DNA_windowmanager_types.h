@@ -210,7 +210,11 @@ struct wmWindowManager {
   /** Filter settings for category tags in popup. */
   char category_tag_filter_show_all_modes = 0;
   char category_tag_filter_current_mode = 0;
-  char _pad3[6] = {};
+  /** Show tag names in Tag Bar buttons (Glyph+Name vs Glyph-only mode). */
+  char show_tag_names = 0;
+  /** Show tag names only for active tags, inactive tags show glyph-only. */
+  char show_tag_names_active_only = 0;
+  char _pad3[4] = {};
 
   /** Available/pending extensions updates. */
   int extensions_updates = 0;

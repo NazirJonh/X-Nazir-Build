@@ -1763,6 +1763,18 @@ class VIEW3D_HT_tag_bar_tags(Header):
             # Check if this tag is in the active set
             depress = tag.name in active_tags_set
 
+            # Check if we should show tag names (Glyph+Name mode vs Glyph-only mode)
+            show_names = getattr(wm, "show_tag_names", False)
+            show_active_only = getattr(wm, "show_tag_names_active_only", False)
+
+            # Center glyph logic:
+            # - If show_names is False: center all glyphs (Glyph-only mode)
+            # - If show_names is True and show_active_only is False: show text for all tags
+            # - If show_names is True and show_active_only is True:
+            #   - Active tags: show text (left-aligned)
+            #   - Inactive tags: center glyph only
+            center_glyph = not show_names or (show_active_only and not depress)
+
             row.tag_button(
                 "view3d.tag_bar_toggle",
                 tag_name=tag.name,
@@ -1771,7 +1783,7 @@ class VIEW3D_HT_tag_bar_tags(Header):
                 color_g=tag.color[1],
                 color_b=tag.color[2],
                 depress=depress,
-                center_glyph=True,  # Center glyph in tag bar buttons
+                center_glyph=center_glyph,
                 tooltip=tag.name,
                 # NEW PARAMETERS (after C++ changes):
                 context_menu_operator="view3d.tag_context_menu",

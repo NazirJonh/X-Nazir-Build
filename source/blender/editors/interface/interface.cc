@@ -5121,6 +5121,7 @@ Button *uiDefButTag(Block *block,
                     const float *color,
                     bool is_active,
                     bool is_pref_mode,
+                    bool center_glyph,
                     int x, int y, short width, short height,
                     const char *tip)
 {
@@ -5217,6 +5218,14 @@ Button *uiDefButTag(Block *block,
   }
 
   /* ============================================================
+   * SET GLYPH CENTERING
+   * ============================================================ */
+
+  if (center_glyph) {
+    button_drawflag_enable(tag_but, BUT_TAG_CENTER_GLYPH);
+  }
+
+  /* ============================================================
    * ADD TO LAYOUT SYSTEM
    * ============================================================ */
 
@@ -5252,11 +5261,12 @@ Button *uiDefButTagPref(Block *block,
                         const char *tag_name,
                         const char *glyph,
                         const float *color,
+                        bool center_glyph,
                         int x, int y, short width, short height,
                         const char *tip)
 {
   /* Preference mode: no checkbox, is_active=false */
-  return uiDefButTag(block, tag_name, glyph, color, false, true, x, y, width, height, tip);
+  return uiDefButTag(block, tag_name, glyph, color, false, true, center_glyph, x, y, width, height, tip);
 }
 
 /**
@@ -5306,7 +5316,7 @@ extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
   block_layout_set_current(block, layout);
 
   /* Create preference mode Tag button */
-  uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, 0, 0, (short)width, (short)height, nullptr);
+  uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, false, 0, 0, (short)width, (short)height, nullptr);
 }
 
 /**
@@ -5377,7 +5387,7 @@ uiLayout *uiDefButTagRow(uiLayout *layout,
 
   /* CREATE TAG BUTTON IN PREFERENCE MODE */
   block_layout_set_current(block, &row);
-  Button *tag_but = uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, 0, 0, (short)width, (short)height, nullptr);
+  Button *tag_but = uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, false, 0, 0, (short)width, (short)height, nullptr);
 
   /* SET FLAGS IF REQUESTED */
   if (no_background && tag_but) {
@@ -5438,6 +5448,7 @@ extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
     int height,
     bool no_background,
     bool align,
+    bool center_glyph,
     const char *operator_name,
     const char *context_menu_operator,
     const char *operator_param_name,
@@ -5476,7 +5487,7 @@ extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
 
   /* CREATE TAG BUTTON IN PREFERENCE MODE */
   block_layout_set_current(block, &row);
-  Button *tag_but = uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, 0, 0, (short)width, (short)height, nullptr);
+  Button *tag_but = uiDefButTagPref(block, tag_name, glyph ? glyph : "", color, center_glyph, 0, 0, (short)width, (short)height, nullptr);
 
   /* SET FLAGS IF REQUESTED */
   if (no_background && tag_but) {

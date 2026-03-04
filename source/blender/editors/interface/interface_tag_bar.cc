@@ -1209,6 +1209,15 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
                 0,                           /* layout_type (UILST_LAYOUT_DEFAULT = 0) */
                 TEMPLATE_LIST_FLAG_NONE);    /* flags */
 
+  /* Checkbox for showing tag names in Tag Bar (Glyph+Name vs Glyph-only mode) */
+  layout.separator();
+  ui::Layout &prop_row = layout.row(false);
+  prop_row.prop(&wm_ptr, "show_tag_names", UI_ITEM_NONE, IFACE_("Show Tag Names"), ICON_NONE);
+
+  /* Checkbox for showing tag names only for active tags */
+  ui::Layout &prop_row2 = layout.row(false);
+  prop_row2.prop(&wm_ptr, "show_tag_names_active_only", UI_ITEM_NONE, IFACE_("Only Active Tags"), ICON_NONE);
+
   /* Move buttons column */
   ui::Layout &button_col = row.column(true);
 

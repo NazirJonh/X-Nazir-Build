@@ -232,12 +232,17 @@ static void template_palette_menu(bContext * /*C*/, Layout *layout, void * /*but
 void template_palette(Layout *layout,
                       PointerRNA *ptr,
                       const StringRefNull propname,
-                      bool /*colors*/)
+                      bool /*colors*/,
+                      const bool show_empty_message,
+                      const bool show_sort_buttons)
 {
   PropertyRNA *prop = RNA_struct_find_property(ptr, propname.c_str());
   Button *but = nullptr;
 
-  const int cols_per_row = std::max(layout->width() / UI_UNIT_X, 1);
+  /* Larger swatches improve tablet/pen interaction. Toggled globally via
+   * #UI_OT_palette_swatch_size_toggle. */
+  const float button_size = palette_swatch_size_large_get() ? UI_UNIT_X * 1.5f : UI_UNIT_X;
+  const int cols_per_row = std::max(int(layout->width() / button_size), 1);
 
   if (!prop) {
     RNA_warning("property not found: %s.%s", RNA_struct_identifier(ptr->type), propname.c_str());
@@ -254,87 +259,138 @@ void template_palette(Layout *layout,
   Palette *palette = static_cast<Palette *>(cptr.data);
 
   Layout *col = &layout->column(true);
-  col->row(true);
-  uiDefIconButO(block,
-                ButtonType::But,
-                "PALETTE_OT_color_add",
-                wm::OpCallContext::InvokeDefault,
-                ICON_ADD,
-                0,
-                0,
-                UI_UNIT_X,
-                UI_UNIT_Y,
-                std::nullopt);
-  uiDefIconButO(block,
-                ButtonType::But,
-                "PALETTE_OT_color_delete",
-                wm::OpCallContext::InvokeDefault,
-                ICON_REMOVE,
-                0,
-                0,
-                UI_UNIT_X,
-                UI_UNIT_Y,
-                std::nullopt);
-  if (palette->colors.first != nullptr) {
-    but = uiDefIconButO(block,
-                        ButtonType::But,
-                        "PALETTE_OT_color_move",
-                        wm::OpCallContext::InvokeDefault,
-                        ICON_TRIA_UP,
-                        0,
-                        0,
-                        UI_UNIT_X,
-                        UI_UNIT_Y,
-                        std::nullopt);
-    button_operator_ptr_ensure(but);
-    RNA_enum_set(but->opptr, "type", -1);
-
-    but = uiDefIconButO(block,
-                        ButtonType::But,
-                        "PALETTE_OT_color_move",
-                        wm::OpCallContext::InvokeDefault,
-                        ICON_TRIA_DOWN,
-                        0,
-                        0,
-                        UI_UNIT_X,
-                        UI_UNIT_Y,
-                        std::nullopt);
-    button_operator_ptr_ensure(but);
-    RNA_enum_set(but->opptr, "type", 1);
-
-    /* Menu. */
-    uiDefIconMenuBut(
-        block, template_palette_menu, nullptr, ICON_SORTSIZE, 0, 0, UI_UNIT_X, UI_UNIT_Y, "");
+  /* Row with buttons on left, size toggle on right */
+  Layout &row_split = col->row(true);
+  row_split.alignment_set(LayoutAlign::Expand);
+  const int layout_width = layout->width();
+  if (layout_width > 0) {
+    row_split.ui_units_x_set(float(layout_width) / float(UI_UNIT_X));
   }
 
-  col = &layout->column(true);
-  col->row(true);
+  /* Left side: add, delete, sort buttons */
+  Layout &row_left = row_split.row(true);
+  row_left.fixed_size_set(true);
+  but = uiDefIconButO(block,
+                      ButtonType::But,
+                      "PALETTE_OT_color_add",
+                      wm::OpCallContext::InvokeDefault,
+                      ICON_ADD,
+                      0,
+                      0,
+                      UI_UNIT_X,
+                      UI_UNIT_Y,
+                      std::nullopt);
+  button_drawflag_disable(but, BUT_ICON_LEFT);
+  but = uiDefIconButO(block,
+                      ButtonType::But,
+                      "PALETTE_OT_color_delete",
+                      wm::OpCallContext::InvokeDefault,
+                      ICON_REMOVE,
+                      0,
+                      0,
+                      UI_UNIT_X,
+                      UI_UNIT_Y,
+                      std::nullopt);
+  button_drawflag_disable(but, BUT_ICON_LEFT);
+  if (show_sort_buttons) {
+    if (palette->colors.first != nullptr) {
+      but = uiDefIconButO(block,
+                          ButtonType::But,
+                          "PALETTE_OT_color_move",
+                          wm::OpCallContext::InvokeDefault,
+                          ICON_TRIA_UP,
+                          0,
+                          0,
+                          UI_UNIT_X,
+                          UI_UNIT_Y,
+                          std::nullopt);
+      button_drawflag_disable(but, BUT_ICON_LEFT);
+      button_operator_ptr_ensure(but);
+      RNA_enum_set(but->opptr, "type", -1);
 
-  int row_cols = 0, col_id = 0;
-  for (PaletteColor &color : palette->colors) {
-    if (row_cols >= cols_per_row) {
-      col->row(true);
-      row_cols = 0;
+      but = uiDefIconButO(block,
+                          ButtonType::But,
+                          "PALETTE_OT_color_move",
+                          wm::OpCallContext::InvokeDefault,
+                          ICON_TRIA_DOWN,
+                          0,
+                          0,
+                          UI_UNIT_X,
+                          UI_UNIT_Y,
+                          std::nullopt);
+      button_drawflag_disable(but, BUT_ICON_LEFT);
+      button_operator_ptr_ensure(but);
+      RNA_enum_set(but->opptr, "type", 1);
+
+      /* Menu. */
+      uiDefIconMenuBut(
+          block, template_palette_menu, nullptr, ICON_SORTSIZE, 0, 0, UI_UNIT_X, UI_UNIT_Y, "");
     }
+  }
 
-    PointerRNA color_ptr = RNA_pointer_create_discrete(&palette->id, RNA_PaletteColor, &color);
-    ButtonColor *color_but = static_cast<ButtonColor *>(uiDefButR(block,
-                                                                  ButtonType::Color,
-                                                                  "",
-                                                                  0,
-                                                                  0,
-                                                                  UI_UNIT_X,
-                                                                  UI_UNIT_Y,
-                                                                  &color_ptr,
-                                                                  "color",
-                                                                  -1,
-                                                                  0.0,
-                                                                  1.0,
-                                                                  ""));
-    color_but->is_pallete_color = true;
-    color_but->palette_color_index = col_id;
-    row_cols++;
-    col_id++;
+  /* Size toggle button on the right side */
+  Layout &row_toggle = row_split.row(true);
+  row_toggle.alignment_set(LayoutAlign::Right);
+  but = uiDefIconButO(block,
+                      ButtonType::But,
+                      "UI_OT_palette_swatch_size_toggle",
+                      wm::OpCallContext::InvokeDefault,
+                      ICON_FULLSCREEN_ENTER,
+                      0,
+                      0,
+                      UI_UNIT_X,
+                      UI_UNIT_Y,
+                      std::nullopt);
+  button_drawflag_disable(but, BUT_ICON_LEFT);
+
+  /* Show message when palette is empty (in a separate row to not affect alignment) */
+  if (show_empty_message && palette->colors.first == nullptr) {
+    col = &layout->column(true);
+    col->row(true);
+    uiDefBut(block,
+             ButtonType::Label,
+             IFACE_("No colors in palette"),
+             0,
+             0,
+             UI_UNIT_X * 10,
+             UI_UNIT_Y,
+             nullptr,
+             0.0,
+             0.0,
+             "");
+  }
+
+  /* Only draw color swatches if palette has colors */
+  if (palette->colors.first != nullptr) {
+    col = &layout->column(true);
+    col->row(true);
+
+    int row_cols = 0, col_id = 0;
+    for (PaletteColor &color : palette->colors) {
+      if (row_cols >= cols_per_row) {
+        col->row(true);
+        row_cols = 0;
+      }
+
+      PointerRNA color_ptr = RNA_pointer_create_discrete(&palette->id, RNA_PaletteColor, &color);
+      ButtonColor *color_but = static_cast<ButtonColor *>(uiDefButR(block,
+                                                                    ButtonType::Color,
+                                                                    "",
+                                                                    0,
+                                                                    0,
+                                                                    button_size,
+                                                                    button_size,
+                                                                    &color_ptr,
+                                                                    "color",
+                                                                    -1,
+                                                                    0.0,
+                                                                    1.0,
+                                                                    ""));
+      color_but->is_pallete_color = true;
+      color_but->palette_color_index = col_id;
+      row_cols++;
+      col_id++;
+    }
   }
 }
 

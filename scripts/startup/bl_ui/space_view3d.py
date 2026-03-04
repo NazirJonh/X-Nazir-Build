@@ -8784,6 +8784,29 @@ class VIEW3D_PT_paint_vertex_context_menu(Panel):
             slider=True,
         )
 
+        # Color Palette section
+        if capabilities.has_color:
+            settings = context.tool_settings.vertex_paint
+            layout.separator()
+
+            # Collapsible Color Palette section
+            palette_header, palette_panel = layout.panel("color_palette", default_closed=True)
+            palette_header.label(text="Color Palette", icon='COLOR')
+
+            if palette_panel:
+                # Palette selector (create/browse/rename)
+                palette_selector = palette_panel.row(align=True)
+                palette_selector.template_ID(settings, "palette", new="palette.new")
+
+                # Color swatches
+                if settings.palette:
+                    palette_panel.template_palette(
+                        settings, "palette",
+                        color=True,
+                        show_empty_message=True,
+                        show_sort_buttons=False
+                    )
+
 
 class VIEW3D_PT_paint_texture_context_menu(Panel):
     # Used in both the 3DView as well as the Image Editor
@@ -8831,6 +8854,29 @@ class VIEW3D_PT_paint_texture_context_menu(Panel):
                 pressure_name="use_pressure_strength",
                 slider=True,
             )
+
+        # Color Palette section
+        if capabilities.has_color:
+            settings = context.tool_settings.image_paint
+            layout.separator()
+
+            # Collapsible Color Palette section
+            palette_header, palette_panel = layout.panel("color_palette", default_closed=True)
+            palette_header.label(text="Color Palette", icon='COLOR')
+
+            if palette_panel:
+                # Palette selector (create/browse/rename)
+                palette_selector = palette_panel.row(align=True)
+                palette_selector.template_ID(settings, "palette", new="palette.new")
+
+                # Color swatches
+                if settings.palette:
+                    palette_panel.template_palette(
+                        settings, "palette",
+                        color=True,
+                        show_empty_message=True,
+                        show_sort_buttons=False
+                    )
 
 
 class VIEW3D_PT_paint_weight_context_menu(Panel):

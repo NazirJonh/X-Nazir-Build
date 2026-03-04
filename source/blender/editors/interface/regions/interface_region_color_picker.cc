@@ -14,6 +14,8 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_brush_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
 
 #include "BLI_listbase.h"
@@ -22,16 +24,21 @@
 #include "BLI_utildefines.h"
 
 #include "BKE_context.hh"
+#include "BKE_paint.hh"
+#include "BKE_paint_types.hh"
 
 #include "UI_interface_c.hh"
 #include "WM_api.hh"
 #include "WM_types.hh"
 
 #include "RNA_access.hh"
+#include "RNA_prototypes.hh"
 
 #include "BLT_translation.hh"
 
 #include "IMB_colormanagement.hh"
+
+#include "UI_interface_layout.hh"
 
 #include "interface_intern.hh"
 
@@ -667,12 +674,41 @@ static void colorpicker_square(
   hsv_but->custom_data = cpicker;
 }
 
+/* Build an RNA pointer to the paint settings for `mode`, used to expose the active palette in the
+ * color picker popup. Returns a null pointer (`ptr.data == nullptr`) when the mode has no paint
+ * settings allocated. */
+static PointerRNA paint_palette_settings_ptr_get(Scene &scene, const PaintMode mode)
+{
+  ToolSettings &ts = *scene.toolsettings;
+  switch (mode) {
+    case PaintMode::Sculpt:
+      return RNA_pointer_create_discrete(&scene.id, RNA_Sculpt, ts.sculpt);
+    case PaintMode::Vertex:
+      return RNA_pointer_create_discrete(&scene.id, RNA_VertexPaint, ts.vpaint);
+    case PaintMode::Weight:
+      return RNA_pointer_create_discrete(&scene.id, RNA_VertexPaint, ts.wpaint);
+    case PaintMode::Texture2D:
+    case PaintMode::Texture3D:
+      return RNA_pointer_create_discrete(&scene.id, RNA_ImagePaint, &ts.imapaint);
+    case PaintMode::GPencil:
+      return RNA_pointer_create_discrete(&scene.id, RNA_GpPaint, ts.gp_paint);
+    case PaintMode::VertexGPencil:
+      return RNA_pointer_create_discrete(&scene.id, RNA_GpVertexPaint, ts.gp_vertexpaint);
+    case PaintMode::SculptGPencil:
+      return RNA_pointer_create_discrete(&scene.id, RNA_GpSculptPaint, ts.gp_sculptpaint);
+    case PaintMode::WeightGPencil:
+      return RNA_pointer_create_discrete(&scene.id, RNA_GpWeightPaint, ts.gp_weightpaint);
+    case PaintMode::SculptCurves:
+      return RNA_pointer_create_discrete(&scene.id, RNA_CurvesSculpt, ts.curves_sculpt);
+    case PaintMode::Invalid:
+      break;
+  }
+  return PointerRNA_NULL;
+}
+
 /* a HS circle, V slider, rgb/hsv/hex sliders */
-static void block_colorpicker(const bContext * /*C*/,
-                              Block *block,
-                              Button *from_but,
-                              float rgba_scene_linear[4],
-                              bool show_picker)
+static void block_colorpicker(
+    bContext *C, Block *block, Button *from_but, float rgba_scene_linear[4], bool show_picker)
 {
   /* ePickerType */
   Button *bt;
@@ -1072,6 +1108,63 @@ static void block_colorpicker(const bContext * /*C*/,
   }
 
   colorpicker_hide_reveal(block);
+
+  /* Add a Color Palette section when the picker is opened in a paint mode. */
+  if (C) {
+    Scene *scene = CTX_data_scene(C);
+    const PaintMode mode = scene ? BKE_paintmode_get_active_from_context(C) : PaintMode::Invalid;
+    /* Use the already-allocated paint settings; do not allocate here, as this runs while building
+     * the block (allocating during draw would be a side effect on scene data). */
+    Paint *paint = (mode != PaintMode::Invalid) ?
+                       BKE_paint_get_active_from_paintmode(scene, mode) :
+                       nullptr;
+    PointerRNA ptr = paint ? paint_palette_settings_ptr_get(*scene, mode) : PointerRNA_NULL;
+
+    if (ptr.data != nullptr) {
+      /* The color wheel/square is placed above `y == 0`, so the block's top does not coincide with
+       * the layout coordinate origin. Layout panels (the palette sub-panel added below) assume
+       * `block->rect.ymax` is that origin (block top at `y == 0`), as in standard popovers. Shift
+       * all existing widgets down so the content top aligns with `y == 0`; otherwise the palette
+       * header backdrop and its click region are offset upwards by the picker height. */
+      float content_top = 0.0f;
+      for (const Button &but : block->buttons()) {
+        if (but.rect.ymax > content_top) {
+          content_top = but.rect.ymax;
+        }
+      }
+      if (content_top > 0.0f) {
+        block_translate(block, 0.0f, -content_top);
+        yco -= content_top;
+      }
+
+      /* Move y position to place palette below hex field. */
+      yco -= UI_UNIT_Y;
+
+      const uiStyle *style = style_get_dpi();
+      Layout &palette_layout = block_layout(
+          block, LayoutDirection::Vertical, LayoutType::Panel, 0, yco, picker_width, 0, 0, style);
+
+      /* Collapsible Color Palette sub-panel. */
+      PanelLayout palette_panel = palette_layout.panel(C, "color_palette", false);
+      palette_panel.header->label(IFACE_("Color Palette"), ICON_COLOR);
+
+      if (palette_panel.body) {
+        /* Palette ID selector (choose/create/browse palettes). */
+        Layout &palette_selector = palette_panel.body->column(true);
+        template_id(&palette_selector, C, &ptr, "palette", "palette.new", nullptr, nullptr);
+
+        /* Color swatches, only when a palette is assigned. */
+        if (paint->palette) {
+          template_palette(palette_panel.body,
+                           &ptr,
+                           "palette",
+                           true,
+                           false,  /* show_empty_message */
+                           false); /* show_sort_buttons */
+        }
+      }
+    }
+  }
 }
 
 static int colorpicker_wheel_cb(const bContext * /*C*/, Block *block, const wmEvent *event)
@@ -1147,6 +1240,7 @@ Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but)
   Block *block;
 
   block = block_begin(C, handle->region, __func__, EmbossType::Emboss);
+  popup_dummy_panel_set(handle->region, block, "color_picker_popup");
 
   if (button_is_color_gamma(but)) {
     block->is_color_gamma_picker = true;
@@ -1156,7 +1250,7 @@ Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but)
 
   block_colorpicker(C, block, but, handle->retvec, true);
 
-  block->flag = BLOCK_LOOP | BLOCK_KEEP_OPEN | BLOCK_OUT_1 | BLOCK_MOVEMOUSE_QUIT;
+  block->flag = BLOCK_LOOP | BLOCK_KEEP_OPEN | BLOCK_OUT_1 | BLOCK_MOVEMOUSE_QUIT | BLOCK_POPUP;
   block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
   block_bounds_set_normal(block, 0.5 * UI_UNIT_X);
 

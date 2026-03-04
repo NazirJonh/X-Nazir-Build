@@ -4728,7 +4728,9 @@ static void block_open_begin(bContext *C, Button *but, HandleButtonData *data)
   }
 
   if (func || handlefunc) {
-    data->menu = popup_block_create(C, data->region, but, func, handlefunc, arg, nullptr, false);
+    const bool can_refresh = (handlefunc == block_func_COLOR);
+    data->menu = popup_block_create(
+        C, data->region, but, func, handlefunc, arg, nullptr, can_refresh);
     if (but->block->handle) {
       data->menu->popup = but->block->handle->popup;
     }
@@ -12468,26 +12470,29 @@ static int handle_menus_recursive(bContext *C,
           C, event, submenu, level + 1, is_parent_inside || inside, is_menu, false);
     }
   }
-  else if (!but && event->val == KM_PRESS && event->type == LEFTMOUSE) {
+  else if (event->val == KM_PRESS && event->type == LEFTMOUSE) {
     for (Block &block : menu->region->runtime->uiblocks) {
       if (block.panel) {
         int mx = event->xy[0];
         int my = event->xy[1];
         window_to_block(menu->region, &block, &mx, &my);
-        if (!IN_RANGE(float(mx), block.rect.xmin, block.rect.xmax)) {
-          break;
-        }
-        LayoutPanelHeader *header = layout_panel_header_under_mouse(*block.panel, my);
-        if (header) {
-          ED_region_tag_redraw(menu->region);
-          ED_region_tag_refresh_ui(menu->region);
-          ARegion *prev_region_popup = CTX_wm_region_popup(C);
-          /* Set the current context popup region so the handler context can access to it. */
-          CTX_wm_region_popup_set(C, menu->region);
-          panel_drag_collapse_handler_add(C, !layout_panel_toggle_open(C, header));
-          /* Restore previous popup region. */
-          CTX_wm_region_popup_set(C, prev_region_popup);
-          retval = WM_UI_HANDLER_BREAK;
+        if (IN_RANGE(float(mx), block.rect.xmin, block.rect.xmax)) {
+          LayoutPanelHeader *header = layout_panel_header_under_mouse(
+              *block.panel, my, menu->region);
+          if (header) {
+            ARegion *prev_region_popup = CTX_wm_region_popup(C);
+            CTX_wm_region_popup_set(C, menu->region);
+            const bool new_state = layout_panel_toggle_open(C, header);
+            CTX_wm_region_popup_set(C, prev_region_popup);
+            ED_region_tag_redraw(menu->region);
+            ED_region_tag_refresh_ui(menu->region);
+            if (menu->can_refresh) {
+              menu->menuretval |= RETURN_UPDATE;
+            }
+            panel_drag_collapse_handler_add(C, !new_state);
+            retval = WM_UI_HANDLER_BREAK;
+            break;
+          }
         }
       }
     }
@@ -12882,39 +12887,48 @@ static int popup_handler(bContext *C, const wmEvent *event, void *userdata)
   /* free if done, does not free handle itself */
   if (menu->menuretval) {
     wmWindow *win = CTX_wm_window(C);
-    /* copy values, we have to free first (closes region) */
-    const PopupBlockHandle temp = *menu;
-    Block *block = static_cast<Block *>(menu->region->runtime->uiblocks.first);
 
-    /* set last pie event to allow chained pie spawning */
-    if (block->flag & BLOCK_PIE_MENU) {
-      win->pie_event_type_last = block->pie_data->event_type;
-      reset_pie = true;
+    if ((menu->menuretval & RETURN_UPDATE) && menu->can_refresh) {
+      const int menuretval_prev = menu->menuretval;
+      menu->menuretval = 0;
+      popup_block_refresh(C, menu, menu->popup_create_vars.butregion, menu->popup_create_vars.but);
+      menu->menuretval = menuretval_prev & ~RETURN_UPDATE;
     }
+    else {
+      /* copy values, we have to free first (closes region) */
+      const PopupBlockHandle temp = *menu;
+      Block *block = static_cast<Block *>(menu->region->runtime->uiblocks.first);
 
-    popup_block_free(C, menu);
-    popup_handlers_remove(&win->runtime->modalhandlers, menu);
-    CTX_wm_region_popup_set(C, nullptr);
+      /* set last pie event to allow chained pie spawning */
+      if (block->flag & BLOCK_PIE_MENU) {
+        win->pie_event_type_last = block->pie_data->event_type;
+        reset_pie = true;
+      }
+
+      popup_block_free(C, menu);
+      popup_handlers_remove(&win->runtime->modalhandlers, menu);
+      CTX_wm_region_popup_set(C, nullptr);
 
 #ifdef USE_DRAG_TOGGLE
-    {
-      WM_event_free_ui_handler_all(C,
-                                   &win->runtime->modalhandlers,
-                                   handler_region_drag_toggle,
-                                   handler_region_drag_toggle_remove);
-    }
+      {
+        WM_event_free_ui_handler_all(C,
+                                     &win->runtime->modalhandlers,
+                                     handler_region_drag_toggle,
+                                     handler_region_drag_toggle_remove);
+      }
 #endif
 
-    if ((temp.menuretval & RETURN_OK) || (temp.menuretval & RETURN_POPUP_OK)) {
-      if (temp.popup_func) {
-        temp.popup_func(C, temp.popup_arg, temp.retvalue);
+      if ((temp.menuretval & RETURN_OK) || (temp.menuretval & RETURN_POPUP_OK)) {
+        if (temp.popup_func) {
+          temp.popup_func(C, temp.popup_arg, temp.retvalue);
+        }
       }
-    }
-    else if (temp.cancel_func) {
-      temp.cancel_func(C, temp.popup_arg);
-    }
+      else if (temp.cancel_func) {
+        temp.cancel_func(C, temp.popup_arg);
+      }
 
-    WM_event_add_mousemove(win);
+      WM_event_add_mousemove(win);
+    }
   }
   else {
     /* Re-enable tool-tips */

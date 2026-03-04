@@ -1213,33 +1213,36 @@ void draw_layout_panels_backdrop(const ARegion *region,
   const float aspect = block_is_popup_any(panel->runtime->block) ? panel->runtime->block->aspect :
                                                                    1.0f;
 
+  const Block *block = panel->runtime->block;
   for (const LayoutPanelBody &body : panel->runtime->layout_panels.bodies) {
+    /* `block->rect` is in region-local space after all popup translations.
+     * Header/body y-coords are layout-local (y=0 at block top, negative downward),
+     * so adding `block->rect.ymax` converts to region-local for drawing. */
+    rctf panel_blockspace = block->rect;
+    panel_blockspace.ymax = block->rect.ymax + body.end_y;
+    panel_blockspace.ymin = block->rect.ymax + body.start_y;
 
-    rctf panel_blockspace = panel->runtime->block->rect;
-    panel_blockspace.ymax = panel->runtime->block->rect.ymax + body.end_y;
-    panel_blockspace.ymin = panel->runtime->block->rect.ymax + body.start_y;
-
-    if (panel_blockspace.ymax <= panel->runtime->block->rect.ymin) {
-      /* Layout panels no longer fits in block rectangle, stop drawing backdrops. */
+    if (panel_blockspace.ymax <= block->rect.ymin) {
+      /* Layout panel no longer fits in block rectangle, stop drawing backdrops. */
       break;
     }
-    if (panel_blockspace.ymin >= panel->runtime->block->rect.ymax) {
+    if (panel_blockspace.ymin >= block->rect.ymax) {
       /* Skip layout panels that scrolled to the top of the block rectangle. */
       continue;
     }
-    /* If the layout panel is at the end of the root panel, it's bottom corners are rounded. */
-    const bool is_main_panel_end = panel_blockspace.ymin - panel->runtime->block->rect.ymin <
+    /* If the layout panel is at the end of the root panel, its bottom corners are rounded. */
+    const bool is_main_panel_end = panel_blockspace.ymin - block->rect.ymin <
                                    (10.0f * UI_SCALE_FAC / aspect);
     if (is_main_panel_end) {
-      panel_blockspace.ymin = panel->runtime->block->rect.ymin;
+      panel_blockspace.ymin = block->rect.ymin;
       draw_roundbox_corner_set(CNR_BOTTOM_RIGHT | CNR_BOTTOM_LEFT);
     }
     else {
       draw_roundbox_corner_set(CNR_NONE);
     }
-    panel_blockspace.ymax = std::min(panel_blockspace.ymax, panel->runtime->block->rect.ymax);
+    panel_blockspace.ymax = std::min(panel_blockspace.ymax, block->rect.ymax);
 
-    rcti panel_pixelspace = rect_to_pixelrect(region, panel->runtime->block, &panel_blockspace);
+    rcti panel_pixelspace = rect_to_pixelrect(region, block, &panel_blockspace);
     rctf panel_pixelspacef;
     BLI_rctf_rcti_copy(&panel_pixelspacef, &panel_pixelspace);
     draw_roundbox_4fv(&panel_pixelspacef, true, radius, subpanel_backcolor);
@@ -2117,10 +2120,31 @@ static void do_drag(const bContext *C, const wmEvent *event, Panel *panel)
 /** \name Region Level Panel Interaction
  * \{ */
 
-LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int my)
+LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel,
+                                                   const int my,
+                                                   const ARegion *region)
 {
+  const Block *block = panel.runtime->block;
+  if (!block) {
+    return nullptr;
+  }
+
+  /* After `window_to_block`, `my` is in region-local space. `block->rect.ymax` is the top of the
+   * block in the same region-local space (after all popup translations). Subtracting it converts
+   * to layout-local space (y=0 at block top, negative downward), matching header coordinates. */
+  float relative_y = float(my) - block->rect.ymax;
+
+  /* For non-popup regions with view2d, account for view2d zoom. */
+  if (!block_is_popup_any(block) && region && region->v2d.flag & V2D_IS_INIT) {
+    const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
+                         (BLI_rcti_size_y(&region->v2d.mask) + 1);
+    if (aspect != 1.0f) {
+      relative_y /= aspect;
+    }
+  }
+
   for (LayoutPanelHeader &header : panel.runtime->layout_panels.headers) {
-    if (IN_RANGE(float(my - panel.runtime->block->rect.ymax), header.start_y, header.end_y)) {
+    if (IN_RANGE(relative_y, header.start_y, header.end_y)) {
       return &header;
     }
   }
@@ -2130,7 +2154,8 @@ LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int
 static PanelMouseState panel_mouse_state_get(const Block *block,
                                              const Panel *panel,
                                              const int mx,
-                                             const int my)
+                                             const int my,
+                                             const ARegion *region = nullptr)
 {
   if (!IN_RANGE(float(mx), block->rect.xmin, block->rect.xmax)) {
     return PANEL_MOUSE_OUTSIDE;
@@ -2139,7 +2164,7 @@ static PanelMouseState panel_mouse_state_get(const Block *block,
   if (IN_RANGE(float(my), block->rect.ymax, block->rect.ymax + PNL_HEADER)) {
     return PANEL_MOUSE_INSIDE_HEADER;
   }
-  if (layout_panel_header_under_mouse(*panel, my) != nullptr) {
+  if (layout_panel_header_under_mouse(*panel, my, region) != nullptr) {
     return PANEL_MOUSE_INSIDE_LAYOUT_PANEL_HEADER;
   }
 
@@ -2188,6 +2213,9 @@ static void panel_drag_collapse(const bContext *C,
     window_to_block_fl(region, &block, &xy_b_block[0], &xy_b_block[1]);
 
     for (LayoutPanelHeader &header : panel->runtime->layout_panels.headers) {
+      /* Convert layout-local header bounds to region-local space for segment intersection.
+       * `block.rect.ymax` is the block top in region-local coords (same as `window_to_block_fl`
+       * output), and header.start_y/end_y are layout-local (y=0 at block top, negative down). */
       rctf rect = block.rect;
       rect.ymin = block.rect.ymax + header.start_y;
       rect.ymax = block.rect.ymax + header.end_y;
@@ -2297,22 +2325,40 @@ bool layout_panel_toggle_open(const bContext *C, LayoutPanelHeader *header)
   return !is_open;
 }
 
-static void handle_layout_panel_header(
-    bContext *C, const Block *block, const int /*mx*/, const int my, const int event_type)
+static void handle_layout_panel_header(bContext *C,
+                                       const Block *block,
+                                       ARegion *region,
+                                       const int /*mx*/,
+                                       const int my,
+                                       const int event_type)
 {
   Panel *panel = block->panel;
   BLI_assert(panel->type != nullptr);
 
-  LayoutPanelHeader *header = layout_panel_header_under_mouse(*panel, my);
+  LayoutPanelHeader *header = layout_panel_header_under_mouse(*panel, my, region);
   if (header == nullptr) {
     return;
   }
+
+  ARegion *prev_region_popup = nullptr;
+  const bool is_popup = block_is_popup_any(block);
+  if (is_popup) {
+    prev_region_popup = CTX_wm_region_popup(C);
+    CTX_wm_region_popup_set(C, region);
+  }
+
   const bool new_state = layout_panel_toggle_open(C, header);
-  ED_region_tag_redraw(CTX_wm_region(C));
+
+  ED_region_tag_redraw(region);
+  ED_region_tag_refresh_ui(region);
   WM_tooltip_clear(C, CTX_wm_window(C));
 
   if (event_type == LEFTMOUSE) {
     panel_drag_collapse_handler_add(C, !new_state);
+  }
+
+  if (is_popup) {
+    CTX_wm_region_popup_set(C, prev_region_popup);
   }
 }
 
@@ -2772,7 +2818,7 @@ int handler_panel_region(bContext *C,
     int my = event->xy[1];
     window_to_block(region, &block, &mx, &my);
 
-    const PanelMouseState mouse_state = panel_mouse_state_get(&block, panel, mx, my);
+    const PanelMouseState mouse_state = panel_mouse_state_get(&block, panel, mx, my, region);
 
     if (has_panel_header && mouse_state != PANEL_MOUSE_OUTSIDE) {
       /* Mark panels that have been interacted with so their expansion
@@ -2819,7 +2865,7 @@ int handler_panel_region(bContext *C,
     if (mouse_state == PANEL_MOUSE_INSIDE_LAYOUT_PANEL_HEADER) {
       if (ELEM(event->type, EVT_RETKEY, EVT_PADENTER, LEFTMOUSE)) {
         retval = WM_UI_HANDLER_BREAK;
-        handle_layout_panel_header(C, &block, mx, my, event->type);
+        handle_layout_panel_header(C, &block, region, mx, my, event->type);
       }
     }
   }
@@ -2872,7 +2918,7 @@ PointerRNA *region_panel_custom_data_under_cursor(const bContext *C, const wmEve
       int mx = event->xy[0];
       int my = event->xy[1];
       window_to_block(region, &block, &mx, &my);
-      const int mouse_state = panel_mouse_state_get(&block, panel, mx, my);
+      const int mouse_state = panel_mouse_state_get(&block, panel, mx, my, region);
       if (ELEM(mouse_state, PANEL_MOUSE_INSIDE_CONTENT, PANEL_MOUSE_INSIDE_HEADER)) {
         return panel_custom_data_get(panel);
       }

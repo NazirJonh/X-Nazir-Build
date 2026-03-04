@@ -3269,6 +3269,7 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
                                        const char *glyph,
                                        const float *color,
                                        bool is_active,
+                                       bool center_glyph,
                                        const char *tooltip,
                                        const char *context_menu_operator,
                                        const char *operator_param_name,
@@ -3288,6 +3289,7 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
                                 color,
                                 is_active,
                                 true,         /* is_pref_mode - NO CHECKBOX */
+                                center_glyph, /* Center glyph in button */
                                 0, 0,
                                 width,        /* calculated width */
                                 UI_UNIT_Y,    /* height */

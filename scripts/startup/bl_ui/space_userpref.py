@@ -2309,6 +2309,11 @@ class USERPREF_OT_category_tag_create(Operator):
         description="Unicode glyph",
         default=""
     )
+    glyph_search: bpy.props.StringProperty(
+        name="Glyph Search",
+        description="Search query for glyph picker",
+        default=""
+    )
     color: bpy.props.FloatVectorProperty(
         name="Color",
         subtype='COLOR_GAMMA',
@@ -2366,24 +2371,17 @@ class USERPREF_OT_category_tag_create(Operator):
         layout.use_property_split = True
         layout.prop(self, "name")
 
-        wm = context.window_manager
-        glyph_selected_hex = getattr(wm, "category_tag_glyph_hex", "")
-        if glyph_selected_hex:
-            self.glyph = glyph_selected_hex
-            wm.category_tag_glyph_hex = ""
-
-        row = layout.row(align=True)
-        row.prop(self, "glyph")
-        op = row.operator("wm.glyph_picker_grid", text=_hex_to_glyph("f02f"), icon='NONE')
-        op.target_property = "window_manager.category_tag_glyph_hex"
-
-        # DEBUG: Проверяем активный оператор
-        print(f"[DEBUG CREATE_TAG draw] context.active_operator = {context.active_operator}")
-        print(f"[DEBUG CREATE_TAG draw] self = {self}")
-        print(f"[DEBUG CREATE_TAG draw] self.as_pointer() = {self.as_pointer()}")
-        ptr = str(self.as_pointer())
-        print(f"[DEBUG CREATE_TAG draw] Setting target_operator_ptr = {ptr}")
-        op.target_operator_ptr = ptr
+        # Full glyph selector (search + input + preview), aligned with C++ templates.
+        layout.template_glyph_selector(
+            data=self.properties,
+            glyph_property="glyph",
+            search_property="glyph_search",
+            color_property="color",
+            category=self.category or "",
+            show_preview=True,
+            show_search=True,
+            show_code=True,
+        )
 
         # Color presets with glyph buttons
         layout.label(text="Color:")
@@ -2392,6 +2390,7 @@ class USERPREF_OT_category_tag_create(Operator):
 
     def invoke(self, context, event):
         context.window_manager.category_tag_glyph_hex = ""
+        self.glyph_search = ""
         return context.window_manager.invoke_props_dialog(self, width=350)
 
 
@@ -2461,29 +2460,30 @@ class USERPREF_OT_category_tag_edit(Operator):
         layout.use_property_split = True
         layout.prop(self, "name")
 
-        wm = context.window_manager
-        glyph_selected_hex = getattr(wm, "category_tag_glyph_hex", "")
-        if glyph_selected_hex:
-            self.glyph = glyph_selected_hex
-            wm.category_tag_glyph_hex = ""
-
-        row = layout.row(align=True)
-        row.prop(self, "glyph")
-        op = row.operator("wm.glyph_picker_grid", text=_hex_to_glyph("f02f"), icon='NONE')
-        op.target_property = "window_manager.category_tag_glyph_hex"
-
-        # DEBUG: Проверяем активный оператор
-        print(f"[DEBUG EDIT_TAG draw] context.active_operator = {context.active_operator}")
-        print(f"[DEBUG EDIT_TAG draw] self = {self}")
-        print(f"[DEBUG EDIT_TAG draw] self.as_pointer() = {self.as_pointer()}")
-        ptr = str(self.as_pointer())
-        print(f"[DEBUG EDIT_TAG draw] Setting target_operator_ptr = {ptr}")
-        op.target_operator_ptr = ptr
+        # Glyph Code input row with Paste button
+        layout.template_glyph_input_row(
+            self.properties,      # data
+            "glyph",              # glyph_property
+            None,                 # search_property (not used for Edit Tag)
+            has_search=False,     # no search field in Edit Tag
+            has_code=True,        # show Code field
+            category=""           # no category context for Edit Tag
+        )
 
         # Color presets with glyph buttons
         layout.label(text="Color:")
         row = layout.row()
         row.template_color_glyph_presets(self.properties, "color")
+
+        # Glyph preview - show current glyph with color
+        glyph = _hex_to_glyph(self.glyph) if self.glyph else ""
+        if glyph:
+            layout.template_glyph_preview(
+                glyph_unicode=glyph,
+                data=self.properties,
+                color_property="color",
+                size_multiplier=2.0
+            )
 
     @with_context_check
     def execute(self, context):

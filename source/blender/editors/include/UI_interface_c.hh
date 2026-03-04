@@ -2857,6 +2857,41 @@ void uiTemplateColorGlyphPresets(Layout *layout,
                                   PointerRNA *ptr,
                                   const char *propname);
 
+void uiTemplateGlyphInputRow(Layout *layout,
+                             bContext *C,
+                             PointerRNA *ptr,
+                             const char *glyph_propname,
+                             const char *search_propname,
+                             bool has_search,
+                             bool has_code,
+                             const char *category);
+
+void uiTemplateGlyphPreview(Layout *layout,
+                             bContext *C,
+                             const char *glyph_unicode,
+                             PointerRNA *ptr,
+                             const char *color_propname,
+                             float size_multiplier);
+
+void uiTemplateGlyphSearchResults(Layout *layout,
+                                  bContext *C,
+                                  PointerRNA *ptr,
+                                  const char *search_propname,
+                                  const char *category,
+                                  const char *color_propname,
+                                  int max_results);
+
+void uiTemplateGlyphSelector(Layout *layout,
+                             bContext *C,
+                             PointerRNA *ptr,
+                             const char *glyph_propname,
+                             const char *search_propname,
+                             const char *color_propname,
+                             const char *category,
+                             bool show_preview,
+                             bool show_search,
+                             bool show_code);
+
 }  // namespace ui
 
 namespace ed::object::shapekey {

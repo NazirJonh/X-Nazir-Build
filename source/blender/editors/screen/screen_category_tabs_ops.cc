@@ -710,10 +710,6 @@ static void SCREEN_OT_category_tab_edit_dialog_save(wmOperatorType *ot)
 
 static wmOperatorStatus category_tab_color_preset_exec(bContext *C, wmOperator *op)
 {
-  if (!category_tab_current_dialog_op) {
-    return OPERATOR_CANCELLED;
-  }
-
   /* Get preset value from operator property */
   const int preset = RNA_int_get(op->ptr, "preset");
 
@@ -721,11 +717,36 @@ static wmOperatorStatus category_tab_color_preset_exec(bContext *C, wmOperator *
   float color[3];
   category_tab_color_preset_to_rgb(preset, color);
 
-  /* Set the color in the dialog operator */
-  RNA_float_set_array(category_tab_current_dialog_op->ptr, "color", color);
+  /* Find target operator through active button's RNA data */
+  ui::Button *active_but = context_active_but_get_respect_popup(C);
+  wmOperator *target_op = nullptr;
+  
+  if (active_but && active_but->rnapoin.data) {
+    /* Check if active button is part of an operator */
+    PointerRNA *ptr = &active_but->rnapoin;
+    if (ptr->type && RNA_struct_is_a(ptr->type, RNA_Operator)) {
+      target_op = static_cast<wmOperator*>(ptr->data);
+      printf("[COLOR_PRESET] Found target operator via button: %p (idname='%s')\n", 
+             (void*)target_op, target_op->idname ? target_op->idname : "NULL");
+    }
+  }
+  
+  if (!target_op) {
+    printf("[COLOR_PRESET] No target operator found via button context!\n");
+    return OPERATOR_CANCELLED;
+  }
+
+  printf("[COLOR_PRESET] Setting color [%.2f,%.2f,%.2f] on operator '%s'\n", 
+         color[0], color[1], color[2], target_op->idname ? target_op->idname : "NULL");
+
+  /* Set the color in the target operator */
+  RNA_float_set_array(target_op->ptr, "color", color);
 
   /* Trigger live update to refresh preview */
-  category_tab_edit_live_update_cb(C, category_tab_current_dialog_op, 0);
+  if (STREQ(target_op->idname, "SCREEN_OT_category_tab_edit_dialog")) {
+    category_tab_edit_live_update_cb(C, target_op, 0);
+  }
+  /* Для других операторов (например, Create Tag) обновление произойдет автоматически через RNA */
 
   return OPERATOR_FINISHED;
 }
@@ -737,8 +758,18 @@ static void SCREEN_OT_category_tab_color_preset(wmOperatorType *ot)
   ot->description = "Set category tab color from preset";
 
   ot->exec = category_tab_color_preset_exec;
-  /* Only works when dialog is open */
-  ot->poll = [](bContext * /*C*/) { return category_tab_current_dialog_op != nullptr; };
+  /* Works when there's an active button with RNA data */
+  ot->poll = [](bContext *C) { 
+    /* Check if there's an active button with operator RNA data */
+    ui::Button *active_but = context_active_but_get_respect_popup(C);
+    if (active_but && active_but->rnapoin.data) {
+      PointerRNA *ptr = &active_but->rnapoin;
+      if (ptr->type && RNA_struct_is_a(ptr->type, RNA_Operator)) {
+        return true;
+      }
+    }
+    return false; 
+  };
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
 

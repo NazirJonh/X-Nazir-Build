@@ -610,13 +610,14 @@ static PointerRNA rna_uiItemTagButton(Layout *layout,
                                       float color_g,
                                       float color_b,
                                       bool depress,
+                                      bool center_glyph,
                                       const char *tooltip,
                                       const char *context_menu_operator,
                                       const char *operator_param_name,
                                       const char *operator_param_value)
 {
   float color[3] = {color_r, color_g, color_b};
-  return uiItemTagButtonWithOperator(layout, opname, tag_name, glyph, color, depress, tooltip,
+  return uiItemTagButtonWithOperator(layout, opname, tag_name, glyph, color, depress, center_glyph, tooltip,
                                      context_menu_operator, operator_param_name, operator_param_value);
 }
 
@@ -1798,6 +1799,7 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_float(func, "color_g", 1.0f, 0.0f, 1.0f, "Green", "Green component (0.0-1.0)", 0.0f, 1.0f);
   RNA_def_float(func, "color_b", 1.0f, 0.0f, 1.0f, "Blue", "Blue component (0.0-1.0)", 0.0f, 1.0f);
   RNA_def_boolean(func, "depress", false, "", "Draw pressed in");
+  RNA_def_boolean(func, "center_glyph", false, "", "Center glyph in button (for glyph-only buttons)");
   parm = RNA_def_string(func, "tooltip", nullptr, 0, "", "Tooltip text to display on hover");
   parm = RNA_def_string(func, "context_menu_operator", nullptr, 0, "", "Operator to call on right-click context menu");
   RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
@@ -2775,6 +2777,7 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_boolean(func, "no_background", false, "", "Skip background rendering (only show on hover/active)");
   parm = RNA_def_boolean(func, "align", true, "", "Align buttons together for seamless appearance");
+  parm = RNA_def_boolean(func, "center_glyph", false, "", "Center glyph in button (for glyph-only buttons)");
   /* Operator parameters */
   parm = RNA_def_string(func, "operator", nullptr, 0, "", "Operator to call on button click");
   RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);

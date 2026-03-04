@@ -31,6 +31,7 @@
 
 #include "BKE_context.hh"
 #include "BKE_global.hh"
+#include "BLF_api.hh"
 #include "BKE_idprop.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_path_templates.hh"
@@ -3302,8 +3303,42 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
 
   Block *block = layout->block();
 
-  /* Fixed width to match standard Blender buttons (1 UNIT) */
-  const short width = UI_UNIT_X * 1.5;
+  /* Calculate button width based on content (glyph + text) */
+  short width;
+  if (center_glyph) {
+    /* Glyph-only mode: fixed small width */
+    width = short(UI_UNIT_X * 1.5f);
+  }
+  else {
+    /* Glyph + Text mode: calculate actual width needed */
+    const uiStyle *style = layout->root()->style;
+    const uiFontStyle *fstyle = &style->widget;
+    const int fontid = fstyle->uifont_id;
+
+    /* Calculate glyph width */
+    float glyph_width = 0.0f;
+    if (glyph && glyph[0] != '\0') {
+      glyph_width = BLF_width(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX);
+    }
+
+    /* Calculate text width */
+    float text_width = 0.0f;
+    if (tag_name && tag_name[0] != '\0') {
+      text_width = BLF_width(fontid, tag_name, BLF_DRAW_STR_DUMMY_MAX);
+    }
+
+    /* Gap between glyph and text (same as category tabs) */
+    const float glyph_text_gap = 6.0f * UI_SCALE_FAC;
+
+    /* Padding inside button */
+    const float padding_x = 4.0f * UI_SCALE_FAC;
+
+    /* Total width = padding + glyph + gap + text + padding */
+    width = short(round_fl_to_int(padding_x + glyph_width + glyph_text_gap + text_width + padding_x));
+
+    /* Ensure minimum width for usability */
+    width = std::max(width, short(UI_UNIT_X * 2.0f));
+  }
 
   /* Create Tag button with preference mode (no checkbox) */
   Button *raw_but = uiDefButTag(block,

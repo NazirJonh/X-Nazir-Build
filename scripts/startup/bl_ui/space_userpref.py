@@ -41,10 +41,63 @@ if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
 TAG_DEBUG = True
 TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
 
+
+# Единый источник режимов тегов (должен соответствовать CategoryTagMode в DNA/RNA).
+_CATEGORY_TAG_MODES = (
+    ("OBJECT_MODE", "OBJECT", 0, "Object Mode", 'OBJECT_DATAMODE'),
+    ("EDIT_MODE", "EDIT", 1, "Edit Mode", 'EDITMODE_HLT'),
+    ("SCULPT_MODE", "SCULPT", 2, "Sculpt Mode", 'SCULPTMODE_HLT'),
+    ("VERTEX_PAINT", "VERTEX_PAINT", 3, "Vertex Paint", 'VPAINT_HLT'),
+    ("WEIGHT_PAINT", "WEIGHT_PAINT", 4, "Weight Paint", 'WPAINT_HLT'),
+    ("TEXTURE_PAINT", "TEXTURE_PAINT", 5, "Texture Paint", 'TPAINT_HLT'),
+    ("UV_EDIT", "UV_EDIT", 6, "UV Edit", 'UV'),
+    ("POSE_MODE", "POSE", 7, "Pose Mode", 'POSE_HLT'),
+)
+_CATEGORY_TAG_MODE_NAME_TO_FLAG = {name: (1 << bit) for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
+_CATEGORY_TAG_MODE_FLAG_TO_NAME = {(1 << bit): name for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
+_CATEGORY_TAG_MODE_ID_TO_BIT = {mode_id: bit for _name, mode_id, bit, _label, _icon in _CATEGORY_TAG_MODES}
+_CATEGORY_TAG_ALL_MODE_FLAGS = sum((1 << bit) for _name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES)
+_CATEGORY_TAG_DEFAULT_MODE_FLAGS = (1 << 0) | (1 << 1) | (1 << 2)
+_CATEGORY_TAG_FILTER_ENUM_TO_FLAG = {
+    0: 0,
+    "ALL": 0,
+    1: (1 << 0),
+    "OBJECT_MODE": (1 << 0),
+    "OBJECT": (1 << 0),
+    2: (1 << 1),
+    "EDIT_MODE": (1 << 1),
+    "EDIT": (1 << 1),
+    3: (1 << 2),
+    "SCULPT_MODE": (1 << 2),
+    "SCULPT": (1 << 2),
+    4: (1 << 3),
+    "VERTEX_PAINT": (1 << 3),
+    5: (1 << 4),
+    "WEIGHT_PAINT": (1 << 4),
+    6: (1 << 5),
+    "TEXTURE_PAINT": (1 << 5),
+    7: (1 << 6),
+    "UV_EDIT": (1 << 6),
+    8: (1 << 7),
+    "POSE_MODE": (1 << 7),
+    "POSE": (1 << 7),
+}
+
 def tag_log(message, level="INFO"):
     """Logging for tag system operations."""
     if TAG_DEBUG or level == "ERROR":
         print(f"[TAGS][{level}] {message}")
+
+
+def _get_tag_filter_mode_flag_from_wm(wm):
+    """Convert WindowManager.category_tag_filter_mode enum index to CategoryTagMode bit flag."""
+    enum_value = getattr(wm, "category_tag_filter_mode", 0)
+    if isinstance(enum_value, str):
+        return _CATEGORY_TAG_FILTER_ENUM_TO_FLAG.get(enum_value, 0)
+    try:
+        return _CATEGORY_TAG_FILTER_ENUM_TO_FLAG.get(int(enum_value), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 @contextmanager
@@ -310,36 +363,16 @@ def _is_single_glyph(name):
 
 def _mode_names_to_flags(mode_names):
     """Convert list of mode names to bitmask."""
-    mode_map = {
-        "OBJECT_MODE": 1 << 0,
-        "EDIT_MODE": 1 << 1,
-        "SCULPT_MODE": 1 << 2,
-        "VERTEX_PAINT": 1 << 3,
-        "WEIGHT_PAINT": 1 << 4,
-        "TEXTURE_PAINT": 1 << 5,
-        "UV_EDIT": 1 << 6,
-        "POSE_MODE": 1 << 7,
-    }
     flags = 0
     for name in mode_names:
-        flags |= mode_map.get(name, 0)
+        flags |= _CATEGORY_TAG_MODE_NAME_TO_FLAG.get(name, 0)
     return flags
 
 
 def _flags_to_mode_names(flags):
     """Convert bitmask to list of mode names."""
-    mode_map = {
-        1 << 0: "OBJECT_MODE",
-        1 << 1: "EDIT_MODE",
-        1 << 2: "SCULPT_MODE",
-        1 << 3: "VERTEX_PAINT",
-        1 << 4: "WEIGHT_PAINT",
-        1 << 5: "TEXTURE_PAINT",
-        1 << 6: "UV_EDIT",
-        1 << 7: "POSE_MODE",
-    }
     names = []
-    for bit, name in mode_map.items():
+    for bit, name in _CATEGORY_TAG_MODE_FLAG_TO_NAME.items():
         if flags & bit:
             names.append(name)
     return names
@@ -380,14 +413,16 @@ def _normalize_category_data(category_data):
                 entry["color"] = list(color[:3])
 
         # Default values (for reset)
-        if "default_glyph" in category_data and category_data["default_glyph"]:
+        # IMPORTANT: Distinguish between "field is missing" vs "field is present but intentionally empty".
+        # Empty default_glyph is meaningful for text_only categories (fallback letter behavior).
+        if "default_glyph" in category_data:
             glyph_str = category_data["default_glyph"]
             if glyph_str and '\\u' in glyph_str:
                 entry["default_glyph"] = _unicode_escape_to_glyph(glyph_str)
             else:
-                entry["default_glyph"] = glyph_str
+                entry["default_glyph"] = glyph_str or ""
         else:
-            # If no default_glyph or it's empty, use current glyph as default
+            # Backward compatibility for legacy data where default_glyph field does not exist.
             entry["default_glyph"] = entry["glyph"]
 
         if "default_display_name" in category_data:
@@ -405,6 +440,11 @@ def _normalize_category_data(category_data):
                 entry["base_type"] = "glyph_text"
             else:
                 entry["base_type"] = "text_only"
+
+        # Safety correction for previously serialized incorrect state:
+        # text_only categories must reset to fallback letter, so default_glyph must be empty.
+        if entry["base_type"] == "text_only":
+            entry["default_glyph"] = ""
 
         # NEW: Tags
         if "tags" in category_data:
@@ -567,7 +607,7 @@ def _load_glyph_mappings_from_file():
             _all_tags_cache[tag_name] = {
                 "glyph": _hex_to_glyph(tag_data.get("glyph", "")),
                 "color": tag_data.get("color", [0.0, 0.0, 0.0]),
-                "mode_flags": tag_data.get("mode_flags", 0b111)
+                "mode_flags": tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS)
             }
         else:
             _all_tags_cache[tag_name] = tag_data
@@ -671,7 +711,7 @@ def _save_glyph_mappings_to_file(data=None):
                 tags_to_save[tag_name] = {
                     "glyph": _glyph_to_hex(tag_data.get("glyph", "")),
                     "color": tag_data.get("color", [0.0, 0.0, 0.0]),
-                    "mode_flags": tag_data.get("mode_flags", 0b111)
+                    "mode_flags": tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS)
                 }
             else:
                 tags_to_save[tag_name] = tag_data
@@ -849,7 +889,7 @@ def create_tag(tag_name, glyph="", color=None, auto_save=True):
     _all_tags_cache[tag_name] = {
         "glyph": glyph,
         "color": list(color) if color else [0.0, 0.0, 0.0],
-        "mode_flags": 0b111  # Default: Object, Edit, Sculpt modes
+        "mode_flags": _CATEGORY_TAG_DEFAULT_MODE_FLAGS
     }
 
     # Always add new tags to the end of the order list
@@ -1621,7 +1661,7 @@ def _sync_glyph_mappings_to_wm_impl():
                 print(f"[DEBUG PY] Set tag '{tag_name}' glyph to '{glyph_hex}' -> tag_item.glyph='{tag_item.glyph}'")
                 tag_item.color = (color_val[0], color_val[1], color_val[2])
                 # НОВОЕ: Sync mode flags
-                mode_flags_val = tag_data.get("mode_flags", 0b111) if isinstance(tag_data, dict) else 0b111
+                mode_flags_val = tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS) if isinstance(tag_data, dict) else _CATEGORY_TAG_DEFAULT_MODE_FLAGS
                 tag_item.mode_flags = mode_flags_val
             print(f"[GLYPH SYNC] Synced {len(wm.category_tags)} tag definitions to WM")
 
@@ -1797,15 +1837,18 @@ def _sync_wm_to_glyph_cache_impl():
                 # Tags are NOT synced from WM to cache to avoid truncation issues
                 # Tags are stored only in _glyph_cache and JSON
 
-                # Also sync default values
-                if hasattr(item, 'default_glyph') and item.default_glyph:
-                    if cached_entry.get("default_glyph", "") != item.default_glyph:
-                        cached_entry["default_glyph"] = item.default_glyph
+                # Also sync default values.
+                # Must sync even when empty string to allow clearing stale values.
+                if hasattr(item, 'default_glyph'):
+                    item_default_glyph = item.default_glyph or ""
+                    if cached_entry.get("default_glyph", "") != item_default_glyph:
+                        cached_entry["default_glyph"] = item_default_glyph
                         changes_detected = True
 
-                if hasattr(item, 'default_display_name') and item.default_display_name:
-                    if cached_entry.get("default_display_name", "") != item.default_display_name:
-                        cached_entry["default_display_name"] = item.default_display_name
+                if hasattr(item, 'default_display_name'):
+                    item_default_display_name = item.default_display_name or ""
+                    if cached_entry.get("default_display_name", "") != item_default_display_name:
+                        cached_entry["default_display_name"] = item_default_display_name
                         changes_detected = True
 
             print(f"[GLYPH] Processed {mappings_count} items from category_glyph_mappings")
@@ -1825,7 +1868,7 @@ def _sync_wm_to_glyph_cache_impl():
                     glyph = _hex_to_glyph(glyph_hex) if glyph_hex else ""
                     color = list(getattr(tag_item, "color", (0.0, 0.0, 0.0))[:3])
                     # НОВОЕ: Sync mode flags
-                    mode_flags = getattr(tag_item, "mode_flags", 0b111)
+                    mode_flags = getattr(tag_item, "mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS)
                     new_tags_cache[tag_name] = {"glyph": glyph, "color": color, "mode_flags": mode_flags}
 
                 # Only update if WM has tags OR our cache is empty (initial load)
@@ -2085,6 +2128,11 @@ class CategoryTagItem(PropertyGroup):
         default=False,
         update=lambda self, ctx: _auto_save_tags()
     )
+    mode_pose: bpy.props.BoolProperty(
+        name="Pose Mode",
+        default=False,
+        update=lambda self, ctx: _auto_save_tags()
+    )
 
     def get_mode_flags(self):
         """Convert boolean mode properties to bitmask."""
@@ -2103,6 +2151,8 @@ class CategoryTagItem(PropertyGroup):
             flags |= 1 << 5  # TEXTURE_PAINT
         if self.mode_uv_edit:
             flags |= 1 << 6  # UV_EDIT
+        if self.mode_pose:
+            flags |= 1 << 7  # POSE_MODE
         return flags
 
     def set_mode_flags(self, flags):
@@ -2114,6 +2164,7 @@ class CategoryTagItem(PropertyGroup):
         self.mode_weight_paint = bool(flags & (1 << 4))
         self.mode_texture_paint = bool(flags & (1 << 5))
         self.mode_uv_edit = bool(flags & (1 << 6))
+        self.mode_pose = bool(flags & (1 << 7))
 
 
 class CategoryTagAssignment(PropertyGroup):
@@ -2133,7 +2184,7 @@ class TagModeItem:
         """Load mode flags from cache."""
         global _all_tags_cache
         tag_data = _all_tags_cache.get(self._tag_name, {})
-        mode_flags = tag_data.get("mode_flags", 0b111) if isinstance(tag_data, dict) else 0b111
+        mode_flags = tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS) if isinstance(tag_data, dict) else _CATEGORY_TAG_DEFAULT_MODE_FLAGS
 
         self._mode_object = bool(mode_flags & (1 << 0))
         self._mode_edit = bool(mode_flags & (1 << 1))
@@ -2142,6 +2193,7 @@ class TagModeItem:
         self._mode_weight_paint = bool(mode_flags & (1 << 4))
         self._mode_texture_paint = bool(mode_flags & (1 << 5))
         self._mode_uv_edit = bool(mode_flags & (1 << 6))
+        self._mode_pose = bool(mode_flags & (1 << 7))
 
     def _save_to_cache(self):
         """Save mode flags to cache."""
@@ -2162,6 +2214,8 @@ class TagModeItem:
                 flags |= 1 << 5
             if self._mode_uv_edit:
                 flags |= 1 << 6
+            if self._mode_pose:
+                flags |= 1 << 7
             _all_tags_cache[self._tag_name]["mode_flags"] = flags
 
     @property
@@ -2227,6 +2281,15 @@ class TagModeItem:
         self._mode_uv_edit = value
         self._save_to_cache()
 
+    @property
+    def mode_pose(self):
+        return self._mode_pose
+
+    @mode_pose.setter
+    def mode_pose(self, value):
+        self._mode_pose = value
+        self._save_to_cache()
+
     def _glyph_update(self, context):
         """Callback for glyph property change via RNA (e.g. from C++ picker)."""
         if self.name:
@@ -2263,8 +2326,8 @@ def _get_mode_flags_for_tag(tag_name):
     if tag_name in _all_tags_cache:
         tag_data = _all_tags_cache[tag_name]
         if isinstance(tag_data, dict):
-            return tag_data.get("mode_flags", 0b111)
-    return 0b111
+            return tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS)
+    return _CATEGORY_TAG_DEFAULT_MODE_FLAGS
 
 
 def _set_mode_flags_for_tag(tag_name, mode_flags):
@@ -5972,13 +6035,24 @@ class USERPREF_UL_category_tags(UIList):
                 layout.label(text="", icon='DOT')
 
     def filter_items(self, context, data, propname):
-        """Show all tags without filtering - Preferences displays all tags for management."""
+        """Filter tags by WindowManager.category_tag_filter_mode (0 = all tags)."""
         items = getattr(data, propname, None)
         if not items:
             return ([], [])
 
-        # Return empty filter flags (show all items) and empty sort order (preserve original order)
-        return ([], [])
+        wm = context.window_manager
+        filter_mode_flag = _get_tag_filter_mode_flag_from_wm(wm)
+        if filter_mode_flag == 0:
+            return ([], [])
+
+        flags = []
+        hidden_flag = self.bitflag_filter_item
+        for item in items:
+            mode_flags = int(getattr(item, "mode_flags", 0))
+            visible = (mode_flags == 0) or bool(mode_flags & filter_mode_flag)
+            flags.append(hidden_flag if visible else 0)
+
+        return (flags, [])
 
 
 # -----------------------------------------------------------------------------
@@ -5997,15 +6071,7 @@ class USERPREF_OT_tag_mode_toggle(Operator):
     bl_options = {'REGISTER', 'INTERNAL'}
 
     mode: bpy.props.EnumProperty(
-        items=[
-            ('OBJECT', "Object Mode", ""),
-            ('EDIT', "Edit Mode", ""),
-            ('SCULPT', "Sculpt Mode", ""),
-            ('VERTEX_PAINT', "Vertex Paint", ""),
-            ('WEIGHT_PAINT', "Weight Paint", ""),
-            ('TEXTURE_PAINT', "Texture Paint", ""),
-            ('UV_EDIT', "UV Edit", ""),
-        ]
+        items=[(mode_id, label, "") for _name, mode_id, _bit, label, _icon in _CATEGORY_TAG_MODES]
     )
 
     def execute(self, context):
@@ -6028,20 +6094,8 @@ class USERPREF_OT_tag_mode_toggle(Operator):
         if not isinstance(tag_data, dict):
             return {'CANCELLED'}
 
-        mode_flags = tag_data.get("mode_flags", 0b111)
-
-        # Map mode to bit position
-        mode_bits = {
-            'OBJECT': 0,
-            'EDIT': 1,
-            'SCULPT': 2,
-            'VERTEX_PAINT': 3,
-            'WEIGHT_PAINT': 4,
-            'TEXTURE_PAINT': 5,
-            'UV_EDIT': 6,
-        }
-
-        bit = mode_bits.get(self.mode, 0)
+        mode_flags = tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS)
+        bit = _CATEGORY_TAG_MODE_ID_TO_BIT.get(self.mode, 0)
         mode_flags ^= (1 << bit)  # Toggle bit
 
         tag_data["mode_flags"] = mode_flags
@@ -6072,8 +6126,8 @@ class USERPREF_OT_tag_mode_select_all(Operator):
 
         tag_name = wm.category_tags[idx].name
         if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
-            _all_tags_cache[tag_name]["mode_flags"] = 0b1111111  # All 7 modes
-            wm.category_tags[idx].mode_flags = 0b1111111
+            _all_tags_cache[tag_name]["mode_flags"] = _CATEGORY_TAG_ALL_MODE_FLAGS
+            wm.category_tags[idx].mode_flags = _CATEGORY_TAG_ALL_MODE_FLAGS
 
         return {'FINISHED'}
 
@@ -6134,32 +6188,19 @@ class USERPREF_PT_tag_mode_filter_popover(Panel):
         tag_name = wm.category_tags[idx].name
         mode_flags = _get_mode_flags_for_tag(tag_name)
 
-        # Mode definitions: (bit, label, mode_icon)
-        modes = [
-            (0, "Object Mode", 'OBJECT_DATAMODE'),
-            (1, "Edit Mode", 'EDITMODE_HLT'),
-            (2, "Sculpt Mode", 'SCULPTMODE_HLT'),
-            (3, "Vertex Paint", 'VPAINT_HLT'),
-            (4, "Weight Paint", 'WPAINT_HLT'),
-            (5, "Texture Paint", 'TPAINT_HLT'),
-            (6, "UV Edit", 'UV'),
-        ]
-
-        mode_keys = ['OBJECT', 'EDIT', 'SCULPT', 'VERTEX_PAINT', 'WEIGHT_PAINT', 'TEXTURE_PAINT', 'UV_EDIT']
-
         col = layout.column(align=True)
-        for i, (bit, label, mode_icon) in enumerate(modes):
+        for _mode_name, mode_id, bit, label, mode_icon in _CATEGORY_TAG_MODES:
             is_active = bool(mode_flags & (1 << bit))
             check_icon = 'CHECKBOX_HLT' if is_active else 'CHECKBOX_DEHLT'
             
             row = col.row(align=True)
             # Left part: Checkbox icon
             op_check = row.operator("userpref.tag_mode_toggle", text="", icon=check_icon, emboss=False)
-            op_check.mode = mode_keys[i]
+            op_check.mode = mode_id
             
             # Right part: Mode icon and label
             op_label = row.operator("userpref.tag_mode_toggle", text=label, icon=mode_icon, emboss=False)
-            op_label.mode = mode_keys[i]
+            op_label.mode = mode_id
 
         # Quick buttons
         row = layout.row()
@@ -6190,9 +6231,14 @@ class USERPREF_PT_tags(TagsPanel, Panel):
 
         # === Left: Tag list with buttons ===
         left_container = split.row()
+        left_col = left_container.column()
+
+        mode_row = left_col.row(align=True)
+        mode_row.prop(wm, "category_tag_filter_mode", text="")
+        mode_row.separator()
 
         # template_list
-        left_container.template_list(
+        left_col.template_list(
             "USERPREF_UL_category_tags", "",
             wm, "category_tags",
             wm, "category_tags_active_index",
@@ -6257,15 +6303,7 @@ class USERPREF_PT_tags(TagsPanel, Panel):
             
             # Show active mode icons at a glance
             m_flags = _get_mode_flags_for_tag(tag.name)
-            m_icons = [
-                (0, 'OBJECT_DATAMODE'),
-                (1, 'EDITMODE_HLT'),
-                (2, 'SCULPTMODE_HLT'),
-                (3, 'VPAINT_HLT'),
-                (4, 'WPAINT_HLT'),
-                (5, 'TPAINT_HLT'),
-                (6, 'UV'),
-            ]
+            m_icons = [(bit, icon) for _name, _mode_id, bit, _label, icon in _CATEGORY_TAG_MODES]
             
             icon_row = row.row(align=True)
             any_mode = False

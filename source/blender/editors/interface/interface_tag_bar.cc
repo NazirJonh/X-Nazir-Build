@@ -293,8 +293,8 @@ void tag_bar_buttons_update(const bContext *C,
     STRNCPY(active_tags, v3d->active_tag_filter_tags);
   }
 
-  /* Get current mode string from context for filtering */
-  const char *mode_string = CTX_data_mode_string(C);
+  /* Get current mode bit for filtering. */
+  const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
 
   /* Iterate through all tags from wm in their original order (from JSON tag_order) */
   if (wm && category_tag_list_is_valid(&wm->category_tags)) {
@@ -324,40 +324,7 @@ void tag_bar_buttons_update(const bContext *C,
           btn.is_visible = true;
         }
         else {
-          /* Check if tag is active for current mode
-           * Mode bit mapping matches Python code:
-           * OBJECT=0, EDIT_MESH=1, SCULPT=2, PAINT_VERTEX=3, PAINT_WEIGHT=4, etc.
-           */
-          int mode_bit = 0;
-          if (STREQ(mode_string, "OBJECT")) {
-            mode_bit = 0;
-          }
-          else if (STREQ(mode_string, "EDIT_MESH")) {
-            mode_bit = 1;
-          }
-          else if (STREQ(mode_string, "SCULPT")) {
-            mode_bit = 2;
-          }
-          else if (STREQ(mode_string, "PAINT_VERTEX")) {
-            mode_bit = 3;
-          }
-          else if (STREQ(mode_string, "PAINT_WEIGHT")) {
-            mode_bit = 4;
-          }
-          else if (STREQ(mode_string, "PAINT_TEXTURE")) {
-            mode_bit = 5;
-          }
-          else if (STREQ(mode_string, "PARTICLE_EDIT")) {
-            mode_bit = 6;
-          }
-          else if (STREQ(mode_string, "POSE")) {
-            mode_bit = 7;
-          }
-          else {
-            /* Default to OBJECT mode for unknown modes */
-            mode_bit = 0;
-          }
-          btn.is_visible = (tag_def->mode_flags & (1 << mode_bit)) != 0;
+          btn.is_visible = (tag_def->mode_flags & current_mode_flag) != 0;
         }
       }
 
@@ -1187,56 +1154,8 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
   /* Create RNA pointer for window manager */
   PointerRNA wm_ptr = RNA_pointer_create_discrete(&wm->id, RNA_WindowManager, wm);
 
-  /* Calculate UIList size - count visible tags for current mode + 1 extra slot */
-  const char *mode_string = CTX_data_mode_string(C);
-
-  /* Calculate mode_bit from mode_string */
-  int mode_bit = 0;
-  if (STREQ(mode_string, "OBJECT")) {
-    mode_bit = 0;
-  }
-  else if (STREQ(mode_string, "EDIT_MESH")) {
-    mode_bit = 1;
-  }
-  else if (STREQ(mode_string, "SCULPT")) {
-    mode_bit = 2;
-  }
-  else if (STREQ(mode_string, "PAINT_VERTEX")) {
-    mode_bit = 3;
-  }
-  else if (STREQ(mode_string, "PAINT_WEIGHT")) {
-    mode_bit = 4;
-  }
-  else if (STREQ(mode_string, "PAINT_TEXTURE")) {
-    mode_bit = 5;
-  }
-  else if (STREQ(mode_string, "PAINT_IMAGE")) {
-    mode_bit = 6;
-  }
-  else if (STREQ(mode_string, "SCULPT_CURVES")) {
-    mode_bit = 7;
-  }
-  else if (STREQ(mode_string, "EDIT_CURVES")) {
-    mode_bit = 8;
-  }
-  else if (STREQ(mode_string, "EDIT_ARMATURE")) {
-    mode_bit = 9;
-  }
-  else if (STREQ(mode_string, "EDIT_GPENCIL")) {
-    mode_bit = 10;
-  }
-  else if (STREQ(mode_string, "EDIT_TEXT")) {
-    mode_bit = 11;
-  }
-  else if (STREQ(mode_string, "POSE")) {
-    mode_bit = 12;
-  }
-  else if (STREQ(mode_string, "PARTICLE")) {
-    mode_bit = 13;
-  }
-  else {
-    mode_bit = 0; /* Default to OBJECT mode */
-  }
+  /* Calculate UIList size - count visible tags for current mode + 1 extra slot. */
+  const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
 
   /* Count visible tags (with glyph + matching mode) */
   int visible_tag_count = 0;
@@ -1250,7 +1169,7 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
     }
 
     /* Check if tag is active for current mode */
-    if (tag_def->mode_flags == 0 || (tag_def->mode_flags & (1 << mode_bit))) {
+    if (tag_def->mode_flags == 0 || (tag_def->mode_flags & current_mode_flag)) {
       visible_tag_count++;
     }
   }

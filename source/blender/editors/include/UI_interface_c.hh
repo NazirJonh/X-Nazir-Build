@@ -2841,9 +2841,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
 
 std::string get_tags_for_category_ui(const wmWindowManager *wm,
                                       const char *category,
-                                      bool filter_show_all_modes,
-                                      bool filter_current_mode,
-                                      uint32_t current_mode_flag);
+                                      uint32_t filter_mode_flag);
 
 /**
  * Get the current object mode as a CategoryTagMode bitmask.

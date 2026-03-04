@@ -2493,6 +2493,31 @@ static void rna_CategoryTagDef_update(bContext *C, PointerRNA * /*ptr*/)
 
 namespace blender {
 
+static const EnumPropertyItem rna_enum_category_tag_filter_mode_items[] = {
+    {0, "ALL", ICON_FILTER, "All Tags", "Show tags for all modes"},
+    {1, "OBJECT_MODE", ICON_OBJECT_DATAMODE, "Object Mode", "Show tags for Object Mode"},
+    {2, "EDIT_MODE", ICON_EDITMODE_HLT, "Edit Mode", "Show tags for Edit Mode"},
+    {3, "SCULPT_MODE", ICON_SCULPTMODE_HLT, "Sculpt Mode", "Show tags for Sculpt Mode"},
+    {4,
+     "VERTEX_PAINT",
+     ICON_VPAINT_HLT,
+     "Vertex Paint",
+     "Show tags for Vertex Paint"},
+    {5,
+     "WEIGHT_PAINT",
+     ICON_WPAINT_HLT,
+     "Weight Paint",
+     "Show tags for Weight Paint"},
+    {6,
+     "TEXTURE_PAINT",
+     ICON_TPAINT_HLT,
+     "Texture Paint",
+     "Show tags for Texture Paint"},
+    {7, "UV_EDIT", ICON_UV, "UV Edit", "Show tags for UV Edit"},
+    {8, "POSE_MODE", ICON_POSE_HLT, "Pose Mode", "Show tags for Pose Mode"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /**
  * expose `Operator.options` as its own type so we can control each flags use
  * (some are read-only).
@@ -3506,16 +3531,12 @@ static void rna_def_windowmanager(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Active Tag", "Index of the active tag in the list");
   RNA_def_property_update(prop, NC_WINDOW, nullptr);
 
-  prop = RNA_def_property(srna, "category_tag_filter_show_all_modes", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "category_tag_filter_show_all_modes", 1);
-  RNA_def_property_ui_text(
-      prop, "Show All Modes", "Show tags for all modes in the category tab popup");
-  RNA_def_property_update(prop, NC_WINDOW, nullptr);
-
-  prop = RNA_def_property(srna, "category_tag_filter_current_mode", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "category_tag_filter_current_mode", 1);
-  RNA_def_property_ui_text(
-      prop, "Show Current Mode", "Show tags for the current mode in the category tab popup");
+  prop = RNA_def_property(srna, "category_tag_filter_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "category_tag_filter_mode");
+  RNA_def_property_enum_items(prop, rna_enum_category_tag_filter_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Tag Filter Mode",
+                           "Filter category tags by mode in the category tab popup");
   RNA_def_property_update(prop, NC_WINDOW, nullptr);
 
   prop = RNA_def_property(srna, "show_tag_names", PROP_BOOLEAN, PROP_NONE);

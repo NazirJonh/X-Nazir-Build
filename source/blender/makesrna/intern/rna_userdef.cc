@@ -5130,6 +5130,14 @@ static void rna_def_userdef_view(BlenderRNA *brna)
                            "Show colored text in Text mode for categories with custom glyph colors");
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
+  prop = RNA_def_property(srna, "category_tabs_hide_reserved_inactive_text", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_hide_reserved_inactive_text", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Reserved Tabs: Icons Only",
+      "In Mixed/Text modes, show only icons for inactive reserved categories");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
   prop = RNA_def_property(srna, "border_width", PROP_INT, PROP_NONE);
   RNA_def_property_ui_text(prop, "Border Width", "Size of the padding around each editor.");
   RNA_def_property_range(prop, 1.0f, 10.0f);

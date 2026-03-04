@@ -1203,12 +1203,12 @@ class USERPREF_OT_category_tag_remove_from_category(Operator):
 # -----------------------------------------------------------------------------
 # Category Filtering by Tags
 
-# Reserved categories that are always visible
-# Generated from DEFAULT_CATEGORY_GLYPHS + additional system categories
-RESERVED_CATEGORIES = frozenset(DEFAULT_CATEGORY_GLYPHS.keys()) | frozenset({
-    # Additional system categories not in DEFAULT_CATEGORY_GLYPHS
-    "Select", "Add", "Export", "Import",
-})
+def _is_reserved_category_name(category_name):
+    """Single source-of-truth check for reserved categories.
+
+    Reserved = categories defined in DEFAULT_CATEGORY_GLYPHS.
+    """
+    return category_name in DEFAULT_CATEGORY_GLYPHS
 
 # TODO: Add preference U.category_filter_hide_reserved (bool, default false)
 # When true, reserved tabs also respect tag filtering
@@ -1232,7 +1232,7 @@ def is_category_visible_by_tags(category_name, active_filter_tags):
     """
     # Reserved categories are always visible
     # TODO: Check U.category_filter_hide_reserved preference
-    if category_name in RESERVED_CATEGORIES:
+    if _is_reserved_category_name(category_name):
         return True
 
     # No filtering - show all
@@ -1699,6 +1699,8 @@ def _sync_glyph_mappings_to_wm_impl():
                     item.color = (color_val[0], color_val[1], color_val[2])
                     item.default_glyph = default_glyph_val
                     item.default_display_name = default_display_name_val
+                    if hasattr(item, "is_reserved"):
+                        item.is_reserved = _is_reserved_category_name(category)
                     # Sync tags to WM for UI display (semicolon-separated string)
                     if hasattr(item, "tags") and isinstance(tags_val, (list, tuple)):
                         tags_str = ";".join([t for t in tags_val if isinstance(t, str) and t])
@@ -5977,6 +5979,13 @@ class VIEW3D_OT_category_tabs_settings(Operator):
         # Show colored text option - only in Text mode
         if view.category_tabs_display_mode == 'TEXT_ONLY':
             layout.prop(view, "category_tabs_text_mode_show_colored_text", text="Show Colored Text")
+
+        # Hide text for inactive reserved tabs in Mixed/Text modes
+        if view.category_tabs_display_mode in {'GLYPHS_TEXT', 'TEXT_ONLY'}:
+            layout.separator()
+            layout.prop(view,
+                        "category_tabs_hide_reserved_inactive_text",
+                        text="Inactive Reserved Tabs: Icons Only")
 
         # Show drag tooltips option - only in Icon mode
         if view.category_tabs_display_mode == 'GLYPHS_ONLY':

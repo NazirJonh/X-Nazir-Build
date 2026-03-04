@@ -803,6 +803,8 @@ struct CategoryDragState {
   int drag_bottom_edge_offset = 0;  /* Offset from click point to bottom edge of tab */
   int original_index = 0;           /* Original position of dragged tab */
   int current_insert_index = 0;
+  int min_insert_index = 0;         /* Minimum allowed insert index for dragged tab */
+  int max_insert_index = 0;         /* Maximum allowed insert index for dragged tab */
   float drag_offset_y = 0.0f;
   float prev_drag_offset_y = 0.0f;  /* Previous frame's offset, for detecting direction change */
   int tab_v_pad = 0;

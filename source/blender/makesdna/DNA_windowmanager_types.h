@@ -128,7 +128,9 @@ typedef struct CategoryGlyphItem {
   char default_display_name[32];
   /** Tags assigned to this category (semicolon-separated). Synced from Python for UI display only. */
   char tags[256];
-  char _pad[4];
+  /** True when category is from Python DEFAULT_CATEGORY_GLYPHS (single source of truth for reserved tabs). */
+  char is_reserved;
+  char _pad[3];
 } CategoryGlyphItem;
 
 /**

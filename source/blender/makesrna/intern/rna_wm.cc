@@ -3313,6 +3313,15 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
   RNA_def_property_string_sdna(prop, nullptr, "tags");
   RNA_def_property_ui_text(prop, "Tags", "Semicolon-separated tag names (synced from Python for UI display)");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+
+  prop = RNA_def_property(srna, "is_reserved", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "is_reserved", 1);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Reserved",
+      "Category is reserved (provided by Python DEFAULT_CATEGORY_GLYPHS)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
 static void rna_def_category_tag_def(BlenderRNA *brna)

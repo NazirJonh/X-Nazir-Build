@@ -995,7 +995,9 @@ struct UserDef {
   char category_tabs_text_mode_show_color_indicator = false;
   /** Show colored text in Text mode for categories with custom glyph colors. */
   char category_tabs_text_mode_show_colored_text = false;
-  char _pad7[8] = {};
+  /** In Mixed/Text modes, show only glyphs for inactive reserved categories. */
+  char category_tabs_hide_reserved_inactive_text = false;
+  char _pad7[7] = {};
   /**
    * Setting for UI line width.
    *

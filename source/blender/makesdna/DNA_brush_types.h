@@ -147,6 +147,8 @@ struct BrushCurvesSculptSettings {
   uint32_t flag = 0;
   /** When shrinking curves, they shouldn't become shorter than this length. */
   float minimum_length = 0;
+  /** Minimum length when cutting curves with the Cut brush. Set to 0 to delete curves completely. */
+  float minimum_trim_length = 0;
   /** Length of newly added curves when it is not interpolated from other curves. */
   float curve_length = 0;
   /** Minimum distance between curve root points used by the Density brush. */
@@ -157,7 +159,7 @@ struct BrushCurvesSculptSettings {
   int density_add_attempts = 0;
   /** #eBrushCurvesSculptDensityMode. */
   uint8_t density_mode = 0;
-  char _pad[7] = {};
+  char _pad[3] = {};
   struct CurveMapping *curve_parameter_falloff = nullptr;
 };
 

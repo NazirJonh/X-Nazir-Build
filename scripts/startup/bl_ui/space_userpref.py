@@ -102,18 +102,36 @@ def _get_tag_filter_mode_flag_from_wm(wm):
 
 @contextmanager
 def safe_file_write(filepath):
-    """Atomic file write with rollback on error."""
+    """Atomic file write with rollback on error and retry logic for Windows."""
+    import time
     temp_path = f"{filepath}.tmp"
+    max_retries = 3
+    retry_delay = 0.1  # 100ms
+
     try:
         with open(temp_path, 'w', encoding='utf-8') as f:
             yield f
-        # Atomic rename on success
-        os.replace(temp_path, filepath)
-        tag_log(f"Saved: {filepath}")
+
+        # Atomic rename with retry on Windows (file may be locked)
+        for attempt in range(max_retries):
+            try:
+                os.replace(temp_path, filepath)
+                tag_log(f"Saved: {filepath}")
+                return
+            except PermissionError as e:
+                if attempt < max_retries - 1:
+                    tag_log(f"Retry {attempt + 1}/{max_retries} for {filepath}: {e}")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    raise e
     except Exception as e:
         # Remove temp file on error
         if os.path.exists(temp_path):
-            os.remove(temp_path)
+            try:
+                os.remove(temp_path)
+            except:
+                pass
         tag_log(f"Failed to save {filepath}: {e}", "ERROR")
         raise e
 
@@ -292,6 +310,32 @@ def _unicode_escape_to_glyph(escape_str):
         return chr(code_point)
 
     return re.sub(pattern, replace_escape, escape_str)
+
+
+def _category_order_encode(category_list):
+    """Encode category order entries for JSON storage (glyphs as \\uXXXX)."""
+    if not isinstance(category_list, list):
+        return category_list
+    encoded = []
+    for category in category_list:
+        if isinstance(category, str):
+            encoded.append(_glyph_to_unicode_escape(category))
+        else:
+            encoded.append(category)
+    return encoded
+
+
+def _category_order_decode(category_list):
+    """Decode category order entries from JSON storage (\\uXXXX -> glyphs)."""
+    if not isinstance(category_list, list):
+        return category_list
+    decoded = []
+    for category in category_list:
+        if isinstance(category, str) and "\\u" in category:
+            decoded.append(_unicode_escape_to_glyph(category))
+        else:
+            decoded.append(category)
+    return decoded
 
 
 def _hex_to_glyph(hex_str):
@@ -576,6 +620,14 @@ def _load_glyph_mappings_from_file():
     # Load into caches
     _glyph_cache = {}
     raw_mappings = data.get('mappings', {})
+    raw_orders = data.get("category_orders", {})
+    order_categories = set()
+    for _tag_key, category_list in raw_orders.items():
+        if isinstance(category_list, list):
+            decoded_list = _category_order_decode(category_list)
+            for category in decoded_list:
+                if isinstance(category, str):
+                    order_categories.add(category)
 
     def _has_user_customizations_raw(category_data):
         """Check if category has user customizations (display_name, color, or tags)."""
@@ -589,15 +641,25 @@ def _load_glyph_mappings_from_file():
     skipped_count = 0
     for category, category_data in raw_mappings.items():
         # Skip invalid category names (glyphs as names) ONLY if they have no user customizations
+        # AND they are not referenced by any category order list.
         if not _is_valid_category_name(category):
             normalized = _normalize_category_data(category_data)
-            if not _has_user_customizations_raw(normalized):
+            if (not _has_user_customizations_raw(normalized)) and (category not in order_categories):
                 skipped_count += 1
                 continue
-            # If has user customizations, load it even with invalid name
-            print(f"[GLYPH] Loading category with user customizations: {repr(category)}")
+            # If referenced by order list or has user customizations, load it even with invalid name
+            if category in order_categories:
+                print(f"[GLYPH] Loading invalid category from order list: {repr(category)}")
+            else:
+                print(f"[GLYPH] Loading category with user customizations: {repr(category)}")
 
         _glyph_cache[category] = _normalize_category_data(category_data)
+
+    # Ensure invalid categories referenced in order lists are kept in cache
+    for category in order_categories:
+        if category not in _glyph_cache and not _is_valid_category_name(category):
+            _glyph_cache[category] = _normalize_category_data({})
+            print(f"[GLYPH] Adding missing invalid category from order list: {repr(category)}")
 
     # Load all_tags cache - convert hex glyphs to Unicode
     raw_tags = data.get("all_tags", {})
@@ -619,10 +681,9 @@ def _load_glyph_mappings_from_file():
     # Load category orders
     global _category_orders_cache
     _category_orders_cache = {}
-    raw_orders = data.get("category_orders", {})
     for tag_key, category_list in raw_orders.items():
         if isinstance(category_list, list):
-            _category_orders_cache[tag_key] = category_list
+            _category_orders_cache[tag_key] = _category_order_decode(category_list)
 
     _glyph_cache_loaded = True
     if skipped_count > 0:
@@ -663,14 +724,23 @@ def _save_glyph_mappings_to_file(data=None):
         # Convert glyphs to Unicode escape format for reliable storage
         mappings_to_save = {}
         skipped_count = 0
+        order_categories = set()
+        for _tag_key, category_list in _category_orders_cache.items():
+            if isinstance(category_list, list):
+                for category in category_list:
+                    if isinstance(category, str):
+                        order_categories.add(category)
         for category, category_data in _glyph_cache.items():
             # Skip invalid category names (glyphs as names) ONLY if they have no user customizations
             if not _is_valid_category_name(category):
-                if not _has_user_customizations(category_data):
+                if (not _has_user_customizations(category_data)) and (category not in order_categories):
                     skipped_count += 1
                     continue
-                # If has user customizations, save it even with invalid name
-                print(f"[GLYPH] Saving category with user customizations: {repr(category)}")
+                # If referenced by order list or has user customizations, save it even with invalid name
+                if category in order_categories:
+                    print(f"[GLYPH] Saving invalid category from order list: {repr(category)}")
+                else:
+                    print(f"[GLYPH] Saving category with user customizations: {repr(category)}")
 
             if isinstance(category_data, dict):
                 # Debug: print tags for all categories with tags
@@ -730,7 +800,10 @@ def _save_glyph_mappings_to_file(data=None):
             'all_tags': tags_to_save,
             'tag_order': tag_order,  # Save tag order
             'mappings': mappings_to_save,
-            'category_orders': _category_orders_cache  # Save category orders
+            'category_orders': {
+                tag_key: _category_order_encode(category_list)
+                for tag_key, category_list in _category_orders_cache.items()
+            }  # Save category orders (glyphs as \uXXXX)
         }
 
     try:
@@ -772,6 +845,15 @@ def set_category_order(tag_combination, category_list):
         category_list: List of category IDs in order
     """
     global _category_orders_cache
+    try:
+        print(f"[CAT ORDER][PY] set_category_order: tag='{tag_combination}' count={len(category_list)}")
+        # Print a compact preview to avoid huge logs
+        preview = ", ".join([repr(x) for x in category_list[:12]])
+        if len(category_list) > 12:
+            preview += f", ... (+{len(category_list)-12})"
+        print(f"[CAT ORDER][PY] order: [{preview}]")
+    except Exception as e:
+        print(f"[CAT ORDER][PY] set_category_order log failed: {e}")
     _category_orders_cache[tag_combination] = category_list.copy()
     # Trigger save
     _save_glyph_mappings_to_file()
@@ -1356,8 +1438,8 @@ def set_category_glyph(category, glyph, save=True):
         _save_glyph_mappings_to_file()
 
 
-def set_category_data(category, glyph=None, display_name=None, color=None, save=True):
-    """Set the full data (glyph, display_name, color) for a category name."""
+def set_category_data(category, glyph=None, display_name=None, color=None, tags=None, save=True):
+    """Set the full data (glyph, display_name, color, tags) for a category name."""
     global _glyph_cache
 
     if category not in _glyph_cache:
@@ -1379,6 +1461,15 @@ def set_category_data(category, glyph=None, display_name=None, color=None, save=
         _glyph_cache[category]["display_name"] = display_name
     if color is not None:
         _glyph_cache[category]["color"] = list(color[:3]) if len(color) >= 3 else [0.0, 0.0, 0.0]
+    if tags is not None:
+        # Parse tags string (comma-separated or single tag)
+        if isinstance(tags, str):
+            if tags:
+                _glyph_cache[category]["tags"] = [t.strip() for t in tags.split(',') if t.strip()]
+            else:
+                _glyph_cache[category]["tags"] = []
+        elif isinstance(tags, list):
+            _glyph_cache[category]["tags"] = tags
 
     if save:
         _save_glyph_mappings_to_file()
@@ -1699,8 +1790,7 @@ def _sync_glyph_mappings_to_wm_impl():
                     item.color = (color_val[0], color_val[1], color_val[2])
                     item.default_glyph = default_glyph_val
                     item.default_display_name = default_display_name_val
-                    if hasattr(item, "is_reserved"):
-                        item.is_reserved = _is_reserved_category_name(category)
+                    # Note: is_reserved is read-only (computed in C++), don't try to set it
                     # Sync tags to WM for UI display (semicolon-separated string)
                     if hasattr(item, "tags") and isinstance(tags_val, (list, tuple)):
                         tags_str = ";".join([t for t in tags_val if isinstance(t, str) and t])
@@ -2698,7 +2788,8 @@ class USERPREF_OT_category_tag_move(Operator):
             tags_data.append({
                 'name': tag.name,
                 'glyph': tag.glyph,
-                'color': tuple(tag.color)
+                'color': tuple(tag.color),
+                'mode_flags': tag.mode_flags,
             })
 
         # Swap the two items in the list
@@ -2714,6 +2805,7 @@ class USERPREF_OT_category_tag_move(Operator):
             new_tag.name = data['name']
             new_tag.glyph = data['glyph']
             new_tag.color = data['color']
+            new_tag.mode_flags = data['mode_flags']
 
         print(f"[TAG MOVE] Rebuilt collection with {len(tags)} tags")
         wm.category_tags_active_index = new_idx

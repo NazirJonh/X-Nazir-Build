@@ -79,6 +79,7 @@ namespace blender::ui {
 /* Forward declarations */
 static bool category_name_is_glyph(const char *category_id);
 
+
 /* -------------------------------------------------------------------- */
 /** \name Constants & Macros
  * \{ */
@@ -94,6 +95,88 @@ static bool category_name_is_glyph(const char *category_id);
 /* Tab background brightening factors for inactive tabs (0.0 = no change, 1.0 = white). */
 #define TABS_BG_BRIGHTEN_BASE 0.0f
 #define TABS_BG_BRIGHTEN_HOVER 0.05f
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Pending Category Insert (Extension Drop)
+ * \{ */
+
+struct PendingCategoryInsert {
+  std::string tag_key;
+  std::string target_category;
+  std::string anchor_before;
+  std::string anchor_after;
+  bool insert_above = true;
+  bool valid = false;
+  double timestamp = 0.0;
+  Set<std::string> existing_categories;
+  Vector<std::string> pre_order;
+};
+
+static PendingCategoryInsert g_pending_category_insert;
+
+static void pending_category_insert_set(const std::string &tag_key,
+                                        const char *target_category,
+                                        const bool insert_above,
+                                        const Vector<PanelCategoryDyn *> &ordered_categories,
+                                        const Vector<std::string> &json_order)
+{
+  if (!target_category || target_category[0] == '\0') {
+    return;
+  }
+
+  g_pending_category_insert.tag_key = tag_key;
+  g_pending_category_insert.target_category = target_category;
+  g_pending_category_insert.anchor_before.clear();
+  g_pending_category_insert.anchor_after.clear();
+  g_pending_category_insert.insert_above = insert_above;
+  g_pending_category_insert.valid = true;
+  g_pending_category_insert.timestamp = BLI_time_now_seconds();
+  g_pending_category_insert.existing_categories.clear();
+  g_pending_category_insert.pre_order = json_order;
+
+  int target_index = -1;
+  for (int i = 0; i < ordered_categories.size(); i++) {
+    const PanelCategoryDyn *pc_dyn = ordered_categories[i];
+    if (pc_dyn && pc_dyn->idname[0] != '\0' && STREQ(pc_dyn->idname, target_category)) {
+      target_index = i;
+      break;
+    }
+  }
+
+  if (target_index != -1) {
+    if (insert_above) {
+      g_pending_category_insert.anchor_after = target_category;
+      if (target_index > 0) {
+        const PanelCategoryDyn *prev = ordered_categories[target_index - 1];
+        if (prev && prev->idname[0] != '\0') {
+          g_pending_category_insert.anchor_before = prev->idname;
+        }
+      }
+    }
+    else {
+      g_pending_category_insert.anchor_before = target_category;
+      if (target_index + 1 < ordered_categories.size()) {
+        const PanelCategoryDyn *next = ordered_categories[target_index + 1];
+        if (next && next->idname[0] != '\0') {
+          g_pending_category_insert.anchor_after = next->idname;
+        }
+      }
+    }
+  }
+
+  for (const PanelCategoryDyn *pc_dyn : ordered_categories) {
+    if (pc_dyn && pc_dyn->idname[0] != '\0') {
+      g_pending_category_insert.existing_categories.add(std::string(pc_dyn->idname));
+    }
+  }
+
+  printf("[CAT ORDER] pending insert set: tag_key='%s' target='%s' insert_above=%d\n",
+         g_pending_category_insert.tag_key.c_str(),
+         g_pending_category_insert.target_category.c_str(),
+         g_pending_category_insert.insert_above ? 1 : 0);
+}
 
 /** \} */
 
@@ -1058,8 +1141,12 @@ bool panel_category_is_visible_by_tags(const bContext *C,
 
 static int get_category_order_index(const bContext *C, ARegion *region, const char *category_id)
 {
-  WorkSpace *workspace = CTX_wm_workspace(C);
   ScrArea *area = CTX_wm_area(C);
+  WorkSpace *workspace = CTX_wm_workspace(C);
+  if (region == nullptr || workspace == nullptr) {
+    return 0;
+  }
+
   const int space_type = area ? area->spacetype : 0;
   const int region_type = region->regiontype;
 
@@ -1099,9 +1186,17 @@ static int get_category_order_index(const bContext *C, ARegion *region, const ch
 static std::string get_tag_combination_key(const wmWindowManager *wm, View3D *v3d)
 {
   UNUSED_VARS(wm);  /* Reserved for future use */
-  
-  if (!v3d || v3d->active_tag_filter_tags[0] == '\0') {
+
+  if (!v3d) {
     return "";  /* No filter active */
+  }
+
+  if (!v3d->tag_filter_enabled) {
+    return "";  /* Filter disabled - always use default key */
+  }
+
+  if (v3d->active_tag_filter_tags[0] == '\0') {
+    return "";  /* Filter enabled but no tags */
   }
 
   /* Parse and collect tag names */
@@ -1317,6 +1412,7 @@ static void save_category_order_to_json(const bContext *C,
 #endif
 }
 
+
 /* Forward declaration */
 Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region);
 
@@ -1517,10 +1613,7 @@ static void workspace_category_order_clear(WorkSpace *workspace, int space_type,
 
 static void apply_category_order(bContext *C, ARegion *region, CategoryDragState *state)
 {
-  WorkSpace *workspace = CTX_wm_workspace(C);
   ScrArea *area = CTX_wm_area(C);
-  const int space_type = area ? area->spacetype : 0;
-  const int region_type = region->regiontype;
   const wmWindowManager *wm = CTX_wm_manager(C);
   View3D *v3d = nullptr;
 
@@ -1564,11 +1657,27 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
   }
 
   /* Save to JSON for this tag combination */
+  printf("[CAT ORDER] apply_category_order: tag_key='%s' drag='%s' insert=%d (min=%d max=%d) count=%d\n",
+         tag_key.c_str(),
+         state->drag_category_id,
+         safe_insert_index,
+         state->min_insert_index,
+         state->max_insert_index,
+         int(final_order.size()));
+  for (int i = 0; i < final_order.size(); i++) {
+    printf("[CAT ORDER] apply_category_order[%d]='%s'\n", i, final_order[i].c_str());
+  }
   save_category_order_to_json(C, tag_key.c_str(), final_order);
 
   /* Also update WorkspaceCategoryOrder for backward compatibility */
-  workspace_category_order_clear(workspace, space_type, region_type);
+  WorkSpace *workspace = CTX_wm_workspace(C);
+  const int space_type = area ? area->spacetype : 0;
+  const int region_type = region->regiontype;
+  if (!workspace) {
+    return;
+  }
 
+  workspace_category_order_clear(workspace, space_type, region_type);
   for (int i = 0; i < final_order.size(); i++) {
     WorkspaceCategoryOrder *item = MEM_new<WorkspaceCategoryOrder>(__func__);
     item->space_type = space_type;
@@ -1581,6 +1690,112 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
   /* Trigger full redraw to ensure new order is used */
   WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
+}
+
+void category_tabs_apply_drop_insert(bContext *C,
+                                     ARegion *region,
+                                     const char *category_id,
+                                     const char *target_category_id,
+                                     bool insert_above)
+{
+  if (!C || !region || !category_id || !category_id[0]) {
+    return;
+  }
+
+  ScrArea *area = CTX_wm_area(C);
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  View3D *v3d = nullptr;
+
+  if (area && area->spacetype == SPACE_VIEW3D) {
+    v3d = static_cast<View3D *>(area->spacedata.first);
+  }
+
+  /* Get tag combination key for current filter state. */
+  std::string tag_key = get_tag_combination_key(wm, v3d);
+
+  Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
+
+  Vector<std::string> json_order = load_category_order_from_json(C, tag_key.c_str());
+
+  pending_category_insert_set(
+      tag_key, target_category_id, insert_above, ordered_categories, json_order);
+
+  /* For extension drop, defer JSON updates until the new category actually appears.
+   * The category_id is the hovered tab (target), not the new extension category. */
+  if (!category_id || !category_id[0] ||
+      (target_category_id && target_category_id[0] && STREQ(category_id, target_category_id)))
+  {
+    return;
+  }
+
+  int target_index = -1;
+  int drag_index = -1;
+  for (int i = 0; i < ordered_categories.size(); i++) {
+    const char *idname = ordered_categories[i]->idname;
+    if (idname && idname[0]) {
+      if (target_category_id && target_category_id[0] && STREQ(idname, target_category_id)) {
+        target_index = i;
+      }
+      if (STREQ(idname, category_id)) {
+        drag_index = i;
+      }
+    }
+  }
+
+  Vector<std::string> order;
+  order.reserve(ordered_categories.size() + 1);
+
+  for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+    const char *idname = pc_dyn_ptr->idname;
+    if (idname && idname[0] && !STREQ(idname, category_id)) {
+      order.append(idname);
+    }
+  }
+
+  int insert_index = order.size();
+  if (target_index != -1) {
+    insert_index = insert_above ? target_index : (target_index + 1);
+    if (drag_index != -1 && drag_index < insert_index) {
+      insert_index--;
+    }
+  }
+
+  insert_index = clamp_i(insert_index, 0, order.size());
+  order.insert(insert_index, std::string(category_id));
+
+  if (category_order_is_crossing_reserved_boundary(wm, order)) {
+    return;
+  }
+
+  printf("[CAT ORDER] category_tabs_apply_drop_insert: tag_key='%s' category='%s' target='%s' insert_above=%d insert_index=%d count=%d\n",
+         tag_key.c_str(),
+         category_id ? category_id : "",
+         target_category_id ? target_category_id : "",
+         insert_above ? 1 : 0,
+         insert_index,
+         int(order.size()));
+  for (int i = 0; i < order.size(); i++) {
+    printf("[CAT ORDER] drop_insert[%d]='%s'\n", i, order[i].c_str());
+  }
+  save_category_order_to_json(C, tag_key.c_str(), order);
+
+  WorkSpace *workspace = CTX_wm_workspace(C);
+  const int space_type = area ? area->spacetype : 0;
+  const int region_type = region->regiontype;
+  if (workspace) {
+    workspace_category_order_clear(workspace, space_type, region_type);
+    for (int i = 0; i < order.size(); i++) {
+      WorkspaceCategoryOrder *item = MEM_new<WorkspaceCategoryOrder>(__func__);
+      item->space_type = space_type;
+      item->region_type = region_type;
+      STRNCPY(item->category_id, order[i].c_str());
+      item->order_index = i;
+      BLI_addtail(&workspace->category_order, item);
+    }
+
+    WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+    WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
+  }
 }
 
 void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *region)
@@ -1618,6 +1833,16 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
   /* Load order from JSON for this tag combination */
   Vector<std::string> json_order = load_category_order_from_json(C, tag_key.c_str());
 
+  if (g_pending_category_insert.valid && g_pending_category_insert.tag_key == tag_key) {
+    const double time_since_pending = BLI_time_now_seconds() - g_pending_category_insert.timestamp;
+    if (time_since_pending > 120.0) {
+      printf("[CAT ORDER] pending insert expired: tag_key='%s' target='%s'\n",
+             g_pending_category_insert.tag_key.c_str(),
+             g_pending_category_insert.target_category.c_str());
+      g_pending_category_insert.valid = false;
+    }
+  }
+
   /* Map of existing categories for quick lookup */
   Map<std::string, PanelCategoryDyn *> existing;
   for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
@@ -1642,12 +1867,260 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
   }
 
   /* Then: remaining categories (new ones or not in JSON order) */
+  Vector<PanelCategoryDyn *> remaining;
   for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     std::string id(pc_dyn.idname);
     if (!added.contains(id) && panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
-      result.append(&pc_dyn);
+      remaining.append(&pc_dyn);
+    }
+  }
+
+  bool pending_applied = false;
+  Vector<std::string> pending_inserted_ids;
+  if (g_pending_category_insert.valid && g_pending_category_insert.tag_key == tag_key)
+  {
+    Vector<PanelCategoryDyn *> appeared_categories;
+    for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (!panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
+        continue;
+      }
+      if (!g_pending_category_insert.existing_categories.contains(std::string(pc_dyn.idname))) {
+        appeared_categories.append(&pc_dyn);
+      }
+    }
+
+    if (!appeared_categories.is_empty()) {
+      Set<std::string> appeared_ids;
+      for (PanelCategoryDyn *pc_dyn : appeared_categories) {
+        appeared_ids.add(std::string(pc_dyn->idname));
+      }
+
+      for (int i = result.size() - 1; i >= 0; i--) {
+        const std::string id(result[i]->idname);
+        if (appeared_ids.contains(id)) {
+          result.remove_and_reorder(i);
+          added.remove(id);
+        }
+      }
+
+      for (int i = remaining.size() - 1; i >= 0; i--) {
+        const std::string id(remaining[i]->idname);
+        if (appeared_ids.contains(id)) {
+          remaining.remove_and_reorder(i);
+        }
+      }
+
+      auto find_index_in_result = [&](const std::string &id) -> int {
+        if (id.empty()) {
+          return -1;
+        }
+        for (int i = 0; i < result.size(); i++) {
+          if (STREQ(result[i]->idname, id.c_str())) {
+            return i;
+          }
+        }
+        return -1;
+      };
+
+      int insert_index = -1;
+      if (!g_pending_category_insert.anchor_after.empty()) {
+        insert_index = find_index_in_result(g_pending_category_insert.anchor_after);
+      }
+      if (insert_index == -1 && !g_pending_category_insert.anchor_before.empty()) {
+        const int before_index = find_index_in_result(g_pending_category_insert.anchor_before);
+        if (before_index != -1) {
+          insert_index = before_index + 1;
+        }
+      }
+      if (insert_index == -1) {
+        const int target_index = find_index_in_result(g_pending_category_insert.target_category);
+        if (target_index != -1) {
+          insert_index = g_pending_category_insert.insert_above ? target_index :
+                                                                 (target_index + 1);
+        }
+      }
+      if (insert_index == -1) {
+        insert_index = result.size();
+      }
+      insert_index = clamp_i(insert_index, 0, result.size());
+
+      Vector<PanelCategoryDyn *> appeared_ordered;
+      appeared_ordered.reserve(appeared_categories.size());
+      Set<std::string> ordered_ids;
+      for (const std::string &cat_id : json_order) {
+        if (!appeared_ids.contains(cat_id) || ordered_ids.contains(cat_id)) {
+          continue;
+        }
+        PanelCategoryDyn **pc = existing.lookup_ptr(cat_id);
+        if (pc) {
+          appeared_ordered.append(*pc);
+          ordered_ids.add(cat_id);
+        }
+      }
+      for (PanelCategoryDyn *pc_dyn : appeared_categories) {
+        const std::string id(pc_dyn->idname);
+        if (!ordered_ids.contains(id)) {
+          appeared_ordered.append(pc_dyn);
+          ordered_ids.add(id);
+        }
+      }
+
+      int insert_offset = 0;
+      for (PanelCategoryDyn *pc_dyn : appeared_ordered) {
+        const std::string id(pc_dyn->idname);
+        if (!added.contains(id)) {
+          result.insert(insert_index + insert_offset, pc_dyn);
+          insert_offset++;
+          added.add(id);
+          pending_inserted_ids.append(id);
+        }
+      }
+
+      if (!pending_inserted_ids.is_empty()) {
+        pending_applied = true;
+        printf("[CAT ORDER] pending insert applied: tag_key='%s' count=%d target='%s' insert_above=%d\n",
+               g_pending_category_insert.tag_key.c_str(),
+               int(pending_inserted_ids.size()),
+               g_pending_category_insert.target_category.c_str(),
+               g_pending_category_insert.insert_above ? 1 : 0);
+        for (int i = 0; i < pending_inserted_ids.size(); i++) {
+          printf("[CAT ORDER] pending insert category[%d]='%s'\n",
+                 i,
+                 pending_inserted_ids[i].c_str());
+        }
+      }
+    }
+  }
+
+  for (PanelCategoryDyn *pc_dyn : remaining) {
+    std::string id(pc_dyn->idname);
+    if (!added.contains(id)) {
+      result.append(pc_dyn);
       added.add(id);
     }
+  }
+
+  if (pending_applied) {
+    Vector<std::string> pending_order = json_order;
+    if (pending_order.is_empty()) {
+      pending_order = g_pending_category_insert.pre_order;
+    }
+
+    auto normalize_reserved_boundary = [&](Vector<std::string> &order) {
+      Vector<std::string> reserved;
+      Vector<std::string> non_reserved;
+      reserved.reserve(order.size());
+      non_reserved.reserve(order.size());
+      for (const std::string &category_id : order) {
+        if (category_is_reserved_for_reorder(wm, category_id.c_str())) {
+          reserved.append(category_id);
+        }
+        else {
+          non_reserved.append(category_id);
+        }
+      }
+      order.clear();
+      order.reserve(reserved.size() + non_reserved.size());
+      for (const std::string &category_id : reserved) {
+        order.append(category_id);
+      }
+      for (const std::string &category_id : non_reserved) {
+        order.append(category_id);
+      }
+    };
+
+    if (pending_order.is_empty()) {
+      Vector<std::string> from_result;
+      from_result.reserve(result.size());
+      for (PanelCategoryDyn *pc_dyn : result) {
+        from_result.append(pc_dyn->idname);
+      }
+      normalize_reserved_boundary(from_result);
+      pending_order = std::move(from_result);
+    }
+    else if (category_order_is_crossing_reserved_boundary(wm, pending_order)) {
+      normalize_reserved_boundary(pending_order);
+    }
+
+    auto find_index_in_order = [&](const std::string &id) -> int {
+      if (id.empty()) {
+        return -1;
+      }
+      for (int i = 0; i < pending_order.size(); i++) {
+        if (STREQ(pending_order[i].c_str(), id.c_str())) {
+          return i;
+        }
+      }
+      return -1;
+    };
+
+    auto erase_first_in_order = [&](const std::string &id) {
+      const int idx = find_index_in_order(id);
+      if (idx != -1) {
+        pending_order.remove_and_reorder(idx);
+      }
+    };
+
+    int order_insert_index = -1;
+    if (!g_pending_category_insert.anchor_after.empty()) {
+      order_insert_index = find_index_in_order(g_pending_category_insert.anchor_after);
+    }
+    if (order_insert_index == -1 && !g_pending_category_insert.anchor_before.empty()) {
+      const int before_index = find_index_in_order(g_pending_category_insert.anchor_before);
+      if (before_index != -1) {
+        order_insert_index = before_index + 1;
+      }
+    }
+    if (order_insert_index == -1) {
+      const int target_index = find_index_in_order(g_pending_category_insert.target_category);
+      if (target_index != -1) {
+        order_insert_index = g_pending_category_insert.insert_above ? target_index :
+                                                                      (target_index + 1);
+      }
+    }
+    if (order_insert_index == -1) {
+      order_insert_index = pending_order.size();
+    }
+
+    order_insert_index = clamp_i(order_insert_index, 0, pending_order.size());
+
+    for (const std::string &id : pending_inserted_ids) {
+      erase_first_in_order(id);
+    }
+
+    int order_offset = 0;
+    for (const std::string &id : pending_inserted_ids) {
+      pending_order.insert(order_insert_index + order_offset, id);
+      order_offset++;
+    }
+
+    if (category_order_is_crossing_reserved_boundary(wm, pending_order)) {
+      printf("[CAT ORDER] pending insert blocked by reserved boundary: tag_key='%s' category='%s'\n",
+             g_pending_category_insert.tag_key.c_str(),
+             pending_inserted_ids.is_empty() ? "" : pending_inserted_ids[0].c_str());
+    }
+    else {
+      save_category_order_to_json(C, tag_key.c_str(), pending_order);
+      ScrArea *save_area = CTX_wm_area(C);
+      const int save_space_type = save_area ? save_area->spacetype : 0;
+      const int save_region_type = region->regiontype;
+      WorkSpace *save_workspace = CTX_wm_workspace(C);
+      if (save_workspace) {
+        workspace_category_order_clear(save_workspace, save_space_type, save_region_type);
+        for (int i = 0; i < pending_order.size(); i++) {
+          WorkspaceCategoryOrder *item = MEM_new<WorkspaceCategoryOrder>(__func__);
+          item->space_type = save_space_type;
+          item->region_type = save_region_type;
+          STRNCPY(item->category_id, pending_order[i].c_str());
+          item->order_index = i;
+          BLI_addtail(&save_workspace->category_order, item);
+        }
+        WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+        WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
+      }
+    }
+
+    g_pending_category_insert.valid = false;
   }
 
   return result;

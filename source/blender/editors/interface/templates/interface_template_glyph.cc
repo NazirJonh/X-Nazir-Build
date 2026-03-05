@@ -23,6 +23,7 @@
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_c.hh"
 #include "interface_intern.hh"
 
 #include "WM_api.hh"
@@ -739,13 +740,24 @@ static void ui_template_glyph_selector_impl(Layout *layout,
     if (glyph_prop) {
       RNA_property_string_get(ptr, glyph_prop, glyph_value);
 
-      /* Only show preview if there's a glyph value */
+      char glyph_unicode[8] = "";
       if (glyph_value[0] != '\0') {
         /* Convert hex code to UTF-8 if needed */
-        char glyph_unicode[8] = "";
-        if (hex_codepoint_to_utf8(glyph_value, glyph_unicode, sizeof(glyph_unicode))) {
-          uiTemplateGlyphPreview(layout, C, glyph_unicode, ptr, color_propname, 2.0f);
+        hex_codepoint_to_utf8(glyph_value, glyph_unicode, sizeof(glyph_unicode));
+      }
+      else if (C && category && category[0] != '\0' && is_single_glyph_str(category)) {
+        /* Glyph-only category: show default glyph when no explicit glyph is set. */
+        wmWindowManager *wm = CTX_wm_manager(C);
+        bool is_fallback = false;
+        const char *default_glyph = panel_category_glyph_lookup(
+            wm, category, nullptr, &is_fallback, nullptr);
+        if (default_glyph && default_glyph[0] != '\0') {
+          STRNCPY(glyph_unicode, default_glyph);
         }
+      }
+
+      if (glyph_unicode[0] != '\0') {
+        uiTemplateGlyphPreview(layout, C, glyph_unicode, ptr, color_propname, 2.0f);
       }
     }
   }

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <string>
 #include <fmt/format.h>
 
 #include "MEM_guardedalloc.h"
@@ -21,6 +22,8 @@
 #include "BLI_math_vector.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
+#include "BLI_path_utils.hh"
+#include "BLI_rect.h"
 
 #include "BLT_translation.hh"
 
@@ -52,6 +55,7 @@
 #include "BKE_main.hh"
 #include "BKE_mask.hh"
 #include "BKE_object.hh"
+#include "BKE_preferences.h"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
@@ -99,6 +103,7 @@
 #include "BLF_api.hh"
 
 #include "GPU_capabilities.hh"
+#include "GPU_state.hh"
 
 #include "wm_window.hh"
 
@@ -7343,11 +7348,94 @@ static void SCREEN_OT_workspace_cycle(wmOperatorType *ot)
                "Direction to cycle through");
 }
 
-/** \} */
-
 /* -------------------------------------------------------------------- */
-/** \name Assigning Operator Types
+/** \name Category Tab Extension Drop Operator
  * \{ */
+
+static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
+                                                          wmOperator *op,
+                                                          const wmEvent *event)
+{
+  std::string url = RNA_string_get(op->ptr, "url");
+  if (url.empty()) {
+    BKE_report(op->reports, RPT_ERROR, "Extension URL or path not provided");
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool url_is_file = STRPREFIX(url.c_str(), "file://");
+  const bool url_is_online = STRPREFIX(url.c_str(), "http://") ||
+                             STRPREFIX(url.c_str(), "https://");
+  const bool url_is_remote = url_is_file | url_is_online;
+
+  /* NOTE: searching for hard-coded add-on name isn't great.
+   * Needed since #WM_dropbox_add expects the operator to exist on startup. */
+  const char *idname_external = url_is_remote ? "extensions.package_install" :
+                                                "extensions.package_install_files";
+  bool use_url = true;
+
+  if (url_is_online && (G.f & G_FLAG_INTERNET_ALLOW) == 0) {
+    idname_external = "extensions.userpref_allow_online_popup";
+    use_url = false;
+  }
+
+  wmOperatorType *ot = WM_operatortype_find(idname_external, true);
+  wmOperatorStatus retval = OPERATOR_CANCELLED;
+  if (ot) {
+    PointerRNA props_ptr = WM_operator_properties_create_ptr(ot);
+    if (use_url) {
+      RNA_string_set(&props_ptr, "url", url.c_str());
+    }
+    retval = WM_operator_name_call_ptr(C, ot, wm::OpCallContext::InvokeDefault, &props_ptr, event);
+    WM_operator_properties_free(&props_ptr);
+  }
+  else {
+    BKE_reportf(op->reports, RPT_ERROR, "Extension operator not found \"%s\"", idname_external);
+    return OPERATOR_CANCELLED;
+  }
+
+#ifdef WITH_PYTHON
+  const std::string category = RNA_string_get(op->ptr, "category");
+  const std::string tag = RNA_string_get(op->ptr, "tag");
+  const char *active_tag = tag.empty() ? ui::category_active_tag_first_get(C) : tag.c_str();
+
+  if (!category.empty() && active_tag && active_tag[0]) {
+    char category_esc[256];
+    char tag_esc[256];
+    BLI_str_escape(category_esc, category.c_str(), sizeof(category_esc));
+    BLI_str_escape(tag_esc, active_tag, sizeof(tag_esc));
+
+    char python_cmd[1024];
+    BLI_snprintf(python_cmd,
+                 sizeof(python_cmd),
+                 "from bl_ui.space_userpref import add_category_tag\n"
+                 "add_category_tag('%s', '%s', auto_save=True)\n",
+                 category_esc,
+                 tag_esc);
+
+    const char *imports[] = {"bpy", nullptr};
+    BPY_run_string_exec(C, imports, python_cmd);
+  }
+#endif
+
+  return retval;
+}
+
+static void SCREEN_OT_category_tab_extension_drop(wmOperatorType *ot)
+{
+  ot->name = "Category Tab Extension Drop";
+  ot->description = "Handle dropping extension file onto category tab";
+  ot->idname = "SCREEN_OT_category_tab_extension_drop";
+
+  ot->invoke = category_tab_extension_drop_invoke;
+
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_string(ot->srna, "url", nullptr, 0, "URL", "Location of the extension to install");
+  RNA_def_string(ot->srna, "category", nullptr, 0, "Category", "Target category tab");
+  RNA_def_string(ot->srna, "tag", nullptr, 0, "Tag", "Active tag to assign");
+}
+
+/** \} */
 
 void ED_operatortypes_screen()
 {
@@ -7385,6 +7473,7 @@ void ED_operatortypes_screen()
   WM_operatortype_append(SCREEN_OT_space_type_set_or_cycle);
   WM_operatortype_append(SCREEN_OT_space_context_cycle);
   WM_operatortype_append(SCREEN_OT_workspace_cycle);
+  WM_operatortype_append(SCREEN_OT_category_tab_extension_drop);
 
   /* Frame changes. */
   WM_operatortype_append(SCREEN_OT_frame_offset);
@@ -7445,6 +7534,433 @@ static void blend_file_drop_copy(bContext * /*C*/, wmDrag *drag, wmDropBox *drop
 {
   /* copy drag path to properties */
   RNA_string_set(drop->ptr, "filepath", WM_drag_get_single_path(drag));
+}
+
+/**
+ * Check if drag data represents an extension (URL or local path).
+ * Supports both WM_DRAG_STRING (URL from website) and WM_DRAG_PATH (local .zip file).
+ */
+static bool category_tab_extension_drag_is_extension(wmDrag *drag)
+{
+  printf("[EXT_CHECK] drag->type=%d (PATH=%d, STRING=%d)\n",
+         drag->type, WM_DRAG_PATH, WM_DRAG_STRING);
+  fflush(stdout);
+
+  if (drag->type == WM_DRAG_PATH) {
+    const char *path = WM_drag_get_single_path(drag);
+    printf("[EXT_CHECK] PATH: '%s'\n", path ? path : "null");
+    fflush(stdout);
+    if (path && BLI_path_extension_check_n(path, ".zip", ".blend_extension", nullptr)) {
+      printf("[EXT_CHECK] PATH: extension match!\n");
+      fflush(stdout);
+      return true;
+    }
+  }
+  else if (drag->type == WM_DRAG_STRING) {
+    const std::string &str = WM_drag_get_string(drag);
+    const char *cstr = str.c_str();
+    printf("[EXT_CHECK] STRING: '%s'\n", cstr);
+    fflush(stdout);
+
+    /* Only URL formatted text. */
+    if (BKE_preferences_remote_scheme_end(cstr) == 0) {
+      return false;
+    }
+
+    /* Only single line strings. */
+    if (str.find('\n') != std::string::npos) {
+      return false;
+    }
+
+    /* Check for .zip extension (strip URL parameters first). */
+    std::string str_strip;
+    const char *cstr_maybe_copy = cstr;
+    size_t param_char = str.find('?');
+    if (param_char != std::string::npos) {
+      str_strip = str.substr(0, param_char);
+      cstr_maybe_copy = str_strip.c_str();
+    }
+
+    const char *cstr_ext = BLI_path_extension(cstr_maybe_copy);
+    if (cstr_ext && STRCASEEQ(cstr_ext, ".zip")) {
+      return true;
+    }
+
+    /* Check for known repository prefix. */
+    if (BKE_preferences_extension_repo_find_by_remote_url_prefix(&U, cstr, true)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
+{
+  printf("[EXT_DROP_POLL] START drag->type=%d\n", drag->type);
+  fflush(stdout);
+
+  if (event) {
+    printf("[EXT_DROP_POLL] event->xy=(%d,%d) event->mval=(%d,%d)\n",
+           event->xy[0],
+           event->xy[1],
+           event->mval[0],
+           event->mval[1]);
+    fflush(stdout);
+  }
+
+  /* Check if drag data is an extension (URL or path). */
+  if (!category_tab_extension_drag_is_extension(drag)) {
+    printf("[EXT_DROP_POLL] REJECT: not an extension\n");
+    fflush(stdout);
+    return false;
+  }
+
+  printf("[EXT_DROP_POLL] IS EXTENSION! checking position...\n");
+  fflush(stdout);
+
+  bScreen *screen = CTX_wm_screen(C);
+  if (!screen) {
+    printf("[EXT_DROP_POLL] REJECT: no screen\n");
+    fflush(stdout);
+    return false;
+  }
+
+  ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, event->xy);
+  if (!area) {
+    printf("[EXT_DROP_POLL] REJECT: no area at (%d,%d)\n", event->xy[0], event->xy[1]);
+    fflush(stdout);
+    return false;
+  }
+
+  ARegion *region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, event->xy);
+  if (!region) {
+    printf("[EXT_DROP_POLL] REJECT: no region at (%d,%d)\n", event->xy[0], event->xy[1]);
+    fflush(stdout);
+    return false;
+  }
+
+  printf("[EXT_DROP_POLL] region=%d winrct=[%d,%d]-[%d,%d] category_scroll=%d\n",
+         region->regiontype,
+         region->winrct.xmin,
+         region->winrct.ymin,
+         region->winrct.xmax,
+         region->winrct.ymax,
+         region->category_scroll);
+  printf("[EXT_DROP_POLL] v2d.cur=[%.3f,%.3f]-[%.3f,%.3f] v2d.tot=[%.3f,%.3f]-[%.3f,%.3f]\n",
+         region->v2d.cur.xmin,
+         region->v2d.cur.ymin,
+         region->v2d.cur.xmax,
+         region->v2d.cur.ymax,
+         region->v2d.tot.xmin,
+         region->v2d.tot.ymin,
+         region->v2d.tot.xmax,
+         region->v2d.tot.ymax);
+  fflush(stdout);
+
+  if (!ui::panel_category_tabs_is_visible(region)) {
+    printf("[EXT_DROP_POLL] REJECT: category tabs not visible (region=%d)\n", region->regiontype);
+    fflush(stdout);
+    return false;
+  }
+
+  if (!ED_region_panel_category_gutter_isect_xy(region, event->xy)) {
+    printf("[EXT_DROP_POLL] REJECT: not in category gutter at (%d,%d)\n",
+           event->xy[0],
+           event->xy[1]);
+    fflush(stdout);
+    return false;
+  }
+
+  const int mx_local = event->xy[0] - region->winrct.xmin;
+  const int my_local = event->xy[1] - region->winrct.ymin;
+  printf("[EXT_DROP_POLL] local=(%d,%d) region_winrct=[%d,%d]-[%d,%d]\n",
+         mx_local,
+         my_local,
+         region->winrct.xmin,
+         region->winrct.ymin,
+         region->winrct.xmax,
+         region->winrct.ymax);
+  fflush(stdout);
+
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    printf("[EXT_DROP_POLL] TAB rect idname='%s' rect=[%d,%d]-[%d,%d]\n",
+           pc_dyn.idname,
+           pc_dyn.rect.xmin,
+           pc_dyn.rect.ymin,
+           pc_dyn.rect.xmax,
+           pc_dyn.rect.ymax);
+    fflush(stdout);
+    if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
+      printf("[EXT_DROP_POLL] HIT tab idname='%s' rect=[%d,%d]-[%d,%d]\n",
+             pc_dyn.idname,
+             pc_dyn.rect.xmin,
+             pc_dyn.rect.ymin,
+             pc_dyn.rect.xmax,
+             pc_dyn.rect.ymax);
+      fflush(stdout);
+      return true;
+    }
+  }
+
+  printf("[EXT_DROP_POLL] REJECT: no tab hit\n");
+  fflush(stdout);
+
+  return false;
+}
+
+static void category_tab_extension_drop_draw_droptip(bContext *C,
+                                                     wmWindow *win,
+                                                     wmDrag * /*drag*/,
+                                                     const int xy[2])
+{
+  printf("[EXT_DROP_DRAW] START at (%d,%d)\n", xy[0], xy[1]);
+  fflush(stdout);
+
+  bScreen *screen = CTX_wm_screen(C);
+  if (!screen) {
+    printf("[EXT_DROP_DRAW] ABORT: no screen\n");
+    fflush(stdout);
+    return;
+  }
+
+  ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, xy);
+  if (!area) {
+    printf("[EXT_DROP_DRAW] ABORT: no area at (%d,%d)\n", xy[0], xy[1]);
+    fflush(stdout);
+    return;
+  }
+
+  ARegion *region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, xy);
+  if (!region) {
+    printf("[EXT_DROP_DRAW] ABORT: no region at (%d,%d)\n", xy[0], xy[1]);
+    fflush(stdout);
+    return;
+  }
+  if (!ui::panel_category_tabs_is_visible(region)) {
+    printf("[EXT_DROP_DRAW] ABORT: category tabs not visible (region=%d)\n", region->regiontype);
+    fflush(stdout);
+    return;
+  }
+
+  if (!ED_region_panel_category_gutter_isect_xy(region, xy)) {
+    printf("[EXT_DROP_DRAW] ABORT: not in category gutter at (%d,%d)\n", xy[0], xy[1]);
+    fflush(stdout);
+    return;
+  }
+
+  const int mx_local = xy[0] - region->winrct.xmin;
+  const int my_local = xy[1] - region->winrct.ymin;
+
+  const PanelCategoryDyn *hovered_tab = nullptr;
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
+      hovered_tab = &pc_dyn;
+      break;
+    }
+  }
+
+  if (!hovered_tab) {
+    printf("[EXT_DROP_DRAW] ABORT: no tab hit local=(%d,%d)\n", mx_local, my_local);
+    fflush(stdout);
+    return;
+  }
+
+  printf("[EXT_DROP_DRAW] HIT tab idname='%s' rect=[%d,%d]-[%d,%d]\n",
+         hovered_tab->idname,
+         hovered_tab->rect.xmin,
+         hovered_tab->rect.ymin,
+         hovered_tab->rect.xmax,
+         hovered_tab->rect.ymax);
+  fflush(stdout);
+
+  const View2D *v2d = &region->v2d;
+  const float aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
+                           1.0f :
+                           (static_cast<ui::Block *>(region->runtime->uiblocks.first))->aspect;
+  float category_tabs_zoom;
+  switch (static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode)) {
+    case USER_CATEGORY_TABS_GLYPHS_ONLY:
+      category_tabs_zoom = U.category_tabs_zoom_icon;
+      break;
+    case USER_CATEGORY_TABS_GLYPHS_TEXT:
+      category_tabs_zoom = U.category_tabs_zoom_mixed;
+      break;
+    case USER_CATEGORY_TABS_TEXT_ONLY:
+    default:
+      category_tabs_zoom = U.category_tabs_zoom_text;
+      break;
+  }
+  const float zoom = (1.0f / aspect) * category_tabs_zoom;
+  const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
+  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+  const int rct_xmin_local = is_left ? v2d->mask.xmin + 3 : (v2d->mask.xmax - category_tabs_width);
+  const int rct_xmax_local = is_left ? v2d->mask.xmin + category_tabs_width : (v2d->mask.xmax - 3);
+
+  /* Determine if cursor is in upper or lower half of the tab */
+  const int tab_center_y = (hovered_tab->rect.ymin + hovered_tab->rect.ymax) / 2;
+  const bool insert_above = (my_local > tab_center_y);
+
+  /* Convert tab rect to screen coordinates */
+  rcti tab_rect = hovered_tab->rect;
+  tab_rect.xmin = rct_xmin_local + region->winrct.xmin;
+  tab_rect.xmax = rct_xmax_local + region->winrct.xmin;
+  tab_rect.ymin += region->winrct.ymin;
+  tab_rect.ymax += region->winrct.ymin;
+
+  /* Calculate insert indicator position */
+  const int indicator_height = round_fl_to_int(3.0f * UI_SCALE_FAC);
+  const int indicator_margin = round_fl_to_int(2.0f * UI_SCALE_FAC);
+
+  rcti insert_rect;
+  insert_rect.xmin = tab_rect.xmin;
+  insert_rect.xmax = tab_rect.xmax;
+
+  if (insert_above) {
+    insert_rect.ymin = tab_rect.ymax + indicator_margin;
+    insert_rect.ymax = tab_rect.ymax + indicator_margin + indicator_height;
+  }
+  else {
+    insert_rect.ymin = tab_rect.ymin - indicator_margin - indicator_height;
+    insert_rect.ymax = tab_rect.ymin - indicator_margin;
+  }
+
+  /* Get theme colors for insert indicator */
+  float insert_color[4];
+  float insert_outline[4];
+  ui::theme::get_color_4fv(TH_TAB_ACTIVE, insert_color);
+  ui::theme::get_color_4fv(TH_TAB_OUTLINE_ACTIVE, insert_outline);
+
+  /* Make indicator more visible */
+  insert_color[3] = 0.8f;
+  insert_outline[3] = 1.0f;
+
+  wmWindowViewport_ex(win, 0.0f);
+  GPU_blend(GPU_BLEND_ALPHA);
+
+  /* Draw insert indicator as a rounded rectangle */
+  rctf indicator_box;
+  indicator_box.xmin = float(insert_rect.xmin);
+  indicator_box.xmax = float(insert_rect.xmax);
+  indicator_box.ymin = float(insert_rect.ymin);
+  indicator_box.ymax = float(insert_rect.ymax);
+
+  bTheme *btheme = ui::theme::theme_get();
+  const float indicator_radius = btheme->tui.wcol_tab.roundness * U.widget_unit * 0.5f;
+
+  ui::draw_roundbox_corner_set(ui::CNR_ALL);
+  ui::draw_roundbox_4fv(&indicator_box, true, indicator_radius, insert_color);
+  ui::draw_roundbox_4fv(&indicator_box, false, indicator_radius, insert_outline);
+
+  /* Also draw a subtle highlight on the target tab */
+  float tab_highlight_color[4];
+  copy_v4_v4(tab_highlight_color, insert_color);
+  tab_highlight_color[3] = 0.15f;
+
+  rctf tab_box;
+  tab_box.xmin = float(tab_rect.xmin);
+  tab_box.xmax = float(tab_rect.xmax);
+  tab_box.ymin = float(tab_rect.ymin);
+  tab_box.ymax = float(tab_rect.ymax);
+
+  const int roundbox_corners = region->overlap ? ui::CNR_ALL :
+                                                 (is_left ? (ui::CNR_TOP_LEFT | ui::CNR_BOTTOM_LEFT) :
+                                                            (ui::CNR_TOP_RIGHT | ui::CNR_BOTTOM_RIGHT));
+  const float tab_curve_radius = btheme->tui.wcol_tab.roundness * U.widget_unit;
+
+  ui::draw_roundbox_corner_set(roundbox_corners);
+  ui::draw_roundbox_4fv(&tab_box, true, tab_curve_radius, tab_highlight_color);
+
+  GPU_blend(GPU_BLEND_NONE);
+}
+
+static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
+{
+  ARegion *region = drag->drop_state.region_from;
+  if (!region || !ui::panel_category_tabs_is_visible(region)) {
+    return;
+  }
+
+  bScreen *screen = CTX_wm_screen(C);
+  if (!screen) {
+    return;
+  }
+
+  ScrArea *area = drag->drop_state.area_from;
+  if (!area) {
+    return;
+  }
+
+  const wmWindow *win = CTX_wm_window(C);
+  if (!win || !win->runtime->eventstate) {
+    return;
+  }
+
+  const int mouse_x = win->runtime->eventstate->xy[0];
+  const int mouse_y = win->runtime->eventstate->xy[1];
+
+  const int mx_local = mouse_x - region->winrct.xmin;
+  const int my_local = mouse_y - region->winrct.ymin;
+
+  const char *category = nullptr;
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
+      category = pc_dyn.idname;
+      break;
+    }
+  }
+
+  if (!category) {
+    return;
+  }
+
+  const char *active_tag = ui::category_active_tag_first_get(C);
+
+  RNA_string_set(drop->ptr, "category", category);
+  if (active_tag && active_tag[0] != '\0') {
+    RNA_string_set(drop->ptr, "tag", active_tag);
+  }
+
+  if (drag->type == WM_DRAG_PATH) {
+    const char *path = WM_drag_get_single_path(drag);
+    RNA_string_set(drop->ptr, "url", path ? path : "");
+  }
+  else if (drag->type == WM_DRAG_STRING) {
+    const std::string &str = WM_drag_get_string(drag);
+    RNA_string_set(drop->ptr, "url", str.c_str());
+  }
+}
+
+static std::string category_tab_extension_drop_tooltip(bContext *C,
+                                                       wmDrag *drag,
+                                                       const int xy[2],
+                                                       wmDropBox * /*drop*/)
+{
+  ARegion *region = drag->drop_state.region_from;
+  if (!region || !ui::panel_category_tabs_is_visible(region)) {
+    return "";
+  }
+
+  const int mx_local = xy[0] - region->winrct.xmin;
+  const int my_local = xy[1] - region->winrct.ymin;
+
+  const char *category = nullptr;
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
+      category = pc_dyn.idname;
+      break;
+    }
+  }
+
+  if (!category) {
+    return "";
+  }
+
+  const char *active_tag = ui::category_active_tag_first_get(C);
+  if (!active_tag || active_tag[0] == '\0') {
+    return fmt::format(fmt::runtime("Add tag to '{}'"), category);
+  }
+
+  return fmt::format(fmt::runtime("Add '{}' tag to '{}'"), active_tag, category);
 }
 
 static bool screen_drop_scene_poll(bContext *C, wmDrag *drag, const wmEvent * /*event*/)
@@ -7511,6 +8027,17 @@ void ED_keymap_screen(wmKeyConfig *keyconf)
                  screen_drop_scene_copy,
                  WM_drag_free_imported_drag_ID,
                  screen_drop_scene_tooltip);
+
+  /* Category-tab extension dropbox should be handled by UI region handlers
+   * so it takes precedence over window-level extension dropboxes (Preferences). */
+  ListBaseT<wmDropBox> *lb_ui = WM_dropboxmap_find("User Interface", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  wmDropBox *drop = WM_dropbox_add(lb_ui,
+                                  "SCREEN_OT_category_tab_extension_drop",
+                                  category_tab_extension_drop_poll,
+                                  category_tab_extension_drop_copy,
+                                  nullptr,
+                                  category_tab_extension_drop_tooltip);
+  drop->draw_droptip = category_tab_extension_drop_draw_droptip;
 
   keymap_modal_set(keyconf);
 }

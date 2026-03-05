@@ -1201,6 +1201,9 @@ static void wm_draw_window_onscreen(bContext *C, wmWindow *win, int view)
   }
 
   /* Needs pixel coords in screen. */
+  printf("[DROP_DRAW] wm_draw_window_onscreen: drags.first=%p\n",
+         wm->runtime->drags.first);
+  fflush(stdout);
   if (wm->runtime->drags.first) {
     wm_drags_draw(C, win);
     wmWindowViewport(win);

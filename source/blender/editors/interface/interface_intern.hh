@@ -860,6 +860,12 @@ bool category_glyph_list_is_valid(const ListBase *list);
 const char *category_tags_string_lookup(const wmWindowManager *wm, const char *category);
 
 /**
+ * Get the first active tag from the current tag filter.
+ * Returns nullptr if no tag is active.
+ */
+const char *category_active_tag_first_get(const bContext *C);
+
+/**
  * Check if a tag name exists in a semicolon-separated tags string.
  */
 bool category_has_tag(const char *tags_string, const char *tag_name);

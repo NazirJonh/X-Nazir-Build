@@ -230,6 +230,62 @@ const char *category_tags_string_lookup(const wmWindowManager *wm, const char *c
   return "";
 }
 
+const char *category_active_tag_first_get(const bContext *C)
+{
+  if (!C) {
+    return nullptr;
+  }
+
+  const ScrArea *area = CTX_wm_area(C);
+  if (!area) {
+    return nullptr;
+  }
+
+  const char *active_tags = nullptr;
+  if (area->spacetype == SPACE_VIEW3D) {
+    const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
+    if (v3d) {
+      active_tags = v3d->active_tag_filter_tags;
+    }
+  }
+  else if (area->spacetype == SPACE_PROPERTIES) {
+    const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
+    if (sbuts) {
+      active_tags = sbuts->active_tag_filter_tags;
+    }
+  }
+
+  if (!active_tags || active_tags[0] == '\0') {
+    return nullptr;
+  }
+
+  static char first_tag[64];
+  const char *cursor = active_tags;
+  while (*cursor) {
+    while (*cursor == ' ' || *cursor == ',' || *cursor == ';') {
+      cursor++;
+    }
+    if (!*cursor) {
+      break;
+    }
+
+    int i = 0;
+    while (*cursor && *cursor != ',' && *cursor != ';' && i < int(sizeof(first_tag)) - 1) {
+      first_tag[i++] = *cursor++;
+    }
+    while (i > 0 && first_tag[i - 1] == ' ') {
+      i--;
+    }
+    first_tag[i] = '\0';
+
+    if (first_tag[0] != '\0') {
+      return first_tag;
+    }
+  }
+
+  return nullptr;
+}
+
 bool category_has_tag(const char *tags_string, const char *tag_name)
 {
   if (tags_string == nullptr || tags_string[0] == '\0') {
@@ -2100,6 +2156,30 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                           int(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / aspect);
   const int tab_v_pad_text = round_fl_to_int(TABS_PADDING_TEXT_FACTOR * dpi_fac * zoom) + 2 * px;
   const int tab_v_pad = round_fl_to_int(TABS_PADDING_BETWEEN_FACTOR * dpi_fac * zoom);
+
+  /* Update drag_state->tab_v_pad during drag to ensure correct shift calculations.
+   * This must be done before the draw loop because calculate_insert_index and
+   * update_insert_zone depend on this value. */
+  if (is_dragging && drag_state != nullptr) {
+    const int prev_tab_v_pad = drag_state->tab_v_pad;
+    drag_state->tab_v_pad = tab_v_pad;
+
+    /* Update insert zone when tab_v_pad changes (first frame of drag) */
+    if (prev_tab_v_pad != tab_v_pad) {
+      update_insert_zone(C, wm, region, drag_state);
+      printf("[DRAW] tab_v_pad updated: %d -> %d, insert_y_start=%d, insert_y_end=%d\n",
+             prev_tab_v_pad, tab_v_pad, drag_state->insert_y_start, drag_state->insert_y_end);
+    }
+
+    printf("[DRAW] is_dragging: category='%s', current_insert_index=%d, original_index=%d, "
+           "tab_v_pad=%d, drag_tab_height=%d\n",
+           drag_state->drag_category_id,
+           drag_state->current_insert_index,
+           drag_state->original_index,
+           drag_state->tab_v_pad,
+           drag_state->drag_tab_height);
+  }
+
   bTheme *btheme = theme::theme_get();
   const float tab_curve_radius = btheme->tui.wcol_tab.roundness * U.widget_unit * zoom;
   const int roundboxtype = region->overlap ? CNR_ALL :
@@ -3095,6 +3175,13 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   state->current_insert_index = clamp_i(
       state->current_insert_index, state->min_insert_index, state->max_insert_index);
 
+  printf("[INVOKE] category='%s', original_index=%d, min_insert=%d, max_insert=%d, is_reserved=%d\n",
+         state->drag_category_id,
+         state->original_index,
+         state->min_insert_index,
+         state->max_insert_index,
+         state->is_reserved);
+
   state->drag_offset_y = 0.0f;
   state->prev_drag_offset_y = 0.0f;
   state->initial_scroll = region->category_scroll;
@@ -3272,6 +3359,16 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
       const wmWindowManager *wm = CTX_wm_manager(C);
       state->current_insert_index = calculate_insert_index(C, region, state);
       update_insert_zone(C, wm, region, state);
+
+      printf("[MODAL MOUSEMOVE] current_insert_index=%d, drag_offset_y=%.1f, tab_v_pad=%d, "
+             "min=%d, max=%d, insert_y_start=%d, insert_y_end=%d\n",
+             state->current_insert_index,
+             state->drag_offset_y,
+             state->tab_v_pad,
+             state->min_insert_index,
+             state->max_insert_index,
+             state->insert_y_start,
+             state->insert_y_end);
 
       /* Check if cursor is over a reserved tab and update cursor accordingly */
       bool over_reserved = false;

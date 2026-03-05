@@ -49,6 +49,8 @@
 #include "ED_screen.hh"
 #include "ED_userpref.hh"
 
+#include "wm_window.hh"
+
 #include "MEM_guardedalloc.h"
 
 #include "userpref_intern.hh"
@@ -1155,7 +1157,7 @@ static void PREFERENCES_OT_unassociate_blend(wmOperatorType *ot)
 /** \name Drag & Drop URL
  * \{ */
 
-static bool drop_extension_url_poll(bContext * /*C*/, wmDrag *drag, const wmEvent * /*event*/)
+static bool drop_extension_url_poll(bContext *C, wmDrag *drag, const wmEvent * /*event*/)
 {
   if (drag->type != WM_DRAG_STRING) {
     return false;
@@ -1206,6 +1208,12 @@ static bool drop_extension_url_poll(bContext * /*C*/, wmDrag *drag, const wmEven
     return false;
   }
 
+  if (C != nullptr) {
+    if (wmWindow *win = CTX_wm_window(C); win != nullptr && win->active == 0) {
+      wm_window_raise(win);
+    }
+  }
+
   return true;
 }
 
@@ -1222,7 +1230,7 @@ static void drop_extension_url_copy(bContext * /*C*/, wmDrag *drag, wmDropBox *d
 /** \name Drag & Drop Paths
  * \{ */
 
-static bool drop_extension_path_poll(bContext * /*C*/, wmDrag *drag, const wmEvent * /*event*/)
+static bool drop_extension_path_poll(bContext *C, wmDrag *drag, const wmEvent * /*event*/)
 {
   if (drag->type != WM_DRAG_PATH) {
     return false;
@@ -1232,6 +1240,12 @@ static bool drop_extension_path_poll(bContext * /*C*/, wmDrag *drag, const wmEve
   const char *cstr_ext = BLI_path_extension(cstr);
   if (!(cstr_ext && STRCASEEQ(cstr_ext, ".zip"))) {
     return false;
+  }
+
+  if (C != nullptr) {
+    if (wmWindow *win = CTX_wm_window(C); win != nullptr && win->active == 0) {
+      wm_window_raise(win);
+    }
   }
 
   return true;

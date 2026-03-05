@@ -1260,6 +1260,50 @@ static void drop_extension_path_copy(bContext * /*C*/, wmDrag *drag, wmDropBox *
 
 /** \} */
 
+static std::string preferences_extension_dragged_name(wmDrag *drag)
+{
+  if (!drag) {
+    return "";
+  }
+
+  if (drag->type == WM_DRAG_PATH) {
+    const char *path = WM_drag_get_single_path(drag);
+    if (!path || path[0] == '\0') {
+      return "";
+    }
+    const char *basename = BLI_path_basename(path);
+    return (basename && basename[0]) ? std::string(basename) : "";
+  }
+
+  if (drag->type == WM_DRAG_STRING) {
+    const std::string &url = WM_drag_get_string(drag);
+    if (url.empty()) {
+      return "";
+    }
+    std::string url_strip = url;
+    const size_t param_pos = url_strip.find_first_of("?#");
+    if (param_pos != std::string::npos) {
+      url_strip = url_strip.substr(0, param_pos);
+    }
+    const char *basename = BLI_path_basename(url_strip.c_str());
+    return (basename && basename[0]) ? std::string(basename) : "";
+  }
+
+  return "";
+}
+
+static std::string preferences_extension_drop_tooltip(bContext * /*C*/,
+                                                       wmDrag *drag,
+                                                       const int /*xy*/[2],
+                                                       wmDropBox * /*drop*/)
+{
+  const std::string extension_name = preferences_extension_dragged_name(drag);
+  if (!extension_name.empty()) {
+    return fmt::format(fmt::runtime("Install '{}'"), extension_name);
+  }
+  return fmt::format(fmt::runtime("Install Extension"));
+}
+
 static void ED_dropbox_drop_extension()
 {
   ListBaseT<wmDropBox> *lb = WM_dropboxmap_find("Window", SPACE_EMPTY, RGN_TYPE_WINDOW);
@@ -1268,13 +1312,13 @@ static void ED_dropbox_drop_extension()
                  drop_extension_url_poll,
                  drop_extension_url_copy,
                  nullptr,
-                 nullptr);
+                 preferences_extension_drop_tooltip);
   WM_dropbox_add(lb,
                  "PREFERENCES_OT_extension_url_drop",
                  drop_extension_path_poll,
                  drop_extension_path_copy,
                  nullptr,
-                 nullptr);
+                 preferences_extension_drop_tooltip);
 }
 
 /* -------------------------------------------------------------------- */

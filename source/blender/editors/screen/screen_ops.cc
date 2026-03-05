@@ -7352,6 +7352,38 @@ static void SCREEN_OT_workspace_cycle(wmOperatorType *ot)
 /** \name Category Tab Extension Drop Operator
  * \{ */
 
+static std::string category_tab_extension_dragged_name(wmDrag *drag)
+{
+  if (!drag) {
+    return "";
+  }
+
+  if (drag->type == WM_DRAG_PATH) {
+    const char *path = WM_drag_get_single_path(drag);
+    if (!path || path[0] == '\0') {
+      return "";
+    }
+    const char *basename = BLI_path_basename(path);
+    return (basename && basename[0]) ? std::string(basename) : "";
+  }
+
+  if (drag->type == WM_DRAG_STRING) {
+    const std::string &url = WM_drag_get_string(drag);
+    if (url.empty()) {
+      return "";
+    }
+    std::string url_strip = url;
+    const size_t param_pos = url_strip.find_first_of("?#");
+    if (param_pos != std::string::npos) {
+      url_strip = url_strip.substr(0, param_pos);
+    }
+    const char *basename = BLI_path_basename(url_strip.c_str());
+    return (basename && basename[0]) ? std::string(basename) : "";
+  }
+
+  return "";
+}
+
 static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
                                                           wmOperator *op,
                                                           const wmEvent *event)
@@ -7976,11 +8008,19 @@ static std::string category_tab_extension_drop_tooltip(bContext *C,
     return "";
   }
 
+  const std::string extension_name = category_tab_extension_dragged_name(drag);
   const char *active_tag = ui::category_active_tag_first_get(C);
   if (!active_tag || active_tag[0] == '\0') {
+    if (!extension_name.empty()) {
+      return fmt::format(fmt::runtime("Install '{}' → '{}'"), extension_name, category);
+    }
     return fmt::format(fmt::runtime("Add tag to '{}'"), category);
   }
 
+  if (!extension_name.empty()) {
+    return fmt::format(
+        fmt::runtime("Install '{}' + add '{}' tag to '{}'"), extension_name, active_tag, category);
+  }
   return fmt::format(fmt::runtime("Add '{}' tag to '{}'"), active_tag, category);
 }
 

@@ -21,12 +21,13 @@
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_math_vector.h"
+#include "BLI_path_utils.hh"
+#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
-#include "BLI_set.hh"
 
 #include "BLT_translation.hh"
 
@@ -37,6 +38,7 @@
 #include "DNA_workspace_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_preferences.h"
 #include "BKE_screen.hh"
 #include "BKE_workspace.hh"
 
@@ -2369,6 +2371,45 @@ static ARegion *ui_panel_category_tooltip_init(
     return nullptr;
   }
 
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm && !BLI_listbase_is_empty(&wm->runtime->drags)) {
+    for (const wmDrag &drag : wm->runtime->drags) {
+      if (drag.type == WM_DRAG_PATH) {
+        const char *path = WM_drag_get_single_path(&drag);
+        if (path && BLI_path_extension_check_n(path, ".zip", ".blend_extension", nullptr)) {
+          return nullptr;
+        }
+      }
+      else if (drag.type == WM_DRAG_STRING) {
+        const std::string &str = WM_drag_get_string(&drag);
+        if (str.empty()) {
+          continue;
+        }
+        const char *cstr = str.c_str();
+        if (BKE_preferences_remote_scheme_end(cstr) == 0) {
+          continue;
+        }
+        if (str.find('\n') != std::string::npos) {
+          continue;
+        }
+        std::string str_strip;
+        const char *cstr_maybe_copy = cstr;
+        size_t param_char = str.find('?');
+        if (param_char != std::string::npos) {
+          str_strip = str.substr(0, param_char);
+          cstr_maybe_copy = str_strip.c_str();
+        }
+        const char *cstr_ext = BLI_path_extension(cstr_maybe_copy);
+        if (cstr_ext && STRCASEEQ(cstr_ext, ".zip")) {
+          return nullptr;
+        }
+        if (BKE_preferences_extension_repo_find_by_remote_url_prefix(&U, cstr, true)) {
+          return nullptr;
+        }
+      }
+    }
+  }
+
   /* Get display mode from preferences.
    * In TEXT_ONLY mode the category name is already visible, so don't show tooltips.
    * In GLYPHS_ONLY and GLYPHS_TEXT (Mixed) modes, tooltips are useful. */
@@ -2388,7 +2429,7 @@ static ARegion *ui_panel_category_tooltip_init(
   const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
 
   /* Get window manager for category display name lookup. */
-  const wmWindowManager *wm = CTX_wm_manager(C);
+  wm = CTX_wm_manager(C);
 
   /* Find the category tab under the mouse. */
   for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {

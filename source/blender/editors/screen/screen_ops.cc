@@ -7393,10 +7393,13 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-#ifdef WITH_PYTHON
   const std::string category = RNA_string_get(op->ptr, "category");
+  const std::string target_category = RNA_string_get(op->ptr, "target_category");
+  const bool insert_above = RNA_boolean_get(op->ptr, "insert_above");
   const std::string tag = RNA_string_get(op->ptr, "tag");
   const char *active_tag = tag.empty() ? ui::category_active_tag_first_get(C) : tag.c_str();
+
+#ifdef WITH_PYTHON
 
   if (!category.empty() && active_tag && active_tag[0]) {
     char category_esc[256];
@@ -7417,6 +7420,15 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
   }
 #endif
 
+  if (!category.empty()) {
+    ui::category_tabs_apply_drop_insert(C,
+                                        CTX_wm_region(C),
+                                        category.c_str(),
+                                        target_category.empty() ? category.c_str() :
+                                                                    target_category.c_str(),
+                                        insert_above);
+  }
+
   return retval;
 }
 
@@ -7432,6 +7444,9 @@ static void SCREEN_OT_category_tab_extension_drop(wmOperatorType *ot)
 
   RNA_def_string(ot->srna, "url", nullptr, 0, "URL", "Location of the extension to install");
   RNA_def_string(ot->srna, "category", nullptr, 0, "Category", "Target category tab");
+  RNA_def_string(ot->srna, "target_category", nullptr, 0, "Target", "Target tab for insert");
+  RNA_def_boolean(
+      ot->srna, "insert_above", true, "Insert Above", "Insert above the target tab");
   RNA_def_string(ot->srna, "tag", nullptr, 0, "Tag", "Active tag to assign");
 }
 
@@ -7901,21 +7916,27 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
   const int mx_local = mouse_x - region->winrct.xmin;
   const int my_local = mouse_y - region->winrct.ymin;
 
-  const char *category = nullptr;
+  const PanelCategoryDyn *hovered_tab = nullptr;
   for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
-      category = pc_dyn.idname;
+      hovered_tab = &pc_dyn;
       break;
     }
   }
 
-  if (!category) {
+  if (!hovered_tab) {
     return;
   }
+
+  const char *category = hovered_tab->idname;
+  const int tab_center_y = (hovered_tab->rect.ymin + hovered_tab->rect.ymax) / 2;
+  const bool insert_above = (my_local > tab_center_y);
 
   const char *active_tag = ui::category_active_tag_first_get(C);
 
   RNA_string_set(drop->ptr, "category", category);
+  RNA_string_set(drop->ptr, "target_category", category);
+  RNA_boolean_set(drop->ptr, "insert_above", insert_above);
   if (active_tag && active_tag[0] != '\0') {
     RNA_string_set(drop->ptr, "tag", active_tag);
   }

@@ -893,6 +893,16 @@ int ui_panel_category_show_active_tab(ARegion *region, const int mval[2]);
  */
 Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region);
 
+/**
+ * Insert/move a category into the ordered list for the current tag combination.
+ * Used by drag & drop on category tabs.
+ */
+void category_tabs_apply_drop_insert(bContext *C,
+                                     ARegion *region,
+                                     const char *category_id,
+                                     const char *target_category_id,
+                                     bool insert_above);
+
 /* `interface_tab_categories_edit.cc` */
 
 /**

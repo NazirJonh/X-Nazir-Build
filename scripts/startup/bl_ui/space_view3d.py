@@ -1538,9 +1538,15 @@ class VIEW3D_UL_tag_order_list(UIList):
 
         # Reorder visible items according to View3D-local cache;
         # hidden items are kept after visible items.
-        new_order = visible_actual_indices + hidden_actual_indices
+        desired_order = visible_actual_indices + hidden_actual_indices
 
-        return (filtered_flags, new_order)
+        # UIList expects a per-item sort key array (length == collection length),
+        # not an ordered list of indices.
+        order_keys = [0] * len(wm.category_tags)
+        for rank, index in enumerate(desired_order):
+            order_keys[index] = rank
+
+        return (filtered_flags, order_keys)
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         """Draw tag item with glyph and name, similar to Preferences list."""
@@ -1626,6 +1632,14 @@ class VIEW3D_OT_tag_move_up(Operator):
         _view3d_tag_order_cache.clear()
         _view3d_tag_order_cache.extend(order_cache)
 
+        # Persist view3d tag order to JSON using global tag order cache.
+        try:
+            from bl_ui import space_userpref
+            space_userpref._tag_order_cache = list(order_cache)
+            space_userpref._save_tag_order_only()
+        except Exception:
+            pass
+
         wm.category_tags_active_index = actual_index
         context.area.tag_redraw()
 
@@ -1680,6 +1694,14 @@ class VIEW3D_OT_tag_move_down(Operator):
 
         _view3d_tag_order_cache.clear()
         _view3d_tag_order_cache.extend(order_cache)
+
+        # Persist view3d tag order to JSON using global tag order cache.
+        try:
+            from bl_ui import space_userpref
+            space_userpref._tag_order_cache = list(order_cache)
+            space_userpref._save_tag_order_only()
+        except Exception:
+            pass
 
         wm.category_tags_active_index = actual_index
         context.area.tag_redraw()

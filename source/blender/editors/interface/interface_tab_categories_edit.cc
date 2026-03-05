@@ -2732,6 +2732,34 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   /* Redraw */
   WM_main_add_notifier(NC_WINDOW, nullptr);
 
+  /* Save updated data to JSON (including tags which might have been modified) */
+  {
+    char python_cmd[2048];
+    /* Convert color to hex for Python set_category_data */
+    char color_hex[8];
+    SNPRINTF(color_hex, "%02x%02x%02x", 
+             int(item->color[0] * 255.0f), 
+             int(item->color[1] * 255.0f), 
+             int(item->color[2] * 255.0f));
+
+    /* Convert UTF-8 glyph back to hex codepoint for storage */
+    char glyph_hex[16] = "";
+    if (item->glyph[0] != '\0') {
+      utf8_to_hex_codepoint(item->glyph, glyph_hex, sizeof(glyph_hex));
+    }
+
+    SNPRINTF(python_cmd,
+             "from bl_ui.space_userpref import set_category_data\n"
+             "set_category_data('%s', display_name='%s', glyph='%s', color='%s', tags='%s')\n",
+             category,
+             item->display_name,
+             glyph_hex,
+             color_hex,
+             item->tags);
+    const char *imports_none[] = {nullptr};
+    BPY_run_string_exec(C, imports_none, python_cmd);
+  }
+
   return OPERATOR_FINISHED;
 }
 

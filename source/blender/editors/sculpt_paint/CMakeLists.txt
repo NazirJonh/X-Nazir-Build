@@ -176,6 +176,7 @@ set(SRC
 
 set(LIB
   PRIVATE bf::asset_system
+  bf_editor_paint_cursor_sync
   PRIVATE bf::blenkernel
   PRIVATE bf::animrig
   PRIVATE bf::blenlib
@@ -225,3 +226,4 @@ endif()
 blender_add_lib(bf_editor_sculpt_paint "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
 # RNA_prototypes.hh
 add_dependencies(bf_editor_sculpt_paint bf_rna)
+

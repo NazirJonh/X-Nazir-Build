@@ -45,6 +45,9 @@
 #include "ED_util.hh"
 #include "ED_uvedit.hh"
 
+#include "../paint_cursor_sync/targets/image_editor_cursor_target.hh"
+#include "../paint_cursor_sync/paint_cursor_sync_manager.hh"
+
 #include "WM_api.hh"
 #include "WM_types.hh"
 
@@ -636,6 +639,9 @@ static void image_main_region_init(wmWindowManager *wm, ARegion *region)
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Image", SPACE_IMAGE, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
+
+  /* Paint cursor sync target initialization. */
+  /* Target will be created on first draw when we have valid context. */
 }
 
 static void image_main_region_draw(const bContext *C, ARegion *region)
@@ -787,6 +793,23 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
     WM_gizmomap_draw(region->runtime->gizmo_map, C, WM_GIZMOMAP_DRAWSTEP_2D);
   }
   draw_image_cache(C, region);
+
+  /* Draw paint cursor sync target if in paint mode. */
+  if (sima->mode == SI_MODE_PAINT) {
+    /* Create target on first draw if needed. */
+    editors::ImageEditorCursorTarget *target =
+        editors::ImageEditorCursorTarget::get_target_for_region(region);
+    if (!target) {
+      SpaceImage *sima_cursor = CTX_wm_space_image(C);
+      target = new editors::ImageEditorCursorTarget(sima_cursor, region);
+      editors::ImageEditorCursorTarget::register_target_for_region(region, target);
+      editors::PaintCursorSyncManager::get().register_target(target);
+    }
+
+    if (target) {
+      target->draw();
+    }
+  }
 }
 
 static void image_main_region_listener(const wmRegionListenerParams *params)
@@ -843,6 +866,17 @@ static void image_main_region_listener(const wmRegionListenerParams *params)
         ED_region_tag_redraw(region);
       }
       break;
+  }
+}
+
+static void image_main_region_free(ARegion *region)
+{
+  editors::ImageEditorCursorTarget *target =
+      editors::ImageEditorCursorTarget::get_target_for_region(region);
+  if (target) {
+    editors::PaintCursorSyncManager::get().unregister_target(target);
+    editors::ImageEditorCursorTarget::unregister_target_for_region(region);
+    delete target;
   }
 }
 
@@ -1263,6 +1297,7 @@ void ED_spacetype_image()
   art->init = image_main_region_init;
   art->draw = image_main_region_draw;
   art->listener = image_main_region_listener;
+  art->free = image_main_region_free;
   art->lock = REGION_DRAW_LOCK_BAKING;
   BLI_addhead(&st->regiontypes, art);
 

@@ -97,6 +97,7 @@
 #include "ED_space_api.hh"
 #include "ED_undo.hh"
 #include "ED_util.hh"
+#include "ED_paint_cursor_sync.hh"
 
 #include "BLF_api.hh"
 #include "BLT_lang.hh"
@@ -227,6 +228,8 @@ void WM_init(bContext *C, int argc, const char **argv)
   DEG_editors_set_update_cb(ED_render_id_flush_update, ED_render_scene_update);
 
   ED_spacetypes_init();
+
+  blender::editors::paint_cursor_sync_init();
 
   ED_node_init_butfuncs();
 
@@ -560,6 +563,8 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
     Main *bmain = CTX_data_main(C);
     ED_editors_exit(bmain, true);
   }
+
+  blender::editors::paint_cursor_sync_exit();
 
   free_openrecent();
 

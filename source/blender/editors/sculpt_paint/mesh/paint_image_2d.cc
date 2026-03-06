@@ -44,6 +44,9 @@
 
 #include "UI_view2d.hh"
 
+#include "../../paint_cursor_sync/paint_cursor_sync_manager.hh"
+#include "../../paint_cursor_sync/sources/sculpt_cursor_source.hh"
+
 #include "../paint_intern.hh"
 
 namespace blender {
@@ -1506,6 +1509,8 @@ static void paint_2d_uv_to_coord(ImagePaintTile *tile, const float uv[2], float 
   coord[1] = (uv[1] - tile->uv_origin[1]) * tile->size[1];
 }
 
+static editors::SculptCursorSource g_cursor_source;
+
 void paint_2d_stroke(void *ps,
                      const float prev_mval[2],
                      const float mval[2],
@@ -1525,6 +1530,13 @@ void paint_2d_stroke(void *ps,
 
   ui::view2d_region_to_view(s->v2d, mval[0], mval[1], &new_uv[0], &new_uv[1]);
   ui::view2d_region_to_view(s->v2d, prev_mval[0], prev_mval[1], &old_uv[0], &old_uv[1]);
+
+  /* Paint cursor sync: update cursor position for 2D paint. */
+  {
+    g_cursor_source.update_from_2d_data(
+        float2(new_uv[0], new_uv[1]), s->image, base_size, true);
+    editors::PaintCursorSyncManager::get().sync_from_source(&g_cursor_source);
+  }
 
   float last_uv[2], start_uv[2];
   ui::view2d_region_to_view(s->v2d, 0.0f, 0.0f, &start_uv[0], &start_uv[1]);

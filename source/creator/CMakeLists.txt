@@ -289,6 +289,7 @@ if(WITH_BUILDINFO)
 endif()
 
 add_cc_flags_custom_test(blender)
+add_dependencies(bf_editor_sculpt_paint bf_editor_paint_cursor_sync)
 
 # message(STATUS "Configuring blender")
 if(WITH_PYTHON_MODULE)

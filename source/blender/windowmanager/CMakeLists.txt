@@ -7,7 +7,9 @@ set(INC
   gizmo
   gizmo/intern
   ../compositor
+  ../editors
   ../editors/include
+  ../editors/paint_cursor_sync
   ../gpu
   ../makesrna
   ../../../intern/memutil
@@ -98,6 +100,8 @@ set(LIB
   PRIVATE bf::depsgraph
   PRIVATE bf::dna
   PRIVATE bf::draw
+  bf_editor_sculpt_paint
+  bf_editor_paint_cursor_sync
   bf_editor_screen
   bf_editor_undo
   PRIVATE bf::gpu

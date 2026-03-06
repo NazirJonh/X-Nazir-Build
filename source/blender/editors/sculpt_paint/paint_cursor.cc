@@ -55,6 +55,12 @@
 #include "ED_image.hh"
 #include "ED_view3d.hh"
 
+#include "../paint_cursor_sync/paint_cursor_sync_manager.hh"
+#include "../paint_cursor_sync/sources/sculpt_cursor_source.hh"
+
+using blender::editors::SculptCursorSource;
+using blender::editors::PaintCursorSyncManager;
+
 #include "GPU_immediate.hh"
 #include "GPU_immediate_util.hh"
 #include "GPU_matrix.hh"
@@ -2195,12 +2201,18 @@ static void paint_cursor_restore_drawing_state()
   GPU_line_smooth(false);
 }
 
+static SculptCursorSource g_cursor_source;
+
 static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, void * /*unused*/)
 {
   PaintCursorContext pcontext;
   if (!paint_cursor_context_init(C, xy, tilt, pcontext)) {
     return;
   }
+
+  g_cursor_source.update_from_cursor_data(
+      pcontext.location, pcontext.normal, pcontext.object, pcontext.pixel_radius, true);
+  PaintCursorSyncManager::get().sync_from_source(&g_cursor_source);
 
   if (!paint_cursor_is_brush_cursor_enabled(pcontext)) {
     /* For Grease Pencil draw mode, we want to we only render a small mouse cursor (dot) if the

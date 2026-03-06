@@ -464,6 +464,7 @@ set(LIB
   bf_editor_render
   bf_editor_scene
   bf_editor_sculpt_paint
+  bf_editor_paint_cursor_sync
   bf_editor_sound
   bf_editor_transform
   bf_editor_undo

@@ -7540,8 +7540,8 @@ void ED_operatortypes_screen()
   /* Category tabs operators. */
   ED_operatortypes_screen_category_tabs();
 
-  /* Register category tag filter menu. */
-  blender::ui::category_tag_filter_menu_register();
+  /* Register category tag filter toggle menu. */
+  blender::ui::category_tag_filter_toggle_menu_register();
 }
 
 /** \} */

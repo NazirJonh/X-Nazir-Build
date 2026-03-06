@@ -100,6 +100,30 @@ def _get_tag_filter_mode_flag_from_wm(wm):
         return 0
 
 
+def get_current_tag_mode_flag(context):
+    """Get the current object mode as a CategoryTagMode bitmask.
+    
+    This is the Python equivalent of the C++ get_current_tag_mode_flag() function.
+    Returns a bit flag corresponding to the current object mode.
+    """
+    ob = context.active_object
+    if not ob:
+        return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("OBJECT_MODE", 0)
+    
+    mode = ob.mode
+    mode_map = {
+        'OBJECT': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("OBJECT_MODE", 0),
+        'EDIT': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0),
+        'SCULPT': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("SCULPT_MODE", 0),
+        'VERTEX_PAINT': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("VERTEX_PAINT", 0),
+        'WEIGHT_PAINT': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("WEIGHT_PAINT", 0),
+        'TEXTURE_PAINT': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("TEXTURE_PAINT", 0),
+        'PAINT_UV': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("UV_EDIT", 0),
+        'POSE': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("POSE_MODE", 0),
+    }
+    return mode_map.get(mode, _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("OBJECT_MODE", 0))
+
+
 @contextmanager
 def safe_file_write(filepath):
     """Atomic file write with rollback on error and retry logic for Windows."""
@@ -2442,6 +2466,46 @@ def with_context_check(func):
     return wrapper
 
 
+class USERPREF_OT_category_tag_filter_set_mode(Operator):
+    """Set category tag filter mode: Current Mode or All Tags"""
+    bl_idname = "wm.category_tag_filter_set_mode"
+    bl_label = "Set Tag Filter Mode"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    use_current_mode: bpy.props.BoolProperty(
+        name="Use Current Mode",
+        description="Filter tags by current object mode (True) or show all tags (False)",
+        default=True
+    )
+
+    @with_context_check
+    def execute(self, context):
+        wm = context.window_manager
+
+        if self.use_current_mode:
+            # Get current object mode and convert to filter mode enum string
+            current_mode_flag = get_current_tag_mode_flag(context)
+            # Map mode flags to RNA enum string identifiers
+            mode_flag_to_enum = {
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("OBJECT_MODE", 0): "OBJECT_MODE",
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0): "EDIT_MODE",
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("SCULPT_MODE", 0): "SCULPT_MODE",
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("VERTEX_PAINT", 0): "VERTEX_PAINT",
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("WEIGHT_PAINT", 0): "WEIGHT_PAINT",
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("TEXTURE_PAINT", 0): "TEXTURE_PAINT",
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("UV_EDIT", 0): "UV_EDIT",
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("POSE_MODE", 0): "POSE_MODE",
+            }
+            wm.category_tag_filter_mode = mode_flag_to_enum.get(current_mode_flag, "OBJECT_MODE")
+        else:
+            # Show all tags
+            wm.category_tag_filter_mode = "ALL"
+
+        # Trigger UI update
+        context.area.tag_redraw()
+        return {'FINISHED'}
+
+
 class USERPREF_OT_category_tag_create(Operator):
     """Create a new category tag and assign it to the current category"""
     bl_idname = "wm.category_tag_create"
@@ -2518,6 +2582,7 @@ class USERPREF_OT_category_tag_create(Operator):
 
             context.area.tag_redraw()
             return {'FINISHED'}
+
         self.report({'ERROR'}, message)
         return {'CANCELLED'}
 
@@ -6493,6 +6558,7 @@ classes = (
     USERPREF_OT_category_tag_move,
     USERPREF_OT_category_tag_toggle,
     USERPREF_OT_category_tag_filter_set,
+    USERPREF_OT_category_tag_filter_set_mode,
 
     USERPREF_PT_interface_display,
     USERPREF_PT_interface_editors,

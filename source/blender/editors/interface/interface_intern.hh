@@ -951,6 +951,7 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int event);
  * Menu registration.
  */
 void category_tag_filter_menu_register();
+void category_tag_filter_toggle_menu_register();
 
 /**
  * Centered popup operator registration.
@@ -2081,6 +2082,12 @@ void uiTemplateGlyphSelectorWithCallback(Layout *layout,
 /** \} */
 
 }  // namespace internal
+
+/**
+ * Get the current object mode as a CategoryTagMode bitmask.
+ * Used by category tag filtering to determine which tags to show.
+ */
+uint32_t get_current_tag_mode_flag(const bContext *C);
 
 /** Glyph picker grid operator. */
 void WM_OT_glyph_picker_grid(wmOperatorType *ot);

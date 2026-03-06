@@ -209,8 +209,8 @@ struct wmWindowManager {
   /** Active index for category tags UI list. */
   int category_tags_active_index = 0;
 
-  /** Mode filter for category tags in popup (`CategoryTagMode`, 0 = all tags). */
-  char category_tag_filter_mode = 0;
+  /** Mode filter for category tags in popup (`CategoryTagMode`, 0 = all tags, 1+ = current mode). */
+  char category_tag_filter_mode = 1;
   char _pad_filter[1] = {};
   /** Show tag names in Tag Bar buttons (Glyph+Name vs Glyph-only mode). */
   char show_tag_names = 0;

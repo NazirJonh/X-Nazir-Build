@@ -16,6 +16,7 @@
 #include "BLI_fileops.h"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.h"
+#include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_string_ref.hh"
 #include "BLI_string_utf8.h"
@@ -39,6 +40,8 @@
 #include "BLT_translation.hh"
 
 #include "BKE_idprop.hh"
+
+#include "GPU_state.hh"
 
 #include "IMB_thumbs.hh"
 
@@ -482,9 +485,12 @@ static void icon_preview_draw_cb(const bContext * /*C*/,
     return;
   }
 
+  const uiStyle *style = style_get_dpi();
   const int rect_w = BLI_rcti_size_x(rect);
   const int rect_h = BLI_rcti_size_y(rect);
-  const float icon_draw_size = float(min_ii(rect_w, rect_h)) * 0.68f * size_multiplier;
+  const float icon_size_from_style = style->widget.points * UI_SCALE_FAC * size_multiplier;
+  const float icon_size_from_rect = float(min_ii(rect_w, rect_h)) * 0.9f;
+  const float icon_draw_size = min_ff(icon_size_from_style, icon_size_from_rect);
 
   uchar icon_tint[4] = {0, 0, 0, 255};
   if (is_zero_v3(color)) {
@@ -500,7 +506,7 @@ static void icon_preview_draw_cb(const bContext * /*C*/,
   const float rect_center_y = float(rect->ymin + rect->ymax) * 0.5f;
   const float icon_pos_x = rect_center_x - icon_draw_size * 0.5f;
   const float icon_pos_y = rect_center_y - icon_draw_size * 0.5f;
-  const float icon_aspect = (float(ICON_DEFAULT_WIDTH) / icon_draw_size) * UI_INV_SCALE_FAC;
+  const float icon_aspect = float(ICON_DEFAULT_WIDTH) / icon_draw_size;
 
   GPU_blend(GPU_BLEND_ALPHA);
   icon_draw_ex(icon_pos_x,
@@ -803,9 +809,6 @@ static void ui_template_glyph_selector_impl(Layout *layout,
 
       char icon_key[128] = "";
       RNA_property_string_get(preview_ptr, icon_key_prop, icon_key);
-      if (icon_key[0] == '\0') {
-        return ICON_NONE;
-      }
 
       int icon_id = ICON_NONE;
       if (icon_key[0] != '\0') {

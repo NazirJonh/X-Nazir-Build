@@ -7428,29 +7428,6 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
   const std::string category = RNA_string_get(op->ptr, "category");
   const std::string target_category = RNA_string_get(op->ptr, "target_category");
   const bool insert_above = RNA_boolean_get(op->ptr, "insert_above");
-  const std::string tag = RNA_string_get(op->ptr, "tag");
-  const char *active_tag = tag.empty() ? ui::category_active_tag_first_get(C) : tag.c_str();
-
-#ifdef WITH_PYTHON
-
-  if (!category.empty() && active_tag && active_tag[0]) {
-    char category_esc[256];
-    char tag_esc[256];
-    BLI_str_escape(category_esc, category.c_str(), sizeof(category_esc));
-    BLI_str_escape(tag_esc, active_tag, sizeof(tag_esc));
-
-    char python_cmd[1024];
-    BLI_snprintf(python_cmd,
-                 sizeof(python_cmd),
-                 "from bl_ui.space_userpref import add_category_tag\n"
-                 "add_category_tag('%s', '%s', auto_save=True)\n",
-                 category_esc,
-                 tag_esc);
-
-    const char *imports[] = {"bpy", nullptr};
-    BPY_run_string_exec(C, imports, python_cmd);
-  }
-#endif
 
   if (!category.empty()) {
     ui::category_tabs_apply_drop_insert(C,
@@ -7479,7 +7456,6 @@ static void SCREEN_OT_category_tab_extension_drop(wmOperatorType *ot)
   RNA_def_string(ot->srna, "target_category", nullptr, 0, "Target", "Target tab for insert");
   RNA_def_boolean(
       ot->srna, "insert_above", true, "Insert Above", "Insert above the target tab");
-  RNA_def_string(ot->srna, "tag", nullptr, 0, "Tag", "Active tag to assign");
 }
 
 /** \} */
@@ -7964,14 +7940,9 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
   const int tab_center_y = (hovered_tab->rect.ymin + hovered_tab->rect.ymax) / 2;
   const bool insert_above = (my_local > tab_center_y);
 
-  const char *active_tag = ui::category_active_tag_first_get(C);
-
   RNA_string_set(drop->ptr, "category", category);
   RNA_string_set(drop->ptr, "target_category", category);
   RNA_boolean_set(drop->ptr, "insert_above", insert_above);
-  if (active_tag && active_tag[0] != '\0') {
-    RNA_string_set(drop->ptr, "tag", active_tag);
-  }
 
   if (drag->type == WM_DRAG_PATH) {
     const char *path = WM_drag_get_single_path(drag);
@@ -7983,7 +7954,7 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
   }
 }
 
-static std::string category_tab_extension_drop_tooltip(bContext *C,
+static std::string category_tab_extension_drop_tooltip(bContext * /*C*/,
                                                        wmDrag *drag,
                                                        const int xy[2],
                                                        wmDropBox * /*drop*/)
@@ -8009,19 +7980,10 @@ static std::string category_tab_extension_drop_tooltip(bContext *C,
   }
 
   const std::string extension_name = category_tab_extension_dragged_name(drag);
-  const char *active_tag = ui::category_active_tag_first_get(C);
-  if (!active_tag || active_tag[0] == '\0') {
-    if (!extension_name.empty()) {
-      return fmt::format(fmt::runtime("Install '{}' → '{}'"), extension_name, category);
-    }
-    return fmt::format(fmt::runtime("Add tag to '{}'"), category);
-  }
-
   if (!extension_name.empty()) {
-    return fmt::format(
-        fmt::runtime("Install '{}' + add '{}' tag to '{}'"), extension_name, active_tag, category);
+    return fmt::format(fmt::runtime("Install '{}' → '{}'"), extension_name, category);
   }
-  return fmt::format(fmt::runtime("Add '{}' tag to '{}'"), active_tag, category);
+  return fmt::format(fmt::runtime("Install extension → '{}'"), category);
 }
 
 static bool screen_drop_scene_poll(bContext *C, wmDrag *drag, const wmEvent * /*event*/)

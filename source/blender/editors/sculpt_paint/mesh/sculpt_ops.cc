@@ -1515,6 +1515,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(trim::SCULPT_OT_trim_polyline_gesture);
   WM_operatortype_append(project::SCULPT_OT_project_line_gesture);
 
+  WM_operatortype_append(color::SCULPT_OT_color_gradient);
   WM_operatortype_append(color::SCULPT_OT_color_filter);
   WM_operatortype_append(mask::SCULPT_OT_mask_by_color);
   WM_operatortype_append(dyntopo::SCULPT_OT_dyntopo_detail_size_edit);

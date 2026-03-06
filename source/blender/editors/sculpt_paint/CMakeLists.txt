@@ -24,6 +24,10 @@ set(SRC
   paint_cursor.cc
   paint_curve.cc
   paint_curve_undo.cc
+  paint_gradient_core.cc
+  paint_image_session_state.cc
+  paint_gradient_session.cc
+  paint_stroke_session.cc
   paint_ops.cc
   paint_sample_color.cc
   paint_stroke.cc
@@ -117,6 +121,11 @@ set(SRC
 
   paint_intern.hh
   paint_cursor.hh
+  paint_gradient_core.hh
+  paint_gradient_session.hh
+  paint_image_session_state.hh
+  paint_gradient_types.hh
+  paint_stroke_session.hh
 
   curves/sculpt_intern.hh
 
@@ -206,6 +215,7 @@ set(LIB
 if(WITH_GTESTS)
   set(TEST_SRC
     mesh/mesh_brush_common_tests.cc
+    mesh/paint_gradient_core_tests.cc
     mesh/paint_test.cc
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc

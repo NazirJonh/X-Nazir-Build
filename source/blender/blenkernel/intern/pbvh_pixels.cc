@@ -4,6 +4,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_customdata.hh"
+#include "BKE_image.hh"
 #include "BKE_mesh.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
@@ -457,9 +458,18 @@ void mark_image_dirty(Node &node, Image &image, ImageUser &image_user)
   NodeData *node_data = static_cast<NodeData *>(node.pixels_);
   if (node_data->flags.dirty) {
     ImageUser local_image_user = image_user;
-    for (ImageTile &tile : image.tiles) {
-      image::ImageTileWrapper image_tile(&tile);
-      local_image_user.tile = image_tile.get_tile_number();
+    for (UDIMTilePixels &tile_data : node_data->tiles) {
+      if (!tile_data.flags.dirty) {
+        continue;
+      }
+
+      ImageTile *image_tile_ptr = BKE_image_get_tile(&image, tile_data.tile_number);
+      if (image_tile_ptr == nullptr) {
+        continue;
+      }
+
+      image::ImageTileWrapper image_tile(image_tile_ptr);
+      local_image_user.tile = tile_data.tile_number;
       ImBuf *image_buffer = BKE_image_acquire_ibuf(&image, &local_image_user, nullptr);
       if (image_buffer == nullptr) {
         continue;

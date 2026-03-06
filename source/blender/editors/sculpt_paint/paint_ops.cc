@@ -1044,6 +1044,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_vertex_paint);
   WM_operatortype_append(PAINT_OT_vertex_color_set);
   WM_operatortype_append(PAINT_OT_vertex_color_smooth);
+  WM_operatortype_append(PAINT_OT_vertex_color_gradient);
 
   WM_operatortype_append(PAINT_OT_vertex_color_brightness_contrast);
   WM_operatortype_append(PAINT_OT_vertex_color_hsv);

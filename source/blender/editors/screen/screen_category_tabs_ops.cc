@@ -76,6 +76,81 @@ using ui::utf8_to_hex_codepoint;
 using ui::context_active_but_get_respect_popup;
 
 /* -------------------------------------------------------------------- */
+/** \name Category Tab Icon Source Enum (Stage 1 wiring)
+ * \{ */
+
+enum eCategoryTabIconSource {
+  CATEGORY_TAB_ICON_SOURCE_AUTO = 0,
+  CATEGORY_TAB_ICON_SOURCE_MANUAL = 1,
+  CATEGORY_TAB_ICON_SOURCE_OFF = 2,
+};
+
+enum eCategoryTabEditDisplayMode {
+  CATEGORY_TAB_EDIT_MODE_GLYPH = 0,
+  CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON = 1,
+  CATEGORY_TAB_EDIT_MODE_TEXT = 2,
+};
+
+enum eCategoryTabCustomIconMode {
+  CATEGORY_TAB_CUSTOM_ICON_MODE_BLENDER = 0,
+  CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM = 1,
+};
+
+static const EnumPropertyItem rna_enum_category_tab_icon_source_items[] = {
+    {CATEGORY_TAB_ICON_SOURCE_AUTO,
+     "AUTO",
+     ICON_NONE,
+     "Auto",
+     "Use automatic icon resolve chain (provider/fallback)"},
+    {CATEGORY_TAB_ICON_SOURCE_MANUAL,
+     "MANUAL",
+     ICON_NONE,
+     "Manual",
+     "Use manual icon key/path override for this category"},
+    {CATEGORY_TAB_ICON_SOURCE_OFF,
+     "OFF",
+     ICON_NONE,
+     "Off",
+     "Disable icon resolve and use fallback glyph/text"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_category_tab_edit_display_mode_items[] = {
+    {CATEGORY_TAB_EDIT_MODE_GLYPH,
+     "GLYPH",
+     ICON_NONE,
+     "Glyph",
+     "Show and edit glyph for this category"},
+    {CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON,
+     "CUSTOM_ICON",
+     ICON_NONE,
+     "Icon",
+     "Show and edit custom icon for this category"},
+    {CATEGORY_TAB_EDIT_MODE_TEXT,
+     "TEXT",
+     ICON_NONE,
+     "First Letter",
+     "Use text/fallback behavior without custom icon override"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_category_tab_custom_icon_mode_items[] = {
+    {CATEGORY_TAB_CUSTOM_ICON_MODE_BLENDER,
+     "BLENDER",
+     ICON_NONE,
+     "Blender",
+     "Use one of Blender built-in icons"},
+    {CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM,
+     "CUSTOM",
+     ICON_NONE,
+     "Custom",
+     "Use external icon path (read-only source path)"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Color Presets Enum
  * \{ */
 
@@ -375,6 +450,14 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     if (!reset_item) {
       reset_item = MEM_new<CategoryGlyphItem>(__func__);
       STRNCPY(reset_item->category, category);
+      reset_item->glyph[0] = '\0';
+      reset_item->display_name[0] = '\0';
+      zero_v3(reset_item->color);
+      reset_item->tags[0] = '\0';
+      reset_item->icon_key[0] = '\0';
+      reset_item->icon_path[0] = '\0';
+      reset_item->icon_provider[0] = '\0';
+      reset_item->icon_source = 0;
       BLI_addtail(&wm->category_glyph_overrides, reset_item);
     }
     /* Clear tags in WM override - this updates UI to show no tags selected */
@@ -605,10 +688,16 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
     return OPERATOR_CANCELLED;
   }
 
-  /* Get category from the dialog operator (not from this operator) */
+  /* Read category before exec, because exec clears category_tab_current_dialog_op. */
   char category[64] = "";
   if (category_tab_current_dialog_op) {
     RNA_string_get(category_tab_current_dialog_op->ptr, "category", category);
+  }
+
+  /* Persist current dialog values (including icon fields) to JSON using the same
+   * code-path as the edit dialog exec callback. */
+  if (category_tab_current_dialog_op) {
+    category_tab_edit_dialog_exec(C, category_tab_current_dialog_op);
   }
 
   if (category[0] == '\0') {
@@ -884,6 +973,46 @@ static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
   RNA_def_string(ot->srna, "display_name", nullptr, 32, "Display Name", "Custom display name");
   RNA_def_string(ot->srna, "glyph", nullptr, 16, "Glyph Code", "Hex codepoint (e.g., e5d2)");
   RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Search glyphs");
+  RNA_def_string(ot->srna, "icon_search", nullptr, 64, "Icon Search", "Search built-in icons");
+
+  RNA_def_enum(ot->srna,
+               "display_mode_ui",
+               rna_enum_category_tab_edit_display_mode_items,
+               CATEGORY_TAB_EDIT_MODE_GLYPH,
+               "Display Mode",
+               "UI mode for category display editor");
+  RNA_def_enum(ot->srna,
+               "custom_icon_mode_ui",
+               rna_enum_category_tab_custom_icon_mode_items,
+               CATEGORY_TAB_CUSTOM_ICON_MODE_BLENDER,
+               "Custom Icon Mode",
+               "Choose between Blender icon picker and external custom icon path");
+
+  RNA_def_enum(ot->srna,
+               "icon_source",
+               rna_enum_category_tab_icon_source_items,
+               CATEGORY_TAB_ICON_SOURCE_AUTO,
+               "Icon Source",
+               "Icon source mode for category tab content (Stage 1 wiring)");
+  RNA_def_string(ot->srna,
+                 "icon_key",
+                 nullptr,
+                 128,
+                 "Icon Key",
+                 "Stable icon key for built-in/manual icon resolver");
+  RNA_def_string(ot->srna,
+                 "icon_path",
+                 nullptr,
+                 1024,
+                 "Icon Path",
+                 "Optional manual icon path (future resolver input)");
+  RNA_def_string(ot->srna,
+                 "icon_provider",
+                 nullptr,
+                 128,
+                 "Icon Provider",
+                 "Stable icon provider key/id");
+
   PropertyRNA *prop = RNA_def_float_color(
       ot->srna, "color", 3, nullptr, 0.0f, 1.0f, "Color", "Glyph color", 0.0f, 1.0f);
   RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);
@@ -892,6 +1021,15 @@ static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
   RNA_def_string(
       ot->srna, "original_display_name", nullptr, 32, "Original Display Name", "");
   RNA_def_string(ot->srna, "original_glyph", nullptr, 16, "Original Glyph", "");
+  RNA_def_enum(ot->srna,
+               "original_icon_source",
+               rna_enum_category_tab_icon_source_items,
+               CATEGORY_TAB_ICON_SOURCE_AUTO,
+               "Original Icon Source",
+               "Original icon source value for cancel semantics");
+  RNA_def_string(ot->srna, "original_icon_key", nullptr, 128, "Original Icon Key", "");
+  RNA_def_string(ot->srna, "original_icon_path", nullptr, 1024, "Original Icon Path", "");
+  RNA_def_string(ot->srna, "original_icon_provider", nullptr, 128, "Original Icon Provider", "");
   prop = RNA_def_float_color(
       ot->srna, "original_color", 3, nullptr, 0.0f, 1.0f, "Original Color", "", 0.0f, 1.0f);
   RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);

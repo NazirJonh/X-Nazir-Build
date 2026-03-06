@@ -128,9 +128,17 @@ typedef struct CategoryGlyphItem {
   char default_display_name[32];
   /** Tags assigned to this category (semicolon-separated). Synced from Python for UI display only. */
   char tags[256];
+  /** Stable icon key for resolver/persistence (builtin/manual/provider specific key). */
+  char icon_key[128];
+  /** Optional icon path for manual/provider resolve (persistent, not runtime icon handle). */
+  char icon_path[1024];
+  /** Stable icon provider id (for example extension/addon provider key). */
+  char icon_provider[128];
+  /** Icon source selector (auto/manual/off). */
+  int icon_source;
   /** True when category is from Python DEFAULT_CATEGORY_GLYPHS (single source of truth for reserved tabs). */
   char is_reserved;
-  char _pad[3];
+  char _pad[7];
 } CategoryGlyphItem;
 
 /**

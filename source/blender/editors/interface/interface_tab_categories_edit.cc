@@ -49,6 +49,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 #include "RNA_path.hh"
 #include "RNA_prototypes.hh"
 
@@ -342,12 +343,20 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   char original_glyph_hex[16] = "";
   float original_color[3] = {0.0f, 0.0f, 0.0f};
   char original_tags[256] = "";
+  char original_icon_key[128] = "";
+  char original_icon_path[1024] = "";
+  char original_icon_provider[128] = "";
+  int original_icon_source = 0;
   bool original_has_override = false;
 
   RNA_string_get(op->ptr, "original_display_name", original_display_name);
   RNA_string_get(op->ptr, "original_glyph", original_glyph_hex);
   RNA_float_get_array(op->ptr, "original_color", original_color);
   RNA_string_get(op->ptr, "original_tags", original_tags);
+  RNA_string_get(op->ptr, "original_icon_key", original_icon_key);
+  RNA_string_get(op->ptr, "original_icon_path", original_icon_path);
+  RNA_string_get(op->ptr, "original_icon_provider", original_icon_provider);
+  original_icon_source = RNA_enum_get(op->ptr, "original_icon_source");
   original_has_override = RNA_boolean_get(op->ptr, "original_has_override");
 
   /* Convert hex glyph back to UTF-8 for restoration */
@@ -375,12 +384,24 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
       /* Override was deleted by live preview - recreate it */
       item = MEM_new<CategoryGlyphItem>(__func__);
       STRNCPY(item->category, category);
+      item->glyph[0] = '\0';
+      item->display_name[0] = '\0';
+      zero_v3(item->color);
+      item->tags[0] = '\0';
+      item->icon_key[0] = '\0';
+      item->icon_path[0] = '\0';
+      item->icon_provider[0] = '\0';
+      item->icon_source = 0;
       BLI_addtail(&wm->category_glyph_overrides, item);
     }
     STRNCPY(item->display_name, original_display_name);
     STRNCPY(item->glyph, original_glyph_utf8);
     copy_v3_v3(item->color, original_color);
     STRNCPY(item->tags, original_tags);
+    STRNCPY(item->icon_key, original_icon_key);
+    STRNCPY(item->icon_path, original_icon_path);
+    STRNCPY(item->icon_provider, original_icon_provider);
+    item->icon_source = original_icon_source;
   }
   else {
     /* There was no override before - remove any created by live preview */
@@ -403,6 +424,10 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
       STRNCPY(item->glyph, original_glyph_utf8);
       copy_v3_v3(item->color, original_color);
       STRNCPY(item->tags, original_tags);
+      STRNCPY(item->icon_key, original_icon_key);
+      STRNCPY(item->icon_path, original_icon_path);
+      STRNCPY(item->icon_provider, original_icon_provider);
+      item->icon_source = original_icon_source;
     }
   }
 
@@ -679,6 +704,10 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
     item->glyph[0] = '\0';
     zero_v3(item->color);
     item->tags[0] = '\0';  /* Initialize tags as empty */
+    item->icon_key[0] = '\0';
+    item->icon_path[0] = '\0';
+    item->icon_provider[0] = '\0';
+    item->icon_source = 0;
 
     /* Preserve existing tags from mappings when creating new override.
      * This prevents losing tags when user modifies display_name/glyph/color. */
@@ -722,6 +751,33 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
 
   /* Update color for live preview */
   copy_v3_v3(item->color, color);
+
+  /* Update icon fields for live preview/state carry-over. */
+  char icon_key[128] = "";
+  char icon_path[1024] = "";
+  char icon_provider[128] = "";
+  RNA_string_get(op->ptr, "icon_key", icon_key);
+  RNA_string_get(op->ptr, "icon_path", icon_path);
+  RNA_string_get(op->ptr, "icon_provider", icon_provider);
+  STRNCPY(item->icon_key, icon_key);
+  STRNCPY(item->icon_path, icon_path);
+  STRNCPY(item->icon_provider, icon_provider);
+
+  const int display_mode_ui = RNA_enum_get(op->ptr, "display_mode_ui");
+  const int custom_icon_mode_ui = RNA_enum_get(op->ptr, "custom_icon_mode_ui");
+
+  int resolved_icon_source = RNA_enum_get(op->ptr, "icon_source");
+  if (display_mode_ui == 0 || display_mode_ui == 2) {
+    resolved_icon_source = 2; /* OFF */
+  }
+  else if (custom_icon_mode_ui == 0) {
+    resolved_icon_source = 1; /* MANUAL: Blender Icon */
+  }
+  else {
+    resolved_icon_source = 0; /* AUTO: path/provider chain (external icon) */
+  }
+  RNA_enum_set(op->ptr, "icon_source", resolved_icon_source);
+  item->icon_source = resolved_icon_source;
 
   /* Update glyph in override only if valid.
    * Save the processed glyph if user has entered something.
@@ -1828,6 +1884,278 @@ void WM_OT_glyph_picker_grid(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Icon Grid Popup (Builtin Icons MVP)
+ * \{ */
+
+struct IconGridPopupItem {
+  std::string identifier;
+  std::string name;
+  int icon;
+};
+
+struct IconGridPopupData {
+  wmOperator *op; /* Dialog operator (SCREEN_OT_category_tab_edit_dialog). */
+  wmOperator *target_op;
+  IDProperty *target_op_properties;
+  Vector<IconGridPopupItem> icons;
+  std::string search_string;
+  PopupBlockHandle *popup_handle;
+
+  IconGridPopupData(wmOperator *op_,
+                    wmOperator *target_op_,
+                    IDProperty *target_op_properties_,
+                    Vector<IconGridPopupItem> icons_)
+      : op(op_),
+        target_op(target_op_),
+        target_op_properties(target_op_properties_),
+        icons(std::move(icons_)),
+        search_string(""),
+        popup_handle(nullptr)
+  {
+  }
+};
+
+class IconGridView : public AbstractGridView {
+ public:
+  using OnIconSelectFn = std::function<void(bContext &C, const IconGridPopupItem &item)>;
+
+ private:
+  Vector<IconGridPopupItem> icons_;
+  OnIconSelectFn on_icon_select_fn_;
+  std::string search_filter_;
+
+ public:
+  void set_icons(const Vector<IconGridPopupItem> &icons)
+  {
+    icons_ = icons;
+  }
+
+  void set_search_filter(StringRef search_filter)
+  {
+    search_filter_ = search_filter;
+  }
+
+  void set_on_icon_select_fn(OnIconSelectFn fn)
+  {
+    on_icon_select_fn_ = fn;
+  }
+
+ protected:
+  void build_items() override
+  {
+    std::string search_lower = search_filter_;
+    if (!search_lower.empty()) {
+      std::transform(search_lower.begin(), search_lower.end(), search_lower.begin(), ::tolower);
+    }
+
+    for (int64_t i = 0; i < icons_.size(); i++) {
+      const IconGridPopupItem &icon_item = icons_[i];
+
+      if (!search_lower.empty()) {
+        std::string identifier_lower = icon_item.identifier;
+        std::transform(
+            identifier_lower.begin(), identifier_lower.end(), identifier_lower.begin(), ::tolower);
+
+        std::string name_lower = icon_item.name;
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+
+        if (identifier_lower.find(search_lower) == std::string::npos &&
+            name_lower.find(search_lower) == std::string::npos)
+        {
+          continue;
+        }
+      }
+
+      std::string view_id = "icon_" + std::to_string(i);
+      PreviewGridItem &item = this->add_item<PreviewGridItem>(view_id,
+                                                              icon_item.identifier,
+                                                              BIFIconID(icon_item.icon));
+      item.hide_label();
+
+      if (on_icon_select_fn_) {
+        item.set_on_activate_fn([this, i](bContext &C, PreviewGridItem & /*new_active*/) {
+          on_icon_select_fn_(C, icons_[i]);
+        });
+      }
+    }
+  }
+};
+
+static Vector<IconGridPopupItem> icon_grid_builtin_icons_collect()
+{
+  Vector<IconGridPopupItem> items;
+
+  for (const EnumPropertyItem *item = rna_enum_icon_items; item->identifier != nullptr; item++) {
+    if (item->identifier[0] == '\0') {
+      continue; /* Separator row. */
+    }
+
+    IconGridPopupItem icon_item;
+    icon_item.identifier = item->identifier;
+    icon_item.name = item->name ? item->name : item->identifier;
+    icon_item.icon = item->value;
+    items.append(std::move(icon_item));
+  }
+
+  return items;
+}
+
+static bool icon_grid_writeback_icon_key(bContext &C,
+                                         IconGridPopupData *popup_data,
+                                         const char *icon_key)
+{
+  if (!popup_data || !icon_key || icon_key[0] == '\0') {
+    return false;
+  }
+
+  bool resolved = false;
+
+  if (popup_data->target_op_properties) {
+    IDProperty *idprop = IDP_GetPropertyFromGroup(popup_data->target_op_properties, "icon_key");
+    if (!idprop) {
+      idprop = IDP_NewString(icon_key, "icon_key");
+      IDP_AddToGroup(popup_data->target_op_properties, idprop);
+      resolved = true;
+    }
+    else if (idprop->type == IDP_STRING) {
+      IDP_AssignString(idprop, icon_key);
+      resolved = true;
+    }
+  }
+
+  if (!resolved && popup_data->target_op && popup_data->target_op->ptr) {
+    PointerRNA target_ptr;
+    PropertyRNA *target_prop;
+    int index;
+    if (RNA_path_resolve_full(popup_data->target_op->ptr, "icon_key", &target_ptr, &target_prop, &index)) {
+      RNA_property_string_set(&target_ptr, target_prop, icon_key);
+      RNA_property_update(&C, &target_ptr, target_prop);
+      resolved = true;
+    }
+  }
+
+  if (!resolved && popup_data->op && popup_data->op->ptr) {
+    RNA_string_set(popup_data->op->ptr, "icon_key", icon_key);
+    resolved = true;
+  }
+
+  return resolved;
+}
+
+static Block *icon_grid_popup_block_create(bContext *C, ARegion *region, void *arg)
+{
+  IconGridPopupData *popup_data = static_cast<IconGridPopupData *>(arg);
+
+  if (popup_data->op) {
+    char search_buf[256] = "";
+    RNA_string_get(popup_data->op->ptr, "icon_search", search_buf);
+    popup_data->search_string = search_buf;
+  }
+
+  Block *block = block_begin(C, region, "icon_grid_popup", EmbossType::Emboss);
+  block_flag_enable(block, BLOCK_LOOP | BLOCK_MOVEMOUSE_QUIT);
+  block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
+  block_bounds_set_centered(block, 6 * UI_SCALE_FAC);
+
+  const int popup_width = 46 * UI_UNIT_X;
+  const int popup_height = 60 * UI_UNIT_Y;
+
+  Layout &layout = block_layout(block,
+                                LayoutDirection::Vertical,
+                                LayoutType::Panel,
+                                0,
+                                0,
+                                popup_width,
+                                popup_height,
+                                0,
+                                style_get());
+
+  if (popup_data->op) {
+    Layout &search_row = layout.row(false);
+    search_row.prop(popup_data->op->ptr,
+                    "icon_search",
+                    ITEM_R_TEXT_BUT_FORCE_SEMI_MODAL_ACTIVE,
+                    "",
+                    ICON_VIEWZOOM);
+  }
+
+  Layout &grid_col = layout.column(false);
+  grid_col.ui_units_x_set(45);
+  grid_col.fixed_size_set(true);
+
+  std::unique_ptr<IconGridView> grid_view_ptr = std::make_unique<IconGridView>();
+  IconGridView *grid_view = grid_view_ptr.get();
+  grid_view->set_icons(popup_data->icons);
+  grid_view->set_search_filter(popup_data->search_string);
+  grid_view->set_tile_size(UI_UNIT_X * 1.8f, UI_UNIT_Y * 1.8f);
+
+  grid_view->set_on_icon_select_fn([popup_data](bContext &C, const IconGridPopupItem &item) {
+    if (popup_data->op) {
+      RNA_string_set(popup_data->op->ptr, "icon_key", item.identifier.c_str());
+      RNA_enum_set(popup_data->op->ptr, "icon_source", 1);
+      RNA_enum_set(popup_data->op->ptr, "display_mode_ui", 1);
+      RNA_enum_set(popup_data->op->ptr, "custom_icon_mode_ui", 0);
+      RNA_string_set(popup_data->op->ptr, "icon_search", "");
+    }
+
+    icon_grid_writeback_icon_key(C, popup_data, item.identifier.c_str());
+
+    if (popup_data->op && popup_data->op->idname &&
+        STREQ(popup_data->op->idname, "SCREEN_OT_category_tab_edit_dialog"))
+    {
+      category_tab_edit_live_update_cb(&C, popup_data->op, 0);
+    }
+
+    if (popup_data->popup_handle) {
+      popup_data->popup_handle->menuretval = RETURN_OK;
+    }
+
+    WM_main_add_notifier(NC_WINDOW, nullptr);
+  });
+
+  AbstractGridView *grid = block_add_view(*block, "icon_grid", std::move(grid_view_ptr));
+  GridViewBuilder builder(*block);
+  builder.build_grid_view(*C, *grid, grid_col);
+
+  return block;
+}
+
+static void icon_grid_popup_free(void *arg)
+{
+  IconGridPopupData *popup_data = static_cast<IconGridPopupData *>(arg);
+  delete popup_data;
+}
+
+static void icon_more_icons_button_cb(bContext *C, void *arg1, void * /*arg2*/)
+{
+  wmOperator *target_op = static_cast<wmOperator *>(arg1);
+  if (!target_op) {
+    return;
+  }
+
+  Vector<IconGridPopupItem> icons = icon_grid_builtin_icons_collect();
+  if (icons.is_empty()) {
+    WM_global_report(RPT_WARNING, "No built-in icons found");
+    return;
+  }
+
+  IconGridPopupData *popup_data = new IconGridPopupData(
+      target_op, target_op, target_op->properties, std::move(icons));
+
+  PopupBlockHandle *handle = popup_block_create(
+      C, nullptr, nullptr, icon_grid_popup_block_create, nullptr, popup_data, icon_grid_popup_free, false);
+
+  popup_data->popup_handle = handle;
+  handle->popup = true;
+
+  wmWindow *window = CTX_wm_window(C);
+  popup_handlers_add(C, &window->runtime->modalhandlers, handle, 0);
+  WM_event_add_mousemove(window);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Popup Block Creation
  * \{ */
 
@@ -1954,9 +2282,18 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
   }
 
   if (icon_panel.body) {
-    /* Properties for glyph search and code */
-    Layout &col_glyph = icon_panel.body->column(false);
+    const int display_mode_ui = RNA_enum_get(op->ptr, "display_mode_ui");
+    const bool show_glyph_inputs = (display_mode_ui == 0); /* GLYPH */
+    const bool show_custom_icon_options = (display_mode_ui == 1); /* CUSTOM_ICON */
+    const bool show_text_mode_hint = (display_mode_ui == 2); /* TEXT */
 
+    Layout &mode_row = icon_panel.body->row(false);
+    mode_row.prop(op->ptr, "display_mode_ui", ITEM_R_EXPAND, std::nullopt, ICON_NONE);
+
+    icon_panel.body->separator();
+
+    /* Preview is always visible; search/code are visible only in Glyph mode. */
+    Layout &col_glyph = icon_panel.body->column(false);
     uiTemplateGlyphSelectorWithCallback(&col_glyph,
                                         C,
                                         op->ptr,
@@ -1965,23 +2302,88 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                                         "color",
                                         category,
                                         true,
-                                        true,
-                                        true,
+                                        show_glyph_inputs,
+                                        show_glyph_inputs,
                                         glyph_more_glyphs_button_cb,
                                         op,
                                         glyph_search_result_button_cb);
 
-  /* Validate glyph input and show warning if invalid. */
-  char glyph_raw_check[16] = "";
-  RNA_string_get(op->ptr, "glyph", glyph_raw_check);
-
-  const bool glyph_valid = validate_glyph_hex_input(glyph_raw_check);
-
-    /* Show warning if glyph is invalid */
-    if (!glyph_valid && glyph_raw_check[0] != '\0') {
-      col_glyph.label("Invalid hex code (use 1-6 hex digits, e.g., e5d2)", ICON_ERROR);
+    if (show_glyph_inputs) {
+      /* Validate glyph input and show warning if invalid. */
+      char glyph_raw_check[16] = "";
+      RNA_string_get(op->ptr, "glyph", glyph_raw_check);
+      const bool glyph_valid = validate_glyph_hex_input(glyph_raw_check);
+      if (!glyph_valid && glyph_raw_check[0] != '\0') {
+        col_glyph.label("Invalid hex code (use 1-6 hex digits, e.g., e5d2)", ICON_ERROR);
+      }
     }
 
+    col_glyph.separator();
+
+    if (show_custom_icon_options) {
+      const int custom_icon_mode_ui = RNA_enum_get(op->ptr, "custom_icon_mode_ui");
+      const bool use_blender_icon = (custom_icon_mode_ui == 0);
+
+      Layout &icon_mode_row = col_glyph.row(false);
+      icon_mode_row.prop(op->ptr, "custom_icon_mode_ui", ITEM_R_EXPAND, std::nullopt, ICON_NONE);
+      col_glyph.separator();
+
+      if (use_blender_icon) {
+        Layout &icon_select_row = col_glyph.row(true);
+        icon_select_row.alignment_set(LayoutAlign::Center);
+
+        Layout &icon_key_col = icon_select_row.column(false);
+        icon_key_col.ui_units_x_set(18.0f);
+        Layout &icon_key_readonly = icon_key_col.row(false);
+        icon_key_readonly.enabled_set(false);
+        icon_key_readonly.prop(op->ptr, "icon_key", UI_ITEM_NONE, IFACE_("Blender"), ICON_NONE);
+
+        Block *icon_actions_block = icon_select_row.block();
+        block_layout_set_current(icon_actions_block, &icon_select_row);
+        char icon_btn_glyph[8] = "";
+        process_glyph_input("f02f", icon_btn_glyph, sizeof(icon_btn_glyph));
+        Button *more_icons_but = uiDefBut(icon_actions_block,
+                                          ButtonType::But,
+                                          icon_btn_glyph,
+                                          0,
+                                          0,
+                                          UI_UNIT_X * 1.5f,
+                                          UI_UNIT_Y,
+                                          nullptr,
+                                          0,
+                                          0,
+                                          std::nullopt);
+        more_icons_but->tip_quick_func = [](const Button *) { return "More icons"; };
+        button_func_set(more_icons_but, icon_more_icons_button_cb, op, nullptr);
+      }
+      else {
+        char custom_icon_path[1024] = "";
+        RNA_string_get(op->ptr, "icon_path", custom_icon_path);
+        const char *custom_icon_display = (custom_icon_path[0] != '\0') ? custom_icon_path : "None";
+
+        Layout &readonly_path_row = col_glyph.row(true);
+        readonly_path_row.alignment_set(LayoutAlign::Center);
+        readonly_path_row.enabled_set(false);
+        readonly_path_row.label(IFACE_("Custom"), ICON_NONE);
+
+        Block *readonly_path_block = readonly_path_row.block();
+        block_layout_set_current(readonly_path_block, &readonly_path_row);
+        uiDefBut(readonly_path_block,
+                 ButtonType::But,
+                 custom_icon_display,
+                 0,
+                 0,
+                 UI_UNIT_X * 18.0f,
+                 UI_UNIT_Y,
+                 nullptr,
+                 0,
+                 0,
+                 std::nullopt);
+      }
+    }
+    else if (show_text_mode_hint) {
+      col_glyph.label(IFACE_("Text mode: icon override disabled"), ICON_INFO);
+    }
   }
 
   /* Color panel */
@@ -2450,6 +2852,21 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
+  auto icon_source_to_cstr = [](const int icon_source) -> const char * {
+    switch (icon_source) {
+      case 0:
+        return "AUTO";
+      case 1:
+        return "MANUAL";
+      case 2:
+        return "OFF";
+      default:
+        return "UNKNOWN";
+    }
+  };
+
+  printf("[CAT TAB ICON INVOKE] category='%s'\n", category);
+
   /* Store category name in operator properties */
   RNA_string_set(op->ptr, "category", category);
 
@@ -2461,6 +2878,7 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
 
   bool has_override = false;
   bool override_is_empty = false;
+  bool override_icon_needs_mapping = false;
 
   /* First check category_glyph_overrides (user changes in current session) */
   for (CategoryGlyphItem *item =
@@ -2469,8 +2887,25 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
        item = static_cast<CategoryGlyphItem *>(item->next))
   {
     if (STREQ(item->category, category)) {
+      const bool has_icon_payload = (item->icon_key[0] != '\0') || (item->icon_path[0] != '\0') ||
+                                    (item->icon_provider[0] != '\0');
+      const bool has_explicit_icon_mode = ELEM(item->icon_source, 1, 2); /* MANUAL/OFF */
+
+      printf("[CAT TAB ICON INVOKE] override match: source=%s(%d), key='%s', path='%s', provider='%s', "
+             "has_payload=%s, explicit_mode=%s\n",
+             icon_source_to_cstr(item->icon_source),
+             item->icon_source,
+             item->icon_key,
+             item->icon_path,
+             item->icon_provider,
+             has_icon_payload ? "true" : "false",
+             has_explicit_icon_mode ? "true" : "false");
+
       /* Check if override is empty (created by tag restore but has no actual data) */
-      if (item->display_name[0] == '\0' && item->glyph[0] == '\0' && is_zero_v3(item->color)) {
+      if (item->display_name[0] == '\0' && item->glyph[0] == '\0' && is_zero_v3(item->color) &&
+          !has_icon_payload && !has_explicit_icon_mode)
+      {
+        printf("[CAT TAB ICON INVOKE] override considered EMPTY placeholder; will ignore icon payload from override\n");
         override_is_empty = true;
         has_override = true; /* Mark as found but empty, so we skip checking mappings again */
         break;
@@ -2505,8 +2940,38 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
       }
       RNA_string_set(op->ptr, "glyph", hex_code);
       RNA_float_set_array(op->ptr, "color", item->color);
+      RNA_enum_set(op->ptr, "icon_source", item->icon_source);
+      RNA_string_set(op->ptr, "icon_key", item->icon_key);
+      RNA_string_set(op->ptr, "icon_path", item->icon_path);
+      RNA_string_set(op->ptr, "icon_provider", item->icon_provider);
+      override_icon_needs_mapping = (!has_icon_payload && !has_explicit_icon_mode);
       has_override = true;
       break;
+    }
+  }
+
+  /* If override is used for text/glyph/color only and doesn't carry explicit icon data,
+   * keep icon fields from persisted mappings (JSON source of truth). */
+  if (has_override && !override_is_empty && override_icon_needs_mapping) {
+    for (CategoryGlyphItem *item =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        printf("[CAT TAB ICON INVOKE] mapping merge (override lacks icon payload): source=%s(%d), key='%s', "
+               "path='%s', provider='%s'\n",
+               icon_source_to_cstr(item->icon_source),
+               item->icon_source,
+               item->icon_key,
+               item->icon_path,
+               item->icon_provider);
+        RNA_enum_set(op->ptr, "icon_source", item->icon_source);
+        RNA_string_set(op->ptr, "icon_key", item->icon_key);
+        RNA_string_set(op->ptr, "icon_path", item->icon_path);
+        RNA_string_set(op->ptr, "icon_provider", item->icon_provider);
+        break;
+      }
     }
   }
 
@@ -2520,6 +2985,12 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     {
       if (STREQ(item->category, category)) {
         found_in_mappings = true;
+        printf("[CAT TAB ICON INVOKE] mapping primary load: source=%s(%d), key='%s', path='%s', provider='%s'\n",
+               icon_source_to_cstr(item->icon_source),
+               item->icon_source,
+               item->icon_key,
+               item->icon_path,
+               item->icon_provider);
         /* Load display_name from mappings */
         if (item->display_name[0] != '\0') {
           RNA_string_set(op->ptr, "display_name", item->display_name);
@@ -2543,10 +3014,18 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
         if (!is_zero_v3(item->color)) {
           RNA_float_set_array(op->ptr, "color", item->color);
         }
+        RNA_enum_set(op->ptr, "icon_source", item->icon_source);
+        RNA_string_set(op->ptr, "icon_key", item->icon_key);
+        RNA_string_set(op->ptr, "icon_path", item->icon_path);
+        RNA_string_set(op->ptr, "icon_provider", item->icon_provider);
         /* When using mappings, mark as no override since data comes from JSON */
         has_override = false;
         break;
       }
+    }
+
+    if (!found_in_mappings) {
+      printf("[CAT TAB ICON INVOKE] mapping not found for category='%s'\n", category);
     }
   }
 
@@ -2606,6 +3085,41 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   RNA_float_get_array(op->ptr, "color", current_color);
   RNA_string_set(op->ptr, "original_display_name", current_display_name);
   RNA_string_set(op->ptr, "original_glyph", current_glyph);
+  const int current_icon_source = RNA_enum_get(op->ptr, "icon_source");
+  char current_icon_key[128] = "";
+  char current_icon_path[1024] = "";
+  char current_icon_provider[128] = "";
+  RNA_string_get(op->ptr, "icon_key", current_icon_key);
+  RNA_string_get(op->ptr, "icon_path", current_icon_path);
+  RNA_string_get(op->ptr, "icon_provider", current_icon_provider);
+
+  printf("[CAT TAB ICON INVOKE] final op ptr: source=%s(%d), key='%s', path='%s', provider='%s', "
+         "has_override=%s, override_is_empty=%s, override_icon_needs_mapping=%s\n",
+         icon_source_to_cstr(current_icon_source),
+         current_icon_source,
+         current_icon_key,
+         current_icon_path,
+         current_icon_provider,
+         has_override ? "true" : "false",
+         override_is_empty ? "true" : "false",
+         override_icon_needs_mapping ? "true" : "false");
+
+  const bool has_icon_key = (current_icon_key[0] != '\0');
+  const bool has_icon_path = (current_icon_path[0] != '\0');
+  int display_mode_ui = 0; /* GLYPH */
+  if (current_icon_source == 2) {
+    display_mode_ui = 2; /* TEXT */
+  }
+  else if (has_icon_key || has_icon_path) {
+    display_mode_ui = 1; /* CUSTOM_ICON */
+  }
+  RNA_enum_set(op->ptr, "display_mode_ui", display_mode_ui);
+  RNA_enum_set(op->ptr, "custom_icon_mode_ui", has_icon_path ? 1 : 0);
+
+  RNA_enum_set(op->ptr, "original_icon_source", current_icon_source);
+  RNA_string_set(op->ptr, "original_icon_key", current_icon_key);
+  RNA_string_set(op->ptr, "original_icon_path", current_icon_path);
+  RNA_string_set(op->ptr, "original_icon_provider", current_icon_provider);
   RNA_float_set_array(op->ptr, "original_color", current_color);
   RNA_boolean_set(op->ptr, "original_has_override", has_override);
 
@@ -2701,6 +3215,14 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   if (!item) {
     item = MEM_new<CategoryGlyphItem>(__func__);
     STRNCPY(item->category, category);
+    item->glyph[0] = '\0';
+    item->display_name[0] = '\0';
+    zero_v3(item->color);
+    item->tags[0] = '\0';
+    item->icon_key[0] = '\0';
+    item->icon_path[0] = '\0';
+    item->icon_provider[0] = '\0';
+    item->icon_source = 0;
     BLI_addtail(&wm->category_glyph_overrides, item);
   }
 
@@ -2761,6 +3283,23 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   /* Update values */
   STRNCPY(item->display_name, display_name);
   copy_v3_v3(item->color, color);
+  const int display_mode_ui_exec = RNA_enum_get(op->ptr, "display_mode_ui");
+  const int custom_icon_mode_ui_exec = RNA_enum_get(op->ptr, "custom_icon_mode_ui");
+  int resolved_icon_source_exec = RNA_enum_get(op->ptr, "icon_source");
+  if (display_mode_ui_exec == 0 || display_mode_ui_exec == 2) {
+    resolved_icon_source_exec = 2; /* OFF */
+  }
+  else if (custom_icon_mode_ui_exec == 0) {
+    resolved_icon_source_exec = 1; /* MANUAL: Blender Icon */
+  }
+  else {
+    resolved_icon_source_exec = 0; /* AUTO: path/provider chain (external icon) */
+  }
+  RNA_enum_set(op->ptr, "icon_source", resolved_icon_source_exec);
+  item->icon_source = resolved_icon_source_exec;
+  RNA_string_get(op->ptr, "icon_key", item->icon_key);
+  RNA_string_get(op->ptr, "icon_path", item->icon_path);
+  RNA_string_get(op->ptr, "icon_provider", item->icon_provider);
 
   /* Only save glyph to override if user has changed it from the default.
    * If glyph matches the default (especially fallback letters), leave it empty
@@ -2789,7 +3328,7 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
 
   /* Save updated data to JSON (including tags which might have been modified) */
   {
-    char python_cmd[2048];
+    char python_cmd[8192];
     /* Convert color to hex for Python set_category_data */
     char color_hex[8];
     SNPRINTF(color_hex, "%02x%02x%02x", 
@@ -2803,14 +3342,35 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
       utf8_to_hex_codepoint(item->glyph, glyph_hex, sizeof(glyph_hex));
     }
 
+    const char *icon_source_py = "auto";
+    switch (item->icon_source) {
+      case 0:
+        icon_source_py = "auto";
+        break;
+      case 1:
+        icon_source_py = "manual";
+        break;
+      case 2:
+        icon_source_py = "off";
+        break;
+      default:
+        icon_source_py = "auto";
+        break;
+    }
+
     SNPRINTF(python_cmd,
              "from bl_ui.space_userpref import set_category_data\n"
-             "set_category_data('%s', display_name='%s', glyph='%s', color='%s', tags='%s')\n",
+             "set_category_data('%s', display_name='%s', glyph='%s', color='%s', tags='%s', "
+             "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s')\n",
              category,
              item->display_name,
              glyph_hex,
              color_hex,
-             item->tags);
+             item->tags,
+             icon_source_py,
+             item->icon_key,
+             item->icon_path,
+             item->icon_provider);
     const char *imports_none[] = {nullptr};
     BPY_run_string_exec(C, imports_none, python_cmd);
   }

@@ -291,7 +291,7 @@ _tag_order_cache = []
 _category_orders_cache = {}
 
 # Current JSON format version
-CURRENT_JSON_VERSION = 6  # Bumped for category_orders support
+CURRENT_JSON_VERSION = 7  # Bumped for category icon persistence support
 
 # JSON file name in config directory
 GLYPHS_FILENAME = "category_glyphs.json"
@@ -363,6 +363,54 @@ def _get_glyphs_filepath():
     if config_dir:
         return os.path.join(config_dir, GLYPHS_FILENAME)
     return None
+
+
+def _normalize_category_key(value: str) -> str:
+    """Normalize category/package name for robust matching (e.g. OpenVAT <-> openvat)."""
+    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
+
+
+def _auto_detect_extension_icon_path(category: str):
+    """Try to find extension icon file for a category in user EXTENSIONS folders.
+
+    Returns: (icon_path, provider) or ("", "") when not found.
+    """
+    try:
+        extensions_dir = bpy.utils.user_resource('EXTENSIONS')
+    except Exception:
+        return "", ""
+
+    if not extensions_dir or not os.path.isdir(extensions_dir):
+        return "", ""
+
+    target_key = _normalize_category_key(category)
+    if not target_key:
+        return "", ""
+
+    icon_filenames = ("icon.png", "icon.webp", "icon.jpg", "icon.jpeg")
+
+    try:
+        for repo_name in os.listdir(extensions_dir):
+            repo_path = os.path.join(extensions_dir, repo_name)
+            if (not os.path.isdir(repo_path)) or repo_name.startswith('.'):
+                continue
+
+            for pkg_name in os.listdir(repo_path):
+                pkg_path = os.path.join(repo_path, pkg_name)
+                if not os.path.isdir(pkg_path):
+                    continue
+
+                if _normalize_category_key(pkg_name) != target_key:
+                    continue
+
+                for icon_name in icon_filenames:
+                    icon_path = os.path.join(pkg_path, icon_name)
+                    if os.path.isfile(icon_path):
+                        return icon_path, "extension_auto"
+    except Exception:
+        return "", ""
+
+    return "", ""
 
 
 def _glyph_to_unicode_escape(glyph):
@@ -511,7 +559,11 @@ def _normalize_category_data(category_data):
         "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
         "default_glyph": "", "default_display_name": "", "base_type": "text_only",
         "tags": [],  # NEW: array of tag names
-        "mode_flags": []  # NEW: array of mode names
+        "mode_flags": [],  # NEW: array of mode names
+        "icon_source": "auto",
+        "icon_key": "",
+        "icon_path": "",
+        "icon_provider": "",
     }
 
     if isinstance(category_data, str):
@@ -520,7 +572,8 @@ def _normalize_category_data(category_data):
         base_type = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
         return {"glyph": glyph, "display_name": "", "color": [0.0, 0.0, 0.0],
                 "default_glyph": glyph, "default_display_name": "", "base_type": base_type,
-                "tags": []}
+                "tags": [],
+                "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": ""}
     elif isinstance(category_data, dict):
         # New format: dict with glyph, display_name, color, default_glyph, default_display_name, base_type, tags
         entry = default_entry.copy()
@@ -578,6 +631,26 @@ def _normalize_category_data(category_data):
             tags = category_data["tags"]
             if isinstance(tags, list):
                 entry["tags"] = [str(t) for t in tags]
+
+        # Icon persistence (v7): accept both nested block and legacy flat keys.
+        icon_block = category_data.get("icon", {}) if isinstance(category_data.get("icon", {}), dict) else {}
+
+        icon_source = icon_block.get("source", category_data.get("icon_source", "auto"))
+        if not isinstance(icon_source, str):
+            icon_source = "auto"
+        icon_source = icon_source.lower()
+        if icon_source not in {"auto", "manual", "off"}:
+            icon_source = "auto"
+        entry["icon_source"] = icon_source
+
+        icon_key = icon_block.get("key", category_data.get("icon_key", ""))
+        entry["icon_key"] = str(icon_key) if icon_key is not None else ""
+
+        icon_path = icon_block.get("path", category_data.get("icon_path", ""))
+        entry["icon_path"] = str(icon_path) if icon_path is not None else ""
+
+        icon_provider = icon_block.get("provider", category_data.get("icon_provider", ""))
+        entry["icon_provider"] = str(icon_provider) if icon_provider is not None else ""
 
         return entry
     else:
@@ -639,12 +712,42 @@ def migrate_v5_to_v6(data):
     return data
 
 
+def migrate_v6_to_v7(data):
+    """Migrate version 6 to 7: Add icon persistence block for each category mapping."""
+    mappings = data.get("mappings", {})
+    if isinstance(mappings, dict):
+        for _category, category_data in mappings.items():
+            if not isinstance(category_data, dict):
+                continue
+
+            icon = category_data.get("icon")
+            if not isinstance(icon, dict):
+                icon = {}
+
+            icon_source = icon.get("source", category_data.get("icon_source", "auto"))
+            if not isinstance(icon_source, str):
+                icon_source = "auto"
+            icon_source = icon_source.lower()
+            if icon_source not in {"auto", "manual", "off"}:
+                icon_source = "auto"
+
+            icon["source"] = icon_source
+            icon["key"] = str(icon.get("key", category_data.get("icon_key", "")) or "")
+            icon["path"] = str(icon.get("path", category_data.get("icon_path", "")) or "")
+            icon["provider"] = str(icon.get("provider", category_data.get("icon_provider", "")) or "")
+            category_data["icon"] = icon
+
+    data["version"] = 7
+    return data
+
+
 MIGRATORS = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
     3: migrate_v3_to_v4,
     4: migrate_v4_to_v5,
     5: migrate_v5_to_v6,
+    6: migrate_v6_to_v7,
 }
 
 
@@ -718,7 +821,12 @@ def _load_glyph_mappings_from_file():
             display_name = category_data.get("display_name", "")
             color = category_data.get("color", [0.0, 0.0, 0.0])
             tags = category_data.get("tags", [])
-            return bool(display_name) or color != [0.0, 0.0, 0.0] or bool(tags)
+            icon_source = str(category_data.get("icon_source", "auto")).lower()
+            icon_key = category_data.get("icon_key", "")
+            icon_path = category_data.get("icon_path", "")
+            icon_provider = category_data.get("icon_provider", "")
+            icon_customized = (icon_source != "auto") or bool(icon_key) or bool(icon_path) or bool(icon_provider)
+            return bool(display_name) or color != [0.0, 0.0, 0.0] or bool(tags) or icon_customized
         return False
 
     skipped_count = 0
@@ -800,8 +908,13 @@ def _save_glyph_mappings_to_file(data=None):
                 display_name = category_data.get("display_name", "")
                 color = category_data.get("color", [0.0, 0.0, 0.0])
                 tags = category_data.get("tags", [])
-                # Check if display_name is not empty, color is not default black, or has tags
-                return bool(display_name) or color != [0.0, 0.0, 0.0] or bool(tags)
+                icon_source = str(category_data.get("icon_source", "auto")).lower()
+                icon_key = category_data.get("icon_key", "")
+                icon_path = category_data.get("icon_path", "")
+                icon_provider = category_data.get("icon_provider", "")
+                icon_customized = (icon_source != "auto") or bool(icon_key) or bool(icon_path) or bool(icon_provider)
+                # Check if display_name is not empty, color is not default black, has tags, or icon customized.
+                return bool(display_name) or color != [0.0, 0.0, 0.0] or bool(tags) or icon_customized
             return False
 
         # Convert glyphs to Unicode escape format for reliable storage
@@ -838,7 +951,13 @@ def _save_glyph_mappings_to_file(data=None):
                     "default_glyph": _glyph_to_unicode_escape(category_data.get("default_glyph", "")),
                     "default_display_name": category_data.get("default_display_name", ""),
                     "base_type": category_data.get("base_type", "text_only"),
-                    "tags": category_data.get("tags", [])  # NEW: Save tags
+                    "tags": category_data.get("tags", []),  # NEW: Save tags
+                    "icon": {
+                        "source": category_data.get("icon_source", "auto"),
+                        "key": category_data.get("icon_key", ""),
+                        "path": category_data.get("icon_path", ""),
+                        "provider": category_data.get("icon_provider", ""),
+                    },
                 }
             elif isinstance(category_data, str):
                 # Old format - convert to new format
@@ -851,7 +970,13 @@ def _save_glyph_mappings_to_file(data=None):
                     "default_glyph": _glyph_to_unicode_escape(glyph),
                     "default_display_name": "",
                     "base_type": base_type,
-                    "tags": []
+                    "tags": [],
+                    "icon": {
+                        "source": "auto",
+                        "key": "",
+                        "path": "",
+                        "provider": "",
+                    },
                 }
 
         if skipped_count > 0:
@@ -1506,7 +1631,8 @@ def set_category_glyph(category, glyph, save=True):
     if category not in _glyph_cache:
         _glyph_cache[category] = {
             "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
-            "default_glyph": "", "default_display_name": ""
+            "default_glyph": "", "default_display_name": "",
+            "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
         }
 
     # Ensure the entry has all required fields
@@ -1527,14 +1653,24 @@ def set_category_glyph(category, glyph, save=True):
         _save_glyph_mappings_to_file()
 
 
-def set_category_data(category, glyph=None, display_name=None, color=None, tags=None, save=True):
-    """Set the full data (glyph, display_name, color, tags) for a category name."""
+def set_category_data(category,
+                      glyph=None,
+                      display_name=None,
+                      color=None,
+                      tags=None,
+                      icon_source=None,
+                      icon_key=None,
+                      icon_path=None,
+                      icon_provider=None,
+                      save=True):
+    """Set the full data (glyph, display_name, color, tags, icon fields) for a category name."""
     global _glyph_cache
 
     if category not in _glyph_cache:
         _glyph_cache[category] = {
             "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
-            "default_glyph": "", "default_display_name": ""
+            "default_glyph": "", "default_display_name": "",
+            "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
         }
 
     # Ensure the entry has all required fields
@@ -1559,6 +1695,18 @@ def set_category_data(category, glyph=None, display_name=None, color=None, tags=
                 _glyph_cache[category]["tags"] = []
         elif isinstance(tags, list):
             _glyph_cache[category]["tags"] = tags
+
+    if icon_source is not None:
+        icon_source_norm = str(icon_source).lower()
+        if icon_source_norm not in {"auto", "manual", "off"}:
+            icon_source_norm = "auto"
+        _glyph_cache[category]["icon_source"] = icon_source_norm
+    if icon_key is not None:
+        _glyph_cache[category]["icon_key"] = str(icon_key)
+    if icon_path is not None:
+        _glyph_cache[category]["icon_path"] = str(icon_path)
+    if icon_provider is not None:
+        _glyph_cache[category]["icon_provider"] = str(icon_provider)
 
     if save:
         _save_glyph_mappings_to_file()
@@ -1738,7 +1886,11 @@ def _merge_discovered_categories():
                 "color": [0.0, 0.0, 0.0],
                 "default_glyph": glyph,
                 "default_display_name": "",
-                "base_type": base_type
+                "base_type": base_type,
+                "icon_source": "auto",
+                "icon_key": "",
+                "icon_path": "",
+                "icon_provider": "",
             }
             print(f"[GLYPH] Added new category '{category}' with glyph '{glyph}', base_type={base_type}")
 
@@ -1798,7 +1950,12 @@ def _sync_glyph_mappings_to_wm_impl():
             display_name = category_data.get("display_name", "")
             color = category_data.get("color", [0.0, 0.0, 0.0])
             tags = category_data.get("tags", [])
-            return bool(display_name) or color != [0.0, 0.0, 0.0] or bool(tags)
+            icon_source = str(category_data.get("icon_source", "auto")).lower()
+            icon_key = category_data.get("icon_key", "")
+            icon_path = category_data.get("icon_path", "")
+            icon_provider = category_data.get("icon_provider", "")
+            icon_customized = (icon_source != "auto") or bool(icon_key) or bool(icon_path) or bool(icon_provider)
+            return bool(display_name) or color != [0.0, 0.0, 0.0] or bool(tags) or icon_customized
         return False
 
     try:
@@ -1872,6 +2029,26 @@ def _sync_glyph_mappings_to_wm_impl():
                     default_glyph_val = normalized_data.get("default_glyph", glyph_val)
                     default_display_name_val = normalized_data.get("default_display_name", "")
                     tags_val = normalized_data.get("tags", [])
+                    icon_source_str = str(normalized_data.get("icon_source", "auto")).lower()
+                    icon_key_val = str(normalized_data.get("icon_key", ""))
+                    icon_path_val = str(normalized_data.get("icon_path", ""))
+                    icon_provider_val = str(normalized_data.get("icon_provider", ""))
+
+                    if icon_source_str == "auto" and (not icon_key_val) and (not icon_path_val):
+                        detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
+                        if detected_icon_path:
+                            icon_path_val = detected_icon_path
+                            if not icon_provider_val:
+                                icon_provider_val = detected_provider
+                            if category == "OpenVAT":
+                                print(f"[GLYPH ICON AUTO] Category '{category}' -> '{icon_path_val}'")
+
+                    icon_source_to_enum = {
+                        "auto": "AUTO",
+                        "manual": "MANUAL",
+                        "off": "OFF",
+                    }
+                    icon_source_val = icon_source_to_enum.get(icon_source_str, "AUTO")
 
                     item = wm.category_glyph_mappings.new(category=category)
                     item.glyph = glyph_val
@@ -1879,6 +2056,14 @@ def _sync_glyph_mappings_to_wm_impl():
                     item.color = (color_val[0], color_val[1], color_val[2])
                     item.default_glyph = default_glyph_val
                     item.default_display_name = default_display_name_val
+                    if hasattr(item, "icon_source"):
+                        item.icon_source = icon_source_val
+                    if hasattr(item, "icon_key"):
+                        item.icon_key = icon_key_val
+                    if hasattr(item, "icon_path"):
+                        item.icon_path = icon_path_val
+                    if hasattr(item, "icon_provider"):
+                        item.icon_provider = icon_provider_val
                     # Note: is_reserved is read-only (computed in C++), don't try to set it
                     # Sync tags to WM for UI display (semicolon-separated string)
                     if hasattr(item, "tags") and isinstance(tags_val, (list, tuple)):
@@ -1996,7 +2181,10 @@ def _sync_wm_to_glyph_cache_impl():
 
                 # Get current cached data or create new entry
                 if category not in _glyph_cache:
-                    _glyph_cache[category] = {"glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0]}
+                    _glyph_cache[category] = {
+                        "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
+                        "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
+                    }
 
                 cached_entry = _glyph_cache[category]
 
@@ -2030,6 +2218,41 @@ def _sync_wm_to_glyph_cache_impl():
                     item_default_display_name = item.default_display_name or ""
                     if cached_entry.get("default_display_name", "") != item_default_display_name:
                         cached_entry["default_display_name"] = item_default_display_name
+                        changes_detected = True
+
+                if hasattr(item, 'icon_source'):
+                    icon_source_raw = getattr(item, "icon_source", "AUTO")
+                    if isinstance(icon_source_raw, str):
+                        icon_source_val = icon_source_raw.lower()
+                        if icon_source_val not in {"auto", "manual", "off"}:
+                            icon_source_val = "auto"
+                    else:
+                        icon_source_from_int = {
+                            0: "auto",
+                            1: "manual",
+                            2: "off",
+                        }
+                        icon_source_val = icon_source_from_int.get(int(icon_source_raw), "auto")
+                    if cached_entry.get("icon_source", "auto") != icon_source_val:
+                        cached_entry["icon_source"] = icon_source_val
+                        changes_detected = True
+
+                if hasattr(item, 'icon_key'):
+                    icon_key_val = item.icon_key or ""
+                    if cached_entry.get("icon_key", "") != icon_key_val:
+                        cached_entry["icon_key"] = icon_key_val
+                        changes_detected = True
+
+                if hasattr(item, 'icon_path'):
+                    icon_path_val = item.icon_path or ""
+                    if cached_entry.get("icon_path", "") != icon_path_val:
+                        cached_entry["icon_path"] = icon_path_val
+                        changes_detected = True
+
+                if hasattr(item, 'icon_provider'):
+                    icon_provider_val = item.icon_provider or ""
+                    if cached_entry.get("icon_provider", "") != icon_provider_val:
+                        cached_entry["icon_provider"] = icon_provider_val
                         changes_detected = True
 
             print(f"[GLYPH] Processed {mappings_count} items from category_glyph_mappings")
@@ -2080,7 +2303,10 @@ def _sync_wm_to_glyph_cache_impl():
 
                     # Get current cached data or create new entry
                     if category not in _glyph_cache:
-                        _glyph_cache[category] = {"glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": []}
+                        _glyph_cache[category] = {
+                            "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
+                            "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
+                        }
 
                     cached_entry = _glyph_cache[category]
 
@@ -2106,6 +2332,41 @@ def _sync_wm_to_glyph_cache_impl():
 
                     # Tags are NOT synced from WM to cache to avoid truncation issues
                     # Tags are stored only in _glyph_cache and JSON
+
+                    if hasattr(item, 'icon_source'):
+                        icon_source_raw = getattr(item, "icon_source", "AUTO")
+                        if isinstance(icon_source_raw, str):
+                            icon_source_val = icon_source_raw.lower()
+                            if icon_source_val not in {"auto", "manual", "off"}:
+                                icon_source_val = "auto"
+                        else:
+                            icon_source_from_int = {
+                                0: "auto",
+                                1: "manual",
+                                2: "off",
+                            }
+                            icon_source_val = icon_source_from_int.get(int(icon_source_raw), "auto")
+                        if cached_entry.get("icon_source", "auto") != icon_source_val:
+                            cached_entry["icon_source"] = icon_source_val
+                            changes_detected = True
+
+                    if hasattr(item, 'icon_key'):
+                        icon_key_val = item.icon_key or ""
+                        if cached_entry.get("icon_key", "") != icon_key_val:
+                            cached_entry["icon_key"] = icon_key_val
+                            changes_detected = True
+
+                    if hasattr(item, 'icon_path'):
+                        icon_path_val = item.icon_path or ""
+                        if cached_entry.get("icon_path", "") != icon_path_val:
+                            cached_entry["icon_path"] = icon_path_val
+                            changes_detected = True
+
+                    if hasattr(item, 'icon_provider'):
+                        icon_provider_val = item.icon_provider or ""
+                        if cached_entry.get("icon_provider", "") != icon_provider_val:
+                            cached_entry["icon_provider"] = icon_provider_val
+                            changes_detected = True
 
                 print(f"[GLYPH SYNC] Processed {overrides_count} items from category_glyph_overrides")
             except Exception as e:

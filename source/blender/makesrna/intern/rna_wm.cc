@@ -3273,6 +3273,13 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
   StructRNA *srna;
   PropertyRNA *prop;
 
+  static const EnumPropertyItem icon_source_items[] = {
+      {0, "AUTO", ICON_NONE, "Auto", "Use automatic icon resolver"},
+      {1, "MANUAL", ICON_NONE, "Manual", "Use manually selected icon data"},
+      {2, "OFF", ICON_NONE, "Off", "Disable icon usage for this category"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   srna = RNA_def_struct(brna, "CategoryGlyphItem", nullptr);
   RNA_def_struct_ui_text(srna, "Category Glyph Item", "Mapping from category name to glyph");
 
@@ -3321,6 +3328,27 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
       prop,
       "Reserved",
       "Category is reserved (provided by Python DEFAULT_CATEGORY_GLYPHS)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+
+  prop = RNA_def_property(srna, "icon_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "icon_source");
+  RNA_def_property_enum_items(prop, icon_source_items);
+  RNA_def_property_ui_text(prop, "Icon Source", "Icon source mode for this category mapping");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+
+  prop = RNA_def_property(srna, "icon_key", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "icon_key");
+  RNA_def_property_ui_text(prop, "Icon Key", "Stable icon key for resolver/persistence");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+
+  prop = RNA_def_property(srna, "icon_path", PROP_STRING, PROP_FILEPATH);
+  RNA_def_property_string_sdna(prop, nullptr, "icon_path");
+  RNA_def_property_ui_text(prop, "Icon Path", "Optional icon path for manual/provider resolve");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+
+  prop = RNA_def_property(srna, "icon_provider", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "icon_provider");
+  RNA_def_property_ui_text(prop, "Icon Provider", "Stable icon provider id");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 

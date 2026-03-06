@@ -11,6 +11,9 @@
 #include "DNA_userdef_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_icons.hh"
+#include "BKE_preview_image.hh"
+#include "BLI_fileops.h"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
@@ -20,10 +23,12 @@
 #include "MEM_guardedalloc.h"
 
 #include "RNA_access.hh"
+#include "RNA_enum_types.hh"
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
+#include "UI_interface_icons.hh"
 #include "interface_intern.hh"
 
 #include "WM_api.hh"
@@ -34,6 +39,8 @@
 #include "BLT_translation.hh"
 
 #include "BKE_idprop.hh"
+
+#include "IMB_thumbs.hh"
 
 namespace blender::ui {
 
@@ -465,6 +472,49 @@ static void glyph_preview_draw_cb(const bContext * /*C*/,
   BLF_draw(fontid, glyph_unicode, BLF_DRAW_STR_DUMMY_MAX);
 }
 
+static void icon_preview_draw_cb(const bContext * /*C*/,
+                                 rcti *rect,
+                                 const int icon_id,
+                                 const float color[3],
+                                 float size_multiplier)
+{
+  if (icon_id == ICON_NONE) {
+    return;
+  }
+
+  const int rect_w = BLI_rcti_size_x(rect);
+  const int rect_h = BLI_rcti_size_y(rect);
+  const float icon_draw_size = float(min_ii(rect_w, rect_h)) * 0.68f * size_multiplier;
+
+  uchar icon_tint[4] = {0, 0, 0, 255};
+  if (is_zero_v3(color)) {
+    theme::get_color_3ubv(TH_TAB_TEXT_HI, icon_tint);
+  }
+  else {
+    icon_tint[0] = uchar(color[0] * 255.0f);
+    icon_tint[1] = uchar(color[1] * 255.0f);
+    icon_tint[2] = uchar(color[2] * 255.0f);
+  }
+
+  const float rect_center_x = float(rect->xmin + rect->xmax) * 0.5f;
+  const float rect_center_y = float(rect->ymin + rect->ymax) * 0.5f;
+  const float icon_pos_x = rect_center_x - icon_draw_size * 0.5f;
+  const float icon_pos_y = rect_center_y - icon_draw_size * 0.5f;
+  const float icon_aspect = (float(ICON_DEFAULT_WIDTH) / icon_draw_size) * UI_INV_SCALE_FAC;
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  icon_draw_ex(icon_pos_x,
+               icon_pos_y,
+               icon_id,
+               icon_aspect,
+               1.0f,
+               0.0f,
+               icon_tint,
+               false,
+               UI_NO_ICON_OVERLAY_TEXT);
+  GPU_blend(GPU_BLEND_NONE);
+}
+
 
 
 void uiTemplateGlyphPreview(Layout *layout,
@@ -734,6 +784,112 @@ static void ui_template_glyph_selector_impl(Layout *layout,
 
   /* Preview (if requested) */
   if (show_preview) {
+    auto resolve_preview_icon_id = [](PointerRNA *preview_ptr) -> int {
+      if (!preview_ptr) {
+        return ICON_NONE;
+      }
+
+      PropertyRNA *icon_source_prop = RNA_struct_find_property(preview_ptr, "icon_source");
+      PropertyRNA *icon_key_prop = RNA_struct_find_property(preview_ptr, "icon_key");
+      PropertyRNA *icon_path_prop = RNA_struct_find_property(preview_ptr, "icon_path");
+      if (!icon_source_prop || !icon_key_prop) {
+        return ICON_NONE;
+      }
+
+      const int icon_source = RNA_property_enum_get(preview_ptr, icon_source_prop);
+      if (icon_source == 2 /* CATEGORY_TAB_ICON_SOURCE_OFF */) {
+        return ICON_NONE;
+      }
+
+      char icon_key[128] = "";
+      RNA_property_string_get(preview_ptr, icon_key_prop, icon_key);
+      if (icon_key[0] == '\0') {
+        return ICON_NONE;
+      }
+
+      int icon_id = ICON_NONE;
+      if (icon_key[0] != '\0') {
+        if (RNA_enum_value_from_identifier(rna_enum_icon_items, icon_key, &icon_id)) {
+          return icon_id;
+        }
+      }
+
+      if (!icon_path_prop) {
+        return ICON_NONE;
+      }
+
+      char icon_path[1024] = "";
+      RNA_property_string_get(preview_ptr, icon_path_prop, icon_path);
+      if (icon_path[0] == '\0' || !BLI_exists(icon_path)) {
+        return ICON_NONE;
+      }
+
+      PreviewImage *preview = BKE_previewimg_cached_thumbnail_read(
+          icon_path, icon_path, THB_SOURCE_DIRECT, false);
+      if (!preview) {
+        return ICON_NONE;
+      }
+
+      BKE_previewimg_ensure(preview, ICON_SIZE_ICON);
+      if (BKE_previewimg_is_invalid(preview, ICON_SIZE_ICON)) {
+        return ICON_NONE;
+      }
+
+      const int path_icon_id = BKE_icon_preview_ensure(nullptr, preview);
+      return (path_icon_id > 0) ? path_icon_id : ICON_NONE;
+    };
+
+    const int preview_icon_id = resolve_preview_icon_id(ptr);
+    if (preview_icon_id != ICON_NONE) {
+      Layout &preview_row = layout->row(false);
+      preview_row.alignment_set(LayoutAlign::Center);
+
+      Block *preview_block = preview_row.block();
+      block_layout_set_current(preview_block, &preview_row);
+
+      const uiStyle *style = style_get_dpi();
+      const float size_multiplier = 2.0f;
+      const int preview_size = int(style->widget.points * UI_SCALE_FAC * 2.0f * size_multiplier);
+
+      const std::string color_propname_copy = color_propname ? color_propname : "";
+      const PointerRNA preview_ptr = ptr ? *ptr : PointerRNA_NULL;
+      const bool has_preview_ptr = ptr != nullptr;
+
+      Button *preview_but = uiDefBut(preview_block,
+                                     ButtonType::Extra,
+                                     "",
+                                     0,
+                                     0,
+                                     preview_size,
+                                     preview_size,
+                                     nullptr,
+                                     0.0f,
+                                     0.0f,
+                                     std::nullopt);
+
+      button_func_drawextra_set(preview_block,
+                                [preview_icon_id,
+                                 color_propname_copy,
+                                 preview_ptr,
+                                 has_preview_ptr,
+                                 size_multiplier](const bContext *C, rcti *rect) {
+                                  float draw_color[3] = {0.0f, 0.0f, 0.0f};
+                                  if (has_preview_ptr && !color_propname_copy.empty()) {
+                                    PointerRNA preview_ptr_local = preview_ptr;
+                                    PropertyRNA *prop = RNA_struct_find_property(&preview_ptr_local,
+                                                                                 color_propname_copy.c_str());
+                                    if (prop) {
+                                      RNA_property_float_get_array(&preview_ptr_local, prop, draw_color);
+                                    }
+                                  }
+                                  icon_preview_draw_cb(
+                                      C, rect, preview_icon_id, draw_color, size_multiplier);
+                                });
+
+      preview_but->tip_quick_func = [](const Button *) { return "Icon preview"; };
+      return;
+    }
+
     /* Get current glyph value */
     char glyph_value[16] = "";
     PropertyRNA *glyph_prop = RNA_struct_find_property(ptr, glyph_propname);

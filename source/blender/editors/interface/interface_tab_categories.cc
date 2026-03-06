@@ -25,6 +25,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_fileops.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_set.hh"
@@ -44,11 +45,14 @@
 #include "DNA_workspace_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_icons.hh"
+#include "BKE_preview_image.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_workspace.hh"
 
 #include "RNA_access.hh"
+#include "RNA_enum_types.hh"
 #include "RNA_prototypes.hh"
 
 #include "BLF_api.hh"
@@ -65,6 +69,8 @@
 #include "GPU_immediate.hh"
 #include "GPU_matrix.hh"
 #include "GPU_state.hh"
+
+#include "IMB_thumbs.hh"
 
 #include "interface_intern.hh"
 #include "interface_tag_bar.hh"
@@ -89,9 +95,10 @@ static bool category_name_is_glyph(const char *category_id);
 #define TABS_PADDING_TEXT_FACTOR 6.0f
 #define TABS_GLYPH_TEXT_GAP_FACTOR 6.0f
 #define TABS_SETTINGS_ICON "\ue5d3" /* Material Symbols: settings/gear */
-
 /* Glyph darkening factor for inactive tabs (0.0 = no change, 1.0 = black). */
 #define TABS_GLYPH_DARKEN_BASE 0.15f
+/* Built-in icon scale in tab content draw (70% of glyph/text-derived base size). */
+#define TABS_BUILTIN_ICON_SCALE 0.7f
 
 /* Tab background brightening factors for inactive tabs (0.0 = no change, 1.0 = white). */
 #define TABS_BG_BRIGHTEN_BASE 0.0f
@@ -213,6 +220,19 @@ enum eCategoryGlyphBaseSource {
   CATEGORY_GLYPH_BASE_SOURCE_MAPPING,
   CATEGORY_GLYPH_BASE_SOURCE_PANEL_TYPE,
   CATEGORY_GLYPH_BASE_SOURCE_FALLBACK,
+};
+
+enum eCategoryTabIconSource {
+  CATEGORY_TAB_ICON_SOURCE_AUTO = 0,
+  CATEGORY_TAB_ICON_SOURCE_MANUAL = 1,
+  CATEGORY_TAB_ICON_SOURCE_OFF = 2,
+};
+
+struct CategoryTabIconResolved {
+  int source = CATEGORY_TAB_ICON_SOURCE_AUTO;
+  const char *key = nullptr;
+  const char *path = nullptr;
+  const char *provider = nullptr;
 };
 
 /** \} */
@@ -602,6 +622,84 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
   return category;
 }
 
+static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
+                                            const char *category,
+                                            CategoryTabIconResolved *r_icon)
+{
+  if (!r_icon) {
+    return false;
+  }
+
+  *r_icon = CategoryTabIconResolved{};
+
+  /* 1) User overrides. */
+  if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (!STREQ(item->category, category)) {
+        continue;
+      }
+
+      const bool has_icon_payload = (item->icon_key[0] != '\0') || (item->icon_path[0] != '\0') ||
+                                    (item->icon_provider[0] != '\0');
+      const bool has_explicit_icon_mode = ELEM(
+          item->icon_source, CATEGORY_TAB_ICON_SOURCE_MANUAL, CATEGORY_TAB_ICON_SOURCE_OFF);
+
+      /* Important: override entries are often created for glyph/color/tag edits.
+       * If an AUTO override has no icon payload, don't mask JSON mapping icon data. */
+      if (!has_icon_payload && !has_explicit_icon_mode) {
+        continue;
+      }
+
+      r_icon->source = item->icon_source;
+      r_icon->key = item->icon_key;
+      r_icon->path = item->icon_path;
+      r_icon->provider = item->icon_provider;
+      if (STREQ(category, "Pivot Tools")) {
+        printf("[CAT TAB ICON DRAW] lookup override category='%s' source=%d key='%s' path='%s' provider='%s'\n",
+               category,
+               item->icon_source,
+               item->icon_key,
+               item->icon_path,
+               item->icon_provider);
+      }
+      return true;
+    }
+  }
+
+  /* 2) Global mappings from Python cache sync. */
+  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (!STREQ(item->category, category)) {
+        continue;
+      }
+
+      r_icon->source = item->icon_source;
+      r_icon->key = item->icon_key;
+      r_icon->path = item->icon_path;
+      r_icon->provider = item->icon_provider;
+      if (STREQ(category, "Pivot Tools")) {
+        printf("[CAT TAB ICON DRAW] lookup mapping category='%s' source=%d key='%s' path='%s' provider='%s'\n",
+               category,
+               item->icon_source,
+               item->icon_key,
+               item->icon_path,
+               item->icon_provider);
+      }
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -828,6 +926,113 @@ static void apply_glyph_darkening(const int fontid, uchar color[3], const float 
 
   darken_color_3ub(color, darken_factor);
   BLF_color3ubv(fontid, color);
+}
+
+static void category_tab_icon_tint_get(const float custom_color[3],
+                                       const bool is_active,
+                                       const float darken_factor,
+                                       const uchar theme_col_text[3],
+                                       const uchar theme_col_text_sel[3],
+                                       uchar r_tint[4])
+{
+  if (!is_zero_v3(custom_color)) {
+    r_tint[0] = uchar(custom_color[0] * 255.0f);
+    r_tint[1] = uchar(custom_color[1] * 255.0f);
+    r_tint[2] = uchar(custom_color[2] * 255.0f);
+  }
+  else {
+    const uchar *col = is_active ? theme_col_text_sel : theme_col_text;
+    r_tint[0] = col[0];
+    r_tint[1] = col[1];
+    r_tint[2] = col[2];
+  }
+
+  if (darken_factor > 0.0f) {
+    darken_color_3ub(r_tint, darken_factor);
+  }
+  r_tint[3] = 255;
+}
+
+static int category_tab_icon_id_resolve_from_path(const char *icon_path)
+{
+  if (!(icon_path && icon_path[0] != '\0')) {
+    return ICON_NONE;
+  }
+
+  if (!BLI_exists(icon_path)) {
+    return ICON_NONE;
+  }
+
+  PreviewImage *preview = BKE_previewimg_cached_thumbnail_read(
+      icon_path, icon_path, THB_SOURCE_DIRECT, false);
+  if (!preview) {
+    return ICON_NONE;
+  }
+
+  BKE_previewimg_ensure(preview, ICON_SIZE_ICON);
+  if (BKE_previewimg_is_invalid(preview, ICON_SIZE_ICON)) {
+    return ICON_NONE;
+  }
+
+  const int icon_id = BKE_icon_preview_ensure(nullptr, preview);
+  return (icon_id > 0) ? icon_id : ICON_NONE;
+}
+
+static int category_tab_icon_id_resolve(const CategoryTabIconResolved &icon_resolved)
+{
+  if (icon_resolved.source == CATEGORY_TAB_ICON_SOURCE_OFF) {
+    return ICON_NONE;
+  }
+
+  if (icon_resolved.key && icon_resolved.key[0] != '\0') {
+    int icon_id = ICON_NONE;
+    if (RNA_enum_value_from_identifier(rna_enum_icon_items, icon_resolved.key, &icon_id)) {
+      return icon_id;
+    }
+  }
+
+  if (icon_resolved.path && icon_resolved.path[0] != '\0') {
+    return category_tab_icon_id_resolve_from_path(icon_resolved.path);
+  }
+
+  return ICON_NONE;
+}
+
+static void draw_category_tab_builtin_icon(const rcti *rct,
+                                           const int icon_id,
+                                           const float icon_center_y,
+                                           const float icon_size_px,
+                                           const float custom_color[3],
+                                           const bool is_active,
+                                           const float darken_factor,
+                                           const uchar theme_col_text[3],
+                                           const uchar theme_col_text_sel[3])
+{
+  if (icon_id == ICON_NONE) {
+    return;
+  }
+
+  uchar icon_tint[4];
+  category_tab_icon_tint_get(
+      custom_color, is_active, darken_factor, theme_col_text, theme_col_text_sel, icon_tint);
+
+  const float icon_draw_size = std::max(icon_size_px, 10.0f * UI_SCALE_FAC);
+  const float center_x = float(rct->xmin + rct->xmax) * 0.5f;
+  const float icon_pos_x = center_x - icon_draw_size * 0.5f;
+  const float icon_pos_y = icon_center_y - icon_draw_size * 0.5f;
+  const float icon_aspect = (float(ICON_DEFAULT_WIDTH) / icon_draw_size) * UI_INV_SCALE_FAC;
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  icon_draw_ex(icon_pos_x,
+               icon_pos_y,
+               icon_id,
+               icon_aspect,
+               1.0f,
+               0.0f,
+               icon_tint,
+               false,
+               UI_NO_ICON_OVERLAY_TEXT);
+  GPU_blend(GPU_BLEND_NONE);
 }
 
 /** \} */
@@ -2457,6 +2662,37 @@ static void ui_panel_category_draw_content(
     const uchar theme_col_tab_text_sel[3],
     const bool is_panel_minimized)
 {
+  const bool display_mode_allows_icon_content = ELEM(
+      display_mode, USER_CATEGORY_TABS_GLYPHS_ONLY, USER_CATEGORY_TABS_GLYPHS_TEXT);
+
+  CategoryTabIconResolved icon_resolved;
+  panel_category_icon_data_lookup(wm, category_id, &icon_resolved);
+  const int resolved_icon_id = category_tab_icon_id_resolve(icon_resolved);
+
+  bool icon_data_allows_icon_content = (icon_resolved.source != CATEGORY_TAB_ICON_SOURCE_OFF);
+  if (icon_resolved.source == CATEGORY_TAB_ICON_SOURCE_MANUAL) {
+    /* In manual mode require explicit key/path input, otherwise use glyph fallback. */
+    icon_data_allows_icon_content = (icon_resolved.key && icon_resolved.key[0] != '\0') ||
+                                    (icon_resolved.path && icon_resolved.path[0] != '\0');
+  }
+
+  const bool use_builtin_icon =
+      display_mode_allows_icon_content && icon_data_allows_icon_content && (resolved_icon_id != ICON_NONE);
+  const float tab_font_size = fstyle_points * UI_SCALE_FAC * category_tabs_zoom;
+
+  if (STREQ(category_id, "Pivot Tools")) {
+    printf("[CAT TAB ICON DRAW] category='%s' display_mode=%d source=%d key='%s' resolved_icon_id=%d "
+           "display_mode_allows_icon_content=%s icon_data_allows_icon_content=%s use_builtin_icon=%s\n",
+           category_id,
+           int(display_mode),
+           icon_resolved.source,
+           (icon_resolved.key && icon_resolved.key[0] != '\0') ? icon_resolved.key : "",
+           resolved_icon_id,
+           display_mode_allows_icon_content ? "true" : "false",
+           icon_data_allows_icon_content ? "true" : "false",
+           use_builtin_icon ? "true" : "false");
+  }
+
   bool is_fallback_letter = false;
   float glyph_color[3] = {0.0f, 0.0f, 0.0f};
   const char *glyph = panel_category_glyph_lookup(
@@ -2551,6 +2787,7 @@ static void ui_panel_category_draw_content(
 
   if (draw_dual) {
     BLF_disable(fontid, BLF_ROTATION);
+    BLF_size(fontid, tab_font_size);
 
     const float glyph_width_val = BLF_width(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX);
     const float ascender = float(BLF_ascender(fontid));
@@ -2561,17 +2798,37 @@ static void ui_panel_category_draw_content(
     const float extra_shift = is_fallback_letter ? (4.0f * UI_SCALE_FAC) : 0.0f;
     const float glyph_pos_y = float(rct->ymax) - glyph_height - (tab_v_pad_text - extra_shift);
 
-    BLF_position(fontid, tab_center_x - glyph_width_val * 0.5f, glyph_pos_y - descender, 0.0f);
-    uchar glyph_color_out[3];
-    set_glyph_color(
-        fontid, glyph_color, is_active, theme_col_tab_text, theme_col_tab_text_sel, glyph_color_out);
-    if (!is_active && darken_factor > 0.0f) {
-      apply_glyph_darkening(fontid, glyph_color_out, darken_factor);
+    if (use_builtin_icon) {
+      const float builtin_icon_size = glyph_height * TABS_BUILTIN_ICON_SCALE;
+      const float icon_center_y = float(rct->ymax) - tab_v_pad_text - glyph_height * 0.5f +
+                                  extra_shift;
+      draw_category_tab_builtin_icon(rct,
+                                     resolved_icon_id,
+                                     icon_center_y,
+                                     builtin_icon_size,
+                                     glyph_color,
+                                     is_active,
+                                     !is_active ? darken_factor : 0.0f,
+                                     theme_col_tab_text,
+                                     theme_col_tab_text_sel);
+    }
+    else {
+      BLF_position(fontid, tab_center_x - glyph_width_val * 0.5f, glyph_pos_y - descender, 0.0f);
+      uchar glyph_color_out[3];
+      set_glyph_color(
+          fontid, glyph_color, is_active, theme_col_tab_text, theme_col_tab_text_sel, glyph_color_out);
+      if (!is_active && darken_factor > 0.0f) {
+        apply_glyph_darkening(fontid, glyph_color_out, darken_factor);
+      }
+
+      shadow_enable();
+      BLF_draw(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX);
+      shadow_disable();
     }
 
-    shadow_enable();
-    BLF_draw(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX);
-    shadow_disable();
+    /* Built-in icon draw can touch BLF internal state (SVG path). Restore tab text size explicitly
+     * so category names remain identical with/without assigned icon. */
+    BLF_size(fontid, tab_font_size);
 
     BLF_enable(fontid, BLF_ROTATION);
     BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
@@ -2619,7 +2876,9 @@ static void ui_panel_category_draw_content(
     switch (display_mode) {
       case USER_CATEGORY_TABS_GLYPHS_ONLY:
         draw_str = glyph;
-        draw_as_glyph = !is_fallback_letter;
+        /* In icon-only mode, a resolved built-in icon must still draw even when the glyph source
+         * is marked as fallback letter (common when no custom glyph is stored for the category). */
+        draw_as_glyph = use_builtin_icon ? true : !is_fallback_letter;
         should_rotate = false;
         break;
       case USER_CATEGORY_TABS_GLYPHS_TEXT:
@@ -2650,6 +2909,8 @@ static void ui_panel_category_draw_content(
     }
   }
 
+  BLF_size(fontid, tab_font_size);
+
   if (!should_rotate) {
     BLF_disable(fontid, BLF_ROTATION);
     const float gw = BLF_width(fontid, draw_str, BLF_DRAW_STR_DUMMY_MAX);
@@ -2675,6 +2936,24 @@ static void ui_panel_category_draw_content(
   }
 
   if (draw_as_glyph) {
+    if (use_builtin_icon) {
+      /* Keep icon size independent from string-specific glyph bounds and active state. */
+      const float icon_font_height = float(BLF_ascender(fontid)) - float(BLF_descender(fontid));
+      const float builtin_icon_size = icon_font_height * TABS_BUILTIN_ICON_SCALE;
+      const float icon_center_y = float(rct->ymin + rct->ymax) * 0.5f;
+      draw_category_tab_builtin_icon(rct,
+                                     resolved_icon_id,
+                                     icon_center_y,
+                                     builtin_icon_size,
+                                     glyph_color,
+                                     is_active,
+                                     darken_factor,
+                                     theme_col_tab_text,
+                                     theme_col_tab_text_sel);
+      BLF_disable(fontid, BLF_ROTATION);
+      return;
+    }
+
     uchar glyph_color_out[3];
     set_glyph_color(
         fontid, glyph_color, is_active, theme_col_tab_text, theme_col_tab_text_sel, glyph_color_out);

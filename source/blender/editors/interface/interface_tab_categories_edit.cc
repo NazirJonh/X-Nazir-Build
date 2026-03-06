@@ -100,6 +100,17 @@ Block *category_tab_popup_block = nullptr;
 double category_tab_popup_close_time = 0.0;
 char category_tab_last_closed_category[64] = "";
 
+bool category_tab_edit_dialog_is_open_for_category(const char *category)
+{
+  if (!category || category[0] == '\0' || category_tab_current_dialog_op == nullptr) {
+    return false;
+  }
+
+  char edited_category[64] = "";
+  RNA_string_get(category_tab_current_dialog_op->ptr, "category", edited_category);
+  return STREQ(edited_category, category);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -2361,8 +2372,12 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         RNA_string_get(op->ptr, "icon_path", custom_icon_path);
         const char *custom_icon_display = (custom_icon_path[0] != '\0') ? custom_icon_path : "None";
 
-        Layout &readonly_path_row = col_glyph.row(true);
-        readonly_path_row.alignment_set(LayoutAlign::Center);
+        Layout &custom_icon_row = col_glyph.row(true);
+        custom_icon_row.alignment_set(LayoutAlign::Center);
+
+        Layout &custom_path_col = custom_icon_row.column(false);
+        custom_path_col.ui_units_x_set(18.0f);
+        Layout &readonly_path_row = custom_path_col.row(false);
         readonly_path_row.enabled_set(false);
         readonly_path_row.label(IFACE_("Custom"), ICON_NONE);
 
@@ -2379,6 +2394,9 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                  0,
                  0,
                  std::nullopt);
+
+        custom_icon_row.op("SCREEN_OT_category_tab_pick_custom_icon", "", ICON_FILE_FOLDER);
+        custom_icon_row.op("SCREEN_OT_category_tab_reload_custom_icon", "", ICON_FILE_REFRESH);
       }
     }
     else if (show_text_mode_hint) {

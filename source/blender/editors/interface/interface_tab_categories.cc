@@ -98,7 +98,7 @@ static bool category_name_is_glyph(const char *category_id);
 /* Glyph darkening factor for inactive tabs (0.0 = no change, 1.0 = black). */
 #define TABS_GLYPH_DARKEN_BASE 0.15f
 /* Built-in icon scale in tab content draw (70% of glyph/text-derived base size). */
-#define TABS_BUILTIN_ICON_SCALE 0.7f
+#define TABS_BUILTIN_ICON_SCALE 1.0f
 
 /* Tab background brightening factors for inactive tabs (0.0 = no change, 1.0 = white). */
 #define TABS_BG_BRIGHTEN_BASE 0.0f
@@ -928,29 +928,35 @@ static void apply_glyph_darkening(const int fontid, uchar color[3], const float 
   BLF_color3ubv(fontid, color);
 }
 
-static void category_tab_icon_tint_get(const float custom_color[3],
-                                       const bool is_active,
+static void category_tab_icon_tint_get(const int icon_id,
+                                       const float custom_color[3],
                                        const float darken_factor,
-                                       const uchar theme_col_text[3],
-                                       const uchar theme_col_text_sel[3],
                                        uchar r_tint[4])
 {
-  if (!is_zero_v3(custom_color)) {
+  const bool has_custom_color = !is_zero_v3(custom_color);
+  r_tint[0] = 255;
+  r_tint[1] = 255;
+  r_tint[2] = 255;
+  r_tint[3] = 255;
+
+  if (has_custom_color) {
     r_tint[0] = uchar(custom_color[0] * 255.0f);
     r_tint[1] = uchar(custom_color[1] * 255.0f);
     r_tint[2] = uchar(custom_color[2] * 255.0f);
   }
   else {
-    const uchar *col = is_active ? theme_col_text_sel : theme_col_text;
-    r_tint[0] = col[0];
-    r_tint[1] = col[1];
-    r_tint[2] = col[2];
+    uchar theme_icon_color[4];
+    if (icon_get_theme_color(icon_id, theme_icon_color)) {
+      copy_v4_v4_uchar(r_tint, theme_icon_color);
+    }
+    else {
+      /* Default monochrome icon color. */
+    }
   }
 
   if (darken_factor > 0.0f) {
     darken_color_3ub(r_tint, darken_factor);
   }
-  r_tint[3] = 255;
 }
 
 static int category_tab_icon_id_resolve_from_path(const char *icon_path)
@@ -1003,18 +1009,17 @@ static void draw_category_tab_builtin_icon(const rcti *rct,
                                            const float icon_center_y,
                                            const float icon_size_px,
                                            const float custom_color[3],
-                                           const bool is_active,
+                                           const bool /*is_active*/,
                                            const float darken_factor,
-                                           const uchar theme_col_text[3],
-                                           const uchar theme_col_text_sel[3])
+                                           const uchar /*theme_col_text*/[3],
+                                           const uchar /*theme_col_text_sel*/[3])
 {
   if (icon_id == ICON_NONE) {
     return;
   }
 
   uchar icon_tint[4];
-  category_tab_icon_tint_get(
-      custom_color, is_active, darken_factor, theme_col_text, theme_col_text_sel, icon_tint);
+  category_tab_icon_tint_get(icon_id, custom_color, darken_factor, icon_tint);
 
   const float icon_draw_size = std::max(icon_size_px, 10.0f * UI_SCALE_FAC);
   const float center_x = float(rct->xmin + rct->xmax) * 0.5f;
@@ -2679,6 +2684,9 @@ static void ui_panel_category_draw_content(
   const bool use_builtin_icon =
       display_mode_allows_icon_content && icon_data_allows_icon_content && (resolved_icon_id != ICON_NONE);
   const float tab_font_size = fstyle_points * UI_SCALE_FAC * category_tabs_zoom;
+  const bool is_being_edited_in_dialog = !is_active &&
+                                         category_tab_edit_dialog_is_open_for_category(category_id);
+  const float draw_darken_factor = is_being_edited_in_dialog ? 0.0f : darken_factor;
 
   if (STREQ(category_id, "Pivot Tools")) {
     printf("[CAT TAB ICON DRAW] category='%s' display_mode=%d source=%d key='%s' resolved_icon_id=%d "
@@ -2808,7 +2816,7 @@ static void ui_panel_category_draw_content(
                                      builtin_icon_size,
                                      glyph_color,
                                      is_active,
-                                     !is_active ? darken_factor : 0.0f,
+                                     !is_active ? draw_darken_factor : 0.0f,
                                      theme_col_tab_text,
                                      theme_col_tab_text_sel);
     }
@@ -2817,8 +2825,8 @@ static void ui_panel_category_draw_content(
       uchar glyph_color_out[3];
       set_glyph_color(
           fontid, glyph_color, is_active, theme_col_tab_text, theme_col_tab_text_sel, glyph_color_out);
-      if (!is_active && darken_factor > 0.0f) {
-        apply_glyph_darkening(fontid, glyph_color_out, darken_factor);
+      if (!is_active && draw_darken_factor > 0.0f) {
+        apply_glyph_darkening(fontid, glyph_color_out, draw_darken_factor);
       }
 
       shadow_enable();
@@ -2846,9 +2854,9 @@ static void ui_panel_category_draw_content(
 
     BLF_position(fontid, text_pos_x, text_pos_y, 0.0f);
 
-    if (!is_active && darken_factor > 0.0f) {
+    if (!is_active && draw_darken_factor > 0.0f) {
       uchar text_color[3] = {theme_col_tab_text[0], theme_col_tab_text[1], theme_col_tab_text[2]};
-      darken_color_3ub(text_color, darken_factor);
+      darken_color_3ub(text_color, draw_darken_factor);
       BLF_color3ubv(fontid, text_color);
     }
     else {
@@ -2947,7 +2955,7 @@ static void ui_panel_category_draw_content(
                                      builtin_icon_size,
                                      glyph_color,
                                      is_active,
-                                     darken_factor,
+                                     draw_darken_factor,
                                      theme_col_tab_text,
                                      theme_col_tab_text_sel);
       BLF_disable(fontid, BLF_ROTATION);
@@ -2957,7 +2965,7 @@ static void ui_panel_category_draw_content(
     uchar glyph_color_out[3];
     set_glyph_color(
         fontid, glyph_color, is_active, theme_col_tab_text, theme_col_tab_text_sel, glyph_color_out);
-    apply_glyph_darkening(fontid, glyph_color_out, darken_factor);
+    apply_glyph_darkening(fontid, glyph_color_out, draw_darken_factor);
   }
   else {
     uchar text_color[3];
@@ -2986,8 +2994,8 @@ static void ui_panel_category_draw_content(
       text_color[1] = is_active ? theme_col_tab_text_sel[1] : theme_col_tab_text[1];
       text_color[2] = is_active ? theme_col_tab_text_sel[2] : theme_col_tab_text[2];
     }
-    if (darken_factor > 0.0f) {
-      darken_color_3ub(text_color, darken_factor);
+    if (draw_darken_factor > 0.0f) {
+      darken_color_3ub(text_color, draw_darken_factor);
     }
     BLF_color3ubv(fontid, text_color);
   }

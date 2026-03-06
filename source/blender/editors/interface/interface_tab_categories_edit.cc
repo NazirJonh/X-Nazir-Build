@@ -2031,8 +2031,8 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         but->drawflag &= ~BUT_TEXT_USE_COL;
       }
       else {
-        const ThemeCollectionColor *category_tab_color = &btheme->collection_color[preset];
-        button_color_set(but, category_tab_color->color);
+        const ThemeGlyphColor *glyph_color = &btheme->glyph_color[preset];
+        button_color_set(but, glyph_color->color);
         but->drawflag |= BUT_TEXT_USE_COL;
       }
 

@@ -427,6 +427,12 @@ static void do_versions_theme(const UserDef *userdef, bTheme *btheme)
     FROM_DEFAULT_V4_UCHAR(space_view3d.grid_major);
   }
 
+  if (!USER_VERSION_ATLEAST(502, 4)) {
+    for (int i = 0; i < GLYPH_COLOR_TOT; i++) {
+      copy_v4_v4_uchar(btheme->glyph_color[i].color, U_theme_default.glyph_color[i].color);
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a USER_VERSION_ATLEAST check.

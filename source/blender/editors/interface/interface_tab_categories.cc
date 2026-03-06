@@ -44,6 +44,7 @@
 #include "DNA_workspace_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_workspace.hh"
 
@@ -115,6 +116,30 @@ struct PendingCategoryInsert {
 };
 
 static PendingCategoryInsert g_pending_category_insert;
+
+static void category_tabs_report_new_categories(const bContext *C,
+                                                const Vector<std::string> &category_ids)
+{
+  if (!C || category_ids.is_empty()) {
+    return;
+  }
+
+  ReportList *reports = CTX_wm_reports(C);
+  if (!reports) {
+    return;
+  }
+
+  std::string message = "New categories: ";
+  for (int i = 0; i < category_ids.size(); i++) {
+    if (i != 0) {
+      message += ", ";
+    }
+    message += category_ids[i];
+  }
+
+  BKE_report(reports, RPT_INFO, message.c_str());
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_INFO_REPORT, nullptr);
+}
 
 static void pending_category_insert_set(const std::string &tag_key,
                                         const char *target_category,
@@ -2074,6 +2099,7 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
 
       if (!pending_inserted_ids.is_empty()) {
         pending_applied = true;
+        category_tabs_report_new_categories(C, pending_inserted_ids);
         printf("[CAT ORDER] pending insert applied: tag_key='%s' count=%d target='%s' insert_above=%d\n",
                g_pending_category_insert.tag_key.c_str(),
                int(pending_inserted_ids.size()),

@@ -1020,7 +1020,7 @@ static void draw_category_tab_builtin_icon(const rcti *rct,
   const float center_x = float(rct->xmin + rct->xmax) * 0.5f;
   const float icon_pos_x = center_x - icon_draw_size * 0.5f;
   const float icon_pos_y = icon_center_y - icon_draw_size * 0.5f;
-  const float icon_aspect = (float(ICON_DEFAULT_WIDTH) / icon_draw_size) * UI_INV_SCALE_FAC;
+  const float icon_aspect = float(ICON_DEFAULT_WIDTH) / icon_draw_size;
 
   GPU_blend(GPU_BLEND_ALPHA);
   icon_draw_ex(icon_pos_x,

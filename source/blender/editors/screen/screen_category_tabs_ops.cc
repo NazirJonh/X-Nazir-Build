@@ -22,7 +22,9 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_fileops.h"
 #include "BLI_math_vector.h"
+#include "BLI_path_utils.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
@@ -34,6 +36,7 @@
 #include "DNA_windowmanager_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_preview_image.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 
@@ -640,6 +643,180 @@ static void SCREEN_OT_category_tab_paste_glyph(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Category Tab Pick Custom Icon Operator
+ * \{ */
+
+static bool category_tab_pick_custom_icon_poll(bContext *C)
+{
+  if (!category_tab_current_dialog_op || !category_tab_popup_block) {
+    return false;
+  }
+  return category_tab_edit_poll(C);
+}
+
+static bool category_tab_icon_filepath_is_supported_image(const char *filepath)
+{
+  return (filepath && filepath[0] != '\0' &&
+          BLI_path_extension_check_n(filepath,
+                                     ".png",
+                                     ".jpg",
+                                     ".jpeg",
+                                     ".webp",
+                                     ".bmp",
+                                     ".tif",
+                                     ".tiff",
+                                     nullptr));
+}
+
+static wmOperatorStatus category_tab_pick_custom_icon_invoke(bContext *C,
+                                                             wmOperator *op,
+                                                             const wmEvent * /*event*/)
+{
+  if (category_tab_current_dialog_op == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  char current_icon_path[1024] = "";
+  RNA_string_get(category_tab_current_dialog_op->ptr, "icon_path", current_icon_path);
+  if (current_icon_path[0] != '\0') {
+    RNA_string_set(op->ptr, "filepath", current_icon_path);
+  }
+
+  WM_event_add_fileselect(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus category_tab_pick_custom_icon_exec(bContext *C, wmOperator *op)
+{
+  if (category_tab_current_dialog_op == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Edit Category Tab dialog is not active");
+    return OPERATOR_CANCELLED;
+  }
+
+  char filepath[FILE_MAX] = "";
+  RNA_string_get(op->ptr, "filepath", filepath);
+
+  if (filepath[0] == '\0') {
+    BKE_report(op->reports, RPT_WARNING, "No file selected");
+    return OPERATOR_CANCELLED;
+  }
+
+  if (!category_tab_icon_filepath_is_supported_image(filepath)) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Only static image files are supported: png, jpg, jpeg, webp, bmp, tif, tiff");
+    return OPERATOR_CANCELLED;
+  }
+
+  wmOperator *dialog_op = category_tab_current_dialog_op;
+  RNA_enum_set(dialog_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON);
+  RNA_enum_set(dialog_op->ptr, "custom_icon_mode_ui", CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM);
+  RNA_string_set(dialog_op->ptr, "icon_path", filepath);
+  RNA_string_set(dialog_op->ptr, "icon_key", "");
+  RNA_string_set(dialog_op->ptr, "icon_provider", "");
+
+  /* Force refresh preview cache for the selected path to avoid stale thumbnail when file changed. */
+  BKE_previewimg_cached_release(filepath);
+
+  category_tab_edit_live_update_cb(C, dialog_op, 0);
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+
+  BKE_report(op->reports, RPT_INFO, "Custom icon file selected");
+  return OPERATOR_FINISHED;
+}
+
+static void SCREEN_OT_category_tab_pick_custom_icon(wmOperatorType *ot)
+{
+  ot->name = "Pick Custom Icon File";
+  ot->idname = "SCREEN_OT_category_tab_pick_custom_icon";
+  ot->description = "Choose a custom icon image file for category tab";
+
+  ot->invoke = category_tab_pick_custom_icon_invoke;
+  ot->exec = category_tab_pick_custom_icon_exec;
+  ot->poll = category_tab_pick_custom_icon_poll;
+
+  ot->flag = OPTYPE_REGISTER;
+
+  WM_operator_properties_filesel(ot,
+                                 FILE_TYPE_FOLDER | FILE_TYPE_IMAGE,
+                                 FILE_SPECIAL,
+                                 FILE_OPENFILE,
+                                 WM_FILESEL_FILEPATH,
+                                 FILE_DEFAULTDISPLAY,
+                                 FILE_SORT_DEFAULT);
+
+  PropertyRNA *prop = RNA_def_string(ot->srna,
+                                     "filter_glob",
+                                     "*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.tif;*.tiff",
+                                     0,
+                                     "Extension Filter",
+                                     "");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Reload Custom Icon Operator
+ * \{ */
+
+static bool category_tab_reload_custom_icon_poll(bContext *C)
+{
+  if (!category_tab_current_dialog_op || !category_tab_popup_block) {
+    return false;
+  }
+  return category_tab_edit_poll(C);
+}
+
+static wmOperatorStatus category_tab_reload_custom_icon_exec(bContext *C, wmOperator *op)
+{
+  if (category_tab_current_dialog_op == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Edit Category Tab dialog is not active");
+    return OPERATOR_CANCELLED;
+  }
+
+  char icon_path[1024] = "";
+  RNA_string_get(category_tab_current_dialog_op->ptr, "icon_path", icon_path);
+  if (icon_path[0] == '\0') {
+    BKE_report(op->reports, RPT_WARNING, "No custom icon path set");
+    return OPERATOR_CANCELLED;
+  }
+  if (!BLI_exists(icon_path)) {
+    BKE_report(op->reports, RPT_ERROR, "Custom icon file not found");
+    return OPERATOR_CANCELLED;
+  }
+  if (!category_tab_icon_filepath_is_supported_image(icon_path)) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Only static image files are supported: png, jpg, jpeg, webp, bmp, tif, tiff");
+    return OPERATOR_CANCELLED;
+  }
+
+  BKE_previewimg_cached_release(icon_path);
+
+  wmOperator *dialog_op = category_tab_current_dialog_op;
+  category_tab_edit_live_update_cb(C, dialog_op, 0);
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+
+  BKE_report(op->reports, RPT_INFO, "Custom icon reloaded");
+  return OPERATOR_FINISHED;
+}
+
+static void SCREEN_OT_category_tab_reload_custom_icon(wmOperatorType *ot)
+{
+  ot->name = "Reload Custom Icon File";
+  ot->idname = "SCREEN_OT_category_tab_reload_custom_icon";
+  ot->description = "Reload custom icon from file and refresh preview";
+
+  ot->exec = category_tab_reload_custom_icon_exec;
+  ot->poll = category_tab_reload_custom_icon_poll;
+
+  ot->flag = OPTYPE_REGISTER;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Category Tab Edit Dialog Cancel Operator
  * \{ */
 
@@ -1047,6 +1224,8 @@ static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
 void ED_operatortypes_screen_category_tabs()
 {
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog);
+  WM_operatortype_append(SCREEN_OT_category_tab_pick_custom_icon);
+  WM_operatortype_append(SCREEN_OT_category_tab_reload_custom_icon);
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_cancel);
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_save);
   WM_operatortype_append(SCREEN_OT_category_tab_color_preset);

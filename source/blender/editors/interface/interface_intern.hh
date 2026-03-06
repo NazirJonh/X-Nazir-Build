@@ -946,6 +946,7 @@ bool extract_leading_glyph(const char *input,
 void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data);
 void category_tab_edit_popup_ok_cb(bContext *C, void *user_data, int retval);
 void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int event);
+bool category_tab_edit_dialog_is_open_for_category(const char *category);
 
 /**
  * Menu registration.

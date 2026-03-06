@@ -492,14 +492,17 @@ static void icon_preview_draw_cb(const bContext * /*C*/,
   const float icon_size_from_rect = float(min_ii(rect_w, rect_h)) * 0.9f;
   const float icon_draw_size = min_ff(icon_size_from_style, icon_size_from_rect);
 
-  uchar icon_tint[4] = {0, 0, 0, 255};
-  if (is_zero_v3(color)) {
-    theme::get_color_3ubv(TH_TAB_TEXT_HI, icon_tint);
-  }
-  else {
+  uchar icon_tint[4] = {255, 255, 255, 255};
+  if (!is_zero_v3(color)) {
     icon_tint[0] = uchar(color[0] * 255.0f);
     icon_tint[1] = uchar(color[1] * 255.0f);
     icon_tint[2] = uchar(color[2] * 255.0f);
+  }
+  else {
+    uchar theme_icon_color[4];
+    if (icon_get_theme_color(icon_id, theme_icon_color)) {
+      copy_v4_v4_uchar(icon_tint, theme_icon_color);
+    }
   }
 
   const float rect_center_x = float(rect->xmin + rect->xmax) * 0.5f;

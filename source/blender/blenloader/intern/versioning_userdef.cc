@@ -431,6 +431,12 @@ static void do_versions_theme(const UserDef *userdef, bTheme *btheme)
     FROM_DEFAULT_V4_UCHAR(space_view3d.gp_wire_edit);
   }
 
+  if (!USER_VERSION_ATLEAST(502, 4)) {
+    for (int i = 0; i < GLYPH_COLOR_TOT; i++) {
+      copy_v4_v4_uchar(btheme->glyph_color[i].color, U_theme_default.glyph_color[i].color);
+    }
+  }
+
   if (!USER_VERSION_ATLEAST(502, 8)) {
     FROM_DEFAULT_V4_UCHAR(tui.link);
   }

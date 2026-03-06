@@ -310,10 +310,10 @@ RESERVED_CATEGORY_PRIORITY = {
         "Render", "Options", "Texture", "Output"
     ],
     'NODE_EDITOR': [
-        "Item", "Tool", "Options", "Node"
+        "Item", "Tool", "Options", "Node", "Group"
     ],
     'IMAGE_EDITOR': [
-        "Item", "Tool", "View", "Image", "Mask"
+        "Item", "Tool", "View", "Image", "Mask", "Scopes"
     ],
     'SEQUENCE_EDITOR': [
         "Item", "Tool", "View", "Strip"
@@ -4478,6 +4478,25 @@ class USERPREF_PT_theme_strip_colors(ThemePanel, CenterAlignMixIn, Panel):
             flow.prop(ui, "color", text=iface_("Color {:d}").format(i), translate=False)
 
 
+class USERPREF_PT_theme_glyph_colors(ThemePanel, CenterAlignMixIn, Panel):
+    bl_label = "Glyph Colors"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, _context):
+        layout = self.layout
+
+        layout.label(icon='COLOR')
+
+    def draw_centered(self, context, layout):
+        theme = context.preferences.themes[0]
+
+        layout.use_property_split = True
+
+        flow = layout.grid_flow(row_major=False, columns=2, even_columns=True, even_rows=False, align=False)
+        for i, ui in enumerate(theme.glyph_color, 1):
+            flow.prop(ui, "color", text=iface_("Color {:d}").format(i), translate=False)
+
+
 # Base class for dynamically defined theme-space panels.
 # This is not registered.
 class PreferenceThemeSpacePanel:
@@ -6694,6 +6713,7 @@ classes = (
     USERPREF_PT_theme_bone_color_sets,
     USERPREF_PT_theme_collection_colors,
     USERPREF_PT_theme_strip_colors,
+    USERPREF_PT_theme_glyph_colors,
 
     USERPREF_PT_file_paths_data,
     USERPREF_PT_file_paths_render,

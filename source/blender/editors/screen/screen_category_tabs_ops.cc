@@ -79,7 +79,7 @@ using ui::context_active_but_get_respect_popup;
 /** \name Color Presets Enum
  * \{ */
 
-/** Category tab color preset values (matches COLLECTION_COLOR_* from DNA) */
+/** Category tab color preset values. */
 enum CategoryTabColorPreset {
   CATEGORY_TAB_COLOR_NONE = -1,
   CATEGORY_TAB_COLOR_01 = 0,
@@ -101,9 +101,9 @@ void category_tab_color_preset_to_rgb(const int preset, float r_color[3])
   }
 
   bTheme *btheme = ui::theme::theme_get();
-  /* Theme colors are stored as 0-7, matching our preset values */
-  if (preset >= 0 && preset < 8) {
-    const uchar *color_uchar = btheme->collection_color[preset].color;
+  /* Theme glyph colors are stored as 0-7, matching our preset values. */
+  if (preset >= 0 && preset < GLYPH_COLOR_TOT) {
+    const uchar *color_uchar = btheme->glyph_color[preset].color;
     r_color[0] = color_uchar[0] / 255.0f;
     r_color[1] = color_uchar[1] / 255.0f;
     r_color[2] = color_uchar[2] / 255.0f;

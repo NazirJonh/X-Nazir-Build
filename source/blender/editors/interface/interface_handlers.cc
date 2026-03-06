@@ -12398,7 +12398,7 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
               double time_since_close = BLI_time_now_seconds() - category_tab_popup_close_time;
               printf("[DEBUG HANDLER] Check close: time_since_close=%.3f, last_closed='%s', current='%s'\n",
                      time_since_close, category_tab_last_closed_category, pc_dyn.idname);
-              if (time_since_close < 0.5 && STREQ(category_tab_last_closed_category, pc_dyn.idname)) {
+              if (time_since_close < 0.1 && STREQ(category_tab_last_closed_category, pc_dyn.idname)) {
                 printf("[DEBUG HANDLER] BLOCKING REOPEN (same click/immediate reopen)\n");
                 should_prevent = true;
               }

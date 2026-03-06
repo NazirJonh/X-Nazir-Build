@@ -931,6 +931,102 @@ static bool category_is_reserved_for_reorder(const wmWindowManager *wm, const ch
   return false;
 }
 
+/**
+ * Get reserved category priority from Python.
+ * Returns -1 if category is not in priority list, 0+ for known categories.
+ * Lower value = higher priority (appears earlier).
+ */
+static int get_reserved_category_priority_py(const bContext *C,
+                                             const char *category_id,
+                                             const char *space_type_name)
+{
+  if (!category_id || category_id[0] == '\0') {
+    return -1;
+  }
+
+#ifdef WITH_PYTHON
+  if (!space_type_name || space_type_name[0] == '\0') {
+    space_type_name = "DEFAULT";
+  }
+
+  char escaped_id[256];
+  int id_j = 0;
+  for (int i = 0; category_id[i] != '\0' && id_j < int(sizeof(escaped_id)) - 1; i++) {
+    const char c = category_id[i];
+    if (c == '\\' || c == '\'') {
+      if (id_j + 1 < int(sizeof(escaped_id)) - 1) {
+        escaped_id[id_j++] = '\\';
+        escaped_id[id_j++] = c;
+      }
+    }
+    else {
+      escaped_id[id_j++] = c;
+    }
+  }
+  escaped_id[id_j] = '\0';
+
+  char escaped_space[128];
+  int space_j = 0;
+  for (int i = 0; space_type_name[i] != '\0' && space_j < int(sizeof(escaped_space)) - 1; i++) {
+    const char c = space_type_name[i];
+    if (c == '\\' || c == '\'') {
+      if (space_j + 1 < int(sizeof(escaped_space)) - 1) {
+        escaped_space[space_j++] = '\\';
+        escaped_space[space_j++] = c;
+      }
+    }
+    else {
+      escaped_space[space_j++] = c;
+    }
+  }
+  escaped_space[space_j] = '\0';
+
+  char python_expr[640];
+  SNPRINTF(python_expr,
+           "str(__import__('bl_ui.space_userpref', fromlist=[''])."
+           "get_reserved_category_priority('%s', '%s'))",
+           escaped_id,
+           escaped_space);
+
+  char *result_str = nullptr;
+  const char *imports_none[] = {nullptr};
+  const bool success = BPY_run_string_as_string(
+      const_cast<bContext *>(C), imports_none, python_expr, nullptr, &result_str);
+  if (!success || !result_str) {
+    return -1;
+  }
+
+  const int prio = atoi(result_str);
+  MEM_delete(result_str);
+  return prio;
+#else
+  return -1;
+#endif
+}
+
+/**
+ * Comparator for sorting reserved categories by priority.
+ */
+static bool compare_reserved_categories_by_priority(
+    const bContext *C,
+    const char *a,
+    const char *b,
+    const char *space_type_name)
+{
+  int prio_a = get_reserved_category_priority_py(C, a, space_type_name);
+  int prio_b = get_reserved_category_priority_py(C, b, space_type_name);
+
+  /* Both known - sort by priority */
+  if (prio_a >= 0 && prio_b >= 0) {
+    return prio_a < prio_b;
+  }
+  /* One known, one unknown - known comes first */
+  if (prio_a >= 0) return true;
+  if (prio_b >= 0) return false;
+  /* Both unknown - sort alphabetically */
+  return BLI_strcasecmp_natural(a, b) < 0;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -1992,12 +2088,87 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
     }
   }
 
+  /* Get space type name for priority lookup (C++ is the source of truth). */
+  const char *space_type_name = "DEFAULT";
+  if (area) {
+    switch (area->spacetype) {
+      case SPACE_VIEW3D: space_type_name = "VIEW_3D"; break;
+      case SPACE_PROPERTIES: space_type_name = "PROPERTIES"; break;
+      case SPACE_NODE: space_type_name = "NODE_EDITOR"; break;
+      case SPACE_IMAGE: space_type_name = "IMAGE_EDITOR"; break;
+      case SPACE_SEQ: space_type_name = "SEQUENCE_EDITOR"; break;
+      case SPACE_CLIP: space_type_name = "CLIP_EDITOR"; break;
+      case SPACE_TEXT: space_type_name = "TEXT_EDITOR"; break;
+      case SPACE_ACTION: space_type_name = "DOPESHEET_EDITOR"; break;
+      case SPACE_GRAPH: space_type_name = "GRAPH_EDITOR"; break;
+      case SPACE_NLA: space_type_name = "NLA_EDITOR"; break;
+      default: space_type_name = "DEFAULT"; break;
+    }
+  }
+
+  /* After processing JSON order and pending inserts,
+   * separate remaining categories into reserved and non-reserved */
+  Vector<PanelCategoryDyn *> remaining_reserved;
+  Vector<PanelCategoryDyn *> remaining_non_reserved;
+
   for (PanelCategoryDyn *pc_dyn : remaining) {
     std::string id(pc_dyn->idname);
     if (!added.contains(id)) {
-      result.append(pc_dyn);
-      added.add(id);
+      if (category_is_reserved_for_reorder(wm, pc_dyn->idname)) {
+        remaining_reserved.append(pc_dyn);
+      } else {
+        remaining_non_reserved.append(pc_dyn);
+      }
     }
+  }
+
+  /* Sort reserved categories by priority */
+  std::sort(remaining_reserved.begin(), remaining_reserved.end(),
+    [&](PanelCategoryDyn *a, PanelCategoryDyn *b) {
+      return compare_reserved_categories_by_priority(C, a->idname, b->idname, space_type_name);
+    });
+
+  /* Append: reserved first, then non-reserved (boundary rule preserved) */
+  for (PanelCategoryDyn *pc_dyn : remaining_reserved) {
+    result.append(pc_dyn);
+    added.add(pc_dyn->idname);
+  }
+  for (PanelCategoryDyn *pc_dyn : remaining_non_reserved) {
+    result.append(pc_dyn);
+    added.add(pc_dyn->idname);
+  }
+
+  /* Enforce global invariant for runtime display order:
+   * reserved categories must be grouped first and sorted by reserved priority.
+   * Non-reserved categories keep their relative order. */
+  {
+    Vector<PanelCategoryDyn *> reserved_sorted;
+    Vector<PanelCategoryDyn *> non_reserved_ordered;
+    reserved_sorted.reserve(result.size());
+    non_reserved_ordered.reserve(result.size());
+
+    for (PanelCategoryDyn *pc_dyn : result) {
+      if (category_is_reserved_for_reorder(wm, pc_dyn->idname)) {
+        reserved_sorted.append(pc_dyn);
+      }
+      else {
+        non_reserved_ordered.append(pc_dyn);
+      }
+    }
+
+    std::sort(reserved_sorted.begin(), reserved_sorted.end(), [&](PanelCategoryDyn *a, PanelCategoryDyn *b) {
+      return compare_reserved_categories_by_priority(C, a->idname, b->idname, space_type_name);
+    });
+
+    Vector<PanelCategoryDyn *> normalized;
+    normalized.reserve(result.size());
+    for (PanelCategoryDyn *pc_dyn : reserved_sorted) {
+      normalized.append(pc_dyn);
+    }
+    for (PanelCategoryDyn *pc_dyn : non_reserved_ordered) {
+      normalized.append(pc_dyn);
+    }
+    result = std::move(normalized);
   }
 
   if (pending_applied) {
@@ -2019,6 +2190,11 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
           non_reserved.append(category_id);
         }
       }
+
+      std::sort(reserved.begin(), reserved.end(), [&](const std::string &a, const std::string &b) {
+        return compare_reserved_categories_by_priority(C, a.c_str(), b.c_str(), space_type_name);
+      });
+
       order.clear();
       order.reserve(reserved.size() + non_reserved.size());
       for (const std::string &category_id : reserved) {
@@ -2093,6 +2269,9 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
       pending_order.insert(order_insert_index + order_offset, id);
       order_offset++;
     }
+
+    /* Persisted order must always satisfy reserved-first + reserved-priority invariant. */
+    normalize_reserved_boundary(pending_order);
 
     if (category_order_is_crossing_reserved_boundary(wm, pending_order)) {
       printf("[CAT ORDER] pending insert blocked by reserved boundary: tag_key='%s' category='%s'\n",

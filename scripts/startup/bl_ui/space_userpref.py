@@ -296,6 +296,65 @@ CURRENT_JSON_VERSION = 6  # Bumped for category_orders support
 # JSON file name in config directory
 GLYPHS_FILENAME = "category_glyphs.json"
 
+# Priority order for reserved categories per space type.
+# Categories not in this list are sorted alphabetically at the end of the reserved block.
+# IMPORTANT: Names must correspond to reserved categories in DEFAULT_CATEGORY_GLYPHS.
+RESERVED_CATEGORY_PRIORITY = {
+    'VIEW_3D': [
+        "Item", "Tool", "View", "Animation", "Edit", "Asset", "Options",
+        "Modifiers", "Physics", "Material", "World", "Scene",
+        "Render" 
+    ],
+    'PROPERTIES': [
+        "Item", "Tool", "View", "Physics", "Material", "World", "Scene",
+        "Render", "Options", "Texture", "Output"
+    ],
+    'NODE_EDITOR': [
+        "Item", "Tool", "Options", "Node"
+    ],
+    'IMAGE_EDITOR': [
+        "Item", "Tool", "View", "Image", "Mask"
+    ],
+    'SEQUENCE_EDITOR': [
+        "Item", "Tool", "View", "Strip"
+    ],
+    'CLIP_EDITOR': [
+        "Item", "Tool", "View", "Mask", "Tracking"
+    ],
+    'TEXT_EDITOR': [
+        "Tool", "View", "Options", "Text"
+    ],
+    'DOPESHEET_EDITOR': [
+        "Item", "Tool", "View", "Animation"
+    ],
+    'GRAPH_EDITOR': [
+        "Item", "Tool", "View", "Animation"
+    ],
+    'NLA_EDITOR': [
+        "Item", "Tool", "View", "Animation"
+    ],
+    # Default fallback for unknown space types
+    'DEFAULT': [
+        "Item", "Tool", "View", "Edit", "Asset", "Options"
+    ]
+}
+
+
+def get_reserved_category_priority(category_id: str, space_type: str) -> int:
+    """
+    Get priority index for a reserved category in a specific space type.
+    Lower index = higher priority (appears earlier).
+    Returns -1 if category is not in the priority list (sort alphabetically).
+    """
+    priority_list = RESERVED_CATEGORY_PRIORITY.get(
+        space_type,
+        RESERVED_CATEGORY_PRIORITY.get('DEFAULT', [])
+    )
+    try:
+        return priority_list.index(category_id)
+    except ValueError:
+        return -1  # Unknown category - sort alphabetically at end
+
 
 def _get_glyphs_filepath():
     """Get the path to the glyph mappings JSON file."""

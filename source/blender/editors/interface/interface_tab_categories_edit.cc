@@ -24,6 +24,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "DNA_ID.h"
+#include "DNA_object_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_userdef_types.h"
@@ -486,49 +487,99 @@ void category_tab_edit_popup_ok_cb(bContext * /*C*/, void *user_data, int /*retv
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Category Tag Filter Menu
+/** \name Category Tag Filter Mode Helpers
  * \{ */
 
-static MenuType *category_tag_filter_menu_type = nullptr;
+/**
+ * Convert current object mode to category_tag_filter_mode value.
+ * Returns 1-8 for specific modes, 1 (OBJECT_MODE) as default.
+ *
+ * Mapping (matches RNA enum in rna_wm.cc):
+ *   1 = OBJECT_MODE, 2 = EDIT_MODE, 3 = SCULPT_MODE,
+ *   4 = VERTEX_PAINT, 5 = WEIGHT_PAINT, 6 = TEXTURE_PAINT,
+ *   7 = UV_EDIT, 8 = POSE_MODE
+ */
+static char get_current_object_mode_filter_value(const bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (!ob) {
+    return 1; /* Default to Object Mode */
+  }
 
-static void category_tag_filter_menu_draw(const bContext *C, Menu *menu)
+  /* Map object mode flags to filter mode values */
+  switch (ob->mode) {
+    case OB_MODE_EDIT:
+      return 2; /* EDIT_MODE */
+    case OB_MODE_SCULPT:
+      return 3; /* SCULPT_MODE */
+    case OB_MODE_VERTEX_PAINT:
+      return 4; /* VERTEX_PAINT */
+    case OB_MODE_WEIGHT_PAINT:
+      return 5; /* WEIGHT_PAINT */
+    case OB_MODE_TEXTURE_PAINT:
+      return 6; /* TEXTURE_PAINT */
+    case OB_MODE_EDIT_GPENCIL_LEGACY:
+    case OB_MODE_PAINT_GREASE_PENCIL:
+      return 7; /* UV_EDIT (closest match for 2D editing modes) */
+    case OB_MODE_POSE:
+      return 8; /* POSE_MODE */
+    default:
+      return 1; /* OBJECT_MODE (default) */
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tag Filter Toggle Menu
+ * \{ */
+
+static MenuType *category_tag_filter_toggle_menu_type = nullptr;
+
+static void category_tag_filter_toggle_menu_draw(const bContext *C, Menu *menu)
 {
   Layout &layout = *menu->layout;
   wmWindowManager *wm = CTX_wm_manager(C);
 
-  layout.label(IFACE_("Filter Tags"), ICON_NONE);
-  layout.separator();
+  /* Get current filter state */
+  bool use_current_mode = (wm->category_tag_filter_mode != 0);
 
-  PointerRNA wm_ptr = RNA_pointer_create_discrete(&wm->id, RNA_WindowManager, wm);
-  layout.prop(&wm_ptr,
-              "category_tag_filter_mode",
-              UI_ITEM_NONE,
-              IFACE_("Mode"),
-              ICON_NONE);
+  /* "Current Mode" button - activates filtering by current object mode */
+  /* Use radiobutton icons to indicate active state */
+  int current_mode_icon = use_current_mode ? ICON_RADIOBUT_ON : ICON_RADIOBUT_OFF;
+  PointerRNA current_mode_ptr = layout.op(
+      "wm.category_tag_filter_set_mode", IFACE_("Current Mode"), current_mode_icon);
+  RNA_boolean_set(&current_mode_ptr, "use_current_mode", true);
+
+  /* "All Tags" button - shows all tags regardless of mode */
+  int all_tags_icon = use_current_mode ? ICON_RADIOBUT_OFF : ICON_RADIOBUT_ON;
+  PointerRNA all_tags_ptr = layout.op(
+      "wm.category_tag_filter_set_mode", IFACE_("All Tags"), all_tags_icon);
+  RNA_boolean_set(&all_tags_ptr, "use_current_mode", false);
 }
 
-static bool category_tag_filter_menu_poll(const bContext *C, MenuType * /*mt*/)
+static bool category_tag_filter_toggle_menu_poll(const bContext *C, MenuType * /*mt*/)
 {
   wmWindowManager *wm = CTX_wm_manager(C);
   return wm != nullptr;
 }
 
-void category_tag_filter_menu_register()
+void category_tag_filter_toggle_menu_register()
 {
-  if (category_tag_filter_menu_type != nullptr) {
+  if (category_tag_filter_toggle_menu_type != nullptr) {
     return; /* Already registered */
   }
 
   MenuType *mt = MEM_new_zeroed<MenuType>(__func__);
-  STRNCPY_UTF8(mt->idname, "SCREEN_MT_category_tag_filter");
+  STRNCPY_UTF8(mt->idname, "SCREEN_MT_category_tag_filter_toggle");
   STRNCPY_UTF8(mt->label, N_("Filter Tags"));
   STRNCPY_UTF8(mt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
-  mt->description = N_("Filter tags by mode in category tab popup");
-  mt->poll = category_tag_filter_menu_poll;
-  mt->draw = category_tag_filter_menu_draw;
+  mt->description = N_("Toggle tag filter mode: Current Mode or All Tags");
+  mt->poll = category_tag_filter_toggle_menu_poll;
+  mt->draw = category_tag_filter_toggle_menu_draw;
 
   WM_menutype_add(mt);
-  category_tag_filter_menu_type = mt;
+  category_tag_filter_toggle_menu_type = mt;
 }
 
 /** \} */
@@ -2166,8 +2217,8 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
 
       header_row.separator();
 
-      /* Filter menu - toggle visibility of tags by mode */
-      header_row.menu("SCREEN_MT_category_tag_filter", "", ICON_FILTER);
+      /* Filter menu button - opens popup with Current Mode / All Tags toggle buttons */
+      header_row.menu("SCREEN_MT_category_tag_filter_toggle", "", ICON_FILTER);
 
       header_row.separator();
 
@@ -2404,6 +2455,10 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
 
   /* Check for existing override and populate properties */
   wmWindowManager *wm = CTX_wm_manager(C);
+
+  /* Set filter mode to current object mode when opening the dialog */
+  wm->category_tag_filter_mode = get_current_object_mode_filter_value(C);
+
   bool has_override = false;
   bool override_is_empty = false;
 

@@ -356,7 +356,7 @@ class VIEW3D_PT_tools_brush_settings_advanced(Panel, View3DPaintBrushPanel):
             tool = settings.brush.gpencil_sculpt_brush_type
             return tool in {'SMOOTH', 'RANDOMIZE'}
 
-        return mode is not None and mode != 'SCULPT_CURVES'
+        return mode is not None and mode not in {'SCULPT_CURVES', 'WEIGHT_CURVES'}
 
     def draw(self, context):
         layout = self.layout
@@ -1163,6 +1163,65 @@ class VIEW3D_PT_curves_sculpt_symmetry_for_topbar(Panel):
     bl_label = "Symmetry"
 
     draw = VIEW3D_PT_curves_sculpt_symmetry.draw
+
+
+# ********** default tools for curves weight paint ****************
+
+
+class VIEW3D_PT_curves_weight_paint_symmetry(Panel, View3DPaintPanel):
+    bl_context = ".curves_weight_paint"
+    bl_label = "Symmetry"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob and ob.type == 'CURVES'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        ob = context.object
+        curves = ob.data
+
+        row = layout.row(align=True, heading="Mirror")
+        row.prop(curves, "use_mirror_x", text="X", toggle=True)
+        row.prop(curves, "use_mirror_y", text="Y", toggle=True)
+        row.prop(curves, "use_mirror_z", text="Z", toggle=True)
+
+
+class VIEW3D_PT_curves_weight_paint_symmetry_for_topbar(Panel):
+    bl_space_type = 'TOPBAR'
+    bl_region_type = 'HEADER'
+    bl_label = "Symmetry"
+
+    draw = VIEW3D_PT_curves_weight_paint_symmetry.draw
+
+
+class VIEW3D_PT_curves_weight_paint_options(Panel, View3DPaintPanel):
+    bl_context = ".curves_weight_paint"
+    bl_label = "Options"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob and ob.type == 'CURVES'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        tool_settings = context.tool_settings
+        curves_weight_paint = tool_settings.curves_weight_paint
+
+        col = layout.column()
+        col.prop(curves_weight_paint, "use_auto_normalize", text="Auto Normalize")
+        col.prop(curves_weight_paint, "use_lock_relative", text="Lock-Relative")
+        col.prop(curves_weight_paint, "use_multipaint", text="Multi-Paint")
 
 
 # ********** default tools for weight-paint ****************

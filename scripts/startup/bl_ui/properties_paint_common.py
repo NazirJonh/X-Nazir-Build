@@ -163,6 +163,7 @@ class BrushAssetShelf:
             'WEIGHT_GREASE_PENCIL': "VIEW3D_AST_brush_gpencil_weight",
             'VERTEX_GREASE_PENCIL': "VIEW3D_AST_brush_gpencil_vertex",
             'SCULPT_CURVES': "VIEW3D_AST_brush_sculpt_curves",
+            'WEIGHT_CURVES': "VIEW3D_AST_brush_weight_paint_curves",
         }
         mode = UnifiedPaintPanel.get_brush_mode(context)
         if not mode:
@@ -276,6 +277,10 @@ class UnifiedPaintPanel:
             return tool_settings.image_paint
         elif mode == 'SCULPT_CURVES':
             return tool_settings.curves_sculpt
+        elif mode == 'WEIGHT_CURVES':
+            return tool_settings.curves_weight_paint
+        elif mode == 'CURVES_WEIGHT_PAINT':
+            return tool_settings.curves_weight_paint
         # Grease Pencil settings
         elif mode == 'PAINT_GREASE_PENCIL':
             return tool_settings.gpencil_paint
@@ -683,7 +688,7 @@ class FalloffPanel(BrushPanel):
         settings = cls.paint_settings(context)
         if not (settings and settings.brush and settings.brush.curve_distance_falloff):
             return False
-        if cls.get_brush_mode(context) == 'SCULPT_CURVES':
+        if cls.get_brush_mode(context) in {'SCULPT_CURVES', 'WEIGHT_CURVES'}:
             brush = settings.brush
             if brush.curves_sculpt_brush_type in {'ADD', 'DELETE'}:
                 return False
@@ -718,7 +723,7 @@ class FalloffPanel(BrushPanel):
         show_falloff_shape = False
         if mode in {'SCULPT', 'PAINT_VERTEX', 'PAINT_WEIGHT'} and brush.sculpt_brush_type != 'POSE':
             show_falloff_shape = True
-        if not show_falloff_shape and mode == 'SCULPT_CURVES' and context.space_data.type == 'PROPERTIES':
+        if not show_falloff_shape and mode in {'SCULPT_CURVES', 'WEIGHT_CURVES'} and context.space_data.type == 'PROPERTIES':
             show_falloff_shape = True
 
         if show_falloff_shape:
@@ -1130,6 +1135,10 @@ def brush_settings(layout, context, brush, popover=False):
             layout.prop(brush.curves_sculpt_settings, "use_uniform_scale")
             layout.prop(brush.curves_sculpt_settings, "minimum_length")
 
+    elif mode == 'WEIGHT_CURVES':
+        # Weight paint curves specific settings can be added here
+        pass
+
 
 def brush_shared_settings(layout, context, brush, popover=False):
     """ Draw simple brush settings that are shared between different paint modes. """
@@ -1195,6 +1204,24 @@ def brush_shared_settings(layout, context, brush, popover=False):
         strength_pressure = tool not in {'SLIDE', 'ADD', 'DELETE'}
         size_pressure = True
 
+    # Weight Paint Curves #
+    if mode == 'WEIGHT_CURVES':
+        size = True
+        strength = True
+        strength_pressure = True
+        size_pressure = True
+
+    # Curves Weight Paint #
+    if mode == 'CURVES_WEIGHT_PAINT':
+        if not popover:
+            size = True
+            weight = True
+            strength = strength_pressure = True
+            size_pressure = True
+        # Only draw blend mode for the Draw tool, similar to weight paint
+        if hasattr(brush, 'curves_weight_brush_type') and brush.curves_weight_brush_type == 'DRAW':
+            blend_mode = True
+
     # Grease Pencil #
     if mode == 'PAINT_GREASE_PENCIL':
         size_mode = True
@@ -1247,7 +1274,8 @@ def brush_shared_settings(layout, context, brush, popover=False):
                 'SCULPT',
                 'PAINT_VERTEX',
                 'PAINT_WEIGHT',
-                    'SCULPT_CURVES'}:
+                'SCULPT_CURVES',
+                'CURVES_WEIGHT_PAINT'}:
                 UnifiedPaintPanel.prop_custom_pressure(
                     layout,
                     context,
@@ -1278,7 +1306,8 @@ def brush_shared_settings(layout, context, brush, popover=False):
             'SCULPT',
             'PAINT_VERTEX',
             'PAINT_WEIGHT',
-                'SCULPT_CURVES'}:
+            'SCULPT_CURVES',
+            'WEIGHT_CURVES'}:
             UnifiedPaintPanel.prop_custom_pressure(
                 layout,
                 context,
@@ -1434,6 +1463,14 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
     elif mode == 'SCULPT_CURVES':
         container.prop(brush, "curves_sculpt_brush_type")
 
+    # Weight Paint Curves
+    elif mode == 'WEIGHT_CURVES':
+        # Weight paint curves brush type can be added here
+        pass
+
+    # Draw shared settings.
+    if use_accumulate:
+        layout.prop(brush, "use_accumulate")
 
 def draw_auto_masking_panel(layout, brush):
     header, panel = layout.panel("auto_masking_panel", default_closed=True)

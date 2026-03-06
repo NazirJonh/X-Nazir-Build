@@ -1526,6 +1526,18 @@ struct CurvesSculpt {
   Paint paint;
 };
 
+struct CurvesWeightPaint {
+  Paint paint;
+
+  /** Ensure all vertex groups add up to 1.0 while weight painting. */
+  char auto_normalize = false;
+  /** Paint across all selected vertex groups. */
+  char multipaint = false;
+  /** Display locked groups as if they were removed and normalize the rest. */
+  char lock_relative = false;
+  char _pad0[5] = {};
+};
+
 struct UvSculpt {
   struct CurveMapping *curve_distance_falloff = nullptr;
   int size = 100;
@@ -2216,6 +2228,8 @@ struct ToolSettings {
   GpWeightPaint *gp_weightpaint = nullptr;
   /** Curves sculpt. */
   CurvesSculpt *curves_sculpt = nullptr;
+  /** Curves weight paint. */
+  CurvesWeightPaint *curves_weight_paint = nullptr;
 
   /** Vertex group weight - used only for editmode, not weight paint. */
   float vgroup_weight = 1.0f;

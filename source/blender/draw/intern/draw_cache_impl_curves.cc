@@ -43,6 +43,7 @@
 
 #include "draw_attributes.hh"
 #include "draw_cache_impl.hh" /* own include */
+#include "draw_cache_impl_curves_private.hh" /* CurvesBatchCache definition */
 #include "draw_cache_inline.hh"
 #include "draw_context_private.hh"
 #include "draw_curves_private.hh" /* own include */
@@ -60,44 +61,7 @@ namespace blender::draw {
 
 /* ---------------------------------------------------------------------- */
 
-struct CurvesBatchCache {
-  CurvesEvalCache eval_cache;
-
-  gpu::Batch *edit_points;
-  gpu::Batch *edit_handles;
-
-  gpu::Batch *sculpt_cage;
-  gpu::IndexBuf *sculpt_cage_ibo;
-
-  /* Crazy-space point positions for original points. */
-  gpu::VertBuf *edit_points_pos;
-  gpu::VertBuf *edit_points_rad;
-
-  /* Additional data needed for shader to choose color for each point in edit_points_pos.
-   * If first bit is set, then point is NURBS control point. EDIT_CURVES_NURBS_CONTROL_POINT is
-   * used to set and test. If second, then point is Bezier handle point. Set and tested with
-   * EDIT_CURVES_BEZIER_HANDLE.
-   * In Bezier case two handle types of HandleType are also encoded.
-   * Byte structure for Bezier knot point (handle middle point):
-   * | left handle type | right handle type |      | BEZIER|  NURBS|
-   * | 7              6 | 5               4 | 3  2 |     1 |     0 |
-   *
-   * If it is left or right handle point, then same handle type is repeated in both slots.
-   */
-  gpu::VertBuf *edit_points_data;
-
-  /* Selection of original points. */
-  gpu::VertBuf *edit_points_selection;
-
-  gpu::IndexBuf *edit_handles_ibo;
-
-  gpu::Batch *edit_curves_lines;
-  gpu::VertBuf *edit_curves_lines_pos;
-  gpu::IndexBuf *edit_curves_lines_ibo;
-
-  /* Whether the cache is invalid. */
-  bool is_dirty;
-};
+/* CurvesBatchCache structure is now defined in draw_cache_impl_curves_private.hh */
 
 static bool batch_cache_is_dirty(const Curves &curves)
 {
@@ -138,6 +102,13 @@ static void clear_edit_data(CurvesBatchCache *cache)
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_curves_lines_pos);
   GPU_INDEXBUF_DISCARD_SAFE(cache->edit_curves_lines_ibo);
   GPU_BATCH_DISCARD_SAFE(cache->edit_curves_lines);
+
+  /* Weight paint batches */
+  GPU_BATCH_DISCARD_SAFE(cache->weight_points);
+  GPU_BATCH_DISCARD_SAFE(cache->weight_lines);
+  GPU_VERTBUF_DISCARD_SAFE(cache->weight_points_pos);
+  GPU_INDEXBUF_DISCARD_SAFE(cache->weight_points_indices);
+  GPU_INDEXBUF_DISCARD_SAFE(cache->weight_lines_indices);
 }
 
 void CurvesEvalCache::discard_attributes()
@@ -194,7 +165,7 @@ static void clear_batch_cache(Curves &curves)
   clear_edit_data(cache);
 }
 
-static CurvesBatchCache &get_batch_cache(Curves &curves)
+CurvesBatchCache &get_batch_cache(Curves &curves)
 {
   DRW_curves_batch_cache_validate(&curves);
   return *curves.batch_cache;
@@ -972,6 +943,7 @@ void DRW_curves_batch_cache_validate(Curves *curves)
 
 void DRW_curves_batch_cache_free(Curves *curves)
 {
+  /* Clean up regular curves cache (weight paint resources are cleaned automatically) */
   clear_batch_cache(*curves);
   CurvesBatchCache *batch_cache = curves->batch_cache;
   MEM_delete(batch_cache);

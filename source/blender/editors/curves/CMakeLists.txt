@@ -25,6 +25,9 @@ set(SRC
   intern/curves_pen.cc
   intern/curves_selection.cc
   intern/curves_undo.cc
+  intern/curves_weight_paint_ops.cc
+  intern/curves_weight_paint_draw.cc
+  intern/curves_weight_paint_utils.cc
   intern/join.cc
   intern/select_linked_pick.cc
   intern/separate.cc

@@ -4124,6 +4124,20 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             None,
             *_tools_annotate,
         ],
+        'WEIGHT_CURVES': [
+            _brush_tool,
+            _defs_weight_paint.blur,
+            _defs_weight_paint.average,
+            _defs_weight_paint.smear,
+            _defs_weight_paint.gradient,
+            None,
+            (
+                _defs_weight_paint.sample_weight,
+                _defs_weight_paint.sample_weight_group,
+            ),
+            None,
+            *_tools_annotate,
+        ],
     }
 
 

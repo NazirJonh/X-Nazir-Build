@@ -355,6 +355,11 @@ static std::optional<std::string> rna_CurvesSculpt_path(const PointerRNA * /*ptr
   return "tool_settings.curves_sculpt";
 }
 
+static std::optional<std::string> rna_CurvesWeightPaint_path(const PointerRNA * /*ptr*/)
+{
+  return "tool_settings.curves_weight_paint";
+}
+
 static std::optional<std::string> rna_GpPaint_path(const PointerRNA * /*ptr*/)
 {
   return "tool_settings.gpencil_paint";
@@ -2012,6 +2017,35 @@ static void rna_def_curves_sculpt(BlenderRNA *brna)
   RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
 }
 
+static void rna_def_curves_weight_paint(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "CurvesWeightPaint", "Paint");
+  RNA_def_struct_path_func(srna, "rna_CurvesWeightPaint_path");
+  RNA_def_struct_ui_text(srna, "Curves Weight Paint", "");
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  /* Auto normalize */
+  prop = RNA_def_property(srna, "use_auto_normalize", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "auto_normalize", 1);
+  RNA_def_property_ui_text(prop, "Auto Normalize", "Ensure all vertex groups add up to 1.0 while weight painting");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* Multi paint */
+  prop = RNA_def_property(srna, "use_multipaint", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "multipaint", 1);
+  RNA_def_property_ui_text(prop, "Multi-Paint", "Paint across the weights of all selected vertex groups");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* Lock relative */
+  prop = RNA_def_property(srna, "use_lock_relative", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "lock_relative", 1);
+  RNA_def_property_ui_text(prop, "Lock-Relative", "Display vertex groups as if all locked groups were deleted");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
 void RNA_def_sculpt_paint(BlenderRNA *brna)
 {
   /* *** Non-Animated *** */
@@ -2033,6 +2067,7 @@ void RNA_def_sculpt_paint(BlenderRNA *brna)
   rna_def_gpencil_guides(brna);
   rna_def_gpencil_sculpt(brna);
   rna_def_curves_sculpt(brna);
+  rna_def_curves_weight_paint(brna);
   RNA_define_animate_sdna(true);
 }
 

@@ -165,6 +165,9 @@ wmKeyMap *WM_keymap_guess_from_context(const bContext *C)
       case CTX_MODE_SCULPT_CURVES:
         km_id = "Sculpt Curves";
         break;
+      case CTX_MODE_WEIGHT_CURVES:
+        km_id = "Weight Curves";
+        break;
       case CTX_MODE_PAINT_GREASE_PENCIL:
         km_id = "Grease Pencil Draw Mode";
         break;
@@ -525,6 +528,9 @@ wmKeyMap *WM_keymap_guess_opname(const bContext *C, const char *opname)
             break;
           case CTX_MODE_SCULPT_CURVES:
             km = WM_keymap_find_all(wm, "Sculpt Curves", SPACE_EMPTY, RGN_TYPE_WINDOW);
+            break;
+          case CTX_MODE_WEIGHT_CURVES:
+            km = WM_keymap_find_all(wm, "Weight Curves", SPACE_EMPTY, RGN_TYPE_WINDOW);
             break;
           default:
             break;

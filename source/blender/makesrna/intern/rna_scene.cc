@@ -3398,6 +3398,11 @@ static void rna_def_tool_settings(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "CurvesSculpt");
   RNA_def_property_ui_text(prop, "Curves Sculpt", "");
 
+  prop = RNA_def_property(srna, "curves_weight_paint", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "curves_weight_paint");
+  RNA_def_property_struct_type(prop, "CurvesWeightPaint");
+  RNA_def_property_ui_text(prop, "Curves Weight Paint", "");
+
   prop = RNA_def_property(srna, "use_auto_normalize", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE | PROP_DEG_SYNC_ONLY);
   RNA_def_property_boolean_sdna(prop, nullptr, "auto_normalize", 1);

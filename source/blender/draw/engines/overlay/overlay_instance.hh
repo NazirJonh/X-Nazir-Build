@@ -20,6 +20,7 @@
 #include "overlay_camera.hh"
 #include "overlay_cursor.hh"
 #include "overlay_curve.hh"
+#include "overlay_curves_weight.hh"
 #include "overlay_empty.hh"
 #include "overlay_facing.hh"
 #include "overlay_fade.hh"
@@ -82,6 +83,7 @@ class Instance : public DrawEngine {
     Bounds bounds = {selection_type_};
     Cameras cameras = {selection_type_};
     Curves curves;
+    CurvesWeightPaint curves_weight_paint;
     Text text = {selection_type_};
     Empties empties = {selection_type_};
     Facing facing;

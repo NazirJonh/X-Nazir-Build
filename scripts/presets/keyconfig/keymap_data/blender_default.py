@@ -5510,6 +5510,38 @@ def km_sculpt_curves(params):
     return keymap
 
 
+def km_weight_curves(params):
+    items = []
+    keymap = (
+        "Weight Curves",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW'},
+        {"items": items},
+    )
+
+    items.extend([
+        ("curves.weight_paint_brush_stroke", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+        ("curves.weight_paint_brush_stroke",
+         {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True},
+         {"properties": [("mode", 'INVERT')]}),
+        ("curves.weight_paint_brush_stroke",
+         {"type": 'LEFTMOUSE', "value": 'PRESS', "shift": True},
+         {"properties": [("brush_toggle", 'SMOOTH')]}),
+        ("curves.weight_toggle_direction", {"type": 'D', "value": 'PRESS'}, None),
+        ("curves.weight_sample", {"type": 'X', "value": 'PRESS', "shift": True}, None),
+        ("curves.set_selection_domain", {"type": 'ONE', "value": 'PRESS'}, {"properties": [("domain", 'POINT')]}),
+        ("curves.set_selection_domain", {"type": 'TWO', "value": 'PRESS'}, {"properties": [("domain", 'CURVE')]}),
+        *_template_paint_radial_control("curves_weight_paint"),
+        ("brush.scale_size", {"type": 'LEFT_BRACKET', "value": 'PRESS', "repeat": True},
+         {"properties": [("scalar", 0.9)]}),
+        ("brush.scale_size", {"type": 'RIGHT_BRACKET', "value": 'PRESS', "repeat": True},
+         {"properties": [("scalar", 1.0 / 0.9)]}),
+        *_template_items_context_panel("VIEW3D_PT_curves_weight_context_menu", params.context_menu_event),
+        *_template_asset_shelf_popup("VIEW3D_AST_brush_weight_paint_curves", params.spacebar_action),
+    ])
+
+    return keymap
+
+
 # ------------------------------------------------------------------------------
 # Object Edit Modes
 
@@ -9053,6 +9085,7 @@ def generate_keymaps(params=None):
         # Object sculpt modes.
         km_sculpt(params),
         km_sculpt_curves(params),
+        km_weight_curves(params),
         # Object edit modes.
         km_edit_mesh(params),
         km_edit_armature(params),

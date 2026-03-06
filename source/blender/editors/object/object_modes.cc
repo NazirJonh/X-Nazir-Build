@@ -97,6 +97,9 @@ static const char *object_mode_op_string(eObjectMode mode)
   if (mode == OB_MODE_SCULPT_CURVES) {
     return "CURVES_OT_sculptmode_toggle";
   }
+  if (mode == OB_MODE_WEIGHT_CURVES) {
+    return "CURVES_OT_weight_paint_toggle";
+  }
   return nullptr;
 }
 
@@ -135,7 +138,7 @@ bool mode_compat_test(const Object *ob, eObjectMode mode)
       }
       break;
     case OB_CURVES:
-      if (mode & (OB_MODE_EDIT | OB_MODE_SCULPT_CURVES)) {
+      if (mode & (OB_MODE_EDIT | OB_MODE_SCULPT_CURVES | OB_MODE_WEIGHT_CURVES)) {
         return true;
       }
       break;

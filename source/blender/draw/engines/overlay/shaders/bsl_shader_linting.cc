@@ -7,6 +7,7 @@
  */
 
 #include "overlay_antialiasing.bsl.hh" /* IWYU pragma: export */
+#include "overlay_curves_weight_paint.bsl.hh" /* IWYU pragma: export */
 #include "overlay_xray_fade.bsl.hh"    /* IWYU pragma: export */
 
 void main() {}

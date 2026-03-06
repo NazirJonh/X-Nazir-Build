@@ -60,6 +60,7 @@ set(SRC
   intern/draw_attributes.cc
   intern/draw_cache_impl_curve.cc
   intern/draw_cache_impl_curves.cc
+  intern/draw_cache_impl_curves_weight.cc
   intern/draw_cache_impl_grease_pencil.cc
   intern/draw_cache_impl_lattice.cc
   intern/draw_cache_impl_mesh.cc
@@ -150,6 +151,7 @@ set(SRC
   engines/overlay/overlay_mode_transfer.cc
   engines/overlay/overlay_shader.cc
   engines/overlay/overlay_shape.cc
+  engines/overlay/overlay_curves_weight.cc
 
   DRW_engine.hh
   DRW_pbvh.hh
@@ -251,6 +253,7 @@ set(SRC
   engines/overlay/overlay_camera.hh
   engines/overlay/overlay_cursor.hh
   engines/overlay/overlay_curve.hh
+  engines/overlay/overlay_curves_weight.hh
   engines/overlay/overlay_empty.hh
   engines/overlay/overlay_engine.h
   engines/overlay/overlay_facing.hh
@@ -738,6 +741,7 @@ set(GLSL_SRC
   engines/overlay/shaders/overlay_wireframe_frag.glsl
   engines/overlay/shaders/overlay_wireframe_vert.glsl
   engines/overlay/shaders/overlay_xray_fade.bsl.hh
+  engines/overlay/shaders/overlay_curves_weight_paint.bsl.hh
 
   engines/overlay/overlay_shader_shared.hh
 

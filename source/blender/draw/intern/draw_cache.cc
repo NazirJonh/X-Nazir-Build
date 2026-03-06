@@ -37,6 +37,7 @@
 
 #include "draw_cache.hh"
 #include "draw_cache_impl.hh"
+#include "draw_cache_impl_curves_weight.hh"
 #include "draw_context_private.hh"
 
 /* -------------------------------------------------------------------- */
@@ -618,5 +619,11 @@ void DRW_cdlayer_attr_aliases_add(GPUVertFormat *format,
     GPU_vertformat_alias_add(format, attr_name);
   }
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Curves Weight Paint
+ * \{ */
+
+/** \} */
 
 }  // namespace blender::draw

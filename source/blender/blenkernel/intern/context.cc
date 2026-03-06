@@ -1474,6 +1474,9 @@ enum eContextObjectMode CTX_data_mode_enum_ex(const Object *obedit,
       if (object_mode & OB_MODE_SCULPT_CURVES) {
         return CTX_MODE_SCULPT_CURVES;
       }
+      if (object_mode & OB_MODE_WEIGHT_CURVES) {
+        return CTX_MODE_WEIGHT_CURVES;
+      }
     }
   }
 
@@ -1516,6 +1519,7 @@ static const char *data_mode_strings[] = {
     "greasepencil_weight",
     "greasepencil_vertex",
     "curves_sculpt",
+    "curves_weight",
     "grease_pencil_paint",
     "grease_pencil_sculpt",
     "grease_pencil_weight",

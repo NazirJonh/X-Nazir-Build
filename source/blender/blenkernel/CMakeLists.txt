@@ -101,6 +101,7 @@ set(SRC
   intern/curves_attributes.cc
   intern/curves_geometry.cc
   intern/curves_utils.cc
+  intern/curves_weight_paint.cc
   intern/customdata.cc
   intern/customdata_file.cc
   intern/data_transfer.cc

@@ -3467,6 +3467,46 @@ def km_sculpt_curves(params):
     return keymap
 
 
+def km_weight_curves(params):
+    items = []
+    keymap = (
+        "Weight Curves",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW'},
+        {"items": items},
+    )
+
+    items.extend([
+        # Brush strokes
+        ("curves.weight_paint_brush_stroke", {"type": 'LEFTMOUSE', "value": 'PRESS'},
+         {"properties": [("mode", 'NORMAL')]}),
+        ("curves.weight_paint_brush_stroke",
+         {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True},
+         {"properties": [("mode", 'INVERT')]}),
+        ("curves.weight_paint_brush_stroke",
+         {"type": 'LEFTMOUSE', "value": 'PRESS', "shift": True},
+         {"properties": [("brush_toggle", 'SMOOTH')]}),
+        # Weight operations
+        ("curves.weight_toggle_direction", {"type": 'D', "value": 'PRESS'}, None),
+        ("curves.weight_sample", {"type": 'X', "value": 'PRESS', "shift": True}, None),
+        # Selection modes
+        ("curves.set_selection_domain", {"type": 'ONE', "value": 'PRESS'}, {"properties": [("domain", 'POINT')]}),
+        ("curves.set_selection_domain", {"type": 'TWO', "value": 'PRESS'}, {"properties": [("domain", 'CURVE')]}),
+        # Brush Properties
+        *_template_paint_radial_control("curves_weight_paint"),
+        ("brush.scale_size", {"type": 'LEFT_BRACKET', "value": 'PRESS', "repeat": True},
+         {"properties": [("scalar", 0.9)]}),
+        ("brush.scale_size", {"type": 'RIGHT_BRACKET', "value": 'PRESS', "repeat": True},
+         {"properties": [("scalar", 1.0 / 0.9)]}),
+        # Context menu.
+        *_template_items_context_panel("VIEW3D_PT_curves_weight_context_menu", {"type": 'RIGHTMOUSE', "value": 'PRESS'}),
+        # Tools
+        op_tool_cycle("builtin.annotate", {"type": 'D', "value": 'PRESS'}),
+        op_asset_shelf_popup("VIEW3D_AST_brush_weight_paint_curves", {"type": 'B', "value": 'PRESS'}),
+    ])
+
+    return keymap
+
+
 # Point cloud edit mode.
 def km_pointcloud(params):
     items = []
@@ -3845,6 +3885,7 @@ def generate_keymaps_impl(params=None):
         km_font(params),
         km_curves(params),
         km_sculpt_curves(params),
+        km_weight_curves(params),
         km_pointcloud(params),
         km_object_non_modal(params),
 

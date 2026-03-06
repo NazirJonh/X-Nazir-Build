@@ -16,6 +16,7 @@
  * this workspace.
  */
 
+#include <cstdio>
 #include <cstring>
 
 #include "CLG_log.h"
@@ -966,6 +967,9 @@ bToolRef *WM_toolsystem_ref_set_by_id_ex(
   }
 #endif
 
+  bToolRef *tref_prev = WM_toolsystem_ref_find(workspace, tkey);
+  const char *tool_before = (tref_prev && tref_prev->idname[0]) ? tref_prev->idname : "<none>";
+
   PointerRNA op_props = WM_operator_properties_create_ptr(ot);
   RNA_string_set(&op_props, "name", name);
 
@@ -978,6 +982,17 @@ bToolRef *WM_toolsystem_ref_set_by_id_ex(
   WM_operator_properties_free(&op_props);
 
   bToolRef *tref = WM_toolsystem_ref_find(workspace, tkey);
+  const char *tool_after = (tref && tref->idname[0]) ? tref->idname : "<none>";
+
+  printf("[DEBUG] WM toolsystem set_by_id: requested='%s' cycle=%d space_type=%d mode=%d "
+         "tool_before='%s' tool_after='%s' changed=%d\n",
+         name,
+         int(cycle),
+         tkey->space_type,
+         tkey->mode,
+         tool_before,
+         tool_after,
+         !STREQ(tool_before, tool_after));
 
   if (tref) {
     Main *bmain = CTX_data_main(C);
@@ -1026,6 +1041,9 @@ static void toolsystem_ref_set_by_brush_type(bContext *C, const char *brush_type
   }
 #endif
 
+  bToolRef *tref_prev = WM_toolsystem_ref_find(workspace, &tkey);
+  const char *tool_before = (tref_prev && tref_prev->idname[0]) ? tref_prev->idname : "<none>";
+
   PointerRNA op_props = WM_operator_properties_create_ptr(ot);
   RNA_string_set(&op_props, "brush_type", brush_type);
 
@@ -1037,6 +1055,16 @@ static void toolsystem_ref_set_by_brush_type(bContext *C, const char *brush_type
   WM_operator_properties_free(&op_props);
 
   bToolRef *tref = WM_toolsystem_ref_find(workspace, &tkey);
+  const char *tool_after = (tref && tref->idname[0]) ? tref->idname : "<none>";
+
+  printf("[DEBUG] WM toolsystem set_by_brush_type: brush_type='%s' space_type=%d mode=%d "
+         "tool_before='%s' tool_after='%s' changed=%d\n",
+         brush_type,
+         tkey.space_type,
+         tkey.mode,
+         tool_before,
+         tool_after,
+         !STREQ(tool_before, tool_after));
 
   if (tref) {
     Main *bmain = CTX_data_main(C);
@@ -1124,6 +1152,7 @@ static const char *toolsystem_default_tool(const bToolKey *tkey)
         case CTX_MODE_VERTEX_GPENCIL_LEGACY:
         case CTX_MODE_VERTEX_GREASE_PENCIL:
         case CTX_MODE_SCULPT_CURVES:
+        case CTX_MODE_WEIGHT_CURVES:
           return "builtin.brush";
         case CTX_MODE_PARTICLE:
           return "builtin_brush.Comb";
@@ -1180,7 +1209,23 @@ static void wm_toolsystem_update_from_context_view3d_impl(bContext *C, WorkSpace
   bToolKey tkey{};
   tkey.space_type = space_type;
   tkey.mode = WM_toolsystem_mode_from_spacetype(*bmain, scene, view_layer, nullptr, space_type);
+  bToolRef *tref_before = WM_toolsystem_ref_find(workspace, &tkey);
+  const char *tool_before = (tref_before && tref_before->idname[0]) ? tref_before->idname : "<none>";
   toolsystem_reinit_ensure_toolref(C, workspace, &tkey, nullptr);
+  bToolRef *tref_after = WM_toolsystem_ref_find(workspace, &tkey);
+  const char *tool_after = (tref_after && tref_after->idname[0]) ? tref_after->idname : "<none>";
+
+  static int debug_view3d_update_count = 0;
+  debug_view3d_update_count++;
+  if (debug_view3d_update_count <= 40 || (debug_view3d_update_count % 200) == 0 ||
+      !STREQ(tool_before, tool_after))
+  {
+    printf("[DEBUG] WM toolsystem view3d update: mode=%d tool_before='%s' tool_after='%s' changed=%d\n",
+           tkey.mode,
+           tool_before,
+           tool_after,
+           !STREQ(tool_before, tool_after));
+  }
 }
 
 void WM_toolsystem_update_from_context_view3d(bContext *C)

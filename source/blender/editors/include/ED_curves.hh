@@ -261,6 +261,14 @@ void CURVES_OT_extrude(wmOperatorType *ot);
 void CURVES_OT_select_linked_pick(wmOperatorType *ot);
 void CURVES_OT_separate(wmOperatorType *ot);
 
+/* Weight paint operators */
+void CURVES_OT_weight_paint_toggle(wmOperatorType *ot);
+void CURVES_OT_vertex_group_add(wmOperatorType *ot);
+void CURVES_OT_vertex_group_remove(wmOperatorType *ot);
+void CURVES_OT_vertex_group_assign(wmOperatorType *ot);
+void CURVES_OT_vertex_group_remove_from(wmOperatorType *ot);
+void CURVES_OT_weight_paint_brush_stroke(wmOperatorType *ot);
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

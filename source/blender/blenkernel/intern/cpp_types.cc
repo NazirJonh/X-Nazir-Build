@@ -52,8 +52,11 @@ void BKE_cpp_types_init()
 
   BLI_CPP_TYPE_REGISTER(bke::GeometryNodesReferenceSet, CPPTypeFlags::None);
   BLI_CPP_TYPE_REGISTER(bke::SocketValueVariant, CPPTypeFlags::Printable);
+
   BLI_CPP_TYPE_REGISTER(nodes::GeoNodesMultiInput<bke::SocketValueVariant>, CPPTypeFlags::None);
   BLI_CPP_TYPE_REGISTER(nodes::BundleItemValue, CPPTypeFlags::None);
+
+  BLI_CPP_TYPE_REGISTER(MDeformVert, CPPTypeFlags::None);
 }
 
 }  // namespace blender

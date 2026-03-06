@@ -731,7 +731,8 @@ struct ObHook {
         OB_VOLUME, \
         OB_GREASE_PENCIL))
 
-#define OB_TYPE_SUPPORT_VGROUP(_type) (ELEM(_type, OB_MESH, OB_LATTICE, OB_GREASE_PENCIL))
+#define OB_TYPE_SUPPORT_VGROUP(_type) \
+  (ELEM(_type, OB_MESH, OB_LATTICE, OB_GREASE_PENCIL, OB_CURVES))
 
 #define OB_TYPE_SUPPORT_EDITMODE(_type) \
   (ELEM(_type, \

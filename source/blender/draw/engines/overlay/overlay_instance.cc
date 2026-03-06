@@ -477,6 +477,7 @@ void Instance::begin_sync()
     layer.bounds.begin_sync(resources, state);
     layer.cameras.begin_sync(resources, state);
     layer.curves.begin_sync(resources, state);
+    layer.curves_weight_paint.begin_sync(resources, state);
     layer.text.begin_sync(resources, state);
     layer.empties.begin_sync(resources, state);
     layer.facing.begin_sync(resources, state);
@@ -525,6 +526,8 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
   layer.mode_transfer.object_sync(manager, ob_ref, resources, state);
 
   if (needs_prepass) {
+    printf("[DEBUG] Object sync: Running prepass for object %s (type: %d, mode: %d)\n", 
+           ob_ref.object->id.name, ob_ref.object->type, ob_ref.object->mode);
     layer.prepass.object_sync(manager, ob_ref, resources, state);
   }
 
@@ -556,6 +559,9 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
         break;
       case OB_GREASE_PENCIL:
         layer.grease_pencil.paint_object_sync(manager, ob_ref, resources, state);
+        break;
+      case OB_CURVES:
+        layer.curves_weight_paint.object_sync(manager, ob_ref, resources, state);
         break;
       default:
         break;
@@ -847,6 +853,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
     layer.mode_transfer.draw(framebuffer, manager, view);
     layer.text.draw(framebuffer, manager, view);
     layer.paints.draw(framebuffer, manager, view);
+    layer.curves_weight_paint.draw(framebuffer, manager, view);
     layer.particles.draw(framebuffer, manager, view);
   };
 
@@ -889,7 +896,9 @@ void Instance::draw_v3d(Manager &manager, View &view)
     infront.cameras.draw_scene_background_images(resources.render_in_front_fb, manager, view);
 
     regular.sculpts.draw_on_render(resources.render_fb, manager, view);
+    regular.curves_weight_paint.draw_on_render(resources.render_fb, manager, view);
     infront.sculpts.draw_on_render(resources.render_in_front_fb, manager, view);
+    infront.curves_weight_paint.draw_on_render(resources.render_in_front_fb, manager, view);
   }
   {
     /* Overlay Line prepass. */
@@ -1020,7 +1029,7 @@ bool Instance::object_is_selected(const ObjectRef &ob_ref)
 bool Instance::object_is_paint_mode(const Object *object)
 {
   return (object == state.object_active) &&
-         (state.object_mode & (OB_MODE_ALL_PAINT | OB_MODE_ALL_PAINT_GPENCIL));
+         (state.object_mode & (OB_MODE_ALL_PAINT | OB_MODE_ALL_PAINT_GPENCIL | OB_MODE_ALL_PAINT_CURVES));
 }
 
 bool Instance::object_is_sculpt_mode(const ObjectRef &ob_ref)
@@ -1137,6 +1146,14 @@ bool Instance::object_needs_prepass(const ObjectRef &ob_ref, bool in_paint_mode)
     if (object_is_rendered_transparent(ob_ref.object, state) ||
         object_is_in_front(ob_ref.object, state))
     {
+      printf("[DEBUG] Prepass: Object %s needs prepass (transparent/in_front)\n", ob_ref.object->id.name);
+      return true;
+    }
+    
+    /* Add curves weight paint support for depth culling */
+    if (ob_ref.object->type == OB_CURVES && 
+        ob_ref.object->mode == OB_MODE_WEIGHT_CURVES) {
+      printf("[DEBUG] Prepass: Curves object %s in weight paint mode needs prepass\n", ob_ref.object->id.name);
       return true;
     }
   }

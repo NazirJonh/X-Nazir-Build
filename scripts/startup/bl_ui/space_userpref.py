@@ -970,9 +970,15 @@ def generate_unique_tag_name():
         i += 1
 
 
-def create_tag(tag_name, glyph="", color=None, auto_save=True):
+def create_tag(tag_name, glyph="", color=None, mode_flags=None, auto_save=True):
     """
     Create a new tag.
+
+    Args:
+        tag_name: Name for the new tag
+        glyph: Unicode glyph character
+        color: RGB color tuple (0.0-1.0)
+        mode_flags: Bitmask of modes where tag is active (None = use default)
 
     Returns:
         (success: bool, message: str)
@@ -995,7 +1001,7 @@ def create_tag(tag_name, glyph="", color=None, auto_save=True):
     _all_tags_cache[tag_name] = {
         "glyph": glyph,
         "color": list(color) if color else [0.0, 0.0, 0.0],
-        "mode_flags": _CATEGORY_TAG_DEFAULT_MODE_FLAGS
+        "mode_flags": mode_flags if mode_flags is not None else _CATEGORY_TAG_DEFAULT_MODE_FLAGS
     }
 
     # Always add new tags to the end of the order list
@@ -2541,6 +2547,11 @@ class USERPREF_OT_category_tag_create(Operator):
         max=1.0,
         default=(0.0, 0.0, 0.0)
     )
+    current_mode_only: bpy.props.BoolProperty(
+        name="Current Mode Only",
+        description="Show tag only in the current object mode (otherwise shows in default modes)",
+        default=False
+    )
 
     @with_context_check
     def execute(self, context):
@@ -2555,10 +2566,18 @@ class USERPREF_OT_category_tag_create(Operator):
         # Convert hex glyph to Unicode character
         glyph = _hex_to_glyph(self.glyph) if self.glyph else ""
         print(f"[DEBUG CREATE_TAG execute] Converted glyph = '{glyph}'")
+
+        # Determine mode_flags based on current_mode_only checkbox
+        if self.current_mode_only:
+            mode_flags = get_current_tag_mode_flag(context)
+        else:
+            mode_flags = _CATEGORY_TAG_DEFAULT_MODE_FLAGS
+
         success, message = create_tag(
             self.name,
             glyph,
             list(self.color),
+            mode_flags=mode_flags,
             auto_save=True
         )
         if success:
@@ -2612,6 +2631,10 @@ class USERPREF_OT_category_tag_create(Operator):
         layout.label(text="Color:")
         row = layout.row()
         row.template_color_glyph_presets(self.properties, "color")
+
+        # Current mode only checkbox (last item)
+        layout.separator()
+        layout.prop(self, "current_mode_only")
 
     def invoke(self, context, event):
         print(

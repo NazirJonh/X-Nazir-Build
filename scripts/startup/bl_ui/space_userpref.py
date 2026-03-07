@@ -264,6 +264,8 @@ DEFAULT_CATEGORY_GLYPHS = {
                   "default_glyph": "\ue3d4", "default_display_name": ""},  # science
     "Curve": {"glyph": "\ue148", "display_name": "", "color": [0.0, 0.0, 0.0],
               "default_glyph": "\ue148", "default_display_name": ""},      # timeline
+    "Image": {"glyph": "\ue204", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ue204", "default_display_name": ""},       # image
     "Mesh": {"glyph": "\ue204", "display_name": "", "color": [0.0, 0.0, 0.0],
              "default_glyph": "\ue204", "default_display_name": ""},       # category
     "Object": {"glyph": "\ue8d4", "display_name": "", "color": [0.0, 0.0, 0.0],

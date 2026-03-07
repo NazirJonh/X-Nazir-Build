@@ -1872,7 +1872,7 @@ static void region_rect_recursive(
         /* Keep left side free for node path/context controls (e.g. Geometry Nodes group path).
          * This mirrors the View3D behavior where top overlay controls don't block critical UI on
          * the left. */
-        const int node_tag_bar_left_reserve = int(16.0f * U.widget_unit);
+        const int node_tag_bar_left_reserve = int(70.0f * U.widget_unit);
         region->winrct.xmin = min_ii(region->winrct.xmax, region->winrct.xmin + node_tag_bar_left_reserve);
       }
 

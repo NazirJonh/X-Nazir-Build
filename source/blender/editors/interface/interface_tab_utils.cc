@@ -29,6 +29,8 @@
 #include "RNA_access.hh"
 #include "RNA_enum_types.hh"
 
+#include "ED_screen.hh"
+
 #include "UI_interface_c.hh"
 #include "UI_interface_icons.hh"
 
@@ -187,8 +189,13 @@ bool category_tab_glyph_is_fallback_letter(const char *glyph, const char *catego
   return STREQ(glyph, category_first_char);
 }
 
-float category_tabs_zoom_value_get(const eUserPref_CategoryTabsDisplayMode display_mode)
+float category_tabs_zoom_value_get(const ScrArea *area,
+                                   const eUserPref_CategoryTabsDisplayMode display_mode)
 {
+  if (area) {
+    return ED_category_tabs_zoom_get(area);
+  }
+
   switch (display_mode) {
     case USER_CATEGORY_TABS_GLYPHS_ONLY:
       return U.category_tabs_zoom_icon;
@@ -200,11 +207,12 @@ float category_tabs_zoom_value_get(const eUserPref_CategoryTabsDisplayMode displ
   }
 }
 
-int category_tabs_min_width_get(const float aspect,
+int category_tabs_min_width_get(const ScrArea *area,
+                                const float aspect,
                                 const eUserPref_CategoryTabsDisplayMode display_mode)
 {
   const float safe_aspect = std::max(aspect, 0.0001f);
-  const float category_tabs_zoom = category_tabs_zoom_value_get(display_mode);
+  const float category_tabs_zoom = category_tabs_zoom_value_get(area, display_mode);
   const float zoom = (1.0f / safe_aspect) * category_tabs_zoom;
   const int category_tabs_width = int(std::lround(double(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom)));
   const int legacy_min_width =

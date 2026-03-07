@@ -19,6 +19,9 @@
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_userdef_types.h"
+#include "DNA_view3d_types.h"
+#include "DNA_windowmanager_types.h"
 #include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_string.h"
@@ -272,6 +275,62 @@ static void version_geometry_nodes_properties(Main &bmain, Object &object, Nodes
   nmd.settings_legacy.properties = nullptr;
 }
 
+static void do_versions_init_category_tabs_display_and_zoom_in_spaces(Main *bmain)
+{
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        switch (sl.spacetype) {
+          case SPACE_VIEW3D: {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            v3d->category_tabs_display_mode = U.category_tabs_display_mode;
+            v3d->category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            v3d->category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            v3d->category_tabs_zoom_text = U.category_tabs_zoom_text;
+            break;
+          }
+          case SPACE_PROPERTIES: {
+            SpaceProperties *sbuts = reinterpret_cast<SpaceProperties *>(&sl);
+            sbuts->category_tabs_display_mode = U.category_tabs_display_mode;
+            sbuts->category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            sbuts->category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            sbuts->category_tabs_zoom_text = U.category_tabs_zoom_text;
+            break;
+          }
+          case SPACE_NODE: {
+            SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
+            snode->category_tabs_display_mode = U.category_tabs_display_mode;
+            snode->category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            snode->category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            snode->category_tabs_zoom_text = U.category_tabs_zoom_text;
+            break;
+          }
+          case SPACE_IMAGE: {
+            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+            sima->category_tabs_display_mode = U.category_tabs_display_mode;
+            sima->category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            sima->category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            sima->category_tabs_zoom_text = U.category_tabs_zoom_text;
+            break;
+          }
+          default:
+            break;
+        }
+      }
+    }
+  }
+}
+
+static void do_versions_clear_category_runtime_lists_in_wm(Main *bmain)
+{
+  for (wmWindowManager &wm : bmain->wm) {
+    BLI_listbase_clear(&wm.category_glyph_mappings);
+    BLI_listbase_clear(&wm.category_glyph_overrides);
+    BLI_listbase_clear(&wm.category_tags);
+    wm.category_tags_active_index = 0;
+  }
+}
+
 /* Saving file extension is now a property of the File Output node. So inherit this
  * setting from the active scene to restore the old behavior.
  * Note: One limitation is that node groups containing file outputs that are not part of any
@@ -358,11 +417,20 @@ void do_versions_after_linking_520(FileData * /*fd*/, Main *bmain)
 
 void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 {
+  /* Category runtime lists in WM are rebuilt by Python on startup and must never be trusted from
+   * blend-file contents (older experimental files may contain stale raw pointers here).
+   * Clear unconditionally for all 5.2 loads before any Python-side sync touches them. */
+  do_versions_clear_category_runtime_lists_in_wm(bmain);
+
   /* Add TAG_BAR region to editors that support category filtering. */
   do_versions_ensure_spaces_have_tag_bar_region(bmain);
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 5)) {
     do_versions_init_tag_filter_state_in_spaces(bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 6)) {
+    do_versions_init_category_tabs_display_and_zoom_in_spaces(bmain);
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 4)) {

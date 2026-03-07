@@ -3347,19 +3347,7 @@ static wmOperatorStatus region_scale_modal(bContext *C, wmOperator *op, const wm
                                  1.0f;
         float min_width_for_pref = UI_PANEL_CATEGORY_MIN_WIDTH;
         if (rmd->region->runtime->type && BKE_regiontype_uses_category_tabs(rmd->region->runtime->type)) {
-          float category_tabs_zoom = 1.0f;
-          switch (static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode)) {
-            case USER_CATEGORY_TABS_GLYPHS_ONLY:
-              category_tabs_zoom = U.category_tabs_zoom_icon;
-              break;
-            case USER_CATEGORY_TABS_GLYPHS_TEXT:
-              category_tabs_zoom = U.category_tabs_zoom_mixed;
-              break;
-            case USER_CATEGORY_TABS_TEXT_ONLY:
-            default:
-              category_tabs_zoom = U.category_tabs_zoom_text;
-              break;
-          }
+          const float category_tabs_zoom = ED_category_tabs_zoom_get(rmd->area);
           min_width_for_pref =
               std::max(UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom);
         }
@@ -7706,7 +7694,7 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
     return false;
   }
 
-  if (!ED_region_panel_category_gutter_isect_xy(region, event->xy)) {
+  if (!ED_region_panel_category_gutter_isect_xy(area, region, event->xy)) {
     printf("[EXT_DROP_POLL] REJECT: not in category gutter at (%d,%d)\n",
            event->xy[0],
            event->xy[1]);
@@ -7785,7 +7773,7 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
     return;
   }
 
-  if (!ED_region_panel_category_gutter_isect_xy(region, xy)) {
+  if (!ED_region_panel_category_gutter_isect_xy(area, region, xy)) {
     printf("[EXT_DROP_DRAW] ABORT: not in category gutter at (%d,%d)\n", xy[0], xy[1]);
     fflush(stdout);
     return;
@@ -7820,19 +7808,7 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
   const float aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
                            1.0f :
                            (static_cast<ui::Block *>(region->runtime->uiblocks.first))->aspect;
-  float category_tabs_zoom;
-  switch (static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode)) {
-    case USER_CATEGORY_TABS_GLYPHS_ONLY:
-      category_tabs_zoom = U.category_tabs_zoom_icon;
-      break;
-    case USER_CATEGORY_TABS_GLYPHS_TEXT:
-      category_tabs_zoom = U.category_tabs_zoom_mixed;
-      break;
-    case USER_CATEGORY_TABS_TEXT_ONLY:
-    default:
-      category_tabs_zoom = U.category_tabs_zoom_text;
-      break;
-  }
+  const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
   const float zoom = (1.0f / aspect) * category_tabs_zoom;
   const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
   const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;

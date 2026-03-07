@@ -2497,18 +2497,18 @@ def _sync_glyph_mappings_to_wm_impl():
             print("[GLYPH] WindowManager or collections not available")
             return False
 
-        # Clear existing mappings to avoid duplicates
-        old_count = len(wm.category_glyph_mappings)
-        for item in list(wm.category_glyph_mappings):
-            wm.category_glyph_mappings.remove(item)
-        print(f"[GLYPH SYNC] Cleared {old_count} existing mappings")
+        # Clear existing mappings to avoid duplicates.
+        # IMPORTANT: use RNA clear() (C-side) to handle potentially corrupted ListBase
+        # safely after loading older/foreign blend files.
+        wm.category_glyph_mappings.clear()
+        print("[GLYPH SYNC] Cleared existing mappings")
 
         # Sync available tags (definitions) into wm.category_tags if available
         if hasattr(wm, "category_tags"):
-            old_tag_count = len(wm.category_tags)
-            for item in list(wm.category_tags):
-                wm.category_tags.remove(item)
-            print(f"[GLYPH SYNC] Cleared {old_tag_count} existing tag definitions")
+            # Same safety rationale as above: do not iterate Python-side over a potentially
+            # corrupted RNA collection right after file load.
+            wm.category_tags.clear()
+            print("[GLYPH SYNC] Cleared existing tag definitions")
 
             # Use tag_order if available, otherwise use cache insertion order (added to end)
             if _tag_order_cache:
@@ -7054,31 +7054,53 @@ class VIEW3D_OT_category_tabs_settings(Operator):
     bl_description = "Adjust display mode settings for category tabs"
     bl_options = {'REGISTER', 'UNDO'}
 
+    @staticmethod
+    def _display_mode_owner(context):
+        space = context.space_data
+        if space and hasattr(space, "category_tabs_display_mode"):
+            return space
+        return context.preferences.view
+
+    @classmethod
+    def _display_mode_value(cls, context):
+        owner = cls._display_mode_owner(context)
+        return owner.category_tabs_display_mode
+
+    @classmethod
+    def _zoom_owner(cls, context):
+        owner = cls._display_mode_owner(context)
+        if hasattr(owner, "category_tabs_zoom_icon"):
+            return owner
+        return context.preferences.view
+
     def draw(self, context):
         layout = self.layout
         prefs = context.preferences
         view = prefs.view
+        display_mode_owner = self._display_mode_owner(context)
+        display_mode_value = self._display_mode_value(context)
+        zoom_owner = self._zoom_owner(context)
 
         # Display mode buttons
         layout.label(text="Display Mode")
         row = layout.row(align=True)
 
-        # Use enum property directly with expanded display
-        row.prop_enum(view, "category_tabs_display_mode", "GLYPHS_ONLY", text="Icon")
-        row.prop_enum(view, "category_tabs_display_mode", "GLYPHS_TEXT", text="Mixed")
-        row.prop_enum(view, "category_tabs_display_mode", "TEXT_ONLY", text="Text")
+        # Per-editor when available; fallback to global preference.
+        row.prop_enum(display_mode_owner, "category_tabs_display_mode", "GLYPHS_ONLY", text="Icon")
+        row.prop_enum(display_mode_owner, "category_tabs_display_mode", "GLYPHS_TEXT", text="Mixed")
+        row.prop_enum(display_mode_owner, "category_tabs_display_mode", "TEXT_ONLY", text="Text")
 
         # Size slider - different property based on mode
         layout.separator()
-        if view.category_tabs_display_mode == 'GLYPHS_ONLY':
-            layout.prop(view, "category_tabs_zoom_icon", text="Icon Size")
-        elif view.category_tabs_display_mode == 'GLYPHS_TEXT':
-            layout.prop(view, "category_tabs_zoom_mixed", text="Mixed Size")
+        if display_mode_value == 'GLYPHS_ONLY':
+            layout.prop(zoom_owner, "category_tabs_zoom_icon", text="Icon Size")
+        elif display_mode_value == 'GLYPHS_TEXT':
+            layout.prop(zoom_owner, "category_tabs_zoom_mixed", text="Mixed Size")
         else:  # TEXT_ONLY
-            layout.prop(view, "category_tabs_zoom_text", text="Text Size")
+            layout.prop(zoom_owner, "category_tabs_zoom_text", text="Text Size")
 
         # Show active tab name option - only in Icon mode
-        if view.category_tabs_display_mode == 'GLYPHS_ONLY':
+        if display_mode_value == 'GLYPHS_ONLY':
             layout.separator()
             layout.prop(view, "category_tabs_show_active_name", text="Show Active Tab Name")
             # Inactive tab behavior - only in Icon mode
@@ -7095,23 +7117,23 @@ class VIEW3D_OT_category_tabs_settings(Operator):
             row.prop_enum(view, "category_tabs_shape", "CAPSULE", text="Capsule Shape")
 
         # Show color indicator option - only in Text mode
-        if view.category_tabs_display_mode == 'TEXT_ONLY':
+        if display_mode_value == 'TEXT_ONLY':
             layout.separator()
             layout.prop(view, "category_tabs_text_mode_show_color_indicator", text="Show Color Indicator")
 
         # Show colored text option - only in Text mode
-        if view.category_tabs_display_mode == 'TEXT_ONLY':
+        if display_mode_value == 'TEXT_ONLY':
             layout.prop(view, "category_tabs_text_mode_show_colored_text", text="Show Colored Text")
 
         # Hide text for inactive reserved tabs in Mixed/Text modes
-        if view.category_tabs_display_mode in {'GLYPHS_TEXT', 'TEXT_ONLY'}:
+        if display_mode_value in {'GLYPHS_TEXT', 'TEXT_ONLY'}:
             layout.separator()
             layout.prop(view,
                         "category_tabs_hide_reserved_inactive_text",
                         text="Inactive Reserved Tabs: Icons Only")
 
         # Show drag tooltips option - only in Icon mode
-        if view.category_tabs_display_mode == 'GLYPHS_ONLY':
+        if display_mode_value == 'GLYPHS_ONLY':
             layout.prop(view, "category_tabs_show_drag_tooltips", text="Show Drag Tooltips")
 
         # Allow editing category data

@@ -2413,8 +2413,8 @@ static ARegion *ui_panel_category_tooltip_init(
   /* Get display mode from preferences.
    * In TEXT_ONLY mode the category name is already visible, so don't show tooltips.
    * In GLYPHS_ONLY and GLYPHS_TEXT (Mixed) modes, tooltips are useful. */
-  const eUserPref_CategoryTabsDisplayMode display_mode =
-      static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+  const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(
+      CTX_wm_area(C));
 
   if (display_mode == USER_CATEGORY_TABS_TEXT_ONLY) {
     return nullptr;
@@ -2871,8 +2871,8 @@ int handler_panel_region(bContext *C,
           const char *previous_active = panel_category_active_get(region, false);
           const bool already_active = STREQ(pc_dyn->idname, previous_active);
           /* Handle previous active tab ID for Sticky inactive behavior mode. */
-          const eUserPref_CategoryTabsDisplayMode display_mode =
-              static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+          const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(
+              CTX_wm_area(C));
           const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
           const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
                                        U.category_tabs_show_active_name);
@@ -2897,7 +2897,8 @@ int handler_panel_region(bContext *C,
 
           const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
                                (BLI_rcti_size_y(&region->v2d.mask) + 1);
-          const int category_tabs_min_width = category_tabs_min_width_get(aspect, display_mode);
+          const int category_tabs_min_width = category_tabs_min_width_get(
+              CTX_wm_area(C), aspect, display_mode);
           const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_width;
           const int category_tabs_min_width_unscaled = int(
               std::ceil(float(category_tabs_min_width) * aspect / UI_SCALE_FAC));
@@ -3034,7 +3035,7 @@ int handler_panel_region(bContext *C,
       }
     }
     if (event->type == EVT_PADPERIOD) {
-      retval = ui_panel_category_show_active_tab(region, event->xy);
+      retval = ui_panel_category_show_active_tab(CTX_wm_area(C), region, event->xy);
     }
   }
 

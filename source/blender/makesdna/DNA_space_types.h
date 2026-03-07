@@ -182,7 +182,16 @@ struct SpaceProperties {
    * When true: only categories with matching active tags are shown.
    */
   char tag_filter_enabled = 0;
-  char _pad_tag_filter[7] = {0, 0, 0, 0, 0, 0, 0};
+  /** Category tabs display mode for this editor instance. */
+  char category_tabs_display_mode = 1;
+  char _pad_tag_filter[2] = {0, 0};
+
+  /** Per-editor scale factor for category tabs in Icon mode. */
+  float category_tabs_zoom_icon = 1.0f;
+  /** Per-editor scale factor for category tabs in Mixed mode. */
+  float category_tabs_zoom_mixed = 1.0f;
+  /** Per-editor scale factor for category tabs in Text mode. */
+  float category_tabs_zoom_text = 1.0f;
 
   /**
    * Horizontal scroll offset in the tag bar (in pixels).
@@ -734,7 +743,16 @@ struct SpaceImage {
    * When true: only categories with matching active tags are shown.
    */
   char tag_filter_enabled = 0;
-  char _pad_tag_filter[7] = {0, 0, 0, 0, 0, 0, 0};
+  /** Category tabs display mode for this editor instance. */
+  char category_tabs_display_mode = 1;
+  char _pad_tag_filter[2] = {0, 0};
+
+  /** Per-editor scale factor for category tabs in Icon mode. */
+  float category_tabs_zoom_icon = 1.0f;
+  /** Per-editor scale factor for category tabs in Mixed mode. */
+  float category_tabs_zoom_mixed = 1.0f;
+  /** Per-editor scale factor for category tabs in Text mode. */
+  float category_tabs_zoom_text = 1.0f;
 
   /**
    * Horizontal scroll offset in the tag bar (in pixels).
@@ -961,7 +979,16 @@ struct SpaceNode {
    * When true: only categories with matching active tags are shown.
    */
   char tag_filter_enabled = 0;
-  char _pad_tag_filter[7] = {0, 0, 0, 0, 0, 0, 0};
+  /** Category tabs display mode for this editor instance. */
+  char category_tabs_display_mode = 1;
+  char _pad_tag_filter[2] = {0, 0};
+
+  /** Per-editor scale factor for category tabs in Icon mode. */
+  float category_tabs_zoom_icon = 1.0f;
+  /** Per-editor scale factor for category tabs in Mixed mode. */
+  float category_tabs_zoom_mixed = 1.0f;
+  /** Per-editor scale factor for category tabs in Text mode. */
+  float category_tabs_zoom_text = 1.0f;
 
   /**
    * Horizontal scroll offset in the tag bar (in pixels).

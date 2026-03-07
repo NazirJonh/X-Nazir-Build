@@ -1921,21 +1921,7 @@ static void region_rect_recursive(
       }
       else if (has_tabs) {
         /* Too narrow for content so show only the category tabs. */
-        const eUserPref_CategoryTabsDisplayMode display_mode =
-            static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
-        float category_tabs_zoom = 1.0f;
-        switch (display_mode) {
-          case USER_CATEGORY_TABS_GLYPHS_ONLY:
-            category_tabs_zoom = U.category_tabs_zoom_icon;
-            break;
-          case USER_CATEGORY_TABS_GLYPHS_TEXT:
-            category_tabs_zoom = U.category_tabs_zoom_mixed;
-            break;
-          case USER_CATEGORY_TABS_TEXT_ONLY:
-          default:
-            category_tabs_zoom = U.category_tabs_zoom_text;
-            break;
-        }
+        const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
         const float category_tabs_min_width = std::max(
             UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom);
         const int cat_min = int(std::ceil(UI_SCALE_FAC * category_tabs_min_width / aspect));
@@ -3519,19 +3505,7 @@ void ED_region_panels_layout_ex(const bContext *C,
   /* offset panels for small vertical tab area */
   const char *category = nullptr;
   /* Get zoom based on display mode. */
-  float category_tabs_zoom;
-  switch (static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode)) {
-    case USER_CATEGORY_TABS_GLYPHS_ONLY:
-      category_tabs_zoom = U.category_tabs_zoom_icon;
-      break;
-    case USER_CATEGORY_TABS_GLYPHS_TEXT:
-      category_tabs_zoom = U.category_tabs_zoom_mixed;
-      break;
-    case USER_CATEGORY_TABS_TEXT_ONLY:
-    default:
-      category_tabs_zoom = U.category_tabs_zoom_text;
-      break;
-  }
+  const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
   const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH *
                                                    category_tabs_zoom);
   int margin_x = 0;
@@ -3810,6 +3784,7 @@ void ED_region_panels_layout(const bContext *C, ARegion *region)
 
 void ED_region_panels_draw(const bContext *C, ARegion *region)
 {
+  const ScrArea *area = CTX_wm_area(C);
   View2D *v2d = &region->v2d;
   const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
                        (BLI_rcti_size_y(&region->v2d.mask) + 1);
@@ -3834,21 +3809,7 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
   const bool has_category_tabs = ui::panel_category_tabs_is_visible(region);
   short min_draw_size = std::min(region->runtime->type->prefsizex, 20);
   if (has_category_tabs) {
-    const eUserPref_CategoryTabsDisplayMode display_mode =
-        static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
-    float category_tabs_zoom = 1.0f;
-    switch (display_mode) {
-      case USER_CATEGORY_TABS_GLYPHS_ONLY:
-        category_tabs_zoom = U.category_tabs_zoom_icon;
-        break;
-      case USER_CATEGORY_TABS_GLYPHS_TEXT:
-        category_tabs_zoom = U.category_tabs_zoom_mixed;
-        break;
-      case USER_CATEGORY_TABS_TEXT_ONLY:
-      default:
-        category_tabs_zoom = U.category_tabs_zoom_text;
-        break;
-    }
+    const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
     const int tabs_only_min_draw_size = int(std::ceil(
         std::max(UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom)));
     min_draw_size = short(tabs_only_min_draw_size + 20);
@@ -3877,19 +3838,7 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
     use_mask = true;
     ui::view2d_mask_from_win(v2d, &mask);
     /* Get zoom based on display mode. */
-    float category_tabs_zoom_local;
-    switch (static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode)) {
-      case USER_CATEGORY_TABS_GLYPHS_ONLY:
-        category_tabs_zoom_local = U.category_tabs_zoom_icon;
-        break;
-      case USER_CATEGORY_TABS_GLYPHS_TEXT:
-        category_tabs_zoom_local = U.category_tabs_zoom_mixed;
-        break;
-      case USER_CATEGORY_TABS_TEXT_ONLY:
-      default:
-        category_tabs_zoom_local = U.category_tabs_zoom_text;
-        break;
-    }
+    const float category_tabs_zoom_local = ED_category_tabs_zoom_get(area);
     const int category_width = round_fl_to_int(ui::view2d_scale_get_x(&region->v2d) *
                                                UI_PANEL_CATEGORY_MARGIN_WIDTH *
                                                category_tabs_zoom_local);

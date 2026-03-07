@@ -681,17 +681,49 @@ static CategoryTagDef *rna_wm_category_tag_def_new(wmWindowManager *wm, const ch
 static void rna_wm_category_tag_def_remove(wmWindowManager *wm, ReportList *reports, PointerRNA *item_ptr);
 static void rna_wm_category_tag_def_clear(wmWindowManager *wm);
 
+static bool rna_wm_listbase_ptr_is_suspicious(const void *ptr)
+{
+  if (ptr == nullptr) {
+    return false;
+  }
+  return ELEM(ptr,
+              reinterpret_cast<void *>(static_cast<intptr_t>(-1)),
+              reinterpret_cast<void *>(static_cast<intptr_t>(0x1))) ||
+         (reinterpret_cast<uintptr_t>(ptr) <= 0x10000);
+}
+
+static bool rna_wm_listbase_needs_hard_reset(const ListBase *listbase)
+{
+  if (listbase->first == nullptr && listbase->last == nullptr) {
+    return false;
+  }
+  if ((listbase->first == nullptr) != (listbase->last == nullptr)) {
+    return true;
+  }
+  return rna_wm_listbase_ptr_is_suspicious(listbase->first) ||
+         rna_wm_listbase_ptr_is_suspicious(listbase->last);
+}
+
+static bool rna_wm_category_runtime_list_should_hard_reset(const wmWindowManager *wm,
+                                                           const ListBase *listbase)
+{
+  /* During startup file-read, these lists can still contain stale pointers from blend data.
+   * Never dereference or free through them before window manager init is complete. */
+  if ((wm->init_flag & WM_INIT_FLAG_WINDOW) == 0) {
+    return true;
+  }
+  return rna_wm_listbase_needs_hard_reset(listbase);
+}
+
 /* Callback functions for category_glyph_mappings collection. */
 static CategoryGlyphItem *rna_wm_category_glyph_mapping_new(wmWindowManager *wm, const char *category)
 {
-  printf("DEBUG: rna_wm_category_glyph_mapping_new: category='%s'\n", category ? category : "(null)");
   CategoryGlyphItem *item = MEM_new_zeroed<CategoryGlyphItem>(__func__);
   if (category) {
     STRNCPY(item->category, category);
   }
   BLI_addtail(&wm->category_glyph_mappings, item);
   WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
-  printf("DEBUG: rna_wm_category_glyph_mapping_new: Notifier sent\n");
   return item;
 }
 
@@ -713,47 +745,13 @@ static void rna_wm_category_glyph_mapping_remove(wmWindowManager *wm,
 
 static void rna_wm_category_glyph_mapping_clear(wmWindowManager *wm)
 {
-  /* After file read, the list may contain garbage pointers from the old file's memory space.
-   * We need to safely handle both cases:
-   * 1. Valid list with properly allocated items (from runtime operations)
-   * 2. Invalid list with garbage pointers (from file read)
-   *
-   * Check if the list appears valid by verifying the first item's prev pointer is null
-   * (as it should be for the first item in a proper linked list). */
-  if (wm->category_glyph_mappings.first != nullptr) {
-    CategoryGlyphItem *first = static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-
-    /* Check for obviously invalid pointers that indicate corruption from file read:
-     * - prev should be NULL for the first item
-     * - next should not be obviously invalid values like -1 or small numbers
-     * - The pointer itself should be within reasonable memory range
-     */
-    bool list_appears_valid = false;
-
-    if (first->prev == nullptr) {
-      /* First item's prev is correctly null, check next pointer */
-      if (first->next == nullptr) {
-        /* Single item list, this is valid */
-        list_appears_valid = true;
-      }
-      else if (first->next != reinterpret_cast<void *>(static_cast<intptr_t>(-1)) &&
-               first->next != reinterpret_cast<void *>(static_cast<intptr_t>(0x1)) &&
-               reinterpret_cast<uintptr_t>(first->next) > 0x10000)
-      {
-        /* Next pointer appears to be a valid address */
-        list_appears_valid = true;
-      }
-    }
-
-    if (list_appears_valid) {
-      /* List appears valid, free items properly. */
-      BLI_freelistN(&wm->category_glyph_mappings);
-    }
-    else {
-      /* List is corrupted, just clear the pointers without freeing. */
-      BLI_listbase_clear(&wm->category_glyph_mappings);
-    }
+  if (rna_wm_category_runtime_list_should_hard_reset(wm, &wm->category_glyph_mappings)) {
+    BLI_listbase_clear(&wm->category_glyph_mappings);
+    WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+    return;
   }
+
+  BLI_freelistN(&wm->category_glyph_mappings);
   WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
@@ -787,60 +785,24 @@ static void rna_wm_category_glyph_override_remove(wmWindowManager *wm,
 
 static void rna_wm_category_glyph_override_clear(wmWindowManager *wm)
 {
-  /* After file read, the list may contain garbage pointers from the old file's memory space.
-   * We need to safely handle both cases:
-   * 1. Valid list with properly allocated items (from runtime operations)
-   * 2. Invalid list with garbage pointers (from file read)
-   *
-   * Check if the list appears valid by verifying the first item's prev pointer is null
-   * (as it should be for the first item in a proper linked list). */
-  if (wm->category_glyph_overrides.first != nullptr) {
-    CategoryGlyphItem *first = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-
-    /* Check for obviously invalid pointers that indicate corruption from file read:
-     * - prev should be NULL for the first item
-     * - next should not be obviously invalid values like -1 or small numbers
-     * - The pointer itself should be within reasonable memory range
-     */
-    bool list_appears_valid = false;
-
-    if (first->prev == nullptr) {
-      /* First item's prev is correctly null, check next pointer */
-      if (first->next == nullptr) {
-        /* Single item list, this is valid */
-        list_appears_valid = true;
-      }
-      else if (first->next != reinterpret_cast<void *>(static_cast<intptr_t>(-1)) &&
-               first->next != reinterpret_cast<void *>(static_cast<intptr_t>(0x1)) &&
-               reinterpret_cast<uintptr_t>(first->next) > 0x10000)
-      {
-        /* Next pointer appears to be a valid address */
-        list_appears_valid = true;
-      }
-    }
-
-    if (list_appears_valid) {
-      /* List appears valid, free items properly. */
-      BLI_freelistN(&wm->category_glyph_overrides);
-    }
-    else {
-      /* List is corrupted, just clear the pointers without freeing. */
-      BLI_listbase_clear(&wm->category_glyph_overrides);
-    }
+  if (rna_wm_category_runtime_list_should_hard_reset(wm, &wm->category_glyph_overrides)) {
+    BLI_listbase_clear(&wm->category_glyph_overrides);
+    WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+    return;
   }
+
+  BLI_freelistN(&wm->category_glyph_overrides);
   WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
 static CategoryTagDef *rna_wm_category_tag_def_new(wmWindowManager *wm, const char *name)
 {
-  printf("DEBUG: rna_wm_category_tag_def_new: name='%s'\n", name ? name : "(null)");
   CategoryTagDef *item = MEM_new_zeroed<CategoryTagDef>(__func__);
   if (name) {
     STRNCPY(item->name, name);
   }
   BLI_addtail(&wm->category_tags, item);
   WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
-  printf("DEBUG: rna_wm_category_tag_def_new: Notifier sent\n");
   return item;
 }
 
@@ -860,29 +822,13 @@ static void rna_wm_category_tag_def_remove(wmWindowManager *wm, ReportList *repo
 
 static void rna_wm_category_tag_def_clear(wmWindowManager *wm)
 {
-  if (wm->category_tags.first != nullptr) {
-    CategoryTagDef *first = static_cast<CategoryTagDef *>(wm->category_tags.first);
-
-    bool list_appears_valid = false;
-    if (first->prev == nullptr) {
-      if (first->next == nullptr) {
-        list_appears_valid = true;
-      }
-      else if (first->next != reinterpret_cast<void *>(static_cast<intptr_t>(-1)) &&
-               first->next != reinterpret_cast<void *>(static_cast<intptr_t>(0x1)) &&
-               reinterpret_cast<uintptr_t>(first->next) > 0x10000)
-      {
-        list_appears_valid = true;
-      }
-    }
-
-    if (list_appears_valid) {
-      BLI_freelistN(&wm->category_tags);
-    }
-    else {
-      BLI_listbase_clear(&wm->category_tags);
-    }
+  if (rna_wm_category_runtime_list_should_hard_reset(wm, &wm->category_tags)) {
+    BLI_listbase_clear(&wm->category_tags);
+    WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+    return;
   }
+
+  BLI_freelistN(&wm->category_tags);
   WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 

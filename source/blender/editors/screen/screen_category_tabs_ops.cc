@@ -364,23 +364,8 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
            */
           bool has_valid_default_glyph = false;
           if (item->default_glyph[0] != '\0') {
-            /* Check if default_glyph is different from category's first char (not a fallback) */
-            const int default_glyph_len = strlen(item->default_glyph);
-            const int category_len = strlen(category);
-
-            if (default_glyph_len < category_len) {
-              /* default_glyph is shorter - might be a fallback letter, check Unicode */
-              const uint default_glyph_code = BLI_str_utf8_as_unicode_safe(item->default_glyph);
-              const uint category_code = BLI_str_utf8_as_unicode_safe(category);
-              if (default_glyph_code != category_code || default_glyph_code == BLI_UTF8_ERR) {
-                /* Different codepoints - this is a real glyph, not a fallback */
-                has_valid_default_glyph = true;
-              }
-            }
-            else {
-              /* Same length or longer - this is a real glyph */
-              has_valid_default_glyph = true;
-            }
+            has_valid_default_glyph = !ui::category_tab_glyph_is_fallback_letter(
+                item->default_glyph, category);
           }
 
           if (has_valid_default_glyph) {

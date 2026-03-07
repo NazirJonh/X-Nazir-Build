@@ -11,9 +11,6 @@
 #include "DNA_userdef_types.h"
 
 #include "BKE_context.hh"
-#include "BKE_icons.hh"
-#include "BKE_preview_image.hh"
-#include "BLI_fileops.h"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
@@ -24,7 +21,6 @@
 #include "MEM_guardedalloc.h"
 
 #include "RNA_access.hh"
-#include "RNA_enum_types.hh"
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
@@ -42,8 +38,6 @@
 #include "BKE_idprop.hh"
 
 #include "GPU_state.hh"
-
-#include "IMB_thumbs.hh"
 
 namespace blender::ui {
 
@@ -806,43 +800,20 @@ static void ui_template_glyph_selector_impl(Layout *layout,
       }
 
       const int icon_source = RNA_property_enum_get(preview_ptr, icon_source_prop);
-      if (icon_source == 2 /* CATEGORY_TAB_ICON_SOURCE_OFF */) {
+      if (icon_source == CATEGORY_TAB_ICON_SOURCE_OFF) {
         return ICON_NONE;
       }
 
       char icon_key[128] = "";
       RNA_property_string_get(preview_ptr, icon_key_prop, icon_key);
 
-      int icon_id = ICON_NONE;
-      if (icon_key[0] != '\0') {
-        if (RNA_enum_value_from_identifier(rna_enum_icon_items, icon_key, &icon_id)) {
-          return icon_id;
-        }
-      }
-
       if (!icon_path_prop) {
-        return ICON_NONE;
+        return category_tab_icon_id_resolve_from_key_path(icon_key, nullptr);
       }
 
       char icon_path[1024] = "";
       RNA_property_string_get(preview_ptr, icon_path_prop, icon_path);
-      if (icon_path[0] == '\0' || !BLI_exists(icon_path)) {
-        return ICON_NONE;
-      }
-
-      PreviewImage *preview = BKE_previewimg_cached_thumbnail_read(
-          icon_path, icon_path, THB_SOURCE_DIRECT, false);
-      if (!preview) {
-        return ICON_NONE;
-      }
-
-      BKE_previewimg_ensure(preview, ICON_SIZE_ICON);
-      if (BKE_previewimg_is_invalid(preview, ICON_SIZE_ICON)) {
-        return ICON_NONE;
-      }
-
-      const int path_icon_id = BKE_icon_preview_ensure(nullptr, preview);
-      return (path_icon_id > 0) ? path_icon_id : ICON_NONE;
+      return category_tab_icon_id_resolve_from_key_path(icon_key, icon_path);
     };
 
     const int preview_icon_id = resolve_preview_icon_id(ptr);
@@ -936,11 +907,7 @@ static void ui_template_glyph_selector_impl(Layout *layout,
           }
         }
 
-        const int first_char_size = BLI_str_utf8_size_safe(first_letter_source);
-        if (first_char_size > 0 && first_char_size < int(sizeof(glyph_unicode))) {
-          memcpy(glyph_unicode, first_letter_source, first_char_size);
-          glyph_unicode[first_char_size] = '\0';
-        }
+        category_tab_first_utf8_char_copy(first_letter_source, glyph_unicode, sizeof(glyph_unicode));
       }
       else if (glyph_value[0] != '\0') {
         /* Convert hex code to UTF-8 if needed */

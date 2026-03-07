@@ -25,7 +25,6 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
-#include "BLI_fileops.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_set.hh"
@@ -46,13 +45,11 @@
 
 #include "BKE_context.hh"
 #include "BKE_icons.hh"
-#include "BKE_preview_image.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_workspace.hh"
 
 #include "RNA_access.hh"
-#include "RNA_enum_types.hh"
 #include "RNA_prototypes.hh"
 
 #include "BLF_api.hh"
@@ -69,8 +66,6 @@
 #include "GPU_immediate.hh"
 #include "GPU_matrix.hh"
 #include "GPU_state.hh"
-
-#include "IMB_thumbs.hh"
 
 #include "interface_intern.hh"
 #include "interface_tag_bar.hh"
@@ -488,22 +483,8 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
         }
 
         if (item->glyph[0] != '\0') {
-          /* Check if this is actually a fallback letter (first char of category).
-           * A real glyph should be different from the category name or longer. */
-          const int glyph_len = strlen(item->glyph);
-          const int category_len = strlen(category);
-
-          /* Check if glyph is a single Unicode character that matches the first char of category.
-           * This indicates a fallback letter, not a custom glyph. */
-          bool is_fallback_letter = false;
-          if (glyph_len < category_len) {
-            /* Glyph is shorter than category - might be a fallback letter */
-            const uint glyph_code = BLI_str_utf8_as_unicode_safe(item->glyph);
-            const uint category_code = BLI_str_utf8_as_unicode_safe(category);
-            if (glyph_code == category_code && glyph_code != BLI_UTF8_ERR) {
-              is_fallback_letter = true;
-            }
-          }
+          const bool is_fallback_letter = category_tab_glyph_is_fallback_letter(item->glyph,
+                                                                                category);
 
           if (is_fallback_letter) {
             /* Glyph is the first character of category - treat as fallback letter. */
@@ -561,11 +542,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
 
     if (item->glyph[0] != '\0') {
       /* Check if this is actually a fallback letter. */
-      const int category_first_char_size = BLI_str_utf8_size_safe(category);
-      if (category_first_char_size > 0 &&
-          STREQLEN(item->glyph, category, category_first_char_size) &&
-          item->glyph[category_first_char_size] == '\0')
-      {
+      if (category_tab_glyph_is_fallback_letter(item->glyph, category)) {
         /* Fallback letter in current glyph: keep searching below for a real default glyph. */
       }
       else {
@@ -575,11 +552,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
 
     /* Use default glyph from mapping when current glyph is empty/fallback. */
     if (item->default_glyph[0] != '\0') {
-      const int category_first_char_size = BLI_str_utf8_size_safe(category);
-      if (!(category_first_char_size > 0 &&
-            STREQLEN(item->default_glyph, category, category_first_char_size) &&
-            item->default_glyph[category_first_char_size] == '\0'))
-      {
+      if (!category_tab_glyph_is_fallback_letter(item->default_glyph, category)) {
         return item->default_glyph;
       }
     }
@@ -624,10 +597,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
     *r_is_fallback_letter = !category_name_is_glyph(category);
   }
   static char first_char_buf[8];
-  const int char_size = BLI_str_utf8_size_safe(category);
-  if (char_size > 0 && char_size < int(sizeof(first_char_buf))) {
-    memcpy(first_char_buf, category, char_size);
-    first_char_buf[char_size] = '\0';
+  if (category_tab_first_utf8_char_copy(category, first_char_buf, sizeof(first_char_buf))) {
     return first_char_buf;
   }
   return category;
@@ -759,10 +729,7 @@ static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
     *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_FALLBACK;
   }
   static char first_char_buf[8];
-  const int char_size = BLI_str_utf8_size_safe(category);
-  if (char_size > 0 && char_size < int(sizeof(first_char_buf))) {
-    memcpy(first_char_buf, category, char_size);
-    first_char_buf[char_size] = '\0';
+  if (category_tab_first_utf8_char_copy(category, first_char_buf, sizeof(first_char_buf))) {
     return first_char_buf;
   }
   return category;
@@ -1000,49 +967,12 @@ static void category_tab_icon_tint_get(const int icon_id,
   }
 }
 
-static int category_tab_icon_id_resolve_from_path(const char *icon_path)
-{
-  if (!(icon_path && icon_path[0] != '\0')) {
-    return ICON_NONE;
-  }
-
-  if (!BLI_exists(icon_path)) {
-    return ICON_NONE;
-  }
-
-  PreviewImage *preview = BKE_previewimg_cached_thumbnail_read(
-      icon_path, icon_path, THB_SOURCE_DIRECT, false);
-  if (!preview) {
-    return ICON_NONE;
-  }
-
-  BKE_previewimg_ensure(preview, ICON_SIZE_ICON);
-  if (BKE_previewimg_is_invalid(preview, ICON_SIZE_ICON)) {
-    return ICON_NONE;
-  }
-
-  const int icon_id = BKE_icon_preview_ensure(nullptr, preview);
-  return (icon_id > 0) ? icon_id : ICON_NONE;
-}
-
 static int category_tab_icon_id_resolve(const CategoryTabIconResolved &icon_resolved)
 {
   if (icon_resolved.source == CATEGORY_TAB_ICON_SOURCE_OFF) {
     return ICON_NONE;
   }
-
-  if (icon_resolved.key && icon_resolved.key[0] != '\0') {
-    int icon_id = ICON_NONE;
-    if (RNA_enum_value_from_identifier(rna_enum_icon_items, icon_resolved.key, &icon_id)) {
-      return icon_id;
-    }
-  }
-
-  if (icon_resolved.path && icon_resolved.path[0] != '\0') {
-    return category_tab_icon_id_resolve_from_path(icon_resolved.path);
-  }
-
-  return ICON_NONE;
+  return category_tab_icon_id_resolve_from_key_path(icon_resolved.key, icon_resolved.path);
 }
 
 static void draw_category_tab_builtin_icon(const rcti *rct,

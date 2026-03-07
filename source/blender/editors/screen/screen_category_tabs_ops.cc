@@ -313,6 +313,110 @@ static void category_tab_reset_tag_redraw(bContext *C, wmWindowManager *wm, ScrA
   WM_main_add_notifier(NC_SCREEN | NA_EDITED, nullptr);
 }
 
+struct CategoryTabResetDefaults {
+  const char *glyph = nullptr;
+  const char *display_name = nullptr;
+  float color[3] = {0.0f, 0.0f, 0.0f};
+};
+
+static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
+                                                       const char *category,
+                                                       const bool reset_glyph)
+{
+  CategoryTabResetDefaults defaults;
+
+  if (!(wm && wm->category_glyph_mappings.first)) {
+    return defaults;
+  }
+
+  for (CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+       item;
+       item = static_cast<CategoryGlyphItem *>(item->next))
+  {
+    if (!STREQ(item->category, category)) {
+      continue;
+    }
+
+    const bool is_glyph_only_category = is_single_glyph_str(category);
+
+    if (reset_glyph) {
+      /* Reset should always clear explicit first-letter mode in persisted mapping. */
+      item->glyph_mode = ui::CATEGORY_TAB_GLYPH_MODE_AUTO;
+    }
+
+    if (is_glyph_only_category) {
+      if (item->default_glyph[0] != '\0') {
+        defaults.glyph = item->default_glyph;
+      }
+      else if (item->glyph[0] != '\0') {
+        defaults.glyph = item->glyph;
+      }
+    }
+    else {
+      bool has_valid_default_glyph = false;
+      if (item->default_glyph[0] != '\0') {
+        has_valid_default_glyph = !ui::category_tab_glyph_is_fallback_letter(item->default_glyph,
+                                                                              category);
+      }
+
+      if (has_valid_default_glyph) {
+        defaults.glyph = item->default_glyph;
+        if (item->glyph[0] != '\0' && !STREQ(item->glyph, item->default_glyph)) {
+          STRNCPY(item->glyph, item->default_glyph);
+        }
+        if (!is_zero_v3(item->color)) {
+          zero_v3(item->color);
+        }
+      }
+      else {
+        defaults.glyph = nullptr;
+        if (item->glyph[0] != '\0') {
+          item->glyph[0] = '\0';
+        }
+        if (!is_zero_v3(item->color)) {
+          zero_v3(item->color);
+        }
+      }
+    }
+
+    if (item->default_display_name[0] != '\0') {
+      defaults.display_name = item->default_display_name;
+    }
+    else if (item->display_name[0] != '\0') {
+      defaults.display_name = item->display_name;
+    }
+
+    break;
+  }
+
+  return defaults;
+}
+
+static CategoryGlyphItem *category_tab_reset_override_ensure(wmWindowManager *wm, const char *category)
+{
+  for (CategoryGlyphItem *it = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first); it;
+       it = static_cast<CategoryGlyphItem *>(it->next))
+  {
+    if (STREQ(it->category, category)) {
+      return it;
+    }
+  }
+
+  CategoryGlyphItem *item = MEM_new<CategoryGlyphItem>(__func__);
+  STRNCPY(item->category, category);
+  item->glyph[0] = '\0';
+  item->display_name[0] = '\0';
+  zero_v3(item->color);
+  item->tags[0] = '\0';
+  item->icon_key[0] = '\0';
+  item->icon_path[0] = '\0';
+  item->icon_provider[0] = '\0';
+  item->icon_source = ui::CATEGORY_TAB_ICON_SOURCE_AUTO;
+  item->glyph_mode = ui::CATEGORY_TAB_GLYPH_MODE_AUTO;
+  BLI_addtail(&wm->category_glyph_overrides, item);
+  return item;
+}
+
 static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
 {
   char category[64];
@@ -326,99 +430,15 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
 
   wmWindowManager *wm = CTX_wm_manager(C);
   ScrArea *area = CTX_wm_area(C);
-
-  /* Default values - read from category_glyph_mappings */
-  const char *default_glyph = nullptr;
-  const char *default_display_name = nullptr;
-  float default_color[3] = {0.0f, 0.0f, 0.0f};
-
-  if (wm->category_glyph_mappings.first != nullptr) {
-    for (CategoryGlyphItem *item =
-             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<CategoryGlyphItem *>(item->next))
-    {
-      if (STREQ(item->category, category)) {
-        /* Determine if this is a glyph-only category or a fallback letter category */
-        const bool is_glyph_only_category = is_single_glyph_str(category);
-
-        if (reset_glyph) {
-          /* Reset should always clear explicit first-letter mode in persisted mapping. */
-          item->glyph_mode = 0;
-        }
-
-        if (is_glyph_only_category) {
-          /* Glyph-only category: always use the glyph from JSON */
-          if (item->default_glyph[0] != '\0') {
-            default_glyph = item->default_glyph;
-          }
-          else if (item->glyph[0] != '\0') {
-            default_glyph = item->glyph;
-          }
-          /* Color is reset to black for glyph-only categories */
-        }
-        else {
-          /* Not a glyph-only category.
-           * Check if there's a default_glyph that is NOT a fallback letter.
-           * This handles GLYPH_TEXT categories like 'Tool', 'View', 'Animation'.
-           */
-          bool has_valid_default_glyph = false;
-          if (item->default_glyph[0] != '\0') {
-            has_valid_default_glyph = !ui::category_tab_glyph_is_fallback_letter(
-                item->default_glyph, category);
-          }
-
-          if (has_valid_default_glyph) {
-            /* Use default_glyph for GLYPH_TEXT categories */
-            default_glyph = item->default_glyph;
-
-            /* Update mappings to use default_glyph */
-            if (item->glyph[0] != '\0' && !STREQ(item->glyph, item->default_glyph)) {
-              STRNCPY(item->glyph, item->default_glyph);
-            }
-            /* Clear color to black in mappings */
-            if (!is_zero_v3(item->color)) {
-              zero_v3(item->color);
-            }
-          }
-          else {
-            /* Fallback letter category (TEXT_ONLY with no custom glyph).
-             * On Reset, clear to fallback letter. */
-            default_glyph = nullptr;  // Will clear glyph, showing fallback letter
-            /* Color remains black (will use theme color for fallback) */
-
-            /* IMPORTANT: Also clear glyph in mappings so it gets saved correctly to JSON.
-             * When override is empty, lookup will return nullptr (fallback letter),
-             * but we need to update mappings too so Save persists this state. */
-            if (item->glyph[0] != '\0') {
-              item->glyph[0] = '\0';
-            }
-            /* Also clear color to black in mappings */
-            if (!is_zero_v3(item->color)) {
-              zero_v3(item->color);
-            }
-          }
-        }
-
-        /* Use default_display_name if available */
-        if (item->default_display_name[0] != '\0') {
-          default_display_name = item->default_display_name;
-        }
-        else if (item->display_name[0] != '\0') {
-          default_display_name = item->display_name;
-        }
-        break;
-      }
-    }
-  }
+  const CategoryTabResetDefaults defaults = compute_reset_defaults(wm, category, reset_glyph);
 
   wmOperator *const dialog_op = category_tab_current_dialog_op;
   category_tab_reset_apply_to_operator(C,
                                        dialog_op,
                                        category,
-                                       default_display_name,
-                                       default_glyph,
-                                       default_color,
+                                       defaults.display_name,
+                                       defaults.glyph,
+                                       defaults.color,
                                        reset_name,
                                        reset_glyph,
                                        reset_color);
@@ -428,9 +448,9 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     category_tab_reset_apply_to_operator(C,
                                          op,
                                          category,
-                                         default_display_name,
-                                         default_glyph,
-                                         default_color,
+                                         defaults.display_name,
+                                         defaults.glyph,
+                                         defaults.color,
                                          reset_name,
                                          reset_glyph,
                                          reset_color);
@@ -444,32 +464,7 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   /* Reset tags: set empty tags in WM override.
    * This updates the UI immediately. If user clicks Cancel, original tags will be restored. */
   if (reset_tag) {
-    CategoryGlyphItem *reset_item = nullptr;
-    for (CategoryGlyphItem *it =
-             static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-         it;
-         it = static_cast<CategoryGlyphItem *>(it->next))
-    {
-      if (STREQ(it->category, category)) {
-        reset_item = it;
-        break;
-      }
-    }
-
-    if (!reset_item) {
-      reset_item = MEM_new<CategoryGlyphItem>(__func__);
-      STRNCPY(reset_item->category, category);
-      reset_item->glyph[0] = '\0';
-      reset_item->display_name[0] = '\0';
-      zero_v3(reset_item->color);
-      reset_item->tags[0] = '\0';
-      reset_item->icon_key[0] = '\0';
-      reset_item->icon_path[0] = '\0';
-      reset_item->icon_provider[0] = '\0';
-      reset_item->icon_source = 0;
-      reset_item->glyph_mode = 0;
-      BLI_addtail(&wm->category_glyph_overrides, reset_item);
-    }
+    CategoryGlyphItem *reset_item = category_tab_reset_override_ensure(wm, category);
     /* Clear tags in WM override - this updates UI to show no tags selected */
     reset_item->tags[0] = '\0';
 

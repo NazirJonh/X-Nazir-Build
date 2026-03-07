@@ -864,6 +864,200 @@ static std::string decode_json_unicode(const char *str)
   return result;
 }
 
+static std::string glyph_search_escape_python_string(const char *value)
+{
+  std::string escaped = value ? value : "";
+
+  size_t pos = 0;
+  while ((pos = escaped.find("\"", pos)) != std::string::npos) {
+    escaped.replace(pos, 1, "\\\"");
+    pos += 2;
+  }
+
+  pos = 0;
+  while ((pos = escaped.find("\\", pos)) != std::string::npos) {
+    escaped.replace(pos, 1, "\\\\");
+    pos += 2;
+  }
+
+  return escaped;
+}
+
+static void glyph_search_python_expr_build(
+    const char *query, const int max_results, char r_python_expr[2048])
+{
+  const std::string escaped_query = glyph_search_escape_python_string(query);
+  snprintf(r_python_expr,
+           2048,
+           "json.dumps([{'unicode': g['unicode'], 'name': g['name']} "
+           "for g in __import__('bl_ui.glyph_library.registry', fromlist=['']).search_glyphs('%s', '', "
+           "%d)])",
+           escaped_query.c_str(),
+           max_results);
+}
+
+static bool parse_json_array_of_strings(const char *json, blender::Vector<std::string> &r_items)
+{
+  if (!json) {
+    return false;
+  }
+
+  const char *p = json;
+  while (*p && *p != '[') {
+    p++;
+  }
+  if (*p != '[') {
+    return false;
+  }
+  p++;
+
+  bool parsed_any = false;
+  while (*p && *p != ']') {
+    while (*p && ELEM(*p, ' ', '\n', '\r', '\t', ',')) {
+      p++;
+    }
+    if (*p == ']') {
+      break;
+    }
+
+    if (*p != '"') {
+      return false;
+    }
+    p++;
+
+    const char *start = p;
+    while (*p && *p != '"') {
+      if (*p == '\\' && *(p + 1)) {
+        p += 2;
+      }
+      else {
+        p++;
+      }
+    }
+
+    if (*p != '"') {
+      return false;
+    }
+
+    std::string value(start, p - start);
+    p++;
+    r_items.append(value);
+    parsed_any = true;
+
+    while (*p && ELEM(*p, ' ', '\n', '\r', '\t')) {
+      p++;
+    }
+    if (*p == ',') {
+      p++;
+    }
+  }
+
+  return parsed_any;
+}
+
+static void glyph_search_result_preview_log(const char *result_str)
+{
+  const size_t result_len = strlen(result_str);
+  if (result_len > 200) {
+    printf("[GLYPH SEARCH] Result length: %zu bytes (first 150 chars)\n", result_len);
+    for (size_t i = 0; i < 150 && i < result_len; i++) {
+      const unsigned char c = (unsigned char)result_str[i];
+      if (c >= 32 && c <= 126) {
+        putchar(c);
+      }
+      else {
+        putchar('?');
+      }
+    }
+    printf("\n");
+  }
+  else {
+    printf("[GLYPH SEARCH] Result: %s\n", result_str);
+  }
+}
+
+static void glyph_search_parse_object_array(const char *json,
+                                            const int max_results,
+                                            blender::Vector<std::pair<std::string, std::string>> &r_results)
+{
+  const char *p = json;
+
+  while (*p && *p != '[') {
+    p++;
+  }
+  if (*p != '[') {
+    printf("[GLYPH SEARCH] Result is not a JSON array: %s\n", json);
+    return;
+  }
+  p++;
+
+  int parsed_count = 0;
+  while (*p && *p != ']') {
+    while (*p && *p != '{') {
+      p++;
+    }
+    if (*p == '{') {
+      p++;
+    }
+
+    std::string unicode;
+    std::string name;
+
+    while (*p && *p != '}') {
+      if (strncmp(p, "\"unicode\":", 10) == 0) {
+        p += 10;
+        while (*p && *p != '"') {
+          p++;
+        }
+        if (*p == '"') {
+          p++;
+        }
+        const char *start = p;
+        while (*p && *p != '"') {
+          p++;
+        }
+        const std::string raw_unicode(start, p - start);
+        unicode = decode_json_unicode(raw_unicode.c_str());
+        printf("[GLYPH SEARCH] Decoded unicode: '%s' -> ", raw_unicode.c_str());
+        safe_print_string("result", unicode.c_str());
+      }
+      else if (strncmp(p, "\"name\":", 7) == 0) {
+        p += 7;
+        while (*p && *p != '"') {
+          p++;
+        }
+        if (*p == '"') {
+          p++;
+        }
+        const char *start = p;
+        while (*p && *p != '"') {
+          p++;
+        }
+        name = std::string(start, p - start);
+      }
+      else {
+        p++;
+      }
+    }
+
+    if (!unicode.empty() && !name.empty()) {
+      printf("[GLYPH SEARCH] Found glyph %d: name='%s', ", ++parsed_count, name.c_str());
+      safe_print_string("unicode", unicode.c_str());
+      r_results.append({unicode, name});
+      if (r_results.size() >= max_results) {
+        break;
+      }
+    }
+
+    while (*p && *p != ',' && *p != ']') {
+      p++;
+    }
+    if (*p == ',' || *p == '}') {
+      p++;
+    }
+  }
+}
+
 blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
     bContext *C, const char *query, const char *category, int max_results)
 {
@@ -875,41 +1069,11 @@ blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
   safe_print_string("Category", category);
   printf("[GLYPH SEARCH] Max: %d\n", max_results);
 
-  /* Build Python script to call glyph search and return JSON result */
-  /* Note: We don't pass category to Python due to encoding issues with Unicode glyph characters.
-   * Category filtering will be done in C++ after getting results. */
-
-  /* Escape query for Python string */
-  std::string escaped_query = query ? query : "";
-  size_t pos = 0;
-  while ((pos = escaped_query.find("\"", pos)) != std::string::npos) {
-    escaped_query.replace(pos, 1, "\\\"");
-    pos += 2;
-  }
-  /* Escape backslashes */
-  pos = 0;
-  while ((pos = escaped_query.find("\\", pos)) != std::string::npos) {
-    escaped_query.replace(pos, 1, "\\\\");
-    pos += 2;
-  }
-
-  /* Prepare Python imports array - only json needs to be imported */
-  const char *imports[] = {
-      "json",
-      nullptr
-  };
-
-  /* Create Python expression using __import__ to access the registry module */
-  /* This avoids the issue of imported modules not being in eval() scope */
+  /* Build Python expression and execute it. */
   char python_expr[2048];
+  glyph_search_python_expr_build(query, max_results, python_expr);
 
-  snprintf(
-      python_expr,
-      sizeof(python_expr),
-      "json.dumps([{'unicode': g['unicode'], 'name': g['name']} "
-      "for g in __import__('bl_ui.glyph_library.registry', fromlist=['']).search_glyphs('%s', '', %d)])",
-      escaped_query.c_str(),
-      max_results);
+  const char *imports[] = {"json", nullptr};
 
   printf("[GLYPH SEARCH] Python expr length: %d\n", int(strlen(python_expr)));
 
@@ -937,25 +1101,7 @@ blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
   }
 
   if (success && result_str) {
-    /* Safe print of result (may contain Unicode) */
-    size_t result_len = strlen(result_str);
-    if (result_len > 200) {
-      printf("[GLYPH SEARCH] Result length: %zu bytes (first 150 chars)\n", result_len);
-      /* Print ascii-safe version */
-      for (size_t i = 0; i < 150 && i < result_len; i++) {
-        unsigned char c = (unsigned char)result_str[i];
-        if (c >= 32 && c <= 126) {
-          putchar(c);
-        }
-        else {
-          putchar('?');
-        }
-      }
-      printf("\n");
-    }
-    else {
-      printf("[GLYPH SEARCH] Result: %s\n", result_str);
-    }
+    glyph_search_result_preview_log(result_str);
 
     /* Check if result is an error message */
     if (strncmp(result_str, "{\"error\":", 9) == 0) {
@@ -964,82 +1110,27 @@ blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
       return results;
     }
 
-    /* Check if result is empty array */
     if (strcmp(result_str, "[]") == 0) {
       printf("[GLYPH SEARCH] Empty result (no glyphs found)\n");
       MEM_delete(result_str);
       return results;
     }
 
-    /* Parse JSON result */
-    const char *p = result_str;
+    glyph_search_parse_object_array(result_str, max_results, results);
 
-    /* Skip to array start */
-    while (*p && *p != '[') p++;
-    if (*p == '[') p++;
-    else {
-      printf("[GLYPH SEARCH] Result is not a JSON array: %s\n", result_str);
-      MEM_delete(result_str);
-      return results;
-    }
-
-    int parsed_count = 0;
-
-    /* Parse array elements */
-    while (*p && *p != ']') {
-      /* Skip to object start */
-      while (*p && *p != '{') p++;
-      if (*p == '{') p++;
-
-      std::string unicode;
-      std::string name;
-
-      /* Parse object fields */
-      while (*p && *p != '}') {
-        /* Parse unicode field */
-        if (strncmp(p, "\"unicode\":", 10) == 0) {
-          p += 10;
-          while (*p && *p != '"') p++;
-          if (*p == '"') p++;
-          const char *start = p;
-          while (*p && *p != '"') {
-            p++;
+    if (results.is_empty()) {
+      blender::Vector<std::string> string_results;
+      if (parse_json_array_of_strings(result_str, string_results)) {
+        for (const std::string &value : string_results) {
+          const std::string unicode = decode_json_unicode(value.c_str());
+          if (!unicode.empty()) {
+            results.append({unicode, value});
+            if (results.size() >= max_results) {
+              break;
+            }
           }
-          std::string raw_unicode = std::string(start, p - start);
-          /* Decode JSON Unicode escape sequences like \ue5d4 to actual UTF-8 */
-          unicode = decode_json_unicode(raw_unicode.c_str());
-          printf("[GLYPH SEARCH] Decoded unicode: '%s' -> ", raw_unicode.c_str());
-          safe_print_string("result", unicode.c_str());
-        }
-        /* Parse name field */
-        else if (strncmp(p, "\"name\":", 7) == 0) {
-          p += 7;
-          while (*p && *p != '"') p++;
-          if (*p == '"') p++;
-          const char *start = p;
-          while (*p && *p != '"') {
-            p++;
-          }
-          name = std::string(start, p - start);
-        }
-        else {
-          p++;
         }
       }
-
-      if (!unicode.empty() && !name.empty()) {
-        printf("[GLYPH SEARCH] Found glyph %d: name='%s', ", ++parsed_count, name.c_str());
-        safe_print_string("unicode", unicode.c_str());
-        results.append({unicode, name});
-
-        if (results.size() >= max_results) {
-          break;
-        }
-      }
-
-      /* Move to next object or end of array */
-      while (*p && *p != ',' && *p != ']') p++;
-      if (*p == ',' || *p == '}') p++;
     }
 
     MEM_delete(result_str);

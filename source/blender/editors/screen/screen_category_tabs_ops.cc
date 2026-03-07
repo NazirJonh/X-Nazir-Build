@@ -82,12 +82,6 @@ using ui::context_active_but_get_respect_popup;
 /** \name Category Tab Icon Source Enum (Stage 1 wiring)
  * \{ */
 
-enum eCategoryTabIconSource {
-  CATEGORY_TAB_ICON_SOURCE_AUTO = 0,
-  CATEGORY_TAB_ICON_SOURCE_MANUAL = 1,
-  CATEGORY_TAB_ICON_SOURCE_OFF = 2,
-};
-
 enum eCategoryTabEditDisplayMode {
   CATEGORY_TAB_EDIT_MODE_GLYPH = 0,
   CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON = 1,
@@ -100,17 +94,17 @@ enum eCategoryTabCustomIconMode {
 };
 
 static const EnumPropertyItem rna_enum_category_tab_icon_source_items[] = {
-    {CATEGORY_TAB_ICON_SOURCE_AUTO,
+    {ui::CATEGORY_TAB_ICON_SOURCE_AUTO,
      "AUTO",
      ICON_NONE,
      "Auto",
      "Use automatic icon resolve chain (provider/fallback)"},
-    {CATEGORY_TAB_ICON_SOURCE_MANUAL,
+    {ui::CATEGORY_TAB_ICON_SOURCE_MANUAL,
      "MANUAL",
      ICON_NONE,
      "Manual",
      "Use manual icon key/path override for this category"},
-    {CATEGORY_TAB_ICON_SOURCE_OFF,
+    {ui::CATEGORY_TAB_ICON_SOURCE_OFF,
      "OFF",
      ICON_NONE,
      "Off",
@@ -119,8 +113,16 @@ static const EnumPropertyItem rna_enum_category_tab_icon_source_items[] = {
 };
 
 static const EnumPropertyItem rna_enum_category_tab_glyph_mode_items[] = {
-    {0, "AUTO", ICON_NONE, "Auto", "Use configured/default glyph behavior"},
-    {1, "FIRST_LETTER", ICON_NONE, "First Letter", "Force first letter of category"},
+    {ui::CATEGORY_TAB_GLYPH_MODE_AUTO,
+     "AUTO",
+     ICON_NONE,
+     "Auto",
+     "Use configured/default glyph behavior"},
+    {ui::CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER,
+     "FIRST_LETTER",
+     ICON_NONE,
+     "First Letter",
+     "Force first letter of category"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1187,7 +1189,7 @@ static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
   RNA_def_enum(ot->srna,
                "icon_source",
                rna_enum_category_tab_icon_source_items,
-               CATEGORY_TAB_ICON_SOURCE_AUTO,
+               ui::CATEGORY_TAB_ICON_SOURCE_AUTO,
                "Icon Source",
                "Icon source mode for category tab content (Stage 1 wiring)");
   RNA_def_string(ot->srna,
@@ -1220,13 +1222,13 @@ static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
   RNA_def_enum(ot->srna,
                "original_icon_source",
                rna_enum_category_tab_icon_source_items,
-               CATEGORY_TAB_ICON_SOURCE_AUTO,
+               ui::CATEGORY_TAB_ICON_SOURCE_AUTO,
                "Original Icon Source",
                "Original icon source value for cancel semantics");
   RNA_def_enum(ot->srna,
                "original_glyph_mode",
                rna_enum_category_tab_glyph_mode_items,
-               0,
+               ui::CATEGORY_TAB_GLYPH_MODE_AUTO,
                "Original Glyph Mode",
                "Original glyph mode value for cancel semantics");
   RNA_def_string(ot->srna, "original_icon_key", nullptr, 128, "Original Icon Key", "");

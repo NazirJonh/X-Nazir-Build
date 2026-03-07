@@ -222,17 +222,6 @@ enum eCategoryGlyphBaseSource {
   CATEGORY_GLYPH_BASE_SOURCE_FALLBACK,
 };
 
-enum eCategoryTabIconSource {
-  CATEGORY_TAB_ICON_SOURCE_AUTO = 0,
-  CATEGORY_TAB_ICON_SOURCE_MANUAL = 1,
-  CATEGORY_TAB_ICON_SOURCE_OFF = 2,
-};
-
-enum eCategoryTabGlyphMode {
-  CATEGORY_TAB_GLYPH_MODE_AUTO = 0,
-  CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER = 1,
-};
-
 struct CategoryTabIconResolved {
   int source = CATEGORY_TAB_ICON_SOURCE_AUTO;
   const char *key = nullptr;

@@ -228,6 +228,11 @@ enum eCategoryTabIconSource {
   CATEGORY_TAB_ICON_SOURCE_OFF = 2,
 };
 
+enum eCategoryTabGlyphMode {
+  CATEGORY_TAB_GLYPH_MODE_AUTO = 0,
+  CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER = 1,
+};
+
 struct CategoryTabIconResolved {
   int source = CATEGORY_TAB_ICON_SOURCE_AUTO;
   const char *key = nullptr;
@@ -483,6 +488,16 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
       if (STREQ(item->category, category)) {
+        if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
+          if (r_color && !is_zero_v3(item->color)) {
+            copy_v3_v3(r_color, item->color);
+          }
+          if (r_is_fallback_letter) {
+            *r_is_fallback_letter = true;
+          }
+          return nullptr;
+        }
+
         if (item->glyph[0] != '\0') {
           /* Check if this is actually a fallback letter (first char of category).
            * A real glyph should be different from the category name or longer. */
@@ -546,6 +561,13 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
   if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category)) {
     if (r_color && is_zero_v3(r_color) && !is_zero_v3(item->color)) {
       copy_v3_v3(r_color, item->color);
+    }
+
+    if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
+      if (r_is_fallback_letter) {
+        *r_is_fallback_letter = true;
+      }
+      return nullptr;
     }
 
     if (item->glyph[0] != '\0') {
@@ -798,6 +820,36 @@ static const char *panel_category_display_name_lookup(const wmWindowManager *wm,
   }
 
   return category;
+}
+
+static const char *category_first_letter_source_name_get(const ARegion *region,
+                                                         const wmWindowManager *wm,
+                                                         const char *category_id,
+                                                         const char *category_id_draw)
+{
+  if (category_id_draw && category_id_draw[0] != '\0' && !is_single_glyph_str(category_id_draw)) {
+    return category_id_draw;
+  }
+
+  if (category_id && is_single_glyph_str(category_id) && region && region->runtime &&
+      region->runtime->type)
+  {
+    for (const PanelType &pt : region->runtime->type->paneltypes) {
+      if (pt.category && STREQ(pt.category, category_id)) {
+        const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+        if (panel_label && panel_label[0] != '\0') {
+          return panel_label;
+        }
+      }
+    }
+  }
+
+  const char *display_name = panel_category_display_name_lookup(wm, category_id);
+  if (display_name && display_name[0] != '\0' && !is_single_glyph_str(display_name)) {
+    return display_name;
+  }
+
+  return category_id;
 }
 
 const char *panel_category_tooltip_name_get(const ARegion *region,
@@ -2709,10 +2761,13 @@ static void ui_panel_category_draw_content(
   /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
   char fallback_glyph_buf[8];
   if (glyph == nullptr && is_fallback_letter) {
-    /* Get first character of category as fallback letter */
-    const int first_char_size = BLI_str_utf8_size_safe(category_id);
+    /* For glyph-id categories use human-readable name (panel label/display name),
+     * otherwise use category id. */
+    const char *first_letter_source = category_first_letter_source_name_get(
+        region, wm, category_id, category_id_draw);
+    const int first_char_size = BLI_str_utf8_size_safe(first_letter_source);
     if (first_char_size > 0) {
-      memcpy(fallback_glyph_buf, category_id, first_char_size);
+      memcpy(fallback_glyph_buf, first_letter_source, first_char_size);
       fallback_glyph_buf[first_char_size] = '\0';
       glyph = fallback_glyph_buf;
     }
@@ -3214,10 +3269,13 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
     char fallback_glyph_buf[8];
     if (glyph == nullptr && is_fallback_letter) {
-      /* Get first character of category as fallback letter */
-      const int first_char_size = BLI_str_utf8_size_safe(category_id);
+      /* For glyph-id categories use human-readable name (panel label/display name),
+       * otherwise use category id. */
+      const char *first_letter_source = category_first_letter_source_name_get(
+          region, wm, category_id, category_id_draw);
+      const int first_char_size = BLI_str_utf8_size_safe(first_letter_source);
       if (first_char_size > 0) {
-        memcpy(fallback_glyph_buf, category_id, first_char_size);
+        memcpy(fallback_glyph_buf, first_letter_source, first_char_size);
         fallback_glyph_buf[first_char_size] = '\0';
         glyph = fallback_glyph_buf;
       }

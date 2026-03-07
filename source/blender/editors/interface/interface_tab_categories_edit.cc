@@ -358,6 +358,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   char original_icon_path[1024] = "";
   char original_icon_provider[128] = "";
   int original_icon_source = 0;
+  int original_glyph_mode = 0;
   bool original_has_override = false;
 
   RNA_string_get(op->ptr, "original_display_name", original_display_name);
@@ -368,6 +369,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   RNA_string_get(op->ptr, "original_icon_path", original_icon_path);
   RNA_string_get(op->ptr, "original_icon_provider", original_icon_provider);
   original_icon_source = RNA_enum_get(op->ptr, "original_icon_source");
+  original_glyph_mode = RNA_enum_get(op->ptr, "original_glyph_mode");
   original_has_override = RNA_boolean_get(op->ptr, "original_has_override");
 
   /* Convert hex glyph back to UTF-8 for restoration */
@@ -403,6 +405,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
       item->icon_path[0] = '\0';
       item->icon_provider[0] = '\0';
       item->icon_source = 0;
+      item->glyph_mode = 0;
       BLI_addtail(&wm->category_glyph_overrides, item);
     }
     STRNCPY(item->display_name, original_display_name);
@@ -413,6 +416,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
     STRNCPY(item->icon_path, original_icon_path);
     STRNCPY(item->icon_provider, original_icon_provider);
     item->icon_source = original_icon_source;
+    item->glyph_mode = original_glyph_mode;
   }
   else {
     /* There was no override before - remove any created by live preview */
@@ -439,6 +443,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
       STRNCPY(item->icon_path, original_icon_path);
       STRNCPY(item->icon_provider, original_icon_provider);
       item->icon_source = original_icon_source;
+      item->glyph_mode = original_glyph_mode;
     }
   }
 
@@ -457,6 +462,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
       }
       STRNCPY(map_item->glyph, original_glyph_utf8);
       copy_v3_v3(map_item->color, original_color);
+      map_item->glyph_mode = original_glyph_mode;
       break;
     }
   }
@@ -663,6 +669,7 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   bool is_fallback = false;
   const char *default_glyph = panel_category_glyph_lookup(
       wm, category, nullptr, &is_fallback, nullptr);
+  const int display_mode_ui = RNA_enum_get(op->ptr, "display_mode_ui");
 
   /* Update preview buffers for popup preview.
    * Use the processed glyph from valid input, or fall back to default lookup.
@@ -670,7 +677,20 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
    * Fallback letter is also shown in preview.
    */
   copy_v3_v3(category_tab_preview_color, color);
-  if (glyph[0] != '\0') {
+  if (display_mode_ui == 2) {
+    char preview_name[32] = "";
+    RNA_string_get(op->ptr, "display_name", preview_name);
+    const char *first_letter_source = (preview_name[0] != '\0') ? preview_name : category;
+    const int first_char_size = BLI_str_utf8_size_safe(first_letter_source);
+    if (first_char_size > 0 && first_char_size < int(sizeof(category_tab_preview_glyph))) {
+      memcpy(category_tab_preview_glyph, first_letter_source, first_char_size);
+      category_tab_preview_glyph[first_char_size] = '\0';
+    }
+    else {
+      category_tab_preview_glyph[0] = '\0';
+    }
+  }
+  else if (glyph[0] != '\0') {
     /* Valid custom glyph - show it */
     STRNCPY(category_tab_preview_glyph, glyph);
   }
@@ -719,6 +739,7 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
     item->icon_path[0] = '\0';
     item->icon_provider[0] = '\0';
     item->icon_source = 0;
+    item->glyph_mode = 0;
 
     /* Preserve existing tags from mappings when creating new override.
      * This prevents losing tags when user modifies display_name/glyph/color. */
@@ -774,7 +795,6 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   STRNCPY(item->icon_path, icon_path);
   STRNCPY(item->icon_provider, icon_provider);
 
-  const int display_mode_ui = RNA_enum_get(op->ptr, "display_mode_ui");
   const int custom_icon_mode_ui = RNA_enum_get(op->ptr, "custom_icon_mode_ui");
 
   int resolved_icon_source = RNA_enum_get(op->ptr, "icon_source");
@@ -789,6 +809,7 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   }
   RNA_enum_set(op->ptr, "icon_source", resolved_icon_source);
   item->icon_source = resolved_icon_source;
+  item->glyph_mode = (display_mode_ui == 2) ? 1 : 0;
 
   /* Update glyph in override only if valid.
    * Save the processed glyph if user has entered something.
@@ -3124,8 +3145,31 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
 
   const bool has_icon_key = (current_icon_key[0] != '\0');
   const bool has_icon_path = (current_icon_path[0] != '\0');
+  int current_glyph_mode = 0;
+  for (CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+       item;
+       item = static_cast<CategoryGlyphItem *>(item->next))
+  {
+    if (STREQ(item->category, category)) {
+      current_glyph_mode = item->glyph_mode;
+      break;
+    }
+  }
+  if (current_glyph_mode == 0) {
+    for (CategoryGlyphItem *item =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category)) {
+        current_glyph_mode = item->glyph_mode;
+        break;
+      }
+    }
+  }
+
   int display_mode_ui = 0; /* GLYPH */
-  if (current_icon_source == 2) {
+  if (current_glyph_mode == 1) {
     display_mode_ui = 2; /* TEXT */
   }
   else if (has_icon_key || has_icon_path) {
@@ -3135,6 +3179,7 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   RNA_enum_set(op->ptr, "custom_icon_mode_ui", has_icon_path ? 1 : 0);
 
   RNA_enum_set(op->ptr, "original_icon_source", current_icon_source);
+  RNA_enum_set(op->ptr, "original_glyph_mode", current_glyph_mode);
   RNA_string_set(op->ptr, "original_icon_key", current_icon_key);
   RNA_string_set(op->ptr, "original_icon_path", current_icon_path);
   RNA_string_set(op->ptr, "original_icon_provider", current_icon_provider);
@@ -3241,6 +3286,7 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     item->icon_path[0] = '\0';
     item->icon_provider[0] = '\0';
     item->icon_source = 0;
+    item->glyph_mode = 0;
     BLI_addtail(&wm->category_glyph_overrides, item);
   }
 
@@ -3315,6 +3361,7 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   }
   RNA_enum_set(op->ptr, "icon_source", resolved_icon_source_exec);
   item->icon_source = resolved_icon_source_exec;
+  item->glyph_mode = (display_mode_ui_exec == 2) ? 1 : 0;
   RNA_string_get(op->ptr, "icon_key", item->icon_key);
   RNA_string_get(op->ptr, "icon_path", item->icon_path);
   RNA_string_get(op->ptr, "icon_provider", item->icon_provider);
@@ -3335,6 +3382,23 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     /* Glyph is same as default or empty - clear override glyph to preserve
      * fallback letter detection in the drawing code. */
     item->glyph[0] = '\0';
+  }
+
+  /* Keep persisted mapping in WM synchronized for immediate runtime consistency.
+   * Rationale: draw code can fall back to mappings in several paths; if mapping keeps
+   * stale glyph_mode=AUTO while override state is transient/filtered, reserved tabs can
+   * still render the old glyph instead of first letter until a full Python resync. */
+  for (CategoryGlyphItem *map_item =
+           static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+       map_item;
+       map_item = static_cast<CategoryGlyphItem *>(map_item->next))
+  {
+    if (!STREQ(map_item->category, category)) {
+      continue;
+    }
+    map_item->glyph_mode = item->glyph_mode;
+    map_item->icon_source = item->icon_source;
+    break;
   }
 
   /* Clear dialog operator pointer and preview button */
@@ -3379,7 +3443,7 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     SNPRINTF(python_cmd,
              "from bl_ui.space_userpref import set_category_data\n"
              "set_category_data('%s', display_name='%s', glyph='%s', color='%s', tags='%s', "
-             "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s')\n",
+             "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s', glyph_mode='%s')\n",
              category,
              item->display_name,
              glyph_hex,
@@ -3388,7 +3452,8 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
              icon_source_py,
              item->icon_key,
              item->icon_path,
-             item->icon_provider);
+             item->icon_provider,
+             (item->glyph_mode == 1) ? "first_letter" : "auto");
     const char *imports_none[] = {nullptr};
     BPY_run_string_exec(C, imports_none, python_cmd);
   }

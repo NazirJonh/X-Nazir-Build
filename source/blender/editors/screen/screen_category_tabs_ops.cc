@@ -118,6 +118,12 @@ static const EnumPropertyItem rna_enum_category_tab_icon_source_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_category_tab_glyph_mode_items[] = {
+    {0, "AUTO", ICON_NONE, "Auto", "Use configured/default glyph behavior"},
+    {1, "FIRST_LETTER", ICON_NONE, "First Letter", "Force first letter of category"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_category_tab_edit_display_mode_items[] = {
     {CATEGORY_TAB_EDIT_MODE_GLYPH,
      "GLYPH",
@@ -208,14 +214,14 @@ static wmOperatorStatus category_tab_reset_invoke(bContext *C,
 }
 
 static void category_tab_reset_apply_to_operator(bContext *C,
-                                                 wmOperator *target_op,
-                                                 const char *category,
-                                                 const char *default_display_name,
-                                                 const char *default_glyph,
-                                                 const float default_color[3],
-                                                 const bool reset_name,
-                                                 const bool reset_glyph,
-                                                 const bool reset_color)
+                                                  wmOperator *target_op,
+                                                  const char *category,
+                                                  const char *default_display_name,
+                                                  const char *default_glyph,
+                                                  const float default_color[3],
+                                                  const bool reset_name,
+                                                  const bool reset_glyph,
+                                                  const bool reset_color)
 {
   if (target_op == nullptr) {
     return;
@@ -243,6 +249,14 @@ static void category_tab_reset_apply_to_operator(bContext *C,
     }
     else {
       RNA_string_set(target_op->ptr, "glyph", "");
+    }
+
+    /* Resetting glyph should also leave explicit First Letter mode.
+     * Otherwise live-update/save keeps `glyph_mode=FIRST_LETTER` from previous state,
+     * and Reset appears unsaved after closing the dialog. */
+    PropertyRNA *display_mode_prop = RNA_struct_find_property(target_op->ptr, "display_mode_ui");
+    if (display_mode_prop != nullptr) {
+      RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_GLYPH);
     }
   }
 
@@ -325,6 +339,11 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
       if (STREQ(item->category, category)) {
         /* Determine if this is a glyph-only category or a fallback letter category */
         const bool is_glyph_only_category = is_single_glyph_str(category);
+
+        if (reset_glyph) {
+          /* Reset should always clear explicit first-letter mode in persisted mapping. */
+          item->glyph_mode = 0;
+        }
 
         if (is_glyph_only_category) {
           /* Glyph-only category: always use the glyph from JSON */
@@ -461,6 +480,7 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
       reset_item->icon_path[0] = '\0';
       reset_item->icon_provider[0] = '\0';
       reset_item->icon_source = 0;
+      reset_item->glyph_mode = 0;
       BLI_addtail(&wm->category_glyph_overrides, reset_item);
     }
     /* Clear tags in WM override - this updates UI to show no tags selected */
@@ -661,7 +681,6 @@ static bool category_tab_icon_filepath_is_supported_image(const char *filepath)
                                      ".png",
                                      ".jpg",
                                      ".jpeg",
-                                     ".webp",
                                      ".bmp",
                                      ".tif",
                                      ".tiff",
@@ -1204,6 +1223,12 @@ static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
                CATEGORY_TAB_ICON_SOURCE_AUTO,
                "Original Icon Source",
                "Original icon source value for cancel semantics");
+  RNA_def_enum(ot->srna,
+               "original_glyph_mode",
+               rna_enum_category_tab_glyph_mode_items,
+               0,
+               "Original Glyph Mode",
+               "Original glyph mode value for cancel semantics");
   RNA_def_string(ot->srna, "original_icon_key", nullptr, 128, "Original Icon Key", "");
   RNA_def_string(ot->srna, "original_icon_path", nullptr, 1024, "Original Icon Path", "");
   RNA_def_string(ot->srna, "original_icon_provider", nullptr, 128, "Original Icon Provider", "");

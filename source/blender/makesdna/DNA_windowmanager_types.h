@@ -136,9 +136,11 @@ typedef struct CategoryGlyphItem {
   char icon_provider[128];
   /** Icon source selector (auto/manual/off). */
   int icon_source;
+  /** Glyph source selector (auto=stored/default glyph, first_letter=force category first letter). */
+  int glyph_mode;
   /** True when category is from Python DEFAULT_CATEGORY_GLYPHS (single source of truth for reserved tabs). */
   char is_reserved;
-  char _pad[7];
+  char _pad[3];
 } CategoryGlyphItem;
 
 /**

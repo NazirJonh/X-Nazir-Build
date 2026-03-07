@@ -3280,6 +3280,12 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem glyph_mode_items[] = {
+      {0, "AUTO", ICON_NONE, "Auto", "Use configured glyph/default behavior"},
+      {1, "FIRST_LETTER", ICON_NONE, "First Letter", "Force first letter of category"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   srna = RNA_def_struct(brna, "CategoryGlyphItem", nullptr);
   RNA_def_struct_ui_text(srna, "Category Glyph Item", "Mapping from category name to glyph");
 
@@ -3334,6 +3340,12 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "icon_source");
   RNA_def_property_enum_items(prop, icon_source_items);
   RNA_def_property_ui_text(prop, "Icon Source", "Icon source mode for this category mapping");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+
+  prop = RNA_def_property(srna, "glyph_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "glyph_mode");
+  RNA_def_property_enum_items(prop, glyph_mode_items);
+  RNA_def_property_ui_text(prop, "Glyph Mode", "Glyph source mode for this category mapping");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 
   prop = RNA_def_property(srna, "icon_key", PROP_STRING, PROP_NONE);

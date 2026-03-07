@@ -198,11 +198,6 @@ static void pending_category_insert_set(const std::string &tag_key,
       g_pending_category_insert.existing_categories.add(std::string(pc_dyn->idname));
     }
   }
-
-  printf("[CAT ORDER] pending insert set: tag_key='%s' target='%s' insert_above=%d\n",
-         g_pending_category_insert.tag_key.c_str(),
-         g_pending_category_insert.target_category.c_str(),
-         g_pending_category_insert.insert_above ? 1 : 0);
 }
 
 /** \} */
@@ -791,22 +786,11 @@ static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
 
   *r_icon = CategoryTabIconResolved{};
 
-  const auto icon_data_copy_from_item = [&](const CategoryGlyphItem *item,
-                                            const char *source_label) {
+  const auto icon_data_copy_from_item = [&](const CategoryGlyphItem *item) {
     r_icon->source = item->icon_source;
     r_icon->key = item->icon_key;
     r_icon->path = item->icon_path;
     r_icon->provider = item->icon_provider;
-
-    if (STREQ(category, "Pivot Tools")) {
-      printf("[CAT TAB ICON DRAW] lookup %s category='%s' source=%d key='%s' path='%s' provider='%s'\n",
-             source_label,
-             category,
-             item->icon_source,
-             item->icon_key,
-             item->icon_path,
-             item->icon_provider);
-    }
   };
 
   const auto override_icon_is_effective = [](const CategoryGlyphItem *item) {
@@ -830,7 +814,7 @@ static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
       if (!STREQ(item->category, category) || !override_icon_is_effective(item)) {
         continue;
       }
-      icon_data_copy_from_item(item, "override");
+      icon_data_copy_from_item(item);
       return true;
     }
 
@@ -850,7 +834,7 @@ static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
           continue;
         }
 
-        icon_data_copy_from_item(item, "override(normalized)");
+        icon_data_copy_from_item(item);
         return true;
       }
     }
@@ -858,7 +842,7 @@ static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
 
   /* 2) Global mappings from Python cache sync. */
   if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category)) {
-    icon_data_copy_from_item(item, "mapping");
+    icon_data_copy_from_item(item);
     return true;
   }
 
@@ -1997,17 +1981,7 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
     return;
   }
 
-  /* Save to JSON for this tag combination */
-  printf("[CAT ORDER] apply_category_order: tag_key='%s' drag='%s' insert=%d (min=%d max=%d) count=%d\n",
-         tag_key.c_str(),
-         state->drag_category_id,
-         safe_insert_index,
-         state->min_insert_index,
-         state->max_insert_index,
-         int(final_order.size()));
-  for (int i = 0; i < final_order.size(); i++) {
-    printf("[CAT ORDER] apply_category_order[%d]='%s'\n", i, final_order[i].c_str());
-  }
+  /* Save to JSON for this tag combination. */
   save_category_order_to_json(C, tag_key.c_str(), final_order);
 
   /* Also update WorkspaceCategoryOrder for backward compatibility */
@@ -2108,16 +2082,6 @@ void category_tabs_apply_drop_insert(bContext *C,
     return;
   }
 
-  printf("[CAT ORDER] category_tabs_apply_drop_insert: tag_key='%s' category='%s' target='%s' insert_above=%d insert_index=%d count=%d\n",
-         tag_key.c_str(),
-         category_id ? category_id : "",
-         target_category_id ? target_category_id : "",
-         insert_above ? 1 : 0,
-         insert_index,
-         int(order.size()));
-  for (int i = 0; i < order.size(); i++) {
-    printf("[CAT ORDER] drop_insert[%d]='%s'\n", i, order[i].c_str());
-  }
   save_category_order_to_json(C, tag_key.c_str(), order);
 
   WorkSpace *workspace = CTX_wm_workspace(C);
@@ -2177,9 +2141,6 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
   if (g_pending_category_insert.valid && g_pending_category_insert.tag_key == tag_key) {
     const double time_since_pending = BLI_time_now_seconds() - g_pending_category_insert.timestamp;
     if (time_since_pending > 120.0) {
-      printf("[CAT ORDER] pending insert expired: tag_key='%s' target='%s'\n",
-             g_pending_category_insert.tag_key.c_str(),
-             g_pending_category_insert.target_category.c_str());
       g_pending_category_insert.valid = false;
     }
   }
@@ -2320,16 +2281,6 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
       if (!pending_inserted_ids.is_empty()) {
         pending_applied = true;
         category_tabs_report_new_categories(C, pending_inserted_ids);
-        printf("[CAT ORDER] pending insert applied: tag_key='%s' count=%d target='%s' insert_above=%d\n",
-               g_pending_category_insert.tag_key.c_str(),
-               int(pending_inserted_ids.size()),
-               g_pending_category_insert.target_category.c_str(),
-               g_pending_category_insert.insert_above ? 1 : 0);
-        for (int i = 0; i < pending_inserted_ids.size(); i++) {
-          printf("[CAT ORDER] pending insert category[%d]='%s'\n",
-                 i,
-                 pending_inserted_ids[i].c_str());
-        }
       }
     }
   }
@@ -2519,12 +2470,7 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
     /* Persisted order must always satisfy reserved-first + reserved-priority invariant. */
     normalize_reserved_boundary(pending_order);
 
-    if (category_order_is_crossing_reserved_boundary(wm, pending_order)) {
-      printf("[CAT ORDER] pending insert blocked by reserved boundary: tag_key='%s' category='%s'\n",
-             g_pending_category_insert.tag_key.c_str(),
-             pending_inserted_ids.is_empty() ? "" : pending_inserted_ids[0].c_str());
-    }
-    else {
+    if (!category_order_is_crossing_reserved_boundary(wm, pending_order)) {
       save_category_order_to_json(C, tag_key.c_str(), pending_order);
       ScrArea *save_area = CTX_wm_area(C);
       const int save_space_type = save_area ? save_area->spacetype : 0;
@@ -2697,19 +2643,6 @@ static void ui_panel_category_draw_content(
   const bool is_being_edited_in_dialog = !is_active &&
                                          category_tab_edit_dialog_is_open_for_category(category_id);
   const float draw_darken_factor = is_being_edited_in_dialog ? 0.0f : darken_factor;
-
-  if (STREQ(category_id, "Pivot Tools")) {
-    printf("[CAT TAB ICON DRAW] category='%s' display_mode=%d source=%d key='%s' resolved_icon_id=%d "
-           "display_mode_allows_icon_content=%s icon_data_allows_icon_content=%s use_builtin_icon=%s\n",
-           category_id,
-           int(display_mode),
-           icon_resolved.source,
-           (icon_resolved.key && icon_resolved.key[0] != '\0') ? icon_resolved.key : "",
-           resolved_icon_id,
-           display_mode_allows_icon_content ? "true" : "false",
-           icon_data_allows_icon_content ? "true" : "false",
-           use_builtin_icon ? "true" : "false");
-  }
 
   bool is_fallback_letter = false;
   float glyph_color[3] = {0.0f, 0.0f, 0.0f};
@@ -3133,17 +3066,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     /* Update insert zone when tab_v_pad changes (first frame of drag) */
     if (prev_tab_v_pad != tab_v_pad) {
       update_insert_zone(C, wm, region, drag_state);
-      printf("[DRAW] tab_v_pad updated: %d -> %d, insert_y_start=%d, insert_y_end=%d\n",
-             prev_tab_v_pad, tab_v_pad, drag_state->insert_y_start, drag_state->insert_y_end);
     }
-
-    printf("[DRAW] is_dragging: category='%s', current_insert_index=%d, original_index=%d, "
-           "tab_v_pad=%d, drag_tab_height=%d\n",
-           drag_state->drag_category_id,
-           drag_state->current_insert_index,
-           drag_state->original_index,
-           drag_state->tab_v_pad,
-           drag_state->drag_tab_height);
   }
 
   bTheme *btheme = theme::theme_get();
@@ -4144,13 +4067,6 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   state->current_insert_index = clamp_i(
       state->current_insert_index, state->min_insert_index, state->max_insert_index);
 
-  printf("[INVOKE] category='%s', original_index=%d, min_insert=%d, max_insert=%d, is_reserved=%d\n",
-         state->drag_category_id,
-         state->original_index,
-         state->min_insert_index,
-         state->max_insert_index,
-         state->is_reserved);
-
   state->drag_offset_y = 0.0f;
   state->prev_drag_offset_y = 0.0f;
   state->initial_scroll = region->category_scroll;
@@ -4328,16 +4244,6 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
       const wmWindowManager *wm = CTX_wm_manager(C);
       state->current_insert_index = calculate_insert_index(C, region, state);
       update_insert_zone(C, wm, region, state);
-
-      printf("[MODAL MOUSEMOVE] current_insert_index=%d, drag_offset_y=%.1f, tab_v_pad=%d, "
-             "min=%d, max=%d, insert_y_start=%d, insert_y_end=%d\n",
-             state->current_insert_index,
-             state->drag_offset_y,
-             state->tab_v_pad,
-             state->min_insert_index,
-             state->max_insert_index,
-             state->insert_y_start,
-             state->insert_y_end);
 
       /* Check if cursor is over a reserved tab and update cursor accordingly */
       bool over_reserved = false;

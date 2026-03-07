@@ -783,28 +783,6 @@ void category_tab_edit_glyph_search_cb(bContext * /*C*/, void *arg_op, int /*eve
  * Returns a list of glyph dictionaries with 'unicode' and 'name' keys.
  * Uses BPY_run_string_as_string to execute Python code and parse JSON result.
  */
-/**
- * Helper function to safely print a string that might contain Unicode characters.
- * Prints the hex codepoint representation for Unicode glyphs to avoid console encoding issues.
- */
-static void safe_print_string(const char *label, const char *str)
-{
-  if (!str || !str[0]) {
-    printf("[%s] (empty)\n", label);
-    return;
-  }
-
-  /* Check if this is a single Unicode glyph character */
-  if (is_single_glyph_str(str)) {
-    char hex_cp[32] = "";
-    utf8_to_hex_codepoint(str, hex_cp, sizeof(hex_cp));
-    printf("[%s] U+%s\n", label, hex_cp);
-  }
-  else {
-    printf("[%s] %s\n", label, str);
-  }
-}
-
 static void glyph_search_python_expr_build(
     const char *query, const int max_results, char r_python_expr[2048])
 {
@@ -818,27 +796,6 @@ static void glyph_search_python_expr_build(
            max_results);
 }
 
-static void glyph_search_result_preview_log(const char *result_str)
-{
-  const size_t result_len = strlen(result_str);
-  if (result_len > 200) {
-    printf("[GLYPH SEARCH] Result length: %zu bytes (first 150 chars)\n", result_len);
-    for (size_t i = 0; i < 150 && i < result_len; i++) {
-      const unsigned char c = (unsigned char)result_str[i];
-      if (c >= 32 && c <= 126) {
-        putchar(c);
-      }
-      else {
-        putchar('?');
-      }
-    }
-    printf("\n");
-  }
-  else {
-    printf("[GLYPH SEARCH] Result: %s\n", result_str);
-  }
-}
-
 static void glyph_search_parse_object_array(const char *json,
                                             const int max_results,
                                             blender::Vector<std::pair<std::string, std::string>> &r_results)
@@ -849,7 +806,6 @@ static void glyph_search_parse_object_array(const char *json,
     p++;
   }
   if (*p != '[') {
-    printf("[GLYPH SEARCH] Result is not a JSON array: %s\n", json);
     return;
   }
   p++;
@@ -881,8 +837,6 @@ static void glyph_search_parse_object_array(const char *json,
         }
         const std::string raw_unicode(start, p - start);
         unicode = category_tab_decode_json_unicode(raw_unicode.c_str());
-        printf("[GLYPH SEARCH] Decoded unicode: '%s' -> ", raw_unicode.c_str());
-        safe_print_string("result", unicode.c_str());
       }
       else if (strncmp(p, "\"name\":", 7) == 0) {
         p += 7;
@@ -904,8 +858,7 @@ static void glyph_search_parse_object_array(const char *json,
     }
 
     if (!unicode.empty() && !name.empty()) {
-      printf("[GLYPH SEARCH] Found glyph %d: name='%s', ", ++parsed_count, name.c_str());
-      safe_print_string("unicode", unicode.c_str());
+      parsed_count++;
       r_results.append({unicode, name});
       if (r_results.size() >= max_results) {
         break;
@@ -927,23 +880,11 @@ blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
   blender::Vector<std::pair<std::string, std::string>> results;
 
 #ifdef WITH_PYTHON
-  /* Debug: Print input parameters safely */
-  printf("[GLYPH SEARCH] Query: '%s', ", query ? query : "");
-  safe_print_string("Category", category);
-  printf("[GLYPH SEARCH] Max: %d\n", max_results);
-
   /* Build Python expression and execute it. */
   char python_expr[2048];
   glyph_search_python_expr_build(query, max_results, python_expr);
 
   const char *imports[] = {"json", nullptr};
-
-  printf("[GLYPH SEARCH] Python expr length: %d\n", int(strlen(python_expr)));
-
-  /* Print the Python expression for debugging */
-  printf("[GLYPH SEARCH] === Python expr ===\n");
-  printf("%s\n", python_expr);
-  printf("[GLYPH SEARCH] === End expr ===\n");
 
   /* Execute Python expression and capture output */
   char *result_str = nullptr;
@@ -952,29 +893,20 @@ blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
 
   /* Use BPY_run_string_as_string with imports array */
   bool success = BPY_run_string_as_string(C, imports, python_expr, &err_info, &result_str);
-  printf("[GLYPH SEARCH] BPY_run_string_as_string success: %d\n", success);
-
-  /* Print error details if failed */
   if (!success) {
-    printf("[GLYPH SEARCH] Execution failed!\n");
     if (err_msg) {
-      printf("[GLYPH SEARCH] Error string: %s\n", err_msg);
       MEM_delete(err_msg);
     }
   }
 
   if (success && result_str) {
-    glyph_search_result_preview_log(result_str);
-
     /* Check if result is an error message */
     if (strncmp(result_str, "{\"error\":", 9) == 0) {
-      printf("[GLYPH SEARCH] Python error: %s\n", result_str);
       MEM_delete(result_str);
       return results;
     }
 
     if (strcmp(result_str, "[]") == 0) {
-      printf("[GLYPH SEARCH] Empty result (no glyphs found)\n");
       MEM_delete(result_str);
       return results;
     }
@@ -998,11 +930,6 @@ blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
 
     MEM_delete(result_str);
   }
-  else {
-    printf("[GLYPH SEARCH] Failed or no result\n");
-  }
-
-  printf("[GLYPH SEARCH] Total glyphs found: %d\n", int(results.size()));
 #else
   (void)query;
   (void)category;
@@ -1036,13 +963,8 @@ static void glyph_cache_clear()
 static const blender::Vector<std::pair<std::string, std::string>>& glyph_cache_get(bContext *C)
 {
   if (!g_glyph_cache_valid) {
-    printf("[GLYPH CACHE] Cache miss, loading glyphs from Python...\n");
     g_glyph_cache = glyph_search_call_python(C, "", "", 1000);
     g_glyph_cache_valid = true;
-    printf("[GLYPH CACHE] Cached %d glyphs\n", int(g_glyph_cache.size()));
-  }
-  else {
-    printf("[GLYPH CACHE] Cache hit, using %d cached glyphs\n", int(g_glyph_cache.size()));
   }
   return g_glyph_cache;
 }
@@ -1275,18 +1197,13 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
   /* Set the selection callback */
   grid_view->set_on_glyph_select_fn(
       [popup_data](bContext &C, const std::string &unicode) {
-        printf("[GLYPH GRID SELECT] === Glyph selected from grid ===\n");
-        printf("[GLYPH GRID SELECT] unicode = '%s'\n", unicode.c_str());
-
         /* Convert unicode to hex codepoint */
         char hex_code[16] = "";
         utf8_to_hex_codepoint(unicode.c_str(), hex_code, sizeof(hex_code));
-        printf("[GLYPH GRID SELECT] hex_code = '%s'\n", hex_code);
 
         /* Set the glyph property of the picker operator if available */
         if (popup_data->op) {
           RNA_string_set(popup_data->op->ptr, "glyph", hex_code);
-          printf("[GLYPH GRID SELECT] Set picker op->ptr['glyph'] = '%s'\n", hex_code);
         }
 
         /* Get target property - from picker operator or use default "glyph" */
@@ -1294,7 +1211,6 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
         if (popup_data->op) {
           RNA_string_get(popup_data->op->ptr, "target_property", target_prop);
         }
-        printf("[GLYPH GRID SELECT] target_property = '%s'\n", target_prop[0] != '\0' ? target_prop : "(empty)");
 
         if (target_prop[0] != '\0') {
           const char *target_prop_path = target_prop;
@@ -1309,12 +1225,6 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
           /* Use the directly stored target operator from popup data */
           wmOperator *target_op = popup_data->target_op;
 
-          printf("[GLYPH GRID SELECT] popup_data->target_op = %p\n", (void *)target_op);
-          if (target_op) {
-            printf("[GLYPH GRID SELECT] target_op->idname = '%s'\n", target_op->idname ? target_op->idname : "NULL");
-            printf("[GLYPH GRID SELECT] target_op->ptr = %p\n", (void *)target_op->ptr);
-          }
-
           if (!target_op && popup_data->target_op_properties) {
             wmWindowManager *wm = CTX_wm_manager(&C);
             if (wm) {
@@ -1324,9 +1234,6 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
               {
                 if (op_iter && op_iter->properties == popup_data->target_op_properties) {
                   target_op = op_iter;
-                  printf("[GLYPH GRID SELECT] Resolved target_op by properties: %p (idname='%s')\n",
-                         (void *)target_op,
-                         target_op->idname ? target_op->idname : "NULL");
                   break;
                 }
               }
@@ -1336,15 +1243,7 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
           /* Fallback: if no target_op stored, try to find it through context */
           if (!target_op) {
             if (!popup_data->target_op_properties) {
-              printf("[GLYPH GRID SELECT] WARNING: popup_data->target_op is NULL, trying fallback...\n");
               target_op = context_active_operator_get(&C);
-              if (target_op) {
-                printf("[GLYPH GRID SELECT] Fallback found active operator: %p (idname='%s')\n",
-                       (void*)target_op, target_op->idname ? target_op->idname : "NULL");
-              }
-            }
-            else {
-              printf("[GLYPH GRID SELECT] popup_data->target_op is NULL, skipping active fallback because explicit target properties are set\n");
             }
           }
 
@@ -1353,10 +1252,6 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
           const char *target_prop_path_for_operator = is_active_operator_path ?
                                                           (target_prop_path + strlen("active_operator.")) :
                                                           target_prop_path;
-
-          printf("[GLYPH GRID SELECT] target_prop_path = '%s'\n", target_prop_path);
-          printf("[GLYPH GRID SELECT] is_active_operator_path = %s\n", is_active_operator_path ? "true" : "false");
-          printf("[GLYPH GRID SELECT] target_prop_path_for_operator = '%s'\n", target_prop_path_for_operator);
 
           /* Primary path for invoke_props_dialog operators: write directly to the captured
            * operator IDProperty group. This avoids routing through unrelated active operators. */
@@ -1370,65 +1265,30 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
                 idprop = IDP_NewString(hex_code, target_prop_path_for_operator);
                 IDP_AddToGroup(popup_data->target_op_properties, idprop);
                 resolved = true;
-                printf("[GLYPH GRID SELECT] SUCCESS: Created and set IDProperty '%s' on target properties\n",
-                       target_prop_path_for_operator);
               }
               else if (idprop->type == IDP_STRING) {
                 IDP_AssignString(idprop, hex_code);
                 resolved = true;
-                printf("[GLYPH GRID SELECT] SUCCESS: Set IDProperty '%s' directly on target properties\n",
-                       target_prop_path_for_operator);
               }
-              else {
-                printf("[GLYPH GRID SELECT] IDProperty '%s' exists but has non-string type=%d\n",
-                       target_prop_path_for_operator,
-                       idprop->type);
-              }
-            }
-            else {
-              printf("[GLYPH GRID SELECT] Skipping direct IDProperty write for complex path '%s'\n",
-                     target_prop_path_for_operator);
             }
           }
 
           if (!resolved && target_op && target_op->ptr) {
-            printf("[GLYPH GRID SELECT] Attempting RNA_path_resolve_full on target_op->ptr...\n");
-            printf("[GLYPH GRID SELECT] Target operator: %p, idname='%s'\n", 
-                   (void*)target_op, target_op->idname ? target_op->idname : "NULL");
-            printf("[GLYPH GRID SELECT] Property path: '%s'\n", target_prop_path_for_operator);
-            
             if (RNA_path_resolve_full(
                     target_op->ptr, target_prop_path_for_operator, &target_ptr, &prop, &index))
             {
-              printf("[GLYPH GRID SELECT] SUCCESS: Resolved property on target_op!\n");
-              printf("[GLYPH GRID SELECT] Setting '%s' = '%s' on operator '%s'\n", 
-                     target_prop_path_for_operator, hex_code, 
-                     target_op->idname ? target_op->idname : "NULL");
               RNA_property_string_set(&target_ptr, prop, hex_code);
               RNA_property_update(&C, &target_ptr, prop);
               resolved = true;
             }
-            else {
-              printf("[GLYPH GRID SELECT] FAILED: RNA_path_resolve_full returned false\n");
-            }
-          }
-          else if (!resolved) {
-            printf("[GLYPH GRID SELECT] Cannot resolve: target_op=%p, target_op->ptr=%p\n",
-                   (void *)target_op, target_op ? (void *)target_op->ptr : nullptr);
           }
 
           if (STRPREFIX(target_prop_path, "active_operator.") && !resolved) {
-            printf("[GLYPH GRID SELECT] Trying active_operator path...\n");
             const char *active_op_path = target_prop_path + strlen("active_operator.");
             wmOperator *active_op = context_active_operator_get(&C);
-            printf("[GLYPH GRID SELECT] context_active_operator_get returned: %p\n", (void *)active_op);
-            if (active_op) {
-              printf("[GLYPH GRID SELECT] active_op->idname = '%s'\n", active_op->idname ? active_op->idname : "NULL");
-            }
             if (active_op && active_op->ptr) {
               if (RNA_path_resolve_full(active_op->ptr, active_op_path, &target_ptr, &prop, &index))
               {
-                printf("[GLYPH GRID SELECT] SUCCESS: Resolved via active_operator!\n");
                 RNA_property_string_set(&target_ptr, prop, hex_code);
                 RNA_property_update(&C, &target_ptr, prop);
                 resolved = true;
@@ -1437,40 +1297,25 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
           }
           if (!resolved) {
             /* Try resolving from window manager as root. */
-            printf("[GLYPH GRID SELECT] Trying window manager root path...\n");
             wmWindowManager *wm = CTX_wm_manager(&C);
             PointerRNA root_ptr = RNA_id_pointer_create(&wm->id);
             if (RNA_path_resolve_full(&root_ptr, target_prop_path, &target_ptr, &prop, &index)) {
-              printf("[GLYPH GRID SELECT] SUCCESS: Resolved via WM root!\n");
               RNA_property_string_set(&target_ptr, prop, hex_code);
               RNA_property_update(&C, &target_ptr, prop);
               resolved = true;
-            }
-            else {
-              printf("[GLYPH GRID SELECT] FAILED: Could not resolve via WM root\n");
             }
           }
 
           if (!resolved) {
             /* Fallback: try resolving from the picker operator itself (relative path). */
             if (popup_data->op) {
-              printf("[GLYPH GRID SELECT] Trying fallback: picker operator relative path...\n");
               if (RNA_path_resolve_full(popup_data->op->ptr, target_prop_path, &target_ptr, &prop, &index)) {
-                printf("[GLYPH GRID SELECT] SUCCESS: Resolved via picker operator!\n");
                 RNA_property_string_set(&target_ptr, prop, hex_code);
                 RNA_property_update(&C, &target_ptr, prop);
                 resolved = true;
               }
-              else {
-                printf("[GLYPH GRID SELECT] FAILED: Could not resolve via picker operator\n");
-              }
             }
           }
-
-          printf("[GLYPH GRID SELECT] Final resolved = %s\n", resolved ? "true" : "false");
-        }
-        else {
-          printf("[GLYPH GRID SELECT] No target_property specified, skipping target update\n");
         }
 
         /* Clear the search field if picker operator available */
@@ -1490,7 +1335,6 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
 
         /* Trigger redraw */
         WM_main_add_notifier(NC_WINDOW, nullptr);
-        printf("[GLYPH GRID SELECT] === Glyph select callback END ===\n");
       });
 
   /* Add grid view to block and build it */
@@ -1529,9 +1373,6 @@ static void glyph_more_glyphs_button_cb(bContext *C, void *arg1, void * /*arg2*/
   if (!target_op) {
     return;
   }
-
-  printf("[GLYPH BUTTON CB] target_op = %p (idname='%s')\n",
-         (void*)target_op, target_op->idname ? target_op->idname : "NULL");
 
   /* Get the current category from target_op->ptr */
   char current_category[64] = "";
@@ -1633,14 +1474,9 @@ static wmOperatorStatus glyph_picker_grid_invoke(bContext *C,
   char target_op_props_ptr_str[64] = "";
   RNA_string_get(op->ptr, "target_operator_properties_ptr", target_op_props_ptr_str);
 
-  printf("[GLYPH PICKER INVOKE] target_operator_properties_ptr from op->ptr = '%s'\n",
-         target_op_props_ptr_str[0] != '\0' ? target_op_props_ptr_str : "(empty)");
-
   if (target_op_props_ptr_str[0] != '\0') {
     has_explicit_target = true;
     const uintptr_t target_props_ptr = uintptr_t(strtoull(target_op_props_ptr_str, nullptr, 10));
-    printf("[GLYPH PICKER INVOKE] Looking for operator with properties pointer %llu\n",
-           (unsigned long long)target_props_ptr);
 
     if (target_props_ptr != 0) {
       wmWindowManager *wm = CTX_wm_manager(C);
@@ -1651,8 +1487,6 @@ static wmOperatorStatus glyph_picker_grid_invoke(bContext *C,
       {
         if (op_iter && op_iter->properties == target_op_properties) {
           target_op = op_iter;
-          printf("[GLYPH PICKER INVOKE] FOUND target operator via properties %p (idname='%s')\n",
-                 (void *)target_op, target_op->idname ? target_op->idname : "NULL");
           break;
         }
       }
@@ -1664,14 +1498,10 @@ static wmOperatorStatus glyph_picker_grid_invoke(bContext *C,
   char target_op_ptr_str[64] = "";
   RNA_string_get(op->ptr, "target_operator_ptr", target_op_ptr_str);
 
-  printf("[GLYPH PICKER INVOKE] target_operator_ptr from op->ptr = '%s'\n",
-         target_op_ptr_str[0] != '\0' ? target_op_ptr_str : "(empty)");
-
   if (!target_op && target_op_ptr_str[0] != '\0') {
     has_explicit_target = true;
     /* Try to find the operator by pointer in wm->runtime->operators */
     const uintptr_t target_op_ptr = uintptr_t(strtoull(target_op_ptr_str, nullptr, 10));
-    printf("[GLYPH PICKER INVOKE] Looking for operator with pointer %llu\n", (unsigned long long)target_op_ptr);
 
     if (target_op_ptr != 0) {
       wmWindowManager *wm = CTX_wm_manager(C);
@@ -1681,8 +1511,6 @@ static wmOperatorStatus glyph_picker_grid_invoke(bContext *C,
       {
         if ((uintptr_t)op_iter == target_op_ptr) {
           target_op = op_iter;
-          printf("[GLYPH PICKER INVOKE] FOUND target operator %p (idname='%s')\n",
-                 (void*)target_op, target_op->idname ? target_op->idname : "NULL");
           break;
         }
       }
@@ -1694,21 +1522,12 @@ static wmOperatorStatus glyph_picker_grid_invoke(bContext *C,
    * keep target_op null and rely on target_op_properties in the select callback. */
   if (!target_op) {
     if (!has_explicit_target) {
-      printf("[GLYPH PICKER INVOKE] target_op not found via ptr, trying context_active_operator_get...\n");
       wmOperator *active_op = context_active_operator_get(C);
       if (active_op && active_op != op) {
         target_op = active_op;
-        printf("[GLYPH PICKER INVOKE] Using active operator %p (idname='%s')\n",
-               (void*)target_op, target_op->idname ? target_op->idname : "NULL");
       }
     }
-    else {
-      printf("[GLYPH PICKER INVOKE] Explicit target provided but no live operator found; "
-             "skipping active-operator fallback\n");
-    }
   }
-
-  printf("[GLYPH PICKER INVOKE] Final target_op = %p\n", (void*)target_op);
 
   /* Create popup data with both picker op and target op */
   GlyphGridPopupData *popup_data = new GlyphGridPopupData(
@@ -2663,11 +2482,8 @@ static bool category_tab_try_auto_detect_extension_icon(bContext *C,
   r_icon_path[0] = '\0';
   r_icon_provider[0] = '\0';
 
-  printf("[CAT TAB ICON AUTO DEBUG] C invoke detect start: category='%s'\n", category ? category : "");
-
 #ifdef WITH_PYTHON
   if (!C || !category || category[0] == '\0') {
-    printf("[CAT TAB ICON AUTO DEBUG] C invoke detect abort: invalid context/category\n");
     return false;
   }
 
@@ -2688,9 +2504,7 @@ static bool category_tab_try_auto_detect_extension_icon(bContext *C,
   const bool success = BPY_run_string_as_string(C, imports, python_expr, &err_info, &result_str);
 
   if (!success || !result_str) {
-    printf("[CAT TAB ICON AUTO DEBUG] C invoke detect python failed: success=%d\n", int(success));
     if (err_msg) {
-      printf("[CAT TAB ICON AUTO DEBUG] C invoke detect python error: %s\n", err_msg);
       MEM_delete(err_msg);
     }
     return false;
@@ -2707,31 +2521,17 @@ static bool category_tab_try_auto_detect_extension_icon(bContext *C,
     if (!icon_path.empty()) {
       BLI_strncpy(r_icon_path, icon_path.c_str(), 1024);
       BLI_strncpy(r_icon_provider, icon_provider.c_str(), 128);
-      printf("[CAT TAB ICON AUTO DEBUG] C invoke detect hit: category='%s', path='%s', provider='%s'\n",
-             category,
-             r_icon_path,
-             r_icon_provider);
       detected = true;
     }
-  }
-  else {
-    printf("[CAT TAB ICON AUTO DEBUG] C invoke detect parse miss: category='%s', parsed=%d, parts=%d\n",
-           category,
-           int(parsed),
-           int(parts.size()));
   }
 
   MEM_delete(result_str);
   if (err_msg) {
     MEM_delete(err_msg);
   }
-  if (!detected) {
-    printf("[CAT TAB ICON AUTO DEBUG] C invoke detect miss: category='%s'\n", category);
-  }
   return detected;
 #else
   UNUSED_VARS(C, category);
-  printf("[CAT TAB ICON AUTO DEBUG] C invoke detect skipped: WITH_PYTHON disabled\n");
   return false;
 #endif
 }
@@ -2808,21 +2608,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  auto icon_source_to_cstr = [](const int icon_source) -> const char * {
-    switch (icon_source) {
-      case 0:
-        return "AUTO";
-      case 1:
-        return "MANUAL";
-      case 2:
-        return "OFF";
-      default:
-        return "UNKNOWN";
-    }
-  };
-
-  printf("[CAT TAB ICON INVOKE] category='%s'\n", category);
-
   /* Store category name in operator properties */
   RNA_string_set(op->ptr, "category", category);
 
@@ -2852,21 +2637,10 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
         explicit_icon_mode_assigned = true;
       }
 
-      printf("[CAT TAB ICON INVOKE] override match: source=%s(%d), key='%s', path='%s', provider='%s', "
-             "has_payload=%s, explicit_mode=%s\n",
-             icon_source_to_cstr(item->icon_source),
-             item->icon_source,
-             item->icon_key,
-             item->icon_path,
-             item->icon_provider,
-             has_icon_payload ? "true" : "false",
-             has_explicit_icon_mode ? "true" : "false");
-
       /* Check if override is empty (created by tag restore but has no actual data) */
       if (item->display_name[0] == '\0' && item->glyph[0] == '\0' && is_zero_v3(item->color) &&
           !has_icon_payload && !has_explicit_icon_mode)
       {
-        printf("[CAT TAB ICON INVOKE] override considered EMPTY placeholder; will ignore icon payload from override\n");
         override_is_empty = true;
         has_override = true; /* Mark as found but empty, so we skip checking mappings again */
         break;
@@ -2922,13 +2696,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
          item = static_cast<CategoryGlyphItem *>(item->next))
     {
       if (STREQ(item->category, category)) {
-        printf("[CAT TAB ICON INVOKE] mapping merge (override lacks icon payload): source=%s(%d), key='%s', "
-               "path='%s', provider='%s'\n",
-               icon_source_to_cstr(item->icon_source),
-               item->icon_source,
-               item->icon_key,
-               item->icon_path,
-               item->icon_provider);
         RNA_enum_set(op->ptr, "icon_source", item->icon_source);
         RNA_string_set(op->ptr, "icon_key", item->icon_key);
         RNA_string_set(op->ptr, "icon_path", item->icon_path);
@@ -2951,12 +2718,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     {
       if (STREQ(item->category, category)) {
         found_in_mappings = true;
-        printf("[CAT TAB ICON INVOKE] mapping primary load: source=%s(%d), key='%s', path='%s', provider='%s'\n",
-               icon_source_to_cstr(item->icon_source),
-               item->icon_source,
-               item->icon_key,
-               item->icon_path,
-               item->icon_provider);
         /* Load display_name from mappings */
         if (item->display_name[0] != '\0') {
           RNA_string_set(op->ptr, "display_name", item->display_name);
@@ -2989,10 +2750,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
         break;
       }
     }
-
-    if (!found_in_mappings) {
-      printf("[CAT TAB ICON INVOKE] mapping not found for category='%s'\n", category);
-    }
   }
 
   /* If no explicit icon mode/payload is set, try to detect extension root icon
@@ -3010,15 +2767,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     const bool has_icon_payload =
         (current_icon_key[0] != '\0') || (current_icon_path[0] != '\0') || (current_icon_provider[0] != '\0');
 
-    printf("[CAT TAB ICON AUTO DEBUG] invoke gate: category='%s', user_glyph_override=%s, explicit_icon_mode=%s, has_icon_payload=%s, key='%s', path='%s', provider='%s'\n",
-           category,
-           user_glyph_override_assigned ? "true" : "false",
-           explicit_icon_mode_assigned ? "true" : "false",
-           has_icon_payload ? "true" : "false",
-           current_icon_key,
-           current_icon_path,
-           current_icon_provider);
-
     if (!has_icon_payload) {
       char detected_icon_path[1024] = "";
       char detected_icon_provider[128] = "";
@@ -3030,13 +2778,6 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
         if (detected_icon_provider[0] != '\0') {
           RNA_string_set(op->ptr, "icon_provider", detected_icon_provider);
         }
-        printf("[CAT TAB ICON AUTO DEBUG] invoke assign: category='%s', path='%s', provider='%s'\n",
-               category,
-               detected_icon_path,
-               detected_icon_provider);
-      }
-      else {
-        printf("[CAT TAB ICON AUTO DEBUG] invoke no assignment: category='%s'\n", category);
       }
     }
   }
@@ -3105,19 +2846,10 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   RNA_string_get(op->ptr, "icon_path", current_icon_path);
   RNA_string_get(op->ptr, "icon_provider", current_icon_provider);
 
-  printf("[CAT TAB ICON INVOKE] final op ptr: source=%s(%d), key='%s', path='%s', provider='%s', "
-         "has_override=%s, override_is_empty=%s, override_icon_needs_mapping=%s\n",
-         icon_source_to_cstr(current_icon_source),
-         current_icon_source,
-         current_icon_key,
-         current_icon_path,
-         current_icon_provider,
-         has_override ? "true" : "false",
-         override_is_empty ? "true" : "false",
-         override_icon_needs_mapping ? "true" : "false");
-
   const bool has_icon_key = (current_icon_key[0] != '\0');
   const bool has_icon_path = (current_icon_path[0] != '\0');
+  const bool has_icon_payload = has_icon_key || has_icon_path;
+  const bool icon_mode_enabled = (current_icon_source != 2); /* OFF */
   int current_glyph_mode = 0;
   for (CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
        item;
@@ -3145,7 +2877,7 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   if (current_glyph_mode == 1) {
     display_mode_ui = 2; /* TEXT */
   }
-  else if (has_icon_key || has_icon_path) {
+  else if (icon_mode_enabled && has_icon_payload) {
     display_mode_ui = 1; /* CUSTOM_ICON */
   }
   RNA_enum_set(op->ptr, "display_mode_ui", display_mode_ui);

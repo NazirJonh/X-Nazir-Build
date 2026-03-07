@@ -47,8 +47,6 @@
 
 #include "BLF_api.hh"
 
-#include "CLG_log.h"
-
 #include "WM_api.hh"
 #include "WM_types.hh"
 
@@ -68,8 +66,6 @@
 #include "interface_intern.hh"
 
 namespace blender::ui {
-
-static CLG_LogRef LOG = {"ui.panel"};
 
 /* -------------------------------------------------------------------- */
 /** \name Defines & Structs
@@ -2906,22 +2902,6 @@ int handler_panel_region(bContext *C,
           const int category_tabs_min_width_unscaled = int(
               std::ceil(float(category_tabs_min_width) * aspect / UI_SCALE_FAC));
 
-          CLOG_INFO_NOCHECK(&LOG,
-                            "%s: click='%s' active='%s' already_active=%d too_narrow=%d "
-                            "winrct_x=%d min_width_px=%d min_width_unscaled=%d aspect=%.6f "
-                            "ui_scale=%.6f prefsizex=%d",
-                            __func__,
-                            pc_dyn->idname,
-                            previous_active ? previous_active : "(null)",
-                            int(already_active),
-                            int(too_narrow),
-                            BLI_rcti_size_x(&region->winrct),
-                            category_tabs_min_width,
-                            category_tabs_min_width_unscaled,
-                            aspect,
-                            UI_SCALE_FAC,
-                            region->runtime->type->prefsizex);
-
           if (already_active && !too_narrow) {
             /* Minimize region when clicking on already active tab.
              * This applies to both Default and Sticky inactive modes - the panel should always
@@ -2949,11 +2929,6 @@ int handler_panel_region(bContext *C,
                                                    UI_SCALE_FAC * aspect);
             ui_panel_region_width_set(region, aspect, category_tabs_min_width_unscaled);
 
-            CLOG_INFO_NOCHECK(&LOG,
-                              "%s: action=minimize result_winrct_x=%d",
-                              __func__,
-                              BLI_rcti_size_x(&region->winrct));
-
             /* In Icon mode with Show Active Tab Name, do NOT hide the tab name.
              * In Sticky inactive mode, we want to show the name for the previous active tab
              * (minimized state). */
@@ -2973,12 +2948,6 @@ int handler_panel_region(bContext *C,
                                       region->runtime->type->prefsizex :
                                       250;
             ui_panel_region_width_set(region, aspect, new_width);
-
-            CLOG_INFO_NOCHECK(&LOG,
-                              "%s: action=enlarge new_width_unscaled=%d result_winrct_x=%d",
-                              __func__,
-                              new_width,
-                              BLI_rcti_size_x(&region->winrct));
 
             /* Reset tab name hidden flag when enlarging region from minimized state */
             if (already_active) {

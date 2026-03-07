@@ -9,8 +9,10 @@
  */
 
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "BLI_fileops.h"
 #include "BLI_string.h"
@@ -215,6 +217,192 @@ int category_tab_icon_id_resolve_from_key_path(const char *icon_key, const char 
   }
 
   return category_tab_icon_id_resolve_from_path(icon_path);
+}
+
+void category_tab_split_tags(const char *tags,
+                             Vector<std::string> &r_tags,
+                             const char *delimiters)
+{
+  if (!tags || tags[0] == '\0') {
+    return;
+  }
+
+  if (!delimiters || delimiters[0] == '\0') {
+    delimiters = ",;";
+  }
+
+  const char *token_start = tags;
+  const auto is_delimiter = [delimiters](const char c) {
+    return strchr(delimiters, c) != nullptr;
+  };
+
+  for (const char *p = tags;; p++) {
+    const bool at_end = (*p == '\0');
+    if (!at_end && !is_delimiter(*p)) {
+      continue;
+    }
+
+    const char *start = token_start;
+    const char *end = p;
+
+    while (start < end && std::isspace(static_cast<unsigned char>(*start))) {
+      start++;
+    }
+    while (end > start && std::isspace(static_cast<unsigned char>(*(end - 1)))) {
+      end--;
+    }
+
+    if (start < end) {
+      r_tags.append(std::string(start, end - start));
+    }
+
+    if (at_end) {
+      break;
+    }
+
+    token_start = p + 1;
+  }
+}
+
+std::string category_tab_escape_for_python_literal(const char *input)
+{
+  std::string escaped = input ? input : "";
+
+  size_t pos = 0;
+  while ((pos = escaped.find("\\", pos)) != std::string::npos) {
+    escaped.replace(pos, 1, "\\\\");
+    pos += 2;
+  }
+
+  pos = 0;
+  while ((pos = escaped.find("'", pos)) != std::string::npos) {
+    escaped.replace(pos, 1, "\\'");
+    pos += 2;
+  }
+
+  return escaped;
+}
+
+bool category_tab_parse_json_string_array_minimal(const char *json, Vector<std::string> &r_items)
+{
+  if (!json) {
+    return false;
+  }
+
+  const char *p = json;
+  while (*p && *p != '[') {
+    p++;
+  }
+  if (*p != '[') {
+    return false;
+  }
+  p++;
+
+  bool parsed_any = false;
+  while (*p && *p != ']') {
+    while (*p && ELEM(*p, ' ', '\n', '\r', '\t', ',')) {
+      p++;
+    }
+    if (*p == ']') {
+      break;
+    }
+
+    if (*p != '"') {
+      p++;
+      continue;
+    }
+    p++;
+
+    const char *start = p;
+    while (*p && *p != '"') {
+      if (*p == '\\' && *(p + 1)) {
+        p += 2;
+      }
+      else {
+        p++;
+      }
+    }
+
+    if (*p != '"') {
+      return parsed_any;
+    }
+
+    const std::string value(start, p - start);
+    if (!value.empty()) {
+      r_items.append(value);
+      parsed_any = true;
+    }
+    p++;
+  }
+
+  return parsed_any;
+}
+
+std::string category_tab_decode_json_unicode(const char *str)
+{
+  if (!str) {
+    return "";
+  }
+
+  std::string result;
+  const size_t len = strlen(str);
+  size_t i = 0;
+
+  while (i < len) {
+    if (i + 5 < len && str[i] == '\\' && str[i + 1] == 'u') {
+      char hex_str[5] = {str[i + 2], str[i + 3], str[i + 4], str[i + 5], 0};
+
+      uint32_t codepoint = 0;
+      for (int j = 0; j < 4; j++) {
+        const char c = hex_str[j];
+        codepoint <<= 4;
+        if (c >= '0' && c <= '9') {
+          codepoint |= (c - '0');
+        }
+        else if (c >= 'a' && c <= 'f') {
+          codepoint |= (c - 'a' + 10);
+        }
+        else if (c >= 'A' && c <= 'F') {
+          codepoint |= (c - 'A' + 10);
+        }
+      }
+
+      char utf8_buf[5];
+      int utf8_len = 0;
+
+      if (codepoint <= 0x7F) {
+        utf8_buf[0] = (char)codepoint;
+        utf8_len = 1;
+      }
+      else if (codepoint <= 0x7FF) {
+        utf8_buf[0] = (char)(0xC0 | (codepoint >> 6));
+        utf8_buf[1] = (char)(0x80 | (codepoint & 0x3F));
+        utf8_len = 2;
+      }
+      else if (codepoint <= 0xFFFF) {
+        utf8_buf[0] = (char)(0xE0 | (codepoint >> 12));
+        utf8_buf[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        utf8_buf[2] = (char)(0x80 | (codepoint & 0x3F));
+        utf8_len = 3;
+      }
+      else {
+        utf8_buf[0] = (char)(0xF0 | (codepoint >> 18));
+        utf8_buf[1] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+        utf8_buf[2] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        utf8_buf[3] = (char)(0x80 | (codepoint & 0x3F));
+        utf8_len = 4;
+      }
+
+      result.append(utf8_buf, utf8_len);
+      i += 6;
+    }
+    else {
+      result += str[i];
+      i++;
+    }
+  }
+
+  return result;
 }
 
 }  // namespace blender::ui

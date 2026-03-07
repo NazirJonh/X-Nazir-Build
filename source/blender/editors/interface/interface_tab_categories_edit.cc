@@ -781,112 +781,10 @@ static void safe_print_string(const char *label, const char *str)
   }
 }
 
-/**
- * Decode JSON Unicode escape sequences (like \uXXXX) to UTF-8.
- * For example, "\ue5d4" becomes the actual UTF-8 bytes for U+E5D4.
- *
- * \param str: Input string with possible \uXXXX escapes
- * \return Decoded UTF-8 string
- */
-static std::string decode_json_unicode(const char *str)
-{
-  if (!str) {
-    return "";
-  }
-
-  std::string result;
-  size_t len = strlen(str);
-  size_t i = 0;
-
-  while (i < len) {
-    /* Check for Unicode escape sequence \uXXXX */
-    if (i + 5 < len && str[i] == '\\' && str[i + 1] == 'u') {
-      /* Parse 4 hex digits */
-      char hex_str[5] = {str[i + 2], str[i + 3], str[i + 4], str[i + 5], 0};
-
-      /* Convert hex string to integer */
-      uint32_t codepoint = 0;
-      for (int j = 0; j < 4; j++) {
-        char c = hex_str[j];
-        codepoint <<= 4;
-        if (c >= '0' && c <= '9') {
-          codepoint |= (c - '0');
-        }
-        else if (c >= 'a' && c <= 'f') {
-          codepoint |= (c - 'a' + 10);
-        }
-        else if (c >= 'A' && c <= 'F') {
-          codepoint |= (c - 'A' + 10);
-        }
-      }
-
-      /* Convert codepoint to UTF-8 */
-      char utf8_buf[5];
-      int utf8_len = 0;
-
-      if (codepoint <= 0x7F) {
-        /* 1 byte: 0xxxxxxx */
-        utf8_buf[0] = (char)codepoint;
-        utf8_len = 1;
-      }
-      else if (codepoint <= 0x7FF) {
-        /* 2 bytes: 110xxxxx 10xxxxxx */
-        utf8_buf[0] = (char)(0xC0 | (codepoint >> 6));
-        utf8_buf[1] = (char)(0x80 | (codepoint & 0x3F));
-        utf8_len = 2;
-      }
-      else if (codepoint <= 0xFFFF) {
-        /* 3 bytes: 1110xxxx 10xxxxxx 10xxxxxx */
-        utf8_buf[0] = (char)(0xE0 | (codepoint >> 12));
-        utf8_buf[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-        utf8_buf[2] = (char)(0x80 | (codepoint & 0x3F));
-        utf8_len = 3;
-      }
-      else {
-        /* 4 bytes: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx */
-        utf8_buf[0] = (char)(0xF0 | (codepoint >> 18));
-        utf8_buf[1] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
-        utf8_buf[2] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-        utf8_buf[3] = (char)(0x80 | (codepoint & 0x3F));
-        utf8_len = 4;
-      }
-
-      result.append(utf8_buf, utf8_len);
-      i += 6; /* Skip \uXXXX */
-    }
-    else {
-      /* Copy character as-is */
-      result += str[i];
-      i++;
-    }
-  }
-
-  return result;
-}
-
-static std::string glyph_search_escape_python_string(const char *value)
-{
-  std::string escaped = value ? value : "";
-
-  size_t pos = 0;
-  while ((pos = escaped.find("\"", pos)) != std::string::npos) {
-    escaped.replace(pos, 1, "\\\"");
-    pos += 2;
-  }
-
-  pos = 0;
-  while ((pos = escaped.find("\\", pos)) != std::string::npos) {
-    escaped.replace(pos, 1, "\\\\");
-    pos += 2;
-  }
-
-  return escaped;
-}
-
 static void glyph_search_python_expr_build(
     const char *query, const int max_results, char r_python_expr[2048])
 {
-  const std::string escaped_query = glyph_search_escape_python_string(query);
+  const std::string escaped_query = category_tab_escape_for_python_literal(query);
   snprintf(r_python_expr,
            2048,
            "json.dumps([{'unicode': g['unicode'], 'name': g['name']} "
@@ -894,65 +792,6 @@ static void glyph_search_python_expr_build(
            "%d)])",
            escaped_query.c_str(),
            max_results);
-}
-
-static bool parse_json_array_of_strings(const char *json, blender::Vector<std::string> &r_items)
-{
-  if (!json) {
-    return false;
-  }
-
-  const char *p = json;
-  while (*p && *p != '[') {
-    p++;
-  }
-  if (*p != '[') {
-    return false;
-  }
-  p++;
-
-  bool parsed_any = false;
-  while (*p && *p != ']') {
-    while (*p && ELEM(*p, ' ', '\n', '\r', '\t', ',')) {
-      p++;
-    }
-    if (*p == ']') {
-      break;
-    }
-
-    if (*p != '"') {
-      return false;
-    }
-    p++;
-
-    const char *start = p;
-    while (*p && *p != '"') {
-      if (*p == '\\' && *(p + 1)) {
-        p += 2;
-      }
-      else {
-        p++;
-      }
-    }
-
-    if (*p != '"') {
-      return false;
-    }
-
-    std::string value(start, p - start);
-    p++;
-    r_items.append(value);
-    parsed_any = true;
-
-    while (*p && ELEM(*p, ' ', '\n', '\r', '\t')) {
-      p++;
-    }
-    if (*p == ',') {
-      p++;
-    }
-  }
-
-  return parsed_any;
 }
 
 static void glyph_search_result_preview_log(const char *result_str)
@@ -1017,7 +856,7 @@ static void glyph_search_parse_object_array(const char *json,
           p++;
         }
         const std::string raw_unicode(start, p - start);
-        unicode = decode_json_unicode(raw_unicode.c_str());
+        unicode = category_tab_decode_json_unicode(raw_unicode.c_str());
         printf("[GLYPH SEARCH] Decoded unicode: '%s' -> ", raw_unicode.c_str());
         safe_print_string("result", unicode.c_str());
       }
@@ -1120,9 +959,9 @@ blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
 
     if (results.is_empty()) {
       blender::Vector<std::string> string_results;
-      if (parse_json_array_of_strings(result_str, string_results)) {
+      if (category_tab_parse_json_string_array_minimal(result_str, string_results)) {
         for (const std::string &value : string_results) {
-          const std::string unicode = decode_json_unicode(value.c_str());
+          const std::string unicode = category_tab_decode_json_unicode(value.c_str());
           if (!unicode.empty()) {
             results.append({unicode, value});
             if (results.size() >= max_results) {

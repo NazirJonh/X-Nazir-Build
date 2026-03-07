@@ -6,6 +6,7 @@
  * \ingroup RNA
  */
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -31,6 +32,7 @@
 #include "DNA_mask_types.h"
 #include "DNA_object_types.h"
 #include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
 
 #include "RNA_define.hh"
@@ -43,6 +45,8 @@
 #include "WM_types.hh"
 
 #include "RNA_enum_types.hh"
+
+#include "UI_interface_c.hh"
 
 namespace blender {
 
@@ -998,8 +1002,23 @@ static void rna_Space_show_region_ui_set(PointerRNA *ptr, bool value)
                              (BLI_rctf_size_x(&region->v2d.cur) /
                               (BLI_rcti_size_x(&region->v2d.mask) + 1)) :
                              1.0f;
+    float category_tabs_zoom = 1.0f;
+    switch (static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode)) {
+      case USER_CATEGORY_TABS_GLYPHS_ONLY:
+        category_tabs_zoom = U.category_tabs_zoom_icon;
+        break;
+      case USER_CATEGORY_TABS_GLYPHS_TEXT:
+        category_tabs_zoom = U.category_tabs_zoom_mixed;
+        break;
+      case USER_CATEGORY_TABS_TEXT_ONLY:
+      default:
+        category_tabs_zoom = U.category_tabs_zoom_text;
+        break;
+    }
+    const float category_tabs_min_width =
+        std::max(UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom);
     if (region->runtime->type && BKE_regiontype_uses_category_tabs(region->runtime->type) &&
-        (float(region->sizex) <= (UI_PANEL_CATEGORY_MIN_WIDTH / aspect)))
+        (float(region->sizex) <= (category_tabs_min_width / aspect)))
     {
       /* If the region is showing only tabs, increase to full width. */
       const int new_width = region->runtime->type->prefsizex ? region->runtime->type->prefsizex :

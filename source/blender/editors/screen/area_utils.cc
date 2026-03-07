@@ -8,9 +8,12 @@
  * Helper functions for area/region API.
  */
 
+#include <algorithm>
 #include <limits>
 
 #include "BKE_screen.hh"
+
+#include "DNA_userdef_types.h"
 
 #include "BLI_rect.h"
 #include "BLI_utildefines.h"
@@ -80,7 +83,23 @@ int ED_region_generic_panel_region_snap_size(const ARegion *region, int size, in
     /* Using Y axis avoids slight feedback loop when adjusting X. */
     const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
                          (BLI_rcti_size_y(&region->v2d.mask) + 1);
-    return int(UI_PANEL_CATEGORY_MIN_WIDTH / aspect);
+    float category_tabs_zoom = 1.0f;
+    switch (static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode)) {
+      case USER_CATEGORY_TABS_GLYPHS_ONLY:
+        category_tabs_zoom = U.category_tabs_zoom_icon;
+        break;
+      case USER_CATEGORY_TABS_GLYPHS_TEXT:
+        category_tabs_zoom = U.category_tabs_zoom_mixed;
+        break;
+      case USER_CATEGORY_TABS_TEXT_ONLY:
+      default:
+        category_tabs_zoom = U.category_tabs_zoom_text;
+        break;
+    }
+
+    const float category_tabs_min_width =
+        std::max(UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom);
+    return int(category_tabs_min_width / aspect);
   }
   return size;
 }

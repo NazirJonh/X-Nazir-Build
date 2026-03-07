@@ -2963,19 +2963,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   const eUserPref_CategoryTabsDisplayMode display_mode =
       static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
 
-  float category_tabs_zoom;
-  switch (display_mode) {
-    case USER_CATEGORY_TABS_GLYPHS_ONLY:
-      category_tabs_zoom = U.category_tabs_zoom_icon;
-      break;
-    case USER_CATEGORY_TABS_GLYPHS_TEXT:
-      category_tabs_zoom = U.category_tabs_zoom_mixed;
-      break;
-    case USER_CATEGORY_TABS_TEXT_ONLY:
-    default:
-      category_tabs_zoom = U.category_tabs_zoom_text;
-      break;
-  }
+  const float category_tabs_zoom = category_tabs_zoom_value_get(display_mode);
   const float zoom = (1.0f / aspect) * category_tabs_zoom;
 
   const wmWindowManager *wm = CTX_wm_manager(C);
@@ -2984,8 +2972,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
   const float dpi_fac = UI_SCALE_FAC;
   /* Calculate too_narrow early - needed for width calculation in first loop */
-  const bool too_narrow = BLI_rcti_size_x(&region->winrct) <=
-                          int(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / aspect);
+  const int category_tabs_min_width = category_tabs_min_width_get(aspect, display_mode);
+  const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_width;
   const int tab_v_pad_text = round_fl_to_int(TABS_PADDING_TEXT_FACTOR * dpi_fac * zoom) + 2 * px;
   const int tab_v_pad = round_fl_to_int(TABS_PADDING_BETWEEN_FACTOR * dpi_fac * zoom);
 

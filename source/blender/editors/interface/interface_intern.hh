@@ -935,6 +935,8 @@ bool is_single_glyph_str(const char *str);
  */
 bool category_tab_first_utf8_char_copy(const char *input, char *output, size_t output_max);
 bool category_tab_glyph_is_fallback_letter(const char *glyph, const char *category);
+float category_tabs_zoom_value_get(eUserPref_CategoryTabsDisplayMode display_mode);
+int category_tabs_min_width_get(float aspect, eUserPref_CategoryTabsDisplayMode display_mode);
 int category_tab_icon_id_resolve_from_path(const char *icon_path);
 int category_tab_icon_id_resolve_from_key_path(const char *icon_key, const char *icon_path);
 void category_tab_split_tags(const char *tags,

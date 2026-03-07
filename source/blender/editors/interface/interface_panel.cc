@@ -2897,9 +2897,8 @@ int handler_panel_region(bContext *C,
 
           const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
                                (BLI_rcti_size_y(&region->v2d.mask) + 1);
-          const bool too_narrow = BLI_rcti_size_x(&region->winrct) <=
-                                  int(std::ceil(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC /
-                                                aspect));
+          const int category_tabs_min_width = category_tabs_min_width_get(aspect, display_mode);
+          const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_width;
           if (too_narrow) {
             /* Enlarge region. */
             const int new_width = region->runtime->type->prefsizex ?
@@ -2920,8 +2919,6 @@ int handler_panel_region(bContext *C,
              * This applies to both Default and Sticky inactive modes - the panel should always collapse.
              * In Sticky inactive mode: save current active tab as previous_active so it shows its name
              * even when inactive (collapsed state). */
-            const eUserPref_CategoryTabsDisplayMode display_mode =
-                static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
             const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
             const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
                                          U.category_tabs_show_active_name);
@@ -2941,7 +2938,7 @@ int handler_panel_region(bContext *C,
 
             region->runtime->type->prefsizex = int(float(BLI_rcti_size_x(&region->winrct) + 1) /
                                                    UI_SCALE_FAC * aspect);
-            ui_panel_region_width_set(region, aspect, UI_PANEL_CATEGORY_MIN_WIDTH);
+            ui_panel_region_width_set(region, aspect, category_tabs_min_width);
 
             /* In Icon mode with Show Active Tab Name, do NOT hide the tab name.
              * In Sticky inactive mode, we want to show the name for the previous active tab (minimized state). */

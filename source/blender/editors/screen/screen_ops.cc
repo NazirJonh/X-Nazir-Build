@@ -6,6 +6,7 @@
  * \ingroup edscr
  */
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -3344,7 +3345,26 @@ static wmOperatorStatus region_scale_modal(bContext *C, wmOperator *op, const wm
                                  (BLI_rctf_size_x(&rmd->region->v2d.cur) /
                                   (BLI_rcti_size_x(&rmd->region->v2d.mask) + 1)) :
                                  1.0f;
-        if (float(rmd->region->sizex) * aspect > UI_PANEL_CATEGORY_MIN_WIDTH) {
+        float min_width_for_pref = UI_PANEL_CATEGORY_MIN_WIDTH;
+        if (rmd->region->runtime->type && BKE_regiontype_uses_category_tabs(rmd->region->runtime->type)) {
+          float category_tabs_zoom = 1.0f;
+          switch (static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode)) {
+            case USER_CATEGORY_TABS_GLYPHS_ONLY:
+              category_tabs_zoom = U.category_tabs_zoom_icon;
+              break;
+            case USER_CATEGORY_TABS_GLYPHS_TEXT:
+              category_tabs_zoom = U.category_tabs_zoom_mixed;
+              break;
+            case USER_CATEGORY_TABS_TEXT_ONLY:
+            default:
+              category_tabs_zoom = U.category_tabs_zoom_text;
+              break;
+          }
+          min_width_for_pref =
+              std::max(UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom);
+        }
+
+        if (float(rmd->region->sizex) * aspect > min_width_for_pref) {
           /* Save this as new runtime preferred size. */
           rmd->region->runtime->type->prefsizex = int(float(rmd->region->sizex) * aspect);
         }

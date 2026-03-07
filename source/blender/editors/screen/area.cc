@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -1912,7 +1913,24 @@ static void region_rect_recursive(
       }
       else if (has_tabs) {
         /* Too narrow for content so show only the category tabs. */
-        const int cat_min = int(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / aspect);
+        const eUserPref_CategoryTabsDisplayMode display_mode =
+            static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+        float category_tabs_zoom = 1.0f;
+        switch (display_mode) {
+          case USER_CATEGORY_TABS_GLYPHS_ONLY:
+            category_tabs_zoom = U.category_tabs_zoom_icon;
+            break;
+          case USER_CATEGORY_TABS_GLYPHS_TEXT:
+            category_tabs_zoom = U.category_tabs_zoom_mixed;
+            break;
+          case USER_CATEGORY_TABS_TEXT_ONLY:
+          default:
+            category_tabs_zoom = U.category_tabs_zoom_text;
+            break;
+        }
+        const float category_tabs_min_width = std::max(
+            UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom);
+        const int cat_min = int(std::ceil(UI_SCALE_FAC * category_tabs_min_width / aspect));
         region->winrct = *winrct;
         if (alignment == RGN_ALIGN_RIGHT) {
           region->winrct.xmin = region->winrct.xmax - cat_min + 1;
@@ -3806,8 +3824,27 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
 
   /* draw panels if they are large enough. */
   const bool has_category_tabs = ui::panel_category_tabs_is_visible(region);
-  const short min_draw_size = has_category_tabs ? short(UI_PANEL_CATEGORY_MIN_WIDTH) + 20 :
-                                                  std::min(region->runtime->type->prefsizex, 20);
+  short min_draw_size = std::min(region->runtime->type->prefsizex, 20);
+  if (has_category_tabs) {
+    const eUserPref_CategoryTabsDisplayMode display_mode =
+        static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+    float category_tabs_zoom = 1.0f;
+    switch (display_mode) {
+      case USER_CATEGORY_TABS_GLYPHS_ONLY:
+        category_tabs_zoom = U.category_tabs_zoom_icon;
+        break;
+      case USER_CATEGORY_TABS_GLYPHS_TEXT:
+        category_tabs_zoom = U.category_tabs_zoom_mixed;
+        break;
+      case USER_CATEGORY_TABS_TEXT_ONLY:
+      default:
+        category_tabs_zoom = U.category_tabs_zoom_text;
+        break;
+    }
+    const int tabs_only_min_draw_size = int(std::ceil(
+        std::max(UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom)));
+    min_draw_size = short(tabs_only_min_draw_size + 20);
+  }
   if (region->winx >= (min_draw_size * UI_SCALE_FAC / aspect)) {
     ui::panels_draw(C, region);
   }

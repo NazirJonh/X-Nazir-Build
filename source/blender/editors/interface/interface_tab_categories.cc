@@ -588,6 +588,15 @@ static const char *panel_category_glyph_lookup_override(const wmWindowManager *w
       return item->glyph;
     }
 
+    /* Override has no glyph: may be explicit clear OR tags/color-only carrier.
+     * Keep searching mappings/defaults, but preserve custom color from exact match.
+     *
+     * Important for glyph-id categories (normalized key can be empty): without this,
+     * color-only overrides are lost in live preview until full restart/resync.
+     */
+    if (r_color && !is_zero_v3(item->color)) {
+      copy_v3_v3(r_color, item->color);
+    }
     break;
   }
 
@@ -774,6 +783,58 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
   }
 
   return panel_category_glyph_lookup_apply_fallback(category, r_is_fallback_letter);
+}
+
+static void panel_category_color_lookup(const wmWindowManager *wm,
+                                        const char *category,
+                                        float r_color[3])
+{
+  if (!r_color) {
+    return;
+  }
+
+  zero_v3(r_color);
+
+  if (!wm || !category) {
+    return;
+  }
+
+  if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
+    for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+             wm->category_glyph_overrides.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category) && !is_zero_v3(item->color)) {
+        copy_v3_v3(r_color, item->color);
+        return;
+      }
+    }
+
+    const std::string normalized_target = normalize_category_key(category);
+    if (!normalized_target.empty()) {
+      for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+               wm->category_glyph_overrides.first);
+           item;
+           item = static_cast<const CategoryGlyphItem *>(item->next))
+      {
+        if (is_zero_v3(item->color)) {
+          continue;
+        }
+        const std::string normalized_item = normalize_category_key(item->category);
+        if (normalized_item == normalized_target) {
+          copy_v3_v3(r_color, item->color);
+          return;
+        }
+      }
+    }
+  }
+
+  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category)) {
+    if (!is_zero_v3(item->color)) {
+      copy_v3_v3(r_color, item->color);
+    }
+  }
 }
 
 static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
@@ -2648,6 +2709,13 @@ static void ui_panel_category_draw_content(
   float glyph_color[3] = {0.0f, 0.0f, 0.0f};
   const char *glyph = panel_category_glyph_lookup(
       wm, category_id, nullptr, &is_fallback_letter, glyph_color);
+
+  /* Safety net for built-in icons:
+   * icon tint must use category custom color even when glyph lookup resolves through
+   * fallback branches that may leave color unset in transient live-preview states. */
+  if (use_builtin_icon && is_zero_v3(glyph_color)) {
+    panel_category_color_lookup(wm, category_id, glyph_color);
+  }
 
   /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
   char fallback_glyph_buf[8];

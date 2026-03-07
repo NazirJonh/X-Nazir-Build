@@ -954,12 +954,8 @@ static wmOperatorStatus category_tab_color_preset_exec(bContext *C, wmOperator *
   wmOperator *target_op = ui::context_active_operator_get(C);
 
   if (!target_op) {
-    printf("[COLOR_PRESET] No active operator found!\n");
     return OPERATOR_CANCELLED;
   }
-
-  printf("[COLOR_PRESET] Setting color [%.2f,%.2f,%.2f] on operator '%s'\n",
-         color[0], color[1], color[2], target_op->idname ? target_op->idname : "NULL");
 
   /* Set the color in the target operator */
   RNA_float_set_array(target_op->ptr, "color", color);
@@ -996,33 +992,15 @@ static void SCREEN_OT_category_tab_color_preset(wmOperatorType *ot)
 /** \name Tag Color Preset Operator
  * \{ */
 
-#define DEBUG_TAG_COLOR_PRESET 1
-
 static wmOperatorStatus tag_color_preset_exec(bContext *C, wmOperator *op)
 {
-#if DEBUG_TAG_COLOR_PRESET
-  printf("[TAG_COLOR_PRESET] tag_color_preset_exec called\n");
-#endif
-
   /* Get preset value and convert to RGB */
   const int preset = RNA_int_get(op->ptr, "preset");
   float color[3];
   category_tab_color_preset_to_rgb(preset, color);
 
-#if DEBUG_TAG_COLOR_PRESET
-  printf("[TAG_COLOR_PRESET] preset=%d, color=[%.2f,%.2f,%.2f]\n", preset, color[0], color[1], color[2]);
-#endif
-
   /* Get the active button - it contains RNA data set by uiTemplateColorGlyphPresets */
   ui::Button *active_but = context_active_but_get_respect_popup(C);
-
-#if DEBUG_TAG_COLOR_PRESET
-  printf("[TAG_COLOR_PRESET] active_but=%p\n", active_but);
-  if (active_but) {
-    printf("[TAG_COLOR_PRESET]   but->rnapoin.data=%p, but->rnaprop=%p\n",
-           active_but->rnapoin.data, active_but->rnaprop);
-  }
-#endif
 
   PointerRNA ptr;
   PropertyRNA *prop = nullptr;
@@ -1031,26 +1009,16 @@ static wmOperatorStatus tag_color_preset_exec(bContext *C, wmOperator *op)
    * This works for ANY RNA pointer - existing tags in WM, operator properties, etc.
    */
   if (active_but && active_but->rnaprop != nullptr) {
-#if DEBUG_TAG_COLOR_PRESET
-    printf("[TAG_COLOR_PRESET] Using button RNA data (PRIMARY METHOD)\n");
-#endif
     ptr = active_but->rnapoin;
     prop = active_but->rnaprop;
   }
   else {
     /* FALLBACK: Try to find the tag in category_tags collection by name (for backward compatibility) */
-#if DEBUG_TAG_COLOR_PRESET
-    printf("[TAG_COLOR_PRESET] No button RNA data, trying fallback method...\n");
-#endif
 
     char tag_name[64];
     char propname[64];
     RNA_string_get(op->ptr, "tag_name", tag_name);
     RNA_string_get(op->ptr, "propname", propname);
-
-#if DEBUG_TAG_COLOR_PRESET
-    printf("[TAG_COLOR_PRESET] tag_name='%s', propname='%s'\n", tag_name, propname);
-#endif
 
     /* Get Window Manager */
     wmWindowManager *wm = CTX_wm_manager(C);
@@ -1064,9 +1032,6 @@ static wmOperatorStatus tag_color_preset_exec(bContext *C, wmOperator *op)
       {
         if (STREQ(item->name, tag_name)) {
           tag = item;
-#if DEBUG_TAG_COLOR_PRESET
-          printf("[TAG_COLOR_PRESET] Found tag in wm->category_tags!\n");
-#endif
           break;
         }
       }
@@ -1074,42 +1039,27 @@ static wmOperatorStatus tag_color_preset_exec(bContext *C, wmOperator *op)
 
     if (tag) {
       /* Existing tag - create PointerRNA to the tag in WM */
-#if DEBUG_TAG_COLOR_PRESET
-      printf("[TAG_COLOR_PRESET] Existing tag - creating RNA pointer to CategoryTagDef\n");
-#endif
       ptr = RNA_pointer_create_discrete(&wm->id, RNA_CategoryTagDef, tag);
       prop = RNA_struct_find_property(&ptr, propname);
     }
     else {
       /* No button RNA data and tag not found in WM */
-#if DEBUG_TAG_COLOR_PRESET
-      printf("[TAG_COLOR_PRESET] ERROR: No button RNA data and tag not in WM - CANCELLED!\n");
-#endif
       return OPERATOR_CANCELLED;
     }
   }
 
   if (!prop) {
-    printf("[TAG_COLOR_PRESET] ERROR: Property not found!\n");
     return OPERATOR_CANCELLED;
   }
 
   /* Verify property type (must be float color array) */
   if (RNA_property_type(prop) != PROP_FLOAT) {
-    printf("[TAG_COLOR_PRESET] ERROR: Property type is not FLOAT!\n");
     return OPERATOR_CANCELLED;
   }
 
   /* Set the color property */
-#if DEBUG_TAG_COLOR_PRESET
-  printf("[TAG_COLOR_PRESET] Setting color property...\n");
-#endif
   RNA_property_float_set_array(&ptr, prop, color);
   RNA_property_update(C, &ptr, prop);
-
-#if DEBUG_TAG_COLOR_PRESET
-  printf("[TAG_COLOR_PRESET] DONE! Color set successfully.\n");
-#endif
   return OPERATOR_FINISHED;
 }
 

@@ -931,6 +931,14 @@ bool is_display_glyph_codepoint(unsigned int codepoint);
 bool is_single_glyph_str(const char *str);
 
 /**
+ * Category tab shared utility helpers.
+ */
+bool category_tab_first_utf8_char_copy(const char *input, char *output, size_t output_max);
+bool category_tab_glyph_is_fallback_letter(const char *glyph, const char *category);
+int category_tab_icon_id_resolve_from_path(const char *icon_path);
+int category_tab_icon_id_resolve_from_key_path(const char *icon_key, const char *icon_path);
+
+/**
  * Category lookup utilities.
  */
 const char *find_panel_label_for_category(ARegion *region, const char *category);

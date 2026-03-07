@@ -117,71 +117,6 @@ bool category_tab_edit_dialog_is_open_for_category(const char *category)
 /** \name Hex/UTF-8 Conversion Utilities
  * \{ */
 
-bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8_max)
-{
-  if (!input || !input[0]) {
-    return false;
-  }
-
-  const char *hex_start = input;
-
-  /* Skip optional "0x" or "0X" prefix */
-  if (input[0] == '0' && (input[1] == 'x' || input[1] == 'X')) {
-    hex_start = input + 2;
-    if (!hex_start[0]) {
-      return false;
-    }
-  }
-
-  /* Check if remaining string is a valid hex number (1-6 hex digits for Unicode) */
-  size_t hex_len = strlen(hex_start);
-  if (hex_len == 0 || hex_len > 6) {
-    return false;
-  }
-
-  /* Verify all characters are hex digits */
-  for (size_t i = 0; i < hex_len; i++) {
-    if (!isxdigit(static_cast<unsigned char>(hex_start[i]))) {
-      return false;
-    }
-  }
-
-  /* Parse hex to unsigned int */
-  uint val = strtoul(hex_start, nullptr, 16);
-
-  /* Validate Unicode codepoint range */
-  if (val < 32 || val > 0x10FFFF) {
-    return false;
-  }
-
-  /* Convert to UTF-8 using Blender's built-in function */
-  const int utf8_len = BLI_str_utf8_from_unicode(val, utf8_out, utf8_max);
-
-  /* BLI_str_utf8_from_unicode does NOT null-terminate, so we must do it */
-  if (utf8_len > 0 && size_t(utf8_len) < utf8_max) {
-    utf8_out[utf8_len] = '\0';
-  }
-
-  return utf8_len > 0;
-}
-
-bool process_glyph_input(const char *input, char *output, size_t output_max)
-{
-  if (!input || !input[0]) {
-    output[0] = '\0';
-    return false;
-  }
-
-  /* Try to convert as hex codepoint first */
-  if (hex_codepoint_to_utf8(input, output, output_max)) {
-    return true;
-  }
-
-  /* Invalid input - return empty string */
-  output[0] = '\0';
-  return false;
-}
-
 static bool validate_glyph_hex_input(const char *glyph_raw)
 {
   if (!glyph_raw || glyph_raw[0] == '\0') {
@@ -215,59 +150,12 @@ static bool validate_glyph_hex_input(const char *glyph_raw)
   }
 
   /* Validate Unicode codepoint range. */
-  const uint val = strtoul(hex_start, nullptr, 16);
+  const unsigned int val = strtoul(hex_start, nullptr, 16);
   if (val < 32 || val > 0x10FFFF) {
     return false;
   }
 
   return true;
-}
-
-void utf8_to_hex_codepoint(const char *input, char *output, size_t output_max)
-{
-  if (!input || !input[0]) {
-    output[0] = '\0';
-    return;
-  }
-
-  /* Convert UTF-8 to codepoint using Blender's built-in function */
-  unsigned int codepoint = BLI_str_utf8_as_unicode_safe(input);
-
-  if (codepoint == BLI_UTF8_ERR || codepoint == 0) {
-    output[0] = '\0';
-    return;
-  }
-
-  /* Format as lowercase hex without "0x" prefix */
-  BLI_snprintf(output, output_max, "%x", codepoint);
-}
-
-bool is_display_glyph_codepoint(unsigned int codepoint)
-{
-  /* Private Use Areas (font icons like Material Symbols) */
-  if ((codepoint >= 0xE000 && codepoint <= 0xF8FF) ||
-      (codepoint >= 0xF0000 && codepoint <= 0xFFFFD) ||
-      (codepoint >= 0x100000 && codepoint <= 0x10FFFD))
-  {
-    return true;
-  }
-  /* Common symbol ranges */
-  if ((codepoint >= 0x2600 && codepoint <= 0x27BF) ||
-      (codepoint >= 0x1F300 && codepoint <= 0x1FAFF))
-  {
-    return true;
-  }
-  return false;
-}
-
-bool is_single_glyph_str(const char *str)
-{
-  if (!str || !str[0]) {
-    return false;
-  }
-  const int utf8_char_size = BLI_str_utf8_size_safe(str);
-  const size_t len = BLI_strnlen(str, 64);
-  return (len == 1) || (utf8_char_size > 0 && size_t(utf8_char_size) == len);
 }
 
 /** \} */
@@ -681,12 +569,9 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
     char preview_name[32] = "";
     RNA_string_get(op->ptr, "display_name", preview_name);
     const char *first_letter_source = (preview_name[0] != '\0') ? preview_name : category;
-    const int first_char_size = BLI_str_utf8_size_safe(first_letter_source);
-    if (first_char_size > 0 && first_char_size < int(sizeof(category_tab_preview_glyph))) {
-      memcpy(category_tab_preview_glyph, first_letter_source, first_char_size);
-      category_tab_preview_glyph[first_char_size] = '\0';
-    }
-    else {
+    if (!category_tab_first_utf8_char_copy(
+            first_letter_source, category_tab_preview_glyph, sizeof(category_tab_preview_glyph)))
+    {
       category_tab_preview_glyph[0] = '\0';
     }
   }
@@ -700,12 +585,9 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   }
   else if (is_fallback) {
     /* default_glyph is nullptr but is_fallback is true - use first char of category */
-    const int first_char_size = BLI_str_utf8_size_safe(category);
-    if (first_char_size > 0) {
-      memcpy(category_tab_preview_glyph, category, first_char_size);
-      category_tab_preview_glyph[first_char_size] = '\0';
-    }
-    else {
+    if (!category_tab_first_utf8_char_copy(
+            category, category_tab_preview_glyph, sizeof(category_tab_preview_glyph)))
+    {
       category_tab_preview_glyph[0] = '\0';
     }
   }

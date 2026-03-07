@@ -449,6 +449,129 @@ static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
                                                      bool *r_is_reserved,
                                                      eCategoryGlyphBaseSource *r_source_type);
 
+static const char *panel_category_glyph_lookup_override(const wmWindowManager *wm,
+                                                        const char *category,
+                                                        bool *r_is_fallback_letter,
+                                                        float r_color[3],
+                                                        bool *r_handled)
+{
+  *r_handled = false;
+
+  if (!(wm && category_glyph_list_is_valid(&wm->category_glyph_overrides))) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+           wm->category_glyph_overrides.first);
+       item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (!STREQ(item->category, category)) {
+      continue;
+    }
+
+    if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
+      if (r_color && !is_zero_v3(item->color)) {
+        copy_v3_v3(r_color, item->color);
+      }
+      if (r_is_fallback_letter) {
+        *r_is_fallback_letter = true;
+      }
+      *r_handled = true;
+      return nullptr;
+    }
+
+    if (item->glyph[0] != '\0') {
+      const bool is_fallback_letter = category_tab_glyph_is_fallback_letter(item->glyph, category);
+
+      if (is_fallback_letter) {
+        if (r_color && !is_zero_v3(item->color)) {
+          copy_v3_v3(r_color, item->color);
+        }
+        /* Empty override used for tags only, keep searching mapping/defaults. */
+        if (is_zero_v3(item->color) && item->display_name[0] == '\0') {
+          continue;
+        }
+        if (r_is_fallback_letter) {
+          *r_is_fallback_letter = true;
+        }
+        *r_handled = true;
+        return nullptr;
+      }
+
+      if (r_color) {
+        copy_v3_v3(r_color, item->color);
+      }
+      *r_handled = true;
+      return item->glyph;
+    }
+
+    /* Override has no glyph: may be explicit clear OR tags-only carrier.
+     * In both cases continue to mappings/defaults; preserve custom color if provided. */
+    if (r_color && !is_zero_v3(item->color)) {
+      copy_v3_v3(r_color, item->color);
+    }
+    continue;
+  }
+
+  return nullptr;
+}
+
+static const char *panel_category_glyph_lookup_mapping(const wmWindowManager *wm,
+                                                       const char *category,
+                                                       bool *r_is_fallback_letter,
+                                                       float r_color[3],
+                                                       bool *r_handled)
+{
+  *r_handled = false;
+
+  const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category);
+  if (!item) {
+    return nullptr;
+  }
+
+  if (r_color && is_zero_v3(r_color) && !is_zero_v3(item->color)) {
+    copy_v3_v3(r_color, item->color);
+  }
+
+  if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
+    if (r_is_fallback_letter) {
+      *r_is_fallback_letter = true;
+    }
+    *r_handled = true;
+    return nullptr;
+  }
+
+  if (item->glyph[0] != '\0' && !category_tab_glyph_is_fallback_letter(item->glyph, category)) {
+    *r_handled = true;
+    return item->glyph;
+  }
+
+  if (item->default_glyph[0] != '\0' &&
+      !category_tab_glyph_is_fallback_letter(item->default_glyph, category))
+  {
+    *r_handled = true;
+    return item->default_glyph;
+  }
+
+  return nullptr;
+}
+
+static const char *panel_category_glyph_lookup_apply_fallback(const char *category,
+                                                              bool *r_is_fallback_letter)
+{
+  if (r_is_fallback_letter) {
+    /* If category itself is a glyph, don't treat it as fallback letter. */
+    *r_is_fallback_letter = !category_name_is_glyph(category);
+  }
+
+  static char first_char_buf[8];
+  if (category_tab_first_utf8_char_copy(category, first_char_buf, sizeof(first_char_buf))) {
+    return first_char_buf;
+  }
+  return category;
+}
+
 const char *panel_category_glyph_lookup(const wmWindowManager *wm,
                                         const char *category,
                                         const PanelType *panel_type,
@@ -464,98 +587,23 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
     zero_v3(r_color);
   }
 
-  /* 1. Check user overrides in wm->category_glyph_overrides. */
-  if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      if (STREQ(item->category, category)) {
-        if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
-          if (r_color && !is_zero_v3(item->color)) {
-            copy_v3_v3(r_color, item->color);
-          }
-          if (r_is_fallback_letter) {
-            *r_is_fallback_letter = true;
-          }
-          return nullptr;
-        }
-
-        if (item->glyph[0] != '\0') {
-          const bool is_fallback_letter = category_tab_glyph_is_fallback_letter(item->glyph,
-                                                                                category);
-
-          if (is_fallback_letter) {
-            /* Glyph is the first character of category - treat as fallback letter. */
-            if (r_color && !is_zero_v3(item->color)) {
-              copy_v3_v3(r_color, item->color);
-            }
-            /* If we found a fallback letter but NO color and NO display name override,
-             * it might be an "empty" override created for tags. Continue searching
-             * in mappings to find the real default color/glyph. */
-            if (is_zero_v3(item->color) && item->display_name[0] == '\0') {
-              continue;
-            }
-            if (r_is_fallback_letter) {
-              *r_is_fallback_letter = true;
-            }
-            return nullptr;
-          }
-          if (r_color) {
-            copy_v3_v3(r_color, item->color);
-          }
-          return item->glyph;
-        }
-        /* Override has no glyph - this means glyph was explicitly cleared OR
-         * this is an "empty" override created just for tags. */
-        if (item->glyph[0] == '\0') {
-          if (r_color && !is_zero_v3(item->color)) {
-            copy_v3_v3(r_color, item->color);
-          }
-          if (is_zero_v3(item->color) && item->display_name[0] == '\0') {
-            /* No glyph, no color, no name - continue searching in mappings. */
-            continue;
-          }
-          /* If we have an override with color/name but no glyph, we should CONTINUE
-           * searching in mappings and default mappings to find a real glyph before
-           * falling back to the first character. */
-          continue;
-        }
-      }
-    }
+  bool handled = false;
+  if (const char *override_glyph = panel_category_glyph_lookup_override(
+          wm, category, r_is_fallback_letter, r_color, &handled))
+  {
+    return override_glyph;
+  }
+  if (handled) {
+    return nullptr;
   }
 
-  /* 2. Check global mappings in wm->category_glyph_mappings.
-   * This collection is synced from Python and is the single source of truth. */
-  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category)) {
-    if (r_color && is_zero_v3(r_color) && !is_zero_v3(item->color)) {
-      copy_v3_v3(r_color, item->color);
-    }
-
-    if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
-      if (r_is_fallback_letter) {
-        *r_is_fallback_letter = true;
-      }
-      return nullptr;
-    }
-
-    if (item->glyph[0] != '\0') {
-      /* Check if this is actually a fallback letter. */
-      if (category_tab_glyph_is_fallback_letter(item->glyph, category)) {
-        /* Fallback letter in current glyph: keep searching below for a real default glyph. */
-      }
-      else {
-        return item->glyph;
-      }
-    }
-
-    /* Use default glyph from mapping when current glyph is empty/fallback. */
-    if (item->default_glyph[0] != '\0') {
-      if (!category_tab_glyph_is_fallback_letter(item->default_glyph, category)) {
-        return item->default_glyph;
-      }
-    }
+  if (const char *mapping_glyph = panel_category_glyph_lookup_mapping(
+          wm, category, r_is_fallback_letter, r_color, &handled))
+  {
+    return mapping_glyph;
+  }
+  if (handled) {
+    return nullptr;
   }
 
   /* 3. Check PanelType.icon_glyph. */
@@ -590,17 +638,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
     return panel_type->icon_glyph;
   }
 
-  /* 4. Fallback: return first character of category. */
-  if (r_is_fallback_letter) {
-    /* If the category name itself is a glyph (high Unicode), don't treat it as a fallback letter.
-     * This avoids adding extra_shift to these icons. */
-    *r_is_fallback_letter = !category_name_is_glyph(category);
-  }
-  static char first_char_buf[8];
-  if (category_tab_first_utf8_char_copy(category, first_char_buf, sizeof(first_char_buf))) {
-    return first_char_buf;
-  }
-  return category;
+  return panel_category_glyph_lookup_apply_fallback(category, r_is_fallback_letter);
 }
 
 static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
@@ -1536,6 +1574,55 @@ static std::string get_tag_combination_key(const wmWindowManager *wm, View3D *v3
   return key;
 }
 
+static void parse_json_array_of_strings(const char *json, Vector<std::string> &r_items)
+{
+  if (!json) {
+    return;
+  }
+
+  const char *p = json;
+  while (*p && *p != '[') {
+    p++;
+  }
+  if (*p != '[') {
+    return;
+  }
+  p++;
+
+  while (*p && *p != ']') {
+    while (*p && ELEM(*p, ' ', '\n', '\r', '\t', ',')) {
+      p++;
+    }
+    if (*p == ']') {
+      break;
+    }
+
+    if (*p != '"') {
+      p++;
+      continue;
+    }
+    p++;
+
+    const char *start = p;
+    while (*p && *p != '"') {
+      if (*p == '\\' && *(p + 1)) {
+        p += 2;
+      }
+      else {
+        p++;
+      }
+    }
+
+    if (*p == '"') {
+      std::string value(start, p - start);
+      p++;
+      if (!value.empty()) {
+        r_items.append(value);
+      }
+    }
+  }
+}
+
 /**
  * Load category order from JSON for a specific tag combination.
  * Calls Python function get_category_order().
@@ -1598,45 +1685,7 @@ static Vector<std::string> load_category_order_from_json(const bContext *C, cons
     return result;
   }
 
-  /* Parse JSON array: ["Item", "Tool", ...] */
-  const char *p = result_str;
-
-  /* Skip to array start */
-  while (*p && *p != '[') p++;
-  if (*p == '[') p++;
-  else {
-    MEM_delete(result_str);
-    return result;
-  }
-
-  /* Parse array elements */
-  while (*p && *p != ']') {
-    /* Skip whitespace and commas */
-    while (*p && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t' || *p == ',')) p++;
-    if (*p == ']') break;
-
-    /* Skip to string start (JSON uses double quotes) */
-    if (*p != '"') {
-      p++;
-      continue;
-    }
-    p++; /* Skip opening quote */
-
-    const char *start = p;
-    /* Find end of string, handling escape sequences */
-    while (*p && *p != '"') {
-      if (*p == '\\' && *(p+1)) p += 2;
-      else p++;
-    }
-
-    if (*p == '"') {
-      std::string cat_id = std::string(start, p - start);
-      p++; /* Skip closing quote */
-      if (!cat_id.empty()) {
-        result.append(cat_id);
-      }
-    }
-  }
+  parse_json_array_of_strings(result_str, result);
 
   MEM_delete(result_str);
   return result;

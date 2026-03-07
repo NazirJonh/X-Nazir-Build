@@ -50,6 +50,8 @@
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 
+#include "../interface/interface_tag_bar.hh"
+
 #include "UI_view2d.hh"
 
 #include "DEG_depsgraph.hh"
@@ -596,6 +598,14 @@ static SpaceLink *node_create(const ScrArea * /*area*/, const Scene * /*scene*/)
   BLI_addtail(&snode->regionbase, region);
   region->regiontype = RGN_TYPE_HEADER;
   region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
+
+  /* tag bar */
+  region = BKE_area_region_new();
+  BLI_addtail(&snode->regionbase, region);
+  region->regiontype = RGN_TYPE_TAG_BAR;
+  region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
+  region->flag = 0;
+  region->overlap = true;
 
   /* asset shelf */
   region = BKE_area_region_new();
@@ -1789,6 +1799,14 @@ static void node_asset_shelf_region_init(wmWindowManager *wm, ARegion *region)
   asset::shelf::region_init(wm, region);
 }
 
+static int node_tag_bar_region_snap_size(const ARegion * /*region*/, int size, int axis)
+{
+  if (axis == 'y') {
+    return (size < UI_UNIT_Y) ? size : UI_UNIT_Y;
+  }
+  return size;
+}
+
 }  // namespace ed::space_node
 
 void ED_spacetype_node()
@@ -1850,6 +1868,21 @@ void ED_spacetype_node()
   art->draw = node_header_region_draw;
 
   BLI_addhead(&st->regiontypes, art);
+
+  /* regions: tag bar */
+  art = MEM_new_zeroed<ARegionType>("spacetype node tag bar region");
+  art->regionid = RGN_TYPE_TAG_BAR;
+  art->prefsizex = 0;
+  art->prefsizey = UI_UNIT_Y;
+  art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D;
+  art->listener = ui::buttons_tag_bar_region_listener;
+  art->message_subscribe = ui::buttons_tag_bar_region_message_subscribe;
+  art->init = ui::buttons_tag_bar_region_init;
+  art->draw = ui::buttons_tag_bar_region_draw;
+  art->snap_size = node_tag_bar_region_snap_size;
+  BLI_addhead(&st->regiontypes, art);
+
+  ui::tag_bar_filter_popover_panel_register(art);
 
   /* regions: asset shelf */
   art = MEM_new_zeroed<ARegionType>("spacetype node asset shelf region");

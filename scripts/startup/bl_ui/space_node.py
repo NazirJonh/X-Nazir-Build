@@ -37,6 +37,40 @@ from bl_ui.properties_data_light import (
 )
 
 
+_CATEGORY_TAG_MODE_OBJECT = 1 << 0
+_CATEGORY_TAG_MODE_EDIT = 1 << 1
+
+
+def _node_current_tag_mode_flag(snode):
+    if snode.tree_type == 'GeometryNodeTree':
+        return _CATEGORY_TAG_MODE_EDIT
+    if snode.tree_type == 'ShaderNodeTree':
+        return _CATEGORY_TAG_MODE_OBJECT
+    return _CATEGORY_TAG_MODE_OBJECT
+
+
+def _tag_glyph_display(glyph):
+    if not glyph:
+        return ""
+    try:
+        if all(c in "0123456789abcdefABCDEF" for c in glyph) and len(glyph) <= 8:
+            return chr(int(glyph, 16))
+    except Exception:
+        pass
+    return glyph
+
+
+def _node_visible_tags_for_current_mode(context):
+    wm = context.window_manager
+    snode = context.space_data
+    mode_flag = _node_current_tag_mode_flag(snode)
+
+    return [
+        tag for tag in wm.category_tags
+        if tag.glyph and (tag.mode_flags == 0 or (tag.mode_flags & mode_flag))
+    ]
+
+
 class NODE_HT_header(Header):
     bl_space_type = 'NODE_EDITOR'
 
@@ -256,7 +290,6 @@ class NODE_HT_header(Header):
         sub.active = overlay.show_overlays and row.active
         sub.popover(panel="NODE_PT_overlay", text="")
 
-
 class NODE_PT_gizmo_display(Panel):
     bl_space_type = 'NODE_EDITOR'
     bl_region_type = 'HEADER'
@@ -291,6 +324,70 @@ class NODE_MT_editor_menus(Menu):
         layout.menu("NODE_MT_select")
         layout.menu("NODE_MT_add")
         layout.menu("NODE_MT_node")
+
+
+class NODE_HT_tag_bar(Header):
+    bl_space_type = 'NODE_EDITOR'
+    bl_region_type = 'TAG_BAR'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.separator_spacer()
+
+        snode = context.space_data
+        wm = context.window_manager
+        row = layout.row(align=True)
+
+        if not snode.show_region_tag_bar:
+            return
+
+        active_tags = getattr(snode, "active_tag_filter_tags", "")
+        active_tags_set = set()
+        if active_tags:
+            for tag_name in active_tags.split(','):
+                tag_name = tag_name.strip()
+                if tag_name:
+                    active_tags_set.add(tag_name)
+
+        tags = _node_visible_tags_for_current_mode(context)
+
+        if not wm.category_tags or not tags:
+            row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD').operator_idname = 'wm.category_tag_create'
+            row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
+            return
+
+        show_names = getattr(wm, "show_tag_names", False)
+        show_active_only = getattr(wm, "show_tag_names_active_only", False)
+
+        for i, tag in enumerate(tags):
+            glyph = _tag_glyph_display(tag.glyph)
+            depress = tag.name in active_tags_set
+            center_glyph = not show_names or (show_active_only and not depress)
+
+            row.tag_button(
+                "view3d.tag_bar_toggle",
+                tag_name=tag.name,
+                glyph=glyph,
+                color_r=tag.color[0],
+                color_g=tag.color[1],
+                color_b=tag.color[2],
+                depress=depress,
+                center_glyph=center_glyph,
+                tooltip=tag.name,
+            )
+
+            if i < len(tags) - 1:
+                row.separator()
+
+        row.separator()
+        row.operator(
+            "view3d.tag_bar_filter_toggle",
+            text="",
+            icon='FILTER',
+            depress=bool(getattr(snode, "tag_filter_enabled", False)),
+        )
+        sub = row.row(align=True)
+        sub.popover(panel="VIEW3D_PT_tag_bar_filter_popover", text="", icon='DOWNARROW_HLT')
 
 
 class NODE_MT_add(node_add_menu.AddNodeMenu):
@@ -363,6 +460,7 @@ class NODE_MT_view(Menu):
 
         layout.prop(snode, "show_region_toolbar")
         layout.prop(snode, "show_region_ui")
+        layout.prop(snode, "show_region_tag_bar")
 
         if is_compositor:
             layout.prop(snode, "show_region_asset_shelf")
@@ -1203,6 +1301,7 @@ class NODE_AST_compositor(bpy.types.AssetShelf):
 
 classes = (
     NODE_HT_header,
+    NODE_HT_tag_bar,
     NODE_MT_editor_menus,
     NODE_MT_add,
     NODE_MT_swap,

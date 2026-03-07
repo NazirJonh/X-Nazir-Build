@@ -110,20 +110,66 @@ TagBarRuntimeData *get_tag_bar_data_global(const bContext *C)
     g_tag_bar_cache[wm] = data;
   }
 
-  /* Get View3D for filter state */
-  ScrArea *area = CTX_wm_area(C);
-  View3D *v3d = nullptr;
-  if (area && area->spacetype == SPACE_VIEW3D) {
-    v3d = static_cast<View3D *>(area->spacedata.first);
-  }
+  TagFilterStateRef state{};
+  const bool has_state = tag_filter_state_from_context(C, &state);
 
   /* Update data if needs_update flag is set */
   if (data->needs_update) {
-    tag_bar_buttons_update(C, wm, v3d, data);
+    tag_bar_buttons_update(C, wm, has_state ? &state : nullptr, data);
     data->needs_update = false;
   }
 
   return data;
+}
+
+bool tag_filter_state_from_area(const ScrArea *area, TagFilterStateRef *r_state)
+{
+  if (!r_state) {
+    return false;
+  }
+
+  *r_state = TagFilterStateRef{};
+  if (!area || !area->spacedata.first) {
+    return false;
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+      r_state->active_tags = v3d->active_tag_filter_tags;
+      r_state->filter_enabled = &v3d->tag_filter_enabled;
+      r_state->scroll_offset = &v3d->tag_bar_scroll_offset;
+      return true;
+    }
+    case SPACE_PROPERTIES: {
+      SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
+      r_state->active_tags = sbuts->active_tag_filter_tags;
+      r_state->filter_enabled = &sbuts->tag_filter_enabled;
+      r_state->scroll_offset = &sbuts->tag_bar_scroll_offset;
+      return true;
+    }
+    case SPACE_NODE: {
+      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
+      r_state->active_tags = snode->active_tag_filter_tags;
+      r_state->filter_enabled = &snode->tag_filter_enabled;
+      r_state->scroll_offset = &snode->tag_bar_scroll_offset;
+      return true;
+    }
+    case SPACE_IMAGE: {
+      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+      r_state->active_tags = sima->active_tag_filter_tags;
+      r_state->filter_enabled = &sima->tag_filter_enabled;
+      r_state->scroll_offset = &sima->tag_bar_scroll_offset;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool tag_filter_state_from_context(const bContext *C, TagFilterStateRef *r_state)
+{
+  return tag_filter_state_from_area(CTX_wm_area(C), r_state);
 }
 
 /**
@@ -277,7 +323,7 @@ bool has_all_tags_active(const wmWindowManager *wm,
  */
 void tag_bar_buttons_update(const bContext *C,
                             const wmWindowManager *wm,
-                            View3D *v3d,
+                            const TagFilterStateRef *state,
                             TagBarRuntimeData *data)
 {
   if (!data) {
@@ -289,8 +335,8 @@ void tag_bar_buttons_update(const bContext *C,
 
   /* Get active filter tags from View3D */
   char active_tags[256] = "";
-  if (v3d) {
-    STRNCPY(active_tags, v3d->active_tag_filter_tags);
+  if (state && state->active_tags) {
+    STRNCPY(active_tags, state->active_tags);
   }
 
   /* Get current mode bit for filtering. */
@@ -431,12 +477,8 @@ static bool activate_tag_by_index(bContext *C, int tag_index)
   }
 
   ScrArea *area = CTX_wm_area(C);
-  if (!area || area->spacetype != SPACE_VIEW3D) {
-    return false;
-  }
-
-  View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-  if (!v3d) {
+  TagFilterStateRef state{};
+  if (!tag_filter_state_from_area(area, &state) || !state.active_tags || !state.filter_enabled) {
     return false;
   }
 
@@ -464,14 +506,14 @@ static bool activate_tag_by_index(bContext *C, int tag_index)
   }
 
   /* Set the new active tag */
-  STRNCPY_RLEN(v3d->active_tag_filter_tags, target_btn->tag_name);
+  BLI_strncpy(state.active_tags, target_btn->tag_name, 256);
 
   /* Enable tag filter */
-  v3d->tag_filter_enabled = 1;
+  *state.filter_enabled = 1;
 
   /* Update button states immediately for next event handling */
   wmWindowManager *wm = CTX_wm_manager(C);
-  tag_bar_buttons_update(C, wm, v3d, data);
+  tag_bar_buttons_update(C, wm, &state, data);
 
   /* Trigger redraw */
   WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
@@ -497,12 +539,8 @@ static bool cycle_active_tag(bContext *C, int direction)
   }
 
   ScrArea *area = CTX_wm_area(C);
-  if (!area || area->spacetype != SPACE_VIEW3D) {
-    return false;
-  }
-
-  View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-  if (!v3d) {
+  TagFilterStateRef state{};
+  if (!tag_filter_state_from_area(area, &state) || !state.active_tags) {
     return false;
   }
 
@@ -519,7 +557,7 @@ static bool cycle_active_tag(bContext *C, int direction)
   }
 
   /* Only cycle if exactly one tag is active */
-  const int active_count = count_active_tags(v3d->active_tag_filter_tags);
+  const int active_count = count_active_tags(state.active_tags);
   if (active_count != 1) {
     return false;
   }
@@ -641,12 +679,8 @@ void tag_button_click_by_mode(bContext *C, void *arg1, void *arg2)
   const int mode_flags = POINTER_AS_INT(arg2);
   (void)mode_flags; /* Unused - deprecated function */
 
-  /* Get View3D to update the filter mask */
-  ScrArea *area = CTX_wm_area(C);
-  View3D *v3d = nullptr;
-  if (area && area->spacetype == SPACE_VIEW3D) {
-    v3d = static_cast<View3D *>(area->spacedata.first);
-  }
+  TagFilterStateRef state{};
+  const bool has_state = tag_filter_state_from_context(C, &state);
 
   /* NOTE: This function is deprecated. Tag toggling is now handled by the operator in view3d_ops.cc.
    * The operator directly modifies the active_tag_filter_tags string. */
@@ -654,7 +688,7 @@ void tag_button_click_by_mode(bContext *C, void *arg1, void *arg2)
   /* Update cache and redraw */
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
   if (data) {
-    tag_bar_buttons_update(C, wm, v3d, data);
+    tag_bar_buttons_update(C, wm, has_state ? &state : nullptr, data);
     data->needs_update = false;  /* Just updated, no need to update again */
   }
 
@@ -685,8 +719,14 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
     return;
   }
 
-  SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
-  if (!sbuts) {
+  if (ELEM(area->spacetype, SPACE_NODE, SPACE_IMAGE)) {
+    /* Node/Image TAG_BAR is drawn from Python Header classes for full UI parity with View3D. */
+    ED_region_header(C, region);
+    return;
+  }
+
+  TagFilterStateRef state{};
+  if (!tag_filter_state_from_area(area, &state)) {
     return;
   }
 
@@ -694,7 +734,15 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 
   /* Get or create data */
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
-  if (!data || data->buttons.is_empty()) {
+  if (!data) {
+    return;
+  }
+
+  const bool has_visible_buttons = std::any_of(
+      data->buttons.begin(), data->buttons.end(), [](const TagButton &btn) { return btn.is_visible; });
+
+  if (!has_visible_buttons) {
+    ED_region_header(C, region);
     return;
   }
 
@@ -714,10 +762,10 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
                                 style);
 
   /* Calculate scroll offset */
-  int scroll_offset = sbuts->tag_bar_scroll_offset;
+  int scroll_offset = state.scroll_offset ? *state.scroll_offset : 0;
   if (scroll_offset < 0) {
     data->max_scroll = std::max(0, data->total_width - region->winx + 20);
-    scroll_offset = -sbuts->tag_bar_scroll_offset;
+    scroll_offset = -scroll_offset;
   }
 
   /* Draw buttons via UI API */
@@ -773,7 +821,7 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 
     if (but) {
       but->func = tag_button_click_by_mode;
-      but->func_arg1 = sbuts;
+      but->func_arg1 = wm;
       /* Find the mode_flags for this tag */
       if (wm && category_tag_list_is_valid(&wm->category_tags)) {
         for (const CategoryTagDef *tag_def =
@@ -804,7 +852,7 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
     [[maybe_unused]] Layout &row = layout.row(false);
     uiDefBut(block, ButtonType::Scroll, "",
              0, 0, UI_UNIT_X, UI_UNIT_Y,
-             &sbuts->tag_bar_scroll_offset, 0.0f, float(data->max_scroll),
+             state.scroll_offset, 0.0f, float(data->max_scroll),
              "");
   }
 

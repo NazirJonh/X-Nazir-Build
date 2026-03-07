@@ -38,6 +38,7 @@
 
 #include "DNA_object_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
@@ -1473,6 +1474,32 @@ static bool compare_reserved_categories_by_priority(
  */
 uint32_t get_current_tag_mode_flag(const bContext *C)
 {
+  ScrArea *area = CTX_wm_area(C);
+  if (area) {
+    if (area->spacetype == SPACE_NODE) {
+      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
+      if (snode) {
+        if (STREQ(snode->tree_idname, "GeometryNodeTree")) {
+          return static_cast<uint32_t>(CategoryTagMode::EDIT_MODE);
+        }
+        if (STREQ(snode->tree_idname, "ShaderNodeTree")) {
+          return static_cast<uint32_t>(CategoryTagMode::OBJECT_MODE);
+        }
+      }
+    }
+    else if (area->spacetype == SPACE_IMAGE) {
+      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+      if (sima) {
+        if (sima->mode == SI_MODE_PAINT) {
+          return static_cast<uint32_t>(CategoryTagMode::TEXTURE_PAINT);
+        }
+        if (sima->mode == SI_MODE_UV) {
+          return static_cast<uint32_t>(CategoryTagMode::UV_EDIT);
+        }
+      }
+    }
+  }
+
   Object *ob = CTX_data_active_object(C);
   if (!ob) {
     return static_cast<uint32_t>(CategoryTagMode::OBJECT_MODE);
@@ -1536,6 +1563,20 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
       if (sbuts) {
         STRNCPY(active_tags, sbuts->active_tag_filter_tags);
         filter_enabled = sbuts->tag_filter_enabled;
+      }
+    }
+    else if (area->spacetype == SPACE_NODE) {
+      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
+      if (snode) {
+        STRNCPY(active_tags, snode->active_tag_filter_tags);
+        filter_enabled = snode->tag_filter_enabled;
+      }
+    }
+    else if (area->spacetype == SPACE_IMAGE) {
+      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+      if (sima) {
+        STRNCPY(active_tags, sima->active_tag_filter_tags);
+        filter_enabled = sima->tag_filter_enabled;
       }
     }
   }
@@ -1666,25 +1707,58 @@ static int get_category_order_index(const bContext *C, ARegion *region, const ch
  * Tags are sorted alphabetically to ensure consistent keys.
  * Returns empty string for no filter, "Tag1;Tag2" for multiple tags.
  */
-static std::string get_tag_combination_key(const wmWindowManager *wm, View3D *v3d)
+static std::string get_tag_combination_key(const wmWindowManager *wm, const bContext *C)
 {
   UNUSED_VARS(wm);  /* Reserved for future use */
 
-  if (!v3d) {
+  char active_tags_buffer[256] = "";
+  bool filter_enabled = false;
+
+  ScrArea *area = CTX_wm_area(C);
+  if (!area || !area->spacedata.first) {
     return "";  /* No filter active */
   }
 
-  if (!v3d->tag_filter_enabled) {
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+      STRNCPY(active_tags_buffer, v3d->active_tag_filter_tags);
+      filter_enabled = v3d->tag_filter_enabled;
+      break;
+    }
+    case SPACE_PROPERTIES: {
+      SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
+      STRNCPY(active_tags_buffer, sbuts->active_tag_filter_tags);
+      filter_enabled = sbuts->tag_filter_enabled;
+      break;
+    }
+    case SPACE_NODE: {
+      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
+      STRNCPY(active_tags_buffer, snode->active_tag_filter_tags);
+      filter_enabled = snode->tag_filter_enabled;
+      break;
+    }
+    case SPACE_IMAGE: {
+      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+      STRNCPY(active_tags_buffer, sima->active_tag_filter_tags);
+      filter_enabled = sima->tag_filter_enabled;
+      break;
+    }
+    default:
+      return "";
+  }
+
+  if (!filter_enabled) {
     return "";  /* Filter disabled - always use default key */
   }
 
-  if (v3d->active_tag_filter_tags[0] == '\0') {
+  if (active_tags_buffer[0] == '\0') {
     return "";  /* Filter enabled but no tags */
   }
 
   /* Parse and collect tag names (without mutating source buffer). */
   Vector<std::string> active_tags;
-  category_tab_split_tags(v3d->active_tag_filter_tags, active_tags, ",;");
+  category_tab_split_tags(active_tags_buffer, active_tags, ",;");
 
   if (active_tags.is_empty()) {
     return "";
@@ -2001,14 +2075,9 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
 {
   ScrArea *area = CTX_wm_area(C);
   const wmWindowManager *wm = CTX_wm_manager(C);
-  View3D *v3d = nullptr;
-
-  if (area && area->spacetype == SPACE_VIEW3D) {
-    v3d = static_cast<View3D *>(area->spacedata.first);
-  }
 
   /* Get tag combination key for current filter state */
-  std::string tag_key = get_tag_combination_key(wm, v3d);
+  std::string tag_key = get_tag_combination_key(wm, C);
 
   Vector<std::string> final_order;
   int insert_idx = 0;
@@ -2080,14 +2149,9 @@ void category_tabs_apply_drop_insert(bContext *C,
 
   ScrArea *area = CTX_wm_area(C);
   const wmWindowManager *wm = CTX_wm_manager(C);
-  View3D *v3d = nullptr;
-
-  if (area && area->spacetype == SPACE_VIEW3D) {
-    v3d = static_cast<View3D *>(area->spacedata.first);
-  }
 
   /* Get tag combination key for current filter state. */
-  std::string tag_key = get_tag_combination_key(wm, v3d);
+  std::string tag_key = get_tag_combination_key(wm, C);
 
   Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
 
@@ -2187,14 +2251,9 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
 {
   ScrArea *area = CTX_wm_area(C);
   const wmWindowManager *wm = CTX_wm_manager(C);
-  View3D *v3d = nullptr;
-
-  if (area && area->spacetype == SPACE_VIEW3D) {
-    v3d = static_cast<View3D *>(area->spacedata.first);
-  }
 
   /* Get tag combination key for current filter state */
-  std::string tag_key = get_tag_combination_key(wm, v3d);
+  std::string tag_key = get_tag_combination_key(wm, C);
 
   /* Load order from JSON for this tag combination */
   Vector<std::string> json_order = load_category_order_from_json(C, tag_key.c_str());

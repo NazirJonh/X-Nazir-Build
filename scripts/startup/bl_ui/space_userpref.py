@@ -106,6 +106,23 @@ def get_current_tag_mode_flag(context):
     This is the Python equivalent of the C++ get_current_tag_mode_flag() function.
     Returns a bit flag corresponding to the current object mode.
     """
+    area = getattr(context, "area", None)
+    if area is not None:
+        if area.type == 'NODE_EDITOR':
+            snode = context.space_data
+            if snode is not None:
+                if snode.tree_type == 'GeometryNodeTree':
+                    return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0)
+                if snode.tree_type == 'ShaderNodeTree':
+                    return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("OBJECT_MODE", 0)
+        elif area.type == 'IMAGE_EDITOR':
+            sima = context.space_data
+            if sima is not None:
+                if sima.mode == 'PAINT':
+                    return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("TEXTURE_PAINT", 0)
+                if sima.mode == 'UV':
+                    return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("UV_EDIT", 0)
+
     ob = context.active_object
     if not ob:
         return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("OBJECT_MODE", 0)
@@ -3429,7 +3446,7 @@ class USERPREF_OT_category_tag_create(Operator):
     current_mode_only: bpy.props.BoolProperty(
         name="Current Mode Only",
         description="Show tag only in the current object mode (otherwise shows in default modes)",
-        default=False
+        default=True
     )
 
     @with_context_check
@@ -3524,6 +3541,7 @@ class USERPREF_OT_category_tag_create(Operator):
         self.glyph_search = ""
         # Set default glyph for tags (not category glyph)
         self.glyph = DEFAULT_TAG_GLYPH_HEX
+        self.current_mode_only = True
         print(
             f"[DEBUG CREATE_TAG invoke] prepared glyph='{self.glyph}', "
             f"glyph_search='{self.glyph_search}', category='{self.category}'"

@@ -13,6 +13,9 @@ struct ARegion;
 struct ARegionType;
 struct bContext;
 struct CategoryTagDef;
+struct ScrArea;
+struct SpaceImage;
+struct SpaceNode;
 struct wmEvent;
 struct wmRegionListenerParams;
 struct wmRegionMessageSubscribeParams;
@@ -30,11 +33,18 @@ namespace blender::ui {
 
 using blender::ARegion;
 using blender::bContext;
+using blender::ScrArea;
 using blender::wmEvent;
 using blender::wmWindowManager;
 using blender::View3D;
 using blender::wmRegionListenerParams;
 using blender::wmRegionMessageSubscribeParams;
+
+struct TagFilterStateRef {
+  char *active_tags = nullptr;
+  char *filter_enabled = nullptr;
+  int *scroll_offset = nullptr;
+};
 
 /**
  * Data for a single tag button in the tag bar.
@@ -74,6 +84,17 @@ struct TagBarRuntimeData {
 TagBarRuntimeData *get_tag_bar_data_global(const bContext *C);
 
 /**
+ * Resolve pointers to tag-filter state fields for a given area.
+ * Supports View3D, Properties, Node Editor and Image Editor.
+ */
+bool tag_filter_state_from_area(const ScrArea *area, TagFilterStateRef *r_state);
+
+/**
+ * Resolve pointers to tag-filter state fields for current context area.
+ */
+bool tag_filter_state_from_context(const bContext *C, TagFilterStateRef *r_state);
+
+/**
  * Mark all cached tag bar data as needing update.
  * Called from listeners when glyphs or tags change.
  */
@@ -88,7 +109,7 @@ void tag_bar_mark_all_dirty();
  */
 void tag_bar_buttons_update(const bContext *C,
                             const blender::wmWindowManager *wm,
-                            blender::View3D *v3d,
+                            const TagFilterStateRef *state,
                             TagBarRuntimeData *data);
 
 /**

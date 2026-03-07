@@ -39,6 +39,40 @@ from bpy.app.translations import (
 )
 
 
+_CATEGORY_TAG_MODE_TEXTURE_PAINT = 1 << 5
+_CATEGORY_TAG_MODE_UV_EDIT = 1 << 6
+
+
+def _image_current_tag_mode_flag(sima):
+    if sima.mode == 'PAINT':
+        return _CATEGORY_TAG_MODE_TEXTURE_PAINT
+    if sima.mode == 'UV':
+        return _CATEGORY_TAG_MODE_UV_EDIT
+    return _CATEGORY_TAG_MODE_TEXTURE_PAINT
+
+
+def _tag_glyph_display(glyph):
+    if not glyph:
+        return ""
+    try:
+        if all(c in "0123456789abcdefABCDEF" for c in glyph) and len(glyph) <= 8:
+            return chr(int(glyph, 16))
+    except Exception:
+        pass
+    return glyph
+
+
+def _image_visible_tags_for_current_mode(context):
+    wm = context.window_manager
+    sima = context.space_data
+    mode_flag = _image_current_tag_mode_flag(sima)
+
+    return [
+        tag for tag in wm.category_tags
+        if tag.glyph and (tag.mode_flags == 0 or (tag.mode_flags & mode_flag))
+    ]
+
+
 class ImagePaintPanel(UnifiedPaintPanel):
     bl_space_type = 'IMAGE_EDITOR'
     bl_region_type = 'UI'
@@ -78,6 +112,7 @@ class IMAGE_MT_view(Menu):
         layout.prop(sima, "show_region_toolbar")
         layout.prop(sima, "show_region_ui")
         layout.prop(sima, "show_region_tool_header")
+        layout.prop(sima, "show_region_tag_bar")
         layout.prop(sima, "show_region_asset_shelf")
         layout.prop(sima, "show_region_hud")
 
@@ -988,6 +1023,70 @@ class IMAGE_MT_editor_menus(Menu):
             layout.menu("MASK_MT_mask")
 
 
+class IMAGE_HT_tag_bar(Header):
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'TAG_BAR'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.separator_spacer()
+
+        sima = context.space_data
+        wm = context.window_manager
+        row = layout.row(align=True)
+
+        if not sima.show_region_tag_bar:
+            return
+
+        active_tags = getattr(sima, "active_tag_filter_tags", "")
+        active_tags_set = set()
+        if active_tags:
+            for tag_name in active_tags.split(','):
+                tag_name = tag_name.strip()
+                if tag_name:
+                    active_tags_set.add(tag_name)
+
+        tags = _image_visible_tags_for_current_mode(context)
+
+        if not wm.category_tags or not tags:
+            row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD').operator_idname = 'wm.category_tag_create'
+            row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
+            return
+
+        show_names = getattr(wm, "show_tag_names", False)
+        show_active_only = getattr(wm, "show_tag_names_active_only", False)
+
+        for i, tag in enumerate(tags):
+            glyph = _tag_glyph_display(tag.glyph)
+            depress = tag.name in active_tags_set
+            center_glyph = not show_names or (show_active_only and not depress)
+
+            row.tag_button(
+                "view3d.tag_bar_toggle",
+                tag_name=tag.name,
+                glyph=glyph,
+                color_r=tag.color[0],
+                color_g=tag.color[1],
+                color_b=tag.color[2],
+                depress=depress,
+                center_glyph=center_glyph,
+                tooltip=tag.name,
+            )
+
+            if i < len(tags) - 1:
+                row.separator()
+
+        row.separator()
+        row.operator(
+            "view3d.tag_bar_filter_toggle",
+            text="",
+            icon='FILTER',
+            depress=bool(getattr(sima, "tag_filter_enabled", False)),
+        )
+        sub = row.row(align=True)
+        sub.popover(panel="VIEW3D_PT_tag_bar_filter_popover", text="", icon='DOWNARROW_HLT')
+
+
 class IMAGE_MT_mask_context_menu(Menu):
     bl_label = "Mask"
 
@@ -1860,6 +1959,7 @@ classes = (
     IMAGE_MT_view_pie,
     IMAGE_HT_tool_header,
     IMAGE_HT_header,
+    IMAGE_HT_tag_bar,
     IMAGE_MT_editor_menus,
     IMAGE_PT_active_tool,
     IMAGE_PT_mask,

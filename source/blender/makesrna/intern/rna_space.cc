@@ -6313,7 +6313,7 @@ static void rna_def_space_image(BlenderRNA *brna)
   rna_def_space_generic_show_region_toggles(srna,
                                             ((1 << RGN_TYPE_TOOL_HEADER) | (1 << RGN_TYPE_TOOLS) |
                                              (1 << RGN_TYPE_UI) | (1 << RGN_TYPE_HUD) |
-                                             (1 << RGN_TYPE_ASSET_SHELF)));
+                                             (1 << RGN_TYPE_ASSET_SHELF) | (1 << RGN_TYPE_TAG_BAR)));
 
   /* image */
   prop = RNA_def_property(srna, "image", PROP_POINTER, PROP_NONE);
@@ -6411,6 +6411,32 @@ static void rna_def_space_image(BlenderRNA *brna)
       "Display the render result for the sequencer scene instead of the active scene");
   RNA_def_property_ui_icon(prop, ICON_SEQ_SEQUENCER, 0);
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  /* Active tag filter as comma-separated tag names */
+  prop = RNA_def_property(srna, "active_tag_filter_tags", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "active_tag_filter_tags");
+  RNA_def_property_ui_text(
+      prop,
+      "Active Tag Filter Tags",
+      "Comma-separated list of active tag names for category filtering (empty = all visible)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
+  /* Whether tag filtering is enabled */
+  prop = RNA_def_property(srna, "tag_filter_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "tag_filter_enabled", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Tag Filter Enabled",
+      "Whether tag filtering is enabled (when disabled, all categories are shown)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
+  prop = RNA_def_property(srna, "tag_bar_scroll_offset", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "tag_bar_scroll_offset");
+  RNA_def_property_ui_text(prop, "Tag Bar Scroll Offset", "Horizontal scroll offset in the tag bar");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   /* uv */
   prop = RNA_def_property(srna, "uv_editor", PROP_POINTER, PROP_NONE);
@@ -8447,7 +8473,9 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_struct_ui_text(srna, "Space Node Editor", "Node editor space data");
 
   rna_def_space_generic_show_region_toggles(
-      srna, (1 << RGN_TYPE_TOOLS) | (1 << RGN_TYPE_UI) | (1 << RGN_TYPE_ASSET_SHELF));
+      srna,
+      (1 << RGN_TYPE_TOOLS) | (1 << RGN_TYPE_UI) | (1 << RGN_TYPE_ASSET_SHELF) |
+          (1 << RGN_TYPE_TAG_BAR));
 
   prop = RNA_def_property(srna, "tree_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_dummy_DEFAULT_items);
@@ -8577,6 +8605,32 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Auto-offset Direction", "Direction to offset nodes on insertion");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_NODE_VIEW, nullptr);
+
+  /* Active tag filter as comma-separated tag names */
+  prop = RNA_def_property(srna, "active_tag_filter_tags", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "active_tag_filter_tags");
+  RNA_def_property_ui_text(
+      prop,
+      "Active Tag Filter Tags",
+      "Comma-separated list of active tag names for category filtering (empty = all visible)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
+  /* Whether tag filtering is enabled */
+  prop = RNA_def_property(srna, "tag_filter_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "tag_filter_enabled", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Tag Filter Enabled",
+      "Whether tag filtering is enabled (when disabled, all categories are shown)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
+  prop = RNA_def_property(srna, "tag_bar_scroll_offset", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "tag_bar_scroll_offset");
+  RNA_def_property_ui_text(prop, "Tag Bar Scroll Offset", "Horizontal scroll offset in the tag bar");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   /* Gizmo Toggles. */
   prop = RNA_def_property(srna, "show_gizmo", PROP_BOOLEAN, PROP_NONE);

@@ -194,18 +194,25 @@ static void VIEW3D_OT_pastebuffer(wmOperatorType *ot)
 static bool view3d_tag_bar_toggle_poll(bContext *C)
 {
   const ScrArea *area = CTX_wm_area(C);
-  return area && area->spacetype == SPACE_VIEW3D;
+  if (!area) {
+    return false;
+  }
+
+  using namespace blender::ui;
+  TagFilterStateRef state{};
+  return tag_filter_state_from_area(area, &state) && state.active_tags && state.filter_enabled;
 }
 
 static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   ScrArea *area = CTX_wm_area(C);
-  if (!area || area->spacetype != SPACE_VIEW3D) {
+  if (!area) {
     return OPERATOR_CANCELLED;
   }
 
-  View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-  if (!v3d) {
+  using namespace blender::ui;
+  TagFilterStateRef state{};
+  if (!tag_filter_state_from_area(area, &state) || !state.active_tags || !state.filter_enabled) {
     return OPERATOR_CANCELLED;
   }
 
@@ -217,7 +224,7 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
 
   /* Copy current active tags to work with */
   char tags_copy[256];
-  STRNCPY_RLEN(tags_copy, v3d->active_tag_filter_tags);
+  BLI_strncpy(tags_copy, state.active_tags, sizeof(tags_copy));
 
   /* Check if tag is already in the list */
   bool tag_found = false;
@@ -241,22 +248,22 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
     /* Add the tag to the list */
     if (shift_pressed) {
       /* Multi-select: add to existing tags */
-      if (v3d->active_tag_filter_tags[0] != '\0') {
-        SNPRINTF(new_tags, "%s,%s", v3d->active_tag_filter_tags, tag_name);
+      if (state.active_tags[0] != '\0') {
+        SNPRINTF(new_tags, "%s,%s", state.active_tags, tag_name);
       }
       else {
-        STRNCPY_RLEN(new_tags, tag_name);
+        BLI_strncpy(new_tags, tag_name, sizeof(new_tags));
       }
     }
     else {
       /* Single-select: replace all tags with this one */
-      STRNCPY_RLEN(new_tags, tag_name);
+      BLI_strncpy(new_tags, tag_name, sizeof(new_tags));
     }
   }
   else {
     /* Remove the tag from the list */
     char temp[256];
-    STRNCPY_RLEN(temp, v3d->active_tag_filter_tags);
+    BLI_strncpy(temp, state.active_tags, sizeof(temp));
     char *token = strtok(temp, ",;");
     bool first = true;
     while (token != nullptr) {
@@ -275,10 +282,10 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
   }
 
   /* Update the active tags string */
-  STRNCPY_RLEN(v3d->active_tag_filter_tags, new_tags);
+  BLI_strncpy(state.active_tags, new_tags, 256);
 
   /* Enable tag filter when user clicks on a tag */
-  v3d->tag_filter_enabled = 1;
+  *state.filter_enabled = 1;
 
   /* Check N-Panel visibility before toggling */
   ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
@@ -322,35 +329,41 @@ static void VIEW3D_OT_tag_bar_toggle(wmOperatorType *ot)
 static bool view3d_tag_bar_filter_toggle_poll(bContext *C)
 {
   const ScrArea *area = CTX_wm_area(C);
-  return area && area->spacetype == SPACE_VIEW3D;
+  if (!area) {
+    return false;
+  }
+
+  using namespace blender::ui;
+  TagFilterStateRef state{};
+  return tag_filter_state_from_area(area, &state) && state.active_tags && state.filter_enabled;
 }
 
 static wmOperatorStatus view3d_tag_bar_filter_toggle_exec(bContext *C, wmOperator * /*op*/)
 {
   ScrArea *area = CTX_wm_area(C);
-  if (!area || area->spacetype != SPACE_VIEW3D) {
+  if (!area) {
     return OPERATOR_CANCELLED;
   }
 
-  View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-  if (!v3d) {
+  using namespace blender::ui;
+  TagFilterStateRef state{};
+  if (!tag_filter_state_from_area(area, &state) || !state.active_tags || !state.filter_enabled) {
     return OPERATOR_CANCELLED;
   }
 
   /* Get runtime data for saving/restoring tags */
-  using namespace blender::ui;
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
   if (!data) {
     return OPERATOR_CANCELLED;
   }
 
   /* Toggle the filter enabled flag */
-  v3d->tag_filter_enabled = v3d->tag_filter_enabled ? 0 : 1;
+  *state.filter_enabled = *state.filter_enabled ? 0 : 1;
 
-  if (v3d->tag_filter_enabled) {
+  if (*state.filter_enabled) {
     /* Filter INACTIVE -> ACTIVE: Restore saved tags and show N-Panel */
     if (data->saved_tags[0] != '\0') {
-      STRNCPY(v3d->active_tag_filter_tags, data->saved_tags);
+      BLI_strncpy(state.active_tags, data->saved_tags, 256);
     }
     /* Open N-Panel if it's hidden */
     ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
@@ -360,7 +373,7 @@ static wmOperatorStatus view3d_tag_bar_filter_toggle_exec(bContext *C, wmOperato
   }
   else {
     /* Filter ACTIVE -> INACTIVE: Save tags */
-    STRNCPY(data->saved_tags, v3d->active_tag_filter_tags);
+    BLI_strncpy(data->saved_tags, state.active_tags, sizeof(data->saved_tags));
     /* Note: Don't clear active_tag_filter_tags - keep them for next activation */
   }
 

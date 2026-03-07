@@ -9,6 +9,7 @@
 #define DNA_DEPRECATED_ALLOW
 
 #include "DNA_ID.h"
+#include "DNA_space_types.h"
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_sys_types.h"
@@ -30,20 +31,39 @@ namespace blender {
 
 // static CLG_LogRef LOG = {"blend.doversion"};
 
-/* Ensure View3D spaces have the TAG_BAR region for category filtering. */
-static void do_versions_ensure_view3d_has_tag_bar_region(Main *bmain)
+/* Ensure editors that support category filtering have the TAG_BAR region. */
+static void do_versions_ensure_spaces_have_tag_bar_region(Main *bmain)
 {
-  int region_count = 0;
   for (bScreen &screen : bmain->screens) {
     for (ScrArea &area : screen.areabase) {
-      if (area.spacetype == SPACE_VIEW3D) {
-        /* Check if TAG_BAR region already exists */
-        ARegion *region = do_versions_ensure_region(&area.regionbase, RGN_TYPE_TAG_BAR, __func__, RGN_TYPE_TOOLS);
-        /* Set up the region */
+      if (ELEM(area.spacetype, SPACE_VIEW3D, SPACE_PROPERTIES, SPACE_NODE, SPACE_IMAGE)) {
+        ARegion *region = do_versions_ensure_region(
+            &area.regionbase, RGN_TYPE_TAG_BAR, __func__, RGN_TYPE_TOOLS);
         region->regiontype = RGN_TYPE_TAG_BAR;
-        region->alignment = RGN_ALIGN_TOP;  /* Top region, full width */
-        region->flag = 0; /* Visible by default */
-        region_count++;
+        region->alignment = RGN_ALIGN_TOP;
+        region->flag &= ~RGN_FLAG_HIDDEN;
+      }
+    }
+  }
+}
+
+static void do_versions_init_tag_filter_state_in_spaces(Main *bmain)
+{
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        if (sl.spacetype == SPACE_NODE) {
+          SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
+          snode->active_tag_filter_tags[0] = '\0';
+          snode->tag_filter_enabled = 0;
+          snode->tag_bar_scroll_offset = 0;
+        }
+        else if (sl.spacetype == SPACE_IMAGE) {
+          SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+          sima->active_tag_filter_tags[0] = '\0';
+          sima->tag_filter_enabled = 0;
+          sima->tag_bar_scroll_offset = 0;
+        }
       }
     }
   }
@@ -91,8 +111,12 @@ void do_versions_after_linking_520(FileData * /*fd*/, Main *bmain)
 
 void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 {
-  /* Add TAG_BAR region to existing View3D spaces */
-  do_versions_ensure_view3d_has_tag_bar_region(bmain);
+  /* Add TAG_BAR region to editors that support category filtering. */
+  do_versions_ensure_spaces_have_tag_bar_region(bmain);
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 5)) {
+    do_versions_init_tag_filter_state_in_spaces(bmain);
+  }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 4)) {
     /* Initialize new category_tabs_inactive_behavior field to DEFAULT */

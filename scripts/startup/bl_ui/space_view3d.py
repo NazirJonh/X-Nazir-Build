@@ -74,7 +74,7 @@ def _sync_view3d_tag_order_cache(wm):
     return synced_order
 
 
-def _get_visible_tag_names_in_view3d_order(wm, mode_string):
+def _get_visible_tag_names_in_view3d_order(wm, context):
     """Return visible tag names sorted by View3D-local order cache."""
     ordered_names = _sync_view3d_tag_order_cache(wm)
     tag_by_name = {tag.name: tag for tag in wm.category_tags}
@@ -82,7 +82,7 @@ def _get_visible_tag_names_in_view3d_order(wm, mode_string):
     visible_names = []
     for name in ordered_names:
         tag = tag_by_name.get(name)
-        if tag and _is_tag_visible_in_mode(tag, mode_string):
+        if tag and _is_tag_visible_in_mode(tag, context):
             visible_names.append(name)
 
     return visible_names
@@ -1439,8 +1439,8 @@ class VIEW3D_OT_tag_order_reset(Operator):
         return {'FINISHED'}
 
 
-def _is_tag_visible_in_mode(tag, mode_string):
-    """Check if tag is visible (has a valid glyph) and is active for the given mode."""
+def _is_tag_visible_in_mode(tag, context):
+    """Check if tag is visible (has a valid glyph) and is active for current editor mode."""
     if not tag.glyph:
         return False
         
@@ -1454,57 +1454,13 @@ def _is_tag_visible_in_mode(tag, mode_string):
     if tag.mode_flags == 0:
         return True
 
-    # --- EXTENSION GUIDE FOR NEW MODES AND EDITORS ---
-    # This system uses a bitmask (mode_flags) to define visibility. Each bit corresponds
-    # to a specific context (Mode or Editor Type).
-    #
-    # 1. ADDING NEW MODES (e.g., for 3D View):
-    #    Add the context.mode string to the map below and assign the next available bit (13, 14, etc.).
-    #    Ensure the corresponding C++ logic in 'interface_tag_bar.cc' or 'rna_wm.cc' 
-    #    uses the same bit-to-mode mapping.
-    #
-    # 2. SUPPORTING OTHER EDITORS (Node Editors, UV, Shader Editor):
-    #    Currently, this function mainly checks 'context.mode'. To support other Space Types,
-    #    you can modify this function to check 'context.space_data.type' (e.g., 'NODE_EDITOR').
-    #    Example: 
-    #       if context.space_data.type == 'NODE_EDITOR':
-    #           context_key = context.space_data.tree_type # (e.g., 'GeometryNodeTree')
-    #       else:
-    #           context_key = mode_string
-    #    
-    #    Assign dedicated bits for these editors (e.g., bit 15 for UV Editor, 16 for Shader, etc.).
-    #
-    # 3. BITMASK LIMIT:
-    #    Standard integers in Blender/C++ provide 32 bits. If you exceed 32 contexts, 
-    #    you'll need to use a second flag property.
-    # -------------------------------------------------
+    from bl_ui.space_userpref import get_current_tag_mode_flag
 
-    mode_bit_map = {
-        'OBJECT': 0,
-        'EDIT_MESH': 1,
-        'SCULPT': 2,
-        'PAINT_VERTEX': 3,
-        'PAINT_WEIGHT': 4,
-        'PAINT_TEXTURE': 5,
-        'PARTICLE_EDIT': 6,
-        'POSE': 7,
-        'PAINT_GPENCIL': 8,
-        'EDIT_GPENCIL': 9,
-        'SCULPT_GPENCIL': 10,
-        'WEIGHT_GPENCIL': 11,
-        'VERTEX_GPENCIL': 12,
-    }
-    
-    bit = None
-    for mode, bit_val in mode_bit_map.items():
-        if mode in mode_string:
-            bit = bit_val
-            break
-            
-    if bit is None:
+    current_mode_flag = get_current_tag_mode_flag(context)
+    if current_mode_flag == 0:
         return True
-        
-    return bool(tag.mode_flags & (1 << bit))
+
+    return bool(tag.mode_flags & current_mode_flag)
 
 
 class VIEW3D_UL_tag_order_list(UIList):
@@ -1516,8 +1472,7 @@ class VIEW3D_UL_tag_order_list(UIList):
         if not wm or not wm.category_tags:
             return ([], [])
 
-        mode_string = context.mode
-        visible_names = _get_visible_tag_names_in_view3d_order(wm, mode_string)
+        visible_names = _get_visible_tag_names_in_view3d_order(wm, context)
 
         name_to_actual_index = {tag.name: i for i, tag in enumerate(wm.category_tags)}
         visible_actual_indices = [
@@ -1605,10 +1560,9 @@ class VIEW3D_OT_tag_move_up(Operator):
             return {'CANCELLED'}
 
         active_tag = wm.category_tags[actual_index]
-        mode_string = context.mode
         active_tag_name = active_tag.name
 
-        visible_names = _get_visible_tag_names_in_view3d_order(wm, mode_string)
+        visible_names = _get_visible_tag_names_in_view3d_order(wm, context)
         if active_tag_name not in visible_names:
             return {'FINISHED'}
 
@@ -1667,10 +1621,9 @@ class VIEW3D_OT_tag_move_down(Operator):
             return {'CANCELLED'}
 
         active_tag = wm.category_tags[actual_index]
-        mode_string = context.mode
         active_tag_name = active_tag.name
 
-        visible_names = _get_visible_tag_names_in_view3d_order(wm, mode_string)
+        visible_names = _get_visible_tag_names_in_view3d_order(wm, context)
         if active_tag_name not in visible_names:
             return {'FINISHED'}
 

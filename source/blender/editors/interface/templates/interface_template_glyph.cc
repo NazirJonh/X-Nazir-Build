@@ -903,7 +903,46 @@ static void ui_template_glyph_selector_impl(Layout *layout,
       RNA_property_string_get(ptr, glyph_prop, glyph_value);
 
       char glyph_unicode[8] = "";
-      if (glyph_value[0] != '\0') {
+      bool force_first_letter_preview = false;
+
+      /* Edit Category Tab dialog exposes First Letter as display_mode_ui == TEXT (2).
+       * Some contexts may expose direct glyph_mode enum (FIRST_LETTER == 1).
+       * Support both to keep preview consistent with runtime draw behavior. */
+      if (category && category[0] != '\0') {
+        if (PropertyRNA *display_mode_prop = RNA_struct_find_property(ptr, "display_mode_ui")) {
+          const int display_mode_ui = RNA_property_enum_get(ptr, display_mode_prop);
+          if (display_mode_ui == 2) {
+            force_first_letter_preview = true;
+          }
+        }
+
+        if (!force_first_letter_preview) {
+          if (PropertyRNA *glyph_mode_prop = RNA_struct_find_property(ptr, "glyph_mode")) {
+            const int glyph_mode = RNA_property_enum_get(ptr, glyph_mode_prop);
+            if (glyph_mode == 1) {
+              force_first_letter_preview = true;
+            }
+          }
+        }
+      }
+
+      if (force_first_letter_preview) {
+        const char *first_letter_source = category;
+        char display_name_value[64] = "";
+        if (PropertyRNA *display_name_prop = RNA_struct_find_property(ptr, "display_name")) {
+          RNA_property_string_get(ptr, display_name_prop, display_name_value);
+          if (display_name_value[0] != '\0') {
+            first_letter_source = display_name_value;
+          }
+        }
+
+        const int first_char_size = BLI_str_utf8_size_safe(first_letter_source);
+        if (first_char_size > 0 && first_char_size < int(sizeof(glyph_unicode))) {
+          memcpy(glyph_unicode, first_letter_source, first_char_size);
+          glyph_unicode[first_char_size] = '\0';
+        }
+      }
+      else if (glyph_value[0] != '\0') {
         /* Convert hex code to UTF-8 if needed */
         hex_codepoint_to_utf8(glyph_value, glyph_unicode, sizeof(glyph_unicode));
       }

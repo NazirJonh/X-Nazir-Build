@@ -937,6 +937,13 @@ bool category_tab_first_utf8_char_copy(const char *input, char *output, size_t o
 bool category_tab_glyph_is_fallback_letter(const char *glyph, const char *category);
 int category_tab_icon_id_resolve_from_path(const char *icon_path);
 int category_tab_icon_id_resolve_from_key_path(const char *icon_key, const char *icon_path);
+void category_tab_split_tags(const char *tags,
+                             Vector<std::string> &r_tags,
+                             const char *delimiters = ",;");
+std::string category_tab_escape_for_python_literal(const char *input);
+bool category_tab_parse_json_string_array_minimal(const char *json,
+                                                  Vector<std::string> &r_items);
+std::string category_tab_decode_json_unicode(const char *str);
 
 /**
  * Category lookup utilities.

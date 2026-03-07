@@ -1367,49 +1367,17 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
     return false;
   }
 
-  /* Check if ANY active tag is present in the category (OR logic) */
-  /* Parse active_tags (comma-separated) and verify at least one tag exists in category_tags */
+  /* Check if ANY active tag is present in the category (OR logic). */
+  Vector<std::string> active_tag_list;
+  category_tab_split_tags(active_tags, active_tag_list, ",;");
 
-  const char *cursor = active_tags;
-  char active_tag[64];
-
-  while (*cursor) {
-    /* Skip leading spaces */
-    while (*cursor == ' ') {
-      cursor++;
-    }
-
-    if (!*cursor) {
-      break;
-    }
-
-    /* Extract tag name */
-    int i = 0;
-    while (*cursor && *cursor != ',' && *cursor != ';' && i < 63) {
-      active_tag[i++] = *cursor++;
-    }
-
-    /* Process trailing spaces */
-    while (i > 0 && active_tag[i - 1] == ' ') {
-      i--;
-    }
-    active_tag[i] = '\0';
-
-    if (*cursor == ',' || *cursor == ';') {
-      cursor++;
-    }
-
-    if (active_tag[0] == '\0') {
-      continue;
-    }
-
-    /* Check if this active_tag exists in category_tags */
-    if (has_tag_in_string(category_tags, active_tag)) {
-      return true;  // Found at least one matching tag
+  for (const std::string &active_tag : active_tag_list) {
+    if (has_tag_in_string(category_tags, active_tag.c_str())) {
+      return true; /* Found at least one matching tag. */
     }
   }
 
-  return false;  // No matching tags found in category
+  return false; /* No matching tags found in category. */
 }
 
 bool panel_category_is_visible_by_tags(const bContext *C,
@@ -1435,33 +1403,17 @@ bool panel_category_is_visible_by_tags(const bContext *C,
   /* Get current mode */
   uint32_t current_mode_flag = get_current_tag_mode_flag(C);
 
-  /* Parse semicolon-separated tags and check if any is active in current mode */
-  char tag_name[64];
-  const char *cursor = tags_string;
+  Vector<std::string> category_tag_list;
+  category_tab_split_tags(tags_string, category_tag_list, ";");
 
-  while (*cursor) {
-    /* Extract tag name */
-    int i = 0;
-    while (*cursor && *cursor != ';' && i < 63) {
-      tag_name[i++] = *cursor++;
-    }
-    tag_name[i] = '\0';
-    if (*cursor == ';') {
-      cursor++;
-    }
-
-    /* Skip empty tags */
-    if (tag_name[0] == '\0') {
-      continue;
-    }
-
-    /* Find tag definition and check mode */
+  for (const std::string &tag_name : category_tag_list) {
+    /* Find tag definition and check mode. */
     for (const CategoryTagDef *tag = static_cast<const CategoryTagDef *>(
              wm->category_tags.first);
          tag;
          tag = static_cast<const CategoryTagDef *>(tag->next))
     {
-      if (STREQ(tag->name, tag_name)) {
+      if (STREQ(tag->name, tag_name.c_str())) {
         /* mode_flags == 0 means all modes active */
         if (tag->mode_flags == 0 || (tag->mode_flags & current_mode_flag)) {
           return true;
@@ -1539,21 +1491,9 @@ static std::string get_tag_combination_key(const wmWindowManager *wm, View3D *v3
     return "";  /* Filter enabled but no tags */
   }
 
-  /* Parse and collect tag names */
+  /* Parse and collect tag names (without mutating source buffer). */
   Vector<std::string> active_tags;
-  char tags_copy[256];
-  STRNCPY(tags_copy, v3d->active_tag_filter_tags);
-
-  char *tag = strtok(tags_copy, ",;");
-  while (tag != nullptr) {
-    while (*tag == ' ') {
-      tag++;
-    }
-    if (tag[0] != '\0') {
-      active_tags.append(std::string(tag));
-    }
-    tag = strtok(nullptr, ",;");
-  }
+  category_tab_split_tags(v3d->active_tag_filter_tags, active_tags, ",;");
 
   if (active_tags.is_empty()) {
     return "";
@@ -1574,55 +1514,6 @@ static std::string get_tag_combination_key(const wmWindowManager *wm, View3D *v3
   return key;
 }
 
-static void parse_json_array_of_strings(const char *json, Vector<std::string> &r_items)
-{
-  if (!json) {
-    return;
-  }
-
-  const char *p = json;
-  while (*p && *p != '[') {
-    p++;
-  }
-  if (*p != '[') {
-    return;
-  }
-  p++;
-
-  while (*p && *p != ']') {
-    while (*p && ELEM(*p, ' ', '\n', '\r', '\t', ',')) {
-      p++;
-    }
-    if (*p == ']') {
-      break;
-    }
-
-    if (*p != '"') {
-      p++;
-      continue;
-    }
-    p++;
-
-    const char *start = p;
-    while (*p && *p != '"') {
-      if (*p == '\\' && *(p + 1)) {
-        p += 2;
-      }
-      else {
-        p++;
-      }
-    }
-
-    if (*p == '"') {
-      std::string value(start, p - start);
-      p++;
-      if (!value.empty()) {
-        r_items.append(value);
-      }
-    }
-  }
-}
-
 /**
  * Load category order from JSON for a specific tag combination.
  * Calls Python function get_category_order().
@@ -1636,29 +1527,13 @@ static Vector<std::string> load_category_order_from_json(const bContext *C, cons
     return result;
   }
 
-  /* Escape tag_key for Python string literal */
-  char escaped_key[256];
-  int j = 0;
-  for (int i = 0; tag_key[i] != '\0' && j < (int)sizeof(escaped_key) - 1; i++) {
-    char c = tag_key[i];
-    if (c == '\\' || c == '\'') {
-      if (j + 1 < (int)sizeof(escaped_key) - 1) {
-        escaped_key[j++] = '\\';
-        escaped_key[j++] = c;
-      }
-    }
-    else {
-      escaped_key[j++] = c;
-    }
-  }
-  escaped_key[j] = '\0';
+  const std::string escaped_key = category_tab_escape_for_python_literal(tag_key);
 
   /* Use json.dumps to convert Python list to JSON string for C++ parsing */
   /* ensure_ascii=False to preserve Unicode characters (not escape them as \uXXXX) */
-  char python_expr[512];
-  SNPRINTF(python_expr,
-           "json.dumps(__import__('bl_ui.space_userpref', fromlist=['']).get_category_order('%s') or [], ensure_ascii=False)",
-           escaped_key);
+  const std::string python_expr =
+      "json.dumps(__import__('bl_ui.space_userpref', fromlist=['']).get_category_order('" +
+      escaped_key + "') or [], ensure_ascii=False)";
 
   /* Execute Python expression and capture output */
   char *result_str = nullptr;
@@ -1670,7 +1545,7 @@ static Vector<std::string> load_category_order_from_json(const bContext *C, cons
   bool success = BPY_run_string_as_string(
       const_cast<bContext *>(C),
       imports_json,
-      python_expr,
+      python_expr.c_str(),
       &err_info,
       &result_str);
 
@@ -1685,7 +1560,7 @@ static Vector<std::string> load_category_order_from_json(const bContext *C, cons
     return result;
   }
 
-  parse_json_array_of_strings(result_str, result);
+  category_tab_parse_json_string_array_minimal(result_str, result);
 
   MEM_delete(result_str);
   return result;
@@ -1714,50 +1589,19 @@ static void save_category_order_to_json(const bContext *C,
     if (i > 0) {
       python_list += ", ";
     }
-    python_list += "'";
-    /* Escape backslashes and quotes for Python string literal */
-    for (char c : order[i]) {
-      if (c == '\\') {
-        python_list += "\\\\";
-      }
-      else if (c == '\'') {
-        python_list += "\\'";
-      }
-      else {
-        python_list += c;
-      }
-    }
-    python_list += "'";
+    python_list += "'" + category_tab_escape_for_python_literal(order[i].c_str()) + "'";
   }
   python_list += "]";
 
-  /* Escape tag_key for Python string literal */
-  char escaped_key[256];
-  int j = 0;
-  for (int i = 0; tag_key[i] != '\0' && j < (int)sizeof(escaped_key) - 1; i++) {
-    char c = tag_key[i];
-    if (c == '\\' || c == '\'') {
-      if (j + 1 < (int)sizeof(escaped_key) - 1) {
-        escaped_key[j++] = '\\';
-        escaped_key[j++] = c;
-      }
-    }
-    else {
-      escaped_key[j++] = c;
-    }
-  }
-  escaped_key[j] = '\0';
+  const std::string escaped_key = category_tab_escape_for_python_literal(tag_key);
 
-  char python_cmd[8192];
-  SNPRINTF(python_cmd,
-           "from bl_ui.space_userpref import set_category_order\n"
-           "set_category_order('%s', %s)\n",
-           escaped_key,
-           python_list.c_str());
+  const std::string python_cmd = "from bl_ui.space_userpref import set_category_order\n"
+                                 "set_category_order('" +
+                                 escaped_key + "', " + python_list + ")\n";
 
   /* BPY_run_string_exec requires non-const context */
   const char *imports_none[] = {nullptr};
-  BPY_run_string_exec(const_cast<bContext *>(C), imports_none, python_cmd);
+  BPY_run_string_exec(const_cast<bContext *>(C), imports_none, python_cmd.c_str());
 #else
   UNUSED_VARS(C, tag_key, order);
 #endif

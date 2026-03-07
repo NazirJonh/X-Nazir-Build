@@ -275,6 +275,9 @@ DEFAULT_CATEGORY_GLYPHS = {
 _glyph_cache = {}
 _glyph_cache_loaded = False
 
+# Last discovery source per category name (used for canonicalization priority).
+_last_discovered_category_sources = {}
+
 # In-memory cache of all tags (tag_name -> {glyph, color})
 _all_tags_cache = {}
 
@@ -370,22 +373,177 @@ def _normalize_category_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value).lower())
 
 
+_CATEGORY_DISCOVERY_SOURCE_PRIORITY = {
+    "panel_discovered": 0,
+    "manifest_name": 1,
+    "manifest_id": 2,
+    "package_dir": 3,
+    "unknown": 99,
+}
+
+
+def _get_discovery_source_priority(source: str) -> int:
+    return _CATEGORY_DISCOVERY_SOURCE_PRIORITY.get(source, _CATEGORY_DISCOVERY_SOURCE_PRIORITY["unknown"])
+
+
+def _pick_canonical_category_name(candidates, source_map):
+    """Pick one canonical category name among aliases sharing the same normalized key."""
+    if not candidates:
+        return ""
+
+    def _style_rank(name: str) -> int:
+        # Prefer human-readable/mixed-case variants over lowercase technical ids.
+        if any(ch.isupper() for ch in name):
+            return 0
+        if any(ch.isspace() for ch in name):
+            return 1
+        return 2
+
+    return sorted(
+        candidates,
+        key=lambda name: (
+            _get_discovery_source_priority(source_map.get(name, "unknown")),
+            _style_rank(name),
+            len(name),
+            name.lower(),
+            name,
+        ),
+    )[0]
+
+
+def _is_single_edit_apart(a: str, b: str) -> bool:
+    """Return True when strings differ by exactly one insertion/deletion/substitution."""
+    if a == b:
+        return False
+    len_a = len(a)
+    len_b = len(b)
+    if abs(len_a - len_b) > 1:
+        return False
+
+    # Substitution case.
+    if len_a == len_b:
+        diff = 0
+        for ca, cb in zip(a, b):
+            if ca != cb:
+                diff += 1
+                if diff > 1:
+                    return False
+        return diff == 1
+
+    # Insertion/deletion case.
+    if len_a > len_b:
+        a, b = b, a
+        len_a, len_b = len_b, len_a
+
+    i = j = 0
+    mismatches = 0
+    while i < len_a and j < len_b:
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+            continue
+        mismatches += 1
+        if mismatches > 1:
+            return False
+        j += 1
+
+    return True
+
+
+def _manifest_field_match_keys(field_value: str):
+    """Build robust normalized match keys from a manifest text field."""
+    keys = set()
+    if not isinstance(field_value, str):
+        return keys
+
+    value = field_value.strip()
+    if not value:
+        return keys
+
+    normalized_full = _normalize_category_key(value)
+    if normalized_full:
+        keys.add(normalized_full)
+
+    # Support values like "Huge Menace <hello@hugemenace.co>".
+    email = ""
+    name_and_email = re.match(r"^\s*([^<]+?)\s*<([^>]+)>\s*$", value)
+    if name_and_email:
+        display_name = name_and_email.group(1).strip()
+        email = name_and_email.group(2).strip()
+        display_key = _normalize_category_key(display_name)
+        if display_key:
+            keys.add(display_key)
+    else:
+        email_match = re.search(r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", value)
+        if email_match:
+            email = email_match.group(1).strip()
+
+    if email and "@" in email:
+        _local, _sep, domain = email.partition("@")
+        domain_labels = [label for label in re.split(r"[^A-Za-z0-9]+", domain) if label]
+        if domain_labels:
+            # Prefer second-level domain key: "hugemenace.co" -> "hugemenace".
+            if len(domain_labels) >= 2:
+                sld_key = _normalize_category_key(domain_labels[-2])
+                if sld_key:
+                    keys.add(sld_key)
+            # Also keep a compact domain form without TLD for subdomain cases.
+            compact_domain = "".join(domain_labels[:-1]) if len(domain_labels) > 1 else domain_labels[0]
+            compact_domain_key = _normalize_category_key(compact_domain)
+            if compact_domain_key:
+                keys.add(compact_domain_key)
+
+    return keys
+
+
+def _extension_manifest_match_keys(pkg_path: str, pkg_name: str):
+    """Collect normalized keys from extension folder + manifest for category matching."""
+    keys = set()
+    if pkg_name:
+        keys.add(_normalize_category_key(pkg_name))
+
+    manifest_path = os.path.join(pkg_path, "blender_manifest.toml")
+    if not os.path.isfile(manifest_path):
+        return keys
+
+    try:
+        import tomllib
+
+        with open(manifest_path, "rb") as fh:
+            manifest = tomllib.load(fh)
+
+        for field_name in ("id", "name", "tagline", "maintainer", "publisher"):
+            field_value = manifest.get(field_name)
+            if isinstance(field_value, str) and field_value.strip():
+                keys.update(_manifest_field_match_keys(field_value))
+    except Exception as e:
+        print(f"[GLYPH ICON AUTO DEBUG] manifest parse failed: pkg_path={pkg_path!r}, error={e}")
+
+    return keys
+
+
 def _auto_detect_extension_icon_path(category: str):
     """Try to find extension icon file for a category in user EXTENSIONS folders.
 
     Returns: (icon_path, provider) or ("", "") when not found.
     """
+    print(f"[GLYPH ICON AUTO DEBUG] detect start: category={category!r}")
     try:
         extensions_dir = bpy.utils.user_resource('EXTENSIONS')
     except Exception:
+        print(f"[GLYPH ICON AUTO DEBUG] detect abort: category={category!r}, reason=user_resource_exception")
         return "", ""
 
     if not extensions_dir or not os.path.isdir(extensions_dir):
+        print(f"[GLYPH ICON AUTO DEBUG] detect abort: category={category!r}, extensions_dir={extensions_dir!r}, exists=False")
         return "", ""
 
     target_key = _normalize_category_key(category)
     if not target_key:
+        print(f"[GLYPH ICON AUTO DEBUG] detect abort: category={category!r}, normalized_key is empty")
         return "", ""
+
+    print(f"[GLYPH ICON AUTO DEBUG] detect context: category={category!r}, target_key={target_key!r}, extensions_dir={extensions_dir!r}")
 
     icon_filenames = ("icon.png", "icon.webp", "icon.jpg", "icon.jpeg")
 
@@ -400,16 +558,40 @@ def _auto_detect_extension_icon_path(category: str):
                 if not os.path.isdir(pkg_path):
                     continue
 
-                if _normalize_category_key(pkg_name) != target_key:
-                    continue
+                match_keys = _extension_manifest_match_keys(pkg_path, pkg_name)
+                exact_match = target_key in match_keys
+                fuzzy_match_key = ""
+                if not exact_match:
+                    # Strict fuzzy fallback for near-typo category names.
+                    # Example: "HugeMenance" -> "hugemenace".
+                    if len(target_key) >= 8:
+                        for key in match_keys:
+                            if not key or abs(len(key) - len(target_key)) > 1:
+                                continue
+                            if key[:5] != target_key[:5]:
+                                continue
+                            if _is_single_edit_apart(target_key, key):
+                                fuzzy_match_key = key
+                                break
+                    if not fuzzy_match_key:
+                        continue
+
+                print(
+                    f"[GLYPH ICON AUTO DEBUG] package match: category={category!r}, repo={repo_name!r}, "
+                    f"pkg={pkg_name!r}, pkg_path={pkg_path!r}, keys={sorted(match_keys)!r}, "
+                    f"match_type={'exact' if exact_match else 'fuzzy'}, fuzzy_key={fuzzy_match_key!r}"
+                )
 
                 for icon_name in icon_filenames:
                     icon_path = os.path.join(pkg_path, icon_name)
                     if os.path.isfile(icon_path):
+                        print(f"[GLYPH ICON AUTO DEBUG] detect hit: category={category!r}, icon={icon_path!r}, provider='extension_auto'")
                         return icon_path, "extension_auto"
     except Exception:
+        print(f"[GLYPH ICON AUTO DEBUG] detect abort: category={category!r}, reason=scan_exception")
         return "", ""
 
+    print(f"[GLYPH ICON AUTO DEBUG] detect miss: category={category!r}")
     return "", ""
 
 
@@ -1823,7 +2005,35 @@ def _integrate_glyph_library():
 
 def _discover_active_categories():
     """Discover all active categories from registered panels including addon panels."""
+    global _last_discovered_category_sources
+
     discovered_categories = set()
+    discovered_sources = {}
+    panel_samples = []
+
+    def _record_discovered(category, source):
+        if not category:
+            return
+
+        discovered_categories.add(category)
+        old_source = discovered_sources.get(category)
+        if (old_source is None) or (
+            _get_discovery_source_priority(source) < _get_discovery_source_priority(old_source)
+        ):
+            discovered_sources[category] = source
+
+    def _append_panel_sample(source, panel_name, panel_obj):
+        if len(panel_samples) >= 40:
+            return
+        try:
+            category = getattr(panel_obj, 'bl_category', '')
+            if not category:
+                return
+            space_type = getattr(panel_obj, 'bl_space_type', '')
+            region_type = getattr(panel_obj, 'bl_region_type', '')
+            panel_samples.append((source, panel_name, category, space_type, region_type))
+        except Exception:
+            return
 
     try:
         import bpy.types
@@ -1835,7 +2045,8 @@ def _discover_active_categories():
                 type_obj = getattr(bpy.types, type_name)
                 # Check if it's a Panel class with bl_category
                 if hasattr(type_obj, 'bl_category') and type_obj.bl_category:
-                    discovered_categories.add(type_obj.bl_category)
+                    _record_discovered(type_obj.bl_category, "panel_discovered")
+                    _append_panel_sample("bpy.types", type_name, type_obj)
             except (AttributeError, TypeError):
                 continue
 
@@ -1843,7 +2054,8 @@ def _discover_active_categories():
         try:
             for panel_class in Panel.__subclasses__():
                 if hasattr(panel_class, 'bl_category') and panel_class.bl_category:
-                    discovered_categories.add(panel_class.bl_category)
+                    _record_discovered(panel_class.bl_category, "panel_discovered")
+                    _append_panel_sample("Panel.__subclasses__", getattr(panel_class, "__name__", "<unknown>"), panel_class)
         except Exception as e:
             print(f"[GLYPH] Warning: Could not get Panel subclasses: {e}")
 
@@ -1855,16 +2067,146 @@ def _discover_active_categories():
                     try:
                         attr = getattr(_bpy.types, attr_name)
                         if hasattr(attr, 'bl_category') and attr.bl_category:
-                            discovered_categories.add(attr.bl_category)
+                            _record_discovered(attr.bl_category, "panel_discovered")
+                            _append_panel_sample("_bpy.types", attr_name, attr)
                     except (AttributeError, TypeError):
                         continue
         except ImportError:
             pass
 
+        # Method 4: Seed categories from enabled extension add-ons.
+        # This covers cases where extension is enabled but its panels are not yet
+        # discoverable through bpy.types / Panel subclasses at this moment.
+        try:
+            prefs = getattr(bpy.context, "preferences", None)
+            addons = getattr(prefs, "addons", None) if prefs else None
+            if addons:
+                extensions_dir = bpy.utils.user_resource('EXTENSIONS')
+                for addon in addons:
+                    module_name = getattr(addon, "module", "")
+                    if not isinstance(module_name, str) or not module_name.startswith("bl_ext."):
+                        continue
+
+                    module_parts = module_name.split(".")
+                    # Expected format: bl_ext.<repo_name>.<package_name>
+                    if len(module_parts) < 3:
+                        continue
+
+                    repo_name = module_parts[1]
+                    pkg_name = ".".join(module_parts[2:])
+                    if pkg_name:
+                        _record_discovered(pkg_name, "package_dir")
+                        print(
+                            f"[GLYPH DISCOVER DEBUG] extension addon seed: "
+                            f"module={module_name!r}, category={pkg_name!r}, source='module'"
+                        )
+
+                    if not extensions_dir:
+                        continue
+
+                    manifest_path = os.path.join(extensions_dir, repo_name, pkg_name, "blender_manifest.toml")
+                    if not os.path.isfile(manifest_path):
+                        continue
+
+                    try:
+                        import tomllib
+                        with open(manifest_path, "rb") as fh:
+                            manifest = tomllib.load(fh)
+
+                        for key_name in ("name", "id"):
+                            value = manifest.get(key_name)
+                            if isinstance(value, str) and value.strip():
+                                seed = value.strip()
+                                if key_name == "name":
+                                    _record_discovered(seed, "manifest_name")
+                                else:
+                                    _record_discovered(seed, "manifest_id")
+                                print(
+                                    f"[GLYPH DISCOVER DEBUG] extension addon seed: "
+                                    f"module={module_name!r}, category={seed!r}, source='manifest.{key_name}'"
+                                )
+                    except Exception as e:
+                        print(
+                            f"[GLYPH DISCOVER DEBUG] extension manifest read failed: "
+                            f"module={module_name!r}, path={manifest_path!r}, error={e}"
+                        )
+        except Exception as e:
+            print(f"[GLYPH DISCOVER DEBUG] extension addon seeding failed: {e}")
+
+        # Method 5: Seed categories from installed extension packages with a root icon file.
+        # This is a fallback for cases where addon enable events do not immediately expose
+        # panel classes or prefs.addons entries for extension packages.
+        try:
+            extensions_dir = bpy.utils.user_resource('EXTENSIONS')
+            if extensions_dir and os.path.isdir(extensions_dir):
+                icon_filenames = ("icon.png", "icon.webp", "icon.jpg", "icon.jpeg")
+
+                for repo_name in os.listdir(extensions_dir):
+                    repo_path = os.path.join(extensions_dir, repo_name)
+                    if (not os.path.isdir(repo_path)) or repo_name.startswith('.'):
+                        continue
+
+                    for pkg_name in os.listdir(repo_path):
+                        pkg_path = os.path.join(repo_path, pkg_name)
+                        if not os.path.isdir(pkg_path):
+                            continue
+
+                        has_root_icon = any(os.path.isfile(os.path.join(pkg_path, icon_name)) for icon_name in icon_filenames)
+                        if not has_root_icon:
+                            continue
+
+                        if pkg_name:
+                            _record_discovered(pkg_name, "package_dir")
+                            print(
+                                f"[GLYPH DISCOVER DEBUG] extension package seed: "
+                                f"repo={repo_name!r}, category={pkg_name!r}, source='package_with_icon'"
+                            )
+
+                        manifest_path = os.path.join(pkg_path, "blender_manifest.toml")
+                        if not os.path.isfile(manifest_path):
+                            continue
+
+                        try:
+                            import tomllib
+                            with open(manifest_path, "rb") as fh:
+                                manifest = tomllib.load(fh)
+
+                            for key_name in ("name", "id"):
+                                value = manifest.get(key_name)
+                                if isinstance(value, str) and value.strip():
+                                    seed = value.strip()
+                                    if key_name == "name":
+                                        _record_discovered(seed, "manifest_name")
+                                    else:
+                                        _record_discovered(seed, "manifest_id")
+                                    print(
+                                        f"[GLYPH DISCOVER DEBUG] extension package seed: "
+                                        f"repo={repo_name!r}, category={seed!r}, source='manifest.{key_name}_with_icon'"
+                                    )
+                        except Exception as e:
+                            print(
+                                f"[GLYPH DISCOVER DEBUG] extension package manifest read failed: "
+                                f"pkg_path={pkg_path!r}, error={e}"
+                            )
+        except Exception as e:
+            print(f"[GLYPH DISCOVER DEBUG] extension package seeding failed: {e}")
+
+        if panel_samples:
+            print(f"[GLYPH DISCOVER DEBUG] panel samples collected: {len(panel_samples)} (showing up to 20)")
+            for source, panel_name, category, space_type, region_type in panel_samples[:20]:
+                print(
+                    f"[GLYPH DISCOVER DEBUG] sample: source={source}, panel={panel_name}, "
+                    f"bl_category={category!r}, space={space_type!r}, region={region_type!r}"
+                )
+        else:
+            print("[GLYPH DISCOVER DEBUG] panel samples collected: 0")
+
+        _last_discovered_category_sources = discovered_sources
         print(f"[GLYPH] Discovered {len(discovered_categories)} active categories: {sorted(discovered_categories)}")
         return discovered_categories
 
     except Exception as e:
+        _last_discovered_category_sources = {}
         print(f"[GLYPH] Error discovering categories: {e}")
         import traceback
         traceback.print_exc()
@@ -1873,14 +2215,129 @@ def _discover_active_categories():
 
 def _merge_discovered_categories():
     """Merge discovered categories with cached mappings, adding defaults for new ones."""
-    global _glyph_cache
+    global _glyph_cache, _category_orders_cache
 
     discovered = _discover_active_categories()
     if not discovered:
         return False
 
+    discovered_source_map = dict(_last_discovered_category_sources)
+
+    def _clone_category_data(data):
+        if not isinstance(data, dict):
+            return _normalize_category_data({})
+        cloned = dict(data)
+        if isinstance(cloned.get("color"), list):
+            cloned["color"] = list(cloned["color"])
+        if isinstance(cloned.get("tags"), list):
+            cloned["tags"] = list(cloned["tags"])
+        return cloned
+
+    def _is_default_color(color):
+        return not isinstance(color, list) or color == [0.0, 0.0, 0.0]
+
+    def _merge_alias_into_canonical(canonical_name, alias_name):
+        if canonical_name == alias_name:
+            return False
+        canonical_data = _glyph_cache.get(canonical_name)
+        alias_data = _glyph_cache.get(alias_name)
+        if alias_data is None:
+            return False
+
+        changed = False
+        if canonical_data is None:
+            _glyph_cache[canonical_name] = _clone_category_data(alias_data)
+            canonical_data = _glyph_cache[canonical_name]
+            changed = True
+
+        # Prefer keeping existing canonical values, but fill missing important fields from alias.
+        for field_name in ("glyph", "display_name", "icon_path", "icon_provider", "icon_source", "icon_key"):
+            if not canonical_data.get(field_name) and alias_data.get(field_name):
+                canonical_data[field_name] = alias_data.get(field_name)
+                changed = True
+
+        if _is_default_color(canonical_data.get("color")) and isinstance(alias_data.get("color"), list) and not _is_default_color(alias_data.get("color")):
+            canonical_data["color"] = list(alias_data.get("color"))
+            changed = True
+
+        canonical_tags = canonical_data.get("tags", []) if isinstance(canonical_data.get("tags"), list) else []
+        alias_tags = alias_data.get("tags", []) if isinstance(alias_data.get("tags"), list) else []
+        merged_tags = []
+        for tag in canonical_tags + alias_tags:
+            if tag not in merged_tags:
+                merged_tags.append(tag)
+        if merged_tags != canonical_tags:
+            canonical_data["tags"] = merged_tags
+            changed = True
+
+        # Remap category references in persisted category orders.
+        for tag_key, order_list in _category_orders_cache.items():
+            if not isinstance(order_list, list):
+                continue
+
+            remapped = [canonical_name if category == alias_name else category for category in order_list]
+            deduped = []
+            for category in remapped:
+                if category not in deduped:
+                    deduped.append(category)
+            if deduped != order_list:
+                _category_orders_cache[tag_key] = deduped
+                changed = True
+
+        del _glyph_cache[alias_name]
+        print(
+            f"[GLYPH DISCOVER DEBUG] canonicalized alias in cache: alias={alias_name!r} -> canonical={canonical_name!r}"
+        )
+        return True
+
+    # Group discovered names by normalized key and choose one canonical key per group.
+    discovered_groups = {}
+    for category in discovered:
+        normalized_key = _normalize_category_key(category) or category
+        discovered_groups.setdefault(normalized_key, []).append(category)
+
+    canonical_by_group = {
+        group_key: _pick_canonical_category_name(candidates, discovered_source_map)
+        for group_key, candidates in discovered_groups.items()
+    }
+
+    # Existing cache aliases for active discovered groups are merged into the canonical entry.
+    cache_changed = False
+    for group_key, canonical_name in canonical_by_group.items():
+        aliases_in_cache = [
+            cache_name
+            for cache_name in list(_glyph_cache.keys())
+            if (_normalize_category_key(cache_name) or cache_name) == group_key and cache_name != canonical_name
+        ]
+        for alias_name in aliases_in_cache:
+            cache_changed = _merge_alias_into_canonical(canonical_name, alias_name) or cache_changed
+
     # Find categories that are in the discovered set but not in cache
     new_categories = discovered - set(_glyph_cache.keys())
+
+    # Canonicalize only new candidates: one mapping per normalized key.
+    canonical_new_categories = []
+    suppressed_aliases = []
+    for group_key, candidates in discovered_groups.items():
+        if not any(candidate in new_categories for candidate in candidates):
+            continue
+
+        canonical_name = canonical_by_group[group_key]
+        if canonical_name not in _glyph_cache:
+            canonical_new_categories.append(canonical_name)
+
+        for candidate in candidates:
+            if candidate in new_categories and candidate != canonical_name:
+                suppressed_aliases.append((candidate, canonical_name))
+
+    new_categories = set(canonical_new_categories)
+
+    if suppressed_aliases:
+        print(f"[GLYPH DISCOVER DEBUG] suppressed {len(suppressed_aliases)} alias categories during merge")
+        for alias_name, canonical_name in sorted(suppressed_aliases)[:40]:
+            print(
+                f"[GLYPH DISCOVER DEBUG] alias suppressed: alias={alias_name!r}, canonical={canonical_name!r}"
+            )
 
     if new_categories:
         print(f"[GLYPH] Found {len(new_categories)} new categories: {sorted(new_categories)}")
@@ -1922,6 +2379,18 @@ def _merge_discovered_categories():
                 "icon_path": "",
                 "icon_provider": "",
             }
+
+            detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
+            if detected_icon_path:
+                _glyph_cache[category]["icon_path"] = detected_icon_path
+                _glyph_cache[category]["icon_provider"] = detected_provider or "extension_auto"
+                print(
+                    f"[GLYPH ICON AUTO DEBUG] merge new category auto-icon: "
+                    f"category={category!r}, path={detected_icon_path!r}, provider={_glyph_cache[category]['icon_provider']!r}"
+                )
+            else:
+                print(f"[GLYPH ICON AUTO DEBUG] merge new category no icon: category={category!r}")
+
             print(f"[GLYPH] Added new category '{category}' with glyph '{glyph}', base_type={base_type}")
 
         # Save updated cache to file
@@ -1931,10 +2400,17 @@ def _merge_discovered_categories():
         else:
             print(f"[GLYPH] Failed to save new category mappings")
 
+    elif cache_changed:
+        if _save_glyph_mappings_to_file():
+            print("[GLYPH] Saved cache canonicalization updates to JSON")
+            return True
+        else:
+            print("[GLYPH] Failed to save cache canonicalization updates")
+
     else:
         print(f"[GLYPH] No new categories found (all {len(discovered)} are cached)")
 
-    return len(new_categories) > 0
+    return len(new_categories) > 0 or cache_changed
 
 
 def _is_collection_safe(collection):
@@ -1973,6 +2449,14 @@ def _sync_glyph_mappings_to_wm_impl():
     global _glyph_cache, _glyph_cache_loaded
 
     print(f"[GLYPH SYNC] sync_glyph_mappings_to_wm called, cache has {len(_glyph_cache)} entries")
+
+    # Re-check categories each sync to catch addons/extensions enabled after startup.
+    # This also triggers icon auto-detection for newly discovered categories.
+    try:
+        discovered_changes = _merge_discovered_categories()
+        print(f"[GLYPH SYNC] late discovery merge result: {discovered_changes}")
+    except Exception as e:
+        print(f"[GLYPH SYNC] late discovery merge failed: {e}")
 
     def _has_user_customizations(category_data):
         """Check if category has user customizations (display_name, color, or tags)."""
@@ -2066,13 +2550,21 @@ def _sync_glyph_mappings_to_wm_impl():
                     icon_provider_val = str(normalized_data.get("icon_provider", ""))
 
                     if icon_source_str == "auto" and (not icon_key_val) and (not icon_path_val):
+                        print(
+                            f"[GLYPH ICON AUTO DEBUG] sync attempt: category={category!r}, "
+                            f"icon_source={icon_source_str!r}, key={icon_key_val!r}, path={icon_path_val!r}, provider={icon_provider_val!r}"
+                        )
                         detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
                         if detected_icon_path:
                             icon_path_val = detected_icon_path
                             if not icon_provider_val:
                                 icon_provider_val = detected_provider
-                            if category == "OpenVAT":
-                                print(f"[GLYPH ICON AUTO] Category '{category}' -> '{icon_path_val}'")
+                            print(
+                                f"[GLYPH ICON AUTO DEBUG] sync hit: category={category!r}, "
+                                f"path={icon_path_val!r}, provider={icon_provider_val!r}"
+                            )
+                        else:
+                            print(f"[GLYPH ICON AUTO DEBUG] sync miss: category={category!r}")
 
                     icon_source_to_enum = {
                         "auto": "AUTO",
@@ -3377,7 +3869,25 @@ def _on_version_update(dummy):
     """Sync category glyphs after Blender version update or addon enable/disable."""
     # Re-discover categories in case new addons were enabled
     try:
-        _merge_discovered_categories()
+        discovered_before = _discover_active_categories()
+        cache_before = set(_glyph_cache.keys())
+        print(
+            f"[GLYPH VERSION UPDATE DEBUG] before merge: "
+            f"discovered={len(discovered_before)}, cache={len(cache_before)}, "
+            f"missing_in_cache={sorted(discovered_before - cache_before)}"
+        )
+
+        merge_result = _merge_discovered_categories()
+
+        discovered_after = _discover_active_categories()
+        cache_after = set(_glyph_cache.keys())
+        print(
+            f"[GLYPH VERSION UPDATE DEBUG] after merge: "
+            f"merge_result={merge_result}, discovered={len(discovered_after)}, cache={len(cache_after)}, "
+            f"added_to_cache={sorted(cache_after - cache_before)}, "
+            f"still_missing={sorted(discovered_after - cache_after)}"
+        )
+
         sync_glyph_mappings_to_wm()
     except Exception as e:
         print(f"[GLYPH] Error during version update sync: {e}")
@@ -3389,6 +3899,13 @@ if _on_load_post not in bpy.app.handlers.load_post:
 
 if _on_save_pre not in bpy.app.handlers.save_pre:
     bpy.app.handlers.save_pre.append(_on_save_pre)
+
+if hasattr(bpy.app.handlers, "version_update"):
+    if _on_version_update not in bpy.app.handlers.version_update:
+        bpy.app.handlers.version_update.append(_on_version_update)
+        print("[GLYPH SYNC] Registered version_update handler for addon/category rediscovery")
+else:
+    print("[GLYPH SYNC] WARNING: bpy.app.handlers.version_update is unavailable")
 
 # Load mappings on module import
 _load_glyph_mappings_from_file()

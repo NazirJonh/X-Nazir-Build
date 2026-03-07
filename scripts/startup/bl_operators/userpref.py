@@ -470,6 +470,33 @@ class PREFERENCES_OT_keyconfig_remove(Operator):
 # -----------------------------------------------------------------------------
 # Add-on Operators
 
+
+def _refresh_category_glyphs_after_addon_change(context):
+    """Refresh category tab glyph/icon mappings after add-on enable/disable."""
+    try:
+        from bl_ui import space_userpref
+    except Exception as ex:
+        print(f"[GLYPH SYNC] addon change refresh: failed to import space_userpref: {ex}")
+        return
+
+    try:
+        refresh_result = space_userpref.sync_glyph_mappings_to_wm()
+        print(f"[GLYPH SYNC] addon change refresh: sync_glyph_mappings_to_wm -> {refresh_result}")
+    except Exception as ex:
+        import traceback
+        print(f"[GLYPH SYNC] addon change refresh: sync failed: {ex}")
+        traceback.print_exc()
+
+    # Force redraw so category tabs pick up updated mappings immediately.
+    wm = context.window_manager if context is not None else bpy.context.window_manager
+    if wm is not None:
+        for window in wm.windows:
+            screen = window.screen
+            if screen is None:
+                continue
+            for area in screen.areas:
+                area.tag_redraw()
+
 class PREFERENCES_OT_addon_enable(Operator):
     """Turn on this add-on"""
     bl_idname = "preferences.addon_enable"
@@ -520,6 +547,8 @@ class PREFERENCES_OT_addon_enable(Operator):
                         "though it is enabled"
                     ).format(*info_ver)
                 )
+
+            _refresh_category_glyphs_after_addon_change(_context)
             result = {'FINISHED'}
         else:
 
@@ -565,6 +594,8 @@ class PREFERENCES_OT_addon_disable(Operator):
 
         if err_str:
             self.report({'ERROR'}, err_str)
+        else:
+            _refresh_category_glyphs_after_addon_change(_context)
 
         if cursor_set:
             _wm_wait_cursor(False)

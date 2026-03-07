@@ -518,6 +518,30 @@ void category_tag_filter_toggle_menu_register()
 /** \name Live Update Callback
  * \{ */
 
+static void category_tab_live_update_notify_redraw(bContext *C)
+{
+  if (!C) {
+    return;
+  }
+
+  /* Notify category glyph/icon subscribers (tag bar + category tabs). */
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  WM_event_add_notifier(C, NC_SPACE | ND_CATEGORY_GLYPHS, nullptr);
+  WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
+
+  /* Immediate redraw for currently active UI context (popup/region). */
+  if (ScrArea *area = CTX_wm_area(C)) {
+    ED_area_tag_redraw(area);
+  }
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+
+  /* Keep legacy window notifier for broad UI refresh. */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
 void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
 {
   wmOperator *op = static_cast<wmOperator *>(arg_op);
@@ -710,8 +734,8 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
     item->glyph[0] = '\0';
   }
 
-  /* Trigger redraw to show the updated color */
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+  /* Trigger live redraw so icon/glyph updates appear instantly without restart. */
+  category_tab_live_update_notify_redraw(C);
 
   /* Note: Preview button uses custom draw callback that reads directly from
    * category_tab_preview_glyph and category_tab_preview_color static buffers,
@@ -2631,6 +2655,87 @@ bool category_tab_edit_poll(bContext *C)
   return ED_operator_regionactive(C);
 }
 
+static bool category_tab_try_auto_detect_extension_icon(bContext *C,
+                                                        const char *category,
+                                                        char r_icon_path[1024],
+                                                        char r_icon_provider[128])
+{
+  r_icon_path[0] = '\0';
+  r_icon_provider[0] = '\0';
+
+  printf("[CAT TAB ICON AUTO DEBUG] C invoke detect start: category='%s'\n", category ? category : "");
+
+#ifdef WITH_PYTHON
+  if (!C || !category || category[0] == '\0') {
+    printf("[CAT TAB ICON AUTO DEBUG] C invoke detect abort: invalid context/category\n");
+    return false;
+  }
+
+  const std::string escaped_category = category_tab_escape_for_python_literal(category);
+
+  char python_expr[2048];
+  SNPRINTF(python_expr,
+           "(lambda _r: json.dumps([_r[0].replace('\\\\', '/'), _r[1]]))"
+           "(__import__('bl_ui.space_userpref', fromlist=[''])"
+           "._auto_detect_extension_icon_path('%s'))",
+           escaped_category.c_str());
+
+  const char *imports[] = {"json", nullptr};
+
+  char *result_str = nullptr;
+  char *err_msg = nullptr;
+  BPy_RunErrInfo err_info = {false, nullptr, "", &err_msg};
+  const bool success = BPY_run_string_as_string(C, imports, python_expr, &err_info, &result_str);
+
+  if (!success || !result_str) {
+    printf("[CAT TAB ICON AUTO DEBUG] C invoke detect python failed: success=%d\n", int(success));
+    if (err_msg) {
+      printf("[CAT TAB ICON AUTO DEBUG] C invoke detect python error: %s\n", err_msg);
+      MEM_delete(err_msg);
+    }
+    return false;
+  }
+
+  blender::Vector<std::string> parts;
+  const bool parsed = category_tab_parse_json_string_array_minimal(result_str, parts);
+  bool detected = false;
+
+  if (parsed && parts.size() >= 2) {
+    const std::string icon_path = category_tab_decode_json_unicode(parts[0].c_str());
+    const std::string icon_provider = category_tab_decode_json_unicode(parts[1].c_str());
+
+    if (!icon_path.empty()) {
+      BLI_strncpy(r_icon_path, icon_path.c_str(), 1024);
+      BLI_strncpy(r_icon_provider, icon_provider.c_str(), 128);
+      printf("[CAT TAB ICON AUTO DEBUG] C invoke detect hit: category='%s', path='%s', provider='%s'\n",
+             category,
+             r_icon_path,
+             r_icon_provider);
+      detected = true;
+    }
+  }
+  else {
+    printf("[CAT TAB ICON AUTO DEBUG] C invoke detect parse miss: category='%s', parsed=%d, parts=%d\n",
+           category,
+           int(parsed),
+           int(parts.size()));
+  }
+
+  MEM_delete(result_str);
+  if (err_msg) {
+    MEM_delete(err_msg);
+  }
+  if (!detected) {
+    printf("[CAT TAB ICON AUTO DEBUG] C invoke detect miss: category='%s'\n", category);
+  }
+  return detected;
+#else
+  UNUSED_VARS(C, category);
+  printf("[CAT TAB ICON AUTO DEBUG] C invoke detect skipped: WITH_PYTHON disabled\n");
+  return false;
+#endif
+}
+
 wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
                                                   wmOperator *op,
                                                   const wmEvent *event)
@@ -2730,6 +2835,8 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   bool has_override = false;
   bool override_is_empty = false;
   bool override_icon_needs_mapping = false;
+  bool user_glyph_override_assigned = false;
+  bool explicit_icon_mode_assigned = false;
 
   /* First check category_glyph_overrides (user changes in current session) */
   for (CategoryGlyphItem *item =
@@ -2741,6 +2848,9 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
       const bool has_icon_payload = (item->icon_key[0] != '\0') || (item->icon_path[0] != '\0') ||
                                     (item->icon_provider[0] != '\0');
       const bool has_explicit_icon_mode = ELEM(item->icon_source, 1, 2); /* MANUAL/OFF */
+      if (has_explicit_icon_mode) {
+        explicit_icon_mode_assigned = true;
+      }
 
       printf("[CAT TAB ICON INVOKE] override match: source=%s(%d), key='%s', path='%s', provider='%s', "
              "has_payload=%s, explicit_mode=%s\n",
@@ -2782,9 +2892,11 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
       char hex_code[16];
       if (item->glyph[0] != '\0') {
         utf8_to_hex_codepoint(item->glyph, hex_code, sizeof(hex_code));
+        user_glyph_override_assigned = true;
       }
       else if (extracted_glyph[0] != '\0') {
         STRNCPY(hex_code, extracted_glyph);
+        user_glyph_override_assigned = true;
       }
       else {
         hex_code[0] = '\0';
@@ -2821,6 +2933,9 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
         RNA_string_set(op->ptr, "icon_key", item->icon_key);
         RNA_string_set(op->ptr, "icon_path", item->icon_path);
         RNA_string_set(op->ptr, "icon_provider", item->icon_provider);
+        if (ELEM(item->icon_source, 1, 2)) {
+          explicit_icon_mode_assigned = true;
+        }
         break;
       }
     }
@@ -2877,6 +2992,52 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
 
     if (!found_in_mappings) {
       printf("[CAT TAB ICON INVOKE] mapping not found for category='%s'\n", category);
+    }
+  }
+
+  /* If no explicit icon mode/payload is set, try to detect extension root icon
+   * (icon.png/icon.webp/...) for this category.
+   * Only do this when there is no user glyph override; fallback glyphs are ignored. */
+  if (!user_glyph_override_assigned && !explicit_icon_mode_assigned) {
+
+    char current_icon_key[128] = "";
+    char current_icon_path[1024] = "";
+    char current_icon_provider[128] = "";
+    RNA_string_get(op->ptr, "icon_key", current_icon_key);
+    RNA_string_get(op->ptr, "icon_path", current_icon_path);
+    RNA_string_get(op->ptr, "icon_provider", current_icon_provider);
+
+    const bool has_icon_payload =
+        (current_icon_key[0] != '\0') || (current_icon_path[0] != '\0') || (current_icon_provider[0] != '\0');
+
+    printf("[CAT TAB ICON AUTO DEBUG] invoke gate: category='%s', user_glyph_override=%s, explicit_icon_mode=%s, has_icon_payload=%s, key='%s', path='%s', provider='%s'\n",
+           category,
+           user_glyph_override_assigned ? "true" : "false",
+           explicit_icon_mode_assigned ? "true" : "false",
+           has_icon_payload ? "true" : "false",
+           current_icon_key,
+           current_icon_path,
+           current_icon_provider);
+
+    if (!has_icon_payload) {
+      char detected_icon_path[1024] = "";
+      char detected_icon_provider[128] = "";
+      if (category_tab_try_auto_detect_extension_icon(
+              C, category, detected_icon_path, detected_icon_provider))
+      {
+        RNA_enum_set(op->ptr, "icon_source", 0); /* AUTO */
+        RNA_string_set(op->ptr, "icon_path", detected_icon_path);
+        if (detected_icon_provider[0] != '\0') {
+          RNA_string_set(op->ptr, "icon_provider", detected_icon_provider);
+        }
+        printf("[CAT TAB ICON AUTO DEBUG] invoke assign: category='%s', path='%s', provider='%s'\n",
+               category,
+               detected_icon_path,
+               detected_icon_provider);
+      }
+      else {
+        printf("[CAT TAB ICON AUTO DEBUG] invoke no assignment: category='%s'\n", category);
+      }
     }
   }
 

@@ -290,6 +290,36 @@ bool category_tag_list_is_valid(const ListBase *list)
   return true;
 }
 
+/**
+ * Normalize category name for canonicalization-aware matching.
+ * Equivalent to Python's _normalize_category_key: removes non-alphanumeric chars and converts to lowercase.
+ */
+static std::string normalize_category_key(const char *category)
+{
+  if (!category) {
+    return "";
+  }
+  
+  std::string result;
+  result.reserve(strlen(category));
+  
+  for (const char *c = category; *c; c++) {
+    if ((*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9')) {
+      result += *c;
+    }
+    else if (*c >= 'A' && *c <= 'Z') {
+      result += (*c + ('a' - 'A')); // Convert to lowercase
+    }
+    // Skip all other characters (spaces, punctuation, etc.)
+  }
+  
+  return result;
+}
+
+/**
+ * Find category glyph mapping item with canonicalization fallback.
+ * First tries exact match, then tries to match by normalized keys if no exact match found.
+ */
 static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManager *wm,
                                                             const char *category)
 {
@@ -297,6 +327,7 @@ static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManage
     return nullptr;
   }
 
+  // First pass: try exact match
   for (const CategoryGlyphItem *item =
            static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
        item;
@@ -306,6 +337,24 @@ static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManage
       return item;
     }
   }
+
+  // Second pass: try canonicalization fallback
+  const std::string normalized_target = normalize_category_key(category);
+  if (normalized_target.empty()) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item =
+           static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+       item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    const std::string normalized_item = normalize_category_key(item->category);
+    if (normalized_item == normalized_target) {
+      return item;
+    }
+  }
+  
   return nullptr;
 }
 
@@ -321,6 +370,7 @@ const char *category_tags_string_lookup(const wmWindowManager *wm, const char *c
     return "";
   }
 
+  // First pass: try exact match in overrides
   if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
@@ -333,6 +383,7 @@ const char *category_tags_string_lookup(const wmWindowManager *wm, const char *c
     }
   }
 
+  // First pass: try exact match in mappings
   if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
@@ -344,6 +395,41 @@ const char *category_tags_string_lookup(const wmWindowManager *wm, const char *c
       }
     }
   }
+
+  // Second pass: try canonicalization fallback
+  const std::string normalized_target = normalize_category_key(category);
+  if (normalized_target.empty()) {
+    return "";
+  }
+
+  // Check overrides with canonicalization
+  if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      const std::string normalized_item = normalize_category_key(item->category);
+      if (normalized_item == normalized_target) {
+        return item->tags;
+      }
+    }
+  }
+
+  // Check mappings with canonicalization
+  if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      const std::string normalized_item = normalize_category_key(item->category);
+      if (normalized_item == normalized_target) {
+        return item->tags;
+      }
+    }
+  }
+  
   return "";
 }
 
@@ -461,6 +547,7 @@ static const char *panel_category_glyph_lookup_override(const wmWindowManager *w
     return nullptr;
   }
 
+  // First pass: try exact match
   for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
            wm->category_glyph_overrides.first);
        item;
@@ -469,6 +556,58 @@ static const char *panel_category_glyph_lookup_override(const wmWindowManager *w
     if (!STREQ(item->category, category)) {
       continue;
     }
+
+    if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
+      if (r_color && !is_zero_v3(item->color)) {
+        copy_v3_v3(r_color, item->color);
+      }
+      if (r_is_fallback_letter) {
+        *r_is_fallback_letter = true;
+      }
+      *r_handled = true;
+      return nullptr;
+    }
+
+    if (item->glyph[0] != '\0') {
+      const bool is_fallback_letter = category_tab_glyph_is_fallback_letter(item->glyph, category);
+
+      if (is_fallback_letter) {
+        if (r_color && !is_zero_v3(item->color)) {
+          copy_v3_v3(r_color, item->color);
+        }
+        /* Empty override used for tags only, keep searching mapping/defaults. */
+        if (is_zero_v3(item->color) && item->display_name[0] == '\0') {
+          continue;
+        }
+        if (r_is_fallback_letter) {
+          *r_is_fallback_letter = true;
+        }
+        *r_handled = true;
+        return nullptr;
+      }
+
+      if (r_color && !is_zero_v3(item->color)) {
+        copy_v3_v3(r_color, item->color);
+      }
+      *r_handled = true;
+      return item->glyph;
+    }
+
+    break;
+  }
+
+  // Second pass: try canonicalization fallback
+  const std::string normalized_target = normalize_category_key(category);
+  if (!normalized_target.empty()) {
+    for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+             wm->category_glyph_overrides.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      const std::string normalized_item = normalize_category_key(item->category);
+      if (normalized_item != normalized_target) {
+        continue;
+      }
 
     if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
       if (r_color && !is_zero_v3(item->color)) {
@@ -511,7 +650,8 @@ static const char *panel_category_glyph_lookup_override(const wmWindowManager *w
     if (r_color && !is_zero_v3(item->color)) {
       copy_v3_v3(r_color, item->color);
     }
-    continue;
+    break;
+    }
   }
 
   return nullptr;
@@ -651,6 +791,35 @@ static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
 
   *r_icon = CategoryTabIconResolved{};
 
+  const auto icon_data_copy_from_item = [&](const CategoryGlyphItem *item,
+                                            const char *source_label) {
+    r_icon->source = item->icon_source;
+    r_icon->key = item->icon_key;
+    r_icon->path = item->icon_path;
+    r_icon->provider = item->icon_provider;
+
+    if (STREQ(category, "Pivot Tools")) {
+      printf("[CAT TAB ICON DRAW] lookup %s category='%s' source=%d key='%s' path='%s' provider='%s'\n",
+             source_label,
+             category,
+             item->icon_source,
+             item->icon_key,
+             item->icon_path,
+             item->icon_provider);
+    }
+  };
+
+  const auto override_icon_is_effective = [](const CategoryGlyphItem *item) {
+    const bool has_icon_payload = (item->icon_key[0] != '\0') || (item->icon_path[0] != '\0') ||
+                                  (item->icon_provider[0] != '\0');
+    const bool has_explicit_icon_mode = ELEM(
+        item->icon_source, CATEGORY_TAB_ICON_SOURCE_MANUAL, CATEGORY_TAB_ICON_SOURCE_OFF);
+
+    /* Important: override entries are often created for glyph/color/tag edits.
+     * If an AUTO override has no icon payload, don't mask JSON mapping icon data. */
+    return has_icon_payload || has_explicit_icon_mode;
+  };
+
   /* 1) User overrides. */
   if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
     for (const CategoryGlyphItem *item =
@@ -658,62 +827,39 @@ static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
          item;
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
-      if (!STREQ(item->category, category)) {
+      if (!STREQ(item->category, category) || !override_icon_is_effective(item)) {
         continue;
       }
-
-      const bool has_icon_payload = (item->icon_key[0] != '\0') || (item->icon_path[0] != '\0') ||
-                                    (item->icon_provider[0] != '\0');
-      const bool has_explicit_icon_mode = ELEM(
-          item->icon_source, CATEGORY_TAB_ICON_SOURCE_MANUAL, CATEGORY_TAB_ICON_SOURCE_OFF);
-
-      /* Important: override entries are often created for glyph/color/tag edits.
-       * If an AUTO override has no icon payload, don't mask JSON mapping icon data. */
-      if (!has_icon_payload && !has_explicit_icon_mode) {
-        continue;
-      }
-
-      r_icon->source = item->icon_source;
-      r_icon->key = item->icon_key;
-      r_icon->path = item->icon_path;
-      r_icon->provider = item->icon_provider;
-      if (STREQ(category, "Pivot Tools")) {
-        printf("[CAT TAB ICON DRAW] lookup override category='%s' source=%d key='%s' path='%s' provider='%s'\n",
-               category,
-               item->icon_source,
-               item->icon_key,
-               item->icon_path,
-               item->icon_provider);
-      }
+      icon_data_copy_from_item(item, "override");
       return true;
+    }
+
+    const std::string normalized_target = normalize_category_key(category);
+    if (!normalized_target.empty()) {
+      for (const CategoryGlyphItem *item =
+               static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+           item;
+           item = static_cast<const CategoryGlyphItem *>(item->next))
+      {
+        if (!override_icon_is_effective(item)) {
+          continue;
+        }
+
+        const std::string normalized_item = normalize_category_key(item->category);
+        if (normalized_item != normalized_target) {
+          continue;
+        }
+
+        icon_data_copy_from_item(item, "override(normalized)");
+        return true;
+      }
     }
   }
 
   /* 2) Global mappings from Python cache sync. */
-  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      if (!STREQ(item->category, category)) {
-        continue;
-      }
-
-      r_icon->source = item->icon_source;
-      r_icon->key = item->icon_key;
-      r_icon->path = item->icon_path;
-      r_icon->provider = item->icon_provider;
-      if (STREQ(category, "Pivot Tools")) {
-        printf("[CAT TAB ICON DRAW] lookup mapping category='%s' source=%d key='%s' path='%s' provider='%s'\n",
-               category,
-               item->icon_source,
-               item->icon_key,
-               item->icon_path,
-               item->icon_provider);
-      }
-      return true;
-    }
+  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category)) {
+    icon_data_copy_from_item(item, "mapping");
+    return true;
   }
 
   return false;

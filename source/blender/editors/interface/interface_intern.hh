@@ -965,6 +965,20 @@ void centered_popup_operator_register();
 ui::Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_data);
 
 /**
+ * Shared Category Tab enums (single source of truth across interface/screen modules).
+ */
+enum eCategoryTabIconSource {
+  CATEGORY_TAB_ICON_SOURCE_AUTO = 0,
+  CATEGORY_TAB_ICON_SOURCE_MANUAL = 1,
+  CATEGORY_TAB_ICON_SOURCE_OFF = 2,
+};
+
+enum eCategoryTabGlyphMode {
+  CATEGORY_TAB_GLYPH_MODE_AUTO = 0,
+  CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER = 1,
+};
+
+/**
  * Dialog invoke/exec.
  */
 bool category_tab_edit_poll(bContext *C);

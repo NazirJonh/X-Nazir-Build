@@ -9,6 +9,8 @@
  */
 
 #include <cctype>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -22,9 +24,12 @@
 #include "BKE_icons.hh"
 #include "BKE_preview_image.hh"
 
+#include "DNA_userdef_types.h"
+
 #include "RNA_access.hh"
 #include "RNA_enum_types.hh"
 
+#include "UI_interface_c.hh"
 #include "UI_interface_icons.hh"
 
 #include "IMB_thumbs.hh"
@@ -180,6 +185,32 @@ bool category_tab_glyph_is_fallback_letter(const char *glyph, const char *catego
   }
 
   return STREQ(glyph, category_first_char);
+}
+
+float category_tabs_zoom_value_get(const eUserPref_CategoryTabsDisplayMode display_mode)
+{
+  switch (display_mode) {
+    case USER_CATEGORY_TABS_GLYPHS_ONLY:
+      return U.category_tabs_zoom_icon;
+    case USER_CATEGORY_TABS_GLYPHS_TEXT:
+      return U.category_tabs_zoom_mixed;
+    case USER_CATEGORY_TABS_TEXT_ONLY:
+    default:
+      return U.category_tabs_zoom_text;
+  }
+}
+
+int category_tabs_min_width_get(const float aspect,
+                                const eUserPref_CategoryTabsDisplayMode display_mode)
+{
+  const float safe_aspect = std::max(aspect, 0.0001f);
+  const float category_tabs_zoom = category_tabs_zoom_value_get(display_mode);
+  const float zoom = (1.0f / safe_aspect) * category_tabs_zoom;
+  const int category_tabs_width = int(std::lround(double(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom)));
+  const int legacy_min_width =
+      int(std::ceil(double(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / safe_aspect)));
+
+  return std::max(category_tabs_width, legacy_min_width);
 }
 
 int category_tab_icon_id_resolve_from_path(const char *icon_path)

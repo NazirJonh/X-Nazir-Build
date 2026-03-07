@@ -139,14 +139,6 @@ static SpaceLink *image_create(const ScrArea * /*area*/, const Scene * /*scene*/
   region->regiontype = RGN_TYPE_HEADER;
   region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
 
-  /* tag bar */
-  region = BKE_area_region_new();
-  BLI_addtail(&simage->regionbase, region);
-  region->regiontype = RGN_TYPE_TAG_BAR;
-  region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
-  region->flag = 0;
-  region->overlap = true;
-
   /* asset shelf */
   region = BKE_area_region_new();
   BLI_addtail(&simage->regionbase, region);
@@ -168,20 +160,28 @@ static SpaceLink *image_create(const ScrArea * /*area*/, const Scene * /*scene*/
   region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
   region->flag = RGN_FLAG_HIDDEN | RGN_FLAG_HIDDEN_BY_USER;
 
-  /* buttons/list view */
-  region = BKE_area_region_new();
-
-  BLI_addtail(&simage->regionbase, region);
-  region->regiontype = RGN_TYPE_UI;
-  region->alignment = RGN_ALIGN_RIGHT;
-  region->flag = RGN_FLAG_HIDDEN;
-
   /* scopes/uv sculpt/paint */
   region = BKE_area_region_new();
 
   BLI_addtail(&simage->regionbase, region);
   region->regiontype = RGN_TYPE_TOOLS;
   region->alignment = RGN_ALIGN_LEFT;
+  region->flag = RGN_FLAG_HIDDEN;
+
+  /* tag bar */
+  region = BKE_area_region_new();
+  BLI_addtail(&simage->regionbase, region);
+  region->regiontype = RGN_TYPE_TAG_BAR;
+  region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
+  region->flag = 0;
+  region->overlap = true;
+
+  /* buttons/list view */
+  region = BKE_area_region_new();
+
+  BLI_addtail(&simage->regionbase, region);
+  region->regiontype = RGN_TYPE_UI;
+  region->alignment = RGN_ALIGN_RIGHT;
   region->flag = RGN_FLAG_HIDDEN;
 
   /* main area */

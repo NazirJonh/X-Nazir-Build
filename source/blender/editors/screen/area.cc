@@ -1868,6 +1868,14 @@ static void region_rect_recursive(
 
       region->winrct = *winrct;
 
+      if (region->regiontype == RGN_TYPE_TAG_BAR && area->spacetype == SPACE_NODE) {
+        /* Keep left side free for node path/context controls (e.g. Geometry Nodes group path).
+         * This mirrors the View3D behavior where top overlay controls don't block critical UI on
+         * the left. */
+        const int node_tag_bar_left_reserve = int(16.0f * U.widget_unit);
+        region->winrct.xmin = min_ii(region->winrct.xmax, region->winrct.xmin + node_tag_bar_left_reserve);
+      }
+
       if (alignment == RGN_ALIGN_TOP) {
         region->winrct.ymin = region->winrct.ymax - prefsizey + 1;
         if (!region->overlap) {

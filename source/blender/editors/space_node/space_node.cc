@@ -599,13 +599,13 @@ static SpaceLink *node_create(const ScrArea * /*area*/, const Scene * /*scene*/)
   region->regiontype = RGN_TYPE_HEADER;
   region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
 
-  /* tag bar */
+  /* tool header */
   region = BKE_area_region_new();
+
   BLI_addtail(&snode->regionbase, region);
-  region->regiontype = RGN_TYPE_TAG_BAR;
+  region->regiontype = RGN_TYPE_TOOL_HEADER;
   region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
-  region->flag = 0;
-  region->overlap = true;
+  region->flag = RGN_FLAG_HIDDEN | RGN_FLAG_HIDDEN_BY_USER;
 
   /* asset shelf */
   region = BKE_area_region_new();
@@ -622,13 +622,6 @@ static SpaceLink *node_create(const ScrArea * /*area*/, const Scene * /*scene*/)
   region->regiontype = RGN_TYPE_ASSET_SHELF_HEADER;
   region->alignment = RGN_ALIGN_BOTTOM | RGN_ALIGN_HIDE_WITH_PREV;
 
-  /* buttons/list view */
-  region = BKE_area_region_new();
-
-  BLI_addtail(&snode->regionbase, region);
-  region->regiontype = RGN_TYPE_UI;
-  region->alignment = RGN_ALIGN_RIGHT;
-
   /* toolbar */
   region = BKE_area_region_new();
 
@@ -637,6 +630,21 @@ static SpaceLink *node_create(const ScrArea * /*area*/, const Scene * /*scene*/)
   region->alignment = RGN_ALIGN_LEFT;
 
   region->flag = RGN_FLAG_HIDDEN;
+
+  /* tag bar */
+  region = BKE_area_region_new();
+  BLI_addtail(&snode->regionbase, region);
+  region->regiontype = RGN_TYPE_TAG_BAR;
+  region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
+  region->flag = 0;
+  region->overlap = true;
+
+  /* buttons/list view */
+  region = BKE_area_region_new();
+
+  BLI_addtail(&snode->regionbase, region);
+  region->regiontype = RGN_TYPE_UI;
+  region->alignment = RGN_ALIGN_RIGHT;
 
   /* main region */
   region = BKE_area_region_new();
@@ -1864,6 +1872,18 @@ void ED_spacetype_node()
   art->prefsizey = HEADERY;
   art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D | ED_KEYMAP_FRAMES | ED_KEYMAP_HEADER;
   art->listener = node_region_listener;
+  art->init = node_header_region_init;
+  art->draw = node_header_region_draw;
+
+  BLI_addhead(&st->regiontypes, art);
+
+  /* regions: tool header */
+  art = MEM_new_zeroed<ARegionType>("spacetype node tool header region");
+  art->regionid = RGN_TYPE_TOOL_HEADER;
+  art->prefsizey = HEADERY;
+  art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D | ED_KEYMAP_FRAMES | ED_KEYMAP_HEADER;
+  art->listener = node_region_listener;
+  art->message_subscribe = ED_area_do_mgs_subscribe_for_tool_header;
   art->init = node_header_region_init;
   art->draw = node_header_region_draw;
 

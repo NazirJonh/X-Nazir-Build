@@ -13,14 +13,13 @@
 #include "DNA_ID.h"
 #include "DNA_brush_types.h"
 #include "DNA_space_types.h"
-
 #include "DNA_curve_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
-
+#include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_string.h"
 #include "BLI_sys_types.h"
@@ -58,9 +57,57 @@ static void do_versions_ensure_spaces_have_tag_bar_region(Main *bmain)
       if (ELEM(area.spacetype, SPACE_VIEW3D, SPACE_PROPERTIES, SPACE_NODE, SPACE_IMAGE)) {
         ARegion *region = do_versions_ensure_region(
             &area.regionbase, RGN_TYPE_TAG_BAR, __func__, RGN_TYPE_TOOLS);
+
+        ARegion *insert_after = nullptr;
+        ARegion *alignment_source = nullptr;
+        if (ELEM(area.spacetype, SPACE_NODE, SPACE_IMAGE)) {
+          ARegion *tools_region = nullptr;
+          ARegion *ui_region = nullptr;
+          ARegion *header_region = nullptr;
+          ARegion *tool_header_region = nullptr;
+          for (ARegion &iter_region : area.regionbase) {
+            if (iter_region.regiontype == RGN_TYPE_TOOLS && tools_region == nullptr) {
+              tools_region = &iter_region;
+            }
+            else if (iter_region.regiontype == RGN_TYPE_UI && ui_region == nullptr) {
+              ui_region = &iter_region;
+            }
+            else if (iter_region.regiontype == RGN_TYPE_HEADER && header_region == nullptr) {
+              header_region = &iter_region;
+            }
+            else if (iter_region.regiontype == RGN_TYPE_TOOL_HEADER && tool_header_region == nullptr) {
+              tool_header_region = &iter_region;
+            }
+          }
+
+          /* Match VIEW_3D behavior: left toolbar is processed before top TAG_BAR so TAG_BAR does not
+           * push down the toolbar. */
+          if (tools_region && ui_region &&
+              BLI_findindex(&area.regionbase, tools_region) > BLI_findindex(&area.regionbase, ui_region))
+          {
+            BLI_remlink(&area.regionbase, tools_region);
+            BLI_insertlinkbefore(&area.regionbase, ui_region, tools_region);
+          }
+
+          /* Keep TAG_BAR stacked like in VIEW_3D:
+           * below tool/header rows, not affecting left toolbar, and before side UI region
+           * in region traversal order. */
+          insert_after = tools_region ? tools_region : (tool_header_region ? tool_header_region : header_region);
+          alignment_source = tool_header_region ? tool_header_region : header_region;
+          if (insert_after != nullptr && insert_after != region) {
+            BLI_remlink(&area.regionbase, region);
+            BLI_insertlinkafter(&area.regionbase, insert_after, region);
+          }
+          if (ui_region && BLI_findindex(&area.regionbase, region) > BLI_findindex(&area.regionbase, ui_region)) {
+            BLI_remlink(&area.regionbase, region);
+            BLI_insertlinkbefore(&area.regionbase, ui_region, region);
+          }
+        }
+
         region->regiontype = RGN_TYPE_TAG_BAR;
-        region->alignment = RGN_ALIGN_TOP;
+        region->alignment = alignment_source ? alignment_source->alignment : RGN_ALIGN_TOP;
         region->flag &= ~RGN_FLAG_HIDDEN;
+        region->overlap = true;
       }
     }
   }

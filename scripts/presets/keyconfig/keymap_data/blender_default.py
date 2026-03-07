@@ -2124,6 +2124,9 @@ def km_image_generic(params):
             toolbar_key={"type": 'T', "value": 'PRESS'},
             sidebar_key={"type": 'N', "value": 'PRESS'},
         ),
+        # Tag Bar toggle.
+        ("wm.context_toggle", {"type": 'T', "value": 'PRESS', "shift": True},
+         {"properties": [("data_path", "space_data.show_region_tag_bar")]}),
         ("image.new", {"type": 'N', "value": 'PRESS', "alt": True}, None),
         ("image.open", {"type": 'O', "value": 'PRESS', "alt": True}, None),
         ("image.reload", {"type": 'R', "value": 'PRESS', "alt": True}, None),
@@ -2244,6 +2247,9 @@ def km_node_generic(params):
             toolbar_key={"type": 'T', "value": 'PRESS'},
             sidebar_key={"type": 'N', "value": 'PRESS'},
         ),
+        # Tag Bar toggle.
+        ("wm.context_toggle", {"type": 'T', "value": 'PRESS', "shift": True},
+         {"properties": [("data_path", "space_data.show_region_tag_bar")]}),
     ])
 
     return keymap

@@ -3150,6 +3150,7 @@ static void draw_category_tab_color_indicator(const rcti *rct,
 
 void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char *category_id_active)
 {
+  const ScrArea *area = CTX_wm_area(C);
   const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
   View2D *v2d = &region->v2d;
   const uiStyle *style = style_get();
@@ -3166,10 +3167,9 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   const bool is_dragging = (drag_state != nullptr && drag_state->is_dragging);
   const char *drag_category_id = is_dragging ? drag_state->drag_category_id : "";
 
-  const eUserPref_CategoryTabsDisplayMode display_mode =
-      static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+  const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
 
-  const float category_tabs_zoom = category_tabs_zoom_value_get(display_mode);
+  const float category_tabs_zoom = category_tabs_zoom_value_get(area, display_mode);
   const float zoom = (1.0f / aspect) * category_tabs_zoom;
 
   const wmWindowManager *wm = CTX_wm_manager(C);
@@ -3178,7 +3178,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
   const float dpi_fac = UI_SCALE_FAC;
   /* Calculate too_narrow early - needed for width calculation in first loop */
-  const int category_tabs_min_width = category_tabs_min_width_get(aspect, display_mode);
+  const int category_tabs_min_width = category_tabs_min_width_get(area, aspect, display_mode);
   const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_width;
   const int tab_v_pad_text = round_fl_to_int(TABS_PADDING_TEXT_FACTOR * dpi_fac * zoom) + 2 * px;
   const int tab_v_pad = round_fl_to_int(TABS_PADDING_BETWEEN_FACTOR * dpi_fac * zoom);
@@ -3983,9 +3983,9 @@ void screen_category_tabs_hover_handler_add(ListBaseT<wmEventHandler> *handlers)
 /** \name Show Active Tab
  * \{ */
 
-int ui_panel_category_show_active_tab(ARegion *region, const int mval[2])
+int ui_panel_category_show_active_tab(const ScrArea *area, ARegion *region, const int mval[2])
 {
-  if (!ED_region_panel_category_gutter_isect_xy(region, mval)) {
+  if (!ED_region_panel_category_gutter_isect_xy(area, region, mval)) {
     return WM_UI_HANDLER_CONTINUE;
   }
 
@@ -4103,8 +4103,8 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
      * - Show Drag Tooltips is enabled
      * - AND tab name is not visible (not active AND not previous active)
      * This helps users identify tabs when only icons are visible. */
-    const eUserPref_CategoryTabsDisplayMode display_mode =
-        static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+    const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(
+        CTX_wm_area(C));
     const bool is_active = STREQ(clicked_pc->idname, region->runtime->category);
     const bool is_previous_active = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
                                      STREQ(clicked_pc->idname, region->runtime->category_tabs_previous_active_id));

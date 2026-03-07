@@ -13,7 +13,9 @@
 
 #include "BKE_screen.hh"
 
+#include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
+#include "DNA_view3d_types.h"
 
 #include "BLI_rect.h"
 #include "BLI_utildefines.h"
@@ -25,6 +27,125 @@
 #include "UI_interface.hh"
 
 namespace blender {
+
+eUserPref_CategoryTabsDisplayMode ED_category_tabs_display_mode_get(const ScrArea *area)
+{
+  if (!area || !area->spacedata.first) {
+    return static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(v3d->category_tabs_display_mode);
+    }
+    case SPACE_PROPERTIES: {
+      const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(sbuts->category_tabs_display_mode);
+    }
+    case SPACE_NODE: {
+      const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(snode->category_tabs_display_mode);
+    }
+    case SPACE_IMAGE: {
+      const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(sima->category_tabs_display_mode);
+    }
+    default:
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
+  }
+}
+
+float ED_category_tabs_zoom_get(const ScrArea *area)
+{
+  float category_tabs_zoom = 1.0f;
+
+  if (area && area->spacedata.first) {
+    switch (area->spacetype) {
+      case SPACE_VIEW3D: {
+        const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
+        switch (ED_category_tabs_display_mode_get(area)) {
+          case USER_CATEGORY_TABS_GLYPHS_ONLY:
+            category_tabs_zoom = v3d->category_tabs_zoom_icon;
+            break;
+          case USER_CATEGORY_TABS_GLYPHS_TEXT:
+            category_tabs_zoom = v3d->category_tabs_zoom_mixed;
+            break;
+          case USER_CATEGORY_TABS_TEXT_ONLY:
+          default:
+            category_tabs_zoom = v3d->category_tabs_zoom_text;
+            break;
+        }
+        break;
+      }
+      case SPACE_PROPERTIES: {
+        const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
+        switch (ED_category_tabs_display_mode_get(area)) {
+          case USER_CATEGORY_TABS_GLYPHS_ONLY:
+            category_tabs_zoom = sbuts->category_tabs_zoom_icon;
+            break;
+          case USER_CATEGORY_TABS_GLYPHS_TEXT:
+            category_tabs_zoom = sbuts->category_tabs_zoom_mixed;
+            break;
+          case USER_CATEGORY_TABS_TEXT_ONLY:
+          default:
+            category_tabs_zoom = sbuts->category_tabs_zoom_text;
+            break;
+        }
+        break;
+      }
+      case SPACE_NODE: {
+        const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
+        switch (ED_category_tabs_display_mode_get(area)) {
+          case USER_CATEGORY_TABS_GLYPHS_ONLY:
+            category_tabs_zoom = snode->category_tabs_zoom_icon;
+            break;
+          case USER_CATEGORY_TABS_GLYPHS_TEXT:
+            category_tabs_zoom = snode->category_tabs_zoom_mixed;
+            break;
+          case USER_CATEGORY_TABS_TEXT_ONLY:
+          default:
+            category_tabs_zoom = snode->category_tabs_zoom_text;
+            break;
+        }
+        break;
+      }
+      case SPACE_IMAGE: {
+        const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
+        switch (ED_category_tabs_display_mode_get(area)) {
+          case USER_CATEGORY_TABS_GLYPHS_ONLY:
+            category_tabs_zoom = sima->category_tabs_zoom_icon;
+            break;
+          case USER_CATEGORY_TABS_GLYPHS_TEXT:
+            category_tabs_zoom = sima->category_tabs_zoom_mixed;
+            break;
+          case USER_CATEGORY_TABS_TEXT_ONLY:
+          default:
+            category_tabs_zoom = sima->category_tabs_zoom_text;
+            break;
+        }
+        break;
+      }
+      default:
+        category_tabs_zoom = 0.0f;
+        break;
+    }
+  }
+
+  if (category_tabs_zoom > 0.0f) {
+    return category_tabs_zoom;
+  }
+
+  switch (ED_category_tabs_display_mode_get(area)) {
+    case USER_CATEGORY_TABS_GLYPHS_ONLY:
+      return U.category_tabs_zoom_icon;
+    case USER_CATEGORY_TABS_GLYPHS_TEXT:
+      return U.category_tabs_zoom_mixed;
+    case USER_CATEGORY_TABS_TEXT_ONLY:
+    default:
+      return U.category_tabs_zoom_text;
+  }
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Generic Tool System Region Callbacks
@@ -83,19 +204,7 @@ int ED_region_generic_panel_region_snap_size(const ARegion *region, int size, in
     /* Using Y axis avoids slight feedback loop when adjusting X. */
     const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
                          (BLI_rcti_size_y(&region->v2d.mask) + 1);
-    float category_tabs_zoom = 1.0f;
-    switch (static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode)) {
-      case USER_CATEGORY_TABS_GLYPHS_ONLY:
-        category_tabs_zoom = U.category_tabs_zoom_icon;
-        break;
-      case USER_CATEGORY_TABS_GLYPHS_TEXT:
-        category_tabs_zoom = U.category_tabs_zoom_mixed;
-        break;
-      case USER_CATEGORY_TABS_TEXT_ONLY:
-      default:
-        category_tabs_zoom = U.category_tabs_zoom_text;
-        break;
-    }
+    const float category_tabs_zoom = ED_category_tabs_zoom_get(nullptr);
 
     const float category_tabs_min_width =
         std::max(UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom);

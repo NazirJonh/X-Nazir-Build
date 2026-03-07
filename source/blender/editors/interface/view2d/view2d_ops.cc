@@ -246,7 +246,8 @@ static wmOperatorStatus view_pan_invoke(bContext *C, wmOperator *op, const wmEve
   vpd->starty = vpd->lasty = event->xy[1];
   vpd->invoke_event = event->type;
 
-  vpd->do_category_scroll = ED_region_panel_category_gutter_isect_xy(vpd->region, event->xy);
+  vpd->do_category_scroll = ED_region_panel_category_gutter_isect_xy(
+      vpd->area, vpd->region, event->xy);
 
   if (event->type == MOUSEPAN) {
     RNA_int_set(op->ptr, "deltax", event->prev_xy[0] - event->xy[0]);
@@ -551,8 +552,8 @@ static wmOperatorStatus view_scrolldown_exec(bContext *C, wmOperator *op)
   }
 
   const wmWindow *win = CTX_wm_window(C);
-  vpd->do_category_scroll = ED_region_panel_category_gutter_isect_xy(vpd->region,
-                                                                     win->runtime->eventstate->xy);
+  vpd->do_category_scroll = ED_region_panel_category_gutter_isect_xy(
+      vpd->area, vpd->region, win->runtime->eventstate->xy);
 
   /* set RNA-Props */
   RNA_int_set(op->ptr, "deltax", 0);
@@ -606,8 +607,8 @@ static wmOperatorStatus view_scrollup_exec(bContext *C, wmOperator *op)
   }
 
   const wmWindow *win = CTX_wm_window(C);
-  vpd->do_category_scroll = ED_region_panel_category_gutter_isect_xy(vpd->region,
-                                                                     win->runtime->eventstate->xy);
+  vpd->do_category_scroll = ED_region_panel_category_gutter_isect_xy(
+      vpd->area, vpd->region, win->runtime->eventstate->xy);
 
   /* set RNA-Props */
   RNA_int_set(op->ptr, "deltax", 0);

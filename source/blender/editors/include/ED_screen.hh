@@ -729,6 +729,8 @@ void ED_region_generic_tools_region_message_subscribe(
  */
 int ED_region_generic_tools_region_snap_size(const ARegion *region, int size, int axis);
 int ED_region_generic_panel_region_snap_size(const ARegion *region, int size, int axis);
+eUserPref_CategoryTabsDisplayMode ED_category_tabs_display_mode_get(const ScrArea *area);
+float ED_category_tabs_zoom_get(const ScrArea *area);
 
 /* `area_query.cc` */
 
@@ -742,14 +744,18 @@ bool ED_region_overlap_isect_xy_with_margin(const ARegion *region,
                                             const int event_xy[2],
                                             int margin);
 
-bool ED_region_panel_category_gutter_calc_rect(const ARegion *region, rcti *r_region_gutter);
-bool ED_region_panel_category_gutter_isect_xy(const ARegion *region, const int event_xy[2]);
+bool ED_region_panel_category_gutter_calc_rect(const ScrArea *area,
+                                               const ARegion *region,
+                                               rcti *r_region_gutter);
+bool ED_region_panel_category_gutter_isect_xy(const ScrArea *area,
+                                              const ARegion *region,
+                                              const int event_xy[2]);
 
 /**
  * \note This may return true for multiple overlapping regions.
  * If it matters, check overlapped regions first (#ARegion.overlap).
  */
-bool ED_region_contains_xy(const ARegion *region, const int event_xy[2]);
+bool ED_region_contains_xy(const ScrArea *area, const ARegion *region, const int event_xy[2]);
 /**
  * Similar to #BKE_area_find_region_xy() but when \a event_xy intersects an overlapping region,
  * this returns the region that is visually under the cursor. E.g. when over the

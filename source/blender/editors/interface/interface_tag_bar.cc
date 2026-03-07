@@ -530,13 +530,11 @@ static bool cycle_active_tag(bContext *C, int direction)
     return false;
   }
 
-  /* Calculate next visible index with wrap-around */
-  int new_index = current_index + direction;
-  if (new_index < 0) {
-    new_index = visible_count - 1;  /* Wrap to last visible */
-  }
-  else if (new_index >= visible_count) {
-    new_index = 0;  /* Wrap to first visible */
+  /* Calculate next visible index without wrap-around.
+   * Stop at boundaries (first/last visible tag), matching non-cyclic category-tab behavior. */
+  const int new_index = current_index + direction;
+  if (new_index < 0 || new_index >= visible_count) {
+    return true; /* Edge reached: consume the cycling event, keep current tag unchanged. */
   }
 
   return activate_tag_by_index(C, new_index);

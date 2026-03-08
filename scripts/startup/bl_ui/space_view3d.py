@@ -1594,7 +1594,14 @@ class VIEW3D_OT_tag_move_up(Operator):
         except Exception:
             pass
 
-        wm.category_tags_active_index = actual_index
+        # Reorder wm.category_tags ListBase to match new order.
+        # This updates C++ side and sends ND_CATEGORY_GLYPHS notifier.
+        if hasattr(wm.category_tags, 'reorder_from_names'):
+            wm.category_tags.reorder_from_names(",".join(order_cache))
+
+        # Find new index of the moved tag after reordering
+        new_index = order_cache.index(active_tag_name)
+        wm.category_tags_active_index = new_index
         context.area.tag_redraw()
 
         self.report({'INFO'}, f"Moved '{active_tag.name}' up")
@@ -1656,7 +1663,14 @@ class VIEW3D_OT_tag_move_down(Operator):
         except Exception:
             pass
 
-        wm.category_tags_active_index = actual_index
+        # Reorder wm.category_tags ListBase to match new order.
+        # This updates C++ side and sends ND_CATEGORY_GLYPHS notifier.
+        if hasattr(wm.category_tags, 'reorder_from_names'):
+            wm.category_tags.reorder_from_names(",".join(order_cache))
+
+        # Find new index of the moved tag after reordering
+        new_index = order_cache.index(active_tag_name)
+        wm.category_tags_active_index = new_index
         context.area.tag_redraw()
 
         self.report({'INFO'}, f"Moved '{active_tag.name}' down")

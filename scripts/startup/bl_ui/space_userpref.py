@@ -7104,11 +7104,14 @@ class VIEW3D_OT_category_tabs_settings(Operator):
             layout.separator()
             layout.prop(view, "category_tabs_show_active_name", text="Show Active Tab Name")
             # Inactive tab behavior - only in Icon mode
+            # Sticky Tab option requires Show Active Tab Name to be enabled
             layout.separator()
             layout.label(text="Inactive Tab Settings")
             row = layout.row(align=True)
             row.prop_enum(view, "category_tabs_inactive_behavior", "DEFAULT", text="Default")
-            row.prop_enum(view, "category_tabs_inactive_behavior", "STICKY", text="Sticky Tab")
+            sticky_row = row.row(align=True)
+            sticky_row.active = view.category_tabs_show_active_name
+            sticky_row.prop_enum(view, "category_tabs_inactive_behavior", "STICKY", text="Sticky Tab")
             # Tab shape - only in Icon mode
             layout.separator()
             layout.label(text="Tab Shape")
@@ -7130,7 +7133,7 @@ class VIEW3D_OT_category_tabs_settings(Operator):
             layout.separator()
             layout.prop(view,
                         "category_tabs_hide_reserved_inactive_text",
-                        text="Inactive Reserved Tabs: Icons Only")
+                        text="Reserved Tabs: Icons Only")
 
         # Show drag tooltips option - only in Icon mode
         if display_mode_value == 'GLYPHS_ONLY':

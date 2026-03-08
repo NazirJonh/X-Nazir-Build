@@ -997,7 +997,17 @@ struct UserDef {
   char category_tabs_text_mode_show_colored_text = false;
   /** In Mixed/Text modes, show only glyphs for inactive reserved categories. */
   char category_tabs_hide_reserved_inactive_text = false;
-  char _pad7[7] = {};
+
+  /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS (optional per-type visibility in Mixed mode) --- */
+  /** In Mixed mode, show custom glyphs for categories. */
+  char category_tabs_mixed_show_glyphs = true;
+  /** In Mixed mode, show first letter fallback for categories without custom glyph. */
+  char category_tabs_mixed_show_first_letter = true;
+  /** In Mixed mode, show resolved icons for categories. */
+  char category_tabs_mixed_show_icons = true;
+  /* --- END: MIXED_MODE_CONTENT_FLAGS --- */
+
+  char _pad7[4] = {};
   /**
    * Setting for UI line width.
    *

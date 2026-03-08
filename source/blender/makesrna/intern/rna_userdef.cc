@@ -5161,6 +5161,26 @@ static void rna_def_userdef_view(BlenderRNA *brna)
       "In Mixed/Text modes, show only icons for inactive reserved categories");
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
+  /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS (optional per-type visibility in Mixed mode) --- */
+  prop = RNA_def_property(srna, "category_tabs_mixed_show_glyphs", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_mixed_show_glyphs", 1);
+  RNA_def_property_ui_text(prop, "Show Glyphs",
+                           "Show custom glyphs in Mixed mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_mixed_show_first_letter", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_mixed_show_first_letter", 1);
+  RNA_def_property_ui_text(prop, "Show First Letter",
+                           "Show first letter fallback in Mixed mode for categories without custom glyph");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+
+  prop = RNA_def_property(srna, "category_tabs_mixed_show_icons", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_mixed_show_icons", 1);
+  RNA_def_property_ui_text(prop, "Show Icons",
+                           "Show resolved icons in Mixed mode");
+  RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
+  /* --- END: MIXED_MODE_CONTENT_FLAGS --- */
+
   prop = RNA_def_property(srna, "border_width", PROP_INT, PROP_NONE);
   RNA_def_property_ui_text(prop, "Border Width", "Size of the padding around each editor.");
   RNA_def_property_range(prop, 1.0f, 10.0f);

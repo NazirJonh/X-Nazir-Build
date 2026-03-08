@@ -7103,6 +7103,7 @@ class VIEW3D_OT_category_tabs_settings(Operator):
         if display_mode_value == 'GLYPHS_ONLY':
             layout.separator()
             layout.prop(view, "category_tabs_show_active_name", text="Show Active Tab Name")
+            layout.prop(view, "category_tabs_show_drag_tooltips", text="Show Drag Tooltips")
             # Inactive tab behavior - only in Icon mode
             # Sticky Tab option requires Show Active Tab Name to be enabled
             layout.separator()
@@ -7119,6 +7120,17 @@ class VIEW3D_OT_category_tabs_settings(Operator):
             row.prop_enum(view, "category_tabs_shape", "BOX", text="Box Shape")
             row.prop_enum(view, "category_tabs_shape", "CAPSULE", text="Capsule Shape")
 
+        # --- BEGIN: MIXED_MODE_CONTENT_FLAGS (optional per-type visibility in Mixed mode) ---
+        # To remove: delete this entire block
+        if display_mode_value == 'GLYPHS_TEXT':
+            layout.separator()
+            layout.label(text="Content Display")
+            row = layout.row(align=True)
+            row.prop(view, "category_tabs_mixed_show_glyphs", text="Glyphs")
+            row.prop(view, "category_tabs_mixed_show_first_letter", text="First Letter")
+            row.prop(view, "category_tabs_mixed_show_icons", text="Icons")
+        # --- END: MIXED_MODE_CONTENT_FLAGS ---
+
         # Show color indicator option - only in Text mode
         if display_mode_value == 'TEXT_ONLY':
             layout.separator()
@@ -7134,10 +7146,6 @@ class VIEW3D_OT_category_tabs_settings(Operator):
             layout.prop(view,
                         "category_tabs_hide_reserved_inactive_text",
                         text="Reserved Tabs: Icons Only")
-
-        # Show drag tooltips option - only in Icon mode
-        if display_mode_value == 'GLYPHS_ONLY':
-            layout.prop(view, "category_tabs_show_drag_tooltips", text="Show Drag Tooltips")
 
         # Allow editing category data
         layout.separator()

@@ -422,15 +422,42 @@ void category_tab_edit_popup_ok_cb(bContext * /*C*/, void *user_data, int /*retv
 
 /**
  * Convert current object mode to category_tag_filter_mode value.
- * Returns 1-8 for specific modes, 1 (OBJECT_MODE) as default.
+ * Returns 1-10 for specific modes, 1 (OBJECT_MODE) as default.
  *
  * Mapping (matches RNA enum in rna_wm.cc):
  *   1 = OBJECT_MODE, 2 = EDIT_MODE, 3 = SCULPT_MODE,
  *   4 = VERTEX_PAINT, 5 = WEIGHT_PAINT, 6 = TEXTURE_PAINT,
- *   7 = UV_EDIT, 8 = POSE_MODE
+ *   7 = UV_EDIT, 8 = POSE_MODE, 9 = GEOMETRY_NODES, 10 = SHADER_EDITOR
  */
 static char get_current_object_mode_filter_value(const bContext *C)
 {
+  /* Check for Node Editor first */
+  ScrArea *area = CTX_wm_area(C);
+  if (area) {
+    if (area->spacetype == SPACE_NODE) {
+      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
+      if (snode) {
+        if (STREQ(snode->tree_idname, "GeometryNodeTree")) {
+          return 9; /* GEOMETRY_NODES */
+        }
+        if (STREQ(snode->tree_idname, "ShaderNodeTree")) {
+          return 10; /* SHADER_EDITOR */
+        }
+      }
+    }
+    else if (area->spacetype == SPACE_IMAGE) {
+      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+      if (sima) {
+        if (sima->mode == SI_MODE_PAINT) {
+          return 6; /* TEXTURE_PAINT */
+        }
+        if (sima->mode == SI_MODE_UV) {
+          return 7; /* UV_EDIT */
+        }
+      }
+    }
+  }
+
   Object *ob = CTX_data_active_object(C);
   if (!ob) {
     return 1; /* Default to Object Mode */
@@ -2173,6 +2200,12 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
       break;
     case 8:
       filter_mode_flag = uint32_t(CategoryTagMode::POSE_MODE);
+      break;
+    case 9:
+      filter_mode_flag = uint32_t(CategoryTagMode::GEOMETRY_NODES);
+      break;
+    case 10:
+      filter_mode_flag = uint32_t(CategoryTagMode::SHADER_EDITOR);
       break;
     default:
       filter_mode_flag = 0;

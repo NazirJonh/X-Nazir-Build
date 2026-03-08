@@ -370,6 +370,10 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   if (category[0] != '\0') {
     wmWindowManager *wm_ptr = CTX_wm_manager(C);
     if (wm_ptr) {
+      /* Get space_type from context for space-specific tag restoration */
+      ScrArea *area = CTX_wm_area(C);
+      const int space_type = area ? area->spacetype : -1;
+
       PointerRNA wm_ptr_rna = RNA_pointer_create_discrete(&wm_ptr->id, RNA_WindowManager, wm_ptr);
       RNA_string_set(&wm_ptr_rna, "category_tab_save_category", category);
 
@@ -383,8 +387,8 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
                    "category = wm.category_tab_save_category\n"
                    "wm.category_tab_save_category = ''\n"
                    "if category:\n"
-                   "    restore_category_tags_from_string(category, r'''%s''')\n",
-                   original_tags);
+                   "    restore_category_tags_from_string(category, r'''%s''', space_type=%d)\n",
+                   original_tags, space_type);
 
       BPY_run_string_exec(C, imports, restore_cmd);
     }
@@ -1878,6 +1882,10 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
   wmOperator *op = static_cast<wmOperator *>(user_data);
   const uiStyle *style = style_get_dpi();
 
+  /* Get space_type from context for category lookup */
+  ScrArea *area = CTX_wm_area(C);
+  const int space_type = area ? area->spacetype : -1;
+
   /* Calculate dialog width - increased for better visibility and tag grid */
   const int dialog_width = 450 * UI_SCALE_FAC;
 
@@ -2213,10 +2221,10 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
   }
 
   /* Get all active tags for the header (unfiltered) */
-  const std::string tags_data_header = get_tags_for_category_ui(wm, category, 0);
+  const std::string tags_data_header = get_tags_for_category_ui(wm, category, 0, space_type);
 
   /* Get filtered tags for the body list */
-  const std::string tags_data_body = get_tags_for_category_ui(wm, category, filter_mode_flag);
+  const std::string tags_data_body = get_tags_for_category_ui(wm, category, filter_mode_flag, space_type);
 
   /* Don't show tags panel for reserved categories */
   if (!is_reserved) {
@@ -2225,7 +2233,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
     SNPRINTF(tags_panel_idname, "tags_list_%s", category);
 
     /* Check if category has any active tags assigned */
-    const char *category_tags_string = category_tags_string_lookup(wm, category);
+    const char *category_tags_string = category_tags_string_lookup(wm, category, space_type);
     const bool category_has_tags = (category_tags_string && category_tags_string[0] != '\0');
     /* Panel should be closed by default if category has tags, open if no tags */
     const bool panel_default_closed = category_has_tags; /* true = closed, false = open */
@@ -2453,6 +2461,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
               if (op_ptr) {
                 RNA_string_set(op_ptr, "category", category);
                 RNA_string_set(op_ptr, "tag_name", tag_name);
+                RNA_int_set(op_ptr, "space_type", space_type);
               }
             }
           }
@@ -2625,6 +2634,10 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
+  /* Get space_type for per-space tag storage */
+  ScrArea *area = CTX_wm_area(C);
+  const int space_type = area ? area->spacetype : -1;
+
   /* Find which tab the mouse is over */
   const int mx = event->mval[0];
   const int my = event->mval[1];
@@ -2641,7 +2654,7 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  /* Store category name in operator properties */
+  /* Store category name and space_type in operator properties */
   RNA_string_set(op->ptr, "category", category);
 
   /* Check for existing override and populate properties */
@@ -2924,30 +2937,59 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   RNA_float_set_array(op->ptr, "original_color", current_color);
   RNA_boolean_set(op->ptr, "original_has_override", has_override);
 
-  /* Save original tags for cancel functionality - read from WM mappings/overrides */
+  /* Save original tags for cancel functionality - read from WM mappings/overrides
+   * IMPORTANT: Filter by space_type to get per-space tags */
   char original_tags[256] = "";
   const char *tags_str = nullptr;
 
-  /* First check overrides */
+  /* First check overrides with matching space_type */
   for (CategoryGlyphItem *item =
            static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
        item;
        item = static_cast<CategoryGlyphItem *>(item->next))
   {
-    if (STREQ(item->category, category)) {
+    if (item->space_type == space_type && STREQ(item->category, category)) {
       tags_str = item->tags;
       break;
     }
   }
 
-  /* If no override, check mappings */
+  /* If no override with matching space_type, check global overrides (space_type = -1) */
+  if (!tags_str || tags_str[0] == '\0') {
+    for (CategoryGlyphItem *item =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+         item;
+         item = static_cast<CategoryGlyphItem *>(item->next))
+    {
+      if (item->space_type == -1 && STREQ(item->category, category)) {
+        tags_str = item->tags;
+        break;
+      }
+    }
+  }
+
+  /* If no override, check mappings with matching space_type */
   if (!tags_str || tags_str[0] == '\0') {
     for (CategoryGlyphItem *item =
              static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
          item;
          item = static_cast<CategoryGlyphItem *>(item->next))
     {
-      if (STREQ(item->category, category)) {
+      if (item->space_type == space_type && STREQ(item->category, category)) {
+        tags_str = item->tags;
+        break;
+      }
+    }
+  }
+
+  /* If no mapping with matching space_type, check global mappings (space_type = -1) */
+  if (!tags_str || tags_str[0] == '\0') {
+    for (CategoryGlyphItem *item =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<CategoryGlyphItem *>(item->next))
+    {
+      if (item->space_type == -1 && STREQ(item->category, category)) {
         tags_str = item->tags;
         break;
       }
@@ -2978,6 +3020,10 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   char category[64];
   RNA_string_get(op->ptr, "category", category);
 
+  /* Get space_type from current context for proper per-space tag storage */
+  ScrArea *area = CTX_wm_area(C);
+  const int space_type = area ? area->spacetype : -1;
+
   char display_name[32];
   RNA_string_get(op->ptr, "display_name", display_name);
 
@@ -2998,7 +3044,7 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   float color[3];
   RNA_float_get_array(op->ptr, "color", color);
 
-  /* Get or create override */
+  /* Get or create override with matching space_type */
   wmWindowManager *wm = CTX_wm_manager(C);
   CategoryGlyphItem *item = nullptr;
 
@@ -3007,7 +3053,7 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
        it;
        it = static_cast<CategoryGlyphItem *>(it->next))
   {
-    if (STREQ(it->category, category)) {
+    if (it->space_type == space_type && STREQ(it->category, category)) {
       item = it;
       break;
     }
@@ -3016,6 +3062,7 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   if (!item) {
     item = MEM_new<CategoryGlyphItem>(__func__);
     STRNCPY(item->category, category);
+    item->space_type = space_type;
     item->glyph[0] = '\0';
     item->display_name[0] = '\0';
     zero_v3(item->color);
@@ -3131,7 +3178,7 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
        map_item;
        map_item = static_cast<CategoryGlyphItem *>(map_item->next))
   {
-    if (!STREQ(map_item->category, category)) {
+    if (map_item->space_type != space_type || !STREQ(map_item->category, category)) {
       continue;
     }
     map_item->glyph_mode = item->glyph_mode;
@@ -3178,22 +3225,29 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
         break;
     }
 
+    /* DEBUG: Log before calling Python set_category_data */
+    printf("[C++ SAVE] Calling set_category_data: category='%s', space_type=%d\n", category, space_type);
+    printf("[C++ SAVE] item->tags='%s' (NOT passed to Python - tags managed by Python)\n", item->tags);
+
     SNPRINTF(python_cmd,
              "from bl_ui.space_userpref import set_category_data\n"
-             "set_category_data('%s', display_name='%s', glyph='%s', color='%s', tags='%s', "
-             "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s', glyph_mode='%s')\n",
+             "set_category_data('%s', display_name='%s', glyph='%s', color='%s', "
+             "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s', glyph_mode='%s', space_type=%d)\n",
              category,
              item->display_name,
              glyph_hex,
              color_hex,
-             item->tags,
              icon_source_py,
              item->icon_key,
              item->icon_path,
              item->icon_provider,
-             (item->glyph_mode == 1) ? "first_letter" : "auto");
+             (item->glyph_mode == 1) ? "first_letter" : "auto",
+             space_type);
     const char *imports_none[] = {nullptr};
     BPY_run_string_exec(C, imports_none, python_cmd);
+
+    /* DEBUG: Confirm call completed */
+    printf("[C++ SAVE] set_category_data call completed for '%s'\n", category);
   }
 
   return OPERATOR_FINISHED;

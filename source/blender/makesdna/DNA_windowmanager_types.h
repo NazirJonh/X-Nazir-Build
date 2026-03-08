@@ -114,6 +114,8 @@ enum {
  */
 typedef struct CategoryGlyphItem {
   struct CategoryGlyphItem *next, *prev;
+  /** Space type identifier (eSpace_Type), or -1 for global categories. */
+  int space_type;
   /** Category name (e.g., "Item", "View"). */
   char category[64];
   /** UTF-8 glyph character from Material Symbols font. */
@@ -140,7 +142,7 @@ typedef struct CategoryGlyphItem {
   int glyph_mode;
   /** True when category is from Python DEFAULT_CATEGORY_GLYPHS (single source of truth for reserved tabs). */
   char is_reserved;
-  char _pad[3];
+  char _pad[7];
 } CategoryGlyphItem;
 
 /**

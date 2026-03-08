@@ -1789,7 +1789,8 @@ LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int
 
 std::string get_tags_for_category_ui(const wmWindowManager *wm,
                                       const char *category,
-                                      uint32_t filter_mode_flag)
+                                      uint32_t filter_mode_flag,
+                                      int space_type)
 {
   if (wm == nullptr || category == nullptr) {
     return {};
@@ -1799,7 +1800,7 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm,
     return {};
   }
 
-  const char *tags_string = category_tags_string_lookup(wm, category);
+  const char *tags_string = category_tags_string_lookup(wm, category, space_type);
 
   std::string result;
   for (const CategoryTagDef *tag = static_cast<const CategoryTagDef *>(wm->category_tags.first); tag;

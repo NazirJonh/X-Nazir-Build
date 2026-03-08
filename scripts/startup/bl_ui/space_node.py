@@ -333,7 +333,7 @@ class NODE_HT_tag_bar(Header):
     def draw(self, context):
         layout = self.layout
         layout.separator_spacer()
-
+        
         snode = context.space_data
         wm = context.window_manager
         row = layout.row(align=True)

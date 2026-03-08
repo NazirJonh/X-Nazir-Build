@@ -1480,10 +1480,10 @@ uint32_t get_current_tag_mode_flag(const bContext *C)
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
       if (snode) {
         if (STREQ(snode->tree_idname, "GeometryNodeTree")) {
-          return static_cast<uint32_t>(CategoryTagMode::EDIT_MODE);
+          return static_cast<uint32_t>(CategoryTagMode::GEOMETRY_NODES);
         }
         if (STREQ(snode->tree_idname, "ShaderNodeTree")) {
-          return static_cast<uint32_t>(CategoryTagMode::OBJECT_MODE);
+          return static_cast<uint32_t>(CategoryTagMode::SHADER_EDITOR);
         }
       }
     }

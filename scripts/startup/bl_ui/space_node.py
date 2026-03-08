@@ -37,16 +37,16 @@ from bl_ui.properties_data_light import (
 )
 
 
-_CATEGORY_TAG_MODE_OBJECT = 1 << 0
-_CATEGORY_TAG_MODE_EDIT = 1 << 1
+_CATEGORY_TAG_MODE_GEOMETRY_NODES = 1 << 8
+_CATEGORY_TAG_MODE_SHADER_EDITOR = 1 << 9
 
 
 def _node_current_tag_mode_flag(snode):
     if snode.tree_type == 'GeometryNodeTree':
-        return _CATEGORY_TAG_MODE_EDIT
+        return _CATEGORY_TAG_MODE_GEOMETRY_NODES
     if snode.tree_type == 'ShaderNodeTree':
-        return _CATEGORY_TAG_MODE_OBJECT
-    return _CATEGORY_TAG_MODE_OBJECT
+        return _CATEGORY_TAG_MODE_SHADER_EDITOR
+    return _CATEGORY_TAG_MODE_SHADER_EDITOR
 
 
 def _tag_glyph_display(glyph):

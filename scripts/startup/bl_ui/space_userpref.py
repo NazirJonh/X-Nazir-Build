@@ -52,6 +52,8 @@ _CATEGORY_TAG_MODES = (
     ("TEXTURE_PAINT", "TEXTURE_PAINT", 5, "Texture Paint", 'TPAINT_HLT'),
     ("UV_EDIT", "UV_EDIT", 6, "UV Edit", 'UV'),
     ("POSE_MODE", "POSE", 7, "Pose Mode", 'POSE_HLT'),
+    ("GEOMETRY_NODES", "GEOMETRY_NODES", 8, "Geometry Nodes", 'NODETREE'),
+    ("SHADER_EDITOR", "SHADER_EDITOR", 9, "Shader Editor", 'MATERIAL'),
 )
 _CATEGORY_TAG_MODE_NAME_TO_FLAG = {name: (1 << bit) for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
 _CATEGORY_TAG_MODE_FLAG_TO_NAME = {(1 << bit): name for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
@@ -81,6 +83,10 @@ _CATEGORY_TAG_FILTER_ENUM_TO_FLAG = {
     8: (1 << 7),
     "POSE_MODE": (1 << 7),
     "POSE": (1 << 7),
+    9: (1 << 8),
+    "GEOMETRY_NODES": (1 << 8),
+    10: (1 << 9),
+    "SHADER_EDITOR": (1 << 9),
 }
 
 def tag_log(message, level="INFO"):
@@ -102,7 +108,7 @@ def _get_tag_filter_mode_flag_from_wm(wm):
 
 def get_current_tag_mode_flag(context):
     """Get the current object mode as a CategoryTagMode bitmask.
-    
+
     This is the Python equivalent of the C++ get_current_tag_mode_flag() function.
     Returns a bit flag corresponding to the current object mode.
     """
@@ -112,9 +118,9 @@ def get_current_tag_mode_flag(context):
             snode = context.space_data
             if snode is not None:
                 if snode.tree_type == 'GeometryNodeTree':
-                    return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0)
+                    return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("GEOMETRY_NODES", 0)
                 if snode.tree_type == 'ShaderNodeTree':
-                    return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("OBJECT_MODE", 0)
+                    return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("SHADER_EDITOR", 0)
         elif area.type == 'IMAGE_EDITOR':
             sima = context.space_data
             if sima is not None:
@@ -3153,6 +3159,16 @@ class CategoryTagItem(PropertyGroup):
         default=False,
         update=lambda self, ctx: _auto_save_tags()
     )
+    mode_geometry_nodes: bpy.props.BoolProperty(
+        name="Geometry Nodes",
+        default=False,
+        update=lambda self, ctx: _auto_save_tags()
+    )
+    mode_shader_editor: bpy.props.BoolProperty(
+        name="Shader Editor",
+        default=False,
+        update=lambda self, ctx: _auto_save_tags()
+    )
 
     def get_mode_flags(self):
         """Convert boolean mode properties to bitmask."""
@@ -3173,6 +3189,10 @@ class CategoryTagItem(PropertyGroup):
             flags |= 1 << 6  # UV_EDIT
         if self.mode_pose:
             flags |= 1 << 7  # POSE_MODE
+        if self.mode_geometry_nodes:
+            flags |= 1 << 8  # GEOMETRY_NODES
+        if self.mode_shader_editor:
+            flags |= 1 << 9  # SHADER_EDITOR
         return flags
 
     def set_mode_flags(self, flags):
@@ -3185,6 +3205,8 @@ class CategoryTagItem(PropertyGroup):
         self.mode_texture_paint = bool(flags & (1 << 5))
         self.mode_uv_edit = bool(flags & (1 << 6))
         self.mode_pose = bool(flags & (1 << 7))
+        self.mode_geometry_nodes = bool(flags & (1 << 8))
+        self.mode_shader_editor = bool(flags & (1 << 9))
 
 
 class CategoryTagAssignment(PropertyGroup):
@@ -3214,6 +3236,8 @@ class TagModeItem:
         self._mode_texture_paint = bool(mode_flags & (1 << 5))
         self._mode_uv_edit = bool(mode_flags & (1 << 6))
         self._mode_pose = bool(mode_flags & (1 << 7))
+        self._mode_geometry_nodes = bool(mode_flags & (1 << 8))
+        self._mode_shader_editor = bool(mode_flags & (1 << 9))
 
     def _save_to_cache(self):
         """Save mode flags to cache."""
@@ -3236,6 +3260,10 @@ class TagModeItem:
                 flags |= 1 << 6
             if self._mode_pose:
                 flags |= 1 << 7
+            if self._mode_geometry_nodes:
+                flags |= 1 << 8
+            if self._mode_shader_editor:
+                flags |= 1 << 9
             _all_tags_cache[self._tag_name]["mode_flags"] = flags
 
     @property
@@ -3308,6 +3336,24 @@ class TagModeItem:
     @mode_pose.setter
     def mode_pose(self, value):
         self._mode_pose = value
+        self._save_to_cache()
+
+    @property
+    def mode_geometry_nodes(self):
+        return self._mode_geometry_nodes
+
+    @mode_geometry_nodes.setter
+    def mode_geometry_nodes(self, value):
+        self._mode_geometry_nodes = value
+        self._save_to_cache()
+
+    @property
+    def mode_shader_editor(self):
+        return self._mode_shader_editor
+
+    @mode_shader_editor.setter
+    def mode_shader_editor(self, value):
+        self._mode_shader_editor = value
         self._save_to_cache()
 
     def _glyph_update(self, context):
@@ -3399,6 +3445,8 @@ class USERPREF_OT_category_tag_filter_set_mode(Operator):
                 _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("TEXTURE_PAINT", 0): "TEXTURE_PAINT",
                 _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("UV_EDIT", 0): "UV_EDIT",
                 _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("POSE_MODE", 0): "POSE_MODE",
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("GEOMETRY_NODES", 0): "GEOMETRY_NODES",
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("SHADER_EDITOR", 0): "SHADER_EDITOR",
             }
             wm.category_tag_filter_mode = mode_flag_to_enum.get(current_mode_flag, "OBJECT_MODE")
         else:

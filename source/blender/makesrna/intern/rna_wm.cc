@@ -2461,6 +2461,8 @@ static const EnumPropertyItem rna_enum_category_tag_filter_mode_items[] = {
      "Show tags for Texture Paint"},
     {7, "UV_EDIT", ICON_UV, "UV Edit", "Show tags for UV Edit"},
     {8, "POSE_MODE", ICON_POSE_HLT, "Pose Mode", "Show tags for Pose Mode"},
+    {9, "GEOMETRY_NODES", ICON_NODETREE, "Geometry Nodes", "Show tags for Geometry Nodes"},
+    {10, "SHADER_EDITOR", ICON_MATERIAL, "Shader Editor", "Show tags for Shader Editor"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

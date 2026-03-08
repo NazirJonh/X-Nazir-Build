@@ -178,6 +178,8 @@ enum class CategoryTagMode : uint32_t {
   TEXTURE_PAINT = (1 << 5),
   UV_EDIT = (1 << 6),
   POSE_MODE = (1 << 7),
+  GEOMETRY_NODES = (1 << 8),
+  SHADER_EDITOR = (1 << 9),
   ALL = 0xFFFFFFFF
 };
 

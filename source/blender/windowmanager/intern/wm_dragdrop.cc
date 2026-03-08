@@ -1344,14 +1344,6 @@ void wm_drags_draw(bContext *C, wmWindow *win)
   /* Should we support multi-line drag draws? Maybe not, more types mixed won't work well. */
   GPU_blend(GPU_BLEND_ALPHA);
   for (wmDrag &drag : wm->runtime->drags) {
-    printf("[DROP_DRAW] loop: active_dropbox='%s' draw_droptip=%p region_from=%p area_from=%p\n",
-           drag.drop_state.active_dropbox ? drag.drop_state.active_dropbox->opname : "null",
-           drag.drop_state.active_dropbox ?
-               reinterpret_cast<void *>(drag.drop_state.active_dropbox->draw_droptip) :
-               nullptr,
-           reinterpret_cast<void *>(drag.drop_state.region_from),
-           reinterpret_cast<void *>(drag.drop_state.area_from));
-    fflush(stdout);
     if (drag.drop_state.active_dropbox) {
       CTX_wm_area_set(C, drag.drop_state.area_from);
       CTX_wm_region_set(C, drag.drop_state.region_from);
@@ -1366,11 +1358,6 @@ void wm_drags_draw(bContext *C, wmWindow *win)
       /* Drawing should be allowed to assume the context from handling and polling (that's why we
        * restore it above). */
       if (drag.drop_state.active_dropbox->draw_droptip) {
-        printf("[DROP_DRAW] calling draw_droptip: drop='%s' xy=(%d,%d)\n",
-               drag.drop_state.active_dropbox->opname,
-               xy[0],
-               xy[1]);
-        fflush(stdout);
         drag.drop_state.active_dropbox->draw_droptip(C, win, &drag, xy);
         continue;
       }

@@ -891,7 +891,12 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
   }
 
   const char *imports[] = {"bpy", nullptr};
-  const char *save_cmd =
+  
+  ScrArea *area = CTX_wm_area(C);
+  const int space_type = area ? area->spacetype : -1;
+
+  char save_cmd[1024];
+  BLI_snprintf(save_cmd, sizeof(save_cmd),
       "from bl_ui.space_userpref import update_category_tags_in_wm, get_category_tags, sync_wm_to_glyph_cache\n"
       "import bpy\n"
       "wm = bpy.context.window_manager\n"
@@ -899,14 +904,15 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
       "wm.category_tab_save_category = ''\n"
       "print(f'[GLYPH SAVE PY] Category from WM property: {category}')\n"
       "if category:\n"
-      "    tags = get_category_tags(category)\n"
+      "    tags = get_category_tags(category, space_type=%d)\n"
       "    print(f'[GLYPH SAVE PY] Tags in _glyph_cache for {category}: {tags}')\n"
-      "    update_category_tags_in_wm(category)\n"
+      "    update_category_tags_in_wm(category, space_type=%d)\n"
       "    print(f'[GLYPH SAVE PY] Tags synced to WM override')\n"
       "    result = sync_wm_to_glyph_cache()\n"
       "    print(f'[GLYPH SAVE PY] sync_wm_to_glyph_cache returned: {result}')\n"
       "else:\n"
-      "    print('[GLYPH SAVE PY] ERROR: No category found in WM property')\n";
+      "    print('[GLYPH SAVE PY] ERROR: No category found in WM property')\n",
+      space_type, space_type);
 
   BPY_run_string_exec(C, imports, save_cmd);
 #else

@@ -719,6 +719,7 @@ static bool rna_wm_category_runtime_list_should_hard_reset(const wmWindowManager
 static CategoryGlyphItem *rna_wm_category_glyph_mapping_new(wmWindowManager *wm, const char *category)
 {
   CategoryGlyphItem *item = MEM_new_zeroed<CategoryGlyphItem>(__func__);
+  item->space_type = -1; /* Global category by default */
   if (category) {
     STRNCPY(item->category, category);
   }
@@ -759,6 +760,7 @@ static void rna_wm_category_glyph_mapping_clear(wmWindowManager *wm)
 static CategoryGlyphItem *rna_wm_category_glyph_override_new(wmWindowManager *wm, const char *category)
 {
   CategoryGlyphItem *item = MEM_new_zeroed<CategoryGlyphItem>(__func__);
+  item->space_type = -1; /* Global category by default */
   if (category) {
     STRNCPY(item->category, category);
   }
@@ -3236,6 +3238,12 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
 
   srna = RNA_def_struct(brna, "CategoryGlyphItem", nullptr);
   RNA_def_struct_ui_text(srna, "Category Glyph Item", "Mapping from category name to glyph");
+
+  prop = RNA_def_property(srna, "space_type", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "space_type");
+  RNA_def_property_ui_text(prop, "Space Type", "Space type identifier (eSpace_Type), -1 for global categories");
+  RNA_def_property_range(prop, -1, SPACE_TYPE_NUM);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 
   prop = RNA_def_property(srna, "category", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "category");

@@ -857,8 +857,11 @@ bool category_glyph_list_is_valid(const ListBase *list);
 
 /**
  * Look up tags string for a category from window manager mappings.
+ * \param space_type: Space type identifier, -1 for global categories.
  */
-const char *category_tags_string_lookup(const wmWindowManager *wm, const char *category);
+const char *category_tags_string_lookup(const wmWindowManager *wm,
+                                        const char *category,
+                                        int space_type = -1);
 
 /**
  * Get the first active tag from the current tag filter.

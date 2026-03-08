@@ -317,24 +317,38 @@ static std::string normalize_category_key(const char *category)
  * First tries exact match, then tries to match by normalized keys if no exact match found.
  */
 static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManager *wm,
-                                                            const char *category)
+                                                             const char *category,
+                                                             int space_type = -1)
 {
   if (!wm || !category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
     return nullptr;
   }
 
-  // First pass: try exact match
+  // First pass: try exact match (category + space_type)
   for (const CategoryGlyphItem *item =
            static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
        item;
        item = static_cast<const CategoryGlyphItem *>(item->next))
   {
-    if (STREQ(item->category, category)) {
+    if (STREQ(item->category, category) && item->space_type == space_type) {
       return item;
     }
   }
 
-  // Second pass: try canonicalization fallback
+  // Second pass: try global categories (space_type = -1) if not searching for global already
+  if (space_type != -1) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      if (STREQ(item->category, category) && item->space_type == -1) {
+        return item;
+      }
+    }
+  }
+
+  // Third pass: try canonicalization fallback with space_type match
   const std::string normalized_target = normalize_category_key(category);
   if (normalized_target.empty()) {
     return nullptr;
@@ -346,8 +360,22 @@ static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManage
        item = static_cast<const CategoryGlyphItem *>(item->next))
   {
     const std::string normalized_item = normalize_category_key(item->category);
-    if (normalized_item == normalized_target) {
+    if (normalized_item == normalized_target && item->space_type == space_type) {
       return item;
+    }
+  }
+
+  // Fourth pass: try canonicalization fallback with global categories
+  if (space_type != -1) {
+    for (const CategoryGlyphItem *item =
+             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<const CategoryGlyphItem *>(item->next))
+    {
+      const std::string normalized_item = normalize_category_key(item->category);
+      if (normalized_item == normalized_target && item->space_type == -1) {
+        return item;
+      }
     }
   }
   
@@ -360,45 +388,77 @@ static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManage
 /** \name Tag Utilities
  * \{ */
 
-const char *category_tags_string_lookup(const wmWindowManager *wm, const char *category)
+const char *category_tags_string_lookup(const wmWindowManager *wm,
+                                        const char *category,
+                                        int space_type)
 {
   if (wm == nullptr || category == nullptr) {
     return "";
   }
 
-  // First pass: try exact match in overrides
+  // First pass: try exact match in overrides (category + space_type)
   if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
          item;
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
-      if (STREQ(item->category, category)) {
+      if (STREQ(item->category, category) && item->space_type == space_type) {
         return item->tags;
       }
     }
   }
 
-  // First pass: try exact match in mappings
+  // Second pass: try global overrides (space_type = -1) if not searching for global already
+  if (space_type != -1) {
+    if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
+      for (const CategoryGlyphItem *item =
+               static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+           item;
+           item = static_cast<const CategoryGlyphItem *>(item->next))
+      {
+        if (STREQ(item->category, category) && item->space_type == -1) {
+          return item->tags;
+        }
+      }
+    }
+  }
+
+  // Third pass: try exact match in mappings (category + space_type)
   if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
          item;
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
-      if (STREQ(item->category, category)) {
+      if (STREQ(item->category, category) && item->space_type == space_type) {
         return item->tags;
       }
     }
   }
 
-  // Second pass: try canonicalization fallback
+  // Fourth pass: try global mappings (space_type = -1) if not searching for global already
+  if (space_type != -1) {
+    if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
+      for (const CategoryGlyphItem *item =
+               static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+           item;
+           item = static_cast<const CategoryGlyphItem *>(item->next))
+      {
+        if (STREQ(item->category, category) && item->space_type == -1) {
+          return item->tags;
+        }
+      }
+    }
+  }
+
+  // Fifth pass: try canonicalization fallback with space_type match
   const std::string normalized_target = normalize_category_key(category);
   if (normalized_target.empty()) {
     return "";
   }
 
-  // Check overrides with canonicalization
+  // Check overrides with canonicalization and space_type
   if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
@@ -406,13 +466,29 @@ const char *category_tags_string_lookup(const wmWindowManager *wm, const char *c
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
       const std::string normalized_item = normalize_category_key(item->category);
-      if (normalized_item == normalized_target) {
+      if (normalized_item == normalized_target && item->space_type == space_type) {
         return item->tags;
       }
     }
   }
 
-  // Check mappings with canonicalization
+  // Check global overrides with canonicalization
+  if (space_type != -1) {
+    if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
+      for (const CategoryGlyphItem *item =
+               static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+           item;
+           item = static_cast<const CategoryGlyphItem *>(item->next))
+      {
+        const std::string normalized_item = normalize_category_key(item->category);
+        if (normalized_item == normalized_target && item->space_type == -1) {
+          return item->tags;
+        }
+      }
+    }
+  }
+
+  // Check mappings with canonicalization and space_type
   if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
@@ -420,12 +496,28 @@ const char *category_tags_string_lookup(const wmWindowManager *wm, const char *c
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
       const std::string normalized_item = normalize_category_key(item->category);
-      if (normalized_item == normalized_target) {
+      if (normalized_item == normalized_target && item->space_type == space_type) {
         return item->tags;
       }
     }
   }
-  
+
+  // Check global mappings with canonicalization
+  if (space_type != -1) {
+    if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
+      for (const CategoryGlyphItem *item =
+               static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+           item;
+           item = static_cast<const CategoryGlyphItem *>(item->next))
+      {
+        const std::string normalized_item = normalize_category_key(item->category);
+        if (normalized_item == normalized_target && item->space_type == -1) {
+          return item->tags;
+        }
+      }
+    }
+  }
+
   return "";
 }
 
@@ -666,11 +758,12 @@ static const char *panel_category_glyph_lookup_mapping(const wmWindowManager *wm
                                                        const char *category,
                                                        bool *r_is_fallback_letter,
                                                        float r_color[3],
-                                                       bool *r_handled)
+                                                       bool *r_handled,
+                                                       int space_type)
 {
   *r_handled = false;
 
-  const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category);
+  const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category, space_type);
   if (!item) {
     return nullptr;
   }
@@ -721,7 +814,8 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
                                         const char *category,
                                         const PanelType *panel_type,
                                         bool *r_is_fallback_letter,
-                                        float r_color[3])
+                                        float r_color[3],
+                                        int space_type)
 {
   /* Initialize outputs. */
   if (r_is_fallback_letter) {
@@ -743,7 +837,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
   }
 
   if (const char *mapping_glyph = panel_category_glyph_lookup_mapping(
-          wm, category, r_is_fallback_letter, r_color, &handled))
+          wm, category, r_is_fallback_letter, r_color, &handled, space_type))
   {
     return mapping_glyph;
   }
@@ -1591,8 +1685,9 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
     return false;
   }
 
-  /* Get category tags */
-  const char *category_tags = category_tags_string_lookup(wm, category_idname);
+  /* Get category tags with space_type awareness */
+  const int space_type = area ? area->spacetype : -1;
+  const char *category_tags = category_tags_string_lookup(wm, category_idname, space_type);
 
   /* If category has no tags - hide it (since filter is active) */
   if (!category_tags || category_tags[0] == '\0') {
@@ -1626,35 +1721,20 @@ bool panel_category_is_visible_by_tags(const bContext *C,
     return false;
   }
 
-  /* Get tags assigned to this category */
-  const char *tags_string = category_tags_string_lookup(wm, category);
+  /* Get tags assigned to this category with space_type awareness */
+  const ScrArea *area = C ? CTX_wm_area(C) : nullptr;
+  const int space_type = area ? area->spacetype : -1;
+  const char *tags_string = category_tags_string_lookup(wm, category, space_type);
   if (tags_string == nullptr || tags_string[0] == '\0') {
     return true; /* No tags = always visible */
   }
 
-  /* Get current mode */
-  uint32_t current_mode_flag = get_current_tag_mode_flag(C);
-
-  Vector<std::string> category_tag_list;
-  category_tab_split_tags(tags_string, category_tag_list, ";");
-
-  for (const std::string &tag_name : category_tag_list) {
-    /* Find tag definition and check mode. */
-    for (const CategoryTagDef *tag = static_cast<const CategoryTagDef *>(
-             wm->category_tags.first);
-         tag;
-         tag = static_cast<const CategoryTagDef *>(tag->next))
-    {
-      if (STREQ(tag->name, tag_name.c_str())) {
-        /* mode_flags == 0 means all modes active */
-        if (tag->mode_flags == 0 || (tag->mode_flags & current_mode_flag)) {
-          return true;
-        }
-      }
-    }
-  }
-
-  return false;
+  /* Categories with tags are visible by default.
+   * Mode-based filtering is only applied for tag bar filtering (above),
+   * not for general category visibility across different editors.
+   * This ensures categories remain accessible even when they have
+   * mode-specific tags assigned (e.g., UV Editor tags in 3D Viewport). */
+  return true;
 }
 
 /** \} */
@@ -1703,9 +1783,42 @@ static int get_category_order_index(const bContext *C, ARegion *region, const ch
 }
 
 /**
+ * Get space type prefix for category order keys.
+ * This ensures each editor type has its own independent category order storage.
+ */
+static std::string get_space_type_prefix(short space_type)
+{
+  switch (space_type) {
+    case SPACE_VIEW3D:
+      return "VIEW3D:";
+    case SPACE_IMAGE:
+      return "IMAGE:";
+    case SPACE_NODE:
+      return "NODE:";
+    case SPACE_PROPERTIES:
+      return "PROPS:";
+    case SPACE_OUTLINER:
+      return "OUTLINER:";
+    case SPACE_FILE:
+      return "FILE:";
+    case SPACE_SEQ:
+      return "SEQUENCE:";
+    case SPACE_TEXT:
+      return "TEXT:";
+    case SPACE_CLIP:
+      return "CLIP:";
+    case SPACE_SPREADSHEET:
+      return "SPREADSHEET:";
+    default:
+      return "OTHER:";
+  }
+}
+
+/**
  * Generate a unique key for the current active tag combination.
  * Tags are sorted alphabetically to ensure consistent keys.
- * Returns empty string for no filter, "Tag1;Tag2" for multiple tags.
+ * Key format: "SPACE_TYPE:tag1;tag2" (e.g., "VIEW3D:modeling", "IMAGE:animation;modeling")
+ * Returns "SPACE_TYPE:" for no filter, ensuring each editor has independent storage.
  */
 static std::string get_tag_combination_key(const wmWindowManager *wm, const bContext *C)
 {
@@ -1716,8 +1829,11 @@ static std::string get_tag_combination_key(const wmWindowManager *wm, const bCon
 
   ScrArea *area = CTX_wm_area(C);
   if (!area || !area->spacedata.first) {
-    return "";  /* No filter active */
+    return "";  /* No area - no key */
   }
+
+  /* Get space type prefix for this editor */
+  const std::string space_prefix = get_space_type_prefix(area->spacetype);
 
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
@@ -1745,15 +1861,16 @@ static std::string get_tag_combination_key(const wmWindowManager *wm, const bCon
       break;
     }
     default:
-      return "";
+      /* For unsupported space types, still return space prefix for independence */
+      return space_prefix;
   }
 
   if (!filter_enabled) {
-    return "";  /* Filter disabled - always use default key */
+    return space_prefix;  /* Filter disabled - return space prefix only */
   }
 
   if (active_tags_buffer[0] == '\0') {
-    return "";  /* Filter enabled but no tags */
+    return space_prefix;  /* Filter enabled but no tags */
   }
 
   /* Parse and collect tag names (without mutating source buffer). */
@@ -1761,14 +1878,14 @@ static std::string get_tag_combination_key(const wmWindowManager *wm, const bCon
   category_tab_split_tags(active_tags_buffer, active_tags, ",;");
 
   if (active_tags.is_empty()) {
-    return "";
+    return space_prefix;
   }
 
   /* Sort alphabetically for consistent keys */
   std::sort(active_tags.begin(), active_tags.end());
 
-  /* Join with semicolons */
-  std::string key;
+  /* Join with semicolons and add space prefix */
+  std::string key = space_prefix;
   for (int i = 0; i < active_tags.size(); i++) {
     if (i > 0) {
       key += ";";

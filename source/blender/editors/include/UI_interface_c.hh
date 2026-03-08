@@ -2837,11 +2837,13 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
                                         const char *category,
                                         const PanelType *panel_type,
                                         bool *r_is_fallback_letter,
-                                        float r_color[3]);
+                                        float r_color[3],
+                                        int space_type = -1);
 
 std::string get_tags_for_category_ui(const wmWindowManager *wm,
                                       const char *category,
-                                      uint32_t filter_mode_flag);
+                                      uint32_t filter_mode_flag,
+                                      int space_type = -1);
 
 /**
  * Get the current object mode as a CategoryTagMode bitmask.

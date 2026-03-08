@@ -3277,7 +3277,6 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "is_reserved", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "is_reserved", 1);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop,
       "Reserved",

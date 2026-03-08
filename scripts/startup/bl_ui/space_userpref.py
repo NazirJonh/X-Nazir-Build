@@ -250,8 +250,8 @@ DEFAULT_CATEGORY_GLYPHS = {
              "default_glyph": "\uea3b", "default_display_name": ""},       # construction
     "Asset": {"glyph": "\ue2c7", "display_name": "", "color": [0.0, 0.0, 0.0],
              "default_glyph": "\ue2c7", "default_display_name": ""},      # folder
-    "Options": {"glyph": "\ue5d4", "display_name": "", "color": [0.0, 0.0, 0.0],
-                "default_glyph": "\ue5d4", "default_display_name": ""},    # settings
+    "Options": {"glyph": "\uf835", "display_name": "", "color": [0.0, 0.0, 0.0],
+                "default_glyph": "\uf835", "default_display_name": ""},    # options
 
     # Editor-specific
     "Animation": {"glyph": "\uf8f0", "display_name": "", "color": [0.0, 0.0, 0.0],
@@ -270,10 +270,10 @@ DEFAULT_CATEGORY_GLYPHS = {
                   "default_glyph": "\ue3d4", "default_display_name": ""},  # science
     "Curve": {"glyph": "\ue148", "display_name": "", "color": [0.0, 0.0, 0.0],
               "default_glyph": "\ue148", "default_display_name": ""},      # timeline
-    "Image": {"glyph": "\ue204", "display_name": "", "color": [0.0, 0.0, 0.0],
-             "default_glyph": "\ue204", "default_display_name": ""},       # image
-    "Mesh": {"glyph": "\ue204", "display_name": "", "color": [0.0, 0.0, 0.0],
-             "default_glyph": "\ue204", "default_display_name": ""},       # category
+    "Image": {"glyph": "\ue410", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ue410", "default_display_name": ""},       # image
+    "Mesh": {"glyph": "\ue3e3", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ue3e3", "default_display_name": ""},       # category
     "Object": {"glyph": "\ue8d4", "display_name": "", "color": [0.0, 0.0, 0.0],
                "default_glyph": "\ue8d4", "default_display_name": ""},     # select_all
     "Scene": {"glyph": "\ue8f9", "display_name": "", "color": [0.0, 0.0, 0.0],
@@ -294,6 +294,10 @@ DEFAULT_CATEGORY_GLYPHS = {
              "default_glyph": "\ue23e", "default_display_name": ""},       # database
     "Node": {"glyph": "\ue1b8", "display_name": "", "color": [0.0, 0.0, 0.0],
              "default_glyph": "\ue1b8", "default_display_name": ""},       # account_tree
+    "Group": {"glyph": "\ue3ea", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ue3ea", "default_display_name": ""},       # account_tree
+    "Scopes": {"glyph": "\uf04e", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\uf04e", "default_display_name": ""},       # account_tree
 }
 
 # In-memory cache of glyph mappings
@@ -338,7 +342,7 @@ RESERVED_CATEGORY_PRIORITY = {
         "Render", "Options", "Texture", "Output"
     ],
     'NODE_EDITOR': [
-        "Item", "Tool", "Options", "Node", "Group"
+        "Item", "Tool", "View", "Options", "Node", "Group"
     ],
     'IMAGE_EDITOR': [
         "Item", "Tool", "View", "Image", "Mask", "Scopes"
@@ -2620,7 +2624,9 @@ def _sync_glyph_mappings_to_wm_impl():
                         item.icon_path = icon_path_val
                     if hasattr(item, "icon_provider"):
                         item.icon_provider = icon_provider_val
-                    # Note: is_reserved is read-only (computed in C++), don't try to set it
+                    # Mark as reserved if category is in DEFAULT_CATEGORY_GLYPHS
+                    if hasattr(item, "is_reserved"):
+                        item.is_reserved = category in DEFAULT_CATEGORY_GLYPHS
                     # Sync tags to WM for UI display (semicolon-separated string)
                     if hasattr(item, "tags") and isinstance(tags_val, (list, tuple)):
                         tags_str = ";".join([t for t in tags_val if isinstance(t, str) and t])

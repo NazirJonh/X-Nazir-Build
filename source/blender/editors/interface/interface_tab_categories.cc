@@ -2797,6 +2797,24 @@ static void ui_panel_category_draw_content(
 
   const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
 
+  /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS --- */
+  /* In Mixed mode, apply per-content-type visibility flags.
+   * To remove this feature: replace these effective variables with their source values
+   * (e.g., mixed_mode_effective_has_glyph -> has_glyph) and delete this block. */
+  const bool mixed_mode_effective_has_glyph =
+      has_glyph && U.category_tabs_mixed_show_glyphs;
+  const bool mixed_mode_effective_fallback_letter =
+      is_fallback_letter && U.category_tabs_mixed_show_first_letter;
+  const bool mixed_mode_effective_builtin_icon =
+      use_builtin_icon && U.category_tabs_mixed_show_icons;
+
+  /* For draw_dual in Mixed mode: show glyph/letter/icon + text if any glyph content is visible.
+   * To remove: replace with `(has_glyph || is_fallback_letter || use_builtin_icon)` */
+  const bool mixed_mode_has_visible_glyph_content =
+      mixed_mode_effective_has_glyph || mixed_mode_effective_fallback_letter ||
+      mixed_mode_effective_builtin_icon;
+  /* --- END: MIXED_MODE_CONTENT_FLAGS --- */
+
   const bool use_reserved_inactive_icon_only =
       U.category_tabs_hide_reserved_inactive_text && !is_active &&
       ELEM(display_mode, USER_CATEGORY_TABS_GLYPHS_TEXT, USER_CATEGORY_TABS_TEXT_ONLY) &&
@@ -2806,7 +2824,7 @@ static void ui_panel_category_draw_content(
   const char *text_for_name = category_id_draw;
 
   if (display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT && !use_reserved_inactive_icon_only &&
-      (has_glyph || is_fallback_letter))
+      mixed_mode_has_visible_glyph_content)
   {
     draw_dual = true;
     if (is_single_glyph_str(text_for_name)) {
@@ -2876,10 +2894,18 @@ static void ui_panel_category_draw_content(
     const float glyph_height = ascender - descender;
 
     const float tab_center_x = float(rct->xmin + rct->xmax) * 0.5f;
+    /* extra_shift is only for visual positioning of fallback letters.
+     * Apply shift if the content IS a fallback letter (regardless of visibility settings). */
     const float extra_shift = is_fallback_letter ? (4.0f * UI_SCALE_FAC) : 0.0f;
     const float glyph_pos_y = float(rct->ymax) - glyph_height - (tab_v_pad_text - extra_shift);
 
-    if (use_builtin_icon) {
+    /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS (icon/glyph drawing) --- */
+    /* In Mixed mode, use effective icon visibility; in other modes use original flag.
+     * To remove: replace with: const bool should_draw_builtin_icon = use_builtin_icon; */
+    const bool should_draw_builtin_icon = (display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT) ?
+        mixed_mode_effective_builtin_icon : use_builtin_icon;
+
+    if (should_draw_builtin_icon) {
       const float builtin_icon_size = glyph_height * TABS_BUILTIN_ICON_SCALE;
       const float icon_center_y = float(rct->ymax) - tab_v_pad_text - glyph_height * 0.5f +
                                   extra_shift;
@@ -2893,7 +2919,13 @@ static void ui_panel_category_draw_content(
                                      theme_col_tab_text,
                                      theme_col_tab_text_sel);
     }
-    else {
+    /* To remove: replace condition with: else if (has_glyph || is_fallback_letter) */
+    else if (display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT ?
+             (mixed_mode_effective_has_glyph || mixed_mode_effective_fallback_letter) :
+             (has_glyph || is_fallback_letter)) {
+      /* Draw glyph/fallback letter only if the appropriate content type is enabled.
+       * In Mixed mode, respect per-content-type visibility flags.
+       * In other modes, draw if any glyph content exists. */
       BLF_position(fontid, tab_center_x - glyph_width_val * 0.5f, glyph_pos_y - descender, 0.0f);
       uchar glyph_color_out[3];
       set_glyph_color(
@@ -2906,6 +2938,7 @@ static void ui_panel_category_draw_content(
       BLF_draw(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX);
       shadow_disable();
     }
+    /* --- END: MIXED_MODE_CONTENT_FLAGS (icon/glyph drawing) --- */
 
     /* Built-in icon draw can touch BLF internal state (SVG path). Restore tab text size explicitly
      * so category names remain identical with/without assigned icon. */
@@ -2963,8 +2996,27 @@ static void ui_panel_category_draw_content(
         should_rotate = false;
         break;
       case USER_CATEGORY_TABS_GLYPHS_TEXT:
-        draw_str = category_id_draw;
-        draw_as_glyph = is_single_glyph_str(category_id_draw);
+        /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS (panel label for single-glyph) --- */
+        /* In Mixed mode, if glyph content is not visible (no dual mode),
+         * use panel label for single-glyph categories (same as TEXT_ONLY mode).
+         * To remove: replace this block with simple: draw_str = category_id_draw; */
+        if (!draw_dual && is_single_glyph_str(category_id_draw)) {
+          const char *panel_label = nullptr;
+          for (const PanelType &pt : region->runtime->type->paneltypes) {
+            if (pt.category && STREQ(pt.category, category_id)) {
+              panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+              if (panel_label && panel_label[0]) {
+                break;
+              }
+            }
+          }
+          draw_str = panel_label ? panel_label : category_id_draw;
+        }
+        else {
+          draw_str = category_id_draw;
+        }
+        /* --- END: MIXED_MODE_CONTENT_FLAGS (panel label for single-glyph) --- */
+        draw_as_glyph = is_single_glyph_str(draw_str);
         should_rotate = !draw_as_glyph;
         break;
       case USER_CATEGORY_TABS_TEXT_ONLY:
@@ -3045,7 +3097,8 @@ static void ui_panel_category_draw_content(
     /* Use custom glyph color even for fallback letters or when in icon-only mode.
      * Respect the 'Show Colored Text' preference in Text mode.
      * For active tab in TEXT_ONLY mode with colored text enabled: use standard color
-     * and show color indicator instead. */
+     * and show color indicator instead.
+     * In Mixed mode: only use custom color if glyphs are actually visible (dual mode). */
     bool use_custom_color = !is_zero_v3(glyph_color);
     if (display_mode == USER_CATEGORY_TABS_TEXT_ONLY) {
       if (!U.category_tabs_text_mode_show_colored_text) {
@@ -3055,6 +3108,19 @@ static void ui_panel_category_draw_content(
         /* Active tab: use standard color, color indicator will be shown instead. */
         use_custom_color = false;
       }
+    }
+    else if (display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT) {
+      /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS (text color when glyph disabled) --- */
+      /* In Mixed mode, only use custom color if we're showing glyph content (dual mode)
+       * AND the content is either a custom glyph or fallback letter (not just an icon).
+       * If only icons are visible, or no glyph content is visible, use standard theme color.
+       * To remove: delete this entire else-if block. */
+      const bool showing_glyph_or_fallback = draw_dual &&
+          (mixed_mode_effective_has_glyph || mixed_mode_effective_fallback_letter);
+      if (!showing_glyph_or_fallback) {
+        use_custom_color = false;
+      }
+      /* --- END: MIXED_MODE_CONTENT_FLAGS (text color when glyph disabled) --- */
     }
 
     if (use_custom_color) {
@@ -3282,6 +3348,37 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     }
 
     const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
+
+    /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS (width calculation) --- */
+    /* Resolve icon for this category (needed for Mixed mode width calculation with flags).
+     * To remove this feature: delete this icon resolution block and the effective flags below,
+     * then replace mixed_mode_has_visible_glyph_content with (has_glyph || is_fallback_letter). */
+    const bool display_mode_allows_icon_content = ELEM(
+        display_mode, USER_CATEGORY_TABS_GLYPHS_ONLY, USER_CATEGORY_TABS_GLYPHS_TEXT);
+    CategoryTabIconResolved icon_resolved;
+    panel_category_icon_data_lookup(wm, category_id, &icon_resolved);
+    const int resolved_icon_id = category_tab_icon_id_resolve(icon_resolved);
+    bool icon_data_allows_icon_content = (icon_resolved.source != CATEGORY_TAB_ICON_SOURCE_OFF);
+    if (icon_resolved.source == CATEGORY_TAB_ICON_SOURCE_MANUAL) {
+      icon_data_allows_icon_content = (icon_resolved.key && icon_resolved.key[0] != '\0') ||
+                                      (icon_resolved.path && icon_resolved.path[0] != '\0');
+    }
+    const bool use_builtin_icon =
+        display_mode_allows_icon_content && icon_data_allows_icon_content && (resolved_icon_id != ICON_NONE);
+
+    /* In Mixed mode, apply per-content-type visibility flags. */
+    const bool mixed_mode_effective_has_glyph =
+        has_glyph && U.category_tabs_mixed_show_glyphs;
+    const bool mixed_mode_effective_fallback_letter =
+        is_fallback_letter && U.category_tabs_mixed_show_first_letter;
+    const bool mixed_mode_effective_builtin_icon =
+        use_builtin_icon && U.category_tabs_mixed_show_icons;
+    /* For width calculation in Mixed mode: consider glyph visible if any content type is enabled. */
+    const bool mixed_mode_has_visible_glyph_content =
+        mixed_mode_effective_has_glyph || mixed_mode_effective_fallback_letter ||
+        mixed_mode_effective_builtin_icon;
+    /* --- END: MIXED_MODE_CONTENT_FLAGS (width calculation) --- */
+
     const bool use_reserved_inactive_icon_only =
         U.category_tabs_hide_reserved_inactive_text && !is_active &&
         ELEM(display_mode, USER_CATEGORY_TABS_GLYPHS_TEXT, USER_CATEGORY_TABS_TEXT_ONLY) &&
@@ -3359,7 +3456,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
         }
 
         const char *text_for_width = category_id_draw;
-        if (has_glyph || is_fallback_letter) {
+        if (mixed_mode_has_visible_glyph_content) {
           if (is_single_glyph_str(text_for_width)) {
             for (const PanelType &pt : region->runtime->type->paneltypes) {
               if (pt.category && STREQ(pt.category, category_id)) {
@@ -3380,20 +3477,34 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
           category_width = glyph_h + text_w + glyph_text_gap;
         }
         else {
-          /* Keep sizing behavior in sync with drawing code:
-           * - single-glyph labels are drawn as glyphs (not rotated text)
-           * - non-glyph labels are drawn as rotated text. */
+          /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS (text-only sizing when glyph disabled) --- */
+          /* No glyph content visible - use text-only sizing.
+           * For single-glyph categories, look up panel label (same as TEXT_ONLY mode).
+           * To remove: replace this block with original code:
+           *   if (is_single_glyph_str(category_id_draw)) {
+           *     category_width = round_fl_to_int(BLF_height(fontid, category_id_draw, ...));
+           *   } else {
+           *     BLF_enable(fontid, BLF_ROTATION); ... category_width = BLF_width(...);
+           *   }
+           */
+          const char *text_for_size = category_id_draw;
           if (is_single_glyph_str(category_id_draw)) {
-            category_width = round_fl_to_int(
-                BLF_height(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
+            for (const PanelType &pt : region->runtime->type->paneltypes) {
+              if (pt.category && STREQ(pt.category, category_id)) {
+                const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+                if (panel_label && panel_label[0]) {
+                  text_for_size = panel_label;
+                  break;
+                }
+              }
+            }
           }
-          else {
-            BLF_enable(fontid, BLF_ROTATION);
-            BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
-            category_width = round_fl_to_int(
-                BLF_width(fontid, category_id_draw, BLF_DRAW_STR_DUMMY_MAX));
-            BLF_disable(fontid, BLF_ROTATION);
-          }
+          BLF_enable(fontid, BLF_ROTATION);
+          BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
+          category_width = round_fl_to_int(
+              BLF_width(fontid, text_for_size, BLF_DRAW_STR_DUMMY_MAX));
+          BLF_disable(fontid, BLF_ROTATION);
+          /* --- END: MIXED_MODE_CONTENT_FLAGS (text-only sizing when glyph disabled) --- */
         }
         break;
       }

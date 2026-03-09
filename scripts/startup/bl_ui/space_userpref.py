@@ -7405,6 +7405,10 @@ class VIEW3D_OT_category_tabs_settings(Operator):
             row.prop_enum(view, "category_tabs_shape", "BOX", text="Box Shape")
             row.prop_enum(view, "category_tabs_shape", "CAPSULE", text="Capsule Shape")
 
+            # Visual effect - only in Icon mode
+            layout.separator()
+            layout.prop(view, "category_tabs_visual_effect", text="Visual Effect")
+
         # --- BEGIN: MIXED_MODE_CONTENT_FLAGS (optional per-type visibility in Mixed mode) ---
         # To remove: delete this entire block
         if display_mode_value == 'GLYPHS_TEXT':

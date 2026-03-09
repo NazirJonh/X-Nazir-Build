@@ -1007,7 +1007,9 @@ struct UserDef {
   char category_tabs_mixed_show_icons = true;
   /* --- END: MIXED_MODE_CONTENT_FLAGS --- */
 
-  char _pad7[4] = {};
+  /** Visual effect (scale on hover/active) for category tabs in Icon mode. */
+  char category_tabs_visual_effect = true;
+  char _pad7[3] = {};
   /**
    * Setting for UI line width.
    *

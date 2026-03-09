@@ -100,6 +100,8 @@ static bool category_name_is_glyph(const char *category_id);
 #define TABS_BG_BRIGHTEN_BASE 0.0f
 #define TABS_BG_BRIGHTEN_HOVER 0.05f
 
+#define TABS_VISUAL_EFFECT_SCALE 1.2f
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -3824,13 +3826,54 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
     GPU_blend(GPU_BLEND_ALPHA);
 
+    // --- BEGIN: TABS_VISUAL_EFFECT_OVERLAP ---
+    /* Visual effect: expand tab on hover/active.
+     * The tab expands by consuming padding from neighbors first, then overlapping.
+     * This keeps the tab grid stable (no jitter) while providing visual feedback.
+     */
+    bool is_visual_effect_active = false;
+    rctf box_rect;
+    box_rect.xmin = float(rct->xmin);
+    box_rect.xmax = float(rct->xmax);
+    box_rect.ymin = float(rct->ymin);
+    box_rect.ymax = float(rct->ymax);
+
+    if (U.category_tabs_visual_effect && display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+        !is_dragging)
+    {
+      if (is_active || is_hover) {
+        is_visual_effect_active = true;
+
+        /* Vertical expansion: scale height by TABS_VISUAL_EFFECT_SCALE (1.2) */
+        const int tab_height = rct->ymax - rct->ymin;
+        const int expanded_height = round_fl_to_int(tab_height * TABS_VISUAL_EFFECT_SCALE);
+        const int extra_height = expanded_height - tab_height;
+
+        /* Distribute extra height equally: half up, half down */
+        const int extra_top = extra_height / 2;
+        const int extra_bottom = extra_height - extra_top;
+
+        /* Expand vertically (consumes padding first, then overlaps neighbors) */
+        box_rect.ymin -= extra_bottom;
+        box_rect.ymax += extra_top;
+
+        /* Horizontal expansion: expand away from the panel edge */
+        const int tab_width = rct->xmax - rct->xmin;
+        const int expanded_width = round_fl_to_int(tab_width * TABS_VISUAL_EFFECT_SCALE);
+        const int extra_width = expanded_width - tab_width;
+
+        if (is_left) {
+          box_rect.xmax += extra_width;
+        }
+        else {
+          box_rect.xmin -= extra_width;
+        }
+      }
+    }
+    // --- END: TABS_VISUAL_EFFECT_OVERLAP ---
+
     {
       draw_roundbox_corner_set(roundboxtype);
-      rctf box_rect;
-      box_rect.xmin = rct->xmin;
-      box_rect.xmax = rct->xmax;
-      box_rect.ymin = rct->ymin;
-      box_rect.ymax = rct->ymax;
 
       float tab_bg_color[4];
       if (is_active) {
@@ -3854,20 +3897,49 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
         immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
 
         immUniformColor4fv(tab_bg_color);
-        immRectf(pos,
-                 is_left ? rct->xmax - px : rct->xmin,
-                 rct->ymin + px,
-                 is_left ? rct->xmax : rct->xmin + px,
-                 rct->ymax - px);
+        /* Use expanded box_rect when visual effect is active, otherwise use standard rct */
+        if (is_visual_effect_active) {
+          immRectf(pos,
+                   is_left ? box_rect.xmax - px : box_rect.xmin,
+                   box_rect.ymin + px,
+                   is_left ? box_rect.xmax : box_rect.xmin + px,
+                   box_rect.ymax - px);
+        }
+        else {
+          immRectf(pos,
+                   is_left ? rct->xmax - px : rct->xmin,
+                   rct->ymin + px,
+                   is_left ? rct->xmax : rct->xmin + px,
+                   rct->ymax - px);
+        }
         immUnbindProgram();
       }
+    }
+
+    /* Prepare expanded rect for content drawing when visual effect is active */
+    rcti expanded_rct;
+    const rcti *content_rct;
+    if (is_visual_effect_active) {
+      expanded_rct.xmin = int(box_rect.xmin);
+      expanded_rct.xmax = int(box_rect.xmax);
+      expanded_rct.ymin = int(box_rect.ymin);
+      expanded_rct.ymax = int(box_rect.ymax);
+      content_rct = &expanded_rct;
+    }
+    else {
+      content_rct = rct;
+    }
+
+    float current_category_tabs_zoom = category_tabs_zoom;
+    if (is_visual_effect_active) {
+      current_category_tabs_zoom *= TABS_VISUAL_EFFECT_SCALE;
     }
 
     ui_panel_category_draw_content(region,
                                    wm,
                                    category_id,
                                    category_id_draw,
-                                   rct,
+                                   content_rct,
                                    rct_xmin,
                                    rct_xmax,
                                    is_active,
@@ -3877,7 +3949,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                                    fstyle,
                                    fstyle_points,
                                    zoom,
-                                   category_tabs_zoom,
+                                   current_category_tabs_zoom,
                                    current_tab_v_pad_text,
                                    darken_factor,
                                    theme_col_tab_text,

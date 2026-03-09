@@ -2486,6 +2486,24 @@ static ARegion *ui_panel_category_tooltip_init(
       tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
       tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
 
+      /* Account for visual effect expansion when hovering over a tab.
+       * When visual effect is enabled and the tab is hovered, it expands
+       * horizontally, so the tooltip needs extra offset to avoid overlap.
+       * We must expand tab_rect_screen because ui_tooltip_create_with_data
+       * uses init_rect_overlap to calculate tooltip position. */
+      if (U.category_tabs_visual_effect) {
+        const int tab_width = pc_dyn.rect.xmax - pc_dyn.rect.xmin;
+        const int extra_width = round_fl_to_int(tab_width * (UI_TABS_VISUAL_EFFECT_SCALE - 1.0f));
+        if (is_left) {
+          /* Tab expands to the right when hovered. */
+          tab_rect_screen.xmax += extra_width;
+        }
+        else {
+          /* Tab expands to the left when hovered. */
+          tab_rect_screen.xmin -= extra_width;
+        }
+      }
+
       int position[2];
       if (is_left) {
         /* Tabs on left side: position tooltip to the right of tabs. */

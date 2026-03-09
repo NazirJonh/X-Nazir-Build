@@ -1680,9 +1680,9 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
     return true;
   }
 
-  /* If filter is enabled but no tags selected - hide all (except reserved) */
+  /* If filter is enabled but no tags selected - show all (no filtering applied) */
   if (active_tags[0] == '\0') {
-    return false;
+    return true;
   }
 
   /* Get category tags with space_type awareness */

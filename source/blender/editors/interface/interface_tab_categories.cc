@@ -2345,6 +2345,8 @@ void category_tabs_apply_drop_insert(bContext *C,
   }
 }
 
+#include "interface_tag_bar.hh"
+
 void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *region)
 {
   if (!panel_category_tabs_is_visible(region)) {
@@ -2356,6 +2358,23 @@ void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *regio
 
   if (current_active && panel_category_is_visible_by_tags(C, wm, current_active)) {
     return;
+  }
+
+  /* Current category is hidden or null. Try to restore from memory first. */
+  char tag_key[256];
+  TagFilterStateRef state{};
+  if (tag_filter_state_from_area(CTX_wm_area(C), &state) && state.active_tags) {
+    tag_build_combination_key(state.active_tags, tag_key, sizeof(tag_key));
+
+    char saved_category[64];
+    if (tag_get_last_active_category(
+            const_cast<bContext *>(C), tag_key, saved_category, sizeof(saved_category)))
+    {
+      if (panel_category_is_visible_by_tags(C, wm, saved_category)) {
+        panel_category_active_set(region, saved_category);
+        return;
+      }
+    }
   }
 
   Vector<PanelCategoryDyn *> visible_categories = get_ordered_categories(C, region);

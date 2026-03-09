@@ -415,6 +415,40 @@ void do_versions_after_linking_520(FileData * /*fd*/, Main *bmain)
    */
 }
 
+static void do_versions_init_tag_category_memory(Main *bmain)
+{
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        switch (sl.spacetype) {
+          case SPACE_VIEW3D: {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            v3d->tag_last_active_categories[0] = '\0';
+            break;
+          }
+          case SPACE_PROPERTIES: {
+            SpaceProperties *sbuts = reinterpret_cast<SpaceProperties *>(&sl);
+            sbuts->tag_last_active_categories[0] = '\0';
+            break;
+          }
+          case SPACE_NODE: {
+            SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
+            snode->tag_last_active_categories[0] = '\0';
+            break;
+          }
+          case SPACE_IMAGE: {
+            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+            sima->tag_last_active_categories[0] = '\0';
+            break;
+          }
+          default:
+            break;
+        }
+      }
+    }
+  }
+}
+
 void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 {
   /* Category runtime lists in WM are rebuilt by Python on startup and must never be trusted from
@@ -424,6 +458,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 
   /* Add TAG_BAR region to editors that support category filtering. */
   do_versions_ensure_spaces_have_tag_bar_region(bmain);
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 8)) {
+    do_versions_init_tag_category_memory(bmain);
+  }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 5)) {
     do_versions_init_tag_filter_state_in_spaces(bmain);

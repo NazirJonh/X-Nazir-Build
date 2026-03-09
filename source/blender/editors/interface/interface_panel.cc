@@ -63,7 +63,8 @@
 #include "GPU_matrix.hh"
 #include "GPU_state.hh"
 
-#include "interface_intern.hh"
+#include "interface_tag_bar.hh"
+#include "interface_intern.hh" /* own include */
 
 namespace blender::ui {
 
@@ -2753,6 +2754,17 @@ static int ui_handle_panel_category_cycling(bContext *C,
           if (next_index >= 0 && next_index < ordered_categories.size()) {
             PanelCategoryDyn *next = ordered_categories[next_index];
             panel_category_active_set(region, next->idname);
+
+            /* Save to tag category memory. */
+            using namespace blender::ui;
+            TagFilterStateRef state{};
+            if (tag_filter_state_from_area(CTX_wm_area(C), &state) && state.active_tags &&
+                state.filter_enabled && *state.filter_enabled)
+            {
+              char tag_key[256];
+              tag_build_combination_key(state.active_tags, tag_key, sizeof(tag_key));
+              tag_save_last_active_category(C, tag_key, next->idname);
+            }
           }
         }
         return WM_UI_HANDLER_BREAK;
@@ -2890,6 +2902,17 @@ int handler_panel_region(bContext *C,
           }
 
           panel_category_active_set(region, pc_dyn->idname);
+
+          /* Save to tag category memory. */
+          using namespace blender::ui;
+          TagFilterStateRef state{};
+          if (tag_filter_state_from_area(CTX_wm_area(C), &state) && state.active_tags &&
+              state.filter_enabled && *state.filter_enabled)
+          {
+            char tag_key[256];
+            tag_build_combination_key(state.active_tags, tag_key, sizeof(tag_key));
+            tag_save_last_active_category(C, tag_key, pc_dyn->idname);
+          }
 
           /* Reset tab name hidden flag when switching to a different tab */
           if (!already_active) {

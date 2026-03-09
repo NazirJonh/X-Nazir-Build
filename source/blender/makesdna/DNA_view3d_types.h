@@ -822,6 +822,16 @@ struct View3D {
    */
   int tag_bar_scroll_offset = 0;
 
+  /**
+   * Last active category for each tag combination.
+   * Format: "tags1:category1;tags2:category2"
+   * - tags: semicolon-separated tag names (sorted alphabetically)
+   * - category: category idname to restore
+   * Example: "Tools:Modify;Create;Modeling:Add Mesh;:General"
+   * (empty tags = default category when no tags active)
+   */
+  char tag_last_active_categories[1024] = "";
+
   int _pad2 = 0;
 
   void *_pad1 = nullptr;

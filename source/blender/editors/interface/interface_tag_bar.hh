@@ -101,6 +101,40 @@ bool tag_filter_state_from_context(const bContext *C, TagFilterStateRef *r_state
 void tag_bar_mark_all_dirty();
 
 /**
+ * Save the last active category for a specific tag combination.
+ * Stores in SpaceData's tag_last_active_categories field.
+ *
+ * \param C: Blender context
+ * \param tags_combination: Semicolon-separated tag names (sorted alphabetically)
+ * \param category: Category idname to save
+ */
+void tag_save_last_active_category(bContext *C, const char *tags_combination, const char *category);
+
+/**
+ * Get the last active category for a specific tag combination.
+ *
+ * \param C: Blender context
+ * \param tags_combination: Semicolon-separated tag names
+ * \param r_category: Output buffer for category idname
+ * \param max_len: Maximum length of output buffer
+ * \return: True if category was found, false otherwise
+ */
+bool tag_get_last_active_category(bContext *C,
+                                  const char *tags_combination,
+                                  char *r_category,
+                                  int max_len);
+
+/**
+ * Build a sorted tag combination key from active tags string.
+ * Tags are sorted alphabetically to ensure consistent keys.
+ *
+ * \param active_tags: Comma/semicolon separated active tags
+ * \param r_key: Output buffer for sorted tag key
+ * \param max_len: Maximum length of output buffer
+ */
+void tag_build_combination_key(const char *active_tags, char *r_key, int max_len);
+
+/**
  * Update tag bar buttons based on tags from window manager.
  * \param C: Context for getting current mode
  * \param wm: Window manager containing tag definitions

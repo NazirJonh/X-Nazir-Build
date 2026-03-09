@@ -198,6 +198,9 @@ struct SpaceProperties {
    */
   int tag_bar_scroll_offset = 0;
 
+  /** Last active category for each tag combination (see View3D for format). */
+  char tag_last_active_categories[1024] = "";
+
   int _pad2 = 0;
 
   void *_pad1 = nullptr;
@@ -759,6 +762,9 @@ struct SpaceImage {
    */
   int tag_bar_scroll_offset = 0;
 
+  /** Last active category for each tag combination (see View3D for format). */
+  char tag_last_active_categories[1024] = "";
+
   int _pad_tag_filter2 = 0;
 };
 
@@ -994,6 +1000,9 @@ struct SpaceNode {
    * Horizontal scroll offset in the tag bar (in pixels).
    */
   int tag_bar_scroll_offset = 0;
+
+  /** Last active category for each tag combination (see View3D for format). */
+  char tag_last_active_categories[1024] = "";
 
   int _pad_tag_filter2 = 0;
 

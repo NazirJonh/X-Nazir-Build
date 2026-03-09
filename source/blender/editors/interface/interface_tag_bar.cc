@@ -21,7 +21,7 @@
 #include "BLI_string_utf8.h"
 #include "BLI_vector.hh"
 
-#include "MEM_guardedalloc.h"
+
 
 #include "BKE_context.hh"
 #include "BKE_screen.hh"
@@ -41,6 +41,8 @@
 #include "UI_interface_c.hh"
 #include "UI_interface_icons.hh"
 #include "UI_resources.hh"
+
+#include "MEM_guardedalloc.h"
 
 #include "BLF_api.hh"
 
@@ -1291,6 +1293,189 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
                                         wm::OpCallContext::ExecDefault,
                                         UI_ITEM_NONE);
   RNA_enum_set(&prefs_ptr, "section", USER_SECTION_TAGS);
+}
+
+#include "interface_intern.hh"
+
+/* Maximum storage size before LRU cleanup (leave some margin from 1024). */
+#define TAG_LAST_ACTIVE_CATEGORIES_MAX_SIZE 900
+
+/**
+ * Get the tag_last_active_categories storage buffer for a given area.
+ * Returns nullptr if the area type doesn't support tag category memory.
+ *
+ * \param area: The screen area to get storage for
+ * \return Pointer to the storage buffer, or nullptr if unsupported
+ */
+static char *tag_last_active_categories_storage_get(const ScrArea *area)
+{
+  if (!area || !area->spacedata.first) {
+    return nullptr;
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+      return v3d->tag_last_active_categories;
+    }
+    case SPACE_PROPERTIES: {
+      SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
+      return sbuts->tag_last_active_categories;
+    }
+    case SPACE_NODE: {
+      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
+      return snode->tag_last_active_categories;
+    }
+    case SPACE_IMAGE: {
+      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+      return sima->tag_last_active_categories;
+    }
+    default:
+      return nullptr;
+  }
+}
+
+/**
+ * Build a sorted tag combination key from active tags string.
+ * Tags are sorted alphabetically to ensure consistent keys.
+ */
+void tag_build_combination_key(const char *active_tags, char *r_key, int max_len)
+{
+  if (!active_tags || !active_tags[0]) {
+    r_key[0] = '\0';
+    return;
+  }
+
+  /* Use shared utility to split tags (avoids strtok static state). */
+  blender::Vector<std::string> tags;
+  category_tab_split_tags(active_tags, tags, ",;");
+
+  if (tags.is_empty()) {
+    r_key[0] = '\0';
+    return;
+  }
+
+  /* Sort alphabetically for consistent keys */
+  std::sort(tags.begin(), tags.end());
+
+  /* Build key string */
+  r_key[0] = '\0';
+  for (int i = 0; i < tags.size(); i++) {
+    if (i > 0) {
+      BLI_strncat(r_key, ";", max_len);
+    }
+    BLI_strncat(r_key, tags[i].c_str(), max_len);
+  }
+}
+
+/**
+ * Save the last active category for a specific tag combination.
+ * Uses LRU cleanup when approaching storage limit to prevent overflow.
+ */
+void tag_save_last_active_category(bContext *C, const char *tags_combination, const char *category)
+{
+  if (!C || !tags_combination || !category) {
+    return;
+  }
+
+  ScrArea *area = CTX_wm_area(C);
+  char *storage = tag_last_active_categories_storage_get(area);
+  if (!storage) {
+    return;
+  }
+
+  /* Parse existing data into entries, skipping entry with same tags. */
+  blender::Vector<std::string> entries;
+  if (storage[0]) {
+    char *data_copy = BLI_strdup(storage);
+    char *token = strtok(data_copy, ";");
+
+    while (token) {
+      std::string entry(token);
+      /* Check if this entry is for the same tags */
+      size_t colon_pos = entry.find(':');
+      if (colon_pos != std::string::npos) {
+        std::string existing_tags = entry.substr(0, colon_pos);
+        if (existing_tags == tags_combination) {
+          /* Skip old entry - will be replaced at the end (most recent). */
+          token = strtok(nullptr, ";");
+          continue;
+        }
+      }
+      entries.append(entry);
+      token = strtok(nullptr, ";");
+    }
+    MEM_delete(data_copy);
+  }
+
+  /* Add new entry (most recent goes at the end). */
+  std::string new_entry = std::string(tags_combination) + ":" + category;
+  entries.append(new_entry);
+
+  /* LRU cleanup: remove oldest entries if approaching size limit. */
+  while (entries.size() > 1) {
+    /* Calculate total size if we rebuild the string. */
+    size_t total_size = 0;
+    for (const auto &entry : entries) {
+      total_size += entry.size() + 1; /* +1 for separator or null. */
+    }
+
+    if (total_size <= TAG_LAST_ACTIVE_CATEGORIES_MAX_SIZE) {
+      break;
+    }
+
+    /* Remove the oldest entry (first in list). */
+    entries.remove(0);
+  }
+
+  /* Rebuild string. */
+  storage[0] = '\0';
+  for (int i = 0; i < entries.size(); i++) {
+    if (i > 0) {
+      BLI_strncat(storage, ";", 1024);
+    }
+    BLI_strncat(storage, entries[i].c_str(), 1024);
+  }
+}
+
+/**
+ * Get the last active category for a specific tag combination.
+ */
+bool tag_get_last_active_category(
+    bContext *C, const char *tags_combination, char *r_category, int max_len)
+{
+  if (!C || !tags_combination || !r_category || max_len <= 0) {
+    return false;
+  }
+
+  ScrArea *area = CTX_wm_area(C);
+  const char *storage = tag_last_active_categories_storage_get(area);
+  if (!storage || !storage[0]) {
+    return false;
+  }
+
+  /* Parse and find entry. */
+  char *data_copy = BLI_strdup(storage);
+  char *token = strtok(data_copy, ";");
+
+  while (token) {
+    std::string entry(token);
+    size_t colon_pos = entry.find(':');
+    if (colon_pos != std::string::npos) {
+      std::string existing_tags = entry.substr(0, colon_pos);
+      if (existing_tags == tags_combination) {
+        std::string category_str = entry.substr(colon_pos + 1);
+        BLI_strncpy(r_category, category_str.c_str(), max_len);
+        MEM_delete(data_copy);
+        return true;
+      }
+    }
+    token = strtok(nullptr, ";");
+  }
+
+  MEM_delete(data_copy);
+  r_category[0] = '\0';
+  return false;
 }
 
 /**

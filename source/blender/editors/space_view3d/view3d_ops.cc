@@ -34,6 +34,7 @@
 #include "ED_screen.hh"
 #include "ED_transform.hh"
 
+#include "UI_interface_c.hh"
 #include "../interface/interface_tag_bar.hh"
 
 #include "view3d_intern.hh"
@@ -216,6 +217,22 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
     return OPERATOR_CANCELLED;
   }
 
+  /* Get current active category BEFORE changing tags. */
+  ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
+  const char *current_category = nullptr;
+  if (region_ui) {
+    current_category = ui::panel_category_active_get(region_ui, false);
+  }
+
+  /* Build tag combination key for current state (before toggle). */
+  char current_tag_key[256];
+  ui::tag_build_combination_key(state.active_tags, current_tag_key, sizeof(current_tag_key));
+
+  /* Save current category for current tag combination. */
+  if (current_category && current_category[0]) {
+    ui::tag_save_last_active_category(C, current_tag_key, current_category);
+  }
+
   char tag_name[64];
   RNA_string_get(op->ptr, "tag_name", tag_name);
 
@@ -225,6 +242,8 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
   /* Copy current active tags to work with */
   char tags_copy[256];
   BLI_strncpy(tags_copy, state.active_tags, sizeof(tags_copy));
+
+
 
   /* Check if tag is already in the list */
   bool tag_found = false;
@@ -287,8 +306,30 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
   /* Enable tag filter when user clicks on a tag */
   *state.filter_enabled = 1;
 
+  /* After updating tags, try to restore saved category for the new combination. */
+  if (region_ui) {
+    char new_tag_key[256];
+    ui::tag_build_combination_key(state.active_tags, new_tag_key, sizeof(new_tag_key));
+
+    char saved_category[64];
+    if (ui::tag_get_last_active_category(C, new_tag_key, saved_category, sizeof(saved_category))) {
+      /* Check if saved category is visible with new tag filter. */
+      const wmWindowManager *wm = CTX_wm_manager(C);
+      if (ui::panel_category_is_visible_by_tags(C, wm, saved_category)) {
+        ui::panel_category_active_set(region_ui, saved_category);
+      }
+      else {
+        /* Fall back to first visible category. */
+        ui::panel_category_tabs_ensure_active_visible(C, region_ui);
+      }
+    }
+    else {
+      /* No saved category - use default behavior (ensure active is visible). */
+      ui::panel_category_tabs_ensure_active_visible(C, region_ui);
+    }
+  }
+
   /* Check N-Panel visibility before toggling */
-  ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
   const bool was_npanel_hidden = region_ui && (region_ui->flag & RGN_FLAG_HIDDEN);
 
   /* Open N-Panel (Sidebar) if it's hidden, so users can see filtered categories */
@@ -357,6 +398,8 @@ static wmOperatorStatus view3d_tag_bar_filter_toggle_exec(bContext *C, wmOperato
     return OPERATOR_CANCELLED;
   }
 
+  ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
+
   /* Toggle the filter enabled flag */
   *state.filter_enabled = *state.filter_enabled ? 0 : 1;
 
@@ -365,15 +408,43 @@ static wmOperatorStatus view3d_tag_bar_filter_toggle_exec(bContext *C, wmOperato
     if (data->saved_tags[0] != '\0') {
       BLI_strncpy(state.active_tags, data->saved_tags, 256);
     }
+
+    /* Restore last active category for this tag combination. */
+    if (region_ui) {
+      char tag_key[256];
+      tag_build_combination_key(state.active_tags, tag_key, sizeof(tag_key));
+      char saved_category[64];
+      if (tag_get_last_active_category(C, tag_key, saved_category, sizeof(saved_category))) {
+        const wmWindowManager *wm = CTX_wm_manager(C);
+        if (ui::panel_category_is_visible_by_tags(C, wm, saved_category)) {
+          ui::panel_category_active_set(region_ui, saved_category);
+        }
+        else {
+          ui::panel_category_tabs_ensure_active_visible(C, region_ui);
+        }
+      }
+      else {
+        ui::panel_category_tabs_ensure_active_visible(C, region_ui);
+      }
+    }
+
     /* Open N-Panel if it's hidden */
-    ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
     if (region_ui && (region_ui->flag & RGN_FLAG_HIDDEN)) {
       ED_region_toggle_hidden(C, region_ui);
     }
   }
   else {
-    /* Filter ACTIVE -> INACTIVE: Save tags */
+    /* Filter ACTIVE -> INACTIVE: Save tags and current category. */
     BLI_strncpy(data->saved_tags, state.active_tags, sizeof(data->saved_tags));
+
+    if (region_ui) {
+      const char *current_category = ui::panel_category_active_get(region_ui, false);
+      if (current_category && current_category[0]) {
+        char tag_key[256];
+        ui::tag_build_combination_key(state.active_tags, tag_key, sizeof(tag_key));
+        ui::tag_save_last_active_category(C, tag_key, current_category);
+      }
+    }
     /* Note: Don't clear active_tag_filter_tags - keep them for next activation */
   }
 

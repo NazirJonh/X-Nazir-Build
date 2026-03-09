@@ -54,6 +54,7 @@ _CATEGORY_TAG_MODES = (
     ("POSE_MODE", "POSE", 7, "Pose Mode", 'POSE_HLT'),
     ("GEOMETRY_NODES", "GEOMETRY_NODES", 8, "Geometry Nodes", 'NODETREE'),
     ("SHADER_EDITOR", "SHADER_EDITOR", 9, "Shader Editor", 'MATERIAL'),
+    ("IMAGE_PAINT", "IMAGE_PAINT", 10, "Image Paint", 'TPAINT_HLT'),
 )
 _CATEGORY_TAG_MODE_NAME_TO_FLAG = {name: (1 << bit) for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
 _CATEGORY_TAG_MODE_FLAG_TO_NAME = {(1 << bit): name for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
@@ -87,6 +88,8 @@ _CATEGORY_TAG_FILTER_ENUM_TO_FLAG = {
     "GEOMETRY_NODES": (1 << 8),
     10: (1 << 9),
     "SHADER_EDITOR": (1 << 9),
+    11: (1 << 10),
+    "IMAGE_PAINT": (1 << 10),
 }
 
 def tag_log(message, level="INFO"):
@@ -125,7 +128,7 @@ def get_current_tag_mode_flag(context):
             sima = context.space_data
             if sima is not None:
                 if sima.mode == 'PAINT':
-                    return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("TEXTURE_PAINT", 0)
+                    return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("IMAGE_PAINT", 0)
                 if sima.mode == 'UV':
                     return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("UV_EDIT", 0)
 
@@ -3375,6 +3378,11 @@ class CategoryTagItem(PropertyGroup):
         default=False,
         update=lambda self, ctx: _auto_save_tags()
     )
+    mode_image_paint: bpy.props.BoolProperty(
+        name="Image Paint",
+        default=False,
+        update=lambda self, ctx: _auto_save_tags()
+    )
 
     def get_mode_flags(self):
         """Convert boolean mode properties to bitmask."""
@@ -3399,6 +3407,8 @@ class CategoryTagItem(PropertyGroup):
             flags |= 1 << 8  # GEOMETRY_NODES
         if self.mode_shader_editor:
             flags |= 1 << 9  # SHADER_EDITOR
+        if self.mode_image_paint:
+            flags |= 1 << 10  # IMAGE_PAINT
         return flags
 
     def set_mode_flags(self, flags):
@@ -3413,6 +3423,7 @@ class CategoryTagItem(PropertyGroup):
         self.mode_pose = bool(flags & (1 << 7))
         self.mode_geometry_nodes = bool(flags & (1 << 8))
         self.mode_shader_editor = bool(flags & (1 << 9))
+        self.mode_image_paint = bool(flags & (1 << 10))
 
 
 class CategoryTagAssignment(PropertyGroup):
@@ -3444,6 +3455,7 @@ class TagModeItem:
         self._mode_pose = bool(mode_flags & (1 << 7))
         self._mode_geometry_nodes = bool(mode_flags & (1 << 8))
         self._mode_shader_editor = bool(mode_flags & (1 << 9))
+        self._mode_image_paint = bool(mode_flags & (1 << 10))
 
     def _save_to_cache(self):
         """Save mode flags to cache."""
@@ -3470,6 +3482,8 @@ class TagModeItem:
                 flags |= 1 << 8
             if self._mode_shader_editor:
                 flags |= 1 << 9
+            if self._mode_image_paint:
+                flags |= 1 << 10
             _all_tags_cache[self._tag_name]["mode_flags"] = flags
 
     @property
@@ -3560,6 +3574,15 @@ class TagModeItem:
     @mode_shader_editor.setter
     def mode_shader_editor(self, value):
         self._mode_shader_editor = value
+        self._save_to_cache()
+
+    @property
+    def mode_image_paint(self):
+        return self._mode_image_paint
+
+    @mode_image_paint.setter
+    def mode_image_paint(self, value):
+        self._mode_image_paint = value
         self._save_to_cache()
 
     def _glyph_update(self, context):

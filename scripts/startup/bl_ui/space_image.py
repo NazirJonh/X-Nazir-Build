@@ -41,14 +41,15 @@ from bpy.app.translations import (
 
 _CATEGORY_TAG_MODE_TEXTURE_PAINT = 1 << 5
 _CATEGORY_TAG_MODE_UV_EDIT = 1 << 6
+_CATEGORY_TAG_MODE_IMAGE_PAINT = 1 << 10
 
 
 def _image_current_tag_mode_flag(sima):
     if sima.mode == 'PAINT':
-        return _CATEGORY_TAG_MODE_TEXTURE_PAINT
+        return _CATEGORY_TAG_MODE_IMAGE_PAINT
     if sima.mode == 'UV':
         return _CATEGORY_TAG_MODE_UV_EDIT
-    return _CATEGORY_TAG_MODE_TEXTURE_PAINT
+    return _CATEGORY_TAG_MODE_IMAGE_PAINT
 
 
 def _tag_glyph_display(glyph):

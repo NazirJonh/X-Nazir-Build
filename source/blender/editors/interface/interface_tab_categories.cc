@@ -1587,7 +1587,7 @@ uint32_t get_current_tag_mode_flag(const bContext *C)
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
       if (sima) {
         if (sima->mode == SI_MODE_PAINT) {
-          return static_cast<uint32_t>(CategoryTagMode::TEXTURE_PAINT);
+          return static_cast<uint32_t>(CategoryTagMode::IMAGE_PAINT);
         }
         if (sima->mode == SI_MODE_UV) {
           return static_cast<uint32_t>(CategoryTagMode::UV_EDIT);
@@ -2767,7 +2767,14 @@ void panel_category_tabs_draw_settings_button(const bContext *C,
                                                const unsigned char theme_col_tab_text[3])
 {
   const uiStyle *style = style_get();
-  const int fontid = style->widget.uifont_id;
+  const uiFontStyle *fstyle = &style->widget;
+  const int fontid = fstyle->uifont_id;
+
+  /* Reset font size to standard zoom (without visual effect scale).
+   * This is necessary because the visual effect for tabs modifies BLF_size,
+   * and we don't want the settings button glyph to be affected. */
+  const float fstyle_points = fstyle->points;
+  BLF_size(fontid, fstyle_points * UI_SCALE_FAC * zoom);
 
   const rcti *rct = &region->runtime->category_tabs_settings_rect;
 
@@ -2824,6 +2831,12 @@ void panel_category_tabs_draw_settings_button(const bContext *C,
   theme::get_color_4fv(TH_TAB_OUTLINE, theme_col_tab_outline);
 
   GPU_blend(GPU_BLEND_ALPHA);
+
+  /* Apply visual effect scale when hovering over the settings button itself.
+   * This ensures the glyph only scales when the cursor is actually over the button,
+   * not when hovering over the last tab. */
+  const float visual_effect_scale = is_hover ? TABS_VISUAL_EFFECT_SCALE : 1.0f;
+  BLF_size(fontid, fstyle_points * UI_SCALE_FAC * zoom * visual_effect_scale);
 
   rctf box_rect;
   box_rect.xmin = float(rct->xmin);
@@ -3839,7 +3852,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     box_rect.ymax = float(rct->ymax);
 
     if (U.category_tabs_visual_effect && display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
-        !is_dragging)
+        !is_dragging && !U.category_tabs_show_active_name)
     {
       if (is_active || is_hover) {
         is_visual_effect_active = true;

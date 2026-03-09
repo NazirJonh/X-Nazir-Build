@@ -217,6 +217,9 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
     return OPERATOR_CANCELLED;
   }
 
+  /* Remember filter state BEFORE any changes - needed for N-Panel hide logic. */
+  const bool was_filter_enabled_before = *state.filter_enabled != 0;
+
   /* Get current active category BEFORE changing tags. */
   ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
   const char *current_category = nullptr;
@@ -303,8 +306,15 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
   /* Update the active tags string */
   BLI_strncpy(state.active_tags, new_tags, 256);
 
-  /* Enable tag filter when user clicks on a tag */
-  *state.filter_enabled = 1;
+  /* Handle filter state based on whether tags were removed or added. */
+  if (was_removing_tag) {
+    /* Tag was removed - don't force enable filter, keep filter state unchanged */
+    *state.filter_enabled = 0;  /* Keep filter OFF if all tags removed */
+  }
+  else {
+    /* Tag was added - enable filter */
+    *state.filter_enabled = 1;
+  }
 
   /* After updating tags, try to restore saved category for the new combination. */
   if (region_ui) {
@@ -336,9 +346,9 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
   if (was_npanel_hidden) {
     ED_region_toggle_hidden(C, region_ui);
   }
-  /* Hide N-Panel if we removed the last active tag and N-Panel was visible before */
-  else if (was_removing_tag && new_tags[0] == '\0') {
-    /* No more tags active - hide N-Panel */
+  /* Hide N-Panel only if: filter was enabled before AND we removed the last tag. */
+  else if (was_filter_enabled_before && was_removing_tag && new_tags[0] == '\0') {
+    /* No more tags active and filter was on - hide N-Panel */
     ED_region_toggle_hidden(C, region_ui);
   }
 
@@ -407,6 +417,10 @@ static wmOperatorStatus view3d_tag_bar_filter_toggle_exec(bContext *C, wmOperato
     /* Filter INACTIVE -> ACTIVE: Restore saved tags and show N-Panel */
     if (data->saved_tags[0] != '\0') {
       BLI_strncpy(state.active_tags, data->saved_tags, 256);
+    }
+    else {
+      /* No saved tags - clear active tags so show all categories when filter is enabled. */
+      state.active_tags[0] = '\0';
     }
 
     /* Restore last active category for this tag combination. */

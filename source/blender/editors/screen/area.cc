@@ -3838,9 +3838,18 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
     ui::view2d_mask_from_win(v2d, &mask);
     /* Get zoom based on display mode. */
     const float category_tabs_zoom_local = ED_category_tabs_zoom_get(area);
+
+    /* Check if vertical scrollbar is actually needed (content exceeds visible area).
+     * Only apply visual effect margin when scrollbar is visible to avoid
+     * unnecessary spacing when there's no scrollbar. */
+    const bool needs_vertical_scroll = (v2d->scroll & V2D_SCROLL_VERTICAL) &&
+                                       (BLI_rctf_size_y(&v2d->tot) > BLI_rctf_size_y(&v2d->cur));
+    const float visual_effect_margin = (U.category_tabs_visual_effect && needs_vertical_scroll) ?
+                                        UI_TABS_VISUAL_EFFECT_MARGIN : 1.0f;
     const int category_width = round_fl_to_int(ui::view2d_scale_get_x(&region->v2d) *
                                                UI_PANEL_CATEGORY_MARGIN_WIDTH *
-                                               category_tabs_zoom_local);
+                                               category_tabs_zoom_local *
+                                               visual_effect_margin);
     if (alignment == RGN_ALIGN_RIGHT) {
       mask.xmax -= category_width;
     }

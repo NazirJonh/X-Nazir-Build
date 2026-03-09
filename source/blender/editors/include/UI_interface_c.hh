@@ -445,7 +445,18 @@ enum {
 /** Total width of Toolbar showing one icon column. */
 #define UI_TOOLBAR_WIDTH UI_TOOLBAR_MARGIN + UI_TOOLBAR_COLUMN
 
+/* Category tabs margin width with extra space for visual effect scaling.
+ * The 1.1f multiplier provides room for tab hover/active scaling without
+ * overlapping panel content. */
 #define UI_PANEL_CATEGORY_MARGIN_WIDTH (U.widget_unit * 1.0f)
+
+/* Scale factor for tab visual effect (hover/active expansion). */
+#define UI_TABS_VISUAL_EFFECT_SCALE 1.2f
+
+/* Scale factor for panel/scrollbar margin when visual effect is enabled.
+ * This can be adjusted independently to fine-tune the spacing.
+ * Lower values = less margin, higher values = more margin. */
+#define UI_TABS_VISUAL_EFFECT_MARGIN 1.15f
 
 /* Minimum width for a panel showing only category tabs. */
 #define UI_PANEL_CATEGORY_MIN_WIDTH 26.0f

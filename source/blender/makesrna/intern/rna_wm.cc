@@ -2465,6 +2465,7 @@ static const EnumPropertyItem rna_enum_category_tag_filter_mode_items[] = {
     {8, "POSE_MODE", ICON_POSE_HLT, "Pose Mode", "Show tags for Pose Mode"},
     {9, "GEOMETRY_NODES", ICON_NODETREE, "Geometry Nodes", "Show tags for Geometry Nodes"},
     {10, "SHADER_EDITOR", ICON_MATERIAL, "Shader Editor", "Show tags for Shader Editor"},
+    {11, "IMAGE_PAINT", ICON_TPAINT_HLT, "Image Paint", "Show tags for Image Paint (2D)"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

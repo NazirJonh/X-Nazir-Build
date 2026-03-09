@@ -100,7 +100,7 @@ static bool category_name_is_glyph(const char *category_id);
 #define TABS_BG_BRIGHTEN_BASE 0.0f
 #define TABS_BG_BRIGHTEN_HOVER 0.05f
 
-#define TABS_VISUAL_EFFECT_SCALE 1.2f
+/* Use UI_UI_TABS_VISUAL_EFFECT_SCALE from UI_interface_c.hh */
 
 /** \} */
 
@@ -2835,7 +2835,7 @@ void panel_category_tabs_draw_settings_button(const bContext *C,
   /* Apply visual effect scale when hovering over the settings button itself.
    * This ensures the glyph only scales when the cursor is actually over the button,
    * not when hovering over the last tab. */
-  const float visual_effect_scale = is_hover ? TABS_VISUAL_EFFECT_SCALE : 1.0f;
+  const float visual_effect_scale = is_hover ? UI_TABS_VISUAL_EFFECT_SCALE : 1.0f;
   BLF_size(fontid, fstyle_points * UI_SCALE_FAC * zoom * visual_effect_scale);
 
   rctf box_rect;
@@ -3857,9 +3857,9 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       if (is_active || is_hover) {
         is_visual_effect_active = true;
 
-        /* Vertical expansion: scale height by TABS_VISUAL_EFFECT_SCALE (1.2) */
+        /* Vertical expansion: scale height by UI_TABS_VISUAL_EFFECT_SCALE (1.2) */
         const int tab_height = rct->ymax - rct->ymin;
-        const int expanded_height = round_fl_to_int(tab_height * TABS_VISUAL_EFFECT_SCALE);
+        const int expanded_height = round_fl_to_int(tab_height * UI_TABS_VISUAL_EFFECT_SCALE);
         const int extra_height = expanded_height - tab_height;
 
         /* Distribute extra height equally: half up, half down */
@@ -3872,7 +3872,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
         /* Horizontal expansion: expand away from the panel edge */
         const int tab_width = rct->xmax - rct->xmin;
-        const int expanded_width = round_fl_to_int(tab_width * TABS_VISUAL_EFFECT_SCALE);
+        const int expanded_width = round_fl_to_int(tab_width * UI_TABS_VISUAL_EFFECT_SCALE);
         const int extra_width = expanded_width - tab_width;
 
         if (is_left) {
@@ -3945,7 +3945,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
     float current_category_tabs_zoom = category_tabs_zoom;
     if (is_visual_effect_active) {
-      current_category_tabs_zoom *= TABS_VISUAL_EFFECT_SCALE;
+      current_category_tabs_zoom *= UI_TABS_VISUAL_EFFECT_SCALE;
     }
 
     ui_panel_category_draw_content(region,

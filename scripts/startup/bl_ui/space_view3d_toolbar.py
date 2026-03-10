@@ -823,6 +823,35 @@ class VIEW3D_PT_tools_mask_texture(Panel, View3DPaintPanel, TextureMaskPanel):
         brush_mask_texture_settings(col, brush)
 
 
+class VIEW3D_PT_tools_sculpt_color_texture(Panel, View3DPaintPanel):
+    """Panel for color texture in Sculpt mode (uses mask_texture_slot)."""
+    bl_context = ".sculpt_mode"  # Sculpt mode only
+    bl_parent_id = "VIEW3D_PT_tools_brush_settings"
+    bl_label = "Color Texture"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_ui_units_x = 13
+
+    @classmethod
+    def poll(cls, context):
+        if not cls.paint_settings(context):
+            return False
+        return context.sculpt_object is not None
+
+    def draw(self, context):
+        layout = self.layout
+        brush = context.tool_settings.sculpt.brush
+        if brush is None:
+            return
+
+        # Use mask_texture_slot for color in Sculpt mode
+        mask_tex_slot = brush.mask_texture_slot
+
+        col = layout.column()
+        col.template_ID_preview(mask_tex_slot, "texture", new="texture.new", rows=3, cols=8)
+
+        brush_mask_texture_settings(col, brush)
+
+
 class VIEW3D_PT_tools_brush_stroke(Panel, View3DPaintPanel, StrokePanel):
     bl_context = ".paint_common"  # dot on purpose (access from topbar)
     bl_label = "Stroke"
@@ -2364,6 +2393,7 @@ classes = (
     VIEW3D_MT_tools_projectpaint_uvlayer,
     VIEW3D_PT_tools_brush_texture,
     VIEW3D_PT_tools_mask_texture,
+    VIEW3D_PT_tools_sculpt_color_texture,
     VIEW3D_PT_tools_brush_stroke,
     VIEW3D_PT_tools_brush_stroke_smooth_stroke,
     VIEW3D_PT_tools_brush_falloff,

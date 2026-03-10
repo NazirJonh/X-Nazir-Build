@@ -20,6 +20,8 @@
 #include "BLI_set.hh"
 #include "BLI_math_color_blend.h"
 #include "BLI_math_geom.h"
+#include "BLI_math_matrix.h"
+#include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_simd.hh"
 #include "BLI_time.h"
@@ -55,6 +57,7 @@
 #include <type_traits>
 
 #include "BLI_enumerable_thread_specific.hh"
+#include "BLI_task.h"
 #include "BLI_task.hh"
 
 namespace blender {
@@ -448,6 +451,74 @@ static void calc_pixel_row_positions(const Span<float3> vert_positions,
   }
 }
 
+/**
+ * Sample the brush's color texture (brush->mask_mtex for Sculpt mode) for RGBA values.
+ * Unlike mask texture, color texture affects the brush color rather than falloff.
+ */
+static void calc_brush_color_texture(const SculptSession &ss,
+                                     const Brush &brush,
+                                     const Span<float3> positions,
+                                     const MutableSpan<float4> r_colors)
+{
+  BLI_assert(positions.size() == r_colors.size());
+
+  const int thread_id = BLI_task_parallel_thread_id(nullptr);
+  const MTex *mtex = BKE_brush_color_texture_get(&brush, OB_MODE_SCULPT);
+  if (!mtex->tex) {
+    r_colors.fill(float4(1.0f, 1.0f, 1.0f, 1.0f));
+    return;
+  }
+
+  const ed::sculpt_paint::StrokeCache &cache = *ss.cache;
+
+  for (const int i : positions.index_range()) {
+    float texture_value;
+    float4 texture_rgba;
+
+    float point[3];
+    sub_v3_v3v3(point, positions[i], cache.plane_offset);
+
+    if (mtex->brush_map_mode == MTEX_MAP_MODE_3D) {
+      texture_value = BKE_brush_sample_tex_3d(
+          cache.paint, &brush, mtex, point, texture_rgba, thread_id, ss.tex_pool);
+    }
+    else {
+      if (cache.radial_symmetry_pass) {
+        mul_m4_v3(cache.symm_rot_mat_inv.ptr(), point);
+      }
+      float3 symm_point = ed::sculpt_paint::symmetry_flip(point, cache.mirror_symmetry_pass);
+
+      if (mtex->brush_map_mode == MTEX_MAP_MODE_AREA) {
+        mul_m4_v3(cache.brush_local_mat.ptr(), symm_point);
+
+        float x = symm_point[0];
+        float y = symm_point[1];
+
+        x *= mtex->size[0];
+        y *= mtex->size[1];
+
+        x += mtex->ofs[0];
+        y += mtex->ofs[1];
+
+        paint_get_tex_pixel(mtex, x, y, ss.tex_pool, thread_id, &texture_value, texture_rgba);
+
+        add_v3_fl(texture_rgba, brush.texture_sample_bias);
+        texture_value -= brush.texture_sample_bias;
+      }
+      else {
+        const float2 point_2d = ED_view3d_project_float_v2_m4(
+            cache.vc->region, symm_point, cache.projection_mat);
+        const float point_3d[3] = {point_2d[0], point_2d[1], 0.0f};
+        texture_value = BKE_brush_sample_tex_3d(
+            cache.paint, &brush, mtex, point_3d, texture_rgba, thread_id, ss.tex_pool);
+      }
+    }
+
+    /* Store texture color. Alpha channel contains the texture alpha for mask modulation. */
+    r_colors[i] = texture_rgba;
+  }
+}
+
 static void apply_hardness_to_squared_distances(const StrokeCache &cache,
                                                 MutableSpan<float> distances)
 {
@@ -755,6 +826,66 @@ template<typename ImageBuffer> class PaintingKernel {
                  last_positive);
   }
 
+  /**
+   * Paint with color texture support.
+   * The texture_colors are used to modify the brush color per-pixel.
+   */
+  bool paint_with_texture_colors(const Brush &brush,
+                                  const PackedPixelRow &pixel_row,
+                                  const Span<float> factors,
+                                  const Span<float4> texture_colors,
+                                  ImBuf *image_buffer,
+                                  const int first_positive,
+                                  const int last_positive)
+  {
+    if (first_positive == -1) {
+      return false;
+    }
+
+    const float brush_alpha = brush.alpha;
+    const IMB_BlendMode blend_mode = static_cast<IMB_BlendMode>(brush.blend);
+
+    ushort2 image_start = pixel_row.start_image_coordinate;
+    image_start.x = ushort(int(image_start.x) + first_positive);
+
+    image_accessor_.set_image_position(image_buffer, image_start);
+    bool pixels_painted = false;
+    for (int x = first_positive; x <= last_positive; x++) {
+      const float factor = factors[x];
+      if (factor <= 0.0f) {
+        image_accessor_.next_pixel();
+        continue;
+      }
+
+      const float4 &tex_color = texture_colors[x];
+      float4 color = image_accessor_.read_pixel(image_buffer);
+
+      /* Multiply brush color by texture color (RGB) and apply texture alpha to factor. */
+      float4 textured_brush_color = brush_color_ * float4(tex_color[0], tex_color[1], tex_color[2], 1.0f);
+      float textured_factor = factor * tex_color[3];
+
+      float4 paint_color = textured_brush_color * textured_factor;
+      float4 buffer_color;
+
+#ifdef DEBUG_PIXEL_NODES
+      if ((pixel_row.start_image_coordinate.y >> 3) & 1) {
+        paint_color[0] *= 0.5f;
+        paint_color[1] *= 0.5f;
+        paint_color[2] *= 0.5f;
+      }
+#endif
+
+      blend_color_mix_float(buffer_color, color, paint_color);
+      buffer_color *= brush_alpha;
+      IMB_blend_color_float(color, color, buffer_color, blend_mode);
+      image_accessor_.write_pixel(image_buffer, color);
+      pixels_painted = true;
+
+      image_accessor_.next_pixel();
+    }
+    return pixels_painted;
+  }
+
   void init_brush_color(ImBuf *image_buffer, float in_brush_color[3])
   {
     const char *to_colorspace = image_accessor_.get_colorspace_name(image_buffer);
@@ -870,9 +1001,11 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
   Vector<float3> pixel_positions;
   Vector<float> factors;
   Vector<float> distances;
+  Vector<float4> texture_colors;
   const eBrushFalloffShape falloff_shape = eBrushFalloffShape(brush.falloff_shape);
   const bool use_spherical_row_cull = (brush.falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE);
   const bool use_brush_texture = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT)->tex != nullptr;
+  const bool use_color_texture = BKE_brush_color_texture_get(&brush, OB_MODE_SCULPT)->tex != nullptr;
   Vector<int8_t> primitive_sphere_cull_state;
   if (use_spherical_row_cull) {
     primitive_sphere_cull_state.resize(node_data.uv_primitives.size());
@@ -973,6 +1106,9 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
       if (use_brush_texture && pixel_positions.capacity() < row_pixels_num) {
         pixel_positions.reserve(row_pixels_num);
       }
+      if (use_color_texture && texture_colors.capacity() < row_pixels_num) {
+        texture_colors.reserve(row_pixels_num);
+      }
 
       const double row_strength_start =
           (r_paint_telemetry != nullptr) ? BLI_time_now_seconds() : 0.0;
@@ -1012,6 +1148,12 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
           telemetry_counter_add(r_paint_telemetry->pre_texture_time_us,
                                 int64_t((BLI_time_now_seconds() - row_texture_start) * 1.0e6));
         }
+
+        /* Sample color texture if enabled. */
+        if (use_color_texture) {
+          texture_colors.resize(pixel_row.num_pixels);
+          calc_brush_color_texture(ss, brush, pixel_positions, texture_colors);
+        }
       }
       else {
         if (!row_linear_is_valid) {
@@ -1021,6 +1163,15 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
         }
         calc_brush_strength_distances_no_texture_row_linear(
             ss, cache, brush, falloff_shape, bstrength, row_linear, row_distances, row_factors);
+
+        /* Sample color texture if enabled (no mask texture, but color texture present). */
+        if (use_color_texture) {
+          pixel_positions.resize(pixel_row.num_pixels);
+          calc_pixel_row_positions(
+              positions, pbvh_data.vert_tris, node_data.uv_primitives, pixel_row, pixel_positions);
+          texture_colors.resize(pixel_row.num_pixels);
+          calc_brush_color_texture(ss, brush, pixel_positions, texture_colors);
+        }
       }
       if (r_paint_telemetry != nullptr) {
         telemetry_counter_add(r_paint_telemetry->pre_strength_time_us,
@@ -1096,12 +1247,24 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
       const double row_kernel_start =
           (r_paint_telemetry != nullptr) ? BLI_time_now_seconds() : 0.0;
       if (image_buffer->float_buffer.data != nullptr) {
-        pixels_painted = kernel_float4.paint(
-            brush, pixel_row, row_factors, image_buffer, first_positive, last_positive);
+        if (use_color_texture) {
+          pixels_painted = kernel_float4.paint_with_texture_colors(
+              brush, pixel_row, row_factors, texture_colors, image_buffer, first_positive, last_positive);
+        }
+        else {
+          pixels_painted = kernel_float4.paint(
+              brush, pixel_row, row_factors, image_buffer, first_positive, last_positive);
+        }
       }
       else {
-        pixels_painted = kernel_byte4.paint(
-            brush, pixel_row, row_factors, image_buffer, first_positive, last_positive);
+        if (use_color_texture) {
+          pixels_painted = kernel_byte4.paint_with_texture_colors(
+              brush, pixel_row, row_factors, texture_colors, image_buffer, first_positive, last_positive);
+        }
+        else {
+          pixels_painted = kernel_byte4.paint(
+              brush, pixel_row, row_factors, image_buffer, first_positive, last_positive);
+        }
       }
       if (r_paint_telemetry != nullptr) {
         telemetry_counter_add(r_paint_telemetry->kernel_time_us,
@@ -1167,9 +1330,11 @@ static bool do_paint_pixels_for_node_tile(const SculptSession &ss,
   Vector<float3> pixel_positions;
   Vector<float> factors;
   Vector<float> distances;
+  Vector<float4> texture_colors;
   const eBrushFalloffShape falloff_shape = eBrushFalloffShape(brush.falloff_shape);
   const bool use_spherical_row_cull = (brush.falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE);
   const bool use_brush_texture = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT)->tex != nullptr;
+  const bool use_color_texture = BKE_brush_color_texture_get(&brush, OB_MODE_SCULPT)->tex != nullptr;
   bool kernel_initialized = false;
   float4 brush_color;
   Vector<int8_t> primitive_sphere_cull_state;
@@ -1261,6 +1426,9 @@ static bool do_paint_pixels_for_node_tile(const SculptSession &ss,
     if (use_brush_texture && pixel_positions.capacity() < row_pixels_num) {
       pixel_positions.reserve(row_pixels_num);
     }
+    if (use_color_texture && texture_colors.capacity() < row_pixels_num) {
+      texture_colors.reserve(row_pixels_num);
+    }
 
     const double row_strength_start =
         (r_paint_telemetry != nullptr) ? BLI_time_now_seconds() : 0.0;
@@ -1299,6 +1467,12 @@ static bool do_paint_pixels_for_node_tile(const SculptSession &ss,
         telemetry_counter_add(r_paint_telemetry->pre_texture_time_us,
                               int64_t((BLI_time_now_seconds() - row_texture_start) * 1.0e6));
       }
+
+      /* Sample color texture if enabled. */
+      if (use_color_texture) {
+        texture_colors.resize(pixel_row.num_pixels);
+        calc_brush_color_texture(ss, brush, pixel_positions, texture_colors);
+      }
     }
     else {
       if (!row_linear_is_valid) {
@@ -1308,6 +1482,15 @@ static bool do_paint_pixels_for_node_tile(const SculptSession &ss,
       }
       calc_brush_strength_distances_no_texture_row_linear(
           ss, cache, brush, falloff_shape, bstrength, row_linear, row_distances, row_factors);
+
+      /* Sample color texture if enabled (no mask texture, but color texture present). */
+      if (use_color_texture) {
+        pixel_positions.resize(pixel_row.num_pixels);
+        calc_pixel_row_positions(
+            positions, pbvh_data.vert_tris, node_data.uv_primitives, pixel_row, pixel_positions);
+        texture_colors.resize(pixel_row.num_pixels);
+        calc_brush_color_texture(ss, brush, pixel_positions, texture_colors);
+      }
     }
     if (r_paint_telemetry != nullptr) {
       telemetry_counter_add(r_paint_telemetry->pre_strength_time_us,
@@ -1368,12 +1551,24 @@ static bool do_paint_pixels_for_node_tile(const SculptSession &ss,
     const double row_kernel_start =
         (r_paint_telemetry != nullptr) ? BLI_time_now_seconds() : 0.0;
     if (image_buffer.float_buffer.data != nullptr) {
-      pixels_painted = kernel_float4.paint(
-          brush, pixel_row, row_factors, &image_buffer, first_positive, last_positive);
+      if (use_color_texture) {
+        pixels_painted = kernel_float4.paint_with_texture_colors(
+            brush, pixel_row, row_factors, texture_colors, &image_buffer, first_positive, last_positive);
+      }
+      else {
+        pixels_painted = kernel_float4.paint(
+            brush, pixel_row, row_factors, &image_buffer, first_positive, last_positive);
+      }
     }
     else {
-      pixels_painted = kernel_byte4.paint(
-          brush, pixel_row, row_factors, &image_buffer, first_positive, last_positive);
+      if (use_color_texture) {
+        pixels_painted = kernel_byte4.paint_with_texture_colors(
+            brush, pixel_row, row_factors, texture_colors, &image_buffer, first_positive, last_positive);
+      }
+      else {
+        pixels_painted = kernel_byte4.paint(
+            brush, pixel_row, row_factors, &image_buffer, first_positive, last_positive);
+      }
     }
     if (r_paint_telemetry != nullptr) {
       telemetry_counter_add(r_paint_telemetry->kernel_time_us,

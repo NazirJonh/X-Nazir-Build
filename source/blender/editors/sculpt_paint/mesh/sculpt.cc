@@ -5042,6 +5042,12 @@ static void brush_init_tex(const Sculpt &sd, SculptSession &ss)
     ntreeTexBeginExecTree(mask_tex->tex->nodetree);
   }
 
+  /* Init color texture nodes for image painting. */
+  const MTex *color_tex = BKE_brush_color_texture_get(brush, OB_MODE_SCULPT);
+  if (color_tex->tex && color_tex->tex->nodetree) {
+    ntreeTexBeginExecTree(color_tex->tex->nodetree);
+  }
+
   if (ss.tex_pool == nullptr) {
     ss.tex_pool = BKE_image_pool_new();
   }

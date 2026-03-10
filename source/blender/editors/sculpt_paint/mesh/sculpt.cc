@@ -65,6 +65,7 @@
 #include "BKE_subdiv_ccg.hh"
 #include "BLI_math_rotation_legacy.hh"
 #include "BLI_math_vector.hh"
+#include <optional>
 
 #include "BLT_translation.hh"
 
@@ -2815,7 +2816,9 @@ static bool sculpt_needs_pbvh_pixels(PaintModeSettings &paint_mode_settings,
 
 static void sculpt_pbvh_update_pixels(const Depsgraph &depsgraph,
                                       PaintModeSettings &paint_mode_settings,
-                                      Object &ob)
+                                      Object &ob,
+                                      const Brush *brush,
+                                      const Paint *paint)
 {
   BLI_assert(ob.type == OB_MESH);
 
@@ -2825,7 +2828,29 @@ static void sculpt_pbvh_update_pixels(const Depsgraph &depsgraph,
     return;
   }
 
-  bke::pbvh::build_pixels(depsgraph, ob, *image, *image_user);
+  std::optional<float2> brush_pos_ss;
+  float brush_radius_ss = 0.0f;
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  if (brush && paint && ss.cache && image != nullptr) {
+    float2 brush_pos_ndc(0.0f);
+    float4 brush_loc_h{ss.cache->location.x, ss.cache->location.y, ss.cache->location.z, 1.0f};
+    float4 projected = ss.cache->projection_mat * brush_loc_h;
+    if (projected.w != 0.0f) {
+      brush_pos_ndc.x = (projected.x / projected.w + 1.0f) * 0.5f;
+      brush_pos_ndc.y = (projected.y / projected.w + 1.0f) * 0.5f;
+      int image_width, image_height;
+      BKE_image_get_size(image, image_user, &image_width, &image_height);
+      if (image_width > 0 && image_height > 0) {
+        brush_pos_ss = float2(brush_pos_ndc.x * float(image_width),
+                              brush_pos_ndc.y * float(image_height));
+      }
+    }
+    const float brush_radius = BKE_brush_size_get(paint, brush) * 0.5f;
+    if (brush_radius > 0.0f) {
+      brush_radius_ss = brush_radius;
+    }
+  }
+  bke::pbvh::build_pixels(depsgraph, ob, *image, *image_user, brush_pos_ss, brush_radius_ss);
 }
 
 /** \} */
@@ -3266,7 +3291,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
   const bool use_pixels = sculpt_needs_pbvh_pixels(paint_mode_settings, brush, ob);
 
   if (sculpt_needs_pbvh_pixels(paint_mode_settings, brush, ob)) {
-    sculpt_pbvh_update_pixels(depsgraph, paint_mode_settings, ob);
+    sculpt_pbvh_update_pixels(depsgraph, paint_mode_settings, ob, &brush, &sd.paint);
 
     texnode_mask = pbvh_gather_texpaint(ob, brush, use_original, 1.0f, memory);
 

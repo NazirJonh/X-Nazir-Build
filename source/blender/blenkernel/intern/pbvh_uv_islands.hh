@@ -303,6 +303,19 @@ struct UVIsland {
    */
   Map<int64_t, Vector<UVVertex *>> uv_vertex_lookup;
 
+  /**
+   * Small LRU cache for recent vertex lookups to avoid repeated Map lookups.
+   * This provides O(1) lookup for recently accessed vertices.
+   */
+  static constexpr int kVertexLookupCacheSize = 16;
+  struct CachedVertexLookup {
+    int vertex_index;
+    float2 uv;
+    UVVertex *result;
+  };
+  CachedVertexLookup recent_vertex_lookups[kVertexLookupCacheSize];
+  int recent_lookup_index;
+
   UVVertex *lookup(const UVVertex &vertex);
   UVVertex *lookup_or_create(const UVVertex &vertex);
   UVEdge *lookup(const UVEdge &edge);
@@ -378,6 +391,74 @@ struct UVIslandsMask {
   void add(const MeshData &mesh_data, const UVIslands &islands);
 
   void dilate(int max_iterations);
+};
+
+/**
+ * Cache for UV island data to avoid recomputation when mesh/UV hasn't changed.
+ * This provides significant performance improvement for repeated painting operations.
+ *
+ * We cache the uv_island_ids array from MeshData, which is copyable and represents
+ * the expensive part of UV island extraction (the BFS to find connected primitives).
+ */
+class UVIslandCache {
+ public:
+  struct CacheEntry {
+    /** Hash of the mesh topology (corner_tris, corner_verts). */
+    uint64_t topology_hash;
+    /** Hash of the UV map. */
+    uint64_t uv_map_hash;
+    /** Number of primitives for validation. */
+    int64_t primitive_count;
+    /** Cached UV island IDs - this is the expensive part to compute */
+    Array<int> uv_island_ids;
+    /** Number of islands found */
+    int64_t uv_island_count;
+  };
+
+ private:
+  /**
+   * Cache entry storing hash values and the expensive-to-compute island IDs.
+   */
+  static CacheEntry *cached_entry_;
+
+  /**
+   * Compute hash from mesh topology.
+   */
+  static uint64_t compute_topology_hash(const MeshData &mesh_data);
+
+  /**
+   * Compute hash from UV map.
+   */
+  static uint64_t compute_uv_map_hash(const MeshData &mesh_data);
+
+ public:
+  UVIslandCache() = delete;
+
+  /**
+   * Get cached UV island IDs or compute new ones if cache is invalid.
+   * This is the main entry point - it returns cached data if available.
+   */
+  static bool get_cached_island_ids(const MeshData &mesh_data, Array<int> &r_uv_island_ids, int64_t &r_island_count);
+
+  /**
+   * Store computed island IDs in cache.
+   */
+  static void store_island_ids(const MeshData &mesh_data, const Array<int> &uv_island_ids, int64_t island_count);
+
+  /**
+   * Invalidate the cache. Call this when mesh topology or UV changes.
+   */
+  static void invalidate();
+
+  /**
+   * Check if cache is valid for given mesh data.
+   */
+  static bool is_cache_valid(const MeshData &mesh_data);
+
+  /**
+   * Get statistics about cache (for debugging/telemetry).
+   */
+  static bool is_cache_populated();
 };
 
 }  // namespace blender::bke::pbvh::uv_islands

@@ -11,6 +11,7 @@
 
 #include "pbvh_uv_islands.hh"
 
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -310,14 +311,29 @@ UVVertex *UVEdge::get_other_uv_vertex(const int vertex)
  * \{ */
 UVVertex *UVIsland::lookup(const UVVertex &vertex)
 {
+  /* Check LRU cache first for O(1) lookup */
   const int vert_index = vertex.vertex;
-  const Vector<UVVertex *> &vertices = uv_vertex_lookup.lookup_or_add_default(vert_index);
-  for (UVVertex *v : vertices) {
-    if (v->uv == vertex.uv) {
-      return v;
+  for (const auto &cached : recent_vertex_lookups) {
+    if (cached.vertex_index == vert_index && cached.uv == vertex.uv) {
+      return cached.result;
     }
   }
-  return nullptr;
+
+  /* Fall back to Map lookup */
+  const Vector<UVVertex *> &vertices = uv_vertex_lookup.lookup_or_add_default(vert_index);
+  UVVertex *result = nullptr;
+  for (UVVertex *v : vertices) {
+    if (v->uv == vertex.uv) {
+      result = v;
+      break;
+    }
+  }
+
+  /* Update LRU cache */
+  recent_vertex_lookups[recent_lookup_index] = {vert_index, vertex.uv, result};
+  recent_lookup_index = (recent_lookup_index + 1) % kVertexLookupCacheSize;
+
+  return result;
 }
 
 UVVertex *UVIsland::lookup_or_create(const UVVertex &vertex)
@@ -1527,23 +1543,25 @@ static void add_uv_island(const MeshData &mesh_data,
         ceil((uv_bounds.ymax - tile.udim_offset.y) * tile.mask_resolution.y),
         tile.mask_resolution.y - 1);
 
-    for (int y = buffer_bounds.ymin; y < buffer_bounds.ymax + 1; y++) {
-      for (int x = buffer_bounds.xmin; x < buffer_bounds.xmax + 1; x++) {
-        float2 uv(float(x) / tile.mask_resolution.x, float(y) / tile.mask_resolution.y);
-        float3 weights;
-        barycentric_weights_v2(mesh_data.uv_map[tri[0]],
-                               mesh_data.uv_map[tri[1]],
-                               mesh_data.uv_map[tri[2]],
-                               uv + tile.udim_offset,
-                               weights);
-        if (!barycentric_inside_triangle_v2(weights)) {
-          continue;
-        }
+        for (int y = buffer_bounds.ymin; y < buffer_bounds.ymax + 1; y++) {
+          for (int x = buffer_bounds.xmin; x < buffer_bounds.xmax + 1; x++) {
+            float2 uv(float(x) / tile.mask_resolution.x, float(y) / tile.mask_resolution.y);
+            float3 weights;
+            barycentric_weights_v2(mesh_data.uv_map[tri[0]],
+                                   mesh_data.uv_map[tri[1]],
+                                   mesh_data.uv_map[tri[2]],
+                                   uv + tile.udim_offset,
+                                   weights);
+            if (!barycentric_inside_triangle_v2(weights)) {
+              continue;
+            }
 
-        uint64_t offset = tile.mask_resolution.x * y + x;
-        tile.mask[offset] = island_index;
-      }
-    }
+            uint64_t offset = tile.mask_resolution.x * y + x;
+            if (tile.mask[offset] == 0xffff) {
+              tile.mask[offset] = island_index;
+            }
+          }
+        }
   }
 }
 
@@ -1659,6 +1677,150 @@ bool UVIslandsMask::is_masked(const uint16_t island_index, const float2 uv) cons
     return false;
   }
   return tile->is_masked(island_index, uv);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name UVIslandCache Implementation
+ * \{ */
+
+/**
+ * Simple hash combination function.
+ */
+static uint64_t hash_combine(uint64_t h1, uint64_t h2)
+{
+  return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+}
+
+/**
+ * Compute a hash from mesh topology (corner_tris and corner_verts).
+ */
+uint64_t UVIslandCache::compute_topology_hash(const MeshData &mesh_data)
+{
+  uint64_t hash = 0;
+
+  /* Hash corner_tris */
+  for (const int3 &tri : mesh_data.corner_tris) {
+    hash = hash_combine(hash, static_cast<uint64_t>(tri[0]));
+    hash = hash_combine(hash, static_cast<uint64_t>(tri[1]));
+    hash = hash_combine(hash, static_cast<uint64_t>(tri[2]));
+  }
+
+  /* Hash corner_verts */
+  for (const int vert : mesh_data.corner_verts) {
+    hash = hash_combine(hash, static_cast<uint64_t>(vert));
+  }
+
+  return hash;
+}
+
+/**
+ * Compute a hash from UV map.
+ */
+uint64_t UVIslandCache::compute_uv_map_hash(const MeshData &mesh_data)
+{
+  uint64_t hash = 0;
+
+  /* Hash UV coordinates - use a subset for performance */
+  const int step = std::max(1, int(mesh_data.uv_map.size()) / 1024);
+  for (int i = 0; i < mesh_data.uv_map.size(); i += step) {
+    const float2 &uv = mesh_data.uv_map[i];
+    /* Combine hash of float2 by hashing both components */
+    uint64_t uv_hash = static_cast<uint64_t>(std::hash<float>{}(uv.x));
+    uv_hash = hash_combine(uv_hash, static_cast<uint64_t>(std::hash<float>{}(uv.y)));
+    hash = hash_combine(hash, uv_hash);
+  }
+
+  return hash;
+}
+
+/* Static member initialization */
+UVIslandCache::CacheEntry *UVIslandCache::cached_entry_ = nullptr;
+
+bool UVIslandCache::get_cached_island_ids(const MeshData &mesh_data, 
+                                           Array<int> &r_uv_island_ids, 
+                                           int64_t &r_island_count)
+{
+  /* Check if cache is valid */
+  if (cached_entry_ != nullptr) {
+    uint64_t current_topology_hash = compute_topology_hash(mesh_data);
+    uint64_t current_uv_map_hash = compute_uv_map_hash(mesh_data);
+
+    printf("[DEBUG CACHE] topology_hash: old=%llu new=%llu %s\n",
+           (unsigned long long)cached_entry_->topology_hash,
+           (unsigned long long)current_topology_hash,
+           cached_entry_->topology_hash == current_topology_hash ? "MATCH" : "DIFF");
+    printf("[DEBUG CACHE] uv_map_hash: old=%llu new=%llu %s\n",
+           (unsigned long long)cached_entry_->uv_map_hash,
+           (unsigned long long)current_uv_map_hash,
+           cached_entry_->uv_map_hash == current_uv_map_hash ? "MATCH" : "DIFF");
+    printf("[DEBUG CACHE] primitive_count: old=%lld new=%lld %s\n",
+           (long long)cached_entry_->primitive_count,
+           (long long)mesh_data.corner_tris.size(),
+           cached_entry_->primitive_count == mesh_data.corner_tris.size() ? "MATCH" : "DIFF");
+
+    if (cached_entry_->topology_hash == current_topology_hash &&
+        cached_entry_->uv_map_hash == current_uv_map_hash &&
+        cached_entry_->primitive_count == mesh_data.corner_tris.size()) {
+      /* Cache hit - return cached island IDs */
+      r_uv_island_ids = cached_entry_->uv_island_ids;
+      r_island_count = cached_entry_->uv_island_count;
+      printf("[DEBUG CACHE] CACHE HIT! Returning %d islands\n", (int)r_island_count);
+      return true;
+    }
+
+    /* Cache invalid - free old entry */
+    printf("[DEBUG CACHE] CACHE MISS - invalidating\n");
+    delete cached_entry_;
+    cached_entry_ = nullptr;
+  }
+  else {
+    printf("[DEBUG CACHE] No cache entry exists\n");
+  }
+
+  /* Cache miss - caller will compute and then call store_island_ids */
+  return false;
+}
+
+void UVIslandCache::store_island_ids(const MeshData &mesh_data, 
+                                      const Array<int> &uv_island_ids, 
+                                      int64_t island_count)
+{
+  /* Create new cache entry */
+  cached_entry_ = new CacheEntry();
+  cached_entry_->topology_hash = compute_topology_hash(mesh_data);
+  cached_entry_->uv_map_hash = compute_uv_map_hash(mesh_data);
+  cached_entry_->primitive_count = mesh_data.corner_tris.size();
+  cached_entry_->uv_island_ids = uv_island_ids;
+  cached_entry_->uv_island_count = island_count;
+}
+
+void UVIslandCache::invalidate()
+{
+  if (cached_entry_ != nullptr) {
+    delete cached_entry_;
+    cached_entry_ = nullptr;
+  }
+}
+
+bool UVIslandCache::is_cache_valid(const MeshData &mesh_data)
+{
+  if (cached_entry_ == nullptr) {
+    return false;
+  }
+
+  uint64_t current_topology_hash = compute_topology_hash(mesh_data);
+  uint64_t current_uv_map_hash = compute_uv_map_hash(mesh_data);
+
+  return cached_entry_->topology_hash == current_topology_hash &&
+         cached_entry_->uv_map_hash == current_uv_map_hash &&
+         cached_entry_->primitive_count == mesh_data.corner_tris.size();
+}
+
+bool UVIslandCache::is_cache_populated()
+{
+  return cached_entry_ != nullptr;
 }
 
 /** \} */

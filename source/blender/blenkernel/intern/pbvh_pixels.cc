@@ -15,6 +15,10 @@
 #include "BLI_listbase.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
+#include "BLI_set.hh"
+
+#include <unordered_map>
+#include <optional>
 
 #include "BKE_image_wrappers.hh"
 #include "BKE_paint.hh"
@@ -71,6 +75,9 @@ static void extract_barycentric_pixels(UDIMTilePixels &tile_data,
                                        const int maxx,
                                        const int maxy)
 {
+  int pixel_rows_count = 0;
+  int total_pixels = 0;
+
   for (int y = miny; y < maxy; y++) {
     bool start_detected = false;
     PackedPixelRow pixel_row;
@@ -100,6 +107,15 @@ static void extract_barycentric_pixels(UDIMTilePixels &tile_data,
     }
     pixel_row.num_pixels = x - pixel_row.start_image_coordinate.x;
     tile_data.pixel_rows.append(pixel_row);
+    pixel_rows_count++;
+    total_pixels += pixel_row.num_pixels;
+  }
+
+  if (pixel_rows_count > 0) {
+    printf("[DEBUG PIXELS] uv_prim=%d, island=%d: extracted %d pixel rows, %d total pixels "
+           "(bounds: x[%d,%d] y[%d,%d])\n",
+           uv_primitive_index, uv_island_index, pixel_rows_count, total_pixels,
+           minx, maxx, miny, maxy);
   }
 }
 
@@ -136,6 +152,29 @@ struct UVPrimitiveLookup {
       }
       uv_island_index++;
     }
+
+    /* DEBUG: Print lookup statistics */
+    printf("[DEBUG LOOKUP] UVPrimitiveLookup created:\n");
+    int total_entries = 0;
+    int max_entries = 0;
+    int tri_with_multiple = 0;
+    for (uint64_t tri = 0; tri < geom_primitive_len; tri++) {
+      int count = lookup[tri].size();
+      total_entries += count;
+      if (count > 1) {
+        tri_with_multiple++;
+        printf("[DEBUG LOOKUP]   tri=%d has %d UV primitives:\n", (int)tri, count);
+        for (int i = 0; i < count; i++) {
+          printf("[DEBUG LOOKUP]     [%d] uv_prim=%p, island=%d\n",
+                 i, lookup[tri][i].uv_primitive, (int)lookup[tri][i].uv_island_index);
+        }
+      }
+      if (count > max_entries) {
+        max_entries = count;
+      }
+    }
+    printf("[DEBUG LOOKUP] Total: %d entries, %d/%d tris have multiple entries, max per tri: %d\n",
+           total_entries, tri_with_multiple, (int)geom_primitive_len, max_entries);
   }
 };
 
@@ -144,9 +183,57 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
                              const UVPrimitiveLookup &uv_prim_lookup,
                              Image &image,
                              ImageUser &image_user,
-                             MeshNode &node)
+                             MeshNode &node,
+                             const std::optional<float2> &brush_pos_ss = std::nullopt,
+                             const float brush_radius_ss = 0.0f)
 {
   NodeData *node_data = static_cast<NodeData *>(node.pixels_);
+
+  const bool use_brush_filter = brush_pos_ss.has_value() && brush_radius_ss > 0.0f;
+  
+  printf("[DEBUG ENCODE] Starting encode for node with %d faces, brush_filter=%s\n", 
+         (int)node.faces().size(), use_brush_filter ? "YES" : "NO");
+  if (use_brush_filter) {
+    printf("[DEBUG ENCODE]   brush_pos_ss=[%.1f,%.1f], brush_radius_ss=%.1f\n",
+           brush_pos_ss->x, brush_pos_ss->y, brush_radius_ss);
+  }
+
+  int total_uv_primitives = 0;
+  int duplicates_skipped = 0;
+  int brush_filter_skipped = 0;
+  int target_island_skipped = 0;
+  int total_tris_processed = 0;
+
+  /* Structure to track processed UV primitives by their UV coordinates */
+  struct UVKey {
+    float2 uvs[3];
+
+    UVKey(const float2 uvs_[3])
+    {
+      uvs[0] = uvs_[0];
+      uvs[1] = uvs_[1];
+      uvs[2] = uvs_[2];
+    }
+
+    bool operator==(const UVKey &other) const
+    {
+      return uvs[0] == other.uvs[0] && uvs[1] == other.uvs[1] && uvs[2] == other.uvs[2];
+    }
+  };
+
+  struct UVKeyHash {
+    uint64_t operator()(const UVKey &key) const
+    {
+      /* Simple hash of UV coordinates */
+      uint64_t h = 0;
+      for (int i = 0; i < 3; i++) {
+        uint32_t ux = *reinterpret_cast<const uint32_t *>(&key.uvs[i].x);
+        uint32_t uy = *reinterpret_cast<const uint32_t *>(&key.uvs[i].y);
+        h ^= (static_cast<uint64_t>(ux) << 32) | uy;
+      }
+      return h;
+    }
+  };
 
   for (ImageTile &tile : image.tiles) {
     image::ImageTileWrapper image_tile(&tile);
@@ -160,15 +247,81 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
     tile_data.tile_number = image_tile.get_tile_number();
     float2 tile_offset = float2(image_tile.get_tile_offset());
 
+    /* Track processed UV primitives by their UV coordinates to avoid duplicates.
+     * Using std::unordered_map to detect UV primitives with same coordinates. */
+    std::unordered_map<UVKey, uintptr_t, UVKeyHash> processed_uv_keys;
+
+    /* Track which geometry tris have been processed for this tile */
+    Set<int> processed_tris;
+
     for (const int face : node.faces()) {
+      printf("[DEBUG FACES] Processing face=%d\n", face);
+      
+      /* Get the UV island ID for this face's first triangle to filter UV primitives */
+      int first_tri = -1;
       for (const int tri : bke::mesh::face_triangles_range(mesh_data.faces, face)) {
+        first_tri = tri;
+        break;
+      }
+      if (first_tri == -1) {
+        continue;
+      }
+      
+      /* Get the island index from the first UV primitive in the lookup */
+        const int target_island_index = (uv_prim_lookup.lookup[first_tri].size() > 0) 
+            ? uv_prim_lookup.lookup[first_tri][0].uv_island_index 
+            : -1;
+        printf("[DEBUG FACES]   face=%d, first_tri=%d, target_island=%d\n", face, first_tri, target_island_index);
+      printf("[DEBUG FACES]   face=%d, first_tri=%d, target_island=%d\n", face, first_tri, target_island_index);
+      
+      for (const int tri : bke::mesh::face_triangles_range(mesh_data.faces, face)) {
+        total_tris_processed++;
+        bool tri_already_processed = processed_tris.contains(tri);
+        if (tri_already_processed) {
+          printf("[DEBUG FACES]   tri=%d ALREADY PROCESSED in this tile (duplicate from different face!)\n", tri);
+        }
+        processed_tris.add_new(tri);
+
+        printf("[DEBUG FACES]   tri=%d, lookup has %d UV primitives\n", tri, (int)uv_prim_lookup.lookup[tri].size());
+        
+        /* Only process UV primitives that belong to the same island as this face */
         for (const UVPrimitiveLookup::Entry &entry : uv_prim_lookup.lookup[tri]) {
-          uv_islands::UVBorder uv_border = entry.uv_primitive->extract_border();
-          float2 uvs[3] = {
-              entry.uv_primitive->get_uv_vertex(mesh_data, 0)->uv - tile_offset,
-              entry.uv_primitive->get_uv_vertex(mesh_data, 1)->uv - tile_offset,
-              entry.uv_primitive->get_uv_vertex(mesh_data, 2)->uv - tile_offset,
+          /* Skip UV primitives from different islands - this prevents projection spreading */
+          if (entry.uv_island_index != target_island_index) {
+            target_island_skipped++;
+            printf("[DEBUG ISLAND] tri=%d SKIP uv_prim=%d island=%d target=%d\n",
+                   tri,
+                   entry.uv_primitive->primitive_i,
+                   (int)entry.uv_island_index,
+                   target_island_index);
+            continue;
+          }
+          /* Get UV coordinates BEFORE tile offset for deduplication */
+          float2 uvs_raw[3] = {
+              entry.uv_primitive->get_uv_vertex(mesh_data, 0)->uv,
+              entry.uv_primitive->get_uv_vertex(mesh_data, 1)->uv,
+              entry.uv_primitive->get_uv_vertex(mesh_data, 2)->uv,
           };
+
+          /* Deduplication: Skip if we've already processed UV primitives with these exact coordinates */
+          UVKey uv_key(uvs_raw);
+          if (processed_uv_keys.contains(uv_key)) {
+            duplicates_skipped++;
+            printf("[DEBUG UV PROJECTION] SKIP DUPLICATE: tri=%d, UVs=[%.3f,%.3f][%.3f,%.3f][%.3f,%.3f] (duplicate UV coordinates)\n",
+                   tri, uvs_raw[0].x, uvs_raw[0].y, uvs_raw[1].x, uvs_raw[1].y,
+                   uvs_raw[2].x, uvs_raw[2].y);
+            continue;
+          }
+          uintptr_t uv_prim_ptr = reinterpret_cast<uintptr_t>(entry.uv_primitive);
+          processed_uv_keys.emplace(uv_key, uv_prim_ptr);
+
+          /* Apply tile offset for actual pixel extraction */
+          float2 uvs[3] = {
+              uvs_raw[0] - tile_offset,
+              uvs_raw[1] - tile_offset,
+              uvs_raw[2] - tile_offset,
+          };
+
           const float minv = clamp_f(min_fff(uvs[0].y, uvs[1].y, uvs[2].y), 0.0f, 1.0f);
           const int miny = floor(minv * image_buffer->y);
           const float maxv = clamp_f(max_fff(uvs[0].y, uvs[1].y, uvs[2].y), 0.0f, 1.0f);
@@ -178,6 +331,78 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
           const float maxu = clamp_f(max_fff(uvs[0].x, uvs[1].x, uvs[2].x), 0.0f, 1.0f);
           const int maxx = min_ii(ceil(maxu * image_buffer->x), image_buffer->x);
 
+          /* Brush position filtering: skip UV primitives that are far from brush position.
+           * Convert UV bounds to screen-space and check intersection with brush radius. */
+          bool should_skip = false;
+          
+          if (use_brush_filter) {
+            /* Convert UV bounds (image pixel coords) to screen-space approx */
+            /* minx,miny and maxx,maxy are in image pixel coordinates (without tile offset) */
+            /* We need to check if this area is within brush radius of brush_pos_ss */
+            
+            /* Calculate center of UV primitive in screen space */
+            float center_ss_x = float(minx + maxx) * 0.5f;
+            float center_ss_y = float(miny + maxy) * 0.5f;
+            
+            /* Calculate approximate distance from brush to UV primitive center */
+            float dist_x = center_ss_x - brush_pos_ss->x;
+            float dist_y = center_ss_y - brush_pos_ss->y;
+            float dist = sqrtf(dist_x * dist_x + dist_y * dist_y);
+            
+            /* Calculate radius of UV primitive */
+            float uv_radius = sqrtf(float(maxx - minx) * float(maxx - minx) + 
+                                   float(maxy - miny) * float(maxy - miny)) * 0.5f;
+            
+            /* Skip if UV primitive is completely outside brush influence */
+            if (dist > brush_radius_ss + uv_radius) {
+              should_skip = true;
+              brush_filter_skipped++;
+              printf("[DEBUG BRUSH FILTER] SKIP: tri=%d, dist=%.1f > brush_radius=%.1f + uv_radius=%.1f\n",
+                     tri, dist, brush_radius_ss, uv_radius);
+            }
+            else {
+              printf("[DEBUG BRUSH FILTER] KEEP tri=%d, dist=%.1f <= brush_radius=%.1f + uv_radius=%.1f, bounds x[%d,%d] y[%d,%d]\n",
+                     tri, dist, brush_radius_ss, uv_radius, minx, maxx, miny, maxy);
+            }
+          }
+          else {
+            /* Fallback: filter by distance from image center.
+             * This helps when brush position is not available.
+             * Skip UV primitives that are far from the center of the image. */
+            float center_x = float(minx + maxx) * 0.5f;
+            float center_y = float(miny + maxy) * 0.5f;
+            float image_center_x = float(image_buffer->x) * 0.5f;
+            float image_center_y = float(image_buffer->y) * 0.5f;
+            
+            float dist_x = center_x - image_center_x;
+            float dist_y = center_y - image_center_y;
+            float dist = sqrtf(dist_x * dist_x + dist_y * dist_y);
+            
+            /* Skip if UV primitive is more than 40% of image size from center */
+            float max_dist = sqrtf(image_center_x * image_center_x + image_center_y * image_center_y) * 0.4f;
+             if (dist > max_dist) {
+              should_skip = true;
+              brush_filter_skipped++;
+              printf("[DEBUG CENTER FILTER] SKIP: tri=%d, dist=%.1f > max_dist=%.1f (center based)\n",
+                     tri, dist, max_dist);
+            }
+          }
+          
+          if (should_skip) {
+            continue;
+          }
+
+          /* Log UV projection details */
+          printf("[DEBUG UV PROJECTION] tri=%d, island=%d, UVs: "
+                 "[%.3f,%.3f] [%.3f,%.3f] [%.3f,%.3f], tile_offset=[%.1f,%.1f], "
+                 "bounds: x[%d,%d] y[%d,%d]\n",
+                 tri, (int)entry.uv_island_index,
+                 uvs[0].x, uvs[0].y, uvs[1].x, uvs[1].y, uvs[2].x, uvs[2].y,
+                 tile_offset.x, tile_offset.y,
+                 minx, maxx, miny, maxy);
+
+          total_uv_primitives++;
+
           /* TODO: Perform bounds check */
           int uv_prim_index = node_data->uv_primitives.size();
           node_data->uv_primitives.append(tri);
@@ -186,6 +411,14 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
           /* Calculate barycentric delta */
           paint_input.delta_barycentric_coord_u = calc_barycentric_delta_x(
               image_buffer, uvs, minx, miny);
+
+          /* DEBUG: Print detailed info about each UV primitive being processed */
+          printf("[DEBUG EXTRACT] face=%d tri=%d uv_prim=%d island=%d, "
+                 "UVs=[%.3f,%.3f][%.3f,%.3f][%.3f,%.3f], "
+                 "bounds: x[%d,%d] y[%d,%d], pixels=%d\n",
+                 face, tri, uv_prim_index, (int)entry.uv_island_index,
+                 uvs[0].x, uvs[0].y, uvs[1].x, uvs[1].y, uvs[2].x, uvs[2].y,
+                 minx, maxx, miny, maxy, (maxx - minx) * (maxy - miny));
 
           /* Extract the pixels. */
           extract_barycentric_pixels(tile_data,
@@ -210,6 +443,14 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
 
     node_data->tiles.append(tile_data);
   }
+
+  printf("[DEBUG ENCODE] Finished encode - processed %d UV primitives, %d tiles, %d duplicates skipped, %d brush_filter_skipped, %d target_island_skipped, %d tri iterations\n",
+         total_uv_primitives,
+         (int)node_data->tiles.size(),
+         duplicates_skipped,
+         brush_filter_skipped,
+         target_island_skipped,
+         total_tris_processed);
 }
 
 static bool should_pixels_be_updated(const Node &node)
@@ -333,7 +574,9 @@ static bool update_pixels(const Depsgraph &depsgraph,
                           const Object &object,
                           Tree &pbvh,
                           Image &image,
-                          ImageUser &image_user)
+                          ImageUser &image_user,
+                          const std::optional<float2> &brush_pos_ss = std::nullopt,
+                          const float brush_radius_ss = 0.0f)
 {
   Vector<MeshNode *> nodes_to_update;
   if (!find_nodes_to_update(pbvh, nodes_to_update)) {
@@ -354,7 +597,37 @@ static bool update_pixels(const Depsgraph &depsgraph,
                                  mesh.corner_verts(),
                                  uv_map,
                                  bke::pbvh::vert_positions_eval(depsgraph, object));
+
+  /* DEBUG: Print mesh data info */
+  printf("[DEBUG] UV Paint: mesh has %d corner_tris, %d corners\n",
+         (int)mesh_data.corner_tris.size(), (int)mesh_data.corner_verts.size());
+  printf("[DEBUG] UV Paint: UV map has %d elements\n", (int)mesh_data.uv_map.size());
+
+  /* UV island caching is disabled due to projection issues with stroke duplication.
+   * TODO: investigate and re-enable with proper invalidation */
+#if 0
+  Array<int> cached_island_ids;
+  int64_t cached_island_count = 0;
+  const bool has_cache = uv_islands::UVIslandCache::get_cached_island_ids(
+      mesh_data, cached_island_ids, cached_island_count);
+  if (has_cache && cached_island_ids.size() == mesh_data.corner_tris.size()) {
+    mesh_data.uv_island_ids = cached_island_ids;
+    mesh_data.uv_island_len = cached_island_count;
+    printf("[DEBUG] Using cached island IDs: %d islands\n", (int)cached_island_count);
+  }
+#endif
+
+  /* Create UV islands */
   uv_islands::UVIslands islands(mesh_data);
+  printf("[DEBUG] Created %d UV islands\n", (int)islands.islands.size());
+
+#if 0
+  /* Store island IDs in cache for next time */
+  if (!has_cache) {
+    uv_islands::UVIslandCache::store_island_ids(
+        mesh_data, mesh_data.uv_island_ids, mesh_data.uv_island_len);
+  }
+#endif
 
   uv_islands::UVIslandsMask uv_masks;
   ImageUser tile_user = image_user;
@@ -381,7 +654,8 @@ static bool update_pixels(const Depsgraph &depsgraph,
   threading::parallel_for(nodes_to_update.index_range(), 1, [&](const IndexRange range) {
     for (const int i : range) {
       do_encode_pixels(
-          mesh_data, uv_masks, uv_primitive_lookup, image, image_user, *nodes_to_update[i]);
+          mesh_data, uv_masks, uv_primitive_lookup, image, image_user, *nodes_to_update[i],
+          brush_pos_ss, brush_radius_ss);
     }
   });
   if (USE_WATERTIGHT_CHECK) {
@@ -408,6 +682,9 @@ static bool update_pixels(const Depsgraph &depsgraph,
       node.flag_ |= Node::TexLeaf;
     }
   }
+
+  printf("[DEBUG] UV Paint update complete - %d nodes updated, %d UV islands processed\n",
+         (int)nodes_to_update.size(), (int)islands.islands.size());
 
 // #define DO_PRINT_STATISTICS
 #ifdef DO_PRINT_STATISTICS
@@ -492,10 +769,11 @@ void collect_dirty_tiles(Node &node, Vector<image::TileNumber> &r_dirty_tiles)
 
 namespace bke::pbvh {
 
-void build_pixels(const Depsgraph &depsgraph, Object &object, Image &image, ImageUser &image_user)
+void build_pixels(const Depsgraph &depsgraph, Object &object, Image &image, ImageUser &image_user,
+                 const std::optional<float2> &brush_pos_ss, const float brush_radius_ss)
 {
   Tree &pbvh = *object::pbvh_get(object);
-  pixels::update_pixels(depsgraph, object, pbvh, image, image_user);
+  pixels::update_pixels(depsgraph, object, pbvh, image, image_user, brush_pos_ss, brush_radius_ss);
 }
 
 void node_pixels_free(Node *node)

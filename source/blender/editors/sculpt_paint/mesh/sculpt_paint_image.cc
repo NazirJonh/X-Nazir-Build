@@ -1759,6 +1759,41 @@ static void do_paint_pixels_gradient(
 
   SculptSession &ss = *object.runtime->sculpt_session;
   const StrokeCache *cache = ss.cache;
+  
+  /* Debug: log brush location and radius */
+  float2 brush_screen_pos(0.0f, 0.0f);
+  
+  if (cache) {
+    std::fprintf(stderr, "[gradient_paint] brush_location=%.3f,%.3f,%.3f radius=%.3f bstrength=%.3f\n",
+                 (double)cache->location.x, (double)cache->location.y, (double)cache->location.z,
+                 (double)cache->radius, (double)cache->bstrength);
+    
+    /* Log plane offset for projection */
+    std::fprintf(stderr, "[gradient_paint] plane_offset=%.3f,%.3f,%.3f\n",
+                 (double)cache->plane_offset.x, (double)cache->plane_offset.y, (double)cache->plane_offset.z);
+    
+    /* Log projection matrix for projection */
+    std::fprintf(stderr, "[gradient_paint] proj_mat row0=%.3f,%.3f,%.3f,%.3f\n",
+                 (double)cache->projection_mat[0][0], (double)cache->projection_mat[0][1], (double)cache->projection_mat[0][2], (double)cache->projection_mat[0][3]);
+    std::fprintf(stderr, "[gradient_paint] proj_mat row1=%.3f,%.3f,%.3f,%.3f\n",
+                 (double)cache->projection_mat[1][0], (double)cache->projection_mat[1][1], (double)cache->projection_mat[1][2], (double)cache->projection_mat[1][3]);
+    std::fprintf(stderr, "[gradient_paint] proj_mat row2=%.3f,%.3f,%.3f,%.3f\n",
+                 (double)cache->projection_mat[2][0], (double)cache->projection_mat[2][1], (double)cache->projection_mat[2][2], (double)cache->projection_mat[2][3]);
+    
+    /* Log gradient calculator type */
+    std::fprintf(stderr, "[gradient_paint] calculator is_radial=%d clamp_to_range=%d\n",
+                 calculator.is_radial(), clamp_to_range);
+    
+    /* Project brush location to screen space */
+    float4 brush_loc_h = float4(cache->location.x, cache->location.y, cache->location.z, 1.0f);
+    float4 projected = cache->projection_mat * brush_loc_h;
+    if (projected.w != 0.0f) {
+      brush_screen_pos.x = (projected.x / projected.w + 1.0f) * 0.5f;
+      brush_screen_pos.y = (projected.y / projected.w + 1.0f) * 0.5f;
+    }
+    std::fprintf(stderr, "[gradient_paint] brush_screen_pos=%.3f,%.3f\n",
+                 (double)brush_screen_pos.x, (double)brush_screen_pos.y);
+  }
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   PBVHData &pbvh_data = bke::pbvh::pixels::data_get(pbvh);
   NodeData &node_data = bke::pbvh::pixels::node_data_get(node);
@@ -2736,7 +2771,10 @@ bool SCULPT_do_paint_brush_image_gradient(const Depsgraph &depsgraph,
   }
   /* Ensure PBVH pixel data exists before accessing per-node pixel payload. */
   if (ensure_pixels) {
-    bke::pbvh::build_pixels(depsgraph, ob, *image_data.image, *image_data.image_user);
+    /* Pass brush screen-space position and radius for UV primitive filtering */
+    const float brush_radius = BKE_brush_size_get(&sd.paint, brush) * 0.5f;
+    bke::pbvh::build_pixels(depsgraph, ob, *image_data.image, *image_data.image_user,
+                           start_ss, brush_radius);
   }
 
   ed::sculpt_paint::gradient::Params gradient_params;

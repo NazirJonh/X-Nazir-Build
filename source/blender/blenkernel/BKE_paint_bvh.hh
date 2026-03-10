@@ -336,7 +336,9 @@ class Tree {
   static Tree from_spatially_organized_mesh(const Mesh &mesh);
 };
 
-void build_pixels(const Depsgraph &depsgraph, Object &object, Image &image, ImageUser &image_user);
+void build_pixels(const Depsgraph &depsgraph, Object &object, Image &image, ImageUser &image_user,
+                 const std::optional<float2> &brush_pos_ss = std::nullopt,
+                 const float brush_radius_ss = 0.0f);
 
 /* Ray-cast
  * the hit callback is called for all leaf nodes intersecting the ray;

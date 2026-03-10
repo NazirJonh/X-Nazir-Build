@@ -1450,11 +1450,13 @@ def _save_glyph_mappings_to_file(data=None):
             os.makedirs(config_dir, exist_ok=True)
 
         def _has_user_customizations(category_data):
-            """Check if category has user customizations (display_name, color, or tags)."""
+            """Check if category has user customizations (display_name, color, glyph, or tags)."""
             if isinstance(category_data, dict):
                 display_name = category_data.get("display_name", "")
                 color = category_data.get("color", [0.0, 0.0, 0.0])
                 tags = category_data.get("tags", [])
+                glyph = category_data.get("glyph", "")
+                default_glyph = category_data.get("default_glyph", "")
                 glyph_mode = str(category_data.get("glyph_mode", "auto")).lower()
                 icon_source = str(category_data.get("icon_source", "auto")).lower()
                 icon_key = category_data.get("icon_key", "")
@@ -1462,8 +1464,10 @@ def _save_glyph_mappings_to_file(data=None):
                 icon_provider = category_data.get("icon_provider", "")
                 icon_customized = (icon_source != "auto") or bool(icon_key) or bool(icon_path) or bool(icon_provider)
                 glyph_mode_customized = glyph_mode != "auto"
-                # Check if display_name is not empty, color is not default black, has tags, or icon customized.
-                return bool(display_name) or color != [0.0, 0.0, 0.0] or bool(tags) or icon_customized or glyph_mode_customized
+                # Check if display_name is not empty, color is not default black, has glyph, has tags, or icon customized.
+                # IMPORTANT: glyph and default_glyph must be checked to save glyph_only categories properly.
+                has_glyph_customization = bool(glyph) or bool(default_glyph)
+                return bool(display_name) or color != [0.0, 0.0, 0.0] or has_glyph_customization or bool(tags) or icon_customized or glyph_mode_customized
             return False
 
         # Convert glyphs to Unicode escape format for reliable storage
@@ -2035,7 +2039,13 @@ def update_category_tags_in_wm(category, space_type=-1):
 
 
 def get_categories_for_tag(tag_name):
-    """Get a list of all categories that use a specific tag."""
+    """Get a list of all categories that use a specific tag.
+    
+    Returns a list of category info dictionaries with keys:
+    - 'name': original category name (may be empty)
+    - 'display_name': display name for UI
+    - 'space_type': space type ID
+    """
     global _glyph_cache, _glyph_cache_loaded
 
     # Ensure cache is loaded
@@ -2045,16 +2055,35 @@ def get_categories_for_tag(tag_name):
     categories = []
     for cat_key, cat_data in _glyph_cache.items():
         if isinstance(cat_data, dict) and tag_name in cat_data.get("tags", []):
-            # cat_key is a tuple (space_type, category), extract just the category name
+            # cat_key is a tuple (space_type, category), extract info
             if isinstance(cat_key, tuple) and len(cat_key) >= 2:
-                categories.append(cat_key[1])
-                # DEBUG
-                print(f"[GET_CATEGORIES_FOR_TAG] Found category {repr(cat_key[1])} with tag '{tag_name}', data={cat_data}")
-            else:
-                categories.append(cat_key)
+                space_type_id, category_name = cat_key
+                display_name = cat_data.get("display_name", "")
+                
+                # Use display_name if available, otherwise use category_name
+                ui_name = display_name if display_name else category_name
+                
+                if ui_name:  # Only include if we have something to display
+                    categories.append({
+                        'name': category_name,
+                        'display_name': ui_name,
+                        'space_type': space_type_id
+                    })
+                    print(f"[GET_CATEGORIES_FOR_TAG] Found category '{category_name}' (display: '{ui_name}') with tag '{tag_name}', space_type={space_type_id}")
+                else:
+                    print(f"[GET_CATEGORIES_FOR_TAG] Skipping category with empty name and display_name, space_type={space_type_id}")
 
-    result = sorted(set(categories))  # Use set to remove duplicates
-    print(f"[GET_CATEGORIES_FOR_TAG] tag_name='{tag_name}', result={result}")
+    # Remove duplicates based on display_name
+    seen = set()
+    result = []
+    for cat_info in categories:
+        if cat_info['display_name'] not in seen:
+            seen.add(cat_info['display_name'])
+            result.append(cat_info)
+    
+    # Sort by display_name
+    result.sort(key=lambda x: x['display_name'])
+    print(f"[GET_CATEGORIES_FOR_TAG] tag_name='{tag_name}', result count={len(result)}")
     return result
 
 
@@ -2117,14 +2146,25 @@ def get_category_glyph_data(category, space_type=-1):
     glyph = cat_data.get("glyph", "") or ""
 
     if not glyph:
-        if base_type == "text_only":
-            # For text-only categories, use first character of display_name (UTF-8 codepoint)
-            # as the visual glyph instead of the full name.
-            source = display_name or category or ""
-            glyph = source[0] if source else ""
-        else:
-            # For glyph-only / glyph-text categories where key itself is the glyph.
-            glyph = category
+        # FIXED: Check if category has tags and use the first tag's glyph
+        category_tags = cat_data.get("tags", [])
+        if category_tags:
+            # Get the first tag's glyph
+            first_tag = category_tags[0]
+            tag_data = get_tag_data(first_tag)
+            if tag_data and tag_data.get("glyph"):
+                glyph = tag_data["glyph"]
+                print(f"[GET_CATEGORY_GLYPH_DATA] Using tag '{first_tag}' glyph: '{glyph}' for category '{category}'")
+        
+        if not glyph:
+            if base_type == "text_only":
+                # For text-only categories, use first character of display_name (UTF-8 codepoint)
+                # as the visual glyph instead of the full name.
+                source = display_name or category or ""
+                glyph = source[0] if source else ""
+            else:
+                # For glyph-only / glyph-text categories where key itself is the glyph.
+                glyph = category
 
     # Primary color from this entry.
     color = cat_data.get("color", [0.0, 0.0, 0.0])
@@ -2203,14 +2243,41 @@ class USERPREF_OT_category_tag_remove_from_category(Operator):
 
     category: bpy.props.StringProperty(name="Category")
     tag_name: bpy.props.StringProperty(name="Tag")
+    space_type: bpy.props.IntProperty(name="Space Type", default=-1)
 
     def execute(self, context):
-        success, message = remove_category_tag(self.category, self.tag_name, auto_save=True)
-        if success:
-            self.report({'INFO'}, message)
-            context.area.tag_redraw()
-            return {'FINISHED'}
-        self.report({'ERROR'}, message)
+        # FIXED: Handle categories with empty names by searching through all space_types
+        category_to_remove = self.category
+        
+        # If category is a display_name, try to find the actual category with empty name
+        if category_to_remove:
+            # First try direct removal
+            success, message = remove_category_tag(category_to_remove, self.tag_name, auto_save=True, space_type=self.space_type)
+            if success:
+                self.report({'INFO'}, message)
+                context.area.tag_redraw()
+                return {'FINISHED'}
+            
+            # If direct removal failed, search for category by display_name
+            global _glyph_cache
+            for cat_key, cat_data in _glyph_cache.items():
+                if isinstance(cat_key, tuple) and len(cat_key) >= 2 and isinstance(cat_data, dict):
+                    space_type_id, actual_category = cat_key
+                    display_name = cat_data.get("display_name", "")
+                    
+                    # Check if this category has the tag and matches the display_name
+                    if (self.tag_name in cat_data.get("tags", []) and 
+                        display_name == category_to_remove):
+                        # Found the category by display_name, use actual category name (even if empty)
+                        success, message = remove_category_tag(actual_category, self.tag_name, auto_save=True, space_type=space_type_id)
+                        if success:
+                            self.report({'INFO'}, f"Tag '{self.tag_name}' removed from '{display_name}'")
+                            context.area.tag_redraw()
+                            return {'FINISHED'}
+                        break
+        
+        # If all attempts failed
+        self.report({'ERROR'}, f"Could not remove tag '{self.tag_name}' from category '{category_to_remove}'")
         return {'CANCELLED'}
 
 
@@ -2329,8 +2396,8 @@ def set_category_glyph(category, glyph, space_type=-1, save=True):
     key = _make_cache_key(space_type, category)
     if key not in _glyph_cache:
         _glyph_cache[key] = {
-            "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
-            "default_glyph": "", "default_display_name": "",
+            "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
+            "default_glyph": "", "default_display_name": "", "base_type": "text_only",
             "glyph_mode": "auto",
             "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
         }
@@ -2385,8 +2452,8 @@ def set_category_data(category,
 
     if key not in _glyph_cache:
         _glyph_cache[key] = {
-            "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
-            "default_glyph": "", "default_display_name": "",
+            "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
+            "default_glyph": "", "default_display_name": "", "base_type": "text_only",
             "glyph_mode": "auto",
             "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
         }
@@ -3113,17 +3180,24 @@ def _sync_glyph_mappings_to_wm_impl():
         print(f"[GLYPH SYNC] late discovery merge failed: {e}")
 
     def _has_user_customizations(category_data):
-        """Check if category has user customizations (display_name, color, or tags)."""
+        """Check if category has user customizations (display_name, color, glyph, or tags)."""
         if isinstance(category_data, dict):
             display_name = category_data.get("display_name", "")
             color = category_data.get("color", [0.0, 0.0, 0.0])
             tags = category_data.get("tags", [])
+            glyph = category_data.get("glyph", "")
+            default_glyph = category_data.get("default_glyph", "")
+            glyph_mode = str(category_data.get("glyph_mode", "auto")).lower()
             icon_source = str(category_data.get("icon_source", "auto")).lower()
             icon_key = category_data.get("icon_key", "")
             icon_path = category_data.get("icon_path", "")
             icon_provider = category_data.get("icon_provider", "")
             icon_customized = (icon_source != "auto") or bool(icon_key) or bool(icon_path) or bool(icon_provider)
-            return bool(display_name) or color != [0.0, 0.0, 0.0] or bool(tags) or icon_customized
+            glyph_mode_customized = glyph_mode != "auto"
+            # Check if display_name is not empty, color is not default black, has glyph, has tags, or icon customized.
+            # IMPORTANT: glyph and default_glyph must be checked to save glyph_only categories properly.
+            has_glyph_customization = bool(glyph) or bool(default_glyph)
+            return bool(display_name) or color != [0.0, 0.0, 0.0] or has_glyph_customization or bool(tags) or icon_customized or glyph_mode_customized
         return False
 
     try:
@@ -3439,7 +3513,8 @@ def _sync_wm_to_glyph_cache_impl():
                 # Get current cached data or create new entry
                 if cache_key not in _glyph_cache:
                     _glyph_cache[cache_key] = {
-                        "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
+                        "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
+                        "default_glyph": "", "default_display_name": "", "base_type": "text_only",
                         "glyph_mode": "auto",
                         "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
                     }
@@ -3449,6 +3524,14 @@ def _sync_wm_to_glyph_cache_impl():
                 # Check if any values changed
                 if cached_entry.get("glyph", "") != item.glyph:
                     cached_entry["glyph"] = item.glyph
+                    # Update default_glyph and base_type for proper glyph_only handling
+                    if item.glyph:
+                        cached_entry["default_glyph"] = item.glyph
+                        # Determine base_type based on glyph content
+                        if _is_single_glyph(item.glyph):
+                            cached_entry["base_type"] = "glyph_only"
+                        else:
+                            cached_entry["base_type"] = "glyph_text"
                     changes_detected = True
 
                 if cached_entry.get("display_name", "") != item.display_name:
@@ -3578,8 +3661,11 @@ def _sync_wm_to_glyph_cache_impl():
 
                     # Get current cached data or create new entry
                     if cache_key not in _glyph_cache:
+                        # Determine base_type based on category name (glyph-only categories use single glyph as name)
+                        base_type = "glyph_only" if _is_single_glyph(category) else "text_only"
                         _glyph_cache[cache_key] = {
                             "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
+                            "default_glyph": "", "default_display_name": "", "base_type": base_type,
                             "glyph_mode": "auto",
                             "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
                         }
@@ -3590,8 +3676,13 @@ def _sync_wm_to_glyph_cache_impl():
                     if item.glyph:
                         if cached_entry.get("glyph", "") != item.glyph:
                             cached_entry["glyph"] = item.glyph
+                            # Also update default_glyph and base_type for glyph_only categories
+                            # This ensures the category is properly saved to JSON
+                            cached_entry["default_glyph"] = item.glyph
+                            base_type = "glyph_only" if _is_single_glyph(item.glyph) else "glyph_text"
+                            cached_entry["base_type"] = base_type
                             changes_detected = True
-                            print(f"[GLYPH SYNC] Updated glyph for '{category}'")
+                            print(f"[GLYPH SYNC] Updated glyph for '{category}' (base_type={base_type})")
 
                     if item.display_name:
                         if cached_entry.get("display_name", "") != item.display_name:
@@ -4240,6 +4331,18 @@ class USERPREF_OT_category_tag_create(Operator):
         default=-1,
         options={'HIDDEN'}
     )
+    error_message: bpy.props.StringProperty(
+        name="Error Message",
+        description="Validation error message to display in the dialog",
+        default="",
+        options={'HIDDEN'}
+    )
+    validation_attempted: bpy.props.BoolProperty(
+        name="Validation Attempted",
+        description="Whether the user has attempted to submit the form",
+        default=False,
+        options={'HIDDEN'}
+    )
 
     @with_context_check
     def execute(self, context):
@@ -4247,9 +4350,31 @@ class USERPREF_OT_category_tag_create(Operator):
         print(f"[DEBUG CREATE_TAG execute] self.glyph = '{self.glyph}'")
         print(f"[DEBUG CREATE_TAG execute] self.name = '{self.name}'")
 
-        if not self.name:
-            self.report({'ERROR'}, "Tag name cannot be empty")
-            return {'CANCELLED'}
+        # Validate name - show error and reopen dialog with error message
+        if not self.name.strip():
+            self.validation_attempted = True
+            self.error_message = "Tag name is required"
+            
+            # Use timer to reopen dialog with error message
+            def reopen_dialog():
+                # Store operator properties for the new invocation
+                props = {
+                    'name': self.name,
+                    'category': self.category,
+                    'glyph': self.glyph,
+                    'glyph_search': self.glyph_search,
+                    'color': list(self.color),
+                    'current_mode_only': self.current_mode_only,
+                    'space_type': self.space_type,
+                    'validation_attempted': True,
+                    'error_message': "Tag name is required"
+                }
+                # Execute the operator with stored properties
+                bpy.ops.wm.category_tag_create('INVOKE_DEFAULT', **props)
+                return None  # Don't repeat the timer
+            
+            bpy.app.timers.register(reopen_dialog, first_interval=0.001)
+            return {'FINISHED'}
 
         # Convert hex glyph to Unicode character
         glyph = _hex_to_glyph(self.glyph) if self.glyph else ""
@@ -4317,6 +4442,9 @@ class USERPREF_OT_category_tag_create(Operator):
         layout.use_property_split = True
         layout.prop(self, "name")
 
+        # Separator after name field
+        layout.separator()
+
         # Full glyph selector (search + input + preview), aligned with C++ templates.
         layout.template_glyph_selector(
             data=self.properties,
@@ -4334,25 +4462,46 @@ class USERPREF_OT_category_tag_create(Operator):
         row = layout.row()
         row.template_color_glyph_presets(self.properties, "color")
 
-        # Current mode only checkbox (last item)
+        # Separator before Current Mode Only checkbox
         layout.separator()
+
+        # Current mode only checkbox (last item)
         layout.prop(self, "current_mode_only")
+
+        # Show error message at the bottom if there's a validation error
+        if self.error_message:
+            layout.separator()
+            row = layout.row()
+            row.label(text=self.error_message, icon='ERROR')
 
     def invoke(self, context, event):
         print(
             f"[DEBUG CREATE_TAG invoke] self={self!r}, "
-            f"incoming category='{self.category}', name='{self.name}'"
+            f"incoming category='{self.category}', name='{self.name}', validation_attempted={self.validation_attempted}"
         )
         context.window_manager.category_tag_glyph_hex = ""
         self.glyph_search = ""
-        # Set default glyph for tags (not category glyph)
-        self.glyph = DEFAULT_TAG_GLYPH_HEX
-        self.current_mode_only = True
+
+        # Only set defaults if this is a fresh dialog (not a re-opening after validation failure)
+        if not self.validation_attempted:
+            # Set default glyph for tags (not category glyph)
+            self.glyph = DEFAULT_TAG_GLYPH_HEX
+            self.current_mode_only = True
+        # When validation_attempted is True, preserve the values passed to the operator
+
+        self.error_message = ""
         print(
             f"[DEBUG CREATE_TAG invoke] prepared glyph='{self.glyph}', "
             f"glyph_search='{self.glyph_search}', category='{self.category}'"
         )
         return context.window_manager.invoke_props_dialog(self, width=405)
+
+    def check(self, context):
+        # Clear error message when user starts typing a name
+        if self.name.strip() and self.error_message:
+            self.error_message = ""
+        # Trigger redraw when name changes to update the warning message
+        return True
 
 
 class USERPREF_OT_category_tag_add(Operator):
@@ -8321,19 +8470,27 @@ class USERPREF_PT_tags(TagsPanel, Panel):
                 # Use automatic columns (columns=0) but force each item to be compact
                 cats_flow = cats_box.grid_flow(row_major=True, columns=0, even_columns=False, even_rows=False, align=False)
 
-                for cat in categories:
+                for cat_info in categories:
+                    # Extract category info
+                    cat_name = cat_info['name']
+                    cat_display_name = cat_info['display_name']
+                    cat_space_type = cat_info['space_type']
+                    
                     # Create an aligned row inside the flow
                     item_row = cats_flow.row()
                     item_row.alignment = 'LEFT'
 
-                    # Get all visual data for the category
-                    glyph, color, display_name = get_category_glyph_data(cat)
-                    icon_key, icon_path = get_category_icon_data(cat)  # Get icon key and path
+                    # Get all visual data for the category using the original name
+                    glyph, color, display_name = get_category_glyph_data(cat_name, cat_space_type)
+                    icon_key, icon_path = get_category_icon_data(cat_name, cat_space_type)  # Get icon key and path
+                    
+                    # Use the display_name from category info if available
+                    final_display_name = cat_display_name if cat_display_name else display_name
 
                     # Create row layout with Tag button (returns row for adding more buttons)
                     # Use color even if glyph is empty (for categories with display_name but no glyph)
                     tag_row = item_row.tag_button_pref_row(
-                        tag_name=display_name,
+                        tag_name=final_display_name,
                         glyph=glyph if glyph else "",
                         color=(color[0], color[1], color[2]) if color and any(c > 0.0 for c in color) else (0.0, 0.0, 0.0),
                         width=0,  # Auto width
@@ -8351,8 +8508,9 @@ class USERPREF_PT_tags(TagsPanel, Panel):
 
                     # Add delete button (X) to the same row - seamless appearance with borders
                     op_x = tag_row.operator("wm.category_tag_remove_from_category", text="", icon='X')
-                    op_x.category = cat
+                    op_x.category = cat_name  # Use original category name (may be empty)
                     op_x.tag_name = tag.name
+                    op_x.space_type = cat_space_type  # Pass space_type for proper lookup
             else:
                 cats_box.label(text="No categories using this tag", icon='INFO')
 

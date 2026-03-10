@@ -467,6 +467,11 @@ struct ButtonTag : public Button {
   char glyph[8] = {};        /**< UTF-8 glyph character (max 1 emoji, ~4 bytes) */
   float color[3] = {0};      /**< RGB color for glyph (0.0-1.0), clamped at creation */
   bool has_color = false;    /**< Whether custom color is set (optimization flag) */
+
+  /** Icon support - icon takes priority over glyph when set */
+  int icon_id = 0;           /**< Blender internal icon ID (BIFIconID), 0 = none */
+  char icon_path[1024] = {}; /**< Path to external icon file (used if icon_id is 0) */
+
   char *context_menu_operator = nullptr; /**< Operator for right-click context menu */
   char *operator_param_name = nullptr;   /**< Parameter name to pass to context menu operator */
   char *operator_param_value = nullptr;  /**< Parameter value to pass to context menu operator */

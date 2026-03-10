@@ -3348,6 +3348,7 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
                                 is_active,
                                 true,         /* is_pref_mode - NO CHECKBOX */
                                 center_glyph, /* Center glyph in button */
+                                0, "",        /* icon_id, icon_path - no icon for this button */
                                 0, 0,
                                 width,        /* calculated width */
                                 UI_UNIT_Y,    /* height */

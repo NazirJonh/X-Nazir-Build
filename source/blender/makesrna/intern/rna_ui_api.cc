@@ -2747,6 +2747,11 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_int(func, "height", 0, 0, INT_MAX, "", "Button height", 0, INT_MAX);
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  /* Icon parameters - icon takes priority over glyph when set */
+  parm = RNA_def_int(func, "icon_id", 0, 0, INT_MAX, "", "Blender internal icon ID (0 = none)", 0, INT_MAX);
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "icon_path", nullptr, 0, "", "Path to external icon file (used if icon_id is 0)");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
 
   /* Tag button row in preference mode (no checkbox, for category assignment UI) */
   func = RNA_def_function(srna, "tag_button_pref_row", "rna_uiLayout_tag_button_pref_row");
@@ -2778,6 +2783,11 @@ void RNA_api_ui_layout(StructRNA *srna)
   parm = RNA_def_boolean(func, "no_background", false, "", "Skip background rendering (only show on hover/active)");
   parm = RNA_def_boolean(func, "align", true, "", "Align buttons together for seamless appearance");
   parm = RNA_def_boolean(func, "center_glyph", false, "", "Center glyph in button (for glyph-only buttons)");
+  /* Icon parameters - icon takes priority over glyph when set */
+  parm = RNA_def_string(func, "icon_key", nullptr, 0, "", "Blender internal icon identifier (e.g. 'PLAY', 'SELECT_EXTEND')");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
+  parm = RNA_def_string(func, "icon_path", nullptr, 0, "", "Path to external icon file (used if icon_key is empty)");
+  RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);
   /* Operator parameters */
   parm = RNA_def_string(func, "operator", nullptr, 0, "", "Operator to call on button click");
   RNA_def_property_clear_flag(parm, PROP_NEVER_NULL);

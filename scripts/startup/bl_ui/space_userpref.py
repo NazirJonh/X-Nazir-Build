@@ -2138,6 +2138,50 @@ def get_category_glyph_data(category, space_type=-1):
     return glyph, color, display_name
 
 
+def get_category_icon_data(category, space_type=-1):
+    """Get icon key and path for a category.
+
+    Returns: (icon_key, icon_path) tuple.
+    - icon_key: Blender internal icon identifier (e.g. 'PLAY', 'SELECT_EXTEND') or ""
+    - icon_path: Path to external icon file or ""
+
+    Icon takes priority over glyph when icon_key is set or icon_path is set.
+    The C++ side resolves icon_id from icon_key using RNA_enum_value_from_identifier.
+    """
+    cat_data = _get_category_data(category, space_type)
+
+    if not cat_data:
+        return "", ""
+
+    if isinstance(cat_data, str):
+        return "", ""
+
+    if not isinstance(cat_data, dict):
+        return "", ""
+
+    icon_source = cat_data.get("icon_source", "auto")
+    if icon_source == "off":
+        return "", ""
+
+    icon_key = cat_data.get("icon_key", "")
+    icon_path = cat_data.get("icon_path", "")
+
+    print(f"[GET_CATEGORY_ICON_DATA] category='{category}', icon_source='{icon_source}', icon_key='{icon_key}', icon_path='{icon_path}'")
+
+    # For manual mode with icon_key, pass it to C++ for resolution
+    if icon_source == "manual" and icon_key:
+        print(f"[GET_CATEGORY_ICON_DATA] Passing icon_key '{icon_key}' to C++ for resolution")
+        return icon_key, ""
+
+    # Return path for external icons (icon_source == "auto" or path explicitly set)
+    if icon_path:
+        print(f"[GET_CATEGORY_ICON_DATA] Returning icon_path for category '{category}'")
+        return "", icon_path
+
+    print(f"[GET_CATEGORY_ICON_DATA] No icon for category '{category}', returning ('', '')")
+    return "", ""
+
+
 class USERPREF_OT_category_tag_remove_from_category(Operator):
     """Remove this tag from a specific category"""
     bl_idname = "wm.category_tag_remove_from_category"
@@ -2899,6 +2943,33 @@ def _merge_discovered_categories():
                 f"[GLYPH DISCOVER DEBUG] alias suppressed: alias={alias_name!r}, canonical={canonical_name!r}"
             )
 
+    # Update icon_path for existing categories with icon_source='auto' and no icon_path
+    # This ensures that extension icons are detected even for categories that were cached before
+    existing_categories_needing_icon_update = []
+    for category in discovered:
+        if category in new_categories:
+            continue  # Skip new categories, they are handled below
+        cache_key = _get_cache_key_for_category(category)
+        if cache_key in _glyph_cache:
+            cached_data = _glyph_cache[cache_key]
+            if isinstance(cached_data, dict):
+                icon_source = cached_data.get("icon_source", "auto")
+                icon_path = cached_data.get("icon_path", "")
+                if icon_source == "auto" and not icon_path:
+                    detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
+                    if detected_icon_path:
+                        cached_data["icon_path"] = detected_icon_path
+                        cached_data["icon_provider"] = detected_provider or "extension_auto"
+                        cache_changed = True
+                        existing_categories_needing_icon_update.append(category)
+                        print(
+                            f"[] update existing category auto-icon: "
+                            f"category={category!r}, path={detected_icon_path!r}, provider={cached_data['icon_provider']!r}"
+                        )
+
+    if existing_categories_needing_icon_update:
+        print(f"[GLYPH] Updated icons for {len(existing_categories_needing_icon_update)} existing categories")
+
     if new_categories:
         print(f"[GLYPH] Found {len(new_categories)} new categories: {sorted(new_categories)}")
 
@@ -2965,17 +3036,20 @@ def _merge_discovered_categories():
         else:
             print(f"[GLYPH] Failed to save new category mappings")
 
-    elif cache_changed:
+    elif cache_changed or existing_categories_needing_icon_update:
         if _save_glyph_mappings_to_file():
-            print("[GLYPH] Saved cache canonicalization updates to JSON")
+            if cache_changed:
+                print("[GLYPH] Saved cache canonicalization updates to JSON")
+            if existing_categories_needing_icon_update:
+                print(f"[GLYPH] Saved icon updates for {len(existing_categories_needing_icon_update)} existing categories to JSON")
             return True
         else:
-            print("[GLYPH] Failed to save cache canonicalization updates")
+            print("[GLYPH] Failed to save cache updates")
 
     else:
         print(f"[GLYPH] No new categories found (all {len(discovered)} are cached)")
 
-    return len(new_categories) > 0 or cache_changed
+    return len(new_categories) > 0 or cache_changed or bool(existing_categories_needing_icon_update)
 
 
 def _is_collection_safe(collection):
@@ -3012,6 +3086,8 @@ def sync_glyph_mappings_to_wm():
 def _sync_glyph_mappings_to_wm_impl():
     """Implementation of sync_glyph_mappings_to_wm."""
     global _glyph_cache, _glyph_cache_loaded
+
+    cache_changed = False  # Track if cache was modified during sync
 
     print(f"[GLYPH SYNC] sync_glyph_mappings_to_wm called, cache has {len(_glyph_cache)} entries")
 
@@ -3102,10 +3178,18 @@ def _sync_glyph_mappings_to_wm_impl():
                             skipped_invalid += 1
                             continue
 
-                    # Normalize data to ensure it has all required fields
+                    # Normalize data to ensure it has all required fields.
+                    # Also migrate legacy string entries in _glyph_cache to dicts so that
+                    # detected icon paths/providers can be persisted back to the JSON file.
                     if isinstance(category_data, str):
-                        # Old format - convert to new format
-                        normalized_data = {"glyph": category_data, "display_name": "", "color": [0.0, 0.0, 0.0]}
+                        # Old format - convert to new format and write back into cache.
+                        normalized_data = {
+                            "glyph": category_data,
+                            "display_name": "",
+                            "color": [0.0, 0.0, 0.0],
+                        }
+                        _glyph_cache[cache_key] = normalized_data
+                        cache_changed = True
                     elif isinstance(category_data, dict):
                         normalized_data = category_data
                     else:
@@ -3137,6 +3221,11 @@ def _sync_glyph_mappings_to_wm_impl():
                                 f"[] sync hit: category={category!r}, "
                                 f"path={icon_path_val!r}, provider={icon_provider_val!r}"
                             )
+                            # Update cache with detected icon path so it persists
+                            if isinstance(normalized_data, dict):
+                                normalized_data["icon_path"] = icon_path_val
+                                normalized_data["icon_provider"] = icon_provider_val
+                                cache_changed = True
                         else:
                             print(f"[] sync miss: category={category!r}")
 
@@ -3232,6 +3321,14 @@ def _sync_glyph_mappings_to_wm_impl():
         if skipped_invalid > 0:
             print(f"[GLYPH] Skipped {skipped_invalid} categories with invalid names and no customizations")
         print(f"[GLYPH] Successfully synced {added_count}/{len(_glyph_cache)} mappings to WM")
+
+        # Save cache to file if any icon paths were updated during sync
+        if cache_changed:
+            if _save_glyph_mappings_to_file():
+                print("[GLYPH SYNC] Saved updated icon paths to JSON file")
+            else:
+                print("[GLYPH SYNC] Failed to save updated icon paths to JSON file")
+
         return added_count > 0
     except Exception as e:
         print(f"[GLYPH] Error syncing to WM: {e}")
@@ -8218,6 +8315,7 @@ class USERPREF_PT_tags(TagsPanel, Panel):
 
                     # Get all visual data for the category
                     glyph, color, display_name = get_category_glyph_data(cat)
+                    icon_key, icon_path = get_category_icon_data(cat)  # Get icon key and path
 
                     # Create row layout with Tag button (returns row for adding more buttons)
                     # Use color even if glyph is empty (for categories with display_name but no glyph)
@@ -8229,6 +8327,9 @@ class USERPREF_PT_tags(TagsPanel, Panel):
                         height=0,  # Auto height
                         no_background=True,
                         align=False,  # Align buttons together for seamless appearance
+                        center_glyph=False,  # Center glyph in button
+                        icon_key=icon_key,  # Blender internal icon key (e.g. 'PLAY')
+                        icon_path=icon_path,  # External icon path
                         operator="",  # Optional operator for button click
                         context_menu_operator="",  # TODO: Temporarily disabled
                         operator_param_name="",  # TODO: Temporarily disabled

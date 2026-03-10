@@ -4975,23 +4975,107 @@ static void widget_draw_tag(const bContext *C,
   }
 
   /* ============================================================
-   * PART 2: Draw colored glyph (if present)
+   * PART 2: Draw icon OR colored glyph (mutually exclusive)
+   * Icon takes priority over glyph when set
    * ============================================================ */
 
   /* Calculate available width for content after checkbox */
   const int available_width = content_rect.xmax - offset_x;
 
-  /* Minimum width for glyph (small square for emoji) */
+  /* Minimum width for glyph/icon (small square) */
   const int min_glyph_width = UI_UNIT_X * 0.5f;  /* Reduced threshold for compact buttons */
   /* Threshold for showing text alongside glyph - lower threshold for better UX */
   const int text_threshold = UI_UNIT_X * 2;  /* Text shows earlier, hides later */
 
-  /* Track glyph width for text clipping */
-  float glyph_width = 0.0f;
-  bool has_glyph = tag_but->glyph[0] != '\0';
-  bool glyph_was_shown = false;  /* Track if glyph was actually drawn (not just space reserved) */
+  /* Resolve icon_id from icon_path if needed */
+  int resolved_icon_id = tag_but->icon_id;
+  if (resolved_icon_id == 0 && tag_but->icon_path[0] != '\0') {
+    resolved_icon_id = category_tab_icon_id_resolve_from_path(tag_but->icon_path);
+  }
 
-  if (has_glyph) {
+  /* Determine what to draw: icon > glyph > nothing */
+  const bool has_icon = (resolved_icon_id > 0);
+  const bool has_glyph = !has_icon && tag_but->glyph[0] != '\0';
+  bool glyph_was_shown = false;  /* Track if glyph/icon was actually drawn */
+  float glyph_width = 0.0f;  /* Track width for text clipping */
+
+  /* ============================================================
+   * DRAW ICON (takes priority over glyph)
+   * ============================================================ */
+  if (has_icon) {
+    /* Check if we have enough space to show icon */
+    const bool show_icon = available_width >= (min_glyph_width * 0.5f);
+
+    if (show_icon) {
+      glyph_was_shown = true;
+
+      /* Calculate icon size based on button height */
+      const int icon_size = int(BLI_rcti_size_y(&content_rect) - 4 * UI_SCALE_FAC);
+      const float icon_draw_size = std::max(float(icon_size), 10.0f * UI_SCALE_FAC);
+
+      /* Calculate icon position - center vertically */
+      const float center_y = (content_rect.ymin + content_rect.ymax) / 2.0f;
+      const float icon_pos_y = center_y - icon_draw_size / 2.0f;
+
+      /* Calculate horizontal position */
+      float icon_pos_x;
+      if (is_pref_mode && (but->drawflag & BUT_TAG_CENTER_GLYPH)) {
+        /* Center icon when center_glyph flag is set */
+        const float center_x = (content_rect.xmin + content_rect.xmax) / 2.0f;
+        icon_pos_x = center_x - icon_draw_size / 2.0f;
+      } else {
+        /* Left-aligned */
+        icon_pos_x = float(offset_x);
+      }
+
+      /* Get icon tint color */
+      uchar icon_tint[4] = {255, 255, 255, 255};
+
+      /* Apply custom color to icon tint */
+      if (tag_but->has_color) {
+        icon_tint[0] = uchar(tag_but->color[0] * 255.0f);
+        icon_tint[1] = uchar(tag_but->color[1] * 255.0f);
+        icon_tint[2] = uchar(tag_but->color[2] * 255.0f);
+      }
+
+      /* Apply state adjustments */
+      if (!(state->but_flag & UI_SELECT)) {
+        color_darken_3uc(icon_tint, TAG_GLYPH_DARKEN_INACTIVE);
+      }
+      if (state->but_flag & UI_HOVER) {
+        color_brighten_3uc(icon_tint, TAG_GLYPH_BRIGHTEN_HOVER);
+      }
+
+      /* Dim icon if space is tight */
+      if (available_width < min_glyph_width) {
+        icon_tint[3] = uchar(icon_tint[3] * 0.5f);
+      }
+
+      /* Draw icon */
+      const float icon_aspect = float(ICON_DEFAULT_WIDTH) / icon_draw_size;
+      GPU_blend(GPU_BLEND_ALPHA);
+      icon_draw_ex(icon_pos_x,
+                   icon_pos_y,
+                   resolved_icon_id,
+                   icon_aspect,
+                   1.0f,  /* alpha */
+                   0.0f,  /* saturation */
+                   icon_tint,
+                   false,
+                   UI_NO_ICON_OVERLAY_TEXT);
+      GPU_blend(GPU_BLEND_NONE);
+
+      /* Update glyph width for text clipping */
+      glyph_width = icon_draw_size;
+
+      /* Update offset to after icon so text doesn't overlap */
+      offset_x += int(glyph_width);
+    }
+  }
+  /* ============================================================
+   * DRAW GLYPH (fallback when no icon)
+   * ============================================================ */
+  else if (has_glyph) {
     /* Setup font for drawing */
     fontstyle_set(fstyle);
     if (fstyle->uifont_id >= 0) {
@@ -5081,8 +5165,8 @@ static void widget_draw_tag(const bContext *C,
     }
   }
 
-  /* Small spacing between glyph/text and checkbox - or just start if no glyph */
-  if (!has_glyph && !is_pref_mode) {
+  /* Small spacing between glyph/icon and text - or just start if no glyph and no icon */
+  if (!has_glyph && !has_icon && !is_pref_mode) {
     offset_x = checkbox_rect.xmax;
   }
   const int small_spacing = 2 * UI_SCALE_FAC;

@@ -1557,9 +1557,12 @@ Button *uiDefButAlert(Block *block, AlertIcon icon, int x, int y, short width, s
  * @param block The UI block to add button to (must be non-NULL)
  * @param tag_name The display name for the tag (must be non-empty, non-NULL)
  * @param glyph Optional UTF-8 glyph/emoji (can be NULL or empty string)
- * @param color Optional RGB color pointer, values clamped to [0.0-1.0]. NULL for default
+ * @param color Optional RGB color pointer. values clamped to [0.0-1.0]. NULL for default
  * @param is_active Whether the tag is currently selected (sets UI_SELECT_DRAW flag)
  * @param is_pref_mode Whether to use preference mode (no checkbox, for category settings UI)
+ * @param center_glyph Whether to center glyph in button (for glyph-only buttons)
+ * @param icon_id Blender internal icon ID (0 = none, icon takes priority over glyph)
+ * @param icon_path Optional path to external icon file (used if icon_id is 0)
  * @param x, y Position in the UI block coordinate system
  * @param width, height Button dimensions in pixels
  * @param tip Optional tooltip text (can be NULL)
@@ -1572,6 +1575,8 @@ Button *uiDefButTag(Block *block,
                     bool is_active,
                     bool is_pref_mode,
                     bool center_glyph,
+                    int icon_id,
+                    const char *icon_path,
                     int x, int y, short width, short height,
                     const char *tip);
 
@@ -1583,6 +1588,9 @@ Button *uiDefButTag(Block *block,
  * @param tag_name The display name for the tag
  * @param glyph Optional UTF-8 glyph/emoji
  * @param color Optional RGB color for glyph
+ * @param center_glyph Whether to center glyph in button
+ * @param icon_id Blender internal icon ID (0 = none)
+ * @param icon_path Optional path to external icon file
  * @param x, y Position in the UI block
  * @param width, height Button dimensions
  * @param tip Optional tooltip text
@@ -1592,6 +1600,9 @@ Button *uiDefButTagPref(Block *block,
                         const char *tag_name,
                         const char *glyph,
                         const float *color,
+                        bool center_glyph,
+                        int icon_id,
+                        const char *icon_path,
                         int x, int y, short width, short height,
                         const char *tip);
 
@@ -1607,12 +1618,16 @@ Button *uiDefButTagPref(Block *block,
  * @param y Position Y
  * @param width Button width
  * @param height Button height
+ * @param icon_id Blender internal icon ID (0 = none)
+ * @param icon_path Optional path to external icon file
  */
 extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
                                               const char *tag_name,
                                               const char *glyph,
                                               const float *color,
-                                              int x, int y, int width, int height);
+                                              int x, int y, int width, int height,
+                                              int icon_id,
+                                              const char *icon_path);
 
 /**
  * Create a row layout with Tag button for preference mode.
@@ -1628,9 +1643,13 @@ extern "C" void rna_uiLayout_tag_button_pref(blender::ui::Layout *layout,
  * @param height Button height (0 for automatic)
  * @param no_background Skip background rendering (only show on hover/active)
  * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @param center_glyph Center glyph in button (for glyph-only buttons)
+ * @param icon_id Blender internal icon ID (0 = none)
+ * @param icon_path Optional path to external icon file
  * @param operator_name Optional operator name to assign to button click
  * @param context_menu_operator Optional operator name for right-click context menu
- * @param category_name Optional category name to pass as operator parameter
+ * @param operator_param_name Optional parameter name to pass to context menu operator
+ * @param operator_param_value Optional parameter value to pass to context menu operator
  * @return Pointer to the row layout with Tag button added
  */
 uiLayout *uiDefButTagRow(uiLayout *layout,
@@ -1641,6 +1660,9 @@ uiLayout *uiDefButTagRow(uiLayout *layout,
                          int height,
                          bool no_background,
                          bool align,
+                         bool center_glyph,
+                         int icon_id,
+                         const char *icon_path,
                          const char *operator_name,
                          const char *context_menu_operator,
                          const char *operator_param_name,
@@ -1658,6 +1680,9 @@ uiLayout *uiDefButTagRow(uiLayout *layout,
  * @param height Button height (0 = auto)
  * @param no_background Skip background rendering unless hovered/active
  * @param align Align buttons together for seamless appearance (true = seamless, false = with gap)
+ * @param center_glyph Center glyph in button (for glyph-only buttons)
+ * @param icon_key Blender internal icon identifier string (e.g. 'PLAY', 'SELECT_EXTEND')
+ * @param icon_path Optional path to external icon file (used if icon_key is empty)
  * @param operator_name Optional operator name to assign to button click
  * @param context_menu_operator Optional operator name for right-click context menu
  * @param operator_param_name Optional parameter name for context menu operator
@@ -1674,6 +1699,8 @@ extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
     bool no_background,
     bool align,
     bool center_glyph,
+    const char *icon_key,
+    const char *icon_path,
     const char *operator_name,
     const char *context_menu_operator,
     const char *operator_param_name,

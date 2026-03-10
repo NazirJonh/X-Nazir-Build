@@ -1097,6 +1097,19 @@ def _normalize_category_data(category_data, category_name=None):
         if entry["base_type"] == "text_only":
             entry["default_glyph"] = ""
 
+        # NEW: For reserved categories (in DEFAULT_CATEGORY_GLYPHS), restore default_glyph
+        # even if glyph field is empty in JSON. This ensures Reset works correctly.
+        if category_name and category_name in DEFAULT_CATEGORY_GLYPHS:
+            default_data = DEFAULT_CATEGORY_GLYPHS[category_name]
+            reserved_glyph = default_data.get("glyph", "")
+            if reserved_glyph:
+                # Only restore if default_glyph is actually empty or incorrect
+                current_default = entry.get("default_glyph", "")
+                if not current_default or current_default != reserved_glyph:
+                    entry["default_glyph"] = reserved_glyph
+                    entry["base_type"] = "glyph_text"
+                    print(f"[GLYPH] Restored default_glyph for reserved category '{category_name}': '{reserved_glyph}'")
+
         # NEW: Tags
         if "tags" in category_data:
             tags = category_data["tags"]

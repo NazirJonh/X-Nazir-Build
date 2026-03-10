@@ -2628,7 +2628,7 @@ def _discover_active_categories():
             discovered_sources[category] = source
 
     def _append_panel_sample(source, panel_name, panel_obj):
-        if len(panel_samples) >= 40:
+        if len(panel_samples) >= 200:
             return
         try:
             category = getattr(panel_obj, 'bl_category', '')
@@ -2883,6 +2883,16 @@ def _merge_discovered_categories():
         if panel_label and category not in category_to_label:
             category_to_label[category] = panel_label
 
+    # Also lookup panel labels for glyph_only categories that may not be in panel_samples
+    # This is important because glyph_only categories (e.g., "\ue8b6" for "Script 4")
+    # need their display_name to be discovered from panel bl_label
+    for category in discovered:
+        if _is_single_glyph(category) and category not in category_to_label:
+            panel_label = _find_panel_label_for_category(category)
+            if panel_label:
+                category_to_label[category] = panel_label
+                print(f"[GLYPH DISCOVER] Found panel label for glyph_only category: {category!r} -> {panel_label!r}")
+
     discovered_source_map = dict(_last_discovered_category_sources)
 
     def _clone_category_data(data):
@@ -3050,6 +3060,36 @@ def _merge_discovered_categories():
     if existing_categories_needing_icon_update:
         print(f"[GLYPH] Updated icons for {len(existing_categories_needing_icon_update)} existing categories")
 
+    # Update default_display_name for existing glyph_only categories that are missing it
+    # This happens when categories were created before panel labels were discovered
+    existing_glyph_only_needing_name_update = []
+    for category in discovered:
+        if category in new_categories:
+            continue  # Skip new categories, they are handled below
+        cache_key = _get_cache_key_for_category(category)
+        if cache_key in _glyph_cache:
+            cached_data = _glyph_cache[cache_key]
+            if isinstance(cached_data, dict):
+                base_type = cached_data.get("base_type", "text_only")
+                default_display_name = cached_data.get("default_display_name", "")
+                # Only update glyph_only categories that are missing default_display_name
+                if base_type == "glyph_only" and not default_display_name:
+                    panel_label = category_to_label.get(category, "")
+                    if panel_label:
+                        cached_data["default_display_name"] = panel_label
+                        # Also update display_name if it's empty
+                        if not cached_data.get("display_name", ""):
+                            cached_data["display_name"] = panel_label
+                        cache_changed = True
+                        existing_glyph_only_needing_name_update.append(category)
+                        print(
+                            f"[GLYPH] Updated default_display_name for existing glyph_only category: "
+                            f"category={category!r}, default_display_name={panel_label!r}"
+                        )
+
+    if existing_glyph_only_needing_name_update:
+        print(f"[GLYPH] Updated default_display_name for {len(existing_glyph_only_needing_name_update)} existing glyph_only categories")
+
     if new_categories:
         print(f"[GLYPH] Found {len(new_categories)} new categories: {sorted(new_categories)}")
 
@@ -3116,12 +3156,14 @@ def _merge_discovered_categories():
         else:
             print(f"[GLYPH] Failed to save new category mappings")
 
-    elif cache_changed or existing_categories_needing_icon_update:
+    elif cache_changed or existing_categories_needing_icon_update or existing_glyph_only_needing_name_update:
         if _save_glyph_mappings_to_file():
             if cache_changed:
                 print("[GLYPH] Saved cache canonicalization updates to JSON")
             if existing_categories_needing_icon_update:
                 print(f"[GLYPH] Saved icon updates for {len(existing_categories_needing_icon_update)} existing categories to JSON")
+            if existing_glyph_only_needing_name_update:
+                print(f"[GLYPH] Saved default_display_name updates for {len(existing_glyph_only_needing_name_update)} existing glyph_only categories to JSON")
             return True
         else:
             print("[GLYPH] Failed to save cache updates")
@@ -3129,7 +3171,9 @@ def _merge_discovered_categories():
     else:
         print(f"[GLYPH] No new categories found (all {len(discovered)} are cached)")
 
-    return len(new_categories) > 0 or cache_changed or bool(existing_categories_needing_icon_update)
+    return (len(new_categories) > 0 or cache_changed or
+            bool(existing_categories_needing_icon_update) or
+            bool(existing_glyph_only_needing_name_update))
 
 
 def _is_collection_safe(collection):

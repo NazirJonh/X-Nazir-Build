@@ -1149,7 +1149,11 @@ const char *panel_category_tooltip_name_get(const ARegion *region,
         if (item->display_name[0] != '\0') {
           return item->display_name;
         }
-        /* Category is in overrides but display_name is empty - use category name. */
+        /* Category is in overrides but display_name is empty - try default_display_name. */
+        if (item->default_display_name[0] != '\0') {
+          return item->default_display_name;
+        }
+        /* Both display_name and default_display_name are empty - use category name. */
         return category_idname;
       }
     }
@@ -1168,7 +1172,11 @@ const char *panel_category_tooltip_name_get(const ARegion *region,
         if (item->display_name[0] != '\0') {
           return item->display_name;
         }
-        /* Category is in mappings but display_name is empty - use category name. */
+        /* Category is in mappings but display_name is empty - try default_display_name. */
+        if (item->default_display_name[0] != '\0') {
+          return item->default_display_name;
+        }
+        /* Both display_name and default_display_name are empty - use category name. */
         return category_idname;
       }
     }
@@ -2750,6 +2758,49 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
     }
 
     g_pending_category_insert.valid = false;
+  }
+
+  /* Auto-save initial category order when JSON order was empty.
+   * This ensures category_orders is populated on first run with discovered categories. */
+  if (json_order.is_empty() && !result.is_empty()) {
+    Vector<std::string> initial_order;
+    initial_order.reserve(result.size());
+    for (PanelCategoryDyn *pc_dyn : result) {
+      initial_order.append(pc_dyn->idname);
+    }
+
+    /* Normalize reserved boundary before saving */
+    Vector<std::string> reserved;
+    Vector<std::string> non_reserved;
+    reserved.reserve(initial_order.size());
+    non_reserved.reserve(initial_order.size());
+    for (const std::string &category_id : initial_order) {
+      if (category_is_reserved_for_reorder(wm, category_id.c_str())) {
+        reserved.append(category_id);
+      }
+      else {
+        non_reserved.append(category_id);
+      }
+    }
+
+    std::sort(reserved.begin(), reserved.end(), [&](const std::string &a, const std::string &b) {
+      return compare_reserved_categories_by_priority(C, a.c_str(), b.c_str(), space_type_name);
+    });
+
+    initial_order.clear();
+    initial_order.reserve(reserved.size() + non_reserved.size());
+    for (const std::string &category_id : reserved) {
+      initial_order.append(category_id);
+    }
+    for (const std::string &category_id : non_reserved) {
+      initial_order.append(category_id);
+    }
+
+    if (!category_order_is_crossing_reserved_boundary(wm, initial_order)) {
+      save_category_order_to_json(C, tag_key.c_str(), initial_order);
+      printf("[CATEGORY ORDER] Auto-saved initial order for tag_key='%s' with %zu categories\n",
+             tag_key.c_str(), initial_order.size());
+    }
   }
 
   return result;

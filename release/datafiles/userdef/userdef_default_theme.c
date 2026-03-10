@@ -958,10 +958,10 @@ const bTheme U_theme_default = {
       .color = RGBA(0xbc3b3bff),
     },
     {
-      .color = RGBA(0xffa124ff),
+      .color = RGBA(0xCB8521ff),
     },
     {
-      .color = RGBA(0xf1dc00ff),
+      .color = RGBA(0xD8C500ff),
     },
     {
       .color = RGBA(0x029c05ff),

@@ -743,6 +743,9 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   }
   else {
     resolved_icon_source = 0; /* AUTO: path/provider chain (external icon) */
+    /* Clear Blender icon key when switching to Custom icon mode */
+    RNA_string_set(op->ptr, "icon_key", "");
+    item->icon_key[0] = '\0';
   }
   RNA_enum_set(op->ptr, "icon_source", resolved_icon_source);
   item->icon_source = resolved_icon_source;
@@ -2448,6 +2451,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                                               is_active,
                                               false,  /* is_pref_mode - toggle button with checkbox */
                                               false,  /* center_glyph - left align for category buttons */
+                                              0, "",  /* icon_id, icon_path - no icon for this button */
                                               0, 0,
                                               UI_UNIT_X * 8,
                                               UI_UNIT_Y * 1.5f,
@@ -3198,9 +3202,9 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     char python_cmd[8192];
     /* Convert color to hex for Python set_category_data */
     char color_hex[8];
-    SNPRINTF(color_hex, "%02x%02x%02x", 
-             int(item->color[0] * 255.0f), 
-             int(item->color[1] * 255.0f), 
+    SNPRINTF(color_hex, "%02x%02x%02x",
+             int(item->color[0] * 255.0f),
+             int(item->color[1] * 255.0f),
              int(item->color[2] * 255.0f));
 
     /* Convert UTF-8 glyph back to hex codepoint for storage */
@@ -3225,6 +3229,18 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
         break;
     }
 
+    /* Escape string parameters for Python (backslashes in paths, quotes, etc.) */
+    char category_esc[128];
+    char display_name_esc[64];
+    char icon_key_esc[256];
+    char icon_path_esc[2048];
+    char icon_provider_esc[256];
+    BLI_str_escape(category_esc, category, sizeof(category_esc));
+    BLI_str_escape(display_name_esc, item->display_name, sizeof(display_name_esc));
+    BLI_str_escape(icon_key_esc, item->icon_key, sizeof(icon_key_esc));
+    BLI_str_escape(icon_path_esc, item->icon_path, sizeof(icon_path_esc));
+    BLI_str_escape(icon_provider_esc, item->icon_provider, sizeof(icon_provider_esc));
+
     /* DEBUG: Log before calling Python set_category_data */
     printf("[C++ SAVE] Calling set_category_data: category='%s', space_type=%d\n", category, space_type);
     printf("[C++ SAVE] item->tags='%s' (NOT passed to Python - tags managed by Python)\n", item->tags);
@@ -3233,14 +3249,14 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
              "from bl_ui.space_userpref import set_category_data\n"
              "set_category_data('%s', display_name='%s', glyph='%s', color='%s', "
              "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s', glyph_mode='%s', space_type=%d)\n",
-             category,
-             item->display_name,
+             category_esc,
+             display_name_esc,
              glyph_hex,
              color_hex,
              icon_source_py,
-             item->icon_key,
-             item->icon_path,
-             item->icon_provider,
+             icon_key_esc,
+             icon_path_esc,
+             icon_provider_esc,
              (item->glyph_mode == 1) ? "first_letter" : "auto",
              space_type);
     const char *imports_none[] = {nullptr};

@@ -2924,14 +2924,35 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   }
 
   int display_mode_ui = 0; /* GLYPH */
+  int custom_icon_mode_ui = 0; /* BLENDER */
+  
   if (current_glyph_mode == 1) {
     display_mode_ui = 2; /* TEXT */
   }
   else if (icon_mode_enabled && has_icon_payload) {
     display_mode_ui = 1; /* CUSTOM_ICON */
+    
+    /* Determine icon submode based on icon_source priority */
+    if (current_icon_source == 1 && has_icon_key) {
+      /* MANUAL source: use Blender icon if available */
+      custom_icon_mode_ui = 0; /* BLENDER */
+    }
+    else if (current_icon_source == 0 && has_icon_path) {
+      /* AUTO source: use Custom icon if available */
+      custom_icon_mode_ui = 1; /* CUSTOM */
+    }
+    else if (has_icon_path) {
+      /* Fallback: if path exists, use Custom */
+      custom_icon_mode_ui = 1; /* CUSTOM */
+    }
+    else if (has_icon_key) {
+      /* Fallback: if key exists, use Blender */
+      custom_icon_mode_ui = 0; /* BLENDER */
+    }
   }
+  
   RNA_enum_set(op->ptr, "display_mode_ui", display_mode_ui);
-  RNA_enum_set(op->ptr, "custom_icon_mode_ui", has_icon_path ? 1 : 0);
+  RNA_enum_set(op->ptr, "custom_icon_mode_ui", custom_icon_mode_ui);
 
   RNA_enum_set(op->ptr, "original_icon_source", current_icon_source);
   RNA_enum_set(op->ptr, "original_glyph_mode", current_glyph_mode);

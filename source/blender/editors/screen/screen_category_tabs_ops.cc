@@ -216,14 +216,14 @@ static wmOperatorStatus category_tab_reset_invoke(bContext *C,
 }
 
 static void category_tab_reset_apply_to_operator(bContext *C,
-                                                  wmOperator *target_op,
-                                                  const char *category,
-                                                  const char *default_display_name,
-                                                  const char *default_glyph,
-                                                  const float default_color[3],
-                                                  const bool reset_name,
-                                                  const bool reset_glyph,
-                                                  const bool reset_color)
+                                                   wmOperator *target_op,
+                                                   const char *category,
+                                                   const char *default_display_name,
+                                                   const char *default_glyph,
+                                                   const float default_color[3],
+                                                   const bool reset_name,
+                                                   const bool reset_glyph,
+                                                   const bool reset_color)
 {
   if (target_op == nullptr) {
     return;
@@ -253,12 +253,23 @@ static void category_tab_reset_apply_to_operator(bContext *C,
       RNA_string_set(target_op->ptr, "glyph", "");
     }
 
-    /* Resetting glyph should also leave explicit First Letter mode.
-     * Otherwise live-update/save keeps `glyph_mode=FIRST_LETTER` from previous state,
-     * and Reset appears unsaved after closing the dialog. */
+    /* Check if there's a default icon path - if so, switch to Icon Custom mode.
+     * This ensures that when user resets with a default icon, the display immediately
+     * shows the Icon Custom section to indicate the reset took effect. */
+    char current_icon_path[1024] = "";
+    RNA_string_get(target_op->ptr, "icon_path", current_icon_path);
+    
     PropertyRNA *display_mode_prop = RNA_struct_find_property(target_op->ptr, "display_mode_ui");
     if (display_mode_prop != nullptr) {
-      RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_GLYPH);
+      if (current_icon_path[0] != '\0') {
+        /* Default icon available - switch to Icon Custom mode */
+        RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON);
+        RNA_enum_set(target_op->ptr, "custom_icon_mode_ui", CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM);
+      }
+      else {
+        /* No default icon - switch to Glyph mode */
+        RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_GLYPH);
+      }
     }
   }
 

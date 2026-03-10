@@ -672,6 +672,7 @@ template<typename ImageBuffer> class PaintingKernel {
   ImageBuffer image_accessor_;
 
   float4 brush_color_;
+  float4 brush_color_linear_;  /* Unconverted brush color for texture multiplication. */
 
   const char *last_used_color_space_ = nullptr;
 
@@ -828,7 +829,8 @@ template<typename ImageBuffer> class PaintingKernel {
 
   /**
    * Paint with color texture support.
-   * The texture_colors are used to modify the brush color per-pixel.
+   * Matches the behavior of the old paint_image_proj.cc system.
+   * The texture RGB multiplies brush color, texture alpha modulates the mask.
    */
   bool paint_with_texture_colors(const Brush &brush,
                                   const PackedPixelRow &pixel_row,
@@ -842,8 +844,16 @@ template<typename ImageBuffer> class PaintingKernel {
       return false;
     }
 
-    const float brush_alpha = brush.alpha;
     const IMB_BlendMode blend_mode = static_cast<IMB_BlendMode>(brush.blend);
+
+    /* Prepare color space converter if needed (for byte buffers). */
+    ColormanageProcessor *cm_processor = nullptr;
+    if (last_used_color_space_ != nullptr) {
+      const char *from_colorspace = IMB_colormanagement_role_colorspace_name_get(
+          COLOR_ROLE_SCENE_LINEAR);
+      cm_processor = IMB_colormanagement_colorspace_processor_new(
+          from_colorspace, last_used_color_space_);
+    }
 
     ushort2 image_start = pixel_row.start_image_coordinate;
     image_start.x = ushort(int(image_start.x) + first_positive);
@@ -858,14 +868,34 @@ template<typename ImageBuffer> class PaintingKernel {
       }
 
       const float4 &tex_color = texture_colors[x];
-      float4 color = image_accessor_.read_pixel(image_buffer);
+      float4 dest_color = image_accessor_.read_pixel(image_buffer);
 
-      /* Multiply brush color by texture color (RGB) and apply texture alpha to factor. */
-      float4 textured_brush_color = brush_color_ * float4(tex_color[0], tex_color[1], tex_color[2], 1.0f);
-      float textured_factor = factor * tex_color[3];
+      /* Match old system (do_projectpaint_draw_f):
+       * 1. Multiply brush color (linear) by texture RGB (linear) = result in linear
+       * 2. Apply mask (factor includes texture alpha)
+       * 3. Set alpha = mask
+       * 4. Convert to image color space (for byte buffers)
+       * 5. Blend with IMB_blend_color_float
+       */
+      float4 paint_color;
 
-      float4 paint_color = textured_brush_color * textured_factor;
-      float4 buffer_color;
+      /* Multiply brush color (linear) by texture RGB (linear). */
+      paint_color[0] = brush_color_linear_[0] * tex_color[0];
+      paint_color[1] = brush_color_linear_[1] * tex_color[1];
+      paint_color[2] = brush_color_linear_[2] * tex_color[2];
+
+      /* Apply mask (factor already includes brush strength, falloff, etc).
+       * Texture alpha modulates the mask. */
+      const float mask = factor * tex_color[3];
+      paint_color[0] *= mask;
+      paint_color[1] *= mask;
+      paint_color[2] *= mask;
+      paint_color[3] = mask;
+
+      /* Convert from scene linear to image color space (for byte buffers). */
+      if (cm_processor != nullptr) {
+        IMB_colormanagement_processor_apply_v4(cm_processor, paint_color);
+      }
 
 #ifdef DEBUG_PIXEL_NODES
       if ((pixel_row.start_image_coordinate.y >> 3) & 1) {
@@ -875,14 +905,18 @@ template<typename ImageBuffer> class PaintingKernel {
       }
 #endif
 
-      blend_color_mix_float(buffer_color, color, paint_color);
-      buffer_color *= brush_alpha;
-      IMB_blend_color_float(color, color, buffer_color, blend_mode);
-      image_accessor_.write_pixel(image_buffer, color);
+      /* Blend directly - this matches the old system. */
+      IMB_blend_color_float(dest_color, dest_color, paint_color, blend_mode);
+      image_accessor_.write_pixel(image_buffer, dest_color);
       pixels_painted = true;
 
       image_accessor_.next_pixel();
     }
+
+    if (cm_processor != nullptr) {
+      IMB_colormanagement_processor_free(cm_processor);
+    }
+
     return pixels_painted;
   }
 
@@ -893,6 +927,11 @@ template<typename ImageBuffer> class PaintingKernel {
       return;
     }
 
+    /* Store linear brush color for texture multiplication. */
+    copy_v3_v3(brush_color_linear_, in_brush_color);
+    brush_color_linear_[3] = 1.0f;
+
+    /* Store converted brush color for direct blending. */
     copy_v3_v3(brush_color_, in_brush_color);
     brush_color_[3] = 1.0f;
 

@@ -182,15 +182,6 @@
       "source_name": "action_key"
     },
     {
-      "codepoint": "e1e6",
-      "name": "activity_zone",
-      "unicode": "",
-      "category": "action",
-      "tags": [],
-      "popularity": 0,
-      "source_name": "activity_zone"
-    },
-    {
       "codepoint": "e4cb",
       "name": "acute",
       "unicode": "",
@@ -765,15 +756,6 @@
       "tags": [],
       "popularity": 0,
       "source_name": "align_justify_space_around"
-    },
-    {
-      "codepoint": "f78e",
-      "name": "align_justify_space_between",
-      "unicode": "",
-      "category": "action",
-      "tags": [],
-      "popularity": 0,
-      "source_name": "align_justify_space_between"
     },
     {
       "codepoint": "f78d",
@@ -4113,15 +4095,6 @@
       "tags": [],
       "popularity": 0,
       "source_name": "chromecast_2"
-    },
-    {
-      "codepoint": "e83c",
-      "name": "chromecast_device",
-      "unicode": "",
-      "category": "action",
-      "tags": [],
-      "popularity": 0,
-      "source_name": "chromecast_device"
     },
     {
       "codepoint": "ebb2",

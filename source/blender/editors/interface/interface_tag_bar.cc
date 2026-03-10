@@ -1256,6 +1256,7 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
 
   /* Checkbox for showing tag names only for active tags */
   ui::Layout &prop_row2 = layout.row(false);
+  prop_row2.active_set(RNA_boolean_get(&wm_ptr, "show_tag_names"));
   prop_row2.prop(&wm_ptr, "show_tag_names_active_only", UI_ITEM_NONE, IFACE_("Only Active Tags"), ICON_NONE);
 
   /* Move buttons column */

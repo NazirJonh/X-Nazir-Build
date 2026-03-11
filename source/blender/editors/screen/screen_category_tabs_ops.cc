@@ -332,13 +332,24 @@ struct CategoryTabResetDefaults {
 
 static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
                                                        const char *category,
-                                                       const bool reset_glyph)
+                                                       const bool reset_glyph,
+                                                       const int space_type)
 {
   CategoryTabResetDefaults defaults;
 
   if (!(wm && wm->category_glyph_mappings.first)) {
     return defaults;
   }
+
+  printf("[CATEGORY RESET DEBUG] compute_reset_defaults(category='%s', space_type=%d, reset_glyph=%d)\n",
+         category,
+         space_type,
+         reset_glyph ? 1 : 0);
+
+  CategoryGlyphItem *apply_item = nullptr;
+  CategoryGlyphItem *target_item = nullptr;
+  CategoryGlyphItem *global_item = nullptr;
+  CategoryGlyphItem *first_match = nullptr;
 
   for (CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
        item;
@@ -348,56 +359,101 @@ static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
       continue;
     }
 
-    const bool is_glyph_only_category = is_single_glyph_str(category);
+    if (item->space_type == -1) {
+      global_item = item;
+    }
+    if (space_type == item->space_type) {
+      target_item = item;
+    }
+    if (!first_match) {
+      first_match = item;
+    }
+    if (target_item && global_item) {
+      break;
+    }
+  }
 
-    if (reset_glyph) {
-      /* Reset should always clear explicit first-letter mode in persisted mapping. */
-      item->glyph_mode = ui::CATEGORY_TAB_GLYPH_MODE_AUTO;
+  /* Choose the entry we will mutate (apply reset to) and the one we use as default source. */
+  apply_item = target_item ? target_item : (first_match ? first_match : global_item);
+  if (!apply_item) {
+    return defaults;
+  }
+
+  printf("[CATEGORY RESET DEBUG] apply_item space_type=%d category='%s' glyph='%s' default_glyph='%s'\n",
+         apply_item->space_type,
+         apply_item->category,
+         apply_item->glyph,
+         apply_item->default_glyph);
+
+  const bool is_glyph_only_category = is_single_glyph_str(category);
+  const bool global_has_glyph = (global_item != nullptr) &&
+                                (global_item->glyph[0] != '\0' || global_item->default_glyph[0] != '\0');
+  CategoryGlyphItem *default_source = apply_item;
+  if (global_has_glyph || (is_glyph_only_category && global_item)) {
+    default_source = global_item;
+  }
+
+  printf("[CATEGORY RESET DEBUG] default_source space_type=%d category='%s' glyph='%s' default_glyph='%s'\n",
+         default_source->space_type,
+         default_source->category,
+         default_source->glyph,
+         default_source->default_glyph);
+
+  if (reset_glyph) {
+    /* Reset should always clear explicit first-letter mode in persisted mapping. */
+    apply_item->glyph_mode = ui::CATEGORY_TAB_GLYPH_MODE_AUTO;
+  }
+
+  if (is_glyph_only_category) {
+    if (default_source->default_glyph[0] != '\0') {
+      defaults.glyph = default_source->default_glyph;
+    }
+    else if (default_source->glyph[0] != '\0') {
+      defaults.glyph = default_source->glyph;
     }
 
-    if (is_glyph_only_category) {
-      if (item->default_glyph[0] != '\0') {
-        defaults.glyph = item->default_glyph;
-      }
-      else if (item->glyph[0] != '\0') {
-        defaults.glyph = item->glyph;
+    if (defaults.glyph) {
+      STRNCPY(apply_item->glyph, defaults.glyph);
+      if (apply_item->default_glyph[0] == '\0') {
+        STRNCPY(apply_item->default_glyph, defaults.glyph);
       }
     }
     else {
-      bool has_valid_default_glyph = false;
-      if (item->default_glyph[0] != '\0') {
-        has_valid_default_glyph = !ui::category_tab_glyph_is_fallback_letter(item->default_glyph,
-                                                                              category);
-      }
-
-      if (has_valid_default_glyph) {
-        defaults.glyph = item->default_glyph;
-        if (item->glyph[0] != '\0' && !STREQ(item->glyph, item->default_glyph)) {
-          STRNCPY(item->glyph, item->default_glyph);
-        }
-        if (!is_zero_v3(item->color)) {
-          zero_v3(item->color);
-        }
-      }
-      else {
-        defaults.glyph = nullptr;
-        if (item->glyph[0] != '\0') {
-          item->glyph[0] = '\0';
-        }
-        if (!is_zero_v3(item->color)) {
-          zero_v3(item->color);
-        }
-      }
+      apply_item->glyph[0] = '\0';
+    }
+  }
+  else {
+    bool has_valid_default_glyph = false;
+    if (default_source->default_glyph[0] != '\0') {
+      has_valid_default_glyph = !ui::category_tab_glyph_is_fallback_letter(
+          default_source->default_glyph, category);
     }
 
-    if (item->default_display_name[0] != '\0') {
-      defaults.display_name = item->default_display_name;
+    if (has_valid_default_glyph) {
+      defaults.glyph = default_source->default_glyph;
+      if (apply_item->glyph[0] != '\0' && !STREQ(apply_item->glyph, default_source->default_glyph)) {
+        STRNCPY(apply_item->glyph, default_source->default_glyph);
+      }
+      if (!is_zero_v3(apply_item->color)) {
+        zero_v3(apply_item->color);
+      }
     }
-    else if (item->display_name[0] != '\0') {
-      defaults.display_name = item->display_name;
+    else {
+      defaults.glyph = nullptr;
+      if (apply_item->glyph[0] != '\0') {
+        apply_item->glyph[0] = '\0';
+      }
+      if (!is_zero_v3(apply_item->color)) {
+        zero_v3(apply_item->color);
+      }
     }
+  }
 
-    break;
+  if (apply_item->default_display_name[0] != '\0') {
+    defaults.display_name = apply_item->default_display_name;
+  }
+  else if (apply_item->display_name[0] != '\0') {
+    defaults.display_name = apply_item->display_name;
   }
 
   return defaults;
@@ -441,7 +497,9 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
 
   wmWindowManager *wm = CTX_wm_manager(C);
   ScrArea *area = CTX_wm_area(C);
-  const CategoryTabResetDefaults defaults = compute_reset_defaults(wm, category, reset_glyph);
+  const int space_type = area ? area->spacetype : -1;
+  const CategoryTabResetDefaults defaults =
+      compute_reset_defaults(wm, category, reset_glyph, space_type);
 
   wmOperator *const dialog_op = category_tab_current_dialog_op;
   category_tab_reset_apply_to_operator(C,

@@ -1690,6 +1690,10 @@ void draw_preview_item_stateless(const uiFontStyle *fstyle,
 #define CATEGORY_DRAG_THRESHOLD_PX 5
 #define CATEGORY_DRAG_DELAY_SEC 0.15
 
+/* Category tag create popup width - used in C++ (interface_tag_bar.cc) and Python (space_userpref.py).
+ * IMPORTANT: Keep this value in sync with wm.category_tag_create operator invoke_props_dialog() */
+#define UI_CATEGORY_TAG_CREATE_POPUP_WIDTH 415
+
 #define UI_PIXEL_AA_JITTER 8
 extern const float ui_pixel_jitter[UI_PIXEL_AA_JITTER][2];
 

@@ -2315,8 +2315,8 @@ void panel_category_tabs_settings_popover_open(bContext *C, ARegion *region)
   /* Determine if tabs are on the left or right side of the region. */
   const bool is_left = (RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT);
 
-  /* Popup width is 200 pixels (set in Python operator), convert with scale. */
-  const int popup_width = 200 * UI_SCALE_FAC;
+  /* Popup width is 240 pixels (set in Python operator), convert with scale. */
+  const int popup_width = 240 * UI_SCALE_FAC;
   /* Add extra margin for spacing. */
   const int popup_margin = 10 * UI_SCALE_FAC;
 

@@ -4639,7 +4639,8 @@ class USERPREF_OT_category_tag_create(Operator):
             f"[DEBUG CREATE_TAG invoke] prepared glyph='{self.glyph}', "
             f"glyph_search='{self.glyph_search}', category='{self.category}'"
         )
-        return context.window_manager.invoke_props_dialog(self, width=405)
+        # IMPORTANT: Keep width in sync with UI_CATEGORY_TAG_CREATE_POPUP_WIDTH in interface_intern.hh
+        return context.window_manager.invoke_props_dialog(self, width=430)
 
     def check(self, context):
         # Clear error message when user starts typing a name
@@ -6468,7 +6469,7 @@ class USERPREF_PT_theme_glyph_colors(ThemePanel, CenterAlignMixIn, Panel):
     def draw_header(self, _context):
         layout = self.layout
 
-        layout.label(icon='COLOR')
+        layout.label(icon='FUND')
 
     def draw_centered(self, context, layout):
         theme = context.preferences.themes[0]
@@ -8240,7 +8241,9 @@ class VIEW3D_OT_category_tabs_settings(Operator):
 
             # Visual effect - only in Icon mode
             layout.separator()
-            layout.prop(view, "category_tabs_visual_effect", text="Visual Effect")
+            visual_row = layout.row()
+            visual_row.active = not view.category_tabs_show_active_name
+            visual_row.prop(view, "category_tabs_visual_effect", text="Visual Effect")
 
         # --- BEGIN: MIXED_MODE_CONTENT_FLAGS (optional per-type visibility in Mixed mode) ---
         # To remove: delete this entire block
@@ -8280,7 +8283,7 @@ class VIEW3D_OT_category_tabs_settings(Operator):
         # Ensure glyph mappings are registered when opening settings
         register_category_glyph_mappings()
         wm = context.window_manager
-        return wm.invoke_popup(self, width=200)
+        return wm.invoke_popup(self, width=240) # in interface_panel void panel_category_tabs_settings_popover_open(bContext *C, ARegion *region) use const int popup_width = 240 * UI_SCALE_FAC;
 
 
 # -----------------------------------------------------------------------------

@@ -659,7 +659,12 @@ static const char *panel_category_glyph_lookup_override(const wmWindowManager *w
     }
 
     if (item->glyph[0] != '\0') {
-      const bool is_fallback_letter = category_tab_glyph_is_fallback_letter(item->glyph, category);
+      /* For glyph_only categories (category name is a glyph), skip fallback letter check.
+       * The glyph equals the category name, which would incorrectly be detected as fallback. */
+      const bool is_glyph_only_category = category_name_is_glyph(category);
+      const bool is_fallback_letter = is_glyph_only_category ?
+                                          false :
+                                          category_tab_glyph_is_fallback_letter(item->glyph, category);
 
       if (is_fallback_letter) {
         if (r_color && !is_zero_v3(item->color)) {
@@ -684,7 +689,8 @@ static const char *panel_category_glyph_lookup_override(const wmWindowManager *w
     }
 
     /* Override has no glyph: may be explicit clear OR tags/color-only carrier.
-     * Keep searching mappings/defaults, but preserve custom color from exact match.
+     * For text_only/glyph_text categories (default_glyph is empty), this means reset to first letter.
+     * For glyph_only categories (default_glyph is set), continue to mappings to get default.
      *
      * Important for glyph-id categories (normalized key can be empty): without this,
      * color-only overrides are lost in live preview until full restart/resync.
@@ -692,6 +698,36 @@ static const char *panel_category_glyph_lookup_override(const wmWindowManager *w
     if (r_color && !is_zero_v3(item->color)) {
       copy_v3_v3(r_color, item->color);
     }
+
+    /* Check if this is a text_only/glyph_text category by looking at mappings.
+     * If default_glyph is empty, reset should return first letter (nullptr), not mapping glyph. */
+    bool is_text_based_category = false;
+    for (const CategoryGlyphItem *map_item = static_cast<const CategoryGlyphItem *>(
+             wm->category_glyph_mappings.first);
+         map_item;
+         map_item = static_cast<const CategoryGlyphItem *>(map_item->next))
+    {
+      if (STREQ(map_item->category, category)) {
+        /* If default_glyph is empty, this is a text_only or glyph_text category.
+         * Reset should return first letter, not the glyph from mappings. */
+        if (map_item->default_glyph[0] == '\0') {
+          is_text_based_category = true;
+        }
+        break;
+      }
+    }
+
+    if (is_text_based_category) {
+      /* Text-based category with empty override glyph = reset to first letter.
+       * Set handled=true to prevent fallback to mappings which would return old glyph.
+       * Set is_fallback_letter=true so draw code knows to use first letter. */
+      if (r_is_fallback_letter) {
+        *r_is_fallback_letter = true;
+      }
+      *r_handled = true;
+      return nullptr;
+    }
+
     break;
   }
 
@@ -720,7 +756,12 @@ static const char *panel_category_glyph_lookup_override(const wmWindowManager *w
     }
 
     if (item->glyph[0] != '\0') {
-      const bool is_fallback_letter = category_tab_glyph_is_fallback_letter(item->glyph, category);
+      /* For glyph_only categories (category name is a glyph), skip fallback letter check.
+       * The glyph equals the category name, which would incorrectly be detected as fallback. */
+      const bool is_glyph_only_category = category_name_is_glyph(category);
+      const bool is_fallback_letter = is_glyph_only_category ?
+                                          false :
+                                          category_tab_glyph_is_fallback_letter(item->glyph, category);
 
       if (is_fallback_letter) {
         if (r_color && !is_zero_v3(item->color)) {
@@ -745,10 +786,37 @@ static const char *panel_category_glyph_lookup_override(const wmWindowManager *w
     }
 
     /* Override has no glyph: may be explicit clear OR tags-only carrier.
-     * In both cases continue to mappings/defaults; preserve custom color if provided. */
+     * For text_only/glyph_text categories, this means reset to first letter. */
     if (r_color && !is_zero_v3(item->color)) {
       copy_v3_v3(r_color, item->color);
     }
+
+    /* Check if this is a text_only/glyph_text category by looking at mappings.
+     * If default_glyph is empty, reset should return first letter, not mapping glyph. */
+    bool is_text_based_category = false;
+    for (const CategoryGlyphItem *map_item = static_cast<const CategoryGlyphItem *>(
+             wm->category_glyph_mappings.first);
+         map_item;
+         map_item = static_cast<const CategoryGlyphItem *>(map_item->next))
+    {
+      if (STREQ(map_item->category, category)) {
+        if (map_item->default_glyph[0] == '\0') {
+          is_text_based_category = true;
+        }
+        break;
+      }
+    }
+
+    if (is_text_based_category) {
+      /* Text-based category with empty override glyph = reset to first letter.
+       * Set is_fallback_letter=true so draw code knows to use first letter. */
+      if (r_is_fallback_letter) {
+        *r_is_fallback_letter = true;
+      }
+      *r_handled = true;
+      return nullptr;
+    }
+
     break;
     }
   }
@@ -782,16 +850,22 @@ static const char *panel_category_glyph_lookup_mapping(const wmWindowManager *wm
     return nullptr;
   }
 
-  if (item->glyph[0] != '\0' && !category_tab_glyph_is_fallback_letter(item->glyph, category)) {
-    *r_handled = true;
-    return item->glyph;
+  /* For glyph_only categories (category name is a glyph), skip fallback letter check.
+   * The glyph equals the category name, which would incorrectly be detected as fallback. */
+  const bool is_glyph_only_category = category_name_is_glyph(category);
+
+  if (item->glyph[0] != '\0') {
+    if (is_glyph_only_category || !category_tab_glyph_is_fallback_letter(item->glyph, category)) {
+      *r_handled = true;
+      return item->glyph;
+    }
   }
 
-  if (item->default_glyph[0] != '\0' &&
-      !category_tab_glyph_is_fallback_letter(item->default_glyph, category))
-  {
-    *r_handled = true;
-    return item->default_glyph;
+  if (item->default_glyph[0] != '\0') {
+    if (is_glyph_only_category || !category_tab_glyph_is_fallback_letter(item->default_glyph, category)) {
+      *r_handled = true;
+      return item->default_glyph;
+    }
   }
 
   return nullptr;

@@ -581,8 +581,12 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
    * Stop processing to avoid resurrecting deleted overrides.
    */
   if (category_tab_current_dialog_op != op) {
+    printf("[LIVE UPDATE CB] GUARD FAILED: current_dialog_op=%p, op=%p\n",
+           (void*)category_tab_current_dialog_op, (void*)op);
     return;
   }
+
+  printf("[LIVE UPDATE CB] CALLED\n");
 
   char category[64];
   RNA_string_get(op->ptr, "category", category);
@@ -592,6 +596,9 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
 
   char glyph_raw[16];
   RNA_string_get(op->ptr, "glyph", glyph_raw);
+
+  /* DEBUG: Log glyph_raw from operator */
+  printf("[LIVE UPDATE CB] category='%s', glyph_raw='%s'\n", category, glyph_raw);
 
   /* Validate glyph input: must be empty or valid hex code (1-6 hex digits). */
   const bool glyph_valid = validate_glyph_hex_input(glyph_raw);
@@ -756,16 +763,49 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
    * Note: We always save the glyph because panel_category_glyph_lookup returns
    * the override glyph if it exists, which would cause a false "match" condition.
    */
+  printf("[LIVE UPDATE CB] glyph_valid=%d, glyph='%s' (processed)\n", glyph_valid ? 1 : 0, glyph);
   if (glyph_valid && glyph[0] != '\0') {
     /* User has entered a valid glyph - save it to override */
+    printf("[LIVE UPDATE CB] Saving glyph to override: '%s'\n", glyph);
     STRNCPY(item->glyph, glyph);
   }
   else if (!glyph_valid) {
     /* Invalid glyph - don't update override, keep previous value */
+    printf("[LIVE UPDATE CB] Invalid glyph - keeping previous value\n");
   }
   else {
-    /* Empty glyph - clear override glyph to use defaults */
-    item->glyph[0] = '\0';
+    /* Empty glyph - check if this is a glyph_only category */
+    const bool is_glyph_only_category = is_single_glyph_str(category);
+    if (is_glyph_only_category) {
+      /* For glyph_only categories, get glyph from mappings (the original glyph) */
+      printf("[LIVE UPDATE CB] Empty glyph for glyph_only category - looking up in mappings\n");
+      for (CategoryGlyphItem *map_item =
+               static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+           map_item;
+           map_item = static_cast<CategoryGlyphItem *>(map_item->next))
+      {
+        if (STREQ(map_item->category, category)) {
+          if (map_item->glyph[0] != '\0') {
+            printf("[LIVE UPDATE CB] Found glyph in mappings: '%s'\n", map_item->glyph);
+            STRNCPY(item->glyph, map_item->glyph);
+          }
+          else if (map_item->default_glyph[0] != '\0') {
+            printf("[LIVE UPDATE CB] Found default_glyph in mappings: '%s'\n", map_item->default_glyph);
+            STRNCPY(item->glyph, map_item->default_glyph);
+          }
+          else {
+            printf("[LIVE UPDATE CB] No glyph in mappings for glyph_only category\n");
+            item->glyph[0] = '\0';
+          }
+          break;
+        }
+      }
+    }
+    else {
+      /* Not a glyph_only category - clear override glyph to use defaults */
+      printf("[LIVE UPDATE CB] Empty glyph - clearing override\n");
+      item->glyph[0] = '\0';
+    }
   }
 
   /* Trigger live redraw so icon/glyph updates appear instantly without restart. */

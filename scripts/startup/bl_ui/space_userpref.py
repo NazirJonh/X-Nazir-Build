@@ -1071,7 +1071,12 @@ def _normalize_category_data(category_data, category_name=None):
                 entry["default_glyph"] = glyph_str or ""
         else:
             # Backward compatibility for legacy data where default_glyph field does not exist.
-            entry["default_glyph"] = entry["glyph"]
+            # IMPORTANT: Only set default_glyph from glyph for glyph_only categories.
+            # For text_only/glyph_text categories, default_glyph should be empty (reset returns first letter).
+            if entry.get("base_type") == "glyph_only":
+                entry["default_glyph"] = entry["glyph"]
+            else:
+                entry["default_glyph"] = ""
 
         if "default_display_name" in category_data:
             entry["default_display_name"] = category_data["default_display_name"]
@@ -1096,8 +1101,9 @@ def _normalize_category_data(category_data, category_name=None):
                 entry["base_type"] = "text_only"
 
         # Safety correction for previously serialized incorrect state:
-        # text_only categories must reset to fallback letter, so default_glyph must be empty.
-        if entry["base_type"] == "text_only":
+        # text_only AND glyph_text categories must reset to fallback letter, so default_glyph must be empty.
+        # Only glyph_only categories should have default_glyph set (to category name).
+        if entry["base_type"] in ("text_only", "glyph_text"):
             entry["default_glyph"] = ""
 
         # For glyph_only categories, ensure default_glyph is set to category name (original glyph)
@@ -2505,8 +2511,15 @@ def set_category_data(category,
 
     # Ensure the entry has all required fields
     entry = _glyph_cache[key]
+    # Note: default_glyph should NOT be set from glyph for text_only/glyph_text categories.
+    # For text_only categories, reset should return first letter (nullptr in C++),
+    # not a previously assigned glyph. default_glyph is only meaningful for glyph_only categories.
     if "default_glyph" not in entry:
-        entry["default_glyph"] = entry.get("glyph", "")
+        # Only set default_glyph for glyph_only categories
+        if _is_single_glyph(category):
+            entry["default_glyph"] = category
+        else:
+            entry["default_glyph"] = ""
     if "default_display_name" not in entry:
         entry["default_display_name"] = entry.get("display_name", "")
     if "glyph_mode" not in entry:
@@ -2517,12 +2530,15 @@ def set_category_data(category,
         # For glyph_only categories, default_glyph must be the category name (original glyph)
         is_glyph_only = _is_single_glyph(category)
         if is_glyph_only:
-            if not _glyph_cache[key].get("default_glyph"):
-                _glyph_cache[key]["default_glyph"] = category
+            # For glyph_only: default_glyph = category name (the original glyph)
+            _glyph_cache[key]["default_glyph"] = category
             _glyph_cache[key]["base_type"] = "glyph_only"
         elif glyph:
-            # For non-glyph_only with a glyph set, update base_type
+            # For text_only categories with a glyph assigned: base_type = glyph_text
+            # But default_glyph stays EMPTY - reset should return to first letter
             _glyph_cache[key]["base_type"] = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
+            # Do NOT set default_glyph for text_only/glyph_text categories
+            # Reset should return to first letter (nullptr in C++)
     if display_name is not None:
         _glyph_cache[key]["display_name"] = display_name
         # Also update default_display_name if it's empty (preserve discovered label)

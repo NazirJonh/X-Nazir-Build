@@ -252,9 +252,15 @@ DEFAULT_CATEGORY_GLYPHS = {
     "Tool": {"glyph": "\uea3b", "display_name": "", "color": [0.0, 0.0, 0.0],
              "default_glyph": "\uea3b", "default_display_name": ""},       # construction
     "Asset": {"glyph": "\ue2c7", "display_name": "", "color": [0.0, 0.0, 0.0],
-             "default_glyph": "\ue2c7", "default_display_name": ""},      # folder
+              "default_glyph": "\ue2c7", "default_display_name": ""},      # folder
     "Options": {"glyph": "\uf835", "display_name": "", "color": [0.0, 0.0, 0.0],
-                "default_glyph": "\uf835", "default_display_name": ""},    # options
+                 "default_glyph": "\uf835", "default_display_name": ""},    # options
+    "Cache": {"glyph": "\uf720", "display_name": "", "color": [0.0, 0.0, 0.0],
+              "default_glyph": "\uf720", "default_display_name": ""},      # cache
+    "Proxy": {"glyph": "\ue335", "display_name": "", "color": [0.0, 0.0, 0.0],
+              "default_glyph": "\ue335", "default_display_name": ""},      # proxy
+    "Metadata": {"glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
+                 "default_glyph": "", "default_display_name": ""},             # metadata (text-only)
 
     # Editor-specific
     "Animation": {"glyph": "\uf8f0", "display_name": "", "color": [0.0, 0.0, 0.0],
@@ -295,12 +301,12 @@ DEFAULT_CATEGORY_GLYPHS = {
                     "default_glyph": "\ue8d2", "default_display_name": ""}, # rule
     "Data": {"glyph": "\ue23e", "display_name": "", "color": [0.0, 0.0, 0.0],
              "default_glyph": "\ue23e", "default_display_name": ""},       # database
-    "Node": {"glyph": "\ue1b8", "display_name": "", "color": [0.0, 0.0, 0.0],
-             "default_glyph": "\ue1b8", "default_display_name": ""},       # account_tree
-    "Group": {"glyph": "\ue3ea", "display_name": "", "color": [0.0, 0.0, 0.0],
-             "default_glyph": "\ue3ea", "default_display_name": ""},       # account_tree
-    "Scopes": {"glyph": "\uf04e", "display_name": "", "color": [0.0, 0.0, 0.0],
-             "default_glyph": "\uf04e", "default_display_name": ""},       # account_tree
+    "Node": {"glyph": "\uf20e", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\uf20e", "default_display_name": ""},       # account_tree
+    "Group": {"glyph": "\ue574", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ue574", "default_display_name": ""},       # account_tree
+    "Scopes": {"glyph": "\ue762", "display_name": "", "color": [0.0, 0.0, 0.0],
+             "default_glyph": "\ue762", "default_display_name": ""},       # account_tree
 }
 
 # In-memory cache of glyph mappings: (space_type, category) -> data
@@ -584,39 +590,39 @@ RESERVED_CATEGORY_PRIORITY = {
     'VIEW_3D': [
         "Item", "Tool", "View", "Animation", "Edit", "Asset", "Options",
         "Modifiers", "Physics", "Material", "World", "Scene",
-        "Render" 
+        "Render", "Cache", "Proxy", "Metadata"
     ],
     'PROPERTIES': [
         "Item", "Tool", "View", "Physics", "Material", "World", "Scene",
-        "Render", "Options", "Texture", "Output"
+        "Render", "Options", "Texture", "Output", "Cache", "Proxy", "Metadata"
     ],
     'NODE_EDITOR': [
-        "Item", "Tool", "View", "Options", "Node", "Group"
+        "Item", "Tool", "View", "Options", "Node", "Group", "Cache", "Proxy", "Metadata"
     ],
     'IMAGE_EDITOR': [
-        "Item", "Tool", "View", "Image", "Mask", "Scopes"
+        "Item", "Tool", "View", "Image", "Mask", "Scopes", "Cache", "Proxy", "Metadata"
     ],
     'SEQUENCE_EDITOR': [
-        "Item", "Tool", "View", "Strip"
+        "Item", "Tool", "View", "Strip", "Cache", "Proxy", "Metadata"
     ],
     'CLIP_EDITOR': [
-        "Item", "Tool", "View", "Mask", "Tracking"
+        "Item", "Tool", "View", "Mask", "Tracking", "Cache", "Proxy", "Metadata"
     ],
     'TEXT_EDITOR': [
-        "Tool", "View", "Options", "Text"
+        "Tool", "View", "Options", "Text", "Cache", "Proxy", "Metadata"
     ],
     'DOPESHEET_EDITOR': [
-        "Item", "Tool", "View", "Animation"
+        "Item", "Tool", "View", "Animation", "Cache", "Proxy", "Metadata"
     ],
     'GRAPH_EDITOR': [
-        "Item", "Tool", "View", "Animation"
+        "Item", "Tool", "View", "Animation", "Cache", "Proxy", "Metadata"
     ],
     'NLA_EDITOR': [
-        "Item", "Tool", "View", "Animation"
+        "Item", "Tool", "View", "Animation", "Cache", "Proxy", "Metadata"
     ],
     # Default fallback for unknown space types
     'DEFAULT': [
-        "Item", "Tool", "View", "Edit", "Asset", "Options"
+        "Item", "Tool", "View", "Edit", "Asset", "Options", "Cache", "Proxy", "Metadata"
     ]
 }
 

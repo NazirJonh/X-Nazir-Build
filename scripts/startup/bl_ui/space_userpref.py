@@ -422,15 +422,18 @@ def _ensure_category_panel_label(category, space_type, entry):
     if not isinstance(entry, dict):
         entry = _normalize_category_data({}, category_name=category)
 
-    # Populate default_display_name / display_name only if missing, to avoid
-    # overwriting explicit user customizations.
-    if not entry.get("default_display_name"):
-        entry["default_display_name"] = panel_label
-    if not entry.get("display_name"):
-        entry["display_name"] = panel_label
+    # Populate default_display_name / display_name ONLY for glyph_only categories
+    # (e.g., "Script 1" for category "" which is a single glyph)
+    # For text_only/glyph_text categories, leave display_name empty to use category name as fallback
+    is_glyph_only = _is_single_glyph(category)
+    if is_glyph_only:
+        if not entry.get("default_display_name"):
+            entry["default_display_name"] = panel_label
+        if not entry.get("display_name"):
+            entry["display_name"] = panel_label
 
     # For glyph-only categories, also ensure glyph/default_glyph/base_type are set.
-    if _is_single_glyph(category):
+    if is_glyph_only:
         if not entry.get("glyph"):
             entry["glyph"] = category
         if not entry.get("default_glyph"):
@@ -445,12 +448,14 @@ def _ensure_category_panel_label(category, space_type, entry):
             if not isinstance(cache_data, dict):
                 cache_data = _normalize_category_data(cache_data, category_name=category)
 
-            if not cache_data.get("default_display_name"):
-                cache_data["default_display_name"] = panel_label
-            if not cache_data.get("display_name"):
-                cache_data["display_name"] = panel_label
+            # Only set display_name for glyph_only categories
+            if is_glyph_only:
+                if not cache_data.get("default_display_name"):
+                    cache_data["default_display_name"] = panel_label
+                if not cache_data.get("display_name"):
+                    cache_data["display_name"] = panel_label
 
-            if _is_single_glyph(category):
+            if is_glyph_only:
                 if not cache_data.get("glyph"):
                     cache_data["glyph"] = category
                 if not cache_data.get("default_glyph"):
@@ -484,16 +489,14 @@ def _get_category_data(category, space_type=-1):
     def has_meaningful_data(data):
         if not isinstance(data, dict):
             return False
-        # Check for non-empty glyph (this is the primary indicator of meaningful data)
+        # CRITICAL FIX: Only consider glyph as "meaningful" for fallback logic
+        # This prevents VIEW3D entries with empty glyphs from blocking GLOBAL fallback
         glyph = data.get("glyph", "")
         default_glyph = data.get("default_glyph", "")
         has_glyph = bool(glyph or default_glyph)
         
-        # Also check display names and non-black color
-        has_display = bool(data.get("display_name") or data.get("default_display_name"))
-        has_color = any(c > 0.0 for c in data.get("color", [0.0, 0.0, 0.0]))
-        
-        return has_glyph or has_display or has_color
+        # Only glyph presence determines "meaningful" data for space-specific vs global fallback
+        return has_glyph
 
     # Try space-specific first
     key = _make_cache_key(space_type, category)
@@ -1375,24 +1378,41 @@ def _load_glyph_mappings_from_file():
                     order_categories.add(category)
 
     # Load mappings - support both old format (category -> data) and new format (space_type -> {category -> data})
+    # Also support "GLOBAL" as space_type = -1
     if isinstance(raw_mappings, dict):
         for key, value in raw_mappings.items():
             if isinstance(key, str) and key.startswith('SPACE_') and isinstance(value, dict):
                 # New format: space_type -> {category -> data}
                 space_type_str = key
                 space_type_id = _space_type_str_to_id(space_type_str)
+                print(f"[GLYPH LOAD DEBUG] Loading SPACE mappings: {space_type_str} -> {len(value)} categories")
                 for category, cat_data in value.items():
                     if isinstance(cat_data, (str, dict)):
                         # Decode Unicode escape sequences in category key (e.g., "\ue8f4" -> actual glyph)
                         decoded_category = _unicode_escape_to_glyph(category) if '\\u' in category else category
                         cache_key = _make_cache_key(space_type_id, decoded_category)
                         _glyph_cache[cache_key] = _normalize_category_data(cat_data, decoded_category)
+                        # DEBUG: Show key glyphs being loaded
+                        if 'Brushstroke' in category:
+                            print(f"[GLYPH LOAD DEBUG] Loaded Brushstroke from {key}: glyph='{cat_data.get('glyph', '')}'")
+            elif key == "GLOBAL" and isinstance(value, dict):
+                # GLOBAL is a special space_type = -1
+                print(f"[GLYPH LOAD DEBUG] Loading GLOBAL mappings -> {len(value)} categories")
+                for category, cat_data in value.items():
+                    if isinstance(cat_data, (str, dict)):
+                        decoded_category = _unicode_escape_to_glyph(category) if '\\u' in category else category
+                        cache_key = _make_cache_key(-1, decoded_category)
+                        _glyph_cache[cache_key] = _normalize_category_data(cat_data, decoded_category)
+                        # DEBUG: Show key glyphs being loaded
+                        if 'Brushstroke' in category:
+                            print(f"[GLYPH LOAD DEBUG] Loaded Brushstroke from GLOBAL: glyph='{cat_data.get('glyph', '')}'")
             elif isinstance(value, (str, dict)):
                 # Old format: category -> data (migrate to global space_type = -1)
                 # Decode Unicode escape sequences in category key
                 category = _unicode_escape_to_glyph(key) if '\\u' in key else key
                 cache_key = _make_cache_key(-1, category)
                 _glyph_cache[cache_key] = _normalize_category_data(value, category)
+                print(f"[GLYPH LOAD DEBUG] Loaded old-format category: {category}")
 
     # Ensure invalid categories referenced in order lists are kept in cache (as global)
     for category in order_categories:
@@ -1430,14 +1450,24 @@ def _load_glyph_mappings_from_file():
     return True
 
 
-def _save_glyph_mappings_to_file(data=None):
-    """Save glyph mappings to JSON file with glyphs in \\uXXXX format."""
+def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
+    """Save glyph mappings to JSON file with glyphs in \\uXXXX format.
+    
+    Args:
+        data: JSON data to save (if None, builds from current cache)
+        force_discovery_skip: If True, skip saving when file exists (used for discovery)
+    """
     global _glyph_cache, _all_tags_cache
 
     filepath = _get_glyphs_filepath()
     if not filepath:
         tag_log("No filepath for saving", "ERROR")
         return False
+
+    # CRITICAL: Only block discovery saves, allow user changes to be saved
+    if force_discovery_skip and data is None and os.path.exists(filepath):
+        tag_log(f"Skipping auto-discovery save - preserving existing customizations in {filepath}", "INFO")
+        return True  # Return True to indicate "success" (preservation is the goal)
 
     # Create backup before overwriting
     create_backup(filepath)
@@ -2992,6 +3022,15 @@ def _merge_discovered_categories():
 
     # Get unique category names from cache (extract from tuple keys)
     cached_category_names = _get_category_names_from_cache()
+    print(f"[GLYPH MERGE DEBUG] cached_category_names count: {len(cached_category_names)}")
+    print(f"[GLYPH MERGE DEBUG] discovered count: {len(discovered)}")
+    print(f"[GLYPH MERGE DEBUG] 'Brushstroke Tools' in cached: {'Brushstroke Tools' in cached_category_names}")
+    if 'Brushstroke Tools' in cached_category_names:
+        brush_key = _make_cache_key(-1, 'Brushstroke Tools')
+        print(f"[GLYPH MERGE DEBUG] Brushstroke cache key: {brush_key}")
+        print(f"[GLYPH MERGE DEBUG] Brushstroke in _glyph_cache: {brush_key in _glyph_cache}")
+        if brush_key in _glyph_cache:
+            print(f"[GLYPH MERGE DEBUG] Brushstroke cached data: {_glyph_cache[brush_key]}")
 
     # Existing cache aliases for active discovered groups are merged into the canonical entry.
     cache_changed = False
@@ -3006,6 +3045,8 @@ def _merge_discovered_categories():
 
     # Find categories that are in the discovered set but not in cache
     new_categories = discovered - cached_category_names
+    print(f"[GLYPH MERGE DEBUG] new_categories count: {len(new_categories)}")
+    print(f"[GLYPH MERGE DEBUG] 'Brushstroke Tools' in new_categories: {'Brushstroke Tools' in new_categories}")
 
     # Canonicalize only new candidates: one mapping per normalized key.
     canonical_new_categories = []
@@ -3117,8 +3158,13 @@ def _merge_discovered_categories():
             else:
                 base_type = "text_only"
 
-            # Get display name from panel label (e.g., "Script 1" for category "")
-            default_display_name = category_to_label.get(category, "")
+            # Get display name from panel label ONLY for glyph_only categories
+            # (e.g., "Script 1" for category "" which is a single glyph)
+            # For text_only/glyph_text categories, leave display_name empty to use category name as fallback
+            if base_type == "glyph_only":
+                default_display_name = category_to_label.get(category, "")
+            else:
+                default_display_name = ""
 
             # Use global key (-1) for newly discovered categories
             cache_key = _make_cache_key(-1, category)
@@ -3149,15 +3195,15 @@ def _merge_discovered_categories():
 
             print(f"[GLYPH] Added new category '{category}' with glyph '{glyph}', base_type={base_type}")
 
-        # Save updated cache to file
-        if _save_glyph_mappings_to_file():
+        # Save updated cache to file (skip if file exists - discovery mode)
+        if _save_glyph_mappings_to_file(force_discovery_skip=True):
             print(f"[GLYPH] Saved {len(new_categories)} new category mappings to JSON")
             return True
         else:
             print(f"[GLYPH] Failed to save new category mappings")
 
     elif cache_changed or existing_categories_needing_icon_update or existing_glyph_only_needing_name_update:
-        if _save_glyph_mappings_to_file():
+        if _save_glyph_mappings_to_file(force_discovery_skip=True):
             if cache_changed:
                 print("[GLYPH] Saved cache canonicalization updates to JSON")
             if existing_categories_needing_icon_update:
@@ -3455,7 +3501,7 @@ def _sync_glyph_mappings_to_wm_impl():
 
         # Save cache to file if any icon paths were updated during sync
         if cache_changed:
-            if _save_glyph_mappings_to_file():
+            if _save_glyph_mappings_to_file(force_discovery_skip=True):
                 print("[GLYPH SYNC] Saved updated icon paths to JSON file")
             else:
                 print("[GLYPH SYNC] Failed to save updated icon paths to JSON file")
@@ -3705,11 +3751,10 @@ def _sync_wm_to_glyph_cache_impl():
 
                     # Get current cached data or create new entry
                     if cache_key not in _glyph_cache:
-                        # Determine base_type based on category name (glyph-only categories use single glyph as name)
-                        base_type = "glyph_only" if _is_single_glyph(category) else "text_only"
+                        # Create initial entry with default base_type (will be updated when glyph is set)
                         _glyph_cache[cache_key] = {
                             "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
-                            "default_glyph": "", "default_display_name": "", "base_type": base_type,
+                            "default_glyph": "", "default_display_name": "", "base_type": "text_only",
                             "glyph_mode": "auto",
                             "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
                         }
@@ -3723,7 +3768,12 @@ def _sync_wm_to_glyph_cache_impl():
                             # Also update default_glyph and base_type for glyph_only categories
                             # This ensures the category is properly saved to JSON
                             cached_entry["default_glyph"] = item.glyph
-                            base_type = "glyph_only" if _is_single_glyph(item.glyph) else "glyph_text"
+                            # Determine base_type based on glyph content, not category name
+                            if _is_single_glyph(item.glyph):
+                                # Single glyph - check if category name is also single glyph (true glyph_only)
+                                base_type = "glyph_only" if _is_single_glyph(category) else "glyph_text"
+                            else:
+                                base_type = "glyph_text"
                             cached_entry["base_type"] = base_type
                             changes_detected = True
                             print(f"[GLYPH SYNC] Updated glyph for '{category}' (base_type={base_type})")

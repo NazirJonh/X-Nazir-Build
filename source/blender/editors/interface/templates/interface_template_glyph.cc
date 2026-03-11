@@ -436,20 +436,34 @@ static void glyph_preview_draw_cb(const bContext * /*C*/,
     return;
   }
 
+  const float min_size = UI_UNIT_X * 0.5f;
+  const int rect_width = BLI_rcti_size_x(rect);
+  const int rect_height = BLI_rcti_size_y(rect);
+  const float rect_size = float(min_ii(rect_width, rect_height));
+  const float glyph_alpha = clamp_f((rect_size - min_size) / min_size, 0.0f, 1.0f);
+  if (glyph_alpha <= 0.0f) {
+    /* Not enough space to draw the glyph preview without clipping. */
+    return;
+  }
+
   const uiStyle *style = style_get_dpi();
   const int fontid = BLF_default();
   const float font_size = style->widget.points * UI_SCALE_FAC * size_multiplier;
   BLF_size(fontid, font_size);
 
   /* Set color - use TH_TAB_TEXT_HI when custom color is (0.0, 0.0, 0.0) */
+  float color_to_use[3];
   if (is_zero_v3(color)) {
     uchar theme_col_tab_text_hi[3];
     theme::get_color_3ubv(TH_TAB_TEXT_HI, theme_col_tab_text_hi);
-    BLF_color3ubv(fontid, theme_col_tab_text_hi);
+    for (int i = 0; i < 3; i++) {
+      color_to_use[i] = theme_col_tab_text_hi[i] / 255.0f;
+    }
   }
   else {
-    BLF_color3fv_alpha(fontid, color, 1.0f);
+    copy_v3_v3(color_to_use, color);
   }
+  BLF_color3fv_alpha(fontid, color_to_use, glyph_alpha);
 
   /* Calculate center position with proper baseline adjustment */
   const float glyph_width = BLF_width(fontid, glyph_unicode, BLF_DRAW_STR_DUMMY_MAX);

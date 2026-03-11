@@ -1100,6 +1100,12 @@ def _normalize_category_data(category_data, category_name=None):
         if entry["base_type"] == "text_only":
             entry["default_glyph"] = ""
 
+        # For glyph_only categories, ensure default_glyph is set to category name (original glyph)
+        if entry["base_type"] == "glyph_only" and category_name and _is_single_glyph(category_name):
+            if not entry.get("default_glyph"):
+                entry["default_glyph"] = category_name
+                print(f"[GLYPH LOAD] Set default_glyph for glyph_only category '{category_name}' to category name")
+
         # NEW: For reserved categories (in DEFAULT_CATEGORY_GLYPHS), restore default_glyph
         # even if glyph field is empty in JSON. This ensures Reset works correctly.
         if category_name and category_name in DEFAULT_CATEGORY_GLYPHS:
@@ -2443,6 +2449,15 @@ def set_category_glyph(category, glyph, space_type=-1, save=True):
 
     if glyph:
         _glyph_cache[key]["glyph"] = glyph
+        # For glyph_only categories, default_glyph must be the category name (original glyph)
+        is_glyph_only = _is_single_glyph(category)
+        if is_glyph_only:
+            if not _glyph_cache[key].get("default_glyph"):
+                _glyph_cache[key]["default_glyph"] = category
+            _glyph_cache[key]["base_type"] = "glyph_only"
+        elif glyph:
+            # For non-glyph_only with a glyph set, update base_type
+            _glyph_cache[key]["base_type"] = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
     else:
         # Remove the category if glyph is empty
         if key in _glyph_cache:
@@ -2499,6 +2514,15 @@ def set_category_data(category,
 
     if glyph is not None:
         _glyph_cache[key]["glyph"] = glyph
+        # For glyph_only categories, default_glyph must be the category name (original glyph)
+        is_glyph_only = _is_single_glyph(category)
+        if is_glyph_only:
+            if not _glyph_cache[key].get("default_glyph"):
+                _glyph_cache[key]["default_glyph"] = category
+            _glyph_cache[key]["base_type"] = "glyph_only"
+        elif glyph:
+            # For non-glyph_only with a glyph set, update base_type
+            _glyph_cache[key]["base_type"] = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
     if display_name is not None:
         _glyph_cache[key]["display_name"] = display_name
         # Also update default_display_name if it's empty (preserve discovered label)
@@ -3614,9 +3638,12 @@ def _sync_wm_to_glyph_cache_impl():
                 # Check if any values changed
                 if cached_entry.get("glyph", "") != item.glyph:
                     cached_entry["glyph"] = item.glyph
-                    # Update default_glyph and base_type for proper glyph_only handling
+                    # Update default_glyph only for non-glyph_only categories
+                    # For glyph_only, default_glyph must stay as category name (original glyph)
                     if item.glyph:
-                        cached_entry["default_glyph"] = item.glyph
+                        is_glyph_only = _is_single_glyph(category)
+                        if not is_glyph_only:
+                            cached_entry["default_glyph"] = item.glyph
                         # Determine base_type based on glyph content
                         if _is_single_glyph(item.glyph):
                             cached_entry["base_type"] = "glyph_only"
@@ -3765,13 +3792,15 @@ def _sync_wm_to_glyph_cache_impl():
                     if item.glyph:
                         if cached_entry.get("glyph", "") != item.glyph:
                             cached_entry["glyph"] = item.glyph
-                            # Also update default_glyph and base_type for glyph_only categories
-                            # This ensures the category is properly saved to JSON
-                            cached_entry["default_glyph"] = item.glyph
+                            # Update default_glyph only for non-glyph_only categories
+                            # For glyph_only, default_glyph must stay as category name (original glyph)
+                            is_glyph_only = _is_single_glyph(category)
+                            if not is_glyph_only:
+                                cached_entry["default_glyph"] = item.glyph
                             # Determine base_type based on glyph content, not category name
                             if _is_single_glyph(item.glyph):
                                 # Single glyph - check if category name is also single glyph (true glyph_only)
-                                base_type = "glyph_only" if _is_single_glyph(category) else "glyph_text"
+                                base_type = "glyph_only" if is_glyph_only else "glyph_text"
                             else:
                                 base_type = "glyph_text"
                             cached_entry["base_type"] = base_type
@@ -8502,18 +8531,24 @@ class USERPREF_PT_tags(TagsPanel, Panel):
             preview_box = col_right.box()
             preview_box.label(text="Preview (as in tabs):")
 
+            # Use template_glyph_preview for larger glyph rendering (same as C++ category tab edit)
+            # Center the glyph
             preview_row = preview_box.row()
-            preview_row.alignment = 'LEFT'
+            preview_row.alignment = 'CENTER'
             if tag.glyph:
                 glyph_char = _hex_to_glyph(tag.glyph)
-                preview_row.colored_label(
-                    text=glyph_char,
-                    icon='NONE',
-                    color_r=tag.color[0],
-                    color_g=tag.color[1],
-                    color_b=tag.color[2]
-                )
-            preview_row.label(text=tag.name, translate=False)
+                if glyph_char:
+                    preview_row.template_glyph_preview(
+                        glyph_unicode=glyph_char,
+                        data=tag,
+                        color_property="color",
+                        size_multiplier=2.0
+                    )
+
+            # Name below, centered
+            name_row = preview_box.row()
+            name_row.alignment = 'CENTER'
+            name_row.label(text=tag.name, translate=False)
 
             # Edit section (second)
             col_right.separator()

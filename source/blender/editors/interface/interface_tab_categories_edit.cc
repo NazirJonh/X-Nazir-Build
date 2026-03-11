@@ -1196,8 +1196,8 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
   block_flag_enable(block, BLOCK_LOOP | BLOCK_MOVEMOUSE_QUIT);
   block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
 
-  /* Set popup size - similar to Asset Shelf, but with larger height */
-  const int popup_width = (GLYPH_POPUP_LEFT_COL_WIDTH + GLYPH_POPUP_RIGHT_COL_WIDTH) * UI_UNIT_X;
+  /* Set popup size - using only right column width (left column temporarily disabled) */
+  const int popup_width = GLYPH_POPUP_RIGHT_COL_WIDTH * UI_UNIT_X;
   const int popup_height = 175 * UI_UNIT_Y; /* 5x larger height (35 * 5 = 175) with scroll */
   /* Center the popup on screen */
   block_bounds_set_centered(block, 6 * UI_SCALE_FAC);
@@ -1213,23 +1213,24 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
                                 0,
                                 style_get());
 
-  /* Create two-column layout like Asset Shelf */
+  /* Create layout for popup content */
   Layout &row = layout.row(false);
 
-  /* Left column: Category tree view */
-  Layout &left_col = row.column(false);
-  left_col.ui_units_x_set(GLYPH_POPUP_LEFT_COL_WIDTH);
-  left_col.ui_units_y_set(150); /* Match height with right column */
-  left_col.fixed_size_set(true);
+  /* NOTE: Left column with category tree view is temporarily disabled.
+   * May be re-enabled in the future when more categories are added.
+   * Original code:
+   *   Layout &left_col = row.column(false);
+   *   left_col.ui_units_x_set(GLYPH_POPUP_LEFT_COL_WIDTH);
+   *   left_col.ui_units_y_set(150);
+   *   left_col.fixed_size_set(true);
+   *   std::unique_ptr<GlyphCategoryTreeView> category_tree_ptr =
+   *       std::make_unique<GlyphCategoryTreeView>(popup_data);
+   *   AbstractTreeView *category_tree =
+   *       block_add_view(*block, "glyph_category_tree", std::move(category_tree_ptr));
+   *   TreeViewBuilder::build_tree_view(*C, *category_tree, left_col);
+   */
 
-  /* Add category tree view to left column */
-  std::unique_ptr<GlyphCategoryTreeView> category_tree_ptr =
-      std::make_unique<GlyphCategoryTreeView>(popup_data);
-  AbstractTreeView *category_tree =
-      block_add_view(*block, "glyph_category_tree", std::move(category_tree_ptr));
-  TreeViewBuilder::build_tree_view(*C, *category_tree, left_col);
-
-  /* Right column: Search + Grid view */
+  /* Main column: Search + Grid view */
   Layout &right_col = row.column(false);
   right_col.ui_units_y_set(150); /* Set minimum height for right column */
   right_col.fixed_size_set(true);

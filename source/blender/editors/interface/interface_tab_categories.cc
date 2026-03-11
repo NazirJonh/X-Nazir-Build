@@ -1512,7 +1512,7 @@ static bool category_is_reserved_for_reorder(const wmWindowManager *wm, const ch
         "Animation",   "Physics",   "World",       "Material", "Modifiers", "Texture",
         "Particles",   "Curve",     "Mesh",        "Object",   "Scene",   "Render",
         "Script",      "Sound",     "Surface",     "Volume",   "Constraints", "Data",
-        "Node",
+        "Node",        "Cache",     "Proxy",       "Metadata",
     };
     for (const char *reserved_id : k_reserved_fallback) {
       if (STREQ(idname, reserved_id)) {

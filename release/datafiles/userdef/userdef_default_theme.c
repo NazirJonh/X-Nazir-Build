@@ -112,6 +112,7 @@ const bTheme U_theme_default = {
     .wcol_tab = {
       .outline = RGBA(0x1d1d1dff),
       .outline_sel = RGBA(0x1d1d1dff),
+      .icon_selection = RGBA(0x181818ff),
       .inner = RGBA(0x1d1d1dff),
       .inner_sel = RGBA(0x303030ff),
       .item = RGBA(0x1d1d1dff),

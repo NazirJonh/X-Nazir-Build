@@ -247,9 +247,12 @@ static void category_tab_reset_apply_to_operator(bContext *C,
     if (default_glyph != nullptr) {
       char glyph_hex[16];
       utf8_to_hex_codepoint(default_glyph, glyph_hex, sizeof(glyph_hex));
+      printf("[RESET APPLY] category='%s', default_glyph='%s', glyph_hex='%s'\n",
+             category, default_glyph, glyph_hex);
       RNA_string_set(target_op->ptr, "glyph", glyph_hex);
     }
     else {
+      printf("[RESET APPLY] category='%s', default_glyph=nullptr, setting glyph=''\n", category);
       RNA_string_set(target_op->ptr, "glyph", "");
     }
 

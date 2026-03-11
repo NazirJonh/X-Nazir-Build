@@ -107,16 +107,19 @@ void utf8_to_hex_codepoint(const char *input, char *output, size_t output_max)
 {
   if (!input || !input[0]) {
     output[0] = '\0';
+    printf("[UTF8_TO_HEX] input is null or empty\n");
     return;
   }
 
   const unsigned int codepoint = BLI_str_utf8_as_unicode_safe(input);
   if (codepoint == BLI_UTF8_ERR || codepoint == 0) {
     output[0] = '\0';
+    printf("[UTF8_TO_HEX] invalid codepoint: %u\n", codepoint);
     return;
   }
 
   BLI_snprintf(output, output_max, "%x", codepoint);
+  printf("[UTF8_TO_HEX] input='%s', codepoint=0x%x, output='%s'\n", input, codepoint, output);
 }
 
 bool is_display_glyph_codepoint(const unsigned int codepoint)

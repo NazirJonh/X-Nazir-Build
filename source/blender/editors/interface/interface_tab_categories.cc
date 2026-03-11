@@ -25,6 +25,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_set.hh"
@@ -95,6 +96,9 @@ static bool category_name_is_glyph(const char *category_id);
 #define TABS_GLYPH_DARKEN_BASE 0.15f
 /* Built-in icon scale in tab content draw (70% of glyph/text-derived base size). */
 #define TABS_BUILTIN_ICON_SCALE 1.0f
+
+/* Enable experimental visual outline for active tabs when visual effect is active. */
+#define CATEGORY_TAB_VISUAL_ACTIVE_OUTLINE_ENABLE 1
 
 /* Tab background brightening factors for inactive tabs (0.0 = no change, 1.0 = white). */
 #define TABS_BG_BRIGHTEN_BASE 0.0f
@@ -3559,6 +3563,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   float theme_col_tab_inactive[4];
   float theme_col_tab_outline[4];
   float theme_col_tab_outline_sel[4];
+  float theme_col_selection[4];
 
   theme::get_color_4ubv(TH_BACK, theme_col_back);
   theme::get_color_3ubv(TH_TAB_TEXT, theme_col_tab_text);
@@ -3568,6 +3573,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   theme::get_color_4fv(TH_TAB_INACTIVE, theme_col_tab_inactive);
   theme::get_color_4fv(TH_TAB_OUTLINE, theme_col_tab_outline);
   theme::get_color_4fv(TH_TAB_OUTLINE_ACTIVE, theme_col_tab_outline_sel);
+  theme::get_color_4fv(TH_TAB_ICON_SELECTION, theme_col_selection);
 
   is_alpha = (region->overlap && (theme_col_back[3] != 255));
 
@@ -4025,6 +4031,23 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       draw_roundbox_4fv(&box_rect, true, tab_curve_radius, tab_bg_color);
       draw_roundbox_4fv(&box_rect, false, tab_curve_radius,
                         is_active ? theme_col_tab_outline_sel : theme_col_tab_outline);
+
+      #if CATEGORY_TAB_VISUAL_ACTIVE_OUTLINE_ENABLE
+      const bool is_visual_active_outline = is_visual_effect_active && is_active &&
+                                            U.category_tabs_visual_outline;
+      if (is_visual_active_outline) {
+        float visual_outline_color[4];
+        rgba_uchar_to_float(visual_outline_color, U.category_tabs_visual_outline_color);
+        const float visual_outline_width = float(px) + 0.5f;
+        draw_roundbox_4fv_ex(&box_rect,
+                              nullptr,
+                              nullptr,
+                              1.0f,
+                              visual_outline_color,
+                              visual_outline_width,
+                              tab_curve_radius);
+      }
+      #endif
 
       /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
       draw_category_tab_color_indicator(

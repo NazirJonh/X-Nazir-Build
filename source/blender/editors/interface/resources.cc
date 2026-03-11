@@ -339,6 +339,9 @@ const uchar *get_color_ptr(bTheme *btheme, int spacetype, int colorid)
         case TH_TAB_OUTLINE_ACTIVE:
           cp = btheme->tui.wcol_tab.outline_sel;
           break;
+        case TH_TAB_ICON_SELECTION:
+          cp = btheme->tui.wcol_tab.icon_selection;
+          break;
         case TH_TAB_BACK:
           cp = btheme->regions.sidebars.tab_back;
           break;

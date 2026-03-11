@@ -1754,6 +1754,13 @@ void blo_do_versions_userdef(UserDef *userdef)
         userdef, "NODE_AST_compositor", "Utilities");
   }
 
+  if (!USER_VERSION_ATLEAST(500, 117)) {
+    /* Initialize new tab icon selection color property. */
+    for (bTheme &btheme : userdef->themes) {
+      copy_v4_v4_uchar(btheme.tui.wcol_tab.icon_selection, U_theme_default.tui.wcol_tab.icon_selection);
+    }
+  }
+
   if (!USER_VERSION_ATLEAST(501, 17)) {
     userdef->flag |= USER_HIDE_DOT_DATABLOCK;
   }

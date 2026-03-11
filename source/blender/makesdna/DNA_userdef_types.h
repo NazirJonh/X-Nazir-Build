@@ -1009,7 +1009,11 @@ struct UserDef {
 
   /** Visual effect (scale on hover/active) for category tabs in Icon mode. */
   char category_tabs_visual_effect = true;
-  char _pad7[3] = {};
+  /** Visual outline effect for active tab. */
+  char category_tabs_visual_outline = true;
+  char _pad7[6] = {};
+  /** Custom color for visual outline effect (RGBA). */
+  unsigned char category_tabs_visual_outline_color[4] = {255, 255, 255, 255};
   /**
    * Setting for UI line width.
    *

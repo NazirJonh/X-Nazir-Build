@@ -184,6 +184,7 @@ typedef struct ThemeCommon {
 typedef struct uiWidgetColors {
   unsigned char outline[4];
   unsigned char outline_sel[4];
+  unsigned char icon_selection[4];
   unsigned char inner[4];
   unsigned char inner_sel[4];
   unsigned char item[4];
@@ -193,6 +194,7 @@ typedef struct uiWidgetColors {
   char _pad0[3];
   short shadetop, shadedown;
   float roundness;
+  char _pad1[4];
 } uiWidgetColors;
 
 typedef struct uiWidgetStateColors {

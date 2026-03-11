@@ -6147,6 +6147,7 @@ class PreferenceThemeWidgetColorPanel:
         col = flow.column(align=True)
         col.prop(widget_style, "inner", slider=True)
         col.prop(widget_style, "inner_sel", text="Selected", slider=True)
+        col.prop(widget_style, "icon_selection", text="Icon Selection", slider=True)
 
         col = flow.column(align=True)
         col.prop(widget_style, "outline")
@@ -8244,6 +8245,13 @@ class VIEW3D_OT_category_tabs_settings(Operator):
             visual_row = layout.row()
             visual_row.active = not view.category_tabs_show_active_name
             visual_row.prop(view, "category_tabs_visual_effect", text="Visual Effect")
+
+            # Outline effect with color picker
+            outline_row = layout.row(align=True)
+            outline_row.active = (not view.category_tabs_show_active_name and
+                                  view.category_tabs_visual_effect)
+            outline_row.prop(view, "category_tabs_visual_outline", text="Outline")
+            outline_row.prop(view, "category_tabs_visual_outline_color", text="")
 
         # --- BEGIN: MIXED_MODE_CONTENT_FLAGS (optional per-type visibility in Mixed mode) ---
         # To remove: delete this entire block

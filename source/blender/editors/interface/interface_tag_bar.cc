@@ -1277,6 +1277,7 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
                                           wm::OpCallContext::InvokeDefault,
                                           UI_ITEM_NONE);
   RNA_string_set(&new_tag_ptr, "operator_idname", "wm.category_tag_create");
+  RNA_int_set(&new_tag_ptr, "width", UI_CATEGORY_TAG_CREATE_POPUP_WIDTH);
 
   /* Delete Tag button - deletes currently selected tag */
   button_col.op("wm.category_tag_delete",

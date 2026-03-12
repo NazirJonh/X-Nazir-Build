@@ -1513,10 +1513,11 @@ static bool category_is_reserved_for_reorder(const wmWindowManager *wm, const ch
   auto reserved_name_fallback = [](const char *idname) {
     static const char *k_reserved_fallback[] = {
         "Item",        "View",      "Edit",        "Tool",     "Asset",   "Options",
-        "Animation",   "Physics",   "World",       "Material", "Modifiers", "Texture",
-        "Particles",   "Curve",     "Mesh",        "Object",   "Scene",   "Render",
-        "Script",      "Sound",     "Surface",     "Volume",   "Constraints", "Data",
+        "Animation",   "Texture",   "Mesh",        "Object",   "Scene",   "Render",
         "Node",        "Cache",     "Proxy",       "Metadata",
+        // Reserved categories (disabled, kept for future use):
+        // "Physics", "World", "Material", "Modifiers", "Particles", "Curve",
+        // "Script", "Sound", "Surface", "Volume", "Constraints", "Data",
     };
     for (const char *reserved_id : k_reserved_fallback) {
       if (STREQ(idname, reserved_id)) {

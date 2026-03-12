@@ -265,20 +265,8 @@ DEFAULT_CATEGORY_GLYPHS = {
     # Editor-specific
     "Animation": {"glyph": "\uf8f0", "display_name": "", "color": [0.0, 0.0, 0.0],
                   "default_glyph": "\uf8f0", "default_display_name": ""},  # motion_photos_on
-    "Physics": {"glyph": "\ue3d4", "display_name": "", "color": [0.0, 0.0, 0.0],
-                "default_glyph": "\ue3d4", "default_display_name": ""},    # science
-    "World": {"glyph": "\ue88e", "display_name": "", "color": [0.0, 0.0, 0.0],
-              "default_glyph": "\ue88e", "default_display_name": ""},      # public
-    "Material": {"glyph": "\ue429", "display_name": "", "color": [0.0, 0.0, 0.0],
-                 "default_glyph": "\ue429", "default_display_name": ""},   # palette
-    "Modifiers": {"glyph": "\ue429", "display_name": "", "color": [0.0, 0.0, 0.0],
-                  "default_glyph": "\ue429", "default_display_name": ""},  # palette
     "Texture": {"glyph": "\ue40a", "display_name": "", "color": [0.0, 0.0, 0.0],
                 "default_glyph": "\ue40a", "default_display_name": ""},    # texture
-    "Particles": {"glyph": "\ue3d4", "display_name": "", "color": [0.0, 0.0, 0.0],
-                  "default_glyph": "\ue3d4", "default_display_name": ""},  # science
-    "Curve": {"glyph": "\ue148", "display_name": "", "color": [0.0, 0.0, 0.0],
-              "default_glyph": "\ue148", "default_display_name": ""},      # timeline
     "Image": {"glyph": "\ue410", "display_name": "", "color": [0.0, 0.0, 0.0],
              "default_glyph": "\ue410", "default_display_name": ""},       # image
     "Mesh": {"glyph": "\ue3e3", "display_name": "", "color": [0.0, 0.0, 0.0],
@@ -289,18 +277,6 @@ DEFAULT_CATEGORY_GLYPHS = {
               "default_glyph": "\ue8f9", "default_display_name": ""},      # dashboard
     "Render": {"glyph": "\ue439", "display_name": "", "color": [0.0, 0.0, 0.0],
                "default_glyph": "\ue439", "default_display_name": ""},     # photo_camera
-    "Script": {"glyph": "\ue86f", "display_name": "", "color": [0.0, 0.0, 0.0],
-               "default_glyph": "\ue86f", "default_display_name": ""},     # terminal
-    "Sound": {"glyph": "\ue3a1", "display_name": "", "color": [0.0, 0.0, 0.0],
-              "default_glyph": "\ue3a1", "default_display_name": ""},      # speaker
-    "Surface": {"glyph": "\ue76c", "display_name": "", "color": [0.0, 0.0, 0.0],
-                "default_glyph": "\ue76c", "default_display_name": ""},    # waves
-    "Volume": {"glyph": "\ue2c8", "display_name": "", "color": [0.0, 0.0, 0.0],
-               "default_glyph": "\ue2c8", "default_display_name": ""},     # folder_open
-    "Constraints": {"glyph": "\ue8d2", "display_name": "", "color": [0.0, 0.0, 0.0],
-                    "default_glyph": "\ue8d2", "default_display_name": ""}, # rule
-    "Data": {"glyph": "\ue23e", "display_name": "", "color": [0.0, 0.0, 0.0],
-             "default_glyph": "\ue23e", "default_display_name": ""},       # database
     "Node": {"glyph": "\uf20e", "display_name": "", "color": [0.0, 0.0, 0.0],
              "default_glyph": "\uf20e", "default_display_name": ""},       # account_tree
     "Group": {"glyph": "\ue574", "display_name": "", "color": [0.0, 0.0, 0.0],
@@ -308,6 +284,36 @@ DEFAULT_CATEGORY_GLYPHS = {
     "Scopes": {"glyph": "\ue762", "display_name": "", "color": [0.0, 0.0, 0.0],
              "default_glyph": "\ue762", "default_display_name": ""},       # account_tree
 }
+
+# ============================================================================
+# RESERVED CATEGORIES (currently disabled, kept for future use)
+# Uncomment and add back to DEFAULT_CATEGORY_GLYPHS if needed
+# ============================================================================
+# "Data": {"glyph": "\ue23e", "display_name": "", "color": [0.0, 0.0, 0.0],
+#          "default_glyph": "\ue23e", "default_display_name": ""},       # database
+# "Constraints": {"glyph": "\ue8d2", "display_name": "", "color": [0.0, 0.0, 0.0],
+#                 "default_glyph": "\ue8d2", "default_display_name": ""}, # rule
+# "Volume": {"glyph": "\ue2c8", "display_name": "", "color": [0.0, 0.0, 0.0],
+#            "default_glyph": "\ue2c8", "default_display_name": ""},     # folder_open
+# "Script": {"glyph": "\ue86f", "display_name": "", "color": [0.0, 0.0, 0.0],
+#            "default_glyph": "\ue86f", "default_display_name": ""},     # terminal
+# "Sound": {"glyph": "\ue3a1", "display_name": "", "color": [0.0, 0.0, 0.0],
+#           "default_glyph": "\ue3a1", "default_display_name": ""},      # speaker
+# "Surface": {"glyph": "\ue76c", "display_name": "", "color": [0.0, 0.0, 0.0],
+#             "default_glyph": "\ue76c", "default_display_name": ""},    # waves
+# "Particles": {"glyph": "\ue3d4", "display_name": "", "color": [0.0, 0.0, 0.0],
+#               "default_glyph": "\ue3d4", "default_display_name": ""},  # science
+# "Curve": {"glyph": "\ue148", "display_name": "", "color": [0.0, 0.0, 0.0],
+#           "default_glyph": "\ue148", "default_display_name": ""},      # timeline
+# "Modifiers": {"glyph": "\ue429", "display_name": "", "color": [0.0, 0.0, 0.0],
+#               "default_glyph": "\ue429", "default_display_name": ""},  # palette
+# "Physics": {"glyph": "\ue3d4", "display_name": "", "color": [0.0, 0.0, 0.0],
+#             "default_glyph": "\ue3d4", "default_display_name": ""},    # science
+# "World": {"glyph": "\ue88e", "display_name": "", "color": [0.0, 0.0, 0.0],
+#           "default_glyph": "\ue88e", "default_display_name": ""},      # public
+# "Material": {"glyph": "\ue429", "display_name": "", "color": [0.0, 0.0, 0.0],
+#              "default_glyph": "\ue429", "default_display_name": ""},   # palette
+# ============================================================================
 
 # In-memory cache of glyph mappings: (space_type, category) -> data
 # space_type = -1 for global categories, specific space_type for space-specific

@@ -501,14 +501,18 @@ def _get_category_data(category, space_type=-1):
     def has_meaningful_data(data):
         if not isinstance(data, dict):
             return False
-        # CRITICAL FIX: Only consider glyph as "meaningful" for fallback logic
+        # CRITICAL FIX: Consider both glyph AND tags as "meaningful" for fallback logic
         # This prevents VIEW3D entries with empty glyphs from blocking GLOBAL fallback
         glyph = data.get("glyph", "")
         default_glyph = data.get("default_glyph", "")
         has_glyph = bool(glyph or default_glyph)
         
-        # Only glyph presence determines "meaningful" data for space-specific vs global fallback
-        return has_glyph
+        # Check for tags as well - tags are meaningful data too
+        tags = data.get("tags", [])
+        has_tags = bool(tags)
+        
+        # Either glyph OR tags presence determines "meaningful" data for space-specific vs global fallback
+        return has_glyph or has_tags
 
     # Try space-specific first
     key = _make_cache_key(space_type, category)
@@ -1744,6 +1748,10 @@ def get_tags_for_category_ui(category):
     all_tags = get_all_tags()
     category_tags = set(get_category_tags(category))
 
+    print(f"[DEBUG get_tags_for_category_ui] Category='{category}'")
+    print(f"[DEBUG get_tags_for_category_ui] all_tags count={len(all_tags)}")
+    print(f"[DEBUG get_tags_for_category_ui] category_tags={category_tags}")
+
     tag_log(f"get_tags_for_category_ui('{category}'): {len(all_tags)} tags found")
 
     parts = []
@@ -1755,9 +1763,11 @@ def get_tags_for_category_ui(category):
         color_str = f"{color[0]:.3f},{color[1]:.3f},{color[2]:.3f}"
         # Use | as separator between fields, ; between tags
         parts.append(f"{name}|{glyph}|{is_active}|{color_str}")
+        print(f"[DEBUG get_tags_for_category_ui] Tag '{name}': glyph='{glyph}', is_active={is_active}, color={color_str}")
 
     result = ";".join(parts)
     tag_log(f"get_tags_for_category_ui result: '{result}'")
+    print(f"[DEBUG get_tags_for_category_ui] Final result: '{result}'")
     return result
 
 
@@ -2026,10 +2036,20 @@ def toggle_category_tag_no_save(category, tag_name, space_type=-1):
 
     if tag_name in tags:
         print(f"[TOGGLE_NO_SAVE] Tag exists - will REMOVE")
-        return remove_category_tag(category, tag_name, auto_save=False, space_type=space_type)
+        result = remove_category_tag(category, tag_name, auto_save=False, space_type=space_type)
+        print(f"[TOGGLE_NO_SAVE] REMOVE result: {result}")
+        # Verify the tag was removed
+        tags_after = get_category_tags(category, space_type)
+        print(f"[TOGGLE_NO_SAVE] Tags after REMOVE: {tags_after}")
+        return result
     else:
         print(f"[TOGGLE_NO_SAVE] Tag not exists - will ADD")
-        return add_category_tag(category, tag_name, auto_save=False, space_type=space_type)
+        result = add_category_tag(category, tag_name, auto_save=False, space_type=space_type)
+        print(f"[TOGGLE_NO_SAVE] ADD result: {result}")
+        # Verify the tag was added
+        tags_after = get_category_tags(category, space_type)
+        print(f"[TOGGLE_NO_SAVE] Tags after ADD: {tags_after}")
+        return result
 
 
 def restore_category_tags_from_string(category, tags_string, space_type=-1):
@@ -2055,10 +2075,12 @@ def update_category_tags_in_wm(category, space_type=-1):
     try:
         wm = bpy.context.window_manager
         if wm is None or not hasattr(wm, 'category_glyph_overrides'):
+            print(f"[DEBUG update_category_tags_in_wm] ERROR: WM or overrides not available")
             tag_log(f"update_category_tags_in_wm: WM or overrides not available", "ERROR")
             return
 
         current_tags = get_category_tags(category, space_type)
+        print(f"[DEBUG update_category_tags_in_wm] category='{category}', space_type={space_type}, current_tags={current_tags}")
         tag_log(f"update_category_tags_in_wm: category='{category}', space_type={space_type}, tags={current_tags}")
         
         override_item = None
@@ -2067,26 +2089,32 @@ def update_category_tags_in_wm(category, space_type=-1):
             item_space_type = getattr(item, 'space_type', -1)
             if item.category == category and item_space_type == space_type:
                 override_item = item
+                print(f"[DEBUG update_category_tags_in_wm] Found existing override for '{category}'")
                 break
         
         if override_item is None:
             # Only create a new override if there are actually tags to store.
             # If tags are empty and no override exists, we don't need to create one.
             if not current_tags:
+                print(f"[DEBUG update_category_tags_in_wm] No override and no tags, skipping creation for '{category}' (space_type={space_type})")
                 tag_log(f"update_category_tags_in_wm: No override and no tags, skipping creation for '{category}' (space_type={space_type})")
                 return
             override_item = wm.category_glyph_overrides.new(category=category)
             # Set space_type for space-specific categories
             if hasattr(override_item, 'space_type'):
                 override_item.space_type = space_type
+            print(f"[DEBUG update_category_tags_in_wm] Created new override for '{category}' (space_type={space_type})")
             tag_log(f"update_category_tags_in_wm: Created new override for '{category}' (space_type={space_type})")
         
         if hasattr(override_item, 'tags'):
             override_item.tags = ";".join(current_tags)
+            print(f"[DEBUG update_category_tags_in_wm] Set WM override tags for '{category}' to '{override_item.tags}'")
             tag_log(f"update_category_tags_in_wm: Set WM override tags for '{category}' (space_type={space_type}) to '{override_item.tags}'")
             
+        print(f"[DEBUG update_category_tags_in_wm] Completed for '{category}' (space_type={space_type})")
         tag_log(f"update_category_tags_in_wm: Completed for '{category}' (space_type={space_type})")
     except Exception as e:
+        print(f"[DEBUG update_category_tags_in_wm] Error: {e}")
         tag_log(f"update_category_tags_in_wm: Error: {e}", "ERROR")
         import traceback
         traceback.print_exc()
@@ -4571,13 +4599,15 @@ class USERPREF_OT_category_tag_create(Operator):
             # Also ensure saved to file
             _auto_save_tags()
 
-            # Set active index to the new tag
+            context.area.tag_redraw()
+            
+            # Set active index to the new tag AFTER all operations are complete
+            # This ensures the tag is properly selected in the UI
             for i, t in enumerate(context.window_manager.category_tags):
                 if t.name == self.name:
                     context.window_manager.category_tags_active_index = i
                     break
 
-            context.area.tag_redraw()
             return {'FINISHED'}
 
         self.report({'ERROR'}, message)
@@ -4958,6 +4988,10 @@ class USERPREF_OT_category_tag_toggle(Operator):
         )
         print(f"[TOGGLE_OPERATOR] Result: success={success}, message='{message}'")
         if success:
+            # Update WM overrides for immediate UI refresh
+            update_category_tags_in_wm(self.category, self.space_type)
+            
+            # Trigger UI redraw for immediate feedback
             context.area.tag_redraw()
             return {'FINISHED'}
         self.report({'ERROR'}, message)

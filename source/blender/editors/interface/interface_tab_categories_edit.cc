@@ -2424,6 +2424,9 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         char tag_color[32];
         int is_active;
 
+        printf("[DEBUG TAG UI] Category='%s', tags_data_body='%s'\n", category, tags_data_body.c_str());
+        int tag_count = 0;
+
         while (*cursor != '\0') {
           int i = 0;
           while (*cursor != '|' && *cursor != '\0' && i < 63) {
@@ -2465,6 +2468,10 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
           }
 
           if (tag_name[0] != '\0') {
+            tag_count++;
+            printf("[DEBUG TAG UI] Tag #%d: name='%s', glyph='%s', is_active=%d, color='%s'\n", 
+                   tag_count, tag_name, tag_glyph, is_active, tag_color);
+
             /* Create row layout for the tag button */
             Layout &tag_item = tags_grid.row(true);
             tag_item.alignment_set(LayoutAlign::Left);
@@ -2486,17 +2493,19 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
 
             /* Create unified Tag button with box container effect */
             Button *tag_but = uiDefButTag(block,
-                                              IFACE_(tag_name),
-                                              tag_glyph,
-                                              has_custom_color ? color_rgb : nullptr,
-                                              is_active,
-                                              false,  /* is_pref_mode - toggle button with checkbox */
-                                              false,  /* center_glyph - left align for category buttons */
-                                              0, "",  /* icon_id, icon_path - no icon for this button */
-                                              0, 0,
-                                              UI_UNIT_X * 8,
-                                              UI_UNIT_Y * 1.5f,
-                                              nullptr);
+                                               IFACE_(tag_name),
+                                               tag_glyph,
+                                               has_custom_color ? color_rgb : nullptr,
+                                               is_active,
+                                               false,  /* is_pref_mode - toggle button with checkbox */
+                                               false,  /* center_glyph - left align for category buttons */
+                                               0, "",  /* icon_id, icon_path - no icon for this button */
+                                               0, 0,
+                                               UI_UNIT_X * 8,
+                                               UI_UNIT_Y * 1.5f,
+                                               nullptr);
+
+            printf("[DEBUG TAG UI] Created button for tag '%s' with is_active=%d\n", tag_name, is_active);
 
             /* Set operator properties */
             wmOperatorType *ot = WM_operatortype_find("wm.category_tag_toggle", false);

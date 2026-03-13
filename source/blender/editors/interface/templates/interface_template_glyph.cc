@@ -494,11 +494,7 @@ static void icon_preview_draw_cb(const bContext * /*C*/,
   }
 
   const uiStyle *style = style_get_dpi();
-  const int rect_w = BLI_rcti_size_x(rect);
-  const int rect_h = BLI_rcti_size_y(rect);
-  const float icon_size_from_style = style->widget.points * UI_SCALE_FAC * size_multiplier;
-  const float icon_size_from_rect = float(min_ii(rect_w, rect_h)) * 0.9f;
-  const float icon_draw_size = min_ff(icon_size_from_style, icon_size_from_rect);
+  const float icon_draw_size = style->widget.points * UI_SCALE_FAC * size_multiplier;
 
   uchar icon_tint[4] = {255, 255, 255, 255};
   if (!is_zero_v3(color)) {

@@ -2288,10 +2288,16 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
     if (tags_panel.header) {
       tags_panel.header->label(IFACE_("Tags list"), ICON_NONE);
 
+      /* Create split layout: left side for glyphs, right side for buttons */
+      Layout &header_split = tags_panel.header->split(0.54f, false); /* 65% for glyphs, 35% for buttons */
+      Layout &glyphs_section = header_split.column(false);
+      Layout &buttons_section = header_split.column(false);
+      buttons_section.alignment_set(LayoutAlign::Right);
+
       /* Show active tags as colored glyph buttons in header */
       if (!tags_data_header.empty()) {
-        Layout &glyphs_row = tags_panel.header->row(true);
-        glyphs_row.alignment_set(LayoutAlign::Center);
+        Layout &glyphs_row = glyphs_section.row(true);
+        glyphs_row.alignment_set(LayoutAlign::Left); /* Left align to use full available width */
 
         const char *cursor = tags_data_header.c_str();
         char tag_name[64];
@@ -2389,22 +2395,21 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         }
       }
 
-      Layout &header_row = tags_panel.header->row(true);
-      header_row.alignment_set(LayoutAlign::Right);
-      header_row.scale_x_set(1.0f);
-      PointerRNA new_tag_ptr = header_row.op("wm.category_tag_create", IFACE_("New tag"), ICON_ADD);
+      /* Add buttons to the right section */
+      Layout &buttons_row = buttons_section.row(true);
+      PointerRNA new_tag_ptr = buttons_row.op("wm.category_tag_create", IFACE_("New tag"), ICON_ADD);
       RNA_string_set(&new_tag_ptr, "name", "");
       RNA_string_set(&new_tag_ptr, "category", category);
 
-      header_row.separator();
+      buttons_row.separator();
 
       /* Filter menu button - opens popup with Current Mode / All Tags toggle buttons */
-      header_row.menu("SCREEN_MT_category_tag_filter_toggle", "", ICON_FILTER);
+      buttons_row.menu("SCREEN_MT_category_tag_filter_toggle", "", ICON_FILTER);
 
-      header_row.separator();
+      buttons_row.separator();
 
       /* Button to open Preferences in Tags section */
-      PointerRNA prefs_ptr = header_row.op("SCREEN_OT_userpref_show", "", ICON_PREFERENCES);
+      PointerRNA prefs_ptr = buttons_row.op("SCREEN_OT_userpref_show", "", ICON_PREFERENCES);
       RNA_enum_set(&prefs_ptr, "section", USER_SECTION_TAGS);
     }
 

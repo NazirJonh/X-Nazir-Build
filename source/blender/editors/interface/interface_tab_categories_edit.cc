@@ -2289,7 +2289,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
       tags_panel.header->label(IFACE_("Tags list"), ICON_NONE);
 
       /* Create split layout: left side for glyphs, right side for buttons */
-      Layout &header_split = tags_panel.header->split(0.54f, false); /* 65% for glyphs, 35% for buttons */
+      Layout &header_split = tags_panel.header->split(0.52f, false); /* 65% for glyphs, 35% for buttons */
       Layout &glyphs_section = header_split.column(false);
       Layout &buttons_section = header_split.column(false);
       buttons_section.alignment_set(LayoutAlign::Right);

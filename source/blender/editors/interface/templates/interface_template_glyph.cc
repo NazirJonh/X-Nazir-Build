@@ -937,6 +937,13 @@ static void ui_template_glyph_selector_impl(Layout *layout,
       if (glyph_unicode[0] != '\0') {
         uiTemplateGlyphPreview(layout, C, glyph_unicode, ptr, color_propname, 2.0f);
       }
+      else if (category && category[0] != '\0') {
+        wmWindowManager *wm = CTX_wm_manager(C);
+        char derived_letter[8] = "";
+        if (panel_category_first_letter_lookup(wm, category, -1, derived_letter)) {
+          uiTemplateGlyphPreview(layout, C, derived_letter, ptr, color_propname, 2.0f);
+        }
+      }
     }
   }
 }

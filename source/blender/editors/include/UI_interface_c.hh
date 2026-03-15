@@ -2740,6 +2740,11 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
                                         float r_color[3],
                                         int space_type = -1);
 
+bool panel_category_first_letter_lookup(const wmWindowManager *wm,
+                                        const char *category,
+                                        int space_type,
+                                        char r_letter[8]);
+
 std::string get_tags_for_category_ui(const wmWindowManager *wm,
                                       const char *category,
                                       uint32_t filter_mode_flag,

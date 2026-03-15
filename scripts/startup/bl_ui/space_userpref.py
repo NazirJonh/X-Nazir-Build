@@ -1053,8 +1053,10 @@ def _normalize_category_data(category_data, category_name=None):
         # Old format: just a glyph string (may be in \uXXXX format)
         glyph = _unicode_escape_to_glyph(category_data) if '\\u' in category_data else category_data
         base_type = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
+        # For glyph_text categories, use category name as default_display_name for tooltip fallback
+        default_display_name = "" if base_type == "glyph_only" else category_name
         return {"glyph": glyph, "display_name": "", "color": [0.0, 0.0, 0.0],
-                "default_glyph": glyph, "default_display_name": "", "base_type": base_type,
+                "default_glyph": glyph, "default_display_name": default_display_name, "base_type": base_type,
                 "tags": [],
                 "glyph_mode": "auto",
                 "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": ""}
@@ -1097,8 +1099,12 @@ def _normalize_category_data(category_data, category_name=None):
         if "default_display_name" in category_data:
             entry["default_display_name"] = category_data["default_display_name"]
         else:
-            # If no default_display_name, use empty string
-            entry["default_display_name"] = ""
+            # If no default_display_name, set based on base_type
+            # For glyph_text categories, use category name for tooltip fallback
+            if entry.get("base_type") == "glyph_text":
+                entry["default_display_name"] = category_name
+            else:
+                entry["default_display_name"] = ""
 
         # Base type (for reset): glyph_only, glyph_text, or text_only
         if "base_type" in category_data:
@@ -2489,7 +2495,11 @@ def set_category_glyph(category, glyph, space_type=-1, save=True):
     if "default_glyph" not in entry:
         entry["default_glyph"] = entry.get("glyph", "")
     if "default_display_name" not in entry:
-        entry["default_display_name"] = entry.get("display_name", "")
+        # For glyph_text categories, use category name as default_display_name for tooltip fallback
+        if entry.get("base_type") == "glyph_text" or (glyph and not _is_single_glyph(category)):
+            entry["default_display_name"] = category
+        else:
+            entry["default_display_name"] = entry.get("display_name", "")
     if "glyph_mode" not in entry:
         entry["glyph_mode"] = "auto"
 
@@ -2561,7 +2571,11 @@ def set_category_data(category,
         else:
             entry["default_glyph"] = ""
     if "default_display_name" not in entry:
-        entry["default_display_name"] = entry.get("display_name", "")
+        # For glyph_text categories, use category name as default_display_name for tooltip fallback
+        if entry.get("base_type") == "glyph_text" or (glyph and not _is_single_glyph(category)):
+            entry["default_display_name"] = category
+        else:
+            entry["default_display_name"] = entry.get("display_name", "")
     if "glyph_mode" not in entry:
         entry["glyph_mode"] = "auto"
 
@@ -3243,6 +3257,10 @@ def _merge_discovered_categories():
             # For text_only/glyph_text categories, leave display_name empty to use category name as fallback
             if base_type == "glyph_only":
                 default_display_name = category_to_label.get(category, "")
+            elif base_type == "glyph_text":
+                # For glyph_text categories, store original category name in default_display_name
+                # This ensures tooltips show the correct original name when display_name is overridden
+                default_display_name = category
             else:
                 default_display_name = ""
 

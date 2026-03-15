@@ -323,8 +323,15 @@ static std::string normalize_category_key(const char *category)
  * First tries exact match, then tries to match by normalized keys if no exact match found.
  */
 static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManager *wm,
-                                                             const char *category,
-                                                             int space_type = -1)
+                                                            const char *category,
+                                                            int space_type = -1);
+static const char *panel_category_glyph_lookup_apply_fallback(const wmWindowManager *wm,
+                                                              const char *category,
+                                                              bool *r_is_fallback_letter);
+
+static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManager *wm,
+                                                            const char *category,
+                                                            int space_type)
 {
   if (!wm || !category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
     return nullptr;
@@ -623,6 +630,7 @@ bool tag_glyph_hex_to_utf8(const char *input, char r_utf8[8])
  * \{ */
 
 /* Forward declaration for glyph source lookup. */
+static const char *panel_category_display_name_lookup(const wmWindowManager *wm, const char *category);
 static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
                                                      const char *category,
                                                      const PanelType *panel_type,
@@ -851,7 +859,12 @@ static const char *panel_category_glyph_lookup_mapping(const wmWindowManager *wm
       *r_is_fallback_letter = true;
     }
     *r_handled = true;
-    return nullptr;
+    static char cached_letter[8];
+    if (item->first_letter[0] != '\0') {
+      STRNCPY(cached_letter, item->first_letter);
+      return cached_letter;
+    }
+    return panel_category_glyph_lookup_apply_fallback(wm, category, r_is_fallback_letter);
   }
 
   /* For glyph_only categories (category name is a glyph), skip fallback letter check.
@@ -875,7 +888,8 @@ static const char *panel_category_glyph_lookup_mapping(const wmWindowManager *wm
   return nullptr;
 }
 
-static const char *panel_category_glyph_lookup_apply_fallback(const char *category,
+static const char *panel_category_glyph_lookup_apply_fallback(const wmWindowManager *wm,
+                                                              const char *category,
                                                               bool *r_is_fallback_letter)
 {
   if (r_is_fallback_letter) {
@@ -884,10 +898,15 @@ static const char *panel_category_glyph_lookup_apply_fallback(const char *catego
   }
 
   static char first_char_buf[8];
-  if (category_tab_first_utf8_char_copy(category, first_char_buf, sizeof(first_char_buf))) {
+  const char *first_letter_source = panel_category_display_name_lookup(wm, category);
+  if (!first_letter_source || first_letter_source[0] == '\0') {
+    first_letter_source = category;
+  }
+
+  if (category_tab_first_utf8_char_copy(first_letter_source, first_char_buf, sizeof(first_char_buf))) {
     return first_char_buf;
   }
-  return category;
+  return first_letter_source;
 }
 
 const char *panel_category_glyph_lookup(const wmWindowManager *wm,
@@ -957,7 +976,26 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
     return panel_type->icon_glyph;
   }
 
-  return panel_category_glyph_lookup_apply_fallback(category, r_is_fallback_letter);
+  return panel_category_glyph_lookup_apply_fallback(wm, category, r_is_fallback_letter);
+}
+
+bool panel_category_first_letter_lookup(const wmWindowManager *wm,
+                                        const char *category,
+                                        int space_type,
+                                        char r_letter[8])
+{
+  if (!wm || !r_letter) {
+    return false;
+  }
+
+  r_letter[0] = '\0';
+  const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category, space_type);
+  if (!item || item->first_letter[0] == '\0') {
+    return false;
+  }
+
+  BLI_strncpy(r_letter, item->first_letter, 8);
+  return true;
 }
 
 static void panel_category_color_lookup(const wmWindowManager *wm,

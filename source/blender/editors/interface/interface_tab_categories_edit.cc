@@ -85,6 +85,7 @@ using internal::uiTemplateGlyphSelectorWithCallback;
 
 /* Static buffers for preview callback - updated by live update callback */
 static char category_tab_preview_glyph[8] = "";
+static char category_tab_preview_first_letter[8] = "";
 static float category_tab_preview_color[3] = {0.0f, 0.0f, 0.0f};
 
 /* Static pointer to preview button - updated when popup opens, used for live updates */
@@ -285,6 +286,9 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
       /* Override was deleted by live preview - recreate it */
       item = MEM_new<CategoryGlyphItem>(__func__);
       STRNCPY(item->category, category);
+      /* Initialize first_letter from category name */
+      item->first_letter[0] = category[0] ? category[0] : '?';
+      item->first_letter[1] = '\0';
       item->glyph[0] = '\0';
       item->display_name[0] = '\0';
       zero_v3(item->color);
@@ -621,40 +625,33 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
       wm, category, nullptr, &is_fallback, nullptr);
   const int display_mode_ui = RNA_enum_get(op->ptr, "display_mode_ui");
 
+  char preview_name[32] = "";
+  RNA_string_get(op->ptr, "display_name", preview_name);
+  const char *first_letter_source = (preview_name[0] != '\0') ? preview_name : category;
+  char fallback_letter[8] = "";
+  if (!category_tab_first_utf8_char_copy(first_letter_source, fallback_letter, sizeof(fallback_letter))) {
+    fallback_letter[0] = '\0';
+  }
+  STRNCPY(category_tab_preview_first_letter, fallback_letter);
+
   /* Update preview buffers for popup preview.
    * Use the processed glyph from valid input, or fall back to default lookup.
    * Invalid input shows the default glyph (not the invalid text).
-   * Fallback letter is also shown in preview.
-   */
+   * Fallback letter is sourced from the display name/category. */
   copy_v3_v3(category_tab_preview_color, color);
   if (display_mode_ui == 2) {
-    char preview_name[32] = "";
-    RNA_string_get(op->ptr, "display_name", preview_name);
-    const char *first_letter_source = (preview_name[0] != '\0') ? preview_name : category;
-    if (!category_tab_first_utf8_char_copy(
-            first_letter_source, category_tab_preview_glyph, sizeof(category_tab_preview_glyph)))
-    {
-      category_tab_preview_glyph[0] = '\0';
-    }
+    STRNCPY(category_tab_preview_glyph, fallback_letter);
   }
   else if (glyph[0] != '\0') {
     /* Valid custom glyph - show it */
     STRNCPY(category_tab_preview_glyph, glyph);
   }
-  else if (default_glyph) {
-    /* Empty or invalid input - show default glyph (including fallback letter) */
+  else if (default_glyph && !is_fallback) {
+    /* Empty or invalid input - show resolved default glyph (non fallback) */
     STRNCPY(category_tab_preview_glyph, default_glyph);
   }
-  else if (is_fallback) {
-    /* default_glyph is nullptr but is_fallback is true - use first char of category */
-    if (!category_tab_first_utf8_char_copy(
-            category, category_tab_preview_glyph, sizeof(category_tab_preview_glyph)))
-    {
-      category_tab_preview_glyph[0] = '\0';
-    }
-  }
   else {
-    category_tab_preview_glyph[0] = '\0';
+    STRNCPY(category_tab_preview_glyph, fallback_letter);
   }
 
   CategoryGlyphItem *item = nullptr;
@@ -684,6 +681,9 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
     item->icon_provider[0] = '\0';
     item->icon_source = 0;
     item->glyph_mode = 0;
+    /* Initialize first_letter from category name */
+    item->first_letter[0] = category[0] ? category[0] : '?';
+    item->first_letter[1] = '\0';
 
     /* Preserve existing tags from mappings when creating new override.
      * This prevents losing tags when user modifies display_name/glyph/color. */
@@ -723,6 +723,7 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   RNA_string_get(op->ptr, "display_name", display_name);
   if (display_name[0] != '\0') {
     STRNCPY(item->display_name, display_name);
+    category_tab_first_utf8_char_copy(display_name, item->first_letter, sizeof(item->first_letter));
   }
 
   /* Update color for live preview */
@@ -2912,15 +2913,16 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     float glyph_color[3] = {0.0f, 0.0f, 0.0f};
     bool is_fallback = false;
 
-    const char *default_glyph = panel_category_glyph_lookup(wm, category, nullptr, &is_fallback, glyph_color);
+    const char *default_glyph = panel_category_glyph_lookup(
+        wm, category, nullptr, &is_fallback, glyph_color);
 
     if (default_glyph) {
       const bool is_glyph_only_category = is_single_glyph_str(category);
       const bool is_intrinsic_category_glyph = is_glyph_only_category && STREQ(default_glyph, category);
-      if (!is_intrinsic_category_glyph) {
-      char hex_code[16];
-      utf8_to_hex_codepoint(default_glyph, hex_code, sizeof(hex_code));
-      RNA_string_set(op->ptr, "glyph", hex_code);
+      if (!is_intrinsic_category_glyph && !is_fallback) {
+        char hex_code[16];
+        utf8_to_hex_codepoint(default_glyph, hex_code, sizeof(hex_code));
+        RNA_string_set(op->ptr, "glyph", hex_code);
       }
     }
   }
@@ -3152,6 +3154,9 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     item->icon_provider[0] = '\0';
     item->icon_source = 0;
     item->glyph_mode = 0;
+    /* Initialize first_letter from category name */
+    item->first_letter[0] = category[0] ? category[0] : '?';
+    item->first_letter[1] = '\0';
     BLI_addtail(&wm->category_glyph_overrides, item);
   }
 
@@ -3323,10 +3328,11 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
 
     SNPRINTF(python_cmd,
              "from bl_ui.space_userpref import set_category_data\n"
-             "set_category_data('%s', display_name='%s', glyph='%s', color='%s', "
+             "set_category_data('%s', display_name='%s', first_letter='%s', glyph='%s', color='%s', "
              "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s', glyph_mode='%s', space_type=%d)\n",
              category_esc,
              display_name_esc,
+             category_tab_preview_first_letter,
              glyph_hex,
              color_hex,
              icon_source_py,

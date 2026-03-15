@@ -1040,6 +1040,7 @@ def _normalize_category_data(category_data, category_name=None):
     default_entry = {
         "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
         "default_glyph": "", "default_display_name": "", "base_type": "text_only",
+        "first_letter": "",
         "tags": [],  # NEW: array of tag names
         "mode_flags": [],  # NEW: array of mode names
         "glyph_mode": "auto",
@@ -1057,6 +1058,7 @@ def _normalize_category_data(category_data, category_name=None):
         default_display_name = "" if base_type == "glyph_only" else category_name
         return {"glyph": glyph, "display_name": "", "color": [0.0, 0.0, 0.0],
                 "default_glyph": glyph, "default_display_name": default_display_name, "base_type": base_type,
+                "first_letter": "",
                 "tags": [],
                 "glyph_mode": "auto",
                 "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": ""}
@@ -1073,6 +1075,11 @@ def _normalize_category_data(category_data, category_name=None):
                 entry["glyph"] = glyph_str
         if "display_name" in category_data:
             entry["display_name"] = category_data["display_name"]
+        if "first_letter" in category_data:
+            entry["first_letter"] = category_data.get("first_letter", "") or ""
+        # Derive first_letter for legacy data when missing but display_name is available.
+        if not entry["first_letter"] and entry.get("display_name"):
+            entry["first_letter"] = entry["display_name"][:1]
         if "color" in category_data:
             color = category_data["color"]
             if isinstance(color, (list, tuple)) and len(color) >= 3:
@@ -1588,6 +1595,7 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
                 mappings_to_save[space_type_str][category] = {
                     "glyph": _glyph_to_unicode_escape(category_data.get("glyph", "")),
                     "display_name": category_data.get("display_name", ""),
+                    "first_letter": category_data.get("first_letter", ""),
                     "color": category_data.get("color", [0.0, 0.0, 0.0]),
                     "default_glyph": _glyph_to_unicode_escape(category_data.get("default_glyph", "")),
                     "default_display_name": category_data.get("default_display_name", ""),
@@ -1608,6 +1616,7 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
                 mappings_to_save[space_type_str][category] = {
                     "glyph": _glyph_to_unicode_escape(glyph),
                     "display_name": "",
+                    "first_letter": "",
                     "color": [0.0, 0.0, 0.0],
                     "default_glyph": _glyph_to_unicode_escape(glyph),
                     "default_display_name": "",
@@ -2486,6 +2495,7 @@ def set_category_glyph(category, glyph, space_type=-1, save=True):
         _glyph_cache[key] = {
             "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
             "default_glyph": "", "default_display_name": "", "base_type": "text_only",
+            "first_letter": "",
             "glyph_mode": "auto",
             "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
         }
@@ -2526,6 +2536,7 @@ def set_category_glyph(category, glyph, space_type=-1, save=True):
 def set_category_data(category,
                       glyph=None,
                       display_name=None,
+                      first_letter=None,
                       color=None,
                       tags=None,
                       glyph_mode=None,
@@ -2555,6 +2566,7 @@ def set_category_data(category,
         _glyph_cache[key] = {
             "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
             "default_glyph": "", "default_display_name": "", "base_type": "text_only",
+            "first_letter": "",
             "glyph_mode": "auto",
             "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
         }
@@ -2578,6 +2590,8 @@ def set_category_data(category,
             entry["default_display_name"] = entry.get("display_name", "")
     if "glyph_mode" not in entry:
         entry["glyph_mode"] = "auto"
+    if "first_letter" not in entry:
+        entry["first_letter"] = ""
 
     if glyph is not None:
         _glyph_cache[key]["glyph"] = glyph
@@ -2598,6 +2612,12 @@ def set_category_data(category,
         # Also update default_display_name if it's empty (preserve discovered label)
         if not _glyph_cache[key].get("default_display_name"):
             _glyph_cache[key]["default_display_name"] = display_name
+    # Keep first_letter in sync with display_name when explicit value is not provided.
+    if first_letter is not None:
+        _glyph_cache[key]["first_letter"] = first_letter
+    elif display_name is not None:
+        src = display_name if isinstance(display_name, str) else ""
+        _glyph_cache[key]["first_letter"] = src[:1] if src else ""
     if color is not None:
         # Ensure color is stored as floats, converting strings if needed
         if len(color) >= 3:

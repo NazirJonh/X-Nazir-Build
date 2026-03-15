@@ -205,6 +205,18 @@ void category_tab_color_preset_to_rgb(const int preset, float r_color[3])
 /** \name Category Tab Reset Operator
  * \{ */
 
+struct CategoryTabResetDefaults {
+  const char *glyph = nullptr;
+  const char *display_name = nullptr;
+  float color[3] = {0.0f, 0.0f, 0.0f};
+  /* Default icon info from mapping (nullptr/empty = no default icon). */
+  const char *icon_path = nullptr;
+  const char *icon_key = nullptr;
+  const char *icon_provider = nullptr;
+  int icon_source = ui::CATEGORY_TAB_ICON_SOURCE_AUTO; /* AUTO = 0 */
+  bool has_default_icon = false;
+};
+
 static wmOperatorStatus category_tab_reset_invoke(bContext *C,
                                                    wmOperator *op,
                                                    const wmEvent *event)
@@ -218,9 +230,7 @@ static wmOperatorStatus category_tab_reset_invoke(bContext *C,
 static void category_tab_reset_apply_to_operator(bContext *C,
                                                    wmOperator *target_op,
                                                    const char *category,
-                                                   const char *default_display_name,
-                                                   const char *default_glyph,
-                                                   const float default_color[3],
+                                                   const CategoryTabResetDefaults &defaults,
                                                    const bool reset_name,
                                                    const bool reset_glyph,
                                                    const bool reset_color)
@@ -230,8 +240,8 @@ static void category_tab_reset_apply_to_operator(bContext *C,
   }
 
   if (reset_name) {
-    if (default_display_name != nullptr && default_display_name[0] != '\0') {
-      RNA_string_set(target_op->ptr, "display_name", default_display_name);
+    if (defaults.display_name != nullptr && defaults.display_name[0] != '\0') {
+      RNA_string_set(target_op->ptr, "display_name", defaults.display_name);
     }
     else if (is_single_glyph_str(category)) {
       ARegion *region = CTX_wm_region(C);
@@ -244,11 +254,11 @@ static void category_tab_reset_apply_to_operator(bContext *C,
   }
 
   if (reset_glyph) {
-    if (default_glyph != nullptr) {
+    if (defaults.glyph != nullptr) {
       char glyph_hex[16];
-      utf8_to_hex_codepoint(default_glyph, glyph_hex, sizeof(glyph_hex));
+      utf8_to_hex_codepoint(defaults.glyph, glyph_hex, sizeof(glyph_hex));
       printf("[RESET APPLY] category='%s', default_glyph='%s', glyph_hex='%s'\n",
-             category, default_glyph, glyph_hex);
+             category, defaults.glyph, glyph_hex);
       RNA_string_set(target_op->ptr, "glyph", glyph_hex);
     }
     else {
@@ -256,28 +266,41 @@ static void category_tab_reset_apply_to_operator(bContext *C,
       RNA_string_set(target_op->ptr, "glyph", "");
     }
 
-    /* Check if there's a default icon path - if so, switch to Icon Custom mode.
-     * This ensures that when user resets with a default icon, the display immediately
-     * shows the Icon Custom section to indicate the reset took effect. */
-    char current_icon_path[1024] = "";
-    RNA_string_get(target_op->ptr, "icon_path", current_icon_path);
-    
+    /* Always clear icon fields first - user's manually-assigned custom icon is
+     * an override, not a default, and must be removed on reset.
+     * Then restore the mapping-level default icon only if it is an extension_auto
+     * icon (i.e. a built-in icon provided automatically by an extension). */
+    RNA_string_set(target_op->ptr, "icon_path", "");
+    RNA_string_set(target_op->ptr, "icon_key", "");
+    RNA_string_set(target_op->ptr, "icon_provider", "");
+    RNA_enum_set(target_op->ptr, "icon_source", ui::CATEGORY_TAB_ICON_SOURCE_AUTO);
+
     PropertyRNA *display_mode_prop = RNA_struct_find_property(target_op->ptr, "display_mode_ui");
     if (display_mode_prop != nullptr) {
-      if (current_icon_path[0] != '\0') {
-        /* Default icon available - switch to Icon Custom mode */
+      if (defaults.has_default_icon) {
+        /* Restore built-in extension icon and show Icon Custom panel. */
+        RNA_string_set(target_op->ptr,
+                       "icon_path",
+                       defaults.icon_path ? defaults.icon_path : "");
+        RNA_string_set(target_op->ptr,
+                       "icon_provider",
+                       defaults.icon_provider ? defaults.icon_provider : "");
+        RNA_string_set(target_op->ptr,
+                       "icon_key",
+                       defaults.icon_key ? defaults.icon_key : "");
+        RNA_enum_set(target_op->ptr, "icon_source", defaults.icon_source);
         RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON);
         RNA_enum_set(target_op->ptr, "custom_icon_mode_ui", CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM);
       }
       else {
-        /* No default icon - switch to Glyph mode */
+        /* No built-in default icon - switch to Glyph mode. */
         RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_GLYPH);
       }
     }
   }
 
   if (reset_color) {
-    RNA_float_set_array(target_op->ptr, "color", default_color);
+    RNA_float_set_array(target_op->ptr, "color", defaults.color);
   }
 
   RNA_string_set(target_op->ptr, "glyph_search", "");
@@ -327,11 +350,6 @@ static void category_tab_reset_tag_redraw(bContext *C, wmWindowManager *wm, ScrA
   WM_main_add_notifier(NC_SCREEN | NA_EDITED, nullptr);
 }
 
-struct CategoryTabResetDefaults {
-  const char *glyph = nullptr;
-  const char *display_name = nullptr;
-  float color[3] = {0.0f, 0.0f, 0.0f};
-};
 
 static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
                                                        const char *category,
@@ -459,6 +477,44 @@ static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
     defaults.display_name = apply_item->display_name;
   }
 
+  /* Collect default icon info from the global mapping item.
+   * Only treat extension_auto icons as "defaults" that survive reset.
+   * Manually-assigned custom icons (empty/missing provider) are user overrides
+   * and must be cleared on reset. */
+  if (global_item != nullptr) {
+    const bool is_extension_auto_icon =
+        (global_item->icon_provider[0] != '\0' &&
+         STRPREFIX(global_item->icon_provider, "extension_auto"));
+    if (is_extension_auto_icon && global_item->icon_path[0] != '\0') {
+      defaults.icon_path = global_item->icon_path;
+      defaults.icon_provider = global_item->icon_provider;
+      defaults.icon_key = global_item->icon_key;
+      defaults.icon_source = global_item->icon_source;
+      defaults.has_default_icon = true;
+    }
+  }
+
+  /* When resetting the glyph, also reset icon fields in the mapping item.
+   * If no extension_auto default icon exists, clear the icon fields so that
+   * the user's manually-assigned custom icon is removed from the mapping and,
+   * consequently, from any subsequent JSON save triggered by "Save" after "Reset". */
+  if (reset_glyph && apply_item != nullptr) {
+    if (defaults.has_default_icon) {
+      /* Keep the extension-auto default; update mapping to reflect it. */
+      STRNCPY(apply_item->icon_path, defaults.icon_path ? defaults.icon_path : "");
+      STRNCPY(apply_item->icon_provider, defaults.icon_provider ? defaults.icon_provider : "");
+      STRNCPY(apply_item->icon_key, defaults.icon_key ? defaults.icon_key : "");
+      apply_item->icon_source = defaults.icon_source;
+    }
+    else {
+      /* No built-in default icon - clear icon fields from the mapping item. */
+      apply_item->icon_path[0] = '\0';
+      apply_item->icon_key[0] = '\0';
+      apply_item->icon_provider[0] = '\0';
+      apply_item->icon_source = ui::CATEGORY_TAB_ICON_SOURCE_AUTO;
+    }
+  }
+
   return defaults;
 }
 
@@ -508,9 +564,7 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   category_tab_reset_apply_to_operator(C,
                                        dialog_op,
                                        category,
-                                       defaults.display_name,
-                                       defaults.glyph,
-                                       defaults.color,
+                                       defaults,
                                        reset_name,
                                        reset_glyph,
                                        reset_color);
@@ -520,12 +574,32 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     category_tab_reset_apply_to_operator(C,
                                          op,
                                          category,
-                                         defaults.display_name,
-                                         defaults.glyph,
-                                         defaults.color,
+                                         defaults,
                                          reset_name,
                                          reset_glyph,
                                          reset_color);
+  }
+
+  /* When resetting the glyph/icon, also clear icon fields from the WM override so that
+   * the live_update callback (called below) does not re-read stale icon data and
+   * propagate it back into the override. Without this, the custom icon assigned by the
+   * user keeps appearing in Preview Image and the tab even after clicking Reset. */
+  if (reset_glyph) {
+    CategoryGlyphItem *override_item = category_tab_reset_override_ensure(wm, category);
+    if (defaults.has_default_icon) {
+      /* Restore default extension icon in the WM override. */
+      STRNCPY(override_item->icon_path, defaults.icon_path ? defaults.icon_path : "");
+      STRNCPY(override_item->icon_provider, defaults.icon_provider ? defaults.icon_provider : "");
+      STRNCPY(override_item->icon_key, defaults.icon_key ? defaults.icon_key : "");
+      override_item->icon_source = defaults.icon_source;
+    }
+    else {
+      /* No built-in default icon - clear all icon fields in the override. */
+      override_item->icon_path[0] = '\0';
+      override_item->icon_key[0] = '\0';
+      override_item->icon_provider[0] = '\0';
+      override_item->icon_source = ui::CATEGORY_TAB_ICON_SOURCE_AUTO;
+    }
   }
 
   /* Trigger live update to refresh preview and override. */

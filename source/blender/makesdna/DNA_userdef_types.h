@@ -979,7 +979,7 @@ struct UserDef {
   /** Show category name for active tab in Icon mode. */
   char category_tabs_show_active_name = true;
   /** Show tooltips when dragging tabs in Icon mode. */
-  char category_tabs_show_drag_tooltips = false;
+  char category_tabs_show_drag_tooltips = true;
   /** Lock editing of category tab data (name, glyph, color). When true, editing is disabled. */
   char category_tabs_allow_edit = false;
   /** Show color indicator bar in Text mode for categories with custom glyph colors. */

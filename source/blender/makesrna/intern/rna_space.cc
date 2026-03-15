@@ -5976,6 +5976,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_mixed");
+  RNA_def_property_float_default(prop, 1.0f);
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -5984,6 +5985,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_text");
+  RNA_def_property_float_default(prop, 1.0f);
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6303,6 +6305,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_mixed");
+  RNA_def_property_float_default(prop, 1.0f);
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6311,6 +6314,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_text");
+  RNA_def_property_float_default(prop, 1.0f);
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6513,6 +6517,7 @@ static void rna_def_space_image(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_mixed");
+  RNA_def_property_float_default(prop, 1.0f);
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6521,6 +6526,7 @@ static void rna_def_space_image(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_text");
+  RNA_def_property_float_default(prop, 1.0f);
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -8721,6 +8727,7 @@ static void rna_def_space_node(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_mixed");
+  RNA_def_property_float_default(prop, 1.0f);
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -8729,6 +8736,7 @@ static void rna_def_space_node(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_text");
+  RNA_def_property_float_default(prop, 1.0f);
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);

@@ -3999,9 +3999,12 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   fontstyle_set(fstyle);
   const int fontid = fstyle->uifont_id;
   float fstyle_points = fstyle->points;
-  const float aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
+  const float raw_aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
                            1.0f :
                            (static_cast<Block *>(region->runtime->uiblocks.first))->aspect;
+  /* Stabilize aspect: if very close to 1.0, use exactly 1.0 to avoid floating-point oscillation.
+   * This prevents tab size jitter when aspect oscillates between 1.0 and 1.0000001. */
+  const float aspect = (std::abs(raw_aspect - 1.0f) < 0.001f) ? 1.0f : raw_aspect;
 
   CategoryDragState *drag_state = static_cast<CategoryDragState *>(
       region->runtime->category_tabs_drag_state);
@@ -4021,8 +4024,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   /* Calculate too_narrow early - needed for width calculation in first loop */
   const int category_tabs_min_width = category_tabs_min_width_get(area, aspect, display_mode);
   const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_width;
-  const int tab_v_pad_text = round_fl_to_int(TABS_PADDING_TEXT_FACTOR * dpi_fac * zoom) + 2 * px;
-  const int tab_v_pad = round_fl_to_int(TABS_PADDING_BETWEEN_FACTOR * dpi_fac * zoom);
+  const int tab_v_pad_text = int(std::floor(TABS_PADDING_TEXT_FACTOR * dpi_fac * zoom)) + 2 * px;
+  const int tab_v_pad = int(std::floor(TABS_PADDING_BETWEEN_FACTOR * dpi_fac * zoom));
 
   /* Update drag_state->tab_v_pad during drag to ensure correct shift calculations.
    * This must be done before the draw loop because calculate_insert_index and
@@ -4164,10 +4167,11 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     int category_width;
     int current_tab_v_pad_text = tab_v_pad_text;
 
+    const int glyph_h = int(std::floor(BLF_height(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX)));
+
     switch (display_mode) {
       case USER_CATEGORY_TABS_GLYPHS_ONLY: {
         /* Use glyph height (without rotation) for consistent sizing with GLYPHS_TEXT mode. */
-        const int glyph_h = round_fl_to_int(BLF_height(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
         category_width = glyph_h;
 
         /* Determine if this tab should expand to show the name.
@@ -4333,6 +4337,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   const int total_content_height = y_ofs + settings_button_height + tab_v_pad;
   const int max_scroll = max_ii(total_content_height - BLI_rcti_size_y(&v2d->mask), 0);
   const int scroll = clamp_i(region->category_scroll, 0, max_scroll);
+
   region->category_scroll = scroll;
   for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     rcti *rct = &pc_dyn.rect;

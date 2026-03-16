@@ -29,6 +29,9 @@
 
 namespace blender {
 
+/* Forward declaration for popover panel registration */
+void statusbar_experimental_build_panel_register(ARegionType *art);
+
 /* ******************** default callbacks for statusbar space ******************** */
 
 static SpaceLink *statusbar_create(const ScrArea * /*area*/, const Scene * /*scene*/)
@@ -158,6 +161,9 @@ void ED_spacetype_statusbar()
   art->listener = statusbar_header_region_listener;
   art->message_subscribe = statusbar_header_region_message_subscribe;
   BLI_addhead(&st->regiontypes, art);
+
+  /* Register experimental build info popover panel */
+  statusbar_experimental_build_panel_register(art);
 
   BKE_spacetype_register(std::move(st));
 }

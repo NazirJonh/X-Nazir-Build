@@ -2875,6 +2875,30 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
     }
 
     g_pending_category_insert.valid = false;
+
+    /* Activate first newly appeared category if visible in current mode */
+    if (!pending_inserted_ids.is_empty()) {
+      for (const std::string &category_id : pending_inserted_ids) {
+        if (panel_category_is_visible_by_tags(C, wm, category_id.c_str())) {
+          const char *current_active = panel_category_active_get(region, false);
+          if (current_active == nullptr || !STREQ(category_id.c_str(), current_active)) {
+            panel_category_active_set(region, category_id.c_str());
+
+            /* Save to tag category memory */
+            blender::ui::TagFilterStateRef tag_state{};
+            if (blender::ui::tag_filter_state_from_area(CTX_wm_area(C), &tag_state) &&
+                tag_state.active_tags) {
+              char tag_key_buf[256];
+              blender::ui::tag_build_combination_key(
+                  tag_state.active_tags, tag_key_buf, sizeof(tag_key_buf));
+              blender::ui::tag_save_last_active_category(
+                  const_cast<bContext *>(C), tag_key_buf, category_id.c_str());
+            }
+          }
+          break;
+        }
+      }
+    }
   }
 
   /* Auto-save initial category order when JSON order was empty.

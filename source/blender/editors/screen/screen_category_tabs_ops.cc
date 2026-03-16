@@ -36,6 +36,7 @@
 #include "DNA_windowmanager_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_global.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
@@ -823,10 +824,15 @@ static wmOperatorStatus category_tab_pick_custom_icon_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  char current_icon_path[1024] = "";
-  RNA_string_get(category_tab_current_dialog_op->ptr, "icon_path", current_icon_path);
-  if (current_icon_path[0] != '\0') {
-    RNA_string_set(op->ptr, "filepath", current_icon_path);
+  if (U.category_tabs_custom_icon_dir[0] != '\0') {
+    RNA_string_set(op->ptr, "directory", U.category_tabs_custom_icon_dir);
+  }
+  else {
+    char current_icon_path[1024] = "";
+    RNA_string_get(category_tab_current_dialog_op->ptr, "icon_path", current_icon_path);
+    if (current_icon_path[0] != '\0') {
+      RNA_string_set(op->ptr, "filepath", current_icon_path);
+    }
   }
 
   WM_event_add_fileselect(C, op);
@@ -888,7 +894,7 @@ static void SCREEN_OT_category_tab_pick_custom_icon(wmOperatorType *ot)
                                  FILE_TYPE_FOLDER | FILE_TYPE_IMAGE,
                                  FILE_SPECIAL,
                                  FILE_OPENFILE,
-                                 WM_FILESEL_FILEPATH,
+                                 WM_FILESEL_FILEPATH | WM_FILESEL_DIRECTORY,
                                  FILE_DEFAULTDISPLAY,
                                  FILE_SORT_DEFAULT);
 

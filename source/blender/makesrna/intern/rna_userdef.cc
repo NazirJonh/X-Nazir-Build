@@ -54,7 +54,7 @@ const EnumPropertyItem rna_enum_preference_section_items[] = {
     RNA_ENUM_ITEM_SEPR,
     {USER_SECTION_ADDONS, "ADDONS", 0, "Add-ons", "Manage add-ons installed via Extensions"},
     {USER_SECTION_THEME, "THEMES", 0, "Themes", "Edit and save themes installed via Extensions"},
-    {USER_SECTION_TAGS, "TAGS", 0, "Category Tags", "Manage category tab tags"},
+    {USER_SECTION_TAGS, "TAGS", ICON_FUND, "Category Tags", "Manage category tab tags"},
 #if 0 /* def WITH_USERDEF_WORKSPACES */
     RNA_ENUM_ITEM_SEPR,
     {USER_SECTION_WORKSPACE_CONFIG, "WORKSPACE_CONFIG", 0, "Configuration File", ""},
@@ -74,6 +74,8 @@ const EnumPropertyItem rna_enum_preference_section_items[] = {
     RNA_ENUM_ITEM_SEPR,
     {USER_SECTION_DEVELOPER_TOOLS, "DEVELOPER_TOOLS", 0, "Developer Tools", ""},
     {USER_SECTION_EXPERIMENTAL, "EXPERIMENTAL", 0, "Experimental", ""},
+    {USER_SECTION_BUILD_FEATURES, "BUILD_FEATURES", 0, "Build Features", ""},
+    {USER_SECTION_BUILD_INFO, "BUILD_INFO", 0, "Build Information", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -5207,6 +5209,15 @@ static void rna_def_userdef_view(BlenderRNA *brna)
                            "Custom color for the visual outline effect on active tab");
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
+  prop = RNA_def_property(srna, "category_tabs_custom_icon_directory", PROP_STRING, PROP_DIRPATH);
+  RNA_def_property_string_sdna(prop, nullptr, "category_tabs_custom_icon_dir");
+  RNA_def_property_string_maxlength(prop, FILE_MAXDIR);
+  RNA_def_property_ui_text(
+      prop,
+      "Custom Icon Directory",
+      "Default directory opened by the custom icon picker for category tabs");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
   prop = RNA_def_property(srna, "border_width", PROP_INT, PROP_NONE);
   RNA_def_property_ui_text(prop, "Border Width", "Size of the padding around each editor.");
   RNA_def_property_range(prop, 1.0f, 10.0f);
@@ -7833,6 +7844,35 @@ static void rna_def_userdef_experimental(BlenderRNA *brna)
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 }
 
+static void rna_def_userdef_build_features(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "PreferencesBuildFeatures", nullptr);
+  RNA_def_struct_sdna(srna, "UserDef_BuildFeatures");
+  RNA_def_struct_nested(brna, srna, "Preferences");
+  RNA_def_struct_ui_text(srna, "Build Features", "Custom build features");
+
+  prop = RNA_def_property(srna, "use_custom_feature_1", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_custom_feature_1", 1);
+  RNA_def_property_ui_text(
+      prop, "Custom Feature 1", "Enable custom feature 1 for this build");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "use_custom_feature_2", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_custom_feature_2", 1);
+  RNA_def_property_ui_text(
+      prop, "Custom Feature 2", "Enable custom feature 2 for this build");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "use_custom_feature_3", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_custom_feature_3", 1);
+  RNA_def_property_ui_text(
+      prop, "Custom Feature 3", "Enable custom feature 3 for this build");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+}
+
 static void rna_def_userdef_addon_collection(BlenderRNA *brna, PropertyRNA *cprop)
 {
   StructRNA *srna;
@@ -8000,6 +8040,14 @@ void RNA_def_userdef(BlenderRNA *brna)
       "Experimental",
       "Settings for features that are still early in their development stage");
 
+  prop = RNA_def_property(srna, "build_features", PROP_POINTER, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_NEVER_NULL);
+  RNA_def_property_struct_type(prop, "PreferencesBuildFeatures");
+  RNA_def_property_ui_text(
+      prop,
+      "Build Features",
+      "Custom features specific to this build");
+
   prop = RNA_def_int_vector(srna,
                             "version",
                             3,
@@ -8056,6 +8104,7 @@ void RNA_def_userdef(BlenderRNA *brna)
   rna_def_userdef_pathcompare(brna);
   rna_def_userdef_apps(brna);
   rna_def_userdef_experimental(brna);
+  rna_def_userdef_build_features(brna);
 
   USERDEF_TAG_DIRTY_PROPERTY_UPDATE_DISABLE;
 }

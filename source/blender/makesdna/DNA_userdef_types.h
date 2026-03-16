@@ -753,6 +753,8 @@ enum eUserPref_Section {
   USER_SECTION_DEVELOPER_TOOLS = 18,
   USER_SECTION_ASSETS = 19,
   USER_SECTION_TAGS = 20,
+  USER_SECTION_BUILD_FEATURES = 21,
+  USER_SECTION_BUILD_INFO = 22,
 };
 
 /** #UserDef_SpaceData.flag (State of the user preferences UI). */
@@ -834,6 +836,20 @@ struct UserDef_Experimental {
 
 #define USER_DEVELOPER_TOOL_TEST(userdef, member) \
   (((userdef)->flag & USER_DEVELOPER_UI) && ((userdef)->experimental).member)
+
+/**
+ * Custom build features - experimental options specific to this build.
+ * These are always available (not sanitized in release builds).
+ */
+struct UserDef_BuildFeatures {
+  /* Add your custom build feature flags here. */
+  char use_custom_feature_1 = 0;
+  char use_custom_feature_2 = 0;
+  char use_custom_feature_3 = 0;
+  char _pad[5] = {};
+};
+
+#define USER_BUILD_FEATURE_TEST(userdef, member) (((userdef)->build_features).member)
 
 /**
  * Container to store multiple directory paths and a name for each as a #ListBase.
@@ -1014,6 +1030,8 @@ struct UserDef {
   char _pad7[6] = {};
   /** Custom color for visual outline effect (RGBA). */
   unsigned char category_tabs_visual_outline_color[4] = {255, 255, 255, 255};
+  /** Default directory used by the "Pick Custom Icon File" browser for category tabs. */
+  char category_tabs_custom_icon_dir[/*FILE_MAXDIR*/ 768] = "";
   /**
    * Setting for UI line width.
    *
@@ -1303,6 +1321,9 @@ struct UserDef {
   UserDef_TempWinBounds stored_bounds;
 
   UserDef_Experimental experimental;
+
+  /** Custom build features - always available. */
+  UserDef_BuildFeatures build_features;
 
   /** Runtime data (keep last). */
   UserDef_Runtime runtime;

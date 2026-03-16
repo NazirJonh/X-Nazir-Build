@@ -1784,19 +1784,23 @@ class VIEW3D_HT_tag_bar_tags(Header):
 
         # Show message if no tags exist at all
         if not wm.category_tags:
-            row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD').operator_idname = 'wm.category_tag_create'
+            op = row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD')
+            op.operator_idname = 'wm.category_tag_create'
+            op.width = 430
             row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
             return
 
         # Filter tag list to only include those with glyphs and active for current mode
         mode_string = context.mode
-        tags_with_glyphs = [t for t in tags_sorted 
-                           if glyph_display(t.glyph) 
+        tags_with_glyphs = [t for t in tags_sorted
+                           if glyph_display(t.glyph)
                            and self.is_tag_active_for_mode(t, mode_string)]
 
         # Show message if no tags with glyphs exist
         if not tags_with_glyphs:
-            row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD').operator_idname = 'wm.category_tag_create'
+            op = row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD')
+            op.operator_idname = 'wm.category_tag_create'
+            op.width = 430
             row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
             return
 

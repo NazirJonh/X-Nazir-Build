@@ -352,7 +352,9 @@ class NODE_HT_tag_bar(Header):
         tags = _node_visible_tags_for_current_mode(context)
 
         if not wm.category_tags or not tags:
-            row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD').operator_idname = 'wm.category_tag_create'
+            op = row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD')
+            op.operator_idname = 'wm.category_tag_create'
+            op.width = 430
             row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
             return
 

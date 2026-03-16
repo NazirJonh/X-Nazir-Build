@@ -8163,6 +8163,76 @@ class ExperimentalPanel:
         return bpy.app.version_cycle == "alpha"
 
 
+class USERPREF_PT_build_features(Panel):
+    """Panel for custom build features in Preferences."""
+    bl_space_type = 'PREFERENCES'
+    bl_region_type = 'WINDOW'
+    bl_context = "build_features"
+    bl_label = "Build Features"
+
+    @classmethod
+    def poll(cls, _context):
+        # Always show this panel for custom builds
+        return True
+
+    def draw(self, context):
+        layout = self.layout
+        prefs = context.preferences
+        build_features = prefs.build_features
+
+        layout.use_property_split = False
+
+        # Info message
+        layout.label(text="Custom features for this experimental build:", icon='INFO')
+        layout.separator()
+
+        # Feature toggles
+        col = layout.column()
+        col.prop(build_features, "use_custom_feature_1")
+        col.prop(build_features, "use_custom_feature_2")
+        col.prop(build_features, "use_custom_feature_3")
+
+
+class USERPREF_PT_experimental_build_info(Panel):
+    """Panel displaying experimental build information in Preferences."""
+    bl_space_type = 'PREFERENCES'
+    bl_region_type = 'WINDOW'
+    bl_context = "build_info"
+    bl_label = "Build Information"
+
+    @classmethod
+    def poll(cls, _context):
+        # Always show this panel for custom builds
+        return True
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+
+        # Build information - these values should match BKE_experimental_build
+        # TODO: In future, access via RNA from C++ BKE_experimental_build_info_get()
+
+        box = layout.box()
+        col = box.column()
+
+        # Title with alert icon
+        row = col.row()
+        row.alert = True
+        row.label(text="Experimental Build", icon='ERROR')
+
+        col.separator()
+
+        # Build details
+        col.label(text="Created by: Nazir Galimov", icon='USER')
+        col.label(text="This is a custom Blender build.", icon='INFO')
+        col.label(text="Use at your own risk.", icon='ERROR')
+
+        col.separator()
+
+        # Additional info
+        col.label(text="Built with love and caffeine.", icon='HEART')
+
+
 """
 # Example panel, leave it here so we always have a template to follow even
 # after the features are gone from the experimental panel.
@@ -8572,20 +8642,13 @@ class USERPREF_PT_tag_mode_filter_popover(Panel):
         row.operator("userpref.tag_mode_select_none", text="None")
 
 
-class USERPREF_PT_tags(TagsPanel, Panel):
-    bl_label = "Category Tags"
-    bl_options = {'HIDE_HEADER'}
+class USERPREF_PT_tag_management(TagsPanel, Panel):
+    bl_label = "Tag Management"
+    bl_icon = 'FUND'
 
     def draw(self, context):
         layout = self.layout
         wm = context.window_manager
-
-        # Header with description
-        row = layout.row()
-        row.label(text="Manage tags for category tabs. Tags help organize and filter panels.", icon='TAG')
-
-        layout.separator()
-
         # Main container box
         main_box = layout.box()
 
@@ -8656,7 +8719,7 @@ class USERPREF_PT_tags(TagsPanel, Panel):
             box = col_right.box()
             box.use_property_split = True
             box.prop(tag, "name", text="Name")
-            
+
             row = box.row(align=True)
             row.prop(tag, "glyph", text="Glyph")
             op = row.operator("wm.glyph_picker_grid", text=_hex_to_glyph("f02f"), icon='NONE')
@@ -8670,18 +8733,18 @@ class USERPREF_PT_tags(TagsPanel, Panel):
             # Filter Mode button
             row = box.row()
             row.label(text="Filter Mode:")
-            
+
             # Show active mode icons at a glance
             m_flags = _get_mode_flags_for_tag(tag.name)
             m_icons = [(bit, icon) for _name, _mode_id, bit, _label, icon in _CATEGORY_TAG_MODES]
-            
+
             icon_row = row.row(align=True)
             any_mode = False
             for bit, m_icon in m_icons:
                 if m_flags & (1 << bit):
                     icon_row.label(text="", icon=m_icon)
                     any_mode = True
-            
+
             if not any_mode:
                 icon_row.label(text="", icon='RESTRICT_SELECT_ON')
 
@@ -8703,7 +8766,7 @@ class USERPREF_PT_tags(TagsPanel, Panel):
                     cat_name = cat_info['name']
                     cat_display_name = cat_info['display_name']
                     cat_space_type = cat_info['space_type']
-                    
+
                     # Create an aligned row inside the flow
                     item_row = cats_flow.row()
                     item_row.alignment = 'LEFT'
@@ -8711,7 +8774,6 @@ class USERPREF_PT_tags(TagsPanel, Panel):
                     # Get all visual data for the category using the original name
                     glyph, color, display_name = get_category_glyph_data(cat_name, cat_space_type)
                     icon_key, icon_path = get_category_icon_data(cat_name, cat_space_type)  # Get icon key and path
-                    
                     # Use the display_name from category info if available
                     final_display_name = cat_display_name if cat_display_name else display_name
 
@@ -8734,19 +8796,36 @@ class USERPREF_PT_tags(TagsPanel, Panel):
                         operator_param_value=""  # TODO: Temporarily disabled
                     )
 
-                    # Add delete button (X) to the same row - seamless appearance with borders
+                    # Add delete button (X) to the same row for seamless appearance with borders
                     op_x = tag_row.operator("wm.category_tag_remove_from_category", text="", icon='X')
                     op_x.category = cat_name  # Use original category name (may be empty)
                     op_x.tag_name = tag.name
                     op_x.space_type = cat_space_type  # Pass space_type for proper lookup
             else:
                 cats_box.label(text="No categories using this tag", icon='INFO')
-
         else:
             # No tag selected or list is empty
             col_right.label(text="Select a tag to edit", icon='INFO')
             if len(tags) == 0:
                 col_right.label(text="Click '+' to create a tag", icon='ADD')
+
+
+class USERPREF_PT_custom_icon_picker(TagsPanel, Panel):
+    bl_label = "Custom Icon Picker"
+    bl_icon = 'FUND'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        prefs = context.preferences
+        view = prefs.view
+
+        col = layout.column()
+        col.use_property_split = True
+        col.use_property_decorate = False
+        col.prop(view, "category_tabs_custom_icon_directory", text="Default Icon Folder")
 
 
 # -----------------------------------------------------------------------------
@@ -8888,12 +8967,14 @@ classes = (
 
     USERPREF_PT_experimental_new_features,
     USERPREF_PT_experimental_prototypes,
+    USERPREF_PT_build_features,
+    USERPREF_PT_experimental_build_info,
     # USERPREF_PT_experimental_tweaks,
 
     USERPREF_PT_developer_tools,
 
-    USERPREF_PT_tags,
-
+    USERPREF_PT_tag_management,
+    USERPREF_PT_custom_icon_picker,
     # UI lists
     USERPREF_UL_asset_libraries,
     USERPREF_UL_extension_repos,

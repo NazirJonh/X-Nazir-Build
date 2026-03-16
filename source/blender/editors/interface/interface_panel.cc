@@ -2770,7 +2770,7 @@ static int ui_handle_panel_category_cycling(bContext *C,
 
           if (next_index >= 0 && next_index < ordered_categories.size()) {
             PanelCategoryDyn *next = ordered_categories[next_index];
-            panel_category_active_set(region, next->idname);
+            ui::panel_category_active_set_safe(C, region, next->idname);
 
             /* Save to tag category memory. */
             using namespace blender::ui;

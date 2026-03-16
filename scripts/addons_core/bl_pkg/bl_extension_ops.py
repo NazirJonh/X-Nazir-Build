@@ -64,6 +64,13 @@ rna_prop_enable_on_install_type_map = {
     "theme": "Set Current Theme",
 }
 
+rna_prop_force_enable_on_install = BoolProperty(
+    name="Force Enable After Install",
+    description="Force enable after installing (used by internal drop logic)",
+    default=False,
+    options={'HIDDEN', 'SKIP_SAVE'},
+)
+
 _ext_base_pkg_idname = "bl_ext"
 _ext_base_pkg_idname_with_dot = _ext_base_pkg_idname + "."
 
@@ -665,6 +672,7 @@ def _preferences_ensure_disabled(
         addon_module_name = ".".join(addon_module_elem)
         loaded_default, loaded_state = addon_utils.check(addon_module_name)
 
+        print(f"[DISABLE] addon={addon_module_name}, loaded_default={loaded_default}, loaded_state={loaded_state}")
         result[addon_module_name] = loaded_default, loaded_state
 
         # Not loaded or default, skip.
@@ -728,10 +736,16 @@ def _preferences_ensure_enabled(*, repo_item, pkg_id_sequence, result, handle_er
     import addon_utils
     _ = repo_item, pkg_id_sequence
     for addon_module_name, (loaded_default, loaded_state) in result.items():
-        # The module was not loaded, so no need to restore it.
-        if not loaded_state:
+        # Always try to re-enable addons after upgrade, even if they weren't loaded before.
+        # This handles the case where an addon was in preferences but failed to load
+        # (e.g., due to missing files that are now installed).
+        # The loaded_default flag indicates if the addon was supposed to be enabled.
+        print(f"[RESTORE] addon={addon_module_name}, loaded_default={loaded_default}, loaded_state={loaded_state}")
+        if not loaded_default:
+            print(f"[RESTORE] Skipping (not in preferences as enabled)")
             continue
 
+        print(f"[RESTORE] Attempting to enable: {addon_module_name}")
         addon_utils.enable(
             addon_module_name,
             default_set=loaded_default,
@@ -778,6 +792,32 @@ def _preferences_install_post_enable_on_install(
                 continue
 
             addon_module_name = "{:s}.{:s}.{:s}".format(_ext_base_pkg_idname, repo_item.module, pkg_id)
+
+            # DEBUG: Check module state before enable
+            import sys
+            repo_module_name = "{:s}.{:s}".format(_ext_base_pkg_idname, repo_item.module)
+            print(f"[DEBUG ENABLE] Attempting to enable: {addon_module_name}")
+            print(f"[DEBUG ENABLE] Repo module name: {repo_module_name}")
+            print(f"[DEBUG ENABLE] Repo module in sys.modules: {repo_module_name in sys.modules}")
+            print(f"[DEBUG ENABLE] Addon module in sys.modules: {addon_module_name in sys.modules}")
+
+            if repo_module_name in sys.modules:
+                repo_mod = sys.modules[repo_module_name]
+                print(f"[DEBUG ENABLE] Repo module __path__: {getattr(repo_mod, '__path__', 'N/A')}")
+                print(f"[DEBUG ENABLE] hasattr(repo_mod, pkg_id): {hasattr(repo_mod, pkg_id)}")
+                if hasattr(repo_mod, pkg_id):
+                    submod = getattr(repo_mod, pkg_id)
+                    print(f"[DEBUG ENABLE] Submodule: {submod}")
+                    print(f"[DEBUG ENABLE] Submodule __addon_enabled__: {getattr(submod, '__addon_enabled__', 'N/A')}")
+
+            # Check path_importer_cache for addon directory
+            addon_dir = os.path.join(directory, pkg_id)
+            print(f"[DEBUG ENABLE] Addon directory: {addon_dir}")
+            print(f"[DEBUG ENABLE] Addon directory exists: {os.path.exists(addon_dir)}")
+            if addon_dir in sys.path_importer_cache:
+                print(f"[DEBUG ENABLE] path_importer_cache[{addon_dir}]: {sys.path_importer_cache[addon_dir]}")
+            # END DEBUG
+
             addon_utils.enable(
                 addon_module_name,
                 default_set=True,
@@ -790,6 +830,30 @@ def _preferences_install_post_enable_on_install(
                 continue
             extension_theme_enable(directory, pkg_id)
             has_theme = True
+
+
+def _preferences_install_post_force_enable_addons(
+        *,
+        directory,
+        pkg_manifest_local,
+        pkg_id_sequence,
+        handle_error,
+):
+    import addon_utils
+    repo_item = _extensions_repo_from_directory(directory)
+    for pkg_id in pkg_id_sequence:
+        item_local = pkg_manifest_local.get(pkg_id)
+        if item_local is None:
+            continue
+        if item_local.type != "add-on":
+            continue
+        addon_module_name = "{:s}.{:s}.{:s}".format(_ext_base_pkg_idname, repo_item.module, pkg_id)
+        addon_utils.enable(
+            addon_module_name,
+            default_set=True,
+            refresh_handled=True,
+            handle_error=handle_error,
+        )
 
 
 def _preferences_ui_redraw():
@@ -1214,12 +1278,24 @@ def _extension_repo_directory_validate_module(repo_directory):
     # Afterwards, the user can perform an action which creates the directory.
     # If the cache is not cleared, enabling the add-on will fail, see: #124457.
     from sys import path_importer_cache
-    # If the directory has been cached as missing, remove the cache.
-    if path_importer_cache.get(repo_directory, ...) is None:
-        # While highly likely the directory exists, it's possible it failed to be created
-        # (maybe there are no permissions?), if that's the case keep the cache.
-        if os.path.exists(repo_directory):
-            del path_importer_cache[repo_directory]
+    import os
+
+    print(f"[DEBUG VALIDATE] Validating repo directory: {repo_directory}")
+
+    # Clear cache for any paths that start with repo_directory (including subdirectories)
+    # This is important for newly installed extensions
+    keys_to_clear = []
+    for cached_path in list(path_importer_cache.keys()):
+        if cached_path.startswith(repo_directory):
+            # Check if the cached value indicates "not found" (None) or if directory now exists
+            cached_value = path_importer_cache.get(cached_path, ...)
+            if cached_value is None or (os.path.exists(cached_path) if isinstance(cached_path, str) else False):
+                keys_to_clear.append(cached_path)
+                print(f"[DEBUG VALIDATE] Will clear cache for: {cached_path} (value: {cached_value})")
+
+    for key in keys_to_clear:
+        del path_importer_cache[key]
+        print(f"[DEBUG VALIDATE] Cleared cache for: {key}")
 
 
 # -----------------------------------------------------------------------------
@@ -1625,6 +1701,25 @@ class EXTENSIONS_OT_repo_sync(Operator, _ExtCmdMixIn):
 
         _preferences_ui_redraw()
 
+        # Notify deferred category activation system that repo sync is complete
+        if not canceled:
+            import bpy
+            try:
+                # Run existing post-update handlers first.
+                for handler in bpy.app.handlers._extension_repos_update_post:
+                    try:
+                        handler()
+                    except Exception as handler_ex:
+                        print(f"Extension post-sync handler error: {handler_ex}")
+
+                # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
+                # This notifies the C++ deferred category activation system that repo sync is complete.
+                print("[PYTHON] Calling extension_repos_update_post_trigger() after repo sync...")
+                bpy.app.extension_repos_update_post_trigger()
+                print("[PYTHON] extension_repos_update_post_trigger() completed after repo sync")
+            except Exception as ex:
+                print(f"Extension post-sync trigger error: {ex}")
+
 
 class EXTENSIONS_OT_repo_sync_all(Operator, _ExtCmdMixIn):
     """Refresh the list of extensions for all the remote repositories"""
@@ -1725,6 +1820,25 @@ class EXTENSIONS_OT_repo_sync_all(Operator, _ExtCmdMixIn):
         repo_stats_calc()
 
         _preferences_ui_redraw()
+
+        # Notify deferred category activation system that repo sync all is complete
+        if not canceled:
+            import bpy
+            try:
+                # Run existing post-update handlers first.
+                for handler in bpy.app.handlers._extension_repos_update_post:
+                    try:
+                        handler()
+                    except Exception as handler_ex:
+                        print(f"Extension post-sync-all handler error: {handler_ex}")
+
+                # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
+                # This notifies the C++ deferred category activation system that repo sync all is complete.
+                print("[PYTHON] Calling extension_repos_update_post_trigger() after repo sync all...")
+                bpy.app.extension_repos_update_post_trigger()
+                print("[PYTHON] extension_repos_update_post_trigger() completed after repo sync all")
+            except Exception as ex:
+                print(f"Extension post-sync-all trigger error: {ex}")
 
 
 class EXTENSIONS_OT_repo_refresh_all(Operator):
@@ -2157,6 +2271,25 @@ class EXTENSIONS_OT_package_upgrade_all(Operator, _ExtCmdMixIn):
         _preferences_ui_redraw()
         _preferences_ui_refresh_addons()
 
+        # Notify deferred category activation system that package upgrade is complete
+        if not canceled:
+            import bpy
+            try:
+                # Run existing post-update handlers first.
+                for handler in bpy.app.handlers._extension_repos_update_post:
+                    try:
+                        handler()
+                    except Exception as handler_ex:
+                        print(f"Extension post-upgrade handler error: {handler_ex}")
+
+                # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
+                # This notifies the C++ deferred category activation system that package upgrade is complete.
+                print("[PYTHON] Calling extension_repos_update_post_trigger() after package upgrade...")
+                bpy.app.extension_repos_update_post_trigger()
+                print("[PYTHON] extension_repos_update_post_trigger() completed after package upgrade")
+            except Exception as ex:
+                print(f"Extension post-upgrade trigger error: {ex}")
+
 
 class EXTENSIONS_OT_package_install_marked(Operator, _ExtCmdMixIn):
     bl_idname = "extensions.package_install_marked"
@@ -2321,6 +2454,44 @@ class EXTENSIONS_OT_package_install_marked(Operator, _ExtCmdMixIn):
 
         _preferences_ui_redraw()
         _preferences_ui_refresh_addons()
+
+        # Notify deferred category activation system that marked package uninstallation is complete
+        if not canceled:
+            import bpy
+            try:
+                # Run existing post-update handlers first.
+                for handler in bpy.app.handlers._extension_repos_update_post:
+                    try:
+                        handler()
+                    except Exception as handler_ex:
+                        print(f"Extension post-uninstall-marked handler error: {handler_ex}")
+
+                # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
+                # This notifies the C++ deferred category activation system that marked package uninstallation is complete.
+                print("[PYTHON] Calling extension_repos_update_post_trigger() after marked package uninstall...")
+                bpy.app.extension_repos_update_post_trigger()
+                print("[PYTHON] extension_repos_update_post_trigger() completed after marked package uninstall")
+            except Exception as ex:
+                print(f"Extension post-uninstall-marked trigger error: {ex}")
+
+        # Notify deferred category activation system that marked package installation is complete
+        if not canceled:
+            import bpy
+            try:
+                # Run existing post-update handlers first.
+                for handler in bpy.app.handlers._extension_repos_update_post:
+                    try:
+                        handler()
+                    except Exception as handler_ex:
+                        print(f"Extension post-install-marked handler error: {handler_ex}")
+
+                # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
+                # This notifies the C++ deferred category activation system that marked package installation is complete.
+                print("[PYTHON] Calling extension_repos_update_post_trigger() after marked package install...")
+                bpy.app.extension_repos_update_post_trigger()
+                print("[PYTHON] extension_repos_update_post_trigger() completed after marked package install")
+            except Exception as ex:
+                print(f"Extension post-install-marked trigger error: {ex}")
 
 
 class EXTENSIONS_OT_package_uninstall_marked(Operator, _ExtCmdMixIn):
@@ -2501,6 +2672,7 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
     )
 
     enable_on_install: rna_prop_enable_on_install
+    force_enable_on_install: rna_prop_force_enable_on_install
 
     # Properties matching the legacy operator, not used by extension packages.
     target: EnumProperty(
@@ -2705,6 +2877,13 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
                 pkg_id_sequence_upgrade=pkg_id_sequence_upgrade,
                 handle_error=handle_error,
             )
+        elif (not canceled) and self.force_enable_on_install:
+            _preferences_install_post_force_enable_addons(
+                directory=self.repo_directory,
+                pkg_manifest_local=pkg_manifest_local,
+                pkg_id_sequence=self.pkg_id_sequence,
+                handle_error=handle_error,
+            )
 
         if self.enable_on_install:
             if (extensions_enabled_test := _extensions_enabled()) != extensions_enabled:
@@ -2723,6 +2902,26 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
 
         _preferences_ui_redraw()
         _preferences_ui_refresh_addons()
+
+        # Notify deferred category activation system that extension installation is complete
+        if not canceled:
+            import bpy
+            try:
+                # Run existing post-update handlers first.
+                # Some workflows rely on these to refresh internal state/UI after extension changes.
+                for handler in bpy.app.handlers._extension_repos_update_post:
+                    try:
+                        handler()
+                    except Exception as handler_ex:
+                        print(f"Extension post-install handler error: {handler_ex}")
+
+                # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
+                # This notifies the C++ deferred category activation system that extension installation is complete.
+                print("[PYTHON] Calling extension_repos_update_post_trigger()...")
+                bpy.app.extension_repos_update_post_trigger()
+                print("[PYTHON] extension_repos_update_post_trigger() completed")
+            except Exception as ex:
+                print(f"Extension post-install callback error: {ex}")
 
     def exec_legacy(self, filepath):
         backup_filepath = self.filepath
@@ -2948,6 +3147,7 @@ class EXTENSIONS_OT_package_install(Operator, _ExtCmdMixIn):
     pkg_id: rna_prop_pkg_id
 
     enable_on_install: rna_prop_enable_on_install
+    force_enable_on_install: rna_prop_force_enable_on_install
 
     # Only used for code-path for dropping an extension.
     url: rna_prop_url
@@ -3095,6 +3295,13 @@ class EXTENSIONS_OT_package_install(Operator, _ExtCmdMixIn):
                 pkg_id_sequence_upgrade=pkg_id_sequence_upgrade,
                 handle_error=handle_error,
             )
+        elif (not canceled) and self.force_enable_on_install:
+            _preferences_install_post_force_enable_addons(
+                directory=self.repo_directory,
+                pkg_manifest_local=pkg_manifest_local,
+                pkg_id_sequence=(self.pkg_id,),
+                handle_error=handle_error,
+            )
 
         if self.enable_on_install:
             if (extensions_enabled_test := _extensions_enabled()) != extensions_enabled:
@@ -3113,6 +3320,25 @@ class EXTENSIONS_OT_package_install(Operator, _ExtCmdMixIn):
 
         _preferences_ui_redraw()
         _preferences_ui_refresh_addons()
+
+        # Notify deferred category activation system that extension installation is complete
+        if not canceled:
+            import bpy
+            try:
+                # Run existing post-update handlers first.
+                for handler in bpy.app.handlers._extension_repos_update_post:
+                    try:
+                        handler()
+                    except Exception as handler_ex:
+                        print(f"Extension post-install handler error: {handler_ex}")
+
+                # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
+                # This notifies the C++ deferred category activation system that extension installation is complete.
+                print("[PYTHON] Calling extension_repos_update_post_trigger()...")
+                bpy.app.extension_repos_update_post_trigger()
+                print("[PYTHON] extension_repos_update_post_trigger() completed")
+            except Exception as ex:
+                print(f"Extension post-install callback error: {ex}")
 
         # NOTE: this can be removed once upgrading from 4.1 is no longer relevant.
         if self.do_legacy_replace and (not canceled):

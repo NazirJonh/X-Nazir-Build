@@ -2720,8 +2720,8 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   /* Check for existing override and populate properties */
   wmWindowManager *wm = CTX_wm_manager(C);
 
-  /* Set filter mode to current object mode when opening the dialog */
-  wm->category_tag_filter_mode = get_current_object_mode_filter_value(C);
+  /* Always show all tags when opening the dialog. */
+  wm->category_tag_filter_mode = 0;
 
   bool has_override = false;
   bool override_is_empty = false;

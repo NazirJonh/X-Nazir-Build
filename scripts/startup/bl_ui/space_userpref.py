@@ -498,8 +498,8 @@ def _get_category_data(category, space_type=-1):
     def has_meaningful_data(data):
         if not isinstance(data, dict):
             return False
-        # CRITICAL FIX: Consider both glyph AND tags as "meaningful" for fallback logic
-        # This prevents VIEW3D entries with empty glyphs from blocking GLOBAL fallback
+        # CRITICAL FIX: Consider glyph, tags, AND icon as "meaningful" for fallback logic
+        # This prevents entries with empty glyphs but valid icons from being skipped
         glyph = data.get("glyph", "")
         default_glyph = data.get("default_glyph", "")
         has_glyph = bool(glyph or default_glyph)
@@ -508,8 +508,14 @@ def _get_category_data(category, space_type=-1):
         tags = data.get("tags", [])
         has_tags = bool(tags)
 
-        # Either glyph OR tags presence determines "meaningful" data for space-specific vs global fallback
-        return has_glyph or has_tags
+        # Check for icon customization - icon_key/icon_path are meaningful
+        icon_source = data.get("icon_source", "auto")
+        icon_key = data.get("icon_key", "")
+        icon_path = data.get("icon_path", "")
+        has_icon = (icon_source in ("manual", "off")) or bool(icon_key) or bool(icon_path)
+
+        # glyph OR tags OR icon presence determines "meaningful" data
+        return has_glyph or has_tags or has_icon
 
     # Try space-specific first
     key = _make_cache_key(space_type, category)
@@ -1190,6 +1196,10 @@ def _normalize_category_data(category_data, category_name=None):
         icon_provider = icon_block.get("provider", category_data.get("icon_provider", ""))
         entry["icon_provider"] = str(icon_provider) if icon_provider is not None else ""
 
+        # DEBUG: Log icon data loading for Brushstroke
+        if 'Brushstroke' in str(category_name):
+            print(f"[NORMALIZE] Brushstroke icon data: source='{icon_source}', key='{icon_key}', path='{icon_path}'")
+
         return entry
     else:
         return default_entry
@@ -1489,6 +1499,118 @@ def _load_glyph_mappings_from_file():
     for tag_key, category_list in raw_orders.items():
         if isinstance(category_list, list):
             _category_orders_cache[tag_key] = _category_order_decode(category_list)
+
+    # Propagate glyph, glyph_mode, and icon data from space-specific entries to GLOBAL entries
+    # This ensures customizations are visible across all spaces
+    for cache_key, cat_data in list(_glyph_cache.items()):
+        if isinstance(cache_key, tuple) and len(cache_key) == 2:
+            space_type_id, category = cache_key
+            if space_type_id != -1:  # Not GLOBAL
+                glyph = cat_data.get("glyph", "")
+                glyph_mode = cat_data.get("glyph_mode", "auto")
+                icon_source = cat_data.get("icon_source", "auto")
+                icon_key = cat_data.get("icon_key", "")
+                icon_path = cat_data.get("icon_path", "")
+                icon_provider = cat_data.get("icon_provider", "")
+                default_glyph = cat_data.get("default_glyph", "")
+
+                # If this space-specific entry has customizations, update GLOBAL entry
+                has_customizations = (
+                    (icon_source in ("manual", "off") or icon_key or icon_path) or
+                    (glyph_mode != "auto") or
+                    (glyph and glyph != default_glyph)
+                )
+                if has_customizations:
+                    global_cache_key = _make_cache_key(-1, category)
+                    if global_cache_key not in _glyph_cache:
+                        _glyph_cache[global_cache_key] = {
+                            "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
+                            "default_glyph": "", "default_display_name": "", "base_type": "text_only",
+                            "glyph_mode": "auto",
+                            "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
+                        }
+
+                    global_entry = _glyph_cache[global_cache_key]
+                    # Determine if we should update global entry based on icon_source priority
+                    # Priority: 'manual' > 'off' > 'auto'
+                    # - 'manual' (user explicitly chose an icon) has HIGHEST priority
+                    # - 'off' (user chose first_letter mode) wins over 'auto'
+                    # - 'auto' is default, overwritten by anything
+                    global_icon_source = global_entry.get("icon_source", "auto")
+                    should_update = (
+                        global_icon_source == "auto" or
+                        icon_source == "manual" or
+                        icon_source == "off"
+                    )
+
+                    # Copy glyph to global entry
+                    if glyph and global_entry.get("glyph", "") != glyph:
+                        global_entry["glyph"] = glyph
+                        print(f"[GLYPH LOAD] Propagated glyph '{glyph}' from space {space_type_id} to GLOBAL for '{category}'")
+
+                    # Copy glyph_mode to global entry only when allowed to update
+                    if should_update and glyph_mode != "auto" and global_entry.get("glyph_mode", "auto") != glyph_mode:
+                        global_entry["glyph_mode"] = glyph_mode
+                        print(f"[GLYPH LOAD] Propagated glyph_mode '{glyph_mode}' from space {space_type_id} to GLOBAL for '{category}'")
+
+                    # Copy icon data to global entry
+                    if should_update:
+                        if global_entry.get("icon_source", "auto") != icon_source:
+                            global_entry["icon_source"] = icon_source
+                            print(f"[GLYPH LOAD] Propagated icon_source '{icon_source}' from space {space_type_id} to GLOBAL for '{category}'")
+                        if global_entry.get("icon_key", "") != icon_key:
+                            global_entry["icon_key"] = icon_key
+                            print(f"[GLYPH LOAD] Propagated icon_key '{icon_key}' from space {space_type_id} to GLOBAL for '{category}'")
+                        if global_entry.get("icon_path", "") != icon_path:
+                            global_entry["icon_path"] = icon_path
+                        if global_entry.get("icon_provider", "") != icon_provider:
+                            global_entry["icon_provider"] = icon_provider
+
+    # STEP 2: Sync from GLOBAL back to all SPACE entries for consistency
+    # This ensures all space-specific entries have the same data as GLOBAL
+    global_cache_prefix = (-1, "")
+    categories_in_global = set()
+    for cache_key in _glyph_cache.keys():
+        if isinstance(cache_key, tuple) and len(cache_key) == 2:
+            space_type_id, category = cache_key
+            if space_type_id == -1:  # GLOBAL entry
+                categories_in_global.add(category)
+
+    for category in categories_in_global:
+        global_cache_key = (-1, category)
+        if global_cache_key not in _glyph_cache:
+            continue
+        global_entry = _glyph_cache[global_cache_key]
+
+        # Get global values
+        global_glyph_mode = global_entry.get("glyph_mode", "auto")
+        global_icon_source = global_entry.get("icon_source", "auto")
+        global_icon_key = global_entry.get("icon_key", "")
+        global_icon_path = global_entry.get("icon_path", "")
+        global_icon_provider = global_entry.get("icon_provider", "")
+
+        # Sync to all space-specific entries for this category
+        for cache_key in _glyph_cache.keys():
+            if isinstance(cache_key, tuple) and len(cache_key) == 2:
+                space_type_id, cat = cache_key
+                if space_type_id != -1 and cat == category:  # Space-specific entry for this category
+                    space_entry = _glyph_cache[cache_key]
+
+                    # Sync glyph_mode
+                    if space_entry.get("glyph_mode", "auto") != global_glyph_mode:
+                        space_entry["glyph_mode"] = global_glyph_mode
+                        print(f"[GLYPH LOAD] Synced glyph_mode '{global_glyph_mode}' from GLOBAL to space {space_type_id} for '{category}'")
+
+                    # Sync icon data
+                    if space_entry.get("icon_source", "auto") != global_icon_source:
+                        space_entry["icon_source"] = global_icon_source
+                        print(f"[GLYPH LOAD] Synced icon_source '{global_icon_source}' from GLOBAL to space {space_type_id} for '{category}'")
+                    if space_entry.get("icon_key", "") != global_icon_key:
+                        space_entry["icon_key"] = global_icon_key
+                    if space_entry.get("icon_path", "") != global_icon_path:
+                        space_entry["icon_path"] = global_icon_path
+                    if space_entry.get("icon_provider", "") != global_icon_provider:
+                        space_entry["icon_provider"] = global_icon_provider
 
     _glyph_cache_loaded = True
     print(f"[GLYPH] Loaded {len(_glyph_cache)} mappings, {len(_all_tags_cache)} tags from {filepath}")
@@ -2334,27 +2456,39 @@ def get_category_icon_data(category, space_type=-1):
     Icon takes priority over glyph when icon_key is set or icon_path is set.
     The C++ side resolves icon_id from icon_key using RNA_enum_value_from_identifier.
     """
+    print(f"[get_category_icon_data] START: category='{category}', space_type={space_type}")
     cat_data = _get_category_data(category, space_type)
 
     if not cat_data:
+        print(f"[get_category_icon_data] RETURN: no cat_data")
         return "", ""
 
     if isinstance(cat_data, str):
+        print(f"[get_category_icon_data] RETURN: cat_data is string")
         return "", ""
 
     if not isinstance(cat_data, dict):
+        print(f"[get_category_icon_data] RETURN: cat_data is not dict")
         return "", ""
 
     icon_source = cat_data.get("icon_source", "auto")
-    if icon_source == "off":
-        return "", ""
-
     icon_key = cat_data.get("icon_key", "")
     icon_path = cat_data.get("icon_path", "")
+    print(f"[get_category_icon_data] icon_source='{icon_source}', icon_key='{icon_key}', icon_path='{icon_path}'")
 
-    # For manual mode with icon_key, pass it to C++ for resolution
+    if icon_source == "off":
+        print(f"[get_category_icon_data] RETURN: icon_source is 'off'")
+        return "", ""
+
+    # For manual mode with icon_key (Blender internal icon), pass it to C++ for resolution
     if icon_source == "manual" and icon_key:
+        print(f"[get_category_icon_data] RETURN: manual mode, icon_key='{icon_key}'")
         return icon_key, ""
+
+    # For manual mode with icon_path (custom icon file), return the path
+    if icon_source == "manual" and icon_path:
+        print(f"[get_category_icon_data] RETURN: manual mode, icon_path='{icon_path}'")
+        return "", icon_path
 
     # Return path for external icons (icon_source == "auto" or path explicitly set)
     if icon_path:
@@ -2584,7 +2718,7 @@ def set_category_data(category,
 
     # DEBUG: Log incoming call
     print(f"[SET_CATEGORY_DATA] CALLED: category='{category}', space_type={space_type}, key={key}")
-    print(f"[SET_CATEGORY_DATA] PARAMS: tags={repr(tags)}, glyph={repr(glyph)}, display_name={repr(display_name)}")
+    print(f"[SET_CATEGORY_DATA] PARAMS: tags={repr(tags)}, glyph={repr(glyph)}, display_name={repr(display_name)}, icon_source={repr(icon_source)}, glyph_mode={repr(glyph_mode)}")
 
     # DEBUG: Show current tags BEFORE changes
     if key in _glyph_cache:
@@ -2625,6 +2759,10 @@ def set_category_data(category,
         entry["first_letter"] = ""
 
     if glyph is not None:
+        # Convert hex string to Unicode glyph if needed
+        if glyph and len(glyph) <= 6 and all(c in '0123456789abcdefABCDEF' for c in glyph):
+            # Looks like a hex string, convert to glyph
+            glyph = _hex_to_glyph(glyph)
         _glyph_cache[key]["glyph"] = glyph
         # For glyph_only categories, default_glyph must be the category name (original glyph)
         is_glyph_only = _is_single_glyph(category)
@@ -2698,6 +2836,67 @@ def set_category_data(category,
     if icon_provider is not None:
         _glyph_cache[key]["icon_provider"] = str(icon_provider)
 
+    # STEP 1: Sync from space-specific to GLOBAL (propagate user changes)
+    # Priority: 'manual' > 'off' > 'auto'
+    if space_type != -1 and (glyph_mode is not None or icon_source is not None):
+        global_key = _make_cache_key(-1, category)
+        if global_key not in _glyph_cache:
+            _glyph_cache[global_key] = {
+                "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
+                "default_glyph": "", "default_display_name": "", "base_type": "text_only",
+                "first_letter": "",
+                "glyph_mode": "auto",
+                "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
+            }
+        global_entry = _glyph_cache[global_key]
+
+        # Determine if we should update global entry
+        # Priority: 'manual' > 'off' > 'auto'
+        # - 'manual' always updates (explicit icon choice)
+        # - 'off' always updates (explicit glyph/first_letter choice)
+        # - 'auto' gets overwritten by anything
+        global_icon_source = global_entry.get("icon_source", "auto")
+        space_icon_source = _glyph_cache[key].get("icon_source", "auto")
+        should_update = (
+            global_icon_source == "auto" or
+            space_icon_source == "manual" or
+            space_icon_source == "off"
+        )
+
+        if should_update:
+            if glyph_mode is not None:
+                global_entry["glyph_mode"] = glyph_mode_norm
+                print(f"[SET_CATEGORY_DATA] Propagated glyph_mode '{glyph_mode_norm}' to GLOBAL for '{category}'")
+            if icon_source is not None:
+                global_entry["icon_source"] = icon_source_norm
+                print(f"[SET_CATEGORY_DATA] Propagated icon_source '{icon_source_norm}' to GLOBAL for '{category}'")
+            if icon_key is not None:
+                global_entry["icon_key"] = str(icon_key)
+            if icon_path is not None:
+                global_entry["icon_path"] = str(icon_path)
+            if icon_provider is not None:
+                global_entry["icon_provider"] = str(icon_provider)
+
+    # STEP 2: Sync from GLOBAL to all space-specific entries (consistency)
+    if space_type == -1 and (glyph_mode is not None or icon_source is not None):
+        for cache_key in list(_glyph_cache.keys()):
+            if isinstance(cache_key, tuple) and len(cache_key) >= 2:
+                cache_space_type, cache_category = cache_key
+                if cache_category == category and cache_space_type != -1:
+                    space_entry = _glyph_cache[cache_key]
+                    if glyph_mode is not None:
+                        space_entry["glyph_mode"] = glyph_mode_norm
+                        print(f"[SET_CATEGORY_DATA] Synced glyph_mode to space_type={cache_space_type} for '{category}'")
+                    if icon_source is not None:
+                        space_entry["icon_source"] = icon_source_norm
+                        print(f"[SET_CATEGORY_DATA] Synced icon_source to space_type={cache_space_type} for '{category}'")
+                    if icon_key is not None:
+                        space_entry["icon_key"] = str(icon_key)
+                    if icon_path is not None:
+                        space_entry["icon_path"] = str(icon_path)
+                    if icon_provider is not None:
+                        space_entry["icon_provider"] = str(icon_provider)
+
     # Sync glyph to space-specific entries when saving to GLOBAL
     # This ensures that categories with tags in space-specific entries get the glyph from GLOBAL
     if space_type == -1 and glyph is not None and glyph:
@@ -2711,6 +2910,84 @@ def set_category_data(category,
                     if not space_entry.get("glyph"):
                         space_entry["glyph"] = glyph
                         print(f"[SET_CATEGORY_DATA] Synced glyph to space_type={cache_space_type} for '{category}'")
+
+    # STEP 3: Sync to WM for C++ UI display
+    try:
+        wm = bpy.context.window_manager
+        if wm is not None and hasattr(wm, 'category_glyph_overrides'):
+            # Find or create override entry in WM
+            override_item = None
+            for item in wm.category_glyph_overrides:
+                item_space_type = getattr(item, 'space_type', -1)
+                if item.category == category and item_space_type == space_type:
+                    override_item = item
+                    break
+
+            if override_item is None:
+                # Create new override entry
+                override_item = wm.category_glyph_overrides.new()
+                override_item.category = category
+                if hasattr(override_item, 'space_type'):
+                    override_item.space_type = space_type
+
+            # Update override with data from cache
+            entry = _glyph_cache[key]
+
+            # Convert lowercase values to uppercase for WM enum
+            icon_source_val = entry.get("icon_source", "auto").upper()
+            glyph_mode_val = entry.get("glyph_mode", "auto").upper()
+            # WM expects FIRST_LETTER, not FIRST_LETTER
+            if glyph_mode_val == "FIRST_LETTER":
+                glyph_mode_val = "FIRST_LETTER"
+
+            if hasattr(override_item, 'icon_source'):
+                override_item.icon_source = icon_source_val
+            if hasattr(override_item, 'glyph_mode'):
+                override_item.glyph_mode = glyph_mode_val
+            if hasattr(override_item, 'icon_key'):
+                override_item.icon_key = entry.get("icon_key", "")
+            if hasattr(override_item, 'icon_path'):
+                override_item.icon_path = entry.get("icon_path", "")
+            if hasattr(override_item, 'icon_provider'):
+                override_item.icon_provider = entry.get("icon_provider", "")
+            if hasattr(override_item, 'glyph'):
+                override_item.glyph = entry.get("glyph", "")
+            if hasattr(override_item, 'display_name'):
+                override_item.display_name = entry.get("display_name", "")
+            print(f"[SET_CATEGORY_DATA] Synced to WM override for '{category}' (space_type={space_type})")
+
+            # Also update mappings (for C++ panel_category_icon_data_lookup)
+            if hasattr(wm, 'category_glyph_mappings'):
+                mapping_item = None
+                for item in wm.category_glyph_mappings:
+                    item_space_type = getattr(item, 'space_type', -1)
+                    if item.category == category and item_space_type == space_type:
+                        mapping_item = item
+                        break
+
+                if mapping_item is None:
+                    mapping_item = wm.category_glyph_mappings.new()
+                    mapping_item.category = category
+                    if hasattr(mapping_item, 'space_type'):
+                        mapping_item.space_type = space_type
+
+                if hasattr(mapping_item, 'icon_source'):
+                    mapping_item.icon_source = icon_source_val
+                if hasattr(mapping_item, 'glyph_mode'):
+                    mapping_item.glyph_mode = glyph_mode_val
+                if hasattr(mapping_item, 'icon_key'):
+                    mapping_item.icon_key = entry.get("icon_key", "")
+                if hasattr(mapping_item, 'icon_path'):
+                    mapping_item.icon_path = entry.get("icon_path", "")
+                if hasattr(mapping_item, 'icon_provider'):
+                    mapping_item.icon_provider = entry.get("icon_provider", "")
+                if hasattr(mapping_item, 'glyph'):
+                    mapping_item.glyph = entry.get("glyph", "")
+                if hasattr(mapping_item, 'display_name'):
+                    mapping_item.display_name = entry.get("display_name", "")
+                print(f"[SET_CATEGORY_DATA] Synced to WM mapping for '{category}' (space_type={space_type})")
+    except Exception as e:
+        print(f"[SET_CATEGORY_DATA] Failed to sync to WM: {e}")
 
     if save:
         _save_glyph_mappings_to_file()
@@ -3547,6 +3824,13 @@ def _sync_glyph_mappings_to_wm_impl():
                     icon_path_val = str(normalized_data.get("icon_path", ""))
                     icon_provider_val = str(normalized_data.get("icon_provider", ""))
 
+                    # Debug: log all cache entries being processed
+                    print(
+                        f"[GLYPH SYNC] Processing cache_key={cache_key!r}, "
+                        f"category={category!r}, icon_source={icon_source_str!r}, "
+                        f"icon_key={icon_key_val!r}, icon_path={icon_path_val!r}"
+                    )
+
                     if icon_source_str == "auto" and (not icon_key_val) and (not icon_path_val):
                         print(
                             f"[] sync attempt: category={category!r}, "
@@ -3865,6 +4149,66 @@ def _sync_wm_to_glyph_cache_impl():
                         cached_entry["icon_provider"] = icon_provider_val
                         changes_detected = True
 
+                # If this is a space-specific entry with customizations, also update GLOBAL entry
+                # This ensures glyph, glyph_mode (first_letter), and icon persist across all spaces
+                item_glyph = item.glyph or ""
+                has_customizations = (
+                    (icon_source_val in ("manual", "off") or icon_key_val or icon_path_val) or
+                    (glyph_mode_val != "auto") or
+                    (item_glyph and item_glyph != cached_entry.get("default_glyph", ""))
+                )
+                if space_type != -1 and has_customizations:
+                    global_cache_key = _make_cache_key(-1, category)
+                    if global_cache_key not in _glyph_cache:
+                        _glyph_cache[global_cache_key] = {
+                            "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
+                            "default_glyph": "", "default_display_name": "", "base_type": "text_only",
+                            "glyph_mode": "auto",
+                            "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
+                        }
+
+                    global_entry = _glyph_cache[global_cache_key]
+                    # Copy glyph data to global entry
+                    if item_glyph and global_entry.get("glyph", "") != item_glyph:
+                        global_entry["glyph"] = item_glyph
+                        changes_detected = True
+                        print(f"[GLYPH SYNC] Updated global glyph for '{category}' to '{item_glyph}' from mappings")
+
+                    # Determine if we should update global entry based on icon_source priority
+                    # Priority: 'manual' > 'off' > 'auto'
+                    # - 'manual' (user explicitly chose an icon) has HIGHEST priority
+                    # - 'off' (user chose first_letter mode) wins over 'auto'
+                    # - 'auto' is the default and gets overwritten by anything
+                    global_icon_source = global_entry.get("icon_source", "auto")
+                    should_update = (
+                        global_icon_source == "auto" or
+                        icon_source_val == "manual" or
+                        icon_source_val == "off"
+                    )
+
+                    # Copy glyph_mode to global entry only when allowed to update
+                    if should_update and global_entry.get("glyph_mode", "auto") != glyph_mode_val:
+                        global_entry["glyph_mode"] = glyph_mode_val
+                        changes_detected = True
+                        print(f"[GLYPH SYNC] Updated global glyph_mode for '{category}' to '{glyph_mode_val}' from mappings")
+
+                    # Copy icon data to global entry
+                    if should_update:
+                        if global_entry.get("icon_source", "auto") != icon_source_val:
+                            global_entry["icon_source"] = icon_source_val
+                            changes_detected = True
+                            print(f"[GLYPH SYNC] Updated global icon_source for '{category}' from mappings")
+                        if global_entry.get("icon_key", "") != icon_key_val:
+                            global_entry["icon_key"] = icon_key_val
+                            changes_detected = True
+                            print(f"[GLYPH SYNC] Updated global icon_key for '{category}' to '{icon_key_val}' from mappings")
+                        if global_entry.get("icon_path", "") != icon_path_val:
+                            global_entry["icon_path"] = icon_path_val
+                            changes_detected = True
+                        if global_entry.get("icon_provider", "") != icon_provider_val:
+                            global_entry["icon_provider"] = icon_provider_val
+                            changes_detected = True
+
             print(f"[GLYPH] Processed {mappings_count} items from category_glyph_mappings")
         except Exception as e:
             print(f"[GLYPH] Error reading from category_glyph_mappings: {e}")
@@ -4010,11 +4354,124 @@ def _sync_wm_to_glyph_cache_impl():
                             cached_entry["icon_provider"] = icon_provider_val
                             changes_detected = True
 
+                    # If this is a space-specific entry with customizations, also update GLOBAL entry
+                    # This ensures glyph, glyph_mode (first_letter), and icon persist across all spaces
+                    has_customizations = (
+                        (icon_source_val in ("manual", "off") or icon_key_val or icon_path_val) or
+                        (glyph_mode_val != "auto") or
+                        (item.glyph and item.glyph != cached_entry.get("default_glyph", ""))
+                    )
+                    if space_type != -1 and has_customizations:
+                        global_cache_key = _make_cache_key(-1, category)
+                        if global_cache_key not in _glyph_cache:
+                            _glyph_cache[global_cache_key] = {
+                                "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
+                                "default_glyph": "", "default_display_name": "", "base_type": "text_only",
+                                "glyph_mode": "auto",
+                                "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
+                            }
+
+                        global_entry = _glyph_cache[global_cache_key]
+                        item_glyph = item.glyph or ""
+
+                        # Copy glyph data to global entry
+                        if item_glyph and global_entry.get("glyph", "") != item_glyph:
+                            global_entry["glyph"] = item_glyph
+                            changes_detected = True
+                            print(f"[GLYPH SYNC] Updated global glyph for '{category}' to '{item_glyph}'")
+
+                        # Determine if we should update global entry based on icon_source priority
+                        # Priority: 'manual' > 'off' > 'auto'
+                        # - 'manual' always updates (explicit icon choice)
+                        # - 'off' always updates (explicit glyph/first_letter choice)
+                        # - 'auto' gets overwritten by anything
+                        global_icon_source = global_entry.get("icon_source", "auto")
+                        should_update = (
+                            global_icon_source == "auto" or
+                            icon_source_val == "manual" or
+                            icon_source_val == "off"
+                        )
+
+                        # Copy glyph_mode to global entry only when allowed to update
+                        if should_update and global_entry.get("glyph_mode", "auto") != glyph_mode_val:
+                            global_entry["glyph_mode"] = glyph_mode_val
+                            changes_detected = True
+                            print(f"[GLYPH SYNC] Updated global glyph_mode for '{category}' to '{glyph_mode_val}'")
+
+                        # Copy icon data to global entry
+                        if should_update:
+                            if global_entry.get("icon_source", "auto") != icon_source_val:
+                                global_entry["icon_source"] = icon_source_val
+                                changes_detected = True
+                                print(f"[GLYPH SYNC] Updated global icon_source for '{category}'")
+                            if global_entry.get("icon_key", "") != icon_key_val:
+                                global_entry["icon_key"] = icon_key_val
+                                changes_detected = True
+                                print(f"[GLYPH SYNC] Updated global icon_key for '{category}' to '{icon_key_val}'")
+                            if global_entry.get("icon_path", "") != icon_path_val:
+                                global_entry["icon_path"] = icon_path_val
+                                changes_detected = True
+                                print(f"[GLYPH SYNC] Updated global icon_path for '{category}'")
+                            if global_entry.get("icon_provider", "") != icon_provider_val:
+                                global_entry["icon_provider"] = icon_provider_val
+                                changes_detected = True
+                                print(f"[GLYPH SYNC] Updated global icon_provider for '{category}'")
+
                 print(f"[GLYPH SYNC] Processed {overrides_count} items from category_glyph_overrides")
             except Exception as e:
                 print(f"[GLYPH SYNC] Error reading from category_glyph_overrides: {e}")
                 import traceback
                 traceback.print_exc()
+
+        # STEP 2: Sync from GLOBAL back to all SPACE entries for consistency
+        # This ensures all space-specific entries have the same icon/glyph_mode data as GLOBAL
+        categories_in_global = set()
+        for cache_key in _glyph_cache.keys():
+            if isinstance(cache_key, tuple) and len(cache_key) == 2:
+                space_type_id, category = cache_key
+                if space_type_id == -1:  # GLOBAL entry
+                    categories_in_global.add(category)
+
+        for category in categories_in_global:
+            global_cache_key = (-1, category)
+            if global_cache_key not in _glyph_cache:
+                continue
+            global_entry = _glyph_cache[global_cache_key]
+
+            # Get global values
+            global_glyph_mode = global_entry.get("glyph_mode", "auto")
+            global_icon_source = global_entry.get("icon_source", "auto")
+            global_icon_key = global_entry.get("icon_key", "")
+            global_icon_path = global_entry.get("icon_path", "")
+            global_icon_provider = global_entry.get("icon_provider", "")
+
+            # Sync to all space-specific entries for this category
+            for cache_key in _glyph_cache.keys():
+                if isinstance(cache_key, tuple) and len(cache_key) == 2:
+                    space_type_id, cat = cache_key
+                    if space_type_id != -1 and cat == category:  # Space-specific entry for this category
+                        space_entry = _glyph_cache[cache_key]
+
+                        # Sync glyph_mode
+                        if space_entry.get("glyph_mode", "auto") != global_glyph_mode:
+                            space_entry["glyph_mode"] = global_glyph_mode
+                            changes_detected = True
+                            print(f"[GLYPH SYNC] Synced glyph_mode '{global_glyph_mode}' from GLOBAL to space {space_type_id} for '{category}'")
+
+                        # Sync icon data
+                        if space_entry.get("icon_source", "auto") != global_icon_source:
+                            space_entry["icon_source"] = global_icon_source
+                            changes_detected = True
+                            print(f"[GLYPH SYNC] Synced icon_source '{global_icon_source}' from GLOBAL to space {space_type_id} for '{category}'")
+                        if space_entry.get("icon_key", "") != global_icon_key:
+                            space_entry["icon_key"] = global_icon_key
+                            changes_detected = True
+                        if space_entry.get("icon_path", "") != global_icon_path:
+                            space_entry["icon_path"] = global_icon_path
+                            changes_detected = True
+                        if space_entry.get("icon_provider", "") != global_icon_provider:
+                            space_entry["icon_provider"] = global_icon_provider
+                            changes_detected = True
 
         # Save to JSON if changes were detected
         if changes_detected:

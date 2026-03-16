@@ -3225,6 +3225,8 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   const int display_mode_ui_exec = RNA_enum_get(op->ptr, "display_mode_ui");
   const int custom_icon_mode_ui_exec = RNA_enum_get(op->ptr, "custom_icon_mode_ui");
   int resolved_icon_source_exec = RNA_enum_get(op->ptr, "icon_source");
+  printf("[C++ EXEC] display_mode_ui_exec=%d, custom_icon_mode_ui_exec=%d, initial icon_source=%d\n",
+         display_mode_ui_exec, custom_icon_mode_ui_exec, resolved_icon_source_exec);
   if (display_mode_ui_exec == 0 || display_mode_ui_exec == 2) {
     resolved_icon_source_exec = 2; /* OFF */
   }
@@ -3232,8 +3234,9 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     resolved_icon_source_exec = 1; /* MANUAL: Blender Icon */
   }
   else {
-    resolved_icon_source_exec = 0; /* AUTO: path/provider chain (external icon) */
+    resolved_icon_source_exec = 1; /* MANUAL: Custom image icon - user explicitly chose an icon */
   }
+  printf("[C++ EXEC] resolved_icon_source_exec=%d (0=AUTO, 1=MANUAL, 2=OFF)\n", resolved_icon_source_exec);
   RNA_enum_set(op->ptr, "icon_source", resolved_icon_source_exec);
   item->icon_source = resolved_icon_source_exec;
   item->glyph_mode = (display_mode_ui_exec == 2) ? 1 : 0;
@@ -3279,9 +3282,6 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   /* Clear dialog operator pointer and preview button */
   category_tab_current_dialog_op = nullptr;
   category_tab_preview_button = nullptr;
-
-  /* Redraw */
-  WM_main_add_notifier(NC_WINDOW, nullptr);
 
   /* Save updated data to JSON (including tags which might have been modified) */
   {
@@ -3329,6 +3329,8 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
 
     /* DEBUG: Log before calling Python set_category_data */
     printf("[C++ SAVE] Calling set_category_data: category='%s', space_type=%d\n", category, space_type);
+    printf("[C++ SAVE] item->icon_source=%d, icon_source_py='%s', glyph_mode=%d\n",
+           item->icon_source, icon_source_py, item->glyph_mode);
     printf("[C++ SAVE] item->tags='%s' (NOT passed to Python - tags managed by Python)\n", item->tags);
 
     SNPRINTF(python_cmd,
@@ -3352,6 +3354,9 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     /* DEBUG: Confirm call completed */
     printf("[C++ SAVE] set_category_data call completed for '%s'\n", category);
   }
+
+  /* Redraw after Python save to update all UI elements */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
 
   return OPERATOR_FINISHED;
 }

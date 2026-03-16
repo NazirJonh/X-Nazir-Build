@@ -592,6 +592,10 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
 
   printf("[LIVE UPDATE CB] CALLED\n");
 
+  /* Get space_type from context for proper per-space override matching */
+  ScrArea *area = CTX_wm_area(C);
+  const int space_type = area ? area->spacetype : -1;
+
   char category[64];
   RNA_string_get(op->ptr, "category", category);
 
@@ -656,13 +660,13 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
 
   CategoryGlyphItem *item = nullptr;
 
-  /* Find existing override */
+  /* Find existing override with matching space_type */
   for (CategoryGlyphItem *it =
            static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
        it;
        it = static_cast<CategoryGlyphItem *>(it->next))
   {
-    if (STREQ(it->category, category)) {
+    if (it->space_type == space_type && STREQ(it->category, category)) {
       item = it;
       break;
     }
@@ -672,6 +676,7 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   if (!item) {
     item = MEM_new<CategoryGlyphItem>(__func__);
     STRNCPY(item->category, category);
+    item->space_type = space_type;  /* CRITICAL: Set space_type for proper matching in exec */
     item->display_name[0] = '\0';
     item->glyph[0] = '\0';
     zero_v3(item->color);

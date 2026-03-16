@@ -494,9 +494,6 @@ def _get_category_data(category, space_type=-1):
     if not _glyph_cache_loaded:
         _load_glyph_mappings_from_file()
 
-    # DEBUG
-    print(f"[_GET_CATEGORY_DATA] category='{category}', space_type={space_type}")
-
     # Helper function to check if data has meaningful content
     def has_meaningful_data(data):
         if not isinstance(data, dict):
@@ -506,61 +503,60 @@ def _get_category_data(category, space_type=-1):
         glyph = data.get("glyph", "")
         default_glyph = data.get("default_glyph", "")
         has_glyph = bool(glyph or default_glyph)
-        
+
         # Check for tags as well - tags are meaningful data too
         tags = data.get("tags", [])
         has_tags = bool(tags)
-        
+
         # Either glyph OR tags presence determines "meaningful" data for space-specific vs global fallback
         return has_glyph or has_tags
 
     # Try space-specific first
     key = _make_cache_key(space_type, category)
-    print(f"[_GET_CATEGORY_DATA] Looking for key: {key}")
+    print(f"[_get_category_data] Looking for key={key}, category='{category}', space_type={space_type}")
     if key in _glyph_cache:
         data = _glyph_cache[key]
-        if has_meaningful_data(data):
-            print(f"[_GET_CATEGORY_DATA] FOUND space-specific entry with data")
+        meaningful = has_meaningful_data(data)
+        print(f"[_get_category_data] FOUND key={key}, has_meaningful={meaningful}, glyph='{data.get('glyph', '') if isinstance(data, dict) else 'N/A'}', tags={data.get('tags', []) if isinstance(data, dict) else 'N/A'}")
+        if meaningful:
             return _ensure_category_panel_label(category, space_type, data)
-        print(f"[_GET_CATEGORY_DATA] Found space-specific entry but no meaningful data, continuing search...")
 
     # Fallback to global (-1) if not global already
     if space_type != -1:
         global_key = _make_cache_key(-1, category)
-        print(f"[_GET_CATEGORY_DATA] Trying global fallback key: {global_key}")
+        print(f"[_get_category_data] Trying GLOBAL fallback, global_key={global_key}")
         if global_key in _glyph_cache:
             data = _glyph_cache[global_key]
-            if has_meaningful_data(data):
-                print(f"[_GET_CATEGORY_DATA] FOUND global entry with data")
+            meaningful = has_meaningful_data(data)
+            print(f"[_get_category_data] GLOBAL found, meaningful={meaningful}, glyph='{data.get('glyph', '') if isinstance(data, dict) else 'N/A'}'")
+            if meaningful:
                 return _ensure_category_panel_label(category, space_type, data)
-            print(f"[_GET_CATEGORY_DATA] Found global entry but no meaningful data, continuing search...")
+    else:
+        print(f"[_get_category_data] space_type=-1 (GLOBAL requested), skipping GLOBAL fallback block")
 
     # Fallback: search in ANY space_type for meaningful data
     # This handles cases where get_categories_for_tag returns categories without space_type info
     # IMPORTANT: Prefer entries with meaningful data over empty entries
-    print(f"[_GET_CATEGORY_DATA] Searching all space_types for meaningful data...")
-
     for cache_key, cache_data in _glyph_cache.items():
         if isinstance(cache_key, tuple) and len(cache_key) >= 2:
             if cache_key[1] == category:
                 if has_meaningful_data(cache_data):
-                    print(f"[_GET_CATEGORY_DATA] FOUND in space_type={cache_key[0]} (has meaningful data: display_name='{cache_data.get('display_name')}', color={cache_data.get('color')})")
                     return _ensure_category_panel_label(category, space_type, cache_data)
 
     # If no meaningful data found, return any entry (prefer non-global)
     for cache_key, cache_data in _glyph_cache.items():
         if isinstance(cache_key, tuple) and len(cache_key) >= 2:
             if cache_key[1] == category and cache_key[0] != -1:
-                print(f"[_GET_CATEGORY_DATA] Returning non-global entry without meaningful data")
+                print(f"[_get_category_data] Returning non-global entry for '{category}': space_type={cache_key[0]}")
                 return _ensure_category_panel_label(category, space_type, cache_data)
 
     # Finally return global entry if exists
     global_key = _make_cache_key(-1, category)
     if global_key in _glyph_cache:
-        print(f"[_GET_CATEGORY_DATA] Returning global entry (last resort)")
+        print(f"[_get_category_data] Returning global entry for '{category}'")
         return _ensure_category_panel_label(category, space_type, _glyph_cache[global_key])
 
-    print(f"[_GET_CATEGORY_DATA] NOT FOUND - returning None")
+    print(f"[_get_category_data] No entry found for '{category}', returning None")
     return _ensure_category_panel_label(category, space_type, None)
 
 def _set_category_data_internal(category, data, space_type=-1):
@@ -1070,7 +1066,10 @@ def _normalize_category_data(category_data, category_name=None):
         if "glyph" in category_data:
             glyph_str = category_data["glyph"]
             if glyph_str and '\\u' in glyph_str:
-                entry["glyph"] = _unicode_escape_to_glyph(glyph_str)
+                decoded_glyph = _unicode_escape_to_glyph(glyph_str)
+                entry["glyph"] = decoded_glyph
+                if 'Brushstroke' in str(category_name):
+                    print(f"[NORMALIZE] Brushstroke glyph decoded: '{glyph_str}' -> '{decoded_glyph}' (len={len(decoded_glyph)})")
             else:
                 entry["glyph"] = glyph_str
         if "display_name" in category_data:
@@ -1091,7 +1090,10 @@ def _normalize_category_data(category_data, category_name=None):
         if "default_glyph" in category_data:
             glyph_str = category_data["default_glyph"]
             if glyph_str and '\\u' in glyph_str:
-                entry["default_glyph"] = _unicode_escape_to_glyph(glyph_str)
+                decoded_default = _unicode_escape_to_glyph(glyph_str)
+                entry["default_glyph"] = decoded_default
+                if 'Brushstroke' in str(category_name):
+                    print(f"[NORMALIZE] Brushstroke default_glyph decoded: '{glyph_str}' -> '{decoded_default}'")
             else:
                 entry["default_glyph"] = glyph_str or ""
         else:
@@ -1383,6 +1385,7 @@ def _load_glyph_mappings_from_file():
 
     filepath = _get_glyphs_filepath()
     print(f"[GLYPH] JSON storage path: {filepath}")
+    print(f"[GLYPH] File exists: {os.path.exists(filepath) if filepath else 'N/A'}")
 
     default_structure = {
         "version": CURRENT_JSON_VERSION,
@@ -1443,10 +1446,11 @@ def _load_glyph_mappings_from_file():
                     if isinstance(cat_data, (str, dict)):
                         decoded_category = _unicode_escape_to_glyph(category) if '\\u' in category else category
                         cache_key = _make_cache_key(-1, decoded_category)
-                        _glyph_cache[cache_key] = _normalize_category_data(cat_data, decoded_category)
+                        normalized_data = _normalize_category_data(cat_data, decoded_category)
+                        _glyph_cache[cache_key] = normalized_data
                         # DEBUG: Show key glyphs being loaded
                         if 'Brushstroke' in category:
-                            print(f"[GLYPH LOAD DEBUG] Loaded Brushstroke from GLOBAL: glyph='{cat_data.get('glyph', '')}'")
+                            print(f"[GLYPH LOAD DEBUG] Loaded Brushstroke from GLOBAL: raw_glyph='{cat_data.get('glyph', '')}', normalized_glyph='{normalized_data.get('glyph', '')}' (len={len(normalized_data.get('glyph', ''))})")
             elif isinstance(value, (str, dict)):
                 # Old format: category -> data (migrate to global space_type = -1)
                 # Decode Unicode escape sequences in category key
@@ -2137,7 +2141,7 @@ def update_category_tags_in_wm(category, space_type=-1):
 
 def get_categories_for_tag(tag_name):
     """Get a list of all categories that use a specific tag.
-    
+
     Returns a list of category info dictionaries with keys:
     - 'name': original category name (may be empty)
     - 'display_name': display name for UI
@@ -2156,10 +2160,10 @@ def get_categories_for_tag(tag_name):
             if isinstance(cat_key, tuple) and len(cat_key) >= 2:
                 space_type_id, category_name = cat_key
                 display_name = cat_data.get("display_name", "")
-                
+
                 # Use display_name if available, otherwise use category_name
                 ui_name = display_name if display_name else category_name
-                
+
                 if ui_name:  # Only include if we have something to display
                     categories.append({
                         'name': category_name,
@@ -2214,23 +2218,28 @@ def get_category_glyph_data(category, space_type=-1):
     """
     global _glyph_cache
 
+    print(f"[get_category_glyph_data] START: category='{category}', space_type={space_type}")
+
     cat_data = _get_category_data(category, space_type)
 
-    # DEBUG
-    print(f"[GET_CATEGORY_GLYPH_DATA] category={repr(category)}, space_type={space_type}")
-    print(f"[GET_CATEGORY_GLYPH_DATA] cat_data={cat_data}")
+    print(f"[get_category_glyph_data] cat_data={cat_data}")
 
     if not cat_data:
+        print(f"[get_category_glyph_data] RETURN: no cat_data")
         return "", [0.0, 0.0, 0.0], category
 
     # Legacy: plain string means "glyph only".
     if isinstance(cat_data, str):
+        print(f"[get_category_glyph_data] RETURN: legacy string '{cat_data}'")
         return cat_data, [0.0, 0.0, 0.0], category
 
     if not isinstance(cat_data, dict):
+        print(f"[get_category_glyph_data] RETURN: not dict")
         return "", [0.0, 0.0, 0.0], category
 
     base_type = cat_data.get("base_type", "text_only")
+    glyph_mode = cat_data.get("glyph_mode", "auto")
+    print(f"[get_category_glyph_data] base_type={base_type}, glyph_mode={glyph_mode}")
 
     # Resolve display name first (used both for label and first-letter glyph).
     display_name = (
@@ -2239,27 +2248,57 @@ def get_category_glyph_data(category, space_type=-1):
         or category
     )
 
-    # Resolve glyph according to base_type.
+    # Get first_letter for potential use (needed for glyph_mode == "first_letter" and fallback)
+    first_letter = cat_data.get("first_letter", "") or (display_name[0] if display_name else category[0] if category else "")
+
+    # If glyph_mode is "first_letter", always use first letter regardless of stored glyph
+    if glyph_mode == "first_letter":
+        print(f"[get_category_glyph_data] glyph_mode='first_letter', using first_letter='{first_letter}'")
+        glyph = first_letter
+        color = cat_data.get("color", [0.0, 0.0, 0.0])
+        print(f"[get_category_glyph_data] RETURN (first_letter mode): glyph='{glyph}'")
+        return glyph, color, display_name
+
+    # Resolve glyph according to base_type (normal mode)
     glyph = cat_data.get("glyph", "") or ""
+    print(f"[get_category_glyph_data] initial glyph='{glyph}' (len={len(glyph)})")
+
+    # If glyph is empty in space-specific entry, try GLOBAL fallback
+    print(f"[get_category_glyph_data] Checking GLOBAL fallback: not glyph={not glyph}, space_type != -1={space_type != -1}")
+    if not glyph and space_type != -1:
+        print(f"[get_category_glyph_data] Trying GLOBAL fallback...")
+        global_data = _get_category_data(category, -1)  # -1 = GLOBAL
+        print(f"[get_category_glyph_data] global_data type={type(global_data)}, is dict={isinstance(global_data, dict)}")
+        if global_data and isinstance(global_data, dict):
+            global_glyph = global_data.get("glyph", "") or ""
+            print(f"[get_category_glyph_data] global_glyph='{global_glyph}' (len={len(global_glyph)})")
+            if global_glyph:
+                glyph = global_glyph
+                # Also update base_type from GLOBAL if it has a glyph
+                base_type = global_data.get("base_type", base_type)
+                print(f"[get_category_glyph_data] Using GLOBAL glyph, new base_type={base_type}")
+        else:
+            print(f"[get_category_glyph_data] GLOBAL data not found or not dict!")
 
     if not glyph:
-        # FIXED: Check if category has tags and use the first tag's glyph
-        category_tags = cat_data.get("tags", [])
-        if category_tags:
-            # Get the first tag's glyph
-            first_tag = category_tags[0]
-            tag_data = get_tag_data(first_tag)
-            if tag_data and tag_data.get("glyph"):
-                glyph = tag_data["glyph"]
-                print(f"[GET_CATEGORY_GLYPH_DATA] Using tag '{first_tag}' glyph: '{glyph}' for category '{category}'")
-        
-        if not glyph:
-            if base_type == "text_only":
-                # For text-only categories, use first character of display_name (UTF-8 codepoint)
-                # as the visual glyph instead of the full name.
-                source = display_name or category or ""
-                glyph = source[0] if source else ""
-            else:
+        # For text_only categories, use first letter as glyph (matching C++ behavior)
+        print(f"[get_category_glyph_data] glyph is still empty, base_type={base_type}")
+        if base_type == "text_only":
+            # Use pre-computed first_letter
+            glyph = first_letter
+            print(f"[get_category_glyph_data] Using first letter fallback: '{glyph}'")
+        else:
+            # For glyph_only/glyph_text categories: check if category has tags and use the first tag's glyph
+            category_tags = cat_data.get("tags", [])
+            if category_tags:
+                # Get the first tag's glyph
+                first_tag = category_tags[0]
+                tag_data = get_tag_data(first_tag)
+                print(f"[get_category_glyph_data] Trying tag glyph: tag='{first_tag}', tag_data={tag_data}")
+                if tag_data and tag_data.get("glyph"):
+                    glyph = tag_data["glyph"]
+
+            if not glyph:
                 # For glyph-only / glyph-text categories where key itself is the glyph.
                 glyph = category
 
@@ -2281,10 +2320,7 @@ def get_category_glyph_data(category, space_type=-1):
                     color = alt_color
                     break
 
-    print(
-        f"[GET_CATEGORY_GLYPH_DATA] result: glyph={repr(glyph)}, "
-        f"color={color}, display_name={repr(display_name)}, base_type={base_type!r}"
-    )
+    print(f"[get_category_glyph_data] RETURN: glyph='{glyph}' (len={len(glyph)}), base_type={base_type}")
     return glyph, color, display_name
 
 
@@ -2316,19 +2352,14 @@ def get_category_icon_data(category, space_type=-1):
     icon_key = cat_data.get("icon_key", "")
     icon_path = cat_data.get("icon_path", "")
 
-    print(f"[GET_CATEGORY_ICON_DATA] category='{category}', icon_source='{icon_source}', icon_key='{icon_key}', icon_path='{icon_path}'")
-
     # For manual mode with icon_key, pass it to C++ for resolution
     if icon_source == "manual" and icon_key:
-        print(f"[GET_CATEGORY_ICON_DATA] Passing icon_key '{icon_key}' to C++ for resolution")
         return icon_key, ""
 
     # Return path for external icons (icon_source == "auto" or path explicitly set)
     if icon_path:
-        print(f"[GET_CATEGORY_ICON_DATA] Returning icon_path for category '{category}'")
         return "", icon_path
 
-    print(f"[GET_CATEGORY_ICON_DATA] No icon for category '{category}', returning ('', '')")
     return "", ""
 
 
@@ -2666,6 +2697,20 @@ def set_category_data(category,
         _glyph_cache[key]["icon_path"] = str(icon_path)
     if icon_provider is not None:
         _glyph_cache[key]["icon_provider"] = str(icon_provider)
+
+    # Sync glyph to space-specific entries when saving to GLOBAL
+    # This ensures that categories with tags in space-specific entries get the glyph from GLOBAL
+    if space_type == -1 and glyph is not None and glyph:
+        for cache_key in list(_glyph_cache.keys()):
+            if isinstance(cache_key, tuple) and len(cache_key) >= 2:
+                cache_space_type, cache_category = cache_key
+                if cache_category == category and cache_space_type != -1:
+                    # Found a space-specific entry for this category
+                    space_entry = _glyph_cache[cache_key]
+                    # Only update if the space-specific entry has empty glyph
+                    if not space_entry.get("glyph"):
+                        space_entry["glyph"] = glyph
+                        print(f"[SET_CATEGORY_DATA] Synced glyph to space_type={cache_space_type} for '{category}'")
 
     if save:
         _save_glyph_mappings_to_file()

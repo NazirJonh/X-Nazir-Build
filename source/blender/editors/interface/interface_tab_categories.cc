@@ -1141,7 +1141,8 @@ static void panel_category_color_lookup(const wmWindowManager *wm,
 
 static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
                                             const char *category,
-                                            CategoryTabIconResolved *r_icon)
+                                            CategoryTabIconResolved *r_icon,
+                                            int space_type = -1)
 {
   if (!r_icon) {
     return false;
@@ -1203,8 +1204,8 @@ static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
     }
   }
 
-  /* 2) Global mappings from Python cache sync. */
-  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category)) {
+  /* 2) Global mappings from Python cache sync. Use space_type for proper space-specific lookup. */
+  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category, space_type)) {
     icon_data_copy_from_item(item);
     return true;
   }
@@ -3355,13 +3356,14 @@ static void ui_panel_category_draw_content(
     const float darken_factor,
     const uchar theme_col_tab_text[3],
     const uchar theme_col_tab_text_sel[3],
-    const bool is_panel_minimized)
+    const bool is_panel_minimized,
+    const int space_type)
 {
   const bool display_mode_allows_icon_content = ELEM(
       display_mode, USER_CATEGORY_TABS_GLYPHS_ONLY, USER_CATEGORY_TABS_GLYPHS_TEXT);
 
   CategoryTabIconResolved icon_resolved;
-  panel_category_icon_data_lookup(wm, category_id, &icon_resolved);
+  panel_category_icon_data_lookup(wm, category_id, &icon_resolved, space_type);
   const int resolved_icon_id = category_tab_icon_id_resolve(icon_resolved);
 
   bool icon_data_allows_icon_content = (icon_resolved.source != CATEGORY_TAB_ICON_SOURCE_OFF);
@@ -3992,6 +3994,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
 
   const ScrArea *area = CTX_wm_area(C);
+  const int space_type = area ? area->spacetype : -1;
   const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
   View2D *v2d = &region->v2d;
   const uiStyle *style = style_get();
@@ -4136,7 +4139,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     const bool display_mode_allows_icon_content = ELEM(
         display_mode, USER_CATEGORY_TABS_GLYPHS_ONLY, USER_CATEGORY_TABS_GLYPHS_TEXT);
     CategoryTabIconResolved icon_resolved;
-    panel_category_icon_data_lookup(wm, category_id, &icon_resolved);
+    panel_category_icon_data_lookup(wm, category_id, &icon_resolved, space_type);
     const int resolved_icon_id = category_tab_icon_id_resolve(icon_resolved);
     bool icon_data_allows_icon_content = (icon_resolved.source != CATEGORY_TAB_ICON_SOURCE_OFF);
     if (icon_resolved.source == CATEGORY_TAB_ICON_SOURCE_MANUAL) {
@@ -4615,7 +4618,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                                    darken_factor,
                                    theme_col_tab_text,
                                    theme_col_tab_text_sel,
-                                   too_narrow);
+                                   too_narrow,
+                                   space_type);
 
     if (is_left) {
       pc_dyn.rect.xmin = v2d->mask.xmin;
@@ -4843,7 +4847,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                                      0.0f,
                                      theme_col_tab_text,
                                      theme_col_tab_text_sel,
-                                     too_narrow);
+                                     too_narrow,
+                                     space_type);
     }
   }
 

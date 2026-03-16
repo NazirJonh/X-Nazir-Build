@@ -7425,6 +7425,16 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
     if (use_url) {
       RNA_string_set(&props_ptr, "url", url.c_str());
     }
+    /* For category-tab drop, enabling on install is expected so that panels register immediately
+     * and a category can appear without restarting Blender. */
+    if (RNA_struct_find_property(&props_ptr, "enable_on_install")) {
+      RNA_boolean_set(&props_ptr, "enable_on_install", true);
+    }
+    /* Some extension flows may still not enable add-ons even when `enable_on_install` is true
+     * (or it may be ignored by UI). Force enable for this internal drop operator. */
+    if (RNA_struct_find_property(&props_ptr, "force_enable_on_install")) {
+      RNA_boolean_set(&props_ptr, "force_enable_on_install", true);
+    }
     retval = WM_operator_name_call_ptr(C, ot, wm::OpCallContext::InvokeDefault, &props_ptr, event);
     WM_operator_properties_free(&props_ptr);
   }
@@ -7688,19 +7698,58 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
          region->v2d.tot.ymax);
   fflush(stdout);
 
-  if (!ui::panel_category_tabs_is_visible(region)) {
-    printf("[EXT_DROP_POLL] REJECT: category tabs not visible (region=%d)\n", region->regiontype);
+  /* Allow extension drops if the region type supports category tabs, even if none are currently visible.
+   * This enables dropping the first extension to create initial categories. */
+  if (!BKE_regiontype_uses_category_tabs(region->runtime->type)) {
+    printf("[EXT_DROP_POLL] REJECT: region type doesn't support category tabs (region=%d)\n", region->regiontype);
     fflush(stdout);
     return false;
   }
 
-  if (!ED_region_panel_category_gutter_isect_xy(area, region, event->xy)) {
-    printf("[EXT_DROP_POLL] REJECT: not in category gutter at (%d,%d)\n",
-           event->xy[0],
-           event->xy[1]);
+  /* For regions that support category tabs but don't have any visible yet,
+   * we need to check if the drop is in a reasonable location for creating tabs. */
+  const bool has_visible_tabs = ui::panel_category_tabs_is_visible(region);
+  if (!has_visible_tabs) {
+    printf("[EXT_DROP_POLL] No visible tabs yet, checking if drop location is suitable for creating tabs\n");
     fflush(stdout);
-    return false;
+    
+    /* For regions without visible tabs, allow drops in the left/right edge area where tabs would appear */
+    const int alignment = RGN_ALIGN_ENUM_FROM_MASK(region->alignment);
+    const int mx_local = event->xy[0] - region->winrct.xmin;
+    const int region_width = region->winrct.xmax - region->winrct.xmin;
+    const int tab_area_width = 50; /* Approximate width where tabs would appear */
+    
+    bool in_tab_area = false;
+    if (alignment == RGN_ALIGN_LEFT && mx_local <= tab_area_width) {
+      in_tab_area = true;
+    }
+    else if (alignment == RGN_ALIGN_RIGHT && mx_local >= (region_width - tab_area_width)) {
+      in_tab_area = true;
+    }
+    
+    if (!in_tab_area) {
+      printf("[EXT_DROP_POLL] REJECT: not in tab creation area (mx_local=%d, region_width=%d, alignment=%d)\n",
+             mx_local, region_width, alignment);
+      fflush(stdout);
+      return false;
+    }
+    
+    printf("[EXT_DROP_POLL] ACCEPT: in tab creation area, allowing extension drop\n");
+    fflush(stdout);
+    return true;
   }
+
+  /* For regions with visible tabs, use the standard gutter intersection check */
+  if (has_visible_tabs) {
+    if (!ED_region_panel_category_gutter_isect_xy(area, region, event->xy)) {
+      printf("[EXT_DROP_POLL] REJECT: not in category gutter at (%d,%d)\n",
+             event->xy[0],
+             event->xy[1]);
+      fflush(stdout);
+      return false;
+    }
+  }
+  /* For regions without visible tabs, we already checked the tab creation area above */
 
   const int mx_local = event->xy[0] - region->winrct.xmin;
   const int my_local = event->xy[1] - region->winrct.ymin;
@@ -7713,30 +7762,46 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
          region->winrct.ymax);
   fflush(stdout);
 
-  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    printf("[EXT_DROP_POLL] TAB rect idname='%s' rect=[%d,%d]-[%d,%d]\n",
-           pc_dyn.idname,
-           pc_dyn.rect.xmin,
-           pc_dyn.rect.ymin,
-           pc_dyn.rect.xmax,
-           pc_dyn.rect.ymax);
-    fflush(stdout);
-    if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
-      printf("[EXT_DROP_POLL] HIT tab idname='%s' rect=[%d,%d]-[%d,%d]\n",
+  /* For regions with visible tabs, check if drop hits an existing tab */
+  if (has_visible_tabs) {
+    /* Add tolerance margin to make it easier to hit tabs when dropping */
+    const int hit_margin = 5;
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      printf("[EXT_DROP_POLL] TAB rect idname='%s' rect=[%d,%d]-[%d,%d]\n",
              pc_dyn.idname,
              pc_dyn.rect.xmin,
              pc_dyn.rect.ymin,
              pc_dyn.rect.xmax,
              pc_dyn.rect.ymax);
       fflush(stdout);
-      return true;
+      /* Use expanded rectangle for hit testing to be more forgiving */
+      rcti expanded_rect = pc_dyn.rect;
+      expanded_rect.xmin -= hit_margin;
+      expanded_rect.xmax += hit_margin;
+      expanded_rect.ymin -= hit_margin;
+      expanded_rect.ymax += hit_margin;
+      if (BLI_rcti_isect_pt(&expanded_rect, mx_local, my_local)) {
+        printf("[EXT_DROP_POLL] HIT tab idname='%s' rect=[%d,%d]-[%d,%d]\n",
+               pc_dyn.idname,
+               pc_dyn.rect.xmin,
+               pc_dyn.rect.ymin,
+               pc_dyn.rect.xmax,
+               pc_dyn.rect.ymax);
+        fflush(stdout);
+        return true;
+      }
     }
+
+    printf("[EXT_DROP_POLL] REJECT: no tab hit\n");
+    fflush(stdout);
+    return false;
   }
-
-  printf("[EXT_DROP_POLL] REJECT: no tab hit\n");
-  fflush(stdout);
-
-  return false;
+  else {
+    /* For regions without visible tabs, we already validated the drop location above */
+    printf("[EXT_DROP_POLL] ACCEPT: no existing tabs, allowing drop in tab creation area\n");
+    fflush(stdout);
+    return true;
+  }
 }
 
 static void category_tab_extension_drop_draw_droptip(bContext *C,
@@ -7767,41 +7832,78 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
     fflush(stdout);
     return;
   }
-  if (!ui::panel_category_tabs_is_visible(region)) {
-    printf("[EXT_DROP_DRAW] ABORT: category tabs not visible (region=%d)\n", region->regiontype);
+  /* Allow extension drops if the region type supports category tabs, even if none are currently visible */
+  if (!BKE_regiontype_uses_category_tabs(region->runtime->type)) {
+    printf("[EXT_DROP_DRAW] ABORT: region type doesn't support category tabs (region=%d)\n", region->regiontype);
     fflush(stdout);
     return;
   }
 
-  if (!ED_region_panel_category_gutter_isect_xy(area, region, xy)) {
-    printf("[EXT_DROP_DRAW] ABORT: not in category gutter at (%d,%d)\n", xy[0], xy[1]);
-    fflush(stdout);
-    return;
-  }
-
+  const bool has_visible_tabs = ui::panel_category_tabs_is_visible(region);
   const int mx_local = xy[0] - region->winrct.xmin;
   const int my_local = xy[1] - region->winrct.ymin;
 
   const PanelCategoryDyn *hovered_tab = nullptr;
-  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
-      hovered_tab = &pc_dyn;
-      break;
+  
+  if (has_visible_tabs) {
+    /* Standard gutter intersection check for regions with visible tabs */
+    if (!ED_region_panel_category_gutter_isect_xy(area, region, xy)) {
+      printf("[EXT_DROP_DRAW] ABORT: not in category gutter at (%d,%d)\n", xy[0], xy[1]);
+      fflush(stdout);
+      return;
+    }
+
+    /* Find hovered tab */
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
+        hovered_tab = &pc_dyn;
+        break;
+      }
+    }
+
+    if (!hovered_tab) {
+      printf("[EXT_DROP_DRAW] ABORT: no tab hit local=(%d,%d)\n", mx_local, my_local);
+      fflush(stdout);
+      return;
     }
   }
-
-  if (!hovered_tab) {
-    printf("[EXT_DROP_DRAW] ABORT: no tab hit local=(%d,%d)\n", mx_local, my_local);
+  else {
+    /* For regions without visible tabs, validate drop location for tab creation */
+    const int alignment = RGN_ALIGN_ENUM_FROM_MASK(region->alignment);
+    const int region_width = region->winrct.xmax - region->winrct.xmin;
+    const int tab_area_width = 50;
+    
+    bool in_tab_area = false;
+    if (alignment == RGN_ALIGN_LEFT && mx_local <= tab_area_width) {
+      in_tab_area = true;
+    }
+    else if (alignment == RGN_ALIGN_RIGHT && mx_local >= (region_width - tab_area_width)) {
+      in_tab_area = true;
+    }
+    
+    if (!in_tab_area) {
+      printf("[EXT_DROP_DRAW] ABORT: not in tab creation area (mx_local=%d, region_width=%d, alignment=%d)\n",
+             mx_local, region_width, alignment);
+      fflush(stdout);
+      return;
+    }
+    
+    printf("[EXT_DROP_DRAW] In tab creation area, showing drop indicator\n");
     fflush(stdout);
-    return;
+    /* hovered_tab remains nullptr for regions without visible tabs */
   }
 
-  printf("[EXT_DROP_DRAW] HIT tab idname='%s' rect=[%d,%d]-[%d,%d]\n",
-         hovered_tab->idname,
-         hovered_tab->rect.xmin,
-         hovered_tab->rect.ymin,
-         hovered_tab->rect.xmax,
-         hovered_tab->rect.ymax);
+  if (hovered_tab) {
+    printf("[EXT_DROP_DRAW] HIT tab idname='%s' rect=[%d,%d]-[%d,%d]\n",
+           hovered_tab->idname,
+           hovered_tab->rect.xmin,
+           hovered_tab->rect.ymin,
+           hovered_tab->rect.xmax,
+           hovered_tab->rect.ymax);
+  }
+  else {
+    printf("[EXT_DROP_DRAW] No existing tab, showing drop indicator for new tab creation\n");
+  }
   fflush(stdout);
 
   const View2D *v2d = &region->v2d;
@@ -7815,16 +7917,26 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
   const int rct_xmin_local = is_left ? v2d->mask.xmin + 3 : (v2d->mask.xmax - category_tabs_width);
   const int rct_xmax_local = is_left ? v2d->mask.xmin + category_tabs_width : (v2d->mask.xmax - 3);
 
-  /* Determine if cursor is in upper or lower half of the tab */
-  const int tab_center_y = (hovered_tab->rect.ymin + hovered_tab->rect.ymax) / 2;
+  /* Determine if cursor is in upper or lower half of the tab (or middle for new tab creation) */
+  const int tab_center_y = hovered_tab ? (hovered_tab->rect.ymin + hovered_tab->rect.ymax) / 2 : my_local;
   const bool insert_above = (my_local > tab_center_y);
 
   /* Convert tab rect to screen coordinates */
-  rcti tab_rect = hovered_tab->rect;
-  tab_rect.xmin = rct_xmin_local + region->winrct.xmin;
-  tab_rect.xmax = rct_xmax_local + region->winrct.xmin;
-  tab_rect.ymin += region->winrct.ymin;
-  tab_rect.ymax += region->winrct.ymin;
+  rcti tab_rect;
+  if (hovered_tab) {
+    tab_rect = hovered_tab->rect;
+    tab_rect.xmin = rct_xmin_local + region->winrct.xmin;
+    tab_rect.xmax = rct_xmax_local + region->winrct.xmin;
+    tab_rect.ymin += region->winrct.ymin;
+    tab_rect.ymax += region->winrct.ymax;
+  }
+  else {
+    /* For regions without visible tabs, create a default tab area */
+    tab_rect.xmin = rct_xmin_local + region->winrct.xmin;
+    tab_rect.xmax = rct_xmax_local + region->winrct.xmin;
+    tab_rect.ymin = region->winrct.ymin + my_local - 15; /* Center around cursor */
+    tab_rect.ymax = region->winrct.ymin + my_local + 15;
+  }
 
   /* Calculate insert indicator position */
   const int indicator_height = round_fl_to_int(3.0f * UI_SCALE_FAC);

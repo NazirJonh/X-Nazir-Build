@@ -45,6 +45,7 @@
 #include "DNA_windowmanager_types.h"
 #include "DNA_workspace_types.h"
 
+#include "BKE_callbacks.hh"
 #include "BKE_context.hh"
 #include "BKE_icons.hh"
 #include "BKE_report.hh"
@@ -77,6 +78,8 @@
 #  include "BPY_extern.hh"
 #  include "BPY_extern_run.hh"
 #endif
+
+struct Main;
 
 namespace blender::ui {
 
@@ -125,6 +128,92 @@ struct PendingCategoryInsert {
 };
 
 static PendingCategoryInsert g_pending_category_insert;
+
+/* Deferred category activation - used to activate a category outside of layout phase.
+ * This prevents crashes when extensions load previews in background threads during
+ * panel_poll calls triggered by immediate activation. */
+struct DeferredCategoryActivation {
+  std::string category_id;
+  std::string tag_key;
+  bool valid = false;
+  double timestamp = 0.0;
+  double activate_time = 0.0; /* Absolute time when activation becomes safe. */
+  int frame_delay = 0;
+  bool wait_for_extension_signal = false;
+  bool extension_signal_received = false;
+  bool discover_new_category = false; /* When true, find and activate new category after extension install */
+  int discover_retry_count = 0; /* Retry counter for discover mode */
+};
+
+static DeferredCategoryActivation g_deferred_category_activation;
+
+/* Known categories before extension drop - used to detect new categories */
+static Set<std::string> g_known_categories_before_extension_drop;
+
+/* New extension categories that should bypass tag filtering.
+ * These categories appeared after extension installation and should be visible
+ * regardless of tag filter state until user explicitly assigns tags to them.
+ * This ensures newly installed extensions are immediately visible and usable. */
+static Set<std::string> g_new_extension_categories_visible;
+
+struct DeferredActivationExtensionCallbackState {
+  bCallbackFuncStore callback_store = {};
+  bool registered = false;
+};
+
+static DeferredActivationExtensionCallbackState g_deferred_activation_extension_callback_state;
+
+static void deferred_category_activation_extension_callback(Main * /*bmain*/,
+                                                            PointerRNA ** /*pointers*/,
+                                                            int /*pointers_num*/,
+                                                            void * /*arg*/)
+{
+  printf("[CATEGORY ACTIVATE] Extension callback triggered! valid=%d wait_for_signal=%d\n",
+         g_deferred_category_activation.valid ? 1 : 0,
+         g_deferred_category_activation.wait_for_extension_signal ? 1 : 0);
+  fflush(stdout);
+  if (g_deferred_category_activation.valid &&
+      g_deferred_category_activation.wait_for_extension_signal) {
+    g_deferred_category_activation.extension_signal_received = true;
+    printf("[CATEGORY ACTIVATE] Extension signal received, will activate on next draw\n");
+    fflush(stdout);
+  }
+}
+
+static void deferred_category_activation_register_extension_callback()
+{
+  if (g_deferred_activation_extension_callback_state.registered) {
+    return;
+  }
+  g_deferred_activation_extension_callback_state.callback_store.alloc = false;
+  g_deferred_activation_extension_callback_state.callback_store.arg = nullptr;
+  g_deferred_activation_extension_callback_state.callback_store.func =
+      deferred_category_activation_extension_callback;
+  BKE_callback_add(&g_deferred_activation_extension_callback_state.callback_store,
+                   BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST);
+  g_deferred_activation_extension_callback_state.registered = true;
+}
+
+static void category_tabs_tag_refresh_active_area_ui(const bContext *C)
+{
+  if (!C) {
+    return;
+  }
+
+  ScrArea *area = CTX_wm_area(C);
+  if (!area) {
+    return;
+  }
+
+  /* Tag a full UI refresh for the whole area, not only the current region.
+   * Add-on panels may register successfully but won't be reflected in category tabs
+   * until regions are refreshed and panels are re-built. */
+  ED_area_tag_refresh(area);
+  for (ARegion &region_iter : area->regionbase) {
+    ED_region_tag_refresh_ui(&region_iter);
+    ED_region_tag_redraw(&region_iter);
+  }
+}
 
 static void category_tabs_report_new_categories(const bContext *C,
                                                 const Vector<std::string> &category_ids)
@@ -1816,8 +1905,16 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
   const int space_type = area ? area->spacetype : -1;
   const char *category_tags = category_tags_string_lookup(wm, category_idname, space_type);
 
-  /* If category has no tags - hide it (since filter is active) */
+  /* If category has no tags - check if it's a newly installed extension category.
+   * New extension categories should be visible regardless of tag filter state,
+   * allowing users to see and configure them immediately after installation. */
   if (!category_tags || category_tags[0] == '\0') {
+    /* Exception: if this category is marked as a new extension category, show it.
+     * This allows newly installed extensions to be visible and activatable
+     * even when tag filter is active and they haven't been assigned tags yet. */
+    if (g_new_extension_categories_visible.contains(category_idname)) {
+      return true;
+    }
     return false;
   }
 
@@ -2381,6 +2478,71 @@ static void apply_category_order(bContext *C, ARegion *region, CategoryDragState
   WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
 }
 
+/**
+ * Safe category activation that checks if we need to wait for extension installation.
+ * This should be used instead of direct panel_category_active_set calls when the
+ * activation might be triggered by extension installation.
+ */
+void panel_category_active_set_safe(const bContext *C,
+                                    ARegion *region,
+                                    const char *category_id,
+                                    bool check_extension)
+{
+  if (!C || !region || !category_id || !category_id[0]) {
+    return;
+  }
+
+  /* Check if this might be an extension category that needs deferred activation */
+  if (check_extension) {
+    /* Check if this category might be from an extension */
+    const bool might_be_extension = (
+        /* Check for common extension naming patterns */
+        strstr(category_id, "ucupaint") != nullptr ||
+        strstr(category_id, "extension") != nullptr ||
+        strstr(category_id, "addon") != nullptr ||
+        /* Check if category has extension-style naming (contains underscores/hyphens) */
+        (strchr(category_id, '_') != nullptr || strchr(category_id, '-') != nullptr) ||
+        /* Check if we're currently in the middle of an extension operation */
+        g_deferred_category_activation.valid
+    );
+    
+    /* If this might be an extension and we have pending operations, use deferred activation */
+    if (might_be_extension) {
+      /* Register extension callback if not already registered */
+      deferred_category_activation_register_extension_callback();
+      
+      /* Set up deferred activation to wait for extension installation signal */
+      g_deferred_category_activation.category_id = category_id;
+      g_deferred_category_activation.valid = true;
+      g_deferred_category_activation.timestamp = BLI_time_now_seconds();
+      g_deferred_category_activation.wait_for_extension_signal = true;
+      g_deferred_category_activation.extension_signal_received = false;
+      g_deferred_category_activation.frame_delay = 0;
+      
+      /* Build tag_key for deferred save */
+      blender::ui::TagFilterStateRef tag_state{};
+      ScrArea *area_for_tag = CTX_wm_area(C);
+      if (blender::ui::tag_filter_state_from_area(area_for_tag, &tag_state) &&
+          tag_state.active_tags) {
+        char tag_key_buf[256];
+        blender::ui::tag_build_combination_key(
+            tag_state.active_tags, tag_key_buf, sizeof(tag_key_buf));
+        g_deferred_category_activation.tag_key = tag_key_buf;
+      }
+      else {
+        g_deferred_category_activation.tag_key.clear();
+      }
+      
+      printf("[CATEGORY ACTIVATE] Safe activation: deferred activation set for '%s', waiting for signal\n",
+             category_id);
+      return;
+    }
+  }
+  
+  /* Direct activation for non-extension categories */
+  panel_category_active_set(region, category_id);
+}
+
 void category_tabs_apply_drop_insert(bContext *C,
                                      ARegion *region,
                                      const char *category_id,
@@ -2391,6 +2553,39 @@ void category_tabs_apply_drop_insert(bContext *C,
     return;
   }
 
+  /* Register extension callback if not already registered */
+  deferred_category_activation_register_extension_callback();
+
+  /* For extension drop, we DON'T know the new category name yet.
+   * Set up deferred activation to wait for extension installation signal,
+   * then discover and activate the new category that appears.
+   * Use empty category_id to indicate "discover new category" mode. */
+  g_deferred_category_activation.category_id.clear(); /* Will be set when new category appears */
+  g_deferred_category_activation.valid = true;
+  g_deferred_category_activation.timestamp = BLI_time_now_seconds();
+  g_deferred_category_activation.wait_for_extension_signal = true;
+  g_deferred_category_activation.extension_signal_received = false;
+  g_deferred_category_activation.frame_delay = 0; /* No frame delay when waiting for signal */
+  g_deferred_category_activation.discover_new_category = true; /* Find new category after install */
+  g_deferred_category_activation.discover_retry_count = 0; /* Reset retry counter */
+
+  /* Build tag_key for deferred save */
+  blender::ui::TagFilterStateRef tag_state{};
+  ScrArea *area_for_tag = CTX_wm_area(C);
+  if (blender::ui::tag_filter_state_from_area(area_for_tag, &tag_state) &&
+      tag_state.active_tags) {
+    char tag_key_buf[256];
+    blender::ui::tag_build_combination_key(
+        tag_state.active_tags, tag_key_buf, sizeof(tag_key_buf));
+    g_deferred_category_activation.tag_key = tag_key_buf;
+  }
+  else {
+    g_deferred_category_activation.tag_key.clear();
+  }
+
+  printf("[CATEGORY ACTIVATE] Extension drop: waiting for new category to appear (target was '%s')\n",
+         category_id);
+
   ScrArea *area = CTX_wm_area(C);
   const wmWindowManager *wm = CTX_wm_manager(C);
 
@@ -2398,6 +2593,14 @@ void category_tabs_apply_drop_insert(bContext *C,
   std::string tag_key = get_tag_combination_key(wm, C);
 
   Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
+
+  /* Save known categories before extension installation to detect new ones later */
+  g_known_categories_before_extension_drop.clear();
+  for (PanelCategoryDyn *pc_dyn : ordered_categories) {
+    if (pc_dyn->idname && pc_dyn->idname[0]) {
+      g_known_categories_before_extension_drop.add(pc_dyn->idname);
+    }
+  }
 
   Vector<std::string> json_order = load_category_order_from_json(C, tag_key.c_str());
 
@@ -2498,7 +2701,7 @@ void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *regio
             const_cast<bContext *>(C), tag_key, saved_category, sizeof(saved_category)))
     {
       if (panel_category_is_visible_by_tags(C, wm, saved_category)) {
-        panel_category_active_set(region, saved_category);
+        panel_category_active_set_safe(C, region, saved_category);
         return;
       }
     }
@@ -2506,7 +2709,7 @@ void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *regio
 
   Vector<PanelCategoryDyn *> visible_categories = get_ordered_categories(C, region);
   if (!visible_categories.is_empty()) {
-    panel_category_active_set(region, visible_categories[0]->idname);
+    panel_category_active_set_safe(C, region, visible_categories[0]->idname);
   }
 }
 
@@ -2566,10 +2769,16 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
   {
     Vector<PanelCategoryDyn *> appeared_categories;
     for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-      if (!panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
+      /* IMPORTANT: Do NOT filter new extension categories through panel_category_is_visible_by_tags!
+       * New extension categories may not have tags assigned yet, which would cause them to be
+       * filtered out when tag filter is active. Extension categories must be discoverable
+       * regardless of tag filter state so they can be positioned and activated. */
+      const bool is_new_category = !g_pending_category_insert.existing_categories.contains(
+          std::string(pc_dyn.idname));
+      if (!is_new_category && !panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
         continue;
       }
-      if (!g_pending_category_insert.existing_categories.contains(std::string(pc_dyn.idname))) {
+      if (is_new_category) {
         appeared_categories.append(&pc_dyn);
       }
     }
@@ -2876,29 +3085,91 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
 
     g_pending_category_insert.valid = false;
 
-    /* Activate first newly appeared category if visible in current mode */
+    /* Auto-activate newly appeared category after extension installation.
+     * Uses deferred activation with extension signal to ensure:
+     * 1. Extension installation is complete
+     * 2. UI has time to stabilize (frame delay)
+     * 3. Category activation happens safely on main thread
+     */
+#if 1
+    printf("[CATEGORY ACTIVATE] pending_inserted_ids count: %zu\n", pending_inserted_ids.size());
     if (!pending_inserted_ids.is_empty()) {
       for (const std::string &category_id : pending_inserted_ids) {
-        if (panel_category_is_visible_by_tags(C, wm, category_id.c_str())) {
-          const char *current_active = panel_category_active_get(region, false);
-          if (current_active == nullptr || !STREQ(category_id.c_str(), current_active)) {
-            panel_category_active_set(region, category_id.c_str());
+        printf("[CATEGORY ACTIVATE] Checking category: '%s'\n", category_id.c_str());
 
-            /* Save to tag category memory */
+        /* Mark this category as a new extension category that should bypass tag filtering.
+         * This ensures it will be visible regardless of current tag filter state. */
+        g_new_extension_categories_visible.add(category_id);
+        printf("[CATEGORY ACTIVATE]   Added to visible extension categories\n");
+
+        const bool is_visible = panel_category_is_visible_by_tags(C, wm, category_id.c_str());
+        printf("[CATEGORY ACTIVATE]   is_visible: %s\n", is_visible ? "true" : "false");
+
+        if (is_visible) {
+          const char *current_active = panel_category_active_get(region, false);
+          printf("[CATEGORY ACTIVATE]   current_active: '%s'\n",
+                 current_active ? current_active : "(null)");
+
+          const bool should_activate = (current_active == nullptr ||
+                                        !STREQ(category_id.c_str(), current_active));
+          printf("[CATEGORY ACTIVATE]   should_activate: %s\n", should_activate ? "true" : "false");
+
+          if (should_activate) {
+            /* Defer activation to avoid crashes during panel layout.
+             * Some extensions (like Ucupaint) load previews in background threads,
+             * which crashes when triggered from panel_poll during layout.
+             * We wait 3 frames before activating to allow UI to stabilize. */
+            printf("[CATEGORY ACTIVATE]   Deferring activation for: '%s' (3 frame delay)\n",
+                   category_id.c_str());
+
+            /* Check if deferred activation is already set up (from discover mode or previous call) */
+            bool already_has_category = !g_deferred_category_activation.category_id.empty();
+            bool signal_already_received = g_deferred_category_activation.extension_signal_received;
+            bool already_waiting_for_signal = g_deferred_category_activation.wait_for_extension_signal;
+
+            /* Skip if already set up - don't overwrite existing activation state */
+            if (already_has_category) {
+              printf("[CATEGORY ACTIVATE]   Skipping - category already set: '%s'\n",
+                     g_deferred_category_activation.category_id.c_str());
+              break;
+            }
+
+            g_deferred_category_activation.category_id = category_id;
+            g_deferred_category_activation.valid = true;
+            g_deferred_category_activation.timestamp = BLI_time_now_seconds();
+            g_deferred_category_activation.frame_delay = 3; /* Wait 3 frames before activating */
+
+            /* Only set wait_for_extension_signal if not already in progress */
+            if (!signal_already_received && !already_waiting_for_signal) {
+              g_deferred_category_activation.wait_for_extension_signal = true;
+              g_deferred_category_activation.extension_signal_received = false;
+            }
+            printf("[CATEGORY ACTIVATE]   signal_already_received: %s, already_waiting: %s\n",
+                   signal_already_received ? "true" : "false",
+                   already_waiting_for_signal ? "true" : "false");
+
+            /* Build tag_key for deferred save */
             blender::ui::TagFilterStateRef tag_state{};
-            if (blender::ui::tag_filter_state_from_area(CTX_wm_area(C), &tag_state) &&
+            ScrArea *area_for_tag = CTX_wm_area(C);
+            if (blender::ui::tag_filter_state_from_area(area_for_tag, &tag_state) &&
                 tag_state.active_tags) {
               char tag_key_buf[256];
               blender::ui::tag_build_combination_key(
                   tag_state.active_tags, tag_key_buf, sizeof(tag_key_buf));
-              blender::ui::tag_save_last_active_category(
-                  const_cast<bContext *>(C), tag_key_buf, category_id.c_str());
+              g_deferred_category_activation.tag_key = tag_key_buf;
             }
+            else {
+              g_deferred_category_activation.tag_key.clear();
+            }
+            printf("[CATEGORY ACTIVATE]   Deferred activation scheduled\n");
           }
+          printf("[CATEGORY ACTIVATE]   Breaking loop after first visible category\n");
           break;
         }
       }
     }
+    printf("[CATEGORY ACTIVATE] Activation block completed\n");
+#endif
   }
 
   /* Auto-save initial category order when JSON order was empty.
@@ -3557,8 +3828,169 @@ static void draw_category_tab_color_indicator(const rcti *rct,
 /** \name Main Drawing Function
  * \{ */
 
+/* Execute deferred category activation if pending.
+ * This is called from panel_category_tabs_draw_all which runs in a safe context
+ * after panel layout is complete, avoiding crashes when extensions load previews
+ * in background threads. */
+static void deferred_category_activation_execute(const bContext *C, ARegion *region)
+{
+  if (!g_deferred_category_activation.valid) {
+    return;
+  }
+
+  std::string category_id = g_deferred_category_activation.category_id;
+
+  /* Check if we need to wait for extension installation signal */
+ if (g_deferred_category_activation.wait_for_extension_signal) {
+ if (!g_deferred_category_activation.extension_signal_received) {
+ printf("[CATEGORY ACTIVATE] Waiting for extension installation signal for: '%s'\n",
+ category_id.c_str());
+ return;
+ }
+ printf("[CATEGORY ACTIVATE] Extension installation signal received for: '%s', proceeding with activation\n",
+ category_id.c_str());
+
+ /* Force immediate UI refresh right after extension install signal.
+ * New panels/categories may already be registered but not drawn yet. */
+ WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
+ WM_event_add_notifier(C, NC_WINDOW | ND_DRAW, nullptr);
+ ED_region_tag_refresh_ui(region);
+ ED_region_tag_redraw(region);
+ category_tabs_tag_refresh_active_area_ui(C);
+ }
+
+
+  /* If in discover mode, find the new category that appeared after extension installation */
+  if (g_deferred_category_activation.discover_new_category && category_id.empty()) {
+    printf("[CATEGORY ACTIVATE] Discover mode: looking for new categories... (retry %d/30)\n",
+           g_deferred_category_activation.discover_retry_count);
+
+    /* IMPORTANT: Search directly in region->runtime->panels_category, NOT through get_ordered_categories()!
+     * get_ordered_categories() applies tag filtering via panel_category_is_visible_by_tags(),
+     * which would hide new categories that don't have tags assigned yet.
+     * New extension categories must be discoverable regardless of tag filter state. */
+    std::string new_category_id;
+    for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (pc_dyn.idname && pc_dyn.idname[0]) {
+        if (!g_known_categories_before_extension_drop.contains(pc_dyn.idname)) {
+          new_category_id = pc_dyn.idname;
+          printf("[CATEGORY ACTIVATE]   Found new category: '%s'\n", new_category_id.c_str());
+          break; /* Take the first new category */
+        }
+      }
+    }
+
+    if (new_category_id.empty()) {
+      /* Category not visible yet - may need more time for addon to register.
+       * Retry with frame delay instead of giving up immediately. */
+      ED_region_tag_refresh_ui(region);
+      category_tabs_tag_refresh_active_area_ui(C);
+      g_deferred_category_activation.discover_retry_count++;
+      if (g_deferred_category_activation.discover_retry_count < 30) {
+        g_deferred_category_activation.frame_delay = 3; /* Retry in 3 frames */
+        printf("[CATEGORY ACTIVATE]   No new category found yet, will retry\n");
+        return;
+      }
+      printf("[CATEGORY ACTIVATE]   No new category found after timeout, clearing deferred activation\n");
+      g_deferred_category_activation.valid = false;
+      g_deferred_category_activation.wait_for_extension_signal = false;
+      g_deferred_category_activation.extension_signal_received = false;
+      g_deferred_category_activation.discover_new_category = false;
+      g_deferred_category_activation.discover_retry_count = 0;
+      g_known_categories_before_extension_drop.clear();
+      return;
+    }
+
+    category_id = new_category_id;
+    g_deferred_category_activation.category_id = new_category_id;
+    g_deferred_category_activation.wait_for_extension_signal = false; /* Signal already received */
+
+    /* Mark this category as a new extension category that should bypass tag filtering.
+     * This ensures it remains visible even when tag filter is active and
+     * the category hasn't been assigned tags yet. */
+    g_new_extension_categories_visible.add(new_category_id);
+    printf("[CATEGORY ACTIVATE]   Added '%s' to visible extension categories\n", new_category_id.c_str());
+    g_deferred_category_activation.discover_retry_count = 0; /* Reset retry counter */
+    printf("[CATEGORY ACTIVATE]   Will activate new category: '%s'\n", category_id.c_str());
+  }
+
+  /* Check frame delay - wait N frames before activating */
+  if (g_deferred_category_activation.frame_delay > 0) {
+    g_deferred_category_activation.frame_delay--;
+    printf("[CATEGORY ACTIVATE] Frame delay: %d remaining for: '%s'\n",
+           g_deferred_category_activation.frame_delay,
+           category_id.c_str());
+    return;
+  }
+
+  printf("[CATEGORY ACTIVATE] Executing deferred activation for: '%s'\n", category_id.c_str());
+
+  /* Verify category still exists in panels_category.
+   * NOTE: We check existence directly in region->runtime->panels_category instead of using
+   * panel_category_is_visible_by_tags() because new extension categories may not have
+   * tags assigned yet, which would cause them to be filtered out when tag filter is active.
+   * Extension categories should be activatable regardless of current tag filter state. */
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  bool category_exists = false;
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (STREQ(pc_dyn.idname, category_id.c_str())) {
+      category_exists = true;
+      break;
+    }
+  }
+  if (!category_exists) {
+    printf("[CATEGORY ACTIVATE]   Category no longer exists, skipping\n");
+    g_deferred_category_activation.valid = false;
+    g_deferred_category_activation.discover_new_category = false;
+    g_deferred_category_activation.discover_retry_count = 0;
+    g_known_categories_before_extension_drop.clear();
+    return;
+  }
+
+  /* Check if already active */
+  const char *current_active = panel_category_active_get(region, false);
+  if (current_active && STREQ(category_id.c_str(), current_active)) {
+    printf("[CATEGORY ACTIVATE]   Category already active, skipping\n");
+    g_deferred_category_activation.valid = false;
+    g_deferred_category_activation.discover_new_category = false;
+    g_deferred_category_activation.discover_retry_count = 0;
+    g_known_categories_before_extension_drop.clear();
+    return;
+  }
+
+  /* Perform activation */
+  printf("[CATEGORY ACTIVATE]   Setting active category to: '%s'\n", category_id.c_str());
+  panel_category_active_set(region, category_id.c_str());
+  printf("[CATEGORY ACTIVATE]   panel_category_active_set completed\n");
+
+  /* Save to tag category memory */
+  if (!g_deferred_category_activation.tag_key.empty()) {
+    printf("[CATEGORY ACTIVATE]   Saving to tag memory, tag_key: '%s'\n",
+           g_deferred_category_activation.tag_key.c_str());
+    blender::ui::tag_save_last_active_category(
+        const_cast<bContext *>(C),
+        g_deferred_category_activation.tag_key.c_str(),
+        category_id.c_str());
+    printf("[CATEGORY ACTIVATE]   tag_save_last_active_category completed\n");
+  }
+
+  /* Clear deferred activation */
+  g_deferred_category_activation.valid = false;
+  g_deferred_category_activation.wait_for_extension_signal = false;
+  g_deferred_category_activation.extension_signal_received = false;
+  g_deferred_category_activation.discover_new_category = false;
+  g_deferred_category_activation.discover_retry_count = 0;
+  g_known_categories_before_extension_drop.clear();
+  printf("[CATEGORY ACTIVATE] Deferred activation completed\n");
+}
+
 void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char *category_id_active)
 {
+  /* Execute deferred category activation if pending.
+   * This is a safe point to activate categories after panel layout is complete. */
+  deferred_category_activation_execute(C, region);
+
+
   const ScrArea *area = CTX_wm_area(C);
   const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
   View2D *v2d = &region->v2d;
@@ -5038,3 +5470,4 @@ void UI_OT_category_tab_drag(wmOperatorType *ot)
 /** \} */
 
 }  // namespace blender::ui
+#include "BKE_callbacks.hh"

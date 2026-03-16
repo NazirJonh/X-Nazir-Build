@@ -907,10 +907,20 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
  * Used by drag & drop on category tabs.
  */
 void category_tabs_apply_drop_insert(bContext *C,
-                                     ARegion *region,
-                                     const char *category_id,
-                                     const char *target_category_id,
-                                     bool insert_above);
+                                      ARegion *region,
+                                      const char *category_id,
+                                      const char *target_category_id,
+                                      bool insert_above);
+
+/**
+ * Safe category activation that waits for extension installation signals.
+ * Use this instead of direct panel_category_active_set when activation
+ * might be triggered by extension installation.
+ */
+void panel_category_active_set_safe(const bContext *C,
+                                   ARegion *region,
+                                   const char *category_id,
+                                   bool check_extension = true);
 
 /* `interface_tab_categories_edit.cc` */
 
@@ -1692,7 +1702,7 @@ void draw_preview_item_stateless(const uiFontStyle *fstyle,
 
 /* Category tag create popup width - used in C++ (interface_tag_bar.cc) and Python (space_userpref.py).
  * IMPORTANT: Keep this value in sync with wm.category_tag_create operator invoke_props_dialog() */
-#define UI_CATEGORY_TAG_CREATE_POPUP_WIDTH 415
+#define UI_CATEGORY_TAG_CREATE_POPUP_WIDTH 430
 
 #define UI_PIXEL_AA_JITTER 8
 extern const float ui_pixel_jitter[UI_PIXEL_AA_JITTER][2];

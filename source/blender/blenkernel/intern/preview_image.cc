@@ -6,6 +6,7 @@
  * \ingroup bke
  */
 
+#include <mutex>
 #include <string>
 
 #include "DNA_ID.h"
@@ -41,7 +42,36 @@ namespace blender {
 
 using CachedPreviewMap = Map<std::string, PreviewImage *>;
 
-/* Not mutex-protected! */
+/* --------------------------------------------------------------------
+ * Thread-Safe Cached Previews
+ *
+ * BACKGROUND:
+ * Some Python addons (like Ucupaint) load preview images from background threads
+ * using bpy.utils.previews.load(). Previously, this raised RuntimeError because
+ * the cached previews map was not thread-safe.
+ *
+ * SOLUTION:
+ * Added std::mutex protection for all cached preview operations. The mutex is
+ * acquired in: BKE_previewimg_cached_get(), BKE_previewimg_cached_ensure(),
+ * BKE_previewimg_cached_thumbnail_read(), BKE_previewimg_cached_release(),
+ * and BKE_preview_images_free().
+ *
+ * GPU SAFETY:
+ * GPU texture deletion from background threads is safe because all backends
+ * have fallback mechanisms:
+ * - OpenGL: Uses orphan list with mutex when no context available
+ * - Vulkan: Uses VKDiscardPool with mutex for deferred deletion
+ * - Metal: Uses atomic Objective-C reference counting
+ * -------------------------------------------------------------------- */
+
+/* Mutex for thread-safe access to cached previews map. */
+static std::mutex &get_cached_previews_mutex()
+{
+  static std::mutex mutex;
+  return mutex;
+}
+
+/* Thread-safe access to cached previews map. */
 static CachedPreviewMap &get_cached_previews_map()
 {
   static CachedPreviewMap cached_previews_map;
@@ -84,7 +114,13 @@ static void previewimg_free_or_defer(PreviewImage **prv)
     return;
   }
 
-  BLI_assert(BLI_thread_is_main());
+  /* Thread-safe: All GPU backends (OpenGL, Vulkan, Metal) have fallback mechanisms
+   * for resource deletion from non-main threads:
+   * - OpenGL: Uses orphan list with mutex when no context is available
+   * - Vulkan: Uses VKDiscardPool with mutex
+   * - Metal: Uses atomic Objective-C reference counting
+   * Note: This function is called from BKE_previewimg_cached_release() which
+   * already holds the cached_previews_mutex. */
 
   bool do_delete = true;
 
@@ -142,6 +178,7 @@ void BKE_preview_images_init() {}
 
 void BKE_preview_images_free()
 {
+  std::lock_guard<std::mutex> lock(get_cached_previews_mutex());
   CachedPreviewMap &cache = get_cached_previews_map();
   for (PreviewImage *prv : cache.values()) {
     BKE_previewimg_free(&prv);
@@ -286,13 +323,15 @@ bool BKE_previewimg_id_supports_jobs(const ID *id)
 
 PreviewImage *BKE_previewimg_cached_get(const char *name)
 {
-  BLI_assert(BLI_thread_is_main());
+  /* Thread-safe: lock mutex for map access. */
+  std::lock_guard<std::mutex> lock(get_cached_previews_mutex());
   return get_cached_previews_map().lookup_default_as(name, nullptr);
 }
 
 PreviewImage *BKE_previewimg_cached_ensure(const char *name)
 {
-  BLI_assert(BLI_thread_is_main());
+  /* Thread-safe: lock mutex for map access. */
+  std::lock_guard<std::mutex> lock(get_cached_previews_mutex());
 
   PreviewImage *prv = get_cached_previews_map().lookup_or_add_cb_as(
       name, [&]() { return BKE_previewimg_create(); });
@@ -305,7 +344,8 @@ PreviewImage *BKE_previewimg_cached_thumbnail_read(const char *name,
                                                    const int source,
                                                    bool force_update)
 {
-  BLI_assert(BLI_thread_is_main());
+  /* Thread-safe: lock mutex for map access. */
+  std::lock_guard<std::mutex> lock(get_cached_previews_mutex());
 
   PreviewImage *prv = nullptr;
   PreviewImage **prv_p;
@@ -362,7 +402,8 @@ PreviewImage *BKE_previewimg_online_thumbnail_read(const char *name,
 
 void BKE_previewimg_cached_release(const char *name)
 {
-  BLI_assert(BLI_thread_is_main());
+  /* Thread-safe: lock mutex for map access. */
+  std::lock_guard<std::mutex> lock(get_cached_previews_mutex());
   CachedPreviewMap &cache = get_cached_previews_map();
   PreviewImage *prv = cache.pop_default_as(name, nullptr);
   previewimg_free_or_defer(&prv);

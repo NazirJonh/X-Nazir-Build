@@ -1513,12 +1513,14 @@ def _load_glyph_mappings_from_file():
                 icon_path = cat_data.get("icon_path", "")
                 icon_provider = cat_data.get("icon_provider", "")
                 default_glyph = cat_data.get("default_glyph", "")
+                color = cat_data.get("color", [0.0, 0.0, 0.0])
 
                 # If this space-specific entry has customizations, update GLOBAL entry
                 has_customizations = (
                     (icon_source in ("manual", "off") or icon_key or icon_path) or
                     (glyph_mode != "auto") or
-                    (glyph and glyph != default_glyph)
+                    (glyph and glyph != default_glyph) or
+                    (color and any(c != 0.0 for c in color))
                 )
                 if has_customizations:
                     global_cache_key = _make_cache_key(-1, category)
@@ -1566,6 +1568,13 @@ def _load_glyph_mappings_from_file():
                         if global_entry.get("icon_provider", "") != icon_provider:
                             global_entry["icon_provider"] = icon_provider
 
+                    # Copy color to global entry if non-zero
+                    color = cat_data.get("color", [0.0, 0.0, 0.0])
+                    if color and any(c != 0.0 for c in color):
+                        if global_entry.get("color", [0.0, 0.0, 0.0]) != color:
+                            global_entry["color"] = color
+                            print(f"[GLYPH LOAD] Propagated color from space {space_type_id} to GLOBAL for '{category}'")
+
     # STEP 2: Sync from GLOBAL back to all SPACE entries for consistency
     # This ensures all space-specific entries have the same data as GLOBAL
     global_cache_prefix = (-1, "")
@@ -1611,6 +1620,13 @@ def _load_glyph_mappings_from_file():
                         space_entry["icon_path"] = global_icon_path
                     if space_entry.get("icon_provider", "") != global_icon_provider:
                         space_entry["icon_provider"] = global_icon_provider
+
+                    # Sync color
+                    global_color = global_entry.get("color", [0.0, 0.0, 0.0])
+                    if global_color and any(c != 0.0 for c in global_color):
+                        if space_entry.get("color", [0.0, 0.0, 0.0]) != global_color:
+                            space_entry["color"] = global_color
+                            print(f"[GLYPH LOAD] Synced color from GLOBAL to space {space_type_id} for '{category}'")
 
     _glyph_cache_loaded = True
     print(f"[GLYPH] Loaded {len(_glyph_cache)} mappings, {len(_all_tags_cache)} tags from {filepath}")
@@ -2789,7 +2805,19 @@ def set_category_data(category,
         _glyph_cache[key]["first_letter"] = src[:1] if src else ""
     if color is not None:
         # Ensure color is stored as floats, converting strings if needed
-        if len(color) >= 3:
+        # Handle hex string format (e.g., "029c05" from C++)
+        if isinstance(color, str) and len(color) >= 6:
+            # Parse as hex color (RRGGBB)
+            try:
+                r = int(color[0:2], 16) / 255.0
+                g = int(color[2:4], 16) / 255.0
+                b = int(color[4:6], 16) / 255.0
+                _glyph_cache[key]["color"] = [r, g, b]
+                print(f"[SET_CATEGORY_DATA] Parsed hex color '{color}' to RGB [{r:.4f}, {g:.4f}, {b:.4f}]")
+            except ValueError:
+                _glyph_cache[key]["color"] = [0.0, 0.0, 0.0]
+                print(f"[SET_CATEGORY_DATA] Failed to parse hex color '{color}', using black")
+        elif len(color) >= 3:
             color_list = []
             for c in color[:3]:
                 if isinstance(c, str):
@@ -2838,7 +2866,7 @@ def set_category_data(category,
 
     # STEP 1: Sync from space-specific to GLOBAL (propagate user changes)
     # Priority: 'manual' > 'off' > 'auto'
-    if space_type != -1 and (glyph_mode is not None or icon_source is not None):
+    if space_type != -1 and (glyph_mode is not None or icon_source is not None or color is not None):
         global_key = _make_cache_key(-1, category)
         if global_key not in _glyph_cache:
             _glyph_cache[global_key] = {
@@ -2876,9 +2904,13 @@ def set_category_data(category,
                 global_entry["icon_path"] = str(icon_path)
             if icon_provider is not None:
                 global_entry["icon_provider"] = str(icon_provider)
+            # Sync color from SPACE to GLOBAL
+            if color is not None:
+                global_entry["color"] = _glyph_cache[key]["color"]
+                print(f"[SET_CATEGORY_DATA] Propagated color to GLOBAL for '{category}'")
 
     # STEP 2: Sync from GLOBAL to all space-specific entries (consistency)
-    if space_type == -1 and (glyph_mode is not None or icon_source is not None):
+    if space_type == -1 and (glyph_mode is not None or icon_source is not None or color is not None):
         for cache_key in list(_glyph_cache.keys()):
             if isinstance(cache_key, tuple) and len(cache_key) >= 2:
                 cache_space_type, cache_category = cache_key
@@ -2896,6 +2928,10 @@ def set_category_data(category,
                         space_entry["icon_path"] = str(icon_path)
                     if icon_provider is not None:
                         space_entry["icon_provider"] = str(icon_provider)
+                    # Sync color from GLOBAL to SPACE
+                    if color is not None:
+                        space_entry["color"] = _glyph_cache[key]["color"]
+                        print(f"[SET_CATEGORY_DATA] Synced color to space_type={cache_space_type} for '{category}'")
 
     # Sync glyph to space-specific entries when saving to GLOBAL
     # This ensures that categories with tags in space-specific entries get the glyph from GLOBAL
@@ -2954,6 +2990,10 @@ def set_category_data(category,
                 override_item.glyph = entry.get("glyph", "")
             if hasattr(override_item, 'display_name'):
                 override_item.display_name = entry.get("display_name", "")
+            # Sync color to WM override
+            if hasattr(override_item, 'color'):
+                color_val = entry.get("color", [0.0, 0.0, 0.0])
+                override_item.color = color_val
             print(f"[SET_CATEGORY_DATA] Synced to WM override for '{category}' (space_type={space_type})")
 
             # Also update mappings (for C++ panel_category_icon_data_lookup)
@@ -2985,6 +3025,10 @@ def set_category_data(category,
                     mapping_item.glyph = entry.get("glyph", "")
                 if hasattr(mapping_item, 'display_name'):
                     mapping_item.display_name = entry.get("display_name", "")
+                # Sync color to WM mapping
+                if hasattr(mapping_item, 'color'):
+                    color_val = entry.get("color", [0.0, 0.0, 0.0])
+                    mapping_item.color = color_val
                 print(f"[SET_CATEGORY_DATA] Synced to WM mapping for '{category}' (space_type={space_type})")
     except Exception as e:
         print(f"[SET_CATEGORY_DATA] Failed to sync to WM: {e}")

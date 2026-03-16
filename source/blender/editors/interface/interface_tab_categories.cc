@@ -3385,6 +3385,11 @@ static void ui_panel_category_draw_content(
   const char *glyph = panel_category_glyph_lookup(
       wm, category_id, nullptr, &is_fallback_letter, glyph_color);
 
+  /* Use live preview color when dialog is open for this category */
+  if (is_being_edited_in_dialog && !is_zero_v3(category_tab_preview_color)) {
+    copy_v3_v3(glyph_color, category_tab_preview_color);
+  }
+
   /* Safety net for built-in icons:
    * icon tint must use category custom color even when glyph lookup resolves through
    * fallback branches that may leave color unset in transient live-preview states. */

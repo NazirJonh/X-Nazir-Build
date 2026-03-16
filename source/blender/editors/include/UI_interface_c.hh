@@ -2567,6 +2567,11 @@ void exit();
  * if non-variable. Therefore fixed weight bold font will look bold. */
 void update_text_styles();
 
+/* Category tab edit dialog preview variables - used for live preview */
+extern char category_tab_preview_glyph[8];
+extern char category_tab_preview_first_letter[8];
+extern float category_tab_preview_color[3];
+
 #define UI_UNIT_X ((void)0, U.widget_unit)
 #define UI_UNIT_Y ((void)0, U.widget_unit)
 

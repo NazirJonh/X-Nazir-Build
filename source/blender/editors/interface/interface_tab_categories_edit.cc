@@ -84,9 +84,10 @@ using internal::uiTemplateGlyphSelectorWithCallback;
  * \{ */
 
 /* Static buffers for preview callback - updated by live update callback */
-static char category_tab_preview_glyph[8] = "";
-static char category_tab_preview_first_letter[8] = "";
-static float category_tab_preview_color[3] = {0.0f, 0.0f, 0.0f};
+/* Declared extern in UI_interface_c.hh for access from interface_tab_categories.cc */
+char category_tab_preview_glyph[8] = "";
+char category_tab_preview_first_letter[8] = "";
+float category_tab_preview_color[3] = {0.0f, 0.0f, 0.0f};
 
 /* Static pointer to preview button - updated when popup opens, used for live updates */
 static Button *category_tab_preview_button = nullptr;

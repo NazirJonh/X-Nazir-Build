@@ -5960,6 +5960,21 @@ class USERPREF_PT_interface_accessibility(InterfacePanel, CenterAlignMixIn, Pane
         flow.prop(view, "use_reduce_motion")
 
 
+class USERPREF_PT_interface_display_tab_sizes(InterfacePanel, CenterAlignMixIn, Panel):
+    bl_label = "Tab Sizes"
+    bl_parent_id = "USERPREF_PT_interface_display"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_centered(self, context, layout):
+        prefs = context.preferences
+        view = prefs.view
+
+        col = layout.column()
+        col.prop(view, "category_tabs_zoom_icon", text="Icon Size")
+        col.prop(view, "category_tabs_zoom_mixed", text="Mixed Size")
+        col.prop(view, "category_tabs_zoom_text", text="Text Size")
+
+
 class USERPREF_PT_interface_editors(InterfacePanel, CenterAlignMixIn, Panel):
     bl_label = "Editors"
 
@@ -9409,6 +9424,7 @@ classes = (
     USERPREF_PT_interface_statusbar,
     USERPREF_PT_interface_translation,
     USERPREF_PT_interface_accessibility,
+    USERPREF_PT_interface_display_tab_sizes,
     USERPREF_PT_interface_text,
     USERPREF_PT_interface_menus,
     USERPREF_PT_interface_menus_mouse_over,

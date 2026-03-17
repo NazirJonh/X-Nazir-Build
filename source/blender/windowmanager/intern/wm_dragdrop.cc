@@ -9,7 +9,10 @@
  */
 
 #include <cstring>
+#include <cstdio>
+#include <cstdarg>
 #include <functional>
+#include <unordered_set>
 
 #include "AS_asset_representation.hh"
 
@@ -67,6 +70,32 @@
 #include "wm_window.hh"
 
 #include <fmt/format.h>
+
+/* Rate-limited debug printing for drag-drop operations.
+ * Prevents log flooding by printing each unique message only once. */
+static std::unordered_set<std::string> _drop_logged_messages;
+
+static void drop_log_once(const char *format, ...)
+{
+  char buffer[512];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(buffer, sizeof(buffer), format, args);
+  va_end(args);
+
+  std::string msg(buffer);
+  size_t hash_val = std::hash<std::string>{}(msg);
+  std::string hash_key = std::to_string(hash_val);
+
+  if (_drop_logged_messages.find(hash_key) == _drop_logged_messages.end()) {
+    if (_drop_logged_messages.size() > 200) {
+      _drop_logged_messages.clear();
+    }
+    _drop_logged_messages.insert(hash_key);
+    printf("%s", buffer);
+    fflush(stdout);
+  }
+}
 
 namespace blender {
 
@@ -347,13 +376,10 @@ void WM_event_start_prepared_drag(bContext *C, wmDrag *drag)
 {
   wmWindowManager *wm = CTX_wm_manager(C);
 
-  printf("[DROP_START] add drag: wm=%p drag=%p type=%d flags=0x%x icon=%d\n",
-         reinterpret_cast<void *>(wm),
-         reinterpret_cast<void *>(drag),
+  drop_log_once("[DROP_START] add drag: type=%d flags=0x%x icon=%d\n",
          drag ? drag->type : -1,
          drag ? drag->flags : 0,
          drag ? drag->icon : 0);
-  fflush(stdout);
   BLI_addtail(&wm->runtime->drags, drag);
   wm_dropbox_invoke(C, drag);
 }
@@ -526,11 +552,7 @@ static wmDropBox *dropbox_active(bContext *C,
             continue;
           }
 
-          printf("[DROP_ACTIVE] poll ok: drop='%s' xy=(%d,%d)\n",
-                 drop.opname,
-                 event->xy[0],
-                 event->xy[1]);
-          fflush(stdout);
+          drop_log_once("[DROP_ACTIVE] poll ok: drop='%s'\n", drop.opname);
 
           const wm::OpCallContext opcontext = wm_drop_operator_context_get(&drop);
           if (drop.ot && WM_operator_poll_context(C, drop.ot, opcontext)) {
@@ -540,8 +562,7 @@ static wmDropBox *dropbox_active(bContext *C,
             return &drop;
           }
 
-          printf("[DROP_ACTIVE] operator poll failed: drop='%s'\n", drop.opname);
-          fflush(stdout);
+          drop_log_once("[DROP_ACTIVE] operator poll failed: drop='%s'\n", drop.opname);
 
           /* Attempt to set the disabled hint when the poll fails. Will always be the last hint set
            * when there are multiple failing polls (could allow multiple disabled-hints too). */
@@ -580,20 +601,17 @@ static wmDropBox *wm_dropbox_active(bContext *C, wmDrag *drag, const wmEvent *ev
   if (area) {
     ARegion *region = BKE_area_find_region_xy(area, RGN_TYPE_ANY, event->xy);
     if (region) {
-      printf("[DROP_ACTIVE] check region handlers (region=%d)\n", region->regiontype);
-      fflush(stdout);
+      drop_log_once("[DROP_ACTIVE] check region handlers (region=%d)\n", region->regiontype);
       drop = dropbox_active(C, &region->runtime->handlers, drag, event);
     }
 
     if (!drop) {
-      printf("[DROP_ACTIVE] check area handlers (space=%d)\n", area->spacetype);
-      fflush(stdout);
+      drop_log_once("[DROP_ACTIVE] check area handlers (space=%d)\n", area->spacetype);
       drop = dropbox_active(C, &area->handlers, drag, event);
     }
   }
   if (!drop) {
-    printf("[DROP_ACTIVE] check window handlers\n");
-    fflush(stdout);
+    drop_log_once("[DROP_ACTIVE] check window handlers\n");
     drop = dropbox_active(C, &win->runtime->handlers, drag, event);
   }
   return drop;
@@ -622,10 +640,9 @@ static void wm_drop_update_active(bContext *C, wmDrag *drag, const wmEvent *even
   wmDropBox *drop_prev = drag->drop_state.active_dropbox;
   wmDropBox *drop = wm_dropbox_active(C, drag, event);
   if (drop != drop_prev) {
-    printf("[DROP_ACTIVE] active_dropbox changed: prev='%s' new='%s'\n",
+    drop_log_once("[DROP_ACTIVE] active_dropbox changed: prev='%s' new='%s'\n",
            drop_prev ? drop_prev->opname : "null",
            drop ? drop->opname : "null");
-    fflush(stdout);
     if (drop_prev && drop_prev->on_exit) {
       drop_prev->on_exit(drop_prev, drag);
       BLI_assert(drop_prev->draw_data == nullptr);

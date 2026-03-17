@@ -3253,6 +3253,7 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "glyph", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "glyph");
+  RNA_def_property_string_maxlength(prop, sizeof(CategoryGlyphItem::glyph) - 1);
   RNA_def_property_ui_text(prop, "Glyph", "UTF-8 glyph character from Material Symbols");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 
@@ -3271,6 +3272,7 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "default_glyph", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "default_glyph");
+  RNA_def_property_string_maxlength(prop, sizeof(CategoryGlyphItem::default_glyph) - 1);
   RNA_def_property_ui_text(prop, "Default Glyph", "Default glyph for reset functionality");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 
@@ -3318,6 +3320,37 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
   RNA_def_property_string_sdna(prop, nullptr, "icon_provider");
   RNA_def_property_ui_text(prop, "Icon Provider", "Stable icon provider id");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+
+  /* Extension pending-tag fields - exposed for Python sync */
+  prop = RNA_def_property(srna, "source_extension", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "source_extension");
+  RNA_def_property_ui_text(
+      prop, "Source Extension", "Extension ID that introduced this category");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+
+  prop = RNA_def_property(srna, "pending_tag_assignment", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "pending_tag_assignment", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Pending Tag Assignment",
+      "Category has not yet been assigned to a tag by the user");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+
+  prop = RNA_def_property(srna, "discovered_in_spaces", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "discovered_in_spaces");
+  RNA_def_property_ui_text(
+      prop,
+      "Discovered In Spaces",
+      "Bitfield of space types (eSpace_Type) where this category was discovered");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+
+  prop = RNA_def_property(srna, "discovered_in_modes", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "discovered_in_modes");
+  RNA_def_property_ui_text(
+      prop,
+      "Discovered In Modes",
+      "Bitfield of mode flags where this category was discovered");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 }
 
 static void rna_def_category_tag_def(BlenderRNA *brna)
@@ -3336,6 +3369,7 @@ static void rna_def_category_tag_def(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "glyph", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "glyph");
+  RNA_def_property_string_maxlength(prop, sizeof(CategoryTagDef::glyph) - 1);
   RNA_def_property_ui_text(prop, "Glyph", "UTF-8 glyph character or hex code-point");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");

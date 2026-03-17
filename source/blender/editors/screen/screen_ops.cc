@@ -10,8 +10,10 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <cstdarg>
 #include <string>
 #include <fmt/format.h>
+#include <unordered_set>
 
 #include "MEM_guardedalloc.h"
 
@@ -114,6 +116,46 @@
 #include "interface_intern.hh"
 #include "interface_tag_bar.hh"
 #include "../interface/interface_intern.hh" /* for UI_SELECT_DRAW and Button */
+
+/* Rate-limited debug printing for drag-drop operations.
+ * Prevents log flooding by printing each unique message only once. */
+static std::unordered_set<std::string> _drop_logged_messages;
+
+static void drop_log_once(const char *format, ...)
+{
+  char buffer[512];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(buffer, sizeof(buffer), format, args);
+  va_end(args);
+
+  std::string msg(buffer);
+  size_t hash_val = std::hash<std::string>{}(msg);
+  std::string hash_key = std::to_string(hash_val);
+
+  if (_drop_logged_messages.find(hash_key) == _drop_logged_messages.end()) {
+    if (_drop_logged_messages.size() > 200) {
+      _drop_logged_messages.clear();
+    }
+    _drop_logged_messages.insert(hash_key);
+    printf("%s", buffer);
+    fflush(stdout);
+  }
+}
+
+/* Rate-limited debug for high-frequency messages (position-based).
+ * Only prints if position changed significantly (by >5 pixels). */
+static int _last_drop_x = -9999, _last_drop_y = -9999;
+
+static bool drop_position_changed(int x, int y)
+{
+  if (abs(x - _last_drop_x) > 5 || abs(y - _last_drop_y) > 5) {
+    _last_drop_x = x;
+    _last_drop_y = y;
+    return true;
+  }
+  return false;
+}
 
 namespace blender {
 
@@ -7403,6 +7445,11 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
+  /* Check if current region supports category tabs */
+  ARegion *region = CTX_wm_region(C);
+  const bool region_supports_category_tabs = region && region->runtime &&
+      BKE_regiontype_uses_category_tabs(region->runtime->type);
+
   const bool url_is_file = STRPREFIX(url.c_str(), "file://");
   const bool url_is_online = STRPREFIX(url.c_str(), "http://") ||
                              STRPREFIX(url.c_str(), "https://");
@@ -7417,6 +7464,55 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
   if (url_is_online && (G.f & G_FLAG_INTERNET_ALLOW) == 0) {
     idname_external = "extensions.userpref_allow_online_popup";
     use_url = false;
+  }
+
+  /* If region doesn't support category tabs, set pending extension context via Python
+   * so that newly discovered categories will be marked with pending_tag_assignment=true */
+  if (!region_supports_category_tabs) {
+#ifdef WITH_PYTHON
+    /* Extract extension ID from URL for the pending context */
+    std::string extension_id;
+    if (url_is_online) {
+      /* URL format: https://extensions.blender.org/.../add-on-hot-node-v1.2.1.zip?... */
+      size_t last_slash = url.find_last_of('/');
+      size_t dot_zip = url.find(".zip", last_slash);
+      if (last_slash != std::string::npos && dot_zip != std::string::npos) {
+        extension_id = url.substr(last_slash + 1, dot_zip - last_slash - 1);
+      }
+    }
+    else if (url_is_file) {
+      /* File format: file:///path/to/add-on-hot-node-v1.2.1.zip */
+      std::string path = url.substr(7);  /* Skip "file://" */
+      size_t last_slash = path.find_last_of('/');
+      size_t dot_zip = path.find(".zip", last_slash);
+      if (last_slash != std::string::npos && dot_zip != std::string::npos) {
+        extension_id = path.substr(last_slash + 1, dot_zip - last_slash - 1);
+      }
+    }
+
+    ScrArea *area = CTX_wm_area(C);
+    int space_type = area ? area->spacetype : -1;
+    uint32_t mode_flag = ui::get_current_tag_mode_flag(C);
+
+    printf("[EXT_DROP_INVOKE] Region doesn't support category tabs, setting pending context\n");
+    printf("[EXT_DROP_INVOKE] extension_id='%s', space_type=%d, mode_flag=%#010x\n",
+           extension_id.c_str(), space_type, mode_flag);
+    fflush(stdout);
+
+    /* Call Python extension_post_install_handler to set _pending_extension_context */
+    char python_expr[1024];
+    SNPRINTF(python_expr,
+             "__import__('bl_ui.space_userpref', fromlist=[''])."
+             "extension_post_install_handler('%s', %d, %u)",
+             extension_id.c_str(),
+             space_type,
+             mode_flag);
+
+    const char *imports_none[] = {nullptr};
+    BPY_run_string_exec(C, imports_none, python_expr);
+#else
+    UNUSED_VARS(url_is_file, url_is_online);
+#endif
   }
 
   wmOperatorType *ot = WM_operatortype_find(idname_external, true);
@@ -7449,9 +7545,10 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
   const bool insert_above = RNA_boolean_get(op->ptr, "insert_above");
   const std::string tag_name = RNA_string_get(op->ptr, "tag_name");
 
-  if (!category.empty()) {
+  /* Only apply drop insert if region supports category tabs AND category is specified */
+  if (!category.empty() && region_supports_category_tabs) {
     ui::category_tabs_apply_drop_insert(C,
-                                        CTX_wm_region(C),
+                                        region,
                                         category.c_str(),
                                         target_category.empty() ? category.c_str() :
                                                                     target_category.c_str(),
@@ -7478,6 +7575,19 @@ static void SCREEN_OT_category_tab_extension_drop(wmOperatorType *ot)
   RNA_def_boolean(
       ot->srna, "insert_above", true, "Insert Above", "Insert above the target tab");
   RNA_def_string(ot->srna, "tag_name", nullptr, 0, "Tag Name", "Active tag to assign to new category");
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Extension Drop Operator (Early Registration)
+ * \{ */
+
+void ED_operatortypes_screen_extension_drop()
+{
+  /* Register this operator early (before PREFERENCES_OT_extension_url_drop)
+   * so the dropbox can be added with higher priority. */
+  WM_operatortype_append(SCREEN_OT_category_tab_extension_drop);
 }
 
 /** \} */
@@ -7518,7 +7628,8 @@ void ED_operatortypes_screen()
   WM_operatortype_append(SCREEN_OT_space_type_set_or_cycle);
   WM_operatortype_append(SCREEN_OT_space_context_cycle);
   WM_operatortype_append(SCREEN_OT_workspace_cycle);
-  WM_operatortype_append(SCREEN_OT_category_tab_extension_drop);
+  /* SCREEN_OT_category_tab_extension_drop is registered early in
+   * ED_operatortypes_screen_extension_drop() to allow dropbox priority. */
 
   /* Frame changes. */
   WM_operatortype_append(SCREEN_OT_frame_offset);
@@ -7587,25 +7698,21 @@ static void blend_file_drop_copy(bContext * /*C*/, wmDrag *drag, wmDropBox *drop
  */
 static bool category_tab_extension_drag_is_extension(wmDrag *drag)
 {
-  printf("[EXT_CHECK] drag->type=%d (PATH=%d, STRING=%d)\n",
+  drop_log_once("[EXT_CHECK] drag->type=%d (PATH=%d, STRING=%d)\n",
          drag->type, WM_DRAG_PATH, WM_DRAG_STRING);
-  fflush(stdout);
 
   if (drag->type == WM_DRAG_PATH) {
     const char *path = WM_drag_get_single_path(drag);
-    printf("[EXT_CHECK] PATH: '%s'\n", path ? path : "null");
-    fflush(stdout);
+    drop_log_once("[EXT_CHECK] PATH: '%s'\n", path ? path : "null");
     if (path && BLI_path_extension_check_n(path, ".zip", ".blend_extension", nullptr)) {
-      printf("[EXT_CHECK] PATH: extension match!\n");
-      fflush(stdout);
+      drop_log_once("[EXT_CHECK] PATH: extension match!\n");
       return true;
     }
   }
   else if (drag->type == WM_DRAG_STRING) {
     const std::string &str = WM_drag_get_string(drag);
     const char *cstr = str.c_str();
-    printf("[EXT_CHECK] STRING: '%s'\n", cstr);
-    fflush(stdout);
+    drop_log_once("[EXT_CHECK] STRING: '%s'\n", cstr);
 
     /* Only URL formatted text. */
     if (BKE_preferences_remote_scheme_end(cstr) == 0) {
@@ -7641,88 +7748,71 @@ static bool category_tab_extension_drag_is_extension(wmDrag *drag)
 
 static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
 {
-  printf("[EXT_DROP_POLL] START drag->type=%d\n", drag->type);
-  fflush(stdout);
+  drop_log_once("[EXT_DROP_POLL] START drag->type=%d\n", drag->type);
 
   if (event) {
-    printf("[EXT_DROP_POLL] event->xy=(%d,%d) event->mval=(%d,%d)\n",
-           event->xy[0],
-           event->xy[1],
-           event->mval[0],
-           event->mval[1]);
-    fflush(stdout);
+    /* Only log position if it changed significantly */
+    if (drop_position_changed(event->xy[0], event->xy[1])) {
+      drop_log_once("[EXT_DROP_POLL] event->xy=(%d,%d)\n", event->xy[0], event->xy[1]);
+    }
   }
 
   /* Check if drag data is an extension (URL or path). */
   if (!category_tab_extension_drag_is_extension(drag)) {
-    printf("[EXT_DROP_POLL] REJECT: not an extension\n");
-    fflush(stdout);
+    drop_log_once("[EXT_DROP_POLL] REJECT: not an extension\n");
     return false;
   }
 
-  printf("[EXT_DROP_POLL] IS EXTENSION! checking position...\n");
-  fflush(stdout);
+  drop_log_once("[EXT_DROP_POLL] IS EXTENSION! checking position...\n");
 
   bScreen *screen = CTX_wm_screen(C);
   if (!screen) {
-    printf("[EXT_DROP_POLL] REJECT: no screen\n");
-    fflush(stdout);
+    drop_log_once("[EXT_DROP_POLL] REJECT: no screen\n");
     return false;
   }
 
   ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, event->xy);
   if (!area) {
-    printf("[EXT_DROP_POLL] REJECT: no area at (%d,%d)\n", event->xy[0], event->xy[1]);
-    fflush(stdout);
+    drop_log_once("[EXT_DROP_POLL] REJECT: no area at (%d,%d)\n", event->xy[0], event->xy[1]);
     return false;
   }
 
   ARegion *region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, event->xy);
   if (!region) {
-    printf("[EXT_DROP_POLL] REJECT: no region at (%d,%d)\n", event->xy[0], event->xy[1]);
-    fflush(stdout);
+    drop_log_once("[EXT_DROP_POLL] REJECT: no region at (%d,%d)\n", event->xy[0], event->xy[1]);
     return false;
   }
 
-  printf("[EXT_DROP_POLL] region=%d winrct=[%d,%d]-[%d,%d] category_scroll=%d\n",
+  drop_log_once("[EXT_DROP_POLL] region=%d winrct=[%d,%d]-[%d,%d]\n",
          region->regiontype,
          region->winrct.xmin,
          region->winrct.ymin,
          region->winrct.xmax,
-         region->winrct.ymax,
-         region->category_scroll);
-  printf("[EXT_DROP_POLL] v2d.cur=[%.3f,%.3f]-[%.3f,%.3f] v2d.tot=[%.3f,%.3f]-[%.3f,%.3f]\n",
-         region->v2d.cur.xmin,
-         region->v2d.cur.ymin,
-         region->v2d.cur.xmax,
-         region->v2d.cur.ymax,
-         region->v2d.tot.xmin,
-         region->v2d.tot.ymin,
-         region->v2d.tot.xmax,
-         region->v2d.tot.ymax);
-  fflush(stdout);
+         region->winrct.ymax);
 
-  /* Allow extension drops if the region type supports category tabs, even if none are currently visible.
-   * This enables dropping the first extension to create initial categories. */
-  if (!BKE_regiontype_uses_category_tabs(region->runtime->type)) {
-    printf("[EXT_DROP_POLL] REJECT: region type doesn't support category tabs (region=%d)\n", region->regiontype);
-    fflush(stdout);
-    return false;
+  /* Allow extension drops in any region - even if it doesn't support category tabs.
+   * This is needed because an extension may create categories in OTHER editors
+   * (e.g., dropping in 3D Viewport but extension adds category in Shader Editor).
+   * The invoke function will handle the different cases appropriately. */
+  const bool region_supports_category_tabs = BKE_regiontype_uses_category_tabs(region->runtime->type);
+  if (!region_supports_category_tabs) {
+    drop_log_once("[EXT_DROP_POLL] Region doesn't support category tabs (region=%d), accepting\n", region->regiontype);
+    /* Accept the drop - invoke will set pending extension context via Python */
+    return true;
   }
 
   /* For regions that support category tabs but don't have any visible yet,
    * we need to check if the drop is in a reasonable location for creating tabs. */
   const bool has_visible_tabs = ui::panel_category_tabs_is_visible(region);
   if (!has_visible_tabs) {
-    printf("[EXT_DROP_POLL] No visible tabs yet, checking if drop location is suitable for creating tabs\n");
-    fflush(stdout);
-    
+    drop_log_once("[EXT_DROP_POLL] No visible tabs, checking tab creation area\n");
+
     /* For regions without visible tabs, allow drops in the left/right edge area where tabs would appear */
     const int alignment = RGN_ALIGN_ENUM_FROM_MASK(region->alignment);
     const int mx_local = event->xy[0] - region->winrct.xmin;
     const int region_width = region->winrct.xmax - region->winrct.xmin;
     const int tab_area_width = 50; /* Approximate width where tabs would appear */
-    
+
     bool in_tab_area = false;
     if (alignment == RGN_ALIGN_LEFT && mx_local <= tab_area_width) {
       in_tab_area = true;
@@ -7730,26 +7820,21 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
     else if (alignment == RGN_ALIGN_RIGHT && mx_local >= (region_width - tab_area_width)) {
       in_tab_area = true;
     }
-    
+
     if (!in_tab_area) {
-      printf("[EXT_DROP_POLL] REJECT: not in tab creation area (mx_local=%d, region_width=%d, alignment=%d)\n",
-             mx_local, region_width, alignment);
-      fflush(stdout);
+      drop_log_once("[EXT_DROP_POLL] REJECT: not in tab creation area (mx_local=%d)\n", mx_local);
       return false;
     }
-    
-    printf("[EXT_DROP_POLL] ACCEPT: in tab creation area, allowing extension drop\n");
-    fflush(stdout);
+
+    drop_log_once("[EXT_DROP_POLL] ACCEPT: in tab creation area\n");
     return true;
   }
 
   /* For regions with visible tabs, use the standard gutter intersection check */
   if (has_visible_tabs) {
     if (!ED_region_panel_category_gutter_isect_xy(area, region, event->xy)) {
-      printf("[EXT_DROP_POLL] REJECT: not in category gutter at (%d,%d)\n",
-             event->xy[0],
-             event->xy[1]);
-      fflush(stdout);
+      drop_log_once("[EXT_DROP_POLL] REJECT: not in category gutter at (%d,%d)\n",
+             event->xy[0], event->xy[1]);
       return false;
     }
   }
@@ -7757,14 +7842,7 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
 
   const int mx_local = event->xy[0] - region->winrct.xmin;
   const int my_local = event->xy[1] - region->winrct.ymin;
-  printf("[EXT_DROP_POLL] local=(%d,%d) region_winrct=[%d,%d]-[%d,%d]\n",
-         mx_local,
-         my_local,
-         region->winrct.xmin,
-         region->winrct.ymin,
-         region->winrct.xmax,
-         region->winrct.ymax);
-  fflush(stdout);
+  drop_log_once("[EXT_DROP_POLL] local=(%d,%d) checking tabs\n", mx_local, my_local);
 
   /* For regions with visible tabs, check if drop hits an existing tab */
   if (has_visible_tabs) {
@@ -7785,25 +7863,17 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
       expanded_rect.ymin -= hit_margin;
       expanded_rect.ymax += hit_margin;
       if (BLI_rcti_isect_pt(&expanded_rect, mx_local, my_local)) {
-        printf("[EXT_DROP_POLL] HIT tab idname='%s' rect=[%d,%d]-[%d,%d]\n",
-               pc_dyn.idname,
-               pc_dyn.rect.xmin,
-               pc_dyn.rect.ymin,
-               pc_dyn.rect.xmax,
-               pc_dyn.rect.ymax);
-        fflush(stdout);
+        drop_log_once("[EXT_DROP_POLL] HIT tab idname='%s'\n", pc_dyn.idname);
         return true;
       }
     }
 
-    printf("[EXT_DROP_POLL] REJECT: no tab hit\n");
-    fflush(stdout);
+    drop_log_once("[EXT_DROP_POLL] REJECT: no tab hit\n");
     return false;
   }
   else {
     /* For regions without visible tabs, we already validated the drop location above */
-    printf("[EXT_DROP_POLL] ACCEPT: no existing tabs, allowing drop in tab creation area\n");
-    fflush(stdout);
+    drop_log_once("[EXT_DROP_POLL] ACCEPT: no existing tabs, allowing drop\n");
     return true;
   }
 }
@@ -7813,33 +7883,28 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
                                                      wmDrag * /*drag*/,
                                                      const int xy[2])
 {
-  printf("[EXT_DROP_DRAW] START at (%d,%d)\n", xy[0], xy[1]);
-  fflush(stdout);
+  drop_log_once("[EXT_DROP_DRAW] START at (%d,%d)\n", xy[0], xy[1]);
 
   bScreen *screen = CTX_wm_screen(C);
   if (!screen) {
-    printf("[EXT_DROP_DRAW] ABORT: no screen\n");
-    fflush(stdout);
+    drop_log_once("[EXT_DROP_DRAW] ABORT: no screen\n");
     return;
   }
 
   ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, xy);
   if (!area) {
-    printf("[EXT_DROP_DRAW] ABORT: no area at (%d,%d)\n", xy[0], xy[1]);
-    fflush(stdout);
+    drop_log_once("[EXT_DROP_DRAW] ABORT: no area at (%d,%d)\n", xy[0], xy[1]);
     return;
   }
 
   ARegion *region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, xy);
   if (!region) {
-    printf("[EXT_DROP_DRAW] ABORT: no region at (%d,%d)\n", xy[0], xy[1]);
-    fflush(stdout);
+    drop_log_once("[EXT_DROP_DRAW] ABORT: no region at (%d,%d)\n", xy[0], xy[1]);
     return;
   }
   /* Allow extension drops if the region type supports category tabs, even if none are currently visible */
   if (!BKE_regiontype_uses_category_tabs(region->runtime->type)) {
-    printf("[EXT_DROP_DRAW] ABORT: region type doesn't support category tabs (region=%d)\n", region->regiontype);
-    fflush(stdout);
+    drop_log_once("[EXT_DROP_DRAW] ABORT: region type doesn't support category tabs (region=%d)\n", region->regiontype);
     return;
   }
 
@@ -7848,12 +7913,11 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
   const int my_local = xy[1] - region->winrct.ymin;
 
   const PanelCategoryDyn *hovered_tab = nullptr;
-  
+
   if (has_visible_tabs) {
     /* Standard gutter intersection check for regions with visible tabs */
     if (!ED_region_panel_category_gutter_isect_xy(area, region, xy)) {
-      printf("[EXT_DROP_DRAW] ABORT: not in category gutter at (%d,%d)\n", xy[0], xy[1]);
-      fflush(stdout);
+      drop_log_once("[EXT_DROP_DRAW] ABORT: not in category gutter at (%d,%d)\n", xy[0], xy[1]);
       return;
     }
 
@@ -7866,8 +7930,7 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
     }
 
     if (!hovered_tab) {
-      printf("[EXT_DROP_DRAW] ABORT: no tab hit local=(%d,%d)\n", mx_local, my_local);
-      fflush(stdout);
+      drop_log_once("[EXT_DROP_DRAW] ABORT: no tab hit local=(%d,%d)\n", mx_local, my_local);
       return;
     }
   }
@@ -7876,7 +7939,7 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
     const int alignment = RGN_ALIGN_ENUM_FROM_MASK(region->alignment);
     const int region_width = region->winrct.xmax - region->winrct.xmin;
     const int tab_area_width = 50;
-    
+
     bool in_tab_area = false;
     if (alignment == RGN_ALIGN_LEFT && mx_local <= tab_area_width) {
       in_tab_area = true;
@@ -7884,31 +7947,22 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
     else if (alignment == RGN_ALIGN_RIGHT && mx_local >= (region_width - tab_area_width)) {
       in_tab_area = true;
     }
-    
+
     if (!in_tab_area) {
-      printf("[EXT_DROP_DRAW] ABORT: not in tab creation area (mx_local=%d, region_width=%d, alignment=%d)\n",
-             mx_local, region_width, alignment);
-      fflush(stdout);
+      drop_log_once("[EXT_DROP_DRAW] ABORT: not in tab creation area (mx_local=%d)\n", mx_local);
       return;
     }
-    
-    printf("[EXT_DROP_DRAW] In tab creation area, showing drop indicator\n");
-    fflush(stdout);
+
+    drop_log_once("[EXT_DROP_DRAW] In tab creation area, showing drop indicator\n");
     /* hovered_tab remains nullptr for regions without visible tabs */
   }
 
   if (hovered_tab) {
-    printf("[EXT_DROP_DRAW] HIT tab idname='%s' rect=[%d,%d]-[%d,%d]\n",
-           hovered_tab->idname,
-           hovered_tab->rect.xmin,
-           hovered_tab->rect.ymin,
-           hovered_tab->rect.xmax,
-           hovered_tab->rect.ymax);
+    drop_log_once("[EXT_DROP_DRAW] HIT tab idname='%s'\n", hovered_tab->idname);
   }
   else {
-    printf("[EXT_DROP_DRAW] No existing tab, showing drop indicator for new tab creation\n");
+    drop_log_once("[EXT_DROP_DRAW] No existing tab, showing drop indicator for new tab creation\n");
   }
-  fflush(stdout);
 
   const View2D *v2d = &region->v2d;
   const float aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
@@ -8010,8 +8064,20 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
 
 static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
 {
+  /* Always copy URL first - needed even when region doesn't support category tabs */
+  if (drag->type == WM_DRAG_PATH) {
+    const char *path = WM_drag_get_single_path(drag);
+    RNA_string_set(drop->ptr, "url", path ? path : "");
+  }
+  else if (drag->type == WM_DRAG_STRING) {
+    const std::string &str = WM_drag_get_string(drag);
+    RNA_string_set(drop->ptr, "url", str.c_str());
+  }
+
   ARegion *region = drag->drop_state.region_from;
   if (!region || !ui::panel_category_tabs_is_visible(region)) {
+    /* Region doesn't support category tabs - just set URL and return.
+     * Invoke will handle setting pending extension context. */
     return;
   }
 
@@ -8063,15 +8129,6 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
   }
   else {
     RNA_string_set(drop->ptr, "tag_name", "");
-  }
-
-  if (drag->type == WM_DRAG_PATH) {
-    const char *path = WM_drag_get_single_path(drag);
-    RNA_string_set(drop->ptr, "url", path ? path : "");
-  }
-  else if (drag->type == WM_DRAG_STRING) {
-    const std::string &str = WM_drag_get_string(drag);
-    RNA_string_set(drop->ptr, "url", str.c_str());
   }
 }
 
@@ -8184,6 +8241,23 @@ void ED_keymap_screen(wmKeyConfig *keyconf)
   drop->draw_droptip = category_tab_extension_drop_draw_droptip;
 
   keymap_modal_set(keyconf);
+}
+
+void ED_dropbox_category_extension()
+{
+  /* Register category-tab extension dropbox in "Window" dropboxmap BEFORE
+   * PREFERENCES_OT_extension_url_drop so our poll is checked first.
+   * This is needed for drops in 3D Viewport and other areas where region
+   * doesn't support category tabs, allowing us to set pending extension context
+   * so "New Add-on!" virtual tag can appear in appropriate editors. */
+  ListBaseT<wmDropBox> *lb_win = WM_dropboxmap_find("Window", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  wmDropBox *drop_win = WM_dropbox_add(lb_win,
+                                        "SCREEN_OT_category_tab_extension_drop",
+                                        category_tab_extension_drop_poll,
+                                        category_tab_extension_drop_copy,
+                                        nullptr,
+                                        category_tab_extension_drop_tooltip);
+  drop_win->draw_droptip = category_tab_extension_drop_draw_droptip;
 }
 
 /** \} */

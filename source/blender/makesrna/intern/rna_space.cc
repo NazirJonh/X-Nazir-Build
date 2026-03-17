@@ -1123,6 +1123,39 @@ static int rna_Space_show_region_tag_bar_editable(const PointerRNA *ptr, const c
 static void rna_Space_show_region_tag_bar_update(bContext *C, PointerRNA *ptr)
 {
   rna_Space_bool_from_region_flag_update_by_type(C, ptr, RGN_TYPE_TAG_BAR, RGN_FLAG_HIDDEN);
+
+  /* Track manual hide for SpaceNode to prevent auto-show from re-opening tag bar. */
+  ScrArea *area = rna_area_from_space(ptr);
+  if (area != nullptr && area->spacetype == SPACE_NODE) {
+    SpaceNode *snode = static_cast<SpaceNode *>(ptr->data);
+    ARegion *tag_bar_region = BKE_area_find_region_type(area, RGN_TYPE_TAG_BAR);
+
+    if (tag_bar_region != nullptr) {
+      bool is_hidden = (tag_bar_region->flag & RGN_FLAG_HIDDEN) != 0;
+
+      if (is_hidden) {
+        /* Tag bar was hidden. Set flag to prevent auto-show from re-opening it. */
+        snode->tag_bar_manually_hidden = true;
+        printf("[RNA_TAG_BAR] Tag bar hidden, setting manually_hidden=true\n");
+      }
+      else {
+        /* Tag bar was shown.
+         * Only reset manually_hidden if this is NOT an auto-show from Python.
+         * Auto-show sets has_new_addon_auto_shown=true BEFORE showing,
+         * so we can detect it here and preserve manually_hidden. */
+        if (!snode->has_new_addon_auto_shown) {
+          /* Manual show - reset manually_hidden so future auto-show can work. */
+          snode->tag_bar_manually_hidden = false;
+          printf("[RNA_TAG_BAR] Tag bar shown (manual), resetting manually_hidden\n");
+        }
+        else {
+          /* Auto-show - keep manually_hidden as is (should be false already). */
+          printf("[RNA_TAG_BAR] Tag bar shown (auto-show), keeping manually_hidden=%d\n",
+                 snode->tag_bar_manually_hidden);
+        }
+      }
+    }
+  }
 }
 
 /** \} */
@@ -8798,6 +8831,21 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Supports Previews",
                            "Whether the node editor's type supports displaying node previews");
+
+  /* Tag bar auto-show state for new add-ons */
+  prop = RNA_def_property(srna, "tag_bar_manually_hidden", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "tag_bar_manually_hidden", 1);
+  RNA_def_property_ui_text(prop,
+                           "Tag Bar Manually Hidden",
+                           "Whether user manually hid the tag bar (prevents auto-show for new add-ons)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_NODE, nullptr);
+
+  prop = RNA_def_property(srna, "has_new_addon_auto_shown", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "has_new_addon_auto_shown", 1);
+  RNA_def_property_ui_text(prop,
+                           "Has New Add-on Auto Shown",
+                           "Whether tag bar was auto-shown due to new add-ons detection");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_NODE, nullptr);
 
   rna_def_space_node_overlay(brna);
   RNA_api_space_node(srna);

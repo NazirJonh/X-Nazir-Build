@@ -1307,6 +1307,12 @@ static std::string preferences_extension_drop_tooltip(bContext * /*C*/,
 static void ED_dropbox_drop_extension()
 {
   ListBaseT<wmDropBox> *lb = WM_dropboxmap_find("Window", SPACE_EMPTY, RGN_TYPE_WINDOW);
+
+  /* Add category-tab extension dropbox FIRST so it takes precedence.
+   * This allows intercepting extension drops in regions without category tabs
+   * to set pending context for "New Add-on!" virtual tag. */
+  ED_dropbox_category_extension();
+
   WM_dropbox_add(lb,
                  "PREFERENCES_OT_extension_url_drop",
                  drop_extension_url_poll,

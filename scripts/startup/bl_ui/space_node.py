@@ -5,6 +5,18 @@
 import bpy
 import rna_prop_ui
 
+# Log deduplication for repetitive debug messages
+_node_logged_messages = set()
+
+def _node_log_once(message):
+    """Print a log message only once per session to avoid log flooding."""
+    msg_hash = hash(message)
+    if msg_hash not in _node_logged_messages:
+        if len(_node_logged_messages) > 500:
+            _node_logged_messages.clear()
+        _node_logged_messages.add(msg_hash)
+        print(message)
+
 from bpy.types import (
     Header,
     Menu,
@@ -64,11 +76,48 @@ def _node_visible_tags_for_current_mode(context):
     wm = context.window_manager
     snode = context.space_data
     mode_flag = _node_current_tag_mode_flag(snode)
-
-    return [
+    
+    # Get tags from WM (normal mode)
+    wm_tags = [
         tag for tag in wm.category_tags
         if tag.glyph and (tag.mode_flags == 0 or (tag.mode_flags & mode_flag))
     ]
+    
+    # In preview mode, also include tags from cache that aren't in WM yet
+    try:
+        from bl_ui.space_userpref import _all_tags_cache, _preview_mode_active, _CATEGORY_TAG_DEFAULT_MODE_FLAGS
+        
+        if _preview_mode_active and _all_tags_cache:
+            # Get existing WM tag names to avoid duplicates
+            existing_tag_names = {tag.name for tag in wm.category_tags}
+            
+            # Create temporary tag objects from cache for preview
+            for tag_name, tag_data in _all_tags_cache.items():
+                if tag_name not in existing_tag_names and isinstance(tag_data, dict):
+                    glyph = tag_data.get("glyph", "")
+                    tag_mode_flags = tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS)
+                    
+                    if glyph and (tag_mode_flags == 0 or (tag_mode_flags & mode_flag)):
+                        # Create a simple object with required attributes for display
+                        class PreviewTag:
+                            def __init__(self, name, glyph, color, mode_flags):
+                                self.name = name
+                                self.glyph = glyph
+                                self.color = color or [1.0, 1.0, 1.0]
+                                self.mode_flags = mode_flags
+                        
+                        preview_tag = PreviewTag(
+                            tag_name, 
+                            glyph, 
+                            tag_data.get("color", [1.0, 1.0, 1.0]),
+                            tag_mode_flags
+                        )
+                        wm_tags.append(preview_tag)
+                        
+    except ImportError:
+        pass  # Fallback to WM tags only if import fails
+    
+    return wm_tags
 
 
 class NODE_HT_header(Header):
@@ -290,6 +339,42 @@ class NODE_HT_header(Header):
         sub.active = overlay.show_overlays and row.active
         sub.popover(panel="NODE_PT_overlay", text="")
 
+        # Auto-show tag bar if there are unassigned categories
+        # This must be in the header (not tag bar) because tag bar draw isn't called when hidden
+        if not snode.show_region_tag_bar:
+            unassigned_count = _get_unassigned_categories_count_for_node_editor(context)
+            has_auto_shown = getattr(snode, 'has_new_addon_auto_shown', False)
+            manually_hidden = getattr(snode, 'tag_bar_manually_hidden', False)
+
+            # Debug: log auto-show state
+            _node_log_once(f"[TAG_BAR_AUTO] unassigned={unassigned_count}, show_bar={snode.show_region_tag_bar}, "
+                           f"has_auto_shown={has_auto_shown}, manually_hidden={manually_hidden}")
+
+            # Only auto-show if:
+            # 1. There are unassigned categories
+            # 2. User has NOT manually hidden the tag bar
+            # 3. We have NOT already done auto-show for this session
+            if unassigned_count > 0 and not manually_hidden and not has_auto_shown:
+                print(f"[TAG_BAR_AUTO] Auto-showing tag bar (unassigned={unassigned_count})")
+                # Set auto-shown flag BEFORE showing tag bar so C++ callback knows this is auto-show
+                try:
+                    snode.has_new_addon_auto_shown = True
+                except (AttributeError, TypeError):
+                    pass
+                snode.show_region_tag_bar = True
+        else:
+            # Tag bar is visible - reset auto-shown flag when no more unassigned
+            # Note: Do NOT reset tag_bar_manually_hidden here - only C++ callback does that
+            has_auto_shown = getattr(snode, 'has_new_addon_auto_shown', False)
+            if has_auto_shown:
+                unassigned_count = _get_unassigned_categories_count_for_node_editor(context)
+                if unassigned_count == 0:
+                    try:
+                        snode.has_new_addon_auto_shown = False
+                    except (AttributeError, TypeError):
+                        pass
+
+
 class NODE_PT_gizmo_display(Panel):
     bl_space_type = 'NODE_EDITOR'
     bl_region_type = 'HEADER'
@@ -326,6 +411,141 @@ class NODE_MT_editor_menus(Menu):
         layout.menu("NODE_MT_node")
 
 
+def _get_unassigned_categories_count_for_node_editor(context):
+    """Count unassigned categories for Node Editor context.
+
+    This function checks two sources for unassigned categories:
+    1. Categories in wm.category_glyph_mappings with pending_tag_assignment=True
+    2. "Orphaned" categories in category_orders that have no corresponding entry in mappings
+    """
+    wm = context.window_manager
+    if not wm:
+        print("[NODE_TAG_BAR] No window manager available")
+        return 0
+
+    # Trigger category discovery if there's a pending extension context.
+    # This ensures extension panels are discovered after installation.
+    try:
+        from bl_ui.space_userpref import (
+            _merge_discovered_categories,
+            _pending_extension_context,
+            _preview_mode_active,
+            sync_glyph_mappings_to_wm,
+        )
+        if _pending_extension_context is not None and not _preview_mode_active:
+            print("[NODE_TAG_BAR] Triggering _merge_discovered_categories due to pending extension context")
+            _merge_discovered_categories()
+            sync_glyph_mappings_to_wm()
+        elif _preview_mode_active:
+            print("[NODE_TAG_BAR] Skipping auto-sync due to preview mode active")
+    except Exception as e:
+        print(f"[NODE_TAG_BAR] Error during category discovery trigger: {e}")
+
+    # Node Editor space type is 16 (SPACE_NODE) - corrected from 18
+    space_type = 16
+    # Use the correct bit flag from SPACE_TO_FLAG mapping: SPACE_NODE = (1 << 11)
+    space_flag = 1 << 11  # This matches SPACE_TO_FLAG['SPACE_NODE']
+
+    count = 0
+    total_categories = 0
+    pending_categories = []
+
+    # Build a set of all categories that exist in mappings with proper data
+    # (not just category name, but with source_extension or pending_tag_assignment)
+    existing_categories_with_data = set()
+    existing_categories_names = set()
+    for item in wm.category_glyph_mappings:
+        total_categories += 1
+        existing_categories_names.add(item.category)
+        # Check if category has meaningful data (pending assignment or source extension)
+        source_extension = getattr(item, 'source_extension', '')
+        pending_assignment = getattr(item, 'pending_tag_assignment', False)
+        if source_extension or pending_assignment:
+            existing_categories_with_data.add(item.category)
+
+        # Debug: collect info about pending categories
+        if (hasattr(item, 'pending_tag_assignment') and item.pending_tag_assignment):
+            disc_spaces = getattr(item, 'discovered_in_spaces', 0)
+            pending_categories.append({
+                'category': item.category,
+                'source_extension': getattr(item, 'source_extension', 'N/A'),
+                'is_reserved': getattr(item, 'is_reserved', False),
+                'tags': getattr(item, 'tags', 'N/A'),
+                'discovered_in_spaces': disc_spaces,
+                'space_match': bool(disc_spaces & space_flag)
+            })
+            # Special debug for Hot Node category
+            if 'hot' in item.category.lower():
+                _node_log_once(f"[NODE_TAG_BAR] HOT NODE DEBUG: category={item.category!r}, "
+                      f"discovered_in_spaces={disc_spaces}, space_flag={space_flag}, "
+                      f"match={bool(disc_spaces & space_flag)}, tags={getattr(item, 'tags', 'N/A')}")
+
+        # Check if category is unassigned for current context
+        is_reserved = getattr(item, 'is_reserved', True)
+        source_extension = getattr(item, 'source_extension', '')
+        pending_assignment = getattr(item, 'pending_tag_assignment', False)
+        tags = getattr(item, 'tags', [])
+        discovered_spaces = getattr(item, 'discovered_in_spaces', 0)
+
+        # Handle tags - could be empty list, None, or empty collection
+        has_no_tags = not tags or (hasattr(tags, '__len__') and len(tags) == 0)
+
+        # Debug for Hot Node: log all conditions
+        if 'hot' in item.category.lower():
+            _node_log_once(f"[NODE_TAG_BAR] HOT NODE CHECK: category={item.category!r}, "
+                  f"is_reserved={is_reserved}, source_extension={source_extension!r}, "
+                  f"pending_assignment={pending_assignment}, has_no_tags={has_no_tags}, "
+                  f"discovered_spaces={discovered_spaces}, space_flag={space_flag}, "
+                  f"space_match={bool(discovered_spaces & space_flag)}")
+
+        if (not is_reserved and
+            source_extension and
+            pending_assignment and
+            has_no_tags):
+
+            # Check if discovered in current space type
+            if discovered_spaces & space_flag:
+                count += 1
+
+    # Check for orphaned categories in category_orders that are not in mappings
+    # This handles the case where drag-and-drop extensions are added to order
+    # but don't get proper category entries in mappings
+    orphaned_categories = []
+    try:
+        from bl_ui.space_userpref import get_category_order
+        node_order = get_category_order("NODE:")
+        _node_log_once(f"[NODE_TAG_BAR] DEBUG: node_order = {node_order}")
+        _node_log_once(f"[NODE_TAG_BAR] DEBUG: existing_categories_names sample = {list(existing_categories_names)[:10]}")
+        if node_order:
+            # Known reserved categories that should not be counted as unassigned
+            reserved_categories = {
+                'Tool', 'View', 'Options', 'Node', 'Item', 'Edit', 'Group',
+                'Animation', 'Image', 'Cache', 'Mask', 'Annotation'
+            }
+            for category in node_order:
+                in_existing = category in existing_categories_names
+                in_reserved = category in reserved_categories
+                # Only log once per unique category
+                _node_log_once(f"[NODE_TAG_BAR] DEBUG: checking '{category}' - in_existing={in_existing}, in_reserved={in_reserved}")
+                if not in_existing and not in_reserved:
+                    orphaned_categories.append(category)
+                    count += 1
+    except Exception as e:
+        import traceback
+        print(f"[NODE_TAG_BAR] Error checking category_orders: {e}")
+        traceback.print_exc()
+
+    # Debug output
+    _node_log_once(f"[NODE_TAG_BAR] Total categories: {total_categories}, Pending: {len(pending_categories)}, Orphaned: {len(orphaned_categories)}, Node Editor count: {count}")
+    _node_log_once(f"[NODE_TAG_BAR] Space flag: {space_flag} (0x{space_flag:x})")
+    for cat in pending_categories:
+        _node_log_once(f"[NODE_TAG_BAR]   - {cat['category']}: ext={cat['source_extension']}, reserved={cat['is_reserved']}, tags={cat['tags']}, spaces=0x{cat['discovered_in_spaces']:x}, match={cat['space_match']}")
+    if orphaned_categories:
+        _node_log_once(f"[NODE_TAG_BAR] Orphaned categories: {orphaned_categories}")
+
+    return count
+
+
 class NODE_HT_tag_bar(Header):
     bl_space_type = 'NODE_EDITOR'
     bl_region_type = 'TAG_BAR'
@@ -333,13 +553,13 @@ class NODE_HT_tag_bar(Header):
     def draw(self, context):
         layout = self.layout
         layout.separator_spacer()
-        
+
         snode = context.space_data
         wm = context.window_manager
         row = layout.row(align=True)
 
-        if not snode.show_region_tag_bar:
-            return
+        # Tag bar is visible - just draw the content
+        # Auto-show logic is in NODE_HT_header.draw()
 
         active_tags = getattr(snode, "active_tag_filter_tags", "")
         active_tags_set = set()
@@ -351,15 +571,34 @@ class NODE_HT_tag_bar(Header):
 
         tags = _node_visible_tags_for_current_mode(context)
 
+        # Calculate unassigned categories count for "New Add-ons!" button
+        unassigned_count = _get_unassigned_categories_count_for_node_editor(context)
+
+        show_names = getattr(wm, "show_tag_names", False)
+        show_active_only = getattr(wm, "show_tag_names_active_only", False)
+
         if not wm.category_tags or not tags:
+            # Show "New Add-ons!" button even when no tags exist
+            if unassigned_count > 0:
+                new_addon_active = getattr(snode, "new_addon_filter_active", False)
+                row.tag_button(
+                    "view3d.tag_bar_toggle",
+                    tag_name="New Add-ons!",
+                    glyph="\uf23a",  # Material Symbols "new_releases" icon (Unicode character)
+                    color_r=0.0,   # Green color
+                    color_g=0.8,
+                    color_b=0.2,
+                    depress=new_addon_active,
+                    center_glyph=False,  # Show both glyph and text
+                    tooltip=f"Show {unassigned_count} new add-on categories",
+                )
+                row.separator()
+
             op = row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD')
             op.operator_idname = 'wm.category_tag_create'
             op.width = 430
             row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
             return
-
-        show_names = getattr(wm, "show_tag_names", False)
-        show_active_only = getattr(wm, "show_tag_names_active_only", False)
 
         for i, tag in enumerate(tags):
             glyph = _tag_glyph_display(tag.glyph)
@@ -380,6 +619,29 @@ class NODE_HT_tag_bar(Header):
 
             if i < len(tags) - 1:
                 row.separator()
+
+        # Add "New Add-ons!" button if there are unassigned categories (already calculated above)
+        if unassigned_count > 0:
+            row.separator()
+
+            # Check if "New Add-ons!" filter is currently active
+            new_addon_active = getattr(snode, "new_addon_filter_active", False)
+
+            # Show "New Add-ons!" with glyph icon and text
+            # Green color to indicate new items
+            new_addon_row = row.row(align=True)
+
+            new_addon_row.tag_button(
+                "view3d.tag_bar_toggle",
+                tag_name="New Add-ons!",
+                glyph="\uf23a",  # Material Symbols "new_releases" icon (Unicode character)
+                color_r=0.0,   # Green color
+                color_g=0.8,
+                color_b=0.2,
+                depress=new_addon_active,
+                center_glyph=False,  # Always show both glyph and text
+                tooltip=f"Show {unassigned_count} new add-on categories",
+            )
 
         row.separator()
         row.operator(
@@ -1301,9 +1563,24 @@ class NODE_AST_compositor(bpy.types.AssetShelf):
         return True
 
 
+class SCREEN_OT_tag_bar_auto_show(bpy.types.Operator):
+    """Show the tag bar to manage new add-on categories"""
+    bl_idname = "screen.tag_bar_auto_show"
+    bl_label = "Show Tag Bar"
+    bl_description = "Show the tag bar to manage new add-on categories"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        space = context.space_data
+        if space and hasattr(space, 'show_region_tag_bar'):
+            space.show_region_tag_bar = True
+        return {'FINISHED'}
+
+
 classes = (
     NODE_HT_header,
     NODE_HT_tag_bar,
+    SCREEN_OT_tag_bar_auto_show,
     NODE_MT_editor_menus,
     NODE_MT_add,
     NODE_MT_swap,

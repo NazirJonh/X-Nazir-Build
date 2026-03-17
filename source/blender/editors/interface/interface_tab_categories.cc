@@ -2098,18 +2098,21 @@ bool panel_category_is_visible_by_tags(const bContext *C,
                                        const wmWindowManager *wm,
                                        const char *category)
 {
-  /* Reserved categories are always visible */
-  if (category_is_reserved_for_reorder(wm, category)) {
-    return true;
-  }
-
-  /* "New Add-on!" filter: when active, show only pending (unassigned) categories. */
   const ScrArea *area = C ? CTX_wm_area(C) : nullptr;
+
+  /* "New Add-on!" filter: when active, show ONLY pending (unassigned) categories.
+   * This check must come BEFORE reserved categories check so reserved tabs are hidden
+   * when the filter is active. */
   if (is_new_addon_filter_active(area)) {
     const int space_type = area ? area->spacetype : -1;
     const uint32_t mode_flag = get_current_tag_mode_flag(C);
     const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category, space_type);
     return category_is_unassigned_for_context(wm, item, space_type, mode_flag);
+  }
+
+  /* Reserved categories are always visible (when New Add-on filter is NOT active) */
+  if (category_is_reserved_for_reorder(wm, category)) {
+    return true;
   }
 
   /* Tag filtering - check horizontal tag bar filter */
@@ -4126,11 +4129,17 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
     g_deferred_category_activation.wait_for_extension_signal = false; /* Signal already received */
 
     /* Mark this category as pending tag assignment via the DNA-backed mechanism.
-     * This replaces the old g_new_extension_categories_visible set. */
+     * This replaces the old g_new_extension_categories_visible set.
+     * IMPORTANT: Use CURRENT space type where the category was discovered, not the space type
+     * where the extension was dropped. This ensures categories are properly tagged
+     * for the correct editor (e.g., Hot Node extension dropped in 3D Viewport but
+     * category appears in Node Editor). */
+    const ScrArea *current_area = CTX_wm_area(C);
+    const int current_space_type = current_area ? current_area->spacetype : -1;
     register_new_extension_category(C,
                                     new_category_id.c_str(),
                                     g_deferred_category_activation.source_extension_id.c_str(),
-                                    g_deferred_category_activation.activation_space_type,
+                                    current_space_type,  // Use current space, not drop space
                                     g_deferred_category_activation.activation_mode_flag,
                                     g_deferred_category_activation.tag_already_assigned);
     printf("[CATEGORY ACTIVATE]   Registered '%s' as pending extension category\n", new_category_id.c_str());

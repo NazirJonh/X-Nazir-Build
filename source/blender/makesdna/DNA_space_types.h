@@ -1034,7 +1034,11 @@ struct SpaceNode {
    * When true, only pending (unassigned) categories are shown.
    */
   char new_addon_filter_active = 0;
-  char _pad_new_addon[3] = {0, 0, 0};
+  /** Whether user manually hid the tag bar (prevents auto-show for new add-ons). */
+  char tag_bar_manually_hidden = 0;
+  /** Whether tag bar was auto-shown due to new add-ons detection. */
+  char has_new_addon_auto_shown = 0;
+  char _pad_new_addon = 0;
 
   /**
    * Saved tag filter state when "New Add-on!" filter is activated.

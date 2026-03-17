@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_set>
 
 #include "MEM_guardedalloc.h"
 
@@ -33,6 +34,7 @@
 
 #include "DNA_object_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_workspace_types.h"
@@ -67,6 +69,22 @@
 #include "interface_intern.hh" /* own include */
 
 namespace blender::ui {
+
+/* Log deduplication for repetitive debug messages */
+static std::unordered_set<std::string> panel_logged_messages;
+static constexpr size_t MAX_LOGGED_MESSAGES = 500;
+
+static void panel_log_once(const char *message)
+{
+  /* Print a log message only once per session to avoid log flooding. */
+  if (panel_logged_messages.count(message) == 0) {
+    if (panel_logged_messages.size() > MAX_LOGGED_MESSAGES) {
+      panel_logged_messages.clear();
+    }
+    panel_logged_messages.insert(message);
+    printf("%s\n", message);
+  }
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Defines & Structs
@@ -3354,6 +3372,33 @@ void panel_stop_animation(const bContext *C, Panel *panel)
 /** \name New Add-on Tag Helper Functions
  * \{ */
 
+/**
+ * Convert eSpace_Type enum value to the flag bit used in discovered_in_spaces.
+ * This mapping must match SPACE_TO_FLAG in space_userpref.py.
+ */
+static uint32_t space_type_to_flag(int space_type)
+{
+  /* Mapping from eSpace_Type enum to flag bits.
+   * This must match SPACE_TO_FLAG in space_userpref.py exactly. */
+  switch (space_type) {
+    case SPACE_VIEW3D:     return (1u << 0);   /* SPACE_VIEW3D = 0 */
+    case SPACE_GRAPH:      return (1u << 1);   /* SPACE_GRAPH = 1 */
+    case SPACE_OUTLINER:   return (1u << 2);   /* SPACE_OUTLINER = 2 */
+    case SPACE_PROPERTIES: return (1u << 3);   /* SPACE_PROPERTIES = 3 */
+    case SPACE_FILE:       return (1u << 4);   /* SPACE_FILE = 4 */
+    case SPACE_IMAGE:      return (1u << 5);   /* SPACE_IMAGE = 5 */
+    case SPACE_INFO:       return (1u << 6);   /* SPACE_INFO = 6 */
+    case SPACE_SEQ:        return (1u << 7);   /* SPACE_SEQ = 7 */
+    case SPACE_TEXT:       return (1u << 9);   /* SPACE_TEXT = 9 */
+    case SPACE_ACTION:     return (1u << 12);  /* SPACE_ACTION = 12 */
+    case SPACE_NLA:        return (1u << 13);  /* SPACE_NLA = 13 */
+    case SPACE_NODE:       return (1u << 11);  /* SPACE_NODE = 16, but flag = 1<<11 */
+    case SPACE_CLIP:       return (1u << 14);  /* SPACE_CLIP = 14 */
+    case SPACE_SPREADSHEET: return (1u << 15); /* SPACE_SPREADSHEET = 15 */
+    default:               return 0;
+  }
+}
+
 bool category_is_unassigned_for_context(const wmWindowManager *wm,
                                         const CategoryGlyphItem *category,
                                         int space_type,
@@ -3381,15 +3426,17 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
   /* Check that this category was discovered in the given space type.
    * space_type == -1 means global (match any). */
   if (space_type != -1) {
-    const uint32_t space_flag = (1u << uint32_t(space_type));
+    const uint32_t space_flag = space_type_to_flag(space_type);
     if ((category->discovered_in_spaces & space_flag) == 0) {
       return false;
     }
   }
 
   /* Check that this category was discovered in the given mode.
-   * current_mode_flag == 0 means any mode. */
-  if (current_mode_flag != 0) {
+   * Skip mode check for SPACE_NODE because Node Editor modes (Geometry Nodes, Shader Editor)
+   * are different from 3D View modes and were often set incorrectly during drag-drop.
+   * Also skip if discovered_in_modes == 0 (any mode) or current_mode_flag == 0 (not filtering). */
+  if (space_type != SPACE_NODE && current_mode_flag != 0 && category->discovered_in_modes != 0) {
     if ((category->discovered_in_modes & current_mode_flag) == 0) {
       return false;
     }

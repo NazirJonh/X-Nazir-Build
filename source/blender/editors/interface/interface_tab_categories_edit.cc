@@ -20,12 +20,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_set>
 
 #include "MEM_guardedalloc.h"
 
 #include "DNA_ID.h"
 #include "DNA_object_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
@@ -65,6 +67,7 @@
 #include "UI_tree_view.hh"
 
 #include "interface_intern.hh"
+#include "interface_tag_bar.hh"
 #include "regions/interface_regions_intern.hh"
 
 #ifdef WITH_PYTHON
@@ -101,6 +104,22 @@ Block *category_tab_popup_block = nullptr;
 /* Track last closed popup time and category to prevent immediate reopen */
 double category_tab_popup_close_time = 0.0;
 char category_tab_last_closed_category[64] = "";
+
+/* Log deduplication for repetitive debug messages */
+static std::unordered_set<std::string> logged_messages;
+static constexpr size_t MAX_LOGGED_MESSAGES = 500;
+
+static void log_once(const char *message)
+{
+  /* Print a log message only once per session to avoid log flooding. */
+  if (logged_messages.count(message) == 0) {
+    if (logged_messages.size() > MAX_LOGGED_MESSAGES) {
+      logged_messages.clear();
+    }
+    logged_messages.insert(message);
+    printf("%s\n", message);
+  }
+}
 
 bool category_tab_edit_dialog_is_open_for_category(const char *category)
 {
@@ -586,12 +605,8 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
    * Stop processing to avoid resurrecting deleted overrides.
    */
   if (category_tab_current_dialog_op != op) {
-    printf("[LIVE UPDATE CB] GUARD FAILED: current_dialog_op=%p, op=%p\n",
-           (void*)category_tab_current_dialog_op, (void*)op);
     return;
   }
-
-  printf("[LIVE UPDATE CB] CALLED\n");
 
   /* Get space_type from context for proper per-space override matching */
   ScrArea *area = CTX_wm_area(C);
@@ -605,9 +620,6 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
 
   char glyph_raw[16];
   RNA_string_get(op->ptr, "glyph", glyph_raw);
-
-  /* DEBUG: Log glyph_raw from operator */
-  printf("[LIVE UPDATE CB] category='%s', glyph_raw='%s'\n", category, glyph_raw);
 
   /* Validate glyph input: must be empty or valid hex code (1-6 hex digits). */
   const bool glyph_valid = validate_glyph_hex_input(glyph_raw);
@@ -770,22 +782,18 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
    * Note: We always save the glyph because panel_category_glyph_lookup returns
    * the override glyph if it exists, which would cause a false "match" condition.
    */
-  printf("[LIVE UPDATE CB] glyph_valid=%d, glyph='%s' (processed)\n", glyph_valid ? 1 : 0, glyph);
   if (glyph_valid && glyph[0] != '\0') {
     /* User has entered a valid glyph - save it to override */
-    printf("[LIVE UPDATE CB] Saving glyph to override: '%s'\n", glyph);
     STRNCPY(item->glyph, glyph);
   }
   else if (!glyph_valid) {
     /* Invalid glyph - don't update override, keep previous value */
-    printf("[LIVE UPDATE CB] Invalid glyph - keeping previous value\n");
   }
   else {
     /* Empty glyph - check if this is a glyph_only category */
     const bool is_glyph_only_category = is_single_glyph_str(category);
     if (is_glyph_only_category) {
       /* For glyph_only categories, get glyph from mappings (the original glyph) */
-      printf("[LIVE UPDATE CB] Empty glyph for glyph_only category - looking up in mappings\n");
       for (CategoryGlyphItem *map_item =
                static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
            map_item;
@@ -793,15 +801,12 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
       {
         if (STREQ(map_item->category, category)) {
           if (map_item->glyph[0] != '\0') {
-            printf("[LIVE UPDATE CB] Found glyph in mappings: '%s'\n", map_item->glyph);
             STRNCPY(item->glyph, map_item->glyph);
           }
           else if (map_item->default_glyph[0] != '\0') {
-            printf("[LIVE UPDATE CB] Found default_glyph in mappings: '%s'\n", map_item->default_glyph);
             STRNCPY(item->glyph, map_item->default_glyph);
           }
           else {
-            printf("[LIVE UPDATE CB] No glyph in mappings for glyph_only category\n");
             item->glyph[0] = '\0';
           }
           break;
@@ -810,7 +815,6 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
     }
     else {
       /* Not a glyph_only category - clear override glyph to use defaults */
-      printf("[LIVE UPDATE CB] Empty glyph - clearing override\n");
       item->glyph[0] = '\0';
     }
   }
@@ -2436,7 +2440,6 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         char tag_color[32];
         int is_active;
 
-        printf("[DEBUG TAG UI] Category='%s', tags_data_body='%s'\n", category, tags_data_body.c_str());
         int tag_count = 0;
 
         while (*cursor != '\0') {
@@ -2481,8 +2484,6 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
 
           if (tag_name[0] != '\0') {
             tag_count++;
-            printf("[DEBUG TAG UI] Tag #%d: name='%s', glyph='%s', is_active=%d, color='%s'\n", 
-                   tag_count, tag_name, tag_glyph, is_active, tag_color);
 
             /* Create row layout for the tag button */
             Layout &tag_item = tags_grid.row(true);
@@ -2516,8 +2517,6 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                                                UI_UNIT_X * 8,
                                                UI_UNIT_Y * 1.5f,
                                                nullptr);
-
-            printf("[DEBUG TAG UI] Created button for tag '%s' with is_active=%d\n", tag_name, is_active);
 
             /* Set operator properties */
             wmOperatorType *ot = WM_operatortype_find("wm.category_tag_toggle", false);
@@ -2726,8 +2725,8 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   /* Check for existing override and populate properties */
   wmWindowManager *wm = CTX_wm_manager(C);
 
-  /* Always show all tags when opening the dialog. */
-  wm->category_tag_filter_mode = 0;
+  /* Default the tag filter to the current editor/object mode for this session. */
+  wm->category_tag_filter_mode = get_current_object_mode_filter_value(C);
 
   bool has_override = false;
   bool override_is_empty = false;
@@ -3226,8 +3225,6 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   const int display_mode_ui_exec = RNA_enum_get(op->ptr, "display_mode_ui");
   const int custom_icon_mode_ui_exec = RNA_enum_get(op->ptr, "custom_icon_mode_ui");
   int resolved_icon_source_exec = RNA_enum_get(op->ptr, "icon_source");
-  printf("[C++ EXEC] display_mode_ui_exec=%d, custom_icon_mode_ui_exec=%d, initial icon_source=%d\n",
-         display_mode_ui_exec, custom_icon_mode_ui_exec, resolved_icon_source_exec);
   if (display_mode_ui_exec == 0 || display_mode_ui_exec == 2) {
     resolved_icon_source_exec = 2; /* OFF */
   }
@@ -3237,7 +3234,6 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   else {
     resolved_icon_source_exec = 1; /* MANUAL: Custom image icon - user explicitly chose an icon */
   }
-  printf("[C++ EXEC] resolved_icon_source_exec=%d (0=AUTO, 1=MANUAL, 2=OFF)\n", resolved_icon_source_exec);
   RNA_enum_set(op->ptr, "icon_source", resolved_icon_source_exec);
   item->icon_source = resolved_icon_source_exec;
   item->glyph_mode = (display_mode_ui_exec == 2) ? 1 : 0;
@@ -3328,16 +3324,11 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     BLI_str_escape(icon_path_esc, item->icon_path, sizeof(icon_path_esc));
     BLI_str_escape(icon_provider_esc, item->icon_provider, sizeof(icon_provider_esc));
 
-    /* DEBUG: Log before calling Python set_category_data */
-    printf("[C++ SAVE] Calling set_category_data: category='%s', space_type=%d\n", category, space_type);
-    printf("[C++ SAVE] item->icon_source=%d, icon_source_py='%s', glyph_mode=%d\n",
-           item->icon_source, icon_source_py, item->glyph_mode);
-    printf("[C++ SAVE] item->tags='%s' (NOT passed to Python - tags managed by Python)\n", item->tags);
-
     SNPRINTF(python_cmd,
-             "from bl_ui.space_userpref import set_category_data\n"
+             "from bl_ui.space_userpref import set_category_data, finalize_category_tag_changes\n"
              "set_category_data('%s', display_name='%s', first_letter='%s', glyph='%s', color='%s', "
-             "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s', glyph_mode='%s', space_type=%d)\n",
+             "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s', glyph_mode='%s', space_type=%d)\n"
+             "finalize_category_tag_changes('%s', space_type=%d)\n",
              category_esc,
              display_name_esc,
              category_tab_preview_first_letter,
@@ -3348,12 +3339,67 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
              icon_path_esc,
              icon_provider_esc,
              (item->glyph_mode == 1) ? "first_letter" : "auto",
+             space_type,
+             category_esc,
              space_type);
     const char *imports_none[] = {nullptr};
     BPY_run_string_exec(C, imports_none, python_cmd);
+  }
 
-    /* DEBUG: Confirm call completed */
-    printf("[C++ SAVE] set_category_data call completed for '%s'\n", category);
+  /* After saving, check if there are still unassigned categories.
+   * If not and "New Add-ons!" filter is active, deactivate it and switch to
+   * the tag that was just assigned to this category. */
+  {
+    const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
+    const bool has_unassigned = should_show_new_addon_tag(wm, space_type, current_mode_flag);
+
+    if (!has_unassigned && is_new_addon_filter_active(area)) {
+      /* No more unassigned categories - deactivate "New Add-ons!" filter */
+      set_new_addon_filter_active(area, false);
+
+      /* Also reset tag_bar_manually_hidden so future auto-show can work */
+      if (area && area->spacetype == SPACE_NODE) {
+        SpaceNode *snode = CTX_wm_space_node(C);
+        if (snode && snode->tag_bar_manually_hidden) {
+          snode->tag_bar_manually_hidden = false;
+          printf("[CATEGORY_TAB_EDIT] Reset tag_bar_manually_hidden - no more unassigned\n");
+        }
+      }
+
+      /* Switch to the first tag assigned to this category */
+      if (item->tags[0] != '\0') {
+        TagFilterStateRef state{};
+        if (tag_filter_state_from_area(area, &state)) {
+          /* Copy the first tag from item->tags (semicolon-separated) */
+          char first_tag[64] = "";
+          const char *sep = strchr(item->tags, ';');
+          if (sep) {
+            size_t len = sep - item->tags;
+            len = std::min(len, sizeof(first_tag) - 1);
+            BLI_strncpy(first_tag, item->tags, len + 1);
+          }
+          else {
+            BLI_strncpy(first_tag, item->tags, sizeof(first_tag));
+          }
+
+          /* Trim whitespace */
+          char *tag = first_tag;
+          while (*tag == ' ') {
+            tag++;
+          }
+          char *end = tag + strlen(tag) - 1;
+          while (end > tag && *end == ' ') {
+            *end-- = '\0';
+          }
+
+          if (tag[0] != '\0') {
+            /* Set this tag as the active filter */
+            BLI_strncpy(state.active_tags, tag, 256);
+            printf("[CATEGORY_TAB_EDIT] No more unassigned categories, switched to tag '%s'\n", tag);
+          }
+        }
+      }
+    }
   }
 
   /* Redraw after Python save to update all UI elements */

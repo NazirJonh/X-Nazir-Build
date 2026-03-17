@@ -697,18 +697,115 @@ int tag_bar_region_handler(bContext *C, const wmEvent *event, void * /*userdata*
 /** \name Region Callbacks
  * \{ */
 
-/* Callback for tag button click */
+/**
+ * Toggle a tag in the active tag filter.
+ * This function directly modifies the tag filter state.
+ *
+ * \param C: The context
+ * \param tag_name: The name of the tag to toggle
+ */
+static void tag_toggle_impl(bContext &C, const char *tag_name)
+{
+  ScrArea *area = CTX_wm_area(&C);
+  if (!area) {
+    return;
+  }
+
+  TagFilterStateRef state{};
+  if (!tag_filter_state_from_area(area, &state) || !state.active_tags || !state.filter_enabled) {
+    return;
+  }
+
+  /* Deactivate "New Add-on!" filter when clicking on a normal tag. */
+  if (is_new_addon_filter_active(area)) {
+    set_saved_tag_filter_tags(area, "");
+    set_new_addon_filter_active(area, false);
+  }
+
+  /* Copy current active tags to work with */
+  char tags_copy[256];
+  BLI_strncpy(tags_copy, state.active_tags, sizeof(tags_copy));
+
+  /* Check if tag is already in the list */
+  bool tag_found = false;
+  char *tag = strtok(tags_copy, ",;");
+  while (tag != nullptr) {
+    while (*tag == ' ') {
+      tag++;
+    }
+    if (STREQ(tag, tag_name)) {
+      tag_found = true;
+      break;
+    }
+    tag = strtok(nullptr, ",;");
+  }
+
+  /* Toggle: add if not found, remove if found */
+  char new_tags[256] = "";
+  const bool was_removing_tag = tag_found;
+
+  if (!tag_found) {
+    /* Add the tag - single select: replace all tags with this one */
+    BLI_strncpy(new_tags, tag_name, sizeof(new_tags));
+  }
+  else {
+    /* Remove the tag from the list */
+    char temp[256];
+    BLI_strncpy(temp, state.active_tags, sizeof(temp));
+    char *token = strtok(temp, ",;");
+    bool first = true;
+    while (token != nullptr) {
+      while (*token == ' ') {
+        token++;
+      }
+      if (!STREQ(token, tag_name)) {
+        if (!first) {
+          BLI_strncat(new_tags, ",", sizeof(new_tags));
+        }
+        BLI_strncat(new_tags, token, sizeof(new_tags));
+        first = false;
+      }
+      token = strtok(nullptr, ",;");
+    }
+  }
+
+  /* Update the active tags string */
+  BLI_strncpy(state.active_tags, new_tags, 256);
+
+  /* Handle filter state based on whether tags were removed or added. */
+  if (was_removing_tag) {
+    /* Tag was removed - disable filter if all tags removed */
+    if (new_tags[0] == '\0') {
+      *state.filter_enabled = 0;
+    }
+  }
+  else {
+    /* Tag was added - enable filter */
+    *state.filter_enabled = 1;
+  }
+
+  /* Ensure first visible category is active */
+  ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
+  if (region_ui) {
+    panel_category_tabs_ensure_active_visible(&C, region_ui);
+  }
+
+  /* Trigger redraw */
+  WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  WM_main_add_notifier(NC_SPACE | ND_CATEGORY_GLYPHS, nullptr);
+  ED_area_tag_redraw(area);
+}
+
+/* Callback for tag button click - deprecated, kept for compatibility */
 void tag_button_click_by_mode(bContext *C, void *arg1, void *arg2)
 {
   wmWindowManager *wm = static_cast<wmWindowManager *>(arg1);
   const int mode_flags = POINTER_AS_INT(arg2);
   (void)mode_flags; /* Unused - deprecated function */
+  (void)wm;
 
   TagFilterStateRef state{};
   const bool has_state = tag_filter_state_from_context(C, &state);
-
-  /* NOTE: This function is deprecated. Tag toggling is now handled by the operator in view3d_ops.cc.
-   * The operator directly modifies the active_tag_filter_tags string. */
 
   /* Update cache and redraw */
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
@@ -794,6 +891,9 @@ static int draw_new_addon_button(const bContext *C,
   const int text_width = BLF_width(fontid, button_label, strlen(button_label));
   const int btn_width = text_width + UI_UNIT_X;
 
+  /* Update is_active from per-space state BEFORE creating button */
+  btn.is_active = area ? is_new_addon_filter_active(area) : false;
+
   Button *but = uiDefBut(block,
                          ButtonType::ButToggle,
                          button_label,
@@ -812,9 +912,10 @@ static int draw_new_addon_button(const bContext *C,
     get_new_addon_tag_color(color);
 
     if (btn.is_active) {
-      /* Active: fill background with green */
+      /* Active: fill background with green and show as selected */
       rgb_float_to_uchar(but->col, color);
       but->col[3] = 255;
+      but->flag |= UI_SELECT;  /* Show button as pressed/selected */
     }
     else {
       /* Inactive: color the text green */
@@ -873,9 +974,6 @@ static int draw_new_addon_button(const bContext *C,
     };
     but->func_arg1 = nullptr;
     but->func_arg2 = nullptr;
-
-    /* Update is_active from per-space state */
-    btn.is_active = area ? is_new_addon_filter_active(area) : false;
   }
 
   return btn_width;
@@ -991,21 +1089,11 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
     }
 
     if (but) {
-      but->func = tag_button_click_by_mode;
-      but->func_arg1 = wm;
-      /* Find the mode_flags for this tag */
-      if (wm && category_tag_list_is_valid(&wm->category_tags)) {
-        for (const CategoryTagDef *tag_def =
-                 static_cast<const CategoryTagDef *>(wm->category_tags.first);
-             tag_def;
-             tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
-        {
-          if (STREQ(tag_def->name, btn.tag_name)) {
-            but->func_arg2 = POINTER_FROM_INT(tag_def->mode_flags);
-            break;
-          }
-        }
-      }
+      /* Capture tag_name by value (copy) for the lambda */
+      std::string captured_tag_name(btn.tag_name);
+      but->apply_func = [captured_tag_name](bContext &C) {
+        tag_toggle_impl(C, captured_tag_name.c_str());
+      };
 
       /* Store button rectangle for mouse hit testing */
       btn.rect.xmin = but->rect.xmin;
@@ -1137,21 +1225,11 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
         but->drawflag |= BUT_TEXT_USE_COL;
       }
 
-      but->func = tag_button_click_by_mode;
-      but->func_arg1 = wm; /* Pass wm instead of sbuts */
-      /* Find the mode_flags for this tag */
-      if (wm && category_tag_list_is_valid(&wm->category_tags)) {
-        for (const CategoryTagDef *tag_def =
-                 static_cast<const CategoryTagDef *>(wm->category_tags.first);
-             tag_def;
-             tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
-        {
-          if (STREQ(tag_def->name, btn.tag_name)) {
-            but->func_arg2 = POINTER_FROM_INT(tag_def->mode_flags);
-            break;
-          }
-        }
-      }
+      /* Capture tag_name by value (copy) for the lambda */
+      std::string captured_tag_name(btn.tag_name);
+      but->apply_func = [captured_tag_name](bContext &C) {
+        tag_toggle_impl(C, captured_tag_name.c_str());
+      };
 
       /* Store button rectangle for mouse hit testing */
       btn.rect.xmin = but->rect.xmin;
@@ -1280,23 +1358,11 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
         but->drawflag |= BUT_TEXT_USE_COL;
       }
 
-      /* Set callback for button click */
-      but->func = tag_button_click_by_mode;
-      but->func_arg1 = wm;
-
-      /* Find the mode_flags for this tag */
-      if (wm && category_tag_list_is_valid(&wm->category_tags)) {
-        for (const CategoryTagDef *tag_def =
-                 static_cast<const CategoryTagDef *>(wm->category_tags.first);
-             tag_def;
-             tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
-        {
-          if (STREQ(tag_def->name, btn.tag_name)) {
-            but->func_arg2 = POINTER_FROM_INT(tag_def->mode_flags);
-            break;
-          }
-        }
-      }
+      /* Set callback for button click - capture tag_name by value */
+      std::string captured_tag_name(btn.tag_name);
+      but->apply_func = [captured_tag_name](bContext &C) {
+        tag_toggle_impl(C, captured_tag_name.c_str());
+      };
 
       /* Store button rectangle for mouse hit testing */
       btn.rect.xmin = but->rect.xmin;

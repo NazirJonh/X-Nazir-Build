@@ -557,6 +557,17 @@ void ED_operatortypes_screen();
 /* called in `spacetypes.cc`. */
 void ED_keymap_screen(wmKeyConfig *keyconf);
 /**
+ * Register SCREEN_OT_category_tab_extension_drop operator early.
+ * Must be called before #ED_operatortypes_userpref() so the dropbox
+ * can be added with higher priority than PREFERENCES_OT_extension_url_drop.
+ */
+void ED_operatortypes_screen_extension_drop();
+/**
+ * Register category-tab extension dropbox in "Window" dropboxmap.
+ * Must be called after operator registration, before userpref dropboxes.
+ */
+void ED_dropbox_category_extension();
+/**
  * Workspace key-maps.
  */
 void ED_operatortypes_workspace();

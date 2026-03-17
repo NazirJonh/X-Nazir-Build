@@ -41,6 +41,40 @@ if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
 TAG_DEBUG = True
 TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
 
+# Log deduplication for repetitive debug messages
+_pref_logged_messages = set()
+_tag_logged_messages = set()
+_package_match_logged = set()
+_sync_miss_logged = set()
+
+def _pref_log_once(message):
+    """Print a log message only once per session to avoid log flooding."""
+    msg_hash = hash(message)
+    if msg_hash not in _pref_logged_messages:
+        if len(_pref_logged_messages) > 500:
+            _pref_logged_messages.clear()
+        _pref_logged_messages.add(msg_hash)
+        print(message)
+
+
+def _package_match_log_once(category, repo_name, pkg_name):
+    """Print package match message only once per category+repo combination."""
+    key = (category, repo_name)
+    if key not in _package_match_logged:
+        if len(_package_match_logged) > 200:
+            _package_match_logged.clear()
+        _package_match_logged.add(key)
+        print(f"[] package match: category={category!r}, repo={repo_name!r}, pkg={pkg_name!r}")
+
+
+def _sync_miss_log_once(category):
+    """Print sync miss message only once per category."""
+    if category not in _sync_miss_logged:
+        if len(_sync_miss_logged) > 200:
+            _sync_miss_logged.clear()
+        _sync_miss_logged.add(category)
+        print(f"[] sync miss: category={category!r}")
+
 
 # Единый источник режимов тегов (должен соответствовать CategoryTagMode в DNA/RNA).
 _CATEGORY_TAG_MODES = (
@@ -92,10 +126,20 @@ _CATEGORY_TAG_FILTER_ENUM_TO_FLAG = {
     "IMAGE_PAINT": (1 << 10),
 }
 
-def tag_log(message, level="INFO"):
-    """Logging for tag system operations."""
-    if TAG_DEBUG or level == "ERROR":
-        print(f"[TAGS][{level}] {message}")
+def tag_log(message, level="INFO", *, dedup=True):
+    """Logging for tag system operations with deduplication to avoid log spam."""
+    if not (TAG_DEBUG or level == "ERROR"):
+        return
+
+    if dedup and level != "ERROR":
+        msg_hash = hash((level, message))
+        if msg_hash in _tag_logged_messages:
+            return
+        if len(_tag_logged_messages) > 1000:
+            _tag_logged_messages.clear()
+        _tag_logged_messages.add(msg_hash)
+
+    print(f"[TAGS][{level}] {message}")
 
 
 def _get_tag_filter_mode_flag_from_wm(wm):
@@ -320,6 +364,21 @@ DEFAULT_CATEGORY_GLYPHS = {
 _glyph_cache = {}
 _glyph_cache_loaded = False
 
+# Log deduplication: track already-logged messages to avoid flooding
+_logged_messages_cache = set()
+_MAX_LOG_CACHE_SIZE = 1000
+
+def _log_once(message):
+    """Print a log message only once per session to avoid log flooding."""
+    global _logged_messages_cache
+    # Use hash of message to save memory
+    msg_hash = hash(message)
+    if msg_hash not in _logged_messages_cache:
+        if len(_logged_messages_cache) > _MAX_LOG_CACHE_SIZE:
+            _logged_messages_cache.clear()
+        _logged_messages_cache.add(msg_hash)
+        print(message)
+
 # Space type conversion helpers
 def _space_type_str_to_id(space_type_str):
     """Convert space type string to ID."""
@@ -354,7 +413,9 @@ def _make_cache_key(space_type, category):
 
 # Maps space type string identifiers to single-bit flags for discovered_in_spaces.
 # Uses the same IDs as _space_type_str_to_id but stored as power-of-two bitmask values.
+# NOTE: Both SPACE_* format (internal) and bl_space_type format (from panels) are supported.
 SPACE_TO_FLAG = {
+    # Internal SPACE_* format
     'SPACE_VIEW3D':     (1 << 0),
     'SPACE_GRAPH':      (1 << 1),
     'SPACE_OUTLINER':   (1 << 2),
@@ -373,6 +434,25 @@ SPACE_TO_FLAG = {
     'SPACE_TOPBAR':     (1 << 15),
     'SPACE_STATUSBAR':  (1 << 16),
     'SPACE_SPREADSHEET':(1 << 17),
+    # bl_space_type format (from Panel.bl_space_type attribute)
+    'VIEW_3D':          (1 << 0),
+    'GRAPH_EDITOR':     (1 << 1),
+    'OUTLINER':         (1 << 2),
+    'PROPERTIES':       (1 << 3),
+    'FILE_BROWSER':     (1 << 4),
+    'IMAGE_EDITOR':     (1 << 5),
+    'INFO':             (1 << 6),
+    'SEQUENCE_EDITOR':  (1 << 7),
+    'TEXT_EDITOR':      (1 << 8),
+    'DOPESHEET_EDITOR': (1 << 9),
+    'NLA_EDITOR':       (1 << 10),
+    'NODE_EDITOR':      (1 << 11),
+    'CONSOLE':          (1 << 12),
+    'USER_PREFERENCES': (1 << 13),
+    'CLIP_EDITOR':      (1 << 14),
+    'TOPBAR':           (1 << 15),
+    'STATUSBAR':        (1 << 16),
+    'SPREADSHEET':      (1 << 17),
 }
 _FLAG_TO_SPACE = {v: k for k, v in SPACE_TO_FLAG.items()}
 
@@ -760,6 +840,10 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
 # categories as originating from that extension.
 _pending_extension_context = None  # dict or None: {"extension_id": str, "space_type": int, "mode_flag": int}
 
+# Preview mode flag: set to True during tag preview in edit dialog to prevent
+# automatic WM synchronization that would cause categories to disappear from "New Add-ons!" filter
+_preview_mode_active = False
+
 
 def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0):
     """Record the extension that was just installed so the next category discovery
@@ -778,10 +862,11 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0):
         "extension_id": extension_id,
         "space_type": space_type,
         "mode_flag": mode_flag,
+        "timestamp": time.time(),
     }
     tag_log(
         f"extension_post_install_handler: extension={extension_id!r}, "
-        f"space_type={space_type}, mode_flag={mode_flag:#010x}"
+        f"space_type={space_type}, mode_flag={mode_flag:#010x}, set at {time.time()}"
     )
 
 _last_discovered_category_sources = {}
@@ -1035,23 +1120,23 @@ def _auto_detect_extension_icon_path(category: str):
 
     Returns: (icon_path, provider) or ("", "") when not found.
     """
-    print(f"[] detect start: category={category!r}")
+    _pref_log_once(f"[] detect start: category={category!r}")
     try:
         extensions_dir = bpy.utils.user_resource('EXTENSIONS')
     except Exception:
-        print(f"[] detect abort: category={category!r}, reason=user_resource_exception")
+        _pref_log_once(f"[] detect abort: category={category!r}, reason=user_resource_exception")
         return "", ""
 
     if not extensions_dir or not os.path.isdir(extensions_dir):
-        print(f"[] detect abort: category={category!r}, extensions_dir={extensions_dir!r}, exists=False")
+        _pref_log_once(f"[] detect abort: category={category!r}, extensions_dir={extensions_dir!r}, exists=False")
         return "", ""
 
     target_key = _normalize_category_key(category)
     if not target_key:
-        print(f"[] detect abort: category={category!r}, normalized_key is empty")
+        _pref_log_once(f"[] detect abort: category={category!r}, normalized_key is empty")
         return "", ""
 
-    print(f"[] detect context: category={category!r}, target_key={target_key!r}, extensions_dir={extensions_dir!r}")
+    _pref_log_once(f"[] detect context: category={category!r}, target_key={target_key!r}, extensions_dir={extensions_dir!r}")
 
     icon_filenames = ("icon.png", "icon.webp", "icon.jpg", "icon.jpeg")
 
@@ -1084,22 +1169,19 @@ def _auto_detect_extension_icon_path(category: str):
                     if not fuzzy_match_key:
                         continue
 
-                print(
-                    f"[] package match: category={category!r}, repo={repo_name!r}, "
-                    f"pkg={pkg_name!r}, pkg_path={pkg_path!r}, keys={sorted(match_keys)!r}, "
-                    f"match_type={'exact' if exact_match else 'fuzzy'}, fuzzy_key={fuzzy_match_key!r}"
-                )
+                # Log package match only once per category+repo to reduce noise
+                _package_match_log_once(category, repo_name, pkg_name)
 
                 for icon_name in icon_filenames:
                     icon_path = os.path.join(pkg_path, icon_name)
                     if os.path.isfile(icon_path):
-                        print(f"[] detect hit: category={category!r}, icon={icon_path!r}, provider='extension_auto'")
+                        _pref_log_once(f"[] detect hit: category={category!r}, icon={icon_path!r}, provider='extension_auto'")
                         return icon_path, "extension_auto"
     except Exception:
-        print(f"[] detect abort: category={category!r}, reason=scan_exception")
+        _pref_log_once(f"[] detect abort: category={category!r}, reason=scan_exception")
         return "", ""
 
-    print(f"[] detect miss: category={category!r}")
+    _pref_log_once(f"[] detect miss: category={category!r}")
     return "", ""
 
 
@@ -1187,14 +1269,23 @@ def _glyph_to_hex(glyph):
 
     Note: Only single-character glyphs are fully supported.
     For multi-character strings, only the first character is converted.
+    Maximum return length is 7 characters to fit in DNA char[8] field.
     """
     if not glyph:
         return ""
     if len(glyph) == 1:
-        return format(ord(glyph), 'x')
-    # For multi-character strings, return first char's hex
-    tag_log(f"Multi-character glyph '{repr(glyph)}', using first char only", "WARN")
-    return format(ord(glyph[0]), 'x')
+        hex_str = format(ord(glyph), 'x')
+    else:
+        # For multi-character strings, return first char's hex
+        tag_log(f"Multi-character glyph '{repr(glyph)}', using first char only", "WARN")
+        hex_str = format(ord(glyph[0]), 'x')
+
+    # Truncate to 7 characters to fit in DNA char glyph[8]
+    if len(hex_str) > 7:
+        tag_log(f"Glyph hex '{hex_str}' too long, truncating to 7 chars", "WARN")
+        hex_str = hex_str[:7]
+
+    return hex_str
 
 
 def _is_valid_category_name(name):
@@ -1245,7 +1336,7 @@ def _flags_to_mode_names(flags):
 
 def _normalize_category_data(category_data, category_name=None):
     """Normalize category data to the new format with glyph, display_name, color, defaults, and tags.
-    
+
     Args:
         category_data: The category data (string or dict)
         category_name: Optional category name (key) for determining base_type when glyph is empty.
@@ -1262,6 +1353,11 @@ def _normalize_category_data(category_data, category_name=None):
         "icon_key": "",
         "icon_path": "",
         "icon_provider": "",
+        # Extension-related fields for "New Add-ons!" feature
+        "source_extension": "",
+        "pending_tag_assignment": False,
+        "discovered_in_spaces": [],
+        "discovered_in_modes": [],
     }
 
     if isinstance(category_data, str):
@@ -1275,7 +1371,9 @@ def _normalize_category_data(category_data, category_name=None):
                 "first_letter": "",
                 "tags": [],
                 "glyph_mode": "auto",
-                "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": ""}
+                "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
+                "source_extension": "", "pending_tag_assignment": False,
+                "discovered_in_spaces": [], "discovered_in_modes": []}
     elif isinstance(category_data, dict):
         # New format: dict with glyph, display_name, color, default_glyph, default_display_name, base_type, tags
         entry = default_entry.copy()
@@ -1359,7 +1457,7 @@ def _normalize_category_data(category_data, category_name=None):
         if entry["base_type"] == "glyph_only" and category_name and _is_single_glyph(category_name):
             if not entry.get("default_glyph"):
                 entry["default_glyph"] = category_name
-                print(f"[GLYPH LOAD] Set default_glyph for glyph_only category '{category_name}' to category name")
+                _pref_log_once(f"[GLYPH LOAD] Set default_glyph for glyph_only category '{category_name}'")
 
         # NEW: For reserved categories (in DEFAULT_CATEGORY_GLYPHS), restore default_glyph
         # even if glyph field is empty in JSON. This ensures Reset works correctly.
@@ -1379,6 +1477,21 @@ def _normalize_category_data(category_data, category_name=None):
             tags = category_data["tags"]
             if isinstance(tags, list):
                 entry["tags"] = [str(t) for t in tags]
+
+        # Extension-related fields for "New Add-ons!" feature
+        if "source_extension" in category_data:
+            entry["source_extension"] = str(category_data["source_extension"])
+        if "pending_tag_assignment" in category_data:
+            val = category_data["pending_tag_assignment"]
+            entry["pending_tag_assignment"] = bool(val) if val else False
+        if "discovered_in_spaces" in category_data:
+            spaces = category_data["discovered_in_spaces"]
+            if isinstance(spaces, list):
+                entry["discovered_in_spaces"] = [str(s) for s in spaces]
+        if "discovered_in_modes" in category_data:
+            modes = category_data["discovered_in_modes"]
+            if isinstance(modes, list):
+                entry["discovered_in_modes"] = [str(m) for m in modes]
 
         # Icon persistence (v7): accept both nested block and legacy flat keys.
         icon_block = category_data.get("icon", {}) if isinstance(category_data.get("icon", {}), dict) else {}
@@ -1678,7 +1791,7 @@ def _load_glyph_mappings_from_file():
                 # New format: space_type -> {category -> data}
                 space_type_str = key
                 space_type_id = _space_type_str_to_id(space_type_str)
-                print(f"[GLYPH LOAD DEBUG] Loading SPACE mappings: {space_type_str} -> {len(value)} categories")
+                _pref_log_once(f"[GLYPH LOAD DEBUG] Loading SPACE mappings: {space_type_str} -> {len(value)} categories")
                 for category, cat_data in value.items():
                     if isinstance(cat_data, (str, dict)):
                         # Decode Unicode escape sequences in category key (e.g., "\ue8f4" -> actual glyph)
@@ -1687,10 +1800,10 @@ def _load_glyph_mappings_from_file():
                         _glyph_cache[cache_key] = _normalize_category_data(cat_data, decoded_category)
                         # DEBUG: Show key glyphs being loaded
                         if 'Brushstroke' in category:
-                            print(f"[GLYPH LOAD DEBUG] Loaded Brushstroke from {key}: glyph='{cat_data.get('glyph', '')}'")
+                            _pref_log_once(f"[GLYPH LOAD DEBUG] Loaded Brushstroke from {key}: glyph='{cat_data.get('glyph', '')}'")
             elif key == "GLOBAL" and isinstance(value, dict):
                 # GLOBAL is a special space_type = -1
-                print(f"[GLYPH LOAD DEBUG] Loading GLOBAL mappings -> {len(value)} categories")
+                _pref_log_once(f"[GLYPH LOAD DEBUG] Loading GLOBAL mappings -> {len(value)} categories")
                 for category, cat_data in value.items():
                     if isinstance(cat_data, (str, dict)):
                         decoded_category = _unicode_escape_to_glyph(category) if '\\u' in category else category
@@ -1699,7 +1812,7 @@ def _load_glyph_mappings_from_file():
                         _glyph_cache[cache_key] = normalized_data
                         # DEBUG: Show key glyphs being loaded
                         if 'Brushstroke' in category:
-                            print(f"[GLYPH LOAD DEBUG] Loaded Brushstroke from GLOBAL: raw_glyph='{cat_data.get('glyph', '')}', normalized_glyph='{normalized_data.get('glyph', '')}' (len={len(normalized_data.get('glyph', ''))})")
+                            _pref_log_once(f"[GLYPH LOAD DEBUG] Loaded Brushstroke from GLOBAL")
             elif isinstance(value, (str, dict)):
                 # Old format: category -> data (migrate to global space_type = -1)
                 # Decode Unicode escape sequences in category key
@@ -1787,21 +1900,21 @@ def _load_glyph_mappings_from_file():
                     # Copy glyph to global entry
                     if glyph and global_entry.get("glyph", "") != glyph:
                         global_entry["glyph"] = glyph
-                        print(f"[GLYPH LOAD] Propagated glyph '{glyph}' from space {space_type_id} to GLOBAL for '{category}'")
+                        _pref_log_once(f"[GLYPH LOAD] Propagated glyph from space {space_type_id} to GLOBAL for '{category}'")
 
                     # Copy glyph_mode to global entry only when allowed to update
                     if should_update and glyph_mode != "auto" and global_entry.get("glyph_mode", "auto") != glyph_mode:
                         global_entry["glyph_mode"] = glyph_mode
-                        print(f"[GLYPH LOAD] Propagated glyph_mode '{glyph_mode}' from space {space_type_id} to GLOBAL for '{category}'")
+                        _pref_log_once(f"[GLYPH LOAD] Propagated glyph_mode from space {space_type_id} to GLOBAL for '{category}'")
 
                     # Copy icon data to global entry
                     if should_update:
                         if global_entry.get("icon_source", "auto") != icon_source:
                             global_entry["icon_source"] = icon_source
-                            print(f"[GLYPH LOAD] Propagated icon_source '{icon_source}' from space {space_type_id} to GLOBAL for '{category}'")
+                            _pref_log_once(f"[GLYPH LOAD] Propagated icon_source from space {space_type_id} to GLOBAL for '{category}'")
                         if global_entry.get("icon_key", "") != icon_key:
                             global_entry["icon_key"] = icon_key
-                            print(f"[GLYPH LOAD] Propagated icon_key '{icon_key}' from space {space_type_id} to GLOBAL for '{category}'")
+                            _pref_log_once(f"[GLYPH LOAD] Propagated icon_key from space {space_type_id} to GLOBAL for '{category}'")
                         if global_entry.get("icon_path", "") != icon_path:
                             global_entry["icon_path"] = icon_path
                         if global_entry.get("icon_provider", "") != icon_provider:
@@ -1812,7 +1925,7 @@ def _load_glyph_mappings_from_file():
                     if color and any(c != 0.0 for c in color):
                         if global_entry.get("color", [0.0, 0.0, 0.0]) != color:
                             global_entry["color"] = color
-                            print(f"[GLYPH LOAD] Propagated color from space {space_type_id} to GLOBAL for '{category}'")
+                            _pref_log_once(f"[GLYPH LOAD] Propagated color from space {space_type_id} to GLOBAL for '{category}'")
 
     # STEP 2: Sync from GLOBAL back to all SPACE entries for consistency
     # This ensures all space-specific entries have the same data as GLOBAL
@@ -1847,12 +1960,12 @@ def _load_glyph_mappings_from_file():
                     # Sync glyph_mode
                     if space_entry.get("glyph_mode", "auto") != global_glyph_mode:
                         space_entry["glyph_mode"] = global_glyph_mode
-                        print(f"[GLYPH LOAD] Synced glyph_mode '{global_glyph_mode}' from GLOBAL to space {space_type_id} for '{category}'")
+                        _pref_log_once(f"[GLYPH LOAD] Synced glyph_mode from GLOBAL to space {space_type_id} for '{category}'")
 
                     # Sync icon data
                     if space_entry.get("icon_source", "auto") != global_icon_source:
                         space_entry["icon_source"] = global_icon_source
-                        print(f"[GLYPH LOAD] Synced icon_source '{global_icon_source}' from GLOBAL to space {space_type_id} for '{category}'")
+                        _pref_log_once(f"[GLYPH LOAD] Synced icon_source from GLOBAL to space {space_type_id} for '{category}'")
                     if space_entry.get("icon_key", "") != global_icon_key:
                         space_entry["icon_key"] = global_icon_key
                     if space_entry.get("icon_path", "") != global_icon_path:
@@ -1865,7 +1978,7 @@ def _load_glyph_mappings_from_file():
                     if global_color and any(c != 0.0 for c in global_color):
                         if space_entry.get("color", [0.0, 0.0, 0.0]) != global_color:
                             space_entry["color"] = global_color
-                            print(f"[GLYPH LOAD] Synced color from GLOBAL to space {space_type_id} for '{category}'")
+                            _pref_log_once(f"[GLYPH LOAD] Synced color from GLOBAL to space {space_type_id} for '{category}'")
 
     _glyph_cache_loaded = True
     print(f"[GLYPH] Loaded {len(_glyph_cache)} mappings, {len(_all_tags_cache)} tags from {filepath}")
@@ -1950,7 +2063,7 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
 
             # DEBUG: Log each category being processed
             cat_tags = category_data.get("tags", []) if isinstance(category_data, dict) else []
-            print(f"[GLYPH SAVE] Processing: key={cache_key}, category='{category}', space_type_str='{space_type_str}', tags={cat_tags}")
+            _pref_log_once(f"[GLYPH SAVE] Processing: key={cache_key}, category='{category}'")
 
             # Initialize nested dict for this space_type if needed
             if space_type_str not in mappings_to_save:
@@ -1973,7 +2086,7 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
                 cat_tags = category_data.get("tags", [])
                 print(f"[GLYPH SAVE] SAVING: '{category}' (space_type={space_type_str}) tags={cat_tags}")
 
-                mappings_to_save[space_type_str][category] = {
+                entry_to_save = {
                     "glyph": _glyph_to_unicode_escape(category_data.get("glyph", "")),
                     "display_name": category_data.get("display_name", ""),
                     "first_letter": category_data.get("first_letter", ""),
@@ -1990,6 +2103,18 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
                         "provider": category_data.get("icon_provider", ""),
                     },
                 }
+
+                # Save extension-related fields for "New Add-ons!" feature
+                if category_data.get("source_extension"):
+                    entry_to_save["source_extension"] = category_data.get("source_extension")
+                if category_data.get("pending_tag_assignment"):
+                    entry_to_save["pending_tag_assignment"] = category_data.get("pending_tag_assignment")
+                if category_data.get("discovered_in_spaces"):
+                    entry_to_save["discovered_in_spaces"] = category_data.get("discovered_in_spaces")
+                if category_data.get("discovered_in_modes"):
+                    entry_to_save["discovered_in_modes"] = category_data.get("discovered_in_modes")
+
+                mappings_to_save[space_type_str][category] = entry_to_save
             elif isinstance(category_data, str):
                 # Old format - convert to new format
                 glyph = _unicode_escape_to_glyph(category_data) if '\\u' in category_data else category_data
@@ -2075,7 +2200,12 @@ def get_category_order(tag_combination):
     global _category_orders_cache, _glyph_cache_loaded
     if not _glyph_cache_loaded:
         _load_glyph_mappings_from_file()
-    return _category_orders_cache.get(tag_combination, []).copy()
+    result = _category_orders_cache.get(tag_combination, []).copy()
+    # Debug logging for NODE: specifically (use _log_once to avoid flooding)
+    if tag_combination == "NODE:":
+        _log_once(f"[CAT ORDER][PY] get_category_order('NODE:') = {result[:5]}... (total {len(result)} entries)")
+        _log_once(f"[CAT ORDER][PY] _category_orders_cache keys: {list(_category_orders_cache.keys())[:10]}")
+    return result
 
 
 def set_category_order(tag_combination, category_list):
@@ -2132,7 +2262,7 @@ def get_tag_names():
     return list(get_all_tags().keys())
 
 
-def get_tags_for_category_ui(category):
+def get_tags_for_category_ui(wm=None, category="", mode_filter=0, space_type=-1):
     """
     Get all tags formatted for C++ UI display.
     Returns string: "name|glyph|is_active|r,g,b;name2|glyph2|is_active2|r,g,b;..."
@@ -2140,15 +2270,31 @@ def get_tags_for_category_ui(category):
     - glyph: unicode glyph character
     - is_active: 1 if assigned to category, 0 otherwise
     - r,g,b: RGB color values (0.0-1.0)
+
+    Parameters:
+    - wm: window manager (unused, kept for C++ compatibility)
+    - category: category name
+    - mode_filter: mode filter flags (unused for now)
+    - space_type: space type for tag lookup (-1 = global)
     """
+    # Handle case where function is called with just category (backward compatibility)
+    if wm is not None and not isinstance(wm, str):
+        # Called from C++ with (wm, category, mode_filter, space_type)
+        pass
+    elif category == "" and isinstance(wm, str):
+        # Called with just category as first arg
+        category = wm
+        wm = None
+        space_type = -1
+
     all_tags = get_all_tags()
-    category_tags = set(get_category_tags(category))
+    category_tags = set(get_category_tags(category, space_type))
 
-    print(f"[DEBUG get_tags_for_category_ui] Category='{category}'")
-    print(f"[DEBUG get_tags_for_category_ui] all_tags count={len(all_tags)}")
-    print(f"[DEBUG get_tags_for_category_ui] category_tags={category_tags}")
+    _pref_log_once(f"[DEBUG get_tags_for_category_ui] Category='{category}', space_type={space_type}")
+    _pref_log_once(f"[DEBUG get_tags_for_category_ui] all_tags count={len(all_tags)}")
+    _pref_log_once(f"[DEBUG get_tags_for_category_ui] category_tags={category_tags}")
 
-    tag_log(f"get_tags_for_category_ui('{category}'): {len(all_tags)} tags found")
+    tag_log(f"get_tags_for_category_ui('{category}', space_type={space_type}): {len(all_tags)} tags found")
 
     parts = []
     for name, data in all_tags.items():
@@ -2159,11 +2305,11 @@ def get_tags_for_category_ui(category):
         color_str = f"{color[0]:.3f},{color[1]:.3f},{color[2]:.3f}"
         # Use | as separator between fields, ; between tags
         parts.append(f"{name}|{glyph}|{is_active}|{color_str}")
-        print(f"[DEBUG get_tags_for_category_ui] Tag '{name}': glyph='{glyph}', is_active={is_active}, color={color_str}")
+        _pref_log_once(f"[DEBUG get_tags_for_category_ui] Tag '{name}': glyph='{glyph}', is_active={is_active}, color={color_str}")
 
     result = ";".join(parts)
     tag_log(f"get_tags_for_category_ui result: '{result}'")
-    print(f"[DEBUG get_tags_for_category_ui] Final result: '{result}'")
+    _pref_log_once(f"[DEBUG get_tags_for_category_ui] Final result: '{result}'")
     return result
 
 
@@ -2232,11 +2378,67 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, auto_save=True):
         _tag_order_cache.append(tag_name)
 
     tag_log(f"Created tag: {tag_name}")
+    print(f"[CREATE_TAG] Tag '{tag_name}' added to _all_tags_cache")
 
     if auto_save:
         _auto_save_tags()
 
+    # Immediately sync the new tag to WM so it's visible in UI
+    # This is important for preview mode where full sync is skipped
+    print(f"[CREATE_TAG] Syncing tag '{tag_name}' to WM for immediate UI visibility")
+    _sync_single_tag_to_wm(tag_name)
+
     return True, f"Tag '{tag_name}' created"
+
+
+def _sync_single_tag_to_wm(tag_name):
+    """Sync a single tag to wm.category_tags without full sync.
+    This allows newly created tags to be immediately visible in UI
+    even during preview mode where sync_glyph_mappings_to_wm() is skipped.
+    """
+    global _all_tags_cache
+
+    if tag_name not in _all_tags_cache:
+        print(f"[SYNC_SINGLE_TAG] Tag '{tag_name}' not in cache, skipping")
+        return False
+
+    try:
+        wm = bpy.context.window_manager
+        if wm is None or not hasattr(wm, 'category_tags'):
+            print(f"[SYNC_SINGLE_TAG] WM or category_tags not available")
+            return False
+
+        tag_data = _all_tags_cache[tag_name]
+        glyph_hex = _glyph_to_hex(tag_data.get("glyph", "")) if isinstance(tag_data, dict) else ""
+        color_val = tag_data.get("color", [0.0, 0.0, 0.0]) if isinstance(tag_data, dict) else [0.0, 0.0, 0.0]
+        mode_flags_val = tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS) if isinstance(tag_data, dict) else _CATEGORY_TAG_DEFAULT_MODE_FLAGS
+
+        # Check if tag already exists in WM
+        existing_tag = None
+        for tag_item in wm.category_tags:
+            if tag_item.name == tag_name:
+                existing_tag = tag_item
+                break
+
+        if existing_tag:
+            # Update existing tag
+            existing_tag.glyph = glyph_hex
+            existing_tag.color = (color_val[0], color_val[1], color_val[2])
+            existing_tag.mode_flags = mode_flags_val
+            print(f"[SYNC_SINGLE_TAG] Updated existing tag '{tag_name}' in WM")
+        else:
+            # Create new tag in WM
+            tag_item = wm.category_tags.new(name=tag_name)
+            tag_item.glyph = glyph_hex
+            tag_item.color = (color_val[0], color_val[1], color_val[2])
+            tag_item.mode_flags = mode_flags_val
+            print(f"[SYNC_SINGLE_TAG] Created new tag '{tag_name}' in WM with glyph='{glyph_hex}'")
+
+        return True
+
+    except Exception as e:
+        print(f"[SYNC_SINGLE_TAG] Error syncing tag '{tag_name}': {e}")
+        return False
 
 
 def update_tag(tag_name, glyph=None, color=None, auto_save=True):
@@ -2301,7 +2503,7 @@ def get_category_tags(category, space_type=-1):
     return []
 
 
-def set_category_tags(category, tags, space_type=-1, auto_save=True):
+def set_category_tags(category, tags, space_type=-1, auto_save=True, update_wm=True):
     """Set tags for a category (replaces existing)."""
     global _glyph_cache, _all_tags_cache
 
@@ -2325,8 +2527,9 @@ def set_category_tags(category, tags, space_type=-1, auto_save=True):
     _glyph_cache[key]["tags"] = valid_tags
     tag_log(f"Set tags for '{category}' (space_type={space_type}): {valid_tags}")
 
-    # Update WM override for sync
-    update_category_tags_in_wm(category, space_type)
+    # Only update WM override if requested (not during preview in edit dialog)
+    if update_wm:
+        update_category_tags_in_wm(category, space_type)
 
     if auto_save:
         _auto_save_tags()
@@ -2334,12 +2537,12 @@ def set_category_tags(category, tags, space_type=-1, auto_save=True):
     return True, f"Tags set for '{category}'"
 
 
-def add_category_tag(category, tag_name, auto_save=True, space_type=-1):
+def add_category_tag(category, tag_name, auto_save=True, space_type=-1, update_wm=True):
     """Add a single tag to a category."""
-    global _glyph_cache, _all_tags_cache
+    global _glyph_cache, _all_tags_cache, _preview_mode_active
 
     # DEBUG
-    print(f"[ADD_TAG] CALLED: category='{category}', tag='{tag_name}', space_type={space_type}, auto_save={auto_save}")
+    print(f"[ADD_TAG] CALLED: category='{category}', tag='{tag_name}', space_type={space_type}, auto_save={auto_save}, update_wm={update_wm}, preview_mode={_preview_mode_active}")
 
     if tag_name not in _all_tags_cache:
         print(f"[ADD_TAG] FAILED: Tag '{tag_name}' not found in _all_tags_cache")
@@ -2354,7 +2557,12 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1):
         if global_key in _glyph_cache:
             # Copy from global entry to preserve glyph, display_name, default_display_name, etc.
             global_data = _glyph_cache[global_key]
-            _glyph_cache[key] = _normalize_category_data(dict(global_data), category)
+            new_entry = _normalize_category_data(dict(global_data), category)
+            # Ensure extension-related fields are preserved (they may not be in old global_data)
+            for ext_field in ["source_extension", "pending_tag_assignment", "discovered_in_spaces", "discovered_in_modes"]:
+                if ext_field in global_data and ext_field not in new_entry:
+                    new_entry[ext_field] = global_data[ext_field]
+            _glyph_cache[key] = new_entry
             print(f"[ADD_TAG] Copied global entry to space-specific for key {key}")
         else:
             _glyph_cache[key] = _normalize_category_data({})
@@ -2374,8 +2582,18 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1):
     print(f"[ADD_TAG] Tags AFTER adding: {_glyph_cache[key]['tags']}")
     tag_log(f"Added tag '{tag_name}' to '{category}' (space_type={space_type})")
 
-    # Update WM override for sync
-    update_category_tags_in_wm(category, space_type)
+    # In preview mode, don't clear pending_tag_assignment yet
+    # It will be cleared only when user clicks Save (in finalize_category_tag_changes)
+    if not _preview_mode_active and update_wm:
+        # Clear pending flag only in non-preview mode
+        cat_data = _glyph_cache[key]
+        if isinstance(cat_data, dict) and cat_data.get("pending_tag_assignment", False):
+            cat_data["pending_tag_assignment"] = False
+            print(f"[ADD_TAG] Cleared pending_tag_assignment for '{category}' (not in preview mode)")
+
+    # Only update WM override if requested (not during preview in edit dialog)
+    if update_wm:
+        update_category_tags_in_wm(category, space_type)
 
     if auto_save:
         print(f"[ADD_TAG] Calling _auto_save_tags()")
@@ -2384,7 +2602,7 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1):
     return True, f"Tag '{tag_name}' added to '{category}'"
 
 
-def remove_category_tag(category, tag_name, auto_save=True, space_type=-1):
+def remove_category_tag(category, tag_name, auto_save=True, space_type=-1, update_wm=True):
     """Remove a single tag from a category."""
     global _glyph_cache
 
@@ -2400,8 +2618,9 @@ def remove_category_tag(category, tag_name, auto_save=True, space_type=-1):
     cat_tags.remove(tag_name)
     tag_log(f"Removed tag '{tag_name}' from '{category}' (space_type={space_type})")
 
-    # Update WM override for sync
-    update_category_tags_in_wm(category, space_type)
+    # Only update WM override if requested (not during preview in edit dialog)
+    if update_wm:
+        update_category_tags_in_wm(category, space_type)
 
     if auto_save:
         _auto_save_tags()
@@ -2409,13 +2628,13 @@ def remove_category_tag(category, tag_name, auto_save=True, space_type=-1):
     return True, f"Tag '{tag_name}' removed from '{category}'"
 
 
-def toggle_category_tag(category, tag_name, auto_save=True, space_type=-1):
+def toggle_category_tag(category, tag_name, auto_save=True, space_type=-1, update_wm=True):
     """Toggle a tag on/off for a category."""
     tags = get_category_tags(category, space_type)
     if tag_name in tags:
-        return remove_category_tag(category, tag_name, auto_save, space_type)
+        return remove_category_tag(category, tag_name, auto_save, space_type, update_wm)
     else:
-        return add_category_tag(category, tag_name, auto_save, space_type)
+        return add_category_tag(category, tag_name, auto_save, space_type, update_wm)
 
 
 def toggle_category_tag_no_save(category, tag_name, space_type=-1):
@@ -2423,43 +2642,93 @@ def toggle_category_tag_no_save(category, tag_name, space_type=-1):
 
     This is used for live preview in the edit dialog. Changes are only
     persisted when the user clicks Save.
+
+    NOTE: We DO update wm.category_glyph_overrides so that the C++ UI
+    (category_tags_string_lookup) can see tag assignments immediately.
+    We only skip sync_glyph_mappings_to_wm() to prevent premature filtering.
     """
-    # DEBUG
-    print(f"[TOGGLE_NO_SAVE] CALLED: category='{category}', tag='{tag_name}', space_type={space_type}")
+    global _preview_mode_active
 
-    tags = get_category_tags(category, space_type)
-    print(f"[TOGGLE_NO_SAVE] Current tags for '{category}': {tags}")
+    # Set preview mode to prevent automatic WM sync during tag operations
+    _preview_mode_active = True
+    try:
+        # DEBUG
+        print(f"[TOGGLE_NO_SAVE] CALLED: category='{category}', tag='{tag_name}', space_type={space_type} (preview_mode=True)")
 
-    if tag_name in tags:
-        print(f"[TOGGLE_NO_SAVE] Tag exists - will REMOVE")
-        result = remove_category_tag(category, tag_name, auto_save=False, space_type=space_type)
-        print(f"[TOGGLE_NO_SAVE] REMOVE result: {result}")
-        # Verify the tag was removed
-        tags_after = get_category_tags(category, space_type)
-        print(f"[TOGGLE_NO_SAVE] Tags after REMOVE: {tags_after}")
+        tags = get_category_tags(category, space_type)
+        print(f"[TOGGLE_NO_SAVE] Current tags for '{category}': {tags}")
+
+        if tag_name in tags:
+            print(f"[TOGGLE_NO_SAVE] Tag exists - will REMOVE")
+            result = remove_category_tag(category, tag_name, auto_save=False, space_type=space_type, update_wm=False)
+            print(f"[TOGGLE_NO_SAVE] REMOVE result: {result}")
+            # Verify the tag was removed
+            tags_after = get_category_tags(category, space_type)
+            print(f"[TOGGLE_NO_SAVE] Tags after REMOVE: {tags_after}")
+        else:
+            print(f"[TOGGLE_NO_SAVE] Tag not exists - will ADD")
+            result = add_category_tag(category, tag_name, auto_save=False, space_type=space_type, update_wm=False)
+            print(f"[TOGGLE_NO_SAVE] ADD result: {result}")
+            # Verify the tag was added
+            tags_after = get_category_tags(category, space_type)
+            print(f"[TOGGLE_NO_SAVE] Tags after ADD: {tags_after}")
+
+        # Update wm.category_glyph_overrides so C++ UI can see tag assignments immediately.
+        # This is necessary because C++ category_tags_string_lookup() reads from
+        # wm->category_glyph_overrides, not from Python cache.
+        # We skip sync_glyph_mappings_to_wm() (via preview_mode) to prevent premature filtering.
+        print(f"[TOGGLE_NO_SAVE] Updating wm.category_glyph_overrides for C++ UI visibility")
+        update_category_tags_in_wm(category, space_type)
+
         return result
-    else:
-        print(f"[TOGGLE_NO_SAVE] Tag not exists - will ADD")
-        result = add_category_tag(category, tag_name, auto_save=False, space_type=space_type)
-        print(f"[TOGGLE_NO_SAVE] ADD result: {result}")
-        # Verify the tag was added
-        tags_after = get_category_tags(category, space_type)
-        print(f"[TOGGLE_NO_SAVE] Tags after ADD: {tags_after}")
-        return result
+    finally:
+        # Keep preview mode active until Save/Cancel - do NOT reset here
+        # This prevents WM sync during context.area.tag_redraw() call
+        print(f"[TOGGLE_NO_SAVE] Keeping preview mode active until Save/Cancel")
 
 
 def restore_category_tags_from_string(category, tags_string, space_type=-1):
     """Restore category tags from a semicolon-separated string.
 
     This is used when cancelling the edit dialog to revert changes.
+    Properly restores pending_tag_assignment=True for unassigned extension categories.
+    Also handles cleanup of any tags that were created during preview but should be cancelled.
     """
+    global _preview_mode_active
+    
+    # Exit preview mode when restoring (Cancel operation)
+    _preview_mode_active = False
+    print(f"[RESTORE] Preview mode disabled for Cancel operation on '{category}'")
+    
     if not tags_string:
         tags = []
     else:
         tags = [t.strip() for t in tags_string.split(';') if t.strip()]
 
     tag_log(f"Restoring tags for '{category}' from string: '{tags_string}' -> {tags} (space_type={space_type})")
-    return set_category_tags(category, tags, space_type=space_type, auto_save=False)
+    
+    # Use update_wm=False during restore to prevent premature filtering changes
+    result = set_category_tags(category, tags, space_type=space_type, auto_save=False, update_wm=False)
+    
+    # If restoring empty tags and category has source_extension, restore pending_tag_assignment=True
+    if not tags:
+        key = _make_cache_key(space_type, category)
+        if key not in _glyph_cache:
+            key = _make_cache_key(-1, category)  # Try global key
+        
+        if key in _glyph_cache:
+            cat_data = _glyph_cache[key]
+            if isinstance(cat_data, dict) and cat_data.get("source_extension", ""):
+                cat_data["pending_tag_assignment"] = True
+                tag_log(f"restore_category_tags_from_string: restored pending=True for '{category}' (space_type={space_type})")
+                # Trigger WM sync to update "New Add-ons!" filter after restoring pending status
+                sync_glyph_mappings_to_wm()
+    
+    # Note: We don't delete tags that were created during preview mode here,
+    # as they might be used by other categories. The tag creation itself is permanent,
+    # only the assignment to this specific category is being cancelled.
+    
+    return result
 
 
 def update_category_tags_in_wm(category, space_type=-1):
@@ -2471,12 +2740,12 @@ def update_category_tags_in_wm(category, space_type=-1):
     try:
         wm = bpy.context.window_manager
         if wm is None or not hasattr(wm, 'category_glyph_overrides'):
-            print(f"[DEBUG update_category_tags_in_wm] ERROR: WM or overrides not available")
+            _pref_log_once(f"[DEBUG update_category_tags_in_wm] ERROR: WM or overrides not available")
             tag_log(f"update_category_tags_in_wm: WM or overrides not available", "ERROR")
             return
 
         current_tags = get_category_tags(category, space_type)
-        print(f"[DEBUG update_category_tags_in_wm] category='{category}', space_type={space_type}, current_tags={current_tags}")
+        _pref_log_once(f"[DEBUG update_category_tags_in_wm] category='{category}', space_type={space_type}, current_tags={current_tags}")
         tag_log(f"update_category_tags_in_wm: category='{category}', space_type={space_type}, tags={current_tags}")
         
         override_item = None
@@ -2485,35 +2754,98 @@ def update_category_tags_in_wm(category, space_type=-1):
             item_space_type = getattr(item, 'space_type', -1)
             if item.category == category and item_space_type == space_type:
                 override_item = item
-                print(f"[DEBUG update_category_tags_in_wm] Found existing override for '{category}'")
+                _pref_log_once(f"[DEBUG update_category_tags_in_wm] Found existing override for '{category}'")
                 break
         
         if override_item is None:
             # Only create a new override if there are actually tags to store.
             # If tags are empty and no override exists, we don't need to create one.
             if not current_tags:
-                print(f"[DEBUG update_category_tags_in_wm] No override and no tags, skipping creation for '{category}' (space_type={space_type})")
+                _pref_log_once(f"[DEBUG update_category_tags_in_wm] No override and no tags, skipping creation for '{category}' (space_type={space_type})")
                 tag_log(f"update_category_tags_in_wm: No override and no tags, skipping creation for '{category}' (space_type={space_type})")
                 return
             override_item = wm.category_glyph_overrides.new(category=category)
             # Set space_type for space-specific categories
             if hasattr(override_item, 'space_type'):
                 override_item.space_type = space_type
-            print(f"[DEBUG update_category_tags_in_wm] Created new override for '{category}' (space_type={space_type})")
+            _pref_log_once(f"[DEBUG update_category_tags_in_wm] Created new override for '{category}' (space_type={space_type})")
             tag_log(f"update_category_tags_in_wm: Created new override for '{category}' (space_type={space_type})")
         
         if hasattr(override_item, 'tags'):
             override_item.tags = ";".join(current_tags)
-            print(f"[DEBUG update_category_tags_in_wm] Set WM override tags for '{category}' to '{override_item.tags}'")
+            _pref_log_once(f"[DEBUG update_category_tags_in_wm] Set WM override tags for '{category}' to '{override_item.tags}'")
             tag_log(f"update_category_tags_in_wm: Set WM override tags for '{category}' (space_type={space_type}) to '{override_item.tags}'")
             
-        print(f"[DEBUG update_category_tags_in_wm] Completed for '{category}' (space_type={space_type})")
+        _pref_log_once(f"[DEBUG update_category_tags_in_wm] Completed for '{category}' (space_type={space_type})")
         tag_log(f"update_category_tags_in_wm: Completed for '{category}' (space_type={space_type})")
     except Exception as e:
-        print(f"[DEBUG update_category_tags_in_wm] Error: {e}")
+        _pref_log_once(f"[DEBUG update_category_tags_in_wm] Error: {e}")
         tag_log(f"update_category_tags_in_wm: Error: {e}", "ERROR")
         import traceback
         traceback.print_exc()
+
+
+def finalize_category_tag_changes(category, space_type=-1):
+    """Finalize tag changes when user clicks Save in edit dialog.
+
+    This function:
+    1. Exits preview mode to allow WM synchronization
+    2. Updates WM with the new tags (makes changes visible in main UI)
+    3. Clears pending_tag_assignment flag (category is no longer "new")
+    4. Syncs changes to WM mappings for persistence
+    5. Saves any new tags created during preview to JSON
+    6. Resets tag_bar_manually_hidden if no more unassigned categories
+    """
+    global _glyph_cache, _preview_mode_active
+
+    # Ensure preview mode is disabled for finalization
+    _preview_mode_active = False
+    print(f"[FINALIZE] Preview mode disabled for '{category}' (space_type={space_type})")
+
+    # Clear pending_tag_assignment in ALL cache entries for this category
+    # (both space-specific and global) so the category is no longer "new"
+    keys_to_clear = []
+    for key in _glyph_cache:
+        if isinstance(key, tuple) and len(key) == 2:
+            key_st, key_cat = key
+            if key_cat == category:
+                keys_to_clear.append(key)
+
+    for key in keys_to_clear:
+        cat_data = _glyph_cache[key]
+        if isinstance(cat_data, dict):
+            if cat_data.get("pending_tag_assignment", False):
+                cat_data["pending_tag_assignment"] = False
+                tag_log(f"finalize_category_tag_changes: cleared pending for '{category}' (key={key})")
+
+    # Update WM override to make changes visible
+    update_category_tags_in_wm(category, space_type)
+
+    # Save any new tags that were created during preview mode
+    # This ensures tags created via "Create Tag" button are persisted
+    _auto_save_tags()
+
+    # Sync to WM mappings for persistence (now that preview mode is off)
+    sync_glyph_mappings_to_wm()
+
+    # Reset tag_bar_manually_hidden if no more unassigned categories remain.
+    # This allows future auto-show to work if new unassigned categories appear.
+    try:
+        import bpy
+        context = bpy.context
+        if context and hasattr(context, 'space_data') and context.space_data:
+            # Check if this was the last unassigned category
+            from bl_ui.space_node import _get_unassigned_categories_count_for_node_editor
+            unassigned_count = _get_unassigned_categories_count_for_node_editor(context)
+            if unassigned_count == 0:
+                snode = context.space_data
+                if hasattr(snode, 'tag_bar_manually_hidden') and snode.tag_bar_manually_hidden:
+                    snode.tag_bar_manually_hidden = False
+                    print(f"[FINALIZE] Reset tag_bar_manually_hidden - no more unassigned categories")
+    except Exception as e:
+        print(f"[FINALIZE] Error checking unassigned count: {e}")
+
+    tag_log(f"finalize_category_tag_changes: completed for '{category}' (space_type={space_type})")
 
 
 def get_categories_for_tag(tag_name):
@@ -3377,7 +3709,9 @@ def _discover_active_categories():
             discovered_sources[category] = source
 
     def _append_panel_sample(source, panel_name, panel_obj):
-        if len(panel_samples) >= 200:
+        # Increased limit to 2000 to ensure all panels including Node Editor are captured.
+        # The previous 200 limit was too low and could miss panels from certain space types.
+        if len(panel_samples) >= 2000:
             return
         try:
             category = getattr(panel_obj, 'bl_category', '')
@@ -3463,7 +3797,7 @@ def _discover_active_categories():
                     pkg_name = ".".join(module_parts[2:])
                     if pkg_name:
                         _record_discovered(pkg_name, "package_dir")
-                        print(
+                        _log_once(
                             f"[GLYPH DISCOVER DEBUG] extension addon seed: "
                             f"module={module_name!r}, category={pkg_name!r}, source='module'"
                         )
@@ -3488,17 +3822,17 @@ def _discover_active_categories():
                                     _record_discovered(seed, "manifest_name")
                                 else:
                                     _record_discovered(seed, "manifest_id")
-                                print(
+                                _log_once(
                                     f"[GLYPH DISCOVER DEBUG] extension addon seed: "
                                     f"module={module_name!r}, category={seed!r}, source='manifest.{key_name}'"
                                 )
                     except Exception as e:
-                        print(
+                        _log_once(
                             f"[GLYPH DISCOVER DEBUG] extension manifest read failed: "
                             f"module={module_name!r}, path={manifest_path!r}, error={e}"
                         )
         except Exception as e:
-            print(f"[GLYPH DISCOVER DEBUG] extension addon seeding failed: {e}")
+            _log_once(f"[GLYPH DISCOVER DEBUG] extension addon seeding failed: {e}")
 
         # Method 5: Seed categories from installed extension packages with a root icon file.
         # This is a fallback for cases where addon enable events do not immediately expose
@@ -3524,7 +3858,7 @@ def _discover_active_categories():
 
                         if pkg_name:
                             _record_discovered(pkg_name, "package_dir")
-                            print(
+                            _log_once(
                                 f"[GLYPH DISCOVER DEBUG] extension package seed: "
                                 f"repo={repo_name!r}, category={pkg_name!r}, source='package_with_icon'"
                             )
@@ -3546,17 +3880,17 @@ def _discover_active_categories():
                                         _record_discovered(seed, "manifest_name")
                                     else:
                                         _record_discovered(seed, "manifest_id")
-                                    print(
+                                    _log_once(
                                         f"[GLYPH DISCOVER DEBUG] extension package seed: "
                                         f"repo={repo_name!r}, category={seed!r}, source='manifest.{key_name}_with_icon'"
                                     )
                         except Exception as e:
-                            print(
+                            _log_once(
                                 f"[GLYPH DISCOVER DEBUG] extension package manifest read failed: "
                                 f"pkg_path={pkg_path!r}, error={e}"
                             )
         except Exception as e:
-            print(f"[GLYPH DISCOVER DEBUG] extension package seeding failed: {e}")
+            _log_once(f"[GLYPH DISCOVER DEBUG] extension package seeding failed: {e}")
 
         # Method 6: Also scan user addon directories for panels with glyph categories.
         # User addons (non-bl_ext.*) are not covered by Method 4, but their panels
@@ -3582,25 +3916,25 @@ def _discover_active_categories():
                                 addon_name = os.path.splitext(filename)[0]
                                 if addon_name and _is_single_glyph(addon_name):
                                     _record_discovered(addon_name, "user_addon_glyph")
-                                    print(
+                                    _log_once(
                                         f"[GLYPH DISCOVER DEBUG] user addon glyph category: "
                                         f"addon={addon_name!r}"
                                     )
         except Exception as e:
-            print(f"[GLYPH DISCOVER DEBUG] user addon seeding failed: {e}")
+            _log_once(f"[GLYPH DISCOVER DEBUG] user addon seeding failed: {e}")
 
         if panel_samples:
-            print(f"[GLYPH DISCOVER DEBUG] panel samples collected: {len(panel_samples)} (showing up to 20)")
+            _log_once(f"[GLYPH DISCOVER DEBUG] panel samples collected: {len(panel_samples)} (showing up to 20)")
             for source, panel_name, category, space_type, region_type, panel_label in panel_samples[:20]:
-                print(
+                _log_once(
                     f"[GLYPH DISCOVER DEBUG] sample: source={source}, panel={panel_name}, "
                     f"bl_category={category!r}, bl_label={panel_label!r}, space={space_type!r}, region={region_type!r}"
                 )
         else:
-            print("[GLYPH DISCOVER DEBUG] panel samples collected: 0")
+            _log_once("[GLYPH DISCOVER DEBUG] panel samples collected: 0")
 
         _last_discovered_category_sources = discovered_sources
-        print(f"[GLYPH] Discovered {len(discovered_categories)} active categories: {sorted(discovered_categories)}")
+        _log_once(f"[GLYPH] Discovered {len(discovered_categories)} active categories: {sorted(discovered_categories)}")
         # Return both discovered categories and panel_samples (for display name lookup)
         return discovered_categories, panel_samples
 
@@ -3625,6 +3959,27 @@ def _merge_discovered_categories():
         panel_samples = []
     if not discovered:
         return False
+
+    # Build a mapping from category name to discovered space types from panel_samples
+    # This is crucial for correctly setting discovered_in_spaces for extension categories
+    # that may appear in different space types than where the extension was dropped
+    category_to_spaces = {}  # category -> set of space_type strings
+    for source, panel_name, category, space_type, region_type, panel_label in panel_samples:
+        if category and space_type:
+            if category not in category_to_spaces:
+                category_to_spaces[category] = set()
+            category_to_spaces[category].add(space_type)
+
+    # Debug: Log category_to_spaces for categories with NODE_EDITOR
+    node_editor_categories = [cat for cat, spaces in category_to_spaces.items() if 'NODE_EDITOR' in spaces]
+    if node_editor_categories:
+        _log_once(f"[CATEGORY_SPACES] Found {len(node_editor_categories)} categories with NODE_EDITOR: {node_editor_categories[:10]}")
+    else:
+        _log_once(f"[CATEGORY_SPACES] WARNING: No categories found with NODE_EDITOR space type!")
+        # Log some sample categories to see what space types we have
+        sample_cats = list(category_to_spaces.items())[:5]
+        for cat, spaces in sample_cats:
+            _log_once(f"[CATEGORY_SPACES] Sample: {cat!r} -> {spaces}")
 
     # Build a mapping from category name to panel label (for display name)
     category_to_label = {}
@@ -3723,7 +4078,7 @@ def _merge_discovered_categories():
 
         if alias_key in _glyph_cache:
             del _glyph_cache[alias_key]
-        print(
+        _log_once(
             f"[GLYPH DISCOVER DEBUG] canonicalized alias in cache: alias={alias_name!r} -> canonical={canonical_name!r}"
         )
         return True
@@ -3741,15 +4096,15 @@ def _merge_discovered_categories():
 
     # Get unique category names from cache (extract from tuple keys)
     cached_category_names = _get_category_names_from_cache()
-    print(f"[GLYPH MERGE DEBUG] cached_category_names count: {len(cached_category_names)}")
-    print(f"[GLYPH MERGE DEBUG] discovered count: {len(discovered)}")
-    print(f"[GLYPH MERGE DEBUG] 'Brushstroke Tools' in cached: {'Brushstroke Tools' in cached_category_names}")
+    _pref_log_once(f"[GLYPH MERGE DEBUG] cached_category_names count: {len(cached_category_names)}")
+    _pref_log_once(f"[GLYPH MERGE DEBUG] discovered count: {len(discovered)}")
+    _pref_log_once(f"[GLYPH MERGE DEBUG] 'Brushstroke Tools' in cached: {'Brushstroke Tools' in cached_category_names}")
     if 'Brushstroke Tools' in cached_category_names:
         brush_key = _make_cache_key(-1, 'Brushstroke Tools')
-        print(f"[GLYPH MERGE DEBUG] Brushstroke cache key: {brush_key}")
-        print(f"[GLYPH MERGE DEBUG] Brushstroke in _glyph_cache: {brush_key in _glyph_cache}")
+        _pref_log_once(f"[GLYPH MERGE DEBUG] Brushstroke cache key: {brush_key}")
+        _pref_log_once(f"[GLYPH MERGE DEBUG] Brushstroke in _glyph_cache: {brush_key in _glyph_cache}")
         if brush_key in _glyph_cache:
-            print(f"[GLYPH MERGE DEBUG] Brushstroke cached data: {_glyph_cache[brush_key]}")
+            _pref_log_once(f"[GLYPH MERGE DEBUG] Brushstroke cached data: {_glyph_cache[brush_key]}")
 
     # Existing cache aliases for active discovered groups are merged into the canonical entry.
     cache_changed = False
@@ -3764,8 +4119,8 @@ def _merge_discovered_categories():
 
     # Find categories that are in the discovered set but not in cache
     new_categories = discovered - cached_category_names
-    print(f"[GLYPH MERGE DEBUG] new_categories count: {len(new_categories)}")
-    print(f"[GLYPH MERGE DEBUG] 'Brushstroke Tools' in new_categories: {'Brushstroke Tools' in new_categories}")
+    _pref_log_once(f"[GLYPH MERGE DEBUG] new_categories count: {len(new_categories)}")
+    _pref_log_once(f"[GLYPH MERGE DEBUG] 'Brushstroke Tools' in new_categories: {'Brushstroke Tools' in new_categories}")
 
     # Canonicalize only new candidates: one mapping per normalized key.
     canonical_new_categories = []
@@ -3787,9 +4142,9 @@ def _merge_discovered_categories():
     new_categories = set(canonical_new_categories)
 
     if suppressed_aliases:
-        print(f"[GLYPH DISCOVER DEBUG] suppressed {len(suppressed_aliases)} alias categories during merge")
-        for alias_name, canonical_name in sorted(suppressed_aliases)[:40]:
-            print(
+        _log_once(f"[GLYPH DISCOVER DEBUG] suppressed {len(suppressed_aliases)} alias categories during merge")
+        for alias_name, canonical_name in sorted(suppressed_aliases)[:5]:  # Reduce from 40 to 5 samples
+            _log_once(
                 f"[GLYPH DISCOVER DEBUG] alias suppressed: alias={alias_name!r}, canonical={canonical_name!r}"
             )
 
@@ -3849,6 +4204,59 @@ def _merge_discovered_categories():
 
     if existing_glyph_only_needing_name_update:
         print(f"[GLYPH] Updated default_display_name for {len(existing_glyph_only_needing_name_update)} existing glyph_only categories")
+
+    # Update existing categories if there is a pending context
+    existing_categories_updated_from_context = False
+    if _pending_extension_context is not None:
+        ext_id = _pending_extension_context.get("extension_id", "")
+        ext_space = _pending_extension_context.get("space_type", -1)
+        ext_mode = _pending_extension_context.get("mode_flag", 0)
+
+        for category in discovered:
+            if category in new_categories:
+                continue
+            cache_key = _get_cache_key_for_category(category)
+            if cache_key in _glyph_cache:
+                cat_data = _glyph_cache[cache_key]
+                if isinstance(cat_data, dict):
+                    existing_ext = cat_data.get("source_extension", "")
+                    # Mark if unassigned or already assigned to this extension
+                    if existing_ext == ext_id or not existing_ext:
+                        if not cat_data.get("source_extension"):
+                            cat_data["source_extension"] = ext_id
+                        if not cat_data.get("pending_tag_assignment"):
+                            cat_data["pending_tag_assignment"] = True
+
+                        # Use ACTUAL discovered spaces from panel_samples, NOT ext_space from drop context.
+                        # This is crucial for extensions like Hot Node that are dropped in VIEW3D but
+                        # register panels in Node Editor - the category must be tagged for NODE_EDITOR,
+                        # not VIEW3D.
+                        category_spaces = category_to_spaces.get(category, set())
+                        if category_spaces:
+                            current_spaces = cat_data.get("discovered_in_spaces", [])
+                            if current_spaces is None: current_spaces = []
+                            spaces_flags = spaces_to_flags(current_spaces)
+                            for space_str in category_spaces:
+                                spaces_flags |= SPACE_TO_FLAG.get(space_str, 0)
+                            cat_data["discovered_in_spaces"] = flags_to_spaces(spaces_flags)
+                            tag_log(
+                                f"_merge_discovered_categories: updated discovered_in_spaces for {category!r} "
+                                f"to {cat_data['discovered_in_spaces']} (from panel_samples)"
+                            )
+
+                        if ext_mode:
+                            current_modes = cat_data.get("discovered_in_modes", [])
+                            if current_modes is None: current_modes = []
+                            modes_flags = modes_to_flags(current_modes)
+                            modes_flags |= ext_mode
+                            cat_data["discovered_in_modes"] = flags_to_modes(modes_flags)
+
+                        cache_changed = True
+                        existing_categories_updated_from_context = True
+                        tag_log(
+                            f"_merge_discovered_categories: updated EXISTING category {category!r} "
+                            f"as pending from extension {ext_id!r}"
+                        )
 
     if new_categories:
         print(f"[GLYPH] Found {len(new_categories)} new categories: {sorted(new_categories)}")
@@ -3913,15 +4321,25 @@ def _merge_discovered_categories():
             # If an extension was just installed, mark this new category as pending.
             if _pending_extension_context is not None:
                 ext_id = _pending_extension_context.get("extension_id", "")
-                ext_space = _pending_extension_context.get("space_type", -1)
                 ext_mode = _pending_extension_context.get("mode_flag", 0)
                 _glyph_cache[cache_key]["source_extension"] = ext_id
                 _glyph_cache[cache_key]["pending_tag_assignment"] = True
-                if ext_space != -1:
-                    space_str = _space_type_id_to_str(ext_space)
-                    _glyph_cache[cache_key]["discovered_in_spaces"] = flags_to_spaces(
-                        SPACE_TO_FLAG.get(space_str, 0)
+
+                # Use ACTUAL discovered spaces from panel_samples, NOT ext_space from drop context.
+                # This is crucial for extensions like Hot Node that are dropped in VIEW3D but
+                # register panels in Node Editor - the category must be tagged for NODE_EDITOR,
+                # not VIEW3D.
+                category_spaces = category_to_spaces.get(category, set())
+                if category_spaces:
+                    spaces_flags = 0
+                    for space_str in category_spaces:
+                        spaces_flags |= SPACE_TO_FLAG.get(space_str, 0)
+                    _glyph_cache[cache_key]["discovered_in_spaces"] = flags_to_spaces(spaces_flags)
+                    tag_log(
+                        f"_merge_discovered_categories: set discovered_in_spaces for new category {category!r} "
+                        f"to {_glyph_cache[cache_key]['discovered_in_spaces']} (from panel_samples)"
                     )
+
                 if ext_mode:
                     _glyph_cache[cache_key]["discovered_in_modes"] = flags_to_modes(ext_mode)
                 tag_log(
@@ -3942,9 +4360,19 @@ def _merge_discovered_categories():
 
             print(f"[GLYPH] Added new category '{category}' with glyph '{glyph}', base_type={base_type}")
 
-        # Consume the pending extension context now that all new categories have been processed.
-        _pending_extension_context = None
+    # Consume the pending extension context now that all categories have been processed
+    # IMPORTANT: Only clear by timeout (30 seconds), NOT by finding new categories.
+    # Extensions may register categories in different space types (e.g., Hot Node dropped
+    # in VIEW3D but appears in Node Editor). We need the context to persist until all
+    # space types have been discovered.
+    if _pending_extension_context is not None:
+        ctx_time = _pending_extension_context.get("timestamp", 0)
+        # Clear only if 30 seconds passed - gives enough time for all space types to be discovered
+        if time.time() - ctx_time > 30.0:
+            tag_log(f"_merge_discovered_categories: clearing pending extension context (30s timeout)")
+            _pending_extension_context = None
 
+    if new_categories:
         # Save updated cache to file (skip if file exists - discovery mode)
         if _save_glyph_mappings_to_file(force_discovery_skip=True):
             print(f"[GLYPH] Saved {len(new_categories)} new category mappings to JSON")
@@ -3952,7 +4380,7 @@ def _merge_discovered_categories():
         else:
             print(f"[GLYPH] Failed to save new category mappings")
 
-    elif cache_changed or existing_categories_needing_icon_update or existing_glyph_only_needing_name_update:
+    elif cache_changed or existing_categories_needing_icon_update or existing_glyph_only_needing_name_update or existing_categories_updated_from_context:
         if _save_glyph_mappings_to_file(force_discovery_skip=True):
             if cache_changed:
                 print("[GLYPH] Saved cache canonicalization updates to JSON")
@@ -3960,6 +4388,8 @@ def _merge_discovered_categories():
                 print(f"[GLYPH] Saved icon updates for {len(existing_categories_needing_icon_update)} existing categories to JSON")
             if existing_glyph_only_needing_name_update:
                 print(f"[GLYPH] Saved default_display_name updates for {len(existing_glyph_only_needing_name_update)} existing glyph_only categories to JSON")
+            if existing_categories_updated_from_context:
+                print(f"[GLYPH] Saved pending_tag_assignment updates for existing categories to JSON")
             return True
         else:
             print("[GLYPH] Failed to save cache updates")
@@ -3989,7 +4419,12 @@ def sync_glyph_mappings_to_wm():
     Note: The collections are cleared in C++ code before file save and after file load
     to prevent crashes from garbage pointers. This function only adds new items.
     """
-    global _glyph_cache, _glyph_cache_loaded, _sync_in_progress
+    global _glyph_cache, _glyph_cache_loaded, _sync_in_progress, _preview_mode_active
+
+    # Skip sync during preview mode to prevent premature category filtering
+    if _preview_mode_active:
+        print("[GLYPH SYNC] sync_glyph_mappings_to_wm: preview mode active, skipping sync")
+        return False
 
     # Prevent recursive calls
     if _sync_in_progress:
@@ -4009,15 +4444,15 @@ def _sync_glyph_mappings_to_wm_impl():
 
     cache_changed = False  # Track if cache was modified during sync
 
-    print(f"[GLYPH SYNC] sync_glyph_mappings_to_wm called, cache has {len(_glyph_cache)} entries")
+    _pref_log_once(f"[GLYPH SYNC] sync_glyph_mappings_to_wm called, cache has {len(_glyph_cache)} entries")
 
     # Re-check categories each sync to catch addons/extensions enabled after startup.
     # This also triggers icon auto-detection for newly discovered categories.
     try:
         discovered_changes = _merge_discovered_categories()
-        print(f"[GLYPH SYNC] late discovery merge result: {discovered_changes}")
+        _pref_log_once(f"[GLYPH SYNC] late discovery merge result: {discovered_changes}")
     except Exception as e:
-        print(f"[GLYPH SYNC] late discovery merge failed: {e}")
+        _pref_log_once(f"[GLYPH SYNC] late discovery merge failed: {e}")
 
     def _has_user_customizations(category_data):
         """Check if category has user customizations (display_name, color, glyph, or tags)."""
@@ -4050,7 +4485,7 @@ def _sync_glyph_mappings_to_wm_impl():
         # IMPORTANT: use RNA clear() (C-side) to handle potentially corrupted ListBase
         # safely after loading older/foreign blend files.
         wm.category_glyph_mappings.clear()
-        print("[GLYPH SYNC] Cleared existing mappings")
+        _pref_log_once("[GLYPH SYNC] Cleared existing mappings")
 
         # Sync available tags (definitions) into wm.category_tags if available
         if hasattr(wm, "category_tags"):
@@ -4082,7 +4517,7 @@ def _sync_glyph_mappings_to_wm_impl():
                 # НОВОЕ: Sync mode flags
                 mode_flags_val = tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS) if isinstance(tag_data, dict) else _CATEGORY_TAG_DEFAULT_MODE_FLAGS
                 tag_item.mode_flags = mode_flags_val
-            print(f"[GLYPH SYNC] Synced {len(wm.category_tags)} tag definitions to WM")
+            _pref_log_once(f"[GLYPH SYNC] Synced {len(wm.category_tags)} tag definitions to WM")
 
         # Add current mappings from cache
         # Cache keys are tuples: (space_type, category_name)
@@ -4134,24 +4569,24 @@ def _sync_glyph_mappings_to_wm_impl():
                     icon_path_val = str(normalized_data.get("icon_path", ""))
                     icon_provider_val = str(normalized_data.get("icon_provider", ""))
 
-                    # Debug: log all cache entries being processed
-                    print(
+                    # Debug: log all cache entries being processed (use _log_once to avoid flooding)
+                    _pref_log_once(
                         f"[GLYPH SYNC] Processing cache_key={cache_key!r}, "
                         f"category={category!r}, icon_source={icon_source_str!r}, "
                         f"icon_key={icon_key_val!r}, icon_path={icon_path_val!r}"
                     )
 
                     if icon_source_str == "auto" and (not icon_key_val) and (not icon_path_val):
-                        print(
+                        _pref_log_once(
                             f"[] sync attempt: category={category!r}, "
-                            f"icon_source={icon_source_str!r}, key={icon_key_val!r}, path={icon_path_val!r}, provider={icon_provider_val!r}"
+                            f"icon_source={icon_source_str!r}"
                         )
                         detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
                         if detected_icon_path:
                             icon_path_val = detected_icon_path
                             if not icon_provider_val:
                                 icon_provider_val = detected_provider
-                            print(
+                            _pref_log_once(
                                 f"[] sync hit: category={category!r}, "
                                 f"path={icon_path_val!r}, provider={icon_provider_val!r}"
                             )
@@ -4161,7 +4596,7 @@ def _sync_glyph_mappings_to_wm_impl():
                                 normalized_data["icon_provider"] = icon_provider_val
                                 cache_changed = True
                         else:
-                            print(f"[] sync miss: category={category!r}")
+                            _sync_miss_log_once(category)
 
                     icon_source_to_enum = {
                         "auto": "AUTO",
@@ -4204,12 +4639,17 @@ def _sync_glyph_mappings_to_wm_impl():
                         item.tags = tags_str
                         # Debug: log categories with tags
                         if tags_str:
-                            print(f"[GLYPH SYNC] Synced tags for category={category!r}, space_type={space_type_val}, tags='{tags_str}'")
+                            _pref_log_once(f"[GLYPH SYNC] Synced tags for category={category!r}, space_type={space_type_val}")
                     # Sync extension pending-tag fields
                     source_ext_val = normalized_data.get("source_extension", "")
                     pending_val = bool(normalized_data.get("pending_tag_assignment", False))
                     disc_spaces_val = normalized_data.get("discovered_in_spaces", [])
                     disc_modes_val = normalized_data.get("discovered_in_modes", [])
+                    # Debug: log pending assignment for extension categories
+                    if pending_val or 'hot' in category.lower():
+                        disc_spaces_flags = spaces_to_flags(disc_spaces_val)
+                        _pref_log_once(f"[GLYPH SYNC] Extension category: {category!r}, pending={pending_val}, "
+                              f"source_ext={source_ext_val!r}, disc_spaces={disc_spaces_val} -> flags={disc_spaces_flags}")
                     if hasattr(item, "source_extension"):
                         item.source_extension = source_ext_val
                     if hasattr(item, "pending_tag_assignment"):
@@ -4264,7 +4704,7 @@ def _sync_glyph_mappings_to_wm_impl():
 
                     # Debug: show what was synced for key categories
                     if category in ["Item", "View", "Tool", "Edit"]:
-                        print(f"[GLYPH SYNC] Synced '{category}' (space_type={space_type_val}): glyph='{glyph_val}', display_name='{display_name_val}'")
+                        _pref_log_once(f"[GLYPH SYNC] Synced '{category}' (space_type={space_type_val}): glyph='{glyph_val}'")
                 except Exception as e:
                     print(f"[GLYPH] Error adding mapping for {cache_key}: {e}")
 
@@ -4504,7 +4944,7 @@ def _sync_wm_to_glyph_cache_impl():
                     if item_glyph and global_entry.get("glyph", "") != item_glyph:
                         global_entry["glyph"] = item_glyph
                         changes_detected = True
-                        print(f"[GLYPH SYNC] Updated global glyph for '{category}' to '{item_glyph}' from mappings")
+                        _pref_log_once(f"[GLYPH SYNC] Updated global glyph for '{category}' to '{item_glyph}' from mappings")
 
                     # Determine if we should update global entry based on icon_source priority
                     # Priority: 'manual' > 'off' > 'auto'
@@ -4522,18 +4962,18 @@ def _sync_wm_to_glyph_cache_impl():
                     if should_update and global_entry.get("glyph_mode", "auto") != glyph_mode_val:
                         global_entry["glyph_mode"] = glyph_mode_val
                         changes_detected = True
-                        print(f"[GLYPH SYNC] Updated global glyph_mode for '{category}' to '{glyph_mode_val}' from mappings")
+                        _pref_log_once(f"[GLYPH SYNC] Updated global glyph_mode for '{category}' to '{glyph_mode_val}' from mappings")
 
                     # Copy icon data to global entry
                     if should_update:
                         if global_entry.get("icon_source", "auto") != icon_source_val:
                             global_entry["icon_source"] = icon_source_val
                             changes_detected = True
-                            print(f"[GLYPH SYNC] Updated global icon_source for '{category}' from mappings")
+                            _pref_log_once(f"[GLYPH SYNC] Updated global icon_source for '{category}' from mappings")
                         if global_entry.get("icon_key", "") != icon_key_val:
                             global_entry["icon_key"] = icon_key_val
                             changes_detected = True
-                            print(f"[GLYPH SYNC] Updated global icon_key for '{category}' to '{icon_key_val}' from mappings")
+                            _pref_log_once(f"[GLYPH SYNC] Updated global icon_key for '{category}' to '{icon_key_val}' from mappings")
                         if global_entry.get("icon_path", "") != icon_path_val:
                             global_entry["icon_path"] = icon_path_val
                             changes_detected = True
@@ -4585,7 +5025,7 @@ def _sync_wm_to_glyph_cache_impl():
                         continue
 
                     overrides_count += 1
-                    print(f"[GLYPH SYNC] Override found: category='{category}', glyph='{item.glyph}', display_name='{item.display_name}', color={list(item.color[:3])}")
+                    _pref_log_once(f"[GLYPH SYNC] Override found: category='{category}', glyph='{item.glyph}'")
 
                     # Get space_type from item (default to -1 for global)
                     space_type = getattr(item, 'space_type', -1)
@@ -4620,20 +5060,20 @@ def _sync_wm_to_glyph_cache_impl():
                                 base_type = "glyph_text"
                             cached_entry["base_type"] = base_type
                             changes_detected = True
-                            print(f"[GLYPH SYNC] Updated glyph for '{category}' (base_type={base_type})")
+                            _pref_log_once(f"[GLYPH SYNC] Updated glyph for '{category}' (base_type={base_type})")
 
                     if item.display_name:
                         if cached_entry.get("display_name", "") != item.display_name:
                             cached_entry["display_name"] = item.display_name
                             changes_detected = True
-                            print(f"[GLYPH SYNC] Updated display_name for '{category}'")
+                            _pref_log_once(f"[GLYPH SYNC] Updated display_name for '{category}'")
 
                     # Always save color from override (even if zero - user explicitly set it)
                     item_color = list(item.color[:3])
                     if cached_entry.get("color", [0.0, 0.0, 0.0]) != item_color:
                         cached_entry["color"] = item_color
                         changes_detected = True
-                        print(f"[GLYPH SYNC] Updated color for '{category}' to {item_color}")
+                        _pref_log_once(f"[GLYPH SYNC] Updated color for '{category}' to {item_color}")
 
                     # Tags are NOT synced from WM to cache to avoid truncation issues
                     # Tags are stored only in _glyph_cache and JSON
@@ -4710,7 +5150,7 @@ def _sync_wm_to_glyph_cache_impl():
                         if item_glyph and global_entry.get("glyph", "") != item_glyph:
                             global_entry["glyph"] = item_glyph
                             changes_detected = True
-                            print(f"[GLYPH SYNC] Updated global glyph for '{category}' to '{item_glyph}'")
+                            _pref_log_once(f"[GLYPH SYNC] Updated global glyph for '{category}' to '{item_glyph}'")
 
                         # Determine if we should update global entry based on icon_source priority
                         # Priority: 'manual' > 'off' > 'auto'
@@ -4728,28 +5168,28 @@ def _sync_wm_to_glyph_cache_impl():
                         if should_update and global_entry.get("glyph_mode", "auto") != glyph_mode_val:
                             global_entry["glyph_mode"] = glyph_mode_val
                             changes_detected = True
-                            print(f"[GLYPH SYNC] Updated global glyph_mode for '{category}' to '{glyph_mode_val}'")
+                            _pref_log_once(f"[GLYPH SYNC] Updated global glyph_mode for '{category}' to '{glyph_mode_val}'")
 
                         # Copy icon data to global entry
                         if should_update:
                             if global_entry.get("icon_source", "auto") != icon_source_val:
                                 global_entry["icon_source"] = icon_source_val
                                 changes_detected = True
-                                print(f"[GLYPH SYNC] Updated global icon_source for '{category}'")
+                                _pref_log_once(f"[GLYPH SYNC] Updated global icon_source for '{category}'")
                             if global_entry.get("icon_key", "") != icon_key_val:
                                 global_entry["icon_key"] = icon_key_val
                                 changes_detected = True
-                                print(f"[GLYPH SYNC] Updated global icon_key for '{category}' to '{icon_key_val}'")
+                                _pref_log_once(f"[GLYPH SYNC] Updated global icon_key for '{category}' to '{icon_key_val}'")
                             if global_entry.get("icon_path", "") != icon_path_val:
                                 global_entry["icon_path"] = icon_path_val
                                 changes_detected = True
-                                print(f"[GLYPH SYNC] Updated global icon_path for '{category}'")
+                                _pref_log_once(f"[GLYPH SYNC] Updated global icon_path for '{category}'")
                             if global_entry.get("icon_provider", "") != icon_provider_val:
                                 global_entry["icon_provider"] = icon_provider_val
                                 changes_detected = True
-                                print(f"[GLYPH SYNC] Updated global icon_provider for '{category}'")
+                                _pref_log_once(f"[GLYPH SYNC] Updated global icon_provider for '{category}'")
 
-                print(f"[GLYPH SYNC] Processed {overrides_count} items from category_glyph_overrides")
+                _pref_log_once(f"[GLYPH SYNC] Processed {overrides_count} items from category_glyph_overrides")
             except Exception as e:
                 print(f"[GLYPH SYNC] Error reading from category_glyph_overrides: {e}")
                 import traceback
@@ -4788,13 +5228,13 @@ def _sync_wm_to_glyph_cache_impl():
                         if space_entry.get("glyph_mode", "auto") != global_glyph_mode:
                             space_entry["glyph_mode"] = global_glyph_mode
                             changes_detected = True
-                            print(f"[GLYPH SYNC] Synced glyph_mode '{global_glyph_mode}' from GLOBAL to space {space_type_id} for '{category}'")
+                            _pref_log_once(f"[GLYPH SYNC] Synced glyph_mode '{global_glyph_mode}' from GLOBAL to space {space_type_id} for '{category}'")
 
                         # Sync icon data
                         if space_entry.get("icon_source", "auto") != global_icon_source:
                             space_entry["icon_source"] = global_icon_source
                             changes_detected = True
-                            print(f"[GLYPH SYNC] Synced icon_source '{global_icon_source}' from GLOBAL to space {space_type_id} for '{category}'")
+                            _pref_log_once(f"[GLYPH SYNC] Synced icon_source '{global_icon_source}' from GLOBAL to space {space_type_id} for '{category}'")
                         if space_entry.get("icon_key", "") != global_icon_key:
                             space_entry["icon_key"] = global_icon_key
                             changes_detected = True
@@ -4907,7 +5347,15 @@ def _sync_mode_flags_from_wm_to_cache():
 
 def _save_tags_to_json():
     """Save tags to JSON file."""
+    global _preview_mode_active
+    
     print("[SAVE_TAGS_TO_JSON] === CALLED ===")
+    
+    # Skip saving during preview mode to prevent premature WM sync
+    if _preview_mode_active:
+        print("[SAVE_TAGS_TO_JSON] Preview mode active - skipping save to avoid WM sync during preview")
+        return
+    
     # НОВОЕ: First sync mode flags from WM items to cache (captures UI changes)
     print("[SAVE_TAGS_TO_JSON] Step 1: Syncing mode flags from WM to cache")
     _sync_mode_flags_from_wm_to_cache()
@@ -5397,9 +5845,13 @@ class USERPREF_OT_category_tag_create(Operator):
 
     @with_context_check
     def execute(self, context):
+        global _preview_mode_active
+        
         # DEBUG: Проверяем значение glyph при сохранении
         print(f"[DEBUG CREATE_TAG execute] self.glyph = '{self.glyph}'")
         print(f"[DEBUG CREATE_TAG execute] self.name = '{self.name}'")
+        print(f"[DEBUG CREATE_TAG execute] self.category = '{self.category}'")
+        print(f"[DEBUG CREATE_TAG execute] _preview_mode_active = {_preview_mode_active}")
 
         # Validate name - show error and reopen dialog with error message
         if not self.name.strip():
@@ -5445,6 +5897,15 @@ class USERPREF_OT_category_tag_create(Operator):
             auto_save=True
         )
         if success:
+            # Check if we're being called from the category edit dialog
+            # If category is specified and we're not already in preview mode, enable it
+            is_in_edit_dialog = (self.category and self.category != "")
+            
+            if is_in_edit_dialog and not _preview_mode_active:
+                # Enable preview mode for this tag assignment
+                _preview_mode_active = True
+                print(f"[CREATE_TAG] Enabled preview mode for tag assignment to '{self.category}'")
+            
             # If category is specified, assign the tag to it
             if self.category:
                 # Get space type from context to match C++ logic
@@ -5461,15 +5922,27 @@ class USERPREF_OT_category_tag_create(Operator):
                         }
                         space_type = area_type_map.get(area.type, -1)
 
-                add_category_tag(self.category, self.name, auto_save=True, space_type=space_type)
-                tag_log(f"Auto-assigned tag '{self.name}' to category '{self.category}'")
+                if is_in_edit_dialog:
+                    # In edit dialog: use preview mode (no auto-save, no WM update)
+                    print(f"[CREATE_TAG] In edit dialog - using preview mode for tag assignment")
+                    add_category_tag(self.category, self.name, auto_save=False, space_type=space_type, update_wm=False)
+                    tag_log(f"Preview-assigned tag '{self.name}' to category '{self.category}'")
+                    # Update wm.category_glyph_overrides so C++ UI can see the tag assignment immediately
+                    print(f"[CREATE_TAG] Updating wm.category_glyph_overrides for C++ UI visibility")
+                    update_category_tags_in_wm(self.category, space_type)
+                else:
+                    # Normal mode: immediate assignment with save and WM update
+                    add_category_tag(self.category, self.name, auto_save=True, space_type=space_type)
+                    tag_log(f"Auto-assigned tag '{self.name}' to category '{self.category}'")
 
             self.report({'INFO'}, message)
 
-            # Sync to WM to update the UI list immediately
-            sync_glyph_mappings_to_wm()
-            # Also ensure saved to file
-            _auto_save_tags()
+            if not is_in_edit_dialog:
+                # Only sync to WM and save if not in edit dialog
+                # Sync to WM to update the UI list immediately
+                sync_glyph_mappings_to_wm()
+                # Also ensure saved to file
+                _auto_save_tags()
 
             context.area.tag_redraw()
             
@@ -5486,7 +5959,7 @@ class USERPREF_OT_category_tag_create(Operator):
         return {'CANCELLED'}
 
     def draw(self, context):
-        print(
+        _pref_log_once(
             f"[DEBUG CREATE_TAG draw] self={self!r}, "
             f"name='{self.name}', category='{self.category}', glyph='{self.glyph}', "
             f"glyph_search='{self.glyph_search}'"
@@ -5528,7 +6001,7 @@ class USERPREF_OT_category_tag_create(Operator):
             row.label(text=self.error_message, icon='ERROR')
 
     def invoke(self, context, event):
-        print(
+        _pref_log_once(
             f"[DEBUG CREATE_TAG invoke] self={self!r}, "
             f"incoming category='{self.category}', name='{self.name}', validation_attempted={self.validation_attempted}"
         )
@@ -5543,7 +6016,7 @@ class USERPREF_OT_category_tag_create(Operator):
         # When validation_attempted is True, preserve the values passed to the operator
 
         self.error_message = ""
-        print(
+        _pref_log_once(
             f"[DEBUG CREATE_TAG invoke] prepared glyph='{self.glyph}', "
             f"glyph_search='{self.glyph_search}', category='{self.category}'"
         )
@@ -5852,6 +6325,7 @@ class USERPREF_OT_category_tag_toggle(Operator):
             return {'CANCELLED'}
         # Use no-save version for live preview in edit dialog
         # Changes are persisted only when user clicks Save
+        # WM is NOT updated to prevent immediate filtering changes
         print(f"[TOGGLE_OPERATOR] Calling toggle_category_tag_no_save")
         success, message = toggle_category_tag_no_save(
             self.category,
@@ -5860,10 +6334,7 @@ class USERPREF_OT_category_tag_toggle(Operator):
         )
         print(f"[TOGGLE_OPERATOR] Result: success={success}, message='{message}'")
         if success:
-            # Update WM overrides for immediate UI refresh
-            update_category_tags_in_wm(self.category, self.space_type)
-            
-            # Trigger UI redraw for immediate feedback
+            # Trigger UI redraw for immediate feedback in the dialog itself
             context.area.tag_redraw()
             return {'FINISHED'}
         self.report({'ERROR'}, message)
@@ -6252,6 +6723,7 @@ class USERPREF_PT_interface_display_tab_sizes(InterfacePanel, CenterAlignMixIn, 
     bl_label = "Tab Sizes"
     bl_parent_id = "USERPREF_PT_interface_display"
     bl_options = {'DEFAULT_CLOSED'}
+    bl_icon = 'FUND'
 
     def draw_centered(self, context, layout):
         prefs = context.preferences

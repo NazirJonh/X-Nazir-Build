@@ -1049,7 +1049,7 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
 
   char save_cmd[1024];
   BLI_snprintf(save_cmd, sizeof(save_cmd),
-      "from bl_ui.space_userpref import update_category_tags_in_wm, get_category_tags, sync_wm_to_glyph_cache\n"
+      "from bl_ui.space_userpref import finalize_category_tag_changes, get_category_tags, sync_wm_to_glyph_cache\n"
       "import bpy\n"
       "wm = bpy.context.window_manager\n"
       "category = wm.category_tab_save_category\n"
@@ -1058,8 +1058,8 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
       "if category:\n"
       "    tags = get_category_tags(category, space_type=%d)\n"
       "    print(f'[GLYPH SAVE PY] Tags in _glyph_cache for {category}: {tags}')\n"
-      "    update_category_tags_in_wm(category, space_type=%d)\n"
-      "    print(f'[GLYPH SAVE PY] Tags synced to WM override')\n"
+      "    finalize_category_tag_changes(category, space_type=%d)\n"
+      "    print(f'[GLYPH SAVE PY] Changes finalized (WM updated, pending cleared)')\n"
       "    result = sync_wm_to_glyph_cache()\n"
       "    print(f'[GLYPH SAVE PY] sync_wm_to_glyph_cache returned: {result}')\n"
       "else:\n"

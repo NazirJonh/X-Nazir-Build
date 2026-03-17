@@ -4913,8 +4913,14 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     box_rect.ymin = float(rct->ymin);
     box_rect.ymax = float(rct->ymax);
 
-    if (U.category_tabs_visual_effect && display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
-        !is_dragging && !U.category_tabs_show_active_name)
+    /* Allow visual effect even when "Show Active Tab Name" is enabled, but skip the
+     * active tab to avoid stretching the expanded label layout. */
+    const bool visual_effect_allowed_for_tab = (U.category_tabs_visual_effect &&
+                                                display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                                !is_dragging &&
+                                                (!U.category_tabs_show_active_name || !is_active));
+
+    if (visual_effect_allowed_for_tab)
     {
       if (is_active || is_hover) {
         is_visual_effect_active = true;

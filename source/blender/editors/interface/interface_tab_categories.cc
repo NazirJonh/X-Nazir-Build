@@ -125,6 +125,7 @@ struct PendingCategoryInsert {
   double timestamp = 0.0;
   Set<std::string> existing_categories;
   Vector<std::string> pre_order;
+  std::string source_extension_id; /* ID of the extension being dropped (for drag & drop) */
 };
 
 static PendingCategoryInsert g_pending_category_insert;
@@ -143,18 +144,25 @@ struct DeferredCategoryActivation {
   bool extension_signal_received = false;
   bool discover_new_category = false; /* When true, find and activate new category after extension install */
   int discover_retry_count = 0; /* Retry counter for discover mode */
+  /* Extension integration fields */
+  std::string source_extension_id; /* ID of the extension that introduced this category */
+  int activation_space_type = 0;   /* Space type where the extension was activated */
+  uint32_t activation_mode_flag = 0; /* Mode flags where the extension was activated */
+  bool tag_already_assigned = false; /* True if a tag was already assigned via drag & drop */
+  std::string tag_name_to_assign;   /* Tag name to assign when category appears (for deferred tag assignment) */
+  /* Pending insert position - copied from g_pending_category_insert before it's cleared */
+  bool pending_insert_valid = false;
+  std::string pending_insert_tag_key;      /* Full key like "VIEW3D:AAA" for JSON order */
+  std::string pending_insert_anchor_before;
+  std::string pending_insert_anchor_after;
+  std::string pending_insert_target_category;
+  bool pending_insert_insert_above = true;
 };
 
 static DeferredCategoryActivation g_deferred_category_activation;
 
 /* Known categories before extension drop - used to detect new categories */
 static Set<std::string> g_known_categories_before_extension_drop;
-
-/* New extension categories that should bypass tag filtering.
- * These categories appeared after extension installation and should be visible
- * regardless of tag filter state until user explicitly assigns tags to them.
- * This ensures newly installed extensions are immediately visible and usable. */
-static Set<std::string> g_new_extension_categories_visible;
 
 struct DeferredActivationExtensionCallbackState {
   bCallbackFuncStore callback_store = {};
@@ -294,6 +302,160 @@ static void pending_category_insert_set(const std::string &tag_key,
       g_pending_category_insert.existing_categories.add(std::string(pc_dyn->idname));
     }
   }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Extension Category Registration
+ * \{ */
+
+/**
+ * Register a new category introduced by an extension as pending tag assignment.
+ *
+ * Calls the Python function `mark_category_from_extension` via the BPY string API,
+ * then tags the tag bar for refresh so the "New Add-on!" virtual tag can appear.
+ *
+ * \param C            Blender context.
+ * \param category_id  Category name (e.g. "Brushstroke Tools").
+ * \param extension_id Extension package ID (e.g. "blender_org/brushstroke_tools").
+ * \param space_type   Space type where the category was discovered (eSpace_Type).
+ * \param mode_flag    Bitmask of mode flags where the category was discovered.
+ * \param tag_already_assigned  True when a tag was already assigned (drag & drop onto tabs).
+ */
+static void register_new_extension_category(const bContext *C,
+                                            const char *category_id,
+                                            const char *extension_id,
+                                            int space_type,
+                                            uint32_t mode_flag,
+                                            bool tag_already_assigned)
+{
+  if (!C || !category_id || category_id[0] == '\0') {
+    return;
+  }
+
+#ifdef WITH_PYTHON
+  /* Escape category_id and extension_id for safe embedding in a Python string literal. */
+  char esc_cat[512];
+  {
+    int j = 0;
+    for (int i = 0; category_id[i] != '\0' && j < int(sizeof(esc_cat)) - 1; i++) {
+      const char c = category_id[i];
+      if (c == '\\' || c == '\'') {
+        if (j + 1 < int(sizeof(esc_cat)) - 1) {
+          esc_cat[j++] = '\\';
+          esc_cat[j++] = c;
+        }
+      }
+      else {
+        esc_cat[j++] = c;
+      }
+    }
+    esc_cat[j] = '\0';
+  }
+
+  char esc_ext[512];
+  {
+    int j = 0;
+    const char *src = extension_id ? extension_id : "";
+    for (int i = 0; src[i] != '\0' && j < int(sizeof(esc_ext)) - 1; i++) {
+      const char c = src[i];
+      if (c == '\\' || c == '\'') {
+        if (j + 1 < int(sizeof(esc_ext)) - 1) {
+          esc_ext[j++] = '\\';
+          esc_ext[j++] = c;
+        }
+      }
+      else {
+        esc_ext[j++] = c;
+      }
+    }
+    esc_ext[j] = '\0';
+  }
+
+  if (!tag_already_assigned) {
+    /* Mark the category as pending tag assignment via Python. */
+    char python_expr[1280];
+    SNPRINTF(python_expr,
+             "__import__('bl_ui.space_userpref', fromlist=[''])."
+             "mark_category_from_extension('%s', '%s', %d, %u)",
+             esc_cat,
+             esc_ext,
+             space_type,
+             mode_flag);
+
+    const char *imports_none[] = {nullptr};
+    BPY_run_string_exec(const_cast<bContext *>(C), imports_none, python_expr);
+  }
+
+  /* Tag the tag bar for refresh so the "New Add-on!" button can appear/disappear. */
+  WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  ScrArea *area = CTX_wm_area(C);
+  if (area) {
+    ED_area_tag_redraw(area);
+  }
+#else
+  UNUSED_VARS(category_id, extension_id, space_type, mode_flag, tag_already_assigned);
+#endif
+}
+
+/**
+ * Handle an extension being dropped onto the category tabs area.
+ *
+ * - Drop onto tabs (tab_category != nullptr): immediately assign the tag via Python
+ *   (`assign_tag_to_category`) so `pending_tag_assignment` stays false.
+ * - Drop into 3D Viewport (tab_category == nullptr): call `register_new_extension_category()`
+ *   with `pending=true` so the "New Add-on!" virtual tag can surface the category.
+ *
+ * Does NOT add to `g_new_extension_categories_visible` — that set is being phased out.
+ *
+ * \param C              Blender context.
+ * \param category_id    Category name introduced by the extension.
+ * \param extension_id   Extension package ID.
+ * \param tab_category   The tab the extension was dropped onto, or nullptr for viewport drop.
+ * \param tag_name       Tag to assign when dropping onto a tab (may be nullptr).
+ */
+static void handle_extension_drop_on_tabs(const bContext *C,
+                                          const char *category_id,
+                                          const char *extension_id,
+                                          const char *tab_category,
+                                          const char *tag_name)
+{
+  if (!C || !category_id || category_id[0] == '\0') {
+    return;
+  }
+
+#ifdef WITH_PYTHON
+  const ScrArea *area = CTX_wm_area(C);
+  const int space_type = area ? area->spacetype : -1;
+  const uint32_t mode_flag = get_current_tag_mode_flag(C);
+
+  if (tab_category != nullptr && tag_name != nullptr && tag_name[0] != '\0') {
+    /* Drop onto tabs: defer tag assignment until category appears after extension install.
+     * The category doesn't exist yet in _glyph_cache, so immediate assignment would fail.
+     * We store the tag name and set tag_already_assigned=true so the deferred activation
+     * will assign the tag when the category actually appears. */
+    printf("[CATEGORY ACTIVATE] Extension drop on tabs: deferring tag assignment for category '%s', tag '%s'\n",
+           category_id, tag_name);
+    fflush(stdout);
+
+    /* Store tag name for deferred assignment */
+    g_deferred_category_activation.tag_name_to_assign = tag_name;
+
+    /* Register as pending extension category with tag_already_assigned=true.
+     * This means: pending=false (user already chose a tag via drag & drop),
+     * but we still need to activate the category when it appears. */
+    register_new_extension_category(
+        C, category_id, extension_id, space_type, mode_flag, /*tag_already_assigned=*/true);
+  }
+  else {
+    /* Drop into viewport: mark as pending so "New Add-on!" tag surfaces it. */
+    register_new_extension_category(
+        C, category_id, extension_id, space_type, mode_flag, /*tag_already_assigned=*/false);
+  }
+#else
+  UNUSED_VARS(category_id, extension_id, tab_category, tag_name);
+#endif
 }
 
 /** \} */
@@ -1910,10 +2072,10 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
    * New extension categories should be visible regardless of tag filter state,
    * allowing users to see and configure them immediately after installation. */
   if (!category_tags || category_tags[0] == '\0') {
-    /* Exception: if this category is marked as a new extension category, show it.
-     * This allows newly installed extensions to be visible and activatable
-     * even when tag filter is active and they haven't been assigned tags yet. */
-    if (g_new_extension_categories_visible.contains(category_idname)) {
+    /* Exception: if this category has a pending tag assignment (introduced by an extension),
+     * show it so users can see and configure it immediately after installation. */
+    const CategoryGlyphItem *glyph_item = category_glyph_mapping_find(wm, category_idname, space_type);
+    if (glyph_item && glyph_item->pending_tag_assignment) {
       return true;
     }
     return false;
@@ -1941,13 +2103,21 @@ bool panel_category_is_visible_by_tags(const bContext *C,
     return true;
   }
 
+  /* "New Add-on!" filter: when active, show only pending (unassigned) categories. */
+  const ScrArea *area = C ? CTX_wm_area(C) : nullptr;
+  if (is_new_addon_filter_active(area)) {
+    const int space_type = area ? area->spacetype : -1;
+    const uint32_t mode_flag = get_current_tag_mode_flag(C);
+    const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category, space_type);
+    return category_is_unassigned_for_context(wm, item, space_type, mode_flag);
+  }
+
   /* Tag filtering - check horizontal tag bar filter */
   if (!category_passes_tag_filter(C, category)) {
     return false;
   }
 
   /* Get tags assigned to this category with space_type awareness */
-  const ScrArea *area = C ? CTX_wm_area(C) : nullptr;
   const int space_type = area ? area->spacetype : -1;
   const char *tags_string = category_tags_string_lookup(wm, category, space_type);
   if (tags_string == nullptr || tags_string[0] == '\0') {
@@ -2548,7 +2718,8 @@ void category_tabs_apply_drop_insert(bContext *C,
                                      ARegion *region,
                                      const char *category_id,
                                      const char *target_category_id,
-                                     bool insert_above)
+                                     bool insert_above,
+                                     const char *tag_name)
 {
   if (!C || !region || !category_id || !category_id[0]) {
     return;
@@ -2569,6 +2740,18 @@ void category_tabs_apply_drop_insert(bContext *C,
   g_deferred_category_activation.frame_delay = 0; /* No frame delay when waiting for signal */
   g_deferred_category_activation.discover_new_category = true; /* Find new category after install */
   g_deferred_category_activation.discover_retry_count = 0; /* Reset retry counter */
+
+  /* Save tag name for deferred assignment when the new category appears.
+   * This allows assigning the active tag filter to the new category after extension install. */
+  if (tag_name && tag_name[0] != '\0') {
+    g_deferred_category_activation.tag_name_to_assign = tag_name;
+    g_deferred_category_activation.tag_already_assigned = true;
+    printf("[CATEGORY ACTIVATE] Will assign tag '%s' to new category when it appears\n", tag_name);
+  }
+  else {
+    g_deferred_category_activation.tag_name_to_assign.clear();
+    g_deferred_category_activation.tag_already_assigned = false;
+  }
 
   /* Build tag_key for deferred save */
   blender::ui::TagFilterStateRef tag_state{};
@@ -2595,11 +2778,15 @@ void category_tabs_apply_drop_insert(bContext *C,
 
   Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
 
-  /* Save known categories before extension installation to detect new ones later */
+  /* Save ALL known categories before extension installation to detect new ones later.
+   * IMPORTANT: Use region->runtime->panels_category directly, NOT get_ordered_categories()!
+   * get_ordered_categories() applies tag filtering, which would exclude categories without
+   * the active tag. This would cause them to be incorrectly detected as "new" when the
+   * extension installs. */
   g_known_categories_before_extension_drop.clear();
-  for (PanelCategoryDyn *pc_dyn : ordered_categories) {
-    if (pc_dyn->idname && pc_dyn->idname[0]) {
-      g_known_categories_before_extension_drop.add(pc_dyn->idname);
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (pc_dyn.idname && pc_dyn.idname[0]) {
+      g_known_categories_before_extension_drop.add(pc_dyn.idname);
     }
   }
 
@@ -3084,6 +3271,25 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
       }
     }
 
+    /* Copy pending insert position to deferred activation BEFORE clearing it.
+     * This ensures the insert position is preserved for deferred_category_activation_execute. */
+    if (g_pending_category_insert.valid) {
+      g_deferred_category_activation.pending_insert_valid = true;
+      g_deferred_category_activation.pending_insert_tag_key = g_pending_category_insert.tag_key;
+      g_deferred_category_activation.pending_insert_anchor_before = g_pending_category_insert.anchor_before;
+      g_deferred_category_activation.pending_insert_anchor_after = g_pending_category_insert.anchor_after;
+      g_deferred_category_activation.pending_insert_target_category = g_pending_category_insert.target_category;
+      g_deferred_category_activation.pending_insert_insert_above = g_pending_category_insert.insert_above;
+      printf("[CATEGORY ORDER] Copied pending insert to deferred activation: tag_key='%s', anchor_before='%s', anchor_after='%s'\n",
+             g_pending_category_insert.tag_key.c_str(),
+             g_pending_category_insert.anchor_before.c_str(),
+             g_pending_category_insert.anchor_after.c_str());
+    }
+    else {
+      printf("[CATEGORY ORDER] g_pending_category_insert.valid is FALSE - no position to copy!\n");
+    }
+    fflush(stdout);
+
     g_pending_category_insert.valid = false;
 
     /* Auto-activate newly appeared category after extension installation.
@@ -3098,10 +3304,16 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
       for (const std::string &category_id : pending_inserted_ids) {
         printf("[CATEGORY ACTIVATE] Checking category: '%s'\n", category_id.c_str());
 
-        /* Mark this category as a new extension category that should bypass tag filtering.
-         * This ensures it will be visible regardless of current tag filter state. */
-        g_new_extension_categories_visible.add(category_id);
-        printf("[CATEGORY ACTIVATE]   Added to visible extension categories\n");
+        /* Mark this category as a new extension category via the pending_tag_assignment
+         * mechanism. This replaces the old g_new_extension_categories_visible set and
+         * ensures the category is visible through the DNA-backed pending flag. */
+        register_new_extension_category(C,
+                                        category_id.c_str(),
+                                        g_pending_category_insert.source_extension_id.c_str(),
+                                        area ? area->spacetype : -1,
+                                        get_current_tag_mode_flag(C),
+                                        /*tag_already_assigned=*/false);
+        printf("[CATEGORY ACTIVATE]   Registered as pending extension category\n");
 
         const bool is_visible = panel_category_is_visible_by_tags(C, wm, category_id.c_str());
         printf("[CATEGORY ACTIVATE]   is_visible: %s\n", is_visible ? "true" : "false");
@@ -3904,6 +4116,7 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
       g_deferred_category_activation.extension_signal_received = false;
       g_deferred_category_activation.discover_new_category = false;
       g_deferred_category_activation.discover_retry_count = 0;
+      g_deferred_category_activation.tag_name_to_assign.clear();
       g_known_categories_before_extension_drop.clear();
       return;
     }
@@ -3912,11 +4125,15 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
     g_deferred_category_activation.category_id = new_category_id;
     g_deferred_category_activation.wait_for_extension_signal = false; /* Signal already received */
 
-    /* Mark this category as a new extension category that should bypass tag filtering.
-     * This ensures it remains visible even when tag filter is active and
-     * the category hasn't been assigned tags yet. */
-    g_new_extension_categories_visible.add(new_category_id);
-    printf("[CATEGORY ACTIVATE]   Added '%s' to visible extension categories\n", new_category_id.c_str());
+    /* Mark this category as pending tag assignment via the DNA-backed mechanism.
+     * This replaces the old g_new_extension_categories_visible set. */
+    register_new_extension_category(C,
+                                    new_category_id.c_str(),
+                                    g_deferred_category_activation.source_extension_id.c_str(),
+                                    g_deferred_category_activation.activation_space_type,
+                                    g_deferred_category_activation.activation_mode_flag,
+                                    g_deferred_category_activation.tag_already_assigned);
+    printf("[CATEGORY ACTIVATE]   Registered '%s' as pending extension category\n", new_category_id.c_str());
     g_deferred_category_activation.discover_retry_count = 0; /* Reset retry counter */
     printf("[CATEGORY ACTIVATE]   Will activate new category: '%s'\n", category_id.c_str());
   }
@@ -3950,6 +4167,7 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
     g_deferred_category_activation.valid = false;
     g_deferred_category_activation.discover_new_category = false;
     g_deferred_category_activation.discover_retry_count = 0;
+    g_deferred_category_activation.tag_name_to_assign.clear();
     g_known_categories_before_extension_drop.clear();
     return;
   }
@@ -3961,6 +4179,7 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
     g_deferred_category_activation.valid = false;
     g_deferred_category_activation.discover_new_category = false;
     g_deferred_category_activation.discover_retry_count = 0;
+    g_deferred_category_activation.tag_name_to_assign.clear();
     g_known_categories_before_extension_drop.clear();
     return;
   }
@@ -3981,12 +4200,216 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
     printf("[CATEGORY ACTIVATE]   tag_save_last_active_category completed\n");
   }
 
+  /* Assign deferred tag if one was saved from drag & drop on tabs.
+   * This happens when an extension was dropped onto a tab with an active tag filter.
+   * The category didn't exist yet, so we deferred tag assignment until now. */
+  if (!g_deferred_category_activation.tag_name_to_assign.empty()) {
+    printf("[CATEGORY ACTIVATE]   Assigning deferred tag '%s' to category '%s'\n",
+           g_deferred_category_activation.tag_name_to_assign.c_str(),
+           category_id.c_str());
+    fflush(stdout);
+
+#ifdef WITH_PYTHON
+    /* Escape category_id and tag_name for safe embedding in a Python string literal. */
+    char esc_cat[512];
+    {
+      int j = 0;
+      for (int i = 0; category_id[i] != '\0' && j < int(sizeof(esc_cat)) - 1; i++) {
+        const char c = category_id[i];
+        if (c == '\\' || c == '\'') {
+          if (j + 1 < int(sizeof(esc_cat)) - 1) {
+            esc_cat[j++] = '\\';
+            esc_cat[j++] = c;
+          }
+        }
+        else {
+          esc_cat[j++] = c;
+        }
+      }
+      esc_cat[j] = '\0';
+    }
+
+    const std::string &tag_names = g_deferred_category_activation.tag_name_to_assign;
+
+    /* Split multiple tags (may be separated by comma or semicolon) and assign each one. */
+    Vector<std::string> tag_list;
+    category_tab_split_tags(tag_names.c_str(), tag_list, ",;");
+
+    const ScrArea *area = CTX_wm_area(C);
+    const int space_type = area ? area->spacetype : -1;
+
+    for (const std::string &single_tag : tag_list) {
+      /* Escape the tag name for safe embedding in a Python string literal. */
+      char esc_tag[256];
+      {
+        int j = 0;
+        for (size_t i = 0; i < single_tag.size() && j < int(sizeof(esc_tag)) - 1; i++) {
+          const char c = single_tag[i];
+          if (c == '\\' || c == '\'') {
+            if (j + 1 < int(sizeof(esc_tag)) - 1) {
+              esc_tag[j++] = '\\';
+              esc_tag[j++] = c;
+            }
+          }
+          else {
+            esc_tag[j++] = c;
+          }
+        }
+        esc_tag[j] = '\0';
+      }
+
+      char python_expr[1280];
+      SNPRINTF(python_expr,
+               "__import__('bl_ui.space_userpref', fromlist=[''])."
+               "assign_tag_to_category('%s', '%s', %d)",
+               esc_cat,
+               esc_tag,
+               space_type);
+
+      const char *imports_none[] = {nullptr};
+      BPY_run_string_exec(const_cast<bContext *>(C), imports_none, python_expr);
+      printf("[CATEGORY ACTIVATE]   Assigned tag '%s' to category '%s'\n",
+             single_tag.c_str(),
+             category_id.c_str());
+      fflush(stdout);
+    }
+
+    printf("[CATEGORY ACTIVATE]   Deferred tag assignment completed (%zu tags)\n", tag_list.size());
+    fflush(stdout);
+
+    WM_event_add_notifier(const_cast<bContext *>(C), NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+    if (area) {
+      ED_area_tag_redraw(const_cast<ScrArea *>(area));
+    }
+#else
+    UNUSED_VARS(C);
+#endif
+    g_deferred_category_activation.tag_name_to_assign.clear();
+  }
+
+  /* Apply pending category insert position to JSON order if available.
+   * This ensures the new category is inserted at the correct position (between anchors)
+   * rather than being appended to the end.
+   *
+   * Note: g_pending_category_insert.tag_key has format "VIEW3D:AAA" while
+   * g_deferred_category_activation.tag_key has format "AAA", so we check if
+   * the pending key ends with the deferred key (after a colon separator). */
+  bool tag_keys_match = false;
+
+  /* Debug: print state for diagnosis */
+  printf("[CATEGORY ACTIVATE]   Checking pending insert: pending_insert_valid=%d, pending_tag_key='%s', deferred_tag_key='%s'\n",
+         g_deferred_category_activation.pending_insert_valid ? 1 : 0,
+         g_deferred_category_activation.pending_insert_tag_key.c_str(),
+         g_deferred_category_activation.tag_key.c_str());
+  fflush(stdout);
+
+  if (g_deferred_category_activation.pending_insert_valid && !g_deferred_category_activation.tag_key.empty()) {
+    const std::string &pending_key = g_deferred_category_activation.pending_insert_tag_key;
+    const std::string &deferred_key = g_deferred_category_activation.tag_key;
+    /* Check if pending_key ends with ":" + deferred_key or equals deferred_key */
+    if (pending_key == deferred_key) {
+      tag_keys_match = true;
+    }
+    else {
+      size_t colon_pos = pending_key.rfind(':');
+      if (colon_pos != std::string::npos) {
+        std::string pending_tag = pending_key.substr(colon_pos + 1);
+        if (pending_tag == deferred_key) {
+          tag_keys_match = true;
+        }
+      }
+    }
+  }
+  printf("[CATEGORY ACTIVATE]   tag_keys_match=%d\n", tag_keys_match ? 1 : 0);
+  fflush(stdout);
+
+  if (tag_keys_match)
+  {
+    printf("[CATEGORY ACTIVATE]   Applying pending insert position for '%s' (pending_key='%s', deferred_key='%s')\n",
+           category_id.c_str(),
+           g_deferred_category_activation.pending_insert_tag_key.c_str(),
+           g_deferred_category_activation.tag_key.c_str());
+
+    /* Load current order from JSON */
+    Vector<std::string> current_order = load_category_order_from_json(
+        C, g_deferred_category_activation.pending_insert_tag_key.c_str());
+
+    /* Check if category is already in order */
+    bool category_in_order = false;
+    for (const auto &cat : current_order) {
+      if (cat == category_id) {
+        category_in_order = true;
+        break;
+      }
+    }
+
+    if (!category_in_order) {
+      /* Find insert position based on anchors */
+      int insert_index = -1;
+
+      /* Try to find position relative to anchor_after (insert before this) */
+      if (!g_deferred_category_activation.pending_insert_anchor_after.empty()) {
+        for (int i = 0; i < current_order.size(); i++) {
+          if (current_order[i] == g_deferred_category_activation.pending_insert_anchor_after) {
+            insert_index = i;
+            break;
+          }
+        }
+      }
+
+      /* If not found, try anchor_before (insert after this) */
+      if (insert_index == -1 && !g_deferred_category_activation.pending_insert_anchor_before.empty()) {
+        for (int i = 0; i < current_order.size(); i++) {
+          if (current_order[i] == g_deferred_category_activation.pending_insert_anchor_before) {
+            insert_index = i + 1;
+            break;
+          }
+        }
+      }
+
+      /* If still not found, try target_category */
+      if (insert_index == -1 && !g_deferred_category_activation.pending_insert_target_category.empty()) {
+        for (int i = 0; i < current_order.size(); i++) {
+          if (current_order[i] == g_deferred_category_activation.pending_insert_target_category) {
+            insert_index = g_deferred_category_activation.pending_insert_insert_above ? i : i + 1;
+            break;
+          }
+        }
+      }
+
+      /* Insert category at the determined position */
+      if (insert_index >= 0 && insert_index <= current_order.size()) {
+        current_order.insert(insert_index, category_id);
+        printf("[CATEGORY ACTIVATE]     Inserted '%s' at index %d (between '%s' and '%s')\n",
+               category_id.c_str(),
+               insert_index,
+               g_deferred_category_activation.pending_insert_anchor_before.c_str(),
+               g_deferred_category_activation.pending_insert_anchor_after.c_str());
+      }
+      else {
+        /* Fallback: append to end */
+        current_order.append(category_id);
+        printf("[CATEGORY ACTIVATE]     Appended '%s' to end (no anchor found)\n",
+               category_id.c_str());
+      }
+
+      /* Save updated order to JSON */
+      save_category_order_to_json(C, g_deferred_category_activation.pending_insert_tag_key.c_str(), current_order);
+      printf("[CATEGORY ACTIVATE]     Order saved to JSON\n");
+    }
+
+    /* Clear pending insert (in deferred activation) */
+    g_deferred_category_activation.pending_insert_valid = false;
+  }
+
   /* Clear deferred activation */
   g_deferred_category_activation.valid = false;
   g_deferred_category_activation.wait_for_extension_signal = false;
   g_deferred_category_activation.extension_signal_received = false;
   g_deferred_category_activation.discover_new_category = false;
   g_deferred_category_activation.discover_retry_count = 0;
+  g_deferred_category_activation.tag_name_to_assign.clear();
+  g_deferred_category_activation.pending_insert_valid = false;
   g_known_categories_before_extension_drop.clear();
   printf("[CATEGORY ACTIVATE] Deferred activation completed\n");
 }

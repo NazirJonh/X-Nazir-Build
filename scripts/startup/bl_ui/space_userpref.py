@@ -349,6 +349,79 @@ def _make_cache_key(space_type, category):
     return (space_type, category)
 
 
+# -----------------------------------------------------------------------------
+# Extension pending-tag: space/mode flag conversion helpers
+
+# Maps space type string identifiers to single-bit flags for discovered_in_spaces.
+# Uses the same IDs as _space_type_str_to_id but stored as power-of-two bitmask values.
+SPACE_TO_FLAG = {
+    'SPACE_VIEW3D':     (1 << 0),
+    'SPACE_GRAPH':      (1 << 1),
+    'SPACE_OUTLINER':   (1 << 2),
+    'SPACE_PROPERTIES': (1 << 3),
+    'SPACE_FILE':       (1 << 4),
+    'SPACE_IMAGE':      (1 << 5),
+    'SPACE_INFO':       (1 << 6),
+    'SPACE_SEQ':        (1 << 7),
+    'SPACE_TEXT':       (1 << 8),
+    'SPACE_ACTION':     (1 << 9),
+    'SPACE_NLA':        (1 << 10),
+    'SPACE_NODE':       (1 << 11),
+    'SPACE_CONSOLE':    (1 << 12),
+    'SPACE_USERPREF':   (1 << 13),
+    'SPACE_CLIP':       (1 << 14),
+    'SPACE_TOPBAR':     (1 << 15),
+    'SPACE_STATUSBAR':  (1 << 16),
+    'SPACE_SPREADSHEET':(1 << 17),
+}
+_FLAG_TO_SPACE = {v: k for k, v in SPACE_TO_FLAG.items()}
+
+# Maps mode name strings to single-bit flags for discovered_in_modes.
+# Reuses the same bit positions as _CATEGORY_TAG_MODE_NAME_TO_FLAG.
+MODE_TO_FLAG = {name: (1 << bit) for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
+_FLAG_TO_MODE = {v: k for k, v in MODE_TO_FLAG.items()}
+
+
+def spaces_to_flags(spaces_list):
+    """Convert a list of space type strings to a combined bitmask (uint32)."""
+    flags = 0
+    for s in spaces_list:
+        flags |= SPACE_TO_FLAG.get(s, 0)
+    return flags
+
+
+def flags_to_spaces(flags):
+    """Convert a bitmask back to a list of space type strings."""
+    result = []
+    for bit in range(18):
+        mask = 1 << bit
+        if flags & mask:
+            space_str = _FLAG_TO_SPACE.get(mask)
+            if space_str:
+                result.append(space_str)
+    return result
+
+
+def modes_to_flags(modes_list):
+    """Convert a list of mode name strings to a combined bitmask (uint32)."""
+    flags = 0
+    for m in modes_list:
+        flags |= MODE_TO_FLAG.get(m, 0)
+    return flags
+
+
+def flags_to_modes(flags):
+    """Convert a bitmask back to a list of mode name strings."""
+    result = []
+    for bit in range(len(_CATEGORY_TAG_MODES)):
+        mask = 1 << bit
+        if flags & mask:
+            mode_str = _FLAG_TO_MODE.get(mask)
+            if mode_str:
+                result.append(mode_str)
+    return result
+
+
 def _find_panel_label_for_category(category):
     """Find human-readable panel label for a given bl_category using registered panels."""
     try:
@@ -571,7 +644,146 @@ def _set_category_data_internal(category, data, space_type=-1):
     key = _make_cache_key(space_type, category)
     _glyph_cache[key] = data
 
-# Last discovery source per category name (used for canonicalization priority).
+
+def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_flag=0):
+    """Mark a category as originating from an extension and pending tag assignment.
+
+    Called when a new extension is installed and introduces a previously unknown category.
+
+    Args:
+        category_id:   Category name (e.g. "Brushstroke Tools").
+        extension_id:  Extension package ID (e.g. "blender_org/brushstroke_tools").
+        space_type:    Integer space type (eSpace_Type), or -1 for global.
+        mode_flag:     Bitmask of mode flags where the category was discovered.
+    """
+    global _glyph_cache
+
+    key = _make_cache_key(space_type, category_id)
+    cat_data = _glyph_cache.get(key)
+    if cat_data is None:
+        # Also try global key as fallback
+        global_key = _make_cache_key(-1, category_id)
+        cat_data = _glyph_cache.get(global_key)
+        if cat_data is not None:
+            key = global_key
+        else:
+            # Category not yet in cache — create a minimal entry
+            cat_data = _normalize_category_data({})
+            _glyph_cache[key] = cat_data
+
+    if not isinstance(cat_data, dict):
+        cat_data = _normalize_category_data(cat_data)
+        _glyph_cache[key] = cat_data
+
+    cat_data["source_extension"] = extension_id
+    cat_data["pending_tag_assignment"] = True
+
+    # Merge discovered_in_spaces
+    existing_spaces_flags = spaces_to_flags(cat_data.get("discovered_in_spaces", []))
+    if space_type != -1:
+        space_str = _space_type_id_to_str(space_type)
+        existing_spaces_flags |= SPACE_TO_FLAG.get(space_str, 0)
+    cat_data["discovered_in_spaces"] = flags_to_spaces(existing_spaces_flags)
+
+    # Merge discovered_in_modes
+    existing_modes_flags = modes_to_flags(cat_data.get("discovered_in_modes", []))
+    existing_modes_flags |= mode_flag
+    cat_data["discovered_in_modes"] = flags_to_modes(existing_modes_flags)
+
+    tag_log(f"mark_category_from_extension: category={category_id!r}, extension={extension_id!r}, "
+            f"space_type={space_type}, mode_flag={mode_flag:#010x}")
+
+
+def assign_tag_to_category(category_id, tag_name, space_type=-1):
+    """Assign a tag to a category and clear its pending_tag_assignment flag.
+
+    Operates on the GLOBAL mapping (space_type=-1) so the assignment is
+    visible across all editor types.
+
+    If the category doesn't exist in the cache yet (e.g., new extension category),
+    creates a new entry automatically.
+
+    Args:
+        category_id:  Category name.
+        tag_name:     Tag name to assign.
+        space_type:   Space type to look up first; falls back to global (-1).
+    """
+    global _glyph_cache
+
+    # Prefer the space-specific entry; fall back to global
+    key = _make_cache_key(space_type, category_id)
+    cat_data = _glyph_cache.get(key)
+    if cat_data is None:
+        key = _make_cache_key(-1, category_id)
+        cat_data = _glyph_cache.get(key)
+
+    if cat_data is None:
+        # Category not in cache yet - create new entry for extension category
+        # This happens when a new extension category is assigned a tag before
+        # the normal sync cycle adds it to the cache.
+        tag_log(f"assign_tag_to_category: creating new cache entry for {category_id!r}")
+        key = _make_cache_key(-1, category_id)
+        cat_data = {
+            "tags": [],
+            "pending_tag_assignment": False,
+            "source_extension": "",
+            "discovered_in_spaces": [],
+            "discovered_in_modes": [],
+        }
+        _glyph_cache[key] = cat_data
+
+    if not isinstance(cat_data, dict):
+        cat_data = _normalize_category_data(cat_data)
+        _glyph_cache[key] = cat_data
+
+    # Add tag if not already present
+    tags = cat_data.setdefault("tags", [])
+    if tag_name not in tags:
+        tags.append(tag_name)
+
+    # Clear pending flag
+    cat_data["pending_tag_assignment"] = False
+
+    # Sync to window manager (DNA) so the change is reflected in C++ code
+    sync_glyph_mappings_to_wm()
+
+    tag_log(f"assign_tag_to_category: category={category_id!r}, tag={tag_name!r}, pending cleared")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Extension post-install context
+# ---------------------------------------------------------------------------
+
+# Pending extension context: set by extension_post_install_handler() so that
+# the next call to _merge_discovered_categories() can mark newly discovered
+# categories as originating from that extension.
+_pending_extension_context = None  # dict or None: {"extension_id": str, "space_type": int, "mode_flag": int}
+
+
+def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0):
+    """Record the extension that was just installed so the next category discovery
+    can mark any new categories as pending tag assignment.
+
+    Call this immediately after an extension is installed (before the next
+    sync/discovery cycle).
+
+    Args:
+        extension_id:  Extension package ID (e.g. "blender_org/brushstroke_tools").
+        space_type:    Space type where the extension was activated, or -1 for global.
+        mode_flag:     Bitmask of mode flags where the extension was activated.
+    """
+    global _pending_extension_context
+    _pending_extension_context = {
+        "extension_id": extension_id,
+        "space_type": space_type,
+        "mode_flag": mode_flag,
+    }
+    tag_log(
+        f"extension_post_install_handler: extension={extension_id!r}, "
+        f"space_type={space_type}, mode_flag={mode_flag:#010x}"
+    )
+
 _last_discovered_category_sources = {}
 
 # In-memory cache of all tags (tag_name -> {glyph, color})
@@ -590,7 +802,7 @@ _tag_order_cache = []
 _category_orders_cache = {}
 
 # Current JSON format version
-CURRENT_JSON_VERSION = 8  # Bumped for space-aware category order keys
+CURRENT_JSON_VERSION = 9  # Bumped for extension pending-tag fields
 
 # JSON file name in config directory
 GLYPHS_FILENAME = "category_glyphs.json"
@@ -1338,6 +1550,32 @@ def migrate_v7_to_v8(data):
     return data
 
 
+def migrate_v8_to_v9(data):
+    """Migrate v8 to v9: Add extension pending-tag fields to existing categories.
+
+    New fields per category:
+      source_extension  - ID of the extension that introduced this category (empty string)
+      pending_tag_assignment - whether the category is awaiting tag assignment (False)
+      discovered_in_spaces   - list of space type strings where category was discovered ([])
+      discovered_in_modes    - list of mode name strings where category was discovered ([])
+    """
+    tag_log("Migrating JSON v8 → v9")
+    mappings = data.get("mappings", {})
+    if isinstance(mappings, dict):
+        for _space_key, categories in mappings.items():
+            if not isinstance(categories, dict):
+                continue
+            for _cat_name, cat_data in categories.items():
+                if not isinstance(cat_data, dict):
+                    continue
+                cat_data.setdefault("source_extension", "")
+                cat_data.setdefault("pending_tag_assignment", False)
+                cat_data.setdefault("discovered_in_spaces", [])
+                cat_data.setdefault("discovered_in_modes", [])
+    data["version"] = 9
+    return data
+
+
 MIGRATORS = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -1346,6 +1584,7 @@ MIGRATORS = {
     5: migrate_v5_to_v6,
     6: migrate_v6_to_v7,
     7: migrate_v7_to_v8,
+    8: migrate_v8_to_v9,
 }
 
 
@@ -3375,7 +3614,7 @@ def _discover_active_categories():
 
 def _merge_discovered_categories():
     """Merge discovered categories with cached mappings, adding defaults for new ones."""
-    global _glyph_cache, _category_orders_cache
+    global _glyph_cache, _category_orders_cache, _pending_extension_context
 
     result = _discover_active_categories()
     # Handle both old tuple return and new tuple return
@@ -3664,7 +3903,31 @@ def _merge_discovered_categories():
                 "icon_key": "",
                 "icon_path": "",
                 "icon_provider": "",
+                # Extension pending-tag fields (populated below if context is available)
+                "source_extension": "",
+                "pending_tag_assignment": False,
+                "discovered_in_spaces": [],
+                "discovered_in_modes": [],
             }
+
+            # If an extension was just installed, mark this new category as pending.
+            if _pending_extension_context is not None:
+                ext_id = _pending_extension_context.get("extension_id", "")
+                ext_space = _pending_extension_context.get("space_type", -1)
+                ext_mode = _pending_extension_context.get("mode_flag", 0)
+                _glyph_cache[cache_key]["source_extension"] = ext_id
+                _glyph_cache[cache_key]["pending_tag_assignment"] = True
+                if ext_space != -1:
+                    space_str = _space_type_id_to_str(ext_space)
+                    _glyph_cache[cache_key]["discovered_in_spaces"] = flags_to_spaces(
+                        SPACE_TO_FLAG.get(space_str, 0)
+                    )
+                if ext_mode:
+                    _glyph_cache[cache_key]["discovered_in_modes"] = flags_to_modes(ext_mode)
+                tag_log(
+                    f"_merge_discovered_categories: marked new category {category!r} "
+                    f"as pending from extension {ext_id!r}"
+                )
 
             detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
             if detected_icon_path:
@@ -3678,6 +3941,9 @@ def _merge_discovered_categories():
                 print(f"[] merge new category no icon: category={category!r}")
 
             print(f"[GLYPH] Added new category '{category}' with glyph '{glyph}', base_type={base_type}")
+
+        # Consume the pending extension context now that all new categories have been processed.
+        _pending_extension_context = None
 
         # Save updated cache to file (skip if file exists - discovery mode)
         if _save_glyph_mappings_to_file(force_discovery_skip=True):
@@ -3939,6 +4205,19 @@ def _sync_glyph_mappings_to_wm_impl():
                         # Debug: log categories with tags
                         if tags_str:
                             print(f"[GLYPH SYNC] Synced tags for category={category!r}, space_type={space_type_val}, tags='{tags_str}'")
+                    # Sync extension pending-tag fields
+                    source_ext_val = normalized_data.get("source_extension", "")
+                    pending_val = bool(normalized_data.get("pending_tag_assignment", False))
+                    disc_spaces_val = normalized_data.get("discovered_in_spaces", [])
+                    disc_modes_val = normalized_data.get("discovered_in_modes", [])
+                    if hasattr(item, "source_extension"):
+                        item.source_extension = source_ext_val
+                    if hasattr(item, "pending_tag_assignment"):
+                        item.pending_tag_assignment = pending_val
+                    if hasattr(item, "discovered_in_spaces"):
+                        item.discovered_in_spaces = spaces_to_flags(disc_spaces_val)
+                    if hasattr(item, "discovered_in_modes"):
+                        item.discovered_in_modes = modes_to_flags(disc_modes_val)
                     added_count += 1
 
                     # Also create a global fallback mapping when there is no explicit
@@ -3972,6 +4251,15 @@ def _sync_glyph_mappings_to_wm_impl():
                             if hasattr(item_global, "tags") and isinstance(tags_val, (list, tuple)):
                                 tags_str_global = ";".join([t for t in tags_val if isinstance(t, str) and t])
                                 item_global.tags = tags_str_global
+                            # Sync extension pending-tag fields for global fallback
+                            if hasattr(item_global, "source_extension"):
+                                item_global.source_extension = source_ext_val
+                            if hasattr(item_global, "pending_tag_assignment"):
+                                item_global.pending_tag_assignment = pending_val
+                            if hasattr(item_global, "discovered_in_spaces"):
+                                item_global.discovered_in_spaces = spaces_to_flags(disc_spaces_val)
+                            if hasattr(item_global, "discovered_in_modes"):
+                                item_global.discovered_in_modes = modes_to_flags(disc_modes_val)
                             added_count += 1
 
                     # Debug: show what was synced for key categories

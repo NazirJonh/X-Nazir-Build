@@ -832,7 +832,21 @@ struct View3D {
    */
   char tag_last_active_categories[1024] = "";
 
+  /**
+   * Whether the "New Add-on!" virtual tag filter is active.
+   * When true, only pending (unassigned) categories are shown.
+   */
+  char new_addon_filter_active = 0;
+  char _pad_new_addon[3] = {0, 0, 0};
+
+  /**
+   * Saved tag filter state when "New Add-on!" filter is activated.
+   * Restored when the filter is deactivated.
+   */
+  char saved_tag_filter_tags[256] = "";
+
   int _pad2 = 0;
+  char _pad_before_ptr[4] = {0};
 
   void *_pad1 = nullptr;
 

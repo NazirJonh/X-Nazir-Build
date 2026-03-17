@@ -35,6 +35,7 @@
 #include "ED_transform.hh"
 
 #include "UI_interface_c.hh"
+#include "../interface/interface_intern.hh"
 #include "../interface/interface_tag_bar.hh"
 
 #include "view3d_intern.hh"
@@ -215,6 +216,13 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
   TagFilterStateRef state{};
   if (!tag_filter_state_from_area(area, &state) || !state.active_tags || !state.filter_enabled) {
     return OPERATOR_CANCELLED;
+  }
+
+  /* Deactivate "New Add-on!" filter when clicking on a normal tag. */
+  if (is_new_addon_filter_active(area)) {
+    /* Clear saved tags since user is manually selecting tags */
+    set_saved_tag_filter_tags(area, "");
+    set_new_addon_filter_active(area, false);
   }
 
   /* Remember filter state BEFORE any changes - needed for N-Panel hide logic. */
@@ -406,6 +414,13 @@ static wmOperatorStatus view3d_tag_bar_filter_toggle_exec(bContext *C, wmOperato
   TagBarRuntimeData *data = get_tag_bar_data_global(C);
   if (!data) {
     return OPERATOR_CANCELLED;
+  }
+
+  /* Deactivate "New Add-on!" filter when toggling normal filter. */
+  if (is_new_addon_filter_active(area)) {
+    /* Clear saved tags since user is manually toggling filter */
+    set_saved_tag_filter_tags(area, "");
+    set_new_addon_filter_active(area, false);
   }
 
   ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);

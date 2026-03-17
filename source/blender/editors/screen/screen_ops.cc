@@ -112,6 +112,7 @@
 
 /* For category tab functions from interface module */
 #include "interface_intern.hh"
+#include "interface_tag_bar.hh"
 #include "../interface/interface_intern.hh" /* for UI_SELECT_DRAW and Button */
 
 namespace blender {
@@ -7446,6 +7447,7 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
   const std::string category = RNA_string_get(op->ptr, "category");
   const std::string target_category = RNA_string_get(op->ptr, "target_category");
   const bool insert_above = RNA_boolean_get(op->ptr, "insert_above");
+  const std::string tag_name = RNA_string_get(op->ptr, "tag_name");
 
   if (!category.empty()) {
     ui::category_tabs_apply_drop_insert(C,
@@ -7453,7 +7455,8 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
                                         category.c_str(),
                                         target_category.empty() ? category.c_str() :
                                                                     target_category.c_str(),
-                                        insert_above);
+                                        insert_above,
+                                        tag_name.empty() ? nullptr : tag_name.c_str());
   }
 
   return retval;
@@ -7474,6 +7477,7 @@ static void SCREEN_OT_category_tab_extension_drop(wmOperatorType *ot)
   RNA_def_string(ot->srna, "target_category", nullptr, 0, "Target", "Target tab for insert");
   RNA_def_boolean(
       ot->srna, "insert_above", true, "Insert Above", "Insert above the target tab");
+  RNA_def_string(ot->srna, "tag_name", nullptr, 0, "Tag Name", "Active tag to assign to new category");
 }
 
 /** \} */
@@ -8051,6 +8055,15 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
   RNA_string_set(drop->ptr, "category", category);
   RNA_string_set(drop->ptr, "target_category", category);
   RNA_boolean_set(drop->ptr, "insert_above", insert_above);
+
+  /* Get active tag from tag bar for deferred assignment to new category */
+  blender::ui::TagFilterStateRef tag_state{};
+  if (blender::ui::tag_filter_state_from_area(area, &tag_state) && tag_state.active_tags) {
+    RNA_string_set(drop->ptr, "tag_name", tag_state.active_tags);
+  }
+  else {
+    RNA_string_set(drop->ptr, "tag_name", "");
+  }
 
   if (drag->type == WM_DRAG_PATH) {
     const char *path = WM_drag_get_single_path(drag);

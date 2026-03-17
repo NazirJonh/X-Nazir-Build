@@ -73,6 +73,13 @@ struct TagBarRuntimeData {
   bool needs_update = true;  /**< Force update on first access */
 
   char saved_tags[256] = ""; /**< Temporary storage for tags when filter is disabled */
+
+  /** Virtual "New Add-on!" button data. */
+  TagButton new_addon_button;
+  /** Number of unassigned (pending) categories for current context. */
+  int unassigned_count = 0;
+  /** Whether the "New Add-on!" button should be shown. */
+  bool show_new_addon_button = false;
 };
 
 /**

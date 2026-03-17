@@ -910,7 +910,8 @@ void category_tabs_apply_drop_insert(bContext *C,
                                       ARegion *region,
                                       const char *category_id,
                                       const char *target_category_id,
-                                      bool insert_above);
+                                      bool insert_above,
+                                      const char *tag_name = nullptr);
 
 /**
  * Safe category activation that waits for extension installation signals.
@@ -921,6 +922,70 @@ void panel_category_active_set_safe(const bContext *C,
                                    ARegion *region,
                                    const char *category_id,
                                    bool check_extension = true);
+
+/**
+ * Check if a category is unassigned (pending tag assignment) for the given context.
+ * Returns true if the category has a source_extension, pending_tag_assignment=true,
+ * no tags assigned, and was discovered in the given space/mode context.
+ * Reserved categories always return false.
+ */
+bool category_is_unassigned_for_context(const wmWindowManager *wm,
+                                        const CategoryGlyphItem *category,
+                                        int space_type,
+                                        uint32_t current_mode_flag);
+
+/**
+ * Count categories that are unassigned (pending tag assignment) for the given context.
+ * Iterates wm->category_glyph_mappings and counts entries where
+ * category_is_unassigned_for_context() returns true.
+ */
+int get_unassigned_categories_count(const wmWindowManager *wm,
+                                    int space_type,
+                                    uint32_t current_mode_flag);
+
+/**
+ * Returns true if there is at least one unassigned category for the given context,
+ * i.e. the "New Add-on!" virtual tag should be shown in the Tag Bar.
+ */
+bool should_show_new_addon_tag(const wmWindowManager *wm,
+                               int space_type,
+                               uint32_t current_mode_flag);
+
+/**
+ * Check if the "New Add-on!" filter is currently active for the given area.
+ * When active, only pending (unassigned) categories are shown.
+ */
+bool is_new_addon_filter_active(const ScrArea *area);
+
+/**
+ * Set the "New Add-on!" filter active state for the given area.
+ */
+void set_new_addon_filter_active(ScrArea *area, bool active);
+
+/**
+ * Get the saved tag filter tags for the given area.
+ * These tags are saved when "New Add-on!" filter is activated and restored when deactivated.
+ * Returns pointer to the saved tags string (may be empty string), or nullptr if unsupported space.
+ */
+char *get_saved_tag_filter_tags(const ScrArea *area);
+
+/**
+ * Set the saved tag filter tags for the given area.
+ * Used to preserve tag selection when toggling "New Add-on!" filter.
+ */
+void set_saved_tag_filter_tags(ScrArea *area, const char *tags);
+
+/**
+ * Get the glyph string for the "New Add-on!" virtual tag button.
+ * Returns the hex glyph string "\uf23a".
+ */
+const char *get_new_addon_tag_glyph();
+
+/**
+ * Fill r_color with the RGB color for the "New Add-on!" virtual tag button.
+ * Color is green: [0.0, 0.6, 0.02].
+ */
+void get_new_addon_tag_color(float r_color[3]);
 
 /* `interface_tab_categories_edit.cc` */
 

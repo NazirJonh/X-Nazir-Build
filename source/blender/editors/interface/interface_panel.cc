@@ -3351,4 +3351,82 @@ void panel_stop_animation(const bContext *C, Panel *panel)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name New Add-on Tag Helper Functions
+ * \{ */
+
+bool category_is_unassigned_for_context(const wmWindowManager *wm,
+                                        const CategoryGlyphItem *category,
+                                        int space_type,
+                                        uint32_t current_mode_flag)
+{
+  if (!wm || !category) {
+    return false;
+  }
+
+  /* Reserved categories are never considered unassigned. */
+  if (category->is_reserved) {
+    return false;
+  }
+
+  /* Must have a source extension and be pending assignment. */
+  if (category->source_extension[0] == '\0' || !category->pending_tag_assignment) {
+    return false;
+  }
+
+  /* Must not already have tags assigned. */
+  if (category->tags[0] != '\0') {
+    return false;
+  }
+
+  /* Check that this category was discovered in the given space type.
+   * space_type == -1 means global (match any). */
+  if (space_type != -1) {
+    const uint32_t space_flag = (1u << uint32_t(space_type));
+    if ((category->discovered_in_spaces & space_flag) == 0) {
+      return false;
+    }
+  }
+
+  /* Check that this category was discovered in the given mode.
+   * current_mode_flag == 0 means any mode. */
+  if (current_mode_flag != 0) {
+    if ((category->discovered_in_modes & current_mode_flag) == 0) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+int get_unassigned_categories_count(const wmWindowManager *wm,
+                                    int space_type,
+                                    uint32_t current_mode_flag)
+{
+  if (!wm) {
+    return 0;
+  }
+
+  int count = 0;
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+           wm->category_glyph_mappings.first);
+       item;
+       item = item->next)
+  {
+    if (category_is_unassigned_for_context(wm, item, space_type, current_mode_flag)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+bool should_show_new_addon_tag(const wmWindowManager *wm,
+                               int space_type,
+                               uint32_t current_mode_flag)
+{
+  return get_unassigned_categories_count(wm, space_type, current_mode_flag) > 0;
+}
+
+/** \} */
+
 }  // namespace blender::ui

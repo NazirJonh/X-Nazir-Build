@@ -109,7 +109,12 @@ static void do_versions_ensure_spaces_have_tag_bar_region(Main *bmain)
 
         region->regiontype = RGN_TYPE_TAG_BAR;
         region->alignment = alignment_source ? alignment_source->alignment : RGN_ALIGN_TOP;
-        region->flag &= ~RGN_FLAG_HIDDEN;
+        if (ELEM(area.spacetype, SPACE_NODE, SPACE_IMAGE)) {
+          region->flag |= RGN_FLAG_HIDDEN;
+        }
+        else {
+          region->flag &= ~RGN_FLAG_HIDDEN;
+        }
         region->overlap = true;
       }
     }

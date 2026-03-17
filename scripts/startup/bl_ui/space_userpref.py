@@ -9240,7 +9240,6 @@ class VIEW3D_OT_category_tabs_settings(Operator):
             # Visual effect - only in Icon mode
             layout.separator()
             visual_row = layout.row()
-            visual_row.active = not view.category_tabs_show_active_name
             visual_row.prop(view, "category_tabs_visual_effect", text="Visual Effect")
 
             # Outline effect with color picker

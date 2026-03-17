@@ -636,7 +636,7 @@ static SpaceLink *node_create(const ScrArea * /*area*/, const Scene * /*scene*/)
   BLI_addtail(&snode->regionbase, region);
   region->regiontype = RGN_TYPE_TAG_BAR;
   region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
-  region->flag = 0;
+  region->flag = RGN_FLAG_HIDDEN;
   region->overlap = true;
 
   /* buttons/list view */

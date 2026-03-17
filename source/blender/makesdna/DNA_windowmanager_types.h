@@ -145,6 +145,16 @@ typedef struct CategoryGlyphItem {
   /** True when category is from Python DEFAULT_CATEGORY_GLYPHS (single source of truth for reserved tabs). */
   char is_reserved;
   char _pad[7];
+  /** Extension ID that introduced this category (e.g. "blender_org/brushstroke_tools"). */
+  char source_extension[128];
+  /** True when category has not yet been assigned to a tag by the user. */
+  char pending_tag_assignment;
+  char _pad2[3];
+  /** Bitfield of space types (eSpace_Type) where this category was discovered. */
+  uint32_t discovered_in_spaces;
+  /** Bitfield of mode flags where this category was discovered. */
+  uint32_t discovered_in_modes;
+  char _pad3[4];
 } CategoryGlyphItem;
 
 /**

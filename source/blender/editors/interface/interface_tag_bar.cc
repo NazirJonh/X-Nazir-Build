@@ -52,6 +52,8 @@ using blender::wmWindowManager;
 using blender::bContext;
 using blender::View3D;
 using blender::SpaceProperties;
+using blender::SpaceNode;
+using blender::SpaceImage;
 using blender::ScrArea;
 using blender::CategoryTagDef;
 using blender::ARegion;
@@ -402,6 +404,27 @@ void tag_bar_buttons_update(const bContext *C,
   /* NOTE: No sorting here! The order from wm->category_tags matches JSON's "tag_order".
    * Python code uses _tag_order_cache which is loaded from JSON, and the ListBase
    * is populated in that same order during JSON loading. */
+
+  /* Check if "New Add-on!" virtual button should be shown. */
+  const ScrArea *area = C ? CTX_wm_area(C) : nullptr;
+  const int space_type = area ? area->spacetype : -1;
+  const bool show_new_addon = wm && should_show_new_addon_tag(wm, space_type, current_mode_flag);
+
+  data->show_new_addon_button = show_new_addon;
+  data->unassigned_count = show_new_addon ?
+                               get_unassigned_categories_count(wm, space_type, current_mode_flag) :
+                               0;
+
+  if (show_new_addon) {
+    TagButton &btn = data->new_addon_button;
+    STRNCPY(btn.tag_name, "New Add-on!");
+    STRNCPY(btn.glyph, get_new_addon_tag_glyph());
+    get_new_addon_tag_color(btn.color);
+    btn.is_visible = true;
+    btn.is_hovered = false;
+    btn.is_active = area ? is_new_addon_filter_active(area) : false;
+    btn.category_count = data->unassigned_count;
+  }
 }
 
 /** \} */
@@ -714,6 +737,152 @@ void buttons_tag_bar_region_exit(wmWindowManager * /*wm*/, ARegion * /*region*/)
   /* Cache cleanup is handled by SpaceProperties lifecycle */
 }
 
+/* -------------------------------------------------------------------- */
+/** \name New Add-on! Button Drawing Helper
+ * \{ */
+
+/**
+ * Draw the "New Add-on!" virtual button at the given x position.
+ * Returns the width of the drawn button (0 if not drawn).
+ */
+static int draw_new_addon_button(const bContext *C,
+                                 Block *block,
+                                 TagBarRuntimeData *data,
+                                 const ScrArea *area,
+                                 int xco,
+                                 int yco,
+                                 int btn_height,
+                                 float font_size_factor)
+{
+  if (!data || !data->show_new_addon_button) {
+    return 0;
+  }
+
+  const uiStyle *style = style_get_dpi();
+  const float dpi_fac = UI_SCALE_FAC;
+  const int fontid = style->widget.uifont_id;
+  BLF_size(fontid, UI_UNIT_Y * font_size_factor * dpi_fac);
+
+  TagButton &btn = data->new_addon_button;
+
+  /* Convert glyph from hex to UTF-8 for display */
+  char glyph_utf8[8] = "";
+  const char *display_glyph = "";
+  if (btn.glyph[0] != '\0') {
+    if (tag_glyph_hex_to_utf8(btn.glyph, glyph_utf8)) {
+      display_glyph = glyph_utf8;
+    }
+    else {
+      display_glyph = btn.glyph;
+    }
+  }
+
+  /* Build label: glyph + "New Add-on!" + count */
+  char count_str[16] = "";
+  if (data->unassigned_count > 0) {
+    SNPRINTF(count_str, " (%d)", data->unassigned_count);
+  }
+
+  char button_label[96];
+  if (display_glyph[0]) {
+    SNPRINTF(button_label, "%s New Add-on!%s", display_glyph, count_str);
+  }
+  else {
+    SNPRINTF(button_label, "New Add-on!%s", count_str);
+  }
+
+  const int text_width = BLF_width(fontid, button_label, strlen(button_label));
+  const int btn_width = text_width + UI_UNIT_X;
+
+  Button *but = uiDefBut(block,
+                         ButtonType::ButToggle,
+                         button_label,
+                         xco,
+                         yco,
+                         btn_width,
+                         btn_height,
+                         nullptr,
+                         0.0f,
+                         0.0f,
+                         TIP_("Show only categories from newly installed add-ons"));
+
+  if (but) {
+    /* Green color for the button */
+    float color[3];
+    get_new_addon_tag_color(color);
+
+    if (btn.is_active) {
+      /* Active: fill background with green */
+      rgb_float_to_uchar(but->col, color);
+      but->col[3] = 255;
+    }
+    else {
+      /* Inactive: color the text green */
+      rgb_float_to_uchar(but->col, color);
+      but->col[3] = 255;
+      but->drawflag |= BUT_TEXT_USE_COL;
+    }
+
+    /* Store button rect for hit testing */
+    btn.rect.xmin = but->rect.xmin;
+    btn.rect.xmax = but->rect.xmax;
+    btn.rect.ymin = but->rect.ymin;
+    btn.rect.ymax = but->rect.ymax;
+
+    /* "New Add-on!" tag click handler.
+     * When activating: save current tags to saved_tag_filter_tags, clear active tags.
+     * When deactivating: restore tags from saved_tag_filter_tags. */
+    but->func = [](bContext *C_cb, void * /*arg1*/, void * /*arg2*/) {
+      ScrArea *cb_area = CTX_wm_area(C_cb);
+      if (!cb_area) {
+        return;
+      }
+
+      const bool currently_active = is_new_addon_filter_active(cb_area);
+
+      /* Get current tag filter state */
+      TagFilterStateRef state{};
+      if (!tag_filter_state_from_area(cb_area, &state) || !state.active_tags) {
+        /* Fallback: just toggle the flag if we can't get tag state */
+        set_new_addon_filter_active(cb_area, !currently_active);
+        WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+        ED_area_tag_redraw(cb_area);
+        return;
+      }
+
+      if (!currently_active) {
+        /* Activating: save current tags, clear active tags to show only pending categories */
+        set_saved_tag_filter_tags(cb_area, state.active_tags);
+        state.active_tags[0] = '\0';
+        set_new_addon_filter_active(cb_area, true);
+      }
+      else {
+        /* Deactivating: restore saved tags */
+        char *saved_tags = get_saved_tag_filter_tags(cb_area);
+        if (saved_tags && saved_tags[0] != '\0') {
+          BLI_strncpy(state.active_tags, saved_tags, 256);
+        }
+        else {
+          state.active_tags[0] = '\0';
+        }
+        set_new_addon_filter_active(cb_area, false);
+      }
+
+      WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+      ED_area_tag_redraw(cb_area);
+    };
+    but->func_arg1 = nullptr;
+    but->func_arg2 = nullptr;
+
+    /* Update is_active from per-space state */
+    btn.is_active = area ? is_new_addon_filter_active(area) : false;
+  }
+
+  return btn_width;
+}
+
+/** \} */
+
 void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 {
   ScrArea *area = CTX_wm_area(C);
@@ -847,6 +1016,12 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 
     xco += btn_width + UI_UNIT_X / 4;
   }
+
+  /* Draw "New Add-on!" virtual button at the end */
+  const int new_addon_width = draw_new_addon_button(
+      C, block, data, area, xco, 0, UI_UNIT_Y, 0.7f);
+  xco += new_addon_width > 0 ? new_addon_width + UI_UNIT_X / 4 : 0;
+
   data->total_width = xco;
 
   /* Scroll button (if needed) */
@@ -987,6 +1162,9 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
 
     xco += btn_width + 4;
   }
+
+  /* Draw "New Add-on!" virtual button at the end */
+  draw_new_addon_button(C, block, data, area, xco, 0, UI_UNIT_Y - 4, 0.5f);
 
   block_end(C, block);
   block_draw(C, block);
@@ -1129,6 +1307,14 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
 
     xco += btn_width + UI_UNIT_X / 4;
   }
+  }
+
+  /* Draw "New Add-on!" virtual button at the end */
+  {
+    const ScrArea *area = C ? CTX_wm_area(C) : nullptr;
+    const int new_addon_width = draw_new_addon_button(
+        C, block, data, area, xco, yco, UI_UNIT_Y - 4, 0.7f);
+    xco += new_addon_width > 0 ? new_addon_width + UI_UNIT_X / 4 : 0;
   }
 
   /* Store total width for View2D scrolling */
@@ -1499,6 +1685,141 @@ void tag_bar_filter_popover_panel_register(ARegionType *art)
 
   /* Add to global panel type list so popovers can find it from anywhere */
   WM_paneltype_add(pt);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name New Add-on Filter State
+ * \{ */
+
+bool is_new_addon_filter_active(const ScrArea *area)
+{
+  if (!area || !area->spacedata.first) {
+    return false;
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
+      return v3d->new_addon_filter_active != 0;
+    }
+    case SPACE_PROPERTIES: {
+      const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
+      return sbuts->new_addon_filter_active != 0;
+    }
+    case SPACE_NODE: {
+      const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
+      return snode->new_addon_filter_active != 0;
+    }
+    case SPACE_IMAGE: {
+      const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
+      return sima->new_addon_filter_active != 0;
+    }
+  }
+
+  return false;
+}
+
+void set_new_addon_filter_active(ScrArea *area, bool active)
+{
+  if (!area || !area->spacedata.first) {
+    return;
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+      v3d->new_addon_filter_active = active ? 1 : 0;
+      break;
+    }
+    case SPACE_PROPERTIES: {
+      SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
+      sbuts->new_addon_filter_active = active ? 1 : 0;
+      break;
+    }
+    case SPACE_NODE: {
+      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
+      snode->new_addon_filter_active = active ? 1 : 0;
+      break;
+    }
+    case SPACE_IMAGE: {
+      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+      sima->new_addon_filter_active = active ? 1 : 0;
+      break;
+    }
+  }
+}
+
+char *get_saved_tag_filter_tags(const ScrArea *area)
+{
+  if (!area || !area->spacedata.first) {
+    return nullptr;
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
+      return const_cast<char *>(v3d->saved_tag_filter_tags);
+    }
+    case SPACE_PROPERTIES: {
+      const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
+      return const_cast<char *>(sbuts->saved_tag_filter_tags);
+    }
+    case SPACE_NODE: {
+      const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
+      return const_cast<char *>(snode->saved_tag_filter_tags);
+    }
+    case SPACE_IMAGE: {
+      const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
+      return const_cast<char *>(sima->saved_tag_filter_tags);
+    }
+  }
+
+  return nullptr;
+}
+
+void set_saved_tag_filter_tags(ScrArea *area, const char *tags)
+{
+  if (!area || !area->spacedata.first) {
+    return;
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+      STRNCPY(v3d->saved_tag_filter_tags, tags ? tags : "");
+      break;
+    }
+    case SPACE_PROPERTIES: {
+      SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
+      STRNCPY(sbuts->saved_tag_filter_tags, tags ? tags : "");
+      break;
+    }
+    case SPACE_NODE: {
+      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
+      STRNCPY(snode->saved_tag_filter_tags, tags ? tags : "");
+      break;
+    }
+    case SPACE_IMAGE: {
+      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+      STRNCPY(sima->saved_tag_filter_tags, tags ? tags : "");
+      break;
+    }
+  }
+}
+
+const char *get_new_addon_tag_glyph()
+{
+  /* Hex codepoint for U+F23A (Material Symbols "new_releases" icon). */
+  return "f23a";
+}
+
+void get_new_addon_tag_color(float r_color[3])
+{
+  r_color[0] = 0.0f;
+  r_color[1] = 0.6f;
+  r_color[2] = 0.02f;
 }
 
 /** \} */

@@ -6723,7 +6723,9 @@ class USERPREF_PT_interface_display_tab_sizes(InterfacePanel, CenterAlignMixIn, 
     bl_label = "Tab Sizes"
     bl_parent_id = "USERPREF_PT_interface_display"
     bl_options = {'DEFAULT_CLOSED'}
-    bl_icon = 'FUND'
+
+    def draw_header(self, _context):
+        self.layout.label(icon='FUND')
 
     def draw_centered(self, context, layout):
         prefs = context.preferences

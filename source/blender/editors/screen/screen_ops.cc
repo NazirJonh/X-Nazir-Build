@@ -7707,6 +7707,21 @@ static bool category_tab_extension_drag_is_extension(wmDrag *drag)
   return false;
 }
 
+static void category_tab_extension_preview_clear_all_in_screen(bScreen *screen)
+{
+  if (!screen) {
+    return;
+  }
+
+  for (ScrArea &area_iter : screen->areabase) {
+    for (ARegion &region_iter : area_iter.regionbase) {
+      if (region_iter.runtime && ui::category_tabs_extension_preview_is_active(&region_iter)) {
+        ui::category_tabs_extension_preview_clear(&region_iter);
+      }
+    }
+  }
+}
+
 static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
 {
   drop_log_once("[EXT_DROP_POLL] START drag->type=%d\n", drag->type);
@@ -7735,12 +7750,14 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
   ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, event->xy);
   if (!area) {
     drop_log_once("[EXT_DROP_POLL] REJECT: no area at (%d,%d)\n", event->xy[0], event->xy[1]);
+    category_tab_extension_preview_clear_all_in_screen(screen);
     return false;
   }
 
   ARegion *region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, event->xy);
   if (!region) {
     drop_log_once("[EXT_DROP_POLL] REJECT: no region at (%d,%d)\n", event->xy[0], event->xy[1]);
+    category_tab_extension_preview_clear_all_in_screen(screen);
     return false;
   }
 
@@ -7758,6 +7775,7 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
   const bool region_supports_category_tabs = BKE_regiontype_uses_category_tabs(region->runtime->type);
   if (!region_supports_category_tabs) {
     drop_log_once("[EXT_DROP_POLL] Region doesn't support category tabs (region=%d), accepting\n", region->regiontype);
+    category_tab_extension_preview_clear_all_in_screen(screen);
     /* Accept the drop - invoke will set pending extension context via Python */
     return true;
   }
@@ -7784,6 +7802,7 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
 
     if (!in_tab_area) {
       drop_log_once("[EXT_DROP_POLL] REJECT: not in tab creation area (mx_local=%d)\n", mx_local);
+      ui::category_tabs_extension_preview_clear(region);
       return false;
     }
 
@@ -7796,6 +7815,7 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
     if (!ED_region_panel_category_gutter_isect_xy(area, region, event->xy)) {
       drop_log_once("[EXT_DROP_POLL] REJECT: not in category gutter at (%d,%d)\n",
              event->xy[0], event->xy[1]);
+      ui::category_tabs_extension_preview_clear(region);
       return false;
     }
   }
@@ -7807,29 +7827,28 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
 
   /* For regions with visible tabs, check if drop hits an existing tab */
   if (has_visible_tabs) {
-    /* Add tolerance margin to make it easier to hit tabs when dropping */
-    const int hit_margin = 5;
-    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-      printf("[EXT_DROP_POLL] TAB rect idname='%s' rect=[%d,%d]-[%d,%d]\n",
-             pc_dyn.idname,
-             pc_dyn.rect.xmin,
-             pc_dyn.rect.ymin,
-             pc_dyn.rect.xmax,
-             pc_dyn.rect.ymax);
-      fflush(stdout);
-      /* Use expanded rectangle for hit testing to be more forgiving */
-      rcti expanded_rect = pc_dyn.rect;
-      expanded_rect.xmin -= hit_margin;
-      expanded_rect.xmax += hit_margin;
-      expanded_rect.ymin -= hit_margin;
-      expanded_rect.ymax += hit_margin;
-      if (BLI_rcti_isect_pt(&expanded_rect, mx_local, my_local)) {
-        drop_log_once("[EXT_DROP_POLL] HIT tab idname='%s'\n", pc_dyn.idname);
-        return true;
-      }
+    const char *hovered_category_id = nullptr;
+    int hovered_target_index = -1;
+    bool insert_above = false;
+    constexpr int hit_margin = 5;
+    if (ui::category_tabs_extension_drop_target_from_mouse(C,
+                                                            region,
+                                                            mx_local,
+                                                            my_local,
+                                                            hit_margin,
+                                                            &hovered_category_id,
+                                                            &hovered_target_index,
+                                                            &insert_above,
+                                                            nullptr)) {
+      drop_log_once("[EXT_DROP_POLL] HIT tab idname='%s' target_idx=%d insert_above=%d\n",
+                    hovered_category_id ? hovered_category_id : "(none)",
+                    hovered_target_index,
+                    insert_above ? 1 : 0);
+      return true;
     }
 
     drop_log_once("[EXT_DROP_POLL] REJECT: no tab hit\n");
+    ui::category_tabs_extension_preview_clear(region);
     return false;
   }
   else {
@@ -7841,7 +7860,7 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
 
 static void category_tab_extension_drop_draw_droptip(bContext *C,
                                                      wmWindow *win,
-                                                     wmDrag * /*drag*/,
+                                                     wmDrag *drag,
                                                      const int xy[2])
 {
   drop_log_once("[EXT_DROP_DRAW] START at (%d,%d)\n", xy[0], xy[1]);
@@ -7849,53 +7868,102 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
   bScreen *screen = CTX_wm_screen(C);
   if (!screen) {
     drop_log_once("[EXT_DROP_DRAW] ABORT: no screen\n");
+    if (drag && drag->drop_state.region_from && drag->drop_state.region_from->runtime) {
+      ui::category_tabs_extension_preview_clear(drag->drop_state.region_from);
+    }
     return;
   }
 
   ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, xy);
   if (!area) {
     drop_log_once("[EXT_DROP_DRAW] ABORT: no area at (%d,%d)\n", xy[0], xy[1]);
+    category_tab_extension_preview_clear_all_in_screen(screen);
     return;
   }
 
   ARegion *region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, xy);
   if (!region) {
     drop_log_once("[EXT_DROP_DRAW] ABORT: no region at (%d,%d)\n", xy[0], xy[1]);
+    category_tab_extension_preview_clear_all_in_screen(screen);
     return;
   }
   /* Allow extension drops if the region type supports category tabs, even if none are currently visible */
   if (!BKE_regiontype_uses_category_tabs(region->runtime->type)) {
     drop_log_once("[EXT_DROP_DRAW] ABORT: region type doesn't support category tabs (region=%d)\n", region->regiontype);
+    category_tab_extension_preview_clear_all_in_screen(screen);
     return;
+  }
+
+  drop_log_once("[EXT_DROP_DRAW] region_info: area=%p region=%p type=%d align=%d winrct=[%d,%d]-[%d,%d] preview_active=%d\n",
+                static_cast<void *>(area),
+                static_cast<void *>(region),
+                region->regiontype,
+                RGN_ALIGN_ENUM_FROM_MASK(region->alignment),
+                region->winrct.xmin,
+                region->winrct.ymin,
+                region->winrct.xmax,
+                region->winrct.ymax,
+                ui::category_tabs_extension_preview_is_active(region) ? 1 : 0);
+
+  /* Clear preview from other regions when drag moves to a new region.
+   * This ensures ghost tabs don't persist when cursor leaves a region. */
+  for (ScrArea &area_iter : screen->areabase) {
+    for (ARegion &region_iter : area_iter.regionbase) {
+      if (&region_iter != region && region_iter.runtime &&
+          ui::category_tabs_extension_preview_is_active(&region_iter)) {
+        ui::category_tabs_extension_preview_clear(&region_iter);
+      }
+    }
   }
 
   const bool has_visible_tabs = ui::panel_category_tabs_is_visible(region);
   const int mx_local = xy[0] - region->winrct.xmin;
   const int my_local = xy[1] - region->winrct.ymin;
+  drop_log_once("[EXT_DROP_DRAW] local=(%d,%d) has_visible_tabs=%d preview_active_before=%d\n",
+                mx_local,
+                my_local,
+                has_visible_tabs ? 1 : 0,
+                ui::category_tabs_extension_preview_is_active(region) ? 1 : 0);
 
-  const PanelCategoryDyn *hovered_tab = nullptr;
+  const char *hovered_category_id = nullptr;
+  int target_index = -1;
+  bool insert_above = false;
+  int hovered_tab_height = 0;
 
   if (has_visible_tabs) {
     /* Standard gutter intersection check for regions with visible tabs */
     if (!ED_region_panel_category_gutter_isect_xy(area, region, xy)) {
-      drop_log_once("[EXT_DROP_DRAW] ABORT: not in category gutter at (%d,%d)\n", xy[0], xy[1]);
+      drop_log_once("[EXT_DROP_DRAW] ABORT: not in category gutter at (%d,%d), preview_active=%d\n",
+                    xy[0],
+                    xy[1],
+                    ui::category_tabs_extension_preview_is_active(region) ? 1 : 0);
+      ui::category_tabs_extension_preview_clear(region);
       return;
     }
 
-    /* Find hovered tab */
-    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-      if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
-        hovered_tab = &pc_dyn;
-        break;
-      }
-    }
-
-    if (!hovered_tab) {
-      drop_log_once("[EXT_DROP_DRAW] ABORT: no tab hit local=(%d,%d)\n", mx_local, my_local);
+    constexpr int hit_margin = 5;
+    if (!ui::category_tabs_extension_drop_target_from_mouse(C,
+                                                             region,
+                                                             mx_local,
+                                                             my_local,
+                                                             hit_margin,
+                                                             &hovered_category_id,
+                                                             &target_index,
+                                                             &insert_above,
+                                                             &hovered_tab_height)) {
+      drop_log_once("[EXT_DROP_DRAW] ABORT: no tab hit local=(%d,%d), preview_active=%d\n",
+                    mx_local,
+                    my_local,
+                    ui::category_tabs_extension_preview_is_active(region) ? 1 : 0);
+      ui::category_tabs_extension_preview_clear(region);
       return;
     }
   }
   else {
+    if (ui::category_tabs_extension_preview_is_active(region)) {
+      ui::category_tabs_extension_preview_clear(region);
+    }
+
     /* For regions without visible tabs, validate drop location for tab creation */
     const int alignment = RGN_ALIGN_ENUM_FROM_MASK(region->alignment);
     const int region_width = region->winrct.xmax - region->winrct.xmin;
@@ -7910,7 +7978,10 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
     }
 
     if (!in_tab_area) {
-      drop_log_once("[EXT_DROP_DRAW] ABORT: not in tab creation area (mx_local=%d)\n", mx_local);
+      drop_log_once("[EXT_DROP_DRAW] ABORT: not in tab creation area (mx_local=%d), preview_active=%d\n",
+                    mx_local,
+                    ui::category_tabs_extension_preview_is_active(region) ? 1 : 0);
+      ui::category_tabs_extension_preview_clear(region);
       return;
     }
 
@@ -7918,8 +7989,8 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
     /* hovered_tab remains nullptr for regions without visible tabs */
   }
 
-  if (hovered_tab) {
-    drop_log_once("[EXT_DROP_DRAW] HIT tab idname='%s'\n", hovered_tab->idname);
+  if (hovered_category_id) {
+    drop_log_once("[EXT_DROP_DRAW] HIT tab idname='%s'\n", hovered_category_id);
   }
   else {
     drop_log_once("[EXT_DROP_DRAW] No existing tab, showing drop indicator for new tab creation\n");
@@ -7936,91 +8007,108 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
   const int rct_xmin_local = is_left ? v2d->mask.xmin + 3 : (v2d->mask.xmax - category_tabs_width);
   const int rct_xmax_local = is_left ? v2d->mask.xmin + category_tabs_width : (v2d->mask.xmax - 3);
 
-  /* Determine if cursor is in upper or lower half of the tab (or middle for new tab creation) */
-  const int tab_center_y = hovered_tab ? (hovered_tab->rect.ymin + hovered_tab->rect.ymax) / 2 : my_local;
-  const bool insert_above = (my_local > tab_center_y);
+  /* Set extension drop preview state for ghost visualization.
+   * Only set preview for regions with visible tabs - ghost will be drawn in panel_category_tabs_draw_all. */
+  if (has_visible_tabs) {
+    /* Calculate tab height and padding for preview */
+    const int tab_height = hovered_tab_height > 0 ? hovered_tab_height : round_fl_to_int(UI_UNIT_Y * zoom);
+    const int tab_v_pad = ui::category_tabs_vertical_padding_calc(zoom);
 
-  /* Convert tab rect to screen coordinates */
-  rcti tab_rect;
-  if (hovered_tab) {
-    tab_rect = hovered_tab->rect;
-    tab_rect.xmin = rct_xmin_local + region->winrct.xmin;
-    tab_rect.xmax = rct_xmax_local + region->winrct.xmin;
-    tab_rect.ymin += region->winrct.ymin;
-    tab_rect.ymax += region->winrct.ymax;
+    /* Debug: log drop target info (time-limited: max once per second, or on change) */
+    static double _drop_last_log_time = 0.0;
+    static int _drop_last_target_idx = -999;
+    static bool _drop_last_insert_above = false;
+    const double current_time = BLI_time_now_seconds();
+    const bool should_log = (current_time - _drop_last_log_time > 1.0) ||
+                            (_drop_last_target_idx != target_index) ||
+                            (_drop_last_insert_above != insert_above);
+
+    if (should_log) {
+      printf("[EXT_DROP] droptip: region_type=%d hovered='%s' "
+             "target_idx=%d insert_above=%d zoom=%.2f local=(%d,%d) tab_h=%d pad=%d\n",
+             region->regiontype,
+             hovered_category_id ? hovered_category_id : "(none)",
+             target_index,
+             insert_above ? 1 : 0,
+             zoom,
+             mx_local,
+             my_local,
+             tab_height,
+             tab_v_pad);
+      _drop_last_log_time = current_time;
+      _drop_last_target_idx = target_index;
+      _drop_last_insert_above = insert_above;
+    }
+
+    ui::category_tabs_extension_preview_set(region,
+                                             hovered_category_id ? hovered_category_id : "",
+                                             target_index,
+                                             insert_above,
+                                             tab_height,
+                                             tab_v_pad,
+                                             my_local);
   }
   else {
-    /* For regions without visible tabs, create a default tab area */
+    /* Debug: log when no visible tabs (rate-limited via drop_log_once) */
+    drop_log_once("[EXT_DROP] droptip: NO visible tabs for region_type=%d\n", region->regiontype);
+  }
+
+  /* For regions WITHOUT visible tabs, draw the old-style insert indicator.
+   * For regions WITH visible tabs, the ghost tab is drawn in panel_category_tabs_draw_all. */
+  if (!has_visible_tabs) {
+    /* Convert tab rect to screen coordinates */
+    rcti tab_rect;
     tab_rect.xmin = rct_xmin_local + region->winrct.xmin;
     tab_rect.xmax = rct_xmax_local + region->winrct.xmin;
     tab_rect.ymin = region->winrct.ymin + my_local - 15; /* Center around cursor */
     tab_rect.ymax = region->winrct.ymin + my_local + 15;
+
+    /* Calculate insert indicator position */
+    const int indicator_height = round_fl_to_int(3.0f * UI_SCALE_FAC);
+    const int indicator_margin = round_fl_to_int(2.0f * UI_SCALE_FAC);
+
+    rcti insert_rect;
+    insert_rect.xmin = tab_rect.xmin;
+    insert_rect.xmax = tab_rect.xmax;
+
+    if (insert_above) {
+      insert_rect.ymin = tab_rect.ymax + indicator_margin;
+      insert_rect.ymax = tab_rect.ymax + indicator_margin + indicator_height;
+    }
+    else {
+      insert_rect.ymin = tab_rect.ymin - indicator_margin - indicator_height;
+      insert_rect.ymax = tab_rect.ymin - indicator_margin;
+    }
+
+    /* Get theme colors for insert indicator */
+    float insert_color[4];
+    float insert_outline[4];
+    ui::theme::get_color_4fv(TH_TAB_ACTIVE, insert_color);
+    ui::theme::get_color_4fv(TH_TAB_OUTLINE_ACTIVE, insert_outline);
+
+    /* Make indicator more visible */
+    insert_color[3] = 0.8f;
+    insert_outline[3] = 1.0f;
+
+    wmWindowViewport_ex(win, 0.0f);
+    GPU_blend(GPU_BLEND_ALPHA);
+
+    /* Draw insert indicator as a rounded rectangle */
+    rctf indicator_box;
+    indicator_box.xmin = float(insert_rect.xmin);
+    indicator_box.xmax = float(insert_rect.xmax);
+    indicator_box.ymin = float(insert_rect.ymin);
+    indicator_box.ymax = float(insert_rect.ymax);
+
+    bTheme *btheme = ui::theme::theme_get();
+    const float indicator_radius = btheme->tui.wcol_tab.roundness * U.widget_unit * 0.5f;
+
+    ui::draw_roundbox_corner_set(ui::CNR_ALL);
+    ui::draw_roundbox_4fv(&indicator_box, true, indicator_radius, insert_color);
+    ui::draw_roundbox_4fv(&indicator_box, false, indicator_radius, insert_outline);
+
+    GPU_blend(GPU_BLEND_NONE);
   }
-
-  /* Calculate insert indicator position */
-  const int indicator_height = round_fl_to_int(3.0f * UI_SCALE_FAC);
-  const int indicator_margin = round_fl_to_int(2.0f * UI_SCALE_FAC);
-
-  rcti insert_rect;
-  insert_rect.xmin = tab_rect.xmin;
-  insert_rect.xmax = tab_rect.xmax;
-
-  if (insert_above) {
-    insert_rect.ymin = tab_rect.ymax + indicator_margin;
-    insert_rect.ymax = tab_rect.ymax + indicator_margin + indicator_height;
-  }
-  else {
-    insert_rect.ymin = tab_rect.ymin - indicator_margin - indicator_height;
-    insert_rect.ymax = tab_rect.ymin - indicator_margin;
-  }
-
-  /* Get theme colors for insert indicator */
-  float insert_color[4];
-  float insert_outline[4];
-  ui::theme::get_color_4fv(TH_TAB_ACTIVE, insert_color);
-  ui::theme::get_color_4fv(TH_TAB_OUTLINE_ACTIVE, insert_outline);
-
-  /* Make indicator more visible */
-  insert_color[3] = 0.8f;
-  insert_outline[3] = 1.0f;
-
-  wmWindowViewport_ex(win, 0.0f);
-  GPU_blend(GPU_BLEND_ALPHA);
-
-  /* Draw insert indicator as a rounded rectangle */
-  rctf indicator_box;
-  indicator_box.xmin = float(insert_rect.xmin);
-  indicator_box.xmax = float(insert_rect.xmax);
-  indicator_box.ymin = float(insert_rect.ymin);
-  indicator_box.ymax = float(insert_rect.ymax);
-
-  bTheme *btheme = ui::theme::theme_get();
-  const float indicator_radius = btheme->tui.wcol_tab.roundness * U.widget_unit * 0.5f;
-
-  ui::draw_roundbox_corner_set(ui::CNR_ALL);
-  ui::draw_roundbox_4fv(&indicator_box, true, indicator_radius, insert_color);
-  ui::draw_roundbox_4fv(&indicator_box, false, indicator_radius, insert_outline);
-
-  /* Also draw a subtle highlight on the target tab */
-  float tab_highlight_color[4];
-  copy_v4_v4(tab_highlight_color, insert_color);
-  tab_highlight_color[3] = 0.15f;
-
-  rctf tab_box;
-  tab_box.xmin = float(tab_rect.xmin);
-  tab_box.xmax = float(tab_rect.xmax);
-  tab_box.ymin = float(tab_rect.ymin);
-  tab_box.ymax = float(tab_rect.ymax);
-
-  const int roundbox_corners = region->overlap ? ui::CNR_ALL :
-                                                 (is_left ? (ui::CNR_TOP_LEFT | ui::CNR_BOTTOM_LEFT) :
-                                                            (ui::CNR_TOP_RIGHT | ui::CNR_BOTTOM_RIGHT));
-  const float tab_curve_radius = btheme->tui.wcol_tab.roundness * U.widget_unit;
-
-  ui::draw_roundbox_corner_set(roundbox_corners);
-  ui::draw_roundbox_4fv(&tab_box, true, tab_curve_radius, tab_highlight_color);
-
-  GPU_blend(GPU_BLEND_NONE);
 }
 
 static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
@@ -8036,6 +8124,36 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
   }
 
   ARegion *region = drag->drop_state.region_from;
+  std::string preview_target_category;
+  bool preview_insert_above = false;
+  bool preview_valid = false;
+
+  if (region && region->runtime) {
+    const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
+    if (preview.active && preview.target_category_id[0] != '\0') {
+      preview_target_category = preview.target_category_id;
+      preview_insert_above = preview.insert_above;
+      preview_valid = true;
+      drop_log_once("[EXT_DROP_COPY] using preview target='%s' insert_above=%d cursor_y=%d\n",
+                    preview_target_category.c_str(),
+                    preview_insert_above ? 1 : 0,
+                    preview.cursor_y);
+    }
+  }
+
+  if (region && region->runtime) {
+    const bool was_active = ui::category_tabs_extension_preview_is_active(region);
+    drop_log_once("[EXT_DROP_COPY] region=%p preview_active_before_clear=%d\n",
+                  static_cast<void *>(region),
+                  was_active ? 1 : 0);
+  }
+
+  /* Clear extension drop preview state when drop is applied.
+   * This ensures ghost tab is removed immediately. */
+  if (region && region->runtime) {
+    ui::category_tabs_extension_preview_clear(region);
+  }
+
   if (!region || !ui::panel_category_tabs_is_visible(region)) {
     /* Region doesn't support category tabs - just set URL and return.
      * Invoke will handle setting pending extension context. */
@@ -8063,21 +8181,40 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
   const int mx_local = mouse_x - region->winrct.xmin;
   const int my_local = mouse_y - region->winrct.ymin;
 
-  const PanelCategoryDyn *hovered_tab = nullptr;
-  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
-      hovered_tab = &pc_dyn;
-      break;
+  const char *category = nullptr;
+  bool insert_above = false;
+
+  if (preview_valid) {
+    category = preview_target_category.c_str();
+    insert_above = preview_insert_above;
+  }
+  else {
+    const char *hovered_category_id = nullptr;
+    constexpr int hit_margin = 5;
+    if (!ui::category_tabs_extension_drop_target_from_mouse(C,
+                                                             region,
+                                                             mx_local,
+                                                             my_local,
+                                                             hit_margin,
+                                                             &hovered_category_id,
+                                                             nullptr,
+                                                             &insert_above,
+                                                             nullptr)) {
+      return;
     }
+    category = hovered_category_id;
+    drop_log_once("[EXT_DROP_COPY] fallback hit target='%s' insert_above=%d local=(%d,%d)\n",
+                  category ? category : "(none)",
+                  insert_above ? 1 : 0,
+                  mx_local,
+                  my_local);
   }
 
-  if (!hovered_tab) {
+  if (!category || category[0] == '\0') {
+    drop_log_once("[EXT_DROP_COPY] ABORT: category unresolved (preview_valid=%d)\n",
+                  preview_valid ? 1 : 0);
     return;
   }
-
-  const char *category = hovered_tab->idname;
-  const int tab_center_y = (hovered_tab->rect.ymin + hovered_tab->rect.ymax) / 2;
-  const bool insert_above = (my_local > tab_center_y);
 
   RNA_string_set(drop->ptr, "category", category);
   RNA_string_set(drop->ptr, "target_category", category);
@@ -8093,7 +8230,7 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
   }
 }
 
-static std::string category_tab_extension_drop_tooltip(bContext * /*C*/,
+static std::string category_tab_extension_drop_tooltip(bContext *C,
                                                        wmDrag *drag,
                                                        const int xy[2],
                                                        wmDropBox * /*drop*/)
@@ -8107,12 +8244,16 @@ static std::string category_tab_extension_drop_tooltip(bContext * /*C*/,
   const int my_local = xy[1] - region->winrct.ymin;
 
   const char *category = nullptr;
-  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    if (BLI_rcti_isect_pt(&pc_dyn.rect, mx_local, my_local)) {
-      category = pc_dyn.idname;
-      break;
-    }
-  }
+  constexpr int hit_margin = 5;
+  ui::category_tabs_extension_drop_target_from_mouse(C,
+                                                      region,
+                                                      mx_local,
+                                                      my_local,
+                                                      hit_margin,
+                                                      &category,
+                                                      nullptr,
+                                                      nullptr,
+                                                      nullptr);
 
   if (!category) {
     return "";

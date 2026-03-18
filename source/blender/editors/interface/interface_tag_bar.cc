@@ -67,6 +67,33 @@ using blender::Span;
 /* Global cache for tag bar data, keyed by wmWindowManager pointer */
 static std::map<const wmWindowManager *, TagBarRuntimeData *> g_tag_bar_cache;
 
+/**
+ * Convert CategoryTagMode bit flag to category_tag_filter_mode enum value.
+ * CategoryTagMode uses bit flags (1 << n), while category_tag_filter_mode uses
+ * sequential enum values (n + 1).
+ *
+ * Mapping:
+ * - CategoryTagMode::OBJECT_MODE (1 << 0) = 1 → enum value 1
+ * - CategoryTagMode::EDIT_MODE (1 << 1) = 2 → enum value 2
+ * - etc.
+ */
+static int category_tag_mode_flag_to_filter_enum(uint32_t mode_flag)
+{
+  if (mode_flag == 0) {
+    return 0; /* ALL */
+  }
+
+  /* Find the bit position and add 1 to get the enum value */
+  for (int bit = 0; bit < 32; bit++) {
+    if (mode_flag == (1u << bit)) {
+      return bit + 1;
+    }
+  }
+
+  /* If multiple bits or unknown, default to 0 (ALL) */
+  return 0;
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Public API
  * \{ */
@@ -1540,7 +1567,12 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
 
   button_col.separator();
 
-  /* Open preferences for full tag management - jump to TAGS section */
+  /* Open preferences for full tag management - jump to TAGS section.
+   * First, sync the tag filter mode to match the current context mode,
+   * so the user sees the same tags in Preferences that they saw in the popover. */
+  const int filter_mode_enum = category_tag_mode_flag_to_filter_enum(current_mode_flag);
+  wm->category_tag_filter_mode = static_cast<char>(filter_mode_enum);
+
   PointerRNA prefs_ptr = button_col.op("screen.userpref_show",
                                         "",
                                         ICON_PREFERENCES,

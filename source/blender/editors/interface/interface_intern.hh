@@ -63,6 +63,11 @@ struct wmTimer;
 
 namespace ui {
 
+/**
+ * Compute vertical padding between category tabs for zoom factor.
+ */
+int category_tabs_vertical_padding_calc(float zoom);
+
 /* ****************** general defines ************** */
 
 #define RNA_ENUM_VALUE -2
@@ -948,8 +953,52 @@ int get_unassigned_categories_count(const wmWindowManager *wm,
  * i.e. the "New Add-on!" virtual tag should be shown in the Tag Bar.
  */
 bool should_show_new_addon_tag(const wmWindowManager *wm,
-                               int space_type,
-                               uint32_t current_mode_flag);
+                                int space_type,
+                                uint32_t current_mode_flag);
+
+/**
+ * Set extension drop preview state.
+ * Called from screen_ops drop handlers to show ghost tab during hover.
+ * \param target_category_id: Category being hovered (can be empty for regions without tabs).
+ * \param target_index: Index of target category in ordered list (-1 if no tabs).
+ * \param insert_above: true = ghost appears above target, false = below.
+ * \param tab_height: Height for ghost tab rectangle.
+ * \param tab_v_pad: Vertical padding between tabs.
+ */
+void category_tabs_extension_preview_set(ARegion *region,
+                                         const char *target_category_id,
+                                         int target_index,
+                                         bool insert_above,
+                                         int tab_height,
+                                         int tab_v_pad,
+                                         int cursor_y);
+
+/**
+ * Clear extension drop preview state.
+ * Must be called when drag leaves region or drop completes/cancels.
+ */
+void category_tabs_extension_preview_clear(ARegion *region);
+
+/**
+ * Check if extension drop preview is active for a region.
+ */
+bool category_tabs_extension_preview_is_active(const ARegion *region);
+
+/**
+ * Hit-test category tab under mouse for extension drop.
+ * Uses visual ordered categories and stable tab rects (without preview feedback shift).
+ *
+ * \return true when a tab is found under cursor.
+ */
+bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
+                                                    ARegion *region,
+                                                    int mouse_x_local,
+                                                    int mouse_y_local,
+                                                    int hit_margin,
+                                                    const char **r_target_category_id,
+                                                    int *r_target_index,
+                                                    bool *r_insert_above,
+                                                    int *r_tab_height);
 
 /**
  * Check if the "New Add-on!" filter is currently active for the given area.

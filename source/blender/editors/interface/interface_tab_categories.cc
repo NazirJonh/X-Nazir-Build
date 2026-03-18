@@ -107,9 +107,17 @@ static bool category_name_is_glyph(const char *category_id);
 #define TABS_BG_BRIGHTEN_BASE 0.0f
 #define TABS_BG_BRIGHTEN_HOVER 0.05f
 
+/* Extension drop preview ghost/offset height (in pixels). */
+#define EXTENSION_DROP_GHOST_HEIGHT 20
+
 /* Use UI_UI_TABS_VISUAL_EFFECT_SCALE from UI_interface_c.hh */
 
 /** \} */
+
+int category_tabs_vertical_padding_calc(float zoom)
+{
+  return int(std::floor(TABS_PADDING_BETWEEN_FACTOR * UI_SCALE_FAC * zoom));
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Pending Category Insert (Extension Drop)
@@ -2440,13 +2448,48 @@ static int calculate_insert_index(const bContext *C,
     const int effective_y = state->drag_start_y + edge_offset + int(state->drag_offset_y);
 
     if (effective_y > tab_center_y) {
-      return clamp_i(index, min_insert_index, max_insert_index);
+      const int insert_index = clamp_i(index, min_insert_index, max_insert_index);
+      static double _tab_drag_last_log_time = 0.0;
+      static int _tab_drag_last_insert_idx = -999;
+      const double now = BLI_time_now_seconds();
+      const bool should_log = (now - _tab_drag_last_log_time > 1.0) ||
+                              (_tab_drag_last_insert_idx != insert_index);
+      if (should_log) {
+        printf("[TAB_DRAG_HIT] drag='%s' effective_y=%d tab='%s' tab_center=%d raw_idx=%d insert_idx=%d bounds=[%d,%d]\n",
+               state->drag_category_id,
+               effective_y,
+               pc_dyn.idname,
+               tab_center_y,
+               index,
+               insert_index,
+               min_insert_index,
+               max_insert_index);
+        _tab_drag_last_log_time = now;
+        _tab_drag_last_insert_idx = insert_index;
+      }
+      return insert_index;
     }
 
     index++;
   }
 
-  return clamp_i(index, min_insert_index, max_insert_index);
+  const int insert_index = clamp_i(index, min_insert_index, max_insert_index);
+  static double _tab_drag_tail_last_log_time = 0.0;
+  static int _tab_drag_tail_last_insert_idx = -999;
+  const double tail_now = BLI_time_now_seconds();
+  const bool tail_should_log = (tail_now - _tab_drag_tail_last_log_time > 1.0) ||
+                               (_tab_drag_tail_last_insert_idx != insert_index);
+  if (tail_should_log) {
+    printf("[TAB_DRAG_HIT] drag='%s' effective_y=TAIL raw_idx=%d insert_idx=%d bounds=[%d,%d]\n",
+           state->drag_category_id,
+           index,
+           insert_index,
+           min_insert_index,
+           max_insert_index);
+    _tab_drag_tail_last_log_time = tail_now;
+    _tab_drag_tail_last_insert_idx = insert_index;
+  }
+  return insert_index;
 }
 
 static void calculate_drag_insert_bounds(const wmWindowManager *wm,
@@ -2717,6 +2760,455 @@ void panel_category_active_set_safe(const bContext *C,
   panel_category_active_set(region, category_id);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Extension Drop Preview State API
+ * \{ */
+
+/* Static state for rate-limited debug logging */
+static double _ext_preview_last_log_time = 0.0;
+static int _ext_preview_last_target_index = -999;
+static bool _ext_preview_last_insert_above = false;
+static char _ext_preview_last_target_id[UI_MAX_NAME_STR] = "";
+
+void category_tabs_extension_preview_set(ARegion *region,
+                                          const char *target_category_id,
+                                          int target_index,
+                                          bool insert_above,
+                                          int tab_height,
+                                          int tab_v_pad,
+                                          int cursor_y)
+{
+  if (!region || !region->runtime) {
+    printf("[EXT_PREVIEW] preview_set: region or runtime is NULL\n");
+    return;
+  }
+
+  /* Don't activate preview if category drag is in progress. */
+  if (region->runtime->category_tabs_drag_state) {
+    ui::CategoryDragState *drag_state = static_cast<ui::CategoryDragState *>(
+        region->runtime->category_tabs_drag_state);
+    if (drag_state->is_dragging) {
+      return;
+    }
+  }
+
+  ui::ExtensionDropPreviewState &state = region->runtime->extension_drop_preview_state;
+
+  /* Log only when state changes OR once per second (time-limited) */
+  const double current_time = BLI_time_now_seconds();
+  const bool time_elapsed = (current_time - _ext_preview_last_log_time) > 1.0;
+  const bool state_changed = (_ext_preview_last_target_index != target_index ||
+                               _ext_preview_last_insert_above != insert_above);
+
+  if (time_elapsed || state_changed) {
+    const char *prev_target_id = state.target_category_id[0] ? state.target_category_id : "(none)";
+    printf("[EXT_PREVIEW] preview_set: region=%p target='%s' idx=%d insert_above=%d h=%d pad=%d cursor_y=%d active_before=%d prev_target='%s' prev_idx=%d prev_insert_above=%d\n",
+           static_cast<void *>(region),
+           target_category_id ? target_category_id : "(null)",
+           target_index,
+           insert_above ? 1 : 0,
+           tab_height,
+           tab_v_pad,
+           cursor_y,
+           state.active ? 1 : 0,
+           prev_target_id,
+           state.target_index,
+           state.insert_above ? 1 : 0);
+    if (state.active) {
+      const bool target_changed = !STREQ(prev_target_id, target_category_id ? target_category_id : "");
+      const bool index_changed = (state.target_index != target_index);
+      const bool side_changed = (state.insert_above != insert_above);
+      if (target_changed || index_changed || side_changed) {
+        printf("[EXT_PREVIEW] transition: target_changed=%d index_changed=%d side_changed=%d\n",
+               target_changed ? 1 : 0,
+               index_changed ? 1 : 0,
+               side_changed ? 1 : 0);
+      }
+    }
+    _ext_preview_last_log_time = current_time;
+    _ext_preview_last_target_index = target_index;
+    _ext_preview_last_insert_above = insert_above;
+    STRNCPY(_ext_preview_last_target_id, target_category_id ? target_category_id : "");
+  }
+
+  state.active = true;
+  if (target_category_id && target_category_id[0]) {
+    STRNCPY(state.target_category_id, target_category_id);
+  }
+  else {
+    state.target_category_id[0] = '\0';
+  }
+  state.target_index = target_index;
+  state.insert_above = insert_above;
+  state.tab_height = tab_height;
+  state.tab_v_pad = tab_v_pad;
+  state.cursor_y = cursor_y;
+}
+
+void category_tabs_extension_preview_clear(ARegion *region)
+{
+  if (!region || !region->runtime) {
+    return;
+  }
+
+  ui::ExtensionDropPreviewState &state = region->runtime->extension_drop_preview_state;
+
+  if (state.active) {
+    printf("[EXT_PREVIEW] preview_clear: region=%p was active target='%s' idx=%d insert_above=%d tab_h=%d pad=%d cursor_y=%d\n",
+           static_cast<void *>(region),
+           state.target_category_id,
+           state.target_index,
+           state.insert_above ? 1 : 0,
+           state.tab_height,
+           state.tab_v_pad,
+           state.cursor_y);
+    /* Reset static variables for next drag operation */
+    _ext_preview_last_target_index = -999;
+    _ext_preview_last_insert_above = false;
+    _ext_preview_last_log_time = 0.0;
+  }
+
+  state.active = false;
+  state.target_category_id[0] = '\0';
+  state.target_index = -1;
+  state.tab_height = 0;
+  state.tab_v_pad = 0;
+}
+
+bool category_tabs_extension_preview_is_active(const ARegion *region)
+{
+  if (!region || !region->runtime) {
+    return false;
+  }
+  return region->runtime->extension_drop_preview_state.active;
+}
+
+bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
+                                                    ARegion *region,
+                                                    int mouse_x_local,
+                                                    int mouse_y_local,
+                                                    int hit_margin,
+                                                    const char **r_target_category_id,
+                                                    int *r_target_index,
+                                                    bool *r_insert_above,
+                                                    int *r_tab_height)
+{
+  if (!C || !region || !region->runtime) {
+    return false;
+  }
+
+  Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
+  if (ordered_categories.is_empty()) {
+    return false;
+  }
+
+  const wmWindowManager *wm = CTX_wm_manager(C);
+
+  auto set_target_after_reserved_prefix = [&](const bool log_redirect) -> bool {
+    int last_reserved_prefix_idx = -1;
+    PanelCategoryDyn *last_reserved_prefix_tab = nullptr;
+
+    int idx = 0;
+    for (PanelCategoryDyn *pc_dyn : ordered_categories) {
+      if (!category_is_reserved(wm, pc_dyn->idname)) {
+        break;
+      }
+      last_reserved_prefix_idx = idx;
+      last_reserved_prefix_tab = pc_dyn;
+      idx++;
+    }
+
+    if (!last_reserved_prefix_tab) {
+      return false;
+    }
+
+    if (r_target_category_id) {
+      *r_target_category_id = last_reserved_prefix_tab->idname;
+    }
+    if (r_target_index) {
+      *r_target_index = last_reserved_prefix_idx;
+    }
+    if (r_insert_above) {
+      *r_insert_above = false;
+    }
+    if (r_tab_height) {
+      *r_tab_height = BLI_rcti_size_y(&last_reserved_prefix_tab->rect);
+    }
+
+    if (log_redirect) {
+      static double _ext_hit_reserved_redirect_log_time = 0.0;
+      const double current_time = BLI_time_now_seconds();
+      if (current_time - _ext_hit_reserved_redirect_log_time > 1.0) {
+        printf("[EXT_HIT] local=(%d,%d) reserved_redirect -> target='%s' idx=%d insert_above=0\n",
+               mouse_x_local,
+               mouse_y_local,
+               last_reserved_prefix_tab->idname,
+               last_reserved_prefix_idx);
+        _ext_hit_reserved_redirect_log_time = current_time;
+      }
+    }
+
+    return true;
+  };
+
+  /* Hard clamp in reserved-prefix zone.
+   * While cursor is over reserved tabs (with hit margin), always preview insertion
+   * after the reserved block. This prevents target oscillation between reserved,
+   * settings/below-all, and neighboring tabs. */
+  {
+    bool has_reserved_prefix = false;
+    rcti reserved_block_rect = {};
+    bool reserved_block_rect_initialized = false;
+
+    for (PanelCategoryDyn *pc_dyn : ordered_categories) {
+      if (!category_is_reserved(wm, pc_dyn->idname)) {
+        break;
+      }
+
+      has_reserved_prefix = true;
+      const rcti tab_rect = pc_dyn->rect;
+      if (!reserved_block_rect_initialized) {
+        reserved_block_rect = tab_rect;
+        reserved_block_rect_initialized = true;
+      }
+      else {
+        reserved_block_rect.xmin = std::min(reserved_block_rect.xmin, tab_rect.xmin);
+        reserved_block_rect.xmax = std::max(reserved_block_rect.xmax, tab_rect.xmax);
+        reserved_block_rect.ymin = std::min(reserved_block_rect.ymin, tab_rect.ymin);
+        reserved_block_rect.ymax = std::max(reserved_block_rect.ymax, tab_rect.ymax);
+      }
+    }
+
+    if (has_reserved_prefix && reserved_block_rect_initialized) {
+      if (hit_margin > 0) {
+        reserved_block_rect.xmin -= hit_margin;
+        reserved_block_rect.xmax += hit_margin;
+        reserved_block_rect.ymin -= hit_margin;
+        reserved_block_rect.ymax += hit_margin;
+      }
+
+      if (BLI_rcti_isect_pt(&reserved_block_rect, mouse_x_local, mouse_y_local)) {
+        if (set_target_after_reserved_prefix(true)) {
+          return true;
+        }
+      }
+    }
+  }
+
+  /* Check below_all_tabs FIRST to prevent ghost appearing at top when cursor below tabs */
+  const PanelCategoryDyn *bottom_tab = nullptr;
+  int bottom_tab_index = -1;
+  int tabs_bottom_y = (1 << 30);
+
+  int scan_index = 0;
+  for (PanelCategoryDyn *pc_dyn : ordered_categories) {
+    if (pc_dyn->rect.ymin < tabs_bottom_y) {
+      tabs_bottom_y = pc_dyn->rect.ymin;
+      bottom_tab = pc_dyn;
+      bottom_tab_index = scan_index;
+    }
+    scan_index++;
+  }
+
+  if (bottom_tab && mouse_y_local < tabs_bottom_y) {
+    /* If bottom tab is reserved, redirect to after reserved block instead of below_all */
+    if (category_is_reserved(wm, bottom_tab->idname)) {
+      if (set_target_after_reserved_prefix(true)) {
+        return true;
+      }
+    }
+
+    if (r_target_category_id) {
+      *r_target_category_id = bottom_tab->idname;
+    }
+    if (r_target_index) {
+      *r_target_index = bottom_tab_index;
+    }
+    if (r_insert_above) {
+      *r_insert_above = false;
+    }
+    if (r_tab_height) {
+      *r_tab_height = BLI_rcti_size_y(&bottom_tab->rect);
+    }
+
+    static double _ext_hit_below_last_log_time = 0.0;
+    const double current_time = BLI_time_now_seconds();
+    if (current_time - _ext_hit_below_last_log_time > 1.0) {
+      printf("[EXT_HIT] local=(%d,%d) mode=below_all -> target='%s' idx=%d insert_above=0 tabs_bottom_y=%d\n",
+             mouse_x_local,
+             mouse_y_local,
+             bottom_tab->idname,
+             bottom_tab_index,
+             tabs_bottom_y);
+      _ext_hit_below_last_log_time = current_time;
+    }
+    return true;
+  }
+
+  const rcti settings_rect = region->runtime->category_tabs_settings_rect;
+  bool hit_settings_button = BLI_rcti_isect_pt(&settings_rect, mouse_x_local, mouse_y_local);
+  if (!hit_settings_button && hit_margin > 0) {
+    rcti settings_hit_rect = settings_rect;
+    settings_hit_rect.xmin -= hit_margin;
+    settings_hit_rect.xmax += hit_margin;
+    settings_hit_rect.ymin -= hit_margin;
+    settings_hit_rect.ymax += hit_margin;
+    hit_settings_button = BLI_rcti_isect_pt(&settings_hit_rect, mouse_x_local, mouse_y_local);
+  }
+
+  if (hit_settings_button) {
+    PanelCategoryDyn *first_tab = ordered_categories.first();
+    if (!first_tab) {
+      return false;
+    }
+
+    /* If first tab is reserved, redirect preview after reserved block. */
+    if (category_is_reserved(wm, first_tab->idname)) {
+      if (set_target_after_reserved_prefix(true)) {
+        return true;
+      }
+      return false;
+    }
+
+    if (r_target_category_id) {
+      *r_target_category_id = first_tab->idname;
+    }
+    if (r_target_index) {
+      *r_target_index = 0;
+    }
+    if (r_insert_above) {
+      *r_insert_above = true;
+    }
+    if (r_tab_height) {
+      *r_tab_height = BLI_rcti_size_y(&first_tab->rect);
+    }
+
+    static double _ext_hit_settings_last_log_time = 0.0;
+    const double current_time = BLI_time_now_seconds();
+    if (current_time - _ext_hit_settings_last_log_time > 1.0) {
+      printf("[EXT_HIT] local=(%d,%d) tab='Display Mode Settings' mode=settings -> target='%s' idx=0 insert_above=1\n",
+             mouse_x_local,
+             mouse_y_local,
+             first_tab->idname);
+      _ext_hit_settings_last_log_time = current_time;
+    }
+    return true;
+  }
+
+  const PanelCategoryDyn *hit_tab = nullptr;
+  int hit_visual_index = -1;
+  bool hit_by_margin = false;
+
+  const PanelCategoryDyn *margin_best_tab = nullptr;
+  int margin_best_index = -1;
+  int margin_best_score = (1 << 30);
+
+  int visual_index = 0;
+  for (PanelCategoryDyn *pc_dyn : ordered_categories) {
+    const rcti tab_rect = pc_dyn->rect;
+
+    if (BLI_rcti_isect_pt(&tab_rect, mouse_x_local, mouse_y_local)) {
+      hit_tab = pc_dyn;
+      hit_visual_index = visual_index;
+      hit_by_margin = false;
+      break;
+    }
+
+    if (hit_margin > 0) {
+      rcti hit_rect = tab_rect;
+      hit_rect.xmin -= hit_margin;
+      hit_rect.xmax += hit_margin;
+      hit_rect.ymin -= hit_margin;
+      hit_rect.ymax += hit_margin;
+
+      if (BLI_rcti_isect_pt(&hit_rect, mouse_x_local, mouse_y_local)) {
+        const int dx = (mouse_x_local < tab_rect.xmin) ? (tab_rect.xmin - mouse_x_local) :
+                       (mouse_x_local > tab_rect.xmax) ? (mouse_x_local - tab_rect.xmax) :
+                                                      0;
+        const int dy = (mouse_y_local < tab_rect.ymin) ? (tab_rect.ymin - mouse_y_local) :
+                       (mouse_y_local > tab_rect.ymax) ? (mouse_y_local - tab_rect.ymax) :
+                                                      0;
+        const int score = dx + dy;
+
+        if (score < margin_best_score) {
+          margin_best_score = score;
+          margin_best_tab = pc_dyn;
+          margin_best_index = visual_index;
+        }
+      }
+    }
+
+    visual_index++;
+  }
+
+  if (!hit_tab && margin_best_tab) {
+    hit_tab = margin_best_tab;
+    hit_visual_index = margin_best_index;
+    hit_by_margin = true;
+  }
+
+  if (!hit_tab) {
+    return false;
+  }
+
+  const rcti tab_rect = hit_tab->rect;
+  const int tab_center_y = (tab_rect.ymin + tab_rect.ymax) / 2;
+  const bool insert_above = (mouse_y_local > tab_center_y);
+
+  /* If trying to insert above a reserved category, redirect after reserved block. */
+  if (insert_above) {
+    if (category_is_reserved(wm, hit_tab->idname)) {
+      if (set_target_after_reserved_prefix(true)) {
+        return true;
+      }
+      return false;
+    }
+  }
+
+  if (r_target_category_id) {
+    *r_target_category_id = hit_tab->idname;
+  }
+  if (r_target_index) {
+    *r_target_index = hit_visual_index;
+  }
+  if (r_insert_above) {
+    *r_insert_above = insert_above;
+  }
+  if (r_tab_height) {
+    *r_tab_height = BLI_rcti_size_y(&tab_rect);
+  }
+
+  static double _ext_hit_last_log_time = 0.0;
+  static int _ext_hit_last_idx = -999;
+  static bool _ext_hit_last_insert_above = false;
+  static bool _ext_hit_last_by_margin = false;
+  const double current_time = BLI_time_now_seconds();
+  const bool should_log = (current_time - _ext_hit_last_log_time > 1.0) ||
+                          (_ext_hit_last_idx != hit_visual_index) ||
+                          (_ext_hit_last_insert_above != insert_above) ||
+                          (_ext_hit_last_by_margin != hit_by_margin);
+  if (should_log) {
+    printf("[EXT_HIT] local=(%d,%d) tab='%s' idx=%d mode=%s tab_y=[%d,%d] center=%d insert_above=%d\n",
+           mouse_x_local,
+           mouse_y_local,
+           hit_tab->idname,
+           hit_visual_index,
+           hit_by_margin ? "margin" : "strict",
+           tab_rect.ymin,
+           tab_rect.ymax,
+           tab_center_y,
+           insert_above ? 1 : 0);
+    _ext_hit_last_log_time = current_time;
+    _ext_hit_last_idx = hit_visual_index;
+    _ext_hit_last_insert_above = insert_above;
+    _ext_hit_last_by_margin = hit_by_margin;
+  }
+
+  return true;
+}
+
+/** \} */
+
 void category_tabs_apply_drop_insert(bContext *C,
                                      ARegion *region,
                                      const char *category_id,
@@ -2724,6 +3216,11 @@ void category_tabs_apply_drop_insert(bContext *C,
                                      bool insert_above,
                                      const char *tag_name)
 {
+  /* Clear any active preview state before applying actual insert. */
+  if (region && region->runtime) {
+    category_tabs_extension_preview_clear(region);
+  }
+
   if (!C || !region || !category_id || !category_id[0]) {
     return;
   }
@@ -4163,7 +4660,6 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
    * panel_category_is_visible_by_tags() because new extension categories may not have
    * tags assigned yet, which would cause them to be filtered out when tag filter is active.
    * Extension categories should be activatable regardless of current tag filter state. */
-  const wmWindowManager *wm = CTX_wm_manager(C);
   bool category_exists = false;
   for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     if (STREQ(pc_dyn.idname, category_id.c_str())) {
@@ -4465,7 +4961,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   const int category_tabs_min_width = category_tabs_min_width_get(area, aspect, display_mode);
   const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_width;
   const int tab_v_pad_text = int(std::floor(TABS_PADDING_TEXT_FACTOR * dpi_fac * zoom)) + 2 * px;
-  const int tab_v_pad = int(std::floor(TABS_PADDING_BETWEEN_FACTOR * dpi_fac * zoom));
+  const int tab_v_pad = category_tabs_vertical_padding_calc(zoom);
 
   /* Update drag_state->tab_v_pad during drag to ensure correct shift calculations.
    * This must be done before the draw loop because calculate_insert_index and
@@ -4844,6 +5340,99 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
         }
       }
     }
+    else if (!is_dragging && region->runtime &&
+             region->runtime->extension_drop_preview_state.active)
+    {
+      const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
+      bool preview_name_found = false;
+      int preview_name_idx = -1;
+      if (preview.target_category_id[0] != '\0') {
+        int idx = 0;
+        for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+          if (STREQ(pc_dyn_ptr->idname, preview.target_category_id)) {
+            preview_name_found = true;
+            preview_name_idx = idx;
+            break;
+          }
+          idx++;
+        }
+      }
+
+      const bool preview_fallback_used = false;
+      /* Use unified insertion slot model consistently */
+      int raw_insertion_index = preview_name_found ? 
+                                  (preview_name_idx + (preview.insert_above ? 0 : 1)) : 
+                                  -1;
+      /* Prevent creating slots beyond existing tabs */
+      const int insertion_index = (raw_insertion_index >= 0 && raw_insertion_index > int(ordered_categories.size())) ?
+                                   int(ordered_categories.size()) : raw_insertion_index;
+
+      static double _ext_shift_last_log_time = 0.0;
+      static int _ext_shift_last_stored_idx = -999;
+      static int _ext_shift_last_resolved_idx = -999;
+      static bool _ext_shift_last_insert_above = false;
+      static bool _ext_shift_last_name_found = false;
+      static int _ext_shift_last_raw_insertion_idx = -999;
+      static int _ext_shift_last_category_count = -999;
+      const double shift_log_time = BLI_time_now_seconds();
+      const bool shift_should_log = (shift_log_time - _ext_shift_last_log_time > 1.0) ||
+                                    (_ext_shift_last_stored_idx != preview.target_index) ||
+                                    (_ext_shift_last_resolved_idx != preview_name_idx) ||
+                                    (_ext_shift_last_insert_above != preview.insert_above) ||
+                                    (_ext_shift_last_name_found != preview_name_found) ||
+                                    (_ext_shift_last_raw_insertion_idx != raw_insertion_index) ||
+                                    (_ext_shift_last_category_count != int(ordered_categories.size()));
+      if (shift_should_log) {
+        const int category_count = int(ordered_categories.size());
+        const int max_valid_index = category_count - 1;
+        printf("[EXT_SHIFT] target='%s' stored_idx=%d name_found=%d name_idx=%d "
+               "insert_above=%d raw_insertion_idx=%d insertion_idx=%d category_count=%d max_valid_idx=%d shift=%d\n",
+               preview.target_category_id,
+               preview.target_index,
+               preview_name_found ? 1 : 0,
+               preview_name_idx,
+               preview.insert_above ? 1 : 0,
+               raw_insertion_index,
+               insertion_index,
+               category_count,
+               max_valid_index,
+               EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad);
+        if (raw_insertion_index >= category_count && category_count > 0) {
+          printf("[EXT_SHIFT] boundary: raw_insertion_idx >= category_count (end-insert path)\n");
+        }
+        if (!preview_name_found && preview.target_category_id[0] != '\0') {
+          printf("[EXT_SHIFT] resolve_warning: target name not found, stored_idx=%d fallback_used=%d\n",
+                 preview.target_index,
+                 preview_fallback_used ? 1 : 0);
+        }
+        _ext_shift_last_log_time = shift_log_time;
+        _ext_shift_last_stored_idx = preview.target_index;
+        _ext_shift_last_resolved_idx = preview_name_idx;
+        _ext_shift_last_insert_above = preview.insert_above;
+        _ext_shift_last_name_found = preview_name_found;
+        _ext_shift_last_raw_insertion_idx = raw_insertion_index;
+        _ext_shift_last_category_count = int(ordered_categories.size());
+      }
+
+      /* UNIFIED INSERTION SLOT MODEL:
+       * insertion_index = target_index + (insert_above ? 0 : 1)
+       * Shift tabs >= insertion_index down to create space for new tab.
+       * This creates a consistent slot between tabs at insertion_index-1 and insertion_index. */
+      if (insertion_index >= 0 && current_display_index >= insertion_index) {
+        /* Always shift DOWN to create space above the insertion point.
+         * Use negative y_shift because in Blender's coordinate system:
+         * - Positive Y values are at the top of screen
+         * - Adding positive value shifts rect UP, negative shifts DOWN */
+        y_shift = -(EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad);
+        if (shift_should_log) {
+          printf("[EXT_SHIFT] apply: tab='%s' display_idx=%d >= insertion_idx=%d y_shift=%d\n",
+                 pc_dyn.idname,
+                 current_display_index,
+                 insertion_index,
+                 y_shift);
+        }
+      }
+    }
 
     rcti shifted_rect = pc_dyn.rect;
     shifted_rect.ymin += y_shift;
@@ -5073,9 +5662,38 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   }
 
   if (!BLI_listbase_is_empty(&region->runtime->panels_category)) {
-    const rcti *settings_rct_ptr = &region->runtime->category_tabs_settings_rect;
+    rcti *settings_rct_ptr = &region->runtime->category_tabs_settings_rect;
+    const rcti settings_rct_backup = *settings_rct_ptr;
+    bool settings_rect_overridden = false;
+
+    if (!is_dragging && region->runtime && region->runtime->extension_drop_preview_state.active) {
+      const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
+      if (preview.target_category_id[0] != '\0') {
+        bool preview_name_found = false;
+        for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+          if (STREQ(pc_dyn_ptr->idname, preview.target_category_id)) {
+            preview_name_found = true;
+            break;
+          }
+        }
+
+        if (preview_name_found) {
+          /* A successful drop inserts a new tab in the category stack regardless of insertion point.
+           * Keep spacing consistent by shifting Display Mode Settings down during preview. */
+          const int shift = EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad;
+          settings_rct_ptr->ymin -= shift;
+          settings_rct_ptr->ymax -= shift;
+          settings_rect_overridden = true;
+        }
+      }
+    }
+
     if (settings_rct_ptr->ymin <= v2d->mask.ymax && settings_rct_ptr->ymax >= v2d->mask.ymin) {
       panel_category_tabs_draw_settings_button(C, region, zoom, theme_col_tab_text);
+    }
+
+    if (settings_rect_overridden) {
+      *settings_rct_ptr = settings_rct_backup;
     }
   }
 
@@ -5292,6 +5910,275 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
                                      theme_col_tab_text_sel,
                                      too_narrow,
                                      space_type);
+    }
+  }
+
+  const char *ghost_skip_reason = nullptr;
+
+  /* Draw ghost tab for extension drop preview (only if not dragging a category) */
+  if (!is_dragging && region->runtime && region->runtime->extension_drop_preview_state.active) {
+    const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
+
+    rcti ghost_rect;
+    /* Use same X positioning as regular tabs (respects is_left alignment) */
+    ghost_rect.xmin = rct_xmin;
+    ghost_rect.xmax = rct_xmax;
+
+    /* Ghost height: compact fixed indicator (~10 px). */
+    const int ghost_height = EXTENSION_DROP_GHOST_HEIGHT;
+
+    /* Debug: log ghost position info (time-limited: max once per second) */
+    static double _ghost_last_log_time = 0.0;
+    static int _ghost_last_target = -999;
+    const double current_time = BLI_time_now_seconds();
+    const bool should_log = (current_time - _ghost_last_log_time > 1.0) ||
+                            (_ghost_last_target != preview.target_index);
+
+    if (should_log) {
+      /* Log all existing tabs positions for debugging */
+      printf("[EXT_GHOST] === TABS POSITIONS (top to bottom) ===\n");
+      int log_idx = 0;
+      for (PanelCategoryDyn *pc : ordered_categories) {
+        printf("[EXT_GHOST]   tab[%d] '%s' y=[%d,%d] h=%d\n",
+               log_idx, pc->idname,
+               pc->rect.ymin, pc->rect.ymax,
+               BLI_rcti_size_y(&pc->rect));
+        log_idx++;
+        if (log_idx > 10) {
+          printf("[EXT_GHOST]   ... (more tabs)\n");
+          break;
+        }
+      }
+      printf("[EXT_GHOST] v2d_mask: y=[%d,%d] x=[%d,%d]\n",
+             v2d->mask.ymin, v2d->mask.ymax,
+             v2d->mask.xmin, v2d->mask.xmax);
+      printf("[EXT_GHOST] ghost_h=%d target_idx=%d insert_above=%d\n",
+             ghost_height,
+             preview.target_index,
+             preview.insert_above ? 1 : 0);
+      printf("[EXT_GHOST] preview_state: active=%d target='%s' idx=%d insert_above=%d tab_h=%d pad=%d cursor_y=%d\n",
+             preview.active ? 1 : 0,
+             preview.target_category_id,
+             preview.target_index,
+             preview.insert_above ? 1 : 0,
+             preview.tab_height,
+             preview.tab_v_pad,
+             preview.cursor_y);
+      _ghost_last_log_time = current_time;
+      _ghost_last_target = preview.target_index;
+    }
+
+    if (preview.target_index >= 0 && preview.target_index < int(ordered_categories.size())) {
+      PanelCategoryDyn *target_tab = nullptr;
+
+      /* Find target tab by NAME, not by index!
+       * The index from screen_ops.cc is based on panels_category order,
+       * but ordered_categories may have different sorting. */
+      bool found_by_name = false;
+      int resolved_target_index = -1;
+      if (preview.target_category_id[0] != '\0') {
+        int idx = 0;
+        for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+          if (STREQ(pc_dyn_ptr->idname, preview.target_category_id)) {
+            target_tab = pc_dyn_ptr;
+            found_by_name = true;
+            resolved_target_index = idx;
+            break;
+          }
+          idx++;
+        }
+      }
+
+      /* Fallback to index if name not found */
+      if (!target_tab) {
+        int loop_idx = 0;
+        for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+          if (loop_idx == preview.target_index) {
+            target_tab = pc_dyn_ptr;
+            resolved_target_index = loop_idx;
+            break;
+          }
+          loop_idx++;
+        }
+        if (should_log && target_tab) {
+          printf("[EXT_GHOST] Found by INDEX fallback: '%s' at idx=%d\n",
+                 target_tab->idname, preview.target_index);
+        }
+      }
+
+      if (target_tab) {
+        /* UNIFIED INSERTION SLOT MODEL:
+         * insertion_index = target_index + (insert_above ? 0 : 1)
+         * Ghost should be centered in the slot between tabs at insertion_index-1 and insertion_index
+         * after tab shifting creates space. */
+        const int category_count = int(ordered_categories.size());
+        const int raw_insertion_index = (resolved_target_index >= 0) ?
+                                            (resolved_target_index + (preview.insert_above ? 0 : 1)) :
+                                            -1;
+        const int insertion_index = raw_insertion_index;
+        const int shift_space = EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad;
+        
+        /* Find slot boundaries after tab shifting */
+        int slot_top_y, slot_bottom_y;
+        
+        if (insertion_index == 0) {
+          /* Insert at top: all tabs shift DOWN, ghost appears above first tab's original position.
+           * Ghost slot: from ymax to (ymax + shift_space) */
+          slot_top_y = target_tab->rect.ymax + shift_space;
+          slot_bottom_y = target_tab->rect.ymax;
+        }
+        else if (insertion_index >= int(ordered_categories.size())) {
+          /* Insert at end: treat as inserting below the actual last tab. */
+          /* This prevents creating empty space beyond existing tabs. */
+          PanelCategoryDyn *last_tab = ordered_categories[int(ordered_categories.size()) - 1];
+          slot_top_y = last_tab->rect.ymin;
+          slot_bottom_y = slot_top_y - shift_space;
+        }
+        else {
+          /* Insert between tabs: find boundaries of the created slot.
+           * After fix: tabs shift DOWN (y_shift negative), so ghost appears
+           * in the space ABOVE where the shifted tabs end up. */
+          if (preview.insert_above) {
+            /* Inserting above target: target shifts DOWN, ghost fills the gap above.
+             * Ghost slot: from (ymax - shift_space) to ymax */
+            slot_top_y = target_tab->rect.ymax;
+            slot_bottom_y = slot_top_y - shift_space;
+          }
+          else {
+            /* Inserting below target: tabs below shift DOWN, ghost fills the gap.
+             * Ghost slot: from (ymin - shift_space) to ymin */
+            slot_top_y = target_tab->rect.ymin;
+            slot_bottom_y = slot_top_y - shift_space;
+          }
+        }
+        
+        /* Center ghost in the insertion slot.
+         * Ghost should be perfectly centered in the free space between tabs. */
+        const int slot_center_y = (slot_top_y + slot_bottom_y) / 2;
+        const int half_ghost_height = ghost_height / 2;
+
+        /* Ghost rect centered in the slot */
+        ghost_rect.ymin = slot_center_y - half_ghost_height;
+        ghost_rect.ymax = slot_center_y + half_ghost_height;
+
+        if (should_log) {
+          printf("[EXT_GHOST] resolve: target='%s' stored_idx=%d resolved_idx=%d insert_above=%d raw_insertion_idx=%d insertion_idx=%d category_count=%d\n",
+                 preview.target_category_id,
+                 preview.target_index,
+                 resolved_target_index,
+                 preview.insert_above ? 1 : 0,
+                 raw_insertion_index,
+                 insertion_index,
+                 category_count);
+          if (raw_insertion_index >= category_count && category_count > 0) {
+            printf("[EXT_GHOST] boundary: raw_insertion_idx >= category_count (using end slot below last tab)\n");
+          }
+          printf("[EXT_GHOST] insertion_idx=%d slot=[%d,%d] center=%d ghost=[%d,%d] target_rect=[%d,%d]\n",
+                 insertion_index,
+                 slot_bottom_y,
+                 slot_top_y,
+                 slot_center_y,
+                 ghost_rect.ymin,
+                 ghost_rect.ymax,
+                 target_tab->rect.ymin,
+                 target_tab->rect.ymax);
+        }
+
+        if (should_log) {
+          const int ghost_center_y = (ghost_rect.ymin + ghost_rect.ymax) / 2;
+          const int center_diff = abs(ghost_center_y - slot_center_y);
+          printf("[EXT_GHOST] FINAL: cursor_y=%d ghost=[%d,%d] center=%d slot_center=%d diff=%d target='%s'\n",
+                 preview.cursor_y, ghost_rect.ymin, ghost_rect.ymax,
+                 ghost_center_y, slot_center_y, center_diff,
+                 target_tab->idname);
+          if (center_diff > 1) {
+            printf("[EXT_GHOST] WARNING: Ghost not centered in slot! (diff=%d px)\n", center_diff);
+          }
+        }
+      }
+      else {
+        printf("[EXT_GHOST] SKIP: target_tab NULL for name='%s' idx=%d\n",
+               preview.target_category_id, preview.target_index);
+        ghost_skip_reason = "target_tab_null";
+        goto skip_extension_ghost;
+      }
+    }
+    else {
+      /* No target tab - position at top of region */
+      ghost_rect.ymin = v2d->mask.ymax - ghost_height - 10;
+      ghost_rect.ymax = v2d->mask.ymax - 10;
+      if (should_log) {
+        printf("[EXT_GHOST] FINAL (no target): ghost y=[%d,%d]\n",
+               ghost_rect.ymin, ghost_rect.ymax);
+      }
+    }
+
+    /* Ensure ghost is within viewport bounds */
+    const bool ghost_in_viewport = (ghost_rect.ymax >= v2d->mask.ymin && ghost_rect.ymin <= v2d->mask.ymax);
+    
+    if (should_log) {
+      printf("[EXT_GHOST] VIEWPORT CHECK: ghost=[%d,%d] viewport=[%d,%d] in_viewport=%d\n",
+             ghost_rect.ymin, ghost_rect.ymax,
+             v2d->mask.ymin, v2d->mask.ymax,
+             ghost_in_viewport ? 1 : 0);
+    }
+    
+    if (!ghost_in_viewport) {
+      /* Clamp ghost to viewport if outside */
+      if (ghost_rect.ymax < v2d->mask.ymin) {
+        const int ghost_height_local = ghost_rect.ymax - ghost_rect.ymin;
+        ghost_rect.ymin = v2d->mask.ymin;
+        ghost_rect.ymax = v2d->mask.ymin + ghost_height_local;
+      }
+      else if (ghost_rect.ymin > v2d->mask.ymax) {
+        const int ghost_height_local = ghost_rect.ymax - ghost_rect.ymin;
+        ghost_rect.ymax = v2d->mask.ymax;
+        ghost_rect.ymin = v2d->mask.ymax - ghost_height_local;
+      }
+      
+      if (should_log) {
+        printf("[EXT_GHOST] CLAMPED: ghost=[%d,%d]\n", ghost_rect.ymin, ghost_rect.ymax);
+      }
+    }
+
+    rctf ghost_box_rect;
+    ghost_box_rect.xmin = float(ghost_rect.xmin);
+    ghost_box_rect.xmax = float(ghost_rect.xmax);
+    ghost_box_rect.ymin = float(ghost_rect.ymin);
+    ghost_box_rect.ymax = float(ghost_rect.ymax);
+
+    float ghost_bg_color[4];
+    copy_v4_v4(ghost_bg_color, theme_col_tab_active);
+    ghost_bg_color[3] = 0.5f;  /* Make more visible for debugging */
+
+    GPU_blend(GPU_BLEND_ALPHA);
+    draw_roundbox_corner_set(roundboxtype);
+    draw_roundbox_4fv(&ghost_box_rect, true, tab_curve_radius, ghost_bg_color);
+
+    float ghost_outline[4];
+    copy_v3_v3(ghost_outline, theme_col_tab_outline_sel);
+    ghost_outline[3] = 0.8f;  /* Make outline more visible */
+    draw_roundbox_4fv(&ghost_box_rect, false, tab_curve_radius, ghost_outline);
+
+    GPU_blend(GPU_BLEND_NONE);
+    if (should_log) {
+      printf("[EXT_GHOST] DRAWN: ghost_rect=[%d,%d]-[%d,%d]\n",
+             ghost_rect.xmin,
+             ghost_rect.ymin,
+             ghost_rect.xmax,
+             ghost_rect.ymax);
+    }
+  }
+skip_extension_ghost:
+  if (!is_dragging && region->runtime && region->runtime->extension_drop_preview_state.active) {
+    const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
+    if (ghost_skip_reason) {
+      printf("[EXT_GHOST] SKIPPED: reason=%s active=%d target='%s' idx=%d cursor_y=%d\n",
+             ghost_skip_reason,
+             preview.active ? 1 : 0,
+             preview.target_category_id,
+             preview.target_index,
+             preview.cursor_y);
     }
   }
 

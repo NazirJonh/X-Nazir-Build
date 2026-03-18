@@ -38,6 +38,21 @@ class AssetRepresentation;
 namespace ui {
 struct Layout;
 struct Block;
+enum class PopupAttachDirection : int8_t;
+/**
+ * Runtime state for extension drop preview on category tabs.
+ * Stored in ARegionRuntime::extension_drop_preview_state during hover.
+ * This is a preview-only state - it does NOT affect actual category order.
+ */
+struct ExtensionDropPreviewState {
+  bool active = false;
+  char target_category_id[64] = ""; /* Category being hovered (empty if no tabs exist) */
+  int target_index = -1;              /* Index of target category in ordered list */
+  bool insert_above = false;          /* true = insert above target, false = below */
+  int tab_height = 0;                 /* Height of tab for ghost sizing */
+  int tab_v_pad = 0;                  /* Vertical padding between tabs */
+  int cursor_y = 0;                   /* Cursor Y position for accurate ghost positioning */
+};
 }  // namespace ui
 
 struct ARegion;
@@ -581,6 +596,8 @@ struct ARegionRuntime {
 
   /** Opaque pointer used by editors for category-tabs dragging state (runtime only). */
   void *category_tabs_drag_state = nullptr;
+  /** Preview state for extension drop (ghost tab visualization during hover). */
+  ui::ExtensionDropPreviewState extension_drop_preview_state = {};
 
   /** Pending category ID for drag detection (cleared when drag starts or click completes). */
   char category_tabs_drag_pending_id[64] = "";

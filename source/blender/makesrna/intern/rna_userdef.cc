@@ -5099,7 +5099,7 @@ static void rna_def_userdef_view(BlenderRNA *brna)
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_default(prop, 1.0f);
+  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_mixed");
   RNA_def_property_ui_text(
       prop, "Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
@@ -5107,7 +5107,7 @@ static void rna_def_userdef_view(BlenderRNA *brna)
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_default(prop, 1.0f);
+  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_text");
   RNA_def_property_ui_text(
       prop, "Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
@@ -5146,7 +5146,6 @@ static void rna_def_userdef_view(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "category_tabs_show_drag_tooltips", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_show_drag_tooltips", 1);
-  RNA_def_property_boolean_default(prop, true);
   RNA_def_property_ui_text(prop, "Show Drag Tooltips",
                            "Show category name tooltips when dragging tabs in Icon mode");
   RNA_def_property_update(prop, 0, "rna_userdef_gpu_update");

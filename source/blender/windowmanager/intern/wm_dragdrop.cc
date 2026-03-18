@@ -99,6 +99,10 @@ static void drop_log_once(const char *format, ...)
 
 namespace blender {
 
+namespace ui {
+void category_tabs_extension_preview_clear(ARegion *region);
+}
+
 /* ****************************************************** */
 
 struct wmDropBoxMap;
@@ -395,6 +399,18 @@ void wm_drags_exit(wmWindowManager *wm, wmWindow *win)
   /* Turn off modal cursor for all windows. */
   for (wmWindow &win : wm->windows) {
     WM_cursor_modal_restore(&win);
+  }
+
+  /* Clear extension drop preview state for all regions in all windows. */
+  for (wmWindow &window : wm->windows) {
+    const bScreen *screen = WM_window_get_active_screen(&window);
+    if (screen) {
+      for (ScrArea &area : screen->areabase) {
+        for (ARegion &region : area.regionbase) {
+          ui::category_tabs_extension_preview_clear(&region);
+        }
+      }
+    }
   }
 
   /* Active area should always redraw, even if canceled. */

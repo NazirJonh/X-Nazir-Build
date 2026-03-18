@@ -1155,17 +1155,37 @@ def _auto_detect_extension_icon_path(category: str):
                 exact_match = target_key in match_keys
                 fuzzy_match_key = ""
                 if not exact_match:
-                    # Strict fuzzy fallback for near-typo category names.
-                    # Example: "HugeMenance" -> "hugemenace".
-                    if len(target_key) >= 8:
-                        for key in match_keys:
-                            if not key or abs(len(key) - len(target_key)) > 1:
-                                continue
-                            if key[:5] != target_key[:5]:
-                                continue
-                            if _is_single_edit_apart(target_key, key):
-                                fuzzy_match_key = key
-                                break
+                    # Prefix matching for extension categories with version suffix.
+                    #
+                    # ARCHITECTURAL NOTE: Many extensions create categories that include version
+                    # numbers or other suffixes (e.g., "MPFB v2.0.14" from extension "mpfb").
+                    # The normalized keys become "mpfbv2014" vs "mpfb" - these don't match exactly
+                    # and the typo-based fuzzy matching below requires length difference <= 1,
+                    # which fails here (diff = 6 characters).
+                    #
+                    # This prefix matching allows "mpfbv2014" to match "mpfb" by checking if
+                    # the category key starts with the extension's normalized key.
+                    #
+                    # TODO: Consider a more robust architecture where extensions explicitly
+                    # declare their panel categories in the manifest, enabling direct mapping
+                    # without relying on string heuristics.
+                    for key in match_keys:
+                        if key and len(key) >= 3 and target_key.startswith(key):
+                            fuzzy_match_key = key
+                            break
+
+                    if not fuzzy_match_key:
+                        # Strict fuzzy fallback for near-typo category names.
+                        # Example: "HugeMenance" -> "hugemenace".
+                        if len(target_key) >= 8:
+                            for key in match_keys:
+                                if not key or abs(len(key) - len(target_key)) > 1:
+                                    continue
+                                if key[:5] != target_key[:5]:
+                                    continue
+                                if _is_single_edit_apart(target_key, key):
+                                    fuzzy_match_key = key
+                                    break
                     if not fuzzy_match_key:
                         continue
 

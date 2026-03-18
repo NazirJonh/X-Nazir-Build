@@ -1501,10 +1501,10 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
     }
   }
 
-  /* visible_rows = visible count + 1 extra slot, max 16 */
+  /* visible_rows = visible count + 1 extra slot, cap at 20 rows for readability */
   int visible_rows = visible_tag_count + 1;
-  if (visible_rows > 16) {
-    visible_rows = 16;
+  if (visible_rows > 20) {
+    visible_rows = 20;
   }
   if (visible_rows < 2) {
     visible_rows = 2; /* Minimum 2 rows for usability */
@@ -1520,13 +1520,13 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
                 "tag_order_list",             /* Unique list ID */
                 &wm_ptr,
                 "category_tags",             /* Collection property */
-                &wm_ptr,
-                "category_tags_active_index", /* Active index property */
-                nullptr,                     /* item_dyntip_propname */
-                visible_rows,                /* rows - show all tags (up to 16) */
-                16,                          /* maxrows - always 16 */
-                0,                           /* layout_type (UILST_LAYOUT_DEFAULT = 0) */
-                TEMPLATE_LIST_FLAG_NONE);    /* flags */
+                 &wm_ptr,
+                 "category_tags_active_index", /* Active index property */
+                 nullptr,                     /* item_dyntip_propname */
+                 visible_rows,                /* rows - show all tags (up to 20) */
+                 20,                          /* maxrows - always 20 */
+                 0,                           /* layout_type (UILST_LAYOUT_DEFAULT = 0) */
+                 TEMPLATE_LIST_FLAG_NONE);    /* flags */
 
   /* Checkbox for showing tag names in Tag Bar (Glyph+Name vs Glyph-only mode) */
   layout.separator();

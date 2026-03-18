@@ -516,6 +516,178 @@ static char get_current_object_mode_filter_value(const bContext *C)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Category Tag Tooltip Helpers
+ * \{ */
+
+/**
+ * Structure to pass tag data to tooltip function.
+ */
+struct TagTooltipData {
+  std::string tag_name;
+  uint32_t mode_flags;
+};
+
+/**
+ * Get mode_flags for a tag by name from the window manager's category_tags list.
+ * Returns 0 if tag not found or has no mode restrictions (works in all modes).
+ */
+static uint32_t category_tag_get_mode_flags(const wmWindowManager *wm, const char *tag_name)
+{
+  if (wm == nullptr || tag_name == nullptr || tag_name[0] == '\0') {
+    return 0;
+  }
+
+  for (const CategoryTagDef *tag = static_cast<const CategoryTagDef *>(wm->category_tags.first);
+       tag;
+       tag = static_cast<const CategoryTagDef *>(tag->next))
+  {
+    if (STREQ(tag->name, tag_name)) {
+      return tag->mode_flags;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Get icon for a CategoryTagMode flag.
+ */
+static int category_tag_mode_get_icon(CategoryTagMode mode)
+{
+  switch (mode) {
+    case CategoryTagMode::OBJECT_MODE:
+      return ICON_OBJECT_DATAMODE;
+    case CategoryTagMode::EDIT_MODE:
+      return ICON_EDITMODE_HLT;
+    case CategoryTagMode::SCULPT_MODE:
+      return ICON_SCULPTMODE_HLT;
+    case CategoryTagMode::VERTEX_PAINT:
+      return ICON_VPAINT_HLT;
+    case CategoryTagMode::WEIGHT_PAINT:
+      return ICON_WPAINT_HLT;
+    case CategoryTagMode::TEXTURE_PAINT:
+      return ICON_TPAINT_HLT;
+    case CategoryTagMode::UV_EDIT:
+      return ICON_UV_DATA;
+    case CategoryTagMode::POSE_MODE:
+      return ICON_POSE_HLT;
+    case CategoryTagMode::GEOMETRY_NODES:
+      return ICON_NODETREE;
+    case CategoryTagMode::SHADER_EDITOR:
+      return ICON_MATERIAL;
+    case CategoryTagMode::IMAGE_PAINT:
+      return ICON_IMAGE_DATA;
+    default:
+      return ICON_NONE;
+  }
+}
+
+/**
+ * Get translated name for a CategoryTagMode flag.
+ */
+static const char *category_tag_mode_get_name(CategoryTagMode mode)
+{
+  switch (mode) {
+    case CategoryTagMode::OBJECT_MODE:
+      return CTX_TIP_(BLT_I18NCONTEXT_ID_WINDOWMANAGER, "Object Mode");
+    case CategoryTagMode::EDIT_MODE:
+      return CTX_TIP_(BLT_I18NCONTEXT_ID_WINDOWMANAGER, "Edit Mode");
+    case CategoryTagMode::SCULPT_MODE:
+      return CTX_TIP_(BLT_I18NCONTEXT_ID_WINDOWMANAGER, "Sculpt Mode");
+    case CategoryTagMode::VERTEX_PAINT:
+      return CTX_TIP_(BLT_I18NCONTEXT_ID_WINDOWMANAGER, "Vertex Paint");
+    case CategoryTagMode::WEIGHT_PAINT:
+      return CTX_TIP_(BLT_I18NCONTEXT_ID_WINDOWMANAGER, "Weight Paint");
+    case CategoryTagMode::TEXTURE_PAINT:
+      return CTX_TIP_(BLT_I18NCONTEXT_ID_WINDOWMANAGER, "Texture Paint");
+    case CategoryTagMode::UV_EDIT:
+      return CTX_TIP_(BLT_I18NCONTEXT_ID_WINDOWMANAGER, "UV Edit");
+    case CategoryTagMode::POSE_MODE:
+      return CTX_TIP_(BLT_I18NCONTEXT_ID_WINDOWMANAGER, "Pose Mode");
+    case CategoryTagMode::GEOMETRY_NODES:
+      return CTX_TIP_(BLT_I18NCONTEXT_ID_WINDOWMANAGER, "Geometry Nodes");
+    case CategoryTagMode::SHADER_EDITOR:
+      return CTX_TIP_(BLT_I18NCONTEXT_ID_WINDOWMANAGER, "Shader Editor");
+    case CategoryTagMode::IMAGE_PAINT:
+      return CTX_TIP_(BLT_I18NCONTEXT_ID_WINDOWMANAGER, "Image Paint");
+    default:
+      return "";
+  }
+}
+
+/**
+ * Build a string listing all modes for a tag's mode_flags.
+ * Format: "Filter Mode:\n• Object Mode\n• Edit Mode\n..."
+ */
+static std::string category_tag_build_modes_string(uint32_t mode_flags)
+{
+  if (mode_flags == 0) {
+    return "";
+  }
+
+  std::string result = TIP_("Filter Mode:");
+
+  /* Check each mode flag */
+  const CategoryTagMode modes[] = {
+      CategoryTagMode::OBJECT_MODE,
+      CategoryTagMode::EDIT_MODE,
+      CategoryTagMode::SCULPT_MODE,
+      CategoryTagMode::VERTEX_PAINT,
+      CategoryTagMode::WEIGHT_PAINT,
+      CategoryTagMode::TEXTURE_PAINT,
+      CategoryTagMode::UV_EDIT,
+      CategoryTagMode::POSE_MODE,
+      CategoryTagMode::GEOMETRY_NODES,
+      CategoryTagMode::SHADER_EDITOR,
+      CategoryTagMode::IMAGE_PAINT,
+  };
+
+  for (const CategoryTagMode mode : modes) {
+    if (mode_flags & uint32_t(mode)) {
+      const char *mode_name = category_tag_mode_get_name(mode);
+      if (mode_name && mode_name[0] != '\0') {
+        result += "\n• ";
+        result += mode_name;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Tooltip function for tag glyphs that shows tag name and mode information.
+ */
+static std::string tag_glyph_tooltip_func(bContext * /*C*/, void *argN, StringRef /*tip*/)
+{
+  TagTooltipData *data = static_cast<TagTooltipData *>(argN);
+  if (data == nullptr) {
+    return "";
+  }
+
+  /* Build full tooltip: tag name + modes */
+  std::string result = data->tag_name;
+
+  const std::string modes_str = category_tag_build_modes_string(data->mode_flags);
+  if (!modes_str.empty()) {
+    result += "\n\n";
+    result += modes_str;
+  }
+
+  return result;
+}
+
+/**
+ * Free function for tooltip data.
+ */
+static void tag_tooltip_data_free(void *arg)
+{
+  TagTooltipData *data = static_cast<TagTooltipData *>(arg);
+  delete data;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Category Tag Filter Toggle Menu
  * \{ */
 
@@ -2385,9 +2557,12 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                                               0,
                                               std::nullopt);
 
-            /* Set tooltip with tag name (copy string to avoid dangling pointer) */
-            std::string tag_name_copy = tag_name;
-            glyph_but->tip_quick_func = [tag_name_copy](const Button *) { return tag_name_copy; };
+            /* Set up full tooltip for tag glyph (shows tag name + filter modes) */
+            TagTooltipData *tooltip_data = new TagTooltipData();
+            tooltip_data->tag_name = tag_name;
+            tooltip_data->mode_flags = category_tag_get_mode_flags(wm, tag_name);
+            button_func_tooltip_set(
+                glyph_but, tag_glyph_tooltip_func, tooltip_data, tag_tooltip_data_free);
 
             /* Set color if available */
             if (has_color) {

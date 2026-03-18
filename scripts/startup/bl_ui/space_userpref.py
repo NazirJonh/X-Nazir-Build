@@ -9779,6 +9779,7 @@ class USERPREF_UL_category_tags(UIList):
             
             # Left: Glyph (fixed relative width)
             col_glyph = split.column()
+            col_glyph.ui_units_x = 4  # Keep some width reserved so glyph never disappears first
             if tag.glyph:
                 glyph_char = _hex_to_glyph(tag.glyph)
                 col_glyph.colored_label(
@@ -10003,7 +10004,7 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
             "USERPREF_UL_category_tags", "",
             wm, "category_tags",
             wm, "category_tags_active_index",
-            rows=25, maxrows=64
+            rows=20, maxrows=64
         )
 
         # Buttons to the right of list

@@ -132,6 +132,7 @@ struct PendingCategoryInsert {
   bool valid = false;
   double timestamp = 0.0;
   Set<std::string> existing_categories;
+  Set<std::string> all_existing_categories; /* ALL categories from region (not filtered by tag) */
   Vector<std::string> pre_order;
   std::string source_extension_id; /* ID of the extension being dropped (for drag & drop) */
 };
@@ -3284,11 +3285,17 @@ void category_tabs_apply_drop_insert(bContext *C,
    * the active tag. This would cause them to be incorrectly detected as "new" when the
    * extension installs. */
   g_known_categories_before_extension_drop.clear();
+  g_pending_category_insert.all_existing_categories.clear();
+  printf("[KNOWN_CATS] Saving known categories before extension drop:\n");
   for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     if (pc_dyn.idname && pc_dyn.idname[0]) {
       g_known_categories_before_extension_drop.add(pc_dyn.idname);
+      g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+      printf("[KNOWN_CATS]   + '%s'\n", pc_dyn.idname);
     }
   }
+  printf("[KNOWN_CATS] Total: %zu categories (also saved to pending_insert)\n",
+         g_known_categories_before_extension_drop.size());
 
   Vector<std::string> json_order = load_category_order_from_json(C, tag_key.c_str());
 
@@ -3416,6 +3423,7 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
     const double time_since_pending = BLI_time_now_seconds() - g_pending_category_insert.timestamp;
     if (time_since_pending > 120.0) {
       g_pending_category_insert.valid = false;
+      g_pending_category_insert.all_existing_categories.clear();
     }
   }
 
@@ -3456,13 +3464,32 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
   if (g_pending_category_insert.valid && g_pending_category_insert.tag_key == tag_key)
   {
     Vector<PanelCategoryDyn *> appeared_categories;
+    printf("[GET_ORDERED] all_existing_categories.size()=%zu, existing_categories.size()=%zu, g_known_categories_before_extension_drop.size()=%zu\n",
+           g_pending_category_insert.all_existing_categories.size(),
+           g_pending_category_insert.existing_categories.size(),
+           g_known_categories_before_extension_drop.size());
     for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
       /* IMPORTANT: Do NOT filter new extension categories through panel_category_is_visible_by_tags!
        * New extension categories may not have tags assigned yet, which would cause them to be
        * filtered out when tag filter is active. Extension categories must be discoverable
-       * regardless of tag filter state so they can be positioned and activated. */
-      const bool is_new_category = !g_pending_category_insert.existing_categories.contains(
-          std::string(pc_dyn.idname));
+       * regardless of tag filter state so they can be positioned and activated.
+       *
+       * Use g_pending_category_insert.all_existing_categories when available (extension drop case),
+       * as it contains ALL categories from the region, not just filtered ones.
+       * This prevents existing categories without the active tag from being incorrectly
+       * detected as "new" when an extension is dropped with an active tag filter.
+       *
+       * Fallback to g_known_categories_before_extension_drop for backwards compatibility,
+       * and finally to existing_categories (filtered) if neither is available. */
+      const bool use_full_category_list = !g_pending_category_insert.all_existing_categories.is_empty() ||
+                                          !g_known_categories_before_extension_drop.is_empty();
+      const bool is_new_category = !g_pending_category_insert.all_existing_categories.is_empty() ?
+          !g_pending_category_insert.all_existing_categories.contains(std::string(pc_dyn.idname)) :
+          (!g_known_categories_before_extension_drop.is_empty() ?
+              !g_known_categories_before_extension_drop.contains(std::string(pc_dyn.idname)) :
+              !g_pending_category_insert.existing_categories.contains(std::string(pc_dyn.idname)));
+      printf("[GET_ORDERED]   cat='%s' use_full=%d is_new=%d\n",
+             pc_dyn.idname, use_full_category_list, is_new_category);
       if (!is_new_category && !panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
         continue;
       }
@@ -3747,6 +3774,28 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
       order_offset++;
     }
 
+    /* Filter pending_order to only include categories that should be visible with current tag filter.
+     * This prevents saving categories without the active tag to the tag-specific order in JSON,
+     * which would cause them to briefly appear before being filtered out.
+     * Keep: reserved categories, newly inserted categories, and categories passing tag filter. */
+    if (!tag_key.empty() && tag_key.back() != ':') {
+      /* tag_key has an active tag filter (not just space prefix like "VIEW3D:") */
+      Vector<std::string> filtered_order;
+      Set<std::string> inserted_set;
+      for (const std::string &id : pending_inserted_ids) {
+        inserted_set.add(id);
+      }
+      for (const std::string &cat_id : pending_order) {
+        const bool is_reserved = category_is_reserved_for_reorder(wm, cat_id.c_str());
+        const bool is_newly_inserted = inserted_set.contains(cat_id);
+        const bool passes_tag_filter = panel_category_is_visible_by_tags(C, wm, cat_id.c_str());
+        if (is_reserved || is_newly_inserted || passes_tag_filter) {
+          filtered_order.append(cat_id);
+        }
+      }
+      pending_order = std::move(filtered_order);
+    }
+
     /* Persisted order must always satisfy reserved-first + reserved-priority invariant. */
     normalize_reserved_boundary(pending_order);
 
@@ -3791,6 +3840,7 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
     fflush(stdout);
 
     g_pending_category_insert.valid = false;
+    g_pending_category_insert.all_existing_categories.clear();
 
     /* Auto-activate newly appeared category after extension installation.
      * Uses deferred activation with extension signal to ensure:

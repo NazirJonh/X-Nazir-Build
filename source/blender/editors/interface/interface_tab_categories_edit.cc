@@ -2601,7 +2601,37 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
 
     if (tags_panel.body) {
       Layout &tags_body = *tags_panel.body;
-      if (!tags_data_body.empty()) {
+
+      /* Show "Without Tag" only for categories that are truly unassigned in current context,
+       * exactly like "New Add-ons!" filter logic. */
+      const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
+      const CategoryGlyphItem *mapping_item = nullptr;
+      for (CategoryGlyphItem *map_item =
+               static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+           map_item;
+           map_item = static_cast<CategoryGlyphItem *>(map_item->next))
+      {
+        if (STREQ(map_item->category, category) && map_item->space_type == space_type) {
+          mapping_item = map_item;
+          break;
+        }
+      }
+      if (!mapping_item && space_type != -1) {
+        for (CategoryGlyphItem *map_item =
+                 static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+             map_item;
+             map_item = static_cast<CategoryGlyphItem *>(map_item->next))
+        {
+          if (STREQ(map_item->category, category) && map_item->space_type == -1) {
+            mapping_item = map_item;
+            break;
+          }
+        }
+      }
+      const bool show_without_tag = category_is_unassigned_for_context(
+          wm, mapping_item, space_type, current_mode_flag);
+
+      if (!tags_data_body.empty() || show_without_tag) {
         /* Create centered container for the grid */
         Layout &centered_row = tags_body.row(false);
         centered_row.alignment_set(LayoutAlign::Center);
@@ -2609,13 +2639,62 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         /* Use grid_flow for automatic column wrapping (max 3 columns, row-major) */
         Layout &tags_grid = centered_row.grid_flow(true, 3, true, false, false);
 
-        const char *cursor = tags_data_body.c_str();
-        char tag_name[64];
-        char tag_glyph[16];
-        char tag_color[32];
-        int is_active;
+        /* Add "Without Tag" button as the FIRST item in the grid if pending */
+        if (show_without_tag) {
+          bool without_tag_is_active = false;
+          for (CategoryGlyphItem *override_item =
+                   static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+               override_item;
+               override_item = static_cast<CategoryGlyphItem *>(override_item->next))
+          {
+            if (!STREQ(override_item->category, category) || override_item->space_type != space_type) {
+              continue;
+            }
+            without_tag_is_active = (override_item->tags[0] == '\0') &&
+                                    (override_item->pending_tag_assignment == 0);
+            break;
+          }
 
-        int tag_count = 0;
+          Layout &without_tag_item = tags_grid.row(true);
+          without_tag_item.alignment_set(LayoutAlign::Left);
+
+          Block *block = without_tag_item.block();
+          block_layout_set_current(block, &without_tag_item);
+
+          /* Create "Without Tag" button with same style as regular tag buttons */
+          Button *without_tag_but = uiDefButTag(block,
+                                                IFACE_("Without Tag"),
+                                                "✕",  /* Simple X glyph for "no tag" */
+                                                nullptr,  /* no custom color */
+                                                without_tag_is_active,
+                                                false,  /* is_pref_mode */
+                                                false,  /* center_glyph */
+                                                0, "",  /* icon_id, icon_path */
+                                               0, 0,
+                                               UI_UNIT_X * 8,
+                                               UI_UNIT_Y * 1.5f,
+                                               nullptr);
+
+          /* Set operator for clearing tags */
+          wmOperatorType *ot_clear = WM_operatortype_find("wm.category_clear_tags", false);
+          if (ot_clear) {
+            button_operator_set(without_tag_but, ot_clear, wm::OpCallContext::ExecDefault);
+            PointerRNA *op_ptr = button_operator_ptr_ensure(without_tag_but);
+            if (op_ptr) {
+              RNA_string_set(op_ptr, "category", category);
+              RNA_int_set(op_ptr, "space_type", space_type);
+            }
+          }
+        }
+
+        if (!tags_data_body.empty()) {
+          const char *cursor = tags_data_body.c_str();
+          char tag_name[64];
+          char tag_glyph[16];
+          char tag_color[32];
+          int is_active;
+
+          int tag_count = 0;
 
         while (*cursor != '\0') {
           int i = 0;
@@ -2710,6 +2789,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
             cursor++;
           }
         }
+        } /* End of if (!tags_data_body.empty()) block */
       }
       else {
         tags_body.label(IFACE_("No tags. Click 'New tag' to create."), ICON_INFO);
@@ -3522,15 +3602,17 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   }
 
   /* After saving, check if there are still unassigned categories.
-   * If not and "New Add-ons!" filter is active, deactivate it and switch to
-   * the tag that was just assigned to this category. */
+   * If not and "New Add-ons!" filter is active, deactivate it and restore
+   * filtering from the currently active category (or disable tag filtering
+   * for "Without Tag"). */
   {
     const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
     const bool has_unassigned = should_show_new_addon_tag(wm, space_type, current_mode_flag);
 
     if (!has_unassigned && is_new_addon_filter_active(area)) {
-      /* No more unassigned categories - deactivate "New Add-ons!" filter */
+      /* No more unassigned categories - deactivate "New Add-ons!" filter. */
       set_new_addon_filter_active(area, false);
+      set_saved_tag_filter_tags(area, "");
 
       /* Also reset tag_bar_manually_hidden so future auto-show can work */
       if (area && area->spacetype == SPACE_NODE) {
@@ -3541,38 +3623,37 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
         }
       }
 
-      /* Switch to the first tag assigned to this category */
-      if (item->tags[0] != '\0') {
-        TagFilterStateRef state{};
-        if (tag_filter_state_from_area(area, &state)) {
-          /* Copy the first tag from item->tags (semicolon-separated) */
-          char first_tag[64] = "";
-          const char *sep = strchr(item->tags, ';');
-          if (sep) {
-            size_t len = sep - item->tags;
-            len = std::min(len, sizeof(first_tag) - 1);
-            BLI_strncpy(first_tag, item->tags, len + 1);
-          }
-          else {
-            BLI_strncpy(first_tag, item->tags, sizeof(first_tag));
-          }
+      ARegion *region_ui = area ? BKE_area_find_region_type(area, RGN_TYPE_UI) : nullptr;
+      const char *active_category = region_ui ? panel_category_active_get(region_ui, false) : nullptr;
+      if (!active_category || active_category[0] == '\0') {
+        active_category = category;
+      }
 
-          /* Trim whitespace */
-          char *tag = first_tag;
-          while (*tag == ' ') {
-            tag++;
-          }
-          char *end = tag + strlen(tag) - 1;
-          while (end > tag && *end == ' ') {
-            *end-- = '\0';
-          }
+      const char *active_category_tags = category_tags_string_lookup(wm, active_category, space_type);
 
-          if (tag[0] != '\0') {
-            /* Set this tag as the active filter */
-            BLI_strncpy(state.active_tags, tag, 256);
-            printf("[CATEGORY_TAB_EDIT] No more unassigned categories, switched to tag '%s'\n", tag);
-          }
+      TagFilterStateRef state{};
+      if (tag_filter_state_from_area(area, &state) && state.active_tags && state.filter_enabled) {
+        Vector<std::string> active_tag_list;
+        if (active_category_tags && active_category_tags[0] != '\0') {
+          category_tab_split_tags(active_category_tags, active_tag_list, ",;");
         }
+
+        if (!active_tag_list.is_empty() && !active_tag_list[0].empty()) {
+          BLI_strncpy(state.active_tags, active_tag_list[0].c_str(), 256);
+          *state.filter_enabled = 1;
+          printf("[CATEGORY_TAB_EDIT] No more unassigned categories, switched to tag '%s'\n",
+                 active_tag_list[0].c_str());
+        }
+        else {
+          /* "Without Tag": disable tag filtering and keep active tab unchanged. */
+          state.active_tags[0] = '\0';
+          *state.filter_enabled = 0;
+          printf("[CATEGORY_TAB_EDIT] No more unassigned categories, disabled tag filtering\n");
+        }
+      }
+
+      if (region_ui && active_category && active_category[0] != '\0') {
+        panel_category_active_set_safe(C, region_ui, active_category, false);
       }
     }
   }

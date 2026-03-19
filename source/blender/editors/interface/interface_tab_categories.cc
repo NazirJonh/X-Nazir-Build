@@ -439,17 +439,35 @@ static void handle_extension_drop_on_tabs(const bContext *C,
   const int space_type = area ? area->spacetype : -1;
   const uint32_t mode_flag = get_current_tag_mode_flag(C);
 
-  if (tab_category != nullptr && tag_name != nullptr && tag_name[0] != '\0') {
+  std::string resolved_tag_name;
+  if (tag_name != nullptr && tag_name[0] != '\0') {
+    resolved_tag_name = tag_name;
+  }
+  else if (tab_category != nullptr) {
+    TagFilterStateRef tag_state{};
+    ScrArea *area_for_tag = CTX_wm_area(C);
+    if (tag_filter_state_from_area(area_for_tag, &tag_state) && tag_state.active_tags &&
+        tag_state.active_tags[0] != '\0') {
+      resolved_tag_name = tag_state.active_tags;
+    }
+  }
+
+  printf("[CATEGORY ACTIVATE] Extension drop on tabs: resolved tag_name_to_assign='%s' (raw tag_name='%s')\n",
+         resolved_tag_name.empty() ? "" : resolved_tag_name.c_str(),
+         (tag_name != nullptr) ? tag_name : "(null)");
+  fflush(stdout);
+
+  if (tab_category != nullptr && !resolved_tag_name.empty()) {
     /* Drop onto tabs: defer tag assignment until category appears after extension install.
      * The category doesn't exist yet in _glyph_cache, so immediate assignment would fail.
      * We store the tag name and set tag_already_assigned=true so the deferred activation
      * will assign the tag when the category actually appears. */
     printf("[CATEGORY ACTIVATE] Extension drop on tabs: deferring tag assignment for category '%s', tag '%s'\n",
-           category_id, tag_name);
+           category_id, resolved_tag_name.c_str());
     fflush(stdout);
 
     /* Store tag name for deferred assignment */
-    g_deferred_category_activation.tag_name_to_assign = tag_name;
+    g_deferred_category_activation.tag_name_to_assign = resolved_tag_name;
 
     /* Register as pending extension category with tag_already_assigned=true.
      * This means: pending=false (user already chose a tag via drag & drop),
@@ -1796,6 +1814,16 @@ bool category_is_reserved(const wmWindowManager *wm, const char *category_id)
     return (item->is_reserved != 0);
   }
 
+  return false;
+}
+
+bool category_has_pending_tag_assignment(const wmWindowManager *wm,
+                                          const char *category_id,
+                                          int space_type)
+{
+  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category_id, space_type)) {
+    return (item->pending_tag_assignment != 0);
+  }
   return false;
 }
 
@@ -3378,8 +3406,48 @@ void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *regio
     return;
   }
 
+  ScrArea *area = CTX_wm_area(C);
   const wmWindowManager *wm = CTX_wm_manager(C);
+  const int space_type = area ? area->spacetype : -1;
+
   const char *current_active = panel_category_active_get(region, false);
+
+  if (area && is_new_addon_filter_active(area)) {
+    const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
+    const bool has_unassigned = should_show_new_addon_tag(wm, space_type, current_mode_flag);
+
+    if (!has_unassigned) {
+      set_new_addon_filter_active(area, false);
+      set_saved_tag_filter_tags(area, "");
+
+      TagFilterStateRef state{};
+      if (tag_filter_state_from_area(area, &state) && state.active_tags && state.filter_enabled) {
+        const char *category_for_restore =
+            (current_active && current_active[0] != '\0') ? current_active : nullptr;
+
+        const char *category_tags = nullptr;
+        if (category_for_restore) {
+          category_tags = category_tags_string_lookup(wm, category_for_restore, space_type);
+        }
+
+        Vector<std::string> tag_list;
+        if (category_tags && category_tags[0] != '\0') {
+          category_tab_split_tags(category_tags, tag_list, ",;");
+        }
+
+        if (!tag_list.is_empty() && !tag_list[0].empty()) {
+          BLI_strncpy(state.active_tags, tag_list[0].c_str(), 256);
+          *state.filter_enabled = 1;
+        }
+        else {
+          state.active_tags[0] = '\0';
+          *state.filter_enabled = 0;
+        }
+      }
+    }
+  }
+
+  current_active = panel_category_active_get(region, false);
 
   if (current_active && panel_category_is_visible_by_tags(C, wm, current_active)) {
     return;

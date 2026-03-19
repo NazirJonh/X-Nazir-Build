@@ -3548,13 +3548,35 @@ def set_category_data(category,
         print(f"[SET_CATEGORY_DATA] KEY NOT in cache - will create new entry")
 
     if key not in _glyph_cache:
-        _glyph_cache[key] = {
-            "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
-            "default_glyph": "", "default_display_name": "", "base_type": "text_only",
-            "first_letter": "",
-            "glyph_mode": "auto",
-            "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
-        }
+        inherited_data = None
+
+        if space_type != -1:
+            global_key = _make_cache_key(-1, category)
+            global_data = _glyph_cache.get(global_key)
+            if isinstance(global_data, dict):
+                inherited_data = dict(global_data)
+
+        if inherited_data is None:
+            for cache_key, cache_data in _glyph_cache.items():
+                if not (isinstance(cache_key, tuple) and len(cache_key) >= 2):
+                    continue
+                if cache_key[1] != category:
+                    continue
+                if isinstance(cache_data, dict):
+                    inherited_data = dict(cache_data)
+                    break
+
+        if isinstance(inherited_data, dict):
+            _glyph_cache[key] = _normalize_category_data(inherited_data, category)
+            print(f"[SET_CATEGORY_DATA] Initialized key={key} from existing category data")
+        else:
+            _glyph_cache[key] = {
+                "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
+                "default_glyph": "", "default_display_name": "", "base_type": "text_only",
+                "first_letter": "",
+                "glyph_mode": "auto",
+                "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
+            }
 
     # Ensure the entry has all required fields
     entry = _glyph_cache[key]

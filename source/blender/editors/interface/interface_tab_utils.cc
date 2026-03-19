@@ -217,7 +217,12 @@ int category_tabs_min_width_get(const ScrArea *area,
   const float safe_aspect = std::max(aspect, 0.0001f);
   const float category_tabs_zoom = category_tabs_zoom_value_get(area, display_mode);
   const float zoom = (1.0f / safe_aspect) * category_tabs_zoom;
-  const int category_tabs_width = int(std::lround(double(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom)));
+  const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                      display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                         UI_TABS_VISUAL_EFFECT_MARGIN :
+                                         1.0f;
+  const int category_tabs_width = int(
+      std::lround(double(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom * visual_effect_margin)));
   const int legacy_min_width =
       int(std::ceil(double(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / safe_aspect)));
 

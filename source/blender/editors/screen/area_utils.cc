@@ -9,6 +9,7 @@
  */
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "BKE_screen.hh"
@@ -196,6 +197,14 @@ int ED_region_generic_tools_region_snap_size(const ARegion *region, int size, in
 
 int ED_region_generic_panel_region_snap_size(const ARegion *region, int size, int axis)
 {
+  return ED_region_generic_panel_region_snap_size_with_area(nullptr, region, size, axis);
+}
+
+int ED_region_generic_panel_region_snap_size_with_area(const ScrArea *area,
+                                                       const ARegion *region,
+                                                       int size,
+                                                       int axis)
+{
   if (axis == 0) {
     if (!ui::panel_category_tabs_is_visible(region)) {
       return size;
@@ -204,11 +213,22 @@ int ED_region_generic_panel_region_snap_size(const ARegion *region, int size, in
     /* Using Y axis avoids slight feedback loop when adjusting X. */
     const float aspect = BLI_rctf_size_y(&region->v2d.cur) /
                          (BLI_rcti_size_y(&region->v2d.mask) + 1);
-    const float category_tabs_zoom = ED_category_tabs_zoom_get(nullptr);
+    const float safe_aspect = std::max(aspect, 0.0001f);
+    const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
+    const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
+    const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                        display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                           UI_TABS_VISUAL_EFFECT_MARGIN :
+                                           1.0f;
+    const float zoom = (1.0f / safe_aspect) * category_tabs_zoom;
 
-    const float category_tabs_min_width =
-        std::max(UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom);
-    return int(category_tabs_min_width / aspect);
+    const int category_tabs_width = int(
+        std::lround(double(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom * visual_effect_margin)));
+    const int legacy_min_width =
+        int(std::ceil(double(UI_PANEL_CATEGORY_MIN_WIDTH * UI_SCALE_FAC / safe_aspect)));
+    const int category_tabs_min_width = std::max(category_tabs_width, legacy_min_width);
+
+    return int(std::ceil(float(category_tabs_min_width) * safe_aspect / UI_SCALE_FAC));
   }
   return size;
 }

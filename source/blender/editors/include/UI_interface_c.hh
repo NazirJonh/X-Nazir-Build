@@ -2767,6 +2767,15 @@ uint32_t get_current_tag_mode_flag(const bContext *C);
  */
 bool category_is_reserved(const wmWindowManager *wm, const char *category_id);
 
+/**
+ * Check if a category has pending tag assignment flag set.
+ * (i.e., it's a new extension category that hasn't been assigned a tag yet)
+ * \return True if the category has pending tag assignment.
+ */
+bool category_has_pending_tag_assignment(const wmWindowManager *wm,
+                                          const char *category_id,
+                                          int space_type);
+
 }  // namespace ui
 void template_header3D_mode(ui::Layout *layout, bContext *C);
 void uiTemplateEditModeSelection(ui::Layout *layout, bContext *C);

@@ -7397,8 +7397,8 @@ static std::string category_tab_extension_dragged_name(wmDrag *drag)
 }
 
 static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
-                                                          wmOperator *op,
-                                                          const wmEvent *event)
+                                                           wmOperator *op,
+                                                           const wmEvent *event)
 {
   std::string url = RNA_string_get(op->ptr, "url");
   if (url.empty()) {
@@ -7406,10 +7406,43 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  /* Check if current region supports category tabs */
-  ARegion *region = CTX_wm_region(C);
-  const bool region_supports_category_tabs = region && region->runtime &&
-      BKE_regiontype_uses_category_tabs(region->runtime->type);
+  /* Resolve drop target from cursor position first.
+   * `CTX_wm_region(C)` may point to a different region than the one that accepted the dropbox,
+   * which would incorrectly skip category-tab flow and break deferred tag assignment. */
+  bScreen *screen = CTX_wm_screen(C);
+  ScrArea *area_under_cursor = nullptr;
+  ARegion *region = nullptr;
+  if (screen && event) {
+    area_under_cursor = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, event->xy);
+    if (area_under_cursor) {
+      region = ED_area_find_region_xy_visual(area_under_cursor, RGN_TYPE_ANY, event->xy);
+    }
+  }
+
+  if (!region) {
+    region = CTX_wm_region(C);
+  }
+
+  auto region_uses_category_tabs = [](const ARegion *region_test) {
+    return region_test && region_test->runtime &&
+           BKE_regiontype_uses_category_tabs(region_test->runtime->type);
+  };
+
+  /* If visual region under cursor is an overlapping sidebar/header, recover the actual
+   * category-tabs region from the same area so tab-drop flow still executes. */
+  if (!region_uses_category_tabs(region) && area_under_cursor) {
+    for (ARegion *region_iter = static_cast<ARegion *>(area_under_cursor->regionbase.first);
+         region_iter;
+         region_iter = static_cast<ARegion *>(region_iter->next))
+    {
+      if (region_uses_category_tabs(region_iter)) {
+        region = region_iter;
+        break;
+      }
+    }
+  }
+
+  const bool region_supports_category_tabs = region_uses_category_tabs(region);
 
   const bool url_is_file = STRPREFIX(url.c_str(), "file://");
   const bool url_is_online = STRPREFIX(url.c_str(), "http://") ||
@@ -7451,7 +7484,7 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
       }
     }
 
-    ScrArea *area = CTX_wm_area(C);
+    ScrArea *area = area_under_cursor ? area_under_cursor : CTX_wm_area(C);
     int space_type = area ? area->spacetype : -1;
     uint32_t mode_flag = ui::get_current_tag_mode_flag(C);
 
@@ -7505,6 +7538,13 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
   const std::string target_category = RNA_string_get(op->ptr, "target_category");
   const bool insert_above = RNA_boolean_get(op->ptr, "insert_above");
   const std::string tag_name = RNA_string_get(op->ptr, "tag_name");
+
+  drop_log_once("[EXT_DROP_INVOKE] resolved region_type=%d supports_tabs=%d category='%s' target='%s' tag='%s'\n",
+                region ? region->regiontype : -1,
+                region_supports_category_tabs ? 1 : 0,
+                category.c_str(),
+                target_category.c_str(),
+                tag_name.c_str());
 
   /* Only apply drop insert if region supports category tabs AND category is specified */
   if (!category.empty() && region_supports_category_tabs) {
@@ -8123,7 +8163,42 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
     RNA_string_set(drop->ptr, "url", str.c_str());
   }
 
-  ARegion *region = drag->drop_state.region_from;
+  ARegion *region = nullptr;
+  ScrArea *area_under_cursor = nullptr;
+
+  const wmWindow *win = CTX_wm_window(C);
+  bScreen *screen = CTX_wm_screen(C);
+  const wmEvent *event_state = (win && win->runtime) ? win->runtime->eventstate : nullptr;
+
+  if (screen && event_state) {
+    const int mouse_xy[2] = {event_state->xy[0], event_state->xy[1]};
+    area_under_cursor = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, mouse_xy);
+    if (area_under_cursor) {
+      region = ED_area_find_region_xy_visual(area_under_cursor, RGN_TYPE_ANY, mouse_xy);
+
+      auto region_uses_visible_tabs = [](const ARegion *region_test) {
+        return region_test && region_test->runtime &&
+               BKE_regiontype_uses_category_tabs(region_test->runtime->type) &&
+               ui::panel_category_tabs_is_visible(const_cast<ARegion *>(region_test));
+      };
+
+      if (!region_uses_visible_tabs(region)) {
+        for (ARegion *region_iter = static_cast<ARegion *>(area_under_cursor->regionbase.first);
+             region_iter;
+             region_iter = static_cast<ARegion *>(region_iter->next))
+        {
+          if (region_uses_visible_tabs(region_iter)) {
+            region = region_iter;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (!region) {
+    region = drag->drop_state.region_from;
+  }
   std::string preview_target_category;
   bool preview_insert_above = false;
   bool preview_valid = false;
@@ -8160,23 +8235,29 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
     return;
   }
 
-  bScreen *screen = CTX_wm_screen(C);
+  screen = CTX_wm_screen(C);
   if (!screen) {
     return;
   }
 
-  ScrArea *area = drag->drop_state.area_from;
-  if (!area) {
-    return;
-  }
-
-  const wmWindow *win = CTX_wm_window(C);
   if (!win || !win->runtime->eventstate) {
     return;
   }
 
   const int mouse_x = win->runtime->eventstate->xy[0];
   const int mouse_y = win->runtime->eventstate->xy[1];
+  const int mouse_xy[2] = {mouse_x, mouse_y};
+
+  /* Resolve target area from current cursor position.
+   * `drag->drop_state.area_from` may point to the source area where drag began,
+   * which can belong to another editor and yields wrong active tag state. */
+  ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, mouse_xy);
+  if (!area) {
+    area = drag->drop_state.area_from;
+  }
+  if (!area) {
+    return;
+  }
 
   const int mx_local = mouse_x - region->winrct.xmin;
   const int my_local = mouse_y - region->winrct.ymin;
@@ -8222,12 +8303,17 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
 
   /* Get active tag from tag bar for deferred assignment to new category */
   blender::ui::TagFilterStateRef tag_state{};
+  const char *resolved_tag_name = "";
   if (blender::ui::tag_filter_state_from_area(area, &tag_state) && tag_state.active_tags) {
-    RNA_string_set(drop->ptr, "tag_name", tag_state.active_tags);
+    resolved_tag_name = tag_state.active_tags;
+    RNA_string_set(drop->ptr, "tag_name", resolved_tag_name);
   }
   else {
     RNA_string_set(drop->ptr, "tag_name", "");
   }
+  drop_log_once("[EXT_DROP_COPY] resolved tag_name='%s' from area spacetype=%d\n",
+                resolved_tag_name,
+                area->spacetype);
 }
 
 static std::string category_tab_extension_drop_tooltip(bContext *C,

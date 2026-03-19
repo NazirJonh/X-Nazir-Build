@@ -756,7 +756,20 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
         _glyph_cache[key] = cat_data
 
     cat_data["source_extension"] = extension_id
-    cat_data["pending_tag_assignment"] = True
+
+    # Do not re-enable pending state for categories that are already tagged.
+    # This prevents re-discovery (e.g. in another editor space) from undoing
+    # a successful deferred tag assignment.
+    has_assigned_tags = bool(cat_data.get("tags", []))
+    if has_assigned_tags:
+        if cat_data.get("pending_tag_assignment", False):
+            cat_data["pending_tag_assignment"] = False
+        tag_log(
+            f"mark_category_from_extension: preserved pending=False for tagged category "
+            f"{category_id!r} (tags={cat_data.get('tags', [])})"
+        )
+    else:
+        cat_data["pending_tag_assignment"] = True
 
     # Merge discovered_in_spaces
     existing_spaces_flags = spaces_to_flags(cat_data.get("discovered_in_spaces", []))
@@ -795,44 +808,53 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
     """
     global _glyph_cache
 
-    # Prefer the space-specific entry; fall back to global
-    key = _make_cache_key(space_type, category_id)
-    cat_data = _glyph_cache.get(key)
-    if cat_data is None:
-        key = _make_cache_key(-1, category_id)
-        cat_data = _glyph_cache.get(key)
+    matching_keys = []
+    for cache_key in _glyph_cache.keys():
+        if isinstance(cache_key, tuple) and len(cache_key) == 2:
+            _st, key_category = cache_key
+            if key_category == category_id:
+                matching_keys.append(cache_key)
 
-    if cat_data is None:
-        # Category not in cache yet - create new entry for extension category
-        # This happens when a new extension category is assigned a tag before
-        # the normal sync cycle adds it to the cache.
+    global_key = _make_cache_key(-1, category_id)
+    if global_key not in _glyph_cache:
+        source_data = None
+        if matching_keys:
+            source_data = _glyph_cache.get(matching_keys[0])
+
+        if isinstance(source_data, dict):
+            _glyph_cache[global_key] = _normalize_category_data(dict(source_data), category_id)
+        else:
+            _glyph_cache[global_key] = {
+                "tags": [],
+                "pending_tag_assignment": False,
+                "source_extension": "",
+                "discovered_in_spaces": [],
+                "discovered_in_modes": [],
+            }
+
+    if global_key not in matching_keys:
+        matching_keys.append(global_key)
+
+    if not matching_keys:
         tag_log(f"assign_tag_to_category: creating new cache entry for {category_id!r}")
-        key = _make_cache_key(-1, category_id)
-        cat_data = {
-            "tags": [],
-            "pending_tag_assignment": False,
-            "source_extension": "",
-            "discovered_in_spaces": [],
-            "discovered_in_modes": [],
-        }
-        _glyph_cache[key] = cat_data
+        matching_keys = [global_key]
 
-    if not isinstance(cat_data, dict):
-        cat_data = _normalize_category_data(cat_data)
-        _glyph_cache[key] = cat_data
+    for key in matching_keys:
+        cat_data = _glyph_cache.get(key)
+        if not isinstance(cat_data, dict):
+            cat_data = _normalize_category_data(cat_data)
+            _glyph_cache[key] = cat_data
 
-    # Add tag if not already present
-    tags = cat_data.setdefault("tags", [])
-    if tag_name not in tags:
-        tags.append(tag_name)
+        tags = cat_data.setdefault("tags", [])
+        if tag_name not in tags:
+            tags.append(tag_name)
 
-    # Clear pending flag
-    cat_data["pending_tag_assignment"] = False
+        cat_data["pending_tag_assignment"] = False
 
     # Sync to window manager (DNA) so the change is reflected in C++ code
     sync_glyph_mappings_to_wm()
 
-    tag_log(f"assign_tag_to_category: category={category_id!r}, tag={tag_name!r}, pending cleared")
+    tag_log(f"assign_tag_to_category: category={category_id!r}, tag={tag_name!r}, pending cleared keys={len(matching_keys)}")
     return True
 
 
@@ -969,6 +991,56 @@ def _get_glyphs_filepath():
 def _normalize_category_key(value: str) -> str:
     """Normalize category/package name for robust matching (e.g. OpenVAT <-> openvat)."""
     return re.sub(r"[^a-z0-9]+", "", str(value).lower())
+
+
+def _extension_id_match_keys(extension_id: str):
+    """Build normalized match keys from extension id/package tokens.
+
+    Supports ids like:
+    - "blender_org/brushstroke_tools"
+    - "add-on-ucupaint-v2.4.5"
+    - "ucupaint"
+    """
+    keys = set()
+    if not isinstance(extension_id, str):
+        return keys
+
+    ext = extension_id.strip()
+    if not ext:
+        return keys
+
+    def _add_key(text: str):
+        key = _normalize_category_key(text)
+        if key:
+            keys.add(key)
+
+    _add_key(ext)
+
+    # repo/package form: use package component as strongest identity key.
+    if "/" in ext:
+        _repo, _sep, pkg = ext.rpartition("/")
+        if pkg:
+            _add_key(pkg)
+            ext = pkg
+
+    # Remove common archive stem prefixes.
+    stem = re.sub(r"^(?:add[-_]?on[-_])", "", ext, flags=re.IGNORECASE)
+    _add_key(stem)
+
+    # Strip common version suffixes, e.g. "-v2.4.5", "_2_4_5", "-2.4.5".
+    stem_no_ver = re.sub(r"(?:[-_]?v?\d+(?:[._-]\d+)*)$", "", stem, flags=re.IGNORECASE)
+    _add_key(stem_no_ver)
+
+    return keys
+
+
+def _extension_ids_match(existing_extension_id: str, incoming_extension_id: str) -> bool:
+    """Loose extension-id equivalence via normalized key overlap."""
+    existing_keys = _extension_id_match_keys(existing_extension_id)
+    incoming_keys = _extension_id_match_keys(incoming_extension_id)
+    if not existing_keys or not incoming_keys:
+        return False
+    return bool(existing_keys.intersection(incoming_keys))
 
 
 _CATEGORY_DISCOVERY_SOURCE_PRIORITY = {
@@ -2132,7 +2204,8 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
                 # Save extension-related fields for "New Add-ons!" feature
                 if category_data.get("source_extension"):
                     entry_to_save["source_extension"] = category_data.get("source_extension")
-                if category_data.get("pending_tag_assignment"):
+                # Always save pending_tag_assignment if key exists (including False for "Without Tag")
+                if "pending_tag_assignment" in category_data:
                     entry_to_save["pending_tag_assignment"] = category_data.get("pending_tag_assignment")
                 if category_data.get("discovered_in_spaces"):
                     entry_to_save["discovered_in_spaces"] = category_data.get("discovered_in_spaces")
@@ -2705,11 +2778,89 @@ def toggle_category_tag_no_save(category, tag_name, space_type=-1):
         print(f"[TOGGLE_NO_SAVE] Updating wm.category_glyph_overrides for C++ UI visibility")
         update_category_tags_in_wm(category, space_type)
 
+        # Any regular tag toggle means "Without Tag" preview must be visually OFF.
+        _set_without_tag_preview_state_in_wm(category, space_type, is_selected=False)
+
         return result
     finally:
         # Keep preview mode active until Save/Cancel - do NOT reset here
         # This prevents WM sync during context.area.tag_redraw() call
         print(f"[TOGGLE_NO_SAVE] Keeping preview mode active until Save/Cancel")
+
+
+def clear_category_tags_no_save(category, space_type=-1):
+    """Clear all tags for a category WITHOUT auto-saving to JSON.
+
+    This is used for live preview in the edit dialog. Changes are only
+    persisted when the user clicks Save.
+
+    NOTE: We DO update wm.category_glyph_overrides so that the C++ UI
+    (category_tags_string_lookup) can see tag assignments immediately.
+    We only skip sync_glyph_mappings_to_wm() to prevent premature filtering.
+    """
+    global _preview_mode_active, _glyph_cache
+
+    # Set preview mode to prevent automatic WM sync during tag operations
+    _preview_mode_active = True
+    try:
+        # DEBUG
+        print(f"[CLEAR_NO_SAVE] CALLED: category='{category}', space_type={space_type} (preview_mode=True)")
+
+        # Get category data from cache
+        key = _make_cache_key(space_type, category)
+        cat_data = _glyph_cache.get(key)
+
+        # Also try global key as fallback
+        if cat_data is None:
+            global_key = _make_cache_key(-1, category)
+            cat_data = _glyph_cache.get(global_key)
+            if cat_data is not None:
+                key = global_key
+
+        if cat_data is None:
+            print(f"[CLEAR_NO_SAVE] Category '{category}' not found in cache")
+            return False, f"Category '{category}' not found"
+
+        if not isinstance(cat_data, dict):
+            cat_data = _normalize_category_data(cat_data)
+            _glyph_cache[key] = cat_data
+
+        without_tag_selected = _is_without_tag_preview_selected_in_wm(category, space_type)
+
+        if without_tag_selected:
+            # Toggle OFF: return to pending/unassigned state for extension categories.
+            if cat_data.get("source_extension", ""):
+                cat_data["pending_tag_assignment"] = True
+            _set_without_tag_preview_state_in_wm(category, space_type, is_selected=False)
+            print(f"[CLEAR_NO_SAVE] Toggled OFF 'Without Tag' for '{category}'")
+            return True, f"Without Tag deselected for '{category}' (preview mode)"
+
+        # Toggle ON: clear all tags in cache (but don't save yet)
+        old_tags = cat_data.get("tags", [])
+        cat_data["tags"] = []
+
+        # Clear pending_tag_assignment - this marks the category as "not needing a tag"
+        # NOTE: We keep source_extension so the category won't be re-marked as pending
+        # on next extension discovery (existing_ext == ext_id check in discovery logic)
+        cat_data["pending_tag_assignment"] = False
+
+        print(f"[CLEAR_NO_SAVE] Cleared tags {old_tags} and pending flag for '{category}' (keeping source_extension)")
+
+        # Update wm.category_glyph_overrides so C++ UI can see tag assignments immediately.
+        # This is necessary because C++ category_tags_string_lookup() reads from
+        # wm->category_glyph_overrides, not from Python cache.
+        # We skip sync_glyph_mappings_to_wm() (via preview_mode) to prevent premature filtering.
+        print(f"[CLEAR_NO_SAVE] Updating wm.category_glyph_overrides for C++ UI visibility")
+        update_category_tags_in_wm(category, space_type)
+
+        # Mark explicit "Without Tag" selection for dialog preview UI.
+        _set_without_tag_preview_state_in_wm(category, space_type, is_selected=True)
+
+        return True, f"Tags cleared for '{category}' (preview mode)"
+    finally:
+        # Keep preview mode active until Save/Cancel - do NOT reset here
+        # This prevents WM sync during context.area.tag_redraw() call
+        print(f"[CLEAR_NO_SAVE] Keeping preview mode active until Save/Cancel")
 
 
 def restore_category_tags_from_string(category, tags_string, space_type=-1):
@@ -2808,6 +2959,63 @@ def update_category_tags_in_wm(category, space_type=-1):
         tag_log(f"update_category_tags_in_wm: Error: {e}", "ERROR")
         import traceback
         traceback.print_exc()
+
+
+def _set_without_tag_preview_state_in_wm(category, space_type=-1, is_selected=False):
+    """Set preview-only visual state for the "Without Tag" button in edit dialog.
+
+    Uses category_glyph_overrides only, so main category filtering (mappings/pending)
+    remains unchanged until Save.
+    """
+    try:
+        wm = bpy.context.window_manager
+        if wm is None or not hasattr(wm, 'category_glyph_overrides'):
+            return
+
+        override_item = None
+        for item in wm.category_glyph_overrides:
+            item_space_type = getattr(item, 'space_type', -1)
+            if item.category == category and item_space_type == space_type:
+                override_item = item
+                break
+
+        if override_item is None and is_selected:
+            override_item = wm.category_glyph_overrides.new(category=category)
+            if hasattr(override_item, 'space_type'):
+                override_item.space_type = space_type
+
+        if override_item is None:
+            return
+
+        if hasattr(override_item, 'pending_tag_assignment'):
+            override_item.pending_tag_assignment = (not is_selected)
+
+        if is_selected and hasattr(override_item, 'tags'):
+            override_item.tags = ""
+    except Exception:
+        # Non-critical preview UI hint; ignore failures silently.
+        pass
+
+
+def _is_without_tag_preview_selected_in_wm(category, space_type=-1):
+    """Return True when preview state for "Without Tag" is currently selected."""
+    try:
+        wm = bpy.context.window_manager
+        if wm is None or not hasattr(wm, 'category_glyph_overrides'):
+            return False
+
+        for item in wm.category_glyph_overrides:
+            item_space_type = getattr(item, 'space_type', -1)
+            if item.category != category or item_space_type != space_type:
+                continue
+
+            item_tags = getattr(item, 'tags', '')
+            item_pending = getattr(item, 'pending_tag_assignment', 1)
+            return (not item_tags) and (item_pending == 0)
+    except Exception:
+        pass
+
+    return False
 
 
 def finalize_category_tag_changes(category, space_type=-1):
@@ -4230,12 +4438,22 @@ def _merge_discovered_categories():
     if existing_glyph_only_needing_name_update:
         print(f"[GLYPH] Updated default_display_name for {len(existing_glyph_only_needing_name_update)} existing glyph_only categories")
 
-    # Update existing categories if there is a pending context
+    pending_extension_context = _pending_extension_context
+    if pending_extension_context is not None:
+        pending_ext_id = str(pending_extension_context.get("extension_id", "") or "").strip()
+        if not pending_ext_id:
+            tag_log("_merge_discovered_categories: dropping pending extension context with empty extension_id")
+            _pending_extension_context = None
+            pending_extension_context = None
+
+    # Update existing categories if there is a pending extension context.
+    # IMPORTANT: only touch categories that are already linked to this same extension,
+    # and never mass-enable pending_tag_assignment for unrelated existing categories.
     existing_categories_updated_from_context = False
-    if _pending_extension_context is not None:
-        ext_id = _pending_extension_context.get("extension_id", "")
-        ext_space = _pending_extension_context.get("space_type", -1)
-        ext_mode = _pending_extension_context.get("mode_flag", 0)
+    if pending_extension_context is not None:
+        ext_id = pending_extension_context.get("extension_id", "")
+        ext_mode = pending_extension_context.get("mode_flag", 0)
+        ext_match_keys = _extension_id_match_keys(ext_id)
 
         for category in discovered:
             if category in new_categories:
@@ -4245,9 +4463,20 @@ def _merge_discovered_categories():
                 cat_data = _glyph_cache[cache_key]
                 if isinstance(cat_data, dict):
                     existing_ext = cat_data.get("source_extension", "")
-                    # Mark if unassigned or already assigned to this extension
-                    if existing_ext == ext_id or not existing_ext:
-                        if not cat_data.get("source_extension"):
+                    category_key = _normalize_category_key(category)
+
+                    same_extension = (existing_ext == ext_id) or _extension_ids_match(existing_ext, ext_id)
+                    can_claim_unowned = (
+                        (not existing_ext) and
+                        bool(category_key) and
+                        bool(ext_match_keys) and
+                        (category_key in ext_match_keys)
+                    )
+
+                    # Refresh existing categories for the same extension, or claim only
+                    # an unowned category whose normalized name matches this extension id.
+                    if same_extension or can_claim_unowned:
+                        if not existing_ext:
                             cat_data["source_extension"] = ext_id
                         if not cat_data.get("pending_tag_assignment"):
                             cat_data["pending_tag_assignment"] = True
@@ -4280,7 +4509,7 @@ def _merge_discovered_categories():
                         existing_categories_updated_from_context = True
                         tag_log(
                             f"_merge_discovered_categories: updated EXISTING category {category!r} "
-                            f"as pending from extension {ext_id!r}"
+                            f"for extension {ext_id!r} (claimed={can_claim_unowned})"
                         )
 
     if new_categories:
@@ -4344,9 +4573,9 @@ def _merge_discovered_categories():
             }
 
             # If an extension was just installed, mark this new category as pending.
-            if _pending_extension_context is not None:
-                ext_id = _pending_extension_context.get("extension_id", "")
-                ext_mode = _pending_extension_context.get("mode_flag", 0)
+            if pending_extension_context is not None:
+                ext_id = pending_extension_context.get("extension_id", "")
+                ext_mode = pending_extension_context.get("mode_flag", 0)
                 _glyph_cache[cache_key]["source_extension"] = ext_id
                 _glyph_cache[cache_key]["pending_tag_assignment"] = True
 
@@ -4390,8 +4619,8 @@ def _merge_discovered_categories():
     # Extensions may register categories in different space types (e.g., Hot Node dropped
     # in VIEW3D but appears in Node Editor). We need the context to persist until all
     # space types have been discovered.
-    if _pending_extension_context is not None:
-        ctx_time = _pending_extension_context.get("timestamp", 0)
+    if pending_extension_context is not None:
+        ctx_time = pending_extension_context.get("timestamp", 0)
         # Clear only if 30 seconds passed - gives enough time for all space types to be discovered
         if time.time() - ctx_time > 30.0:
             tag_log(f"_merge_discovered_categories: clearing pending extension context (30s timeout)")
@@ -6358,6 +6587,45 @@ class USERPREF_OT_category_tag_toggle(Operator):
             self.space_type
         )
         print(f"[TOGGLE_OPERATOR] Result: success={success}, message='{message}'")
+        if success:
+            # Trigger UI redraw for immediate feedback in the dialog itself
+            context.area.tag_redraw()
+            return {'FINISHED'}
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+
+class USERPREF_OT_category_clear_tags(Operator):
+    """Clear all tags and mark category as not needing tag assignment (Without Tag)"""
+    bl_idname = "wm.category_clear_tags"
+    bl_label = "Clear Category Tags (Without Tag)"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    category: bpy.props.StringProperty(name="Category")
+    space_type: bpy.props.IntProperty(
+        name="Space Type",
+        description="Space type ID for category lookup (-1 for global)",
+        default=-1
+    )
+
+    @with_context_check
+    def execute(self, context):
+        # DEBUG
+        print(f"[CLEAR_TAGS] CALLED: category='{self.category}', space_type={self.space_type}")
+
+        if not self.category:
+            self.report({'WARNING'}, "No category specified.")
+            return {'CANCELLED'}
+        
+        # Use no-save version for live preview in edit dialog
+        # Changes are persisted only when user clicks Save
+        # WM is NOT updated to prevent immediate filtering changes
+        print(f"[CLEAR_TAGS] Calling clear_category_tags_no_save")
+        success, message = clear_category_tags_no_save(
+            self.category,
+            self.space_type
+        )
+        print(f"[CLEAR_TAGS] Result: success={success}, message='{message}'")
         if success:
             # Trigger UI redraw for immediate feedback in the dialog itself
             context.area.tag_redraw()
@@ -10202,6 +10470,7 @@ classes = (
     USERPREF_OT_category_tag_delete,
     USERPREF_OT_category_tag_move,
     USERPREF_OT_category_tag_toggle,
+    USERPREF_OT_category_clear_tags,
     USERPREF_OT_category_tag_filter_set,
     USERPREF_OT_category_tag_filter_set_mode,
 

@@ -2512,13 +2512,17 @@ static ARegion *ui_panel_category_tooltip_init(
       if (U.category_tabs_visual_effect) {
         const int tab_width = pc_dyn.rect.xmax - pc_dyn.rect.xmin;
         const int extra_width = round_fl_to_int(tab_width * (UI_TABS_VISUAL_EFFECT_SCALE - 1.0f));
+        const int available_extra_width = is_left ?
+                                              std::max(region->winrct.xmax - tab_rect_screen.xmax, 0) :
+                                              std::max(tab_rect_screen.xmin - region->winrct.xmin, 0);
+        const int applied_extra_width = std::min(extra_width, available_extra_width);
         if (is_left) {
           /* Tab expands to the right when hovered. */
-          tab_rect_screen.xmax += extra_width;
+          tab_rect_screen.xmax += applied_extra_width;
         }
         else {
           /* Tab expands to the left when hovered. */
-          tab_rect_screen.xmin -= extra_width;
+          tab_rect_screen.xmin -= applied_extra_width;
         }
       }
 

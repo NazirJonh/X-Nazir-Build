@@ -187,7 +187,9 @@ const rcti *ED_region_visible_rect(ARegion *region);
 bool ED_region_is_overlap(int spacetype, int regiontype);
 
 int ED_region_snap_size_test(const ARegion *region);
+int ED_region_snap_size_test_with_area(const ARegion *region, const ScrArea *area);
 bool ED_region_snap_size_apply(ARegion *region, int snap_flag);
+bool ED_region_snap_size_apply_with_area(ARegion *region, int snap_flag, const ScrArea *area);
 
 /* message_bus callbacks */
 void ED_region_do_msg_notify_tag_redraw(bContext *C,
@@ -740,6 +742,10 @@ void ED_region_generic_tools_region_message_subscribe(
  */
 int ED_region_generic_tools_region_snap_size(const ARegion *region, int size, int axis);
 int ED_region_generic_panel_region_snap_size(const ARegion *region, int size, int axis);
+int ED_region_generic_panel_region_snap_size_with_area(const ScrArea *area,
+                                                       const ARegion *region,
+                                                       int size,
+                                                       int axis);
 eUserPref_CategoryTabsDisplayMode ED_category_tabs_display_mode_get(const ScrArea *area);
 float ED_category_tabs_zoom_get(const ScrArea *area);
 

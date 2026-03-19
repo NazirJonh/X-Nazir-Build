@@ -5446,6 +5446,196 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
   /* too_narrow was calculated earlier for use in width calculation */
 
+  struct DeferredHoverTabDrawData {
+    bool valid = false;
+    rcti rct = {};
+    const char *category_id = nullptr;
+    const char *category_id_draw = nullptr;
+    bool is_active = false;
+    int current_tab_v_pad_text = 0;
+    float darken_factor = 0.0f;
+    float bg_brighten_factor = 0.0f;
+    float glyph_color[3] = {0.0f, 0.0f, 0.0f};
+  };
+
+  DeferredHoverTabDrawData deferred_hover_tab_draw;
+
+  const auto draw_single_category_tab = [&](const rcti *rct,
+                                            const char *category_id,
+                                            const char *category_id_draw,
+                                            const bool is_active,
+                                            const bool is_hover,
+                                            const int current_tab_v_pad_text,
+                                            const float darken_factor,
+                                            const float bg_brighten_factor,
+                                            const float glyph_color[3]) {
+    GPU_blend(GPU_BLEND_ALPHA);
+
+    // --- BEGIN: TABS_VISUAL_EFFECT_OVERLAP ---
+    /* Visual effect: expand tab on hover/active.
+     * The tab expands by consuming padding from neighbors first, then overlapping.
+     * This keeps the tab grid stable (no jitter) while providing visual feedback.
+     */
+    bool is_visual_effect_active = false;
+    rctf box_rect;
+    box_rect.xmin = float(rct->xmin);
+    box_rect.xmax = float(rct->xmax);
+    box_rect.ymin = float(rct->ymin);
+    box_rect.ymax = float(rct->ymax);
+
+    /* Allow visual effect even when "Show Active Tab Name" is enabled, but skip the
+     * active tab to avoid stretching the expanded label layout. */
+    const bool visual_effect_allowed_for_tab = (U.category_tabs_visual_effect &&
+                                                display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                                                !is_dragging &&
+                                                (!U.category_tabs_show_active_name || !is_active));
+
+    if (visual_effect_allowed_for_tab)
+    {
+      if (is_active || is_hover) {
+        is_visual_effect_active = true;
+
+        /* Vertical expansion: scale height by UI_TABS_VISUAL_EFFECT_SCALE (1.2) */
+        const int tab_height = rct->ymax - rct->ymin;
+        const int expanded_height = round_fl_to_int(tab_height * UI_TABS_VISUAL_EFFECT_SCALE);
+        const int extra_height = expanded_height - tab_height;
+
+        /* Distribute extra height equally: half up, half down */
+        int extra_top = extra_height / 2;
+        int extra_bottom = extra_height - extra_top;
+
+        const int available_top = std::max(v2d->mask.ymax - rct->ymax, 0);
+        const int available_bottom = std::max(rct->ymin - v2d->mask.ymin, 0);
+        extra_top = std::min(extra_top, available_top);
+        extra_bottom = std::min(extra_bottom, available_bottom);
+
+        /* Expand vertically (consumes padding first, then overlaps neighbors) */
+        box_rect.ymin -= extra_bottom;
+        box_rect.ymax += extra_top;
+
+        /* Horizontal expansion: expand away from the panel edge */
+        const int tab_width = rct->xmax - rct->xmin;
+        const int expanded_width = round_fl_to_int(tab_width * UI_TABS_VISUAL_EFFECT_SCALE);
+        const int extra_width = expanded_width - tab_width;
+        const int available_extra_width = is_left ? std::max(v2d->mask.xmax - rct->xmax, 0) :
+                                                    std::max(rct->xmin - v2d->mask.xmin, 0);
+        const int applied_extra_width = std::min(extra_width, available_extra_width);
+
+        if (is_left) {
+          box_rect.xmax += applied_extra_width;
+        }
+        else {
+          box_rect.xmin -= applied_extra_width;
+        }
+      }
+    }
+    // --- END: TABS_VISUAL_EFFECT_OVERLAP ---
+
+    {
+      draw_roundbox_corner_set(roundboxtype);
+
+      float tab_bg_color[4];
+      if (is_active) {
+        copy_v4_v4(tab_bg_color, theme_col_tab_active);
+      }
+      else {
+        copy_v4_v4(tab_bg_color, theme_col_tab_inactive);
+        brighten_color_4fv(tab_bg_color, bg_brighten_factor);
+      }
+
+      draw_roundbox_4fv(&box_rect, true, tab_curve_radius, tab_bg_color);
+      draw_roundbox_4fv(&box_rect,
+                        false,
+                        tab_curve_radius,
+                        is_active ? theme_col_tab_outline_sel : theme_col_tab_outline);
+
+#if CATEGORY_TAB_VISUAL_ACTIVE_OUTLINE_ENABLE
+      const bool is_visual_active_outline = is_visual_effect_active && is_active &&
+                                            U.category_tabs_visual_outline;
+      if (is_visual_active_outline) {
+        float visual_outline_color[4];
+        rgba_uchar_to_float(visual_outline_color, U.category_tabs_visual_outline_color);
+        const float visual_outline_width = float(px) + 0.5f;
+        draw_roundbox_4fv_ex(&box_rect,
+                             nullptr,
+                             nullptr,
+                             1.0f,
+                             visual_outline_color,
+                             visual_outline_width,
+                             tab_curve_radius);
+      }
+#endif
+
+      /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
+      draw_category_tab_color_indicator(
+          rct, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator, is_active);
+
+      if (!region->overlap) {
+        pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
+        immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+        immUniformColor4fv(tab_bg_color);
+        /* Use expanded box_rect when visual effect is active, otherwise use standard rct */
+        if (is_visual_effect_active) {
+          immRectf(pos,
+                   is_left ? box_rect.xmax - px : box_rect.xmin,
+                   box_rect.ymin + px,
+                   is_left ? box_rect.xmax : box_rect.xmin + px,
+                   box_rect.ymax - px);
+        }
+        else {
+          immRectf(pos,
+                   is_left ? rct->xmax - px : rct->xmin,
+                   rct->ymin + px,
+                   is_left ? rct->xmax : rct->xmin + px,
+                   rct->ymax - px);
+        }
+        immUnbindProgram();
+      }
+    }
+
+    /* Prepare expanded rect for content drawing when visual effect is active */
+    rcti expanded_rct;
+    const rcti *content_rct;
+    if (is_visual_effect_active) {
+      expanded_rct.xmin = int(box_rect.xmin);
+      expanded_rct.xmax = int(box_rect.xmax);
+      expanded_rct.ymin = int(box_rect.ymin);
+      expanded_rct.ymax = int(box_rect.ymax);
+      content_rct = &expanded_rct;
+    }
+    else {
+      content_rct = rct;
+    }
+
+    float current_category_tabs_zoom = category_tabs_zoom;
+    if (is_visual_effect_active) {
+      current_category_tabs_zoom *= UI_TABS_VISUAL_EFFECT_SCALE;
+    }
+
+    ui_panel_category_draw_content(region,
+                                   wm,
+                                   category_id,
+                                   category_id_draw,
+                                   content_rct,
+                                   rct_xmin,
+                                   rct_xmax,
+                                   is_active,
+                                   is_left,
+                                   display_mode,
+                                   fontid,
+                                   fstyle,
+                                   fstyle_points,
+                                   zoom,
+                                   current_category_tabs_zoom,
+                                   current_tab_v_pad_text,
+                                   darken_factor,
+                                   theme_col_tab_text,
+                                   theme_col_tab_text_sel,
+                                   too_narrow,
+                                   space_type);
+  };
+
   int current_display_index = 0;
 
   for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
@@ -5630,161 +5820,33 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       bg_brighten_factor = is_hover ? TABS_BG_BRIGHTEN_HOVER : TABS_BG_BRIGHTEN_BASE;
     }
 
-    GPU_blend(GPU_BLEND_ALPHA);
-
-    // --- BEGIN: TABS_VISUAL_EFFECT_OVERLAP ---
-    /* Visual effect: expand tab on hover/active.
-     * The tab expands by consuming padding from neighbors first, then overlapping.
-     * This keeps the tab grid stable (no jitter) while providing visual feedback.
-     */
-    bool is_visual_effect_active = false;
-    rctf box_rect;
-    box_rect.xmin = float(rct->xmin);
-    box_rect.xmax = float(rct->xmax);
-    box_rect.ymin = float(rct->ymin);
-    box_rect.ymax = float(rct->ymax);
-
-    /* Allow visual effect even when "Show Active Tab Name" is enabled, but skip the
-     * active tab to avoid stretching the expanded label layout. */
     const bool visual_effect_allowed_for_tab = (U.category_tabs_visual_effect &&
                                                 display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
                                                 !is_dragging &&
                                                 (!U.category_tabs_show_active_name || !is_active));
 
-    if (visual_effect_allowed_for_tab)
-    {
-      if (is_active || is_hover) {
-        is_visual_effect_active = true;
-
-        /* Vertical expansion: scale height by UI_TABS_VISUAL_EFFECT_SCALE (1.2) */
-        const int tab_height = rct->ymax - rct->ymin;
-        const int expanded_height = round_fl_to_int(tab_height * UI_TABS_VISUAL_EFFECT_SCALE);
-        const int extra_height = expanded_height - tab_height;
-
-        /* Distribute extra height equally: half up, half down */
-        const int extra_top = extra_height / 2;
-        const int extra_bottom = extra_height - extra_top;
-
-        /* Expand vertically (consumes padding first, then overlaps neighbors) */
-        box_rect.ymin -= extra_bottom;
-        box_rect.ymax += extra_top;
-
-        /* Horizontal expansion: expand away from the panel edge */
-        const int tab_width = rct->xmax - rct->xmin;
-        const int expanded_width = round_fl_to_int(tab_width * UI_TABS_VISUAL_EFFECT_SCALE);
-        const int extra_width = expanded_width - tab_width;
-
-        if (is_left) {
-          box_rect.xmax += extra_width;
-        }
-        else {
-          box_rect.xmin -= extra_width;
-        }
-      }
-    }
-    // --- END: TABS_VISUAL_EFFECT_OVERLAP ---
-
-    {
-      draw_roundbox_corner_set(roundboxtype);
-
-      float tab_bg_color[4];
-      if (is_active) {
-        copy_v4_v4(tab_bg_color, theme_col_tab_active);
-      }
-      else {
-        copy_v4_v4(tab_bg_color, theme_col_tab_inactive);
-        brighten_color_4fv(tab_bg_color, bg_brighten_factor);
-      }
-
-      draw_roundbox_4fv(&box_rect, true, tab_curve_radius, tab_bg_color);
-      draw_roundbox_4fv(&box_rect, false, tab_curve_radius,
-                        is_active ? theme_col_tab_outline_sel : theme_col_tab_outline);
-
-      #if CATEGORY_TAB_VISUAL_ACTIVE_OUTLINE_ENABLE
-      const bool is_visual_active_outline = is_visual_effect_active && is_active &&
-                                            U.category_tabs_visual_outline;
-      if (is_visual_active_outline) {
-        float visual_outline_color[4];
-        rgba_uchar_to_float(visual_outline_color, U.category_tabs_visual_outline_color);
-        const float visual_outline_width = float(px) + 0.5f;
-        draw_roundbox_4fv_ex(&box_rect,
-                              nullptr,
-                              nullptr,
-                              1.0f,
-                              visual_outline_color,
-                              visual_outline_width,
-                              tab_curve_radius);
-      }
-      #endif
-
-      /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
-      draw_category_tab_color_indicator(
-          rct, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator, is_active);
-
-      if (!region->overlap) {
-        pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
-        immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-        immUniformColor4fv(tab_bg_color);
-        /* Use expanded box_rect when visual effect is active, otherwise use standard rct */
-        if (is_visual_effect_active) {
-          immRectf(pos,
-                   is_left ? box_rect.xmax - px : box_rect.xmin,
-                   box_rect.ymin + px,
-                   is_left ? box_rect.xmax : box_rect.xmin + px,
-                   box_rect.ymax - px);
-        }
-        else {
-          immRectf(pos,
-                   is_left ? rct->xmax - px : rct->xmin,
-                   rct->ymin + px,
-                   is_left ? rct->xmax : rct->xmin + px,
-                   rct->ymax - px);
-        }
-        immUnbindProgram();
-      }
-    }
-
-    /* Prepare expanded rect for content drawing when visual effect is active */
-    rcti expanded_rct;
-    const rcti *content_rct;
-    if (is_visual_effect_active) {
-      expanded_rct.xmin = int(box_rect.xmin);
-      expanded_rct.xmax = int(box_rect.xmax);
-      expanded_rct.ymin = int(box_rect.ymin);
-      expanded_rct.ymax = int(box_rect.ymax);
-      content_rct = &expanded_rct;
+    if (is_hover && visual_effect_allowed_for_tab) {
+      deferred_hover_tab_draw.valid = true;
+      deferred_hover_tab_draw.rct = *rct;
+      deferred_hover_tab_draw.category_id = category_id;
+      deferred_hover_tab_draw.category_id_draw = category_id_draw;
+      deferred_hover_tab_draw.is_active = is_active;
+      deferred_hover_tab_draw.current_tab_v_pad_text = current_tab_v_pad_text;
+      deferred_hover_tab_draw.darken_factor = darken_factor;
+      deferred_hover_tab_draw.bg_brighten_factor = bg_brighten_factor;
+      copy_v3_v3(deferred_hover_tab_draw.glyph_color, glyph_color);
     }
     else {
-      content_rct = rct;
+      draw_single_category_tab(rct,
+                               category_id,
+                               category_id_draw,
+                               is_active,
+                               is_hover,
+                               current_tab_v_pad_text,
+                               darken_factor,
+                               bg_brighten_factor,
+                               glyph_color);
     }
-
-    float current_category_tabs_zoom = category_tabs_zoom;
-    if (is_visual_effect_active) {
-      current_category_tabs_zoom *= UI_TABS_VISUAL_EFFECT_SCALE;
-    }
-
-    ui_panel_category_draw_content(region,
-                                   wm,
-                                   category_id,
-                                   category_id_draw,
-                                   content_rct,
-                                   rct_xmin,
-                                   rct_xmax,
-                                   is_active,
-                                   is_left,
-                                   display_mode,
-                                   fontid,
-                                   fstyle,
-                                   fstyle_points,
-                                   zoom,
-                                   current_category_tabs_zoom,
-                                   current_tab_v_pad_text,
-                                   darken_factor,
-                                   theme_col_tab_text,
-                                   theme_col_tab_text_sel,
-                                   too_narrow,
-                                   space_type);
 
     if (is_left) {
       pc_dyn.rect.xmin = v2d->mask.xmin;
@@ -5792,6 +5854,18 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     else {
       pc_dyn.rect.xmax = v2d->mask.xmax;
     }
+  }
+
+  if (deferred_hover_tab_draw.valid) {
+    draw_single_category_tab(&deferred_hover_tab_draw.rct,
+                             deferred_hover_tab_draw.category_id,
+                             deferred_hover_tab_draw.category_id_draw,
+                             deferred_hover_tab_draw.is_active,
+                             true,
+                             deferred_hover_tab_draw.current_tab_v_pad_text,
+                             deferred_hover_tab_draw.darken_factor,
+                             deferred_hover_tab_draw.bg_brighten_factor,
+                             deferred_hover_tab_draw.glyph_color);
   }
 
   if (!BLI_listbase_is_empty(&region->runtime->panels_category)) {

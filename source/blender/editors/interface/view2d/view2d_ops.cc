@@ -759,10 +759,11 @@ static void view_zoomstep_apply_ex(bContext *C,
                                    const float facx,
                                    const float facy)
 {
+  ScrArea *area = CTX_wm_area(C);
   ARegion *region = CTX_wm_region(C);
   View2D *v2d = &region->v2d;
   const rctf cur_old = v2d->cur;
-  const int snap_test = ED_region_snap_size_test(region);
+  const int snap_test = ED_region_snap_size_test_with_area(region, area);
   const bool do_keepofs = !(v2d->flag & V2D_ZOOM_IGNORE_KEEPOFS);
 
   /* calculate amount to move view by, ensuring symmetry so the
@@ -855,8 +856,7 @@ static void view_zoomstep_apply_ex(bContext *C,
   /* Inform v2d about changes after this operation. */
   view2d_curRect_changed(C, v2d);
 
-  if (ED_region_snap_size_apply(region, snap_test)) {
-    ScrArea *area = CTX_wm_area(C);
+  if (ED_region_snap_size_apply_with_area(region, snap_test, area)) {
     ED_area_tag_redraw(area);
     WM_event_add_notifier(C, NC_SCREEN | NA_EDITED, nullptr);
   }
@@ -1048,9 +1048,10 @@ static void VIEW2D_OT_zoom_out(wmOperatorType *ot)
 /* apply transform to view (i.e. adjust 'cur' rect) */
 static void view_zoomdrag_apply(bContext *C, wmOperator *op)
 {
+  ScrArea *area = CTX_wm_area(C);
   v2dViewZoomData *vzd = static_cast<v2dViewZoomData *>(op->customdata);
   View2D *v2d = vzd->v2d;
-  const int snap_test = ED_region_snap_size_test(vzd->region);
+  const int snap_test = ED_region_snap_size_test_with_area(vzd->region, area);
 
   const bool use_cursor_init = RNA_boolean_get(op->ptr, "use_cursor_init");
   const bool zoom_to_pos = use_cursor_init && vzd->zoom_to_mouse_pos;
@@ -1114,8 +1115,7 @@ static void view_zoomdrag_apply(bContext *C, wmOperator *op)
   /* Inform v2d about changes after this operation. */
   view2d_curRect_changed(C, v2d);
 
-  if (ED_region_snap_size_apply(vzd->region, snap_test)) {
-    ScrArea *area = CTX_wm_area(C);
+  if (ED_region_snap_size_apply_with_area(vzd->region, snap_test, area)) {
     ED_area_tag_redraw(area);
     WM_event_add_notifier(C, NC_SCREEN | NA_EDITED, nullptr);
   }
@@ -2269,9 +2269,10 @@ static void VIEW2D_OT_scroller_activate(wmOperatorType *ot)
 static wmOperatorStatus reset_exec(bContext *C, wmOperator * /*op*/)
 {
   const uiStyle *style = style_get();
+  ScrArea *area = CTX_wm_area(C);
   ARegion *region = CTX_wm_region(C);
   View2D *v2d = &region->v2d;
-  const int snap_test = ED_region_snap_size_test(region);
+  const int snap_test = ED_region_snap_size_test_with_area(region, area);
 
   region->category_scroll = 0;
 
@@ -2308,8 +2309,7 @@ static wmOperatorStatus reset_exec(bContext *C, wmOperator * /*op*/)
   /* Inform v2d about changes after this operation. */
   view2d_curRect_changed(C, v2d);
 
-  if (ED_region_snap_size_apply(region, snap_test)) {
-    ScrArea *area = CTX_wm_area(C);
+  if (ED_region_snap_size_apply_with_area(region, snap_test, area)) {
     ED_area_tag_redraw(area);
     WM_event_add_notifier(C, NC_SCREEN | NA_EDITED, nullptr);
   }

@@ -1921,8 +1921,15 @@ static void region_rect_recursive(
       else if (has_tabs) {
         /* Too narrow for content so show only the category tabs. */
         const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
+        const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(
+            area);
+        const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                            display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                               UI_TABS_VISUAL_EFFECT_MARGIN :
+                                               1.0f;
         const float category_tabs_min_width = std::max(
-            UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom);
+            UI_PANEL_CATEGORY_MIN_WIDTH,
+            UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom * visual_effect_margin);
         const int cat_min = int(std::ceil(UI_SCALE_FAC * category_tabs_min_width / aspect));
         region->winrct = *winrct;
         if (alignment == RGN_ALIGN_RIGHT) {
@@ -3809,8 +3816,14 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
   short min_draw_size = std::min(region->runtime->type->prefsizex, 20);
   if (has_category_tabs) {
     const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
+    const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
+    const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                        display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                           UI_TABS_VISUAL_EFFECT_MARGIN :
+                                           1.0f;
     const int tabs_only_min_draw_size = int(std::ceil(
-        std::max(UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom)));
+        std::max(UI_PANEL_CATEGORY_MIN_WIDTH,
+                 UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom * visual_effect_margin)));
     min_draw_size = short(tabs_only_min_draw_size + 20);
   }
   if (region->winx >= (min_draw_size * UI_SCALE_FAC / aspect)) {
@@ -3844,8 +3857,12 @@ void ED_region_panels_draw(const bContext *C, ARegion *region)
      * unnecessary spacing when there's no scrollbar. */
     const bool needs_vertical_scroll = (v2d->scroll & V2D_SCROLL_VERTICAL) &&
                                        (BLI_rctf_size_y(&v2d->tot) > BLI_rctf_size_y(&v2d->cur));
-    const float visual_effect_margin = (U.category_tabs_visual_effect && needs_vertical_scroll) ?
-                                        UI_TABS_VISUAL_EFFECT_MARGIN : 1.0f;
+    const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
+    const float visual_effect_margin =
+        (U.category_tabs_visual_effect && display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+         needs_vertical_scroll) ?
+            UI_TABS_VISUAL_EFFECT_MARGIN :
+            1.0f;
     const int category_width = round_fl_to_int(ui::view2d_scale_get_x(&region->v2d) *
                                                UI_PANEL_CATEGORY_MARGIN_WIDTH *
                                                category_tabs_zoom_local *
@@ -4657,11 +4674,23 @@ void ED_region_message_subscribe(wmRegionMessageSubscribeParams *params)
 
 int ED_region_snap_size_test(const ARegion *region)
 {
+  return ED_region_snap_size_test_with_area(region, nullptr);
+}
+
+int ED_region_snap_size_test_with_area(const ARegion *region, const ScrArea *area)
+{
   /* Use a larger value because toggling scrollbars can jump in size. */
   const int snap_match_threshold = 16;
   if (region->runtime->type->snap_size != nullptr) {
-    const int snap_size_x = region->runtime->type->snap_size(region, region->sizex, 0);
-    const int snap_size_y = region->runtime->type->snap_size(region, region->sizey, 1);
+    const auto snap_size_fn = region->runtime->type->snap_size;
+    const int snap_size_x = (snap_size_fn == ED_region_generic_panel_region_snap_size) ?
+                                ED_region_generic_panel_region_snap_size_with_area(
+                                    area, region, region->sizex, 0) :
+                                snap_size_fn(region, region->sizex, 0);
+    const int snap_size_y = (snap_size_fn == ED_region_generic_panel_region_snap_size) ?
+                                ED_region_generic_panel_region_snap_size_with_area(
+                                    area, region, region->sizey, 1) :
+                                snap_size_fn(region, region->sizey, 1);
     return (((abs(region->sizex - snap_size_x) <= snap_match_threshold) << 0) |
             ((abs(region->sizey - snap_size_y) <= snap_match_threshold) << 1));
   }
@@ -4670,17 +4699,29 @@ int ED_region_snap_size_test(const ARegion *region)
 
 bool ED_region_snap_size_apply(ARegion *region, int snap_flag)
 {
+  return ED_region_snap_size_apply_with_area(region, snap_flag, nullptr);
+}
+
+bool ED_region_snap_size_apply_with_area(ARegion *region, int snap_flag, const ScrArea *area)
+{
   bool changed = false;
   if (region->runtime->type->snap_size != nullptr) {
+    const auto snap_size_fn = region->runtime->type->snap_size;
     if (snap_flag & (1 << 0)) {
-      short snap_size = region->runtime->type->snap_size(region, region->sizex, 0);
+      short snap_size = (snap_size_fn == ED_region_generic_panel_region_snap_size) ?
+                            short(ED_region_generic_panel_region_snap_size_with_area(
+                                area, region, region->sizex, 0)) :
+                            short(snap_size_fn(region, region->sizex, 0));
       if (snap_size != region->sizex) {
         region->sizex = snap_size;
         changed = true;
       }
     }
     if (snap_flag & (1 << 1)) {
-      short snap_size = region->runtime->type->snap_size(region, region->sizey, 1);
+      short snap_size = (snap_size_fn == ED_region_generic_panel_region_snap_size) ?
+                            short(ED_region_generic_panel_region_snap_size_with_area(
+                                area, region, region->sizey, 1)) :
+                            short(snap_size_fn(region, region->sizey, 1));
       if (snap_size != region->sizey) {
         region->sizey = snap_size;
         changed = true;

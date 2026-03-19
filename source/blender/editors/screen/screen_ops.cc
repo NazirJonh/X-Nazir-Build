@@ -3276,6 +3276,25 @@ static wmOperatorStatus region_scale_modal(bContext *C, wmOperator *op, const wm
             rmd->region->sizex = sizex_test;
           }
         }
+
+        if (rmd->region->runtime->type &&
+            BKE_regiontype_uses_category_tabs(rmd->region->runtime->type))
+        {
+          const float category_tabs_zoom = ED_category_tabs_zoom_get(rmd->area);
+          const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(
+              rmd->area);
+          const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                              display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                                 UI_TABS_VISUAL_EFFECT_MARGIN :
+                                                 1.0f;
+          const float category_tabs_min_width = std::max(
+              UI_PANEL_CATEGORY_MIN_WIDTH,
+              UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom * visual_effect_margin);
+          const int category_tabs_min_sizex = int(
+              std::ceil(category_tabs_min_width * aspect / UI_SCALE_FAC));
+          rmd->region->sizex = short(max_ii(int(rmd->region->sizex), category_tabs_min_sizex));
+        }
+
         BLI_assert(rmd->region->sizex <= rmd->maxsize);
 
         if (size_no_snap < UI_UNIT_X / aspect) {
@@ -3391,8 +3410,15 @@ static wmOperatorStatus region_scale_modal(bContext *C, wmOperator *op, const wm
         float min_width_for_pref = UI_PANEL_CATEGORY_MIN_WIDTH;
         if (rmd->region->runtime->type && BKE_regiontype_uses_category_tabs(rmd->region->runtime->type)) {
           const float category_tabs_zoom = ED_category_tabs_zoom_get(rmd->area);
-          min_width_for_pref =
-              std::max(UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom);
+          const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(
+              rmd->area);
+          const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                              display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                                 UI_TABS_VISUAL_EFFECT_MARGIN :
+                                                 1.0f;
+          min_width_for_pref = std::max(UI_PANEL_CATEGORY_MIN_WIDTH,
+                                        UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom *
+                                            visual_effect_margin);
         }
 
         if (float(rmd->region->sizex) * aspect > min_width_for_pref) {

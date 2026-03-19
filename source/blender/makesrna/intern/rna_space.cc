@@ -1023,8 +1023,14 @@ static void rna_Space_show_region_ui_set(PointerRNA *ptr, bool value)
                               (BLI_rcti_size_x(&region->v2d.mask) + 1)) :
                              1.0f;
     const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
-    const float category_tabs_min_width =
-        std::max(UI_PANEL_CATEGORY_MIN_WIDTH, UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom);
+    const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
+    const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                        display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                           UI_TABS_VISUAL_EFFECT_MARGIN :
+                                           1.0f;
+    const float category_tabs_min_width = std::max(
+        UI_PANEL_CATEGORY_MIN_WIDTH,
+        UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom * visual_effect_margin);
     if (region->runtime->type && BKE_regiontype_uses_category_tabs(region->runtime->type) &&
         (float(region->sizex) <= (category_tabs_min_width / aspect)))
     {
@@ -1039,6 +1045,48 @@ static void rna_Space_show_region_ui_set(PointerRNA *ptr, bool value)
 static void rna_Space_show_region_ui_update(bContext *C, PointerRNA *ptr)
 {
   rna_Space_bool_from_region_flag_update_by_type(C, ptr, RGN_TYPE_UI, RGN_FLAG_HIDDEN);
+}
+
+static void rna_Space_category_tabs_settings_update(
+    Main * /*bmain*/, Scene * /*active_scene*/, PointerRNA *ptr)
+{
+  ScrArea *area = rna_area_from_space(ptr);
+  if (!area) {
+    return;
+  }
+
+  ARegion *region = BKE_area_find_region_type(area, RGN_TYPE_UI);
+  if (!region || !region->runtime->type ||
+      !BKE_regiontype_uses_category_tabs(region->runtime->type))
+  {
+    return;
+  }
+
+  const float aspect = (region->v2d.flag & V2D_IS_INIT) ?
+                           (BLI_rctf_size_x(&region->v2d.cur) /
+                            (BLI_rcti_size_x(&region->v2d.mask) + 1)) :
+                           1.0f;
+  const float category_tabs_zoom = ED_category_tabs_zoom_get(area);
+  const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
+  const float visual_effect_margin = (U.category_tabs_visual_effect &&
+                                      display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY) ?
+                                         UI_TABS_VISUAL_EFFECT_MARGIN :
+                                         1.0f;
+  const float category_tabs_min_width = std::max(
+      UI_PANEL_CATEGORY_MIN_WIDTH,
+      UI_PANEL_CATEGORY_MARGIN_WIDTH * category_tabs_zoom * visual_effect_margin);
+
+  const int category_tabs_min_sizex = int((category_tabs_min_width / aspect) + 0.999f);
+  const int category_tabs_snap_limit = int((UI_PANEL_CATEGORY_MIN_SNAP_WIDTH / aspect) + 0.999f);
+
+  if (int(region->sizex) <= category_tabs_snap_limit && int(region->sizex) != category_tabs_min_sizex)
+  {
+    region->sizex = short(category_tabs_min_sizex);
+    ED_region_tag_redraw(region);
+    ED_area_tag_redraw(area);
+    WM_main_add_notifier(NC_SCREEN | NA_EDITED, nullptr);
+    WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  }
 }
 
 /* Redo (HUD) Region */
@@ -6005,7 +6053,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, rna_enum_space_category_tabs_display_mode_items);
   RNA_def_property_ui_text(
       prop, "Category Tabs Display Mode", "How to display category tabs in this editor");
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_icon", PROP_FLOAT, PROP_NONE);
@@ -6013,7 +6061,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Icon Size", "Scale factor for category tabs in Icon mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
@@ -6021,7 +6069,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
@@ -6029,7 +6077,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "tag_bar_scroll_offset", PROP_INT, PROP_NONE);
@@ -6332,7 +6380,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, rna_enum_space_category_tabs_display_mode_items);
   RNA_def_property_ui_text(
       prop, "Category Tabs Display Mode", "How to display category tabs in this editor");
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_icon", PROP_FLOAT, PROP_NONE);
@@ -6340,7 +6388,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Icon Size", "Scale factor for category tabs in Icon mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
@@ -6348,7 +6396,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
@@ -6356,7 +6404,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "tag_bar_scroll_offset", PROP_INT, PROP_NONE);
@@ -6542,7 +6590,7 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, rna_enum_space_category_tabs_display_mode_items);
   RNA_def_property_ui_text(
       prop, "Category Tabs Display Mode", "How to display category tabs in this editor");
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_icon", PROP_FLOAT, PROP_NONE);
@@ -6550,7 +6598,7 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Icon Size", "Scale factor for category tabs in Icon mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
@@ -6558,7 +6606,7 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
@@ -6566,7 +6614,7 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "tag_bar_scroll_offset", PROP_INT, PROP_NONE);
@@ -8768,7 +8816,7 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, rna_enum_space_category_tabs_display_mode_items);
   RNA_def_property_ui_text(
       prop, "Category Tabs Display Mode", "How to display category tabs in this editor");
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_icon", PROP_FLOAT, PROP_NONE);
@@ -8776,7 +8824,7 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Icon Size", "Scale factor for category tabs in Icon mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
@@ -8784,7 +8832,7 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
@@ -8792,7 +8840,7 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
-  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_Space_category_tabs_settings_update");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "tag_bar_scroll_offset", PROP_INT, PROP_NONE);

@@ -2989,34 +2989,57 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   bool user_glyph_override_assigned = false;
   bool explicit_icon_mode_assigned = false;
 
-  /* First check category_glyph_overrides (user changes in current session) */
+  /* First check category_glyph_overrides (user changes in current session).
+   * Priority: exact editor space first, then GLOBAL fallback. */
+  CategoryGlyphItem *override_item = nullptr;
   for (CategoryGlyphItem *item =
            static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
        item;
        item = static_cast<CategoryGlyphItem *>(item->next))
   {
-    if (STREQ(item->category, category)) {
-      const bool has_icon_payload = (item->icon_key[0] != '\0') || (item->icon_path[0] != '\0') ||
-                                    (item->icon_provider[0] != '\0');
-      const bool has_explicit_icon_mode = ELEM(item->icon_source, 1, 2); /* MANUAL/OFF */
-      if (has_explicit_icon_mode) {
-        explicit_icon_mode_assigned = true;
-      }
-
-      /* Check if override is empty (created by tag restore but has no actual data) */
-      if (item->display_name[0] == '\0' && item->glyph[0] == '\0' && is_zero_v3(item->color) &&
-          !has_icon_payload && !has_explicit_icon_mode)
-      {
-        override_is_empty = true;
-        has_override = true; /* Mark as found but empty, so we skip checking mappings again */
+    if (item->space_type == space_type && STREQ(item->category, category)) {
+      override_item = item;
+      break;
+    }
+  }
+  if (!override_item && space_type != -1) {
+    for (CategoryGlyphItem *item =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+         item;
+         item = static_cast<CategoryGlyphItem *>(item->next))
+    {
+      if (item->space_type == -1 && STREQ(item->category, category)) {
+        override_item = item;
         break;
       }
+    }
+  }
 
+  if (override_item) {
+    const bool has_icon_payload = (override_item->icon_key[0] != '\0') ||
+                                  (override_item->icon_path[0] != '\0') ||
+                                  (override_item->icon_provider[0] != '\0');
+    const bool has_explicit_icon_mode = ELEM(override_item->icon_source, 1, 2); /* MANUAL/OFF */
+    if (has_explicit_icon_mode) {
+      explicit_icon_mode_assigned = true;
+    }
+
+    /* Check if override is empty (created by tag restore but has no actual data) */
+    if (override_item->display_name[0] == '\0' && override_item->glyph[0] == '\0' &&
+        is_zero_v3(override_item->color) && !has_icon_payload && !has_explicit_icon_mode)
+    {
+      override_is_empty = true;
+      has_override = true; /* Mark as found but empty, so we skip checking mappings again */
+    }
+    else {
       /* Extract any leading glyph from display_name */
       char extracted_glyph[16];
       char clean_display_name[32];
-      extract_leading_glyph(
-          item->display_name, extracted_glyph, sizeof(extracted_glyph), clean_display_name, sizeof(clean_display_name));
+      extract_leading_glyph(override_item->display_name,
+                            extracted_glyph,
+                            sizeof(extracted_glyph),
+                            clean_display_name,
+                            sizeof(clean_display_name));
 
       /* If display_name is empty after glyph extraction, find panel label */
       if (clean_display_name[0] == '\0') {
@@ -3030,8 +3053,8 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
 
       /* Use extracted glyph if item->glyph is empty, otherwise use item->glyph */
       char hex_code[16];
-      if (item->glyph[0] != '\0') {
-        utf8_to_hex_codepoint(item->glyph, hex_code, sizeof(hex_code));
+      if (override_item->glyph[0] != '\0') {
+        utf8_to_hex_codepoint(override_item->glyph, hex_code, sizeof(hex_code));
         user_glyph_override_assigned = true;
       }
       else if (extracted_glyph[0] != '\0') {
@@ -3042,34 +3065,50 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
         hex_code[0] = '\0';
       }
       RNA_string_set(op->ptr, "glyph", hex_code);
-      RNA_float_set_array(op->ptr, "color", item->color);
-      RNA_enum_set(op->ptr, "icon_source", item->icon_source);
-      RNA_string_set(op->ptr, "icon_key", item->icon_key);
-      RNA_string_set(op->ptr, "icon_path", item->icon_path);
-      RNA_string_set(op->ptr, "icon_provider", item->icon_provider);
+      RNA_float_set_array(op->ptr, "color", override_item->color);
+      RNA_enum_set(op->ptr, "icon_source", override_item->icon_source);
+      RNA_string_set(op->ptr, "icon_key", override_item->icon_key);
+      RNA_string_set(op->ptr, "icon_path", override_item->icon_path);
+      RNA_string_set(op->ptr, "icon_provider", override_item->icon_provider);
       override_icon_needs_mapping = (!has_icon_payload && !has_explicit_icon_mode);
       has_override = true;
-      break;
     }
   }
 
   /* If override is used for text/glyph/color only and doesn't carry explicit icon data,
    * keep icon fields from persisted mappings (JSON source of truth). */
   if (has_override && !override_is_empty && override_icon_needs_mapping) {
+    CategoryGlyphItem *mapping_item = nullptr;
     for (CategoryGlyphItem *item =
              static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
          item;
          item = static_cast<CategoryGlyphItem *>(item->next))
     {
-      if (STREQ(item->category, category)) {
-        RNA_enum_set(op->ptr, "icon_source", item->icon_source);
-        RNA_string_set(op->ptr, "icon_key", item->icon_key);
-        RNA_string_set(op->ptr, "icon_path", item->icon_path);
-        RNA_string_set(op->ptr, "icon_provider", item->icon_provider);
-        if (ELEM(item->icon_source, 1, 2)) {
-          explicit_icon_mode_assigned = true;
-        }
+      if (item->space_type == space_type && STREQ(item->category, category)) {
+        mapping_item = item;
         break;
+      }
+    }
+    if (!mapping_item && space_type != -1) {
+      for (CategoryGlyphItem *item =
+               static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+           item;
+           item = static_cast<CategoryGlyphItem *>(item->next))
+      {
+        if (item->space_type == -1 && STREQ(item->category, category)) {
+          mapping_item = item;
+          break;
+        }
+      }
+    }
+
+    if (mapping_item) {
+      RNA_enum_set(op->ptr, "icon_source", mapping_item->icon_source);
+      RNA_string_set(op->ptr, "icon_key", mapping_item->icon_key);
+      RNA_string_set(op->ptr, "icon_path", mapping_item->icon_path);
+      RNA_string_set(op->ptr, "icon_provider", mapping_item->icon_provider);
+      if (ELEM(mapping_item->icon_source, 1, 2)) {
+        explicit_icon_mode_assigned = true;
       }
     }
   }
@@ -3077,44 +3116,62 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   /* If no override OR override is empty, check category_glyph_mappings (saved settings from JSON) */
   if (!has_override || override_is_empty) {
     bool found_in_mappings = false;
+    CategoryGlyphItem *mapping_item = nullptr;
     for (CategoryGlyphItem *item =
              static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
          item;
          item = static_cast<CategoryGlyphItem *>(item->next))
     {
-      if (STREQ(item->category, category)) {
-        found_in_mappings = true;
-        /* Load display_name from mappings */
-        if (item->display_name[0] != '\0') {
-          RNA_string_set(op->ptr, "display_name", item->display_name);
-        }
-
-        /* Load glyph.
-         * For glyph-only categories, `category` itself is the canonical id/default glyph.
-         * Do not seed the editable glyph field with that intrinsic id value, otherwise live
-         * preview/save can treat it like a user-entered override. */
-        if (item->glyph[0] != '\0') {
-          const bool is_glyph_only_category = is_single_glyph_str(category);
-          const bool is_intrinsic_category_glyph = is_glyph_only_category && STREQ(item->glyph, category);
-          if (!is_intrinsic_category_glyph) {
-            char hex_code[16];
-            utf8_to_hex_codepoint(item->glyph, hex_code, sizeof(hex_code));
-            RNA_string_set(op->ptr, "glyph", hex_code);
-          }
-        }
-
-        /* Load color if not default black */
-        if (!is_zero_v3(item->color)) {
-          RNA_float_set_array(op->ptr, "color", item->color);
-        }
-        RNA_enum_set(op->ptr, "icon_source", item->icon_source);
-        RNA_string_set(op->ptr, "icon_key", item->icon_key);
-        RNA_string_set(op->ptr, "icon_path", item->icon_path);
-        RNA_string_set(op->ptr, "icon_provider", item->icon_provider);
-        /* When using mappings, mark as no override since data comes from JSON */
-        has_override = false;
+      if (item->space_type == space_type && STREQ(item->category, category)) {
+        mapping_item = item;
         break;
       }
+    }
+    if (!mapping_item && space_type != -1) {
+      for (CategoryGlyphItem *item =
+               static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+           item;
+           item = static_cast<CategoryGlyphItem *>(item->next))
+      {
+        if (item->space_type == -1 && STREQ(item->category, category)) {
+          mapping_item = item;
+          break;
+        }
+      }
+    }
+
+    if (mapping_item) {
+      found_in_mappings = true;
+      /* Load display_name from mappings */
+      if (mapping_item->display_name[0] != '\0') {
+        RNA_string_set(op->ptr, "display_name", mapping_item->display_name);
+      }
+
+      /* Load glyph.
+       * For glyph-only categories, `category` itself is the canonical id/default glyph.
+       * Do not seed the editable glyph field with that intrinsic id value, otherwise live
+       * preview/save can treat it like a user-entered override. */
+      if (mapping_item->glyph[0] != '\0') {
+        const bool is_glyph_only_category = is_single_glyph_str(category);
+        const bool is_intrinsic_category_glyph = is_glyph_only_category &&
+                                                 STREQ(mapping_item->glyph, category);
+        if (!is_intrinsic_category_glyph) {
+          char hex_code[16];
+          utf8_to_hex_codepoint(mapping_item->glyph, hex_code, sizeof(hex_code));
+          RNA_string_set(op->ptr, "glyph", hex_code);
+        }
+      }
+
+      /* Load color if not default black */
+      if (!is_zero_v3(mapping_item->color)) {
+        RNA_float_set_array(op->ptr, "color", mapping_item->color);
+      }
+      RNA_enum_set(op->ptr, "icon_source", mapping_item->icon_source);
+      RNA_string_set(op->ptr, "icon_key", mapping_item->icon_key);
+      RNA_string_set(op->ptr, "icon_path", mapping_item->icon_path);
+      RNA_string_set(op->ptr, "icon_provider", mapping_item->icon_provider);
+      /* When using mappings, mark as no override since data comes from JSON */
+      has_override = false;
     }
   }
 
@@ -3222,9 +3279,20 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
        item;
        item = static_cast<CategoryGlyphItem *>(item->next))
   {
-    if (STREQ(item->category, category)) {
+    if (item->space_type == space_type && STREQ(item->category, category)) {
       current_glyph_mode = item->glyph_mode;
       break;
+    }
+  }
+  if (current_glyph_mode == 0 && space_type != -1) {
+    for (CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+         item;
+         item = static_cast<CategoryGlyphItem *>(item->next))
+    {
+      if (item->space_type == -1 && STREQ(item->category, category)) {
+        current_glyph_mode = item->glyph_mode;
+        break;
+      }
     }
   }
   if (current_glyph_mode == 0) {
@@ -3233,7 +3301,19 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
          item;
          item = static_cast<CategoryGlyphItem *>(item->next))
     {
-      if (STREQ(item->category, category)) {
+      if (item->space_type == space_type && STREQ(item->category, category)) {
+        current_glyph_mode = item->glyph_mode;
+        break;
+      }
+    }
+  }
+  if (current_glyph_mode == 0 && space_type != -1) {
+    for (CategoryGlyphItem *item =
+             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         item;
+         item = static_cast<CategoryGlyphItem *>(item->next))
+    {
+      if (item->space_type == -1 && STREQ(item->category, category)) {
         current_glyph_mode = item->glyph_mode;
         break;
       }

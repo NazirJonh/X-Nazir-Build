@@ -773,6 +773,11 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
     tag_log(f"mark_category_from_extension: category={category_id!r}, extension={extension_id!r}, "
             f"space_type={space_type}, mode_flag={mode_flag:#010x}")
 
+    # Sync to window manager (DNA) so the change is reflected in C++ code
+    # and persists across sessions when saved to JSON
+    sync_glyph_mappings_to_wm()
+    _auto_save_tags()
+
 
 def assign_tag_to_category(category_id, tag_name, space_type=-1):
     """Assign a tag to a category and clear its pending_tag_assignment flag.

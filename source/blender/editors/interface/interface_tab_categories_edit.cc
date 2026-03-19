@@ -2712,7 +2712,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         }
       }
       else {
-        tags_body.label(IFACE_("No tags. Click 'New' to create."), ICON_INFO);
+        tags_body.label(IFACE_("No tags. Click 'New tag' to create."), ICON_INFO);
       }
     }
   } /* End of !is_reserved check for tags panel */

@@ -605,7 +605,8 @@ static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManage
                                                             int space_type = -1);
 static const char *panel_category_glyph_lookup_apply_fallback(const wmWindowManager *wm,
                                                               const char *category,
-                                                              bool *r_is_fallback_letter);
+                                                              bool *r_is_fallback_letter,
+                                                              int space_type);
 
 static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManager *wm,
                                                             const char *category,
@@ -908,7 +909,9 @@ bool tag_glyph_hex_to_utf8(const char *input, char r_utf8[8])
  * \{ */
 
 /* Forward declaration for glyph source lookup. */
-static const char *panel_category_display_name_lookup(const wmWindowManager *wm, const char *category);
+static const char *panel_category_display_name_lookup(const wmWindowManager *wm,
+                                                      const char *category,
+                                                      int space_type);
 static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
                                                      const char *category,
                                                      const PanelType *panel_type,
@@ -1142,7 +1145,7 @@ static const char *panel_category_glyph_lookup_mapping(const wmWindowManager *wm
       STRNCPY(cached_letter, item->first_letter);
       return cached_letter;
     }
-    return panel_category_glyph_lookup_apply_fallback(wm, category, r_is_fallback_letter);
+    return panel_category_glyph_lookup_apply_fallback(wm, category, r_is_fallback_letter, space_type);
   }
 
   /* For glyph_only categories (category name is a glyph), skip fallback letter check.
@@ -1168,7 +1171,8 @@ static const char *panel_category_glyph_lookup_mapping(const wmWindowManager *wm
 
 static const char *panel_category_glyph_lookup_apply_fallback(const wmWindowManager *wm,
                                                               const char *category,
-                                                              bool *r_is_fallback_letter)
+                                                              bool *r_is_fallback_letter,
+                                                              int space_type)
 {
   if (r_is_fallback_letter) {
     /* If category itself is a glyph, don't treat it as fallback letter. */
@@ -1176,7 +1180,7 @@ static const char *panel_category_glyph_lookup_apply_fallback(const wmWindowMana
   }
 
   static char first_char_buf[8];
-  const char *first_letter_source = panel_category_display_name_lookup(wm, category);
+  const char *first_letter_source = panel_category_display_name_lookup(wm, category, space_type);
   if (!first_letter_source || first_letter_source[0] == '\0') {
     first_letter_source = category;
   }
@@ -1254,7 +1258,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
     return panel_type->icon_glyph;
   }
 
-  return panel_category_glyph_lookup_apply_fallback(wm, category, r_is_fallback_letter);
+  return panel_category_glyph_lookup_apply_fallback(wm, category, r_is_fallback_letter, space_type);
 }
 
 bool panel_category_first_letter_lookup(const wmWindowManager *wm,
@@ -1462,36 +1466,45 @@ static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
 /** \name Display Name Lookup
  * \{ */
 
-static const char *panel_category_display_name_lookup(const wmWindowManager *wm, const char *category)
+static const char *panel_category_display_name_lookup(const wmWindowManager *wm,
+                                                      const char *category,
+                                                      int space_type)
 {
-  /* 1. Check user overrides first */
+  if (!category) {
+    return "";
+  }
+
+  /* 1. Check user overrides first (prefer requested space, then GLOBAL fallback). */
+  const CategoryGlyphItem *global_override = nullptr;
   if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
     for (const CategoryGlyphItem *item =
              static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
          item;
          item = static_cast<const CategoryGlyphItem *>(item->next))
     {
-      if (STREQ(item->category, category)) {
-        if (item->display_name[0] != '\0') {
-          return item->display_name;
-        }
-        break;
+      if (!STREQ(item->category, category)) {
+        continue;
+      }
+      if (item->space_type == space_type && item->display_name[0] != '\0') {
+        return item->display_name;
+      }
+      if (space_type != -1 && item->space_type == -1 && item->display_name[0] != '\0' &&
+          global_override == nullptr)
+      {
+        global_override = item;
       }
     }
   }
 
-  /* 2. Check global mappings */
-  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      if (STREQ(item->category, category)) {
-        if (item->display_name[0] != '\0') {
-          return item->display_name;
-        }
-        break;
+  if (global_override) {
+    return global_override->display_name;
+  }
+
+  /* 2. Check mappings with per-space lookup semantics. */
+  if (wm) {
+    if (const CategoryGlyphItem *mapped = category_glyph_mapping_find(wm, category, space_type)) {
+      if (mapped->display_name[0] != '\0') {
+        return mapped->display_name;
       }
     }
   }
@@ -1502,7 +1515,8 @@ static const char *panel_category_display_name_lookup(const wmWindowManager *wm,
 static const char *category_first_letter_source_name_get(const ARegion *region,
                                                          const wmWindowManager *wm,
                                                          const char *category_id,
-                                                         const char *category_id_draw)
+                                                         const char *category_id_draw,
+                                                         int space_type)
 {
   if (category_id_draw && category_id_draw[0] != '\0' && !is_single_glyph_str(category_id_draw)) {
     return category_id_draw;
@@ -1521,7 +1535,7 @@ static const char *category_first_letter_source_name_get(const ARegion *region,
     }
   }
 
-  const char *display_name = panel_category_display_name_lookup(wm, category_id);
+  const char *display_name = panel_category_display_name_lookup(wm, category_id, space_type);
   if (display_name && display_name[0] != '\0' && !is_single_glyph_str(display_name)) {
     return display_name;
   }
@@ -4213,7 +4227,7 @@ static void ui_panel_category_draw_content(
   bool is_fallback_letter = false;
   float glyph_color[3] = {0.0f, 0.0f, 0.0f};
   const char *glyph = panel_category_glyph_lookup(
-      wm, category_id, nullptr, &is_fallback_letter, glyph_color);
+      wm, category_id, nullptr, &is_fallback_letter, glyph_color, space_type);
 
   /* Use live preview color when dialog is open for this category */
   if (is_being_edited_in_dialog && !is_zero_v3(category_tab_preview_color)) {
@@ -4233,7 +4247,7 @@ static void ui_panel_category_draw_content(
     /* For glyph-id categories use human-readable name (panel label/display name),
      * otherwise use category id. */
     const char *first_letter_source = category_first_letter_source_name_get(
-        region, wm, category_id, category_id_draw);
+        region, wm, category_id, category_id_draw, space_type);
     const int first_char_size = BLI_str_utf8_size_safe(first_letter_source);
     if (first_char_size > 0) {
       memcpy(fallback_glyph_buf, first_letter_source, first_char_size);
@@ -5153,14 +5167,14 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
     rcti *rct = &pc_dyn.rect;
     const char *category_id = pc_dyn.idname;
-    const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
+    const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id, space_type));
     /* When panel is minimized (too_narrow), the active tab should not expand */
     const bool is_active = !too_narrow && category_id_active && STREQ(category_id, category_id_active);
 
     bool is_fallback_letter = false;
     float glyph_color[3] = {0.0f, 0.0f, 0.0f};
     const char *glyph = panel_category_glyph_lookup(
-        wm, category_id, nullptr, &is_fallback_letter, glyph_color);
+        wm, category_id, nullptr, &is_fallback_letter, glyph_color, space_type);
 
     /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
     char fallback_glyph_buf[8];
@@ -5168,7 +5182,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       /* For glyph-id categories use human-readable name (panel label/display name),
        * otherwise use category id. */
       const char *first_letter_source = category_first_letter_source_name_get(
-          region, wm, category_id, category_id_draw);
+          region, wm, category_id, category_id_draw, space_type);
       const int first_char_size = BLI_str_utf8_size_safe(first_letter_source);
       if (first_char_size > 0) {
         memcpy(fallback_glyph_buf, first_letter_source, first_char_size);
@@ -5566,7 +5580,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       break;
     }
     const char *category_id = pc_dyn.idname;
-    const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
+    const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id, space_type));
     const bool is_active = !too_narrow && category_id_active && STREQ(category_id, category_id_active);
 
     /* Determine if this tab should expand to show the name.
@@ -5599,7 +5613,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     /* Get glyph color for color indicator in TEXT_ONLY mode. */
     bool is_fallback_letter = false;
     float glyph_color[3] = {0.0f, 0.0f, 0.0f};
-    panel_category_glyph_lookup(wm, category_id, nullptr, &is_fallback_letter, glyph_color);
+    panel_category_glyph_lookup(
+        wm, category_id, nullptr, &is_fallback_letter, glyph_color, space_type);
 
     current_display_index++;
 
@@ -5968,13 +5983,14 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       bool is_fallback_letter = false;
       float glyph_color[3] = {0.0f, 0.0f, 0.0f};
       const char *category_id = drag_tab->idname;
-      panel_category_glyph_lookup(wm, category_id, nullptr, &is_fallback_letter, glyph_color);
+      panel_category_glyph_lookup(
+          wm, category_id, nullptr, &is_fallback_letter, glyph_color, space_type);
 
       /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
       draw_category_tab_color_indicator(
           &drag_rect, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator, true);
 
-      const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id));
+      const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id, space_type));
       const rcti *rct = &drag_rect;
 
       const bool is_active_tab = category_id_active && STREQ(category_id, category_id_active);

@@ -7801,10 +7801,11 @@ static void rna_def_userdef_build_features(BlenderRNA *brna)
   RNA_def_struct_nested(brna, srna, "Preferences");
   RNA_def_struct_ui_text(srna, "Build Features", "Custom build features");
 
-  prop = RNA_def_property(srna, "use_custom_feature_1", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "use_custom_feature_1", 1);
+  prop = RNA_def_property(srna, "use_enhanced_paint_system", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_enhanced_paint_system", 1);
   RNA_def_property_ui_text(
-      prop, "Custom Feature 1", "Enable custom feature 1 for this build");
+      prop, "Enhanced Paint System",
+      "Enable enhanced paint system with gradient tools and texture painting in Sculpt mode");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 
   prop = RNA_def_property(srna, "use_custom_feature_2", PROP_BOOLEAN, PROP_NONE);

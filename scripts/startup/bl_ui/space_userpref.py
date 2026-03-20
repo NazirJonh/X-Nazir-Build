@@ -9924,7 +9924,7 @@ class USERPREF_PT_build_features(Panel):
 
         # Feature toggles
         col = layout.column()
-        col.prop(build_features, "use_custom_feature_1")
+        col.prop(build_features, "use_enhanced_paint_system")
         col.prop(build_features, "use_custom_feature_2")
         col.prop(build_features, "use_custom_feature_3")
 

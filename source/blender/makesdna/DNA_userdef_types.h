@@ -843,13 +843,19 @@ struct UserDef_Experimental {
  */
 struct UserDef_BuildFeatures {
   /* Add your custom build feature flags here. */
-  char use_custom_feature_1 = 0;
+  char use_enhanced_paint_system = 0;
   char use_custom_feature_2 = 0;
   char use_custom_feature_3 = 0;
   char _pad[5] = {};
 };
 
 #define USER_BUILD_FEATURE_TEST(userdef, member) (((userdef)->build_features).member)
+
+/**
+ * Check if enhanced paint system is enabled.
+ * Use this to guard all Speed Paint integration code.
+ */
+#define USE_ENHANCED_PAINT_SYSTEM() USER_BUILD_FEATURE_TEST(&U, use_enhanced_paint_system)
 
 /**
  * Container to store multiple directory paths and a name for each as a #ListBase.

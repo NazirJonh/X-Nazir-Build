@@ -121,6 +121,726 @@ static void log_once(const char *message)
   }
 }
 
+static void category_tab_edit_dialog_clear_runtime_state(const bool clear_popup_block)
+{
+  category_tab_current_dialog_op = nullptr;
+  category_tab_preview_button = nullptr;
+  if (clear_popup_block) {
+    category_tab_popup_block = nullptr;
+  }
+}
+
+static void category_tab_edit_dialog_mark_closed(const char *category)
+{
+  category_tab_popup_close_time = BLI_time_now_seconds();
+  STRNCPY(category_tab_last_closed_category, category);
+}
+
+static void category_glyph_item_init(
+    CategoryGlyphItem &item, const char *category, const int space_type)
+{
+  STRNCPY(item.category, category);
+  item.space_type = space_type;
+  item.first_letter[0] = category[0] ? category[0] : '?';
+  item.first_letter[1] = '\0';
+  item.glyph[0] = '\0';
+  item.display_name[0] = '\0';
+  zero_v3(item.color);
+  item.tags[0] = '\0';
+  item.icon_key[0] = '\0';
+  item.icon_path[0] = '\0';
+  item.icon_provider[0] = '\0';
+  item.icon_source = 0;
+  item.glyph_mode = 0;
+}
+
+static CategoryGlyphItem *category_glyph_item_find(
+    ListBase &items, const char *category, const int space_type)
+{
+  for (CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(items.first); item;
+       item = static_cast<CategoryGlyphItem *>(item->next))
+  {
+    if (item->space_type == space_type && STREQ(item->category, category)) {
+      return item;
+    }
+  }
+  return nullptr;
+}
+
+static const CategoryGlyphItem *category_glyph_item_find_const(
+    const ListBase &items, const char *category, const int space_type)
+{
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(items.first); item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (item->space_type == space_type && STREQ(item->category, category)) {
+      return item;
+    }
+  }
+  return nullptr;
+}
+
+static CategoryGlyphItem *category_glyph_item_find_with_global_fallback(
+    ListBase &items, const char *category, const int space_type)
+{
+  if (CategoryGlyphItem *item = category_glyph_item_find(items, category, space_type)) {
+    return item;
+  }
+  if (space_type != -1) {
+    return category_glyph_item_find(items, category, -1);
+  }
+  return nullptr;
+}
+
+static const CategoryGlyphItem *category_glyph_item_find_with_global_fallback_const(
+    const ListBase &items, const char *category, const int space_type)
+{
+  if (const CategoryGlyphItem *item =
+          category_glyph_item_find_const(items, category, space_type))
+  {
+    return item;
+  }
+  if (space_type != -1) {
+    return category_glyph_item_find_const(items, category, -1);
+  }
+  return nullptr;
+}
+
+static CategoryGlyphItem *category_glyph_item_ensure(
+    ListBase &items, const char *category, const int space_type)
+{
+  if (CategoryGlyphItem *item = category_glyph_item_find(items, category, space_type)) {
+    return item;
+  }
+
+  CategoryGlyphItem *item = MEM_new<CategoryGlyphItem>(__func__);
+  category_glyph_item_init(*item, category, space_type);
+  BLI_addtail(&items, item);
+  return item;
+}
+
+struct CategoryTabIconState {
+  char key[128] = "";
+  char path[1024] = "";
+  char provider[128] = "";
+};
+
+static void category_tab_icon_state_read(PointerRNA *ptr, CategoryTabIconState &r_state)
+{
+  RNA_string_get(ptr, "icon_key", r_state.key);
+  RNA_string_get(ptr, "icon_path", r_state.path);
+  RNA_string_get(ptr, "icon_provider", r_state.provider);
+}
+
+static void category_tab_icon_state_write(PointerRNA *ptr, const CategoryTabIconState &state)
+{
+  RNA_string_set(ptr, "icon_key", state.key);
+  RNA_string_set(ptr, "icon_path", state.path);
+  RNA_string_set(ptr, "icon_provider", state.provider);
+}
+
+static void category_tab_icon_state_from_item(const CategoryGlyphItem &item,
+                                              CategoryTabIconState &r_state)
+{
+  STRNCPY(r_state.key, item.icon_key);
+  STRNCPY(r_state.path, item.icon_path);
+  STRNCPY(r_state.provider, item.icon_provider);
+}
+
+static void category_tab_icon_state_apply_item_to_operator(PointerRNA *ptr,
+                                                           const CategoryGlyphItem &item)
+{
+  RNA_enum_set(ptr, "icon_source", item.icon_source);
+  CategoryTabIconState icon_state;
+  category_tab_icon_state_from_item(item, icon_state);
+  category_tab_icon_state_write(ptr, icon_state);
+}
+
+static void category_tab_icon_state_apply(CategoryGlyphItem &item,
+                                          const CategoryTabIconState &state)
+{
+  STRNCPY(item.icon_key, state.key);
+  STRNCPY(item.icon_path, state.path);
+  STRNCPY(item.icon_provider, state.provider);
+}
+
+struct CategoryTabDialogSnapshot {
+  char display_name[32] = "";
+  char glyph_hex[16] = "";
+  float color[3] = {0.0f, 0.0f, 0.0f};
+  char tags[256] = "";
+  CategoryTabIconState icon;
+  int icon_source = 0;
+  int glyph_mode = 0;
+  bool has_override = false;
+  int space_type = -1;
+  int override_space_type = -1;
+};
+
+static void category_tab_dialog_snapshot_read(PointerRNA *ptr,
+                                              CategoryTabDialogSnapshot &r_snapshot)
+{
+  RNA_string_get(ptr, "original_display_name", r_snapshot.display_name);
+  RNA_string_get(ptr, "original_glyph", r_snapshot.glyph_hex);
+  RNA_float_get_array(ptr, "original_color", r_snapshot.color);
+  RNA_string_get(ptr, "original_tags", r_snapshot.tags);
+  RNA_string_get(ptr, "original_icon_key", r_snapshot.icon.key);
+  RNA_string_get(ptr, "original_icon_path", r_snapshot.icon.path);
+  RNA_string_get(ptr, "original_icon_provider", r_snapshot.icon.provider);
+  r_snapshot.icon_source = RNA_enum_get(ptr, "original_icon_source");
+  r_snapshot.glyph_mode = RNA_enum_get(ptr, "original_glyph_mode");
+  r_snapshot.has_override = RNA_boolean_get(ptr, "original_has_override");
+  r_snapshot.space_type = RNA_int_get(ptr, "original_space_type");
+  r_snapshot.override_space_type = RNA_int_get(ptr, "original_override_space_type");
+}
+
+static void category_tab_dialog_snapshot_write(PointerRNA *ptr,
+                                               const CategoryTabDialogSnapshot &snapshot)
+{
+  RNA_string_set(ptr, "original_display_name", snapshot.display_name);
+  RNA_string_set(ptr, "original_glyph", snapshot.glyph_hex);
+  RNA_float_set_array(ptr, "original_color", snapshot.color);
+  RNA_string_set(ptr, "original_tags", snapshot.tags);
+  RNA_string_set(ptr, "original_icon_key", snapshot.icon.key);
+  RNA_string_set(ptr, "original_icon_path", snapshot.icon.path);
+  RNA_string_set(ptr, "original_icon_provider", snapshot.icon.provider);
+  RNA_enum_set(ptr, "original_icon_source", snapshot.icon_source);
+  RNA_enum_set(ptr, "original_glyph_mode", snapshot.glyph_mode);
+  RNA_boolean_set(ptr, "original_has_override", snapshot.has_override);
+  RNA_int_set(ptr, "original_space_type", snapshot.space_type);
+  RNA_int_set(ptr, "original_override_space_type", snapshot.override_space_type);
+}
+
+static void category_tab_dialog_snapshot_apply_to_item(CategoryGlyphItem &item,
+                                                       const CategoryTabDialogSnapshot &snapshot)
+{
+  char glyph_utf8[8] = "";
+  process_glyph_input(snapshot.glyph_hex, glyph_utf8, sizeof(glyph_utf8));
+
+  STRNCPY(item.display_name, snapshot.display_name);
+  STRNCPY(item.glyph, glyph_utf8);
+  copy_v3_v3(item.color, snapshot.color);
+  STRNCPY(item.tags, snapshot.tags);
+  category_tab_icon_state_apply(item, snapshot.icon);
+  item.icon_source = snapshot.icon_source;
+  item.glyph_mode = snapshot.glyph_mode;
+}
+
+static void category_tab_dialog_snapshot_apply_runtime_visuals_to_item(
+    CategoryGlyphItem &item, const CategoryTabDialogSnapshot &snapshot)
+{
+  char glyph_utf8[8] = "";
+  process_glyph_input(snapshot.glyph_hex, glyph_utf8, sizeof(glyph_utf8));
+
+  STRNCPY(item.glyph, glyph_utf8);
+  copy_v3_v3(item.color, snapshot.color);
+  category_tab_icon_state_apply(item, snapshot.icon);
+  item.icon_source = snapshot.icon_source;
+  item.glyph_mode = snapshot.glyph_mode;
+}
+
+static const char *category_tab_lookup_runtime_default_glyph(wmWindowManager *wm,
+                                                             const char *category,
+                                                             const int space_type,
+                                                             CategoryGlyphItem *override_item,
+                                                             const bool clear_override_glyph,
+                                                             bool *r_is_fallback,
+                                                             float *r_color)
+{
+  bool is_fallback_dummy = false;
+  bool *is_fallback = r_is_fallback ? r_is_fallback : &is_fallback_dummy;
+
+  char previous_override_glyph[8] = "";
+  const bool temporarily_clear_override_for_lookup =
+      clear_override_glyph && override_item && override_item->glyph[0] != '\0';
+
+  if (temporarily_clear_override_for_lookup) {
+    STRNCPY(previous_override_glyph, override_item->glyph);
+    override_item->glyph[0] = '\0';
+  }
+
+  const char *default_glyph =
+      panel_category_glyph_lookup(wm, category, nullptr, is_fallback, r_color, space_type);
+
+  if (temporarily_clear_override_for_lookup) {
+    STRNCPY(override_item->glyph, previous_override_glyph);
+  }
+
+  return default_glyph;
+}
+
+static void category_tab_compute_preview_glyph(char r_preview_glyph[8],
+                                               const int display_mode_ui,
+                                               const char *custom_glyph,
+                                               const char *default_glyph,
+                                               const bool is_default_fallback,
+                                               const char *fallback_letter)
+{
+  if (display_mode_ui == 2) {
+    BLI_strncpy(r_preview_glyph, fallback_letter ? fallback_letter : "", 8);
+  }
+  else if (custom_glyph && custom_glyph[0] != '\0') {
+    BLI_strncpy(r_preview_glyph, custom_glyph, 8);
+  }
+  else if (default_glyph && !is_default_fallback) {
+    BLI_strncpy(r_preview_glyph, default_glyph, 8);
+  }
+  else {
+    BLI_strncpy(r_preview_glyph, fallback_letter ? fallback_letter : "", 8);
+  }
+}
+
+static int category_tab_resolve_glyph_mode_with_fallback(const wmWindowManager *wm,
+                                                         const char *category,
+                                                         const int space_type)
+{
+  const CategoryGlyphItem *override_exact = category_glyph_item_find_const(
+      wm->category_glyph_overrides, category, space_type);
+  if (override_exact && override_exact->glyph_mode != 0) {
+    return override_exact->glyph_mode;
+  }
+
+  if (space_type != -1) {
+    const CategoryGlyphItem *override_global = category_glyph_item_find_const(
+        wm->category_glyph_overrides, category, -1);
+    if (override_global && override_global->glyph_mode != 0) {
+      return override_global->glyph_mode;
+    }
+  }
+
+  const CategoryGlyphItem *mapping_exact = category_glyph_item_find_const(
+      wm->category_glyph_mappings, category, space_type);
+  if (mapping_exact && mapping_exact->glyph_mode != 0) {
+    return mapping_exact->glyph_mode;
+  }
+
+  if (space_type != -1) {
+    const CategoryGlyphItem *mapping_global = category_glyph_item_find_const(
+        wm->category_glyph_mappings, category, -1);
+    if (mapping_global && mapping_global->glyph_mode != 0) {
+      return mapping_global->glyph_mode;
+    }
+  }
+
+  return 0;
+}
+
+static const char *category_tab_lookup_tags_with_fallback(const wmWindowManager *wm,
+                                                          const char *category,
+                                                          const int space_type)
+{
+  const CategoryGlyphItem *override_exact = category_glyph_item_find_const(
+      wm->category_glyph_overrides, category, space_type);
+  if (override_exact && override_exact->tags[0] != '\0') {
+    return override_exact->tags;
+  }
+
+  if (space_type != -1) {
+    const CategoryGlyphItem *override_global = category_glyph_item_find_const(
+        wm->category_glyph_overrides, category, -1);
+    if (override_global && override_global->tags[0] != '\0') {
+      return override_global->tags;
+    }
+  }
+
+  const CategoryGlyphItem *mapping_exact = category_glyph_item_find_const(
+      wm->category_glyph_mappings, category, space_type);
+  if (mapping_exact && mapping_exact->tags[0] != '\0') {
+    return mapping_exact->tags;
+  }
+
+  if (space_type != -1) {
+    const CategoryGlyphItem *mapping_global = category_glyph_item_find_const(
+        wm->category_glyph_mappings, category, -1);
+    if (mapping_global && mapping_global->tags[0] != '\0') {
+      return mapping_global->tags;
+    }
+  }
+
+  return nullptr;
+}
+
+static bool category_tab_resolve_default_glyph_from_mappings(const wmWindowManager *wm,
+                                                             const char *category,
+                                                             const int space_type,
+                                                             char r_default_glyph[8])
+{
+  r_default_glyph[0] = '\0';
+
+  const CategoryGlyphItem *map_item_resolved = category_glyph_item_find_with_global_fallback_const(
+      wm->category_glyph_mappings, category, space_type);
+  if (!map_item_resolved) {
+    return false;
+  }
+
+  if (map_item_resolved->default_glyph[0] != '\0') {
+    BLI_strncpy(r_default_glyph, map_item_resolved->default_glyph, 8);
+    return true;
+  }
+
+  if (is_single_glyph_str(category) && map_item_resolved->glyph[0] != '\0') {
+    /* Glyph-only category: reset/default is its glyph value. */
+    BLI_strncpy(r_default_glyph, map_item_resolved->glyph, 8);
+    return true;
+  }
+
+  /* text_only categories intentionally keep default_glyph empty so reset falls back to first letter. */
+  return false;
+}
+
+struct CategoryTabInvokeLoadResult {
+  CategoryGlyphItem *override_item = nullptr;
+  bool has_override = false;
+  bool override_is_empty = false;
+  bool override_icon_needs_mapping = false;
+  bool user_glyph_override_assigned = false;
+  bool explicit_icon_mode_assigned = false;
+};
+
+static CategoryTabInvokeLoadResult category_tab_invoke_load_operator_state_from_items(
+    PointerRNA *op_ptr,
+    wmWindowManager *wm,
+    ARegion *region,
+    const char *category,
+    const int space_type)
+{
+  CategoryTabInvokeLoadResult result;
+
+  /* First check category_glyph_overrides (user changes in current session).
+   * Priority: exact editor space first, then GLOBAL fallback. */
+  result.override_item = category_glyph_item_find_with_global_fallback(
+      wm->category_glyph_overrides, category, space_type);
+
+  if (result.override_item) {
+    const bool has_icon_payload = (result.override_item->icon_key[0] != '\0') ||
+                                  (result.override_item->icon_path[0] != '\0') ||
+                                  (result.override_item->icon_provider[0] != '\0');
+    const bool has_explicit_icon_mode = ELEM(result.override_item->icon_source, 1, 2);
+    if (has_explicit_icon_mode) {
+      result.explicit_icon_mode_assigned = true;
+    }
+
+    if (result.override_item->display_name[0] == '\0' && result.override_item->glyph[0] == '\0' &&
+        is_zero_v3(result.override_item->color) && !has_icon_payload && !has_explicit_icon_mode)
+    {
+      result.override_is_empty = true;
+      result.has_override = true;
+    }
+    else {
+      char extracted_glyph[16];
+      char clean_display_name[32];
+      extract_leading_glyph(result.override_item->display_name,
+                            extracted_glyph,
+                            sizeof(extracted_glyph),
+                            clean_display_name,
+                            sizeof(clean_display_name));
+
+      if (clean_display_name[0] == '\0') {
+        const char *panel_label = find_panel_label_for_category(region, category);
+        if (panel_label) {
+          STRNCPY(clean_display_name, panel_label);
+        }
+      }
+
+      RNA_string_set(op_ptr, "display_name", clean_display_name);
+
+      char hex_code[16];
+      if (result.override_item->glyph[0] != '\0') {
+        utf8_to_hex_codepoint(result.override_item->glyph, hex_code, sizeof(hex_code));
+        result.user_glyph_override_assigned = true;
+      }
+      else if (extracted_glyph[0] != '\0') {
+        STRNCPY(hex_code, extracted_glyph);
+        result.user_glyph_override_assigned = true;
+      }
+      else {
+        hex_code[0] = '\0';
+      }
+
+      RNA_string_set(op_ptr, "glyph", hex_code);
+      RNA_float_set_array(op_ptr, "color", result.override_item->color);
+      category_tab_icon_state_apply_item_to_operator(op_ptr, *result.override_item);
+
+      result.override_icon_needs_mapping = (!has_icon_payload && !has_explicit_icon_mode);
+      result.has_override = true;
+    }
+  }
+
+  /* If override is used for text/glyph/color only and doesn't carry explicit icon data,
+   * keep icon fields from persisted mappings (JSON source of truth). */
+  if (result.has_override && !result.override_is_empty && result.override_icon_needs_mapping) {
+    const CategoryGlyphItem *mapping_item = category_glyph_item_find_with_global_fallback_const(
+        wm->category_glyph_mappings, category, space_type);
+
+    if (mapping_item) {
+      category_tab_icon_state_apply_item_to_operator(op_ptr, *mapping_item);
+      if (ELEM(mapping_item->icon_source, 1, 2)) {
+        result.explicit_icon_mode_assigned = true;
+      }
+    }
+  }
+
+  /* If no override OR override is empty, check category_glyph_mappings (saved settings from JSON). */
+  if (!result.has_override || result.override_is_empty) {
+    const CategoryGlyphItem *mapping_item = category_glyph_item_find_with_global_fallback_const(
+        wm->category_glyph_mappings, category, space_type);
+
+    if (mapping_item) {
+      if (mapping_item->display_name[0] != '\0') {
+        RNA_string_set(op_ptr, "display_name", mapping_item->display_name);
+      }
+
+      if (mapping_item->glyph[0] != '\0') {
+        const bool is_glyph_only_category = is_single_glyph_str(category);
+        const bool is_intrinsic_category_glyph = is_glyph_only_category &&
+                                                 STREQ(mapping_item->glyph, category);
+        if (!is_intrinsic_category_glyph) {
+          char hex_code[16];
+          utf8_to_hex_codepoint(mapping_item->glyph, hex_code, sizeof(hex_code));
+          RNA_string_set(op_ptr, "glyph", hex_code);
+        }
+      }
+
+      if (!is_zero_v3(mapping_item->color)) {
+        RNA_float_set_array(op_ptr, "color", mapping_item->color);
+      }
+
+      category_tab_icon_state_apply_item_to_operator(op_ptr, *mapping_item);
+      result.has_override = false;
+    }
+  }
+
+  return result;
+}
+
+static bool category_tab_try_auto_detect_extension_icon(bContext *C,
+                                                        const char *category,
+                                                        char r_icon_path[1024],
+                                                        char r_icon_provider[128]);
+
+static void category_tab_invoke_apply_post_load_defaults(bContext *C,
+                                                         PointerRNA *op_ptr,
+                                                         wmWindowManager *wm,
+                                                         ARegion *region,
+                                                         const char *category,
+                                                         const int space_type,
+                                                         const bool user_glyph_override_assigned,
+                                                         const bool explicit_icon_mode_assigned)
+{
+  /* If no explicit icon mode/payload is set, try to detect extension root icon
+   * (icon.png/icon.webp/...) for this category.
+   * Only do this when there is no user glyph override; fallback glyphs are ignored. */
+  if (!user_glyph_override_assigned && !explicit_icon_mode_assigned) {
+    CategoryTabIconState current_icon_state;
+    category_tab_icon_state_read(op_ptr, current_icon_state);
+
+    const bool has_icon_payload = (current_icon_state.key[0] != '\0') ||
+                                  (current_icon_state.path[0] != '\0') ||
+                                  (current_icon_state.provider[0] != '\0');
+
+    if (!has_icon_payload) {
+      char detected_icon_path[1024] = "";
+      char detected_icon_provider[128] = "";
+      if (category_tab_try_auto_detect_extension_icon(
+              C, category, detected_icon_path, detected_icon_provider))
+      {
+        RNA_enum_set(op_ptr, "icon_source", 0); /* AUTO */
+        RNA_string_set(op_ptr, "icon_path", detected_icon_path);
+        if (detected_icon_provider[0] != '\0') {
+          RNA_string_set(op_ptr, "icon_provider", detected_icon_provider);
+        }
+      }
+    }
+  }
+
+  /* If display_name is still empty, use panel label or category. */
+  char current_display_name[32] = "";
+  RNA_string_get(op_ptr, "display_name", current_display_name);
+  if (current_display_name[0] == '\0') {
+    if (is_single_glyph_str(category)) {
+      const char *panel_label = find_panel_label_for_category(region, category);
+      if (panel_label) {
+        RNA_string_set(op_ptr, "display_name", panel_label);
+      }
+    }
+    else {
+      RNA_string_set(op_ptr, "display_name", category);
+    }
+  }
+
+  /* If glyph/color are still default, fill from runtime glyph lookup. */
+  char runtime_default_glyph[8] = "";
+  float runtime_default_color[3] = {0.0f, 0.0f, 0.0f};
+  bool runtime_default_is_fallback = false;
+  bool runtime_default_lookup_done = false;
+
+  auto ensure_runtime_default_lookup = [&]() {
+    if (runtime_default_lookup_done) {
+      return;
+    }
+
+    const char *default_glyph = category_tab_lookup_runtime_default_glyph(
+        wm,
+        category,
+        space_type,
+        nullptr,
+        false,
+        &runtime_default_is_fallback,
+        runtime_default_color);
+    if (default_glyph) {
+      STRNCPY(runtime_default_glyph, default_glyph);
+    }
+    runtime_default_lookup_done = true;
+  };
+
+  char current_glyph[16] = "";
+  RNA_string_get(op_ptr, "glyph", current_glyph);
+  if (current_glyph[0] == '\0') {
+    ensure_runtime_default_lookup();
+
+    if (runtime_default_glyph[0] != '\0') {
+      const bool is_glyph_only_category = is_single_glyph_str(category);
+      const bool is_intrinsic_category_glyph =
+          is_glyph_only_category && STREQ(runtime_default_glyph, category);
+      if (!is_intrinsic_category_glyph && !runtime_default_is_fallback) {
+        char hex_code[16];
+        utf8_to_hex_codepoint(runtime_default_glyph, hex_code, sizeof(hex_code));
+        RNA_string_set(op_ptr, "glyph", hex_code);
+      }
+    }
+  }
+
+  float current_color[3] = {0.0f, 0.0f, 0.0f};
+  RNA_float_get_array(op_ptr, "color", current_color);
+  if (is_zero_v3(current_color)) {
+    ensure_runtime_default_lookup();
+    if (!is_zero_v3(runtime_default_color)) {
+      RNA_float_set_array(op_ptr, "color", runtime_default_color);
+    }
+  }
+}
+
+struct CategoryTabDisplayModeState {
+  int display_mode_ui = 0;
+  int custom_icon_mode_ui = 0;
+};
+
+enum class CategoryTabIconSourceResolveMode {
+  Preview,
+  Commit,
+};
+
+static CategoryTabDisplayModeState category_tab_resolve_display_mode_state(
+    const int glyph_mode, const int icon_source, const bool has_icon_key, const bool has_icon_path)
+{
+  CategoryTabDisplayModeState state;
+
+  const bool has_icon_payload = has_icon_key || has_icon_path;
+  const bool icon_mode_enabled = (icon_source != 2); /* OFF */
+
+  if (glyph_mode == 1) {
+    state.display_mode_ui = 2; /* TEXT */
+    return state;
+  }
+
+  if (!(icon_mode_enabled && has_icon_payload)) {
+    return state; /* GLYPH/BLENDER by default. */
+  }
+
+  state.display_mode_ui = 1; /* CUSTOM_ICON */
+
+  if (icon_source == 1 && has_icon_key) {
+    state.custom_icon_mode_ui = 0; /* BLENDER */
+  }
+  else if (icon_source == 0 && has_icon_path) {
+    state.custom_icon_mode_ui = 1; /* CUSTOM */
+  }
+  else if (has_icon_path) {
+    state.custom_icon_mode_ui = 1; /* CUSTOM fallback */
+  }
+  else if (has_icon_key) {
+    state.custom_icon_mode_ui = 0; /* BLENDER fallback */
+  }
+
+  return state;
+}
+
+static int category_tab_resolve_icon_source(const int display_mode_ui,
+                                            const int custom_icon_mode_ui,
+                                            const int current_icon_source,
+                                            const CategoryTabIconSourceResolveMode mode,
+                                            bool *r_clear_blender_icon_key)
+{
+  if (r_clear_blender_icon_key) {
+    *r_clear_blender_icon_key = false;
+  }
+
+  if (display_mode_ui == 0 || display_mode_ui == 2) {
+    return 2; /* OFF */
+  }
+
+  if (custom_icon_mode_ui == 0) {
+    return 1; /* MANUAL: Blender Icon */
+  }
+
+  if (mode == CategoryTabIconSourceResolveMode::Preview) {
+    if (r_clear_blender_icon_key) {
+      *r_clear_blender_icon_key = true;
+    }
+    return 0; /* AUTO: path/provider chain (external icon) */
+  }
+
+  UNUSED_VARS(current_icon_source);
+  return 1; /* MANUAL: Custom image icon - explicit user choice on commit */
+}
+
+static void category_tab_invoke_build_and_store_snapshot(PointerRNA *op_ptr,
+                                                         const wmWindowManager *wm,
+                                                         const char *category,
+                                                         const int space_type,
+                                                         const bool has_override,
+                                                         const CategoryGlyphItem *override_item)
+{
+  char current_display_name[32] = "";
+  char current_glyph[16] = "";
+  float current_color[3] = {0.0f, 0.0f, 0.0f};
+  RNA_string_get(op_ptr, "display_name", current_display_name);
+  RNA_string_get(op_ptr, "glyph", current_glyph);
+  RNA_float_get_array(op_ptr, "color", current_color);
+
+  const int current_icon_source = RNA_enum_get(op_ptr, "icon_source");
+  CategoryTabIconState current_icon_state;
+  category_tab_icon_state_read(op_ptr, current_icon_state);
+
+  const bool has_icon_key = (current_icon_state.key[0] != '\0');
+  const bool has_icon_path = (current_icon_state.path[0] != '\0');
+  const int current_glyph_mode = category_tab_resolve_glyph_mode_with_fallback(
+      wm, category, space_type);
+
+  CategoryTabDialogSnapshot snapshot;
+  STRNCPY(snapshot.display_name, current_display_name);
+  STRNCPY(snapshot.glyph_hex, current_glyph);
+  copy_v3_v3(snapshot.color, current_color);
+  snapshot.icon = current_icon_state;
+  snapshot.icon_source = current_icon_source;
+  snapshot.glyph_mode = current_glyph_mode;
+  snapshot.has_override = has_override;
+  snapshot.space_type = space_type;
+  snapshot.override_space_type = (has_override && override_item) ? override_item->space_type :
+                                                                    space_type;
+
+  const CategoryTabDisplayModeState display_mode_state = category_tab_resolve_display_mode_state(
+      current_glyph_mode, current_icon_source, has_icon_key, has_icon_path);
+  RNA_enum_set(op_ptr, "display_mode_ui", display_mode_state.display_mode_ui);
+  RNA_enum_set(op_ptr, "custom_icon_mode_ui", display_mode_state.custom_icon_mode_ui);
+
+  const char *tags_str = category_tab_lookup_tags_with_fallback(wm, category, space_type);
+  if (tags_str) {
+    STRNCPY(snapshot.tags, tags_str);
+  }
+  category_tab_dialog_snapshot_write(op_ptr, snapshot);
+}
+
 bool category_tab_edit_dialog_is_open_for_category(const char *category)
 {
   if (!category || category[0] == '\0' || category_tab_current_dialog_op == nullptr) {
@@ -258,136 +978,59 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   char category[64];
   RNA_string_get(op->ptr, "category", category);
 
-  /* Get original values saved when dialog was opened */
-  char original_display_name[32] = "";
-  char original_glyph_hex[16] = "";
-  float original_color[3] = {0.0f, 0.0f, 0.0f};
-  char original_tags[256] = "";
-  char original_icon_key[128] = "";
-  char original_icon_path[1024] = "";
-  char original_icon_provider[128] = "";
-  int original_icon_source = 0;
-  int original_glyph_mode = 0;
-  bool original_has_override = false;
+  CategoryTabDialogSnapshot snapshot;
+  category_tab_dialog_snapshot_read(op->ptr, snapshot);
 
-  RNA_string_get(op->ptr, "original_display_name", original_display_name);
-  RNA_string_get(op->ptr, "original_glyph", original_glyph_hex);
-  RNA_float_get_array(op->ptr, "original_color", original_color);
-  RNA_string_get(op->ptr, "original_tags", original_tags);
-  RNA_string_get(op->ptr, "original_icon_key", original_icon_key);
-  RNA_string_get(op->ptr, "original_icon_path", original_icon_path);
-  RNA_string_get(op->ptr, "original_icon_provider", original_icon_provider);
-  original_icon_source = RNA_enum_get(op->ptr, "original_icon_source");
-  original_glyph_mode = RNA_enum_get(op->ptr, "original_glyph_mode");
-  original_has_override = RNA_boolean_get(op->ptr, "original_has_override");
+  if (snapshot.space_type == -1) {
+    ScrArea *area = CTX_wm_area(C);
+    snapshot.space_type = area ? area->spacetype : -1;
+  }
 
-  /* Convert hex glyph back to UTF-8 for restoration */
-  char original_glyph_utf8[8] = "";
-  process_glyph_input(original_glyph_hex, original_glyph_utf8, sizeof(original_glyph_utf8));
+  const int restore_override_space_type = snapshot.has_override ? snapshot.override_space_type :
+                                                                  snapshot.space_type;
 
   wmWindowManager *wm = CTX_wm_manager(C);
 
   /* Find current override (may have been created by live preview) */
-  CategoryGlyphItem *item = nullptr;
-  for (CategoryGlyphItem *it =
-           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-       it;
-       it = static_cast<CategoryGlyphItem *>(it->next))
-  {
-    if (STREQ(it->category, category)) {
-      item = it;
-      break;
-    }
-  }
+  CategoryGlyphItem *item = category_glyph_item_find(
+      wm->category_glyph_overrides, category, restore_override_space_type);
 
-  if (original_has_override) {
+  if (snapshot.has_override) {
     /* There was an override before - restore original values */
     if (!item) {
       /* Override was deleted by live preview - recreate it */
-      item = MEM_new<CategoryGlyphItem>(__func__);
-      STRNCPY(item->category, category);
-      /* Initialize first_letter from category name */
-      item->first_letter[0] = category[0] ? category[0] : '?';
-      item->first_letter[1] = '\0';
-      item->glyph[0] = '\0';
-      item->display_name[0] = '\0';
-      zero_v3(item->color);
-      item->tags[0] = '\0';
-      item->icon_key[0] = '\0';
-      item->icon_path[0] = '\0';
-      item->icon_provider[0] = '\0';
-      item->icon_source = 0;
-      item->glyph_mode = 0;
-      BLI_addtail(&wm->category_glyph_overrides, item);
+      item = category_glyph_item_ensure(
+          wm->category_glyph_overrides, category, restore_override_space_type);
     }
-    STRNCPY(item->display_name, original_display_name);
-    STRNCPY(item->glyph, original_glyph_utf8);
-    copy_v3_v3(item->color, original_color);
-    STRNCPY(item->tags, original_tags);
-    STRNCPY(item->icon_key, original_icon_key);
-    STRNCPY(item->icon_path, original_icon_path);
-    STRNCPY(item->icon_provider, original_icon_provider);
-    item->icon_source = original_icon_source;
-    item->glyph_mode = original_glyph_mode;
+    category_tab_dialog_snapshot_apply_to_item(*item, snapshot);
   }
   else {
     /* There was no override before - remove any created by live preview */
-  if (item) {
-    /* Check if override has any user changes besides tags/glyph/color/display_name.
-     * Note: color is considered changed if it's not the original color.
-     */
-    bool color_changed = !is_zero_v3(item->color) && !compare_v3v3(item->color, original_color, 0.001f);
-    bool has_changes = (item->display_name[0] != '\0' || item->glyph[0] != '\0' ||
-                        color_changed ||
-                        (item->tags[0] != '\0' && original_tags[0] == '\0'));
-
-    if (!has_changes || !original_has_override) {
+    if (item) {
       BLI_remlink(&wm->category_glyph_overrides, item);
       MEM_delete(item);
     }
-    else {
-      /* Keep override but restore original values */
-      STRNCPY(item->display_name, original_display_name);
-      STRNCPY(item->glyph, original_glyph_utf8);
-      copy_v3_v3(item->color, original_color);
-      STRNCPY(item->tags, original_tags);
-      STRNCPY(item->icon_key, original_icon_key);
-      STRNCPY(item->icon_path, original_icon_path);
-      STRNCPY(item->icon_provider, original_icon_provider);
-      item->icon_source = original_icon_source;
-      item->glyph_mode = original_glyph_mode;
-    }
-  }
 
   /* Reset operator can temporarily modify category_glyph_mappings (for example when resetting
-   * a fallback-letter category to an empty glyph). If user cancels the dialog and there was no
-   * original override, restore mapping glyph/color from dialog-open snapshot as well, otherwise
-   * UI may keep fallback state until restart even though changes were discarded. */
-  if (!original_has_override) {
-    for (CategoryGlyphItem *map_item =
-             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         map_item;
-         map_item = static_cast<CategoryGlyphItem *>(map_item->next))
-    {
-      if (!STREQ(map_item->category, category)) {
-        continue;
-      }
-      STRNCPY(map_item->glyph, original_glyph_utf8);
-      copy_v3_v3(map_item->color, original_color);
-      map_item->glyph_mode = original_glyph_mode;
-      break;
+   * a fallback-letter category to an empty glyph or toggling icon mode). If user cancels the
+   * dialog and there was no original override, restore mapping runtime state from the dialog-open
+   * snapshot as well, otherwise UI may keep fallback/first-letter state until restart even though
+   * changes were discarded. */
+  if (!snapshot.has_override) {
+    CategoryGlyphItem *map_item_restore = category_glyph_item_find_with_global_fallback(
+        wm->category_glyph_mappings, category, snapshot.space_type);
+
+    if (map_item_restore) {
+      category_tab_dialog_snapshot_apply_runtime_visuals_to_item(*map_item_restore, snapshot);
     }
   }
   }
 
   /* Clear dialog operator pointer and popup block */
-  category_tab_current_dialog_op = nullptr;
-  category_tab_popup_block = nullptr;
-  category_tab_preview_button = nullptr;
+  category_tab_edit_dialog_clear_runtime_state(true);
 
   /* Record popup close time and category to prevent immediate reopen */
-  category_tab_popup_close_time = BLI_time_now_seconds();
-  STRNCPY(category_tab_last_closed_category, category);
+  category_tab_edit_dialog_mark_closed(category);
 
 #ifdef WITH_PYTHON
   /* Restore tags in Python _glyph_cache to revert live preview changes. */
@@ -411,8 +1054,8 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
                    "category = wm.category_tab_save_category\n"
                    "wm.category_tab_save_category = ''\n"
                    "if category:\n"
-                   "    restore_category_tags_from_string(category, r'''%s''', space_type=%d)\n",
-                   original_tags, space_type);
+                    "    restore_category_tags_from_string(category, r'''%s''', space_type=%d)\n",
+                   snapshot.tags, space_type);
 
       BPY_run_string_exec(C, imports, restore_cmd);
     }
@@ -428,17 +1071,14 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
 void category_tab_edit_popup_ok_cb(bContext * /*C*/, void *user_data, int /*retval*/)
 {
   /* Clear dialog operator pointer and popup block */
-  category_tab_current_dialog_op = nullptr;
-  category_tab_popup_block = nullptr;
-  category_tab_preview_button = nullptr;
+  category_tab_edit_dialog_clear_runtime_state(true);
 
   /* Record popup close time and category */
   if (user_data) {
     wmOperator *op = static_cast<wmOperator *>(user_data);
     char category[64];
     RNA_string_get(op->ptr, "category", category);
-    category_tab_popup_close_time = BLI_time_now_seconds();
-    STRNCPY(category_tab_last_closed_category, category);
+    category_tab_edit_dialog_mark_closed(category);
   }
 }
 
@@ -808,10 +1448,14 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   /* Update the override immediately for live preview */
   wmWindowManager *wm = CTX_wm_manager(C);
 
+  CategoryGlyphItem *item = category_glyph_item_find(
+      wm->category_glyph_overrides, category, space_type);
+
   /* Look up default glyph for preview fallback (when user input is empty or invalid) */
   bool is_fallback = false;
-  const char *default_glyph = panel_category_glyph_lookup(
-      wm, category, nullptr, &is_fallback, nullptr);
+  const char *default_glyph = category_tab_lookup_runtime_default_glyph(
+      wm, category, space_type, item, glyph_raw[0] == '\0', &is_fallback, nullptr);
+
   const int display_mode_ui = RNA_enum_get(op->ptr, "display_mode_ui");
 
   char preview_name[32] = "";
@@ -828,52 +1472,12 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
    * Invalid input shows the default glyph (not the invalid text).
    * Fallback letter is sourced from the display name/category. */
   copy_v3_v3(category_tab_preview_color, color);
-  if (display_mode_ui == 2) {
-    STRNCPY(category_tab_preview_glyph, fallback_letter);
-  }
-  else if (glyph[0] != '\0') {
-    /* Valid custom glyph - show it */
-    STRNCPY(category_tab_preview_glyph, glyph);
-  }
-  else if (default_glyph && !is_fallback) {
-    /* Empty or invalid input - show resolved default glyph (non fallback) */
-    STRNCPY(category_tab_preview_glyph, default_glyph);
-  }
-  else {
-    STRNCPY(category_tab_preview_glyph, fallback_letter);
-  }
-
-  CategoryGlyphItem *item = nullptr;
-
-  /* Find existing override with matching space_type */
-  for (CategoryGlyphItem *it =
-           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-       it;
-       it = static_cast<CategoryGlyphItem *>(it->next))
-  {
-    if (it->space_type == space_type && STREQ(it->category, category)) {
-      item = it;
-      break;
-    }
-  }
+  category_tab_compute_preview_glyph(
+      category_tab_preview_glyph, display_mode_ui, glyph, default_glyph, is_fallback, fallback_letter);
 
   /* Create if not found */
   if (!item) {
-    item = MEM_new<CategoryGlyphItem>(__func__);
-    STRNCPY(item->category, category);
-    item->space_type = space_type;  /* CRITICAL: Set space_type for proper matching in exec */
-    item->display_name[0] = '\0';
-    item->glyph[0] = '\0';
-    zero_v3(item->color);
-    item->tags[0] = '\0';  /* Initialize tags as empty */
-    item->icon_key[0] = '\0';
-    item->icon_path[0] = '\0';
-    item->icon_provider[0] = '\0';
-    item->icon_source = 0;
-    item->glyph_mode = 0;
-    /* Initialize first_letter from category name */
-    item->first_letter[0] = category[0] ? category[0] : '?';
-    item->first_letter[1] = '\0';
+    item = category_glyph_item_ensure(wm->category_glyph_overrides, category, space_type);
 
     /* Preserve existing tags from mappings when creating new override.
      * This prevents losing tags when user modifies display_name/glyph/color. */
@@ -904,8 +1508,6 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
     if (existing_tags && existing_tags[0] != '\0') {
       STRNCPY(item->tags, existing_tags);
     }
-
-    BLI_addtail(&wm->category_glyph_overrides, item);
   }
 
   /* Update display_name for live preview */
@@ -920,27 +1522,20 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   copy_v3_v3(item->color, color);
 
   /* Update icon fields for live preview/state carry-over. */
-  char icon_key[128] = "";
-  char icon_path[1024] = "";
-  char icon_provider[128] = "";
-  RNA_string_get(op->ptr, "icon_key", icon_key);
-  RNA_string_get(op->ptr, "icon_path", icon_path);
-  RNA_string_get(op->ptr, "icon_provider", icon_provider);
-  STRNCPY(item->icon_key, icon_key);
-  STRNCPY(item->icon_path, icon_path);
-  STRNCPY(item->icon_provider, icon_provider);
+  CategoryTabIconState icon_state;
+  category_tab_icon_state_read(op->ptr, icon_state);
+  category_tab_icon_state_apply(*item, icon_state);
 
   const int custom_icon_mode_ui = RNA_enum_get(op->ptr, "custom_icon_mode_ui");
 
-  int resolved_icon_source = RNA_enum_get(op->ptr, "icon_source");
-  if (display_mode_ui == 0 || display_mode_ui == 2) {
-    resolved_icon_source = 2; /* OFF */
-  }
-  else if (custom_icon_mode_ui == 0) {
-    resolved_icon_source = 1; /* MANUAL: Blender Icon */
-  }
-  else {
-    resolved_icon_source = 0; /* AUTO: path/provider chain (external icon) */
+  bool clear_blender_icon_key = false;
+  const int resolved_icon_source = category_tab_resolve_icon_source(
+      display_mode_ui,
+      custom_icon_mode_ui,
+      RNA_enum_get(op->ptr, "icon_source"),
+      CategoryTabIconSourceResolveMode::Preview,
+      &clear_blender_icon_key);
+  if (clear_blender_icon_key) {
     /* Clear Blender icon key when switching to Custom icon mode */
     RNA_string_set(op->ptr, "icon_key", "");
     item->icon_key[0] = '\0';
@@ -2605,29 +3200,8 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
       /* Show "Without Tag" only for categories that are truly unassigned in current context,
        * exactly like "New Add-ons!" filter logic. */
       const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
-      const CategoryGlyphItem *mapping_item = nullptr;
-      for (CategoryGlyphItem *map_item =
-               static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-           map_item;
-           map_item = static_cast<CategoryGlyphItem *>(map_item->next))
-      {
-        if (STREQ(map_item->category, category) && map_item->space_type == space_type) {
-          mapping_item = map_item;
-          break;
-        }
-      }
-      if (!mapping_item && space_type != -1) {
-        for (CategoryGlyphItem *map_item =
-                 static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-             map_item;
-             map_item = static_cast<CategoryGlyphItem *>(map_item->next))
-        {
-          if (STREQ(map_item->category, category) && map_item->space_type == -1) {
-            mapping_item = map_item;
-            break;
-          }
-        }
-      }
+      const CategoryGlyphItem *mapping_item = category_glyph_item_find_with_global_fallback_const(
+          wm->category_glyph_mappings, category, space_type);
       const bool show_without_tag = category_is_unassigned_for_context(
           wm, mapping_item, space_type, current_mode_flag);
 
@@ -2983,445 +3557,24 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   /* Default the tag filter to the current editor/object mode for this session. */
   wm->category_tag_filter_mode = get_current_object_mode_filter_value(C);
 
-  bool has_override = false;
-  bool override_is_empty = false;
-  bool override_icon_needs_mapping = false;
-  bool user_glyph_override_assigned = false;
-  bool explicit_icon_mode_assigned = false;
+  const CategoryTabInvokeLoadResult invoke_load = category_tab_invoke_load_operator_state_from_items(
+      op->ptr, wm, region, category, space_type);
+  const bool has_override = invoke_load.has_override;
+  const bool user_glyph_override_assigned = invoke_load.user_glyph_override_assigned;
+  const bool explicit_icon_mode_assigned = invoke_load.explicit_icon_mode_assigned;
+  CategoryGlyphItem *override_item = invoke_load.override_item;
 
-  /* First check category_glyph_overrides (user changes in current session).
-   * Priority: exact editor space first, then GLOBAL fallback. */
-  CategoryGlyphItem *override_item = nullptr;
-  for (CategoryGlyphItem *item =
-           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-       item;
-       item = static_cast<CategoryGlyphItem *>(item->next))
-  {
-    if (item->space_type == space_type && STREQ(item->category, category)) {
-      override_item = item;
-      break;
-    }
-  }
-  if (!override_item && space_type != -1) {
-    for (CategoryGlyphItem *item =
-             static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-         item;
-         item = static_cast<CategoryGlyphItem *>(item->next))
-    {
-      if (item->space_type == -1 && STREQ(item->category, category)) {
-        override_item = item;
-        break;
-      }
-    }
-  }
+  category_tab_invoke_apply_post_load_defaults(C,
+                                               op->ptr,
+                                               wm,
+                                               region,
+                                               category,
+                                               space_type,
+                                               user_glyph_override_assigned,
+                                               explicit_icon_mode_assigned);
 
-  if (override_item) {
-    const bool has_icon_payload = (override_item->icon_key[0] != '\0') ||
-                                  (override_item->icon_path[0] != '\0') ||
-                                  (override_item->icon_provider[0] != '\0');
-    const bool has_explicit_icon_mode = ELEM(override_item->icon_source, 1, 2); /* MANUAL/OFF */
-    if (has_explicit_icon_mode) {
-      explicit_icon_mode_assigned = true;
-    }
-
-    /* Check if override is empty (created by tag restore but has no actual data) */
-    if (override_item->display_name[0] == '\0' && override_item->glyph[0] == '\0' &&
-        is_zero_v3(override_item->color) && !has_icon_payload && !has_explicit_icon_mode)
-    {
-      override_is_empty = true;
-      has_override = true; /* Mark as found but empty, so we skip checking mappings again */
-    }
-    else {
-      /* Extract any leading glyph from display_name */
-      char extracted_glyph[16];
-      char clean_display_name[32];
-      extract_leading_glyph(override_item->display_name,
-                            extracted_glyph,
-                            sizeof(extracted_glyph),
-                            clean_display_name,
-                            sizeof(clean_display_name));
-
-      /* If display_name is empty after glyph extraction, find panel label */
-      if (clean_display_name[0] == '\0') {
-        const char *panel_label = find_panel_label_for_category(region, category);
-        if (panel_label) {
-          STRNCPY(clean_display_name, panel_label);
-        }
-      }
-
-      RNA_string_set(op->ptr, "display_name", clean_display_name);
-
-      /* Use extracted glyph if item->glyph is empty, otherwise use item->glyph */
-      char hex_code[16];
-      if (override_item->glyph[0] != '\0') {
-        utf8_to_hex_codepoint(override_item->glyph, hex_code, sizeof(hex_code));
-        user_glyph_override_assigned = true;
-      }
-      else if (extracted_glyph[0] != '\0') {
-        STRNCPY(hex_code, extracted_glyph);
-        user_glyph_override_assigned = true;
-      }
-      else {
-        hex_code[0] = '\0';
-      }
-      RNA_string_set(op->ptr, "glyph", hex_code);
-      RNA_float_set_array(op->ptr, "color", override_item->color);
-      RNA_enum_set(op->ptr, "icon_source", override_item->icon_source);
-      RNA_string_set(op->ptr, "icon_key", override_item->icon_key);
-      RNA_string_set(op->ptr, "icon_path", override_item->icon_path);
-      RNA_string_set(op->ptr, "icon_provider", override_item->icon_provider);
-      override_icon_needs_mapping = (!has_icon_payload && !has_explicit_icon_mode);
-      has_override = true;
-    }
-  }
-
-  /* If override is used for text/glyph/color only and doesn't carry explicit icon data,
-   * keep icon fields from persisted mappings (JSON source of truth). */
-  if (has_override && !override_is_empty && override_icon_needs_mapping) {
-    CategoryGlyphItem *mapping_item = nullptr;
-    for (CategoryGlyphItem *item =
-             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<CategoryGlyphItem *>(item->next))
-    {
-      if (item->space_type == space_type && STREQ(item->category, category)) {
-        mapping_item = item;
-        break;
-      }
-    }
-    if (!mapping_item && space_type != -1) {
-      for (CategoryGlyphItem *item =
-               static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-           item;
-           item = static_cast<CategoryGlyphItem *>(item->next))
-      {
-        if (item->space_type == -1 && STREQ(item->category, category)) {
-          mapping_item = item;
-          break;
-        }
-      }
-    }
-
-    if (mapping_item) {
-      RNA_enum_set(op->ptr, "icon_source", mapping_item->icon_source);
-      RNA_string_set(op->ptr, "icon_key", mapping_item->icon_key);
-      RNA_string_set(op->ptr, "icon_path", mapping_item->icon_path);
-      RNA_string_set(op->ptr, "icon_provider", mapping_item->icon_provider);
-      if (ELEM(mapping_item->icon_source, 1, 2)) {
-        explicit_icon_mode_assigned = true;
-      }
-    }
-  }
-
-  /* If no override OR override is empty, check category_glyph_mappings (saved settings from JSON) */
-  if (!has_override || override_is_empty) {
-    bool found_in_mappings = false;
-    CategoryGlyphItem *mapping_item = nullptr;
-    for (CategoryGlyphItem *item =
-             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<CategoryGlyphItem *>(item->next))
-    {
-      if (item->space_type == space_type && STREQ(item->category, category)) {
-        mapping_item = item;
-        break;
-      }
-    }
-    if (!mapping_item && space_type != -1) {
-      for (CategoryGlyphItem *item =
-               static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-           item;
-           item = static_cast<CategoryGlyphItem *>(item->next))
-      {
-        if (item->space_type == -1 && STREQ(item->category, category)) {
-          mapping_item = item;
-          break;
-        }
-      }
-    }
-
-    if (mapping_item) {
-      found_in_mappings = true;
-      /* Load display_name from mappings */
-      if (mapping_item->display_name[0] != '\0') {
-        RNA_string_set(op->ptr, "display_name", mapping_item->display_name);
-      }
-
-      /* Load glyph.
-       * For glyph-only categories, `category` itself is the canonical id/default glyph.
-       * Do not seed the editable glyph field with that intrinsic id value, otherwise live
-       * preview/save can treat it like a user-entered override. */
-      if (mapping_item->glyph[0] != '\0') {
-        const bool is_glyph_only_category = is_single_glyph_str(category);
-        const bool is_intrinsic_category_glyph = is_glyph_only_category &&
-                                                 STREQ(mapping_item->glyph, category);
-        if (!is_intrinsic_category_glyph) {
-          char hex_code[16];
-          utf8_to_hex_codepoint(mapping_item->glyph, hex_code, sizeof(hex_code));
-          RNA_string_set(op->ptr, "glyph", hex_code);
-        }
-      }
-
-      /* Load color if not default black */
-      if (!is_zero_v3(mapping_item->color)) {
-        RNA_float_set_array(op->ptr, "color", mapping_item->color);
-      }
-      RNA_enum_set(op->ptr, "icon_source", mapping_item->icon_source);
-      RNA_string_set(op->ptr, "icon_key", mapping_item->icon_key);
-      RNA_string_set(op->ptr, "icon_path", mapping_item->icon_path);
-      RNA_string_set(op->ptr, "icon_provider", mapping_item->icon_provider);
-      /* When using mappings, mark as no override since data comes from JSON */
-      has_override = false;
-    }
-  }
-
-  /* If no explicit icon mode/payload is set, try to detect extension root icon
-   * (icon.png/icon.webp/...) for this category.
-   * Only do this when there is no user glyph override; fallback glyphs are ignored. */
-  if (!user_glyph_override_assigned && !explicit_icon_mode_assigned) {
-
-    char current_icon_key[128] = "";
-    char current_icon_path[1024] = "";
-    char current_icon_provider[128] = "";
-    RNA_string_get(op->ptr, "icon_key", current_icon_key);
-    RNA_string_get(op->ptr, "icon_path", current_icon_path);
-    RNA_string_get(op->ptr, "icon_provider", current_icon_provider);
-
-    const bool has_icon_payload =
-        (current_icon_key[0] != '\0') || (current_icon_path[0] != '\0') || (current_icon_provider[0] != '\0');
-
-    if (!has_icon_payload) {
-      char detected_icon_path[1024] = "";
-      char detected_icon_provider[128] = "";
-      if (category_tab_try_auto_detect_extension_icon(
-              C, category, detected_icon_path, detected_icon_provider))
-      {
-        RNA_enum_set(op->ptr, "icon_source", 0); /* AUTO */
-        RNA_string_set(op->ptr, "icon_path", detected_icon_path);
-        if (detected_icon_provider[0] != '\0') {
-          RNA_string_set(op->ptr, "icon_provider", detected_icon_provider);
-        }
-      }
-    }
-  }
-
-  /* If display_name is still empty, use panel label or category */
-  char current_display_name[32] = "";
-  RNA_string_get(op->ptr, "display_name", current_display_name);
-  if (current_display_name[0] == '\0') {
-    /* Set display_name: if category is a single glyph, find panel label */
-    if (is_single_glyph_str(category)) {
-      const char *panel_label = find_panel_label_for_category(region, category);
-      if (panel_label) {
-        RNA_string_set(op->ptr, "display_name", panel_label);
-      }
-    }
-    else {
-      RNA_string_set(op->ptr, "display_name", category);
-    }
-  }
-
-  /* If glyph is still empty, use panel_category_glyph_lookup.
-   * For glyph-only categories, avoid seeding with the intrinsic category-id glyph
-   * (same value as `category`) for the same reason as above. */
-  char current_glyph[16] = "";
-  RNA_string_get(op->ptr, "glyph", current_glyph);
-  if (current_glyph[0] == '\0') {
-    float glyph_color[3] = {0.0f, 0.0f, 0.0f};
-    bool is_fallback = false;
-
-    const char *default_glyph = panel_category_glyph_lookup(
-        wm, category, nullptr, &is_fallback, glyph_color);
-
-    if (default_glyph) {
-      const bool is_glyph_only_category = is_single_glyph_str(category);
-      const bool is_intrinsic_category_glyph = is_glyph_only_category && STREQ(default_glyph, category);
-      if (!is_intrinsic_category_glyph && !is_fallback) {
-        char hex_code[16];
-        utf8_to_hex_codepoint(default_glyph, hex_code, sizeof(hex_code));
-        RNA_string_set(op->ptr, "glyph", hex_code);
-      }
-    }
-  }
-
-  /* If color is still default, check from lookup */
-  float current_color[3] = {0.0f, 0.0f, 0.0f};
-  RNA_float_get_array(op->ptr, "color", current_color);
-  if (is_zero_v3(current_color)) {
-    float glyph_color[3] = {0.0f, 0.0f, 0.0f};
-    bool is_fallback = false;
-    panel_category_glyph_lookup(wm, category, nullptr, &is_fallback, glyph_color);
-    if (!is_zero_v3(glyph_color)) {
-      RNA_float_set_array(op->ptr, "color", glyph_color);
-    }
-  }
-
-  /* Save original values for cancel functionality */
-  RNA_string_get(op->ptr, "display_name", current_display_name);
-  RNA_string_get(op->ptr, "glyph", current_glyph);
-  RNA_float_get_array(op->ptr, "color", current_color);
-  RNA_string_set(op->ptr, "original_display_name", current_display_name);
-  RNA_string_set(op->ptr, "original_glyph", current_glyph);
-  const int current_icon_source = RNA_enum_get(op->ptr, "icon_source");
-  char current_icon_key[128] = "";
-  char current_icon_path[1024] = "";
-  char current_icon_provider[128] = "";
-  RNA_string_get(op->ptr, "icon_key", current_icon_key);
-  RNA_string_get(op->ptr, "icon_path", current_icon_path);
-  RNA_string_get(op->ptr, "icon_provider", current_icon_provider);
-
-  const bool has_icon_key = (current_icon_key[0] != '\0');
-  const bool has_icon_path = (current_icon_path[0] != '\0');
-  const bool has_icon_payload = has_icon_key || has_icon_path;
-  const bool icon_mode_enabled = (current_icon_source != 2); /* OFF */
-  int current_glyph_mode = 0;
-  for (CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-       item;
-       item = static_cast<CategoryGlyphItem *>(item->next))
-  {
-    if (item->space_type == space_type && STREQ(item->category, category)) {
-      current_glyph_mode = item->glyph_mode;
-      break;
-    }
-  }
-  if (current_glyph_mode == 0 && space_type != -1) {
-    for (CategoryGlyphItem *item = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-         item;
-         item = static_cast<CategoryGlyphItem *>(item->next))
-    {
-      if (item->space_type == -1 && STREQ(item->category, category)) {
-        current_glyph_mode = item->glyph_mode;
-        break;
-      }
-    }
-  }
-  if (current_glyph_mode == 0) {
-    for (CategoryGlyphItem *item =
-             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<CategoryGlyphItem *>(item->next))
-    {
-      if (item->space_type == space_type && STREQ(item->category, category)) {
-        current_glyph_mode = item->glyph_mode;
-        break;
-      }
-    }
-  }
-  if (current_glyph_mode == 0 && space_type != -1) {
-    for (CategoryGlyphItem *item =
-             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<CategoryGlyphItem *>(item->next))
-    {
-      if (item->space_type == -1 && STREQ(item->category, category)) {
-        current_glyph_mode = item->glyph_mode;
-        break;
-      }
-    }
-  }
-
-  int display_mode_ui = 0; /* GLYPH */
-  int custom_icon_mode_ui = 0; /* BLENDER */
-  
-  if (current_glyph_mode == 1) {
-    display_mode_ui = 2; /* TEXT */
-  }
-  else if (icon_mode_enabled && has_icon_payload) {
-    display_mode_ui = 1; /* CUSTOM_ICON */
-    
-    /* Determine icon submode based on icon_source priority */
-    if (current_icon_source == 1 && has_icon_key) {
-      /* MANUAL source: use Blender icon if available */
-      custom_icon_mode_ui = 0; /* BLENDER */
-    }
-    else if (current_icon_source == 0 && has_icon_path) {
-      /* AUTO source: use Custom icon if available */
-      custom_icon_mode_ui = 1; /* CUSTOM */
-    }
-    else if (has_icon_path) {
-      /* Fallback: if path exists, use Custom */
-      custom_icon_mode_ui = 1; /* CUSTOM */
-    }
-    else if (has_icon_key) {
-      /* Fallback: if key exists, use Blender */
-      custom_icon_mode_ui = 0; /* BLENDER */
-    }
-  }
-  
-  RNA_enum_set(op->ptr, "display_mode_ui", display_mode_ui);
-  RNA_enum_set(op->ptr, "custom_icon_mode_ui", custom_icon_mode_ui);
-
-  RNA_enum_set(op->ptr, "original_icon_source", current_icon_source);
-  RNA_enum_set(op->ptr, "original_glyph_mode", current_glyph_mode);
-  RNA_string_set(op->ptr, "original_icon_key", current_icon_key);
-  RNA_string_set(op->ptr, "original_icon_path", current_icon_path);
-  RNA_string_set(op->ptr, "original_icon_provider", current_icon_provider);
-  RNA_float_set_array(op->ptr, "original_color", current_color);
-  RNA_boolean_set(op->ptr, "original_has_override", has_override);
-
-  /* Save original tags for cancel functionality - read from WM mappings/overrides
-   * IMPORTANT: Filter by space_type to get per-space tags */
-  char original_tags[256] = "";
-  const char *tags_str = nullptr;
-
-  /* First check overrides with matching space_type */
-  for (CategoryGlyphItem *item =
-           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-       item;
-       item = static_cast<CategoryGlyphItem *>(item->next))
-  {
-    if (item->space_type == space_type && STREQ(item->category, category)) {
-      tags_str = item->tags;
-      break;
-    }
-  }
-
-  /* If no override with matching space_type, check global overrides (space_type = -1) */
-  if (!tags_str || tags_str[0] == '\0') {
-    for (CategoryGlyphItem *item =
-             static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-         item;
-         item = static_cast<CategoryGlyphItem *>(item->next))
-    {
-      if (item->space_type == -1 && STREQ(item->category, category)) {
-        tags_str = item->tags;
-        break;
-      }
-    }
-  }
-
-  /* If no override, check mappings with matching space_type */
-  if (!tags_str || tags_str[0] == '\0') {
-    for (CategoryGlyphItem *item =
-             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<CategoryGlyphItem *>(item->next))
-    {
-      if (item->space_type == space_type && STREQ(item->category, category)) {
-        tags_str = item->tags;
-        break;
-      }
-    }
-  }
-
-  /* If no mapping with matching space_type, check global mappings (space_type = -1) */
-  if (!tags_str || tags_str[0] == '\0') {
-    for (CategoryGlyphItem *item =
-             static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<CategoryGlyphItem *>(item->next))
-    {
-      if (item->space_type == -1 && STREQ(item->category, category)) {
-        tags_str = item->tags;
-        break;
-      }
-    }
-  }
-
-  if (tags_str) {
-    STRNCPY(original_tags, tags_str);
-  }
-  RNA_string_set(op->ptr, "original_tags", original_tags);
+  category_tab_invoke_build_and_store_snapshot(
+      op->ptr, wm, category, space_type, has_override, override_item);
 
   /* Store pointer to dialog operator for Reset/Save button access */
   category_tab_current_dialog_op = op;
@@ -3468,37 +3621,8 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
 
   /* Get or create override with matching space_type */
   wmWindowManager *wm = CTX_wm_manager(C);
-  CategoryGlyphItem *item = nullptr;
-
-  for (CategoryGlyphItem *it =
-           static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-       it;
-       it = static_cast<CategoryGlyphItem *>(it->next))
-  {
-    if (it->space_type == space_type && STREQ(it->category, category)) {
-      item = it;
-      break;
-    }
-  }
-
-  if (!item) {
-    item = MEM_new<CategoryGlyphItem>(__func__);
-    STRNCPY(item->category, category);
-    item->space_type = space_type;
-    item->glyph[0] = '\0';
-    item->display_name[0] = '\0';
-    zero_v3(item->color);
-    item->tags[0] = '\0';
-    item->icon_key[0] = '\0';
-    item->icon_path[0] = '\0';
-    item->icon_provider[0] = '\0';
-    item->icon_source = 0;
-    item->glyph_mode = 0;
-    /* Initialize first_letter from category name */
-    item->first_letter[0] = category[0] ? category[0] : '?';
-    item->first_letter[1] = '\0';
-    BLI_addtail(&wm->category_glyph_overrides, item);
-  }
+  CategoryGlyphItem *item = category_glyph_item_ensure(
+      wm->category_glyph_overrides, category, space_type);
 
   /* Resolve base/default glyph from stable mappings first (canonical category key),
    * and only then use lookup as a fallback.
@@ -3509,48 +3633,17 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
    *   incorrectly treated as default and cleared.
    */
   char default_glyph[8] = "";
-  bool default_glyph_found = false;
-
-  for (CategoryGlyphItem *map_item =
-           static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-       map_item;
-       map_item = static_cast<CategoryGlyphItem *>(map_item->next))
-  {
-    if (!STREQ(map_item->category, category)) {
-      continue;
-    }
-
-    if (map_item->default_glyph[0] != '\0') {
-      STRNCPY(default_glyph, map_item->default_glyph);
-      default_glyph_found = true;
-    }
-    else if (is_single_glyph_str(category) && map_item->glyph[0] != '\0') {
-      /* Glyph-only category: reset/default is its glyph value. */
-      STRNCPY(default_glyph, map_item->glyph);
-      default_glyph_found = true;
-    }
-    /* text_only categories intentionally keep default_glyph empty so reset falls back to first letter. */
-    break;
-  }
+  const bool default_glyph_found = category_tab_resolve_default_glyph_from_mappings(
+      wm, category, space_type, default_glyph);
 
   if (!default_glyph_found) {
     /* Fallback for categories not present in mappings yet.
      * Temporarily clear live override glyph to avoid self-matching. */
-    char previous_override_glyph[8] = "";
-    if (item->glyph[0] != '\0') {
-      STRNCPY(previous_override_glyph, item->glyph);
-      item->glyph[0] = '\0';
-    }
-
     bool is_fallback = false;
-    const char *default_glyph_lookup = panel_category_glyph_lookup(
-        wm, category, nullptr, &is_fallback, nullptr);
+    const char *default_glyph_lookup = category_tab_lookup_runtime_default_glyph(
+        wm, category, space_type, item, true, &is_fallback, nullptr);
     if (default_glyph_lookup) {
       STRNCPY(default_glyph, default_glyph_lookup);
-    }
-
-    if (previous_override_glyph[0] != '\0') {
-      STRNCPY(item->glyph, previous_override_glyph);
     }
   }
 
@@ -3559,22 +3652,18 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   copy_v3_v3(item->color, color);
   const int display_mode_ui_exec = RNA_enum_get(op->ptr, "display_mode_ui");
   const int custom_icon_mode_ui_exec = RNA_enum_get(op->ptr, "custom_icon_mode_ui");
-  int resolved_icon_source_exec = RNA_enum_get(op->ptr, "icon_source");
-  if (display_mode_ui_exec == 0 || display_mode_ui_exec == 2) {
-    resolved_icon_source_exec = 2; /* OFF */
-  }
-  else if (custom_icon_mode_ui_exec == 0) {
-    resolved_icon_source_exec = 1; /* MANUAL: Blender Icon */
-  }
-  else {
-    resolved_icon_source_exec = 1; /* MANUAL: Custom image icon - user explicitly chose an icon */
-  }
+  const int resolved_icon_source_exec = category_tab_resolve_icon_source(
+      display_mode_ui_exec,
+      custom_icon_mode_ui_exec,
+      RNA_enum_get(op->ptr, "icon_source"),
+      CategoryTabIconSourceResolveMode::Commit,
+      nullptr);
   RNA_enum_set(op->ptr, "icon_source", resolved_icon_source_exec);
   item->icon_source = resolved_icon_source_exec;
   item->glyph_mode = (display_mode_ui_exec == 2) ? 1 : 0;
-  RNA_string_get(op->ptr, "icon_key", item->icon_key);
-  RNA_string_get(op->ptr, "icon_path", item->icon_path);
-  RNA_string_get(op->ptr, "icon_provider", item->icon_provider);
+  CategoryTabIconState icon_state_exec;
+  category_tab_icon_state_read(op->ptr, icon_state_exec);
+  category_tab_icon_state_apply(*item, icon_state_exec);
 
   /* Only save glyph to override if user has changed it from the default.
    * If glyph matches the default (especially fallback letters), leave it empty
@@ -3612,8 +3701,7 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   }
 
   /* Clear dialog operator pointer and preview button */
-  category_tab_current_dialog_op = nullptr;
-  category_tab_preview_button = nullptr;
+  category_tab_edit_dialog_clear_runtime_state(false);
 
   /* Save updated data to JSON (including tags which might have been modified) */
   {

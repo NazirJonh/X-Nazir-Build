@@ -85,6 +85,364 @@ namespace blender::ui {
 
 /* Forward declarations */
 static bool category_name_is_glyph(const char *category_id);
+static std::string normalize_category_key(const char *category);
+static void panel_category_color_lookup(const wmWindowManager *wm,
+                                        const char *category,
+                                        float r_color[3]);
+
+static bool category_item_match_exact(const CategoryGlyphItem *item,
+                                      const char *category,
+                                      int space_type);
+static bool category_item_match_normalized(const CategoryGlyphItem *item,
+                                           const std::string &normalized_target,
+                                           int space_type);
+static const CategoryGlyphItem *category_item_find_exact_any_space(const ListBase *list,
+                                                                   const char *category);
+static const CategoryGlyphItem *category_item_find_overrides(const wmWindowManager *wm,
+                                                             const char *category,
+                                                             int space_type);
+static const CategoryGlyphItem *category_item_find_mappings(const wmWindowManager *wm,
+                                                            const char *category,
+                                                            int space_type);
+static bool category_order_is_crossing_reserved_boundary(const wmWindowManager *wm,
+                                                         const Vector<std::string> &order);
+static void workspace_category_order_clear(WorkSpace *workspace, int space_type, int region_type);
+static bool category_tab_should_expand_name(const ARegion *region,
+                                            const char *category_id,
+                                            const eUserPref_CategoryTabsDisplayMode display_mode,
+                                            const bool is_active,
+                                            const bool use_minimized_gate,
+                                            const bool is_panel_minimized);
+
+/* -------------------------------------------------------------------- */
+/** \name Internal Category Lookup Helpers
+ * \{ */
+
+/**
+ * Internal helper: Find category glyph item with exact match (category + space_type).
+ * Returns first matching item or nullptr if not found.
+ */
+static bool category_item_match_exact(const CategoryGlyphItem *item,
+                                      const char *category,
+                                      int space_type)
+{
+  return item && category && STREQ(item->category, category) && item->space_type == space_type;
+}
+
+static bool category_item_match_normalized(const CategoryGlyphItem *item,
+                                           const std::string &normalized_target,
+                                           int space_type)
+{
+  if (!item || normalized_target.empty()) {
+    return false;
+  }
+  const std::string normalized_item = normalize_category_key(item->category);
+  return normalized_item == normalized_target && item->space_type == space_type;
+}
+
+static const CategoryGlyphItem *category_item_find_exact_any_space(const ListBase *list,
+                                                                   const char *category)
+{
+  if (!list || !category || !category_glyph_list_is_valid(list)) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first);
+       item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (STREQ(item->category, category)) {
+      return item;
+    }
+  }
+
+  return nullptr;
+}
+
+static const CategoryGlyphItem *category_glyph_item_find_exact(const ListBase *list,
+                                                               const char *category,
+                                                               int space_type)
+{
+  if (!list || !category_glyph_list_is_valid(list)) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first);
+       item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (category_item_match_exact(item, category, space_type)) {
+      return item;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * Internal helper: Find category glyph item with global fallback (space_type = -1).
+ * Only searches global if space_type != -1.
+ */
+static const CategoryGlyphItem *category_glyph_item_find_global(const ListBase *list,
+                                                                const char *category,
+                                                                int space_type)
+{
+  if (!list || !category_glyph_list_is_valid(list) || space_type == -1) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first);
+       item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (STREQ(item->category, category) && item->space_type == -1) {
+      return item;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * Internal helper: Find category glyph item with normalized exact match.
+ * Uses normalize_category_key() for canonicalization fallback.
+ */
+static const CategoryGlyphItem *category_glyph_item_find_normalized_exact(const ListBase *list,
+                                                                          const char *category,
+                                                                          int space_type)
+{
+  if (!list || !category_glyph_list_is_valid(list)) {
+    return nullptr;
+  }
+
+  const std::string normalized_target = normalize_category_key(category);
+  if (normalized_target.empty()) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first);
+       item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (category_item_match_normalized(item, normalized_target, space_type)) {
+      return item;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * Internal helper: Find category glyph item with normalized global fallback.
+ * Uses normalize_category_key() for canonicalization with global space_type = -1.
+ */
+static const CategoryGlyphItem *category_glyph_item_find_normalized_global(const ListBase *list,
+                                                                           const char *category,
+                                                                           int space_type)
+{
+  if (!list || !category_glyph_list_is_valid(list) || space_type == -1) {
+    return nullptr;
+  }
+
+  const std::string normalized_target = normalize_category_key(category);
+  if (normalized_target.empty()) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first);
+       item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (category_item_match_normalized(item, normalized_target, -1)) {
+      return item;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * Internal helper: Unified category lookup with priority order.
+ * Searches in order: exact -> global -> normalized exact -> normalized global.
+ * Keep this order stable: edit/live-preview/reset paths rely on the same resolution contract.
+ */
+static const CategoryGlyphItem *category_glyph_item_find_with_fallback(const ListBase *list,
+                                                                        const char *category,
+                                                                        int space_type)
+{
+  if (!list || !category) {
+    return nullptr;
+  }
+
+  // First pass: try exact match (category + space_type)
+  if (const CategoryGlyphItem *item = category_glyph_item_find_exact(list, category, space_type)) {
+    return item;
+  }
+
+  // Second pass: try global categories (space_type = -1) if not searching for global already
+  if (const CategoryGlyphItem *item = category_glyph_item_find_global(list, category, space_type)) {
+    return item;
+  }
+
+  // Third pass: try canonicalization fallback with space_type match
+  if (const CategoryGlyphItem *item = category_glyph_item_find_normalized_exact(list, category, space_type)) {
+    return item;
+  }
+
+  // Fourth pass: try canonicalization fallback with global categories
+  if (const CategoryGlyphItem *item = category_glyph_item_find_normalized_global(list, category, space_type)) {
+    return item;
+  }
+
+  return nullptr;
+}
+
+static const CategoryGlyphItem *category_item_find_overrides(const wmWindowManager *wm,
+                                                             const char *category,
+                                                             int space_type)
+{
+  if (!wm) {
+    return nullptr;
+  }
+  return category_glyph_item_find_with_fallback(&wm->category_glyph_overrides, category, space_type);
+}
+
+static const CategoryGlyphItem *category_item_find_mappings(const wmWindowManager *wm,
+                                                            const char *category,
+                                                            int space_type)
+{
+  if (!wm) {
+    return nullptr;
+  }
+  return category_glyph_item_find_with_fallback(&wm->category_glyph_mappings, category, space_type);
+}
+
+static bool category_item_override_icon_is_effective(const CategoryGlyphItem *item)
+{
+  if (!item) {
+    return false;
+  }
+
+  const bool has_icon_payload = (item->icon_key[0] != '\0') || (item->icon_path[0] != '\0') ||
+                                (item->icon_provider[0] != '\0');
+  const bool has_explicit_icon_mode = ELEM(
+      item->icon_source, CATEGORY_TAB_ICON_SOURCE_MANUAL, CATEGORY_TAB_ICON_SOURCE_OFF);
+
+  /* Override entries are often created for glyph/color/tag edits.
+   * If an AUTO override has no icon payload, don't mask JSON mapping icon data. */
+  return has_icon_payload || has_explicit_icon_mode;
+}
+
+static const CategoryGlyphItem *category_item_find_with_color_any_space(const ListBase *list,
+                                                                        const char *category)
+{
+  if (!list || !category_glyph_list_is_valid(list) || !category) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (STREQ(item->category, category) && !is_zero_v3(item->color)) {
+      return item;
+    }
+  }
+
+  const std::string normalized_target = normalize_category_key(category);
+  if (normalized_target.empty()) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (is_zero_v3(item->color)) {
+      continue;
+    }
+    if (category_item_match_normalized(item, normalized_target, item->space_type)) {
+      return item;
+    }
+  }
+
+  return nullptr;
+}
+
+static const CategoryGlyphItem *category_item_find_with_effective_icon_any_space(
+    const ListBase *list, const char *category)
+{
+  if (!list || !category_glyph_list_is_valid(list) || !category) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (STREQ(item->category, category) && category_item_override_icon_is_effective(item)) {
+      return item;
+    }
+  }
+
+  const std::string normalized_target = normalize_category_key(category);
+  if (normalized_target.empty()) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (!category_item_override_icon_is_effective(item)) {
+      continue;
+    }
+    if (category_item_match_normalized(item, normalized_target, item->space_type)) {
+      return item;
+    }
+  }
+
+  return nullptr;
+}
+
+static const CategoryGlyphItem *category_item_find_override_with_display_name(
+    const ListBase *list, const char *category, int space_type)
+{
+  if (!list || !category_glyph_list_is_valid(list) || !category) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (category_item_match_exact(item, category, space_type) && item->display_name[0] != '\0') {
+      return item;
+    }
+  }
+
+  if (space_type == -1) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (category_item_match_exact(item, category, -1) && item->display_name[0] != '\0') {
+      return item;
+    }
+  }
+
+  return nullptr;
+}
+
+static const char *category_item_display_name_or_default_or_category(const CategoryGlyphItem *item,
+                                                                     const char *category)
+{
+  if (!item) {
+    return category;
+  }
+  if (item->display_name[0] != '\0') {
+    return item->display_name;
+  }
+  if (item->default_display_name[0] != '\0') {
+    return item->default_display_name;
+  }
+  return category;
+}
+
+/** \} */
 
 
 /* -------------------------------------------------------------------- */
@@ -609,69 +967,10 @@ static const char *panel_category_glyph_lookup_apply_fallback(const wmWindowMana
                                                               int space_type);
 
 static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManager *wm,
-                                                            const char *category,
-                                                            int space_type)
+                                                             const char *category,
+                                                             int space_type)
 {
-  if (!wm || !category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-    return nullptr;
-  }
-
-  // First pass: try exact match (category + space_type)
-  for (const CategoryGlyphItem *item =
-           static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-       item;
-       item = static_cast<const CategoryGlyphItem *>(item->next))
-  {
-    if (STREQ(item->category, category) && item->space_type == space_type) {
-      return item;
-    }
-  }
-
-  // Second pass: try global categories (space_type = -1) if not searching for global already
-  if (space_type != -1) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      if (STREQ(item->category, category) && item->space_type == -1) {
-        return item;
-      }
-    }
-  }
-
-  // Third pass: try canonicalization fallback with space_type match
-  const std::string normalized_target = normalize_category_key(category);
-  if (normalized_target.empty()) {
-    return nullptr;
-  }
-
-  for (const CategoryGlyphItem *item =
-           static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-       item;
-       item = static_cast<const CategoryGlyphItem *>(item->next))
-  {
-    const std::string normalized_item = normalize_category_key(item->category);
-    if (normalized_item == normalized_target && item->space_type == space_type) {
-      return item;
-    }
-  }
-
-  // Fourth pass: try canonicalization fallback with global categories
-  if (space_type != -1) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      const std::string normalized_item = normalize_category_key(item->category);
-      if (normalized_item == normalized_target && item->space_type == -1) {
-        return item;
-      }
-    }
-  }
-  
-  return nullptr;
+  return category_item_find_mappings(wm, category, space_type);
 }
 
 /** \} */
@@ -681,133 +980,21 @@ static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManage
  * \{ */
 
 const char *category_tags_string_lookup(const wmWindowManager *wm,
-                                        const char *category,
-                                        int space_type)
+                                         const char *category,
+                                         int space_type)
 {
   if (wm == nullptr || category == nullptr) {
     return "";
   }
 
-  // First pass: try exact match in overrides (category + space_type)
-  if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      if (STREQ(item->category, category) && item->space_type == space_type) {
-        return item->tags;
-      }
-    }
+  // First check overrides with priority order: exact -> global -> normalized exact -> normalized global
+  if (const CategoryGlyphItem *item = category_item_find_overrides(wm, category, space_type)) {
+    return item->tags;
   }
 
-  // Second pass: try global overrides (space_type = -1) if not searching for global already
-  if (space_type != -1) {
-    if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
-      for (const CategoryGlyphItem *item =
-               static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-           item;
-           item = static_cast<const CategoryGlyphItem *>(item->next))
-      {
-        if (STREQ(item->category, category) && item->space_type == -1) {
-          return item->tags;
-        }
-      }
-    }
-  }
-
-  // Third pass: try exact match in mappings (category + space_type)
-  if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      if (STREQ(item->category, category) && item->space_type == space_type) {
-        return item->tags;
-      }
-    }
-  }
-
-  // Fourth pass: try global mappings (space_type = -1) if not searching for global already
-  if (space_type != -1) {
-    if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-      for (const CategoryGlyphItem *item =
-               static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-           item;
-           item = static_cast<const CategoryGlyphItem *>(item->next))
-      {
-        if (STREQ(item->category, category) && item->space_type == -1) {
-          return item->tags;
-        }
-      }
-    }
-  }
-
-  // Fifth pass: try canonicalization fallback with space_type match
-  const std::string normalized_target = normalize_category_key(category);
-  if (normalized_target.empty()) {
-    return "";
-  }
-
-  // Check overrides with canonicalization and space_type
-  if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      const std::string normalized_item = normalize_category_key(item->category);
-      if (normalized_item == normalized_target && item->space_type == space_type) {
-        return item->tags;
-      }
-    }
-  }
-
-  // Check global overrides with canonicalization
-  if (space_type != -1) {
-    if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
-      for (const CategoryGlyphItem *item =
-               static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-           item;
-           item = static_cast<const CategoryGlyphItem *>(item->next))
-      {
-        const std::string normalized_item = normalize_category_key(item->category);
-        if (normalized_item == normalized_target && item->space_type == -1) {
-          return item->tags;
-        }
-      }
-    }
-  }
-
-  // Check mappings with canonicalization and space_type
-  if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      const std::string normalized_item = normalize_category_key(item->category);
-      if (normalized_item == normalized_target && item->space_type == space_type) {
-        return item->tags;
-      }
-    }
-  }
-
-  // Check global mappings with canonicalization
-  if (space_type != -1) {
-    if (category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-      for (const CategoryGlyphItem *item =
-               static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-           item;
-           item = static_cast<const CategoryGlyphItem *>(item->next))
-      {
-        const std::string normalized_item = normalize_category_key(item->category);
-        if (normalized_item == normalized_target && item->space_type == -1) {
-          return item->tags;
-        }
-      }
-    }
+  // Then check mappings with same priority order
+  if (const CategoryGlyphItem *item = category_item_find_mappings(wm, category, space_type)) {
+    return item->tags;
   }
 
   return "";
@@ -918,31 +1105,44 @@ static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
                                                      bool *r_is_reserved,
                                                      eCategoryGlyphBaseSource *r_source_type);
 
-static const char *panel_category_glyph_lookup_override(const wmWindowManager *wm,
-                                                        const char *category,
-                                                        bool *r_is_fallback_letter,
-                                                        float r_color[3],
-                                                        bool *r_handled)
+/**
+ * Internal helper: Process a single CategoryGlyphItem from overrides.
+ * Handles glyph_mode, fallback letter detection, and color extraction.
+ */
+static const char *process_override_glyph_item(const CategoryGlyphItem *item,
+                                               const char *category,
+                                               bool *r_is_fallback_letter,
+                                               float r_color[3],
+                                               bool *r_handled,
+                                               const wmWindowManager *wm,
+                                               int space_type)
 {
-  *r_handled = false;
-
-  if (!(wm && category_glyph_list_is_valid(&wm->category_glyph_overrides))) {
+  if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
+    if (r_color && !is_zero_v3(item->color)) {
+      copy_v3_v3(r_color, item->color);
+    }
+    if (r_is_fallback_letter) {
+      *r_is_fallback_letter = true;
+    }
+    *r_handled = true;
     return nullptr;
   }
 
-  // First pass: try exact match
-  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
-           wm->category_glyph_overrides.first);
-       item;
-       item = static_cast<const CategoryGlyphItem *>(item->next))
-  {
-    if (!STREQ(item->category, category)) {
-      continue;
-    }
+  if (item->glyph[0] != '\0') {
+    /* For glyph_only categories (category name is a glyph), skip fallback letter check.
+     * The glyph equals the category name, which would incorrectly be detected as fallback. */
+    const bool is_glyph_only_category = category_name_is_glyph(category);
+    const bool is_fallback_letter = is_glyph_only_category ?
+                                        false :
+                                        category_tab_glyph_is_fallback_letter(item->glyph, category);
 
-    if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
+    if (is_fallback_letter) {
       if (r_color && !is_zero_v3(item->color)) {
         copy_v3_v3(r_color, item->color);
+      }
+      /* Empty override used for tags only, keep searching mapping/defaults. */
+      if (is_zero_v3(item->color) && item->display_name[0] == '\0') {
+        return nullptr; /* Continue searching */
       }
       if (r_is_fallback_letter) {
         *r_is_fallback_letter = true;
@@ -951,66 +1151,29 @@ static const char *panel_category_glyph_lookup_override(const wmWindowManager *w
       return nullptr;
     }
 
-    if (item->glyph[0] != '\0') {
-      /* For glyph_only categories (category name is a glyph), skip fallback letter check.
-       * The glyph equals the category name, which would incorrectly be detected as fallback. */
-      const bool is_glyph_only_category = category_name_is_glyph(category);
-      const bool is_fallback_letter = is_glyph_only_category ?
-                                          false :
-                                          category_tab_glyph_is_fallback_letter(item->glyph, category);
-
-      if (is_fallback_letter) {
-        if (r_color && !is_zero_v3(item->color)) {
-          copy_v3_v3(r_color, item->color);
-        }
-        /* Empty override used for tags only, keep searching mapping/defaults. */
-        if (is_zero_v3(item->color) && item->display_name[0] == '\0') {
-          continue;
-        }
-        if (r_is_fallback_letter) {
-          *r_is_fallback_letter = true;
-        }
-        *r_handled = true;
-        return nullptr;
-      }
-
-      if (r_color && !is_zero_v3(item->color)) {
-        copy_v3_v3(r_color, item->color);
-      }
-      *r_handled = true;
-      return item->glyph;
-    }
-
-    /* Override has no glyph: may be explicit clear OR tags/color-only carrier.
-     * For text_only/glyph_text categories (default_glyph is empty), this means reset to first letter.
-     * For glyph_only categories (default_glyph is set), continue to mappings to get default.
-     *
-     * Important for glyph-id categories (normalized key can be empty): without this,
-     * color-only overrides are lost in live preview until full restart/resync.
-     */
     if (r_color && !is_zero_v3(item->color)) {
       copy_v3_v3(r_color, item->color);
     }
+    *r_handled = true;
+    return item->glyph;
+  }
 
-    /* Check if this is a text_only/glyph_text category by looking at mappings.
-     * If default_glyph is empty, reset should return first letter (nullptr), not mapping glyph. */
-    bool is_text_based_category = false;
-    for (const CategoryGlyphItem *map_item = static_cast<const CategoryGlyphItem *>(
-             wm->category_glyph_mappings.first);
-         map_item;
-         map_item = static_cast<const CategoryGlyphItem *>(map_item->next))
-    {
-      if (STREQ(map_item->category, category)) {
-        /* If default_glyph is empty, this is a text_only or glyph_text category.
-         * Reset should return first letter, not the glyph from mappings. */
-        if (map_item->default_glyph[0] == '\0') {
-          is_text_based_category = true;
-        }
-        break;
-      }
-    }
+  /* Override has no glyph: may be explicit clear OR tags/color-only carrier.
+   * For text_only/glyph_text categories (default_glyph is empty), this means reset to first letter.
+   * For glyph_only categories (default_glyph is set), continue to mappings to get default.
+   *
+   * Important for glyph-id categories (normalized key can be empty): without this,
+   * color-only overrides are lost in live preview until full restart/resync.
+   */
+  if (r_color && !is_zero_v3(item->color)) {
+    copy_v3_v3(r_color, item->color);
+  }
 
-    if (is_text_based_category) {
+  /* Check if this is a text_only/glyph_text category by looking at mappings.
+   * If default_glyph is empty, reset should return first letter (nullptr), not mapping glyph. */
+  if (const CategoryGlyphItem *map_item = category_glyph_mapping_find(wm, category, space_type)) {
+    /* Treat as true text-only only when both glyph and default_glyph are empty. */
+    if (map_item->default_glyph[0] == '\0' && map_item->glyph[0] == '\0') {
       /* Text-based category with empty override glyph = reset to first letter.
        * Set handled=true to prevent fallback to mappings which would return old glyph.
        * Set is_fallback_letter=true so draw code knows to use first letter. */
@@ -1020,98 +1183,33 @@ static const char *panel_category_glyph_lookup_override(const wmWindowManager *w
       *r_handled = true;
       return nullptr;
     }
-
-    break;
   }
 
-  // Second pass: try canonicalization fallback
-  const std::string normalized_target = normalize_category_key(category);
-  if (!normalized_target.empty()) {
-    for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
-             wm->category_glyph_overrides.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      const std::string normalized_item = normalize_category_key(item->category);
-      if (normalized_item != normalized_target) {
-        continue;
-      }
+  return nullptr; /* Continue to mappings */
+}
 
-    if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
-      if (r_color && !is_zero_v3(item->color)) {
-        copy_v3_v3(r_color, item->color);
-      }
-      if (r_is_fallback_letter) {
-        *r_is_fallback_letter = true;
-      }
-      *r_handled = true;
-      return nullptr;
+static const char *panel_category_glyph_lookup_override(const wmWindowManager *wm,
+                                                         const char *category,
+                                                         bool *r_is_fallback_letter,
+                                                         float r_color[3],
+                                                         bool *r_handled,
+                                                         int space_type)
+{
+  *r_handled = false;
+
+  if (!wm) {
+    return nullptr;
+  }
+
+  // First try exact match, then normalized match using unified helper
+  if (const CategoryGlyphItem *item = category_item_find_overrides(wm, category, space_type))
+  {
+    const char *result = process_override_glyph_item(
+        item, category, r_is_fallback_letter, r_color, r_handled, wm, space_type);
+    if (*r_handled || result) {
+      return result;
     }
-
-    if (item->glyph[0] != '\0') {
-      /* For glyph_only categories (category name is a glyph), skip fallback letter check.
-       * The glyph equals the category name, which would incorrectly be detected as fallback. */
-      const bool is_glyph_only_category = category_name_is_glyph(category);
-      const bool is_fallback_letter = is_glyph_only_category ?
-                                          false :
-                                          category_tab_glyph_is_fallback_letter(item->glyph, category);
-
-      if (is_fallback_letter) {
-        if (r_color && !is_zero_v3(item->color)) {
-          copy_v3_v3(r_color, item->color);
-        }
-        /* Empty override used for tags only, keep searching mapping/defaults. */
-        if (is_zero_v3(item->color) && item->display_name[0] == '\0') {
-          continue;
-        }
-        if (r_is_fallback_letter) {
-          *r_is_fallback_letter = true;
-        }
-        *r_handled = true;
-        return nullptr;
-      }
-
-      if (r_color) {
-        copy_v3_v3(r_color, item->color);
-      }
-      *r_handled = true;
-      return item->glyph;
-    }
-
-    /* Override has no glyph: may be explicit clear OR tags-only carrier.
-     * For text_only/glyph_text categories, this means reset to first letter. */
-    if (r_color && !is_zero_v3(item->color)) {
-      copy_v3_v3(r_color, item->color);
-    }
-
-    /* Check if this is a text_only/glyph_text category by looking at mappings.
-     * If default_glyph is empty, reset should return first letter, not mapping glyph. */
-    bool is_text_based_category = false;
-    for (const CategoryGlyphItem *map_item = static_cast<const CategoryGlyphItem *>(
-             wm->category_glyph_mappings.first);
-         map_item;
-         map_item = static_cast<const CategoryGlyphItem *>(map_item->next))
-    {
-      if (STREQ(map_item->category, category)) {
-        if (map_item->default_glyph[0] == '\0') {
-          is_text_based_category = true;
-        }
-        break;
-      }
-    }
-
-    if (is_text_based_category) {
-      /* Text-based category with empty override glyph = reset to first letter.
-       * Set is_fallback_letter=true so draw code knows to use first letter. */
-      if (r_is_fallback_letter) {
-        *r_is_fallback_letter = true;
-      }
-      *r_handled = true;
-      return nullptr;
-    }
-
-    break;
-    }
+    /* Continue searching if process_override_glyph_item returned nullptr without setting handled */
   }
 
   return nullptr;
@@ -1209,7 +1307,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
 
   bool handled = false;
   if (const char *override_glyph = panel_category_glyph_lookup_override(
-          wm, category, r_is_fallback_letter, r_color, &handled))
+          wm, category, r_is_fallback_letter, r_color, &handled, space_type))
   {
     return override_glyph;
   }
@@ -1229,31 +1327,7 @@ const char *panel_category_glyph_lookup(const wmWindowManager *wm,
   /* 3. Check PanelType.icon_glyph. */
   if (panel_type && panel_type->icon_glyph && panel_type->icon_glyph[0]) {
     if (r_color && is_zero_v3(r_color)) {
-      if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
-        for (const CategoryGlyphItem *item =
-                 static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-             item;
-             item = static_cast<const CategoryGlyphItem *>(item->next))
-        {
-          if (STREQ(item->category, category) && !is_zero_v3(item->color)) {
-            copy_v3_v3(r_color, item->color);
-            break;
-          }
-        }
-      }
-      if (is_zero_v3(r_color) && wm &&
-          category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-        for (const CategoryGlyphItem *item =
-                 static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-             item;
-             item = static_cast<const CategoryGlyphItem *>(item->next))
-        {
-          if (STREQ(item->category, category) && !is_zero_v3(item->color)) {
-            copy_v3_v3(r_color, item->color);
-            break;
-          }
-        }
-      }
+      panel_category_color_lookup(wm, category, r_color);
     }
     return panel_type->icon_glyph;
   }
@@ -1294,35 +1368,11 @@ static void panel_category_color_lookup(const wmWindowManager *wm,
     return;
   }
 
-  if (category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
-    for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
-             wm->category_glyph_overrides.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      if (STREQ(item->category, category) && !is_zero_v3(item->color)) {
-        copy_v3_v3(r_color, item->color);
-        return;
-      }
-    }
-
-    const std::string normalized_target = normalize_category_key(category);
-    if (!normalized_target.empty()) {
-      for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
-               wm->category_glyph_overrides.first);
-           item;
-           item = static_cast<const CategoryGlyphItem *>(item->next))
-      {
-        if (is_zero_v3(item->color)) {
-          continue;
-        }
-        const std::string normalized_item = normalize_category_key(item->category);
-        if (normalized_item == normalized_target) {
-          copy_v3_v3(r_color, item->color);
-          return;
-        }
-      }
-    }
+  if (const CategoryGlyphItem *item = category_item_find_with_color_any_space(
+          &wm->category_glyph_overrides, category))
+  {
+    copy_v3_v3(r_color, item->color);
+    return;
   }
 
   if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category)) {
@@ -1350,50 +1400,13 @@ static bool panel_category_icon_data_lookup(const wmWindowManager *wm,
     r_icon->provider = item->icon_provider;
   };
 
-  const auto override_icon_is_effective = [](const CategoryGlyphItem *item) {
-    const bool has_icon_payload = (item->icon_key[0] != '\0') || (item->icon_path[0] != '\0') ||
-                                  (item->icon_provider[0] != '\0');
-    const bool has_explicit_icon_mode = ELEM(
-        item->icon_source, CATEGORY_TAB_ICON_SOURCE_MANUAL, CATEGORY_TAB_ICON_SOURCE_OFF);
-
-    /* Important: override entries are often created for glyph/color/tag edits.
-     * If an AUTO override has no icon payload, don't mask JSON mapping icon data. */
-    return has_icon_payload || has_explicit_icon_mode;
-  };
-
   /* 1) User overrides. */
-  if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
+  if (wm) {
+    if (const CategoryGlyphItem *item = category_item_find_with_effective_icon_any_space(
+            &wm->category_glyph_overrides, category))
     {
-      if (!STREQ(item->category, category) || !override_icon_is_effective(item)) {
-        continue;
-      }
       icon_data_copy_from_item(item);
       return true;
-    }
-
-    const std::string normalized_target = normalize_category_key(category);
-    if (!normalized_target.empty()) {
-      for (const CategoryGlyphItem *item =
-               static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-           item;
-           item = static_cast<const CategoryGlyphItem *>(item->next))
-      {
-        if (!override_icon_is_effective(item)) {
-          continue;
-        }
-
-        const std::string normalized_item = normalize_category_key(item->category);
-        if (normalized_item != normalized_target) {
-          continue;
-        }
-
-        icon_data_copy_from_item(item);
-        return true;
-      }
     }
   }
 
@@ -1475,29 +1488,12 @@ static const char *panel_category_display_name_lookup(const wmWindowManager *wm,
   }
 
   /* 1. Check user overrides first (prefer requested space, then GLOBAL fallback). */
-  const CategoryGlyphItem *global_override = nullptr;
-  if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
+  if (wm) {
+    if (const CategoryGlyphItem *item = category_item_find_override_with_display_name(
+            &wm->category_glyph_overrides, category, space_type))
     {
-      if (!STREQ(item->category, category)) {
-        continue;
-      }
-      if (item->space_type == space_type && item->display_name[0] != '\0') {
-        return item->display_name;
-      }
-      if (space_type != -1 && item->space_type == -1 && item->display_name[0] != '\0' &&
-          global_override == nullptr)
-      {
-        global_override = item;
-      }
+      return item->display_name;
     }
-  }
-
-  if (global_override) {
-    return global_override->display_name;
   }
 
   /* 2. Check mappings with per-space lookup semantics. */
@@ -1548,46 +1544,22 @@ const char *panel_category_tooltip_name_get(const ARegion *region,
                                              const char *category_idname)
 {
   /* 1. Check user overrides first. If category is in overrides and has display_name, use it. */
-  if (wm && category_glyph_list_is_valid(&wm->category_glyph_overrides)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
+  if (wm) {
+    if (const CategoryGlyphItem *item = category_item_find_exact_any_space(
+            &wm->category_glyph_overrides, category_idname))
     {
-      if (STREQ(item->category, category_idname)) {
-        if (item->display_name[0] != '\0') {
-          return item->display_name;
-        }
-        /* Category is in overrides but display_name is empty - try default_display_name. */
-        if (item->default_display_name[0] != '\0') {
-          return item->default_display_name;
-        }
-        /* Both display_name and default_display_name are empty - use category name. */
-        return category_idname;
-      }
+      return category_item_display_name_or_default_or_category(item, category_idname);
     }
   }
 
   /* 2. Check global mappings. If category is in mappings and has display_name, use it. */
   bool found_in_mappings = false;
-  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
+  if (wm) {
+    if (const CategoryGlyphItem *item = category_item_find_exact_any_space(
+            &wm->category_glyph_mappings, category_idname))
     {
-      if (STREQ(item->category, category_idname)) {
-        found_in_mappings = true;
-        if (item->display_name[0] != '\0') {
-          return item->display_name;
-        }
-        /* Category is in mappings but display_name is empty - try default_display_name. */
-        if (item->default_display_name[0] != '\0') {
-          return item->default_display_name;
-        }
-        /* Both display_name and default_display_name are empty - use category name. */
-        return category_idname;
-      }
+      found_in_mappings = true;
+      return category_item_display_name_or_default_or_category(item, category_idname);
     }
   }
 
@@ -2441,6 +2413,615 @@ static void save_category_order_to_json(const bContext *C,
 
 /* Forward declaration */
 Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region);
+
+static void category_order_pending_insert_expired_clear_if_needed(const std::string &tag_key)
+{
+  if (!(g_pending_category_insert.valid && g_pending_category_insert.tag_key == tag_key)) {
+    return;
+  }
+
+  const double time_since_pending = BLI_time_now_seconds() - g_pending_category_insert.timestamp;
+  if (time_since_pending > 120.0) {
+    g_pending_category_insert.valid = false;
+    g_pending_category_insert.all_existing_categories.clear();
+  }
+}
+
+static Map<std::string, PanelCategoryDyn *> collect_visible_existing_categories(const bContext *C,
+                                                                                const wmWindowManager *wm,
+                                                                                ARegion *region)
+{
+  Map<std::string, PanelCategoryDyn *> existing;
+  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
+      existing.add(std::string(pc_dyn.idname), &pc_dyn);
+    }
+  }
+  return existing;
+}
+
+static Vector<PanelCategoryDyn *> collect_visible_remaining_categories(const bContext *C,
+                                                                       const wmWindowManager *wm,
+                                                                       ARegion *region,
+                                                                       const Set<std::string> &added)
+{
+  Vector<PanelCategoryDyn *> remaining;
+  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    std::string id(pc_dyn.idname);
+    if (!added.contains(id) && panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
+      remaining.append(&pc_dyn);
+    }
+  }
+  return remaining;
+}
+
+static void apply_json_order(const Vector<std::string> &json_order,
+                             const Map<std::string, PanelCategoryDyn *> &existing,
+                             Vector<PanelCategoryDyn *> &r_result,
+                             Set<std::string> &r_added)
+{
+  for (const std::string &cat_id : json_order) {
+    PanelCategoryDyn *const *pc = existing.lookup_ptr(cat_id);
+    if (pc && !r_added.contains(cat_id)) {
+      r_result.append(*pc);
+      r_added.add(cat_id);
+    }
+  }
+}
+
+static const char *space_type_name_resolve(const ScrArea *area)
+{
+  if (!area) {
+    return "DEFAULT";
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D:
+      return "VIEW_3D";
+    case SPACE_PROPERTIES:
+      return "PROPERTIES";
+    case SPACE_NODE:
+      return "NODE_EDITOR";
+    case SPACE_IMAGE:
+      return "IMAGE_EDITOR";
+    case SPACE_SEQ:
+      return "SEQUENCE_EDITOR";
+    case SPACE_CLIP:
+      return "CLIP_EDITOR";
+    case SPACE_TEXT:
+      return "TEXT_EDITOR";
+    case SPACE_ACTION:
+      return "DOPESHEET_EDITOR";
+    case SPACE_GRAPH:
+      return "GRAPH_EDITOR";
+    case SPACE_NLA:
+      return "NLA_EDITOR";
+    default:
+      return "DEFAULT";
+  }
+}
+
+static void append_remaining_categories_with_reserved_priority(
+    const bContext *C,
+    const wmWindowManager *wm,
+    const char *space_type_name,
+    const Vector<PanelCategoryDyn *> &remaining,
+    Vector<PanelCategoryDyn *> &r_result,
+    Set<std::string> &r_added)
+{
+  Vector<PanelCategoryDyn *> remaining_reserved;
+  Vector<PanelCategoryDyn *> remaining_non_reserved;
+
+  for (PanelCategoryDyn *pc_dyn : remaining) {
+    const std::string id(pc_dyn->idname);
+    if (!r_added.contains(id)) {
+      if (category_is_reserved_for_reorder(wm, pc_dyn->idname)) {
+        remaining_reserved.append(pc_dyn);
+      }
+      else {
+        remaining_non_reserved.append(pc_dyn);
+      }
+    }
+  }
+
+  std::sort(remaining_reserved.begin(),
+            remaining_reserved.end(),
+            [&](PanelCategoryDyn *a, PanelCategoryDyn *b) {
+              return compare_reserved_categories_by_priority(C, a->idname, b->idname, space_type_name);
+            });
+
+  for (PanelCategoryDyn *pc_dyn : remaining_reserved) {
+    r_result.append(pc_dyn);
+    r_added.add(pc_dyn->idname);
+  }
+  for (PanelCategoryDyn *pc_dyn : remaining_non_reserved) {
+    r_result.append(pc_dyn);
+    r_added.add(pc_dyn->idname);
+  }
+}
+
+static void normalize_reserved_boundary_order(const bContext *C,
+                                             const wmWindowManager *wm,
+                                             const char *space_type_name,
+                                             Vector<std::string> &order)
+{
+  Vector<std::string> reserved;
+  Vector<std::string> non_reserved;
+  reserved.reserve(order.size());
+  non_reserved.reserve(order.size());
+
+  for (const std::string &category_id : order) {
+    if (category_is_reserved_for_reorder(wm, category_id.c_str())) {
+      reserved.append(category_id);
+    }
+    else {
+      non_reserved.append(category_id);
+    }
+  }
+
+  std::sort(reserved.begin(), reserved.end(), [&](const std::string &a, const std::string &b) {
+    return compare_reserved_categories_by_priority(C, a.c_str(), b.c_str(), space_type_name);
+  });
+
+  order.clear();
+  order.reserve(reserved.size() + non_reserved.size());
+  for (const std::string &category_id : reserved) {
+    order.append(category_id);
+  }
+  for (const std::string &category_id : non_reserved) {
+    order.append(category_id);
+  }
+}
+
+static void apply_pending_insert(const bContext *C,
+                                 const wmWindowManager *wm,
+                                 ARegion *region,
+                                 const std::string &tag_key,
+                                 const Vector<std::string> &json_order,
+                                 const Map<std::string, PanelCategoryDyn *> &existing,
+                                 Vector<PanelCategoryDyn *> &r_result,
+                                 Set<std::string> &r_added,
+                                 Vector<PanelCategoryDyn *> &r_remaining,
+                                 bool &r_pending_applied,
+                                 Vector<std::string> &r_pending_inserted_ids)
+{
+  if (!(g_pending_category_insert.valid && g_pending_category_insert.tag_key == tag_key)) {
+    return;
+  }
+
+  Vector<PanelCategoryDyn *> appeared_categories;
+  printf("[GET_ORDERED] all_existing_categories.size()=%zu, existing_categories.size()=%zu, g_known_categories_before_extension_drop.size()=%zu\n",
+         g_pending_category_insert.all_existing_categories.size(),
+         g_pending_category_insert.existing_categories.size(),
+         g_known_categories_before_extension_drop.size());
+  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    /* IMPORTANT: Do NOT filter new extension categories through panel_category_is_visible_by_tags!
+     * New extension categories may not have tags assigned yet, which would cause them to be
+     * filtered out when tag filter is active. Extension categories must be discoverable
+     * regardless of tag filter state so they can be positioned and activated.
+     *
+     * Use g_pending_category_insert.all_existing_categories when available (extension drop case),
+     * as it contains ALL categories from the region, not just filtered ones.
+     * This prevents existing categories without the active tag from being incorrectly
+     * detected as "new" when an extension is dropped with an active tag filter.
+     *
+     * Fallback to g_known_categories_before_extension_drop for backwards compatibility,
+     * and finally to existing_categories (filtered) if neither is available. */
+    const bool use_full_category_list = !g_pending_category_insert.all_existing_categories.is_empty() ||
+                                        !g_known_categories_before_extension_drop.is_empty();
+    const bool is_new_category = !g_pending_category_insert.all_existing_categories.is_empty() ?
+                                     !g_pending_category_insert.all_existing_categories.contains(
+                                         std::string(pc_dyn.idname)) :
+                                     (!g_known_categories_before_extension_drop.is_empty() ?
+                                          !g_known_categories_before_extension_drop.contains(
+                                              std::string(pc_dyn.idname)) :
+                                          !g_pending_category_insert.existing_categories.contains(
+                                              std::string(pc_dyn.idname)));
+    printf("[GET_ORDERED]   cat='%s' use_full=%d is_new=%d\n",
+           pc_dyn.idname,
+           use_full_category_list,
+           is_new_category);
+    if (!is_new_category && !panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
+      continue;
+    }
+    if (is_new_category) {
+      appeared_categories.append(&pc_dyn);
+    }
+  }
+
+  if (appeared_categories.is_empty()) {
+    return;
+  }
+
+  Set<std::string> appeared_ids;
+  for (PanelCategoryDyn *pc_dyn : appeared_categories) {
+    appeared_ids.add(std::string(pc_dyn->idname));
+  }
+
+  for (int i = r_result.size() - 1; i >= 0; i--) {
+    const std::string id(r_result[i]->idname);
+    if (appeared_ids.contains(id)) {
+      r_result.remove_and_reorder(i);
+      r_added.remove(id);
+    }
+  }
+
+  for (int i = r_remaining.size() - 1; i >= 0; i--) {
+    const std::string id(r_remaining[i]->idname);
+    if (appeared_ids.contains(id)) {
+      r_remaining.remove_and_reorder(i);
+    }
+  }
+
+  auto find_index_in_result = [&](const std::string &id) -> int {
+    if (id.empty()) {
+      return -1;
+    }
+    for (int i = 0; i < r_result.size(); i++) {
+      if (STREQ(r_result[i]->idname, id.c_str())) {
+        return i;
+      }
+    }
+    return -1;
+  };
+
+  int insert_index = -1;
+  if (!g_pending_category_insert.anchor_after.empty()) {
+    insert_index = find_index_in_result(g_pending_category_insert.anchor_after);
+  }
+  if (insert_index == -1 && !g_pending_category_insert.anchor_before.empty()) {
+    const int before_index = find_index_in_result(g_pending_category_insert.anchor_before);
+    if (before_index != -1) {
+      insert_index = before_index + 1;
+    }
+  }
+  if (insert_index == -1) {
+    const int target_index = find_index_in_result(g_pending_category_insert.target_category);
+    if (target_index != -1) {
+      insert_index = g_pending_category_insert.insert_above ? target_index : (target_index + 1);
+    }
+  }
+  if (insert_index == -1) {
+    insert_index = r_result.size();
+  }
+  insert_index = clamp_i(insert_index, 0, r_result.size());
+
+  Vector<PanelCategoryDyn *> appeared_ordered;
+  appeared_ordered.reserve(appeared_categories.size());
+  Set<std::string> ordered_ids;
+  for (const std::string &cat_id : json_order) {
+    if (!appeared_ids.contains(cat_id) || ordered_ids.contains(cat_id)) {
+      continue;
+    }
+    PanelCategoryDyn *const *pc = existing.lookup_ptr(cat_id);
+    if (pc) {
+      appeared_ordered.append(*pc);
+      ordered_ids.add(cat_id);
+    }
+  }
+  for (PanelCategoryDyn *pc_dyn : appeared_categories) {
+    const std::string id(pc_dyn->idname);
+    if (!ordered_ids.contains(id)) {
+      appeared_ordered.append(pc_dyn);
+      ordered_ids.add(id);
+    }
+  }
+
+  int insert_offset = 0;
+  for (PanelCategoryDyn *pc_dyn : appeared_ordered) {
+    const std::string id(pc_dyn->idname);
+    if (!r_added.contains(id)) {
+      r_result.insert(insert_index + insert_offset, pc_dyn);
+      insert_offset++;
+      r_added.add(id);
+      r_pending_inserted_ids.append(id);
+    }
+  }
+
+  if (!r_pending_inserted_ids.is_empty()) {
+    r_pending_applied = true;
+    category_tabs_report_new_categories(C, r_pending_inserted_ids);
+  }
+}
+
+static void normalize_runtime_result_reserved_first(const bContext *C,
+                                                    const wmWindowManager *wm,
+                                                    const char *space_type_name,
+                                                    Vector<PanelCategoryDyn *> &r_result)
+{
+  Vector<PanelCategoryDyn *> reserved_sorted;
+  Vector<PanelCategoryDyn *> non_reserved_ordered;
+  reserved_sorted.reserve(r_result.size());
+  non_reserved_ordered.reserve(r_result.size());
+
+  for (PanelCategoryDyn *pc_dyn : r_result) {
+    if (category_is_reserved_for_reorder(wm, pc_dyn->idname)) {
+      reserved_sorted.append(pc_dyn);
+    }
+    else {
+      non_reserved_ordered.append(pc_dyn);
+    }
+  }
+
+  std::sort(reserved_sorted.begin(), reserved_sorted.end(), [&](PanelCategoryDyn *a, PanelCategoryDyn *b) {
+    return compare_reserved_categories_by_priority(C, a->idname, b->idname, space_type_name);
+  });
+
+  Vector<PanelCategoryDyn *> normalized;
+  normalized.reserve(r_result.size());
+  for (PanelCategoryDyn *pc_dyn : reserved_sorted) {
+    normalized.append(pc_dyn);
+  }
+  for (PanelCategoryDyn *pc_dyn : non_reserved_ordered) {
+    normalized.append(pc_dyn);
+  }
+
+  r_result = std::move(normalized);
+}
+
+static Vector<std::string> build_pending_order_after_insert(const bContext *C,
+                                                            const wmWindowManager *wm,
+                                                            const char *space_type_name,
+                                                            const std::string &tag_key,
+                                                            const Vector<std::string> &json_order,
+                                                            const Vector<PanelCategoryDyn *> &result,
+                                                            const Vector<std::string> &pending_inserted_ids)
+{
+  Vector<std::string> pending_order = json_order;
+  if (pending_order.is_empty()) {
+    pending_order = g_pending_category_insert.pre_order;
+  }
+
+  if (pending_order.is_empty()) {
+    Vector<std::string> from_result;
+    from_result.reserve(result.size());
+    for (PanelCategoryDyn *pc_dyn : result) {
+      from_result.append(pc_dyn->idname);
+    }
+    normalize_reserved_boundary_order(C, wm, space_type_name, from_result);
+    pending_order = std::move(from_result);
+  }
+  else if (category_order_is_crossing_reserved_boundary(wm, pending_order)) {
+    normalize_reserved_boundary_order(C, wm, space_type_name, pending_order);
+  }
+
+  auto find_index_in_order = [&](const std::string &id) -> int {
+    if (id.empty()) {
+      return -1;
+    }
+    for (int i = 0; i < pending_order.size(); i++) {
+      if (STREQ(pending_order[i].c_str(), id.c_str())) {
+        return i;
+      }
+    }
+    return -1;
+  };
+
+  auto erase_first_in_order = [&](const std::string &id) {
+    const int idx = find_index_in_order(id);
+    if (idx != -1) {
+      pending_order.remove_and_reorder(idx);
+    }
+  };
+
+  int order_insert_index = -1;
+  if (!g_pending_category_insert.anchor_after.empty()) {
+    order_insert_index = find_index_in_order(g_pending_category_insert.anchor_after);
+  }
+  if (order_insert_index == -1 && !g_pending_category_insert.anchor_before.empty()) {
+    const int before_index = find_index_in_order(g_pending_category_insert.anchor_before);
+    if (before_index != -1) {
+      order_insert_index = before_index + 1;
+    }
+  }
+  if (order_insert_index == -1) {
+    const int target_index = find_index_in_order(g_pending_category_insert.target_category);
+    if (target_index != -1) {
+      order_insert_index = g_pending_category_insert.insert_above ? target_index : (target_index + 1);
+    }
+  }
+  if (order_insert_index == -1) {
+    order_insert_index = pending_order.size();
+  }
+
+  order_insert_index = clamp_i(order_insert_index, 0, pending_order.size());
+
+  for (const std::string &id : pending_inserted_ids) {
+    erase_first_in_order(id);
+  }
+
+  int order_offset = 0;
+  for (const std::string &id : pending_inserted_ids) {
+    pending_order.insert(order_insert_index + order_offset, id);
+    order_offset++;
+  }
+
+  if (!tag_key.empty() && tag_key.back() != ':') {
+    Vector<std::string> filtered_order;
+    Set<std::string> inserted_set;
+    for (const std::string &id : pending_inserted_ids) {
+      inserted_set.add(id);
+    }
+    for (const std::string &cat_id : pending_order) {
+      const bool is_reserved = category_is_reserved_for_reorder(wm, cat_id.c_str());
+      const bool is_newly_inserted = inserted_set.contains(cat_id);
+      const bool passes_tag_filter = panel_category_is_visible_by_tags(C, wm, cat_id.c_str());
+      if (is_reserved || is_newly_inserted || passes_tag_filter) {
+        filtered_order.append(cat_id);
+      }
+    }
+    pending_order = std::move(filtered_order);
+  }
+
+  normalize_reserved_boundary_order(C, wm, space_type_name, pending_order);
+  return pending_order;
+}
+
+static void persist_pending_order(const bContext *C,
+                                  ARegion *region,
+                                  const std::string &tag_key,
+                                  const Vector<std::string> &pending_order)
+{
+  save_category_order_to_json(C, tag_key.c_str(), pending_order);
+
+  ScrArea *save_area = CTX_wm_area(C);
+  const int save_space_type = save_area ? save_area->spacetype : 0;
+  const int save_region_type = region->regiontype;
+  WorkSpace *save_workspace = CTX_wm_workspace(C);
+  if (!save_workspace) {
+    return;
+  }
+
+  workspace_category_order_clear(save_workspace, save_space_type, save_region_type);
+  for (int i = 0; i < pending_order.size(); i++) {
+    WorkspaceCategoryOrder *item = MEM_new<WorkspaceCategoryOrder>(__func__);
+    item->space_type = save_space_type;
+    item->region_type = save_region_type;
+    STRNCPY(item->category_id, pending_order[i].c_str());
+    item->order_index = i;
+    BLI_addtail(&save_workspace->category_order, item);
+  }
+  WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
+}
+
+static void pending_insert_state_transfer_to_deferred_activation()
+{
+  /* Copy pending insert position to deferred activation BEFORE clearing it.
+   * This ensures the insert position is preserved for deferred_category_activation_execute. */
+  if (g_pending_category_insert.valid) {
+    g_deferred_category_activation.pending_insert_valid = true;
+    g_deferred_category_activation.pending_insert_tag_key = g_pending_category_insert.tag_key;
+    g_deferred_category_activation.pending_insert_anchor_before = g_pending_category_insert.anchor_before;
+    g_deferred_category_activation.pending_insert_anchor_after = g_pending_category_insert.anchor_after;
+    g_deferred_category_activation.pending_insert_target_category =
+        g_pending_category_insert.target_category;
+    g_deferred_category_activation.pending_insert_insert_above =
+        g_pending_category_insert.insert_above;
+    printf("[CATEGORY ORDER] Copied pending insert to deferred activation: tag_key='%s', anchor_before='%s', anchor_after='%s'\n",
+           g_pending_category_insert.tag_key.c_str(),
+           g_pending_category_insert.anchor_before.c_str(),
+           g_pending_category_insert.anchor_after.c_str());
+  }
+  else {
+    printf("[CATEGORY ORDER] g_pending_category_insert.valid is FALSE - no position to copy!\n");
+  }
+  fflush(stdout);
+
+  g_pending_category_insert.valid = false;
+  g_pending_category_insert.all_existing_categories.clear();
+}
+
+static void schedule_activation_for_pending_inserted_categories(
+    const bContext *C,
+    ARegion *region,
+    const wmWindowManager *wm,
+    const ScrArea *area,
+    const Vector<std::string> &pending_inserted_ids)
+{
+  printf("[CATEGORY ACTIVATE] pending_inserted_ids count: %zu\n", pending_inserted_ids.size());
+  if (pending_inserted_ids.is_empty()) {
+    printf("[CATEGORY ACTIVATE] Activation block completed\n");
+    return;
+  }
+
+  for (const std::string &category_id : pending_inserted_ids) {
+    printf("[CATEGORY ACTIVATE] Checking category: '%s'\n", category_id.c_str());
+
+    register_new_extension_category(C,
+                                    category_id.c_str(),
+                                    g_pending_category_insert.source_extension_id.c_str(),
+                                    area ? area->spacetype : -1,
+                                    get_current_tag_mode_flag(C),
+                                    /*tag_already_assigned=*/false);
+    printf("[CATEGORY ACTIVATE]   Registered as pending extension category\n");
+
+    const bool is_visible = panel_category_is_visible_by_tags(C, wm, category_id.c_str());
+    printf("[CATEGORY ACTIVATE]   is_visible: %s\n", is_visible ? "true" : "false");
+
+    if (!is_visible) {
+      continue;
+    }
+
+    const char *current_active = panel_category_active_get(region, false);
+    printf("[CATEGORY ACTIVATE]   current_active: '%s'\n", current_active ? current_active : "(null)");
+
+    const bool should_activate = (current_active == nullptr || !STREQ(category_id.c_str(), current_active));
+    printf("[CATEGORY ACTIVATE]   should_activate: %s\n", should_activate ? "true" : "false");
+
+    if (should_activate) {
+      printf("[CATEGORY ACTIVATE]   Deferring activation for: '%s' (3 frame delay)\n",
+             category_id.c_str());
+
+      bool already_has_category = !g_deferred_category_activation.category_id.empty();
+      bool signal_already_received = g_deferred_category_activation.extension_signal_received;
+      bool already_waiting_for_signal = g_deferred_category_activation.wait_for_extension_signal;
+
+      if (already_has_category) {
+        printf("[CATEGORY ACTIVATE]   Skipping - category already set: '%s'\n",
+               g_deferred_category_activation.category_id.c_str());
+        break;
+      }
+
+      g_deferred_category_activation.category_id = category_id;
+      g_deferred_category_activation.valid = true;
+      g_deferred_category_activation.timestamp = BLI_time_now_seconds();
+      g_deferred_category_activation.frame_delay = 3;
+
+      if (!signal_already_received && !already_waiting_for_signal) {
+        g_deferred_category_activation.wait_for_extension_signal = true;
+        g_deferred_category_activation.extension_signal_received = false;
+      }
+      printf("[CATEGORY ACTIVATE]   signal_already_received: %s, already_waiting: %s\n",
+             signal_already_received ? "true" : "false",
+             already_waiting_for_signal ? "true" : "false");
+
+      blender::ui::TagFilterStateRef tag_state{};
+      ScrArea *area_for_tag = CTX_wm_area(C);
+      if (blender::ui::tag_filter_state_from_area(area_for_tag, &tag_state) && tag_state.active_tags) {
+        char tag_key_buf[256];
+        blender::ui::tag_build_combination_key(tag_state.active_tags, tag_key_buf, sizeof(tag_key_buf));
+        g_deferred_category_activation.tag_key = tag_key_buf;
+      }
+      else {
+        g_deferred_category_activation.tag_key.clear();
+      }
+      printf("[CATEGORY ACTIVATE]   Deferred activation scheduled\n");
+    }
+
+    printf("[CATEGORY ACTIVATE]   Breaking loop after first visible category\n");
+    break;
+  }
+
+  printf("[CATEGORY ACTIVATE] Activation block completed\n");
+}
+
+static void autosave_initial_order_if_needed(const bContext *C,
+                                             const wmWindowManager *wm,
+                                             const char *space_type_name,
+                                             const std::string &tag_key,
+                                             const Vector<std::string> &json_order,
+                                             const Vector<PanelCategoryDyn *> &result)
+{
+  if (!json_order.is_empty() || result.is_empty()) {
+    return;
+  }
+
+  Vector<std::string> initial_order;
+  initial_order.reserve(result.size());
+  for (PanelCategoryDyn *pc_dyn : result) {
+    initial_order.append(pc_dyn->idname);
+  }
+
+  normalize_reserved_boundary_order(C, wm, space_type_name, initial_order);
+
+  if (!category_order_is_crossing_reserved_boundary(wm, initial_order)) {
+    save_category_order_to_json(C, tag_key.c_str(), initial_order);
+    printf("[CATEGORY ORDER] Auto-saved initial order for tag_key='%s' with %zu categories\n",
+           tag_key.c_str(),
+           initial_order.size());
+  }
+}
 
 static int calculate_insert_index(const bContext *C,
                                   ARegion *region,
@@ -3490,6 +4071,84 @@ void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *regio
   }
 }
 
+struct CategoryOrderPipelineState {
+  Map<std::string, PanelCategoryDyn *> existing;
+  Vector<PanelCategoryDyn *> result;
+  Set<std::string> added;
+  Vector<PanelCategoryDyn *> remaining;
+  bool pending_applied = false;
+  Vector<std::string> pending_inserted_ids;
+};
+
+struct CategoryOrderPipelineContext {
+  const bContext *C;
+  const wmWindowManager *wm;
+  ARegion *region;
+  ScrArea *area;
+  const std::string *tag_key;
+  const Vector<std::string> *json_order;
+  const char *space_type_name;
+};
+
+static CategoryOrderPipelineState category_order_stage_collect(
+    const CategoryOrderPipelineContext &ctx)
+{
+  CategoryOrderPipelineState state{};
+
+  state.existing = collect_visible_existing_categories(ctx.C, ctx.wm, ctx.region);
+  apply_json_order(*ctx.json_order, state.existing, state.result, state.added);
+  state.remaining = collect_visible_remaining_categories(ctx.C, ctx.wm, ctx.region, state.added);
+
+  return state;
+}
+
+static void category_order_stage_apply(const CategoryOrderPipelineContext &ctx,
+                                       CategoryOrderPipelineState &r_state)
+{
+  apply_pending_insert(ctx.C,
+                       ctx.wm,
+                       ctx.region,
+                       *ctx.tag_key,
+                       *ctx.json_order,
+                       r_state.existing,
+                       r_state.result,
+                       r_state.added,
+                       r_state.remaining,
+                       r_state.pending_applied,
+                       r_state.pending_inserted_ids);
+
+  append_remaining_categories_with_reserved_priority(
+      ctx.C, ctx.wm, ctx.space_type_name, r_state.remaining, r_state.result, r_state.added);
+
+  normalize_runtime_result_reserved_first(ctx.C, ctx.wm, ctx.space_type_name, r_state.result);
+}
+
+static void category_order_stage_persist(const CategoryOrderPipelineContext &ctx,
+                                         CategoryOrderPipelineState &r_state)
+{
+  if (r_state.pending_applied) {
+    Vector<std::string> pending_order = build_pending_order_after_insert(
+        ctx.C,
+        ctx.wm,
+        ctx.space_type_name,
+        *ctx.tag_key,
+        *ctx.json_order,
+        r_state.result,
+        r_state.pending_inserted_ids);
+
+    if (!category_order_is_crossing_reserved_boundary(ctx.wm, pending_order)) {
+      persist_pending_order(ctx.C, ctx.region, *ctx.tag_key, pending_order);
+    }
+
+    pending_insert_state_transfer_to_deferred_activation();
+    schedule_activation_for_pending_inserted_categories(
+        ctx.C, ctx.region, ctx.wm, ctx.area, r_state.pending_inserted_ids);
+  }
+
+  autosave_initial_order_if_needed(
+      ctx.C, ctx.wm, ctx.space_type_name, *ctx.tag_key, *ctx.json_order, r_state.result);
+}
+
 Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *region)
 {
   ScrArea *area = CTX_wm_area(C);
@@ -3501,566 +4160,25 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
   /* Load order from JSON for this tag combination */
   Vector<std::string> json_order = load_category_order_from_json(C, tag_key.c_str());
 
-  if (g_pending_category_insert.valid && g_pending_category_insert.tag_key == tag_key) {
-    const double time_since_pending = BLI_time_now_seconds() - g_pending_category_insert.timestamp;
-    if (time_since_pending > 120.0) {
-      g_pending_category_insert.valid = false;
-      g_pending_category_insert.all_existing_categories.clear();
-    }
-  }
-
-  /* Map of existing categories for quick lookup */
-  Map<std::string, PanelCategoryDyn *> existing;
-  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    /* Only include categories that are visible by tag filtering */
-    if (panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
-      existing.add(std::string(pc_dyn.idname), &pc_dyn);
-    }
-  }
-
-  /* Build result list following JSON order */
-  Vector<PanelCategoryDyn *> result;
-  Set<std::string> added;
-
-  /* First: categories in JSON order (skip missing - disabled addons) */
-  for (const std::string &cat_id : json_order) {
-    PanelCategoryDyn **pc = existing.lookup_ptr(cat_id);
-    if (pc && !added.contains(cat_id)) {
-      result.append(*pc);
-      added.add(cat_id);
-    }
-    /* Else: category in JSON but not registered - skip silently (disabled addon) */
-  }
-
-  /* Then: remaining categories (new ones or not in JSON order) */
-  Vector<PanelCategoryDyn *> remaining;
-  for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    std::string id(pc_dyn.idname);
-    if (!added.contains(id) && panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
-      remaining.append(&pc_dyn);
-    }
-  }
-
-  bool pending_applied = false;
-  Vector<std::string> pending_inserted_ids;
-  if (g_pending_category_insert.valid && g_pending_category_insert.tag_key == tag_key)
-  {
-    Vector<PanelCategoryDyn *> appeared_categories;
-    printf("[GET_ORDERED] all_existing_categories.size()=%zu, existing_categories.size()=%zu, g_known_categories_before_extension_drop.size()=%zu\n",
-           g_pending_category_insert.all_existing_categories.size(),
-           g_pending_category_insert.existing_categories.size(),
-           g_known_categories_before_extension_drop.size());
-    for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-      /* IMPORTANT: Do NOT filter new extension categories through panel_category_is_visible_by_tags!
-       * New extension categories may not have tags assigned yet, which would cause them to be
-       * filtered out when tag filter is active. Extension categories must be discoverable
-       * regardless of tag filter state so they can be positioned and activated.
-       *
-       * Use g_pending_category_insert.all_existing_categories when available (extension drop case),
-       * as it contains ALL categories from the region, not just filtered ones.
-       * This prevents existing categories without the active tag from being incorrectly
-       * detected as "new" when an extension is dropped with an active tag filter.
-       *
-       * Fallback to g_known_categories_before_extension_drop for backwards compatibility,
-       * and finally to existing_categories (filtered) if neither is available. */
-      const bool use_full_category_list = !g_pending_category_insert.all_existing_categories.is_empty() ||
-                                          !g_known_categories_before_extension_drop.is_empty();
-      const bool is_new_category = !g_pending_category_insert.all_existing_categories.is_empty() ?
-          !g_pending_category_insert.all_existing_categories.contains(std::string(pc_dyn.idname)) :
-          (!g_known_categories_before_extension_drop.is_empty() ?
-              !g_known_categories_before_extension_drop.contains(std::string(pc_dyn.idname)) :
-              !g_pending_category_insert.existing_categories.contains(std::string(pc_dyn.idname)));
-      printf("[GET_ORDERED]   cat='%s' use_full=%d is_new=%d\n",
-             pc_dyn.idname, use_full_category_list, is_new_category);
-      if (!is_new_category && !panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
-        continue;
-      }
-      if (is_new_category) {
-        appeared_categories.append(&pc_dyn);
-      }
-    }
-
-    if (!appeared_categories.is_empty()) {
-      Set<std::string> appeared_ids;
-      for (PanelCategoryDyn *pc_dyn : appeared_categories) {
-        appeared_ids.add(std::string(pc_dyn->idname));
-      }
-
-      for (int i = result.size() - 1; i >= 0; i--) {
-        const std::string id(result[i]->idname);
-        if (appeared_ids.contains(id)) {
-          result.remove_and_reorder(i);
-          added.remove(id);
-        }
-      }
-
-      for (int i = remaining.size() - 1; i >= 0; i--) {
-        const std::string id(remaining[i]->idname);
-        if (appeared_ids.contains(id)) {
-          remaining.remove_and_reorder(i);
-        }
-      }
-
-      auto find_index_in_result = [&](const std::string &id) -> int {
-        if (id.empty()) {
-          return -1;
-        }
-        for (int i = 0; i < result.size(); i++) {
-          if (STREQ(result[i]->idname, id.c_str())) {
-            return i;
-          }
-        }
-        return -1;
-      };
-
-      int insert_index = -1;
-      if (!g_pending_category_insert.anchor_after.empty()) {
-        insert_index = find_index_in_result(g_pending_category_insert.anchor_after);
-      }
-      if (insert_index == -1 && !g_pending_category_insert.anchor_before.empty()) {
-        const int before_index = find_index_in_result(g_pending_category_insert.anchor_before);
-        if (before_index != -1) {
-          insert_index = before_index + 1;
-        }
-      }
-      if (insert_index == -1) {
-        const int target_index = find_index_in_result(g_pending_category_insert.target_category);
-        if (target_index != -1) {
-          insert_index = g_pending_category_insert.insert_above ? target_index :
-                                                                 (target_index + 1);
-        }
-      }
-      if (insert_index == -1) {
-        insert_index = result.size();
-      }
-      insert_index = clamp_i(insert_index, 0, result.size());
-
-      Vector<PanelCategoryDyn *> appeared_ordered;
-      appeared_ordered.reserve(appeared_categories.size());
-      Set<std::string> ordered_ids;
-      for (const std::string &cat_id : json_order) {
-        if (!appeared_ids.contains(cat_id) || ordered_ids.contains(cat_id)) {
-          continue;
-        }
-        PanelCategoryDyn **pc = existing.lookup_ptr(cat_id);
-        if (pc) {
-          appeared_ordered.append(*pc);
-          ordered_ids.add(cat_id);
-        }
-      }
-      for (PanelCategoryDyn *pc_dyn : appeared_categories) {
-        const std::string id(pc_dyn->idname);
-        if (!ordered_ids.contains(id)) {
-          appeared_ordered.append(pc_dyn);
-          ordered_ids.add(id);
-        }
-      }
-
-      int insert_offset = 0;
-      for (PanelCategoryDyn *pc_dyn : appeared_ordered) {
-        const std::string id(pc_dyn->idname);
-        if (!added.contains(id)) {
-          result.insert(insert_index + insert_offset, pc_dyn);
-          insert_offset++;
-          added.add(id);
-          pending_inserted_ids.append(id);
-        }
-      }
-
-      if (!pending_inserted_ids.is_empty()) {
-        pending_applied = true;
-        category_tabs_report_new_categories(C, pending_inserted_ids);
-      }
-    }
-  }
+  category_order_pending_insert_expired_clear_if_needed(tag_key);
 
   /* Get space type name for priority lookup (C++ is the source of truth). */
-  const char *space_type_name = "DEFAULT";
-  if (area) {
-    switch (area->spacetype) {
-      case SPACE_VIEW3D: space_type_name = "VIEW_3D"; break;
-      case SPACE_PROPERTIES: space_type_name = "PROPERTIES"; break;
-      case SPACE_NODE: space_type_name = "NODE_EDITOR"; break;
-      case SPACE_IMAGE: space_type_name = "IMAGE_EDITOR"; break;
-      case SPACE_SEQ: space_type_name = "SEQUENCE_EDITOR"; break;
-      case SPACE_CLIP: space_type_name = "CLIP_EDITOR"; break;
-      case SPACE_TEXT: space_type_name = "TEXT_EDITOR"; break;
-      case SPACE_ACTION: space_type_name = "DOPESHEET_EDITOR"; break;
-      case SPACE_GRAPH: space_type_name = "GRAPH_EDITOR"; break;
-      case SPACE_NLA: space_type_name = "NLA_EDITOR"; break;
-      default: space_type_name = "DEFAULT"; break;
-    }
-  }
+  const char *space_type_name = space_type_name_resolve(area);
 
-  /* After processing JSON order and pending inserts,
-   * separate remaining categories into reserved and non-reserved */
-  Vector<PanelCategoryDyn *> remaining_reserved;
-  Vector<PanelCategoryDyn *> remaining_non_reserved;
+  CategoryOrderPipelineContext ctx{};
+  ctx.C = C;
+  ctx.wm = wm;
+  ctx.region = region;
+  ctx.area = area;
+  ctx.tag_key = &tag_key;
+  ctx.json_order = &json_order;
+  ctx.space_type_name = space_type_name;
 
-  for (PanelCategoryDyn *pc_dyn : remaining) {
-    std::string id(pc_dyn->idname);
-    if (!added.contains(id)) {
-      if (category_is_reserved_for_reorder(wm, pc_dyn->idname)) {
-        remaining_reserved.append(pc_dyn);
-      } else {
-        remaining_non_reserved.append(pc_dyn);
-      }
-    }
-  }
+  CategoryOrderPipelineState state = category_order_stage_collect(ctx);
+  category_order_stage_apply(ctx, state);
+  category_order_stage_persist(ctx, state);
 
-  /* Sort reserved categories by priority */
-  std::sort(remaining_reserved.begin(), remaining_reserved.end(),
-    [&](PanelCategoryDyn *a, PanelCategoryDyn *b) {
-      return compare_reserved_categories_by_priority(C, a->idname, b->idname, space_type_name);
-    });
-
-  /* Append: reserved first, then non-reserved (boundary rule preserved) */
-  for (PanelCategoryDyn *pc_dyn : remaining_reserved) {
-    result.append(pc_dyn);
-    added.add(pc_dyn->idname);
-  }
-  for (PanelCategoryDyn *pc_dyn : remaining_non_reserved) {
-    result.append(pc_dyn);
-    added.add(pc_dyn->idname);
-  }
-
-  /* Enforce global invariant for runtime display order:
-   * reserved categories must be grouped first and sorted by reserved priority.
-   * Non-reserved categories keep their relative order. */
-  {
-    Vector<PanelCategoryDyn *> reserved_sorted;
-    Vector<PanelCategoryDyn *> non_reserved_ordered;
-    reserved_sorted.reserve(result.size());
-    non_reserved_ordered.reserve(result.size());
-
-    for (PanelCategoryDyn *pc_dyn : result) {
-      if (category_is_reserved_for_reorder(wm, pc_dyn->idname)) {
-        reserved_sorted.append(pc_dyn);
-      }
-      else {
-        non_reserved_ordered.append(pc_dyn);
-      }
-    }
-
-    std::sort(reserved_sorted.begin(), reserved_sorted.end(), [&](PanelCategoryDyn *a, PanelCategoryDyn *b) {
-      return compare_reserved_categories_by_priority(C, a->idname, b->idname, space_type_name);
-    });
-
-    Vector<PanelCategoryDyn *> normalized;
-    normalized.reserve(result.size());
-    for (PanelCategoryDyn *pc_dyn : reserved_sorted) {
-      normalized.append(pc_dyn);
-    }
-    for (PanelCategoryDyn *pc_dyn : non_reserved_ordered) {
-      normalized.append(pc_dyn);
-    }
-    result = std::move(normalized);
-  }
-
-  if (pending_applied) {
-    Vector<std::string> pending_order = json_order;
-    if (pending_order.is_empty()) {
-      pending_order = g_pending_category_insert.pre_order;
-    }
-
-    auto normalize_reserved_boundary = [&](Vector<std::string> &order) {
-      Vector<std::string> reserved;
-      Vector<std::string> non_reserved;
-      reserved.reserve(order.size());
-      non_reserved.reserve(order.size());
-      for (const std::string &category_id : order) {
-        if (category_is_reserved_for_reorder(wm, category_id.c_str())) {
-          reserved.append(category_id);
-        }
-        else {
-          non_reserved.append(category_id);
-        }
-      }
-
-      std::sort(reserved.begin(), reserved.end(), [&](const std::string &a, const std::string &b) {
-        return compare_reserved_categories_by_priority(C, a.c_str(), b.c_str(), space_type_name);
-      });
-
-      order.clear();
-      order.reserve(reserved.size() + non_reserved.size());
-      for (const std::string &category_id : reserved) {
-        order.append(category_id);
-      }
-      for (const std::string &category_id : non_reserved) {
-        order.append(category_id);
-      }
-    };
-
-    if (pending_order.is_empty()) {
-      Vector<std::string> from_result;
-      from_result.reserve(result.size());
-      for (PanelCategoryDyn *pc_dyn : result) {
-        from_result.append(pc_dyn->idname);
-      }
-      normalize_reserved_boundary(from_result);
-      pending_order = std::move(from_result);
-    }
-    else if (category_order_is_crossing_reserved_boundary(wm, pending_order)) {
-      normalize_reserved_boundary(pending_order);
-    }
-
-    auto find_index_in_order = [&](const std::string &id) -> int {
-      if (id.empty()) {
-        return -1;
-      }
-      for (int i = 0; i < pending_order.size(); i++) {
-        if (STREQ(pending_order[i].c_str(), id.c_str())) {
-          return i;
-        }
-      }
-      return -1;
-    };
-
-    auto erase_first_in_order = [&](const std::string &id) {
-      const int idx = find_index_in_order(id);
-      if (idx != -1) {
-        pending_order.remove_and_reorder(idx);
-      }
-    };
-
-    int order_insert_index = -1;
-    if (!g_pending_category_insert.anchor_after.empty()) {
-      order_insert_index = find_index_in_order(g_pending_category_insert.anchor_after);
-    }
-    if (order_insert_index == -1 && !g_pending_category_insert.anchor_before.empty()) {
-      const int before_index = find_index_in_order(g_pending_category_insert.anchor_before);
-      if (before_index != -1) {
-        order_insert_index = before_index + 1;
-      }
-    }
-    if (order_insert_index == -1) {
-      const int target_index = find_index_in_order(g_pending_category_insert.target_category);
-      if (target_index != -1) {
-        order_insert_index = g_pending_category_insert.insert_above ? target_index :
-                                                                      (target_index + 1);
-      }
-    }
-    if (order_insert_index == -1) {
-      order_insert_index = pending_order.size();
-    }
-
-    order_insert_index = clamp_i(order_insert_index, 0, pending_order.size());
-
-    for (const std::string &id : pending_inserted_ids) {
-      erase_first_in_order(id);
-    }
-
-    int order_offset = 0;
-    for (const std::string &id : pending_inserted_ids) {
-      pending_order.insert(order_insert_index + order_offset, id);
-      order_offset++;
-    }
-
-    /* Filter pending_order to only include categories that should be visible with current tag filter.
-     * This prevents saving categories without the active tag to the tag-specific order in JSON,
-     * which would cause them to briefly appear before being filtered out.
-     * Keep: reserved categories, newly inserted categories, and categories passing tag filter. */
-    if (!tag_key.empty() && tag_key.back() != ':') {
-      /* tag_key has an active tag filter (not just space prefix like "VIEW3D:") */
-      Vector<std::string> filtered_order;
-      Set<std::string> inserted_set;
-      for (const std::string &id : pending_inserted_ids) {
-        inserted_set.add(id);
-      }
-      for (const std::string &cat_id : pending_order) {
-        const bool is_reserved = category_is_reserved_for_reorder(wm, cat_id.c_str());
-        const bool is_newly_inserted = inserted_set.contains(cat_id);
-        const bool passes_tag_filter = panel_category_is_visible_by_tags(C, wm, cat_id.c_str());
-        if (is_reserved || is_newly_inserted || passes_tag_filter) {
-          filtered_order.append(cat_id);
-        }
-      }
-      pending_order = std::move(filtered_order);
-    }
-
-    /* Persisted order must always satisfy reserved-first + reserved-priority invariant. */
-    normalize_reserved_boundary(pending_order);
-
-    if (!category_order_is_crossing_reserved_boundary(wm, pending_order)) {
-      save_category_order_to_json(C, tag_key.c_str(), pending_order);
-      ScrArea *save_area = CTX_wm_area(C);
-      const int save_space_type = save_area ? save_area->spacetype : 0;
-      const int save_region_type = region->regiontype;
-      WorkSpace *save_workspace = CTX_wm_workspace(C);
-      if (save_workspace) {
-        workspace_category_order_clear(save_workspace, save_space_type, save_region_type);
-        for (int i = 0; i < pending_order.size(); i++) {
-          WorkspaceCategoryOrder *item = MEM_new<WorkspaceCategoryOrder>(__func__);
-          item->space_type = save_space_type;
-          item->region_type = save_region_type;
-          STRNCPY(item->category_id, pending_order[i].c_str());
-          item->order_index = i;
-          BLI_addtail(&save_workspace->category_order, item);
-        }
-        WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
-        WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
-      }
-    }
-
-    /* Copy pending insert position to deferred activation BEFORE clearing it.
-     * This ensures the insert position is preserved for deferred_category_activation_execute. */
-    if (g_pending_category_insert.valid) {
-      g_deferred_category_activation.pending_insert_valid = true;
-      g_deferred_category_activation.pending_insert_tag_key = g_pending_category_insert.tag_key;
-      g_deferred_category_activation.pending_insert_anchor_before = g_pending_category_insert.anchor_before;
-      g_deferred_category_activation.pending_insert_anchor_after = g_pending_category_insert.anchor_after;
-      g_deferred_category_activation.pending_insert_target_category = g_pending_category_insert.target_category;
-      g_deferred_category_activation.pending_insert_insert_above = g_pending_category_insert.insert_above;
-      printf("[CATEGORY ORDER] Copied pending insert to deferred activation: tag_key='%s', anchor_before='%s', anchor_after='%s'\n",
-             g_pending_category_insert.tag_key.c_str(),
-             g_pending_category_insert.anchor_before.c_str(),
-             g_pending_category_insert.anchor_after.c_str());
-    }
-    else {
-      printf("[CATEGORY ORDER] g_pending_category_insert.valid is FALSE - no position to copy!\n");
-    }
-    fflush(stdout);
-
-    g_pending_category_insert.valid = false;
-    g_pending_category_insert.all_existing_categories.clear();
-
-    /* Auto-activate newly appeared category after extension installation.
-     * Uses deferred activation with extension signal to ensure:
-     * 1. Extension installation is complete
-     * 2. UI has time to stabilize (frame delay)
-     * 3. Category activation happens safely on main thread
-     */
-#if 1
-    printf("[CATEGORY ACTIVATE] pending_inserted_ids count: %zu\n", pending_inserted_ids.size());
-    if (!pending_inserted_ids.is_empty()) {
-      for (const std::string &category_id : pending_inserted_ids) {
-        printf("[CATEGORY ACTIVATE] Checking category: '%s'\n", category_id.c_str());
-
-        /* Mark this category as a new extension category via the pending_tag_assignment
-         * mechanism. This replaces the old g_new_extension_categories_visible set and
-         * ensures the category is visible through the DNA-backed pending flag. */
-        register_new_extension_category(C,
-                                        category_id.c_str(),
-                                        g_pending_category_insert.source_extension_id.c_str(),
-                                        area ? area->spacetype : -1,
-                                        get_current_tag_mode_flag(C),
-                                        /*tag_already_assigned=*/false);
-        printf("[CATEGORY ACTIVATE]   Registered as pending extension category\n");
-
-        const bool is_visible = panel_category_is_visible_by_tags(C, wm, category_id.c_str());
-        printf("[CATEGORY ACTIVATE]   is_visible: %s\n", is_visible ? "true" : "false");
-
-        if (is_visible) {
-          const char *current_active = panel_category_active_get(region, false);
-          printf("[CATEGORY ACTIVATE]   current_active: '%s'\n",
-                 current_active ? current_active : "(null)");
-
-          const bool should_activate = (current_active == nullptr ||
-                                        !STREQ(category_id.c_str(), current_active));
-          printf("[CATEGORY ACTIVATE]   should_activate: %s\n", should_activate ? "true" : "false");
-
-          if (should_activate) {
-            /* Defer activation to avoid crashes during panel layout.
-             * Some extensions (like Ucupaint) load previews in background threads,
-             * which crashes when triggered from panel_poll during layout.
-             * We wait 3 frames before activating to allow UI to stabilize. */
-            printf("[CATEGORY ACTIVATE]   Deferring activation for: '%s' (3 frame delay)\n",
-                   category_id.c_str());
-
-            /* Check if deferred activation is already set up (from discover mode or previous call) */
-            bool already_has_category = !g_deferred_category_activation.category_id.empty();
-            bool signal_already_received = g_deferred_category_activation.extension_signal_received;
-            bool already_waiting_for_signal = g_deferred_category_activation.wait_for_extension_signal;
-
-            /* Skip if already set up - don't overwrite existing activation state */
-            if (already_has_category) {
-              printf("[CATEGORY ACTIVATE]   Skipping - category already set: '%s'\n",
-                     g_deferred_category_activation.category_id.c_str());
-              break;
-            }
-
-            g_deferred_category_activation.category_id = category_id;
-            g_deferred_category_activation.valid = true;
-            g_deferred_category_activation.timestamp = BLI_time_now_seconds();
-            g_deferred_category_activation.frame_delay = 3; /* Wait 3 frames before activating */
-
-            /* Only set wait_for_extension_signal if not already in progress */
-            if (!signal_already_received && !already_waiting_for_signal) {
-              g_deferred_category_activation.wait_for_extension_signal = true;
-              g_deferred_category_activation.extension_signal_received = false;
-            }
-            printf("[CATEGORY ACTIVATE]   signal_already_received: %s, already_waiting: %s\n",
-                   signal_already_received ? "true" : "false",
-                   already_waiting_for_signal ? "true" : "false");
-
-            /* Build tag_key for deferred save */
-            blender::ui::TagFilterStateRef tag_state{};
-            ScrArea *area_for_tag = CTX_wm_area(C);
-            if (blender::ui::tag_filter_state_from_area(area_for_tag, &tag_state) &&
-                tag_state.active_tags) {
-              char tag_key_buf[256];
-              blender::ui::tag_build_combination_key(
-                  tag_state.active_tags, tag_key_buf, sizeof(tag_key_buf));
-              g_deferred_category_activation.tag_key = tag_key_buf;
-            }
-            else {
-              g_deferred_category_activation.tag_key.clear();
-            }
-            printf("[CATEGORY ACTIVATE]   Deferred activation scheduled\n");
-          }
-          printf("[CATEGORY ACTIVATE]   Breaking loop after first visible category\n");
-          break;
-        }
-      }
-    }
-    printf("[CATEGORY ACTIVATE] Activation block completed\n");
-#endif
-  }
-
-  /* Auto-save initial category order when JSON order was empty.
-   * This ensures category_orders is populated on first run with discovered categories. */
-  if (json_order.is_empty() && !result.is_empty()) {
-    Vector<std::string> initial_order;
-    initial_order.reserve(result.size());
-    for (PanelCategoryDyn *pc_dyn : result) {
-      initial_order.append(pc_dyn->idname);
-    }
-
-    /* Normalize reserved boundary before saving */
-    Vector<std::string> reserved;
-    Vector<std::string> non_reserved;
-    reserved.reserve(initial_order.size());
-    non_reserved.reserve(initial_order.size());
-    for (const std::string &category_id : initial_order) {
-      if (category_is_reserved_for_reorder(wm, category_id.c_str())) {
-        reserved.append(category_id);
-      }
-      else {
-        non_reserved.append(category_id);
-      }
-    }
-
-    std::sort(reserved.begin(), reserved.end(), [&](const std::string &a, const std::string &b) {
-      return compare_reserved_categories_by_priority(C, a.c_str(), b.c_str(), space_type_name);
-    });
-
-    initial_order.clear();
-    initial_order.reserve(reserved.size() + non_reserved.size());
-    for (const std::string &category_id : reserved) {
-      initial_order.append(category_id);
-    }
-    for (const std::string &category_id : non_reserved) {
-      initial_order.append(category_id);
-    }
-
-    if (!category_order_is_crossing_reserved_boundary(wm, initial_order)) {
-      save_category_order_to_json(C, tag_key.c_str(), initial_order);
-      printf("[CATEGORY ORDER] Auto-saved initial order for tag_key='%s' with %zu categories\n",
-             tag_key.c_str(), initial_order.size());
-    }
-  }
-
-  return result;
+  return state.result;
 }
 
 /** \} */
@@ -4069,10 +4187,146 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
 /** \name Category Tab Drawing Functions
  * \{ */
 
+struct CategoryTabsDrawContext {
+  const ScrArea *area;
+  int space_type;
+  bool is_left;
+  View2D *v2d;
+  const uiStyle *style;
+  const uiFontStyle *fstyle;
+  int fontid;
+  float fstyle_points;
+  float aspect;
+  eUserPref_CategoryTabsDisplayMode display_mode;
+  float category_tabs_zoom;
+  float zoom;
+  const wmWindowManager *wm;
+  int px;
+  int category_tabs_width;
+  float dpi_fac;
+  int category_tabs_min_width;
+  bool too_narrow;
+  int tab_v_pad_text;
+  int tab_v_pad;
+};
+
+struct CategoryTabMixedContentFlags {
+  int resolved_icon_id;
+  bool use_builtin_icon;
+  bool mixed_mode_effective_has_glyph;
+  bool mixed_mode_effective_fallback_letter;
+  bool mixed_mode_effective_builtin_icon;
+  bool mixed_mode_has_visible_glyph_content;
+};
+
+struct CategoryTabRenderData {
+  const char *category_id;
+  const char *category_id_draw;
+  const char *category_id_draw_label;
+};
+
+struct CategoryTabVisualBoxCalcResult {
+  rctf box_rect;
+  bool is_visual_effect_active;
+};
+
+struct CategoryTabToneFactors {
+  float darken_factor;
+  float bg_brighten_factor;
+};
+
+struct CategoryTabNameLayout {
+  bool should_expand_name;
+  int tab_v_pad_text;
+};
+
+struct CategoryTabSingleDrawContext {
+  const ARegion *region;
+  const wmWindowManager *wm;
+  const View2D *v2d;
+  int rct_xmin;
+  int rct_xmax;
+  bool is_left;
+  bool is_dragging;
+  eUserPref_CategoryTabsDisplayMode display_mode;
+  float tab_curve_radius;
+  int roundboxtype;
+  int px;
+  float theme_col_tab_active[4];
+  float theme_col_tab_inactive[4];
+  float theme_col_tab_outline[4];
+  float theme_col_tab_outline_sel[4];
+  int fontid;
+  const uiFontStyle *fstyle;
+  float fstyle_points;
+  float zoom;
+  float category_tabs_zoom;
+  uchar theme_col_tab_text[3];
+  uchar theme_col_tab_text_sel[3];
+  bool too_narrow;
+  int space_type;
+};
+
+struct CategoryTabLoopDrawData {
+  const char *category_id;
+  const char *category_id_draw;
+  bool is_active;
+  bool is_hover;
+  int current_tab_v_pad_text;
+  float darken_factor;
+  float bg_brighten_factor;
+  float glyph_color[3];
+};
+
+struct DeferredHoverTabDrawData {
+  bool valid = false;
+  rcti rct = {};
+  const char *category_id = nullptr;
+  const char *category_id_draw = nullptr;
+  bool is_active = false;
+  int current_tab_v_pad_text = 0;
+  float darken_factor = 0.0f;
+  float bg_brighten_factor = 0.0f;
+  float glyph_color[3] = {0.0f, 0.0f, 0.0f};
+};
+
+static CategoryTabsDrawContext category_tabs_draw_context_build(const bContext *C, ARegion *region)
+{
+  CategoryTabsDrawContext ctx{};
+  ctx.area = CTX_wm_area(C);
+  ctx.space_type = ctx.area ? ctx.area->spacetype : -1;
+  ctx.is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+  ctx.v2d = &region->v2d;
+  ctx.style = style_get();
+  ctx.fstyle = &ctx.style->widget;
+  ctx.fontid = ctx.fstyle->uifont_id;
+  ctx.fstyle_points = ctx.fstyle->points;
+
+  const float raw_aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
+                               1.0f :
+                               (static_cast<Block *>(region->runtime->uiblocks.first))->aspect;
+  /* Stabilize aspect: if very close to 1.0, use exactly 1.0 to avoid floating-point oscillation.
+   * This prevents tab size jitter when aspect oscillates between 1.0 and 1.0000001. */
+  ctx.aspect = (std::abs(raw_aspect - 1.0f) < 0.001f) ? 1.0f : raw_aspect;
+  ctx.display_mode = ED_category_tabs_display_mode_get(ctx.area);
+  ctx.category_tabs_zoom = category_tabs_zoom_value_get(ctx.area, ctx.display_mode);
+  ctx.zoom = (1.0f / ctx.aspect) * ctx.category_tabs_zoom;
+  ctx.wm = CTX_wm_manager(C);
+  ctx.px = U.pixelsize;
+  ctx.category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * ctx.zoom);
+  ctx.dpi_fac = UI_SCALE_FAC;
+  ctx.category_tabs_min_width = category_tabs_min_width_get(ctx.area, ctx.aspect, ctx.display_mode);
+  ctx.too_narrow = BLI_rcti_size_x(&region->winrct) <= ctx.category_tabs_min_width;
+  ctx.tab_v_pad_text = int(std::floor(TABS_PADDING_TEXT_FACTOR * ctx.dpi_fac * ctx.zoom)) +
+                       2 * ctx.px;
+  ctx.tab_v_pad = category_tabs_vertical_padding_calc(ctx.zoom);
+  return ctx;
+}
+
 void panel_category_tabs_draw_settings_button(const bContext *C,
-                                               ARegion *region,
-                                               float zoom,
-                                               const unsigned char theme_col_tab_text[3])
+                                              ARegion *region,
+                                              float zoom,
+                                              const unsigned char theme_col_tab_text[3])
 {
   const uiStyle *style = style_get();
   const uiFontStyle *fstyle = &style->widget;
@@ -4180,6 +4434,1230 @@ void panel_category_tabs_draw_settings_button(const bContext *C,
   GPU_blend(GPU_BLEND_NONE);
 }
 
+static const char *category_tab_draw_label_resolve(const ARegion *region,
+                                                   const char *category_id,
+                                                   const char *category_id_draw)
+{
+  if (!category_id_draw || category_id_draw[0] == '\0' || !is_single_glyph_str(category_id_draw) ||
+      !region || !region->runtime || !region->runtime->type)
+  {
+    return category_id_draw;
+  }
+
+  for (const PanelType &pt : region->runtime->type->paneltypes) {
+    if (pt.category && STREQ(pt.category, category_id)) {
+      const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+      if (panel_label && panel_label[0] != '\0') {
+        return panel_label;
+      }
+      break;
+    }
+  }
+
+  return category_id_draw;
+}
+
+static CategoryTabRenderData category_tab_render_data_build(const wmWindowManager *wm,
+                                                            const ARegion *region,
+                                                            const char *category_id,
+                                                            const int space_type)
+{
+  CategoryTabRenderData render_data{};
+  render_data.category_id = category_id;
+  render_data.category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id, space_type));
+  render_data.category_id_draw_label = category_tab_draw_label_resolve(
+      region, category_id, render_data.category_id_draw);
+  return render_data;
+}
+
+static CategoryTabMixedContentFlags category_tab_mixed_content_flags_resolve(
+    const wmWindowManager *wm,
+    const char *category_id,
+    const eUserPref_CategoryTabsDisplayMode display_mode,
+    const int space_type,
+    const bool has_glyph,
+    const bool is_fallback_letter)
+{
+  CategoryTabMixedContentFlags flags{};
+
+  const bool display_mode_allows_icon_content = ELEM(
+      display_mode, USER_CATEGORY_TABS_GLYPHS_ONLY, USER_CATEGORY_TABS_GLYPHS_TEXT);
+
+  CategoryTabIconResolved icon_resolved;
+  panel_category_icon_data_lookup(wm, category_id, &icon_resolved, space_type);
+  flags.resolved_icon_id = category_tab_icon_id_resolve(icon_resolved);
+
+  bool icon_data_allows_icon_content = (icon_resolved.source != CATEGORY_TAB_ICON_SOURCE_OFF);
+  if (icon_resolved.source == CATEGORY_TAB_ICON_SOURCE_MANUAL) {
+    icon_data_allows_icon_content = (icon_resolved.key && icon_resolved.key[0] != '\0') ||
+                                    (icon_resolved.path && icon_resolved.path[0] != '\0');
+  }
+
+  flags.use_builtin_icon =
+      display_mode_allows_icon_content && icon_data_allows_icon_content &&
+      (flags.resolved_icon_id != ICON_NONE);
+  flags.mixed_mode_effective_has_glyph = has_glyph && U.category_tabs_mixed_show_glyphs;
+  flags.mixed_mode_effective_fallback_letter =
+      is_fallback_letter && U.category_tabs_mixed_show_first_letter;
+  flags.mixed_mode_effective_builtin_icon = flags.use_builtin_icon && U.category_tabs_mixed_show_icons;
+  flags.mixed_mode_has_visible_glyph_content = flags.mixed_mode_effective_has_glyph ||
+                                               flags.mixed_mode_effective_fallback_letter ||
+                                               flags.mixed_mode_effective_builtin_icon;
+
+  return flags;
+}
+
+static int category_tab_v_pad_text_resolve(const eUserPref_CategoryTabsDisplayMode display_mode,
+                                           const int tab_v_pad_text,
+                                           const bool should_expand_name)
+{
+  if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+      U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_BOX && !should_expand_name)
+  {
+    return 0;
+  }
+  return tab_v_pad_text;
+}
+
+static CategoryTabToneFactors category_tab_tone_factors_calc(const bool is_active,
+                                                             const bool is_hover)
+{
+  CategoryTabToneFactors tone_factors{};
+
+  if (!is_active && !is_hover) {
+    tone_factors.darken_factor = TABS_GLYPH_DARKEN_BASE;
+  }
+
+  if (!is_active) {
+    tone_factors.bg_brighten_factor = is_hover ? TABS_BG_BRIGHTEN_HOVER : TABS_BG_BRIGHTEN_BASE;
+  }
+
+  return tone_factors;
+}
+
+static bool category_tab_visual_effect_allowed(const eUserPref_CategoryTabsDisplayMode display_mode,
+                                               const bool is_dragging,
+                                               const bool is_active)
+{
+  return (U.category_tabs_visual_effect && display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+          !is_dragging && (!U.category_tabs_show_active_name || !is_active));
+}
+
+static CategoryTabNameLayout category_tab_name_layout_resolve(const ARegion *region,
+                                                              const char *category_id,
+                                                              const eUserPref_CategoryTabsDisplayMode display_mode,
+                                                              const bool is_active,
+                                                              const bool use_minimized_gate,
+                                                              const bool is_panel_minimized,
+                                                              const int tab_v_pad_text)
+{
+  CategoryTabNameLayout name_layout{};
+  name_layout.should_expand_name = category_tab_should_expand_name(region,
+                                                                   category_id,
+                                                                   display_mode,
+                                                                   is_active,
+                                                                   use_minimized_gate,
+                                                                   is_panel_minimized);
+  name_layout.tab_v_pad_text = category_tab_v_pad_text_resolve(
+      display_mode, tab_v_pad_text, name_layout.should_expand_name);
+  return name_layout;
+}
+
+static CategoryTabLoopDrawData category_tab_loop_draw_data_build(const wmWindowManager *wm,
+                                                                 const ARegion *region,
+                                                                 const rcti *rct,
+                                                                 const char *category_id_raw,
+                                                                 const char *category_id_active,
+                                                                 const eUserPref_CategoryTabsDisplayMode display_mode,
+                                                                 const int tab_v_pad_text,
+                                                                 const bool too_narrow,
+                                                                 const int mouse_x,
+                                                                 const int mouse_y,
+                                                                 const int space_type)
+{
+  const CategoryTabRenderData render_data = category_tab_render_data_build(
+      wm, region, category_id_raw, space_type);
+
+  CategoryTabLoopDrawData draw_data{};
+  draw_data.category_id = render_data.category_id;
+  draw_data.category_id_draw = render_data.category_id_draw;
+  draw_data.is_active =
+      !too_narrow && category_id_active && STREQ(draw_data.category_id, category_id_active);
+
+  const CategoryTabNameLayout name_layout = category_tab_name_layout_resolve(
+      region, draw_data.category_id, display_mode, draw_data.is_active, true, too_narrow, tab_v_pad_text);
+  draw_data.current_tab_v_pad_text = name_layout.tab_v_pad_text;
+
+  bool is_fallback_letter = false;
+  panel_category_glyph_lookup(
+      wm, draw_data.category_id, nullptr, &is_fallback_letter, draw_data.glyph_color, space_type);
+  if (category_tab_edit_dialog_is_open_for_category(draw_data.category_id)) {
+    copy_v3_v3(draw_data.glyph_color, category_tab_preview_color);
+  }
+
+  draw_data.is_hover = BLI_rcti_isect_pt(rct, mouse_x, mouse_y);
+
+  const CategoryTabToneFactors tone_factors = category_tab_tone_factors_calc(draw_data.is_active,
+                                                                              draw_data.is_hover);
+  draw_data.darken_factor = tone_factors.darken_factor;
+  draw_data.bg_brighten_factor = tone_factors.bg_brighten_factor;
+
+  return draw_data;
+}
+
+static int category_tab_y_shift_resolve(const ARegion *region,
+                                        const blender::Vector<PanelCategoryDyn *> &ordered_categories,
+                                        const PanelCategoryDyn &pc_dyn,
+                                        const bool is_dragging,
+                                        const CategoryDragState *drag_state,
+                                        const int current_display_index,
+                                        const int tab_v_pad)
+{
+  int y_shift = 0;
+
+  if (is_dragging && drag_state && !drag_state->is_reserved) {
+    const int insert_idx = drag_state->current_insert_index;
+    const int original_idx = drag_state->original_index;
+
+    if (insert_idx > original_idx) {
+      if (current_display_index > original_idx && current_display_index <= insert_idx) {
+        y_shift = drag_state->drag_tab_height + tab_v_pad;
+      }
+    }
+    else if (insert_idx < original_idx) {
+      if (current_display_index >= insert_idx && current_display_index < original_idx) {
+        y_shift = -drag_state->drag_tab_height - tab_v_pad;
+      }
+    }
+
+    return y_shift;
+  }
+
+  if (!is_dragging && region->runtime && region->runtime->extension_drop_preview_state.active) {
+    const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
+    bool preview_name_found = false;
+    int preview_name_idx = -1;
+    if (preview.target_category_id[0] != '\0') {
+      int idx = 0;
+      for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+        if (STREQ(pc_dyn_ptr->idname, preview.target_category_id)) {
+          preview_name_found = true;
+          preview_name_idx = idx;
+          break;
+        }
+        idx++;
+      }
+    }
+
+    const bool preview_fallback_used = false;
+    /* Use unified insertion slot model consistently */
+    int raw_insertion_index = preview_name_found ?
+                                  (preview_name_idx + (preview.insert_above ? 0 : 1)) :
+                                  -1;
+    /* Prevent creating slots beyond existing tabs */
+    const int insertion_index =
+        (raw_insertion_index >= 0 && raw_insertion_index > int(ordered_categories.size())) ?
+            int(ordered_categories.size()) :
+            raw_insertion_index;
+
+    static double _ext_shift_last_log_time = 0.0;
+    static int _ext_shift_last_stored_idx = -999;
+    static int _ext_shift_last_resolved_idx = -999;
+    static bool _ext_shift_last_insert_above = false;
+    static bool _ext_shift_last_name_found = false;
+    static int _ext_shift_last_raw_insertion_idx = -999;
+    static int _ext_shift_last_category_count = -999;
+    const double shift_log_time = BLI_time_now_seconds();
+    const bool shift_should_log = (shift_log_time - _ext_shift_last_log_time > 1.0) ||
+                                  (_ext_shift_last_stored_idx != preview.target_index) ||
+                                  (_ext_shift_last_resolved_idx != preview_name_idx) ||
+                                  (_ext_shift_last_insert_above != preview.insert_above) ||
+                                  (_ext_shift_last_name_found != preview_name_found) ||
+                                  (_ext_shift_last_raw_insertion_idx != raw_insertion_index) ||
+                                  (_ext_shift_last_category_count != int(ordered_categories.size()));
+    if (shift_should_log) {
+      const int category_count = int(ordered_categories.size());
+      const int max_valid_index = category_count - 1;
+      printf("[EXT_SHIFT] target='%s' stored_idx=%d name_found=%d name_idx=%d "
+             "insert_above=%d raw_insertion_idx=%d insertion_idx=%d category_count=%d max_valid_idx=%d shift=%d\n",
+             preview.target_category_id,
+             preview.target_index,
+             preview_name_found ? 1 : 0,
+             preview_name_idx,
+             preview.insert_above ? 1 : 0,
+             raw_insertion_index,
+             insertion_index,
+             category_count,
+             max_valid_index,
+             EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad);
+      if (raw_insertion_index >= category_count && category_count > 0) {
+        printf("[EXT_SHIFT] boundary: raw_insertion_idx >= category_count (end-insert path)\n");
+      }
+      if (!preview_name_found && preview.target_category_id[0] != '\0') {
+        printf("[EXT_SHIFT] resolve_warning: target name not found, stored_idx=%d fallback_used=%d\n",
+               preview.target_index,
+               preview_fallback_used ? 1 : 0);
+      }
+      _ext_shift_last_log_time = shift_log_time;
+      _ext_shift_last_stored_idx = preview.target_index;
+      _ext_shift_last_resolved_idx = preview_name_idx;
+      _ext_shift_last_insert_above = preview.insert_above;
+      _ext_shift_last_name_found = preview_name_found;
+      _ext_shift_last_raw_insertion_idx = raw_insertion_index;
+      _ext_shift_last_category_count = int(ordered_categories.size());
+    }
+
+    /* UNIFIED INSERTION SLOT MODEL:
+     * insertion_index = target_index + (insert_above ? 0 : 1)
+     * Shift tabs >= insertion_index down to create space for new tab.
+     * This creates a consistent slot between tabs at insertion_index-1 and insertion_index. */
+    if (insertion_index >= 0 && current_display_index >= insertion_index) {
+      /* Always shift DOWN to create space above the insertion point.
+       * Use negative y_shift because in Blender's coordinate system:
+       * - Positive Y values are at the top of screen
+       * - Adding positive value shifts rect UP, negative shifts DOWN */
+      y_shift = -(EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad);
+      if (shift_should_log) {
+        printf("[EXT_SHIFT] apply: tab='%s' display_idx=%d >= insertion_idx=%d y_shift=%d\n",
+               pc_dyn.idname,
+               current_display_index,
+               insertion_index,
+               y_shift);
+      }
+    }
+  }
+
+  return y_shift;
+}
+
+static bool category_tab_should_expand_name(const ARegion *region,
+                                            const char *category_id,
+                                            const eUserPref_CategoryTabsDisplayMode display_mode,
+                                            const bool is_active,
+                                            const bool use_minimized_gate,
+                                            const bool is_panel_minimized)
+{
+  const bool is_sticky_inactive = (U.category_tabs_inactive_behavior ==
+                                   USER_CATEGORY_TABS_INACTIVE_STICKY);
+  const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
+                               U.category_tabs_show_active_name);
+  const bool can_show_previous = is_sticky_inactive && is_sticky_mode;
+  const bool is_previous_active_raw = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
+                                       STREQ(category_id,
+                                             region->runtime->category_tabs_previous_active_id));
+  const bool is_previous_active = use_minimized_gate ?
+                                      (can_show_previous && is_panel_minimized && is_previous_active_raw) :
+                                      (can_show_previous && is_previous_active_raw);
+
+  return ((is_sticky_mode || is_active) && U.category_tabs_show_active_name &&
+          !region->runtime->category_tabs_active_name_hidden && (is_active || is_previous_active));
+}
+
+static CategoryTabVisualBoxCalcResult category_tab_visual_box_calc(const rcti *rct,
+                                                                   const View2D *v2d,
+                                                                   const bool is_left,
+                                                                   const bool is_active,
+                                                                   const bool is_hover,
+                                                                   const bool visual_effect_allowed_for_tab)
+{
+  CategoryTabVisualBoxCalcResult result{};
+  result.is_visual_effect_active = false;
+  result.box_rect.xmin = float(rct->xmin);
+  result.box_rect.xmax = float(rct->xmax);
+  result.box_rect.ymin = float(rct->ymin);
+  result.box_rect.ymax = float(rct->ymax);
+
+  if (visual_effect_allowed_for_tab && (is_active || is_hover)) {
+    result.is_visual_effect_active = true;
+
+    const int tab_height = rct->ymax - rct->ymin;
+    const int expanded_height = round_fl_to_int(tab_height * UI_TABS_VISUAL_EFFECT_SCALE);
+    const int extra_height = expanded_height - tab_height;
+
+    int extra_top = extra_height / 2;
+    int extra_bottom = extra_height - extra_top;
+
+    const int available_top = std::max(v2d->mask.ymax - rct->ymax, 0);
+    const int available_bottom = std::max(rct->ymin - v2d->mask.ymin, 0);
+    extra_top = std::min(extra_top, available_top);
+    extra_bottom = std::min(extra_bottom, available_bottom);
+
+    result.box_rect.ymin -= extra_bottom;
+    result.box_rect.ymax += extra_top;
+
+    const int tab_width = rct->xmax - rct->xmin;
+    const int expanded_width = round_fl_to_int(tab_width * UI_TABS_VISUAL_EFFECT_SCALE);
+    const int extra_width = expanded_width - tab_width;
+    const int available_extra_width = is_left ? std::max(v2d->mask.xmax - rct->xmax, 0) :
+                                               std::max(rct->xmin - v2d->mask.xmin, 0);
+    const int applied_extra_width = std::min(extra_width, available_extra_width);
+
+    if (is_left) {
+      result.box_rect.xmax += applied_extra_width;
+    }
+    else {
+      result.box_rect.xmin -= applied_extra_width;
+    }
+  }
+
+  return result;
+}
+
+static void draw_category_tab_color_indicator(const rcti *rct,
+                                              const float glyph_color[3],
+                                              bool is_left,
+                                              eUserPref_CategoryTabsDisplayMode display_mode,
+                                              bool show_color_indicator,
+                                              bool is_active_tab);
+static void ui_panel_category_draw_content(const ARegion *region,
+                                           const wmWindowManager *wm,
+                                           const char *category_id,
+                                           const char *category_id_draw,
+                                           const rcti *rct,
+                                           int rct_xmin,
+                                           int rct_xmax,
+                                           bool is_active,
+                                           bool is_left,
+                                           eUserPref_CategoryTabsDisplayMode display_mode,
+                                           int fontid,
+                                           const uiFontStyle *fstyle,
+                                           float fstyle_points,
+                                           float zoom,
+                                           float category_tabs_zoom,
+                                           int tab_v_pad_text,
+                                           float darken_factor,
+                                           const uchar theme_col_tab_text[3],
+                                           const uchar theme_col_tab_text_sel[3],
+                                           bool is_panel_minimized,
+                                           int space_type);
+
+static void category_tab_draw_background_and_border(const ARegion *region,
+                                                    const rcti *rct,
+                                                    const rctf &box_rect,
+                                                    const bool is_visual_effect_active,
+                                                    const bool is_active,
+                                                    const bool is_left,
+                                                    const eUserPref_CategoryTabsDisplayMode display_mode,
+                                                    const float bg_brighten_factor,
+                                                    const float glyph_color[3],
+                                                    const float tab_curve_radius,
+                                                    const int roundboxtype,
+                                                    const int px,
+                                                    const float theme_col_tab_active[4],
+                                                    const float theme_col_tab_inactive[4],
+                                                    const float theme_col_tab_outline[4],
+                                                    const float theme_col_tab_outline_sel[4])
+{
+  draw_roundbox_corner_set(roundboxtype);
+
+  float tab_bg_color[4];
+  if (is_active) {
+    copy_v4_v4(tab_bg_color, theme_col_tab_active);
+  }
+  else {
+    copy_v4_v4(tab_bg_color, theme_col_tab_inactive);
+    brighten_color_4fv(tab_bg_color, bg_brighten_factor);
+  }
+
+  draw_roundbox_4fv(&box_rect, true, tab_curve_radius, tab_bg_color);
+  draw_roundbox_4fv(
+      &box_rect, false, tab_curve_radius, is_active ? theme_col_tab_outline_sel : theme_col_tab_outline);
+
+#if CATEGORY_TAB_VISUAL_ACTIVE_OUTLINE_ENABLE
+  const bool is_visual_active_outline = is_visual_effect_active && is_active &&
+                                        U.category_tabs_visual_outline;
+  if (is_visual_active_outline) {
+    float visual_outline_color[4];
+    rgba_uchar_to_float(visual_outline_color, U.category_tabs_visual_outline_color);
+    const float visual_outline_width = float(px) + 0.5f;
+    draw_roundbox_4fv_ex(&box_rect,
+                         nullptr,
+                         nullptr,
+                         1.0f,
+                         visual_outline_color,
+                         visual_outline_width,
+                         tab_curve_radius);
+  }
+#endif
+
+  /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
+  draw_category_tab_color_indicator(
+      rct, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator, is_active);
+
+  if (!region->overlap) {
+    const uint pos = GPU_vertformat_attr_add(
+        immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
+    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+    immUniformColor4fv(tab_bg_color);
+    /* Use expanded box_rect when visual effect is active, otherwise use standard rct */
+    if (is_visual_effect_active) {
+      immRectf(pos,
+               is_left ? box_rect.xmax - px : box_rect.xmin,
+               box_rect.ymin + px,
+               is_left ? box_rect.xmax : box_rect.xmin + px,
+               box_rect.ymax - px);
+    }
+    else {
+      immRectf(pos,
+               is_left ? rct->xmax - px : rct->xmin,
+               rct->ymin + px,
+               is_left ? rct->xmax : rct->xmin + px,
+               rct->ymax - px);
+    }
+    immUnbindProgram();
+  }
+}
+
+static void category_tab_draw_content_layer(const ARegion *region,
+                                            const wmWindowManager *wm,
+                                            const char *category_id,
+                                            const char *category_id_draw,
+                                            const rcti *rct,
+                                            const rctf &box_rect,
+                                            const bool is_visual_effect_active,
+                                            const int rct_xmin,
+                                            const int rct_xmax,
+                                            const bool is_active,
+                                            const bool is_left,
+                                            const eUserPref_CategoryTabsDisplayMode display_mode,
+                                            const int fontid,
+                                            const uiFontStyle *fstyle,
+                                            const float fstyle_points,
+                                            const float zoom,
+                                            const float category_tabs_zoom,
+                                            const int current_tab_v_pad_text,
+                                            const float darken_factor,
+                                            const uchar theme_col_tab_text[3],
+                                            const uchar theme_col_tab_text_sel[3],
+                                            const bool too_narrow,
+                                            const int space_type)
+{
+  rcti expanded_rct;
+  const rcti *content_rct;
+  if (is_visual_effect_active) {
+    expanded_rct.xmin = int(box_rect.xmin);
+    expanded_rct.xmax = int(box_rect.xmax);
+    expanded_rct.ymin = int(box_rect.ymin);
+    expanded_rct.ymax = int(box_rect.ymax);
+    content_rct = &expanded_rct;
+  }
+  else {
+    content_rct = rct;
+  }
+
+  float current_category_tabs_zoom = category_tabs_zoom;
+  if (is_visual_effect_active) {
+    current_category_tabs_zoom *= UI_TABS_VISUAL_EFFECT_SCALE;
+  }
+
+  ui_panel_category_draw_content(region,
+                                 wm,
+                                 category_id,
+                                 category_id_draw,
+                                 content_rct,
+                                 rct_xmin,
+                                 rct_xmax,
+                                 is_active,
+                                 is_left,
+                                 display_mode,
+                                 fontid,
+                                 fstyle,
+                                 fstyle_points,
+                                 zoom,
+                                 current_category_tabs_zoom,
+                                 current_tab_v_pad_text,
+                                 darken_factor,
+                                 theme_col_tab_text,
+                                 theme_col_tab_text_sel,
+                                  too_narrow,
+                                  space_type);
+}
+
+static void category_tab_draw_single(const CategoryTabSingleDrawContext &ctx,
+                                     const rcti *rct,
+                                     const char *category_id,
+                                     const char *category_id_draw,
+                                     const bool is_active,
+                                     const bool is_hover,
+                                     const int current_tab_v_pad_text,
+                                     const float darken_factor,
+                                     const float bg_brighten_factor,
+                                     const float glyph_color[3])
+{
+  GPU_blend(GPU_BLEND_ALPHA);
+
+  const bool visual_effect_allowed_for_tab = category_tab_visual_effect_allowed(
+      ctx.display_mode, ctx.is_dragging, is_active);
+  const CategoryTabVisualBoxCalcResult visual_box = category_tab_visual_box_calc(
+      rct, ctx.v2d, ctx.is_left, is_active, is_hover, visual_effect_allowed_for_tab);
+  const bool is_visual_effect_active = visual_box.is_visual_effect_active;
+  const rctf &box_rect = visual_box.box_rect;
+
+  category_tab_draw_background_and_border(ctx.region,
+                                          rct,
+                                          box_rect,
+                                          is_visual_effect_active,
+                                          is_active,
+                                          ctx.is_left,
+                                          ctx.display_mode,
+                                          bg_brighten_factor,
+                                          glyph_color,
+                                          ctx.tab_curve_radius,
+                                          ctx.roundboxtype,
+                                          ctx.px,
+                                          ctx.theme_col_tab_active,
+                                          ctx.theme_col_tab_inactive,
+                                          ctx.theme_col_tab_outline,
+                                          ctx.theme_col_tab_outline_sel);
+
+  category_tab_draw_content_layer(ctx.region,
+                                  ctx.wm,
+                                  category_id,
+                                  category_id_draw,
+                                  rct,
+                                  box_rect,
+                                  is_visual_effect_active,
+                                  ctx.rct_xmin,
+                                  ctx.rct_xmax,
+                                  is_active,
+                                  ctx.is_left,
+                                  ctx.display_mode,
+                                  ctx.fontid,
+                                  ctx.fstyle,
+                                  ctx.fstyle_points,
+                                  ctx.zoom,
+                                  ctx.category_tabs_zoom,
+                                  current_tab_v_pad_text,
+                                  darken_factor,
+                                  ctx.theme_col_tab_text,
+                                  ctx.theme_col_tab_text_sel,
+                                  ctx.too_narrow,
+                                  ctx.space_type);
+}
+
+static void category_tab_draw_dispatch(const CategoryTabSingleDrawContext &ctx,
+                                       const rcti *rct,
+                                       const CategoryTabLoopDrawData &draw_data,
+                                       DeferredHoverTabDrawData &r_deferred_hover_tab_draw)
+{
+  const bool visual_effect_allowed_for_tab = category_tab_visual_effect_allowed(
+      ctx.display_mode, ctx.is_dragging, draw_data.is_active);
+
+  if (draw_data.is_hover && visual_effect_allowed_for_tab) {
+    r_deferred_hover_tab_draw.valid = true;
+    r_deferred_hover_tab_draw.rct = *rct;
+    r_deferred_hover_tab_draw.category_id = draw_data.category_id;
+    r_deferred_hover_tab_draw.category_id_draw = draw_data.category_id_draw;
+    r_deferred_hover_tab_draw.is_active = draw_data.is_active;
+    r_deferred_hover_tab_draw.current_tab_v_pad_text = draw_data.current_tab_v_pad_text;
+    r_deferred_hover_tab_draw.darken_factor = draw_data.darken_factor;
+    r_deferred_hover_tab_draw.bg_brighten_factor = draw_data.bg_brighten_factor;
+    copy_v3_v3(r_deferred_hover_tab_draw.glyph_color, draw_data.glyph_color);
+    return;
+  }
+
+  category_tab_draw_single(ctx,
+                           rct,
+                           draw_data.category_id,
+                           draw_data.category_id_draw,
+                           draw_data.is_active,
+                           draw_data.is_hover,
+                           draw_data.current_tab_v_pad_text,
+                           draw_data.darken_factor,
+                           draw_data.bg_brighten_factor,
+                           draw_data.glyph_color);
+}
+
+static void category_tab_draw_deferred_hover_flush(
+    const CategoryTabSingleDrawContext &ctx, const DeferredHoverTabDrawData &deferred_hover_tab_draw)
+{
+  if (!deferred_hover_tab_draw.valid) {
+    return;
+  }
+
+  category_tab_draw_single(ctx,
+                           &deferred_hover_tab_draw.rct,
+                           deferred_hover_tab_draw.category_id,
+                           deferred_hover_tab_draw.category_id_draw,
+                           deferred_hover_tab_draw.is_active,
+                           true,
+                           deferred_hover_tab_draw.current_tab_v_pad_text,
+                           deferred_hover_tab_draw.darken_factor,
+                           deferred_hover_tab_draw.bg_brighten_factor,
+                           deferred_hover_tab_draw.glyph_color);
+}
+
+static void category_tab_settings_draw_with_preview_shift(
+    const bContext *C,
+    ARegion *region,
+    const View2D *v2d,
+    const blender::Vector<PanelCategoryDyn *> &ordered_categories,
+    const bool is_dragging,
+    const float zoom,
+    const uchar theme_col_tab_text[3])
+{
+  if (BLI_listbase_is_empty(&region->runtime->panels_category)) {
+    return;
+  }
+
+  rcti *settings_rct_ptr = &region->runtime->category_tabs_settings_rect;
+  const rcti settings_rct_backup = *settings_rct_ptr;
+  bool settings_rect_overridden = false;
+
+  if (!is_dragging && region->runtime && region->runtime->extension_drop_preview_state.active) {
+    const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
+    if (preview.target_category_id[0] != '\0') {
+      bool preview_name_found = false;
+      for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+        if (STREQ(pc_dyn_ptr->idname, preview.target_category_id)) {
+          preview_name_found = true;
+          break;
+        }
+      }
+
+      if (preview_name_found) {
+        /* A successful drop inserts a new tab in the category stack regardless of insertion point.
+         * Keep spacing consistent by shifting Display Mode Settings down during preview. */
+        const int shift = EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad;
+        settings_rct_ptr->ymin -= shift;
+        settings_rct_ptr->ymax -= shift;
+        settings_rect_overridden = true;
+      }
+    }
+  }
+
+  if (settings_rct_ptr->ymin <= v2d->mask.ymax && settings_rct_ptr->ymax >= v2d->mask.ymin) {
+    panel_category_tabs_draw_settings_button(C, region, zoom, theme_col_tab_text);
+  }
+
+  if (settings_rect_overridden) {
+    *settings_rct_ptr = settings_rct_backup;
+  }
+}
+
+static CategoryTabSingleDrawContext category_tab_single_draw_context_build(
+    const ARegion *region,
+    const wmWindowManager *wm,
+    const View2D *v2d,
+    const int rct_xmin,
+    const int rct_xmax,
+    const bool is_left,
+    const bool is_dragging,
+    const eUserPref_CategoryTabsDisplayMode display_mode,
+    const float tab_curve_radius,
+    const int roundboxtype,
+    const int px,
+    const float theme_col_tab_active[4],
+    const float theme_col_tab_inactive[4],
+    const float theme_col_tab_outline[4],
+    const float theme_col_tab_outline_sel[4],
+    const int fontid,
+    const uiFontStyle *fstyle,
+    const float fstyle_points,
+    const float zoom,
+    const float category_tabs_zoom,
+    const uchar theme_col_tab_text[3],
+    const uchar theme_col_tab_text_sel[3],
+    const bool too_narrow,
+    const int space_type)
+{
+  CategoryTabSingleDrawContext draw_ctx{};
+  draw_ctx.region = region;
+  draw_ctx.wm = wm;
+  draw_ctx.v2d = v2d;
+  draw_ctx.rct_xmin = rct_xmin;
+  draw_ctx.rct_xmax = rct_xmax;
+  draw_ctx.is_left = is_left;
+  draw_ctx.is_dragging = is_dragging;
+  draw_ctx.display_mode = display_mode;
+  draw_ctx.tab_curve_radius = tab_curve_radius;
+  draw_ctx.roundboxtype = roundboxtype;
+  draw_ctx.px = px;
+  copy_v4_v4(draw_ctx.theme_col_tab_active, theme_col_tab_active);
+  copy_v4_v4(draw_ctx.theme_col_tab_inactive, theme_col_tab_inactive);
+  copy_v4_v4(draw_ctx.theme_col_tab_outline, theme_col_tab_outline);
+  copy_v4_v4(draw_ctx.theme_col_tab_outline_sel, theme_col_tab_outline_sel);
+  draw_ctx.fontid = fontid;
+  draw_ctx.fstyle = fstyle;
+  draw_ctx.fstyle_points = fstyle_points;
+  draw_ctx.zoom = zoom;
+  draw_ctx.category_tabs_zoom = category_tabs_zoom;
+  copy_v3_v3_uchar(draw_ctx.theme_col_tab_text, theme_col_tab_text);
+  copy_v3_v3_uchar(draw_ctx.theme_col_tab_text_sel, theme_col_tab_text_sel);
+  draw_ctx.too_narrow = too_narrow;
+  draw_ctx.space_type = space_type;
+  return draw_ctx;
+}
+
+static void category_tab_draw_dragged_with_reorder_ghost(
+    const ARegion *region,
+    const wmWindowManager *wm,
+    const blender::Vector<PanelCategoryDyn *> &ordered_categories,
+    const CategoryDragState *drag_state,
+    const char *drag_category_id,
+    const char *category_id_active,
+    const eUserPref_CategoryTabsDisplayMode display_mode,
+    const bool is_left,
+    const int tab_v_pad,
+    const int tab_v_pad_text,
+    const int roundboxtype,
+    const float tab_curve_radius,
+    const int fontid,
+    const uiFontStyle *fstyle,
+    const float fstyle_points,
+    const float zoom,
+    const float category_tabs_zoom,
+    const uchar theme_col_tab_text[3],
+    const uchar theme_col_tab_text_sel[3],
+    const float theme_col_tab_active[4],
+    const float theme_col_tab_outline_sel[4],
+    const bool too_narrow,
+    const int space_type)
+{
+  const PanelCategoryDyn *drag_tab = nullptr;
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (STREQ(pc_dyn.idname, drag_category_id)) {
+      drag_tab = &pc_dyn;
+      break;
+    }
+  }
+
+  if (!drag_tab) {
+    return;
+  }
+
+  const int insert_idx = drag_state->current_insert_index;
+  const int original_idx = drag_state->original_index;
+  const int tab_h = drag_state->drag_tab_height;
+
+  /* Find the tab at insert position to determine ghost location */
+  PanelCategoryDyn *insert_position_tab = nullptr;
+  int current_idx = 0;
+  for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+    if (STREQ(pc_dyn_ptr->idname, drag_category_id)) {
+      continue;
+    }
+    if (current_idx == insert_idx) {
+      insert_position_tab = pc_dyn_ptr;
+      break;
+    }
+    current_idx++;
+  }
+
+  /* Draw ghost tab at insert position */
+  if (insert_position_tab || insert_idx >= int(ordered_categories.size()) - 1) {
+    rcti ghost_rect = drag_tab->rect;
+
+    /* Find the tab to position relative to.
+     * If inserting before a tab, position above it.
+     * If appending (insert_position_tab is NULL), position below the last visible tab. */
+    PanelCategoryDyn *target_tab = insert_position_tab;
+    bool position_above = true;
+    int target_orig_idx = -1;
+
+    if (target_tab) {
+      /* Need to find the original index of the target tab for shift calculation */
+      int loop_idx = 0;
+      for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+        if (pc_dyn_ptr == target_tab) {
+          target_orig_idx = loop_idx;
+          break;
+        }
+        loop_idx++;
+      }
+    }
+    else {
+      /* Append case: use last visible tab */
+      int loop_idx = 0;
+      for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+        if (STREQ(pc_dyn_ptr->idname, drag_category_id)) {
+          loop_idx++;
+          continue;
+        }
+        target_tab = pc_dyn_ptr;
+        target_orig_idx = loop_idx;
+        loop_idx++;
+      }
+      position_above = false;
+    }
+
+    if (target_tab && target_orig_idx != -1) {
+      /* Calculate the visual shift that was applied to the target tab. */
+      int target_shift_y = 0;
+      if (insert_idx > original_idx) {
+        if (target_orig_idx > original_idx && target_orig_idx <= insert_idx) {
+          target_shift_y = tab_h + tab_v_pad;
+        }
+      }
+      else if (insert_idx < original_idx) {
+        if (target_orig_idx >= insert_idx && target_orig_idx < original_idx) {
+          target_shift_y = -tab_h - tab_v_pad;
+        }
+      }
+
+      /* Apply shift to target rect before calculating ghost position */
+      rcti target_rect = target_tab->rect;
+      target_rect.ymin += target_shift_y;
+      target_rect.ymax += target_shift_y;
+
+      if (position_above) {
+        /* Ghost appears above the target tab */
+        ghost_rect.ymin = target_rect.ymax + tab_v_pad;
+        ghost_rect.ymax = target_rect.ymax + tab_h + tab_v_pad;
+      }
+      else {
+        /* Ghost appears below the target tab */
+        ghost_rect.ymin = target_rect.ymin - tab_h - tab_v_pad;
+        ghost_rect.ymax = target_rect.ymin - tab_v_pad;
+      }
+    }
+
+    /* Draw ghost tab (semi-transparent placeholder at insert position) */
+    {
+      rctf ghost_box_rect;
+      ghost_box_rect.xmin = float(ghost_rect.xmin);
+      ghost_box_rect.xmax = float(ghost_rect.xmax);
+      ghost_box_rect.ymin = float(ghost_rect.ymin);
+      ghost_box_rect.ymax = float(ghost_rect.ymax);
+
+      /* Very transparent background for ghost */
+      float ghost_bg_color[4];
+      copy_v4_v4(ghost_bg_color, theme_col_tab_active);
+      ghost_bg_color[3] = 0.3f;
+
+      GPU_blend(GPU_BLEND_ALPHA);
+      draw_roundbox_corner_set(roundboxtype);
+      draw_roundbox_4fv(&ghost_box_rect, true, tab_curve_radius, ghost_bg_color);
+
+      /* Dashed outline for ghost */
+      float ghost_outline[4];
+      copy_v3_v3(ghost_outline, theme_col_tab_outline_sel);
+      ghost_outline[3] = 0.5f;
+      draw_roundbox_4fv(&ghost_box_rect, false, tab_curve_radius, ghost_outline);
+
+      GPU_blend(GPU_BLEND_NONE);
+    }
+  }
+
+  /* Calculate dragged tab position (follows cursor) */
+  rcti drag_rect = drag_tab->rect;
+  const int scroll_diff = region->category_scroll - drag_state->initial_scroll;
+  drag_rect.ymin -= scroll_diff;
+  drag_rect.ymax -= scroll_diff;
+
+  const int offset_y = int(drag_state->drag_offset_y);
+  drag_rect.ymin += offset_y;
+  drag_rect.ymax += offset_y;
+
+  rctf box_rect;
+  box_rect.xmin = float(drag_rect.xmin);
+  box_rect.xmax = float(drag_rect.xmax);
+  box_rect.ymin = float(drag_rect.ymin);
+  box_rect.ymax = float(drag_rect.ymax);
+
+  float drag_bg_color[4];
+  copy_v4_v4(drag_bg_color, theme_col_tab_active);
+  drag_bg_color[3] = 0.7f;
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  draw_roundbox_corner_set(roundboxtype);
+  draw_roundbox_4fv(&box_rect, true, tab_curve_radius, drag_bg_color);
+  draw_roundbox_4fv(&box_rect, false, tab_curve_radius, theme_col_tab_outline_sel);
+
+  /* Get glyph color for color indicator in TEXT_ONLY mode. */
+  bool is_fallback_letter = false;
+  float glyph_color[3] = {0.0f, 0.0f, 0.0f};
+  const char *category_id = drag_tab->idname;
+  panel_category_glyph_lookup(wm, category_id, nullptr, &is_fallback_letter, glyph_color, space_type);
+
+  /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
+  draw_category_tab_color_indicator(
+      &drag_rect, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator, true);
+
+  const CategoryTabRenderData render_data = category_tab_render_data_build(
+      wm, region, category_id, space_type);
+  const char *category_id_draw = render_data.category_id_draw;
+  const rcti *rct = &drag_rect;
+
+  const bool is_active_tab = category_id_active && STREQ(category_id, category_id_active);
+
+  const CategoryTabNameLayout name_layout = category_tab_name_layout_resolve(
+      region, category_id, display_mode, is_active_tab, false, false, tab_v_pad_text);
+  int current_drag_tab_v_pad_text = name_layout.tab_v_pad_text;
+
+  ui_panel_category_draw_content(region,
+                                 wm,
+                                 category_id,
+                                 category_id_draw,
+                                 rct,
+                                 rct->xmin,
+                                 rct->xmax,
+                                 is_active_tab,
+                                 is_left,
+                                 display_mode,
+                                 fontid,
+                                 fstyle,
+                                 fstyle_points,
+                                 zoom,
+                                 category_tabs_zoom,
+                                 current_drag_tab_v_pad_text,
+                                 0.0f,
+                                 theme_col_tab_text,
+                                 theme_col_tab_text_sel,
+                                 too_narrow,
+                                 space_type);
+}
+
+static const char *category_tab_extension_drop_ghost_draw(
+    const ARegion *region,
+    const View2D *v2d,
+    const blender::Vector<PanelCategoryDyn *> &ordered_categories,
+    const bool is_dragging,
+    const int rct_xmin,
+    const int rct_xmax,
+    const int roundboxtype,
+    const float tab_curve_radius,
+    const float theme_col_tab_active[4],
+    const float theme_col_tab_outline_sel[4])
+{
+  if (is_dragging || !region->runtime || !region->runtime->extension_drop_preview_state.active) {
+    return nullptr;
+  }
+
+  const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
+
+  rcti ghost_rect;
+  ghost_rect.xmin = rct_xmin;
+  ghost_rect.xmax = rct_xmax;
+
+  const int ghost_height = EXTENSION_DROP_GHOST_HEIGHT;
+
+  static double _ghost_last_log_time = 0.0;
+  static int _ghost_last_target = -999;
+  const double current_time = BLI_time_now_seconds();
+  const bool should_log = (current_time - _ghost_last_log_time > 1.0) ||
+                          (_ghost_last_target != preview.target_index);
+
+  if (should_log) {
+    printf("[EXT_GHOST] === TABS POSITIONS (top to bottom) ===\n");
+    int log_idx = 0;
+    for (PanelCategoryDyn *pc : ordered_categories) {
+      printf("[EXT_GHOST]   tab[%d] '%s' y=[%d,%d] h=%d\n",
+             log_idx,
+             pc->idname,
+             pc->rect.ymin,
+             pc->rect.ymax,
+             BLI_rcti_size_y(&pc->rect));
+      log_idx++;
+      if (log_idx > 10) {
+        printf("[EXT_GHOST]   ... (more tabs)\n");
+        break;
+      }
+    }
+    printf("[EXT_GHOST] v2d_mask: y=[%d,%d] x=[%d,%d]\n",
+           v2d->mask.ymin,
+           v2d->mask.ymax,
+           v2d->mask.xmin,
+           v2d->mask.xmax);
+    printf("[EXT_GHOST] ghost_h=%d target_idx=%d insert_above=%d\n",
+           ghost_height,
+           preview.target_index,
+           preview.insert_above ? 1 : 0);
+    printf("[EXT_GHOST] preview_state: active=%d target='%s' idx=%d insert_above=%d tab_h=%d pad=%d cursor_y=%d\n",
+           preview.active ? 1 : 0,
+           preview.target_category_id,
+           preview.target_index,
+           preview.insert_above ? 1 : 0,
+           preview.tab_height,
+           preview.tab_v_pad,
+           preview.cursor_y);
+    _ghost_last_log_time = current_time;
+    _ghost_last_target = preview.target_index;
+  }
+
+  if (preview.target_index >= 0 && preview.target_index < int(ordered_categories.size())) {
+    PanelCategoryDyn *target_tab = nullptr;
+
+    int resolved_target_index = -1;
+    if (preview.target_category_id[0] != '\0') {
+      int idx = 0;
+      for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+        if (STREQ(pc_dyn_ptr->idname, preview.target_category_id)) {
+          target_tab = pc_dyn_ptr;
+          resolved_target_index = idx;
+          break;
+        }
+        idx++;
+      }
+    }
+
+    if (!target_tab) {
+      int loop_idx = 0;
+      for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+        if (loop_idx == preview.target_index) {
+          target_tab = pc_dyn_ptr;
+          resolved_target_index = loop_idx;
+          break;
+        }
+        loop_idx++;
+      }
+      if (should_log && target_tab) {
+        printf("[EXT_GHOST] Found by INDEX fallback: '%s' at idx=%d\n",
+               target_tab->idname,
+               preview.target_index);
+      }
+    }
+
+    if (!target_tab) {
+      printf("[EXT_GHOST] SKIP: target_tab NULL for name='%s' idx=%d\n",
+             preview.target_category_id,
+             preview.target_index);
+      return "target_tab_null";
+    }
+
+    const int category_count = int(ordered_categories.size());
+    const int raw_insertion_index = (resolved_target_index >= 0) ?
+                                        (resolved_target_index + (preview.insert_above ? 0 : 1)) :
+                                        -1;
+    const int insertion_index = raw_insertion_index;
+    const int shift_space = EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad;
+
+    int slot_top_y, slot_bottom_y;
+
+    if (insertion_index == 0) {
+      slot_top_y = target_tab->rect.ymax + shift_space;
+      slot_bottom_y = target_tab->rect.ymax;
+    }
+    else if (insertion_index >= int(ordered_categories.size())) {
+      PanelCategoryDyn *last_tab = ordered_categories[int(ordered_categories.size()) - 1];
+      slot_top_y = last_tab->rect.ymin;
+      slot_bottom_y = slot_top_y - shift_space;
+    }
+    else {
+      if (preview.insert_above) {
+        slot_top_y = target_tab->rect.ymax;
+        slot_bottom_y = slot_top_y - shift_space;
+      }
+      else {
+        slot_top_y = target_tab->rect.ymin;
+        slot_bottom_y = slot_top_y - shift_space;
+      }
+    }
+
+    const int slot_center_y = (slot_top_y + slot_bottom_y) / 2;
+    const int half_ghost_height = ghost_height / 2;
+
+    ghost_rect.ymin = slot_center_y - half_ghost_height;
+    ghost_rect.ymax = slot_center_y + half_ghost_height;
+
+    if (should_log) {
+      printf("[EXT_GHOST] resolve: target='%s' stored_idx=%d resolved_idx=%d insert_above=%d raw_insertion_idx=%d insertion_idx=%d category_count=%d\n",
+             preview.target_category_id,
+             preview.target_index,
+             resolved_target_index,
+             preview.insert_above ? 1 : 0,
+             raw_insertion_index,
+             insertion_index,
+             category_count);
+      if (raw_insertion_index >= category_count && category_count > 0) {
+        printf("[EXT_GHOST] boundary: raw_insertion_idx >= category_count (using end slot below last tab)\n");
+      }
+      printf("[EXT_GHOST] insertion_idx=%d slot=[%d,%d] center=%d ghost=[%d,%d] target_rect=[%d,%d]\n",
+             insertion_index,
+             slot_bottom_y,
+             slot_top_y,
+             slot_center_y,
+             ghost_rect.ymin,
+             ghost_rect.ymax,
+             target_tab->rect.ymin,
+             target_tab->rect.ymax);
+    }
+
+    if (should_log) {
+      const int ghost_center_y = (ghost_rect.ymin + ghost_rect.ymax) / 2;
+      const int center_diff = abs(ghost_center_y - slot_center_y);
+      printf("[EXT_GHOST] FINAL: cursor_y=%d ghost=[%d,%d] center=%d slot_center=%d diff=%d target='%s'\n",
+             preview.cursor_y,
+             ghost_rect.ymin,
+             ghost_rect.ymax,
+             ghost_center_y,
+             slot_center_y,
+             center_diff,
+             target_tab->idname);
+      if (center_diff > 1) {
+        printf("[EXT_GHOST] WARNING: Ghost not centered in slot! (diff=%d px)\n", center_diff);
+      }
+    }
+  }
+  else {
+    ghost_rect.ymin = v2d->mask.ymax - ghost_height - 10;
+    ghost_rect.ymax = v2d->mask.ymax - 10;
+    if (should_log) {
+      printf("[EXT_GHOST] FINAL (no target): ghost y=[%d,%d]\n", ghost_rect.ymin, ghost_rect.ymax);
+    }
+  }
+
+  const bool ghost_in_viewport = (ghost_rect.ymax >= v2d->mask.ymin &&
+                                  ghost_rect.ymin <= v2d->mask.ymax);
+
+  if (should_log) {
+    printf("[EXT_GHOST] VIEWPORT CHECK: ghost=[%d,%d] viewport=[%d,%d] in_viewport=%d\n",
+           ghost_rect.ymin,
+           ghost_rect.ymax,
+           v2d->mask.ymin,
+           v2d->mask.ymax,
+           ghost_in_viewport ? 1 : 0);
+  }
+
+  if (!ghost_in_viewport) {
+    if (ghost_rect.ymax < v2d->mask.ymin) {
+      const int ghost_height_local = ghost_rect.ymax - ghost_rect.ymin;
+      ghost_rect.ymin = v2d->mask.ymin;
+      ghost_rect.ymax = v2d->mask.ymin + ghost_height_local;
+    }
+    else if (ghost_rect.ymin > v2d->mask.ymax) {
+      const int ghost_height_local = ghost_rect.ymax - ghost_rect.ymin;
+      ghost_rect.ymax = v2d->mask.ymax;
+      ghost_rect.ymin = v2d->mask.ymax - ghost_height_local;
+    }
+
+    if (should_log) {
+      printf("[EXT_GHOST] CLAMPED: ghost=[%d,%d]\n", ghost_rect.ymin, ghost_rect.ymax);
+    }
+  }
+
+  rctf ghost_box_rect;
+  ghost_box_rect.xmin = float(ghost_rect.xmin);
+  ghost_box_rect.xmax = float(ghost_rect.xmax);
+  ghost_box_rect.ymin = float(ghost_rect.ymin);
+  ghost_box_rect.ymax = float(ghost_rect.ymax);
+
+  float ghost_bg_color[4];
+  copy_v4_v4(ghost_bg_color, theme_col_tab_active);
+  ghost_bg_color[3] = 0.5f;
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  draw_roundbox_corner_set(roundboxtype);
+  draw_roundbox_4fv(&ghost_box_rect, true, tab_curve_radius, ghost_bg_color);
+
+  float ghost_outline[4];
+  copy_v3_v3(ghost_outline, theme_col_tab_outline_sel);
+  ghost_outline[3] = 0.8f;
+  draw_roundbox_4fv(&ghost_box_rect, false, tab_curve_radius, ghost_outline);
+
+  GPU_blend(GPU_BLEND_NONE);
+  if (should_log) {
+    printf("[EXT_GHOST] DRAWN: ghost_rect=[%d,%d]-[%d,%d]\n",
+           ghost_rect.xmin,
+           ghost_rect.ymin,
+           ghost_rect.xmax,
+           ghost_rect.ymax);
+  }
+
+  return nullptr;
+}
+
 static void ui_panel_category_draw_content(
     const ARegion *region,
     const wmWindowManager *wm,
@@ -4203,25 +5681,9 @@ static void ui_panel_category_draw_content(
     const bool is_panel_minimized,
     const int space_type)
 {
-  const bool display_mode_allows_icon_content = ELEM(
-      display_mode, USER_CATEGORY_TABS_GLYPHS_ONLY, USER_CATEGORY_TABS_GLYPHS_TEXT);
-
-  CategoryTabIconResolved icon_resolved;
-  panel_category_icon_data_lookup(wm, category_id, &icon_resolved, space_type);
-  const int resolved_icon_id = category_tab_icon_id_resolve(icon_resolved);
-
-  bool icon_data_allows_icon_content = (icon_resolved.source != CATEGORY_TAB_ICON_SOURCE_OFF);
-  if (icon_resolved.source == CATEGORY_TAB_ICON_SOURCE_MANUAL) {
-    /* In manual mode require explicit key/path input, otherwise use glyph fallback. */
-    icon_data_allows_icon_content = (icon_resolved.key && icon_resolved.key[0] != '\0') ||
-                                    (icon_resolved.path && icon_resolved.path[0] != '\0');
-  }
-
-  const bool use_builtin_icon =
-      display_mode_allows_icon_content && icon_data_allows_icon_content && (resolved_icon_id != ICON_NONE);
   const float tab_font_size = fstyle_points * UI_SCALE_FAC * category_tabs_zoom;
-  const bool is_being_edited_in_dialog = !is_active &&
-                                         category_tab_edit_dialog_is_open_for_category(category_id);
+  const bool is_being_edited_in_dialog =
+      category_tab_edit_dialog_is_open_for_category(category_id);
   const float draw_darken_factor = is_being_edited_in_dialog ? 0.0f : darken_factor;
 
   bool is_fallback_letter = false;
@@ -4229,16 +5691,14 @@ static void ui_panel_category_draw_content(
   const char *glyph = panel_category_glyph_lookup(
       wm, category_id, nullptr, &is_fallback_letter, glyph_color, space_type);
 
-  /* Use live preview color when dialog is open for this category */
-  if (is_being_edited_in_dialog && !is_zero_v3(category_tab_preview_color)) {
+  /* Use live preview glyph and color when dialog is open for this category */
+  if (is_being_edited_in_dialog) {
+    if (category_tab_preview_glyph[0] != '\0') {
+      glyph = category_tab_preview_glyph;
+      is_fallback_letter = (category_tab_preview_first_letter[0] != '\0') &&
+                           STREQ(category_tab_preview_glyph, category_tab_preview_first_letter);
+    }
     copy_v3_v3(glyph_color, category_tab_preview_color);
-  }
-
-  /* Safety net for built-in icons:
-   * icon tint must use category custom color even when glyph lookup resolves through
-   * fallback branches that may leave color unset in transient live-preview states. */
-  if (use_builtin_icon && is_zero_v3(glyph_color)) {
-    panel_category_color_lookup(wm, category_id, glyph_color);
   }
 
   /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
@@ -4262,23 +5722,28 @@ static void ui_panel_category_draw_content(
 
   const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
 
-  /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS --- */
-  /* In Mixed mode, apply per-content-type visibility flags.
-   * To remove this feature: replace these effective variables with their source values
-   * (e.g., mixed_mode_effective_has_glyph -> has_glyph) and delete this block. */
-  const bool mixed_mode_effective_has_glyph =
-      has_glyph && U.category_tabs_mixed_show_glyphs;
+  const CategoryTabMixedContentFlags mixed_content_flags = category_tab_mixed_content_flags_resolve(
+      wm, category_id, display_mode, space_type, has_glyph, is_fallback_letter);
+  const int resolved_icon_id = mixed_content_flags.resolved_icon_id;
+  const bool use_builtin_icon = mixed_content_flags.use_builtin_icon;
+  const bool mixed_mode_effective_has_glyph = mixed_content_flags.mixed_mode_effective_has_glyph;
   const bool mixed_mode_effective_fallback_letter =
-      is_fallback_letter && U.category_tabs_mixed_show_first_letter;
+      mixed_content_flags.mixed_mode_effective_fallback_letter;
   const bool mixed_mode_effective_builtin_icon =
-      use_builtin_icon && U.category_tabs_mixed_show_icons;
-
-  /* For draw_dual in Mixed mode: show glyph/letter/icon + text if any glyph content is visible.
-   * To remove: replace with `(has_glyph || is_fallback_letter || use_builtin_icon)` */
+      mixed_content_flags.mixed_mode_effective_builtin_icon;
   const bool mixed_mode_has_visible_glyph_content =
-      mixed_mode_effective_has_glyph || mixed_mode_effective_fallback_letter ||
-      mixed_mode_effective_builtin_icon;
-  /* --- END: MIXED_MODE_CONTENT_FLAGS --- */
+      mixed_content_flags.mixed_mode_has_visible_glyph_content;
+
+  /* Safety net for built-in icons:
+   * icon tint must use category custom color even when glyph lookup resolves through
+   * fallback branches that may leave color unset in transient live-preview states. */
+  if (use_builtin_icon && is_zero_v3(glyph_color)) {
+    const bool preview_explicit_no_color = is_being_edited_in_dialog &&
+                                           is_zero_v3(category_tab_preview_color);
+    if (!preview_explicit_no_color) {
+      panel_category_color_lookup(wm, category_id, glyph_color);
+    }
+  }
 
   const bool use_reserved_inactive_icon_only =
       U.category_tabs_hide_reserved_inactive_text && !is_active &&
@@ -4286,23 +5751,12 @@ static void ui_panel_category_draw_content(
       category_is_reserved_for_reorder(wm, category_id) && has_glyph;
 
   bool draw_dual = false;
-  const char *text_for_name = category_id_draw;
+  const char *text_for_name = category_tab_draw_label_resolve(region, category_id, category_id_draw);
 
   if (display_mode == USER_CATEGORY_TABS_GLYPHS_TEXT && !use_reserved_inactive_icon_only &&
       mixed_mode_has_visible_glyph_content)
   {
     draw_dual = true;
-    if (is_single_glyph_str(text_for_name)) {
-      for (const PanelType &pt : region->runtime->type->paneltypes) {
-        if (pt.category && STREQ(pt.category, category_id)) {
-          const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-          if (panel_label && panel_label[0]) {
-            text_for_name = panel_label;
-            break;
-          }
-        }
-      }
-    }
   }
   else if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
            U.category_tabs_show_active_name &&
@@ -4320,17 +5774,6 @@ static void ui_panel_category_draw_content(
                                      STREQ(category_id, region->runtime->category_tabs_previous_active_id));
     if ((is_active || is_previous_active) && (has_glyph || is_fallback_letter)) {
       draw_dual = true;
-      if (is_single_glyph_str(category_id_draw)) {
-        for (const PanelType &pt : region->runtime->type->paneltypes) {
-          if (pt.category && STREQ(pt.category, category_id)) {
-            const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-            if (panel_label && panel_label[0]) {
-              text_for_name = panel_label;
-              break;
-            }
-          }
-        }
-      }
     }
   }
 
@@ -5057,43 +6500,30 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
    * This is a safe point to activate categories after panel layout is complete. */
   deferred_category_activation_execute(C, region);
 
-
-  const ScrArea *area = CTX_wm_area(C);
-  const int space_type = area ? area->spacetype : -1;
-  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
-  View2D *v2d = &region->v2d;
-  const uiStyle *style = style_get();
-  const uiFontStyle *fstyle = &style->widget;
+  const CategoryTabsDrawContext draw_ctx = category_tabs_draw_context_build(C, region);
+  const int space_type = draw_ctx.space_type;
+  const bool is_left = draw_ctx.is_left;
+  View2D *v2d = draw_ctx.v2d;
+  const uiFontStyle *fstyle = draw_ctx.fstyle;
   fontstyle_set(fstyle);
-  const int fontid = fstyle->uifont_id;
-  float fstyle_points = fstyle->points;
-  const float raw_aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
-                           1.0f :
-                           (static_cast<Block *>(region->runtime->uiblocks.first))->aspect;
-  /* Stabilize aspect: if very close to 1.0, use exactly 1.0 to avoid floating-point oscillation.
-   * This prevents tab size jitter when aspect oscillates between 1.0 and 1.0000001. */
-  const float aspect = (std::abs(raw_aspect - 1.0f) < 0.001f) ? 1.0f : raw_aspect;
+  const int fontid = draw_ctx.fontid;
+  float fstyle_points = draw_ctx.fstyle_points;
+  const float aspect = draw_ctx.aspect;
 
   CategoryDragState *drag_state = static_cast<CategoryDragState *>(
       region->runtime->category_tabs_drag_state);
   const bool is_dragging = (drag_state != nullptr && drag_state->is_dragging);
   const char *drag_category_id = is_dragging ? drag_state->drag_category_id : "";
 
-  const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
-
-  const float category_tabs_zoom = category_tabs_zoom_value_get(area, display_mode);
-  const float zoom = (1.0f / aspect) * category_tabs_zoom;
-
-  const wmWindowManager *wm = CTX_wm_manager(C);
-
-  const int px = U.pixelsize;
-  const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
-  const float dpi_fac = UI_SCALE_FAC;
-  /* Calculate too_narrow early - needed for width calculation in first loop */
-  const int category_tabs_min_width = category_tabs_min_width_get(area, aspect, display_mode);
-  const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_width;
-  const int tab_v_pad_text = int(std::floor(TABS_PADDING_TEXT_FACTOR * dpi_fac * zoom)) + 2 * px;
-  const int tab_v_pad = category_tabs_vertical_padding_calc(zoom);
+  const eUserPref_CategoryTabsDisplayMode display_mode = draw_ctx.display_mode;
+  const float category_tabs_zoom = draw_ctx.category_tabs_zoom;
+  const float zoom = draw_ctx.zoom;
+  const wmWindowManager *wm = draw_ctx.wm;
+  const int px = draw_ctx.px;
+  const int category_tabs_width = draw_ctx.category_tabs_width;
+  const bool too_narrow = draw_ctx.too_narrow;
+  const int tab_v_pad_text = draw_ctx.tab_v_pad_text;
+  const int tab_v_pad = draw_ctx.tab_v_pad;
 
   /* Update drag_state->tab_v_pad during drag to ensure correct shift calculations.
    * This must be done before the draw loop because calculate_insert_index and
@@ -5166,8 +6596,11 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
   for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
     PanelCategoryDyn &pc_dyn = *pc_dyn_ptr;
     rcti *rct = &pc_dyn.rect;
-    const char *category_id = pc_dyn.idname;
-    const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id, space_type));
+    const CategoryTabRenderData render_data = category_tab_render_data_build(
+        wm, region, pc_dyn.idname, space_type);
+    const char *category_id = render_data.category_id;
+    const char *category_id_draw = render_data.category_id_draw;
+    const char *category_id_draw_label = render_data.category_id_draw_label;
     /* When panel is minimized (too_narrow), the active tab should not expand */
     const bool is_active = !too_narrow && category_id_active && STREQ(category_id, category_id_active);
 
@@ -5175,6 +6608,14 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     float glyph_color[3] = {0.0f, 0.0f, 0.0f};
     const char *glyph = panel_category_glyph_lookup(
         wm, category_id, nullptr, &is_fallback_letter, glyph_color, space_type);
+    if (category_tab_edit_dialog_is_open_for_category(category_id)) {
+      if (category_tab_preview_glyph[0] != '\0') {
+        glyph = category_tab_preview_glyph;
+        is_fallback_letter = (category_tab_preview_first_letter[0] != '\0') &&
+                             STREQ(category_tab_preview_glyph, category_tab_preview_first_letter);
+      }
+      copy_v3_v3(glyph_color, category_tab_preview_color);
+    }
 
     /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
     char fallback_glyph_buf[8];
@@ -5197,35 +6638,10 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
     const bool has_glyph = is_single_glyph_str(glyph) && !is_fallback_letter;
 
-    /* --- BEGIN: MIXED_MODE_CONTENT_FLAGS (width calculation) --- */
-    /* Resolve icon for this category (needed for Mixed mode width calculation with flags).
-     * To remove this feature: delete this icon resolution block and the effective flags below,
-     * then replace mixed_mode_has_visible_glyph_content with (has_glyph || is_fallback_letter). */
-    const bool display_mode_allows_icon_content = ELEM(
-        display_mode, USER_CATEGORY_TABS_GLYPHS_ONLY, USER_CATEGORY_TABS_GLYPHS_TEXT);
-    CategoryTabIconResolved icon_resolved;
-    panel_category_icon_data_lookup(wm, category_id, &icon_resolved, space_type);
-    const int resolved_icon_id = category_tab_icon_id_resolve(icon_resolved);
-    bool icon_data_allows_icon_content = (icon_resolved.source != CATEGORY_TAB_ICON_SOURCE_OFF);
-    if (icon_resolved.source == CATEGORY_TAB_ICON_SOURCE_MANUAL) {
-      icon_data_allows_icon_content = (icon_resolved.key && icon_resolved.key[0] != '\0') ||
-                                      (icon_resolved.path && icon_resolved.path[0] != '\0');
-    }
-    const bool use_builtin_icon =
-        display_mode_allows_icon_content && icon_data_allows_icon_content && (resolved_icon_id != ICON_NONE);
-
-    /* In Mixed mode, apply per-content-type visibility flags. */
-    const bool mixed_mode_effective_has_glyph =
-        has_glyph && U.category_tabs_mixed_show_glyphs;
-    const bool mixed_mode_effective_fallback_letter =
-        is_fallback_letter && U.category_tabs_mixed_show_first_letter;
-    const bool mixed_mode_effective_builtin_icon =
-        use_builtin_icon && U.category_tabs_mixed_show_icons;
-    /* For width calculation in Mixed mode: consider glyph visible if any content type is enabled. */
+    const CategoryTabMixedContentFlags mixed_content_flags = category_tab_mixed_content_flags_resolve(
+        wm, category_id, display_mode, space_type, has_glyph, is_fallback_letter);
     const bool mixed_mode_has_visible_glyph_content =
-        mixed_mode_effective_has_glyph || mixed_mode_effective_fallback_letter ||
-        mixed_mode_effective_builtin_icon;
-    /* --- END: MIXED_MODE_CONTENT_FLAGS (width calculation) --- */
+        mixed_content_flags.mixed_mode_has_visible_glyph_content;
 
     const bool use_reserved_inactive_icon_only =
         U.category_tabs_hide_reserved_inactive_text && !is_active &&
@@ -5242,48 +6658,19 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
         /* Use glyph height (without rotation) for consistent sizing with GLYPHS_TEXT mode. */
         category_width = glyph_h;
 
-        /* Determine if this tab should expand to show the name.
-         * Show name for active tab OR for the previous active tab (only in minimized state for STICKY mode).
-         *
-         * In DEFAULT inactive behavior mode: previous_active tab should NOT expand (stays glyph-only).
-         * In STICKY inactive behavior mode: previous_active tab expands to show name ONLY when panel is minimized.
-         */
-        const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
-        const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
-                                     U.category_tabs_show_active_name);
-        /* Only use previous_active when BOTH sticky inactive AND sticky mode are enabled */
-        const bool can_show_previous = is_sticky_inactive && is_sticky_mode;
-        const bool is_previous_active_raw = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
-                                             STREQ(category_id, region->runtime->category_tabs_previous_active_id));
-        const bool is_previous_active = can_show_previous && too_narrow && is_previous_active_raw;
-        /* Active tab can expand in sticky mode. Previous active tab can expand only in sticky inactive mode. */
-        const bool should_expand_name = ((is_sticky_mode || is_active) &&
-                                         U.category_tabs_show_active_name &&
-                                         !region->runtime->category_tabs_active_name_hidden &&
-                                         (is_active || is_previous_active));
+        const CategoryTabNameLayout name_layout = category_tab_name_layout_resolve(
+            region, category_id, display_mode, is_active, true, too_narrow, tab_v_pad_text);
+        const bool should_expand_name = name_layout.should_expand_name;
+        current_tab_v_pad_text = name_layout.tab_v_pad_text;
 
-        if (U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_BOX) {
-          if (!should_expand_name) {
-            /* Box shape without name: use square size with no padding */
-            current_tab_v_pad_text = 0;
-            category_width = square_size + 3.0; // Add padding for Box shape(No change value 3.0!)
-          }
+        if (current_tab_v_pad_text == 0) {
+          /* Box shape without name: use square size with no padding */
+          category_width = square_size + 3.0; // Add padding for Box shape(No change value 3.0!)
         }
 
         if (should_expand_name) {
           /* Get text width for name expansion */
-          const char *text_for_name = category_id_draw;
-          if (is_single_glyph_str(category_id_draw)) {
-            for (const PanelType &pt : region->runtime->type->paneltypes) {
-              if (pt.category && STREQ(pt.category, category_id)) {
-                const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-                if (panel_label && panel_label[0]) {
-                  text_for_name = panel_label;
-                  break;
-                }
-              }
-            }
-          }
+          const char *text_for_name = category_id_draw_label;
           BLF_enable(fontid, BLF_ROTATION);
           BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
           const int text_w = round_fl_to_int(
@@ -5304,19 +6691,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
           break;
         }
 
-        const char *text_for_width = category_id_draw;
+        const char *text_for_width = category_id_draw_label;
         if (mixed_mode_has_visible_glyph_content) {
-          if (is_single_glyph_str(text_for_width)) {
-            for (const PanelType &pt : region->runtime->type->paneltypes) {
-              if (pt.category && STREQ(pt.category, category_id)) {
-                const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-                if (panel_label && panel_label[0]) {
-                  text_for_width = panel_label;
-                  break;
-                }
-              }
-            }
-          }
           const int glyph_h = round_fl_to_int(BLF_height(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX));
           BLF_enable(fontid, BLF_ROTATION);
           BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
@@ -5336,18 +6712,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
            *     BLF_enable(fontid, BLF_ROTATION); ... category_width = BLF_width(...);
            *   }
            */
-          const char *text_for_size = category_id_draw;
-          if (is_single_glyph_str(category_id_draw)) {
-            for (const PanelType &pt : region->runtime->type->paneltypes) {
-              if (pt.category && STREQ(pt.category, category_id)) {
-                const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-                if (panel_label && panel_label[0]) {
-                  text_for_size = panel_label;
-                  break;
-                }
-              }
-            }
-          }
+          const char *text_for_size = category_id_draw_label;
           BLF_enable(fontid, BLF_ROTATION);
           BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
           category_width = round_fl_to_int(
@@ -5365,18 +6730,7 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
           break;
         }
 
-        const char *text_for_size = category_id_draw;
-        if (is_single_glyph_str(category_id_draw)) {
-          for (const PanelType &pt : region->runtime->type->paneltypes) {
-            if (pt.category && STREQ(pt.category, category_id)) {
-              const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-              if (panel_label && panel_label[0]) {
-                text_for_size = panel_label;
-                break;
-              }
-            }
-          }
-        }
+        const char *text_for_size = category_id_draw_label;
         BLF_enable(fontid, BLF_ROTATION);
         BLF_rotation(fontid, is_left ? M_PI_2 : -M_PI_2);
         category_width = round_fl_to_int(BLF_width(fontid, text_for_size, BLF_DRAW_STR_DUMMY_MAX));
@@ -5446,195 +6800,32 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
   /* too_narrow was calculated earlier for use in width calculation */
 
-  struct DeferredHoverTabDrawData {
-    bool valid = false;
-    rcti rct = {};
-    const char *category_id = nullptr;
-    const char *category_id_draw = nullptr;
-    bool is_active = false;
-    int current_tab_v_pad_text = 0;
-    float darken_factor = 0.0f;
-    float bg_brighten_factor = 0.0f;
-    float glyph_color[3] = {0.0f, 0.0f, 0.0f};
-  };
-
   DeferredHoverTabDrawData deferred_hover_tab_draw;
-
-  const auto draw_single_category_tab = [&](const rcti *rct,
-                                            const char *category_id,
-                                            const char *category_id_draw,
-                                            const bool is_active,
-                                            const bool is_hover,
-                                            const int current_tab_v_pad_text,
-                                            const float darken_factor,
-                                            const float bg_brighten_factor,
-                                            const float glyph_color[3]) {
-    GPU_blend(GPU_BLEND_ALPHA);
-
-    // --- BEGIN: TABS_VISUAL_EFFECT_OVERLAP ---
-    /* Visual effect: expand tab on hover/active.
-     * The tab expands by consuming padding from neighbors first, then overlapping.
-     * This keeps the tab grid stable (no jitter) while providing visual feedback.
-     */
-    bool is_visual_effect_active = false;
-    rctf box_rect;
-    box_rect.xmin = float(rct->xmin);
-    box_rect.xmax = float(rct->xmax);
-    box_rect.ymin = float(rct->ymin);
-    box_rect.ymax = float(rct->ymax);
-
-    /* Allow visual effect even when "Show Active Tab Name" is enabled, but skip the
-     * active tab to avoid stretching the expanded label layout. */
-    const bool visual_effect_allowed_for_tab = (U.category_tabs_visual_effect &&
-                                                display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
-                                                !is_dragging &&
-                                                (!U.category_tabs_show_active_name || !is_active));
-
-    if (visual_effect_allowed_for_tab)
-    {
-      if (is_active || is_hover) {
-        is_visual_effect_active = true;
-
-        /* Vertical expansion: scale height by UI_TABS_VISUAL_EFFECT_SCALE (1.2) */
-        const int tab_height = rct->ymax - rct->ymin;
-        const int expanded_height = round_fl_to_int(tab_height * UI_TABS_VISUAL_EFFECT_SCALE);
-        const int extra_height = expanded_height - tab_height;
-
-        /* Distribute extra height equally: half up, half down */
-        int extra_top = extra_height / 2;
-        int extra_bottom = extra_height - extra_top;
-
-        const int available_top = std::max(v2d->mask.ymax - rct->ymax, 0);
-        const int available_bottom = std::max(rct->ymin - v2d->mask.ymin, 0);
-        extra_top = std::min(extra_top, available_top);
-        extra_bottom = std::min(extra_bottom, available_bottom);
-
-        /* Expand vertically (consumes padding first, then overlaps neighbors) */
-        box_rect.ymin -= extra_bottom;
-        box_rect.ymax += extra_top;
-
-        /* Horizontal expansion: expand away from the panel edge */
-        const int tab_width = rct->xmax - rct->xmin;
-        const int expanded_width = round_fl_to_int(tab_width * UI_TABS_VISUAL_EFFECT_SCALE);
-        const int extra_width = expanded_width - tab_width;
-        const int available_extra_width = is_left ? std::max(v2d->mask.xmax - rct->xmax, 0) :
-                                                    std::max(rct->xmin - v2d->mask.xmin, 0);
-        const int applied_extra_width = std::min(extra_width, available_extra_width);
-
-        if (is_left) {
-          box_rect.xmax += applied_extra_width;
-        }
-        else {
-          box_rect.xmin -= applied_extra_width;
-        }
-      }
-    }
-    // --- END: TABS_VISUAL_EFFECT_OVERLAP ---
-
-    {
-      draw_roundbox_corner_set(roundboxtype);
-
-      float tab_bg_color[4];
-      if (is_active) {
-        copy_v4_v4(tab_bg_color, theme_col_tab_active);
-      }
-      else {
-        copy_v4_v4(tab_bg_color, theme_col_tab_inactive);
-        brighten_color_4fv(tab_bg_color, bg_brighten_factor);
-      }
-
-      draw_roundbox_4fv(&box_rect, true, tab_curve_radius, tab_bg_color);
-      draw_roundbox_4fv(&box_rect,
-                        false,
-                        tab_curve_radius,
-                        is_active ? theme_col_tab_outline_sel : theme_col_tab_outline);
-
-#if CATEGORY_TAB_VISUAL_ACTIVE_OUTLINE_ENABLE
-      const bool is_visual_active_outline = is_visual_effect_active && is_active &&
-                                            U.category_tabs_visual_outline;
-      if (is_visual_active_outline) {
-        float visual_outline_color[4];
-        rgba_uchar_to_float(visual_outline_color, U.category_tabs_visual_outline_color);
-        const float visual_outline_width = float(px) + 0.5f;
-        draw_roundbox_4fv_ex(&box_rect,
-                             nullptr,
-                             nullptr,
-                             1.0f,
-                             visual_outline_color,
-                             visual_outline_width,
-                             tab_curve_radius);
-      }
-#endif
-
-      /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
-      draw_category_tab_color_indicator(
-          rct, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator, is_active);
-
-      if (!region->overlap) {
-        pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
-        immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-        immUniformColor4fv(tab_bg_color);
-        /* Use expanded box_rect when visual effect is active, otherwise use standard rct */
-        if (is_visual_effect_active) {
-          immRectf(pos,
-                   is_left ? box_rect.xmax - px : box_rect.xmin,
-                   box_rect.ymin + px,
-                   is_left ? box_rect.xmax : box_rect.xmin + px,
-                   box_rect.ymax - px);
-        }
-        else {
-          immRectf(pos,
-                   is_left ? rct->xmax - px : rct->xmin,
-                   rct->ymin + px,
-                   is_left ? rct->xmax : rct->xmin + px,
-                   rct->ymax - px);
-        }
-        immUnbindProgram();
-      }
-    }
-
-    /* Prepare expanded rect for content drawing when visual effect is active */
-    rcti expanded_rct;
-    const rcti *content_rct;
-    if (is_visual_effect_active) {
-      expanded_rct.xmin = int(box_rect.xmin);
-      expanded_rct.xmax = int(box_rect.xmax);
-      expanded_rct.ymin = int(box_rect.ymin);
-      expanded_rct.ymax = int(box_rect.ymax);
-      content_rct = &expanded_rct;
-    }
-    else {
-      content_rct = rct;
-    }
-
-    float current_category_tabs_zoom = category_tabs_zoom;
-    if (is_visual_effect_active) {
-      current_category_tabs_zoom *= UI_TABS_VISUAL_EFFECT_SCALE;
-    }
-
-    ui_panel_category_draw_content(region,
-                                   wm,
-                                   category_id,
-                                   category_id_draw,
-                                   content_rct,
-                                   rct_xmin,
-                                   rct_xmax,
-                                   is_active,
-                                   is_left,
-                                   display_mode,
-                                   fontid,
-                                   fstyle,
-                                   fstyle_points,
-                                   zoom,
-                                   current_category_tabs_zoom,
-                                   current_tab_v_pad_text,
-                                   darken_factor,
-                                   theme_col_tab_text,
-                                   theme_col_tab_text_sel,
-                                   too_narrow,
-                                   space_type);
-  };
+  const CategoryTabSingleDrawContext single_draw_ctx = category_tab_single_draw_context_build(
+      region,
+      wm,
+      v2d,
+      rct_xmin,
+      rct_xmax,
+      is_left,
+      is_dragging,
+      display_mode,
+      tab_curve_radius,
+      roundboxtype,
+      px,
+      theme_col_tab_active,
+      theme_col_tab_inactive,
+      theme_col_tab_outline,
+      theme_col_tab_outline_sel,
+      fontid,
+      fstyle,
+      fstyle_points,
+      zoom,
+      category_tabs_zoom,
+      theme_col_tab_text,
+      theme_col_tab_text_sel,
+      too_narrow,
+      space_type);
 
   int current_display_index = 0;
 
@@ -5646,115 +6837,8 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
       continue;
     }
 
-    int y_shift = 0;
-    if (is_dragging && !drag_state->is_reserved) {
-      const int insert_idx = drag_state->current_insert_index;
-      const int original_idx = drag_state->original_index;
-
-      if (insert_idx > original_idx) {
-        if (current_display_index > original_idx && current_display_index <= insert_idx) {
-          y_shift = drag_state->drag_tab_height + tab_v_pad;
-        }
-      }
-      else if (insert_idx < original_idx) {
-        if (current_display_index >= insert_idx && current_display_index < original_idx) {
-          y_shift = -drag_state->drag_tab_height - tab_v_pad;
-        }
-      }
-    }
-    else if (!is_dragging && region->runtime &&
-             region->runtime->extension_drop_preview_state.active)
-    {
-      const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
-      bool preview_name_found = false;
-      int preview_name_idx = -1;
-      if (preview.target_category_id[0] != '\0') {
-        int idx = 0;
-        for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
-          if (STREQ(pc_dyn_ptr->idname, preview.target_category_id)) {
-            preview_name_found = true;
-            preview_name_idx = idx;
-            break;
-          }
-          idx++;
-        }
-      }
-
-      const bool preview_fallback_used = false;
-      /* Use unified insertion slot model consistently */
-      int raw_insertion_index = preview_name_found ? 
-                                  (preview_name_idx + (preview.insert_above ? 0 : 1)) : 
-                                  -1;
-      /* Prevent creating slots beyond existing tabs */
-      const int insertion_index = (raw_insertion_index >= 0 && raw_insertion_index > int(ordered_categories.size())) ?
-                                   int(ordered_categories.size()) : raw_insertion_index;
-
-      static double _ext_shift_last_log_time = 0.0;
-      static int _ext_shift_last_stored_idx = -999;
-      static int _ext_shift_last_resolved_idx = -999;
-      static bool _ext_shift_last_insert_above = false;
-      static bool _ext_shift_last_name_found = false;
-      static int _ext_shift_last_raw_insertion_idx = -999;
-      static int _ext_shift_last_category_count = -999;
-      const double shift_log_time = BLI_time_now_seconds();
-      const bool shift_should_log = (shift_log_time - _ext_shift_last_log_time > 1.0) ||
-                                    (_ext_shift_last_stored_idx != preview.target_index) ||
-                                    (_ext_shift_last_resolved_idx != preview_name_idx) ||
-                                    (_ext_shift_last_insert_above != preview.insert_above) ||
-                                    (_ext_shift_last_name_found != preview_name_found) ||
-                                    (_ext_shift_last_raw_insertion_idx != raw_insertion_index) ||
-                                    (_ext_shift_last_category_count != int(ordered_categories.size()));
-      if (shift_should_log) {
-        const int category_count = int(ordered_categories.size());
-        const int max_valid_index = category_count - 1;
-        printf("[EXT_SHIFT] target='%s' stored_idx=%d name_found=%d name_idx=%d "
-               "insert_above=%d raw_insertion_idx=%d insertion_idx=%d category_count=%d max_valid_idx=%d shift=%d\n",
-               preview.target_category_id,
-               preview.target_index,
-               preview_name_found ? 1 : 0,
-               preview_name_idx,
-               preview.insert_above ? 1 : 0,
-               raw_insertion_index,
-               insertion_index,
-               category_count,
-               max_valid_index,
-               EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad);
-        if (raw_insertion_index >= category_count && category_count > 0) {
-          printf("[EXT_SHIFT] boundary: raw_insertion_idx >= category_count (end-insert path)\n");
-        }
-        if (!preview_name_found && preview.target_category_id[0] != '\0') {
-          printf("[EXT_SHIFT] resolve_warning: target name not found, stored_idx=%d fallback_used=%d\n",
-                 preview.target_index,
-                 preview_fallback_used ? 1 : 0);
-        }
-        _ext_shift_last_log_time = shift_log_time;
-        _ext_shift_last_stored_idx = preview.target_index;
-        _ext_shift_last_resolved_idx = preview_name_idx;
-        _ext_shift_last_insert_above = preview.insert_above;
-        _ext_shift_last_name_found = preview_name_found;
-        _ext_shift_last_raw_insertion_idx = raw_insertion_index;
-        _ext_shift_last_category_count = int(ordered_categories.size());
-      }
-
-      /* UNIFIED INSERTION SLOT MODEL:
-       * insertion_index = target_index + (insert_above ? 0 : 1)
-       * Shift tabs >= insertion_index down to create space for new tab.
-       * This creates a consistent slot between tabs at insertion_index-1 and insertion_index. */
-      if (insertion_index >= 0 && current_display_index >= insertion_index) {
-        /* Always shift DOWN to create space above the insertion point.
-         * Use negative y_shift because in Blender's coordinate system:
-         * - Positive Y values are at the top of screen
-         * - Adding positive value shifts rect UP, negative shifts DOWN */
-        y_shift = -(EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad);
-        if (shift_should_log) {
-          printf("[EXT_SHIFT] apply: tab='%s' display_idx=%d >= insertion_idx=%d y_shift=%d\n",
-                 pc_dyn.idname,
-                 current_display_index,
-                 insertion_index,
-                 y_shift);
-        }
-      }
-    }
+    const int y_shift = category_tab_y_shift_resolve(
+        region, ordered_categories, pc_dyn, is_dragging, drag_state, current_display_index, tab_v_pad);
 
     rcti shifted_rect = pc_dyn.rect;
     shifted_rect.ymin += y_shift;
@@ -5769,84 +6853,19 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     if (rct->ymax < v2d->mask.ymin) {
       break;
     }
-    const char *category_id = pc_dyn.idname;
-    const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id, space_type));
-    const bool is_active = !too_narrow && category_id_active && STREQ(category_id, category_id_active);
-
-    /* Determine if this tab should expand to show the name.
-     * Show name for active tab OR for the previous active tab (only in minimized state for STICKY mode).
-     *
-     * In DEFAULT mode: previous_active tab should NOT expand (stays glyph-only).
-     * In STICKY inactive behavior mode: previous_active tab expands to show name ONLY when panel is minimized (too_narrow).
-     */
-    const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
-    const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
-                                 U.category_tabs_show_active_name);
-    const bool can_show_previous = is_sticky_inactive && is_sticky_mode;
-    const bool is_previous_active_raw = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
-                                         STREQ(category_id, region->runtime->category_tabs_previous_active_id));
-    const bool is_previous_active = can_show_previous && too_narrow && is_previous_active_raw;
-    const bool should_expand_name = ((is_sticky_mode || is_active) &&
-                                     U.category_tabs_show_active_name &&
-                                     !region->runtime->category_tabs_active_name_hidden &&
-                                     (is_active || is_previous_active));
-
-    int current_tab_v_pad_text = tab_v_pad_text;
-    if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
-        U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_BOX)
-    {
-      if (!should_expand_name) {
-        current_tab_v_pad_text = 0;
-      }
-    }
-
-    /* Get glyph color for color indicator in TEXT_ONLY mode. */
-    bool is_fallback_letter = false;
-    float glyph_color[3] = {0.0f, 0.0f, 0.0f};
-    panel_category_glyph_lookup(
-        wm, category_id, nullptr, &is_fallback_letter, glyph_color, space_type);
-
+    const CategoryTabLoopDrawData draw_data = category_tab_loop_draw_data_build(wm,
+                                                                                 region,
+                                                                                 rct,
+                                                                                 pc_dyn.idname,
+                                                                                 category_id_active,
+                                                                                 display_mode,
+                                                                                 tab_v_pad_text,
+                                                                                 too_narrow,
+                                                                                 mouse_x,
+                                                                                 mouse_y,
+                                                                                 space_type);
     current_display_index++;
-
-    const bool is_hover = BLI_rcti_isect_pt(rct, mouse_x, mouse_y);
-
-    float darken_factor = 0.0f;
-    if (!is_active && !is_hover) {
-      darken_factor = TABS_GLYPH_DARKEN_BASE;
-    }
-
-    float bg_brighten_factor = 0.0f;
-    if (!is_active) {
-      bg_brighten_factor = is_hover ? TABS_BG_BRIGHTEN_HOVER : TABS_BG_BRIGHTEN_BASE;
-    }
-
-    const bool visual_effect_allowed_for_tab = (U.category_tabs_visual_effect &&
-                                                display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
-                                                !is_dragging &&
-                                                (!U.category_tabs_show_active_name || !is_active));
-
-    if (is_hover && visual_effect_allowed_for_tab) {
-      deferred_hover_tab_draw.valid = true;
-      deferred_hover_tab_draw.rct = *rct;
-      deferred_hover_tab_draw.category_id = category_id;
-      deferred_hover_tab_draw.category_id_draw = category_id_draw;
-      deferred_hover_tab_draw.is_active = is_active;
-      deferred_hover_tab_draw.current_tab_v_pad_text = current_tab_v_pad_text;
-      deferred_hover_tab_draw.darken_factor = darken_factor;
-      deferred_hover_tab_draw.bg_brighten_factor = bg_brighten_factor;
-      copy_v3_v3(deferred_hover_tab_draw.glyph_color, glyph_color);
-    }
-    else {
-      draw_single_category_tab(rct,
-                               category_id,
-                               category_id_draw,
-                               is_active,
-                               is_hover,
-                               current_tab_v_pad_text,
-                               darken_factor,
-                               bg_brighten_factor,
-                               glyph_color);
-    }
+    category_tab_draw_dispatch(single_draw_ctx, rct, draw_data, deferred_hover_tab_draw);
 
     if (is_left) {
       pc_dyn.rect.xmin = v2d->mask.xmin;
@@ -5856,528 +6875,49 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     }
   }
 
-  if (deferred_hover_tab_draw.valid) {
-    draw_single_category_tab(&deferred_hover_tab_draw.rct,
-                             deferred_hover_tab_draw.category_id,
-                             deferred_hover_tab_draw.category_id_draw,
-                             deferred_hover_tab_draw.is_active,
-                             true,
-                             deferred_hover_tab_draw.current_tab_v_pad_text,
-                             deferred_hover_tab_draw.darken_factor,
-                             deferred_hover_tab_draw.bg_brighten_factor,
-                             deferred_hover_tab_draw.glyph_color);
-  }
+  category_tab_draw_deferred_hover_flush(single_draw_ctx, deferred_hover_tab_draw);
 
-  if (!BLI_listbase_is_empty(&region->runtime->panels_category)) {
-    rcti *settings_rct_ptr = &region->runtime->category_tabs_settings_rect;
-    const rcti settings_rct_backup = *settings_rct_ptr;
-    bool settings_rect_overridden = false;
-
-    if (!is_dragging && region->runtime && region->runtime->extension_drop_preview_state.active) {
-      const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
-      if (preview.target_category_id[0] != '\0') {
-        bool preview_name_found = false;
-        for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
-          if (STREQ(pc_dyn_ptr->idname, preview.target_category_id)) {
-            preview_name_found = true;
-            break;
-          }
-        }
-
-        if (preview_name_found) {
-          /* A successful drop inserts a new tab in the category stack regardless of insertion point.
-           * Keep spacing consistent by shifting Display Mode Settings down during preview. */
-          const int shift = EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad;
-          settings_rct_ptr->ymin -= shift;
-          settings_rct_ptr->ymax -= shift;
-          settings_rect_overridden = true;
-        }
-      }
-    }
-
-    if (settings_rct_ptr->ymin <= v2d->mask.ymax && settings_rct_ptr->ymax >= v2d->mask.ymin) {
-      panel_category_tabs_draw_settings_button(C, region, zoom, theme_col_tab_text);
-    }
-
-    if (settings_rect_overridden) {
-      *settings_rct_ptr = settings_rct_backup;
-    }
-  }
+  category_tab_settings_draw_with_preview_shift(
+      C, region, v2d, ordered_categories, is_dragging, zoom, theme_col_tab_text);
 
   /* Draw the dragged tab at cursor position and ghost tab at insert position */
   if (is_dragging && !drag_state->is_reserved) {
-    PanelCategoryDyn *drag_tab = nullptr;
-    for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-      if (STREQ(pc_dyn.idname, drag_category_id)) {
-        drag_tab = &pc_dyn;
-        break;
-      }
-    }
-
-    if (drag_tab) {
-      const int insert_idx = drag_state->current_insert_index;
-      const int original_idx = drag_state->original_index;
-      const int tab_h = drag_state->drag_tab_height;
-
-      /* Find the tab at insert position to determine ghost location */
-      PanelCategoryDyn *insert_position_tab = nullptr;
-      int current_idx = 0;
-      for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
-        if (STREQ(pc_dyn_ptr->idname, drag_category_id)) {
-          continue;
-        }
-        if (current_idx == insert_idx) {
-          insert_position_tab = pc_dyn_ptr;
-          break;
-        }
-        current_idx++;
-      }
-
-      /* Draw ghost tab at insert position */
-      if (insert_position_tab || insert_idx >= int(ordered_categories.size()) - 1) {
-        rcti ghost_rect = drag_tab->rect;
-
-        /* Find the tab to position relative to.
-         * If inserting before a tab, position above it.
-         * If appending (insert_position_tab is NULL), position below the last visible tab. */
-        PanelCategoryDyn *target_tab = insert_position_tab;
-        bool position_above = true;
-        int target_orig_idx = -1;
-
-        if (target_tab) {
-          /* Need to find the original index of the target tab for shift calculation */
-          int loop_idx = 0;
-          for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
-            if (pc_dyn_ptr == target_tab) {
-              target_orig_idx = loop_idx;
-              break;
-            }
-            loop_idx++;
-          }
-        }
-        else {
-          /* Append case: use last visible tab */
-          int loop_idx = 0;
-          for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
-            if (STREQ(pc_dyn_ptr->idname, drag_category_id)) {
-              loop_idx++;
-              continue;
-            }
-            target_tab = pc_dyn_ptr;
-            target_orig_idx = loop_idx;
-            loop_idx++;
-          }
-          position_above = false;
-        }
-
-        if (target_tab && target_orig_idx != -1) {
-          /* Calculate the visual shift that was applied to the target tab. */
-          int target_shift_y = 0;
-          if (insert_idx > original_idx) {
-            if (target_orig_idx > original_idx && target_orig_idx <= insert_idx) {
-              target_shift_y = tab_h + tab_v_pad;
-            }
-          }
-          else if (insert_idx < original_idx) {
-            if (target_orig_idx >= insert_idx && target_orig_idx < original_idx) {
-              target_shift_y = -tab_h - tab_v_pad;
-            }
-          }
-
-          /* Apply shift to target rect before calculating ghost position */
-          rcti target_rect = target_tab->rect;
-          target_rect.ymin += target_shift_y;
-          target_rect.ymax += target_shift_y;
-
-          if (position_above) {
-            /* Ghost appears above the target tab */
-            ghost_rect.ymin = target_rect.ymax + tab_v_pad;
-            ghost_rect.ymax = target_rect.ymax + tab_h + tab_v_pad;
-          }
-          else {
-            /* Ghost appears below the target tab */
-            ghost_rect.ymin = target_rect.ymin - tab_h - tab_v_pad;
-            ghost_rect.ymax = target_rect.ymin - tab_v_pad;
-          }
-        }
-
-        /* Draw ghost tab (semi-transparent placeholder at insert position) */
-        {
-          rctf ghost_box_rect;
-          ghost_box_rect.xmin = float(ghost_rect.xmin);
-          ghost_box_rect.xmax = float(ghost_rect.xmax);
-          ghost_box_rect.ymin = float(ghost_rect.ymin);
-          ghost_box_rect.ymax = float(ghost_rect.ymax);
-
-          /* Very transparent background for ghost */
-          float ghost_bg_color[4];
-          copy_v4_v4(ghost_bg_color, theme_col_tab_active);
-          ghost_bg_color[3] = 0.3f;  /* More transparent */
-
-          GPU_blend(GPU_BLEND_ALPHA);
-          draw_roundbox_corner_set(roundboxtype);
-          draw_roundbox_4fv(&ghost_box_rect, true, tab_curve_radius, ghost_bg_color);
-
-          /* Dashed outline for ghost */
-          float ghost_outline[4];
-          copy_v3_v3(ghost_outline, theme_col_tab_outline_sel);
-          ghost_outline[3] = 0.5f;
-          draw_roundbox_4fv(&ghost_box_rect, false, tab_curve_radius, ghost_outline);
-
-          GPU_blend(GPU_BLEND_NONE);
-        }
-      }
-
-      /* Calculate dragged tab position (follows cursor) */
-      rcti drag_rect = drag_tab->rect;
-      const int scroll_diff = region->category_scroll - drag_state->initial_scroll;
-      drag_rect.ymin -= scroll_diff;
-      drag_rect.ymax -= scroll_diff;
-
-      const int offset_y = int(drag_state->drag_offset_y);
-      drag_rect.ymin += offset_y;
-      drag_rect.ymax += offset_y;
-
-      rctf box_rect;
-      box_rect.xmin = float(drag_rect.xmin);
-      box_rect.xmax = float(drag_rect.xmax);
-      box_rect.ymin = float(drag_rect.ymin);
-      box_rect.ymax = float(drag_rect.ymax);
-
-      float drag_bg_color[4];
-      copy_v4_v4(drag_bg_color, theme_col_tab_active);
-      drag_bg_color[3] = 0.7f;
-
-      GPU_blend(GPU_BLEND_ALPHA);
-      draw_roundbox_corner_set(roundboxtype);
-      draw_roundbox_4fv(&box_rect, true, tab_curve_radius, drag_bg_color);
-      draw_roundbox_4fv(&box_rect, false, tab_curve_radius, theme_col_tab_outline_sel);
-
-      /* Get glyph color for color indicator in TEXT_ONLY mode. */
-      bool is_fallback_letter = false;
-      float glyph_color[3] = {0.0f, 0.0f, 0.0f};
-      const char *category_id = drag_tab->idname;
-      panel_category_glyph_lookup(
-          wm, category_id, nullptr, &is_fallback_letter, glyph_color, space_type);
-
-      /* Draw color indicator bar for TEXT_ONLY mode to show assigned glyph color. */
-      draw_category_tab_color_indicator(
-          &drag_rect, glyph_color, is_left, display_mode, U.category_tabs_text_mode_show_color_indicator, true);
-
-      const char *category_id_draw = IFACE_(panel_category_display_name_lookup(wm, category_id, space_type));
-      const rcti *rct = &drag_rect;
-
-      const bool is_active_tab = category_id_active && STREQ(category_id, category_id_active);
-
-      /* Determine if this tab should expand to show the name.
-       * Show name for active tab OR for the previous active tab (only in minimized state for STICKY mode).
-       *
-       * During drag: too_narrow check is not available, so use a basic flag.
-       * In STICKY inactive behavior mode (GLYPHS_ONLY + show_active_name), expand for previous_active.
-       * In DEFAULT inactive behavior mode: previous_active tab should NOT expand.
-       */
-      const bool is_sticky_inactive = (U.category_tabs_inactive_behavior == USER_CATEGORY_TABS_INACTIVE_STICKY);
-      const bool is_sticky_mode = (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
-                                   U.category_tabs_show_active_name);
-      const bool can_show_previous = is_sticky_inactive && is_sticky_mode;
-      const bool is_previous_active_raw = (region->runtime->category_tabs_previous_active_id[0] != '\0' &&
-                                           STREQ(category_id, region->runtime->category_tabs_previous_active_id));
-      const bool is_previous_active = can_show_previous && is_previous_active_raw;
-      const bool should_expand_name = ((is_sticky_mode || is_active_tab) &&
-                                       U.category_tabs_show_active_name &&
-                                       !region->runtime->category_tabs_active_name_hidden &&
-                                       (is_active_tab || is_previous_active));
-
-      int current_drag_tab_v_pad_text = tab_v_pad_text;
-      if (display_mode == USER_CATEGORY_TABS_GLYPHS_ONLY &&
-          U.category_tabs_shape == USER_CATEGORY_TABS_SHAPE_BOX)
-      {
-        if (!should_expand_name) {
-          current_drag_tab_v_pad_text = 0;
-        }
-      }
-
-      ui_panel_category_draw_content(region,
-                                     wm,
-                                     category_id,
-                                     category_id_draw,
-                                     rct,
-                                     rct->xmin,
-                                     rct->xmax,
-                                     is_active_tab,
-                                     is_left,
-                                     display_mode,
-                                     fontid,
-                                     fstyle,
-                                     fstyle_points,
-                                     zoom,
-                                     category_tabs_zoom,
-                                     current_drag_tab_v_pad_text,
-                                     0.0f,
-                                     theme_col_tab_text,
-                                     theme_col_tab_text_sel,
-                                     too_narrow,
-                                     space_type);
-    }
+    category_tab_draw_dragged_with_reorder_ghost(region,
+                                                 wm,
+                                                 ordered_categories,
+                                                 drag_state,
+                                                 drag_category_id,
+                                                 category_id_active,
+                                                 display_mode,
+                                                 is_left,
+                                                 tab_v_pad,
+                                                 tab_v_pad_text,
+                                                 roundboxtype,
+                                                 tab_curve_radius,
+                                                 fontid,
+                                                 fstyle,
+                                                 fstyle_points,
+                                                 zoom,
+                                                 category_tabs_zoom,
+                                                 theme_col_tab_text,
+                                                 theme_col_tab_text_sel,
+                                                 theme_col_tab_active,
+                                                 theme_col_tab_outline_sel,
+                                                 too_narrow,
+                                                 space_type);
   }
 
-  const char *ghost_skip_reason = nullptr;
+  const char *ghost_skip_reason = category_tab_extension_drop_ghost_draw(region,
+                                                                          v2d,
+                                                                          ordered_categories,
+                                                                          is_dragging,
+                                                                          rct_xmin,
+                                                                          rct_xmax,
+                                                                          roundboxtype,
+                                                                          tab_curve_radius,
+                                                                          theme_col_tab_active,
+                                                                          theme_col_tab_outline_sel);
 
-  /* Draw ghost tab for extension drop preview (only if not dragging a category) */
-  if (!is_dragging && region->runtime && region->runtime->extension_drop_preview_state.active) {
-    const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
-
-    rcti ghost_rect;
-    /* Use same X positioning as regular tabs (respects is_left alignment) */
-    ghost_rect.xmin = rct_xmin;
-    ghost_rect.xmax = rct_xmax;
-
-    /* Ghost height: compact fixed indicator (~10 px). */
-    const int ghost_height = EXTENSION_DROP_GHOST_HEIGHT;
-
-    /* Debug: log ghost position info (time-limited: max once per second) */
-    static double _ghost_last_log_time = 0.0;
-    static int _ghost_last_target = -999;
-    const double current_time = BLI_time_now_seconds();
-    const bool should_log = (current_time - _ghost_last_log_time > 1.0) ||
-                            (_ghost_last_target != preview.target_index);
-
-    if (should_log) {
-      /* Log all existing tabs positions for debugging */
-      printf("[EXT_GHOST] === TABS POSITIONS (top to bottom) ===\n");
-      int log_idx = 0;
-      for (PanelCategoryDyn *pc : ordered_categories) {
-        printf("[EXT_GHOST]   tab[%d] '%s' y=[%d,%d] h=%d\n",
-               log_idx, pc->idname,
-               pc->rect.ymin, pc->rect.ymax,
-               BLI_rcti_size_y(&pc->rect));
-        log_idx++;
-        if (log_idx > 10) {
-          printf("[EXT_GHOST]   ... (more tabs)\n");
-          break;
-        }
-      }
-      printf("[EXT_GHOST] v2d_mask: y=[%d,%d] x=[%d,%d]\n",
-             v2d->mask.ymin, v2d->mask.ymax,
-             v2d->mask.xmin, v2d->mask.xmax);
-      printf("[EXT_GHOST] ghost_h=%d target_idx=%d insert_above=%d\n",
-             ghost_height,
-             preview.target_index,
-             preview.insert_above ? 1 : 0);
-      printf("[EXT_GHOST] preview_state: active=%d target='%s' idx=%d insert_above=%d tab_h=%d pad=%d cursor_y=%d\n",
-             preview.active ? 1 : 0,
-             preview.target_category_id,
-             preview.target_index,
-             preview.insert_above ? 1 : 0,
-             preview.tab_height,
-             preview.tab_v_pad,
-             preview.cursor_y);
-      _ghost_last_log_time = current_time;
-      _ghost_last_target = preview.target_index;
-    }
-
-    if (preview.target_index >= 0 && preview.target_index < int(ordered_categories.size())) {
-      PanelCategoryDyn *target_tab = nullptr;
-
-      /* Find target tab by NAME, not by index!
-       * The index from screen_ops.cc is based on panels_category order,
-       * but ordered_categories may have different sorting. */
-      bool found_by_name = false;
-      int resolved_target_index = -1;
-      if (preview.target_category_id[0] != '\0') {
-        int idx = 0;
-        for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
-          if (STREQ(pc_dyn_ptr->idname, preview.target_category_id)) {
-            target_tab = pc_dyn_ptr;
-            found_by_name = true;
-            resolved_target_index = idx;
-            break;
-          }
-          idx++;
-        }
-      }
-
-      /* Fallback to index if name not found */
-      if (!target_tab) {
-        int loop_idx = 0;
-        for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
-          if (loop_idx == preview.target_index) {
-            target_tab = pc_dyn_ptr;
-            resolved_target_index = loop_idx;
-            break;
-          }
-          loop_idx++;
-        }
-        if (should_log && target_tab) {
-          printf("[EXT_GHOST] Found by INDEX fallback: '%s' at idx=%d\n",
-                 target_tab->idname, preview.target_index);
-        }
-      }
-
-      if (target_tab) {
-        /* UNIFIED INSERTION SLOT MODEL:
-         * insertion_index = target_index + (insert_above ? 0 : 1)
-         * Ghost should be centered in the slot between tabs at insertion_index-1 and insertion_index
-         * after tab shifting creates space. */
-        const int category_count = int(ordered_categories.size());
-        const int raw_insertion_index = (resolved_target_index >= 0) ?
-                                            (resolved_target_index + (preview.insert_above ? 0 : 1)) :
-                                            -1;
-        const int insertion_index = raw_insertion_index;
-        const int shift_space = EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad;
-        
-        /* Find slot boundaries after tab shifting */
-        int slot_top_y, slot_bottom_y;
-        
-        if (insertion_index == 0) {
-          /* Insert at top: all tabs shift DOWN, ghost appears above first tab's original position.
-           * Ghost slot: from ymax to (ymax + shift_space) */
-          slot_top_y = target_tab->rect.ymax + shift_space;
-          slot_bottom_y = target_tab->rect.ymax;
-        }
-        else if (insertion_index >= int(ordered_categories.size())) {
-          /* Insert at end: treat as inserting below the actual last tab. */
-          /* This prevents creating empty space beyond existing tabs. */
-          PanelCategoryDyn *last_tab = ordered_categories[int(ordered_categories.size()) - 1];
-          slot_top_y = last_tab->rect.ymin;
-          slot_bottom_y = slot_top_y - shift_space;
-        }
-        else {
-          /* Insert between tabs: find boundaries of the created slot.
-           * After fix: tabs shift DOWN (y_shift negative), so ghost appears
-           * in the space ABOVE where the shifted tabs end up. */
-          if (preview.insert_above) {
-            /* Inserting above target: target shifts DOWN, ghost fills the gap above.
-             * Ghost slot: from (ymax - shift_space) to ymax */
-            slot_top_y = target_tab->rect.ymax;
-            slot_bottom_y = slot_top_y - shift_space;
-          }
-          else {
-            /* Inserting below target: tabs below shift DOWN, ghost fills the gap.
-             * Ghost slot: from (ymin - shift_space) to ymin */
-            slot_top_y = target_tab->rect.ymin;
-            slot_bottom_y = slot_top_y - shift_space;
-          }
-        }
-        
-        /* Center ghost in the insertion slot.
-         * Ghost should be perfectly centered in the free space between tabs. */
-        const int slot_center_y = (slot_top_y + slot_bottom_y) / 2;
-        const int half_ghost_height = ghost_height / 2;
-
-        /* Ghost rect centered in the slot */
-        ghost_rect.ymin = slot_center_y - half_ghost_height;
-        ghost_rect.ymax = slot_center_y + half_ghost_height;
-
-        if (should_log) {
-          printf("[EXT_GHOST] resolve: target='%s' stored_idx=%d resolved_idx=%d insert_above=%d raw_insertion_idx=%d insertion_idx=%d category_count=%d\n",
-                 preview.target_category_id,
-                 preview.target_index,
-                 resolved_target_index,
-                 preview.insert_above ? 1 : 0,
-                 raw_insertion_index,
-                 insertion_index,
-                 category_count);
-          if (raw_insertion_index >= category_count && category_count > 0) {
-            printf("[EXT_GHOST] boundary: raw_insertion_idx >= category_count (using end slot below last tab)\n");
-          }
-          printf("[EXT_GHOST] insertion_idx=%d slot=[%d,%d] center=%d ghost=[%d,%d] target_rect=[%d,%d]\n",
-                 insertion_index,
-                 slot_bottom_y,
-                 slot_top_y,
-                 slot_center_y,
-                 ghost_rect.ymin,
-                 ghost_rect.ymax,
-                 target_tab->rect.ymin,
-                 target_tab->rect.ymax);
-        }
-
-        if (should_log) {
-          const int ghost_center_y = (ghost_rect.ymin + ghost_rect.ymax) / 2;
-          const int center_diff = abs(ghost_center_y - slot_center_y);
-          printf("[EXT_GHOST] FINAL: cursor_y=%d ghost=[%d,%d] center=%d slot_center=%d diff=%d target='%s'\n",
-                 preview.cursor_y, ghost_rect.ymin, ghost_rect.ymax,
-                 ghost_center_y, slot_center_y, center_diff,
-                 target_tab->idname);
-          if (center_diff > 1) {
-            printf("[EXT_GHOST] WARNING: Ghost not centered in slot! (diff=%d px)\n", center_diff);
-          }
-        }
-      }
-      else {
-        printf("[EXT_GHOST] SKIP: target_tab NULL for name='%s' idx=%d\n",
-               preview.target_category_id, preview.target_index);
-        ghost_skip_reason = "target_tab_null";
-        goto skip_extension_ghost;
-      }
-    }
-    else {
-      /* No target tab - position at top of region */
-      ghost_rect.ymin = v2d->mask.ymax - ghost_height - 10;
-      ghost_rect.ymax = v2d->mask.ymax - 10;
-      if (should_log) {
-        printf("[EXT_GHOST] FINAL (no target): ghost y=[%d,%d]\n",
-               ghost_rect.ymin, ghost_rect.ymax);
-      }
-    }
-
-    /* Ensure ghost is within viewport bounds */
-    const bool ghost_in_viewport = (ghost_rect.ymax >= v2d->mask.ymin && ghost_rect.ymin <= v2d->mask.ymax);
-    
-    if (should_log) {
-      printf("[EXT_GHOST] VIEWPORT CHECK: ghost=[%d,%d] viewport=[%d,%d] in_viewport=%d\n",
-             ghost_rect.ymin, ghost_rect.ymax,
-             v2d->mask.ymin, v2d->mask.ymax,
-             ghost_in_viewport ? 1 : 0);
-    }
-    
-    if (!ghost_in_viewport) {
-      /* Clamp ghost to viewport if outside */
-      if (ghost_rect.ymax < v2d->mask.ymin) {
-        const int ghost_height_local = ghost_rect.ymax - ghost_rect.ymin;
-        ghost_rect.ymin = v2d->mask.ymin;
-        ghost_rect.ymax = v2d->mask.ymin + ghost_height_local;
-      }
-      else if (ghost_rect.ymin > v2d->mask.ymax) {
-        const int ghost_height_local = ghost_rect.ymax - ghost_rect.ymin;
-        ghost_rect.ymax = v2d->mask.ymax;
-        ghost_rect.ymin = v2d->mask.ymax - ghost_height_local;
-      }
-      
-      if (should_log) {
-        printf("[EXT_GHOST] CLAMPED: ghost=[%d,%d]\n", ghost_rect.ymin, ghost_rect.ymax);
-      }
-    }
-
-    rctf ghost_box_rect;
-    ghost_box_rect.xmin = float(ghost_rect.xmin);
-    ghost_box_rect.xmax = float(ghost_rect.xmax);
-    ghost_box_rect.ymin = float(ghost_rect.ymin);
-    ghost_box_rect.ymax = float(ghost_rect.ymax);
-
-    float ghost_bg_color[4];
-    copy_v4_v4(ghost_bg_color, theme_col_tab_active);
-    ghost_bg_color[3] = 0.5f;  /* Make more visible for debugging */
-
-    GPU_blend(GPU_BLEND_ALPHA);
-    draw_roundbox_corner_set(roundboxtype);
-    draw_roundbox_4fv(&ghost_box_rect, true, tab_curve_radius, ghost_bg_color);
-
-    float ghost_outline[4];
-    copy_v3_v3(ghost_outline, theme_col_tab_outline_sel);
-    ghost_outline[3] = 0.8f;  /* Make outline more visible */
-    draw_roundbox_4fv(&ghost_box_rect, false, tab_curve_radius, ghost_outline);
-
-    GPU_blend(GPU_BLEND_NONE);
-    if (should_log) {
-      printf("[EXT_GHOST] DRAWN: ghost_rect=[%d,%d]-[%d,%d]\n",
-             ghost_rect.xmin,
-             ghost_rect.ymin,
-             ghost_rect.xmax,
-             ghost_rect.ymax);
-    }
-  }
-skip_extension_ghost:
   if (!is_dragging && region->runtime && region->runtime->extension_drop_preview_state.active) {
     const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
     if (ghost_skip_reason) {

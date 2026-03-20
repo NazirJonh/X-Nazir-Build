@@ -519,18 +519,21 @@ static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
   return defaults;
 }
 
-static CategoryGlyphItem *category_tab_reset_override_ensure(wmWindowManager *wm, const char *category)
+static CategoryGlyphItem *category_tab_reset_override_ensure(wmWindowManager *wm,
+                                                              const char *category,
+                                                              const int space_type)
 {
   for (CategoryGlyphItem *it = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first); it;
        it = static_cast<CategoryGlyphItem *>(it->next))
   {
-    if (STREQ(it->category, category)) {
+    if (it->space_type == space_type && STREQ(it->category, category)) {
       return it;
     }
   }
 
   CategoryGlyphItem *item = MEM_new<CategoryGlyphItem>(__func__);
   STRNCPY(item->category, category);
+  item->space_type = space_type;
   item->glyph[0] = '\0';
   item->display_name[0] = '\0';
   zero_v3(item->color);
@@ -586,7 +589,7 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
    * propagate it back into the override. Without this, the custom icon assigned by the
    * user keeps appearing in Preview Image and the tab even after clicking Reset. */
   if (reset_glyph) {
-    CategoryGlyphItem *override_item = category_tab_reset_override_ensure(wm, category);
+    CategoryGlyphItem *override_item = category_tab_reset_override_ensure(wm, category, space_type);
     if (defaults.has_default_icon) {
       /* Restore default extension icon in the WM override. */
       STRNCPY(override_item->icon_path, defaults.icon_path ? defaults.icon_path : "");
@@ -611,7 +614,7 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   /* Reset tags: set empty tags in WM override.
    * This updates the UI immediately. If user clicks Cancel, original tags will be restored. */
   if (reset_tag) {
-    CategoryGlyphItem *reset_item = category_tab_reset_override_ensure(wm, category);
+    CategoryGlyphItem *reset_item = category_tab_reset_override_ensure(wm, category, space_type);
     /* Clear tags in WM override - this updates UI to show no tags selected */
     reset_item->tags[0] = '\0';
 
@@ -1326,6 +1329,24 @@ static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
       ot->srna, "original_color", 3, nullptr, 0.0f, 1.0f, "Original Color", "", 0.0f, 1.0f);
   RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);
   RNA_def_boolean(ot->srna, "original_has_override", false, "Original Has Override", "");
+  RNA_def_int(ot->srna,
+              "original_space_type",
+              -1,
+              -1,
+              4096,
+              "Original Space Type",
+              "Space type captured at dialog open for cancel-restore semantics",
+              -1,
+              4096);
+  RNA_def_int(ot->srna,
+              "original_override_space_type",
+              -1,
+              -1,
+              4096,
+              "Original Override Space Type",
+              "Space type of the override source captured at dialog open",
+              -1,
+              4096);
   RNA_def_string(
       ot->srna, "original_tags", nullptr, 256, "Original Tags", "Semicolon-separated tag names");
 }

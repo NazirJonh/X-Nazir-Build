@@ -1514,7 +1514,7 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
   ui::Layout &row = layout.row(false);
   ui::Layout &list_col = row.column(true);
 
-  template_list(&list_col,
+  template_uilist(&list_col,
                 C,
                 "VIEW3D_UL_tag_order_list",  /* UIList type name */
                 "tag_order_list",             /* Unique list ID */

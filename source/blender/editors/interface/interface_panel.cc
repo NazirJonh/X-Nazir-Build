@@ -1261,7 +1261,7 @@ void draw_layout_panels_backdrop(const ARegion *region,
     }
     panel_blockspace.ymax = std::min(panel_blockspace.ymax, panel->runtime->block->rect.ymax);
 
-    rcti panel_pixelspace = ui_to_pixelrect(region, panel->runtime->block, &panel_blockspace);
+    rcti panel_pixelspace = rect_to_pixelrect(region, panel->runtime->block, &panel_blockspace);
     rctf panel_pixelspacef;
     BLI_rctf_rcti_copy(&panel_pixelspacef, &panel_pixelspace);
     draw_roundbox_4fv(&panel_pixelspacef, true, radius, subpanel_backcolor);

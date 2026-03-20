@@ -1878,6 +1878,13 @@ void layout_list_set_labels_active(Layout *layout);
 void item_menutype_func(bContext *C, Layout *layout, void *arg_mt);
 void item_paneltype_func(bContext *C, Layout *layout, void *arg_pt);
 
+/* `interface_panel.cc` */
+
+/**
+ * Toggle panel open/closed state and return the new state.
+ */
+bool ui_layout_panel_toggle_open(const bContext *C, LayoutPanelHeader *header);
+
 /* `interface_button_group.cc` */
 
 /**
@@ -1887,6 +1894,13 @@ void item_paneltype_func(bContext *C, Layout *layout, void *arg_pt);
 void block_new_button_group(Block *block, ButtonGroupFlag flag);
 void button_group_add_but(Block *block, Button *but);
 void button_group_replace_but_ptr(Block *block, const Button *old_but_ptr, Button *new_but);
+
+/* `interface.cc` - Button factory */
+
+/**
+ * Factory function to create a button of the specified type.
+ */
+std::unique_ptr<Button> but_new(ButtonType type);
 
 /* `interface_drag.cc` */
 

@@ -867,7 +867,7 @@ void rna_template_list(Layout *layout,
     flags |= ui::TEMPLATE_LIST_SORT_LOCK;
   }
 
-  ui::template_list(layout,
+  ui::template_uilist(layout,
                     C,
                     listtype_name,
                     list_id,
@@ -931,7 +931,7 @@ static void rna_template_list_flags(Layout *layout,
     return;
   }
 
-  ui::template_list_flags(layout, C, &fileptr);
+  ui::template_uilist_flags(layout, C, &fileptr);
 }
 
 static void rna_uiTemplatePathBuilder(Layout *layout,

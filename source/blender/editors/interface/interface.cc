@@ -4252,7 +4252,7 @@ void block_cm_to_display_space_v3(Block *block, float pixel[3])
 /**
  * Factory function: Allocate button and set #Button.type.
  */
-static std::unique_ptr<Button> but_new(const ButtonType type)
+std::unique_ptr<Button> but_new(const ButtonType type)
 {
   std::unique_ptr<Button> but{};
 
@@ -5162,7 +5162,7 @@ Button *uiDefButTag(Block *block,
    * CREATE BUTTON USING FACTORY FUNCTION
    * ============================================================ */
 
-  block->buttons_ptrs.append(ui_but_new(ButtonType::Tag));
+  block->buttons_ptrs.append(but_new(ButtonType::Tag));
   ButtonTag *tag_but = static_cast<ButtonTag *>(block->buttons_ptrs.last().get());
 
   /* ============================================================

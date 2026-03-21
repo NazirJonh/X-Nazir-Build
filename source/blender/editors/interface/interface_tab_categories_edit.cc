@@ -1002,10 +1002,27 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
     snapshot.space_type = area ? area->spacetype : -1;
   }
 
-  const int restore_override_space_type = snapshot.has_override ? snapshot.override_space_type :
-                                                                  snapshot.space_type;
+  /* Global-First: Always use GLOBAL space_type (-1) for override.
+   * The restore_override_space_type from snapshot is used only for lookup fallback. */
+  const int restore_override_space_type = -1;  // Always GLOBAL
 
   wmWindowManager *wm = CTX_wm_manager(C);
+
+  /* Global-First Migration: Remove all stale space-specific overrides for this category */
+  for (CategoryGlyphItem *old_item = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+       old_item != nullptr;)
+  {
+    CategoryGlyphItem *next_item = static_cast<CategoryGlyphItem *>(old_item->next);
+    if (STREQ(old_item->category, category) && old_item->space_type != -1) {
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CANCEL RESTORE] Removed stale space-specific override for '%s' (space_type=%d)\n",
+               category, old_item->space_type);
+      }
+      BLI_remlink(&wm->category_glyph_overrides, old_item);
+      MEM_delete(old_item);
+    }
+    old_item = next_item;
+  }
 
   /* Find current override (may have been created by live preview) */
   CategoryGlyphItem *item = category_glyph_item_find(
@@ -1014,7 +1031,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   if (snapshot.has_override) {
     /* There was an override before - restore original values */
     if (!item) {
-      /* Override was deleted by live preview - recreate it */
+      /* Override was deleted by live preview - recreate it with GLOBAL space_type */
       item = category_glyph_item_ensure(
           wm->category_glyph_overrides, category, restore_override_space_type);
     }
@@ -1063,7 +1080,7 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
       RNA_string_set(&wm_ptr_rna, "category_tab_save_category", category);
 
       const char *imports[] = {"bpy", nullptr};
-      char restore_cmd[1024];
+      char restore_cmd[2048];
       BLI_snprintf(restore_cmd,
                    sizeof(restore_cmd),
                    "from bl_ui.space_userpref import restore_category_tags_from_string, restore_category_glyph_from_snapshot\n"
@@ -1073,11 +1090,16 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
                    "wm.category_tab_save_category = ''\n"
                    "if category:\n"
                    "    restore_category_tags_from_string(category, r'''%s''', space_type=%d)\n"
-                   "    restore_category_glyph_from_snapshot(category, r'''%s''', %d, [%f, %f, %f], space_type=%d)\n",
+                   "    restore_category_glyph_from_snapshot(category, r'''%s''', %d, [%f, %f, %f], space_type=%d,\n"
+                   "        icon_source=%d, icon_key=r'''%s''', icon_path=r'''%s''', icon_provider=r'''%s''')\n",
                    snapshot.tags, space_type,
                    snapshot.glyph_hex, snapshot.glyph_mode,
                    snapshot.color[0], snapshot.color[1], snapshot.color[2],
-                   space_type);
+                   space_type,
+                   snapshot.icon_source,
+                   snapshot.icon.key,
+                   snapshot.icon.path,
+                   snapshot.icon.provider);
 
       BPY_run_string_exec(C, imports, restore_cmd);
     }
@@ -1442,9 +1464,12 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
     return;
   }
 
-  /* Get space_type from context for proper per-space override matching */
+  /* Global-First: Always use GLOBAL space_type (-1) for override.
+   * This ensures consistency with Python code and prevents C++ from finding
+   * stale space-specific overrides first (which have priority in lookup). */
   ScrArea *area = CTX_wm_area(C);
   const int space_type = area ? area->spacetype : -1;
+  const int override_space_type = -1;  // Always GLOBAL for override
 
   char category[64];
   RNA_string_get(op->ptr, "category", category);
@@ -1470,8 +1495,24 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   /* Update the override immediately for live preview */
   wmWindowManager *wm = CTX_wm_manager(C);
 
+  /* Global-First Migration: Remove all stale space-specific overrides for this category */
+  for (CategoryGlyphItem *old_item = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+       old_item != nullptr;)
+  {
+    CategoryGlyphItem *next_item = static_cast<CategoryGlyphItem *>(old_item->next);
+    if (STREQ(old_item->category, category) && old_item->space_type != -1) {
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[LIVE UPDATE] Removed stale space-specific override for '%s' (space_type=%d)\n",
+               category, old_item->space_type);
+      }
+      BLI_remlink(&wm->category_glyph_overrides, old_item);
+      MEM_delete(old_item);
+    }
+    old_item = next_item;
+  }
+
   CategoryGlyphItem *item = category_glyph_item_find(
-      wm->category_glyph_overrides, category, space_type);
+      wm->category_glyph_overrides, category, override_space_type);
 
   /* Look up default glyph for preview fallback (when user input is empty or invalid) */
   bool is_fallback = false;
@@ -1497,9 +1538,9 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   category_tab_compute_preview_glyph(
       category_tab_preview_glyph, display_mode_ui, glyph, default_glyph, is_fallback, fallback_letter);
 
-  /* Create if not found */
+  /* Create if not found - always use GLOBAL space_type */
   if (!item) {
-    item = category_glyph_item_ensure(wm->category_glyph_overrides, category, space_type);
+    item = category_glyph_item_ensure(wm->category_glyph_overrides, category, override_space_type);
 
     /* Preserve existing tags from mappings when creating new override.
      * This prevents losing tags when user modifies display_name/glyph/color. */
@@ -2572,6 +2613,17 @@ static bool icon_grid_writeback_icon_key(bContext &C,
 
   bool resolved = false;
 
+  if (popup_data->op && popup_data->op->ptr) {
+    RNA_string_set(popup_data->op->ptr, "icon_key", icon_key);
+    PointerRNA target_ptr;
+    PropertyRNA *target_prop;
+    int index;
+    if (RNA_path_resolve_full(popup_data->op->ptr, "icon_key", &target_ptr, &target_prop, &index)) {
+      RNA_property_update(&C, &target_ptr, target_prop);
+    }
+    resolved = true;
+  }
+
   if (popup_data->target_op_properties) {
     IDProperty *idprop = IDP_GetPropertyFromGroup(popup_data->target_op_properties, "icon_key");
     if (!idprop) {
@@ -3617,9 +3669,11 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   char category[64];
   RNA_string_get(op->ptr, "category", category);
 
-  /* Get space_type from current context for proper per-space tag storage */
+  /* Global-First: Always use GLOBAL space_type (-1) for override.
+   * space_type from context is still used for lookup defaults. */
   ScrArea *area = CTX_wm_area(C);
   const int space_type = area ? area->spacetype : -1;
+  const int override_space_type = -1;  // Always GLOBAL for override
 
   char display_name[32];
   RNA_string_get(op->ptr, "display_name", display_name);
@@ -3641,10 +3695,27 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   float color[3];
   RNA_float_get_array(op->ptr, "color", color);
 
-  /* Get or create override with matching space_type */
+  /* Get or create override with GLOBAL space_type */
   wmWindowManager *wm = CTX_wm_manager(C);
+
+  /* Global-First Migration: Remove all stale space-specific overrides for this category */
+  for (CategoryGlyphItem *old_item = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+       old_item != nullptr;)
+  {
+    CategoryGlyphItem *next_item = static_cast<CategoryGlyphItem *>(old_item->next);
+    if (STREQ(old_item->category, category) && old_item->space_type != -1) {
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[EXEC SAVE] Removed stale space-specific override for '%s' (space_type=%d)\n",
+               category, old_item->space_type);
+      }
+      BLI_remlink(&wm->category_glyph_overrides, old_item);
+      MEM_delete(old_item);
+    }
+    old_item = next_item;
+  }
+
   CategoryGlyphItem *item = category_glyph_item_ensure(
-      wm->category_glyph_overrides, category, space_type);
+      wm->category_glyph_overrides, category, override_space_type);
 
   /* Resolve base/default glyph from stable mappings first (canonical category key),
    * and only then use lookup as a fallback.
@@ -3674,18 +3745,27 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   copy_v3_v3(item->color, color);
   const int display_mode_ui_exec = RNA_enum_get(op->ptr, "display_mode_ui");
   const int custom_icon_mode_ui_exec = RNA_enum_get(op->ptr, "custom_icon_mode_ui");
+  char icon_key_before[128] = "";
+  RNA_string_get(op->ptr, "icon_key", icon_key_before);
+  printf("[ICON SAVE DEBUG] display_mode_ui=%d, custom_icon_mode_ui=%d, icon_source_before=%d, icon_key='%s'\n",
+         display_mode_ui_exec, custom_icon_mode_ui_exec, RNA_enum_get(op->ptr, "icon_source"), icon_key_before);
   const int resolved_icon_source_exec = category_tab_resolve_icon_source(
       display_mode_ui_exec,
       custom_icon_mode_ui_exec,
       RNA_enum_get(op->ptr, "icon_source"),
       CategoryTabIconSourceResolveMode::Commit,
       nullptr);
+  printf("[ICON SAVE DEBUG] resolved_icon_source=%d\n", resolved_icon_source_exec);
   RNA_enum_set(op->ptr, "icon_source", resolved_icon_source_exec);
   item->icon_source = resolved_icon_source_exec;
   item->glyph_mode = (display_mode_ui_exec == 2) ? 1 : 0;
   CategoryTabIconState icon_state_exec;
   category_tab_icon_state_read(op->ptr, icon_state_exec);
+  printf("[ICON SAVE DEBUG] icon_state_exec.key='%s', path='%s', provider='%s'\n",
+         icon_state_exec.key, icon_state_exec.path, icon_state_exec.provider);
   category_tab_icon_state_apply(*item, icon_state_exec);
+  printf("[ICON SAVE DEBUG] After apply: item->icon_key='%s', icon_source=%d\n",
+         item->icon_key, item->icon_source);
 
   /* Only save glyph to override if user has changed it from the default.
    * If glyph matches the default (especially fallback letters), leave it empty

@@ -285,6 +285,39 @@ static const CategoryGlyphItem *category_glyph_item_find_normalized_global(const
   return nullptr;
 }
 
+static const CategoryGlyphItem *category_glyph_item_find_global_only(const ListBase *list,
+                                                                     const char *category)
+{
+  if (!list || !category_glyph_list_is_valid(list) || !category) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first);
+       item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (item->space_type == -1 && STREQ(item->category, category)) {
+      return item;
+    }
+  }
+
+  const std::string normalized_target = normalize_category_key(category);
+  if (normalized_target.empty()) {
+    return nullptr;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first);
+       item;
+       item = static_cast<const CategoryGlyphItem *>(item->next))
+  {
+    if (item->space_type == -1 && category_item_match_normalized(item, normalized_target, -1)) {
+      return item;
+    }
+  }
+
+  return nullptr;
+}
+
 /**
  * Internal helper: Unified category lookup with priority order.
  * Searches in order: exact -> global -> normalized exact -> normalized global.
@@ -332,13 +365,13 @@ static const CategoryGlyphItem *category_item_find_overrides(const wmWindowManag
 }
 
 static const CategoryGlyphItem *category_item_find_mappings(const wmWindowManager *wm,
-                                                            const char *category,
-                                                            int space_type)
+                                                             const char *category,
+                                                             int space_type)
 {
   if (!wm) {
     return nullptr;
   }
-  return category_glyph_item_find_with_fallback(&wm->category_glyph_mappings, category, space_type);
+  return category_glyph_item_find_global_only(&wm->category_glyph_mappings, category);
 }
 
 static bool category_item_override_icon_is_effective(const CategoryGlyphItem *item)

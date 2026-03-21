@@ -593,8 +593,12 @@ def _space_type_id_to_str(space_type_id):
 
 # Helper functions for cache key management
 def _make_cache_key(space_type, category):
-    """Create cache key for space_type aware category lookup."""
-    return (space_type, category)
+    """Create cache key for GLOBAL-only category lookup (Global-First architecture).
+
+    Always returns (-1, category) regardless of input space_type to ensure
+    a single source of truth for all category data across all editor types.
+    """
+    return (-1, category)
 
 
 # -----------------------------------------------------------------------------
@@ -869,7 +873,12 @@ def _ensure_category_panel_label(category, space_type, entry):
 
 
 def _get_category_data(category, space_type=-1):
-    """Get category data with space_type fallback logic."""
+    """Get category data using GLOBAL-only lookup (Global-First architecture).
+
+    All category data is stored under GLOBAL key (-1, category) for a single
+    source of truth across all editor types. The space_type parameter is
+    preserved for API compatibility but is ignored for cache lookup.
+    """
     global _glyph_cache, _glyph_cache_loaded
     if not _glyph_cache_loaded:
         _load_glyph_mappings_from_file()
@@ -897,50 +906,27 @@ def _get_category_data(category, space_type=-1):
         # glyph OR tags OR icon presence determines "meaningful" data
         return has_glyph or has_tags or has_icon
 
-    # Try space-specific first
-    key = _make_cache_key(space_type, category)
-    category_debug_print(f"[_get_category_data] Looking for key={key}, category='{category}', space_type={space_type}")
+    # Global-First: Always use GLOBAL key (-1, category)
+    key = _make_cache_key(space_type, category)  # Returns (-1, category) regardless of space_type
+    category_debug_print(f"[_get_category_data] Looking for GLOBAL key={key}, category='{category}'")
     if key in _glyph_cache:
         data = _glyph_cache[key]
         meaningful = has_meaningful_data(data)
-        category_debug_print(f"[_get_category_data] FOUND key={key}, has_meaningful={meaningful}, glyph='{data.get('glyph', '') if isinstance(data, dict) else 'N/A'}', tags={data.get('tags', []) if isinstance(data, dict) else 'N/A'}")
+        category_debug_print(f"[_get_category_data] FOUND GLOBAL key={key}, has_meaningful={meaningful}")
         if meaningful:
             return _ensure_category_panel_label(category, space_type, data)
 
-    # Fallback to global (-1) if not global already
-    if space_type != -1:
-        global_key = _make_cache_key(-1, category)
-        category_debug_print(f"[_get_category_data] Trying GLOBAL fallback, global_key={global_key}")
-        if global_key in _glyph_cache:
-            data = _glyph_cache[global_key]
-            meaningful = has_meaningful_data(data)
-            category_debug_print(f"[_get_category_data] GLOBAL found, meaningful={meaningful}, glyph='{data.get('glyph', '') if isinstance(data, dict) else 'N/A'}'")
-            if meaningful:
-                return _ensure_category_panel_label(category, space_type, data)
-    else:
-        category_debug_print(f"[_get_category_data] space_type=-1 (GLOBAL requested), skipping GLOBAL fallback block")
-
-    # Fallback: search in ANY space_type for meaningful data
-    # This handles cases where get_categories_for_tag returns categories without space_type info
-    # IMPORTANT: Prefer entries with meaningful data over empty entries
-    for cache_key, cache_data in _glyph_cache.items():
-        if isinstance(cache_key, tuple) and len(cache_key) >= 2:
-            if cache_key[1] == category:
-                if has_meaningful_data(cache_data):
-                    return _ensure_category_panel_label(category, space_type, cache_data)
-
-    # If no meaningful data found, return any entry (prefer non-global)
-    for cache_key, cache_data in _glyph_cache.items():
-        if isinstance(cache_key, tuple) and len(cache_key) >= 2:
-            if cache_key[1] == category and cache_key[0] != -1:
-                category_debug_print(f"[_get_category_data] Returning non-global entry for '{category}': space_type={cache_key[0]}")
-                return _ensure_category_panel_label(category, space_type, cache_data)
-
-    # Finally return global entry if exists
-    global_key = _make_cache_key(-1, category)
-    if global_key in _glyph_cache:
-        category_debug_print(f"[_get_category_data] Returning global entry for '{category}'")
-        return _ensure_category_panel_label(category, space_type, _glyph_cache[global_key])
+    # Canonicalization fallback: search for category by normalized key
+    # This handles cases where category names have different spellings/unicode
+    normalized_target = normalize_category_key(category)
+    if normalized_target:
+        for cache_key, cache_data in _glyph_cache.items():
+            if isinstance(cache_key, tuple) and len(cache_key) >= 2:
+                cache_category = cache_key[1]
+                if normalize_category_key(cache_category) == normalized_target:
+                    if has_meaningful_data(cache_data):
+                        category_debug_print(f"[_get_category_data] Found via canonicalization: {cache_key}")
+                        return _ensure_category_panel_label(category, space_type, cache_data)
 
     category_debug_print(f"[_get_category_data] No entry found for '{category}', returning None")
     return _ensure_category_panel_label(category, space_type, None)
@@ -1204,7 +1190,7 @@ _tag_order_cache = []
 _category_orders_cache = {}
 
 # Current JSON format version
-CURRENT_JSON_VERSION = 9  # Bumped for extension pending-tag fields
+CURRENT_JSON_VERSION = 11  # Global-First architecture: all entries use GLOBAL (space_type=-1)
 
 # JSON file name in config directory
 GLYPHS_FILENAME = "category_glyphs.json"
@@ -2076,6 +2062,96 @@ def migrate_v8_to_v9(data):
     return data
 
 
+def migrate_v9_to_v11(data):
+    """Migrate from v9 (space-specific entries) to v11 (Global-First architecture).
+
+    Consolidates all space-specific entries (SPACE_VIEW3D, SPACE_NODE, etc.)
+    into a single GLOBAL entry for each category. Customizations from
+    space-specific entries are merged into GLOBAL with priority given to
+    manual icon settings and non-default values.
+    """
+    mappings = data.get("mappings", {})
+    if not isinstance(mappings, dict):
+        mappings = {}
+
+    global_mappings = mappings.get("GLOBAL", {})
+    if not isinstance(global_mappings, dict):
+        global_mappings = {}
+
+    # Consolidate space-specific entries into GLOBAL
+    for space_key, categories in mappings.items():
+        if space_key == "GLOBAL":
+            continue  # Already processed
+        if not isinstance(categories, dict):
+            continue
+
+        for cat_name, cat_data in categories.items():
+            if not isinstance(cat_data, dict):
+                continue
+
+            if cat_name not in global_mappings:
+                # Create new GLOBAL entry from space-specific
+                global_mappings[cat_name] = dict(cat_data)
+            else:
+                # Merge customizations into existing GLOBAL entry
+                existing = global_mappings[cat_name]
+                if not isinstance(existing, dict):
+                    existing = {}
+                    global_mappings[cat_name] = existing
+
+                # Priority: manual icon > off > auto
+                migrated_icon_source = cat_data.get("icon_source", "auto")
+                existing_icon_source = existing.get("icon_source", "auto")
+
+                should_update_icon = (
+                    existing_icon_source == "auto" or
+                    migrated_icon_source == "manual" or
+                    migrated_icon_source == "off"
+                )
+
+                if should_update_icon:
+                    if migrated_icon_source in ("manual", "off"):
+                        existing["icon_source"] = migrated_icon_source
+                    if cat_data.get("icon_key"):
+                        existing["icon_key"] = cat_data.get("icon_key")
+                    if cat_data.get("icon_path"):
+                        existing["icon_path"] = cat_data.get("icon_path")
+                    if cat_data.get("icon_provider"):
+                        existing["icon_provider"] = cat_data.get("icon_provider")
+
+                # Merge glyph_mode if not auto
+                migrated_glyph_mode = cat_data.get("glyph_mode", "auto")
+                if migrated_glyph_mode != "auto" and existing.get("glyph_mode", "auto") == "auto":
+                    existing["glyph_mode"] = migrated_glyph_mode
+
+                # Merge glyph if GLOBAL doesn't have one
+                migrated_glyph = cat_data.get("glyph", "")
+                if migrated_glyph and not existing.get("glyph"):
+                    existing["glyph"] = migrated_glyph
+
+                # Merge color if GLOBAL doesn't have one
+                migrated_color = cat_data.get("color", [0.0, 0.0, 0.0])
+                if migrated_color and any(c != 0.0 for c in migrated_color):
+                    if not any(c != 0.0 for c in existing.get("color", [0.0, 0.0, 0.0])):
+                        existing["color"] = migrated_color
+
+                # Merge tags (union)
+                migrated_tags = cat_data.get("tags", [])
+                existing_tags = existing.get("tags", [])
+                if migrated_tags:
+                    existing["tags"] = list(set(existing_tags) | set(migrated_tags))
+
+                # Preserve extension-related fields if present
+                for ext_field in ["source_extension", "pending_tag_assignment", "discovered_in_spaces", "discovered_in_modes"]:
+                    if ext_field in cat_data and ext_field not in existing:
+                        existing[ext_field] = cat_data[ext_field]
+
+    # Replace mappings with only GLOBAL
+    data["mappings"] = {"GLOBAL": global_mappings}
+    data["version"] = 11
+    return data
+
+
 MIGRATORS = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -2085,6 +2161,7 @@ MIGRATORS = {
     6: migrate_v6_to_v7,
     7: migrate_v7_to_v8,
     8: migrate_v8_to_v9,
+    9: migrate_v9_to_v11,  # Global-First architecture migration
 }
 
 
@@ -2170,45 +2247,83 @@ def _load_glyph_mappings_from_file():
                 if isinstance(category, str):
                     order_categories.add(category)
 
-    # Load mappings - support both old format (category -> data) and new format (space_type -> {category -> data})
-    # Also support "GLOBAL" as space_type = -1
+    # Load mappings - Global-First Architecture: Only load GLOBAL entries
+    # Space-specific entries (SPACE_VIEW3D, SPACE_NODE, etc.) are ignored for JSON persistence
+    # Old format (category -> data) is migrated to GLOBAL
     if isinstance(raw_mappings, dict):
+        # First, try to load GLOBAL mappings
+        global_mappings = raw_mappings.get("GLOBAL", {})
+        if isinstance(global_mappings, dict) and global_mappings:
+            _pref_log_once(f"[GLYPH LOAD DEBUG] Loading GLOBAL mappings -> {len(global_mappings)} categories")
+            for category, cat_data in global_mappings.items():
+                if isinstance(cat_data, (str, dict)):
+                    decoded_category = _unicode_escape_to_glyph(category) if '\\u' in category else category
+                    cache_key = _make_cache_key(-1, decoded_category)  # Always GLOBAL key
+                    normalized_data = _normalize_category_data(cat_data, decoded_category)
+                    _glyph_cache[cache_key] = normalized_data
+                    # DEBUG: Log Pivot Tools loading
+                    if 'Pivot' in str(category):
+                        category_debug_print(f"[GLYPH LOAD DEBUG] Loaded 'Pivot Tools': cache_key={cache_key}, tags={normalized_data.get('tags', [])}")
+
+        # Migrate space-specific entries to GLOBAL (for old JSON files)
+        # This ensures backward compatibility with pre-fix JSON files
         for key, value in raw_mappings.items():
             if isinstance(key, str) and key.startswith('SPACE_') and isinstance(value, dict):
-                # New format: space_type -> {category -> data}
-                space_type_str = key
-                space_type_id = _space_type_str_to_id(space_type_str)
-                _pref_log_once(f"[GLYPH LOAD DEBUG] Loading SPACE mappings: {space_type_str} -> {len(value)} categories")
-                for category, cat_data in value.items():
-                    if isinstance(cat_data, (str, dict)):
-                        # Decode Unicode escape sequences in category key (e.g., "\ue8f4" -> actual glyph)
-                        decoded_category = _unicode_escape_to_glyph(category) if '\\u' in category else category
-                        cache_key = _make_cache_key(space_type_id, decoded_category)
-                        _glyph_cache[cache_key] = _normalize_category_data(cat_data, decoded_category)
-                        # DEBUG: Show key glyphs being loaded
-                        if 'Brushstroke' in category:
-                            _pref_log_once(f"[GLYPH LOAD DEBUG] Loaded Brushstroke from {key}: glyph='{cat_data.get('glyph', '')}'")
-            elif key == "GLOBAL" and isinstance(value, dict):
-                # GLOBAL is a special space_type = -1
-                _pref_log_once(f"[GLYPH LOAD DEBUG] Loading GLOBAL mappings -> {len(value)} categories")
+                # Old format: space_type -> {category -> data}
+                # Migrate these entries to GLOBAL by merging customizations
+                _pref_log_once(f"[GLYPH LOAD DEBUG] Migrating {key} entries to GLOBAL")
                 for category, cat_data in value.items():
                     if isinstance(cat_data, (str, dict)):
                         decoded_category = _unicode_escape_to_glyph(category) if '\\u' in category else category
-                        cache_key = _make_cache_key(-1, decoded_category)
+                        cache_key = _make_cache_key(-1, decoded_category)  # Always GLOBAL key
                         normalized_data = _normalize_category_data(cat_data, decoded_category)
-                        _glyph_cache[cache_key] = normalized_data
-                        # DEBUG: Show key glyphs being loaded
-                        if 'Brushstroke' in category:
-                            _pref_log_once(f"[GLYPH LOAD DEBUG] Loaded Brushstroke from GLOBAL")
-            elif isinstance(value, (str, dict)):
-                # Old format: category -> data (migrate to global space_type = -1)
-                # Decode Unicode escape sequences in category key
+
+                        # If GLOBAL entry already exists, merge customizations
+                        if cache_key in _glyph_cache:
+                            existing = _glyph_cache[cache_key]
+                            # Only overwrite if migrated data has customizations
+                            migrated_icon_source = normalized_data.get("icon_source", "auto")
+                            migrated_glyph_mode = normalized_data.get("glyph_mode", "auto")
+                            migrated_glyph = normalized_data.get("glyph", "")
+                            migrated_color = normalized_data.get("color", [0.0, 0.0, 0.0])
+
+                            # Priority: 'manual' > 'off' > 'auto'
+                            existing_icon_source = existing.get("icon_source", "auto")
+                            should_update_icon = (
+                                existing_icon_source == "auto" or
+                                migrated_icon_source == "manual" or
+                                migrated_icon_source == "off"
+                            )
+
+                            if should_update_icon:
+                                if migrated_icon_source in ("manual", "off"):
+                                    existing["icon_source"] = migrated_icon_source
+                                if normalized_data.get("icon_key"):
+                                    existing["icon_key"] = normalized_data.get("icon_key")
+                                if normalized_data.get("icon_path"):
+                                    existing["icon_path"] = normalized_data.get("icon_path")
+                                if normalized_data.get("icon_provider"):
+                                    existing["icon_provider"] = normalized_data.get("icon_provider")
+
+                            if migrated_glyph_mode != "auto" and existing.get("glyph_mode", "auto") == "auto":
+                                existing["glyph_mode"] = migrated_glyph_mode
+                            if migrated_glyph and not existing.get("glyph"):
+                                existing["glyph"] = migrated_glyph
+                            if migrated_color and any(c != 0.0 for c in migrated_color):
+                                if not any(c != 0.0 for c in existing.get("color", [0.0, 0.0, 0.0])):
+                                    existing["color"] = migrated_color
+                        else:
+                            # No existing GLOBAL entry, create new one
+                            _glyph_cache[cache_key] = normalized_data
+
+            elif key != "GLOBAL" and isinstance(value, (str, dict)):
+                # Very old format: category -> data (migrate to GLOBAL)
                 category = _unicode_escape_to_glyph(key) if '\\u' in key else key
-                cache_key = _make_cache_key(-1, category)
+                cache_key = _make_cache_key(-1, category)  # Always GLOBAL key
                 _glyph_cache[cache_key] = _normalize_category_data(value, category)
                 category_debug_print(f"[GLYPH LOAD DEBUG] Loaded old-format category: {category}")
 
-    # Ensure invalid categories referenced in order lists are kept in cache (as global)
+    # Ensure invalid categories referenced in order lists are kept in cache (as GLOBAL)
     for category in order_categories:
         global_key = _make_cache_key(-1, category)
         if global_key not in _glyph_cache and not _is_valid_category_name(category):
@@ -2239,136 +2354,8 @@ def _load_glyph_mappings_from_file():
         if isinstance(category_list, list):
             _category_orders_cache[tag_key] = _category_order_decode(category_list)
 
-    # Propagate glyph, glyph_mode, and icon data from space-specific entries to GLOBAL entries
-    # This ensures customizations are visible across all spaces
-    for cache_key, cat_data in list(_glyph_cache.items()):
-        if isinstance(cache_key, tuple) and len(cache_key) == 2:
-            space_type_id, category = cache_key
-            if space_type_id != -1:  # Not GLOBAL
-                glyph = cat_data.get("glyph", "")
-                glyph_mode = cat_data.get("glyph_mode", "auto")
-                icon_source = cat_data.get("icon_source", "auto")
-                icon_key = cat_data.get("icon_key", "")
-                icon_path = cat_data.get("icon_path", "")
-                icon_provider = cat_data.get("icon_provider", "")
-                default_glyph = cat_data.get("default_glyph", "")
-                color = cat_data.get("color", [0.0, 0.0, 0.0])
-
-                # If this space-specific entry has customizations, update GLOBAL entry
-                has_customizations = (
-                    (icon_source in ("manual", "off") or icon_key or icon_path) or
-                    (glyph_mode != "auto") or
-                    (glyph and glyph != default_glyph) or
-                    (color and any(c != 0.0 for c in color))
-                )
-                if has_customizations:
-                    global_cache_key = _make_cache_key(-1, category)
-                    if global_cache_key not in _glyph_cache:
-                        _glyph_cache[global_cache_key] = {
-                            "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
-                            "default_glyph": "", "default_display_name": "", "base_type": "text_only",
-                            "glyph_mode": "auto",
-                            "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
-                        }
-
-                    global_entry = _glyph_cache[global_cache_key]
-                    # Determine if we should update global entry based on icon_source priority
-                    # Priority: 'manual' > 'off' > 'auto'
-                    # - 'manual' (user explicitly chose an icon) has HIGHEST priority
-                    # - 'off' (user chose first_letter mode) wins over 'auto'
-                    # - 'auto' is default, overwritten by anything
-                    global_icon_source = global_entry.get("icon_source", "auto")
-                    should_update = (
-                        global_icon_source == "auto" or
-                        icon_source == "manual" or
-                        icon_source == "off"
-                    )
-
-                    # Copy glyph to global entry
-                    if glyph and global_entry.get("glyph", "") != glyph:
-                        global_entry["glyph"] = glyph
-                        _pref_log_once(f"[GLYPH LOAD] Propagated glyph from space {space_type_id} to GLOBAL for '{category}'")
-
-                    # Copy glyph_mode to global entry only when allowed to update
-                    if should_update and glyph_mode != "auto" and global_entry.get("glyph_mode", "auto") != glyph_mode:
-                        global_entry["glyph_mode"] = glyph_mode
-                        _pref_log_once(f"[GLYPH LOAD] Propagated glyph_mode from space {space_type_id} to GLOBAL for '{category}'")
-
-                    # Copy icon data to global entry
-                    if should_update:
-                        if global_entry.get("icon_source", "auto") != icon_source:
-                            global_entry["icon_source"] = icon_source
-                            _pref_log_once(f"[GLYPH LOAD] Propagated icon_source from space {space_type_id} to GLOBAL for '{category}'")
-                        if global_entry.get("icon_key", "") != icon_key:
-                            global_entry["icon_key"] = icon_key
-                            _pref_log_once(f"[GLYPH LOAD] Propagated icon_key from space {space_type_id} to GLOBAL for '{category}'")
-                        if global_entry.get("icon_path", "") != icon_path:
-                            global_entry["icon_path"] = icon_path
-                        if global_entry.get("icon_provider", "") != icon_provider:
-                            global_entry["icon_provider"] = icon_provider
-
-                    # Copy color to global entry if non-zero
-                    color = cat_data.get("color", [0.0, 0.0, 0.0])
-                    if color and any(c != 0.0 for c in color):
-                        if global_entry.get("color", [0.0, 0.0, 0.0]) != color:
-                            global_entry["color"] = color
-                            _pref_log_once(f"[GLYPH LOAD] Propagated color from space {space_type_id} to GLOBAL for '{category}'")
-
-    # STEP 2: Sync from GLOBAL back to all SPACE entries for consistency
-    # This ensures all space-specific entries have the same data as GLOBAL
-    global_cache_prefix = (-1, "")
-    categories_in_global = set()
-    for cache_key in _glyph_cache.keys():
-        if isinstance(cache_key, tuple) and len(cache_key) == 2:
-            space_type_id, category = cache_key
-            if space_type_id == -1:  # GLOBAL entry
-                categories_in_global.add(category)
-
-    for category in categories_in_global:
-        global_cache_key = (-1, category)
-        if global_cache_key not in _glyph_cache:
-            continue
-        global_entry = _glyph_cache[global_cache_key]
-
-        # Get global values
-        global_glyph_mode = global_entry.get("glyph_mode", "auto")
-        global_icon_source = global_entry.get("icon_source", "auto")
-        global_icon_key = global_entry.get("icon_key", "")
-        global_icon_path = global_entry.get("icon_path", "")
-        global_icon_provider = global_entry.get("icon_provider", "")
-
-        # Sync to all space-specific entries for this category
-        for cache_key in _glyph_cache.keys():
-            if isinstance(cache_key, tuple) and len(cache_key) == 2:
-                space_type_id, cat = cache_key
-                if space_type_id != -1 and cat == category:  # Space-specific entry for this category
-                    space_entry = _glyph_cache[cache_key]
-
-                    # Sync glyph_mode
-                    if space_entry.get("glyph_mode", "auto") != global_glyph_mode:
-                        space_entry["glyph_mode"] = global_glyph_mode
-                        _pref_log_once(f"[GLYPH LOAD] Synced glyph_mode from GLOBAL to space {space_type_id} for '{category}'")
-
-                    # Sync icon data
-                    if space_entry.get("icon_source", "auto") != global_icon_source:
-                        space_entry["icon_source"] = global_icon_source
-                        _pref_log_once(f"[GLYPH LOAD] Synced icon_source from GLOBAL to space {space_type_id} for '{category}'")
-                    if space_entry.get("icon_key", "") != global_icon_key:
-                        space_entry["icon_key"] = global_icon_key
-                    if space_entry.get("icon_path", "") != global_icon_path:
-                        space_entry["icon_path"] = global_icon_path
-                    if space_entry.get("icon_provider", "") != global_icon_provider:
-                        space_entry["icon_provider"] = global_icon_provider
-
-                    # Sync color
-                    global_color = global_entry.get("color", [0.0, 0.0, 0.0])
-                    if global_color and any(c != 0.0 for c in global_color):
-                        if space_entry.get("color", [0.0, 0.0, 0.0]) != global_color:
-                            space_entry["color"] = global_color
-                            _pref_log_once(f"[GLYPH LOAD] Synced color from GLOBAL to space {space_type_id} for '{category}'")
-
     _glyph_cache_loaded = True
-    category_debug_print(f"[GLYPH] Loaded {len(_glyph_cache)} mappings, {len(_all_tags_cache)} tags from {filepath}")
+    category_debug_print(f"[GLYPH] Loaded {len(_glyph_cache)} GLOBAL mappings, {len(_all_tags_cache)} tags from {filepath}")
     return True
 
 
@@ -2448,13 +2435,19 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
             # Convert space_type ID to string (e.g., 1 -> "SPACE_VIEW3D", -1 -> "GLOBAL")
             space_type_str = _space_type_id_to_str(space_type)
 
+            # Global-First Architecture: Only save GLOBAL entries (space_type == -1)
+            # Skip any entries that somehow have space_type != -1 (shouldn't happen after fix)
+            if space_type != -1:
+                category_debug_print(f"[GLYPH SAVE] SKIPPED non-GLOBAL entry: key={cache_key}, category='{category}'")
+                continue
+
             # DEBUG: Log each category being processed
             cat_tags = category_data.get("tags", []) if isinstance(category_data, dict) else []
             _pref_log_once(f"[GLYPH SAVE] Processing: key={cache_key}, category='{category}'")
 
-            # Initialize nested dict for this space_type if needed
-            if space_type_str not in mappings_to_save:
-                mappings_to_save[space_type_str] = {}
+            # Initialize GLOBAL dict if needed (Global-First: always use "GLOBAL")
+            if "GLOBAL" not in mappings_to_save:
+                mappings_to_save["GLOBAL"] = {}
 
             # Skip invalid category names (glyphs as names) ONLY if they have no user customizations
             if not _is_valid_category_name(category):
@@ -2471,7 +2464,7 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
             if isinstance(category_data, dict):
                 # Debug: print tags for all categories with tags
                 cat_tags = category_data.get("tags", [])
-                category_debug_print(f"[GLYPH SAVE] SAVING: '{category}' (space_type={space_type_str}) tags={cat_tags}")
+                category_debug_print(f"[GLYPH SAVE] SAVING: '{category}' (GLOBAL) tags={cat_tags}")
 
                 entry_to_save = {
                     "glyph": _glyph_to_unicode_escape(category_data.get("glyph", "")),
@@ -2502,12 +2495,12 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
                 if category_data.get("discovered_in_modes"):
                     entry_to_save["discovered_in_modes"] = category_data.get("discovered_in_modes")
 
-                mappings_to_save[space_type_str][category] = entry_to_save
+                mappings_to_save["GLOBAL"][category] = entry_to_save
             elif isinstance(category_data, str):
                 # Old format - convert to new format
                 glyph = _unicode_escape_to_glyph(category_data) if '\\u' in category_data else category_data
                 base_type = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
-                mappings_to_save[space_type_str][category] = {
+                mappings_to_save["GLOBAL"][category] = {
                     "glyph": _glyph_to_unicode_escape(glyph),
                     "display_name": "",
                     "first_letter": "",
@@ -2892,15 +2885,18 @@ def get_category_tags(category, space_type=-1):
 
 
 def set_category_tags(category, tags, space_type=-1, auto_save=True, update_wm=True):
-    """Set tags for a category (replaces existing)."""
+    """Set tags for a category (replaces existing).
+
+    Global-First: All operations use GLOBAL key (-1, category) regardless of space_type parameter.
+    """
     global _glyph_cache, _all_tags_cache
 
-    key = _make_cache_key(space_type, category)
+    key = _make_cache_key(space_type, category)  # Returns (-1, category)
     if key not in _glyph_cache:
         # If we are setting empty tags on a non-existent category, don't create it.
         # This prevents "empty" overrides from being created during cancel/restore.
         if not tags:
-            tag_log(f"set_category_tags: No tags to set for new category '{category}' (space_type={space_type}), skipping creation")
+            tag_log(f"set_category_tags: No tags to set for new category '{category}', skipping creation")
             return True, "No tags to set"
         # Create entry if not exists
         _glyph_cache[key] = _normalize_category_data({})
@@ -2913,7 +2909,7 @@ def set_category_tags(category, tags, space_type=-1, auto_save=True, update_wm=T
         tag_log(f"Warning: Unknown tags ignored: {invalid_tags}", "WARN")
 
     _glyph_cache[key]["tags"] = valid_tags
-    tag_log(f"Set tags for '{category}' (space_type={space_type}): {valid_tags}")
+    tag_log(f"Set tags for '{category}' (GLOBAL): {valid_tags}")
 
     # Only update WM override if requested (not during preview in edit dialog)
     if update_wm:
@@ -2926,35 +2922,26 @@ def set_category_tags(category, tags, space_type=-1, auto_save=True, update_wm=T
 
 
 def add_category_tag(category, tag_name, auto_save=True, space_type=-1, update_wm=True):
-    """Add a single tag to a category."""
+    """Add a single tag to a category.
+
+    Global-First: All operations use GLOBAL key (-1, category) regardless of space_type parameter.
+    """
     global _glyph_cache, _all_tags_cache, _preview_mode_active
 
     # DEBUG
-    category_debug_print(f"[ADD_TAG] CALLED: category='{category}', tag='{tag_name}', space_type={space_type}, auto_save={auto_save}, update_wm={update_wm}, preview_mode={_preview_mode_active}")
+    category_debug_print(f"[ADD_TAG] CALLED: category='{category}', tag='{tag_name}', auto_save={auto_save}, update_wm={update_wm}, preview_mode={_preview_mode_active}")
 
     if tag_name not in _all_tags_cache:
         category_debug_print(f"[ADD_TAG] FAILED: Tag '{tag_name}' not found in _all_tags_cache")
         return False, f"Tag '{tag_name}' not found"
 
-    key = _make_cache_key(space_type, category)
-    category_debug_print(f"[ADD_TAG] Cache key: {key}")
+    # Global-First: Always use GLOBAL key
+    key = _make_cache_key(space_type, category)  # Returns (-1, category)
+    category_debug_print(f"[ADD_TAG] Cache key (GLOBAL): {key}")
 
     if key not in _glyph_cache:
-        # Try to inherit from global entry (-1) if exists
-        global_key = _make_cache_key(-1, category)
-        if global_key in _glyph_cache:
-            # Copy from global entry to preserve glyph, display_name, default_display_name, etc.
-            global_data = _glyph_cache[global_key]
-            new_entry = _normalize_category_data(dict(global_data), category)
-            # Ensure extension-related fields are preserved (they may be reset to defaults by normalize)
-            for ext_field in ["source_extension", "pending_tag_assignment", "discovered_in_spaces", "discovered_in_modes"]:
-                if ext_field in global_data:
-                    new_entry[ext_field] = global_data[ext_field]
-            _glyph_cache[key] = new_entry
-            category_debug_print(f"[ADD_TAG] Copied global entry to space-specific for key {key}")
-        else:
-            _glyph_cache[key] = _normalize_category_data({})
-        category_debug_print(f"[ADD_TAG] Created new cache entry for key {key}")
+        _glyph_cache[key] = _normalize_category_data({})
+        category_debug_print(f"[ADD_TAG] Created new GLOBAL cache entry for key {key}")
 
     if "tags" not in _glyph_cache[key]:
         _glyph_cache[key]["tags"] = []
@@ -2968,7 +2955,7 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1, update_w
 
     _glyph_cache[key]["tags"].append(tag_name)
     category_debug_print(f"[ADD_TAG] Tags AFTER adding: {_glyph_cache[key]['tags']}")
-    tag_log(f"Added tag '{tag_name}' to '{category}' (space_type={space_type})")
+    tag_log(f"Added tag '{tag_name}' to '{category}' (GLOBAL)")
 
     # In preview mode, don't clear pending_tag_assignment yet
     # It will be cleared only when user clicks Save (in finalize_category_tag_changes)
@@ -2991,10 +2978,13 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1, update_w
 
 
 def remove_category_tag(category, tag_name, auto_save=True, space_type=-1, update_wm=True):
-    """Remove a single tag from a category."""
+    """Remove a single tag from a category.
+
+    Global-First: All operations use GLOBAL key (-1, category) regardless of space_type parameter.
+    """
     global _glyph_cache
 
-    key = _make_cache_key(space_type, category)
+    key = _make_cache_key(space_type, category)  # Returns (-1, category)
     if key not in _glyph_cache:
         return False, f"Category '{category}' not found"
 
@@ -3004,7 +2994,7 @@ def remove_category_tag(category, tag_name, auto_save=True, space_type=-1, updat
         return True, f"Tag '{tag_name}' not assigned to '{category}'"
 
     cat_tags.remove(tag_name)
-    tag_log(f"Removed tag '{tag_name}' from '{category}' (space_type={space_type})")
+    tag_log(f"Removed tag '{tag_name}' from '{category}' (GLOBAL)")
 
     # Only update WM override if requested (not during preview in edit dialog)
     if update_wm:
@@ -3084,6 +3074,8 @@ def clear_category_tags_no_save(category, space_type=-1):
     This is used for live preview in the edit dialog. Changes are only
     persisted when the user clicks Save.
 
+    Global-First: All operations use GLOBAL key (-1, category).
+
     NOTE: We DO update wm.category_glyph_overrides so that the C++ UI
     (category_tags_string_lookup) can see tag assignments immediately.
     We only skip sync_glyph_mappings_to_wm() to prevent premature filtering.
@@ -3094,18 +3086,11 @@ def clear_category_tags_no_save(category, space_type=-1):
     _preview_mode_active = True
     try:
         # DEBUG
-        category_debug_print(f"[CLEAR_NO_SAVE] CALLED: category='{category}', space_type={space_type} (preview_mode=True)")
+        category_debug_print(f"[CLEAR_NO_SAVE] CALLED: category='{category}' (preview_mode=True)")
 
-        # Get category data from cache
-        key = _make_cache_key(space_type, category)
+        # Global-First: Always use GLOBAL key
+        key = _make_cache_key(space_type, category)  # Returns (-1, category)
         cat_data = _glyph_cache.get(key)
-
-        # Also try global key as fallback
-        if cat_data is None:
-            global_key = _make_cache_key(-1, category)
-            cat_data = _glyph_cache.get(global_key)
-            if cat_data is not None:
-                key = global_key
 
         if cat_data is None:
             category_debug_print(f"[CLEAR_NO_SAVE] Category '{category}' not found in cache")
@@ -3214,11 +3199,12 @@ def restore_category_tags_from_string(category, tags_string, space_type=-1):
     return result
 
 
-def restore_category_glyph_from_snapshot(category, glyph_hex, glyph_mode, color, space_type=-1):
+def restore_category_glyph_from_snapshot(category, glyph_hex, glyph_mode, color, space_type=-1,
+                                          icon_source=0, icon_key="", icon_path="", icon_provider=""):
     """Restore category glyph data from snapshot values.
 
     This is used when cancelling the edit dialog to revert Reset changes.
-    Restores glyph, glyph_mode, and color in both GLOBAL and space-specific entries.
+    Restores glyph, glyph_mode, color, and icon fields in both GLOBAL and space-specific entries.
 
     Args:
         category: Category name
@@ -3226,6 +3212,10 @@ def restore_category_glyph_from_snapshot(category, glyph_hex, glyph_mode, color,
         glyph_mode: Glyph mode (0=auto, 1=first_letter)
         color: Color as [r, g, b] list
         space_type: Space type (-1 for global)
+        icon_source: Icon source (0=auto, 1=manual, 2=off)
+        icon_key: Blender icon key (e.g., "FUND" or empty string)
+        icon_path: Custom icon file path (or empty string)
+        icon_provider: Icon provider (e.g., "extension_auto" or empty string)
     """
     global _glyph_cache, _glyph_cache_loaded
 
@@ -3236,6 +3226,7 @@ def restore_category_glyph_from_snapshot(category, glyph_hex, glyph_mode, color,
         _load_glyph_mappings_from_file()
 
     category_debug_print(f"[RESTORE GLYPH] Restoring glyph for '{category}': glyph_hex='{glyph_hex}', glyph_mode={glyph_mode}, color={color}, space_type={space_type}")
+    category_debug_print(f"[RESTORE ICON] Restoring icon: icon_source={icon_source}, icon_key='{icon_key}', icon_path='{icon_path}', icon_provider='{icon_provider}'")
 
     # Convert glyph_hex to glyph character if needed
     glyph = ""
@@ -3249,6 +3240,10 @@ def restore_category_glyph_from_snapshot(category, glyph_hex, glyph_mode, color,
 
     category_debug_print(f"[RESTORE GLYPH] Converted glyph_hex '{glyph_hex}' to glyph '{glyph}'")
 
+    # Map icon_source int to string
+    icon_source_map = {0: "auto", 1: "manual", 2: "off"}
+    icon_source_str = icon_source_map.get(icon_source, "auto")
+
     # Restore in GLOBAL entry
     global_key = _make_cache_key(-1, category)
     if global_key in _glyph_cache:
@@ -3257,7 +3252,15 @@ def restore_category_glyph_from_snapshot(category, glyph_hex, glyph_mode, color,
         global_entry["glyph"] = glyph
         global_entry["glyph_mode"] = "auto" if glyph_mode == 0 else "first_letter"
         global_entry["color"] = list(color) if color else [0.0, 0.0, 0.0]
+        # Restore icon fields
+        if "icon" not in global_entry:
+            global_entry["icon"] = {}
+        global_entry["icon"]["source"] = icon_source_str
+        global_entry["icon"]["key"] = icon_key if icon_key else ""
+        global_entry["icon"]["path"] = icon_path if icon_path else ""
+        global_entry["icon"]["provider"] = icon_provider if icon_provider else ""
         category_debug_print(f"[RESTORE GLYPH] After restore GLOBAL: glyph='{global_entry.get('glyph', '')}', glyph_mode='{global_entry.get('glyph_mode', 'auto')}'")
+        category_debug_print(f"[RESTORE ICON] After restore GLOBAL icon: source='{global_entry['icon'].get('source', 'auto')}', key='{global_entry['icon'].get('key', '')}'")
 
     # Restore in space-specific entry if space_type is provided
     if space_type != -1:
@@ -3268,7 +3271,15 @@ def restore_category_glyph_from_snapshot(category, glyph_hex, glyph_mode, color,
             space_entry["glyph"] = glyph
             space_entry["glyph_mode"] = "auto" if glyph_mode == 0 else "first_letter"
             space_entry["color"] = list(color) if color else [0.0, 0.0, 0.0]
+            # Restore icon fields
+            if "icon" not in space_entry:
+                space_entry["icon"] = {}
+            space_entry["icon"]["source"] = icon_source_str
+            space_entry["icon"]["key"] = icon_key if icon_key else ""
+            space_entry["icon"]["path"] = icon_path if icon_path else ""
+            space_entry["icon"]["provider"] = icon_provider if icon_provider else ""
             category_debug_print(f"[RESTORE GLYPH] After restore SPACE({space_type}): glyph='{space_entry.get('glyph', '')}', glyph_mode='{space_entry.get('glyph_mode', 'auto')}'")
+            category_debug_print(f"[RESTORE ICON] After restore SPACE({space_type}) icon: source='{space_entry['icon'].get('source', 'auto')}', key='{space_entry['icon'].get('key', '')}'")
     category_debug_print(f"[RESTORE GLYPH] Restored glyph data for '{category}'")
     return True
 
@@ -3278,49 +3289,124 @@ def update_category_tags_in_wm(category, space_type=-1):
 
     Tags are stored in _glyph_cache and JSON for persistence.
     They are also synced to WM category_glyph_overrides for C++ UI display.
+    
+    Global-First: Always use GLOBAL space_type (-1) for override lookup to ensure
+    consistency with _glyph_cache which stores all data under GLOBAL key.
     """
     try:
         wm = bpy.context.window_manager
         if wm is None or not hasattr(wm, 'category_glyph_overrides'):
+            category_debug_print(f"[UPDATE_WM_TAGS] ERROR: WM or overrides not available for '{category}'")
             _pref_log_once(f"[DEBUG update_category_tags_in_wm] ERROR: WM or overrides not available")
             tag_log(f"update_category_tags_in_wm: WM or overrides not available", "ERROR")
             return
 
-        current_tags = get_category_tags(category, space_type)
-        _pref_log_once(f"[DEBUG update_category_tags_in_wm] category='{category}', space_type={space_type}, current_tags={current_tags}")
+        category_debug_print(f"[UPDATE_WM_TAGS] START: category='{category}', space_type={space_type}")
+        
+        # Global-First: Always use GLOBAL space_type (-1) for cache lookup
+        global_space_type = -1
+        current_tags = get_category_tags(category, global_space_type)
+        category_debug_print(f"[UPDATE_WM_TAGS] current_tags={current_tags} (from global_space_type={global_space_type})")
+        _pref_log_once(f"[DEBUG update_category_tags_in_wm] category='{category}', space_type={space_type}, global_space_type={global_space_type}, current_tags={current_tags}")
         tag_log(f"update_category_tags_in_wm: category='{category}', space_type={space_type}, tags={current_tags}")
         
+        # Debug: List all overrides for this category
+        all_overrides_for_cat = []
+        for item in wm.category_glyph_overrides:
+            if item.category == category:
+                item_st = getattr(item, 'space_type', -1)
+                item_tags = getattr(item, 'tags', '')
+                all_overrides_for_cat.append(f"(space_type={item_st}, tags='{item_tags}')")
+        category_debug_print(f"[UPDATE_WM_TAGS] Existing WM overrides for '{category}': {all_overrides_for_cat}")
+        
+        # Global-First Migration: Remove all stale space-specific overrides for this category
+        # This ensures only GLOBAL override exists, preventing C++ from finding empty space-specific first
+        items_to_remove = []
+        for item in wm.category_glyph_overrides:
+            if item.category == category:
+                item_st = getattr(item, 'space_type', -1)
+                if item_st != global_space_type:  # Not GLOBAL (-1)
+                    items_to_remove.append(item)
+                    category_debug_print(f"[UPDATE_WM_TAGS] Marking stale space-specific override for removal: space_type={item_st}")
+
+        for item in items_to_remove:
+            wm.category_glyph_overrides.remove(item)
+            category_debug_print(f"[UPDATE_WM_TAGS] Removed stale space-specific override (space_type={getattr(item, 'space_type', '?')})")
+
         override_item = None
         for item in wm.category_glyph_overrides:
-            # Check both category name and space_type for space-specific categories
+            # Global-First: Always use GLOBAL space_type (-1) for override lookup
+            # This ensures we find the override regardless of what space_type was passed in
             item_space_type = getattr(item, 'space_type', -1)
-            if item.category == category and item_space_type == space_type:
+            if item.category == category and item_space_type == global_space_type:
                 override_item = item
-                _pref_log_once(f"[DEBUG update_category_tags_in_wm] Found existing override for '{category}'")
+                category_debug_print(f"[UPDATE_WM_TAGS] Found existing GLOBAL override for '{category}' with tags='{getattr(item, 'tags', '')}'")
+                _pref_log_once(f"[DEBUG update_category_tags_in_wm] Found existing override for '{category}' (space_type={global_space_type})")
                 break
         
         if override_item is None:
+            category_debug_print(f"[UPDATE_WM_TAGS] No GLOBAL override found for '{category}'")
             # Only create a new override if there are actually tags to store.
             # If tags are empty and no override exists, we don't need to create one.
             if not current_tags:
-                _pref_log_once(f"[DEBUG update_category_tags_in_wm] No override and no tags, skipping creation for '{category}' (space_type={space_type})")
-                tag_log(f"update_category_tags_in_wm: No override and no tags, skipping creation for '{category}' (space_type={space_type})")
+                category_debug_print(f"[UPDATE_WM_TAGS] No override and no tags, skipping creation for '{category}'")
+                _pref_log_once(f"[DEBUG update_category_tags_in_wm] No override and no tags, skipping creation for '{category}' (global_space_type={global_space_type})")
+                tag_log(f"update_category_tags_in_wm: No override and no tags, skipping creation for '{category}' (global_space_type={global_space_type})")
                 return
             override_item = wm.category_glyph_overrides.new(category=category)
-            # Set space_type for space-specific categories
+            # Global-First: Always use GLOBAL space_type (-1) for consistency
             if hasattr(override_item, 'space_type'):
-                override_item.space_type = space_type
-            _pref_log_once(f"[DEBUG update_category_tags_in_wm] Created new override for '{category}' (space_type={space_type})")
-            tag_log(f"update_category_tags_in_wm: Created new override for '{category}' (space_type={space_type})")
+                override_item.space_type = global_space_type
+            category_debug_print(f"[UPDATE_WM_TAGS] Created new GLOBAL override for '{category}'")
+            _pref_log_once(f"[DEBUG update_category_tags_in_wm] Created new override for '{category}' (global_space_type={global_space_type})")
+            tag_log(f"update_category_tags_in_wm: Created new override for '{category}' (global_space_type={global_space_type})")
+        else:
+            # Override exists - check if we need to clear it (no tags left)
+            if not current_tags:
+                # Remove the override since there are no tags
+                category_debug_print(f"[UPDATE_WM_TAGS] Removing GLOBAL override for '{category}' (no tags left)")
+                _pref_log_once(f"[DEBUG update_category_tags_in_wm] Removing override for '{category}' (no tags left, global_space_type={global_space_type})")
+                tag_log(f"update_category_tags_in_wm: Removing override for '{category}' (no tags left, global_space_type={global_space_type})")
+                wm.category_glyph_overrides.remove(override_item)
+                return
         
         if hasattr(override_item, 'tags'):
+            old_tags = override_item.tags
             override_item.tags = ";".join(current_tags)
+            category_debug_print(f"[UPDATE_WM_TAGS] Set WM override tags for '{category}' from '{old_tags}' to '{override_item.tags}'")
             _pref_log_once(f"[DEBUG update_category_tags_in_wm] Set WM override tags for '{category}' to '{override_item.tags}'")
-            tag_log(f"update_category_tags_in_wm: Set WM override tags for '{category}' (space_type={space_type}) to '{override_item.tags}'")
-            
-        _pref_log_once(f"[DEBUG update_category_tags_in_wm] Completed for '{category}' (space_type={space_type})")
-        tag_log(f"update_category_tags_in_wm: Completed for '{category}' (space_type={space_type})")
+            tag_log(f"update_category_tags_in_wm: Set WM override tags for '{category}' (global_space_type={global_space_type}) to '{override_item.tags}'")
+
+        # Also update category_glyph_mappings so C++ lookup finds the updated tags
+        # This is critical for Edit Category Tab to show correct tag state
+        if hasattr(wm, 'category_glyph_mappings'):
+            mapping_item = None
+            for item in wm.category_glyph_mappings:
+                item_space_type = getattr(item, 'space_type', -1)
+                if item.category == category and item_space_type == global_space_type:
+                    mapping_item = item
+                    break
+
+            if mapping_item is not None:
+                # Update existing mapping
+                if hasattr(mapping_item, 'tags'):
+                    old_mapping_tags = mapping_item.tags
+                    mapping_item.tags = ";".join(current_tags)
+                    category_debug_print(f"[UPDATE_WM_TAGS] Updated mapping tags for '{category}' from '{old_mapping_tags}' to '{mapping_item.tags}'")
+            elif current_tags:
+                # Create new mapping only if there are tags to store
+                mapping_item = wm.category_glyph_mappings.new(category=category)
+                if hasattr(mapping_item, 'space_type'):
+                    mapping_item.space_type = global_space_type
+                if hasattr(mapping_item, 'tags'):
+                    mapping_item.tags = ";".join(current_tags)
+                category_debug_print(f"[UPDATE_WM_TAGS] Created new mapping for '{category}' with tags '{mapping_item.tags}'")
+
+        category_debug_print(f"[UPDATE_WM_TAGS] COMPLETED for '{category}' (global_space_type={global_space_type})")
+        _pref_log_once(f"[DEBUG update_category_tags_in_wm] Completed for '{category}' (global_space_type={global_space_type})")
+        tag_log(f"update_category_tags_in_wm: Completed for '{category}' (global_space_type={global_space_type})")
     except Exception as e:
+        category_debug_print(f"[UPDATE_WM_TAGS] EXCEPTION for '{category}': {e}")
         _pref_log_once(f"[DEBUG update_category_tags_in_wm] Error: {e}")
         tag_log(f"update_category_tags_in_wm: Error: {e}", "ERROR")
         import traceback
@@ -3332,23 +3418,27 @@ def _set_without_tag_preview_state_in_wm(category, space_type=-1, is_selected=Fa
 
     Uses category_glyph_overrides only, so main category filtering (mappings/pending)
     remains unchanged until Save.
+    
+    Global-First: Always use GLOBAL space_type (-1) for consistency with tag storage.
     """
     try:
         wm = bpy.context.window_manager
         if wm is None or not hasattr(wm, 'category_glyph_overrides'):
             return
 
+        # Global-First: Always use GLOBAL space_type (-1) for lookup
+        global_space_type = -1
         override_item = None
         for item in wm.category_glyph_overrides:
             item_space_type = getattr(item, 'space_type', -1)
-            if item.category == category and item_space_type == space_type:
+            if item.category == category and item_space_type == global_space_type:
                 override_item = item
                 break
 
         if override_item is None and is_selected:
             override_item = wm.category_glyph_overrides.new(category=category)
             if hasattr(override_item, 'space_type'):
-                override_item.space_type = space_type
+                override_item.space_type = global_space_type
 
         if override_item is None:
             return
@@ -3364,15 +3454,20 @@ def _set_without_tag_preview_state_in_wm(category, space_type=-1, is_selected=Fa
 
 
 def _is_without_tag_preview_selected_in_wm(category, space_type=-1):
-    """Return True when preview state for "Without Tag" is currently selected."""
+    """Return True when preview state for "Without Tag" is currently selected.
+    
+    Global-First: Always use GLOBAL space_type (-1) for consistency with tag storage.
+    """
     try:
         wm = bpy.context.window_manager
         if wm is None or not hasattr(wm, 'category_glyph_overrides'):
             return False
 
+        # Global-First: Always use GLOBAL space_type (-1) for lookup
+        global_space_type = -1
         for item in wm.category_glyph_overrides:
             item_space_type = getattr(item, 'space_type', -1)
-            if item.category != category or item_space_type != space_type:
+            if item.category != category or item_space_type != global_space_type:
                 continue
 
             item_tags = getattr(item, 'tags', '')
@@ -3401,6 +3496,14 @@ def finalize_category_tag_changes(category, space_type=-1):
     _preview_mode_active = False
     category_debug_print(f"[FINALIZE] Preview mode disabled for '{category}' (space_type={space_type})")
 
+    # Get source_extension for this category to clear pending for all sibling categories
+    source_ext = None
+    key = _make_cache_key(space_type, category)
+    if key in _glyph_cache:
+        cat_data = _glyph_cache[key]
+        if isinstance(cat_data, dict):
+            source_ext = cat_data.get("source_extension", "")
+
     # Clear pending_tag_assignment in ALL cache entries for this category
     # (both space-specific and global) so the category is no longer "new"
     keys_to_clear = []
@@ -3416,6 +3519,20 @@ def finalize_category_tag_changes(category, space_type=-1):
             if cat_data.get("pending_tag_assignment", False):
                 cat_data["pending_tag_assignment"] = False
                 tag_log(f"finalize_category_tag_changes: cleared pending for '{category}' (key={key})")
+
+    # Also clear pending_tag_assignment for all categories from the same extension
+    # When one category of an extension gets a tag, the whole extension is "processed"
+    if source_ext:
+        cleared_count = 0
+        for cache_key, cat_data in _glyph_cache.items():
+            if isinstance(cat_data, dict):
+                if cat_data.get("source_extension") == source_ext:
+                    if cat_data.get("pending_tag_assignment", False):
+                        cat_data["pending_tag_assignment"] = False
+                        cleared_count += 1
+                        category_debug_print(f"[FINALIZE] Cleared pending for sibling category '{cache_key[1]}' (same extension: {source_ext})")
+        if cleared_count > 0:
+            tag_log(f"finalize_category_tag_changes: cleared pending for {cleared_count} sibling categories of extension '{source_ext}'")
 
     # Update WM override to make changes visible
     update_category_tags_in_wm(category, space_type)
@@ -3467,11 +3584,16 @@ def get_categories_for_tag(tag_name):
             # cat_key is a tuple (space_type, category), extract info
             if isinstance(cat_key, tuple) and len(cat_key) >= 2:
                 space_type_id, category_name = cat_key
+                
+                # Global-First: Only process GLOBAL entries (space_type = -1)
+                if space_type_id != -1:
+                    continue
+                
                 display_name = cat_data.get("display_name", "")
-
+                
                 # Use display_name if available, otherwise use category_name
                 ui_name = display_name if display_name else category_name
-
+                
                 if ui_name:  # Only include if we have something to display
                     categories.append({
                         'name': category_name,
@@ -3666,18 +3788,14 @@ def get_category_icon_data(category, space_type=-1):
         category_debug_print(f"[get_category_icon_data] RETURN: icon_source is 'off'")
         return "", ""
 
-    # For manual mode with icon_key (Blender internal icon), pass it to C++ for resolution
-    if icon_source == "manual" and icon_key:
+    # Prefer any explicit icon payload so the UI stays in sync even if icon_source
+    # was not refreshed yet in the in-memory cache.
+    if icon_key:
         category_debug_print(f"[get_category_icon_data] RETURN: manual mode, icon_key='{icon_key}'")
         return icon_key, ""
 
-    # For manual mode with icon_path (custom icon file), return the path
-    if icon_source == "manual" and icon_path:
-        category_debug_print(f"[get_category_icon_data] RETURN: manual mode, icon_path='{icon_path}'")
-        return "", icon_path
-
-    # Return path for external icons (icon_source == "auto" or path explicitly set)
     if icon_path:
+        category_debug_print(f"[get_category_icon_data] RETURN: manual mode, icon_path='{icon_path}'")
         return "", icon_path
 
     return "", ""
@@ -3717,7 +3835,8 @@ class USERPREF_OT_category_tag_remove_from_category(Operator):
                     if (self.tag_name in cat_data.get("tags", []) and 
                         display_name == category_to_remove):
                         # Found the category by display_name, use actual category name (even if empty)
-                        success, message = remove_category_tag(actual_category, self.tag_name, auto_save=True, space_type=space_type_id)
+                        # Global-First: Always use GLOBAL key (-1) for tag removal
+                        success, message = remove_category_tag(actual_category, self.tag_name, auto_save=True, space_type=-1)
                         if success:
                             self.report({'INFO'}, f"Tag '{self.tag_name}' removed from '{display_name}'")
                             context.area.tag_redraw()
@@ -4169,23 +4288,36 @@ def set_category_data(category,
                         category_debug_print(f"[SET_CATEGORY_DATA] Synced glyph to space_type={cache_space_type} for '{category}'")
 
     # STEP 3: Sync to WM for C++ UI display
+    # Global-First: Always use GLOBAL space_type (-1) for WM override to prevent
+    # C++ from finding stale space-specific overrides first
     try:
         wm = bpy.context.window_manager
         if wm is not None and hasattr(wm, 'category_glyph_overrides'):
-            # Find or create override entry in WM
+            # Global-First: Remove any stale space-specific overrides for this category
+            items_to_remove = []
+            for item in wm.category_glyph_overrides:
+                if item.category == category:
+                    item_st = getattr(item, 'space_type', -1)
+                    if item_st != -1:  # Not GLOBAL
+                        items_to_remove.append(item)
+            for item in items_to_remove:
+                wm.category_glyph_overrides.remove(item)
+                category_debug_print(f"[SET_CATEGORY_DATA] Removed stale space-specific WM override for '{category}'")
+
+            # Find or create GLOBAL override entry in WM
             override_item = None
             for item in wm.category_glyph_overrides:
                 item_space_type = getattr(item, 'space_type', -1)
-                if item.category == category and item_space_type == space_type:
+                if item.category == category and item_space_type == -1:  # GLOBAL only
                     override_item = item
                     break
 
             if override_item is None:
-                # Create new override entry
+                # Create new GLOBAL override entry
                 override_item = wm.category_glyph_overrides.new()
                 override_item.category = category
                 if hasattr(override_item, 'space_type'):
-                    override_item.space_type = space_type
+                    override_item.space_type = -1  # Always GLOBAL
 
             # Update override with data from cache
             entry = _glyph_cache[key]
@@ -4215,14 +4347,14 @@ def set_category_data(category,
             if hasattr(override_item, 'color'):
                 color_val = entry.get("color", [0.0, 0.0, 0.0])
                 override_item.color = color_val
-            category_debug_print(f"[SET_CATEGORY_DATA] Synced to WM override for '{category}' (space_type={space_type})")
+            category_debug_print(f"[SET_CATEGORY_DATA] Synced to WM override for '{category}' (space_type=-1 GLOBAL)")
 
             # Also update mappings (for C++ panel_category_icon_data_lookup)
             if hasattr(wm, 'category_glyph_mappings'):
                 mapping_item = None
                 for item in wm.category_glyph_mappings:
                     item_space_type = getattr(item, 'space_type', -1)
-                    if item.category == category and item_space_type == space_type:
+                    if item.category == category and item_space_type == -1:
                         mapping_item = item
                         break
 
@@ -4230,7 +4362,7 @@ def set_category_data(category,
                     mapping_item = wm.category_glyph_mappings.new()
                     mapping_item.category = category
                     if hasattr(mapping_item, 'space_type'):
-                        mapping_item.space_type = space_type
+                        mapping_item.space_type = -1
 
                 if hasattr(mapping_item, 'icon_source'):
                     mapping_item.icon_source = icon_source_val
@@ -4250,7 +4382,7 @@ def set_category_data(category,
                 if hasattr(mapping_item, 'color'):
                     color_val = entry.get("color", [0.0, 0.0, 0.0])
                     mapping_item.color = color_val
-                category_debug_print(f"[SET_CATEGORY_DATA] Synced to WM mapping for '{category}' (space_type={space_type})")
+                category_debug_print(f"[SET_CATEGORY_DATA] Synced to WM mapping for '{category}' (space_type=-1)")
 
             if global_synced_from_space and global_key in _glyph_cache:
                 global_entry = _glyph_cache[global_key]
@@ -5121,17 +5253,18 @@ def _merge_discovered_categories():
     if new_categories:
         category_debug_print(f"[GLYPH] Found {len(new_categories)} new categories: {sorted(new_categories)}")
 
-        # Auto-detect pending extension context from enabled extensions
-        # This handles "Install from Disk" where pending_extension_context is not set
-        # We check ALL new categories, not just those with extension sources,
-        # because panels may be discovered before extension metadata is available.
+        # Auto-detect extension for EACH category individually from enabled extensions.
+        # This handles "Install from Disk" and startup discovery where pending_extension_context is not set.
+        # IMPORTANT: Each category gets its own source_extension based on name matching,
+        # NOT a global context that would incorrectly assign all categories to one extension.
+        category_to_auto_extension = {}  # Maps category name to detected extension_id
+        enabled_extensions = {}  # Map of extension_id -> {module_name, pkg_name, match_keys}
         if pending_extension_context is None:
             try:
                 prefs = getattr(bpy.context, "preferences", None)
                 addons = getattr(prefs, "addons", None) if prefs else None
                 if addons:
                     # Build map of all enabled extensions for quick lookup
-                    enabled_extensions = {}
                     for addon in addons:
                         module_name = getattr(addon, "module", "")
                         if not isinstance(module_name, str) or not module_name.startswith("bl_ext."):
@@ -5147,6 +5280,7 @@ def _merge_discovered_categories():
                             "match_keys": _extension_id_match_keys(ext_id),
                         }
 
+                    # For EACH category, find its matching extension individually
                     for category in new_categories:
                         # Skip RESERVED categories - they should never be linked to extensions
                         if category in DEFAULT_CATEGORY_GLYPHS:
@@ -5159,16 +5293,8 @@ def _merge_discovered_categories():
                         for ext_id, ext_info in enabled_extensions.items():
                             if category_key in ext_info["match_keys"]:
                                 category_debug_print(f"[MERGE AUTO-EXT] Auto-detected extension for new category '{category}': ext_id={ext_id!r}")
-                                pending_extension_context = {
-                                    "extension_id": ext_id,
-                                    "space_type": -1,
-                                    "mode_flag": 0,
-                                    "timestamp": time.time(),
-                                }
+                                category_to_auto_extension[category] = ext_id
                                 break
-
-                        if pending_extension_context is not None:
-                            break
             except Exception as e:
                 category_debug_print(f"[MERGE AUTO-EXT] Error auto-detecting extension: {e}")
 
@@ -5257,14 +5383,26 @@ def _merge_discovered_categories():
 
             # Use global key (-1) for newly discovered categories
             cache_key = _make_cache_key(-1, category)
-            
-            # Check if this is a new category from pending extension
+
+            # Determine source_extension for this category:
+            # 1. If pending_extension_context is set (extension just installed), all categories get that extension
+            # 2. Otherwise, use auto-detected extension from category_to_auto_extension (individual per category)
+            ext_id = ""
+            ext_mode = 0
+            tag_already_assigned = False
             is_from_pending_ext = pending_extension_context is not None
+
             if is_from_pending_ext:
+                # All categories from this merge cycle belong to the pending extension
                 ext_id = pending_extension_context.get("extension_id", "")
                 ext_mode = pending_extension_context.get("mode_flag", 0)
+                tag_already_assigned = pending_extension_context.get("tag_already_assigned", False)
                 category_debug_print(f"[MERGE DEBUG] NEW CATEGORY from pending extension: category={category!r}, extension_id={ext_id!r}")
-            
+            elif category in category_to_auto_extension:
+                # Individual auto-detection for this category
+                ext_id = category_to_auto_extension[category]
+                category_debug_print(f"[MERGE DEBUG] NEW CATEGORY auto-detected: category={category!r}, extension_id={ext_id!r}")
+
             _glyph_cache[cache_key] = {
                 "glyph": glyph,
                 "display_name": default_display_name,
@@ -5277,18 +5415,15 @@ def _merge_discovered_categories():
                 "icon_key": "",
                 "icon_path": "",
                 "icon_provider": "",
-                # Extension pending-tag fields (populated below if context is available)
-                "source_extension": "",
+                # Extension pending-tag fields
+                "source_extension": ext_id,
                 "pending_tag_assignment": False,
                 "discovered_in_spaces": [],
                 "discovered_in_modes": [],
             }
 
-            # If an extension was just installed, mark this new category as pending.
-            if pending_extension_context is not None:
-                ext_id = pending_extension_context.get("extension_id", "")
-                ext_mode = pending_extension_context.get("mode_flag", 0)
-                tag_already_assigned = pending_extension_context.get("tag_already_assigned", False)
+            # If an extension was detected (either from pending context or auto-detection), mark as pending.
+            if ext_id:
                 _glyph_cache[cache_key]["source_extension"] = ext_id
                 # Only set pending_tag_assignment if tag was NOT already assigned via tab drop.
                 # For tab drops, the category will be visible in the general list without filtering,
@@ -5601,7 +5736,7 @@ def _sync_glyph_mappings_to_wm_impl():
                     item = wm.category_glyph_mappings.new(category=category)
                     # Set space_type for space-specific category lookup
                     if hasattr(item, "space_type"):
-                        item.space_type = space_type_val
+                        item.space_type = -1
                     item.glyph = glyph_val
                     item.display_name = display_name_val
                     item.color = (color_val[0], color_val[1], color_val[2])
@@ -5626,69 +5761,21 @@ def _sync_glyph_mappings_to_wm_impl():
                         item.tags = tags_str
                         # Debug: log categories with tags
                         if tags_str:
-                            _pref_log_once(f"[GLYPH SYNC] Synced tags for category={category!r}, space_type={space_type_val}")
+                            _pref_log_once(f"[GLYPH SYNC] Synced tags for category={category!r} (GLOBAL)")
                     # Sync extension pending-tag fields
                     source_ext_val = normalized_data.get("source_extension", "")
-                    # Ensure extension metadata is inherited from Global if missing in space-specific entry.
-                    # This prevents loss of extension info when a user assigns a tag in a specific space/mode.
-                    if not source_ext_val and space_type_val != -1:
-                        global_key = (-1, category)
-                        if global_key in _glyph_cache:
-                            global_data = _glyph_cache[global_key]
-                            if isinstance(global_data, dict):
-                                source_ext_val = global_data.get("source_extension", "")
-                                if source_ext_val:
-                                    normalized_data["source_extension"] = source_ext_val
-                                    # Also copy other related fields if missing
-                                    for field in ["pending_tag_assignment", "discovered_in_spaces", "discovered_in_modes"]:
-                                        if field not in normalized_data or not normalized_data[field]:
-                                            normalized_data[field] = global_data.get(field)
-                                    # CRITICAL: Since normalized_data is a copy, we MUST update the cache directly.
-                                    _glyph_cache[cache_key] = normalized_data
-                                    cache_changed = True
-                                    category_debug_print(f"[GLYPH SYNC] Inherited extension {source_ext_val} from global for {category!r} in space {space_type_val}")
 
                     pending_val = bool(normalized_data.get("pending_tag_assignment", False))
                     disc_spaces_val = normalized_data.get("discovered_in_spaces", [])
                     disc_modes_val = normalized_data.get("discovered_in_modes", [])
 
-                    # NORMALIZE pending: clear if category has tags (in ANY space) or no source_extension
+                    # NORMALIZE pending: clear if category has tags or no source_extension
                     # This prevents stale pending flags from showing "New Add-ons!" button
                     # when there's nothing to distribute in the current context.
                     # Also clear for RESERVED categories - they should never be linked to extensions.
+                    # Global-First: All entries are GLOBAL, so no need to check other space types.
                     is_reserved = category in DEFAULT_CATEGORY_GLYPHS
-                    has_tags_current = bool(tags_val) if isinstance(tags_val, (list, tuple)) else bool(tags_str)
-                    has_tags_any_space = has_tags_current
-
-                    # Debug: log what we're checking
-                    if pending_val and source_ext_val:
-                        category_debug_print(f"[GLYPH SYNC DEBUG] Checking tags for {category!r}: has_tags_current={has_tags_current}")
-
-                    if not has_tags_any_space:
-                        # Check all cache entries for this category name AND same source_extension
-                        for check_key, check_data in _glyph_cache.items():
-                            if isinstance(check_key, tuple) and len(check_key) == 2:
-                                check_cat = check_key[1]
-                                if isinstance(check_data, dict):
-                                    is_same_cat = (check_cat == category and check_key[0] != space_type_val)
-                                    
-                                    # Robust extension matching: resolve extension from global if missing in space entry
-                                    check_ext = check_data.get("source_extension", "")
-                                    if not check_ext and check_key[0] != -1:
-                                        global_check_key = (-1, check_cat)
-                                        if global_check_key in _glyph_cache:
-                                            global_check_data = _glyph_cache[global_check_key]
-                                            if isinstance(global_check_data, dict):
-                                                check_ext = global_check_data.get("source_extension", "")
-                                    
-                                    is_same_ext = bool(source_ext_val) and check_ext == source_ext_val
-                                    
-                                    if is_same_cat or is_same_ext:
-                                        check_tags = check_data.get("tags", [])
-                                        if check_tags:
-                                            has_tags_any_space = True
-                                            category_debug_print(f"[GLYPH SYNC NORMALIZE] Found tags in space {check_key[0]} for category {check_cat!r} (via same cat/ext): {check_tags}")
-                                            break
+                    has_tags = bool(tags_val) if isinstance(tags_val, (list, tuple)) else bool(tags_str)
 
                     # Reserved categories should not surface as pending, but keep their
                     # source_extension so the extension can still be recognized as already
@@ -5700,14 +5787,14 @@ def _sync_glyph_mappings_to_wm_impl():
                         _glyph_cache[cache_key] = normalized_data
                         cache_changed = True
                         category_debug_print(f"[GLYPH SYNC NORMALIZE] Cleared pending for RESERVED category {category!r} while keeping source_extension")
-                    elif pending_val and (has_tags_any_space or not source_ext_val):
+                    elif pending_val and (has_tags or not source_ext_val):
                         pending_val = False
                         normalized_data["pending_tag_assignment"] = False
                         # CRITICAL: Update cache so it gets saved to JSON.
                         _glyph_cache[cache_key] = normalized_data
                         cache_changed = True
                         category_debug_print(f"[GLYPH SYNC NORMALIZE] Cleared stale pending for {category!r}: "
-                              f"has_tags_current={has_tags_current}, has_tags_any_space={has_tags_any_space}, source_ext={source_ext_val!r}")
+                              f"has_tags={has_tags}, source_ext={source_ext_val!r}")
 
                     # Debug: log ALL categories with pending_tag_assignment or source_extension
                     if pending_val or source_ext_val:
@@ -5726,51 +5813,9 @@ def _sync_glyph_mappings_to_wm_impl():
                         item.discovered_in_modes = modes_to_flags(disc_modes_val)
                     added_count += 1
 
-                    # Also create a global fallback mapping when there is no explicit
-                    # global cache entry for this category. This ensures that C-side
-                    # lookups which don't pass space_type (legacy call-sites in
-                    # interface_tab_categories.cc) still see custom glyph color and
-                    # display name defined for space-specific categories.
-                    if space_type_val != -1:
-                        global_key = _make_cache_key(-1, category)
-                        if global_key not in _glyph_cache:
-                            item_global = wm.category_glyph_mappings.new(category=category)
-                            if hasattr(item_global, "space_type"):
-                                item_global.space_type = -1
-                            item_global.glyph = glyph_val
-                            item_global.display_name = display_name_val
-                            item_global.color = (color_val[0], color_val[1], color_val[2])
-                            item_global.default_glyph = default_glyph_val
-                            item_global.default_display_name = default_display_name_val
-                            if hasattr(item_global, "icon_source"):
-                                item_global.icon_source = icon_source_val
-                            if hasattr(item_global, "glyph_mode"):
-                                item_global.glyph_mode = glyph_mode_val
-                            if hasattr(item_global, "icon_key"):
-                                item_global.icon_key = icon_key_val
-                            if hasattr(item_global, "icon_path"):
-                                item_global.icon_path = icon_path_val
-                            if hasattr(item_global, "icon_provider"):
-                                item_global.icon_provider = icon_provider_val
-                            if hasattr(item_global, "is_reserved"):
-                                item_global.is_reserved = category in DEFAULT_CATEGORY_GLYPHS
-                            if hasattr(item_global, "tags") and isinstance(tags_val, (list, tuple)):
-                                tags_str_global = ";".join([t for t in tags_val if isinstance(t, str) and t])
-                                item_global.tags = tags_str_global
-                            # Sync extension pending-tag fields for global fallback
-                            if hasattr(item_global, "source_extension"):
-                                item_global.source_extension = source_ext_val
-                            if hasattr(item_global, "pending_tag_assignment"):
-                                item_global.pending_tag_assignment = pending_val
-                            if hasattr(item_global, "discovered_in_spaces"):
-                                item_global.discovered_in_spaces = spaces_to_flags(disc_spaces_val)
-                            if hasattr(item_global, "discovered_in_modes"):
-                                item_global.discovered_in_modes = modes_to_flags(disc_modes_val)
-                            added_count += 1
-
                     # Debug: show what was synced for key categories
                     if category in ["Item", "View", "Tool", "Edit"]:
-                        _pref_log_once(f"[GLYPH SYNC] Synced '{category}' (space_type={space_type_val}): glyph='{glyph_val}'")
+                        _pref_log_once(f"[GLYPH SYNC] Synced '{category}' (GLOBAL): glyph='{glyph_val}'")
                 except Exception as e:
                     category_debug_print(f"[GLYPH] Error adding mapping for {cache_key}: {e}")
 
@@ -5881,9 +5926,11 @@ def _sync_wm_to_glyph_cache_impl():
 
                 mappings_count += 1
 
-                # Get space_type from item (default to -1 for global)
+                # Global-First: ignore any non-GLOBAL WM entries.
                 space_type = getattr(item, 'space_type', -1)
-                cache_key = _make_cache_key(space_type, category)
+                if space_type != -1:
+                    continue
+                cache_key = _make_cache_key(-1, category)
 
                 # Get current cached data or create new entry
                 if cache_key not in _glyph_cache:
@@ -5985,6 +6032,42 @@ def _sync_wm_to_glyph_cache_impl():
                     icon_provider_val = item.icon_provider or ""
                     if cached_entry.get("icon_provider", "") != icon_provider_val:
                         cached_entry["icon_provider"] = icon_provider_val
+                        changes_detected = True
+
+                # Sync extension-related fields for "New Add-ons!" feature
+                # These are critical for showing unassigned categories
+                if hasattr(item, 'source_extension'):
+                    source_ext_val = item.source_extension or ""
+                    if cached_entry.get("source_extension", "") != source_ext_val:
+                        cached_entry["source_extension"] = source_ext_val
+                        changes_detected = True
+
+                if hasattr(item, 'pending_tag_assignment'):
+                    pending_val = bool(item.pending_tag_assignment)
+                    if cached_entry.get("pending_tag_assignment", False) != pending_val:
+                        cached_entry["pending_tag_assignment"] = pending_val
+                        changes_detected = True
+
+                if hasattr(item, 'discovered_in_spaces'):
+                    # WM stores as int (flags), cache stores as list of strings
+                    disc_spaces_flags = getattr(item, 'discovered_in_spaces', 0)
+                    if isinstance(disc_spaces_flags, int):
+                        disc_spaces = flags_to_spaces(disc_spaces_flags)
+                    else:
+                        disc_spaces = list(disc_spaces_flags) if disc_spaces_flags else []
+                    if cached_entry.get("discovered_in_spaces", []) != disc_spaces:
+                        cached_entry["discovered_in_spaces"] = disc_spaces
+                        changes_detected = True
+
+                if hasattr(item, 'discovered_in_modes'):
+                    # WM stores as int (flags), cache stores as list of strings
+                    disc_modes_flags = getattr(item, 'discovered_in_modes', 0)
+                    if isinstance(disc_modes_flags, int):
+                        disc_modes = flags_to_modes(disc_modes_flags)
+                    else:
+                        disc_modes = list(disc_modes_flags) if disc_modes_flags else []
+                    if cached_entry.get("discovered_in_modes", []) != disc_modes:
+                        cached_entry["discovered_in_modes"] = disc_modes
                         changes_detected = True
 
                 # If this is a space-specific entry with customizations, also update GLOBAL entry
@@ -6093,9 +6176,9 @@ def _sync_wm_to_glyph_cache_impl():
                     overrides_count += 1
                     _pref_log_once(f"[GLYPH SYNC] Override found: category='{category}', glyph='{item.glyph}'")
 
-                    # Get space_type from item (default to -1 for global)
+                    # Persist overrides into the canonical GLOBAL cache key only.
                     space_type = getattr(item, 'space_type', -1)
-                    cache_key = _make_cache_key(space_type, category)
+                    cache_key = _make_cache_key(-1, category)
 
                     # Get current cached data or create new entry
                     if cache_key not in _glyph_cache:

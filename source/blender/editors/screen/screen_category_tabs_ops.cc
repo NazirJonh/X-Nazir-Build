@@ -538,8 +538,10 @@ static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
     printf("[RESET FIX] Clearing GLOBAL entry for text_only/glyph_text category '%s'\n", category);
     /* Reset glyph to empty (will use first_letter fallback) */
     global_item->glyph[0] = '\0';
-    /* Set glyph_mode to first_letter to ensure correct display */
-    global_item->glyph_mode = ui::CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER;
+    /* Keep glyph_mode=AUTO so Cancel restores original icon/glyph correctly.
+     * The first_letter display will be used at runtime when glyph is empty,
+     * but we must not persist FIRST_LETTER mode or Cancel will restore wrong state. */
+    global_item->glyph_mode = ui::CATEGORY_TAB_GLYPH_MODE_AUTO;
     /* Clear color */
     zero_v3(global_item->color);
     /* Clear icon data */
@@ -547,7 +549,7 @@ static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
     global_item->icon_key[0] = '\0';
     global_item->icon_provider[0] = '\0';
     global_item->icon_source = ui::CATEGORY_TAB_ICON_SOURCE_OFF;
-    printf("[RESET FIX] GLOBAL entry cleared: glyph='', glyph_mode=first_letter\n");
+    printf("[RESET FIX] GLOBAL entry cleared: glyph='', glyph_mode=auto\n");
   }
 
   return defaults;
@@ -692,11 +694,38 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
 #endif
 
   /* Reset tags: set empty tags in WM override.
-   * This updates the UI immediately. If user clicks Cancel, original tags will be restored. */
+   * This updates the UI immediately. If user clicks Cancel, original tags will be restored.
+   *
+   * Global-First: Always use GLOBAL space_type (-1) for override to prevent C++ lookup
+   * from finding stale space-specific overrides first. */
   if (reset_tag) {
-    CategoryGlyphItem *reset_item = category_tab_reset_override_ensure(wm, category, space_type);
+    const int global_space_type = -1;  // Always GLOBAL for consistency
+
+    /* Remove all space-specific overrides for this category first */
+    for (CategoryGlyphItem *old_item = static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
+         old_item != nullptr;)
+    {
+      CategoryGlyphItem *next_item = static_cast<CategoryGlyphItem *>(old_item->next);
+      if (STREQ(old_item->category, category) && old_item->space_type != global_space_type) {
+        BLI_remlink(&wm->category_glyph_overrides, old_item);
+        MEM_delete(old_item);
+      }
+      old_item = next_item;
+    }
+
+    CategoryGlyphItem *reset_item = category_tab_reset_override_ensure(wm, category, global_space_type);
     /* Clear tags in WM override - this updates UI to show no tags selected */
     reset_item->tags[0] = '\0';
+
+    /* Also clear tags in category_glyph_mappings so C++ lookup finds empty tags */
+    for (CategoryGlyphItem *map_item = static_cast<CategoryGlyphItem *>(wm->category_glyph_mappings.first);
+         map_item != nullptr; map_item = static_cast<CategoryGlyphItem *>(map_item->next))
+    {
+      if (STREQ(map_item->category, category)) {
+        map_item->tags[0] = '\0';
+        break;
+      }
+    }
 
 #ifdef WITH_PYTHON
     /* Also clear tags in Python _glyph_cache to ensure consistency */
@@ -716,7 +745,7 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
                  "wm.category_tab_save_category = ''\n"
                  "if category:\n"
                  "    set_category_tags(category, [], space_type=%d, auto_save=False)\n",
-                 space_type);
+                 global_space_type);
 
     BPY_run_string_exec(C, imports, reset_tags_cmd);
 #endif
@@ -1150,6 +1179,8 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
       space_type, space_type);
 
   BPY_run_string_exec(C, imports, save_cmd);
+
+  category_tab_reset_tag_redraw(C, wm, area);
 #else
   (void)C; /* Unused when Python is disabled */
 #endif

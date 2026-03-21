@@ -294,8 +294,22 @@ static void category_tab_reset_apply_to_operator(bContext *C,
         RNA_enum_set(target_op->ptr, "custom_icon_mode_ui", CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM);
       }
       else {
-        /* No built-in default icon - switch to Glyph mode. */
-        RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_GLYPH);
+        /* No built-in default icon.
+         * For text categories, reset must keep first-letter behavior after Save,
+         * otherwise save path may persist glyph_mode=auto and UI can fall back to tag glyph.
+         */
+        if (is_single_glyph_str(category)) {
+          RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_GLYPH);
+        }
+        else {
+          RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_TEXT);
+          PropertyRNA *glyph_mode_prop = RNA_struct_find_property(target_op->ptr, "glyph_mode");
+          if (glyph_mode_prop != nullptr) {
+            RNA_enum_set(target_op->ptr,
+                         "glyph_mode",
+                         ui::CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER);
+          }
+        }
       }
     }
   }
@@ -516,6 +530,26 @@ static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
     }
   }
 
+  /* CRITICAL FIX: For text_only/glyph_text categories, also clear GLOBAL mappings
+   * to prevent stale glyph data from appearing in "Categories using this tag" panel.
+   * The issue: get_category_glyph_data uses GLOBAL fallback which finds old glyph
+   * in GLOBAL mappings even after resetting space-specific entry. */
+  if (reset_glyph && !is_glyph_only_category && global_item != nullptr) {
+    printf("[RESET FIX] Clearing GLOBAL entry for text_only/glyph_text category '%s'\n", category);
+    /* Reset glyph to empty (will use first_letter fallback) */
+    global_item->glyph[0] = '\0';
+    /* Set glyph_mode to first_letter to ensure correct display */
+    global_item->glyph_mode = ui::CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER;
+    /* Clear color */
+    zero_v3(global_item->color);
+    /* Clear icon data */
+    global_item->icon_path[0] = '\0';
+    global_item->icon_key[0] = '\0';
+    global_item->icon_provider[0] = '\0';
+    global_item->icon_source = ui::CATEGORY_TAB_ICON_SOURCE_OFF;
+    printf("[RESET FIX] GLOBAL entry cleared: glyph='', glyph_mode=first_letter\n");
+  }
+
   return defaults;
 }
 
@@ -549,22 +583,37 @@ static CategoryGlyphItem *category_tab_reset_override_ensure(wmWindowManager *wm
 
 static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
 {
+  printf("[RESET EXEC] === category_tab_reset_exec START ===\n");
+  
   char category[64];
   RNA_string_get(op->ptr, "category", category);
+  printf("[RESET EXEC] category='%s'\n", category);
 
   /* Read checkbox flags for selective reset */
   const bool reset_name = RNA_boolean_get(op->ptr, "reset_name");
   const bool reset_glyph = RNA_boolean_get(op->ptr, "reset_glyph");
   const bool reset_color = RNA_boolean_get(op->ptr, "reset_color");
   const bool reset_tag = RNA_boolean_get(op->ptr, "reset_tag");
+  printf("[RESET EXEC] reset_name=%d, reset_glyph=%d, reset_color=%d, reset_tag=%d\n", 
+         reset_name, reset_glyph, reset_color, reset_tag);
 
   wmWindowManager *wm = CTX_wm_manager(C);
+  wmOperator *const dialog_op = category_tab_current_dialog_op;
   ScrArea *area = CTX_wm_area(C);
-  const int space_type = area ? area->spacetype : -1;
+  int space_type = area ? area->spacetype : -1;
+  if (space_type == -1 && dialog_op != nullptr && dialog_op->ptr != nullptr) {
+    PropertyRNA *prop_space_type = RNA_struct_find_property(dialog_op->ptr, "original_space_type");
+    if (prop_space_type != nullptr) {
+      space_type = RNA_int_get(dialog_op->ptr, "original_space_type");
+    }
+  }
+  printf("[RESET EXEC] space_type=%d\n", space_type);
+  
+  printf("[RESET EXEC] Calling compute_reset_defaults...\n");
   const CategoryTabResetDefaults defaults =
       compute_reset_defaults(wm, category, reset_glyph, space_type);
+  printf("[RESET EXEC] compute_reset_defaults returned\n");
 
-  wmOperator *const dialog_op = category_tab_current_dialog_op;
   category_tab_reset_apply_to_operator(C,
                                        dialog_op,
                                        category,
@@ -611,6 +660,37 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
     category_tab_edit_live_update_cb(C, dialog_op, 0);
   }
 
+#ifdef WITH_PYTHON
+  /* CRITICAL FIX: Sync Python _glyph_cache with WM changes after Reset glyph.
+   * The issue: C++ clears global_item->glyph in wm->category_glyph_mappings,
+   * but Python _sync_wm_to_glyph_cache_impl skips empty glyphs (line 5939 condition:
+   * "if item_glyph and ..."). This causes stale GLOBAL glyph to persist in
+   * _glyph_cache and JSON, appearing in "Categories using this tag" panel.
+   *
+   * Solution: Call Python reset_category_to_defaults() which directly clears
+   * GLOBAL entry in _glyph_cache, bypassing the sync issue. */
+  if (reset_glyph) {
+    PointerRNA wm_ptr = RNA_pointer_create_discrete(&wm->id, RNA_WindowManager, wm);
+    RNA_string_set(&wm_ptr, "category_tab_save_category", category);
+
+    const char *imports[] = {"bpy", nullptr};
+    char reset_glyph_cmd[512];
+    BLI_snprintf(reset_glyph_cmd,
+                 sizeof(reset_glyph_cmd),
+                 "from bl_ui.space_userpref import reset_category_to_defaults\n"
+                 "import bpy\n"
+                 "wm = bpy.context.window_manager\n"
+                 "category = wm.category_tab_save_category\n"
+                 "wm.category_tab_save_category = ''\n"
+                 "if category:\n"
+                 "    reset_category_to_defaults(category, space_type=%d, save=False)\n"
+                 "    print(f'[RESET GLYPH SYNC] Cleared GLOBAL glyph in _glyph_cache for {category}')\n",
+                 space_type);
+
+    BPY_run_string_exec(C, imports, reset_glyph_cmd);
+  }
+#endif
+
   /* Reset tags: set empty tags in WM override.
    * This updates the UI immediately. If user clicks Cancel, original tags will be restored. */
   if (reset_tag) {
@@ -635,8 +715,8 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
                  "category = wm.category_tab_save_category\n"
                  "wm.category_tab_save_category = ''\n"
                  "if category:\n"
-                 "    set_category_tags(category, [], auto_save=False)\n",
-                 category);
+                 "    set_category_tags(category, [], space_type=%d, auto_save=False)\n",
+                 space_type);
 
     BPY_run_string_exec(C, imports, reset_tags_cmd);
 #endif

@@ -403,7 +403,7 @@ static int category_tab_resolve_glyph_mode_with_fallback(const wmWindowManager *
 {
   const CategoryGlyphItem *override_exact = category_glyph_item_find_const(
       wm->category_glyph_overrides, category, space_type);
-  if (override_exact && override_exact->glyph_mode != 0) {
+  if (override_exact) {
     return override_exact->glyph_mode;
   }
 
@@ -417,7 +417,7 @@ static int category_tab_resolve_glyph_mode_with_fallback(const wmWindowManager *
 
   const CategoryGlyphItem *mapping_exact = category_glyph_item_find_const(
       wm->category_glyph_mappings, category, space_type);
-  if (mapping_exact && mapping_exact->glyph_mode != 0) {
+  if (mapping_exact) {
     return mapping_exact->glyph_mode;
   }
 
@@ -1028,16 +1028,20 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
     }
 
   /* Reset operator can temporarily modify category_glyph_mappings (for example when resetting
-   * a fallback-letter category to an empty glyph or toggling icon mode). If user cancels the
-   * dialog and there was no original override, restore mapping runtime state from the dialog-open
-   * snapshot as well, otherwise UI may keep fallback/first-letter state until restart even though
-   * changes were discarded. */
-  if (!snapshot.has_override) {
-    CategoryGlyphItem *map_item_restore = category_glyph_item_find_with_global_fallback(
-        wm->category_glyph_mappings, category, snapshot.space_type);
+   * a fallback-letter category to an empty glyph or toggling icon mode). On cancel, restore
+   * runtime visuals in mappings from dialog-open snapshot for both space-specific and GLOBAL
+   * entries, otherwise next dialog reopen may pick stale first-letter mode from fallback chain. */
+  CategoryGlyphItem *map_item_exact = category_glyph_item_find(
+      wm->category_glyph_mappings, category, snapshot.space_type);
+  if (map_item_exact) {
+    category_tab_dialog_snapshot_apply_runtime_visuals_to_item(*map_item_exact, snapshot);
+  }
 
-    if (map_item_restore) {
-      category_tab_dialog_snapshot_apply_runtime_visuals_to_item(*map_item_restore, snapshot);
+  if (snapshot.space_type != -1) {
+    CategoryGlyphItem *map_item_global = category_glyph_item_find(
+        wm->category_glyph_mappings, category, -1);
+    if (map_item_global && map_item_global != map_item_exact) {
+      category_tab_dialog_snapshot_apply_runtime_visuals_to_item(*map_item_global, snapshot);
     }
   }
   }
@@ -1053,25 +1057,27 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   if (category[0] != '\0') {
     wmWindowManager *wm_ptr = CTX_wm_manager(C);
     if (wm_ptr) {
-      /* Get space_type from context for space-specific tag restoration */
-      ScrArea *area = CTX_wm_area(C);
-      const int space_type = area ? area->spacetype : -1;
+      const int space_type = snapshot.space_type;
 
       PointerRNA wm_ptr_rna = RNA_pointer_create_discrete(&wm_ptr->id, RNA_WindowManager, wm_ptr);
       RNA_string_set(&wm_ptr_rna, "category_tab_save_category", category);
 
       const char *imports[] = {"bpy", nullptr};
-      char restore_cmd[512];
+      char restore_cmd[1024];
       BLI_snprintf(restore_cmd,
                    sizeof(restore_cmd),
-                   "from bl_ui.space_userpref import restore_category_tags_from_string\n"
+                   "from bl_ui.space_userpref import restore_category_tags_from_string, restore_category_glyph_from_snapshot\n"
                    "import bpy\n"
                    "wm = bpy.context.window_manager\n"
                    "category = wm.category_tab_save_category\n"
                    "wm.category_tab_save_category = ''\n"
                    "if category:\n"
-                    "    restore_category_tags_from_string(category, r'''%s''', space_type=%d)\n",
-                   snapshot.tags, space_type);
+                   "    restore_category_tags_from_string(category, r'''%s''', space_type=%d)\n"
+                   "    restore_category_glyph_from_snapshot(category, r'''%s''', %d, [%f, %f, %f], space_type=%d)\n",
+                   snapshot.tags, space_type,
+                   snapshot.glyph_hex, snapshot.glyph_mode,
+                   snapshot.color[0], snapshot.color[1], snapshot.color[2],
+                   space_type);
 
       BPY_run_string_exec(C, imports, restore_cmd);
     }

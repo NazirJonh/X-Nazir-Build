@@ -3165,6 +3165,9 @@ def restore_category_tags_from_string(category, tags_string, space_type=-1):
     # Exit preview mode when restoring (Cancel operation)
     _preview_mode_active = False
     category_debug_print(f"[RESTORE] Preview mode disabled for Cancel operation on '{category}'")
+
+    # Cancel any queued deferred save from preview-time updates.
+    _cancel_deferred_auto_save(reason=f"cancel_restore_tags:{category}")
     
     if not tags_string:
         tags = []
@@ -3207,8 +3210,67 @@ def restore_category_tags_from_string(category, tags_string, space_type=-1):
     # Note: We don't delete tags that were created during preview mode here,
     # as they might be used by other categories. The tag creation itself is permanent,
     # only the assignment to this specific category is being cancelled.
-    
+
     return result
+
+
+def restore_category_glyph_from_snapshot(category, glyph_hex, glyph_mode, color, space_type=-1):
+    """Restore category glyph data from snapshot values.
+
+    This is used when cancelling the edit dialog to revert Reset changes.
+    Restores glyph, glyph_mode, and color in both GLOBAL and space-specific entries.
+
+    Args:
+        category: Category name
+        glyph_hex: Glyph hex code (e.g., "f722" or empty string)
+        glyph_mode: Glyph mode (0=auto, 1=first_letter)
+        color: Color as [r, g, b] list
+        space_type: Space type (-1 for global)
+    """
+    global _glyph_cache, _glyph_cache_loaded
+
+    # Cancel any queued deferred save from preview-time updates.
+    _cancel_deferred_auto_save(reason=f"cancel_restore_glyph:{category}")
+
+    if not _glyph_cache_loaded:
+        _load_glyph_mappings_from_file()
+
+    category_debug_print(f"[RESTORE GLYPH] Restoring glyph for '{category}': glyph_hex='{glyph_hex}', glyph_mode={glyph_mode}, color={color}, space_type={space_type}")
+
+    # Convert glyph_hex to glyph character if needed
+    glyph = ""
+    if glyph_hex:
+        if glyph_hex.startswith("\\u"):
+            glyph = _unicode_escape_to_glyph(glyph_hex)
+        elif glyph_hex.startswith("U+"):
+            glyph = _hex_to_glyph(glyph_hex[2:])
+        else:
+            glyph = _hex_to_glyph(glyph_hex)
+
+    category_debug_print(f"[RESTORE GLYPH] Converted glyph_hex '{glyph_hex}' to glyph '{glyph}'")
+
+    # Restore in GLOBAL entry
+    global_key = _make_cache_key(-1, category)
+    if global_key in _glyph_cache:
+        global_entry = _glyph_cache[global_key]
+        category_debug_print(f"[RESTORE GLYPH] Before restore GLOBAL: glyph='{global_entry.get('glyph', '')}', glyph_mode='{global_entry.get('glyph_mode', 'auto')}'")
+        global_entry["glyph"] = glyph
+        global_entry["glyph_mode"] = "auto" if glyph_mode == 0 else "first_letter"
+        global_entry["color"] = list(color) if color else [0.0, 0.0, 0.0]
+        category_debug_print(f"[RESTORE GLYPH] After restore GLOBAL: glyph='{global_entry.get('glyph', '')}', glyph_mode='{global_entry.get('glyph_mode', 'auto')}'")
+
+    # Restore in space-specific entry if space_type is provided
+    if space_type != -1:
+        space_key = _make_cache_key(space_type, category)
+        if space_key in _glyph_cache:
+            space_entry = _glyph_cache[space_key]
+            category_debug_print(f"[RESTORE GLYPH] Before restore SPACE({space_type}): glyph='{space_entry.get('glyph', '')}', glyph_mode='{space_entry.get('glyph_mode', 'auto')}'")
+            space_entry["glyph"] = glyph
+            space_entry["glyph_mode"] = "auto" if glyph_mode == 0 else "first_letter"
+            space_entry["color"] = list(color) if color else [0.0, 0.0, 0.0]
+            category_debug_print(f"[RESTORE GLYPH] After restore SPACE({space_type}): glyph='{space_entry.get('glyph', '')}', glyph_mode='{space_entry.get('glyph_mode', 'auto')}'")
+    category_debug_print(f"[RESTORE GLYPH] Restored glyph data for '{category}'")
+    return True
 
 
 def update_category_tags_in_wm(category, space_type=-1):
@@ -4270,6 +4332,9 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
 
     Color is always reset to [0.0, 0.0, 0.0].
     Returns the default glyph and display_name.
+    
+    For text_only categories, this also clears GLOBAL mappings to prevent
+    stale glyph data from appearing in "Categories using this tag" panel.
     """
     global _glyph_cache, _glyph_cache_loaded
 
@@ -4297,6 +4362,59 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
     entry["color"] = [0.0, 0.0, 0.0]
 
     category_debug_print(f"[GLYPH RESET] After reset entry: {entry}")
+
+    # CRITICAL FIX: For text_only/glyph_text categories, also clear GLOBAL mappings
+    # to prevent stale glyph data from appearing in "Categories using this tag" panel.
+    # The issue: get_category_glyph_data uses GLOBAL fallback (lines 3512-3527) which
+    # finds old glyph in GLOBAL mappings even after resetting space-specific entry.
+    #
+    # IMPORTANT: Check base_type from GLOBAL entry, not space-specific entry!
+    # Space-specific entry may have base_type="glyph_only" (set when user assigns glyph),
+    # but GLOBAL entry has the original base_type="glyph_text" or "text_only".
+    global_key = _make_cache_key(-1, category)
+    global_entry = _glyph_cache.get(global_key, {})
+    # Use GLOBAL base_type if available, otherwise fallback to space-specific entry
+    base_type = global_entry.get("base_type", entry.get("base_type", "text_only"))
+    category_debug_print(f"[GLYPH RESET] base_type='{base_type}' (from {'GLOBAL' if global_entry else 'space-specific'} entry)")
+
+    # Check if this is NOT a glyph_only category (glyph_only categories should keep their glyphs)
+    is_glyph_only = base_type == "glyph_only"
+    category_debug_print(f"[GLYPH RESET] is_glyph_only={is_glyph_only}")
+
+    if not is_glyph_only:
+        # Clear GLOBAL mappings (space_type=-1) for this category
+        global_key = _make_cache_key(-1, category)
+        if global_key in _glyph_cache:
+            global_entry = _glyph_cache[global_key]
+            category_debug_print(f"[GLYPH RESET] Clearing GLOBAL entry (not glyph_only): {global_entry}")
+            # Reset glyph to empty (will use first_letter fallback)
+            global_entry["glyph"] = ""
+            global_entry["color"] = [0.0, 0.0, 0.0]
+            # Set glyph_mode to first_letter to ensure correct display
+            global_entry["glyph_mode"] = "first_letter"
+            # Clear icon data
+            global_entry["icon_source"] = "off"
+            global_entry["icon_key"] = ""
+            global_entry["icon_path"] = ""
+            global_entry["icon_provider"] = ""
+            category_debug_print(f"[GLYPH RESET] After clearing GLOBAL entry: {global_entry}")
+        
+        # Clear only current space-specific mapping (tags are handled separately by reset_tag).
+        if space_type != -1 and key in _glyph_cache:
+            cache_entry = _glyph_cache[key]
+            category_debug_print(f"[GLYPH RESET] Clearing current space-specific entry: space_type={space_type}")
+            cache_entry["glyph"] = ""
+            cache_entry["color"] = [0.0, 0.0, 0.0]
+            cache_entry["glyph_mode"] = "first_letter"
+            cache_entry["icon_source"] = "off"
+            cache_entry["icon_key"] = ""
+            cache_entry["icon_path"] = ""
+            cache_entry["icon_provider"] = ""
+
+    category_debug_print(f"[GLYPH RESET] Final cache state for '{category}':")
+    for cache_key, cache_entry in _glyph_cache.items():
+        if isinstance(cache_key, tuple) and len(cache_key) >= 2 and cache_key[1] == category:
+            category_debug_print(f"  {cache_key}: glyph='{cache_entry.get('glyph', '')}', glyph_mode='{cache_entry.get('glyph_mode', 'auto')}'")
 
     if save:
         _save_glyph_mappings_to_file()
@@ -6250,6 +6368,22 @@ class USERPREF_OT_sync_category_glyphs(Operator):
 # Tag System - PropertyGroups and Operators
 
 _auto_save_pending = False
+
+
+def _cancel_deferred_auto_save(reason=""):
+    """Cancel queued deferred auto-save (used by Cancel flow)."""
+    global _auto_save_pending
+
+    _auto_save_pending = False
+    if bpy.app.timers.is_registered(_deferred_save):
+        try:
+            bpy.app.timers.unregister(_deferred_save)
+            if reason:
+                category_debug_print(f"[AUTO_SAVE_TAGS] Deferred save canceled ({reason})")
+            else:
+                category_debug_print("[AUTO_SAVE_TAGS] Deferred save canceled")
+        except Exception as e:
+            category_debug_print(f"[AUTO_SAVE_TAGS] Failed to cancel deferred save: {e}")
 
 
 def _auto_save_tags():

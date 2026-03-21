@@ -7488,14 +7488,22 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
     region = CTX_wm_region(C);
   }
 
+  const ARegion *drop_region = region;
+
   auto region_uses_category_tabs = [](const ARegion *region_test) {
     return region_test && region_test->runtime &&
            BKE_regiontype_uses_category_tabs(region_test->runtime->type);
   };
 
   /* If visual region under cursor is an overlapping sidebar/header, recover the actual
-   * category-tabs region from the same area so tab-drop flow still executes. */
-  if (!region_uses_category_tabs(region) && area_under_cursor) {
+   * category-tabs region from the same area so tab-drop flow still executes.
+   *
+   * IMPORTANT: Do not do this for WINDOW region drops.
+   * Dropping into 3D Viewport WINDOW must stay in viewport flow (pending/no-tag assignment)
+   * instead of being treated as a tab drop. */
+  if (!region_uses_category_tabs(region) && area_under_cursor && drop_region &&
+      drop_region->regiontype != RGN_TYPE_WINDOW)
+  {
     for (ARegion *region_iter = static_cast<ARegion *>(area_under_cursor->regionbase.first);
          region_iter;
          region_iter = static_cast<ARegion *>(region_iter->next))
@@ -7508,6 +7516,8 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
   }
 
   const bool region_supports_category_tabs = region_uses_category_tabs(region);
+  const bool is_window_drop_region = drop_region && drop_region->regiontype == RGN_TYPE_WINDOW;
+  const bool treat_as_tab_drop = region_supports_category_tabs && !is_window_drop_region;
 
   const bool url_is_file = STRPREFIX(url.c_str(), "file://");
   const bool url_is_online = STRPREFIX(url.c_str(), "http://") ||
@@ -7525,9 +7535,9 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
     use_url = false;
   }
 
-  /* If region doesn't support category tabs, set pending extension context via Python
+  /* If this isn't a real tab drop (e.g. viewport WINDOW), set pending extension context via Python
    * so that newly discovered categories will be marked with pending_tag_assignment=true */
-  if (!region_supports_category_tabs) {
+  if (!treat_as_tab_drop) {
 #ifdef WITH_PYTHON
     /* Extract extension ID from URL for the pending context */
     std::string extension_id;
@@ -7604,15 +7614,17 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
   const bool insert_above = RNA_boolean_get(op->ptr, "insert_above");
   const std::string tag_name = RNA_string_get(op->ptr, "tag_name");
 
-  drop_log_once("[EXT_DROP_INVOKE] resolved region_type=%d supports_tabs=%d category='%s' target='%s' tag='%s'\n",
+  drop_log_once("[EXT_DROP_INVOKE] resolved region_type=%d drop_region_type=%d supports_tabs=%d tab_drop=%d category='%s' target='%s' tag='%s'\n",
                 region ? region->regiontype : -1,
+                drop_region ? drop_region->regiontype : -1,
                 region_supports_category_tabs ? 1 : 0,
+                treat_as_tab_drop ? 1 : 0,
                 category.c_str(),
                 target_category.c_str(),
                 tag_name.c_str());
 
-  /* Only apply drop insert if region supports category tabs AND category is specified */
-  if (!category.empty() && region_supports_category_tabs) {
+  /* Only apply tab insertion for actual tab-region drops (not viewport WINDOW drops). */
+  if (!category.empty() && treat_as_tab_drop) {
     ui::category_tabs_apply_drop_insert(C,
                                         region,
                                         category.c_str(),

@@ -6048,6 +6048,16 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
+  /* New Add-on filter active state */
+  prop = RNA_def_property(srna, "new_addon_filter_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "new_addon_filter_active", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "New Add-on Filter Active",
+      "Whether the 'New Add-on!' filter is active (showing only categories from newly installed add-ons)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
   prop = RNA_def_property(srna, "category_tabs_display_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_display_mode");
   RNA_def_property_enum_items(prop, rna_enum_space_category_tabs_display_mode_items);

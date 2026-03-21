@@ -195,6 +195,21 @@ enum class CategoryTagMode : uint32_t {
   GEOMETRY_NODES = (1 << 8),
   SHADER_EDITOR = (1 << 9),
   IMAGE_PAINT = (1 << 10),
+  /* Detailed edit modes for bl_context matching (mesh_edit, curve_edit, etc.) */
+  MESH_EDIT = (1 << 11),
+  CURVE_EDIT = (1 << 12),
+  SURFACE_EDIT = (1 << 13),
+  ARMATURE_EDIT = (1 << 14),
+  LATTICE_EDIT = (1 << 15),
+  META_EDIT = (1 << 16),
+  FONT_EDIT = (1 << 17),
+  GREASE_PENCIL_EDIT = (1 << 18),
+  POINTCLOUD_EDIT = (1 << 19),
+  VOLUME_EDIT = (1 << 20),
+  /* Mask for all edit modes */
+  EDIT_MODE_MASK = EDIT_MODE | MESH_EDIT | CURVE_EDIT | SURFACE_EDIT |
+                   ARMATURE_EDIT | LATTICE_EDIT | META_EDIT | FONT_EDIT |
+                   GREASE_PENCIL_EDIT | POINTCLOUD_EDIT | VOLUME_EDIT,
   ALL = 0xFFFFFFFF
 };
 

@@ -89,6 +89,17 @@ _CATEGORY_TAG_MODES = (
     ("GEOMETRY_NODES", "GEOMETRY_NODES", 8, "Geometry Nodes", 'NODETREE'),
     ("SHADER_EDITOR", "SHADER_EDITOR", 9, "Shader Editor", 'MATERIAL'),
     ("IMAGE_PAINT", "IMAGE_PAINT", 10, "Image Paint", 'TPAINT_HLT'),
+    # Detailed edit modes for bl_context matching
+    ("MESH_EDIT", "MESH_EDIT", 11, "Mesh Edit", 'MESH_DATA'),
+    ("CURVE_EDIT", "CURVE_EDIT", 12, "Curve Edit", 'CURVE_DATA'),
+    ("SURFACE_EDIT", "SURFACE_EDIT", 13, "Surface Edit", 'SURFACE_DATA'),
+    ("ARMATURE_EDIT", "ARMATURE_EDIT", 14, "Armature Edit", 'ARMATURE_DATA'),
+    ("LATTICE_EDIT", "LATTICE_EDIT", 15, "Lattice Edit", 'LATTICE_DATA'),
+    ("META_EDIT", "META_EDIT", 16, "Metaball Edit", 'META_DATA'),
+    ("FONT_EDIT", "FONT_EDIT", 17, "Text Edit", 'FONT_DATA'),
+    ("GREASE_PENCIL_EDIT", "GREASE_PENCIL_EDIT", 18, "Grease Pencil Edit", 'GREASEPENCIL'),
+    ("POINTCLOUD_EDIT", "POINTCLOUD_EDIT", 19, "Point Cloud Edit", 'POINTCLOUD_DATA'),
+    ("VOLUME_EDIT", "VOLUME_EDIT", 20, "Volume Edit", 'VOLUME_DATA'),
 )
 _CATEGORY_TAG_MODE_NAME_TO_FLAG = {name: (1 << bit) for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
 _CATEGORY_TAG_MODE_FLAG_TO_NAME = {(1 << bit): name for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
@@ -124,6 +135,27 @@ _CATEGORY_TAG_FILTER_ENUM_TO_FLAG = {
     "SHADER_EDITOR": (1 << 9),
     11: (1 << 10),
     "IMAGE_PAINT": (1 << 10),
+    # Detailed edit modes
+    12: (1 << 11),
+    "MESH_EDIT": (1 << 11),
+    13: (1 << 12),
+    "CURVE_EDIT": (1 << 12),
+    14: (1 << 13),
+    "SURFACE_EDIT": (1 << 13),
+    15: (1 << 14),
+    "ARMATURE_EDIT": (1 << 14),
+    16: (1 << 15),
+    "LATTICE_EDIT": (1 << 15),
+    17: (1 << 16),
+    "META_EDIT": (1 << 16),
+    18: (1 << 17),
+    "FONT_EDIT": (1 << 17),
+    19: (1 << 18),
+    "GREASE_PENCIL_EDIT": (1 << 18),
+    20: (1 << 19),
+    "POINTCLOUD_EDIT": (1 << 19),
+    21: (1 << 20),
+    "VOLUME_EDIT": (1 << 20),
 }
 
 def tag_log(message, level="INFO", *, dedup=True):
@@ -158,6 +190,7 @@ def get_current_tag_mode_flag(context):
 
     This is the Python equivalent of the C++ get_current_tag_mode_flag() function.
     Returns a bit flag corresponding to the current object mode.
+    For edit mode, returns a detailed flag based on object type (mesh_edit, curve_edit, etc.)
     """
     area = getattr(context, "area", None)
     if area is not None:
@@ -179,11 +212,29 @@ def get_current_tag_mode_flag(context):
     ob = context.active_object
     if not ob:
         return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("OBJECT_MODE", 0)
-    
+
     mode = ob.mode
+    if mode == 'EDIT':
+        # Return detailed edit mode flag based on object type
+        # This matches bl_context values like "mesh_edit", "curve_edit", etc.
+        ob_type_to_mode = {
+            'MESH': "MESH_EDIT",
+            'CURVE': "CURVE_EDIT",
+            'CURVES': "CURVE_EDIT",
+            'SURFACE': "SURFACE_EDIT",
+            'ARMATURE': "ARMATURE_EDIT",
+            'LATTICE': "LATTICE_EDIT",
+            'META': "META_EDIT",
+            'FONT': "FONT_EDIT",
+            'GREASEPENCIL': "GREASE_PENCIL_EDIT",
+            'POINTCLOUD': "POINTCLOUD_EDIT",
+            'VOLUME': "VOLUME_EDIT",
+        }
+        mode_name = ob_type_to_mode.get(ob.type, "EDIT_MODE")
+        return _CATEGORY_TAG_MODE_NAME_TO_FLAG.get(mode_name, _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0))
+
     mode_map = {
         'OBJECT': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("OBJECT_MODE", 0),
-        'EDIT': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0),
         'SCULPT': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("SCULPT_MODE", 0),
         'VERTEX_PAINT': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("VERTEX_PAINT", 0),
         'WEIGHT_PAINT': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("WEIGHT_PAINT", 0),
@@ -192,6 +243,102 @@ def get_current_tag_mode_flag(context):
         'POSE': _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("POSE_MODE", 0),
     }
     return mode_map.get(mode, _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("OBJECT_MODE", 0))
+
+
+def _get_unassigned_categories_count_for_space(context,
+                                               space_type,
+                                               space_flag,
+                                               _order_key=None):
+    """Count unassigned extension categories for a specific editor space.
+
+    Mirrors the C++ unassigned-category predicate so Python headers stay in sync
+    with the shared tag-bar behavior.
+    """
+    wm = getattr(context, "window_manager", None)
+    if wm is None:
+        return 0
+
+    try:
+        if _pending_extension_context is not None and not _preview_mode_active:
+            _merge_discovered_categories()
+            sync_glyph_mappings_to_wm()
+    except Exception:
+        pass
+
+    current_mode_flag = get_current_tag_mode_flag(context)
+    count = 0
+
+    for item in wm.category_glyph_mappings:
+        is_reserved = getattr(item, "is_reserved", True)
+        source_extension = getattr(item, "source_extension", "")
+        pending_assignment = getattr(item, "pending_tag_assignment", False)
+        tags = getattr(item, "tags", [])
+        discovered_spaces = getattr(item, "discovered_in_spaces", 0)
+        discovered_modes = getattr(item, "discovered_in_modes", 0)
+
+        has_no_tags = not tags or (hasattr(tags, "__len__") and len(tags) == 0)
+
+        # Mirror C++ category_is_unassigned_for_context logic:
+        # - discovered_spaces == 0 means "any space" (legacy/unknown source)
+        # - discovered_spaces != 0 must match the current space_flag
+        space_matches = (discovered_spaces == 0) or (discovered_spaces & space_flag)
+
+        if (not is_reserved and
+                source_extension and
+                pending_assignment and
+                has_no_tags and
+                space_matches and
+                not _extension_has_tagged_category(wm, source_extension) and
+                not _extension_has_only_reserved_categories(wm, source_extension)):
+            # Mode check: skip for SPACE_NODE (16), or if no mode filtering
+            # Mirror C++: current_mode_flag == 0 or discovered_modes == 0 means "any mode"
+            if space_type == 16 or current_mode_flag == 0 or discovered_modes == 0 or (discovered_modes & current_mode_flag):
+                count += 1
+
+    return count
+
+
+def _extension_has_tagged_category(wm, source_extension: str) -> bool:
+    if wm is None or not source_extension:
+        return False
+
+    for item in wm.category_glyph_mappings:
+        if getattr(item, "source_extension", "") == source_extension and getattr(item, "tags", []):
+            return True
+
+    return False
+
+
+def _extension_has_only_reserved_categories(wm, source_extension: str) -> bool:
+    if wm is None or not source_extension:
+        return False
+
+    has_any_category = False
+    has_reserved_with_panels = False
+    has_non_reserved_without_panels = False
+    has_non_reserved_with_panels = False
+
+    for item in wm.category_glyph_mappings:
+        if getattr(item, "source_extension", "") != source_extension:
+            continue
+
+        has_any_category = True
+        is_reserved = getattr(item, "is_reserved", True)
+        discovered_spaces = getattr(item, "discovered_in_spaces", 0)
+
+        if is_reserved:
+            if discovered_spaces != 0:
+                has_reserved_with_panels = True
+        else:
+            if discovered_spaces == 0:
+                has_non_reserved_without_panels = True
+            else:
+                has_non_reserved_with_panels = True
+
+    if has_reserved_with_panels and has_non_reserved_without_panels and not has_non_reserved_with_panels:
+        return True
+
+    return has_any_category and not has_non_reserved_without_panels and not has_non_reserved_with_panels
 
 
 @contextmanager
@@ -461,6 +608,44 @@ _FLAG_TO_SPACE = {v: k for k, v in SPACE_TO_FLAG.items()}
 MODE_TO_FLAG = {name: (1 << bit) for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
 _FLAG_TO_MODE = {v: k for k, v in MODE_TO_FLAG.items()}
 
+# Maps Panel.bl_context values to mode flags.
+# bl_context is used by panels to show only in specific modes.
+# IMPORTANT: For edit modes, use the detailed flags (MESH_EDIT, CURVE_EDIT, etc.)
+# so that categories only show when editing the correct object type.
+BL_CONTEXT_TO_MODE_FLAG = {
+    # Object mode contexts
+    'objectmode': MODE_TO_FLAG.get('OBJECT_MODE', 0),
+    # Edit mode contexts - now use detailed edit flags
+    'mesh_edit': MODE_TO_FLAG.get('MESH_EDIT', 0) or (1 << 11),  # bit 11
+    'curve_edit': MODE_TO_FLAG.get('CURVE_EDIT', 0) or (1 << 12),  # bit 12
+    'surface_edit': MODE_TO_FLAG.get('SURFACE_EDIT', 0) or (1 << 13),  # bit 13
+    'armature_edit': MODE_TO_FLAG.get('ARMATURE_EDIT', 0) or (1 << 14),  # bit 14
+    'lattice_edit': MODE_TO_FLAG.get('LATTICE_EDIT', 0) or (1 << 15),  # bit 15
+    'metaball_edit': MODE_TO_FLAG.get('META_EDIT', 0) or (1 << 16),  # bit 16
+    'text_edit': MODE_TO_FLAG.get('FONT_EDIT', 0) or (1 << 17),  # bit 17
+    'gpencil_edit': MODE_TO_FLAG.get('GREASE_PENCIL_EDIT', 0) or (1 << 18),  # bit 18
+    'greasepencil_edit': MODE_TO_FLAG.get('GREASE_PENCIL_EDIT', 0) or (1 << 18),  # bit 18 (alternate name)
+    'curves_edit': MODE_TO_FLAG.get('CURVE_EDIT', 0) or (1 << 12),  # bit 12 (Curves use same as Curve)
+    'pointcloud_edit': MODE_TO_FLAG.get('POINTCLOUD_EDIT', 0) or (1 << 19),  # bit 19
+    'volume_edit': MODE_TO_FLAG.get('VOLUME_EDIT', 0) or (1 << 20),  # bit 20
+    # Paint modes
+    'sculptmode': MODE_TO_FLAG.get('SCULPT_MODE', 0),
+    'vertexpaint': MODE_TO_FLAG.get('VERTEX_PAINT', 0),
+    'weightpaint': MODE_TO_FLAG.get('WEIGHT_PAINT', 0),
+    'texturepaint': MODE_TO_FLAG.get('TEXTURE_PAINT', 0),
+    'imagepaint': MODE_TO_FLAG.get('IMAGE_PAINT', 0),
+    # UV edit
+    'uv_edit': MODE_TO_FLAG.get('UV_EDIT', 0),
+    'uv_sculpt': MODE_TO_FLAG.get('UV_EDIT', 0),
+    # Pose mode
+    'posemode': MODE_TO_FLAG.get('POSE_MODE', 0),
+    # Grease pencil modes
+    'greasepencil_paint': MODE_TO_FLAG.get('GREASE_PENCIL_EDIT', 0) or (1 << 18),  # Use GREASE_PENCIL_EDIT
+    'greasepencil_sculpt': MODE_TO_FLAG.get('GREASE_PENCIL_EDIT', 0) or (1 << 18),
+    'greasepencil_weight': MODE_TO_FLAG.get('GREASE_PENCIL_EDIT', 0) or (1 << 18),
+    'greasepencil_vertex': MODE_TO_FLAG.get('VERTEX_PAINT', 0),
+}
+
 
 def spaces_to_flags(spaces_list):
     """Convert a list of space type strings to a combined bitmask (uint32)."""
@@ -493,7 +678,7 @@ def modes_to_flags(modes_list):
 def flags_to_modes(flags):
     """Convert a bitmask back to a list of mode name strings."""
     result = []
-    for bit in range(len(_CATEGORY_TAG_MODES)):
+    for bit in range(21):  # Extended range to include new detailed edit modes
         mask = 1 << bit
         if flags & mask:
             mode_str = _FLAG_TO_MODE.get(mask)
@@ -884,13 +1069,73 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0):
         space_type:    Space type where the extension was activated, or -1 for global.
         mode_flag:     Bitmask of mode flags where the extension was activated.
     """
-    global _pending_extension_context
+    global _pending_extension_context, _glyph_cache
     _pending_extension_context = {
         "extension_id": extension_id,
         "space_type": space_type,
         "mode_flag": mode_flag,
         "timestamp": time.time(),
     }
+
+    # Opportunistically mark already-known categories from this extension as pending.
+    # This is needed when the category already exists in the cache but is not rediscovered
+    # in the current draw/update cycle (for example MPFB-like extensions).
+    ext_match_keys = _extension_id_match_keys(extension_id)
+    updated_existing = False
+    for cache_key, cat_data in list(_glyph_cache.items()):
+        if not (isinstance(cache_key, tuple) and len(cache_key) == 2):
+            continue
+        _cache_space_type, category_name = cache_key
+        if not isinstance(cat_data, dict):
+            cat_data = _normalize_category_data(cat_data, category_name)
+            _glyph_cache[cache_key] = cat_data
+
+        existing_ext = str(cat_data.get("source_extension", "") or "")
+        category_key = _normalize_category_key(category_name)
+        same_extension = (existing_ext == extension_id) or _extension_ids_match(existing_ext, extension_id)
+        category_matches_pending_context = (
+            bool(category_key) and bool(ext_match_keys) and (category_key in ext_match_keys)
+        )
+
+        if not (same_extension or category_matches_pending_context):
+            continue
+
+        # Already tagged categories must not surface in "New Add-ons!".
+        if cat_data.get("tags"):
+            cat_data["pending_tag_assignment"] = False
+            continue
+
+        if not existing_ext:
+            cat_data["source_extension"] = extension_id
+        cat_data["pending_tag_assignment"] = True
+
+        if space_type != -1:
+            current_spaces = cat_data.get("discovered_in_spaces", [])
+            if current_spaces is None:
+                current_spaces = []
+            spaces_flags = spaces_to_flags(current_spaces)
+            space_str = _space_type_id_to_str(space_type)
+            spaces_flags |= SPACE_TO_FLAG.get(space_str, 0)
+            cat_data["discovered_in_spaces"] = flags_to_spaces(spaces_flags)
+
+        if mode_flag:
+            current_modes = cat_data.get("discovered_in_modes", [])
+            if current_modes is None:
+                current_modes = []
+            modes_flags = modes_to_flags(current_modes)
+            modes_flags |= mode_flag
+            cat_data["discovered_in_modes"] = flags_to_modes(modes_flags)
+
+        updated_existing = True
+        tag_log(
+            f"extension_post_install_handler: pre-marked existing category {category_name!r} "
+            f"for extension {extension_id!r}"
+        )
+
+    if updated_existing:
+        sync_glyph_mappings_to_wm()
+        _auto_save_tags()
+
     tag_log(
         f"extension_post_install_handler: extension={extension_id!r}, "
         f"space_type={space_type}, mode_flag={mode_flag:#010x}, set at {time.time()}"
@@ -2656,9 +2901,9 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1, update_w
             # Copy from global entry to preserve glyph, display_name, default_display_name, etc.
             global_data = _glyph_cache[global_key]
             new_entry = _normalize_category_data(dict(global_data), category)
-            # Ensure extension-related fields are preserved (they may not be in old global_data)
+            # Ensure extension-related fields are preserved (they may be reset to defaults by normalize)
             for ext_field in ["source_extension", "pending_tag_assignment", "discovered_in_spaces", "discovered_in_modes"]:
-                if ext_field in global_data and ext_field not in new_entry:
+                if ext_field in global_data:
                     new_entry[ext_field] = global_data[ext_field]
             _glyph_cache[key] = new_entry
             print(f"[ADD_TAG] Copied global entry to space-specific for key {key}")
@@ -4072,9 +4317,11 @@ def _discover_active_categories():
                 return
             space_type = getattr(panel_obj, 'bl_space_type', '')
             region_type = getattr(panel_obj, 'bl_region_type', '')
-            # Collect bl_label for display name (e.g., "Script 1" for category "")
+            # Collect bl_label for display name (e.g., "Script 1" for category "")
             panel_label = getattr(panel_obj, 'bl_label', '') or ''
-            
+            # Collect bl_context for mode-specific panels (e.g., "mesh_edit" for EDIT mode)
+            bl_context = getattr(panel_obj, 'bl_context', '') or ''
+
             # Also try to get addon name from the panel's module bl_info
             if not panel_label:
                 try:
@@ -4084,8 +4331,8 @@ def _discover_active_categories():
                         panel_label = bl_info.get('name', '') or ''
                 except Exception:
                     pass
-            
-            panel_samples.append((source, panel_name, category, space_type, region_type, panel_label))
+
+            panel_samples.append((source, panel_name, category, space_type, region_type, panel_label, bl_context))
         except Exception:
             return
 
@@ -4278,10 +4525,10 @@ def _discover_active_categories():
 
         if panel_samples:
             _log_once(f"[GLYPH DISCOVER DEBUG] panel samples collected: {len(panel_samples)} (showing up to 20)")
-            for source, panel_name, category, space_type, region_type, panel_label in panel_samples[:20]:
+            for source, panel_name, category, space_type, region_type, panel_label, bl_context in panel_samples[:20]:
                 _log_once(
                     f"[GLYPH DISCOVER DEBUG] sample: source={source}, panel={panel_name}, "
-                    f"bl_category={category!r}, bl_label={panel_label!r}, space={space_type!r}, region={region_type!r}"
+                    f"bl_category={category!r}, bl_label={panel_label!r}, space={space_type!r}, region={region_type!r}, bl_context={bl_context!r}"
                 )
         else:
             _log_once("[GLYPH DISCOVER DEBUG] panel samples collected: 0")
@@ -4302,6 +4549,9 @@ def _discover_active_categories():
 def _merge_discovered_categories():
     """Merge discovered categories with cached mappings, adding defaults for new ones."""
     global _glyph_cache, _category_orders_cache, _pending_extension_context
+    
+    print(f"[MERGE DEBUG] _merge_discovered_categories START")
+    print(f"[MERGE DEBUG] Pending extension context: {_pending_extension_context}")
 
     result = _discover_active_categories()
     # Handle both old tuple return and new tuple return
@@ -4310,18 +4560,29 @@ def _merge_discovered_categories():
     else:
         discovered = result
         panel_samples = []
+    
+    print(f"[MERGE DEBUG] Discovered {len(discovered) if discovered else 0} categories")
+    if discovered:
+        print(f"[MERGE DEBUG] Discovered categories sample: {sorted(discovered)[:10]}")
+    
     if not discovered:
+        print(f"[MERGE DEBUG] No categories discovered, returning False")
         return False
 
     # Build a mapping from category name to discovered space types from panel_samples
     # This is crucial for correctly setting discovered_in_spaces for extension categories
     # that may appear in different space types than where the extension was dropped
     category_to_spaces = {}  # category -> set of space_type strings
-    for source, panel_name, category, space_type, region_type, panel_label in panel_samples:
+    category_to_contexts = {}  # category -> set of bl_context strings (for mode filtering)
+    for source, panel_name, category, space_type, region_type, panel_label, bl_context in panel_samples:
         if category and space_type:
             if category not in category_to_spaces:
                 category_to_spaces[category] = set()
             category_to_spaces[category].add(space_type)
+            if bl_context:
+                if category not in category_to_contexts:
+                    category_to_contexts[category] = set()
+                category_to_contexts[category].add(bl_context)
 
     # Debug: Log category_to_spaces for categories with NODE_EDITOR
     node_editor_categories = [cat for cat, spaces in category_to_spaces.items() if 'NODE_EDITOR' in spaces]
@@ -4336,7 +4597,7 @@ def _merge_discovered_categories():
 
     # Build a mapping from category name to panel label (for display name)
     category_to_label = {}
-    for source, panel_name, category, space_type, region_type, panel_label in panel_samples:
+    for source, panel_name, category, space_type, region_type, panel_label, bl_context in panel_samples:
         if panel_label and category not in category_to_label:
             category_to_label[category] = panel_label
 
@@ -4561,6 +4822,7 @@ def _merge_discovered_categories():
     pending_extension_context = _pending_extension_context
     if pending_extension_context is not None:
         pending_ext_id = str(pending_extension_context.get("extension_id", "") or "").strip()
+        print(f"[MERGE DEBUG] Processing pending extension context: extension_id={pending_ext_id!r}")
         if not pending_ext_id:
             tag_log("_merge_discovered_categories: dropping pending extension context with empty extension_id")
             _pending_extension_context = None
@@ -4574,9 +4836,13 @@ def _merge_discovered_categories():
         ext_id = pending_extension_context.get("extension_id", "")
         ext_mode = pending_extension_context.get("mode_flag", 0)
         ext_match_keys = _extension_id_match_keys(ext_id)
+        print(f"[MERGE DEBUG] Processing {len(discovered)} discovered categories for extension {ext_id!r}")
 
         for category in discovered:
             if category in new_categories:
+                continue
+            # Skip RESERVED categories - they should never be linked to extensions
+            if category in DEFAULT_CATEGORY_GLYPHS:
                 continue
             cache_key = _get_cache_key_for_category(category)
             if cache_key in _glyph_cache:
@@ -4586,20 +4852,42 @@ def _merge_discovered_categories():
                     category_key = _normalize_category_key(category)
 
                     same_extension = (existing_ext == ext_id) or _extension_ids_match(existing_ext, ext_id)
-                    can_claim_unowned = (
-                        (not existing_ext) and
+                    category_matches_pending_context = (
                         bool(category_key) and
                         bool(ext_match_keys) and
                         (category_key in ext_match_keys)
                     )
+                    can_claim_unowned = (not existing_ext) and category_matches_pending_context
 
                     # Refresh existing categories for the same extension, or claim only
                     # an unowned category whose normalized name matches this extension id.
-                    if same_extension or can_claim_unowned:
+                    if same_extension or can_claim_unowned or category_matches_pending_context:
+                        print(f"[MERGE DEBUG] MATCH: category={category!r}, existing_ext={existing_ext!r}, same_extension={same_extension}, can_claim_unowned={can_claim_unowned}")
                         if not existing_ext:
                             cat_data["source_extension"] = ext_id
-                        if not cat_data.get("pending_tag_assignment"):
+
+                        # Check if category has tags in ANY space before setting pending
+                        has_tags_current = bool(cat_data.get("tags", []))
+                        has_tags_any_space = has_tags_current
+                        if not has_tags_any_space:
+                            for check_key, check_data in _glyph_cache.items():
+                                if isinstance(check_key, tuple) and len(check_key) == 2:
+                                    check_cat = check_key[1]
+                                    if isinstance(check_data, dict):
+                                        is_same_cat = (check_cat == category and check_key[0] != -1)
+                                        is_same_ext = bool(ext_id) and check_data.get("source_extension") == ext_id
+                                        if is_same_cat or is_same_ext:
+                                            check_tags = check_data.get("tags", [])
+                                            if check_tags:
+                                                has_tags_any_space = True
+                                                print(f"[MERGE DEBUG] Found tags in space {check_key[0]} for category {check_cat!r} (same cat/ext): {check_tags}")
+                                                break
+
+                        if not cat_data.get("pending_tag_assignment") and not has_tags_any_space:
                             cat_data["pending_tag_assignment"] = True
+                            print(f"[MERGE DEBUG] SET pending_tag_assignment=True for {category!r}")
+                        elif has_tags_any_space:
+                            print(f"[MERGE DEBUG] SKIP pending for {category!r}: has_tags_any_space={has_tags_any_space}")
 
                         # Use ACTUAL discovered spaces from panel_samples, NOT ext_space from drop context.
                         # This is crucial for extensions like Hot Node that are dropped in VIEW3D but
@@ -4618,9 +4906,23 @@ def _merge_discovered_categories():
                                 f"to {cat_data['discovered_in_spaces']} (from panel_samples)"
                             )
 
-                        if ext_mode:
+                        # Update discovered_in_modes from bl_context
+                        category_contexts = category_to_contexts.get(category, set())
+                        if category_contexts:
                             current_modes = cat_data.get("discovered_in_modes", [])
                             if current_modes is None: current_modes = []
+                            modes_flags = modes_to_flags(current_modes)
+                            for bl_ctx in category_contexts:
+                                modes_flags |= BL_CONTEXT_TO_MODE_FLAG.get(bl_ctx, 0)
+                            if modes_flags:
+                                cat_data["discovered_in_modes"] = flags_to_modes(modes_flags)
+                                tag_log(
+                                    f"_merge_discovered_categories: updated discovered_in_modes for {category!r} "
+                                    f"to {cat_data['discovered_in_modes']} (from bl_context={category_contexts})"
+                                )
+
+                        if ext_mode and not cat_data.get("discovered_in_modes"):
+                            current_modes = []
                             modes_flags = modes_to_flags(current_modes)
                             modes_flags |= ext_mode
                             cat_data["discovered_in_modes"] = flags_to_modes(modes_flags)
@@ -4634,6 +4936,104 @@ def _merge_discovered_categories():
 
     if new_categories:
         print(f"[GLYPH] Found {len(new_categories)} new categories: {sorted(new_categories)}")
+
+        # Auto-detect pending extension context from enabled extensions
+        # This handles "Install from Disk" where pending_extension_context is not set
+        # We check ALL new categories, not just those with extension sources,
+        # because panels may be discovered before extension metadata is available.
+        if pending_extension_context is None:
+            try:
+                prefs = getattr(bpy.context, "preferences", None)
+                addons = getattr(prefs, "addons", None) if prefs else None
+                if addons:
+                    # Build map of all enabled extensions for quick lookup
+                    enabled_extensions = {}
+                    for addon in addons:
+                        module_name = getattr(addon, "module", "")
+                        if not isinstance(module_name, str) or not module_name.startswith("bl_ext."):
+                            continue
+                        module_parts = module_name.split(".")
+                        if len(module_parts) < 3:
+                            continue
+                        pkg_name = ".".join(module_parts[2:])
+                        ext_id = f"add-on-{pkg_name}"
+                        enabled_extensions[ext_id] = {
+                            "module_name": module_name,
+                            "pkg_name": pkg_name,
+                            "match_keys": _extension_id_match_keys(ext_id),
+                        }
+
+                    for category in new_categories:
+                        # Skip RESERVED categories - they should never be linked to extensions
+                        if category in DEFAULT_CATEGORY_GLYPHS:
+                            continue
+                        category_key = _normalize_category_key(category)
+                        if not category_key:
+                            continue
+
+                        # Check if category matches any enabled extension
+                        for ext_id, ext_info in enabled_extensions.items():
+                            if category_key in ext_info["match_keys"]:
+                                print(f"[MERGE AUTO-EXT] Auto-detected extension for new category '{category}': ext_id={ext_id!r}")
+                                pending_extension_context = {
+                                    "extension_id": ext_id,
+                                    "space_type": -1,
+                                    "mode_flag": 0,
+                                    "timestamp": time.time(),
+                                }
+                                break
+
+                        if pending_extension_context is not None:
+                            break
+            except Exception as e:
+                print(f"[MERGE AUTO-EXT] Error auto-detecting extension: {e}")
+
+        # Also update EXISTING categories without source_extension that match enabled extensions
+        # This handles cases where category was discovered before extension context was available
+        # (e.g., Hot Node installed via Get Extensions before pending logic was active)
+        try:
+            prefs = getattr(bpy.context, "preferences", None)
+            addons = getattr(prefs, "addons", None) if prefs else None
+            if addons and enabled_extensions:
+                for cache_key, cat_data in list(_glyph_cache.items()):
+                    if not isinstance(cache_key, tuple) or len(cache_key) != 2:
+                        continue
+                    space_type_val, category_name = cache_key
+                    if space_type_val != -1:  # Only check global entries
+                        continue
+                    if not isinstance(cat_data, dict):
+                        continue
+                    # Skip RESERVED categories - they should never be linked to extensions
+                    if category_name in DEFAULT_CATEGORY_GLYPHS:
+                        continue
+                    # Skip if already has source_extension or tags (already distributed)
+                    if cat_data.get("source_extension") or cat_data.get("tags"):
+                        continue
+                    # Skip if not pending (already processed)
+                    if not cat_data.get("pending_tag_assignment"):
+                        continue
+
+                    category_key = _normalize_category_key(category_name)
+                    if not category_key:
+                        continue
+
+                    # Check if category matches any enabled extension
+                    for ext_id, ext_info in enabled_extensions.items():
+                        if category_key in ext_info["match_keys"]:
+                            print(f"[MERGE AUTO-EXT] Updating existing category '{category_name}' with source_extension={ext_id!r}")
+                            cat_data["source_extension"] = ext_id
+                            cache_changed = True
+                            break
+        except Exception as e:
+            print(f"[MERGE AUTO-EXT] Error updating existing categories: {e}")
+
+        # Save immediately if we updated source_extension for existing categories
+        # This is critical for categories like Hot Node that were discovered before extension context
+        if cache_changed:
+            if _save_glyph_mappings_to_file(force_discovery_skip=False):
+                print("[MERGE AUTO-EXT] Saved source_extension updates to JSON")
+            else:
+                print("[MERGE AUTO-EXT] Failed to save source_extension updates")
 
         # Add new categories with appropriate glyphs from DEFAULT_CATEGORY_GLYPHS
         for category in new_categories:
@@ -4673,6 +5073,14 @@ def _merge_discovered_categories():
 
             # Use global key (-1) for newly discovered categories
             cache_key = _make_cache_key(-1, category)
+            
+            # Check if this is a new category from pending extension
+            is_from_pending_ext = pending_extension_context is not None
+            if is_from_pending_ext:
+                ext_id = pending_extension_context.get("extension_id", "")
+                ext_mode = pending_extension_context.get("mode_flag", 0)
+                print(f"[MERGE DEBUG] NEW CATEGORY from pending extension: category={category!r}, extension_id={ext_id!r}")
+            
             _glyph_cache[cache_key] = {
                 "glyph": glyph,
                 "display_name": default_display_name,
@@ -4698,6 +5106,7 @@ def _merge_discovered_categories():
                 ext_mode = pending_extension_context.get("mode_flag", 0)
                 _glyph_cache[cache_key]["source_extension"] = ext_id
                 _glyph_cache[cache_key]["pending_tag_assignment"] = True
+                print(f"[MERGE DEBUG] SET PENDING: category={category!r}, pending_tag_assignment=True, source_extension={ext_id!r}")
 
                 # Use ACTUAL discovered spaces from panel_samples, NOT ext_space from drop context.
                 # This is crucial for extensions like Hot Node that are dropped in VIEW3D but
@@ -4714,7 +5123,21 @@ def _merge_discovered_categories():
                         f"to {_glyph_cache[cache_key]['discovered_in_spaces']} (from panel_samples)"
                     )
 
-                if ext_mode:
+                # Use bl_context from panel_samples to determine mode filtering.
+                # This is crucial for panels like "VCol Edit" that only show in EDIT mode.
+                category_contexts = category_to_contexts.get(category, set())
+                if category_contexts:
+                    modes_flags = 0
+                    for bl_ctx in category_contexts:
+                        modes_flags |= BL_CONTEXT_TO_MODE_FLAG.get(bl_ctx, 0)
+                    if modes_flags:
+                        _glyph_cache[cache_key]["discovered_in_modes"] = flags_to_modes(modes_flags)
+                        tag_log(
+                            f"_merge_discovered_categories: set discovered_in_modes for new category {category!r} "
+                            f"to {_glyph_cache[cache_key]['discovered_in_modes']} (from bl_context={category_contexts})"
+                        )
+
+                if ext_mode and not _glyph_cache[cache_key].get("discovered_in_modes"):
                     _glyph_cache[cache_key]["discovered_in_modes"] = flags_to_modes(ext_mode)
                 tag_log(
                     f"_merge_discovered_categories: marked new category {category!r} "
@@ -4914,20 +5337,19 @@ def _sync_glyph_mappings_to_wm_impl():
                             skipped_invalid += 1
                             continue
 
-                    # Normalize data to ensure it has all required fields.
-                    # Also migrate legacy string entries in _glyph_cache to dicts so that
-                    # detected icon paths/providers can be persisted back to the JSON file.
-                    if isinstance(category_data, str):
-                        # Old format - convert to new format and write back into cache.
-                        normalized_data = {
-                            "glyph": category_data,
-                            "display_name": "",
-                            "color": [0.0, 0.0, 0.0],
-                        }
-                        _glyph_cache[cache_key] = normalized_data
-                        cache_changed = True
-                    elif isinstance(category_data, dict):
-                        normalized_data = category_data
+                    # Normalize data to ensure it has all required fields (glyph, display_name, color, tags, extension fields).
+                    # Also migrating legacy string entries in _glyph_cache to dicts.
+                    if isinstance(category_data, (str, dict)):
+                        normalized_data = _normalize_category_data(category_data, category)
+                        
+                        # Store normalized version back to cache if data was old format or missing fields.
+                        # This allows detected icon paths and inherited extension info to be persisted back to JSON.
+                        is_legacy_string = isinstance(category_data, str)
+                        is_missing_fields = isinstance(category_data, dict) and any(field not in category_data for field in normalized_data)
+                        
+                        if is_legacy_string or is_missing_fields:
+                            _glyph_cache[cache_key] = normalized_data
+                            cache_changed = True
                     else:
                         continue
 
@@ -5016,18 +5438,97 @@ def _sync_glyph_mappings_to_wm_impl():
                             _pref_log_once(f"[GLYPH SYNC] Synced tags for category={category!r}, space_type={space_type_val}")
                     # Sync extension pending-tag fields
                     source_ext_val = normalized_data.get("source_extension", "")
+                    # Ensure extension metadata is inherited from Global if missing in space-specific entry.
+                    # This prevents loss of extension info when a user assigns a tag in a specific space/mode.
+                    if not source_ext_val and space_type_val != -1:
+                        global_key = (-1, category)
+                        if global_key in _glyph_cache:
+                            global_data = _glyph_cache[global_key]
+                            if isinstance(global_data, dict):
+                                source_ext_val = global_data.get("source_extension", "")
+                                if source_ext_val:
+                                    normalized_data["source_extension"] = source_ext_val
+                                    # Also copy other related fields if missing
+                                    for field in ["pending_tag_assignment", "discovered_in_spaces", "discovered_in_modes"]:
+                                        if field not in normalized_data or not normalized_data[field]:
+                                            normalized_data[field] = global_data.get(field)
+                                    # CRITICAL: Since normalized_data is a copy, we MUST update the cache directly.
+                                    _glyph_cache[cache_key] = normalized_data
+                                    cache_changed = True
+                                    print(f"[GLYPH SYNC] Inherited extension {source_ext_val} from global for {category!r} in space {space_type_val}")
+
                     pending_val = bool(normalized_data.get("pending_tag_assignment", False))
                     disc_spaces_val = normalized_data.get("discovered_in_spaces", [])
                     disc_modes_val = normalized_data.get("discovered_in_modes", [])
-                    # Debug: log pending assignment for extension categories
-                    if pending_val or 'hot' in category.lower():
+
+                    # NORMALIZE pending: clear if category has tags (in ANY space) or no source_extension
+                    # This prevents stale pending flags from showing "New Add-ons!" button
+                    # when there's nothing to distribute in the current context.
+                    # Also clear for RESERVED categories - they should never be linked to extensions.
+                    is_reserved = category in DEFAULT_CATEGORY_GLYPHS
+                    has_tags_current = bool(tags_val) if isinstance(tags_val, (list, tuple)) else bool(tags_str)
+                    has_tags_any_space = has_tags_current
+
+                    # Debug: log what we're checking
+                    if pending_val and source_ext_val:
+                        print(f"[GLYPH SYNC DEBUG] Checking tags for {category!r}: has_tags_current={has_tags_current}")
+
+                    if not has_tags_any_space:
+                        # Check all cache entries for this category name AND same source_extension
+                        for check_key, check_data in _glyph_cache.items():
+                            if isinstance(check_key, tuple) and len(check_key) == 2:
+                                check_cat = check_key[1]
+                                if isinstance(check_data, dict):
+                                    is_same_cat = (check_cat == category and check_key[0] != space_type_val)
+                                    
+                                    # Robust extension matching: resolve extension from global if missing in space entry
+                                    check_ext = check_data.get("source_extension", "")
+                                    if not check_ext and check_key[0] != -1:
+                                        global_check_key = (-1, check_cat)
+                                        if global_check_key in _glyph_cache:
+                                            global_check_data = _glyph_cache[global_check_key]
+                                            if isinstance(global_check_data, dict):
+                                                check_ext = global_check_data.get("source_extension", "")
+                                    
+                                    is_same_ext = bool(source_ext_val) and check_ext == source_ext_val
+                                    
+                                    if is_same_cat or is_same_ext:
+                                        check_tags = check_data.get("tags", [])
+                                        if check_tags:
+                                            has_tags_any_space = True
+                                            print(f"[GLYPH SYNC NORMALIZE] Found tags in space {check_key[0]} for category {check_cat!r} (via same cat/ext): {check_tags}")
+                                            break
+
+                    # Reserved categories should not surface as pending, but keep their
+                    # source_extension so the extension can still be recognized as already
+                    # distributed when its only visible panels live in reserved tabs.
+                    if is_reserved and (pending_val or source_ext_val):
+                        pending_val = False
+                        normalized_data["pending_tag_assignment"] = False
+                        # CRITICAL: Update cache so it gets saved to JSON.
+                        _glyph_cache[cache_key] = normalized_data
+                        cache_changed = True
+                        print(f"[GLYPH SYNC NORMALIZE] Cleared pending for RESERVED category {category!r} while keeping source_extension")
+                    elif pending_val and (has_tags_any_space or not source_ext_val):
+                        pending_val = False
+                        normalized_data["pending_tag_assignment"] = False
+                        # CRITICAL: Update cache so it gets saved to JSON.
+                        _glyph_cache[cache_key] = normalized_data
+                        cache_changed = True
+                        print(f"[GLYPH SYNC NORMALIZE] Cleared stale pending for {category!r}: "
+                              f"has_tags_current={has_tags_current}, has_tags_any_space={has_tags_any_space}, source_ext={source_ext_val!r}")
+
+                    # Debug: log ALL categories with pending_tag_assignment or source_extension
+                    if pending_val or source_ext_val:
                         disc_spaces_flags = spaces_to_flags(disc_spaces_val)
-                        _pref_log_once(f"[GLYPH SYNC] Extension category: {category!r}, pending={pending_val}, "
+                        print(f"[GLYPH SYNC] >>> PENDING CATEGORY: {category!r}, pending={pending_val}, "
                               f"source_ext={source_ext_val!r}, disc_spaces={disc_spaces_val} -> flags={disc_spaces_flags}")
+                        print(f"[GLYPH SYNC] >>> Setting item.pending_tag_assignment={pending_val} for {category!r}")
                     if hasattr(item, "source_extension"):
                         item.source_extension = source_ext_val
                     if hasattr(item, "pending_tag_assignment"):
                         item.pending_tag_assignment = pending_val
+                        print(f"[GLYPH SYNC] >>> WM item.pending_tag_assignment set to {item.pending_tag_assignment} for {category!r}")
                     if hasattr(item, "discovered_in_spaces"):
                         item.discovered_in_spaces = spaces_to_flags(disc_spaces_val)
                     if hasattr(item, "discovered_in_modes"):
@@ -6791,6 +7292,76 @@ def _on_save_pre(dummy):
 
 
 @bpy.app.handlers.persistent
+def _on_extension_repos_update_post(dummy=None):
+    """Sync category glyphs after extension installation/update."""
+    # Re-discover categories after extension changes to find new bl_category panels
+    print("=" * 80)
+    print("[GLYPH EXTENSION UPDATE] >>> START _on_extension_repos_update_post handler")
+    print(f"[GLYPH EXTENSION UPDATE] Pending extension context: {_pending_extension_context}")
+    print("=" * 80)
+    try:
+        result_before = _discover_active_categories()
+        # Handle both old and new return format
+        if isinstance(result_before, tuple):
+            discovered_before, _ = result_before
+        else:
+            discovered_before = result_before
+        cache_before = set(_glyph_cache.keys())
+        print(
+            f"[GLYPH EXTENSION UPDATE DEBUG] before merge: "
+            f"discovered={len(discovered_before)}, cache={len(cache_before)}, "
+            f"missing_in_cache={sorted(discovered_before - cache_before)}"
+        )
+
+        print("[GLYPH EXTENSION UPDATE] >>> Calling _merge_discovered_categories()...")
+        merge_result = _merge_discovered_categories()
+        print(f"[GLYPH EXTENSION UPDATE] >>> _merge_discovered_categories() returned: {merge_result}")
+
+        result_after = _discover_active_categories()
+        if isinstance(result_after, tuple):
+            discovered_after, _ = result_after
+        else:
+            discovered_after = result_after
+        cache_after = set(_glyph_cache.keys())
+        print(
+            f"[GLYPH EXTENSION UPDATE DEBUG] after merge: "
+            f"merge_result={merge_result}, discovered={len(discovered_after)}, cache={len(cache_after)}, "
+            f"added_to_cache={sorted(cache_after - cache_before)}, "
+            f"still_missing={sorted(discovered_after - cache_after)}"
+        )
+
+        print("[GLYPH EXTENSION UPDATE] >>> Calling sync_glyph_mappings_to_wm()...")
+        sync_glyph_mappings_to_wm()
+        print("[GLYPH EXTENSION UPDATE] >>> sync_glyph_mappings_to_wm() completed")
+        
+        # Trigger tag bar update to show/hide "New Add-ons!" button
+        # Use timer to ensure context is available
+        print("[GLYPH EXTENSION UPDATE] >>> Scheduling tag bar update via timer...")
+        def _trigger_tag_bar_update():
+            try:
+                import bpy
+                # Force refresh of category glyphs by toggling a dummy property
+                # This triggers the tag bar listener to update
+                wm = bpy.context.window_manager
+                if wm:
+                    # Send notification via operator that triggers ND_CATEGORY_GLYPHS
+                    bpy.ops.wm.sync_category_glyphs('EXEC_DEFAULT')
+                    print("[GLYPH EXTENSION UPDATE] >>> Tag bar update triggered successfully")
+                return None  # Stop timer
+            except Exception as err:
+                print(f"[GLYPH EXTENSION UPDATE] Warning: Could not trigger update: {err}")
+                return None  # Stop timer anyway
+        bpy.app.timers.register(_trigger_tag_bar_update, first_interval=0.1)
+        
+        print("=" * 80)
+        print("[GLYPH EXTENSION UPDATE] >>> END _on_extension_repos_update_post handler")
+        print("=" * 80)
+    except Exception as e:
+        print(f"[GLYPH] Error during extension repos update sync: {e}")
+        import traceback
+        traceback.print_exc()
+
+@bpy.app.handlers.persistent
 def _on_version_update(dummy):
     """Sync category glyphs after Blender version update or addon enable/disable."""
     # Re-discover categories in case new addons were enabled
@@ -6841,6 +7412,14 @@ if hasattr(bpy.app.handlers, "version_update"):
         print("[GLYPH SYNC] Registered version_update handler for addon/category rediscovery")
 else:
     print("[GLYPH SYNC] WARNING: bpy.app.handlers.version_update is unavailable")
+
+# Register extension repos update post handler for category discovery after addon installation
+if hasattr(bpy.app.handlers, "_extension_repos_update_post"):
+    if _on_extension_repos_update_post not in bpy.app.handlers._extension_repos_update_post:
+        bpy.app.handlers._extension_repos_update_post.append(_on_extension_repos_update_post)
+        print("[GLYPH SYNC] Registered _extension_repos_update_post handler for extension category discovery")
+else:
+    print("[GLYPH SYNC] WARNING: bpy.app.handlers._extension_repos_update_post is unavailable")
 
 # Load mappings on module import
 _load_glyph_mappings_from_file()

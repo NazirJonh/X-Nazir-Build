@@ -1742,6 +1742,35 @@ class VIEW3D_HT_tag_bar_tags(Header):
 
         wm = context.window_manager
         v3d = context.space_data
+        area = context.area
+
+        # Check for pending (unassigned) categories from new add-ons.
+        # Use the shared helper so View3D matches the editor-wide tag-bar rules.
+        from bl_ui.space_userpref import _get_unassigned_categories_count_for_space
+        unassigned_count = _get_unassigned_categories_count_for_space(context, 1, 1 << 0, "VIEW3D:")
+
+        # Create a row for tag buttons and filter toggle with compact spacing
+        row = layout.row(align=True)
+
+        # Draw "New Add-on!" button if there are pending categories
+        if unassigned_count > 0:
+            # Check if New Add-on filter is active
+            new_addon_active = getattr(v3d, "new_addon_filter_active", False) if v3d else False
+
+            # Draw the button with green color - use Material Symbols glyph
+            row.tag_button(
+                "view3d.tag_bar_toggle",
+                tag_name="New Add-ons!",  # Must match C++ STREQ check
+                glyph="\uf23a",  # Material Symbols "new_releases" icon
+                color_r=0.0,
+                color_g=0.8,
+                color_b=0.2,
+                depress=new_addon_active,
+                center_glyph=False,
+                tooltip=f"Show {unassigned_count} new add-on categories",
+            )
+            row.separator()
+
         # Get active tags as comma-separated string
         active_tags = getattr(v3d, "active_tag_filter_tags", "")
 

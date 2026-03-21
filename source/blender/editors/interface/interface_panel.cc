@@ -12,8 +12,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <string>
 #include <unordered_set>
 
@@ -3404,35 +3406,151 @@ static uint32_t space_type_to_flag(int space_type)
   }
 }
 
+/**
+ * Check if any category from the same extension already has tags assigned.
+ * This ensures that when a user assigns a tag to one category of an extension,
+ * all categories of that extension are considered "read" across all modes/spaces.
+ */
+static bool extension_has_tagged_category(const wmWindowManager *wm,
+                                          const char *source_extension)
+{
+  if (!wm || !source_extension || source_extension[0] == '\0') {
+    return false;
+  }
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+           wm->category_glyph_mappings.first);
+       item;
+       item = item->next)
+  {
+    if (STREQ(item->source_extension, source_extension) && item->tags[0] != '\0') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if all categories from the same extension are reserved.
+ * This handles cases like Bool Tool, which creates a pending category "Bool Tool"
+ * but all its panels are actually in the reserved category "Edit".
+ * Such extensions should not show "New Add-ons!" button.
+ */
+static bool extension_has_only_reserved_categories(const wmWindowManager *wm,
+                                                   const char *source_extension)
+{
+  if (!wm || !source_extension || source_extension[0] == '\0') {
+    return false;
+  }
+
+  bool has_any_category = false;
+  bool has_reserved_with_panels = false;
+  bool has_non_reserved_without_panels = false;
+  bool has_non_reserved_with_panels = false;
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+           wm->category_glyph_mappings.first);
+       item;
+       item = item->next)
+  {
+    if (STREQ(item->source_extension, source_extension)) {
+      has_any_category = true;
+      if (item->is_reserved) {
+        /* Reserved category with panels (discovered_in_spaces != 0 means it has panels). */
+        if (item->discovered_in_spaces != 0) {
+          has_reserved_with_panels = true;
+        }
+      }
+      else {
+        /* Non-reserved category: check if it has panels. */
+        if (item->discovered_in_spaces == 0) {
+          has_non_reserved_without_panels = true;
+        }
+        else {
+          has_non_reserved_with_panels = true;
+        }
+      }
+    }
+  }
+
+  /* If extension has a reserved category with panels AND a non-reserved category without panels,
+   * it means the non-reserved category is a "ghost" (like Bool Tool's "Bool Tool" category).
+   * All actual panels are in the reserved category, so the extension is considered "read". */
+  if (has_reserved_with_panels && has_non_reserved_without_panels && !has_non_reserved_with_panels) {
+    return true;
+  }
+
+  /* If extension has categories and all of them are reserved, return true. */
+  return has_any_category && !has_non_reserved_without_panels && !has_non_reserved_with_panels;
+}
+
 bool category_is_unassigned_for_context(const wmWindowManager *wm,
                                         const CategoryGlyphItem *category,
                                         int space_type,
                                         uint32_t current_mode_flag)
 {
+  printf("[UNASSIGNED FUNC] ENTER: category='%s' wm=%p space_type=%d mode_flag=0x%x\n",
+         (category ? category->category : "NULL"), (const void*)wm, space_type, current_mode_flag);
+  fflush(stdout);
+
   if (!wm || !category) {
+    printf("[UNASSIGNED FUNC] RETURN false: wm=%p category=%p\n", (const void*)wm, (const void*)category);
+    fflush(stdout);
     return false;
   }
 
   /* Reserved categories are never considered unassigned. */
   if (category->is_reserved) {
+    printf("[UNASSIGNED FUNC] RETURN false: reserved category='%s'\n", category->category);
+    fflush(stdout);
     return false;
   }
 
   /* Must have a source extension and be pending assignment. */
   if (category->source_extension[0] == '\0' || !category->pending_tag_assignment) {
+    printf("[UNASSIGNED FUNC] RETURN false: source_extension='%s' pending_tag_assignment=%d\n",
+           category->source_extension, int(category->pending_tag_assignment));
+    fflush(stdout);
     return false;
   }
 
   /* Must not already have tags assigned. */
   if (category->tags[0] != '\0') {
+    printf("[UNASSIGNED FUNC] RETURN false: already tagged tags='%s'\n", category->tags);
+    fflush(stdout);
+    return false;
+  }
+
+  /* NEW: If ANY category from the same extension has tags, this extension is considered "read".
+   * This prevents showing "New Add-ons!" for VCol Edit in Edit Mode when Ucupaint
+   * already has a tag assigned in Object Mode. */
+  if (extension_has_tagged_category(wm, category->source_extension)) {
+    printf("[UNASSIGNED FUNC] RETURN false: extension '%s' has tagged category\n",
+           category->source_extension);
+    fflush(stdout);
+    return false;
+  }
+
+  /* NEW: If ALL categories from the same extension are reserved, this extension is considered "read".
+   * This prevents showing "New Add-ons!" for extensions like Bool Tool, which creates a pending
+   * category "Bool Tool" but all its panels are actually in the reserved category "Edit". */
+  if (extension_has_only_reserved_categories(wm, category->source_extension)) {
+    printf("[UNASSIGNED FUNC] RETURN false: extension '%s' has only reserved categories\n",
+           category->source_extension);
+    fflush(stdout);
     return false;
   }
 
   /* Check that this category was discovered in the given space type.
-   * space_type == -1 means global (match any). */
-  if (space_type != -1) {
+   * space_type == -1 means global (match any).
+   * discovered_in_spaces == 0 means "any space" (legacy / unknown source),
+   * so do not reject in that case. */
+  if (space_type != -1 && category->discovered_in_spaces != 0) {
     const uint32_t space_flag = space_type_to_flag(space_type);
     if ((category->discovered_in_spaces & space_flag) == 0) {
+      printf("[UNASSIGNED FUNC] RETURN false: discovered_in_spaces=0x%x space_flag=0x%x\n",
+             category->discovered_in_spaces, space_flag);
+      fflush(stdout);
       return false;
     }
   }
@@ -3443,11 +3561,34 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
    * Also skip if discovered_in_modes == 0 (any mode) or current_mode_flag == 0 (not filtering). */
   if (space_type != SPACE_NODE && current_mode_flag != 0 && category->discovered_in_modes != 0) {
     if ((category->discovered_in_modes & current_mode_flag) == 0) {
+      printf("[UNASSIGNED FUNC] RETURN false: discovered_in_modes=0x%x current_mode_flag=0x%x\n",
+             category->discovered_in_modes, current_mode_flag);
+      fflush(stdout);
       return false;
     }
   }
 
+  printf("[UNASSIGNED FUNC] RETURN true: category='%s'\n", category->category);
+  fflush(stdout);
   return true;
+}
+
+/**
+ * Check if a category exists in the region's panel categories list.
+ * This verifies that the category has at least one visible panel in the current context.
+ */
+static bool category_exists_in_region(const ARegion *region, const char *category_id)
+{
+  if (!region || !region->runtime || !category_id || category_id[0] == '\0') {
+    return false;
+  }
+
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (STREQ(pc_dyn.idname, category_id)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 int get_unassigned_categories_count(const wmWindowManager *wm,
@@ -3455,6 +3596,39 @@ int get_unassigned_categories_count(const wmWindowManager *wm,
                                     uint32_t current_mode_flag)
 {
   if (!wm) {
+    printf("[UNASSIGNED COUNT] get_unassigned_categories_count: wm=NULL, returning 0\n");
+    fflush(stdout);
+    return 0;
+  }
+
+  printf("[UNASSIGNED COUNT] get_unassigned_categories_count: wm=%p space_type=%d mode_flag=0x%x\n",
+         (const void*)wm, space_type, current_mode_flag);
+  fflush(stdout);
+
+  int count = 0;
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+           wm->category_glyph_mappings.first);
+       item;
+       item = item->next)
+  {
+    if (category_is_unassigned_for_context(wm, item, space_type, current_mode_flag)) {
+      count++;
+      printf("[UNASSIGNED COUNT] Found unassigned: category='%s' pending=%d source_ext='%s' count=%d\n",
+             item->category, int(item->pending_tag_assignment), item->source_extension, count);
+      fflush(stdout);
+    }
+  }
+  printf("[UNASSIGNED COUNT] Result: count=%d\n", count);
+  fflush(stdout);
+  return count;
+}
+
+int get_unassigned_categories_count_for_region(const wmWindowManager *wm,
+                                                const ARegion *region,
+                                                int space_type,
+                                                uint32_t current_mode_flag)
+{
+  if (!wm || !region) {
     return 0;
   }
 
@@ -3464,7 +3638,15 @@ int get_unassigned_categories_count(const wmWindowManager *wm,
        item;
        item = item->next)
   {
-    if (category_is_unassigned_for_context(wm, item, space_type, current_mode_flag)) {
+    /* First check if category is unassigned for context */
+    if (!category_is_unassigned_for_context(wm, item, space_type, current_mode_flag)) {
+      continue;
+    }
+
+    /* Then verify the category actually exists in the region's panel list.
+     * This filters out categories that are pending but whose panels are not visible
+     * (e.g., due to poll() returning false). */
+    if (category_exists_in_region(region, item->category)) {
       count++;
     }
   }
@@ -3475,7 +3657,29 @@ bool should_show_new_addon_tag(const wmWindowManager *wm,
                                int space_type,
                                uint32_t current_mode_flag)
 {
-  return get_unassigned_categories_count(wm, space_type, current_mode_flag) > 0;
+  printf("[NEW ADDON TAG] should_show_new_addon_tag: wm=%p space_type=%d mode_flag=0x%x\n",
+         (const void*)wm, space_type, current_mode_flag);
+  fflush(stdout);
+
+  int count = get_unassigned_categories_count(wm, space_type, current_mode_flag);
+  bool result = count > 0;
+
+  printf("[NEW ADDON TAG] Result: count=%d should_show=%d\n", count, (result ? 1 : 0));
+  fflush(stdout);
+
+  return result;
+}
+
+bool should_show_new_addon_tag_for_region(const wmWindowManager *wm,
+                                           const ARegion *region,
+                                           int space_type,
+                                           uint32_t current_mode_flag)
+{
+  if (!wm || !region) {
+    return false;
+  }
+
+  return get_unassigned_categories_count_for_region(wm, region, space_type, current_mode_flag) > 0;
 }
 
 /** \} */

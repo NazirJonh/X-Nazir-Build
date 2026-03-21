@@ -6,6 +6,8 @@
 #include <map>
 #include <optional>
 #include <algorithm>
+#include <iostream>
+#include <cstdio>
 
 #include "interface_tag_bar.hh"
 #include "interface_intern.hh"
@@ -125,12 +127,16 @@ void tag_bar_mark_all_dirty()
 TagBarRuntimeData *get_tag_bar_data_global(const bContext *C)
 {
   if (!C) {
+    printf("[TAG BAR DATA] get_tag_bar_data_global: C=NULL\n");
+    fflush(stdout);
     return nullptr;
   }
 
   wmWindowManager *wm = CTX_wm_manager(C);
 
   if (!wm) {
+    printf("[TAG BAR DATA] get_tag_bar_data_global: wm=NULL\n");
+    fflush(stdout);
     return nullptr;
   }
 
@@ -139,15 +145,26 @@ TagBarRuntimeData *get_tag_bar_data_global(const bContext *C)
   if (!data) {
     data = MEM_new<TagBarRuntimeData>(__func__);
     g_tag_bar_cache[wm] = data;
+    printf("[TAG BAR DATA] created runtime data: wm=%p data=%p\n", (void*)wm, (void*)data);
+    fflush(stdout);
   }
 
   TagFilterStateRef state{};
   const bool has_state = tag_filter_state_from_context(C, &state);
 
+  printf("[TAG BAR DATA] fetch: wm=%p data=%p needs_update=%d has_state=%d\n",
+         (void*)wm, (void*)data, int(data->needs_update), int(has_state));
+  fflush(stdout);
+
   /* Update data if needs_update flag is set */
   if (data->needs_update) {
+    printf("[TAG BAR DATA] calling tag_bar_buttons_update\n");
+    fflush(stdout);
     tag_bar_buttons_update(C, wm, has_state ? &state : nullptr, data);
     data->needs_update = false;
+    printf("[TAG BAR DATA] update complete: button_count=%zu show_new_addon_button=%d unassigned_count=%d\n",
+           data->buttons.size(), int(data->show_new_addon_button), data->unassigned_count);
+    fflush(stdout);
   }
 
   return data;
@@ -434,15 +451,32 @@ void tag_bar_buttons_update(const bContext *C,
 
   /* Check if "New Add-on!" virtual button should be shown. */
   const ScrArea *area = C ? CTX_wm_area(C) : nullptr;
+  const ARegion *region = C ? CTX_wm_region(C) : nullptr;
   const int space_type = area ? area->spacetype : -1;
-  const bool show_new_addon = wm && should_show_new_addon_tag(wm, space_type, current_mode_flag);
+  printf("[TAG BAR DEBUG] area=%p space_type=%d wm=%p mode_flag=0x%x\n",
+         (const void*)area, space_type, (void*)wm, current_mode_flag);
+  fflush(stdout);
+
+  /* Use region-aware check to filter out categories whose panels are not visible
+   * (e.g., due to poll() returning false in the current context). */
+  const bool show_new_addon = wm && should_show_new_addon_tag_for_region(wm, region, space_type, current_mode_flag);
+
+  printf("[TAG BAR DEBUG] show_new_addon=%d\n", (show_new_addon ? 1 : 0));
+  fflush(stdout);
 
   data->show_new_addon_button = show_new_addon;
   data->unassigned_count = show_new_addon ?
-                               get_unassigned_categories_count(wm, space_type, current_mode_flag) :
+                               get_unassigned_categories_count_for_region(wm, region, space_type, current_mode_flag) :
                                0;
 
+  printf("[TAG BAR UPDATE] New Add-on button result: show_new_addon_button=%d unassigned_count=%d\n",
+         (data->show_new_addon_button ? 1 : 0), data->unassigned_count);
+  fflush(stdout);
+
   if (show_new_addon) {
+    printf("[NEW ADDON BUTTON] CREATING BUTTON: count=%d\n", data->unassigned_count);
+    fflush(stdout);
+
     TagButton &btn = data->new_addon_button;
     STRNCPY(btn.tag_name, "New Add-on!");
     STRNCPY(btn.glyph, get_new_addon_tag_glyph());
@@ -879,6 +913,9 @@ static int draw_new_addon_button(const bContext *C,
                                  float font_size_factor)
 {
   if (!data || !data->show_new_addon_button) {
+    printf("[NEW ADDON DRAW] SKIP: data=%p show_new_addon_button=%d\n",
+           (void*)data, (data ? int(data->show_new_addon_button) : -1));
+    fflush(stdout);
     return 0;
   }
 
@@ -917,6 +954,10 @@ static int draw_new_addon_button(const bContext *C,
 
   const int text_width = BLF_width(fontid, button_label, strlen(button_label));
   const int btn_width = text_width + UI_UNIT_X;
+
+  printf("[NEW ADDON DRAW] DRAW: area=%p label='%s' count=%d x=%d y=%d width=%d height=%d\n",
+         (const void*)area, button_label, data->unassigned_count, xco, yco, btn_width, btn_height);
+  fflush(stdout);
 
   /* Update is_active from per-space state BEFORE creating button */
   btn.is_active = area ? is_new_addon_filter_active(area) : false;
@@ -1008,9 +1049,34 @@ static int draw_new_addon_button(const bContext *C,
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Public New Add-on Button Draw Function
+ * \{ */
+
+int tag_bar_draw_new_addon_button(const bContext *C,
+                                  Block *block,
+                                  const ScrArea *area,
+                                  int xco,
+                                  int yco,
+                                  int btn_height,
+                                  float font_size_factor)
+{
+  TagBarRuntimeData *data = get_tag_bar_data_global(C);
+  if (!data) {
+    return 0;
+  }
+  return draw_new_addon_button(C, block, data, area, xco, yco, btn_height, font_size_factor);
+}
+
+/** \} */
+
 void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 {
   ScrArea *area = CTX_wm_area(C);
+  printf("[TAG BAR REGION DRAW] enter: area=%p region=%p space_type=%d\n",
+         (void*)area, (void*)region, (area ? area->spacetype : -1));
+  fflush(stdout);
+
   if (!area) {
     return;
   }
@@ -1036,6 +1102,10 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 
   const bool has_visible_buttons = std::any_of(
       data->buttons.begin(), data->buttons.end(), [](const TagButton &btn) { return btn.is_visible; });
+
+  printf("[TAG BAR REGION DRAW] buttons: total=%zu has_visible_buttons=%d show_new_addon_button=%d unassigned_count=%d\n",
+         data->buttons.size(), int(has_visible_buttons), int(data->show_new_addon_button), data->unassigned_count);
+  fflush(stdout);
 
   if (!has_visible_buttons) {
     ED_region_header(C, region);
@@ -1067,6 +1137,10 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
   /* Draw buttons via UI API */
   int xco = UI_UNIT_X / 2;
   for (TagButton &btn : data->buttons) {
+    if (!btn.is_visible) {
+      continue;
+    }
+
     /* Calculate button width */
     const int fontid = style->widget.uifont_id;
     BLF_size(fontid, UI_UNIT_Y * 0.7f * dpi_fac);
@@ -1196,6 +1270,10 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
   /* Draw tag buttons */
   int xco = 0;
   for (TagButton &btn : data->buttons) {
+    if (!btn.is_visible) {
+      continue;
+    }
+
     /* Calculate button width */
     const int fontid = style->widget.uifont_id;
     BLF_size(fontid, UI_UNIT_Y * 0.5f * dpi_fac);
@@ -1300,6 +1378,10 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
   int total_buttons_width = 0;
   if (!data->buttons.is_empty()) {
     for (const TagButton &btn : data->buttons) {
+      if (!btn.is_visible) {
+        continue;
+      }
+
       const int fontid = style->widget.uifont_id;
       BLF_size(fontid, UI_UNIT_Y * 0.7f * dpi_fac);
 
@@ -1329,8 +1411,12 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
   /* Draw tag buttons (if any exist) */
   if (!data->buttons.is_empty()) {
     for (TagButton &btn : data->buttons) {
-    const int fontid = style->widget.uifont_id;
-    BLF_size(fontid, UI_UNIT_Y * 0.7f * dpi_fac);
+      if (!btn.is_visible) {
+        continue;
+      }
+
+      const int fontid = style->widget.uifont_id;
+      BLF_size(fontid, UI_UNIT_Y * 0.7f * dpi_fac);
 
     /* Convert glyph from hex to UTF-8 for display */
     char glyph_utf8[8] = "";
@@ -1418,6 +1504,10 @@ void buttons_tag_bar_region_listener(const wmRegionListenerParams *params)
 {
   const wmNotifier *wmn = params->notifier;
   ARegion *region = params->region;
+
+  printf("[TAG BAR LISTENER] category=%d data=%d action=%d region=%p\n",
+         wmn->category, wmn->data, wmn->action, (void*)region);
+  fflush(stdout);
 
   switch (wmn->category) {
     case NC_WM:
@@ -1919,6 +2009,11 @@ void get_new_addon_tag_color(float r_color[3])
   r_color[1] = 0.6f;
   r_color[2] = 0.02f;
 }
+
+/* NOTE: Реализация должна быть единственной.
+ * Эти функции определены в `source/blender/editors/interface/interface_panel.cc`.
+ * Здесь оставляем только использования.
+ */
 
 /** \} */
 

@@ -272,6 +272,27 @@ void buttons_tag_bar_region_message_subscribe(const wmRegionMessageSubscribePara
  */
 void tag_bar_filter_popover_panel_register(ARegionType *art);
 
+/**
+ * Draw the "New Add-on!" virtual button into a UI block.
+ * This is used to display a button for newly installed add-ons that haven't been tagged yet.
+ *
+ * \param C: Context
+ * \param block: UI block to add the button to
+ * \param area: The area for context (can be nullptr)
+ * \param xco: X position to start drawing
+ * \param yco: Y position to start drawing
+ * \param btn_height: Height of the button
+ * \param font_size_factor: Font size multiplier
+ * \return Width of the drawn button (0 if not drawn)
+ */
+int tag_bar_draw_new_addon_button(const bContext *C,
+                                  Block *block,
+                                  const ScrArea *area,
+                                  int xco,
+                                  int yco,
+                                  int btn_height,
+                                  float font_size_factor);
+
 /** \} */
 
 }  // namespace blender::ui

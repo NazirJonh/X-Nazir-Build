@@ -1263,6 +1263,7 @@ static void SCREEN_OT_category_tab_edit_dialog(wmOperatorType *ot)
   RNA_def_string(ot->srna, "glyph", nullptr, 16, "Glyph Code", "Hex codepoint (e.g., e5d2)");
   RNA_def_string(ot->srna, "glyph_search", nullptr, 64, "Search", "Search glyphs");
   RNA_def_string(ot->srna, "icon_search", nullptr, 64, "Icon Search", "Search built-in icons");
+  RNA_def_string(ot->srna, "source_extension", nullptr, 256, "Add-on", "Add-on identifier for this category");
 
   RNA_def_enum(ot->srna,
                "display_mode_ui",

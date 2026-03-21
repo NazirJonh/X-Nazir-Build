@@ -21,6 +21,7 @@
 
 #include "DNA_listBase.h"
 #include "DNA_vec_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "RNA_types.hh"
 
@@ -949,12 +950,31 @@ int get_unassigned_categories_count(const wmWindowManager *wm,
                                     uint32_t current_mode_flag);
 
 /**
+ * Count categories that are unassigned AND actually exist in the region's panel list.
+ * This filters out pending categories whose panels are not visible due to poll() returning false.
+ */
+int get_unassigned_categories_count_for_region(const wmWindowManager *wm,
+                                                const ARegion *region,
+                                                int space_type,
+                                                uint32_t current_mode_flag);
+
+/**
  * Returns true if there is at least one unassigned category for the given context,
  * i.e. the "New Add-on!" virtual tag should be shown in the Tag Bar.
  */
 bool should_show_new_addon_tag(const wmWindowManager *wm,
                                 int space_type,
                                 uint32_t current_mode_flag);
+
+/**
+ * Returns true if there is at least one unassigned category that exists in the region.
+ * Use this when you have access to the region to avoid showing "New Add-on!" for
+ * categories whose panels are not visible (e.g., due to poll() returning false).
+ */
+bool should_show_new_addon_tag_for_region(const wmWindowManager *wm,
+                                           const ARegion *region,
+                                           int space_type,
+                                           uint32_t current_mode_flag);
 
 /**
  * Set extension drop preview state.
@@ -1092,6 +1112,12 @@ bool extract_leading_glyph(const char *input,
                            size_t glyph_hex_max,
                            char *text_out,
                            size_t text_max);
+/**
+ * Find a category glyph item with global fallback (space_type = -1).
+ * Used by interface_panel.cc for tooltip source extension display.
+ */
+const CategoryGlyphItem *category_glyph_item_find_with_global_fallback_const(
+    const ListBase &items, const char *category, const int space_type);
 
 /**
  * Popup callbacks (exported for operators).

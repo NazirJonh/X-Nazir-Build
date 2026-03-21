@@ -414,136 +414,15 @@ class NODE_MT_editor_menus(Menu):
 def _get_unassigned_categories_count_for_node_editor(context):
     """Count unassigned categories for Node Editor context.
 
-    This function checks two sources for unassigned categories:
-    1. Categories in wm.category_glyph_mappings with pending_tag_assignment=True
-    2. "Orphaned" categories in category_orders that have no corresponding entry in mappings
+    Delegates to the shared Python helper so the Node Editor and View3D
+    "New Add-ons!" visibility stay in sync.
     """
-    wm = context.window_manager
-    if not wm:
-        print("[NODE_TAG_BAR] No window manager available")
+    try:
+        from bl_ui.space_userpref import _get_unassigned_categories_count_for_space
+        return _get_unassigned_categories_count_for_space(context, 16, 1 << 11, "NODE:")
+    except Exception as e:
+        print(f"[NODE_TAG_BAR] Error checking unassigned categories: {e}")
         return 0
-
-    # Trigger category discovery if there's a pending extension context.
-    # This ensures extension panels are discovered after installation.
-    try:
-        from bl_ui.space_userpref import (
-            _merge_discovered_categories,
-            _pending_extension_context,
-            _preview_mode_active,
-            sync_glyph_mappings_to_wm,
-        )
-        if _pending_extension_context is not None and not _preview_mode_active:
-            print("[NODE_TAG_BAR] Triggering _merge_discovered_categories due to pending extension context")
-            _merge_discovered_categories()
-            sync_glyph_mappings_to_wm()
-        elif _preview_mode_active:
-            print("[NODE_TAG_BAR] Skipping auto-sync due to preview mode active")
-    except Exception as e:
-        print(f"[NODE_TAG_BAR] Error during category discovery trigger: {e}")
-
-    # Node Editor space type is 16 (SPACE_NODE) - corrected from 18
-    space_type = 16
-    # Use the correct bit flag from SPACE_TO_FLAG mapping: SPACE_NODE = (1 << 11)
-    space_flag = 1 << 11  # This matches SPACE_TO_FLAG['SPACE_NODE']
-
-    count = 0
-    total_categories = 0
-    pending_categories = []
-
-    # Build a set of all categories that exist in mappings with proper data
-    # (not just category name, but with source_extension or pending_tag_assignment)
-    existing_categories_with_data = set()
-    existing_categories_names = set()
-    for item in wm.category_glyph_mappings:
-        total_categories += 1
-        existing_categories_names.add(item.category)
-        # Check if category has meaningful data (pending assignment or source extension)
-        source_extension = getattr(item, 'source_extension', '')
-        pending_assignment = getattr(item, 'pending_tag_assignment', False)
-        if source_extension or pending_assignment:
-            existing_categories_with_data.add(item.category)
-
-        # Debug: collect info about pending categories
-        if (hasattr(item, 'pending_tag_assignment') and item.pending_tag_assignment):
-            disc_spaces = getattr(item, 'discovered_in_spaces', 0)
-            pending_categories.append({
-                'category': item.category,
-                'source_extension': getattr(item, 'source_extension', 'N/A'),
-                'is_reserved': getattr(item, 'is_reserved', False),
-                'tags': getattr(item, 'tags', 'N/A'),
-                'discovered_in_spaces': disc_spaces,
-                'space_match': bool(disc_spaces & space_flag)
-            })
-            # Special debug for Hot Node category
-            if 'hot' in item.category.lower():
-                _node_log_once(f"[NODE_TAG_BAR] HOT NODE DEBUG: category={item.category!r}, "
-                      f"discovered_in_spaces={disc_spaces}, space_flag={space_flag}, "
-                      f"match={bool(disc_spaces & space_flag)}, tags={getattr(item, 'tags', 'N/A')}")
-
-        # Check if category is unassigned for current context
-        is_reserved = getattr(item, 'is_reserved', True)
-        source_extension = getattr(item, 'source_extension', '')
-        pending_assignment = getattr(item, 'pending_tag_assignment', False)
-        tags = getattr(item, 'tags', [])
-        discovered_spaces = getattr(item, 'discovered_in_spaces', 0)
-
-        # Handle tags - could be empty list, None, or empty collection
-        has_no_tags = not tags or (hasattr(tags, '__len__') and len(tags) == 0)
-
-        # Debug for Hot Node: log all conditions
-        if 'hot' in item.category.lower():
-            _node_log_once(f"[NODE_TAG_BAR] HOT NODE CHECK: category={item.category!r}, "
-                  f"is_reserved={is_reserved}, source_extension={source_extension!r}, "
-                  f"pending_assignment={pending_assignment}, has_no_tags={has_no_tags}, "
-                  f"discovered_spaces={discovered_spaces}, space_flag={space_flag}, "
-                  f"space_match={bool(discovered_spaces & space_flag)}")
-
-        if (not is_reserved and
-            source_extension and
-            pending_assignment and
-            has_no_tags):
-
-            # Check if discovered in current space type
-            if discovered_spaces & space_flag:
-                count += 1
-
-    # Check for orphaned categories in category_orders that are not in mappings
-    # This handles the case where drag-and-drop extensions are added to order
-    # but don't get proper category entries in mappings
-    orphaned_categories = []
-    try:
-        from bl_ui.space_userpref import get_category_order
-        node_order = get_category_order("NODE:")
-        _node_log_once(f"[NODE_TAG_BAR] DEBUG: node_order = {node_order}")
-        _node_log_once(f"[NODE_TAG_BAR] DEBUG: existing_categories_names sample = {list(existing_categories_names)[:10]}")
-        if node_order:
-            # Known reserved categories that should not be counted as unassigned
-            reserved_categories = {
-                'Tool', 'View', 'Options', 'Node', 'Item', 'Edit', 'Group',
-                'Animation', 'Image', 'Cache', 'Mask', 'Annotation'
-            }
-            for category in node_order:
-                in_existing = category in existing_categories_names
-                in_reserved = category in reserved_categories
-                # Only log once per unique category
-                _node_log_once(f"[NODE_TAG_BAR] DEBUG: checking '{category}' - in_existing={in_existing}, in_reserved={in_reserved}")
-                if not in_existing and not in_reserved:
-                    orphaned_categories.append(category)
-                    count += 1
-    except Exception as e:
-        import traceback
-        print(f"[NODE_TAG_BAR] Error checking category_orders: {e}")
-        traceback.print_exc()
-
-    # Debug output
-    _node_log_once(f"[NODE_TAG_BAR] Total categories: {total_categories}, Pending: {len(pending_categories)}, Orphaned: {len(orphaned_categories)}, Node Editor count: {count}")
-    _node_log_once(f"[NODE_TAG_BAR] Space flag: {space_flag} (0x{space_flag:x})")
-    for cat in pending_categories:
-        _node_log_once(f"[NODE_TAG_BAR]   - {cat['category']}: ext={cat['source_extension']}, reserved={cat['is_reserved']}, tags={cat['tags']}, spaces=0x{cat['discovered_in_spaces']:x}, match={cat['space_match']}")
-    if orphaned_categories:
-        _node_log_once(f"[NODE_TAG_BAR] Orphaned categories: {orphaned_categories}")
-
-    return count
 
 
 class NODE_HT_tag_bar(Header):

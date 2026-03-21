@@ -539,13 +539,16 @@ struct DeferredActivationExtensionCallbackState {
 static DeferredActivationExtensionCallbackState g_deferred_activation_extension_callback_state;
 
 static void deferred_category_activation_extension_callback(Main * /*bmain*/,
-                                                            PointerRNA ** /*pointers*/,
-                                                            int /*pointers_num*/,
-                                                            void * /*arg*/)
+                                                             PointerRNA ** /*pointers*/,
+                                                             int /*pointers_num*/,
+                                                             void * /*arg*/)
 {
   printf("[CATEGORY ACTIVATE] Extension callback triggered! valid=%d wait_for_signal=%d\n",
          g_deferred_category_activation.valid ? 1 : 0,
          g_deferred_category_activation.wait_for_extension_signal ? 1 : 0);
+  printf("[CATEGORY ACTIVATE] Extension callback - source_extension_id='%s', discover_new_category=%d\n",
+         g_deferred_category_activation.source_extension_id.empty() ? "" : g_deferred_category_activation.source_extension_id.c_str(),
+         g_deferred_category_activation.discover_new_category ? 1 : 0);
   fflush(stdout);
   if (g_deferred_category_activation.valid &&
       g_deferred_category_activation.wait_for_extension_signal) {
@@ -691,13 +694,21 @@ static void pending_category_insert_set(const std::string &tag_key,
  * \param tag_already_assigned  True when a tag was already assigned (drag & drop onto tabs).
  */
 static void register_new_extension_category(const bContext *C,
-                                            const char *category_id,
-                                            const char *extension_id,
-                                            int space_type,
-                                            uint32_t mode_flag,
-                                            bool tag_already_assigned)
+                                             const char *category_id,
+                                             const char *extension_id,
+                                             int space_type,
+                                             uint32_t mode_flag,
+                                             bool tag_already_assigned)
 {
+  printf("[CATEGORY REGISTER] register_new_extension_category called: category='%s', extension='%s', space_type=%d, mode_flag=0x%08X, tag_already_assigned=%d\n",
+         category_id ? category_id : "(null)",
+         extension_id ? extension_id : "(null)", 
+         space_type, mode_flag, tag_already_assigned ? 1 : 0);
+  fflush(stdout);
+  
   if (!C || !category_id || category_id[0] == '\0') {
+    printf("[CATEGORY REGISTER] Early return: C=%p, category_id=%s\n", C, category_id ? category_id : "(null)");
+    fflush(stdout);
     return;
   }
 
@@ -752,14 +763,26 @@ static void register_new_extension_category(const bContext *C,
              mode_flag);
 
     const char *imports_none[] = {nullptr};
+    printf("[CATEGORY REGISTER] Executing Python: %s\n", python_expr);
+    fflush(stdout);
     BPY_run_string_exec(const_cast<bContext *>(C), imports_none, python_expr);
+    printf("[CATEGORY REGISTER] Python execution completed for mark_category_from_extension\n");
+    fflush(stdout);
   }
 
   /* Tag the tag bar for refresh so the "New Add-on!" button can appear/disappear. */
+  printf("[CATEGORY REGISTER] Sending WM notification NC_WM | ND_CATEGORY_GLYPHS\n");
+  fflush(stdout);
   WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   ScrArea *area = CTX_wm_area(C);
   if (area) {
+    printf("[CATEGORY REGISTER] Tagging area for redraw, spacetype=%d\n", area->spacetype);
+    fflush(stdout);
     ED_area_tag_redraw(area);
+  }
+  else {
+    printf("[CATEGORY REGISTER] No area found for redraw\n");
+    fflush(stdout);
   }
 #else
   UNUSED_VARS(category_id, extension_id, space_type, mode_flag, tag_already_assigned);
@@ -783,12 +806,21 @@ static void register_new_extension_category(const bContext *C,
  * \param tag_name       Tag to assign when dropping onto a tab (may be nullptr).
  */
 static void handle_extension_drop_on_tabs(const bContext *C,
-                                          const char *category_id,
-                                          const char *extension_id,
-                                          const char *tab_category,
-                                          const char *tag_name)
+                                           const char *category_id,
+                                           const char *extension_id,
+                                           const char *tab_category,
+                                           const char *tag_name)
 {
+  printf("[EXT DROP HANDLER] handle_extension_drop_on_tabs called: category='%s', extension='%s', tab_category='%s', tag_name='%s'\n",
+         category_id ? category_id : "(null)",
+         extension_id ? extension_id : "(null)", 
+         tab_category ? tab_category : "(null)",
+         tag_name ? tag_name : "(null)");
+  fflush(stdout);
+  
   if (!C || !category_id || category_id[0] == '\0') {
+    printf("[EXT DROP HANDLER] Early return: C=%p, category_id=%s\n", C, category_id ? category_id : "(null)");
+    fflush(stdout);
     return;
   }
 
@@ -1967,6 +1999,7 @@ static bool compare_reserved_categories_by_priority(
 
 /**
  * Get the current object mode as a CategoryTagMode bitmask.
+ * For edit mode, returns a detailed flag based on object type (mesh_edit, curve_edit, etc.)
  */
 uint32_t get_current_tag_mode_flag(const bContext *C)
 {
@@ -2004,8 +2037,36 @@ uint32_t get_current_tag_mode_flag(const bContext *C)
   switch (ob->mode) {
     case OB_MODE_OBJECT:
       return static_cast<uint32_t>(CategoryTagMode::OBJECT_MODE);
-    case OB_MODE_EDIT:
-      return static_cast<uint32_t>(CategoryTagMode::EDIT_MODE);
+    case OB_MODE_EDIT: {
+      /* Return detailed edit mode flag based on object type.
+       * This matches bl_context values like "mesh_edit", "curve_edit", etc. */
+      switch (ob->type) {
+        case OB_MESH:
+          return static_cast<uint32_t>(CategoryTagMode::MESH_EDIT);
+        case OB_CURVES_LEGACY:
+        case OB_CURVES:
+          return static_cast<uint32_t>(CategoryTagMode::CURVE_EDIT);
+        case OB_SURF:
+          return static_cast<uint32_t>(CategoryTagMode::SURFACE_EDIT);
+        case OB_ARMATURE:
+          return static_cast<uint32_t>(CategoryTagMode::ARMATURE_EDIT);
+        case OB_LATTICE:
+          return static_cast<uint32_t>(CategoryTagMode::LATTICE_EDIT);
+        case OB_MBALL:
+          return static_cast<uint32_t>(CategoryTagMode::META_EDIT);
+        case OB_FONT:
+          return static_cast<uint32_t>(CategoryTagMode::FONT_EDIT);
+        case OB_GREASE_PENCIL:
+          return static_cast<uint32_t>(CategoryTagMode::GREASE_PENCIL_EDIT);
+        case OB_POINTCLOUD:
+          return static_cast<uint32_t>(CategoryTagMode::POINTCLOUD_EDIT);
+        case OB_VOLUME:
+          return static_cast<uint32_t>(CategoryTagMode::VOLUME_EDIT);
+        default:
+          /* Fallback to generic EDIT_MODE for unknown object types */
+          return static_cast<uint32_t>(CategoryTagMode::EDIT_MODE);
+      }
+    }
     case OB_MODE_SCULPT:
       return static_cast<uint32_t>(CategoryTagMode::SCULPT_MODE);
     case OB_MODE_VERTEX_PAINT:
@@ -2091,16 +2152,14 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
   const int space_type = area ? area->spacetype : -1;
   const char *category_tags = category_tags_string_lookup(wm, category_idname, space_type);
 
-  /* If category has no tags - check if it's a newly installed extension category.
-   * New extension categories should be visible regardless of tag filter state,
-   * allowing users to see and configure them immediately after installation. */
+  /* If category has no tags, it must not pass a normal tag filter.
+   * Unassigned extension categories are shown via dedicated "New Add-ons!" filter,
+   * not by leaking into an arbitrary active tag (e.g. AAA/BBB). */
   if (!category_tags || category_tags[0] == '\0') {
-    /* Exception: if this category has a pending tag assignment (introduced by an extension),
-     * show it so users can see and configure it immediately after installation. */
-    const CategoryGlyphItem *glyph_item = category_glyph_mapping_find(wm, category_idname, space_type);
-    if (glyph_item && glyph_item->pending_tag_assignment) {
-      return true;
-    }
+    printf("[TAG FILTER] Reject untagged category in normal tag filter: category='%s', active_tags='%s'\n",
+           category_idname,
+           active_tags);
+    fflush(stdout);
     return false;
   }
 

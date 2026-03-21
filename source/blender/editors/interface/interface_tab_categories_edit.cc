@@ -192,7 +192,7 @@ static CategoryGlyphItem *category_glyph_item_find_with_global_fallback(
   return nullptr;
 }
 
-static const CategoryGlyphItem *category_glyph_item_find_with_global_fallback_const(
+const CategoryGlyphItem *category_glyph_item_find_with_global_fallback_const(
     const ListBase &items, const char *category, const int space_type)
 {
   if (const CategoryGlyphItem *item =
@@ -577,6 +577,9 @@ static CategoryTabInvokeLoadResult category_tab_invoke_load_operator_state_from_
       if (ELEM(mapping_item->icon_source, 1, 2)) {
         result.explicit_icon_mode_assigned = true;
       }
+      if (mapping_item->source_extension[0] != '\0') {
+        RNA_string_set(op_ptr, "source_extension", mapping_item->source_extension);
+      }
     }
   }
 
@@ -706,6 +709,12 @@ static void category_tab_invoke_apply_post_load_defaults(bContext *C,
         char hex_code[16];
         utf8_to_hex_codepoint(runtime_default_glyph, hex_code, sizeof(hex_code));
         RNA_string_set(op_ptr, "glyph", hex_code);
+      }
+
+      const CategoryGlyphItem *mapping_item = category_glyph_item_find_with_global_fallback_const(
+          wm->category_glyph_mappings, category, space_type);
+      if (mapping_item && mapping_item->source_extension[0] != '\0') {
+        RNA_string_set(op_ptr, "source_extension", mapping_item->source_extension);
       }
     }
   }
@@ -2815,7 +2824,15 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
   else {
     col_props.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
   }
-
+ 
+  char source_extension[256];
+  RNA_string_get(op->ptr, "source_extension", source_extension);
+  if (source_extension[0] != '\0') {
+    Layout &row_ext = col_props.row(false);
+    row_ext.enabled_set(false);
+    row_ext.prop(op->ptr, "source_extension", UI_ITEM_NONE, IFACE_("Add-on"), ICON_NONE);
+  }
+ 
   layout.separator();
 
   /* Change Icon panel */

@@ -847,8 +847,13 @@ static void handle_extension_drop_on_tabs(const bContext *C,
   else if (tab_category != nullptr) {
     TagFilterStateRef tag_state{};
     ScrArea *area_for_tag = CTX_wm_area(C);
+    /* IMPORTANT: Only use active_tags if filter is actually ENABLED.
+     * When filter is disabled (e.g., via "Tag Filter Tag" toggle), the category
+     * should go to the general list without a tag. */
     if (tag_filter_state_from_area(area_for_tag, &tag_state) && tag_state.active_tags &&
-        tag_state.active_tags[0] != '\0') {
+        tag_state.active_tags[0] != '\0' &&
+        tag_state.filter_enabled && *tag_state.filter_enabled)
+    {
       resolved_tag_name = tag_state.active_tags;
     }
   }
@@ -861,27 +866,34 @@ static void handle_extension_drop_on_tabs(const bContext *C,
   /* Store extension ID for deferred activation (used for reserved-only extension detection) */
   g_deferred_category_activation.source_extension_id = extension_id;
 
-  if (tab_category != nullptr && !resolved_tag_name.empty()) {
-    /* Drop onto tabs: defer tag assignment until category appears after extension install.
-     * The category doesn't exist yet in _glyph_cache, so immediate assignment would fail.
-     * We store the tag name and set tag_already_assigned=true so the deferred activation
-     * will assign the tag when the category actually appears. */
-    printf("[CATEGORY ACTIVATE] Extension drop on tabs: deferring tag assignment for category '%s', tag '%s'\n",
-           category_id, resolved_tag_name.c_str());
+  if (tab_category != nullptr) {
+    /* Drop onto tabs (with or without tag): set tag_already_assigned=true.
+     * When dropping onto tabs, the category will be visible in the general list
+     * without tag filtering, so we don't need to show "New Add-ons!" button.
+     * If a tag is active, it will be assigned to the category when it appears. */
+    printf("[CATEGORY ACTIVATE] Extension drop on tabs: deferring for category '%s', tag '%s'\n",
+           category_id, resolved_tag_name.empty() ? "(none)" : resolved_tag_name.c_str());
     fflush(stdout);
 
-    /* Store tag name for deferred assignment */
-    g_deferred_category_activation.tag_name_to_assign = resolved_tag_name;
+    /* Store tag name for deferred assignment (may be empty if no tag active) */
+    if (!resolved_tag_name.empty()) {
+      g_deferred_category_activation.tag_name_to_assign = resolved_tag_name;
+    }
+    else {
+      g_deferred_category_activation.tag_name_to_assign.clear();
+    }
 
     /* Register as pending extension category with tag_already_assigned=true.
-     * This means: pending=false (user already chose a tag via drag & drop),
+     * This means: pending=false (user dropped onto tabs, category will be visible),
      * but we still need to activate the category when it appears. */
     register_new_extension_category(
         C, category_id, extension_id, space_type, mode_flag, /*tag_already_assigned=*/true);
   }
   else {
     /* Drop into viewport: set up deferred activation to discover and activate the new category.
-     * This handles reserved-only extensions that need to switch to reserved category immediately. */
+     * This handles reserved-only extensions that need to switch to reserved category immediately.
+     * For viewport drops, we show "New Add-ons!" button since the category won't be visible
+     * without tag assignment. */
     printf("[CATEGORY ACTIVATE] Extension drop into viewport: setting up deferred activation for category '%s'\n",
            category_id);
     fflush(stdout);
@@ -3159,12 +3171,18 @@ static void schedule_activation_for_pending_inserted_categories(
   for (const std::string &category_id : pending_inserted_ids) {
     printf("[CATEGORY ACTIVATE] Checking category: '%s'\n", category_id.c_str());
 
+    /* Use tag_already_assigned from deferred activation state.
+     * This preserves the value set by handle_extension_drop_on_tabs or
+     * category_tabs_apply_drop_insert (true for tab drops, false for viewport drops). */
+    const bool tag_already_assigned = g_deferred_category_activation.tag_already_assigned;
+    printf("[CATEGORY ACTIVATE]   tag_already_assigned: %s\n", tag_already_assigned ? "true" : "false");
+
     register_new_extension_category(C,
                                     category_id.c_str(),
                                     g_pending_category_insert.source_extension_id.c_str(),
                                     area ? area->spacetype : -1,
                                     get_current_tag_mode_flag(C),
-                                    /*tag_already_assigned=*/false);
+                                    tag_already_assigned);
     printf("[CATEGORY ACTIVATE]   Registered as pending extension category\n");
 
     const bool is_visible = panel_category_is_visible_by_tags(C, wm, category_id.c_str());
@@ -3209,7 +3227,11 @@ static void schedule_activation_for_pending_inserted_categories(
 
       blender::ui::TagFilterStateRef tag_state{};
       ScrArea *area_for_tag = CTX_wm_area(C);
-      if (blender::ui::tag_filter_state_from_area(area_for_tag, &tag_state) && tag_state.active_tags) {
+      /* Only use tag_key if filter is enabled. If filter is disabled,
+       * category goes to general list (empty tag_key). */
+      if (blender::ui::tag_filter_state_from_area(area_for_tag, &tag_state) && tag_state.active_tags &&
+          tag_state.filter_enabled && *tag_state.filter_enabled)
+      {
         char tag_key_buf[256];
         blender::ui::tag_build_combination_key(tag_state.active_tags, tag_key_buf, sizeof(tag_key_buf));
         g_deferred_category_activation.tag_key = tag_key_buf;
@@ -4097,16 +4119,18 @@ void category_tabs_apply_drop_insert(bContext *C,
   g_deferred_category_activation.discover_retry_count = 0; /* Reset retry counter */
 
   /* Save tag name for deferred assignment when the new category appears.
-   * This allows assigning the active tag filter to the new category after extension install. */
+   * This allows assigning the active tag filter to the new category after extension install.
+   * IMPORTANT: tag_already_assigned is always true for tab drops because the category will be
+   * visible in the general list without tag filtering. We don't need "New Add-ons!" button.
+   * If a tag is active, it will be assigned to the category when it appears. */
   if (tag_name && tag_name[0] != '\0') {
     g_deferred_category_activation.tag_name_to_assign = tag_name;
-    g_deferred_category_activation.tag_already_assigned = true;
     printf("[CATEGORY ACTIVATE] Will assign tag '%s' to new category when it appears\n", tag_name);
   }
   else {
     g_deferred_category_activation.tag_name_to_assign.clear();
-    g_deferred_category_activation.tag_already_assigned = false;
   }
+  g_deferred_category_activation.tag_already_assigned = true;
 
   /* Build tag_key for deferred save */
   blender::ui::TagFilterStateRef tag_state{};
@@ -4282,7 +4306,11 @@ void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *regio
   /* Current category is hidden or null. Try to restore from memory first. */
   char tag_key[256];
   TagFilterStateRef state{};
-  if (tag_filter_state_from_area(CTX_wm_area(C), &state) && state.active_tags) {
+  /* Only use tag_key if filter is enabled. If filter is disabled,
+   * use empty tag_key for general list. */
+  if (tag_filter_state_from_area(CTX_wm_area(C), &state) && state.active_tags &&
+      state.filter_enabled && *state.filter_enabled)
+  {
     tag_build_combination_key(state.active_tags, tag_key, sizeof(tag_key));
 
     char saved_category[64];

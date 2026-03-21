@@ -299,11 +299,38 @@ def _get_unassigned_categories_count_for_space(context,
 
 
 def _extension_has_tagged_category(wm, source_extension: str) -> bool:
+    """Check if an extension has at least one NON-RESERVED category that was processed by user.
+
+    A category is considered "processed" if:
+    - It has tags assigned (tags list is not empty)
+    - OR pending_tag_assignment is False (user selected "Without Tag" or assigned a tag)
+
+    RESERVED categories (like "Item", "Tool", "View") are IGNORED because they are
+    standard Blender categories that extensions may use but don't "own". An extension
+    shouldn't be considered "processed" just because it uses a reserved category.
+
+    This handles the case where an extension creates multiple category aliases
+    (e.g., "Texel Density" and "Texel Density Checker") and user processes only one.
+    """
     if wm is None or not source_extension:
         return False
 
     for item in wm.category_glyph_mappings:
-        if getattr(item, "source_extension", "") == source_extension and getattr(item, "tags", []):
+        if getattr(item, "source_extension", "") != source_extension:
+            continue
+
+        # Skip reserved categories - extensions don't "own" them
+        is_reserved = getattr(item, "is_reserved", True)
+        if is_reserved:
+            continue
+
+        # Has explicit tags assigned
+        if getattr(item, "tags", []):
+            return True
+
+        # Was processed by user (tag assigned OR "Without Tag" selected)
+        # pending_tag_assignment=False means user already decided what to do with this category
+        if not getattr(item, "pending_tag_assignment", True):
             return True
 
     return False
@@ -1057,7 +1084,7 @@ _pending_extension_context = None  # dict or None: {"extension_id": str, "space_
 _preview_mode_active = False
 
 
-def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0):
+def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag_already_assigned=False):
     """Record the extension that was just installed so the next category discovery
     can mark any new categories as pending tag assignment.
 
@@ -1065,9 +1092,11 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0):
     sync/discovery cycle).
 
     Args:
-        extension_id:  Extension package ID (e.g. "blender_org/brushstroke_tools").
-        space_type:    Space type where the extension was activated, or -1 for global.
-        mode_flag:     Bitmask of mode flags where the extension was activated.
+        extension_id:         Extension package ID (e.g. "blender_org/brushstroke_tools").
+        space_type:           Space type where the extension was activated, or -1 for global.
+        mode_flag:            Bitmask of mode flags where the extension was activated.
+        tag_already_assigned: If True, the category was dropped onto tabs and will be visible
+                              without tag filtering. Don't show "New Add-ons!" button.
     """
     global _pending_extension_context, _glyph_cache
     _pending_extension_context = {
@@ -1075,6 +1104,7 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0):
         "space_type": space_type,
         "mode_flag": mode_flag,
         "timestamp": time.time(),
+        "tag_already_assigned": tag_already_assigned,
     }
 
     # Opportunistically mark already-known categories from this extension as pending.
@@ -3132,18 +3162,32 @@ def restore_category_tags_from_string(category, tags_string, space_type=-1):
     result = set_category_tags(category, tags, space_type=space_type, auto_save=False, update_wm=False)
     
     # If restoring empty tags and category has source_extension, restore pending_tag_assignment=True
+    # BUT ONLY if the category is not already in category_orders (i.e., not already distributed via tab drop)
     if not tags:
         key = _make_cache_key(space_type, category)
         if key not in _glyph_cache:
             key = _make_cache_key(-1, category)  # Try global key
-        
+
         if key in _glyph_cache:
             cat_data = _glyph_cache[key]
             if isinstance(cat_data, dict) and cat_data.get("source_extension", ""):
-                cat_data["pending_tag_assignment"] = True
-                tag_log(f"restore_category_tags_from_string: restored pending=True for '{category}' (space_type={space_type})")
-                # Trigger WM sync to update "New Add-ons!" filter after restoring pending status
-                sync_glyph_mappings_to_wm()
+                # Check if category is already in any category_orders (i.e., was dropped on tabs)
+                global _category_orders_cache, _glyph_cache_loaded
+                if not _glyph_cache_loaded:
+                    _load_glyph_mappings_from_file()
+
+                is_in_orders = False
+                for tag_key, order_list in _category_orders_cache.items():
+                    if category in order_list:
+                        is_in_orders = True
+                        tag_log(f"restore_category_tags_from_string: category '{category}' found in category_orders['{tag_key}'], NOT restoring pending=True")
+                        break
+
+                if not is_in_orders:
+                    cat_data["pending_tag_assignment"] = True
+                    tag_log(f"restore_category_tags_from_string: restored pending=True for '{category}' (space_type={space_type})")
+                    # Trigger WM sync to update "New Add-ons!" filter after restoring pending status
+                    sync_glyph_mappings_to_wm()
     
     # Note: We don't delete tags that were created during preview mode here,
     # as they might be used by other categories. The tag creation itself is permanent,
@@ -4883,9 +4927,16 @@ def _merge_discovered_categories():
                                                 print(f"[MERGE DEBUG] Found tags in space {check_key[0]} for category {check_cat!r} (same cat/ext): {check_tags}")
                                                 break
 
-                        if not cat_data.get("pending_tag_assignment") and not has_tags_any_space:
+                        # Check if this was a tab drop (tag_already_assigned=True)
+                        # For tab drops, don't set pending_tag_assignment since the category
+                        # will be visible in the general list without tag filtering.
+                        tag_already_assigned = pending_extension_context.get("tag_already_assigned", False) if pending_extension_context else False
+
+                        if not cat_data.get("pending_tag_assignment") and not has_tags_any_space and not tag_already_assigned:
                             cat_data["pending_tag_assignment"] = True
                             print(f"[MERGE DEBUG] SET pending_tag_assignment=True for {category!r}")
+                        elif tag_already_assigned:
+                            print(f"[MERGE DEBUG] TAB DROP EXISTING: category={category!r}, tag_already_assigned=True, NOT setting pending_tag_assignment")
                         elif has_tags_any_space:
                             print(f"[MERGE DEBUG] SKIP pending for {category!r}: has_tags_any_space={has_tags_any_space}")
 
@@ -5104,9 +5155,16 @@ def _merge_discovered_categories():
             if pending_extension_context is not None:
                 ext_id = pending_extension_context.get("extension_id", "")
                 ext_mode = pending_extension_context.get("mode_flag", 0)
+                tag_already_assigned = pending_extension_context.get("tag_already_assigned", False)
                 _glyph_cache[cache_key]["source_extension"] = ext_id
-                _glyph_cache[cache_key]["pending_tag_assignment"] = True
-                print(f"[MERGE DEBUG] SET PENDING: category={category!r}, pending_tag_assignment=True, source_extension={ext_id!r}")
+                # Only set pending_tag_assignment if tag was NOT already assigned via tab drop.
+                # For tab drops, the category will be visible in the general list without filtering,
+                # so we don't need to show "New Add-ons!" button.
+                if not tag_already_assigned:
+                    _glyph_cache[cache_key]["pending_tag_assignment"] = True
+                    print(f"[MERGE DEBUG] SET PENDING: category={category!r}, pending_tag_assignment=True, source_extension={ext_id!r}")
+                else:
+                    print(f"[MERGE DEBUG] TAB DROP: category={category!r}, tag_already_assigned=True, NOT setting pending_tag_assignment, source_extension={ext_id!r}")
 
                 # Use ACTUAL discovered spaces from panel_samples, NOT ext_space from drop context.
                 # This is crucial for extensions like Hot Node that are dropped in VIEW3D but

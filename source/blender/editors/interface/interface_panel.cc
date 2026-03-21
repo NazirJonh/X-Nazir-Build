@@ -3407,7 +3407,15 @@ static uint32_t space_type_to_flag(int space_type)
 }
 
 /**
- * Check if any category from the same extension already has tags assigned.
+ * Check if any NON-RESERVED category from the same extension was processed by user.
+ *
+ * A category is considered "processed" if:
+ * - It has tags assigned (tags[0] != '\0')
+ * - OR pending_tag_assignment is false (user selected "Without Tag" or assigned a tag)
+ *
+ * RESERVED categories (like "Item", "Tool", "View") are IGNORED because they are
+ * standard Blender categories that extensions may use but don't "own".
+ *
  * This ensures that when a user assigns a tag to one category of an extension,
  * all categories of that extension are considered "read" across all modes/spaces.
  */
@@ -3423,7 +3431,22 @@ static bool extension_has_tagged_category(const wmWindowManager *wm,
        item;
        item = item->next)
   {
-    if (STREQ(item->source_extension, source_extension) && item->tags[0] != '\0') {
+    if (!STREQ(item->source_extension, source_extension)) {
+      continue;
+    }
+
+    /* Skip reserved categories - extensions don't "own" them */
+    if (item->is_reserved) {
+      continue;
+    }
+
+    /* Has explicit tags assigned */
+    if (item->tags[0] != '\0') {
+      return true;
+    }
+
+    /* Was processed by user (tag assigned OR "Without Tag" selected) */
+    if (!item->pending_tag_assignment) {
       return true;
     }
   }

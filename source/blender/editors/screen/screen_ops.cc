@@ -7537,32 +7537,32 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
 
   /* If this isn't a real tab drop (e.g. viewport WINDOW), set pending extension context via Python
    * so that newly discovered categories will be marked with pending_tag_assignment=true */
-  if (!treat_as_tab_drop) {
 #ifdef WITH_PYTHON
-    /* Extract extension ID from URL for the pending context */
-    std::string extension_id;
-    if (url_is_online) {
-      /* URL format: https://extensions.blender.org/.../add-on-hot-node-v1.2.1.zip?... */
-      size_t last_slash = url.find_last_of('/');
-      size_t dot_zip = url.find(".zip", last_slash);
-      if (last_slash != std::string::npos && dot_zip != std::string::npos) {
-        extension_id = url.substr(last_slash + 1, dot_zip - last_slash - 1);
-      }
+  /* Extract extension ID from URL for the pending context - needed for both tab and viewport drops */
+  std::string extension_id;
+  if (url_is_online) {
+    /* URL format: https://extensions.blender.org/.../add-on-hot-node-v1.2.1.zip?... */
+    size_t last_slash = url.find_last_of('/');
+    size_t dot_zip = url.find(".zip", last_slash);
+    if (last_slash != std::string::npos && dot_zip != std::string::npos) {
+      extension_id = url.substr(last_slash + 1, dot_zip - last_slash - 1);
     }
-    else if (url_is_file) {
-      /* File format: file:///path/to/add-on-hot-node-v1.2.1.zip */
-      std::string path = url.substr(7);  /* Skip "file://" */
-      size_t last_slash = path.find_last_of('/');
-      size_t dot_zip = path.find(".zip", last_slash);
-      if (last_slash != std::string::npos && dot_zip != std::string::npos) {
-        extension_id = path.substr(last_slash + 1, dot_zip - last_slash - 1);
-      }
+  }
+  else if (url_is_file) {
+    /* File format: file:///path/to/add-on-hot-node-v1.2.1.zip */
+    std::string path = url.substr(7);  /* Skip "file://" */
+    size_t last_slash = path.find_last_of('/');
+    size_t dot_zip = path.find(".zip", last_slash);
+    if (last_slash != std::string::npos && dot_zip != std::string::npos) {
+      extension_id = path.substr(last_slash + 1, dot_zip - last_slash - 1);
     }
+  }
 
-    ScrArea *area = area_under_cursor ? area_under_cursor : CTX_wm_area(C);
-    int space_type = area ? area->spacetype : -1;
-    uint32_t mode_flag = ui::get_current_tag_mode_flag(C);
+  ScrArea *area = area_under_cursor ? area_under_cursor : CTX_wm_area(C);
+  int space_type = area ? area->spacetype : -1;
+  uint32_t mode_flag = ui::get_current_tag_mode_flag(C);
 
+  if (!treat_as_tab_drop) {
     printf("[EXT_DROP_INVOKE] Region doesn't support category tabs, setting pending context\n");
     printf("[EXT_DROP_INVOKE] extension_id='%s', space_type=%d, mode_flag=%#010x\n",
            extension_id.c_str(), space_type, mode_flag);
@@ -7584,10 +7584,10 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
 
     const char *imports_none[] = {nullptr};
     BPY_run_string_exec(C, imports_none, python_expr);
-#else
-    UNUSED_VARS(url_is_file, url_is_online);
-#endif
   }
+#else
+  UNUSED_VARS(url_is_file, url_is_online);
+#endif
 
   wmOperatorType *ot = WM_operatortype_find(idname_external, true);
   wmOperatorStatus retval = OPERATOR_CANCELLED;
@@ -7637,6 +7637,27 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
                                                                     target_category.c_str(),
                                         insert_above,
                                         tag_name.empty() ? nullptr : tag_name.c_str());
+
+#ifdef WITH_PYTHON
+    /* For tab drops, call Python extension_post_install_handler with tag_already_assigned=True.
+     * This tells Python NOT to set pending_tag_assignment=True for new categories,
+     * so "New Add-ons!" button won't appear for tab drops (category will be visible
+     * in the general list without tag filtering). */
+    if (!extension_id.empty()) {
+      char python_expr[1024];
+      SNPRINTF(python_expr,
+               "__import__('bl_ui.space_userpref', fromlist=[''])."
+               "extension_post_install_handler('%s', %d, %u, True)",
+               extension_id.c_str(),
+               space_type,
+               mode_flag);
+
+      const char *imports_none[] = {nullptr};
+      printf("[EXT_DROP_INVOKE] Calling extension_post_install_handler with tag_already_assigned=True for tab drop\n");
+      fflush(stdout);
+      BPY_run_string_exec(C, imports_none, python_expr);
+    }
+#endif
   }
 
   return retval;
@@ -8383,10 +8404,16 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
   RNA_string_set(drop->ptr, "target_category", category);
   RNA_boolean_set(drop->ptr, "insert_above", insert_above);
 
-  /* Get active tag from tag bar for deferred assignment to new category */
+  /* Get active tag from tag bar for deferred assignment to new category.
+   * IMPORTANT: Only assign tag if filter is actually ENABLED (filter_enabled != 0).
+   * When filter is disabled (e.g., via "Tag Filter Tag" toggle), the category
+   * should go to the general list without a tag, even if active_tags contains
+   * a tag name from a previous selection. */
   blender::ui::TagFilterStateRef tag_state{};
   const char *resolved_tag_name = "";
-  if (blender::ui::tag_filter_state_from_area(area, &tag_state) && tag_state.active_tags) {
+  if (blender::ui::tag_filter_state_from_area(area, &tag_state) && tag_state.active_tags &&
+      tag_state.filter_enabled && *tag_state.filter_enabled)
+  {
     resolved_tag_name = tag_state.active_tags;
     RNA_string_set(drop->ptr, "tag_name", resolved_tag_name);
   }

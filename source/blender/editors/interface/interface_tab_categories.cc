@@ -91,6 +91,26 @@ extern const EnumPropertyItem rna_enum_space_type_items[];
 
 namespace blender::ui {
 
+/* -------------------------------------------------------------------- */
+/** \name Debug Output Control
+ * \{ */
+
+/**
+ * Debug output control flag - set to true to enable debug printf messages.
+ * 
+ * Debug messages include:
+ * - Category activation and deferred activation state
+ * - Extension drop handling
+ * - Category registration
+ * - Category order changes
+ * - Tag assignment operations
+ * 
+ * To enable: Change to `static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;`
+ */
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
+
+/** \} */
+
 /* Forward declarations */
 static bool category_name_is_glyph(const char *category_id);
 static std::string normalize_category_key(const char *category);
@@ -551,18 +571,20 @@ static void deferred_category_activation_extension_callback(Main * /*bmain*/,
                                                              int /*pointers_num*/,
                                                              void * /*arg*/)
 {
-  printf("[CATEGORY ACTIVATE] Extension callback triggered! valid=%d wait_for_signal=%d\n",
-         g_deferred_category_activation.valid ? 1 : 0,
-         g_deferred_category_activation.wait_for_extension_signal ? 1 : 0);
-  printf("[CATEGORY ACTIVATE] Extension callback - source_extension_id='%s', discover_new_category=%d\n",
-         g_deferred_category_activation.source_extension_id.empty() ? "" : g_deferred_category_activation.source_extension_id.c_str(),
-         g_deferred_category_activation.discover_new_category ? 1 : 0);
-  fflush(stdout);
-  if (g_deferred_category_activation.valid &&
-      g_deferred_category_activation.wait_for_extension_signal) {
-    g_deferred_category_activation.extension_signal_received = true;
-    printf("[CATEGORY ACTIVATE] Extension signal received, will activate on next draw\n");
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY ACTIVATE] Extension callback triggered! valid=%d wait_for_signal=%d\n",
+           g_deferred_category_activation.valid ? 1 : 0,
+           g_deferred_category_activation.wait_for_extension_signal ? 1 : 0);
+    printf("[CATEGORY ACTIVATE] Extension callback - source_extension_id='%s', discover_new_category=%d\n",
+           g_deferred_category_activation.source_extension_id.empty() ? "" : g_deferred_category_activation.source_extension_id.c_str(),
+           g_deferred_category_activation.discover_new_category ? 1 : 0);
     fflush(stdout);
+    if (g_deferred_category_activation.valid &&
+        g_deferred_category_activation.wait_for_extension_signal) {
+      g_deferred_category_activation.extension_signal_received = true;
+      printf("[CATEGORY ACTIVATE] Extension signal received, will activate on next draw\n");
+      fflush(stdout);
+    }
   }
 }
 
@@ -708,15 +730,19 @@ static void register_new_extension_category(const bContext *C,
                                              uint32_t mode_flag,
                                              bool tag_already_assigned)
 {
-  printf("[CATEGORY REGISTER] register_new_extension_category called: category='%s', extension='%s', space_type=%d, mode_flag=0x%08X, tag_already_assigned=%d\n",
-         category_id ? category_id : "(null)",
-         extension_id ? extension_id : "(null)", 
-         space_type, mode_flag, tag_already_assigned ? 1 : 0);
-  fflush(stdout);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY REGISTER] register_new_extension_category called: category='%s', extension='%s', space_type=%d, mode_flag=0x%08X, tag_already_assigned=%d\n",
+           category_id ? category_id : "(null)",
+           extension_id ? extension_id : "(null)", 
+           space_type, mode_flag, tag_already_assigned ? 1 : 0);
+    fflush(stdout);
+  }
   
   if (!C || !category_id || category_id[0] == '\0') {
-    printf("[CATEGORY REGISTER] Early return: C=%p, category_id=%s\n", C, category_id ? category_id : "(null)");
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY REGISTER] Early return: C=%p, category_id=%s\n", C, category_id ? category_id : "(null)");
+      fflush(stdout);
+    }
     return;
   }
 
@@ -774,26 +800,36 @@ static void register_new_extension_category(const bContext *C,
              mode_flag);
 
     const char *imports_none[] = {nullptr};
-    printf("[CATEGORY REGISTER] Executing Python: %s\n", python_expr);
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY REGISTER] Executing Python: %s\n", python_expr);
+      fflush(stdout);
+    }
     BPY_run_string_exec(const_cast<bContext *>(C), imports_none, python_expr);
-    printf("[CATEGORY REGISTER] Python execution completed for mark_category_from_extension\n");
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY REGISTER] Python execution completed for mark_category_from_extension\n");
+      fflush(stdout);
+    }
   }
 
   /* Tag the tag bar for refresh so the "New Add-on!" button can appear/disappear. */
-  printf("[CATEGORY REGISTER] Sending WM notification NC_WM | ND_CATEGORY_GLYPHS\n");
-  fflush(stdout);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY REGISTER] Sending WM notification NC_WM | ND_CATEGORY_GLYPHS\n");
+    fflush(stdout);
+  }
   WM_event_add_notifier(C, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   ScrArea *area = CTX_wm_area(C);
   if (area) {
-    printf("[CATEGORY REGISTER] Tagging area for redraw, spacetype=%d\n", area->spacetype);
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY REGISTER] Tagging area for redraw, spacetype=%d\n", area->spacetype);
+      fflush(stdout);
+    }
     ED_area_tag_redraw(area);
   }
   else {
-    printf("[CATEGORY REGISTER] No area found for redraw\n");
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY REGISTER] No area found for redraw\n");
+      fflush(stdout);
+    }
   }
 #else
   UNUSED_VARS(category_id, extension_id, space_type, mode_flag, tag_already_assigned);
@@ -822,16 +858,20 @@ static void handle_extension_drop_on_tabs(const bContext *C,
                                            const char *tab_category,
                                            const char *tag_name)
 {
-  printf("[EXT DROP HANDLER] handle_extension_drop_on_tabs called: category='%s', extension='%s', tab_category='%s', tag_name='%s'\n",
-         category_id ? category_id : "(null)",
-         extension_id ? extension_id : "(null)", 
-         tab_category ? tab_category : "(null)",
-         tag_name ? tag_name : "(null)");
-  fflush(stdout);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[EXT DROP HANDLER] handle_extension_drop_on_tabs called: category='%s', extension='%s', tab_category='%s', tag_name='%s'\n",
+           category_id ? category_id : "(null)",
+           extension_id ? extension_id : "(null)", 
+           tab_category ? tab_category : "(null)",
+           tag_name ? tag_name : "(null)");
+    fflush(stdout);
+  }
   
   if (!C || !category_id || category_id[0] == '\0') {
-    printf("[EXT DROP HANDLER] Early return: C=%p, category_id=%s\n", C, category_id ? category_id : "(null)");
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[EXT DROP HANDLER] Early return: C=%p, category_id=%s\n", C, category_id ? category_id : "(null)");
+      fflush(stdout);
+    }
     return;
   }
 
@@ -858,10 +898,12 @@ static void handle_extension_drop_on_tabs(const bContext *C,
     }
   }
 
-  printf("[CATEGORY ACTIVATE] Extension drop on tabs: resolved tag_name_to_assign='%s' (raw tag_name='%s')\n",
-         resolved_tag_name.empty() ? "" : resolved_tag_name.c_str(),
-         (tag_name != nullptr) ? tag_name : "(null)");
-  fflush(stdout);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY ACTIVATE] Extension drop on tabs: resolved tag_name_to_assign='%s' (raw tag_name='%s')\n",
+           resolved_tag_name.empty() ? "" : resolved_tag_name.c_str(),
+           (tag_name != nullptr) ? tag_name : "(null)");
+    fflush(stdout);
+  }
 
   /* Store extension ID for deferred activation (used for reserved-only extension detection) */
   g_deferred_category_activation.source_extension_id = extension_id;
@@ -871,9 +913,11 @@ static void handle_extension_drop_on_tabs(const bContext *C,
      * When dropping onto tabs, the category will be visible in the general list
      * without tag filtering, so we don't need to show "New Add-ons!" button.
      * If a tag is active, it will be assigned to the category when it appears. */
-    printf("[CATEGORY ACTIVATE] Extension drop on tabs: deferring for category '%s', tag '%s'\n",
-           category_id, resolved_tag_name.empty() ? "(none)" : resolved_tag_name.c_str());
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE] Extension drop on tabs: deferring for category '%s', tag '%s'\n",
+             category_id, resolved_tag_name.empty() ? "(none)" : resolved_tag_name.c_str());
+      fflush(stdout);
+    }
 
     /* Store tag name for deferred assignment (may be empty if no tag active) */
     if (!resolved_tag_name.empty()) {
@@ -894,9 +938,11 @@ static void handle_extension_drop_on_tabs(const bContext *C,
      * This handles reserved-only extensions that need to switch to reserved category immediately.
      * For viewport drops, we show "New Add-ons!" button since the category won't be visible
      * without tag assignment. */
-    printf("[CATEGORY ACTIVATE] Extension drop into viewport: setting up deferred activation for category '%s'\n",
-           category_id);
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE] Extension drop into viewport: setting up deferred activation for category '%s'\n",
+             category_id);
+      fflush(stdout);
+    }
 
     /* Register extension callback if not already registered */
     deferred_category_activation_register_extension_callback();
@@ -910,17 +956,19 @@ static void handle_extension_drop_on_tabs(const bContext *C,
     if (region && region->runtime) {
       g_known_categories_before_extension_drop.clear();
       g_pending_category_insert.all_existing_categories.clear();
-      printf("[KNOWN_CATS] Saving known categories before viewport extension drop:\n");
-      for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-        if (pc_dyn.idname && pc_dyn.idname[0]) {
-          g_known_categories_before_extension_drop.add(pc_dyn.idname);
-          g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
-          printf("[KNOWN_CATS]   + '%s'\n", pc_dyn.idname);
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[KNOWN_CATS] Saving known categories before viewport extension drop:\n");
+        for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+          if (pc_dyn.idname && pc_dyn.idname[0]) {
+            g_known_categories_before_extension_drop.add(pc_dyn.idname);
+            g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+            printf("[KNOWN_CATS]   + '%s'\n", pc_dyn.idname);
+          }
         }
+        printf("[KNOWN_CATS] Total: %zu categories saved\n",
+               g_known_categories_before_extension_drop.size());
+        fflush(stdout);
       }
-      printf("[KNOWN_CATS] Total: %zu categories saved\n",
-             g_known_categories_before_extension_drop.size());
-      fflush(stdout);
     }
 
     /* Set up deferred activation to wait for extension installation signal,
@@ -941,7 +989,9 @@ static void handle_extension_drop_on_tabs(const bContext *C,
     /* Save tag name for deferred assignment when the new category appears */
     if (!resolved_tag_name.empty()) {
       g_deferred_category_activation.tag_name_to_assign = resolved_tag_name;
-      printf("[CATEGORY ACTIVATE] Will assign tag '%s' to new category when it appears\n", resolved_tag_name.c_str());
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CATEGORY ACTIVATE] Will assign tag '%s' to new category when it appears\n", resolved_tag_name.c_str());
+      }
     }
     else {
       g_deferred_category_activation.tag_name_to_assign.clear();
@@ -965,8 +1015,10 @@ static void handle_extension_drop_on_tabs(const bContext *C,
     register_new_extension_category(
         C, category_id, extension_id, space_type, mode_flag, /*tag_already_assigned=*/false);
 
-    printf("[CATEGORY ACTIVATE] Deferred activation setup complete for viewport drop\n");
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE] Deferred activation setup complete for viewport drop\n");
+      fflush(stdout);
+    }
   }
 #else
   UNUSED_VARS(category_id, extension_id, tab_category, tag_name);
@@ -992,14 +1044,18 @@ void category_tabs_setup_viewport_drop_deferred(const bContext *C,
 {
 #ifdef WITH_PYTHON
   if (!C || !extension_id || extension_id[0] == '\0') {
-    printf("[VIEWPORT DROP DEFERRED] Invalid parameters: C=%p, extension_id=%s\n",
-           C, extension_id ? extension_id : "(null)");
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[VIEWPORT DROP DEFERRED] Invalid parameters: C=%p, extension_id=%s\n",
+             C, extension_id ? extension_id : "(null)");
+    }
     return;
   }
 
-  printf("[VIEWPORT DROP DEFERRED] Setting up deferred activation for extension '%s' (space_type=%d, mode_flag=%#010x)\n",
-         extension_id, space_type, mode_flag);
-  fflush(stdout);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[VIEWPORT DROP DEFERRED] Setting up deferred activation for extension '%s' (space_type=%d, mode_flag=%#010x)\n",
+           extension_id, space_type, mode_flag);
+    fflush(stdout);
+  }
 
   /* Register extension callback if not already registered */
   deferred_category_activation_register_extension_callback();
@@ -1009,17 +1065,19 @@ void category_tabs_setup_viewport_drop_deferred(const bContext *C,
   if (region && region->runtime) {
     g_known_categories_before_extension_drop.clear();
     g_pending_category_insert.all_existing_categories.clear();
-    printf("[VIEWPORT DROP DEFERRED] Saving known categories:\n");
-    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-      if (pc_dyn.idname && pc_dyn.idname[0]) {
-        g_known_categories_before_extension_drop.add(pc_dyn.idname);
-        g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
-        printf("[VIEWPORT DROP DEFERRED]   + '%s'\n", pc_dyn.idname);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[VIEWPORT DROP DEFERRED] Saving known categories:\n");
+      for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+        if (pc_dyn.idname && pc_dyn.idname[0]) {
+          g_known_categories_before_extension_drop.add(pc_dyn.idname);
+          g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+          printf("[VIEWPORT DROP DEFERRED]   + '%s'\n", pc_dyn.idname);
+        }
       }
+      printf("[VIEWPORT DROP DEFERRED] Total: %zu categories saved\n",
+             g_known_categories_before_extension_drop.size());
+      fflush(stdout);
     }
-    printf("[VIEWPORT DROP DEFERRED] Total: %zu categories saved\n",
-           g_known_categories_before_extension_drop.size());
-    fflush(stdout);
   }
 
   /* Set up deferred activation to wait for extension installation signal,
@@ -1052,8 +1110,10 @@ void category_tabs_setup_viewport_drop_deferred(const bContext *C,
     g_deferred_category_activation.tag_key.clear();
   }
 
-  printf("[VIEWPORT DROP DEFERRED] Deferred activation setup complete\n");
-  fflush(stdout);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[VIEWPORT DROP DEFERRED] Deferred activation setup complete\n");
+    fflush(stdout);
+  }
 #else
   UNUSED_VARS(C, extension_id, space_type, mode_flag);
 #endif
@@ -3141,15 +3201,21 @@ static void pending_insert_state_transfer_to_deferred_activation()
         g_pending_category_insert.target_category;
     g_deferred_category_activation.pending_insert_insert_above =
         g_pending_category_insert.insert_above;
-    printf("[CATEGORY ORDER] Copied pending insert to deferred activation: tag_key='%s', anchor_before='%s', anchor_after='%s'\n",
-           g_pending_category_insert.tag_key.c_str(),
-           g_pending_category_insert.anchor_before.c_str(),
-           g_pending_category_insert.anchor_after.c_str());
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ORDER] Copied pending insert to deferred activation: tag_key='%s', anchor_before='%s', anchor_after='%s'\n",
+             g_pending_category_insert.tag_key.c_str(),
+             g_pending_category_insert.anchor_before.c_str(),
+             g_pending_category_insert.anchor_after.c_str());
+    }
   }
   else {
-    printf("[CATEGORY ORDER] g_pending_category_insert.valid is FALSE - no position to copy!\n");
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ORDER] g_pending_category_insert.valid is FALSE - no position to copy!\n");
+    }
   }
-  fflush(stdout);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    fflush(stdout);
+  }
 
   g_pending_category_insert.valid = false;
   g_pending_category_insert.all_existing_categories.clear();
@@ -3162,20 +3228,28 @@ static void schedule_activation_for_pending_inserted_categories(
     const ScrArea *area,
     const Vector<std::string> &pending_inserted_ids)
 {
-  printf("[CATEGORY ACTIVATE] pending_inserted_ids count: %zu\n", pending_inserted_ids.size());
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY ACTIVATE] pending_inserted_ids count: %zu\n", pending_inserted_ids.size());
+  }
   if (pending_inserted_ids.is_empty()) {
-    printf("[CATEGORY ACTIVATE] Activation block completed\n");
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE] Activation block completed\n");
+    }
     return;
   }
 
   for (const std::string &category_id : pending_inserted_ids) {
-    printf("[CATEGORY ACTIVATE] Checking category: '%s'\n", category_id.c_str());
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE] Checking category: '%s'\n", category_id.c_str());
+    }
 
     /* Use tag_already_assigned from deferred activation state.
      * This preserves the value set by handle_extension_drop_on_tabs or
      * category_tabs_apply_drop_insert (true for tab drops, false for viewport drops). */
     const bool tag_already_assigned = g_deferred_category_activation.tag_already_assigned;
-    printf("[CATEGORY ACTIVATE]   tag_already_assigned: %s\n", tag_already_assigned ? "true" : "false");
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE]   tag_already_assigned: %s\n", tag_already_assigned ? "true" : "false");
+    }
 
     register_new_extension_category(C,
                                     category_id.c_str(),
@@ -3183,32 +3257,44 @@ static void schedule_activation_for_pending_inserted_categories(
                                     area ? area->spacetype : -1,
                                     get_current_tag_mode_flag(C),
                                     tag_already_assigned);
-    printf("[CATEGORY ACTIVATE]   Registered as pending extension category\n");
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE]   Registered as pending extension category\n");
+    }
 
     const bool is_visible = panel_category_is_visible_by_tags(C, wm, category_id.c_str());
-    printf("[CATEGORY ACTIVATE]   is_visible: %s\n", is_visible ? "true" : "false");
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE]   is_visible: %s\n", is_visible ? "true" : "false");
+    }
 
     if (!is_visible) {
       continue;
     }
 
     const char *current_active = panel_category_active_get(region, false);
-    printf("[CATEGORY ACTIVATE]   current_active: '%s'\n", current_active ? current_active : "(null)");
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE]   current_active: '%s'\n", current_active ? current_active : "(null)");
+    }
 
     const bool should_activate = (current_active == nullptr || !STREQ(category_id.c_str(), current_active));
-    printf("[CATEGORY ACTIVATE]   should_activate: %s\n", should_activate ? "true" : "false");
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE]   should_activate: %s\n", should_activate ? "true" : "false");
+    }
 
     if (should_activate) {
-      printf("[CATEGORY ACTIVATE]   Deferring activation for: '%s' (3 frame delay)\n",
-             category_id.c_str());
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CATEGORY ACTIVATE]   Deferring activation for: '%s' (3 frame delay)\n",
+               category_id.c_str());
+      }
 
       bool already_has_category = !g_deferred_category_activation.category_id.empty();
       bool signal_already_received = g_deferred_category_activation.extension_signal_received;
       bool already_waiting_for_signal = g_deferred_category_activation.wait_for_extension_signal;
 
       if (already_has_category) {
-        printf("[CATEGORY ACTIVATE]   Skipping - category already set: '%s'\n",
-               g_deferred_category_activation.category_id.c_str());
+        if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+          printf("[CATEGORY ACTIVATE]   Skipping - category already set: '%s'\n",
+                 g_deferred_category_activation.category_id.c_str());
+        }
         break;
       }
 
@@ -3221,9 +3307,11 @@ static void schedule_activation_for_pending_inserted_categories(
         g_deferred_category_activation.wait_for_extension_signal = true;
         g_deferred_category_activation.extension_signal_received = false;
       }
-      printf("[CATEGORY ACTIVATE]   signal_already_received: %s, already_waiting: %s\n",
-             signal_already_received ? "true" : "false",
-             already_waiting_for_signal ? "true" : "false");
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CATEGORY ACTIVATE]   signal_already_received: %s, already_waiting: %s\n",
+               signal_already_received ? "true" : "false",
+               already_waiting_for_signal ? "true" : "false");
+      }
 
       blender::ui::TagFilterStateRef tag_state{};
       ScrArea *area_for_tag = CTX_wm_area(C);
@@ -3239,14 +3327,20 @@ static void schedule_activation_for_pending_inserted_categories(
       else {
         g_deferred_category_activation.tag_key.clear();
       }
-      printf("[CATEGORY ACTIVATE]   Deferred activation scheduled\n");
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CATEGORY ACTIVATE]   Deferred activation scheduled\n");
+      }
     }
 
-    printf("[CATEGORY ACTIVATE]   Breaking loop after first visible category\n");
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE]   Breaking loop after first visible category\n");
+    }
     break;
   }
 
-  printf("[CATEGORY ACTIVATE] Activation block completed\n");
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY ACTIVATE] Activation block completed\n");
+  }
 }
 
 static void autosave_initial_order_if_needed(const bContext *C,
@@ -3270,9 +3364,11 @@ static void autosave_initial_order_if_needed(const bContext *C,
 
   if (!category_order_is_crossing_reserved_boundary(wm, initial_order)) {
     save_category_order_to_json(C, tag_key.c_str(), initial_order);
-    printf("[CATEGORY ORDER] Auto-saved initial order for tag_key='%s' with %zu categories\n",
-           tag_key.c_str(),
-           initial_order.size());
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ORDER] Auto-saved initial order for tag_key='%s' with %zu categories\n",
+             tag_key.c_str(),
+             initial_order.size());
+    }
   }
 }
 
@@ -3627,8 +3723,10 @@ void panel_category_active_set_safe(const bContext *C,
         g_deferred_category_activation.tag_key.clear();
       }
       
-      printf("[CATEGORY ACTIVATE] Safe activation: deferred activation set for '%s', waiting for signal\n",
-             category_id);
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CATEGORY ACTIVATE] Safe activation: deferred activation set for '%s', waiting for signal\n",
+               category_id);
+      }
       return;
     }
   }
@@ -3656,7 +3754,9 @@ void category_tabs_extension_preview_set(ARegion *region,
                                           int cursor_y)
 {
   if (!region || !region->runtime) {
-    printf("[EXT_PREVIEW] preview_set: region or runtime is NULL\n");
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[EXT_PREVIEW] preview_set: region or runtime is NULL\n");
+    }
     return;
   }
 
@@ -3677,35 +3777,37 @@ void category_tabs_extension_preview_set(ARegion *region,
   const bool state_changed = (_ext_preview_last_target_index != target_index ||
                                _ext_preview_last_insert_above != insert_above);
 
-  if (time_elapsed || state_changed) {
-    const char *prev_target_id = state.target_category_id[0] ? state.target_category_id : "(none)";
-    printf("[EXT_PREVIEW] preview_set: region=%p target='%s' idx=%d insert_above=%d h=%d pad=%d cursor_y=%d active_before=%d prev_target='%s' prev_idx=%d prev_insert_above=%d\n",
-           static_cast<void *>(region),
-           target_category_id ? target_category_id : "(null)",
-           target_index,
-           insert_above ? 1 : 0,
-           tab_height,
-           tab_v_pad,
-           cursor_y,
-           state.active ? 1 : 0,
-           prev_target_id,
-           state.target_index,
-           state.insert_above ? 1 : 0);
-    if (state.active) {
-      const bool target_changed = !STREQ(prev_target_id, target_category_id ? target_category_id : "");
-      const bool index_changed = (state.target_index != target_index);
-      const bool side_changed = (state.insert_above != insert_above);
-      if (target_changed || index_changed || side_changed) {
-        printf("[EXT_PREVIEW] transition: target_changed=%d index_changed=%d side_changed=%d\n",
-               target_changed ? 1 : 0,
-               index_changed ? 1 : 0,
-               side_changed ? 1 : 0);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    if (time_elapsed || state_changed) {
+      const char *prev_target_id = state.target_category_id[0] ? state.target_category_id : "(none)";
+      printf("[EXT_PREVIEW] preview_set: region=%p target='%s' idx=%d insert_above=%d h=%d pad=%d cursor_y=%d active_before=%d prev_target='%s' prev_idx=%d prev_insert_above=%d\n",
+             static_cast<void *>(region),
+             target_category_id ? target_category_id : "(null)",
+             target_index,
+             insert_above ? 1 : 0,
+             tab_height,
+             tab_v_pad,
+             cursor_y,
+             state.active ? 1 : 0,
+             prev_target_id,
+             state.target_index,
+             state.insert_above ? 1 : 0);
+      if (state.active) {
+        const bool target_changed = !STREQ(prev_target_id, target_category_id ? target_category_id : "");
+        const bool index_changed = (state.target_index != target_index);
+        const bool side_changed = (state.insert_above != insert_above);
+        if (target_changed || index_changed || side_changed) {
+          printf("[EXT_PREVIEW] transition: target_changed=%d index_changed=%d side_changed=%d\n",
+                 target_changed ? 1 : 0,
+                 index_changed ? 1 : 0,
+                 side_changed ? 1 : 0);
+        }
       }
+      _ext_preview_last_log_time = current_time;
+      _ext_preview_last_target_index = target_index;
+      _ext_preview_last_insert_above = insert_above;
+      STRNCPY(_ext_preview_last_target_id, target_category_id ? target_category_id : "");
     }
-    _ext_preview_last_log_time = current_time;
-    _ext_preview_last_target_index = target_index;
-    _ext_preview_last_insert_above = insert_above;
-    STRNCPY(_ext_preview_last_target_id, target_category_id ? target_category_id : "");
   }
 
   state.active = true;
@@ -3731,14 +3833,16 @@ void category_tabs_extension_preview_clear(ARegion *region)
   ui::ExtensionDropPreviewState &state = region->runtime->extension_drop_preview_state;
 
   if (state.active) {
-    printf("[EXT_PREVIEW] preview_clear: region=%p was active target='%s' idx=%d insert_above=%d tab_h=%d pad=%d cursor_y=%d\n",
-           static_cast<void *>(region),
-           state.target_category_id,
-           state.target_index,
-           state.insert_above ? 1 : 0,
-           state.tab_height,
-           state.tab_v_pad,
-           state.cursor_y);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[EXT_PREVIEW] preview_clear: region=%p was active target='%s' idx=%d insert_above=%d tab_h=%d pad=%d cursor_y=%d\n",
+             static_cast<void *>(region),
+             state.target_category_id,
+             state.target_index,
+             state.insert_above ? 1 : 0,
+             state.tab_height,
+             state.tab_v_pad,
+             state.cursor_y);
+    }
     /* Reset static variables for next drag operation */
     _ext_preview_last_target_index = -999;
     _ext_preview_last_insert_above = false;
@@ -3815,13 +3919,15 @@ bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
     if (log_redirect) {
       static double _ext_hit_reserved_redirect_log_time = 0.0;
       const double current_time = BLI_time_now_seconds();
-      if (current_time - _ext_hit_reserved_redirect_log_time > 1.0) {
-        printf("[EXT_HIT] local=(%d,%d) reserved_redirect -> target='%s' idx=%d insert_above=0\n",
-               mouse_x_local,
-               mouse_y_local,
-               last_reserved_prefix_tab->idname,
-               last_reserved_prefix_idx);
-        _ext_hit_reserved_redirect_log_time = current_time;
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        if (current_time - _ext_hit_reserved_redirect_log_time > 1.0) {
+          printf("[EXT_HIT] local=(%d,%d) reserved_redirect -> target='%s' idx=%d insert_above=0\n",
+                 mouse_x_local,
+                 mouse_y_local,
+                 last_reserved_prefix_tab->idname,
+                 last_reserved_prefix_idx);
+          _ext_hit_reserved_redirect_log_time = current_time;
+        }
       }
     }
 
@@ -3910,14 +4016,16 @@ bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
 
     static double _ext_hit_below_last_log_time = 0.0;
     const double current_time = BLI_time_now_seconds();
-    if (current_time - _ext_hit_below_last_log_time > 1.0) {
-      printf("[EXT_HIT] local=(%d,%d) mode=below_all -> target='%s' idx=%d insert_above=0 tabs_bottom_y=%d\n",
-             mouse_x_local,
-             mouse_y_local,
-             bottom_tab->idname,
-             bottom_tab_index,
-             tabs_bottom_y);
-      _ext_hit_below_last_log_time = current_time;
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      if (current_time - _ext_hit_below_last_log_time > 1.0) {
+        printf("[EXT_HIT] local=(%d,%d) mode=below_all -> target='%s' idx=%d insert_above=0 tabs_bottom_y=%d\n",
+               mouse_x_local,
+               mouse_y_local,
+               bottom_tab->idname,
+               bottom_tab_index,
+               tabs_bottom_y);
+        _ext_hit_below_last_log_time = current_time;
+      }
     }
     return true;
   }
@@ -3962,12 +4070,14 @@ bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
 
     static double _ext_hit_settings_last_log_time = 0.0;
     const double current_time = BLI_time_now_seconds();
-    if (current_time - _ext_hit_settings_last_log_time > 1.0) {
-      printf("[EXT_HIT] local=(%d,%d) tab='Display Mode Settings' mode=settings -> target='%s' idx=0 insert_above=1\n",
-             mouse_x_local,
-             mouse_y_local,
-             first_tab->idname);
-      _ext_hit_settings_last_log_time = current_time;
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      if (current_time - _ext_hit_settings_last_log_time > 1.0) {
+        printf("[EXT_HIT] local=(%d,%d) tab='Display Mode Settings' mode=settings -> target='%s' idx=0 insert_above=1\n",
+               mouse_x_local,
+               mouse_y_local,
+               first_tab->idname);
+        _ext_hit_settings_last_log_time = current_time;
+      }
     }
     return true;
   }
@@ -4064,21 +4174,23 @@ bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
                           (_ext_hit_last_idx != hit_visual_index) ||
                           (_ext_hit_last_insert_above != insert_above) ||
                           (_ext_hit_last_by_margin != hit_by_margin);
-  if (should_log) {
-    printf("[EXT_HIT] local=(%d,%d) tab='%s' idx=%d mode=%s tab_y=[%d,%d] center=%d insert_above=%d\n",
-           mouse_x_local,
-           mouse_y_local,
-           hit_tab->idname,
-           hit_visual_index,
-           hit_by_margin ? "margin" : "strict",
-           tab_rect.ymin,
-           tab_rect.ymax,
-           tab_center_y,
-           insert_above ? 1 : 0);
-    _ext_hit_last_log_time = current_time;
-    _ext_hit_last_idx = hit_visual_index;
-    _ext_hit_last_insert_above = insert_above;
-    _ext_hit_last_by_margin = hit_by_margin;
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    if (should_log) {
+      printf("[EXT_HIT] local=(%d,%d) tab='%s' idx=%d mode=%s tab_y=[%d,%d] center=%d insert_above=%d\n",
+             mouse_x_local,
+             mouse_y_local,
+             hit_tab->idname,
+             hit_visual_index,
+             hit_by_margin ? "margin" : "strict",
+             tab_rect.ymin,
+             tab_rect.ymax,
+             tab_center_y,
+             insert_above ? 1 : 0);
+      _ext_hit_last_log_time = current_time;
+      _ext_hit_last_idx = hit_visual_index;
+      _ext_hit_last_insert_above = insert_above;
+      _ext_hit_last_by_margin = hit_by_margin;
+    }
   }
 
   return true;
@@ -4125,7 +4237,9 @@ void category_tabs_apply_drop_insert(bContext *C,
    * If a tag is active, it will be assigned to the category when it appears. */
   if (tag_name && tag_name[0] != '\0') {
     g_deferred_category_activation.tag_name_to_assign = tag_name;
-    printf("[CATEGORY ACTIVATE] Will assign tag '%s' to new category when it appears\n", tag_name);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE] Will assign tag '%s' to new category when it appears\n", tag_name);
+    }
   }
   else {
     g_deferred_category_activation.tag_name_to_assign.clear();
@@ -4146,8 +4260,10 @@ void category_tabs_apply_drop_insert(bContext *C,
     g_deferred_category_activation.tag_key.clear();
   }
 
-  printf("[CATEGORY ACTIVATE] Extension drop: waiting for new category to appear (target was '%s')\n",
-         category_id);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY ACTIVATE] Extension drop: waiting for new category to appear (target was '%s')\n",
+           category_id);
+  }
 
   ScrArea *area = CTX_wm_area(C);
   const wmWindowManager *wm = CTX_wm_manager(C);
@@ -4164,16 +4280,18 @@ void category_tabs_apply_drop_insert(bContext *C,
    * extension installs. */
   g_known_categories_before_extension_drop.clear();
   g_pending_category_insert.all_existing_categories.clear();
-  printf("[KNOWN_CATS] Saving known categories before extension drop:\n");
-  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    if (pc_dyn.idname && pc_dyn.idname[0]) {
-      g_known_categories_before_extension_drop.add(pc_dyn.idname);
-      g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
-      printf("[KNOWN_CATS]   + '%s'\n", pc_dyn.idname);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[KNOWN_CATS] Saving known categories before extension drop:\n");
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (pc_dyn.idname && pc_dyn.idname[0]) {
+        g_known_categories_before_extension_drop.add(pc_dyn.idname);
+        g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+        printf("[KNOWN_CATS]   + '%s'\n", pc_dyn.idname);
+      }
     }
+    printf("[KNOWN_CATS] Total: %zu categories (also saved to pending_insert)\n",
+           g_known_categories_before_extension_drop.size());
   }
-  printf("[KNOWN_CATS] Total: %zu categories (also saved to pending_insert)\n",
-         g_known_categories_before_extension_drop.size());
 
   Vector<std::string> json_order = load_category_order_from_json(C, tag_key.c_str());
 
@@ -4934,36 +5052,38 @@ static int category_tab_y_shift_resolve(const ARegion *region,
                                   (_ext_shift_last_name_found != preview_name_found) ||
                                   (_ext_shift_last_raw_insertion_idx != raw_insertion_index) ||
                                   (_ext_shift_last_category_count != int(ordered_categories.size()));
-    if (shift_should_log) {
-      const int category_count = int(ordered_categories.size());
-      const int max_valid_index = category_count - 1;
-      printf("[EXT_SHIFT] target='%s' stored_idx=%d name_found=%d name_idx=%d "
-             "insert_above=%d raw_insertion_idx=%d insertion_idx=%d category_count=%d max_valid_idx=%d shift=%d\n",
-             preview.target_category_id,
-             preview.target_index,
-             preview_name_found ? 1 : 0,
-             preview_name_idx,
-             preview.insert_above ? 1 : 0,
-             raw_insertion_index,
-             insertion_index,
-             category_count,
-             max_valid_index,
-             EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad);
-      if (raw_insertion_index >= category_count && category_count > 0) {
-        printf("[EXT_SHIFT] boundary: raw_insertion_idx >= category_count (end-insert path)\n");
-      }
-      if (!preview_name_found && preview.target_category_id[0] != '\0') {
-        printf("[EXT_SHIFT] resolve_warning: target name not found, stored_idx=%d fallback_used=%d\n",
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      if (shift_should_log) {
+        const int category_count = int(ordered_categories.size());
+        const int max_valid_index = category_count - 1;
+        printf("[EXT_SHIFT] target='%s' stored_idx=%d name_found=%d name_idx=%d "
+               "insert_above=%d raw_insertion_idx=%d insertion_idx=%d category_count=%d max_valid_idx=%d shift=%d\n",
+               preview.target_category_id,
                preview.target_index,
-               preview_fallback_used ? 1 : 0);
+               preview_name_found ? 1 : 0,
+               preview_name_idx,
+               preview.insert_above ? 1 : 0,
+               raw_insertion_index,
+               insertion_index,
+               category_count,
+               max_valid_index,
+               EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad);
+        if (raw_insertion_index >= category_count && category_count > 0) {
+          printf("[EXT_SHIFT] boundary: raw_insertion_idx >= category_count (end-insert path)\n");
+        }
+        if (!preview_name_found && preview.target_category_id[0] != '\0') {
+          printf("[EXT_SHIFT] resolve_warning: target name not found, stored_idx=%d fallback_used=%d\n",
+                 preview.target_index,
+                 preview_fallback_used ? 1 : 0);
+        }
+        _ext_shift_last_log_time = shift_log_time;
+        _ext_shift_last_stored_idx = preview.target_index;
+        _ext_shift_last_resolved_idx = preview_name_idx;
+        _ext_shift_last_insert_above = preview.insert_above;
+        _ext_shift_last_name_found = preview_name_found;
+        _ext_shift_last_raw_insertion_idx = raw_insertion_index;
+        _ext_shift_last_category_count = int(ordered_categories.size());
       }
-      _ext_shift_last_log_time = shift_log_time;
-      _ext_shift_last_stored_idx = preview.target_index;
-      _ext_shift_last_resolved_idx = preview_name_idx;
-      _ext_shift_last_insert_above = preview.insert_above;
-      _ext_shift_last_name_found = preview_name_found;
-      _ext_shift_last_raw_insertion_idx = raw_insertion_index;
-      _ext_shift_last_category_count = int(ordered_categories.size());
     }
 
     /* UNIFIED INSERTION SLOT MODEL:
@@ -4976,12 +5096,14 @@ static int category_tab_y_shift_resolve(const ARegion *region,
        * - Positive Y values are at the top of screen
        * - Adding positive value shifts rect UP, negative shifts DOWN */
       y_shift = -(EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad);
-      if (shift_should_log) {
-        printf("[EXT_SHIFT] apply: tab='%s' display_idx=%d >= insertion_idx=%d y_shift=%d\n",
-               pc_dyn.idname,
-               current_display_index,
-               insertion_index,
-               y_shift);
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        if (shift_should_log) {
+          printf("[EXT_SHIFT] apply: tab='%s' display_idx=%d >= insertion_idx=%d y_shift=%d\n",
+                 pc_dyn.idname,
+                 current_display_index,
+                 insertion_index,
+                 y_shift);
+        }
       }
     }
   }
@@ -5698,41 +5820,43 @@ static const char *category_tab_extension_drop_ghost_draw(
   const bool should_log = (current_time - _ghost_last_log_time > 1.0) ||
                           (_ghost_last_target != preview.target_index);
 
-  if (should_log) {
-    printf("[EXT_GHOST] === TABS POSITIONS (top to bottom) ===\n");
-    int log_idx = 0;
-    for (PanelCategoryDyn *pc : ordered_categories) {
-      printf("[EXT_GHOST]   tab[%d] '%s' y=[%d,%d] h=%d\n",
-             log_idx,
-             pc->idname,
-             pc->rect.ymin,
-             pc->rect.ymax,
-             BLI_rcti_size_y(&pc->rect));
-      log_idx++;
-      if (log_idx > 10) {
-        printf("[EXT_GHOST]   ... (more tabs)\n");
-        break;
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    if (should_log) {
+      printf("[EXT_GHOST] === TABS POSITIONS (top to bottom) ===\n");
+      int log_idx = 0;
+      for (PanelCategoryDyn *pc : ordered_categories) {
+        printf("[EXT_GHOST]   tab[%d] '%s' y=[%d,%d] h=%d\n",
+               log_idx,
+               pc->idname,
+               pc->rect.ymin,
+               pc->rect.ymax,
+               BLI_rcti_size_y(&pc->rect));
+        log_idx++;
+        if (log_idx > 10) {
+          printf("[EXT_GHOST]   ... (more tabs)\n");
+          break;
+        }
       }
+      printf("[EXT_GHOST] v2d_mask: y=[%d,%d] x=[%d,%d]\n",
+             v2d->mask.ymin,
+             v2d->mask.ymax,
+             v2d->mask.xmin,
+             v2d->mask.xmax);
+      printf("[EXT_GHOST] ghost_h=%d target_idx=%d insert_above=%d\n",
+             ghost_height,
+             preview.target_index,
+             preview.insert_above ? 1 : 0);
+      printf("[EXT_GHOST] preview_state: active=%d target='%s' idx=%d insert_above=%d tab_h=%d pad=%d cursor_y=%d\n",
+             preview.active ? 1 : 0,
+             preview.target_category_id,
+             preview.target_index,
+             preview.insert_above ? 1 : 0,
+             preview.tab_height,
+             preview.tab_v_pad,
+             preview.cursor_y);
+      _ghost_last_log_time = current_time;
+      _ghost_last_target = preview.target_index;
     }
-    printf("[EXT_GHOST] v2d_mask: y=[%d,%d] x=[%d,%d]\n",
-           v2d->mask.ymin,
-           v2d->mask.ymax,
-           v2d->mask.xmin,
-           v2d->mask.xmax);
-    printf("[EXT_GHOST] ghost_h=%d target_idx=%d insert_above=%d\n",
-           ghost_height,
-           preview.target_index,
-           preview.insert_above ? 1 : 0);
-    printf("[EXT_GHOST] preview_state: active=%d target='%s' idx=%d insert_above=%d tab_h=%d pad=%d cursor_y=%d\n",
-           preview.active ? 1 : 0,
-           preview.target_category_id,
-           preview.target_index,
-           preview.insert_above ? 1 : 0,
-           preview.tab_height,
-           preview.tab_v_pad,
-           preview.cursor_y);
-    _ghost_last_log_time = current_time;
-    _ghost_last_target = preview.target_index;
   }
 
   if (preview.target_index >= 0 && preview.target_index < int(ordered_categories.size())) {
@@ -5761,17 +5885,21 @@ static const char *category_tab_extension_drop_ghost_draw(
         }
         loop_idx++;
       }
-      if (should_log && target_tab) {
-        printf("[EXT_GHOST] Found by INDEX fallback: '%s' at idx=%d\n",
-               target_tab->idname,
-               preview.target_index);
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        if (should_log && target_tab) {
+          printf("[EXT_GHOST] Found by INDEX fallback: '%s' at idx=%d\n",
+                 target_tab->idname,
+                 preview.target_index);
+        }
       }
     }
 
     if (!target_tab) {
-      printf("[EXT_GHOST] SKIP: target_tab NULL for name='%s' idx=%d\n",
-             preview.target_category_id,
-             preview.target_index);
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[EXT_GHOST] SKIP: target_tab NULL for name='%s' idx=%d\n",
+               preview.target_category_id,
+               preview.target_index);
+      }
       return "target_tab_null";
     }
 
@@ -5810,63 +5938,71 @@ static const char *category_tab_extension_drop_ghost_draw(
     ghost_rect.ymin = slot_center_y - half_ghost_height;
     ghost_rect.ymax = slot_center_y + half_ghost_height;
 
-    if (should_log) {
-      printf("[EXT_GHOST] resolve: target='%s' stored_idx=%d resolved_idx=%d insert_above=%d raw_insertion_idx=%d insertion_idx=%d category_count=%d\n",
-             preview.target_category_id,
-             preview.target_index,
-             resolved_target_index,
-             preview.insert_above ? 1 : 0,
-             raw_insertion_index,
-             insertion_index,
-             category_count);
-      if (raw_insertion_index >= category_count && category_count > 0) {
-        printf("[EXT_GHOST] boundary: raw_insertion_idx >= category_count (using end slot below last tab)\n");
-      }
-      printf("[EXT_GHOST] insertion_idx=%d slot=[%d,%d] center=%d ghost=[%d,%d] target_rect=[%d,%d]\n",
-             insertion_index,
-             slot_bottom_y,
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      if (should_log) {
+        printf("[EXT_GHOST] resolve: target='%s' stored_idx=%d resolved_idx=%d insert_above=%d raw_insertion_idx=%d insertion_idx=%d category_count=%d\n",
+               preview.target_category_id,
+               preview.target_index,
+               resolved_target_index,
+               preview.insert_above ? 1 : 0,
+               raw_insertion_index,
+               insertion_index,
+               category_count);
+        if (raw_insertion_index >= category_count && category_count > 0) {
+          printf("[EXT_GHOST] boundary: raw_insertion_idx >= category_count (using end slot below last tab)\n");
+        }
+        printf("[EXT_GHOST] insertion_idx=%d slot=[%d,%d] center=%d ghost=[%d,%d] target_rect=[%d,%d]\n",
+               insertion_index,
+               slot_bottom_y,
              slot_top_y,
              slot_center_y,
              ghost_rect.ymin,
              ghost_rect.ymax,
              target_tab->rect.ymin,
              target_tab->rect.ymax);
+      }
     }
 
-    if (should_log) {
-      const int ghost_center_y = (ghost_rect.ymin + ghost_rect.ymax) / 2;
-      const int center_diff = abs(ghost_center_y - slot_center_y);
-      printf("[EXT_GHOST] FINAL: cursor_y=%d ghost=[%d,%d] center=%d slot_center=%d diff=%d target='%s'\n",
-             preview.cursor_y,
-             ghost_rect.ymin,
-             ghost_rect.ymax,
-             ghost_center_y,
-             slot_center_y,
-             center_diff,
-             target_tab->idname);
-      if (center_diff > 1) {
-        printf("[EXT_GHOST] WARNING: Ghost not centered in slot! (diff=%d px)\n", center_diff);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      if (should_log) {
+        const int ghost_center_y = (ghost_rect.ymin + ghost_rect.ymax) / 2;
+        const int center_diff = abs(ghost_center_y - slot_center_y);
+        printf("[EXT_GHOST] FINAL: cursor_y=%d ghost=[%d,%d] center=%d slot_center=%d diff=%d target='%s'\n",
+               preview.cursor_y,
+               ghost_rect.ymin,
+               ghost_rect.ymax,
+               ghost_center_y,
+               slot_center_y,
+               center_diff,
+               target_tab->idname);
+        if (center_diff > 1) {
+          printf("[EXT_GHOST] WARNING: Ghost not centered in slot! (diff=%d px)\n", center_diff);
+        }
       }
     }
   }
   else {
     ghost_rect.ymin = v2d->mask.ymax - ghost_height - 10;
     ghost_rect.ymax = v2d->mask.ymax - 10;
-    if (should_log) {
-      printf("[EXT_GHOST] FINAL (no target): ghost y=[%d,%d]\n", ghost_rect.ymin, ghost_rect.ymax);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      if (should_log) {
+        printf("[EXT_GHOST] FINAL (no target): ghost y=[%d,%d]\n", ghost_rect.ymin, ghost_rect.ymax);
+      }
     }
   }
 
   const bool ghost_in_viewport = (ghost_rect.ymax >= v2d->mask.ymin &&
                                   ghost_rect.ymin <= v2d->mask.ymax);
 
-  if (should_log) {
-    printf("[EXT_GHOST] VIEWPORT CHECK: ghost=[%d,%d] viewport=[%d,%d] in_viewport=%d\n",
-           ghost_rect.ymin,
-           ghost_rect.ymax,
-           v2d->mask.ymin,
-           v2d->mask.ymax,
-           ghost_in_viewport ? 1 : 0);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    if (should_log) {
+      printf("[EXT_GHOST] VIEWPORT CHECK: ghost=[%d,%d] viewport=[%d,%d] in_viewport=%d\n",
+             ghost_rect.ymin,
+             ghost_rect.ymax,
+             v2d->mask.ymin,
+             v2d->mask.ymax,
+             ghost_in_viewport ? 1 : 0);
+    }
   }
 
   if (!ghost_in_viewport) {
@@ -5881,8 +6017,10 @@ static const char *category_tab_extension_drop_ghost_draw(
       ghost_rect.ymin = v2d->mask.ymax - ghost_height_local;
     }
 
-    if (should_log) {
-      printf("[EXT_GHOST] CLAMPED: ghost=[%d,%d]\n", ghost_rect.ymin, ghost_rect.ymax);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      if (should_log) {
+        printf("[EXT_GHOST] CLAMPED: ghost=[%d,%d]\n", ghost_rect.ymin, ghost_rect.ymax);
+      }
     }
   }
 
@@ -5906,12 +6044,14 @@ static const char *category_tab_extension_drop_ghost_draw(
   draw_roundbox_4fv(&ghost_box_rect, false, tab_curve_radius, ghost_outline);
 
   GPU_blend(GPU_BLEND_NONE);
-  if (should_log) {
-    printf("[EXT_GHOST] DRAWN: ghost_rect=[%d,%d]-[%d,%d]\n",
-           ghost_rect.xmin,
-           ghost_rect.ymin,
-           ghost_rect.xmax,
-           ghost_rect.ymax);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    if (should_log) {
+      printf("[EXT_GHOST] DRAWN: ghost_rect=[%d,%d]-[%d,%d]\n",
+             ghost_rect.xmin,
+             ghost_rect.ymin,
+             ghost_rect.xmax,
+             ghost_rect.ymax);
+    }
   }
 
   return nullptr;
@@ -6557,39 +6697,47 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
   }
 
   /* Debug: Log deferred activation state */
-  printf("[CATEGORY ACTIVATE] deferred_category_activation_execute called:\n");
-  printf("[CATEGORY ACTIVATE]   valid=%d, category_id='%s', source_extension_id='%s'\n",
-         g_deferred_category_activation.valid,
-         g_deferred_category_activation.category_id.c_str(),
-         g_deferred_category_activation.source_extension_id.c_str());
-  printf("[CATEGORY ACTIVATE]   wait_for_signal=%d, signal_received=%d, discover_mode=%d, retry=%d\n",
-         g_deferred_category_activation.wait_for_extension_signal,
-         g_deferred_category_activation.extension_signal_received,
-         g_deferred_category_activation.discover_new_category,
-         g_deferred_category_activation.discover_retry_count);
-  fflush(stdout);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY ACTIVATE] deferred_category_activation_execute called:\n");
+    printf("[CATEGORY ACTIVATE]   valid=%d, category_id='%s', source_extension_id='%s'\n",
+           g_deferred_category_activation.valid,
+           g_deferred_category_activation.category_id.c_str(),
+           g_deferred_category_activation.source_extension_id.c_str());
+    printf("[CATEGORY ACTIVATE]   wait_for_signal=%d, signal_received=%d, discover_mode=%d, retry=%d\n",
+           g_deferred_category_activation.wait_for_extension_signal,
+           g_deferred_category_activation.extension_signal_received,
+           g_deferred_category_activation.discover_new_category,
+           g_deferred_category_activation.discover_retry_count);
+    fflush(stdout);
+  }
 
   /* Check for reserved-only extension - switch immediately without waiting for discover mode.
    * This handles cases like Bool Tool where all panels are in reserved categories.
    * Check this FIRST before any other deferred activation logic. */
   if (!g_deferred_category_activation.source_extension_id.empty()) {
     const wmWindowManager *wm = CTX_wm_manager(C);
-    printf("[CATEGORY ACTIVATE] Checking reserved-only for extension '%s', wm=%p\n",
-           g_deferred_category_activation.source_extension_id.c_str(), (void *)wm);
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE] Checking reserved-only for extension '%s', wm=%p\n",
+             g_deferred_category_activation.source_extension_id.c_str(), (void *)wm);
+      fflush(stdout);
+    }
 
     if (wm && blender::ui::extension_has_only_reserved_categories(
               wm, g_deferred_category_activation.source_extension_id.c_str()))
     {
-      printf("[CATEGORY ACTIVATE] Reserved-only extension detected (source='%s'), switching to reserved category...\n",
-             g_deferred_category_activation.source_extension_id.c_str());
-      fflush(stdout);
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CATEGORY ACTIVATE] Reserved-only extension detected (source='%s'), switching to reserved category...\n",
+               g_deferred_category_activation.source_extension_id.c_str());
+        fflush(stdout);
+      }
       const ScrArea *current_area = CTX_wm_area(C);
       const int space_type = current_area ? current_area->spacetype : -1;
       if (switch_to_reserved_category_for_extension(
               C, region, g_deferred_category_activation.source_extension_id.c_str(), space_type))
       {
-        printf("[CATEGORY ACTIVATE] Reserved-only switch completed, clearing deferred activation\n");
+        if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+          printf("[CATEGORY ACTIVATE] Reserved-only switch completed, clearing deferred activation\n");
+        }
         g_deferred_category_activation.valid = false;
         g_deferred_category_activation.wait_for_extension_signal = false;
         g_deferred_category_activation.extension_signal_received = false;
@@ -6600,7 +6748,9 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
         return;
       }
       else {
-        printf("[CATEGORY ACTIVATE] Reserved-only switch failed (category may not have panels yet), will retry...\n");
+        if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+          printf("[CATEGORY ACTIVATE] Reserved-only switch failed (category may not have panels yet), will retry...\n");
+        }
       }
     }
   }
@@ -6608,29 +6758,35 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
   std::string category_id = g_deferred_category_activation.category_id;
 
   /* Check if we need to wait for extension installation signal */
- if (g_deferred_category_activation.wait_for_extension_signal) {
- if (!g_deferred_category_activation.extension_signal_received) {
- printf("[CATEGORY ACTIVATE] Waiting for extension installation signal for: '%s'\n",
- category_id.c_str());
- return;
- }
- printf("[CATEGORY ACTIVATE] Extension installation signal received for: '%s', proceeding with activation\n",
- category_id.c_str());
+  if (g_deferred_category_activation.wait_for_extension_signal) {
+    if (!g_deferred_category_activation.extension_signal_received) {
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CATEGORY ACTIVATE] Waiting for extension installation signal for: '%s'\n",
+               category_id.c_str());
+      }
+      return;
+    }
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE] Extension installation signal received for: '%s', proceeding with activation\n",
+             category_id.c_str());
+    }
 
- /* Force immediate UI refresh right after extension install signal.
- * New panels/categories may already be registered but not drawn yet. */
- WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
- WM_event_add_notifier(C, NC_WINDOW | ND_DRAW, nullptr);
- ED_region_tag_refresh_ui(region);
- ED_region_tag_redraw(region);
- category_tabs_tag_refresh_active_area_ui(C);
- }
+    /* Force immediate UI refresh right after extension install signal.
+     * New panels/categories may already be registered but not drawn yet. */
+    WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
+    WM_event_add_notifier(C, NC_WINDOW | ND_DRAW, nullptr);
+    ED_region_tag_refresh_ui(region);
+    ED_region_tag_redraw(region);
+    category_tabs_tag_refresh_active_area_ui(C);
+  }
 
 
   /* If in discover mode, find the new category that appeared after extension installation */
   if (g_deferred_category_activation.discover_new_category && category_id.empty()) {
-    printf("[CATEGORY ACTIVATE] Discover mode: looking for new categories... (retry %d/30)\n",
-           g_deferred_category_activation.discover_retry_count);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE] Discover mode: looking for new categories... (retry %d/30)\n",
+             g_deferred_category_activation.discover_retry_count);
+    }
 
     /* IMPORTANT: Search directly in region->runtime->panels_category, NOT through get_ordered_categories()!
      * get_ordered_categories() applies tag filtering via panel_category_is_visible_by_tags(),
@@ -6641,7 +6797,9 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
       if (pc_dyn.idname && pc_dyn.idname[0]) {
         if (!g_known_categories_before_extension_drop.contains(pc_dyn.idname)) {
           new_category_id = pc_dyn.idname;
-          printf("[CATEGORY ACTIVATE]   Found new category: '%s'\n", new_category_id.c_str());
+          if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+            printf("[CATEGORY ACTIVATE]   Found new category: '%s'\n", new_category_id.c_str());
+          }
           break; /* Take the first new category */
         }
       }
@@ -6654,138 +6812,166 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
       category_tabs_tag_refresh_active_area_ui(C);
       g_deferred_category_activation.discover_retry_count++;
       if (g_deferred_category_activation.discover_retry_count < 30) {
-        g_deferred_category_activation.frame_delay = 3; /* Retry in 3 frames */
+      g_deferred_category_activation.frame_delay = 3; /* Retry in 3 frames */
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
         printf("[CATEGORY ACTIVATE]   No new category found yet, will retry\n");
-        return;
       }
+      return;
+    }
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
       printf("[CATEGORY ACTIVATE]   No new category found after timeout, clearing deferred activation\n");
+    }
+    g_deferred_category_activation.valid = false;
+    g_deferred_category_activation.wait_for_extension_signal = false;
+    g_deferred_category_activation.extension_signal_received = false;
+    g_deferred_category_activation.discover_new_category = false;
+    g_deferred_category_activation.discover_retry_count = 0;
+    g_deferred_category_activation.tag_name_to_assign.clear();
+    g_known_categories_before_extension_drop.clear();
+    return;
+  }
+
+  category_id = new_category_id;
+  g_deferred_category_activation.category_id = new_category_id;
+  g_deferred_category_activation.wait_for_extension_signal = false; /* Signal already received */
+
+  /* Mark this category as pending tag assignment via the DNA-backed mechanism.
+   * This replaces the old g_new_extension_categories_visible set.
+   * IMPORTANT: Use CURRENT space type where the category was discovered, not the space type
+   * where the extension was dropped. This ensures categories are properly tagged
+   * for the correct editor (e.g., Hot Node extension dropped in 3D Viewport but
+   * category appears in Node Editor). */
+  const ScrArea *current_area = CTX_wm_area(C);
+  const int current_space_type = current_area ? current_area->spacetype : -1;
+  register_new_extension_category(C,
+                                  new_category_id.c_str(),
+                                  g_deferred_category_activation.source_extension_id.c_str(),
+                                  current_space_type,  // Use current space, not drop space
+                                  g_deferred_category_activation.activation_mode_flag,
+                                  g_deferred_category_activation.tag_already_assigned);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY ACTIVATE]   Registered '%s' as pending extension category\n", new_category_id.c_str());
+    printf("[CATEGORY ACTIVATE]   Will activate new category: '%s'\n", category_id.c_str());
+  }
+  g_deferred_category_activation.discover_retry_count = 0; /* Reset retry counter */
+  
+  /* NEW: Check if this is a reserved-only extension and switch to reserved category instead.
+   * This handles cases like Bool Tool, which creates panels only in reserved categories.
+   * For such extensions, we automatically switch to the reserved category instead of
+   * showing the "New Add-ons!" button. */
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm && blender::ui::extension_has_only_reserved_categories(
+                wm, g_deferred_category_activation.source_extension_id.c_str()))
+  {
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE] Reserved-only extension detected, switching to reserved category...\n");
+    }
+    const int space_type = current_area ? current_area->spacetype : -1;
+    if (switch_to_reserved_category_for_extension(
+            C, region, g_deferred_category_activation.source_extension_id.c_str(), space_type))
+    {
+      /* Successfully switched to reserved category - clear deferred activation.
+       * Don't show "New Add-ons!" for reserved-only extensions. */
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CATEGORY ACTIVATE] Reserved-only switch completed, clearing deferred activation\n");
+      }
       g_deferred_category_activation.valid = false;
-      g_deferred_category_activation.wait_for_extension_signal = false;
-      g_deferred_category_activation.extension_signal_received = false;
       g_deferred_category_activation.discover_new_category = false;
       g_deferred_category_activation.discover_retry_count = 0;
       g_deferred_category_activation.tag_name_to_assign.clear();
       g_known_categories_before_extension_drop.clear();
       return;
     }
-
-    category_id = new_category_id;
-    g_deferred_category_activation.category_id = new_category_id;
-    g_deferred_category_activation.wait_for_extension_signal = false; /* Signal already received */
-
-    /* Mark this category as pending tag assignment via the DNA-backed mechanism.
-     * This replaces the old g_new_extension_categories_visible set.
-     * IMPORTANT: Use CURRENT space type where the category was discovered, not the space type
-     * where the extension was dropped. This ensures categories are properly tagged
-     * for the correct editor (e.g., Hot Node extension dropped in 3D Viewport but
-     * category appears in Node Editor). */
-    const ScrArea *current_area = CTX_wm_area(C);
-    const int current_space_type = current_area ? current_area->spacetype : -1;
-    register_new_extension_category(C,
-                                    new_category_id.c_str(),
-                                    g_deferred_category_activation.source_extension_id.c_str(),
-                                    current_space_type,  // Use current space, not drop space
-                                    g_deferred_category_activation.activation_mode_flag,
-                                    g_deferred_category_activation.tag_already_assigned);
-    printf("[CATEGORY ACTIVATE]   Registered '%s' as pending extension category\n", new_category_id.c_str());
-    g_deferred_category_activation.discover_retry_count = 0; /* Reset retry counter */
-    printf("[CATEGORY ACTIVATE]   Will activate new category: '%s'\n", category_id.c_str());
-    
-    /* NEW: Check if this is a reserved-only extension and switch to reserved category instead.
-     * This handles cases like Bool Tool, which creates panels only in reserved categories.
-     * For such extensions, we automatically switch to the reserved category instead of
-     * showing the "New Add-ons!" button. */
-    const wmWindowManager *wm = CTX_wm_manager(C);
-    if (wm && blender::ui::extension_has_only_reserved_categories(
-                  wm, g_deferred_category_activation.source_extension_id.c_str()))
-    {
-      printf("[CATEGORY ACTIVATE] Reserved-only extension detected, switching to reserved category...\n");
-      const int space_type = current_area ? current_area->spacetype : -1;
-      if (switch_to_reserved_category_for_extension(
-              C, region, g_deferred_category_activation.source_extension_id.c_str(), space_type))
-      {
-        /* Successfully switched to reserved category - clear deferred activation.
-         * Don't show "New Add-ons!" for reserved-only extensions. */
-        printf("[CATEGORY ACTIVATE] Reserved-only switch completed, clearing deferred activation\n");
-        g_deferred_category_activation.valid = false;
-        g_deferred_category_activation.discover_new_category = false;
-        g_deferred_category_activation.discover_retry_count = 0;
-        g_deferred_category_activation.tag_name_to_assign.clear();
-        g_known_categories_before_extension_drop.clear();
-        return;
-      }
-    }
   }
+}
 
-  /* Check frame delay - wait N frames before activating */
-  if (g_deferred_category_activation.frame_delay > 0) {
-    g_deferred_category_activation.frame_delay--;
+/* Check frame delay - wait N frames before activating */
+if (g_deferred_category_activation.frame_delay > 0) {
+  g_deferred_category_activation.frame_delay--;
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     printf("[CATEGORY ACTIVATE] Frame delay: %d remaining for: '%s'\n",
            g_deferred_category_activation.frame_delay,
            category_id.c_str());
-    return;
   }
+  return;
+}
 
+if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
   printf("[CATEGORY ACTIVATE] Executing deferred activation for: '%s'\n", category_id.c_str());
+}
 
-  /* Verify category still exists in panels_category.
-   * NOTE: We check existence directly in region->runtime->panels_category instead of using
-   * panel_category_is_visible_by_tags() because new extension categories may not have
-   * tags assigned yet, which would cause them to be filtered out when tag filter is active.
-   * Extension categories should be activatable regardless of current tag filter state. */
-  bool category_exists = false;
-  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    if (STREQ(pc_dyn.idname, category_id.c_str())) {
-      category_exists = true;
-      break;
-    }
+/* Verify category still exists in panels_category.
+ * NOTE: We check existence directly in region->runtime->panels_category instead of using
+ * panel_category_is_visible_by_tags() because new extension categories may not have
+ * tags assigned yet, which would cause them to be filtered out when tag filter is active.
+ * Extension categories should be activatable regardless of current tag filter state. */
+bool category_exists = false;
+for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+  if (STREQ(pc_dyn.idname, category_id.c_str())) {
+    category_exists = true;
+    break;
   }
-  if (!category_exists) {
+}
+if (!category_exists) {
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     printf("[CATEGORY ACTIVATE]   Category no longer exists, skipping\n");
-    g_deferred_category_activation.valid = false;
-    g_deferred_category_activation.discover_new_category = false;
-    g_deferred_category_activation.discover_retry_count = 0;
-    g_deferred_category_activation.tag_name_to_assign.clear();
-    g_known_categories_before_extension_drop.clear();
-    return;
   }
+  g_deferred_category_activation.valid = false;
+  g_deferred_category_activation.discover_new_category = false;
+  g_deferred_category_activation.discover_retry_count = 0;
+  g_deferred_category_activation.tag_name_to_assign.clear();
+  g_known_categories_before_extension_drop.clear();
+  return;
+}
 
-  /* Check if already active */
-  const char *current_active = panel_category_active_get(region, false);
-  if (current_active && STREQ(category_id.c_str(), current_active)) {
+/* Check if already active */
+const char *current_active = panel_category_active_get(region, false);
+if (current_active && STREQ(category_id.c_str(), current_active)) {
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     printf("[CATEGORY ACTIVATE]   Category already active, skipping\n");
-    g_deferred_category_activation.valid = false;
-    g_deferred_category_activation.discover_new_category = false;
-    g_deferred_category_activation.discover_retry_count = 0;
-    g_deferred_category_activation.tag_name_to_assign.clear();
-    g_known_categories_before_extension_drop.clear();
-    return;
   }
+  g_deferred_category_activation.valid = false;
+  g_deferred_category_activation.discover_new_category = false;
+  g_deferred_category_activation.discover_retry_count = 0;
+  g_deferred_category_activation.tag_name_to_assign.clear();
+  g_known_categories_before_extension_drop.clear();
+  return;
+}
 
-  /* Perform activation */
+/* Perform activation */
+if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
   printf("[CATEGORY ACTIVATE]   Setting active category to: '%s'\n", category_id.c_str());
-  panel_category_active_set(region, category_id.c_str());
+}
+panel_category_active_set(region, category_id.c_str());
+if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
   printf("[CATEGORY ACTIVATE]   panel_category_active_set completed\n");
+}
 
-  /* Save to tag category memory */
-  if (!g_deferred_category_activation.tag_key.empty()) {
+/* Save to tag category memory */
+if (!g_deferred_category_activation.tag_key.empty()) {
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     printf("[CATEGORY ACTIVATE]   Saving to tag memory, tag_key: '%s'\n",
            g_deferred_category_activation.tag_key.c_str());
-    blender::ui::tag_save_last_active_category(
-        const_cast<bContext *>(C),
-        g_deferred_category_activation.tag_key.c_str(),
-        category_id.c_str());
+  }
+  blender::ui::tag_save_last_active_category(
+      const_cast<bContext *>(C),
+      g_deferred_category_activation.tag_key.c_str(),
+      category_id.c_str());
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     printf("[CATEGORY ACTIVATE]   tag_save_last_active_category completed\n");
   }
+}
 
   /* Assign deferred tag if one was saved from drag & drop on tabs.
    * This happens when an extension was dropped onto a tab with an active tag filter.
    * The category didn't exist yet, so we deferred tag assignment until now. */
   if (!g_deferred_category_activation.tag_name_to_assign.empty()) {
-    printf("[CATEGORY ACTIVATE]   Assigning deferred tag '%s' to category '%s'\n",
-           g_deferred_category_activation.tag_name_to_assign.c_str(),
-           category_id.c_str());
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE]   Assigning deferred tag '%s' to category '%s'\n",
+             g_deferred_category_activation.tag_name_to_assign.c_str(),
+             category_id.c_str());
+      fflush(stdout);
+    }
 
 #ifdef WITH_PYTHON
     /* Escape category_id and tag_name for safe embedding in a Python string literal. */
@@ -6846,14 +7032,18 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
 
       const char *imports_none[] = {nullptr};
       BPY_run_string_exec(const_cast<bContext *>(C), imports_none, python_expr);
-      printf("[CATEGORY ACTIVATE]   Assigned tag '%s' to category '%s'\n",
-             single_tag.c_str(),
-             category_id.c_str());
-      fflush(stdout);
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CATEGORY ACTIVATE]   Assigned tag '%s' to category '%s'\n",
+               single_tag.c_str(),
+               category_id.c_str());
+        fflush(stdout);
+      }
     }
 
-    printf("[CATEGORY ACTIVATE]   Deferred tag assignment completed (%zu tags)\n", tag_list.size());
-    fflush(stdout);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE]   Deferred tag assignment completed (%zu tags)\n", tag_list.size());
+      fflush(stdout);
+    }
 
     WM_event_add_notifier(const_cast<bContext *>(C), NC_WM | ND_CATEGORY_GLYPHS, nullptr);
     if (area) {
@@ -6875,11 +7065,13 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
   bool tag_keys_match = false;
 
   /* Debug: print state for diagnosis */
-  printf("[CATEGORY ACTIVATE]   Checking pending insert: pending_insert_valid=%d, pending_tag_key='%s', deferred_tag_key='%s'\n",
-         g_deferred_category_activation.pending_insert_valid ? 1 : 0,
-         g_deferred_category_activation.pending_insert_tag_key.c_str(),
-         g_deferred_category_activation.tag_key.c_str());
-  fflush(stdout);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY ACTIVATE]   Checking pending insert: pending_insert_valid=%d, pending_tag_key='%s', deferred_tag_key='%s'\n",
+           g_deferred_category_activation.pending_insert_valid ? 1 : 0,
+           g_deferred_category_activation.pending_insert_tag_key.c_str(),
+           g_deferred_category_activation.tag_key.c_str());
+    fflush(stdout);
+  }
 
   if (g_deferred_category_activation.pending_insert_valid && !g_deferred_category_activation.tag_key.empty()) {
     const std::string &pending_key = g_deferred_category_activation.pending_insert_tag_key;
@@ -6898,15 +7090,19 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
       }
     }
   }
-  printf("[CATEGORY ACTIVATE]   tag_keys_match=%d\n", tag_keys_match ? 1 : 0);
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY ACTIVATE]   tag_keys_match=%d\n", tag_keys_match ? 1 : 0);
+  }
   fflush(stdout);
 
   if (tag_keys_match)
   {
-    printf("[CATEGORY ACTIVATE]   Applying pending insert position for '%s' (pending_key='%s', deferred_key='%s')\n",
-           category_id.c_str(),
-           g_deferred_category_activation.pending_insert_tag_key.c_str(),
-           g_deferred_category_activation.tag_key.c_str());
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[CATEGORY ACTIVATE]   Applying pending insert position for '%s' (pending_key='%s', deferred_key='%s')\n",
+             category_id.c_str(),
+             g_deferred_category_activation.pending_insert_tag_key.c_str(),
+             g_deferred_category_activation.tag_key.c_str());
+    }
 
     /* Load current order from JSON */
     Vector<std::string> current_order = load_category_order_from_json(
@@ -6958,22 +7154,28 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
       /* Insert category at the determined position */
       if (insert_index >= 0 && insert_index <= current_order.size()) {
         current_order.insert(insert_index, category_id);
-        printf("[CATEGORY ACTIVATE]     Inserted '%s' at index %d (between '%s' and '%s')\n",
-               category_id.c_str(),
-               insert_index,
-               g_deferred_category_activation.pending_insert_anchor_before.c_str(),
-               g_deferred_category_activation.pending_insert_anchor_after.c_str());
+        if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+          printf("[CATEGORY ACTIVATE]     Inserted '%s' at index %d (between '%s' and '%s')\n",
+                 category_id.c_str(),
+                 insert_index,
+                 g_deferred_category_activation.pending_insert_anchor_before.c_str(),
+                 g_deferred_category_activation.pending_insert_anchor_after.c_str());
+        }
       }
       else {
         /* Fallback: append to end */
         current_order.append(category_id);
-        printf("[CATEGORY ACTIVATE]     Appended '%s' to end (no anchor found)\n",
-               category_id.c_str());
+        if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+          printf("[CATEGORY ACTIVATE]     Appended '%s' to end (no anchor found)\n",
+                 category_id.c_str());
+        }
       }
 
       /* Save updated order to JSON */
       save_category_order_to_json(C, g_deferred_category_activation.pending_insert_tag_key.c_str(), current_order);
-      printf("[CATEGORY ACTIVATE]     Order saved to JSON\n");
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CATEGORY ACTIVATE]     Order saved to JSON\n");
+      }
     }
 
     /* Clear pending insert (in deferred activation) */
@@ -6989,7 +7191,9 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
   g_deferred_category_activation.tag_name_to_assign.clear();
   g_deferred_category_activation.pending_insert_valid = false;
   g_known_categories_before_extension_drop.clear();
-  printf("[CATEGORY ACTIVATE] Deferred activation completed\n");
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CATEGORY ACTIVATE] Deferred activation completed\n");
+  }
 }
 
 void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char *category_id_active)
@@ -7418,13 +7622,15 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
 
   if (!is_dragging && region->runtime && region->runtime->extension_drop_preview_state.active) {
     const ui::ExtensionDropPreviewState &preview = region->runtime->extension_drop_preview_state;
-    if (ghost_skip_reason) {
-      printf("[EXT_GHOST] SKIPPED: reason=%s active=%d target='%s' idx=%d cursor_y=%d\n",
-             ghost_skip_reason,
-             preview.active ? 1 : 0,
-             preview.target_category_id,
-             preview.target_index,
-             preview.cursor_y);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      if (ghost_skip_reason) {
+        printf("[EXT_GHOST] SKIPPED: reason=%s active=%d target='%s' idx=%d cursor_y=%d\n",
+               ghost_skip_reason,
+               preview.active ? 1 : 0,
+               preview.target_category_id,
+               preview.target_index,
+               preview.cursor_y);
+      }
     }
   }
 

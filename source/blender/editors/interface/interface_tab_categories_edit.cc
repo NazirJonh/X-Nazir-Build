@@ -109,16 +109,23 @@ char category_tab_last_closed_category[64] = "";
 static std::unordered_set<std::string> logged_messages;
 static constexpr size_t MAX_LOGGED_MESSAGES = 500;
 
+/* Debug output control flag - set to true to enable debug printf messages */
+//DEBUG FLAGS
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
+
 static void log_once(const char *message)
 {
   /* Print a log message only once per session to avoid log flooding. */
-  if (logged_messages.count(message) == 0) {
-    if (logged_messages.size() > MAX_LOGGED_MESSAGES) {
-      logged_messages.clear();
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    if (logged_messages.count(message) == 0) {
+      if (logged_messages.size() > MAX_LOGGED_MESSAGES) {
+        logged_messages.clear();
+      }
+      logged_messages.insert(message);
+      printf("%s\n", message);
     }
-    logged_messages.insert(message);
-    printf("%s\n", message);
   }
+  UNUSED_VARS(message);
 }
 
 static void category_tab_edit_dialog_clear_runtime_state(const bool clear_popup_block)
@@ -2825,14 +2832,6 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
     col_props.prop(op->ptr, "display_name", UI_ITEM_NONE, IFACE_("Category Name"), ICON_NONE);
   }
  
-  char source_extension[256];
-  RNA_string_get(op->ptr, "source_extension", source_extension);
-  if (source_extension[0] != '\0') {
-    Layout &row_ext = col_props.row(false);
-    row_ext.enabled_set(false);
-    row_ext.prop(op->ptr, "source_extension", UI_ITEM_NONE, IFACE_("Add-on"), ICON_NONE);
-  }
- 
   layout.separator();
 
   /* Change Icon panel */
@@ -3800,11 +3799,13 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
       set_saved_tag_filter_tags(area, "");
 
       /* Also reset tag_bar_manually_hidden so future auto-show can work */
-      if (area && area->spacetype == SPACE_NODE) {
-        SpaceNode *snode = CTX_wm_space_node(C);
-        if (snode && snode->tag_bar_manually_hidden) {
-          snode->tag_bar_manually_hidden = false;
-          printf("[CATEGORY_TAB_EDIT] Reset tag_bar_manually_hidden - no more unassigned\n");
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        if (area && area->spacetype == SPACE_NODE) {
+          SpaceNode *snode = CTX_wm_space_node(C);
+          if (snode && snode->tag_bar_manually_hidden) {
+            snode->tag_bar_manually_hidden = false;
+            printf("[CATEGORY_TAB_EDIT] Reset tag_bar_manually_hidden - no more unassigned\n");
+          }
         }
       }
 
@@ -3823,17 +3824,19 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
           category_tab_split_tags(active_category_tags, active_tag_list, ",;");
         }
 
-        if (!active_tag_list.is_empty() && !active_tag_list[0].empty()) {
-          BLI_strncpy(state.active_tags, active_tag_list[0].c_str(), 256);
-          *state.filter_enabled = 1;
-          printf("[CATEGORY_TAB_EDIT] No more unassigned categories, switched to tag '%s'\n",
-                 active_tag_list[0].c_str());
-        }
-        else {
-          /* "Without Tag": disable tag filtering and keep active tab unchanged. */
-          state.active_tags[0] = '\0';
-          *state.filter_enabled = 0;
-          printf("[CATEGORY_TAB_EDIT] No more unassigned categories, disabled tag filtering\n");
+        if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+          if (!active_tag_list.is_empty() && !active_tag_list[0].empty()) {
+            BLI_strncpy(state.active_tags, active_tag_list[0].c_str(), 256);
+            *state.filter_enabled = 1;
+            printf("[CATEGORY_TAB_EDIT] No more unassigned categories, switched to tag '%s'\n",
+                   active_tag_list[0].c_str());
+          }
+          else {
+            /* "Without Tag": disable tag filtering and keep active tab unchanged. */
+            state.active_tags[0] = '\0';
+            *state.filter_enabled = 0;
+            printf("[CATEGORY_TAB_EDIT] No more unassigned categories, disabled tag filtering\n");
+          }
         }
       }
 

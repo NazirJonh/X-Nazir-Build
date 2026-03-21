@@ -3436,8 +3436,8 @@ static bool extension_has_tagged_category(const wmWindowManager *wm,
  * but all its panels are actually in the reserved category "Edit".
  * Such extensions should not show "New Add-ons!" button.
  */
-static bool extension_has_only_reserved_categories(const wmWindowManager *wm,
-                                                   const char *source_extension)
+bool extension_has_only_reserved_categories(const wmWindowManager *wm,
+                                            const char *source_extension)
 {
   if (!wm || !source_extension || source_extension[0] == '\0') {
     return false;

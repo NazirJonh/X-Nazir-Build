@@ -920,6 +920,17 @@ void category_tabs_apply_drop_insert(bContext *C,
                                       const char *tag_name = nullptr);
 
 /**
+ * Set up deferred category activation for viewport (WINDOW region) extension drops.
+ * This is called from screen_ops.cc when an extension is dropped into a viewport
+ * (not onto category tabs). It enables reserved-only extension detection and
+ * automatic switching to reserved categories (e.g., "Edit" for Bool Tool).
+ */
+void category_tabs_setup_viewport_drop_deferred(const bContext *C,
+                                                 const char *extension_id,
+                                                 int space_type,
+                                                 uint32_t mode_flag);
+
+/**
  * Safe category activation that waits for extension installation signals.
  * Use this instead of direct panel_category_active_set when activation
  * might be triggered by extension installation.
@@ -975,6 +986,29 @@ bool should_show_new_addon_tag_for_region(const wmWindowManager *wm,
                                            const ARegion *region,
                                            int space_type,
                                            uint32_t current_mode_flag);
+
+/**
+ * Check if all categories from an extension are reserved categories.
+ * Returns true if the extension only adds panels to reserved categories (like Bool Tool → Edit).
+ * Such extensions should not show "New Add-ons!" button, but instead auto-switch to the reserved tab.
+ */
+bool extension_has_only_reserved_categories(const wmWindowManager *wm,
+                                            const char *source_extension);
+
+/**
+ * Find the reserved category for an extension and switch to it.
+ * Used for reserved-only extensions like Bool Tool that add panels only to reserved categories.
+ * 
+ * \param C              Blender context.
+ * \param region         Region where tabs are drawn.
+ * \param source_extension Extension package ID.
+ * \param space_type     Space type to search in.
+ * \return True if a reserved category was found and activated.
+ */
+bool switch_to_reserved_category_for_extension(const bContext *C,
+                                               ARegion *region,
+                                               const char *source_extension,
+                                               int space_type);
 
 /**
  * Set extension drop preview state.
@@ -1591,6 +1625,9 @@ void layout_panel_popup_scroll_apply(Panel *panel, const float dy);
 
 /** Category tab drag operator for reordering tabs. */
 void UI_OT_category_tab_drag(wmOperatorType *ot);
+
+/** Switch to reserved category for reserved-only extensions. */
+void UI_OT_switch_to_reserved_category(wmOperatorType *ot);
 
 /**
  * Draws in resolution of 48x4 colors.

@@ -7568,6 +7568,11 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
            extension_id.c_str(), space_type, mode_flag);
     fflush(stdout);
 
+    /* Set up C++ deferred activation for reserved-only extension detection.
+     * This enables automatic switching to reserved categories (e.g., "Edit" for Bool Tool)
+     * when an extension's panels only go into reserved categories. */
+    ui::category_tabs_setup_viewport_drop_deferred(C, extension_id.c_str(), space_type, mode_flag);
+
     /* Call Python extension_post_install_handler to set _pending_extension_context */
     char python_expr[1024];
     SNPRINTF(python_expr,

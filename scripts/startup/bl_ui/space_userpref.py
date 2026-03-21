@@ -7334,6 +7334,21 @@ def _on_extension_repos_update_post(dummy=None):
         sync_glyph_mappings_to_wm()
         print("[GLYPH EXTENSION UPDATE] >>> sync_glyph_mappings_to_wm() completed")
         
+        # Check if this is a reserved-only extension and switch to reserved category
+        if _pending_extension_context and _pending_extension_context.get("extension_id"):
+            extension_id = _pending_extension_context["extension_id"]
+            wm = bpy.context.window_manager
+            if wm and _extension_has_only_reserved_categories(wm, extension_id):
+                print(f"[GLYPH EXTENSION UPDATE] >>> Reserved-only extension detected: {extension_id}")
+                print("[GLYPH EXTENSION UPDATE] >>> Scheduling switch to reserved category...")
+                # Set deferred activation for reserved category.
+                # This is handled by C++ code in deferred_category_activation_execute()
+                # which runs during panel draw when context is safe.
+                print(f"[RESERVED SWITCH] Setting deferred activation for extension '{extension_id}'")
+                # Store in pending context for C++ to pick up
+                _pending_extension_context["activate_reserved"] = True
+                bpy.app.timers.register(lambda: None, first_interval=0.1)  # Trigger UI refresh
+        
         # Trigger tag bar update to show/hide "New Add-ons!" button
         # Use timer to ensure context is available
         print("[GLYPH EXTENSION UPDATE] >>> Scheduling tag bar update via timer...")

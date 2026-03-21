@@ -3036,6 +3036,9 @@ void operatortypes_ui()
 
   WM_operatortype_append(UI_OT_category_tab_drag);
 
+  /* Switch to reserved category for reserved-only extensions */
+  WM_operatortype_append(UI_OT_switch_to_reserved_category);
+
   /* Centered popup operator wrapper */
   centered_popup_operator_register();
 

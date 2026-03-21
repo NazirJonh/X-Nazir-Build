@@ -53,6 +53,7 @@
 #include "BKE_workspace.hh"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
 #include "RNA_prototypes.hh"
 
 #include "BLF_api.hh"
@@ -80,6 +81,13 @@
 #endif
 
 struct Main;
+
+namespace blender {
+
+/* Extern declaration for space type enum items (defined in rna_space.cc) */
+extern const EnumPropertyItem rna_enum_space_type_items[];
+
+}  // namespace blender
 
 namespace blender::ui {
 
@@ -751,6 +759,9 @@ static void register_new_extension_category(const bContext *C,
     esc_ext[j] = '\0';
   }
 
+  /* Store extension ID for deferred activation (used for reserved-only extension detection) */
+  g_deferred_category_activation.source_extension_id = extension_id;
+
   if (!tag_already_assigned) {
     /* Mark the category as pending tag assignment via Python. */
     char python_expr[1280];
@@ -847,6 +858,9 @@ static void handle_extension_drop_on_tabs(const bContext *C,
          (tag_name != nullptr) ? tag_name : "(null)");
   fflush(stdout);
 
+  /* Store extension ID for deferred activation (used for reserved-only extension detection) */
+  g_deferred_category_activation.source_extension_id = extension_id;
+
   if (tab_category != nullptr && !resolved_tag_name.empty()) {
     /* Drop onto tabs: defer tag assignment until category appears after extension install.
      * The category doesn't exist yet in _glyph_cache, so immediate assignment would fail.
@@ -866,12 +880,170 @@ static void handle_extension_drop_on_tabs(const bContext *C,
         C, category_id, extension_id, space_type, mode_flag, /*tag_already_assigned=*/true);
   }
   else {
-    /* Drop into viewport: mark as pending so "New Add-on!" tag surfaces it. */
+    /* Drop into viewport: set up deferred activation to discover and activate the new category.
+     * This handles reserved-only extensions that need to switch to reserved category immediately. */
+    printf("[CATEGORY ACTIVATE] Extension drop into viewport: setting up deferred activation for category '%s'\n",
+           category_id);
+    fflush(stdout);
+
+    /* Register extension callback if not already registered */
+    deferred_category_activation_register_extension_callback();
+
+    /* Save ALL known categories before extension installation to detect new ones later.
+     * IMPORTANT: Use region->runtime->panels_category directly, NOT get_ordered_categories()!
+     * get_ordered_categories() applies tag filtering, which would exclude categories without
+     * the active tag. This would cause them to be incorrectly detected as "new" when the
+     * extension installs. */
+    ARegion *region = CTX_wm_region(C);
+    if (region && region->runtime) {
+      g_known_categories_before_extension_drop.clear();
+      g_pending_category_insert.all_existing_categories.clear();
+      printf("[KNOWN_CATS] Saving known categories before viewport extension drop:\n");
+      for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+        if (pc_dyn.idname && pc_dyn.idname[0]) {
+          g_known_categories_before_extension_drop.add(pc_dyn.idname);
+          g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+          printf("[KNOWN_CATS]   + '%s'\n", pc_dyn.idname);
+        }
+      }
+      printf("[KNOWN_CATS] Total: %zu categories saved\n",
+             g_known_categories_before_extension_drop.size());
+      fflush(stdout);
+    }
+
+    /* Set up deferred activation to wait for extension installation signal,
+     * then discover and activate the new category that appears. */
+    g_deferred_category_activation.category_id.clear(); /* Will be set when new category appears */
+    g_deferred_category_activation.valid = true;
+    g_deferred_category_activation.timestamp = BLI_time_now_seconds();
+    g_deferred_category_activation.wait_for_extension_signal = true;
+    g_deferred_category_activation.extension_signal_received = false;
+    g_deferred_category_activation.frame_delay = 0; /* No frame delay when waiting for signal */
+    g_deferred_category_activation.discover_new_category = true; /* Find new category after install */
+    g_deferred_category_activation.discover_retry_count = 0; /* Reset retry counter */
+    g_deferred_category_activation.source_extension_id = extension_id;
+    g_deferred_category_activation.activation_space_type = space_type;
+    g_deferred_category_activation.activation_mode_flag = mode_flag;
+    g_deferred_category_activation.tag_already_assigned = false;
+
+    /* Save tag name for deferred assignment when the new category appears */
+    if (!resolved_tag_name.empty()) {
+      g_deferred_category_activation.tag_name_to_assign = resolved_tag_name;
+      printf("[CATEGORY ACTIVATE] Will assign tag '%s' to new category when it appears\n", resolved_tag_name.c_str());
+    }
+    else {
+      g_deferred_category_activation.tag_name_to_assign.clear();
+    }
+
+    /* Build tag_key for deferred save */
+    blender::ui::TagFilterStateRef tag_state{};
+    ScrArea *area_for_tag = CTX_wm_area(C);
+    if (blender::ui::tag_filter_state_from_area(area_for_tag, &tag_state) &&
+        tag_state.active_tags) {
+      char tag_key_buf[256];
+      blender::ui::tag_build_combination_key(
+          tag_state.active_tags, tag_key_buf, sizeof(tag_key_buf));
+      g_deferred_category_activation.tag_key = tag_key_buf;
+    }
+    else {
+      g_deferred_category_activation.tag_key.clear();
+    }
+
+    /* Register as pending extension category (this will call Python mark_category_from_extension) */
     register_new_extension_category(
         C, category_id, extension_id, space_type, mode_flag, /*tag_already_assigned=*/false);
+
+    printf("[CATEGORY ACTIVATE] Deferred activation setup complete for viewport drop\n");
+    fflush(stdout);
   }
 #else
   UNUSED_VARS(category_id, extension_id, tab_category, tag_name);
+#endif
+}
+
+/**
+ * Set up deferred category activation for viewport (WINDOW region) extension drops.
+ * This is called from screen_ops.cc when an extension is dropped into a viewport
+ * (not onto category tabs). It sets up the same deferred activation mechanism as
+ * handle_extension_drop_on_tabs() but can be called from outside the tab drop flow.
+ *
+ * This is needed for reserved-only extensions like Bool Tool, where all panels
+ * go into reserved categories (e.g., "Edit"). The deferred activation will:
+ * 1. Wait for extension installation signal
+ * 2. Discover if it's a reserved-only extension
+ * 3. Switch to the appropriate reserved category
+ */
+void category_tabs_setup_viewport_drop_deferred(const bContext *C,
+                                                 const char *extension_id,
+                                                 int space_type,
+                                                 uint32_t mode_flag)
+{
+#ifdef WITH_PYTHON
+  if (!C || !extension_id || extension_id[0] == '\0') {
+    printf("[VIEWPORT DROP DEFERRED] Invalid parameters: C=%p, extension_id=%s\n",
+           C, extension_id ? extension_id : "(null)");
+    return;
+  }
+
+  printf("[VIEWPORT DROP DEFERRED] Setting up deferred activation for extension '%s' (space_type=%d, mode_flag=%#010x)\n",
+         extension_id, space_type, mode_flag);
+  fflush(stdout);
+
+  /* Register extension callback if not already registered */
+  deferred_category_activation_register_extension_callback();
+
+  /* Save ALL known categories before extension installation to detect new ones later. */
+  ARegion *region = CTX_wm_region(C);
+  if (region && region->runtime) {
+    g_known_categories_before_extension_drop.clear();
+    g_pending_category_insert.all_existing_categories.clear();
+    printf("[VIEWPORT DROP DEFERRED] Saving known categories:\n");
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (pc_dyn.idname && pc_dyn.idname[0]) {
+        g_known_categories_before_extension_drop.add(pc_dyn.idname);
+        g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+        printf("[VIEWPORT DROP DEFERRED]   + '%s'\n", pc_dyn.idname);
+      }
+    }
+    printf("[VIEWPORT DROP DEFERRED] Total: %zu categories saved\n",
+           g_known_categories_before_extension_drop.size());
+    fflush(stdout);
+  }
+
+  /* Set up deferred activation to wait for extension installation signal,
+   * then discover and activate the new category that appears. */
+  g_deferred_category_activation.category_id.clear(); /* Will be set when new category appears */
+  g_deferred_category_activation.valid = true;
+  g_deferred_category_activation.timestamp = BLI_time_now_seconds();
+  g_deferred_category_activation.wait_for_extension_signal = true;
+  g_deferred_category_activation.extension_signal_received = false;
+  g_deferred_category_activation.frame_delay = 0; /* No frame delay when waiting for signal */
+  g_deferred_category_activation.discover_new_category = true; /* Find new category after install */
+  g_deferred_category_activation.discover_retry_count = 0; /* Reset retry counter */
+  g_deferred_category_activation.source_extension_id = extension_id;
+  g_deferred_category_activation.activation_space_type = space_type;
+  g_deferred_category_activation.activation_mode_flag = mode_flag;
+  g_deferred_category_activation.tag_already_assigned = false;
+  g_deferred_category_activation.tag_name_to_assign.clear();
+
+  /* Build tag_key for deferred save */
+  blender::ui::TagFilterStateRef tag_state{};
+  ScrArea *area_for_tag = CTX_wm_area(C);
+  if (blender::ui::tag_filter_state_from_area(area_for_tag, &tag_state) &&
+      tag_state.active_tags) {
+    char tag_key_buf[256];
+    blender::ui::tag_build_combination_key(
+        tag_state.active_tags, tag_key_buf, sizeof(tag_key_buf));
+    g_deferred_category_activation.tag_key = tag_key_buf;
+  }
+  else {
+    g_deferred_category_activation.tag_key.clear();
+  }
+
+  printf("[VIEWPORT DROP DEFERRED] Deferred activation setup complete\n");
+  fflush(stdout);
+#else
+  UNUSED_VARS(C, extension_id, space_type, mode_flag);
 #endif
 }
 
@@ -6181,6 +6353,171 @@ static void draw_category_tab_color_indicator(const rcti *rct,
 /** \name Main Drawing Function
  * \{ */
 
+/**
+ * Find the reserved category for an extension and switch to it.
+ * Used for reserved-only extensions like Bool Tool that add panels only to reserved categories.
+ * 
+ * \param C              Blender context.
+ * \param region         Region where tabs are drawn.
+ * \param source_extension Extension package ID.
+ * \param space_type     Space type to search in.
+ * \return True if a reserved category was found and activated.
+ */
+bool switch_to_reserved_category_for_extension(const bContext *C,
+                                               ARegion *region,
+                                               const char *source_extension,
+                                               int space_type)
+{
+  /* Currently space_type is not used, but kept for future extension. */
+  (void)space_type;
+
+  printf("[RESERVED SWITCH] switch_to_reserved_category_for_extension called: extension='%s', space_type=%d\n",
+         source_extension ? source_extension : "(null)", space_type);
+  fflush(stdout);
+
+  if (!C || !region || !source_extension || source_extension[0] == '\0') {
+    printf("[RESERVED SWITCH] Invalid parameters: C=%p, region=%p, source_extension=%s\n",
+           C, (void *)region, source_extension ? source_extension : "(null)");
+    return false;
+  }
+
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  if (!wm) {
+    printf("[RESERVED SWITCH] No window manager\n");
+    return false;
+  }
+
+  /* Debug: List all categories in wm->category_glyph_mappings */
+  printf("[RESERVED SWITCH] Scanning wm->category_glyph_mappings for extension '%s':\n", source_extension);
+  int total_items = 0;
+  int matching_items = 0;
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+           wm->category_glyph_mappings.first);
+       item;
+       item = item->next)
+  {
+    total_items++;
+    if (STREQ(item->source_extension, source_extension)) {
+      matching_items++;
+      printf("[RESERVED SWITCH]   MATCH: category='%s', is_reserved=%d, discovered_in_spaces=%d\n",
+             item->category, item->is_reserved, item->discovered_in_spaces);
+    }
+  }
+  printf("[RESERVED SWITCH] Total items: %d, matching extension: %d\n", total_items, matching_items);
+  fflush(stdout);
+
+  /* Find all categories for this extension and look for reserved ones.
+   * For reserved categories, we don't require discovered_in_spaces != 0,
+   * since the category may not have panels registered yet (extension still loading).
+   * The reserved category is defined in Python DEFAULT_CATEGORY_GLYPHS and exists
+   * in wm->category_glyph_mappings immediately after extension install. */
+  std::string reserved_category;
+  bool found_reserved = false;
+
+  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(
+           wm->category_glyph_mappings.first);
+       item;
+       item = item->next)
+  {
+    if (STREQ(item->source_extension, source_extension)) {
+      if (item->is_reserved != 0) {
+        /* Found a reserved category (with or without panels yet). */
+        reserved_category = item->category;
+        found_reserved = true;
+        printf("[RESERVED SWITCH] Found reserved category '%s' for extension '%s' (discovered_in_spaces=%d)\n",
+               reserved_category.c_str(), source_extension, item->discovered_in_spaces);
+        break; /* Take the first reserved category */
+      }
+    }
+  }
+
+  if (!found_reserved || reserved_category.empty()) {
+    printf("[RESERVED SWITCH] No reserved category found for extension '%s'\n", source_extension);
+    return false;
+  }
+
+  /* Check if already active */
+  const char *current_active = panel_category_active_get(region, false);
+  if (current_active && STREQ(reserved_category.c_str(), current_active)) {
+    printf("[RESERVED SWITCH] Reserved category '%s' already active\n", reserved_category.c_str());
+    return true;
+  }
+
+  /* Activate the reserved category */
+  printf("[RESERVED SWITCH] Activating reserved category '%s' for extension '%s'\n",
+         reserved_category.c_str(), source_extension);
+  panel_category_active_set(region, reserved_category.c_str());
+
+  /* Save to tag category memory */
+  blender::ui::TagFilterStateRef tag_state{};
+  ScrArea *area = CTX_wm_area(C);
+  if (blender::ui::tag_filter_state_from_area(area, &tag_state) && tag_state.active_tags &&
+      tag_state.filter_enabled && *tag_state.filter_enabled)
+  {
+    char tag_key_buf[256];
+    blender::ui::tag_build_combination_key(tag_state.active_tags, tag_key_buf, sizeof(tag_key_buf));
+    blender::ui::tag_save_last_active_category(
+        const_cast<bContext *>(C), tag_key_buf, reserved_category.c_str());
+  }
+
+  /* Trigger UI refresh */
+  WM_event_add_notifier(C, NC_SPACE | ND_DRAW, nullptr);
+  ED_region_tag_redraw(region);
+
+  printf("[RESERVED SWITCH] Successfully switched to reserved category '%s'\n", reserved_category.c_str());
+  return true;
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Operator: Switch to Reserved Category
+ * \{ */
+
+static wmOperatorStatus switch_to_reserved_category_invoke(bContext *C,
+                                                           wmOperator *op,
+                                                           const wmEvent * /*event*/)
+{
+  std::string source_extension = RNA_string_get(op->ptr, "source_extension");
+  const int space_type = RNA_enum_get(op->ptr, "space_type");
+
+  ARegion *region = CTX_wm_region(C);
+  if (!region) {
+    BKE_report(op->reports, RPT_ERROR, "No active region found");
+    return OPERATOR_CANCELLED;
+  }
+
+  if (switch_to_reserved_category_for_extension(C, region, source_extension.c_str(), space_type)) {
+    return OPERATOR_FINISHED;
+  }
+
+  BKE_report(op->reports, RPT_WARNING, "No reserved category found for this extension");
+  return OPERATOR_CANCELLED;
+}
+
+static bool switch_to_reserved_category_poll(bContext * /*C*/)
+{
+  return true;
+}
+
+void UI_OT_switch_to_reserved_category(wmOperatorType *ot)
+{
+  ot->name = "Switch to Reserved Category";
+  ot->idname = "UI_OT_switch_to_reserved_category";
+  ot->description = "Switch to the reserved category for a reserved-only extension";
+
+  ot->invoke = switch_to_reserved_category_invoke;
+  ot->poll = switch_to_reserved_category_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_string(ot->srna, "source_extension", nullptr, 0, "Source Extension",
+                 "Extension package ID to find the reserved category for");
+
+  RNA_def_enum(ot->srna, "space_type", rna_enum_space_type_items, SPACE_EMPTY, "Space Type",
+               "Space type to search in");
+}
+
+/** \} */
+
 /* Execute deferred category activation if pending.
  * This is called from panel_category_tabs_draw_all which runs in a safe context
  * after panel layout is complete, avoiding crashes when extensions load previews
@@ -6189,6 +6526,55 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
 {
   if (!g_deferred_category_activation.valid) {
     return;
+  }
+
+  /* Debug: Log deferred activation state */
+  printf("[CATEGORY ACTIVATE] deferred_category_activation_execute called:\n");
+  printf("[CATEGORY ACTIVATE]   valid=%d, category_id='%s', source_extension_id='%s'\n",
+         g_deferred_category_activation.valid,
+         g_deferred_category_activation.category_id.c_str(),
+         g_deferred_category_activation.source_extension_id.c_str());
+  printf("[CATEGORY ACTIVATE]   wait_for_signal=%d, signal_received=%d, discover_mode=%d, retry=%d\n",
+         g_deferred_category_activation.wait_for_extension_signal,
+         g_deferred_category_activation.extension_signal_received,
+         g_deferred_category_activation.discover_new_category,
+         g_deferred_category_activation.discover_retry_count);
+  fflush(stdout);
+
+  /* Check for reserved-only extension - switch immediately without waiting for discover mode.
+   * This handles cases like Bool Tool where all panels are in reserved categories.
+   * Check this FIRST before any other deferred activation logic. */
+  if (!g_deferred_category_activation.source_extension_id.empty()) {
+    const wmWindowManager *wm = CTX_wm_manager(C);
+    printf("[CATEGORY ACTIVATE] Checking reserved-only for extension '%s', wm=%p\n",
+           g_deferred_category_activation.source_extension_id.c_str(), (void *)wm);
+    fflush(stdout);
+
+    if (wm && blender::ui::extension_has_only_reserved_categories(
+              wm, g_deferred_category_activation.source_extension_id.c_str()))
+    {
+      printf("[CATEGORY ACTIVATE] Reserved-only extension detected (source='%s'), switching to reserved category...\n",
+             g_deferred_category_activation.source_extension_id.c_str());
+      fflush(stdout);
+      const ScrArea *current_area = CTX_wm_area(C);
+      const int space_type = current_area ? current_area->spacetype : -1;
+      if (switch_to_reserved_category_for_extension(
+              C, region, g_deferred_category_activation.source_extension_id.c_str(), space_type))
+      {
+        printf("[CATEGORY ACTIVATE] Reserved-only switch completed, clearing deferred activation\n");
+        g_deferred_category_activation.valid = false;
+        g_deferred_category_activation.wait_for_extension_signal = false;
+        g_deferred_category_activation.extension_signal_received = false;
+        g_deferred_category_activation.discover_new_category = false;
+        g_deferred_category_activation.discover_retry_count = 0;
+        g_deferred_category_activation.tag_name_to_assign.clear();
+        g_known_categories_before_extension_drop.clear();
+        return;
+      }
+      else {
+        printf("[CATEGORY ACTIVATE] Reserved-only switch failed (category may not have panels yet), will retry...\n");
+      }
+    }
   }
 
   std::string category_id = g_deferred_category_activation.category_id;
@@ -6276,6 +6662,31 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
     printf("[CATEGORY ACTIVATE]   Registered '%s' as pending extension category\n", new_category_id.c_str());
     g_deferred_category_activation.discover_retry_count = 0; /* Reset retry counter */
     printf("[CATEGORY ACTIVATE]   Will activate new category: '%s'\n", category_id.c_str());
+    
+    /* NEW: Check if this is a reserved-only extension and switch to reserved category instead.
+     * This handles cases like Bool Tool, which creates panels only in reserved categories.
+     * For such extensions, we automatically switch to the reserved category instead of
+     * showing the "New Add-ons!" button. */
+    const wmWindowManager *wm = CTX_wm_manager(C);
+    if (wm && blender::ui::extension_has_only_reserved_categories(
+                  wm, g_deferred_category_activation.source_extension_id.c_str()))
+    {
+      printf("[CATEGORY ACTIVATE] Reserved-only extension detected, switching to reserved category...\n");
+      const int space_type = current_area ? current_area->spacetype : -1;
+      if (switch_to_reserved_category_for_extension(
+              C, region, g_deferred_category_activation.source_extension_id.c_str(), space_type))
+      {
+        /* Successfully switched to reserved category - clear deferred activation.
+         * Don't show "New Add-ons!" for reserved-only extensions. */
+        printf("[CATEGORY ACTIVATE] Reserved-only switch completed, clearing deferred activation\n");
+        g_deferred_category_activation.valid = false;
+        g_deferred_category_activation.discover_new_category = false;
+        g_deferred_category_activation.discover_retry_count = 0;
+        g_deferred_category_activation.tag_name_to_assign.clear();
+        g_known_categories_before_extension_drop.clear();
+        return;
+      }
+    }
   }
 
   /* Check frame delay - wait N frames before activating */

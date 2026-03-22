@@ -449,6 +449,20 @@ struct Brush {
 
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve = nullptr;
   struct MeshAutomaskingSettings *mesh_automasking_settings = nullptr;
+
+  /** Channels that brush writes to in vertex paint mode (#eBrushVertexPaintChannel). */
+  int vertex_paint_channel_flag = (BRUSH_VPAINT_CHANNEL_R | BRUSH_VPAINT_CHANNEL_G | BRUSH_VPAINT_CHANNEL_B);
+
+  char _pad4[4] = {};
+};
+
+/* Struct to hold palette colors for sorting. */
+struct tPaletteColorHSV {
+  float rgb[3] = {};
+  float value = 0;
+  float h = 0;
+  float s = 0;
+  float v = 0;
 };
 
 struct PaletteColor {

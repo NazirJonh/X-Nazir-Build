@@ -1413,6 +1413,18 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
         container.prop(brush, "vertex_brush_type")
 
         container.prop(brush, "use_alpha")
+
+        # Vertex Paint Channel Output
+        container.separator()
+        col = container.column(align=True)
+        col.label(text="Channel Output:", icon='GROUP_VCOL')
+
+        # Channel toggle buttons for RGB channels
+        row = col.row(align=True)
+        row.prop(brush, "use_vertex_paint_channel_r", text="Red", icon='RGB_RED', toggle=True)
+        row.prop(brush, "use_vertex_paint_channel_g", text="Green", icon='RGB_GREEN', toggle=True)
+        row.prop(brush, "use_vertex_paint_channel_b", text="Blue", icon='RGB_BLUE', toggle=True)
+
         # TODO: Make this a "Capability"
         if brush.vertex_brush_type != 'SMEAR':
             container.prop(brush, "use_accumulate")

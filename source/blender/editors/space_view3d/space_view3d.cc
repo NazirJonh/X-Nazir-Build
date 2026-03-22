@@ -9,6 +9,9 @@
 /* Allow using deprecated functionality for .blend file I/O. */
 #define DNA_DEPRECATED_ALLOW
 
+/* Enable debug printf messages for vertex paint channel feature */
+// #define VPAINT_DEBUG
+
 #include <cstring>
 
 #include "DNA_collection_types.h"
@@ -565,8 +568,24 @@ static void view3d_main_region_listener(const wmRegionListenerParams *params)
   RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
   wmGizmoMap *gzmap = region->runtime->gizmo_map;
 
+#ifdef VPAINT_DEBUG
+  if (wmn->category == NC_SPACE && wmn->data == ND_SPACE_VIEW3D) {
+    printf("[DEBUG] view3d_main_region_listener: NC_SPACE|ND_SPACE_VIEW3D received, region=%p\n", (void*)region);
+  }
+#endif
+
   /* context changes */
   switch (wmn->category) {
+#ifdef VPAINT_DEBUG
+    case NC_WINDOW:
+      printf("[DEBUG] view3d_main_region_listener: NC_WINDOW received, region=%p\n", (void*)region);
+      ED_region_tag_redraw(region);
+      break;
+    case NC_WINDOW | ND_SPACE_VIEW3D:
+      printf("[DEBUG] view3d_main_region_listener: NC_WINDOW|ND_SPACE_VIEW3D received, region=%p\n", (void*)region);
+      ED_region_tag_redraw(region);
+      break;
+#endif
     case NC_WM:
       if (ELEM(wmn->data, ND_UNDO)) {
         WM_gizmomap_tag_refresh(gzmap);

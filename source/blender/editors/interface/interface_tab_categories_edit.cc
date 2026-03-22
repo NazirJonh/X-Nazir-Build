@@ -3290,17 +3290,15 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         /* Add "Without Tag" button as the FIRST item in the grid if pending */
         if (show_without_tag) {
           bool without_tag_is_active = false;
-          for (CategoryGlyphItem *override_item =
-                   static_cast<CategoryGlyphItem *>(wm->category_glyph_overrides.first);
-               override_item;
-               override_item = static_cast<CategoryGlyphItem *>(override_item->next))
-          {
-            if (!STREQ(override_item->category, category) || override_item->space_type != space_type) {
-              continue;
-            }
+          /* Use GLOBAL fallback to find override - Python always creates overrides with space_type=-1 */
+          CategoryGlyphItem *override_item = category_glyph_item_find_with_global_fallback(
+              wm->category_glyph_overrides, category, space_type);
+          if (override_item) {
+            /* Check without_tag_preview flag which is set when user selects "Without Tag"
+             * in preview mode. We keep pending_tag_assignment=1 for "New Add-ons!" visibility,
+             * so we can't use pending==0 as the check anymore. */
             without_tag_is_active = (override_item->tags[0] == '\0') &&
-                                    (override_item->pending_tag_assignment == 0);
-            break;
+                                    (override_item->without_tag_preview == 1);
           }
 
           Layout &without_tag_item = tags_grid.row(true);

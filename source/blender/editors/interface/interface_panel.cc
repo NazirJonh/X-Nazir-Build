@@ -3440,13 +3440,19 @@ static bool extension_has_tagged_category(const wmWindowManager *wm,
       continue;
     }
 
-    /* Has explicit tags assigned */
-    if (item->tags[0] != '\0') {
+    /* A category is considered "processed" only when BOTH:
+     * 1. pending_tag_assignment is false (user clicked Save)
+     * 2. Has tags assigned (user assigned a tag, not "Without Tag")
+     *
+     * In preview mode, pending_tag_assignment stays true, so the extension
+     * is NOT considered "tagged" yet - this keeps categories visible in "New Add-ons!"
+     * until user clicks Save. */
+    if (!item->pending_tag_assignment && item->tags[0] != '\0') {
       return true;
     }
 
-    /* Was processed by user (tag assigned OR "Without Tag" selected) */
-    if (!item->pending_tag_assignment) {
+    /* Was processed by user with "Without Tag" (pending=false, no tags) */
+    if (!item->pending_tag_assignment && item->tags[0] == '\0') {
       return true;
     }
   }
@@ -3529,17 +3535,25 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
     return false;
   }
 
-  /* Must have a source extension and be pending assignment. */
-  if (category->source_extension[0] == '\0' || !category->pending_tag_assignment) {
-    printf("[UNASSIGNED FUNC] RETURN false: source_extension='%s' pending_tag_assignment=%d\n",
-           category->source_extension, int(category->pending_tag_assignment));
+  /* Must have a source extension. */
+  if (category->source_extension[0] == '\0') {
+    printf("[UNASSIGNED FUNC] RETURN false: source_extension is empty\n");
     fflush(stdout);
     return false;
   }
 
-  /* Must not already have tags assigned. */
-  if (category->tags[0] != '\0') {
-    printf("[UNASSIGNED FUNC] RETURN false: already tagged tags='%s'\n", category->tags);
+  /* If pending_tag_assignment is true, the category is still "new" and unassigned,
+   * even if it has preview tags. This keeps it visible in "New Add-ons!" until user clicks Save.
+   * Only consider it "assigned" when pending_tag_assignment is false AND it has tags. */
+  if (!category->pending_tag_assignment && category->tags[0] != '\0') {
+    printf("[UNASSIGNED FUNC] RETURN false: already saved with tags='%s'\n", category->tags);
+    fflush(stdout);
+    return false;
+  }
+
+  /* If pending_tag_assignment is false and no tags, user selected "Without Tag" and saved. */
+  if (!category->pending_tag_assignment) {
+    printf("[UNASSIGNED FUNC] RETURN false: pending_tag_assignment=false (processed without tag)\n");
     fflush(stdout);
     return false;
   }

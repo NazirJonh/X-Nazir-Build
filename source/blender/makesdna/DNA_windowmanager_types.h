@@ -149,7 +149,9 @@ typedef struct CategoryGlyphItem {
   char source_extension[128];
   /** True when category has not yet been assigned to a tag by the user. */
   char pending_tag_assignment;
-  char _pad2[3];
+  /** True when user selected "Without Tag" in preview mode (before Save). */
+  char without_tag_preview;
+  char _pad2[2];
   /** Bitfield of space types (eSpace_Type) where this category was discovered. */
   uint32_t discovered_in_spaces;
   /** Bitfield of mode flags where this category was discovered. */

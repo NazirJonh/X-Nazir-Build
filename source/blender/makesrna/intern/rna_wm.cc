@@ -3336,6 +3336,14 @@ static void rna_def_category_glyph_item(BlenderRNA *brna)
       "Category has not yet been assigned to a tag by the user");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
 
+  prop = RNA_def_property(srna, "without_tag_preview", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "without_tag_preview", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Without Tag Preview",
+      "User selected 'Without Tag' in preview mode (before Save)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+
   prop = RNA_def_property(srna, "discovered_in_spaces", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "discovered_in_spaces");
   RNA_def_property_ui_text(

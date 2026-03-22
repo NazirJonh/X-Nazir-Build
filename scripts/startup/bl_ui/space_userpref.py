@@ -266,7 +266,13 @@ def _get_unassigned_categories_count_for_space(context,
 
     Mirrors the C++ unassigned-category predicate so Python headers stay in sync
     with the shared tag-bar behavior.
+
+    IMPORTANT: This function checks _glyph_cache instead of wm.category_glyph_mappings
+    to respect preview mode. In preview mode, WM may have tags but pending_tag_assignment
+    stays True in cache, so categories remain visible in "New Add-ons!" until Save.
     """
+    global _glyph_cache
+
     wm = getattr(context, "window_manager", None)
     if wm is None:
         return 0
@@ -281,13 +287,38 @@ def _get_unassigned_categories_count_for_space(context,
     current_mode_flag = get_current_tag_mode_flag(context)
     count = 0
 
-    for item in wm.category_glyph_mappings:
-        is_reserved = getattr(item, "is_reserved", True)
-        source_extension = getattr(item, "source_extension", "")
-        pending_assignment = getattr(item, "pending_tag_assignment", False)
-        tags = getattr(item, "tags", [])
-        discovered_spaces = getattr(item, "discovered_in_spaces", 0)
-        discovered_modes = getattr(item, "discovered_in_modes", 0)
+    # Check cache instead of WM to respect preview mode
+    for cache_key, cat_data in _glyph_cache.items():
+        if not isinstance(cache_key, tuple) or len(cache_key) != 2:
+            continue
+
+        # Only check global entries (space_type=-1)
+        cache_space_type, category_name = cache_key
+        if cache_space_type != -1:
+            continue
+
+        if not isinstance(cat_data, dict):
+            continue
+
+        # Get values from cache
+        is_reserved = category_name in DEFAULT_CATEGORY_GLYPHS
+        source_extension = cat_data.get("source_extension", "")
+        pending_assignment = cat_data.get("pending_tag_assignment", False)
+        tags = cat_data.get("tags", [])
+
+        # Convert discovered_spaces from list to flags
+        disc_spaces_list = cat_data.get("discovered_in_spaces", [])
+        if isinstance(disc_spaces_list, list):
+            discovered_spaces = spaces_to_flags(disc_spaces_list)
+        else:
+            discovered_spaces = 0
+
+        # Convert discovered_modes from list to flags
+        disc_modes_list = cat_data.get("discovered_in_modes", [])
+        if isinstance(disc_modes_list, list):
+            discovered_modes = modes_to_flags(disc_modes_list)
+        else:
+            discovered_modes = 0
 
         has_no_tags = not tags or (hasattr(tags, "__len__") and len(tags) == 0)
 
@@ -316,7 +347,7 @@ def _extension_has_tagged_category(wm, source_extension: str) -> bool:
 
     A category is considered "processed" if:
     - It has tags assigned (tags list is not empty)
-    - OR pending_tag_assignment is False (user selected "Without Tag" or assigned a tag)
+    - OR pending_tag_assignment is False (user selected "Without Tag" or assigned a tag AND saved)
 
     RESERVED categories (like "Item", "Tool", "View") are IGNORED because they are
     standard Blender categories that extensions may use but don't "own". An extension
@@ -324,33 +355,59 @@ def _extension_has_tagged_category(wm, source_extension: str) -> bool:
 
     This handles the case where an extension creates multiple category aliases
     (e.g., "Texel Density" and "Texel Density Checker") and user processes only one.
+
+    IMPORTANT: This function checks _glyph_cache instead of wm.category_glyph_mappings
+    because in preview mode, WM is updated for C++ UI visibility but pending_tag_assignment
+    remains True in cache. This prevents categories from disappearing from "New Add-ons!"
+    before user clicks Save.
     """
-    if wm is None or not source_extension:
+    global _glyph_cache
+
+    if not source_extension:
         return False
 
-    for item in wm.category_glyph_mappings:
-        if getattr(item, "source_extension", "") != source_extension:
+    # Check cache instead of WM to respect preview mode
+    for cache_key, cat_data in _glyph_cache.items():
+        if not isinstance(cache_key, tuple) or len(cache_key) != 2:
+            continue
+
+        # Only check global entries (space_type=-1)
+        space_type_val, category_name = cache_key
+        if space_type_val != -1:
+            continue
+
+        if not isinstance(cat_data, dict):
+            continue
+
+        if cat_data.get("source_extension", "") != source_extension:
             continue
 
         # Skip reserved categories - extensions don't "own" them
-        is_reserved = getattr(item, "is_reserved", True)
-        if is_reserved:
+        if category_name in DEFAULT_CATEGORY_GLYPHS:
             continue
 
-        # Has explicit tags assigned
-        if getattr(item, "tags", []):
+        # Has explicit tags assigned AND saved (pending_tag_assignment is False)
+        # In preview mode, tags may be added but pending_tag_assignment stays True
+        if cat_data.get("tags", []) and not cat_data.get("pending_tag_assignment", True):
             return True
 
-        # Was processed by user (tag assigned OR "Without Tag" selected)
-        # pending_tag_assignment=False means user already decided what to do with this category
-        if not getattr(item, "pending_tag_assignment", True):
+        # Was processed by user AND saved (pending_tag_assignment=False)
+        # This means user clicked Save after assigning tag or selecting "Without Tag"
+        if not cat_data.get("pending_tag_assignment", True):
             return True
 
     return False
 
 
 def _extension_has_only_reserved_categories(wm, source_extension: str) -> bool:
-    if wm is None or not source_extension:
+    """Check if extension only has reserved categories (with panels) or non-reserved without panels.
+
+    IMPORTANT: This function checks _glyph_cache instead of wm.category_glyph_mappings
+    to be consistent with _extension_has_tagged_category and respect preview mode.
+    """
+    global _glyph_cache
+
+    if not source_extension:
         return False
 
     has_any_category = False
@@ -358,13 +415,32 @@ def _extension_has_only_reserved_categories(wm, source_extension: str) -> bool:
     has_non_reserved_without_panels = False
     has_non_reserved_with_panels = False
 
-    for item in wm.category_glyph_mappings:
-        if getattr(item, "source_extension", "") != source_extension:
+    for cache_key, cat_data in _glyph_cache.items():
+        if not isinstance(cache_key, tuple) or len(cache_key) != 2:
+            continue
+
+        # Only check global entries (space_type=-1)
+        space_type_val, category_name = cache_key
+        if space_type_val != -1:
+            continue
+
+        if not isinstance(cat_data, dict):
+            continue
+
+        if cat_data.get("source_extension", "") != source_extension:
             continue
 
         has_any_category = True
-        is_reserved = getattr(item, "is_reserved", True)
-        discovered_spaces = getattr(item, "discovered_in_spaces", 0)
+        is_reserved = category_name in DEFAULT_CATEGORY_GLYPHS
+
+        # Get discovered_spaces as flags
+        disc_spaces = cat_data.get("discovered_in_spaces", [])
+        if isinstance(disc_spaces, list):
+            discovered_spaces = 0
+            for space_str in disc_spaces:
+                discovered_spaces |= SPACE_TO_FLAG.get(space_str, 0)
+        else:
+            discovered_spaces = 0
 
         if is_reserved:
             if discovered_spaces != 0:
@@ -918,12 +994,12 @@ def _get_category_data(category, space_type=-1):
 
     # Canonicalization fallback: search for category by normalized key
     # This handles cases where category names have different spellings/unicode
-    normalized_target = normalize_category_key(category)
+    normalized_target = _normalize_category_key(category)
     if normalized_target:
         for cache_key, cache_data in _glyph_cache.items():
             if isinstance(cache_key, tuple) and len(cache_key) >= 2:
                 cache_category = cache_key[1]
-                if normalize_category_key(cache_category) == normalized_target:
+                if _normalize_category_key(cache_category) == normalized_target:
                     if has_meaningful_data(cache_data):
                         category_debug_print(f"[_get_category_data] Found via canonicalization: {cache_key}")
                         return _ensure_category_panel_label(category, space_type, cache_data)
@@ -3051,14 +3127,8 @@ def toggle_category_tag_no_save(category, tag_name, space_type=-1):
             tags_after = get_category_tags(category, space_type)
             category_debug_print(f"[TOGGLE_NO_SAVE] Tags after ADD: {tags_after}")
 
-        # Update wm.category_glyph_overrides so C++ UI can see tag assignments immediately.
-        # This is necessary because C++ category_tags_string_lookup() reads from
-        # wm->category_glyph_overrides, not from Python cache.
-        # We skip sync_glyph_mappings_to_wm() (via preview_mode) to prevent premature filtering.
-        category_debug_print(f"[TOGGLE_NO_SAVE] Updating wm.category_glyph_overrides for C++ UI visibility")
-        update_category_tags_in_wm(category, space_type)
-
         # Any regular tag toggle means "Without Tag" preview must be visually OFF.
+        # This will also call update_category_tags_in_wm internally to sync WM override.
         _set_without_tag_preview_state_in_wm(category, space_type, is_selected=False)
 
         return result
@@ -3106,6 +3176,10 @@ def clear_category_tags_no_save(category, space_type=-1):
             # Toggle OFF: return to pending/unassigned state for extension categories.
             if cat_data.get("source_extension", ""):
                 cat_data["pending_tag_assignment"] = True
+            # Clear the without_tag_preview flag since user deselected
+            if cat_data.get("without_tag_preview", False):
+                cat_data["without_tag_preview"] = False
+            # This will also call update_category_tags_in_wm internally to sync WM override.
             _set_without_tag_preview_state_in_wm(category, space_type, is_selected=False)
             category_debug_print(f"[CLEAR_NO_SAVE] Toggled OFF 'Without Tag' for '{category}'")
             return True, f"Without Tag deselected for '{category}' (preview mode)"
@@ -3114,21 +3188,16 @@ def clear_category_tags_no_save(category, space_type=-1):
         old_tags = cat_data.get("tags", [])
         cat_data["tags"] = []
 
-        # Clear pending_tag_assignment - this marks the category as "not needing a tag"
-        # NOTE: We keep source_extension so the category won't be re-marked as pending
-        # on next extension discovery (existing_ext == ext_id check in discovery logic)
-        cat_data["pending_tag_assignment"] = False
+        # CRITICAL: Keep pending_tag_assignment=True so category stays visible in "New Add-ons!"
+        # until Save. We mark this as a "without_tag_preview" selection which will be processed
+        # on Save to set pending_tag_assignment=False.
+        # This ensures consistent behavior with regular tags - category disappears only after Save.
+        cat_data["without_tag_preview"] = True
 
-        category_debug_print(f"[CLEAR_NO_SAVE] Cleared tags {old_tags} and pending flag for '{category}' (keeping source_extension)")
-
-        # Update wm.category_glyph_overrides so C++ UI can see tag assignments immediately.
-        # This is necessary because C++ category_tags_string_lookup() reads from
-        # wm->category_glyph_overrides, not from Python cache.
-        # We skip sync_glyph_mappings_to_wm() (via preview_mode) to prevent premature filtering.
-        category_debug_print(f"[CLEAR_NO_SAVE] Updating wm.category_glyph_overrides for C++ UI visibility")
-        update_category_tags_in_wm(category, space_type)
+        category_debug_print(f"[CLEAR_NO_SAVE] Cleared tags {old_tags} for '{category}' (keeping pending=True for preview)")
 
         # Mark explicit "Without Tag" selection for dialog preview UI.
+        # This will also call update_category_tags_in_wm internally to sync WM override.
         _set_without_tag_preview_state_in_wm(category, space_type, is_selected=True)
 
         return True, f"Tags cleared for '{category}' (preview mode)"
@@ -3188,7 +3257,13 @@ def restore_category_tags_from_string(category, tags_string, space_type=-1):
 
                 if not is_in_orders:
                     cat_data["pending_tag_assignment"] = True
+                    # Also clear without_tag_preview flag if it was set during preview
+                    if cat_data.get("without_tag_preview", False):
+                        cat_data["without_tag_preview"] = False
+                        tag_log(f"restore_category_tags_from_string: cleared without_tag_preview for '{category}'")
                     tag_log(f"restore_category_tags_from_string: restored pending=True for '{category}' (space_type={space_type})")
+                    # Clear "Without Tag" selection in WM
+                    _set_without_tag_preview_state_in_wm(category, space_type, is_selected=False)
                     # Trigger WM sync to update "New Add-ons!" filter after restoring pending status
                     sync_glyph_mappings_to_wm()
     
@@ -3346,13 +3421,22 @@ def update_category_tags_in_wm(category, space_type=-1):
         
         if override_item is None:
             category_debug_print(f"[UPDATE_WM_TAGS] No GLOBAL override found for '{category}'")
-            # Only create a new override if there are actually tags to store.
-            # If tags are empty and no override exists, we don't need to create one.
-            if not current_tags:
+
+            # Check if this is "Without Tag" preview mode - need to create override for C++ UI
+            key = _make_cache_key(global_space_type, category)
+            without_tag_preview = False
+            if key in _glyph_cache:
+                cat_data = _glyph_cache[key]
+                if isinstance(cat_data, dict):
+                    without_tag_preview = cat_data.get("without_tag_preview", False)
+
+            # Only create a new override if there are tags OR "Without Tag" preview mode
+            if not current_tags and not without_tag_preview:
                 category_debug_print(f"[UPDATE_WM_TAGS] No override and no tags, skipping creation for '{category}'")
                 _pref_log_once(f"[DEBUG update_category_tags_in_wm] No override and no tags, skipping creation for '{category}' (global_space_type={global_space_type})")
                 tag_log(f"update_category_tags_in_wm: No override and no tags, skipping creation for '{category}' (global_space_type={global_space_type})")
                 return
+
             override_item = wm.category_glyph_overrides.new(category=category)
             # Global-First: Always use GLOBAL space_type (-1) for consistency
             if hasattr(override_item, 'space_type'):
@@ -3363,11 +3447,53 @@ def update_category_tags_in_wm(category, space_type=-1):
         else:
             # Override exists - check if we need to clear it (no tags left)
             if not current_tags:
-                # Remove the override since there are no tags
+                # Check if this is "Without Tag" preview state in cache
+                # If without_tag_preview=True, keep override with pending=True so category stays visible
+                # in "New Add-ons!" until Save. This ensures consistent behavior with regular tags.
+                key = _make_cache_key(global_space_type, category)
+                without_tag_preview = False
+                if key in _glyph_cache:
+                    cat_data = _glyph_cache[key]
+                    if isinstance(cat_data, dict):
+                        without_tag_preview = cat_data.get("without_tag_preview", False)
+
+                if without_tag_preview:
+                    # "Without Tag" preview mode - keep override with pending=True for visibility
+                    if hasattr(override_item, 'tags'):
+                        override_item.tags = ""
+                    if hasattr(override_item, 'pending_tag_assignment'):
+                        override_item.pending_tag_assignment = True  # Keep True for "New Add-ons!" visibility
+                    category_debug_print(f"[UPDATE_WM_TAGS] Keeping override for '{category}' (Without Tag preview: pending=True, tags empty)")
+                    # Also update mappings to sync state
+                    if hasattr(wm, 'category_glyph_mappings'):
+                        for item in wm.category_glyph_mappings:
+                            item_space_type = getattr(item, 'space_type', -1)
+                            if item.category == category and item_space_type == global_space_type:
+                                if hasattr(item, 'tags'):
+                                    item.tags = ""
+                                if hasattr(item, 'pending_tag_assignment'):
+                                    item.pending_tag_assignment = True  # Keep True for visibility
+                                category_debug_print(f"[UPDATE_WM_TAGS] Updated mapping for '{category}' (Without Tag preview)")
+                                break
+                    return
+
+                # Not "Without Tag" preview - remove the override since there are no tags
                 category_debug_print(f"[UPDATE_WM_TAGS] Removing GLOBAL override for '{category}' (no tags left)")
                 _pref_log_once(f"[DEBUG update_category_tags_in_wm] Removing override for '{category}' (no tags left, global_space_type={global_space_type})")
                 tag_log(f"update_category_tags_in_wm: Removing override for '{category}' (no tags left, global_space_type={global_space_type})")
                 wm.category_glyph_overrides.remove(override_item)
+                # CRITICAL: Also clear tags in category_glyph_mappings so C++ doesn't find stale tags
+                # when override is removed. Without this, toggle appears broken because mappings
+                # still contain old tag values.
+                if hasattr(wm, 'category_glyph_mappings'):
+                    for item in wm.category_glyph_mappings:
+                        item_space_type = getattr(item, 'space_type', -1)
+                        if item.category == category and item_space_type == global_space_type:
+                            if hasattr(item, 'tags'):
+                                old_tags = item.tags
+                                item.tags = ""
+                                category_debug_print(f"[UPDATE_WM_TAGS] Cleared mapping tags for '{category}' from '{old_tags}' to '' (override removed)")
+                            break
                 return
         
         if hasattr(override_item, 'tags'):
@@ -3393,6 +3519,16 @@ def update_category_tags_in_wm(category, space_type=-1):
                     old_mapping_tags = mapping_item.tags
                     mapping_item.tags = ";".join(current_tags)
                     category_debug_print(f"[UPDATE_WM_TAGS] Updated mapping tags for '{category}' from '{old_mapping_tags}' to '{mapping_item.tags}'")
+                # CRITICAL: Also sync pending_tag_assignment from cache to mappings
+                # so C++ can correctly determine "New Add-ons!" visibility
+                key = _make_cache_key(global_space_type, category)
+                if key in _glyph_cache:
+                    cat_data = _glyph_cache[key]
+                    if isinstance(cat_data, dict) and hasattr(mapping_item, 'pending_tag_assignment'):
+                        pending_val = cat_data.get("pending_tag_assignment", False)
+                        if mapping_item.pending_tag_assignment != pending_val:
+                            mapping_item.pending_tag_assignment = pending_val
+                            category_debug_print(f"[UPDATE_WM_TAGS] Updated mapping pending_tag_assignment for '{category}' to {pending_val}")
             elif current_tags:
                 # Create new mapping only if there are tags to store
                 mapping_item = wm.category_glyph_mappings.new(category=category)
@@ -3443,11 +3579,22 @@ def _set_without_tag_preview_state_in_wm(category, space_type=-1, is_selected=Fa
         if override_item is None:
             return
 
+        # CRITICAL: Keep pending=True for "New Add-ons!" visibility.
+        # The without_tag_preview flag in WM is used by C++ to determine button active state.
         if hasattr(override_item, 'pending_tag_assignment'):
-            override_item.pending_tag_assignment = (not is_selected)
+            override_item.pending_tag_assignment = True
+
+        # Set without_tag_preview flag for C++ UI button state
+        if hasattr(override_item, 'without_tag_preview'):
+            override_item.without_tag_preview = is_selected
 
         if is_selected and hasattr(override_item, 'tags'):
             override_item.tags = ""
+
+        # CRITICAL: Update WM override to make the without_tag_preview state visible in C++ UI.
+        # This must be called AFTER setting without_tag_preview flag above, otherwise
+        # update_category_tags_in_wm won't create the override (see line 3448 condition).
+        update_category_tags_in_wm(category, space_type)
     except Exception:
         # Non-critical preview UI hint; ignore failures silently.
         pass
@@ -3455,24 +3602,24 @@ def _set_without_tag_preview_state_in_wm(category, space_type=-1, is_selected=Fa
 
 def _is_without_tag_preview_selected_in_wm(category, space_type=-1):
     """Return True when preview state for "Without Tag" is currently selected.
-    
+
     Global-First: Always use GLOBAL space_type (-1) for consistency with tag storage.
+
+    NOTE: This function checks the CACHE for without_tag_preview flag, not WM.
+    The WM check was incorrect because we now keep pending=True for "New Add-ons!"
+    visibility. The without_tag_preview flag in cache is the authoritative source.
     """
+    global _glyph_cache
     try:
-        wm = bpy.context.window_manager
-        if wm is None or not hasattr(wm, 'category_glyph_overrides'):
-            return False
-
         # Global-First: Always use GLOBAL space_type (-1) for lookup
-        global_space_type = -1
-        for item in wm.category_glyph_overrides:
-            item_space_type = getattr(item, 'space_type', -1)
-            if item.category != category or item_space_type != global_space_type:
-                continue
-
-            item_tags = getattr(item, 'tags', '')
-            item_pending = getattr(item, 'pending_tag_assignment', 1)
-            return (not item_tags) and (item_pending == 0)
+        key = _make_cache_key(-1, category)
+        if key in _glyph_cache:
+            cat_data = _glyph_cache[key]
+            if isinstance(cat_data, dict):
+                # Check without_tag_preview flag AND empty tags
+                without_tag = cat_data.get("without_tag_preview", False)
+                tags = cat_data.get("tags", [])
+                return without_tag and not tags
     except Exception:
         pass
 
@@ -5766,8 +5913,20 @@ def _sync_glyph_mappings_to_wm_impl():
                     source_ext_val = normalized_data.get("source_extension", "")
 
                     pending_val = bool(normalized_data.get("pending_tag_assignment", False))
+                    without_tag_preview = bool(normalized_data.get("without_tag_preview", False))
                     disc_spaces_val = normalized_data.get("discovered_in_spaces", [])
                     disc_modes_val = normalized_data.get("discovered_in_modes", [])
+
+                    # Handle "Without Tag" preview finalization on Save:
+                    # If without_tag_preview=True, this means user selected "Without Tag" in preview
+                    # and now clicked Save. Set pending=False to finalize the choice.
+                    if without_tag_preview:
+                        pending_val = False
+                        normalized_data["pending_tag_assignment"] = False
+                        normalized_data["without_tag_preview"] = False  # Clear preview flag
+                        _glyph_cache[cache_key] = normalized_data
+                        cache_changed = True
+                        category_debug_print(f"[GLYPH SYNC] Finalized 'Without Tag' for {category!r}: pending=False")
 
                     # NORMALIZE pending: clear if category has tags or no source_extension
                     # This prevents stale pending flags from showing "New Add-ons!" button

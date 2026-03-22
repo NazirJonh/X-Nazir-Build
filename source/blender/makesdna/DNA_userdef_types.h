@@ -845,7 +845,7 @@ struct UserDef_BuildFeatures {
   /* Add your custom build feature flags here. */
   char use_enhanced_paint_system = 0;
   char use_dnd_gn_modifiers = 0;
-  char use_custom_feature_3 = 0;
+  char use_face_sets_in_edit_mesh = 0;
   char _pad[5] = {};
 };
 

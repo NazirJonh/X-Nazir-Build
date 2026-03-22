@@ -11065,7 +11065,7 @@ class USERPREF_PT_build_features(Panel):
         col = layout.column()
         col.prop(build_features, "use_enhanced_paint_system")
         col.prop(build_features, "use_dnd_gn_modifiers")
-        col.prop(build_features, "use_custom_feature_3")
+        col.prop(build_features, "use_face_sets_in_edit_mesh")
 
 
 class USERPREF_PT_experimental_build_info(Panel):

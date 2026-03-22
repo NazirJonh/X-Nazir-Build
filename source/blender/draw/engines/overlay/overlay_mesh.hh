@@ -65,11 +65,13 @@ class Meshes : Overlay {
 
   /* Depth pre-pass to cull edit cage in case the object is not opaque. */
   PassSimple edit_mesh_prepass_ps_ = {"Prepass"};
+  PassSimple edit_mesh_face_sets_ps_ = {"Face Sets"};
 
   bool xray_enabled_ = false;
   bool xray_flag_enabled_ = false;
 
   bool show_retopology_ = false;
+  bool show_face_sets_ = false;
   bool show_mesh_analysis_ = false;
   bool show_face_overlay_ = false;
   bool show_weight_ = false;
@@ -115,6 +117,8 @@ class Meshes : Overlay {
                         select_face_;
 
     show_retopology_ = (edit_flag & V3D_OVERLAY_EDIT_RETOPOLOGY) && !state.xray_enabled;
+    show_face_sets_ = (edit_flag & V3D_OVERLAY_EDIT_FACE_SETS) && !state.xray_enabled &&
+                      U.build_features.use_face_sets_in_edit_mesh;
     show_mesh_analysis_ = (edit_flag & V3D_OVERLAY_EDIT_STATVIS);
     show_face_overlay_ = (edit_flag & V3D_OVERLAY_EDIT_FACES);
     show_weight_ = (edit_flag & V3D_OVERLAY_EDIT_WEIGHT);
@@ -131,19 +135,47 @@ class Meshes : Overlay {
     float backwire_opacity = (state.xray_flag_enabled) ? 0.5f : 1.0f;
     float face_alpha = (show_face_overlay_) ? 1.0f : 0.0f;
     float retopology_offset = state.is_depth_only_drawing ? 0.0f : RETOPOLOGY_OFFSET(state.v3d);
+    float face_sets_opacity = state.v3d->overlay.face_sets_opacity;
+    /* In retopology mode make face sets more transparent for better visibility of base mesh. */
+    if (show_retopology_ && show_face_sets_) {
+      face_sets_opacity *= 0.5f;
+    }
     /* Cull back-faces for retopology face pass. This makes it so back-faces are not drawn.
      * Doing so lets us distinguish back-faces from front-faces. */
-    DRWState face_culling = (show_retopology_) ? DRW_STATE_CULL_BACK : DRWState(0);
+    DRWState face_culling = (show_retopology_ || show_face_sets_) ? DRW_STATE_CULL_BACK :
+                                                                    DRWState(0);
 
     gpu::Texture **depth_tex = (state.xray_flag_enabled) ? &res.depth_tx : &res.dummy_depth_tx;
 
     {
       auto &pass = edit_mesh_prepass_ps_;
       pass.init();
-      pass.state_set(DRW_STATE_WRITE_DEPTH | DRW_STATE_DEPTH_LESS_EQUAL | face_culling,
+      pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_WRITE_DEPTH | DRW_STATE_DEPTH_LESS_EQUAL |
+                         DRW_STATE_BLEND_ALPHA | face_culling,
                      state.clipping_plane_count);
       pass.shader_set(res.shaders->mesh_edit_depth.get());
       pass.push_constant("retopology_offset", retopology_offset);
+      pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+      pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+    }
+    if (show_face_sets_) {
+      auto &pass = edit_mesh_face_sets_ps_;
+      pass.init();
+      /* For retopology, use BLEND_ALPHA instead of BLEND_MUL because the base mesh is hidden,
+       * so render_fb contains black/background. With BLEND_MUL, multiplying by black gives black.
+       * With BLEND_ALPHA, we can draw colors directly on top of the black background. */
+      DRWState blend_mode = (show_retopology_ && show_face_sets_) ? DRW_STATE_BLEND_ALPHA :
+                                                                    DRW_STATE_BLEND_MUL;
+      pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS_EQUAL | blend_mode |
+                         face_culling,
+                     state.clipping_plane_count);
+      pass.shader_set(res.shaders->mesh_edit_face_sets.get());
+      pass.bind_texture("color_render_tx", &res.color_render_tx);
+
+      pass.push_constant("retopology_offset", retopology_offset);
+      pass.push_constant("retopology_enabled", show_retopology_);
+      pass.push_constant("face_sets_opacity", face_sets_opacity);
+
       pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
       pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
     }
@@ -321,6 +353,13 @@ class Meshes : Overlay {
       gpu::Batch *geom = DRW_mesh_batch_cache_get_edit_triangles(mesh);
       edit_mesh_prepass_ps_.draw(geom, res_handle);
     }
+    if (show_face_sets_) {
+      gpu::Batch *geom = DRW_mesh_batch_cache_get_edit_triangles(mesh);
+
+      edit_mesh_face_sets_ps_.push_constant("face_set_seed", mesh.face_sets_color_seed);
+      edit_mesh_face_sets_ps_.push_constant("face_set_default", mesh.face_sets_color_default);
+      edit_mesh_face_sets_ps_.draw(geom, res_handle);
+    }
     if (draw_as_solid && !state.is_render_depth_available) {
       gpu::Batch *geom = DRW_cache_mesh_surface_get(ob);
       edit_mesh_prepass_ps_.draw(geom, res_handle);
@@ -387,13 +426,14 @@ class Meshes : Overlay {
     GPU_debug_group_begin("Mesh Edit");
 
     GPU_framebuffer_bind(framebuffer);
-    manager.submit(edit_mesh_prepass_ps_, view);
+    if (show_retopology_ || show_face_sets_) {
+      manager.submit(edit_mesh_prepass_ps_, view);
+    }
     manager.submit(edit_mesh_analysis_ps_, view);
     manager.submit(edit_mesh_weight_ps_, view);
 
     if (!xray_enabled_) {
-      /* Still use depth-testing for selected faces when X-Ray flag is enabled but transparency is
-       * off (X-Ray Opacity == 1.0 or in Preview/Render mode) (See #135325). */
+      /* Render face selection with depth testing when X-Ray is disabled.*/
       manager.submit(edit_mesh_faces_ps_, view);
       manager.submit(edit_mesh_cages_ps_, view);
     }
@@ -420,7 +460,7 @@ class Meshes : Overlay {
 
     if (xray_enabled_) {
       /* Still use depth-testing for selected faces when X-Ray flag is enabled but transparency is
-       * off (X-Ray Opacity == 1.0 or in Preview/Render mode) (See #135325). */
+       * off (X-Ray Opacity == 1.0 or in Preview/Render mode) (See #135325).*/
       GPU_framebuffer_bind(framebuffer);
       manager.submit(edit_mesh_faces_ps_, view);
       manager.submit(edit_mesh_cages_ps_, view);
@@ -442,6 +482,30 @@ class Meshes : Overlay {
     GPU_debug_group_end();
   }
 
+  void draw_on_render(gpu::FrameBuffer *framebuffer, Manager &manager, View &view) final
+  {
+    if (!enabled_ || !show_face_sets_) {
+      return;
+    }
+
+    /* Face sets require render framebuffer for multiplicative blending.
+     * Skip rendering during selection or depth-only drawing when framebuffer is unavailable. */
+    if (framebuffer == nullptr) {
+      return;
+    }
+
+    GPU_debug_group_begin("Edit Mesh Face Sets on Render");
+    GPU_framebuffer_bind(framebuffer);
+    if (show_retopology_) {
+      manager.submit(edit_mesh_prepass_ps_, view);
+    }
+    else {
+      manager.submit(edit_mesh_prepass_ps_, view);
+    }
+    manager.submit(edit_mesh_face_sets_ps_, view);
+    GPU_debug_group_end();
+  }
+
   static bool mesh_has_edit_cage(const Object *ob)
   {
     BLI_assert(ob->type == OB_MESH);
@@ -453,6 +517,16 @@ class Meshes : Overlay {
       return (editmesh_eval_cage != nullptr) && (editmesh_eval_cage != editmesh_eval_final);
     }
     return false;
+  }
+
+  bool show_retopology() const
+  {
+    return show_retopology_;
+  }
+
+  bool show_face_sets() const
+  {
+    return show_face_sets_;
   }
 
  private:

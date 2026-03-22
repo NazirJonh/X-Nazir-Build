@@ -7868,10 +7868,10 @@ static void rna_def_userdef_build_features(BlenderRNA *brna)
       "Enable drag and drop of Geometry Nodes assets from Asset Browser into the modifier stack");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 
-  prop = RNA_def_property(srna, "use_custom_feature_3", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "use_custom_feature_3", 1);
+  prop = RNA_def_property(srna, "use_face_sets_in_edit_mesh", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_face_sets_in_edit_mesh", 1);
   RNA_def_property_ui_text(
-      prop, "Custom Feature 3", "Enable custom feature 3 for this build");
+      prop, "Face Sets in Edit Mesh", "Display face sets with individual colors in edit mode overlay");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 }
 

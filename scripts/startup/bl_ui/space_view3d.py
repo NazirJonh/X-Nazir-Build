@@ -8104,6 +8104,22 @@ class VIEW3D_PT_overlay_edit_mesh_shading(Panel):
         sub.active = overlay.show_retopology
         sub.prop(overlay, "retopology_offset", text="Retopology")
 
+        # Check if sculpt_face_set attribute exists
+        has_face_set_attribute = False
+        obj = context.active_object
+        if obj and obj.type == 'MESH' and obj.data:
+            mesh = obj.data
+            has_face_set_attribute = mesh.attributes.get(".sculpt_face_set") is not None
+
+        # Face Sets overlay - only show if experimental feature is enabled
+        if context.preferences.build_features.use_face_sets_in_edit_mesh:
+            row = col.row(align=True)
+            row.enabled = has_face_set_attribute
+            row.prop(overlay, "show_face_sets", text="")
+            sub = row.row()
+            sub.enabled = overlay.show_face_sets and has_face_set_attribute
+            sub.prop(overlay, "face_sets_opacity", text="Face Sets")
+
         col.prop(overlay, "show_weight", text="Vertex Group Weights")
         if overlay.show_weight:
             row = col.split(factor=0.33)

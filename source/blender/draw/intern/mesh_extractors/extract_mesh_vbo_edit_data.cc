@@ -14,6 +14,11 @@
 
 #include "draw_subdivision.hh"
 
+#include "BKE_attribute.hh"
+#include "BKE_customdata.hh"
+
+#include "UI_resources.hh"
+
 namespace blender::draw {
 
 static void mesh_render_data_edge_flag(const MeshRenderData &mr,
@@ -120,6 +125,7 @@ static void extract_edit_data_mesh(const MeshRenderData &mr, MutableSpan<EditLoo
   const OffsetIndices faces = mr.faces;
   const Span<int> corner_verts = mr.corner_verts;
   const Span<int> corner_edges = mr.corner_edges;
+
   threading::parallel_for(faces.index_range(), 2048, [&](const IndexRange range) {
     for (const int face : range) {
       EditLoopData face_value = {};
@@ -187,12 +193,14 @@ static void extract_edit_data_bm(const MeshRenderData &mr, MutableSpan<EditLoopD
       EditLoopData face_value = {};
       mesh_render_data_face_flag(mr, &face, uv_offsets_none, face_value);
       const BMLoop *loop = BM_FACE_FIRST_LOOP(&face);
+
       for ([[maybe_unused]] const int i : IndexRange(face.len)) {
         const int index = BM_elem_index_get(loop);
         EditLoopData &value = corners_data[index];
         value = face_value;
         mesh_render_data_edge_flag(mr, loop->e, value);
         mesh_render_data_vert_flag(mr, loop->v, value);
+
         loop = loop->next;
       }
     }
@@ -331,6 +339,7 @@ static void extract_edit_subdiv_data_bm(const MeshRenderData &mr,
   MutableSpan loose_vert_data = vbo_data.take_back(mr.loose_verts.size());
 
   BMesh &bm = *mr.bm;
+
   threading::parallel_for(IndexRange(subdiv_cache.num_subdiv_quads), 2048, [&](IndexRange range) {
     for (const int subdiv_quad : range) {
       const int coarse_face = subdiv_loop_face_index[subdiv_quad * 4];
@@ -393,6 +402,113 @@ gpu::VertBufPtr extract_edit_data_subdiv(const MeshRenderData &mr,
   else {
     extract_edit_subdiv_data_bm(mr, subdiv_cache, vbo_data);
   }
+  return vbo;
+}
+
+/* ---------------------------------------------------------------------- */
+/** \name Face Set ID extraction (separate VBO to avoid bloating EditLoopData)
+ * \{ */
+
+static const GPUVertFormat &get_edit_face_set_format()
+{
+  static const GPUVertFormat format = []() {
+    GPUVertFormat format{};
+    GPU_vertformat_attr_add(&format, "face_set_id", gpu::VertAttrType::SINT_32);
+    return format;
+  }();
+  return format;
+}
+
+gpu::VertBufPtr extract_edit_face_set(const MeshRenderData &mr)
+{
+  gpu::VertBufPtr vbo = gpu::VertBufPtr(
+      GPU_vertbuf_create_with_format(get_edit_face_set_format()));
+  const int size = mr.corners_num + mr.loose_indices_num;
+  GPU_vertbuf_data_alloc(*vbo, size);
+  MutableSpan<int> data = vbo->data<int>();
+
+  const int face_set_default = mr.mesh->face_sets_color_default;
+
+  if (mr.extract_type == MeshExtractType::Mesh) {
+    const bke::AttributeAccessor attributes = mr.mesh->attributes();
+    const VArraySpan<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
+                                                              bke::AttrDomain::Face);
+    if (face_sets.is_empty()) {
+      data.fill(face_set_default);
+    }
+    else {
+      const OffsetIndices faces = mr.faces;
+      threading::parallel_for(faces.index_range(), 2048, [&](const IndexRange range) {
+        for (const int face : range) {
+          const int face_set_id = face_sets[face];
+          for (const int corner : faces[face]) {
+            data[corner] = face_set_id;
+          }
+        }
+      });
+      /* Loose elements default. */
+      data.slice(mr.corners_num, mr.loose_indices_num).fill(face_set_default);
+    }
+  }
+  else {
+    const BMesh &bm = *mr.bm;
+    const int face_set_offset = CustomData_get_offset_named(
+        &bm.pdata, CD_PROP_INT32, ".sculpt_face_set");
+    if (face_set_offset == -1) {
+      data.fill(face_set_default);
+    }
+    else {
+      threading::parallel_for(IndexRange(bm.totface), 2048, [&](const IndexRange range) {
+        for (const int face_index : range) {
+          const BMFace &face = *BM_face_at_index(&const_cast<BMesh &>(bm), face_index);
+          const int face_set_id = BM_ELEM_CD_GET_INT(&face, face_set_offset);
+          const BMLoop *loop = BM_FACE_FIRST_LOOP(&face);
+          for ([[maybe_unused]] const int i : IndexRange(face.len)) {
+            const int index = BM_elem_index_get(loop);
+            data[index] = face_set_id;
+            loop = loop->next;
+          }
+        }
+      });
+      data.slice(mr.corners_num, mr.loose_indices_num).fill(face_set_default);
+    }
+  }
+
+  return vbo;
+}
+
+gpu::VertBufPtr extract_edit_face_set_subdiv(const MeshRenderData &mr,
+                                             const DRWSubdivCache &subdiv_cache)
+{
+  gpu::VertBufPtr vbo = gpu::VertBufPtr(
+      GPU_vertbuf_create_with_format(get_edit_face_set_format()));
+  const int size = subdiv_full_vbo_size(mr, subdiv_cache);
+  GPU_vertbuf_data_alloc(*vbo, size);
+  MutableSpan<int> data = vbo->data<int>();
+
+  const int face_set_default = mr.mesh->face_sets_color_default;
+  const Span<int> subdiv_loop_face_index(subdiv_cache.subdiv_loop_face_index,
+                                         subdiv_cache.num_subdiv_loops);
+
+  const bke::AttributeAccessor attributes = mr.mesh->attributes();
+  const VArraySpan<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
+                                                            bke::AttrDomain::Face);
+  if (face_sets.is_empty()) {
+    data.fill(face_set_default);
+  }
+  else {
+    threading::parallel_for(
+        IndexRange(subdiv_cache.num_subdiv_loops), 4096, [&](const IndexRange range) {
+          for (const int i : range) {
+            const int face_index = subdiv_loop_face_index[i];
+            data[i] = face_sets[face_index];
+          }
+        });
+    /* Loose portion defaults. */
+    data.slice(subdiv_cache.num_subdiv_loops, size - subdiv_cache.num_subdiv_loops)
+        .fill(face_set_default);
+  }
+
   return vbo;
 }
 

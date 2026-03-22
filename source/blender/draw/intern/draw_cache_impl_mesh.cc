@@ -542,7 +542,8 @@ void DRW_mesh_batch_cache_dirty_tag(Mesh *mesh, eMeshBatchDirtyMode mode)
   MeshBatchCache &cache = *mesh->runtime->batch_cache;
   switch (mode) {
     case BKE_MESH_BATCH_DIRTY_SELECT:
-      discard_buffers(cache, {VBOType::EditData, VBOType::FaceDotNormal}, {});
+      discard_buffers(
+          cache, {VBOType::EditData, VBOType::EditFaceSet, VBOType::FaceDotNormal}, {});
 
       /* Because visible UVs depends on edit mode selection, discard topology. */
       mesh_batch_cache_discard_uvedit_select(cache);
@@ -1404,7 +1405,7 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_TRIS,
                            list,
                            IBOType::Tris,
-                           {VBOType::Position, VBOType::EditData}});
+                           {VBOType::Position, VBOType::EditData, VBOType::EditFaceSet}});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edit_triangles);

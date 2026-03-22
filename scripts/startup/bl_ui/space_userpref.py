@@ -38,7 +38,7 @@ if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
 # -----------------------------------------------------------------------------
 # Tag System - Infrastructure Utilities (CleanPanels patterns)
 
-TAG_DEBUG = True  # Set to False to disable all debug output
+TAG_DEBUG = False  # Set to False to disable all debug output
 TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
 
 

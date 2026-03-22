@@ -107,7 +107,7 @@ namespace blender::ui {
  * 
  * To enable: Change to `static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;`
  */
-static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
 
 /** \} */
 

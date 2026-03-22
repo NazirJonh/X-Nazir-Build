@@ -847,7 +847,8 @@ struct UserDef_BuildFeatures {
   char use_dnd_gn_modifiers = 0;
   char use_face_sets_in_edit_mesh = 0;
   char use_dnd_texture = 1;  /* Включено для Drag and Drop текстуры */
-  char _pad[4] = {};
+  char use_sculpt_texture_mapping = 0;  /* New Mapping modes for Brush in Sculpt Mode */
+  char _pad[3] = {};
 };
 
 #define USER_BUILD_FEATURE_TEST(userdef, member) (((userdef)->build_features).member)
@@ -869,6 +870,12 @@ struct UserDef_BuildFeatures {
  * Use this to guard all texture drag&drop integration code.
  */
 #define USE_DND_TEXTURE() USER_BUILD_FEATURE_TEST(&U, use_dnd_texture)
+
+/**
+ * Check if new texture mapping modes for sculpt mode are enabled.
+ * Use this to guard triplanar, cube, octahedral and equal-area projection code.
+ */
+#define USE_SCULPT_TEXTURE_MAPPING() USER_BUILD_FEATURE_TEST(&U, use_sculpt_texture_mapping)
 
 /**
  * Container to store multiple directory paths and a name for each as a #ListBase.

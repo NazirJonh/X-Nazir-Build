@@ -2926,6 +2926,56 @@ void do_versions_after_linking_500(FileData *fd, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 12)) {
+    /* Initialize new projection fields in MTex for backward compatibility. */
+    for (Brush &brush : bmain->brushes) {
+      if (brush.mtex.tex) {
+        brush.mtex.triplanar_origin[0] = 0.0f;
+        brush.mtex.triplanar_origin[1] = 0.0f;
+        brush.mtex.triplanar_origin[2] = 0.0f;
+        brush.mtex.triplanar_scale = 1.0f;
+        brush.mtex.triplanar_sharpness = 2.0f;
+
+        brush.mtex.cube_origin[0] = 0.0f;
+        brush.mtex.cube_origin[1] = 0.0f;
+        brush.mtex.cube_origin[2] = 0.0f;
+        brush.mtex.cube_scale = 1.0f;
+
+        brush.mtex.octahedral_origin[0] = 0.0f;
+        brush.mtex.octahedral_origin[1] = 0.0f;
+        brush.mtex.octahedral_origin[2] = 0.0f;
+        brush.mtex.octahedral_scale = 1.0f;
+
+        brush.mtex.equal_area_origin[0] = 0.0f;
+        brush.mtex.equal_area_origin[1] = 0.0f;
+        brush.mtex.equal_area_origin[2] = 0.0f;
+        brush.mtex.equal_area_scale = 1.0f;
+      }
+      if (brush.mask_mtex.tex) {
+        brush.mask_mtex.triplanar_origin[0] = 0.0f;
+        brush.mask_mtex.triplanar_origin[1] = 0.0f;
+        brush.mask_mtex.triplanar_origin[2] = 0.0f;
+        brush.mask_mtex.triplanar_scale = 1.0f;
+        brush.mask_mtex.triplanar_sharpness = 2.0f;
+
+        brush.mask_mtex.cube_origin[0] = 0.0f;
+        brush.mask_mtex.cube_origin[1] = 0.0f;
+        brush.mask_mtex.cube_origin[2] = 0.0f;
+        brush.mask_mtex.cube_scale = 1.0f;
+
+        brush.mask_mtex.octahedral_origin[0] = 0.0f;
+        brush.mask_mtex.octahedral_origin[1] = 0.0f;
+        brush.mask_mtex.octahedral_origin[2] = 0.0f;
+        brush.mask_mtex.octahedral_scale = 1.0f;
+
+        brush.mask_mtex.equal_area_origin[0] = 0.0f;
+        brush.mask_mtex.equal_area_origin[1] = 0.0f;
+        brush.mask_mtex.equal_area_origin[2] = 0.0f;
+        brush.mask_mtex.equal_area_scale = 1.0f;
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

@@ -39,6 +39,7 @@
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_userdef_types.h"
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
@@ -2390,6 +2391,233 @@ void sculpt_apply_texture(const SculptSession &ss,
   if (mtex->brush_map_mode == MTEX_MAP_MODE_3D) {
     /* Get strength by feeding the vertex location directly into a texture. */
     *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, mtex, point, r_rgba, 0, ss.tex_pool);
+  }
+  else if (USE_SCULPT_TEXTURE_MAPPING() && mtex->brush_map_mode == MTEX_MAP_MODE_TRIPLANAR) {
+    /* Triplanar projection: sample three axis-aligned projections and blend by normal. */
+
+    /* Offset from triplanar origin (in object space) and apply scale. */
+    float offset[3];
+    sub_v3_v3v3(offset, brush_point, mtex->triplanar_origin);
+    const float inv_scale = (mtex->triplanar_scale != 0.0f) ? 1.0f / mtex->triplanar_scale : 1.0f;
+    mul_v3_fl(offset, inv_scale);
+
+    /* Compute weights from sculpt normal in symmetry space. */
+    float normal[3];
+    copy_v3_v3(normal, cache.sculpt_normal_symm);
+    if (!is_zero_v3(normal)) {
+      normalize_v3(normal);
+    }
+
+    const float sharpness = mtex->triplanar_sharpness;
+    float weights[3];
+    weights[0] = powf(fabsf(normal[0]), sharpness);
+    weights[1] = powf(fabsf(normal[1]), sharpness);
+    weights[2] = powf(fabsf(normal[2]), sharpness);
+
+    float weight_sum = weights[0] + weights[1] + weights[2];
+    if (weight_sum > 0.0f) {
+      weights[0] /= weight_sum;
+      weights[1] /= weight_sum;
+      weights[2] /= weight_sum;
+    }
+    else {
+      /* Degenerate normal, fall back to Z projection. */
+      weights[0] = 0.0f;
+      weights[1] = 0.0f;
+      weights[2] = 1.0f;
+    }
+
+    /* Accumulate blended color and intensity. */
+    float accum_rgba[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float accum_value = 0.0f;
+
+    for (int axis = 0; axis < 3; axis++) {
+      if (weights[axis] == 0.0f) {
+        continue;
+      }
+
+      float x, y;
+      switch (axis) {
+        case 0: /* X axis: project onto YZ plane. */
+          x = offset[1];
+          y = offset[2];
+          break;
+        case 1: /* Y axis: project onto XZ plane. */
+          x = offset[0];
+          y = offset[2];
+          break;
+        default: /* Z axis: project onto XY plane. */
+          x = offset[0];
+          y = offset[1];
+          break;
+      }
+
+      x = x * mtex->size[0] + mtex->ofs[0];
+      y = y * mtex->size[1] + mtex->ofs[1];
+
+      float sample_rgba[4];
+      float sample_value;
+      paint_get_tex_pixel(mtex, x, y, ss.tex_pool, thread_id, &sample_value, sample_rgba);
+
+      for (int i = 0; i < 4; i++) {
+        accum_rgba[i] += sample_rgba[i] * weights[axis];
+      }
+      accum_value += sample_value * weights[axis];
+    }
+
+    copy_v4_v4(r_rgba, accum_rgba);
+    *r_value = accum_value;
+
+    add_v3_fl(r_rgba, brush.texture_sample_bias);
+    *r_value -= brush.texture_sample_bias;
+  }
+  else if (USE_SCULPT_TEXTURE_MAPPING() && mtex->brush_map_mode == MTEX_MAP_MODE_CUBE) {
+    /* Cube projection: project onto the dominant axis of the direction vector. */
+    float3 dir;
+    sub_v3_v3v3(dir, brush_point, mtex->cube_origin);
+    const float scale = (mtex->cube_scale != 0.0f) ? 1.0f / mtex->cube_scale : 1.0f;
+
+    float abs_x = fabsf(dir.x);
+    float abs_y = fabsf(dir.y);
+    float abs_z = fabsf(dir.z);
+
+    float u, v;
+    if (abs_x >= abs_y && abs_x >= abs_z) {
+      /* X is dominant. */
+      u = dir.z / abs_x;
+      v = dir.y / abs_x;
+    }
+    else if (abs_y >= abs_x && abs_y >= abs_z) {
+      /* Y is dominant. */
+      u = dir.x / abs_y;
+      v = dir.z / abs_y;
+    }
+    else {
+      /* Z is dominant. */
+      u = dir.x / abs_z;
+      v = dir.y / abs_z;
+    }
+
+    /* Map to [0, 1] and apply scale and offset. */
+    u = (u * 0.5f + 0.5f) * scale;
+    v = (v * 0.5f + 0.5f) * scale;
+
+    float x = u * mtex->size[0] + mtex->ofs[0];
+    float y = v * mtex->size[1] + mtex->ofs[1];
+
+    paint_get_tex_pixel(mtex, x, y, ss.tex_pool, thread_id, r_value, r_rgba);
+
+    add_v3_fl(r_rgba, brush.texture_sample_bias);
+    *r_value -= brush.texture_sample_bias;
+  }
+  else if (USE_SCULPT_TEXTURE_MAPPING() && mtex->brush_map_mode == MTEX_MAP_MODE_OCTAHEDRAL) {
+    /* Octahedral projection (Engel formula). */
+    float3 dir;
+    sub_v3_v3v3(dir, brush_point, mtex->octahedral_origin);
+    const float scale = (mtex->octahedral_scale != 0.0f) ? 1.0f / mtex->octahedral_scale : 1.0f;
+
+    if (!is_zero_v3(dir)) {
+      normalize_v3(dir);
+    }
+
+    float u, v;
+    float denom = fabsf(dir.x) + fabsf(dir.y) + fabsf(dir.z);
+    if (denom != 0.0f) {
+      if (dir.z >= 0.0f) {
+        u = dir.x / denom;
+        v = dir.y / denom;
+      }
+      else {
+        u = (1.0f - fabsf(dir.y) / denom) * (dir.x >= 0.0f ? 1.0f : -1.0f);
+        v = (1.0f - fabsf(dir.x) / denom) * (dir.y >= 0.0f ? 1.0f : -1.0f);
+      }
+    }
+    else {
+      u = v = 0.0f;
+    }
+
+    /* Map to [0, 1] and apply scale and offset. */
+    u = (u * 0.5f + 0.5f) * scale;
+    v = (v * 0.5f + 0.5f) * scale;
+
+    float x = u * mtex->size[0] + mtex->ofs[0];
+    float y = v * mtex->size[1] + mtex->ofs[1];
+
+    paint_get_tex_pixel(mtex, x, y, ss.tex_pool, thread_id, r_value, r_rgba);
+
+    add_v3_fl(r_rgba, brush.texture_sample_bias);
+    *r_value -= brush.texture_sample_bias;
+  }
+  else if (USE_SCULPT_TEXTURE_MAPPING() && mtex->brush_map_mode == MTEX_MAP_MODE_EQUAL_AREA) {
+    /* Equal-Area projection (Lambert Azimuthal). */
+    float3 dir;
+    sub_v3_v3v3(dir, brush_point, mtex->equal_area_origin);
+    const float scale = (mtex->equal_area_scale != 0.0f) ? 1.0f / mtex->equal_area_scale : 1.0f;
+
+    if (!is_zero_v3(dir)) {
+      normalize_v3(dir);
+    }
+
+    float abs_x = fabsf(dir.x);
+    float abs_y = fabsf(dir.y);
+    float abs_z = fabsf(dir.z);
+
+    int dominant = 0;
+    if (abs_y >= abs_x && abs_y >= abs_z) {
+      dominant = 1;
+    }
+    else if (abs_z >= abs_x && abs_z >= abs_y) {
+      dominant = 2;
+    }
+
+    float pole_coord = dir[dominant];
+    bool flip_u = false;
+    bool flip_v = false;
+
+    if (pole_coord < 0.0f) {
+      pole_coord = -pole_coord;
+      flip_u = true;
+    }
+
+    float k = sqrtf(2.0f / (1.0f + pole_coord));
+    float u_proj, v_proj;
+
+    switch (dominant) {
+      case 0:
+        u_proj = dir.z;
+        v_proj = dir.y;
+        break;
+      case 1:
+        u_proj = dir.x;
+        v_proj = dir.z;
+        break;
+      default:
+        u_proj = dir.x;
+        v_proj = dir.y;
+        break;
+    }
+
+    float u = k * u_proj * 0.5f + 0.5f;
+    float v = k * v_proj * 0.5f + 0.5f;
+
+    if (flip_u) {
+      u = 1.0f - u;
+    }
+    if (flip_v) {
+      v = 1.0f - v;
+    }
+
+    /* Apply scale and offset. */
+    u *= scale;
+    v *= scale;
+
+    float x = u * mtex->size[0] + mtex->ofs[0];
+    float y = v * mtex->size[1] + mtex->ofs[1];
+
+    paint_get_tex_pixel(mtex, x, y, ss.tex_pool, thread_id, r_value, r_rgba);
+
+    add_v3_fl(r_rgba, brush.texture_sample_bias);
+    *r_value -= brush.texture_sample_bias;
   }
   else {
     /* If the active area is being applied for symmetry, flip it

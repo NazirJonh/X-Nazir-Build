@@ -11067,6 +11067,7 @@ class USERPREF_PT_build_features(Panel):
         col.prop(build_features, "use_dnd_gn_modifiers")
         col.prop(build_features, "use_face_sets_in_edit_mesh")
         col.prop(build_features, "use_dnd_texture")
+        col.prop(build_features, "use_sculpt_texture_mapping")
 
 
 class USERPREF_PT_experimental_build_info(Panel):

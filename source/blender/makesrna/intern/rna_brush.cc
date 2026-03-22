@@ -12,6 +12,7 @@
 #include "DNA_gpencil_legacy_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
+#include "DNA_userdef_types.h"
 
 #include "BLI_math_base.h"
 #include "BLI_string_utf8_symbols.h"
@@ -71,6 +72,32 @@ static const EnumPropertyItem rna_enum_brush_texture_slot_map_all_mode_items[] =
     {MTEX_MAP_MODE_AREA, "AREA_PLANE", 0, "Area Plane", ""},
     {MTEX_MAP_MODE_TILED, "TILED", 0, "Tiled", ""},
     {MTEX_MAP_MODE_3D, "3D", 0, "3D", ""},
+    {MTEX_MAP_MODE_TRIPLANAR, "TRIPLANAR", 0, "❤ Triplanar", "Triplanar projection from three axes"},
+    {MTEX_MAP_MODE_CUBE, "CUBE", 0, "❤ Cube", "Cube projection"},
+    {MTEX_MAP_MODE_OCTAHEDRAL, "OCTAHEDRAL", 0, "❤ Octahedral", "Octahedral projection"},
+    {MTEX_MAP_MODE_EQUAL_AREA, "EQUAL_AREA", 0, "❤ Equal-Area", "Equal-Area projection"},
+    {MTEX_MAP_MODE_RANDOM, "RANDOM", 0, "Random", ""},
+    {MTEX_MAP_MODE_STENCIL, "STENCIL", 0, "Stencil", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Mask texture map mode items without experimental texture mapping modes. */
+static const EnumPropertyItem prop_mask_paint_map_mode_base_items[] = {
+    {MTEX_MAP_MODE_VIEW, "VIEW_PLANE", 0, "View Plane", ""},
+    {MTEX_MAP_MODE_TILED, "TILED", 0, "Tiled", ""},
+    {MTEX_MAP_MODE_RANDOM, "RANDOM", 0, "Random", ""},
+    {MTEX_MAP_MODE_STENCIL, "STENCIL", 0, "Stencil", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Mask texture map mode items with experimental texture mapping modes. */
+static const EnumPropertyItem prop_mask_paint_map_mode_full_items[] = {
+    {MTEX_MAP_MODE_VIEW, "VIEW_PLANE", 0, "View Plane", ""},
+    {MTEX_MAP_MODE_TILED, "TILED", 0, "Tiled", ""},
+    {MTEX_MAP_MODE_TRIPLANAR, "TRIPLANAR", 0, "❤ Triplanar", "Triplanar projection"},
+    {MTEX_MAP_MODE_CUBE, "CUBE", 0, "❤ Cube", "Cube projection"},
+    {MTEX_MAP_MODE_OCTAHEDRAL, "OCTAHEDRAL", 0, "❤ Octahedral", "Octahedral projection"},
+    {MTEX_MAP_MODE_EQUAL_AREA, "EQUAL_AREA", 0, "❤ Equal-Area", "Equal-Area projection"},
     {MTEX_MAP_MODE_RANDOM, "RANDOM", 0, "Random", ""},
     {MTEX_MAP_MODE_STENCIL, "STENCIL", 0, "Stencil", ""},
     {0, nullptr, 0, nullptr, nullptr},
@@ -1117,20 +1144,46 @@ static const EnumPropertyItem *rna_BrushTextureSlot_map_mode_itemf(bContext *C,
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  /* Sculpt mode items without experimental texture mapping modes. */
+  static const EnumPropertyItem rna_enum_brush_texture_slot_map_sculpt_mode_base_items[] = {
+      {MTEX_MAP_MODE_VIEW, "VIEW_PLANE", 0, "View Plane", ""},
+      {MTEX_MAP_MODE_AREA, "AREA_PLANE", 0, "Area Plane", ""},
+      {MTEX_MAP_MODE_TILED, "TILED", 0, "Tiled", ""},
+      {MTEX_MAP_MODE_3D, "3D", 0, "3D", ""},
+      {MTEX_MAP_MODE_RANDOM, "RANDOM", 0, "Random", ""},
+      {MTEX_MAP_MODE_STENCIL, "STENCIL", 0, "Stencil", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   if (C == nullptr) {
     return rna_enum_brush_texture_slot_map_all_mode_items;
   }
 
-#  define rna_enum_brush_texture_slot_map_sculpt_mode_items \
-    rna_enum_brush_texture_slot_map_all_mode_items;
-
   const PaintMode mode = BKE_paintmode_get_active_from_context(C);
   if (mode == PaintMode::Sculpt) {
-    return rna_enum_brush_texture_slot_map_sculpt_mode_items;
+    /* Only show experimental texture mapping modes when the feature is enabled. */
+    if (USE_SCULPT_TEXTURE_MAPPING()) {
+      return rna_enum_brush_texture_slot_map_all_mode_items;
+    }
+    return rna_enum_brush_texture_slot_map_sculpt_mode_base_items;
   }
   return rna_enum_brush_texture_slot_map_texture_mode_items;
+}
 
-#  undef rna_enum_brush_texture_slot_map_sculpt_mode_items
+static const EnumPropertyItem *rna_BrushTextureSlot_mask_map_mode_itemf(bContext *C,
+                                                                        PointerRNA * /*ptr*/,
+                                                                        PropertyRNA * /*prop*/,
+                                                                        bool * /*r_free*/)
+{
+  if (C == nullptr) {
+    return prop_mask_paint_map_mode_base_items;
+  }
+
+  /* Only show experimental texture mapping modes when the feature is enabled. */
+  if (USE_SCULPT_TEXTURE_MAPPING()) {
+    return prop_mask_paint_map_mode_full_items;
+  }
+  return prop_mask_paint_map_mode_base_items;
 }
 
 static void rna_Brush_automasking_invert_cavity_set(PointerRNA *ptr, bool val)
@@ -1261,14 +1314,6 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
   StructRNA *srna;
   PropertyRNA *prop;
 
-  static const EnumPropertyItem prop_mask_paint_map_mode_items[] = {
-      {MTEX_MAP_MODE_VIEW, "VIEW_PLANE", 0, "View Plane", ""},
-      {MTEX_MAP_MODE_TILED, "TILED", 0, "Tiled", ""},
-      {MTEX_MAP_MODE_RANDOM, "RANDOM", 0, "Random", ""},
-      {MTEX_MAP_MODE_STENCIL, "STENCIL", 0, "Stencil", ""},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
-
 #  define TEXTURE_CAPABILITY(prop_name_, ui_name_) \
     prop = RNA_def_property(srna, #prop_name_, PROP_BOOLEAN, PROP_NONE); \
     RNA_def_property_clear_flag(prop, PROP_EDITABLE); \
@@ -1297,7 +1342,8 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "mask_map_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "brush_map_mode");
-  RNA_def_property_enum_items(prop, prop_mask_paint_map_mode_items);
+  RNA_def_property_enum_items(prop, prop_mask_paint_map_mode_base_items);
+  RNA_def_property_enum_funcs(prop, nullptr, nullptr, "rna_BrushTextureSlot_mask_map_mode_itemf");
   RNA_def_property_ui_text(prop, "Mode", "");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
@@ -1317,6 +1363,77 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
   prop = RNA_def_property(srna, "random_angle", PROP_FLOAT, PROP_ANGLE);
   RNA_def_property_range(prop, 0, M_PI * 2);
   RNA_def_property_ui_text(prop, "Random Angle", "Brush texture random angle");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  /* Triplanar mapping parameters. */
+  prop = RNA_def_property(srna, "triplanar_origin", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "triplanar_origin");
+  RNA_def_property_ui_text(
+      prop, "Triplanar Origin", "Origin point for triplanar projection in world space");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "triplanar_scale", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "triplanar_scale");
+  RNA_def_property_range(prop, 0.001f, 1000.0f);
+  RNA_def_property_ui_range(prop, 0.1f, 100.0f, 0.1, 3);
+  RNA_def_property_ui_text(prop, "Triplanar Scale", "Scale of texture for triplanar projection");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "triplanar_sharpness", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "triplanar_sharpness");
+  RNA_def_property_range(prop, 0.1f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.5f, 5.0f, 0.1, 2);
+  RNA_def_property_ui_text(prop,
+                           "Triplanar Sharpness",
+                           "Sharpness of blend between projections (higher = sharper transitions)");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  /* Cube projection parameters. */
+  prop = RNA_def_property(srna, "cube_origin", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "cube_origin");
+  RNA_def_property_ui_text(prop, "Cube Origin", "Origin point for cube projection");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "cube_scale", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "cube_scale");
+  RNA_def_property_range(prop, 0.001f, 1000.0f);
+  RNA_def_property_ui_range(prop, 0.1f, 100.0f, 0.1, 3);
+  RNA_def_property_ui_text(prop, "Cube Scale", "Scale of texture for cube projection");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  /* Octahedral projection parameters. */
+  prop = RNA_def_property(srna, "octahedral_origin", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "octahedral_origin");
+  RNA_def_property_ui_text(prop, "Octahedral Origin", "Origin point for octahedral projection");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "octahedral_scale", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "octahedral_scale");
+  RNA_def_property_range(prop, 0.001f, 1000.0f);
+  RNA_def_property_ui_range(prop, 0.1f, 100.0f, 0.1, 3);
+  RNA_def_property_ui_text(prop, "Octahedral Scale", "Scale of texture for octahedral projection");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  /* Equal-Area projection parameters. */
+  prop = RNA_def_property(srna, "equal_area_origin", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "equal_area_origin");
+  RNA_def_property_ui_text(prop, "Equal-Area Origin", "Origin point for equal-area projection");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "equal_area_scale", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "equal_area_scale");
+  RNA_def_property_range(prop, 0.001f, 1000.0f);
+  RNA_def_property_ui_range(prop, 0.1f, 100.0f, 0.1, 3);
+  RNA_def_property_ui_text(prop, "Equal-Area Scale", "Scale of texture for equal-area projection");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
 

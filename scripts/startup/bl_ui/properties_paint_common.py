@@ -1585,6 +1585,42 @@ def brush_texture_settings(layout, brush, sculpt):
     layout.prop(tex_slot, "offset")
     layout.prop(tex_slot, "scale")
 
+    # Triplanar mapping parameters (only if experimental feature is enabled)
+    prefs = context.preferences
+    if prefs.build_features.use_sculpt_texture_mapping:
+        if tex_slot.map_mode == 'TRIPLANAR':
+            layout.separator()
+            row = layout.row()
+            row.label(text="Triplanar", icon='FUND')
+            col = layout.column()
+            col.prop(tex_slot, "triplanar_origin", text="Origin")
+            col.prop(tex_slot, "triplanar_scale", text="Scale")
+            col.prop(tex_slot, "triplanar_sharpness", text="Sharpness")
+
+        elif tex_slot.map_mode == 'CUBE':
+            layout.separator()
+            row = layout.row()
+            row.label(text="Cube", icon='FUND')
+            col = layout.column()
+            col.prop(tex_slot, "cube_origin", text="Origin")
+            col.prop(tex_slot, "cube_scale", text="Scale")
+
+        elif tex_slot.map_mode == 'OCTAHEDRAL':
+            layout.separator()
+            row = layout.row()
+            row.label(text="Octahedral", icon='FUND')
+            col = layout.column()
+            col.prop(tex_slot, "octahedral_origin", text="Origin")
+            col.prop(tex_slot, "octahedral_scale", text="Scale")
+
+        elif tex_slot.map_mode == 'EQUAL_AREA':
+            layout.separator()
+            row = layout.row()
+            row.label(text="Equal-Area", icon='FUND')
+            col = layout.column()
+            col.prop(tex_slot, "equal_area_origin", text="Origin")
+            col.prop(tex_slot, "equal_area_scale", text="Scale")
+
     if sculpt:
         # texture_sample_bias
         layout.prop(brush, "texture_sample_bias", slider=True, text="Sample Bias")

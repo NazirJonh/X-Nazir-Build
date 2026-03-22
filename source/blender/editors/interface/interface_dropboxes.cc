@@ -27,6 +27,8 @@
 
 #include "UI_interface.hh"
 
+#include "interface_drop_image.hh"
+
 namespace blender::ui {
 
 /* -------------------------------------------------------------------- */
@@ -195,6 +197,9 @@ void dropboxes_ui()
                  drop_material_tooltip);
 
   WM_drag_global_prefetch_handler_add(WM_DRAG_ASSET, prefetch_assets);
+
+  /* Register texture/image drop functionality for template_id_preview */
+  DROP_IMAGE_register_dropboxes();
 }
 
 /** \} */

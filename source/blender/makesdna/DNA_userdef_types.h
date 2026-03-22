@@ -846,7 +846,8 @@ struct UserDef_BuildFeatures {
   char use_enhanced_paint_system = 0;
   char use_dnd_gn_modifiers = 0;
   char use_face_sets_in_edit_mesh = 0;
-  char _pad[5] = {};
+  char use_dnd_texture = 1;  /* Включено для Drag and Drop текстуры */
+  char _pad[4] = {};
 };
 
 #define USER_BUILD_FEATURE_TEST(userdef, member) (((userdef)->build_features).member)
@@ -862,6 +863,12 @@ struct UserDef_BuildFeatures {
  * Use this to guard all DnD modifier integration code.
  */
 #define USE_DND_GN_MODIFIERS() USER_BUILD_FEATURE_TEST(&U, use_dnd_gn_modifiers)
+
+/**
+ * Check if drag&drop texture support is enabled.
+ * Use this to guard all texture drag&drop integration code.
+ */
+#define USE_DND_TEXTURE() USER_BUILD_FEATURE_TEST(&U, use_dnd_texture)
 
 /**
  * Container to store multiple directory paths and a name for each as a #ListBase.

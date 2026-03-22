@@ -7873,6 +7873,13 @@ static void rna_def_userdef_build_features(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Face Sets in Edit Mesh", "Display face sets with individual colors in edit mode overlay");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "use_dnd_texture", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_dnd_texture", 1);
+  RNA_def_property_ui_text(
+      prop, "Drag&Drop Texture Support",
+      "Enable drag and drop of textures/images onto UI buttons (brush texture slots, etc.)");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
 }
 
 static void rna_def_userdef_addon_collection(BlenderRNA *brna, PropertyRNA *cprop)

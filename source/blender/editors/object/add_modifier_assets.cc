@@ -27,6 +27,7 @@
 #include "BLT_translation.hh"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
 
 #include "ED_asset.hh"
 #include "ED_asset_menu_utils.hh"
@@ -286,9 +287,14 @@ static wmOperatorStatus modifier_add_asset_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  const bool show_datablock_in_modifier = RNA_boolean_get(op->ptr, "show_datablock_in_modifier");
+  const int insert_index = RNA_int_get(op->ptr, "insert_index");
+
   bool changed = false;
   for (const PointerRNA &ptr : objects) {
     Object *object = static_cast<Object *>(ptr.data);
+
+    /* First, add the modifier (it will be appended to the end) */
     NodesModifierData *nmd = reinterpret_cast<NodesModifierData *>(
         modifier_add(op->reports, bmain, scene, object, nullptr, eModifierType_Nodes));
     if (!nmd) {
@@ -299,8 +305,20 @@ static wmOperatorStatus modifier_add_asset_exec(bContext *C, wmOperator *op)
     id_us_plus(&node_group->id);
     MOD_nodes_update_interface(object, nmd);
 
-    /* Don't show the data-block selector since it's not usually necessary for assets. */
-    nmd->flag |= NODES_MODIFIER_HIDE_DATABLOCK_SELECTOR;
+    /* Move modifier to the correct position if needed. */
+    const int mod_count = BLI_listbase_count(&object->modifiers);
+    if (insert_index >= 0 && insert_index < mod_count - 1) {
+      ModifierData *target = static_cast<ModifierData *>(
+          BLI_findlink(&object->modifiers, insert_index));
+      if (target && target != &nmd->modifier) {
+        BLI_remlink(&object->modifiers, &nmd->modifier);
+        BLI_insertlinkbefore(&object->modifiers, target, &nmd->modifier);
+      }
+    }
+
+    if (!show_datablock_in_modifier) {
+      nmd->flag |= NODES_MODIFIER_HIDE_DATABLOCK_SELECTOR;
+    }
     SET_FLAG_FROM_TEST(nmd->flag,
                        node_group->geometry_node_asset_traits &&
                            (node_group->geometry_node_asset_traits->flag &
@@ -361,6 +379,27 @@ static void OBJECT_OT_modifier_add_node_group(wmOperatorType *ot)
   asset::operator_asset_reference_props_register(*ot->srna);
   WM_operator_properties_id_lookup(ot, false);
   modifier_register_use_selected_objects_prop(ot);
+
+  /* Insertion index for drag-drop positional insertion.
+   * -1 means append at end (default behavior).
+   * >= 0 means insert before the modifier at that index. */
+  PropertyRNA *prop = RNA_def_int(ot->srna,
+                                  "insert_index",
+                                  -1,
+                                  -1,
+                                  INT_MAX,
+                                  "Insert Index",
+                                  "Index to insert modifier at (-1 = append)",
+                                  -1,
+                                  INT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "show_datablock_in_modifier",
+                         false,
+                         "Show the data-block selector in the modifier",
+                         "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
 static MenuType modifier_add_unassigned_assets_menu_type()

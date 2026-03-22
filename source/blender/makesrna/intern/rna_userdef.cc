@@ -7860,10 +7860,12 @@ static void rna_def_userdef_build_features(BlenderRNA *brna)
       "Enable enhanced paint system with gradient tools and texture painting in Sculpt mode");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 
-  prop = RNA_def_property(srna, "use_custom_feature_2", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "use_custom_feature_2", 1);
+  prop = RNA_def_property(srna, "use_dnd_gn_modifiers", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_dnd_gn_modifiers", 1);
   RNA_def_property_ui_text(
-      prop, "Custom Feature 2", "Enable custom feature 2 for this build");
+      prop,
+      "Drag&Drop Geometry Nodes Assets in Modifiers",
+      "Enable drag and drop of Geometry Nodes assets from Asset Browser into the modifier stack");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 
   prop = RNA_def_property(srna, "use_custom_feature_3", PROP_BOOLEAN, PROP_NONE);

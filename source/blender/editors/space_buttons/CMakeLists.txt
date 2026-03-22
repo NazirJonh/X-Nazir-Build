@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 set(INC
+  ../asset
   ../include
   ../../makesrna
 
@@ -15,6 +16,7 @@ set(INC_SYS
 
 set(SRC
   buttons_context.cc
+  buttons_dropboxes.cc
   buttons_ops.cc
   buttons_texture.cc
   space_buttons.cc
@@ -23,6 +25,7 @@ set(SRC
 )
 
 set(LIB
+  PRIVATE bf::asset_system
   PRIVATE bf::blenkernel
   PRIVATE bf::blenlib
   PRIVATE bf::blenloader

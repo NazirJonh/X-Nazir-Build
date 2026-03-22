@@ -14,6 +14,7 @@
 
 #include "BLI_listbase.h"
 
+#include "ED_buttons.hh"
 #include "ED_object.hh"
 
 #include "RNA_access.hh"
@@ -37,13 +38,27 @@ void template_modifiers(Layout * /*layout*/, bContext *C)
   Object *ob = ed::object::context_active_object(C);
   ListBaseT<ModifierData> *modifiers = &ob->modifiers;
 
-  const bool panels_match = panel_list_matches_data(region, modifiers, modifier_panel_id);
+  int insert_index = -1; /* -1 means append at end (default behavior) */
+  const bool show_ghost = ED_buttons_drop_active("GEOMETRY_NODES_MODIFIER", &insert_index);
+
+  /* Force rebuild if we need to show the ghost panel, or if the panels don't match the data. */
+  const bool panels_match = !show_ghost &&
+                            panel_list_matches_data(region, modifiers, modifier_panel_id);
 
   if (!panels_match) {
     panels_free_instanced(C, region);
+
+    int i = 0;
     for (ModifierData &md : *modifiers) {
+      /* Insert ghost panel before the current modifier if this is the insertion point. */
+      if (show_ghost && i == insert_index) {
+        panel_add_instanced(C, region, &region->panels, "MOD_PT_Ghost", nullptr);
+      }
+
       const ModifierTypeInfo *mti = BKE_modifier_get_info(ModifierType(md.type));
       if (mti->panel_register == nullptr) {
+        /* Increment index even if we skip this modifier, to match the list position. */
+        i++;
         continue;
       }
 
@@ -55,6 +70,12 @@ void template_modifiers(Layout * /*layout*/, bContext *C)
       *md_ptr = RNA_pointer_create_id_subdata(ob->id, RNA_Modifier, &md);
 
       panel_add_instanced(C, region, &region->panels, panel_idname, md_ptr);
+      i++;
+    }
+
+    /* Insert ghost panel at the end if needed. */
+    if (show_ghost && i == insert_index) {
+      panel_add_instanced(C, region, &region->panels, "MOD_PT_Ghost", nullptr);
     }
   }
   else {

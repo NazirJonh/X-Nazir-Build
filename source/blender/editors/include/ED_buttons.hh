@@ -46,4 +46,12 @@ void ED_buttons_set_context(const bContext *C,
                             PointerRNA *ptr,
                             int context);
 
+/**
+ * Get the current drop state for a specific drop type.
+ * \param drop_type_idname: The identifier of the drop type (e.g., "GEOMETRY_NODES_MODIFIER").
+ * \param r_index: Optional pointer to receive the insertion index (if applicable).
+ * \return True if the specified drop type is active and over the properties editor.
+ */
+bool ED_buttons_drop_active(const char *drop_type_idname, int *r_index = nullptr);
+
 }  // namespace blender

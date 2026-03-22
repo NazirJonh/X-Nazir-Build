@@ -166,6 +166,11 @@ static void buttons_main_region_init(wmWindowManager *wm, ARegion *region)
   keymap = WM_keymap_ensure(
       wm->runtime->defaultconf, "Property Editor", SPACE_PROPERTIES, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
+
+  /* Add drop boxes. */
+  ListBaseT<wmDropBox> *lb = WM_dropboxmap_find(
+      "Property Editor", SPACE_PROPERTIES, RGN_TYPE_WINDOW);
+  WM_event_add_dropbox_handler(&region->runtime->handlers, lb);
 }
 
 /** \} */
@@ -1082,6 +1087,18 @@ static void buttons_space_blend_write(BlendWriter *writer, SpaceLink *sl)
 /** \name Space Type Initialization
  * \{ */
 
+static void modifier_ghost_panel_draw(const bContext * /*C*/, Panel *panel)
+{
+  ui::Layout *layout = panel->layout;
+  ui::Layout &split = layout->split(0.35f, false);
+  ui::Layout &left_col = split.column(false);
+  left_col.alignment_set(ui::LayoutAlign::Left);
+  left_col.label("", ICON_ADD);
+  ui::Layout &center_col = split.column(false);
+  center_col.alignment_set(ui::LayoutAlign::Center);
+  center_col.label(IFACE_("Drop Modifier Here"), ICON_NONE);
+}
+
 void ED_spacetype_buttons()
 {
   std::unique_ptr<SpaceType> st = std::make_unique<SpaceType>();
@@ -1096,6 +1113,7 @@ void ED_spacetype_buttons()
   st->duplicate = buttons_duplicate;
   st->operatortypes = buttons_operatortypes;
   st->keymap = buttons_keymap;
+  st->dropboxes = buttons_dropboxes;
   st->listener = buttons_area_listener;
   st->context = buttons_context;
   st->id_remap = buttons_id_remap;
@@ -1115,6 +1133,17 @@ void ED_spacetype_buttons()
   art->lock = REGION_DRAW_LOCK_ALL;
   buttons_context_register(art);
   BLI_addhead(&st->regiontypes, art);
+
+  /* Register ghost panel for drag and drop from Asset Browser. */
+  {
+    PanelType *pt = MEM_new_zeroed<PanelType>("ghost_panel");
+    STRNCPY_UTF8(pt->idname, "MOD_PT_Ghost");
+    STRNCPY_UTF8(pt->label, "Insert Modifier");
+    STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+    pt->flag = PANEL_TYPE_NO_HEADER | PANEL_TYPE_INSTANCED;
+    pt->draw = modifier_ghost_panel_draw;
+    BLI_addtail(&art->paneltypes, pt);
+  }
 
   /* Register the panel types from modifiers. The actual panels are built per modifier rather
    * than per modifier type. */

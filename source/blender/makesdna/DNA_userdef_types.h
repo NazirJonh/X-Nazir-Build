@@ -844,7 +844,7 @@ struct UserDef_Experimental {
 struct UserDef_BuildFeatures {
   /* Add your custom build feature flags here. */
   char use_enhanced_paint_system = 0;
-  char use_custom_feature_2 = 0;
+  char use_dnd_gn_modifiers = 0;
   char use_custom_feature_3 = 0;
   char _pad[5] = {};
 };
@@ -856,6 +856,12 @@ struct UserDef_BuildFeatures {
  * Use this to guard all Speed Paint integration code.
  */
 #define USE_ENHANCED_PAINT_SYSTEM() USER_BUILD_FEATURE_TEST(&U, use_enhanced_paint_system)
+
+/**
+ * Check if drag&drop Geometry Nodes modifiers is enabled.
+ * Use this to guard all DnD modifier integration code.
+ */
+#define USE_DND_GN_MODIFIERS() USER_BUILD_FEATURE_TEST(&U, use_dnd_gn_modifiers)
 
 /**
  * Container to store multiple directory paths and a name for each as a #ListBase.

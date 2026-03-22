@@ -51,6 +51,14 @@
 /* Include drag state structures */
 #include "../interface/interface_drop_image.hh"
 
+/* Debug macro for consistent logging - only prints when g_drop_image_debug_enabled is true */
+#define PAINT_DEBUG_PRINT(fmt, ...) \
+  do { \
+    if (g_drop_image_debug_enabled) { \
+      printf("[DEBUG] PAINT: " fmt "\n", ##__VA_ARGS__); \
+    } \
+  } while (0)
+
 namespace blender {
 
 /* -------------------------------------------------------------------- */
@@ -65,15 +73,15 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
 
-  printf("[DEBUG] paint_assign_image_exec: Starting execution\n");
-  printf("[DEBUG] paint_assign_image_exec: replace_existing=%s, skip_reference_count=%s\n", 
+  PAINT_DEBUG_PRINT("paint_assign_image_exec: Starting execution");
+  PAINT_DEBUG_PRINT("paint_assign_image_exec: replace_existing=%s, skip_reference_count=%s", 
          RNA_boolean_get(op->ptr, "replace_existing") ? "true" : "false", 
          RNA_boolean_get(op->ptr, "skip_reference_count") ? "true" : "false");
 
   /* INTEGRATION: Initialize drag state if not already active */
   if (!g_texture_drag_state.is_active) {
     DROP_IMAGE_drag_state_init();
-    printf("[DEBUG] paint_assign_image_exec: Initialized drag state\n");
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: Initialized drag state");
   }
 
   /* Get the image to assign */
@@ -84,7 +92,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
   RNA_string_get(op->ptr, "filepath", filepath);
   
   if (filepath[0] != '\0') {
-    printf("[DEBUG] paint_assign_image_exec: Loading image from filepath: %s\n", filepath);
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: Loading image from filepath: %s", filepath);
     image = BKE_image_load_exists(bmain, filepath);
     if (!image) {
       BKE_reportf(op->reports, RPT_ERROR, "Cannot load image: %s", filepath);
@@ -99,7 +107,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
       BKE_report(op->reports, RPT_ERROR, "No image specified for assignment");
       return OPERATOR_CANCELLED;
     }
-    printf("[DEBUG] paint_assign_image_exec: Using existing image: %s\n", image->id.name);
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: Using existing image: %s", image->id.name);
   }
 
   /* Find active brush */
@@ -115,7 +123,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  printf("[DEBUG] paint_assign_image_exec: Found active brush: %s\n", brush->id.name);
+  PAINT_DEBUG_PRINT("paint_assign_image_exec: Found active brush: %s", brush->id.name);
 
   /* IMPROVED: Enhanced slot determination logic */
   bool use_mask_slot = RNA_boolean_get(op->ptr, "use_mask_slot");
@@ -127,17 +135,17 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
   if (context_mode == CTX_MODE_SCULPT) {
     /* In Sculpt mode, force main texture slot (mask slot doesn't exist) */
     use_mask_slot = false;
-    printf("[DEBUG] paint_assign_image_exec: SCULPT MODE: Forcing main texture slot\n");
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: SCULPT MODE: Forcing main texture slot");
   } else if (context_mode == CTX_MODE_PAINT_TEXTURE) {
     /* In Texture Paint mode, respect the use_mask_slot parameter from dropbox */
-    printf("[DEBUG] paint_assign_image_exec: TEXTURE PAINT MODE: Using slot from dropbox (use_mask_slot=%s)\n", 
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: TEXTURE PAINT MODE: Using slot from dropbox (use_mask_slot=%s)", 
            use_mask_slot ? "true" : "false");
   }
   
   Tex **tex_slot_ptr = use_mask_slot ? &brush->mask_mtex.tex : &brush->mtex.tex;
   Tex *tex_slot = *tex_slot_ptr;
   
-  printf("[DEBUG] paint_assign_image_exec: Using %s slot (replace_existing=%s)\n", 
+  PAINT_DEBUG_PRINT("paint_assign_image_exec: Using %s slot (replace_existing=%s)", 
          use_mask_slot ? "mask" : "main", replace_existing ? "true" : "false");
 
   /* ENHANCED: Check if the same image is already assigned and set skip_reference_count automatically */
@@ -148,24 +156,24 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
     if (!is_same_image && filepath[0] != '\0' && tex_slot->ima && tex_slot->ima->filepath) {
       if (BLI_path_cmp_normalized(filepath, tex_slot->ima->filepath) == 0) {
         is_same_image = true;
-        printf("[DEBUG] paint_assign_image_exec: Same image file already assigned (filepath match)\n");
+        PAINT_DEBUG_PRINT("paint_assign_image_exec: Same image file already assigned (filepath match)");
       }
     }
     
     if (is_same_image) {
-      printf("[DEBUG] paint_assign_image_exec: Same image already assigned, setting skip_reference_count=true\n");
+      PAINT_DEBUG_PRINT("paint_assign_image_exec: Same image already assigned, setting skip_reference_count=true");
       skip_reference_count = true;
     }
   }
   
   /* EARLY RETURN: If skip_reference_count is true, it means the image is already assigned */
   if (skip_reference_count) {
-    printf("[DEBUG] paint_assign_image_exec: skip_reference_count=true, image already assigned, returning early\n");
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: skip_reference_count=true, image already assigned, returning early");
     
     /* INTEGRATION: Clear drag state before returning */
     if (g_texture_drag_state.is_active) {
       DROP_IMAGE_drag_state_clear();
-      printf("[DEBUG] paint_assign_image_exec: Cleared drag state on early return\n");
+      PAINT_DEBUG_PRINT("paint_assign_image_exec: Cleared drag state on early return");
     }
     
     return OPERATOR_FINISHED;
@@ -174,7 +182,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
   if (tex_slot && tex_slot->ima) {
     /* Slot has existing texture with image */
     if (replace_existing) {
-      printf("[DEBUG] paint_assign_image_exec: Replacing existing texture image\n");
+      PAINT_DEBUG_PRINT("paint_assign_image_exec: Replacing existing texture image");
       
       /* Release old image if different */
       bool is_same_image = (tex_slot->ima == image);
@@ -183,13 +191,13 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
       if (!is_same_image && filepath[0] != '\0' && tex_slot->ima && tex_slot->ima->filepath) {
         if (BLI_path_cmp_normalized(filepath, tex_slot->ima->filepath) == 0) {
           is_same_image = true;
-          printf("[DEBUG] paint_assign_image_exec: Same image file already assigned (filepath match)\n");
+          PAINT_DEBUG_PRINT("paint_assign_image_exec: Same image file already assigned (filepath match)");
         }
       }
       
       if (!is_same_image) {
         id_us_min(&tex_slot->ima->id);
-        printf("[DEBUG] paint_assign_image_exec: Released old image: %s\n", tex_slot->ima->id.name);
+        PAINT_DEBUG_PRINT("paint_assign_image_exec: Released old image: %s", tex_slot->ima->id.name);
         
         /* Assign new image to existing texture */
         tex_slot->ima = image;
@@ -198,14 +206,14 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
         }
         tex_slot->type = TEX_IMAGE;
         
-        printf("[DEBUG] paint_assign_image_exec: Assigned new image '%s' to existing texture '%s'\n", 
+        PAINT_DEBUG_PRINT("paint_assign_image_exec: Assigned new image '%s' to existing texture '%s'", 
                image->id.name, tex_slot->id.name);
       } else {
-        printf("[DEBUG] paint_assign_image_exec: Same image already assigned, no reference count change needed\n");
+        PAINT_DEBUG_PRINT("paint_assign_image_exec: Same image already assigned, no reference count change needed");
         /* Same image already assigned - no need to change reference count */
       }
     } else {
-      printf("[DEBUG] paint_assign_image_exec: Slot occupied, but replace_existing=false, updating anyway\n");
+      PAINT_DEBUG_PRINT("paint_assign_image_exec: Slot occupied, but replace_existing=false, updating anyway");
       
       /* Still update if explicitly requested, but only if different image */
       bool is_same_image = (tex_slot->ima == image);
@@ -214,7 +222,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
       if (!is_same_image && filepath[0] != '\0' && tex_slot->ima && tex_slot->ima->filepath) {
         if (BLI_path_cmp_normalized(filepath, tex_slot->ima->filepath) == 0) {
           is_same_image = true;
-          printf("[DEBUG] paint_assign_image_exec: Same image file already assigned (filepath match)\n");
+          PAINT_DEBUG_PRINT("paint_assign_image_exec: Same image file already assigned (filepath match)");
         }
       }
       
@@ -226,9 +234,9 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
         }
         tex_slot->type = TEX_IMAGE;
         
-        printf("[DEBUG] paint_assign_image_exec: Updated to different image '%s'\n", image->id.name);
+        PAINT_DEBUG_PRINT("paint_assign_image_exec: Updated to different image '%s'", image->id.name);
       } else {
-        printf("[DEBUG] paint_assign_image_exec: Same image already assigned, no reference count change needed\n");
+        PAINT_DEBUG_PRINT("paint_assign_image_exec: Same image already assigned, no reference count change needed");
         /* Same image already assigned - no need to change reference count */
       }
     }
@@ -238,7 +246,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
   }
   else if (tex_slot && !tex_slot->ima) {
     /* Texture exists but has no image */
-    printf("[DEBUG] paint_assign_image_exec: Assigning image to existing texture without image\n");
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: Assigning image to existing texture without image");
     
     tex_slot->ima = image;
     if (!skip_reference_count) {
@@ -251,7 +259,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
   }
   else {
     /* No texture in slot - create new one */
-    printf("[DEBUG] paint_assign_image_exec: Creating new texture for empty slot\n");
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: Creating new texture for empty slot");
     
     const char *tex_name = use_mask_slot ? "BrushMaskTexture" : "BrushTexture";
     tex_slot = BKE_texture_add(bmain, tex_name);
@@ -264,7 +272,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
       id_us_plus(&image->id);
     }
     
-    printf("[DEBUG] paint_assign_image_exec: Created new texture '%s' with image '%s'\n", 
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: Created new texture '%s' with image '%s'", 
            tex_slot->id.name, image->id.name);
     
     /* Mark texture as modified */
@@ -295,7 +303,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
     Object *ob = CTX_data_active_object(C);
     if (ob) {
       DEG_id_tag_update(&ob->id, ID_RECALC_SHADING);
-      printf("[DEBUG] paint_assign_image_exec: Tagged object for shading update in Texture Paint mode\n");
+      PAINT_DEBUG_PRINT("paint_assign_image_exec: Tagged object for shading update in Texture Paint mode");
     }
   }
 
@@ -305,10 +313,10 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
   /* INTEGRATION: Clear drag state after successful completion */
   if (g_texture_drag_state.is_active) {
     DROP_IMAGE_drag_state_clear();
-    printf("[DEBUG] paint_assign_image_exec: Cleared drag state after successful completion\n");
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: Cleared drag state after successful completion");
   }
 
-  printf("[DEBUG] paint_assign_image_exec: Successfully assigned image to brush\n");
+  PAINT_DEBUG_PRINT("paint_assign_image_exec: Successfully assigned image to brush");
   return OPERATOR_FINISHED;
 }
 
@@ -367,12 +375,12 @@ static wmOperatorStatus paint_new_texture_with_image_exec(bContext *C, wmOperato
 {
   Main *bmain = CTX_data_main(C);
 
-  printf("[DEBUG] paint_new_texture_with_image_exec: Starting execution\n");
+  PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Starting execution");
 
   /* INTEGRATION: Initialize drag state if not already active */
   if (!g_texture_drag_state.is_active) {
     DROP_IMAGE_drag_state_init();
-    printf("[DEBUG] paint_new_texture_with_image_exec: Initialized drag state\n");
+    PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Initialized drag state");
   }
 
   /* Get the image */
@@ -383,7 +391,7 @@ static wmOperatorStatus paint_new_texture_with_image_exec(bContext *C, wmOperato
   RNA_string_get(op->ptr, "filepath", filepath);
   
   if (filepath[0] != '\0') {
-    printf("[DEBUG] paint_new_texture_with_image_exec: Loading image from filepath: %s\n", filepath);
+    PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Loading image from filepath: %s", filepath);
     image = BKE_image_load_exists(bmain, filepath);
     if (!image) {
       BKE_reportf(op->reports, RPT_ERROR, "Cannot load image: %s", filepath);
@@ -398,7 +406,7 @@ static wmOperatorStatus paint_new_texture_with_image_exec(bContext *C, wmOperato
       BKE_report(op->reports, RPT_ERROR, "No image specified for texture creation");
       return OPERATOR_CANCELLED;
     }
-    printf("[DEBUG] paint_new_texture_with_image_exec: Using existing image: %s\n", image->id.name);
+    PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Using existing image: %s", image->id.name);
   }
 
   /* Find active brush */
@@ -414,7 +422,7 @@ static wmOperatorStatus paint_new_texture_with_image_exec(bContext *C, wmOperato
     return OPERATOR_CANCELLED;
   }
 
-  printf("[DEBUG] paint_new_texture_with_image_exec: Found active brush: %s\n", brush->id.name);
+  PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Found active brush: %s", brush->id.name);
 
   /* IMPROVED: Enhanced slot determination logic */
   bool use_mask_slot = RNA_boolean_get(op->ptr, "use_mask_slot");
@@ -424,23 +432,23 @@ static wmOperatorStatus paint_new_texture_with_image_exec(bContext *C, wmOperato
   if (context_mode == CTX_MODE_SCULPT) {
     /* In Sculpt mode, force main texture slot (mask slot doesn't exist) */
     use_mask_slot = false;
-    printf("[DEBUG] paint_new_texture_with_image_exec: SCULPT MODE: Forcing main texture slot\n");
+    PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: SCULPT MODE: Forcing main texture slot");
   } else if (context_mode == CTX_MODE_PAINT_TEXTURE) {
     /* In Texture Paint mode, respect the use_mask_slot parameter from dropbox */
-    printf("[DEBUG] paint_new_texture_with_image_exec: TEXTURE PAINT MODE: Using slot from dropbox (use_mask_slot=%s)\n", 
+    PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: TEXTURE PAINT MODE: Using slot from dropbox (use_mask_slot=%s)", 
            use_mask_slot ? "true" : "false");
   }
   
   Tex **tex_slot_ptr = use_mask_slot ? &brush->mask_mtex.tex : &brush->mtex.tex;
   
-  printf("[DEBUG] paint_new_texture_with_image_exec: Using %s slot\n", 
+  PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Using %s slot", 
          use_mask_slot ? "mask" : "main");
 
   /* Create new texture (always create new, even if slot is occupied) */
   const char *tex_name = use_mask_slot ? "BrushMaskTexture" : "BrushTexture";
   Tex *new_texture = BKE_texture_add(bmain, tex_name);
   
-  printf("[DEBUG] paint_new_texture_with_image_exec: Created new texture: %s\n", new_texture->id.name);
+  PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Created new texture: %s", new_texture->id.name);
 
   /* Setup texture */
   new_texture->type = TEX_IMAGE;
@@ -483,7 +491,7 @@ static wmOperatorStatus paint_new_texture_with_image_exec(bContext *C, wmOperato
     Object *ob = CTX_data_active_object(C);
     if (ob) {
       DEG_id_tag_update(&ob->id, ID_RECALC_SHADING);
-      printf("[DEBUG] paint_new_texture_with_image_exec: Tagged object for shading update in Texture Paint mode\n");
+      PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Tagged object for shading update in Texture Paint mode");
     }
   }
 
@@ -493,10 +501,10 @@ static wmOperatorStatus paint_new_texture_with_image_exec(bContext *C, wmOperato
   /* INTEGRATION: Clear drag state after successful completion */
   if (g_texture_drag_state.is_active) {
     DROP_IMAGE_drag_state_clear();
-    printf("[DEBUG] paint_new_texture_with_image_exec: Cleared drag state after successful completion\n");
+    PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Cleared drag state after successful completion");
   }
 
-  printf("[DEBUG] paint_new_texture_with_image_exec: Successfully created texture with image\n");
+  PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Successfully created texture with image");
   return OPERATOR_FINISHED;
 }
 

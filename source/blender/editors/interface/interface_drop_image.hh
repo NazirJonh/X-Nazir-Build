@@ -17,6 +17,9 @@
 
 namespace blender {
 
+/** Debug flag to enable/disable printf debug output. Default: disabled. */
+extern bool g_drop_image_debug_enabled;
+
 struct ARegion;
 struct Brush;
 struct Image;

@@ -92,6 +92,9 @@
 
 namespace blender {
 
+/** Debug flag to enable/disable printf debug output. Default: disabled. */
+bool g_drop_image_debug_enabled = false;
+
 /** -------------------------------------------------------------------- */
 /** \name Type Definitions and Enums
  * \{ */

@@ -93,8 +93,13 @@ namespace blender {
 /** \name Preview Scaling Utility Functions
  * \{ */
 
-/* Debug macro for consistent logging */
-#define DROP_IMAGE_DEBUG_PRINT(fmt, ...) printf("[DEBUG] DROP_IMAGE: " fmt "\n", ##__VA_ARGS__)
+/* Debug macro for consistent logging - only prints when g_drop_image_debug_enabled is true */
+#define DROP_IMAGE_DEBUG_PRINT(fmt, ...) \
+  do { \
+    if (g_drop_image_debug_enabled) { \
+      printf("[DEBUG] DROP_IMAGE: " fmt "\n", ##__VA_ARGS__); \
+    } \
+  } while (0)
 
 /**
  * Calculates new dimensions for scaling while preserving aspect ratio.
@@ -321,30 +326,30 @@ std::string DROP_IMAGE_tooltip_view3d(bContext *C, const char *filename, const c
     if (is_drag_active && g_texture_drag_state.active_brush == brush) {
       use_mask_slot = g_texture_drag_state.is_mask_target;
       slot_info = use_mask_slot ? " (mask slot - drag target)" : " (main slot - drag target)";
-      printf("DEBUG: Using drag state info - mask_target=%s\n", use_mask_slot ? "true" : "false");
+      DROP_IMAGE_DEBUG_PRINT("Using drag state info - mask_target=%s", use_mask_slot ? "true" : "false");
     }
     else {
       /* Check if mask slot is used */
       if (context.paint_mode == TexturePaintMode::SCULPT) {
         /* In Sculpt mode always use main slot */
         slot_info = " (main slot)";
-        printf("DEBUG: Sculpt mode - using main texture slot\n");
+        DROP_IMAGE_DEBUG_PRINT("Sculpt mode - using main texture slot");
       }
       else if (context.paint_mode == TexturePaintMode::TEXTURE_PAINT) {
         /* In Texture Paint mode check settings */
         if (brush->mask_mtex.tex && brush->mask_mtex.tex != brush->mtex.tex) {
           use_mask_slot = true;
           slot_info = " (mask slot)";
-          printf("DEBUG: Texture Paint mode - using mask slot\n");
+          DROP_IMAGE_DEBUG_PRINT("Texture Paint mode - using mask slot");
         }
         else {
           slot_info = " (main slot)";
-          printf("DEBUG: Texture Paint mode - using main slot\n");
+          DROP_IMAGE_DEBUG_PRINT("Texture Paint mode - using main slot");
         }
       }
       else {
         slot_info = " (main slot)";
-        printf("DEBUG: Other paint mode - using main slot\n");
+        DROP_IMAGE_DEBUG_PRINT("Other paint mode - using main slot");
       }
     }
   }
@@ -451,23 +456,23 @@ void DROP_IMAGE_update_texture_preview(bContext *C, Main *bmain, Tex *tex, bool 
     return;
   }
 
-  printf("[DEBUG] DROP_IMAGE_update_texture_preview: Starting preview update for texture: %s\n", 
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview: Starting preview update for texture: %s", 
          tex->id.name + 2);
 
   /* 1. CRITICAL: Stop all competing preview jobs to prevent conflicts */
   ED_preview_kill_jobs(CTX_wm_manager(C), bmain);
-  printf("[DEBUG] DROP_IMAGE_update_texture_preview: Cancelled existing preview jobs\n");
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview: Cancelled existing preview jobs");
 
   /* 2. Force preview regeneration with enhanced system */
   BKE_previewimg_id_free(&tex->id);
   PreviewImage *prv = BKE_previewimg_id_ensure(&tex->id);
   BKE_icon_changed(BKE_icon_id_ensure(&tex->id));
   ED_previews_tag_dirty_by_id(*bmain, tex->id);
-  printf("[DEBUG] DROP_IMAGE_update_texture_preview: Updated preview system\n");
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview: Updated preview system");
 
   /* 3. Start asynchronous rendering for better performance */
   ui::icon_render_id(C, nullptr, &tex->id, ICON_SIZE_PREVIEW, true);
-  printf("[DEBUG] DROP_IMAGE_update_texture_preview: Started async rendering\n");
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview: Started async rendering");
 
   /* 4. Universal area refresh - update all relevant areas, not just Properties */
   for (bScreen &screen : ListBaseT<bScreen>(bmain->screens)) {
@@ -500,7 +505,7 @@ void DROP_IMAGE_update_texture_preview(bContext *C, Main *bmain, Tex *tex, bool 
       }
     }
   }
-  printf("[DEBUG] DROP_IMAGE_update_texture_preview: Updated all relevant areas\n");
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview: Updated all relevant areas");
 
   /* 5. Update dependency graph with enhanced flags */
   DEG_id_tag_update(&tex->id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL); //ID_RECALC_SYNC_TO_EVAL проверрить как влияет на производительность
@@ -519,7 +524,7 @@ void DROP_IMAGE_update_texture_preview(bContext *C, Main *bmain, Tex *tex, bool 
     WM_event_add_notifier(C, NC_TEXTURE | ND_SHADING_DRAW, nullptr);
   }
 
-  printf("[DEBUG] DROP_IMAGE_update_texture_preview: Preview update completed\n");
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview: Preview update completed");
 }
 
 /**
@@ -536,29 +541,29 @@ void DROP_IMAGE_update_texture_preview(bContext *C, Main *bmain, Tex *tex, bool 
 void DROP_IMAGE_update_texture_paint_preview(bContext *C, Main *bmain, Tex *tex, Brush *brush)
 {
   if (!tex) {
-    printf("[DEBUG] DROP_IMAGE_update_texture_paint_preview: No texture provided\n");
+    DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: No texture provided");
     return;
   }
   
-  printf("[DEBUG] DROP_IMAGE_update_texture_paint_preview: Starting enhanced preview update for texture: %s\n", 
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: Starting enhanced preview update for texture: %s", 
          tex->id.name + 2);
   
   /* ENHANCED: Check drag state for additional context */
   bool is_drag_active = DROP_IMAGE_drag_state_is_active();
   if (is_drag_active) {
-    printf("[DEBUG] DROP_IMAGE_update_texture_paint_preview: Drag operation active, using enhanced update\n");
+    DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: Drag operation active, using enhanced update");
     
     /* Update drag state with current texture */
     if (g_texture_drag_state.active_brush && brush == g_texture_drag_state.active_brush) {
       g_texture_drag_state.over_valid_target = true;
       g_texture_drag_state.highlight_alpha = 1.0f; // Full highlight during update
-      printf("[DEBUG] DROP_IMAGE_update_texture_paint_preview: Updated drag state for active brush\n");
+      DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: Updated drag state for active brush");
     }
   }
   
   /* 1. CRITICAL: Cancel all competing preview jobs to prevent conflicts */
   ED_preview_kill_jobs(CTX_wm_manager(C), bmain);
-  printf("[DEBUG] DROP_IMAGE_update_texture_paint_preview: Cancelled existing preview jobs\n");
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: Cancelled existing preview jobs");
   
   /* 2. Force Properties Editor preview update (same as standard function) */
   BKE_previewimg_id_free(&tex->id);
@@ -577,7 +582,7 @@ void DROP_IMAGE_update_texture_paint_preview(bContext *C, Main *bmain, Tex *tex,
       }
     }
   }
-  printf("[DEBUG] DROP_IMAGE_update_texture_paint_preview: Updated Properties Editor preview\n");
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: Updated Properties Editor preview");
   
   /* 3. ENHANCEMENT: Add 3D Viewport-specific refresh for Texture Paint mode */
   for (bScreen &screen : ListBaseT<bScreen>(bmain->screens)) {
@@ -587,7 +592,7 @@ void DROP_IMAGE_update_texture_paint_preview(bContext *C, Main *bmain, Tex *tex,
       }
     }
   }
-  printf("[DEBUG] DROP_IMAGE_update_texture_paint_preview: Updated 3D Viewport\n");
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: Updated 3D Viewport");
   
   /* 4. Send comprehensive notifications for all relevant systems */
   WM_event_add_notifier(C, NC_TEXTURE | ND_SHADING_PREVIEW, &tex->id);
@@ -602,16 +607,16 @@ void DROP_IMAGE_update_texture_paint_preview(bContext *C, Main *bmain, Tex *tex,
   if (brush) {
     DEG_id_tag_update(&brush->id, ID_RECALC_PARAMETERS);
     WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
-    printf("[DEBUG] DROP_IMAGE_update_texture_paint_preview: Updated brush dependencies\n");
+    DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: Updated brush dependencies");
   }
   
   /* ENHANCED: Reset drag state highlight after update */
   if (is_drag_active && g_texture_drag_state.active_brush && brush == g_texture_drag_state.active_brush) {
     g_texture_drag_state.highlight_alpha = 0.8f; // Reduce highlight after update
-    printf("[DEBUG] DROP_IMAGE_update_texture_paint_preview: Reset drag state highlight\n");
+    DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: Reset drag state highlight");
   }
   
-  printf("[DEBUG] DROP_IMAGE_update_texture_paint_preview: Enhanced preview update completed\n");
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: Enhanced preview update completed");
 }
 
 /**
@@ -626,12 +631,12 @@ void DROP_IMAGE_update_texture_paint_preview(bContext *C, Main *bmain, Tex *tex,
 void DROP_IMAGE_update_texture_preview_smart(bContext *C, Main *bmain, Tex *tex, bool force_update)
 {
   if (!C || !bmain || !tex) {
-    printf("[DEBUG] DROP_IMAGE_update_texture_preview_smart: Invalid parameters - C:%p bmain:%p tex:%p\n", 
+    DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview_smart: Invalid parameters - C:%p bmain:%p tex:%p", 
            (void*)C, (void*)bmain, (void*)tex);
     return;
   }
 
-  printf("[DEBUG] DROP_IMAGE_update_texture_preview_smart: Starting smart preview update for texture: %s\n", 
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview_smart: Starting smart preview update for texture: %s", 
          tex->id.name + 2);
 
   /* Determine the best update method based on context */
@@ -639,15 +644,15 @@ void DROP_IMAGE_update_texture_preview_smart(bContext *C, Main *bmain, Tex *tex,
   
   /* Check if we're in Texture Paint mode */
   if (context.paint_mode == TexturePaintMode::TEXTURE_PAINT) {
-    printf("[DEBUG] DROP_IMAGE_update_texture_preview_smart: Using Texture Paint specific update\n");
+    DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview_smart: Using Texture Paint specific update");
     DROP_IMAGE_update_texture_paint_preview(C, bmain, tex, context.active_brush);
   }
   else {
-    printf("[DEBUG] DROP_IMAGE_update_texture_preview_smart: Using universal update\n");
+    DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview_smart: Using universal update");
     DROP_IMAGE_update_texture_preview(C, bmain, tex, force_update);
   }
   
-  printf("[DEBUG] DROP_IMAGE_update_texture_preview_smart: Smart preview update completed\n");
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview_smart: Smart preview update completed");
 }
 
 /** \} */
@@ -668,7 +673,7 @@ void DROP_IMAGE_update_texture_preview_smart(bContext *C, Main *bmain, Tex *tex,
  */
 std::string DROP_IMAGE_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wmDropBox *drop)
 {
-  printf("[DEBUG] DROP_IMAGE_drop_tooltip: ENTRY - Function called from interface_drop_image_feedback.cc\n");
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_drop_tooltip: ENTRY - Function called from interface_drop_image_feedback.cc");
   
   /* Determine operation type by dropbox */
   const char *op_idname = drop->ot ? drop->ot->idname : "";

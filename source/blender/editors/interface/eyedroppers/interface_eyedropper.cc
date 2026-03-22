@@ -163,11 +163,12 @@ void eyedropper_draw_cursor_color_region(const wmWindow *window, const int xy[2]
    * WM_window_rect_calc возвращает прямоугольник от (0, 0) до (width, height),
    * где (0, 0) - левый нижний угол клиентской области окна (без заголовка).
    * Когда курсор вне окна, координаты могут быть отрицательными или выходить за пределы. */
-  int cursor_x = xy[0];
-  int cursor_y = xy[1];
+  const int original_cursor_x = xy[0];
+  const int original_cursor_y = xy[1];
 
   /* Проверяем валидность координат (избегаем слишком больших значений) */
-  if (cursor_x < -10000 || cursor_x > 100000 || cursor_y < -10000 || cursor_y > 100000) {
+  if (original_cursor_x < -10000 || original_cursor_x > 100000 ||
+      original_cursor_y < -10000 || original_cursor_y > 100000) {
     return;
   }
 
@@ -175,45 +176,81 @@ void eyedropper_draw_cursor_color_region(const wmWindow *window, const int xy[2]
   const float preview_size = (radius + border_width + shadow_offset) * 2.0f;
   const float half_size = preview_size / 2.0f;
 
-  /* Если курсор вне окна, ограничиваем координаты превью границами окна.
-   * Превью будет рисоваться на краю окна, ближайшем к курсору. */
-  const int min_cursor_x = int(half_size);
-  const int max_cursor_x = window_width - int(half_size);
-  const int min_cursor_y = int(half_size);
-  const int max_cursor_y = window_height - int(half_size);
-
-  /* Ограничиваем позицию курсора для расчета превью */
-  if (cursor_x < min_cursor_x) cursor_x = min_cursor_x;
-  if (cursor_x > max_cursor_x) cursor_x = max_cursor_x;
-  if (cursor_y < min_cursor_y) cursor_y = min_cursor_y;
-  if (cursor_y > max_cursor_y) cursor_y = max_cursor_y;
-  
-  /* Позиционируем превью справа и ниже курсора по умолчанию */
-  float center_x = float(cursor_x) + offset;
-  float center_y = float(cursor_y) - offset;
-  
-  /* Проверяем, помещается ли превью справа от курсора */
-  if (center_x + preview_size / 2.0f > float(window_width)) {
-    /* Не помещается справа - размещаем слева */
-    center_x = float(cursor_x) - offset;
-  }
-  
-  /* Проверяем, помещается ли превью ниже курсора */
-  if (center_y - preview_size / 2.0f < 0.0f) {
-    /* Не помещается ниже - размещаем выше */
-    center_y = float(cursor_y) + offset;
-  }
-  
-  /* Финальная проверка границ окна с учетом всех элементов */
+  /* Границы для позиционирования превью внутри окна */
   const float min_x = half_size + border_width;
   const float max_x = float(window_width) - half_size - border_width;
   const float min_y = half_size + border_width;
   const float max_y = float(window_height) - half_size - border_width;
-  
-  /* Ограничиваем координаты границами окна */
-  center_x = std::max(min_x, std::min(max_x, center_x));
-  center_y = std::max(min_y, std::min(max_y, center_y));
-  
+
+  /* Определяем, находится ли курсор вне окна */
+  const bool cursor_outside_left = (original_cursor_x < 0);
+  const bool cursor_outside_right = (original_cursor_x > window_width);
+  const bool cursor_outside_top = (original_cursor_y < 0);      /* Y < 0 = выше окна */
+  const bool cursor_outside_bottom = (original_cursor_y > window_height); /* Y > height = ниже окна */
+  const bool cursor_outside = cursor_outside_left || cursor_outside_right ||
+                               cursor_outside_top || cursor_outside_bottom;
+
+  float center_x, center_y;
+
+  if (cursor_outside) {
+    /* Курсор вне окна - размещаем превью на краю окна в направлении курсора */
+
+    if (cursor_outside_right) {
+      /* Курсор справа от окна - превью на правом краю */
+      float clamped_y = std::max(min_y, std::min(max_y, float(original_cursor_y)));
+      center_x = max_x;
+      center_y = clamped_y;
+    }
+    else if (cursor_outside_left) {
+      /* Курсор слева от окна - превью на левом краю */
+      float clamped_y = std::max(min_y, std::min(max_y, float(original_cursor_y)));
+      center_x = min_x;
+      center_y = clamped_y;
+    }
+    else if (cursor_outside_top) {
+      /* Курсор выше окна (Y < 0) - превью на верхнем краю (Y ≈ 0) */
+      float clamped_x = std::max(min_x, std::min(max_x, float(original_cursor_x)));
+      center_x = clamped_x;
+      center_y = min_y;
+    }
+    else if (cursor_outside_bottom) {
+      /* Курсор ниже окна (Y > height) - превью на нижнем краю */
+      float clamped_x = std::max(min_x, std::min(max_x, float(original_cursor_x)));
+      center_x = clamped_x;
+      center_y = max_y;
+    }
+    else {
+      /* Fallback - не должно происходить */
+      center_x = float(window_width) / 2.0f;
+      center_y = float(window_height) / 2.0f;
+    }
+  }
+  else {
+    /* Курсор внутри окна - обычное позиционирование */
+    int cursor_x = original_cursor_x;
+    int cursor_y = original_cursor_y;
+
+    /* Позиционируем превью справа и ниже курсора по умолчанию */
+    center_x = float(cursor_x) + offset;
+    center_y = float(cursor_y) - offset;
+
+    /* Проверяем, помещается ли превью справа от курсора */
+    if (center_x + preview_size / 2.0f > float(window_width)) {
+      /* Не помещается справа - размещаем слева */
+      center_x = float(cursor_x) - offset;
+    }
+
+    /* Проверяем, помещается ли превью ниже курсора */
+    if (center_y - preview_size / 2.0f < 0.0f) {
+      /* Не помещается ниже - размещаем выше */
+      center_y = float(cursor_y) + offset;
+    }
+
+    /* Ограничиваем координаты границами окна */
+    center_x = std::max(min_x, std::min(max_x, center_x));
+    center_y = std::max(min_y, std::min(max_y, center_y));
+  }
+
   /* Проверяем валидность финальных координат (избегаем NaN/Inf) */
   if (!std::isfinite(center_x) || !std::isfinite(center_y) || 
       !std::isfinite(radius) || radius <= 0.0f) {

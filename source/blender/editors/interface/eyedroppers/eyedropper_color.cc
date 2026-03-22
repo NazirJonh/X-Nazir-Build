@@ -208,7 +208,7 @@ static bool eyedropper_init(bContext *C, wmOperator *op)
 
   /* Add timer for updating preview when mouse is outside Blender window. */
   wmWindowManager *wm = CTX_wm_manager(C);
-  eye->timer = WM_event_timer_add(wm, eye->cb_win, TIMER, 0.02); /* 50 FPS update rate. */
+  eye->timer = WM_event_timer_add(wm, eye->cb_win, TIMER, 0.033); /* ~30 FPS update rate. */
 
   /* Set up color management for all color properties. */
   Scene *scene = CTX_data_scene(C);
@@ -243,7 +243,7 @@ static void eyedropper_exit(bContext *C, wmOperator *op)
   /* Remove timer. */
   if (eye->timer) {
     wmWindowManager *wm = CTX_wm_manager(C);
-    WM_event_timer_remove(wm, window, eye->timer);
+    WM_event_timer_remove(wm, eye->cb_win, eye->timer);
     eye->timer = nullptr;
   }
 
@@ -431,7 +431,8 @@ static bool eyedropper_cryptomatte_sample_fl(bContext *C,
   ScrArea *area = nullptr;
 
   int event_xy_win[2];
-  wmWindow *win = WM_window_find_under_cursor(CTX_wm_window(C), event_xy, event_xy_win);
+  /* Используем eye->cb_win, так как event_xy в пространстве этого окна */
+  wmWindow *win = WM_window_find_under_cursor(eye->cb_win, event_xy, event_xy_win);
   if (win) {
     bScreen *screen = WM_window_get_active_screen(win);
     area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, event_xy_win);
@@ -537,14 +538,17 @@ bool eyedropper_color_sample_fl(bContext *C,
   ScrArea *area = nullptr;
 
   int event_xy_win[2];
-  wmWindow *win = WM_window_find_under_cursor(CTX_wm_window(C), event_xy, event_xy_win);
-  
+  /* Используем eye->cb_win вместо CTX_wm_window(C), так как event_xy
+   * находится в пространстве eye->cb_win, а не контекстного окна */
+  wmWindow *ctx_win = eye ? eye->cb_win : CTX_wm_window(C);
+  wmWindow *win = WM_window_find_under_cursor(ctx_win, event_xy, event_xy_win);
+
   /* Периодические debug сообщения (каждые 60 кадров) */
   static int debug_counter = 0;
   debug_counter++;
   if (debug_counter % 60 == 0) {
-    printf("DEBUG: eyedropper_color_sample_fl: event_xy=(%d, %d), found win=%p\n", 
-           event_xy[0], event_xy[1], (void *)win);
+    printf("DEBUG: eyedropper_color_sample_fl: event_xy=(%d, %d), ctx_win=%p, found win=%p\n",
+           event_xy[0], event_xy[1], (void *)ctx_win, (void *)win);
   }
   
   if (win) {
@@ -730,6 +734,22 @@ static void eyedropper_color_update_current(bContext *C,
     if (eyedropper_color_sample_fl(C, eye, event_xy, col)) {
       /* Use the sampled color directly for preview without color space conversion. */
       copy_v3_v3(eye->current_col, col);
+
+      /* Debug: показываем успешное сэмплирование */
+      static int debug_counter2 = 0;
+      debug_counter2++;
+      if (debug_counter2 % 30 == 0) {
+        printf("DEBUG: eyedropper_color_update_current: sampled col=(%.3f, %.3f, %.3f)\n",
+               col[0], col[1], col[2]);
+      }
+    }
+    else {
+      static int debug_counter3 = 0;
+      debug_counter3++;
+      if (debug_counter3 % 30 == 0) {
+        printf("DEBUG: eyedropper_color_update_current: sampling FAILED at (%d, %d)\n",
+               event_xy[0], event_xy[1]);
+      }
     }
   }
 }
@@ -740,14 +760,15 @@ static void eyedropper_update_preview(bContext *C, Eyedropper *eye, const int ev
   if (eye->draw_handle_sample_text) {
     /* Update cursor position immediately for smooth preview. */
     int event_xy_win[2];
-    wmWindow *win = WM_window_find_under_cursor(CTX_wm_window(C), event_xy, event_xy_win);
+    /* Используем eye->cb_win, так как event_xy в пространстве этого окна */
+    wmWindow *win = WM_window_find_under_cursor(eye->cb_win, event_xy, event_xy_win);
     if (win) {
       /* Курсор внутри окна Blender - используем координаты события */
       eye->cb_win_event_xy[0] = event_xy[0];
       eye->cb_win_event_xy[1] = event_xy[1];
     }
     else {
-      /* Курсор вне окна Blender - получаем актуальную позицию курсора 
+      /* Курсор вне окна Blender - получаем актуальную позицию курсора
        * в координатах окна, которое обрабатывает отрисовку (eye->cb_win) */
       if (wm_cursor_position_get(eye->cb_win, &eye->cb_win_event_xy[0], &eye->cb_win_event_xy[1])) {
         /* Координаты уже в пространстве клиента eye->cb_win */
@@ -775,11 +796,14 @@ static void eyedropper_update_preview(bContext *C, Eyedropper *eye, const int ev
       }
     }
     else {
-      /* When sampling outside a window, we can't rely on a region for redraw. */
-      WM_main_add_notifier(NC_WM | ND_DRAW, nullptr);
-      if (wm) {
-        ED_screen_refresh(C, wm, eye->cb_win);
-      }
+      /* When sampling outside a window, mark the window for paint cursor redraw.
+       * This will trigger the draw callback on the next redraw cycle. */
+      bScreen *screen = WM_window_get_active_screen(eye->cb_win);
+      screen->do_draw_paintcursor = true;
+
+      /* Force redraw - wm_draw_update will only redraw windows that have
+       * redraw flags set, so this is efficient. */
+      WM_redraw_windows(C);
     }
   }
 }
@@ -884,34 +908,32 @@ static void eyedropper_modal_handle_mousemove(bContext *C, wmOperator *op, const
 static void eyedropper_modal_handle_timer(bContext *C, wmOperator * /*op*/, const wmEvent * /*event*/, Eyedropper *eye)
 {
   /* Timer event for updating preview when mouse is outside Blender window. */
-  
+
   int mouse_xy[2];
-  wmWindow *win = CTX_wm_window(C);
+  /* Используем eye->cb_win для получения координат курсора в пространстве этого окна */
+  wmWindow *win = eye->cb_win;
 
   /* Периодические debug сообщения (каждые 80 кадров) */
   static int debug_counter = 0;
   debug_counter++;
   if (debug_counter % 80 == 0) {
-    printf("DEBUG: eyedropper_modal_handle_timer: TIMER event for eye->cb_win=%p, win=%p\n", 
-           (void *)eye->cb_win, (void *)win);
+    printf("DEBUG: eyedropper_modal_handle_timer: TIMER event for eye->cb_win=%p\n",
+           (void *)eye->cb_win);
   }
 
-  /* Get current mouse position from window event state. */
-  if (win && win->runtime && win->runtime->eventstate) {
-    mouse_xy[0] = win->runtime->eventstate->xy[0];
-    mouse_xy[1] = win->runtime->eventstate->xy[1];
-    
+  /* Get current mouse position in the coordinate space of eye->cb_win */
+  if (win && wm_cursor_position_get(win, &mouse_xy[0], &mouse_xy[1])) {
     if (debug_counter % 80 == 0) {
-      printf("DEBUG: eyedropper_modal_handle_timer: TIMER using coords from win->eventstate: (%d, %d) from win=%p\n",
-             mouse_xy[0], mouse_xy[1], (void *)win);
+      printf("DEBUG: eyedropper_modal_handle_timer: TIMER using coords from wm_cursor_position_get: (%d, %d)\n",
+             mouse_xy[0], mouse_xy[1]);
     }
-    
-    /* В Windows используем оригинальные координаты для отрисовки превью */
+
+    /* Обновляем превью с текущими координатами курсора */
     eyedropper_update_preview(C, eye, mouse_xy);
   }
   else {
     if (debug_counter % 80 == 0) {
-      printf("DEBUG: eyedropper_modal_handle_timer: TIMER - no win or win->eventstate\n");
+      printf("DEBUG: eyedropper_modal_handle_timer: TIMER - no win or wm_cursor_position_get failed\n");
     }
   }
 }
@@ -1041,11 +1063,9 @@ static wmOperatorStatus eyedropper_screen_modal(bContext *C, wmOperator *op, con
     eyedropper_update_preview(C, eye, event->xy);
   }
   else if (event->type == TIMER && event->customdata == eye->timer) {
+    /* Используем eye->cb_win для получения координат курсора */
     int mouse_xy[2];
-    wmWindow *win = CTX_wm_window(C);
-    if (win && win->runtime && win->runtime->eventstate) {
-      mouse_xy[0] = win->runtime->eventstate->xy[0];
-      mouse_xy[1] = win->runtime->eventstate->xy[1];
+    if (eye->cb_win && wm_cursor_position_get(eye->cb_win, &mouse_xy[0], &mouse_xy[1])) {
       eyedropper_update_preview(C, eye, mouse_xy);
     }
   }

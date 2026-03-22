@@ -449,11 +449,14 @@ struct Brush {
   float automasking_cavity_factor = 1.0f;
 
   struct CurveMapping *automasking_cavity_curve = nullptr;
+
+  /** Channels that brush writes to in vertex paint mode (#eBrushVertexPaintChannel). */
+  int vertex_paint_channel_flag = (BRUSH_VPAINT_CHANNEL_R | BRUSH_VPAINT_CHANNEL_G | BRUSH_VPAINT_CHANNEL_B);
+
+  char _pad4[4] = {};
 };
 
 /* Struct to hold palette colors for sorting. */
-#
-#
 struct tPaletteColorHSV {
   float rgb[3] = {};
   float value = 0;

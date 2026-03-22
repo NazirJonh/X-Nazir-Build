@@ -1159,6 +1159,92 @@ static void rna_Brush_automasking_cavity_set(PointerRNA *ptr, bool val)
   }
 }
 
+static bool rna_Brush_vertex_paint_channel_r_get(PointerRNA *ptr)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+  return (brush->vertex_paint_channel_flag & BRUSH_VPAINT_CHANNEL_R) != 0;
+}
+
+static void rna_Brush_vertex_paint_channel_r_set(PointerRNA *ptr, bool value)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+  if (value) {
+    brush->vertex_paint_channel_flag |= BRUSH_VPAINT_CHANNEL_R;
+  }
+  else {
+    /* Prevent disabling all channels - at least one must remain enabled */
+    int remaining = brush->vertex_paint_channel_flag & ~BRUSH_VPAINT_CHANNEL_R;
+    if (remaining == 0) {
+      return;
+    }
+    brush->vertex_paint_channel_flag &= ~BRUSH_VPAINT_CHANNEL_R;
+  }
+}
+
+static bool rna_Brush_vertex_paint_channel_g_get(PointerRNA *ptr)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+  return (brush->vertex_paint_channel_flag & BRUSH_VPAINT_CHANNEL_G) != 0;
+}
+
+static void rna_Brush_vertex_paint_channel_g_set(PointerRNA *ptr, bool value)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+  if (value) {
+    brush->vertex_paint_channel_flag |= BRUSH_VPAINT_CHANNEL_G;
+  }
+  else {
+    int remaining = brush->vertex_paint_channel_flag & ~BRUSH_VPAINT_CHANNEL_G;
+    if (remaining == 0) {
+      return;
+    }
+    brush->vertex_paint_channel_flag &= ~BRUSH_VPAINT_CHANNEL_G;
+  }
+}
+
+static bool rna_Brush_vertex_paint_channel_b_get(PointerRNA *ptr)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+  return (brush->vertex_paint_channel_flag & BRUSH_VPAINT_CHANNEL_B) != 0;
+}
+
+static void rna_Brush_vertex_paint_channel_b_set(PointerRNA *ptr, bool value)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+  if (value) {
+    brush->vertex_paint_channel_flag |= BRUSH_VPAINT_CHANNEL_B;
+  }
+  else {
+    int remaining = brush->vertex_paint_channel_flag & ~BRUSH_VPAINT_CHANNEL_B;
+    if (remaining == 0) {
+      return;
+    }
+    brush->vertex_paint_channel_flag &= ~BRUSH_VPAINT_CHANNEL_B;
+  }
+}
+
+static bool rna_Brush_vertex_paint_channel_a_get(PointerRNA *ptr)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+  return (brush->vertex_paint_channel_flag & BRUSH_VPAINT_CHANNEL_A) != 0;
+}
+
+static void rna_Brush_vertex_paint_channel_a_set(PointerRNA *ptr, bool value)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+
+  if (value) {
+    brush->vertex_paint_channel_flag |= BRUSH_VPAINT_CHANNEL_A;
+  }
+  else {
+    int remaining = brush->vertex_paint_channel_flag & ~BRUSH_VPAINT_CHANNEL_A;
+    if (remaining == 0) {
+      return;
+    }
+    brush->vertex_paint_channel_flag &= ~BRUSH_VPAINT_CHANNEL_A;
+  }
+}
+
 static std::optional<std::string> rna_BrushCurvesSculptSettings_path(const PointerRNA * /*ptr*/)
 {
   return "curves_sculpt_settings";
@@ -3892,6 +3978,36 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_boolean_negative_sdna(prop, nullptr, "flag", BRUSH_LOCK_ALPHA);
   RNA_def_property_ui_text(
       prop, "Affect Alpha", "When this is disabled, lock alpha while painting");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+
+  /* Vertex Paint Channel Output */
+  prop = RNA_def_property(srna, "use_vertex_paint_channel_r", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+      "rna_Brush_vertex_paint_channel_r_get",
+      "rna_Brush_vertex_paint_channel_r_set");
+  RNA_def_property_ui_text(prop, "Red Channel", "Write to red channel when vertex painting");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_vertex_paint_channel_g", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+      "rna_Brush_vertex_paint_channel_g_get",
+      "rna_Brush_vertex_paint_channel_g_set");
+  RNA_def_property_ui_text(prop, "Green Channel", "Write to green channel when vertex painting");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_vertex_paint_channel_b", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+      "rna_Brush_vertex_paint_channel_b_get",
+      "rna_Brush_vertex_paint_channel_b_set");
+  RNA_def_property_ui_text(prop, "Blue Channel", "Write to blue channel when vertex painting");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_vertex_paint_channel_a", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+      "rna_Brush_vertex_paint_channel_a_get",
+      "rna_Brush_vertex_paint_channel_a_set");
+  RNA_def_property_ui_text(prop, "Alpha Channel", "Write to alpha channel when vertex painting");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "curve_distance_falloff", PROP_POINTER, PROP_NONE);

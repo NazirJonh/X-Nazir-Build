@@ -1446,6 +1446,17 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
         layout.separator()
 
         layout.prop(brush, "use_alpha")
+
+        # Vertex Paint Channel Output
+        layout.separator()
+        col = layout.column(align=True)
+        col.label(text="Channel Output:", icon='GROUP_VCOL')
+
+        # Channel toggle buttons for RGB channels
+        row = col.row(align=True)
+        row.prop(brush, "use_vertex_paint_channel_r", text="Red", icon='RGB_RED', toggle=True)
+        row.prop(brush, "use_vertex_paint_channel_g", text="Green", icon='RGB_GREEN', toggle=True)
+        row.prop(brush, "use_vertex_paint_channel_b", text="Blue", icon='RGB_BLUE', toggle=True)
         if brush.vertex_brush_type != 'SMEAR':
             use_accumulate = True
         use_frontface = True

@@ -548,6 +548,15 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 7)) {
+    /* Initialize vertex_paint_channel_flag for existing brushes. */
+    for (Brush &brush : bmain->brushes) {
+      /* Set default RGB channels for brushes created before this version. */
+      brush.vertex_paint_channel_flag = (BRUSH_VPAINT_CHANNEL_R | BRUSH_VPAINT_CHANNEL_G |
+                                         BRUSH_VPAINT_CHANNEL_B);
+    }
+  }
+
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 12)) {
     for (bScreen &screen : bmain->screens) {
       for (ScrArea &area : screen.areabase) {

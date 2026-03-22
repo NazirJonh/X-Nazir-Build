@@ -629,6 +629,9 @@ struct View3DOverlay {
   /** Weight paint mode settings. */
   int wpaint_flag = 0;
 
+  /** Vertex paint channel display flags (R=bit0, G=bit1, B=bit2, A=bit3, Grayscale=bit4). */
+  int vertex_paint_channel_flag = 7;  // 0x07 = R+G+B enabled by default, Alpha and Grayscale disabled
+
   /** Alpha for texture, weight, vertex paint overlay. */
   float texture_paint_mode_opacity = 1.0f;
   float vertex_paint_mode_opacity = 1.0f;
@@ -791,6 +794,8 @@ struct View3D {
   /** Display settings. */
   View3DShading shading;
   View3DOverlay overlay;
+
+  char _pad_viewer[4] = {};
 
   /** Path to the viewer node that is currently previewed. This is retrieved from the workspace. */
   ViewerPath viewer_path;

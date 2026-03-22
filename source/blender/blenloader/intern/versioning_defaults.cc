@@ -210,6 +210,10 @@ static void blo_update_defaults_screen(bScreen *screen,
       v3d->overlay.texture_paint_mode_opacity = 1.0f;
       v3d->overlay.weight_paint_mode_opacity = 1.0f;
       v3d->overlay.vertex_paint_mode_opacity = 1.0f;
+      /* Initialize vertex paint channel flags: RGB channels enabled by default. */
+      if (v3d->overlay.vertex_paint_channel_flag == 0) {
+        v3d->overlay.vertex_paint_channel_flag = 7;  // 0x07 = RGB enabled, Alpha disabled
+      }
       /* Update default Z bias for retopology overlay. */
       v3d->overlay.retopology_offset = 0.01f;
       /* Set default face sets opacity for edit mode. */

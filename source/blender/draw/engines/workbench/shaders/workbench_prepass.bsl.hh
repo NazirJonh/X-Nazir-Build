@@ -122,6 +122,11 @@ struct Mesh {
   /** WORKAROUND: This exact compilation constant is checked in Metal backend to enable clip
    * distances. */
   [[compilation_constant]] const bool use_clipping;
+
+  /** Vertex paint channel mask (r, g, b, a). 1.0 = show, 0.0 = hide */
+  [[push_constant]] const float4 vertex_paint_channel_mask;
+  /** Vertex paint grayscale mode. 1 = grayscale, 0 = color */
+  [[push_constant]] const int vertex_paint_grayscale;
 };
 
 [[vertex]] void vert_mesh([[resource_table]] Mesh &mesh,
@@ -145,10 +150,13 @@ struct Mesh {
 
   materials.material_data_get(int(drw_custom_id()),
                               v_in.ac.rgb,
+                              v_in.ac.a,
                               v_out.color,
                               v_out.alpha,
                               v_out.roughness,
-                              v_out.metallic);
+                              v_out.metallic,
+                              mesh.vertex_paint_channel_mask,
+                              mesh.vertex_paint_grayscale);
 }
 
 struct Curves {
@@ -165,6 +173,11 @@ struct Curves {
   [[sampler(WB_CURVES_COLOR_SLOT) /*, frequency(batch)*/]] samplerBuffer ac;
   [[sampler(WB_CURVES_UV_SLOT) /*, frequency(batch)*/]] samplerBuffer au;
   [[push_constant]] const int emitter_object_id;
+
+  /** Vertex paint channel mask (r, g, b, a). 1.0 = show, 0.0 = hide */
+  [[push_constant]] const float4 vertex_paint_channel_mask;
+  /** Vertex paint grayscale mode. 1 = grayscale, 0 = color */
+  [[push_constant]] const int vertex_paint_grayscale;
 };
 
 [[vertex]] void vert_curves([[resource_table]] Curves &curves,
@@ -206,10 +219,13 @@ struct Curves {
 
   materials.material_data_get(int(drw_custom_id()),
                               curves::get_customdata_vec3(ws_pt.curve_id, curves.ac),
+                              1.0f,  /* curves use default alpha */
                               v_out.color,
                               v_out.alpha,
                               v_out.roughness,
-                              v_out.metallic);
+                              v_out.metallic,
+                              curves.vertex_paint_channel_mask,
+                              curves.vertex_paint_grayscale);
 
   /* Hairs have lots of layer and can rapidly become the most prominent surface.
    * So we lower their alpha artificially. */
@@ -233,6 +249,11 @@ struct PointCloud {
   /** WORKAROUND: This exact compilation constant is checked in Metal backend to enable clip
    * distances. */
   [[compilation_constant]] const bool use_clipping;
+
+  /** Vertex paint channel mask (r, g, b, a). 1.0 = show, 0.0 = hide */
+  [[push_constant]] const float4 vertex_paint_channel_mask;
+  /** Vertex paint grayscale mode. 1 = grayscale, 0 = color */
+  [[push_constant]] const int vertex_paint_grayscale;
 };
 
 [[vertex]] void vert_pointcloud([[resource_table]] PointCloud &point_cloud,
@@ -258,10 +279,13 @@ struct PointCloud {
 
   materials.material_data_get(int(drw_custom_id()),
                               float3(1.0f),
+                              1.0f,  /* pointcloud uses default alpha */
                               v_out.color,
                               v_out.alpha,
                               v_out.roughness,
-                              v_out.metallic);
+                              v_out.metallic,
+                              point_cloud.vertex_paint_channel_mask,
+                              point_cloud.vertex_paint_grayscale);
 
   v_out.object_id = int(drw_resource_id() & 0xFFFFu) + 1;
 }

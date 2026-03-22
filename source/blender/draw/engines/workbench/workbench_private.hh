@@ -2,6 +2,9 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
+/* Enable debug printf messages for vertex paint channel feature */
+// #define VPAINT_DEBUG
+
 #include "BKE_context.hh"
 
 #include "DNA_camera_types.h"
@@ -183,6 +186,12 @@ struct SceneState {
 
   bool show_paint_bvh_debug = false;
 
+  /** Vertex paint channel mask (r, g, b, a). 1.0 = show, 0.0 = hide */
+  float4 vertex_paint_channel_mask = float4(1.0f);
+
+  /** Vertex paint grayscale mode. true = grayscale, false = color */
+  bool vertex_paint_grayscale = true;
+
   void init(const DRWContext *context, bool scene_updated, Object *camera_ob = nullptr);
 };
 
@@ -304,6 +313,8 @@ class MeshPass : public PassMain {
   ePipelineType pipeline_;
   eLightingType lighting_;
   bool clip_;
+  float4 vertex_paint_channel_mask_ = float4(1.0f);
+  int vertex_paint_grayscale_ = 1;  /* Use int instead of bool for push_constant */
 
   bool is_empty_ = false;
 
@@ -317,6 +328,8 @@ class MeshPass : public PassMain {
 
   void init_pass(SceneResources &resources, DRWState state, int clip_planes);
   void init_subpasses(ePipelineType pipeline, eLightingType lighting, bool clip);
+  void set_vertex_paint_channel_mask(const float4 &mask);
+  void set_vertex_paint_grayscale(bool grayscale);
 
   PassMain::Sub &get_subpass(eGeometryType geometry_type,
                              const MaterialTexture *texture = nullptr);

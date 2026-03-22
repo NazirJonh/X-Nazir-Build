@@ -933,6 +933,155 @@ static void rna_Space_show_region_header_update(bContext *C, PointerRNA *ptr)
   rna_Space_bool_from_region_flag_update_by_type(C, ptr, RGN_TYPE_TOOL_HEADER, RGN_FLAG_HIDDEN);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Vertex Paint Channel Display Access
+ * \{ */
+
+static View3DOverlay *rna_Space_view3d_overlay_get(PointerRNA *ptr)
+{
+  View3D *v3d = static_cast<View3D *>(ptr->data);
+  return &v3d->overlay;
+}
+
+static void rna_view3d_overlay_vertex_paint_channel_set(PointerRNA *ptr,
+                                                        const bool value,
+                                                        const int channel_flag)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+
+  int old_flag = overlay->vertex_paint_channel_flag;
+  int new_flag = old_flag;
+  SET_FLAG_FROM_TEST(new_flag, value, channel_flag);
+
+  bool is_grayscale = (old_flag & V3D_OVERLAY_VPAINT_GRAYSCALE) != 0;
+  bool is_alpha_channel = (channel_flag == V3D_OVERLAY_VPAINT_SHOW_A);
+
+  if (is_grayscale && value) {
+    /* In grayscale mode: only ONE channel can be active at a time.
+     * When activating a channel, deactivate all others. */
+    new_flag = (old_flag & ~V3D_OVERLAY_VPAINT_SHOW_ALL_MASK) | channel_flag | V3D_OVERLAY_VPAINT_GRAYSCALE;
+  }
+  else if (is_grayscale && !value) {
+    /* In grayscale mode: cannot deactivate the last active channel.
+     * Ignore the deactivation request. */
+    int active_count = 0;
+    if (new_flag & V3D_OVERLAY_VPAINT_SHOW_R) active_count++;
+    if (new_flag & V3D_OVERLAY_VPAINT_SHOW_G) active_count++;
+    if (new_flag & V3D_OVERLAY_VPAINT_SHOW_B) active_count++;
+    if (new_flag & V3D_OVERLAY_VPAINT_SHOW_A) active_count++;
+    if (active_count == 0) {
+      /* Keep the channel active */
+      new_flag |= channel_flag;
+    }
+  }
+  else if (!is_grayscale) {
+    /* Non-grayscale (color) mode:
+     * - Alpha is a separate mode, mutually exclusive with RGB
+     * - Activating Alpha: deactivate all RGB channels
+     * - Activating RGB: deactivate Alpha
+     * - Cannot deactivate the last active channel */
+    if (value && is_alpha_channel) {
+      /* Activating Alpha: clear all RGB channels */
+      new_flag = (old_flag & ~V3D_OVERLAY_VPAINT_SHOW_RGB_MASK) | V3D_OVERLAY_VPAINT_SHOW_A;
+    }
+    else if (value && !is_alpha_channel) {
+      /* Activating RGB: clear Alpha */
+      new_flag = (new_flag & ~V3D_OVERLAY_VPAINT_SHOW_A);
+    }
+    else if (!value) {
+      /* Deactivating: ensure at least one channel remains active */
+      if ((new_flag & V3D_OVERLAY_VPAINT_SHOW_ALL_MASK) == 0) {
+        new_flag |= channel_flag;
+      }
+    }
+  }
+
+#ifdef VPAINT_DEBUG
+  printf("[DEBUG] RNA SET: channel_flag=0x%x -> 0x%x (value=%d, mask=0x%x)\n", old_flag, new_flag, value, channel_flag);
+#endif
+  overlay->vertex_paint_channel_flag = new_flag;
+}
+
+static void rna_Space_show_vertex_paint_channel_update(bContext *C, PointerRNA * /*ptr*/)
+{
+  /* Tag the 3D View window region for redraw. */
+  ScrArea *area = CTX_wm_area(C);
+  if (area && area->spacetype == SPACE_VIEW3D) {
+    ARegion *region = BKE_area_find_region_type(area, RGN_TYPE_WINDOW);
+    if (region) {
+      ED_region_tag_redraw(region);
+    }
+  }
+
+  /* Tag the active object for geometry update to force a full sync cycle.
+   * This ensures the draw engine's object_sync() is called, which updates push constants. */
+  Object *ob = CTX_data_active_object(C);
+  if (ob != nullptr) {
+    DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  }
+
+  /* Force immediate redraw. */
+  WM_redraw_windows(C);
+}
+
+static bool rna_Space_show_vertex_paint_r_get(PointerRNA *ptr)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  return (overlay->vertex_paint_channel_flag & V3D_OVERLAY_VPAINT_SHOW_R) != 0;
+}
+
+static void rna_Space_show_vertex_paint_r_set(PointerRNA *ptr, bool value)
+{
+  rna_view3d_overlay_vertex_paint_channel_set(ptr, value, V3D_OVERLAY_VPAINT_SHOW_R);
+}
+
+static bool rna_Space_show_vertex_paint_g_get(PointerRNA *ptr)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  return (overlay->vertex_paint_channel_flag & V3D_OVERLAY_VPAINT_SHOW_G) != 0;
+}
+
+static void rna_Space_show_vertex_paint_g_set(PointerRNA *ptr, bool value)
+{
+  rna_view3d_overlay_vertex_paint_channel_set(ptr, value, V3D_OVERLAY_VPAINT_SHOW_G);
+}
+
+static bool rna_Space_show_vertex_paint_b_get(PointerRNA *ptr)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  return (overlay->vertex_paint_channel_flag & V3D_OVERLAY_VPAINT_SHOW_B) != 0;
+}
+
+static void rna_Space_show_vertex_paint_b_set(PointerRNA *ptr, bool value)
+{
+  rna_view3d_overlay_vertex_paint_channel_set(ptr, value, V3D_OVERLAY_VPAINT_SHOW_B);
+}
+
+static bool rna_Space_show_vertex_paint_a_get(PointerRNA *ptr)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  return (overlay->vertex_paint_channel_flag & V3D_OVERLAY_VPAINT_SHOW_A) != 0;
+}
+
+static void rna_Space_show_vertex_paint_a_set(PointerRNA *ptr, bool value)
+{
+  rna_view3d_overlay_vertex_paint_channel_set(ptr, value, V3D_OVERLAY_VPAINT_SHOW_A);
+}
+
+static bool rna_Space_show_vertex_paint_grayscale_get(PointerRNA *ptr)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  return (overlay->vertex_paint_channel_flag & V3D_OVERLAY_VPAINT_GRAYSCALE) != 0;
+}
+
+static void rna_Space_show_vertex_paint_grayscale_set(PointerRNA *ptr, bool value)
+{
+  View3DOverlay *overlay = rna_Space_view3d_overlay_get(ptr);
+  SET_FLAG_FROM_TEST(overlay->vertex_paint_channel_flag, value, V3D_OVERLAY_VPAINT_GRAYSCALE);
+}
+
+/** \} */
+
 /* Footer Region. */
 static bool rna_Space_show_region_footer_get(PointerRNA *ptr)
 {
@@ -1377,6 +1526,7 @@ static void rna_SpaceView3D_retopology_update(Main * /*bmain*/, Scene *scene, Po
 
 static void rna_SpaceView3D_show_overlay_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
+  printf("[DEBUG] rna_SpaceView3D_show_overlay_update: start, ptr->data=%p\n", ptr->data);
   /* If Retopology is enabled, toggling overlays can change the visibility of active object. */
   const View3D *v3d = static_cast<View3D *>(ptr->data);
   if (v3d->overlay.edit_flag & V3D_OVERLAY_EDIT_RETOPOLOGY) {
@@ -5304,6 +5454,42 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "overlay.paint_flag", V3D_OVERLAY_PAINT_WIRE);
   RNA_def_property_ui_text(prop, "Show Wire", "Use wireframe display in painting modes");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  /* Vertex Paint Channel Display */
+  prop = RNA_def_property(srna, "show_vertex_paint_r", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Space_show_vertex_paint_r_get", "rna_Space_show_vertex_paint_r_set");
+  RNA_def_property_ui_text(prop, "R", "Show red channel in vertex paint mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_Space_show_vertex_paint_channel_update");
+
+  prop = RNA_def_property(srna, "show_vertex_paint_g", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Space_show_vertex_paint_g_get", "rna_Space_show_vertex_paint_g_set");
+  RNA_def_property_ui_text(prop, "G", "Show green channel in vertex paint mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_Space_show_vertex_paint_channel_update");
+
+  prop = RNA_def_property(srna, "show_vertex_paint_b", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Space_show_vertex_paint_b_get", "rna_Space_show_vertex_paint_b_set");
+  RNA_def_property_ui_text(prop, "B", "Show blue channel in vertex paint mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_Space_show_vertex_paint_channel_update");
+
+  prop = RNA_def_property(srna, "show_vertex_paint_a", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Space_show_vertex_paint_a_get", "rna_Space_show_vertex_paint_a_set");
+  RNA_def_property_ui_text(prop, "A", "Show alpha channel in vertex paint mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_Space_show_vertex_paint_channel_update");
+
+  prop = RNA_def_property(srna, "show_vertex_paint_grayscale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Space_show_vertex_paint_grayscale_get", "rna_Space_show_vertex_paint_grayscale_set");
+  RNA_def_property_ui_text(prop, "Grayscale", "Display single channel as grayscale instead of channel color");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_Space_show_vertex_paint_channel_update");
 
   prop = RNA_def_property(srna, "show_wpaint_contours", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "overlay.wpaint_flag", V3D_OVERLAY_WPAINT_CONTOURS);

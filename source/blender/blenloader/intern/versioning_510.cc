@@ -19,6 +19,7 @@
 #include "DNA_screen_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_windowmanager_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_workspace_types.h"
 
 #include "BLI_listbase.h"
@@ -633,6 +634,24 @@ void do_versions_after_linking_510(FileData *fd, Main *bmain)
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 0)) {
     version_clear_unused_strip_flags(*bmain);
+  }
+
+
+  /* Vertex Paint Channel Display Flags - initialize for files prior to 5.1. */
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 0)) {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            /* Initialize to RGB channels enabled if not already set. */
+            if (v3d->overlay.vertex_paint_channel_flag == 0) {
+              v3d->overlay.vertex_paint_channel_flag = 7;  // 0x07 = RGB enabled, Alpha disabled
+            }
+          }
+        }
+      }
+    }
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 24)) {

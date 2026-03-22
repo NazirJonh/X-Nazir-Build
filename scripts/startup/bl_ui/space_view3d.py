@@ -8462,6 +8462,7 @@ class VIEW3D_PT_overlay_vertex_paint(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
     bl_label = "Vertex Paint"
+    bl_ui_units_x = 12
 
     @classmethod
     def poll(cls, context):
@@ -8480,6 +8481,30 @@ class VIEW3D_PT_overlay_vertex_paint(Panel):
 
         col.prop(overlay, "vertex_paint_mode_opacity")
         col.prop(overlay, "show_paint_wire")
+
+        # Channel Display Section
+        col.separator()
+        col.label(text="Channel Display:")
+
+        # Count active RGB channels
+        active_channels = sum([
+            overlay.show_vertex_paint_r,
+            overlay.show_vertex_paint_g,
+            overlay.show_vertex_paint_b,
+        ])
+
+        # Grayscale toggle: only enabled when single channel is active
+        row = col.row()
+        row.active = (active_channels == 1)
+        row.prop(overlay, "show_vertex_paint_grayscale", text="Grayscale Mode")
+
+        # Channel Display Toggle Buttons
+        row = col.row(align=True)
+        row.prop(overlay, "show_vertex_paint_r", text="Red", icon='RGB_RED', toggle=True)
+        row.prop(overlay, "show_vertex_paint_g", text="Green", icon='RGB_GREEN', toggle=True)
+        row.prop(overlay, "show_vertex_paint_b", text="Blue", icon='RGB_BLUE', toggle=True)
+        row.separator()
+        row.prop(overlay, "show_vertex_paint_a", text="Alpha", icon='IMAGE_ALPHA', toggle=True)
 
 
 class VIEW3D_PT_overlay_weight_paint(Panel):

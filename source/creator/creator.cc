@@ -30,6 +30,7 @@
 #include "CLG_log.h"
 
 #include "DNA_genfile.h"
+#include "DNA_userdef_types.h"
 
 #include "BLI_endian_defines.h"
 #include "BLI_fftw.hh"
@@ -596,6 +597,19 @@ int main(int argc,
 #endif
 
   WM_init(C, argc, argv);
+
+  /* Print enabled Build Features for debugging. */
+  {
+    const UserDef_BuildFeatures &bf = U.build_features;
+    printf("\n");
+    printf("Build Features:\n");
+    printf("  use_enhanced_paint_system: %s\n", bf.use_enhanced_paint_system ? "ON" : "OFF");
+    printf("  use_dnd_gn_modifiers: %s\n", bf.use_dnd_gn_modifiers ? "ON" : "OFF");
+    printf("  use_face_sets_in_edit_mesh: %s\n", bf.use_face_sets_in_edit_mesh ? "ON" : "OFF");
+    printf("  use_dnd_texture: %s\n", bf.use_dnd_texture ? "ON" : "OFF");
+    printf("  use_sculpt_texture_mapping: %s\n", bf.use_sculpt_texture_mapping ? "ON" : "OFF");
+    printf("\n");
+  }
 
 #ifndef WITH_PYTHON
   fprintf(stderr,

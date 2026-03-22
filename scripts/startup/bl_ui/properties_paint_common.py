@@ -1586,7 +1586,7 @@ def brush_texture_settings(layout, brush, sculpt):
     layout.prop(tex_slot, "scale")
 
     # Triplanar mapping parameters (only if experimental feature is enabled)
-    prefs = context.preferences
+    prefs = bpy.context.preferences
     if prefs.build_features.use_sculpt_texture_mapping:
         if tex_slot.map_mode == 'TRIPLANAR':
             layout.separator()

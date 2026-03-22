@@ -2926,7 +2926,7 @@ void do_versions_after_linking_500(FileData *fd, Main *bmain)
     }
   }
 
-  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 12)) {
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 13)) {
     /* Initialize new projection fields in MTex for backward compatibility. */
     for (Brush &brush : bmain->brushes) {
       if (brush.mtex.tex) {

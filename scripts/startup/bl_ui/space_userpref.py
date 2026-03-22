@@ -327,6 +327,13 @@ def _get_unassigned_categories_count_for_space(context,
         # - discovered_spaces != 0 must match the current space_flag
         space_matches = (discovered_spaces == 0) or (discovered_spaces & space_flag)
 
+        # Detailed logging for debugging "New Add-ons!" filter issues
+        if source_extension and pending_assignment:
+            category_debug_print(f"[NEW ADDONS DEBUG] Checking category={category_name!r}: "
+                               f"source_ext={source_extension!r}, pending={pending_assignment}, "
+                               f"tags={tags}, discovered_spaces={disc_spaces_list}, "
+                               f"discovered_modes={disc_modes_list}")
+
         if (not is_reserved and
                 source_extension and
                 pending_assignment and
@@ -338,6 +345,23 @@ def _get_unassigned_categories_count_for_space(context,
             # Mirror C++: current_mode_flag == 0 or discovered_modes == 0 means "any mode"
             if space_type == 16 or current_mode_flag == 0 or discovered_modes == 0 or (discovered_modes & current_mode_flag):
                 count += 1
+                category_debug_print(f"[NEW ADDONS DEBUG] ✓ COUNTED: {category_name!r}")
+            else:
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED mode check: {category_name!r} "
+                                   f"(current_mode_flag={current_mode_flag:#x}, discovered_modes={discovered_modes:#x})")
+        elif source_extension and pending_assignment:
+            # Log why category was NOT counted
+            if is_reserved:
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: is_reserved={is_reserved}")
+            elif not has_no_tags:
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: has_tags={not has_no_tags}")
+            elif not space_matches:
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: space_matches={space_matches} "
+                                   f"(discovered_spaces={discovered_spaces:#x}, space_flag={space_flag:#x})")
+            elif _extension_has_tagged_category(wm, source_extension):
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: extension has tagged category")
+            elif _extension_has_only_reserved_categories(wm, source_extension):
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: extension has only reserved categories")
 
     return count
 
@@ -5442,16 +5466,29 @@ def _merge_discovered_categories():
                                 category_debug_print(f"[MERGE AUTO-EXT] Auto-detected extension for new category '{category}': ext_id={ext_id!r}")
                                 category_to_auto_extension[category] = ext_id
                                 break
+                            # Prefix matching: "mpfbv2014" should match "mpfb" from "add-on-mpfb"
+                            for ext_key in ext_info["match_keys"]:
+                                if category_key.startswith(ext_key) and len(category_key) > len(ext_key):
+                                    category_debug_print(f"[MERGE AUTO-EXT] Auto-detected extension for new category '{category}' via prefix: ext_id={ext_id!r} (key={ext_key!r})")
+                                    category_to_auto_extension[category] = ext_id
+                                    break
+                            if category in category_to_auto_extension:
+                                break
             except Exception as e:
                 category_debug_print(f"[MERGE AUTO-EXT] Error auto-detecting extension: {e}")
 
         # Also update EXISTING categories without source_extension that match enabled extensions
         # This handles cases where category was discovered before extension context was available
         # (e.g., Hot Node installed via Get Extensions before pending logic was active)
+        # CRITICAL FIX: Also repair categories that have pending_tag_assignment=false but NO source_extension.
+        # These are orphaned categories from incomplete discovery (e.g., "MPFB v2.0.14", "Mixamo").
         try:
             prefs = getattr(bpy.context, "preferences", None)
             addons = getattr(prefs, "addons", None) if prefs else None
             if addons and enabled_extensions:
+                category_debug_print(f"[MERGE AUTO-EXT DEBUG] Checking {len(_glyph_cache)} cache entries for extension matching")
+                category_debug_print(f"[MERGE AUTO-EXT DEBUG] enabled_extensions: {list(enabled_extensions.keys())}")
+                
                 for cache_key, cat_data in list(_glyph_cache.items()):
                     if not isinstance(cache_key, tuple) or len(cache_key) != 2:
                         continue
@@ -5463,23 +5500,58 @@ def _merge_discovered_categories():
                     # Skip RESERVED categories - they should never be linked to extensions
                     if category_name in DEFAULT_CATEGORY_GLYPHS:
                         continue
-                    # Skip if already has source_extension or tags (already distributed)
-                    if cat_data.get("source_extension") or cat_data.get("tags"):
+                    # Skip if already has source_extension (already linked)
+                    if cat_data.get("source_extension"):
                         continue
-                    # Skip if not pending (already processed)
-                    if not cat_data.get("pending_tag_assignment"):
+                    # Skip if has tags (already distributed) - these don't need source_extension
+                    if cat_data.get("tags"):
                         continue
+                    # IMPORTANT: Do NOT skip categories with pending_tag_assignment=false!
+                    # Categories like "MPFB v2.0.14" may have pending=false but still need source_extension.
+                    # We need to repair these orphaned categories so they appear in "New Add-ons!" filter.
+                    
+                    # DEBUG: Log categories that pass initial filters
+                    if "MPFB" in category_name or "Mixamo" in category_name:
+                        category_debug_print(f"[MERGE AUTO-EXT DEBUG] Checking category '{category_name}': "
+                                           f"pending={cat_data.get('pending_tag_assignment')}, "
+                                           f"has_tags={bool(cat_data.get('tags'))}, "
+                                           f"has_source_ext={bool(cat_data.get('source_extension'))}")
 
                     category_key = _normalize_category_key(category_name)
                     if not category_key:
                         continue
+                    
+                    # DEBUG: Log normalized key for MPFB/Mixamo categories
+                    if "MPFB" in category_name or "Mixamo" in category_name:
+                        category_debug_print(f"[MERGE AUTO-EXT DEBUG] Normalized key for '{category_name}': '{category_key}'")
+                        for ext_id, ext_info in enabled_extensions.items():
+                            if "mpfb" in ext_id.lower() or "mixamo" in ext_id.lower():
+                                category_debug_print(f"[MERGE AUTO-EXT DEBUG] Extension {ext_id!r} match_keys: {ext_info['match_keys']}")
+                                category_debug_print(f"[MERGE AUTO-EXT DEBUG]   Does '{category_key}' match? {category_key in ext_info['match_keys']}")
 
                     # Check if category matches any enabled extension
                     for ext_id, ext_info in enabled_extensions.items():
                         if category_key in ext_info["match_keys"]:
                             category_debug_print(f"[MERGE AUTO-EXT] Updating existing category '{category_name}' with source_extension={ext_id!r}")
                             cat_data["source_extension"] = ext_id
+                            # Re-enable pending_tag_assignment so category appears in "New Add-ons!" filter
+                            if not cat_data.get("pending_tag_assignment"):
+                                cat_data["pending_tag_assignment"] = True
+                                category_debug_print(f"[MERGE AUTO-EXT] Re-enabled pending_tag_assignment for '{category_name}'")
                             cache_changed = True
+                            break
+                        # Prefix matching: "mpfbv2014" should match "mpfb" from "add-on-mpfb"
+                        for ext_key in ext_info["match_keys"]:
+                            if category_key.startswith(ext_key) and len(category_key) > len(ext_key):
+                                category_debug_print(f"[MERGE AUTO-EXT] Updating existing category '{category_name}' via prefix: source_extension={ext_id!r} (key={ext_key!r})")
+                                cat_data["source_extension"] = ext_id
+                                # Re-enable pending_tag_assignment so category appears in "New Add-ons!" filter
+                                if not cat_data.get("pending_tag_assignment"):
+                                    cat_data["pending_tag_assignment"] = True
+                                    category_debug_print(f"[MERGE AUTO-EXT] Re-enabled pending_tag_assignment for '{category_name}'")
+                                cache_changed = True
+                                break
+                        if cat_data.get("source_extension"):
                             break
         except Exception as e:
             category_debug_print(f"[MERGE AUTO-EXT] Error updating existing categories: {e}")
@@ -5539,6 +5611,13 @@ def _merge_discovered_categories():
             tag_already_assigned = False
             is_from_pending_ext = pending_extension_context is not None
 
+            # DEBUG: Log for MPFB/Mixamo categories
+            if "MPFB" in category or "Mixamo" in category:
+                category_debug_print(f"[MERGE DEBUG] NEW CATEGORY processing: category={category!r}")
+                category_debug_print(f"[MERGE DEBUG]   pending_extension_context={pending_extension_context}")
+                category_debug_print(f"[MERGE DEBUG]   category_to_auto_extension={category_to_auto_extension}")
+                category_debug_print(f"[MERGE DEBUG]   category in category_to_auto_extension? {category in category_to_auto_extension}")
+
             if is_from_pending_ext:
                 # All categories from this merge cycle belong to the pending extension
                 ext_id = pending_extension_context.get("extension_id", "")
@@ -5549,6 +5628,12 @@ def _merge_discovered_categories():
                 # Individual auto-detection for this category
                 ext_id = category_to_auto_extension[category]
                 category_debug_print(f"[MERGE DEBUG] NEW CATEGORY auto-detected: category={category!r}, extension_id={ext_id!r}")
+            else:
+                # DEBUG: Log why category didn't get extension
+                if "MPFB" in category or "Mixamo" in category:
+                    category_debug_print(f"[MERGE DEBUG] NEW CATEGORY WARNING: {category!r} did NOT get source_extension!")
+                    category_debug_print(f"[MERGE DEBUG]   is_from_pending_ext={is_from_pending_ext}")
+                    category_debug_print(f"[MERGE DEBUG]   in category_to_auto_extension={category in category_to_auto_extension}")
 
             _glyph_cache[cache_key] = {
                 "glyph": glyph,

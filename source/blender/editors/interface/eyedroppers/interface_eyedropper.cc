@@ -25,8 +25,8 @@
 #include "BKE_global.hh"
 #include "BKE_main.hh"
 
-#include "GHOST_C-api.h"
-#include "GHOST_ISystem.hh"
+#include "GHOST_IWindow.hh"
+#include "GHOST_Types.hh"
 
 #include "interface_intern.hh"
 
@@ -131,9 +131,8 @@ void eyedropper_draw_cursor_color_region(const wmWindow *window, const int xy[2]
 
   /* Проверяем, что окно не минимизировано (избегаем проблем с GPU драйверами) */
 #ifdef WIN32
-  GHOST_TWindowState state = GHOST_GetWindowState(
-      static_cast<GHOST_WindowHandle>(window->runtime->ghostwin));
-  if (state == GHOST_kWindowStateMinimized) {
+  GHOST_IWindow *ghost_window = static_cast<GHOST_IWindow *>(window->runtime->ghostwin);
+  if (ghost_window && ghost_window->getState() == GHOST_kWindowStateMinimized) {
     return;
   }
 #endif
@@ -147,7 +146,7 @@ void eyedropper_draw_cursor_color_region(const wmWindow *window, const int xy[2]
   const float radius = U.widget_unit * 1.1f;
   const float border_width = 2.5f;
   const float shadow_offset = 2.0f;
-  const float offset = 50.0f; /* Отступ от курсора */
+  const float offset = 30.0f; /* Отступ от курсора */
   
   /* Получаем размеры окна для проверки границ */
   rcti window_rect;
@@ -163,37 +162,31 @@ void eyedropper_draw_cursor_color_region(const wmWindow *window, const int xy[2]
   /* Координаты xy находятся в pixel space окна (относительные координаты внутри окна).
    * WM_window_rect_calc возвращает прямоугольник от (0, 0) до (width, height),
    * где (0, 0) - левый нижний угол клиентской области окна (без заголовка).
-   * Когда курсор на заголовке окна, координата Y может быть отрицательной или
-   * выходить за пределы клиентской области. */
-  const int cursor_x = xy[0];
-  const int cursor_y = xy[1];
-  
-  /* Проверяем валидность координат (избегаем слишком больших значений и отрицательных) */
+   * Когда курсор вне окна, координаты могут быть отрицательными или выходить за пределы. */
+  int cursor_x = xy[0];
+  int cursor_y = xy[1];
+
+  /* Проверяем валидность координат (избегаем слишком больших значений) */
   if (cursor_x < -10000 || cursor_x > 100000 || cursor_y < -10000 || cursor_y > 100000) {
     return;
   }
-  
-  /* Проверяем, находятся ли координаты в пределах клиентской области окна.
-   * WM_window_rect_calc возвращает только клиентскую область (без заголовка окна).
-   * Если курсор на заголовке окна, координата Y будет отрицательной или выходить
-   * за пределы клиентской области. В этом случае не рисуем превью. */
-  const int margin = 100;
-  
-  /* Строгая проверка для Y: если координата отрицательная, курсор точно на заголовке или вне окна */
-  if (cursor_y < 0) {
-    return;
-  }
-  
-  /* Проверяем, находятся ли координаты в пределах клиентской области с небольшим запасом */
-  if (cursor_y > window_height + margin) {
-    return;
-  }
-  if (cursor_x < -margin || cursor_x > window_width + margin) {
-    return;
-  }
-  
+
   /* Размер превью с учетом отступов */
   const float preview_size = (radius + border_width + shadow_offset) * 2.0f;
+  const float half_size = preview_size / 2.0f;
+
+  /* Если курсор вне окна, ограничиваем координаты превью границами окна.
+   * Превью будет рисоваться на краю окна, ближайшем к курсору. */
+  const int min_cursor_x = int(half_size);
+  const int max_cursor_x = window_width - int(half_size);
+  const int min_cursor_y = int(half_size);
+  const int max_cursor_y = window_height - int(half_size);
+
+  /* Ограничиваем позицию курсора для расчета превью */
+  if (cursor_x < min_cursor_x) cursor_x = min_cursor_x;
+  if (cursor_x > max_cursor_x) cursor_x = max_cursor_x;
+  if (cursor_y < min_cursor_y) cursor_y = min_cursor_y;
+  if (cursor_y > max_cursor_y) cursor_y = max_cursor_y;
   
   /* Позиционируем превью справа и ниже курсора по умолчанию */
   float center_x = float(cursor_x) + offset;
@@ -212,7 +205,6 @@ void eyedropper_draw_cursor_color_region(const wmWindow *window, const int xy[2]
   }
   
   /* Финальная проверка границ окна с учетом всех элементов */
-  const float half_size = preview_size / 2.0f;
   const float min_x = half_size + border_width;
   const float max_x = float(window_width) - half_size - border_width;
   const float min_y = half_size + border_width;

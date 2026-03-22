@@ -986,11 +986,7 @@ void UI_OT_eyedropper_color(wmOperatorType *ot)
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
-}  // namespace blender::ui
-
 /* ===================== Screen-level Eyedropper Operator ===================== */
-
-using namespace blender::ui;
 
 static bool eyedropper_screen_poll(bContext *C)
 {
@@ -998,15 +994,13 @@ static bool eyedropper_screen_poll(bContext *C)
   return (CTX_wm_window(C) != nullptr && CTX_wm_screen(C) != nullptr);
 }
 
-static wmOperatorStatus eyedropper_screen_invoke(bContext *C, wmOperator *op, const wmEvent *event)
+static wmOperatorStatus eyedropper_screen_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
 {
   wmWindow *win = CTX_wm_window(C);
-  Eyedropper *eye = MEM_new<Eyedropper>(__func__);
-  op->customdata = eye;
 
-  WM_cursor_modal_set(win, WM_CURSOR_EYEDROPPER);
-
+  /* Сначала инициализируем eyedropper, и только если успешно - устанавливаем курсор */
   if (eyedropper_init(C, op)) {
+    WM_cursor_modal_set(win, WM_CURSOR_EYEDROPPER);
     /* Очищаем активную кнопку, чтобы не было сброса курсора */
     context_active_but_clear(C, win, nullptr);
     /* Добавляем modal handler на уровне экрана */
@@ -1018,7 +1012,6 @@ static wmOperatorStatus eyedropper_screen_invoke(bContext *C, wmOperator *op, co
 
 static wmOperatorStatus eyedropper_screen_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
-  wmWindow *win = CTX_wm_window(C);
   Eyedropper *eye = static_cast<Eyedropper *>(op->customdata);
 
   if (event->type == EVT_MODAL_MAP) {
@@ -1086,4 +1079,6 @@ void SCREEN_OT_eyedropper_color(wmOperatorType *ot)
                         "Path of property to be set with the depth");
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
+
+}  // namespace blender::ui
 

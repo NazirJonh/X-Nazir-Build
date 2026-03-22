@@ -78,9 +78,10 @@
 namespace blender {
 
 extern void PyC_FileAndNum_Safe(const char **r_filename, int *r_lineno);
-extern void SCREEN_OT_eyedropper_color(wmOperatorType *ot);
 
 namespace ui {
+
+extern void SCREEN_OT_eyedropper_color(wmOperatorType *ot);
 
 /* -------------------------------------------------------------------- */
 /** \name Immediate redraw helper

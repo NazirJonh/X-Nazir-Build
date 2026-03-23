@@ -17,6 +17,7 @@
 #include "BLI_bit_vector.hh"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
+#include "BLI_vector.hh"
 #include "BLI_math_color_blend.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.h"
@@ -33,12 +34,15 @@
 #include "IMB_imbuf.hh"
 
 #include "BKE_brush.hh"
+#include "BKE_colorband.hh"
 #include "BKE_image.hh"
 #include "BKE_image_wrappers.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
+
+#include "MEM_guardedalloc.h"
 
 #include "../paint_gradient_core.hh"
 #include "../paint_image_session_state.hh"
@@ -747,7 +751,7 @@ template<typename ImageBuffer> class PaintingKernel {
       const __m128 color = _mm_loadu_ps(pixel_data);
       /* For gradient tools, use absolute value since negative factors indicate position
        * before gradient start, not negative color intensity. */
-      const float effective_factor = is_gradient_tool ? std::abs(factor) : factor;
+      const float effective_factor = is_gradient_tool ? math::abs(factor) : factor;
       const __m128 factor_vec = _mm_set1_ps(effective_factor);
       const __m128 paint_color = _mm_mul_ps(brush_color, factor_vec);
 
@@ -812,7 +816,7 @@ template<typename ImageBuffer> class PaintingKernel {
       float4 color = image_accessor_.read_pixel(image_buffer);
       /* For gradient tools, use absolute value since negative factors indicate position
        * before gradient start, not negative color intensity. */
-      const float effective_factor = is_gradient_tool ? std::abs(factor) : factor;
+      const float effective_factor = is_gradient_tool ? math::abs(factor) : factor;
       float4 paint_color = brush_color_ * effective_factor;
       float4 buffer_color;
 
@@ -910,24 +914,55 @@ template<typename ImageBuffer> class PaintingKernel {
        * 3. Set alpha = mask
        * 4. Convert to image color space (for byte buffers)
        * 5. Blend with IMB_blend_color_float
+       *
+       * For gradient tools: tex_color already contains the final color from colorband,
+       * so we use it directly without multiplying by brush_color.
        */
       float4 paint_color;
 
-      /* Multiply brush color (linear) by texture RGB (linear). */
-      paint_color[0] = brush_color_linear_[0] * tex_color[0];
-      paint_color[1] = brush_color_linear_[1] * tex_color[1];
-      paint_color[2] = brush_color_linear_[2] * tex_color[2];
+      if (is_gradient_tool) {
+        /* For gradient tool, tex_color is the gradient color from colorband.
+         * Use it directly with full alpha. The gradient color already represents
+         * the final color at this position in the gradient. */
+        paint_color[0] = tex_color[0];
+        paint_color[1] = tex_color[1];
+        paint_color[2] = tex_color[2];
+        paint_color[3] = tex_color[3];  /* Use alpha from colorband if set, otherwise 1.0 */
+      }
+      else {
+        /* Multiply brush color (linear) by texture RGB (linear). */
+        paint_color[0] = brush_color_linear_[0] * tex_color[0];
+        paint_color[1] = brush_color_linear_[1] * tex_color[1];
+        paint_color[2] = brush_color_linear_[2] * tex_color[2];
+        paint_color[3] = 1.0f;  /* Will be set by mask below */
+      }
 
       /* Apply mask (factor already includes brush strength, falloff, etc).
        * Texture alpha modulates the mask.
-       * For gradient tools, use absolute value since negative factors indicate position
-       * before gradient start, not negative color intensity. */
-      const float effective_factor = is_gradient_tool ? std::abs(factor) : factor;
-      const float mask = effective_factor * tex_color[3];
+       * For gradient tools, factor is not used to modulate the color intensity
+       * since the colorband already defines the color. */
+      float mask;
+      if (is_gradient_tool) {
+        /* For gradient tool, use full intensity - the colorband defines the color.
+         * The colorband alpha (if set) is preserved. */
+        mask = 1.0f;
+      }
+      else {
+        mask = factor * tex_color[3];
+      }
+
       paint_color[0] *= mask;
       paint_color[1] *= mask;
       paint_color[2] *= mask;
-      paint_color[3] = mask;
+      /* For gradient tool, preserve the colorband alpha instead of overwriting with mask.
+       * For regular brushes, use the mask as alpha. */
+      if (is_gradient_tool) {
+        /* paint_color[3] already contains the colorband alpha, just modulate by mask. */
+        paint_color[3] *= mask;
+      }
+      else {
+        paint_color[3] = mask;
+      }
 
       /* Convert from scene linear to image color space (for byte buffers). */
       if (cm_processor != nullptr) {
@@ -1982,7 +2017,6 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
       threading::EnumerableThreadSpecific<Vector<float3>> tls_pixel_positions;
       threading::EnumerableThreadSpecific<Vector<float>> tls_factors;
       threading::EnumerableThreadSpecific<Vector<float2>> tls_screen_coords;
-      threading::EnumerableThreadSpecific<Vector<float4>> tls_texture_colors;
       threading::EnumerableThreadSpecific<ThreadDirtyRegion> tls_dirty_regions;
 
       std::atomic<int64_t> local_rows_total_atomic{0};
@@ -1999,7 +2033,6 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
             Vector<float3> &pixel_positions = tls_pixel_positions.local();
             Vector<float> &factors = tls_factors.local();
             Vector<float2> &screen_coords = tls_screen_coords.local();
-            Vector<float4> &texture_colors = tls_texture_colors.local();
 
             for (const int row_index : range) {
               const PackedPixelRow &pixel_row = pixel_rows[row_index];
@@ -2107,7 +2140,7 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                   }
 
                   /* For Gradient Tools, negative factors are valid (pixels "before" gradient start) */
-                  has_influence |= (factor != 0.0f);
+                  has_influence |= (factor > 0.0f);
                 }
 
                 /* Log details for first few rejected rows */
@@ -2166,7 +2199,7 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                   }
 
                   /* For Gradient Tools, negative factors are valid (pixels "before" gradient start) */
-                  has_influence |= (factor != 0.0f);
+                  has_influence |= (factor > 0.0f);
                 }
 
                 /* Log details for first few rejected rows */
@@ -2218,35 +2251,17 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                                               BLI_time_now_seconds() :
                                               0.0;
               bool pixels_painted = false;
-              
-              /* Count pixels with non-zero factors before kernel */
-              int64_t nonzero_factors_in_row = 0;
-              if (kEnableGradientPaintDebugTelemetry) {
-                for (const int i : factors.index_range()) {
-                  if (factors[i] != 0.0f) {
-                    nonzero_factors_in_row++;
-                  }
-                }
-              }
-              
+
               if (is_float_image) {
-                pixels_painted = local_kernel_float4.paint(
-                    brush, pixel_row, factors, image_buffer, true);
+                pixels_painted = local_kernel_float4.paint(brush, pixel_row, factors, image_buffer);
               }
               else {
-                pixels_painted = local_kernel_byte4.paint(brush, pixel_row, factors, image_buffer, true);
+                pixels_painted = local_kernel_byte4.paint(brush, pixel_row, factors, image_buffer);
               }
               if (kEnableGradientPaintDebugTelemetry) {
                 local_kernel_time_us_atomic.fetch_add(
                     int64_t((BLI_time_now_seconds() - kernel_start) * 1.0e6),
                     std::memory_order_relaxed);
-                
-                if (pixels_painted) {
-                  g_gradient_telemetry.pixels_kernel_painted.fetch_add(nonzero_factors_in_row, std::memory_order_relaxed);
-                }
-                else {
-                  g_gradient_telemetry.pixels_kernel_skipped.fetch_add(nonzero_factors_in_row, std::memory_order_relaxed);
-                }
               }
 
               if (pixels_painted) {
@@ -2393,7 +2408,7 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
             pixels_processed++;
 
             /* For Gradient Tools, negative factors are valid (pixels "before" gradient start) */
-            has_influence |= (factor != 0.0f);
+            has_influence |= (factor > 0.0f);
           }
         }
         else {
@@ -2418,7 +2433,7 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
             pixels_processed++;
 
             /* For Gradient Tools, negative factors are valid (pixels "before" gradient start) */
-            has_influence |= (factor != 0.0f);
+            has_influence |= (factor > 0.0f);
           }
         }
 
@@ -2468,11 +2483,12 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
         const double kernel_start = kEnableGradientPaintDebugTelemetry ? BLI_time_now_seconds() :
                                                                          0.0;
         bool pixels_painted = false;
+
         if (is_float_image) {
-          pixels_painted = local_kernel_float4.paint(brush, pixel_row, factors, image_buffer, true);
+          pixels_painted = local_kernel_float4.paint(brush, pixel_row, factors, image_buffer);
         }
         else {
-          pixels_painted = local_kernel_byte4.paint(brush, pixel_row, factors, image_buffer, true);
+          pixels_painted = local_kernel_byte4.paint(brush, pixel_row, factors, image_buffer);
         }
         if (kEnableGradientPaintDebugTelemetry) {
           local_kernel_time_us += int64_t((BLI_time_now_seconds() - kernel_start) * 1.0e6);

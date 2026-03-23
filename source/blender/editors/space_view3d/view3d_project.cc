@@ -342,6 +342,83 @@ void ED_view3d_project_float_object_array(const ARegion *region,
   }
 }
 
+/**
+ * Version of ED_view3d_project_float_object_array that returns projection status for each point.
+ * This allows callers to distinguish between actual (0,0) coordinates and projection failures.
+ */
+void ED_view3d_project_float_object_array_with_status(
+    const ARegion *region,
+    const Span<float3> positions,
+    MutableSpan<float2> r_screen_coords,
+    MutableSpan<eV3DProjStatus> r_statuses,
+    const eV3DProjTest flag)
+{
+  RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
+  ED_view3d_check_mats_rv3d(rv3d);
+  const float (*perspmat)[4] = rv3d->persmatob;
+
+  const int num_positions = positions.size();
+  BLI_assert(num_positions == r_screen_coords.size());
+  BLI_assert(num_positions == r_statuses.size());
+
+  for (int i = 0; i < num_positions; i++) {
+    float vec4[4];
+    vec4[0] = positions[i].x;
+    vec4[1] = positions[i].y;
+    vec4[2] = positions[i].z;
+    vec4[3] = 1.0f;
+    mul_m4_v4(perspmat, vec4);
+    const float w = fabsf(vec4[3]);
+
+    eV3DProjStatus status = V3D_PROJ_RET_OK;
+
+    if ((flag & V3D_PROJ_TEST_CLIP_ZERO) && (w <= float(BL_ZERO_CLIP))) {
+      r_screen_coords[i].x = 0.0f;
+      r_screen_coords[i].y = 0.0f;
+      r_statuses[i] = V3D_PROJ_RET_CLIP_ZERO;
+      continue;
+    }
+
+    if ((flag & V3D_PROJ_TEST_CLIP_NEAR) && (vec4[2] <= -w)) {
+      r_screen_coords[i].x = 0.0f;
+      r_screen_coords[i].y = 0.0f;
+      r_statuses[i] = V3D_PROJ_RET_CLIP_NEAR;
+      continue;
+    }
+
+    if ((flag & V3D_PROJ_TEST_CLIP_FAR) && (vec4[2] >= w)) {
+      r_screen_coords[i].x = 0.0f;
+      r_screen_coords[i].y = 0.0f;
+      r_statuses[i] = V3D_PROJ_RET_CLIP_FAR;
+      continue;
+    }
+
+    const float scalar = (w != 0.0f) ? (1.0f / w) : 0.0f;
+    const float fx = (float(region->winx) / 2.0f) * (1.0f + (vec4[0] * scalar));
+    const float fy = (float(region->winy) / 2.0f) * (1.0f + (vec4[1] * scalar));
+
+    if ((flag & V3D_PROJ_TEST_CLIP_WIN) &&
+        (fx <= 0.0f || fy <= 0.0f || fx >= float(region->winx) || fy >= float(region->winy)))
+    {
+      r_screen_coords[i].x = 0.0f;
+      r_screen_coords[i].y = 0.0f;
+      r_statuses[i] = V3D_PROJ_RET_CLIP_WIN;
+      continue;
+    }
+
+    if (isfinite(fx) && isfinite(fy)) {
+      r_screen_coords[i].x = fx;
+      r_screen_coords[i].y = fy;
+      r_statuses[i] = V3D_PROJ_RET_OK;
+    }
+    else {
+      r_screen_coords[i].x = 0.0f;
+      r_screen_coords[i].y = 0.0f;
+      r_statuses[i] = V3D_PROJ_RET_OVERFLOW;
+    }
+  }
+}
+
 /* More Generic Window/Ray/Vector projection functions
  * *************************************************** */
 

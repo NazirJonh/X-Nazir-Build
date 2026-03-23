@@ -561,6 +561,17 @@ void ED_view3d_project_float_object_array(const ARegion *region,
                                           blender::MutableSpan<blender::float2> r_screen_coords,
                                           eV3DProjTest flag);
 
+/**
+ * Version that returns projection status for each point.
+ * Returns V3D_PROJ_RET_OK for successful projections, V3D_PROJ_RET_CLIP_FALL for failures.
+ */
+void ED_view3d_project_float_object_array_with_status(
+    const ARegion *region,
+    const blender::Span<blender::float3> positions,
+    blender::MutableSpan<blender::float2> r_screen_coords,
+    blender::MutableSpan<eV3DProjStatus> r_statuses,
+    eV3DProjTest flag);
+
 float ED_view3d_pixel_size(const RegionView3D *rv3d, const float co[3]);
 float ED_view3d_pixel_size_no_ui_scale(const RegionView3D *rv3d, const float co[3]);
 

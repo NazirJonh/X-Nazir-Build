@@ -324,11 +324,6 @@ float paint_projected_gradient_factor_with_preprojected(
     const int symmetry,
     const int8_t radial_symmetry[3])
 {
-  /* Check for invalid screen coordinates (from failed projection) */
-  if (screen_co[0] == 0.0f && screen_co[1] == 0.0f) {
-    return 0.0f;
-  }
-
   /* For symmetry cases, fall back to original function - it needs 3D position transformation.
    * radial_symmetry is an int8_t[3] array, always valid (not nullptr).
    * Values of 1 mean symmetry disabled, >1 means enabled. */
@@ -339,7 +334,9 @@ float paint_projected_gradient_factor_with_preprojected(
     return -1.0f;
   }
 
-  /* No symmetry - simple case, just evaluate the gradient */
+  /* No symmetry - simple case, just evaluate the gradient.
+   * Note: (0,0) is a valid screen coordinate, so we don't check for it here.
+   * The caller (do_paint_pixels_gradient) handles projection failure separately. */
   return calculator.evaluate(float3(screen_co[0], screen_co[1], 0.0f));
 }
 

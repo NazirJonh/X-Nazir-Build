@@ -2010,23 +2010,28 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                   screen_coords.reserve(pixel_positions.size());
                 }
                 screen_coords.resize(pixel_positions.size());
-                ED_view3d_project_float_object_array(&region,
-                                                     pixel_positions.as_span(),
-                                                     screen_coords.as_mutable_span(),
-                                                     V3D_PROJ_TEST_CLIP_BB |
-                                                         V3D_PROJ_TEST_CLIP_NEAR);
+
+                /* Allocate projection status array */
+                Vector<eV3DProjStatus> proj_statuses;
+                if (proj_statuses.capacity() < pixel_positions.size()) {
+                  proj_statuses.reserve(pixel_positions.size());
+                }
+                proj_statuses.resize(pixel_positions.size());
+
+                ED_view3d_project_float_object_array_with_status(
+                    &region,
+                    pixel_positions.as_span(),
+                    screen_coords.as_mutable_span(),
+                    proj_statuses.as_mutable_span(),
+                    V3D_PROJ_TEST_CLIP_BB | V3D_PROJ_TEST_CLIP_NEAR);
 
                 for (const int i : factors.index_range()) {
                   const float2 &screen_co = screen_coords[i];
+                  const bool projection_failed = (proj_statuses[i] != V3D_PROJ_RET_OK);
 
                   if (kEnableGradientPaintDebugTelemetry) {
                     g_gradient_telemetry.pixels_total.fetch_add(1, std::memory_order_relaxed);
                   }
-
-                  /* Check if projection failed (clipped points get (0,0) coordinates).
-                   * We still process these points because (0,0) can be a valid screen coordinate.
-                   * The gradient calculator will handle invalid coordinates gracefully. */
-                  const bool projection_failed = (screen_co[0] == 0.0f && screen_co[1] == 0.0f);
 
                   bool should_reject = false;
                   if (is_radial) {
@@ -2070,7 +2075,7 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                   factor = paint_gradient_finalize_factor(
                       brush, factor, clamp_to_range, bstrength);
                   factors[i] = factor;
-                  
+
                   if (kEnableGradientPaintDebugTelemetry) {
                     if (factor == 0.0f) {
                       g_gradient_telemetry.pixels_with_factor_zero.fetch_add(1, std::memory_order_relaxed);
@@ -2079,7 +2084,7 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                       g_gradient_telemetry.pixels_with_factor_nonzero.fetch_add(1, std::memory_order_relaxed);
                     }
                   }
-                  
+
                   /* For Gradient Tools, negative factors are valid (pixels "before" gradient start) */
                   has_influence |= (factor != 0.0f);
                 }
@@ -2240,18 +2245,24 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
             screen_coords.reserve(pixel_positions.size());
           }
           screen_coords.resize(pixel_positions.size());
-          ED_view3d_project_float_object_array(&region,
-                                               pixel_positions.as_span(),
-                                               screen_coords.as_mutable_span(),
-                                               V3D_PROJ_TEST_CLIP_BB | V3D_PROJ_TEST_CLIP_NEAR);
+
+          /* Allocate projection status array */
+          Vector<eV3DProjStatus> proj_statuses;
+          if (proj_statuses.capacity() < pixel_positions.size()) {
+            proj_statuses.reserve(pixel_positions.size());
+          }
+          proj_statuses.resize(pixel_positions.size());
+
+          ED_view3d_project_float_object_array_with_status(
+              &region,
+              pixel_positions.as_span(),
+              screen_coords.as_mutable_span(),
+              proj_statuses.as_mutable_span(),
+              V3D_PROJ_TEST_CLIP_BB | V3D_PROJ_TEST_CLIP_NEAR);
 
           for (const int i : factors.index_range()) {
             const float2 &screen_co = screen_coords[i];
-
-            /* Check if projection failed (clipped points get (0,0) coordinates).
-             * We still process these points because (0,0) can be a valid screen coordinate.
-             * The gradient calculator will handle invalid coordinates gracefully. */
-            const bool projection_failed = (screen_co[0] == 0.0f && screen_co[1] == 0.0f);
+            const bool projection_failed = (proj_statuses[i] != V3D_PROJ_RET_OK);
 
             bool should_reject = false;
             if (is_radial) {

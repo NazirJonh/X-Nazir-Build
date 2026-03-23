@@ -606,7 +606,7 @@ static wmOperatorStatus vertex_color_gradient_exec(bContext *C, wmOperator *op)
               const auto evaluate_factor = [&](const float3 &position) {
                 float factor = paint_projected_gradient_factor_with_symmetry(
                     region, *calculator, position, symmetry, mesh->radial_symmetry);
-                return paint_gradient_finalize_factor(*brush, factor, clamp_to_range, brush_alpha);
+                return paint_gradient_finalize_factor(*brush, factor, clamp_to_range, brush_alpha, true);
               };
 
               for (const int i : segment) {

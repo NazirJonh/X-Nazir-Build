@@ -208,12 +208,13 @@ float paint_brush_gradient_coord(const Brush &brush, const float distance, const
 float paint_gradient_finalize_factor(const Brush &brush,
                                      float factor,
                                      const bool clamp_to_range,
-                                     const float multiplier)
+                                     const float multiplier,
+                                     const bool is_gradient_tool)
 {
   /* Для Gradient Tools кривая кисти не применяется - градиент уже имеет свою форму,
    * заданную через colorband и параметры калькулятора (hardness, clamp и т.д.).
    * Применение кривой приводит к обнулению валидных факторов и пропускам пикселей. */
-  if (brush.flag & BRUSH_USE_GRADIENT) {
+  if (is_gradient_tool || (brush.flag & BRUSH_USE_GRADIENT)) {
     if (clamp_to_range) {
       CLAMP(factor, 0.0f, 1.0f);
     }

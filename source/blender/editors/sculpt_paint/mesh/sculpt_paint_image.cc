@@ -691,13 +691,33 @@ template<typename ImageBuffer> class PaintingKernel {
     return r_first_positive != -1;
   }
 
+  /* For gradient tools, negative factors are valid (pixels "before" gradient start).
+   * This method finds the bounds of all non-zero factors. */
+  static bool find_nonzero_factor_bounds(const Span<float> factors,
+                                         int &r_first_nonzero,
+                                         int &r_last_nonzero)
+  {
+    r_first_nonzero = -1;
+    r_last_nonzero = -1;
+    for (const int i : factors.index_range()) {
+      if (factors[i] != 0.0f) {
+        if (r_first_nonzero == -1) {
+          r_first_nonzero = i;
+        }
+        r_last_nonzero = i;
+      }
+    }
+    return r_first_nonzero != -1;
+  }
+
 #if BLI_HAVE_SSE2
   bool paint_mix_float4_simd(const PackedPixelRow &pixel_row,
                              const Span<float> factors,
                              ImBuf *image_buffer,
                              const float brush_alpha,
                              const int first_positive,
-                             const int last_positive)
+                             const int last_positive,
+                             const bool is_gradient_tool = false)
   {
     const int pixel_start_offset = int(pixel_row.start_image_coordinate.y) * image_buffer->x +
                                    int(pixel_row.start_image_coordinate.x) + first_positive;
@@ -717,13 +737,18 @@ template<typename ImageBuffer> class PaintingKernel {
     bool pixels_painted = false;
     for (int x = first_positive; x <= last_positive; x++) {
       const float factor = factors[x];
-      if (factor <= 0.0f) {
+      /* For gradient tools, negative factors are valid (pixels "before" gradient start).
+       * Only skip exactly zero factors for gradient tools. For regular brushes, skip <= 0. */
+      if (is_gradient_tool ? (factor == 0.0f) : (factor <= 0.0f)) {
         pixel_data += 4;
         continue;
       }
 
       const __m128 color = _mm_loadu_ps(pixel_data);
-      const __m128 factor_vec = _mm_set1_ps(factor);
+      /* For gradient tools, use absolute value since negative factors indicate position
+       * before gradient start, not negative color intensity. */
+      const float effective_factor = is_gradient_tool ? std::abs(factor) : factor;
+      const __m128 factor_vec = _mm_set1_ps(effective_factor);
       const __m128 paint_color = _mm_mul_ps(brush_color, factor_vec);
 
       const __m128 paint_alpha = _mm_shuffle_ps(paint_color, paint_color, _MM_SHUFFLE(3, 3, 3, 3));
@@ -751,7 +776,8 @@ template<typename ImageBuffer> class PaintingKernel {
              const Span<float> factors,
              ImBuf *image_buffer,
              const int first_positive,
-             const int last_positive)
+             const int last_positive,
+             const bool is_gradient_tool = false)
   {
     if (first_positive == -1) {
       return false;
@@ -764,7 +790,7 @@ template<typename ImageBuffer> class PaintingKernel {
     if constexpr (std::is_same_v<ImageBuffer, ImageBufferFloat4>) {
       if (blend_mode == IMB_BLEND_MIX) {
         return paint_mix_float4_simd(
-            pixel_row, factors, image_buffer, brush_alpha, first_positive, last_positive);
+            pixel_row, factors, image_buffer, brush_alpha, first_positive, last_positive, is_gradient_tool);
       }
     }
 #endif
@@ -776,13 +802,18 @@ template<typename ImageBuffer> class PaintingKernel {
     bool pixels_painted = false;
     for (int x = first_positive; x <= last_positive; x++) {
       const float factor = factors[x];
-      if (factor <= 0.0f) {
+      /* For gradient tools, negative factors are valid (pixels "before" gradient start).
+       * Only skip exactly zero factors for gradient tools. For regular brushes, skip <= 0. */
+      if (is_gradient_tool ? (factor == 0.0f) : (factor <= 0.0f)) {
         image_accessor_.next_pixel();
         continue;
       }
 
       float4 color = image_accessor_.read_pixel(image_buffer);
-      float4 paint_color = brush_color_ * factor;
+      /* For gradient tools, use absolute value since negative factors indicate position
+       * before gradient start, not negative color intensity. */
+      const float effective_factor = is_gradient_tool ? std::abs(factor) : factor;
+      float4 paint_color = brush_color_ * effective_factor;
       float4 buffer_color;
 
 #ifdef DEBUG_PIXEL_NODES
@@ -807,14 +838,24 @@ template<typename ImageBuffer> class PaintingKernel {
   bool paint(const Brush &brush,
              const PackedPixelRow &pixel_row,
              const Span<float> factors,
-             ImBuf *image_buffer)
+             ImBuf *image_buffer,
+             const bool is_gradient_tool = false)
   {
     int first_positive;
     int last_positive;
-    if (!find_positive_factor_bounds(factors, first_positive, last_positive)) {
-      return false;
+    /* For gradient tools, find non-zero factors (including negative values for "before" pixels).
+     * For regular brushes, only find positive factors. */
+    if (is_gradient_tool) {
+      if (!find_nonzero_factor_bounds(factors, first_positive, last_positive)) {
+        return false;
+      }
     }
-    return paint(brush, pixel_row, factors, image_buffer, first_positive, last_positive);
+    else {
+      if (!find_positive_factor_bounds(factors, first_positive, last_positive)) {
+        return false;
+      }
+    }
+    return paint(brush, pixel_row, factors, image_buffer, first_positive, last_positive, is_gradient_tool);
   }
 
   /**
@@ -828,7 +869,8 @@ template<typename ImageBuffer> class PaintingKernel {
                                  const Span<float4> texture_colors,
                                  ImBuf *image_buffer,
                                  const int first_positive,
-                                 const int last_positive)
+                                 const int last_positive,
+                                 const bool is_gradient_tool = false)
   {
     if (first_positive == -1) {
       return false;
@@ -852,7 +894,9 @@ template<typename ImageBuffer> class PaintingKernel {
     bool pixels_painted = false;
     for (int x = first_positive; x <= last_positive; x++) {
       const float factor = factors[x];
-      if (factor <= 0.0f) {
+      /* For gradient tools, negative factors are valid (pixels "before" gradient start).
+       * Only skip exactly zero factors for gradient tools. For regular brushes, skip <= 0. */
+      if (is_gradient_tool ? (factor == 0.0f) : (factor <= 0.0f)) {
         image_accessor_.next_pixel();
         continue;
       }
@@ -875,8 +919,11 @@ template<typename ImageBuffer> class PaintingKernel {
       paint_color[2] = brush_color_linear_[2] * tex_color[2];
 
       /* Apply mask (factor already includes brush strength, falloff, etc).
-       * Texture alpha modulates the mask. */
-      const float mask = factor * tex_color[3];
+       * Texture alpha modulates the mask.
+       * For gradient tools, use absolute value since negative factors indicate position
+       * before gradient start, not negative color intensity. */
+      const float effective_factor = is_gradient_tool ? std::abs(factor) : factor;
+      const float mask = effective_factor * tex_color[3];
       paint_color[0] *= mask;
       paint_color[1] *= mask;
       paint_color[2] *= mask;
@@ -1758,6 +1805,7 @@ static void do_paint_pixels_batched_by_tile(const Depsgraph &depsgraph,
 
 static constexpr bool kEnableGradientPaintDebugTelemetry = true;
 static constexpr int64_t kGradientPaintDebugPeriod = 1;
+static constexpr int kMaxDebugRejectedRows = 5;  /* Only log first N rejected rows in detail */
 
 struct GradientPaintTelemetry {
   std::atomic<int64_t> rows_total = 0;
@@ -1795,10 +1843,6 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                                      const int symmetry,
                                      const int8_t radial_symmetry[3])
 {
-  /* Debug: check if function is called */
-  std::fprintf(stderr, "[gradient_paint] do_paint_pixels_gradient called\n");
-  std::fflush(stderr);
-
   SculptSession &ss = *object.runtime->sculpt_session;
   const StrokeCache *cache = ss.cache;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
@@ -1923,19 +1967,6 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
     int64_t local_gradient_calc_time_us = 0;
     int64_t local_kernel_time_us = 0;
 
-    const float2 gradient_start = calculator.get_start_ss();
-    const float2 gradient_end = calculator.get_end_ss();
-    const bool is_radial = calculator.is_radial();
-    const bool clip_before_start = calculator.get_clip_before_start();
-    const float2 gradient_axis = gradient_end - gradient_start;
-    const float gradient_axis_len_sq = math::length_squared(gradient_axis);
-    const float gradient_axis_inv_len_sq = (gradient_axis_len_sq > 1.0e-12f) ?
-                                               (1.0f / gradient_axis_len_sq) :
-                                               0.0f;
-    const float gradient_radius = math::sqrt(gradient_axis_len_sq);
-    const float rejection_radius = gradient_radius * 1.1f;
-    const float rejection_radius_sq = rejection_radius * rejection_radius;
-
     const Span<PackedPixelRow> pixel_rows = tile_data.pixel_rows;
     if (allow_row_parallel && pixel_rows.size() >= row_threading_min_rows) {
       struct ThreadDirtyRegion {
@@ -1961,6 +1992,7 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
       std::atomic<int64_t> local_pre_positions_time_us_atomic{0};
       std::atomic<int64_t> local_gradient_calc_time_us_atomic{0};
       std::atomic<int64_t> local_kernel_time_us_atomic{0};
+      std::atomic<int> debug_rejected_rows_count{0};  /* For limiting detailed debug output */
 
       threading::parallel_for(
           pixel_rows.index_range(), row_threading_grain_size, [&](const IndexRange range) {
@@ -2005,6 +2037,12 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
               factors.resize(pixel_positions.size());
               bool has_influence = false;
 
+              /* For debugging: store sample factors from this row */
+              float first_factor_raw = 0.0f, first_factor_final = 0.0f;
+              float middle_factor_raw = 0.0f, middle_factor_final = 0.0f;
+              float last_factor_raw = 0.0f, last_factor_final = 0.0f;
+              int pixels_processed = 0;
+
               if (use_batch_projection) {
                 if (screen_coords.capacity() < pixel_positions.size()) {
                   screen_coords.reserve(pixel_positions.size());
@@ -2033,50 +2071,33 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                     g_gradient_telemetry.pixels_total.fetch_add(1, std::memory_order_relaxed);
                   }
 
-                  bool should_reject = false;
-                  if (is_radial) {
-                    const float dist_sq = math::distance_squared(screen_co, gradient_start);
-                    should_reject = (dist_sq > rejection_radius_sq);
-                  }
-                  else if (gradient_axis_inv_len_sq == 0.0f) {
-                    should_reject = true;
-                  }
-                  else {
-                    const float2 to_point = screen_co - gradient_start;
-                    const float t = math::dot(to_point, gradient_axis) * gradient_axis_inv_len_sq;
-                    if (t > 1.1f) {
-                      should_reject = true;
-                    }
-                    else if (clip_before_start && t < -0.1f) {
-                      should_reject = true;
-                    }
-                  }
-
-                  /* Don't reject points that failed projection - they may still be valid.
-                   * The gradient calculator will return 0.0f for truly invalid points. */
-                  if (projection_failed && should_reject) {
-                    should_reject = false;
-                  }
-
-                  if (should_reject) {
-                    factors[i] = 0.0f;
-                    if (kEnableGradientPaintDebugTelemetry) {
-                      g_gradient_telemetry.pixels_rejected_early.fetch_add(1, std::memory_order_relaxed);
-                    }
-                    continue;
-                  }
-
+                  /* Early rejection optimization disabled for gradient tool - the gradient calculator
+                   * will correctly return 0.0f for pixels outside the gradient range. Early rejection
+                   * was using screen-space coordinates which are incorrect for World/UV space gradients. */
                   if (projection_failed && kEnableGradientPaintDebugTelemetry) {
                     g_gradient_telemetry.pixels_rejected_projection.fetch_add(1, std::memory_order_relaxed);
                   }
 
-                  float factor = paint_projected_gradient_factor_with_preprojected(
+                  float factor_raw = paint_projected_gradient_factor_with_preprojected(
                       calculator, screen_co, symmetry, radial_symmetry);
-                  factor = paint_gradient_finalize_factor(
-                      brush, factor, clamp_to_range, bstrength);
+                  float factor = paint_gradient_finalize_factor(
+                      brush, factor_raw, clamp_to_range, bstrength, true);
                   factors[i] = factor;
 
+                  /* Store sample factors for debugging */
                   if (kEnableGradientPaintDebugTelemetry) {
+                    if (pixels_processed == 0) {
+                      first_factor_raw = factor_raw;
+                      first_factor_final = factor;
+                    }
+                    if (pixels_processed == pixel_positions.size() / 2) {
+                      middle_factor_raw = factor_raw;
+                      middle_factor_final = factor;
+                    }
+                    last_factor_raw = factor_raw;
+                    last_factor_final = factor;
+                    pixels_processed++;
+
                     if (factor == 0.0f) {
                       g_gradient_telemetry.pixels_with_factor_zero.fetch_add(1, std::memory_order_relaxed);
                     }
@@ -2088,16 +2109,91 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                   /* For Gradient Tools, negative factors are valid (pixels "before" gradient start) */
                   has_influence |= (factor != 0.0f);
                 }
+
+                /* Log details for first few rejected rows */
+                if (kEnableGradientPaintDebugTelemetry && !has_influence) {
+                  int rejected_count = debug_rejected_rows_count.fetch_add(1, std::memory_order_relaxed);
+                  if (rejected_count < kMaxDebugRejectedRows) {
+                    fprintf(stderr,
+                            "GRADIENT ROW REJECT #%d: row=%d pixels=%d processed=%d\n"
+                            "  first: raw=%.4f final=%.4f\n"
+                            "  middle: raw=%.4f final=%.4f\n"
+                            "  last: raw=%.4f final=%.4f\n"
+                            "  bstrength=%.4f clamp=%d symmetry=%d\n",
+                            rejected_count + 1,
+                            row_index,
+                            int(pixel_row.num_pixels),
+                            pixels_processed,
+                            first_factor_raw,
+                            first_factor_final,
+                            middle_factor_raw,
+                            middle_factor_final,
+                            last_factor_raw,
+                            last_factor_final,
+                            bstrength,
+                            int(clamp_to_range),
+                            symmetry);
+                    fflush(stderr);
+                  }
+                }
               }
               else {
+                /* Non-batch projection path */
+                float first_factor_raw = 0.0f, first_factor_final = 0.0f;
+                float middle_factor_raw = 0.0f, middle_factor_final = 0.0f;
+                float last_factor_raw = 0.0f, last_factor_final = 0.0f;
+                int pixels_processed = 0;
+
                 for (const int i : factors.index_range()) {
-                  float factor = paint_projected_gradient_factor_with_symmetry(
+                  float factor_raw = paint_projected_gradient_factor_with_symmetry(
                       &region, calculator, pixel_positions[i], symmetry, radial_symmetry);
-                  factor = paint_gradient_finalize_factor(
-                      brush, factor, clamp_to_range, bstrength);
+                  float factor = paint_gradient_finalize_factor(
+                      brush, factor_raw, clamp_to_range, bstrength, true);
                   factors[i] = factor;
+
+                  if (kEnableGradientPaintDebugTelemetry) {
+                    if (pixels_processed == 0) {
+                      first_factor_raw = factor_raw;
+                      first_factor_final = factor;
+                    }
+                    if (pixels_processed == pixel_positions.size() / 2) {
+                      middle_factor_raw = factor_raw;
+                      middle_factor_final = factor;
+                    }
+                    last_factor_raw = factor_raw;
+                    last_factor_final = factor;
+                    pixels_processed++;
+                  }
+
                   /* For Gradient Tools, negative factors are valid (pixels "before" gradient start) */
                   has_influence |= (factor != 0.0f);
+                }
+
+                /* Log details for first few rejected rows */
+                if (kEnableGradientPaintDebugTelemetry && !has_influence) {
+                  int rejected_count = debug_rejected_rows_count.fetch_add(1, std::memory_order_relaxed);
+                  if (rejected_count < kMaxDebugRejectedRows) {
+                    fprintf(stderr,
+                            "GRADIENT ROW REJECT #%d (symmetry): row=%d pixels=%d processed=%d\n"
+                            "  first: raw=%.4f final=%.4f\n"
+                            "  middle: raw=%.4f final=%.4f\n"
+                            "  last: raw=%.4f final=%.4f\n"
+                            "  bstrength=%.4f clamp=%d symmetry=%d\n",
+                            rejected_count + 1,
+                            row_index,
+                            int(pixel_row.num_pixels),
+                            pixels_processed,
+                            first_factor_raw,
+                            first_factor_final,
+                            middle_factor_raw,
+                            middle_factor_final,
+                            last_factor_raw,
+                            last_factor_final,
+                            bstrength,
+                            int(clamp_to_range),
+                            symmetry);
+                    fflush(stderr);
+                  }
                 }
               }
 
@@ -2135,10 +2231,10 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
               
               if (is_float_image) {
                 pixels_painted = local_kernel_float4.paint(
-                    brush, pixel_row, factors, image_buffer);
+                    brush, pixel_row, factors, image_buffer, true);
               }
               else {
-                pixels_painted = local_kernel_byte4.paint(brush, pixel_row, factors, image_buffer);
+                pixels_painted = local_kernel_byte4.paint(brush, pixel_row, factors, image_buffer, true);
               }
               if (kEnableGradientPaintDebugTelemetry) {
                 local_kernel_time_us_atomic.fetch_add(
@@ -2240,6 +2336,13 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
         factors.resize(pixel_positions.size());
         bool has_influence = false;
 
+        /* For debugging: store sample factors from this row */
+        float first_factor_raw = 0.0f, first_factor_final = 0.0f;
+        float middle_factor_raw = 0.0f, middle_factor_final = 0.0f;
+        float last_factor_raw = 0.0f, last_factor_final = 0.0f;
+        int pixels_processed = 0;
+        static int debug_serial_rejected_count = 0;  /* Static to limit output across all rows */
+
         if (use_batch_projection) {
           if (screen_coords.capacity() < pixel_positions.size()) {
             screen_coords.reserve(pixel_positions.size());
@@ -2264,50 +2367,85 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
             const float2 &screen_co = screen_coords[i];
             const bool projection_failed = (proj_statuses[i] != V3D_PROJ_RET_OK);
 
-            bool should_reject = false;
-            if (is_radial) {
-              const float dist_sq = math::distance_squared(screen_co, gradient_start);
-              should_reject = (dist_sq > rejection_radius_sq);
-            }
-            else if (gradient_axis_inv_len_sq == 0.0f) {
-              should_reject = true;
-            }
-            else {
-              const float2 to_point = screen_co - gradient_start;
-              const float t = math::dot(to_point, gradient_axis) * gradient_axis_inv_len_sq;
-              if (t > 1.1f) {
-                should_reject = true;
-              }
-              else if (clip_before_start && t < -0.1f) {
-                should_reject = true;
-              }
-            }
-
-            /* Don't reject points that failed projection - they may still be valid.
-             * The gradient calculator will return 0.0f for truly invalid points. */
-            if (projection_failed && should_reject) {
-              should_reject = false;
-            }
-
-            if (should_reject) {
+            /* Early rejection optimization disabled for gradient tool - the gradient calculator
+             * will correctly return 0.0f for pixels outside the gradient range. */
+            if (projection_failed) {
               factors[i] = 0.0f;
               continue;
             }
 
-            float factor = paint_projected_gradient_factor_with_preprojected(
+            float factor_raw = paint_projected_gradient_factor_with_preprojected(
                 calculator, screen_co, symmetry, radial_symmetry);
-            factor = paint_gradient_finalize_factor(brush, factor, clamp_to_range, bstrength);
+            float factor = paint_gradient_finalize_factor(brush, factor_raw, clamp_to_range, bstrength, true);
             factors[i] = factor;
-            has_influence |= (factor > 0.0f);
+
+            /* Store sample factors for debugging */
+            if (pixels_processed == 0) {
+              first_factor_raw = factor_raw;
+              first_factor_final = factor;
+            }
+            if (pixels_processed == pixel_positions.size() / 2) {
+              middle_factor_raw = factor_raw;
+              middle_factor_final = factor;
+            }
+            last_factor_raw = factor_raw;
+            last_factor_final = factor;
+            pixels_processed++;
+
+            /* For Gradient Tools, negative factors are valid (pixels "before" gradient start) */
+            has_influence |= (factor != 0.0f);
           }
         }
         else {
+          /* Non-batch projection path (serial) */
           for (const int i : factors.index_range()) {
-            float factor = paint_projected_gradient_factor_with_symmetry(
+            float factor_raw = paint_projected_gradient_factor_with_symmetry(
                 &region, calculator, pixel_positions[i], symmetry, radial_symmetry);
-            factor = paint_gradient_finalize_factor(brush, factor, clamp_to_range, bstrength);
+            float factor = paint_gradient_finalize_factor(brush, factor_raw, clamp_to_range, bstrength, true);
             factors[i] = factor;
-            has_influence |= (factor > 0.0f);
+
+            /* Store sample factors for debugging */
+            if (pixels_processed == 0) {
+              first_factor_raw = factor_raw;
+              first_factor_final = factor;
+            }
+            if (pixels_processed == pixel_positions.size() / 2) {
+              middle_factor_raw = factor_raw;
+              middle_factor_final = factor;
+            }
+            last_factor_raw = factor_raw;
+            last_factor_final = factor;
+            pixels_processed++;
+
+            /* For Gradient Tools, negative factors are valid (pixels "before" gradient start) */
+            has_influence |= (factor != 0.0f);
+          }
+        }
+
+        /* Log details for first few rejected rows (serial path) */
+        if (kEnableGradientPaintDebugTelemetry && !has_influence) {
+          if (debug_serial_rejected_count < kMaxDebugRejectedRows) {
+            fprintf(stderr,
+                    "GRADIENT ROW REJECT #%d (serial): row_idx=%d pixels=%d processed=%d\n"
+                    "  first: raw=%.4f final=%.4f\n"
+                    "  middle: raw=%.4f final=%.4f\n"
+                    "  last: raw=%.4f final=%.4f\n"
+                    "  bstrength=%.4f clamp=%d symmetry=%d\n",
+                    debug_serial_rejected_count + 1,
+                    local_rows_total,
+                    int(pixel_row.num_pixels),
+                    pixels_processed,
+                    first_factor_raw,
+                    first_factor_final,
+                    middle_factor_raw,
+                    middle_factor_final,
+                    last_factor_raw,
+                    last_factor_final,
+                    bstrength,
+                    int(clamp_to_range),
+                    symmetry);
+            fflush(stderr);
+            debug_serial_rejected_count++;
           }
         }
 
@@ -2331,10 +2469,10 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                                                                          0.0;
         bool pixels_painted = false;
         if (is_float_image) {
-          pixels_painted = local_kernel_float4.paint(brush, pixel_row, factors, image_buffer);
+          pixels_painted = local_kernel_float4.paint(brush, pixel_row, factors, image_buffer, true);
         }
         else {
-          pixels_painted = local_kernel_byte4.paint(brush, pixel_row, factors, image_buffer);
+          pixels_painted = local_kernel_byte4.paint(brush, pixel_row, factors, image_buffer, true);
         }
         if (kEnableGradientPaintDebugTelemetry) {
           local_kernel_time_us += int64_t((BLI_time_now_seconds() - kernel_start) * 1.0e6);

@@ -1505,7 +1505,7 @@ class SculptColorBackend : public gradient::session::Backend {
         float factor = paint_projected_gradient_factor_with_symmetry(
             context_->region, *calculator, snapshot.positions[i], symmetry_, radial_symmetry_);
         factor = paint_gradient_finalize_factor(
-            *context_->brush, factor, clamp_to_range, brush_alpha);
+            *context_->brush, factor, clamp_to_range, brush_alpha, true);
         factor *= snapshot.visibility_factors[i];
 
         if (factor <= 0.0f) {

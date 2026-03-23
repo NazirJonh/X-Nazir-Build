@@ -609,7 +609,8 @@ float paint_brush_gradient_coord(const Brush &brush, float distance, float press
 float paint_gradient_finalize_factor(const Brush &brush,
                                      float factor,
                                      bool clamp_to_range,
-                                     float multiplier);
+                                     float multiplier,
+                                     bool is_gradient_tool = false);
 float paint_projected_gradient_factor_with_symmetry(
     const ARegion *region,
     const ed::sculpt_paint::gradient::Calculator &calculator,

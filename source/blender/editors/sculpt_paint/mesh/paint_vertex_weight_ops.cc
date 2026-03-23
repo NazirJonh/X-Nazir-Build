@@ -605,7 +605,7 @@ static void gradientVert_update(WPGradient_userData *grad_data, int index)
 
   /* adjust weight */
   alpha = paint_gradient_finalize_factor(
-      *grad_data->brush, alpha, grad_data->clamp_to_range, 1.0f);
+      *grad_data->brush, alpha, grad_data->clamp_to_range, 1.0f, true);
 
   if (alpha != 0.0f) {
     MDeformVert *dv = &grad_data->dvert[index];

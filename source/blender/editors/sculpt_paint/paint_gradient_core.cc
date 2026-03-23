@@ -37,9 +37,17 @@ float apply_hardness(const float value, const float hardness)
 
   /* Keep hardness = 1.0 as identity for parity with existing paths.
    * Lower hardness values compress mid-range factors towards zero.
-   */
+   *
+   * Important: Handle negative values (pixels "before" gradient start) specially.
+   * std::pow with negative base and non-integer exponent returns NaN.
+   * For gradient tools, we preserve the sign but apply hardness to the magnitude. */
+  const float abs_value = std::abs(value);
+  const float sign = (value >= 0.0f) ? 1.0f : -1.0f;
+
   const float exponent = 1.0f / std::max(hardness_clamped, kEpsilon);
-  return std::pow(value, exponent);
+  const float result = std::pow(abs_value, exponent);
+
+  return sign * result;
 }
 
 float evaluate_curve(const CurveMapping *curve, const float value)
@@ -47,7 +55,12 @@ float evaluate_curve(const CurveMapping *curve, const float value)
   if (curve == nullptr) {
     return value;
   }
-  return BKE_curvemapping_evaluateF(curve, 0, value);
+  /* Curve mapping may not handle negative values correctly.
+   * For gradient tools, we want to preserve the sign but apply the curve to the magnitude. */
+  const float abs_value = std::abs(value);
+  const float sign = (value >= 0.0f) ? 1.0f : -1.0f;
+  const float result = BKE_curvemapping_evaluateF(curve, 0, abs_value);
+  return sign * result;
 }
 
 float evaluate_linear_world(const Params &params, const float3 &position)

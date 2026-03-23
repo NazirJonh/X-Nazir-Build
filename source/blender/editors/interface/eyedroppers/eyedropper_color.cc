@@ -93,14 +93,14 @@ struct Eyedropper {
 
   wmWindow *cb_win = nullptr;
   int cb_win_event_xy[2] = {};
-  void *draw_handle_sample_text = nullptr;
+  wmPaintCursor *paint_cursor = nullptr; /* Global paint cursor for eyedropper preview */
   char sample_text[MAX_NAME] = {};
   float current_col[3] = {}; /* current color under cursor */
 
   bNode *crypto_node = nullptr;
   CryptomatteSession *cryptomatte_session = nullptr;
   ViewportColorSampleSession *viewport_session = nullptr;
-  
+
   wmTimer *timer = nullptr; /* Timer for updating preview outside Blender window */
   void (*old_cursor_fn)(wmWindow *, ScrArea *, ARegion *) = nullptr;
   ARegionType *region_type = nullptr;
@@ -111,9 +111,10 @@ static void eyedropper_region_cursor(wmWindow *win, ScrArea * /*area*/, ARegion 
   WM_cursor_set(win, WM_CURSOR_EYEDROPPER);
 }
 
-static void eyedropper_draw_cb(const wmWindow *window, void *arg)
+static void eyedropper_draw_cb(bContext *C, const int2 &xy, const float2 & /*tilt*/, void *arg)
 {
   Eyedropper *eye = static_cast<Eyedropper *>(arg);
+  wmWindow *window = CTX_wm_window(C); /* GPU context is now handled globally */
 
   if (!window || !eye) {
     return;
@@ -220,9 +221,9 @@ static bool eyedropper_init(bContext *C, wmOperator *op)
     eye->cryptomatte_session = ntreeCompositCryptomatteSession(eye->crypto_node);
   }
 
-  /* Always activate draw callback for color preview. */
+  /* Use global paint cursor system for automatic cross-window GPU context management. */
   eye->cb_win = CTX_wm_window(C);
-  eye->draw_handle_sample_text = WM_draw_cb_activate(eye->cb_win, eyedropper_draw_cb, eye);
+  eye->paint_cursor = WM_paint_cursor_activate(SPACE_TYPE_ANY, RGN_TYPE_ANY, nullptr, eyedropper_draw_cb, eye);
 
   /* Mouse capture is handled by the timer system for outside-window tracking */
 
@@ -271,9 +272,9 @@ static void eyedropper_exit(bContext *C, wmOperator *op)
 
   ED_workspace_status_text(C, nullptr);
 
-  if (eye->draw_handle_sample_text) {
-    WM_draw_cb_exit(eye->cb_win, eye->draw_handle_sample_text);
-    eye->draw_handle_sample_text = nullptr;
+  if (eye->paint_cursor) {
+    WM_paint_cursor_end(eye->paint_cursor);
+    eye->paint_cursor = nullptr;
   }
 
   if (eye->cryptomatte_session) {
@@ -802,30 +803,21 @@ static void eyedropper_color_update_current(bContext *C,
 static void eyedropper_update_preview(bContext *C, Eyedropper *eye, const int event_xy[2])
 {
   wmWindowManager *wm = CTX_wm_manager(C);
-  if (eye->draw_handle_sample_text) {
+  if (eye->paint_cursor) {
     int event_xy_win[2];
     /* Use eye->cb_win as reference - event_xy is in its coordinate space */
     wmWindow *win = WM_window_find_under_cursor(eye->cb_win, event_xy, event_xy_win);
 
-    /* If cursor moved to a different Blender window, switch the draw callback.
-     * This is safe to do here (not during drawing) and allows the preview
-     * to follow the cursor between windows. */
-    if (win && win != eye->cb_win && eye->draw_handle_sample_text) {
-      /* Deactivate draw callback in old window */
-      WM_draw_cb_exit(eye->cb_win, eye->draw_handle_sample_text);
-
-      /* Activate draw callback in new window */
-      eye->cb_win = win;
-      eye->draw_handle_sample_text = WM_draw_cb_activate(eye->cb_win, eyedropper_draw_cb, eye);
-    }
+    /* Global paint cursor system now automatically handles GPU context switching
+     * between windows safely. Preview can now be displayed in any window. */
 
     if (win) {
-      /* Cursor is inside a Blender window */
-      eye->cb_win_event_xy[0] = event_xy[0];
-      eye->cb_win_event_xy[1] = event_xy[1];
+      /* Cursor is inside a Blender window - use window coordinates */
+      eye->cb_win_event_xy[0] = event_xy_win[0];
+      eye->cb_win_event_xy[1] = event_xy_win[1];
     }
     else {
-      /* Cursor is outside all Blender windows - get cursor position in eye->cb_win space */
+      /* Cursor is outside all Blender windows - get position relative to original window */
       if (wm_cursor_position_get(eye->cb_win, &eye->cb_win_event_xy[0], &eye->cb_win_event_xy[1])) {
         /* Coordinates obtained successfully */
       }
@@ -839,7 +831,15 @@ static void eyedropper_update_preview(bContext *C, Eyedropper *eye, const int ev
     eyedropper_color_sample_text_update(C, eye, event_xy);
     eyedropper_color_update_current(C, eye, event_xy);
 
-    /* Mark current window for redraw */
+    /* Mark windows for paint cursor redraw - global system handles all windows */
+    if (win && win != eye->cb_win) {
+      /* Mark target window for redraw */
+      bScreen *target_screen = WM_window_get_active_screen(win);
+      if (target_screen) {
+        target_screen->do_draw_paintcursor = true;
+      }
+    }
+    /* Always mark original window for redraw */
     bScreen *screen = WM_window_get_active_screen(eye->cb_win);
     if (screen) {
       screen->do_draw_paintcursor = true;

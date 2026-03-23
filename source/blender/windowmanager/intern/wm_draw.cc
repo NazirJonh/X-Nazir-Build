@@ -115,6 +115,9 @@ static void wm_paintcursor_draw(bContext *C, ScrArea *area, ARegion *region)
   wmWindowManager *wm = CTX_wm_manager(C);
   wmWindow *win = CTX_wm_window(C);
   bScreen *screen = WM_window_get_active_screen(win);
+  
+  /* Store original drawable window for restoration */
+  wmWindow *original_drawable = wm->runtime->windrawable;
 
   /* Don't draw paint cursors with locked interface. Painting is not possible
    * then, and cursor drawing can use scene data that another thread may be
@@ -139,18 +142,7 @@ static void wm_paintcursor_draw(bContext *C, ScrArea *area, ARegion *region)
     if (pc.poll == nullptr || pc.poll(C)) {
       ui::theme::theme_set(area->spacetype, region->regiontype);
 
-      /* Prevent drawing outside region. */
-      GPU_scissor_test(true);
-      GPU_scissor(region->winrct.xmin,
-                  region->winrct.ymin,
-                  BLI_rcti_size_x(&region->winrct) + 1,
-                  BLI_rcti_size_y(&region->winrct) + 1);
-      /* Reading the cursor location from the operating-system while the cursor is grabbed
-       * conflicts with grabbing logic that hides the cursor, then keeps it centered to accumulate
-       * deltas without it escaping from the window. In this case we never want to show the actual
-       * cursor coordinates so limit reading the cursor location to when the cursor is grabbed and
-       * wrapping in a region since this is the case when it would otherwise attempt to draw the
-       * cursor outside the view/window. See: #102792. */
+      /* Get cursor position */
       const int *xy = win->runtime->eventstate->xy;
       int xy_buf[2];
       if ((WM_capabilities_flag() & WM_CAPABILITY_CURSOR_WARP) &&
@@ -159,9 +151,49 @@ static void wm_paintcursor_draw(bContext *C, ScrArea *area, ARegion *region)
       {
         xy = xy_buf;
       }
+      
+      /* GLOBAL SOLUTION: Find window under cursor and switch GPU context safely */
+      int cursor_xy_target[2];
+      wmWindow *cursor_win = WM_window_find_under_cursor(win, xy, cursor_xy_target);
+      wmWindow *draw_win = cursor_win ? cursor_win : win;
+      
+      /* Only switch context if needed and window is valid */
+      bool context_switched = false;
+      if (draw_win != wm->runtime->windrawable && draw_win->runtime->ghostwin && 
+          draw_win->runtime->gpuctx) {
+        /* VULKAN FIX: Activate/raise window before GPU context switch to prevent crashes */
+        wm_window_raise(draw_win);
+        
+        /* Safely switch GPU context to target window */
+        wm_window_make_drawable(wm, draw_win);
+        context_switched = true;
+      }
+      
+      /* Use target window coordinates for drawing */
+      const int *draw_xy = cursor_win ? cursor_xy_target : xy;
 
-      pc.draw(C, xy, win->runtime->eventstate->tablet.tilt, pc.customdata);
+      /* Prevent drawing outside region */
+      GPU_scissor_test(true);
+      GPU_scissor(region->winrct.xmin,
+                  region->winrct.ymin,
+                  BLI_rcti_size_x(&region->winrct) + 1,
+                  BLI_rcti_size_y(&region->winrct) + 1);
+
+      /* Update context to reflect target window */
+      wmWindow *prev_ctx_win = CTX_wm_window(C);
+      CTX_wm_window_set(C, draw_win);
+      
+      pc.draw(C, draw_xy, win->runtime->eventstate->tablet.tilt, pc.customdata);
+      
+      /* Restore original context */
+      CTX_wm_window_set(C, prev_ctx_win);
       GPU_scissor_test(false);
+      
+      /* Restore original drawable if we switched */
+      if (context_switched && original_drawable && 
+          original_drawable->runtime->ghostwin && original_drawable->runtime->gpuctx) {
+        wm_window_make_drawable(wm, original_drawable);
+      }
     }
   }
 }

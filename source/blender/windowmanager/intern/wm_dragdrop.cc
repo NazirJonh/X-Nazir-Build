@@ -71,12 +71,19 @@
 
 #include <fmt/format.h>
 
+/* Global debug flag for drag-drop operations - set to false to disable debug output */
+static constexpr bool WM_DRAGDROP_DEBUG_ENABLED = false;
+
 /* Rate-limited debug printing for drag-drop operations.
  * Prevents log flooding by printing each unique message only once. */
 static std::unordered_set<std::string> _drop_logged_messages;
 
 static void drop_log_once(const char *format, ...)
 {
+  if constexpr (!WM_DRAGDROP_DEBUG_ENABLED) {
+    return;
+  }
+  
   char buffer[512];
   va_list args;
   va_start(args, format);

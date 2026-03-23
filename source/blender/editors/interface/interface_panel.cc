@@ -3520,7 +3520,7 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
                                         uint32_t current_mode_flag)
 {
   static bool first_call = true;
-  if (first_call) {
+  if (first_call && g_unassigned_func_debug_enabled) {
     printf("[UNASSIGNED FUNC] ENTER: category='%s' wm=%p space_type=%d mode_flag=0x%x\n",
            (category ? category->category : "NULL"), (const void*)wm, space_type, current_mode_flag);
     fflush(stdout);
@@ -3529,7 +3529,7 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
 
   if (!wm || !category) {
     static bool first_return_null = true;
-    if (first_return_null) {
+    if (first_return_null && g_unassigned_func_debug_enabled) {
       printf("[UNASSIGNED FUNC] RETURN false: wm=%p category=%p\n", (const void*)wm, (const void*)category);
       fflush(stdout);
       first_return_null = false;
@@ -3540,7 +3540,7 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
   /* Reserved categories are never considered unassigned. */
   if (category->is_reserved) {
     static bool first_reserved = true;
-    if (first_reserved) {
+    if (first_reserved && g_unassigned_func_debug_enabled) {
       printf("[UNASSIGNED FUNC] RETURN false: reserved category='%s'\n", category->category);
       fflush(stdout);
       first_reserved = false;
@@ -3551,7 +3551,7 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
   /* Must have a source extension. */
   if (category->source_extension[0] == '\0') {
     static bool first_empty_ext = true;
-    if (first_empty_ext) {
+    if (first_empty_ext && g_unassigned_func_debug_enabled) {
       printf("[UNASSIGNED FUNC] RETURN false: source_extension is empty\n");
       fflush(stdout);
       first_empty_ext = false;
@@ -3564,7 +3564,7 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
    * Only consider it "assigned" when pending_tag_assignment is false AND it has tags. */
   if (!category->pending_tag_assignment && category->tags[0] != '\0') {
     static bool first_saved = true;
-    if (first_saved) {
+    if (first_saved && g_unassigned_func_debug_enabled) {
       printf("[UNASSIGNED FUNC] RETURN false: already saved with tags='%s'\n", category->tags);
       fflush(stdout);
       first_saved = false;
@@ -3575,7 +3575,7 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
   /* If pending_tag_assignment is false and no tags, user selected "Without Tag" and saved. */
   if (!category->pending_tag_assignment) {
     static bool first_without_tag = true;
-    if (first_without_tag) {
+    if (first_without_tag && g_unassigned_func_debug_enabled) {
       printf("[UNASSIGNED FUNC] RETURN false: pending_tag_assignment=false (processed without tag)\n");
       fflush(stdout);
       first_without_tag = false;
@@ -3588,7 +3588,7 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
    * already has a tag assigned in Object Mode. */
   if (extension_has_tagged_category(wm, category->source_extension)) {
     static bool first_has_tagged = true;
-    if (first_has_tagged) {
+    if (first_has_tagged && g_unassigned_func_debug_enabled) {
       printf("[UNASSIGNED FUNC] RETURN false: extension '%s' has tagged category\n",
              category->source_extension);
       fflush(stdout);
@@ -3602,7 +3602,7 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
    * category "Bool Tool" but all its panels are actually in the reserved category "Edit". */
   if (extension_has_only_reserved_categories(wm, category->source_extension)) {
     static bool first_only_reserved = true;
-    if (first_only_reserved) {
+    if (first_only_reserved && g_unassigned_func_debug_enabled) {
       printf("[UNASSIGNED FUNC] RETURN false: extension '%s' has only reserved categories\n",
              category->source_extension);
       fflush(stdout);
@@ -3619,7 +3619,7 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
     const uint32_t space_flag = space_type_to_flag(space_type);
     if ((category->discovered_in_spaces & space_flag) == 0) {
       static bool first_space_mismatch = true;
-      if (first_space_mismatch) {
+      if (first_space_mismatch && g_unassigned_func_debug_enabled) {
         printf("[UNASSIGNED FUNC] RETURN false: discovered_in_spaces=0x%x space_flag=0x%x\n",
                category->discovered_in_spaces, space_flag);
         fflush(stdout);
@@ -3636,7 +3636,7 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
   if (space_type != SPACE_NODE && current_mode_flag != 0 && category->discovered_in_modes != 0) {
     if ((category->discovered_in_modes & current_mode_flag) == 0) {
       static bool first_mode_mismatch = true;
-      if (first_mode_mismatch) {
+      if (first_mode_mismatch && g_unassigned_func_debug_enabled) {
         printf("[UNASSIGNED FUNC] RETURN false: discovered_in_modes=0x%x current_mode_flag=0x%x\n",
                category->discovered_in_modes, current_mode_flag);
         fflush(stdout);
@@ -3647,7 +3647,7 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
   }
 
   static bool first_return_true = true;
-  if (first_return_true) {
+  if (first_return_true && g_unassigned_func_debug_enabled) {
     printf("[UNASSIGNED FUNC] RETURN true: category='%s'\n", category->category);
     fflush(stdout);
     first_return_true = false;
@@ -3707,7 +3707,7 @@ int get_unassigned_categories_count(const wmWindowManager *wm,
   auto it = _last_logged_counts.find(cache_key);
   bool should_log = (it == _last_logged_counts.end() || it->second != count);
 
-  if (should_log) {
+  if (should_log && g_unassigned_func_debug_enabled) {
     /* Prevent unbounded cache growth */
     if (_last_logged_counts.size() > MAX_CACHE_ENTRIES) {
       _last_logged_counts.clear();
@@ -3773,17 +3773,21 @@ bool should_show_new_addon_tag(const wmWindowManager *wm,
     }
     _logged_tag_messages.insert(msg_key);
     
-    printf("[NEW ADDON TAG] should_show_new_addon_tag: wm=%p space_type=%d mode_flag=0x%x\n",
-           (const void*)wm, space_type, current_mode_flag);
-    fflush(stdout);
+    if (g_unassigned_func_debug_enabled) {
+      printf("[NEW ADDON TAG] should_show_new_addon_tag: wm=%p space_type=%d mode_flag=0x%x\n",
+             (const void*)wm, space_type, current_mode_flag);
+      fflush(stdout);
+    }
   }
 
   int count = get_unassigned_categories_count(wm, space_type, current_mode_flag);
   bool result = count > 0;
 
   if (!already_logged) {
-    printf("[NEW ADDON TAG] Result: count=%d should_show=%d\n", count, (result ? 1 : 0));
-    fflush(stdout);
+    if (g_unassigned_func_debug_enabled) {
+      printf("[NEW ADDON TAG] Result: count=%d should_show=%d\n", count, (result ? 1 : 0));
+      fflush(stdout);
+    }
   }
 
   return result;

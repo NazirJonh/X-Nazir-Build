@@ -915,12 +915,16 @@ static void ui_apply_but_func(bContext *C, Button *but)
 {
   Block *block = but->block;
   if (!ui_afterfunc_check(block, but)) {
-    printf("DEBUG: ui_apply_but_func: ui_afterfunc_check returned false\n");
+    if (g_ui_apply_but_func_debug_enabled) {
+      printf("DEBUG: ui_apply_but_func: ui_afterfunc_check returned false\n");
+    }
     return;
   }
 
-  printf("DEBUG: ui_apply_but_func: but type=%d, optype=%p, opptr=%p, opcontext=%d\n",
-         int(but->type), but->optype, but->opptr, int(but->opcontext));
+  if (g_ui_apply_but_func_debug_enabled) {
+    printf("DEBUG: ui_apply_but_func: but type=%d, optype=%p, opptr=%p, opcontext=%d\n",
+           int(but->type), but->optype, but->opptr, int(but->opcontext));
+  }
 
   AfterFunc *after = ui_afterfunc_new();
 
@@ -963,8 +967,10 @@ static void ui_apply_but_func(bContext *C, Button *but)
     after->opcontext = but->opcontext;
     after->opptr = but->opptr;
 
-    printf("DEBUG: ui_apply_but_func: Copying optype=%p, opcontext=%d, opptr=%p to AfterFunc\n",
-           after->optype, int(after->opcontext), after->opptr);
+    if (g_ui_apply_but_func_debug_enabled) {
+      printf("DEBUG: ui_apply_but_func: Copying optype=%p, opcontext=%d, opptr=%p to AfterFunc\n",
+             after->optype, int(after->opcontext), after->opptr);
+    }
 
     but->optype = nullptr;
     but->opcontext = wm::OpCallContext(0);
@@ -1257,8 +1263,10 @@ static void ui_apply_but_TOG(bContext *C, Button *but, HandleButtonData *data)
 
   button_value_set(but, double(value_toggle));
 
-  printf("DEBUG: ui_apply_but_TOG: but type=%d, optype=%p, opptr=%p\n",
-         int(but->type), but->optype, but->opptr);
+  if (g_ui_apply_but_func_debug_enabled) {
+    printf("DEBUG: ui_apply_but_TOG: but type=%d, optype=%p, opptr=%p\n",
+           int(but->type), but->optype, but->opptr);
+  }
 
   if (ELEM(but->type, ButtonType::IconToggle, ButtonType::IconToggleN, ButtonType::Tag)) {
     button_update_edited(but);
@@ -12396,10 +12404,14 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
             /* Check if dialog was just closed for the same category */
             if (!should_prevent && category_tab_last_closed_category[0] != '\0') {
               double time_since_close = BLI_time_now_seconds() - category_tab_popup_close_time;
-              printf("[DEBUG HANDLER] Check close: time_since_close=%.3f, last_closed='%s', current='%s'\n",
-                     time_since_close, category_tab_last_closed_category, pc_dyn.idname);
+              if (g_tag_filter_debug_enabled) {
+                printf("[DEBUG HANDLER] Check close: time_since_close=%.3f, last_closed='%s', current='%s'\n",
+                       time_since_close, category_tab_last_closed_category, pc_dyn.idname);
+              }
               if (time_since_close < 0.1 && STREQ(category_tab_last_closed_category, pc_dyn.idname)) {
-                printf("[DEBUG HANDLER] BLOCKING REOPEN (same click/immediate reopen)\n");
+                if (g_tag_filter_debug_enabled) {
+                  printf("[DEBUG HANDLER] BLOCKING REOPEN (same click/immediate reopen)\n");
+                }
                 should_prevent = true;
               }
             }

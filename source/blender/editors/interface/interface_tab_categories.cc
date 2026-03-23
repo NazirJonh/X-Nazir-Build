@@ -37,6 +37,11 @@
 
 #include "BLT_translation.hh"
 
+/* Global debug flag for tab drag operations - set to 0 to disable debug output */
+#ifndef TAB_DRAG_DEBUG_ENABLED
+#  define TAB_DRAG_DEBUG_ENABLED 0
+#endif
+
 #include "DNA_object_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
@@ -105,9 +110,9 @@ namespace blender::ui {
  * - Category order changes
  * - Tag assignment operations
  * 
- * To enable: Change to `static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;`
+ * To enable: Change to `static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;`
  */
-static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
 
 /** \} */
 
@@ -2477,10 +2482,12 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
    * Unassigned extension categories are shown via dedicated "New Add-ons!" filter,
    * not by leaking into an arbitrary active tag (e.g. AAA/BBB). */
   if (!category_tags || category_tags[0] == '\0') {
-    printf("[TAG FILTER] Reject untagged category in normal tag filter: category='%s', active_tags='%s'\n",
-           category_idname,
-           active_tags);
-    fflush(stdout);
+    if (g_tag_filter_debug_enabled) {
+      printf("[TAG FILTER] Reject untagged category in normal tag filter: category='%s', active_tags='%s'\n",
+             category_idname,
+             active_tags);
+      fflush(stdout);
+    }
     return false;
   }
 
@@ -2970,10 +2977,12 @@ static void apply_pending_insert(const bContext *C,
   }
 
   Vector<PanelCategoryDyn *> appeared_categories;
-  printf("[GET_ORDERED] all_existing_categories.size()=%zu, existing_categories.size()=%zu, g_known_categories_before_extension_drop.size()=%zu\n",
-         g_pending_category_insert.all_existing_categories.size(),
-         g_pending_category_insert.existing_categories.size(),
-         g_known_categories_before_extension_drop.size());
+  if (g_tag_filter_debug_enabled) {
+    printf("[GET_ORDERED] all_existing_categories.size()=%zu, existing_categories.size()=%zu, g_known_categories_before_extension_drop.size()=%zu\n",
+           g_pending_category_insert.all_existing_categories.size(),
+           g_pending_category_insert.existing_categories.size(),
+           g_known_categories_before_extension_drop.size());
+  }
   for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     /* IMPORTANT: Do NOT filter new extension categories through panel_category_is_visible_by_tags!
      * New extension categories may not have tags assigned yet, which would cause them to be
@@ -2997,10 +3006,12 @@ static void apply_pending_insert(const bContext *C,
                                               std::string(pc_dyn.idname)) :
                                           !g_pending_category_insert.existing_categories.contains(
                                               std::string(pc_dyn.idname)));
-    printf("[GET_ORDERED]   cat='%s' use_full=%d is_new=%d\n",
-           pc_dyn.idname,
-           use_full_category_list,
-           is_new_category);
+    if (g_tag_filter_debug_enabled) {
+      printf("[GET_ORDERED]   cat='%s' use_full=%d is_new=%d\n",
+             pc_dyn.idname,
+             use_full_category_list,
+             is_new_category);
+    }
     if (!is_new_category && !panel_category_is_visible_by_tags(C, wm, pc_dyn.idname)) {
       continue;
     }
@@ -3504,6 +3515,7 @@ static int calculate_insert_index(const bContext *C,
       const double now = BLI_time_now_seconds();
       const bool should_log = (now - _tab_drag_last_log_time > 1.0) ||
                               (_tab_drag_last_insert_idx != insert_index);
+#if TAB_DRAG_DEBUG_ENABLED
       if (should_log) {
         printf("[TAB_DRAG_HIT] drag='%s' effective_y=%d tab='%s' tab_center=%d raw_idx=%d insert_idx=%d bounds=[%d,%d]\n",
                state->drag_category_id,
@@ -3517,6 +3529,7 @@ static int calculate_insert_index(const bContext *C,
         _tab_drag_last_log_time = now;
         _tab_drag_last_insert_idx = insert_index;
       }
+#endif
       return insert_index;
     }
 
@@ -3529,6 +3542,7 @@ static int calculate_insert_index(const bContext *C,
   const double tail_now = BLI_time_now_seconds();
   const bool tail_should_log = (tail_now - _tab_drag_tail_last_log_time > 1.0) ||
                                (_tab_drag_tail_last_insert_idx != insert_index);
+#if TAB_DRAG_DEBUG_ENABLED
   if (tail_should_log) {
     printf("[TAB_DRAG_HIT] drag='%s' effective_y=TAIL raw_idx=%d insert_idx=%d bounds=[%d,%d]\n",
            state->drag_category_id,
@@ -3539,6 +3553,7 @@ static int calculate_insert_index(const bContext *C,
     _tab_drag_tail_last_log_time = tail_now;
     _tab_drag_tail_last_insert_idx = insert_index;
   }
+#endif
   return insert_index;
 }
 

@@ -48,6 +48,11 @@
 
 #include "ED_screen.hh"
 
+/* Global debug flag for category tab operations - set to 0 to disable debug output */
+#ifndef CATEGORY_TAB_DEBUG_ENABLED
+#  define CATEGORY_TAB_DEBUG_ENABLED 0
+#endif
+
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 #include "RNA_prototypes.hh"
@@ -258,12 +263,16 @@ static void category_tab_reset_apply_to_operator(bContext *C,
     if (defaults.glyph != nullptr) {
       char glyph_hex[16];
       utf8_to_hex_codepoint(defaults.glyph, glyph_hex, sizeof(glyph_hex));
+#if CATEGORY_TAB_DEBUG_ENABLED
       printf("[RESET APPLY] category='%s', default_glyph='%s', glyph_hex='%s'\n",
              category, defaults.glyph, glyph_hex);
+#endif
       RNA_string_set(target_op->ptr, "glyph", glyph_hex);
     }
     else {
+#if CATEGORY_TAB_DEBUG_ENABLED
       printf("[RESET APPLY] category='%s', default_glyph=nullptr, setting glyph=''\n", category);
+#endif
       RNA_string_set(target_op->ptr, "glyph", "");
     }
 
@@ -377,10 +386,12 @@ static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
     return defaults;
   }
 
+#if CATEGORY_TAB_DEBUG_ENABLED
   printf("[CATEGORY RESET DEBUG] compute_reset_defaults(category='%s', space_type=%d, reset_glyph=%d)\n",
          category,
          space_type,
          reset_glyph ? 1 : 0);
+#endif
 
   CategoryGlyphItem *apply_item = nullptr;
   CategoryGlyphItem *target_item = nullptr;
@@ -415,11 +426,13 @@ static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
     return defaults;
   }
 
+#if CATEGORY_TAB_DEBUG_ENABLED
   printf("[CATEGORY RESET DEBUG] apply_item space_type=%d category='%s' glyph='%s' default_glyph='%s'\n",
          apply_item->space_type,
          apply_item->category,
          apply_item->glyph,
          apply_item->default_glyph);
+#endif
 
   const bool is_glyph_only_category = is_single_glyph_str(category);
   const bool global_has_glyph = (global_item != nullptr) &&
@@ -429,11 +442,13 @@ static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
     default_source = global_item;
   }
 
+#if CATEGORY_TAB_DEBUG_ENABLED
   printf("[CATEGORY RESET DEBUG] default_source space_type=%d category='%s' glyph='%s' default_glyph='%s'\n",
          default_source->space_type,
          default_source->category,
          default_source->glyph,
          default_source->default_glyph);
+#endif
 
   if (reset_glyph) {
     /* Reset should always clear explicit first-letter mode in persisted mapping. */
@@ -535,7 +550,9 @@ static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
    * The issue: get_category_glyph_data uses GLOBAL fallback which finds old glyph
    * in GLOBAL mappings even after resetting space-specific entry. */
   if (reset_glyph && !is_glyph_only_category && global_item != nullptr) {
+#if CATEGORY_TAB_DEBUG_ENABLED
     printf("[RESET FIX] Clearing GLOBAL entry for text_only/glyph_text category '%s'\n", category);
+#endif
     /* Reset glyph to empty (will use first_letter fallback) */
     global_item->glyph[0] = '\0';
     /* Keep glyph_mode=AUTO so Cancel restores original icon/glyph correctly.
@@ -549,7 +566,9 @@ static CategoryTabResetDefaults compute_reset_defaults(wmWindowManager *wm,
     global_item->icon_key[0] = '\0';
     global_item->icon_provider[0] = '\0';
     global_item->icon_source = ui::CATEGORY_TAB_ICON_SOURCE_OFF;
+#if CATEGORY_TAB_DEBUG_ENABLED
     printf("[RESET FIX] GLOBAL entry cleared: glyph='', glyph_mode=auto\n");
+#endif
   }
 
   return defaults;
@@ -585,19 +604,25 @@ static CategoryGlyphItem *category_tab_reset_override_ensure(wmWindowManager *wm
 
 static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
 {
+#if CATEGORY_TAB_DEBUG_ENABLED
   printf("[RESET EXEC] === category_tab_reset_exec START ===\n");
+#endif
   
   char category[64];
   RNA_string_get(op->ptr, "category", category);
+#if CATEGORY_TAB_DEBUG_ENABLED
   printf("[RESET EXEC] category='%s'\n", category);
+#endif
 
   /* Read checkbox flags for selective reset */
   const bool reset_name = RNA_boolean_get(op->ptr, "reset_name");
   const bool reset_glyph = RNA_boolean_get(op->ptr, "reset_glyph");
   const bool reset_color = RNA_boolean_get(op->ptr, "reset_color");
   const bool reset_tag = RNA_boolean_get(op->ptr, "reset_tag");
+#if CATEGORY_TAB_DEBUG_ENABLED
   printf("[RESET EXEC] reset_name=%d, reset_glyph=%d, reset_color=%d, reset_tag=%d\n", 
          reset_name, reset_glyph, reset_color, reset_tag);
+#endif
 
   wmWindowManager *wm = CTX_wm_manager(C);
   wmOperator *const dialog_op = category_tab_current_dialog_op;
@@ -609,12 +634,18 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
       space_type = RNA_int_get(dialog_op->ptr, "original_space_type");
     }
   }
+#if CATEGORY_TAB_DEBUG_ENABLED
   printf("[RESET EXEC] space_type=%d\n", space_type);
+#endif
   
+#if CATEGORY_TAB_DEBUG_ENABLED
   printf("[RESET EXEC] Calling compute_reset_defaults...\n");
+#endif
   const CategoryTabResetDefaults defaults =
       compute_reset_defaults(wm, category, reset_glyph, space_type);
+#if CATEGORY_TAB_DEBUG_ENABLED
   printf("[RESET EXEC] compute_reset_defaults returned\n");
+#endif
 
   category_tab_reset_apply_to_operator(C,
                                        dialog_op,
@@ -686,7 +717,10 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
                  "wm.category_tab_save_category = ''\n"
                  "if category:\n"
                  "    reset_category_to_defaults(category, space_type=%d, save=False)\n"
-                 "    print(f'[RESET GLYPH SYNC] Cleared GLOBAL glyph in _glyph_cache for {category}')\n",
+#if CATEGORY_TAB_DEBUG_ENABLED
+                 "    print(f'[RESET GLYPH SYNC] Cleared GLOBAL glyph in _glyph_cache for {category}')\n"
+#endif
+                 ,
                  space_type);
 
     BPY_run_string_exec(C, imports, reset_glyph_cmd);
@@ -1160,6 +1194,7 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
   const int space_type = area ? area->spacetype : -1;
 
   char save_cmd[1024];
+#if CATEGORY_TAB_DEBUG_ENABLED
   BLI_snprintf(save_cmd, sizeof(save_cmd),
       "from bl_ui.space_userpref import finalize_category_tag_changes, get_category_tags, sync_wm_to_glyph_cache\n"
       "import bpy\n"
@@ -1177,6 +1212,19 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
       "else:\n"
       "    print('[GLYPH SAVE PY] ERROR: No category found in WM property')\n",
       space_type, space_type);
+#else
+  BLI_snprintf(save_cmd, sizeof(save_cmd),
+      "from bl_ui.space_userpref import finalize_category_tag_changes, get_category_tags, sync_wm_to_glyph_cache\n"
+      "import bpy\n"
+      "wm = bpy.context.window_manager\n"
+      "category = wm.category_tab_save_category\n"
+      "wm.category_tab_save_category = ''\n"
+      "if category:\n"
+      "    tags = get_category_tags(category, space_type=%d)\n"
+      "    finalize_category_tag_changes(category, space_type=%d)\n"
+      "    result = sync_wm_to_glyph_cache()\n",
+      space_type, space_type);
+#endif
 
   BPY_run_string_exec(C, imports, save_cmd);
 

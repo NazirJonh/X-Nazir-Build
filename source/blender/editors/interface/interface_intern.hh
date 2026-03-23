@@ -32,6 +32,27 @@
 struct IconTextOverlay;
 namespace blender {
 
+/** ===================================================================== */
+/** \name Global Debug Flags for Logging Control
+ *  \{ */
+
+/** Enable/disable drag-and-drop texture debug logging (interface_drop_image.cc). */
+extern bool g_drop_image_debug_enabled;
+
+/** Enable/disable UI button tag debug logging (interface.cc). */
+extern bool g_ui_button_tag_debug_enabled;
+
+/** Enable/disable UI button function application debug logging (interface_handlers.cc). */
+extern bool g_ui_apply_but_func_debug_enabled;
+
+/** Enable/disable tag filter debug logging (interface_tab_categories.cc). */
+extern bool g_tag_filter_debug_enabled;
+
+/** Enable/disable unassigned category function debug logging (interface_panel.cc). */
+extern bool g_unassigned_func_debug_enabled;
+
+/** \} */
+
 struct AnimationEvalContext;
 struct ARegion;
 struct bContext;

@@ -14,6 +14,9 @@ __all__ = (
 
 import os
 
+# Global debug flag for extension operations - set to False to disable debug output
+EXTENSION_DEBUG_ENABLED = False
+
 from functools import partial
 
 from typing import (
@@ -795,28 +798,29 @@ def _preferences_install_post_enable_on_install(
             addon_module_name = "{:s}.{:s}.{:s}".format(_ext_base_pkg_idname, repo_item.module, pkg_id)
 
             # DEBUG: Check module state before enable
-            import sys
-            repo_module_name = "{:s}.{:s}".format(_ext_base_pkg_idname, repo_item.module)
-            print(f"[DEBUG ENABLE] Attempting to enable: {addon_module_name}")
-            print(f"[DEBUG ENABLE] Repo module name: {repo_module_name}")
-            print(f"[DEBUG ENABLE] Repo module in sys.modules: {repo_module_name in sys.modules}")
-            print(f"[DEBUG ENABLE] Addon module in sys.modules: {addon_module_name in sys.modules}")
+            if EXTENSION_DEBUG_ENABLED:
+                import sys
+                repo_module_name = "{:s}.{:s}".format(_ext_base_pkg_idname, repo_item.module)
+                print(f"[DEBUG ENABLE] Attempting to enable: {addon_module_name}")
+                print(f"[DEBUG ENABLE] Repo module name: {repo_module_name}")
+                print(f"[DEBUG ENABLE] Repo module in sys.modules: {repo_module_name in sys.modules}")
+                print(f"[DEBUG ENABLE] Addon module in sys.modules: {addon_module_name in sys.modules}")
 
-            if repo_module_name in sys.modules:
-                repo_mod = sys.modules[repo_module_name]
-                print(f"[DEBUG ENABLE] Repo module __path__: {getattr(repo_mod, '__path__', 'N/A')}")
-                print(f"[DEBUG ENABLE] hasattr(repo_mod, pkg_id): {hasattr(repo_mod, pkg_id)}")
-                if hasattr(repo_mod, pkg_id):
-                    submod = getattr(repo_mod, pkg_id)
-                    print(f"[DEBUG ENABLE] Submodule: {submod}")
-                    print(f"[DEBUG ENABLE] Submodule __addon_enabled__: {getattr(submod, '__addon_enabled__', 'N/A')}")
+                if repo_module_name in sys.modules:
+                    repo_mod = sys.modules[repo_module_name]
+                    print(f"[DEBUG ENABLE] Repo module __path__: {getattr(repo_mod, '__path__', 'N/A')}")
+                    print(f"[DEBUG ENABLE] hasattr(repo_mod, pkg_id): {hasattr(repo_mod, pkg_id)}")
+                    if hasattr(repo_mod, pkg_id):
+                        submod = getattr(repo_mod, pkg_id)
+                        print(f"[DEBUG ENABLE] Submodule: {submod}")
+                        print(f"[DEBUG ENABLE] Submodule __addon_enabled__: {getattr(submod, '__addon_enabled__', 'N/A')}")
 
-            # Check path_importer_cache for addon directory
-            addon_dir = os.path.join(directory, pkg_id)
-            print(f"[DEBUG ENABLE] Addon directory: {addon_dir}")
-            print(f"[DEBUG ENABLE] Addon directory exists: {os.path.exists(addon_dir)}")
-            if addon_dir in sys.path_importer_cache:
-                print(f"[DEBUG ENABLE] path_importer_cache[{addon_dir}]: {sys.path_importer_cache[addon_dir]}")
+                # Check path_importer_cache for addon directory
+                addon_dir = os.path.join(directory, pkg_id)
+                print(f"[DEBUG ENABLE] Addon directory: {addon_dir}")
+                print(f"[DEBUG ENABLE] Addon directory exists: {os.path.exists(addon_dir)}")
+                if addon_dir in sys.path_importer_cache:
+                    print(f"[DEBUG ENABLE] path_importer_cache[{addon_dir}]: {sys.path_importer_cache[addon_dir]}")
             # END DEBUG
 
             addon_utils.enable(
@@ -1281,7 +1285,8 @@ def _extension_repo_directory_validate_module(repo_directory):
     from sys import path_importer_cache
     import os
 
-    print(f"[DEBUG VALIDATE] Validating repo directory: {repo_directory}")
+    if EXTENSION_DEBUG_ENABLED:
+        print(f"[DEBUG VALIDATE] Validating repo directory: {repo_directory}")
 
     # Clear cache for any paths that start with repo_directory (including subdirectories)
     # This is important for newly installed extensions
@@ -1292,11 +1297,13 @@ def _extension_repo_directory_validate_module(repo_directory):
             cached_value = path_importer_cache.get(cached_path, ...)
             if cached_value is None or (os.path.exists(cached_path) if isinstance(cached_path, str) else False):
                 keys_to_clear.append(cached_path)
-                print(f"[DEBUG VALIDATE] Will clear cache for: {cached_path} (value: {cached_value})")
+                if EXTENSION_DEBUG_ENABLED:
+                    print(f"[DEBUG VALIDATE] Will clear cache for: {cached_path} (value: {cached_value})")
 
     for key in keys_to_clear:
         del path_importer_cache[key]
-        print(f"[DEBUG VALIDATE] Cleared cache for: {key}")
+        if EXTENSION_DEBUG_ENABLED:
+            print(f"[DEBUG VALIDATE] Cleared cache for: {key}")
 
 
 # -----------------------------------------------------------------------------
@@ -1715,9 +1722,11 @@ class EXTENSIONS_OT_repo_sync(Operator, _ExtCmdMixIn):
 
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that repo sync is complete.
-                print("[PYTHON] Calling extension_repos_update_post_trigger() after repo sync...")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] Calling extension_repos_update_post_trigger() after repo sync...")
                 bpy.app.extension_repos_update_post_trigger()
-                print("[PYTHON] extension_repos_update_post_trigger() completed after repo sync")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] extension_repos_update_post_trigger() completed after repo sync")
             except Exception as ex:
                 print(f"Extension post-sync trigger error: {ex}")
 
@@ -1835,9 +1844,11 @@ class EXTENSIONS_OT_repo_sync_all(Operator, _ExtCmdMixIn):
 
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that repo sync all is complete.
-                print("[PYTHON] Calling extension_repos_update_post_trigger() after repo sync all...")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] Calling extension_repos_update_post_trigger() after repo sync all...")
                 bpy.app.extension_repos_update_post_trigger()
-                print("[PYTHON] extension_repos_update_post_trigger() completed after repo sync all")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] extension_repos_update_post_trigger() completed after repo sync all")
             except Exception as ex:
                 print(f"Extension post-sync-all trigger error: {ex}")
 
@@ -2285,9 +2296,11 @@ class EXTENSIONS_OT_package_upgrade_all(Operator, _ExtCmdMixIn):
 
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that package upgrade is complete.
-                print("[PYTHON] Calling extension_repos_update_post_trigger() after package upgrade...")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] Calling extension_repos_update_post_trigger() after package upgrade...")
                 bpy.app.extension_repos_update_post_trigger()
-                print("[PYTHON] extension_repos_update_post_trigger() completed after package upgrade")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] extension_repos_update_post_trigger() completed after package upgrade")
             except Exception as ex:
                 print(f"Extension post-upgrade trigger error: {ex}")
 
@@ -2469,9 +2482,11 @@ class EXTENSIONS_OT_package_install_marked(Operator, _ExtCmdMixIn):
 
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that marked package uninstallation is complete.
-                print("[PYTHON] Calling extension_repos_update_post_trigger() after marked package uninstall...")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] Calling extension_repos_update_post_trigger() after marked package uninstall...")
                 bpy.app.extension_repos_update_post_trigger()
-                print("[PYTHON] extension_repos_update_post_trigger() completed after marked package uninstall")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] extension_repos_update_post_trigger() completed after marked package uninstall")
             except Exception as ex:
                 print(f"Extension post-uninstall-marked trigger error: {ex}")
 
@@ -2488,9 +2503,11 @@ class EXTENSIONS_OT_package_install_marked(Operator, _ExtCmdMixIn):
 
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that marked package installation is complete.
-                print("[PYTHON] Calling extension_repos_update_post_trigger() after marked package install...")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] Calling extension_repos_update_post_trigger() after marked package install...")
                 bpy.app.extension_repos_update_post_trigger()
-                print("[PYTHON] extension_repos_update_post_trigger() completed after marked package install")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] extension_repos_update_post_trigger() completed after marked package install")
             except Exception as ex:
                 print(f"Extension post-install-marked trigger error: {ex}")
 
@@ -2918,9 +2935,11 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
 
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that extension installation is complete.
-                print("[PYTHON] Calling extension_repos_update_post_trigger()...")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] Calling extension_repos_update_post_trigger()...")
                 bpy.app.extension_repos_update_post_trigger()
-                print("[PYTHON] extension_repos_update_post_trigger() completed")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] extension_repos_update_post_trigger() completed")
             except Exception as ex:
                 print(f"Extension post-install callback error: {ex}")
 
@@ -3000,7 +3019,8 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
 
     def _invoke_for_drop(self, context, _event):
         # Drop logic.
-        print("DROP FILE:", self.url)
+        if EXTENSION_DEBUG_ENABLED:
+            print("DROP FILE:", self.url)
 
         # Blender calls the drop logic with an un-encoded file-path.
         # It would be nicer if it used the file URI schema,
@@ -3335,9 +3355,11 @@ class EXTENSIONS_OT_package_install(Operator, _ExtCmdMixIn):
 
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that extension installation is complete.
-                print("[PYTHON] Calling extension_repos_update_post_trigger()...")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] Calling extension_repos_update_post_trigger()...")
                 bpy.app.extension_repos_update_post_trigger()
-                print("[PYTHON] extension_repos_update_post_trigger() completed")
+                if EXTENSION_DEBUG_ENABLED:
+                    print("[PYTHON] extension_repos_update_post_trigger() completed")
             except Exception as ex:
                 print(f"Extension post-install callback error: {ex}")
 
@@ -3369,7 +3391,8 @@ class EXTENSIONS_OT_package_install(Operator, _ExtCmdMixIn):
         )
 
         url = self.url
-        print("DROP URL:", url)
+        if EXTENSION_DEBUG_ENABLED:
+            print("DROP URL:", url)
 
         # Needed for UNC paths on WIN32.
         url = self.url = url_normalize(url)

@@ -111,7 +111,7 @@ static constexpr size_t MAX_LOGGED_MESSAGES = 500;
 
 /* Debug output control flag - set to true to enable debug printf messages */
 //DEBUG FLAGS
-static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
 
 static void log_once(const char *message)
 {
@@ -3745,25 +3745,27 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   const int custom_icon_mode_ui_exec = RNA_enum_get(op->ptr, "custom_icon_mode_ui");
   char icon_key_before[128] = "";
   RNA_string_get(op->ptr, "icon_key", icon_key_before);
-  printf("[ICON SAVE DEBUG] display_mode_ui=%d, custom_icon_mode_ui=%d, icon_source_before=%d, icon_key='%s'\n",
-         display_mode_ui_exec, custom_icon_mode_ui_exec, RNA_enum_get(op->ptr, "icon_source"), icon_key_before);
   const int resolved_icon_source_exec = category_tab_resolve_icon_source(
       display_mode_ui_exec,
       custom_icon_mode_ui_exec,
       RNA_enum_get(op->ptr, "icon_source"),
       CategoryTabIconSourceResolveMode::Commit,
       nullptr);
-  printf("[ICON SAVE DEBUG] resolved_icon_source=%d\n", resolved_icon_source_exec);
+  CategoryTabIconState icon_state_exec;
+  category_tab_icon_state_read(op->ptr, icon_state_exec);
+  category_tab_icon_state_apply(*item, icon_state_exec);
+  if (g_tag_filter_debug_enabled) {
+    printf("[ICON SAVE DEBUG] display_mode_ui=%d, custom_icon_mode_ui=%d, icon_source_before=%d, icon_key='%s'\n",
+           display_mode_ui_exec, custom_icon_mode_ui_exec, RNA_enum_get(op->ptr, "icon_source"), icon_key_before);
+    printf("[ICON SAVE DEBUG] resolved_icon_source=%d\n", resolved_icon_source_exec);
+    printf("[ICON SAVE DEBUG] icon_state_exec.key='%s', path='%s', provider='%s'\n",
+           icon_state_exec.key, icon_state_exec.path, icon_state_exec.provider);
+    printf("[ICON SAVE DEBUG] After apply: item->icon_key='%s', icon_source=%d\n",
+           item->icon_key, item->icon_source);
+  }
   RNA_enum_set(op->ptr, "icon_source", resolved_icon_source_exec);
   item->icon_source = resolved_icon_source_exec;
   item->glyph_mode = (display_mode_ui_exec == 2) ? 1 : 0;
-  CategoryTabIconState icon_state_exec;
-  category_tab_icon_state_read(op->ptr, icon_state_exec);
-  printf("[ICON SAVE DEBUG] icon_state_exec.key='%s', path='%s', provider='%s'\n",
-         icon_state_exec.key, icon_state_exec.path, icon_state_exec.provider);
-  category_tab_icon_state_apply(*item, icon_state_exec);
-  printf("[ICON SAVE DEBUG] After apply: item->icon_key='%s', icon_source=%d\n",
-         item->icon_key, item->icon_source);
 
   /* Only save glyph to override if user has changed it from the default.
    * If glyph matches the default (especially fallback letters), leave it empty

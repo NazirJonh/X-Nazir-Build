@@ -14,6 +14,12 @@ from .validators import (
 
 log = logging.getLogger(__name__)
 
+# =============================================================================
+# Global debug flag for enabling/disabling glyph library debug logging
+# Set to False to disable all [GLYPH LIBRARY] print statements
+# =============================================================================
+GLYPH_LIBRARY_DEBUG_ENABLED = False
+
 GLYPH_LIBRARY_DIR = Path(__file__).parent / "data"
 
 # Import DEFAULT_CATEGORY_GLYPHS from space_userpref.py
@@ -49,43 +55,55 @@ class GlyphLibrary:
         self._initialized = True
     
     def load_all(self) -> bool:
-        print("[GLYPH LIBRARY] ===== LOAD_ALL START =====")
+        if GLYPH_LIBRARY_DEBUG_ENABLED:
+            print("[GLYPH LIBRARY] ===== LOAD_ALL START =====")
         self.load_errors = []
 
         success = True
 
-        print("[GLYPH LIBRARY] Loading material_symbols.json...")
+        if GLYPH_LIBRARY_DEBUG_ENABLED:
+            print("[GLYPH LIBRARY] Loading material_symbols.json...")
         if not self._load_material_symbols():
-            print("[GLYPH LIBRARY] FAILED to load material_symbols.json")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print("[GLYPH LIBRARY] FAILED to load material_symbols.json")
             success = False
         else:
-            print(f"[GLYPH LIBRARY] Loaded {len(self.glyphs)} glyphs")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print(f"[GLYPH LIBRARY] Loaded {len(self.glyphs)} glyphs")
 
-        print("[GLYPH LIBRARY] Loading categories.json...")
+        if GLYPH_LIBRARY_DEBUG_ENABLED:
+            print("[GLYPH LIBRARY] Loading categories.json...")
         if not self._load_categories():
-            print("[GLYPH LIBRARY] No categories loaded (non-critical)")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print("[GLYPH LIBRARY] No categories loaded (non-critical)")
             pass  # Non-critical
         else:
-            print(f"[GLYPH LIBRARY] Loaded {len(self.categories)} categories")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print(f"[GLYPH LIBRARY] Loaded {len(self.categories)} categories")
 
         if success:
-            print("[GLYPH LIBRARY] Building indices...")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print("[GLYPH LIBRARY] Building indices...")
             self._build_indices()
-            print("[GLYPH LIBRARY] Integrating default category glyphs...")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print("[GLYPH LIBRARY] Integrating default category glyphs...")
             self._integrate_default_category_glyphs()
             self.is_loaded = True
             log.info("Glyph library loaded: %d glyphs, %d categories",
                      len(self.glyphs), len(self.categories))
-            print(f"[GLYPH LIBRARY] ===== LOAD_ALL SUCCESS: {len(self.glyphs)} glyphs =====")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print(f"[GLYPH LIBRARY] ===== LOAD_ALL SUCCESS: {len(self.glyphs)} glyphs =====")
         else:
-            print(f"[GLYPH LIBRARY] ===== LOAD_ALL FAILED: {self.load_errors} =====")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print(f"[GLYPH LIBRARY] ===== LOAD_ALL FAILED: {self.load_errors} =====")
 
         return success
     
     def _load_material_symbols(self) -> bool:
         filepath = GLYPH_LIBRARY_DIR / "material_symbols.json"
-        print(f"[GLYPH LIBRARY] Loading from: {filepath}")
-        print(f"[GLYPH LIBRARY] File exists: {filepath.exists()}")
+        if GLYPH_LIBRARY_DEBUG_ENABLED:
+            print(f"[GLYPH LIBRARY] Loading from: {filepath}")
+            print(f"[GLYPH LIBRARY] File exists: {filepath.exists()}")
 
         if not filepath.exists():
             msg = f"Critical: material_symbols.json not found at {filepath}"
@@ -97,16 +115,19 @@ class GlyphLibrary:
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-            print(f"[GLYPH LIBRARY] JSON loaded, keys: {list(data.keys())}")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print(f"[GLYPH LIBRARY] JSON loaded, keys: {list(data.keys())}")
             glyphs_list = data.get('glyphs', [])
-            print(f"[GLYPH LIBRARY] Glyphs in file: {len(glyphs_list)}")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print(f"[GLYPH LIBRARY] Glyphs in file: {len(glyphs_list)}")
 
             is_valid, errors = validate_material_symbols_file(data)
 
             if not is_valid:
-                print(f"[GLYPH LIBRARY] Validation failed with {len(errors)} errors:")
-                for i, err in enumerate(errors[:5]):
-                    print(f"[GLYPH LIBRARY]   Error {i+1}: {err}")
+                if GLYPH_LIBRARY_DEBUG_ENABLED:
+                    print(f"[GLYPH LIBRARY] Validation failed with {len(errors)} errors:")
+                    for i, err in enumerate(errors[:5]):
+                        print(f"[GLYPH LIBRARY]   Error {i+1}: {err}")
                 for err in errors:
                     log.error("Validation: %s", err)
                     self.load_errors.append(err)
@@ -116,18 +137,21 @@ class GlyphLibrary:
 
             self.glyphs = {g['name']: g for g in glyphs_list}
             self.blender_mappings = data.get('blender_default_mappings', {})
-            print(f"[GLYPH LIBRARY] Loaded {len(self.glyphs)} glyphs")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print(f"[GLYPH LIBRARY] Loaded {len(self.glyphs)} glyphs")
 
             # Print first few glyphs for verification
-            for i, (name, glyph) in enumerate(list(self.glyphs.items())[:3]):
-                print(f"[GLYPH LIBRARY]   Glyph {i+1}: {name} = {glyph.get('unicode', 'N/A')}")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                for i, (name, glyph) in enumerate(list(self.glyphs.items())[:3]):
+                    print(f"[GLYPH LIBRARY]   Glyph {i+1}: {name} = {glyph.get('unicode', 'N/A')}")
 
             return True
 
         except json.JSONDecodeError as e:
             msg = f"Invalid JSON in material_symbols.json: {e}"
             log.error(msg)
-            print(f"[GLYPH LIBRARY] JSON decode error: {e}")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print(f"[GLYPH LIBRARY] JSON decode error: {e}")
             self.load_errors.append(msg)
             return False
         except Exception as e:
@@ -227,29 +251,36 @@ class GlyphLibrary:
         return [self.glyphs[n] for n in names if n in self.glyphs]
     
     def search(self, query: str, category: str = "", max_results: int = 50) -> List[dict]:
-        print(f"[GLYPH LIBRARY] search() called: query='{query}', category='{category}', max={max_results}")
-        print(f"[GLYPH LIBRARY] is_loaded={self.is_loaded}, total_glyphs={len(self.glyphs)}")
+        if GLYPH_LIBRARY_DEBUG_ENABLED:
+            print(f"[GLYPH LIBRARY] search() called: query='{query}', category='{category}', max={max_results}")
+            print(f"[GLYPH LIBRARY] is_loaded={self.is_loaded}, total_glyphs={len(self.glyphs)}")
 
         if not self.is_loaded:
-            print("[GLYPH LIBRARY] ERROR: Library not loaded!")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print("[GLYPH LIBRARY] ERROR: Library not loaded!")
             return []
 
         query = query.lower().strip()
-        print(f"[GLYPH LIBRARY] Normalized query: '{query}'")
+        if GLYPH_LIBRARY_DEBUG_ENABLED:
+            print(f"[GLYPH LIBRARY] Normalized query: '{query}'")
 
         if not query:
-            print("[GLYPH LIBRARY] Empty query, returning by category or all")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print("[GLYPH LIBRARY] Empty query, returning by category or all")
             if category:
                 results = self.get_glyphs_by_category(category)[:max_results]
-                print(f"[GLYPH LIBRARY] Returning {len(results)} glyphs for category '{category}'")
+                if GLYPH_LIBRARY_DEBUG_ENABLED:
+                    print(f"[GLYPH LIBRARY] Returning {len(results)} glyphs for category '{category}'")
                 return results
             results = list(self.glyphs.values())[:max_results]
-            print(f"[GLYPH LIBRARY] Returning {len(results)} glyphs (no category filter)")
+            if GLYPH_LIBRARY_DEBUG_ENABLED:
+                print(f"[GLYPH LIBRARY] Returning {len(results)} glyphs (no category filter)")
             return results
 
         results_with_scores: List[Tuple[float, dict]] = []
 
-        print(f"[GLYPH LIBRARY] Searching through {len(self.glyphs)} glyphs...")
+        if GLYPH_LIBRARY_DEBUG_ENABLED:
+            print(f"[GLYPH LIBRARY] Searching through {len(self.glyphs)} glyphs...")
         for name, glyph in self.glyphs.items():
             if category and glyph.get('category') != category:
                 continue
@@ -257,13 +288,15 @@ class GlyphLibrary:
             score = self._calculate_score(query, glyph)
 
             if score > 0:
-                print(f"[GLYPH LIBRARY] Match found: '{name}' score={score}")
+                if GLYPH_LIBRARY_DEBUG_ENABLED:
+                    print(f"[GLYPH LIBRARY] Match found: '{name}' score={score}")
                 results_with_scores.append((score, glyph))
 
         results_with_scores.sort(key=lambda x: (-x[0], -x[1].get('popularity', 0)))
 
         final_results = [g for _, g in results_with_scores[:max_results]]
-        print(f"[GLYPH LIBRARY] Returning {len(final_results)} results")
+        if GLYPH_LIBRARY_DEBUG_ENABLED:
+            print(f"[GLYPH LIBRARY] Returning {len(final_results)} results")
         return final_results
     
     def _get_fuzzy_match_errors(self, query: str, text: str) -> int:
@@ -397,27 +430,35 @@ def get_glyph_library() -> GlyphLibrary:
 
 
 def register():
-    print("[GLYPH LIBRARY] ===== REGISTER START =====")
+    if GLYPH_LIBRARY_DEBUG_ENABLED:
+        print("[GLYPH LIBRARY] ===== REGISTER START =====")
     library = get_glyph_library()
-    print(f"[GLYPH LIBRARY] After get_glyph_library: is_loaded={library.is_loaded}")
-    print(f"[GLYPH LIBRARY] Glyphs count: {len(library.glyphs)}")
-    print(f"[GLYPH LIBRARY] Load errors: {library.load_errors}")
+    if GLYPH_LIBRARY_DEBUG_ENABLED:
+        print(f"[GLYPH LIBRARY] After get_glyph_library: is_loaded={library.is_loaded}")
+        print(f"[GLYPH LIBRARY] Glyphs count: {len(library.glyphs)}")
+        print(f"[GLYPH LIBRARY] Load errors: {library.load_errors}")
 
     if not library.is_loaded:
         log.warning("Glyph library failed to load, using fallback")
-        print("[GLYPH LIBRARY] WARNING: Library not loaded, using fallback!")
+        if GLYPH_LIBRARY_DEBUG_ENABLED:
+            print("[GLYPH LIBRARY] WARNING: Library not loaded, using fallback!")
     else:
-        print(f"[GLYPH LIBRARY] Successfully loaded {len(library.glyphs)} glyphs")
-    print("[GLYPH LIBRARY] ===== REGISTER END =====")
+        if GLYPH_LIBRARY_DEBUG_ENABLED:
+            print(f"[GLYPH LIBRARY] Successfully loaded {len(library.glyphs)} glyphs")
+    if GLYPH_LIBRARY_DEBUG_ENABLED:
+        print("[GLYPH LIBRARY] ===== REGISTER END =====")
 
 
 def search_glyphs(query: str, category: str = "", max_results: int = 50) -> List[dict]:
     """Public API function for searching glyphs."""
-    print(f"[GLYPH LIBRARY API] search_glyphs() called: query='{query}', category='{category}', max={max_results}")
+    if GLYPH_LIBRARY_DEBUG_ENABLED:
+        print(f"[GLYPH LIBRARY API] search_glyphs() called: query='{query}', category='{category}', max={max_results}")
     library = get_glyph_library()
-    print(f"[GLYPH LIBRARY API] Library state: is_loaded={library.is_loaded}, glyphs={len(library.glyphs)}")
+    if GLYPH_LIBRARY_DEBUG_ENABLED:
+        print(f"[GLYPH LIBRARY API] Library state: is_loaded={library.is_loaded}, glyphs={len(library.glyphs)}")
     results = library.search(query, category, max_results)
-    print(f"[GLYPH LIBRARY API] Returning {len(results)} results")
+    if GLYPH_LIBRARY_DEBUG_ENABLED:
+        print(f"[GLYPH LIBRARY API] Returning {len(results)} results")
     return results
 
 

@@ -48,6 +48,11 @@
 #include "GPU_init_exit.hh"
 #include "GPU_shader.hh"
 
+/* Global debug flag for extension operations - set to 0 to disable debug output */
+#ifndef EXTENSION_DEBUG_ENABLED
+#  define EXTENSION_DEBUG_ENABLED 0
+#endif
+
 #include "UI_interface_icons.hh"
 
 #include "ED_undo.hh"
@@ -831,13 +836,17 @@ PyDoc_STRVAR(
 static PyObject *bpy_app_extension_repos_update_post_trigger(PyObject * /*self*/,
                                                              PyObject * /*args*/)
 {
+#if EXTENSION_DEBUG_ENABLED
   printf("[PYTHON API] extension_repos_update_post_trigger() called\n");
   fflush(stdout);
+#endif
   Main *bmain = G_MAIN;
   if (bmain) {
     BKE_callback_exec_null(bmain, BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST);
+#if EXTENSION_DEBUG_ENABLED
     printf("[PYTHON API] BKE_callback_exec_null completed for EXTENSION_REPOS_UPDATE_POST\n");
     fflush(stdout);
+#endif
   }
   Py_RETURN_NONE;
 }

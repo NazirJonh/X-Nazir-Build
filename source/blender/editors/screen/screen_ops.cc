@@ -121,8 +121,15 @@
  * Prevents log flooding by printing each unique message only once. */
 static std::unordered_set<std::string> _drop_logged_messages;
 
+/* Master debug flag for extension drop operations.
+ * Set to false to disable all debug output in this module. */
+static constexpr bool EXTENSION_DROP_DEBUG_ENABLED = false;
+
 static void drop_log_once(const char *format, ...)
 {
+  if constexpr (!EXTENSION_DROP_DEBUG_ENABLED) {
+    return;
+  }
   char buffer[512];
   va_list args;
   va_start(args, format);
@@ -7575,10 +7582,12 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
   uint32_t mode_flag = ui::get_current_tag_mode_flag(C);
 
   if (!treat_as_tab_drop) {
-    printf("[EXT_DROP_INVOKE] Region doesn't support category tabs, setting pending context\n");
-    printf("[EXT_DROP_INVOKE] extension_id='%s', space_type=%d, mode_flag=%#010x\n",
-           extension_id.c_str(), space_type, mode_flag);
-    fflush(stdout);
+    if constexpr (EXTENSION_DROP_DEBUG_ENABLED) {
+      printf("[EXT_DROP_INVOKE] Region doesn't support category tabs, setting pending context\n");
+      printf("[EXT_DROP_INVOKE] extension_id='%s', space_type=%d, mode_flag=%#010x\n",
+             extension_id.c_str(), space_type, mode_flag);
+      fflush(stdout);
+    }
 
     /* Set up C++ deferred activation for reserved-only extension detection.
      * This enables automatic switching to reserved categories (e.g., "Edit" for Bool Tool)
@@ -7669,8 +7678,10 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
                mode_flag);
 
       const char *imports_none[] = {nullptr};
-      printf("[EXT_DROP_INVOKE] Calling extension_post_install_handler with tag_already_assigned=True for tab drop\n");
-      fflush(stdout);
+      if constexpr (EXTENSION_DROP_DEBUG_ENABLED) {
+        printf("[EXT_DROP_INVOKE] Calling extension_post_install_handler with tag_already_assigned=True for tab drop\n");
+        fflush(stdout);
+      }
       BPY_run_string_exec(C, imports_none, python_expr);
     }
   }
@@ -8198,21 +8209,23 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
                             (_drop_last_target_idx != target_index) ||
                             (_drop_last_insert_above != insert_above);
 
-    if (should_log) {
-      printf("[EXT_DROP] droptip: region_type=%d hovered='%s' "
-             "target_idx=%d insert_above=%d zoom=%.2f local=(%d,%d) tab_h=%d pad=%d\n",
-             region->regiontype,
-             hovered_category_id ? hovered_category_id : "(none)",
-             target_index,
-             insert_above ? 1 : 0,
-             zoom,
-             mx_local,
-             my_local,
-             tab_height,
-             tab_v_pad);
-      _drop_last_log_time = current_time;
-      _drop_last_target_idx = target_index;
-      _drop_last_insert_above = insert_above;
+    if constexpr (EXTENSION_DROP_DEBUG_ENABLED) {
+      if (should_log) {
+        printf("[EXT_DROP] droptip: region_type=%d hovered='%s' "
+               "target_idx=%d insert_above=%d zoom=%.2f local=(%d,%d) tab_h=%d pad=%d\n",
+               region->regiontype,
+               hovered_category_id ? hovered_category_id : "(none)",
+               target_index,
+               insert_above ? 1 : 0,
+               zoom,
+               mx_local,
+               my_local,
+               tab_height,
+               tab_v_pad);
+        _drop_last_log_time = current_time;
+        _drop_last_target_idx = target_index;
+        _drop_last_insert_above = insert_above;
+      }
     }
 
     ui::category_tabs_extension_preview_set(region,

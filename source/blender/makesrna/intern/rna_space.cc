@@ -10,6 +10,9 @@
 #include <cstdlib>
 #include <cstring>
 
+/* Global debug flag for RNA space operations - set to false to disable debug output */
+static constexpr bool RNA_SPACE_DEBUG_ENABLED = false;
+
 #include "BLI_math_constants.h"
 #include "BLI_string_ref.hh"
 #include "BLT_translation.hh"
@@ -1333,7 +1336,9 @@ static void rna_Space_show_region_tag_bar_update(bContext *C, PointerRNA *ptr)
       if (is_hidden) {
         /* Tag bar was hidden. Set flag to prevent auto-show from re-opening it. */
         snode->tag_bar_manually_hidden = true;
-        printf("[RNA_TAG_BAR] Tag bar hidden, setting manually_hidden=true\n");
+        if constexpr (RNA_SPACE_DEBUG_ENABLED) {
+          printf("[RNA_TAG_BAR] Tag bar hidden, setting manually_hidden=true\n");
+        }
       }
       else {
         /* Tag bar was shown.
@@ -1343,12 +1348,16 @@ static void rna_Space_show_region_tag_bar_update(bContext *C, PointerRNA *ptr)
         if (!snode->has_new_addon_auto_shown) {
           /* Manual show - reset manually_hidden so future auto-show can work. */
           snode->tag_bar_manually_hidden = false;
-          printf("[RNA_TAG_BAR] Tag bar shown (manual), resetting manually_hidden\n");
+          if constexpr (RNA_SPACE_DEBUG_ENABLED) {
+            printf("[RNA_TAG_BAR] Tag bar shown (manual), resetting manually_hidden\n");
+          }
         }
         else {
           /* Auto-show - keep manually_hidden as is (should be false already). */
-          printf("[RNA_TAG_BAR] Tag bar shown (auto-show), keeping manually_hidden=%d\n",
-                 snode->tag_bar_manually_hidden);
+          if constexpr (RNA_SPACE_DEBUG_ENABLED) {
+            printf("[RNA_TAG_BAR] Tag bar shown (auto-show), keeping manually_hidden=%d\n",
+                   snode->tag_bar_manually_hidden);
+          }
         }
       }
     }

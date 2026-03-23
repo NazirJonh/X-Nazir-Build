@@ -5195,10 +5195,14 @@ Button *uiDefButTag(Block *block,
   if (glyph && glyph[0] != '\0') {
     /* NOTE: glyph must be valid UTF-8 */
     BLI_strncpy(tag_but->glyph, glyph, sizeof(tag_but->glyph));
-    printf("DEBUG: uiDefButTag: glyph set to '%s' (len=%zu)\n", tag_but->glyph, strlen(tag_but->glyph));
+    if (g_ui_button_tag_debug_enabled) {
+      printf("DEBUG: uiDefButTag: glyph set to '%s' (len=%zu)\n", tag_but->glyph, strlen(tag_but->glyph));
+    }
   } else {
     tag_but->glyph[0] = '\0';
-    printf("DEBUG: uiDefButTag: glyph is empty\n");
+    if (g_ui_button_tag_debug_enabled) {
+      printf("DEBUG: uiDefButTag: glyph is empty\n");
+    }
   }
 
   /* ============================================================
@@ -5237,7 +5241,9 @@ Button *uiDefButTag(Block *block,
   }
 
   /* Debug: Log icon data */
-  printf("DEBUG: uiDefButTag: icon_id=%d, icon_path='%s'\n", icon_id, icon_path ? icon_path : "(null)");
+  if (g_ui_button_tag_debug_enabled) {
+    printf("DEBUG: uiDefButTag: icon_id=%d, icon_path='%s'\n", icon_id, icon_path ? icon_path : "(null)");
+  }
 
   /* ============================================================
    * SET ACTIVE/SELECTED STATE
@@ -5539,8 +5545,10 @@ extern "C" blender::ui::Layout *rna_uiLayout_tag_button_pref_row(
   int icon_id = category_tab_icon_id_resolve_from_key_path(icon_key, icon_path);
 
   /* Debug: Log resolved icon */
-  printf("DEBUG: rna_uiLayout_tag_button_pref_row: icon_key='%s', icon_path='%s', resolved icon_id=%d\n",
-         icon_key ? icon_key : "(null)", icon_path ? icon_path : "(null)", icon_id);
+  if (g_ui_button_tag_debug_enabled) {
+    printf("DEBUG: rna_uiLayout_tag_button_pref_row: icon_key='%s', icon_path='%s', resolved icon_id=%d\n",
+           icon_key ? icon_key : "(null)", icon_path ? icon_path : "(null)", icon_id);
+  }
 
   /* CREATE TAG BUTTON IN PREFERENCE MODE */
   block_layout_set_current(block, &row);

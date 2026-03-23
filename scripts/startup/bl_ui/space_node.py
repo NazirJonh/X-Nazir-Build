@@ -5,11 +5,16 @@
 import bpy
 import rna_prop_ui
 
+# Global debug flag for Node Editor operations - set to False to disable debug output
+NODE_EDITOR_DEBUG_ENABLED = False
+
 # Log deduplication for repetitive debug messages
 _node_logged_messages = set()
 
 def _node_log_once(message):
     """Print a log message only once per session to avoid log flooding."""
+    if not NODE_EDITOR_DEBUG_ENABLED:
+        return
     msg_hash = hash(message)
     if msg_hash not in _node_logged_messages:
         if len(_node_logged_messages) > 500:
@@ -355,7 +360,8 @@ class NODE_HT_header(Header):
             # 2. User has NOT manually hidden the tag bar
             # 3. We have NOT already done auto-show for this session
             if unassigned_count > 0 and not manually_hidden and not has_auto_shown:
-                print(f"[TAG_BAR_AUTO] Auto-showing tag bar (unassigned={unassigned_count})")
+                if NODE_EDITOR_DEBUG_ENABLED:
+                    print(f"[TAG_BAR_AUTO] Auto-showing tag bar (unassigned={unassigned_count})")
                 # Set auto-shown flag BEFORE showing tag bar so C++ callback knows this is auto-show
                 try:
                     snode.has_new_addon_auto_shown = True

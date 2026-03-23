@@ -29,6 +29,7 @@ set(SRC
   interface.cc
   interface_align.cc
   interface_anim.cc
+  interface_debug_flags.cc
   interface_button_group.cc
   interface_button_sections.cc
   interface_context_menu.cc

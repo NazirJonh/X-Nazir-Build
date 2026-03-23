@@ -92,8 +92,7 @@
 
 namespace blender {
 
-/** Debug flag to enable/disable printf debug output. Default: disabled. */
-bool g_drop_image_debug_enabled = false;
+/* g_drop_image_debug_enabled declared in interface_intern.hh - default false */
 
 /** -------------------------------------------------------------------- */
 /** \name Type Definitions and Enums
@@ -384,10 +383,14 @@ static void refresh_texture_paint_viewport(bContext *C, Brush *brush)
  */
 bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext *C)
 {
-  printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Checking button %p\n", but);
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Checking button %p\n", but);
+  }
   
   if (!but) {
-    printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Button is NULL\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Button is NULL\n");
+    }
     return false;
   }
   
@@ -401,9 +404,11 @@ bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext 
   }
   
   if (!but->rnaprop) {
-    printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Button has no RNA property (button type: %d)\n", int(but->type));
-    if (but->block && !but->block->name.empty()) {
-      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Button block name: %s\n", but->block->name.c_str());
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Button has no RNA property (button type: %d)\n", int(but->type));
+      if (but->block && !but->block->name.empty()) {
+        printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Button block name: %s\n", but->block->name.c_str());
+      }
     }
     
   /* Check if this is a texture slot button without RNA property but in correct context */
@@ -417,7 +422,9 @@ bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext 
         strstr(block_name, "Shelf") ||
         strstr(block_name, "ASSET_SHELF") ||
         strstr(block_name, "AssetShelf")) {
-      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Asset Shelf context detected - DENIED\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Asset Shelf context detected - DENIED\n");
+      }
       return false;
     }
     
@@ -425,8 +432,10 @@ bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext 
     if (brush) {
       bool use_mask_slot = false;
       if (determine_texture_slot_type(but, brush, &use_mask_slot, C)) {
-        printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Intelligent detection - valid %s slot\n", 
-               use_mask_slot ? "mask" : "main");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Intelligent detection - valid %s slot\n", 
+                 use_mask_slot ? "mask" : "main");
+        }
         return true;
       }
     }
@@ -440,7 +449,9 @@ bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext 
         strstr(block_name, "PROPERTIES_PT") ||
         strstr(block_name, "texture") ||
         strstr(block_name, "Texture")) {
-      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Allowing button in texture context without RNA property\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Allowing button in texture context without RNA property\n");
+      }
       return true;
     }
   }
@@ -448,14 +459,18 @@ bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext 
     return false;
   }
 
-  printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Starting validation for button with RNA property\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Starting validation for button with RNA property\n");
+  }
 
   /* Use intelligent slot detection for buttons with RNA properties */
   if (brush) {
     bool use_mask_slot = false;
     if (determine_texture_slot_type(but, brush, &use_mask_slot, C)) {
-      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Intelligent detection - valid %s slot with RNA\n", 
-             use_mask_slot ? "mask" : "main");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Intelligent detection - valid %s slot with RNA\n", 
+               use_mask_slot ? "mask" : "main");
+      }
       
       /* Additional validation: ensure this is actually a texture-related property */
       const char *prop_id = RNA_property_identifier(but->rnaprop);
@@ -481,12 +496,16 @@ bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext 
   
   /* Check RNA property - must be texture property */
   const char *prop_id = RNA_property_identifier(but->rnaprop);
-  printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Property ID: %s\n", prop_id ? prop_id : "NULL");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Property ID: %s\n", prop_id ? prop_id : "NULL");
+  }
   
   /* CRITICAL: Check RNA property type - must be PROP_POINTER for texture slots */
   if (RNA_property_type(but->rnaprop) != PROP_POINTER) {
-    printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Not a pointer property (type=%d) - DENIED\n", 
-           RNA_property_type(but->rnaprop));
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Not a pointer property (type=%d) - DENIED\n", 
+             RNA_property_type(but->rnaprop));
+    }
     return false;
   }
 
@@ -499,15 +518,21 @@ bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext 
                  strstr(prop_id, "texture") != nullptr ||
                  strstr(prop_id, "mask") != nullptr)) {
     is_texture_slot = true;
-    printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Valid texture slot by property name: %s\n", prop_id);
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Valid texture slot by property name: %s\n", prop_id);
+    }
   } else if (prop_id) {
-    printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Property is NOT a texture slot: %s - DENIED\n", prop_id);
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Property is NOT a texture slot: %s - DENIED\n", prop_id);
+    }
   }
   
   /* PRIORITY 2: Check RNA pointer type */
   if (!is_texture_slot && but->rnapoin.type && but->rnapoin.data) {
     const char *type_id = RNA_struct_identifier(but->rnapoin.type);
-    printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: RNA type: %s\n", type_id ? type_id : "NULL");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: RNA type: %s\n", type_id ? type_id : "NULL");
+    }
     
     /* Allow if pointer to texture or BrushTextureSlot */
     if (type_id && (STREQ(type_id, "Texture") || STREQ(type_id, "BrushTextureSlot"))) {
@@ -520,9 +545,13 @@ bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext 
                      strstr(prop_id, "texture") != nullptr ||
                      strstr(prop_id, "mask") != nullptr)) {
         is_texture_slot = true;
-        printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Valid texture slot by RNA type: %s\n", prop_id);
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Valid texture slot by RNA type: %s\n", prop_id);
+        }
       } else {
-        printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Pointer to texture, but property is NOT a slot: %s - DENIED\n", prop_id);
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Pointer to texture, but property is NOT a slot: %s - DENIED\n", prop_id);
+        }
       }
     }
   }
@@ -530,7 +559,9 @@ bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext 
   /* PRIORITY 3: Check by panel name */
   if (!is_texture_slot && but->block && !but->block->name.empty()) {
     const char *block_name = but->block->name.c_str();
-    printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Block name: %s\n", block_name);
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Block name: %s\n", block_name);
+    }
     
     /* Allow ONLY blocks that are clearly related to brush texture */
     if (strstr(block_name, "brush_texture") || 
@@ -547,9 +578,13 @@ bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext 
                      strstr(prop_id, "texture") != nullptr ||
                      strstr(prop_id, "mask") != nullptr)) {
         is_texture_slot = true;
-        printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Valid texture slot by block name: %s\n", prop_id);
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Valid texture slot by block name: %s\n", prop_id);
+        }
       } else {
-        printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Button in texture block, but property is NOT a slot: %s - DENIED\n", prop_id);
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Button in texture block, but property is NOT a slot: %s - DENIED\n", prop_id);
+        }
       }
     }
   }
@@ -560,12 +595,16 @@ bool DROP_IMAGE_is_valid_brush_texture_property(const ui::Button *but, bContext 
     if (strstr(block_name, "brush") != nullptr || 
         strstr(block_name, "texture") != nullptr ||
         strstr(block_name, "paint") != nullptr) {
-      printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: FALLBACK - allowing by block context: %s\n", block_name);
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: FALLBACK - allowing by block context: %s\n", block_name);
+      }
       is_texture_slot = true;
     }
   }
   
-  printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Final result: %s\n", is_texture_slot ? "ALLOWED" : "DENIED");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_is_valid_brush_texture_property: Final result: %s\n", is_texture_slot ? "ALLOWED" : "DENIED");
+  }
   return is_texture_slot;
 }
 
@@ -588,14 +627,18 @@ bool DROP_IMAGE_is_texture_drop_area(bContext *C, const wmEvent *event)
   
   /* CRITICAL: Always disallow Asset Shelf regions */
   if (region->regiontype == RGN_TYPE_ASSET_SHELF) {
-    printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Asset Shelf region - DISALLOWING\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Asset Shelf region - DISALLOWING\n");
+    }
     return false;
   }
   
   /* ALLOW: Properties Editor */
   ScrArea *area = CTX_wm_area(C);
   if (area && area->spacetype == SPACE_PROPERTIES) {
-    printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Properties Editor - ALLOWING\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Properties Editor - ALLOWING\n");
+    }
     return true;
   }
   
@@ -603,7 +646,9 @@ bool DROP_IMAGE_is_texture_drop_area(bContext *C, const wmEvent *event)
   if (area && area->spacetype == SPACE_IMAGE) {
     SpaceImage *sima = CTX_wm_space_image(C);
     if (sima && sima->mode == SI_MODE_PAINT) {
-      printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Image Editor Paint mode - ALLOWING\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Image Editor Paint mode - ALLOWING\n");
+      }
       return true;
     }
   }
@@ -615,21 +660,27 @@ bool DROP_IMAGE_is_texture_drop_area(bContext *C, const wmEvent *event)
     if (but) {
       /* Check if button is in brush texture context */
       if (DROP_IMAGE_is_valid_brush_texture_property(but, C)) {
-        printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Valid brush texture button found in View3D\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Valid brush texture button found in View3D\n");
+        }
         return true;
       }
       
       /* Additional check by block name to ensure we're in brush texture panel */
       if (but->block && !but->block->name.empty()) {
         const char *block_name = but->block->name.c_str();
-        printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Block name: %s\n", block_name);
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Block name: %s\n", block_name);
+        }
         
         /* Only allow in specific brush texture panels */
         if (strstr(block_name, "brush_texture") || 
             strstr(block_name, "brush_mask") ||
             strstr(block_name, "texture_slot") ||
             strstr(block_name, "VIEW3D_PT_tools_brush_texture")) {
-          printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Allowed in brush texture panel\n");
+          if (g_drop_image_debug_enabled) {
+            printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Allowed in brush texture panel\n");
+          }
           return true;
         }
         
@@ -638,7 +689,9 @@ bool DROP_IMAGE_is_texture_drop_area(bContext *C, const wmEvent *event)
             strstr(block_name, "Asset") ||
             strstr(block_name, "shelf") ||
             strstr(block_name, "Shelf")) {
-          printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Asset Shelf context detected - DISALLOWING\n");
+          if (g_drop_image_debug_enabled) {
+            printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Asset Shelf context detected - DISALLOWING\n");
+          }
           return false;
         }
       }
@@ -647,17 +700,23 @@ bool DROP_IMAGE_is_texture_drop_area(bContext *C, const wmEvent *event)
   
   /* ALLOW: Node Editor */
   if (area && area->spacetype == SPACE_NODE) {
-    printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Node Editor - ALLOWING\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Node Editor - ALLOWING\n");
+    }
     return true;
   }
   
   /* DISALLOW: Main 3D View area (general area) */
   if (region->regiontype == RGN_TYPE_WINDOW) {
-    printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Main 3D View area - DISALLOWING\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Main 3D View area - DISALLOWING\n");
+    }
     return false;
   }
   
-  printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Unknown area - DISALLOWING\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_is_texture_drop_area: Unknown area - DISALLOWING\n");
+  }
   return false;
 }
 
@@ -812,18 +871,24 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
     return false;
   }
   
-  printf("[DEBUG] determine_texture_slot_type: Starting analysis\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] determine_texture_slot_type: Starting analysis\n");
+  }
   *r_use_mask_slot = false;
   
   /* 0. SPECIAL CHECK: If we're in Sculpt Mode, mask slot doesn't exist */
   if (C) {
     const enum eContextObjectMode context_mode = CTX_data_mode_enum(C);
-    printf("[DEBUG] determine_texture_slot_type: Context mode: %d\n", context_mode);
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] determine_texture_slot_type: Context mode: %d\n", context_mode);
+    }
     
     /* In Sculpt Mode, brushes don't have separate mask slot */
     if (context_mode == CTX_MODE_SCULPT) {
       *r_use_mask_slot = false;
-      printf("[DEBUG] determine_texture_slot_type: SCULPT MODE: Mask slot doesn't exist, using main slot\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] determine_texture_slot_type: SCULPT MODE: Mask slot doesn't exist, using main slot\n");
+      }
       return true;
     }
   }
@@ -831,7 +896,9 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
   /* 1. PRIORITY: Check by panel name (most important criterion) */
   if (but->block && !but->block->name.empty()) {
     const char *block_name = but->block->name.c_str();
-    printf("[DEBUG] determine_texture_slot_type: Panel name: %s\n", block_name);
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] determine_texture_slot_type: Panel name: %s\n", block_name);
+    }
     
     /* CRITICAL: Explicitly exclude Asset Shelf contexts */
     if (strstr(block_name, "asset") || 
@@ -840,54 +907,67 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
         strstr(block_name, "Shelf") ||
         strstr(block_name, "ASSET_SHELF") ||
         strstr(block_name, "AssetShelf")) {
-      printf("[DEBUG] determine_texture_slot_type: Asset Shelf context detected - DENIED\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] determine_texture_slot_type: Asset Shelf context detected - DENIED\n");
+      }
       return false;
     }
     
     /* If panel contains "mask", this is definitely mask slot */
     if (strstr(block_name, "mask") || strstr(block_name, "Mask")) {
       *r_use_mask_slot = true;
-      printf("[DEBUG] determine_texture_slot_type: PRIORITY: Mask slot determined by panel name\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] determine_texture_slot_type: PRIORITY: Mask slot determined by panel name\n");
+      }
       return true;
     }
     
     /* If panel contains "brush_texture" (but not mask), this is main slot */
     if (strstr(block_name, "brush_texture") && !strstr(block_name, "mask")) {
       *r_use_mask_slot = false;
-      printf("[DEBUG] determine_texture_slot_type: PRIORITY: Main slot determined by panel name\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] determine_texture_slot_type: PRIORITY: Main slot determined by panel name\n");
+      }
       return true;
     }
     
     /* IMPROVED: Support for Image Editor panels */
     if (strstr(block_name, "IMAGE_PT") || strstr(block_name, "IMAGE_MT")) {
-      printf("[DEBUG] determine_texture_slot_type: Image Editor panel detected\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] determine_texture_slot_type: Image Editor panel detected\n");
+      }
       
       /* In Image Editor, check context more carefully */
       if (strstr(block_name, "mask") || strstr(block_name, "Mask")) {
         *r_use_mask_slot = true;
-        printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Mask slot determined by panel name\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Mask slot determined by panel name\n");
+        }
         return true;
       }
       
       if (strstr(block_name, "texture") || strstr(block_name, "Texture") ||
           strstr(block_name, "brush") || strstr(block_name, "Brush")) {
         *r_use_mask_slot = false;
-        printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Main slot determined by panel name\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Main slot determined by panel name\n");
+        }
         return true;
       }
       
       /* ENHANCED: For any Image Editor panel, use intelligent slot detection */
-      printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Using intelligent slot detection\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Using intelligent slot detection\n");
+      }
       
       /* Check if we're in Paint mode and use intelligent slot detection */
       if (C) {
         SpaceImage *sima = CTX_wm_space_image(C);
         if (sima && sima->spacetype == SPACE_IMAGE && sima->mode == SI_MODE_PAINT) {
-          printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR PAINT MODE - using intelligent detection\n");
-          
-          /* In Image Editor Paint mode, always allow free assignment to any slot */
-          /* Use intelligent detection to determine the best slot */
-          printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Free assignment to any slot\n");
+          if (g_drop_image_debug_enabled) {
+            printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR PAINT MODE - using intelligent detection\n");
+            printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Free assignment to any slot\n");
+          }
           return true; // Let the intelligent detection handle it
         }
       }
@@ -897,24 +977,32 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
     
     /* ENHANCED: Support for Properties Editor panels */
     if (strstr(block_name, "PROPERTIES_PT") || strstr(block_name, "PROPERTIES_MT")) {
-      printf("[DEBUG] determine_texture_slot_type: Properties Editor panel detected\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] determine_texture_slot_type: Properties Editor panel detected\n");
+      }
       
       /* In Properties Editor, check context more carefully */
       if (strstr(block_name, "mask") || strstr(block_name, "Mask")) {
         *r_use_mask_slot = true;
-        printf("[DEBUG] determine_texture_slot_type: PROPERTIES EDITOR: Mask slot determined by panel name\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] determine_texture_slot_type: PROPERTIES EDITOR: Mask slot determined by panel name\n");
+        }
         return true;
       }
       
       if (strstr(block_name, "texture") || strstr(block_name, "Texture") ||
           strstr(block_name, "brush") || strstr(block_name, "Brush")) {
         *r_use_mask_slot = false;
-        printf("[DEBUG] determine_texture_slot_type: PROPERTIES EDITOR: Main slot determined by panel name\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] determine_texture_slot_type: PROPERTIES EDITOR: Main slot determined by panel name\n");
+        }
         return true;
       }
       
       /* ENHANCED: For any Properties Editor panel, use intelligent slot detection */
-      printf("[DEBUG] determine_texture_slot_type: PROPERTIES EDITOR: Using intelligent slot detection\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] determine_texture_slot_type: PROPERTIES EDITOR: Using intelligent slot detection\n");
+      }
       return true; // Let the intelligent detection handle it
     }
   }
@@ -922,7 +1010,9 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
   /* 2. Analyze RNA structure of the slot itself */
   if (but->rnapoin.type && but->rnapoin.data) {
     const char *type_identifier = RNA_struct_identifier(but->rnapoin.type);
-    printf("[DEBUG] determine_texture_slot_type: RNA type: %s\n", type_identifier);
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] determine_texture_slot_type: RNA type: %s\n", type_identifier);
+    }
     
     /* Check if this is mask slot */
     if (STREQ(type_identifier, "BrushMaskTextureSlot") || 
@@ -930,7 +1020,9 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
         STREQ(type_identifier, "BrushMaskTexture") ||
         STREQ(type_identifier, "MaskTexture")) {
       *r_use_mask_slot = true;
-      printf("[DEBUG] determine_texture_slot_type: Mask slot determined by RNA slot type\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] determine_texture_slot_type: Mask slot determined by RNA slot type\n");
+      }
       return true;
     }
     
@@ -940,7 +1032,9 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
         STREQ(type_identifier, "BrushTexture") ||
         STREQ(type_identifier, "MainTexture")) {
       *r_use_mask_slot = false;
-      printf("[DEBUG] determine_texture_slot_type: Main slot determined by RNA slot type\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] determine_texture_slot_type: Main slot determined by RNA slot type\n");
+      }
       return true;
     }
   }
@@ -948,20 +1042,26 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
   /* 3. Analyze RNA path to determine slot type */
   if (but->rnaprop) {
     const char *prop_identifier = RNA_property_identifier(but->rnaprop);
-    printf("[DEBUG] determine_texture_slot_type: Property: %s\n", prop_identifier);
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] determine_texture_slot_type: Property: %s\n", prop_identifier);
+    }
     
     /* Check property path - if contains "mask", this is mask slot */
     if (prop_identifier) {
       if (strstr(prop_identifier, "mask") || strstr(prop_identifier, "Mask")) {
         *r_use_mask_slot = true;
-        printf("[DEBUG] determine_texture_slot_type: Mask slot determined by property path\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] determine_texture_slot_type: Mask slot determined by property path\n");
+        }
         return true;
       }
       
       if (strstr(prop_identifier, "texture") || strstr(prop_identifier, "Texture") ||
           strstr(prop_identifier, "image") || strstr(prop_identifier, "Image")) {
         *r_use_mask_slot = false;
-        printf("[DEBUG] determine_texture_slot_type: Main slot determined by property path\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] determine_texture_slot_type: Main slot determined by property path\n");
+        }
         return true;
       }
     }
@@ -971,18 +1071,24 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
   if (C) {
     SpaceImage *sima = CTX_wm_space_image(C);
     if (sima && sima->spacetype == SPACE_IMAGE && sima->mode == SI_MODE_PAINT) {
-      printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR PAINT MODE - using occupancy logic\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR PAINT MODE - using occupancy logic\n");
+      }
       
       /* In Image Editor Paint check which slot is already occupied */
       if (brush->mtex.tex && brush->mtex.tex->ima && !brush->mask_mtex.tex) {
         *r_use_mask_slot = true;
-        printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Main slot occupied, suggesting mask\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Main slot occupied, suggesting mask\n");
+        }
         return true;
       }
       
       if (!brush->mtex.tex && brush->mask_mtex.tex && brush->mask_mtex.tex->ima) {
         *r_use_mask_slot = false;
-        printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Mask slot occupied, suggesting main\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Mask slot occupied, suggesting main\n");
+        }
         return true;
       }
     }
@@ -991,19 +1097,25 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
   /* 5. Smart logic by slot occupancy (fallback) */
   if (brush->mtex.tex && brush->mtex.tex->ima && !brush->mask_mtex.tex) {
     *r_use_mask_slot = true;
-    printf("[DEBUG] determine_texture_slot_type: Suggesting mask slot (main already occupied)\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] determine_texture_slot_type: Suggesting mask slot (main already occupied)\n");
+    }
     return true;
   }
   
   if (!brush->mtex.tex && brush->mask_mtex.tex && brush->mask_mtex.tex->ima) {
     *r_use_mask_slot = false;
-    printf("[DEBUG] determine_texture_slot_type: Suggesting main slot (mask already occupied)\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] determine_texture_slot_type: Suggesting main slot (mask already occupied)\n");
+    }
     return true;
   }
   
   /* 6. Fallback: use main slot by default */
   *r_use_mask_slot = false;
-  printf("[DEBUG] determine_texture_slot_type: Using main slot by default\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] determine_texture_slot_type: Using main slot by default\n");
+  }
   return true;
 }
 
@@ -1300,7 +1412,9 @@ bool DROP_IMAGE_texture_slot_poll(bContext *C, wmDrag *drag, const wmEvent *even
     return false;
   }
 
-  printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Starting validation\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Starting validation\n");
+  }
 
   /* ENHANCED: Initialize drag state if not already active */
   if (!DROP_IMAGE_drag_state_is_active()) {
@@ -1314,8 +1428,10 @@ bool DROP_IMAGE_texture_slot_poll(bContext *C, wmDrag *drag, const wmEvent *even
           bool use_mask_slot = false;
           if (determine_texture_slot_type(but, paint->brush, &use_mask_slot, C)) {
             DROP_IMAGE_drag_state_set_active(paint->brush, use_mask_slot);
-            printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Initialized drag state for brush: %s, mask_slot: %s\n", 
-                   paint->brush->id.name + 2, use_mask_slot ? "true" : "false");
+            if (g_drop_image_debug_enabled) {
+              printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Initialized drag state for brush: %s, mask_slot: %s\n", 
+                     paint->brush->id.name + 2, use_mask_slot ? "true" : "false");
+            }
           }
         }
       }
@@ -1324,39 +1440,51 @@ bool DROP_IMAGE_texture_slot_poll(bContext *C, wmDrag *drag, const wmEvent *even
 
   /* CRITICAL: First check if we're in a valid texture drop area */
   if (!DROP_IMAGE_is_texture_drop_area(C, event)) {
-    printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Not in valid texture drop area (possibly Asset Shelf)\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Not in valid texture drop area (possibly Asset Shelf)\n");
+    }
     return false;
   }
 
   /* Check if drag contains valid image/texture data */
   if (!DROP_IMAGE_validate_drag_data(drag)) {
-    printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Invalid drag data\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Invalid drag data\n");
+    }
     return false;
   }
 
   /* Find button under cursor */
   ARegion *region = CTX_wm_region(C);
   if (!region) {
-    printf("[DEBUG] DROP_IMAGE_texture_slot_poll: No region found\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_texture_slot_poll: No region found\n");
+    }
     return false;
   }
 
   ui::Button *but = ui::but_find_mouse_over(region, event);
   if (!but) {
-    printf("[DEBUG] DROP_IMAGE_texture_slot_poll: No button under cursor\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_texture_slot_poll: No button under cursor\n");
+    }
     return false;
   }
 
   /* Check if button is valid texture property */
   if (!DROP_IMAGE_is_valid_brush_texture_property(but, C)) {
-    printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Button is not a valid texture property\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Button is not a valid texture property\n");
+    }
     return false;
   }
 
   /* Create drop context for validation */
   TextureDropContext context(C);
   if (!DROP_IMAGE_validate_drop_context(&context)) {
-    printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Invalid drop context\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Invalid drop context\n");
+    }
     return false;
   }
 
@@ -1373,7 +1501,9 @@ bool DROP_IMAGE_texture_slot_poll(bContext *C, wmDrag *drag, const wmEvent *even
     }
   }
   
-  printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Can drop = %s\n", can_drop ? "true" : "false");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_texture_slot_poll: Can drop = %s\n", can_drop ? "true" : "false");
+  }
 
   return can_drop;
 }
@@ -1408,8 +1538,10 @@ static bool check_texture_slot_occupancy(Brush *brush, bool use_mask_slot, Image
   bool slot_occupied = (mtex->tex && mtex->tex->ima);
   
   if (slot_occupied) {
-    printf("[DEBUG] check_texture_slot_occupancy: %s slot is occupied with texture: %s\n",
-           use_mask_slot ? "Mask" : "Main", mtex->tex->id.name);
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] check_texture_slot_occupancy: %s slot is occupied with texture: %s\n",
+             use_mask_slot ? "Mask" : "Main", mtex->tex->id.name);
+    }
     
     /* Check if the same image is already assigned */
     bool is_same = false;
@@ -1417,12 +1549,16 @@ static bool check_texture_slot_occupancy(Brush *brush, bool use_mask_slot, Image
     if (drag_image && mtex->tex->ima == drag_image) {
       /* Direct pointer comparison for ID-based drags */
       is_same = true;
-      printf("[DEBUG] check_texture_slot_occupancy: Same image already assigned (pointer match)\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] check_texture_slot_occupancy: Same image already assigned (pointer match)\n");
+      }
     } else if (drag_filepath && mtex->tex->ima && mtex->tex->ima->filepath) {
       /* File path comparison for file-based drags */
       if (BLI_path_cmp_normalized(drag_filepath, mtex->tex->ima->filepath) == 0) {
         is_same = true;
-        printf("[DEBUG] check_texture_slot_occupancy: Same image already assigned (filepath match)\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] check_texture_slot_occupancy: Same image already assigned (filepath match)\n");
+        }
       }
     }
     
@@ -1437,8 +1573,10 @@ static bool check_texture_slot_occupancy(Brush *brush, bool use_mask_slot, Image
       *r_should_replace = true;
     }
   } else {
-    printf("[DEBUG] check_texture_slot_occupancy: %s slot is empty\n",
-           use_mask_slot ? "Mask" : "Main");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] check_texture_slot_occupancy: %s slot is empty\n",
+             use_mask_slot ? "Mask" : "Main");
+    }
   }
   
   return slot_occupied;
@@ -1458,13 +1596,17 @@ void DROP_IMAGE_texture_slot_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
     return;
   }
 
-  printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Starting copy operation\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Starting copy operation\n");
+  }
 
   /* ENHANCED: Update drag state during copy operation */
   bool drag_was_active = DROP_IMAGE_drag_state_is_active();
   if (drag_was_active) {
     g_texture_drag_state.highlight_alpha = 1.0f; // Full highlight during operation
-    printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Using active drag state\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Using active drag state\n");
+    }
   }
 
   /* Get image from drag data */
@@ -1473,7 +1615,9 @@ void DROP_IMAGE_texture_slot_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
     /* For file paths, we'll need to load the image */
     const char *filepath = WM_drag_get_single_path(drag);
     if (filepath) {
-      printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Loading image from path: %s\n", filepath);
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Loading image from path: %s\n", filepath);
+      }
       RNA_string_set(drop->ptr, "filepath", filepath);
     }
   }
@@ -1481,7 +1625,9 @@ void DROP_IMAGE_texture_slot_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
     /* For existing Image IDs */
     id = WM_drag_get_local_ID(drag, ID_IM);
     if (id) {
-      printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Using existing Image ID: %s\n", id->name);
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Using existing Image ID: %s\n", id->name);
+      }
       RNA_int_set(drop->ptr, "session_uid", int(id->session_uid));
     }
   }
@@ -1501,21 +1647,27 @@ void DROP_IMAGE_texture_slot_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
         const char *prop_id = RNA_property_identifier(but->rnaprop);
         if (prop_id) {
           RNA_string_set(drop->ptr, "property_name", prop_id);
-          printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Target property: %s\n", prop_id);
+          if (g_drop_image_debug_enabled) {
+            printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Target property: %s\n", prop_id);
+          }
         }
       }
       
       /* ENHANCED: Use drag state information if available */
       if (drag_was_active && g_texture_drag_state.active_brush == context.active_brush) {
         use_mask_slot = g_texture_drag_state.is_mask_target;
-        printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Using drag state slot info - mask_slot: %s\n", 
-               use_mask_slot ? "true" : "false");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Using drag state slot info - mask_slot: %s\n", 
+                 use_mask_slot ? "true" : "false");
+        }
       }
       /* Fallback: Determine if this is mask slot - works for all button types */
       else if (context.active_brush) {
         if (determine_texture_slot_type(but, context.active_brush, &use_mask_slot, C)) {
-          printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Determined slot type - mask_slot: %s\n", 
-                 use_mask_slot ? "true" : "false");
+          if (g_drop_image_debug_enabled) {
+            printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Determined slot type - mask_slot: %s\n", 
+                   use_mask_slot ? "true" : "false");
+          }
         }
       }
       
@@ -1546,18 +1698,24 @@ void DROP_IMAGE_texture_slot_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
     
     if (is_same_image) {
       /* Same image already assigned - no action needed */
-      printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Same image already assigned, skipping operation\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Same image already assigned, skipping operation\n");
+      }
       
       /* ENHANCED: Clear drag state since operation is complete */
       if (drag_was_active) {
         DROP_IMAGE_drag_state_clear();
-        printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Cleared drag state (same image)\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Cleared drag state (same image)\n");
+        }
       }
       return;
       
     } else if (slot_occupied && should_replace) {
       /* Slot is occupied with different image - use assign operator to replace existing texture */
-      printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Using TEXTURE_OT_assign_image (replace existing)\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Using TEXTURE_OT_assign_image (replace existing)\n");
+      }
       /* Drop->ptr already points to TEXTURE_OT_assign_image from registration */
       
       /* Add special flag to indicate replacement */
@@ -1566,7 +1724,9 @@ void DROP_IMAGE_texture_slot_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
     } else {
       /* Slot is empty or user prefers new texture - we could switch to new operator
        * But for simplicity, TEXTURE_OT_assign_image handles both cases */
-      printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Using TEXTURE_OT_assign_image (assign to empty or existing)\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Using TEXTURE_OT_assign_image (assign to empty or existing)\n");
+      }
       
       /* Add flag to indicate this is not a replacement */
       RNA_boolean_set(drop->ptr, "replace_existing", false);
@@ -1575,7 +1735,9 @@ void DROP_IMAGE_texture_slot_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
 
   /* Note: editor_type and paint_mode are not needed for TEXTURE_OT_assign_image */
   
-  printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Copy operation completed\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_texture_slot_copy: Copy operation completed\n");
+  }
 }
 
 /**
@@ -1595,7 +1757,9 @@ std::string DROP_IMAGE_texture_slot_tooltip(bContext *C, wmDrag *drag, const int
     return std::string("Invalid drop data");
   }
 
-  printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Generating smart tooltip\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Generating smart tooltip\n");
+  }
 
   /* Create drop context for analysis */
   TextureDropContext context(C);
@@ -1609,19 +1773,25 @@ std::string DROP_IMAGE_texture_slot_tooltip(bContext *C, wmDrag *drag, const int
   const wmEvent *event = CTX_wm_window(C)->runtime->eventstate;
   if (region && event) {
     ui::Button *but = ui::but_find_mouse_over(region, event);
-    printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Found button: %p, has rnaprop: %s, active_brush: %p\n",
-           but, (but && but->rnaprop) ? "yes" : "no", context.active_brush);
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Found button: %p, has rnaprop: %s, active_brush: %p\n",
+             but, (but && but->rnaprop) ? "yes" : "no", context.active_brush);
+    }
     
     if (but && context.active_brush) {
       /* ENHANCED: Always determine current slot type in real-time */
       bool current_slot_is_mask = false;
       bool slot_type_determined = determine_texture_slot_type(but, context.active_brush, &current_slot_is_mask, C);
-      printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Real-time slot detection - mask_slot: %s, determined: %s\n", 
-             current_slot_is_mask ? "yes" : "no", slot_type_determined ? "yes" : "no");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Real-time slot detection - mask_slot: %s, determined: %s\n", 
+               current_slot_is_mask ? "yes" : "no", slot_type_determined ? "yes" : "no");
+      }
       
       /* Use drag state information if available, but update it with current slot */
       bool drag_is_active = DROP_IMAGE_drag_state_is_active();
-      printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Drag state active: %s\n", drag_is_active ? "yes" : "no");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Drag state active: %s\n", drag_is_active ? "yes" : "no");
+      }
       
       if (drag_is_active && g_texture_drag_state.active_brush == context.active_brush && slot_type_determined) {
         /* UPDATE: Use current slot type instead of cached drag state */
@@ -1629,88 +1799,130 @@ std::string DROP_IMAGE_texture_slot_tooltip(bContext *C, wmDrag *drag, const int
         
         /* Update drag state with current slot information */
         if (g_texture_drag_state.is_mask_target != current_slot_is_mask) {
-          printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Updating drag state - old mask_slot: %s, new mask_slot: %s\n", 
-                 g_texture_drag_state.is_mask_target ? "yes" : "no", current_slot_is_mask ? "yes" : "no");
+          if (g_drop_image_debug_enabled) {
+            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Updating drag state - old mask_slot: %s, new mask_slot: %s\n", 
+                   g_texture_drag_state.is_mask_target ? "yes" : "no", current_slot_is_mask ? "yes" : "no");
+          }
           g_texture_drag_state.is_mask_target = current_slot_is_mask;
         }
         
-        printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using updated drag state, mask_slot: %s\n", use_mask_slot ? "yes" : "no");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using updated drag state, mask_slot: %s\n", use_mask_slot ? "yes" : "no");
+        }
         
         /* Get proper slot name from RNA */
         if (use_mask_slot) {
           PointerRNA brush_ptr = RNA_pointer_create_discrete(nullptr, RNA_Brush, context.active_brush);
           PropertyRNA *mask_tex_prop = RNA_struct_find_property(&brush_ptr, "mask_texture");
-          printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Looking for mask_texture property: %p\n", (void*)mask_tex_prop);
+          if (g_drop_image_debug_enabled) {
+            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Looking for mask_texture property: %p\n", (void*)mask_tex_prop);
+          }
           if (mask_tex_prop) {
             const char *ui_name = RNA_property_ui_name(mask_tex_prop);
             slot_name = ui_name;
-            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Got RNA UI name for mask texture: '%s'\n", ui_name);
+            if (g_drop_image_debug_enabled) {
+              printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Got RNA UI name for mask texture: '%s'\n", ui_name);
+            }
           } else {
             slot_name = "mask texture";
-            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using fallback name for mask texture\n");
+            if (g_drop_image_debug_enabled) {
+              printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using fallback name for mask texture\n");
+            }
           }
         } else {
           PointerRNA brush_ptr = RNA_pointer_create_discrete(nullptr, RNA_Brush, context.active_brush);
           PropertyRNA *tex_prop = RNA_struct_find_property(&brush_ptr, "texture");
-          printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Looking for texture property: %p\n", (void*)tex_prop);
+          if (g_drop_image_debug_enabled) {
+            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Looking for texture property: %p\n", (void*)tex_prop);
+          }
           if (tex_prop) {
             const char *ui_name = RNA_property_ui_name(tex_prop);
             slot_name = ui_name;
-            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Got RNA UI name for main texture: '%s'\n", ui_name);
+            if (g_drop_image_debug_enabled) {
+              printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Got RNA UI name for main texture: '%s'\n", ui_name);
+            }
           } else {
             slot_name = "main texture";
-            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using fallback name for main texture\n");
+            if (g_drop_image_debug_enabled) {
+              printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using fallback name for main texture\n");
+            }
           }
         }
         
-        printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using updated drag state slot info\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using updated drag state slot info\n");
+        }
       }
       /* Fallback: Use determined slot type */
       else if (slot_type_determined) {
         use_mask_slot = current_slot_is_mask;
-        printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using fallback slot type, mask_slot: %s\n", use_mask_slot ? "yes" : "no");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using fallback slot type, mask_slot: %s\n", use_mask_slot ? "yes" : "no");
+        }
         
         /* Get proper slot name from RNA */
         if (use_mask_slot) {
           PointerRNA brush_ptr = RNA_pointer_create_discrete(nullptr, RNA_Brush, context.active_brush);
           PropertyRNA *mask_tex_prop = RNA_struct_find_property(&brush_ptr, "mask_texture");
-          printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Looking for mask_texture property: %p\n", (void*)mask_tex_prop);
+          if (g_drop_image_debug_enabled) {
+            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Looking for mask_texture property: %p\n", (void*)mask_tex_prop);
+          }
           if (mask_tex_prop) {
             const char *ui_name = RNA_property_ui_name(mask_tex_prop);
             slot_name = ui_name;
-            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Got RNA UI name for mask texture: '%s'\n", ui_name);
+            if (g_drop_image_debug_enabled) {
+              printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Got RNA UI name for mask texture: '%s'\n", ui_name);
+            }
           } else {
             slot_name = "mask texture";
-            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using fallback name for mask texture\n");
+            if (g_drop_image_debug_enabled) {
+              printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using fallback name for mask texture\n");
+            }
           }
         } else {
           PointerRNA brush_ptr = RNA_pointer_create_discrete(nullptr, RNA_Brush, context.active_brush);
           PropertyRNA *tex_prop = RNA_struct_find_property(&brush_ptr, "texture");
-          printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Looking for texture property: %p\n", (void*)tex_prop);
+          if (g_drop_image_debug_enabled) {
+            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Looking for texture property: %p\n", (void*)tex_prop);
+          }
           if (tex_prop) {
             const char *ui_name = RNA_property_ui_name(tex_prop);
             slot_name = ui_name;
-            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Got RNA UI name for main texture: '%s'\n", ui_name);
+            if (g_drop_image_debug_enabled) {
+              printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Got RNA UI name for main texture: '%s'\n", ui_name);
+            }
           } else {
             slot_name = "main texture";
-            printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using fallback name for main texture\n");
+            if (g_drop_image_debug_enabled) {
+              printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Using fallback name for main texture\n");
+            }
           }
         }
         
-        printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Determined slot type\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Determined slot type\n");
+        }
       } else {
-        printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Could not determine slot type\n");
+        if (g_drop_image_debug_enabled) {
+          printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Could not determine slot type\n");
+        }
       }
         
       /* Note: Slot occupancy will be checked later with actual drag data */
     } else {
-      printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Missing button or active brush\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Missing button or active brush\n");
+      }
     }
   } else {
-    printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Missing region or event\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Missing region or event\n");
+    }
   }
   
-  printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Final slot_name: '%s'\n", slot_name.c_str());
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: Final slot_name: '%s'\n", slot_name.c_str());
+  }
   
   /* Get drag image information for occupancy check */
   Image *drag_image = nullptr;
@@ -1740,8 +1952,10 @@ std::string DROP_IMAGE_texture_slot_tooltip(bContext *C, wmDrag *drag, const int
     slot_occupied = check_texture_slot_occupancy(context.active_brush, use_mask_slot, 
                                                 drag_image, drag_filepath, &should_replace, &is_same_image);
     
-    printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: slot_occupied=%s, should_replace=%s, is_same_image=%s\n",
-           slot_occupied ? "true" : "false", should_replace ? "true" : "false", is_same_image ? "true" : "false");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_texture_slot_tooltip: slot_occupied=%s, should_replace=%s, is_same_image=%s\n",
+             slot_occupied ? "true" : "false", should_replace ? "true" : "false", is_same_image ? "true" : "false");
+    }
   }
   
   /* ENHANCED: Add drag state information to tooltip */
@@ -1791,7 +2005,9 @@ static bool DROP_IMAGE_set_preview_for_drag(wmDrag *drag, int max_size)
     return false;
   }
 
-  printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Setting preview for drag operation\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Setting preview for drag operation\n");
+  }
 
   /* Load image preview using functions from interface_drop_image_feedback.cc */
   ImBuf *preview_imb = nullptr;
@@ -1800,7 +2016,9 @@ static bool DROP_IMAGE_set_preview_for_drag(wmDrag *drag, int max_size)
     /* For image files */
     const char *filepath = WM_drag_get_single_path(drag);
     if (filepath) {
-      printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Processing file: %s\n", filepath);
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Processing file: %s\n", filepath);
+      }
       preview_imb = DROP_IMAGE_load_and_scale_preview(filepath, max_size);
     }
   }
@@ -1809,28 +2027,34 @@ static bool DROP_IMAGE_set_preview_for_drag(wmDrag *drag, int max_size)
     ID *id = WM_drag_get_local_ID(drag, ID_IM);
     if (id) {
       Image *image = (Image *)id;
-      printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Processing Image ID: %s\n", id->name);
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Processing Image ID: %s\n", id->name);
+      }
       preview_imb = DROP_IMAGE_load_and_scale_preview_from_id(image, max_size);
     }
   }
   
   if (!preview_imb) {
-    printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Failed to load preview\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Failed to load preview\n");
+    }
     return false;
   }
 
   /* Set preview for drag operation */
   WM_event_drag_image(drag, preview_imb, 1.0f);
-  printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Preview successfully set (size: %dx%d)\n", 
-         preview_imb->x, preview_imb->y);
-  
-  /* Check that preview is actually set */
-  printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Verification - drag->imb: %p, drag->imbuf_scale: %.2f\n", 
-         drag->imb, drag->imbuf_scale);
-  
-  /* Additional check - ensure preview won't be overwritten */
-  if (drag->imb != preview_imb) {
-    printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: ERROR! Preview was overwritten!\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Preview successfully set (size: %dx%d)\n", 
+           preview_imb->x, preview_imb->y);
+    
+    /* Check that preview is actually set */
+    printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: Verification - drag->imb: %p, drag->imbuf_scale: %.2f\n", 
+           drag->imb, drag->imbuf_scale);
+    
+    /* Additional check - ensure preview won't be overwritten */
+    if (drag->imb != preview_imb) {
+      printf("[DEBUG] DROP_IMAGE_set_preview_for_drag: ERROR! Preview was overwritten!\n");
+    }
   }
   
   /* Принудительно обновляем отображение */
@@ -1850,16 +2074,22 @@ static bool DROP_IMAGE_set_preview_for_drag(wmDrag *drag, int max_size)
 static void DROP_IMAGE_drag_start_callback(bContext *C, wmDrag *drag)
 {
   if (!C || !drag) {
-    printf("[DEBUG] DROP_IMAGE_drag_start_callback: Invalid parameters\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_drag_start_callback: Invalid parameters\n");
+    }
     return;
   }
 
-  printf("[DEBUG] DROP_IMAGE_drag_start_callback: Drag start callback called for type: %d\n", drag->type);
-  printf("[DEBUG] DROP_IMAGE_drag_start_callback: Current drag->imb: %p\n", drag->imb);
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_drag_start_callback: Drag start callback called for type: %d\n", drag->type);
+    printf("[DEBUG] DROP_IMAGE_drag_start_callback: Current drag->imb: %p\n", drag->imb);
+  }
 
   /* Only set preview if it's not already set */
   if (drag->imb) {
-    printf("[DEBUG] DROP_IMAGE_drag_start_callback: Preview already set, skipping\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_drag_start_callback: Preview already set, skipping\n");
+    }
     return;
   }
 
@@ -1867,19 +2097,25 @@ static void DROP_IMAGE_drag_start_callback(bContext *C, wmDrag *drag)
   if (drag->type == WM_DRAG_PATH) {
     const char *path = WM_drag_get_single_path(drag);
     if (path && BLI_path_extension_check_array(path, imb_ext_image)) {
-      printf("[DEBUG] DROP_IMAGE_drag_start_callback: Setting preview for image file: %s\n", path);
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_drag_start_callback: Setting preview for image file: %s\n", path);
+      }
       DROP_IMAGE_set_preview_for_drag(drag, 128);
     }
   }
   else if (drag->type == WM_DRAG_ID) {
     ID *id = WM_drag_get_local_ID(drag, ID_IM);
     if (id) {
-      printf("[DEBUG] DROP_IMAGE_drag_start_callback: Setting preview for Image ID: %s\n", id->name);
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_drag_start_callback: Setting preview for Image ID: %s\n", id->name);
+      }
       DROP_IMAGE_set_preview_for_drag(drag, 128);
     }
   }
   else {
-    printf("[DEBUG] DROP_IMAGE_drag_start_callback: Unsupported drag type: %d\n", drag->type);
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_drag_start_callback: Unsupported drag type: %d\n", drag->type);
+    }
   }
 }
 
@@ -1901,13 +2137,17 @@ void DROP_IMAGE_register_dropboxes()
     return;
   }
 
-  printf("[DEBUG] DROP_IMAGE_register_dropboxes: Registering universal texture dropboxes (excluding Asset Shelf)\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_register_dropboxes: Registering universal texture dropboxes (excluding Asset Shelf)\n");
+  }
 
   /* Register for "User Interface" dropbox map - this covers all UI elements */
   ListBaseT<wmDropBox> *lb = WM_dropboxmap_find("User Interface", SPACE_EMPTY, RGN_TYPE_WINDOW);
   
   if (lb) {
-    printf("[DEBUG] DROP_IMAGE_register_dropboxes: Adding texture slot dropbox to User Interface\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_register_dropboxes: Adding texture slot dropbox to User Interface\n");
+    }
     WM_dropbox_add(lb,
                    "TEXTURE_OT_assign_image", // Use created operator for texture assignment
                    DROP_IMAGE_texture_slot_poll,
@@ -1919,7 +2159,9 @@ void DROP_IMAGE_register_dropboxes()
     wmDropBox *drop = static_cast<wmDropBox *>(lb->last);
     if (drop) {
       drop->on_drag_start = DROP_IMAGE_drag_start_callback;
-      printf("[DEBUG] DROP_IMAGE_register_dropboxes: Set drag start callback for User Interface\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_register_dropboxes: Set drag start callback for User Interface\n");
+      }
     }
   }
 
@@ -1928,7 +2170,9 @@ void DROP_IMAGE_register_dropboxes()
   /* 1. View3D Editor */
   lb = WM_dropboxmap_find("View3D", SPACE_VIEW3D, RGN_TYPE_UI);
   if (lb) {
-    printf("[DEBUG] DROP_IMAGE_register_dropboxes: Adding texture slot dropbox to View3D UI region\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_register_dropboxes: Adding texture slot dropbox to View3D UI region\n");
+    }
     WM_dropbox_add(lb,
                    "TEXTURE_OT_assign_image",
                    DROP_IMAGE_texture_slot_poll,
@@ -1940,14 +2184,18 @@ void DROP_IMAGE_register_dropboxes()
     wmDropBox *drop = static_cast<wmDropBox *>(lb->last);
     if (drop) {
       drop->on_drag_start = DROP_IMAGE_drag_start_callback;
-      printf("[DEBUG] DROP_IMAGE_register_dropboxes: Set drag start callback for View3D\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_register_dropboxes: Set drag start callback for View3D\n");
+      }
     }
   }
 
   /* 2. Properties Editor */
   lb = WM_dropboxmap_find("Properties", SPACE_PROPERTIES, RGN_TYPE_WINDOW);
   if (lb) {
-    printf("[DEBUG] DROP_IMAGE_register_dropboxes: Adding texture slot dropbox to Properties\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_register_dropboxes: Adding texture slot dropbox to Properties\n");
+    }
     WM_dropbox_add(lb,
                    "TEXTURE_OT_assign_image",
                    DROP_IMAGE_texture_slot_poll,
@@ -1959,14 +2207,18 @@ void DROP_IMAGE_register_dropboxes()
     wmDropBox *drop = static_cast<wmDropBox *>(lb->last);
     if (drop) {
       drop->on_drag_start = DROP_IMAGE_drag_start_callback;
-      printf("[DEBUG] DROP_IMAGE_register_dropboxes: Set drag start callback for Properties\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_register_dropboxes: Set drag start callback for Properties\n");
+      }
     }
   }
 
   /* 3. Image Editor */
   lb = WM_dropboxmap_find("Image", SPACE_IMAGE, RGN_TYPE_UI);
   if (lb) {
-    printf("[DEBUG] DROP_IMAGE_register_dropboxes: Adding texture slot dropbox to Image Editor UI\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_register_dropboxes: Adding texture slot dropbox to Image Editor UI\n");
+    }
     WM_dropbox_add(lb,
                    "TEXTURE_OT_assign_image",
                    DROP_IMAGE_texture_slot_poll,
@@ -1978,14 +2230,18 @@ void DROP_IMAGE_register_dropboxes()
     wmDropBox *drop = static_cast<wmDropBox *>(lb->last);
     if (drop) {
       drop->on_drag_start = DROP_IMAGE_drag_start_callback;
-      printf("[DEBUG] DROP_IMAGE_register_dropboxes: Set drag start callback for Image Editor\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_register_dropboxes: Set drag start callback for Image Editor\n");
+      }
     }
   }
 
   /* 4. Node Editor */
   lb = WM_dropboxmap_find("Node Editor", SPACE_NODE, RGN_TYPE_UI);
   if (lb) {
-    printf("[DEBUG] DROP_IMAGE_register_dropboxes: Adding texture slot dropbox to Node Editor UI\n");
+    if (g_drop_image_debug_enabled) {
+      printf("[DEBUG] DROP_IMAGE_register_dropboxes: Adding texture slot dropbox to Node Editor UI\n");
+    }
     WM_dropbox_add(lb,
                    "TEXTURE_OT_assign_image",
                    DROP_IMAGE_texture_slot_poll,
@@ -1997,11 +2253,15 @@ void DROP_IMAGE_register_dropboxes()
     wmDropBox *drop = static_cast<wmDropBox *>(lb->last);
     if (drop) {
       drop->on_drag_start = DROP_IMAGE_drag_start_callback;
-      printf("[DEBUG] DROP_IMAGE_register_dropboxes: Set drag start callback for Node Editor\n");
+      if (g_drop_image_debug_enabled) {
+        printf("[DEBUG] DROP_IMAGE_register_dropboxes: Set drag start callback for Node Editor\n");
+      }
     }
   }
 
-  printf("[DEBUG] DROP_IMAGE_register_dropboxes: Universal texture dropbox registration completed\n");
+  if (g_drop_image_debug_enabled) {
+    printf("[DEBUG] DROP_IMAGE_register_dropboxes: Universal texture dropbox registration completed\n");
+  }
 }
 
 }

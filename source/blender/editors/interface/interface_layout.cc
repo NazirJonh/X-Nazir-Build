@@ -3385,7 +3385,9 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
   PointerRNA ptr;
   PointerRNA *op_ptr = button_operator_ptr_ensure(tag_but);
   if (!op_ptr) {
-    printf("DEBUG: uiItemTagButtonWithOperator FAILED: button_operator_ptr_ensure returned nullptr\n");
+    if (g_ui_button_tag_debug_enabled) {
+      printf("DEBUG: uiItemTagButtonWithOperator FAILED: button_operator_ptr_ensure returned nullptr\n");
+    }
     return PointerRNA_NULL;
   }
 

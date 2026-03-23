@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
+import copy
 import json
 import os
 import re
@@ -493,18 +494,19 @@ def safe_file_write(filepath):
         with open(temp_path, 'w', encoding='utf-8') as f:
             yield f
 
-        # Atomic rename with retry on Windows (file may be locked)
+        # Atomic rename with retry on Windows (file may be locked or temp file missing)
         for attempt in range(max_retries):
             try:
                 os.replace(temp_path, filepath)
                 tag_log(f"Saved: {filepath}")
                 return
-            except PermissionError as e:
+            except (PermissionError, FileNotFoundError) as e:
                 if attempt < max_retries - 1:
                     tag_log(f"Retry {attempt + 1}/{max_retries} for {filepath}: {e}")
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
                 else:
+                    tag_log(f"Failed to save after {max_retries} retries: {e}", "ERROR")
                     raise e
     except Exception as e:
         # Remove temp file on error
@@ -1062,6 +1064,8 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
         else:
             # Category not yet in cache — create a minimal entry
             cat_data = _normalize_category_data({})
+            # New categories from extensions start as pending tag assignment.
+            cat_data["pending_tag_assignment"] = True
             _glyph_cache[key] = cat_data
 
     if not isinstance(cat_data, dict):
@@ -1082,7 +1086,11 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
             f"{category_id!r} (tags={cat_data.get('tags', [])})"
         )
     else:
-        cat_data["pending_tag_assignment"] = True
+        # Only mark as pending if it hasn't been explicitly addressed yet (False).
+        # This prevents distributed categories from reappearing in "New Add-ons!"
+        # if all tags are subsequently removed.
+        if cat_data.get("pending_tag_assignment", True):
+            cat_data["pending_tag_assignment"] = True
 
     # Merge discovered_in_spaces
     existing_spaces_flags = spaces_to_flags(cat_data.get("discovered_in_spaces", []))
@@ -1099,9 +1107,8 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
     tag_log(f"mark_category_from_extension: category={category_id!r}, extension={extension_id!r}, "
             f"space_type={space_type}, mode_flag={mode_flag:#010x}")
 
-    # Sync to window manager (DNA) so the change is reflected in C++ code
-    # and persists across sessions when saved to JSON
-    sync_glyph_mappings_to_wm()
+    # Debounced sync and save to prevent lags during rapid discovery
+    _auto_sync_to_wm()
     _auto_save_tags()
 
 
@@ -1158,6 +1165,11 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
             cat_data = _normalize_category_data(cat_data)
             _glyph_cache[key] = cat_data
 
+        # CRITICAL: If an entry was NOT in cache and is now being assigned
+        # a tag, ensure it starts with pending=True so it can be cleared below.
+        if "pending_tag_assignment" not in cat_data:
+             cat_data["pending_tag_assignment"] = True
+
         tags = cat_data.setdefault("tags", [])
         if tag_name not in tags:
             tags.append(tag_name)
@@ -1183,6 +1195,17 @@ _pending_extension_context = None  # dict or None: {"extension_id": str, "space_
 # Preview mode flag: set to True during tag preview in edit dialog to prevent
 # automatic WM synchronization that would cause categories to disappear from "New Add-ons!" filter
 _preview_mode_active = False
+
+
+def set_preview_mode_active(active):
+    """Set preview mode active state.
+
+    Called from C++ when opening edit dialog to ensure tag changes
+        only affect overrides, not mappings, until Save is clicked.
+    """
+    global _preview_mode_active
+    _preview_mode_active = active
+    category_debug_print(f"[DEBUG set_preview_mode_active] Set to {active}")
 
 
 def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag_already_assigned=False):
@@ -1238,7 +1261,10 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
 
         if not existing_ext:
             cat_data["source_extension"] = extension_id
-        cat_data["pending_tag_assignment"] = True
+        
+        # Only mark as pending if it hasn't been explicitly addressed yet (False).
+        if cat_data.get("pending_tag_assignment", True):
+            cat_data["pending_tag_assignment"] = True
 
         if space_type != -1:
             current_spaces = cat_data.get("discovered_in_spaces", [])
@@ -1264,7 +1290,7 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
         )
 
     if updated_existing:
-        sync_glyph_mappings_to_wm()
+        _auto_sync_to_wm()
         _auto_save_tags()
 
     tag_log(
@@ -1550,7 +1576,7 @@ def _extension_manifest_match_keys(pkg_path: str, pkg_name: str):
 
     manifest_path = os.path.join(pkg_path, "blender_manifest.toml")
     if not os.path.isfile(manifest_path):
-        category_debug_print(f"[MANIFEST] No manifest found at {manifest_path!r}, returning keys={keys}")
+        #Man category_debug_print(f"[MANIFEST] No manifest found at {manifest_path!r}, returning keys={keys}")
         return keys
 
     try:
@@ -1564,7 +1590,7 @@ def _extension_manifest_match_keys(pkg_path: str, pkg_name: str):
             if isinstance(field_value, str) and field_value.strip():
                 keys.update(_manifest_field_match_keys(field_value))
 
-        category_debug_print(f"[MANIFEST] pkg_name={pkg_name!r}, pkg_path={pkg_path!r}, keys from manifest fields={keys}")
+        #Man category_debug_print(f"[MANIFEST] pkg_name={pkg_name!r}, pkg_path={pkg_path!r}, keys from manifest fields={keys}")
 
         # Also scan Python files for panel bl_category values.
         # This handles cases where panel bl_category differs from manifest name
@@ -1592,14 +1618,15 @@ def _extension_manifest_match_keys(pkg_path: str, pkg_name: str):
                             bl_categories_found.append(f"{panel_category} -> {normalized}")
                             category_debug_print(f"[MANIFEST] Found bl_category='{panel_category}' in {os.path.relpath(py_path, pkg_path)} -> normalized='{normalized}'")
                 except Exception as e:
-                    category_debug_print(f"[MANIFEST] Failed to scan {py_path!r}: {e}")
+                    #Man category_debug_print(f"[MANIFEST] Failed to scan {py_path!r}: {e}")
                     pass
         
         if py_files_scanned > 0:
-            category_debug_print(f"[MANIFEST] Scanned {py_files_scanned} Python files in {pkg_path!r}, found bl_categories: {bl_categories_found}")
-        category_debug_print(f"[MANIFEST] Final keys for pkg_name={pkg_name!r}: {keys}")
+            # category_debug_print(f"[MANIFEST] Scanned {py_files_scanned} Python files in {pkg_path!r}, found bl_categories: {bl_categories_found}")
+            pass
+        #category_debug_print(f"[MANIFEST] Final keys for pkg_name={pkg_name!r}: {keys}")
     except Exception as e:
-        category_debug_print(f"[MANIFEST] manifest parse failed: pkg_path={pkg_path!r}, error={e}")
+        pass  # category_debug_print(f"[MANIFEST] manifest parse failed: pkg_path={pkg_path!r}, error={e}")
 
     return keys
 
@@ -2495,13 +2522,18 @@ def _load_glyph_mappings_from_file():
     return True
 
 
-def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
+def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_sync=False):
     """Save glyph mappings to JSON file with glyphs in \\uXXXX format.
     
     Args:
         data: JSON data to save (if None, builds from current cache)
         force_discovery_skip: If True, skip saving when file exists (used for discovery)
+        skip_wm_sync: If True, skip WM sync operations after saving (optimization for Save button)
     """
+    import time
+    save_start_time = time.perf_counter()
+    category_debug_print(f"[GLYPH SAVE] >>>>>> START _save_glyph_mappings_to_file <<<<<<")
+    
     global _glyph_cache, _all_tags_cache
 
     filepath = _get_glyphs_filepath()
@@ -2514,8 +2546,7 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
         tag_log(f"Skipping auto-discovery save - preserving existing customizations in {filepath}", "INFO")
         return True  # Return True to indicate "success" (preservation is the goal)
 
-    # Create backup before overwriting
-    create_backup(filepath)
+    # Backup and disk writing is deferred to background thread using thread_task
 
     if data is None:
         # Ensure directory exists
@@ -2556,8 +2587,9 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
                     if isinstance(category, str):
                         order_categories.add(category)
 
-        # DEBUG: Log total cache entries before save
-        category_debug_print(f"[GLYPH SAVE] === START SAVE === Total cache entries: {len(_glyph_cache)}")
+        # DEBUG: Log total cache entries before save with timing
+        prepare_start = time.perf_counter()
+        category_debug_print(f"[GLYPH SAVE] Step 1: Building data structure from {len(_glyph_cache)} cache entries...")
 
         # Iterate over tuple keys (space_type, category) from _glyph_cache
         for cache_key, category_data in _glyph_cache.items():
@@ -2606,11 +2638,11 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
                     "glyph": _glyph_to_unicode_escape(category_data.get("glyph", "")),
                     "display_name": category_data.get("display_name", ""),
                     "first_letter": category_data.get("first_letter", ""),
-                    "color": category_data.get("color", [0.0, 0.0, 0.0]),
+                    "color": list(category_data.get("color", [0.0, 0.0, 0.0])),
                     "default_glyph": _glyph_to_unicode_escape(category_data.get("default_glyph", "")),
                     "default_display_name": category_data.get("default_display_name", ""),
                     "base_type": category_data.get("base_type", "text_only"),
-                    "tags": category_data.get("tags", []),  # Save tags
+                    "tags": list(category_data.get("tags", [])),  # Save tags
                     "glyph_mode": category_data.get("glyph_mode", "auto"),
                     "icon": {
                         "source": category_data.get("icon_source", "auto"),
@@ -2663,7 +2695,7 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
             if isinstance(tag_data, dict):
                 tags_to_save[tag_name] = {
                     "glyph": _glyph_to_hex(tag_data.get("glyph", "")),
-                    "color": tag_data.get("color", [0.0, 0.0, 0.0]),
+                    "color": list(tag_data.get("color", [0.0, 0.0, 0.0])),
                     "mode_flags": tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS)
                 }
             else:
@@ -2689,11 +2721,63 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False):
             }  # Save category orders (glyphs as \uXXXX)
         }
 
+        prepare_end = time.perf_counter()
+        category_debug_print(f"[GLYPH SAVE] Step 1 COMPLETE: Data structure built in {(prepare_end - prepare_start)*1000:.2f}ms")
+
     try:
-        with safe_file_write(filepath) as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        tag_log(f"Saved {len(_glyph_cache)} categories, {len(_all_tags_cache)} tags")
-        category_debug_print(f"[GLYPH SAVE] Successfully saved to {filepath}")
+        import threading
+        cat_count = len(_glyph_cache)
+        tag_count = len(_all_tags_cache)
+        
+        # Snapshot data on main thread, then serialize + write in background.
+        snapshot_start = time.perf_counter()
+        data_snapshot = copy.deepcopy(data)
+        snapshot_end = time.perf_counter()
+        category_debug_print(f"[GLYPH SAVE] Step 2: copy.deepcopy() completed in {(snapshot_end - snapshot_start)*1000:.2f}ms")
+        
+        def write_task():
+            try:
+                thread_start = time.perf_counter()
+                category_debug_print(f"[GLYPH SAVE THREAD] >>>>>> START background thread <<<<<<")
+                
+                # Serialize off the main thread so Save returns immediately.
+                serialize_start = time.perf_counter()
+                json_str = json.dumps(data_snapshot, indent=2, ensure_ascii=False)
+                serialize_end = time.perf_counter()
+                category_debug_print(f"[GLYPH SAVE THREAD] Step 3a: json.dumps() completed in {(serialize_end - serialize_start)*1000:.2f}ms")
+                
+                # Create backup before overwriting (in background)
+                backup_start = time.perf_counter()
+                create_backup(filepath)
+                backup_end = time.perf_counter()
+                category_debug_print(f"[GLYPH SAVE THREAD] Step 3b: create_backup() completed in {(backup_end - backup_start)*1000:.2f}ms")
+                
+                # Write to disk
+                write_start = time.perf_counter()
+                with safe_file_write(filepath) as f:
+                    f.write(json_str)
+                write_end = time.perf_counter()
+                category_debug_print(f"[GLYPH SAVE THREAD] Step 3c: file write completed in {(write_end - write_start)*1000:.2f}ms")
+                
+                thread_end = time.perf_counter()
+                category_debug_print(f"[GLYPH SAVE THREAD] <<<<<< COMPLETE: Total background time {(thread_end - thread_start)*1000:.2f}ms <<<<<<")
+                category_debug_print(f"[GLYPH SAVE THREAD] Successfully saved {cat_count} categories to {filepath}")
+            except Exception as e:
+                category_debug_print(f"[GLYPH SAVE THREAD] Error: {e}")
+                import traceback
+                traceback.print_exc()
+                
+        thread = threading.Thread(target=write_task)
+        thread.daemon = True
+        thread_start_main = time.perf_counter()
+        thread.start()
+        thread_start_end = time.perf_counter()
+        category_debug_print(f"[GLYPH SAVE] Step 4: Thread started in {(thread_start_end - thread_start_main)*1000:.2f}ms")
+        
+        total_end = time.perf_counter()
+        category_debug_print(f"[GLYPH SAVE] <<<<<<<< MAIN THREAD COMPLETE: Total time {(total_end - save_start_time)*1000:.2f}ms (background thread continues) <<<<<<<<")
+        
+        tag_log(f"Started async save for {cat_count} categories, {tag_count} tags (main thread time: {(total_end - save_start_time)*1000:.2f}ms)")
         return True
     except Exception as e:
         tag_log(f"Save failed: {e}", "ERROR")
@@ -2856,7 +2940,7 @@ def generate_unique_tag_name():
         i += 1
 
 
-def create_tag(tag_name, glyph="", color=None, mode_flags=None, auto_save=True):
+def create_tag(tag_name, glyph="", color=None, mode_flags=None, auto_save=True, skip_wm_sync=False):
     """
     Create a new tag.
 
@@ -2865,6 +2949,7 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, auto_save=True):
         glyph: Unicode glyph character
         color: RGB color tuple (0.0-1.0)
         mode_flags: Bitmask of modes where tag is active (None = use default)
+        skip_wm_sync: If True, skip WM sync (optimization for Edit Category Tab dialog)
 
     Returns:
         (success: bool, message: str)
@@ -2902,8 +2987,11 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, auto_save=True):
 
     # Immediately sync the new tag to WM so it's visible in UI
     # This is important for preview mode where full sync is skipped
-    category_debug_print(f"[CREATE_TAG] Syncing tag '{tag_name}' to WM for immediate UI visibility")
-    _sync_single_tag_to_wm(tag_name)
+    if not skip_wm_sync:
+        category_debug_print(f"[CREATE_TAG] Syncing tag '{tag_name}' to WM for immediate UI visibility")
+        _sync_single_tag_to_wm(tag_name)
+    else:
+        category_debug_print(f"[CREATE_TAG] Skipping WM sync for tag '{tag_name}' (will be done by Save)")
 
     return True, f"Tag '{tag_name}' created"
 
@@ -3165,6 +3253,7 @@ def toggle_category_tag_no_save(category, tag_name, space_type=-1):
 
     # Set preview mode to prevent automatic WM sync during tag operations
     _preview_mode_active = True
+    print(f"[DEBUG TOGGLE_NO_SAVE] SET _preview_mode_active=True for category='{category}', tag='{tag_name}'")
     try:
         # DEBUG
         category_debug_print(f"[TOGGLE_NO_SAVE] CALLED: category='{category}', tag='{tag_name}', space_type={space_type} (preview_mode=True)")
@@ -3437,7 +3526,10 @@ def update_category_tags_in_wm(category, space_type=-1):
             return
 
         category_debug_print(f"[UPDATE_WM_TAGS] START: category='{category}', space_type={space_type}")
-        
+
+        # DEBUG: Print _preview_mode_active state
+        category_debug_print(f"[DEBUG UPDATE_WM_TAGS] category='{category}', _preview_mode_active={_preview_mode_active}")
+
         # Global-First: Always use GLOBAL space_type (-1) for cache lookup
         global_space_type = -1
         current_tags = get_category_tags(category, global_space_type)
@@ -3490,6 +3582,17 @@ def update_category_tags_in_wm(category, space_type=-1):
                 if isinstance(cat_data, dict):
                     without_tag_preview = cat_data.get("without_tag_preview", False)
 
+            # In preview mode, keep/create empty override even when there are no tags,
+            # so C++ dialog does not fall back to stale mappings values.
+            if _preview_mode_active and not current_tags and not without_tag_preview:
+                override_item = wm.category_glyph_overrides.new(category=category)
+                if hasattr(override_item, 'space_type'):
+                    override_item.space_type = global_space_type
+                if hasattr(override_item, 'tags'):
+                    override_item.tags = ""
+                category_debug_print(f"[UPDATE_WM_TAGS] Preview mode: created empty GLOBAL override for '{category}'")
+                return
+
             # Only create a new override if there are tags OR "Without Tag" preview mode
             if not current_tags and not without_tag_preview:
                 category_debug_print(f"[UPDATE_WM_TAGS] No override and no tags, skipping creation for '{category}'")
@@ -3507,6 +3610,16 @@ def update_category_tags_in_wm(category, space_type=-1):
         else:
             # Override exists - check if we need to clear it (no tags left)
             if not current_tags:
+                # In preview mode we must keep an explicit empty override so C++ dialog
+                # does not fall back to stale tags from mappings.
+                if _preview_mode_active:
+                    if hasattr(override_item, 'tags'):
+                        old_tags = override_item.tags
+                        override_item.tags = ""
+                        category_debug_print(
+                            f"[UPDATE_WM_TAGS] Preview mode: kept empty override for '{category}' (old tags='{old_tags}')")
+                    return
+
                 # Check if this is "Without Tag" preview state in cache
                 # If without_tag_preview=True, keep override with pending=True so category stays visible
                 # in "New Add-ons!" until Save. This ensures consistent behavior with regular tags.
@@ -3555,7 +3668,7 @@ def update_category_tags_in_wm(category, space_type=-1):
                                 category_debug_print(f"[UPDATE_WM_TAGS] Cleared mapping tags for '{category}' from '{old_tags}' to '' (override removed)")
                             break
                 return
-        
+
         if hasattr(override_item, 'tags'):
             old_tags = override_item.tags
             override_item.tags = ";".join(current_tags)
@@ -3563,9 +3676,14 @@ def update_category_tags_in_wm(category, space_type=-1):
             _pref_log_once(f"[DEBUG update_category_tags_in_wm] Set WM override tags for '{category}' to '{override_item.tags}'")
             tag_log(f"update_category_tags_in_wm: Set WM override tags for '{category}' (global_space_type={global_space_type}) to '{override_item.tags}'")
 
-        # Also update category_glyph_mappings so C++ lookup finds the updated tags
-        # This is critical for Edit Category Tab to show correct tag state
-        if hasattr(wm, 'category_glyph_mappings'):
+        # CRITICAL: In preview mode, only update overrides, NOT mappings.
+        # This keeps "New Add-ons!" button visible until user clicks Save.
+        # Mappings are only updated when changes are actually saved.
+        category_debug_print(f"[DEBUG UPDATE_WM_TAGS] Checking preview mode: _preview_mode_active={_preview_mode_active}")
+        if _preview_mode_active:
+            category_debug_print(f"[DEBUG UPDATE_WM_TAGS] Preview mode: SKIPPING mappings update for '{category}'")
+            category_debug_print(f"[UPDATE_WM_TAGS] Preview mode: skipping mappings update for '{category}'")
+        elif hasattr(wm, 'category_glyph_mappings'):
             mapping_item = None
             for item in wm.category_glyph_mappings:
                 item_space_type = getattr(item, 'space_type', -1)
@@ -3580,7 +3698,7 @@ def update_category_tags_in_wm(category, space_type=-1):
                     mapping_item.tags = ";".join(current_tags)
                     category_debug_print(f"[UPDATE_WM_TAGS] Updated mapping tags for '{category}' from '{old_mapping_tags}' to '{mapping_item.tags}'")
                 # CRITICAL: Also sync pending_tag_assignment from cache to mappings
-                # so C++ can correctly determine "New Add-ons!" visibility
+                # so C++ can correctly determine "New Add-ons!" visibility.
                 key = _make_cache_key(global_space_type, category)
                 if key in _glyph_cache:
                     cat_data = _glyph_cache[key]
@@ -3653,6 +3771,7 @@ def _set_without_tag_preview_state_in_wm(category, space_type=-1, is_selected=Fa
         # This must be called AFTER setting without_tag_preview flag above, otherwise
         # update_category_tags_in_wm won't create the override (see line 3448 condition).
         # IMPORTANT: Call this even if override_item is None to sync tags from Python cache to WM.
+        category_debug_print(f"[DEBUG _set_without_tag] category='{category}', _preview_mode_active={_preview_mode_active}")
         update_category_tags_in_wm(category, space_type)
     except Exception:
         # Non-critical preview UI hint; ignore failures silently.
@@ -3685,17 +3804,21 @@ def _is_without_tag_preview_selected_in_wm(category, space_type=-1):
     return False
 
 
-def finalize_category_tag_changes(category, space_type=-1):
+def finalize_category_tag_changes(category, space_type=-1, sync_wm=True):
     """Finalize tag changes when user clicks Save in edit dialog.
 
     This function:
     1. Exits preview mode to allow WM synchronization
     2. Updates WM with the new tags (makes changes visible in main UI)
     3. Clears pending_tag_assignment flag (category is no longer "new")
-    4. Syncs changes to WM mappings for persistence
+    4. Syncs changes to WM mappings for persistence (optional)
     5. Saves any new tags created during preview to JSON
     6. Resets tag_bar_manually_hidden if no more unassigned categories
     """
+    import time
+    finalize_start = time.perf_counter()
+    category_debug_print(f"[FINALIZE] >>>>>> START finalize_category_tag_changes for '{category}' <<<<<<")
+    
     global _glyph_cache, _preview_mode_active
 
     # Ensure preview mode is disabled for finalization
@@ -3741,14 +3864,24 @@ def finalize_category_tag_changes(category, space_type=-1):
             tag_log(f"finalize_category_tag_changes: cleared pending for {cleared_count} sibling categories of extension '{source_ext}'")
 
     # Update WM override to make changes visible
+    wm_update_start = time.perf_counter()
     update_category_tags_in_wm(category, space_type)
+    wm_update_end = time.perf_counter()
+    category_debug_print(f"[FINALIZE] Step 1: update_category_tags_in_wm() completed in {(wm_update_end - wm_update_start)*1000:.2f}ms")
 
     # Save any new tags that were created during preview mode
     # This ensures tags created via "Create Tag" button are persisted
+    tags_save_start = time.perf_counter()
     _auto_save_tags()
+    tags_save_end = time.perf_counter()
+    category_debug_print(f"[FINALIZE] Step 2: _auto_save_tags() completed in {(tags_save_end - tags_save_start)*1000:.2f}ms")
 
     # Sync to WM mappings for persistence (now that preview mode is off)
-    sync_glyph_mappings_to_wm()
+    if sync_wm:
+        wm_sync_start = time.perf_counter()
+        _auto_sync_to_wm()
+        wm_sync_end = time.perf_counter()
+        category_debug_print(f"[FINALIZE] Step 3: _auto_sync_to_wm() completed in {(wm_sync_end - wm_sync_start)*1000:.2f}ms")
 
     # Reset tag_bar_manually_hidden if no more unassigned categories remain.
     # This allows future auto-show to work if new unassigned categories appear.
@@ -3767,7 +3900,10 @@ def finalize_category_tag_changes(category, space_type=-1):
     except Exception as e:
         category_debug_print(f"[FINALIZE] Error checking unassigned count: {e}")
 
-    tag_log(f"finalize_category_tag_changes: completed for '{category}' (space_type={space_type})")
+    finalize_end = time.perf_counter()
+    category_debug_print(f"[FINALIZE] <<<<<<<< COMPLETE: Total time {(finalize_end - finalize_start)*1000:.2f}ms <<<<<<<<")
+    
+    tag_log(f"finalize_category_tag_changes: completed for '{category}' (space_type={space_type}, time: {(finalize_end - finalize_start)*1000:.2f}ms)")
 
 
 def get_categories_for_tag(tag_name):
@@ -4206,7 +4342,7 @@ def set_category_glyph(category, glyph, space_type=-1, save=True):
             del _glyph_cache[key]
 
     if save:
-        _save_glyph_mappings_to_file()
+        _auto_save_glyph_mappings()
 
 
 def set_category_data(category,
@@ -4221,8 +4357,12 @@ def set_category_data(category,
                       icon_path=None,
                       icon_provider=None,
                       space_type=-1,
-                      save=True):
+                      save=True,
+                      skip_wm_sync=False):
     """Set the full data (glyph, display_name, color, tags, icon fields) for a category name."""
+    import time
+    set_start = time.perf_counter()
+    category_debug_print(f"[SET_CATEGORY_DATA] >>>>>> START set_category_data for '{category}' <<<<<<")
     global _glyph_cache
 
     key = _make_cache_key(space_type, category)
@@ -4662,7 +4802,13 @@ def set_category_data(category,
         category_debug_print(f"[SET_CATEGORY_DATA] Failed to sync to WM: {e}")
 
     if save:
-        _save_glyph_mappings_to_file()
+        save_start = time.perf_counter()
+        _auto_save_glyph_mappings(skip_wm_sync=skip_wm_sync)
+        save_end = time.perf_counter()
+        category_debug_print(f"[SET_CATEGORY_DATA] Step 4: _auto_save_glyph_mappings() scheduled in {(save_end - save_start)*1000:.2f}ms")
+
+    set_end = time.perf_counter()
+    category_debug_print(f"[SET_CATEGORY_DATA] <<<<<<<< COMPLETE: Total time {(set_end - set_start)*1000:.2f}ms <<<<<<<<")
 
 
 def reset_category_to_defaults(category, space_type=-1, save=True):
@@ -4755,7 +4901,7 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
             category_debug_print(f"  {cache_key}: glyph='{cache_entry.get('glyph', '')}', glyph_mode='{cache_entry.get('glyph_mode', 'auto')}'")
 
     if save:
-        _save_glyph_mappings_to_file()
+        _auto_save_glyph_mappings()
 
     return default_glyph, default_display_name
 
@@ -5934,6 +6080,39 @@ def sync_glyph_mappings_to_wm():
         _sync_in_progress = False
 
 
+_auto_sync_timer = None
+
+
+def _auto_sync_to_wm():
+    """Trigger an automatic sync to WM DNA structures with debouncing.
+    
+    Prevents UI stuttering when multiple categories are updated (e.g. discovery)
+    by aggregating DNA clearing/rebuilding cycles into a single deferred call.
+    """
+    global _initial_load_complete, _preview_mode_active, _auto_sync_timer
+    
+    # If not in preview mode and initial load is done, debounce the sync.
+    # We use a short interval (100ms) to maintain responsiveness while preventing per-category stutter.
+    if _initial_load_complete and not _preview_mode_active:
+        if _auto_sync_timer is not None:
+            try:
+                bpy.app.timers.unregister(_auto_sync_timer)
+            except Exception:
+                pass
+            
+        def delayed_sync():
+            global _auto_sync_timer
+            _auto_sync_timer = None
+            sync_glyph_mappings_to_wm()
+            return None
+            
+        _auto_sync_timer = delayed_sync
+        bpy.app.timers.register(delayed_sync, first_interval=0.1)
+    else:
+        # Immediate sync if we're not debouncing (e.g. startup or preview)
+        sync_glyph_mappings_to_wm()
+
+
 def _sync_glyph_mappings_to_wm_impl():
     """Implementation of sync_glyph_mappings_to_wm."""
     global _glyph_cache, _glyph_cache_loaded
@@ -6879,6 +7058,27 @@ def _deferred_save():
     return None  # Don't repeat timer
 
 
+_auto_save_glyph_pending = False
+_auto_save_glyph_skip_wm_sync = False
+
+def _auto_save_glyph_mappings(skip_wm_sync=False):
+    """Mark that glyph mappings need to be saved (called from UI callbacks).
+    Schedules a deferred save to prevent UI freezes."""
+    global _auto_save_glyph_pending, _auto_save_glyph_skip_wm_sync
+    _auto_save_glyph_pending = True
+    _auto_save_glyph_skip_wm_sync = skip_wm_sync
+    if not bpy.app.timers.is_registered(_deferred_save_glyphs):
+        bpy.app.timers.register(_deferred_save_glyphs, first_interval=0.5)
+
+def _deferred_save_glyphs():
+    global _auto_save_glyph_pending, _auto_save_glyph_skip_wm_sync
+    if _auto_save_glyph_pending:
+        _save_glyph_mappings_to_file(skip_wm_sync=_auto_save_glyph_skip_wm_sync)
+        _auto_save_glyph_pending = False
+        _auto_save_glyph_skip_wm_sync = False
+    return None
+
+
 def _sync_mode_flags_from_wm_to_cache():
     """Sync mode flags from Python CategoryTagItem to _all_tags_cache.
     This captures UI changes to mode checkboxes before saving."""
@@ -7439,12 +7639,16 @@ class USERPREF_OT_category_tag_create(Operator):
         else:
             mode_flags = _CATEGORY_TAG_DEFAULT_MODE_FLAGS
 
+        # Skip WM sync if we're in edit dialog - will be done by Save button
+        skip_wm_sync = is_in_edit_dialog if 'is_in_edit_dialog' in locals() else False
+        
         success, message = create_tag(
             self.name,
             glyph,
             list(self.color),
             mode_flags=mode_flags,
-            auto_save=True
+            auto_save=True,
+            skip_wm_sync=skip_wm_sync
         )
         if success:
             # Check if we're being called from the category edit dialog
@@ -7488,11 +7692,14 @@ class USERPREF_OT_category_tag_create(Operator):
             self.report({'INFO'}, message)
 
             if not is_in_edit_dialog:
-                # Only sync to WM and save if not in edit dialog
-                # Sync to WM to update the UI list immediately
-                sync_glyph_mappings_to_wm()
-                # Also ensure saved to file
+                # Defer save to background thread - prevents UI freeze
+                # Tag is already visible via _sync_single_tag_to_wm
+                category_debug_print(f"[CREATE_TAG] Deferring save - tag already visible")
                 _auto_save_tags()
+            else:
+                # In edit dialog: defer heavy sync/save until Save button is clicked
+                # This prevents UI freeze when creating tags during preview
+                category_debug_print(f"[CREATE_TAG] Deferring heavy sync/save - will be done by Save button")
 
             context.area.tag_redraw()
             
@@ -7593,16 +7800,20 @@ class USERPREF_OT_category_tag_add(Operator):
         tag_name = generate_unique_tag_name()
 
         # Create tag with default glyph and color
+        # auto_save=True triggers deferred save (no blocking)
         glyph = _hex_to_glyph(DEFAULT_TAG_GLYPH_HEX)
         success, message = create_tag(
             tag_name,
             glyph,
-            [0.0, 0.0, 0.0]
+            [0.0, 0.0, 0.0],
+            auto_save=True,  # Deferred save only - no blocking
+            skip_wm_sync=True  # Skip heavy WM sync
         )
 
         if success:
-            # Sync to WM to update the UI list immediately
-            sync_glyph_mappings_to_wm()
+            # _sync_single_tag_to_wm already synced the tag to WM for immediate visibility
+            # Skip full sync_glyph_mappings_to_wm to prevent UI freeze
+            category_debug_print(f"[QUICK_CREATE_TAG] Tag created and visible - no heavy sync")
 
             # Set active index to the new tag
             for i, t in enumerate(context.window_manager.category_tags):
@@ -7690,9 +7901,9 @@ class USERPREF_OT_category_tag_edit(Operator):
         if success:
             self.report({'INFO'}, message)
 
-            # Sync to WM to update the UI list immediately
-            sync_glyph_mappings_to_wm()
-            # Also ensure saved to file
+            # Defer save to background thread - prevents UI freeze
+            # Tag changes are already visible via existing WM data
+            category_debug_print(f"[EDIT_TAG] Deferring save - no heavy sync")
             _auto_save_tags()
 
             context.area.tag_redraw()
@@ -7736,10 +7947,11 @@ class USERPREF_OT_category_tag_delete(Operator):
         tag = tags[active_idx]
         tag_name = tag.name
 
-        success, message = delete_tag(tag_name)
+        success, message = delete_tag(tag_name, auto_save=True)
         if success:
-            # Sync to WM to update the UI list immediately
-            sync_glyph_mappings_to_wm()
+            # Tag removed from WM collection automatically via _all_tags_cache deletion
+            # Skip full sync_glyph_mappings_to_wm to prevent UI freeze
+            category_debug_print(f"[DELETE_TAG] Tag deleted - skipping heavy WM sync")
 
             # Adjust active index if needed
             tags = wm.category_tags

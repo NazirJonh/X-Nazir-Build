@@ -1164,20 +1164,20 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
     return OPERATOR_CANCELLED;
   }
 
-  /* Read category before exec, because exec clears category_tab_current_dialog_op. */
+  /* Read category before closing popup. */
   char category[64] = "";
   if (category_tab_current_dialog_op) {
     RNA_string_get(category_tab_current_dialog_op->ptr, "category", category);
   }
 
-  /* Persist current dialog values (including icon fields) to JSON using the same
-   * code-path as the edit dialog exec callback. */
-  if (category_tab_current_dialog_op) {
-    category_tab_edit_dialog_exec(C, category_tab_current_dialog_op);
-  }
-
   if (category[0] == '\0') {
     return OPERATOR_CANCELLED;
+  }
+
+  /* Commit the current dialog state to the runtime cache before writing JSON.
+   * This preserves the values the user just edited in the popup. */
+  if (category_tab_current_dialog_op) {
+    category_tab_edit_dialog_exec(C, category_tab_current_dialog_op);
   }
 
 #ifdef WITH_PYTHON
@@ -1191,42 +1191,50 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
   const char *imports[] = {"bpy", nullptr};
   
   ScrArea *area = CTX_wm_area(C);
-  const int space_type = area ? area->spacetype : -1;
 
+  /* Directly save to JSON without triggering WM sync - live update already applied changes.
+   * This avoids the 2-4ms UI block caused by _sync_glyph_mappings_to_wm_impl() processing
+   * all 37 categories in the main thread after Save.
+   * 
+   * The _save_glyph_mappings_to_file with force_discovery_skip=False will:
+   * 1. Build data from _glyph_cache (already updated by live preview via toggle_category_tag_no_save)
+   * 2. Save to JSON file in background thread
+   * 3. NOT trigger any WM sync operations */
   char save_cmd[1024];
 #if CATEGORY_TAB_DEBUG_ENABLED
   BLI_snprintf(save_cmd, sizeof(save_cmd),
-      "from bl_ui.space_userpref import finalize_category_tag_changes, get_category_tags, sync_wm_to_glyph_cache\n"
+      "from bl_ui.space_userpref import _save_glyph_mappings_to_file\n"
       "import bpy\n"
       "wm = bpy.context.window_manager\n"
       "category = wm.category_tab_save_category\n"
       "wm.category_tab_save_category = ''\n"
-      "print(f'[GLYPH SAVE PY] Category from WM property: {category}')\n"
       "if category:\n"
-      "    tags = get_category_tags(category, space_type=%d)\n"
-      "    print(f'[GLYPH SAVE PY] Tags in _glyph_cache for {category}: {tags}')\n"
-      "    finalize_category_tag_changes(category, space_type=%d)\n"
-      "    print(f'[GLYPH SAVE PY] Changes finalized (WM updated, pending cleared)')\n"
-      "    result = sync_wm_to_glyph_cache()\n"
-      "    print(f'[GLYPH SAVE PY] sync_wm_to_glyph_cache returned: {result}')\n"
-      "else:\n"
-      "    print('[GLYPH SAVE PY] ERROR: No category found in WM property')\n",
-      space_type, space_type);
+      "    print(f'[GLYPH SAVE PY] Starting save for {category}...')\n"
+      "    _save_glyph_mappings_to_file(force_discovery_skip=False)\n"
+      "    print(f'[GLYPH SAVE PY] Saved {category} to JSON (no WM sync)')\n");
 #else
   BLI_snprintf(save_cmd, sizeof(save_cmd),
-      "from bl_ui.space_userpref import finalize_category_tag_changes, get_category_tags, sync_wm_to_glyph_cache\n"
+      "from bl_ui.space_userpref import _save_glyph_mappings_to_file\n"
       "import bpy\n"
       "wm = bpy.context.window_manager\n"
       "category = wm.category_tab_save_category\n"
+      "print(f'[GLYPH SAVE PY] category from WM: [{category}]')\n"
       "wm.category_tab_save_category = ''\n"
       "if category:\n"
-      "    tags = get_category_tags(category, space_type=%d)\n"
-      "    finalize_category_tag_changes(category, space_type=%d)\n"
-      "    result = sync_wm_to_glyph_cache()\n",
-      space_type, space_type);
+      "    print(f'[GLYPH SAVE PY] Starting save for {category}...')\n"
+      "    _save_glyph_mappings_to_file(force_discovery_skip=False)\n"
+      "    print(f'[GLYPH SAVE PY] Save completed')\n"
+      "else:\n"
+      "    print(f'[GLYPH SAVE PY] ERROR: category is empty, skipping save')\n");
 #endif
 
+#if CATEGORY_TAB_DEBUG_ENABLED
+  printf("[SAVE EXEC] Calling BPY_run_string_exec for category='%s'\n", category);
+#endif
   BPY_run_string_exec(C, imports, save_cmd);
+#if CATEGORY_TAB_DEBUG_ENABLED
+  printf("[SAVE EXEC] BPY_run_string_exec completed\n");
+#endif
 
   category_tab_reset_tag_redraw(C, wm, area);
 #else

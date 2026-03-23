@@ -3651,6 +3651,21 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   /* Store pointer to dialog operator for Reset/Save button access */
   category_tab_current_dialog_op = op;
 
+#ifdef WITH_PYTHON
+  /* Enable preview mode in Python to prevent mappings sync until Save.
+   * This ensures tag button changes only affect overrides, not mappings.
+   * Critical for categories that are already assigned (not in "New Add-ons!"). */
+  {
+    char python_cmd[256];
+    BLI_snprintf(python_cmd,
+                 sizeof(python_cmd),
+                 "from bl_ui.space_userpref import set_preview_mode_active\n"
+                 "set_preview_mode_active(True)");
+    const char *imports_none[] = {nullptr};
+    BPY_run_string_exec(C, imports_none, python_cmd);
+  }
+#endif
+
   /* Open custom popup with live preview support using public API */
   popup_block_ex(C,
                      category_tab_edit_block_create,
@@ -3805,7 +3820,9 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   /* Clear dialog operator pointer and preview button */
   category_tab_edit_dialog_clear_runtime_state(false);
 
-  /* Save updated data to JSON (including tags which might have been modified) */
+  /* Save updated data to JSON (including tags which might have been modified).
+   * Note: Python side uses timers to defer heavy operations (json.dumps off main thread),
+   * so this call returns quickly without blocking the UI. */
   {
     char python_cmd[8192];
     /* Convert color to hex for Python set_category_data */
@@ -3815,10 +3832,15 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
              int(item->color[1] * 255.0f),
              int(item->color[2] * 255.0f));
 
-    /* Convert UTF-8 glyph back to hex codepoint for storage */
+    /* Convert UTF-8 glyph back to hex codepoint for storage.
+     * Read glyph from operator properties (UI input), not from override,
+     * to ensure user's input is saved even if it matches the default. */
     char glyph_hex[16] = "";
-    if (item->glyph[0] != '\0') {
-      utf8_to_hex_codepoint(item->glyph, glyph_hex, sizeof(glyph_hex));
+    char glyph_raw[16] = "";
+    RNA_string_get(op->ptr, "glyph", glyph_raw);
+    if (glyph_raw[0] != '\0') {
+      /* glyph_raw is already a hex code from UI input */
+      STRNCPY(glyph_hex, glyph_raw);
     }
 
     const char *icon_source_py = "auto";
@@ -3852,8 +3874,8 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     SNPRINTF(python_cmd,
              "from bl_ui.space_userpref import set_category_data, finalize_category_tag_changes\n"
              "set_category_data('%s', display_name='%s', first_letter='%s', glyph='%s', color='%s', "
-             "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s', glyph_mode='%s', space_type=%d)\n"
-             "finalize_category_tag_changes('%s', space_type=%d)\n",
+             "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s', glyph_mode='%s', space_type=%d, skip_wm_sync=True)\n"
+             "finalize_category_tag_changes('%s', space_type=%d, sync_wm=False)\n",
              category_esc,
              display_name_esc,
              category_tab_preview_first_letter,

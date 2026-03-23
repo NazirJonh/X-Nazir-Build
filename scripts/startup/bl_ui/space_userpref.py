@@ -3636,24 +3636,23 @@ def _set_without_tag_preview_state_in_wm(category, space_type=-1, is_selected=Fa
             if hasattr(override_item, 'space_type'):
                 override_item.space_type = global_space_type
 
-        if override_item is None:
-            return
+        if override_item is not None:
+            # CRITICAL: Keep pending=True for "New Add-ons!" visibility.
+            # The without_tag_preview flag in WM is used by C++ to determine button active state.
+            if hasattr(override_item, 'pending_tag_assignment'):
+                override_item.pending_tag_assignment = True
 
-        # CRITICAL: Keep pending=True for "New Add-ons!" visibility.
-        # The without_tag_preview flag in WM is used by C++ to determine button active state.
-        if hasattr(override_item, 'pending_tag_assignment'):
-            override_item.pending_tag_assignment = True
+            # Set without_tag_preview flag for C++ UI button state
+            if hasattr(override_item, 'without_tag_preview'):
+                override_item.without_tag_preview = is_selected
 
-        # Set without_tag_preview flag for C++ UI button state
-        if hasattr(override_item, 'without_tag_preview'):
-            override_item.without_tag_preview = is_selected
-
-        if is_selected and hasattr(override_item, 'tags'):
-            override_item.tags = ""
+            if is_selected and hasattr(override_item, 'tags'):
+                override_item.tags = ""
 
         # CRITICAL: Update WM override to make the without_tag_preview state visible in C++ UI.
         # This must be called AFTER setting without_tag_preview flag above, otherwise
         # update_category_tags_in_wm won't create the override (see line 3448 condition).
+        # IMPORTANT: Call this even if override_item is None to sync tags from Python cache to WM.
         update_category_tags_in_wm(category, space_type)
     except Exception:
         # Non-critical preview UI hint; ignore failures silently.

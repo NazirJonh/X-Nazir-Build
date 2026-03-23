@@ -11,6 +11,14 @@
  * - #UI_OT_eyedropper_color
  */
 
+/* Debug flag for eyedropper - set to 1 to enable debug output */
+#define EYEDROPPER_DEBUG 1
+
+#if EYEDROPPER_DEBUG
+#  define EYE_DEBUG_PRINT(...) printf(__VA_ARGS__)
+#else
+#  define EYE_DEBUG_PRINT(...) ((void)0)
+#endif
 
 #include "MEM_guardedalloc.h"
 
@@ -47,6 +55,9 @@
 
 #include "WM_types.hh"
 #include "wm_window.hh"
+
+#include "GHOST_IWindow.hh"
+#include "GHOST_Types.hh"
 
 #include "interface_intern.hh"
 
@@ -108,25 +119,34 @@ static void eyedropper_draw_cb(const wmWindow *window, void *arg)
     return;
   }
 
+  /* Critical: ensure window has valid runtime, ghost window and GPU context.
+   * Drawing without a valid GPU context causes crashes in NVIDIA OpenGL driver. */
+  if (!window->runtime || !window->runtime->ghostwin || !window->runtime->gpuctx) {
+    return;
+  }
+
+#ifdef WIN32
+  /* Don't draw if window is minimized - GPU context may be invalid. */
+  GHOST_IWindow *ghost_window = static_cast<GHOST_IWindow *>(window->runtime->ghostwin);
+  if (ghost_window && ghost_window->getState() == GHOST_kWindowStateMinimized) {
+    return;
+  }
+#endif
+
   /* Получаем координаты курсора в координатах окна, в котором происходит отрисовка.
    * Пытаемся получить актуальную позицию курсора через GHOST API. */
   int current_xy[2] = {0, 0};
   bool coords_valid = false;
-  
-  if (window->runtime && window->runtime->ghostwin) {
-    /* Пытаемся получить актуальную позицию курсора относительно окна */
-    if (wm_cursor_position_get(const_cast<wmWindow *>(window), &current_xy[0], &current_xy[1])) {
-      coords_valid = true;
-    }
+
+  if (wm_cursor_position_get(const_cast<wmWindow *>(window), &current_xy[0], &current_xy[1])) {
+    coords_valid = true;
   }
-  
-  /* Если не удалось получить позицию через GHOST, используем сохраненные координаты.
-   * Но нужно убедиться, что они в правильной системе координат для этого окна. */
+
+  /* Если не удалось получить позицию через GHOST, используем сохраненные координаты. */
   if (!coords_valid) {
-    if (window->runtime && window->runtime->eventstate) {
+    if (window->runtime->eventstate) {
       current_xy[0] = window->runtime->eventstate->xy[0];
       current_xy[1] = window->runtime->eventstate->xy[1];
-      coords_valid = true;
     }
     else {
       /* Используем сохраненные координаты как fallback */
@@ -441,12 +461,11 @@ static bool eyedropper_cryptomatte_sample_fl(bContext *C,
   eye->cb_win_event_xy[0] = event_xy_win[0];
   eye->cb_win_event_xy[1] = event_xy_win[1];
 
-  if (win && win != eye->cb_win && eye->draw_handle_sample_text) {
-    WM_draw_cb_exit(eye->cb_win, eye->draw_handle_sample_text);
-    eye->cb_win = win;
-    eye->draw_handle_sample_text = WM_draw_cb_activate(eye->cb_win, eyedropper_draw_cb, eye);
-    ED_region_tag_redraw(CTX_wm_region(C));
-  }
+  /* NOTE: We do NOT switch draw callback between windows anymore.
+   * This was causing GPU context crashes in NVIDIA OpenGL driver (nvoglv64.dll)
+   * when moving cursor between windows. The preview will be shown in the original
+   * window (eye->cb_win), and when cursor is outside, it will appear at the
+   * window edge pointing towards the cursor direction. */
 
   if (!area || !ELEM(area->spacetype, SPACE_IMAGE, SPACE_NODE, SPACE_CLIP, SPACE_VIEW3D)) {
     return false;
@@ -543,14 +562,14 @@ bool eyedropper_color_sample_fl(bContext *C,
   wmWindow *ctx_win = eye ? eye->cb_win : CTX_wm_window(C);
   wmWindow *win = WM_window_find_under_cursor(ctx_win, event_xy, event_xy_win);
 
-  /* Периодические debug сообщения (каждые 60 кадров) */
+  /* Debug output */
   static int debug_counter = 0;
   debug_counter++;
   if (debug_counter % 60 == 0) {
-    printf("DEBUG: eyedropper_color_sample_fl: event_xy=(%d, %d), ctx_win=%p, found win=%p\n",
-           event_xy[0], event_xy[1], (void *)ctx_win, (void *)win);
+    EYE_DEBUG_PRINT("DEBUG: eyedropper_color_sample_fl: event_xy=(%d, %d), ctx_win=%p, found win=%p\n",
+                    event_xy[0], event_xy[1], (void *)ctx_win, (void *)win);
   }
-  
+
   if (win) {
     bScreen *screen = WM_window_get_active_screen(win);
     area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, event_xy_win);
@@ -558,17 +577,14 @@ bool eyedropper_color_sample_fl(bContext *C,
 
   /* Update cursor position for drawing color swatch */
   if (eye) {
-    /* В Windows используем оригинальные координаты для отрисовки превью,
-       так как они уже в правильной системе координат */
     eye->cb_win_event_xy[0] = event_xy[0];
     eye->cb_win_event_xy[1] = event_xy[1];
 
-    if (win && win != eye->cb_win && eye->draw_handle_sample_text) {
-      WM_draw_cb_exit(eye->cb_win, eye->draw_handle_sample_text);
-      eye->cb_win = win;
-      eye->draw_handle_sample_text = WM_draw_cb_activate(eye->cb_win, eyedropper_draw_cb, eye);
-      ED_region_tag_redraw(CTX_wm_region(C));
-    }
+    /* NOTE: We do NOT switch draw callback between windows anymore.
+     * This was causing GPU context crashes in NVIDIA OpenGL driver (nvoglv64.dll)
+     * when moving cursor between windows. The preview will be shown in the original
+     * window (eye->cb_win), and when cursor is outside, it will appear at the
+     * window edge pointing towards the cursor direction. */
   }
 
   if (area) {
@@ -739,42 +755,82 @@ static void eyedropper_color_update_current(bContext *C,
       static int debug_counter2 = 0;
       debug_counter2++;
       if (debug_counter2 % 30 == 0) {
-        printf("DEBUG: eyedropper_color_update_current: sampled col=(%.3f, %.3f, %.3f)\n",
-               col[0], col[1], col[2]);
+        EYE_DEBUG_PRINT("DEBUG: eyedropper_color_update_current: sampled col=(%.3f, %.3f, %.3f)\n",
+                        col[0], col[1], col[2]);
       }
     }
     else {
       static int debug_counter3 = 0;
       debug_counter3++;
       if (debug_counter3 % 30 == 0) {
-        printf("DEBUG: eyedropper_color_update_current: sampling FAILED at (%d, %d)\n",
-               event_xy[0], event_xy[1]);
+        EYE_DEBUG_PRINT("DEBUG: eyedropper_color_update_current: sampling FAILED at (%d, %d)\n",
+                        event_xy[0], event_xy[1]);
       }
     }
   }
 }
 
+/**
+ * Update the color preview circle position and color.
+ *
+ * This function handles preview updates for both cases:
+ * 1. Cursor is inside a Blender window - uses event coordinates
+ * 2. Cursor is outside all Blender windows - uses desktop color sampling
+ *
+ * IMPORTANT: For child windows (e.g., node editor in separate window),
+ * we must use eye->cb_win instead of CTX_wm_window(C) because:
+ * - event_xy coordinates are in eye->cb_win's coordinate space
+ * - CTX_wm_window(C) may return a different window (e.g., main window)
+ *
+ * WHY WM_main_add_notifier + ED_screen_refresh doesn't work for child windows:
+ * - WM_main_add_notifier posts to a queue processed in the main event loop
+ * - If the child window has no active events, it may not receive the notification
+ * - ED_screen_refresh only updates screen structure (do_refresh flag), not drawing
+ * - Actual redraw happens in wm_draw_update() which checks redraw flags
+ *
+ * Current solution uses WM_redraw_windows() which:
+ * - Calls wm_draw_update() internally
+ * - Only redraws windows with redraw flags set (efficient)
+ * - Works reliably for all window types
+ *
+ * POTENTIAL IMPROVEMENT for Blender core:
+ * - Add WM_window_tag_redraw(wmWindow *win) function to WM_api.hh
+ * - This would allow tagging only the specific window for redraw
+ * - Implementation: set screen->do_draw_paintcursor = true for the window
+ * - Then call wm_draw_update() or wait for next event loop iteration
+ */
 static void eyedropper_update_preview(bContext *C, Eyedropper *eye, const int event_xy[2])
 {
   wmWindowManager *wm = CTX_wm_manager(C);
   if (eye->draw_handle_sample_text) {
-    /* Update cursor position immediately for smooth preview. */
     int event_xy_win[2];
-    /* Используем eye->cb_win, так как event_xy в пространстве этого окна */
+    /* Use eye->cb_win as reference - event_xy is in its coordinate space */
     wmWindow *win = WM_window_find_under_cursor(eye->cb_win, event_xy, event_xy_win);
+
+    /* If cursor moved to a different Blender window, switch the draw callback.
+     * This is safe to do here (not during drawing) and allows the preview
+     * to follow the cursor between windows. */
+    if (win && win != eye->cb_win && eye->draw_handle_sample_text) {
+      /* Deactivate draw callback in old window */
+      WM_draw_cb_exit(eye->cb_win, eye->draw_handle_sample_text);
+
+      /* Activate draw callback in new window */
+      eye->cb_win = win;
+      eye->draw_handle_sample_text = WM_draw_cb_activate(eye->cb_win, eyedropper_draw_cb, eye);
+    }
+
     if (win) {
-      /* Курсор внутри окна Blender - используем координаты события */
+      /* Cursor is inside a Blender window */
       eye->cb_win_event_xy[0] = event_xy[0];
       eye->cb_win_event_xy[1] = event_xy[1];
     }
     else {
-      /* Курсор вне окна Blender - получаем актуальную позицию курсора
-       * в координатах окна, которое обрабатывает отрисовку (eye->cb_win) */
+      /* Cursor is outside all Blender windows - get cursor position in eye->cb_win space */
       if (wm_cursor_position_get(eye->cb_win, &eye->cb_win_event_xy[0], &eye->cb_win_event_xy[1])) {
-        /* Координаты уже в пространстве клиента eye->cb_win */
+        /* Coordinates obtained successfully */
       }
       else {
-        /* Fallback: используем координаты события как есть */
+        /* Fallback: use event coordinates as-is */
         eye->cb_win_event_xy[0] = event_xy[0];
         eye->cb_win_event_xy[1] = event_xy[1];
       }
@@ -783,27 +839,10 @@ static void eyedropper_update_preview(bContext *C, Eyedropper *eye, const int ev
     eyedropper_color_sample_text_update(C, eye, event_xy);
     eyedropper_color_update_current(C, eye, event_xy);
 
-    /* Force immediate redraw to reduce cursor lag. */
-    if (win) {
-      ARegion *region = CTX_wm_region(C);
-      if (wm && region) {
-        /* Tag paint cursor for immediate redraw. */
-        WM_paint_cursor_tag_redraw(win, region);
-        /* Tag region for cursor redraw. */
-        ED_region_tag_redraw_cursor(region);
-        /* Force immediate screen refresh. */
-        ED_screen_refresh(C, wm, win);
-      }
-    }
-    else {
-      /* When sampling outside a window, mark the window for paint cursor redraw.
-       * This will trigger the draw callback on the next redraw cycle. */
-      bScreen *screen = WM_window_get_active_screen(eye->cb_win);
+    /* Mark current window for redraw */
+    bScreen *screen = WM_window_get_active_screen(eye->cb_win);
+    if (screen) {
       screen->do_draw_paintcursor = true;
-
-      /* Force redraw - wm_draw_update will only redraw windows that have
-       * redraw flags set, so this is efficient. */
-      WM_redraw_windows(C);
     }
   }
 }
@@ -879,14 +918,14 @@ static wmOperatorStatus eyedropper_modal(bContext *C, wmOperator *op, const wmEv
 
 static void eyedropper_modal_handle_mousemove(bContext *C, wmOperator *op, const wmEvent *event, Eyedropper *eye)
 {
-  /* Периодические debug сообщения (каждые 70 кадров) */
+  /* Debug output */
   static int debug_counter = 0;
   debug_counter++;
   if (debug_counter % 70 == 0) {
-    printf("DEBUG: eyedropper_modal_handle_mousemove: MOUSE_MOTION at (%d, %d) on eye->cb_win=%p, accum_start=%s\n",
-           event->xy[0], event->xy[1], (void *)eye->cb_win, eye->accum_start ? "true" : "false");
+    EYE_DEBUG_PRINT("DEBUG: eyedropper_modal_handle_mousemove: MOUSE_MOTION at (%d, %d) on eye->cb_win=%p, accum_start=%s\n",
+                    event->xy[0], event->xy[1], (void *)eye->cb_win, eye->accum_start ? "true" : "false");
   }
-  
+
   if (eye->accum_start) {
     /* button is pressed so keep sampling */
     eyedropper_color_sample(C, eye, event->xy);
@@ -910,30 +949,30 @@ static void eyedropper_modal_handle_timer(bContext *C, wmOperator * /*op*/, cons
   /* Timer event for updating preview when mouse is outside Blender window. */
 
   int mouse_xy[2];
-  /* Используем eye->cb_win для получения координат курсора в пространстве этого окна */
+  /* Use eye->cb_win to get cursor coordinates in this window's space */
   wmWindow *win = eye->cb_win;
 
-  /* Периодические debug сообщения (каждые 80 кадров) */
+  /* Debug output */
   static int debug_counter = 0;
   debug_counter++;
   if (debug_counter % 80 == 0) {
-    printf("DEBUG: eyedropper_modal_handle_timer: TIMER event for eye->cb_win=%p\n",
-           (void *)eye->cb_win);
+    EYE_DEBUG_PRINT("DEBUG: eyedropper_modal_handle_timer: TIMER event for eye->cb_win=%p\n",
+                    (void *)eye->cb_win);
   }
 
   /* Get current mouse position in the coordinate space of eye->cb_win */
   if (win && wm_cursor_position_get(win, &mouse_xy[0], &mouse_xy[1])) {
     if (debug_counter % 80 == 0) {
-      printf("DEBUG: eyedropper_modal_handle_timer: TIMER using coords from wm_cursor_position_get: (%d, %d)\n",
-             mouse_xy[0], mouse_xy[1]);
+      EYE_DEBUG_PRINT("DEBUG: eyedropper_modal_handle_timer: TIMER using coords from wm_cursor_position_get: (%d, %d)\n",
+                      mouse_xy[0], mouse_xy[1]);
     }
 
-    /* Обновляем превью с текущими координатами курсора */
+    /* Update preview with current cursor coordinates */
     eyedropper_update_preview(C, eye, mouse_xy);
   }
   else {
     if (debug_counter % 80 == 0) {
-      printf("DEBUG: eyedropper_modal_handle_timer: TIMER - no win or wm_cursor_position_get failed\n");
+      EYE_DEBUG_PRINT("DEBUG: eyedropper_modal_handle_timer: TIMER - no win or wm_cursor_position_get failed\n");
     }
   }
 }

@@ -47,7 +47,7 @@ float evaluate_curve(const CurveMapping *curve, const float value)
   if (curve == nullptr) {
     return value;
   }
-  return BKE_curvemapping_evaluateF(curve, 0, std::clamp(value, 0.0f, 1.0f));
+  return BKE_curvemapping_evaluateF(curve, 0, value);
 }
 
 float evaluate_linear_world(const Params &params, const float3 &position)
@@ -90,45 +90,45 @@ float evaluate_radial_screen(const Params &params, const float3 &position)
 }
 
 class GradientCalculator : public Calculator {
- public:
-  explicit GradientCalculator(const Params &params) : params_(params) {}
+  public:
+   explicit GradientCalculator(const Params &params) : params_(params) {}
 
-  float evaluate(const float3 &position) const override
-  {
-    float factor = 0.0f;
+   float evaluate(const float3 &position) const override
+   {
+     float factor = 0.0f;
 
-    if (params_.type == Type::Linear) {
-      switch (params_.space) {
-        case Space::World:
-          factor = evaluate_linear_world(params_, position);
-          break;
-        case Space::Screen:
-        case Space::UV:
-          factor = evaluate_linear_screen(params_, position);
-          break;
+     if (params_.type == Type::Linear) {
+       switch (params_.space) {
+         case Space::World:
+           factor = evaluate_linear_world(params_, position);
+           break;
+         case Space::Screen:
+         case Space::UV:
+           factor = evaluate_linear_screen(params_, position);
+           break;
+       }
+     }
+     else {
+       switch (params_.space) {
+         case Space::World:
+           factor = evaluate_radial_world(params_, position);
+           break;
+         case Space::Screen:
+         case Space::UV:
+           factor = evaluate_radial_screen(params_, position);
+           break;
+       }
+     }
+
+      if (!std::isfinite(factor)) {
+        factor = 0.0f;
       }
-    }
-    else {
-      switch (params_.space) {
-        case Space::World:
-          factor = evaluate_radial_world(params_, position);
-          break;
-        case Space::Screen:
-        case Space::UV:
-          factor = evaluate_radial_screen(params_, position);
-          break;
-      }
-    }
 
-    if (!std::isfinite(factor)) {
-      factor = 0.0f;
-    }
-
-    factor = clamp_factor(factor, params_.clamp_to_range);
-    factor = apply_hardness(factor, params_.hardness);
-    factor = evaluate_curve(params_.curve, factor);
-    return clamp_factor(factor, params_.clamp_to_range);
-  }
+      factor = clamp_factor(factor, params_.clamp_to_range);
+      factor = apply_hardness(factor, params_.hardness);
+      factor = evaluate_curve(params_.curve, factor);
+      return clamp_factor(factor, params_.clamp_to_range);
+   }
 
   float2 get_start_ss() const override
   {

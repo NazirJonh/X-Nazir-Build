@@ -38,7 +38,7 @@ struct Params {
   float2 end_ss = float2(1.0f, 0.0f);
 
   float hardness = 1.0f;
-  bool clamp_to_range = true;
+  bool clamp_to_range = false;
   const CurveMapping *curve = nullptr;
 
   /* For linear gradient: if true, reject pixels before the start point (t < 0).

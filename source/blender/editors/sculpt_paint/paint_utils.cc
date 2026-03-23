@@ -210,6 +210,17 @@ float paint_gradient_finalize_factor(const Brush &brush,
                                      const bool clamp_to_range,
                                      const float multiplier)
 {
+  /* Для Gradient Tools кривая кисти не применяется - градиент уже имеет свою форму,
+   * заданную через colorband и параметры калькулятора (hardness, clamp и т.д.).
+   * Применение кривой приводит к обнулению валидных факторов и пропускам пикселей. */
+  if (brush.flag & BRUSH_USE_GRADIENT) {
+    if (clamp_to_range) {
+      CLAMP(factor, 0.0f, 1.0f);
+    }
+    return factor * multiplier;
+  }
+
+  /* Для обычных кистей применяем кривую затухания. */
   factor = BKE_brush_curve_strength(&brush, max_ff(factor, 0.0f), 1.0f);
   if (clamp_to_range) {
     CLAMP(factor, 0.0f, 1.0f);
@@ -479,7 +490,7 @@ void paint_gradient_operator_properties(wmOperatorType *ot,
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 
   prop = RNA_def_boolean(
-      ot->srna, "clamp_to_range", true, "Clamp to Range", "Clamp evaluated factor to [0, 1]");
+      ot->srna, "clamp_to_range", false, "Clamp to Range", "Clamp evaluated factor to [0, 1]");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 
   prop = RNA_def_boolean(

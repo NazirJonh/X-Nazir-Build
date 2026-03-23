@@ -570,16 +570,20 @@ static void calc_brush_strength_distances_optimized(const SculptSession &ss,
   if (pixel_positions.size() <= small_row_pixels_threshold) {
     calc_brush_distances(ss, pixel_positions, falloff_shape, distances);
     apply_hardness_to_distances(cache, distances);
-    factors.fill(bstrength);
+    factors.fill(1.0f);
     calc_brush_strength_factors(cache, brush, distances, factors);
+    filter_distances_with_radius(cache.radius, distances, factors);
+    scale_factors(factors, bstrength);
     return;
   }
 
   calc_brush_distances_squared(ss, pixel_positions, falloff_shape, distances);
   apply_hardness_to_squared_distances(cache, distances);
 
-  factors.fill(bstrength);
+  factors.fill(1.0f);
   calc_brush_strength_factors(cache, brush, distances, factors);
+  filter_distances_with_radius(cache.radius, distances, factors);
+  scale_factors(factors, bstrength);
 }
 
 static void calc_brush_strength_distances_no_texture_row_linear(
@@ -653,8 +657,10 @@ static void calc_brush_strength_distances_no_texture_row_linear(
     }
   }
 
-  factors.fill(bstrength);
+  factors.fill(1.0f);
   calc_brush_strength_factors(cache, brush, distances, factors);
+  filter_distances_with_radius(cache.radius, distances, factors);
+  scale_factors(factors, bstrength);
 }
 
 template<typename ImageBuffer> class PaintingKernel {
@@ -1764,6 +1770,15 @@ struct GradientPaintTelemetry {
   std::atomic<int64_t> ibuf_acquire_release_time_us = 0;
   std::atomic<int64_t> cache_hits = 0;
   std::atomic<int64_t> cache_misses = 0;
+  
+  /* Extended debugging for missing pixels */
+  std::atomic<int64_t> pixels_total = 0;
+  std::atomic<int64_t> pixels_rejected_early = 0;
+  std::atomic<int64_t> pixels_rejected_projection = 0;
+  std::atomic<int64_t> pixels_with_factor_zero = 0;
+  std::atomic<int64_t> pixels_with_factor_nonzero = 0;
+  std::atomic<int64_t> pixels_kernel_skipped = 0;
+  std::atomic<int64_t> pixels_kernel_painted = 0;
 };
 
 static GradientPaintTelemetry g_gradient_telemetry;
@@ -1827,6 +1842,10 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
 #endif
 
   brush_color[3] = 1.0f;
+
+  /* Check if color texture is enabled for gradient painting */
+  const bool use_color_texture = BKE_brush_color_texture_get(&brush, OB_MODE_SCULPT)->tex !=
+                                 nullptr;
 
   /* Note: pixel_positions and factors are now thread-local inside parallel_for loop */
 
@@ -1932,6 +1951,7 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
       threading::EnumerableThreadSpecific<Vector<float3>> tls_pixel_positions;
       threading::EnumerableThreadSpecific<Vector<float>> tls_factors;
       threading::EnumerableThreadSpecific<Vector<float2>> tls_screen_coords;
+      threading::EnumerableThreadSpecific<Vector<float4>> tls_texture_colors;
       threading::EnumerableThreadSpecific<ThreadDirtyRegion> tls_dirty_regions;
 
       std::atomic<int64_t> local_rows_total_atomic{0};
@@ -1947,6 +1967,7 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
             Vector<float3> &pixel_positions = tls_pixel_positions.local();
             Vector<float> &factors = tls_factors.local();
             Vector<float2> &screen_coords = tls_screen_coords.local();
+            Vector<float4> &texture_colors = tls_texture_colors.local();
 
             for (const int row_index : range) {
               const PackedPixelRow &pixel_row = pixel_rows[row_index];
@@ -1998,6 +2019,15 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                 for (const int i : factors.index_range()) {
                   const float2 &screen_co = screen_coords[i];
 
+                  if (kEnableGradientPaintDebugTelemetry) {
+                    g_gradient_telemetry.pixels_total.fetch_add(1, std::memory_order_relaxed);
+                  }
+
+                  /* Check if projection failed (clipped points get (0,0) coordinates).
+                   * We still process these points because (0,0) can be a valid screen coordinate.
+                   * The gradient calculator will handle invalid coordinates gracefully. */
+                  const bool projection_failed = (screen_co[0] == 0.0f && screen_co[1] == 0.0f);
+
                   bool should_reject = false;
                   if (is_radial) {
                     const float dist_sq = math::distance_squared(screen_co, gradient_start);
@@ -2017,9 +2047,22 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                     }
                   }
 
+                  /* Don't reject points that failed projection - they may still be valid.
+                   * The gradient calculator will return 0.0f for truly invalid points. */
+                  if (projection_failed && should_reject) {
+                    should_reject = false;
+                  }
+
                   if (should_reject) {
                     factors[i] = 0.0f;
+                    if (kEnableGradientPaintDebugTelemetry) {
+                      g_gradient_telemetry.pixels_rejected_early.fetch_add(1, std::memory_order_relaxed);
+                    }
                     continue;
+                  }
+
+                  if (projection_failed && kEnableGradientPaintDebugTelemetry) {
+                    g_gradient_telemetry.pixels_rejected_projection.fetch_add(1, std::memory_order_relaxed);
                   }
 
                   float factor = paint_projected_gradient_factor_with_preprojected(
@@ -2027,7 +2070,18 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                   factor = paint_gradient_finalize_factor(
                       brush, factor, clamp_to_range, bstrength);
                   factors[i] = factor;
-                  has_influence |= (factor > 0.0f);
+                  
+                  if (kEnableGradientPaintDebugTelemetry) {
+                    if (factor == 0.0f) {
+                      g_gradient_telemetry.pixels_with_factor_zero.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else {
+                      g_gradient_telemetry.pixels_with_factor_nonzero.fetch_add(1, std::memory_order_relaxed);
+                    }
+                  }
+                  
+                  /* For Gradient Tools, negative factors are valid (pixels "before" gradient start) */
+                  has_influence |= (factor != 0.0f);
                 }
               }
               else {
@@ -2037,7 +2091,8 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                   factor = paint_gradient_finalize_factor(
                       brush, factor, clamp_to_range, bstrength);
                   factors[i] = factor;
-                  has_influence |= (factor > 0.0f);
+                  /* For Gradient Tools, negative factors are valid (pixels "before" gradient start) */
+                  has_influence |= (factor != 0.0f);
                 }
               }
 
@@ -2062,6 +2117,17 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                                               BLI_time_now_seconds() :
                                               0.0;
               bool pixels_painted = false;
+              
+              /* Count pixels with non-zero factors before kernel */
+              int64_t nonzero_factors_in_row = 0;
+              if (kEnableGradientPaintDebugTelemetry) {
+                for (const int i : factors.index_range()) {
+                  if (factors[i] != 0.0f) {
+                    nonzero_factors_in_row++;
+                  }
+                }
+              }
+              
               if (is_float_image) {
                 pixels_painted = local_kernel_float4.paint(
                     brush, pixel_row, factors, image_buffer);
@@ -2073,6 +2139,13 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
                 local_kernel_time_us_atomic.fetch_add(
                     int64_t((BLI_time_now_seconds() - kernel_start) * 1.0e6),
                     std::memory_order_relaxed);
+                
+                if (pixels_painted) {
+                  g_gradient_telemetry.pixels_kernel_painted.fetch_add(nonzero_factors_in_row, std::memory_order_relaxed);
+                }
+                else {
+                  g_gradient_telemetry.pixels_kernel_skipped.fetch_add(nonzero_factors_in_row, std::memory_order_relaxed);
+                }
               }
 
               if (pixels_painted) {
@@ -2175,6 +2248,11 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
           for (const int i : factors.index_range()) {
             const float2 &screen_co = screen_coords[i];
 
+            /* Check if projection failed (clipped points get (0,0) coordinates).
+             * We still process these points because (0,0) can be a valid screen coordinate.
+             * The gradient calculator will handle invalid coordinates gracefully. */
+            const bool projection_failed = (screen_co[0] == 0.0f && screen_co[1] == 0.0f);
+
             bool should_reject = false;
             if (is_radial) {
               const float dist_sq = math::distance_squared(screen_co, gradient_start);
@@ -2192,6 +2270,12 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
               else if (clip_before_start && t < -0.1f) {
                 should_reject = true;
               }
+            }
+
+            /* Don't reject points that failed projection - they may still be valid.
+             * The gradient calculator will return 0.0f for truly invalid points. */
+            if (projection_failed && should_reject) {
+              should_reject = false;
             }
 
             if (should_reject) {
@@ -2299,6 +2383,14 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
   /* Debug output every call */
   if (kEnableGradientPaintDebugTelemetry) {
     const int64_t tick = cache ? cache->iteration_count : 0;
+    const int64_t pixels_total = g_gradient_telemetry.pixels_total.load(std::memory_order_relaxed);
+    const int64_t pixels_rejected_early = g_gradient_telemetry.pixels_rejected_early.load(std::memory_order_relaxed);
+    const int64_t pixels_rejected_projection = g_gradient_telemetry.pixels_rejected_projection.load(std::memory_order_relaxed);
+    const int64_t pixels_factor_zero = g_gradient_telemetry.pixels_with_factor_zero.load(std::memory_order_relaxed);
+    const int64_t pixels_factor_nonzero = g_gradient_telemetry.pixels_with_factor_nonzero.load(std::memory_order_relaxed);
+    const int64_t pixels_kernel_painted = g_gradient_telemetry.pixels_kernel_painted.load(std::memory_order_relaxed);
+    const int64_t pixels_kernel_skipped = g_gradient_telemetry.pixels_kernel_skipped.load(std::memory_order_relaxed);
+    
     std::fprintf(
         stderr,
         "[gradient_paint] tick=%lld rows_total=%lld rej_no_influence=%lld "
@@ -2319,6 +2411,18 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
         double(g_gradient_telemetry.kernel_time_us.load(std::memory_order_relaxed)) / 1000.0,
         double(g_gradient_telemetry.ibuf_acquire_release_time_us.load(std::memory_order_relaxed)) /
             1000.0);
+    
+    std::fprintf(
+        stderr,
+        "[gradient_paint] PIXELS total=%lld rej_early=%lld rej_proj=%lld factor_zero=%lld "
+        "factor_nonzero=%lld kernel_painted=%lld kernel_skipped=%lld\n",
+        static_cast<long long>(pixels_total),
+        static_cast<long long>(pixels_rejected_early),
+        static_cast<long long>(pixels_rejected_projection),
+        static_cast<long long>(pixels_factor_zero),
+        static_cast<long long>(pixels_factor_nonzero),
+        static_cast<long long>(pixels_kernel_painted),
+        static_cast<long long>(pixels_kernel_skipped));
     std::fflush(stderr);
 
     /* Reset counters for next call */
@@ -2330,6 +2434,13 @@ static void do_paint_pixels_gradient(const Depsgraph &depsgraph,
     g_gradient_telemetry.gradient_calc_time_us.store(0, std::memory_order_relaxed);
     g_gradient_telemetry.kernel_time_us.store(0, std::memory_order_relaxed);
     g_gradient_telemetry.ibuf_acquire_release_time_us.store(0, std::memory_order_relaxed);
+    g_gradient_telemetry.pixels_total.store(0, std::memory_order_relaxed);
+    g_gradient_telemetry.pixels_rejected_early.store(0, std::memory_order_relaxed);
+    g_gradient_telemetry.pixels_rejected_projection.store(0, std::memory_order_relaxed);
+    g_gradient_telemetry.pixels_with_factor_zero.store(0, std::memory_order_relaxed);
+    g_gradient_telemetry.pixels_with_factor_nonzero.store(0, std::memory_order_relaxed);
+    g_gradient_telemetry.pixels_kernel_painted.store(0, std::memory_order_relaxed);
+    g_gradient_telemetry.pixels_kernel_skipped.store(0, std::memory_order_relaxed);
   }
 }
 

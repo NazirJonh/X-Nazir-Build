@@ -18,8 +18,11 @@
 #include "DNA_node_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_sequence_types.h"
+#include "DNA_space_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_workspace_types.h"
+
+#include <cmath>
 
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
@@ -669,6 +672,21 @@ void do_versions_after_linking_510(FileData *fd, Main *bmain)
       }
       if ((gp_style.flag & GP_MATERIAL_FILL_SHOW) == 0) {
         gp_style.fill_rgba[3] = 0.0f;
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 4)) {
+    /* Initialize cached sin/cos values for SpaceImage rotation. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &space : area.spacedata) {
+          if (space.spacetype == SPACE_IMAGE) {
+            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&space);
+            sima->rotation_sin = std::sin(sima->rotation);
+            sima->rotation_cos = std::cos(sima->rotation);
+          }
+        }
       }
     }
   }

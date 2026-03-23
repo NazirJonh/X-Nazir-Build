@@ -223,6 +223,10 @@ static void image_operatortypes()
   WM_operatortype_append(IMAGE_OT_view_zoom_out);
   WM_operatortype_append(IMAGE_OT_view_zoom_ratio);
   WM_operatortype_append(IMAGE_OT_view_zoom_border);
+  WM_operatortype_append(IMAGE_OT_view_rotate_cw);
+  WM_operatortype_append(IMAGE_OT_view_rotate_ccw);
+  WM_operatortype_append(IMAGE_OT_view_rotate_reset);
+  WM_operatortype_append(IMAGE_OT_view_rotate_interactive);
 #ifdef WITH_INPUT_NDOF
   WM_operatortype_append(IMAGE_OT_view_ndof);
 #endif

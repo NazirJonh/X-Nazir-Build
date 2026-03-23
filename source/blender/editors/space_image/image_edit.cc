@@ -6,12 +6,20 @@
  * \ingroup spimage
  */
 
+/* Debug flag for canvas rotation. Set to 0 to disable debug output. */
+#ifndef IMAGE_ROTATION_DEBUG
+#  define IMAGE_ROTATION_DEBUG 0
+#endif
+
+#include <cstdio>
+
 #include "DNA_brush_types.h"
 #include "DNA_mask_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_vector.h"
 #include "BLI_rect.h"
 
 #include "BKE_colortools.hh"
@@ -36,6 +44,13 @@
 
 #include "WM_api.hh"
 #include "WM_types.hh"
+
+/* Debug printf macro */
+#if IMAGE_ROTATION_DEBUG
+#  define ROT_DEBUG_PRINT(...) printf(__VA_ARGS__)
+#else
+#  define ROT_DEBUG_PRINT(...) ((void)0)
+#endif
 
 namespace blender {
 
@@ -390,6 +405,251 @@ void ED_image_point_pos__reverse(SpaceImage *sima,
   r_co[0] = (co[0] * width * zoomx) + float(sx);
   r_co[1] = (co[1] * height * zoomy) + float(sy);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Const Versions of Coordinate Conversion Functions
+ *
+ * These functions accept const SpaceImage* for use in rotation wrappers
+ * and other contexts where the space data should not be modified.
+ * \{ */
+
+void ED_image_mouse_pos_const(const SpaceImage *sima,
+                               const ARegion *region,
+                               const int mval[2],
+                               float co[2])
+{
+  int sx, sy, width, height;
+  float zoomx, zoomy;
+
+  ED_space_image_get_zoom(const_cast<SpaceImage *>(sima), region, &zoomx, &zoomy);
+  ED_space_image_get_size(const_cast<SpaceImage *>(sima), &width, &height);
+
+  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+
+  co[0] = ((mval[0] - sx) / zoomx) / width;
+  co[1] = ((mval[1] - sy) / zoomy) / height;
+}
+
+void ED_image_point_pos_const(const SpaceImage *sima,
+                               const ARegion *region,
+                               float x,
+                               float y,
+                               float *r_x,
+                               float *r_y)
+{
+  int sx, sy, width, height;
+  float zoomx, zoomy;
+
+  ED_space_image_get_zoom(const_cast<SpaceImage *>(sima), region, &zoomx, &zoomy);
+  ED_space_image_get_size(const_cast<SpaceImage *>(sima), &width, &height);
+
+  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+
+  *r_x = ((x - sx) / zoomx) / width;
+  *r_y = ((y - sy) / zoomy) / height;
+}
+
+void ED_image_point_pos__reverse_const(const SpaceImage *sima,
+                                        const ARegion *region,
+                                        const float co[2],
+                                        float r_co[2])
+{
+  float zoomx, zoomy;
+  int width, height;
+  int sx, sy;
+
+  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+  ED_space_image_get_size(const_cast<SpaceImage *>(sima), &width, &height);
+  ED_space_image_get_zoom(const_cast<SpaceImage *>(sima), region, &zoomx, &zoomy);
+
+  r_co[0] = (co[0] * width * zoomx) + float(sx);
+  r_co[1] = (co[1] * height * zoomy) + float(sy);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Coordinate Wrappers with Rotation Support
+ *
+ * These functions compensate for canvas rotation when converting between
+ * screen coordinates and image/UV coordinates.
+ *
+ * The GPU pipeline rotates the visual representation, so we need to apply
+ * the inverse rotation to input coordinates to make tools work correctly
+ * when the canvas is rotated.
+ *
+ * Pivot point: (0.5, 0.5) in UV space - center of the image.
+ * \{ */
+
+void ED_image_mouse_pos_rotated(const SpaceImage *sima,
+                                 const ARegion *region,
+                                 const int mval[2],
+                                 float r_co[2])
+{
+  ROT_DEBUG_PRINT("\n--- ED_image_mouse_pos_rotated ---\n");
+  ROT_DEBUG_PRINT("  mval: [%d, %d]\n", mval[0], mval[1]);
+  ROT_DEBUG_PRINT("  rotation: %.4f rad (%.1f deg)\n", sima->rotation, RAD2DEGF(sima->rotation));
+  ROT_DEBUG_PRINT("  rotation_pivot: [%.4f, %.4f]\n", sima->rotation_pivot[0], sima->rotation_pivot[1]);
+
+  if (sima->rotation != 0.0f) {
+    float pivot_uv[2] = {sima->rotation_pivot[0], sima->rotation_pivot[1]};
+    float pivot_screen[2];
+    ED_image_point_pos__reverse_const(sima, region, pivot_uv, pivot_screen);
+    ROT_DEBUG_PRINT("  pivot_uv: [%.4f, %.4f]\n", pivot_uv[0], pivot_uv[1]);
+    ROT_DEBUG_PRINT("  pivot_screen: [%.4f, %.4f]\n", pivot_screen[0], pivot_screen[1]);
+
+    float unrotated_screen[2] = {float(mval[0]), float(mval[1])};
+    /* Use cached sin/cos: cos(-θ) = cos(θ), sin(-θ) = -sin(θ) */
+    const float cos_r = sima->rotation_cos;
+    const float sin_r = -sima->rotation_sin;
+    ROT_DEBUG_PRINT("  cos(-rotation)=%.6f, sin(-rotation)=%.6f\n", cos_r, sin_r);
+
+    const float dx = unrotated_screen[0] - pivot_screen[0];
+    const float dy = unrotated_screen[1] - pivot_screen[1];
+    ROT_DEBUG_PRINT("  dx=%.4f, dy=%.4f (screen space)\n", dx, dy);
+
+    unrotated_screen[0] = pivot_screen[0] + dx * cos_r - dy * sin_r;
+    unrotated_screen[1] = pivot_screen[1] + dx * sin_r + dy * cos_r;
+    ROT_DEBUG_PRINT("  unrotated_screen: [%.4f, %.4f]\n", unrotated_screen[0], unrotated_screen[1]);
+
+    ED_image_point_pos_const(sima,
+                       region,
+                       unrotated_screen[0],
+                       unrotated_screen[1],
+                       &r_co[0],
+                       &r_co[1]);
+    ROT_DEBUG_PRINT("  RESULT r_co (UV): [%.4f, %.4f]\n", r_co[0], r_co[1]);
+    return;
+  }
+
+  ED_image_mouse_pos_const(sima, region, mval, r_co);
+  ROT_DEBUG_PRINT("  RESULT r_co (no rotation): [%.4f, %.4f]\n", r_co[0], r_co[1]);
+}
+
+void ED_image_view_to_region_rotated(const SpaceImage *sima,
+                                      const ARegion *region,
+                                      const float co[2],
+                                      float r_co[2])
+{
+  ROT_DEBUG_PRINT("\n--- ED_image_view_to_region_rotated ---\n");
+  ROT_DEBUG_PRINT("  co (UV): [%.4f, %.4f]\n", co[0], co[1]);
+  ROT_DEBUG_PRINT("  rotation: %.4f rad (%.1f deg)\n", sima->rotation, RAD2DEGF(sima->rotation));
+  ROT_DEBUG_PRINT("  rotation_pivot: [%.4f, %.4f]\n", sima->rotation_pivot[0], sima->rotation_pivot[1]);
+
+  ED_image_point_pos__reverse_const(sima, region, co, r_co);
+  ROT_DEBUG_PRINT("  after reverse (screen): [%.4f, %.4f]\n", r_co[0], r_co[1]);
+
+  if (sima->rotation == 0.0f) {
+    ROT_DEBUG_PRINT("  RESULT (no rotation): [%.4f, %.4f]\n", r_co[0], r_co[1]);
+    return;
+  }
+
+  float pivot_uv[2] = {sima->rotation_pivot[0], sima->rotation_pivot[1]};
+  float pivot_screen[2];
+  ED_image_point_pos__reverse_const(sima, region, pivot_uv, pivot_screen);
+  ROT_DEBUG_PRINT("  pivot_screen: [%.4f, %.4f]\n", pivot_screen[0], pivot_screen[1]);
+
+  /* Use cached sin/cos values */
+  const float cos_r = sima->rotation_cos;
+  const float sin_r = sima->rotation_sin;
+  const float dx = r_co[0] - pivot_screen[0];
+  const float dy = r_co[1] - pivot_screen[1];
+  ROT_DEBUG_PRINT("  dx=%.4f, dy=%.4f, cos_r=%.6f, sin_r=%.6f\n", dx, dy, cos_r, sin_r);
+
+  r_co[0] = pivot_screen[0] + dx * cos_r - dy * sin_r;
+  r_co[1] = pivot_screen[1] + dx * sin_r + dy * cos_r;
+  ROT_DEBUG_PRINT("  RESULT (rotated screen): [%.4f, %.4f]\n", r_co[0], r_co[1]);
+}
+
+void ED_image_point_pos_rotated(SpaceImage *sima,
+                                 const ARegion *region,
+                                 float x,
+                                 float y,
+                                 float *r_x,
+                                 float *r_y)
+{
+  ROT_DEBUG_PRINT("\n--- ED_image_point_pos_rotated ---\n");
+  ROT_DEBUG_PRINT("  screen: [%.4f, %.4f]\n", x, y);
+  ROT_DEBUG_PRINT("  rotation: %.4f rad (%.1f deg)\n", sima->rotation, RAD2DEGF(sima->rotation));
+  ROT_DEBUG_PRINT("  rotation_pivot: [%.4f, %.4f]\n", sima->rotation_pivot[0], sima->rotation_pivot[1]);
+
+  if (sima->rotation != 0.0f) {
+    float pivot_uv[2] = {sima->rotation_pivot[0], sima->rotation_pivot[1]};
+    float pivot_screen[2];
+    ED_image_point_pos__reverse(sima, region, pivot_uv, pivot_screen);
+    ROT_DEBUG_PRINT("  pivot_screen: [%.4f, %.4f]\n", pivot_screen[0], pivot_screen[1]);
+
+    float unrotated_screen[2] = {x, y};
+    /* Use cached sin/cos: cos(-θ) = cos(θ), sin(-θ) = -sin(θ) */
+    const float cos_r = sima->rotation_cos;
+    const float sin_r = -sima->rotation_sin;
+    const float dx = unrotated_screen[0] - pivot_screen[0];
+    const float dy = unrotated_screen[1] - pivot_screen[1];
+    ROT_DEBUG_PRINT("  dx=%.4f, dy=%.4f, cos(-r)=%.6f, sin(-r)=%.6f\n", dx, dy, cos_r, sin_r);
+
+    unrotated_screen[0] = pivot_screen[0] + dx * cos_r - dy * sin_r;
+    unrotated_screen[1] = pivot_screen[1] + dx * sin_r + dy * cos_r;
+    ROT_DEBUG_PRINT("  unrotated_screen: [%.4f, %.4f]\n", unrotated_screen[0], unrotated_screen[1]);
+
+    ED_image_point_pos(sima, region, unrotated_screen[0], unrotated_screen[1], r_x, r_y);
+    ROT_DEBUG_PRINT("  RESULT (UV): [%.4f, %.4f]\n", *r_x, *r_y);
+    return;
+  }
+
+  ED_image_point_pos(sima, region, x, y, r_x, r_y);
+  ROT_DEBUG_PRINT("  RESULT (no rotation, UV): [%.4f, %.4f]\n", *r_x, *r_y);
+}
+
+void ED_image_point_pos__reverse_rotated(SpaceImage *sima,
+                                          const ARegion *region,
+                                          const float co[2],
+                                          float r_co[2])
+{
+  ROT_DEBUG_PRINT("\n--- ED_image_point_pos__reverse_rotated ---\n");
+  ROT_DEBUG_PRINT("  co (UV): [%.4f, %.4f]\n", co[0], co[1]);
+  ROT_DEBUG_PRINT("  rotation: %.4f rad (%.1f deg)\n", sima->rotation, RAD2DEGF(sima->rotation));
+  ROT_DEBUG_PRINT("  rotation_pivot: [%.4f, %.4f]\n", sima->rotation_pivot[0], sima->rotation_pivot[1]);
+
+  ED_image_point_pos__reverse(sima, region, co, r_co);
+  ROT_DEBUG_PRINT("  after reverse (screen): [%.4f, %.4f]\n", r_co[0], r_co[1]);
+
+  if (sima->rotation == 0.0f) {
+    ROT_DEBUG_PRINT("  RESULT (no rotation): [%.4f, %.4f]\n", r_co[0], r_co[1]);
+    return;
+  }
+
+  float pivot_uv[2] = {sima->rotation_pivot[0], sima->rotation_pivot[1]};
+  float pivot_screen[2];
+  ED_image_point_pos__reverse(sima, region, pivot_uv, pivot_screen);
+  ROT_DEBUG_PRINT("  pivot_screen: [%.4f, %.4f]\n", pivot_screen[0], pivot_screen[1]);
+
+  /* Use cached sin/cos values */
+  const float cos_r = sima->rotation_cos;
+  const float sin_r = sima->rotation_sin;
+  const float dx = r_co[0] - pivot_screen[0];
+  const float dy = r_co[1] - pivot_screen[1];
+  ROT_DEBUG_PRINT("  dx=%.4f, dy=%.4f, cos_r=%.6f, sin_r=%.6f\n", dx, dy, cos_r, sin_r);
+
+  r_co[0] = pivot_screen[0] + dx * cos_r - dy * sin_r;
+  r_co[1] = pivot_screen[1] + dx * sin_r + dy * cos_r;
+  ROT_DEBUG_PRINT("  RESULT (rotated screen): [%.4f, %.4f]\n", r_co[0], r_co[1]);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Rotation Cache
+ *
+ * Cached sin/cos values for canvas rotation to avoid repeated calculations.
+ * \{ */
+
+void ED_space_image_rotation_cache_update(SpaceImage *sima)
+{
+  sima->rotation_sin = sinf(sima->rotation);
+  sima->rotation_cos = cosf(sima->rotation);
+}
+
+/** \} */
 
 bool ED_image_slot_cycle(Image *image, int direction)
 {

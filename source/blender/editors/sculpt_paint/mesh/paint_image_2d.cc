@@ -6,7 +6,13 @@
  * \ingroup bke
  */
 
+/* Debug flag for canvas rotation. Set to 0 to disable debug output. */
+#ifndef IMAGE_ROTATION_DEBUG
+#  define IMAGE_ROTATION_DEBUG 0
+#endif
+
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "MEM_guardedalloc.h"
@@ -17,6 +23,7 @@
 
 #include "BLI_bitmap.h"
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_math_color.h"
 #include "BLI_math_color_blend.h"
 #include "BLI_stack.h"
@@ -32,6 +39,7 @@
 
 #include "DEG_depsgraph.hh"
 
+#include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 
@@ -46,7 +54,65 @@
 
 #include "../paint_intern.hh"
 
+/* Debug printf macro */
+#if IMAGE_ROTATION_DEBUG
+#  define ROT_DEBUG_PRINT(...) printf(__VA_ARGS__)
+#else
+#  define ROT_DEBUG_PRINT(...) ((void)0)
+#endif
+
 namespace blender {
+
+/**
+ * RAII helper class for temporarily modifying brush rotation values in PaintRuntime.
+ * This provides a safe, exception-safe way to apply canvas rotation compensation
+ * during texture sampling without risking leaving the runtime in an inconsistent state.
+ *
+ * Note: Uses const_cast internally because Paint::runtime is const, but the runtime
+ * data is mutable and designed to be modified during painting operations.
+ */
+class ScopedBrushRotationOverride {
+ public:
+  ScopedBrushRotationOverride(const Paint *paint,
+                               float tex_rotation_offset,
+                               float mask_rotation_offset,
+                               bool apply_tex,
+                               bool apply_mask)
+      : runtime_(const_cast<bke::PaintRuntime *>(paint->runtime)),
+        apply_tex_(apply_tex),
+        apply_mask_(apply_mask),
+        original_brush_rotation_(runtime_->brush_rotation),
+        original_brush_rotation_sec_(runtime_->brush_rotation_sec)
+  {
+    if (apply_tex_) {
+      runtime_->brush_rotation -= tex_rotation_offset;
+    }
+    if (apply_mask_) {
+      runtime_->brush_rotation_sec -= mask_rotation_offset;
+    }
+  }
+
+  ~ScopedBrushRotationOverride()
+  {
+    if (apply_tex_) {
+      runtime_->brush_rotation = original_brush_rotation_;
+    }
+    if (apply_mask_) {
+      runtime_->brush_rotation_sec = original_brush_rotation_sec_;
+    }
+  }
+
+  /* Prevent copying */
+  ScopedBrushRotationOverride(const ScopedBrushRotationOverride &) = delete;
+  ScopedBrushRotationOverride &operator=(const ScopedBrushRotationOverride &) = delete;
+
+ private:
+  bke::PaintRuntime *runtime_;
+  bool apply_tex_;
+  bool apply_mask_;
+  float original_brush_rotation_;
+  float original_brush_rotation_sec_;
+};
 
 /* Brush Painting for 2D image editor */
 
@@ -740,15 +806,49 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
                              BRUSH_GRADIENT_SPACING_CLAMP) ||
                         (cache->last_pressure != pressure))) ||
                       BKE_brush_color_jitter_get_settings(painter->paint, brush);
-  float tex_rotation = -brush->mtex.rot;
-  float mask_rotation = -brush->mask_mtex.rot;
+  float tex_rotation = brush->mtex.rot;
+  float mask_rotation = brush->mask_mtex.rot;
+
+  float canvas_rotation = (s->sima) ? s->sima->rotation : 0.0f;
 
   painter->pool = BKE_image_pool_new();
+
+  /* Calculate rotation offsets for canvas rotation compensation.
+   * Only apply to VIEW and RANDOM mapping modes. */
+  float tex_rotation_offset = 0.0f;
+  float mask_rotation_offset = 0.0f;
+  bool apply_tex_rotation = false;
+  bool apply_mask_rotation = false;
+
+  if (canvas_rotation != 0.0f) {
+    if (cache->is_texbrush &&
+        ELEM(brush->mtex.brush_map_mode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_RANDOM))
+    {
+      tex_rotation_offset = canvas_rotation;
+      apply_tex_rotation = true;
+    }
+    if (cache->is_maskbrush &&
+        ELEM(brush->mask_mtex.brush_map_mode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_RANDOM))
+    {
+      mask_rotation_offset = canvas_rotation;
+      apply_mask_rotation = true;
+    }
+  }
+
+  /* Calculate effective rotation for cache invalidation decisions */
+  float brush_rotation_for_sampling = paint_runtime->brush_rotation;
+  float brush_rotation_sec_for_sampling = paint_runtime->brush_rotation_sec;
+  if (apply_tex_rotation) {
+    brush_rotation_for_sampling -= canvas_rotation;
+  }
+  if (apply_mask_rotation) {
+    brush_rotation_sec_for_sampling -= canvas_rotation;
+  }
 
   /* determine how can update based on textures used */
   if (cache->is_texbrush) {
     if (brush->mtex.brush_map_mode == MTEX_MAP_MODE_VIEW) {
-      tex_rotation += paint_runtime->brush_rotation;
+      tex_rotation += brush_rotation_for_sampling;
     }
     else if (brush->mtex.brush_map_mode == MTEX_MAP_MODE_RANDOM) {
       do_random = true;
@@ -766,7 +866,7 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     bool do_partial_update_mask = false;
     /* invalidate case for all mapping modes */
     if (brush->mask_mtex.brush_map_mode == MTEX_MAP_MODE_VIEW) {
-      mask_rotation += paint_runtime->brush_rotation_sec;
+      mask_rotation += brush_rotation_sec_for_sampling;
     }
     else if (brush->mask_mtex.brush_map_mode == MTEX_MAP_MODE_RANDOM) {
       renew_maxmask = true;
@@ -789,11 +889,21 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
       brush_painter_2d_tex_mapping(
           s, tile, diameter, pos, mouse, brush->mask_mtex.brush_map_mode, &painter->mask_mapping);
 
-      if (do_partial_update_mask) {
-        brush_painter_mask_imbuf_partial_update(painter, tile, pos, diameter);
-      }
-      else {
-        cache->tex_mask = brush_painter_mask_ibuf_new(painter, diameter);
+      /* Use RAII scope for safe rotation override */
+      {
+        ScopedBrushRotationOverride rotation_override(
+            painter->paint,
+            tex_rotation_offset,
+            mask_rotation_offset,
+            apply_tex_rotation,
+            apply_mask_rotation);
+
+        if (do_partial_update_mask) {
+          brush_painter_mask_imbuf_partial_update(painter, tile, pos, diameter);
+        }
+        else {
+          cache->tex_mask = brush_painter_mask_ibuf_new(painter, diameter);
+        }
       }
       cache->last_mask_rotation = mask_rotation;
     }
@@ -801,6 +911,37 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
   /* Re-initialize the curve mask. Mask is always recreated due to the change of position. */
   paint_curve_mask_cache_update(&cache->curve_mask_cache, brush, diameter, size, pos);
+
+  {
+    static bool did_print = false;
+    static float last_mtex_rot = 0.0f;
+    static float last_mask_rot = 0.0f;
+    static float last_brush_rot = 0.0f;
+    static float last_brush_rot_sec = 0.0f;
+    static float last_canvas_rot = 0.0f;
+    if (!did_print || last_mtex_rot != brush->mtex.rot || last_mask_rot != brush->mask_mtex.rot ||
+        last_brush_rot != brush_rotation_for_sampling ||
+        last_brush_rot_sec != brush_rotation_sec_for_sampling || last_canvas_rot != canvas_rotation)
+    {
+      did_print = true;
+      last_mtex_rot = brush->mtex.rot;
+      last_mask_rot = brush->mask_mtex.rot;
+      last_brush_rot = brush_rotation_for_sampling;
+      last_brush_rot_sec = brush_rotation_sec_for_sampling;
+      last_canvas_rot = canvas_rotation;
+      printf(
+          "\n=== [BrushTex Stroke] map=%d mask_map=%d mtex=%.2f mask=%.2f brush=%.2f brush2=%.2f canvas=%.2f tex_final=%.2f mask_final=%.2f (deg) ===\n",
+             int(brush->mtex.brush_map_mode),
+             int(brush->mask_mtex.brush_map_mode),
+             brush->mtex.rot * 180.0f / M_PI,
+             brush->mask_mtex.rot * 180.0f / M_PI,
+             brush_rotation_for_sampling * 180.0f / M_PI,
+             brush_rotation_sec_for_sampling * 180.0f / M_PI,
+             canvas_rotation * 180.0f / M_PI,
+             tex_rotation * 180.0f / M_PI,
+             mask_rotation * 180.0f / M_PI);
+    }
+  }
 
   /* detect if we need to recreate image brush buffer */
   if (diameter != cache->lastdiameter || (tex_rotation != cache->last_tex_rotation) || do_random ||
@@ -811,13 +952,23 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
       cache->ibuf = nullptr;
     }
 
-    if (do_partial_update) {
-      /* do partial update of texture */
-      brush_painter_imbuf_partial_update(painter, tile, pos, diameter);
-    }
-    else {
-      /* create brush from scratch */
-      cache->ibuf = brush_painter_imbuf_new(painter, tile, diameter, pressure, distance);
+    /* Use RAII scope for safe rotation override */
+    {
+      ScopedBrushRotationOverride rotation_override(
+          painter->paint,
+          tex_rotation_offset,
+          mask_rotation_offset,
+          apply_tex_rotation,
+          apply_mask_rotation);
+
+      if (do_partial_update) {
+        /* do partial update of texture */
+        brush_painter_imbuf_partial_update(painter, tile, pos, diameter);
+      }
+      else {
+        /* create brush from scratch */
+        cache->ibuf = brush_painter_imbuf_new(painter, tile, diameter, pressure, distance);
+      }
     }
 
     cache->lastdiameter = diameter;
@@ -830,6 +981,13 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     int dy = int(floorf(tile->last_paintpos[1])) - int(floorf(pos[1]));
 
     if ((dx != 0) || (dy != 0)) {
+      /* Use RAII scope for safe rotation override */
+      ScopedBrushRotationOverride rotation_override(
+          painter->paint,
+          tex_rotation_offset,
+          mask_rotation_offset,
+          apply_tex_rotation,
+          apply_mask_rotation);
       brush_painter_imbuf_partial_update(painter, tile, pos, diameter);
     }
   }
@@ -1489,9 +1647,48 @@ static void paint_2d_canvas_free(ImagePaintState *s)
   }
 }
 
+/**
+ * Apply inverse rotation to UV coordinates to compensate for canvas rotation.
+ * This makes tools work correctly when the canvas is visually rotated.
+ * \param pivot: The pivot point in UV space (typically sima->rotation_pivot).
+ * \param rotation_cos: Pre-cached cos(rotation).
+ * \param rotation_sin: Pre-cached sin(rotation).
+ */
+static void paint_2d_apply_rotation_inverse(float uv[2],
+                                             float rotation_cos,
+                                             float rotation_sin,
+                                             const float pivot[2])
+{
+  if (rotation_sin != 0.0f) {
+    float dx = uv[0] - pivot[0];
+    float dy = uv[1] - pivot[1];
+
+    /* For inverse rotation: cos(-θ) = cos(θ), sin(-θ) = -sin(θ) */
+    float cos_r = rotation_cos;
+    float sin_r = -rotation_sin;
+
+    uv[0] = pivot[0] + dx * cos_r - dy * sin_r;
+    uv[1] = pivot[1] + dx * sin_r + dy * cos_r;
+
+    ROT_DEBUG_PRINT("  paint_2d_apply_rotation_inverse: uv=[%.4f,%.4f] -> [%.4f,%.4f] pivot=[%.4f,%.4f]\n",
+           dx + pivot[0], dy + pivot[1], uv[0], uv[1], pivot[0], pivot[1]);
+  }
+}
+
 static void paint_2d_transform_mouse(View2D *v2d, const float in[2], float out[2])
 {
   ui::view2d_region_to_view(v2d, in[0], in[1], &out[0], &out[1]);
+}
+
+static void paint_2d_transform_mouse_rotated(View2D *v2d,
+                                             const float in[2],
+                                             float out[2],
+                                             float rotation_cos,
+                                             float rotation_sin,
+                                             const float pivot[2])
+{
+  ui::view2d_region_to_view(v2d, in[0], in[1], &out[0], &out[1]);
+  paint_2d_apply_rotation_inverse(out, rotation_cos, rotation_sin, pivot);
 }
 
 static bool is_inside_tile(const int size[2], const float pos[2], const float brush[2])
@@ -1523,11 +1720,31 @@ void paint_2d_stroke(void *ps,
     s->blend = IMB_BLEND_ERASE_ALPHA;
   }
 
-  ui::view2d_region_to_view(s->v2d, mval[0], mval[1], &new_uv[0], &new_uv[1]);
-  ui::view2d_region_to_view(s->v2d, prev_mval[0], prev_mval[1], &old_uv[0], &old_uv[1]);
+  /* Get rotation from SpaceImage for coordinate compensation */
+  float rotation_cos = (s->sima) ? s->sima->rotation_cos : 1.0f;
+  float rotation_sin = (s->sima) ? s->sima->rotation_sin : 0.0f;
+  float pivot[2] = {0.5f, 0.5f};
+  if (s->sima) {
+    pivot[0] = s->sima->rotation_pivot[0];
+    pivot[1] = s->sima->rotation_pivot[1];
+  }
+
+  ROT_DEBUG_PRINT("\n=== paint_2d_stroke DEBUG ===\n");
+  ROT_DEBUG_PRINT("  mval: [%.1f, %.1f], prev_mval: [%.1f, %.1f]\n", mval[0], mval[1], prev_mval[0], prev_mval[1]);
+  ROT_DEBUG_PRINT("  rotation: %.4f rad (%.1f deg), pivot: [%.4f, %.4f]\n",
+                  (s->sima) ? s->sima->rotation : 0.0f,
+                  (s->sima) ? RAD2DEGF(s->sima->rotation) : 0.0f,
+                  pivot[0], pivot[1]);
+
+  /* Transform mouse to UV coordinates with rotation compensation */
+  paint_2d_transform_mouse_rotated(s->v2d, mval, new_uv, rotation_cos, rotation_sin, pivot);
+  paint_2d_transform_mouse_rotated(s->v2d, prev_mval, old_uv, rotation_cos, rotation_sin, pivot);
+
+  ROT_DEBUG_PRINT("  new_uv: [%.4f, %.4f], old_uv: [%.4f, %.4f]\n", new_uv[0], new_uv[1], old_uv[0], old_uv[1]);
 
   float last_uv[2], start_uv[2];
   ui::view2d_region_to_view(s->v2d, 0.0f, 0.0f, &start_uv[0], &start_uv[1]);
+  paint_2d_apply_rotation_inverse(start_uv, rotation_cos, rotation_sin, pivot);
   if (painter->firsttouch) {
     /* paint exactly once on first touch */
     copy_v2_v2(last_uv, new_uv);
@@ -1861,9 +2078,12 @@ void paint_2d_bucket_fill(const bContext *C,
   }
 
   View2D *v2d = s ? s->v2d : &CTX_wm_region(C)->v2d;
+  float rotation_cos = sima->rotation_cos;
+  float rotation_sin = sima->rotation_sin;
+  float pivot[2] = {sima->rotation_pivot[0], sima->rotation_pivot[1]};
   float uv_origin[2];
   float image_init[2];
-  paint_2d_transform_mouse(v2d, mouse_init, image_init);
+  paint_2d_transform_mouse_rotated(v2d, mouse_init, image_init, rotation_cos, rotation_sin, pivot);
 
   int tile_number = BKE_image_get_tile_from_pos(ima, image_init, image_init, uv_origin);
 
@@ -2071,8 +2291,11 @@ void paint_2d_gradient_fill(
     return;
   }
 
-  paint_2d_transform_mouse(s->v2d, mouse_final, image_final);
-  paint_2d_transform_mouse(s->v2d, mouse_init, image_init);
+  float rotation_cos = sima->rotation_cos;
+  float rotation_sin = sima->rotation_sin;
+  float pivot[2] = {sima->rotation_pivot[0], sima->rotation_pivot[1]};
+  paint_2d_transform_mouse_rotated(s->v2d, mouse_final, image_final, rotation_cos, rotation_sin, pivot);
+  paint_2d_transform_mouse_rotated(s->v2d, mouse_init, image_init, rotation_cos, rotation_sin, pivot);
   sub_v2_v2(image_init, uv_origin);
   sub_v2_v2(image_final, uv_origin);
 

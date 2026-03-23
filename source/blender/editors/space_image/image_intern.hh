@@ -48,6 +48,10 @@ void IMAGE_OT_view_zoom_in(wmOperatorType *ot);
 void IMAGE_OT_view_zoom_out(wmOperatorType *ot);
 void IMAGE_OT_view_zoom_ratio(wmOperatorType *ot);
 void IMAGE_OT_view_zoom_border(wmOperatorType *ot);
+void IMAGE_OT_view_rotate_cw(wmOperatorType *ot);
+void IMAGE_OT_view_rotate_ccw(wmOperatorType *ot);
+void IMAGE_OT_view_rotate_reset(wmOperatorType *ot);
+void IMAGE_OT_view_rotate_interactive(wmOperatorType *ot);
 #ifdef WITH_INPUT_NDOF
 void IMAGE_OT_view_ndof(wmOperatorType *ot);
 #endif

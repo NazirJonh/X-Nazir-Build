@@ -920,7 +920,16 @@ void restoreTransObjects(TransInfo *t)
 void calculateCenter2D(TransInfo *t)
 {
   BLI_assert(!is_zero_v3(t->aspect));
+
+  printf("[CENTER_2D] calculateCenter2D\n");
+  printf("[CENTER_2D]   center_global: [%.4f, %.4f, %.4f]\n",
+         t->center_global[0], t->center_global[1], t->center_global[2]);
+  printf("[CENTER_2D]   spacetype: %d\n", t->spacetype);
+
   projectFloatView(t, t->center_global, t->center2d);
+
+  printf("[CENTER_2D]   center2d after projection: [%.4f, %.4f]\n",
+         t->center2d[0], t->center2d[1]);
 }
 
 void calculateCenterLocal(TransInfo *t, const float center_global[3])
@@ -958,9 +967,13 @@ void calculateCenterCursor2D(TransInfo *t, float r_center[2])
   float cursor_local_buf[2];
   const float *cursor = nullptr;
 
+  printf("\n=== calculateCenterCursor2D ===\n");
+
   if (t->spacetype == SPACE_IMAGE) {
     SpaceImage *sima = static_cast<SpaceImage *>(t->area->spacedata.first);
     cursor = sima->cursor;
+    printf("  SPACE_IMAGE cursor: [%.4f, %.4f]\n", cursor[0], cursor[1]);
+    printf("  sima->rotation: %.4f rad (%.1f deg)\n", sima->rotation, RAD2DEGF(sima->rotation));
   }
   if (t->spacetype == SPACE_SEQ) {
     SpaceSeq *sseq = static_cast<SpaceSeq *>(t->area->spacedata.first);
@@ -972,6 +985,12 @@ void calculateCenterCursor2D(TransInfo *t, float r_center[2])
     SpaceClip *space_clip = static_cast<SpaceClip *>(t->area->spacedata.first);
     cursor = space_clip->cursor;
   }
+
+  printf("  options: CTX_CURSOR=%d, CTX_MASK=%d, CTX_PAINT_CURVE=%d\n",
+         (t->options & CTX_CURSOR) ? 1 : 0,
+         (t->options & CTX_MASK) ? 1 : 0,
+         (t->options & CTX_PAINT_CURVE) ? 1 : 0);
+  printf("  t->aspect: [%.4f, %.4f]\n", t->aspect[0], t->aspect[1]);
 
   if (cursor) {
     if (t->options & CTX_MASK) {
@@ -999,9 +1018,12 @@ void calculateCenterCursor2D(TransInfo *t, float r_center[2])
       }
     }
     else {
+      printf("  Using default path (cursor * aspect)\n");
       r_center[0] = cursor[0] * t->aspect[0];
       r_center[1] = cursor[1] * t->aspect[1];
     }
+
+    printf("  r_center result: [%.4f, %.4f]\n", r_center[0], r_center[1]);
   }
 }
 

@@ -67,6 +67,11 @@ struct PaintSample;
 struct StrokeCache;
 }  // namespace ed::sculpt_paint
 
+namespace ed::sculpt_paint::gradient {
+class Calculator;
+struct Params;
+}  // namespace ed::sculpt_paint::gradient
+
 namespace ocio {
 class Display;
 }
@@ -376,6 +381,12 @@ enum {
   WPAINT_GRADIENT_TYPE_LINEAR,
   WPAINT_GRADIENT_TYPE_RADIAL,
 };
+
+enum {
+  PAINT_GRADIENT_SPACE_WORLD,
+  PAINT_GRADIENT_SPACE_SCREEN,
+  PAINT_GRADIENT_SPACE_UV,
+};
 void PAINT_OT_weight_gradient(wmOperatorType *ot);
 
 void PAINT_OT_vertex_paint_toggle(wmOperatorType *ot);
@@ -430,6 +441,7 @@ void PAINT_OT_vertex_color_brightness_contrast(wmOperatorType *ot);
 void PAINT_OT_vertex_color_hsv(wmOperatorType *ot);
 void PAINT_OT_vertex_color_invert(wmOperatorType *ot);
 void PAINT_OT_vertex_color_levels(wmOperatorType *ot);
+void PAINT_OT_vertex_color_gradient(wmOperatorType *ot);
 
 /* `paint_vertex_weight_ops.cc` */
 
@@ -490,8 +502,8 @@ void paint_proj_redraw(const bContext *C, void *ps_handle_p, bool final);
 void paint_proj_stroke_done(void *ps_handle_p);
 
 void paint_brush_color_get(const Paint *paint,
-                           Brush *br,
-                           std::optional<float3> &initial_hsv_jitter,
+                           const Brush *br,
+                           const std::optional<float3> &initial_hsv_jitter,
                            bool invert,
                            float distance,
                            float pressure,
@@ -587,7 +599,38 @@ bool paint_get_tex_pixel(const MTex *mtex,
                          float *r_intensity,
                          float r_rgba[4]);
 
+float paint_gradient_value_from_coord(float coord);
+void paint_fill_gradient_params_from_brush(const Brush &brush,
+                                           const float2 &start_ss,
+                                           const float2 &end_ss,
+                                           ed::sculpt_paint::gradient::Params &r_params);
+void paint_brush_gradient_color_from_factor(const Brush &brush, float factor, float r_color[4]);
+float paint_brush_gradient_coord(const Brush &brush, float distance, float pressure);
+float paint_gradient_finalize_factor(const Brush &brush,
+                                     float factor,
+                                     bool clamp_to_range,
+                                     float multiplier);
+float paint_projected_gradient_factor_with_symmetry(
+    const ARegion *region,
+    const ed::sculpt_paint::gradient::Calculator &calculator,
+    const float3 &position,
+    int symmetry,
+    const int8_t radial_symmetry[3]);
+/**
+ * Batch-optimized version that uses pre-projected screen coordinates.
+ */
+float paint_projected_gradient_factor_with_preprojected(
+    const ed::sculpt_paint::gradient::Calculator &calculator,
+    const float2 &screen_co,
+    int symmetry,
+    const int8_t radial_symmetry[3]);
+bool paint_brush_color_varies_during_stroke(const Paint &paint,
+                                            const Brush &brush,
+                                            float last_pressure,
+                                            float pressure);
+
 void paint_stroke_operator_properties(wmOperatorType *ot);
+void paint_gradient_operator_properties(wmOperatorType *ot, int default_type, int default_space);
 
 void BRUSH_OT_curve_preset(wmOperatorType *ot);
 void BRUSH_OT_sculpt_curves_falloff_preset(wmOperatorType *ot);

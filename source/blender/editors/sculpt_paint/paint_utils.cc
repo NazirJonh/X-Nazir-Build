@@ -6,7 +6,11 @@
  * \ingroup edsculpt
  */
 
+#include <algorithm>
 #include <cmath>
+#include <functional>
+#include <memory>
+#include <unordered_map>
 
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
@@ -24,6 +28,7 @@
 
 #include "BKE_brush.hh"
 #include "BKE_bvhutils.hh"
+#include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_layer.hh"
@@ -47,6 +52,7 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "paint_gradient_core.hh"
 #include "paint_intern.hh"
 
 namespace blender {
@@ -138,6 +144,252 @@ bool paint_get_tex_pixel(const MTex *mtex,
   return has_rgb;
 }
 
+float paint_gradient_value_from_coord(const float coord)
+{
+  static const std::unique_ptr<ed::sculpt_paint::gradient::Calculator> calculator = []() {
+    ed::sculpt_paint::gradient::Params params;
+    params.type = ed::sculpt_paint::gradient::Type::Linear;
+    params.space = ed::sculpt_paint::gradient::Space::Screen;
+    params.start_ss = float2(0.0f, 0.0f);
+    params.end_ss = float2(1.0f, 0.0f);
+    params.hardness = 1.0f;
+    params.clamp_to_range = false;
+    params.curve = nullptr;
+    return ed::sculpt_paint::gradient::create(params);
+  }();
+
+  return calculator->evaluate(float3(coord, 0.0f, 0.0f));
+}
+
+void paint_fill_gradient_params_from_brush(const Brush &brush,
+                                           const float2 &start_ss,
+                                           const float2 &end_ss,
+                                           ed::sculpt_paint::gradient::Params &r_params)
+{
+  r_params.type = (brush.gradient_fill_mode == BRUSH_GRADIENT_LINEAR) ?
+                      ed::sculpt_paint::gradient::Type::Linear :
+                      ed::sculpt_paint::gradient::Type::Radial;
+  r_params.space = ed::sculpt_paint::gradient::Space::Screen;
+  r_params.start_ss = start_ss;
+  r_params.end_ss = end_ss;
+  r_params.hardness = 1.0f;
+  r_params.clamp_to_range = false;
+  r_params.curve = nullptr;
+}
+
+void paint_brush_gradient_color_from_factor(const Brush &brush,
+                                            const float factor,
+                                            float r_color[4])
+{
+  BKE_colorband_evaluate(brush.gradient, factor, r_color);
+}
+
+float paint_brush_gradient_coord(const Brush &brush, const float distance, const float pressure)
+{
+  const float gradient_spacing = (brush.gradient_spacing > 0) ? float(brush.gradient_spacing) :
+                                                                1.0f;
+
+  switch (brush.gradient_stroke_mode) {
+    case BRUSH_GRADIENT_PRESSURE:
+      return paint_gradient_value_from_coord(pressure);
+    case BRUSH_GRADIENT_SPACING_REPEAT: {
+      const float coord = fmod(distance / gradient_spacing, 1.0f);
+      return paint_gradient_value_from_coord(coord);
+    }
+    case BRUSH_GRADIENT_SPACING_CLAMP: {
+      const float coord = distance / gradient_spacing;
+      return paint_gradient_value_from_coord(coord);
+    }
+    default:
+      return 0.0f;
+  }
+}
+
+float paint_gradient_finalize_factor(const Brush &brush,
+                                     float factor,
+                                     const bool clamp_to_range,
+                                     const float multiplier)
+{
+  factor = BKE_brush_curve_strength(&brush, max_ff(factor, 0.0f), 1.0f);
+  if (clamp_to_range) {
+    CLAMP(factor, 0.0f, 1.0f);
+  }
+  return factor * multiplier;
+}
+
+/* Cache disabled - not effective for gradient tool */
+void clear_gradient_project_cache()
+{
+  /* Disabled - see optimization_plan.md for details */
+}
+
+float paint_projected_gradient_factor_with_symmetry(
+    const ARegion *region,
+    const ed::sculpt_paint::gradient::Calculator &calculator,
+    const float3 &position,
+    const int symmetry,
+    const int8_t radial_symmetry[3])
+{
+  if (region == nullptr) {
+    return 0.0f;
+  }
+
+  const auto evaluate_screen_factor = [&](const float3 &sample_position) {
+    /* No cache - direct projection */
+    float sample_v[3] = {sample_position.x, sample_position.y, sample_position.z};
+    float screen_co[2];
+    if (ED_view3d_project_float_object(
+            region, sample_v, screen_co, V3D_PROJ_TEST_CLIP_BB | V3D_PROJ_TEST_CLIP_NEAR) !=
+        V3D_PROJ_RET_OK)
+    {
+      return 0.0f;
+    }
+
+    return calculator.evaluate(float3(screen_co[0], screen_co[1], 0.0f));
+  };
+
+  const int symmetry_mask = (symmetry < 0) ? 0 : (symmetry & PAINT_SYMM_AXIS_ALL);
+
+  const auto evaluate_with_mirror = [&](const float3 &sample_position) {
+    float result = evaluate_screen_factor(sample_position);
+    for (int symm_iter = 1; symm_iter <= symmetry_mask; symm_iter++) {
+      if (!ed::sculpt_paint::is_symmetry_iteration_valid(char(symm_iter), char(symmetry_mask))) {
+        continue;
+      }
+
+      const float3 symm_position = ed::sculpt_paint::symmetry_flip(sample_position,
+                                                                   ePaintSymmetryFlags(symm_iter));
+      const float symm_factor = evaluate_screen_factor(symm_position);
+      result = (result > symm_factor) ? result : symm_factor;
+    }
+    return result;
+  };
+
+  auto rotate_radial = [&](const float3 &co, const int axis, const float angle) {
+    const float cs = cosf(angle);
+    const float sn = sinf(angle);
+    switch (axis) {
+      case 0:
+        return float3(co.x, co.y * cs - co.z * sn, co.y * sn + co.z * cs);
+      case 1:
+        return float3(co.x * cs + co.z * sn, co.y, -co.x * sn + co.z * cs);
+      default:
+        return float3(co.x * cs - co.y * sn, co.x * sn + co.y * cs, co.z);
+    }
+  };
+
+  /* Single-factor aggregation strategy: take max contribution across symmetry passes.
+   * This avoids any additive/double-apply behavior in operator callsites. */
+  float factor = evaluate_with_mirror(position);
+
+  if (radial_symmetry != nullptr) {
+    constexpr float two_pi = 6.28318530717958647692f;
+    for (int axis = 0; axis < 3; axis++) {
+      /* Match RNA constraints from Mesh.radial_symmetry (1..64) and guard against corrupted
+       * runtime data. */
+      const int steps = std::clamp(int(radial_symmetry[axis]), 1, 64);
+      for (int i = 1; i < steps; i++) {
+        const float angle = two_pi * (float(i) / float(steps));
+        const float radial_factor = evaluate_with_mirror(rotate_radial(position, axis, angle));
+        factor = (factor > radial_factor) ? factor : radial_factor;
+      }
+    }
+  }
+
+  return factor;
+}
+
+/**
+ * Variant of paint_projected_gradient_factor_with_symmetry that uses pre-projected
+ * screen coordinates instead of doing projection for each point.
+ * This is an optimization for batch processing where all positions are projected upfront.
+ *
+ * Note: For symmetry != 0 or radial_symmetry != nullptr, this falls back to the original
+ * function that does per-point projection. For best performance, use symmetry=0.
+ */
+float paint_projected_gradient_factor_with_preprojected(
+    const ed::sculpt_paint::gradient::Calculator &calculator,
+    const float2 &screen_co,
+    const int symmetry,
+    const int8_t radial_symmetry[3])
+{
+  /* Check for invalid screen coordinates (from failed projection) */
+  if (screen_co[0] == 0.0f && screen_co[1] == 0.0f) {
+    return 0.0f;
+  }
+
+  /* For symmetry cases, fall back to original function - it needs 3D position transformation.
+   * radial_symmetry is an int8_t[3] array, always valid (not nullptr).
+   * Values of 1 mean symmetry disabled, >1 means enabled. */
+  const bool radial_sym_enabled = (radial_symmetry[0] != 1 || radial_symmetry[1] != 1 ||
+                                   radial_symmetry[2] != 1);
+  if (symmetry != 0 || radial_sym_enabled) {
+    /* Return -1 to indicate "use fallback" - the caller will handle this */
+    return -1.0f;
+  }
+
+  /* No symmetry - simple case, just evaluate the gradient */
+  return calculator.evaluate(float3(screen_co[0], screen_co[1], 0.0f));
+}
+
+static void paint_brush_gradient_color(const Brush &brush,
+                                       const float distance,
+                                       const float pressure,
+                                       float r_color[4])
+{
+  const float gradient_coord = paint_brush_gradient_coord(brush, distance, pressure);
+  paint_brush_gradient_color_from_factor(brush, gradient_coord, r_color);
+}
+
+bool paint_brush_color_varies_during_stroke(const Paint &paint,
+                                            const Brush &brush,
+                                            const float last_pressure,
+                                            const float pressure)
+{
+  const bool gradient_updates_color = (brush.flag & BRUSH_USE_GRADIENT) &&
+                                      (ELEM(brush.gradient_stroke_mode,
+                                            BRUSH_GRADIENT_SPACING_REPEAT,
+                                            BRUSH_GRADIENT_SPACING_CLAMP) ||
+                                       (last_pressure != pressure));
+
+  return gradient_updates_color || BKE_brush_color_jitter_get_settings(&paint, &brush).has_value();
+}
+
+void paint_brush_color_get(const Paint *paint,
+                           const Brush *br,
+                           const std::optional<float3> &initial_hsv_jitter,
+                           const bool invert,
+                           const float distance,
+                           const float pressure,
+                           float r_color[3])
+{
+  if (invert) {
+    copy_v3_v3(r_color, BKE_brush_secondary_color_get(paint, br));
+  }
+  else {
+    const std::optional<BrushColorJitterSettings> color_jitter_settings =
+        BKE_brush_color_jitter_get_settings(paint, br);
+    if (br->flag & BRUSH_USE_GRADIENT) {
+      float color_gr[4];
+      paint_brush_gradient_color(*br, distance, pressure, color_gr);
+      copy_v3_v3(r_color, color_gr);
+    }
+    else if (color_jitter_settings) {
+      /* Perform color jitter with sRGB transfer function. This is inconsistent with other
+       * paint modes which do it in linear space. But arguably it's better to do it in the
+       * more perceptually uniform color space. */
+      float3 color = BKE_brush_color_get(paint, br);
+      linearrgb_to_srgb_v3_v3(color, color);
+      color = BKE_paint_randomize_color(
+          *color_jitter_settings, *initial_hsv_jitter, distance, pressure, color);
+      srgb_to_linearrgb_v3_v3(r_color, color);
+    }
+    else {
+      copy_v3_v3(r_color, BKE_brush_color_get(paint, br));
+    }
+  }
+}
+
 void paint_stroke_operator_properties(wmOperatorType *ot)
 {
   static const EnumPropertyItem stroke_mode_items[] = {
@@ -198,6 +450,46 @@ void paint_stroke_operator_properties(wmOperatorType *ot)
   prop = RNA_def_boolean(
       ot->srna, "pen_flip", false, "Pen Flip", "Whether a tablet's eraser mode is being used");
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+}
+
+void paint_gradient_operator_properties(wmOperatorType *ot,
+                                        const int default_type,
+                                        const int default_space)
+{
+  static const EnumPropertyItem gradient_types[] = {
+      {WPAINT_GRADIENT_TYPE_LINEAR, "LINEAR", 0, "Linear", ""},
+      {WPAINT_GRADIENT_TYPE_RADIAL, "RADIAL", 0, "Radial", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  static const EnumPropertyItem gradient_spaces[] = {
+      {PAINT_GRADIENT_SPACE_WORLD, "WORLD", 0, "World", "Use world-space coordinates"},
+      {PAINT_GRADIENT_SPACE_SCREEN, "SCREEN", 0, "Screen", "Use screen-space coordinates"},
+      {PAINT_GRADIENT_SPACE_UV, "UV", 0, "UV", "Use UV-space coordinates"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  PropertyRNA *prop = RNA_def_enum(ot->srna, "type", gradient_types, default_type, "Type", "");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_enum(ot->srna, "space", gradient_spaces, default_space, "Space", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_float(
+      ot->srna, "hardness", 1.0f, 0.0f, 1.0f, "Hardness", "Gradient hardness", 0.0f, 1.0f);
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(
+      ot->srna, "clamp_to_range", true, "Clamp to Range", "Clamp evaluated factor to [0, 1]");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(
+      ot->srna,
+      "clip_before_start",
+      false,
+      "Clip Before Start",
+      "For linear gradient: reject pixels before the start point (old behavior). "
+      "When off, pixels before start are painted with original color");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 }
 
 /* face-select ops */

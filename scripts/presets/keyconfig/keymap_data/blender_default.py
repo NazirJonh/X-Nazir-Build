@@ -8346,6 +8346,16 @@ def km_3d_view_tool_sculpt_color_filter(params):
     )
 
 
+def km_3d_view_tool_sculpt_color_gradient(params):
+    return (
+        "3D View Tool: Sculpt, Color Gradient",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("sculpt.color_gradient", params.tool_maybe_tweak_event, None)
+        ]},
+    )
+
+
 def km_3d_view_tool_sculpt_mask_by_color(params):
     return (
         "3D View Tool: Sculpt, Mask by Color",
@@ -9159,6 +9169,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_line_project(params),
         km_3d_view_tool_sculpt_mesh_filter(params),
         km_3d_view_tool_sculpt_cloth_filter(params),
+        km_3d_view_tool_sculpt_color_gradient(params),
         km_3d_view_tool_sculpt_color_filter(params),
         km_3d_view_tool_sculpt_mask_by_color(params),
         km_3d_view_tool_sculpt_face_set_edit(params),

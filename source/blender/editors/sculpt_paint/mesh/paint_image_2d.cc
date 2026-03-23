@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 
 #include "MEM_guardedalloc.h"
 
@@ -23,7 +24,6 @@
 #include "BLI_task.h"
 
 #include "BKE_brush.hh"
-#include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
@@ -44,6 +44,7 @@
 
 #include "UI_view2d.hh"
 
+#include "../paint_gradient_core.hh"
 #include "../paint_intern.hh"
 
 namespace blender {
@@ -734,12 +735,8 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
   bool do_random = false;
   bool do_partial_update = false;
-  bool update_color = ((brush->flag & BRUSH_USE_GRADIENT) &&
-                       (ELEM(brush->gradient_stroke_mode,
-                             BRUSH_GRADIENT_SPACING_REPEAT,
-                             BRUSH_GRADIENT_SPACING_CLAMP) ||
-                        (cache->last_pressure != pressure))) ||
-                      BKE_brush_color_jitter_get_settings(painter->paint, brush);
+  const bool update_color = paint_brush_color_varies_during_stroke(
+      *painter->paint, *brush, cache->last_pressure, pressure);
   float tex_rotation = -brush->mtex.rot;
   float mask_rotation = -brush->mask_mtex.rot;
 
@@ -2049,8 +2046,6 @@ void paint_2d_gradient_fill(
   uint color_b;
   float color_f[4];
   float image_init[2], image_final[2];
-  float tangent[2];
-  float line_len_sq_inv, line_len;
   const float brush_alpha = BKE_brush_alpha_get(s->paint, br);
 
   bool do_float;
@@ -2082,11 +2077,13 @@ void paint_2d_gradient_fill(
   image_init[0] *= ibuf->x;
   image_init[1] *= ibuf->y;
 
-  /* some math to get needed gradient variables */
-  sub_v2_v2v2(tangent, image_final, image_init);
-  line_len = len_squared_v2(tangent);
-  line_len_sq_inv = 1.0f / line_len;
-  line_len = sqrtf(line_len);
+  ed::sculpt_paint::gradient::Params gradient_params;
+  paint_fill_gradient_params_from_brush(*br,
+                                        float2(image_init[0], image_init[1]),
+                                        float2(image_final[0], image_final[1]),
+                                        gradient_params);
+  const std::unique_ptr<ed::sculpt_paint::gradient::Calculator> calculator =
+      ed::sculpt_paint::gradient::create(gradient_params);
 
   do_float = (ibuf->float_buffer.data != nullptr);
 
@@ -2096,21 +2093,8 @@ void paint_2d_gradient_fill(
   if (do_float) {
     for (x_px = 0; x_px < ibuf->x; x_px++) {
       for (y_px = 0; y_px < ibuf->y; y_px++) {
-        float f;
-        const float p[2] = {x_px - image_init[0], y_px - image_init[1]};
-
-        switch (br->gradient_fill_mode) {
-          case BRUSH_GRADIENT_LINEAR: {
-            f = dot_v2v2(p, tangent) * line_len_sq_inv;
-            break;
-          }
-          case BRUSH_GRADIENT_RADIAL:
-          default: {
-            f = len_v2(p) / line_len;
-            break;
-          }
-        }
-        BKE_colorband_evaluate(br->gradient, f, color_f);
+        const float f = calculator->evaluate(float3(float(x_px), float(y_px), 0.0f));
+        paint_brush_gradient_color_from_factor(*br, f, color_f);
         /* convert to premultiplied */
         mul_v3_fl(color_f, color_f[3]);
         color_f[3] *= brush_alpha;
@@ -2124,22 +2108,9 @@ void paint_2d_gradient_fill(
   else {
     for (x_px = 0; x_px < ibuf->x; x_px++) {
       for (y_px = 0; y_px < ibuf->y; y_px++) {
-        float f;
-        const float p[2] = {x_px - image_init[0], y_px - image_init[1]};
+        const float f = calculator->evaluate(float3(float(x_px), float(y_px), 0.0f));
 
-        switch (br->gradient_fill_mode) {
-          case BRUSH_GRADIENT_LINEAR: {
-            f = dot_v2v2(p, tangent) * line_len_sq_inv;
-            break;
-          }
-          case BRUSH_GRADIENT_RADIAL:
-          default: {
-            f = len_v2(p) / line_len;
-            break;
-          }
-        }
-
-        BKE_colorband_evaluate(br->gradient, f, color_f);
+        paint_brush_gradient_color_from_factor(*br, f, color_f);
         IMB_colormanagement_scene_linear_to_colorspace_v3(color_f, ibuf->byte_buffer.colorspace);
         rgba_float_to_uchar(reinterpret_cast<uchar *>(&color_b), color_f);
         (reinterpret_cast<uchar *>(&color_b))[3] *= brush_alpha;

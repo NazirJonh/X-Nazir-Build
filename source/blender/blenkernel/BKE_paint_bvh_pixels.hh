@@ -350,9 +350,7 @@ struct PBVHData {
 };
 
 NodeData &node_data_get(bke::pbvh::Node &node);
-void mark_image_dirty(bke::pbvh::Node &node,
-                      Image &image,
-                      Map<image::TileNumber, ImBuf *> &buffers);
+void mark_image_dirty(bke::pbvh::Node &node, Image &image, ImageUser &image_user);
 PBVHData &data_get(bke::pbvh::Tree &pbvh);
 void collect_dirty_tiles(bke::pbvh::Node &node, Vector<image::TileNumber> &r_dirty_tiles);
 

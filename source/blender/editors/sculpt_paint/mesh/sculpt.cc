@@ -5039,6 +5039,12 @@ static void brush_init_tex(const Sculpt &sd, SculptSession &ss)
     ntreeTexBeginExecTree(mask_tex->tex->nodetree);
   }
 
+  /* Init color texture nodes for image painting. */
+  const MTex *color_tex = BKE_brush_color_texture_get(brush, OB_MODE_SCULPT);
+  if (color_tex->tex && color_tex->tex->nodetree) {
+    ntreeTexBeginExecTree(color_tex->tex->nodetree);
+  }
+
   if (ss.tex_pool == nullptr) {
     ss.tex_pool = BKE_image_pool_new();
   }
@@ -5918,7 +5924,9 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   }
   else if (brush_type_is_paint(brush.sculpt_brush_type)) {
     if (SCULPT_use_image_paint_brush(*this->paint_mode_settings_, ob)) {
-      flush_update_step(this->vc, *this->object, UpdateType::Image);
+      if (ss.cache->paint_brush.should_flush_image_post_step) {
+        flush_update_step(this->vc, *this->object, UpdateType::Image);
+      }
     }
     else {
       flush_update_step(this->vc, *this->object, UpdateType::Color);
@@ -5944,6 +5952,10 @@ void SculptPaintStroke::done(bool is_cancel)
   Object &ob = *this->object;
   SculptSession &ss = *ob.runtime->sculpt_session;
   Sculpt &sd = *this->sculpt_;
+
+  if (ss.cache != nullptr) {
+    color::image_paint_brush_session_ensure_ended(*ss.cache, is_cancel);
+  }
 
   /* Finished. */
   if (!ss.cache) {
@@ -6112,12 +6124,17 @@ static void sculpt_brush_stroke_cancel(bContext *C, wmOperator *op)
   const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
   Object &ob = *CTX_data_active_object(C);
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
+  SculptSession &ss = *ob.runtime->sculpt_session;
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
 
   SculptPaintStroke *stroke = static_cast<SculptPaintStroke *>(op->customdata);
 
   BLI_assert(!dyntopo::stroke_is_dyntopo(ob, brush));
   UNUSED_VARS_NDEBUG(brush);
+
+  if (ss.cache != nullptr) {
+    color::image_paint_brush_session_ensure_ended(*ss.cache, true);
+  }
 
   undo::restore_from_undo_step(depsgraph, sd, ob);
   stroke->cancel(C, op);

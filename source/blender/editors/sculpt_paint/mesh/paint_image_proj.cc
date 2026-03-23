@@ -12,6 +12,7 @@
 #include <climits>
 #include <cmath>
 #include <cstring>
+#include <memory>
 
 #include "MEM_guardedalloc.h"
 
@@ -59,7 +60,6 @@
 #include "BKE_attribute_legacy_convert.hh"
 #include "BKE_brush.hh"
 #include "BKE_camera.h"
-#include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_customdata.hh"
@@ -117,6 +117,7 @@
 
 // #include "bmesh_tools.hh"
 
+#include "../paint_gradient_core.hh"
 #include "../paint_intern.hh"
 
 namespace blender {
@@ -5373,6 +5374,17 @@ static void do_projectpaint_thread(TaskPool *__restrict /*pool*/, void *ph_v)
     softenArena = BLI_memarena_new(MEM_SIZE_OPTIMAL(1 << 16), "paint soften arena");
   }
 
+  const std::unique_ptr<ed::sculpt_paint::gradient::Calculator> fill_gradient_calculator = [&]() {
+    if (!(ps->source == PROJ_SRC_VIEW_FILL && (brush->flag & BRUSH_USE_GRADIENT))) {
+      return std::unique_ptr<ed::sculpt_paint::gradient::Calculator>(nullptr);
+    }
+
+    ed::sculpt_paint::gradient::Params params;
+    paint_fill_gradient_params_from_brush(
+        *brush, float2(lastpos[0], lastpos[1]), float2(pos[0], pos[1]), params);
+    return ed::sculpt_paint::gradient::create(params);
+  }();
+
   // printf("brush bounds %d %d %d %d\n",
   //        bucketMin[0], bucketMin[1], bucketMax[0], bucketMax[1]);
 
@@ -5409,33 +5421,11 @@ static void do_projectpaint_thread(TaskPool *__restrict /*pool*/, void *ph_v)
         /* fill brushes */
         if (ps->source == PROJ_SRC_VIEW_FILL) {
           if (brush->flag & BRUSH_USE_GRADIENT) {
-            /* these could probably be cached instead of being done per pixel */
-            float tangent[2];
-            float line_len_sq_inv, line_len;
-            float f;
             float color_f[4];
-            const float p[2] = {
-                projPixel->projCoSS[0] - lastpos[0],
-                projPixel->projCoSS[1] - lastpos[1],
-            };
-
-            sub_v2_v2v2(tangent, pos, lastpos);
-            line_len = len_squared_v2(tangent);
-            line_len_sq_inv = 1.0f / line_len;
-            line_len = sqrtf(line_len);
-
-            switch (brush->gradient_fill_mode) {
-              case BRUSH_GRADIENT_LINEAR: {
-                f = dot_v2v2(p, tangent) * line_len_sq_inv;
-                break;
-              }
-              case BRUSH_GRADIENT_RADIAL:
-              default: {
-                f = len_v2(p) / line_len;
-                break;
-              }
-            }
-            BKE_colorband_evaluate(brush->gradient, f, color_f);
+            BLI_assert(fill_gradient_calculator);
+            const float f = fill_gradient_calculator->evaluate(
+                float3(projPixel->projCoSS[0], projPixel->projCoSS[1], 0.0f));
+            paint_brush_gradient_color_from_factor(*brush, f, color_f);
             color_f[3] *= float(projPixel->mask) * (1.0f / 65535.0f) * brush_alpha;
 
             if (is_floatbuf) {

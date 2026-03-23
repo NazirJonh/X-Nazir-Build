@@ -18,6 +18,7 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
+#include "BLI_span.hh"
 
 #include "BKE_camera.h"
 #include "BKE_screen.hh"
@@ -271,6 +272,74 @@ eV3DProjStatus ED_view3d_project_float_object(const ARegion *region,
   RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
   ED_view3d_check_mats_rv3d(rv3d);
   return ED_view3d_project_float_ex(region, rv3d->persmatob, true, co, r_co, flag);
+}
+
+/**
+ * Batch version of ED_view3d_project_float_object for arrays.
+ * Projects multiple points in a single call for better performance.
+ * Uses object space projection (persmatob) which requires ED_view3d_init_mats_rv3d to be called
+ * first.
+ */
+void ED_view3d_project_float_object_array(const ARegion *region,
+                                          const Span<float3> positions,
+                                          MutableSpan<float2> r_screen_coords,
+                                          const eV3DProjTest flag)
+{
+  RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
+  ED_view3d_check_mats_rv3d(rv3d);
+  const float (*perspmat)[4] = rv3d->persmatob;
+
+  const int num_positions = positions.size();
+  BLI_assert(num_positions == r_screen_coords.size());
+
+  for (int i = 0; i < num_positions; i++) {
+    float vec4[4];
+    vec4[0] = positions[i].x;
+    vec4[1] = positions[i].y;
+    vec4[2] = positions[i].z;
+    vec4[3] = 1.0f;
+    mul_m4_v4(perspmat, vec4);
+    const float w = fabsf(vec4[3]);
+
+    if ((flag & V3D_PROJ_TEST_CLIP_ZERO) && (w <= float(BL_ZERO_CLIP))) {
+      r_screen_coords[i].x = 0.0f;
+      r_screen_coords[i].y = 0.0f;
+      continue;
+    }
+
+    if ((flag & V3D_PROJ_TEST_CLIP_NEAR) && (vec4[2] <= -w)) {
+      r_screen_coords[i].x = 0.0f;
+      r_screen_coords[i].y = 0.0f;
+      continue;
+    }
+
+    if ((flag & V3D_PROJ_TEST_CLIP_FAR) && (vec4[2] >= w)) {
+      r_screen_coords[i].x = 0.0f;
+      r_screen_coords[i].y = 0.0f;
+      continue;
+    }
+
+    const float scalar = (w != 0.0f) ? (1.0f / w) : 0.0f;
+    const float fx = (float(region->winx) / 2.0f) * (1.0f + (vec4[0] * scalar));
+    const float fy = (float(region->winy) / 2.0f) * (1.0f + (vec4[1] * scalar));
+
+    if ((flag & V3D_PROJ_TEST_CLIP_WIN) &&
+        (fx <= 0.0f || fy <= 0.0f || fx >= float(region->winx) || fy >= float(region->winy)))
+    {
+      r_screen_coords[i].x = 0.0f;
+      r_screen_coords[i].y = 0.0f;
+      continue;
+    }
+
+    if (isfinite(fx) && isfinite(fy)) {
+      r_screen_coords[i].x = fx;
+      r_screen_coords[i].y = fy;
+    }
+    else {
+      r_screen_coords[i].x = 0.0f;
+      r_screen_coords[i].y = 0.0f;
+    }
+  }
 }
 
 /* More Generic Window/Ray/Vector projection functions

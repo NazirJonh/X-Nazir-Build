@@ -550,6 +550,17 @@ eV3DProjStatus ED_view3d_project_float_object(const ARegion *region,
                                               float r_co[2],
                                               eV3DProjTest flag);
 
+/**
+ * Batch version of ED_view3d_project_float_object for arrays.
+ * Projects multiple points in a single call for better performance.
+ * Uses object space projection (persmatob) which requires ED_view3d_init_mats_rv3d to be called
+ * first.
+ */
+void ED_view3d_project_float_object_array(const ARegion *region,
+                                          const blender::Span<blender::float3> positions,
+                                          blender::MutableSpan<blender::float2> r_screen_coords,
+                                          eV3DProjTest flag);
+
 float ED_view3d_pixel_size(const RegionView3D *rv3d, const float co[3]);
 float ED_view3d_pixel_size_no_ui_scale(const RegionView3D *rv3d, const float co[3]);
 

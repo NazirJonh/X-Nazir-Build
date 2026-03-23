@@ -12,6 +12,7 @@
 #include "BLI_color.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_hash.h"
+#include "BLI_map.hh"
 #include "BLI_math_color_blend.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
@@ -19,15 +20,18 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
-#include "BKE_colorband.hh"
-#include "BKE_colortools.hh"
 #include "BKE_customdata.hh"
+#include "BKE_image.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 
 #include "IMB_colormanagement.hh"
+
+#include "../paint_image_session_state.hh"
+#include "../paint_intern.hh"
+#include "../paint_stroke_session.hh"
 
 #include "mesh_brush_common.hh"
 #include "sculpt_automask.hh"
@@ -40,6 +44,211 @@
 #include <cmath>
 
 namespace blender::ed::sculpt_paint::color {
+
+struct PaintImageBrushSessionStaticContext {
+  const Depsgraph *depsgraph = nullptr;
+  PaintModeSettings *paint_mode_settings = nullptr;
+  const Sculpt *sculpt = nullptr;
+  Object *ob = nullptr;
+};
+
+struct PaintImageBrushSessionStepState {
+  const IndexMask *node_mask = nullptr;
+  int64_t tick_version = 1;
+};
+
+struct PaintImageBrushSessionStepResult {
+  bool executed = false;
+  bool had_updates = false;
+};
+
+static std::unique_ptr<stroke::session::Backend> make_image_paint_brush_backend();
+
+class ImagePaintBrushStrokeSession {
+ public:
+  PaintImageBrushSessionStepResult step(const PaintImageBrushSessionStaticContext &static_context,
+                                        const PaintImageBrushSessionStepState &step_state)
+  {
+    PaintImageBrushSessionStepResult step_result;
+    if (!this->ensure_started(static_context)) {
+      this->end(true);
+      return step_result;
+    }
+
+    stroke::session::DynamicState dynamic_state;
+    dynamic_state.step_data = step_state.node_mask;
+    dynamic_state.tick_version = step_state.tick_version > 0 ? step_state.tick_version : 1;
+    if (!handle_->tick(dynamic_state)) {
+      this->end(true);
+      return step_result;
+    }
+
+    step_result.executed = true;
+    step_result.had_updates = handle_->last_step_had_updates();
+    return step_result;
+  }
+
+  void end(const bool cancel_session)
+  {
+    if (handle_ == nullptr) {
+      return;
+    }
+
+    if (handle_->is_active()) {
+      if (cancel_session) {
+        handle_->cancel();
+      }
+      else {
+        handle_->commit();
+      }
+    }
+    handle_.reset();
+  }
+
+ private:
+  bool ensure_started(const PaintImageBrushSessionStaticContext &static_context)
+  {
+    if (handle_ != nullptr) {
+      return true;
+    }
+
+    static_context_ = static_context;
+
+    stroke::session::StaticContext stroke_static_context;
+    stroke_static_context.user_data = &static_context_;
+    handle_ = std::make_unique<stroke::session::Handle>(make_image_paint_brush_backend(),
+                                                        stroke_static_context);
+    return handle_ != nullptr;
+  }
+
+  PaintImageBrushSessionStaticContext static_context_;
+  std::unique_ptr<stroke::session::Handle> handle_;
+};
+
+static Map<StrokeCache *, std::unique_ptr<ImagePaintBrushStrokeSession>>
+    g_image_paint_brush_stroke_sessions;
+
+static ImagePaintBrushStrokeSession *image_paint_brush_session_lookup(StrokeCache &cache)
+{
+  std::unique_ptr<ImagePaintBrushStrokeSession> *session =
+      g_image_paint_brush_stroke_sessions.lookup_ptr(&cache);
+  return session != nullptr ? session->get() : nullptr;
+}
+
+static ImagePaintBrushStrokeSession *image_paint_brush_session_ensure(StrokeCache &cache)
+{
+  if (ImagePaintBrushStrokeSession *session = image_paint_brush_session_lookup(cache)) {
+    return session;
+  }
+
+  g_image_paint_brush_stroke_sessions.add(&cache,
+                                          std::make_unique<ImagePaintBrushStrokeSession>());
+  return image_paint_brush_session_lookup(cache);
+}
+
+static void image_paint_brush_session_remove(StrokeCache &cache, const bool cancel_session)
+{
+  std::unique_ptr<ImagePaintBrushStrokeSession> *session =
+      g_image_paint_brush_stroke_sessions.lookup_ptr(&cache);
+  if (session == nullptr) {
+    return;
+  }
+
+  (*session)->end(cancel_session);
+  g_image_paint_brush_stroke_sessions.remove(&cache);
+}
+
+static void update_simple_image_brush_step_policy(StrokeCache &cache, const bool had_updates)
+{
+  cache.paint_brush.last_image_step_had_updates = had_updates;
+  const int64_t tick_version = std::max<int64_t>(cache.iteration_count, 1);
+  const int brush_size_px = cache.brush != nullptr ? cache.brush->size : 0;
+  cache.paint_brush.should_flush_image_post_step =
+      image::session::should_schedule_simple_image_brush_post_step(
+          cache.paint_brush.last_image_step_had_updates,
+          tick_version,
+          cache.paint_brush.image_brush_canvas_longest_side,
+          brush_size_px);
+}
+
+class PaintImageBrushBackend : public stroke::session::Backend {
+ public:
+  bool begin_session(const stroke::session::StaticContext &static_context,
+                     const stroke::session::DynamicState & /*dynamic_state*/) override
+  {
+    context_ = static_cast<const PaintImageBrushSessionStaticContext *>(static_context.user_data);
+    return context_ != nullptr && context_->depsgraph != nullptr &&
+           context_->paint_mode_settings != nullptr && context_->sculpt != nullptr &&
+           context_->ob != nullptr;
+  }
+
+  void restore_baseline(const stroke::session::DynamicState & /*dynamic_state*/) override {}
+
+  void apply_step(const stroke::session::DynamicState &dynamic_state) override
+  {
+    last_step_had_updates_ = false;
+
+    const IndexMask *node_mask = static_cast<const IndexMask *>(dynamic_state.step_data);
+    if (context_ == nullptr || node_mask == nullptr) {
+      return;
+    }
+    if (node_mask->is_empty()) {
+      return;
+    }
+
+    last_step_had_updates_ = SCULPT_do_paint_brush_image(*context_->depsgraph,
+                                                         *context_->paint_mode_settings,
+                                                         *context_->sculpt,
+                                                         *context_->ob,
+                                                         *node_mask);
+  }
+
+  bool last_step_had_updates() const override
+  {
+    return last_step_had_updates_;
+  }
+
+  void commit() override {}
+  void cancel() override {}
+  void end_session() override
+  {
+    context_ = nullptr;
+  }
+
+ private:
+  const PaintImageBrushSessionStaticContext *context_ = nullptr;
+  bool last_step_had_updates_ = false;
+};
+
+static std::unique_ptr<stroke::session::Backend> make_image_paint_brush_backend()
+{
+  return std::make_unique<PaintImageBrushBackend>();
+}
+
+static PaintImageBrushSessionStepResult try_paint_image_brush_session_step(
+    StrokeCache &cache,
+    const PaintImageBrushSessionStaticContext &static_context,
+    const PaintImageBrushSessionStepState &step_state)
+{
+  PaintImageBrushSessionStepResult step_result;
+
+  if (!image::session::should_use_unified_simple_image_brush_backend()) {
+    image_paint_brush_session_remove(cache, true);
+    return step_result;
+  }
+
+  ImagePaintBrushStrokeSession *session = image_paint_brush_session_ensure(cache);
+  if (session == nullptr) {
+    return step_result;
+  }
+
+  return session->step(static_context, step_state);
+}
+
+void image_paint_brush_session_ensure_ended(StrokeCache &cache, const bool cancel_session)
+{
+  image_paint_brush_session_remove(cache, cancel_session);
+}
 
 static void calc_local_positions(const float4x4 &mat,
                                  const Span<int> verts,
@@ -424,42 +633,19 @@ static void do_paint_brush_task(const Depsgraph &depsgraph,
     }
   }
 
-  float3 brush_color_rgb = ss.cache->invert ? BKE_brush_secondary_color_get(&paint, &brush) :
-                                              BKE_brush_color_get(&paint, &brush);
-
-  const std::optional<BrushColorJitterSettings> color_jitter_settings =
-      BKE_brush_color_jitter_get_settings(&paint, &brush);
-  if (color_jitter_settings) {
-    brush_color_rgb = BKE_paint_randomize_color(*color_jitter_settings,
-                                                *ss.cache->initial_hsv_jitter,
-                                                ss.cache->stroke_distance,
-                                                ss.cache->pressure,
-                                                brush_color_rgb);
-  }
-
-  float4 brush_color(brush_color_rgb, 1.0f);
+  float brush_color_rgb[3];
+  paint_brush_color_get(&paint,
+                        &brush,
+                        ss.cache->initial_hsv_jitter,
+                        ss.cache->invert,
+                        ss.cache->stroke_distance,
+                        ss.cache->pressure,
+                        brush_color_rgb);
+  float4 brush_color(brush_color_rgb[0], brush_color_rgb[1], brush_color_rgb[2], 1.0f);
 
   const Span<float4> orig_colors = orig_color_data_get_mesh(object, node);
 
   MutableSpan<float4> color_buffer = gather_data_mesh(mix_colors.as_span(), verts, tls.mix_colors);
-
-  if (brush.flag & BRUSH_USE_GRADIENT) {
-    switch (brush.gradient_stroke_mode) {
-      case BRUSH_GRADIENT_PRESSURE:
-        BKE_colorband_evaluate(brush.gradient, ss.cache->pressure, brush_color);
-        break;
-      case BRUSH_GRADIENT_SPACING_REPEAT: {
-        float coord = fmod(ss.cache->stroke_distance / brush.gradient_spacing, 1.0);
-        BKE_colorband_evaluate(brush.gradient, coord, brush_color);
-        break;
-      }
-      case BRUSH_GRADIENT_SPACING_CLAMP: {
-        BKE_colorband_evaluate(
-            brush.gradient, ss.cache->stroke_distance / brush.gradient_spacing, brush_color);
-        break;
-      }
-    }
-  }
 
   tls.new_colors.resize(verts.size());
   MutableSpan<float4> new_colors = tls.new_colors;
@@ -562,13 +748,33 @@ void do_paint_brush(const Depsgraph &depsgraph,
                     const IndexMask &node_mask,
                     const IndexMask &texnode_mask)
 {
+  SculptSession &ss = *ob.runtime->sculpt_session;
+
   if (SCULPT_use_image_paint_brush(paint_mode_settings, ob)) {
-    SCULPT_do_paint_brush_image(depsgraph, sd, ob, texnode_mask);
+    PaintImageBrushSessionStaticContext static_context;
+    static_context.depsgraph = &depsgraph;
+    static_context.paint_mode_settings = &paint_mode_settings;
+    static_context.sculpt = &sd;
+    static_context.ob = &ob;
+
+    PaintImageBrushSessionStepState step_state;
+    step_state.node_mask = &texnode_mask;
+    step_state.tick_version = ss.cache != nullptr ? int64_t(ss.cache->iteration_count) : 1;
+
+    const PaintImageBrushSessionStepResult session_step_result =
+        try_paint_image_brush_session_step(*ss.cache, static_context, step_state);
+    if (session_step_result.executed) {
+      update_simple_image_brush_step_policy(*ss.cache, session_step_result.had_updates);
+      return;
+    }
+
+    update_simple_image_brush_step_policy(
+        *ss.cache,
+        SCULPT_do_paint_brush_image(depsgraph, paint_mode_settings, sd, ob, texnode_mask));
     return;
   }
 
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
-  SculptSession &ss = *ob.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
 

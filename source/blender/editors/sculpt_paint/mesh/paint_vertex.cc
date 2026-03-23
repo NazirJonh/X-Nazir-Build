@@ -13,6 +13,8 @@
 
 #include "MEM_guardedalloc.h"
 
+#include <memory>
+
 #include "CLG_log.h"
 
 #include "BLI_color.hh"
@@ -1706,23 +1708,18 @@ static float paint_and_tex_color_alpha(const VPaint &vp,
   return rgba[3];
 }
 
-/* Compute brush color, using jitter if it's enabled */
-static float3 get_brush_color(const Paint *paint,
-                              const Brush *brush,
-                              const StrokeCache &cache,
-                              const ColorPaint4f &paint_color)
+/* Compute brush color using the shared paint helper (invert/gradient/jitter). */
+static float3 get_brush_color(const Paint *paint, const Brush *brush, const StrokeCache &cache)
 {
-  float3 brush_color = float3(paint_color.r, paint_color.g, paint_color.b);
-  const std::optional<BrushColorJitterSettings> color_jitter_settings =
-      BKE_brush_color_jitter_get_settings(paint, brush);
-  if (color_jitter_settings) {
-    brush_color = BKE_paint_randomize_color(*color_jitter_settings,
-                                            *cache.initial_hsv_jitter,
-                                            cache.stroke_distance,
-                                            cache.pressure,
-                                            brush_color);
-  }
-  return brush_color;
+  float brush_color[3];
+  paint_brush_color_get(paint,
+                        brush,
+                        cache.initial_hsv_jitter,
+                        cache.invert,
+                        cache.stroke_distance,
+                        cache.pressure,
+                        brush_color);
+  return float3(brush_color[0], brush_color[1], brush_color[2]);
 }
 
 static void vpaint_do_draw(const Depsgraph &depsgraph,
@@ -1768,7 +1765,7 @@ static void vpaint_do_draw(const Depsgraph &depsgraph,
     select_poly = *attributes.lookup<bool>(".select_poly", bke::AttrDomain::Face);
   }
 
-  const float3 brush_color = get_brush_color(&vp.paint, &brush, cache, vpd.paintcol);
+  const float3 brush_color = get_brush_color(&vp.paint, &brush, cache);
 
   struct LocalData {
     Vector<float> factors;

@@ -8,6 +8,9 @@
 
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_types.h"
+
+#include <memory>
 
 #include "BLI_array.hh"
 #include "BLI_color.hh"
@@ -20,9 +23,12 @@
 #include "BLT_translation.hh"
 
 #include "BKE_attribute_math.hh"
+#include "BKE_brush.hh"
+#include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_geometry_set.hh"
 #include "BKE_mesh.hh"
+#include "BKE_paint.hh"
 
 #include "DEG_depsgraph.hh"
 
@@ -33,7 +39,9 @@
 #include "WM_types.hh"
 
 #include "ED_mesh.hh"
+#include "ED_view3d.hh"
 
+#include "../paint_gradient_core.hh"
 #include "../paint_intern.hh" /* own include */
 #include "sculpt_intern.hh"
 
@@ -511,6 +519,169 @@ void PAINT_OT_vertex_color_levels(wmOperatorType *ot)
   RNA_def_float(
       ot->srna, "gain", 1.0f, 0.0f, FLT_MAX, "Gain", "Value to multiply colors by", 0.0f, 10.0f);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Vertex Color Gradient Operator
+ * \{ */
+
+static wmOperatorStatus vertex_color_gradient_exec(bContext *C, wmOperator *op)
+{
+  Object *obact = CTX_data_active_object(C);
+  ARegion *region = CTX_wm_region(C);
+  if (region == nullptr || region->regiondata == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Mesh *mesh;
+  if (((mesh = BKE_mesh_from_object(obact)) == nullptr) ||
+      (ED_mesh_color_ensure(mesh, nullptr) == false))
+  {
+    return OPERATOR_CANCELLED;
+  }
+
+  ToolSettings *ts = CTX_data_tool_settings(C);
+  Brush *brush = BKE_paint_brush(&ts->vpaint->paint);
+  if (brush == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  BKE_curvemapping_init(brush->curve_distance_falloff);
+
+  const int x_start = RNA_int_get(op->ptr, "xstart");
+  const int y_start = RNA_int_get(op->ptr, "ystart");
+  const int x_end = RNA_int_get(op->ptr, "xend");
+  const int y_end = RNA_int_get(op->ptr, "yend");
+
+  ed::sculpt_paint::gradient::Params gradient_params;
+  gradient_params.type = (RNA_enum_get(op->ptr, "type") == WPAINT_GRADIENT_TYPE_LINEAR) ?
+                             ed::sculpt_paint::gradient::Type::Linear :
+                             ed::sculpt_paint::gradient::Type::Radial;
+  /* This operator currently evaluates projected screen-space points.
+   * Keep unsupported spaces as screen fallback for now. */
+  gradient_params.space = ed::sculpt_paint::gradient::Space::Screen;
+  gradient_params.start_ss = float2(float(x_start), float(y_start));
+  gradient_params.end_ss = float2(float(x_end), float(y_end));
+  gradient_params.hardness = RNA_float_get(op->ptr, "hardness");
+  gradient_params.clamp_to_range = RNA_boolean_get(op->ptr, "clamp_to_range");
+  gradient_params.curve = nullptr;
+  gradient_params.clip_before_start = RNA_boolean_get(op->ptr, "clip_before_start");
+  const std::unique_ptr<ed::sculpt_paint::gradient::Calculator> calculator =
+      ed::sculpt_paint::gradient::create(gradient_params);
+
+  const StringRef name = mesh->active_color_attribute;
+  bke::MutableAttributeAccessor attributes = mesh->attributes_for_write();
+  const VArraySpan<bool> hide_vert = *attributes.lookup_or_default<bool>(
+      ".hide_vert", bke::AttrDomain::Point, false);
+  const VArraySpan<bool> hide_poly = *attributes.lookup_or_default<bool>(
+      ".hide_poly", bke::AttrDomain::Face, false);
+  if (!attributes.contains(name)) {
+    BLI_assert_unreachable();
+    return OPERATOR_CANCELLED;
+  }
+
+  bke::GAttributeWriter color_attribute = attributes.lookup_for_write(name);
+  if (!color_attribute) {
+    BLI_assert_unreachable();
+    return OPERATOR_CANCELLED;
+  }
+
+  IndexMaskMemory memory;
+  const IndexMask selection = get_selected_indices(*mesh, color_attribute.domain, memory);
+
+  const Span<float3> positions = mesh->vert_positions();
+  const Span<int> corner_verts = mesh->corner_verts();
+  const Span<int> corner_to_face = mesh->corner_to_face_map();
+
+  ED_view3d_init_mats_rv3d(obact, static_cast<RegionView3D *>(region->regiondata));
+
+  const float3 brush_color = BKE_brush_color_get(&ts->vpaint->paint, brush);
+  const float brush_alpha = brush->alpha;
+  const bool clamp_to_range = gradient_params.clamp_to_range;
+  const int symmetry = int(SCULPT_mesh_symmetry_xyz_get(*obact));
+
+  selection.foreach_segment(
+      [&](const IndexMaskSegment segment) {
+        color_attribute.varray.type().to_static_type<ColorGeometry4f, ColorGeometry4b>(
+            [&]<typename T>() {
+              const auto evaluate_factor = [&](const float3 &position) {
+                float factor = paint_projected_gradient_factor_with_symmetry(
+                    region, *calculator, position, symmetry, mesh->radial_symmetry);
+                return paint_gradient_finalize_factor(*brush, factor, clamp_to_range, brush_alpha);
+              };
+
+              for (const int i : segment) {
+                const int vert = (color_attribute.domain == bke::AttrDomain::Point) ?
+                                     i :
+                                     corner_verts[i];
+
+                if (hide_vert[vert]) {
+                  continue;
+                }
+                if (color_attribute.domain == bke::AttrDomain::Corner &&
+                    hide_poly[corner_to_face[i]]) {
+                  continue;
+                }
+
+                const float factor = evaluate_factor(positions[vert]);
+
+                if (factor == 0.0f) {
+                  continue;
+                }
+
+                if constexpr (std::is_same_v<T, ColorGeometry4f>) {
+                  ColorGeometry4f color = color_attribute.varray.get<ColorGeometry4f>(i);
+                  for (const int channel : IndexRange(3)) {
+                    color[channel] = interpf(brush_color[channel], color[channel], factor);
+                  }
+                  color_attribute.varray.set_by_copy(i, &color);
+                }
+                else if constexpr (std::is_same_v<T, ColorGeometry4b>) {
+                  ColorGeometry4f color = color::decode(
+                      color_attribute.varray.get<ColorGeometry4b>(i));
+                  for (const int channel : IndexRange(3)) {
+                    color[channel] = interpf(brush_color[channel], color[channel], factor);
+                  }
+                  const ColorGeometry4b encoded = color::encode(color);
+                  color_attribute.varray.set_by_copy(i, &encoded);
+                }
+              }
+            });
+      },
+      exec_mode::grain_size(1024));
+
+  color_attribute.finish();
+  tag_object_after_update(*obact);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, obact);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus vertex_color_gradient_invoke(bContext *C,
+                                                     wmOperator *op,
+                                                     const wmEvent *event)
+{
+  return WM_gesture_straightline_invoke(C, op, event);
+}
+
+void PAINT_OT_vertex_color_gradient(wmOperatorType *ot)
+{
+  ot->name = "Vertex Color Gradient";
+  ot->idname = "PAINT_OT_vertex_color_gradient";
+  ot->description = "Apply a screen-space gradient to selected vertex colors";
+
+  ot->invoke = vertex_color_gradient_invoke;
+  ot->modal = WM_gesture_straightline_modal;
+  ot->exec = vertex_color_gradient_exec;
+  ot->poll = vertex_paint_poll_ignore_tool;
+  ot->cancel = WM_gesture_straightline_cancel;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
+
+  paint_gradient_operator_properties(ot, WPAINT_GRADIENT_TYPE_LINEAR, PAINT_GRADIENT_SPACE_SCREEN);
+
+  WM_operator_properties_gesture_straightline(ot, WM_CURSOR_EDIT);
+}
+
+/** \} */
 
 /** \} */
 

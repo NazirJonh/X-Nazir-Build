@@ -8,7 +8,6 @@
  */
 
 #include <cfloat>
-#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -32,7 +31,6 @@
 #include "DNA_scene_types.h"
 
 #include "BKE_brush.hh"
-#include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
 #include "BKE_grease_pencil.hh"
@@ -362,54 +360,6 @@ bool paint_use_opacity_masking(const Paint *paint, const Brush *brush)
                                             MTEX_MAP_MODE_3D)) ?
               false :
               true);
-}
-
-void paint_brush_color_get(const Paint *paint,
-                           Brush *br,
-                           std::optional<float3> &initial_hsv_jitter,
-                           bool invert,
-                           float distance,
-                           float pressure,
-                           float r_color[3])
-{
-  if (invert) {
-    copy_v3_v3(r_color, BKE_brush_secondary_color_get(paint, br));
-  }
-  else {
-    const std::optional<BrushColorJitterSettings> color_jitter_settings =
-        BKE_brush_color_jitter_get_settings(paint, br);
-    if (br->flag & BRUSH_USE_GRADIENT) {
-      float color_gr[4];
-      switch (br->gradient_stroke_mode) {
-        case BRUSH_GRADIENT_PRESSURE:
-          BKE_colorband_evaluate(br->gradient, pressure, color_gr);
-          break;
-        case BRUSH_GRADIENT_SPACING_REPEAT: {
-          float coord = fmod(distance / br->gradient_spacing, 1.0);
-          BKE_colorband_evaluate(br->gradient, coord, color_gr);
-          break;
-        }
-        case BRUSH_GRADIENT_SPACING_CLAMP: {
-          BKE_colorband_evaluate(br->gradient, distance / br->gradient_spacing, color_gr);
-          break;
-        }
-      }
-      copy_v3_v3(r_color, color_gr);
-    }
-    else if (color_jitter_settings) {
-      /* Perform color jitter with sRGB transfer function. This is inconsistent with other
-       * paint modes which do it in linear space. But arguably it's better to do it in the
-       * more perceptually uniform color space. */
-      float3 color = BKE_brush_color_get(paint, br);
-      linearrgb_to_srgb_v3_v3(color, color);
-      color = BKE_paint_randomize_color(
-          *color_jitter_settings, *initial_hsv_jitter, distance, pressure, color);
-      srgb_to_linearrgb_v3_v3(r_color, color);
-    }
-    else {
-      copy_v3_v3(r_color, BKE_brush_color_get(paint, br));
-    }
-  }
 }
 
 void paint_brush_init_tex(Brush *brush)

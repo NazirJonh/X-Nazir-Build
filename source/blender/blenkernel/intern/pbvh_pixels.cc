@@ -4,6 +4,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_customdata.hh"
+#include "BKE_image.hh"
 #include "BKE_mesh.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
@@ -472,21 +473,31 @@ static std::optional<image::ImageTileWrapper> find_image_tile(Image &image,
   return std::nullopt;
 }
 
-void mark_image_dirty(bke::pbvh::Node &node,
-                      Image &image,
-                      Map<image::TileNumber, ImBuf *> &buffers)
+void mark_image_dirty(bke::pbvh::Node &node, Image &image, ImageUser &image_user)
 {
   BLI_assert(node.pixels_ != nullptr);
   NodeData *node_data = node.pixels_;
   if (node_data->flags.dirty) {
-    for (UDIMTilePixels &tile : node_data->tiles) {
-      std::optional<image::ImageTileWrapper> image_tile = find_image_tile(image, tile.tile_number);
-      ImBuf *image_buffer = buffers.lookup_default(tile.tile_number, nullptr);
-      if (image_buffer == nullptr || !image_tile) {
+    ImageUser local_image_user = image_user;
+    for (UDIMTilePixels &tile_data : node_data->tiles) {
+      if (!tile_data.flags.dirty) {
         continue;
       }
 
-      node_data->mark_region(tile, image, *image_tile, *image_buffer);
+      ImageTile *image_tile_ptr = BKE_image_get_tile(&image, tile_data.tile_number);
+      if (image_tile_ptr == nullptr) {
+        continue;
+      }
+
+      image::ImageTileWrapper image_tile(image_tile_ptr);
+      local_image_user.tile = tile_data.tile_number;
+      ImBuf *image_buffer = BKE_image_acquire_ibuf(&image, &local_image_user, nullptr);
+      if (image_buffer == nullptr) {
+        continue;
+      }
+
+      node_data->mark_region(tile_data, image, image_tile, *image_buffer);
+      BKE_image_release_ibuf(&image, image_buffer, nullptr);
     }
     node_data->flags.dirty = false;
   }

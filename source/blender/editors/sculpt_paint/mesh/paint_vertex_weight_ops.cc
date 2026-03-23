@@ -8,6 +8,8 @@
 
 #include "MEM_guardedalloc.h"
 
+#include <memory>
+
 #include "BLI_bitmap.h"
 #include "BLI_enum_flags.hh"
 #include "BLI_listbase.h"
@@ -51,7 +53,9 @@
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 
+#include "../paint_gradient_core.hh"
 #include "../paint_intern.hh" /* own include */
+#include "sculpt_intern.hh"
 
 namespace blender {
 
@@ -541,6 +545,7 @@ struct WPGradient_vertStore {
     VGRAD_STORE_IS_MODIFIED = (1 << 1)
   };
   float sco[2];
+  float co[3];
   float weight_orig;
   Flag flag;
 };
@@ -561,7 +566,7 @@ struct WPGradient_userData {
   Brush *brush;
   const float *sco_start; /* [2] */
   const float *sco_end;   /* [2] */
-  float sco_line_div;     /* store (1.0f / len_v2v2(sco_start, sco_end)) */
+  std::unique_ptr<ed::sculpt_paint::gradient::Calculator> calculator;
   int def_nr;
   bool is_init;
   WPGradient_vertStoreBase *vert_cache;
@@ -572,12 +577,15 @@ struct WPGradient_userData {
   bool use_select;
   bool use_vgroup_restrict;
   short type;
+  bool clamp_to_range;
+  int symmetry;
   float weightpaint;
 };
 
 static void gradientVert_update(WPGradient_userData *grad_data, int index)
 {
   WPGradient_vertStore *vs = &grad_data->vert_cache->elem[index];
+  BLI_assert(grad_data->calculator);
 
   /* Optionally restrict to assigned vertices only. */
   if (grad_data->use_vgroup_restrict &&
@@ -588,22 +596,20 @@ static void gradientVert_update(WPGradient_userData *grad_data, int index)
     return;
   }
 
-  float alpha;
-  if (grad_data->type == WPAINT_GRADIENT_TYPE_LINEAR) {
-    alpha = line_point_factor_v2(vs->sco, grad_data->sco_start, grad_data->sco_end);
-  }
-  else {
-    BLI_assert(grad_data->type == WPAINT_GRADIENT_TYPE_RADIAL);
-    alpha = len_v2v2(grad_data->sco_start, vs->sco) * grad_data->sco_line_div;
-  }
+  const float3 position = float3(vs->co[0], vs->co[1], vs->co[2]);
+  float alpha = paint_projected_gradient_factor_with_symmetry(grad_data->region,
+                                                              *grad_data->calculator,
+                                                              position,
+                                                              grad_data->symmetry,
+                                                              grad_data->mesh->radial_symmetry);
 
   /* adjust weight */
-  alpha = BKE_brush_curve_strength_clamped(grad_data->brush, std::max(0.0f, alpha), 1.0f);
+  alpha = paint_gradient_finalize_factor(
+      *grad_data->brush, alpha, grad_data->clamp_to_range, 1.0f);
 
   if (alpha != 0.0f) {
     MDeformVert *dv = &grad_data->dvert[index];
     MDeformWeight *dw = BKE_defvert_ensure_index(dv, grad_data->def_nr);
-    // dw->weight = alpha; // testing
     int tool = grad_data->brush->blend;
     float testw;
 
@@ -672,6 +678,7 @@ static void gradientVertInit__mapFunc(void *user_data,
     return;
   }
 
+  copy_v3_v3(vs->co, co);
   if (ED_view3d_project_float_object(
           grad_data->region, co, vs->sco, V3D_PROJ_TEST_CLIP_BB | V3D_PROJ_TEST_CLIP_NEAR) !=
       V3D_PROJ_RET_OK)
@@ -807,12 +814,12 @@ static wmOperatorStatus paint_weight_gradient_exec(bContext *C, wmOperator *op)
       ".hide_vert", bke::AttrDomain::Point, false);
   data.sco_start = sco_start;
   data.sco_end = sco_end;
-  data.sco_line_div = 1.0f / len_v2v2(sco_start, sco_end);
   data.def_nr = BKE_object_defgroup_active_index_get(ob) - 1;
   data.use_select = (mesh->editflag & (ME_EDIT_PAINT_FACE_SEL | ME_EDIT_PAINT_VERT_SEL)) != 0;
   data.vert_cache = vert_cache;
   data.vert_visit = nullptr;
   data.type = RNA_enum_get(op->ptr, "type");
+  data.symmetry = int(SCULPT_mesh_symmetry_xyz_get(*ob));
 
   {
     ToolSettings *ts = CTX_data_tool_settings(C);
@@ -824,6 +831,22 @@ static wmOperatorStatus paint_weight_gradient_exec(bContext *C, wmOperator *op)
     data.brush = brush;
     data.weightpaint = BKE_brush_weight_get(&wp->paint, brush);
     data.use_vgroup_restrict = (ts->wpaint->flag & VP_FLAG_VGROUP_RESTRICT) != 0;
+
+    ed::sculpt_paint::gradient::Params gradient_params;
+    gradient_params.type = (data.type == WPAINT_GRADIENT_TYPE_LINEAR) ?
+                               ed::sculpt_paint::gradient::Type::Linear :
+                               ed::sculpt_paint::gradient::Type::Radial;
+    /* Weight gradient currently uses projected screen coordinates only.
+     * Keep unsupported spaces as screen fallback for now. */
+    gradient_params.space = ed::sculpt_paint::gradient::Space::Screen;
+    gradient_params.start_ss = float2(data.sco_start[0], data.sco_start[1]);
+    gradient_params.end_ss = float2(data.sco_end[0], data.sco_end[1]);
+    gradient_params.hardness = RNA_float_get(op->ptr, "hardness");
+    gradient_params.clamp_to_range = RNA_boolean_get(op->ptr, "clamp_to_range");
+    gradient_params.curve = nullptr;
+    gradient_params.clip_before_start = RNA_boolean_get(op->ptr, "clip_before_start");
+    data.clamp_to_range = gradient_params.clamp_to_range;
+    data.calculator = ed::sculpt_paint::gradient::create(gradient_params);
   }
 
   ED_view3d_init_mats_rv3d(ob, static_cast<RegionView3D *>(region->regiondata));
@@ -902,15 +925,6 @@ static wmOperatorStatus paint_weight_gradient_invoke(bContext *C,
 
 void PAINT_OT_weight_gradient(wmOperatorType *ot)
 {
-  /* defined in DNA_space_types.h */
-  static const EnumPropertyItem gradient_types[] = {
-      {WPAINT_GRADIENT_TYPE_LINEAR, "LINEAR", 0, "Linear", ""},
-      {WPAINT_GRADIENT_TYPE_RADIAL, "RADIAL", 0, "Radial", ""},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
-
-  PropertyRNA *prop;
-
   /* identifiers */
   ot->name = "Weight Gradient";
   ot->idname = "PAINT_OT_weight_gradient";
@@ -926,8 +940,7 @@ void PAINT_OT_weight_gradient(wmOperatorType *ot)
   /* flags */
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
 
-  prop = RNA_def_enum(ot->srna, "type", gradient_types, 0, "Type", "");
-  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  paint_gradient_operator_properties(ot, WPAINT_GRADIENT_TYPE_LINEAR, PAINT_GRADIENT_SPACE_SCREEN);
 
   WM_operator_properties_gesture_straightline(ot, WM_CURSOR_EDIT);
 }

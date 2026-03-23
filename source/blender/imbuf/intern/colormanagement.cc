@@ -1332,7 +1332,13 @@ const char *IMB_colormanagement_get_byte_colorspace(const ImBuf *ibuf)
   return IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DEFAULT_BYTE);
 }
 
-const char *IMB_colormanagement_space_from_filepath_rules(const char *filepath)
+const char *IMB_colormanagement_get_rect_colorspace(const ImBuf *ibuf)
+{
+  if (ibuf->float_buffer.data) {
+    return IMB_colormanagement_get_float_colorspace(ibuf);
+  }
+  return IMB_colormanagement_get_byte_colorspace(ibuf);
+}const char *IMB_colormanagement_space_from_filepath_rules(const char *filepath)
 {
   return g_config()->get_color_space_from_filepath(filepath);
 }

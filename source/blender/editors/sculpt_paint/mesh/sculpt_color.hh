@@ -28,6 +28,10 @@ class Node;
 }
 }  // namespace bke
 
+namespace ed::sculpt_paint {
+struct StrokeCache;
+}
+
 namespace ed::sculpt_paint::color {
 
 /* Swaps colors at each element in indices with values in colors. */
@@ -70,6 +74,7 @@ void do_paint_brush(const Depsgraph &depsgraph,
                     Object &ob,
                     const IndexMask &node_mask,
                     const IndexMask &texnode_mask);
+void image_paint_brush_session_ensure_ended(StrokeCache &cache, bool cancel_session);
 void do_smear_brush(const Depsgraph &depsgraph,
                     const Sculpt &sd,
                     Object &ob,

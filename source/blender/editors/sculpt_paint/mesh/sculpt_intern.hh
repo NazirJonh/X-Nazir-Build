@@ -166,8 +166,6 @@ struct ImageData : NonCopyable {
   Image *image = nullptr;
   ImageUser *image_user = nullptr;
 
-  Map<bke::image::TileNumber, ImBuf *> buffers = {};
-
   ~ImageData();
 
   static std::unique_ptr<ImageData> init_active_image(Object &ob,
@@ -353,6 +351,28 @@ struct StrokeCache {
      */
     Array<float4> mix_colors;
     Array<float4> prev_colors;
+
+    /**
+     * Last image paint step result (`had_updates`) for the current stroke step.
+     *
+     * Updated by sculpt paint image path and reserved for unified flush/dirty policies.
+     */
+    bool last_image_step_had_updates = true;
+
+    /**
+     * Shared post-step scheduling decision for image paint cleanup/flush.
+     */
+    bool should_flush_image_post_step = true;
+
+    /**
+     * Cached longest side of active image-paint canvas for the current stroke.
+     */
+    int image_brush_canvas_longest_side = 0;
+
+    /**
+     * Node indices that already had undo tiles pushed in this image-paint stroke.
+     */
+    Set<int> image_undo_pushed_node_indices;
   } paint_brush;
 
   /* Pose brush */
@@ -949,10 +969,42 @@ float object_space_radius_get(const ViewContext &vc,
 /** \name 3D Texture Paint (Experimental)
  * \{ */
 
-void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
+/**
+ * \brief Get the image canvas for painting on the given object.
+ *
+ * \return #true if an image is found. The #r_image and #r_image_user fields are filled with
+ * the image and image user. Returns false when the image isn't found. In the later case the
+ * r_image and r_image_user are set to NULL.
+ */
+bool SCULPT_paint_image_canvas_get(PaintModeSettings &paint_mode_settings,
+                                   Object &ob,
+                                   Image **r_image,
+                                   ImageUser **r_image_user) ATTR_NONNULL();
+bool SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
+                                 PaintModeSettings &paint_mode_settings,
                                  const Sculpt &sd,
                                  Object &ob,
                                  const IndexMask &node_mask);
+bool SCULPT_do_paint_brush_image_gradient(const Depsgraph &depsgraph,
+                                          PaintModeSettings &paint_mode_settings,
+                                          const Sculpt &sd,
+                                          Object &ob,
+                                          const IndexMask &node_mask,
+                                          const ARegion *region,
+                                          int gradient_type,
+                                          const float2 &start_ss,
+                                          const float2 &end_ss,
+                                          float hardness,
+                                          bool clamp_to_range,
+                                          bool push_undo_tiles,
+                                          bool ensure_pixels,
+                                          bool apply_seam_fix,
+                                          bool mark_image_dirty_now,
+                                          bool clip_before_start);
+void SCULPT_image_paint_push_undo_tiles(const Depsgraph &depsgraph,
+                                        PaintModeSettings &paint_mode_settings,
+                                        Object &ob,
+                                        const IndexMask &node_mask);
 bool SCULPT_use_image_paint_brush(PaintModeSettings &settings, Object &ob);
 
 /** \} */
@@ -1024,8 +1076,9 @@ void SCULPT_OT_cloth_filter(wmOperatorType *ot);
 }
 
 namespace ed::sculpt_paint::color {
+void SCULPT_OT_color_gradient(wmOperatorType *ot);
 void SCULPT_OT_color_filter(wmOperatorType *ot);
-}
+}  // namespace ed::sculpt_paint::color
 
 namespace ed::sculpt_paint::mask {
 

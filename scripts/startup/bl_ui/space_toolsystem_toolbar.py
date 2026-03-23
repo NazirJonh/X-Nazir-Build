@@ -1489,6 +1489,25 @@ class _defs_sculpt:
         )
 
     @ToolDef.from_fn
+    def color_gradient():
+        def draw_settings(_context, layout, tool):
+            props = tool.operator_properties("sculpt.color_gradient")
+            layout.prop(props, "type", expand=False)
+            layout.prop(props, "hardness", slider=True)
+            layout.prop(props, "clamp_to_range", expand=False)
+            layout.prop(props, "clip_before_start", expand=False)
+
+        return dict(
+            idname="builtin.color_gradient",
+            label="Color Gradient",
+            icon="ops.paint.weight_gradient",
+            widget=None,
+            cursor='PAINT_CROSS',
+            keymap=(),
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def paint():
         return dict(
             idname="builtin_brush.paint",
@@ -2225,6 +2244,8 @@ class _defs_weight_paint:
             row.prop(props, "type", expand=True)
             row = layout.row()
             row.popover("VIEW3D_PT_tools_weight_gradient")
+            row = layout.row()
+            row.prop(props, "clip_before_start")
 
         return dict(
             idname="builtin.gradient",
@@ -3951,6 +3972,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.paint,
             _defs_sculpt.mask,
             _defs_sculpt.draw_face_sets,
+            _defs_sculpt.color_gradient,
             lambda context: (
                 (
                     _defs_sculpt.dyntopo_density,

@@ -1550,6 +1550,7 @@ def _extension_manifest_match_keys(pkg_path: str, pkg_name: str):
 
     manifest_path = os.path.join(pkg_path, "blender_manifest.toml")
     if not os.path.isfile(manifest_path):
+        category_debug_print(f"[MANIFEST] No manifest found at {manifest_path!r}, returning keys={keys}")
         return keys
 
     try:
@@ -1562,8 +1563,43 @@ def _extension_manifest_match_keys(pkg_path: str, pkg_name: str):
             field_value = manifest.get(field_name)
             if isinstance(field_value, str) and field_value.strip():
                 keys.update(_manifest_field_match_keys(field_value))
+
+        category_debug_print(f"[MANIFEST] pkg_name={pkg_name!r}, pkg_path={pkg_path!r}, keys from manifest fields={keys}")
+
+        # Also scan Python files for panel bl_category values.
+        # This handles cases where panel bl_category differs from manifest name
+        # (e.g., Edge Length Measure extension uses "Edge Length" as bl_category).
+        import re
+        py_files_scanned = 0
+        bl_categories_found = []
+        for root, dirs, files in os.walk(pkg_path):
+            # Skip __pycache__ and hidden directories
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
+            for filename in files:
+                if not filename.endswith('.py'):
+                    continue
+                py_path = os.path.join(root, filename)
+                py_files_scanned += 1
+                try:
+                    with open(py_path, 'r', encoding='utf-8', errors='ignore') as py_file:
+                        content = py_file.read()
+                    # Find bl_category assignments in Panel classes
+                    for match in re.finditer(r'bl_category\s*=\s*["\']([^"\']+)["\']', content):
+                        panel_category = match.group(1).strip()
+                        if panel_category:
+                            normalized = _normalize_category_key(panel_category)
+                            keys.add(normalized)
+                            bl_categories_found.append(f"{panel_category} -> {normalized}")
+                            category_debug_print(f"[MANIFEST] Found bl_category='{panel_category}' in {os.path.relpath(py_path, pkg_path)} -> normalized='{normalized}'")
+                except Exception as e:
+                    category_debug_print(f"[MANIFEST] Failed to scan {py_path!r}: {e}")
+                    pass
+        
+        if py_files_scanned > 0:
+            category_debug_print(f"[MANIFEST] Scanned {py_files_scanned} Python files in {pkg_path!r}, found bl_categories: {bl_categories_found}")
+        category_debug_print(f"[MANIFEST] Final keys for pkg_name={pkg_name!r}: {keys}")
     except Exception as e:
-        category_debug_print(f"[] manifest parse failed: pkg_path={pkg_path!r}, error={e}")
+        category_debug_print(f"[MANIFEST] manifest parse failed: pkg_path={pkg_path!r}, error={e}")
 
     return keys
 
@@ -4894,10 +4930,13 @@ def _discover_active_categories():
                         with open(manifest_path, "rb") as fh:
                             manifest = tomllib.load(fh)
 
+                        # Collect manifest names for comparison with panel categories
+                        manifest_names = set()
                         for key_name in ("name", "id"):
                             value = manifest.get(key_name)
                             if isinstance(value, str) and value.strip():
                                 seed = value.strip()
+                                manifest_names.add(seed)
                                 if key_name == "name":
                                     _record_discovered(seed, "manifest_name")
                                 else:
@@ -4906,6 +4945,36 @@ def _discover_active_categories():
                                     f"[GLYPH DISCOVER DEBUG] extension addon seed: "
                                     f"module={module_name!r}, category={seed!r}, source='manifest.{key_name}'"
                                 )
+
+                        # Also scan Python files for panel bl_category values.
+                        # This handles cases where panel bl_category differs from manifest name
+                        # (e.g., Edge Length Measure extension uses "Edge Length" as bl_category).
+                        ext_id = f"add-on-{pkg_name}"
+                        pkg_dir = os.path.dirname(manifest_path)
+                        for root, dirs, files in os.walk(pkg_dir):
+                            # Skip __pycache__ and hidden directories
+                            dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
+                            for filename in files:
+                                if not filename.endswith('.py'):
+                                    continue
+                                py_path = os.path.join(root, filename)
+                                try:
+                                    with open(py_path, 'r', encoding='utf-8', errors='ignore') as py_file:
+                                        content = py_file.read()
+                                    # Find bl_category assignments in Panel classes
+                                    import re
+                                    for match in re.finditer(r'bl_category\s*=\s*["\']([^"\']+)["\']', content):
+                                        panel_category = match.group(1).strip()
+                                        # Only record panel categories that differ from manifest names
+                                        if panel_category and panel_category not in manifest_names:
+                                            _record_discovered(panel_category, "panel_bl_category")
+                                            _log_once(
+                                                f"[GLYPH DISCOVER DEBUG] extension panel category: "
+                                                f"module={module_name!r}, category={panel_category!r}, "
+                                                f"source='panel_bl_category', ext_id={ext_id!r}"
+                                            )
+                                except Exception:
+                                    pass
                     except Exception as e:
                         _log_once(
                             f"[GLYPH DISCOVER DEBUG] extension manifest read failed: "
@@ -4952,10 +5021,13 @@ def _discover_active_categories():
                             with open(manifest_path, "rb") as fh:
                                 manifest = tomllib.load(fh)
 
+                            # Collect manifest names for comparison with panel categories
+                            manifest_names = set()
                             for key_name in ("name", "id"):
                                 value = manifest.get(key_name)
                                 if isinstance(value, str) and value.strip():
                                     seed = value.strip()
+                                    manifest_names.add(seed)
                                     if key_name == "name":
                                         _record_discovered(seed, "manifest_name")
                                     else:
@@ -4964,6 +5036,36 @@ def _discover_active_categories():
                                         f"[GLYPH DISCOVER DEBUG] extension package seed: "
                                         f"repo={repo_name!r}, category={seed!r}, source='manifest.{key_name}_with_icon'"
                                     )
+
+                            # Also scan Python files for panel bl_category values.
+                            # This handles cases where panel bl_category differs from manifest name
+                            # (e.g., Edge Length Measure extension uses "Edge Length" as bl_category).
+                            ext_id = f"add-on-{pkg_name}"
+                            for root, dirs, files in os.walk(pkg_path):
+                                # Skip __pycache__ and hidden directories
+                                dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
+                                for filename in files:
+                                    if not filename.endswith('.py'):
+                                        continue
+                                    py_path = os.path.join(root, filename)
+                                    try:
+                                        with open(py_path, 'r', encoding='utf-8', errors='ignore') as py_file:
+                                            content = py_file.read()
+                                        # Find bl_category assignments in Panel classes
+                                        # Match patterns like: bl_category = "Category Name" or bl_category="Category Name"
+                                        import re
+                                        for match in re.finditer(r'bl_category\s*=\s*["\']([^"\']+)["\']', content):
+                                            panel_category = match.group(1).strip()
+                                            # Only record panel categories that differ from manifest names
+                                            if panel_category and panel_category not in manifest_names:
+                                                _record_discovered(panel_category, "panel_bl_category")
+                                                _log_once(
+                                                    f"[GLYPH DISCOVER DEBUG] extension panel category: "
+                                                    f"repo={repo_name!r}, pkg={pkg_name!r}, category={panel_category!r}, "
+                                                    f"source='panel_bl_category', ext_id={ext_id!r}"
+                                                )
+                                    except Exception:
+                                        pass
                         except Exception as e:
                             _log_once(
                                 f"[GLYPH DISCOVER DEBUG] extension package manifest read failed: "
@@ -5421,7 +5523,10 @@ def _merge_discovered_categories():
                             f"for extension {ext_id!r} (claimed={can_claim_unowned})"
                         )
 
-    if new_categories:
+    # NOTE: Existing-category auto-repair (source_extension backfill) lives in this block.
+    # It must run even when there are no newly discovered categories, otherwise
+    # orphan categories like "Edge Length" are never linked to their extension.
+    if new_categories or pending_extension_context is None:
         category_debug_print(f"[GLYPH] Found {len(new_categories)} new categories: {sorted(new_categories)}")
 
         # Auto-detect extension for EACH category individually from enabled extensions.
@@ -5482,12 +5587,35 @@ def _merge_discovered_categories():
         # (e.g., Hot Node installed via Get Extensions before pending logic was active)
         # CRITICAL FIX: Also repair categories that have pending_tag_assignment=false but NO source_extension.
         # These are orphaned categories from incomplete discovery (e.g., "MPFB v2.0.14", "Mixamo").
+        # FIX: Use _extension_manifest_match_keys() to scan Python files for bl_category values
+        # (e.g., "Edge Length Measure" extension uses bl_category="Edge Length" which differs from manifest name).
         try:
             prefs = getattr(bpy.context, "preferences", None)
             addons = getattr(prefs, "addons", None) if prefs else None
             if addons and enabled_extensions:
                 category_debug_print(f"[MERGE AUTO-EXT DEBUG] Checking {len(_glyph_cache)} cache entries for extension matching")
                 category_debug_print(f"[MERGE AUTO-EXT DEBUG] enabled_extensions: {list(enabled_extensions.keys())}")
+                
+                # Build manifest match keys for each extension (includes Python file bl_category scanning)
+                extension_manifest_keys = {}
+                for ext_id, ext_info in enabled_extensions.items():
+                    pkg_name = ext_info["pkg_name"]
+                    module_name = ext_info["module_name"]
+                    category_debug_print(f"[MERGE AUTO-EXT DEBUG] Building manifest keys for ext_id={ext_id!r}, pkg_name={pkg_name!r}, module_name={module_name!r}")
+                    try:
+                        import importlib
+                        module = importlib.import_module(module_name)
+                        pkg_path = os.path.dirname(getattr(module, "__file__", ""))
+                        category_debug_print(f"[MERGE AUTO-EXT DEBUG] pkg_path={pkg_path!r}, isdir={os.path.isdir(pkg_path) if pkg_path else False}")
+                        if pkg_path and os.path.isdir(pkg_path):
+                            extension_manifest_keys[ext_id] = _extension_manifest_match_keys(pkg_path, pkg_name)
+                            category_debug_print(f"[MERGE AUTO-EXT DEBUG] manifest_keys for {ext_id!r}: {extension_manifest_keys[ext_id]}")
+                        else:
+                            extension_manifest_keys[ext_id] = set()
+                            category_debug_print(f"[MERGE AUTO-EXT DEBUG] pkg_path invalid, using empty set")
+                    except Exception as e:
+                        extension_manifest_keys[ext_id] = set()
+                        category_debug_print(f"[MERGE AUTO-EXT DEBUG] Failed to import module {module_name!r}: {e}")
                 
                 for cache_key, cat_data in list(_glyph_cache.items()):
                     if not isinstance(cache_key, tuple) or len(cache_key) != 2:
@@ -5511,7 +5639,7 @@ def _merge_discovered_categories():
                     # We need to repair these orphaned categories so they appear in "New Add-ons!" filter.
                     
                     # DEBUG: Log categories that pass initial filters
-                    if "MPFB" in category_name or "Mixamo" in category_name:
+                    if "MPFB" in category_name or "Mixamo" in category_name or "Edge" in category_name:
                         category_debug_print(f"[MERGE AUTO-EXT DEBUG] Checking category '{category_name}': "
                                            f"pending={cat_data.get('pending_tag_assignment')}, "
                                            f"has_tags={bool(cat_data.get('tags'))}, "
@@ -5521,18 +5649,32 @@ def _merge_discovered_categories():
                     if not category_key:
                         continue
                     
-                    # DEBUG: Log normalized key for MPFB/Mixamo categories
-                    if "MPFB" in category_name or "Mixamo" in category_name:
+                    # DEBUG: Log normalized key for MPFB/Mixamo/Edge categories
+                    if "MPFB" in category_name or "Mixamo" in category_name or "Edge" in category_name:
                         category_debug_print(f"[MERGE AUTO-EXT DEBUG] Normalized key for '{category_name}': '{category_key}'")
                         for ext_id, ext_info in enabled_extensions.items():
-                            if "mpfb" in ext_id.lower() or "mixamo" in ext_id.lower():
+                            if "mpfb" in ext_id.lower() or "mixamo" in ext_id.lower() or "edge" in ext_id.lower():
                                 category_debug_print(f"[MERGE AUTO-EXT DEBUG] Extension {ext_id!r} match_keys: {ext_info['match_keys']}")
                                 category_debug_print(f"[MERGE AUTO-EXT DEBUG]   Does '{category_key}' match? {category_key in ext_info['match_keys']}")
+                                manifest_keys = extension_manifest_keys.get(ext_id, set())
+                                category_debug_print(f"[MERGE AUTO-EXT DEBUG]   Extension {ext_id!r} manifest_keys: {manifest_keys}")
+                                category_debug_print(f"[MERGE AUTO-EXT DEBUG]   Does '{category_key}' match manifest? {category_key in manifest_keys}")
 
-                    # Check if category matches any enabled extension
+                    # Check if category matches any enabled extension using manifest keys (includes bl_category)
                     for ext_id, ext_info in enabled_extensions.items():
+                        manifest_keys = extension_manifest_keys.get(ext_id, set())
+                        if category_key in manifest_keys:
+                            category_debug_print(f"[MERGE AUTO-EXT] Updating existing category '{category_name}' with source_extension={ext_id!r} (via manifest bl_category)")
+                            cat_data["source_extension"] = ext_id
+                            # Re-enable pending_tag_assignment so category appears in "New Add-ons!" filter
+                            if not cat_data.get("pending_tag_assignment"):
+                                cat_data["pending_tag_assignment"] = True
+                                category_debug_print(f"[MERGE AUTO-EXT] Re-enabled pending_tag_assignment for '{category_name}'")
+                            cache_changed = True
+                            break
+                        # Fallback to ID-based matching for extensions without Python bl_category scanning
                         if category_key in ext_info["match_keys"]:
-                            category_debug_print(f"[MERGE AUTO-EXT] Updating existing category '{category_name}' with source_extension={ext_id!r}")
+                            category_debug_print(f"[MERGE AUTO-EXT] Updating existing category '{category_name}' with source_extension={ext_id!r} (via ID match)")
                             cat_data["source_extension"] = ext_id
                             # Re-enable pending_tag_assignment so category appears in "New Add-ons!" filter
                             if not cat_data.get("pending_tag_assignment"):

@@ -7589,6 +7589,24 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
   UNUSED_VARS(url_is_file, url_is_online);
 #endif
 
+  const std::string category = RNA_string_get(op->ptr, "category");
+  const std::string target_category = RNA_string_get(op->ptr, "target_category");
+  const bool insert_above = RNA_boolean_get(op->ptr, "insert_above");
+  const std::string tag_name = RNA_string_get(op->ptr, "tag_name");
+
+  /* Arm deferred activation BEFORE install starts.
+   * The install operator may synchronously emit extension repo update callbacks and/or
+   * register categories before returning, so preparing after invoke can miss both. */
+  if (!category.empty() && treat_as_tab_drop) {
+    ui::category_tabs_apply_drop_insert(C,
+                                        region,
+                                        category.c_str(),
+                                        target_category.empty() ? category.c_str() :
+                                                                    target_category.c_str(),
+                                        insert_above,
+                                        tag_name.empty() ? nullptr : tag_name.c_str());
+  }
+
   wmOperatorType *ot = WM_operatortype_find(idname_external, true);
   wmOperatorStatus retval = OPERATOR_CANCELLED;
   if (ot) {
@@ -7614,11 +7632,6 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  const std::string category = RNA_string_get(op->ptr, "category");
-  const std::string target_category = RNA_string_get(op->ptr, "target_category");
-  const bool insert_above = RNA_boolean_get(op->ptr, "insert_above");
-  const std::string tag_name = RNA_string_get(op->ptr, "tag_name");
-
   drop_log_once("[EXT_DROP_INVOKE] resolved region_type=%d drop_region_type=%d supports_tabs=%d tab_drop=%d category='%s' target='%s' tag='%s'\n",
                 region ? region->regiontype : -1,
                 drop_region ? drop_region->regiontype : -1,
@@ -7628,17 +7641,8 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
                 target_category.c_str(),
                 tag_name.c_str());
 
-  /* Only apply tab insertion for actual tab-region drops (not viewport WINDOW drops). */
-  if (!category.empty() && treat_as_tab_drop) {
-    ui::category_tabs_apply_drop_insert(C,
-                                        region,
-                                        category.c_str(),
-                                        target_category.empty() ? category.c_str() :
-                                                                    target_category.c_str(),
-                                        insert_above,
-                                        tag_name.empty() ? nullptr : tag_name.c_str());
-
 #ifdef WITH_PYTHON
+  if (!category.empty() && treat_as_tab_drop) {
     /* For tab drops, call Python extension_post_install_handler with tag_already_assigned=True.
      * This tells Python NOT to set pending_tag_assignment=True for new categories,
      * so "New Add-ons!" button won't appear for tab drops (category will be visible
@@ -7657,8 +7661,8 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
       fflush(stdout);
       BPY_run_string_exec(C, imports_none, python_expr);
     }
-#endif
   }
+#endif
 
   return retval;
 }
@@ -8353,13 +8357,39 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
 
   /* Resolve target area from current cursor position.
    * `drag->drop_state.area_from` may point to the source area where drag began,
-   * which can belong to another editor and yields wrong active tag state. */
+   * which can belong to another editor and yields wrong active tag state.
+   *
+   * IMPORTANT: For tag filter state, we MUST use the area that contains the region
+   * with category tabs, NOT the area under the mouse cursor. When dragging from
+   * File Browser to 3D Viewport tabs, the mouse may still be over File Browser,
+   * but we need the tag state from 3D Viewport where the tabs actually are. */
   ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, mouse_xy);
   if (!area) {
     area = drag->drop_state.area_from;
   }
   if (!area) {
     return;
+  }
+
+  /* Use the area that owns the region with category tabs for tag state lookup.
+   * This ensures we get the correct tag filter state from the target editor. */
+  ScrArea *area_for_tag = area;
+  for (ScrArea *area_iter = static_cast<ScrArea *>(screen->areabase.first);
+       area_iter;
+       area_iter = static_cast<ScrArea *>(area_iter->next))
+  {
+    for (ARegion *region_iter = static_cast<ARegion *>(area_iter->regionbase.first);
+         region_iter;
+         region_iter = static_cast<ARegion *>(region_iter->next))
+    {
+      if (region_iter == region) {
+        area_for_tag = area_iter;
+        break;
+      }
+    }
+    if (area_for_tag != area) {
+      break;
+    }
   }
 
   const int mx_local = mouse_x - region->winrct.xmin;
@@ -8408,10 +8438,13 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
    * IMPORTANT: Only assign tag if filter is actually ENABLED (filter_enabled != 0).
    * When filter is disabled (e.g., via "Tag Filter Tag" toggle), the category
    * should go to the general list without a tag, even if active_tags contains
-   * a tag name from a previous selection. */
+   * a tag name from a previous selection.
+   *
+   * Use area_for_tag (the area that owns the region with category tabs) instead
+   * of area (which may be under the mouse cursor in a different editor). */
   blender::ui::TagFilterStateRef tag_state{};
   const char *resolved_tag_name = "";
-  if (blender::ui::tag_filter_state_from_area(area, &tag_state) && tag_state.active_tags &&
+  if (blender::ui::tag_filter_state_from_area(area_for_tag, &tag_state) && tag_state.active_tags &&
       tag_state.filter_enabled && *tag_state.filter_enabled)
   {
     resolved_tag_name = tag_state.active_tags;
@@ -8420,9 +8453,9 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
   else {
     RNA_string_set(drop->ptr, "tag_name", "");
   }
-  drop_log_once("[EXT_DROP_COPY] resolved tag_name='%s' from area spacetype=%d\n",
+  drop_log_once("[EXT_DROP_COPY] resolved tag_name='%s' from area_for_tag spacetype=%d\n",
                 resolved_tag_name,
-                area->spacetype);
+                area_for_tag->spacetype);
 }
 
 static std::string category_tab_extension_drop_tooltip(bContext *C,

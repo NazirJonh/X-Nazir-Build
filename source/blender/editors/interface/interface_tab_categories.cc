@@ -604,6 +604,12 @@ static void deferred_category_activation_extension_callback(Main * /*bmain*/,
                                                              int /*pointers_num*/,
                                                              void * /*arg*/)
 {
+  /* Set extension signal received flag - this must happen regardless of debug mode. */
+  if (g_deferred_category_activation.valid &&
+      g_deferred_category_activation.wait_for_extension_signal) {
+    g_deferred_category_activation.extension_signal_received = true;
+  }
+
   if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     printf("[CATEGORY ACTIVATE] Extension callback triggered! valid=%d wait_for_signal=%d\n",
            g_deferred_category_activation.valid ? 1 : 0,
@@ -614,7 +620,6 @@ static void deferred_category_activation_extension_callback(Main * /*bmain*/,
     fflush(stdout);
     if (g_deferred_category_activation.valid &&
         g_deferred_category_activation.wait_for_extension_signal) {
-      g_deferred_category_activation.extension_signal_received = true;
       printf("[CATEGORY ACTIVATE] Extension signal received, will activate on next draw\n");
       fflush(stdout);
     }
@@ -989,14 +994,16 @@ static void handle_extension_drop_on_tabs(const bContext *C,
     if (region && region->runtime) {
       g_known_categories_before_extension_drop.clear();
       g_pending_category_insert.all_existing_categories.clear();
+      for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+        if (pc_dyn.idname && pc_dyn.idname[0]) {
+          g_known_categories_before_extension_drop.add(pc_dyn.idname);
+          g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+        }
+      }
       if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
         printf("[KNOWN_CATS] Saving known categories before viewport extension drop:\n");
-        for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-          if (pc_dyn.idname && pc_dyn.idname[0]) {
-            g_known_categories_before_extension_drop.add(pc_dyn.idname);
-            g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
-            printf("[KNOWN_CATS]   + '%s'\n", pc_dyn.idname);
-          }
+        for (const std::string &known_category : g_known_categories_before_extension_drop) {
+          printf("[KNOWN_CATS]   + '%s'\n", known_category.c_str());
         }
         printf("[KNOWN_CATS] Total: %zu categories saved\n",
                g_known_categories_before_extension_drop.size());
@@ -1098,14 +1105,16 @@ void category_tabs_setup_viewport_drop_deferred(const bContext *C,
   if (region && region->runtime) {
     g_known_categories_before_extension_drop.clear();
     g_pending_category_insert.all_existing_categories.clear();
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (pc_dyn.idname && pc_dyn.idname[0]) {
+        g_known_categories_before_extension_drop.add(pc_dyn.idname);
+        g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+      }
+    }
     if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
       printf("[VIEWPORT DROP DEFERRED] Saving known categories:\n");
-      for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-        if (pc_dyn.idname && pc_dyn.idname[0]) {
-          g_known_categories_before_extension_drop.add(pc_dyn.idname);
-          g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
-          printf("[VIEWPORT DROP DEFERRED]   + '%s'\n", pc_dyn.idname);
-        }
+      for (const std::string &known_category : g_known_categories_before_extension_drop) {
+        printf("[VIEWPORT DROP DEFERRED]   + '%s'\n", known_category.c_str());
       }
       printf("[VIEWPORT DROP DEFERRED] Total: %zu categories saved\n",
              g_known_categories_before_extension_drop.size());
@@ -4267,7 +4276,10 @@ void category_tabs_apply_drop_insert(bContext *C,
    * This allows assigning the active tag filter to the new category after extension install.
    * IMPORTANT: tag_already_assigned is always true for tab drops because the category will be
    * visible in the general list without tag filtering. We don't need "New Add-ons!" button.
-   * If a tag is active, it will be assigned to the category when it appears. */
+   * If a tag is active, it will be assigned to the category when it appears.
+   *
+   * NOTE: tag_name is already filtered by filter_enabled in category_tab_extension_drop_copy.
+   * If filter was disabled at drop time, tag_name will be empty. */
   if (tag_name && tag_name[0] != '\0') {
     g_deferred_category_activation.tag_name_to_assign = tag_name;
     if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
@@ -4313,14 +4325,16 @@ void category_tabs_apply_drop_insert(bContext *C,
    * extension installs. */
   g_known_categories_before_extension_drop.clear();
   g_pending_category_insert.all_existing_categories.clear();
+  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+    if (pc_dyn.idname && pc_dyn.idname[0]) {
+      g_known_categories_before_extension_drop.add(pc_dyn.idname);
+      g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+    }
+  }
   if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     printf("[KNOWN_CATS] Saving known categories before extension drop:\n");
-    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-      if (pc_dyn.idname && pc_dyn.idname[0]) {
-        g_known_categories_before_extension_drop.add(pc_dyn.idname);
-        g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
-        printf("[KNOWN_CATS]   + '%s'\n", pc_dyn.idname);
-      }
+    for (const std::string &known_category : g_known_categories_before_extension_drop) {
+      printf("[KNOWN_CATS]   + '%s'\n", known_category.c_str());
     }
     printf("[KNOWN_CATS] Total: %zu categories (also saved to pending_insert)\n",
            g_known_categories_before_extension_drop.size());
@@ -6792,6 +6806,30 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
 
   /* Check if we need to wait for extension installation signal */
   if (g_deferred_category_activation.wait_for_extension_signal) {
+    if (!g_deferred_category_activation.extension_signal_received) {
+      bool discovered_without_signal = false;
+      if (region && region->runtime && !g_known_categories_before_extension_drop.is_empty()) {
+        for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+          if (pc_dyn.idname && pc_dyn.idname[0] &&
+              !g_known_categories_before_extension_drop.contains(pc_dyn.idname))
+          {
+            discovered_without_signal = true;
+            break;
+          }
+        }
+      }
+
+      if (discovered_without_signal) {
+        g_deferred_category_activation.extension_signal_received = true;
+      }
+      else {
+        const double wait_seconds = BLI_time_now_seconds() - g_deferred_category_activation.timestamp;
+        if (wait_seconds > 2.0) {
+          g_deferred_category_activation.extension_signal_received = true;
+        }
+      }
+    }
+
     if (!g_deferred_category_activation.extension_signal_received) {
       if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
         printf("[CATEGORY ACTIVATE] Waiting for extension installation signal for: '%s'\n",

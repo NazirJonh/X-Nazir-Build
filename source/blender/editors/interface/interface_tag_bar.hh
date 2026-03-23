@@ -295,4 +295,39 @@ int tag_bar_draw_new_addon_button(const bContext *C,
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name New Add-on Filter State
+ * \{ */
+
+/**
+ * Check if the "New Add-on!" filter is currently active.
+ * \param area: Area to check (View3D, Properties, Node Editor, or Image Editor)
+ * \return True if filter is active, false otherwise
+ */
+bool is_new_addon_filter_active(const ScrArea *area);
+
+/**
+ * Set the "New Add-on!" filter active state.
+ * \param area: Area to modify (View3D, Properties, Node Editor, or Image Editor)
+ * \param active: True to activate filter, false to deactivate
+ */
+void set_new_addon_filter_active(ScrArea *area, bool active);
+
+/**
+ * Set the "New Add-on!" filter active state with auto-activation flag.
+ * \param area: Area to modify (View3D, Properties, Node Editor, or Image Editor)
+ * \param active: True to activate filter, false to deactivate
+ * \param auto_activated: True if activated automatically (not by user)
+ */
+void set_new_addon_filter_active(ScrArea *area, bool active, bool auto_activated);
+
+/**
+ * Check if the "New Add-on!" filter was auto-activated (not by user).
+ * \param area: Area to check (View3D, Properties, Node Editor, or Image Editor)
+ * \return True if filter was auto-activated, false otherwise
+ */
+bool is_new_addon_filter_auto_activated(const ScrArea *area);
+
+/** \} */
+
 }  // namespace blender::ui

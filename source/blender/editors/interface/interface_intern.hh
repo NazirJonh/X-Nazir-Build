@@ -1066,6 +1066,16 @@ bool is_new_addon_filter_active(const ScrArea *area);
 void set_new_addon_filter_active(ScrArea *area, bool active);
 
 /**
+ * Set the "New Add-on!" filter active state with auto-activation flag.
+ */
+void set_new_addon_filter_active(ScrArea *area, bool active, bool auto_activated);
+
+/**
+ * Check if the "New Add-on!" filter was auto-activated (not by user).
+ */
+bool is_new_addon_filter_auto_activated(const ScrArea *area);
+
+/**
  * Get the saved tag filter tags for the given area.
  * These tags are saved when "New Add-on!" filter is activated and restored when deactivated.
  * Returns pointer to the saved tags string (may be empty string), or nullptr if unsupported space.

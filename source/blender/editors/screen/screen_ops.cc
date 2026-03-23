@@ -8006,11 +8006,11 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
 }
 
 static void category_tab_extension_drop_draw_droptip(bContext *C,
-                                                     wmWindow *win,
-                                                     wmDrag *drag,
-                                                     const int xy[2])
+                                                      wmWindow *win,
+                                                      wmDrag *drag,
+                                                      const int xy[2])
 {
-  drop_log_once("[EXT_DROP_DRAW] START at (%d,%d)\n", xy[0], xy[1]);
+  drop_log_once("[EXT_DROP_DRAW] START\n");
 
   bScreen *screen = CTX_wm_screen(C);
   if (!screen) {
@@ -8023,14 +8023,14 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
 
   ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, xy);
   if (!area) {
-    drop_log_once("[EXT_DROP_DRAW] ABORT: no area at (%d,%d)\n", xy[0], xy[1]);
+    drop_log_once("[EXT_DROP_DRAW] ABORT: no area\n");
     category_tab_extension_preview_clear_all_in_screen(screen);
     return;
   }
 
   ARegion *region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, xy);
   if (!region) {
-    drop_log_once("[EXT_DROP_DRAW] ABORT: no region at (%d,%d)\n", xy[0], xy[1]);
+    drop_log_once("[EXT_DROP_DRAW] ABORT: no region\n");
     category_tab_extension_preview_clear_all_in_screen(screen);
     return;
   }
@@ -8041,15 +8041,11 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
     return;
   }
 
-  drop_log_once("[EXT_DROP_DRAW] region_info: area=%p region=%p type=%d align=%d winrct=[%d,%d]-[%d,%d] preview_active=%d\n",
+  drop_log_once("[EXT_DROP_DRAW] region_info: area=%p region=%p type=%d align=%d preview_active=%d\n",
                 static_cast<void *>(area),
                 static_cast<void *>(region),
                 region->regiontype,
                 RGN_ALIGN_ENUM_FROM_MASK(region->alignment),
-                region->winrct.xmin,
-                region->winrct.ymin,
-                region->winrct.xmax,
-                region->winrct.ymax,
                 ui::category_tabs_extension_preview_is_active(region) ? 1 : 0);
 
   /* Clear preview from other regions when drag moves to a new region.
@@ -8066,9 +8062,7 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
   const bool has_visible_tabs = ui::panel_category_tabs_is_visible(region);
   const int mx_local = xy[0] - region->winrct.xmin;
   const int my_local = xy[1] - region->winrct.ymin;
-  drop_log_once("[EXT_DROP_DRAW] local=(%d,%d) has_visible_tabs=%d preview_active_before=%d\n",
-                mx_local,
-                my_local,
+  drop_log_once("[EXT_DROP_DRAW] local: has_visible_tabs=%d preview_active_before=%d\n",
                 has_visible_tabs ? 1 : 0,
                 ui::category_tabs_extension_preview_is_active(region) ? 1 : 0);
 
@@ -8080,9 +8074,7 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
   if (has_visible_tabs) {
     /* Standard gutter intersection check for regions with visible tabs */
     if (!ED_region_panel_category_gutter_isect_xy(area, region, xy)) {
-      drop_log_once("[EXT_DROP_DRAW] ABORT: not in category gutter at (%d,%d), preview_active=%d\n",
-                    xy[0],
-                    xy[1],
+      drop_log_once("[EXT_DROP_DRAW] ABORT: not in category gutter, preview_active=%d\n",
                     ui::category_tabs_extension_preview_is_active(region) ? 1 : 0);
       ui::category_tabs_extension_preview_clear(region);
       return;
@@ -8098,9 +8090,7 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
                                                              &target_index,
                                                              &insert_above,
                                                              &hovered_tab_height)) {
-      drop_log_once("[EXT_DROP_DRAW] ABORT: no tab hit local=(%d,%d), preview_active=%d\n",
-                    mx_local,
-                    my_local,
+      drop_log_once("[EXT_DROP_DRAW] ABORT: no tab hit, preview_active=%d\n",
                     ui::category_tabs_extension_preview_is_active(region) ? 1 : 0);
       ui::category_tabs_extension_preview_clear(region);
       return;
@@ -8125,8 +8115,7 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
     }
 
     if (!in_tab_area) {
-      drop_log_once("[EXT_DROP_DRAW] ABORT: not in tab creation area (mx_local=%d), preview_active=%d\n",
-                    mx_local,
+      drop_log_once("[EXT_DROP_DRAW] ABORT: not in tab creation area, preview_active=%d\n",
                     ui::category_tabs_extension_preview_is_active(region) ? 1 : 0);
       ui::category_tabs_extension_preview_clear(region);
       return;

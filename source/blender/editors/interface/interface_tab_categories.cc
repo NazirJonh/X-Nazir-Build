@@ -107,7 +107,7 @@ namespace blender::ui {
  * 
  * To enable: Change to `static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;`
  */
-static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
 
 /** \} */
 
@@ -371,6 +371,7 @@ static const CategoryGlyphItem *category_item_find_mappings(const wmWindowManage
   if (!wm) {
     return nullptr;
   }
+  UNUSED_VARS(space_type);
   return category_glyph_item_find_global_only(&wm->category_glyph_mappings, category);
 }
 
@@ -1055,6 +1056,24 @@ static void handle_extension_drop_on_tabs(const bContext *C,
     register_new_extension_category(
         C, category_id, extension_id, space_type, mode_flag, /*tag_already_assigned=*/false);
 
+    /* Auto-activate "New Add-ons!" filter to show the new category immediately.
+     * This ensures users see the new category right after extension installation.
+     * Only activate once - don't re-activate if filter was already auto-activated.
+     * NOTE: Don't set active category here - it doesn't exist yet. Will be set in
+     * deferred activation when category actually appears in the UI. */
+    ScrArea *area = CTX_wm_area(C);
+    if (area && !is_new_addon_filter_auto_activated(area)) {
+      set_new_addon_filter_active(area, true, /*auto_activated=*/true);
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[NEW ADDON AUTO-ACTIVATE] Activated filter for viewport drop: category='%s', extension='%s'\n",
+               category_id, extension_id);
+        fflush(stdout);
+      }
+    }
+
+    /* Force immediate UI refresh to show the new category and activate the filter */
+    category_tabs_tag_refresh_active_area_ui(C);
+
     if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
       printf("[CATEGORY ACTIVATE] Deferred activation setup complete for viewport drop\n");
       fflush(stdout);
@@ -1100,26 +1119,42 @@ void category_tabs_setup_viewport_drop_deferred(const bContext *C,
   /* Register extension callback if not already registered */
   deferred_category_activation_register_extension_callback();
 
-  /* Save ALL known categories before extension installation to detect new ones later. */
-  ARegion *region = CTX_wm_region(C);
+  /* Save ALL known categories before extension installation to detect new ones later.
+   * IMPORTANT: Get region from area, not from context, because context region may not have
+   * panels_category runtime data. We need the region that actually contains category tabs. */
+  ScrArea *area = CTX_wm_area(C);
+  ARegion *region = nullptr;
+  if (area && area->regionbase.first) {
+    /* Find the UI region that contains category tabs */
+    for (ARegion *ar = static_cast<ARegion *>(area->regionbase.first); ar; ar = ar->next) {
+      if (ar->runtime && ar->runtime->panels_category.first) {
+        region = ar;
+        break;
+      }
+    }
+  }
+  
+  g_known_categories_before_extension_drop.clear();
+  g_pending_category_insert.all_existing_categories.clear();
   if (region && region->runtime) {
-    g_known_categories_before_extension_drop.clear();
-    g_pending_category_insert.all_existing_categories.clear();
     for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
       if (pc_dyn.idname && pc_dyn.idname[0]) {
         g_known_categories_before_extension_drop.add(pc_dyn.idname);
         g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
       }
     }
-    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-      printf("[VIEWPORT DROP DEFERRED] Saving known categories:\n");
-      for (const std::string &known_category : g_known_categories_before_extension_drop) {
-        printf("[VIEWPORT DROP DEFERRED]   + '%s'\n", known_category.c_str());
-      }
-      printf("[VIEWPORT DROP DEFERRED] Total: %zu categories saved\n",
-             g_known_categories_before_extension_drop.size());
-      fflush(stdout);
+  }
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[VIEWPORT DROP DEFERRED] Saving known categories from region=%p:\n", (void*)region);
+    if (g_known_categories_before_extension_drop.is_empty()) {
+      printf("[VIEWPORT DROP DEFERRED]   (no categories found - region may not have panels_category yet)\n");
     }
+    for (const std::string &known_category : g_known_categories_before_extension_drop) {
+      printf("[VIEWPORT DROP DEFERRED]   + '%s'\n", known_category.c_str());
+    }
+    printf("[VIEWPORT DROP DEFERRED] Total: %zu categories saved\n",
+           g_known_categories_before_extension_drop.size());
+    fflush(stdout);
   }
 
   /* Set up deferred activation to wait for extension installation signal,
@@ -4427,6 +4462,49 @@ void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *regio
 
   const char *current_active = panel_category_active_get(region, false);
 
+  /* Check if "New Add-ons!" filter should be auto-activated.
+   * This handles cases where extension was installed but filter wasn't activated yet.
+   * IMPORTANT: Only activate ONCE when category first appears. Don't re-activate if user
+   * manually switched to other tags (indicated by active_tags being set). */
+  if (area) {
+    const bool filter_active = is_new_addon_filter_active(area);
+    const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
+    const bool has_unassigned = should_show_new_addon_tag(wm, space_type, current_mode_flag);
+    
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[NEW ADDON CHECK] filter_active=%d has_unassigned=%d\n",
+             filter_active ? 1 : 0, has_unassigned ? 1 : 0);
+      fflush(stdout);
+    }
+    
+    /* Only auto-activate if:
+     * 1. Filter is NOT active
+     * 2. Has unassigned categories
+     * 3. User has NOT manually selected other tags (active_tags is empty) */
+    if (!filter_active && has_unassigned) {
+      /* Check if user has manually selected other tags */
+      TagFilterStateRef state{};
+      bool user_selected_other_tags = false;
+      if (tag_filter_state_from_area(area, &state) && state.active_tags && state.active_tags[0] != '\0') {
+        user_selected_other_tags = true;
+        if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+          printf("[NEW ADDON CHECK] User has selected other tags: '%s', skipping auto-activate\n",
+                 state.active_tags);
+          fflush(stdout);
+        }
+      }
+      
+      /* Only auto-activate if user hasn't selected other tags */
+      if (!user_selected_other_tags) {
+        set_new_addon_filter_active(area, true, /*auto_activated=*/true);
+        if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+          printf("[NEW ADDON AUTO-ACTIVATE] Auto-activated filter in panel_category_tabs_ensure_active_visible\n");
+          fflush(stdout);
+        }
+      }
+    }
+  }
+
   if (area && is_new_addon_filter_active(area)) {
     const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
     const bool has_unassigned = should_show_new_addon_tag(wm, space_type, current_mode_flag);
@@ -6766,6 +6844,9 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
     if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
       printf("[CATEGORY ACTIVATE] Checking reserved-only for extension '%s', wm=%p\n",
              g_deferred_category_activation.source_extension_id.c_str(), (void *)wm);
+      printf("[CATEGORY ACTIVATE]   discover_new_category=%d, category_id='%s'\n",
+             g_deferred_category_activation.discover_new_category ? 1 : 0,
+             g_deferred_category_activation.category_id.c_str());
       fflush(stdout);
     }
 
@@ -6773,8 +6854,9 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
               wm, g_deferred_category_activation.source_extension_id.c_str()))
     {
       if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-        printf("[CATEGORY ACTIVATE] Reserved-only extension detected (source='%s'), switching to reserved category...\n",
+        printf("[CATEGORY ACTIVATE] *** RESERVED-ONLY EXTENSION DETECTED *** (source='%s')\n",
                g_deferred_category_activation.source_extension_id.c_str());
+        printf("[CATEGORY ACTIVATE] This will bypass new category activation and switch to reserved category\n");
         fflush(stdout);
       }
       const ScrArea *current_area = CTX_wm_area(C);
@@ -6796,8 +6878,14 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
       }
       else {
         if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-          printf("[CATEGORY ACTIVATE] Reserved-only switch failed (category may not have panels yet), will retry...\n");
+          printf("[CATEGORY ACTIVATE] Reserved-only switch FAILED (category may not have panels yet), will continue with normal activation...\n");
         }
+      }
+    }
+    else {
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[CATEGORY ACTIVATE] Extension is NOT reserved-only, proceeding with normal activation\n");
+        fflush(stdout);
       }
     }
   }
@@ -6857,6 +6945,14 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
     if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
       printf("[CATEGORY ACTIVATE] Discover mode: looking for new categories... (retry %d/30)\n",
              g_deferred_category_activation.discover_retry_count);
+      printf("[CATEGORY ACTIVATE]   region=%p, region->runtime=%p\n",
+             (void*)region, region ? (void*)region->runtime : nullptr);
+      if (region && region->runtime) {
+        printf("[CATEGORY ACTIVATE]   panels_category count: %d\n",
+               BLI_listbase_count(&region->runtime->panels_category));
+      }
+      printf("[CATEGORY ACTIVATE]   known categories before drop: %zu\n",
+             g_known_categories_before_extension_drop.size());
     }
 
     /* IMPORTANT: Search directly in region->runtime->panels_category, NOT through get_ordered_categories()!
@@ -6864,14 +6960,21 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
      * which would hide new categories that don't have tags assigned yet.
      * New extension categories must be discoverable regardless of tag filter state. */
     std::string new_category_id;
-    for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-      if (pc_dyn.idname && pc_dyn.idname[0]) {
-        if (!g_known_categories_before_extension_drop.contains(pc_dyn.idname)) {
-          new_category_id = pc_dyn.idname;
+    if (region && region->runtime) {
+      for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+        if (pc_dyn.idname && pc_dyn.idname[0]) {
           if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-            printf("[CATEGORY ACTIVATE]   Found new category: '%s'\n", new_category_id.c_str());
+            printf("[CATEGORY ACTIVATE]   Checking category: '%s', known=%d\n",
+                   pc_dyn.idname,
+                   g_known_categories_before_extension_drop.contains(pc_dyn.idname) ? 1 : 0);
           }
-          break; /* Take the first new category */
+          if (!g_known_categories_before_extension_drop.contains(pc_dyn.idname)) {
+            new_category_id = pc_dyn.idname;
+            if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+              printf("[CATEGORY ACTIVATE]   Found new category: '%s'\n", new_category_id.c_str());
+            }
+            break; /* Take the first new category */
+          }
         }
       }
     }
@@ -6925,6 +7028,52 @@ static void deferred_category_activation_execute(const bContext *C, ARegion *reg
     printf("[CATEGORY ACTIVATE]   Will activate new category: '%s'\n", category_id.c_str());
   }
   g_deferred_category_activation.discover_retry_count = 0; /* Reset retry counter */
+
+  /* Auto-activate "New Add-ons!" filter to show the new category immediately.
+   * Only activate if tag was not already assigned (i.e., category is truly new).
+   * Only activate once - don't re-activate if filter was already auto-activated. */
+  if (!g_deferred_category_activation.tag_already_assigned && current_area &&
+      !is_new_addon_filter_auto_activated(current_area)) {
+    set_new_addon_filter_active(const_cast<ScrArea *>(current_area), true, /*auto_activated=*/true);
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[NEW ADDON AUTO-ACTIVATE] Activated filter for discovered category: '%s', extension: '%s'\n",
+             new_category_id.c_str(), g_deferred_category_activation.source_extension_id.c_str());
+      fflush(stdout);
+    }
+  }
+  
+  /* IMPORTANT: Set the NEW category as active, not the first one in the list.
+   * This ensures user sees the category they just added via extension install.
+   * Do this AFTER filter activation check so category is set even if filter was already active. */
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[NEW ADDON AUTO-ACTIVATE] DEBUG: tag_already_assigned=%d, region=%p, new_category_id='%s', category_id='%s'\n",
+           g_deferred_category_activation.tag_already_assigned ? 1 : 0,
+           (void*)region,
+           new_category_id.c_str(),
+           category_id.c_str());
+    fflush(stdout);
+  }
+  if (!g_deferred_category_activation.tag_already_assigned && region && 
+      !category_id.empty()) {
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[NEW ADDON AUTO-ACTIVATE] Setting active category to: '%s'\n", category_id.c_str());
+      fflush(stdout);
+    }
+    panel_category_active_set(region, category_id.c_str());
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[NEW ADDON AUTO-ACTIVATE] Successfully set active category: '%s'\n", category_id.c_str());
+      fflush(stdout);
+    }
+  }
+  else {
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[NEW ADDON AUTO-ACTIVATE] SKIPPED: tag_already_assigned=%d, region=%p, category_id.empty()=%d\n",
+             g_deferred_category_activation.tag_already_assigned ? 1 : 0,
+             (void*)region,
+             category_id.empty() ? 1 : 0);
+      fflush(stdout);
+    }
+  }
   
   /* NEW: Check if this is a reserved-only extension and switch to reserved category instead.
    * This handles cases like Bool Tool, which creates panels only in reserved categories.
@@ -7119,6 +7268,17 @@ if (!g_deferred_category_activation.tag_key.empty()) {
     WM_event_add_notifier(const_cast<bContext *>(C), NC_WM | ND_CATEGORY_GLYPHS, nullptr);
     if (area) {
       ED_area_tag_redraw(const_cast<ScrArea *>(area));
+    }
+
+    /* Auto-deactivate "New Add-ons!" filter if it was auto-activated.
+     * This ensures the filter is turned off after the category gets its tag. */
+    if (area && is_new_addon_filter_auto_activated(area)) {
+      set_new_addon_filter_active(const_cast<ScrArea *>(area), false);
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[NEW ADDON AUTO-DEACTIVATE] Filter deactivated after tag assignment for category '%s'\n",
+               category_id.c_str());
+        fflush(stdout);
+      }
     }
 #else
     UNUSED_VARS(C);

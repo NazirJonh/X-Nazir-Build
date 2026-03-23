@@ -844,7 +844,12 @@ struct View3D {
    * When true, only pending (unassigned) categories are shown.
    */
   char new_addon_filter_active = 0;
-  char _pad_new_addon[3] = {0, 0, 0};
+  /**
+   * Whether the filter was auto-activated (not by user).
+   * Used to distinguish auto-activation (after extension install) from manual activation.
+   */
+  char new_addon_filter_auto_activated = 0;
+  char _pad_new_addon[2] = {0, 0};
 
   /**
    * Saved tag filter state when "New Add-on!" filter is activated.
@@ -852,10 +857,7 @@ struct View3D {
    */
   char saved_tag_filter_tags[256] = "";
 
-  int _pad2 = 0;
-  char _pad_before_ptr[4] = {0};
-
-  void *_pad1 = nullptr;
+  char _pad2[8] = {0};
 
   /** Runtime evaluation data (keep last). */
   View3D_Runtime runtime;

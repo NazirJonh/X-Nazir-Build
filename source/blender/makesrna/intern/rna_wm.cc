@@ -2420,7 +2420,6 @@ static void rna_KeyMapItem_update(Main * /*bmain*/, Scene * /*scene*/, PointerRN
 /* Update callback for CategoryTagDef properties - saves to JSON on change. */
 static void rna_CategoryTagDef_update(bContext *C, PointerRNA * /*ptr*/)
 {
-  printf("DEBUG: rna_CategoryTagDef_update CALLED! Sending NC_WM | ND_CATEGORY_GLYPHS\n");
 #  ifdef WITH_PYTHON
   const char *imports[] = {"bpy", nullptr};
   const char *save_cmd =
@@ -2429,7 +2428,6 @@ static void rna_CategoryTagDef_update(bContext *C, PointerRNA * /*ptr*/)
   BPY_run_string_exec(C, imports, save_cmd);
   /* Notify UI to update after JSON save */
   WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
-  printf("DEBUG: rna_CategoryTagDef_update: Notifier sent!\n");
 #  else
   (void)C;
 #  endif

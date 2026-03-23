@@ -777,7 +777,8 @@ static void tag_toggle_impl(bContext &C, const char *tag_name)
     return;
   }
 
-  /* Deactivate "New Add-on!" filter when clicking on a normal tag. */
+  /* Deactivate "New Add-on!" filter when clicking on a normal tag.
+   * This allows user to switch away from "New Add-ons!" filter to other tags. */
   if (is_new_addon_filter_active(area)) {
     set_saved_tag_filter_tags(area, "");
     set_new_addon_filter_active(area, false);
@@ -1023,10 +1024,12 @@ static int draw_new_addon_button(const bContext *C,
         /* Activating: save current tags, clear active tags to show only pending categories */
         set_saved_tag_filter_tags(cb_area, state.active_tags);
         state.active_tags[0] = '\0';
-        set_new_addon_filter_active(cb_area, true);
+        set_new_addon_filter_active(cb_area, true, /*auto_activated=*/false);
       }
       else {
-        /* Deactivating: restore saved tags */
+        /* Deactivating: restore saved tags.
+         * IMPORTANT: Clear auto_activated flag so filter won't be re-activated automatically.
+         * User manually deactivated the filter, so they want to see other categories. */
         char *saved_tags = get_saved_tag_filter_tags(cb_area);
         if (saved_tags && saved_tags[0] != '\0') {
           BLI_strncpy(state.active_tags, saved_tags, 256);
@@ -1034,7 +1037,7 @@ static int draw_new_addon_button(const bContext *C,
         else {
           state.active_tags[0] = '\0';
         }
-        set_new_addon_filter_active(cb_area, false);
+        set_new_addon_filter_active(cb_area, false, /*auto_activated=*/false);
       }
 
       WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
@@ -1911,6 +1914,11 @@ bool is_new_addon_filter_active(const ScrArea *area)
 
 void set_new_addon_filter_active(ScrArea *area, bool active)
 {
+  set_new_addon_filter_active(area, active, false);
+}
+
+void set_new_addon_filter_active(ScrArea *area, bool active, bool auto_activated)
+{
   if (!area || !area->spacedata.first) {
     return;
   }
@@ -1919,24 +1927,56 @@ void set_new_addon_filter_active(ScrArea *area, bool active)
     case SPACE_VIEW3D: {
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
       v3d->new_addon_filter_active = active ? 1 : 0;
+      v3d->new_addon_filter_auto_activated = auto_activated ? 1 : 0;
       break;
     }
     case SPACE_PROPERTIES: {
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
       sbuts->new_addon_filter_active = active ? 1 : 0;
+      sbuts->new_addon_filter_auto_activated = auto_activated ? 1 : 0;
       break;
     }
     case SPACE_NODE: {
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
       snode->new_addon_filter_active = active ? 1 : 0;
+      snode->new_addon_filter_auto_activated = auto_activated ? 1 : 0;
       break;
     }
     case SPACE_IMAGE: {
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
       sima->new_addon_filter_active = active ? 1 : 0;
+      sima->new_addon_filter_auto_activated = auto_activated ? 1 : 0;
       break;
     }
   }
+}
+
+bool is_new_addon_filter_auto_activated(const ScrArea *area)
+{
+  if (!area || !area->spacedata.first) {
+    return false;
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
+      return v3d->new_addon_filter_auto_activated != 0;
+    }
+    case SPACE_PROPERTIES: {
+      const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
+      return sbuts->new_addon_filter_auto_activated != 0;
+    }
+    case SPACE_NODE: {
+      const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
+      return snode->new_addon_filter_auto_activated != 0;
+    }
+    case SPACE_IMAGE: {
+      const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
+      return sima->new_addon_filter_auto_activated != 0;
+    }
+  }
+
+  return false;
 }
 
 char *get_saved_tag_filter_tags(const ScrArea *area)

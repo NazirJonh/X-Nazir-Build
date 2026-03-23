@@ -206,7 +206,12 @@ struct SpaceProperties {
    * When true, only pending (unassigned) categories are shown.
    */
   char new_addon_filter_active = 0;
-  char _pad_new_addon[3] = {0, 0, 0};
+  /**
+   * Whether the filter was auto-activated (not by user).
+   * Used to distinguish auto-activation (after extension install) from manual activation.
+   */
+  char new_addon_filter_auto_activated = 0;
+  char _pad_new_addon[2] = {0, 0};
 
   /**
    * Saved tag filter state when "New Add-on!" filter is activated.
@@ -214,10 +219,7 @@ struct SpaceProperties {
    */
   char saved_tag_filter_tags[256] = "";
 
-  int _pad2 = 0;
-  char _pad_before_ptr[4] = {0};
-
-  void *_pad1 = nullptr;
+  char _pad2[8] = {0};
 
   /* Doesn't necessarily need to be a pointer, but runtime structs are still written to files. */
   struct SpaceProperties_Runtime *runtime = nullptr;
@@ -784,7 +786,12 @@ struct SpaceImage {
    * When true, only pending (unassigned) categories are shown.
    */
   char new_addon_filter_active = 0;
-  char _pad_new_addon[3] = {0, 0, 0};
+  /**
+   * Whether the filter was auto-activated (not by user).
+   * Used to distinguish auto-activation (after extension install) from manual activation.
+   */
+  char new_addon_filter_auto_activated = 0;
+  char _pad_new_addon[2] = {0, 0};
 
   /**
    * Saved tag filter state when "New Add-on!" filter is activated.
@@ -792,8 +799,7 @@ struct SpaceImage {
    */
   char saved_tag_filter_tags[256] = "";
 
-  int _pad_tag_filter2 = 0;
-  char _pad_end[4] = {0};
+  char _pad_tag_filter2[8] = {0};
 };
 
 /** \} */
@@ -1041,7 +1047,11 @@ struct SpaceNode {
   char tag_bar_manually_hidden = 0;
   /** Whether tag bar was auto-shown due to new add-ons detection. */
   char has_new_addon_auto_shown = 0;
-  char _pad_new_addon = 0;
+  /**
+   * Whether the filter was auto-activated (not by user).
+   * Used to distinguish auto-activation (after extension install) from manual activation.
+   */
+  char new_addon_filter_auto_activated = 0;
 
   /**
    * Saved tag filter state when "New Add-on!" filter is activated.
@@ -1049,8 +1059,7 @@ struct SpaceNode {
    */
   char saved_tag_filter_tags[256] = "";
 
-  int _pad_tag_filter2 = 0;
-  char _pad_before_runtime[4] = {0};
+  char _pad_tag_filter2[8] = {0};
 
   ed::space_node::SpaceNode_Runtime *runtime = nullptr;
 };

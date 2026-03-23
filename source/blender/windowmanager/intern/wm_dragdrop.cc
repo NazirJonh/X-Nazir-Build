@@ -570,6 +570,15 @@ static wmDropBox *dropbox_active(bContext *C,
 
           drop_log_once("[DROP_ACTIVE] poll ok: drop='%s'\n", drop.opname);
 
+          /* Check if poll set disabled_info (e.g., blocked by filter).
+           * In this case, dropbox is active but drop is blocked - show disabled message. */
+          if (drag->drop_state.disabled_info.has_value()) {
+            drop_log_once("[DROP_ACTIVE] poll set disabled_info: '%s'\n",
+                          drag->drop_state.disabled_info.value().c_str());
+            CTX_store_set(C, nullptr);
+            return nullptr;
+          }
+
           const wm::OpCallContext opcontext = wm_drop_operator_context_get(&drop);
           if (drop.ot && WM_operator_poll_context(C, drop.ot, opcontext)) {
             /* Get dropbox tooltip now, #wm_drag_draw_tooltip can use a different draw context. */
@@ -707,18 +716,25 @@ void wm_drags_check_ops(bContext *C, const wmEvent *event)
   wmWindowManager *wm = CTX_wm_manager(C);
 
   bool any_active = false;
+  bool any_disabled = false;
   for (wmDrag &drag : wm->runtime->drags) {
     wm_drop_update_active(C, &drag, event);
 
     if (drag.drop_state.active_dropbox) {
       any_active = true;
+      /* Check if drop is disabled (e.g., blocked by filter) */
+      if (drag.drop_state.disabled_info.has_value()) {
+        any_disabled = true;
+      }
     }
   }
 
   /* Change the cursor to display that dropping isn't possible here. But only if there is something
    * being dragged actually. Cursor will be restored in #wm_drags_exit(). */
   if (!BLI_listbase_is_empty(&wm->runtime->drags)) {
-    WM_cursor_modal_set(CTX_wm_window(C), any_active ? WM_CURSOR_DEFAULT : WM_CURSOR_STOP);
+    /* Show stop cursor if no active dropbox OR if drop is disabled */
+    WM_cursor_modal_set(CTX_wm_window(C),
+                        (any_active && !any_disabled) ? WM_CURSOR_DEFAULT : WM_CURSOR_STOP);
   }
 }
 

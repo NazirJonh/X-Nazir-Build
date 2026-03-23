@@ -7481,6 +7481,18 @@ static wmOperatorStatus category_tab_extension_drop_invoke(bContext *C,
     area_under_cursor = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, event->xy);
     if (area_under_cursor) {
       region = ED_area_find_region_xy_visual(area_under_cursor, RGN_TYPE_ANY, event->xy);
+
+      /* Block drop on tabs when "New Add-ons!" filter is active.
+       * This check is also in poll, but we verify here for safety. */
+      if (region && BKE_regiontype_uses_category_tabs(region->runtime->type) &&
+          ED_region_panel_category_gutter_isect_xy(area_under_cursor, region, event->xy) &&
+          ui::is_new_addon_filter_active(area_under_cursor))
+      {
+        BKE_report(op->reports,
+                   RPT_WARNING,
+                   "Cannot drop on tabs while 'New Add-ons!' is active. Switch to a tag first.");
+        return OPERATOR_CANCELLED;
+      }
     }
   }
 
@@ -7923,6 +7935,8 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
   if (!region_supports_category_tabs) {
     drop_log_once("[EXT_DROP_POLL] Region doesn't support category tabs (region=%d), accepting\n", region->regiontype);
     category_tab_extension_preview_clear_all_in_screen(screen);
+    /* Clear any previous disabled_info when moving to non-tab region */
+    drag->drop_state.disabled_info = std::nullopt;
     /* Accept the drop - invoke will set pending extension context via Python */
     return true;
   }
@@ -7932,6 +7946,8 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
   const bool has_visible_tabs = ui::panel_category_tabs_is_visible(region);
   if (!has_visible_tabs) {
     drop_log_once("[EXT_DROP_POLL] No visible tabs, checking tab creation area\n");
+    /* Clear any previous disabled_info when no tabs visible */
+    drag->drop_state.disabled_info = std::nullopt;
 
     /* For regions without visible tabs, allow drops in the left/right edge area where tabs would appear */
     const int alignment = RGN_ALIGN_ENUM_FROM_MASK(region->alignment);
@@ -7965,6 +7981,18 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
       ui::category_tabs_extension_preview_clear(region);
       return false;
     }
+
+    /* When "New Add-ons!" filter is active, don't allow drag & drop onto tabs.
+     * This filter is for viewing categories, not for assigning tags via drag.
+     * User should first switch to a tag or disable filter before dropping.
+     * Return true but set disabled_info to show error tooltip and stop cursor. */
+    if (ui::is_new_addon_filter_active(area)) {
+      drop_log_once("[EXT_DROP_POLL] BLOCKED: 'New Add-ons!' filter is active\n");
+      drag->drop_state.disabled_info = RPT_("Cannot drop on tabs while 'New Add-ons!' is active. Switch to a tag first.");
+      ui::category_tabs_extension_preview_clear(region);
+      /* Return true so tooltip/droptip can show the disabled message */
+      return true;
+    }
   }
   /* For regions without visible tabs, we already checked the tab creation area above */
 
@@ -7991,6 +8019,8 @@ static bool category_tab_extension_drop_poll(bContext *C, wmDrag *drag, const wm
                     hovered_category_id ? hovered_category_id : "(none)",
                     hovered_target_index,
                     insert_above ? 1 : 0);
+      /* Clear any previous disabled_info when drop is allowed */
+      drag->drop_state.disabled_info = std::nullopt;
       return true;
     }
 
@@ -8076,6 +8106,15 @@ static void category_tab_extension_drop_draw_droptip(bContext *C,
     if (!ED_region_panel_category_gutter_isect_xy(area, region, xy)) {
       drop_log_once("[EXT_DROP_DRAW] ABORT: not in category gutter, preview_active=%d\n",
                     ui::category_tabs_extension_preview_is_active(region) ? 1 : 0);
+      ui::category_tabs_extension_preview_clear(region);
+      return;
+    }
+
+    /* If drop is disabled (e.g., "New Add-ons!" filter active), don't draw ghost tab.
+     * The disabled_info message will be shown by the drag & drop system. */
+    if (drag->drop_state.disabled_info.has_value()) {
+      drop_log_once("[EXT_DROP_DRAW] DROP DISABLED: %s\n",
+                    drag->drop_state.disabled_info.value().c_str());
       ui::category_tabs_extension_preview_clear(region);
       return;
     }
@@ -8452,7 +8491,19 @@ static std::string category_tab_extension_drop_tooltip(bContext *C,
                                                        const int xy[2],
                                                        wmDropBox * /*drop*/)
 {
+  /* Use region_from if available, otherwise try to get region from current context.
+   * This is needed because tooltip is called before region_from is set on first frame. */
   ARegion *region = drag->drop_state.region_from;
+  if (!region) {
+    bScreen *screen = CTX_wm_screen(C);
+    if (screen) {
+      ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, xy);
+      if (area) {
+        region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, xy);
+      }
+    }
+  }
+
   if (!region || !ui::panel_category_tabs_is_visible(region)) {
     return "";
   }

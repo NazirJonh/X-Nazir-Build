@@ -105,6 +105,11 @@ Block *category_tab_popup_block = nullptr;
 double category_tab_popup_close_time = 0.0;
 char category_tab_last_closed_category[64] = "";
 
+/* Local tag filter mode for the edit popup (0 = all tags, 1+ = current mode).
+ * This is separate from wm->category_tag_filter_mode to prevent cross-UI interference.
+ * When the popup opens, it initializes from the global setting, but changes only affect the popup. */
+static char category_tab_popup_local_filter_mode = 0;
+
 /* Log deduplication for repetitive debug messages */
 static std::unordered_set<std::string> logged_messages;
 static constexpr size_t MAX_LOGGED_MESSAGES = 500;
@@ -1377,25 +1382,66 @@ static void tag_tooltip_data_free(void *arg)
 
 static MenuType *category_tag_filter_toggle_menu_type = nullptr;
 
+/**
+ * Operator to set the popup's local tag filter mode.
+ * This only affects the edit popup, not the global wm->category_tag_filter_mode.
+ */
+static wmOperatorStatus category_tab_popup_filter_set_exec(bContext *C, wmOperator *op)
+{
+  const bool use_current_mode = RNA_boolean_get(op->ptr, "use_current_mode");
+  
+  /* Set the popup's local filter mode */
+  if (use_current_mode) {
+    /* Get current object mode and convert to filter mode enum value */
+    category_tab_popup_local_filter_mode = get_current_object_mode_filter_value(C);
+  }
+  else {
+    /* Show all tags */
+    category_tab_popup_local_filter_mode = 0;
+  }
+  
+  /* Trigger redraw */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  
+  return OPERATOR_FINISHED;
+}
+
+void SCREEN_OT_category_tab_popup_filter_set(wmOperatorType *ot)
+{
+  ot->name = "Set Popup Tag Filter Mode";
+  ot->idname = "SCREEN_OT_category_tab_popup_filter_set";
+  ot->description = "Set tag filter mode for the edit popup (Current Mode or All Tags)";
+  
+  ot->exec = category_tab_popup_filter_set_exec;
+  
+  RNA_def_boolean(
+      ot->srna,
+      "use_current_mode",
+      true,
+      "Use Current Mode",
+      "Filter tags by current object mode (True) or show all tags (False)"
+  );
+}
+
 static void category_tag_filter_toggle_menu_draw(const bContext *C, Menu *menu)
 {
   Layout &layout = *menu->layout;
-  wmWindowManager *wm = CTX_wm_manager(C);
 
-  /* Get current filter state */
-  bool use_current_mode = (wm->category_tag_filter_mode != 0);
+  /* Use the popup's local filter mode, not the global wm->category_tag_filter_mode.
+   * This prevents changes in the popup from affecting the Preferences UI list filtering. */
+  bool use_current_mode = (category_tab_popup_local_filter_mode != 0);
 
   /* "Current Mode" button - activates filtering by current object mode */
   /* Use radiobutton icons to indicate active state */
   int current_mode_icon = use_current_mode ? ICON_RADIOBUT_ON : ICON_RADIOBUT_OFF;
   PointerRNA current_mode_ptr = layout.op(
-      "wm.category_tag_filter_set_mode", IFACE_("Current Mode"), current_mode_icon);
+      "SCREEN_OT_category_tab_popup_filter_set", IFACE_("Current Mode"), current_mode_icon);
   RNA_boolean_set(&current_mode_ptr, "use_current_mode", true);
 
   /* "All Tags" button - shows all tags regardless of mode */
   int all_tags_icon = use_current_mode ? ICON_RADIOBUT_OFF : ICON_RADIOBUT_ON;
   PointerRNA all_tags_ptr = layout.op(
-      "wm.category_tag_filter_set_mode", IFACE_("All Tags"), all_tags_icon);
+      "SCREEN_OT_category_tab_popup_filter_set", IFACE_("All Tags"), all_tags_icon);
   RNA_boolean_set(&all_tags_ptr, "use_current_mode", false);
 }
 
@@ -3078,9 +3124,10 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
   layout.separator();
 
   /* Tags section in a sub-panel - only show for non-reserved categories */
-  /* Get filter mode from window manager (0 = all tags). */
+  /* Get filter mode from popup's local state (0 = all tags).
+   * This is separate from wm->category_tag_filter_mode to prevent cross-UI interference. */
   uint32_t filter_mode_flag = 0;
-  switch (wm->category_tag_filter_mode) {
+  switch (category_tab_popup_local_filter_mode) {
     case 1:
       filter_mode_flag = uint32_t(CategoryTagMode::OBJECT_MODE);
       break;
@@ -3626,8 +3673,20 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   /* Check for existing override and populate properties */
   wmWindowManager *wm = CTX_wm_manager(C);
 
-  /* Default the tag filter to the current editor/object mode for this session. */
-  wm->category_tag_filter_mode = get_current_object_mode_filter_value(C);
+  /* NOTE: Do NOT reset wm->category_tag_filter_mode here.
+   * This is a global preference used by the Preferences "Tags" UI-list to filter visible tags.
+   * Previously, opening this popup would reset the filter to the current context mode,
+   * causing confusing cross-UI synchronization where opening the edit popup would change
+   * which tags are visible in Preferences.
+   * The popup has its own "Filter Tags" menu (Current Mode / All Tags) that users can use
+   * to control tag filtering within the popup without affecting the global preference.
+   */
+
+  /* Initialize popup's local filter mode to Current Mode by default.
+   * This ensures the edit dialog always starts with mode-specific tag filtering enabled,
+   * showing only tags relevant to the current object/editor mode.
+   * Subsequent changes in the popup won't affect Preferences. */
+  category_tab_popup_local_filter_mode = get_current_object_mode_filter_value(C);
 
   const CategoryTabInvokeLoadResult invoke_load = category_tab_invoke_load_operator_state_from_items(
       op->ptr, wm, region, category, space_type);

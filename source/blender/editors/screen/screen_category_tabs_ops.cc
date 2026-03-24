@@ -1537,6 +1537,8 @@ void ED_operatortypes_screen_category_tabs()
   WM_operatortype_append(SCREEN_OT_category_tab_reset);
   WM_operatortype_append(SCREEN_OT_category_tab_paste_glyph);
   WM_operatortype_append(ui::WM_OT_glyph_picker_grid);
+  /* Popup-local tag filter mode operator */
+  WM_operatortype_append(ui::SCREEN_OT_category_tab_popup_filter_set);
 }
 
 /** \} */

@@ -1199,6 +1199,11 @@ void category_tag_filter_menu_register();
 void category_tag_filter_toggle_menu_register();
 
 /**
+ * Popup-local tag filter operator.
+ */
+void SCREEN_OT_category_tab_popup_filter_set(wmOperatorType *ot);
+
+/**
  * Centered popup operator registration.
  */
 void centered_popup_operator_register();

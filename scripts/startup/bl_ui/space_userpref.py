@@ -1206,6 +1206,11 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
 # categories as originating from that extension.
 _pending_extension_context = None  # dict or None: {"extension_id": str, "space_type": int, "mode_flag": int}
 
+# Flag to indicate that an extension was just installed from disk (Install from Disk operator).
+# This is used to optimize Python file scanning - we only scan Python files for bl_category
+# when an extension is installed from disk, not for drag-and-drop installs.
+_install_from_disk_just_occurred = False
+
 # Preview mode flag: set to True during tag preview in edit dialog to prevent
 # automatic WM synchronization that would cause categories to disappear from "New Add-ons!" filter
 _preview_mode_active = False
@@ -1222,7 +1227,21 @@ def set_preview_mode_active(active):
     category_debug_print(f"[DEBUG set_preview_mode_active] Set to {active}")
 
 
-def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag_already_assigned=False):
+def _scan_extension_icon_path(pkg_path: str):
+    """Scan extension package directory for icon file (icon.png, icon.webp, icon.jpg, icon.jpeg).
+    
+    Returns:
+        Tuple of (icon_path, icon_filename) or (None, None) if not found.
+    """
+    icon_filenames = ("icon.png", "icon.webp", "icon.jpg", "icon.jpeg")
+    for icon_name in icon_filenames:
+        icon_path = os.path.join(pkg_path, icon_name)
+        if os.path.isfile(icon_path):
+            return icon_path, icon_name
+    return None, None
+
+
+def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag_already_assigned=False, is_install_from_disk=False):
     """Record the extension that was just installed so the next category discovery
     can mark any new categories as pending tag assignment.
 
@@ -1235,15 +1254,40 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
         mode_flag:            Bitmask of mode flags where the extension was activated.
         tag_already_assigned: If True, the category was dropped onto tabs and will be visible
                               without tag filtering. Don't show "New Add-ons!" button.
+        is_install_from_disk: If True, the extension was installed via "Install from Disk" operator.
+                              This triggers Python file scanning for bl_category values.
     """
-    global _pending_extension_context, _glyph_cache
+    global _pending_extension_context, _glyph_cache, _install_from_disk_just_occurred
     _pending_extension_context = {
         "extension_id": extension_id,
         "space_type": space_type,
         "mode_flag": mode_flag,
         "timestamp": time.time(),
         "tag_already_assigned": tag_already_assigned,
+        "is_install_from_disk": is_install_from_disk,
     }
+    # Set flag to trigger Python file scanning only for Install from Disk
+    _install_from_disk_just_occurred = is_install_from_disk
+    
+    # OPTIMIZATION: For Install from Disk, scan for icon file once and cache the result
+    # This avoids repeated disk scans for icon detection in _auto_detect_extension_icon_path
+    if is_install_from_disk:
+        try:
+            import importlib
+            module = importlib.import_module(extension_id.replace("add-on-", "bl_ext."))
+            pkg_path = os.path.dirname(getattr(module, "__file__", ""))
+            if pkg_path and os.path.isdir(pkg_path):
+                icon_path, icon_name = _scan_extension_icon_path(pkg_path)
+                if icon_path:
+                    category_debug_print(f"[ICON SCAN] Found icon for extension {extension_id!r}: {icon_path!r}")
+                    # Store in a temporary cache for use in _merge_discovered_categories
+                    if not hasattr(extension_post_install_handler, "_icon_cache"):
+                        extension_post_install_handler._icon_cache = {}
+                    extension_post_install_handler._icon_cache[extension_id] = icon_path
+                else:
+                    category_debug_print(f"[ICON SCAN] No icon found for extension {extension_id!r}")
+        except Exception as e:
+            category_debug_print(f"[ICON SCAN] Failed to scan icon for {extension_id!r}: {e}")
 
     # Opportunistically mark already-known categories from this extension as pending.
     # This is needed when the category already exists in the cache but is not rediscovered
@@ -1582,8 +1626,16 @@ def _manifest_field_match_keys(field_value: str):
     return keys
 
 
-def _extension_manifest_match_keys(pkg_path: str, pkg_name: str):
-    """Collect normalized keys from extension folder + manifest for category matching."""
+def _extension_manifest_match_keys(pkg_path: str, pkg_name: str, scan_python_files: bool = True):
+    """Collect normalized keys from extension folder + manifest for category matching.
+    
+    Args:
+        pkg_path: Path to the extension package directory.
+        pkg_name: Package name from the manifest.
+        scan_python_files: If True, scan Python files for bl_category values.
+                          Set to False for performance optimization when scanning
+                          is not needed (e.g., drag-and-drop installs).
+    """
     keys = set()
     if pkg_name:
         keys.add(_normalize_category_key(pkg_name))
@@ -1609,35 +1661,37 @@ def _extension_manifest_match_keys(pkg_path: str, pkg_name: str):
         # Also scan Python files for panel bl_category values.
         # This handles cases where panel bl_category differs from manifest name
         # (e.g., Edge Length Measure extension uses "Edge Length" as bl_category).
-        import re
-        py_files_scanned = 0
-        bl_categories_found = []
-        for root, dirs, files in os.walk(pkg_path):
-            # Skip __pycache__ and hidden directories
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
-            for filename in files:
-                if not filename.endswith('.py'):
-                    continue
-                py_path = os.path.join(root, filename)
-                py_files_scanned += 1
-                try:
-                    with open(py_path, 'r', encoding='utf-8', errors='ignore') as py_file:
-                        content = py_file.read()
-                    # Find bl_category assignments in Panel classes
-                    for match in re.finditer(r'bl_category\s*=\s*["\']([^"\']+)["\']', content):
-                        panel_category = match.group(1).strip()
-                        if panel_category:
-                            normalized = _normalize_category_key(panel_category)
-                            keys.add(normalized)
-                            bl_categories_found.append(f"{panel_category} -> {normalized}")
-                            category_debug_print(f"[MANIFEST] Found bl_category='{panel_category}' in {os.path.relpath(py_path, pkg_path)} -> normalized='{normalized}'")
-                except Exception as e:
-                    #Man category_debug_print(f"[MANIFEST] Failed to scan {py_path!r}: {e}")
-                    pass
-        
-        if py_files_scanned > 0:
-            # category_debug_print(f"[MANIFEST] Scanned {py_files_scanned} Python files in {pkg_path!r}, found bl_categories: {bl_categories_found}")
-            pass
+        # OPTIMIZATION: Only scan Python files when explicitly requested (Install from Disk).
+        if scan_python_files:
+            import re
+            py_files_scanned = 0
+            bl_categories_found = []
+            for root, dirs, files in os.walk(pkg_path):
+                # Skip __pycache__ and hidden directories
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
+                for filename in files:
+                    if not filename.endswith('.py'):
+                        continue
+                    py_path = os.path.join(root, filename)
+                    py_files_scanned += 1
+                    try:
+                        with open(py_path, 'r', encoding='utf-8', errors='ignore') as py_file:
+                            content = py_file.read()
+                        # Find bl_category assignments in Panel classes
+                        for match in re.finditer(r'bl_category\s*=\s*["\']([^"\']+)["\']', content):
+                            panel_category = match.group(1).strip()
+                            if panel_category:
+                                normalized = _normalize_category_key(panel_category)
+                                keys.add(normalized)
+                                bl_categories_found.append(f"{panel_category} -> {normalized}")
+                                category_debug_print(f"[MANIFEST] Found bl_category='{panel_category}' in {os.path.relpath(py_path, pkg_path)} -> normalized='{normalized}'")
+                    except Exception as e:
+                        #Man category_debug_print(f"[MANIFEST] Failed to scan {py_path!r}: {e}")
+                        pass
+            
+            if py_files_scanned > 0:
+                # category_debug_print(f"[MANIFEST] Scanned {py_files_scanned} Python files in {pkg_path!r}, found bl_categories: {bl_categories_found}")
+                pass
         #category_debug_print(f"[MANIFEST] Final keys for pkg_name={pkg_name!r}: {keys}")
     except Exception as e:
         pass  # category_debug_print(f"[MANIFEST] manifest parse failed: pkg_path={pkg_path!r}, error={e}")
@@ -1681,7 +1735,9 @@ def _auto_detect_extension_icon_path(category: str):
                 if not os.path.isdir(pkg_path):
                     continue
 
-                match_keys = _extension_manifest_match_keys(pkg_path, pkg_name)
+                # OPTIMIZATION: Don't scan Python files for icon detection.
+                # Manifest fields are sufficient for matching categories to extensions.
+                match_keys = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=False)
                 exact_match = target_key in match_keys
                 fuzzy_match_key = ""
                 if not exact_match:
@@ -5308,7 +5364,7 @@ def _discover_active_categories():
 
 def _merge_discovered_categories():
     """Merge discovered categories with cached mappings, adding defaults for new ones."""
-    global _glyph_cache, _category_orders_cache, _pending_extension_context
+    global _glyph_cache, _category_orders_cache, _pending_extension_context, _install_from_disk_just_occurred
     
     category_debug_print(f"[MERGE DEBUG] _merge_discovered_categories START")
     category_debug_print(f"[MERGE DEBUG] Pending extension context: {_pending_extension_context}")
@@ -5524,7 +5580,10 @@ def _merge_discovered_categories():
 
     # Update icon_path for existing categories with icon_source='auto' and no icon_path
     # This ensures that extension icons are detected even for categories that were cached before
+    # OPTIMIZATION: Use cached icon path from extension_post_install_handler if available
     existing_categories_needing_icon_update = []
+    icon_cache = getattr(extension_post_install_handler, "_icon_cache", {})
+    
     for category in discovered:
         if category in new_categories:
             continue  # Skip new categories, they are handled below
@@ -5535,7 +5594,20 @@ def _merge_discovered_categories():
                 icon_source = cached_data.get("icon_source", "auto")
                 icon_path = cached_data.get("icon_path", "")
                 if icon_source == "auto" and not icon_path:
-                    detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
+                    # Try to get extension_id and use cached icon path
+                    detected_icon_path = None
+                    detected_provider = None
+                    ext_id = cached_data.get("source_extension", "")
+                    
+                    if ext_id and ext_id in icon_cache:
+                        detected_icon_path = icon_cache[ext_id]
+                        detected_provider = "extension_auto"
+                        category_debug_print(f"[ICON CACHE] Using cached icon for existing category {category!r}: {detected_icon_path!r}")
+                    
+                    # Fallback to disk scan only if no cached icon
+                    if not detected_icon_path:
+                        detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
+                    
                     if detected_icon_path:
                         cached_data["icon_path"] = detected_icon_path
                         cached_data["icon_provider"] = detected_provider or "extension_auto"
@@ -5775,6 +5847,12 @@ def _merge_discovered_categories():
                 category_debug_print(f"[MERGE AUTO-EXT DEBUG] enabled_extensions: {list(enabled_extensions.keys())}")
                 
                 # Build manifest match keys for each extension (includes Python file bl_category scanning)
+                # OPTIMIZATION: Only scan Python files when _install_from_disk_just_occurred is True
+                # (i.e., when extension was installed via "Install from Disk" operator).
+                # For drag-and-drop installs, skip Python file scanning to avoid UI freeze.
+                should_scan_python_files = _install_from_disk_just_occurred
+                category_debug_print(f"[MERGE AUTO-EXT DEBUG] _install_from_disk_just_occurred={_install_from_disk_just_occurred}, will scan Python files={should_scan_python_files}")
+                
                 extension_manifest_keys = {}
                 for ext_id, ext_info in enabled_extensions.items():
                     pkg_name = ext_info["pkg_name"]
@@ -5786,7 +5864,7 @@ def _merge_discovered_categories():
                         pkg_path = os.path.dirname(getattr(module, "__file__", ""))
                         category_debug_print(f"[MERGE AUTO-EXT DEBUG] pkg_path={pkg_path!r}, isdir={os.path.isdir(pkg_path) if pkg_path else False}")
                         if pkg_path and os.path.isdir(pkg_path):
-                            extension_manifest_keys[ext_id] = _extension_manifest_match_keys(pkg_path, pkg_name)
+                            extension_manifest_keys[ext_id] = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=should_scan_python_files)
                             category_debug_print(f"[MERGE AUTO-EXT DEBUG] manifest_keys for {ext_id!r}: {extension_manifest_keys[ext_id]}")
                         else:
                             extension_manifest_keys[ext_id] = set()
@@ -6022,7 +6100,22 @@ def _merge_discovered_categories():
                     f"as pending from extension {ext_id!r}"
                 )
 
-            detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
+            # OPTIMIZATION: Use cached icon path from extension_post_install_handler if available
+            # This avoids repeated disk scans for icon detection
+            detected_icon_path = None
+            detected_provider = None
+            
+            # Check if we have a cached icon path from Install from Disk
+            icon_cache = getattr(extension_post_install_handler, "_icon_cache", {})
+            if ext_id and ext_id in icon_cache:
+                detected_icon_path = icon_cache[ext_id]
+                detected_provider = "extension_auto"
+                category_debug_print(f"[ICON CACHE] Using cached icon for category {category!r}: {detected_icon_path!r}")
+            
+            # Fallback to disk scan only if no cached icon (for backward compatibility)
+            if not detected_icon_path:
+                detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
+            
             if detected_icon_path:
                 _glyph_cache[cache_key]["icon_path"] = detected_icon_path
                 _glyph_cache[cache_key]["icon_provider"] = detected_provider or "extension_auto"
@@ -6071,6 +6164,12 @@ def _merge_discovered_categories():
 
     else:
         category_debug_print(f"[GLYPH] No new categories found (all {len(discovered)} are cached)")
+
+    # Reset the install-from-disk flag after it has been consumed
+    # This ensures Python file scanning only happens once per Install from Disk operation
+    if _install_from_disk_just_occurred:
+        category_debug_print("[MERGE] Resetting _install_from_disk_just_occurred flag after use")
+        _install_from_disk_just_occurred = False
 
     return (len(new_categories) > 0 or cache_changed or
             bool(existing_categories_needing_icon_update) or

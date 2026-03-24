@@ -2933,6 +2933,24 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
                     except Exception as handler_ex:
                         print(f"Extension post-install handler error: {handler_ex}")
 
+                # Call extension_post_install_handler with is_install_from_disk=True for each installed package.
+                # This triggers Python file scanning for bl_category values only for Install from Disk operations.
+                from bl_ui.space_userpref import extension_post_install_handler
+                for pkg_id in self.pkg_id_sequence:
+                    # Build extension_id in the format expected by extension_post_install_handler
+                    # Format: "add-on-{pkg_name}" where pkg_name is the full module path
+                    repo_module = repo_item.module
+                    extension_id = f"add-on-{repo_module}.{pkg_id}"
+                    if EXTENSION_DEBUG_ENABLED:
+                        print(f"[PYTHON] Calling extension_post_install_handler for Install from Disk: {extension_id!r}")
+                    extension_post_install_handler(
+                        extension_id=extension_id,
+                        space_type=-1,  # Global
+                        mode_flag=0,
+                        tag_already_assigned=False,
+                        is_install_from_disk=True  # Trigger Python file scanning
+                    )
+
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that extension installation is complete.
                 if EXTENSION_DEBUG_ENABLED:

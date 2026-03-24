@@ -3042,6 +3042,9 @@ void operatortypes_ui()
   /* Centered popup operator wrapper */
   centered_popup_operator_register();
 
+  /* Category tab icon picker */
+  WM_operatortype_append(SCREEN_OT_category_tab_icon_picker);
+
   WM_operatortype_append(UI_OT_override_add_button);
   WM_operatortype_append(UI_OT_override_remove_button);
   WM_operatortype_append(UI_OT_override_idtemplate_make);

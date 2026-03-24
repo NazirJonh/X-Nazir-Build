@@ -43,10 +43,15 @@
 #include "UI_interface_c.hh"
 #include "UI_interface_icons.hh"
 #include "UI_resources.hh"
+#include "RNA_enum_types.hh"
 
 #include "MEM_guardedalloc.h"
 
 #include "BLF_api.hh"
+
+#include "GPU_immediate.hh"
+#include "GPU_matrix.hh"
+#include "GPU_state.hh"
 
 namespace blender::ui {
 
@@ -71,7 +76,7 @@ static std::map<const wmWindowManager *, TagBarRuntimeData *> g_tag_bar_cache;
 
 /* Master debug flag for tag bar operations.
  * Set to false to disable all debug output in this module. */
-static constexpr bool TAG_BAR_DEBUG_ENABLED = false;
+static constexpr bool TAG_BAR_DEBUG_ENABLED = true;
 
 /**
  * Convert CategoryTagMode bit flag to category_tag_filter_mode enum value.
@@ -406,8 +411,12 @@ void tag_bar_buttons_update(const bContext *C,
   /* Get current mode bit for filtering. */
   const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
 
+  /* DEBUG: Log current mode flag */
+  printf("[TAG_BAR] current_mode_flag=%u\n", current_mode_flag);
+
   /* Iterate through all tags from wm in their original order (from JSON tag_order) */
   if (wm && category_tag_list_is_valid(&wm->category_tags)) {
+    printf("[TAG_BAR] Iterating through %d tags\n", BLI_listbase_count(&wm->category_tags));
     for (const CategoryTagDef *tag_def =
              static_cast<const CategoryTagDef *>(wm->category_tags.first);
          tag_def;
@@ -418,14 +427,41 @@ void tag_bar_buttons_update(const bContext *C,
       STRNCPY(btn.glyph, tag_def->glyph);
       copy_v3_v3(btn.color, tag_def->color);
 
+      /* Store icon_key for fallback rendering */
+      STRNCPY(btn.icon_key, tag_def->icon_key);
+
+      /* NEW: Resolve icon from icon_key */
+      btn.icon_id = ICON_NONE;
+      btn.use_builtin_icon = false;
+
+      /* DEBUG: Log tag properties from WM */
+      printf("[TAG_BAR] tag='%s' icon_source=%d icon_key='%s' glyph='%s'\n",
+             tag_def->name, tag_def->icon_source, tag_def->icon_key, tag_def->glyph);
+
+      if (tag_def->icon_source == 1 && tag_def->icon_key[0] != '\0') {
+        /* icon_source == 1 means use Blender icon */
+        btn.icon_id = category_tab_icon_id_resolve_from_key_path(tag_def->icon_key, nullptr);
+        btn.use_builtin_icon = (btn.icon_id != ICON_NONE);
+        printf("[TAG_BAR] tag='%s' resolved icon_id=%d use_builtin_icon=%d\n",
+               tag_def->name, btn.icon_id, btn.use_builtin_icon);
+      }
+
       /* Check if this tag should be visible:
-       * 1. Must have a glyph (not empty)
+       * 1. Must have a glyph (not empty) OR icon (if using icon mode)
        * 2. Must be active for current mode (mode_flags check)
        */
       btn.is_visible = false;
 
-      /* Check if glyph exists and is not empty */
-      if (tag_def->glyph[0] == '\0') {
+      /* Check if glyph/icon exists */
+      const bool has_glyph = (tag_def->glyph[0] != '\0');
+      /* Check has_icon based on icon_key presence, not icon_id resolution success
+       * icon_id may be ICON_NONE if resolution fails, but we should still show the tag */
+      const bool has_icon = (tag_def->icon_source == 1 && tag_def->icon_key[0] != '\0');
+
+      printf("[TAG_BAR] tag='%s' has_glyph=%d has_icon=%d mode_flags=%u current_mode_flag=%u\n",
+             tag_def->name, has_glyph, has_icon, tag_def->mode_flags, current_mode_flag);
+
+      if (!has_glyph && !has_icon) {
         btn.is_visible = false;
       }
       else {
@@ -437,6 +473,9 @@ void tag_bar_buttons_update(const bContext *C,
           btn.is_visible = (tag_def->mode_flags & current_mode_flag) != 0;
         }
       }
+
+      printf("[TAG_BAR] tag='%s' final is_visible=%d\n",
+             tag_def->name, btn.is_visible);
 
       btn.is_hovered = false;
       /* Check if this tag is in the active tags list */
@@ -458,12 +497,26 @@ void tag_bar_buttons_update(const bContext *C,
 
       /* Append button - order is preserved from wm->category_tags (JSON tag_order) */
       data->buttons.append(btn);
+      printf("[TAG_BAR] Added button for tag='%s' is_visible=%d has_glyph=%d has_icon=%d\n",
+             btn.tag_name, btn.is_visible, (btn.glyph[0] != '\0'), btn.use_builtin_icon);
     }
   }
 
   /* NOTE: No sorting here! The order from wm->category_tags matches JSON's "tag_order".
    * Python code uses _tag_order_cache which is loaded from JSON, and the ListBase
    * is populated in that same order during JSON loading. */
+
+  printf("[TAG_BAR] Total buttons added: %llu (visible: %zu)\n",
+         (unsigned long long)data->buttons.size(),
+         std::count_if(data->buttons.begin(), data->buttons.end(),
+                      [](const TagButton& b) { return b.is_visible; }));
+
+  /* DEBUG: List all buttons */
+  printf("[TAG_BAR] All buttons after creation:\n");
+  for (const TagButton &btn : data->buttons) {
+    printf("[TAG_BAR]   - '%s': is_visible=%d icon_key='%s' icon_id=%d\n",
+           btn.tag_name, int(btn.is_visible), btn.icon_key, btn.icon_id);
+  }
 
   /* Check if "New Add-on!" virtual button should be shown. */
   const ScrArea *area = C ? CTX_wm_area(C) : nullptr;
@@ -1101,6 +1154,85 @@ int tag_bar_draw_new_addon_button(const bContext *C,
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Tag Icon Drawing Helper
+ * \{ */
+
+/**
+ * Darken RGB color by factor (0.0 = no change, 1.0 = black).
+ */
+static void darken_color_3ub(uchar color[3], const float factor)
+{
+  BLI_assert(factor >= 0.0f && factor <= 1.0f);
+
+  for (int i = 0; i < 3; i++) {
+    color[i] = uchar(color[i] * (1.0f - factor));
+  }
+}
+
+/**
+ * Draw a Blender icon for a tag button with proper tinting.
+ * Monochrome icons get tag color tint, colored icons keep original.
+ */
+static void draw_tag_icon_with_tint(const TagButton &btn,
+                                     float x, float y,
+                                     float icon_size,
+                                     float darken_factor)
+{
+  int icon_id_to_draw = btn.icon_id;
+
+  /* If icon_id is NONE but we have icon_key, try to resolve it now.
+   * Special case for FUND is handled manually if resolution fails. */
+  if (icon_id_to_draw == ICON_NONE && btn.icon_key[0] != '\0') {
+    icon_id_to_draw = category_tab_icon_id_resolve_from_key_path(btn.icon_key, nullptr);
+  }
+
+  if (icon_id_to_draw == ICON_NONE) {
+    if (strcmp(btn.icon_key, "FUND") == 0) {
+      /* Hardcoded fallback for Development Fund icon if not in RNA.
+       * We try to use the Blender logo icon if FUND is not resolvable. */
+      RNA_enum_value_from_identifier(rna_enum_icon_items, "BLENDER", &icon_id_to_draw);
+    }
+  }
+
+  if (icon_id_to_draw == ICON_NONE) {
+    return;
+  }
+
+  uchar icon_tint[4] = {255, 255, 255, 255};
+
+  /* Check if icon is monochrome (can be tinted). */
+  uchar theme_icon_color[4];
+  if (icon_get_theme_color(icon_id_to_draw, theme_icon_color)) {
+    /* Monochrome icon - apply tag color tint. */
+    if (!is_zero_v3(btn.color)) {
+      icon_tint[0] = uchar(btn.color[0] * 255.0f);
+      icon_tint[1] = uchar(btn.color[1] * 255.0f);
+      icon_tint[2] = uchar(btn.color[2] * 255.0f);
+    }
+    else {
+      /* Use theme default for monochrome. */
+      copy_v4_v4_uchar(icon_tint, theme_icon_color);
+    }
+  }
+  /* else: Colored icon - keep white tint (original colors). */
+
+  if (darken_factor > 0.0f) {
+    darken_color_3ub(icon_tint, darken_factor);
+  }
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  icon_draw_ex(x, y, icon_id_to_draw, icon_size / ICON_DEFAULT_WIDTH, 1.0f, 0.0f,
+               icon_tint, false, UI_NO_ICON_OVERLAY_TEXT);
+  GPU_blend(GPU_BLEND_NONE);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Region Draw Functions
+ * \{ */
+
 void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 {
   ScrArea *area = CTX_wm_area(C);
@@ -1136,13 +1268,22 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
   const bool has_visible_buttons = std::any_of(
       data->buttons.begin(), data->buttons.end(), [](const TagButton &btn) { return btn.is_visible; });
 
+  /* DEBUG: Always print button state info (not just in debug mode) */
+  printf("[TAG_BAR REGION DRAW] buttons: total=%zu has_visible_buttons=%d\n",
+         data->buttons.size(), int(has_visible_buttons));
+  for (const TagButton &btn : data->buttons) {
+    printf("[TAG BAR REGION DRAW] button='%s' is_visible=%d icon_source=%d icon_key='%s' icon_id=%d\n",
+           btn.tag_name, int(btn.is_visible), 0, btn.icon_key, btn.icon_id);
+  }
+
   if constexpr (TAG_BAR_DEBUG_ENABLED) {
-    printf("[TAG BAR REGION DRAW] buttons: total=%zu has_visible_buttons=%d show_new_addon_button=%d unassigned_count=%d\n",
-           data->buttons.size(), int(has_visible_buttons), int(data->show_new_addon_button), data->unassigned_count);
+    printf("[TAG BAR DEBUG] show_new_addon_button=%d unassigned_count=%d\n",
+           int(data->show_new_addon_button), data->unassigned_count);
     fflush(stdout);
   }
 
   if (!has_visible_buttons) {
+    printf("[TAG BAR REGION DRAW] No visible buttons - skipping draw\n");
     ED_region_header(C, region);
     return;
   }
@@ -1180,10 +1321,14 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
     const int fontid = style->widget.uifont_id;
     BLF_size(fontid, UI_UNIT_Y * 0.7f * dpi_fac);
 
-    /* Convert glyph from hex to UTF-8 for display */
+    /* Determine what to display: icon or glyph */
+    /* Use icon if icon_id is valid, or if it's the specialized FUND icon. */
+    const bool use_icon = (btn.icon_id != ICON_NONE) || (strcmp(btn.icon_key, "FUND") == 0);
+
+    /* Convert glyph from hex to UTF-8 for display (only if not using icon) */
     char glyph_utf8[8] = "";
     const char *display_glyph = "";
-    if (btn.glyph[0] != '\0') {
+    if (!use_icon && btn.glyph[0] != '\0') {
       if (tag_glyph_hex_to_utf8(btn.glyph, glyph_utf8)) {
         display_glyph = glyph_utf8;
       }
@@ -1193,12 +1338,17 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
     }
 
     const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-    const int glyph_width = (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
-    const int btn_width = glyph_width + text_width + UI_UNIT_X / 2;
+    const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 0.7f * dpi_fac) :
+                                  (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
+    const int btn_width = icon_glyph_width + text_width + UI_UNIT_X / 2;
 
-    /* Create button label with glyph */
+    /* Create button label - use placeholder for icon, glyph text otherwise */
     char button_label[72];
-    if (display_glyph[0]) {
+    if (use_icon) {
+      /* For icon mode, use a space placeholder - icon will be drawn manually */
+      SNPRINTF(button_label, " %s", btn.tag_name);
+    }
+    else if (display_glyph[0]) {
       SNPRINTF(button_label, "%s %s", display_glyph, btn.tag_name);
     }
     else {
@@ -1222,6 +1372,15 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
       but->col[0] = btn.color[0];
       but->col[1] = btn.color[1];
       but->col[2] = btn.color[2];
+    }
+
+    /* Draw icon manually if using icon mode */
+    if (use_icon) {
+      const float icon_size = UI_UNIT_Y * 0.7f * dpi_fac;
+      const float icon_x = float(xco + UI_UNIT_X / 4);
+      /* Center icon vertically in the tag bar. */
+      const float icon_y = (UI_UNIT_Y * dpi_fac - icon_size) / 2.0f;
+      draw_tag_icon_with_tint(btn, icon_x, icon_y, icon_size, 0.0f);
     }
 
     if (but) {
@@ -1313,10 +1472,14 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
     const int fontid = style->widget.uifont_id;
     BLF_size(fontid, UI_UNIT_Y * 0.5f * dpi_fac);
 
-    /* Convert glyph from hex to UTF-8 for display */
+    /* Determine what to display: icon or glyph */
+    /* Use icon if we have icon_id OR if we have icon_key (will try to resolve during draw) */
+    const bool use_icon = btn.use_builtin_icon || (btn.icon_key[0] != '\0');
+    
+    /* Convert glyph from hex to UTF-8 for display (only if not using icon) */
     char glyph_utf8[8] = "";
     const char *display_glyph = "";
-    if (btn.glyph[0] != '\0') {
+    if (!use_icon && btn.glyph[0] != '\0') {
       if (tag_glyph_hex_to_utf8(btn.glyph, glyph_utf8)) {
         display_glyph = glyph_utf8;
       }
@@ -1326,12 +1489,16 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
     }
 
     const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-    const int glyph_width = (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
-    const int btn_width = glyph_width + text_width + 20;
+    const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 0.5f * dpi_fac) :
+                                  (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
+    const int btn_width = icon_glyph_width + text_width + 20;
 
-    /* Create button label with glyph */
+    /* Create button label - use placeholder for icon, glyph text otherwise */
     char button_label[72];
-    if (display_glyph[0]) {
+    if (use_icon) {
+      SNPRINTF(button_label, " %s", btn.tag_name);
+    }
+    else if (display_glyph[0]) {
       SNPRINTF(button_label, "%s %s", display_glyph, btn.tag_name);
     }
     else {
@@ -1350,6 +1517,14 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
                                 0.0f,
                                 TIP_("Toggle category filter"));
 
+    /* Draw icon manually if using icon mode */
+    if (use_icon && btn.icon_id != ICON_NONE) {
+      const float icon_size = UI_UNIT_Y * 0.5f * dpi_fac;
+      const float icon_x = float(xco + 10);
+      const float icon_y = float((UI_UNIT_Y - 4) * 0.15f);
+      draw_tag_icon_with_tint(btn, icon_x, icon_y, icon_size, 0.0f);
+    }
+
     if (but) {
       /* Setup button colors and glyphs based on state */
       if (btn.is_active) {
@@ -1357,7 +1532,7 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
         rgb_float_to_uchar(but->col, btn.color);
         but->col[3] = 255;
       }
-      else if (btn.glyph[0]) {
+      else if (!use_icon && btn.glyph[0]) {
         /* Inactive but with glyph: we want the text (glyph + label) to be colored.
          * We MUST set BUT_TEXT_USE_COL flag for but->col to affect text drawing. */
         rgb_float_to_uchar(but->col, btn.color);
@@ -1420,10 +1595,13 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
       const int fontid = style->widget.uifont_id;
       BLF_size(fontid, UI_UNIT_Y * 0.7f * dpi_fac);
 
-      /* Convert glyph from hex to UTF-8 for display */
+      /* Determine what to display: icon or glyph */
+      const bool use_icon = btn.use_builtin_icon && (btn.icon_id != ICON_NONE);
+      
+      /* Convert glyph from hex to UTF-8 for display (only if not using icon) */
       char glyph_utf8[8] = "";
       const char *display_glyph = "";
-      if (btn.glyph[0] != '\0') {
+      if (!use_icon && btn.glyph[0] != '\0') {
         if (tag_glyph_hex_to_utf8(btn.glyph, glyph_utf8)) {
           display_glyph = glyph_utf8;
         }
@@ -1433,8 +1611,9 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
       }
 
       const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-      const int glyph_width = (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
-      total_buttons_width += glyph_width + text_width + UI_UNIT_X + UI_UNIT_X / 4;
+      const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 0.7f * dpi_fac) :
+                                    (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
+      total_buttons_width += icon_glyph_width + text_width + UI_UNIT_X + UI_UNIT_X / 4;
     }
   }
 
@@ -1453,32 +1632,39 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
       const int fontid = style->widget.uifont_id;
       BLF_size(fontid, UI_UNIT_Y * 0.7f * dpi_fac);
 
-    /* Convert glyph from hex to UTF-8 for display */
-    char glyph_utf8[8] = "";
-    const char *display_glyph = "";
-    if (btn.glyph[0] != '\0') {
-      if (tag_glyph_hex_to_utf8(btn.glyph, glyph_utf8)) {
-        display_glyph = glyph_utf8;
+      /* Determine what to display: icon or glyph */
+      const bool use_icon = btn.use_builtin_icon && (btn.icon_id != ICON_NONE);
+      
+      /* Convert glyph from hex to UTF-8 for display (only if not using icon) */
+      char glyph_utf8[8] = "";
+      const char *display_glyph = "";
+      if (!use_icon && btn.glyph[0] != '\0') {
+        if (tag_glyph_hex_to_utf8(btn.glyph, glyph_utf8)) {
+          display_glyph = glyph_utf8;
+        }
+        else {
+          display_glyph = btn.glyph;
+        }
+      }
+
+      const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
+      const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 0.7f * dpi_fac) :
+                                    (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
+      const int btn_width = icon_glyph_width + text_width + UI_UNIT_X;
+
+      /* Create button label - use placeholder for icon, glyph text otherwise */
+      char button_label[72];
+      if (use_icon) {
+        SNPRINTF(button_label, " %s", btn.tag_name);
+      }
+      else if (display_glyph[0]) {
+        SNPRINTF(button_label, "%s %s", display_glyph, btn.tag_name);
       }
       else {
-        display_glyph = btn.glyph;
+        STRNCPY(button_label, btn.tag_name);
       }
-    }
 
-    const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-    const int glyph_width = (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
-    const int btn_width = glyph_width + text_width + UI_UNIT_X;
-
-    /* Create button label with glyph */
-    char button_label[72];
-    if (display_glyph[0]) {
-      SNPRINTF(button_label, "%s %s", display_glyph, btn.tag_name);
-    }
-    else {
-      STRNCPY(button_label, btn.tag_name);
-    }
-
-    Button *but = uiDefBut(block,
+      Button *but = uiDefBut(block,
                                 ButtonType::ButToggle,
                                 button_label,
                                 xco,
@@ -1490,34 +1676,42 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
                                 0.0f,
                                 TIP_("Toggle category filter"));
 
-    if (but) {
-      /* Setup button colors and glyphs based on state */
-      if (btn.is_active) {
-        /* Active button: background uses tag color.
-         * For ButToggle, but->col sets the "checked" background color. */
-        rgb_float_to_uchar(but->col, btn.color);
-        but->col[3] = 255;
-      }
-      else if (btn.glyph[0]) {
-        /* Inactive but with glyph: we want the text (glyph + label) to be colored.
-         * We MUST set BUT_TEXT_USE_COL flag for but->col to affect text drawing. */
-        rgb_float_to_uchar(but->col, btn.color);
-        but->col[3] = 255;
-        but->drawflag |= BUT_TEXT_USE_COL;
+      /* Draw icon manually if using icon mode */
+      if (use_icon && btn.icon_id != ICON_NONE) {
+        const float icon_size = UI_UNIT_Y * 0.7f * dpi_fac;
+        const float icon_x = float(xco + UI_UNIT_X / 4);
+        const float icon_y = float((UI_UNIT_Y - 4) * 0.15f);
+        draw_tag_icon_with_tint(btn, icon_x, icon_y, icon_size, 0.0f);
       }
 
-      /* Set callback for button click - capture tag_name by value */
-      std::string captured_tag_name(btn.tag_name);
-      but->apply_func = [captured_tag_name](bContext &C) {
-        tag_toggle_impl(C, captured_tag_name.c_str());
-      };
+      if (but) {
+        /* Setup button colors and glyphs based on state */
+        if (btn.is_active) {
+          /* Active button: background uses tag color.
+           * For ButToggle, but->col sets the "checked" background color. */
+          rgb_float_to_uchar(but->col, btn.color);
+          but->col[3] = 255;
+        }
+        else if (!use_icon && btn.glyph[0]) {
+          /* Inactive but with glyph: we want the text (glyph + label) to be colored.
+           * We MUST set BUT_TEXT_USE_COL flag for but->col to affect text drawing. */
+          rgb_float_to_uchar(but->col, btn.color);
+          but->col[3] = 255;
+          but->drawflag |= BUT_TEXT_USE_COL;
+        }
 
-      /* Store button rectangle for mouse hit testing */
-      btn.rect.xmin = but->rect.xmin;
-      btn.rect.xmax = but->rect.xmax;
-      btn.rect.ymin = but->rect.ymin;
-      btn.rect.ymax = but->rect.ymax;
-    }
+        /* Set callback for button click - capture tag_name by value */
+        std::string captured_tag_name(btn.tag_name);
+        but->apply_func = [captured_tag_name](bContext &C) {
+          tag_toggle_impl(C, captured_tag_name.c_str());
+        };
+
+        /* Store button rectangle for mouse hit testing */
+        btn.rect.xmin = but->rect.xmin;
+        btn.rect.xmax = but->rect.xmax;
+        btn.rect.ymin = but->rect.ymin;
+        btn.rect.ymax = but->rect.ymax;
+      }
 
     xco += btn_width + UI_UNIT_X / 4;
   }

@@ -173,7 +173,11 @@ typedef struct CategoryTagDef {
   float color[3];
   /** Mode flags for tag filtering. */
   uint32_t mode_flags;
-  char _pad0[8];
+  /** Blender icon identifier (e.g., "OBJECT_DATAMODE"). Matches CategoryGlyphItem::icon_key size. */
+  char icon_key[128];
+  /** Icon source: 0=GLYPH (use glyph field), 1=ICON (use icon_key). */
+  int icon_source;
+  char _pad1[4]; /* Alignment padding */
 } CategoryTagDef;
 
 /* -------------------------------------------------------------------- */
@@ -647,3 +651,4 @@ struct wmOperator {
 };
 
 }  // namespace blender
+

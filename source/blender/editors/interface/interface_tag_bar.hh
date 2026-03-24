@@ -58,7 +58,13 @@ struct TagButton {
   bool is_visible;      /**< Whether the button is visible in UI */
   bool is_hovered;      /**< Whether cursor is over the button */
   bool is_active;       /**< Whether the filter is active */
-  char _pad[1];         /**< Padding for alignment */
+  /** Resolved Blender icon ID from icon_key. ICON_NONE if not using icon. */
+  int icon_id;
+  /** True if icon_source == 1 and icon_id != ICON_NONE. */
+  bool use_builtin_icon;
+  /** Icon key from tag definition (e.g., "FUND") - used when icon_id resolution fails */
+  char icon_key[128];
+  char _pad[3];         /**< Padding for alignment */
 };
 
 /**

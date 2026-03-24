@@ -16,6 +16,7 @@
 
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "BLI_array.hh"
 #include "BLI_dynstr.h"
@@ -3303,7 +3304,30 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
 
   Block *block = layout->block();
 
-  /* Calculate button width based on content (glyph + text) */
+  /* Resolve icon from tag definition in window manager if possible. */
+  int icon_id = ICON_NONE;
+  const char *icon_path_found = "";
+  
+  if (tag_name && tag_name[0] != '\0') {
+    bContext *C = static_cast<bContext *>(block->evil_C);
+    wmWindowManager *wm = CTX_wm_manager(C);
+    if (wm && category_tag_list_is_valid(&wm->category_tags)) {
+      for (const CategoryTagDef *tag_def = static_cast<const CategoryTagDef *>(wm->category_tags.first);
+           tag_def;
+           tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
+      {
+        if (STREQ(tag_def->name, tag_name)) {
+          if (tag_def->icon_source == 1 && tag_def->icon_key[0] != '\0') {
+            /* Use our specialized resolver to handle FUND and other special icons. */
+            icon_id = category_tab_icon_id_resolve_from_key_path(tag_def->icon_key, nullptr);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  /* Calculate button width based on content (icon + glyph + text) */
   short width;
   if (center_glyph) {
     /* Glyph-only mode: fixed small width */
@@ -3320,6 +3344,11 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
     if (glyph && glyph[0] != '\0') {
       glyph_width = BLF_width(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX);
     }
+    
+    /* If no glyph but has icon, reserve space for icon (approx. height of button) */
+    if (glyph_width == 0.0f && icon_id != ICON_NONE) {
+      glyph_width = UI_UNIT_Y * 0.7f * UI_SCALE_FAC;
+    }
 
     /* Calculate text width */
     float text_width = 0.0f;
@@ -3327,13 +3356,13 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
       text_width = BLF_width(fontid, tag_name, BLF_DRAW_STR_DUMMY_MAX);
     }
 
-    /* Gap between glyph and text (same as category tabs) */
+    /* Gap between glyph/icon and text */
     const float glyph_text_gap = 6.0f * UI_SCALE_FAC;
 
     /* Padding inside button */
     const float padding_x = 4.0f * UI_SCALE_FAC;
 
-    /* Total width = padding + glyph + gap + text + padding */
+    /* Total width = padding + content + gap + text + padding */
     width = short(round_fl_to_int(padding_x + glyph_width + glyph_text_gap + text_width + padding_x));
 
     /* Ensure minimum width for usability */
@@ -3348,7 +3377,7 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
                                 is_active,
                                 true,         /* is_pref_mode - NO CHECKBOX */
                                 center_glyph, /* Center glyph in button */
-                                0, "",        /* icon_id, icon_path - no icon for this button */
+                                icon_id, icon_path_found, /* resolved icon_id */
                                 0, 0,
                                 width,        /* calculated width */
                                 UI_UNIT_Y,    /* height */

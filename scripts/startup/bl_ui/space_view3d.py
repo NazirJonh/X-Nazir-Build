@@ -1819,21 +1819,21 @@ class VIEW3D_HT_tag_bar_tags(Header):
             row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
             return
 
-        # Filter tag list to only include those with glyphs and active for current mode
+        # Filter tag list to only include those with glyphs or icons and active for current mode
         mode_string = context.mode
-        tags_with_glyphs = [t for t in tags_sorted
-                           if glyph_display(t.glyph)
-                           and self.is_tag_active_for_mode(t, mode_string)]
+        tags_to_show = [t for t in tags_sorted
+                       if (glyph_display(t.glyph) or (t.icon_source == 1 and t.icon_key))
+                       and self.is_tag_active_for_mode(t, mode_string)]
 
-        # Show message if no tags with glyphs exist
-        if not tags_with_glyphs:
+        # Show message if no visible tags exist
+        if not tags_to_show:
             op = row.operator("wm.centered_popup_operator_wrapper", text="New Tag", icon='ADD')
             op.operator_idname = 'wm.category_tag_create'
             op.width = 430
             row.operator("screen.userpref_show", text="", icon='PREFERENCES').section = 'TAGS'
             return
 
-        for i, tag in enumerate(tags_with_glyphs):
+        for i, tag in enumerate(tags_to_show):
             glyph = glyph_display(tag.glyph)
 
             # Check if this tag is in the active set
@@ -1864,11 +1864,11 @@ class VIEW3D_HT_tag_bar_tags(Header):
             )
 
             # Add separator between tag buttons (but not after the last one)
-            if i < len(tags_with_glyphs) - 1:
+            if i < len(tags_to_show) - 1:
                 row.separator()
 
         # Add separator before filter toggle button
-        if tags_with_glyphs:
+        if tags_to_show:
             row.separator()
 
         # Filter toggle button & popover - like Gizmo/Overlay pattern

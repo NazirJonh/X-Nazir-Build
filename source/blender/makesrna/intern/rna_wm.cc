@@ -3395,6 +3395,22 @@ static void rna_def_category_tag_def(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Mode Flags", "Bitmask of modes where this tag is active (0 = all modes)");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");
+
+  /* Icon key for Blender icon identifier */
+  prop = RNA_def_property(srna, "icon_key", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "icon_key");
+  RNA_def_property_string_maxlength(prop, sizeof(CategoryTagDef::icon_key) - 1);
+  RNA_def_property_ui_text(prop, "Icon Key", "Blender icon identifier (e.g., OBJECT_DATAMODE)");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");
+
+  /* Icon source: 0=GLYPH, 1=ICON */
+  prop = RNA_def_property(srna, "icon_source", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "icon_source");
+  RNA_def_property_range(prop, 0, 1);
+  RNA_def_property_ui_text(prop, "Icon Source", "Display mode: 0=Glyph, 1=Blender Icon");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");
 }
 
 static void rna_def_category_glyph_mappings(BlenderRNA *brna, PropertyRNA *cprop)

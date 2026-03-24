@@ -110,9 +110,9 @@ namespace blender::ui {
  * - Category order changes
  * - Tag assignment operations
  * 
- * To enable: Change to `static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;`
+ * To enable: Change to `static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;`
  */
-static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
 
 /** \} */
 

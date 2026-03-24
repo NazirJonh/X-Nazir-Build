@@ -1877,6 +1877,15 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm,
     char color_str[32];
     SNPRINTF(color_str, "%.3f,%.3f,%.3f", tag->color[0], tag->color[1], tag->color[2]);
     result.append(color_str);
+    /* Add icon_id and icon_source */
+    result.push_back('|');
+    int icon_id = ICON_NONE;
+    if (tag->icon_source == 1 && tag->icon_key[0] != '\0') {
+      icon_id = category_tab_icon_id_resolve_from_key_path(tag->icon_key, nullptr);
+    }
+    char icon_str[32];
+    SNPRINTF(icon_str, "%d|%d", icon_id, tag->icon_source);
+    result.append(icon_str);
   }
 
   return result;

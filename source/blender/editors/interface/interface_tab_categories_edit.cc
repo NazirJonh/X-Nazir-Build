@@ -116,7 +116,7 @@ static constexpr size_t MAX_LOGGED_MESSAGES = 500;
 
 /* Debug output control flag - set to true to enable debug printf messages */
 //DEBUG FLAGS
-static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
 
 static void log_once(const char *message)
 {
@@ -1117,18 +1117,38 @@ void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data)
   WM_main_add_notifier(NC_WINDOW, nullptr);
 }
 
-void category_tab_edit_popup_ok_cb(bContext * /*C*/, void *user_data, int /*retval*/)
+void category_tab_edit_popup_ok_cb(bContext *C, void *user_data, int /*retval*/)
 {
-  /* Clear dialog operator pointer and popup block */
-  category_tab_edit_dialog_clear_runtime_state(true);
-
-  /* Record popup close time and category */
+  /* Save data to Python cache before clearing runtime state */
   if (user_data) {
     wmOperator *op = static_cast<wmOperator *>(user_data);
     char category[64];
     RNA_string_get(op->ptr, "category", category);
+    
+    /* Get icon state for saving */
+    CategoryTabIconState icon_state;
+    category_tab_icon_state_read(op->ptr, icon_state);
+    
+    int icon_source = RNA_enum_get(op->ptr, "icon_source");
+    
+#ifdef WITH_PYTHON
+    /* Save to Python cache via update_tag */
+    if (category[0] != '\0') {
+      const char *imports[] = {"bpy", nullptr};
+      char save_cmd[2048];
+      BLI_snprintf(save_cmd, sizeof(save_cmd),
+          "from bl_ui.space_userpref import update_tag\n"
+          "update_tag(tag_name='%s', icon_key='%s', icon_source=%d, auto_save=True)\n",
+          category, icon_state.key, icon_source);
+      BPY_run_string_exec(C, imports, save_cmd);
+    }
+#endif
+    
     category_tab_edit_dialog_mark_closed(category);
   }
+  
+  /* Clear dialog operator pointer and popup block */
+  category_tab_edit_dialog_clear_runtime_state(true);
 }
 
 /** \} */
@@ -1701,6 +1721,70 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   /* Note: Preview button uses custom draw callback that reads directly from
    * category_tab_preview_glyph and category_tab_preview_color static buffers,
    * which are already updated above. No button-specific update needed. */
+}
+
+/**
+ * Live update callback for tag icon picker.
+ * Updates wm.category_tags collection when icon is selected in the picker.
+ * This is the Tags equivalent of category_tab_edit_live_update_cb.
+ */
+void tag_icon_live_update_cb(bContext *C, void *arg_op, int /*event*/)
+{
+  wmOperator *op = static_cast<wmOperator *>(arg_op);
+
+  /* Get tag name from operator */
+  char tag_name[64];
+  RNA_string_get(op->ptr, "name", tag_name);
+
+  if (tag_name[0] == '\0') {
+    /* No tag name yet, skip update */
+    return;
+  }
+
+  /* Get icon properties from operator */
+  char icon_key[128];
+  RNA_string_get(op->ptr, "icon_key", icon_key);
+  int icon_source = RNA_enum_get(op->ptr, "icon_source");
+  const int display_mode_ui = RNA_enum_get(op->ptr, "display_mode_ui");
+
+  /* Get color */
+  float color[3];
+  RNA_float_get_array(op->ptr, "color", color);
+
+  /* Update WM category_tags collection */
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm && category_tag_list_is_valid(&wm->category_tags)) {
+    /* Find existing tag to update */
+    CategoryTagDef *tag_item = nullptr;
+    for (CategoryTagDef *iter = static_cast<CategoryTagDef *>(wm->category_tags.first);
+         iter != nullptr;
+         iter = iter->next)
+    {
+      if (STREQ(iter->name, tag_name)) {
+        tag_item = iter;
+        break;
+      }
+    }
+
+    /* If tag doesn't exist in WM yet, we can't add it here - will be added by execute */
+    if (!tag_item) {
+      /* Tag not created yet - skip WM update, will be done by create_tag */
+      return;
+    }
+
+    /* Update existing tag */
+    STRNCPY(tag_item->icon_key, icon_key);
+    tag_item->icon_source = icon_source;
+    copy_v3_v3(tag_item->color, color);
+
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[TAG ICON LIVE UPDATE] Updated tag '%s': icon_key='%s', icon_source=%d, display_mode_ui=%d\n",
+             tag_name, icon_key, icon_source, display_mode_ui);
+    }
+  }
+
+  /* Trigger redraw for live preview */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
 }
 
 /** \} */
@@ -2683,7 +2767,9 @@ static bool icon_grid_writeback_icon_key(bContext &C,
     }
   }
 
-  if (!resolved && popup_data->target_op && popup_data->target_op->ptr) {
+  /* CRITICAL FIX: Always try RNA update for target_op to trigger Python callbacks.
+   * IDProperty update alone doesn't trigger RNA property update callbacks. */
+  if (popup_data->target_op && popup_data->target_op->ptr) {
     PointerRNA target_ptr;
     PropertyRNA *target_prop;
     int index;
@@ -2752,18 +2838,27 @@ static Block *icon_grid_popup_block_create(bContext *C, ARegion *region, void *a
   grid_view->set_on_icon_select_fn([popup_data](bContext &C, const IconGridPopupItem &item) {
     if (popup_data->op) {
       RNA_string_set(popup_data->op->ptr, "icon_key", item.identifier.c_str());
-      RNA_enum_set(popup_data->op->ptr, "icon_source", 1);
-      RNA_enum_set(popup_data->op->ptr, "display_mode_ui", 1);
-      RNA_enum_set(popup_data->op->ptr, "custom_icon_mode_ui", 0);
+      RNA_int_set(popup_data->op->ptr, "icon_source", 1);
+      RNA_int_set(popup_data->op->ptr, "display_mode_ui", 1);
+      RNA_int_set(popup_data->op->ptr, "custom_icon_mode_ui", 0);
       RNA_string_set(popup_data->op->ptr, "icon_search", "");
     }
 
     icon_grid_writeback_icon_key(C, popup_data, item.identifier.c_str());
 
+    /* Call live update for Edit Category dialog */
     if (popup_data->op && popup_data->op->idname &&
         STREQ(popup_data->op->idname, "SCREEN_OT_category_tab_edit_dialog"))
     {
       category_tab_edit_live_update_cb(&C, popup_data->op, 0);
+    }
+    /* Also call live update for Create/Edit Tag Python operators via target_op */
+    else if (popup_data->target_op && popup_data->target_op->idname &&
+             (STREQ(popup_data->target_op->idname, "wm.category_tag_create") ||
+              STREQ(popup_data->target_op->idname, "wm.category_tag_edit")))
+    {
+      /* For Python tag operators, call the C++ live update callback */
+      tag_icon_live_update_cb(&C, popup_data->target_op, 0);
     }
 
     if (popup_data->popup_handle) {
@@ -2811,6 +2906,132 @@ static void icon_more_icons_button_cb(bContext *C, void *arg1, void * /*arg2*/)
   wmWindow *window = CTX_wm_window(C);
   popup_handlers_add(C, &window->runtime->modalhandlers, handle, 0);
   WM_event_add_mousemove(window);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Icon Picker Operator
+ * \{ */
+
+/**
+ * Operator to open icon picker popup for selecting Blender icons.
+ * Used by tag create/edit dialogs.
+ */
+static wmOperatorStatus category_tab_icon_picker_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
+{
+  wmOperator *target_op = nullptr;
+  IDProperty *target_op_properties = nullptr;
+  
+  /* Try to get target operator from target_operator_ptr property (string pointer) */
+  char target_op_ptr_str[64] = "";
+  RNA_string_get(op->ptr, "target_operator_ptr", target_op_ptr_str);
+  
+  if (target_op_ptr_str[0] != '\0') {
+    /* Parse pointer from hex string */
+    const uintptr_t target_ptr = uintptr_t(strtoull(target_op_ptr_str, nullptr, 10));
+    if (target_ptr != 0) {
+      wmWindowManager *wm = CTX_wm_manager(C);
+      for (wmOperator *op_iter = static_cast<wmOperator *>(wm->runtime->operators.last); op_iter;
+           op_iter = op_iter->prev)
+      {
+        if ((uintptr_t)op_iter == target_ptr) {
+          target_op = op_iter;
+          target_op_properties = op_iter->properties;
+          break;
+        }
+      }
+    }
+  }
+  
+  /* Fallback: try to get from pointer property (for C++ calls) */
+  if (!target_op) {
+    PointerRNA target_op_ptr = RNA_pointer_get(op->ptr, "target_operator");
+    target_op = static_cast<wmOperator *>(target_op_ptr.data);
+    if (target_op) {
+      target_op_properties = target_op->properties;
+    }
+  }
+  
+  /* Fallback: use active operator from context (the operator whose draw() method called this) */
+  if (!target_op) {
+    target_op = context_active_operator_get(C);
+    /* Don't use the picker operator itself as target */
+    if (target_op == op) {
+      target_op = nullptr;
+    }
+    else {
+      target_op_properties = target_op->properties;
+    }
+  }
+  
+  if (!target_op || !target_op_properties) {
+    WM_global_report(RPT_ERROR, "No target operator specified");
+    return OPERATOR_CANCELLED;
+  }
+
+  Vector<IconGridPopupItem> icons = icon_grid_builtin_icons_collect();
+  if (icons.is_empty()) {
+    WM_global_report(RPT_WARNING, "No built-in icons found");
+    return OPERATOR_CANCELLED;
+  }
+
+  IconGridPopupData *popup_data = new IconGridPopupData(
+      op, target_op, target_op_properties, std::move(icons));
+
+  PopupBlockHandle *handle = popup_block_create(
+      C, nullptr, nullptr, icon_grid_popup_block_create, nullptr, popup_data, icon_grid_popup_free, false);
+
+  popup_data->popup_handle = handle;
+  handle->popup = true;
+
+  wmWindow *window = CTX_wm_window(C);
+  popup_handlers_add(C, &window->runtime->modalhandlers, handle, 0);
+  WM_event_add_mousemove(window);
+
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus category_tab_icon_picker_exec(bContext * /*C*/, wmOperator * /*op*/)
+{
+  /* Should not be called - this operator only works via invoke */
+  return OPERATOR_CANCELLED;
+}
+
+static void category_tab_icon_picker_cancel(bContext * /*C*/, wmOperator * /*op*/)
+{
+  /* Cleanup handled by popup_free callback */
+}
+
+void SCREEN_OT_category_tab_icon_picker(wmOperatorType *ot)
+{
+  ot->name = "Category Tab Icon Picker";
+  ot->idname = "SCREEN_OT_category_tab_icon_picker";
+  ot->description = "Open icon picker popup to select a Blender icon";
+
+  ot->invoke = category_tab_icon_picker_invoke;
+  ot->exec = category_tab_icon_picker_exec;
+  ot->cancel = category_tab_icon_picker_cancel;
+
+  /* Target operator pointer (for Python calls) */
+  RNA_def_string(
+      ot->srna, "target_operator_ptr", nullptr, 64, "Target Operator Pointer",
+      "Internal: pointer to target operator (hex string)");
+  /* Target property RNA path (alternative to target_operator) */
+  RNA_def_string(ot->srna, "target_property", nullptr, 256, "Target Property",
+                 "RNA path to property that will receive the selected icon key");
+  
+  /* Icon picker state properties - needed for live update and preview */
+  RNA_def_string(ot->srna, "icon_key", nullptr, 128, "Icon Key",
+                 "Selected Blender icon identifier");
+  RNA_def_int(ot->srna, "icon_source", 0, 0, 2, "Icon Source",
+              "Source of the icon (0=auto, 1=manual, 2=off)", 0, 2);
+  RNA_def_int(ot->srna, "display_mode_ui", 0, 0, 2, "Display Mode",
+              "Display mode (0=GLYPH, 1=ICON)", 0, 2);
+  RNA_def_int(ot->srna, "custom_icon_mode_ui", 0, 0, 1, "Custom Icon Mode",
+              "Custom icon mode (0=blender icon, 1=custom path)", 0, 1);
+  RNA_def_string(ot->srna, "icon_search", nullptr, 256, "Icon Search",
+                 "Search string for filtering icons in picker");
 }
 
 /** \} */
@@ -3001,6 +3222,32 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         Layout &icon_key_readonly = icon_key_col.row(false);
         icon_key_readonly.enabled_set(false);
         icon_key_readonly.prop(op->ptr, "icon_key", UI_ITEM_NONE, IFACE_("Blender"), ICON_NONE);
+
+        /* Preview icon */
+        char icon_key[128];
+        RNA_string_get(op->ptr, "icon_key", icon_key);
+        
+        if (icon_key[0] != '\0') {
+          /* Show preview of selected icon */
+          int icon_id = ICON_NONE;
+          if (RNA_enum_value_from_identifier(rna_enum_icon_items, icon_key, &icon_id) && icon_id > 0) {
+            Layout &icon_preview_row = icon_key_col.row(false);
+            icon_preview_row.alignment_set(LayoutAlign::Center);
+            
+            Block *preview_block = icon_preview_row.block();
+            block_layout_set_current(preview_block, &icon_preview_row);
+            
+            /* Create preview button with the selected icon */
+            Button *preview_but = uiDefIconBut(preview_block,
+                                               {ButtonType::But, ButPointerType::None},
+                                               icon_id,
+                                               0, 0,
+                                               short(UI_UNIT_X * 2), short(UI_UNIT_Y * 2),
+                                               nullptr, 0.0f, 0.0f,
+                                               "Selected icon preview");
+            preview_but->tip_quick_func = [](const Button *) { return "Selected icon preview"; };
+          }
+        }
 
         Block *icon_actions_block = icon_select_row.block();
         block_layout_set_current(icon_actions_block, &icon_select_row);
@@ -3232,17 +3479,25 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
             cursor++;
           }
 
-          /* Parse color */
+          /* Parse color (format: r,g,b where r,g,b are 0.0-1.0) */
           if (*cursor == '|') {
             cursor++;
             i = 0;
-            while (*cursor != ';' && *cursor != '\0' && i < 31) {
+            while (*cursor != '|' && *cursor != '\0' && i < 31) {
               tag_color[i++] = *cursor++;
             }
             tag_color[i] = '\0';
           }
           else {
             tag_color[0] = '\0';
+          }
+
+          /* Skip icon_id and icon_source (format: icon_id|icon_source) */
+          if (*cursor == '|') {
+            cursor++;
+            while (*cursor != ';' && *cursor != '\0') {
+              cursor++;
+            }
           }
 
           /* Only show colored glyph for active tags */
@@ -3420,13 +3675,28 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
           if (*cursor == '|') {
             cursor++;
             i = 0;
-            while (*cursor != ';' && *cursor != '\0' && i < 31) {
+            while (*cursor != '|' && *cursor != '\0' && i < 31) {
               tag_color[i++] = *cursor++;
             }
             tag_color[i] = '\0';
           }
           else {
             tag_color[0] = '\0';
+          }
+
+          /* Parse icon_id and icon_source (format: icon_id|icon_source) */
+          int tag_icon_id = 0;
+          int tag_icon_source = 0;
+          if (*cursor == '|') {
+            cursor++;
+            if (sscanf(cursor, "%d|%d", &tag_icon_id, &tag_icon_source) != 2) {
+              tag_icon_id = 0;
+              tag_icon_source = 0;
+            }
+            /* Advance cursor past the parsed icon_id|icon_source to reach ';' separator */
+            while (*cursor != '\0' && *cursor != ';') {
+              cursor++;
+            }
           }
 
           if (tag_name[0] != '\0') {
@@ -3459,7 +3729,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                                                is_active,
                                                false,  /* is_pref_mode - toggle button with checkbox */
                                                false,  /* center_glyph - left align for category buttons */
-                                               0, "",  /* icon_id, icon_path - no icon for this button */
+                                               tag_icon_id, "",  /* icon_id from tag data, no custom path */
                                                0, 0,
                                                UI_UNIT_X * 8,
                                                UI_UNIT_Y * 1.5f,

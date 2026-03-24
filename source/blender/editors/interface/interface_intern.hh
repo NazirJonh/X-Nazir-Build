@@ -1190,6 +1190,7 @@ const CategoryGlyphItem *category_glyph_item_find_with_global_fallback_const(
 void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data);
 void category_tab_edit_popup_ok_cb(bContext *C, void *user_data, int retval);
 void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int event);
+void tag_icon_live_update_cb(bContext *C, void *arg_op, int event);
 bool category_tab_edit_dialog_is_open_for_category(const char *category);
 
 /**
@@ -1207,6 +1208,11 @@ void SCREEN_OT_category_tab_popup_filter_set(wmOperatorType *ot);
  * Centered popup operator registration.
  */
 void centered_popup_operator_register();
+
+/**
+ * Category tab icon picker operator.
+ */
+void SCREEN_OT_category_tab_icon_picker(wmOperatorType *ot);
 
 /**
  * Popup block creation.

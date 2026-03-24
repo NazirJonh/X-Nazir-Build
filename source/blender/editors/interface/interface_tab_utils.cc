@@ -246,7 +246,7 @@ int category_tab_icon_id_resolve_from_path(const char *icon_path)
   }
 
   PreviewImage *preview = BKE_previewimg_cached_thumbnail_read(
-      icon_path, icon_path, THB_SOURCE_DIRECT, false);
+      icon_path, icon_path, blender::THB_SOURCE_DIRECT, false);
   if (!preview) {
     return ICON_NONE;
   }
@@ -264,7 +264,36 @@ int category_tab_icon_id_resolve_from_key_path(const char *icon_key, const char 
 {
   if (icon_key && icon_key[0] != '\0') {
     int icon_id = ICON_NONE;
-    if (RNA_enum_value_from_identifier(rna_enum_icon_items, icon_key, &icon_id)) {
+    printf("[ICON_RESOLVE] Looking for icon_key='%s'\n", icon_key);
+
+    /* DEBUG: Try to find the icon by searching through enum */
+    bool found = false;
+    for (const EnumPropertyItem *item = rna_enum_icon_items; item->identifier; item++) {
+      if (strcmp(item->identifier, icon_key) == 0) {
+        icon_id = item->value;
+        printf("[ICON_RESOLVE] icon_key='%s' -> icon_id=%d (found by search)\n", icon_key, icon_id);
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) {
+      /* Handle special Blender icons that are not in the standard RNA enum. */
+      if (STREQ(icon_key, "FUND")) {
+        return ICON_FUND;
+      }
+      if (STREQ(icon_key, "BLENDER")) {
+        return ICON_BLENDER;
+      }
+
+      printf("[ICON_RESOLVE] icon_key='%s' NOT FOUND in rna_enum_icon_items\n", icon_key);
+      /* Also try RNA_enum_value_from_identifier for comparison */
+      if (RNA_enum_value_from_identifier(rna_enum_icon_items, icon_key, &icon_id)) {
+        printf("[ICON_RESOLVE] RNA_enum_value_from_identifier succeeded! icon_id=%d\n", icon_id);
+        return icon_id;
+      }
+      printf("[ICON_RESOLVE] RNA_enum_value_from_identifier also failed\n");
+    } else {
       return icon_id;
     }
   }

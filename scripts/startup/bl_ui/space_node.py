@@ -4,6 +4,7 @@
 
 import bpy
 import rna_prop_ui
+import time
 
 # Global debug flag for Node Editor operations - set to False to disable debug output
 NODE_EDITOR_DEBUG_ENABLED = False
@@ -436,6 +437,9 @@ class NODE_HT_tag_bar(Header):
     bl_region_type = 'TAG_BAR'
 
     def draw(self, context):
+        # PERF: Profile draw time
+        _draw_start = time.perf_counter()
+        
         layout = self.layout
         layout.separator_spacer()
 
@@ -454,10 +458,15 @@ class NODE_HT_tag_bar(Header):
                 if tag_name:
                     active_tags_set.add(tag_name)
 
+        # PERF: Time before visible_tags
+        _vt_start = time.perf_counter()
         tags = _node_visible_tags_for_current_mode(context)
+        _vt_elapsed = (time.perf_counter() - _vt_start) * 1000
 
-        # Calculate unassigned categories count for "New Add-ons!" button
+        # PERF: Time unassigned count calculation
+        _uc_start = time.perf_counter()
         unassigned_count = _get_unassigned_categories_count_for_node_editor(context)
+        _uc_elapsed = (time.perf_counter() - _uc_start) * 1000
 
         show_names = getattr(wm, "show_tag_names", False)
         show_active_only = getattr(wm, "show_tag_names_active_only", False)
@@ -537,6 +546,15 @@ class NODE_HT_tag_bar(Header):
         )
         sub = row.row(align=True)
         sub.popover(panel="VIEW3D_PT_tag_bar_filter_popover", text="", icon='DOWNARROW_HLT')
+        
+        # PERF: Log total draw time and component timings
+        _draw_elapsed = (time.perf_counter() - _draw_start) * 1000
+        if not hasattr(NODE_HT_tag_bar.draw, '_call_count'):
+            NODE_HT_tag_bar.draw._call_count = 0
+        NODE_HT_tag_bar.draw._call_count += 1
+        # Log first 10 calls and every 100th call after
+        if NODE_HT_tag_bar.draw._call_count <= 10 or NODE_HT_tag_bar.draw._call_count % 100 == 0:
+            _node_log_once(f"[PERF] NODE_HT_tag_bar.draw #{NODE_HT_tag_bar.draw._call_count}: total={_draw_elapsed:.3f}ms, visible_tags={_vt_elapsed:.3f}ms, unassigned_count={_uc_elapsed:.3f}ms (count={unassigned_count})")
 
 
 class NODE_MT_add(node_add_menu.AddNodeMenu):

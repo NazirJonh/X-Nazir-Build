@@ -32,6 +32,20 @@ try:
 except ImportError:
     get_glyph_library = None
 
+# Import performance profiling utilities
+try:
+    from .space_userpref_perf import profile_block, profile_function, print_perf_summary
+except ImportError:
+    # Fallback if profiling module not available
+    from contextlib import contextmanager
+    @contextmanager
+    def profile_block(name):
+        yield
+    def profile_function(func):
+        return func
+    def print_perf_summary():
+        pass
+
 if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
     bpy.types.WindowManager.category_tag_glyph_hex = bpy.props.StringProperty(default="", options={'HIDDEN'})
 
@@ -39,7 +53,7 @@ if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
 # -----------------------------------------------------------------------------
 # Tag System - Infrastructure Utilities (CleanPanels patterns)
 
-TAG_DEBUG = False  # Set to False to disable all debug output
+TAG_DEBUG = True  # Set to False to disable all debug output
 TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
 SAVE_DEBUG = True  # Set to True to enable verbose save/load logging (printf-style)
 
@@ -281,22 +295,25 @@ def _get_unassigned_categories_count_for_space(context,
     """
     global _glyph_cache
 
+    # PERF: Start timing
+    _count_start = time.perf_counter()
+
     wm = getattr(context, "window_manager", None)
     if wm is None:
         return 0
 
-    try:
-        if _pending_extension_context is not None and not _preview_mode_active:
-            _merge_discovered_categories()
-            sync_glyph_mappings_to_wm()
-    except Exception:
-        pass
-
+    # OPTIMIZATION: REMOVED calls to _merge_discovered_categories() and sync_glyph_mappings_to_wm()
+    # These were being called EVERY time category count was checked (multiple times per UI draw)
+    # causing severe performance issues. Discovery now only happens at initial load.
+    # CRITICAL FIX: This was causing 790 panel scans on EVERY count check!
+    
     current_mode_flag = get_current_tag_mode_flag(context)
     count = 0
 
     # Check cache instead of WM to respect preview mode
+    _cache_iterations = 0
     for cache_key, cat_data in _glyph_cache.items():
+        _cache_iterations += 1
         if not isinstance(cache_key, tuple) or len(cache_key) != 2:
             continue
 
@@ -371,6 +388,17 @@ def _get_unassigned_categories_count_for_space(context,
             elif _extension_has_only_reserved_categories(wm, source_extension):
                 category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: extension has only reserved categories")
 
+    # PERF: Log timing for EVERY call to capture Get Extension panel performance
+    _count_elapsed = (time.perf_counter() - _count_start) * 1000
+    if not hasattr(_get_unassigned_categories_count_for_space, '_call_count'):
+        _get_unassigned_categories_count_for_space._call_count = 0
+    _get_unassigned_categories_count_for_space._call_count += 1
+    
+    # Log every call when in Preferences context (space_type 19 = USERPREF)
+    # This captures performance when Get Extension panel is opened
+    if space_type == 19 or _get_unassigned_categories_count_for_space._call_count <= 10:
+        category_debug_print(f"[PERF] _get_unassigned_categories_count_for_space: {_count_elapsed:.3f}ms (cache iterations={_cache_iterations}, call #{_get_unassigned_categories_count_for_space._call_count}, space_type={space_type})")
+    
     return count
 
 
@@ -1232,6 +1260,44 @@ _install_from_disk_just_occurred = False
 # automatic WM synchronization that would cause categories to disappear from "New Add-ons!" filter
 _preview_mode_active = False
 
+# ============================================================================
+# PERFORMANCE OPTIMIZATION: Caching and debouncing
+# ============================================================================
+
+# Cache for _merge_discovered_categories() results to avoid repeated scanning
+_merge_discovery_cache = {
+    "last_discovered": None,
+    "last_panel_samples": None,
+    "last_addon_count": 0,
+    "last_extension_count": 0,
+    "last_check_time": 0,
+    "cache_valid": False,
+}
+
+# Cache for icon detection to avoid repeated disk scans
+_icon_detection_cache = {}  # Maps category -> (icon_path, provider, timestamp)
+
+# Session-level tracking to avoid redundant icon checks within a single merge operation
+_icon_detection_session_checked = set()  # Categories already checked in current merge session
+
+# Debounce timer for heavy operations
+_discovery_debounce_timer = None
+
+# Flag to track if we're in a UI draw call (avoid heavy operations during drawing)
+_in_ui_draw = False
+
+# Minimum time between discovery merges (in seconds)
+_DISCOVERY_DEBOUNCE_INTERVAL = 2.0
+
+# Maximum cache age for icon detection (in seconds)
+_ICON_CACHE_MAX_AGE = 300.0  # 5 minutes
+
+# Flag to completely disable Python file scanning for bl_category
+_DISABLE_PYTHON_FILE_SCANNING = False
+
+# Cache for extension manifest keys to avoid repeated file scanning
+_extension_manifest_keys_cache = {}  # Maps (ext_id, scan_python_files) -> {keys, timestamp, pkg_path}
+
 
 def set_preview_mode_active(active):
     """Set preview mode active state.
@@ -1262,6 +1328,9 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
     """Record the extension that was just installed so the next category discovery
     can mark any new categories as pending tag assignment.
 
+    OPTIMIZATION: Now scans Python files for bl_category ONLY once at install time,
+    not during every UI draw. Results are cached permanently.
+
     Call this immediately after an extension is installed (before the next
     sync/discovery cycle).
 
@@ -1275,6 +1344,8 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
                               This triggers Python file scanning for bl_category values.
     """
     global _pending_extension_context, _glyph_cache, _install_from_disk_just_occurred
+    global _extension_manifest_keys_cache
+    
     _pending_extension_context = {
         "extension_id": extension_id,
         "space_type": space_type,
@@ -1283,28 +1354,45 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
         "tag_already_assigned": tag_already_assigned,
         "is_install_from_disk": is_install_from_disk,
     }
-    # Set flag to trigger Python file scanning only for Install from Disk
-    _install_from_disk_just_occurred = is_install_from_disk
     
-    # OPTIMIZATION: For Install from Disk, scan for icon file once and cache the result
-    # This avoids repeated disk scans for icon detection in _auto_detect_extension_icon_path
-    if is_install_from_disk:
-        try:
-            import importlib
-            module = importlib.import_module(extension_id.replace("add-on-", "bl_ext."))
-            pkg_path = os.path.dirname(getattr(module, "__file__", ""))
-            if pkg_path and os.path.isdir(pkg_path):
-                icon_path, icon_name = _scan_extension_icon_path(pkg_path)
-                if icon_path:
-                    category_debug_print(f"[ICON SCAN] Found icon for extension {extension_id!r}: {icon_path!r}")
-                    # Store in a temporary cache for use in _merge_discovered_categories
-                    if not hasattr(extension_post_install_handler, "_icon_cache"):
-                        extension_post_install_handler._icon_cache = {}
-                    extension_post_install_handler._icon_cache[extension_id] = icon_path
-                else:
-                    category_debug_print(f"[ICON SCAN] No icon found for extension {extension_id!r}")
-        except Exception as e:
-            category_debug_print(f"[ICON SCAN] Failed to scan icon for {extension_id!r}: {e}")
+    # OPTIMIZATION: Scan for icon file and bl_category ONLY once at install time
+    # This avoids repeated disk scans during UI draws
+    try:
+        import importlib
+        module = importlib.import_module(extension_id.replace("add-on-", "bl_ext."))
+        pkg_path = os.path.dirname(getattr(module, "__file__", ""))
+        if pkg_path and os.path.isdir(pkg_path):
+            # Scan icon once
+            icon_path, icon_name = _scan_extension_icon_path(pkg_path)
+            if icon_path:
+                category_debug_print(f"[ICON SCAN] Found icon for extension {extension_id!r}: {icon_path!r}")
+                if not hasattr(extension_post_install_handler, "_icon_cache"):
+                    extension_post_install_handler._icon_cache = {}
+                extension_post_install_handler._icon_cache[extension_id] = icon_path
+            else:
+                category_debug_print(f"[ICON SCAN] No icon found for extension {extension_id!r}")
+            
+            # CRITICAL OPTIMIZATION: Scan Python files for bl_category ONCE at install time
+            # Cache the result permanently (no expiration) to avoid repeated scanning
+            category_debug_print(f"[BL_CATEGORY SCAN] Scanning Python files for bl_category at install time: {extension_id!r}")
+            pkg_name = extension_id.replace("add-on-", "").replace(".", "_")
+            
+            # Always scan Python files at install time (regardless of is_install_from_disk)
+            # This is a one-time operation that happens only when extension is installed
+            manifest_keys = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=True)
+            
+            # Cache permanently with no expiration (scan only once ever)
+            cache_key = (extension_id, True)  # True = scanned Python files
+            _extension_manifest_keys_cache[cache_key] = {
+                "keys": manifest_keys,
+                "timestamp": time.time(),
+                "pkg_path": pkg_path,
+                "scanned_at_install": True,  # Mark as scanned at install
+            }
+            category_debug_print(f"[BL_CATEGORY SCAN] CACHED {len(manifest_keys)} keys for {extension_id!r}: {manifest_keys}")
+            
+    except Exception as e:
+        category_debug_print(f"[INSTALL SCAN] Failed to scan extension {extension_id!r}: {e}")
 
     # Opportunistically mark already-known categories from this extension as pending.
     # This is needed when the category already exists in the cache but is not rediscovered
@@ -1716,25 +1804,64 @@ def _extension_manifest_match_keys(pkg_path: str, pkg_name: str, scan_python_fil
     return keys
 
 
-def _auto_detect_extension_icon_path(category: str):
+def _auto_detect_extension_icon_path(category: str, force_refresh=False):
     """Try to find extension icon file for a category in user EXTENSIONS folders.
-
+    
+    OPTIMIZATION: Added caching to avoid repeated disk scans during UI draws.
+    
     Returns: (icon_path, provider) or ("", "") when not found.
     """
+    global _icon_detection_cache
+    
+    # PERF: Start timing
+    _icon_detect_start = time.perf_counter()
+    
+    # OPTIMIZATION: Check cache first
+    current_time = time.time()
+    
+    if not force_refresh and category in _icon_detection_cache:
+        cache_entry = _icon_detection_cache[category]
+        cache_age = current_time - cache_entry.get("timestamp", 0)
+        
+        # Use cache if it's fresh (less than ICON_CACHE_MAX_AGE seconds old)
+        if cache_age < _ICON_CACHE_MAX_AGE:
+            icon_path = cache_entry.get("icon_path", "")
+            provider = cache_entry.get("provider", "")
+            category_debug_print(f"[ICON DETECT OPTIMIZATION] Using cached icon for {category!r}: {icon_path!r} (age={cache_age:.1f}s)")
+            return icon_path, provider
+    
     _pref_log_once(f"[] detect start: category={category!r}")
     try:
         extensions_dir = bpy.utils.user_resource('EXTENSIONS')
     except Exception:
         _pref_log_once(f"[] detect abort: category={category!r}, reason=user_resource_exception")
+        # Cache the negative result
+        _icon_detection_cache[category] = {
+            "icon_path": "",
+            "provider": "",
+            "timestamp": current_time,
+        }
         return "", ""
 
     if not extensions_dir or not os.path.isdir(extensions_dir):
         _pref_log_once(f"[] detect abort: category={category!r}, extensions_dir={extensions_dir!r}, exists=False")
+        # Cache the negative result
+        _icon_detection_cache[category] = {
+            "icon_path": "",
+            "provider": "",
+            "timestamp": current_time,
+        }
         return "", ""
 
     target_key = _normalize_category_key(category)
     if not target_key:
         _pref_log_once(f"[] detect abort: category={category!r}, normalized_key is empty")
+        # Cache the negative result
+        _icon_detection_cache[category] = {
+            "icon_path": "",
+            "provider": "",
+            "timestamp": current_time,
+        }
         return "", ""
 
     _pref_log_once(f"[] detect context: category={category!r}, target_key={target_key!r}, extensions_dir={extensions_dir!r}")
@@ -1752,9 +1879,25 @@ def _auto_detect_extension_icon_path(category: str):
                 if not os.path.isdir(pkg_path):
                     continue
 
-                # OPTIMIZATION: Don't scan Python files for icon detection.
-                # Manifest fields are sufficient for matching categories to extensions.
-                match_keys = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=False)
+                # CRITICAL OPTIMIZATION: Use cached manifest keys instead of scanning
+                # Manifest keys are scanned once at extension install time
+                ext_id = f"add-on-{pkg_name}"
+                cache_key = (ext_id, True)  # True = scanned Python files at install
+                
+                if cache_key in _extension_manifest_keys_cache:
+                    match_keys = _extension_manifest_keys_cache[cache_key]["keys"]
+                    category_debug_print(f"[ICON DETECT OPTIMIZATION] Using cached manifest keys for {pkg_name!r}: {match_keys}")
+                else:
+                    # Fallback: scan manifest only (no Python files) if not cached
+                    # This should only happen for extensions installed before the optimization
+                    match_keys = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=False)
+                    # Cache for future use
+                    _extension_manifest_keys_cache[cache_key] = {
+                        "keys": match_keys,
+                        "timestamp": time.time(),
+                        "pkg_path": pkg_path,
+                    }
+                
                 exact_match = target_key in match_keys
                 fuzzy_match_key = ""
                 if not exact_match:
@@ -1799,12 +1942,40 @@ def _auto_detect_extension_icon_path(category: str):
                     icon_path = os.path.join(pkg_path, icon_name)
                     if os.path.isfile(icon_path):
                         _pref_log_once(f"[] detect hit: category={category!r}, icon={icon_path!r}, provider='extension_auto'")
+                        # Cache the result
+                        _icon_detection_cache[category] = {
+                            "icon_path": icon_path,
+                            "provider": "extension_auto",
+                            "timestamp": current_time,
+                        }
+                        
+                        # PERF: Log timing for successful detection
+                        _icon_detect_elapsed = (time.perf_counter() - _icon_detect_start) * 1000
+                        category_debug_print(f"[PERF] _auto_detect_extension_icon_path({category!r}) FOUND in {_icon_detect_elapsed:.2f}ms: {icon_path!r}")
+                        
                         return icon_path, "extension_auto"
     except Exception:
         _pref_log_once(f"[] detect abort: category={category!r}, reason=scan_exception")
+        # Cache the negative result
+        _icon_detection_cache[category] = {
+            "icon_path": "",
+            "provider": "",
+            "timestamp": current_time,
+        }
         return "", ""
 
     _pref_log_once(f"[] detect miss: category={category!r}")
+    # Cache the negative result
+    _icon_detection_cache[category] = {
+        "icon_path": "",
+        "provider": "",
+        "timestamp": current_time,
+    }
+    
+    # PERF: Log timing
+    _icon_detect_elapsed = (time.perf_counter() - _icon_detect_start) * 1000
+    category_debug_print(f"[PERF] _auto_detect_extension_icon_path({category!r}) completed in {_icon_detect_elapsed:.2f}ms")
+    
     return "", ""
 
 
@@ -3508,7 +3679,8 @@ def restore_category_tags_from_string(category, tags_string, space_type=-1):
                     # Clear "Without Tag" selection in WM
                     _set_without_tag_preview_state_in_wm(category, space_type, is_selected=False)
                     # Trigger WM sync to update "New Add-ons!" filter after restoring pending status
-                    sync_glyph_mappings_to_wm()
+                    # OPTIMIZATION: Skip icon detection (will run in background)
+                    sync_glyph_mappings_to_wm(skip_icon_detection=True)
     
     # Note: We don't delete tags that were created during preview mode here,
     # as they might be used by other categories. The tag creation itself is permanent,
@@ -5367,12 +5539,80 @@ def _discover_active_categories():
         return set()
 
 
-def _merge_discovered_categories():
-    """Merge discovered categories with cached mappings, adding defaults for new ones."""
-    global _glyph_cache, _category_orders_cache, _pending_extension_context, _install_from_disk_just_occurred
+def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False):
+    """Merge discovered categories with cached mappings, adding defaults for new ones.
     
-    category_debug_print(f"[MERGE DEBUG] _merge_discovered_categories START")
+    OPTIMIZATION: Added caching and debouncing to prevent repeated scanning during UI draws.
+    OPTIMIZATION: skip_icon_detection parameter allows deferring icon detection to background sync.
+    """
+    global _glyph_cache, _category_orders_cache, _pending_extension_context, _install_from_disk_just_occurred
+    global _merge_discovery_cache, _discovery_debounce_timer, _in_ui_draw
+    global _icon_detection_session_checked
+    
+    # PERF: Start timing
+    _merge_start_time = time.perf_counter()
+    
+    # OPTIMIZATION: Skip if cache is valid and not forced refresh
+    current_time = time.time()
+    
+    # Check if we should use cached results
+    if not force_refresh and _merge_discovery_cache.get("cache_valid", False):
+        cache_age = current_time - _merge_discovery_cache.get("last_check_time", 0)
+        
+        # Use cache if it's fresh (less than DEBOUNCE_INTERVAL seconds old)
+        if cache_age < _DISCOVERY_DEBOUNCE_INTERVAL:
+            category_debug_print(f"[MERGE OPTIMIZATION] Using cached discovery results (age={cache_age:.2f}s)")
+            return False
+        
+        # Check if addon/extension count changed
+        try:
+            prefs = getattr(bpy.context, "preferences", None)
+            addons = getattr(prefs, "addons", None) if prefs else None
+            addon_count = len(addons) if addons else 0
+            
+            extensions_dir = bpy.utils.user_resource('EXTENSIONS') if bpy.utils.user_resource('EXTENSIONS') else ""
+            extension_count = 0
+            if extensions_dir and os.path.isdir(extensions_dir):
+                extension_count = sum(1 for repo in os.listdir(extensions_dir) 
+                                     if os.path.isdir(os.path.join(extensions_dir, repo)) 
+                                     and not repo.startswith('.'))
+            
+            # Use cache if counts haven't changed
+            if (addon_count == _merge_discovery_cache.get("last_addon_count", 0) and
+                extension_count == _merge_discovery_cache.get("last_extension_count", 0)):
+                category_debug_print(f"[MERGE OPTIMIZATION] Using cached results (addon_count={addon_count}, ext_count={extension_count})")
+                _merge_discovery_cache["last_check_time"] = current_time
+                return False
+        except Exception:
+            pass  # Continue with merge if we can't check counts
+    
+    # OPTIMIZATION: Skip heavy operations during UI draw calls
+    if _in_ui_draw and not force_refresh:
+        category_debug_print(f"[MERGE OPTIMIZATION] Deferring merge - in UI draw call")
+        # Schedule deferred merge if not already scheduled
+        if _discovery_debounce_timer is None:
+            def deferred_merge():
+                global _discovery_debounce_timer
+                _discovery_debounce_timer = None
+                # Skip icon detection in deferred UI merge (will run in background)
+                _merge_discovered_categories(force_refresh=True, skip_icon_detection=True)
+                return None
+            
+            _discovery_debounce_timer = deferred_merge
+            try:
+                bpy.app.timers.register(deferred_merge, first_interval=_DISCOVERY_DEBOUNCE_INTERVAL)
+                category_debug_print(f"[MERGE OPTIMIZATION] Scheduled deferred merge in {_DISCOVERY_DEBOUNCE_INTERVAL}s")
+            except Exception:
+                pass  # Timer registration failed, continue with merge
+        return False
+    
+    category_debug_print(f"[MERGE DEBUG] _merge_discovered_categories START (force_refresh={force_refresh})")
     category_debug_print(f"[MERGE DEBUG] Pending extension context: {_pending_extension_context}")
+    
+    # OPTIMIZATION: Clear session-level icon detection tracker for fresh merge
+    global _icon_detection_session_checked
+    _icon_detection_session_checked = set()
+    category_debug_print(f"[ICON SESSION CACHE] Cleared session tracker for new merge")
 
     result = _discover_active_categories()
     # Handle both old tuple return and new tuple return
@@ -5586,42 +5826,55 @@ def _merge_discovered_categories():
     # Update icon_path for existing categories with icon_source='auto' and no icon_path
     # This ensures that extension icons are detected even for categories that were cached before
     # OPTIMIZATION: Use cached icon path from extension_post_install_handler if available
+    # OPTIMIZATION: Session-level tracking to avoid redundant icon checks
+    # OPTIMIZATION: Skip icon detection entirely if skip_icon_detection=True
     existing_categories_needing_icon_update = []
     icon_cache = getattr(extension_post_install_handler, "_icon_cache", {})
     
-    for category in discovered:
-        if category in new_categories:
-            continue  # Skip new categories, they are handled below
-        cache_key = _get_cache_key_for_category(category)
-        if cache_key in _glyph_cache:
-            cached_data = _glyph_cache[cache_key]
-            if isinstance(cached_data, dict):
-                icon_source = cached_data.get("icon_source", "auto")
-                icon_path = cached_data.get("icon_path", "")
-                if icon_source == "auto" and not icon_path:
-                    # Try to get extension_id and use cached icon path
-                    detected_icon_path = None
-                    detected_provider = None
-                    ext_id = cached_data.get("source_extension", "")
-                    
-                    if ext_id and ext_id in icon_cache:
-                        detected_icon_path = icon_cache[ext_id]
-                        detected_provider = "extension_auto"
-                        category_debug_print(f"[ICON CACHE] Using cached icon for existing category {category!r}: {detected_icon_path!r}")
-                    
-                    # Fallback to disk scan only if no cached icon
-                    if not detected_icon_path:
-                        detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
-                    
-                    if detected_icon_path:
-                        cached_data["icon_path"] = detected_icon_path
-                        cached_data["icon_provider"] = detected_provider or "extension_auto"
-                        cache_changed = True
-                        existing_categories_needing_icon_update.append(category)
-                        category_debug_print(
-                            f"[] update existing category auto-icon: "
-                            f"category={category!r}, path={detected_icon_path!r}, provider={cached_data['icon_provider']!r}"
-                        )
+    if not skip_icon_detection:
+        for category in discovered:
+            if category in new_categories:
+                continue  # Skip new categories, they are handled below
+            cache_key = _get_cache_key_for_category(category)
+            if cache_key in _glyph_cache:
+                cached_data = _glyph_cache[cache_key]
+                if isinstance(cached_data, dict):
+                    icon_source = cached_data.get("icon_source", "auto")
+                    icon_path = cached_data.get("icon_path", "")
+                    if icon_source == "auto" and not icon_path:
+                        # OPTIMIZATION: Skip if already checked in this session
+                        if category in _icon_detection_session_checked:
+                            category_debug_print(f"[ICON SESSION CACHE] Skipping already-checked category {category!r}")
+                            continue
+                        
+                        # Try to get extension_id and use cached icon path
+                        detected_icon_path = None
+                        detected_provider = None
+                        ext_id = cached_data.get("source_extension", "")
+                        
+                        if ext_id and ext_id in icon_cache:
+                            detected_icon_path = icon_cache[ext_id]
+                            detected_provider = "extension_auto"
+                            category_debug_print(f"[ICON CACHE] Using cached icon for existing category {category!r}: {detected_icon_path!r}")
+                        
+                        # Fallback to disk scan only if no cached icon
+                        if not detected_icon_path:
+                            detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
+                        
+                        # Mark as checked in this session
+                        _icon_detection_session_checked.add(category)
+                        
+                        if detected_icon_path:
+                            cached_data["icon_path"] = detected_icon_path
+                            cached_data["icon_provider"] = detected_provider or "extension_auto"
+                            cache_changed = True
+                            existing_categories_needing_icon_update.append(category)
+                            category_debug_print(
+                                f"[] update existing category auto-icon: "
+                                f"category={category!r}, path={detected_icon_path!r}, provider={cached_data['icon_provider']!r}"
+                            )
+    else:
+        category_debug_print("[ICON DETECTION] Skipping icon detection for faster startup (will run in background)")
 
     if existing_categories_needing_icon_update:
         category_debug_print(f"[GLYPH] Updated icons for {len(existing_categories_needing_icon_update)} existing categories")
@@ -5851,32 +6104,40 @@ def _merge_discovered_categories():
                 category_debug_print(f"[MERGE AUTO-EXT DEBUG] Checking {len(_glyph_cache)} cache entries for extension matching")
                 category_debug_print(f"[MERGE AUTO-EXT DEBUG] enabled_extensions: {list(enabled_extensions.keys())}")
                 
-                # Build manifest match keys for each extension (includes Python file bl_category scanning)
-                # OPTIMIZATION: Only scan Python files when _install_from_disk_just_occurred is True
-                # (i.e., when extension was installed via "Install from Disk" operator).
-                # For drag-and-drop installs, skip Python file scanning to avoid UI freeze.
-                should_scan_python_files = _install_from_disk_just_occurred
-                category_debug_print(f"[MERGE AUTO-EXT DEBUG] _install_from_disk_just_occurred={_install_from_disk_just_occurred}, will scan Python files={should_scan_python_files}")
-                
+                # CRITICAL OPTIMIZATION: NEVER scan Python files during merge/discovery
+                # Python files are scanned ONLY once at extension install time in extension_post_install_handler()
+                # This eliminates the main cause of UI freezes during Get Extension/Add-ons panel draws
                 extension_manifest_keys = {}
                 for ext_id, ext_info in enabled_extensions.items():
-                    pkg_name = ext_info["pkg_name"]
-                    module_name = ext_info["module_name"]
-                    category_debug_print(f"[MERGE AUTO-EXT DEBUG] Building manifest keys for ext_id={ext_id!r}, pkg_name={pkg_name!r}, module_name={module_name!r}")
-                    try:
-                        import importlib
-                        module = importlib.import_module(module_name)
-                        pkg_path = os.path.dirname(getattr(module, "__file__", ""))
-                        category_debug_print(f"[MERGE AUTO-EXT DEBUG] pkg_path={pkg_path!r}, isdir={os.path.isdir(pkg_path) if pkg_path else False}")
-                        if pkg_path and os.path.isdir(pkg_path):
-                            extension_manifest_keys[ext_id] = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=should_scan_python_files)
-                            category_debug_print(f"[MERGE AUTO-EXT DEBUG] manifest_keys for {ext_id!r}: {extension_manifest_keys[ext_id]}")
-                        else:
+                    # Always use cached keys (scanned at install time)
+                    # Use cache key with True (scanned Python files) to get the install-time scan results
+                    cache_key = (ext_id, True)
+                    
+                    if cache_key in _extension_manifest_keys_cache:
+                        cache_entry = _extension_manifest_keys_cache[cache_key]
+                        # Use cached keys regardless of age - they were scanned at install and never change
+                        extension_manifest_keys[ext_id] = cache_entry["keys"]
+                        category_debug_print(f"[MERGE AUTO-EXT OPTIMIZATION] Using INSTALL-TIME cached manifest keys for {ext_id!r}: {cache_entry['keys']}")
+                    else:
+                        # Fallback: build keys from manifest ONLY (no Python file scanning)
+                        # This handles extensions installed before this optimization was added
+                        pkg_name = ext_info["pkg_name"]
+                        module_name = ext_info["module_name"]
+                        category_debug_print(f"[MERGE AUTO-EXT OPTIMIZATION] No install-time cache for {ext_id!r}, building from manifest only (no Python scan)")
+                        try:
+                            import importlib
+                            module = importlib.import_module(module_name)
+                            pkg_path = os.path.dirname(getattr(module, "__file__", ""))
+                            if pkg_path and os.path.isdir(pkg_path):
+                                # NEVER scan Python files here - use manifest fields only
+                                keys = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=False)
+                                extension_manifest_keys[ext_id] = keys
+                                category_debug_print(f"[MERGE AUTO-EXT OPTIMIZATION] Built manifest-only keys for {ext_id!r}: {keys}")
+                            else:
+                                extension_manifest_keys[ext_id] = set()
+                        except Exception as e:
                             extension_manifest_keys[ext_id] = set()
-                            category_debug_print(f"[MERGE AUTO-EXT DEBUG] pkg_path invalid, using empty set")
-                    except Exception as e:
-                        extension_manifest_keys[ext_id] = set()
-                        category_debug_print(f"[MERGE AUTO-EXT DEBUG] Failed to import module {module_name!r}: {e}")
+                            category_debug_print(f"[MERGE AUTO-EXT OPTIMIZATION] Failed to build keys for {ext_id!r}: {e}")
                 
                 for cache_key, cat_data in list(_glyph_cache.items()):
                     if not isinstance(cache_key, tuple) or len(cache_key) != 2:
@@ -6107,19 +6368,31 @@ def _merge_discovered_categories():
 
             # OPTIMIZATION: Use cached icon path from extension_post_install_handler if available
             # This avoids repeated disk scans for icon detection
+            # OPTIMIZATION: Session-level tracking to avoid redundant checks
+            # OPTIMIZATION: Skip icon detection entirely if skip_icon_detection=True
             detected_icon_path = None
             detected_provider = None
             
-            # Check if we have a cached icon path from Install from Disk
-            icon_cache = getattr(extension_post_install_handler, "_icon_cache", {})
-            if ext_id and ext_id in icon_cache:
-                detected_icon_path = icon_cache[ext_id]
-                detected_provider = "extension_auto"
-                category_debug_print(f"[ICON CACHE] Using cached icon for category {category!r}: {detected_icon_path!r}")
-            
-            # Fallback to disk scan only if no cached icon (for backward compatibility)
-            if not detected_icon_path:
-                detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
+            if not skip_icon_detection:
+                # Check if already checked in this session
+                if category in _icon_detection_session_checked:
+                    category_debug_print(f"[ICON SESSION CACHE] Skipping already-checked new category {category!r}")
+                else:
+                    # Check if we have a cached icon path from Install from Disk
+                    icon_cache = getattr(extension_post_install_handler, "_icon_cache", {})
+                    if ext_id and ext_id in icon_cache:
+                        detected_icon_path = icon_cache[ext_id]
+                        detected_provider = "extension_auto"
+                        category_debug_print(f"[ICON CACHE] Using cached icon for category {category!r}: {detected_icon_path!r}")
+                    
+                    # Fallback to disk scan only if no cached icon (for backward compatibility)
+                    if not detected_icon_path:
+                        detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
+                    
+                    # Mark as checked in this session
+                    _icon_detection_session_checked.add(category)
+            else:
+                category_debug_print(f"[ICON DETECTION] Skipping icon detection for new category {category!r} (will run in background)")
             
             if detected_icon_path:
                 _glyph_cache[cache_key]["icon_path"] = detected_icon_path
@@ -6176,6 +6449,10 @@ def _merge_discovered_categories():
         category_debug_print("[MERGE] Resetting _install_from_disk_just_occurred flag after use")
         _install_from_disk_just_occurred = False
 
+    # PERF: Log timing
+    _merge_elapsed = (time.perf_counter() - _merge_start_time) * 1000
+    category_debug_print(f"[PERF] _merge_discovered_categories completed in {_merge_elapsed:.2f}ms")
+
     return (len(new_categories) > 0 or cache_changed or
             bool(existing_categories_needing_icon_update) or
             bool(existing_glyph_only_needing_name_update))
@@ -6192,9 +6469,12 @@ def _is_collection_safe(collection):
         return False
 
 
-def sync_glyph_mappings_to_wm():
+def sync_glyph_mappings_to_wm(force_discovery_merge=False, skip_icon_detection=False):
     """Sync in-memory glyph mappings to window manager collection.
 
+    OPTIMIZATION: Added force_discovery_merge parameter to control when heavy discovery runs.
+    OPTIMIZATION: Added skip_icon_detection parameter to defer icon detection to background.
+    
     Note: The collections are cleared in C++ code before file save and after file load
     to prevent crashes from garbage pointers. This function only adds new items.
     """
@@ -6212,12 +6492,74 @@ def sync_glyph_mappings_to_wm():
 
     _sync_in_progress = True
     try:
-        return _sync_glyph_mappings_to_wm_impl()
+        return _sync_glyph_mappings_to_wm_impl(force_discovery_merge=force_discovery_merge, skip_icon_detection=skip_icon_detection)
     finally:
         _sync_in_progress = False
 
 
 _auto_sync_timer = None
+_background_sync_timer = None
+_background_sync_run_count = 0  # Track number of background sync runs
+
+
+def _background_discovery_sync():
+    """Background periodic sync with discovery merge to keep categories updated.
+    
+    OPTIMIZATION: Runs discovery merge periodically in background instead of on every UI draw.
+    First run uses shorter interval for quick icon detection, then switches to longer interval.
+    """
+    global _background_sync_timer, _background_sync_run_count
+    
+    _background_sync_run_count += 1
+    
+    # Run discovery merge with force_refresh and icon detection enabled
+    try:
+        sync_glyph_mappings_to_wm(force_discovery_merge=True, skip_icon_detection=False)
+        category_debug_print(f"[BACKGROUND SYNC] Completed discovery sync with icon detection (run #{_background_sync_run_count})")
+    except Exception as e:
+        category_debug_print(f"[BACKGROUND SYNC] Error: {e}")
+    
+    # Re-register timer for next run
+    # First run: 5 seconds (quick icon detection)
+    # Subsequent runs: 60 seconds (reduce CPU usage)
+    _background_sync_timer = _background_discovery_sync
+    next_interval = 5.0 if _background_sync_run_count == 1 else 60.0
+    try:
+        bpy.app.timers.register(_background_sync_timer, first_interval=next_interval)
+        category_debug_print(f"[BACKGROUND SYNC] Next sync scheduled in {next_interval} seconds")
+    except Exception:
+        _background_sync_timer = None
+    
+    return None
+
+
+def _start_background_sync():
+    """Start background periodic sync timer."""
+    global _background_sync_timer
+    
+    if _background_sync_timer is not None:
+        return  # Already running
+    
+    try:
+        _background_sync_timer = _background_discovery_sync
+        bpy.app.timers.register(_background_sync_timer, first_interval=5.0)
+        category_debug_print("[BACKGROUND SYNC] Started background sync timer (5s initial, 10s interval)")
+    except Exception as e:
+        category_debug_print(f"[BACKGROUND SYNC] Failed to start: {e}")
+        _background_sync_timer = None
+
+
+def _stop_background_sync():
+    """Stop background periodic sync timer."""
+    global _background_sync_timer
+    
+    if _background_sync_timer is not None:
+        try:
+            bpy.app.timers.unregister(_background_sync_timer)
+        except Exception:
+            pass
+        _background_sync_timer = None
+        category_debug_print("[BACKGROUND SYNC] Stopped background sync timer")
 
 
 def _auto_sync_to_wm():
@@ -6240,31 +6582,46 @@ def _auto_sync_to_wm():
         def delayed_sync():
             global _auto_sync_timer
             _auto_sync_timer = None
-            sync_glyph_mappings_to_wm()
+            # OPTIMIZATION: Don't force discovery merge in delayed syncs (UI updates)
+            sync_glyph_mappings_to_wm(force_discovery_merge=False)
             return None
             
         _auto_sync_timer = delayed_sync
         bpy.app.timers.register(delayed_sync, first_interval=0.1)
     else:
         # Immediate sync if we're not debouncing (e.g. startup or preview)
-        sync_glyph_mappings_to_wm()
+        # OPTIMIZATION: Don't force discovery merge in immediate syncs (UI updates)
+        sync_glyph_mappings_to_wm(force_discovery_merge=False)
 
 
-def _sync_glyph_mappings_to_wm_impl():
-    """Implementation of sync_glyph_mappings_to_wm."""
+def _sync_glyph_mappings_to_wm_impl(force_discovery_merge=False, skip_icon_detection=False):
+    """Implementation of sync_glyph_mappings_to_wm.
+    
+    OPTIMIZATION: Added force_discovery_merge parameter to control when heavy discovery runs.
+    OPTIMIZATION: Added skip_icon_detection parameter to defer icon detection to background.
+    """
     global _glyph_cache, _glyph_cache_loaded
 
     cache_changed = False  # Track if cache was modified during sync
+    
+    # PERF: Start timing
+    _sync_start_time = time.perf_counter()
 
-    _pref_log_once(f"[GLYPH SYNC] sync_glyph_mappings_to_wm called, cache has {len(_glyph_cache)} entries")
+    _pref_log_once(f"[GLYPH SYNC] sync_glyph_mappings_to_wm called, cache has {len(_glyph_cache)} entries, force_discovery={force_discovery_merge}, skip_icon={skip_icon_detection}")
 
-    # Re-check categories each sync to catch addons/extensions enabled after startup.
-    # This also triggers icon auto-detection for newly discovered categories.
-    try:
-        discovered_changes = _merge_discovered_categories()
-        _pref_log_once(f"[GLYPH SYNC] late discovery merge result: {discovered_changes}")
-    except Exception as e:
-        _pref_log_once(f"[GLYPH SYNC] late discovery merge failed: {e}")
+    # OPTIMIZATION: Only run heavy discovery merge when explicitly requested
+    # This prevents UI stuttering during panel draws (Get Extensions, Add-ons)
+    if force_discovery_merge:
+        _pref_log_once(f"[GLYPH SYNC] Running forced discovery merge")
+        try:
+            discovered_changes = _merge_discovered_categories(force_refresh=True, skip_icon_detection=skip_icon_detection)
+            _pref_log_once(f"[GLYPH SYNC] late discovery merge result: {discovered_changes}")
+        except Exception as e:
+            _pref_log_once(f"[GLYPH SYNC] late discovery merge failed: {e}")
+    else:
+        # Skip discovery merge for regular syncs (UI draws)
+        # Discovery will run periodically via timer or when explicitly requested
+        _pref_log_once(f"[GLYPH SYNC] Skipping discovery merge (not forced)")
 
     def _has_user_customizations(category_data):
         """Check if category has user customizations (display_name, color, glyph, or tags)."""
@@ -6388,26 +6745,30 @@ def _sync_glyph_mappings_to_wm_impl():
                     )
 
                     if icon_source_str == "auto" and (not icon_key_val) and (not icon_path_val):
-                        _pref_log_once(
-                            f"[] sync attempt: category={category!r}, "
-                            f"icon_source={icon_source_str!r}"
-                        )
-                        detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
-                        if detected_icon_path:
-                            icon_path_val = detected_icon_path
-                            if not icon_provider_val:
-                                icon_provider_val = detected_provider
+                        # OPTIMIZATION: Skip icon detection during startup (will run in background)
+                        if not skip_icon_detection:
                             _pref_log_once(
-                                f"[] sync hit: category={category!r}, "
-                                f"path={icon_path_val!r}, provider={icon_provider_val!r}"
+                                f"[] sync attempt: category={category!r}, "
+                                f"icon_source={icon_source_str!r}"
                             )
-                            # Update cache with detected icon path so it persists
-                            if isinstance(normalized_data, dict):
-                                normalized_data["icon_path"] = icon_path_val
-                                normalized_data["icon_provider"] = icon_provider_val
-                                cache_changed = True
+                            detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
+                            if detected_icon_path:
+                                icon_path_val = detected_icon_path
+                                if not icon_provider_val:
+                                    icon_provider_val = detected_provider
+                                _pref_log_once(
+                                    f"[] sync hit: category={category!r}, "
+                                    f"path={icon_path_val!r}, provider={icon_provider_val!r}"
+                                )
+                                # Update cache with detected icon path so it persists
+                                if isinstance(normalized_data, dict):
+                                    normalized_data["icon_path"] = icon_path_val
+                                    normalized_data["icon_provider"] = icon_provider_val
+                                    cache_changed = True
+                            else:
+                                _sync_miss_log_once(category)
                         else:
-                            _sync_miss_log_once(category)
+                            category_debug_print(f"[ICON DETECTION] Skipping icon detection for {category!r} during sync (will run in background)")
 
                     icon_source_to_enum = {
                         "auto": "AUTO",
@@ -6537,6 +6898,10 @@ def _sync_glyph_mappings_to_wm_impl():
             else:
                 category_debug_print("[GLYPH SYNC] Failed to save updated icon paths to JSON file")
 
+        # PERF: Log timing
+        _sync_elapsed = (time.perf_counter() - _sync_start_time) * 1000
+        category_debug_print(f"[PERF] _sync_glyph_mappings_to_wm_impl completed in {_sync_elapsed:.2f}ms")
+
         return added_count > 0
     except Exception as e:
         category_debug_print(f"[GLYPH] Error syncing to WM: {e}")
@@ -6558,18 +6923,32 @@ def register_category_glyph_mappings():
     # Integrate with glyph library if available
     _integrate_glyph_library()
 
-    # Discover and merge any new categories from active addons
-    try:
-        _merge_discovered_categories()
-    except Exception as e:
-        category_debug_print(f"[GLYPH] Error during category discovery: {e}")
-        # Continue even if discovery fails - we can still sync existing categories
+    # OPTIMIZATION: REMOVED duplicate _merge_discovered_categories() call
+    # sync_glyph_mappings_to_wm(force_discovery_merge=True) below already calls it
+    # This was causing DOUBLE discovery (2x 790 panel scans) at startup!
+    category_debug_print("[GLYPH] Skipping duplicate discovery - will be done by sync_glyph_mappings_to_wm")
 
-    result = sync_glyph_mappings_to_wm()
+    # OPTIMIZATION: Force discovery merge on initial load to ensure all categories are found
+    # OPTIMIZATION: Skip icon detection during startup for faster load (will run in background)
+    result = sync_glyph_mappings_to_wm(force_discovery_merge=True, skip_icon_detection=True)
 
     # Mark initial load as complete - callbacks can now save
     _initial_load_complete = True
     category_debug_print("[GLYPH] Initial load complete, auto-save callbacks enabled")
+
+    # OPTIMIZATION: Start background sync with delay to handle icon detection
+    # This allows startup to be fast, then icons are detected in the background
+    def start_background_sync_delayed():
+        category_debug_print("[BACKGROUND SYNC] Starting delayed background sync for icon detection")
+        _start_background_sync()
+        return None
+    
+    # Start background sync after 2 seconds to allow UI to settle
+    try:
+        bpy.app.timers.register(start_background_sync_delayed, first_interval=2.0)
+        category_debug_print("[BACKGROUND SYNC] Scheduled to start in 2 seconds")
+    except Exception as e:
+        category_debug_print(f"[BACKGROUND SYNC] Failed to schedule delayed start: {e}")
 
     return result
 
@@ -7255,7 +7634,8 @@ def _save_tags_to_json():
     _sync_mode_flags_from_wm_to_cache()
     save_debug_print(f"[SAVE_TAGS_TO_JSON] Step 2: Syncing glyph mappings to WM")
     category_debug_print("[SAVE_TAGS_TO_JSON] Step 2: Syncing glyph mappings to WM")
-    sync_glyph_mappings_to_wm()
+    # OPTIMIZATION: Skip icon detection during save (will run in background)
+    sync_glyph_mappings_to_wm(skip_icon_detection=True)
     save_debug_print(f"[SAVE_TAGS_TO_JSON] Step 3: Saving to JSON file")
     category_debug_print("[SAVE_TAGS_TO_JSON] Step 3: Saving to JSON file")
     _save_glyph_mappings_to_file()
@@ -8348,7 +8728,8 @@ def _on_extension_repos_update_post(dummy=None):
         )
 
         category_debug_print("[GLYPH EXTENSION UPDATE] >>> Calling _merge_discovered_categories()...")
-        merge_result = _merge_discovered_categories()
+        # Skip icon detection for faster response (background sync will handle icons)
+        merge_result = _merge_discovered_categories(skip_icon_detection=True)
         category_debug_print(f"[GLYPH EXTENSION UPDATE] >>> _merge_discovered_categories() returned: {merge_result}")
 
         result_after = _discover_active_categories()
@@ -8365,7 +8746,8 @@ def _on_extension_repos_update_post(dummy=None):
         )
 
         category_debug_print("[GLYPH EXTENSION UPDATE] >>> Calling sync_glyph_mappings_to_wm()...")
-        sync_glyph_mappings_to_wm()
+        # OPTIMIZATION: Skip icon detection in extension update handler (background sync will handle it)
+        sync_glyph_mappings_to_wm(skip_icon_detection=True)
         category_debug_print("[GLYPH EXTENSION UPDATE] >>> sync_glyph_mappings_to_wm() completed")
         
         # Check if this is a reserved-only extension and switch to reserved category
@@ -8428,7 +8810,8 @@ def _on_version_update(dummy):
             f"missing_in_cache={sorted(discovered_before - cache_before)}"
         )
 
-        merge_result = _merge_discovered_categories()
+        # Skip icon detection for faster response (background sync will handle icons)
+        merge_result = _merge_discovered_categories(skip_icon_detection=True)
 
         result_after = _discover_active_categories()
         if isinstance(result_after, tuple):
@@ -8443,7 +8826,8 @@ def _on_version_update(dummy):
             f"still_missing={sorted(discovered_after - cache_after)}"
         )
 
-        sync_glyph_mappings_to_wm()
+        # OPTIMIZATION: Skip icon detection in version update handler (background sync will handle it)
+        sync_glyph_mappings_to_wm(skip_icon_detection=True)
     except Exception as e:
         category_debug_print(f"[GLYPH] Error during version update sync: {e}")
 

@@ -484,9 +484,23 @@ def _extension_has_only_reserved_categories(wm, source_extension: str) -> bool:
 
 @contextmanager
 def safe_file_write(filepath):
-    """Atomic file write with rollback on error and retry logic for Windows."""
+    """Atomic file write with rollback on error and retry logic for Windows.
+    
+    Uses unique temporary filename with timestamp and PID to avoid race conditions
+    when multiple threads or rapid successive calls attempt to write the same file.
+    """
     import time
-    temp_path = f"{filepath}.tmp"
+    import tempfile
+    
+    # Create unique temp file in the same directory to ensure atomic rename works
+    dir_name = os.path.dirname(filepath)
+    base_name = os.path.basename(filepath)
+    
+    # Generate unique temp filename: {base_name}.tmp.{pid}.{timestamp}
+    timestamp = int(time.time() * 1000000)  # Microsecond precision
+    temp_name = f"{base_name}.tmp.{os.getpid()}.{timestamp}"
+    temp_path = os.path.join(dir_name, temp_name) if dir_name else temp_name
+    
     max_retries = 3
     retry_delay = 0.1  # 100ms
 
@@ -2531,14 +2545,27 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
         skip_wm_sync: If True, skip WM sync operations after saving (optimization for Save button)
     """
     import time
+    global _glyph_save_lock
+    
+    # Prevent parallel saves - if already saving, skip this call
+    if _glyph_save_lock:
+        category_debug_print("[GLYPH SAVE] SKIPPED - another save is in progress")
+        return False
+    
+    _glyph_save_lock = True
     save_start_time = time.perf_counter()
     category_debug_print(f"[GLYPH SAVE] >>>>>> START _save_glyph_mappings_to_file <<<<<<")
     
     global _glyph_cache, _all_tags_cache
 
-    filepath = _get_glyphs_filepath()
-    if not filepath:
-        tag_log("No filepath for saving", "ERROR")
+    try:
+        filepath = _get_glyphs_filepath()
+        if not filepath:
+            tag_log("No filepath for saving", "ERROR")
+            return False
+    except Exception as e:
+        _glyph_save_lock = False
+        tag_log(f"Failed to get filepath: {e}", "ERROR")
         return False
 
     # CRITICAL: Only block discovery saves, allow user changes to be saved
@@ -2766,6 +2793,11 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
                 category_debug_print(f"[GLYPH SAVE THREAD] Error: {e}")
                 import traceback
                 traceback.print_exc()
+            finally:
+                # Release lock after background thread completes
+                global _glyph_save_lock
+                _glyph_save_lock = False
+                category_debug_print("[GLYPH SAVE THREAD] Lock released")
                 
         thread = threading.Thread(target=write_task)
         thread.daemon = True
@@ -2778,12 +2810,13 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
         category_debug_print(f"[GLYPH SAVE] <<<<<<<< MAIN THREAD COMPLETE: Total time {(total_end - save_start_time)*1000:.2f}ms (background thread continues) <<<<<<<<")
         
         tag_log(f"Started async save for {cat_count} categories, {tag_count} tags (main thread time: {(total_end - save_start_time)*1000:.2f}ms)")
-        return True
+        return True  # Lock will be released in background thread
     except Exception as e:
         tag_log(f"Save failed: {e}", "ERROR")
         category_debug_print(f"[GLYPH SAVE] Error: {e}")
         import traceback
         traceback.print_exc()
+        _glyph_save_lock = False  # Release lock on error
         return False
 
 
@@ -7060,6 +7093,7 @@ def _deferred_save():
 
 _auto_save_glyph_pending = False
 _auto_save_glyph_skip_wm_sync = False
+_glyph_save_lock = False  # Global lock to prevent parallel file writes
 
 def _auto_save_glyph_mappings(skip_wm_sync=False):
     """Mark that glyph mappings need to be saved (called from UI callbacks).

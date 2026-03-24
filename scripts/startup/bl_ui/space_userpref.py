@@ -41,11 +41,18 @@ if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
 
 TAG_DEBUG = False  # Set to False to disable all debug output
 TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
+SAVE_DEBUG = True  # Set to True to enable verbose save/load logging (printf-style)
 
 
 def category_debug_print(message):
     """Print debug message only when TAG_DEBUG is enabled."""
     if TAG_DEBUG:
+        print(message)
+
+
+def save_debug_print(message):
+    """Print verbose save/load debug message only when SAVE_DEBUG is enabled."""
+    if SAVE_DEBUG:
         print(message)
 
 
@@ -490,7 +497,6 @@ def safe_file_write(filepath):
     when multiple threads or rapid successive calls attempt to write the same file.
     """
     import time
-    import tempfile
     
     # Create unique temp file in the same directory to ensure atomic rename works
     dir_name = os.path.dirname(filepath)
@@ -501,34 +507,45 @@ def safe_file_write(filepath):
     temp_name = f"{base_name}.tmp.{os.getpid()}.{timestamp}"
     temp_path = os.path.join(dir_name, temp_name) if dir_name else temp_name
     
+    # CRITICAL DEBUG: Always log file write attempts (even if TAG_DEBUG=False)
+    save_debug_print(f"[SAFE_FILE_WRITE] >>>>> START: filepath={filepath!r}, temp_path={temp_path!r}, dir_name={dir_name!r}")
+    
     max_retries = 3
     retry_delay = 0.1  # 100ms
 
     try:
+        save_debug_print(f"[SAFE_FILE_WRITE] Opening temp file for writing: {temp_path!r}")
         with open(temp_path, 'w', encoding='utf-8') as f:
             yield f
+        save_debug_print(f"[SAFE_FILE_WRITE] Temp file written successfully, attempting rename...")
 
         # Atomic rename with retry on Windows (file may be locked or temp file missing)
         for attempt in range(max_retries):
             try:
+                save_debug_print(f"[SAFE_FILE_WRITE] Attempt {attempt + 1}/{max_retries}: os.replace({temp_path!r}, {filepath!r})")
                 os.replace(temp_path, filepath)
+                save_debug_print(f"[SAFE_FILE_WRITE] <<<<< SUCCESS: Saved {filepath!r}")
                 tag_log(f"Saved: {filepath}")
                 return
             except (PermissionError, FileNotFoundError) as e:
+                save_debug_print(f"[SAFE_FILE_WRITE] Attempt {attempt + 1} failed: {type(e).__name__}: {e}")
                 if attempt < max_retries - 1:
                     tag_log(f"Retry {attempt + 1}/{max_retries} for {filepath}: {e}")
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
                 else:
+                    save_debug_print(f"[SAFE_FILE_WRITE] <<<<< FAILED after {max_retries} retries: {e}")
                     tag_log(f"Failed to save after {max_retries} retries: {e}", "ERROR")
                     raise e
     except Exception as e:
         # Remove temp file on error
+        save_debug_print(f"[SAFE_FILE_WRITE] <<<<< EXCEPTION: {type(e).__name__}: {e}")
         if os.path.exists(temp_path):
             try:
+                save_debug_print(f"[SAFE_FILE_WRITE] Cleaning up temp file: {temp_path!r}")
                 os.remove(temp_path)
-            except:
-                pass
+            except Exception as cleanup_error:
+                save_debug_print(f"[SAFE_FILE_WRITE] Cleanup failed: {cleanup_error}")
         tag_log(f"Failed to save {filepath}: {e}", "ERROR")
         raise e
 
@@ -2601,10 +2618,18 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
         skip_wm_sync: If True, skip WM sync operations after saving (optimization for Save button)
     """
     import time
-    global _glyph_save_lock
+    # CRITICAL FIX: Declare ALL global variables at the very beginning, before any usage
+    global _glyph_save_lock, _glyph_cache, _all_tags_cache
+    
+    # CRITICAL DEBUG: Always log save attempts (even if TAG_DEBUG=False)
+    save_debug_print(f"[GLYPH SAVE] >>>>>> START _save_glyph_mappings_to_file <<<<<<")
+    save_debug_print(f"[GLYPH SAVE] data={data is not None}, force_discovery_skip={force_discovery_skip}, skip_wm_sync={skip_wm_sync}")
+    save_debug_print(f"[GLYPH SAVE] _glyph_cache entries: {len(_glyph_cache)}")
+    save_debug_print(f"[GLYPH SAVE] _all_tags_cache entries: {len(_all_tags_cache)}")
     
     # Prevent parallel saves - if already saving, skip this call
     if _glyph_save_lock:
+        save_debug_print(f"[GLYPH SAVE] SKIPPED - another save is in progress (_glyph_save_lock={_glyph_save_lock})")
         category_debug_print("[GLYPH SAVE] SKIPPED - another save is in progress")
         return False
     
@@ -2612,20 +2637,24 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
     save_start_time = time.perf_counter()
     category_debug_print(f"[GLYPH SAVE] >>>>>> START _save_glyph_mappings_to_file <<<<<<")
     
-    global _glyph_cache, _all_tags_cache
-
     try:
         filepath = _get_glyphs_filepath()
         if not filepath:
+            save_debug_print(f"[GLYPH SAVE] ERROR: No filepath returned from _get_glyphs_filepath()")
             tag_log("No filepath for saving", "ERROR")
             return False
+        save_debug_print(f"[GLYPH SAVE] Filepath: {filepath!r}")
     except Exception as e:
+        save_debug_print(f"[GLYPH SAVE] ERROR getting filepath: {type(e).__name__}: {e}")
         _glyph_save_lock = False
         tag_log(f"Failed to get filepath: {e}", "ERROR")
         return False
 
     # CRITICAL: Only block discovery saves, allow user changes to be saved
     if force_discovery_skip and data is None and os.path.exists(filepath):
+        save_debug_print(f"[GLYPH SAVE] Skipping auto-discovery save (force_discovery_skip=True and file exists)")
+        save_debug_print(f"[GLYPH SAVE] Releasing lock before return (_glyph_save_lock={_glyph_save_lock})")
+        _glyph_save_lock = False  # CRITICAL FIX: Release lock before returning!
         tag_log(f"Skipping auto-discovery save - preserving existing customizations in {filepath}", "INFO")
         return True  # Return True to indicate "success" (preservation is the goal)
 
@@ -2807,67 +2836,43 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
         prepare_end = time.perf_counter()
         category_debug_print(f"[GLYPH SAVE] Step 1 COMPLETE: Data structure built in {(prepare_end - prepare_start)*1000:.2f}ms")
 
+    # SIMPLIFIED: Synchronous save (no background thread)
+    cat_count = len(_glyph_cache)
+    tag_count = len(_all_tags_cache)
+    
     try:
-        import threading
-        cat_count = len(_glyph_cache)
-        tag_count = len(_all_tags_cache)
+        save_debug_print(f"[GLYPH SAVE] Step 2: Serializing JSON data...")
+        serialize_start = time.perf_counter()
+        json_str = json.dumps(data, indent=2, ensure_ascii=False)
+        serialize_end = time.perf_counter()
+        save_debug_print(f"[GLYPH SAVE] Step 2: JSON serialized in {(serialize_end - serialize_start)*1000:.2f}ms, len={len(json_str)}")
         
-        # Snapshot data on main thread, then serialize + write in background.
-        snapshot_start = time.perf_counter()
-        data_snapshot = copy.deepcopy(data)
-        snapshot_end = time.perf_counter()
-        category_debug_print(f"[GLYPH SAVE] Step 2: copy.deepcopy() completed in {(snapshot_end - snapshot_start)*1000:.2f}ms")
+        # Create backup before overwriting
+        save_debug_print(f"[GLYPH SAVE] Step 3a: Creating backup...")
+        backup_start = time.perf_counter()
+        create_backup(filepath)
+        backup_end = time.perf_counter()
+        save_debug_print(f"[GLYPH SAVE] Step 3a: Backup created in {(backup_end - backup_start)*1000:.2f}ms")
         
-        def write_task():
-            try:
-                thread_start = time.perf_counter()
-                category_debug_print(f"[GLYPH SAVE THREAD] >>>>>> START background thread <<<<<<")
-                
-                # Serialize off the main thread so Save returns immediately.
-                serialize_start = time.perf_counter()
-                json_str = json.dumps(data_snapshot, indent=2, ensure_ascii=False)
-                serialize_end = time.perf_counter()
-                category_debug_print(f"[GLYPH SAVE THREAD] Step 3a: json.dumps() completed in {(serialize_end - serialize_start)*1000:.2f}ms")
-                
-                # Create backup before overwriting (in background)
-                backup_start = time.perf_counter()
-                create_backup(filepath)
-                backup_end = time.perf_counter()
-                category_debug_print(f"[GLYPH SAVE THREAD] Step 3b: create_backup() completed in {(backup_end - backup_start)*1000:.2f}ms")
-                
-                # Write to disk
-                write_start = time.perf_counter()
-                with safe_file_write(filepath) as f:
-                    f.write(json_str)
-                write_end = time.perf_counter()
-                category_debug_print(f"[GLYPH SAVE THREAD] Step 3c: file write completed in {(write_end - write_start)*1000:.2f}ms")
-                
-                thread_end = time.perf_counter()
-                category_debug_print(f"[GLYPH SAVE THREAD] <<<<<< COMPLETE: Total background time {(thread_end - thread_start)*1000:.2f}ms <<<<<<")
-                category_debug_print(f"[GLYPH SAVE THREAD] Successfully saved {cat_count} categories to {filepath}")
-            except Exception as e:
-                category_debug_print(f"[GLYPH SAVE THREAD] Error: {e}")
-                import traceback
-                traceback.print_exc()
-            finally:
-                # Release lock after background thread completes
-                global _glyph_save_lock
-                _glyph_save_lock = False
-                category_debug_print("[GLYPH SAVE THREAD] Lock released")
-                
-        thread = threading.Thread(target=write_task)
-        thread.daemon = True
-        thread_start_main = time.perf_counter()
-        thread.start()
-        thread_start_end = time.perf_counter()
-        category_debug_print(f"[GLYPH SAVE] Step 4: Thread started in {(thread_start_end - thread_start_main)*1000:.2f}ms")
+        # Write to disk synchronously
+        save_debug_print(f"[GLYPH SAVE] Step 3b: Writing file...")
+        write_start = time.perf_counter()
+        with safe_file_write(filepath) as f:
+            f.write(json_str)
+        write_end = time.perf_counter()
+        save_debug_print(f"[GLYPH SAVE] Step 3b: File written in {(write_end - write_start)*1000:.2f}ms")
         
         total_end = time.perf_counter()
-        category_debug_print(f"[GLYPH SAVE] <<<<<<<< MAIN THREAD COMPLETE: Total time {(total_end - save_start_time)*1000:.2f}ms (background thread continues) <<<<<<<<")
+        save_debug_print(f"[GLYPH SAVE] <<<<<<<< COMPLETE: Total time {(total_end - save_start_time)*1000:.2f}ms <<<<<<<<")
+        save_debug_print(f"[GLYPH SAVE] Successfully saved {cat_count} categories, {tag_count} tags to {filepath}")
+        tag_log(f"Saved {cat_count} categories, {tag_count} tags in {(total_end - save_start_time)*1000:.2f}ms")
         
-        tag_log(f"Started async save for {cat_count} categories, {tag_count} tags (main thread time: {(total_end - save_start_time)*1000:.2f}ms)")
-        return True  # Lock will be released in background thread
+        # Release lock
+        _glyph_save_lock = False
+        return True
+        
     except Exception as e:
+        save_debug_print(f"[GLYPH SAVE] <<<<<<<< EXCEPTION: {type(e).__name__}: {e}")
         tag_log(f"Save failed: {e}", "ERROR")
         category_debug_print(f"[GLYPH SAVE] Error: {e}")
         import traceback
@@ -7232,20 +7237,29 @@ def _save_tags_to_json():
     """Save tags to JSON file."""
     global _preview_mode_active
     
+    # CRITICAL DEBUG: Always log (even if TAG_DEBUG=False)
+    save_debug_print(f"[SAVE_TAGS_TO_JSON] === CALLED ===")
+    save_debug_print(f"[SAVE_TAGS_TO_JSON] _preview_mode_active={_preview_mode_active}")
+    
     category_debug_print("[SAVE_TAGS_TO_JSON] === CALLED ===")
     
     # Skip saving during preview mode to prevent premature WM sync
     if _preview_mode_active:
+        save_debug_print(f"[SAVE_TAGS_TO_JSON] SKIPPED: Preview mode active")
         category_debug_print("[SAVE_TAGS_TO_JSON] Preview mode active - skipping save to avoid WM sync during preview")
         return
     
     # НОВОЕ: First sync mode flags from WM items to cache (captures UI changes)
+    save_debug_print(f"[SAVE_TAGS_TO_JSON] Step 1: Syncing mode flags from WM to cache")
     category_debug_print("[SAVE_TAGS_TO_JSON] Step 1: Syncing mode flags from WM to cache")
     _sync_mode_flags_from_wm_to_cache()
+    save_debug_print(f"[SAVE_TAGS_TO_JSON] Step 2: Syncing glyph mappings to WM")
     category_debug_print("[SAVE_TAGS_TO_JSON] Step 2: Syncing glyph mappings to WM")
     sync_glyph_mappings_to_wm()
+    save_debug_print(f"[SAVE_TAGS_TO_JSON] Step 3: Saving to JSON file")
     category_debug_print("[SAVE_TAGS_TO_JSON] Step 3: Saving to JSON file")
     _save_glyph_mappings_to_file()
+    save_debug_print(f"[SAVE_TAGS_TO_JSON] === COMPLETED ===")
     category_debug_print("[SAVE_TAGS_TO_JSON] === COMPLETED ===")
 
 

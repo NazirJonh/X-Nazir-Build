@@ -22,6 +22,8 @@
 #include "DNA_view3d_types.h"
 #include "DNA_workspace_types.h"
 
+#include <cmath>
+
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
@@ -934,6 +936,21 @@ void blo_do_versions_510(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
         static_assert(snap_geom_old == 63);
         if (scene.toolsettings->snap_mode_tools == snap_geom_old) {
           scene.toolsettings->snap_mode_tools = SCE_SNAP_TO_GEOM;
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 4)) {
+    /* Initialize cached sin/cos values for SpaceImage rotation. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &space : area.spacedata) {
+          if (space.spacetype == SPACE_IMAGE) {
+            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&space);
+            sima->rotation_sin = std::sin(sima->rotation);
+            sima->rotation_cos = std::cos(sima->rotation);
+          }
         }
       }
     }

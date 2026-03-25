@@ -494,9 +494,8 @@ static void uv_sculpt_stroke_apply(bContext *C,
   float alpha = sculptdata->uvsculpt->strength;
 
   float co[2];
-  ui::view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &co[0], &co[1]);
-
   SpaceImage *sima = CTX_wm_space_image(C);
+  ED_image_mouse_pos_rotated(sima, region, event->mval, co);
 
   int width, height;
   ED_space_image_get_size(sima, &width, &height);
@@ -706,8 +705,10 @@ static UvSculptData *uv_sculpt_stroke_init(bContext *C, wmOperator *op, const wm
     return nullptr;
   }
 
+  SpaceImage *sima = CTX_wm_space_image(C);
+
   /* Mouse coordinates, useful for some functions like grab and sculpt all islands */
-  ui::view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &co[0], &co[1]);
+  ED_image_mouse_pos_rotated(sima, region, event->mval, co);
 
   /* We need to find the active island here. */
   if (do_island_optimization) {
@@ -855,7 +856,6 @@ static UvSculptData *uv_sculpt_stroke_init(bContext *C, wmOperator *op, const wm
     }
   }
 
-  SpaceImage *sima = CTX_wm_space_image(C);
   data->constrain_to_bounds = (sima->flag & SI_CLIP_UV);
   BKE_image_find_nearest_tile_with_offset(sima->image, co, data->uv_base_offset);
 

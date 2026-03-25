@@ -3910,9 +3910,11 @@ static wmOperatorStatus uv_select_exec(bContext *C, wmOperator *op)
 static wmOperatorStatus uv_select_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   const ARegion *region = CTX_wm_region(C);
+  SpaceImage *sima = CTX_wm_space_image(C);
   float co[2];
 
-  ui::view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &co[0], &co[1]);
+  /* Use rotation-compensated coordinates for correct selection when canvas is rotated. */
+  ED_image_mouse_pos_rotated(sima, region, event->mval, co);
   RNA_float_set_array(op->ptr, "location", co);
 
   const wmOperatorStatus retval = uv_select_exec(C, op);
@@ -4064,9 +4066,11 @@ static wmOperatorStatus uv_select_loop_exec(bContext *C, wmOperator *op)
 static wmOperatorStatus uv_select_loop_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   const ARegion *region = CTX_wm_region(C);
+  SpaceImage *sima = CTX_wm_space_image(C);
   float co[2];
 
-  ui::view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &co[0], &co[1]);
+  /* Use rotation-compensated coordinates for correct selection when canvas is rotated. */
+  ED_image_mouse_pos_rotated(sima, region, event->mval, co);
   RNA_float_set_array(op->ptr, "location", co);
 
   const wmOperatorStatus retval = uv_select_loop_exec(C, op);
@@ -4128,9 +4132,11 @@ static wmOperatorStatus uv_select_edge_ring_invoke(bContext *C,
                                                    const wmEvent *event)
 {
   const ARegion *region = CTX_wm_region(C);
+  SpaceImage *sima = CTX_wm_space_image(C);
   float co[2];
 
-  ui::view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &co[0], &co[1]);
+  /* Use rotation-compensated coordinates for correct selection when canvas is rotated. */
+  ED_image_mouse_pos_rotated(sima, region, event->mval, co);
   RNA_float_set_array(op->ptr, "location", co);
 
   const wmOperatorStatus retval = uv_select_edge_ring_exec(C, op);
@@ -4209,8 +4215,10 @@ static wmOperatorStatus uv_select_linked_internal(bContext *C,
     float co[2];
 
     if (event) {
-      /* invoke */
-      ui::view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &co[0], &co[1]);
+      /* invoke - use rotation-compensated coordinates for correct selection when canvas is
+       * rotated. */
+      SpaceImage *sima = CTX_wm_space_image(C);
+      ED_image_mouse_pos_rotated(sima, region, event->mval, co);
       RNA_float_set_array(op->ptr, "location", co);
     }
     else {
@@ -4901,15 +4909,46 @@ static wmOperatorStatus uv_box_select_exec(bContext *C, wmOperator *op)
   const Main *bmain = CTX_data_main(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
   const ARegion *region = CTX_wm_region(C);
+  SpaceImage *sima = CTX_wm_space_image(C);
   BMFace *efa;
   BMLoop *l;
   BMIter iter, liter;
   float *luv;
   rctf rectf;
 
-  /* get rectangle from operator */
+  /* Get rectangle from operator and apply rotation compensation.
+   * When canvas is rotated, the screen-space box becomes a rotated quadrilateral in UV space.
+   * We transform all 4 corners and create a bounding box for selection. */
   WM_operator_properties_border_to_rctf(op, &rectf);
-  ui::view2d_region_to_view_rctf(&region->v2d, &rectf, &rectf);
+
+  if (sima && sima->rotation != 0.0f) {
+    /* Transform all 4 corners with rotation compensation. */
+    int corners[4][2] = {
+        {int(rectf.xmin), int(rectf.ymin)},
+        {int(rectf.xmax), int(rectf.ymin)},
+        {int(rectf.xmax), int(rectf.ymax)},
+        {int(rectf.xmin), int(rectf.ymax)},
+    };
+    float uv_corners[4][2];
+    float uv_min[2] = {FLT_MAX, FLT_MAX};
+    float uv_max[2] = {-FLT_MAX, -FLT_MAX};
+
+    for (int i = 0; i < 4; i++) {
+      ED_image_mouse_pos_rotated(sima, region, corners[i], uv_corners[i]);
+      uv_min[0] = std::min(uv_min[0], uv_corners[i][0]);
+      uv_min[1] = std::min(uv_min[1], uv_corners[i][1]);
+      uv_max[0] = std::max(uv_max[0], uv_corners[i][0]);
+      uv_max[1] = std::max(uv_max[1], uv_corners[i][1]);
+    }
+
+    rectf.xmin = uv_min[0];
+    rectf.ymin = uv_min[1];
+    rectf.xmax = uv_max[0];
+    rectf.ymax = uv_max[1];
+  }
+  else {
+    ui::view2d_region_to_view_rctf(&region->v2d, &rectf, &rectf);
+  }
 
   const eSelectOp sel_op = eSelectOp(RNA_enum_get(op->ptr, "mode"));
   const bool select = (sel_op != SEL_OP_SUB);
@@ -5195,7 +5234,9 @@ static wmOperatorStatus uv_circle_select_exec(bContext *C, wmOperator *op)
   ellipse[0] = width * zoomx / radius;
   ellipse[1] = height * zoomy / radius;
 
-  ui::view2d_region_to_view(&region->v2d, x, y, &offset[0], &offset[1]);
+  /* Use rotation-compensated coordinates for correct selection when canvas is rotated. */
+  int mval[2] = {x, y};
+  ED_image_mouse_pos_rotated(sima, region, mval, offset);
 
   bool changed_multi = false;
 
@@ -7374,11 +7415,42 @@ void UV_OT_select_tile(wmOperatorType *ot)
 static wmOperatorStatus uv_custom_region_set_exec(bContext *C, wmOperator *op)
 {
   const Scene *scene = CTX_data_scene(C);
+  SpaceImage *sima = CTX_wm_space_image(C);
   const ARegion *region = CTX_wm_region(C);
   ToolSettings *ts = scene->toolsettings;
 
   WM_operator_properties_border_to_rctf(op, &ts->uv_custom_region);
-  ui::view2d_region_to_view_rctf(&region->v2d, &ts->uv_custom_region, &ts->uv_custom_region);
+
+  /* Apply rotation compensation for custom region. */
+  if (sima && sima->rotation != 0.0f) {
+    rctf &rectf = ts->uv_custom_region;
+    int corners[4][2] = {
+        {int(rectf.xmin), int(rectf.ymin)},
+        {int(rectf.xmax), int(rectf.ymin)},
+        {int(rectf.xmax), int(rectf.ymax)},
+        {int(rectf.xmin), int(rectf.ymax)},
+    };
+    float uv_corners[4][2];
+    float uv_min[2] = {FLT_MAX, FLT_MAX};
+    float uv_max[2] = {-FLT_MAX, -FLT_MAX};
+
+    for (int i = 0; i < 4; i++) {
+      ED_image_mouse_pos_rotated(sima, region, corners[i], uv_corners[i]);
+      uv_min[0] = std::min(uv_min[0], uv_corners[i][0]);
+      uv_min[1] = std::min(uv_min[1], uv_corners[i][1]);
+      uv_max[0] = std::max(uv_max[0], uv_corners[i][0]);
+      uv_max[1] = std::max(uv_max[1], uv_corners[i][1]);
+    }
+
+    rectf.xmin = uv_min[0];
+    rectf.ymin = uv_min[1];
+    rectf.xmax = uv_max[0];
+    rectf.ymax = uv_max[1];
+  }
+  else {
+    ui::view2d_region_to_view_rctf(&region->v2d, &ts->uv_custom_region, &ts->uv_custom_region);
+  }
+
   ts->uv_flag |= UV_FLAG_CUSTOM_REGION;
 
   return OPERATOR_FINISHED;

@@ -530,10 +530,13 @@ static bool paint_draw_tex_overlay(Paint *paint,
           paint_runtime->draw_anchored ? paint_runtime->anchored_initial_mouse[1] : y,
       };
 
-      /* Brush rotation. */
+      float brush_rot = primary ? paint_runtime->brush_rotation :
+                                  paint_runtime->brush_rotation_sec;
+      float total_rotation = brush_rot;
+
+      /* Brush rotation for texture overlay. */
       GPU_matrix_translate_2fv(center);
-      GPU_matrix_rotate_2d(
-          RAD2DEGF(primary ? paint_runtime->brush_rotation : paint_runtime->brush_rotation_sec));
+      GPU_matrix_rotate_2d(RAD2DEGF(total_rotation));
       GPU_matrix_translate_2f(-center[0], -center[1]);
 
       /* Scale based on tablet pressure. */

@@ -111,10 +111,38 @@ class SpaceImageAccessor : public AbstractSpaceAccessor {
     float translate_x = scale_x * -region->v2d.cur.xmin + display_offset_x;
     float translate_y = scale_y * -region->v2d.cur.ymin + display_offset_y;
 
-    r_uv_to_texture[0][0] = scale_x;
-    r_uv_to_texture[1][1] = scale_y;
-    r_uv_to_texture[3][0] = translate_x;
-    r_uv_to_texture[3][1] = translate_y;
+    /* Check if rotation is supported in current mode */
+    if (sima->rotation != 0.0f && ED_space_image_rotation_supported(sima)) {
+      const float cos_r = cosf(sima->rotation);
+      const float sin_r = sinf(sima->rotation);
+      const float winx = float(region->winx);
+      const float winy = float(region->winy);
+      const float aspect_x = winx / winy;
+      const float aspect_y = winy / winx;
+
+      const float pivot_x = sima->rotation_pivot[0];
+      const float pivot_y = sima->rotation_pivot[1];
+
+      const float pivot_ss_x = scale_x * pivot_x;
+      const float pivot_ss_y = scale_y * pivot_y;
+
+      const float pivot_ss_rot_x = cos_r * pivot_ss_x - (aspect_y * sin_r) * pivot_ss_y;
+      const float pivot_ss_rot_y = (aspect_x * sin_r) * pivot_ss_x + cos_r * pivot_ss_y;
+
+      r_uv_to_texture[0][0] = cos_r * scale_x;
+      r_uv_to_texture[0][1] = (aspect_x * sin_r) * scale_x;
+      r_uv_to_texture[1][0] = -(aspect_y * sin_r) * scale_y;
+      r_uv_to_texture[1][1] = cos_r * scale_y;
+
+      r_uv_to_texture[3][0] = translate_x + pivot_ss_x - pivot_ss_rot_x;
+      r_uv_to_texture[3][1] = translate_y + pivot_ss_y - pivot_ss_rot_y;
+    }
+    else {
+      r_uv_to_texture[0][0] = scale_x;
+      r_uv_to_texture[1][1] = scale_y;
+      r_uv_to_texture[3][0] = translate_x;
+      r_uv_to_texture[3][1] = translate_y;
+    }
   }
 };
 

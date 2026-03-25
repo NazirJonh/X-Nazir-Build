@@ -438,9 +438,23 @@ static bool gizmo2d_calc_transform_pivot(const bContext *C,
 
 /**
  * Convert origin (or any other point) from view to region space.
+ * Accounts for canvas rotation in SPACE_IMAGE.
  */
-BLI_INLINE void gizmo2d_origin_to_region(ARegion *region, float *r_origin)
+BLI_INLINE void gizmo2d_origin_to_region(const bContext *C, ARegion *region, float *r_origin)
 {
+  ScrArea *area = CTX_wm_area(C);
+  if (area && area->spacetype == SPACE_IMAGE) {
+    const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
+    if (sima->rotation != 0.0f) {
+      /* Use rotation-compensated projection for Image Editor with canvas rotation. */
+      float screen_pos[2];
+      ED_image_view_to_region_rotated(sima, region, r_origin, screen_pos);
+      r_origin[0] = screen_pos[0];
+      r_origin[1] = screen_pos[1];
+      return;
+    }
+  }
+  /* Default: no rotation, use standard View2D conversion. */
   ui::view2d_view_to_region_fl(&region->v2d, r_origin[0], r_origin[1], &r_origin[0], &r_origin[1]);
 }
 
@@ -456,7 +470,7 @@ static wmOperatorStatus gizmo2d_modal(bContext *C,
   float origin[3];
 
   gizmo2d_calc_transform_pivot(C, false, origin);
-  gizmo2d_origin_to_region(region, origin);
+  gizmo2d_origin_to_region(C, region, origin);
   WM_gizmo_set_matrix_location(widget, origin);
 
   ED_region_tag_redraw_editor_overlays(region);
@@ -627,7 +641,7 @@ static void gizmo2d_xform_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
   GizmoGroup2D *ggd = static_cast<GizmoGroup2D *>(gzgroup->customdata);
   float origin[3] = {UNPACK2(ggd->origin), 0.0f};
 
-  gizmo2d_origin_to_region(region, origin);
+  gizmo2d_origin_to_region(C, region, origin);
 
   for (int i = 0; i < ARRAY_SIZE(ggd->translate_xy); i++) {
     wmGizmo *gz = ggd->translate_xy[i];
@@ -664,6 +678,29 @@ static void gizmo2d_xform_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
   else {
     const float origin_aa[3] = {UNPACK2(ggd->origin), 0.0f};
     WM_gizmo_set_matrix_offset_location(ggd->cage, origin_aa);
+
+    /* Apply canvas rotation for SPACE_IMAGE. */
+    if (area->spacetype == SPACE_IMAGE) {
+      const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
+      if (sima->rotation != 0.0f) {
+        /* Get pivot in screen coordinates for rotation center. */
+        float pivot_screen[2];
+        ED_image_view_to_region_rotated(sima, region, sima->rotation_pivot, pivot_screen);
+
+        float matrix_rotate[4][4];
+        unit_m4(matrix_rotate);
+        copy_v3_v3(matrix_rotate[3], pivot_screen);
+        rotate_m4(matrix_rotate, 'Z', sima->rotation);
+        unit_m4(ggd->cage->matrix_basis);
+        mul_m4_m4m4(ggd->cage->matrix_basis, matrix_rotate, ggd->cage->matrix_basis);
+
+        /* Adjust offset to compensate for pivot. */
+        float mid[2];
+        sub_v2_v2v2(mid, pivot_screen, origin);
+        mul_v2_fl(mid, -1.0f);
+        copy_v2_v2(ggd->cage->matrix_offset[3], mid);
+      }
+    }
   }
 }
 
@@ -855,7 +892,7 @@ static void gizmo2d_resize_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup
   GizmoGroup_Resize2D *ggd = static_cast<GizmoGroup_Resize2D *>(gzgroup->customdata);
   float origin[3] = {UNPACK2(ggd->origin), 0.0f};
 
-  gizmo2d_origin_to_region(region, origin);
+  gizmo2d_origin_to_region(C, region, origin);
 
   for (int i = 0; i < ARRAY_SIZE(ggd->gizmo_xy); i++) {
     wmGizmo *gz = ggd->gizmo_xy[i];
@@ -1010,7 +1047,7 @@ static void gizmo2d_rotate_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup
   GizmoGroup_Rotate2D *ggd = static_cast<GizmoGroup_Rotate2D *>(gzgroup->customdata);
   float origin[3] = {UNPACK2(ggd->origin), 0.0f};
 
-  gizmo2d_origin_to_region(region, origin);
+  gizmo2d_origin_to_region(C, region, origin);
 
   wmGizmo *gz = ggd->gizmo;
   WM_gizmo_set_matrix_location(gz, origin);

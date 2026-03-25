@@ -31,6 +31,7 @@
 
 #include "DEG_depsgraph.hh"
 
+#include "ED_image.hh"
 #include "ED_mesh.hh"
 #include "ED_screen.hh"
 #include "ED_transform.hh"
@@ -967,9 +968,11 @@ static wmOperatorStatus uv_rip_exec(bContext *C, wmOperator *op)
 static wmOperatorStatus uv_rip_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   ARegion *region = CTX_wm_region(C);
+  SpaceImage *sima = CTX_wm_space_image(C);
   float co[2];
 
-  ui::view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &co[0], &co[1]);
+  /* Use rotation-compensated coordinates for correct rip position when canvas is rotated. */
+  ED_image_mouse_pos_rotated(sima, region, event->mval, co);
   RNA_float_set_array(op->ptr, "location", co);
 
   return uv_rip_exec(C, op);

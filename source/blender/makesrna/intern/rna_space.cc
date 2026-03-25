@@ -24,6 +24,7 @@ static constexpr bool RNA_SPACE_DEBUG_ENABLED = false;
 
 #include "ED_asset.hh"
 #include "ED_buttons.hh"
+#include "ED_image.hh"
 #include "ED_screen.hh"
 #include "ED_spreadsheet.hh"
 #include "ED_userpref.hh"
@@ -2407,6 +2408,12 @@ static void rna_SpaceImageEditor_cursor_location_set(PointerRNA *ptr, const floa
     sima->cursor[0] = values[0] / w;
     sima->cursor[1] = values[1] / h;
   }
+}
+
+static void rna_SpaceImage_rotation_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  ED_space_image_rotation_cache_update(sima);
 }
 
 static void rna_SpaceImageEditor_image_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
@@ -6744,6 +6751,20 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_range(prop, .4, 80000);
   RNA_def_property_ui_range(prop, 25, 400, 100, 0);
   RNA_def_property_ui_text(prop, "Zoom", "Zoom percentage");
+
+  /* canvas rotation */
+  prop = RNA_def_property(srna, "rotation", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_sdna(prop, nullptr, "rotation");
+  RNA_def_property_ui_text(prop, "Rotation", "Canvas rotation angle");
+  RNA_def_property_range(prop, -M_PI, M_PI);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, "rna_SpaceImage_rotation_update");
+
+  prop = RNA_def_property(srna, "rotation_pivot", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "rotation_pivot");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_ui_text(prop, "Rotation Pivot", "Pivot point for canvas rotation in UV space");
+  RNA_def_property_range(prop, 0.0, 1.0);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 
   /* image draw */
   prop = RNA_def_property(srna, "show_repeat", PROP_BOOLEAN, PROP_NONE);

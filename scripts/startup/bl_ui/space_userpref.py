@@ -12609,9 +12609,15 @@ class USERPREF_UL_category_tags(UIList):
             col_glyph.ui_units_x = 4  # Keep some width reserved so glyph never disappears first
 
             if use_icon:
-                # Display Blender icon - use icon name directly
+                # Display Blender icon with tag color tint
                 icon_key = getattr(tag, "icon_key", "")
-                col_glyph.label(text="", icon=icon_key)
+                col_glyph.colored_label(
+                    text="",
+                    icon=icon_key,
+                    color_r=tag.color[0],
+                    color_g=tag.color[1],
+                    color_b=tag.color[2]
+                )
             elif use_glyph:
                 # Display colored glyph
                 glyph_char = _hex_to_glyph(tag.glyph)
@@ -12632,12 +12638,24 @@ class USERPREF_UL_category_tags(UIList):
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
             if use_icon:
-                # Display Blender icon - use icon name directly
+                # Display Blender icon with tag color tint
                 icon_key = getattr(tag, "icon_key", "")
-                layout.label(text="", icon=icon_key)
+                layout.colored_label(
+                    text="",
+                    icon=icon_key,
+                    color_r=tag.color[0],
+                    color_g=tag.color[1],
+                    color_b=tag.color[2]
+                )
             elif use_glyph:
                 glyph_char = _hex_to_glyph(tag.glyph)
-                layout.label(text=glyph_char, translate=False)
+                layout.colored_label(
+                    text=glyph_char,
+                    icon='NONE',
+                    color_r=tag.color[0],
+                    color_g=tag.color[1],
+                    color_b=tag.color[2]
+                )
             else:
                 layout.label(text="", icon='DOT')
 

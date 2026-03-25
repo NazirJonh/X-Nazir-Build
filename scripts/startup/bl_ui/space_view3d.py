@@ -1440,10 +1440,16 @@ class VIEW3D_OT_tag_order_reset(Operator):
 
 
 def _is_tag_visible_in_mode(tag, context):
-    """Check if tag is visible (has a valid glyph) and is active for current editor mode."""
-    if not tag.glyph:
+    """Check if tag is visible (has a valid glyph OR icon) and is active for current editor mode."""
+    # Check if tag has glyph OR icon (icon_source == 1 and icon_key not empty)
+    icon_source_val = getattr(tag, "icon_source", 0)
+    icon_key_val = getattr(tag, "icon_key", "")
+    has_glyph = bool(tag.glyph)
+    has_icon = (icon_source_val == 1 and bool(icon_key_val))
+
+    if not has_glyph and not has_icon:
         return False
-        
+
     try:
         glyph = tag.glyph
         if all(c in "0123456789abcdefABCDEF" for c in glyph) and len(glyph) <= 8:
@@ -1504,29 +1510,47 @@ class VIEW3D_UL_tag_order_list(UIList):
         return (filtered_flags, order_keys)
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        """Draw tag item with glyph and name, similar to Preferences list."""
+        """Draw tag item with icon/glyph and name, similar to Preferences list."""
         layout.emboss = 'NONE'
+
+        # Determine icon source like in USERPREF_UL_category_tags
+        icon_source_val = getattr(item, "icon_source", 0)
+        icon_key_val = getattr(item, "icon_key", "")
+        glyph_val = getattr(item, "glyph", "")
+
+        # DEBUG
+        print(f"[VIEW3D_UL_tag_order_list] tag='{item.name}' icon_source={icon_source_val} icon_key='{icon_key_val}' glyph='{glyph_val}'")
+
+        use_icon = (icon_source_val == 1 and icon_key_val)
+        use_glyph = (not use_icon and glyph_val)
 
         # Use split layout like in Preferences for consistent appearance
         split = layout.split(factor=0.15, align=True)
 
-        # Left: Glyph (colored)
+        # Left: Icon or Glyph (fixed relative width)
         col_glyph = split.column()
-        if item.glyph:
+        col_glyph.ui_units_x = 4
+
+        if use_icon:
+            # Display Blender icon with tag color tint
+            col_glyph.colored_label(
+                text="",
+                icon=icon_key_val,
+                color_r=item.color[0],
+                color_g=item.color[1],
+                color_b=item.color[2]
+            )
+        elif use_glyph:
             try:
                 # Convert hex string to glyph character
-                glyph_val = int(item.glyph, 16) if item.glyph.startswith('0x') or item.glyph.startswith('0X') else int(item.glyph, 16)
-                if 0 < glyph_val <= 0x10FFFF:
-                    glyph_char = chr(glyph_val)
-                    col_glyph.colored_label(
-                        text=glyph_char,
-                        icon='NONE',
-                        color_r=item.color[0],
-                        color_g=item.color[1],
-                        color_b=item.color[2]
-                    )
-                else:
-                    col_glyph.label(text="", icon='DOT')
+                glyph_char = chr(int(glyph_val, 16))
+                col_glyph.colored_label(
+                    text=glyph_char,
+                    icon='NONE',
+                    color_r=item.color[0],
+                    color_g=item.color[1],
+                    color_b=item.color[2]
+                )
             except:
                 col_glyph.label(text="", icon='DOT')
         else:

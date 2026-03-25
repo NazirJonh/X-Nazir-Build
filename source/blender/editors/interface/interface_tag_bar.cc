@@ -1807,14 +1807,16 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
   /* Calculate UIList size - count visible tags for current mode + 1 extra slot. */
   const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
 
-  /* Count visible tags (with glyph + matching mode) */
+  /* Count visible tags (with icon/glyph + matching mode) */
   int visible_tag_count = 0;
   for (const CategoryTagDef *tag_def = static_cast<const CategoryTagDef *>(wm->category_tags.first);
        tag_def;
        tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
   {
-    /* Check if tag has glyph */
-    if (tag_def->glyph[0] == '\0') {
+    /* Check if tag has glyph OR icon (icon_source == 1 and icon_key not empty) */
+    const bool has_glyph = (tag_def->glyph[0] != '\0');
+    const bool has_icon = (tag_def->icon_source == 1 && tag_def->icon_key[0] != '\0');
+    if (!has_glyph && !has_icon) {
       continue;
     }
 

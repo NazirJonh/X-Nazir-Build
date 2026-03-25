@@ -8757,19 +8757,12 @@ class USERPREF_OT_category_tag_create(Operator):
             row = layout.row()
             row.template_color_glyph_presets(self.properties, "color")
         else:
-            # Icon picker - compact row with all elements centered and no gaps
-            row = layout.row(align=True)
-            row.alignment = 'CENTER'
-            
-            # Icon label
-            row.label(text="Icon:")
-            
-            # Read-only field (compact width)
-            row.prop(self, "icon_key", text="")
-            
-            # Pick Icon button with glyph f02f (like More glyphs button)
-            # Use glyph f02f (zoom/search icon) like More glyphs button
-            row.operator("screen.category_tab_icon_picker", text="\uf02f", icon='NONE')
+            # Icon picker - label and button on same row like Display Mode
+            icon_split = layout.split(factor=0.38)
+            icon_split.alignment = 'RIGHT'
+            icon_split.label(text="Icon:")
+            icon_row = icon_split.row(align=True)
+            icon_row.operator("screen.category_tab_icon_picker", text="Choose", icon='VIEWZOOM')
             
             # Preview - always show (empty button when no icon)
             preview_row = layout.row()
@@ -8978,17 +8971,12 @@ class USERPREF_OT_category_tag_edit(Operator):
                     size_multiplier=2.0
                 )
         else:
-            # Icon picker
-            split = layout.split(factor=0.3)
-            split.label(text="Icon:")
-            
-            # Read-only display of selected icon
-            sub = split.row()
-            sub.enabled = False
-            sub.prop(self, "icon_key", text="")
-            
-            # Icon picker button - direct call to SCREEN_OT_category_tab_icon_picker
-            layout.operator("screen.category_tab_icon_picker", text="Pick Icon", icon='VIEWZOOM')
+            # Icon picker - label and button on same row like Display Mode
+            icon_split = layout.split(factor=0.38)
+            icon_split.alignment = 'RIGHT'
+            icon_split.label(text="Icon:")
+            icon_row = icon_split.row(align=True)
+            icon_row.operator("screen.category_tab_icon_picker", text="Choose", icon='VIEWZOOM')
             
             # Preview
             if self.icon_key:

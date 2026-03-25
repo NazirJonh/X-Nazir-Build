@@ -1794,6 +1794,33 @@ void blo_do_versions_userdef(UserDef *userdef)
     userdef->category_tabs_hide_reserved_inactive_text = false;
   }
 
+  if (!USER_VERSION_ATLEAST(502, 14)) {
+    /* Initialize new category_tabs_mixed_show_* fields to true (enabled by default). */
+    userdef->category_tabs_mixed_show_glyphs = true;
+    userdef->category_tabs_mixed_show_first_letter = true;
+    userdef->category_tabs_mixed_show_icons = true;
+  }
+
+  if (!USER_VERSION_ATLEAST(502, 15)) {
+    /* Ensure category_tabs_mixed_show_* fields are enabled for existing preferences. */
+    userdef->category_tabs_mixed_show_glyphs = true;
+    userdef->category_tabs_mixed_show_first_letter = true;
+    userdef->category_tabs_mixed_show_icons = true;
+    /* Ensure Visual Effect is enabled by default. */
+    userdef->category_tabs_visual_effect = true;
+    /* Ensure Show Drag Tooltips is enabled by default. */
+    userdef->category_tabs_show_drag_tooltips = true;
+    /* Ensure Outline is disabled by default. */
+    userdef->category_tabs_visual_outline = false;
+    /* Ensure Show Active Tab Name is disabled by default. */
+    userdef->category_tabs_show_active_name = false;
+    /* Set default outline color to #5C5C5CFF. */
+    userdef->category_tabs_visual_outline_color[0] = 92;
+    userdef->category_tabs_visual_outline_color[1] = 92;
+    userdef->category_tabs_visual_outline_color[2] = 92;
+    userdef->category_tabs_visual_outline_color[3] = 255;
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a USER_VERSION_ATLEAST check.

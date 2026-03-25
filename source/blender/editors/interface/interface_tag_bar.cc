@@ -87,11 +87,20 @@ static constexpr bool TAG_BAR_DEBUG_ENABLED = true;
  * - CategoryTagMode::OBJECT_MODE (1 << 0) = 1 → enum value 1
  * - CategoryTagMode::EDIT_MODE (1 << 1) = 2 → enum value 2
  * - etc.
+ *
+ * Note: Detailed edit modes (MESH_EDIT, CURVE_EDIT, etc.) are mapped to EDIT_MODE (2)
+ * since the Preferences filter enum doesn't have separate values for them.
  */
 static int category_tag_mode_flag_to_filter_enum(uint32_t mode_flag)
 {
   if (mode_flag == 0) {
     return 0; /* ALL */
+  }
+
+  /* Special handling for detailed edit modes: map them all to EDIT_MODE (2).
+   * This matches the RNA enum which only has EDIT_MODE, not MESH_EDIT, etc. */
+  if (mode_flag & static_cast<uint32_t>(CategoryTagMode::EDIT_MODE_MASK)) {
+    return 2; /* EDIT_MODE */
   }
 
   /* Find the bit position and add 1 to get the enum value */
@@ -465,12 +474,21 @@ void tag_bar_buttons_update(const bContext *C,
         btn.is_visible = false;
       }
       else {
-        /* Check mode_flags - if mode_flags is 0, tag is active for all modes */
+        /* Check mode_flags - if mode_flags is 0, tag is active for all modes.
+         * Special handling for edit modes: if tag has EDIT_MODE flag, it should be visible
+         * in all detailed edit modes (MESH_EDIT, CURVE_EDIT, etc.) */
         if (tag_def->mode_flags == 0) {
           btn.is_visible = true;
         }
+        else if (tag_def->mode_flags & current_mode_flag) {
+          btn.is_visible = true;  /* Direct mode match */
+        }
+        else if ((current_mode_flag & static_cast<uint32_t>(CategoryTagMode::EDIT_MODE_MASK)) && (tag_def->mode_flags & static_cast<uint32_t>(CategoryTagMode::EDIT_MODE))) {
+          /* Tag has EDIT_MODE flag and we're in any edit mode (mesh_edit, curve_edit, etc.) */
+          btn.is_visible = true;
+        }
         else {
-          btn.is_visible = (tag_def->mode_flags & current_mode_flag) != 0;
+          btn.is_visible = false;
         }
       }
 
@@ -1820,8 +1838,22 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
       continue;
     }
 
-    /* Check if tag is active for current mode */
-    if (tag_def->mode_flags == 0 || (tag_def->mode_flags & current_mode_flag)) {
+    /* Check if tag is active for current mode.
+     * Special handling for edit modes: if tag has EDIT_MODE flag, it should be visible
+     * in all detailed edit modes (MESH_EDIT, CURVE_EDIT, etc.) */
+    bool is_visible_for_mode = false;
+    if (tag_def->mode_flags == 0) {
+      is_visible_for_mode = true;  /* Tag active for all modes */
+    }
+    else if (tag_def->mode_flags & current_mode_flag) {
+      is_visible_for_mode = true;  /* Direct mode match */
+    }
+    else if ((current_mode_flag & static_cast<uint32_t>(CategoryTagMode::EDIT_MODE_MASK)) && (tag_def->mode_flags & static_cast<uint32_t>(CategoryTagMode::EDIT_MODE))) {
+      /* Tag has EDIT_MODE flag and we're in any edit mode (mesh_edit, curve_edit, etc.) */
+      is_visible_for_mode = true;
+    }
+
+    if (is_visible_for_mode) {
       visible_tag_count++;
     }
   }

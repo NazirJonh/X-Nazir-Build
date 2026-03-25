@@ -1028,7 +1028,7 @@ struct UserDef {
   /** Shape for tabs in Icon mode. */
   char category_tabs_shape = USER_CATEGORY_TABS_SHAPE_CAPSULE;
   /** Show category name for active tab in Icon mode. */
-  char category_tabs_show_active_name = true;
+  char category_tabs_show_active_name = false;
   /** Show tooltips when dragging tabs in Icon mode. */
   char category_tabs_show_drag_tooltips = true;
   /** Lock editing of category tab data (name, glyph, color). When true, editing is disabled. */
@@ -1052,10 +1052,10 @@ struct UserDef {
   /** Visual effect (scale on hover/active) for category tabs in Icon mode. */
   char category_tabs_visual_effect = true;
   /** Visual outline effect for active tab. */
-  char category_tabs_visual_outline = true;
+  char category_tabs_visual_outline = false;
   char _pad7[6] = {};
   /** Custom color for visual outline effect (RGBA). */
-  unsigned char category_tabs_visual_outline_color[4] = {255, 255, 255, 255};
+  unsigned char category_tabs_visual_outline_color[4] = {92, 92, 92, 255};
   /** Default directory used by the "Pick Custom Icon File" browser for category tabs. */
   char category_tabs_custom_icon_dir[/*FILE_MAXDIR*/ 768] = "";
   /**

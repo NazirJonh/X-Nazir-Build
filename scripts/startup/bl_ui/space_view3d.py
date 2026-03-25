@@ -1460,13 +1460,37 @@ def _is_tag_visible_in_mode(tag, context):
     if tag.mode_flags == 0:
         return True
 
-    from bl_ui.space_userpref import get_current_tag_mode_flag
+    from bl_ui.space_userpref import get_current_tag_mode_flag, _CATEGORY_TAG_MODE_NAME_TO_FLAG
 
     current_mode_flag = get_current_tag_mode_flag(context)
     if current_mode_flag == 0:
         return True
 
-    return bool(tag.mode_flags & current_mode_flag)
+    # Direct mode match
+    if tag.mode_flags & current_mode_flag:
+        return True
+
+    # Special handling for edit modes: if tag has EDIT_MODE flag and we're in
+    # any detailed edit mode (MESH_EDIT, CURVE_EDIT, etc.), the tag should be visible.
+    # This matches the C++ EDIT_MODE_MASK logic in interface_tag_bar.cc.
+    EDIT_MODE_FLAG = _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0)
+    EDIT_MODE_MASK = (
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0) |
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("MESH_EDIT", 0) |
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("CURVE_EDIT", 0) |
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("SURFACE_EDIT", 0) |
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("ARMATURE_EDIT", 0) |
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("LATTICE_EDIT", 0) |
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("META_EDIT", 0) |
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("FONT_EDIT", 0) |
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("GREASE_PENCIL_EDIT", 0) |
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("POINTCLOUD_EDIT", 0) |
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("VOLUME_EDIT", 0)
+    )
+    if (current_mode_flag & EDIT_MODE_MASK) and (tag.mode_flags & EDIT_MODE_FLAG):
+        return True
+
+    return False
 
 
 class VIEW3D_UL_tag_order_list(UIList):

@@ -3643,13 +3643,29 @@ bool category_is_unassigned_for_context(const wmWindowManager *wm,
   /* Check that this category was discovered in the given mode.
    * Skip mode check for SPACE_NODE because Node Editor modes (Geometry Nodes, Shader Editor)
    * are different from 3D View modes and were often set incorrectly during drag-drop.
-   * Also skip if discovered_in_modes == 0 (any mode) or current_mode_flag == 0 (not filtering). */
-  if (space_type != SPACE_NODE && current_mode_flag != 0 && category->discovered_in_modes != 0) {
-    if ((category->discovered_in_modes & current_mode_flag) == 0) {
+   * Also skip if current_mode_flag == 0 (not filtering).
+   *
+   * For mode filtering, use:
+   * - discovered_in_modes if available (panels with bl_context)
+   * - install_mode_flag as fallback (mode when extension was installed, for panels without bl_context)
+   */
+  if (space_type != SPACE_NODE && current_mode_flag != 0) {
+    /* Use discovered_in_modes if available, otherwise fall back to install_mode_flag.
+     * This handles extensions where panels don't specify bl_context but we know
+     * the mode where the extension was installed. */
+    uint32_t effective_mode_flags = category->discovered_in_modes;
+    if (effective_mode_flags == 0 && category->install_mode_flag != 0) {
+      effective_mode_flags = category->install_mode_flag;
+    }
+
+    /* If we have mode flags to filter by, check for match. */
+    if (effective_mode_flags != 0 && (effective_mode_flags & current_mode_flag) == 0) {
       static bool first_mode_mismatch = true;
       if (first_mode_mismatch && g_unassigned_func_debug_enabled) {
-        printf("[UNASSIGNED FUNC] RETURN false: discovered_in_modes=0x%x current_mode_flag=0x%x\n",
-               category->discovered_in_modes, current_mode_flag);
+        printf("[UNASSIGNED FUNC] RETURN false: discovered_in_modes=0x%x install_mode_flag=0x%x "
+               "effective=0x%x current_mode_flag=0x%x\n",
+               category->discovered_in_modes, category->install_mode_flag,
+               effective_mode_flags, current_mode_flag);
         fflush(stdout);
         first_mode_mismatch = false;
       }

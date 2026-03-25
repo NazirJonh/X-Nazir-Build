@@ -156,7 +156,8 @@ typedef struct CategoryGlyphItem {
   uint32_t discovered_in_spaces;
   /** Bitfield of mode flags where this category was discovered. */
   uint32_t discovered_in_modes;
-  char _pad3[4];
+  /** Mode flag when extension was installed (for mode-aware filtering when discovered_in_modes == 0). */
+  uint32_t install_mode_flag;
 } CategoryGlyphItem;
 
 /**

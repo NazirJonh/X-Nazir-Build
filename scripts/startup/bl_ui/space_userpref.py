@@ -345,6 +345,10 @@ def _get_unassigned_categories_count_for_space(context,
         else:
             discovered_modes = 0
 
+        # Get install_mode_flag for mode-aware filtering
+        # This is set when extension is installed and panels don't specify bl_context
+        install_mode_flag = cat_data.get("install_mode_flag", 0)
+
         has_no_tags = not tags or (hasattr(tags, "__len__") and len(tags) == 0)
 
         # Mirror C++ category_is_unassigned_for_context logic:
@@ -368,12 +372,16 @@ def _get_unassigned_categories_count_for_space(context,
                 not _extension_has_only_reserved_categories(wm, source_extension)):
             # Mode check: skip for SPACE_NODE (16), or if no mode filtering
             # Mirror C++: current_mode_flag == 0 or discovered_modes == 0 means "any mode"
-            if space_type == 16 or current_mode_flag == 0 or discovered_modes == 0 or (discovered_modes & current_mode_flag):
+            # BUT: for categories from extensions with discovered_modes == 0, use install_mode_flag
+            # to filter by the mode where extension was installed
+            effective_mode_flags = discovered_modes if discovered_modes != 0 else install_mode_flag
+            if space_type == 16 or current_mode_flag == 0 or effective_mode_flags == 0 or (effective_mode_flags & current_mode_flag):
                 count += 1
                 category_debug_print(f"[NEW ADDONS DEBUG] ✓ COUNTED: {category_name!r}")
             else:
                 category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED mode check: {category_name!r} "
-                                   f"(current_mode_flag={current_mode_flag:#x}, discovered_modes={discovered_modes:#x})")
+                                   f"(current_mode_flag={current_mode_flag:#x}, discovered_modes={discovered_modes:#x}, "
+                                   f"install_mode_flag={install_mode_flag:#x})")
         elif source_extension and pending_assignment:
             # Log why category was NOT counted
             if is_reserved:
@@ -6460,6 +6468,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                 "pending_tag_assignment": False,
                 "discovered_in_spaces": [],
                 "discovered_in_modes": [],
+                "install_mode_flag": 0,  # Mode flag when extension was installed (for mode-aware filtering)
             }
 
             # If an extension was detected (either from pending context or auto-detection), mark as pending.
@@ -6505,6 +6514,16 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
 
                 if ext_mode and not _glyph_cache[cache_key].get("discovered_in_modes"):
                     _glyph_cache[cache_key]["discovered_in_modes"] = flags_to_modes(ext_mode)
+
+                # Store the install mode flag for mode-aware filtering of "New Add-ons!" button.
+                # This is used when discovered_in_modes is empty (panels don't specify bl_context).
+                # The category should only show "New Add-ons!" in the mode where it was installed.
+                if ext_mode:
+                    _glyph_cache[cache_key]["install_mode_flag"] = ext_mode
+                    tag_log(
+                        f"_merge_discovered_categories: set install_mode_flag={ext_mode:#x} for {category!r}"
+                    )
+
                 tag_log(
                     f"_merge_discovered_categories: marked new category {category!r} "
                     f"as pending from extension {ext_id!r}"
@@ -7053,6 +7072,9 @@ def _sync_glyph_mappings_to_wm_impl(force_discovery_merge=False, skip_icon_detec
                         item.discovered_in_spaces = spaces_to_flags(disc_spaces_val)
                     if hasattr(item, "discovered_in_modes"):
                         item.discovered_in_modes = modes_to_flags(disc_modes_val)
+                    # Sync install_mode_flag for mode-aware filtering
+                    if hasattr(item, "install_mode_flag"):
+                        item.install_mode_flag = normalized_data.get("install_mode_flag", 0)
                     added_count += 1
 
                     # Debug: show what was synced for key categories

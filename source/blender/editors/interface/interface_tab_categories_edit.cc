@@ -2743,6 +2743,41 @@ static bool icon_grid_writeback_icon_key(bContext &C,
 
   bool resolved = false;
 
+  /* First, try to resolve via target_property (RNA path) - same approach as glyph picker.
+   * This allows writing directly to any RNA property without needing a target operator. */
+  char target_property[256] = "";
+  if (popup_data->op && popup_data->op->ptr) {
+    RNA_string_get(popup_data->op->ptr, "target_property", target_property);
+  }
+
+  if (target_property[0] != '\0') {
+    /* Try resolving from window manager as root (like glyph picker does) */
+    wmWindowManager *wm = CTX_wm_manager(&C);
+    if (wm) {
+      PointerRNA root_ptr = RNA_id_pointer_create(&wm->id);
+      PointerRNA target_ptr;
+      PropertyRNA *target_prop;
+      int index;
+      if (RNA_path_resolve_full(&root_ptr, target_property, &target_ptr, &target_prop, &index)) {
+        RNA_property_string_set(&target_ptr, target_prop, icon_key);
+        RNA_property_update(&C, &target_ptr, target_prop);
+        resolved = true;
+      }
+    }
+
+    /* Fallback: try resolving from picker operator itself (relative path) */
+    if (!resolved && popup_data->op && popup_data->op->ptr) {
+      PointerRNA target_ptr;
+      PropertyRNA *target_prop;
+      int index;
+      if (RNA_path_resolve_full(popup_data->op->ptr, target_property, &target_ptr, &target_prop, &index)) {
+        RNA_property_string_set(&target_ptr, target_prop, icon_key);
+        RNA_property_update(&C, &target_ptr, target_prop);
+        resolved = true;
+      }
+    }
+  }
+
   if (popup_data->op && popup_data->op->ptr) {
     RNA_string_set(popup_data->op->ptr, "icon_key", icon_key);
     PointerRNA target_ptr;
@@ -2960,13 +2995,20 @@ static wmOperatorStatus category_tab_icon_picker_invoke(bContext *C, wmOperator 
     if (target_op == op) {
       target_op = nullptr;
     }
-    else {
+    else if (target_op != nullptr) {
       target_op_properties = target_op->properties;
     }
   }
-  
-  if (!target_op || !target_op_properties) {
-    WM_global_report(RPT_ERROR, "No target operator specified");
+
+  /* Check if we have a target_property (RNA path) - this allows direct property write
+   * without needing a target operator, similar to how glyph picker works. */
+  char target_property[256] = "";
+  RNA_string_get(op->ptr, "target_property", target_property);
+
+  /* If we have target_property but no target_op, we can still work by writing directly
+   * to the RNA path when icon is selected. Create popup_data with nullptr target_op. */
+  if (!target_op && target_property[0] == '\0') {
+    WM_global_report(RPT_ERROR, "No target operator or target_property specified");
     return OPERATOR_CANCELLED;
   }
 

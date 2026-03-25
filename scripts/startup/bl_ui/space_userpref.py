@@ -3232,11 +3232,13 @@ def get_tag_names():
 def get_tags_for_category_ui(wm=None, category="", mode_filter=0, space_type=-1):
     """
     Get all tags formatted for C++ UI display.
-    Returns string: "name|glyph|is_active|r,g,b;name2|glyph2|is_active2|r,g,b;..."
+    Returns string: "name|glyph|is_active|r,g,b|icon_key|icon_source;name2|glyph2|is_active2|r,g,b|icon_key|icon_source;..."
     - name: tag name
     - glyph: unicode glyph character
     - is_active: 1 if assigned to category, 0 otherwise
     - r,g,b: RGB color values (0.0-1.0)
+    - icon_key: Blender icon identifier string (e.g., "ICON_OBJECT_DATAMODE")
+    - icon_source: icon source type (0=auto, 1=manual, 2=off)
 
     Parameters:
     - wm: window manager (unused, kept for C++ compatibility)
@@ -3270,9 +3272,14 @@ def get_tags_for_category_ui(wm=None, category="", mode_filter=0, space_type=-1)
         color = data.get("color", [0.0, 0.0, 0.0])
         # Format color as r,g,b with 3 decimal places
         color_str = f"{color[0]:.3f},{color[1]:.3f},{color[2]:.3f}"
+        # Get icon data for tag
+        icon_key = data.get("icon_key", "")
+        icon_source = data.get("icon_source", 0)
+        # Debug: Check type of icon_key
+        icon_key_type = type(icon_key).__name__
         # Use | as separator between fields, ; between tags
-        parts.append(f"{name}|{glyph}|{is_active}|{color_str}")
-        _pref_log_once(f"[DEBUG get_tags_for_category_ui] Tag '{name}': glyph='{glyph}', is_active={is_active}, color={color_str}")
+        parts.append(f"{name}|{glyph}|{is_active}|{color_str}|{icon_key}|{icon_source}")
+        _pref_log_once(f"[DEBUG get_tags_for_category_ui] Tag '{name}': glyph='{glyph}', is_active={is_active}, color={color_str}, icon_key='{icon_key}' (type={icon_key_type}), icon_source={icon_source}")
 
     result = ";".join(parts)
     tag_log(f"get_tags_for_category_ui result: '{result}'")
@@ -7785,6 +7792,46 @@ def _deferred_save_glyphs():
     return None
 
 
+# Debounce mechanism for display mode changes (Icon/Glyph toggle)
+_pending_display_mode_change = None  # (tag_name, icon_source)
+_display_mode_debounce_timer_running = False
+
+def _schedule_display_mode_change(tag_name, icon_source):
+    """Schedule a deferred display mode change with debouncing.
+    Updates WM immediately for visual feedback, but defers cache/JSON update."""
+    global _pending_display_mode_change, _display_mode_debounce_timer_running
+
+    _pending_display_mode_change = (tag_name, icon_source)
+    category_debug_print(f"[DISPLAY_MODE_DEBOUNCE] Scheduled: tag='{tag_name}', icon_source={icon_source}")
+
+    if not _display_mode_debounce_timer_running:
+        _display_mode_debounce_timer_running = True
+        if not bpy.app.timers.is_registered(_process_pending_display_mode_change):
+            bpy.app.timers.register(_process_pending_display_mode_change, first_interval=0.3)
+            category_debug_print("[DISPLAY_MODE_DEBOUNCE] Timer registered")
+
+def _process_pending_display_mode_change():
+    """Process the pending display mode change (called by timer)."""
+    global _pending_display_mode_change, _display_mode_debounce_timer_running, _all_tags_cache
+
+    category_debug_print(f"[DISPLAY_MODE_DEBOUNCE] Timer fired, pending={_pending_display_mode_change}")
+
+    if _pending_display_mode_change is not None:
+        tag_name, icon_source = _pending_display_mode_change
+
+        if tag_name in _all_tags_cache:
+            _all_tags_cache[tag_name]["icon_source"] = icon_source
+            category_debug_print(f"[DISPLAY_MODE_DEBOUNCE] Updated cache: tag='{tag_name}', icon_source={icon_source}")
+
+            # Now save to JSON
+            _auto_save_tags()
+
+        _pending_display_mode_change = None
+
+    _display_mode_debounce_timer_running = False
+    return None  # Don't repeat timer
+
+
 def _sync_mode_flags_from_wm_to_cache():
     """Sync mode flags and icon properties from Python CategoryTagItem to _all_tags_cache.
     This captures UI changes to mode checkboxes and icon settings before saving."""
@@ -7799,7 +7846,10 @@ def _sync_mode_flags_from_wm_to_cache():
                 _all_tags_cache[tag_name]["mode_flags"] = tag_item.mode_flags
                 # Sync icon properties for tags with icons
                 if hasattr(tag_item, 'icon_key'):
-                    _all_tags_cache[tag_name]["icon_key"] = tag_item.icon_key
+                    wm_icon_key = tag_item.icon_key
+                    wm_icon_key_type = type(wm_icon_key).__name__
+                    category_debug_print(f"[SYNC_WM_CACHE] tag='{tag_name}' WM icon_key='{wm_icon_key}' (type={wm_icon_key_type})")
+                    _all_tags_cache[tag_name]["icon_key"] = wm_icon_key
                 if hasattr(tag_item, 'icon_source'):
                     _all_tags_cache[tag_name]["icon_source"] = tag_item.icon_source
     except Exception as e:
@@ -8301,6 +8351,43 @@ def _tag_display_mode_from_data(tag_data):
     return 'GLYPH'
 
 
+def get_tag_names():
+    """Get list of all existing tag names.
+    
+    Returns:
+        List of tag name strings
+    """
+    global _all_tags_cache
+    return list(_all_tags_cache.keys())
+
+
+def _generate_unique_tag_name(base_name="New Tag"):
+    """Generate a unique tag name with random suffix to avoid duplicates.
+    
+    Args:
+        base_name: Base name for the tag (default: "New Tag")
+    
+    Returns:
+        Unique tag name with format "BaseName.XXX" where XXX is 000-999
+    """
+    import random
+    
+    # Get existing tag names
+    existing_names = set(get_tag_names())
+    
+    # Try up to 1000 times to find a unique name
+    for _ in range(1000):
+        suffix = random.randint(0, 999)
+        candidate_name = f"{base_name}.{suffix:03d}"
+        if candidate_name not in existing_names:
+            return candidate_name
+    
+    # Fallback: use timestamp if all random names are taken (very unlikely)
+    import time
+    timestamp = int(time.time() * 1000) % 1000
+    return f"{base_name}.{timestamp:03d}"
+
+
 def with_context_check(func):
     """Decorator to verify context before RNA operations."""
     def wrapper(self, context):
@@ -8365,7 +8452,8 @@ class USERPREF_OT_category_tag_create(Operator):
     name: bpy.props.StringProperty(
         name="Name",
         description="Tag name",
-        maxlen=32
+        maxlen=32,
+        default="New Tag"
     )
     category: bpy.props.StringProperty(
         name="Category",
@@ -8419,8 +8507,8 @@ class USERPREF_OT_category_tag_create(Operator):
     display_mode_ui: bpy.props.EnumProperty(
         name="Display Mode",
         items=[
-            ('GLYPH', "Glyph", "Display as glyph character"),
-            ('ICON', "Icon", "Display as Blender icon"),
+            ('GLYPH', "Glyph", "Display as glyph character", 'FONT_DATA', 0),
+            ('ICON', "Icon", "Display as Blender icon", 'IMAGE_DATA', 1),
         ],
         default='GLYPH'
     )
@@ -8473,11 +8561,16 @@ class USERPREF_OT_category_tag_create(Operator):
             # Set default glyph for tags (not category glyph)
             self.glyph = DEFAULT_TAG_GLYPH_HEX
             self.current_mode_only = True
-        # When validation_attempted is True, preserve the values passed to the operator
+            
+            # Generate unique name with random suffix (only on fresh dialog)
+            self.name = _generate_unique_tag_name("New Tag")
+        
+        # When validation_attempted is True, preserve the name from previous attempt
+        category_debug_print(f"[CREATE_TAG invoke] Final name: '{self.name}', validation_attempted={self.validation_attempted}")
 
         self.error_message = ""
         _pref_log_once(
-            f"[DEBUG CREATE_TAG invoke] prepared glyph='{self.glyph}', "
+            f"[DEBUG CREATE_TAG invoke] prepared name='{self.name}', glyph='{self.glyph}', "
             f"glyph_search='{self.glyph_search}', category='{self.category}'"
         )
         # IMPORTANT: Keep width in sync with UI_CATEGORY_TAG_CREATE_POPUP_WIDTH in interface_intern.hh
@@ -8521,16 +8614,27 @@ class USERPREF_OT_category_tag_create(Operator):
             
             bpy.app.timers.register(reopen_dialog, first_interval=0.001)
             return {'FINISHED'}
+        
+        # Generate unique name with random suffix if user kept default "New Tag"
+        # This ensures each tag has a unique name even if user doesn't edit it
+        if self.name == "New Tag":
+            self.name = _generate_unique_tag_name("New Tag")
+            category_debug_print(f"[CREATE_TAG execute] Generated unique name: '{self.name}'")
+        
+        # IMPORTANT: User's settings (icon, glyph, color) are preserved even if they didn't change the default name.
+        # This allows users to configure a tag visually and then just accept the default name without losing their work.
+        # The name is already unique (generated with random suffix), so no conflict will occur.
 
         # Determine icon_source from display_mode_ui
         print(f"[TAG EXECUTE] BEFORE: self.icon_key='{self.icon_key}', self.display_mode_ui='{self.display_mode_ui}'")
         icon_source = _tag_icon_source_from_display_mode(self.display_mode_ui)
         print(f"[TAG EXECUTE] AFTER: icon_source='{icon_source}'")
 
-        # For GLYPH mode, clear icon_key; for ICON mode, clear glyph
+        # For GLYPH mode, clear icon_key; for ICON mode, keep glyph as fallback for tag management panel
         icon_key = self.icon_key if icon_source == 'BLENDER_ICON' else ""
-        glyph = _hex_to_glyph(self.glyph) if (icon_source == 'GLYPH' and self.glyph) else ""
-        print(f"[TAG EXECUTE] FINAL: icon_key='{icon_key}', glyph='{glyph}'")
+        # Always convert glyph - needed for display in tag management panel even in Icon mode
+        glyph = _hex_to_glyph(self.glyph) if self.glyph else ""
+        print(f"[TAG EXECUTE] FINAL: icon_key='{icon_key}', glyph='{glyph}', icon_source='{icon_source}'")
 
         # Validate icon_key if using icon mode
         if icon_source == 'BLENDER_ICON' and icon_key:
@@ -8715,8 +8819,9 @@ class USERPREF_OT_category_tag_create(Operator):
 
         # Only set defaults if this is a fresh dialog (not a re-opening after validation failure)
         if not self.validation_attempted:
-            # Set default glyph for tags (not category glyph)
-            self.glyph = DEFAULT_TAG_GLYPH_HEX
+            # ALWAYS set default glyph (e8e7) - required for proper display in tag management panel
+            # Even if user switches to Icon mode, glyph field must have a value to avoid errors
+            self.glyph = "e8e7"
             self.current_mode_only = True
         # When validation_attempted is True, preserve the values passed to the operator
 
@@ -8944,6 +9049,118 @@ class USERPREF_OT_category_tag_edit(Operator):
             return {'FINISHED'}
         self.report({'ERROR'}, message)
         return {'CANCELLED'}
+
+
+class WM_OT_category_tag_set_display_mode(Operator):
+    """Set display mode for a tag (Glyph or Icon)"""
+    bl_idname = "wm.category_tag_set_display_mode"
+    bl_label = "Set Tag Display Mode"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    mode: bpy.props.EnumProperty(
+        name="Mode",
+        description="Display mode for the tag",
+        items=[
+            ('GLYPH', "Glyph", "Display as glyph character"),
+            ('ICON', "Icon", "Display as Blender icon"),
+        ],
+        default='GLYPH'
+    )
+
+    @classmethod
+    def poll(cls, context):
+        wm = context.window_manager
+        if not wm or not hasattr(wm, 'category_tags'):
+            return False
+        idx = wm.category_tags_active_index
+        return 0 <= idx < len(wm.category_tags)
+
+    def execute(self, context):
+        wm = context.window_manager
+        active_idx = wm.category_tags_active_index
+        tags = wm.category_tags
+
+        if not (0 <= active_idx < len(tags)):
+            self.report({'ERROR'}, "No tag selected")
+            return {'CANCELLED'}
+
+        tag = tags[active_idx]
+        tag_name = tag.name
+
+        # Convert mode to icon_source value (0=GLYPH, 1=ICON)
+        icon_source_val = 1 if self.mode == 'ICON' else 0
+
+        category_debug_print(f"[SET_DISPLAY_MODE] Setting tag '{tag_name}' to mode={self.mode} (icon_source={icon_source_val})")
+
+        # Update WM tag
+        if hasattr(tag, 'icon_source'):
+            tag.icon_source = icon_source_val
+
+        # If switching to GLYPH mode, clear icon_key
+        if self.mode == 'GLYPH' and hasattr(tag, 'icon_key'):
+            tag.icon_key = ""
+
+        # Update _all_tags_cache
+        global _all_tags_cache
+        if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
+            _all_tags_cache[tag_name]["icon_source"] = icon_source_val
+            if self.mode == 'GLYPH':
+                _all_tags_cache[tag_name]["icon_key"] = ""
+
+        # Save to JSON
+        _auto_save_tags()
+
+        # Redraw
+        context.area.tag_redraw()
+        self.report({'INFO'}, f"Set '{tag_name}' to {self.mode} mode")
+        return {'FINISHED'}
+
+
+class WM_OT_category_tag_pick_icon(Operator):
+    """Pick an icon for the selected tag"""
+    bl_idname = "wm.category_tag_pick_icon"
+    bl_label = "Pick Icon for Tag"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        wm = context.window_manager
+        if not wm or not hasattr(wm, 'category_tags'):
+            return False
+        idx = wm.category_tags_active_index
+        return 0 <= idx < len(wm.category_tags)
+
+    def execute(self, context):
+        wm = context.window_manager
+        active_idx = wm.category_tags_active_index
+        tags = wm.category_tags
+
+        if not (0 <= active_idx < len(tags)):
+            self.report({'ERROR'}, "No tag selected")
+            return {'CANCELLED'}
+
+        tag = tags[active_idx]
+        tag_name = tag.name
+
+        # Set icon_source to ICON mode before opening picker
+        if hasattr(tag, 'icon_source'):
+            tag.icon_source = 1  # ICON mode
+
+        # Update _all_tags_cache
+        global _all_tags_cache
+        if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
+            _all_tags_cache[tag_name]["icon_source"] = 1
+
+        # Build RNA path for the icon_key property
+        target_property = f"category_tags[{active_idx}].icon_key"
+
+        # Call the icon picker with target property
+        bpy.ops.screen.category_tab_icon_picker(
+            'INVOKE_DEFAULT',
+            target_property=target_property
+        )
+
+        return {'FINISHED'}
 
 
 class USERPREF_OT_category_tag_delete(Operator):
@@ -12899,6 +13116,54 @@ class USERPREF_OT_tag_mode_select_none(Operator):
         return {'FINISHED'}
 
 
+class USERPREF_OT_category_tag_set_display_mode(Operator):
+    """Set display mode (Glyph or Icon) for a tag."""
+    bl_idname = "wm.category_tag_set_display_mode"
+    bl_label = "Set Display Mode"
+    bl_options = {'REGISTER', 'INTERNAL', 'UNDO'}
+    
+    mode: bpy.props.EnumProperty(
+        name="Mode",
+        items=[
+            ('GLYPH', "Glyph", "Display as glyph character"),
+            ('ICON', "Icon", "Display as Blender icon"),
+        ],
+        default='GLYPH'
+    )
+    
+    def execute(self, context):
+        global _all_tags_cache
+
+        wm = context.window_manager
+        idx = wm.category_tags_active_index
+
+        if not wm or not hasattr(wm, 'category_tags'):
+            return {'CANCELLED'}
+
+        if idx < 0 or idx >= len(wm.category_tags):
+            return {'CANCELLED'}
+
+        tag_name = wm.category_tags[idx].name
+        if tag_name not in _all_tags_cache:
+            return {'CANCELLED'}
+
+        # Set icon_source: 0=GLYPH, 1=ICON
+        icon_source = 0 if self.mode == 'GLYPH' else 1
+
+        # Update WM immediately for visual feedback
+        wm.category_tags[idx].icon_source = icon_source
+
+        category_debug_print(f"[DISPLAY_MODE] Switched '{tag_name}' to {self.mode}, icon_source={icon_source}")
+
+        # Schedule deferred cache update and save (prevents crash on rapid toggle)
+        _schedule_display_mode_change(tag_name, icon_source)
+
+        # Redraw UI to show change immediately
+        context.area.tag_redraw()
+
+        return {'FINISHED'}
+
+
 class USERPREF_PT_tag_mode_filter_popover(Panel):
     """Popover panel for selecting tag filter modes."""
     bl_label = "Filter Mode"
@@ -12980,13 +13245,18 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
             rows=20, maxrows=64
         )
 
-        # Buttons to the right of list
+        # Buttons to the right of list (all in one column)
         col_btn = left_container.column(align=True)
         col_btn.operator("wm.category_tag_add", text="", icon='ADD')
         col_btn.operator("wm.category_tag_delete", text="", icon='REMOVE')
         col_btn.separator()
-        col_btn.operator("wm.category_tag_move", text="", icon='TRIA_UP').direction = 'UP'
-        col_btn.operator("wm.category_tag_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
+        # Move Up/Down buttons - disabled when not in "All Tags" filter mode
+        filter_mode_flag = _get_tag_filter_mode_flag_from_wm(wm)
+        can_move = (filter_mode_flag == 0)  # 0 means "ALL" mode
+        col_move = col_btn.column(align=True)
+        col_move.enabled = can_move
+        col_move.operator("wm.category_tag_move", text="", icon='TRIA_UP').direction = 'UP'
+        col_move.operator("wm.category_tag_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
 
         # === Right: Detail panel ===
         col_right = split.column()
@@ -13050,12 +13320,70 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
             box.use_property_split = True
             box.prop(tag, "name", text="Name")
 
-            row = box.row(align=True)
-            row.prop(tag, "glyph", text="Glyph")
-            op = row.operator("wm.glyph_picker_grid", text=_hex_to_glyph("f02f"), icon='NONE')
-            op.target_property = f"category_tags[{active_idx}].glyph"
+            # Display Mode selector (Glyph vs Icon) - FIRST
+            box.separator()
+            display_row = box.row(align=True)
+            display_row.label(text="Display Mode:")
+
+            # Get current icon_source value (0=GLYPH, 1=ICON)
+            icon_source_val = getattr(tag, "icon_source", 0)
+
+            # Toggle buttons for display mode (always enabled for visual feedback)
+            glyph_row = display_row.row(align=True)
+            glyph_row.active = (icon_source_val == 0)
+            op_glyph = glyph_row.operator("wm.category_tag_set_display_mode", text="Glyph", icon='FONT_DATA',
+                                          depress=(icon_source_val == 0))
+            op_glyph.mode = 'GLYPH'
+
+            icon_row = display_row.row(align=True)
+            icon_row.active = (icon_source_val == 1)
+            op_icon = icon_row.operator("wm.category_tag_set_display_mode", text="Icon", icon='IMAGE_DATA',
+                                        depress=(icon_source_val == 1))
+            op_icon.mode = 'ICON'
+
+            # Conditional UI based on display mode
+            if icon_source_val == 1:
+                # Icon mode - show icon picker (similar layout to Glyph mode)
+                box.separator()
+
+                icon_key_val = getattr(tag, "icon_key", "")
+
+                # Row with label on left, fields on right (like Glyph mode)
+                icon_split = box.split(factor=0.3)
+                icon_split.label(text="Icon:")
+
+                # Right side: compact row with preview and pick button (no gap)
+                icon_row = icon_split.row(align=True)
+
+                # Left: Preview icon or placeholder
+                if icon_key_val:
+                    try:
+                        import bl_ui.icon_helper as icon_helper
+                        icon_id = icon_helper.icon_name_to_id(icon_key_val)
+                        if icon_id > 0:
+                            # Show icon preview
+                            icon_row.label(text="", icon_value=icon_id)
+                        else:
+                            icon_row.label(text=icon_key_val, translate=False)
+                    except Exception:
+                        icon_row.label(text=icon_key_val, translate=False)
+                else:
+                    # Empty preview when no icon selected
+                    icon_row.label(text="None", translate=False)
+
+                # Right: Pick icon button (like glyph picker button with glyph f02f)
+                icon_row.operator("wm.category_tag_pick_icon", text="\uf02f", icon='NONE')
+            else:
+                # Glyph mode - show glyph picker BELOW the mode buttons
+                box.separator()
+
+                row = box.row(align=True)
+                row.prop(tag, "glyph", text="Glyph")
+                op = row.operator("wm.glyph_picker_grid", text=_hex_to_glyph("f02f"), icon='NONE')
+                op.target_property = f"category_tags[{active_idx}].glyph"
 
             # Color presets with glyph buttons
+            box.separator()
             box.label(text="Color:")
             row = box.row()
             row.template_color_glyph_presets(tag, "color")
@@ -13222,6 +13550,8 @@ classes = (
     USERPREF_OT_category_tag_edit,
     USERPREF_OT_category_tag_delete,
     USERPREF_OT_category_tag_move,
+    WM_OT_category_tag_set_display_mode,
+    WM_OT_category_tag_pick_icon,
     USERPREF_OT_category_tag_toggle,
     USERPREF_OT_category_clear_tags,
     USERPREF_OT_category_tag_filter_set,
@@ -13335,6 +13665,7 @@ classes = (
     USERPREF_OT_tag_mode_toggle,
     USERPREF_OT_tag_mode_select_all,
     USERPREF_OT_tag_mode_select_none,
+    USERPREF_OT_category_tag_set_display_mode,
     USERPREF_OT_category_tag_remove_from_category,
 
     USERPREF_PT_experimental_new_features,

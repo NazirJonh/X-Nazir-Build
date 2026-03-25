@@ -21,7 +21,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "RNA_access.hh"
-#include "RNA_prototypes.hh"
+#include "RNA_enum_types.hh"
 
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
@@ -592,6 +592,87 @@ void uiTemplateGlyphPreview(Layout *layout,
     return std::string("Glyph: ") + glyph_unicode_copy;
   };
 }
+
+void uiTemplateIconPreview(Layout *layout,
+                            bContext * /*C*/,
+                            const char *icon_key,
+                            PointerRNA *ptr,
+                            const char *color_propname,
+                            float size_multiplier)
+{
+  if (!layout || !icon_key || icon_key[0] == '\0') {
+    return;
+  }
+
+  /* Resolve icon_key to icon_id */
+  int icon_id = ICON_NONE;
+  if (!RNA_enum_value_from_identifier(rna_enum_icon_items, icon_key, &icon_id) || icon_id <= 0) {
+    /* Try special icons not in standard enum */
+    if (STREQ(icon_key, "FUND")) {
+      icon_id = ICON_FUND;
+    }
+    else if (STREQ(icon_key, "BLENDER")) {
+      icon_id = ICON_BLENDER;
+    }
+    else {
+      return;  /* Icon not found */
+    }
+  }
+
+  /* Create centered row for preview */
+  Layout &preview_row = layout->row(false);
+  preview_row.alignment_set(LayoutAlign::Center);
+
+  /* Get block and create preview button */
+  Block *preview_block = preview_row.block();
+  block_layout_set_current(preview_block, &preview_row);
+
+  const uiStyle *style = style_get_dpi();
+  const int preview_size = int(style->widget.points * UI_SCALE_FAC * 2.0f * size_multiplier);
+
+  /* Copy callback data to keep it valid across redraws while popup stays open. */
+  const std::string icon_key_copy = icon_key;
+  const std::string color_propname_copy = color_propname ? color_propname : "";
+  const PointerRNA preview_ptr = ptr ? *ptr : PointerRNA_NULL;
+  const bool has_preview_ptr = ptr != nullptr;
+  const int icon_id_copy = icon_id;
+
+  /* Create preview button using Extra type with custom draw callback */
+  Button *preview_but = uiDefBut(preview_block,
+                                       ButtonType::Extra,
+                                      "",
+                                      0,
+                                       0,
+                                       preview_size,
+                                       preview_size,
+                                       nullptr,
+                                       0.0f,
+                                       0.0f,
+                                       std::nullopt);
+
+  /* Read color from RNA on every redraw for live-update preview in dialogs/popups. */
+  button_func_drawextra_set(preview_block,
+                            [icon_id_copy, color_propname_copy, preview_ptr, has_preview_ptr, size_multiplier](
+                                const bContext *C, rcti *rect) {
+                              float draw_color[3] = {0.0f, 0.0f, 0.0f};
+                              if (has_preview_ptr && !color_propname_copy.empty()) {
+                                PointerRNA preview_ptr_local = preview_ptr;
+                                PropertyRNA *prop = RNA_struct_find_property(
+                                    &preview_ptr_local, color_propname_copy.c_str());
+                                if (prop) {
+                                  RNA_property_float_get_array(&preview_ptr_local, prop, draw_color);
+                                }
+                              }
+                              icon_preview_draw_cb(
+                                  C, rect, icon_id_copy, draw_color, size_multiplier);
+                            });
+
+  preview_but->tip_quick_func = [icon_key_copy](const Button *) {
+    return std::string("Icon: ") + icon_key_copy;
+  };
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Glyph Search Results Template

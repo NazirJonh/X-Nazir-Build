@@ -2141,6 +2141,25 @@ void RNA_api_ui_layout(StructRNA *srna)
                        0.5f,
                        5.0f);
 
+  func = RNA_def_function(srna, "template_icon_preview", "ui::uiTemplateIconPreview");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(func, "Creates a centered preview button showing a Blender icon with optional color tint");
+  parm = RNA_def_string(func, "icon_key", nullptr, 0, "", "Blender icon identifier (e.g., 'FUND', 'OBJECT_DATAMODE')");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take color property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  parm = RNA_def_string(func, "color_property", nullptr, 0, "", "Identifier of color property for icon tint");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), ParameterFlag(0));
+  parm = RNA_def_float(func,
+                       "size_multiplier",
+                       2.0f,
+                       0.5f,
+                       5.0f,
+                       "",
+                       "Size multiplier for the preview icon",
+                       0.5f,
+                       5.0f);
+
   func = RNA_def_function(srna, "template_glyph_search_results", "ui::uiTemplateGlyphSearchResults");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   RNA_def_function_ui_description(func, "Creates dynamic buttons for glyph search results");

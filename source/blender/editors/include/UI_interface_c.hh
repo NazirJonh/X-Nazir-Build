@@ -3079,6 +3079,13 @@ void uiTemplateGlyphPreview(Layout *layout,
                             const char *color_propname,
                             float size_multiplier);
 
+void uiTemplateIconPreview(Layout *layout,
+                            bContext *C,
+                            const char *icon_key,
+                            PointerRNA *ptr,
+                            const char *color_propname,
+                            float size_multiplier);
+
 void uiTemplateGlyphSearchResults(Layout *layout,
                                   bContext *C,
                                   PointerRNA *ptr,

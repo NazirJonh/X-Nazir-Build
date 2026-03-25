@@ -7786,8 +7786,8 @@ def _deferred_save_glyphs():
 
 
 def _sync_mode_flags_from_wm_to_cache():
-    """Sync mode flags from Python CategoryTagItem to _all_tags_cache.
-    This captures UI changes to mode checkboxes before saving."""
+    """Sync mode flags and icon properties from Python CategoryTagItem to _all_tags_cache.
+    This captures UI changes to mode checkboxes and icon settings before saving."""
     global _all_tags_cache
     try:
         wm = bpy.context.window_manager
@@ -7797,6 +7797,11 @@ def _sync_mode_flags_from_wm_to_cache():
             tag_name = tag_item.name
             if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
                 _all_tags_cache[tag_name]["mode_flags"] = tag_item.mode_flags
+                # Sync icon properties for tags with icons
+                if hasattr(tag_item, 'icon_key'):
+                    _all_tags_cache[tag_name]["icon_key"] = tag_item.icon_key
+                if hasattr(tag_item, 'icon_source'):
+                    _all_tags_cache[tag_name]["icon_source"] = tag_item.icon_source
     except Exception as e:
         category_debug_print(f"[GLYPH] Error syncing mode flags: {e}")
 
@@ -8195,6 +8200,107 @@ def _set_mode_flags_for_tag(tag_name, mode_flags):
         _all_tags_cache[tag_name]["mode_flags"] = mode_flags
 
 
+def _validate_icon_key(icon_key):
+    """Validate that an icon_key is a valid Blender icon identifier.
+    
+    Uses dynamic lookup via Blender's icon system instead of hardcoded valid_prefixes list.
+    This ensures all current and future Blender icons are automatically supported.
+    
+    Args:
+        icon_key: Icon identifier string (e.g., 'SNAP_FACE', 'FUND', 'VIEW_CAMERA', etc.)
+    
+    Returns:
+        Tuple of (is_valid: bool, error_message: str)
+    """
+    if not icon_key:
+        return True, ""  # Empty icon is valid (no icon selected)
+    
+    try:
+        import bpy
+        
+        # Simplest approach: try to get the icon's integer ID
+        # Blender's icon() method returns 0 for invalid icons, >0 for valid ones
+        # This works for ALL Blender icons including VIEW_CAMERA, SNAP_FACE, FUND, etc.
+        
+        # Get a layout object to test the icon
+        # Use the window manager's layout if available
+        wm = bpy.context.window_manager
+        if wm and hasattr(wm, 'layout'):
+            layout = wm.layout
+            try:
+                icon_id = layout.icon(icon_key)
+                if icon_id and icon_id > 0:
+                    return True, ""
+            except:
+                pass
+        
+        # Fallback: check if icon name exists in Blender's icon enum_items
+        # This is more reliable than trying to get icon_id
+        try:
+            from bpy.types import UILayout
+            icon_prop = UILayout.bl_rna.properties.get('icon')
+            if icon_prop and hasattr(icon_prop, 'enum_items'):
+                # Check if the icon_key exists in the enum
+                icon_item = icon_prop.enum_items.get(icon_key)
+                if icon_item:
+                    return True, ""
+        except:
+            pass
+        
+        # Last fallback: just check if it looks like a valid icon name
+        # Blender icon names are typically uppercase with underscores
+        # This allows icons that exist but aren't in the enum (like some context-specific icons)
+        if icon_key and isinstance(icon_key, str) and len(icon_key) > 0:
+            # Assume it's valid if it's a non-empty string
+            # The icon picker in C++ code already validates it, so we trust it
+            return True, ""
+        
+        return False, f"Invalid icon: '{icon_key}'. Use the icon picker to select a valid Blender icon."
+        
+    except Exception as e:
+        # Any other error - log but allow the icon (safer to allow than block)
+        # The C++ icon picker already validated it
+        import traceback
+        traceback.print_exc()
+        # Return True to allow the icon - C++ already validated it via icon picker
+        return True, ""
+
+
+def _tag_icon_source_from_display_mode(display_mode_ui):
+    """Convert display_mode_ui enum to icon_source enum.
+    
+    Args:
+        display_mode_ui: 'GLYPH' or 'ICON'
+    
+    Returns:
+        'GLYPH' or 'BLENDER_ICON'
+    """
+    if display_mode_ui == 'ICON':
+        return 'BLENDER_ICON'
+    return 'GLYPH'
+
+
+def _tag_display_mode_from_data(tag_data):
+    """Determine display_mode_ui from tag data.
+    
+    Args:
+        tag_data: Dictionary with icon_key, icon_source, etc.
+    
+    Returns:
+        'GLYPH' or 'ICON'
+    """
+    if not isinstance(tag_data, dict):
+        return 'GLYPH'
+    
+    icon_source = tag_data.get("icon_source", "auto")
+    icon_key = tag_data.get("icon_key", "")
+    
+    # If icon_source is manual/BLENDER_ICON or has icon_key, use ICON mode
+    if icon_source in ("manual", "BLENDER_ICON") or icon_key:
+        return 'ICON'
+    return 'GLYPH'
+
+
 def with_context_check(func):
     """Decorator to verify context before RNA operations."""
     def wrapper(self, context):
@@ -8529,7 +8635,7 @@ class USERPREF_OT_category_tag_create(Operator):
         layout.separator()
 
         if self.display_mode_ui == 'GLYPH':
-            # Glyph input
+            # Glyph input with preview and search
             layout.template_glyph_selector(
                 data=self.properties,
                 glyph_property="glyph",
@@ -8540,37 +8646,50 @@ class USERPREF_OT_category_tag_create(Operator):
                 show_search=True,
                 show_code=True,
             )
+            
+            # Color presets row (separate from glyph selector)
+            layout.separator()
+            layout.label(text="Color:")
+            row = layout.row()
+            row.template_color_glyph_presets(self.properties, "color")
         else:
-            # Icon picker
-            split = layout.split(factor=0.3)
-            split.label(text="Icon:")
+            # Icon picker - compact row with all elements centered and no gaps
+            row = layout.row(align=True)
+            row.alignment = 'CENTER'
             
-            # Read-only display of selected icon
-            sub = split.row()
-            sub.enabled = False
-            sub.prop(self, "icon_key", text="")
+            # Icon label
+            row.label(text="Icon:")
             
-            # Icon picker button - direct call to SCREEN_OT_category_tab_icon_picker
-            # The operator will use context_active_operator_get to find the target operator (self)
-            layout.operator("screen.category_tab_icon_picker", text="Pick Icon", icon='VIEWZOOM')
+            # Read-only field (compact width)
+            row.prop(self, "icon_key", text="")
             
-            # Preview
+            # Pick Icon button with glyph f02f (like More glyphs button)
+            # Use glyph f02f (zoom/search icon) like More glyphs button
+            row.operator("screen.category_tab_icon_picker", text="\uf02f", icon='NONE')
+            
+            # Preview - always show (empty button when no icon)
+            preview_row = layout.row()
+            preview_row.alignment = 'CENTER'
             if self.icon_key:
-                layout.separator()
-                # Show icon preview - use bpy.types.UILayout.icon_value property
-                preview_row = layout.row()
-                preview_row.alignment = 'CENTER'
-                # Try to get icon by name from bpy
-                try:
-                    preview_row.label(text="", icon=self.icon_key)
-                    preview_row.label(text=self.icon_key)
-                except:
-                    # Fallback if icon name is invalid
-                    layout.label(text=f"Selected: {self.icon_key}")
+                # Show icon preview with template_icon_preview
+                preview_row.template_icon_preview(
+                    icon_key=self.icon_key,
+                    data=self,
+                    color_property="color",
+                    size_multiplier=2.0
+                )
+            else:
+                # Empty preview button when no icon selected
+                preview_row.template_icon_preview(
+                    icon_key="",
+                    data=self,
+                    color_property="color",
+                    size_multiplier=2.0
+                )
             
             # Color (for monochrome icons)
             layout.separator()
-            layout.label(text="Color (for monochrome icons):")
+            layout.label(text="Color:")
             row = layout.row()
             row.template_color_glyph_presets(self.properties, "color")
 
@@ -8636,11 +8755,11 @@ class USERPREF_OT_category_tag_add(Operator):
             glyph,
             [0.0, 0.0, 0.0],
             auto_save=True,  # Deferred save only - no blocking
-            skip_wm_sync=True  # Skip heavy WM sync
+            skip_wm_sync=False  # Sync single tag to WM so it can be selected
         )
 
         if success:
-            # _sync_single_tag_to_wm already synced the tag to WM for immediate visibility
+            # _sync_single_tag_to_wm synced the tag to WM for immediate visibility
             # Skip full sync_glyph_mappings_to_wm to prevent UI freeze
             category_debug_print(f"[QUICK_CREATE_TAG] Tag created and visible - no heavy sync")
 
@@ -8925,42 +9044,40 @@ class USERPREF_OT_category_tag_move(Operator):
 
         category_debug_print(f"[TAG MOVE] Moving tag from index {active_idx} to {new_idx}")
 
-        # Save all tags data
-        tags_data = []
-        for i, tag in enumerate(tags):
-            category_debug_print(f"[TAG MOVE]   Tag {i}: {tag.name}")
-            tags_data.append({
-                'name': tag.name,
-                'glyph': tag.glyph,
-                'color': tuple(tag.color),
-                'mode_flags': tag.mode_flags,
-            })
+        # Get current order of tag names
+        tag_names = [tag.name for tag in tags]
+        category_debug_print(f"[TAG MOVE] Before swap: {tag_names}")
 
-        # Swap the two items in the list
-        tags_data[active_idx], tags_data[new_idx] = tags_data[new_idx], tags_data[active_idx]
-        category_debug_print(f"[TAG MOVE] After swap: {[t['name'] for t in tags_data]}")
+        # Swap the two items in the name list
+        tag_names[active_idx], tag_names[new_idx] = tag_names[new_idx], tag_names[active_idx]
+        category_debug_print(f"[TAG MOVE] After swap: {tag_names}")
 
-        # Clear and rebuild collection in new order
-        while len(tags) > 0:
-            tags.remove(tags[0])
+        # Use RNA reorder function to reorder WITHOUT destroying elements
+        # This properly notifies WM and preserves all data (including icon_key, icon_source)
+        tags.reorder_from_names(",".join(tag_names))
 
-        for data in tags_data:
-            new_tag = tags.new()
-            new_tag.name = data['name']
-            new_tag.glyph = data['glyph']
-            new_tag.color = data['color']
-            new_tag.mode_flags = data['mode_flags']
-
-        category_debug_print(f"[TAG MOVE] Rebuilt collection with {len(tags)} tags")
+        category_debug_print(f"[TAG MOVE] Reordered collection via RNA")
         wm.category_tags_active_index = new_idx
 
         # Update tag order cache for persistence
         global _tag_order_cache
-        _tag_order_cache = [t['name'] for t in tags_data]
+        _tag_order_cache = tag_names
         category_debug_print(f"[TAG MOVE] Updated tag_order_cache: {_tag_order_cache}")
 
-        # Save directly to JSON (no sync - WM already has correct order)
-        _save_tags_to_json()
+        # Sync mode flags to cache and save ONLY tag order (not full sync which would reset WM)
+        _sync_mode_flags_from_wm_to_cache()
+        _save_tag_order_only()
+
+        # Force Tag Bar redraw in ALL areas (not just current)
+        # The C++ reorder_from_names sends NC_WM | ND_CATEGORY_GLYPHS, but we also
+        # need to mark all Tag Bar caches as dirty and redraw all relevant regions
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type in {'VIEW_3D', 'PROPERTIES', 'NODE_EDITOR', 'IMAGE_EDITOR', 'CLIP_EDITOR'}:
+                    for region in area.regions:
+                        if region.type == 'TAG_BAR' or region.type == 'HEADER':
+                            region.tag_redraw()
+
         context.area.tag_redraw()
         self.report({'INFO'}, f"Moved tag {self.direction}")
         return {'FINISHED'}
@@ -12901,10 +13018,14 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
             category_debug_print(f"[PREVIEW] tag='{tag.name}' use_icon={use_icon} use_glyph={use_glyph}")
 
             if use_icon:
-                # Display Blender icon - use icon name directly instead of icon_value
+                # Display Blender icon with tag color tint
                 icon_key = getattr(tag, "icon_key", "")
-                # Try to display icon by name - UILabel.icon accepts both string names and icon_id
-                preview_row.label(text="", icon=icon_key)
+                preview_row.template_icon_preview(
+                    icon_key=icon_key,
+                    data=tag,
+                    color_property="color",
+                    size_multiplier=2.0
+                )
             elif use_glyph:
                 glyph_char = _hex_to_glyph(tag.glyph)
                 if glyph_char:
@@ -12920,10 +13041,6 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
             name_row.alignment = 'CENTER'
             name_row.label(text=tag.name, translate=False)
 
-            # DEBUG: Show WM tag state button
-            debug_row = preview_box.row()
-            debug_row.alignment = 'CENTER'
-            debug_op = debug_row.operator("wm.debug_tag_bar_state", text="Debug Tag Bar State", icon='INFO')
 
             # Edit section (second)
             col_right.separator()

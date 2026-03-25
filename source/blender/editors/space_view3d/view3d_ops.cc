@@ -193,19 +193,31 @@ static void VIEW3D_OT_pastebuffer(wmOperatorType *ot)
 /** \name Tag Bar Filter Toggle Operator
  * \{ */
 
+/* Debug flag for tag bar toggle operator.
+ * Set to true to enable detailed logging of tag toggle operations. */
+static constexpr bool TAG_BAR_TOGGLE_DEBUG_ENABLED = false;
+
 static bool view3d_tag_bar_toggle_poll(bContext *C)
 {
   const ScrArea *area = CTX_wm_area(C);
   if (!area) {
+    if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+      printf("[TAG_BAR_TOGGLE_POLL] area is NULL\n");
+    }
     return false;
   }
 
   using namespace blender::ui;
   TagFilterStateRef state{};
+  const bool result = tag_filter_state_from_area(area, &state) && state.active_tags;
+  if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+    printf("[TAG_BAR_TOGGLE_POLL] area=%p spacetype=%d result=%d\n",
+           (void*)area, area->spacetype, result);
+  }
   /* Only require that we can get tag filter state from area.
    * Don't require filter_enabled to be true - user should be able to
    * toggle tags even when filter is off (to enable filtering). */
-  return tag_filter_state_from_area(area, &state) && state.active_tags;
+  return result;
 }
 
 static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op, const wmEvent *event)
@@ -221,15 +233,29 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
   using namespace blender::ui;
 
   /* Special handling for "New Add-ons!" button */
+  if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+    printf("[TAG_BAR_TOGGLE] tag_name='%s' comparing with 'New Add-ons!'\n", tag_name);
+  }
   if (STREQ(tag_name, "New Add-ons!")) {
     ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
     const bool is_currently_active = is_new_addon_filter_active(area);
+    if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+      printf("[TAG_BAR_TOGGLE] 'New Add-ons!' detected, is_currently_active=%d\n", is_currently_active);
+    }
 
     if (is_currently_active) {
       /* Filter is active - deactivate it.
        * Do NOT hide N-Panel - user wants to see all categories.
        * Restore saved tags or show all categories if no tags were saved. */
+      if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+        printf("[TAG_BAR_TOGGLE] Deactivating 'New Add-ons!' filter, was_auto_activated=%d\n",
+               is_new_addon_filter_auto_activated(area));
+      }
       set_new_addon_filter_active(area, false);
+      if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+        printf("[TAG_BAR_TOGGLE] After deactivation: is_new_addon_filter_active=%d auto_activated=%d\n",
+               is_new_addon_filter_active(area), is_new_addon_filter_auto_activated(area));
+      }
 
       /* Restore saved tags or clear to show all categories */
       TagFilterStateRef state{};
@@ -251,13 +277,28 @@ static wmOperatorStatus view3d_tag_bar_toggle_invoke(bContext *C, wmOperator *op
     }
     else {
       /* Filter is not active - activate and show N-Panel */
+      if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+        printf("[TAG_BAR_TOGGLE] Activating 'New Add-ons!' filter\n");
+      }
       set_new_addon_filter_active(area, true);
+      if constexpr (TAG_BAR_TOGGLE_DEBUG_ENABLED) {
+        printf("[TAG_BAR_TOGGLE] After activation: is_new_addon_filter_active=%d auto_activated=%d\n",
+               is_new_addon_filter_active(area), is_new_addon_filter_auto_activated(area));
+      }
 
       /* Save current tags before clearing (so we can restore later) */
       TagFilterStateRef state{};
       if (tag_filter_state_from_area(area, &state) && state.active_tags) {
+        const bool has_active_tags = (state.active_tags[0] != '\0');
         set_saved_tag_filter_tags(area, state.active_tags);
         state.active_tags[0] = '\0';
+
+        /* If no tags were selected, disable the tag filter to show all categories.
+         * This allows user to see all categories when clicking "New Add-ons!" without
+         * any tag filter active. */
+        if (!has_active_tags && state.filter_enabled) {
+          *state.filter_enabled = 0;
+        }
       }
 
       /* Open N-Panel if hidden */

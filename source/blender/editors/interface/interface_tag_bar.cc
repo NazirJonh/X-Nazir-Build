@@ -76,7 +76,7 @@ static std::map<const wmWindowManager *, TagBarRuntimeData *> g_tag_bar_cache;
 
 /* Master debug flag for tag bar operations.
  * Set to false to disable all debug output in this module. */
-static constexpr bool TAG_BAR_DEBUG_ENABLED = true;
+static constexpr bool TAG_BAR_DEBUG_ENABLED = false;
 
 /**
  * Convert CategoryTagMode bit flag to category_tag_filter_mode enum value.
@@ -1100,7 +1100,9 @@ static int draw_new_addon_button(const bContext *C,
 
     /* "New Add-on!" tag click handler.
      * When activating: save current tags to saved_tag_filter_tags, clear active tags.
-     * When deactivating: restore tags from saved_tag_filter_tags. */
+     * When deactivating: restore tags from saved_tag_filter_tags.
+     * Special case: if no tags are selected when activating, show all categories
+     * and disable the tag filter (filter_enabled = 0). */
     but->func = [](bContext *C_cb, void * /*arg1*/, void * /*arg2*/) {
       ScrArea *cb_area = CTX_wm_area(C_cb);
       if (!cb_area) {
@@ -1121,9 +1123,17 @@ static int draw_new_addon_button(const bContext *C,
 
       if (!currently_active) {
         /* Activating: save current tags, clear active tags to show only pending categories */
+        const bool has_active_tags = (state.active_tags[0] != '\0');
         set_saved_tag_filter_tags(cb_area, state.active_tags);
         state.active_tags[0] = '\0';
         set_new_addon_filter_active(cb_area, true, /*auto_activated=*/false);
+
+        /* If no tags were selected, disable the tag filter to show all categories.
+         * This allows user to see all categories when clicking "New Add-on!" without
+         * any tag filter active. */
+        if (!has_active_tags && state.filter_enabled) {
+          *state.filter_enabled = 0;
+        }
       }
       else {
         /* Deactivating: restore saved tags.

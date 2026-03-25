@@ -112,7 +112,7 @@ namespace blender::ui {
  * 
  * To enable: Change to `static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;`
  */
-static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
 
 /** \} */
 
@@ -4483,40 +4483,54 @@ void panel_category_tabs_ensure_active_visible(const bContext *C, ARegion *regio
   /* Check if "New Add-ons!" filter should be auto-activated.
    * This handles cases where extension was installed but filter wasn't activated yet.
    * IMPORTANT: Only activate ONCE when category first appears. Don't re-activate if user
-   * manually switched to other tags (indicated by active_tags being set). */
+   * manually switched to other tags (indicated by active_tags being set) or if user
+   * manually deactivated the filter (indicated by auto_activated flag being false). */
   if (area) {
     const bool filter_active = is_new_addon_filter_active(area);
+    const bool was_auto_activated = is_new_addon_filter_auto_activated(area);
     const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
     const bool has_unassigned = should_show_new_addon_tag(wm, space_type, current_mode_flag);
-    
+
     if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-      printf("[NEW ADDON CHECK] filter_active=%d has_unassigned=%d\n",
-             filter_active ? 1 : 0, has_unassigned ? 1 : 0);
+      printf("[NEW ADDON CHECK] filter_active=%d was_auto_activated=%d has_unassigned=%d\n",
+             filter_active ? 1 : 0, was_auto_activated ? 1 : 0, has_unassigned ? 1 : 0);
       fflush(stdout);
     }
-    
+
     /* Only auto-activate if:
      * 1. Filter is NOT active
      * 2. Has unassigned categories
-     * 3. User has NOT manually selected other tags (active_tags is empty) */
+     * 3. Filter was NOT manually deactivated (auto_activated flag should be true for auto-reactivation)
+     *
+     * NOTE: After manual deactivation, auto_activated is set to false, preventing re-activation here. */
     if (!filter_active && has_unassigned) {
-      /* Check if user has manually selected other tags */
-      TagFilterStateRef state{};
-      bool user_selected_other_tags = false;
-      if (tag_filter_state_from_area(area, &state) && state.active_tags && state.active_tags[0] != '\0') {
-        user_selected_other_tags = true;
-        if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-          printf("[NEW ADDON CHECK] User has selected other tags: '%s', skipping auto-activate\n",
-                 state.active_tags);
-          fflush(stdout);
+      /* If filter was auto-activated before, we can re-activate it.
+       * If it was manually deactivated (auto_activated=false), don't re-activate. */
+      if (was_auto_activated) {
+        /* Check if user has manually selected other tags */
+        TagFilterStateRef state{};
+        bool user_selected_other_tags = false;
+        if (tag_filter_state_from_area(area, &state) && state.active_tags && state.active_tags[0] != '\0') {
+          user_selected_other_tags = true;
+          if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+            printf("[NEW ADDON CHECK] User has selected other tags: '%s', skipping auto-activate\n",
+                   state.active_tags);
+            fflush(stdout);
+          }
+        }
+
+        /* Only auto-activate if user hasn't selected other tags */
+        if (!user_selected_other_tags) {
+          if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+            printf("[NEW ADDON AUTO-ACTIVATE] Auto-activating filter (was_auto_activated=true)\n");
+            fflush(stdout);
+          }
+          set_new_addon_filter_active(area, true, /*auto_activated=*/true);
         }
       }
-      
-      /* Only auto-activate if user hasn't selected other tags */
-      if (!user_selected_other_tags) {
-        set_new_addon_filter_active(area, true, /*auto_activated=*/true);
+      else {
         if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-          printf("[NEW ADDON AUTO-ACTIVATE] Auto-activated filter in panel_category_tabs_ensure_active_visible\n");
+          printf("[NEW ADDON CHECK] Filter was manually deactivated (was_auto_activated=false), skipping auto-activate\n");
           fflush(stdout);
         }
       }

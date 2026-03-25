@@ -8762,6 +8762,7 @@ class USERPREF_OT_category_tag_create(Operator):
             icon_split.alignment = 'RIGHT'
             icon_split.label(text="Icon:")
             icon_row = icon_split.row(align=True)
+            icon_row.alignment = 'LEFT'
             icon_row.operator("screen.category_tab_icon_picker", text="Choose", icon='VIEWZOOM')
             
             # Preview - always show (empty button when no icon)
@@ -8976,6 +8977,7 @@ class USERPREF_OT_category_tag_edit(Operator):
             icon_split.alignment = 'RIGHT'
             icon_split.label(text="Icon:")
             icon_row = icon_split.row(align=True)
+            icon_row.alignment = 'LEFT'
             icon_row.operator("screen.category_tab_icon_picker", text="Choose", icon='VIEWZOOM')
             
             # Preview

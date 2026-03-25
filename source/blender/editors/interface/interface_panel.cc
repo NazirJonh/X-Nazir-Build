@@ -1877,7 +1877,9 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm,
     char color_str[32];
     SNPRINTF(color_str, "%.3f,%.3f,%.3f", tag->color[0], tag->color[1], tag->color[2]);
     result.append(color_str);
-    /* Add icon_id and icon_source */
+    /* Add icon_id and icon_source (format: |icon_id|icon_source).
+     * NOTE: This string is parsed in interface_tab_categories_edit.cc:tag_list_panel_draw()
+     * and must follow the expected positional format (name|glyph|is_active|color|icon_id|icon_source). */
     result.push_back('|');
     int icon_id = ICON_NONE;
     if (tag->icon_source == 1 && tag->icon_key[0] != '\0') {

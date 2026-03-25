@@ -8507,8 +8507,8 @@ class USERPREF_OT_category_tag_create(Operator):
     display_mode_ui: bpy.props.EnumProperty(
         name="Display Mode",
         items=[
-            ('GLYPH', "Glyph", "Display as glyph character", 'FONT_DATA', 0),
-            ('ICON', "Icon", "Display as Blender icon", 'IMAGE_DATA', 1),
+            ('GLYPH', "Glyph", "Display as glyph character", '', 0),
+            ('ICON', "Icon", "Display as Blender icon", '', 1),
         ],
         default='GLYPH'
     )
@@ -13331,13 +13331,13 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
             # Toggle buttons for display mode (always enabled for visual feedback)
             glyph_row = display_row.row(align=True)
             glyph_row.active = (icon_source_val == 0)
-            op_glyph = glyph_row.operator("wm.category_tag_set_display_mode", text="Glyph", icon='FONT_DATA',
+            op_glyph = glyph_row.operator("wm.category_tag_set_display_mode", text="Glyph",
                                           depress=(icon_source_val == 0))
             op_glyph.mode = 'GLYPH'
 
             icon_row = display_row.row(align=True)
             icon_row.active = (icon_source_val == 1)
-            op_icon = icon_row.operator("wm.category_tag_set_display_mode", text="Icon", icon='IMAGE_DATA',
+            op_icon = icon_row.operator("wm.category_tag_set_display_mode", text="Icon",
                                         depress=(icon_source_val == 1))
             op_icon.mode = 'ICON'
 

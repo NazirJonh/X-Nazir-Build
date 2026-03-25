@@ -3534,10 +3534,22 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
             tag_color[0] = '\0';
           }
 
-          /* Skip icon_id and icon_source (format: icon_id|icon_source) */
+          /* Parse icon_id and icon_source (format: icon_id|icon_source).
+           * NOTE: This data is serialized in interface_panel.cc:get_tags_for_category_ui().
+           * We parse it here to allow header buttons (which are Labels) to display icons.
+           * ARCHITECTURAL NOTE: This manual parsing is a workaround for the current string-based
+           * communication between panel data prep and tab category rendering. A future refactor
+           * should ideally pass a structured object instead of a semicolon-separated string. */
+          int tag_icon_id = 0;
+          int tag_icon_source = 0;
           if (*cursor == '|') {
             cursor++;
-            while (*cursor != ';' && *cursor != '\0') {
+            if (sscanf(cursor, "%d|%d", &tag_icon_id, &tag_icon_source) != 2) {
+              tag_icon_id = 0;
+              tag_icon_source = 0;
+            }
+            /* Advance cursor past the parsed icon_id|icon_source to reach ';' separator */
+            while (*cursor != '\0' && *cursor != ';') {
               cursor++;
             }
           }
@@ -3555,12 +3567,22 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
               }
             }
 
-            /* Create colored glyph label */
+            /* Determine what to display: icon takes priority over glyph if icon_source is ICON (1).
+             * This ensures that when a tag is switched to 'Icon' mode, it renders correctly 
+             * in the Tags List header (using standard Label icon rendering). */
+            int draw_icon_id = ICON_NONE;
+            const char *draw_text = tag_glyph;
+            if (tag_icon_source == 1 && tag_icon_id > 0) {
+              draw_icon_id = tag_icon_id;
+              draw_text = ""; /* Don't show glyph if icon is set. */
+            }
+
+            /* Create colored glyph label or icon button. */
             Block *block = glyphs_row.block();
             block_layout_set_current(block, &glyphs_row);
             Button *glyph_but = uiDefBut(block,
                                               ButtonType::Label,
-                                              tag_glyph,
+                                              draw_text,
                                               0,
                                               0,
                                               UI_UNIT_X,
@@ -3569,6 +3591,11 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
                                               0,
                                               0,
                                               std::nullopt);
+
+            /* Set icon if available (Labels support icons via def_but_icon). */
+            if (draw_icon_id > 0) {
+              def_but_icon(glyph_but, draw_icon_id, UI_HAS_ICON);
+            }
 
             /* Set up full tooltip for tag glyph (shows tag name + filter modes) */
             TagTooltipData *tooltip_data = new TagTooltipData();

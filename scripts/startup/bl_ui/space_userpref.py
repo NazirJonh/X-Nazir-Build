@@ -8763,7 +8763,8 @@ class USERPREF_OT_category_tag_create(Operator):
             icon_split.label(text="Icon:")
             icon_row = icon_split.row(align=True)
             icon_row.alignment = 'LEFT'
-            icon_row.operator("screen.category_tab_icon_picker", text="Choose", icon='VIEWZOOM')
+            icon_row.operator("screen.category_tab_icon_picker", text="       Choose        ", icon='VIEWZOOM')
+            icon_row.separator()
             
             # Preview - always show (empty button when no icon)
             preview_row = layout.row()
@@ -8978,7 +8979,8 @@ class USERPREF_OT_category_tag_edit(Operator):
             icon_split.label(text="Icon:")
             icon_row = icon_split.row(align=True)
             icon_row.alignment = 'LEFT'
-            icon_row.operator("screen.category_tab_icon_picker", text="Choose", icon='VIEWZOOM')
+            icon_row.operator("screen.category_tab_icon_picker", text="        Choose        ", icon='VIEWZOOM')
+            icon_row.separator()
             
             # Preview
             if self.icon_key:
@@ -13312,8 +13314,11 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
 
             # Display Mode selector (Glyph vs Icon) - FIRST
             box.separator()
-            display_row = box.row(align=True)
-            display_row.label(text="Display Mode:")
+            display_split = box.split(factor=0.38)
+            display_split.alignment = 'RIGHT'
+            display_split.label(text="Display Mode:")
+            display_row = display_split.row(align=True)
+            display_row.alignment = 'LEFT'
 
             # Get current icon_source value (0=GLYPH, 1=ICON)
             icon_source_val = getattr(tag, "icon_source", 0)
@@ -13335,34 +13340,28 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
             if icon_source_val == 1:
                 # Icon mode - show icon picker (similar layout to Glyph mode)
                 box.separator()
-
                 icon_key_val = getattr(tag, "icon_key", "")
-
-                # Row with label on left, fields on right (like Glyph mode)
-                icon_split = box.split(factor=0.3)
+                # Row with label on left, fields on right (like Create/Edit Tag)
+                icon_split = box.split(factor=0.38)
+                icon_split.alignment = 'RIGHT'
                 icon_split.label(text="Icon:")
-
-                # Right side: compact row with preview and pick button (no gap)
                 icon_row = icon_split.row(align=True)
-
-                # Left: Preview icon or placeholder
+                icon_row.alignment = 'LEFT'
+                icon_row.operator("wm.category_tag_pick_icon", text="        Choose        ", icon='VIEWZOOM')
+                icon_row.separator()
+                # Preview below
                 if icon_key_val:
+                    box.separator()
                     try:
                         import bl_ui.icon_helper as icon_helper
                         icon_id = icon_helper.icon_name_to_id(icon_key_val)
                         if icon_id > 0:
-                            # Show icon preview
-                            icon_row.label(text="", icon_value=icon_id)
-                        else:
-                            icon_row.label(text=icon_key_val, translate=False)
+                            # Show icon preview only (no text)
+                            preview_row = box.row()
+                            preview_row.alignment = 'CENTER'
+                            preview_row.label(text="", icon_value=icon_id)
                     except Exception:
-                        icon_row.label(text=icon_key_val, translate=False)
-                else:
-                    # Empty preview when no icon selected
-                    icon_row.label(text="None", translate=False)
-
-                # Right: Pick icon button (like glyph picker button with glyph f02f)
-                icon_row.operator("wm.category_tag_pick_icon", text="\uf02f", icon='NONE')
+                        pass
             else:
                 # Glyph mode - show glyph picker BELOW the mode buttons
                 box.separator()

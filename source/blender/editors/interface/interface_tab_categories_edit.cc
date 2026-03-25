@@ -116,7 +116,7 @@ static constexpr size_t MAX_LOGGED_MESSAGES = 500;
 
 /* Debug output control flag - set to true to enable debug printf messages */
 //DEBUG FLAGS
-static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
 
 static void log_once(const char *message)
 {
@@ -253,17 +253,23 @@ static void category_tab_icon_state_write(PointerRNA *ptr, const CategoryTabIcon
 
 static void category_tab_set_string_if_supported(PointerRNA *ptr,
                                                  const char *identifier,
-                                                 const char *value)
+                                                 const char *value,
+                                                 bContext *C = nullptr)
 {
   PropertyRNA *property = RNA_struct_find_property(ptr, identifier);
   if (property && RNA_property_type(property) == PROP_STRING) {
     RNA_string_set(ptr, identifier, value);
+    /* Trigger Python update callback and UI redraw */
+    if (C) {
+      RNA_property_update(C, ptr, property);
+    }
   }
 }
 
 static void category_tab_set_int_or_enum_if_supported(PointerRNA *ptr,
                                                       const char *identifier,
-                                                      const int value)
+                                                      const int value,
+                                                      bContext *C = nullptr)
 {
   PropertyRNA *property = RNA_struct_find_property(ptr, identifier);
   if (!property) {
@@ -279,6 +285,11 @@ static void category_tab_set_int_or_enum_if_supported(PointerRNA *ptr,
       break;
     default:
       break;
+  }
+  
+  /* Trigger Python update callback and UI redraw */
+  if (C) {
+    RNA_property_update(C, ptr, property);
   }
 }
 
@@ -1474,7 +1485,7 @@ void SCREEN_OT_category_tab_popup_filter_set(wmOperatorType *ot)
   );
 }
 
-static void category_tag_filter_toggle_menu_draw(const bContext *C, Menu *menu)
+static void category_tag_filter_toggle_menu_draw(const bContext * /*C*/, Menu *menu)
 {
   Layout &layout = *menu->layout;
 
@@ -1763,12 +1774,23 @@ void tag_icon_live_update_cb(bContext *C, void *arg_op, int /*event*/)
 {
   wmOperator *op = static_cast<wmOperator *>(arg_op);
 
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[TAG_ICON_LIVE_UPDATE] Called with op=%p, idname='%s'\n", (void*)op, op ? op->idname : "null");
+  }
+
   /* Get tag name from operator */
   char tag_name[64];
   RNA_string_get(op->ptr, "name", tag_name);
 
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[TAG_ICON_LIVE_UPDATE] tag_name='%s'\n", tag_name);
+  }
+
   if (tag_name[0] == '\0') {
     /* No tag name yet, skip update */
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[TAG_ICON_LIVE_UPDATE] No tag name, skipping\n");
+    }
     return;
   }
 
@@ -1778,9 +1800,20 @@ void tag_icon_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   int icon_source = RNA_enum_get(op->ptr, "icon_source");
   const int display_mode_ui = RNA_enum_get(op->ptr, "display_mode_ui");
 
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[TAG_ICON_LIVE_UPDATE] icon_key='%s', icon_source=%d, display_mode_ui=%d\n",
+           icon_key, icon_source, display_mode_ui);
+  }
+
   /* Get color */
   float color[3];
   RNA_float_get_array(op->ptr, "color", color);
+
+  /* Update operator properties first - this is critical for template_icon_preview to update */
+  RNA_string_set(op->ptr, "icon_key", icon_key);
+  RNA_enum_set(op->ptr, "icon_source", icon_source);
+  RNA_enum_set(op->ptr, "display_mode_ui", display_mode_ui);
+  RNA_float_set_array(op->ptr, "color", color);
 
   /* Update WM category_tags collection */
   wmWindowManager *wm = CTX_wm_manager(C);
@@ -1814,8 +1847,11 @@ void tag_icon_live_update_cb(bContext *C, void *arg_op, int /*event*/)
     }
   }
 
-  /* Trigger redraw for live preview */
+  /* Trigger redraw for live preview - notify area to update template_icon_preview */
   WM_main_add_notifier(NC_WINDOW, nullptr);
+  if (ScrArea *area = CTX_wm_area(C)) {
+    ED_area_tag_redraw(area);
+  }
 }
 
 /** \} */
@@ -1951,7 +1987,7 @@ static void glyph_search_parse_object_array(const char *json,
 }
 
 blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
-    bContext *C, const char *query, const char *category, int max_results)
+    bContext *C, const char *query, const char * /*category*/, int max_results)
 {
   blender::Vector<std::pair<std::string, std::string>> results;
 
@@ -2904,11 +2940,11 @@ static Block *icon_grid_popup_block_create(bContext *C, ARegion *region, void *a
   grid_view->set_on_icon_select_fn([popup_data](bContext &C, const IconGridPopupItem &item) {
     if (popup_data->op) {
       category_tab_set_string_if_supported(
-          popup_data->op->ptr, "icon_key", item.identifier.c_str());
-      category_tab_set_int_or_enum_if_supported(popup_data->op->ptr, "icon_source", 1);
-      category_tab_set_int_or_enum_if_supported(popup_data->op->ptr, "display_mode_ui", 1);
-      category_tab_set_int_or_enum_if_supported(popup_data->op->ptr, "custom_icon_mode_ui", 0);
-      category_tab_set_string_if_supported(popup_data->op->ptr, "icon_search", "");
+          popup_data->op->ptr, "icon_key", item.identifier.c_str(), &C);
+      category_tab_set_int_or_enum_if_supported(popup_data->op->ptr, "icon_source", 1, &C);
+      category_tab_set_int_or_enum_if_supported(popup_data->op->ptr, "display_mode_ui", 1, &C);
+      category_tab_set_int_or_enum_if_supported(popup_data->op->ptr, "custom_icon_mode_ui", 0, &C);
+      category_tab_set_string_if_supported(popup_data->op->ptr, "icon_search", "", &C);
     }
 
     icon_grid_writeback_icon_key(C, popup_data, item.identifier.c_str());
@@ -2924,8 +2960,29 @@ static Block *icon_grid_popup_block_create(bContext *C, ARegion *region, void *a
              (STREQ(popup_data->target_op->idname, "wm.category_tag_create") ||
               STREQ(popup_data->target_op->idname, "wm.category_tag_edit")))
     {
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[ICON_GRID DEBUG] Icon selected for Python tag operator: '%s'\n", popup_data->target_op->idname);
+        printf("[ICON_GRID DEBUG]   -> icon_key='%s'\n", item.identifier.c_str());
+      }
+      /* CRITICAL: Update target_op properties before calling live update callback.
+       * This ensures template_icon_preview in Python sees the updated icon_key. */
+      category_tab_set_string_if_supported(
+          popup_data->target_op->ptr, "icon_key", item.identifier.c_str(), &C);
+      category_tab_set_int_or_enum_if_supported(popup_data->target_op->ptr, "icon_source", 1, &C);
+      category_tab_set_int_or_enum_if_supported(popup_data->target_op->ptr, "display_mode_ui", 1, &C);
+      category_tab_set_int_or_enum_if_supported(popup_data->target_op->ptr, "custom_icon_mode_ui", 0, &C);
+
       /* For Python tag operators, call the C++ live update callback */
       tag_icon_live_update_cb(&C, popup_data->target_op, 0);
+    }
+    else {
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[ICON_GRID DEBUG] Icon selected but target_op mismatch:\n");
+        printf("[ICON_GRID DEBUG]   -> popup_data->target_op=%p\n", (void*)popup_data->target_op);
+        if (popup_data->target_op && popup_data->target_op->idname) {
+          printf("[ICON_GRID DEBUG]   -> idname='%s'\n", popup_data->target_op->idname);
+        }
+      }
     }
 
     if (popup_data->popup_handle) {
@@ -3022,7 +3079,77 @@ static wmOperatorStatus category_tab_icon_picker_invoke(bContext *C, wmOperator 
   
   /* Fallback: use active operator from context (the operator whose draw() method called this) */
   if (!target_op) {
-    target_op = context_active_operator_get(C);
+    ARegion *region_ctx = CTX_wm_region(C);
+
+    /* Debug: scan all regions and blocks to understand what's happening */
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      printf("[ICON_PICKER DEBUG] CTX_wm_region=%p, regiontype=%d\n", (void*)region_ctx, region_ctx ? region_ctx->regiontype : -1);
+
+      if (region_ctx) {
+        printf("[ICON_PICKER DEBUG] Scanning region_ctx blocks:\n");
+        for (Block &block : region_ctx->runtime->uiblocks) {
+          printf("[ICON_PICKER DEBUG]   block='%s', ui_operator=%p\n",
+                 block.name, (void*)block.ui_operator);
+          if (block.ui_operator) {
+            printf("[ICON_PICKER DEBUG]     -> idname='%s'\n", block.ui_operator->idname);
+          }
+        }
+      }
+
+      bScreen *screen = CTX_wm_screen(C);
+      if (screen) {
+        printf("[ICON_PICKER DEBUG] Scanning popup regions in screen->regionbase:\n");
+        for (ARegion &region : screen->regionbase) {
+          if (&region == region_ctx) continue;
+          printf("[ICON_PICKER DEBUG]   popup region regiontype=%d\n", region.regiontype);
+          for (Block &block : region.runtime->uiblocks) {
+            printf("[ICON_PICKER DEBUG]     block='%s', ui_operator=%p\n",
+                   block.name, (void*)block.ui_operator);
+            if (block.ui_operator) {
+              printf("[ICON_PICKER DEBUG]       -> idname='%s'\n", block.ui_operator->idname);
+            }
+          }
+        }
+      }
+    }
+
+    /* PRIORITY: First scan popup regions for Python tag operators.
+     * This is critical because context_active_operator_get scans the current region first
+     * and finds the parent C++ dialog instead of the Python tag operator popup. */
+    bScreen *screen = CTX_wm_screen(C);
+    if (screen) {
+      for (ARegion &region : screen->regionbase) {
+        if (&region == region_ctx) continue;
+        for (Block &block : region.runtime->uiblocks) {
+          if (block.ui_operator && block.ui_operator->idname[0] != '\0') {
+            const char *idname = block.ui_operator->idname;
+            /* Look specifically for Python tag operators */
+            if (STREQ(idname, "WM_OT_category_tag_create") ||
+                STREQ(idname, "WM_OT_category_tag_edit"))
+            {
+              target_op = block.ui_operator;
+              target_op_properties = target_op->properties;
+              if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+                printf("[ICON_PICKER DEBUG] Found Python tag operator in popup region: '%s'\n", idname);
+              }
+              break;
+            }
+          }
+        }
+        if (target_op) break;
+      }
+    }
+
+    /* Fallback: use context_active_operator_get */
+    if (!target_op) {
+      target_op = context_active_operator_get(C);
+      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+        printf("[ICON_PICKER DEBUG] context_active_operator_get returned: %p\n", (void*)target_op);
+        if (target_op) {
+          printf("[ICON_PICKER DEBUG]   -> idname='%s'\n", target_op->idname);
+        }
+      }
+    }
     /* Don't use the picker operator itself as target */
     if (target_op == op) {
       target_op = nullptr;
@@ -3631,7 +3758,6 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
       /* Add buttons to the right section */
       Layout &buttons_row = buttons_section.row(true);
       PointerRNA new_tag_ptr = buttons_row.op("wm.category_tag_create", IFACE_("New tag"), ICON_ADD);
-      RNA_string_set(&new_tag_ptr, "name", "");
       RNA_string_set(&new_tag_ptr, "category", category);
 
       buttons_row.separator();
@@ -4423,6 +4549,19 @@ static wmOperatorStatus centered_popup_invoke(bContext *C, wmOperator *op, const
     if (glyph_search_prop && RNA_property_type(glyph_search_prop) == PROP_STRING) {
       RNA_property_string_set(props_ptr, glyph_search_prop, "");
     }
+    
+    /* Copy category property from wrapper operator if provided */
+    PropertyRNA *category_prop = RNA_struct_find_property(props_ptr, "category");
+    if (category_prop && RNA_property_type(category_prop) == PROP_STRING) {
+      PropertyRNA *src_category_prop = RNA_struct_find_property(op->ptr, "category");
+      if (src_category_prop && RNA_property_type(src_category_prop) == PROP_STRING) {
+        char category_value[64] = "";
+        RNA_property_string_get(op->ptr, src_category_prop, category_value);
+        if (category_value[0] != '\0') {
+          RNA_property_string_set(props_ptr, category_prop, category_value);
+        }
+      }
+    }
   }
 
   /* Create operator for the popup dialog */
@@ -4432,6 +4571,11 @@ static wmOperatorStatus centered_popup_invoke(bContext *C, wmOperator *op, const
   target_op->properties = properties;
   target_op->reports = op->reports;
   target_op->flag = OP_IS_INVOKE;
+
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[CENTERED_POPUP DEBUG] Creating popup for operator: %s\n", ot->idname);
+    printf("[CENTERED_POPUP DEBUG]   target_op=%p, idname='%s'\n", (void*)target_op, target_op->idname);
+  }
 
   /* Call WM_operator_props_dialog_popup with a dummy message to force centering.
    * The function centers the popup when message is non-empty (line 1881 in wm_operators.cc):
@@ -4494,6 +4638,16 @@ static void CENTERED_OT_popup_operator_wrapper(wmOperatorType *ot)
       "Popup width in pixels",
       100,
       1000
+  );
+  
+  /* Category property for wm.category_tag_create */
+  RNA_def_string(
+      ot->srna,
+      "category",
+      nullptr,
+      64,
+      "Category",
+      "Category to assign the tag to (passed to wrapped operator)"
   );
 }
 

@@ -53,9 +53,9 @@ if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
 # -----------------------------------------------------------------------------
 # Tag System - Infrastructure Utilities (CleanPanels patterns)
 
-TAG_DEBUG = True  # Set to False to disable all debug output
+TAG_DEBUG = False  # Set to False to disable all debug output
 TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
-SAVE_DEBUG = True  # Set to True to enable verbose save/load logging (printf-style)
+SAVE_DEBUG = False  # Set to True to enable verbose save/load logging (printf-style)
 
 
 def category_debug_print(message):
@@ -8785,7 +8785,10 @@ class USERPREF_OT_category_tag_create(Operator):
             icon_split.label(text="Icon:")
             icon_row = icon_split.row(align=True)
             icon_row.alignment = 'LEFT'
-            icon_row.operator("screen.category_tab_icon_picker", text="       Choose        ", icon='VIEWZOOM')
+            # Pass operator pointer to icon picker so it knows which operator to update
+            icon_picker_op = icon_row.operator("screen.category_tab_icon_picker", text="       Choose        ", icon='VIEWZOOM')
+            # Set target_operator_ptr as decimal string of operator memory address
+            icon_picker_op.target_operator_ptr = str(id(self))
             icon_row.separator()
             
             # Preview - always show (empty button when no icon)
@@ -9001,7 +9004,10 @@ class USERPREF_OT_category_tag_edit(Operator):
             icon_split.label(text="Icon:")
             icon_row = icon_split.row(align=True)
             icon_row.alignment = 'LEFT'
-            icon_row.operator("screen.category_tab_icon_picker", text="        Choose        ", icon='VIEWZOOM')
+            # Pass operator pointer to icon picker so it knows which operator to update
+            icon_picker_op = icon_row.operator("screen.category_tab_icon_picker", text="        Choose        ", icon='VIEWZOOM')
+            # Set target_operator_ptr as decimal string of operator memory address
+            icon_picker_op.target_operator_ptr = str(id(self))
             icon_row.separator()
             
             # Preview

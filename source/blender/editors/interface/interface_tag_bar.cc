@@ -1202,16 +1202,18 @@ static void draw_tag_icon_with_tint(const TagButton &btn,
   uchar icon_tint[4] = {255, 255, 255, 255};
 
   /* Check if icon is monochrome (can be tinted). */
-  uchar theme_icon_color[4];
-  if (icon_get_theme_color(icon_id_to_draw, theme_icon_color)) {
+  const bool is_monochrome = icon_is_monochrome(icon_id_to_draw);
+
+  if (is_monochrome && !is_zero_v3(btn.color)) {
     /* Monochrome icon - apply tag color tint. */
-    if (!is_zero_v3(btn.color)) {
-      icon_tint[0] = uchar(btn.color[0] * 255.0f);
-      icon_tint[1] = uchar(btn.color[1] * 255.0f);
-      icon_tint[2] = uchar(btn.color[2] * 255.0f);
-    }
-    else {
-      /* Use theme default for monochrome. */
+    icon_tint[0] = uchar(btn.color[0] * 255.0f);
+    icon_tint[1] = uchar(btn.color[1] * 255.0f);
+    icon_tint[2] = uchar(btn.color[2] * 255.0f);
+  }
+  else if (is_monochrome) {
+    /* Use theme default for monochrome if no tag color. */
+    uchar theme_icon_color[4];
+    if (icon_get_theme_color(icon_id_to_draw, theme_icon_color)) {
       copy_v4_v4_uchar(icon_tint, theme_icon_color);
     }
   }

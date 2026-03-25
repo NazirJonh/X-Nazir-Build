@@ -5031,12 +5031,23 @@ static void widget_draw_tag(const bContext *C,
       /* Get icon tint color */
       uchar icon_tint[4] = {255, 255, 255, 255};
 
-      /* Apply custom color to icon tint */
-      if (tag_but->has_color) {
+      /* Check if the icon is monochrome (can be tinted). */
+      const bool is_monochrome = icon_is_monochrome(resolved_icon_id);
+
+      /* Apply custom color ONLY to monochrome icons. */
+      if (is_monochrome && tag_but->has_color) {
         icon_tint[0] = uchar(tag_but->color[0] * 255.0f);
         icon_tint[1] = uchar(tag_but->color[1] * 255.0f);
         icon_tint[2] = uchar(tag_but->color[2] * 255.0f);
       }
+      else if (is_monochrome) {
+        /* Default for monochrome icons if no tag color. */
+        uchar theme_icon_color[4];
+        if (icon_get_theme_color(resolved_icon_id, theme_icon_color)) {
+          copy_v4_v4_uchar(icon_tint, theme_icon_color);
+        }
+      }
+      /* Else: multi-color SVG - keep white tint (100% original color). */
 
       /* Apply state adjustments */
       if (!(state->but_flag & UI_SELECT)) {

@@ -2020,19 +2020,22 @@ static void category_tab_icon_tint_get(const int icon_id,
   r_tint[2] = 255;
   r_tint[3] = 255;
 
-  if (has_custom_color) {
+  const bool is_monochrome = icon_is_monochrome(icon_id);
+
+  if (is_monochrome && has_custom_color) {
     r_tint[0] = uchar(custom_color[0] * 255.0f);
     r_tint[1] = uchar(custom_color[1] * 255.0f);
     r_tint[2] = uchar(custom_color[2] * 255.0f);
   }
-  else {
+  else if (is_monochrome) {
+    /* Standard theme color for monochrome icons. */
     uchar theme_icon_color[4];
     if (icon_get_theme_color(icon_id, theme_icon_color)) {
       copy_v4_v4_uchar(r_tint, theme_icon_color);
     }
-    else {
-      /* Default monochrome icon color. */
-    }
+  }
+  else {
+    /* Multi-color SVG/icon - keep white tint (draws original colors). */
   }
 
   if (darken_factor > 0.0f) {

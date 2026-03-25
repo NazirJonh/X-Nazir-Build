@@ -251,6 +251,37 @@ static void category_tab_icon_state_write(PointerRNA *ptr, const CategoryTabIcon
   RNA_string_set(ptr, "icon_provider", state.provider);
 }
 
+static void category_tab_set_string_if_supported(PointerRNA *ptr,
+                                                 const char *identifier,
+                                                 const char *value)
+{
+  PropertyRNA *property = RNA_struct_find_property(ptr, identifier);
+  if (property && RNA_property_type(property) == PROP_STRING) {
+    RNA_string_set(ptr, identifier, value);
+  }
+}
+
+static void category_tab_set_int_or_enum_if_supported(PointerRNA *ptr,
+                                                      const char *identifier,
+                                                      const int value)
+{
+  PropertyRNA *property = RNA_struct_find_property(ptr, identifier);
+  if (!property) {
+    return;
+  }
+
+  switch (RNA_property_type(property)) {
+    case PROP_INT:
+      RNA_int_set(ptr, identifier, value);
+      break;
+    case PROP_ENUM:
+      RNA_enum_set(ptr, identifier, value);
+      break;
+    default:
+      break;
+  }
+}
+
 static void category_tab_icon_state_from_item(const CategoryGlyphItem &item,
                                               CategoryTabIconState &r_state)
 {
@@ -2872,11 +2903,12 @@ static Block *icon_grid_popup_block_create(bContext *C, ARegion *region, void *a
 
   grid_view->set_on_icon_select_fn([popup_data](bContext &C, const IconGridPopupItem &item) {
     if (popup_data->op) {
-      RNA_string_set(popup_data->op->ptr, "icon_key", item.identifier.c_str());
-      RNA_int_set(popup_data->op->ptr, "icon_source", 1);
-      RNA_int_set(popup_data->op->ptr, "display_mode_ui", 1);
-      RNA_int_set(popup_data->op->ptr, "custom_icon_mode_ui", 0);
-      RNA_string_set(popup_data->op->ptr, "icon_search", "");
+      category_tab_set_string_if_supported(
+          popup_data->op->ptr, "icon_key", item.identifier.c_str());
+      category_tab_set_int_or_enum_if_supported(popup_data->op->ptr, "icon_source", 1);
+      category_tab_set_int_or_enum_if_supported(popup_data->op->ptr, "display_mode_ui", 1);
+      category_tab_set_int_or_enum_if_supported(popup_data->op->ptr, "custom_icon_mode_ui", 0);
+      category_tab_set_string_if_supported(popup_data->op->ptr, "icon_search", "");
     }
 
     icon_grid_writeback_icon_key(C, popup_data, item.identifier.c_str());
@@ -3265,32 +3297,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         icon_key_readonly.enabled_set(false);
         icon_key_readonly.prop(op->ptr, "icon_key", UI_ITEM_NONE, IFACE_("Blender"), ICON_NONE);
 
-        /* Preview icon */
-        char icon_key[128];
-        RNA_string_get(op->ptr, "icon_key", icon_key);
-        
-        if (icon_key[0] != '\0') {
-          /* Show preview of selected icon */
-          int icon_id = ICON_NONE;
-          if (RNA_enum_value_from_identifier(rna_enum_icon_items, icon_key, &icon_id) && icon_id > 0) {
-            Layout &icon_preview_row = icon_key_col.row(false);
-            icon_preview_row.alignment_set(LayoutAlign::Center);
-            
-            Block *preview_block = icon_preview_row.block();
-            block_layout_set_current(preview_block, &icon_preview_row);
-            
-            /* Create preview button with the selected icon */
-            Button *preview_but = uiDefIconBut(preview_block,
-                                               {ButtonType::But, ButPointerType::None},
-                                               icon_id,
-                                               0, 0,
-                                               short(UI_UNIT_X * 2), short(UI_UNIT_Y * 2),
-                                               nullptr, 0.0f, 0.0f,
-                                               "Selected icon preview");
-            preview_but->tip_quick_func = [](const Button *) { return "Selected icon preview"; };
-          }
-        }
-
+        /* More icons button */
         Block *icon_actions_block = icon_select_row.block();
         block_layout_set_current(icon_actions_block, &icon_select_row);
         char icon_btn_glyph[8] = "";

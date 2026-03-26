@@ -116,9 +116,14 @@ class Meshes : Overlay {
     select_face_dots_ = ((edit_flag & V3D_OVERLAY_EDIT_FACE_DOT) || state.xray_flag_enabled) &
                         select_face_;
 
-    show_retopology_ = (edit_flag & V3D_OVERLAY_EDIT_RETOPOLOGY) && !state.xray_enabled;
+    /* Only show retopology and face sets overlays when in edit mode.
+     * Without this check, the passes would be submitted without geometry in object mode,
+     * causing a crash when trying to render. */
+    const bool is_edit_mode = (state.object_mode & OB_MODE_EDIT);
+    show_retopology_ = (edit_flag & V3D_OVERLAY_EDIT_RETOPOLOGY) && !state.xray_enabled &&
+                       is_edit_mode;
     show_face_sets_ = (edit_flag & V3D_OVERLAY_EDIT_FACE_SETS) && !state.xray_enabled &&
-                      U.build_features.use_face_sets_in_edit_mesh;
+                      U.build_features.use_face_sets_in_edit_mesh && is_edit_mode;
     show_mesh_analysis_ = (edit_flag & V3D_OVERLAY_EDIT_STATVIS);
     show_face_overlay_ = (edit_flag & V3D_OVERLAY_EDIT_FACES);
     show_weight_ = (edit_flag & V3D_OVERLAY_EDIT_WEIGHT);
@@ -496,12 +501,7 @@ class Meshes : Overlay {
 
     GPU_debug_group_begin("Edit Mesh Face Sets on Render");
     GPU_framebuffer_bind(framebuffer);
-    if (show_retopology_) {
-      manager.submit(edit_mesh_prepass_ps_, view);
-    }
-    else {
-      manager.submit(edit_mesh_prepass_ps_, view);
-    }
+    manager.submit(edit_mesh_prepass_ps_, view);
     manager.submit(edit_mesh_face_sets_ps_, view);
     GPU_debug_group_end();
   }

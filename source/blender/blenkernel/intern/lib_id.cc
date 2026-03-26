@@ -2503,7 +2503,37 @@ bool BKE_id_is_in_main(Main *bmain, ID *id)
 {
   /* We do not want to fail when id is nullptr here, even though this is a bit strange behavior...
    */
-  return (id == nullptr || BLI_findindex(which_libbase(bmain, GS(id->name)), id) != -1);
+  if (id == nullptr) {
+    return true;
+  }
+
+  const ListBaseT<ID> *lb = which_libbase(bmain, GS(id->name));
+  if (lb == nullptr) {
+    return false;
+  }
+
+  return (BLI_findindex(lb, id) != -1);
+}
+
+bool BKE_id_pointer_is_valid(Main *bmain, const ID *id)
+{
+  /* Safe check that doesn't dereference the ID pointer.
+   * This is used to validate potentially dangling pointers after undo operations.
+   * We iterate through all ID lists in bmain and compare pointers directly,
+   * without accessing any data inside the potentially invalid ID. */
+  if (id == nullptr) {
+    return true;
+  }
+
+  /* Iterate over all ID types in bmain using the modern API. */
+  MainListsArray lbarray = BKE_main_lists_get(*bmain);
+  for (ListBaseT<ID> *lb : lbarray) {
+    /* Use BLI_findindex which only compares pointers, never dereferences them. */
+    if (BLI_findindex(lb, const_cast<ID *>(id)) != -1) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool BKE_id_is_in_global_main(ID *id)

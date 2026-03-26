@@ -27,6 +27,7 @@
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
+#include "BKE_main_invariants.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
 #include "BKE_texture.h"
@@ -98,6 +99,15 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
       BKE_reportf(op->reports, RPT_ERROR, "Cannot load image: %s", filepath);
       return OPERATOR_CANCELLED;
     }
+
+    /* Ensure the image is properly part of Main.
+     *
+     * In undo decode/refcount recompute, we must not end up with ID pointers that are not owned
+     * by the current Main. When loading by filepath, the image should already be in Main, but
+     * this assert helps catch unexpected cases early (instead of later crashing on undo).
+     */
+    BLI_assert_msg(BKE_main_is_empty(bmain) || BLI_findindex(&bmain->images, image) != -1,
+                   "Loaded image is not in Main (unexpected for BKE_image_load_exists)");
   }
   else {
     /* Try to get image by ID lookup */
@@ -128,7 +138,9 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
   /* IMPROVED: Enhanced slot determination logic */
   bool use_mask_slot = RNA_boolean_get(op->ptr, "use_mask_slot");
   bool replace_existing = RNA_boolean_get(op->ptr, "replace_existing");
-  bool skip_reference_count = RNA_boolean_get(op->ptr, "skip_reference_count");
+  /* NOTE: keep the RNA property for backwards compatibility with existing drop-box setups,
+   * but do not use it to alter user counts (see note below). */
+  const bool skip_reference_count = RNA_boolean_get(op->ptr, "skip_reference_count");
   
   /* ENHANCED: Check context mode for Sculpt mode special handling */
   const enum eContextObjectMode context_mode = CTX_data_mode_enum(C);
@@ -144,40 +156,38 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
   
   Tex **tex_slot_ptr = use_mask_slot ? &brush->mask_mtex.tex : &brush->mtex.tex;
   Tex *tex_slot = *tex_slot_ptr;
-  
-  PAINT_DEBUG_PRINT("paint_assign_image_exec: Using %s slot (replace_existing=%s)", 
+
+  /* CRITICAL: After undo, tex_slot may be a dangling pointer (deleted from Main
+   * but brush->mtex.tex still holds the old address). Must validate before access. */
+  if (tex_slot && !BKE_id_is_in_global_main(&tex_slot->id)) {
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: tex_slot is dangling pointer, treating as null");
+    tex_slot = nullptr;
+    *tex_slot_ptr = nullptr;  /* Clear the dangling pointer to prevent future issues */
+  }
+
+  /* Also check if tex_slot->ima is a dangling pointer after undo */
+  if (tex_slot && tex_slot->ima && !BKE_id_is_in_global_main(&tex_slot->ima->id)) {
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: tex_slot->ima is dangling pointer, clearing");
+    tex_slot->ima = nullptr;  /* Clear the dangling pointer */
+  }
+
+  PAINT_DEBUG_PRINT("paint_assign_image_exec: Using %s slot (replace_existing=%s)",
          use_mask_slot ? "mask" : "main", replace_existing ? "true" : "false");
 
-  /* ENHANCED: Check if the same image is already assigned and set skip_reference_count automatically */
-  if (tex_slot && tex_slot->ima) {
-    bool is_same_image = (tex_slot->ima == image);
-    
-    /* Additional check for file-based images - compare filepaths */
-    if (!is_same_image && filepath[0] != '\0' && tex_slot->ima && tex_slot->ima->filepath) {
-      if (BLI_path_cmp_normalized(filepath, tex_slot->ima->filepath) == 0) {
-        is_same_image = true;
-        PAINT_DEBUG_PRINT("paint_assign_image_exec: Same image file already assigned (filepath match)");
-      }
-    }
-    
-    if (is_same_image) {
-      PAINT_DEBUG_PRINT("paint_assign_image_exec: Same image already assigned, setting skip_reference_count=true");
-      skip_reference_count = true;
-    }
-  }
-  
-  /* EARLY RETURN: If skip_reference_count is true, it means the image is already assigned */
-  if (skip_reference_count) {
-    PAINT_DEBUG_PRINT("paint_assign_image_exec: skip_reference_count=true, image already assigned, returning early");
-    
-    /* INTEGRATION: Clear drag state before returning */
-    if (g_texture_drag_state.is_active) {
-      DROP_IMAGE_drag_state_clear();
-      PAINT_DEBUG_PRINT("paint_assign_image_exec: Cleared drag state on early return");
-    }
-    
-    return OPERATOR_FINISHED;
-  }
+  /* NOTE: Do not manipulate Image user counts here.
+   *
+   * This operator can load (or reuse) external-file backed images via BKE_image_load_exists.
+   * When executed with OPTYPE_UNDO, the undo system will decode memfile states and then
+   * recompute ID reference counts from ID links.
+   *
+   * If we also change Image user counts manually (id_us_plus/id_us_min), we can create temporary
+   * states where an Image has users while not being part of Main during undo decode, triggering
+   * asserts in id_us_plus_no_lib.
+   *
+   * So: only set pointer relationships (Tex->ima) and let the undo system/Main refcount
+   * recomputation handle user counting.
+   */
+  (void)skip_reference_count;
 
   if (tex_slot && tex_slot->ima) {
     /* Slot has existing texture with image */
@@ -196,14 +206,8 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
       }
       
       if (!is_same_image) {
-        id_us_min(&tex_slot->ima->id);
-        PAINT_DEBUG_PRINT("paint_assign_image_exec: Released old image: %s", tex_slot->ima->id.name);
-        
         /* Assign new image to existing texture */
         tex_slot->ima = image;
-        if (!skip_reference_count) {
-          id_us_plus(&image->id);
-        }
         tex_slot->type = TEX_IMAGE;
         
         PAINT_DEBUG_PRINT("paint_assign_image_exec: Assigned new image '%s' to existing texture '%s'", 
@@ -227,11 +231,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
       }
       
       if (!is_same_image) {
-        id_us_min(&tex_slot->ima->id);
         tex_slot->ima = image;
-        if (!skip_reference_count) {
-          id_us_plus(&image->id);
-        }
         tex_slot->type = TEX_IMAGE;
         
         PAINT_DEBUG_PRINT("paint_assign_image_exec: Updated to different image '%s'", image->id.name);
@@ -249,9 +249,6 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
     PAINT_DEBUG_PRINT("paint_assign_image_exec: Assigning image to existing texture without image");
     
     tex_slot->ima = image;
-    if (!skip_reference_count) {
-      id_us_plus(&image->id);
-    }
     tex_slot->type = TEX_IMAGE;
     
     /* Mark texture as modified */
@@ -260,21 +257,27 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
   else {
     /* No texture in slot - create new one */
     PAINT_DEBUG_PRINT("paint_assign_image_exec: Creating new texture for empty slot");
-    
+
     const char *tex_name = use_mask_slot ? "BrushMaskTexture" : "BrushTexture";
     tex_slot = BKE_texture_add(bmain, tex_name);
-    *tex_slot_ptr = tex_slot;
-    
-    /* Setup texture */
+
+    /* Setup texture image before assigning to brush (to avoid unnecessary refcount changes) */
     tex_slot->type = TEX_IMAGE;
     tex_slot->ima = image;
-    if (!skip_reference_count) {
-      id_us_plus(&image->id);
+
+    /* Assign texture to brush using proper refcount management.
+     * This is critical for undo/redo to work correctly - the undo system needs
+     * consistent refcount to properly restore state. */
+    if (use_mask_slot) {
+      set_current_brush_mask_texture(brush, tex_slot);
     }
-    
-    PAINT_DEBUG_PRINT("paint_assign_image_exec: Created new texture '%s' with image '%s'", 
+    else {
+      set_current_brush_texture(brush, tex_slot);
+    }
+
+    PAINT_DEBUG_PRINT("paint_assign_image_exec: Created new texture '%s' with image '%s'",
            tex_slot->id.name, image->id.name);
-    
+
     /* Mark texture as modified */
     DEG_id_tag_update(&tex_slot->id, ID_RECALC_SHADING);
   }
@@ -307,8 +310,12 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
     }
   }
 
-  /* Undo */
-  ED_undo_push(C, "Assign Image to Brush");
+  /* Undo is handled by the operator system (OPTYPE_UNDO).
+   * Pushing an extra undo step here can create a state where external-file backed images created
+   * during drag & drop are not consistently available on undo/redo, causing invalid ID pointers
+   * and crashes during refcount recomputation.
+   * See .MyDoc_2026/LOGS/log_A1.md.
+   */
 
   /* INTEGRATION: Clear drag state after successful completion */
   if (g_texture_drag_state.is_active) {
@@ -438,33 +445,30 @@ static wmOperatorStatus paint_new_texture_with_image_exec(bContext *C, wmOperato
     PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: TEXTURE PAINT MODE: Using slot from dropbox (use_mask_slot=%s)", 
            use_mask_slot ? "true" : "false");
   }
-  
-  Tex **tex_slot_ptr = use_mask_slot ? &brush->mask_mtex.tex : &brush->mtex.tex;
-  
-  PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Using %s slot", 
+
+  PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Using %s slot",
          use_mask_slot ? "mask" : "main");
 
   /* Create new texture (always create new, even if slot is occupied) */
   const char *tex_name = use_mask_slot ? "BrushMaskTexture" : "BrushTexture";
   Tex *new_texture = BKE_texture_add(bmain, tex_name);
-  
+
   PAINT_DEBUG_PRINT("paint_new_texture_with_image_exec: Created new texture: %s", new_texture->id.name);
 
   /* Setup texture */
   new_texture->type = TEX_IMAGE;
   new_texture->ima = image;
-  id_us_plus(&image->id);
 
-  /* Release old texture if exists */
-  if (*tex_slot_ptr) {
-    if ((*tex_slot_ptr)->ima) {
-      id_us_min(&(*tex_slot_ptr)->ima->id);
-    }
-    id_us_min(&(*tex_slot_ptr)->id);
+  /* Assign texture to brush using proper refcount management.
+   * This is critical for undo/redo to work correctly - the undo system needs
+   * consistent refcount to properly restore state.
+   */
+  if (use_mask_slot) {
+    set_current_brush_mask_texture(brush, new_texture);
   }
-
-  /* Assign new texture to brush */
-  *tex_slot_ptr = new_texture;
+  else {
+    set_current_brush_texture(brush, new_texture);
+  }
 
   /* Update dependencies */
   DEG_id_tag_update(&new_texture->id, ID_RECALC_SHADING);
@@ -495,8 +499,7 @@ static wmOperatorStatus paint_new_texture_with_image_exec(bContext *C, wmOperato
     }
   }
 
-  /* Undo */
-  ED_undo_push(C, "Create Texture with Image");
+  /* Undo is handled by OPTYPE_UNDO. */
 
   /* INTEGRATION: Clear drag state after successful completion */
   if (g_texture_drag_state.is_active) {

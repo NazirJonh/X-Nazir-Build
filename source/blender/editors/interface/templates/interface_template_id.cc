@@ -1103,7 +1103,9 @@ static void template_ID(const bContext *C,
   }
 
   /* text button with name */
-  if (id) {
+  /* Guard against dangling ID pointers after undo/redo.
+   * If the ID is no longer in Main, skip rendering to avoid crash when accessing invalid memory. */
+  if (id && BKE_id_is_in_global_main(id)) {
     char name[UI_MAX_NAME_STR];
     const bool user_alert = (id->us <= 0);
 
@@ -1327,7 +1329,7 @@ static void template_ID(const bContext *C,
 
   /* Due to space limit in UI - skip the "open" icon for packed data, and allow to unpack.
    * Only for images, sound and fonts */
-  if (id && BKE_packedfile_id_check(id)) {
+  if (id && BKE_id_is_in_global_main(id) && BKE_packedfile_id_check(id)) {
     but = uiDefIconButO(block,
                         ButtonType::But,
                         "FILE_OT_unpack_item",
@@ -1401,7 +1403,7 @@ static void template_ID(const bContext *C,
 
   /* delete button */
   /* don't use RNA_property_is_unlink here */
-  if (id && (flag & UI_ID_DELETE) && (hide_buttons == false)) {
+  if (id && BKE_id_is_in_global_main(id) && (flag & UI_ID_DELETE) && (hide_buttons == false)) {
     /* allow unlink if 'unlinkop' is passed, even when 'PROP_NEVER_UNLINK' is set */
     but = nullptr;
 

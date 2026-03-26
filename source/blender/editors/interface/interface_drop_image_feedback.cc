@@ -337,7 +337,10 @@ std::string DROP_IMAGE_tooltip_view3d(bContext *C, const char *filename, const c
       }
       else if (context.paint_mode == TexturePaintMode::TEXTURE_PAINT) {
         /* In Texture Paint mode check settings */
-        if (brush->mask_mtex.tex && brush->mask_mtex.tex != brush->mtex.tex) {
+        /* CRITICAL: Validate texture pointers before access to prevent crash after undo */
+        bool mask_tex_valid = brush->mask_mtex.tex && BKE_id_is_in_global_main(&brush->mask_mtex.tex->id);
+        bool main_tex_valid = brush->mtex.tex && BKE_id_is_in_global_main(&brush->mtex.tex->id);
+        if (mask_tex_valid && (!main_tex_valid || brush->mask_mtex.tex != brush->mtex.tex)) {
           use_mask_slot = true;
           slot_info = " (mask slot)";
           DROP_IMAGE_DEBUG_PRINT("Texture Paint mode - using mask slot");
@@ -456,6 +459,12 @@ void DROP_IMAGE_update_texture_preview(bContext *C, Main *bmain, Tex *tex, bool 
     return;
   }
 
+  if (!BKE_id_is_in_global_main(&tex->id)) {
+    DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview: Texture is not in Main anymore: %s",
+                           tex->id.name + 2);
+    return;
+  }
+
   DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview: Starting preview update for texture: %s", 
          tex->id.name + 2);
 
@@ -465,14 +474,14 @@ void DROP_IMAGE_update_texture_preview(bContext *C, Main *bmain, Tex *tex, bool 
 
   /* 2. Force preview regeneration with enhanced system */
   BKE_previewimg_id_free(&tex->id);
-  PreviewImage *prv = BKE_previewimg_id_ensure(&tex->id);
+  BKE_previewimg_id_ensure(&tex->id);
   BKE_icon_changed(BKE_icon_id_ensure(&tex->id));
   ED_previews_tag_dirty_by_id(*bmain, tex->id);
   DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview: Updated preview system");
 
-  /* 3. Start asynchronous rendering for better performance */
-  ui::icon_render_id(C, nullptr, &tex->id, ICON_SIZE_PREVIEW, true);
-  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview: Started async rendering");
+  /* 3. Render preview synchronously to avoid dangling job access during immediate Undo. */
+  ui::icon_render_id(C, nullptr, &tex->id, ICON_SIZE_PREVIEW, false);
+  DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_preview: Rendered preview synchronously");
 
   /* 4. Universal area refresh - update all relevant areas, not just Properties */
   for (bScreen &screen : ListBaseT<bScreen>(bmain->screens)) {
@@ -542,6 +551,12 @@ void DROP_IMAGE_update_texture_paint_preview(bContext *C, Main *bmain, Tex *tex,
 {
   if (!tex) {
     DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: No texture provided");
+    return;
+  }
+
+  if (!BKE_id_is_in_global_main(&tex->id)) {
+    DROP_IMAGE_DEBUG_PRINT("DROP_IMAGE_update_texture_paint_preview: Texture is not in Main anymore: %s",
+                           tex->id.name + 2);
     return;
   }
   

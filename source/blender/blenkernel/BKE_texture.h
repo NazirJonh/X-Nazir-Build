@@ -50,6 +50,7 @@ bool give_active_mtex(struct ID *id, struct MTex ***mtex_ar, short *act);
 void set_active_mtex(struct ID *id, short act);
 
 void set_current_brush_texture(struct Brush *br, struct Tex *tex);
+void set_current_brush_mask_texture(struct Brush *br, struct Tex *tex);
 void set_current_linestyle_texture(struct FreestyleLineStyle *linestyle, struct Tex *tex);
 void set_current_particle_texture(struct ParticleSettings *part, struct Tex *tex);
 

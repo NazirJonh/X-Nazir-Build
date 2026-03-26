@@ -214,6 +214,21 @@ IDTypeInfo IDType_ID_TE = {
 void BKE_texture_mtex_foreach_id(LibraryForeachIDData *data, MTex *mtex)
 {
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, mtex->object, IDWALK_CB_NOP);
+
+  /* Guard against dangling texture pointers after undo operations.
+   * When undo is performed after drag-and-drop texture assignment, the texture
+   * may be freed but brush->mtex.tex may still hold the old address.
+   * Passing this dangling pointer to the foreach macro would cause a crash
+   * when it tries to dereference the pointer for type checking.
+   * Clear the dangling pointer to prevent crashes during refcount recomputation. */
+  if (mtex->tex != nullptr) {
+    Main *bmain = BKE_lib_query_foreachid_process_main_get(data);
+    if (bmain != nullptr && !BKE_id_pointer_is_valid(bmain, reinterpret_cast<const ID *>(mtex->tex))) {
+      /* Texture is not in Main (freed by undo). Clear the dangling pointer. */
+      mtex->tex = nullptr;
+    }
+  }
+
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, mtex->tex, IDWALK_CB_USER);
 }
 
@@ -535,6 +550,25 @@ void set_current_brush_texture(Brush *br, Tex *newtex)
   if (newtex) {
     br->mtex.tex = newtex;
     id_us_plus(&newtex->id);
+  }
+  else {
+    br->mtex.tex = nullptr;
+  }
+  BKE_brush_tag_unsaved_changes(br);
+}
+
+void set_current_brush_mask_texture(Brush *br, Tex *newtex)
+{
+  if (br->mask_mtex.tex) {
+    id_us_min(&br->mask_mtex.tex->id);
+  }
+
+  if (newtex) {
+    br->mask_mtex.tex = newtex;
+    id_us_plus(&newtex->id);
+  }
+  else {
+    br->mask_mtex.tex = nullptr;
   }
   BKE_brush_tag_unsaved_changes(br);
 }

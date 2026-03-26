@@ -353,11 +353,12 @@ static void refresh_texture_paint_viewport(bContext *C, Brush *brush)
   // Invalidate brush texture cache if brush is provided
   if (brush) {
     // Clear any cached brush texture data to force reload
-    if (brush->mtex.tex) {
+    // Also verify texture is valid (in Main) to avoid crash with dangling pointers after undo.
+    if (brush->mtex.tex && BKE_id_is_in_global_main(&brush->mtex.tex->id)) {
       BKE_icon_changed(BKE_icon_id_ensure(&brush->mtex.tex->id));
       printf("[DEBUG] refresh_texture_paint_viewport: Invalidated main brush texture cache\n");
     }
-    if (brush->mask_mtex.tex) {
+    if (brush->mask_mtex.tex && BKE_id_is_in_global_main(&brush->mask_mtex.tex->id)) {
       BKE_icon_changed(BKE_icon_id_ensure(&brush->mask_mtex.tex->id));
       printf("[DEBUG] refresh_texture_paint_viewport: Invalidated mask brush texture cache\n");
     }
@@ -1076,15 +1077,19 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
       }
       
       /* In Image Editor Paint check which slot is already occupied */
-      if (brush->mtex.tex && brush->mtex.tex->ima && !brush->mask_mtex.tex) {
+      /* Also verify textures are valid (in Main) to avoid crash with dangling pointers after undo. */
+      bool main_tex_valid = brush->mtex.tex && BKE_id_is_in_global_main(&brush->mtex.tex->id);
+      bool mask_tex_valid = brush->mask_mtex.tex && BKE_id_is_in_global_main(&brush->mask_mtex.tex->id);
+
+      if (main_tex_valid && brush->mtex.tex->ima && !brush->mask_mtex.tex) {
         *r_use_mask_slot = true;
         if (g_drop_image_debug_enabled) {
           printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Main slot occupied, suggesting mask\n");
         }
         return true;
       }
-      
-      if (!brush->mtex.tex && brush->mask_mtex.tex && brush->mask_mtex.tex->ima) {
+
+      if (!brush->mtex.tex && mask_tex_valid && brush->mask_mtex.tex->ima) {
         *r_use_mask_slot = false;
         if (g_drop_image_debug_enabled) {
           printf("[DEBUG] determine_texture_slot_type: IMAGE EDITOR: Mask slot occupied, suggesting main\n");
@@ -1095,15 +1100,19 @@ bool determine_texture_slot_type(const ui::Button *but, const Brush *brush, bool
   }
   
   /* 5. Smart logic by slot occupancy (fallback) */
-  if (brush->mtex.tex && brush->mtex.tex->ima && !brush->mask_mtex.tex) {
+  /* Also verify textures are valid (in Main) to avoid crash with dangling pointers after undo. */
+  bool main_tex_valid_fallback = brush->mtex.tex && BKE_id_is_in_global_main(&brush->mtex.tex->id);
+  bool mask_tex_valid_fallback = brush->mask_mtex.tex && BKE_id_is_in_global_main(&brush->mask_mtex.tex->id);
+
+  if (main_tex_valid_fallback && brush->mtex.tex->ima && !brush->mask_mtex.tex) {
     *r_use_mask_slot = true;
     if (g_drop_image_debug_enabled) {
       printf("[DEBUG] determine_texture_slot_type: Suggesting mask slot (main already occupied)\n");
     }
     return true;
   }
-  
-  if (!brush->mtex.tex && brush->mask_mtex.tex && brush->mask_mtex.tex->ima) {
+
+  if (!brush->mtex.tex && mask_tex_valid_fallback && brush->mask_mtex.tex->ima) {
     *r_use_mask_slot = false;
     if (g_drop_image_debug_enabled) {
       printf("[DEBUG] determine_texture_slot_type: Suggesting main slot (mask already occupied)\n");
@@ -1198,18 +1207,20 @@ static MTex *find_active_brush_texture_slot(bContext *C, bool *is_mask_slot)
   /* IMPROVED: Enhanced logic for different modes */
   if (ob_mode == OB_MODE_SCULPT) {
     /* In Sculpt mode, brushes don't have separate mask slot */
-    if (brush->mtex.tex) {
+    /* Also verify texture is valid (in Main) to avoid crash with dangling pointers. */
+    if (brush->mtex.tex && BKE_id_is_in_global_main(&brush->mtex.tex->id)) {
       return &brush->mtex;
     }
     /* If main slot is empty, create it */
     return &brush->mtex;
-    
+
   } else if (ob_mode == OB_MODE_TEXTURE_PAINT) {
     /* In Texture Paint mode, check both slots */
-    
+
     /* IMPROVED: Check if there are free slots */
-    bool main_slot_occupied = (brush->mtex.tex && brush->mtex.tex->ima);
-    bool mask_slot_occupied = (brush->mask_mtex.tex && brush->mask_mtex.tex->ima);
+    /* Also verify textures are valid (in Main) to avoid crash with dangling pointers. */
+    bool main_slot_occupied = (brush->mtex.tex && BKE_id_is_in_global_main(&brush->mtex.tex->id) && brush->mtex.tex->ima);
+    bool mask_slot_occupied = (brush->mask_mtex.tex && BKE_id_is_in_global_main(&brush->mask_mtex.tex->id) && brush->mask_mtex.tex->ima);
     
     /* If main slot is free, use it */
     if (!main_slot_occupied) {
@@ -1242,20 +1253,21 @@ static MTex *find_active_brush_texture_slot(bContext *C, bool *is_mask_slot)
     }
     
     /* IMPROVED: Check free slots */
-    bool main_slot_occupied = (brush->mtex.tex && brush->mtex.tex->ima);
-    bool mask_slot_occupied = (brush->mask_mtex.tex && brush->mask_mtex.tex->ima);
-    
+    /* Also verify textures are valid (in Main) to avoid crash with dangling pointers. */
+    bool main_slot_occupied_other = (brush->mtex.tex && BKE_id_is_in_global_main(&brush->mtex.tex->id) && brush->mtex.tex->ima);
+    bool mask_slot_occupied_other = (brush->mask_mtex.tex && BKE_id_is_in_global_main(&brush->mask_mtex.tex->id) && brush->mask_mtex.tex->ima);
+
     /* If main slot is free, use it */
-    if (!main_slot_occupied) {
+    if (!main_slot_occupied_other) {
       return &brush->mtex;
     }
-    
+
     /* If mask slot is free, use it */
-    if (!mask_slot_occupied) {
+    if (!mask_slot_occupied_other) {
       if (is_mask_slot) *is_mask_slot = true;
       return &brush->mask_mtex;
     }
-    
+
     /* If both slots are occupied, return nullptr for forced selection */
     return nullptr;
   }
@@ -1533,10 +1545,13 @@ static bool check_texture_slot_occupancy(Brush *brush, bool use_mask_slot, Image
   }
   
   MTex *mtex = use_mask_slot ? &brush->mask_mtex : &brush->mtex;
-  
-  /* Check if slot is occupied */
-  bool slot_occupied = (mtex->tex && mtex->tex->ima);
-  
+
+  /* Check if slot is occupied - also verify texture is valid (in Main) to avoid
+   * crash when accessing dangling pointer after undo/redo. */
+  bool slot_occupied = (mtex->tex != nullptr) &&
+                      BKE_id_is_in_global_main(&mtex->tex->id) &&
+                      mtex->tex->ima != nullptr;
+
   if (slot_occupied) {
     if (g_drop_image_debug_enabled) {
       printf("[DEBUG] check_texture_slot_occupancy: %s slot is occupied with texture: %s\n",

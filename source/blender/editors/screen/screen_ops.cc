@@ -8304,7 +8304,17 @@ static void category_tab_extension_drop_copy(bContext *C, wmDrag *drag, wmDropBo
   /* Always copy URL first - needed even when region doesn't support category tabs */
   if (drag->type == WM_DRAG_PATH) {
     const char *path = WM_drag_get_single_path(drag);
-    RNA_string_set(drop->ptr, "url", path ? path : "");
+    if (path && path[0]) {
+      /* Python extension code expects raw file path, not URL format */
+      RNA_string_set(drop->ptr, "url", path);
+      
+      if constexpr (EXTENSION_DROP_DEBUG_ENABLED) {
+        printf("[DRAG_PATH_COPY] Using path='%s' (no URL conversion)\n", path);
+        fflush(stdout);
+      }
+    } else {
+      RNA_string_set(drop->ptr, "url", "");
+    }
   }
   else if (drag->type == WM_DRAG_STRING) {
     const std::string &str = WM_drag_get_string(drag);

@@ -1107,17 +1107,20 @@ void category_tabs_setup_viewport_drop_deferred(const bContext *C,
                                                  uint32_t mode_flag)
 {
 #ifdef WITH_PYTHON
-  if (!C || !extension_id || extension_id[0] == '\0') {
+  if (!C) {
     if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
       printf("[VIEWPORT DROP DEFERRED] Invalid parameters: C=%p, extension_id=%s\n",
-             C, extension_id ? extension_id : "(null)");
+             C,
+             extension_id ? extension_id : "(null)");
     }
     return;
   }
 
   if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     printf("[VIEWPORT DROP DEFERRED] Setting up deferred activation for extension '%s' (space_type=%d, mode_flag=%#010x)\n",
-           extension_id, space_type, mode_flag);
+           extension_id ? extension_id : "",
+           space_type,
+           mode_flag);
     fflush(stdout);
   }
 

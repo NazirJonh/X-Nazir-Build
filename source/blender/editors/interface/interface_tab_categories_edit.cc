@@ -4485,10 +4485,41 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     }
   }
 
-  /* Redraw after Python save to update all UI elements */
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+   /* After saving, switch to the assigned tag if category has been assigned to a tag.
+    * This handles the case where user selected an existing tag and saved. */
+   {
+     const char *saved_category_tags = category_tags_string_lookup(wm, category, space_type);
+     if (saved_category_tags && saved_category_tags[0] != '\0') {
+       /* Category has tags assigned - switch to the first assigned tag */
+       Vector<std::string> assigned_tag_list;
+       category_tab_split_tags(saved_category_tags, assigned_tag_list, ",;");
+       
+       if (!assigned_tag_list.is_empty() && !assigned_tag_list[0].empty()) {
+         TagFilterStateRef state{};
+         if (tag_filter_state_from_area(area, &state) && state.active_tags && state.filter_enabled) {
+           /* Switch to the first assigned tag */
+           BLI_strncpy(state.active_tags, assigned_tag_list[0].c_str(), 256);
+           *state.filter_enabled = 1;
+           
+           if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+             printf("[CATEGORY_TAB_EDIT] Category '%s' saved with tag, switched to tag '%s'\n",
+                    category, assigned_tag_list[0].c_str());
+           }
+           
+           /* Ensure the category tab is visible and active */
+           ARegion *region_ui = area ? BKE_area_find_region_type(area, RGN_TYPE_UI) : nullptr;
+           if (region_ui) {
+             panel_category_active_set_safe(C, region_ui, category, false);
+           }
+         }
+       }
+     }
+   }
 
-  return OPERATOR_FINISHED;
+   /* Redraw after Python save to update all UI elements */
+   WM_main_add_notifier(NC_WINDOW, nullptr);
+
+   return OPERATOR_FINISHED;
 }
 
 /** \} */

@@ -3422,7 +3422,7 @@ ARegion *tooltip_create_from_text_with_colored_suffix_fixed_width(
     const rcti *init_rect_overlap,
     bool prefer_left,
     int min_width,
-    float pad_scale = 1.0f);
+    bool center_text = false);
 
 bool tooltip_region_update_text(ARegion *region, const char *text);
 

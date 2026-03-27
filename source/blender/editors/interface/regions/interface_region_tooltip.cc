@@ -118,7 +118,7 @@ struct TooltipData {
   uiFontStyle fstyle;
   int wrap_width;
   int toth, lineh;
-  float pad_scale = 1.0f;
+  bool center_text = false;
 };
 
 BLI_STATIC_ASSERT(int(TIP_LC_MAX) == int(TIP_LC_ALERT) + 1, "invalid lc-max");
@@ -252,14 +252,24 @@ static void ui_tooltip_region_draw_cb(const bContext * /*C*/, ARegion *region)
   bbox.xmin += 0.5f * pad_x; /* add padding to the text */
   bbox.ymax -= 0.5f * pad_y;
 
-  /* When tooltip is scaled up, center text in the larger box. */
-  if (data->pad_scale > 1.0f) {
-    const float extra_x = BLI_rcti_size_x(&bbox) * (data->pad_scale - 1.0f) /
-                          (2.0f * data->pad_scale);
-    const float extra_y = BLI_rcti_size_y(&bbox) * (data->pad_scale - 1.0f) /
-                          (2.0f * data->pad_scale);
-    bbox.xmin += extra_x;
-    bbox.ymax -= extra_y;
+  /* Center text when tooltip is wider than content (e.g. matching panel width). */
+  if (data->center_text) {
+    const int font_id = data->fstyle.uifont_id;
+    /* Calculate total text content width across all NORMAL fields. */
+    int total_w = 0;
+    for (const TooltipField &f : data->fields) {
+      if (f.format.style == TIP_STYLE_NORMAL) {
+        int w = BLF_width(font_id, f.text.c_str(), f.text.size());
+        if (!f.text_suffix.empty()) {
+          w += BLF_width(font_id, ": ", 2);
+          w += BLF_width(font_id, f.text_suffix.c_str(), f.text_suffix.size());
+        }
+        total_w = max_ii(total_w, w);
+      }
+    }
+    const int bbox_w = BLI_rcti_size_x(&bbox);
+    const int offset_x = max_ii(0, (bbox_w - int(pad_x) - total_w) / 2);
+    bbox.xmin += offset_x;
   }
   bbox.ymax -= BLF_descender(data->fstyle.uifont_id);
 
@@ -1484,7 +1494,7 @@ static ARegion *ui_tooltip_create_with_data(bContext *C,
                                             const rcti *init_rect_overlap,
                                             bool prefer_left,
                                             int min_width,
-                                            float pad_scale = 1.0f)
+                                            bool center_text = false)
 {
   wmWindow *win = CTX_wm_window(C);
   const int2 win_size = WM_window_native_pixel_size(win);
@@ -1604,19 +1614,9 @@ static ARegion *ui_tooltip_create_with_data(bContext *C,
     }
   }
 
-  /* Scale tooltip size by pad_scale (keeps text size unchanged). */
-  if (pad_scale > 0.0f && pad_scale != 1.0f) {
-    data->pad_scale = pad_scale;
-    const int size_x = BLI_rcti_size_x(&rect_i);
-    const int size_y = BLI_rcti_size_y(&rect_i);
-    const int new_size_x = int(round(size_x * pad_scale));
-    const int new_size_y = int(round(size_y * pad_scale));
-    const int cx = BLI_rcti_cent_x(&rect_i);
-    const int cy = BLI_rcti_cent_y(&rect_i);
-    rect_i.xmin = cx - new_size_x / 2;
-    rect_i.xmax = cx + new_size_x - new_size_x / 2;
-    rect_i.ymin = cy - new_size_y / 2;
-    rect_i.ymax = cy + new_size_y - new_size_y / 2;
+  /* Center text in tooltip (when wider than text content). */
+  if (center_text) {
+    data->center_text = true;
   }
 
   /* Clamp to window bounds. */
@@ -2153,7 +2153,7 @@ ARegion *tooltip_create_from_text_with_colored_suffix_fixed_width(
     const rcti *init_rect_overlap,
     bool prefer_left,
     int min_width,
-    float pad_scale)
+    bool center_text)
 {
   std::unique_ptr<TooltipData> data = std::make_unique<TooltipData>();
   tooltip_text_field_add_with_suffix_color(
@@ -2161,7 +2161,7 @@ ARegion *tooltip_create_from_text_with_colored_suffix_fixed_width(
 
   float init_position[2] = {float(position[0]), float(position[1])};
   return ui_tooltip_create_with_data(
-      C, std::move(data), init_position, init_rect_overlap, prefer_left, min_width, pad_scale);
+      C, std::move(data), init_position, init_rect_overlap, prefer_left, min_width, center_text);
 }
 
 bool tooltip_region_update_text(ARegion *region, const char *text)

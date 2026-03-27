@@ -2641,14 +2641,14 @@ static ARegion *ui_panel_category_active_tooltip_init(
       tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
 
       const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
-      /* Extend tab_rect_screen by 200px toward the tooltip side so the
-       * overlap-avoidance logic positions the tooltip further away. */
+
+
       if (is_left) {
-        tab_rect_screen.xmax += 100;
+        tab_rect_screen.xmax += 8;
         position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN / 4;
       }
       else {
-        tab_rect_screen.xmin -= 100;
+        tab_rect_screen.xmin -= 8;
         position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN / 4;
       }
       position[1] = event->xy[1];
@@ -2682,7 +2682,29 @@ static ARegion *ui_panel_category_active_tooltip_init(
   }
 
   const int lineh = BLF_height_max(font_id);
-  const int min_width = max_text_width + int(round(lineh * 1.95f));
+  int min_width = max_text_width + int(round(lineh * 1.95f));
+
+  /* When panels are expanded, match tooltip width to the panel content area width. */
+  {
+    ScrArea *area = CTX_wm_area(C);
+    if (area) {
+      const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
+      const float category_tabs_zoom = category_tabs_zoom_value_get(area, display_mode);
+      const float raw_aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
+                               1.0f :
+                               (static_cast<Block *>(region->runtime->uiblocks.first))->aspect;
+      const float aspect = (std::abs(raw_aspect - 1.0f) < 0.001f) ? 1.0f : raw_aspect;
+      const float zoom = (1.0f / aspect) * category_tabs_zoom;
+      const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
+      const int category_tabs_min_w = category_tabs_min_width_get(area, aspect, display_mode);
+      const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_w;
+
+      if (!too_narrow) {
+        const int panel_content_width = region->winx - category_tabs_width;
+        min_width = max_ii(min_width, panel_content_width);
+      }
+    }
+  }
 
   return tooltip_create_from_text_with_colored_suffix_fixed_width(C,
                                                                  tooltip_prefix,
@@ -2692,7 +2714,7 @@ static ARegion *ui_panel_category_active_tooltip_init(
                                                                  use_tab_rect ? &tab_rect_screen : nullptr,
                                                                  prefer_left,
                                                                  min_width,
-                                                                 1.5f);
+                                                                 true);
 }
 
 void panel_category_tooltip_timer_init(bContext *C, ARegion *region)

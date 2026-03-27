@@ -53,7 +53,7 @@ if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
 # -----------------------------------------------------------------------------
 # Tag System - Infrastructure Utilities (CleanPanels patterns)
 
-TAG_DEBUG = False  # Set to False to disable all debug output
+TAG_DEBUG = True  # Set to False to disable all debug output
 TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
 SAVE_DEBUG = False  # Set to True to enable verbose save/load logging (printf-style)
 
@@ -1306,6 +1306,10 @@ _DISABLE_PYTHON_FILE_SCANNING = False
 # Cache for extension manifest keys to avoid repeated file scanning
 _extension_manifest_keys_cache = {}  # Maps (ext_id, scan_python_files) -> {keys, timestamp, pkg_path}
 
+# Store the mapping between discovered extension panel categories and their extension_id
+# This is used as fallback when extension_post_install_handler is called with empty extension_id
+_last_discovered_ext_panel_categories = {}  # Maps category_name -> extension_id
+
 
 def set_preview_mode_active(active):
     """Set preview mode active state.
@@ -1365,42 +1369,46 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
     
     # OPTIMIZATION: Scan for icon file and bl_category ONLY once at install time
     # This avoids repeated disk scans during UI draws
-    try:
-        import importlib
-        module = importlib.import_module(extension_id.replace("add-on-", "bl_ext."))
-        pkg_path = os.path.dirname(getattr(module, "__file__", ""))
-        if pkg_path and os.path.isdir(pkg_path):
-            # Scan icon once
-            icon_path, icon_name = _scan_extension_icon_path(pkg_path)
-            if icon_path:
-                category_debug_print(f"[ICON SCAN] Found icon for extension {extension_id!r}: {icon_path!r}")
-                if not hasattr(extension_post_install_handler, "_icon_cache"):
-                    extension_post_install_handler._icon_cache = {}
-                extension_post_install_handler._icon_cache[extension_id] = icon_path
-            else:
-                category_debug_print(f"[ICON SCAN] No icon found for extension {extension_id!r}")
-            
-            # CRITICAL OPTIMIZATION: Scan Python files for bl_category ONCE at install time
-            # Cache the result permanently (no expiration) to avoid repeated scanning
-            category_debug_print(f"[BL_CATEGORY SCAN] Scanning Python files for bl_category at install time: {extension_id!r}")
-            pkg_name = extension_id.replace("add-on-", "").replace(".", "_")
-            
-            # Always scan Python files at install time (regardless of is_install_from_disk)
-            # This is a one-time operation that happens only when extension is installed
-            manifest_keys = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=True)
-            
-            # Cache permanently with no expiration (scan only once ever)
-            cache_key = (extension_id, True)  # True = scanned Python files
-            _extension_manifest_keys_cache[cache_key] = {
-                "keys": manifest_keys,
-                "timestamp": time.time(),
-                "pkg_path": pkg_path,
-                "scanned_at_install": True,  # Mark as scanned at install
-            }
-            category_debug_print(f"[BL_CATEGORY SCAN] CACHED {len(manifest_keys)} keys for {extension_id!r}: {manifest_keys}")
-            
-    except Exception as e:
-        category_debug_print(f"[INSTALL SCAN] Failed to scan extension {extension_id!r}: {e}")
+    # Skip scanning if extension_id is empty (drag-and-drop from file explorer)
+    if extension_id and extension_id.strip():
+        try:
+            import importlib
+            module = importlib.import_module(extension_id.replace("add-on-", "bl_ext."))
+            pkg_path = os.path.dirname(getattr(module, "__file__", ""))
+            if pkg_path and os.path.isdir(pkg_path):
+                # Scan icon once
+                icon_path, icon_name = _scan_extension_icon_path(pkg_path)
+                if icon_path:
+                    category_debug_print(f"[ICON SCAN] Found icon for extension {extension_id!r}: {icon_path!r}")
+                    if not hasattr(extension_post_install_handler, "_icon_cache"):
+                        extension_post_install_handler._icon_cache = {}
+                    extension_post_install_handler._icon_cache[extension_id] = icon_path
+                else:
+                    category_debug_print(f"[ICON SCAN] No icon found for extension {extension_id!r}")
+                
+                # CRITICAL OPTIMIZATION: Scan Python files for bl_category ONCE at install time
+                # Cache the result permanently (no expiration) to avoid repeated scanning
+                category_debug_print(f"[BL_CATEGORY SCAN] Scanning Python files for bl_category at install time: {extension_id!r}")
+                pkg_name = extension_id.replace("add-on-", "").replace(".", "_")
+                
+                # Always scan Python files at install time (regardless of is_install_from_disk)
+                # This is a one-time operation that happens only when extension is installed
+                manifest_keys = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=True)
+                
+                # Cache permanently with no expiration (scan only once ever)
+                cache_key = (extension_id, True)  # True = scanned Python files
+                _extension_manifest_keys_cache[cache_key] = {
+                    "keys": manifest_keys,
+                    "timestamp": time.time(),
+                    "pkg_path": pkg_path,
+                    "scanned_at_install": True,  # Mark as scanned at install
+                }
+                category_debug_print(f"[BL_CATEGORY SCAN] CACHED {len(manifest_keys)} keys for {extension_id!r}: {manifest_keys}")
+                
+        except Exception as e:
+            category_debug_print(f"[INSTALL SCAN] Failed to scan extension {extension_id!r}: {e}")
+    else:
+        category_debug_print(f"[INSTALL SCAN] Skipping Python file scanning - empty extension_id (drag-and-drop from file explorer)")
 
     # Opportunistically mark already-known categories from this extension as pending.
     # This is needed when the category already exists in the cache but is not rediscovered
@@ -1820,6 +1828,7 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
     Returns: (icon_path, provider) or ("", "") when not found.
     """
     global _icon_detection_cache
+    global _last_discovered_ext_panel_categories
     
     # PERF: Start timing
     _icon_detect_start = time.perf_counter()
@@ -1875,6 +1884,45 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
     _pref_log_once(f"[] detect context: category={category!r}, target_key={target_key!r}, extensions_dir={extensions_dir!r}")
 
     icon_filenames = ("icon.png", "icon.webp", "icon.jpg", "icon.jpeg")
+
+    def _check_pkg_path_for_icon(pkg_path: str):
+        for icon_name in icon_filenames:
+            icon_path = os.path.join(pkg_path, icon_name)
+            if os.path.isfile(icon_path):
+                _pref_log_once(f"[] detect hit: category={category!r}, icon={icon_path!r}, provider='extension_auto'")
+                _icon_detection_cache[category] = {
+                    "icon_path": icon_path,
+                    "provider": "extension_auto",
+                    "timestamp": current_time,
+                }
+                _icon_detect_elapsed = (time.perf_counter() - _icon_detect_start) * 1000
+                category_debug_print(
+                    f"[PERF] _auto_detect_extension_icon_path({category!r}) FOUND in {_icon_detect_elapsed:.2f}ms: {icon_path!r}"
+                )
+                return icon_path, "extension_auto"
+        return None
+
+    preferred_ext_id = _last_discovered_ext_panel_categories.get(category, "")
+    if preferred_ext_id:
+        preferred_pkg_name = preferred_ext_id[7:] if preferred_ext_id.startswith("add-on-") else preferred_ext_id
+        try:
+            for repo_name in os.listdir(extensions_dir):
+                repo_path = os.path.join(extensions_dir, repo_name)
+                if (not os.path.isdir(repo_path)) or repo_name.startswith('.'):
+                    continue
+
+                pkg_path = os.path.join(repo_path, preferred_pkg_name)
+                if not os.path.isdir(pkg_path):
+                    continue
+
+                detected_icon = _check_pkg_path_for_icon(pkg_path)
+                if detected_icon:
+                    if not hasattr(extension_post_install_handler, "_icon_cache"):
+                        extension_post_install_handler._icon_cache = {}
+                    extension_post_install_handler._icon_cache[preferred_ext_id] = detected_icon[0]
+                    return detected_icon
+        except Exception:
+            pass
 
     try:
         for repo_name in os.listdir(extensions_dir):
@@ -1946,22 +1994,9 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
                 # Log package match only once per category+repo to reduce noise
                 _package_match_log_once(category, repo_name, pkg_name)
 
-                for icon_name in icon_filenames:
-                    icon_path = os.path.join(pkg_path, icon_name)
-                    if os.path.isfile(icon_path):
-                        _pref_log_once(f"[] detect hit: category={category!r}, icon={icon_path!r}, provider='extension_auto'")
-                        # Cache the result
-                        _icon_detection_cache[category] = {
-                            "icon_path": icon_path,
-                            "provider": "extension_auto",
-                            "timestamp": current_time,
-                        }
-                        
-                        # PERF: Log timing for successful detection
-                        _icon_detect_elapsed = (time.perf_counter() - _icon_detect_start) * 1000
-                        category_debug_print(f"[PERF] _auto_detect_extension_icon_path({category!r}) FOUND in {_icon_detect_elapsed:.2f}ms: {icon_path!r}")
-                        
-                        return icon_path, "extension_auto"
+                detected_icon = _check_pkg_path_for_icon(pkg_path)
+                if detected_icon:
+                    return detected_icon
     except Exception:
         _pref_log_once(f"[] detect abort: category={category!r}, reason=scan_exception")
         # Cache the negative result
@@ -5368,11 +5403,13 @@ def _integrate_glyph_library():
 
 def _discover_active_categories():
     """Discover all active categories from registered panels including addon panels."""
-    global _last_discovered_category_sources
-
+    global _last_discovered_category_sources, _last_discovered_ext_panel_categories
     discovered_categories = set()
     discovered_sources = {}
     panel_samples = []
+    
+    # Clear and rebuild extension panel categories mapping
+    _last_discovered_ext_panel_categories = {}
 
     def _record_discovered(category, source):
         if not category:
@@ -5531,6 +5568,8 @@ def _discover_active_categories():
                                         # Only record panel categories that differ from manifest names
                                         if panel_category and panel_category not in manifest_names:
                                             _record_discovered(panel_category, "panel_bl_category")
+                                            # Store the mapping between discovered extension panel categories and their extension_id
+                                            _last_discovered_ext_panel_categories[panel_category] = ext_id
                                             _log_once(
                                                 f"[GLYPH DISCOVER DEBUG] extension panel category: "
                                                 f"module={module_name!r}, category={panel_category!r}, "
@@ -5622,6 +5661,8 @@ def _discover_active_categories():
                                             # Only record panel categories that differ from manifest names
                                             if panel_category and panel_category not in manifest_names:
                                                 _record_discovered(panel_category, "panel_bl_category")
+                                                # Store the mapping between discovered extension panel categories and their extension_id
+                                                _last_discovered_ext_panel_categories[panel_category] = ext_id
                                                 _log_once(
                                                     f"[GLYPH DISCOVER DEBUG] extension panel category: "
                                                     f"repo={repo_name!r}, pkg={pkg_name!r}, category={panel_category!r}, "
@@ -6066,9 +6107,9 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
         pending_ext_id = str(pending_extension_context.get("extension_id", "") or "").strip()
         category_debug_print(f"[MERGE DEBUG] Processing pending extension context: extension_id={pending_ext_id!r}")
         if not pending_ext_id:
-            tag_log("_merge_discovered_categories: dropping pending extension context with empty extension_id")
-            _pending_extension_context = None
-            pending_extension_context = None
+            # Don't drop pending context for empty extension_id - this happens during drag-and-drop from file explorer
+            # The fallback logic will try to match categories using _last_discovered_ext_panel_categories
+            tag_log("_merge_discovered_categories: pending extension context has empty extension_id - will use fallback matching")
 
     # Update existing categories if there is a pending extension context.
     # IMPORTANT: only touch categories that are already linked to this same extension,
@@ -6434,8 +6475,8 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                 category_debug_print(f"[MERGE DEBUG]   category_to_auto_extension={category_to_auto_extension}")
                 category_debug_print(f"[MERGE DEBUG]   category in category_to_auto_extension? {category in category_to_auto_extension}")
 
-            if is_from_pending_ext:
-                # All categories from this merge cycle belong to the pending extension
+            if is_from_pending_ext and pending_extension_context.get("extension_id", "").strip():
+                # Pending extension with valid extension_id
                 ext_id = pending_extension_context.get("extension_id", "")
                 ext_mode = pending_extension_context.get("mode_flag", 0)
                 tag_already_assigned = pending_extension_context.get("tag_already_assigned", False)
@@ -6445,11 +6486,28 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                 ext_id = category_to_auto_extension[category]
                 category_debug_print(f"[MERGE DEBUG] NEW CATEGORY auto-detected: category={category!r}, extension_id={ext_id!r}")
             else:
-                # DEBUG: Log why category didn't get extension
-                if "MPFB" in category or "Mixamo" in category:
-                    category_debug_print(f"[MERGE DEBUG] NEW CATEGORY WARNING: {category!r} did NOT get source_extension!")
-                    category_debug_print(f"[MERGE DEBUG]   is_from_pending_ext={is_from_pending_ext}")
-                    category_debug_print(f"[MERGE DEBUG]   in category_to_auto_extension={category in category_to_auto_extension}")
+                # Fallback: Try to get extension_id from discovered extension panel categories
+                # This handles cases where extension_post_install_handler was called with empty extension_id
+                # but _discover_active_categories found the mapping between category and extension_id
+                fallback_ext_id = _last_discovered_ext_panel_categories.get(category)
+                if fallback_ext_id:
+                    ext_id = fallback_ext_id
+                    # If we're in pending context but with empty extension_id, use the pending context flags
+                    if is_from_pending_ext:
+                        ext_mode = pending_extension_context.get("mode_flag", 0)
+                        tag_already_assigned = pending_extension_context.get("tag_already_assigned", False)
+                        category_debug_print(f"[MERGE DEBUG] NEW CATEGORY fallback from pending context: category={category!r}, extension_id={ext_id!r} (from _last_discovered_ext_panel_categories)")
+                    else:
+                        category_debug_print(f"[MERGE DEBUG] NEW CATEGORY fallback: category={category!r}, extension_id={ext_id!r} (from _last_discovered_ext_panel_categories)")
+                else:
+                    # DEBUG: Log why category didn't get extension
+                    if "MPFB" in category or "Mixamo" in category or "Hyperfy" in category:
+                        category_debug_print(f"[MERGE DEBUG] NEW CATEGORY WARNING: {category!r} did NOT get source_extension!")
+                        category_debug_print(f"[MERGE DEBUG]   is_from_pending_ext={is_from_pending_ext}")
+                        category_debug_print(f"[MERGE DEBUG]   in category_to_auto_extension={category in category_to_auto_extension}")
+                        category_debug_print(f"[MERGE DEBUG]   fallback_ext_id from _last_discovered_ext_panel_categories: {fallback_ext_id}")
+                        if is_from_pending_ext:
+                            category_debug_print(f"[MERGE DEBUG]   pending_extension_id: {pending_extension_context.get('extension_id', '')!r}")
 
             _glyph_cache[cache_key] = {
                 "glyph": glyph,

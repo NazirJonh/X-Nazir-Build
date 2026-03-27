@@ -3840,12 +3840,23 @@ def restore_category_tags_from_string(category, tags_string, space_type=-1):
         tags = [t.strip() for t in tags_string.split(';') if t.strip()]
 
     tag_log(f"Restoring tags for '{category}' from string: '{tags_string}' -> {tags} (space_type={space_type})")
-    
+
+    # Save original pending_tag_assignment BEFORE any modifications.
+    # This prevents incorrectly setting pending=True for categories that were
+    # intentionally saved as "Without Tag" (pending=False).
+    original_pending = None
+    _pending_key = _make_cache_key(space_type, category)
+    if _pending_key not in _glyph_cache:
+        _pending_key = _make_cache_key(-1, category)
+    if _pending_key in _glyph_cache:
+        original_pending = _glyph_cache[_pending_key].get("pending_tag_assignment", False)
+
     # Use update_wm=False during restore to prevent premature filtering changes
     result = set_category_tags(category, tags, space_type=space_type, auto_save=False, update_wm=False)
-    
+
     # If restoring empty tags and category has source_extension, restore pending_tag_assignment=True
-    # BUT ONLY if the category is not already in category_orders (i.e., not already distributed via tab drop)
+    # BUT ONLY if the category is not already in category_orders AND was originally pending=True.
+    # Categories that were intentionally saved as "Without Tag" (pending=False) must stay False.
     if not tags:
         key = _make_cache_key(space_type, category)
         if key not in _glyph_cache:
@@ -3866,7 +3877,7 @@ def restore_category_tags_from_string(category, tags_string, space_type=-1):
                         tag_log(f"restore_category_tags_from_string: category '{category}' found in category_orders['{tag_key}'], NOT restoring pending=True")
                         break
 
-                if not is_in_orders:
+                if not is_in_orders and original_pending:
                     cat_data["pending_tag_assignment"] = True
                     # Also clear without_tag_preview flag if it was set during preview
                     if cat_data.get("without_tag_preview", False):
@@ -3878,6 +3889,8 @@ def restore_category_tags_from_string(category, tags_string, space_type=-1):
                     # Trigger WM sync to update "New Add-ons!" filter after restoring pending status
                     # OPTIMIZATION: Skip icon detection (will run in background)
                     sync_glyph_mappings_to_wm(skip_icon_detection=True)
+                elif not is_in_orders and not original_pending:
+                    tag_log(f"restore_category_tags_from_string: NOT restoring pending=True for '{category}' (was intentionally saved as Without Tag, original_pending={original_pending})")
     
     # Note: We don't delete tags that were created during preview mode here,
     # as they might be used by other categories. The tag creation itself is permanent,

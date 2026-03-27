@@ -8741,7 +8741,26 @@ class USERPREF_OT_category_tag_create(Operator):
 
         # Determine mode_flags based on current_mode_only checkbox
         if self.current_mode_only:
-            mode_flags = get_current_tag_mode_flag(context)
+            current_mode_flag = get_current_tag_mode_flag(context)
+            # Convert detailed edit modes (MESH_EDIT, CURVE_EDIT, etc.) to base EDIT_MODE
+            # This matches the C++ visibility check logic which expects EDIT_MODE flag for tags
+            detailed_edit_modes = {
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("MESH_EDIT", 0),
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("CURVE_EDIT", 0),
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("SURFACE_EDIT", 0),
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("ARMATURE_EDIT", 0),    
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("LATTICE_EDIT", 0),
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("META_EDIT", 0),
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("FONT_EDIT", 0),
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("GREASE_PENCIL_EDIT", 0),
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("POINTCLOUD_EDIT", 0),
+                _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("VOLUME_EDIT", 0),
+            }
+            if current_mode_flag in detailed_edit_modes:
+                mode_flags = _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0)
+                print(f"[TAG CREATE] Converted {current_mode_flag} to EDIT_MODE ({mode_flags}) for tag visibility")
+            else:
+                mode_flags = current_mode_flag
         else:
             mode_flags = _CATEGORY_TAG_DEFAULT_MODE_FLAGS
 
@@ -12744,6 +12763,7 @@ class USERPREF_PT_about_build(Panel):
     bl_region_type = 'WINDOW'
     bl_context = "build_features"  # Using existing context
     bl_label = "About Build"
+    bl_icon = 'COLORSET_11_VEC'
 
     @classmethod
     def poll(cls, _context):

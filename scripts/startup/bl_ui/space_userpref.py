@@ -1358,6 +1358,10 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
     global _pending_extension_context, _glyph_cache, _install_from_disk_just_occurred
     global _extension_manifest_keys_cache
     
+    category_debug_print(f"[EXTENSION POST INSTALL] >>> START handler for {extension_id!r}")
+    category_debug_print(f"[EXTENSION POST INSTALL] space_type={space_type}, mode_flag={mode_flag:#010x}, tag_assigned={tag_already_assigned}, from_disk={is_install_from_disk}")
+    category_debug_print(f"[EXTENSION POST INSTALL] Current cache size: {len(_glyph_cache)} categories")
+    
     _pending_extension_context = {
         "extension_id": extension_id,
         "space_type": space_type,

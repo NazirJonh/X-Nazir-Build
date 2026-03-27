@@ -2240,6 +2240,16 @@ void WM_tooltip_refresh(bContext *C, wmWindow *win);
  * Use for smooth tooltip updates during category tab scrolling.
  */
 bool WM_tooltip_update_text(bContext *C, wmWindow *win, const char *text, wmTooltipInitFn init = nullptr);
+/**
+ * Update text and colored suffix in existing tooltip without recreation.
+ * Returns true if tooltip exists and was updated, false otherwise.
+ * Use for smooth tooltip updates during category tab scrolling with colored names.
+ */
+bool WM_tooltip_update_text_and_suffix(bContext *C,
+                                       wmWindow *win,
+                                       const char *text,
+                                       const char *suffix,
+                                       wmTooltipInitFn init = nullptr);
 double WM_tooltip_time_closed();
 
 /* `wm_utils.cc` */

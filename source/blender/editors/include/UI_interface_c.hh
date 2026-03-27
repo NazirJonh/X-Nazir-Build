@@ -3408,6 +3408,22 @@ ARegion *tooltip_create_from_text_fixed_width(bContext *C,
                                              bool prefer_left,
                                              int min_width);
 
+/**
+ * Create a tooltip with colored suffix text.
+ * The main text uses the default color, the suffix uses a specified color.
+ * \param suffix_color: Color ID for the suffix text part.
+ */
+ARegion *tooltip_create_from_text_with_colored_suffix_fixed_width(
+    bContext *C,
+    const char *text,
+    const char *suffix,
+    TooltipColorID suffix_color,
+    const int position[2],
+    const rcti *init_rect_overlap,
+    bool prefer_left,
+    int min_width,
+    float pad_scale = 1.0f);
+
 bool tooltip_region_update_text(ARegion *region, const char *text);
 
 /* How long before a tool-tip shows. */

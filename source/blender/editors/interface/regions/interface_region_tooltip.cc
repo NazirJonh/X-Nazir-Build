@@ -96,6 +96,7 @@ namespace blender::ui {
 struct TooltipFormat {
   TooltipStyle style;
   TooltipColorID color_id;
+  TooltipColorID suffix_color_id;
 };
 
 struct TooltipField {
@@ -117,6 +118,7 @@ struct TooltipData {
   uiFontStyle fstyle;
   int wrap_width;
   int toth, lineh;
+  float pad_scale = 1.0f;
 };
 
 BLI_STATIC_ASSERT(int(TIP_LC_MAX) == int(TIP_LC_ALERT) + 1, "invalid lc-max");
@@ -136,6 +138,28 @@ void tooltip_text_field_add(TooltipData &data,
   TooltipField field{};
   field.format.style = style;
   field.format.color_id = color_id;
+  field.format.suffix_color_id = TIP_LC_NORMAL;
+  field.text = std::move(text);
+  field.text_suffix = std::move(suffix);
+  data.fields.append(std::move(field));
+}
+
+void tooltip_text_field_add_with_suffix_color(TooltipData &data,
+                                              std::string text,
+                                              std::string suffix,
+                                              const TooltipStyle style,
+                                              const TooltipColorID color_id,
+                                              const TooltipColorID suffix_color_id,
+                                              const bool is_pad)
+{
+  if (is_pad) {
+    /* Add a spacer field before this one. */
+    tooltip_text_field_add(data, {}, {}, TIP_STYLE_SPACER, TIP_LC_NORMAL, false);
+  }
+  TooltipField field{};
+  field.format.style = style;
+  field.format.color_id = color_id;
+  field.format.suffix_color_id = suffix_color_id;
   field.text = std::move(text);
   field.text_suffix = std::move(suffix);
   data.fields.append(std::move(field));
@@ -227,6 +251,16 @@ static void ui_tooltip_region_draw_cb(const bContext * /*C*/, ARegion *region)
 
   bbox.xmin += 0.5f * pad_x; /* add padding to the text */
   bbox.ymax -= 0.5f * pad_y;
+
+  /* When tooltip is scaled up, center text in the larger box. */
+  if (data->pad_scale > 1.0f) {
+    const float extra_x = BLI_rcti_size_x(&bbox) * (data->pad_scale - 1.0f) /
+                          (2.0f * data->pad_scale);
+    const float extra_y = BLI_rcti_size_y(&bbox) * (data->pad_scale - 1.0f) /
+                          (2.0f * data->pad_scale);
+    bbox.xmin += extra_x;
+    bbox.ymax -= extra_y;
+  }
   bbox.ymax -= BLF_descender(data->fstyle.uifont_id);
 
   for (int i = 0; i < data->fields.size(); i++) {
@@ -356,6 +390,24 @@ static void ui_tooltip_region_draw_cb(const bContext * /*C*/, ARegion *region)
       fontstyle_set(&data->fstyle);
       fontstyle_draw(
           &data->fstyle, &bbox, field->text.c_str(), field->text.size(), drawcol, &fs_params);
+
+      /* Offset to the end of the last line and draw suffix with different color. */
+      if (!field->text_suffix.empty()) {
+        const float xofs = field->geom.x_pos;
+        const float yofs = data->lineh * (field->geom.lines - 1);
+        bbox.xmin += xofs;
+        bbox.ymax -= yofs;
+        rgb_float_to_uchar(drawcol, tip_colors[int(field->format.suffix_color_id)]);
+        fontstyle_draw(&data->fstyle,
+                       &bbox,
+                       field->text_suffix.c_str(),
+                       field->text_suffix.size(),
+                       drawcol,
+                       &fs_params);
+        /* Undo offset. */
+        bbox.xmin -= xofs;
+        bbox.ymax += yofs;
+      }
     }
 
     bbox.ymax -= data->lineh * field->geom.lines;
@@ -1431,7 +1483,8 @@ static ARegion *ui_tooltip_create_with_data(bContext *C,
                                             const float init_position[2],
                                             const rcti *init_rect_overlap,
                                             bool prefer_left,
-                                            int min_width)
+                                            int min_width,
+                                            float pad_scale = 1.0f)
 {
   wmWindow *win = CTX_wm_window(C);
   const int2 win_size = WM_window_native_pixel_size(win);
@@ -1549,6 +1602,21 @@ static ARegion *ui_tooltip_create_with_data(bContext *C,
       rect_i.xmin -= extra_l;
       rect_i.xmax += extra - extra_l;
     }
+  }
+
+  /* Scale tooltip size by pad_scale (keeps text size unchanged). */
+  if (pad_scale > 0.0f && pad_scale != 1.0f) {
+    data->pad_scale = pad_scale;
+    const int size_x = BLI_rcti_size_x(&rect_i);
+    const int size_y = BLI_rcti_size_y(&rect_i);
+    const int new_size_x = int(round(size_x * pad_scale));
+    const int new_size_y = int(round(size_y * pad_scale));
+    const int cx = BLI_rcti_cent_x(&rect_i);
+    const int cy = BLI_rcti_cent_y(&rect_i);
+    rect_i.xmin = cx - new_size_x / 2;
+    rect_i.xmax = cx + new_size_x - new_size_x / 2;
+    rect_i.ymin = cy - new_size_y / 2;
+    rect_i.ymax = cy + new_size_y - new_size_y / 2;
   }
 
   /* Clamp to window bounds. */
@@ -2076,6 +2144,26 @@ ARegion *tooltip_create_from_text_fixed_width(bContext *C,
       C, std::move(data), init_position, init_rect_overlap, prefer_left, min_width);
 }
 
+ARegion *tooltip_create_from_text_with_colored_suffix_fixed_width(
+    bContext *C,
+    const char *text,
+    const char *suffix,
+    TooltipColorID suffix_color,
+    const int position[2],
+    const rcti *init_rect_overlap,
+    bool prefer_left,
+    int min_width,
+    float pad_scale)
+{
+  std::unique_ptr<TooltipData> data = std::make_unique<TooltipData>();
+  tooltip_text_field_add_with_suffix_color(
+      *data, text, suffix, TIP_STYLE_NORMAL, TIP_LC_NORMAL, suffix_color, false);
+
+  float init_position[2] = {float(position[0]), float(position[1])};
+  return ui_tooltip_create_with_data(
+      C, std::move(data), init_position, init_rect_overlap, prefer_left, min_width, pad_scale);
+}
+
 bool tooltip_region_update_text(ARegion *region, const char *text)
 {
   if (region == nullptr || region->regiondata == nullptr) {
@@ -2095,6 +2183,44 @@ bool tooltip_region_update_text(ARegion *region, const char *text)
   field.text = text ? text : "";
   field.geom.lines = 1;
   field.geom.x_pos = 0;
+
+  ED_region_tag_redraw(region);
+  return true;
+}
+
+bool tooltip_region_update_text_and_suffix(ARegion *region,
+                                           const char *text,
+                                           const char *suffix)
+{
+  if (region == nullptr || region->regiondata == nullptr) {
+    return false;
+  }
+
+  TooltipData *data = static_cast<TooltipData *>(region->regiondata);
+  if (data->fields.size() != 1) {
+    return false;
+  }
+
+  TooltipField &field = data->fields[0];
+  if (field.format.style != TIP_STYLE_NORMAL || field.image) {
+    return false;
+  }
+
+  field.text = text ? text : "";
+  field.text_suffix = suffix ? suffix : "";
+  field.geom.lines = 1;
+
+  /* Recalculate x_pos for suffix positioning. */
+  if (!field.text_suffix.empty()) {
+    fontstyle_set(&data->fstyle);
+    BLF_size(data->fstyle.uifont_id, data->fstyle.points * UI_SCALE_FAC);
+    ResultBLF info = {0};
+    BLF_width(data->fstyle.uifont_id, field.text.c_str(), field.text.size(), &info);
+    field.geom.x_pos = info.width;
+  }
+  else {
+    field.geom.x_pos = 0;
+  }
 
   ED_region_tag_redraw(region);
   return true;

@@ -2620,7 +2620,8 @@ static ARegion *ui_panel_category_active_tooltip_init(
    * or the category name itself if not configured in mappings.
    * This matches the behavior of hover tooltips. */
   const char *category_display_name = panel_category_tooltip_name_get(region, wm, category_idname);
-  const std::string tooltip_text = std::string("Active tab: ") + IFACE_(category_display_name);
+  const char *tooltip_prefix = IFACE_("Active tab: ");
+  const char *tooltip_suffix = IFACE_(category_display_name);
 
   wmWindow *win = CTX_wm_window(C);
   const wmEvent *event = win->runtime->eventstate;
@@ -2640,10 +2641,14 @@ static ARegion *ui_panel_category_active_tooltip_init(
       tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
 
       const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+      /* Extend tab_rect_screen by 200px toward the tooltip side so the
+       * overlap-avoidance logic positions the tooltip further away. */
       if (is_left) {
+        tab_rect_screen.xmax += 100;
         position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN / 4;
       }
       else {
+        tab_rect_screen.xmin -= 100;
         position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN / 4;
       }
       position[1] = event->xy[1];
@@ -2653,36 +2658,7 @@ static ARegion *ui_panel_category_active_tooltip_init(
       position[1] = event->xy[1] - UI_POPUP_MARGIN / 4;
   }
 
-  /* ─────────────────────────────────────────────────────────────────────────────
-   * TAB SCROLL TOOLTIP POSITIONING
-   * ─────────────────────────────────────────────────────────────────────────────
-   * When scrolling through tabs with Ctrl+MouseWheel, position the tooltip:
-   * - At window center Y if editor area > 50% of window height (large editor)
-   * - At mouse cursor Y if editor area <= 50% of window height (small editor)
-   *
-   * Configurable parameters:
-   * - Threshold: win_size[1] / 2 (50% of window height)
-   * - Both position[1] and tab_rect_screen Y must be updated for correct positioning
-   * ───────────────────────────────────────────────────────────────────────────── */
-  ScrArea *area = CTX_wm_area(C);
-  if (area) {
-    const int2 win_size = WM_window_native_pixel_size(win);
-    const int area_height = BLI_rcti_size_y(&area->totrct);
-    const int threshold = win_size[1] / 2;  /* 50% of window height */
-
-    if (area_height > threshold) {
-      /* Large editor: position tooltip at window center. */
-      rcti win_rect;
-      WM_window_rect_calc(win, &win_rect);
-      position[1] = BLI_rcti_cent_y(&win_rect);
-      /* Update tab_rect_screen Y so tooltip_create_from_text_fixed_width
-       * positions correctly relative to the centered rect. */
-      if (use_tab_rect) {
-        tab_rect_screen.ymin = position[1] - UI_UNIT_Y / 2;
-        tab_rect_screen.ymax = position[1] + UI_UNIT_Y / 2;
-      }
-    }
-  }
+  /* Tooltip always follows cursor Y position. */
 
   const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
   const bool prefer_left = !is_left;
@@ -2708,12 +2684,15 @@ static ARegion *ui_panel_category_active_tooltip_init(
   const int lineh = BLF_height_max(font_id);
   const int min_width = max_text_width + int(round(lineh * 1.95f));
 
-  return tooltip_create_from_text_fixed_width(C,
-                                             tooltip_text.c_str(),
-                                             position,
-                                             use_tab_rect ? &tab_rect_screen : nullptr,
-                                             prefer_left,
-                                             min_width);
+  return tooltip_create_from_text_with_colored_suffix_fixed_width(C,
+                                                                 tooltip_prefix,
+                                                                 tooltip_suffix,
+                                                                 TIP_LC_ACTIVE,
+                                                                 position,
+                                                                 use_tab_rect ? &tab_rect_screen : nullptr,
+                                                                 prefer_left,
+                                                                 min_width,
+                                                                 1.5f);
 }
 
 void panel_category_tooltip_timer_init(bContext *C, ARegion *region)
@@ -3094,14 +3073,18 @@ int handler_panel_region(bContext *C,
            * matching the behavior of hover tooltips. */
           const char *category_display_name = panel_category_tooltip_name_get(
               region, wm, category_idname);
-          const std::string tooltip_text = std::string("Active tab: ") +
-                                           IFACE_(category_display_name);
+          const char *tooltip_prefix = IFACE_("Active tab: ");
+          const char *tooltip_suffix = IFACE_(category_display_name);
 
           /* Try to update existing tooltip first to avoid flickering.
            * We only update if the current tooltip was created with the same init function,
            * ensuring it has the correct custom position and fixed width. */
-          if (!WM_tooltip_update_text(C, win, tooltip_text.c_str(), 
-                                      ui_panel_category_active_tooltip_init)) {
+          if (!WM_tooltip_update_text_and_suffix(C,
+                                                 win,
+                                                 tooltip_prefix,
+                                                 tooltip_suffix,
+                                                 ui_panel_category_active_tooltip_init))
+          {
             /* No existing tooltip - create new one. */
             WM_tooltip_immediate_init(C,
                                       win,

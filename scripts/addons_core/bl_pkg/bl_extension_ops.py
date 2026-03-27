@@ -2297,12 +2297,17 @@ class EXTENSIONS_OT_package_upgrade_all(Operator, _ExtCmdMixIn):
                 # Call extension_post_install_handler for each upgraded package for category discovery
                 # This is needed for Upgrade operations to update category cache (icons may have changed)
                 from bl_ui.space_userpref import extension_post_install_handler
+                if EXTENSION_DEBUG_ENABLED:
+                    print(f"[UPGRADE ALL] ======= STARTING POST-UPGRADE PROCESSING =======")
+                    print(f"[UPGRADE ALL] Processing {len(self._addon_restore)} repositories")
                 for (repo_item, pkg_id_sequence, result) in self._addon_restore:
                     repo_module = repo_item.module
+                    if EXTENSION_DEBUG_ENABLED:
+                        print(f"[UPGRADE ALL] Upgrading {len(pkg_id_sequence)} packages from {repo_module}: {list(pkg_id_sequence)}")
                     for pkg_id in pkg_id_sequence:
                         extension_id = f"add-on-{repo_module}.{pkg_id}"
                         if EXTENSION_DEBUG_ENABLED:
-                            print(f"[PYTHON] Calling extension_post_install_handler for Upgrade: {extension_id!r}")
+                            print(f"[UPGRADE ALL] >>> Calling extension_post_install_handler for: {extension_id!r}")
                         extension_post_install_handler(
                             extension_id=extension_id,
                             space_type=-1,  # Global
@@ -2310,30 +2315,39 @@ class EXTENSIONS_OT_package_upgrade_all(Operator, _ExtCmdMixIn):
                             tag_already_assigned=False,
                             is_install_from_disk=False  # Upgrade from repository, not from disk
                         )
+                        if EXTENSION_DEBUG_ENABLED:
+                            print(f"[UPGRADE ALL] >>> Extension post-install handler completed for: {extension_id!r}")
 
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that package upgrade is complete.
                 if EXTENSION_DEBUG_ENABLED:
-                    print("[PYTHON] Calling extension_repos_update_post_trigger() after package upgrade...")
+                    print("[UPGRADE ALL] Calling extension_repos_update_post_trigger() after package upgrade...")
                 bpy.app.extension_repos_update_post_trigger()
                 if EXTENSION_DEBUG_ENABLED:
-                    print("[PYTHON] extension_repos_update_post_trigger() completed after package upgrade")
+                    print("[UPGRADE ALL] extension_repos_update_post_trigger() completed after package upgrade")
                 
                 # CRITICAL: Sync category cache from Python to Window Manager after package upgrade
                 # This ensures that updated categories with changed icons appear in the UI immediately
                 # without requiring "Edit Category Tab" dialog or Blender restart
                 try:
                     if EXTENSION_DEBUG_ENABLED:
-                        print("[PYTHON] Syncing discovered categories from cache to WM after package upgrade...")
+                        print("[UPGRADE ALL] ======= STARTING CATEGORY SYNC =======")
+                        print("[UPGRADE ALL] Syncing discovered categories from cache to WM after package upgrade...")
                     from bl_ui.space_userpref import sync_glyph_mappings_to_wm
-                    if sync_glyph_mappings_to_wm(skip_icon_detection=True):
+                    sync_result = sync_glyph_mappings_to_wm(skip_icon_detection=False)
+                    if EXTENSION_DEBUG_ENABLED:
+                        print(f"[UPGRADE ALL] sync_glyph_mappings_to_wm returned: {sync_result}")
+                        print("[UPGRADE ALL] ======= CATEGORY SYNC COMPLETED =======")
+                    if sync_result:
                         if EXTENSION_DEBUG_ENABLED:
-                            print("[PYTHON] Category glyph sync completed successfully")
+                            print("[UPGRADE ALL] Category glyph sync completed successfully")
                     else:
                         if EXTENSION_DEBUG_ENABLED:
-                            print("[PYTHON] Category glyph sync completed (no changes)")
+                            print("[UPGRADE ALL] Category glyph sync completed (no changes)")
                 except Exception as sync_ex:
-                    print(f"Category glyph sync error after package upgrade: {sync_ex}")
+                    print(f"[UPGRADE ALL] Category glyph sync error after package upgrade: {sync_ex}")
+                    import traceback
+                    print(f"[UPGRADE ALL] Full traceback: {traceback.format_exc()}")
             except Exception as ex:
                 print(f"Extension post-upgrade trigger error: {ex}")
 
@@ -2538,6 +2552,9 @@ class EXTENSIONS_OT_package_install_marked(Operator, _ExtCmdMixIn):
                 # This is needed for Install Marked operations to update category cache
                 from bl_ui.space_userpref import extension_post_install_handler
                 repos_all = list(extension_repos_read(use_active_only=False))
+                if EXTENSION_DEBUG_ENABLED:
+                    print(f"[INSTALL MARKED] ======= STARTING POST-INSTALL PROCESSING =======")
+                    print(f"[INSTALL MARKED] Processing {len(self._repo_map_packages_addon_only)} repositories")
                 for directory, pkg_id_sequence in self._repo_map_packages_addon_only:
                     # Find repo_item for this directory to get module name
                     repo_item = None
@@ -2548,10 +2565,12 @@ class EXTENSIONS_OT_package_install_marked(Operator, _ExtCmdMixIn):
                     
                     if repo_item:
                         repo_module = repo_item.module
+                        if EXTENSION_DEBUG_ENABLED:
+                            print(f"[INSTALL MARKED] Installing {len(pkg_id_sequence)} packages from {repo_module}: {list(pkg_id_sequence)}")
                         for pkg_id in pkg_id_sequence:
                             extension_id = f"add-on-{repo_module}.{pkg_id}"
                             if EXTENSION_DEBUG_ENABLED:
-                                print(f"[PYTHON] Calling extension_post_install_handler for Install Marked: {extension_id!r}")
+                                print(f"[INSTALL MARKED] >>> Calling extension_post_install_handler for: {extension_id!r}")
                             extension_post_install_handler(
                                 extension_id=extension_id,
                                 space_type=-1,  # Global
@@ -2559,30 +2578,39 @@ class EXTENSIONS_OT_package_install_marked(Operator, _ExtCmdMixIn):
                                 tag_already_assigned=False,
                                 is_install_from_disk=False  # Install from repository, not from disk
                             )
+                            if EXTENSION_DEBUG_ENABLED:
+                                print(f"[INSTALL MARKED] >>> Extension post-install handler completed for: {extension_id!r}")
 
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that marked package installation is complete.
                 if EXTENSION_DEBUG_ENABLED:
-                    print("[PYTHON] Calling extension_repos_update_post_trigger() after marked package install...")
+                    print("[INSTALL MARKED] Calling extension_repos_update_post_trigger() after marked package install...")
                 bpy.app.extension_repos_update_post_trigger()
                 if EXTENSION_DEBUG_ENABLED:
-                    print("[PYTHON] extension_repos_update_post_trigger() completed after marked package install")
+                    print("[INSTALL MARKED] extension_repos_update_post_trigger() completed after marked package install")
                 
                 # CRITICAL: Sync category cache from Python to Window Manager after marked packages installation
                 # This ensures that newly discovered categories with icons appear in the UI immediately
                 # without requiring "Edit Category Tab" dialog or Blender restart
                 try:
                     if EXTENSION_DEBUG_ENABLED:
-                        print("[PYTHON] Syncing discovered categories from cache to WM after marked packages installation...")
+                        print("[INSTALL MARKED] ======= STARTING CATEGORY SYNC =======")
+                        print("[INSTALL MARKED] Syncing discovered categories from cache to WM after marked packages installation...")
                     from bl_ui.space_userpref import sync_glyph_mappings_to_wm
-                    if sync_glyph_mappings_to_wm(skip_icon_detection=True):
+                    sync_result = sync_glyph_mappings_to_wm(skip_icon_detection=False)
+                    if EXTENSION_DEBUG_ENABLED:
+                        print(f"[INSTALL MARKED] sync_glyph_mappings_to_wm returned: {sync_result}")
+                        print("[INSTALL MARKED] ======= CATEGORY SYNC COMPLETED =======")
+                    if sync_result:
                         if EXTENSION_DEBUG_ENABLED:
-                            print("[PYTHON] Category glyph sync completed successfully")
+                            print("[INSTALL MARKED] Category glyph sync completed successfully")
                     else:
                         if EXTENSION_DEBUG_ENABLED:
-                            print("[PYTHON] Category glyph sync completed (no changes)")
+                            print("[INSTALL MARKED] Category glyph sync completed (no changes)")
                 except Exception as sync_ex:
-                    print(f"Category glyph sync error after marked packages installation: {sync_ex}")
+                    print(f"[INSTALL MARKED] Category glyph sync error after marked packages installation: {sync_ex}")
+                    import traceback
+                    print(f"[INSTALL MARKED] Full traceback: {traceback.format_exc()}")
             except Exception as ex:
                 print(f"Extension post-install-marked trigger error: {ex}")
 
@@ -3013,13 +3041,16 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
                 # Call extension_post_install_handler with is_install_from_disk=True for each installed package.
                 # This triggers Python file scanning for bl_category values only for Install from Disk operations.
                 from bl_ui.space_userpref import extension_post_install_handler
+                if EXTENSION_DEBUG_ENABLED:
+                    print(f"[INSTALL FROM DISK] ======= STARTING POST-INSTALL PROCESSING =======")
+                    print(f"[INSTALL FROM DISK] Installing {len(self.pkg_id_sequence)} packages: {list(self.pkg_id_sequence)}")
                 for pkg_id in self.pkg_id_sequence:
                     # Build extension_id in the format expected by extension_post_install_handler
                     # Format: "add-on-{pkg_name}" where pkg_name is the full module path
                     repo_module = self.repo_item.module
                     extension_id = f"add-on-{repo_module}.{pkg_id}"
                     if EXTENSION_DEBUG_ENABLED:
-                        print(f"[PYTHON] Calling extension_post_install_handler for Install from Disk: {extension_id!r}")
+                        print(f"[INSTALL FROM DISK] >>> Calling extension_post_install_handler for: {extension_id!r}")
                     extension_post_install_handler(
                         extension_id=extension_id,
                         space_type=-1,  # Global
@@ -3027,30 +3058,39 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
                         tag_already_assigned=False,
                         is_install_from_disk=True  # Trigger Python file scanning
                     )
+                    if EXTENSION_DEBUG_ENABLED:
+                        print(f"[INSTALL FROM DISK] >>> Extension post-install handler completed for: {extension_id!r}")
 
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that extension installation is complete.
                 if EXTENSION_DEBUG_ENABLED:
-                    print("[PYTHON] Calling extension_repos_update_post_trigger()...")
+                    print("[INSTALL FROM DISK] Calling extension_repos_update_post_trigger()...")
                 bpy.app.extension_repos_update_post_trigger()
                 if EXTENSION_DEBUG_ENABLED:
-                    print("[PYTHON] extension_repos_update_post_trigger() completed")
+                    print("[INSTALL FROM DISK] extension_repos_update_post_trigger() completed")
                 
                 # CRITICAL: Sync category cache from Python to Window Manager after extension installation
                 # This ensures that newly discovered categories with icons appear in the UI immediately
                 # without requiring "Edit Category Tab" dialog or Blender restart
                 try:
                     if EXTENSION_DEBUG_ENABLED:
-                        print("[PYTHON] Syncing discovered categories from cache to WM after extension installation...")
+                        print("[INSTALL FROM DISK] ======= STARTING CATEGORY SYNC =======")
+                        print("[INSTALL FROM DISK] Syncing discovered categories from cache to WM after extension installation...")
                     from bl_ui.space_userpref import sync_glyph_mappings_to_wm
-                    if sync_glyph_mappings_to_wm(skip_icon_detection=True):
+                    sync_result = sync_glyph_mappings_to_wm(skip_icon_detection=False)
+                    if EXTENSION_DEBUG_ENABLED:
+                        print(f"[INSTALL FROM DISK] sync_glyph_mappings_to_wm returned: {sync_result}")
+                        print("[INSTALL FROM DISK] ======= CATEGORY SYNC COMPLETED =======")
+                    if sync_result:
                         if EXTENSION_DEBUG_ENABLED:
-                            print("[PYTHON] Category glyph sync completed successfully")
+                            print("[INSTALL FROM DISK] Category glyph sync completed successfully")
                     else:
                         if EXTENSION_DEBUG_ENABLED:
-                            print("[PYTHON] Category glyph sync completed (no changes)")
+                            print("[INSTALL FROM DISK] Category glyph sync completed (no changes)")
                 except Exception as sync_ex:
-                    print(f"Category glyph sync error after extension installation: {sync_ex}")
+                    print(f"[INSTALL FROM DISK] Category glyph sync error after extension installation: {sync_ex}")
+                    import traceback
+                    print(f"[INSTALL FROM DISK] Full traceback: {traceback.format_exc()}")
             except Exception as ex:
                 print(f"Extension post-install callback error: {ex}")
 
@@ -3470,7 +3510,8 @@ class EXTENSIONS_OT_package_install(Operator, _ExtCmdMixIn):
                 repo_module = self.repo_item.module
                 extension_id = f"add-on-{repo_module}.{self.pkg_id}"
                 if EXTENSION_DEBUG_ENABLED:
-                    print(f"[PYTHON] Calling extension_post_install_handler for Install from Repository: {extension_id!r}")
+                    print(f"[INSTALL FROM REPO] ======= STARTING POST-INSTALL PROCESSING =======")
+                    print(f"[INSTALL FROM REPO] >>> Calling extension_post_install_handler for: {extension_id!r}")
                 extension_post_install_handler(
                     extension_id=extension_id,
                     space_type=-1,  # Global
@@ -3478,30 +3519,39 @@ class EXTENSIONS_OT_package_install(Operator, _ExtCmdMixIn):
                     tag_already_assigned=False,
                     is_install_from_disk=False  # Install from repository, not from disk
                 )
+                if EXTENSION_DEBUG_ENABLED:
+                    print(f"[INSTALL FROM REPO] >>> Extension post-install handler completed for: {extension_id!r}")
 
                 # Trigger BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST callback.
                 # This notifies the C++ deferred category activation system that extension installation is complete.
                 if EXTENSION_DEBUG_ENABLED:
-                    print("[PYTHON] Calling extension_repos_update_post_trigger()...")
+                    print("[INSTALL FROM REPO] Calling extension_repos_update_post_trigger()...")
                 bpy.app.extension_repos_update_post_trigger()
                 if EXTENSION_DEBUG_ENABLED:
-                    print("[PYTHON] extension_repos_update_post_trigger() completed")
+                    print("[INSTALL FROM REPO] extension_repos_update_post_trigger() completed")
                 
                 # CRITICAL: Sync category cache from Python to Window Manager after extension installation
                 # This ensures that newly discovered categories with icons appear in the UI immediately
                 # without requiring "Edit Category Tab" dialog or Blender restart
                 try:
                     if EXTENSION_DEBUG_ENABLED:
-                        print("[PYTHON] Syncing discovered categories from cache to WM after extension installation...")
+                        print("[INSTALL FROM REPO] ======= STARTING CATEGORY SYNC =======")
+                        print("[INSTALL FROM REPO] Syncing discovered categories from cache to WM after extension installation...")
                     from bl_ui.space_userpref import sync_glyph_mappings_to_wm
-                    if sync_glyph_mappings_to_wm(skip_icon_detection=True):
+                    sync_result = sync_glyph_mappings_to_wm(skip_icon_detection=False)
+                    if EXTENSION_DEBUG_ENABLED:
+                        print(f"[INSTALL FROM REPO] sync_glyph_mappings_to_wm returned: {sync_result}")
+                        print("[INSTALL FROM REPO] ======= CATEGORY SYNC COMPLETED =======")
+                    if sync_result:
                         if EXTENSION_DEBUG_ENABLED:
-                            print("[PYTHON] Category glyph sync completed successfully")
+                            print("[INSTALL FROM REPO] Category glyph sync completed successfully")
                     else:
                         if EXTENSION_DEBUG_ENABLED:
-                            print("[PYTHON] Category glyph sync completed (no changes)")
+                            print("[INSTALL FROM REPO] Category glyph sync completed (no changes)")
                 except Exception as sync_ex:
-                    print(f"Category glyph sync error after extension installation: {sync_ex}")
+                    print(f"[INSTALL FROM REPO] Category glyph sync error after extension installation: {sync_ex}")
+                    import traceback
+                    print(f"[INSTALL FROM REPO] Full traceback: {traceback.format_exc()}")
             except Exception as ex:
                 print(f"Extension post-install callback error: {ex}")
 

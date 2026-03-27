@@ -1473,13 +1473,19 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
         )
 
     if updated_existing:
+        category_debug_print(f"[EXTENSION POST INSTALL] Updated {len([k for k, v in _glyph_cache.items() if isinstance(k, tuple) and v.get('pending_tag_assignment')])} existing categories to pending")
         _auto_sync_to_wm()
         _auto_save_tags()
 
+    category_debug_print(f"[EXTENSION POST INSTALL] Final cache state: {len(_glyph_cache)} total categories")
+    category_debug_print(f"[EXTENSION POST INSTALL] Pending extension context set: {_pending_extension_context}")
+    
     tag_log(
         f"extension_post_install_handler: extension={extension_id!r}, "
         f"space_type={space_type}, mode_flag={mode_flag:#010x}, set at {time.time()}"
     )
+    
+    category_debug_print(f"[EXTENSION POST INSTALL] <<< END handler for {extension_id!r}")
 
 _last_discovered_category_sources = {}
 
@@ -5805,6 +5811,8 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
     
     category_debug_print(f"[MERGE DEBUG] _merge_discovered_categories START (force_refresh={force_refresh})")
     category_debug_print(f"[MERGE DEBUG] Pending extension context: {_pending_extension_context}")
+    category_debug_print(f"[MERGE DEBUG] Current cache size before merge: {len(_glyph_cache)} categories")
+    category_debug_print(f"[MERGE DEBUG] Cache keys sample: {list(_glyph_cache.keys())[:10]}")
     
     # OPTIMIZATION: Clear session-level icon detection tracker for fresh merge
     global _icon_detection_session_checked
@@ -6233,6 +6241,8 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
     # orphan categories like "Edge Length" are never linked to their extension.
     if new_categories or pending_extension_context is None:
         category_debug_print(f"[GLYPH] Found {len(new_categories)} new categories: {sorted(new_categories)}")
+        category_debug_print(f"[NEW CATEGORIES DEBUG] Processing new categories with pending_extension_context: {pending_extension_context}")
+        category_debug_print(f"[NEW CATEGORIES DEBUG] Cache state before processing: {len(_glyph_cache)} total categories")
 
         # Auto-detect extension for EACH category individually from enabled extensions.
         # This handles "Install from Disk" and startup discovery where pending_extension_context is not set.
@@ -6630,6 +6640,8 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                 category_debug_print(f"[] merge new category no icon: category={category!r}")
 
             category_debug_print(f"[GLYPH] Added new category '{category}' with glyph '{glyph}', base_type={base_type}")
+            category_debug_print(f"[NEW CATEGORY DEBUG] Cache entry for '{category}': source_extension='{ext_id}', pending_tag_assignment={_glyph_cache[cache_key].get('pending_tag_assignment', False)}, discovered_in_spaces={_glyph_cache[cache_key].get('discovered_in_spaces', [])}")
+            category_debug_print(f"[NEW CATEGORY DEBUG] Total cache size after adding '{category}': {len(_glyph_cache)} categories")
 
     # Consume the pending extension context now that all categories have been processed
     # IMPORTANT: Only clear by timeout (30 seconds), NOT by finding new categories.
@@ -9532,8 +9544,8 @@ def _on_extension_repos_update_post(dummy=None):
         )
 
         category_debug_print("[GLYPH EXTENSION UPDATE] >>> Calling _merge_discovered_categories()...")
-        # Skip icon detection for faster response (background sync will handle icons)
-        merge_result = _merge_discovered_categories(skip_icon_detection=True)
+        # Enable icon detection for immediate response in extension updates
+        merge_result = _merge_discovered_categories(skip_icon_detection=False)
         category_debug_print(f"[GLYPH EXTENSION UPDATE] >>> _merge_discovered_categories() returned: {merge_result}")
 
         result_after = _discover_active_categories()
@@ -9550,8 +9562,8 @@ def _on_extension_repos_update_post(dummy=None):
         )
 
         category_debug_print("[GLYPH EXTENSION UPDATE] >>> Calling sync_glyph_mappings_to_wm()...")
-        # OPTIMIZATION: Skip icon detection in extension update handler (background sync will handle it)
-        sync_glyph_mappings_to_wm(skip_icon_detection=True)
+        # OPTIMIZATION: Enable icon detection in extension update handler for immediate updates
+        sync_glyph_mappings_to_wm(skip_icon_detection=False)
         category_debug_print("[GLYPH EXTENSION UPDATE] >>> sync_glyph_mappings_to_wm() completed")
         
         # Check if this is a reserved-only extension and switch to reserved category
@@ -9614,8 +9626,8 @@ def _on_version_update(dummy):
             f"missing_in_cache={sorted(discovered_before - cache_before)}"
         )
 
-        # Skip icon detection for faster response (background sync will handle icons)
-        merge_result = _merge_discovered_categories(skip_icon_detection=True)
+        # Enable icon detection for immediate response in version updates
+        merge_result = _merge_discovered_categories(skip_icon_detection=False)
 
         result_after = _discover_active_categories()
         if isinstance(result_after, tuple):
@@ -9630,8 +9642,8 @@ def _on_version_update(dummy):
             f"still_missing={sorted(discovered_after - cache_after)}"
         )
 
-        # OPTIMIZATION: Skip icon detection in version update handler (background sync will handle it)
-        sync_glyph_mappings_to_wm(skip_icon_detection=True)
+        # OPTIMIZATION: Enable icon detection in version update handler for immediate updates
+        sync_glyph_mappings_to_wm(skip_icon_detection=False)
     except Exception as e:
         category_debug_print(f"[GLYPH] Error during version update sync: {e}")
 

@@ -754,7 +754,6 @@ enum eUserPref_Section {
   USER_SECTION_ASSETS = 19,
   USER_SECTION_TAGS = 20,
   USER_SECTION_BUILD_FEATURES = 21,
-  USER_SECTION_BUILD_INFO = 22,
 };
 
 /** #UserDef_SpaceData.flag (State of the user preferences UI). */

@@ -12738,44 +12738,12 @@ class ExperimentalPanel:
         return bpy.app.version_cycle == "alpha"
 
 
-class USERPREF_PT_build_features(Panel):
-    """Panel for custom build features in Preferences."""
+class USERPREF_PT_about_build(Panel):
+    """Panel for build information and custom features in Preferences."""
     bl_space_type = 'PREFERENCES'
     bl_region_type = 'WINDOW'
-    bl_context = "build_features"
-    bl_label = "Build Features"
-
-    @classmethod
-    def poll(cls, _context):
-        # Always show this panel for custom builds
-        return True
-
-    def draw(self, context):
-        layout = self.layout
-        prefs = context.preferences
-        build_features = prefs.build_features
-
-        layout.use_property_split = False
-
-        # Info message
-        layout.label(text="Custom features for this experimental build:", icon='INFO')
-        layout.separator()
-
-        # Feature toggles
-        col = layout.column()
-        col.prop(build_features, "use_enhanced_paint_system")
-        col.prop(build_features, "use_dnd_gn_modifiers")
-        col.prop(build_features, "use_face_sets_in_edit_mesh")
-        col.prop(build_features, "use_dnd_texture")
-        col.prop(build_features, "use_sculpt_texture_mapping")
-
-
-class USERPREF_PT_experimental_build_info(Panel):
-    """Panel displaying experimental build information in Preferences."""
-    bl_space_type = 'PREFERENCES'
-    bl_region_type = 'WINDOW'
-    bl_context = "build_info"
-    bl_label = "Build Information"
+    bl_context = "build_features"  # Using existing context
+    bl_label = "About Build"
 
     @classmethod
     def poll(cls, _context):
@@ -12786,9 +12754,7 @@ class USERPREF_PT_experimental_build_info(Panel):
         layout = self.layout
         layout.use_property_split = False
 
-        # Build information - these values should match BKE_experimental_build
-        # TODO: In future, access via RNA from C++ BKE_experimental_build_info_get()
-
+        # Build Information Section
         box = layout.box()
         col = box.column()
 
@@ -12808,6 +12774,26 @@ class USERPREF_PT_experimental_build_info(Panel):
 
         # Additional info
         col.label(text="Built with love and caffeine.", icon='HEART')
+
+        # Separator between sections
+        layout.separator()
+        layout.separator()
+
+        # Build Features Section
+        prefs = context.preferences
+        build_features = prefs.build_features
+
+        # Features header
+        layout.label(text="Custom features for this experimental build:", icon='INFO')
+        layout.separator()
+
+        # Feature toggles
+        col = layout.column()
+        col.prop(build_features, "use_enhanced_paint_system")
+        col.prop(build_features, "use_dnd_gn_modifiers")
+        col.prop(build_features, "use_face_sets_in_edit_mesh")
+        col.prop(build_features, "use_dnd_texture")
+        col.prop(build_features, "use_sculpt_texture_mapping")
 
 
 """
@@ -13761,8 +13747,7 @@ classes = (
 
     USERPREF_PT_experimental_new_features,
     USERPREF_PT_experimental_prototypes,
-    USERPREF_PT_build_features,
-    USERPREF_PT_experimental_build_info,
+    USERPREF_PT_about_build,
     # USERPREF_PT_experimental_tweaks,
 
     USERPREF_PT_developer_tools,

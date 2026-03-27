@@ -2700,7 +2700,7 @@ static ARegion *ui_panel_category_active_tooltip_init(
       const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_w;
 
       if (!too_narrow) {
-        const int panel_content_width = region->winx - category_tabs_width;
+        const int panel_content_width = region->winx - category_tabs_width - 2 * UI_PANEL_MARGIN_X;
         min_width = max_ii(min_width, panel_content_width);
       }
     }
@@ -2714,7 +2714,8 @@ static ARegion *ui_panel_category_active_tooltip_init(
                                                                  use_tab_rect ? &tab_rect_screen : nullptr,
                                                                  prefer_left,
                                                                  min_width,
-                                                                 true);
+                                                                 true,
+                                                                 1.5f);
 }
 
 void panel_category_tooltip_timer_init(bContext *C, ARegion *region)

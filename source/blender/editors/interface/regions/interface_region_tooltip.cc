@@ -268,7 +268,7 @@ static void ui_tooltip_region_draw_cb(const bContext * /*C*/, ARegion *region)
       }
     }
     const int bbox_w = BLI_rcti_size_x(&bbox);
-    const int offset_x = max_ii(0, (bbox_w - int(pad_x) - total_w) / 2);
+    const int offset_x = max_ii(0, (bbox_w - total_w) / 2);
     bbox.xmin += offset_x;
   }
   bbox.ymax -= BLF_descender(data->fstyle.uifont_id);
@@ -1494,7 +1494,8 @@ static ARegion *ui_tooltip_create_with_data(bContext *C,
                                             const rcti *init_rect_overlap,
                                             bool prefer_left,
                                             int min_width,
-                                            bool center_text = false)
+                                            bool center_text = false,
+                                            float height_scale = 1.0f)
 {
   wmWindow *win = CTX_wm_window(C);
   const int2 win_size = WM_window_native_pixel_size(win);
@@ -1522,6 +1523,10 @@ static ARegion *ui_tooltip_create_with_data(bContext *C,
   BLF_size(data->fstyle.uifont_id, data->fstyle.points * UI_SCALE_FAC);
   int h = BLF_height_max(data->fstyle.uifont_id);
   const float pad_x = h * TIP_PADDING_X;
+  /* Scale vertical dimensions without affecting horizontal padding. */
+  if (height_scale != 1.0f) {
+    h = int(round(h * height_scale));
+  }
   const float pad_y = h * TIP_PADDING_Y;
 
   fontstyle_set(&data->fstyle);
@@ -1611,6 +1616,9 @@ static ARegion *ui_tooltip_create_with_data(bContext *C,
       const int extra_l = extra / 2;
       rect_i.xmin -= extra_l;
       rect_i.xmax += extra - extra_l;
+      /* Expand wrap width to match min_width so text wrapping
+       * stays in sync with the tooltip box width. */
+      data->wrap_width = max_ii(data->wrap_width, min_width);
     }
   }
 
@@ -2153,7 +2161,8 @@ ARegion *tooltip_create_from_text_with_colored_suffix_fixed_width(
     const rcti *init_rect_overlap,
     bool prefer_left,
     int min_width,
-    bool center_text)
+    bool center_text,
+    float height_scale)
 {
   std::unique_ptr<TooltipData> data = std::make_unique<TooltipData>();
   tooltip_text_field_add_with_suffix_color(
@@ -2161,7 +2170,7 @@ ARegion *tooltip_create_from_text_with_colored_suffix_fixed_width(
 
   float init_position[2] = {float(position[0]), float(position[1])};
   return ui_tooltip_create_with_data(
-      C, std::move(data), init_position, init_rect_overlap, prefer_left, min_width, center_text);
+      C, std::move(data), init_position, init_rect_overlap, prefer_left, min_width, center_text, height_scale);
 }
 
 bool tooltip_region_update_text(ARegion *region, const char *text)

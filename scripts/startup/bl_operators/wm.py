@@ -3482,7 +3482,7 @@ class WM_MT_splash(Menu):
 
         col2 = split.column()
 
-        col2.operator("wm.url_open_preset", text="What's New", icon='URL').type = 'RELEASE_NOTES'
+        col2.operator("wm.url_open", text=">>>Send FEEDBACK!<<<", icon='STRIP_COLOR_06').url = "https://xnazirbuildfeedback.carrd.co/" 
         col2.operator("wm.url_open_preset", text="Donate to Blender", icon='FUND').type = 'FUND'
 
         layout.separator()
@@ -3530,7 +3530,7 @@ class WM_MT_splash_about(Menu):
         col = split.column(align=True)
         col.emboss = 'PULLDOWN_MENU'
         col.operator("wm.url_open_preset", text="Donate", icon='FUND').type = 'FUND'
-        col.operator("wm.url_open_preset", text="What's New", icon='URL').type = 'RELEASE_NOTES'
+        col.operator("wm.url_open", text="What's New", icon='URL').url = "https://xnazirbuildfeedback.carrd.co/"
         col.separator(factor=2.0)
         col.operator("wm.url_open_preset", text="Credits", icon='URL').type = 'CREDITS'
         col.operator("wm.url_open", text="License", icon='URL').url = "https://www.blender.org/about/license/"

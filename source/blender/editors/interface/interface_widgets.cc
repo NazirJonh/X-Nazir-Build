@@ -4951,8 +4951,8 @@ static void widget_draw_tag(const bContext *C,
   rcti checkbox_rect = {0};
 
   if (!is_pref_mode) {
-    /* Add small padding from left edge of box */
-    const int left_padding = 3 * UI_SCALE_FAC;
+    /* Add proper padding from left edge of box */
+    const int left_padding = UI_UNIT_X / 4;  /* Space from left edge */
     offset_x += left_padding;
 
     /* Create checkbox rect - use smaller square checkbox, not full height */
@@ -4969,8 +4969,8 @@ static void widget_draw_tag(const bContext *C,
     /* Update offset to after checkbox (no extra spacing) */
     offset_x = checkbox_rect.xmax;
   } else {
-    /* In preference mode, add smaller padding from left edge */
-    const int left_padding = 2 * UI_SCALE_FAC;
+    /* In preference mode, add proper padding from left edge */
+    const int left_padding = UI_UNIT_X / 6;  /* Smaller space from left edge in pref mode */
     offset_x += left_padding;
   }
 
@@ -5009,9 +5009,9 @@ static void widget_draw_tag(const bContext *C,
     if (show_icon) {
       glyph_was_shown = true;
 
-      /* Calculate icon size based on button height */
-      const int icon_size = int(BLI_rcti_size_y(&content_rect) - 4 * UI_SCALE_FAC);
-      const float icon_draw_size = std::max(float(icon_size), 10.0f * UI_SCALE_FAC);
+      /* Calculate icon size based on button height - increased 2x */
+      const int icon_size = int((BLI_rcti_size_y(&content_rect) - 4 * UI_SCALE_FAC) * 1.5f);
+      const float icon_draw_size = std::max(float(icon_size), 15.0f * UI_SCALE_FAC);
 
       /* Calculate icon position - center vertically */
       const float center_y = (content_rect.ymin + content_rect.ymax) / 2.0f;
@@ -5176,12 +5176,14 @@ static void widget_draw_tag(const bContext *C,
     }
   }
 
-  /* Small spacing between glyph/icon and text - or just start if no glyph and no icon */
+  /* Proper spacing between glyph/icon and text - or just start if no glyph and no icon */
   if (!has_glyph && !has_icon && !is_pref_mode) {
     offset_x = checkbox_rect.xmax;
   }
-  const int small_spacing = 2 * UI_SCALE_FAC;
-  offset_x += small_spacing;
+  //  const int icon_text_spacing = UI_UNIT_X / 3;  /* Increased space between icon and text */
+
+  const int icon_text_spacing = 2 * UI_SCALE_FAC;  /* Increased space between icon and text */
+  offset_x += icon_text_spacing;
 
   /* ============================================================
    * PART 3: Draw tag name text

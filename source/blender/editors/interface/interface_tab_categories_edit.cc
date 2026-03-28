@@ -590,9 +590,17 @@ static CategoryTabInvokeLoadResult category_tab_invoke_load_operator_state_from_
                             sizeof(clean_display_name));
 
       if (clean_display_name[0] == '\0') {
-        const char *panel_label = find_panel_label_for_category(region, category);
-        if (panel_label) {
-          STRNCPY(clean_display_name, panel_label);
+        // Only use panel label for glyph_only categories
+        // For text_only categories, use the category name itself
+        if (is_single_glyph_str(category)) {
+          const char *panel_label = find_panel_label_for_category(region, category);
+          if (panel_label) {
+            STRNCPY(clean_display_name, panel_label);
+          }
+        }
+        else {
+          // For text_only categories: use category name, not panel label
+          STRNCPY(clean_display_name, category);
         }
       }
 

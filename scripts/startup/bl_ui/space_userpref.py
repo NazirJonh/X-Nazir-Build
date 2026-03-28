@@ -6567,9 +6567,11 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                 # This ensures tooltips show the correct original name when display_name is overridden
                 default_display_name = category
             else:
-                # For text_only categories, store the original name for Reset.
-                # Use panel label if available, otherwise fall back to category name.
-                default_display_name = category_to_label.get(category, "") or category
+                # For text_only categories, ALWAYS use category name as display name.
+                # Panel labels are inappropriate here: they represent individual panels
+                # ("Coloraide 1.5.0", "Credits", "Add walk cycle") not the addon/category name.
+                # Only glyph_only categories should use panel labels for human-readable names.
+                default_display_name = category
 
             # Use global key (-1) for newly discovered categories
             cache_key = _make_cache_key(-1, category)

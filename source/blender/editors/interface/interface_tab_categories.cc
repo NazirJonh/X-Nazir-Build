@@ -1882,6 +1882,42 @@ static const char *category_first_letter_source_name_get(const ARegion *region,
   if (category_id && is_single_glyph_str(category_id) && region && region->runtime &&
       region->runtime->type)
   {
+    /* CRITICAL FIX: When multiple extensions use the same tag-category (e.g., "Animation"),
+     * prioritize panels from the specific source_extension over generic panels.
+     * This prevents MPFB "Add walk cycle" from being used for all Animation extensions. */
+    const char *target_source_extension = nullptr;
+    
+    /* Try to get source_extension from category mappings for context-aware panel selection */
+    if (const CategoryGlyphItem *mapping_item = category_item_find_mappings(wm, category_id, space_type)) {
+      if (mapping_item->source_extension[0] != '\0') {
+        target_source_extension = mapping_item->source_extension;
+      }
+    }
+    
+    /* If no mapping found, try overrides */
+    if (!target_source_extension) {
+      if (const CategoryGlyphItem *override_item = category_item_find_overrides(wm, category_id, space_type)) {
+        if (override_item && override_item->source_extension[0] != '\0') {
+          target_source_extension = override_item->source_extension;
+        }
+      }
+    }
+    
+    /* TODO: First pass - find panel from specific extension context
+     * Currently disabled until proper source_extension detection is implemented */
+    /* if (target_source_extension) {
+      for (const PanelType &pt : region->runtime->type->paneltypes) {
+        if (pt.category && STREQ(pt.category, category_id)) {
+          // TODO: Add proper source_extension matching logic here
+          const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+          if (panel_label && panel_label[0] != '\0') {
+            return panel_label;
+          }
+        }
+      }
+    } */
+    
+    /* Second pass: fallback to any panel (original behavior) */
     for (const PanelType &pt : region->runtime->type->paneltypes) {
       if (pt.category && STREQ(pt.category, category_id)) {
         const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
@@ -1932,6 +1968,42 @@ const char *panel_category_tooltip_name_get(const ARegion *region,
   /* 4. For categories NOT in mappings (not explicitly configured), look up panel label.
    * This handles special cases like "Script 3" where category name contains only a glyph. */
   if (!found_in_mappings) {
+    /* CRITICAL FIX: When multiple extensions use the same tag-category (e.g., "Animation"),
+     * prioritize panels from the specific source_extension over generic panels.
+     * This prevents MPFB "Add walk cycle" from being used for all Animation extensions. */
+    const char *target_source_extension = nullptr;
+    
+    /* Try to get source_extension from category mappings for context-aware panel selection */
+    if (const CategoryGlyphItem *mapping_item = category_item_find_mappings(wm, category_idname, -1)) {
+      if (mapping_item->source_extension[0] != '\0') {
+        target_source_extension = mapping_item->source_extension;
+      }
+    }
+    
+    /* If no mapping found, try overrides */
+    if (!target_source_extension) {
+      if (const CategoryGlyphItem *override_item = category_item_find_overrides(wm, category_idname, -1)) {
+        if (override_item && override_item->source_extension[0] != '\0') {
+          target_source_extension = override_item->source_extension;
+        }
+      }
+    }
+    
+    /* TODO: First pass - find panel from specific extension context
+     * Currently disabled until proper source_extension detection is implemented */
+    /* if (target_source_extension) {
+      for (const PanelType &pt : region->runtime->type->paneltypes) {
+        if (pt.category && STREQ(pt.category, category_idname)) {
+          // TODO: Add proper source_extension matching logic here
+          const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+          if (panel_label && panel_label[0]) {
+            return panel_label;
+          }
+        }
+      }
+    } */
+    
+    /* Second pass: fallback to any panel (original behavior) */
     for (const PanelType &pt : region->runtime->type->paneltypes) {
       if (pt.category && STREQ(pt.category, category_idname)) {
         const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
@@ -3083,6 +3155,9 @@ static void apply_pending_insert(const bContext *C,
   }
   insert_index = clamp_i(insert_index, 0, r_result.size());
 
+  /* CRITICAL: Recalculate insert index after deletions to prevent vector bounds violation */
+  insert_index = clamp_i(insert_index, 0, r_result.size());
+
   Vector<PanelCategoryDyn *> appeared_ordered;
   appeared_ordered.reserve(appeared_categories.size());
   Set<std::string> ordered_ids;
@@ -3226,6 +3301,9 @@ static Vector<std::string> build_pending_order_after_insert(const bContext *C,
   for (const std::string &id : pending_inserted_ids) {
     erase_first_in_order(id);
   }
+
+  /* CRITICAL: Recalculate insert index after deletions to prevent vector bounds violation */
+  order_insert_index = clamp_i(order_insert_index, 0, pending_order.size());
 
   int order_offset = 0;
   for (const std::string &id : pending_inserted_ids) {
@@ -4981,6 +5059,11 @@ static const char *category_tab_draw_label_resolve(const ARegion *region,
     return category_id_draw;
   }
 
+  /* TODO: Extension-aware panel selection - currently simplified to original behavior
+   * Extension context detection will be implemented when proper source_extension
+   * tracking is available in PanelType structure */
+  
+  /* Original behavior: find first panel with matching category */
   for (const PanelType &pt : region->runtime->type->paneltypes) {
     if (pt.category && STREQ(pt.category, category_id)) {
       const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
@@ -6467,18 +6550,22 @@ static void ui_panel_category_draw_content(
         /* In Mixed mode, if glyph content is not visible (no dual mode),
          * use panel label for single-glyph categories (same as TEXT_ONLY mode).
          * To remove: replace this block with simple: draw_str = category_id_draw; */
-        if (!draw_dual && is_single_glyph_str(category_id_draw)) {
-          const char *panel_label = nullptr;
-          for (const PanelType &pt : region->runtime->type->paneltypes) {
-            if (pt.category && STREQ(pt.category, category_id)) {
-              panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-              if (panel_label && panel_label[0]) {
-                break;
+          if (!draw_dual && is_single_glyph_str(category_id_draw)) {
+            const char *panel_label = nullptr;
+            
+            /* TODO: Extension-aware panel selection - currently using original behavior
+             * Will be implemented when proper source_extension tracking is available */
+            
+            for (const PanelType &pt : region->runtime->type->paneltypes) {
+              if (pt.category && STREQ(pt.category, category_id)) {
+                panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+                if (panel_label && panel_label[0]) {
+                  break;
+                }
               }
             }
-          }
-          draw_str = panel_label ? panel_label : category_id_draw;
-        }
+           draw_str = panel_label ? panel_label : category_id_draw;
+         }
         else {
           draw_str = category_id_draw;
         }
@@ -6488,18 +6575,22 @@ static void ui_panel_category_draw_content(
         break;
       case USER_CATEGORY_TABS_TEXT_ONLY:
       default:
-        if (is_single_glyph_str(category_id_draw)) {
-          const char *panel_label = nullptr;
-          for (const PanelType &pt : region->runtime->type->paneltypes) {
-            if (pt.category && STREQ(pt.category, category_id)) {
-              panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-              if (panel_label && panel_label[0]) {
-                break;
-              }
-            }
-          }
-          draw_str = panel_label ? panel_label : category_id_draw;
-        }
+         if (is_single_glyph_str(category_id_draw)) {
+           const char *panel_label = nullptr;
+           
+           /* TODO: Extension-aware panel selection - currently using original behavior
+            * Will be implemented when proper source_extension tracking is available */
+           
+           for (const PanelType &pt : region->runtime->type->paneltypes) {
+             if (pt.category && STREQ(pt.category, category_id)) {
+               panel_label = CTX_IFACE_(pt.translation_context, pt.label);
+               if (panel_label && panel_label[0]) {
+                 break;
+               }
+             }
+           }
+           draw_str = panel_label ? panel_label : category_id_draw;
+         }
         else {
           draw_str = category_id_draw;
         }

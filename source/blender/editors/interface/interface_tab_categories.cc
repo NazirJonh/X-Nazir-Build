@@ -4041,14 +4041,14 @@ bool category_tabs_extension_preview_is_active(const ARegion *region)
 }
 
 bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
-                                                    ARegion *region,
-                                                    int mouse_x_local,
-                                                    int mouse_y_local,
-                                                    int hit_margin,
-                                                    const char **r_target_category_id,
-                                                    int *r_target_index,
-                                                    bool *r_insert_above,
-                                                    int *r_tab_height)
+                                                     ARegion *region,
+                                                     int mouse_x_local,
+                                                     int mouse_y_local,
+                                                     int hit_margin,
+                                                     const char **r_target_category_id,
+                                                     int *r_target_index,
+                                                     bool *r_insert_above,
+                                                     int *r_tab_height)
 {
   if (!C || !region || !region->runtime) {
     return false;
@@ -4057,6 +4057,21 @@ bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
   Vector<PanelCategoryDyn *> ordered_categories = get_ordered_categories(C, region);
   if (ordered_categories.is_empty()) {
     return false;
+  }
+  
+  /* CRITICAL FIX: Create a mapping from category name to full region index.
+   * This ensures ghost positioning works correctly regardless of tag filter state.
+   * get_ordered_categories() returns filtered results, but we need absolute indices
+   * for consistent ghost positioning across different filter states. */
+  Map<std::string, int> category_to_full_index;
+  {
+    int full_idx = 0;
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (pc_dyn.idname && pc_dyn.idname[0] != '\0') {
+        category_to_full_index.add(std::string(pc_dyn.idname), full_idx);
+      }
+      full_idx++;
+    }
   }
 
   const wmWindowManager *wm = CTX_wm_manager(C);
@@ -4083,7 +4098,9 @@ bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
       *r_target_category_id = last_reserved_prefix_tab->idname;
     }
     if (r_target_index) {
-      *r_target_index = last_reserved_prefix_idx;
+      /* Use full region index for consistent ghost positioning */
+      int full_index = category_to_full_index.lookup_default(std::string(last_reserved_prefix_tab->idname), last_reserved_prefix_idx);
+      *r_target_index = full_index;
     }
     if (r_insert_above) {
       *r_insert_above = false;
@@ -4181,7 +4198,9 @@ bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
       *r_target_category_id = bottom_tab->idname;
     }
     if (r_target_index) {
-      *r_target_index = bottom_tab_index;
+      /* Use full region index for consistent ghost positioning */
+      int full_index = category_to_full_index.lookup_default(std::string(bottom_tab->idname), bottom_tab_index);
+      *r_target_index = full_index;
     }
     if (r_insert_above) {
       *r_insert_above = false;
@@ -4235,7 +4254,9 @@ bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
       *r_target_category_id = first_tab->idname;
     }
     if (r_target_index) {
-      *r_target_index = 0;
+      /* Use full region index for consistent ghost positioning */
+      int full_index = category_to_full_index.lookup_default(std::string(first_tab->idname), 0);
+      *r_target_index = full_index;
     }
     if (r_insert_above) {
       *r_insert_above = true;
@@ -4332,7 +4353,11 @@ bool category_tabs_extension_drop_target_from_mouse(const bContext *C,
     *r_target_category_id = hit_tab->idname;
   }
   if (r_target_index) {
-    *r_target_index = hit_visual_index;
+    /* CRITICAL FIX: Use full region index instead of filtered visual index.
+     * This ensures ghost positioning works correctly when tag filters change
+     * the visible set of tabs between mouse events. */
+    int full_index = category_to_full_index.lookup_default(std::string(hit_tab->idname), hit_visual_index);
+    *r_target_index = full_index;
   }
   if (r_insert_above) {
     *r_insert_above = insert_above;
@@ -6102,78 +6127,110 @@ static const char *category_tab_extension_drop_ghost_draw(
     }
   }
 
-  if (preview.target_index >= 0 && preview.target_index < int(ordered_categories.size())) {
-    PanelCategoryDyn *target_tab = nullptr;
-
-    int resolved_target_index = -1;
-    if (preview.target_category_id[0] != '\0') {
-      int idx = 0;
-      for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
-        if (STREQ(pc_dyn_ptr->idname, preview.target_category_id)) {
-          target_tab = pc_dyn_ptr;
-          resolved_target_index = idx;
-          break;
-        }
-        idx++;
+  /* CRITICAL FIX: Find target tab using category name first, then fall back to full region index.
+   * preview.target_index now contains full region indices (not filtered visual indices),
+   * so we need to map it back to the filtered ordered_categories list correctly. */
+  
+  PanelCategoryDyn *target_tab = nullptr;
+  int resolved_target_index = -1;
+  
+  /* First, try to find by category name (most reliable) */
+  if (preview.target_category_id[0] != '\0') {
+    int visual_idx = 0;
+    for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
+      if (STREQ(pc_dyn_ptr->idname, preview.target_category_id)) {
+        target_tab = pc_dyn_ptr;
+        resolved_target_index = visual_idx;
+        break;
       }
+      visual_idx++;
     }
-
-    if (!target_tab) {
-      int loop_idx = 0;
-      for (PanelCategoryDyn *pc_dyn_ptr : ordered_categories) {
-        if (loop_idx == preview.target_index) {
-          target_tab = pc_dyn_ptr;
-          resolved_target_index = loop_idx;
-          break;
+  }
+  
+  /* If not found by name, build a mapping from full region index to visual index */
+  if (!target_tab && preview.target_index >= 0) {
+    /* Create mapping from full region index to current visual index */
+    Map<int, int> full_to_visual_index;
+    int visual_idx = 0;
+    int full_idx = 0;
+    
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (pc_dyn.idname && pc_dyn.idname[0] != '\0') {
+        /* Check if this category is in the current filtered list */
+        for (PanelCategoryDyn *visible_cat : ordered_categories) {
+          if (STREQ(visible_cat->idname, pc_dyn.idname)) {
+            full_to_visual_index.add(full_idx, visual_idx);
+            visual_idx++;
+            break;
+          }
         }
-        loop_idx++;
       }
+      full_idx++;
+    }
+    
+    /* Now find the target using the mapped index */
+    if (int *visual_index_ptr = full_to_visual_index.lookup_ptr(preview.target_index)) {
+      int target_visual_index = *visual_index_ptr;
+      if (target_visual_index < ordered_categories.size()) {
+        target_tab = ordered_categories[target_visual_index];
+        resolved_target_index = target_visual_index;
+        
+        if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+          if (should_log) {
+            printf("[EXT_GHOST] Found by MAPPED INDEX: full_idx=%d -> visual_idx=%d -> '%s'\n",
+                   preview.target_index, target_visual_index, target_tab->idname);
+          }
+        }
+      }
+    } else {
       if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-        if (should_log && target_tab) {
-          printf("[EXT_GHOST] Found by INDEX fallback: '%s' at idx=%d\n",
-                 target_tab->idname,
+        if (should_log) {
+          printf("[EXT_GHOST] Could not map full_idx=%d to visual index (category may be filtered out)\n",
                  preview.target_index);
         }
       }
     }
+  }
 
-    if (!target_tab) {
-      if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-        printf("[EXT_GHOST] SKIP: target_tab NULL for name='%s' idx=%d\n",
+  if (!target_tab) {
+    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+      if (should_log) {
+        printf("[EXT_GHOST] SKIP: target_tab NULL for name='%s' full_idx=%d (may be filtered out)\n",
                preview.target_category_id,
                preview.target_index);
       }
-      return "target_tab_null";
     }
+    return "target_tab_null";
+  }
 
-    const int category_count = int(ordered_categories.size());
-    const int raw_insertion_index = (resolved_target_index >= 0) ?
-                                        (resolved_target_index + (preview.insert_above ? 0 : 1)) :
-                                        -1;
-    const int insertion_index = raw_insertion_index;
-    const int shift_space = EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad;
+  const int category_count = int(ordered_categories.size());
+  const int raw_insertion_index = (resolved_target_index >= 0) ?
+                                      (resolved_target_index + (preview.insert_above ? 0 : 1)) :
+                                      -1;
+  const int insertion_index = raw_insertion_index;
+  const int shift_space = EXTENSION_DROP_GHOST_HEIGHT + preview.tab_v_pad;
 
-    int slot_top_y, slot_bottom_y;
+  int slot_top_y, slot_bottom_y;
 
-    if (insertion_index == 0) {
-      slot_top_y = target_tab->rect.ymax + shift_space;
-      slot_bottom_y = target_tab->rect.ymax;
-    }
-    else if (insertion_index >= int(ordered_categories.size())) {
-      PanelCategoryDyn *last_tab = ordered_categories[int(ordered_categories.size()) - 1];
-      slot_top_y = last_tab->rect.ymin;
+  if (insertion_index == 0) {
+    slot_top_y = target_tab->rect.ymax + shift_space;
+    slot_bottom_y = target_tab->rect.ymax;
+  }
+  else if (insertion_index >= category_count) {
+    PanelCategoryDyn *last_tab = ordered_categories[category_count - 1];
+    slot_top_y = last_tab->rect.ymin;
+    slot_bottom_y = slot_top_y - shift_space;
+  }
+  else {
+    if (preview.insert_above) {
+      slot_top_y = target_tab->rect.ymax;
       slot_bottom_y = slot_top_y - shift_space;
     }
     else {
-      if (preview.insert_above) {
-        slot_top_y = target_tab->rect.ymax;
-        slot_bottom_y = slot_top_y - shift_space;
-      }
-      else {
-        slot_top_y = target_tab->rect.ymin;
-        slot_bottom_y = slot_top_y - shift_space;
-      }
+      slot_top_y = target_tab->rect.ymin;
+      slot_bottom_y = slot_top_y - shift_space;
     }
+  }
 
     const int slot_center_y = (slot_top_y + slot_bottom_y) / 2;
     const int half_ghost_height = ghost_height / 2;
@@ -6223,16 +6280,6 @@ static const char *category_tab_extension_drop_ghost_draw(
         }
       }
     }
-  }
-  else {
-    ghost_rect.ymin = v2d->mask.ymax - ghost_height - 10;
-    ghost_rect.ymax = v2d->mask.ymax - 10;
-    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-      if (should_log) {
-        printf("[EXT_GHOST] FINAL (no target): ghost y=[%d,%d]\n", ghost_rect.ymin, ghost_rect.ymax);
-      }
-    }
-  }
 
   const bool ghost_in_viewport = (ghost_rect.ymax >= v2d->mask.ymin &&
                                   ghost_rect.ymin <= v2d->mask.ymax);

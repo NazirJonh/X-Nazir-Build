@@ -3371,7 +3371,7 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
 
   /* Create Tag button with preference mode (no checkbox) */
   Button *raw_but = uiDefButTag(block,
-                                tag_name ? tag_name : "Tag",
+                                (tag_name && tag_name[0] != '\0') ? tag_name : "Tag",
                                 glyph ? glyph : "",
                                 color,
                                 is_active,

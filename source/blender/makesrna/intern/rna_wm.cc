@@ -2433,6 +2433,28 @@ static void rna_CategoryTagDef_update(bContext *C, PointerRNA * /*ptr*/)
 #  endif
 }
 
+/* Set callback for CategoryTagDef.name - rejects empty names and restores previous value. */
+static void rna_CategoryTagDef_name_set(PointerRNA *ptr, const char *value)
+{
+  CategoryTagDef *tag = static_cast<CategoryTagDef *>(ptr->data);
+
+  /* Reject empty or whitespace-only names - keep the existing name unchanged. */
+  if (!value || value[0] == '\0') {
+    return;
+  }
+
+  /* Check if value is whitespace-only */
+  const char *p = value;
+  while (*p == ' ' || *p == '\t') {
+    p++;
+  }
+  if (*p == '\0') {
+    return;
+  }
+
+  BLI_strncpy(tag->name, value, sizeof(tag->name));
+}
+
 }  // namespace blender
 
 #else /* RNA_RUNTIME */
@@ -3369,6 +3391,7 @@ static void rna_def_category_tag_def(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_CategoryTagDef_name_set");
   RNA_def_property_ui_text(prop, "Name", "Tag name");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");

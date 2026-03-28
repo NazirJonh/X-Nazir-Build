@@ -499,6 +499,9 @@ class NODE_HT_tag_bar(Header):
             depress = tag.name in active_tags_set
             center_glyph = not show_names or (show_active_only and not depress)
 
+            if not tag.name:
+                continue
+
             row.tag_button(
                 "view3d.tag_bar_toggle",
                 tag_name=tag.name,

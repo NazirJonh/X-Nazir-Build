@@ -61,13 +61,27 @@ def _sync_view3d_tag_order_cache(wm):
         _view3d_tag_order_cache.clear()
         return []
 
-    # Keep existing order for known tags.
-    synced_order = [name for name in _view3d_tag_order_cache if name in current_names]
+    current_names_set = set(current_names)
+    cached_set = set(_view3d_tag_order_cache)
 
-    # Append newly created tags at the end.
-    for name in current_names:
-        if name not in synced_order:
-            synced_order.append(name)
+    disappeared = cached_set - current_names_set
+    appeared = current_names_set - cached_set
+
+    if disappeared and len(disappeared) == len(appeared):
+        # Likely a rename — replace old names with new names in-place
+        # to preserve the original position in the order.
+        appeared_list = list(appeared)
+        synced_order = list(_view3d_tag_order_cache)
+        for i, name in enumerate(synced_order):
+            if name in disappeared:
+                synced_order[i] = appeared_list.pop()
+    else:
+        # Normal sync: keep existing order for known tags.
+        synced_order = [name for name in _view3d_tag_order_cache if name in current_names_set]
+        # Append newly created tags at the end.
+        for name in current_names:
+            if name not in set(synced_order):
+                synced_order.append(name)
 
     _view3d_tag_order_cache.clear()
     _view3d_tag_order_cache.extend(synced_order)
@@ -1898,6 +1912,9 @@ class VIEW3D_HT_tag_bar_tags(Header):
             #   - Active tags: show text (left-aligned)
             #   - Inactive tags: center glyph only
             center_glyph = not show_names or (show_active_only and not depress)
+
+            if not tag.name:
+                continue
 
             row.tag_button(
                 "view3d.tag_bar_toggle",

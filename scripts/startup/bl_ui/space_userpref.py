@@ -3528,6 +3528,57 @@ def update_tag(tag_name, glyph=None, color=None, icon_key=None, icon_source=None
     return True, f"Tag '{tag_name}' updated"
 
 
+def rename_tag(old_name, new_name, auto_save=True):
+    """Rename a tag, updating all references in categories and order cache."""
+    global _all_tags_cache, _glyph_cache, _tag_order_cache
+
+    if not new_name or not new_name.strip():
+        return False, "New tag name cannot be empty"
+
+    new_name = new_name.strip()
+
+    if old_name not in _all_tags_cache:
+        return False, f"Tag '{old_name}' not found"
+
+    if old_name == new_name:
+        return True, f"Tag name unchanged"
+
+    if new_name in _all_tags_cache:
+        return False, f"Tag '{new_name}' already exists"
+
+    # Move data to new key
+    _all_tags_cache[new_name] = _all_tags_cache.pop(old_name)
+
+    # Update order cache
+    if old_name in _tag_order_cache:
+        idx = _tag_order_cache.index(old_name)
+        _tag_order_cache[idx] = new_name
+
+    # Update all category assignments
+    for cat_data in _glyph_cache.values():
+        if "tags" in cat_data and old_name in cat_data["tags"]:
+            idx = cat_data["tags"].index(old_name)
+            cat_data["tags"][idx] = new_name
+
+    # Sync renamed tag to WM
+    try:
+        wm = bpy.context.window_manager
+        if wm and hasattr(wm, 'category_tags'):
+            for tag_item in wm.category_tags:
+                if tag_item.name == old_name:
+                    tag_item.name = new_name
+                    break
+    except Exception as e:
+        category_debug_print(f"[RENAME_TAG] WM sync error: {e}")
+
+    tag_log(f"Renamed tag: '{old_name}' -> '{new_name}'")
+
+    if auto_save:
+        _auto_save_tags()
+
+    return True, f"Tag renamed to '{new_name}'"
+
+
 def delete_tag(tag_name, auto_save=True):
     """Delete a tag from registry and all category assignments."""
     global _all_tags_cache, _glyph_cache, _tag_order_cache
@@ -7537,6 +7588,27 @@ def _sync_wm_to_glyph_cache_impl():
 
                 # Only update if WM has tags OR our cache is empty (initial load)
                 if new_tags_cache and _all_tags_cache != new_tags_cache:
+                    # Detect tag renames and update _tag_order_cache before replacing cache.
+                    # When name is changed via box.prop(tag, "name"), the RNA update fires
+                    # and rebuilds cache here. Without this, the old name stays in _tag_order_cache
+                    # and the new name gets appended at the end on next WM sync.
+                    if _tag_order_cache:
+                        old_keys = set(_all_tags_cache.keys())
+                        new_keys = set(new_tags_cache.keys())
+                        disappeared = old_keys - new_keys
+                        appeared = new_keys - old_keys
+                        # Same count means likely a rename, not add/delete
+                        if disappeared and len(disappeared) == len(appeared):
+                            for old_name in list(disappeared):
+                                if old_name in _tag_order_cache:
+                                    idx = _tag_order_cache.index(old_name)
+                                    # Pick a new name not already in order cache
+                                    for new_name in list(appeared):
+                                        if new_name not in _tag_order_cache:
+                                            _tag_order_cache[idx] = new_name
+                                            appeared.discard(new_name)
+                                            break
+
                     _all_tags_cache = new_tags_cache
                     changes_detected = True
                     category_debug_print(f"[GLYPH] Synced {len(_all_tags_cache)} tag definitions from WM")
@@ -9015,6 +9087,7 @@ class USERPREF_OT_category_tag_edit(Operator):
     bl_options = {'REGISTER', 'INTERNAL'}
 
     name: bpy.props.StringProperty(name="Tag Name")
+    original_name: bpy.props.StringProperty(name="Original Name", options={'HIDDEN'})
     glyph: bpy.props.StringProperty(name="Glyph")
     color: bpy.props.FloatVectorProperty(
         name="Color",
@@ -9055,6 +9128,8 @@ class USERPREF_OT_category_tag_edit(Operator):
     )
 
     def invoke(self, context, event):
+        # Save original name so we can restore it if user clears the field
+        self.original_name = self.name
         # Load current values - convert Unicode glyph to hex for display
         tag_data = get_tag_data(self.name)
         self.glyph = _glyph_to_hex(tag_data.get("glyph", ""))
@@ -9071,6 +9146,13 @@ class USERPREF_OT_category_tag_edit(Operator):
         layout = self.layout
         layout.use_property_split = True
         layout.prop(self, "name")
+
+        # Warn user if name is empty and stop drawing to avoid C++ crash
+        if not self.name.strip():
+            layout.alert = True
+            layout.label(text="Tag name cannot be empty", icon='ERROR')
+            layout.alert = False
+            return
 
         # Display mode toggle (2 options only)
         row = layout.row(align=True)
@@ -9138,6 +9220,14 @@ class USERPREF_OT_category_tag_edit(Operator):
 
     @with_context_check
     def execute(self, context):
+        # If user cleared the name field, restore the original name and cancel
+        if not self.name.strip():
+            self.name = self.original_name
+            self.report({'WARNING'}, "Tag name cannot be empty, restored original name")
+            return {'CANCELLED'}
+
+        new_name = self.name.strip()
+
         # Determine icon_source from display_mode_ui
         print(f"[TAG EXECUTE] BEFORE: self.icon_key='{self.icon_key}', self.display_mode_ui='{self.display_mode_ui}'")
         icon_source = _tag_icon_source_from_display_mode(self.display_mode_ui)
@@ -9154,9 +9244,19 @@ class USERPREF_OT_category_tag_edit(Operator):
             if not is_valid:
                 self.report({'ERROR'}, error_msg)
                 return {'CANCELLED'}
-        
+
+        # Handle rename if name changed
+        working_name = self.original_name
+        if new_name != self.original_name:
+            success, message = rename_tag(self.original_name, new_name, auto_save=False)
+            if not success:
+                self.report({'ERROR'}, message)
+                return {'CANCELLED'}
+            working_name = new_name
+
+        # Update glyph/color/icon using the (possibly renamed) key
         success, message = update_tag(
-            self.name,
+            working_name,
             glyph=glyph,
             color=list(self.color),
             icon_key=icon_key,
@@ -9165,12 +9265,8 @@ class USERPREF_OT_category_tag_edit(Operator):
         )
         if success:
             self.report({'INFO'}, message)
-
-            # Defer save to background thread - prevents UI freeze
-            # Tag changes are already visible via existing WM data
             category_debug_print(f"[EDIT_TAG] Deferring save - no heavy sync")
             _auto_save_tags()
-
             context.area.tag_redraw()
             return {'FINISHED'}
         self.report({'ERROR'}, message)

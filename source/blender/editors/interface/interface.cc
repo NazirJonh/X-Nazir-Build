@@ -5315,7 +5315,7 @@ Button *uiDefButTagPref(Block *block,
                         const char *tip)
 {
   /* Preference mode: no checkbox, is_active=false */
-  return uiDefButTag(block, tag_name, glyph, color, false, true, center_glyph, icon_id, icon_path, x, y, width, height, tip);
+  return uiDefButTag(block, (tag_name && tag_name[0] != '\0') ? tag_name : "Tag", glyph, color, false, true, center_glyph, icon_id, icon_path, x, y, width, height, tip);
 }
 
 /**

@@ -53,7 +53,7 @@ if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
 # -----------------------------------------------------------------------------
 # Tag System - Infrastructure Utilities (CleanPanels patterns)
 
-TAG_DEBUG = True  # Set to False to disable all debug output
+TAG_DEBUG = False  # Set to False to disable all debug output
 TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
 SAVE_DEBUG = False  # Set to True to enable verbose save/load logging (printf-style)
 
@@ -12965,6 +12965,8 @@ class USERPREF_PT_about_build(Panel):
         if body:
             # Author image
             import os
+            # Ensure previews module is loaded
+            import bpy.utils.previews
             image_path = os.path.join(
                 bpy.utils.resource_path('LOCAL'),
                 'datafiles', 'autor_image.png'
@@ -13025,13 +13027,13 @@ class USERPREF_PT_about_build(Panel):
         col.prop(build_features, "use_face_sets_in_edit_mesh")
         col.prop(build_features, "use_dnd_texture")
         col.prop(build_features, "use_sculpt_texture_mapping")
-        
+
         # Feedback Section
         box = layout.box()
         col = box.column()
         col.label(text="We value your feedback on this experimental build:", icon='COMMUNITY')
         col.separator()
-        
+
         # Feedback button
         col2 = col.column()
         col2.scale_y = 1.5

@@ -4952,7 +4952,11 @@ def set_category_data(category,
         if entry.get("base_type") == "glyph_text" or (glyph and not _is_single_glyph(category)):
             entry["default_display_name"] = category
         else:
-            entry["default_display_name"] = entry.get("display_name", "")
+            # For text_only/glyph_only categories, try to find Panel bl_label first,
+            # then fall back to category name. Never use entry["display_name"] here
+            # because it may already be a user-renamed value (e.g., "ZZZ" instead of "Hyperfy").
+            panel_label = _find_panel_label_for_category(category)
+            entry["default_display_name"] = panel_label if panel_label else category
     if "glyph_mode" not in entry:
         entry["glyph_mode"] = "auto"
     if "first_letter" not in entry:
@@ -4978,9 +4982,10 @@ def set_category_data(category,
             # Reset should return to first letter (nullptr in C++)
     if display_name is not None:
         _glyph_cache[key]["display_name"] = display_name
-        # Also update default_display_name if it's empty (preserve discovered label)
-        if not _glyph_cache[key].get("default_display_name"):
-            _glyph_cache[key]["default_display_name"] = display_name
+        # NOTE: Do NOT update default_display_name here. It must be set only once
+        # during initial category discovery to preserve the original name for Reset.
+        # Updating it here causes renamed categories (e.g., "Hyperfy" → "ZZZ") to
+        # lose their original name, breaking the Reset functionality.
     # Keep first_letter in sync with display_name when explicit value is not provided.
     if first_letter is not None:
         _glyph_cache[key]["first_letter"] = first_letter

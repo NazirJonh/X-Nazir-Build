@@ -74,7 +74,7 @@ const EnumPropertyItem rna_enum_preference_section_items[] = {
     RNA_ENUM_ITEM_SEPR,
     {USER_SECTION_DEVELOPER_TOOLS, "DEVELOPER_TOOLS", 0, "Developer Tools", ""},
     {USER_SECTION_EXPERIMENTAL, "EXPERIMENTAL", 0, "Experimental", ""},
-    {USER_SECTION_BUILD_FEATURES, "BUILD_FEATURES", 0, "About Build", ""},
+    {USER_SECTION_BUILD_FEATURES, "BUILD_FEATURES", ICON_INFO, "About Build", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

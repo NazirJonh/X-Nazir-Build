@@ -10094,7 +10094,7 @@ class USERPREF_PT_interface_accessibility(InterfacePanel, CenterAlignMixIn, Pane
 
 
 class USERPREF_PT_interface_display_tab_sizes(InterfacePanel, CenterAlignMixIn, Panel):
-    bl_label = "Tab Sizes"
+    bl_label = "Category Tab Settings"
     bl_parent_id = "USERPREF_PT_interface_display"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -10106,9 +10106,18 @@ class USERPREF_PT_interface_display_tab_sizes(InterfacePanel, CenterAlignMixIn, 
         view = prefs.view
 
         col = layout.column()
-        col.prop(view, "category_tabs_zoom_icon", text="Icon Size")
-        col.prop(view, "category_tabs_zoom_mixed", text="Mixed Size")
-        col.prop(view, "category_tabs_zoom_text", text="Text Size")
+        col.label(text="Default Display Mode")
+        row = col.row(align=True)
+        row.prop_enum(view, "category_tabs_display_mode", "GLYPHS_ONLY", text="Icon")
+        row.prop_enum(view, "category_tabs_display_mode", "GLYPHS_TEXT", text="Mixed")
+        row.prop_enum(view, "category_tabs_display_mode", "TEXT_ONLY", text="Text")
+
+        col.separator()
+
+        col.label(text="Size")
+        col.prop(view, "category_tabs_zoom_icon", text="Icon")
+        col.prop(view, "category_tabs_zoom_mixed", text="Mixed")
+        col.prop(view, "category_tabs_zoom_text", text="Text")
 
 
 class USERPREF_PT_interface_editors(InterfacePanel, CenterAlignMixIn, Panel):

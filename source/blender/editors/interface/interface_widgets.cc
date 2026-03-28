@@ -5010,7 +5010,7 @@ static void widget_draw_tag(const bContext *C,
       glyph_was_shown = true;
 
       /* Calculate icon size based on button height - increased 2x */
-      const int icon_size = int((BLI_rcti_size_y(&content_rect) - 4 * UI_SCALE_FAC) * 1.5f);
+      const int icon_size = int((BLI_rcti_size_y(&content_rect) - 4 * UI_SCALE_FAC) * 1.0f);
       const float icon_draw_size = std::max(float(icon_size), 15.0f * UI_SCALE_FAC);
 
       /* Calculate icon position - center vertically */

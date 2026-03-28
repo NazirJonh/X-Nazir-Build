@@ -1368,15 +1368,23 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
     }
 
     const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-    const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 0.7f * dpi_fac) :
+    const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 1.4f * dpi_fac) :
                                   (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
-    const int btn_width = icon_glyph_width + text_width + UI_UNIT_X / 2;
+    
+    /* Calculate proper button width with adequate padding */
+    const int left_padding = UI_UNIT_X / 2;  /* Left padding for icon */
+    const int icon_text_spacing = UI_UNIT_X / 3;  /* Spacing between icon and text */
+    const int right_padding = UI_UNIT_X;  /* Reduced right padding for compact buttons */
+    
+    const int btn_width = use_icon ? 
+      (left_padding + icon_glyph_width + icon_text_spacing + text_width + right_padding) :  /* Full width for proper text display */
+      (left_padding + icon_glyph_width + icon_text_spacing + text_width + right_padding);
 
-    /* Create button label - use placeholder for icon, glyph text otherwise */
+    /* Create button label - use proper spacing for icon, glyph text otherwise */
     char button_label[72];
     if (use_icon) {
-      /* For icon mode, use a space placeholder - icon will be drawn manually */
-      SNPRINTF(button_label, " %s", btn.tag_name);
+      /* For icon mode, add enough spaces for proper icon placement and spacing */
+      SNPRINTF(button_label, "        %s", btn.tag_name);  /* 6 spaces for icon + spacing + text positioning */
     }
     else if (display_glyph[0]) {
       SNPRINTF(button_label, "%s %s", display_glyph, btn.tag_name);
@@ -1406,8 +1414,8 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 
     /* Draw icon manually if using icon mode */
     if (use_icon) {
-      const float icon_size = UI_UNIT_Y * 0.7f * dpi_fac;
-      const float icon_x = float(xco + UI_UNIT_X / 4);
+      const float icon_size = UI_UNIT_Y * 1.4f * dpi_fac;
+      const float icon_x = float(xco + left_padding);
       /* Center icon vertically in the tag bar. */
       const float icon_y = (UI_UNIT_Y * dpi_fac - icon_size) / 2.0f;
       draw_tag_icon_with_tint(btn, icon_x, icon_y, icon_size, 0.0f);
@@ -1519,14 +1527,23 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
     }
 
     const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-    const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 0.5f * dpi_fac) :
+    const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 1.0f * dpi_fac) :
                                   (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
-    const int btn_width = icon_glyph_width + text_width + 20;
+    
+    /* Calculate proper button width with adequate padding for header */
+    const int left_padding = 10;  /* Left padding for icon in header */
+    const int icon_text_spacing = 15;  /* Spacing between icon and text in header */
+    const int right_padding = 5;  /* Reduced right padding for compact buttons in header */
+    
+    const int btn_width = use_icon ? 
+      (left_padding + icon_glyph_width + icon_text_spacing + text_width + right_padding) :  /* Full width for proper text display */
+      (left_padding + icon_glyph_width + icon_text_spacing + text_width + right_padding);
 
-    /* Create button label - use placeholder for icon, glyph text otherwise */
+    /* Create button label - use proper spacing for icon, glyph text otherwise */
     char button_label[72];
     if (use_icon) {
-      SNPRINTF(button_label, " %s", btn.tag_name);
+      /* For icon mode, add enough spaces for proper icon placement and spacing */
+      SNPRINTF(button_label, "        %s", btn.tag_name);  /* 6 spaces for icon + spacing + text positioning */
     }
     else if (display_glyph[0]) {
       SNPRINTF(button_label, "%s %s", display_glyph, btn.tag_name);
@@ -1549,8 +1566,8 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
 
     /* Draw icon manually if using icon mode */
     if (use_icon && btn.icon_id != ICON_NONE) {
-      const float icon_size = UI_UNIT_Y * 0.5f * dpi_fac;
-      const float icon_x = float(xco + 10);
+      const float icon_size = UI_UNIT_Y * 1.0f * dpi_fac;
+      const float icon_x = float(xco + left_padding);
       const float icon_y = float((UI_UNIT_Y - 4) * 0.15f);
       draw_tag_icon_with_tint(btn, icon_x, icon_y, icon_size, 0.0f);
     }
@@ -1678,14 +1695,23 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
       }
 
       const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-      const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 0.7f * dpi_fac) :
+      const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 1.4f * dpi_fac) :
                                     (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
-      const int btn_width = icon_glyph_width + text_width + UI_UNIT_X;
+      
+      /* Calculate proper button width with adequate padding for layout */
+      const int left_padding = UI_UNIT_X / 2;  /* Left padding for icon in layout */
+      const int icon_text_spacing = UI_UNIT_X / 3;  /* Spacing between icon and text in layout */
+      const int right_padding = UI_UNIT_X / 8;  /* Reduced right padding for compact buttons in layout */
+      
+      const int btn_width = use_icon ? 
+        (left_padding + icon_glyph_width + icon_text_spacing + text_width + right_padding) :  /* Full width for proper text display */
+        (left_padding + icon_glyph_width + icon_text_spacing + text_width + right_padding);
 
-      /* Create button label - use placeholder for icon, glyph text otherwise */
+      /* Create button label - use proper spacing for icon, glyph text otherwise */
       char button_label[72];
       if (use_icon) {
-        SNPRINTF(button_label, " %s", btn.tag_name);
+        /* For icon mode, add enough spaces for proper icon placement and spacing */
+        SNPRINTF(button_label, "        %s", btn.tag_name);  /* 6 spaces for icon + spacing + text positioning */
       }
       else if (display_glyph[0]) {
         SNPRINTF(button_label, "%s %s", display_glyph, btn.tag_name);
@@ -1708,8 +1734,8 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
 
       /* Draw icon manually if using icon mode */
       if (use_icon && btn.icon_id != ICON_NONE) {
-        const float icon_size = UI_UNIT_Y * 0.7f * dpi_fac;
-        const float icon_x = float(xco + UI_UNIT_X / 4);
+        const float icon_size = UI_UNIT_Y * 1.4f * dpi_fac;
+        const float icon_x = float(xco + left_padding);
         const float icon_y = float((UI_UNIT_Y - 4) * 0.15f);
         draw_tag_icon_with_tint(btn, icon_x, icon_y, icon_size, 0.0f);
       }

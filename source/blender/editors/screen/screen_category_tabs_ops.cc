@@ -240,7 +240,8 @@ static void category_tab_reset_apply_to_operator(bContext *C,
                                                    const CategoryTabResetDefaults &defaults,
                                                    const bool reset_name,
                                                    const bool reset_glyph,
-                                                   const bool reset_color)
+                                                   const bool reset_color,
+                                                   const bool reset_icon)
 {
   if (target_op == nullptr) {
     return;
@@ -261,6 +262,7 @@ static void category_tab_reset_apply_to_operator(bContext *C,
   }
 
   if (reset_glyph) {
+    /* Reset glyph character (hex code). */
     if (defaults.glyph != nullptr) {
       char glyph_hex[16];
       utf8_to_hex_codepoint(defaults.glyph, glyph_hex, sizeof(glyph_hex));
@@ -277,47 +279,51 @@ static void category_tab_reset_apply_to_operator(bContext *C,
       RNA_string_set(target_op->ptr, "glyph", "");
     }
 
-    /* Always clear icon fields first - user's manually-assigned custom icon is
-     * an override, not a default, and must be removed on reset.
-     * Then restore the mapping-level default icon only if it is an extension_auto
-     * icon (i.e. a built-in icon provided automatically by an extension). */
-    RNA_string_set(target_op->ptr, "icon_path", "");
-    RNA_string_set(target_op->ptr, "icon_key", "");
-    RNA_string_set(target_op->ptr, "icon_provider", "");
-    RNA_enum_set(target_op->ptr, "icon_source", ui::CATEGORY_TAB_ICON_SOURCE_AUTO);
+    if (reset_icon) {
+      /* Clear icon fields first - user's manually-assigned custom icon is
+       * an override, not a default, and must be removed on reset.
+       * Then restore the mapping-level default icon only if it is an extension_auto
+       * icon (i.e. a built-in icon provided automatically by an extension). */
+      RNA_string_set(target_op->ptr, "icon_path", "");
+      RNA_string_set(target_op->ptr, "icon_key", "");
+      RNA_string_set(target_op->ptr, "icon_provider", "");
+      RNA_enum_set(target_op->ptr, "icon_source", ui::CATEGORY_TAB_ICON_SOURCE_AUTO);
 
-    PropertyRNA *display_mode_prop = RNA_struct_find_property(target_op->ptr, "display_mode_ui");
-    if (display_mode_prop != nullptr) {
-      if (defaults.has_default_icon) {
-        /* Restore built-in extension icon and show Icon Custom panel. */
-        RNA_string_set(target_op->ptr,
-                       "icon_path",
-                       defaults.icon_path ? defaults.icon_path : "");
-        RNA_string_set(target_op->ptr,
-                       "icon_provider",
-                       defaults.icon_provider ? defaults.icon_provider : "");
-        RNA_string_set(target_op->ptr,
-                       "icon_key",
-                       defaults.icon_key ? defaults.icon_key : "");
-        RNA_enum_set(target_op->ptr, "icon_source", defaults.icon_source);
-        RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON);
-        RNA_enum_set(target_op->ptr, "custom_icon_mode_ui", CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM);
-      }
-      else {
-        /* No built-in default icon.
-         * For text categories, reset must keep first-letter behavior after Save,
-         * otherwise save path may persist glyph_mode=auto and UI can fall back to tag glyph.
-         */
-        if (is_single_glyph_str(category)) {
-          RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_GLYPH);
+      PropertyRNA *display_mode_prop = RNA_struct_find_property(target_op->ptr,
+                                                                "display_mode_ui");
+      if (display_mode_prop != nullptr) {
+        if (defaults.has_default_icon) {
+          /* Restore built-in extension icon and show Icon Custom panel. */
+          RNA_string_set(target_op->ptr,
+                         "icon_path",
+                         defaults.icon_path ? defaults.icon_path : "");
+          RNA_string_set(target_op->ptr,
+                         "icon_provider",
+                         defaults.icon_provider ? defaults.icon_provider : "");
+          RNA_string_set(target_op->ptr,
+                         "icon_key",
+                         defaults.icon_key ? defaults.icon_key : "");
+          RNA_enum_set(target_op->ptr, "icon_source", defaults.icon_source);
+          RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON);
+          RNA_enum_set(target_op->ptr, "custom_icon_mode_ui", CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM);
         }
         else {
-          RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_TEXT);
-          PropertyRNA *glyph_mode_prop = RNA_struct_find_property(target_op->ptr, "glyph_mode");
-          if (glyph_mode_prop != nullptr) {
-            RNA_enum_set(target_op->ptr,
-                         "glyph_mode",
-                         ui::CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER);
+          /* No built-in default icon.
+           * For text categories, reset must keep first-letter behavior after Save,
+           * otherwise save path may persist glyph_mode=auto and UI can fall back to
+           * tag glyph. */
+          if (is_single_glyph_str(category)) {
+            RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_GLYPH);
+          }
+          else {
+            RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_TEXT);
+            PropertyRNA *glyph_mode_prop = RNA_struct_find_property(target_op->ptr,
+                                                                     "glyph_mode");
+            if (glyph_mode_prop != nullptr) {
+              RNA_enum_set(target_op->ptr,
+                           "glyph_mode",
+                           ui::CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER);
+            }
           }
         }
       }
@@ -333,12 +339,14 @@ static void category_tab_reset_apply_to_operator(bContext *C,
 
 static void category_tab_reset_tag_redraw(bContext *C, wmWindowManager *wm, ScrArea *area)
 {
-  /* Force redraw of the popup to update glyph preview/tag UI. */
+  /* Force redraw of the popup to update glyph preview/tag UI.
+   * NOTE: Only use redraw_no_rebuild here. ED_region_tag_refresh_ui would
+   * destroy and recreate the popup block, which triggers the cancel callback
+   * and restores the original snapshot data — undoing the reset. */
   if (category_tab_popup_block) {
     ARegion *region = CTX_wm_region(C);
     if (region) {
       ED_region_tag_redraw_no_rebuild(region);
-      ED_region_tag_refresh_ui(region);
     }
   }
 
@@ -620,9 +628,10 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
   const bool reset_glyph = RNA_boolean_get(op->ptr, "reset_glyph");
   const bool reset_color = RNA_boolean_get(op->ptr, "reset_color");
   const bool reset_tag = RNA_boolean_get(op->ptr, "reset_tag");
+  const bool reset_icon = RNA_boolean_get(op->ptr, "reset_icon");
 #if CATEGORY_TAB_DEBUG_ENABLED
-  printf("[RESET EXEC] reset_name=%d, reset_glyph=%d, reset_color=%d, reset_tag=%d\n", 
-         reset_name, reset_glyph, reset_color, reset_tag);
+  printf("[RESET EXEC] reset_name=%d, reset_glyph=%d, reset_color=%d, reset_tag=%d, reset_icon=%d\n",
+         reset_name, reset_glyph, reset_color, reset_tag, reset_icon);
 #endif
 
   wmWindowManager *wm = CTX_wm_manager(C);
@@ -654,7 +663,8 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
                                        defaults,
                                        reset_name,
                                        reset_glyph,
-                                       reset_color);
+                                       reset_color,
+                                       reset_icon);
 
   /* Keep reset popup operator props in sync with the dialog operator props. */
   if (op != dialog_op) {
@@ -664,14 +674,16 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
                                          defaults,
                                          reset_name,
                                          reset_glyph,
-                                         reset_color);
+                                         reset_color,
+                                         reset_icon);
   }
 
   /* When resetting the glyph/icon, also clear icon fields from the WM override so that
    * the live_update callback (called below) does not re-read stale icon data and
    * propagate it back into the override. Without this, the custom icon assigned by the
-   * user keeps appearing in Preview Image and the tab even after clicking Reset. */
-  if (reset_glyph) {
+   * user keeps appearing in Preview Image and the tab even after clicking Reset.
+   * Skip this entire block when reset_icon is false - user wants to preserve their icon. */
+  if (reset_glyph && reset_icon) {
     CategoryGlyphItem *override_item = category_tab_reset_override_ensure(wm, category, space_type);
     if (defaults.has_default_icon) {
       /* Restore default extension icon in the WM override. */
@@ -696,11 +708,11 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
    *    mappings (so compute_reset_defaults can't find it)
    * 2) User had manually overridden the extension icon with their own custom
    *    icon, and Reset should restore the original extension icon.png */
-  if (reset_glyph && !defaults.has_default_icon && dialog_op != nullptr) {
+  if (reset_glyph && reset_icon && !defaults.has_default_icon && dialog_op != nullptr) {
     char detected_icon_path[1024] = "";
     char detected_icon_provider[128] = "";
 
-    if (ui::category_tab_try_auto_detect_extension_icon(
+    if (category_tab_try_auto_detect_extension_icon(
             C, category, detected_icon_path, detected_icon_provider))
     {
       /* Apply detected extension icon to dialog operator. */
@@ -736,8 +748,10 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
    * _glyph_cache and JSON, appearing in "Categories using this tag" panel.
    *
    * Solution: Call Python reset_category_to_defaults() which directly clears
-   * GLOBAL entry in _glyph_cache, bypassing the sync issue. */
-  if (reset_glyph) {
+   * GLOBAL entry in _glyph_cache, bypassing the sync issue.
+   * Run when reset_icon is true - user wants to reset icon along with glyph,
+   * and clearing Python cache removes stale icon data so auto-detected extension icon takes effect. */
+  if (reset_glyph && reset_icon) {
     PointerRNA wm_ptr = RNA_pointer_create_discrete(&wm->id, RNA_WindowManager, wm);
     RNA_string_set(&wm_ptr, "category_tab_save_category", category);
 
@@ -855,6 +869,15 @@ static void SCREEN_OT_category_tab_reset(wmOperatorType *ot)
   RNA_def_boolean(ot->srna, "reset_glyph", true, "Glyph", "Reset glyph");
   RNA_def_boolean(ot->srna, "reset_color", true, "Color", "Reset color");
   RNA_def_boolean(ot->srna, "reset_tag", true, "Tag", "Reset tags");
+  RNA_def_boolean(ot->srna, "reset_icon", true, "Icon", "Reset custom icon to default");
+
+  /* Icon data properties for sync (hidden, not user-facing). */
+  prop = RNA_def_string(ot->srna, "icon_path", nullptr, 1024, "Icon Path", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_string(ot->srna, "icon_key", nullptr, 128, "Icon Key", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_string(ot->srna, "icon_provider", nullptr, 128, "Icon Provider", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
 }
 
 /** \} */

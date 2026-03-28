@@ -4485,11 +4485,24 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     }
   }
 
-   /* After saving, switch to the assigned tag if category has been assigned to a tag.
-    * This handles the case where user selected an existing tag and saved. */
+   /* After saving, switch to the assigned tag ONLY when the category was truly
+    * unassigned (pending_tag_assignment=true in mappings, i.e. in "New Add-ons!")
+    * and just received its first tag. For already-assigned categories
+    * (pending_tag_assignment=false), the active tag must remain unchanged —
+    * switching it would break the normal editing workflow. */
    {
+     /* Check whether the category was in "New Add-ons!" before the save.
+      * Only pending_tag_assignment=true means the category was unassigned.
+      * A category with pending_tag_assignment=false but empty tags is NOT
+      * in "New Add-ons!" — it's a regular assigned category without tags. */
+     const CategoryGlyphItem *mapping_before_save =
+         category_glyph_item_find_with_global_fallback_const(
+             wm->category_glyph_mappings, category, space_type);
+     const bool was_pending = (mapping_before_save != nullptr &&
+                               mapping_before_save->pending_tag_assignment != 0);
+
      const char *saved_category_tags = category_tags_string_lookup(wm, category, space_type);
-     if (saved_category_tags && saved_category_tags[0] != '\0') {
+     if (was_pending && saved_category_tags && saved_category_tags[0] != '\0') {
        /* Category has tags assigned - switch to the first assigned tag */
        Vector<std::string> assigned_tag_list;
        category_tab_split_tags(saved_category_tags, assigned_tag_list, ",;");

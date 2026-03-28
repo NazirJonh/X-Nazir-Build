@@ -4848,7 +4848,10 @@ def set_category_glyph(category, glyph, space_type=-1, save=True):
         if entry.get("base_type") == "glyph_text" or (glyph and not _is_single_glyph(category)):
             entry["default_display_name"] = category
         else:
-            entry["default_display_name"] = entry.get("display_name", "")
+            # NEVER use entry["display_name"] here — it may be a user-renamed value.
+            # Use panel label or category name as the original name for Reset.
+            panel_label = _find_panel_label_for_category(category)
+            entry["default_display_name"] = panel_label if panel_label else category
     if "glyph_mode" not in entry:
         entry["glyph_mode"] = "auto"
 
@@ -5108,7 +5111,10 @@ def set_category_data(category,
             if display_name is not None:
                 global_entry["display_name"] = _glyph_cache[key].get("display_name", "")
                 if not global_entry.get("default_display_name"):
-                    global_entry["default_display_name"] = global_entry["display_name"]
+                    # NEVER use display_name as fallback — it may be a user-renamed value.
+                    # Use panel label or category name as the original name for Reset.
+                    panel_label = _find_panel_label_for_category(category)
+                    global_entry["default_display_name"] = panel_label if panel_label else category
                 category_debug_print(f"[SET_CATEGORY_DATA] Propagated display_name to GLOBAL for '{category}'")
             if first_letter is not None or display_name is not None:
                 global_entry["first_letter"] = _glyph_cache[key].get("first_letter", "")
@@ -5146,7 +5152,9 @@ def set_category_data(category,
                     if display_name is not None:
                         space_entry["display_name"] = _glyph_cache[key].get("display_name", "")
                         if not space_entry.get("default_display_name"):
-                            space_entry["default_display_name"] = space_entry["display_name"]
+                            # NEVER use display_name — it may be a user-renamed value.
+                            panel_label = _find_panel_label_for_category(category)
+                            space_entry["default_display_name"] = panel_label if panel_label else category
                         category_debug_print(f"[SET_CATEGORY_DATA] Synced display_name to space_type={cache_space_type} for '{category}'")
                     if first_letter is not None or display_name is not None:
                         space_entry["first_letter"] = _glyph_cache[key].get("first_letter", "")
@@ -5414,11 +5422,19 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
             global_entry["color"] = [0.0, 0.0, 0.0]
             # Reserved categories use AUTO (glyph), others use first_letter fallback.
             global_entry["glyph_mode"] = reset_glyph_mode
-            # Clear icon data
+            # Clear icon data, then re-detect for extension categories
             global_entry["icon_source"] = "off"
             global_entry["icon_key"] = ""
             global_entry["icon_path"] = ""
             global_entry["icon_provider"] = ""
+            # If category belongs to an extension, re-detect icon.png
+            if global_entry.get("source_extension"):
+                detected_path, detected_provider = _auto_detect_extension_icon_path(category)
+                if detected_path:
+                    global_entry["icon_source"] = "auto"
+                    global_entry["icon_path"] = detected_path
+                    global_entry["icon_provider"] = detected_provider or "extension_auto"
+                    category_debug_print(f"[GLYPH RESET] Re-detected extension icon for '{category}': {detected_path}")
             category_debug_print(f"[GLYPH RESET] After clearing GLOBAL entry: {global_entry}")
 
         # Clear only current space-specific mapping (tags are handled separately by reset_tag).
@@ -5432,6 +5448,13 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
             cache_entry["icon_key"] = ""
             cache_entry["icon_path"] = ""
             cache_entry["icon_provider"] = ""
+            # Re-detect extension icon for space-specific entry too
+            if cache_entry.get("source_extension"):
+                detected_path, detected_provider = _auto_detect_extension_icon_path(category)
+                if detected_path:
+                    cache_entry["icon_source"] = "auto"
+                    cache_entry["icon_path"] = detected_path
+                    cache_entry["icon_provider"] = detected_provider or "extension_auto"
 
     category_debug_print(f"[GLYPH RESET] Final cache state for '{category}':")
     for cache_key, cache_entry in _glyph_cache.items():
@@ -6544,7 +6567,9 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                 # This ensures tooltips show the correct original name when display_name is overridden
                 default_display_name = category
             else:
-                default_display_name = ""
+                # For text_only categories, store the original name for Reset.
+                # Use panel label if available, otherwise fall back to category name.
+                default_display_name = category_to_label.get(category, "") or category
 
             # Use global key (-1) for newly discovered categories
             cache_key = _make_cache_key(-1, category)
@@ -7413,7 +7438,11 @@ def _sync_wm_to_glyph_cache_impl():
 
                 if hasattr(item, 'default_display_name'):
                     item_default_display_name = item.default_display_name or ""
-                    if cached_entry.get("default_display_name", "") != item_default_display_name:
+                    # Only sync FROM WM if cache doesn't already have a valid value.
+                    # WM items may have empty/stale default_display_name because the C++
+                    # commit path does not set it on override items. The Python cache
+                    # (loaded from JSON) is the authoritative source for default_display_name.
+                    if not cached_entry.get("default_display_name") and item_default_display_name:
                         cached_entry["default_display_name"] = item_default_display_name
                         changes_detected = True
 

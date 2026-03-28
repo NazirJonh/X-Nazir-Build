@@ -26,10 +26,14 @@ typedef struct ExperimentalBuildInfo {
   const char *build_name;
   /** Author of the build */
   const char *author;
-  /** Brief description */
-  const char *description;
-  /** Warning message for users */
-  const char *warning_message;
+  /** Brief description - part 1 */
+  const char *description1;
+  /** Brief description - part 2 */
+  const char *description2;
+  /** Warning message for users - part 1 */
+  const char *warning_message1;
+  /** Warning message for users - part 2 */
+  const char *warning_message2;
   /** Build date string */
   const char *build_date;
   /** Additional notes or credits */

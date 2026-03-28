@@ -13025,6 +13025,17 @@ class USERPREF_PT_about_build(Panel):
         col.prop(build_features, "use_face_sets_in_edit_mesh")
         col.prop(build_features, "use_dnd_texture")
         col.prop(build_features, "use_sculpt_texture_mapping")
+        
+        # Feedback Section
+        box = layout.box()
+        col = box.column()
+        col.label(text="We value your feedback on this experimental build:", icon='COMMUNITY')
+        col.separator()
+        
+        # Feedback button
+        col2 = col.column()
+        col2.scale_y = 1.5
+        col2.operator("wm.url_open", text=">>>Send FEEDBACK!<<<", icon='STRIP_COLOR_06').url = "https://xnazirbuildfeedback.carrd.co/"
 
 
 """

@@ -30,6 +30,10 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "RNA_access.hh"
+
+#include "wm.hh"
+
 namespace blender {
 
 /* -------------------------------------------------------------------- */
@@ -66,8 +70,18 @@ static void statusbar_experimental_build_panel_draw(const bContext * /*C*/, Pane
 
   /* Additional information section */
   layout.separator();
-  layout.label(info->description, ICON_INFO);
-  layout.label(info->warning_message, ICON_ERROR);
+  if (info->description1 && info->description1[0]) {
+    layout.label(info->description1, ICON_INFO);
+  }
+  if (info->description2 && info->description2[0]) {
+    layout.label(info->description2, ICON_NONE);
+  }
+  if (info->warning_message1 && info->warning_message1[0]) {
+    layout.label(info->warning_message1, ICON_ERROR);
+  }
+  if (info->warning_message2 && info->warning_message2[0]) {
+    layout.label(info->warning_message2, ICON_NONE);
+  }
 
   /* Credits */
   if (info->credits && info->credits[0]) {
@@ -75,8 +89,18 @@ static void statusbar_experimental_build_panel_draw(const bContext * /*C*/, Pane
     layout.label(info->credits, ICON_HEART);
   }
 
-  /* Future: Add more build-specific information here */
-  /* Future: Add buttons, links, etc. */
+  /* Feedback button */
+  layout.separator();
+  
+  /* Create feedback button with URL operator using C++ Layout API */
+  PointerRNA op_ptr = layout.op("WM_OT_url_open",
+                                ">>>Send FEEDBACK!<<<",
+                                ICON_STRIP_COLOR_06,
+                                wm::OpCallContext::InvokeDefault,
+                                UI_ITEM_NONE);
+  
+  /* Set the URL property */
+  RNA_string_set(&op_ptr, "url", "https://xnazirbuildfeedback.carrd.co/");
 }
 
 /**

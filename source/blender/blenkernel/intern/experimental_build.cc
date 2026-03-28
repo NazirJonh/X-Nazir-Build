@@ -23,10 +23,12 @@ namespace blender {
 static const ExperimentalBuildInfo g_experimental_build_info = {
     /* build_name */ "Experimental Build",
     /* author */ "Nazir Galimov",
-    /* description */ "This is a custom Blender build with experimental features.",
-    /* warning_message */ "Use at your own risk. Not officially supported.",
+    /* description1 */ "This is a custom build",
+    /* description2 */ "with a prototype of an advanced tab management system.",
+    /* warning_message1 */ "Use at your own risk.",
+    /* warning_message2 */ "Do not use it to create important files for production.",
     /* build_date */ __DATE__ " " __TIME__,
-    /* credits */ "Built with love and caffeine.",
+    /* credits */ "To leave feedback, use the >>>Send FEEDBACK<<< button.",
 };
 
 }  // namespace blender

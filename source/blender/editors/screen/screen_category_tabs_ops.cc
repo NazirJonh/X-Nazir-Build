@@ -83,6 +83,7 @@ using ui::find_panel_label_for_category;
 using ui::is_single_glyph_str;
 using ui::utf8_to_hex_codepoint;
 using ui::context_active_but_get_respect_popup;
+using ui::category_tab_try_auto_detect_extension_icon;
 
 /* -------------------------------------------------------------------- */
 /** \name Category Tab Icon Source Enum (Stage 1 wiring)
@@ -685,6 +686,40 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
       override_item->icon_key[0] = '\0';
       override_item->icon_provider[0] = '\0';
       override_item->icon_source = ui::CATEGORY_TAB_ICON_SOURCE_AUTO;
+    }
+  }
+
+  /* Edge case fallback: If no default extension icon was found in mappings,
+   * try auto-detecting icon.png from the extension directory. This handles the
+   * scenario where:
+   * 1) icon.png was auto-detected at dialog invoke time but not yet saved to
+   *    mappings (so compute_reset_defaults can't find it)
+   * 2) User had manually overridden the extension icon with their own custom
+   *    icon, and Reset should restore the original extension icon.png */
+  if (reset_glyph && !defaults.has_default_icon && dialog_op != nullptr) {
+    char detected_icon_path[1024] = "";
+    char detected_icon_provider[128] = "";
+
+    if (ui::category_tab_try_auto_detect_extension_icon(
+            C, category, detected_icon_path, detected_icon_provider))
+    {
+      /* Apply detected extension icon to dialog operator. */
+      RNA_string_set(dialog_op->ptr, "icon_path", detected_icon_path);
+      RNA_string_set(dialog_op->ptr, "icon_provider", detected_icon_provider);
+      RNA_string_set(dialog_op->ptr, "icon_key", "");
+      RNA_enum_set(dialog_op->ptr, "icon_source", 0); /* AUTO */
+      PropertyRNA *dm_prop = RNA_struct_find_property(dialog_op->ptr, "display_mode_ui");
+      if (dm_prop) {
+        RNA_enum_set(dialog_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON);
+        RNA_enum_set(dialog_op->ptr, "custom_icon_mode_ui", CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM);
+      }
+
+      /* Also update WM override with detected icon. */
+      CategoryGlyphItem *override_item = category_tab_reset_override_ensure(wm, category, -1);
+      STRNCPY(override_item->icon_path, detected_icon_path);
+      STRNCPY(override_item->icon_provider, detected_icon_provider);
+      override_item->icon_key[0] = '\0';
+      override_item->icon_source = 0; /* AUTO */
     }
   }
 

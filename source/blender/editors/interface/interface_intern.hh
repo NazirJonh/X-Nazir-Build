@@ -1194,6 +1194,16 @@ void tag_icon_live_update_cb(bContext *C, void *arg_op, int event);
 bool category_tab_edit_dialog_is_open_for_category(const char *category);
 
 /**
+ * Try to auto-detect an extension's icon.png/icon.webp for the given category.
+ * Searches extension directories for matching icon files.
+ * Returns true if an icon was found, filling r_icon_path and r_icon_provider.
+ */
+bool category_tab_try_auto_detect_extension_icon(bContext *C,
+                                                  const char *category,
+                                                  char r_icon_path[1024],
+                                                  char r_icon_provider[128]);
+
+/**
  * Menu registration.
  */
 void category_tag_filter_menu_register();

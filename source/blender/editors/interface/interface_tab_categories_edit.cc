@@ -670,10 +670,10 @@ static CategoryTabInvokeLoadResult category_tab_invoke_load_operator_state_from_
   return result;
 }
 
-static bool category_tab_try_auto_detect_extension_icon(bContext *C,
-                                                        const char *category,
-                                                        char r_icon_path[1024],
-                                                        char r_icon_provider[128]);
+bool category_tab_try_auto_detect_extension_icon(bContext *C,
+                                                  const char *category,
+                                                  char r_icon_path[1024],
+                                                  char r_icon_provider[128]);
 
 static void category_tab_invoke_apply_post_load_defaults(bContext *C,
                                                          PointerRNA *op_ptr,
@@ -4001,10 +4001,10 @@ bool category_tab_edit_poll(bContext *C)
   return ED_operator_regionactive(C);
 }
 
-static bool category_tab_try_auto_detect_extension_icon(bContext *C,
-                                                        const char *category,
-                                                        char r_icon_path[1024],
-                                                        char r_icon_provider[128])
+bool category_tab_try_auto_detect_extension_icon(bContext *C,
+                                                  const char *category,
+                                                  char r_icon_path[1024],
+                                                  char r_icon_provider[128])
 {
   r_icon_path[0] = '\0';
   r_icon_provider[0] = '\0';

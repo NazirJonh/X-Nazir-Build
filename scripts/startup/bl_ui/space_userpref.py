@@ -12946,29 +12946,78 @@ class USERPREF_PT_about_build(Panel):
         col.separator()
 
         # Build details
-        col.label(text="Created by: Nazir Galimov", icon='USER')
-        col.label(text="This is a custom Blender build.", icon='INFO')
-        col.label(text="Use at your own risk.", icon='ERROR')
+        col.label(text="Build Created by: Nazir Galimov", icon='USER')
+        col.separator()
+        col.label(text="This is a custom build with a prototype of an advanced tab management system.", icon='INFO')
+        col.separator()
+        col.label(text="Use at your own risk. Do not use it to create important files for production.", icon='ERROR')
 
         col.separator()
 
         # Additional info
-        col.label(text="Built with love and caffeine.", icon='HEART')
+        col.label(text="Built with love and caffeine. To leave a review, use the button >>>Send FEEDBACK<<<", icon='HEART')
 
-        # Separator between sections
-        layout.separator()
-        layout.separator()
+        # About the author — collapsible panel
+        header, body = layout.panel("about_author", default_closed=True)
+        header.label(text="About the Author", icon='COMMUNITY')
+        if body:
+            # Author image
+            import os
+            image_path = os.path.join(
+                bpy.utils.resource_path('LOCAL'),
+                'datafiles', 'autor_image.png'
+            )
+            if os.path.isfile(image_path):
+                if not hasattr(USERPREF_PT_about_build, "_preview_collection"):
+                    pcoll = bpy.utils.previews.new()
+                    pcoll.author_image = pcoll.load("AUTHOR_IMAGE", image_path, 'IMAGE')
+                    USERPREF_PT_about_build._preview_collection = pcoll
+                pcoll = USERPREF_PT_about_build._preview_collection
+                if "AUTHOR_IMAGE" in pcoll:
+                    body.template_icon(pcoll["AUTHOR_IMAGE"].icon_id, scale=6.0)
+
+            box = body.box()
+            col = box.column(align=True)
+            col.label(text="Six years ago, I discovered Blender and immediately "
+                          "knew it would become my main tool.")
+            col.label(text="Since then, I\u2019ve been creating 3D models and "
+                          "constantly working to improve my workflow.")
+            col.separator()
+            col.label(text="The industry is going through a difficult period "
+                          "right now, and like many 3D artists, I\u2019ve lost my job.")
+            col.label(text="Working on Blender has helped me stay confident "
+                          "and keep moving forward.")
+            col.separator()
+            col.label(text="This prototype is the result of over a month of work.")
+            col.label(text="It reflects my vision of what Blender could become "
+                          "in the future.")
+            col.label(text="Bringing these ideas into the core software would "
+                          "require several months of focused development, ")
+            col.label(text="which is why I\u2019m asking for your support.")
+            col.separator()
+            col.label(text="I understand that this is not a perfect solution. "
+                          "But in my view, it is a step forward.")
+            col.separator()
+            col.label(text="The future of this project largely depends on you.")
+            col.label(text="Share information about it with your friends ")
+            col.label(text="on YouTube, Twitter, and other social media platforms.")
+
+            col.label(text="Feel free to share your feedback using the "
+                          ">>>Send FEEDBACK<<< button.")
+            col.separator()
+            col.label(text="Thank you for your support, and have a great day!")
 
         # Build Features Section
         prefs = context.preferences
         build_features = prefs.build_features
 
         # Features header
-        layout.label(text="Custom features for this experimental build:", icon='INFO')
-        layout.separator()
+        box = layout.box()
+        box.label(text="Custom features for this experimental build:", icon='INFO')
+        box.separator()
 
         # Feature toggles
-        col = layout.column()
+        col = box.column()
         col.prop(build_features, "use_enhanced_paint_system")
         col.prop(build_features, "use_dnd_gn_modifiers")
         col.prop(build_features, "use_face_sets_in_edit_mesh")

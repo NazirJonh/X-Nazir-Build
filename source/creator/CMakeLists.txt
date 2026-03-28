@@ -503,6 +503,12 @@ install(
   DESTINATION ${TARGETDIR_VER}/datafiles
 )
 
+# author image
+install(
+  FILES ${CMAKE_SOURCE_DIR}/release/datafiles/autor_image.png
+  DESTINATION ${TARGETDIR_VER}/datafiles
+)
+
 # localization
 if(WITH_INTERNATIONAL)
   set(_locale_dir "${CMAKE_SOURCE_DIR}/locale")
@@ -1181,6 +1187,15 @@ elseif(WIN32)
         set(WITH_WINDOWS_RELEASE_STRIPPED_PDB off)
       endif()
     endif()
+
+    # Copy author image to build output for development builds.
+    add_custom_command(
+      TARGET blender POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/release/datafiles/autor_image.png
+        ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/${TARGETDIR_VER}/datafiles/autor_image.png
+      COMMENT "Copying autor_image.png to build output"
+    )
 
     if(WITH_WINDOWS_RELEASE_STRIPPED_PDB)
       # Icky hack for older CMAKE from https://stackoverflow.com/a/21198501

@@ -53,9 +53,14 @@ if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
 # -----------------------------------------------------------------------------
 # Tag System - Infrastructure Utilities (CleanPanels patterns)
 
-TAG_DEBUG = False  # Set to False to disable all debug output
+TAG_DEBUG = True  # Set to False to disable all debug output
 TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
 SAVE_DEBUG = False  # Set to True to enable verbose save/load logging (printf-style)
+
+# [POPULAR ADDONS DB] - Temporary: fallback icon lookup from Popular Addons Database.
+# When extensions start bundling their own icons, this functionality will no longer be needed.
+# Set to False to disable all Popular Addons Database integration code.
+POPULAR_ADDONS_DB_ENABLED = True
 
 
 def category_debug_print(message):
@@ -1389,6 +1394,47 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
                     extension_post_install_handler._icon_cache[extension_id] = icon_path
                 else:
                     category_debug_print(f"[ICON SCAN] No icon found for extension {extension_id!r}")
+
+                    # [POPULAR ADDONS DB] BEGIN - Fallback: try Popular Addons Database
+                    # Can be removed when extensions bundle their own icons.
+                    if POPULAR_ADDONS_DB_ENABLED:
+                        try:
+                            from bl_ext.user_default.popular_addons_database import api as _pad_api
+                            import re as _re_mod
+                            # Build addon_id candidates from extension_id (ALWAYS try both strategies)
+                            raw_id = extension_id
+                            if raw_id.startswith("add-on-"):
+                                raw_id = raw_id[7:]
+                            _pad_candidates = []
+                            # Strategy 1: repo.pkg format
+                            if "." in raw_id:
+                                _pkg = raw_id.rsplit(".", 1)[-1]
+                                if not _pkg[0:1].isdigit():
+                                    _pad_candidates.append(_pkg)
+                            # Strategy 2: strip version suffix (ALWAYS try)
+                            stripped = _re_mod.sub(r'-v?\d+(\.\d+)*$', '', raw_id)
+                            if stripped and stripped not in _pad_candidates:
+                                _pad_candidates.append(stripped)
+                                _us = stripped.replace("-", "_")
+                                if _us not in _pad_candidates:
+                                    _pad_candidates.append(_us)
+                            # Strategy 3: raw_id as fallback
+                            if raw_id not in _pad_candidates:
+                                _pad_candidates.append(raw_id)
+
+                            for _q_id in _pad_candidates:
+                                result = _pad_api.query_popular_addon_icon(_q_id)
+                                if result:
+                                    pad_icon_path = result.get("icon_path", "")
+                                    if pad_icon_path and os.path.isfile(pad_icon_path):
+                                        category_debug_print(f"[ICON SCAN] Popular Addons Database icon for {_q_id!r}: {pad_icon_path!r}")
+                                        if not hasattr(extension_post_install_handler, "_icon_cache"):
+                                            extension_post_install_handler._icon_cache = {}
+                                        extension_post_install_handler._icon_cache[extension_id] = pad_icon_path
+                                    break
+                        except Exception as pad_ex:
+                            category_debug_print(f"[ICON SCAN] Popular Addons Database lookup failed: {pad_ex}")
+                    # [POPULAR ADDONS DB] END
                 
                 # CRITICAL OPTIMIZATION: Scan Python files for bl_category ONCE at install time
                 # Cache the result permanently (no expiration) to avoid repeated scanning
@@ -5640,11 +5686,16 @@ def _discover_active_categories():
 
                         # Collect manifest names for comparison with panel categories
                         manifest_names = set()
+                        ext_id = f"add-on-{repo_name}.{pkg_name}"
                         for key_name in ("name", "id"):
                             value = manifest.get(key_name)
                             if isinstance(value, str) and value.strip():
                                 seed = value.strip()
                                 manifest_names.add(seed)
+                                # Store category->extension mapping for ALL manifest seeds
+                                # (not just panel bl_category), so merge can find the correct
+                                # source_extension even when category == manifest name.
+                                _last_discovered_ext_panel_categories[seed] = ext_id
                                 if key_name == "name":
                                     _record_discovered(seed, "manifest_name")
                                 else:
@@ -5657,7 +5708,6 @@ def _discover_active_categories():
                         # Also scan Python files for panel bl_category values.
                         # This handles cases where panel bl_category differs from manifest name
                         # (e.g., Edge Length Measure extension uses "Edge Length" as bl_category).
-                        ext_id = f"add-on-{pkg_name}"
                         pkg_dir = os.path.dirname(manifest_path)
                         for root, dirs, files in os.walk(pkg_dir):
                             # Skip __pycache__ and hidden directories
@@ -5733,11 +5783,14 @@ def _discover_active_categories():
 
                             # Collect manifest names for comparison with panel categories
                             manifest_names = set()
+                            ext_id = f"add-on-{repo_name}.{pkg_name}"
                             for key_name in ("name", "id"):
                                 value = manifest.get(key_name)
                                 if isinstance(value, str) and value.strip():
                                     seed = value.strip()
                                     manifest_names.add(seed)
+                                    # Store category->extension mapping for ALL manifest seeds
+                                    _last_discovered_ext_panel_categories[seed] = ext_id
                                     if key_name == "name":
                                         _record_discovered(seed, "manifest_name")
                                     else:
@@ -5750,7 +5803,6 @@ def _discover_active_categories():
                             # Also scan Python files for panel bl_category values.
                             # This handles cases where panel bl_category differs from manifest name
                             # (e.g., Edge Length Measure extension uses "Edge Length" as bl_category).
-                            ext_id = f"add-on-{pkg_name}"
                             for root, dirs, files in os.walk(pkg_path):
                                 # Skip __pycache__ and hidden directories
                                 dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
@@ -6159,7 +6211,59 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                             detected_icon_path = icon_cache[ext_id]
                             detected_provider = "extension_auto"
                             category_debug_print(f"[ICON CACHE] Using cached icon for existing category {category!r}: {detected_icon_path!r}")
-                        
+                        elif ext_id:
+                            # Try alternate extension_id formats in icon_cache
+                            for _alt_pfx in ("add-on-blender_org.", "add-on-user_default.", "add-on-"):
+                                _alt_id = _alt_pfx + ext_id.replace("add-on-", "")
+                                if _alt_id in icon_cache:
+                                    detected_icon_path = icon_cache[_alt_id]
+                                    detected_provider = "extension_auto"
+                                    category_debug_print(f"[ICON CACHE] Using cached icon (alt key {_alt_id!r}) for existing category {category!r}: {detected_icon_path!r}")
+                                    break
+
+                        # [POPULAR ADDONS DB] BEGIN - Fallback: try Popular Addons Database by extension_id or category name
+                        # Can be removed when extensions bundle their own icons.
+                        if POPULAR_ADDONS_DB_ENABLED and not detected_icon_path:
+                            try:
+                                from bl_ext.user_default.popular_addons_database import api as _pad_api
+                                import re as _re_mod
+                                _pad_candidates = []
+                                if ext_id:
+                                    raw_id = ext_id
+                                    if raw_id.startswith("add-on-"):
+                                        raw_id = raw_id[7:]
+                                    # Strategy 1: repo.pkg format
+                                    if "." in raw_id:
+                                        _pkg = raw_id.rsplit(".", 1)[-1]
+                                        if not _pkg[0:1].isdigit():
+                                            _pad_candidates.append(_pkg)
+                                    # Strategy 2: strip version suffix (ALWAYS try)
+                                    stripped = _re_mod.sub(r'-v?\d+(\.\d+)*$', '', raw_id)
+                                    if stripped and stripped not in _pad_candidates:
+                                        _pad_candidates.append(stripped)
+                                        _us = stripped.replace("-", "_")
+                                        if _us not in _pad_candidates:
+                                            _pad_candidates.append(_us)
+                                    # Strategy 3: raw_id fallback
+                                    if raw_id not in _pad_candidates:
+                                        _pad_candidates.append(raw_id)
+                                # Strategy 4: category name variants (original case + lowercase + separators)
+                                for _ck in (category, category.lower(), category.lower().replace(" ", ""), category.lower().replace(" ", "_"), category.lower().replace(" ", "-")):
+                                    if _ck not in _pad_candidates:
+                                        _pad_candidates.append(_ck)
+                                for _q_id in _pad_candidates:
+                                    result = _pad_api.query_popular_addon_icon(_q_id)
+                                    if result:
+                                        pad_icon_path = result.get("icon_path", "")
+                                        if pad_icon_path and os.path.isfile(pad_icon_path):
+                                            detected_icon_path = pad_icon_path
+                                            detected_provider = "popular_addons_database"
+                                            category_debug_print(f"[POPULAR ADDONS] Icon for existing {category!r} via {_q_id!r}: {pad_icon_path!r}")
+                                        break
+                            except Exception as pad_ex:
+                                category_debug_print(f"[POPULAR ADDONS] Lookup failed: {pad_ex}")
+                        # [POPULAR ADDONS DB] END
+
                         # Fallback to disk scan only if no cached icon
                         if not detected_icon_path:
                             detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
@@ -6591,8 +6695,19 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                 category_debug_print(f"[MERGE DEBUG]   category_to_auto_extension={category_to_auto_extension}")
                 category_debug_print(f"[MERGE DEBUG]   category in category_to_auto_extension? {category in category_to_auto_extension}")
 
-            if is_from_pending_ext and pending_extension_context.get("extension_id", "").strip():
-                # Pending extension with valid extension_id
+            # PRIORITY 1: Use specific extension-panel mapping (most accurate)
+            # This handles cases where a category was discovered from a specific extension module
+            # (e.g., bl_ext.blender_org.hyperfy_tools) even if pending context is from a different extension.
+            specific_ext_id = _last_discovered_ext_panel_categories.get(category)
+            if specific_ext_id:
+                ext_id = specific_ext_id
+                # Still use pending context flags if available (for mode_flag etc.)
+                if is_from_pending_ext:
+                    ext_mode = pending_extension_context.get("mode_flag", 0)
+                    tag_already_assigned = pending_extension_context.get("tag_already_assigned", False)
+                category_debug_print(f"[MERGE DEBUG] NEW CATEGORY from panel mapping: category={category!r}, extension_id={ext_id!r}")
+            elif is_from_pending_ext and pending_extension_context.get("extension_id", "").strip():
+                # PRIORITY 2: Pending extension with valid extension_id
                 ext_id = pending_extension_context.get("extension_id", "")
                 ext_mode = pending_extension_context.get("mode_flag", 0)
                 tag_already_assigned = pending_extension_context.get("tag_already_assigned", False)
@@ -6721,7 +6836,60 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                         detected_icon_path = icon_cache[ext_id]
                         detected_provider = "extension_auto"
                         category_debug_print(f"[ICON CACHE] Using cached icon for category {category!r}: {detected_icon_path!r}")
-                    
+                    elif ext_id:
+                        # Try alternate extension_id formats (e.g., "add-on-hyperfy_tools" vs "add-on-blender_org.hyperfy_tools")
+                        for _alt_prefix in ("add-on-blender_org.", "add-on-user_default.", "add-on-"):
+                            _alt_id = _alt_prefix + ext_id.replace("add-on-", "")
+                            if _alt_id in icon_cache:
+                                detected_icon_path = icon_cache[_alt_id]
+                                detected_provider = "extension_auto"
+                                category_debug_print(f"[ICON CACHE] Using cached icon (alt key {_alt_id!r}) for category {category!r}: {detected_icon_path!r}")
+                                break
+
+                    # [POPULAR ADDONS DB] BEGIN - Fallback: try Popular Addons Database by extension_id or category name
+                    # Can be removed when extensions bundle their own icons.
+                    if POPULAR_ADDONS_DB_ENABLED and not detected_icon_path:
+                        try:
+                            from bl_ext.user_default.popular_addons_database import api as _pad_api
+                            import re as _re_mod
+                            # Build list of addon_id candidates to try (order matters)
+                            _pad_candidates = []
+                            if ext_id:
+                                raw_id = ext_id
+                                if raw_id.startswith("add-on-"):
+                                    raw_id = raw_id[7:]
+                                # Strategy 1: repo.pkg format -> extract "pkg" (e.g., "blender_org.ucupaint" -> "ucupaint")
+                                if "." in raw_id:
+                                    _pkg = raw_id.rsplit(".", 1)[-1]
+                                    if not _pkg[0:1].isdigit():  # Not just a version number
+                                        _pad_candidates.append(_pkg)
+                                # Strategy 2: strip version suffix (e.g., "coloraide-v1.5.1" -> "coloraide")
+                                stripped = _re_mod.sub(r'-v?\d+(\.\d+)*$', '', raw_id)
+                                if stripped and stripped not in _pad_candidates:
+                                    _pad_candidates.append(stripped)
+                                    _us = stripped.replace("-", "_")
+                                    if _us not in _pad_candidates:
+                                        _pad_candidates.append(_us)
+                                # Strategy 3: raw_id as fallback
+                                if raw_id not in _pad_candidates:
+                                    _pad_candidates.append(raw_id)
+                            # Strategy 4: category name variants (original case + lowercase + separators)
+                            for _ck in (category, category.lower(), category.lower().replace(" ", ""), category.lower().replace(" ", "_"), category.lower().replace(" ", "-")):
+                                if _ck not in _pad_candidates:
+                                    _pad_candidates.append(_ck)
+                            for _q_id in _pad_candidates:
+                                result = _pad_api.query_popular_addon_icon(_q_id)
+                                if result:
+                                    pad_icon_path = result.get("icon_path", "")
+                                    if pad_icon_path and os.path.isfile(pad_icon_path):
+                                        detected_icon_path = pad_icon_path
+                                        detected_provider = "popular_addons_database"
+                                        category_debug_print(f"[POPULAR ADDONS] Icon for {category!r} via {_q_id!r}: {pad_icon_path!r}")
+                                    break
+                        except Exception as pad_ex:
+                            category_debug_print(f"[POPULAR ADDONS] Lookup failed: {pad_ex}")
+                    # [POPULAR ADDONS DB] END
+
                     # Fallback to disk scan only if no cached icon (for backward compatibility)
                     if not detected_icon_path:
                         detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)

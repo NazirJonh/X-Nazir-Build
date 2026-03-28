@@ -118,6 +118,11 @@ static constexpr size_t MAX_LOGGED_MESSAGES = 500;
 //DEBUG FLAGS
 static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
 
+/* [POPULAR ADDONS DB] - Temporary: fallback icon lookup from Popular Addons Database.
+ * When extensions start bundling their own icons, this functionality will no longer be needed.
+ * Set to false to disable all Popular Addons Database integration code. */
+static constexpr bool WITH_POPULAR_ADDONS_DATABASE = true;
+
 static void log_once(const char *message)
 {
   /* Print a log message only once per session to avoid log flooding. */
@@ -679,9 +684,135 @@ static CategoryTabInvokeLoadResult category_tab_invoke_load_operator_state_from_
 }
 
 bool category_tab_try_auto_detect_extension_icon(bContext *C,
-                                                  const char *category,
-                                                  char r_icon_path[1024],
-                                                  char r_icon_provider[128]);
+                                                   const char *category,
+                                                   char r_icon_path[1024],
+                                                   char r_icon_provider[128]);
+
+/**
+ * [POPULAR ADDONS DB] Query Popular Addons Database for icon information.
+ * Returns true if icon found and paths set.
+ * Can be removed when extensions bundle their own icons.
+ */
+static bool category_tab_query_popular_addons_database(
+    bContext *C,
+    const char *addon_id,
+    char r_icon_path[1024],
+    char r_icon_provider[128])
+{
+#ifdef WITH_PYTHON
+    if (!C || !addon_id || !addon_id[0]) {
+        return false;
+    }
+    
+    // Clear output buffers
+    r_icon_path[0] = '\0';
+    r_icon_provider[0] = '\0';
+    
+    // Check if Popular Addons Database is available
+    const char *check_script =
+        "try:\n"
+        "    from bl_ext.user_default.popular_addons_database import api as _pad_api\n"
+        "    available = _pad_api.check_popular_addons_database_available()\n"
+        "    print(f'POPULAR_ADDONS_AVAILABLE:{available}')\n"
+        "except Exception:\n"
+        "    print('POPULAR_ADDONS_AVAILABLE:False')";
+    
+    // Execute availability check via BPY
+    const char *imports[] = {"bpy", nullptr};
+    char *result = nullptr;
+    char *err_msg = nullptr;
+    BPy_RunErrInfo err_info = {false, nullptr, "", &err_msg};
+    const bool check_success = BPY_run_string_as_string(C, imports, check_script, &err_info, &result);
+    
+    if (!check_success || !result) {
+        if (err_msg) {
+            MEM_delete(err_msg);
+        }
+        return false;
+    }
+    
+    // Parse availability result
+    bool available = (strstr(result, "POPULAR_ADDONS_AVAILABLE:True") != nullptr);
+    MEM_delete(result);
+    if (err_msg) {
+        MEM_delete(err_msg);
+    }
+    
+    if (!available) {
+        return false;
+    }
+    
+    // Query for addon icon
+    char query_script[2048];
+    SNPRINTF(query_script,
+        "try:\n"
+        "    from bl_ext.user_default.popular_addons_database import api as _pad_api\n"
+        "    result = _pad_api.query_popular_addon_icon('%s')\n"
+        "    if result:\n"
+        "        icon_path = result.get('icon_path', '')\n"
+        "        icon_provider = result.get('icon_provider', 'popular_addons_database')\n"
+        "        print(f'ADDON_ICON_FOUND:{icon_path}:{icon_provider}')\n"
+        "    else:\n"
+        "        print('ADDON_ICON_NOT_FOUND')\n"
+        "except Exception as e:\n"
+        "    print(f'ADDON_ICON_ERROR:{e}')",
+        addon_id);
+    
+    char *query_result = nullptr;
+    char *query_err_msg = nullptr;
+    BPy_RunErrInfo query_err_info = {false, nullptr, "", &query_err_msg};
+    const bool query_success = BPY_run_string_as_string(C, imports, query_script, &query_err_info, &query_result);
+    
+    if (!query_success || !query_result) {
+        if (query_err_msg) {
+            MEM_delete(query_err_msg);
+        }
+        return false;
+    }
+    
+    // Parse query result
+    bool icon_found = false;
+    if (const char *found_line = strstr(query_result, "ADDON_ICON_FOUND:")) {
+        const char *data_start = found_line + strlen("ADDON_ICON_FOUND:");
+        
+        // Find first colon (separator between path and provider)
+        const char *colon_pos = strchr(data_start, ':');
+        if (colon_pos) {
+            // Extract icon path
+            size_t path_len = colon_pos - data_start;
+            if (path_len > 0 && path_len < 1023) {
+                BLI_strncpy_ensure_pad(r_icon_path, data_start, path_len + 1, '\0');
+                
+                // Extract provider
+                const char *provider_start = colon_pos + 1;
+                const char *newline_pos = strchr(provider_start, '\n');
+                size_t provider_len = newline_pos ? (newline_pos - provider_start) : strlen(provider_start);
+                
+                if (provider_len < 127) {
+                    BLI_strncpy_ensure_pad(r_icon_provider, provider_start, provider_len + 1, '\0');
+                    
+                    icon_found = true;
+                    
+                    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+                        printf("[POPULAR_ADDONS] Found icon for '%s': path='%s', provider='%s'\n",
+                               addon_id, r_icon_path, r_icon_provider);
+                    }
+                }
+            }
+        }
+    }
+    
+    MEM_delete(query_result);
+    if (query_err_msg) {
+        MEM_delete(query_err_msg);
+    }
+    return icon_found;
+    
+#else
+    UNUSED_VARS(C, addon_id, r_icon_path, r_icon_provider);
+    return false;
+#endif
+}
 
 static void category_tab_invoke_apply_post_load_defaults(bContext *C,
                                                          PointerRNA *op_ptr,
@@ -4010,9 +4141,9 @@ bool category_tab_edit_poll(bContext *C)
 }
 
 bool category_tab_try_auto_detect_extension_icon(bContext *C,
-                                                  const char *category,
-                                                  char r_icon_path[1024],
-                                                  char r_icon_provider[128])
+                                                   const char *category,
+                                                   char r_icon_path[1024],
+                                                   char r_icon_provider[128])
 {
   r_icon_path[0] = '\0';
   r_icon_provider[0] = '\0';
@@ -4022,6 +4153,16 @@ bool category_tab_try_auto_detect_extension_icon(bContext *C,
     return false;
   }
 
+  // [POPULAR ADDONS DB] BEGIN - First try Popular Addons Database
+  // Can be removed when extensions bundle their own icons.
+  if constexpr (WITH_POPULAR_ADDONS_DATABASE) {
+    if (category_tab_query_popular_addons_database(C, category, r_icon_path, r_icon_provider)) {
+      return true;
+    }
+  }
+  // [POPULAR ADDONS DB] END
+
+  // Fallback to existing logic (original extension icon detection)
   const std::string escaped_category = category_tab_escape_for_python_literal(category);
 
   char python_expr[2048];

@@ -3365,6 +3365,9 @@ class EXTENSIONS_OT_package_install(Operator, _ExtCmdMixIn):
         if (repo_item := _extensions_repo_from_directory_and_report(directory, self.report)) is None:
             return None
 
+        # pylint: disable-next=attribute-defined-outside-init
+        self.repo_item = repo_item
+
         if not (pkg_id := self.pkg_id):
             self.report({'ERROR'}, "Package ID not set")
             return None

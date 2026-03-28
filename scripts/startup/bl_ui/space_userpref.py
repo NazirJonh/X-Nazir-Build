@@ -5398,30 +5398,36 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
     category_debug_print(f"[GLYPH RESET] is_glyph_only={is_glyph_only}")
 
     if not is_glyph_only:
+        # Reserved categories always have default glyphs in DEFAULT_CATEGORY_GLYPHS.
+        # On reset, restore their glyph and use AUTO mode (not First Letter).
+        is_reserved = category in DEFAULT_CATEGORY_GLYPHS
+        reset_glyph_mode = "auto" if is_reserved else "first_letter"
+        reset_glyph_val = DEFAULT_CATEGORY_GLYPHS[category].get("default_glyph", "") if is_reserved else ""
+
         # Clear GLOBAL mappings (space_type=-1) for this category
         global_key = _make_cache_key(-1, category)
         if global_key in _glyph_cache:
             global_entry = _glyph_cache[global_key]
             category_debug_print(f"[GLYPH RESET] Clearing GLOBAL entry (not glyph_only): {global_entry}")
-            # Reset glyph to empty (will use first_letter fallback)
-            global_entry["glyph"] = ""
+            # For reserved categories, restore default glyph; for others, clear to empty.
+            global_entry["glyph"] = reset_glyph_val
             global_entry["color"] = [0.0, 0.0, 0.0]
-            # Set glyph_mode to first_letter to ensure correct display
-            global_entry["glyph_mode"] = "first_letter"
+            # Reserved categories use AUTO (glyph), others use first_letter fallback.
+            global_entry["glyph_mode"] = reset_glyph_mode
             # Clear icon data
             global_entry["icon_source"] = "off"
             global_entry["icon_key"] = ""
             global_entry["icon_path"] = ""
             global_entry["icon_provider"] = ""
             category_debug_print(f"[GLYPH RESET] After clearing GLOBAL entry: {global_entry}")
-        
+
         # Clear only current space-specific mapping (tags are handled separately by reset_tag).
         if space_type != -1 and key in _glyph_cache:
             cache_entry = _glyph_cache[key]
             category_debug_print(f"[GLYPH RESET] Clearing current space-specific entry: space_type={space_type}")
-            cache_entry["glyph"] = ""
+            cache_entry["glyph"] = reset_glyph_val
             cache_entry["color"] = [0.0, 0.0, 0.0]
-            cache_entry["glyph_mode"] = "first_letter"
+            cache_entry["glyph_mode"] = reset_glyph_mode
             cache_entry["icon_source"] = "off"
             cache_entry["icon_key"] = ""
             cache_entry["icon_path"] = ""
@@ -10106,11 +10112,13 @@ class USERPREF_PT_interface_display_tab_sizes(InterfacePanel, CenterAlignMixIn, 
         view = prefs.view
 
         col = layout.column()
-        col.label(text="Default Display Mode")
-        row = col.row(align=True)
-        row.prop_enum(view, "category_tabs_display_mode", "GLYPHS_ONLY", text="Icon")
-        row.prop_enum(view, "category_tabs_display_mode", "GLYPHS_TEXT", text="Mixed")
-        row.prop_enum(view, "category_tabs_display_mode", "TEXT_ONLY", text="Text")
+        split = col.split(factor=0.4)
+        split.label(text="Default Display Mode")
+        subrow = split.row(align=True)
+        subrow.use_property_split = False
+        subrow.prop_enum(view, "category_tabs_display_mode", "GLYPHS_ONLY", text="Icon")
+        subrow.prop_enum(view, "category_tabs_display_mode", "GLYPHS_TEXT", text="Mixed")
+        subrow.prop_enum(view, "category_tabs_display_mode", "TEXT_ONLY", text="Text")
 
         col.separator()
 

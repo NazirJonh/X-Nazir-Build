@@ -1185,6 +1185,12 @@ const CategoryGlyphItem *category_glyph_item_find_with_global_fallback_const(
     const ListBase &items, const char *category, const int space_type);
 
 /**
+ * Check if a category is reserved (from DEFAULT_CATEGORY_GLYPHS in Python).
+ * Reserved categories always use their standard glyph and cannot be changed.
+ */
+bool category_is_reserved(const wmWindowManager *wm, const char *category_id);
+
+/**
  * Popup callbacks (exported for operators).
  */
 void category_tab_edit_popup_cancel_cb(bContext *C, void *user_data);

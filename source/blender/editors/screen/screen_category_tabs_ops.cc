@@ -84,6 +84,7 @@ using ui::is_single_glyph_str;
 using ui::utf8_to_hex_codepoint;
 using ui::context_active_but_get_respect_popup;
 using ui::category_tab_try_auto_detect_extension_icon;
+using ui::category_is_reserved;
 
 /* -------------------------------------------------------------------- */
 /** \name Category Tab Icon Source Enum (Stage 1 wiring)
@@ -241,7 +242,8 @@ static void category_tab_reset_apply_to_operator(bContext *C,
                                                    const bool reset_name,
                                                    const bool reset_glyph,
                                                    const bool reset_color,
-                                                   const bool reset_icon)
+                                                   const bool reset_icon,
+                                                   const wmWindowManager *wm)
 {
   if (target_op == nullptr) {
     return;
@@ -311,8 +313,18 @@ static void category_tab_reset_apply_to_operator(bContext *C,
           /* No built-in default icon.
            * For text categories, reset must keep first-letter behavior after Save,
            * otherwise save path may persist glyph_mode=auto and UI can fall back to
-           * tag glyph. */
-          if (is_single_glyph_str(category)) {
+           * tag glyph.
+           * 
+           * EXCEPTION: For reserved categories (from DEFAULT_CATEGORY_GLYPHS in Python),
+           * always use Glyph mode (AUTO) instead of First Letter, because reserved
+           * categories always have a standard glyph assigned and should not show
+           * first-letter behavior. */
+          /* Reserved categories (from DEFAULT_CATEGORY_GLYPHS) always have a standard
+           * glyph assigned. On reset, show the Glyph tab so the user sees the glyph,
+           * not the First Letter text mode. */
+          if (is_single_glyph_str(category) ||
+              (category_is_reserved(wm, category) && defaults.glyph != nullptr))
+          {
             RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_GLYPH);
           }
           else {
@@ -664,7 +676,8 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
                                        reset_name,
                                        reset_glyph,
                                        reset_color,
-                                       reset_icon);
+                                       reset_icon,
+                                       wm);
 
   /* Keep reset popup operator props in sync with the dialog operator props. */
   if (op != dialog_op) {
@@ -675,7 +688,8 @@ static wmOperatorStatus category_tab_reset_exec(bContext *C, wmOperator *op)
                                          reset_name,
                                          reset_glyph,
                                          reset_color,
-                                         reset_icon);
+                                         reset_icon,
+                                         wm);
   }
 
   /* When resetting the glyph/icon, also clear icon fields from the WM override so that

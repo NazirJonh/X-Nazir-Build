@@ -3740,10 +3740,23 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
     /* Check if category has any active tags assigned */
     const char *category_tags_string = category_tags_string_lookup(wm, category, space_type);
     const bool category_has_tags = (category_tags_string && category_tags_string[0] != '\0');
-    /* Panel should be closed by default if category has tags, open if no tags */
-    const bool panel_default_closed = category_has_tags; /* true = closed, false = open */
+
+    /* Persistent state for Tags list panel across popup sessions.
+     * Once the user expands the panel in any popup, it stays expanded
+     * for all future popup openings in the current session. */
+    static bool g_tags_list_panel_expanded = false;
+
+    /* Use stored state if user previously expanded; otherwise default:
+     * closed if category has tags, open if no tags. */
+    const bool panel_default_closed = g_tags_list_panel_expanded ? false : category_has_tags;
 
     PanelLayout tags_panel = layout.panel(C, tags_panel_idname, panel_default_closed);
+
+    /* Detect user expansion: if panel was supposed to be closed by default
+     * but body exists, the user expanded it — remember for future popups. */
+    if (tags_panel.body && panel_default_closed) {
+      g_tags_list_panel_expanded = true;
+    }
 
     /* Add label, active tag glyphs, and "New Tag" button to panel header */
     if (tags_panel.header) {

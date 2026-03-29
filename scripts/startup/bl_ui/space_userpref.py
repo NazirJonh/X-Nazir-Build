@@ -13661,6 +13661,15 @@ class USERPREF_PT_about_build(Panel):
         col.label(text="We value your feedback on this experimental build:", icon='COMMUNITY')
         col.separator()
 
+        # Tutorial videos link
+        row = col.row()
+        row.alignment = 'LEFT'
+        row.label(text="Watch tutorial videos:")
+        col.alignment = 'LEFT'
+        col.link(url="https://www.youtube.com/@XNazirBuild", text="X-Nazir Build YouTube Channel", icon='URL')
+        col.alignment = 'EXPAND'
+        col.separator()
+
         # Feedback button
         col2 = col.column()
         col2.scale_y = 1.5

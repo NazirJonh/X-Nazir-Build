@@ -92,6 +92,16 @@ static void statusbar_experimental_build_panel_draw(const bContext * /*C*/, Pane
   /* Feedback button */
   layout.separator();
   
+  /* Tutorial videos link */
+  {
+    ui::Layout &link_row = layout.row(false);
+    link_row.alignment_set(ui::LayoutAlign::Left);
+    link_row.label(RPT_("Watch tutorial videos:"), ICON_NONE);
+    link_row.link("https://www.youtube.com/@XNazirBuild", "X-Nazir Build YouTube Channel", ICON_URL);
+  }
+
+  layout.separator();
+
   /* Create feedback button with URL operator using C++ Layout API */
   PointerRNA op_ptr = layout.op("WM_OT_url_open",
                                 ">>>Send FEEDBACK!<<<",

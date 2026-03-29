@@ -536,6 +536,22 @@ static void rna_uiItemL(Layout *layout,
   layout->label(text.value_or(""), icon);
 }
 
+static void rna_uiItemLink(Layout *layout,
+                           const char *url,
+                           const char *name,
+                           const char *text_ctxt,
+                           bool translate,
+                           int icon,
+                           int icon_value)
+{
+  std::optional<StringRefNull> text = rna_translate_ui_text(
+      name, text_ctxt, nullptr, nullptr, translate);
+  if (icon_value && !icon) {
+    icon = icon_value;
+  }
+  layout->link(url ? url : "", text.value_or(""), icon);
+}
+
 static void rna_uiItemL_colored(Layout *layout,
                                 const char *name,
                                 const char *text_ctxt,
@@ -1745,6 +1761,16 @@ void RNA_api_ui_layout(StructRNA *srna)
 
   func = RNA_def_function(srna, "label", "rna_uiItemL");
   RNA_def_function_ui_description(func, "Item. Displays text and/or icon in the layout.");
+  api_ui_item_common(func);
+  parm = RNA_def_property(func, "icon_value", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_ui_text(parm, "Icon Value", "Override automatic icon of the item");
+
+  func = RNA_def_function(srna, "link", "rna_uiItemLink");
+  RNA_def_function_ui_description(
+      func,
+      "Item. Displays a clickable URL link. Text becomes underlined on hover.");
+  parm = RNA_def_string(func, "url", nullptr, 0, "URL", "URL to open in the web browser");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   api_ui_item_common(func);
   parm = RNA_def_property(func, "icon_value", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_ui_text(parm, "Icon Value", "Override automatic icon of the item");

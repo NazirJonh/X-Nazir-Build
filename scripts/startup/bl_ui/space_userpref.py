@@ -53,7 +53,7 @@ if not hasattr(bpy.types.WindowManager, "category_tag_glyph_hex"):
 # -----------------------------------------------------------------------------
 # Tag System - Infrastructure Utilities (CleanPanels patterns)
 
-TAG_DEBUG = True  # Set to False to disable all debug output
+TAG_DEBUG = False  # Set to False to disable all debug output
 TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
 SAVE_DEBUG = False  # Set to True to enable verbose save/load logging (printf-style)
 
@@ -142,12 +142,12 @@ _CATEGORY_TAG_MODES = (
     ("CURVE_EDIT", "CURVE_EDIT", 12, "Curve Edit", 'CURVE_DATA'),
     ("SURFACE_EDIT", "SURFACE_EDIT", 13, "Surface Edit", 'SURFACE_DATA'),
     ("ARMATURE_EDIT", "ARMATURE_EDIT", 14, "Armature Edit", 'ARMATURE_DATA'),
-    ("LATTICE_EDIT", "LATTICE_EDIT", 15, "Lattice Edit", 'LATTICE_DATA'),
-    ("META_EDIT", "META_EDIT", 16, "Metaball Edit", 'META_DATA'),
-    ("FONT_EDIT", "FONT_EDIT", 17, "Text Edit", 'FONT_DATA'),
+    # ("LATTICE_EDIT", "LATTICE_EDIT", 15, "Lattice Edit", 'LATTICE_DATA'),  # Temporarily hidden
+    # ("META_EDIT", "META_EDIT", 16, "Metaball Edit", 'META_DATA'),  # Temporarily hidden
+    # ("FONT_EDIT", "FONT_EDIT", 17, "Text Edit", 'FONT_DATA'),  # Temporarily hidden
     ("GREASE_PENCIL_EDIT", "GREASE_PENCIL_EDIT", 18, "Grease Pencil Edit", 'GREASEPENCIL'),
-    ("POINTCLOUD_EDIT", "POINTCLOUD_EDIT", 19, "Point Cloud Edit", 'POINTCLOUD_DATA'),
-    ("VOLUME_EDIT", "VOLUME_EDIT", 20, "Volume Edit", 'VOLUME_DATA'),
+    # ("POINTCLOUD_EDIT", "POINTCLOUD_EDIT", 19, "Point Cloud Edit", 'POINTCLOUD_DATA'),  # Temporarily hidden
+    # ("VOLUME_EDIT", "VOLUME_EDIT", 20, "Volume Edit", 'VOLUME_DATA'),  # Temporarily hidden
 )
 _CATEGORY_TAG_MODE_NAME_TO_FLAG = {name: (1 << bit) for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
 _CATEGORY_TAG_MODE_FLAG_TO_NAME = {(1 << bit): name for name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES}
@@ -192,18 +192,18 @@ _CATEGORY_TAG_FILTER_ENUM_TO_FLAG = {
     "SURFACE_EDIT": (1 << 13),
     15: (1 << 14),
     "ARMATURE_EDIT": (1 << 14),
-    16: (1 << 15),
-    "LATTICE_EDIT": (1 << 15),
-    17: (1 << 16),
-    "META_EDIT": (1 << 16),
-    18: (1 << 17),
-    "FONT_EDIT": (1 << 17),
+    # 16: (1 << 15),  # Temporarily hidden
+    # "LATTICE_EDIT": (1 << 15),  # Temporarily hidden
+    # 17: (1 << 16),  # Temporarily hidden
+    # "META_EDIT": (1 << 16),  # Temporarily hidden
+    # 18: (1 << 17),  # Temporarily hidden
+    # "FONT_EDIT": (1 << 17),  # Temporarily hidden
     19: (1 << 18),
     "GREASE_PENCIL_EDIT": (1 << 18),
-    20: (1 << 19),
-    "POINTCLOUD_EDIT": (1 << 19),
-    21: (1 << 20),
-    "VOLUME_EDIT": (1 << 20),
+    # 20: (1 << 19),  # Temporarily hidden
+    # "POINTCLOUD_EDIT": (1 << 19),  # Temporarily hidden
+    # 21: (1 << 20),  # Temporarily hidden
+    # "VOLUME_EDIT": (1 << 20),  # Temporarily hidden
 }
 
 def tag_log(message, level="INFO", *, dedup=True):

@@ -84,6 +84,11 @@ static std::map<const wmWindowManager *, TagBarRuntimeData *> g_tag_bar_cache;
  * Set to false to disable all debug output in this module. */
 static constexpr bool TAG_BAR_DEBUG_ENABLED = false;
 
+/* Forward declarations */
+static bool is_tag_valid_for_mode(const wmWindowManager *wm,
+                                   const char *tag_name,
+                                   uint32_t mode_flag);
+
 /**
  * Convert CategoryTagMode bit flag to category_tag_filter_mode enum value.
  * CategoryTagMode uses bit flags (1 << n), while category_tag_filter_mode uses
@@ -143,6 +148,21 @@ void tag_bar_mark_all_dirty()
 /** \name Internal Functions
  * \{ */
 
+/* Forward declarations for per-mode tag filter state functions
+ * (defined later in this file, but needed by get_tag_bar_data_global). */
+static char *tag_filter_per_mode_storage_get(const ScrArea *area);
+static uint32_t tag_filter_get_last_mode(const ScrArea *area);
+static void tag_filter_set_last_mode(ScrArea *area, uint32_t mode);
+static void tag_filter_per_mode_save(ScrArea *area,
+                                      uint32_t mode_flag,
+                                      const char *tags,
+                                      int enabled);
+static bool tag_filter_per_mode_restore(const ScrArea *area,
+                                         uint32_t mode_flag,
+                                         char *r_tags,
+                                         int max_len,
+                                         int *r_enabled);
+
 /**
  * Get or create tag bar runtime data from global cache.
  * Creates the data if it doesn't exist.
@@ -181,6 +201,70 @@ TagBarRuntimeData *get_tag_bar_data_global(const bContext *C)
 
   TagFilterStateRef state{};
   const bool has_state = tag_filter_state_from_context(C, &state);
+
+  /* Per-mode tag filter save/restore:
+   * Detect mode changes and save/restore per-mode tag filter state.
+   * When the user switches from Object Mode to Edit Mode (or any other mode),
+   * we save the current tag selection for the old mode and restore the
+   * previously saved tag selection for the new mode. */
+  if (has_state && state.active_tags && state.filter_enabled) {
+    ScrArea *area = CTX_wm_area(C);
+    if (area) {
+      const uint32_t current_mode = get_current_tag_mode_flag(C);
+      const uint32_t last_mode = tag_filter_get_last_mode(area);
+
+      if (last_mode == 0) {
+        /* First call: initialize last_mode and save current state as baseline
+         * so that when the user switches away and comes back, the tag is restored. */
+        tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
+        tag_filter_set_last_mode(area, current_mode);
+      }
+      else if (current_mode != last_mode) {
+        /* Mode changed! Save current state for the previous mode. */
+        tag_filter_per_mode_save(area, last_mode, state.active_tags, *state.filter_enabled);
+
+        /* Restore state for new mode. */
+        char restored_tags[256] = "";
+        int restored_enabled = 0;
+        if (tag_filter_per_mode_restore(
+                area, current_mode, restored_tags, sizeof(restored_tags), &restored_enabled))
+        {
+          BLI_strncpy(state.active_tags, restored_tags, 256);
+          *state.filter_enabled = char(restored_enabled);
+        }
+        else {
+          /* No saved state for this mode.
+           * Keep current tag if it's valid in the new mode,
+           * only clear if the tag is not applicable.
+           * This preserves the user's selection when switching between
+           * modes where the same tag works (e.g., "modeling" in both
+           * Object and Edit modes). */
+          bool keep_current = false;
+          if (state.active_tags[0] != '\0' && *state.filter_enabled) {
+            Vector<std::string> active_tag_list;
+            category_tab_split_tags(state.active_tags, active_tag_list, ",;");
+            if (!active_tag_list.is_empty()) {
+              keep_current = is_tag_valid_for_mode(
+                  wm, active_tag_list[0].c_str(), current_mode);
+            }
+          }
+          if (!keep_current) {
+            state.active_tags[0] = '\0';
+            *state.filter_enabled = 0;
+          }
+          /* Save initial state for new mode (even if empty) so future returns
+           * to this mode restore the correct state. */
+          tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
+        }
+
+        /* Update last mode. */
+        tag_filter_set_last_mode(area, current_mode);
+
+        /* Force rebuild. */
+        data->needs_update = true;
+      }
+    }
+  }
 
   if constexpr (TAG_BAR_DEBUG_ENABLED) {
     printf("[TAG BAR DATA] fetch: wm=%p data=%p needs_update=%d has_state=%d\n",
@@ -398,6 +482,46 @@ bool has_all_tags_active(const wmWindowManager *wm,
   /* Check if ALL active tag bits are present in category's tags */
   /* (active_mask & category_tag_bits) must equal active_mask for AND logic */
   return (active_mask & category_tag_bits) == active_mask;
+}
+
+/**
+ * Check if a tag name is valid (visible) for a given mode flag.
+ * Uses the same mode-matching logic as tag_bar_buttons_update:
+ * - mode_flags == 0 means tag is valid for all modes
+ * - Direct bit match with mode_flag
+ * - EDIT_MODE generalization for detailed edit modes
+ */
+static bool is_tag_valid_for_mode(const wmWindowManager *wm,
+                                   const char *tag_name,
+                                   uint32_t mode_flag)
+{
+  if (!tag_name || !tag_name[0]) {
+    return false;
+  }
+  if (!wm || !category_tag_list_is_valid(&wm->category_tags)) {
+    return true; /* No tag definitions → assume valid */
+  }
+  for (const CategoryTagDef *tag_def =
+           static_cast<const CategoryTagDef *>(wm->category_tags.first);
+       tag_def;
+       tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
+  {
+    if (STREQ(tag_def->name, tag_name)) {
+      if (tag_def->mode_flags == 0) {
+        return true; /* Tag valid for all modes */
+      }
+      if (tag_def->mode_flags & mode_flag) {
+        return true; /* Direct mode match */
+      }
+      if ((mode_flag & static_cast<uint32_t>(CategoryTagMode::EDIT_MODE_MASK)) &&
+          (tag_def->mode_flags & static_cast<uint32_t>(CategoryTagMode::EDIT_MODE)))
+      {
+        return true; /* EDIT_MODE generalization */
+      }
+      return false;
+    }
+  }
+  return false; /* Tag not found in definitions */
 }
 
 /**
@@ -702,6 +826,13 @@ static bool activate_tag_by_index(bContext *C, int tag_index)
   wmWindowManager *wm = CTX_wm_manager(C);
   tag_bar_buttons_update(C, wm, &state, data);
 
+  /* Save per-mode tag filter state for current mode. */
+  {
+    const uint32_t current_mode = get_current_tag_mode_flag(C);
+    tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
+    tag_filter_set_last_mode(area, current_mode);
+  }
+
   /* Trigger redraw */
   WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   WM_event_add_notifier(C, NC_SPACE | ND_CATEGORY_GLYPHS, nullptr);
@@ -908,8 +1039,17 @@ static void tag_toggle_impl(bContext &C, const char *tag_name)
   const bool was_removing_tag = tag_found;
 
   if (!tag_found) {
-    /* Add the tag - single select: replace all tags with this one */
-    BLI_strncpy(new_tags, tag_name, sizeof(new_tags));
+    /* Add the tag - multi-select with max 3 tags.
+     * If limit reached, do nothing (ignore the click). */
+    if (count_active_tags(state.active_tags) >= 3) {
+      return;
+    }
+    /* Append to existing tags */
+    BLI_strncpy(new_tags, state.active_tags, sizeof(new_tags));
+    if (new_tags[0] != '\0') {
+      BLI_strncat(new_tags, ",", sizeof(new_tags));
+    }
+    BLI_strncat(new_tags, tag_name, sizeof(new_tags));
   }
   else {
     /* Remove the tag from the list */
@@ -951,6 +1091,13 @@ static void tag_toggle_impl(bContext &C, const char *tag_name)
   ARegion *region_ui = BKE_area_find_region_type(area, RGN_TYPE_UI);
   if (region_ui) {
     panel_category_tabs_ensure_active_visible(&C, region_ui);
+  }
+
+  /* Save per-mode tag filter state for current mode. */
+  {
+    const uint32_t current_mode = get_current_tag_mode_flag(&C);
+    tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
+    tag_filter_set_last_mode(area, current_mode);
   }
 
   /* Trigger redraw */
@@ -1836,7 +1983,7 @@ void buttons_tag_bar_region_listener(const wmRegionListenerParams *params)
       }
       break;
     case NC_SPACE:
-      if (wmn->data == ND_SPACE_PROPERTIES) {
+      if (wmn->data == ND_SPACE_VIEW3D) {
         ED_region_tag_redraw(region);
       }
       break;
@@ -2055,6 +2202,237 @@ static char *tag_last_active_categories_storage_get(const ScrArea *area)
       return nullptr;
   }
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Per-Mode Tag Filter State
+ * \{ */
+
+/**
+ * Get the per-mode tag filter state storage buffer for a given area.
+ * Format: "flag|enabled|tags;flag|enabled|tags;..."
+ * Returns nullptr if the area type doesn't support per-mode tag state.
+ */
+static char *tag_filter_per_mode_storage_get(const ScrArea *area)
+{
+  if (!area || !area->spacedata.first) {
+    return nullptr;
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+      return v3d->tag_filter_state_per_mode;
+    }
+    case SPACE_PROPERTIES: {
+      SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
+      return sbuts->tag_filter_state_per_mode;
+    }
+    case SPACE_NODE: {
+      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
+      return snode->tag_filter_state_per_mode;
+    }
+    case SPACE_IMAGE: {
+      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+      return sima->tag_filter_state_per_mode;
+    }
+    default:
+      return nullptr;
+  }
+}
+
+/**
+ * Get the last known mode flag for per-mode tag filter save/restore.
+ */
+static uint32_t tag_filter_get_last_mode(const ScrArea *area)
+{
+  if (!area || !area->spacedata.first) {
+    return 0;
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+      return v3d->tag_filter_last_mode;
+    }
+    case SPACE_PROPERTIES: {
+      SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
+      return sbuts->tag_filter_last_mode;
+    }
+    case SPACE_NODE: {
+      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
+      return snode->tag_filter_last_mode;
+    }
+    case SPACE_IMAGE: {
+      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+      return sima->tag_filter_last_mode;
+    }
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Set the last known mode flag for per-mode tag filter save/restore.
+ */
+static void tag_filter_set_last_mode(ScrArea *area, uint32_t mode)
+{
+  if (!area || !area->spacedata.first) {
+    return;
+  }
+
+  switch (area->spacetype) {
+    case SPACE_VIEW3D: {
+      View3D *v3d = static_cast<View3D *>(area->spacedata.first);
+      v3d->tag_filter_last_mode = mode;
+      break;
+    }
+    case SPACE_PROPERTIES: {
+      SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
+      sbuts->tag_filter_last_mode = mode;
+      break;
+    }
+    case SPACE_NODE: {
+      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
+      snode->tag_filter_last_mode = mode;
+      break;
+    }
+    case SPACE_IMAGE: {
+      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+      sima->tag_filter_last_mode = mode;
+      break;
+    }
+  }
+}
+
+/**
+ * Save tag filter state for a specific mode into per-mode storage.
+ * Format: "flag|enabled|tags;flag|enabled|tags;..."
+ * If an entry for the given mode_flag already exists, it is updated.
+ */
+static void tag_filter_per_mode_save(ScrArea *area,
+                                      uint32_t mode_flag,
+                                      const char *tags,
+                                      int enabled)
+{
+  if (!area || mode_flag == 0) {
+    return;
+  }
+
+  char *storage = tag_filter_per_mode_storage_get(area);
+  if (!storage) {
+    return;
+  }
+
+  /* Build new entry for this mode. */
+  char new_entry[320];
+  SNPRINTF(new_entry, "%u|%d|%s", (unsigned)mode_flag, enabled, tags ? tags : "");
+
+  /* Parse existing entries, replace the one for this mode. */
+  blender::Vector<std::string> entries;
+  if (storage[0]) {
+    char *data_copy = BLI_strdup(storage);
+    char *cursor = data_copy;
+    while (*cursor) {
+      char *entry_start = cursor;
+      /* Find next ';' separator. */
+      while (*cursor && *cursor != ';') {
+        cursor++;
+      }
+      if (*cursor == ';') {
+        *cursor = '\0';
+        cursor++;
+      }
+
+      /* Check if this entry is for the same mode. */
+      /* Entry format: "flag|enabled|tags" */
+      unsigned int entry_flag = 0;
+      if (sscanf(entry_start, "%u|", &entry_flag) == 1 && entry_flag == mode_flag) {
+        /* Skip old entry - will be replaced. */
+        continue;
+      }
+      entries.append(std::string(entry_start));
+    }
+    MEM_delete(data_copy);
+  }
+
+  /* Add new/updated entry. */
+  entries.append(std::string(new_entry));
+
+  /* Rebuild storage string. */
+  storage[0] = '\0';
+  for (int i = 0; i < entries.size(); i++) {
+    size_t current_len = strlen(storage);
+    size_t entry_len = entries[i].size();
+    /* +1 for separator or null terminator. */
+    if (current_len + entry_len + 2 >= 1024) {
+      break;  /* Storage full. */
+    }
+    if (i > 0) {
+      BLI_strncat(storage, ";", 1024);
+    }
+    BLI_strncat(storage, entries[i].c_str(), 1024);
+  }
+}
+
+/**
+ * Restore tag filter state for a specific mode from per-mode storage.
+ * Returns true if an entry was found for the given mode_flag.
+ */
+static bool tag_filter_per_mode_restore(const ScrArea *area,
+                                         uint32_t mode_flag,
+                                         char *r_tags,
+                                         int max_len,
+                                         int *r_enabled)
+{
+  if (!area || mode_flag == 0) {
+    return false;
+  }
+
+  const char *storage = tag_filter_per_mode_storage_get(area);
+  if (!storage || !storage[0]) {
+    return false;
+  }
+
+  /* Parse entries looking for matching mode_flag. */
+  char *data_copy = BLI_strdup(storage);
+  char *cursor = data_copy;
+  bool found = false;
+
+  while (*cursor) {
+    char *entry_start = cursor;
+    /* Find next ';' separator. */
+    while (*cursor && *cursor != ';') {
+      cursor++;
+    }
+    if (*cursor == ';') {
+      *cursor = '\0';
+      cursor++;
+    }
+
+    /* Parse entry: "flag|enabled|tags" */
+    unsigned int entry_flag = 0;
+    if (sscanf(entry_start, "%u|%d|", &entry_flag, r_enabled) == 2 && entry_flag == mode_flag) {
+      /* Found the entry. Extract tags after the second '|'. */
+      const char *second_pipe = strchr(entry_start, '|');
+      if (second_pipe) {
+        const char *third_pipe = strchr(second_pipe + 1, '|');
+        if (third_pipe) {
+          BLI_strncpy(r_tags, third_pipe + 1, max_len);
+        }
+        else {
+          r_tags[0] = '\0';
+        }
+      }
+      found = true;
+      break;
+    }
+  }
+
+  MEM_delete(data_copy);
+  return found;
+}
+
+/** \} */
 
 /**
  * Build a sorted tag combination key from active tags string.

@@ -840,6 +840,20 @@ struct View3D {
   char tag_last_active_categories[1024] = "";
 
   /**
+   * Per-mode tag filter state storage.
+   * Format: "flag|enabled|tags;flag|enabled|tags;..."
+   * - flag: uint32 mode flag value (e.g., 1=OBJECT_MODE, 2048=MESH_EDIT)
+   * - enabled: 0 or 1 (tag filter enabled state)
+   * - tags: comma-separated tag names
+   * Example: "1|1|modeling;2048|1|mesh,animation"
+   */
+  char tag_filter_state_per_mode[1024] = "";
+
+  /** Last known mode flag for per-mode tag filter save/restore.
+   * 0 = not initialized yet (first call will set it). */
+  uint32_t tag_filter_last_mode = 0;
+
+  /**
    * Whether the "New Add-on!" virtual tag filter is active.
    * When true, only pending (unassigned) categories are shown.
    */
@@ -857,7 +871,7 @@ struct View3D {
    */
   char saved_tag_filter_tags[256] = "";
 
-  char _pad2[8] = {0};
+  char _pad2[4] = {0};
 
   /** Runtime evaluation data (keep last). */
   View3D_Runtime runtime;

@@ -201,6 +201,11 @@ struct SpaceProperties {
   /** Last active category for each tag combination (see View3D for format). */
   char tag_last_active_categories[1024] = "";
 
+  /** Per-mode tag filter state (see View3D for format). */
+  char tag_filter_state_per_mode[1024] = "";
+  uint32_t tag_filter_last_mode = 0;
+  char _pad_per_mode[4] = {0};
+
   /**
    * Whether the "New Add-on!" virtual tag filter is active.
    * When true, only pending (unassigned) categories are shown.
@@ -788,6 +793,11 @@ struct SpaceImage {
   /** Last active category for each tag combination (see View3D for format). */
   char tag_last_active_categories[1024] = "";
 
+  /** Per-mode tag filter state (see View3D for format). */
+  char tag_filter_state_per_mode[1024] = "";
+  uint32_t tag_filter_last_mode = 0;
+  char _pad_per_mode[4] = {0};
+
   /**
    * Whether the "New Add-on!" virtual tag filter is active.
    * When true, only pending (unassigned) categories are shown.
@@ -1059,6 +1069,11 @@ struct SpaceNode {
    * Used to distinguish auto-activation (after extension install) from manual activation.
    */
   char new_addon_filter_auto_activated = 0;
+
+  /** Per-mode tag filter state (see View3D for format). */
+  char tag_filter_state_per_mode[1024] = "";
+  uint32_t tag_filter_last_mode = 0;
+  char _pad_per_mode[4] = {0};
 
   /**
    * Saved tag filter state when "New Add-on!" filter is activated.

@@ -2552,6 +2552,53 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
     return true;
   }
 
+  /* Check if any active tag is valid for the current mode.
+   * If none of the active tags apply to the current mode (e.g., user selected a tag
+   * in Object Mode but switched to Edit Mode where that tag doesn't apply),
+   * treat the filter as inactive so extension categories are not hidden.
+   * This prevents the situation where switching modes leaves only reserved categories visible. */
+  const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
+  bool any_tag_valid_for_mode = false;
+
+  if (wm && category_tag_list_is_valid(&wm->category_tags)) {
+    Vector<std::string> check_tag_list;
+    category_tab_split_tags(active_tags, check_tag_list, ",;");
+
+    for (const std::string &tag_name : check_tag_list) {
+      for (const CategoryTagDef *tag_def =
+               static_cast<const CategoryTagDef *>(wm->category_tags.first);
+           tag_def;
+           tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
+      {
+        if (STREQ(tag_name.c_str(), tag_def->name)) {
+          /* Same mode matching logic as tag_bar_buttons_update:
+           * - mode_flags == 0 means tag applies to all modes
+           * - Direct bit match with current_mode_flag
+           * - EDIT_MODE generalization for detailed edit modes */
+          if (tag_def->mode_flags == 0 ||
+              (tag_def->mode_flags & current_mode_flag) ||
+              ((current_mode_flag & static_cast<uint32_t>(CategoryTagMode::EDIT_MODE_MASK)) &&
+               (tag_def->mode_flags & static_cast<uint32_t>(CategoryTagMode::EDIT_MODE))))
+          {
+            any_tag_valid_for_mode = true;
+          }
+          break;
+        }
+      }
+      if (any_tag_valid_for_mode) {
+        break;
+      }
+    }
+  }
+  else {
+    /* No tag definitions available - can't determine validity, allow filter */
+    any_tag_valid_for_mode = true;
+  }
+
+  if (!any_tag_valid_for_mode) {
+    return true; /* No active tag applies to current mode - show all categories */
+  }
+
   /* Get category tags with space_type awareness */
   const int space_type = area ? area->spacetype : -1;
   const char *category_tags = category_tags_string_lookup(wm, category_idname, space_type);

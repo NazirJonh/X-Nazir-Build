@@ -722,7 +722,9 @@ struct XrNavigation {
 struct UserDef_Runtime {
   /** Mark as changed so the preferences are saved on exit. */
   char is_dirty = 0;
-  char _pad0[7] = {};
+  /** Set to 1 after the test-build warning popup has been shown once. */
+  char test_build_warning_shown = 0;
+  char _pad0[6] = {};
 };
 
 /* Toggles for unfinished 2.8 UserPref design. */

@@ -220,7 +220,12 @@ TagBarRuntimeData *get_tag_bar_data_global(const bContext *C)
         tag_filter_set_last_mode(area, current_mode);
       }
       else if (current_mode != last_mode) {
-        /* Mode changed! Save current state for the previous mode. */
+        /* Mode changed! Remember current tags before save/restore for carry-over. */
+        char prev_tags[256];
+        BLI_strncpy(prev_tags, state.active_tags, sizeof(prev_tags));
+        int prev_enabled = *state.filter_enabled;
+
+        /* Save current state for the previous mode. */
         tag_filter_per_mode_save(area, last_mode, state.active_tags, *state.filter_enabled);
 
         /* Restore state for new mode. */
@@ -229,8 +234,37 @@ TagBarRuntimeData *get_tag_bar_data_global(const bContext *C)
         if (tag_filter_per_mode_restore(
                 area, current_mode, restored_tags, sizeof(restored_tags), &restored_enabled))
         {
-          BLI_strncpy(state.active_tags, restored_tags, 256);
-          *state.filter_enabled = char(restored_enabled);
+          /* If the restored state is empty but previous tags are valid in the new mode,
+           * carry them over. This handles tags shared between modes (e.g., valid in
+           * both Object Mode and Edit Mode) when the target mode has no selection. */
+          if (restored_tags[0] == '\0' && restored_enabled != 0 &&
+              prev_tags[0] != '\0' && prev_enabled)
+          {
+            bool all_valid = true;
+            Vector<std::string> prev_tag_list;
+            category_tab_split_tags(prev_tags, prev_tag_list, ",;");
+            for (const auto &tag : prev_tag_list) {
+              if (!is_tag_valid_for_mode(wm, tag.c_str(), current_mode)) {
+                all_valid = false;
+                break;
+              }
+            }
+            if (all_valid) {
+              BLI_strncpy(state.active_tags, prev_tags, 256);
+              *state.filter_enabled = char(prev_enabled);
+              /* Update saved state to reflect carry-over. */
+              tag_filter_per_mode_save(
+                  area, current_mode, state.active_tags, *state.filter_enabled);
+            }
+            else {
+              BLI_strncpy(state.active_tags, restored_tags, 256);
+              *state.filter_enabled = char(restored_enabled);
+            }
+          }
+          else {
+            BLI_strncpy(state.active_tags, restored_tags, 256);
+            *state.filter_enabled = char(restored_enabled);
+          }
         }
         else {
           /* No saved state for this mode.

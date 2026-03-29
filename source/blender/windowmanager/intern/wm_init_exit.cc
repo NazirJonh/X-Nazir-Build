@@ -388,6 +388,18 @@ void WM_init_splash_on_startup(bContext *C)
   }
 
   WM_init_splash(C);
+
+  /* Show test build warning popup once per installation. */
+  if (!U.runtime.test_build_warning_shown) {
+    wmWindowManager *wm = CTX_wm_manager(C);
+    if (!BLI_listbase_is_empty(&wm->windows)) {
+      wmWindow *prevwin = CTX_wm_window(C);
+      CTX_wm_window_set(C, static_cast<wmWindow *>(wm->windows.first));
+      WM_operator_name_call(
+          C, "WM_OT_test_build_warning", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
+      CTX_wm_window_set(C, prevwin);
+    }
+  }
 }
 
 void WM_init_splash(bContext *C)

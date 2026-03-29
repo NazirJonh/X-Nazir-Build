@@ -11584,6 +11584,12 @@ static int ui_handle_menu_event(bContext *C,
           WM_tooltip_clear(C, win);
         }
 
+        /* Modal popups must not be closed by clicking outside. */
+        if (block->flag & BLOCK_POPUP_MODAL) {
+          /* consume the event so it doesn't propagate */
+        }
+        else
+
         if (ELEM(event->type, LEFTMOUSE, MIDDLEMOUSE, RIGHTMOUSE)) {
           if (ELEM(event->val, KM_PRESS, KM_DBL_CLICK)) {
             if ((is_parent_menu == false) && (U.uiflag & USER_MENUOPENAUTO) == 0) {
@@ -11631,7 +11637,9 @@ static int ui_handle_menu_event(bContext *C,
 #endif
       else if (event->type == EVT_ESCKEY && event->val == KM_PRESS) {
         /* Escape cancels this and all preceding menus. */
-        menu->menuretval = RETURN_CANCEL;
+        if (!(block->flag & BLOCK_POPUP_MODAL)) {
+          menu->menuretval = RETURN_CANCEL;
+        }
       }
       else if (ELEM(event->type, EVT_RETKEY, EVT_PADENTER) && event->val == KM_PRESS) {
         Button *but_default = region_find_first_but_test_flag(

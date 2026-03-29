@@ -325,6 +325,11 @@ enum {
    * and inherited by sub-menus from their parent.
    */
   BLOCK_NO_ACCELERATOR_KEYS = 1 << 27,
+  /**
+   * Prevent the popup from being closed by clicking outside or pressing Escape.
+   * The user must explicitly interact with a button inside the block to close it.
+   */
+  BLOCK_POPUP_MODAL = 1 << 28,
 };
 
 /** #PopupBlockHandle.menuretval */

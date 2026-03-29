@@ -19,6 +19,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
+#include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_vector.hh"
@@ -38,6 +39,11 @@
 #include "WM_types.hh"
 
 #include "ED_screen.hh"
+
+#ifdef WITH_PYTHON
+#  include "BPY_extern.hh"
+#  include "BPY_extern_run.hh"
+#endif
 
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
@@ -819,6 +825,33 @@ int tag_bar_region_handler(bContext *C, const wmEvent *event, void * /*userdata*
 {
   if (!event || !C) {
     return WM_UI_HANDLER_CONTINUE;
+  }
+
+  if (event->type == LEFTMOUSE && (event->modifier & blender::KM_ALT) != 0 && event->val == KM_PRESS) {
+    TagBarRuntimeData *data = get_tag_bar_data_global(C);
+    const ScrArea *area = CTX_wm_area(C);
+    const ARegion *region = CTX_wm_region(C);
+    if (data && area && region && data->show_new_addon_button) {
+      const int mx = event->xy[0] - region->winrct.xmin;
+      const int my = event->xy[1] - region->winrct.ymin;
+      if ((mx >= data->new_addon_button.rect.xmin) && (mx <= data->new_addon_button.rect.xmax) &&
+          (my >= data->new_addon_button.rect.ymin) && (my <= data->new_addon_button.rect.ymax)) {
+#ifdef WITH_PYTHON
+        char python_expr[512];
+        SNPRINTF(python_expr,
+                 "import bpy; "
+                 "updated = __import__('bl_ui.space_userpref', fromlist=['']).mark_all_unassigned_categories_as_without_tag(%d, %u); "
+                 "bpy.context.window_manager.report({'INFO'}, f'{{updated}} unassigned categories marked as \"Without Tag\"')",
+                 area->spacetype,
+                 get_current_tag_mode_flag(C));
+        const char *imports_none[] = {nullptr};
+        BPY_run_string_exec(const_cast<bContext *>(C), imports_none, python_expr);
+#endif
+        WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+        ED_area_tag_redraw(const_cast<ScrArea *>(area));
+        return WM_UI_HANDLER_BREAK;
+      }
+    }
   }
 
   /* Only handle mouse wheel events */

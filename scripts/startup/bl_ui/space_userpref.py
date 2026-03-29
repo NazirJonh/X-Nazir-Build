@@ -63,6 +63,14 @@ SAVE_DEBUG = False  # Set to True to enable verbose save/load logging (printf-st
 POPULAR_ADDONS_DB_ENABLED = True
 
 
+def _is_popular_addons_database_extension(extension_id):
+    """Check if extension_id is Popular Addons Database."""
+    if not isinstance(extension_id, str):
+        return False
+    normalized = _normalize_category_key(extension_id)
+    return normalized.endswith("popularaddonsdatabase") or normalized == "popularaddonsdatabase"
+
+
 def category_debug_print(message):
     """Print debug message only when TAG_DEBUG is enabled."""
     if TAG_DEBUG:
@@ -1125,6 +1133,10 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
     """
     global _glyph_cache
 
+    if _is_popular_addons_database_extension(extension_id):
+        tag_log(f"mark_category_from_extension: skipped PAD source extension for category={category_id!r}")
+        return
+
     key = _make_cache_key(space_type, category_id)
     cat_data = _glyph_cache.get(key)
     if cat_data is None:
@@ -1184,6 +1196,47 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
     _auto_save_tags()
 
 
+def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
+    global _glyph_cache
+
+    updated = 0
+    for cache_key, cat_data in list(_glyph_cache.items()):
+        if not (isinstance(cache_key, tuple) and len(cache_key) == 2):
+            continue
+        cache_space_type, category_name = cache_key
+        if cache_space_type != -1:
+            continue
+        if not isinstance(cat_data, dict):
+            continue
+        if category_name in DEFAULT_CATEGORY_GLYPHS:
+            continue
+        if not cat_data.get("source_extension", ""):
+            continue
+        if not cat_data.get("pending_tag_assignment", False):
+            continue
+        if cat_data.get("tags"):
+            continue
+
+        discovered_spaces = spaces_to_flags(cat_data.get("discovered_in_spaces", []))
+        if space_type != -1 and discovered_spaces and not (discovered_spaces & SPACE_TO_FLAG.get(_space_type_id_to_str(space_type), 0)):
+            continue
+
+        effective_mode_flags = modes_to_flags(cat_data.get("discovered_in_modes", []))
+        if effective_mode_flags == 0:
+            effective_mode_flags = int(cat_data.get("install_mode_flag", 0))
+        if mode_flag and effective_mode_flags and not (effective_mode_flags & mode_flag):
+            continue
+
+        cat_data["pending_tag_assignment"] = False
+        updated += 1
+
+    if updated:
+        _auto_sync_to_wm()
+        _auto_save_tags()
+    tag_log(f"mark_all_unassigned_categories_as_without_tag: updated={updated}")
+    return updated
+
+
 def assign_tag_to_category(category_id, tag_name, space_type=-1):
     """Assign a tag to a category and clear its pending_tag_assignment flag.
 
@@ -1231,6 +1284,16 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
         tag_log(f"assign_tag_to_category: creating new cache entry for {category_id!r}")
         matching_keys = [global_key]
 
+    # First, get the source_extension for this category to find all sibling categories
+    source_ext = None
+    category_name_for_prefix_match = None
+    for key in matching_keys:
+        cat_data = _glyph_cache.get(key)
+        if isinstance(cat_data, dict):
+            source_ext = cat_data.get("source_extension", "")
+            category_name_for_prefix_match = key[1]  # Store category name for prefix matching
+            break
+
     for key in matching_keys:
         cat_data = _glyph_cache.get(key)
         if not isinstance(cat_data, dict):
@@ -1248,10 +1311,49 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
 
         cat_data["pending_tag_assignment"] = False
 
+    # CRITICAL: Clear pending_tag_assignment for ALL categories from the same extension
+    # This ensures that when a user assigns a tag to any category from an extension,
+    # all other categories from that extension disappear from "New Add-ons!" filter
+    cleared_count = 0
+    if source_ext:
+        # Primary path: match by source_extension
+        for other_key, other_data in _glyph_cache.items():
+            if isinstance(other_data, dict) and other_data.get("source_extension") == source_ext:
+                other_data["pending_tag_assignment"] = False
+                category_debug_print(f"[ASSIGN TAG] Cleared pending for sibling category: {other_key[1]!r} (extension={source_ext!r})")
+                cleared_count += 1
+    elif category_name_for_prefix_match:
+        # FALLBACK: If source_extension is empty, find categories by name prefix matching
+        # This handles cases like "Home Builder" (ext='') and "Home Builder 5" (ext='add-on-...')
+        # Strategy: Find all categories that start with the same base name or contain it as a prefix
+        base_name = category_name_for_prefix_match.rstrip('0123456789').rstrip()  # Remove trailing numbers
+        if not base_name:
+            base_name = category_name_for_prefix_match
+        
+        for other_key, other_data in _glyph_cache.items():
+            if not isinstance(other_data, dict):
+                continue
+            other_name = other_key[1]
+            # Skip self
+            if other_name == category_name_for_prefix_match:
+                continue
+            # Check if other category starts with base_name or base_name starts with other
+            # This catches: "Home Builder" <-> "Home Builder 5", "MPFB" <-> "MPFB v2.0.14"
+            other_ext = other_data.get("source_extension", "")
+            if other_ext and (other_name.startswith(base_name) or base_name.startswith(other_name)):
+                other_data["pending_tag_assignment"] = False
+                category_debug_print(f"[ASSIGN TAG] Cleared pending for prefix-matched sibling: {other_name!r} (base={base_name!r}, extension={other_ext!r})")
+                cleared_count += 1
+            # Also check: if other category has no extension but similar name, clear it too
+            elif not other_ext and (other_name.startswith(base_name) or base_name.startswith(other_name)):
+                other_data["pending_tag_assignment"] = False
+                category_debug_print(f"[ASSIGN TAG] Cleared pending for prefix-matched sibling (no ext): {other_name!r} (base={base_name!r})")
+                cleared_count += 1
+
     # Sync to window manager (DNA) so the change is reflected in C++ code
     sync_glyph_mappings_to_wm()
 
-    tag_log(f"assign_tag_to_category: category={category_id!r}, tag={tag_name!r}, pending cleared keys={len(matching_keys)}")
+    tag_log(f"assign_tag_to_category: category={category_id!r}, tag={tag_name!r}, pending cleared keys={len(matching_keys)}, extension={source_ext!r}, siblings_cleared={cleared_count}")
     return True
 
 
@@ -1366,7 +1468,7 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
     category_debug_print(f"[EXTENSION POST INSTALL] >>> START handler for {extension_id!r}")
     category_debug_print(f"[EXTENSION POST INSTALL] space_type={space_type}, mode_flag={mode_flag:#010x}, tag_assigned={tag_already_assigned}, from_disk={is_install_from_disk}")
     category_debug_print(f"[EXTENSION POST INSTALL] Current cache size: {len(_glyph_cache)} categories")
-    
+
     _pending_extension_context = {
         "extension_id": extension_id,
         "space_type": space_type,
@@ -1378,87 +1480,135 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
     
     # OPTIMIZATION: Scan for icon file and bl_category ONLY once at install time
     # This avoids repeated disk scans during UI draws
-    # Skip scanning if extension_id is empty (drag-and-drop from file explorer)
+    # FIX: Also scan for drag-and-drop installs by discovering pkg_path from discovered categories
+    pkg_path = None
+    pkg_name = None
+    
     if extension_id and extension_id.strip():
         try:
             import importlib
             module = importlib.import_module(extension_id.replace("add-on-", "bl_ext."))
             pkg_path = os.path.dirname(getattr(module, "__file__", ""))
-            if pkg_path and os.path.isdir(pkg_path):
-                # Scan icon once
-                icon_path, icon_name = _scan_extension_icon_path(pkg_path)
-                if icon_path:
-                    category_debug_print(f"[ICON SCAN] Found icon for extension {extension_id!r}: {icon_path!r}")
-                    if not hasattr(extension_post_install_handler, "_icon_cache"):
-                        extension_post_install_handler._icon_cache = {}
-                    extension_post_install_handler._icon_cache[extension_id] = icon_path
-                else:
-                    category_debug_print(f"[ICON SCAN] No icon found for extension {extension_id!r}")
+            pkg_name = extension_id.replace("add-on-", "").replace(".", "_")
+        except Exception:
+            pass
+    
+    # FIX: If pkg_path not found (drag-and-drop), try to discover it from panel discovery
+    if not pkg_path:
+        # Look for recently discovered categories that might belong to this extension
+        for cache_key, cat_data in _glyph_cache.items():
+            if isinstance(cache_key, tuple) and len(cache_key) == 2:
+                _, cat_name = cache_key
+                if isinstance(cat_data, dict) and cat_data.get("pending_tag_assignment", False):
+                    # This is a newly discovered category - try to find its extension
+                    discovered_spaces = cat_data.get("discovered_in_spaces", [])
+                    if discovered_spaces:
+                        # Try to find extension by matching category name to panel bl_category
+                        for space_type_str in discovered_spaces:
+                            try:
+                                import bpy
+                                space_type = getattr(bpy.types, space_type_str, None)
+                                if space_type and hasattr(space_type, 'panels'):
+                                    for panel_cls in space_type.panels:
+                                        if getattr(panel_cls, 'bl_category', '') == cat_name:
+                                            module = getattr(panel_cls, '__module__', '')
+                                            if module.startswith('bl_ext.'):
+                                                module_parts = module.split('.')
+                                                if len(module_parts) >= 3:
+                                                    pkg_name = '.'.join(module_parts[2:])
+                                                    try:
+                                                        ext_module = importlib.import_module(module)
+                                                        pkg_path = os.path.dirname(getattr(ext_module, "__file__", ""))
+                                                        category_debug_print(f"[DRAG-DROP FIX] Discovered pkg_path={pkg_path!r} for category {cat_name!r}")
+                                                        break
+                                                    except Exception:
+                                                        pass
+                                    if pkg_path:
+                                        break
+                            except Exception:
+                                pass
+                    if pkg_path:
+                        break
+    
+    if pkg_path and os.path.isdir(pkg_path):
+        try:
+            # Scan icon once
+            icon_path, icon_name = _scan_extension_icon_path(pkg_path)
+            if icon_path:
+                category_debug_print(f"[ICON SCAN] Found icon for pkg_path {pkg_path!r}: {icon_path!r}")
+                if not hasattr(extension_post_install_handler, "_icon_cache"):
+                    extension_post_install_handler._icon_cache = {}
+                # Use pkg_path as cache key if extension_id is empty
+                cache_key_icon = extension_id if extension_id else pkg_path
+                extension_post_install_handler._icon_cache[cache_key_icon] = icon_path
+            else:
+                category_debug_print(f"[ICON SCAN] No icon found for pkg_path {pkg_path!r}")
 
-                    # [POPULAR ADDONS DB] BEGIN - Fallback: try Popular Addons Database
-                    # Can be removed when extensions bundle their own icons.
-                    if POPULAR_ADDONS_DB_ENABLED:
-                        try:
-                            from bl_ext.user_default.popular_addons_database import api as _pad_api
-                            import re as _re_mod
-                            # Build addon_id candidates from extension_id (ALWAYS try both strategies)
-                            raw_id = extension_id
-                            if raw_id.startswith("add-on-"):
-                                raw_id = raw_id[7:]
-                            _pad_candidates = []
-                            # Strategy 1: repo.pkg format
-                            if "." in raw_id:
-                                _pkg = raw_id.rsplit(".", 1)[-1]
-                                if not _pkg[0:1].isdigit():
-                                    _pad_candidates.append(_pkg)
-                            # Strategy 2: strip version suffix (ALWAYS try)
-                            stripped = _re_mod.sub(r'-v?\d+(\.\d+)*$', '', raw_id)
-                            if stripped and stripped not in _pad_candidates:
-                                _pad_candidates.append(stripped)
-                                _us = stripped.replace("-", "_")
-                                if _us not in _pad_candidates:
-                                    _pad_candidates.append(_us)
-                            # Strategy 3: raw_id as fallback
-                            if raw_id not in _pad_candidates:
-                                _pad_candidates.append(raw_id)
+            # [POPULAR ADDONS DB] BEGIN - Fallback: try Popular Addons Database
+            # Can be removed when extensions bundle their own icons.
+            if POPULAR_ADDONS_DB_ENABLED:
+                try:
+                    from bl_ext.user_default.popular_addons_database import api as _pad_api
+                    import re as _re_mod
+                    # Build addon_id candidates from extension_id (ALWAYS try both strategies)
+                    raw_id = extension_id if extension_id else ""
+                    if raw_id.startswith("add-on-"):
+                        raw_id = raw_id[7:]
+                    _pad_candidates = []
+                    # Strategy 1: repo.pkg format
+                    if "." in raw_id:
+                        _pkg = raw_id.rsplit(".", 1)[-1]
+                        if not _pkg[0:1].isdigit():
+                            _pad_candidates.append(_pkg)
+                    # Strategy 2: strip version suffix (ALWAYS try)
+                    stripped = _re_mod.sub(r'-v?\d+(\.\d+)*$', '', raw_id)
+                    if stripped and stripped not in _pad_candidates:
+                        _pad_candidates.append(stripped)
+                        _us = stripped.replace("-", "_")
+                        if _us not in _pad_candidates:
+                            _pad_candidates.append(_us)
+                    # Strategy 3: raw_id as fallback
+                    if raw_id not in _pad_candidates:
+                        _pad_candidates.append(raw_id)
 
-                            for _q_id in _pad_candidates:
-                                result = _pad_api.query_popular_addon_icon(_q_id)
-                                if result:
-                                    pad_icon_path = result.get("icon_path", "")
-                                    if pad_icon_path and os.path.isfile(pad_icon_path):
-                                        category_debug_print(f"[ICON SCAN] Popular Addons Database icon for {_q_id!r}: {pad_icon_path!r}")
-                                        if not hasattr(extension_post_install_handler, "_icon_cache"):
-                                            extension_post_install_handler._icon_cache = {}
-                                        extension_post_install_handler._icon_cache[extension_id] = pad_icon_path
-                                    break
-                        except Exception as pad_ex:
-                            category_debug_print(f"[ICON SCAN] Popular Addons Database lookup failed: {pad_ex}")
-                    # [POPULAR ADDONS DB] END
-                
-                # CRITICAL OPTIMIZATION: Scan Python files for bl_category ONCE at install time
-                # Cache the result permanently (no expiration) to avoid repeated scanning
-                category_debug_print(f"[BL_CATEGORY SCAN] Scanning Python files for bl_category at install time: {extension_id!r}")
-                pkg_name = extension_id.replace("add-on-", "").replace(".", "_")
-                
-                # Always scan Python files at install time (regardless of is_install_from_disk)
-                # This is a one-time operation that happens only when extension is installed
-                manifest_keys = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=True)
-                
-                # Cache permanently with no expiration (scan only once ever)
-                cache_key = (extension_id, True)  # True = scanned Python files
-                _extension_manifest_keys_cache[cache_key] = {
-                    "keys": manifest_keys,
-                    "timestamp": time.time(),
-                    "pkg_path": pkg_path,
-                    "scanned_at_install": True,  # Mark as scanned at install
-                }
-                category_debug_print(f"[BL_CATEGORY SCAN] CACHED {len(manifest_keys)} keys for {extension_id!r}: {manifest_keys}")
-                
+                    for _q_id in _pad_candidates:
+                        result = _pad_api.query_popular_addon_icon(_q_id)
+                        if result:
+                            pad_icon_path = result.get("icon_path", "")
+                            if pad_icon_path and os.path.isfile(pad_icon_path):
+                                category_debug_print(f"[ICON SCAN] Popular Addons Database icon for {_q_id!r}: {pad_icon_path!r}")
+                                if not hasattr(extension_post_install_handler, "_icon_cache"):
+                                    extension_post_install_handler._icon_cache = {}
+                                cache_key_icon = extension_id if extension_id else pkg_path
+                                extension_post_install_handler._icon_cache[cache_key_icon] = pad_icon_path
+                            break
+                except Exception as pad_ex:
+                    category_debug_print(f"[ICON SCAN] Popular Addons Database lookup failed: {pad_ex}")
+            # [POPULAR ADDONS DB] END
+        
+            # CRITICAL OPTIMIZATION: Scan Python files for bl_category ONCE at install time
+            # Cache the result permanently (no expiration) to avoid repeated scanning
+            if not pkg_name:
+                pkg_name = extension_id.replace("add-on-", "").replace(".", "_") if extension_id else ""
+            category_debug_print(f"[BL_CATEGORY SCAN] Scanning Python files for bl_category at install time: pkg_path={pkg_path!r}, pkg_name={pkg_name!r}")
+            
+            # Always scan Python files at install time (regardless of is_install_from_disk)
+            # This is a one-time operation that happens only when extension is installed
+            manifest_keys = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=True)
+            
+            # Cache permanently with no expiration (scan only once ever)
+            cache_key_ext = extension_id if extension_id else pkg_path
+            cache_key = (cache_key_ext, True)  # True = scanned Python files
+            _extension_manifest_keys_cache[cache_key] = {
+                "keys": manifest_keys,
+                "timestamp": time.time(),
+                "pkg_path": pkg_path,
+                "scanned_at_install": True,  # Mark as scanned at install
+            }
+            category_debug_print(f"[BL_CATEGORY SCAN] CACHED {len(manifest_keys)} keys for {cache_key_ext!r}: {manifest_keys}")
+            
         except Exception as e:
-            category_debug_print(f"[INSTALL SCAN] Failed to scan extension {extension_id!r}: {e}")
-    else:
-        category_debug_print(f"[INSTALL SCAN] Skipping Python file scanning - empty extension_id (drag-and-drop from file explorer)")
+            category_debug_print(f"[INSTALL SCAN] Failed to scan extension: {e}")
 
     # Opportunistically mark already-known categories from this extension as pending.
     # This is needed when the category already exists in the cache but is not rediscovered
@@ -3740,14 +3890,53 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1, update_w
     category_debug_print(f"[ADD_TAG] Tags AFTER adding: {_glyph_cache[key]['tags']}")
     tag_log(f"Added tag '{tag_name}' to '{category}' (GLOBAL)")
 
-    # In preview mode, don't clear pending_tag_assignment yet
-    # It will be cleared only when user clicks Save (in finalize_category_tag_changes)
-    if not _preview_mode_active and update_wm:
-        # Clear pending flag only in non-preview mode
-        cat_data = _glyph_cache[key]
-        if isinstance(cat_data, dict) and cat_data.get("pending_tag_assignment", False):
+    # Clear pending_tag_assignment for the current category and all sibling categories
+    # This ensures "New Add-ons!" button disappears immediately when tag is assigned
+    cat_data = _glyph_cache[key]
+    if isinstance(cat_data, dict):
+        source_ext = cat_data.get("source_extension", "")
+        
+        # Clear pending for the current category
+        if cat_data.get("pending_tag_assignment", False):
             cat_data["pending_tag_assignment"] = False
-            category_debug_print(f"[ADD_TAG] Cleared pending_tag_assignment for '{category}' (not in preview mode)")
+            category_debug_print(f"[ADD_TAG] Cleared pending_tag_assignment for '{category}'")
+        
+        # CRITICAL: Clear pending_tag_assignment for ALL categories from the same extension
+        # This ensures that when a user assigns a tag to any category from an extension,
+        # all other categories from that extension disappear from "New Add-ons!" filter
+        cleared_count = 0
+        if source_ext:
+            # Primary path: match by source_extension
+            for other_key, other_data in _glyph_cache.items():
+                if isinstance(other_data, dict) and other_data.get("source_extension") == source_ext:
+                    other_key_name = other_key[1] if isinstance(other_key, tuple) else other_key
+                    if other_key_name != category:  # Skip self
+                        other_data["pending_tag_assignment"] = False
+                        category_debug_print(f"[ADD_TAG] Cleared pending for sibling category: {other_key_name!r} (extension={source_ext!r})")
+                        cleared_count += 1
+        else:
+            # FALLBACK: If source_extension is empty, find categories by name prefix matching
+            # This handles cases like "Home Builder" (ext='') and "Home Builder 5" (ext='add-on-...')
+            base_name = category.rstrip('0123456789').rstrip()  # Remove trailing numbers
+            if not base_name:
+                base_name = category
+            
+            for other_key, other_data in _glyph_cache.items():
+                if not isinstance(other_data, dict):
+                    continue
+                other_name = other_key[1] if isinstance(other_key, tuple) else other_key
+                # Skip self
+                if other_name == category:
+                    continue
+                # Check if other category starts with base_name or base_name starts with other
+                other_ext = other_data.get("source_extension", "")
+                if other_ext and (other_name.startswith(base_name) or base_name.startswith(other_name)):
+                    other_data["pending_tag_assignment"] = False
+                    category_debug_print(f"[ADD_TAG] Cleared pending for prefix-matched sibling: {other_name!r} (base={base_name!r}, extension={other_ext!r})")
+                    cleared_count += 1
+        
+        if cleared_count > 0:
+            category_debug_print(f"[ADD_TAG] Total siblings cleared: {cleared_count}")
 
     # Only update WM override if requested (not during preview in edit dialog)
     if update_wm:
@@ -4424,8 +4613,9 @@ def finalize_category_tag_changes(category, space_type=-1, sync_wm=True):
 
     # Also clear pending_tag_assignment for all categories from the same extension
     # When one category of an extension gets a tag, the whole extension is "processed"
+    cleared_count = 0
     if source_ext:
-        cleared_count = 0
+        # Primary path: match by source_extension
         for cache_key, cat_data in _glyph_cache.items():
             if isinstance(cat_data, dict):
                 if cat_data.get("source_extension") == source_ext:
@@ -4435,6 +4625,31 @@ def finalize_category_tag_changes(category, space_type=-1, sync_wm=True):
                         category_debug_print(f"[FINALIZE] Cleared pending for sibling category '{cache_key[1]}' (same extension: {source_ext})")
         if cleared_count > 0:
             tag_log(f"finalize_category_tag_changes: cleared pending for {cleared_count} sibling categories of extension '{source_ext}'")
+    else:
+        # FALLBACK: If source_extension is empty, find categories by name prefix matching
+        # This handles cases like "Home Builder" (ext='') and "Home Builder 5" (ext='add-on-...')
+        base_name = category.rstrip('0123456789').rstrip()  # Remove trailing numbers
+        if not base_name:
+            base_name = category
+        
+        for cache_key, cat_data in _glyph_cache.items():
+            if not isinstance(cat_data, dict):
+                continue
+            other_name = cache_key[1] if isinstance(cache_key, tuple) else cache_key
+            # Skip self
+            if other_name == category:
+                continue
+            # Check if other category starts with base_name or base_name starts with other
+            # This catches: "Home Builder" <-> "Home Builder 5", "MPFB" <-> "MPFB v2.0.14"
+            other_ext = cat_data.get("source_extension", "")
+            if other_ext and (other_name.startswith(base_name) or base_name.startswith(other_name)):
+                if cat_data.get("pending_tag_assignment", False):
+                    cat_data["pending_tag_assignment"] = False
+                    cleared_count += 1
+                    category_debug_print(f"[FINALIZE] Cleared pending for prefix-matched sibling: {other_name!r} (base={base_name!r}, extension={other_ext!r})")
+        
+        if cleared_count > 0:
+            tag_log(f"finalize_category_tag_changes: cleared pending for {cleared_count} prefix-matched sibling categories (base={base_name!r})")
 
     # Update WM override to make changes visible
     wm_update_start = time.perf_counter()
@@ -5665,6 +5880,28 @@ def _discover_active_categories():
 
                     repo_name = module_parts[1]
                     pkg_name = ".".join(module_parts[2:])
+                    # Only seed categories from extensions that have actual panels with bl_category.
+                    # Extensions without panels (e.g., icon providers, databases) should not appear as categories.
+                    _ext_has_panels = False
+                    if extensions_dir:
+                        _pkg_check_dir = os.path.join(extensions_dir, repo_name, pkg_name)
+                        if os.path.isdir(_pkg_check_dir):
+                            for _er, _eds, _efs in os.walk(_pkg_check_dir):
+                                _eds[:] = [d for d in _eds if not d.startswith('.') and d != '__pycache__']
+                                for _ef in _efs:
+                                    if _ef.endswith('.py'):
+                                        try:
+                                            with open(os.path.join(_er, _ef), 'r', encoding='utf-8', errors='ignore') as _fp:
+                                                if 'bl_category' in _fp.read():
+                                                    _ext_has_panels = True
+                                                    break
+                                        except Exception:
+                                            pass
+                                if _ext_has_panels:
+                                    break
+                    if not _ext_has_panels:
+                        continue
+
                     if pkg_name:
                         _record_discovered(pkg_name, "package_dir")
                         _log_once(
@@ -5763,6 +6000,24 @@ def _discover_active_categories():
 
                         has_root_icon = any(os.path.isfile(os.path.join(pkg_path, icon_name)) for icon_name in icon_filenames)
                         if not has_root_icon:
+                            continue
+
+                        # Only seed categories from packages that have actual panels with bl_category.
+                        _pkg_has_panels = False
+                        for _pr, _pds, _pfs in os.walk(pkg_path):
+                            _pds[:] = [d for d in _pds if not d.startswith('.') and d != '__pycache__']
+                            for _pf in _pfs:
+                                if _pf.endswith('.py'):
+                                    try:
+                                        with open(os.path.join(_pr, _pf), 'r', encoding='utf-8', errors='ignore') as _fp:
+                                            if 'bl_category' in _fp.read():
+                                                _pkg_has_panels = True
+                                                break
+                                    except Exception:
+                                        pass
+                            if _pkg_has_panels:
+                                break
+                        if not _pkg_has_panels:
                             continue
 
                         if pkg_name:
@@ -5970,6 +6225,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
     category_debug_print(f"[ICON SESSION CACHE] Cleared session tracker for new merge")
 
     result = _discover_active_categories()
+    
     # Handle both old tuple return and new tuple return
     if isinstance(result, tuple):
         discovered, panel_samples = result
@@ -6385,9 +6641,15 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                         # will be visible in the general list without tag filtering.
                         tag_already_assigned = pending_extension_context.get("tag_already_assigned", False) if pending_extension_context else False
 
-                        if not cat_data.get("pending_tag_assignment") and not has_tags_any_space and not tag_already_assigned:
+                        # Check if user already processed this category (assigned tag or "Without Tag").
+                        # pending_tag_assignment=False means user explicitly cleared it — don't override.
+                        user_already_processed = "pending_tag_assignment" in cat_data and cat_data["pending_tag_assignment"] is False
+
+                        if not cat_data.get("pending_tag_assignment") and not has_tags_any_space and not tag_already_assigned and not user_already_processed:
                             cat_data["pending_tag_assignment"] = True
-                            category_debug_print(f"[MERGE DEBUG] SET pending_tag_assignment=True for {category!r}")
+                            category_debug_print(f"[MERGE DEBUG] SET pending_tag_assignment=True for {category!r} (first-time discovery)")
+                        elif user_already_processed:
+                            category_debug_print(f"[MERGE DEBUG] SKIP re-enable for {category!r}: user already processed (pending_tag_assignment=False)")
                         elif tag_already_assigned:
                             category_debug_print(f"[MERGE DEBUG] TAB DROP EXISTING: category={category!r}, tag_already_assigned=True, NOT setting pending_tag_assignment")
                         elif has_tags_any_space:
@@ -6597,20 +6859,27 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                         if category_key in manifest_keys:
                             category_debug_print(f"[MERGE AUTO-EXT] Updating existing category '{category_name}' with source_extension={ext_id!r} (via manifest bl_category)")
                             cat_data["source_extension"] = ext_id
-                            # Re-enable pending_tag_assignment so category appears in "New Add-ons!" filter
-                            if not cat_data.get("pending_tag_assignment"):
+                            # Only set pending_tag_assignment for categories that were NEVER processed.
+                            # If pending_tag_assignment=False, user already assigned tag or "Without Tag".
+                            user_already_processed = "pending_tag_assignment" in cat_data and cat_data["pending_tag_assignment"] is False
+                            if not cat_data.get("pending_tag_assignment") and not user_already_processed:
                                 cat_data["pending_tag_assignment"] = True
-                                category_debug_print(f"[MERGE AUTO-EXT] Re-enabled pending_tag_assignment for '{category_name}'")
+                                category_debug_print(f"[MERGE AUTO-EXT] Re-enabled pending_tag_assignment for '{category_name}' (first-time discovery)")
+                            elif user_already_processed:
+                                category_debug_print(f"[MERGE AUTO-EXT] SKIP for '{category_name}': user already processed")
                             cache_changed = True
                             break
                         # Fallback to ID-based matching for extensions without Python bl_category scanning
                         if category_key in ext_info["match_keys"]:
                             category_debug_print(f"[MERGE AUTO-EXT] Updating existing category '{category_name}' with source_extension={ext_id!r} (via ID match)")
                             cat_data["source_extension"] = ext_id
-                            # Re-enable pending_tag_assignment so category appears in "New Add-ons!" filter
-                            if not cat_data.get("pending_tag_assignment"):
+                            # Only set pending for categories that were NEVER processed by user
+                            user_already_processed = "pending_tag_assignment" in cat_data and cat_data["pending_tag_assignment"] is False
+                            if not cat_data.get("pending_tag_assignment") and not user_already_processed:
                                 cat_data["pending_tag_assignment"] = True
-                                category_debug_print(f"[MERGE AUTO-EXT] Re-enabled pending_tag_assignment for '{category_name}'")
+                                category_debug_print(f"[MERGE AUTO-EXT] Re-enabled pending_tag_assignment for '{category_name}' (first-time discovery)")
+                            elif user_already_processed:
+                                category_debug_print(f"[MERGE AUTO-EXT] SKIP for '{category_name}': user already processed")
                             cache_changed = True
                             break
                         # Prefix matching: "mpfbv2014" should match "mpfb" from "add-on-mpfb"
@@ -6618,10 +6887,13 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                             if category_key.startswith(ext_key) and len(category_key) > len(ext_key):
                                 category_debug_print(f"[MERGE AUTO-EXT] Updating existing category '{category_name}' via prefix: source_extension={ext_id!r} (key={ext_key!r})")
                                 cat_data["source_extension"] = ext_id
-                                # Re-enable pending_tag_assignment so category appears in "New Add-ons!" filter
-                                if not cat_data.get("pending_tag_assignment"):
+                                # Only set pending for categories that were NEVER processed by user
+                                user_already_processed = "pending_tag_assignment" in cat_data and cat_data["pending_tag_assignment"] is False
+                                if not cat_data.get("pending_tag_assignment") and not user_already_processed:
                                     cat_data["pending_tag_assignment"] = True
-                                    category_debug_print(f"[MERGE AUTO-EXT] Re-enabled pending_tag_assignment for '{category_name}'")
+                                    category_debug_print(f"[MERGE AUTO-EXT] Re-enabled pending_tag_assignment for '{category_name}' (first-time discovery)")
+                                elif user_already_processed:
+                                    category_debug_print(f"[MERGE AUTO-EXT] SKIP for '{category_name}': user already processed")
                                 cache_changed = True
                                 break
                         if cat_data.get("source_extension"):
@@ -7373,6 +7645,46 @@ def _sync_glyph_mappings_to_wm_impl(force_discovery_merge=False, skip_icon_detec
                         _glyph_cache[cache_key] = normalized_data
                         cache_changed = True
                         category_debug_print(f"[GLYPH SYNC] Finalized 'Without Tag' for {category!r}: pending=False")
+                        
+                        # CRITICAL: Clear pending_tag_assignment for ALL sibling categories from the same extension
+                        # This ensures that when a user selects "Without Tag" for any category from an extension,
+                        # all other categories from that extension disappear from "New Add-ons!" filter
+                        source_ext = source_ext_val
+                        cleared_count = 0
+                        if source_ext:
+                            # Primary path: match by source_extension
+                            for other_key, other_data in _glyph_cache.items():
+                                if isinstance(other_data, dict) and other_data.get("source_extension") == source_ext:
+                                    other_name = other_key[1] if isinstance(other_key, tuple) else other_key
+                                    if other_name != category:  # Skip self
+                                        if other_data.get("pending_tag_assignment", False):
+                                            other_data["pending_tag_assignment"] = False
+                                            cleared_count += 1
+                                            category_debug_print(f"[GLYPH SYNC] Cleared pending for sibling (Without Tag): {other_name!r} (extension={source_ext!r})")
+                        else:
+                            # FALLBACK: If source_extension is empty, find categories by name prefix matching
+                            # This handles cases like "Home Builder" (ext='') and "Home Builder 5" (ext='add-on-...')
+                            base_name = category.rstrip('0123456789').rstrip()  # Remove trailing numbers
+                            if not base_name:
+                                base_name = category
+                            
+                            for other_key, other_data in _glyph_cache.items():
+                                if not isinstance(other_data, dict):
+                                    continue
+                                other_name = other_key[1] if isinstance(other_key, tuple) else other_key
+                                # Skip self
+                                if other_name == category:
+                                    continue
+                                # Check if other category starts with base_name or base_name starts with other
+                                other_ext = other_data.get("source_extension", "")
+                                if other_ext and (other_name.startswith(base_name) or base_name.startswith(other_name)):
+                                    if other_data.get("pending_tag_assignment", False):
+                                        other_data["pending_tag_assignment"] = False
+                                        cleared_count += 1
+                                        category_debug_print(f"[GLYPH SYNC] Cleared pending for prefix-matched sibling (Without Tag): {other_name!r} (base={base_name!r})")
+                        
+                        if cleared_count > 0:
+                            category_debug_print(f"[GLYPH SYNC] Total siblings cleared for 'Without Tag': {cleared_count}")
 
                     # NORMALIZE pending: clear if category has tags or no source_extension
                     # This prevents stale pending flags from showing "New Add-ons!" button
@@ -7392,6 +7704,21 @@ def _sync_glyph_mappings_to_wm_impl(force_discovery_merge=False, skip_icon_detec
                         _glyph_cache[cache_key] = normalized_data
                         cache_changed = True
                         category_debug_print(f"[GLYPH SYNC NORMALIZE] Cleared pending for RESERVED category {category!r} while keeping source_extension")
+                        
+                        # CRITICAL: Clear pending_tag_assignment for ALL sibling categories from the same extension
+                        cleared_count = 0
+                        if source_ext_val:
+                            for other_key, other_data in _glyph_cache.items():
+                                if isinstance(other_data, dict) and other_data.get("source_extension") == source_ext_val:
+                                    other_name = other_key[1] if isinstance(other_key, tuple) else other_key
+                                    if other_name != category:  # Skip self
+                                        if other_data.get("pending_tag_assignment", False):
+                                            other_data["pending_tag_assignment"] = False
+                                            cleared_count += 1
+                                            category_debug_print(f"[GLYPH SYNC NORMALIZE] Cleared pending for sibling (RESERVED): {other_name!r} (extension={source_ext_val!r})")
+                        
+                        if cleared_count > 0:
+                            category_debug_print(f"[GLYPH SYNC NORMALIZE] Total siblings cleared for RESERVED: {cleared_count}")
                     elif pending_val and (has_tags or not source_ext_val):
                         pending_val = False
                         normalized_data["pending_tag_assignment"] = False
@@ -7400,6 +7727,41 @@ def _sync_glyph_mappings_to_wm_impl(force_discovery_merge=False, skip_icon_detec
                         cache_changed = True
                         category_debug_print(f"[GLYPH SYNC NORMALIZE] Cleared stale pending for {category!r}: "
                               f"has_tags={has_tags}, source_ext={source_ext_val!r}")
+                        
+                        # CRITICAL: Clear pending_tag_assignment for ALL sibling categories from the same extension
+                        # This ensures that when a category gets tags (or has no extension), all siblings are cleared too
+                        cleared_count = 0
+                        if source_ext_val:
+                            # Primary path: match by source_extension
+                            for other_key, other_data in _glyph_cache.items():
+                                if isinstance(other_data, dict) and other_data.get("source_extension") == source_ext_val:
+                                    other_name = other_key[1] if isinstance(other_key, tuple) else other_key
+                                    if other_name != category:  # Skip self
+                                        if other_data.get("pending_tag_assignment", False):
+                                            other_data["pending_tag_assignment"] = False
+                                            cleared_count += 1
+                                            category_debug_print(f"[GLYPH SYNC NORMALIZE] Cleared pending for sibling: {other_name!r} (extension={source_ext_val!r})")
+                        else:
+                            # FALLBACK: If source_extension is empty, find categories by name prefix matching
+                            base_name = category.rstrip('0123456789').rstrip()
+                            if not base_name:
+                                base_name = category
+                            
+                            for other_key, other_data in _glyph_cache.items():
+                                if not isinstance(other_data, dict):
+                                    continue
+                                other_name = other_key[1] if isinstance(other_key, tuple) else other_key
+                                if other_name == category:
+                                    continue
+                                other_ext = other_data.get("source_extension", "")
+                                if other_ext and (other_name.startswith(base_name) or base_name.startswith(other_name)):
+                                    if other_data.get("pending_tag_assignment", False):
+                                        other_data["pending_tag_assignment"] = False
+                                        cleared_count += 1
+                                        category_debug_print(f"[GLYPH SYNC NORMALIZE] Cleared pending for prefix-matched sibling: {other_name!r} (base={base_name!r})")
+                        
+                        if cleared_count > 0:
+                            category_debug_print(f"[GLYPH SYNC NORMALIZE] Total siblings cleared: {cleared_count}")
 
                     # Debug: log ALL categories with pending_tag_assignment or source_extension
                     if pending_val or source_ext_val:

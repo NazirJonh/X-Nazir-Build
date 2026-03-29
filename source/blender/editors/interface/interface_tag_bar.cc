@@ -827,33 +827,6 @@ int tag_bar_region_handler(bContext *C, const wmEvent *event, void * /*userdata*
     return WM_UI_HANDLER_CONTINUE;
   }
 
-  if (event->type == LEFTMOUSE && (event->modifier & blender::KM_ALT) != 0 && event->val == KM_PRESS) {
-    TagBarRuntimeData *data = get_tag_bar_data_global(C);
-    const ScrArea *area = CTX_wm_area(C);
-    const ARegion *region = CTX_wm_region(C);
-    if (data && area && region && data->show_new_addon_button) {
-      const int mx = event->xy[0] - region->winrct.xmin;
-      const int my = event->xy[1] - region->winrct.ymin;
-      if ((mx >= data->new_addon_button.rect.xmin) && (mx <= data->new_addon_button.rect.xmax) &&
-          (my >= data->new_addon_button.rect.ymin) && (my <= data->new_addon_button.rect.ymax)) {
-#ifdef WITH_PYTHON
-        char python_expr[512];
-        SNPRINTF(python_expr,
-                 "import bpy; "
-                 "updated = __import__('bl_ui.space_userpref', fromlist=['']).mark_all_unassigned_categories_as_without_tag(%d, %u); "
-                 "bpy.context.window_manager.report({'INFO'}, f'{{updated}} unassigned categories marked as \"Without Tag\"')",
-                 area->spacetype,
-                 get_current_tag_mode_flag(C));
-        const char *imports_none[] = {nullptr};
-        BPY_run_string_exec(const_cast<bContext *>(C), imports_none, python_expr);
-#endif
-        WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
-        ED_area_tag_redraw(const_cast<ScrArea *>(area));
-        return WM_UI_HANDLER_BREAK;
-      }
-    }
-  }
-
   /* Only handle mouse wheel events */
   if (event->type != blender::WHEELUPMOUSE && event->type != blender::WHEELDOWNMOUSE) {
     return WM_UI_HANDLER_CONTINUE;
@@ -1135,10 +1108,35 @@ static int draw_new_addon_button(const bContext *C,
      * When activating: save current tags to saved_tag_filter_tags, clear active tags.
      * When deactivating: restore tags from saved_tag_filter_tags.
      * Special case: if no tags are selected when activating, show all categories
-     * and disable the tag filter (filter_enabled = 0). */
+     * and disable the tag filter (filter_enabled = 0).
+     * 
+     * Alt+Click: Mark all unassigned categories as "Without Tag" (clear pending). */
     but->func = [](bContext *C_cb, void * /*arg1*/, void * /*arg2*/) {
       ScrArea *cb_area = CTX_wm_area(C_cb);
       if (!cb_area) {
+        return;
+      }
+
+      /* Check if Alt modifier is pressed - if so, mark all unassigned as "Without Tag" */
+      const wmWindow *win = CTX_wm_window(C_cb);
+      const wmEvent *event = win ? win->runtime->eventstate : nullptr;
+      const bool alt_pressed = event && (event->modifier & blender::KM_ALT);
+
+      if (alt_pressed) {
+        /* Alt+Click: Mark all unassigned categories as "Without Tag" */
+#ifdef WITH_PYTHON
+        char python_expr[512];
+        SNPRINTF(python_expr,
+                 "import bpy; "
+                 "updated = __import__('bl_ui.space_userpref', fromlist=['']).mark_all_unassigned_categories_as_without_tag(%d, %u); "
+                 "bpy.context.window_manager.report({'INFO'}, f'{{updated}} unassigned categories marked as \"Without Tag\"')",
+                 cb_area->spacetype,
+                 get_current_tag_mode_flag(C_cb));
+        const char *imports_none[] = {nullptr};
+        BPY_run_string_exec(const_cast<bContext *>(C_cb), imports_none, python_expr);
+#endif
+        WM_main_add_notifier(NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+        ED_area_tag_redraw(cb_area);
         return;
       }
 
@@ -2005,6 +2003,17 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
                                         wm::OpCallContext::ExecDefault,
                                         UI_ITEM_NONE);
   RNA_enum_set(&prefs_ptr, "section", USER_SECTION_TAGS);
+
+  /* "Mark All as Distributed" button - shown only when there are unassigned categories
+   * (i.e. when the "New Add-on!" button is visible in the tag bar). */
+  if (should_show_new_addon_tag(wm, -1, current_mode_flag)) {
+    button_col.separator();
+    button_col.op("wm.mark_all_unassigned_as_distributed",
+                  "",
+                  ICON_CHECKMARK,
+                  wm::OpCallContext::ExecDefault,
+                  UI_ITEM_NONE);
+  }
 }
 
 #include "interface_intern.hh"

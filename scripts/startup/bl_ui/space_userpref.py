@@ -1197,9 +1197,18 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
 
 
 def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
+    """Mark all unassigned categories as 'Without Tag' (pending=False).
+    
+    This is called when Alt+Click on "New Add-ons!" button.
+    Handles both categories with source_extension and categories without extension
+    (using prefix matching for siblings like "Home Builder" <-> "Home Builder 5").
+    """
     global _glyph_cache
 
     updated = 0
+    categories_to_clear = []  # Collect categories that were cleared for sibling processing
+    
+    # First pass: mark all unassigned categories as without tag
     for cache_key, cat_data in list(_glyph_cache.items()):
         if not (isinstance(cache_key, tuple) and len(cache_key) == 2):
             continue
@@ -1210,8 +1219,8 @@ def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
             continue
         if category_name in DEFAULT_CATEGORY_GLYPHS:
             continue
-        if not cat_data.get("source_extension", ""):
-            continue
+        # CRITICAL: Process ALL categories with pending=True, regardless of source_extension
+        # This includes categories like "Home Builder" (ext='') and "Home Builder 5" (ext='...')
         if not cat_data.get("pending_tag_assignment", False):
             continue
         if cat_data.get("tags"):
@@ -1228,13 +1237,66 @@ def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
             continue
 
         cat_data["pending_tag_assignment"] = False
+        categories_to_clear.append(category_name)
         updated += 1
 
-    if updated:
+    # Second pass: clear pending for sibling categories
+    # This ensures that when one category from an extension is cleared,
+    # all siblings are also cleared (even if they weren't in the original list)
+    cleared_siblings = set()
+    for category_name in categories_to_clear:
+        key = _make_cache_key(-1, category_name)
+        cat_data = _glyph_cache.get(key)
+        if not isinstance(cat_data, dict):
+            continue
+        
+        source_ext = cat_data.get("source_extension", "")
+        cleared_count = 0
+        
+        if source_ext:
+            # Primary path: match by source_extension
+            for other_key, other_data in _glyph_cache.items():
+                if isinstance(other_data, dict) and other_data.get("source_extension") == source_ext:
+                    other_name = other_key[1] if isinstance(other_key, tuple) else other_key
+                    if other_name != category_name:  # Skip self
+                        if other_data.get("pending_tag_assignment", False) and not other_data.get("tags"):
+                            other_data["pending_tag_assignment"] = False
+                            cleared_siblings.add(other_name)
+                            cleared_count += 1
+        else:
+            # FALLBACK: If source_extension is empty, find categories by name prefix matching
+            # This handles cases like "Home Builder" (ext='') and "Home Builder 5" (ext='add-on-...')
+            base_name = category_name.rstrip('0123456789').rstrip()  # Remove trailing numbers
+            if not base_name:
+                base_name = category_name
+            
+            for other_key, other_data in _glyph_cache.items():
+                if not isinstance(other_data, dict):
+                    continue
+                other_name = other_key[1] if isinstance(other_key, tuple) else other_key
+                # Skip self
+                if other_name == category_name:
+                    continue
+                # Skip if already has tags or not pending
+                if other_data.get("tags") or not other_data.get("pending_tag_assignment", False):
+                    continue
+                # Check if other category starts with base_name or base_name starts with other
+                other_ext = other_data.get("source_extension", "")
+                if other_ext and (other_name.startswith(base_name) or base_name.startswith(other_name)):
+                    other_data["pending_tag_assignment"] = False
+                    cleared_siblings.add(other_name)
+                    cleared_count += 1
+        
+        if cleared_count > 0:
+            category_debug_print(f"[ALT_CLICK] Cleared {cleared_count} siblings for '{category_name}'")
+    
+    if updated or cleared_siblings:
         _auto_sync_to_wm()
         _auto_save_tags()
-    tag_log(f"mark_all_unassigned_categories_as_without_tag: updated={updated}")
-    return updated
+    
+    total_cleared = updated + len(cleared_siblings)
+    tag_log(f"mark_all_unassigned_categories_as_without_tag: updated={updated}, siblings_cleared={len(cleared_siblings)}, total={total_cleared}")
+    return total_cleared
 
 
 def assign_tag_to_category(category_id, tag_name, space_type=-1):
@@ -10013,6 +10075,41 @@ class USERPREF_OT_category_tag_delete(Operator):
         return {'CANCELLED'}
 
 
+class USERPREF_OT_mark_all_unassigned_as_distributed(Operator):
+    """Mark all unassigned categories as 'Distributed' (Without Tag).
+    
+    This clears the pending_tag_assignment flag for all categories that:
+    - Have no tags assigned
+    - Are marked as pending (from new extensions)
+    
+    This is useful when you want to dismiss the "New Add-ons!" button
+    without manually assigning tags to each category.
+    """
+    bl_idname = "wm.mark_all_unassigned_as_distributed"
+    bl_label = "Mark All as Distributed"
+    bl_options = {'REGISTER', 'INTERNAL'}
+    
+    @with_context_check
+    def execute(self, context):
+        # Call the core function to mark all unassigned as distributed
+        # Use space_type=-1 to process all spaces (popover is not space-specific)
+        updated = mark_all_unassigned_categories_as_without_tag(
+            space_type=-1,
+            mode_flag=get_current_tag_mode_flag(context)
+        )
+        
+        if updated > 0:
+            self.report({'INFO'}, f"Marked {updated} unassigned categor{'y' if updated == 1 else 'ies'} as 'Distributed'")
+        else:
+            self.report({'INFO'}, "No unassigned categories found")
+        
+        # Trigger WM sync and redraw
+        if context.area:
+            context.area.tag_redraw()
+        
+        return {'FINISHED'}
+
+
 class USERPREF_OT_category_tag_move(Operator):
     """Move a tag up or down in the list"""
     bl_idname = "wm.category_tag_move"
@@ -14401,6 +14498,7 @@ classes = (
     USERPREF_OT_category_tag_edit,
     USERPREF_OT_category_tag_delete,
     USERPREF_OT_category_tag_move,
+    USERPREF_OT_mark_all_unassigned_as_distributed,
     WM_OT_category_tag_set_display_mode,
     WM_OT_category_tag_pick_icon,
     USERPREF_OT_category_tag_toggle,

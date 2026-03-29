@@ -116,7 +116,7 @@ static constexpr size_t MAX_LOGGED_MESSAGES = 500;
 
 /* Debug output control flag - set to true to enable debug printf messages */
 //DEBUG FLAGS
-static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
 
 /* [POPULAR ADDONS DB] - Temporary: fallback icon lookup from Popular Addons Database.
  * When extensions start bundling their own icons, this functionality will no longer be needed.
@@ -4500,6 +4500,15 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
   /* Clear dialog operator pointer and preview button */
   category_tab_edit_dialog_clear_runtime_state(false);
 
+  /* Capture pending state BEFORE Python save modifies it.
+   * finalize_category_tag_changes sets pending_tag_assignment=0 in mappings,
+   * so we must read it now to know if the category was in "New Add-ons!". */
+  const CategoryGlyphItem *mapping_pre_save =
+      category_glyph_item_find_with_global_fallback_const(
+          wm->category_glyph_mappings, category, space_type);
+  const bool was_pending_before_save = (mapping_pre_save != nullptr &&
+                                         mapping_pre_save->pending_tag_assignment != 0);
+
   /* Save updated data to JSON (including tags which might have been modified).
    * Note: Python side uses timers to defer heavy operations (json.dumps off main thread),
    * so this call returns quickly without blocking the UI. */
@@ -4612,17 +4621,19 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
           category_tab_split_tags(active_category_tags, active_tag_list, ",;");
         }
 
-        if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-          if (!active_tag_list.is_empty() && !active_tag_list[0].empty()) {
-            BLI_strncpy(state.active_tags, active_tag_list[0].c_str(), 256);
-            *state.filter_enabled = 1;
+        if (!active_tag_list.is_empty() && !active_tag_list[0].empty()) {
+          BLI_strncpy(state.active_tags, active_tag_list[0].c_str(), 256);
+          *state.filter_enabled = 1;
+          if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
             printf("[CATEGORY_TAB_EDIT] No more unassigned categories, switched to tag '%s'\n",
                    active_tag_list[0].c_str());
           }
-          else {
-            /* "Without Tag": disable tag filtering and keep active tab unchanged. */
-            state.active_tags[0] = '\0';
-            *state.filter_enabled = 0;
+        }
+        else {
+          /* "Without Tag": disable tag filtering and keep active tab unchanged. */
+          state.active_tags[0] = '\0';
+          *state.filter_enabled = 0;
+          if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
             printf("[CATEGORY_TAB_EDIT] No more unassigned categories, disabled tag filtering\n");
           }
         }
@@ -4640,18 +4651,12 @@ wmOperatorStatus category_tab_edit_dialog_exec(bContext *C, wmOperator *op)
     * (pending_tag_assignment=false), the active tag must remain unchanged —
     * switching it would break the normal editing workflow. */
    {
-     /* Check whether the category was in "New Add-ons!" before the save.
-      * Only pending_tag_assignment=true means the category was unassigned.
-      * A category with pending_tag_assignment=false but empty tags is NOT
-      * in "New Add-ons!" — it's a regular assigned category without tags. */
-     const CategoryGlyphItem *mapping_before_save =
-         category_glyph_item_find_with_global_fallback_const(
-             wm->category_glyph_mappings, category, space_type);
-     const bool was_pending = (mapping_before_save != nullptr &&
-                               mapping_before_save->pending_tag_assignment != 0);
+     /* Use the pending state captured BEFORE Python save (was_pending_before_save).
+      * Python's finalize_category_tag_changes has already set pending_tag_assignment=0
+      * in the mapping, so reading it now would always return false. */
 
      const char *saved_category_tags = category_tags_string_lookup(wm, category, space_type);
-     if (was_pending && saved_category_tags && saved_category_tags[0] != '\0') {
+     if (was_pending_before_save && saved_category_tags && saved_category_tags[0] != '\0') {
        /* Category has tags assigned - switch to the first assigned tag */
        Vector<std::string> assigned_tag_list;
        category_tab_split_tags(saved_category_tags, assigned_tag_list, ",;");

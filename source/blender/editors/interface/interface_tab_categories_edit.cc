@@ -2522,6 +2522,35 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
                 IDP_AssignString(idprop, hex_code);
                 resolved = true;
               }
+
+              /* After writing via IDProperty, find the owning operator and call
+               * RNA_property_update so that Python's check() is triggered and the
+               * props-dialog redraws (updating the glyph preview). */
+              if (resolved) {
+                wmOperator *owner_op = target_op;
+                if (!owner_op) {
+                  wmWindowManager *wm_find = CTX_wm_manager(&C);
+                  if (wm_find) {
+                    for (wmOperator *op_iter =
+                             static_cast<wmOperator *>(wm_find->runtime->operators.last);
+                         op_iter;
+                         op_iter = op_iter->prev)
+                    {
+                      if (op_iter && op_iter->properties == popup_data->target_op_properties) {
+                        owner_op = op_iter;
+                        break;
+                      }
+                    }
+                  }
+                }
+                if (owner_op && owner_op->ptr) {
+                  PropertyRNA *glyph_rna_prop = RNA_struct_find_property(
+                      owner_op->ptr, target_prop_path_for_operator);
+                  if (glyph_rna_prop) {
+                    RNA_property_update(&C, owner_op->ptr, glyph_rna_prop);
+                  }
+                }
+              }
             }
           }
 

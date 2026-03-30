@@ -883,6 +883,16 @@ static void ui_template_glyph_selector_impl(Layout *layout,
         return ICON_NONE;
       }
 
+      /* If display_mode_ui is present and set to GLYPH (0), never show icon preview.
+       * This ensures switching back from Icon to Glyph mode clears the icon preview
+       * even when icon_key is still populated. */
+      if (PropertyRNA *display_mode_prop = RNA_struct_find_property(preview_ptr, "display_mode_ui")) {
+        const int display_mode_ui = RNA_property_enum_get(preview_ptr, display_mode_prop);
+        if (display_mode_ui == 0) { /* 0 = GLYPH */
+          return ICON_NONE;
+        }
+      }
+
       PropertyRNA *icon_source_prop = RNA_struct_find_property(preview_ptr, "icon_source");
       PropertyRNA *icon_key_prop = RNA_struct_find_property(preview_ptr, "icon_key");
       PropertyRNA *icon_path_prop = RNA_struct_find_property(preview_ptr, "icon_path");

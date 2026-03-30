@@ -39,7 +39,7 @@
 
 /* Global debug flag for tab drag operations - set to 0 to disable debug output */
 #ifndef TAB_DRAG_DEBUG_ENABLED
-#  define TAB_DRAG_DEBUG_ENABLED 1
+#  define TAB_DRAG_DEBUG_ENABLED 0
 #endif
 
 #include "DNA_object_types.h"

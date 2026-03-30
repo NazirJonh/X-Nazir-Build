@@ -27,7 +27,8 @@ try:
     from ..space_userpref import DEFAULT_CATEGORY_GLYPHS
 except ImportError:
     DEFAULT_CATEGORY_GLYPHS = {}
-    log.warning("DEFAULT_CATEGORY_GLYPHS not imported from space_userpref.py")
+    if GLYPH_LIBRARY_DEBUG_ENABLED:
+        log.warning("DEFAULT_CATEGORY_GLYPHS not imported from space_userpref.py")
 
 
 class GlyphLibrary:

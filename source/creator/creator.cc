@@ -599,7 +599,7 @@ int main(int argc,
   WM_init(C, argc, argv);
 
   /* Print enabled Build Features for debugging. */
-  {
+  if constexpr (false) {
     const UserDef_BuildFeatures &bf = U.build_features;
     printf("\n");
     printf("Build Features:\n");

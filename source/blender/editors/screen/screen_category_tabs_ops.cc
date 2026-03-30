@@ -1290,14 +1290,9 @@ static wmOperatorStatus category_tab_edit_dialog_save_exec(bContext *C, wmOperat
       "import bpy\n"
       "wm = bpy.context.window_manager\n"
       "category = wm.category_tab_save_category\n"
-      "print(f'[GLYPH SAVE PY] category from WM: [{category}]')\n"
       "wm.category_tab_save_category = ''\n"
       "if category:\n"
-      "    print(f'[GLYPH SAVE PY] Starting save for {category}...')\n"
-      "    _save_glyph_mappings_to_file(force_discovery_skip=False)\n"
-      "    print(f'[GLYPH SAVE PY] Save completed')\n"
-      "else:\n"
-      "    print(f'[GLYPH SAVE PY] ERROR: category is empty, skipping save')\n");
+      "    _save_glyph_mappings_to_file(force_discovery_skip=False)\n");
 #endif
 
 #if CATEGORY_TAB_DEBUG_ENABLED

@@ -4063,7 +4063,8 @@ def toggle_category_tag_no_save(category, tag_name, space_type=-1):
 
     # Set preview mode to prevent automatic WM sync during tag operations
     _preview_mode_active = True
-    print(f"[DEBUG TOGGLE_NO_SAVE] SET _preview_mode_active=True for category='{category}', tag='{tag_name}'")
+    if TAG_DEBUG:
+        print(f"[DEBUG TOGGLE_NO_SAVE] SET _preview_mode_active=True for category='{category}', tag='{tag_name}'")
     try:
         # DEBUG
         category_debug_print(f"[TOGGLE_NO_SAVE] CALLED: category='{category}', tag='{tag_name}', space_type={space_type} (preview_mode=True)")

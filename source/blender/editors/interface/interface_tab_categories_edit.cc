@@ -116,7 +116,7 @@ static constexpr size_t MAX_LOGGED_MESSAGES = 500;
 
 /* Debug output control flag - set to true to enable debug printf messages */
 //DEBUG FLAGS
-static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
+static constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
 
 /* [POPULAR ADDONS DB] - Temporary: fallback icon lookup from Popular Addons Database.
  * When extensions start bundling their own icons, this functionality will no longer be needed.

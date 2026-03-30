@@ -585,11 +585,15 @@ void tag_bar_buttons_update(const bContext *C,
   const uint32_t current_mode_flag = get_current_tag_mode_flag(C);
 
   /* DEBUG: Log current mode flag */
-  printf("[TAG_BAR] current_mode_flag=%u\n", current_mode_flag);
+  if constexpr (TAG_BAR_DEBUG_ENABLED) {
+    printf("[TAG_BAR] current_mode_flag=%u\n", current_mode_flag);
+  }
 
   /* Iterate through all tags from wm in their original order (from JSON tag_order) */
   if (wm && category_tag_list_is_valid(&wm->category_tags)) {
-    printf("[TAG_BAR] Iterating through %d tags\n", BLI_listbase_count(&wm->category_tags));
+    if constexpr (TAG_BAR_DEBUG_ENABLED) {
+      printf("[TAG_BAR] Iterating through %d tags\n", BLI_listbase_count(&wm->category_tags));
+    }
     for (const CategoryTagDef *tag_def =
              static_cast<const CategoryTagDef *>(wm->category_tags.first);
          tag_def;
@@ -608,15 +612,19 @@ void tag_bar_buttons_update(const bContext *C,
       btn.use_builtin_icon = false;
 
       /* DEBUG: Log tag properties from WM */
-      printf("[TAG_BAR] tag='%s' icon_source=%d icon_key='%s' glyph='%s'\n",
-             tag_def->name, tag_def->icon_source, tag_def->icon_key, tag_def->glyph);
+      if constexpr (TAG_BAR_DEBUG_ENABLED) {
+        printf("[TAG_BAR] tag='%s' icon_source=%d icon_key='%s' glyph='%s'\n",
+               tag_def->name, tag_def->icon_source, tag_def->icon_key, tag_def->glyph);
+      }
 
       if (tag_def->icon_source == 1 && tag_def->icon_key[0] != '\0') {
         /* icon_source == 1 means use Blender icon */
         btn.icon_id = category_tab_icon_id_resolve_from_key_path(tag_def->icon_key, nullptr);
         btn.use_builtin_icon = (btn.icon_id != ICON_NONE);
-        printf("[TAG_BAR] tag='%s' resolved icon_id=%d use_builtin_icon=%d\n",
-               tag_def->name, btn.icon_id, btn.use_builtin_icon);
+        if constexpr (TAG_BAR_DEBUG_ENABLED) {
+          printf("[TAG_BAR] tag='%s' resolved icon_id=%d use_builtin_icon=%d\n",
+                 tag_def->name, btn.icon_id, btn.use_builtin_icon);
+        }
       }
 
       /* Check if this tag should be visible:
@@ -631,8 +639,10 @@ void tag_bar_buttons_update(const bContext *C,
        * icon_id may be ICON_NONE if resolution fails, but we should still show the tag */
       const bool has_icon = (tag_def->icon_source == 1 && tag_def->icon_key[0] != '\0');
 
-      printf("[TAG_BAR] tag='%s' has_glyph=%d has_icon=%d mode_flags=%u current_mode_flag=%u\n",
-             tag_def->name, has_glyph, has_icon, tag_def->mode_flags, current_mode_flag);
+      if constexpr (TAG_BAR_DEBUG_ENABLED) {
+        printf("[TAG_BAR] tag='%s' has_glyph=%d has_icon=%d mode_flags=%u current_mode_flag=%u\n",
+               tag_def->name, has_glyph, has_icon, tag_def->mode_flags, current_mode_flag);
+      }
 
       if (!has_glyph && !has_icon) {
         btn.is_visible = false;
@@ -656,8 +666,10 @@ void tag_bar_buttons_update(const bContext *C,
         }
       }
 
-      printf("[TAG_BAR] tag='%s' final is_visible=%d\n",
-             tag_def->name, btn.is_visible);
+      if constexpr (TAG_BAR_DEBUG_ENABLED) {
+        printf("[TAG_BAR] tag='%s' final is_visible=%d\n",
+               tag_def->name, btn.is_visible);
+      }
 
       btn.is_hovered = false;
       /* Check if this tag is in the active tags list */
@@ -679,8 +691,10 @@ void tag_bar_buttons_update(const bContext *C,
 
       /* Append button - order is preserved from wm->category_tags (JSON tag_order) */
       data->buttons.append(btn);
-      printf("[TAG_BAR] Added button for tag='%s' is_visible=%d has_glyph=%d has_icon=%d\n",
-             btn.tag_name, btn.is_visible, (btn.glyph[0] != '\0'), btn.use_builtin_icon);
+      if constexpr (TAG_BAR_DEBUG_ENABLED) {
+        printf("[TAG_BAR] Added button for tag='%s' is_visible=%d has_glyph=%d has_icon=%d\n",
+               btn.tag_name, btn.is_visible, (btn.glyph[0] != '\0'), btn.use_builtin_icon);
+      }
     }
   }
 
@@ -688,16 +702,18 @@ void tag_bar_buttons_update(const bContext *C,
    * Python code uses _tag_order_cache which is loaded from JSON, and the ListBase
    * is populated in that same order during JSON loading. */
 
-  printf("[TAG_BAR] Total buttons added: %llu (visible: %zu)\n",
-         (unsigned long long)data->buttons.size(),
-         std::count_if(data->buttons.begin(), data->buttons.end(),
-                      [](const TagButton& b) { return b.is_visible; }));
+  if constexpr (TAG_BAR_DEBUG_ENABLED) {
+    printf("[TAG_BAR] Total buttons added: %llu (visible: %zu)\n",
+           (unsigned long long)data->buttons.size(),
+           std::count_if(data->buttons.begin(), data->buttons.end(),
+                        [](const TagButton& b) { return b.is_visible; }));
 
-  /* DEBUG: List all buttons */
-  printf("[TAG_BAR] All buttons after creation:\n");
-  for (const TagButton &btn : data->buttons) {
-    printf("[TAG_BAR]   - '%s': is_visible=%d icon_key='%s' icon_id=%d\n",
-           btn.tag_name, int(btn.is_visible), btn.icon_key, btn.icon_id);
+    /* DEBUG: List all buttons */
+    printf("[TAG_BAR] All buttons after creation:\n");
+    for (const TagButton &btn : data->buttons) {
+      printf("[TAG_BAR]   - '%s': is_visible=%d icon_key='%s' icon_id=%d\n",
+             btn.tag_name, int(btn.is_visible), btn.icon_key, btn.icon_id);
+    }
   }
 
   /* Check if "New Add-on!" virtual button should be shown. */

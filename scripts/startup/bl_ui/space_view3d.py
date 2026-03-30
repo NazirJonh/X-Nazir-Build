@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
+
+TAG_DEBUG = False  # Set to True to enable debug output for tag operations
+
 from bpy.types import (
     Header,
     Menu,
@@ -1264,11 +1267,13 @@ class VIEW3D_OT_tag_move(Operator):
 
         # Convert filtered view index to actual collection index
         filtered_index = wm.category_tags_active_index
-        print(f"DEBUG move: filtered_index={filtered_index}")
+        if TAG_DEBUG:
+            print(f"DEBUG move: filtered_index={filtered_index}")
         actual_index = _get_filtered_tag_to_actual_index(wm, filtered_index)
-        print(f"DEBUG move: actual_index={actual_index}")
-        for i, tag in enumerate(wm.category_tags):
-            print(f"  Collection[{i}] = '{tag.name}'")
+        if TAG_DEBUG:
+            print(f"DEBUG move: actual_index={actual_index}")
+            for i, tag in enumerate(wm.category_tags):
+                print(f"  Collection[{i}] = '{tag.name}'")
 
         if actual_index < 0:
             self.report({'ERROR'}, "Invalid tag selection (filter mismatch)")
@@ -1276,7 +1281,8 @@ class VIEW3D_OT_tag_move(Operator):
 
         # Get current tag order from cache (from space_userpref module)
         tag_order = list(_tag_order_cache)  # Make a copy
-        print(f"DEBUG move: tag_order={tag_order}")
+        if TAG_DEBUG:
+            print(f"DEBUG move: tag_order={tag_order}")
         active_tag = wm.category_tags[actual_index]
 
         # If tag not in order, add it
@@ -1557,7 +1563,8 @@ class VIEW3D_UL_tag_order_list(UIList):
         glyph_val = getattr(item, "glyph", "")
 
         # DEBUG
-        print(f"[VIEW3D_UL_tag_order_list] tag='{item.name}' icon_source={icon_source_val} icon_key='{icon_key_val}' glyph='{glyph_val}'")
+        if TAG_DEBUG:
+            print(f"[VIEW3D_UL_tag_order_list] tag='{item.name}' icon_source={icon_source_val} icon_key='{icon_key_val}' glyph='{glyph_val}'")
 
         use_icon = (icon_source_val == 1 and icon_key_val)
         use_glyph = (not use_icon and glyph_val)

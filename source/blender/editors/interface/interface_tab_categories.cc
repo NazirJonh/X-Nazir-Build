@@ -8433,6 +8433,14 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   /* Set grab cursor during drag */
   WM_cursor_modal_set(CTX_wm_window(C), state->is_reserved ? WM_CURSOR_HAND : WM_CURSOR_HAND_CLOSED);
 
+  /* Easter egg: show crying emoji in status bar while dragging. */
+  {
+    WorkspaceStatus status(C);
+    status.item("\xe2\x98\xba\xef\xb8\x8f  Just Do It!", ICON_NONE);
+    status.item("LMB: Place", ICON_MOUSE_LMB);
+    status.item("Esc/RMB: Cancel", ICON_EVENT_ESC);
+  }
+
   ED_region_tag_redraw(region);
 
   return OPERATOR_RUNNING_MODAL;
@@ -8529,6 +8537,10 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
       MEM_delete(state);
       op->customdata = nullptr;
       WM_cursor_modal_restore(CTX_wm_window(C));
+
+      /* Easter egg: clear status bar to restore default hints. */
+      ED_workspace_status_text(C, nullptr);
+
       ED_region_tag_redraw(region);
       return OPERATOR_FINISHED;
     }
@@ -8638,6 +8650,9 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
 
         WM_cursor_modal_restore(CTX_wm_window(C));
 
+        /* Easter egg: clear status bar to restore default hints. */
+        ED_workspace_status_text(C, nullptr);
+
         ED_region_tag_redraw(region);
         return OPERATOR_FINISHED;
       }
@@ -8659,6 +8674,10 @@ static wmOperatorStatus category_tab_drag_modal(bContext *C,
       op->customdata = nullptr;
 
       WM_cursor_modal_restore(CTX_wm_window(C));
+
+      /* Easter egg: clear status bar on cancel. */
+      ED_workspace_status_text(C, nullptr);
+
 
       ED_region_tag_redraw(region);
       return OPERATOR_CANCELLED;
@@ -8691,6 +8710,9 @@ static void category_tab_drag_cancel(bContext *C, wmOperator *op)
     op->customdata = nullptr;
 
     WM_cursor_modal_restore(CTX_wm_window(C));
+
+    /* Easter egg: clear status bar on cancel. */
+    ED_workspace_status_text(C, nullptr);
 
     ED_region_tag_redraw(region);
   }

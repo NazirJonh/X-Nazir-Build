@@ -104,8 +104,8 @@ static void statusbar_experimental_build_panel_draw(const bContext * /*C*/, Pane
 
   /* Create feedback button with URL operator using C++ Layout API */
   PointerRNA op_ptr = layout.op("WM_OT_url_open",
-                                ">>>Send FEEDBACK!<<<",
-                                ICON_STRIP_COLOR_06,
+                                ">>>Support and Send FEEDBACK!<<<",
+                                ICON_FUND,
                                 wm::OpCallContext::InvokeDefault,
                                 UI_ITEM_NONE);
   

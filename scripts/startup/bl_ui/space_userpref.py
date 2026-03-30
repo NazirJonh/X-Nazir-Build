@@ -13584,7 +13584,7 @@ class USERPREF_PT_about_build(Panel):
         col.separator()
 
         # Additional info
-        col.label(text="Built with love and caffeine. To leave a review, use the button >>>Send FEEDBACK<<<", icon='HEART')
+        col.label(text="To leave a review, use the button >>>Support and Send FEEDBACK<<<", icon='HEART')
 
         # About the author — collapsible panel
         header, body = layout.panel("about_author", default_closed=True)
@@ -13634,7 +13634,7 @@ class USERPREF_PT_about_build(Panel):
             col.label(text="on YouTube, Twitter, and other social media platforms.")
 
             col.label(text="Feel free to share your feedback using the "
-                          ">>>Send FEEDBACK<<< button.")
+                          ">>>Support and Send FEEDBACK<<< button.")
             col.separator()
             col.label(text="Thank you for your support, and have a great day!")
 
@@ -13673,7 +13673,7 @@ class USERPREF_PT_about_build(Panel):
         # Feedback button
         col2 = col.column()
         col2.scale_y = 1.5
-        col2.operator("wm.url_open", text=">>>Send FEEDBACK!<<<", icon='STRIP_COLOR_06').url = "https://xnazirbuildfeedback.carrd.co/"
+        col2.operator("wm.url_open", text=">>>Support and Send FEEDBACK<<<", icon='FUND').url = "https://xnazirbuildfeedback.carrd.co/"
 
 
 """

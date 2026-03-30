@@ -3436,6 +3436,18 @@ class WM_MT_splash(Menu):
         layout.operator_context = 'EXEC_DEFAULT'
         layout.emboss = 'PULLDOWN_MENU'
 
+        # Feedback button centered above everything
+        split_fb = layout.split(factor=0.23)
+        split_fb.column()  # left spacer
+        row_feedback = split_fb.column()
+        row_feedback.scale_x = 2.0
+        row_feedback.operator("wm.url_open", text=">>>Support and Send FEEDBACK<<<", icon='FUND').url = "https://xnazirbuildfeedback.carrd.co/"
+
+        col_sep = layout.column()
+        col_sep.separator()
+        col_sep.separator(type='LINE')
+        col_sep.separator()
+
         split = layout.split()
 
         # Templates
@@ -3482,7 +3494,7 @@ class WM_MT_splash(Menu):
 
         col2 = split.column()
 
-        col2.operator("wm.url_open", text=">>>Send FEEDBACK!<<<", icon='STRIP_COLOR_06').url = "https://xnazirbuildfeedback.carrd.co/" 
+        col2.operator("wm.url_open", text="X-Nazir Build YouTube Channel", icon='URL').url = "https://www.youtube.com/@XNazirBuild"
         col2.operator("wm.url_open_preset", text="Donate to Blender", icon='FUND').type = 'FUND'
 
         layout.separator()

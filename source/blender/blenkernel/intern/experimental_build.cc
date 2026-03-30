@@ -28,7 +28,7 @@ static const ExperimentalBuildInfo g_experimental_build_info = {
     /* warning_message1 */ "Use at your own risk.",
     /* warning_message2 */ "Do not use it to create important files for production.",
     /* build_date */ __DATE__ " " __TIME__,
-    /* credits */ "To leave feedback, use the >>>Send FEEDBACK<<< button.",
+    /* credits */ "To leave feedback!",
 };
 
 }  // namespace blender

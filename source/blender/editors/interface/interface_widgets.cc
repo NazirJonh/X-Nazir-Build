@@ -5180,9 +5180,10 @@ static void widget_draw_tag(const bContext *C,
   if (!has_glyph && !has_icon && !is_pref_mode) {
     offset_x = checkbox_rect.xmax;
   }
-  //  const int icon_text_spacing = UI_UNIT_X / 3;  /* Increased space between icon and text */
 
-  const int icon_text_spacing = 2 * UI_SCALE_FAC;  /* Increased space between icon and text */
+  /* Spacing between icon/glyph and text label.
+   * Icons get a bit more breathing room than glyphs. */
+  const int icon_text_spacing = has_icon ? int(5 * UI_SCALE_FAC) : int(2 * UI_SCALE_FAC);
   offset_x += icon_text_spacing;
 
   /* ============================================================

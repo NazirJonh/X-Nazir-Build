@@ -1526,14 +1526,6 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
   const bool has_visible_buttons = std::any_of(
       data->buttons.begin(), data->buttons.end(), [](const TagButton &btn) { return btn.is_visible; });
 
-  /* DEBUG: Always print button state info (not just in debug mode) */
-  printf("[TAG_BAR REGION DRAW] buttons: total=%zu has_visible_buttons=%d\n",
-         data->buttons.size(), int(has_visible_buttons));
-  for (const TagButton &btn : data->buttons) {
-    printf("[TAG BAR REGION DRAW] button='%s' is_visible=%d icon_source=%d icon_key='%s' icon_id=%d\n",
-           btn.tag_name, int(btn.is_visible), 0, btn.icon_key, btn.icon_id);
-  }
-
   if constexpr (TAG_BAR_DEBUG_ENABLED) {
     printf("[TAG BAR DEBUG] show_new_addon_button=%d unassigned_count=%d\n",
            int(data->show_new_addon_button), data->unassigned_count);
@@ -1541,7 +1533,6 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
   }
 
   if (!has_visible_buttons) {
-    printf("[TAG BAR REGION DRAW] No visible buttons - skipping draw\n");
     ED_region_header(C, region);
     return;
   }
@@ -1596,17 +1587,15 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
     }
 
     const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-    const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 1.4f * dpi_fac) :
-                                  (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
-    
+    const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 1.4f) :
+                                   (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
+
     /* Calculate proper button width with adequate padding */
-    const int left_padding = UI_UNIT_X / 2;  /* Left padding for icon */
-    const int icon_text_spacing = UI_UNIT_X / 3;  /* Spacing between icon and text */
-    const int right_padding = UI_UNIT_X;  /* Reduced right padding for compact buttons */
-    
-    const int btn_width = use_icon ? 
-      (left_padding + icon_glyph_width + icon_text_spacing + text_width + right_padding) :  /* Full width for proper text display */
-      (left_padding + icon_glyph_width + icon_text_spacing + text_width + right_padding);
+    const int left_padding = UI_UNIT_X / 2;
+    const int icon_text_spacing = UI_UNIT_X / 3;
+    const int right_padding = UI_UNIT_X;
+
+    const int btn_width = left_padding + icon_glyph_width + icon_text_spacing + text_width + right_padding;
 
     /* Create button label - use proper spacing for icon, glyph text otherwise */
     char button_label[72];
@@ -1623,15 +1612,15 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
 
     Button *but = uiDefBut(block,
                                 ButtonType::ButToggle,
-                               button_label,
-                               xco,
-                               0,
-                               btn_width,
-                               UI_UNIT_Y,
-                               nullptr,
-                               0.0f,
-                               0.0f,
-                               TIP_("Toggle category filter"));
+                                button_label,
+                                xco,
+                                0,
+                                btn_width,
+                                UI_UNIT_Y,
+                                nullptr,
+                                0.0f,
+                                0.0f,
+                                TIP_("Toggle category filter"));
 
     /* Set color for active button */
     if (but && btn.is_active) {
@@ -1755,8 +1744,8 @@ void buttons_tag_bar_draw_in_header(const bContext *C, ARegion *region)
     }
 
     const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-    const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 1.0f * dpi_fac) :
-                                  (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
+    const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 1.0f) :
+                                   (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
     
     /* Calculate proper button width with adequate padding for header */
     const int left_padding = 10;  /* Left padding for icon in header */
@@ -1886,8 +1875,8 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
       }
 
       const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-      const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 0.7f * dpi_fac) :
-                                    (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
+      const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 0.7f) :
+                                     (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
       total_buttons_width += icon_glyph_width + text_width + UI_UNIT_X + UI_UNIT_X / 4;
     }
   }
@@ -1923,8 +1912,8 @@ void tag_bar_draw_in_layout(const bContext *C, Block *block, ARegion *region, in
       }
 
       const int text_width = BLF_width(fontid, btn.tag_name, strlen(btn.tag_name));
-      const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 1.4f * dpi_fac) :
-                                    (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
+      const int icon_glyph_width = use_icon ? int(UI_UNIT_Y * 1.4f) :
+                                     (display_glyph[0]) ? BLF_width(fontid, display_glyph, strlen(display_glyph)) : 0;
       
       /* Calculate proper button width with adequate padding for layout */
       const int left_padding = UI_UNIT_X / 2;  /* Left padding for icon in layout */

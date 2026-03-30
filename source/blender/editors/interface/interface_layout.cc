@@ -3337,37 +3337,49 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
     /* Glyph + Text mode: calculate actual width needed */
     const uiStyle *style = layout->root()->style;
     const uiFontStyle *fstyle = &style->widget;
-    const int fontid = fstyle->uifont_id;
 
     /* Calculate glyph width */
     float glyph_width = 0.0f;
     if (glyph && glyph[0] != '\0') {
-      glyph_width = BLF_width(fontid, glyph, BLF_DRAW_STR_DUMMY_MAX);
+      /* Use stable fixed glyph width based on UI_UNIT_Y (already DPI-scaled).
+       * BLF_width() is unreliable in layout context because the font may not be set up yet. */
+      glyph_width = UI_UNIT_Y * 0.92f;
     }
     
-    /* If no glyph but has icon, reserve space for icon (approx. height of button) */
+    /* If no glyph but has icon, reserve space for icon */
     if (glyph_width == 0.0f && icon_id != ICON_NONE) {
-      glyph_width = UI_UNIT_Y * 0.7f * UI_SCALE_FAC;
+      glyph_width = UI_UNIT_Y * 0.7f;
     }
 
-    /* Calculate text width */
+    /* Calculate text width using fontstyle_string_width which correctly sets up the font
+     * before measuring. This gives accurate pixel width for the tag label.
+     *
+     * NOTE: BLF_set_default() is called first to ensure the font is properly initialized
+     * in the current context. Without this, BLF_width returns 0 for the first few calls
+     * because the font hasn't been used yet in this draw pass. */
     float text_width = 0.0f;
     if (tag_name && tag_name[0] != '\0') {
-      text_width = BLF_width(fontid, tag_name, BLF_DRAW_STR_DUMMY_MAX);
+      BLF_set_default();
+      text_width = float(fontstyle_string_width(fstyle, tag_name));
     }
 
-    /* Gap between glyph/icon and text */
-    const float glyph_text_gap = 6.0f * UI_SCALE_FAC;
+    /* Gap between glyph/icon and text. Matches icon_text_spacing in widget_draw_tag:
+     * icons get 5*scale, glyphs get 2*scale. */
+    const float glyph_text_gap = (icon_id != ICON_NONE) ? 5.0f * UI_SCALE_FAC : 2.0f * UI_SCALE_FAC;
 
-    /* Padding inside button */
-    const float padding_x = 4.0f * UI_SCALE_FAC;
+    /* Padding: must match the actual draw code overhead exactly.
+     * Draw left:  box_padding_x(2*scale) + left_padding(UI_UNIT_X/6)
+     * Draw right: box_padding_x(2*scale) + clip_margin(0.25*widget_unit)
+     * For icon buttons the gap is 3px wider, so reduce pad_right accordingly. */
+    const float pad_left  = 2.0f * UI_SCALE_FAC + UI_UNIT_X / 6.0f;
+    const float pad_right = 2.0f * UI_SCALE_FAC + 0.25f * UI_UNIT_Y
+                            - ((icon_id != ICON_NONE) ? 3.0f * UI_SCALE_FAC : 0.0f);
 
-    /* Total width = padding + content + gap + text + padding */
-    width = short(round_fl_to_int(padding_x + glyph_width + glyph_text_gap + text_width + padding_x));
+    /* Total width = left_pad + glyph + gap + text + right_pad */
+    width = short(round_fl_to_int(pad_left + glyph_width + glyph_text_gap + text_width + pad_right));
 
-    /* Ensure minimum width for usability */
-    width = std::max(width, short(UI_UNIT_X * 2.0f));
-  }
+    /* Ensure minimum width for usability (same as glyph-only mode). */
+    width = std::max(width, short(UI_UNIT_X * 1.5f));  }
 
   /* Create Tag button with preference mode (no checkbox) */
   Button *raw_but = uiDefButTag(block,

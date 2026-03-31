@@ -688,7 +688,7 @@ static std::string wm_window_title_text(
     }
   }
 
-  win_title.append(fmt::format(" - Blender {}", BKE_blender_version_string()));
+  win_title.append(fmt::format(" - X-Nazir Build {}", "0.0.1"));
 
   return win_title;
 }

@@ -88,6 +88,16 @@ static constexpr bool TAG_BAR_DEBUG_ENABLED = false;
 static bool is_tag_valid_for_mode(const wmWindowManager *wm,
                                    const char *tag_name,
                                    uint32_t mode_flag);
+static void tag_filter_append_valid_tags_for_mode(const wmWindowManager *wm,
+                                                  const char *tags_string,
+                                                  uint32_t mode_flag,
+                                                  Vector<std::string> &r_tags);
+static void tag_filter_join_tags(const Vector<std::string> &tags,
+                                 char *r_tags,
+                                 int max_len);
+static const char *tag_filter_last_tag_in_string(const char *tags_string,
+                                                 char *r_tag,
+                                                 int max_len);
 
 /**
  * Convert CategoryTagMode bit flag to category_tag_filter_mode enum value.
@@ -223,69 +233,47 @@ TagBarRuntimeData *get_tag_bar_data_global(const bContext *C)
         /* Mode changed! Remember current tags before save/restore for carry-over. */
         char prev_tags[256];
         BLI_strncpy(prev_tags, state.active_tags, sizeof(prev_tags));
-        int prev_enabled = *state.filter_enabled;
+        const bool prev_enabled = (*state.filter_enabled != 0);
 
         /* Save current state for the previous mode. */
         tag_filter_per_mode_save(area, last_mode, state.active_tags, *state.filter_enabled);
 
-        /* Restore state for new mode. */
-        char restored_tags[256] = "";
-        int restored_enabled = 0;
-        if (tag_filter_per_mode_restore(
-                area, current_mode, restored_tags, sizeof(restored_tags), &restored_enabled))
-        {
-          /* If the restored state is empty but previous tags are valid in the new mode,
-           * carry them over. This handles tags shared between modes (e.g., valid in
-           * both Object Mode and Edit Mode) when the target mode has no selection. */
-          if (restored_tags[0] == '\0' && restored_enabled != 0 &&
-              prev_tags[0] != '\0' && prev_enabled)
+        /* Rebuild the active tag list for the new mode from all tags that are valid there.
+         * This preserves shared selections across modes and supports multi-select. */
+        Vector<std::string> merged_tags;
+        if (prev_enabled) {
+          tag_filter_append_valid_tags_for_mode(wm, prev_tags, current_mode, merged_tags);
+        }
+
+        if (!merged_tags.is_empty()) {
+          tag_filter_join_tags(merged_tags, state.active_tags, 256);
+          *state.filter_enabled = 1;
+
+          /* Update saved state to reflect the merged selection in the new mode. */
+          tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
+        }
+        else if (prev_enabled) {
+          /* No shared tags remain. Fall back to the last selected tag from the previous mode.
+           * This keeps the filter useful when the intersection is empty. */
+          char last_tag[64] = "";
+          if (tag_filter_last_tag_in_string(prev_tags, last_tag, sizeof(last_tag)) &&
+              is_tag_valid_for_mode(wm, last_tag, current_mode))
           {
-            bool all_valid = true;
-            Vector<std::string> prev_tag_list;
-            category_tab_split_tags(prev_tags, prev_tag_list, ",;");
-            for (const auto &tag : prev_tag_list) {
-              if (!is_tag_valid_for_mode(wm, tag.c_str(), current_mode)) {
-                all_valid = false;
-                break;
-              }
-            }
-            if (all_valid) {
-              BLI_strncpy(state.active_tags, prev_tags, 256);
-              *state.filter_enabled = char(prev_enabled);
-              /* Update saved state to reflect carry-over. */
-              tag_filter_per_mode_save(
-                  area, current_mode, state.active_tags, *state.filter_enabled);
-            }
-            else {
-              BLI_strncpy(state.active_tags, restored_tags, 256);
-              *state.filter_enabled = char(restored_enabled);
-            }
+            BLI_strncpy(state.active_tags, last_tag, 256);
+            *state.filter_enabled = 1;
+            tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
           }
           else {
-            BLI_strncpy(state.active_tags, restored_tags, 256);
-            *state.filter_enabled = char(restored_enabled);
+            state.active_tags[0] = '\0';
+            *state.filter_enabled = 0;
+            tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
           }
         }
         else {
-          /* No saved state for this mode.
-           * Keep current tag if it's valid in the new mode,
-           * only clear if the tag is not applicable.
-           * This preserves the user's selection when switching between
-           * modes where the same tag works (e.g., "modeling" in both
-           * Object and Edit modes). */
-          bool keep_current = false;
-          if (state.active_tags[0] != '\0' && *state.filter_enabled) {
-            Vector<std::string> active_tag_list;
-            category_tab_split_tags(state.active_tags, active_tag_list, ",;");
-            if (!active_tag_list.is_empty()) {
-              keep_current = is_tag_valid_for_mode(
-                  wm, active_tag_list[0].c_str(), current_mode);
-            }
-          }
-          if (!keep_current) {
-            state.active_tags[0] = '\0';
-            *state.filter_enabled = 0;
-          }
+          /* No saved state for this mode and nothing valid to carry over. */
+          state.active_tags[0] = '\0';
+          *state.filter_enabled = 0;
+
           /* Save initial state for new mode (even if empty) so future returns
            * to this mode restore the correct state. */
           tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
@@ -556,6 +544,74 @@ static bool is_tag_valid_for_mode(const wmWindowManager *wm,
     }
   }
   return false; /* Tag not found in definitions */
+}
+
+/**
+ * Append tags that are valid for a given mode to a destination list.
+ * Preserves order, skips invalid tags, and avoids duplicates.
+ */
+static void tag_filter_append_valid_tags_for_mode(const wmWindowManager *wm,
+                                                  const char *tags_string,
+                                                  uint32_t mode_flag,
+                                                  Vector<std::string> &r_tags)
+{
+  if (!tags_string || !tags_string[0]) {
+    return;
+  }
+
+  Vector<std::string> tags;
+  category_tab_split_tags(tags_string, tags, ",;");
+
+  for (const std::string &tag : tags) {
+    if (!is_tag_valid_for_mode(wm, tag.c_str(), mode_flag)) {
+      continue;
+    }
+    if (std::find(r_tags.begin(), r_tags.end(), tag) == r_tags.end()) {
+      r_tags.append(tag);
+    }
+  }
+}
+
+/**
+ * Join a list of tags into a comma-separated string.
+ */
+static void tag_filter_join_tags(const Vector<std::string> &tags,
+                                 char *r_tags,
+                                 int max_len)
+{
+  if (!r_tags || max_len <= 0) {
+    return;
+  }
+
+  r_tags[0] = '\0';
+  for (int i = 0; i < tags.size(); i++) {
+    if (i > 0) {
+      BLI_strncat(r_tags, ",", max_len);
+    }
+    BLI_strncat(r_tags, tags[i].c_str(), max_len);
+  }
+}
+
+/**
+ * Extract the last tag from a comma/semicolon separated tag string.
+ * Returns r_tag on success, nullptr otherwise.
+ */
+static const char *tag_filter_last_tag_in_string(const char *tags_string,
+                                                 char *r_tag,
+                                                 int max_len)
+{
+  if (!tags_string || !tags_string[0] || !r_tag || max_len <= 0) {
+    return nullptr;
+  }
+
+  Vector<std::string> tags;
+  category_tab_split_tags(tags_string, tags, ",;");
+  if (tags.is_empty()) {
+    return nullptr;
+  }
+
+  BLI_strncpy(r_tag, tags.last().c_str(), max_len);
+  return r_tag;
 }
 
 /**

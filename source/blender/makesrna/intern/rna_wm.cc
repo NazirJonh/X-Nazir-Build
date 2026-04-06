@@ -3531,7 +3531,33 @@ static void rna_def_category_glyph_overrides(BlenderRNA *brna, PropertyRNA *cpro
 
   func = RNA_def_function(srna, "clear", "rna_wm_category_glyph_override_clear");
   RNA_def_function_ui_description(func, "Remove all glyph overrides");
->>>>>>> 84e5ccdb079 (Refactor category tab drawing logic to handle single glyphs and improve text positioning)
+}
+
+static void rna_def_report(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "Report", nullptr);
+  RNA_def_struct_sdna(srna, "Report");
+  RNA_def_struct_ui_text(srna, "Report", "Report entry");
+
+  prop = RNA_def_property(srna, "session_uid", PROP_INT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_int_funcs(prop, "rna_Report_session_uid_get", nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Session UID", "Unique per-session report identifier");
+
+  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_enum_items(prop, rna_enum_wm_report_items);
+  RNA_def_property_enum_funcs(prop, "rna_Report_type_get", nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Type", "Report type (severity)");
+
+  prop = RNA_def_property(srna, "message", PROP_STRING, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_string_funcs(
+      prop, "rna_Report_message_get", "rna_Report_message_length", nullptr);
+  RNA_def_property_ui_text(prop, "Message", "Report message text");
 }
 
 static void rna_def_windowmanager(BlenderRNA *brna)
@@ -4058,6 +4084,7 @@ void RNA_def_wm(BlenderRNA *brna)
   rna_def_popovermenu(brna);
   rna_def_piemenu(brna);
   rna_def_window(brna);
+  rna_def_report(brna);
   rna_def_category_glyph_item(brna);
   rna_def_category_tag_def(brna);
   rna_def_windowmanager(brna);

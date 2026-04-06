@@ -5237,7 +5237,7 @@ static void widget_draw_tag(const bContext *C,
   (void)C;  /* Suppress unused warning */
 }
 
-static WidgetType *widget_type(WidgetTypeEnum type)
+static WidgetType *widget_type(WidgetStyle type)
 {
   bTheme *btheme = theme::theme_get();
 

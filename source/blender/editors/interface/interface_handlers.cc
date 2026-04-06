@@ -10997,7 +10997,7 @@ static int handle_menu_mmb_event(bContext *C,
     const int delta = (menu->mmb_panning_last_y - event->xy[1]) *
                       (event->flag & WM_EVENT_SCROLL_INVERT ? 1 : -1);
     if (delta) {
-      menu_scroll_apply_offset_y(region, block, delta);
+      ui_menu_scroll_apply_offset_y(region, block, delta);
       menu->mmb_panning_last_y = event->xy[1];
     }
     retval = WM_UI_HANDLER_BREAK;
@@ -11007,7 +11007,7 @@ static int handle_menu_mmb_event(bContext *C,
   }
   else if (event->type == MIDDLEMOUSE && !inside) {
     /* Let parent menus handle middle mouse panning if the mouse is not within the current menu. */
-    if (menu_pass_event_to_parent_if_nonactive(menu, but, level, is_parent_menu, 0)) {
+    if (ui_menu_pass_event_to_parent_if_nonactive(menu, but, level, is_parent_menu, 0)) {
       return WM_UI_HANDLER_CONTINUE;
     }
   }

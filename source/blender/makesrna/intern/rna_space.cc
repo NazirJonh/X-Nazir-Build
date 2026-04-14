@@ -703,6 +703,7 @@ static const EnumPropertyItem spreadsheet_table_id_type_items[] = {
 #  include "IMB_imbuf_types.hh"
 
 #  include "UI_interface.hh"
+#  include "UI_interface_c.hh"
 #  include "UI_view2d.hh"
 
 #  include "SEQ_proxy.hh"
@@ -711,6 +712,9 @@ static const EnumPropertyItem spreadsheet_table_id_type_items[] = {
 #  include "RE_engine.h"
 
 namespace blender {
+
+/* Extern declaration for paint slot type enum items defined in rna_nodetree.cc */
+extern const EnumPropertyItem rna_enum_node_tex_image_paint_slot_type_items[];
 
 /* -------------------------------------------------------------------- */
 /** \name Private Utilities
@@ -2172,6 +2176,28 @@ static const EnumPropertyItem *rna_SpaceImageEditor_pivot_itemf(bContext * /*C*/
     return pivot_items;
   }
 }
+
+static const EnumPropertyItem rna_enum_space_image_filter_mode_items[] = {
+    {ui::TEMPLATE_ID_FILTER_ALL, "ALL", 0, "All", "Show all images"},
+    {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL,
+     "CURRENT_MATERIAL",
+     0,
+     "Current Material",
+     "Show images used by the active material"},
+    {ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+     "SLOT_TYPE",
+     0,
+     "Slot Type",
+     "Show images used by a specific paint slot type"},
+    {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL | ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+     "CURRENT_MATERIAL_AND_SLOT_TYPE",
+     0,
+     "Current Material & Slot Type",
+     "Show images used by the active material and specific paint slot type"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Forward declaration for use in RNA definitions further below. */
 
 static void rna_SpaceUVEditor_tile_grid_shape_set(PointerRNA *ptr, const int *values)
 {
@@ -3917,6 +3943,9 @@ static const EnumPropertyItem *rna_FileAssetSelectParams_import_method_itemf(
 }  // namespace blender
 
 #else
+
+#  include "UI_interface_c.hh"
+#  include "UI_resources.hh"
 
 namespace blender {
 
@@ -6188,6 +6217,26 @@ static void rna_def_space_image(BlenderRNA *brna)
   StructRNA *srna;
   PropertyRNA *prop;
 
+  static const EnumPropertyItem image_filter_mode_items[] = {
+      {ui::TEMPLATE_ID_FILTER_ALL, "ALL", ICON_IMAGE, "All", "Show all images"},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL,
+       "CURRENT_MATERIAL",
+       ICON_MATERIAL,
+       "Current Material",
+       "Show images used by the active material"},
+      {ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+       "SLOT_TYPE",
+       ICON_NODE_TEXTURE,
+       "Slot Type",
+       "Show images used by a specific paint slot type"},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL | ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+       "CURRENT_MATERIAL_AND_SLOT_TYPE",
+       ICON_MATERIAL_DATA,
+       "Current Material & Slot Type",
+       "Show images used by the active material and specific paint slot type"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   srna = RNA_def_struct(brna, "SpaceImageEditor", "Space");
   RNA_def_struct_sdna(srna, "SpaceImage");
   RNA_def_struct_ui_text(srna, "Space Image Editor", "Image and UV editor space data");
@@ -6231,6 +6280,20 @@ static void rna_def_space_image(BlenderRNA *brna)
       prop, "Image Pin", "Display current image regardless of object selection");
   RNA_def_property_ui_icon(prop, ICON_UNPINNED, 1);
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "image_filter_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "image_filter_mode");
+  RNA_def_property_enum_items(prop, image_filter_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Image Filter Mode",
+                           "Criteria used when filtering images in paint-related ID browsers");
+
+  prop = RNA_def_property(srna, "image_filter_slot_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "image_filter_slot_type");
+  RNA_def_property_enum_items(prop, rna_enum_node_tex_image_paint_slot_type_items);
+  RNA_def_property_ui_text(prop,
+                           "Image Filter Slot Type",
+                           "Paint slot type used when filtering by slot type");
 
   prop = RNA_def_property(srna, "sample_histogram", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "sample_line_hist");

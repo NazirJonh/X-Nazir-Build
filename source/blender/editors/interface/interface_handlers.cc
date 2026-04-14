@@ -479,6 +479,26 @@ struct HandleButtonData {
 
   /* Search box see: #UI_screen_free_active_but_highlight. */
   ARegion *searchbox = nullptr;
+  /**
+   * Флаг, указывающий, что клик был произведен по кнопке фильтра в нижней части выпадающего списка
+   * (а не по самой области результатов поиска). Это позволяет отличить клики по элементам
+   * интерфейса внутри поиска от кликов по результатам поиска.
+   */
+  bool searchbox_click_on_popup_button = false;
+  /**
+   * Флаг для пропуска следующего события RELEASE (отпускания кнопки мыши).
+   * 
+   * Используется в сценарии реактивации строки поиска из обратного вызова (callback) кнопки фильтра.
+   * Когда пользователь нажимает кнопку фильтра:
+   * 1. Происходит PRESS на кнопке фильтра.
+   * 2. Выполняется callback кнопки, который применяет фильтр и реактивирует строку поиска.
+   * 3. После этого в очередь событий поступает RELEASE от того же клика.
+   * 
+   * Без этого флага RELEASE был бы обработан строкой поиска как клик снаружи (или в области),
+   * что привело бы к немедленному закрытию только что открытого поиска.
+   * Установка этого флага позволяет "поглотить" этот лишний RELEASE.
+   */
+  bool searchbox_skip_next_release = false;
 #ifdef USE_KEYNAV_LIMIT
   KeyNavLock searchbox_keynav_state;
 #endif
@@ -549,7 +569,7 @@ static void button_activate_init(bContext *C,
                                  ARegion *region,
                                  Button *but,
                                  ButtonActivateType type);
-static void button_activate_state(bContext *C, Button *but, HandleButtonState state);
+static void button_activate_state(bContext *C, Button *but, HandleButtonState state, bool escapecancel = true);
 static void button_activate_exit(
     bContext *C, Button *but, HandleButtonData *data, const bool mousemove, const bool onfree);
 static int handler_region_menu(bContext *C, const wmEvent *event, void *userdata);
@@ -3690,8 +3710,40 @@ static void textedit_begin(bContext *C, Button *but, HandleButtonData *data)
   if (but->type == ButtonType::SearchMenu) {
     ButtonSearch *search_but = static_cast<ButtonSearch *>(but);
 
-    data->searchbox = search_but->popup_create_fn(C, data->region, search_but);
-    searchbox_update(C, data->searchbox, but, true); /* true = reset */
+    /* Reuse existing searchbox if it's still valid in the screen. */
+    bool reused = false;
+    if (but->searchbox_region) {
+       bScreen *screen = CTX_wm_screen(C);
+       if (screen && BLI_findindex(&screen->regionbase, but->searchbox_region) != -1) {
+           data->searchbox = but->searchbox_region;
+           reused = true;
+           printf("DEBUG: interface_handlers.cc: Reusing existing searchbox=%p\n", (void *)data->searchbox);
+           
+           /* Update data back-pointers in case pointers changed (e.g. after refresh). */
+           uiSearchboxData *sb_data = static_cast<uiSearchboxData *>(data->searchbox->regiondata);
+           sb_data->search_but = search_but;
+           sb_data->butregion = data->region;
+
+           /* Ensure the reused searchbox is correctly positioned relative to the button.
+            * This fixes (0,0) positioning errors that occur after UI refreshes. */
+           UI_searchbox_reposition(C, data->searchbox, but);
+       }
+    }
+
+    if (!reused) {
+      data->searchbox = search_but->popup_create_fn(C, data->region, search_but);
+      /* Store the searchbox region directly on the button so it can be accessed
+       * even after the button loses focus (but->active becomes NULL).
+       * Cleared in searchbox_region_free_fn() when the region is destroyed. */
+      but->searchbox_region = data->searchbox;
+
+      /* Notify external code (e.g. filter callbacks) that a new searchbox was created. */
+      if (search_but->searchbox_created_fn) {
+        search_but->searchbox_created_fn(data->searchbox, search_but->searchbox_created_arg);
+      }
+    }
+
+    searchbox_update(C, data->searchbox, but, !reused);
   }
 
   /* reset alert flag (avoid confusion, will refresh on exit) */
@@ -3728,7 +3780,7 @@ static void textedit_begin(bContext *C, Button *but, HandleButtonData *data)
 #endif
 }
 
-static void textedit_end(bContext *C, Button *but, HandleButtonData *data)
+static void textedit_end(bContext *C, Button *but, HandleButtonData *data, bool escapecancel)
 {
   TextEdit &text_edit = data->text_edit;
   wmWindow *win = data->window;
@@ -3757,7 +3809,6 @@ static void textedit_end(bContext *C, Button *but, HandleButtonData *data)
             (searchbox_find_index(data->searchbox, but->editstr) == -1) &&
             !but_search->results_are_suggestions)
         {
-
           if (but->flag & BUT_VALUE_CLEAR) {
             /* It is valid for _VALUE_CLEAR flavor to have no active element
              * (it's a valid way to unlink). */
@@ -3775,7 +3826,18 @@ static void textedit_end(bContext *C, Button *but, HandleButtonData *data)
         }
       }
 
-      searchbox_free(C, data->searchbox);
+      /* Persistence logic: If the button specifically tracks the searchbox region,
+       * we don't free it here during focus shifts (deactivation).
+       * This allows flicker-free reuse when the button is re-activated (e.g. after filter click).
+       * The region will be finally destroyed in popup_block_free() when the menu is closed. */
+      bool should_free = true;
+      if (but->type == ButtonType::SearchMenu && but->searchbox_region == data->searchbox) {
+        should_free = false;
+      }
+
+      if (should_free) {
+        searchbox_free(C, data->searchbox);
+      }
       data->searchbox = nullptr;
     }
 
@@ -3974,6 +4036,48 @@ static int do_but_textedit(
        * and allow multiple menu levels */
       if (data->searchbox) {
         inbox = searchbox_inside(data->searchbox, event->xy);
+        
+        /* Для выпадающих окон с флагом BLOCK_KEEP_OPEN (например, браузер изображений с кнопками фильтров),
+         * мы также считаем клики по кнопкам внутри окна как "внутренние" (inbox), чтобы предотвратить 
+         * преждевременное закрытие. Это позволяет кнопкам фильтров работать, сохраняя окно открытым.
+         * 
+         * Обоснование: Окна с BLOCK_KEEP_OPEN предназначены для того, чтобы оставаться открытыми при 
+         * нажатии кнопок внутри них (например, выбор цвета, браузер изображений с фильтрами). 
+         * Однако у строки поиска есть собственное обнаружение "клика снаружи", которое обычно 
+         * закрывает ее при нажатии на кнопки фильтров. Обрабатывая клики по кнопкам окна как 
+         * "внутренние", мы предотвращаем преждевременное закрытие поиска.
+         * 
+         * Реализация: Мы используем button_find_mouse_over_ex(), чтобы проверить, есть ли кнопка 
+         * под курсором в области блока всплывающего окна. Если кнопка найдена, мы считаем клик 
+         * "внутренним" и устанавливаем флаг для специальной обработки в обработчике PRESS. */
+        bool inbox_is_popup_button = false;
+        if (!inbox && (block->flag & BLOCK_KEEP_OPEN)) {
+          Button *but_under_cursor = button_find_mouse_over_ex(
+              data->region, event->xy, false, false, nullptr, nullptr);
+          printf("DEBUG LMB PRESS: xy=[%d,%d] inbox_orig=%d KEEP_OPEN=1 but_under=%p but_self=%p region=%p\n",
+                 event->xy[0], event->xy[1], inbox, (void *)but_under_cursor, (void *)but, (void *)data->region);
+          printf("DEBUG LMB PRESS: region->winrct=[%d,%d,%d,%d] block->rect=[%.1f,%.1f,%.1f,%.1f]\n",
+                 data->region->winrct.xmin, data->region->winrct.ymin,
+                 data->region->winrct.xmax, data->region->winrct.ymax,
+                 block->rect.xmin, block->rect.ymin, block->rect.xmax, block->rect.ymax);
+          if (but_under_cursor && but_under_cursor != but) {
+            /* Клик по другой кнопке во всплывающем окне - считаем как "внутри" */
+            inbox = true;
+            inbox_is_popup_button = true;
+            printf("DEBUG LMB PRESS: -> inbox set to TRUE (filter button hit)\n");
+          }
+          else {
+            printf("DEBUG LMB PRESS: -> inbox stays FALSE (outside popup)\n");
+          }
+        }
+        else {
+          printf("DEBUG LMB PRESS: xy=[%d,%d] inbox=%d KEEP_OPEN=%d\n",
+                 event->xy[0], event->xy[1], inbox,
+                 (block->flag & BLOCK_KEEP_OPEN) ? 1 : 0);
+        }
+        
+        /* Store the flag in data for use in PRESS handling below */
+        data->searchbox_click_on_popup_button = inbox_is_popup_button;
       }
 
       bool is_press_in_button = false;
@@ -3987,9 +4091,31 @@ static int do_but_textedit(
         }
       }
 
-      /* for double click: we do a press again for when you first click on button
-       * (selects all text, no cursor pos) */
+      /* для двойного клика: мы снова делаем нажатие, когда вы впервые нажимаете на кнопку
+       * (выделяет весь текст, без позиции курсора) */
       if (ELEM(event->val, KM_PRESS, KM_DBL_CLICK)) {
+        /* Специальная обработка для всплывающих окон BLOCK_KEEP_OPEN с кнопками фильтров.
+         * Когда пользователь нажимает на кнопку фильтра (не в области строки поиска), нам нужно:
+         * 1. Активировать кнопку фильтра напрямую (в обход обычного потока событий).
+         * 2. Оставить строку поиска открытой (не деактивировать ее).
+         * 3. Позволить callback-функции кнопки фильтра обновить содержимое поиска.
+         * 
+         * Это необходимо, потому что кнопка поиска в данный момент активна и обычно 
+         * поглощает все события. Обнаруживая клики по кнопкам всплывающего окна и активируя 
+         * их напрямую, мы позволяем кнопкам фильтров работать без закрытия поиска. */
+        if (data->searchbox_click_on_popup_button && (block->flag & BLOCK_KEEP_OPEN)) {
+          Button *but_under_cursor = button_find_mouse_over_ex(
+              data->region, event->xy, false, false, nullptr, nullptr);
+          if (but_under_cursor && but_under_cursor != but) {
+            printf("DEBUG LMB PRESS: click_on_popup_button=TRUE -> activating button directly\n");
+            /* Активируем кнопку под курсором напрямую с типом APPLY.
+             * Это немедленно выполнит callback кнопки. */
+            handle_button_activate(C, data->region, but_under_cursor, BUTTON_ACTIVATE_APPLY);
+            retval = WM_UI_HANDLER_BREAK;
+            break;
+          }
+        }
+        
         if (is_press_in_button) {
           textedit_set_cursor_pos(but, data->region, event->xy[0]);
           but->selsta = but->selend = but->pos;
@@ -4001,7 +4127,19 @@ static int do_but_textedit(
         else if (inbox == false && !data->is_semi_modal) {
           /* if searchbox, click outside will cancel */
           if (data->searchbox) {
+            printf("DEBUG LMB PRESS: inbox=FALSE -> cancelling searchbox, KEEP_OPEN=%d handle=%p\n",
+                   (block->flag & BLOCK_KEEP_OPEN) ? 1 : 0, (void *)block->handle);
             data->cancel = data->escapecancel = true;
+            
+            /* For BLOCK_KEEP_OPEN popups, also close the popup itself when clicking outside.
+             * Normally button_activate_exit() won't set menuretval for BLOCK_KEEP_OPEN blocks,
+             * because they're designed to stay open when clicking buttons inside them.
+             * However, when clicking completely outside the popup, we want to close everything.
+             * So we set menuretval directly here to force popup closure. */
+            if ((block->flag & BLOCK_KEEP_OPEN) && block->handle) {
+              block->handle->menuretval = RETURN_CANCEL;
+              printf("DEBUG LMB PRESS: -> set menuretval=RETURN_CANCEL directly\n");
+            }
           }
 #ifdef WITH_INPUT_IME
           else if (is_ime_composing && ime_data->composite.size() && but->type == ButtonType::Text)
@@ -4039,8 +4177,22 @@ static int do_but_textedit(
         /* if we allow activation on key press,
          * it gives problems launching operators #35713. */
         if (event->val == KM_RELEASE) {
-          button_activate_state(C, but, BUTTON_STATE_EXIT);
-          retval = WM_UI_HANDLER_BREAK;
+          /* Если установлен флаг searchbox_skip_next_release, мы игнорируем это событие RELEASE.
+           * Это происходит, когда поиск был только что реактивирован программно (например, при
+           * переключении фильтров в Image Editor). 
+           * Мы "проглатываем" RELEASE от клика по кнопке фильтра, чтобы он не закрыл поиск. */
+          if (data->searchbox_skip_next_release) {
+            printf("DEBUG LMB RELEASE: inbox=TRUE but skip_next_release=TRUE -> ignoring\n");
+            /* Сбрасываем флаг сразу после использования, чтобы последующие обычные клики
+             * обрабатывались как положено. */
+            data->searchbox_skip_next_release = false;
+            retval = WM_UI_HANDLER_BREAK;
+          }
+          else {
+            printf("DEBUG LMB RELEASE: inbox=TRUE val=RELEASE -> EXIT searchbox\n");
+            button_activate_state(C, but, BUTTON_STATE_EXIT);
+            retval = WM_UI_HANDLER_BREAK;
+          }
         }
       }
       break;
@@ -8532,6 +8684,10 @@ static int do_button(bContext *C, Block *block, Button *but, const wmEvent *even
   HandleButtonData *data = but->active;
   int retval = WM_UI_HANDLER_CONTINUE;
 
+  if (data == nullptr) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
   const bool is_disabled = but->flag & BUT_DISABLED || data->disable_force;
 
   /* If `but->pointype` is set, `but->poin` should be too. */
@@ -8925,7 +9081,7 @@ static bool button_modal_state(HandleButtonState state)
               BUTTON_STATE_MENU_OPEN);
 }
 
-static void button_activate_state(bContext *C, Button *but, HandleButtonState state)
+static void button_activate_state(bContext *C, Button *but, HandleButtonState state, bool escapecancel)
 {
   HandleButtonData *data = but->active;
   if (data->state == state) {
@@ -8980,10 +9136,10 @@ static void button_activate_state(bContext *C, Button *but, HandleButtonState st
     textedit_begin(C, but, data);
   }
   else if (data->state == BUTTON_STATE_TEXT_EDITING && state != BUTTON_STATE_TEXT_SELECTING) {
-    textedit_end(C, but, data);
+    textedit_end(C, but, data, escapecancel);
   }
   else if (data->state == BUTTON_STATE_TEXT_SELECTING && state != BUTTON_STATE_TEXT_EDITING) {
-    textedit_end(C, but, data);
+    textedit_end(C, but, data, escapecancel);
   }
 
   /* number editing */
@@ -9241,11 +9397,11 @@ static void button_activate_exit(
 
   /* ensure we are in the exit state */
   if (data->state != BUTTON_STATE_EXIT) {
-    button_activate_state(C, but, BUTTON_STATE_EXIT);
+    button_activate_state(C, but, BUTTON_STATE_EXIT, onfree);
   }
 
   /* apply the button action or value */
-  if (!onfree) {
+  if (!onfree && !data->cancel) {
     apply_but(C, block, but, data, false);
   }
 
@@ -9275,7 +9431,13 @@ static void button_activate_exit(
       menu = block->handle;
       menu->butretval = data->retval;
       menu->menuretval = (data->cancel) ? RETURN_CANCEL : RETURN_OK;
+      printf("DEBUG button_activate_exit: KEEP_OPEN=0 cancel=%d escapecancel=%d -> menuretval=%d\n",
+             data->cancel, data->escapecancel, menu->menuretval);
     }
+  }
+  else if (block->handle && (block->flag & BLOCK_KEEP_OPEN)) {
+    printf("DEBUG button_activate_exit: KEEP_OPEN=1 cancel=%d escapecancel=%d -> menuretval NOT set (current=%d)\n",
+           data->cancel, data->escapecancel, block->handle->menuretval);
   }
 
   if (!onfree && !data->cancel) {
@@ -9721,6 +9883,13 @@ void button_activate_event(bContext *C, ARegion *region, Button *but)
   event.customdata_free = false;
 
   do_button(C, but->block, but, &event);
+}
+
+void button_searchbox_skip_next_release_set(Button *but, bool value)
+{
+  if (but->active) {
+    but->active->searchbox_skip_next_release = value;
+  }
 }
 
 void button_activate_over(bContext *C, ARegion *region, Button *but)
@@ -11050,6 +11219,18 @@ static int handle_menu_event(bContext *C,
   /* if there's an active modal button, don't check events or outside, except for search menu */
   but = region_find_active_but(region);
 
+  if (ELEM(event->type, LEFTMOUSE, MIDDLEMOUSE, RIGHTMOUSE) &&
+      ELEM(event->val, KM_PRESS, KM_DBL_CLICK, KM_RELEASE))
+  {
+    printf("DEBUG handler_region_menu: event=%d val=%d xy=[%d,%d] block_mx=%d block_my=%d inside=%d KEEP_OPEN=%d LOOP=%d menuretval=%d active_but=%p\n",
+           event->type, event->val, event->xy[0], event->xy[1], mx, my,
+           inside,
+           (block->flag & BLOCK_KEEP_OPEN) ? 1 : 0,
+           (block->flag & BLOCK_LOOP) ? 1 : 0,
+           menu->menuretval,
+           (void *)but);
+  }
+
 #ifdef USE_DRAG_POPUP
 
 #  if defined(__APPLE__)
@@ -11565,6 +11746,10 @@ static int handle_menu_event(bContext *C,
 
         if (ELEM(event->type, LEFTMOUSE, MIDDLEMOUSE, RIGHTMOUSE)) {
           if (ELEM(event->val, KM_PRESS, KM_DBL_CLICK)) {
+            printf("DEBUG handler_region_menu: BLOCK_LOOP outside click xy=[%d,%d] KEEP_OPEN=%d is_parent_menu=%d\n",
+                   event->xy[0], event->xy[1],
+                   (block->flag & BLOCK_KEEP_OPEN) ? 1 : 0,
+                   is_parent_menu);
             if ((is_parent_menu == false) && (U.uiflag & USER_MENUOPENAUTO) == 0) {
               /* for root menus, allow clicking to close */
               if (block->flag & BLOCK_OUT_1) {
@@ -12833,6 +13018,49 @@ bool button_active_drop_color(bContext *C)
   }
 
   return false;
+}
+
+void UI_but_search_refresh(Button *but)
+{
+  printf("DEBUG: UI_but_search_refresh: called with but=%p\n", (void *)but);
+  
+  if (!but) {
+    printf("DEBUG: UI_but_search_refresh: but is NULL\n");
+    return;
+  }
+  
+  if (but->type != ButtonType::SearchMenu) {
+    printf("DEBUG: UI_but_search_refresh: but is not SearchMenu type (type=%d)\n", (int)but->type);
+    return;
+  }
+  
+  if (!but->active) {
+    printf("DEBUG: UI_but_search_refresh: but->active is NULL\n");
+    return;
+  }
+  
+  if (!but->active->searchbox) {
+    printf("DEBUG: UI_but_search_refresh: but->active->searchbox is NULL\n");
+    return;
+  }
+  
+  printf("DEBUG: UI_but_search_refresh: All checks passed, updating searchbox\n");
+  
+  /* Mark button as changed and update searchbox.
+   * This is the same mechanism used when text is typed in the search field. */
+  but->changed = true;
+  
+  /* Get context from the button's block */
+  bContext *C = static_cast<bContext *>(but->block->evil_C);
+  if (C) {
+    printf("DEBUG: UI_but_search_refresh: Calling searchbox_update\n");
+    searchbox_update(C, but->active->searchbox, but, true);
+    ED_region_tag_redraw(but->active->searchbox);
+    printf("DEBUG: UI_but_search_refresh: Update complete\n");
+  }
+  else {
+    printf("DEBUG: UI_but_search_refresh: Context is NULL\n");
+  }
 }
 
 /** \} */

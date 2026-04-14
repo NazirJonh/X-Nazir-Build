@@ -657,6 +657,12 @@ struct SpaceImage {
   /* Storage for sub-space types. */
   char mode_prev = 0;
 
+  /** Image browser filter mode for ID browsing. */
+  char image_filter_mode = 0;
+  /** Slot type filter used when image_filter_mode == SLOT_TYPE. */
+  char image_filter_slot_type = 0;
+  char _pad_filter[2] = {};
+
   char pin = 0;
 
   char pixel_round_mode = 0;
@@ -671,7 +677,7 @@ struct SpaceImage {
   char gizmo_flag = 0;
 
   char grid_shape_source = 0;
-  char _pad1[6] = {};
+  char _pad1[2] = {};
 
   int flag = 0;
 

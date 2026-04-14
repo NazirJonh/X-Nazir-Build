@@ -11,6 +11,7 @@
 
 #include "BLI_compiler_attrs.h"
 #include "BLI_mutex.hh"
+#include "BLI_vector.hh"
 
 #include <cstdint>
 #include <limits>
@@ -38,6 +39,7 @@ struct ImageTile;
 struct ImbFormatOptions;
 struct Library;
 struct Main;
+struct Material;
 struct MovieCache;
 struct Object;
 struct PartialUpdateRegister;
@@ -59,6 +61,34 @@ constexpr int IMAGE_GPU_LAYER_NONE = std::numeric_limits<short>::max();
 constexpr int IMAGE_GPU_VIEW_NONE = std::numeric_limits<short>::max();
 
 namespace bke {
+
+/**
+ * Record describing a single usage of an image in a material.
+ * Used for runtime indexing to enable fast filtering.
+ */
+struct UsageRecord {
+  /** Material that uses this image. */
+  struct Material *material;
+  /** Slot type this image is used as (from NodeTexImage::paint_slot_type). */
+  char slot_type;
+  /** Pointer to the node using this image (for future extensions). */
+  void *node;
+};
+
+/**
+ * Runtime index structure for fast image filtering by material and slot type.
+ * Stored in ImageRuntime and rebuilt on demand.
+ */
+struct ImagePaintSlotInfo {
+  /** List of all usage records for this image. */
+  blender::Vector<UsageRecord> usage_records;
+  /** Bitmask of slot types used across all materials (bit N = slot type N is used). */
+  char slot_types_mask = 0;
+  /** Whether this image is used in any material at all. */
+  bool is_used = false;
+  /** Update count when index was last built (for invalidation checking). */
+  uint64_t last_update_count = 0;
+};
 
 struct ImageRuntime {
   /* Mutex used to guarantee thread-safe access to the cached ImBuf of the corresponding image ID.
@@ -89,6 +119,9 @@ struct ImageRuntime {
 
   float view_offset[2] = {};
   float view_zoom = 1.0f;
+
+  /* Runtime index for fast image filtering by material and slot type. */
+  ImagePaintSlotInfo *paint_slot_info = nullptr;
 };
 
 }  // namespace bke
@@ -690,6 +723,57 @@ void BKE_image_update_gputexture(Image *ima, ImageUser *iuser, int x, int y, int
  */
 void BKE_image_update_gputexture_delayed(
     Image *ima, ImageTile *image_tile, ImBuf *ibuf, int x, int y, int w, int h);
+
+bool BKE_image_is_used_in_material(const Image *ima, const Material *material);
+bool BKE_image_has_slot_type(const Image *ima, char slot_type);
+bool BKE_image_is_used_in_material_slot_type(const Image *ima,
+                                             const Material *material,
+                                             char slot_type);
+
+/**
+ * Runtime index functions for fast image filtering.
+ */
+
+/**
+ * Build or rebuild the paint slot usage index for this image.
+ * Scans all materials and collects information about how this image is used.
+ */
+void BKE_image_paint_slot_info_rebuild(Image *ima);
+void BKE_image_paint_slot_info_invalidate(Image *ima);
+
+/**
+ * Check if the paint slot info index is valid (doesn't need rebuilding).
+ * Returns false if index is nullptr or outdated.
+ */
+bool BKE_image_paint_slot_info_is_valid(const Image *ima);
+
+/**
+ * Quick check if image is used in any material (uses cached index).
+ * Rebuilds index if needed.
+ */
+bool BKE_image_paint_slot_info_is_used_in_any_material(const Image *ima);
+
+/**
+ * Quick check if image has a specific slot type usage (uses cached index).
+ * Rebuilds index if needed.
+ */
+bool BKE_image_paint_slot_info_has_slot_type(const Image *ima, char slot_type);
+
+/**
+ * Quick check if image is used in a specific material with optional slot type filter
+ * (uses cached index). Rebuilds index if needed.
+ */
+bool BKE_image_paint_slot_info_is_used_in_material(const Image *ima,
+                                                   const Material *material,
+                                                   char slot_type = 0);
+
+/**
+ * Get the list of materials that use this image (from cached index).
+ * Returns pointer to internal vector - do not store long-term.
+ * Rebuilds index if needed.
+ */
+const blender::Vector<bke::UsageRecord> *BKE_image_paint_slot_info_get_usage_records(
+    const Image *ima);
 
 /**
  * Called on entering and exiting texture paint mode,

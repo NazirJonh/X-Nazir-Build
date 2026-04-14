@@ -161,7 +161,9 @@ Block *template_common_search_menu(const bContext *C,
                                    ButtonSearchTooltipFn item_tooltip_fn,
                                    const int preview_rows,
                                    const int preview_cols,
-                                   float scale)
+                                   float scale,
+                                   int extra_bottom_height,
+                                   int min_width)
 {
   static char search[256];
   wmWindow *win = CTX_wm_window(C);
@@ -176,18 +178,24 @@ Block *template_common_search_menu(const bContext *C,
 
   /* preview thumbnails */
   if (preview_rows > 0 && preview_cols > 0) {
-    const int w = 4 * U.widget_unit * preview_cols * scale;
+    int w = 4 * U.widget_unit * preview_cols * scale;
+    if (min_width > w) {
+      w = min_width;
+    }
     const int h = 5 * U.widget_unit * preview_rows * scale + 2 * UI_SEARCHBOX_TRIA_H -
                   UI_SEARCHBOX_BOUNDS;
 
     /* fake button, it holds space for search items */
-    uiDefBut(block, ButtonType::Label, "", 0, UI_UNIT_Y, w, h, nullptr, 0, 0, std::nullopt);
-    but = uiDefSearchBut(block, search, ICON_VIEWZOOM, sizeof(search), 0, 0, w, UI_UNIT_Y, "");
+    uiDefBut(block, ButtonType::Label, "", 0, UI_UNIT_Y + extra_bottom_height, w, h, nullptr, 0, 0, std::nullopt);
+    but = uiDefSearchBut(block, search, ICON_VIEWZOOM, sizeof(search), 0, extra_bottom_height, w, UI_UNIT_Y, "");
     button_search_preview_grid_size_set(but, preview_rows, preview_cols);
   }
   /* list view */
   else {
-    const int searchbox_width = searchbox_size_x_guess(C, search_update_fn, search_arg);
+    int searchbox_width = searchbox_size_x_guess(C, search_update_fn, search_arg);
+    if (min_width > searchbox_width) {
+      searchbox_width = min_width;
+    }
     const int searchbox_height = searchbox_size_y();
     const int search_but_height = UI_UNIT_Y - 1.0f * UI_SCALE_FAC;
 
@@ -196,7 +204,7 @@ Block *template_common_search_menu(const bContext *C,
              ButtonType::Label,
              "",
              0,
-             search_but_height,
+             search_but_height + extra_bottom_height,
              searchbox_width,
              searchbox_height - UI_SEARCHBOX_BOUNDS,
              nullptr,
@@ -209,7 +217,7 @@ Block *template_common_search_menu(const bContext *C,
                          ICON_VIEWZOOM,
                          sizeof(search),
                          0,
-                         0,
+                         extra_bottom_height,
                          searchbox_width,
                          search_but_height,
                          "");
@@ -223,6 +231,10 @@ Block *template_common_search_menu(const bContext *C,
                          search_exec_fn,
                          active_item);
   button_func_search_set_tooltip(but, item_tooltip_fn);
+
+  /* Store extra_bottom_height in the search button so searchbox can use it for positioning. */
+  ButtonSearch *search_but = static_cast<ButtonSearch *>(but);
+  search_but->extra_bottom_height = extra_bottom_height;
 
   block_bounds_set_normal(block, UI_SEARCHBOX_BOUNDS);
   block_direction_set(block, UI_DIR_DOWN);

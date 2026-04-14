@@ -332,6 +332,14 @@ struct Button : NonMovable {
    */
   HandleButtonData *active = nullptr;
   /**
+   * When this button is a #ButtonType::SearchMenu and is in text-editing state,
+   * this points to the temporary searchbox region showing the results list.
+   * Unlike #active->searchbox (which is only valid while the button is active),
+   * this pointer is valid as long as the searchbox region exists in screen->regionbase.
+   * It is set in textedit_begin() and cleared in searchbox_region_free_fn().
+   */
+  ARegion *searchbox_region = nullptr;
+  /**
    * Event handling only supports one active button at a time, but there are cases where that's not
    * enough. A common one is to keep some filter button active to receive text input, while other
    * buttons remain active for interaction.
@@ -393,11 +401,21 @@ struct ButtonTab : public Button {
   MenuType *menu = nullptr;
 };
 
-/** Derived struct for #ButtonType::SearchMenu */
+  /** Derived struct for #ButtonType::SearchMenu */
 struct ButtonSearch : public Button {
   ButtonSearchCreateFn popup_create_fn = nullptr;
   ButtonSearchUpdateFn items_update_fn = nullptr;
   ButtonSearchListenFn listen_fn = nullptr;
+
+  /**
+   * Optional callback invoked immediately after the searchbox region is created.
+   * Allows external code (e.g. filter button callbacks) to track the searchbox region
+   * without storing a raw pointer that may become dangling.
+   * \param searchbox_region: The newly created searchbox ARegion.
+   * \param arg: User data passed via #button_search_set_searchbox_created_fn().
+   */
+  void (*searchbox_created_fn)(ARegion *searchbox_region, void *arg) = nullptr;
+  void *searchbox_created_arg = nullptr;
 
   void *item_active = nullptr;
   char *item_active_str;
@@ -416,11 +434,68 @@ struct ButtonSearch : public Button {
   int preview_rows = 0;
   int preview_cols = 0;
 
+  /** Extra height reserved at the bottom of the popup for additional UI elements (e.g., filter buttons). */
+  int extra_bottom_height = 0;
+
   /**
    * The search box only provides suggestions, it does not force
    * the string to match one of the search items when applying.
    */
   bool results_are_suggestions = false;
+
+  ~ButtonSearch() override;
+};
+
+struct AutoComplete;
+
+struct SearchItems {
+  int maxitem, totitem, maxstrlen;
+
+  int offset, offset_i; /* offset for inserting in array */
+  int more;             /* flag indicating there are more items */
+
+  char **names;
+  void **pointers;
+  int *icons;
+  int *but_flags;
+  uint8_t *name_prefix_offsets;
+
+  /** Is there any item with an icon? */
+  bool has_icon;
+
+  AutoComplete *autocpl;
+  void *active;
+};
+
+struct uiSearchboxData {
+  rcti bbox;
+  uiFontStyle fstyle;
+  /** Region zoom level. */
+  float zoom;
+  SearchItems items;
+  bool size_set;
+  ARegion *butregion;
+  ButtonSearch *search_but;
+  /** index in items array */
+  int active;
+  /** when menu opened with enough space for this */
+  bool noback;
+  /** draw thumbnail previews, rather than list */
+  bool preview;
+  /** Use the #UI_SEP_CHAR char for splitting shortcuts (good for operators, bad for data). */
+  bool use_shortcut_sep;
+  int prv_rows, prv_cols;
+  /**
+   * Show the active icon and text after the last instance of this string.
+   * Used so we can show leading text to menu items less prominently (not related to 'use_sep').
+   */
+  const char *sep_string;
+  /** Extra height reserved at the bottom of the popup for additional UI elements (e.g., filter buttons). */
+  int extra_bottom_height;
+
+  /* Owned by ButtonSearch */
+  void *search_arg;
+  ButtonSearchListenFn search_listener;
 };
 
 /**
@@ -1087,6 +1162,11 @@ int searchbox_find_index(ARegion *region, const char *name);
  * Region is the search box itself.
  */
 void searchbox_update(bContext *C, ARegion *region, Button *but, bool reset);
+/**
+ * Update a live searchbox region directly.
+ * The region must still exist in #bScreen::regionbase.
+ */
+bool UI_searchbox_update_by_region(bContext *C, ARegion *searchbox_region, Button *search_but);
 int searchbox_autocomplete(bContext *C, ARegion *region, Button *but, char *str);
 bool searchbox_event(
     bContext *C, ARegion *region, Button *but, ARegion *butregion, const wmEvent *event);
@@ -1095,6 +1175,7 @@ bool searchbox_event(
  */
 bool searchbox_apply(Button *but, ARegion *region);
 void searchbox_free(bContext *C, ARegion *region);
+void UI_searchbox_reposition(bContext *C, ARegion *region, Button *but);
 /**
  * XXX weak: search_func adds all partial matches.
  */
@@ -1272,6 +1353,11 @@ void pan_to_scroll(const wmEvent *event, int *type, int *val);
  * The context needs to be set by the caller.
  */
 void button_activate_event(bContext *C, ARegion *region, Button *but);
+/**
+ * Set a flag to skip the next RELEASE event for the searchbox.
+ * Used when reactivating a searchbox from a callback to prevent immediate closure.
+ */
+void button_searchbox_skip_next_release_set(Button *but, bool value);
 /**
  * Simulate moving the mouse over a button (or navigating to it with arrow keys).
  *

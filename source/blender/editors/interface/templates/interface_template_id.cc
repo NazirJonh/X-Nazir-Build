@@ -10,6 +10,7 @@
 #include "BKE_collection.hh"
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
+#include "BKE_image.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_override.hh"
@@ -19,6 +20,7 @@
 #include "BKE_packedFile.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_rect.h"
 #include "BLI_string_search.hh"
 #include "BLI_string_utf8.h"
 
@@ -27,12 +29,17 @@
 #include "DEG_depsgraph_query.hh"
 
 #include "DNA_collection_types.h"
+#include "DNA_image_types.h"
+#include "DNA_material_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
+#include "DNA_space_types.h"
 #include "DNA_workspace_types.h"
 
 #include "ED_id_management.hh"
 #include "ED_node.hh"
 #include "ED_object.hh"
+#include "ED_screen.hh"
 #include "ED_undo.hh"
 
 #include "RNA_access.hh"
@@ -40,6 +47,7 @@
 
 #include "WM_api.hh"
 
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_string_search.hh"
 #include "interface_intern.hh"
@@ -58,32 +66,82 @@ struct TemplateID {
   int prv_cols = 0;
   bool preview = false;
   float scale = 0.0f;
+
+  /* Filter context for advanced filtering (material/slot type). */
+  TemplateIDFilterContext filter_context = {};
+
+  /** When true, the search popup will always show filter mode buttons (for image browsing). */
+  bool show_filter_ui = false;
 };
+
+/* Global state for the active ID search menu to allow live updates from buttons. */
+struct SearchFilterContext {
+  TemplateID template_ui;
+  SpaceImage *sima;
+  ARegion *menu_region;
+  Button *search_but;  /* Pointer to the search button. */
+  /** Last known searchbox region. Validated against screen->regionbase before use.
+   *  Updated via UI_searchbox_region_register() called from textedit_begin(). */
+  ARegion *searchbox_region = nullptr;
+};
+
+/**
+ * Callback invoked from textedit_begin() when a new searchbox region is created.
+ * Stores the region pointer in the SearchFilterContext so filter buttons can update it.
+ */
+static void id_search_on_searchbox_created(ARegion *searchbox_region, void *arg)
+{
+  SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg);
+  ctx->searchbox_region = searchbox_region;
+}
+
+
 
 /* Search browse menu, assign. */
 static void template_ID_set_property_exec_fn(bContext *C, void *arg_template, void *item)
 {
-  TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
+  SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg_template);
+  TemplateID *template_ui = &ctx->template_ui;
+  if (template_ui == nullptr) {
+    return;
+  }
 
   /* ID */
   if (item) {
     PointerRNA idptr = RNA_id_pointer_create(static_cast<ID *>(item));
     RNA_property_pointer_set(&template_ui->ptr, template_ui->prop, idptr, nullptr);
     RNA_property_update(C, &template_ui->ptr, template_ui->prop);
+
+    /* Close the popup manually since we use BLOCK_KEEP_OPEN for advanced image filtering. */
+    Button *but = context_active_but_get(C);
+    if (but && but->block && (but->block->flag & BLOCK_KEEP_OPEN)) {
+      if (but->block->handle) {
+        but->block->handle->menuretval = RETURN_OK;
+      }
+    }
   }
 }
 
 /* Search browse menu, assign #ID::session_uid as Int Property. */
-static void template_ID_set_int_property_session_uid_exec_fn(bContext * /*C*/,
+static void template_ID_set_int_property_session_uid_exec_fn(bContext *C,
                                                              void *arg_template,
                                                              void *item)
 {
-  TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
-  if (!item) {
+  SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg_template);
+  TemplateID *template_ui = &ctx->template_ui;
+  if (template_ui == nullptr || item == nullptr) {
     return;
   }
   RNA_property_int_set(
       &template_ui->ptr, template_ui->prop, int(static_cast<ID *>(item)->session_uid));
+
+  /* Close the popup manually since we use BLOCK_KEEP_OPEN for advanced image filtering. */
+  Button *but = context_active_but_get(C);
+  if (but && but->block && (but->block->flag & BLOCK_KEEP_OPEN)) {
+    if (but->block->handle) {
+      but->block->handle->menuretval = RETURN_OK;
+    }
+  }
 }
 
 static bool id_search_allows_id(TemplateID *template_ui, const int flag, ID *id, const char *query)
@@ -107,6 +165,68 @@ static bool id_search_allows_id(TemplateID *template_ui, const int flag, ID *id,
   if (U.flag & USER_HIDE_DOT_DATABLOCK) {
     if ((id->name[2] == '.') && (query[0] != '.')) {
       return false;
+    }
+  }
+
+  /* Advanced filtering for images. */
+  if (template_ui->idcode == ID_IM && template_ui->filter != TEMPLATE_ID_FILTER_ALL) {
+    Image *ima = id_cast<Image *>(id);
+    if (ima == nullptr) {
+      return false;
+    }
+
+    /* Exclude internal/compositor images from paint-slot filtering.
+     * These should only show up in the unfiltered "All Images" mode. */
+    if (ELEM(ima->type, IMA_TYPE_R_RESULT, IMA_TYPE_COMPOSITE)) {
+      return false;
+    }
+
+    const bool filter_material = (template_ui->filter & TEMPLATE_ID_FILTER_CURRENT_MATERIAL) != 0;
+    const bool filter_slot_type = (template_ui->filter & TEMPLATE_ID_FILTER_SLOT_TYPE) != 0;
+
+    /* Combined filtering (AND logic): both conditions must be met in the SAME UsageRecord. */
+    if (filter_material && filter_slot_type) {
+      Material *mat = template_ui->filter_context.material;
+      char slot_type = template_ui->filter_context.slot_type;
+
+      /* Edge case: no material or invalid slot type. */
+      if (mat == nullptr) {
+        return false;
+      }
+
+      /* Check if image has a UsageRecord matching BOTH material AND slot_type.
+       * Pass the slot_type to the function so it checks both conditions in the same record. */
+      if (!BKE_image_paint_slot_info_is_used_in_material(ima, mat, slot_type)) {
+        return false;
+      }
+    }
+    else {
+      /* Individual filters: check each condition separately. */
+
+      /* Filter by current material only. */
+      if (filter_material) {
+        Material *mat = template_ui->filter_context.material;
+        if (mat != nullptr) {
+          /* Check if image is used in this material (any slot type). */
+          if (!BKE_image_paint_slot_info_is_used_in_material(ima, mat, 0)) {
+            return false;
+          }
+        }
+        else {
+          /* No material set in context, so filter rejects all. */
+          return false;
+        }
+      }
+
+      /* Filter by slot type only. */
+      if (filter_slot_type) {
+        char slot_type = template_ui->filter_context.slot_type;
+        if (slot_type != 0) {  /* 0 means NODE_TEX_IMAGE_SLOT_NONE (no filter) */
+          if (!BKE_image_paint_slot_info_has_slot_type(ima, slot_type)) {
+            return false;
+          }
+        }
+      }
     }
   }
 
@@ -151,7 +271,8 @@ static void id_search_cb(const bContext *C,
                          SearchItems *items,
                          const bool /*is_first*/)
 {
-  TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
+  SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg_template);
+  TemplateID *template_ui = &ctx->template_ui;
   ListBaseT<ID> *lb = template_ui->idlb;
   const int flag = RNA_property_flag(template_ui->prop);
 
@@ -166,10 +287,12 @@ static void id_search_cb(const bContext *C,
 
   const Vector<ID *> filtered_ids = search.query(str);
 
+  int count = 0;
   for (ID *id : filtered_ids) {
     if (!id_search_add(C, template_ui, items, id)) {
       break;
     }
+    count++;
   }
 }
 
@@ -181,7 +304,8 @@ static void id_search_cb_tagged(const bContext *C,
                                 const char *str,
                                 SearchItems *items)
 {
-  TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
+  SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg_template);
+  TemplateID *template_ui = &ctx->template_ui;
   ListBaseT<ID> *lb = template_ui->idlb;
   const int flag = RNA_property_flag(template_ui->prop);
 
@@ -216,7 +340,8 @@ static void id_search_cb_objects_from_scene(const bContext *C,
                                             SearchItems *items,
                                             const bool /*is_first*/)
 {
-  TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
+  SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg_template);
+  TemplateID *template_ui = &ctx->template_ui;
   ListBaseT<ID> *lb = template_ui->idlb;
   Scene *scene = nullptr;
   ID *id_from = template_ui->ptr.owner_id;
@@ -244,60 +369,234 @@ static ARegion *template_ID_search_menu_item_tooltip(
   return tooltip_create_from_search_item_generic(C, region, item_rect, active_id);
 }
 
+static void id_search_filter_mode_button_cb(bContext *C, void *arg_ctx, void *arg_mode)
+{
+  SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg_ctx);
+  const int new_mode = POINTER_AS_INT(arg_mode);
+  printf("DEBUG id_search_filter_mode_button_cb: CALLED new_mode=%d searchbox_region=%p\n",
+         new_mode, (void *)ctx->searchbox_region);
+
+  /* Update filter mode in SpaceImage and template context */
+  if (ctx->sima) {
+    ctx->sima->image_filter_mode = new_mode;
+  }
+  ctx->template_ui.filter = short(new_mode);
+
+  /* Update visual feedback (red highlight) for the filter buttons.
+   * The active filter button should have BUT_ACTIVE_DEFAULT flag set. */
+  if (ctx->search_but && ctx->search_but->block) {
+    for (Button &b : ctx->search_but->block->buttons()) {
+      if (b.type == ButtonType::But && b.func == id_search_filter_mode_button_cb) {
+        if (POINTER_AS_INT(b.func_arg2) == new_mode) {
+          button_flag_enable(&b, BUT_ACTIVE_DEFAULT);
+        } else {
+          button_flag_disable(&b, BUT_ACTIVE_DEFAULT);
+        }
+        button_update(&b);
+      }
+    }
+  }
+
+  /* Update searchbox content with new filter applied */
+  if (ctx->search_but && ctx->searchbox_region) {
+    UI_searchbox_update_by_region(C, ctx->searchbox_region, ctx->search_but);
+    
+    /* Reactivate searchbox if mouse is over it and it's not currently active.
+     * This provides better UX: after clicking a filter button, if the mouse is over
+     * the search results, the searchbox is automatically reactivated so the user can
+     * immediately interact with the updated results (click on an item or type to search).
+     * 
+     * Implementation notes:
+     * - We check if mouse is inside searchbox region using BLI_rcti_isect_pt()
+     * - We only reactivate if searchbox is not already active (ctx->search_but->active == nullptr)
+     * - After reactivation, we set searchbox_skip_next_release flag to prevent the pending
+     *   RELEASE event from the filter button click from immediately closing the searchbox
+     * - This works in both Image Editor and Node Editor (with different UI scales) */
+    if (ctx->search_but->active == nullptr) {
+      wmWindow *win = CTX_wm_window(C);
+      if (win && win->runtime && win->runtime->eventstate) {
+        const int *mval = win->runtime->eventstate->xy;
+        if (BLI_rcti_isect_pt(&ctx->searchbox_region->winrct, mval[0], mval[1])) {
+          printf("DEBUG id_search_filter_mode_button_cb: Mouse over searchbox -> reactivating\n");
+          button_activate_event(C, ctx->menu_region, ctx->search_but);
+          
+          /* Set flag to skip next RELEASE event to prevent immediate closure.
+           * The searchbox was just reactivated, and the pending RELEASE from the filter button
+           * click should not close it. The flag will be cleared when the RELEASE is processed. */
+          button_searchbox_skip_next_release_set(ctx->search_but, true);
+          printf("DEBUG id_search_filter_mode_button_cb: Set skip_next_release flag\n");
+        }
+      }
+    }
+  }
+}
+
+static void template_ID_filter_buttons_add(Block *block, bContext * /*C*/, SearchFilterContext *ctx)
+{
+  SpaceImage *sima = ctx->sima;
+  const int current_mode = sima ? sima->image_filter_mode : int(ctx->template_ui.filter);
+
+  const int but_height = UI_UNIT_Y;
+  const int ypos = UI_UNIT_Y / 2;
+  const uiStyle *style = style_get_dpi();
+  int xpos = 0;
+
+  auto def_filter_but = [&](int mode, const char *text, const char *tip) {
+    const int text_width = fontstyle_string_width(&style->widget, text);
+    /* Use slightly more padding than the absolute minimum, otherwise the UI will ellipsize the
+     * label even when the width is computed from the font metrics. */
+    const int but_width = text_width + int(UI_UNIT_X);
+    Button *but = uiDefBut(block,
+                           ButtonType::But,
+                           text,
+                           xpos,
+                           ypos,
+                           but_width,
+                           but_height,
+                           nullptr,
+                           0,
+                           0,
+                           tip);
+    button_func_set(but, id_search_filter_mode_button_cb, ctx, POINTER_FROM_INT(mode));
+    if (current_mode == mode) {
+      button_flag_enable(but, BUT_ACTIVE_DEFAULT);
+    }
+    xpos += but_width + UI_UNIT_X / 2;
+  };
+
+  def_filter_but(TEMPLATE_ID_FILTER_ALL, "All Images", "Show all images");
+  def_filter_but(TEMPLATE_ID_FILTER_CURRENT_MATERIAL,
+                 "Material",
+                 "Show images used by current material");
+  def_filter_but(TEMPLATE_ID_FILTER_SLOT_TYPE, "Slot", "Show images by slot type");
+  def_filter_but(TEMPLATE_ID_FILTER_CURRENT_MATERIAL | TEMPLATE_ID_FILTER_SLOT_TYPE,
+                 "Both",
+                 "Show images by current material and slot type");
+}
+
 /* ID Search browse menu, open */
 static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
 {
-  static TemplateID template_ui;
+  static SearchFilterContext s_filter_ctx;
   PointerRNA active_item_ptr;
   void (*id_search_update_fn)(
       const bContext *, void *, const char *, SearchItems *, const bool) = id_search_cb;
 
-  /* arg_litem is malloced, can be freed by parent button */
-  template_ui = *(static_cast<TemplateID *>(arg_litem));
-  active_item_ptr = RNA_property_pointer_get(&template_ui.ptr, template_ui.prop);
+  /* Initialize the horizontal (file) global state from the button data. 
+   * Preserve the filter state if we are refreshing the same menu session. */
+  short prev_filter = s_filter_ctx.template_ui.filter;
+  bool is_refresh = (s_filter_ctx.menu_region == region);
 
-  if (template_ui.filter) {
+  s_filter_ctx.template_ui = *(static_cast<TemplateID *>(arg_litem));
+  s_filter_ctx.menu_region = region;
+
+  if (is_refresh) {
+    s_filter_ctx.template_ui.filter = prev_filter;
+  }
+
+  active_item_ptr = RNA_property_pointer_get(&s_filter_ctx.template_ui.ptr,
+                                             s_filter_ctx.template_ui.prop);
+
+  if (s_filter_ctx.template_ui.filter) {
     /* Currently only used for objects. */
-    if (template_ui.idcode == ID_OB) {
-      if (template_ui.filter == TEMPLATE_ID_FILTER_AVAILABLE) {
+    if (s_filter_ctx.template_ui.idcode == ID_OB) {
+      if (s_filter_ctx.template_ui.filter == TEMPLATE_ID_FILTER_AVAILABLE) {
         id_search_update_fn = id_search_cb_objects_from_scene;
       }
     }
   }
 
-  return template_common_search_menu(C,
-                                     region,
-                                     id_search_update_fn,
-                                     &template_ui,
-                                     template_ID_set_property_exec_fn,
-                                     active_item_ptr.data,
-                                     template_ID_search_menu_item_tooltip,
-                                     template_ui.prv_rows,
-                                     template_ui.prv_cols,
-                                     template_ui.scale);
+  /* Determine if we need extra space at the bottom for filter mode buttons.
+   * Show filter buttons whenever the template was created with show_filter_ui=true
+   * (i.e. via template_id_browse_with_context), regardless of the current filter value.
+   * This ensures the buttons are visible even when the initial mode is "All Images". */
+  const bool show_filter_buttons = (s_filter_ctx.template_ui.idcode == ID_IM &&
+                                    s_filter_ctx.template_ui.show_filter_ui);
+  /* Optional: when available (Image Editor), keep filter mode in sync with SpaceImage. */
+  s_filter_ctx.sima = CTX_wm_space_image(C);
+
+  /* Reserve space at the bottom: button height + spacing gap above buttons. */
+  const int filter_but_height = show_filter_buttons ? (UI_UNIT_Y + UI_UNIT_Y) : 0;
+
+  int filter_buttons_width = 0;
+  if (show_filter_buttons) {
+    const uiStyle *style = style_get_dpi();
+    auto calc_button_width = [&](const char *text) {
+      return fontstyle_string_width(&style->widget, text) + int(UI_UNIT_X);
+    };
+    const int gap = UI_UNIT_X / 2;
+    filter_buttons_width = calc_button_width("All Images");
+    filter_buttons_width += gap + calc_button_width("Material");
+    filter_buttons_width += gap + calc_button_width("Slot");
+    filter_buttons_width += gap + calc_button_width("Both");
+
+    /* Compensate for popup bounds/padding so the row fits without clipping. */
+    filter_buttons_width += 2 * UI_SEARCHBOX_BOUNDS;
+  }
+
+  Block *block = template_common_search_menu(C,
+                                             region,
+                                             id_search_update_fn,
+                                             &s_filter_ctx,
+                                             template_ID_set_property_exec_fn,
+                                             active_item_ptr.data,
+                                             template_ID_search_menu_item_tooltip,
+                                             s_filter_ctx.template_ui.prv_rows,
+                                             s_filter_ctx.template_ui.prv_cols,
+                                             s_filter_ctx.template_ui.scale,
+                                             filter_but_height,
+                                             filter_buttons_width);
+
+  if (show_filter_buttons) {
+    block_flag_enable(block, BLOCK_KEEP_OPEN);
+  }
+
+  /* Save the search button so filter callbacks can find the searchbox later. */
+  s_filter_ctx.search_but = nullptr;
+  for (Button &b : block->buttons()) {
+    if (b.type == ButtonType::SearchMenu) {
+      ButtonSearch *search_but = static_cast<ButtonSearch *>(&b);
+      s_filter_ctx.search_but = &b;
+
+      /* Register callback to track searchbox creation. */
+      search_but->searchbox_created_fn = id_search_on_searchbox_created;
+      search_but->searchbox_created_arg = &s_filter_ctx;
+      break;
+    }
+  }
+
+  /* Add filter mode buttons for image browser when using advanced filtering. */
+  if (show_filter_buttons) {
+    template_ID_filter_buttons_add(block, C, &s_filter_ctx);
+  }
+
+  return block;
 }
 
 static Block *id_search_menu_session_uid(bContext *C, ARegion *region, void *arg_litem)
 {
-  static TemplateID template_ui;
+  static SearchFilterContext s_filter_ctx;
   void (*id_search_update_fn)(
       const bContext *, void *, const char *, SearchItems *, const bool) = id_search_cb;
 
-  template_ui = *(static_cast<TemplateID *>(arg_litem));
-  const uint32_t active_session_uid = RNA_property_int_get(&template_ui.ptr, template_ui.prop);
+  s_filter_ctx.template_ui = *(static_cast<TemplateID *>(arg_litem));
+  s_filter_ctx.sima = nullptr;
+  s_filter_ctx.menu_region = region;
+  const uint32_t active_session_uid = RNA_property_int_get(&s_filter_ctx.template_ui.ptr,
+                                                           s_filter_ctx.template_ui.prop);
   ID *active_id = BKE_libblock_find_session_uid(
-      CTX_data_main(C), template_ui.idcode, active_session_uid);
+      CTX_data_main(C), s_filter_ctx.template_ui.idcode, active_session_uid);
 
   return template_common_search_menu(C,
                                      region,
                                      id_search_update_fn,
-                                     &template_ui,
+                                     &s_filter_ctx,
                                      template_ID_set_int_property_session_uid_exec_fn,
                                      active_id,
                                      template_ID_search_menu_item_tooltip,
-                                     template_ui.prv_rows,
-                                     template_ui.prv_cols,
-                                     template_ui.scale);
+                                     s_filter_ctx.template_ui.prv_rows,
+                                     s_filter_ctx.template_ui.prv_cols,
+                                     s_filter_ctx.template_ui.scale);
 }
 
 static void template_id_cb(bContext *C, void *arg_litem, void *arg_event);
@@ -1761,23 +2060,65 @@ void template_id_browse(Layout *layout,
                         int filter,
                         const char *text)
 {
-  template_id(*layout,
-              C,
-              ptr,
-              propname,
-              newop,
-              openop,
-              unlinkop,
-              nullptr,
-              text,
-              UI_ID_BROWSE | UI_ID_RENAME,
-              0,
-              0,
-              filter,
-              false,
-              1.0f,
-              false,
-              false);
+  /* Default implementation without filter context. */
+  template_id_browse_with_context(
+      layout, C, ptr, propname, newop, openop, unlinkop, filter, text, nullptr, 0);
+}
+
+/**
+ * Extended version of template_id_browse with filter context.
+ * Allows filtering by material and slot type for image properties.
+ */
+void template_id_browse_with_context(Layout *layout,
+                                     bContext *C,
+                                     PointerRNA *ptr,
+                                     const StringRefNull propname,
+                                     const char *newop,
+                                     const char *openop,
+                                     const char *unlinkop,
+                                     int filter,
+                                     const char *text,
+                                     Material *material,
+                                     char slot_type)
+{
+  PropertyRNA *prop = RNA_struct_find_property(ptr, propname.c_str());
+
+  if (!prop || RNA_property_type(prop) != PROP_POINTER) {
+    RNA_warning(
+        "pointer property not found: %s.%s", RNA_struct_identifier(ptr->type), propname.c_str());
+    return;
+  }
+
+  TemplateID template_ui = {};
+  template_ui.ptr = *ptr;
+  template_ui.prop = prop;
+  template_ui.prv_rows = 0;
+  template_ui.prv_cols = 0;
+  template_ui.scale = 1.0f;
+  template_ui.filter = filter;
+  template_ui.show_filter_ui = true;
+
+  /* Set filter context. */
+  template_ui.filter_context.material = material;
+  template_ui.filter_context.slot_type = slot_type;
+
+  StructRNA *type = RNA_property_pointer_type(ptr, prop);
+  short idcode = RNA_type_to_ID_code(type);
+  template_ui.idcode = idcode;
+  template_ui.idlb = which_libbase(CTX_data_main(C), idcode);
+
+  /* create UI elements for this template. */
+  if (template_ui.idlb) {
+    int flag = UI_ID_BROWSE | UI_ID_RENAME | UI_ID_DELETE;
+    if (newop) {
+      flag |= UI_ID_ADD_NEW;
+    }
+    if (openop) {
+      flag |= UI_ID_OPEN;
+    }
+    Layout &row = layout->row(true);
+    template_ID(C, row, template_ui, type, flag, newop, openop, unlinkop, text, false, false);
+  }
 }
 
 void template_id_preview(Layout *layout,

@@ -22,6 +22,7 @@
 #include "BKE_image.hh"
 #include "BKE_main.hh"
 #include "BKE_main_invariants.hh"
+#include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_enum.hh"
 #include "BKE_node_legacy_types.hh"
@@ -360,7 +361,47 @@ static void node_shader_buts_tex_image(ui::Layout &layout, bContext *C, PointerR
   PointerRNA iuserptr = RNA_pointer_get(ptr, "image_user");
 
   layout.context_ptr_set("image_user", &iuserptr);
-  template_id(&layout, C, ptr, "image", "IMAGE_OT_new", "IMAGE_OT_open", nullptr);
+
+  /* Get material and slot type for filtering. */
+  Material *mat = nullptr;
+  {
+    PointerRNA mat_ptr = CTX_data_pointer_get(C, "material");
+    if (mat_ptr.data != nullptr && RNA_struct_is_a(mat_ptr.type, RNA_Material)) {
+      mat = static_cast<Material *>(mat_ptr.data);
+    }
+  }
+  bNode *node = (bNode *)ptr->data;
+  NodeTexImage *storage = (NodeTexImage *)node->storage;
+
+  /* If there is no material context, don't apply a "current material" filter as it would
+   * otherwise filter out every image. */
+  int filter = ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL | ui::TEMPLATE_ID_FILTER_SLOT_TYPE;
+  const Object *ob = CTX_data_active_object(C);
+  Scene *scene = CTX_data_scene(C);
+  if (mat && ob && scene) {
+    /* Ensure TexPaintSlot cache + NodeTexImage::paint_slot_type are up-to-date for filtering. */
+    BKE_texpaint_slot_refresh_cache(scene, mat, ob);
+  }
+  else if (mat == nullptr) {
+    filter = ui::TEMPLATE_ID_FILTER_ALL;
+  }
+  else if (ob == nullptr || scene == nullptr) {
+    filter = ui::TEMPLATE_ID_FILTER_ALL;
+  }
+
+  ui::template_id_browse_with_context(
+      &layout,
+      C,
+      ptr,
+      "image",
+      "IMAGE_OT_new",
+      "IMAGE_OT_open",
+      nullptr,
+      filter,
+      nullptr,
+      mat,
+      storage->paint_slot_type);
+
   layout.prop(ptr, "interpolation", DEFAULT_FLAGS, "", ICON_NONE);
   layout.prop(ptr, "projection", DEFAULT_FLAGS, "", ICON_NONE);
 

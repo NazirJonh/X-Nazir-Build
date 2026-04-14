@@ -499,6 +499,52 @@ static PointerRNA rna_Image_active_tile_get(PointerRNA *ptr)
   return RNA_pointer_create_with_parent(*ptr, RNA_UDIMTile, tile);
 }
 
+static int rna_Image_paint_slot_info_usage_records_get_length(PointerRNA *ptr)
+{
+  Image *ima = static_cast<Image *>(ptr->data);
+  if (ima->runtime->paint_slot_info == nullptr) {
+    BKE_image_paint_slot_info_rebuild(ima);
+  }
+  return (int)ima->runtime->paint_slot_info->usage_records.size();
+}
+
+static void rna_Image_paint_slot_info_usage_records_begin(CollectionPropertyIterator *iter,
+                                                          PointerRNA *ptr)
+{
+  Image *ima = static_cast<Image *>(ptr->data);
+  if (ima->runtime->paint_slot_info == nullptr) {
+    BKE_image_paint_slot_info_rebuild(ima);
+  }
+
+  /* Use array iterator for blender::Vector. */
+  rna_iterator_array_begin(
+      iter,
+      ptr,
+      (void *)ima->runtime->paint_slot_info->usage_records.data(),
+      sizeof(bke::UsageRecord),
+      ima->runtime->paint_slot_info->usage_records.size(),
+      false,
+      nullptr);
+}
+
+static PointerRNA rna_Image_paint_slot_info_usage_records_get(CollectionPropertyIterator *iter)
+{
+  return RNA_pointer_create_with_parent(
+      iter->parent, RNA_ImageUsageRecord, rna_iterator_array_get(iter));
+}
+
+static int rna_UsageRecord_slot_type_get(PointerRNA *ptr)
+{
+  bke::UsageRecord *record = static_cast<bke::UsageRecord *>(ptr->data);
+  return record->slot_type;
+}
+
+static PointerRNA rna_UsageRecord_material_get(PointerRNA *ptr)
+{
+  bke::UsageRecord *record = static_cast<bke::UsageRecord *>(ptr->data);
+  return RNA_id_pointer_create(&record->material->id);
+}
+
 static void rna_Image_active_tile_set(PointerRNA *ptr, PointerRNA value, ReportList * /*reports*/)
 {
   Image *image = static_cast<Image *>(ptr->data);
@@ -1431,13 +1477,51 @@ static void rna_def_image(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "Stereo3dFormat");
   RNA_def_property_ui_text(prop, "Stereo 3D Format", "Settings for stereo 3d");
 
+  prop = RNA_def_property(srna, "usage_records", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "ImageUsageRecord");
+  RNA_def_property_collection_funcs(prop,
+                                     "rna_Image_paint_slot_info_usage_records_begin",
+                                     "rna_iterator_array_next",
+                                     "rna_iterator_array_end",
+                                     "rna_Image_paint_slot_info_usage_records_get",
+                                     "rna_Image_paint_slot_info_usage_records_get_length",
+                                     nullptr,
+                                     nullptr,
+                                     nullptr);
+  RNA_def_property_flag(prop, PROP_LIB_EXCEPTION);
+  RNA_def_property_ui_text(prop, "Usage Records", "List of materials using this image");
+
   RNA_api_image(srna);
+}
+
+static void rna_def_usage_record(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "ImageUsageRecord", nullptr);
+  RNA_def_struct_ui_text(srna, "Image Usage Record", "Record of image usage in a material");
+  RNA_def_struct_flag(srna, STRUCT_NO_IDPROPERTIES);
+
+  prop = RNA_def_property(srna, "material", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(prop, "rna_UsageRecord_material_get", nullptr, nullptr, nullptr);
+  RNA_def_property_flag(prop, PROP_LIB_EXCEPTION);
+  RNA_def_property_ui_text(prop, "Material", "Material using the image");
+
+  prop = RNA_def_property(srna, "slot_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_node_tex_image_paint_slot_type_items);
+  RNA_def_property_enum_funcs(prop, "rna_UsageRecord_slot_type_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_flag(prop, PROP_LIB_EXCEPTION);
+  RNA_def_property_ui_text(prop, "Slot Type", "Type of slot the image is used for");
 }
 
 void RNA_def_image(BlenderRNA *brna)
 {
   rna_def_render_slot(brna);
   rna_def_udim_tile(brna);
+  rna_def_usage_record(brna);
   rna_def_image(brna);
   rna_def_imageuser(brna);
   rna_def_image_packed_files(brna);

@@ -25,6 +25,7 @@
 #include "BKE_attribute.hh"
 #include "BKE_context.hh"
 #include "BKE_geometry_set.hh"
+#include "BKE_image.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 
@@ -41,6 +42,18 @@
 #include "WM_types.hh"
 
 namespace blender {
+
+const EnumPropertyItem rna_enum_node_tex_image_paint_slot_type_items[] = {
+    {NODE_TEX_IMAGE_SLOT_NONE, "NONE", 0, "None", "Not assigned to any paint slot"},
+    {NODE_TEX_IMAGE_SLOT_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+    {NODE_TEX_IMAGE_SLOT_SPECULAR, "SPECULAR", 0, "Specular", ""},
+    {NODE_TEX_IMAGE_SLOT_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+    {NODE_TEX_IMAGE_SLOT_METALLIC, "METALLIC", 0, "Metallic", ""},
+    {NODE_TEX_IMAGE_SLOT_NORMAL, "NORMAL", 0, "Normal", ""},
+    {NODE_TEX_IMAGE_SLOT_BUMP, "BUMP", 0, "Bump", ""},
+    {NODE_TEX_IMAGE_SLOT_DISPLACEMENT, "DISPLACEMENT", 0, "Displacement", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
 
 const EnumPropertyItem rna_enum_node_socket_in_out_items[] = {{SOCK_IN, "IN", 0, "Input", ""},
                                                               {SOCK_OUT, "OUT", 0, "Output", ""},
@@ -706,6 +719,7 @@ extern FunctionRNA *rna_NodeTree_valid_socket_type_func;
 extern FunctionRNA *rna_Node_poll_func;
 extern FunctionRNA *rna_Node_poll_instance_func;
 extern FunctionRNA *rna_Node_update_func;
+extern FunctionRNA *rna_Node_image_slot_update_func;
 extern FunctionRNA *rna_Node_insert_link_func;
 extern FunctionRNA *rna_Node_init_func;
 extern FunctionRNA *rna_Node_copy_func;
@@ -2638,6 +2652,32 @@ void rna_Node_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
   BKE_main_ensure_invariants(*bmain, ntree->id);
 }
 
+/**
+ * Specialized update function for image node paint_slot_type and image changes.
+ * Invalidates the runtime usage index for affected images.
+ */
+void rna_Node_image_slot_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
+{
+  bNodeTree *ntree = reinterpret_cast<bNodeTree *>(ptr->owner_id);
+  bNode *node = ptr->data_as<bNode>();
+  
+  /* Call the regular update first. */
+  BKE_ntree_update_tag_node_property(ntree, node);
+  BKE_main_ensure_invariants(*bmain, ntree->id);
+  
+  /* If this is an image texture node, invalidate the image's usage index. */
+  if (node->type_legacy == SH_NODE_TEX_IMAGE && node->id != nullptr) {
+    Image *ima = id_cast<Image *>(node->id);
+    if (ima != nullptr && ima->runtime != nullptr) {
+      /* Invalidate by setting update count to 0, forcing rebuild on next access. */
+      /* The actual rebuild happens when the index is accessed with a different update count. */
+      if (ima->runtime->paint_slot_info != nullptr) {
+        ima->runtime->paint_slot_info->last_update_count = 0;
+      }
+    }
+  }
+}
+
 void rna_Node_update_relations(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   rna_Node_update(bmain, scene, ptr);
@@ -3155,10 +3195,26 @@ static void rna_Node_tex_image_update(Main *bmain, Scene * /*scene*/, PointerRNA
   bNodeTree *ntree = reinterpret_cast<bNodeTree *>(ptr->owner_id);
   bNode *node = ptr->data_as<bNode>();
 
+  /* Invalidate old image's index if there was one. */
+  Image *old_ima = (node->id != nullptr) ? id_cast<Image *>(node->id) : nullptr;
+  
   BKE_ntree_update_tag_node_property(ntree, node);
   BKE_main_ensure_invariants(*bmain, ntree->id);
   DEG_relations_tag_update(bmain);
   WM_main_add_notifier(NC_IMAGE, nullptr);
+  
+  /* Invalidate old image's usage index. */
+  if (old_ima != nullptr && old_ima->runtime != nullptr && 
+      old_ima->runtime->paint_slot_info != nullptr) {
+    old_ima->runtime->paint_slot_info->last_update_count = 0;
+  }
+  
+  /* Invalidate new image's usage index (if different). */
+  Image *new_ima = (node->id != nullptr) ? id_cast<Image *>(node->id) : nullptr;
+  if (new_ima != old_ima && new_ima != nullptr && new_ima->runtime != nullptr &&
+      new_ima->runtime->paint_slot_info != nullptr) {
+    new_ima->runtime->paint_slot_info->last_update_count = 0;
+  }
 }
 
 static void rna_NodeGroup_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
@@ -5459,6 +5515,12 @@ static void def_sh_tex_image(BlenderRNA *brna, StructRNA *srna)
       prop, "Extension", "How the image is extrapolated past its original bounds");
   RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_IMAGE);
   RNA_def_property_update(prop, 0, "rna_Node_update");
+
+  prop = RNA_def_property(srna, "paint_slot_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "paint_slot_type");
+  RNA_def_property_enum_items(prop, rna_enum_node_tex_image_paint_slot_type_items);
+  RNA_def_property_ui_text(prop, "Paint Slot Type", "Type of paint slot this texture is used for");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_image_slot_update");
 
   prop = RNA_def_property(srna, "image_user", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_NEVER_NULL);

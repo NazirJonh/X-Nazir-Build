@@ -73,6 +73,7 @@
 #include "BKE_blender_version.h"
 #include "BKE_collection.hh"
 #include "BKE_global.hh" /* for G */
+#include "BKE_image.hh"
 #include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
 #include "BKE_layer.hh"
@@ -4538,6 +4539,13 @@ BlendFileData *blo_read_file_internal(FileData *fd, const char *filepath)
     fix_relpaths_library(fd->relabase, bfd->main);
 
     bfd->main->need_preview_render_restart = fd->need_preview_render_restart;
+
+    /* Build runtime paint slot info for all images. */
+    Image *ima;
+    for (ima = static_cast<Image *>(bfd->main->images.first); ima;
+         ima = static_cast<Image *>(ima->id.next)) {
+      BKE_image_paint_slot_info_rebuild(ima);
+    }
   }
   else {
     BKE_layer_collection_resync_allow(*bfd->main);

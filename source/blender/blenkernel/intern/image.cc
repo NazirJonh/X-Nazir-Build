@@ -135,6 +135,12 @@ static void image_runtime_free_data(Image *image)
     image->runtime->partial_update_user = nullptr;
   }
   BKE_image_partial_update_register_free(image);
+
+  /* Free paint slot info runtime index. */
+  if (image->runtime->paint_slot_info != nullptr) {
+    MEM_delete(image->runtime->paint_slot_info);
+    image->runtime->paint_slot_info = nullptr;
+  }
 }
 
 static void image_init_data(ID *id)
@@ -3048,6 +3054,245 @@ void BKE_image_init_imageuser(Image *ima, ImageUser *iuser)
     BKE_image_multilayer_index(rr, iuser);
   }
 }
+
+static bool image_node_tree_contains_usage_for_slot_type(const bNodeTree &ntree,
+                                                         const Image &image,
+                                                         const char slot_type)
+{
+  for (const bNode *node : ntree.all_nodes()) {
+    if (node->type_legacy == SH_NODE_TEX_IMAGE && node->id == &image.id) {
+      const NodeTexImage *storage = static_cast<const NodeTexImage *>(node->storage);
+      if (slot_type == NODE_TEX_IMAGE_SLOT_NONE || storage == nullptr ||
+          storage->paint_slot_type == slot_type)
+      {
+        return true;
+      }
+    }
+    if (node->is_group() && node->id != nullptr) {
+      const bNodeTree *group_tree = id_cast<const bNodeTree *>(node->id);
+      if (group_tree != nullptr &&
+          image_node_tree_contains_usage_for_slot_type(*group_tree, image, slot_type))
+      {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool BKE_image_is_used_in_material(const Image *ima, const Material *material)
+{
+  if (ima == nullptr || material == nullptr || material->nodetree == nullptr) {
+    return false;
+  }
+  return image_node_tree_contains_usage_for_slot_type(
+      *material->nodetree, *ima, NODE_TEX_IMAGE_SLOT_NONE);
+}
+
+bool BKE_image_is_used_in_material_slot_type(const Image *ima,
+                                             const Material *material,
+                                             const char slot_type)
+{
+  if (ima == nullptr || material == nullptr || material->nodetree == nullptr) {
+    return false;
+  }
+  return image_node_tree_contains_usage_for_slot_type(*material->nodetree, *ima, slot_type);
+}
+
+bool BKE_image_has_slot_type(const Image *ima, const char slot_type)
+{
+  if (ima == nullptr) {
+    return false;
+  }
+  if (slot_type == NODE_TEX_IMAGE_SLOT_NONE) {
+    return true;
+  }
+  if (G_MAIN == nullptr) {
+    return false;
+  }
+
+  for (const Material &material : G_MAIN->materials) {
+    if (BKE_image_is_used_in_material_slot_type(ima, &material, slot_type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Runtime Paint Slot Info Index Functions
+ * \{ */
+
+/**
+ * Helper: collect all usage records for an image across all materials.
+ * This performs a full scan of all materials and their node trees.
+ */
+static void image_paint_slot_info_collect(const Image *ima, blender::Vector<bke::UsageRecord> &records)
+{
+  if (G_MAIN == nullptr) {
+    return;
+  }
+
+  for (Material &material : G_MAIN->materials) {
+    if (material.nodetree == nullptr) {
+      continue;
+    }
+
+    /* Traverse all nodes in the material's node tree. */
+    for (bNode *node : material.nodetree->all_nodes()) {
+      if (node->type_legacy == SH_NODE_TEX_IMAGE && node->id == &ima->id) {
+        NodeTexImage *storage = static_cast<NodeTexImage *>(node->storage);
+        char slot_type = (storage != nullptr) ? storage->paint_slot_type : NODE_TEX_IMAGE_SLOT_NONE;
+
+        records.append(bke::UsageRecord{&material, slot_type, node});
+      }
+    }
+  }
+}
+
+void BKE_image_paint_slot_info_rebuild(Image *ima)
+{
+  if (ima == nullptr || ima->runtime == nullptr) {
+    return;
+  }
+
+  /* Create index if it doesn't exist. */
+  if (ima->runtime->paint_slot_info == nullptr) {
+    ima->runtime->paint_slot_info = MEM_new<bke::ImagePaintSlotInfo>(__func__);
+  }
+
+  bke::ImagePaintSlotInfo *info = ima->runtime->paint_slot_info;
+
+  /* Clear old data. */
+  info->usage_records.clear();
+  info->slot_types_mask = 0;
+  info->is_used = false;
+
+  /* Collect new usage records. */
+  image_paint_slot_info_collect(ima, info->usage_records);
+
+  /* Update derived data. */
+  for (const bke::UsageRecord &record : info->usage_records) {
+    info->is_used = true;
+    if (record.slot_type > 0 && record.slot_type < 8) {
+      info->slot_types_mask |= (1 << record.slot_type);
+    }
+  }
+
+  /* Mark index as current. */
+  info->last_update_count = ima->runtime->update_count;
+}
+
+bool BKE_image_paint_slot_info_is_valid(const Image *ima)
+{
+  if (ima == nullptr || ima->runtime == nullptr) {
+    return false;
+  }
+
+  const bke::ImagePaintSlotInfo *info = ima->runtime->paint_slot_info;
+  if (info == nullptr) {
+    return false;
+  }
+
+  /* Check if update count has changed since last build. */
+  return info->last_update_count == ima->runtime->update_count;
+}
+
+bool BKE_image_paint_slot_info_is_used_in_any_material(const Image *ima)
+{
+  if (ima == nullptr) {
+    return false;
+  }
+
+  /* Rebuild index if needed. */
+  if (!BKE_image_paint_slot_info_is_valid(ima)) {
+    BKE_image_paint_slot_info_rebuild(const_cast<Image *>(ima));
+  }
+
+  const bke::ImagePaintSlotInfo *info = ima->runtime->paint_slot_info;
+  return (info != nullptr) ? info->is_used : false;
+}
+
+bool BKE_image_paint_slot_info_has_slot_type(const Image *ima, char slot_type)
+{
+  if (ima == nullptr) {
+    return false;
+  }
+
+  /* None means "any slot" - just check if image is used at all. */
+  if (slot_type == NODE_TEX_IMAGE_SLOT_NONE) {
+    return BKE_image_paint_slot_info_is_used_in_any_material(ima);
+  }
+
+  /* Rebuild index if needed. */
+  if (!BKE_image_paint_slot_info_is_valid(ima)) {
+    BKE_image_paint_slot_info_rebuild(const_cast<Image *>(ima));
+  }
+
+  const bke::ImagePaintSlotInfo *info = ima->runtime->paint_slot_info;
+  if (info == nullptr || !info->is_used) {
+    return false;
+  }
+
+  /* Check bitmask. */
+  if (slot_type > 0 && slot_type < 8) {
+    return (info->slot_types_mask & (1 << slot_type)) != 0;
+  }
+
+  return false;
+}
+
+bool BKE_image_paint_slot_info_is_used_in_material(const Image *ima,
+                                                   const Material *material,
+                                                   char slot_type)
+{
+  if (ima == nullptr || material == nullptr) {
+    return false;
+  }
+
+  /* Rebuild index if needed. */
+  if (!BKE_image_paint_slot_info_is_valid(ima)) {
+    BKE_image_paint_slot_info_rebuild(const_cast<Image *>(ima));
+  }
+
+  const bke::ImagePaintSlotInfo *info = ima->runtime->paint_slot_info;
+  if (info == nullptr || !info->is_used) {
+    return false;
+  }
+
+  /* Search through usage records. */
+  for (const bke::UsageRecord &record : info->usage_records) {
+    if (record.material == material) {
+      /* If slot_type is 0 (NONE), any match counts. */
+      if (slot_type == NODE_TEX_IMAGE_SLOT_NONE || record.slot_type == slot_type) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+const blender::Vector<bke::UsageRecord> *BKE_image_paint_slot_info_get_usage_records(const Image *ima)
+{
+  if (ima == nullptr) {
+    return nullptr;
+  }
+
+  /* Rebuild index if needed. */
+  if (!BKE_image_paint_slot_info_is_valid(ima)) {
+    BKE_image_paint_slot_info_rebuild(const_cast<Image *>(ima));
+  }
+
+  const bke::ImagePaintSlotInfo *info = ima->runtime->paint_slot_info;
+  if (info == nullptr || !info->is_used) {
+    return nullptr;
+  }
+
+  return &info->usage_records;
+}
+
+/** \} */
 
 static void image_free_tile(Image *ima, ImageTile *tile)
 {

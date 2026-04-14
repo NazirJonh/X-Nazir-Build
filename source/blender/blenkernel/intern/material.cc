@@ -1603,6 +1603,7 @@ static bool fill_texpaint_slots_cb(bNodeTree * /*nodetree*/, bNode *node, void *
       slot->ima = id_cast<Image *>(node->id);
       NodeTexImage *storage = static_cast<NodeTexImage *>(node->storage);
       slot->interp = storage->interpolation;
+      slot->slot_type = storage->paint_slot_type;
       slot->image_user = &storage->iuser;
       /* For new renderer, we need to traverse the tree back in search of a UV node. */
       bNode *uvnode = nodetree_uv_node_recursive(node);

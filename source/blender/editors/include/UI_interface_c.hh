@@ -41,6 +41,7 @@ struct IDProperty;
 struct ImBuf;
 struct Image;
 struct ImageUser;
+struct Material;
 struct MTex;
 struct Panel;
 struct PanelType;
@@ -1695,6 +1696,18 @@ enum {
 enum {
   TEMPLATE_ID_FILTER_ALL = 0,
   TEMPLATE_ID_FILTER_AVAILABLE = 1,
+  /** Filter images by current active material. */
+  TEMPLATE_ID_FILTER_CURRENT_MATERIAL = 2,
+  /** Filter images by slot type (requires slot_type context). */
+  TEMPLATE_ID_FILTER_SLOT_TYPE = 4,
+};
+
+/** Filter context for template ID browsing. */
+struct TemplateIDFilterContext {
+  /** Current active material to filter by (for CURRENT_MATERIAL filter). */
+  struct Material *material;
+  /** Slot type to filter by (for SLOT_TYPE filter). */
+  char slot_type;
 };
 
 /***************************** ID Utilities *******************************/
@@ -2451,6 +2464,20 @@ void template_id_browse(Layout *layout,
                         const char *unlinkop,
                         int filter = TEMPLATE_ID_FILTER_ALL,
                         const char *text = nullptr);
+/**
+ * Extended version with filter context for material/slot type filtering.
+ */
+void template_id_browse_with_context(Layout *layout,
+                                     bContext *C,
+                                     PointerRNA *ptr,
+                                     StringRefNull propname,
+                                     const char *newop,
+                                     const char *openop,
+                                     const char *unlinkop,
+                                     int filter,
+                                     const char *text,
+                                     struct Material *material,
+                                     char slot_type);
 void template_id_preview(Layout *layout,
                          bContext *C,
                          PointerRNA *ptr,

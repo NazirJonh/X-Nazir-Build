@@ -1285,6 +1285,8 @@ void RNA_api_ui_layout(StructRNA *srna)
   static const EnumPropertyItem id_template_filter_items[] = {
       {ui::TEMPLATE_ID_FILTER_ALL, "ALL", 0, "All", ""},
       {ui::TEMPLATE_ID_FILTER_AVAILABLE, "AVAILABLE", 0, "Available", ""},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL, "CURRENT_MATERIAL", 0, "Current Material", ""},
+      {ui::TEMPLATE_ID_FILTER_SLOT_TYPE, "SLOT_TYPE", 0, "Slot Type", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

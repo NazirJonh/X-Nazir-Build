@@ -481,7 +481,7 @@ class ClonePanel(BrushPanel):
                 col.template_ID_with_filter_context(
                     settings, "clone_image",
                     new="image.new", open="image.open",
-                    filter='IMAGE',
+                    filter='CURRENT_MATERIAL',
                     text="",
                     material=mat,
                     slot_type=slot_type

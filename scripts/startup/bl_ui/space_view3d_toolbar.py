@@ -501,7 +501,7 @@ class SelectPaintSlotHelper:
                     layout.template_ID_with_filter_context(
                         mode_settings, self.canvas_image_attr_name,
                         new="image.new", open="image.open",
-                        filter='IMAGE',
+                        filter='CURRENT_MATERIAL',
                         text="",
                         material=mat,
                         slot_type=slot_type

@@ -657,6 +657,11 @@ struct SpaceImage {
   /* Storage for sub-space types. */
   char mode_prev = 0;
 
+  /** Image browser filter mode for ID browsing. */
+  char image_filter_mode = 0;
+  /** Slot type filter used when image_filter_mode == SLOT_TYPE. */
+  char image_filter_slot_type = 0;
+
   char pin = 0;
 
   char pixel_round_mode = 0;

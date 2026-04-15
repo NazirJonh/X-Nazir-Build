@@ -2173,6 +2173,21 @@ static const EnumPropertyItem *rna_SpaceImageEditor_pivot_itemf(bContext * /*C*/
   }
 }
 
+static const EnumPropertyItem rna_enum_space_image_filter_mode_items[] = {
+    {TEMPLATE_ID_FILTER_ALL, "ALL", 0, "All", "Show all images"},
+    {TEMPLATE_ID_FILTER_CURRENT_MATERIAL,
+     "CURRENT_MATERIAL",
+     0,
+     "Current Material",
+     "Show images used by the active material"},
+    {TEMPLATE_ID_FILTER_SLOT_TYPE,
+     "SLOT_TYPE",
+     0,
+     "Slot Type",
+     "Show images used by a specific paint slot type"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static void rna_SpaceUVEditor_tile_grid_shape_set(PointerRNA *ptr, const int *values)
 {
   SpaceImage *data = static_cast<SpaceImage *>(ptr->data);
@@ -6231,6 +6246,20 @@ static void rna_def_space_image(BlenderRNA *brna)
       prop, "Image Pin", "Display current image regardless of object selection");
   RNA_def_property_ui_icon(prop, ICON_UNPINNED, 1);
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "image_filter_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "image_filter_mode");
+  RNA_def_property_enum_items(prop, rna_enum_space_image_filter_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Image Filter Mode",
+                           "Criteria used when filtering images in paint-related ID browsers");
+
+  prop = RNA_def_property(srna, "image_filter_slot_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "image_filter_slot_type");
+  RNA_def_property_enum_items(prop, rna_enum_node_tex_image_paint_slot_type_items);
+  RNA_def_property_ui_text(prop,
+                           "Image Filter Slot Type",
+                           "Paint slot type used when filtering by slot type");
 
   prop = RNA_def_property(srna, "sample_histogram", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "sample_line_hist");

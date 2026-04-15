@@ -739,6 +739,7 @@ bool BKE_image_is_used_in_material_slot_type(const Image *ima,
  * Scans all materials and collects information about how this image is used.
  */
 void BKE_image_paint_slot_info_rebuild(Image *ima);
+void BKE_image_paint_slot_info_invalidate(Image *ima);
 
 /**
  * Check if the paint slot info index is valid (doesn't need rebuilding).

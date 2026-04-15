@@ -360,7 +360,26 @@ static void node_shader_buts_tex_image(ui::Layout &layout, bContext *C, PointerR
   PointerRNA iuserptr = RNA_pointer_get(ptr, "image_user");
 
   layout.context_ptr_set("image_user", &iuserptr);
-  template_id(&layout, C, ptr, "image", "IMAGE_OT_new", "IMAGE_OT_open", nullptr);
+
+  /* Get material and slot type for filtering. */
+  ID *owner_id = ptr->owner_id;
+  Material *mat = (owner_id && GS(owner_id->name) == ID_MA) ? (Material *)owner_id : nullptr;
+  bNode *node = (bNode *)ptr->data;
+  NodeTexImage *storage = (NodeTexImage *)node->storage;
+
+  ui::template_id_browse_with_context(
+      &layout,
+      C,
+      ptr,
+      "image",
+      "IMAGE_OT_new",
+      "IMAGE_OT_open",
+      nullptr,
+      ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL | ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+      nullptr,
+      mat,
+      storage->paint_slot_type);
+
   layout.prop(ptr, "interpolation", DEFAULT_FLAGS, "", ICON_NONE);
   layout.prop(ptr, "projection", DEFAULT_FLAGS, "", ICON_NONE);
 

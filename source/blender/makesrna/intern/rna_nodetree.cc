@@ -43,6 +43,18 @@
 
 namespace blender {
 
+const EnumPropertyItem rna_enum_node_tex_image_paint_slot_type_items[] = {
+    {NODE_TEX_IMAGE_SLOT_NONE, "NONE", 0, "None", "Not assigned to any paint slot"},
+    {NODE_TEX_IMAGE_SLOT_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+    {NODE_TEX_IMAGE_SLOT_SPECULAR, "SPECULAR", 0, "Specular", ""},
+    {NODE_TEX_IMAGE_SLOT_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+    {NODE_TEX_IMAGE_SLOT_METALLIC, "METALLIC", 0, "Metallic", ""},
+    {NODE_TEX_IMAGE_SLOT_NORMAL, "NORMAL", 0, "Normal", ""},
+    {NODE_TEX_IMAGE_SLOT_BUMP, "BUMP", 0, "Bump", ""},
+    {NODE_TEX_IMAGE_SLOT_DISPLACEMENT, "DISPLACEMENT", 0, "Displacement", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 const EnumPropertyItem rna_enum_node_socket_in_out_items[] = {{SOCK_IN, "IN", 0, "Input", ""},
                                                               {SOCK_OUT, "OUT", 0, "Output", ""},
                                                               {0, nullptr, 0, nullptr, nullptr}};
@@ -5464,17 +5476,6 @@ static void def_sh_tex_image(BlenderRNA *brna, StructRNA *srna)
        "Image is projected from the tube using the Z axis as central"},
       {0, nullptr, 0, nullptr, nullptr},
   };
-  static const EnumPropertyItem prop_paint_slot_type_items[] = {
-      {NODE_TEX_IMAGE_SLOT_NONE, "NONE", 0, "None", "Not assigned to any paint slot"},
-      {NODE_TEX_IMAGE_SLOT_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
-      {NODE_TEX_IMAGE_SLOT_SPECULAR, "SPECULAR", 0, "Specular", ""},
-      {NODE_TEX_IMAGE_SLOT_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
-      {NODE_TEX_IMAGE_SLOT_METALLIC, "METALLIC", 0, "Metallic", ""},
-      {NODE_TEX_IMAGE_SLOT_NORMAL, "NORMAL", 0, "Normal", ""},
-      {NODE_TEX_IMAGE_SLOT_BUMP, "BUMP", 0, "Bump", ""},
-      {NODE_TEX_IMAGE_SLOT_DISPLACEMENT, "DISPLACEMENT", 0, "Displacement", ""},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
 
   PropertyRNA *prop;
 
@@ -5517,7 +5518,7 @@ static void def_sh_tex_image(BlenderRNA *brna, StructRNA *srna)
 
   prop = RNA_def_property(srna, "paint_slot_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "paint_slot_type");
-  RNA_def_property_enum_items(prop, prop_paint_slot_type_items);
+  RNA_def_property_enum_items(prop, rna_enum_node_tex_image_paint_slot_type_items);
   RNA_def_property_ui_text(prop, "Paint Slot Type", "Type of paint slot this texture is used for");
   RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_image_slot_update");
 

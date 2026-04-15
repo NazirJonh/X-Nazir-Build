@@ -3150,16 +3150,29 @@ static void image_paint_slot_info_collect(const Image *ima, blender::Vector<bke:
   }
 }
 
-void BKE_image_paint_slot_info_rebuild(Image *ima)
+void BKE_image_paint_slot_info_rebuild(Image *ima);
+
+void BKE_image_paint_slot_info_invalidate(Image *ima)
 {
   if (ima == nullptr || ima->runtime == nullptr) {
     return;
   }
-
-  /* Create index if it doesn't exist. */
-  if (ima->runtime->paint_slot_info == nullptr) {
-    ima->runtime->paint_slot_info = MEM_new<bke::ImagePaintSlotInfo>(__func__);
+  if (ima->runtime->paint_slot_info != nullptr) {
+    MEM_delete(ima->runtime->paint_slot_info);
+    ima->runtime->paint_slot_info = nullptr;
   }
+}
+
+void BKE_image_paint_slot_info_rebuild(Image *ima)
+{
+  BKE_image_paint_slot_info_invalidate(ima);
+
+  if (ima == nullptr || ima->runtime == nullptr) {
+    return;
+  }
+
+  /* Create index. */
+  ima->runtime->paint_slot_info = MEM_new<bke::ImagePaintSlotInfo>(__func__);
 
   bke::ImagePaintSlotInfo *info = ima->runtime->paint_slot_info;
 

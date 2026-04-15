@@ -65,6 +65,7 @@ DEF_ENUM(rna_enum_image_type_all_items)
 DEF_ENUM(rna_enum_image_color_mode_items)
 DEF_ENUM(rna_enum_image_color_depth_items)
 DEF_ENUM(rna_enum_image_generated_type_items)
+DEF_ENUM(rna_enum_node_tex_image_paint_slot_type_items)
 
 DEF_ENUM(rna_enum_normal_space_items)
 DEF_ENUM(rna_enum_normal_swizzle_items)

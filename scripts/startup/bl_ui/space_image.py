@@ -895,7 +895,18 @@ class IMAGE_HT_header(Header):
 
         IMAGE_HT_header.draw_xform_template(layout, context)
 
-        layout.template_ID(sima, "image", new="image.new", open="image.open")
+        if sima.mode == 'PAINT' and context.image_paint_object:
+            ob = context.image_paint_object
+            mat = ob.active_material
+            slot_type = 0
+
+            layout.template_ID_with_filter_context(
+                sima, "image", new="image.new", open="image.open",
+                filter='CURRENT_MATERIAL',
+                material=mat, slot_type=slot_type
+            )
+        else:
+            layout.template_ID(sima, "image", new="image.new", open="image.open")
 
         if show_maskedit:
             layout.template_ID(sima, "mask", new="mask.new")

@@ -150,6 +150,15 @@ static void material_free_data(ID *id)
 {
   Material *material = id_cast<Material *>(id);
 
+  /* Invalidate image paint slot info for all images used in this material. */
+  if (material->nodetree != nullptr) {
+    for (bNode &node : material->nodetree->nodes) {
+      if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id != nullptr) {
+        BKE_image_paint_slot_info_invalidate(id_cast<Image *>(node.id));
+      }
+    }
+  }
+
   /* Free gpu material before the ntree */
   GPU_material_free(&material->gpumaterial);
 

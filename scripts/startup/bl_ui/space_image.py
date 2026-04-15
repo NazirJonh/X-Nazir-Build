@@ -903,14 +903,14 @@ class IMAGE_HT_header(Header):
 
             row = layout.row(align=True)
             row.prop(sima, "image_filter_mode", text="", expand=True)
-            if filter_mode == 'SLOT_TYPE':
+            # Показывать выбор slot_type для SLOT_TYPE и CURRENT_MATERIAL_AND_SLOT_TYPE
+            if filter_mode in {'SLOT_TYPE', 'CURRENT_MATERIAL_AND_SLOT_TYPE'}:
                 row.prop(sima, "image_filter_slot_type", text="")
 
-            filter_flag = filter_mode
-
+            # Передаём filter_mode напрямую как строку (enum identifier)
             layout.template_ID_with_filter_context(
                 sima, "image", new="image.new", open="image.open",
-                filter=filter_flag,
+                filter=filter_mode,
                 material=mat, slot_type=slot_type
             )
         else:

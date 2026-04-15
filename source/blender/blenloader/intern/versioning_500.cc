@@ -79,6 +79,8 @@
 
 #include "WM_api.hh"
 
+#include "UI_interface_c.hh"
+
 #include "AS_asset_library.hh"
 
 #include "readfile.hh"
@@ -4523,6 +4525,25 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 20)) {
+    /* Initialize SpaceImage filter fields for image filtering in texture paint mode. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_IMAGE) {
+            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+            if (sima->image_filter_mode == 0) {
+              sima->image_filter_mode = ui::TEMPLATE_ID_FILTER_ALL;
+            }
+            if (sima->image_filter_slot_type == 0) {
+              sima->image_filter_slot_type = NODE_TEX_IMAGE_SLOT_NONE;
+            }
+          }
+        }
+      }
+    }
   }
 
   /**

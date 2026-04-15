@@ -11,6 +11,7 @@
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
 
+#include "DNA_node_types.h"
 #include "DNA_screen_types.h"
 
 #include "UI_interface.hh"
@@ -1308,6 +1309,11 @@ void RNA_api_ui_layout(StructRNA *srna)
       {ui::TEMPLATE_ID_FILTER_AVAILABLE, "AVAILABLE", 0, "Available", ""},
       {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL, "CURRENT_MATERIAL", 0, "Current Material", ""},
       {ui::TEMPLATE_ID_FILTER_SLOT_TYPE, "SLOT_TYPE", 0, "Slot Type", ""},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL | ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+       "CURRENT_MATERIAL_AND_SLOT_TYPE",
+       0,
+       "Current Material & Slot Type",
+       ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -1862,15 +1868,12 @@ void RNA_api_ui_layout(StructRNA *srna)
   parm = RNA_def_pointer(
       func, "material", "Material", "", "Material to filter images by (optional)");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
-  RNA_def_int(func,
-              "slot_type",
-              0,
-              0,
-              INT_MAX,
-              "Slot Type",
-              "Paint slot type to filter images by (0=NONE, 1=BASE_COLOR, etc.)",
-              0,
-              INT_MAX);
+  RNA_def_enum(func,
+               "slot_type",
+               rna_enum_node_tex_image_paint_slot_type_items,
+               NODE_TEX_IMAGE_SLOT_NONE,
+               "Slot Type",
+               "Paint slot type to filter images by");
 
   func = RNA_def_function(srna, "template_ID_session_uid", "rna_ui_template_ID_session_uid");
   RNA_def_function_ui_description(func,

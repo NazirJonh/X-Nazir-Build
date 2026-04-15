@@ -467,24 +467,14 @@ class ClonePanel(BrushPanel):
             # Filter by current material if available
             mat = ob.active_material if ob and hasattr(ob, 'active_material') else None
             if mat:
-                # Get slot type from active paint slot if available
-                slot_type = 0  # Default to NONE
-                if hasattr(mat, 'texture_paint_slots') and mat.texture_paint_slots:
-                    try:
-                        active_slot = mat.texture_paint_slots[mat.paint_active_slot]
-                        if hasattr(active_slot, 'slot_type'):
-                            slot_type = active_slot.slot_type
-                    except (IndexError, AttributeError):
-                        pass
-                
-                # Use new filtering function with material and slot type context
+                # Use filtered image selection by current material
                 col.template_ID_with_filter_context(
                     settings, "clone_image",
                     new="image.new", open="image.open",
                     filter='CURRENT_MATERIAL',
                     text="",
                     material=mat,
-                    slot_type=slot_type
+                    slot_type='NONE'  # Slot type not used for clone image
                 )
             else:
                 # Fallback to standard template_ID if no material

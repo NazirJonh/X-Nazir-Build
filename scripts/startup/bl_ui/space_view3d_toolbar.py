@@ -483,7 +483,32 @@ class SelectPaintSlotHelper:
             case 'IMAGE':
                 mesh = ob.data
                 uv_text = mesh.uv_layers.active.name if mesh.uv_layers.active else ""
-                layout.template_ID(mode_settings, self.canvas_image_attr_name, new="image.new", open="image.open")
+                # Use filtered image selection for texture paint
+                # Filter by current material if available
+                mat = ob.active_material if ob and hasattr(ob, 'active_material') else None
+                if mat:
+                    # Get slot type from active paint slot if available
+                    slot_type = 0  # Default to NONE
+                    if hasattr(mat, 'texture_paint_slots') and mat.texture_paint_slots:
+                        try:
+                            active_slot = mat.texture_paint_slots[mat.paint_active_slot]
+                            if hasattr(active_slot, 'slot_type'):
+                                slot_type = active_slot.slot_type
+                        except (IndexError, AttributeError):
+                            pass
+                    
+                    # Use new filtering function with material and slot type context
+                    layout.template_ID_with_filter_context(
+                        mode_settings, self.canvas_image_attr_name,
+                        new="image.new", open="image.open",
+                        filter='IMAGE',
+                        text="",
+                        material=mat,
+                        slot_type=slot_type
+                    )
+                else:
+                    # Fallback to standard template_ID if no material
+                    layout.template_ID(mode_settings, self.canvas_image_attr_name, new="image.new", open="image.open")
                 if settings.missing_uvs:
                     layout.operator("paint.add_simple_uvs", icon='ADD', text="Add UVs")
                 else:
@@ -738,7 +763,22 @@ class VIEW3D_PT_stencil_projectpaint(Panel):
         col.active = ipaint.use_stencil_layer
 
         col.label(text="Stencil Image")
-        col.template_ID(ipaint, "stencil_image", new="image.new", open="image.open")
+        # Use filtered image selection for texture paint
+        # Filter by current material if available
+        mat = ob.active_material if ob and hasattr(ob, 'active_material') else None
+        if mat:
+            # Stencil doesn't have a specific slot type, so use 0 (NONE)
+            col.template_ID_with_filter_context(
+                ipaint, "stencil_image",
+                new="image.new", open="image.open",
+                filter='IMAGE',
+                text="",
+                material=mat,
+                slot_type=0
+            )
+        else:
+            # Fallback to standard template_ID if no material
+            col.template_ID(ipaint, "stencil_image", new="image.new", open="image.open")
 
         stencil_text = mesh.uv_layer_stencil.name if mesh.uv_layer_stencil else ""
 

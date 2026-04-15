@@ -1385,39 +1385,6 @@ static void uv_image_outset(const ProjPaintState *ps,
   }
 }
 
-/* Layer type enum for paint slot operations */
-enum {
-  LAYER_BASE_COLOR,
-  LAYER_SPECULAR,
-  LAYER_ROUGHNESS,
-  LAYER_METALLIC,
-  LAYER_NORMAL,
-  LAYER_BUMP,
-  LAYER_DISPLACEMENT,
-};
-
-static char node_tex_image_paint_slot_type_from_layer_type(const int layer_type)
-{
-  switch (layer_type) {
-    case LAYER_BASE_COLOR:
-      return NODE_TEX_IMAGE_SLOT_BASE_COLOR;
-    case LAYER_SPECULAR:
-      return NODE_TEX_IMAGE_SLOT_SPECULAR;
-    case LAYER_ROUGHNESS:
-      return NODE_TEX_IMAGE_SLOT_ROUGHNESS;
-    case LAYER_METALLIC:
-      return NODE_TEX_IMAGE_SLOT_METALLIC;
-    case LAYER_NORMAL:
-      return NODE_TEX_IMAGE_SLOT_NORMAL;
-    case LAYER_BUMP:
-      return NODE_TEX_IMAGE_SLOT_BUMP;
-    case LAYER_DISPLACEMENT:
-      return NODE_TEX_IMAGE_SLOT_DISPLACEMENT;
-    default:
-      return NODE_TEX_IMAGE_SLOT_NONE;
-  }
-}
-
 static void insert_seam_vert_array(const ProjPaintState *ps,
                                    MemArena *arena,
                                    const int tri_index,
@@ -6675,6 +6642,17 @@ bool ED_paint_proj_mesh_data_check(Scene &scene,
   return has_uvs && has_mat && has_tex && has_stencil;
 }
 
+/* Add layer operator */
+enum {
+  LAYER_BASE_COLOR,
+  LAYER_SPECULAR,
+  LAYER_ROUGHNESS,
+  LAYER_METALLIC,
+  LAYER_NORMAL,
+  LAYER_BUMP,
+  LAYER_DISPLACEMENT,
+};
+
 static const EnumPropertyItem layer_type_items[] = {
     {LAYER_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
     {LAYER_SPECULAR, "SPECULAR", 0, "Specular IOR Level", ""},
@@ -6685,6 +6663,46 @@ static const EnumPropertyItem layer_type_items[] = {
     {LAYER_DISPLACEMENT, "DISPLACEMENT", 0, "Displacement", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
+
+/**
+ * Map layer type enum to NodeTexImage paint_slot_type.
+ * This allows automatic assignment of slot types when creating paint slots.
+ */
+static char node_tex_image_paint_slot_type_from_layer_type(const int layer_type)
+{
+  char result;
+  switch (layer_type) {
+    case LAYER_BASE_COLOR:
+      result = NODE_TEX_IMAGE_SLOT_BASE_COLOR;
+      break;
+    case LAYER_SPECULAR:
+      result = NODE_TEX_IMAGE_SLOT_SPECULAR;
+      break;
+    case LAYER_ROUGHNESS:
+      result = NODE_TEX_IMAGE_SLOT_ROUGHNESS;
+      break;
+    case LAYER_METALLIC:
+      result = NODE_TEX_IMAGE_SLOT_METALLIC;
+      break;
+    case LAYER_NORMAL:
+      result = NODE_TEX_IMAGE_SLOT_NORMAL;
+      break;
+    case LAYER_BUMP:
+      result = NODE_TEX_IMAGE_SLOT_BUMP;
+      break;
+    case LAYER_DISPLACEMENT:
+      result = NODE_TEX_IMAGE_SLOT_DISPLACEMENT;
+      break;
+    default:
+      result = NODE_TEX_IMAGE_SLOT_NONE;
+      break;
+  }
+  
+  printf("[DEBUG] node_tex_image_paint_slot_type_from_layer_type: layer_type=%d -> paint_slot_type=%d\n", 
+         layer_type, (int)result);
+  
+  return result;
+}
 
 static Material *get_or_create_current_material(bContext *C, Object *ob)
 {
@@ -6865,6 +6883,11 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
     Main *bmain = CTX_data_main(C);
     int type = RNA_enum_get(op->ptr, "type");
     bool is_data = (type > LAYER_BASE_COLOR);
+    
+    printf("[DEBUG] PAINT_OT_add_texture_paint_slot: Starting paint slot creation\n");
+    printf("[DEBUG]   Material: %s\n", ma->id.name + 2);
+    printf("[DEBUG]   Layer type (enum): %d\n", type);
+    printf("[DEBUG]   Layer type name: %s\n", layer_type_items[type].name);
 
     bNode *new_node;
     bNodeTree *ntree = ma->nodetree;
@@ -6886,7 +6909,15 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
         ima = proj_paint_image_create(op, bmain, is_data);
         new_node->id = &ima->id;
         NodeTexImage *tex_image_storage = static_cast<NodeTexImage *>(new_node->storage);
+        
+        printf("[DEBUG]   Created image: %s\n", ima->id.name + 2);
+        printf("[DEBUG]   Calling node_tex_image_paint_slot_type_from_layer_type(%d)...\n", type);
+        
         tex_image_storage->paint_slot_type = node_tex_image_paint_slot_type_from_layer_type(type);
+        
+        printf("[DEBUG]   Assigned paint_slot_type to NodeTexImage: %d\n", 
+               (int)tex_image_storage->paint_slot_type);
+        
         break;
       }
       case PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE: {
@@ -6966,13 +6997,19 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
     bke::node_position_propagate(*out_node);
 
     if (ima) {
+      printf("[DEBUG]   Calling BKE_texpaint_slot_refresh_cache for image...\n");
       BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+      printf("[DEBUG]   BKE_texpaint_slot_refresh_cache completed\n");
+      
       BKE_image_signal(bmain, ima, nullptr, IMA_SIGNAL_USER_NEW_IMAGE);
       WM_event_add_notifier(C, NC_IMAGE | NA_ADDED, ima);
       ED_space_image_sync(bmain, ima, false);
     }
     if (layer) {
+      printf("[DEBUG]   Calling BKE_texpaint_slot_refresh_cache for layer...\n");
       BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+      printf("[DEBUG]   BKE_texpaint_slot_refresh_cache completed\n");
+      
       DEG_id_tag_update(ob->data, ID_RECALC_GEOMETRY);
       WM_main_add_notifier(NC_GEOM | ND_DATA, ob->data);
     }
@@ -6983,6 +7020,9 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
     ED_area_tag_redraw(CTX_wm_area(C));
 
     ED_paint_proj_mesh_data_check(*scene, *ob, nullptr, nullptr, nullptr, nullptr);
+
+    printf("[DEBUG] PAINT_OT_add_texture_paint_slot: Completed successfully\n");
+    printf("[DEBUG] ========================================\n\n");
 
     return true;
   }

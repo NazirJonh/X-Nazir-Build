@@ -679,6 +679,27 @@ static void rna_ui_template_ID_session_uid(
   template_ID_session_uid(*layout, C, ptr, propname, idcode);
 }
 
+static void rna_uiTemplateID_with_filter_context(Layout *layout,
+                                                  bContext *C,
+                                                  PointerRNA *ptr,
+                                                  const char *propname,
+                                                  const char *newop,
+                                                  const char *openop,
+                                                  const char *unlinkop,
+                                                  int filter,
+                                                  const char *text,
+                                                  PointerRNA *material_ptr,
+                                                  int slot_type)
+{
+  Material *material = nullptr;
+  if (material_ptr && material_ptr->data) {
+    material = static_cast<Material *>(material_ptr->data);
+  }
+
+  template_id_browse_with_context(
+      layout, C, ptr, propname, newop, openop, unlinkop, filter, text, material, char(slot_type));
+}
+
 static void rna_uiTemplateAnyID(Layout *layout,
                                 PointerRNA *ptr,
                                 const char *propname,
@@ -1815,6 +1836,41 @@ void RNA_api_ui_layout(StructRNA *srna)
                "Optionally limit the items which can be selected");
   RNA_def_boolean(func, "live_icon", false, "", "Show preview instead of fixed icon");
   api_ui_item_common_text(func);
+
+  func = RNA_def_function(
+      srna, "template_ID_with_filter_context", "rna_uiTemplateID_with_filter_context");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "Template ID with filter context for material and slot type filtering (for texture paint)");
+  api_ui_item_rna_common(func);
+  RNA_def_string(func, "new", nullptr, 0, "", "Operator identifier to create a new ID block");
+  RNA_def_string(func,
+                 "open",
+                 nullptr,
+                 0,
+                 "",
+                 "Operator identifier to open a file for creating a new ID block");
+  RNA_def_string(func, "unlink", nullptr, 0, "", "Operator identifier to unlink the ID block");
+  RNA_def_enum(func,
+               "filter",
+               id_template_filter_items,
+               ui::TEMPLATE_ID_FILTER_ALL,
+               "",
+               "Optionally limit the items which can be selected");
+  RNA_def_string(func, "text", nullptr, 0, "", "Custom label to display in UI");
+  parm = RNA_def_pointer(
+      func, "material", "Material", "", "Material to filter images by (optional)");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_int(func,
+              "slot_type",
+              0,
+              0,
+              INT_MAX,
+              "Slot Type",
+              "Paint slot type to filter images by (0=NONE, 1=BASE_COLOR, etc.)",
+              0,
+              INT_MAX);
 
   func = RNA_def_function(srna, "template_ID_session_uid", "rna_ui_template_ID_session_uid");
   RNA_def_function_ui_description(func,

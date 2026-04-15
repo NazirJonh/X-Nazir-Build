@@ -463,7 +463,32 @@ class ClonePanel(BrushPanel):
 
             clone_text = mesh.uv_layer_clone.name if mesh.uv_layer_clone else ""
             col.label(text="Source Clone Image")
-            col.template_ID(settings, "clone_image")
+            # Use filtered image selection for texture paint
+            # Filter by current material if available
+            mat = ob.active_material if ob and hasattr(ob, 'active_material') else None
+            if mat:
+                # Get slot type from active paint slot if available
+                slot_type = 0  # Default to NONE
+                if hasattr(mat, 'texture_paint_slots') and mat.texture_paint_slots:
+                    try:
+                        active_slot = mat.texture_paint_slots[mat.paint_active_slot]
+                        if hasattr(active_slot, 'slot_type'):
+                            slot_type = active_slot.slot_type
+                    except (IndexError, AttributeError):
+                        pass
+                
+                # Use new filtering function with material and slot type context
+                col.template_ID_with_filter_context(
+                    settings, "clone_image",
+                    new="image.new", open="image.open",
+                    filter='IMAGE',
+                    text="",
+                    material=mat,
+                    slot_type=slot_type
+                )
+            else:
+                # Fallback to standard template_ID if no material
+                col.template_ID(settings, "clone_image")
             col.label(text="Source Clone UV Map")
             col.menu("VIEW3D_MT_tools_projectpaint_clone", text=clone_text, translate=False)
 

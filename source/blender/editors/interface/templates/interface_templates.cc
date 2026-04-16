@@ -225,6 +225,10 @@ Block *template_common_search_menu(const bContext *C,
                          active_item);
   button_func_search_set_tooltip(but, item_tooltip_fn);
 
+  /* Store extra_bottom_height in the search button so searchbox can use it for positioning. */
+  ButtonSearch *search_but = static_cast<ButtonSearch *>(but);
+  search_but->extra_bottom_height = extra_bottom_height;
+
   block_bounds_set_normal(block, UI_SEARCHBOX_BOUNDS);
   block_direction_set(block, UI_DIR_DOWN);
 

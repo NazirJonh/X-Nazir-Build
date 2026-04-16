@@ -374,9 +374,9 @@ static void id_search_filter_mode_button_cb(bContext *C, void *arg_ctx, void *ar
     for (Button &b : ctx->search_but->block->buttons()) {
       if (b.type == ButtonType::But && b.func == id_search_filter_mode_button_cb) {
         if (POINTER_AS_INT(b.func_arg2) == new_mode) {
-          button_flag_enable(&b, BUT_REDALERT);
+          button_flag_enable(&b, BUT_ACTIVE_DEFAULT);
         } else {
-          button_flag_disable(&b, BUT_REDALERT);
+          button_flag_disable(&b, BUT_ACTIVE_DEFAULT);
         }
         button_update(&b);
       }
@@ -395,7 +395,7 @@ static void template_ID_filter_buttons_add(Block *block, bContext * /*C*/, Searc
 
   /* Calculate button widths to span the full popup width. */
   const int but_height = UI_UNIT_Y;
-  const int ypos = 0; /* Below the search field. */
+  const int ypos = UI_UNIT_Y / 2; /* At the bottom of the reserved space. */
   const int but_width = UI_UNIT_X * 2;
   int xpos = 0;
 
@@ -413,9 +413,9 @@ static void template_ID_filter_buttons_add(Block *block, bContext * /*C*/, Searc
                                    tip);
     button_func_set(but, id_search_filter_mode_button_cb, ctx, POINTER_FROM_INT(mode));
     if (current_mode == mode) {
-      button_flag_enable(but, BUT_REDALERT);
+      button_flag_enable(but, BUT_ACTIVE_DEFAULT);
     }
-    xpos += but_width;
+    xpos += but_width + UI_UNIT_X / 2;
   };
 
   def_filter_but(TEMPLATE_ID_FILTER_ALL, ICON_IMAGE, "All", "Show all images");
@@ -467,8 +467,8 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
                                     s_filter_ctx.template_ui.filter != TEMPLATE_ID_FILTER_ALL);
   s_filter_ctx.sima = show_filter_buttons ? CTX_wm_space_image(C) : nullptr;
 
-  /* Reserve one row height at the bottom for the filter buttons row. */
-  const int filter_but_height = (s_filter_ctx.sima != nullptr) ? UI_UNIT_Y : 0;
+  /* Reserve space at the bottom: button height + spacing gap above buttons. */
+  const int filter_but_height = (s_filter_ctx.sima != nullptr) ? (UI_UNIT_Y + UI_UNIT_Y) : 0;
 
   Block *block = template_common_search_menu(C,
                                              region,

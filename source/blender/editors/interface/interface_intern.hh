@@ -434,6 +434,9 @@ struct ButtonSearch : public Button {
   int preview_rows = 0;
   int preview_cols = 0;
 
+  /** Extra height reserved at the bottom of the popup for additional UI elements (e.g., filter buttons). */
+  int extra_bottom_height = 0;
+
   /**
    * The search box only provides suggestions, it does not force
    * the string to match one of the search items when applying.
@@ -487,6 +490,8 @@ struct uiSearchboxData {
    * Used so we can show leading text to menu items less prominently (not related to 'use_sep').
    */
   const char *sep_string;
+  /** Extra height reserved at the bottom of the popup for additional UI elements (e.g., filter buttons). */
+  int extra_bottom_height;
 
   /* Owned by ButtonSearch */
   void *search_arg;
@@ -1162,28 +1167,6 @@ void searchbox_update(bContext *C, ARegion *region, Button *but, bool reset);
  * The region must still exist in #bScreen::regionbase.
  */
 bool UI_searchbox_update_by_region(bContext *C, ARegion *searchbox_region, Button *search_but);
-bool UI_searchbox_update_by_popup_block(bContext *C, Block *popup_block);
-/**
- * Update searchbox directly through the button region.
- * This is more reliable than searching by popup block.
- */
-bool UI_searchbox_update_by_button(bContext *C, ARegion *button_region, Button *but);
-/**
- * Update searchbox by finding it through the search button pointer.
- * This works even when the button is not active.
- */
-bool UI_searchbox_update_by_search_button(bContext *C, Button *search_but);
-/**
- * Update searchbox by matching the search button's owning region.
- */
-bool UI_searchbox_update_by_menu_region(bContext *C, ARegion *menu_region, Button *search_but);
-/**
- * Update any searchbox found on the screen that has a valid search button.
- * Used as a last-resort fallback when the specific searchbox cannot be identified.
- * \param search_but: The search button to use for the update call.
- * \return true if a searchbox was found and updated.
- */
-bool UI_searchbox_update_any(bContext *C, Button *search_but);
 int searchbox_autocomplete(bContext *C, ARegion *region, Button *but, char *str);
 bool searchbox_event(
     bContext *C, ARegion *region, Button *but, ARegion *butregion, const wmEvent *event);

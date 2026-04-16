@@ -470,6 +470,12 @@ void searchbox_update(bContext *C, ARegion *region, Button *but, const bool rese
 {
   ButtonSearch *search_but = static_cast<ButtonSearch *>(but);
   uiSearchboxData *data = static_cast<uiSearchboxData *>(region->regiondata);
+  const char *query = but->editstr ? but->editstr : but->drawstr.c_str();
+
+  if (but->editstr == nullptr) {
+    printf("DEBUG: searchbox_update: editstr is NULL, using drawstr fallback='%s'\n",
+           but->drawstr.c_str());
+  }
 
   BLI_assert(but->type == ButtonType::SearchMenu);
 
@@ -517,7 +523,7 @@ void searchbox_update(bContext *C, ARegion *region, Button *but, const bool rese
 
   /* callback */
   if (search_but->items_update_fn) {
-    searchbox_update_fn(C, search_but, but->editstr, &data->items);
+    searchbox_update_fn(C, search_but, query, &data->items);
   }
 
   /* handle case where editstr is equal to one of items */
@@ -528,12 +534,12 @@ void searchbox_update(bContext *C, ARegion *region, Button *but, const bool rese
                          (data->items.name_prefix_offsets ? data->items.name_prefix_offsets[a] :
                                                             0);
       const char *name_sep = data->use_shortcut_sep ? strrchr(name, UI_SEP_CHAR) : nullptr;
-      if (STREQLEN(but->editstr, name, name_sep ? (name_sep - name) : data->items.maxstrlen)) {
+      if (STREQLEN(query, name, name_sep ? (name_sep - name) : data->items.maxstrlen)) {
         data->active = a;
         break;
       }
     }
-    if (data->items.totitem == 1 && but->editstr[0]) {
+    if (data->items.totitem == 1 && query[0]) {
       data->active = 0;
     }
   }
@@ -566,34 +572,6 @@ void searchbox_update(bContext *C, ARegion *region, Button *but, const bool rese
   ED_region_tag_redraw(region);
 }
 
-bool UI_searchbox_update_by_popup_block(bContext *C, Block *popup_block)
-{
-  if (!popup_block) {
-    return false;
-  }
-  bScreen *screen = CTX_wm_screen(C);
-  if (!screen) {
-    return false;
-  }
-
-  for (ARegion *ar = static_cast<ARegion *>(screen->regionbase.first); ar; ar = ar->next) {
-    if (ar->regiontype == RGN_TYPE_TEMPORARY) {
-      uiSearchboxData *data = static_cast<uiSearchboxData *>(ar->regiondata);
-      if (data && data->search_but) {
-        Button *sbut = (Button *)data->search_but;
-        if (sbut->block == popup_block) {
-          printf("DEBUG: UI_searchbox_update_by_popup_block: FOUND searchbox for block\n");
-          searchbox_update(C, ar, sbut, true);
-          ED_region_tag_redraw(ar);
-          return true;
-        }
-      }
-    }
-  }
-  printf("DEBUG: UI_searchbox_update_by_popup_block: NOT FOUND\n");
-  return false;
-}
-
 bool UI_searchbox_update_by_region(bContext *C, ARegion *searchbox_region, Button *search_but)
 {
   if (!C || !searchbox_region || !search_but) {
@@ -616,172 +594,6 @@ bool UI_searchbox_update_by_region(bContext *C, ARegion *searchbox_region, Butto
   searchbox_update(C, searchbox_region, search_but, true);
   ED_region_tag_redraw(searchbox_region);
   return true;
-}
-
-bool UI_searchbox_update_by_button(bContext *C, ARegion *button_region, Button *but)
-{
-  if (!but || !button_region) {
-    return false;
-  }
-
-  /* Get the searchbox region through the public API. */
-  ARegion *searchbox = region_searchbox_region_get(button_region);
-  if (!searchbox) {
-    printf("DEBUG: UI_searchbox_update_by_button: searchbox not found via region_searchbox_region_get\n");
-    return false;
-  }
-  
-  printf("DEBUG: UI_searchbox_update_by_button: FOUND searchbox via region_searchbox_region_get\n");
-  searchbox_update(C, searchbox, but, true);
-  ED_region_tag_redraw(searchbox);
-  return true;
-}
-
-bool UI_searchbox_update_by_menu_region(bContext *C, ARegion *menu_region, Button *search_but)
-{
-  if (!menu_region || !search_but) {
-    return false;
-  }
-
-  bScreen *screen = CTX_wm_screen(C);
-  if (!screen) {
-    return false;
-  }
-
-  printf("DEBUG: UI_searchbox_update_by_menu_region: searching for searchbox...\n");
-  printf("DEBUG:   Looking for butregion=%p\n", (void *)menu_region);
-  
-  int temp_region_count = 0;
-  int total_region_count = 0;
-  for (ARegion *ar = static_cast<ARegion *>(screen->regionbase.first); ar; ar = ar->next) {
-    total_region_count++;
-    if (ar->regiontype != RGN_TYPE_TEMPORARY) {
-      continue;
-    }
-    temp_region_count++;
-    uiSearchboxData *data = static_cast<uiSearchboxData *>(ar->regiondata);
-    printf("DEBUG:   Temp region #%d: ar=%p, regiontype=%d, data=%p", temp_region_count, (void *)ar, ar->regiontype, (void *)data);
-    if (data) {
-      printf(", data->butregion=%p, data->search_but=%p\n", (void *)data->butregion, (void *)data->search_but);
-    } else {
-      printf(", NO DATA\n");
-    }
-    
-    if (data && data->butregion == menu_region) {
-      printf("DEBUG: UI_searchbox_update_by_menu_region: FOUND searchbox via butregion, data->search_but=%p, requested=%p\n",
-             (void *)data->search_but,
-             (void *)search_but);
-      Button *update_but = data->search_but ? data->search_but : search_but;
-      if (update_but == nullptr) {
-        printf("DEBUG: UI_searchbox_update_by_menu_region: no button available for update\n");
-        return false;
-      }
-      searchbox_update(C, ar, update_but, true);
-      ED_region_tag_redraw(ar);
-      return true;
-    }
-  }
-
-  printf("DEBUG: UI_searchbox_update_by_menu_region: NOT FOUND (checked %d temp regions out of %d total)\n", temp_region_count, total_region_count);
-
-  return false;
-}
-
-bool UI_searchbox_update_by_search_button(bContext *C, Button *search_but)
-{
-  if (!search_but) {
-    printf("DEBUG: UI_searchbox_update_by_search_button: search_but is NULL\n");
-    return false;
-  }
-  
-  /* Find the searchbox region by iterating through temporary regions. */
-  bScreen *screen = CTX_wm_screen(C);
-  if (!screen) {
-    printf("DEBUG: UI_searchbox_update_by_search_button: screen is NULL\n");
-    return false;
-  }
-  
-  printf("DEBUG: UI_searchbox_update_by_search_button: searching for search_but=%p\n", (void *)search_but);
-  
-  /* Try to find searchbox by checking if it's a search menu type region.
-   * Since the button pointer changes on each menu refresh, we need to find
-   * the searchbox by other means - check if it's the only temporary region
-   * with search data. */
-  int temp_region_count = 0;
-  ARegion *searchbox_region = nullptr;
-  
-  for (ARegion *ar = static_cast<ARegion *>(screen->regionbase.first); ar; ar = ar->next) {
-    if (ar->regiontype == RGN_TYPE_TEMPORARY) {
-      temp_region_count++;
-      uiSearchboxData *data = static_cast<uiSearchboxData *>(ar->regiondata);
-      printf("DEBUG:   Temp region #%d: regiondata=%p\n", temp_region_count, (void *)data);
-      if (data) {
-        printf("DEBUG:     data->search_but=%p (looking for %p)\n", (void *)data->search_but, (void *)search_but);
-        
-        /* Check if this is a searchbox region (has search_but field) */
-        if (data->search_but) {
-          /* If pointers match exactly, use it immediately */
-          if (data->search_but == search_but) {
-            printf("DEBUG: UI_searchbox_update_by_search_button: FOUND searchbox by exact match\n");
-            searchbox_update(C, ar, search_but, true);
-            ED_region_tag_redraw(ar);
-            return true;
-          }
-          
-          /* Store this as a potential searchbox (in case button was recreated) */
-          if (!searchbox_region) {
-            searchbox_region = ar;
-            printf("DEBUG:     Stored as potential searchbox region\n");
-          }
-        }
-      }
-    }
-  }
-  
-  /* Don't try to reuse searchbox if button pointer doesn't match.
-   * This means the menu was recreated and we should wait for the new searchbox. */
-  if (searchbox_region) {
-    printf("DEBUG: UI_searchbox_update_by_search_button: Found searchbox but pointer mismatch - button was recreated, skipping update\n");
-  }
-  
-  printf("DEBUG: UI_searchbox_update_by_search_button: searchbox NOT FOUND (checked %d temp regions)\n", temp_region_count);
-  return false;
-}
-
-bool UI_searchbox_update_any(bContext *C, Button *search_but)
-{
-  if (!search_but) {
-    return false;
-  }
-
-  bScreen *screen = CTX_wm_screen(C);
-  if (!screen) {
-    return false;
-  }
-
-  printf("DEBUG: UI_searchbox_update_any: looking for any searchbox...\n");
-
-  for (ARegion *ar = static_cast<ARegion *>(screen->regionbase.first); ar; ar = ar->next) {
-    if (ar->regiontype != RGN_TYPE_TEMPORARY) {
-      continue;
-    }
-    /* A real searchbox region has no UI blocks of its own (unlike popup menus).
-     * Popup menus have uiblocks with buttons; searchbox regions only have regiondata. */
-    if (ar->runtime && ar->runtime->uiblocks.first != nullptr) {
-      printf("DEBUG: UI_searchbox_update_any: skipping region ar=%p (has uiblocks, likely popup menu)\n", (void *)ar);
-      continue;
-    }
-    uiSearchboxData *data = static_cast<uiSearchboxData *>(ar->regiondata);
-    if (data && data->search_but) {
-      printf("DEBUG: UI_searchbox_update_any: found searchbox at ar=%p, updating...\n", (void *)ar);
-      searchbox_update(C, ar, search_but, true);
-      ED_region_tag_redraw(ar);
-      return true;
-    }
-  }
-
-  printf("DEBUG: UI_searchbox_update_any: no searchbox found\n");
-  return false;
 }
 
 
@@ -1085,7 +897,7 @@ void UI_searchbox_reposition(bContext *C, ARegion *region, Button *but)
     /* widget rect, in region coords */
     data->bbox.xmin = margin + padding;
     data->bbox.xmax = BLI_rcti_size_x(&region->winrct) - (margin + padding);
-    data->bbox.ymin = margin;
+    data->bbox.ymin = margin + data->extra_bottom_height;  /* Reserve space for filter buttons at bottom */
     data->bbox.ymax = BLI_rcti_size_y(&region->winrct) - UI_POPUP_MENU_TOP;
 
     /* check if button is lower half */
@@ -1201,6 +1013,7 @@ static ARegion *searchbox_create_generic_ex(bContext *C,
   data->butregion = butregion;
   data->size_set = false;
   data->search_listener = but->listen_fn;
+  data->extra_bottom_height = but->extra_bottom_height;
 
   /* Register the search button to ensure safe cleanup during shutdown. */
   g_living_search_buttons.add(but);

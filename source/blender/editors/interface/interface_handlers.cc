@@ -549,7 +549,7 @@ static void button_activate_init(bContext *C,
                                  ARegion *region,
                                  Button *but,
                                  ButtonActivateType type);
-static void button_activate_state(bContext *C, Button *but, HandleButtonState state);
+static void button_activate_state(bContext *C, Button *but, HandleButtonState state, bool escapecancel = true);
 static void button_activate_exit(
     bContext *C, Button *but, HandleButtonData *data, const bool mousemove, const bool onfree);
 static int handler_region_menu(bContext *C, const wmEvent *event, void *userdata);
@@ -3690,8 +3690,40 @@ static void textedit_begin(bContext *C, Button *but, HandleButtonData *data)
   if (but->type == ButtonType::SearchMenu) {
     ButtonSearch *search_but = static_cast<ButtonSearch *>(but);
 
-    data->searchbox = search_but->popup_create_fn(C, data->region, search_but);
-    searchbox_update(C, data->searchbox, but, true); /* true = reset */
+    /* Reuse existing searchbox if it's still valid in the screen. */
+    bool reused = false;
+    if (but->searchbox_region) {
+       bScreen *screen = CTX_wm_screen(C);
+       if (screen && BLI_findindex(&screen->regionbase, but->searchbox_region) != -1) {
+           data->searchbox = but->searchbox_region;
+           reused = true;
+           printf("DEBUG: interface_handlers.cc: Reusing existing searchbox=%p\n", (void *)data->searchbox);
+           
+           /* Update data back-pointers in case pointers changed (e.g. after refresh). */
+           uiSearchboxData *sb_data = static_cast<uiSearchboxData *>(data->searchbox->regiondata);
+           sb_data->search_but = search_but;
+           sb_data->butregion = data->region;
+
+           /* Ensure the reused searchbox is correctly positioned relative to the button.
+            * This fixes (0,0) positioning errors that occur after UI refreshes. */
+           UI_searchbox_reposition(C, data->searchbox, but);
+       }
+    }
+
+    if (!reused) {
+      data->searchbox = search_but->popup_create_fn(C, data->region, search_but);
+      /* Store the searchbox region directly on the button so it can be accessed
+       * even after the button loses focus (but->active becomes NULL).
+       * Cleared in searchbox_region_free_fn() when the region is destroyed. */
+      but->searchbox_region = data->searchbox;
+
+      /* Notify external code (e.g. filter callbacks) that a new searchbox was created. */
+      if (search_but->searchbox_created_fn) {
+        search_but->searchbox_created_fn(data->searchbox, search_but->searchbox_created_arg);
+      }
+    }
+
+    searchbox_update(C, data->searchbox, but, !reused);
   }
 
   /* reset alert flag (avoid confusion, will refresh on exit) */
@@ -3728,7 +3760,7 @@ static void textedit_begin(bContext *C, Button *but, HandleButtonData *data)
 #endif
 }
 
-static void textedit_end(bContext *C, Button *but, HandleButtonData *data)
+static void textedit_end(bContext *C, Button *but, HandleButtonData *data, bool escapecancel)
 {
   TextEdit &text_edit = data->text_edit;
   wmWindow *win = data->window;
@@ -3757,7 +3789,6 @@ static void textedit_end(bContext *C, Button *but, HandleButtonData *data)
             (searchbox_find_index(data->searchbox, but->editstr) == -1) &&
             !but_search->results_are_suggestions)
         {
-
           if (but->flag & BUT_VALUE_CLEAR) {
             /* It is valid for _VALUE_CLEAR flavor to have no active element
              * (it's a valid way to unlink). */
@@ -3775,7 +3806,18 @@ static void textedit_end(bContext *C, Button *but, HandleButtonData *data)
         }
       }
 
-      searchbox_free(C, data->searchbox);
+      /* Persistence logic: If the button specifically tracks the searchbox region,
+       * we don't free it here during focus shifts (deactivation).
+       * This allows flicker-free reuse when the button is re-activated (e.g. after filter click).
+       * The region will be finally destroyed in popup_block_free() when the menu is closed. */
+      bool should_free = true;
+      if (but->type == ButtonType::SearchMenu && but->searchbox_region == data->searchbox) {
+        should_free = false;
+      }
+
+      if (should_free) {
+        searchbox_free(C, data->searchbox);
+      }
       data->searchbox = nullptr;
     }
 
@@ -8532,6 +8574,10 @@ static int do_button(bContext *C, Block *block, Button *but, const wmEvent *even
   HandleButtonData *data = but->active;
   int retval = WM_UI_HANDLER_CONTINUE;
 
+  if (data == nullptr) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
   const bool is_disabled = but->flag & BUT_DISABLED || data->disable_force;
 
   /* If `but->pointype` is set, `but->poin` should be too. */
@@ -8925,7 +8971,7 @@ static bool button_modal_state(HandleButtonState state)
               BUTTON_STATE_MENU_OPEN);
 }
 
-static void button_activate_state(bContext *C, Button *but, HandleButtonState state)
+static void button_activate_state(bContext *C, Button *but, HandleButtonState state, bool escapecancel)
 {
   HandleButtonData *data = but->active;
   if (data->state == state) {
@@ -8980,10 +9026,10 @@ static void button_activate_state(bContext *C, Button *but, HandleButtonState st
     textedit_begin(C, but, data);
   }
   else if (data->state == BUTTON_STATE_TEXT_EDITING && state != BUTTON_STATE_TEXT_SELECTING) {
-    textedit_end(C, but, data);
+    textedit_end(C, but, data, escapecancel);
   }
   else if (data->state == BUTTON_STATE_TEXT_SELECTING && state != BUTTON_STATE_TEXT_EDITING) {
-    textedit_end(C, but, data);
+    textedit_end(C, but, data, escapecancel);
   }
 
   /* number editing */
@@ -9241,11 +9287,11 @@ static void button_activate_exit(
 
   /* ensure we are in the exit state */
   if (data->state != BUTTON_STATE_EXIT) {
-    button_activate_state(C, but, BUTTON_STATE_EXIT);
+    button_activate_state(C, but, BUTTON_STATE_EXIT, onfree);
   }
 
   /* apply the button action or value */
-  if (!onfree) {
+  if (!onfree && !data->cancel) {
     apply_but(C, block, but, data, false);
   }
 

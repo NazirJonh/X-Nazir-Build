@@ -1046,6 +1046,19 @@ void popup_block_free(bContext *C, PopupBlockHandle *handle)
     BKE_panel_free(handle->region->runtime->popup_block_panel);
   }
 
+  /* Searchbox persistence can leave regions alive even after the buttons lose focus.
+   * We must ensure they are finally destroyed when the entire popup menu is closed. */
+  for (Block &block : handle->region->runtime->uiblocks) {
+    for (Button &but : block.buttons()) {
+      if (but.type == ButtonType::SearchMenu && but.searchbox_region != nullptr) {
+        searchbox_free(C, but.searchbox_region);
+        /* button_active_free/textedit_end might be called later during region destruction,
+         * so clear the pointer to avoid double-freeing. */
+        but.searchbox_region = nullptr;
+      }
+    }
+  }
+
   popup_block_remove(C, handle);
 
   MEM_delete(handle);

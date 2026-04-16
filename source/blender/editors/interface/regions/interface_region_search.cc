@@ -53,54 +53,6 @@ namespace blender::ui {
 /** \name Search Box Creation
  * \{ */
 
-struct SearchItems {
-  int maxitem, totitem, maxstrlen;
-
-  int offset, offset_i; /* offset for inserting in array */
-  int more;             /* flag indicating there are more items */
-
-  char **names;
-  void **pointers;
-  int *icons;
-  int *but_flags;
-  uint8_t *name_prefix_offsets;
-
-  /** Is there any item with an icon? */
-  bool has_icon;
-
-  AutoComplete *autocpl;
-  void *active;
-};
-
-struct uiSearchboxData {
-  rcti bbox;
-  uiFontStyle fstyle;
-  /** Region zoom level. */
-  float zoom;
-  SearchItems items;
-  bool size_set;
-  ARegion *butregion;
-  ButtonSearch *search_but;
-  /** index in items array */
-  int active;
-  /** when menu opened with enough space for this */
-  bool noback;
-  /** draw thumbnail previews, rather than list */
-  bool preview;
-  /** Use the #UI_SEP_CHAR char for splitting shortcuts (good for operators, bad for data). */
-  bool use_shortcut_sep;
-  int prv_rows, prv_cols;
-  /**
-   * Show the active icon and text after the last instance of this string.
-   * Used so we can show leading text to menu items less prominently (not related to 'use_sep').
-   */
-  const char *sep_string;
-
-  /* Owned by ButtonSearch */
-  void *search_arg;
-  ButtonSearchListenFn search_listener;
-};
-
 #define SEARCH_ITEMS 10
 
 bool search_item_add(SearchItems *items,
@@ -642,18 +594,36 @@ bool UI_searchbox_update_by_popup_block(bContext *C, Block *popup_block)
   return false;
 }
 
+bool UI_searchbox_update_by_region(bContext *C, ARegion *searchbox_region, Button *search_but)
+{
+  if (!C || !searchbox_region || !search_but) {
+    return false;
+  }
+
+  bScreen *screen = CTX_wm_screen(C);
+  if (!screen) {
+    return false;
+  }
+
+  if (BLI_findindex(&screen->regionbase, searchbox_region) == -1) {
+    printf("DEBUG: UI_searchbox_update_by_region: region no longer alive\n");
+    return false;
+  }
+
+  printf("DEBUG: UI_searchbox_update_by_region: updating searchbox=%p for button=%p\n",
+         (void *)searchbox_region,
+         (void *)search_but);
+  searchbox_update(C, searchbox_region, search_but, true);
+  ED_region_tag_redraw(searchbox_region);
+  return true;
+}
+
 bool UI_searchbox_update_by_button(bContext *C, ARegion *button_region, Button *but)
 {
   if (!but || !button_region) {
     return false;
   }
-  
-  /* Check if the button is active before trying to get searchbox. */
-  if (!but->active) {
-    printf("DEBUG: UI_searchbox_update_by_button: button is not active\n");
-    return false;
-  }
-  
+
   /* Get the searchbox region through the public API. */
   ARegion *searchbox = region_searchbox_region_get(button_region);
   if (!searchbox) {
@@ -665,6 +635,56 @@ bool UI_searchbox_update_by_button(bContext *C, ARegion *button_region, Button *
   searchbox_update(C, searchbox, but, true);
   ED_region_tag_redraw(searchbox);
   return true;
+}
+
+bool UI_searchbox_update_by_menu_region(bContext *C, ARegion *menu_region, Button *search_but)
+{
+  if (!menu_region || !search_but) {
+    return false;
+  }
+
+  bScreen *screen = CTX_wm_screen(C);
+  if (!screen) {
+    return false;
+  }
+
+  printf("DEBUG: UI_searchbox_update_by_menu_region: searching for searchbox...\n");
+  printf("DEBUG:   Looking for butregion=%p\n", (void *)menu_region);
+  
+  int temp_region_count = 0;
+  int total_region_count = 0;
+  for (ARegion *ar = static_cast<ARegion *>(screen->regionbase.first); ar; ar = ar->next) {
+    total_region_count++;
+    if (ar->regiontype != RGN_TYPE_TEMPORARY) {
+      continue;
+    }
+    temp_region_count++;
+    uiSearchboxData *data = static_cast<uiSearchboxData *>(ar->regiondata);
+    printf("DEBUG:   Temp region #%d: ar=%p, regiontype=%d, data=%p", temp_region_count, (void *)ar, ar->regiontype, (void *)data);
+    if (data) {
+      printf(", data->butregion=%p, data->search_but=%p\n", (void *)data->butregion, (void *)data->search_but);
+    } else {
+      printf(", NO DATA\n");
+    }
+    
+    if (data && data->butregion == menu_region) {
+      printf("DEBUG: UI_searchbox_update_by_menu_region: FOUND searchbox via butregion, data->search_but=%p, requested=%p\n",
+             (void *)data->search_but,
+             (void *)search_but);
+      Button *update_but = data->search_but ? data->search_but : search_but;
+      if (update_but == nullptr) {
+        printf("DEBUG: UI_searchbox_update_by_menu_region: no button available for update\n");
+        return false;
+      }
+      searchbox_update(C, ar, update_but, true);
+      ED_region_tag_redraw(ar);
+      return true;
+    }
+  }
+
+  printf("DEBUG: UI_searchbox_update_by_menu_region: NOT FOUND (checked %d temp regions out of %d total)\n", temp_region_count, total_region_count);
+
+  return false;
 }
 
 bool UI_searchbox_update_by_search_button(bContext *C, Button *search_but)
@@ -728,6 +748,41 @@ bool UI_searchbox_update_by_search_button(bContext *C, Button *search_but)
   return false;
 }
 
+bool UI_searchbox_update_any(bContext *C, Button *search_but)
+{
+  if (!search_but) {
+    return false;
+  }
+
+  bScreen *screen = CTX_wm_screen(C);
+  if (!screen) {
+    return false;
+  }
+
+  printf("DEBUG: UI_searchbox_update_any: looking for any searchbox...\n");
+
+  for (ARegion *ar = static_cast<ARegion *>(screen->regionbase.first); ar; ar = ar->next) {
+    if (ar->regiontype != RGN_TYPE_TEMPORARY) {
+      continue;
+    }
+    /* A real searchbox region has no UI blocks of its own (unlike popup menus).
+     * Popup menus have uiblocks with buttons; searchbox regions only have regiondata. */
+    if (ar->runtime && ar->runtime->uiblocks.first != nullptr) {
+      printf("DEBUG: UI_searchbox_update_any: skipping region ar=%p (has uiblocks, likely popup menu)\n", (void *)ar);
+      continue;
+    }
+    uiSearchboxData *data = static_cast<uiSearchboxData *>(ar->regiondata);
+    if (data && data->search_but) {
+      printf("DEBUG: UI_searchbox_update_any: found searchbox at ar=%p, updating...\n", (void *)ar);
+      searchbox_update(C, ar, search_but, true);
+      ED_region_tag_redraw(ar);
+      return true;
+    }
+  }
+
+  printf("DEBUG: UI_searchbox_update_any: no searchbox found\n");
+  return false;
+}
 
 
 int searchbox_autocomplete(bContext *C, ARegion *region, Button *but, char *str)
@@ -955,9 +1010,25 @@ static void searchbox_region_draw_fn(const bContext *C, ARegion *region)
   }
 }
 
+/* Use a registry to safely track living search buttons across different regions.
+ * This prevents crashes during shutdown or workspace switches where region destruction
+ * order is non-deterministic. */
+static blender::Set<ButtonSearch *> g_living_search_buttons;
+
+ButtonSearch::~ButtonSearch()
+{
+  g_living_search_buttons.remove(this);
+}
+
 static void searchbox_region_free_fn(ARegion *region)
 {
   uiSearchboxData *data = static_cast<uiSearchboxData *>(region->regiondata);
+
+  /* Clear the back-reference on the search button only if it hasn't been freed yet.
+   * This check is vital for stability during shutdown. */
+  if (data->search_but && g_living_search_buttons.contains(data->search_but)) {
+    data->search_but->searchbox_region = nullptr;
+  }
 
   /* free search data */
   for (int a = 0; a < data->items.maxitem; a++) {
@@ -989,20 +1060,21 @@ static void searchbox_region_layout_fn(const bContext *C, ARegion *region)
   uiSearchboxData *data = static_cast<uiSearchboxData *>(region->regiondata);
 
   if (data->size_set) {
-    /* Already set. */
     return;
   }
 
-  ButtonSearch *but = data->search_but;
+  UI_searchbox_reposition((bContext *)C, region, data->search_but);
+}
+
+void UI_searchbox_reposition(bContext *C, ARegion *region, Button *but)
+{
+  uiSearchboxData *data = static_cast<uiSearchboxData *>(region->regiondata);
   ARegion *butregion = data->butregion;
-  const int margin = UI_POPUP_MARGIN;
   wmWindow *win = CTX_wm_window(C);
+  const int margin = UI_POPUP_MARGIN;
 
-  /* compute position */
   if (but->block->flag & BLOCK_SEARCH_MENU) {
-    /* this case is search menu inside other menu */
     /* we copy region size */
-
     region->winrct = butregion->winrct;
 
     /* Align menu items with the search button. */
@@ -1054,8 +1126,6 @@ static void searchbox_region_layout_fn(const bContext *C, ARegion *region)
     BLI_rcti_translate(&rect_i, butregion->winrct.xmin, butregion->winrct.ymin);
 
     int winx = WM_window_native_pixel_x(win);
-    // winy = WM_window_pixels_y(win);  /* UNUSED */
-    // wm_window_get_size(win, &winx, &winy);
 
     if (rect_i.xmax > winx) {
       /* super size */
@@ -1106,11 +1176,14 @@ static ARegion *searchbox_create_generic_ex(bContext *C,
                                             ButtonSearch *but,
                                             const bool use_shortcut_sep)
 {
+  printf("DEBUG: searchbox_create_generic_ex: CALLED, butregion=%p, but=%p\n", (void *)butregion, (void *)but);
+  
   const uiStyle *style = style_get();
   const float aspect = but->block->aspect;
 
   /* create area region */
   ARegion *region = region_temp_add(CTX_wm_screen(C));
+  printf("DEBUG: searchbox_create_generic_ex: created region=%p\n", (void *)region);
 
   static ARegionType type;
   memset(&type, 0, sizeof(ARegionType));
@@ -1128,6 +1201,9 @@ static ARegion *searchbox_create_generic_ex(bContext *C,
   data->butregion = butregion;
   data->size_set = false;
   data->search_listener = but->listen_fn;
+
+  /* Register the search button to ensure safe cleanup during shutdown. */
+  g_living_search_buttons.add(but);
   data->zoom = 1.0f / aspect;
 
   /* Set font, get the bounding-box. */
@@ -1137,11 +1213,7 @@ static ARegion *searchbox_create_generic_ex(bContext *C,
 
   region->regiondata = data;
 
-  /* Special case, hard-coded feature, not draw backdrop when called from menus,
-   * assume for design that popup already added it. */
-  if (but->block->flag & BLOCK_SEARCH_MENU) {
-    data->noback = true;
-  }
+  UI_searchbox_reposition(C, region, but);
 
   if (but->preview_rows > 0 && but->preview_cols > 0) {
     data->preview = true;

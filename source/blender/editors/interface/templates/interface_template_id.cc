@@ -74,7 +74,21 @@ struct SearchFilterContext {
   SpaceImage *sima;
   ARegion *menu_region;
   Button *search_but;  /* Pointer to the search button. */
+  /** Last known searchbox region. Validated against screen->regionbase before use.
+   *  Updated via UI_searchbox_region_register() called from textedit_begin(). */
+  ARegion *searchbox_region = nullptr;
 };
+
+/**
+ * Callback invoked from textedit_begin() when a new searchbox region is created.
+ * Stores the region pointer in the SearchFilterContext so filter buttons can update it.
+ */
+static void id_search_on_searchbox_created(ARegion *searchbox_region, void *arg)
+{
+  SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg);
+  printf("DEBUG: id_search_on_searchbox_created: searchbox_region=%p\n", (void *)searchbox_region);
+  ctx->searchbox_region = searchbox_region;
+}
 
 
 
@@ -350,19 +364,12 @@ static void id_search_filter_mode_button_cb(bContext *C, void *arg_ctx, void *ar
   SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg_ctx);
   const int new_mode = POINTER_AS_INT(arg_mode);
 
-  printf("DEBUG: id_search_filter_mode_button_cb: called with mode=%d\n", new_mode);
-  printf("DEBUG:   ctx=%p, ctx->search_but=%p\n", (void *)ctx, (void *)ctx->search_but);
-
-  /* Update SpaceImage via RNA for proper notifiers (affects UI highlights). */
-  PointerRNA sima_ptr = RNA_pointer_create_discrete(
-      &CTX_wm_screen(C)->id, RNA_SpaceImageEditor, ctx->sima);
-  RNA_enum_set(&sima_ptr, "image_filter_mode", new_mode);
-
-  /* Update the filter value in the template state so the search callback picks it up. */
+  if (ctx->sima) {
+    ctx->sima->image_filter_mode = new_mode;
+  }
   ctx->template_ui.filter = short(new_mode);
-  printf("DEBUG:   Updated filter to %d\n", (int)ctx->template_ui.filter);
 
-  /* Update visual feedback (red highlight) for the filter buttons in the same block. */
+  /* Update visual feedback (red highlight) for the filter buttons. */
   if (ctx->search_but && ctx->search_but->block) {
     for (Button &b : ctx->search_but->block->buttons()) {
       if (b.type == ButtonType::But && b.func == id_search_filter_mode_button_cb) {
@@ -376,20 +383,12 @@ static void id_search_filter_mode_button_cb(bContext *C, void *arg_ctx, void *ar
     }
   }
 
-  /* Refocus the search button to trigger searchbox update.
-   * This will activate the button and create/update the searchbox with the new filter value.
-   * The searchbox will be updated automatically when the button becomes active. */
-  if (ctx->search_but) {
-    printf("DEBUG:   Refocusing search button to trigger update\n");
-    button_focus_on_enter_event(CTX_wm_window(C), ctx->search_but);
+  if (ctx->search_but && ctx->searchbox_region) {
+    UI_searchbox_update_by_region(C, ctx->searchbox_region, ctx->search_but);
   }
-
-  /* Trigger general update. */
-  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
-  printf("DEBUG: id_search_filter_mode_button_cb: complete\n");
 }
 
-static void template_ID_filter_buttons_add(Block *block, bContext *C, SearchFilterContext *ctx)
+static void template_ID_filter_buttons_add(Block *block, bContext * /*C*/, SearchFilterContext *ctx)
 {
   SpaceImage *sima = ctx->sima;
   const int current_mode = sima->image_filter_mode;
@@ -401,6 +400,7 @@ static void template_ID_filter_buttons_add(Block *block, bContext *C, SearchFilt
   int xpos = 0;
 
   auto def_filter_but = [&](int mode, int icon, const char *text, const char *tip) {
+    /* Use standard But type for filter buttons. */
     Button *but = uiDefIconTextBut(block,
                                    ButtonType::But,
                                    icon,
@@ -490,11 +490,15 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
   s_filter_ctx.search_but = nullptr;
   for (Button &b : block->buttons()) {
     if (b.type == ButtonType::SearchMenu) {
+      ButtonSearch *search_but = static_cast<ButtonSearch *>(&b);
       s_filter_ctx.search_but = &b;
+
+      /* Register callback to track searchbox creation. */
+      search_but->searchbox_created_fn = id_search_on_searchbox_created;
+      search_but->searchbox_created_arg = &s_filter_ctx;
       break;
     }
   }
-  printf("DEBUG: id_search_menu: search_but=%p\n", (void *)s_filter_ctx.search_but);
 
   /* Add filter mode buttons for image browser when using advanced filtering. */
   if (s_filter_ctx.sima != nullptr) {

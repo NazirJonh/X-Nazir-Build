@@ -479,11 +479,26 @@ struct HandleButtonData {
 
   /* Search box see: #UI_screen_free_active_but_highlight. */
   ARegion *searchbox = nullptr;
-  /* True when click was on a popup button (not in searchbox region itself).
-   * Used to pass through RELEASE event to the button instead of closing searchbox. */
+  /**
+   * Флаг, указывающий, что клик был произведен по кнопке фильтра в нижней части выпадающего списка
+   * (а не по самой области результатов поиска). Это позволяет отличить клики по элементам
+   * интерфейса внутри поиска от кликов по результатам поиска.
+   */
   bool searchbox_click_on_popup_button = false;
-  /* Timestamp when searchbox was activated. Used to ignore immediate RELEASE events. */
-  double searchbox_activate_time = 0.0;
+  /**
+   * Флаг для пропуска следующего события RELEASE (отпускания кнопки мыши).
+   * 
+   * Используется в сценарии реактивации строки поиска из обратного вызова (callback) кнопки фильтра.
+   * Когда пользователь нажимает кнопку фильтра:
+   * 1. Происходит PRESS на кнопке фильтра.
+   * 2. Выполняется callback кнопки, который применяет фильтр и реактивирует строку поиска.
+   * 3. После этого в очередь событий поступает RELEASE от того же клика.
+   * 
+   * Без этого флага RELEASE был бы обработан строкой поиска как клик снаружи (или в области),
+   * что привело бы к немедленному закрытию только что открытого поиска.
+   * Установка этого флага позволяет "поглотить" этот лишний RELEASE.
+   */
+  bool searchbox_skip_next_release = false;
 #ifdef USE_KEYNAV_LIMIT
   KeyNavLock searchbox_keynav_state;
 #endif
@@ -3701,7 +3716,6 @@ static void textedit_begin(bContext *C, Button *but, HandleButtonData *data)
        bScreen *screen = CTX_wm_screen(C);
        if (screen && BLI_findindex(&screen->regionbase, but->searchbox_region) != -1) {
            data->searchbox = but->searchbox_region;
-           data->searchbox_activate_time = BLI_time_now_seconds();
            reused = true;
            printf("DEBUG: interface_handlers.cc: Reusing existing searchbox=%p\n", (void *)data->searchbox);
            
@@ -3718,7 +3732,6 @@ static void textedit_begin(bContext *C, Button *but, HandleButtonData *data)
 
     if (!reused) {
       data->searchbox = search_but->popup_create_fn(C, data->region, search_but);
-      data->searchbox_activate_time = BLI_time_now_seconds();
       /* Store the searchbox region directly on the button so it can be accessed
        * even after the button loses focus (but->active becomes NULL).
        * Cleared in searchbox_region_free_fn() when the region is destroyed. */
@@ -4024,9 +4037,19 @@ static int do_but_textedit(
       if (data->searchbox) {
         inbox = searchbox_inside(data->searchbox, event->xy);
         
-        /* For BLOCK_KEEP_OPEN popups (e.g. image browser with filter buttons),
-         * also consider clicks on popup buttons as "inside" to prevent premature closure.
-         * This allows filter buttons to work while keeping the popup open. */
+        /* Для выпадающих окон с флагом BLOCK_KEEP_OPEN (например, браузер изображений с кнопками фильтров),
+         * мы также считаем клики по кнопкам внутри окна как "внутренние" (inbox), чтобы предотвратить 
+         * преждевременное закрытие. Это позволяет кнопкам фильтров работать, сохраняя окно открытым.
+         * 
+         * Обоснование: Окна с BLOCK_KEEP_OPEN предназначены для того, чтобы оставаться открытыми при 
+         * нажатии кнопок внутри них (например, выбор цвета, браузер изображений с фильтрами). 
+         * Однако у строки поиска есть собственное обнаружение "клика снаружи", которое обычно 
+         * закрывает ее при нажатии на кнопки фильтров. Обрабатывая клики по кнопкам окна как 
+         * "внутренние", мы предотвращаем преждевременное закрытие поиска.
+         * 
+         * Реализация: Мы используем button_find_mouse_over_ex(), чтобы проверить, есть ли кнопка 
+         * под курсором в области блока всплывающего окна. Если кнопка найдена, мы считаем клик 
+         * "внутренним" и устанавливаем флаг для специальной обработки в обработчике PRESS. */
         bool inbox_is_popup_button = false;
         if (!inbox && (block->flag & BLOCK_KEEP_OPEN)) {
           Button *but_under_cursor = button_find_mouse_over_ex(
@@ -4038,7 +4061,7 @@ static int do_but_textedit(
                  data->region->winrct.xmax, data->region->winrct.ymax,
                  block->rect.xmin, block->rect.ymin, block->rect.xmax, block->rect.ymax);
           if (but_under_cursor && but_under_cursor != but) {
-            /* Click is on another button in the popup - treat as "inside" */
+            /* Клик по другой кнопке во всплывающем окне - считаем как "внутри" */
             inbox = true;
             inbox_is_popup_button = true;
             printf("DEBUG LMB PRESS: -> inbox set to TRUE (filter button hit)\n");
@@ -4053,7 +4076,7 @@ static int do_but_textedit(
                  (block->flag & BLOCK_KEEP_OPEN) ? 1 : 0);
         }
         
-        /* Store the flag in data for use in RELEASE handling */
+        /* Store the flag in data for use in PRESS handling below */
         data->searchbox_click_on_popup_button = inbox_is_popup_button;
       }
 
@@ -4068,18 +4091,25 @@ static int do_but_textedit(
         }
       }
 
-      /* for double click: we do a press again for when you first click on button
-       * (selects all text, no cursor pos) */
+      /* для двойного клика: мы снова делаем нажатие, когда вы впервые нажимаете на кнопку
+       * (выделяет весь текст, без позиции курсора) */
       if (ELEM(event->val, KM_PRESS, KM_DBL_CLICK)) {
-        /* If click is on a popup button (e.g. filter button), activate it directly
-         * while keeping searchbox active. This allows filter buttons to work without
-         * closing the searchbox. */
+        /* Специальная обработка для всплывающих окон BLOCK_KEEP_OPEN с кнопками фильтров.
+         * Когда пользователь нажимает на кнопку фильтра (не в области строки поиска), нам нужно:
+         * 1. Активировать кнопку фильтра напрямую (в обход обычного потока событий).
+         * 2. Оставить строку поиска открытой (не деактивировать ее).
+         * 3. Позволить callback-функции кнопки фильтра обновить содержимое поиска.
+         * 
+         * Это необходимо, потому что кнопка поиска в данный момент активна и обычно 
+         * поглощает все события. Обнаруживая клики по кнопкам всплывающего окна и активируя 
+         * их напрямую, мы позволяем кнопкам фильтров работать без закрытия поиска. */
         if (data->searchbox_click_on_popup_button && (block->flag & BLOCK_KEEP_OPEN)) {
           Button *but_under_cursor = button_find_mouse_over_ex(
               data->region, event->xy, false, false, nullptr, nullptr);
           if (but_under_cursor && but_under_cursor != but) {
             printf("DEBUG LMB PRESS: click_on_popup_button=TRUE -> activating button directly\n");
-            /* Activate the button under cursor directly */
+            /* Активируем кнопку под курсором напрямую с типом APPLY.
+             * Это немедленно выполнит callback кнопки. */
             handle_button_activate(C, data->region, but_under_cursor, BUTTON_ACTIVATE_APPLY);
             retval = WM_UI_HANDLER_BREAK;
             break;
@@ -4102,8 +4132,10 @@ static int do_but_textedit(
             data->cancel = data->escapecancel = true;
             
             /* For BLOCK_KEEP_OPEN popups, also close the popup itself when clicking outside.
-             * Normally button_activate_exit won't set menuretval for BLOCK_KEEP_OPEN,
-             * so we set it directly here. */
+             * Normally button_activate_exit() won't set menuretval for BLOCK_KEEP_OPEN blocks,
+             * because they're designed to stay open when clicking buttons inside them.
+             * However, when clicking completely outside the popup, we want to close everything.
+             * So we set menuretval directly here to force popup closure. */
             if ((block->flag & BLOCK_KEEP_OPEN) && block->handle) {
               block->handle->menuretval = RETURN_CANCEL;
               printf("DEBUG LMB PRESS: -> set menuretval=RETURN_CANCEL directly\n");
@@ -4145,12 +4177,15 @@ static int do_but_textedit(
         /* if we allow activation on key press,
          * it gives problems launching operators #35713. */
         if (event->val == KM_RELEASE) {
-          /* Ignore RELEASE if searchbox was just activated (within 0.1 seconds).
-           * This prevents immediate closure when reactivated from filter button callback. */
-          const double time_since_activate = BLI_time_now_seconds() - data->searchbox_activate_time;
-          if (time_since_activate < 0.1) {
-            printf("DEBUG LMB RELEASE: inbox=TRUE but just activated (%.3fs ago) -> ignoring\n",
-                   time_since_activate);
+          /* Если установлен флаг searchbox_skip_next_release, мы игнорируем это событие RELEASE.
+           * Это происходит, когда поиск был только что реактивирован программно (например, при
+           * переключении фильтров в Image Editor). 
+           * Мы "проглатываем" RELEASE от клика по кнопке фильтра, чтобы он не закрыл поиск. */
+          if (data->searchbox_skip_next_release) {
+            printf("DEBUG LMB RELEASE: inbox=TRUE but skip_next_release=TRUE -> ignoring\n");
+            /* Сбрасываем флаг сразу после использования, чтобы последующие обычные клики
+             * обрабатывались как положено. */
+            data->searchbox_skip_next_release = false;
             retval = WM_UI_HANDLER_BREAK;
           }
           else {
@@ -9848,6 +9883,13 @@ void button_activate_event(bContext *C, ARegion *region, Button *but)
   event.customdata_free = false;
 
   do_button(C, but->block, but, &event);
+}
+
+void button_searchbox_skip_next_release_set(Button *but, bool value)
+{
+  if (but->active) {
+    but->active->searchbox_skip_next_release = value;
+  }
 }
 
 void button_activate_over(bContext *C, ARegion *region, Button *but)

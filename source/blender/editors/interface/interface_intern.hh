@@ -1354,6 +1354,11 @@ void pan_to_scroll(const wmEvent *event, int *type, int *val);
  */
 void button_activate_event(bContext *C, ARegion *region, Button *but);
 /**
+ * Set a flag to skip the next RELEASE event for the searchbox.
+ * Used when reactivating a searchbox from a callback to prevent immediate closure.
+ */
+void button_searchbox_skip_next_release_set(Button *but, bool value);
+/**
  * Simulate moving the mouse over a button (or navigating to it with arrow keys).
  *
  * exported so menus can start with a highlighted button,

@@ -45,6 +45,7 @@
 
 #include "WM_api.hh"
 
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_string_search.hh"
 #include "interface_intern.hh"
@@ -393,24 +394,27 @@ static void template_ID_filter_buttons_add(Block *block, bContext * /*C*/, Searc
   SpaceImage *sima = ctx->sima;
   const int current_mode = sima->image_filter_mode;
 
-  /* Calculate button widths to span the full popup width. */
   const int but_height = UI_UNIT_Y;
-  const int ypos = UI_UNIT_Y / 2; /* At the bottom of the reserved space. */
-  const int but_width = UI_UNIT_X * 2;
+  const int ypos = UI_UNIT_Y / 2;
+  const uiStyle *style = style_get_dpi();
   int xpos = 0;
 
-  auto def_filter_but = [&](int mode, int icon, const char *text, const char *tip) {
-    /* Use standard But type for filter buttons. */
-    Button *but = uiDefIconTextBut(block,
-                                   ButtonType::But,
-                                   icon,
-                                   text,
-                                   xpos,
-                                   ypos,
-                                   but_width,
-                                   but_height,
-                                   nullptr,
-                                   tip);
+  auto def_filter_but = [&](int mode, const char *text, const char *tip) {
+    const int text_width = fontstyle_string_width(&style->widget, text);
+    /* Use slightly more padding than the absolute minimum, otherwise the UI will ellipsize the
+     * label even when the width is computed from the font metrics. */
+    const int but_width = text_width + int(UI_UNIT_X);
+    Button *but = uiDefBut(block,
+                           ButtonType::But,
+                           text,
+                           xpos,
+                           ypos,
+                           but_width,
+                           but_height,
+                           nullptr,
+                           0,
+                           0,
+                           tip);
     button_func_set(but, id_search_filter_mode_button_cb, ctx, POINTER_FROM_INT(mode));
     if (current_mode == mode) {
       button_flag_enable(but, BUT_ACTIVE_DEFAULT);
@@ -418,14 +422,12 @@ static void template_ID_filter_buttons_add(Block *block, bContext * /*C*/, Searc
     xpos += but_width + UI_UNIT_X / 2;
   };
 
-  def_filter_but(TEMPLATE_ID_FILTER_ALL, ICON_IMAGE, "All", "Show all images");
+  def_filter_but(TEMPLATE_ID_FILTER_ALL, "All Images", "Show all images");
   def_filter_but(TEMPLATE_ID_FILTER_CURRENT_MATERIAL,
-                 ICON_MATERIAL,
                  "Material",
                  "Show images used by current material");
-  def_filter_but(TEMPLATE_ID_FILTER_SLOT_TYPE, ICON_NODE_TEXTURE, "Slot", "Show images by slot type");
+  def_filter_but(TEMPLATE_ID_FILTER_SLOT_TYPE, "Slot", "Show images by slot type");
   def_filter_but(TEMPLATE_ID_FILTER_CURRENT_MATERIAL | TEMPLATE_ID_FILTER_SLOT_TYPE,
-                 ICON_MATERIAL_DATA,
                  "Both",
                  "Show images by current material and slot type");
 }
@@ -470,6 +472,22 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
   /* Reserve space at the bottom: button height + spacing gap above buttons. */
   const int filter_but_height = (s_filter_ctx.sima != nullptr) ? (UI_UNIT_Y + UI_UNIT_Y) : 0;
 
+  int filter_buttons_width = 0;
+  if (s_filter_ctx.sima != nullptr) {
+    const uiStyle *style = style_get_dpi();
+    auto calc_button_width = [&](const char *text) {
+      return fontstyle_string_width(&style->widget, text) + int(UI_UNIT_X);
+    };
+    const int gap = UI_UNIT_X / 2;
+    filter_buttons_width = calc_button_width("All Images");
+    filter_buttons_width += gap + calc_button_width("Material");
+    filter_buttons_width += gap + calc_button_width("Slot");
+    filter_buttons_width += gap + calc_button_width("Both");
+
+    /* Compensate for popup bounds/padding so the row fits without clipping. */
+    filter_buttons_width += 2 * UI_SEARCHBOX_BOUNDS;
+  }
+
   Block *block = template_common_search_menu(C,
                                              region,
                                              id_search_update_fn,
@@ -480,7 +498,8 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
                                              s_filter_ctx.template_ui.prv_rows,
                                              s_filter_ctx.template_ui.prv_cols,
                                              s_filter_ctx.template_ui.scale,
-                                             filter_but_height);
+                                             filter_but_height,
+                                             filter_buttons_width);
 
   if (show_filter_buttons) {
     block_flag_enable(block, BLOCK_KEEP_OPEN);

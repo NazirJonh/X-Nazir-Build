@@ -162,7 +162,8 @@ Block *template_common_search_menu(const bContext *C,
                                    const int preview_rows,
                                    const int preview_cols,
                                    float scale,
-                                   int extra_bottom_height)
+                                   int extra_bottom_height,
+                                   int min_width)
 {
   static char search[256];
   wmWindow *win = CTX_wm_window(C);
@@ -177,7 +178,10 @@ Block *template_common_search_menu(const bContext *C,
 
   /* preview thumbnails */
   if (preview_rows > 0 && preview_cols > 0) {
-    const int w = 4 * U.widget_unit * preview_cols * scale;
+    int w = 4 * U.widget_unit * preview_cols * scale;
+    if (min_width > w) {
+      w = min_width;
+    }
     const int h = 5 * U.widget_unit * preview_rows * scale + 2 * UI_SEARCHBOX_TRIA_H -
                   UI_SEARCHBOX_BOUNDS;
 
@@ -188,7 +192,10 @@ Block *template_common_search_menu(const bContext *C,
   }
   /* list view */
   else {
-    const int searchbox_width = searchbox_size_x_guess(C, search_update_fn, search_arg);
+    int searchbox_width = searchbox_size_x_guess(C, search_update_fn, search_arg);
+    if (min_width > searchbox_width) {
+      searchbox_width = min_width;
+    }
     const int searchbox_height = searchbox_size_y();
     const int search_but_height = UI_UNIT_Y - 1.0f * UI_SCALE_FAC;
 

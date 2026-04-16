@@ -79,7 +79,8 @@ Block *template_common_search_menu(const bContext *C,
                                    const int preview_rows,
                                    const int preview_cols,
                                    float scale,
-                                   int extra_bottom_height = 0);
+                                   int extra_bottom_height = 0,
+                                   int min_width = 0);
 
 }  // namespace ui
 }  // namespace blender

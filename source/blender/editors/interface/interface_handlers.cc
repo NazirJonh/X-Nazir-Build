@@ -482,6 +482,8 @@ struct HandleButtonData {
   /* True when click was on a popup button (not in searchbox region itself).
    * Used to pass through RELEASE event to the button instead of closing searchbox. */
   bool searchbox_click_on_popup_button = false;
+  /* Timestamp when searchbox was activated. Used to ignore immediate RELEASE events. */
+  double searchbox_activate_time = 0.0;
 #ifdef USE_KEYNAV_LIMIT
   KeyNavLock searchbox_keynav_state;
 #endif
@@ -3699,6 +3701,7 @@ static void textedit_begin(bContext *C, Button *but, HandleButtonData *data)
        bScreen *screen = CTX_wm_screen(C);
        if (screen && BLI_findindex(&screen->regionbase, but->searchbox_region) != -1) {
            data->searchbox = but->searchbox_region;
+           data->searchbox_activate_time = BLI_time_now_seconds();
            reused = true;
            printf("DEBUG: interface_handlers.cc: Reusing existing searchbox=%p\n", (void *)data->searchbox);
            
@@ -3715,6 +3718,7 @@ static void textedit_begin(bContext *C, Button *but, HandleButtonData *data)
 
     if (!reused) {
       data->searchbox = search_but->popup_create_fn(C, data->region, search_but);
+      data->searchbox_activate_time = BLI_time_now_seconds();
       /* Store the searchbox region directly on the button so it can be accessed
        * even after the button loses focus (but->active becomes NULL).
        * Cleared in searchbox_region_free_fn() when the region is destroyed. */
@@ -4027,8 +4031,12 @@ static int do_but_textedit(
         if (!inbox && (block->flag & BLOCK_KEEP_OPEN)) {
           Button *but_under_cursor = button_find_mouse_over_ex(
               data->region, event->xy, false, false, nullptr, nullptr);
-          printf("DEBUG LMB PRESS: xy=[%d,%d] inbox_orig=%d KEEP_OPEN=1 but_under=%p but_self=%p\n",
-                 event->xy[0], event->xy[1], inbox, (void *)but_under_cursor, (void *)but);
+          printf("DEBUG LMB PRESS: xy=[%d,%d] inbox_orig=%d KEEP_OPEN=1 but_under=%p but_self=%p region=%p\n",
+                 event->xy[0], event->xy[1], inbox, (void *)but_under_cursor, (void *)but, (void *)data->region);
+          printf("DEBUG LMB PRESS: region->winrct=[%d,%d,%d,%d] block->rect=[%.1f,%.1f,%.1f,%.1f]\n",
+                 data->region->winrct.xmin, data->region->winrct.ymin,
+                 data->region->winrct.xmax, data->region->winrct.ymax,
+                 block->rect.xmin, block->rect.ymin, block->rect.xmax, block->rect.ymax);
           if (but_under_cursor && but_under_cursor != but) {
             /* Click is on another button in the popup - treat as "inside" */
             inbox = true;
@@ -4137,9 +4145,19 @@ static int do_but_textedit(
         /* if we allow activation on key press,
          * it gives problems launching operators #35713. */
         if (event->val == KM_RELEASE) {
-          printf("DEBUG LMB RELEASE: inbox=TRUE val=RELEASE -> EXIT searchbox\n");
-          button_activate_state(C, but, BUTTON_STATE_EXIT);
-          retval = WM_UI_HANDLER_BREAK;
+          /* Ignore RELEASE if searchbox was just activated (within 0.1 seconds).
+           * This prevents immediate closure when reactivated from filter button callback. */
+          const double time_since_activate = BLI_time_now_seconds() - data->searchbox_activate_time;
+          if (time_since_activate < 0.1) {
+            printf("DEBUG LMB RELEASE: inbox=TRUE but just activated (%.3fs ago) -> ignoring\n",
+                   time_since_activate);
+            retval = WM_UI_HANDLER_BREAK;
+          }
+          else {
+            printf("DEBUG LMB RELEASE: inbox=TRUE val=RELEASE -> EXIT searchbox\n");
+            button_activate_state(C, but, BUTTON_STATE_EXIT);
+            retval = WM_UI_HANDLER_BREAK;
+          }
         }
       }
       break;

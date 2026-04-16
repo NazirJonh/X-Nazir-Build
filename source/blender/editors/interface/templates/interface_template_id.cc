@@ -398,15 +398,16 @@ static void id_search_filter_mode_button_cb(bContext *C, void *arg_ctx, void *ar
   if (ctx->search_but && ctx->searchbox_region) {
     UI_searchbox_update_by_region(C, ctx->searchbox_region, ctx->search_but);
     
-    /* If mouse is over the searchbox region, reactivate the search button
-     * to allow immediate interaction with the search results. */
-    wmWindow *win = CTX_wm_window(C);
-    if (win && win->runtime && win->runtime->eventstate && ctx->search_but->active == nullptr) {
-      const int *mval = win->runtime->eventstate->xy;
-      if (BLI_rcti_isect_pt(&ctx->searchbox_region->winrct, mval[0], mval[1])) {
-        /* Mouse is over searchbox - reactivate search button for text editing */
-        printf("DEBUG id_search_filter_mode_button_cb: Mouse over searchbox -> reactivating search button\n");
-        button_activate_event(C, ctx->menu_region, ctx->search_but);
+    /* Reactivate searchbox if mouse is over it and it's not currently active.
+     * This allows immediate interaction with search results after filter change. */
+    if (ctx->search_but->active == nullptr) {
+      wmWindow *win = CTX_wm_window(C);
+      if (win && win->runtime && win->runtime->eventstate) {
+        const int *mval = win->runtime->eventstate->xy;
+        if (BLI_rcti_isect_pt(&ctx->searchbox_region->winrct, mval[0], mval[1])) {
+          printf("DEBUG id_search_filter_mode_button_cb: Mouse over searchbox -> reactivating\n");
+          button_activate_event(C, ctx->menu_region, ctx->search_but);
+        }
       }
     }
   }

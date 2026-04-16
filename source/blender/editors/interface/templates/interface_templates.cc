@@ -161,7 +161,8 @@ Block *template_common_search_menu(const bContext *C,
                                    ButtonSearchTooltipFn item_tooltip_fn,
                                    const int preview_rows,
                                    const int preview_cols,
-                                   float scale)
+                                   float scale,
+                                   int extra_bottom_height)
 {
   static char search[256];
   wmWindow *win = CTX_wm_window(C);
@@ -181,8 +182,8 @@ Block *template_common_search_menu(const bContext *C,
                   UI_SEARCHBOX_BOUNDS;
 
     /* fake button, it holds space for search items */
-    uiDefBut(block, ButtonType::Label, "", 0, UI_UNIT_Y, w, h, nullptr, 0, 0, std::nullopt);
-    but = uiDefSearchBut(block, search, ICON_VIEWZOOM, sizeof(search), 0, 0, w, UI_UNIT_Y, "");
+    uiDefBut(block, ButtonType::Label, "", 0, UI_UNIT_Y + extra_bottom_height, w, h, nullptr, 0, 0, std::nullopt);
+    but = uiDefSearchBut(block, search, ICON_VIEWZOOM, sizeof(search), 0, extra_bottom_height, w, UI_UNIT_Y, "");
     button_search_preview_grid_size_set(but, preview_rows, preview_cols);
   }
   /* list view */
@@ -196,7 +197,7 @@ Block *template_common_search_menu(const bContext *C,
              ButtonType::Label,
              "",
              0,
-             search_but_height,
+             search_but_height + extra_bottom_height,
              searchbox_width,
              searchbox_height - UI_SEARCHBOX_BOUNDS,
              nullptr,
@@ -209,7 +210,7 @@ Block *template_common_search_menu(const bContext *C,
                          ICON_VIEWZOOM,
                          sizeof(search),
                          0,
-                         0,
+                         extra_bottom_height,
                          searchbox_width,
                          search_but_height,
                          "");

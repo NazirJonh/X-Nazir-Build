@@ -608,8 +608,39 @@ void searchbox_update(bContext *C, ARegion *region, Button *but, const bool rese
   /* validate selected item */
   searchbox_select(C, region, but, 0);
 
+  printf("DEBUG: searchbox_update: but=%p items_total=%d\n", (void *)but, data->items.totitem);
   ED_region_tag_redraw(region);
 }
+
+bool UI_searchbox_update_by_popup_block(bContext *C, Block *popup_block)
+{
+  if (!popup_block) {
+    return false;
+  }
+  bScreen *screen = CTX_wm_screen(C);
+  if (!screen) {
+    return false;
+  }
+
+  for (ARegion *ar = static_cast<ARegion *>(screen->regionbase.first); ar; ar = ar->next) {
+    if (ar->regiontype == RGN_TYPE_TEMPORARY) {
+      uiSearchboxData *data = static_cast<uiSearchboxData *>(ar->regiondata);
+      if (data && data->search_but) {
+        Button *sbut = (Button *)data->search_but;
+        if (sbut->block == popup_block) {
+          printf("DEBUG: UI_searchbox_update_by_popup_block: FOUND searchbox for block\n");
+          searchbox_update(C, ar, sbut, true);
+          ED_region_tag_redraw(ar);
+          return true;
+        }
+      }
+    }
+  }
+  printf("DEBUG: UI_searchbox_update_by_popup_block: NOT FOUND\n");
+  return false;
+}
+
+
 
 int searchbox_autocomplete(bContext *C, ARegion *region, Button *but, char *str)
 {

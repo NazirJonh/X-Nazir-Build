@@ -1087,6 +1087,7 @@ int searchbox_find_index(ARegion *region, const char *name);
  * Region is the search box itself.
  */
 void searchbox_update(bContext *C, ARegion *region, Button *but, bool reset);
+bool UI_searchbox_update_by_popup_block(bContext *C, Block *popup_block);
 int searchbox_autocomplete(bContext *C, ARegion *region, Button *but, char *str);
 bool searchbox_event(
     bContext *C, ARegion *region, Button *but, ARegion *butregion, const wmEvent *event);

@@ -73,7 +73,7 @@ struct SearchFilterContext {
   TemplateID template_ui;
   SpaceImage *sima;
   ARegion *menu_region;
-  Button *search_but;         /* Pointer to the search button. */
+  Button *search_but;  /* Pointer to the search button. */
 };
 
 
@@ -350,6 +350,9 @@ static void id_search_filter_mode_button_cb(bContext *C, void *arg_ctx, void *ar
   SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg_ctx);
   const int new_mode = POINTER_AS_INT(arg_mode);
 
+  printf("DEBUG: id_search_filter_mode_button_cb: called with mode=%d\n", new_mode);
+  printf("DEBUG:   ctx=%p, ctx->search_but=%p\n", (void *)ctx, (void *)ctx->search_but);
+
   /* Update SpaceImage via RNA for proper notifiers (affects UI highlights). */
   PointerRNA sima_ptr = RNA_pointer_create_discrete(
       &CTX_wm_screen(C)->id, RNA_SpaceImageEditor, ctx->sima);
@@ -357,6 +360,7 @@ static void id_search_filter_mode_button_cb(bContext *C, void *arg_ctx, void *ar
 
   /* Update the filter value in the template state so the search callback picks it up. */
   ctx->template_ui.filter = short(new_mode);
+  printf("DEBUG:   Updated filter to %d\n", (int)ctx->template_ui.filter);
 
   /* Update visual feedback (red highlight) for the filter buttons in the same block. */
   if (ctx->search_but && ctx->search_but->block) {
@@ -372,15 +376,17 @@ static void id_search_filter_mode_button_cb(bContext *C, void *arg_ctx, void *ar
     }
   }
 
-  /* When the user clicks the filter mode button, the search button loses focus 
-   * and the searchbox results list is destroyed. We simulate an open event 
-   * to immediately restore focus to the search button and regenerate the dropdown. */
+  /* Refocus the search button to trigger searchbox update.
+   * This will activate the button and create/update the searchbox with the new filter value.
+   * The searchbox will be updated automatically when the button becomes active. */
   if (ctx->search_but) {
+    printf("DEBUG:   Refocusing search button to trigger update\n");
     button_focus_on_enter_event(CTX_wm_window(C), ctx->search_but);
   }
 
   /* Trigger general update. */
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+  printf("DEBUG: id_search_filter_mode_button_cb: complete\n");
 }
 
 static void template_ID_filter_buttons_add(Block *block, bContext *C, SearchFilterContext *ctx)
@@ -432,9 +438,18 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
   void (*id_search_update_fn)(
       const bContext *, void *, const char *, SearchItems *, const bool) = id_search_cb;
 
-  /* Initialize the horizontal (file) global state from the button data. */
+  /* Initialize the horizontal (file) global state from the button data. 
+   * Preserve the filter state if we are refreshing the same menu session. */
+  short prev_filter = s_filter_ctx.template_ui.filter;
+  bool is_refresh = (s_filter_ctx.menu_region == region);
+
   s_filter_ctx.template_ui = *(static_cast<TemplateID *>(arg_litem));
   s_filter_ctx.menu_region = region;
+
+  if (is_refresh) {
+    s_filter_ctx.template_ui.filter = prev_filter;
+  }
+
   active_item_ptr = RNA_property_pointer_get(&s_filter_ctx.template_ui.ptr,
                                              s_filter_ctx.template_ui.prop);
 
@@ -480,7 +495,6 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
     }
   }
   printf("DEBUG: id_search_menu: search_but=%p\n", (void *)s_filter_ctx.search_but);
-
 
   /* Add filter mode buttons for image browser when using advanced filtering. */
   if (s_filter_ctx.sima != nullptr) {

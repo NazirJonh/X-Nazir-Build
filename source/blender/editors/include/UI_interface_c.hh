@@ -2141,6 +2141,12 @@ bool textbutton_activate_but(const bContext *C, Button *actbut);
  */
 void button_focus_on_enter_event(wmWindow *win, Button *but);
 
+/**
+ * Refresh the searchbox for a search button.
+ * This triggers an immediate update of the search results.
+ */
+void UI_but_search_refresh(Button *but);
+
 void button_func_hold_set(Button *but, ButtonHandleHoldFunc func, void *argN);
 
 PointerRNA *button_extra_operator_icon_add(Button *but,

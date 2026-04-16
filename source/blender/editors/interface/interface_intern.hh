@@ -1088,6 +1088,16 @@ int searchbox_find_index(ARegion *region, const char *name);
  */
 void searchbox_update(bContext *C, ARegion *region, Button *but, bool reset);
 bool UI_searchbox_update_by_popup_block(bContext *C, Block *popup_block);
+/**
+ * Update searchbox directly through the button region.
+ * This is more reliable than searching by popup block.
+ */
+bool UI_searchbox_update_by_button(bContext *C, ARegion *button_region, Button *but);
+/**
+ * Update searchbox by finding it through the search button pointer.
+ * This works even when the button is not active.
+ */
+bool UI_searchbox_update_by_search_button(bContext *C, Button *search_but);
 int searchbox_autocomplete(bContext *C, ARegion *region, Button *but, char *str);
 bool searchbox_event(
     bContext *C, ARegion *region, Button *but, ARegion *butregion, const wmEvent *event);

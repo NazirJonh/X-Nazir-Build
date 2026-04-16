@@ -45,6 +45,8 @@
 #include "interface_intern.hh"
 #include "interface_regions_intern.hh"
 
+#include "UI_interface_c.hh"
+
 namespace blender::ui {
 
 /* -------------------------------------------------------------------- */
@@ -637,6 +639,92 @@ bool UI_searchbox_update_by_popup_block(bContext *C, Block *popup_block)
     }
   }
   printf("DEBUG: UI_searchbox_update_by_popup_block: NOT FOUND\n");
+  return false;
+}
+
+bool UI_searchbox_update_by_button(bContext *C, ARegion *button_region, Button *but)
+{
+  if (!but || !button_region) {
+    return false;
+  }
+  
+  /* Check if the button is active before trying to get searchbox. */
+  if (!but->active) {
+    printf("DEBUG: UI_searchbox_update_by_button: button is not active\n");
+    return false;
+  }
+  
+  /* Get the searchbox region through the public API. */
+  ARegion *searchbox = region_searchbox_region_get(button_region);
+  if (!searchbox) {
+    printf("DEBUG: UI_searchbox_update_by_button: searchbox not found via region_searchbox_region_get\n");
+    return false;
+  }
+  
+  printf("DEBUG: UI_searchbox_update_by_button: FOUND searchbox via region_searchbox_region_get\n");
+  searchbox_update(C, searchbox, but, true);
+  ED_region_tag_redraw(searchbox);
+  return true;
+}
+
+bool UI_searchbox_update_by_search_button(bContext *C, Button *search_but)
+{
+  if (!search_but) {
+    printf("DEBUG: UI_searchbox_update_by_search_button: search_but is NULL\n");
+    return false;
+  }
+  
+  /* Find the searchbox region by iterating through temporary regions. */
+  bScreen *screen = CTX_wm_screen(C);
+  if (!screen) {
+    printf("DEBUG: UI_searchbox_update_by_search_button: screen is NULL\n");
+    return false;
+  }
+  
+  printf("DEBUG: UI_searchbox_update_by_search_button: searching for search_but=%p\n", (void *)search_but);
+  
+  /* Try to find searchbox by checking if it's a search menu type region.
+   * Since the button pointer changes on each menu refresh, we need to find
+   * the searchbox by other means - check if it's the only temporary region
+   * with search data. */
+  int temp_region_count = 0;
+  ARegion *searchbox_region = nullptr;
+  
+  for (ARegion *ar = static_cast<ARegion *>(screen->regionbase.first); ar; ar = ar->next) {
+    if (ar->regiontype == RGN_TYPE_TEMPORARY) {
+      temp_region_count++;
+      uiSearchboxData *data = static_cast<uiSearchboxData *>(ar->regiondata);
+      printf("DEBUG:   Temp region #%d: regiondata=%p\n", temp_region_count, (void *)data);
+      if (data) {
+        printf("DEBUG:     data->search_but=%p (looking for %p)\n", (void *)data->search_but, (void *)search_but);
+        
+        /* Check if this is a searchbox region (has search_but field) */
+        if (data->search_but) {
+          /* If pointers match exactly, use it immediately */
+          if (data->search_but == search_but) {
+            printf("DEBUG: UI_searchbox_update_by_search_button: FOUND searchbox by exact match\n");
+            searchbox_update(C, ar, search_but, true);
+            ED_region_tag_redraw(ar);
+            return true;
+          }
+          
+          /* Store this as a potential searchbox (in case button was recreated) */
+          if (!searchbox_region) {
+            searchbox_region = ar;
+            printf("DEBUG:     Stored as potential searchbox region\n");
+          }
+        }
+      }
+    }
+  }
+  
+  /* Don't try to reuse searchbox if button pointer doesn't match.
+   * This means the menu was recreated and we should wait for the new searchbox. */
+  if (searchbox_region) {
+    printf("DEBUG: UI_searchbox_update_by_search_button: Found searchbox but pointer mismatch - button was recreated, skipping update\n");
+  }
+  
+  printf("DEBUG: UI_searchbox_update_by_search_button: searchbox NOT FOUND (checked %d temp regions)\n", temp_region_count);
   return false;
 }
 

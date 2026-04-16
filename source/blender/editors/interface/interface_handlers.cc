@@ -12835,6 +12835,49 @@ bool button_active_drop_color(bContext *C)
   return false;
 }
 
+void UI_but_search_refresh(Button *but)
+{
+  printf("DEBUG: UI_but_search_refresh: called with but=%p\n", (void *)but);
+  
+  if (!but) {
+    printf("DEBUG: UI_but_search_refresh: but is NULL\n");
+    return;
+  }
+  
+  if (but->type != ButtonType::SearchMenu) {
+    printf("DEBUG: UI_but_search_refresh: but is not SearchMenu type (type=%d)\n", (int)but->type);
+    return;
+  }
+  
+  if (!but->active) {
+    printf("DEBUG: UI_but_search_refresh: but->active is NULL\n");
+    return;
+  }
+  
+  if (!but->active->searchbox) {
+    printf("DEBUG: UI_but_search_refresh: but->active->searchbox is NULL\n");
+    return;
+  }
+  
+  printf("DEBUG: UI_but_search_refresh: All checks passed, updating searchbox\n");
+  
+  /* Mark button as changed and update searchbox.
+   * This is the same mechanism used when text is typed in the search field. */
+  but->changed = true;
+  
+  /* Get context from the button's block */
+  bContext *C = static_cast<bContext *>(but->block->evil_C);
+  if (C) {
+    printf("DEBUG: UI_but_search_refresh: Calling searchbox_update\n");
+    searchbox_update(C, but->active->searchbox, but, true);
+    ED_region_tag_redraw(but->active->searchbox);
+    printf("DEBUG: UI_but_search_refresh: Update complete\n");
+  }
+  else {
+    printf("DEBUG: UI_but_search_refresh: Context is NULL\n");
+  }
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

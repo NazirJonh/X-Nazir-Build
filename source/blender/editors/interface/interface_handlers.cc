@@ -479,6 +479,9 @@ struct HandleButtonData {
 
   /* Search box see: #UI_screen_free_active_but_highlight. */
   ARegion *searchbox = nullptr;
+  /* True when click was on a popup button (not in searchbox region itself).
+   * Used to pass through RELEASE event to the button instead of closing searchbox. */
+  bool searchbox_click_on_popup_button = false;
 #ifdef USE_KEYNAV_LIMIT
   KeyNavLock searchbox_keynav_state;
 #endif
@@ -4016,6 +4019,34 @@ static int do_but_textedit(
        * and allow multiple menu levels */
       if (data->searchbox) {
         inbox = searchbox_inside(data->searchbox, event->xy);
+        
+        /* For BLOCK_KEEP_OPEN popups (e.g. image browser with filter buttons),
+         * also consider clicks on popup buttons as "inside" to prevent premature closure.
+         * This allows filter buttons to work while keeping the popup open. */
+        bool inbox_is_popup_button = false;
+        if (!inbox && (block->flag & BLOCK_KEEP_OPEN)) {
+          Button *but_under_cursor = button_find_mouse_over_ex(
+              data->region, event->xy, false, false, nullptr, nullptr);
+          printf("DEBUG LMB PRESS: xy=[%d,%d] inbox_orig=%d KEEP_OPEN=1 but_under=%p but_self=%p\n",
+                 event->xy[0], event->xy[1], inbox, (void *)but_under_cursor, (void *)but);
+          if (but_under_cursor && but_under_cursor != but) {
+            /* Click is on another button in the popup - treat as "inside" */
+            inbox = true;
+            inbox_is_popup_button = true;
+            printf("DEBUG LMB PRESS: -> inbox set to TRUE (filter button hit)\n");
+          }
+          else {
+            printf("DEBUG LMB PRESS: -> inbox stays FALSE (outside popup)\n");
+          }
+        }
+        else {
+          printf("DEBUG LMB PRESS: xy=[%d,%d] inbox=%d KEEP_OPEN=%d\n",
+                 event->xy[0], event->xy[1], inbox,
+                 (block->flag & BLOCK_KEEP_OPEN) ? 1 : 0);
+        }
+        
+        /* Store the flag in data for use in RELEASE handling */
+        data->searchbox_click_on_popup_button = inbox_is_popup_button;
       }
 
       bool is_press_in_button = false;
@@ -4032,6 +4063,21 @@ static int do_but_textedit(
       /* for double click: we do a press again for when you first click on button
        * (selects all text, no cursor pos) */
       if (ELEM(event->val, KM_PRESS, KM_DBL_CLICK)) {
+        /* If click is on a popup button (e.g. filter button), activate it directly
+         * while keeping searchbox active. This allows filter buttons to work without
+         * closing the searchbox. */
+        if (data->searchbox_click_on_popup_button && (block->flag & BLOCK_KEEP_OPEN)) {
+          Button *but_under_cursor = button_find_mouse_over_ex(
+              data->region, event->xy, false, false, nullptr, nullptr);
+          if (but_under_cursor && but_under_cursor != but) {
+            printf("DEBUG LMB PRESS: click_on_popup_button=TRUE -> activating button directly\n");
+            /* Activate the button under cursor directly */
+            handle_button_activate(C, data->region, but_under_cursor, BUTTON_ACTIVATE_APPLY);
+            retval = WM_UI_HANDLER_BREAK;
+            break;
+          }
+        }
+        
         if (is_press_in_button) {
           textedit_set_cursor_pos(but, data->region, event->xy[0]);
           but->selsta = but->selend = but->pos;
@@ -4043,7 +4089,17 @@ static int do_but_textedit(
         else if (inbox == false && !data->is_semi_modal) {
           /* if searchbox, click outside will cancel */
           if (data->searchbox) {
+            printf("DEBUG LMB PRESS: inbox=FALSE -> cancelling searchbox, KEEP_OPEN=%d handle=%p\n",
+                   (block->flag & BLOCK_KEEP_OPEN) ? 1 : 0, (void *)block->handle);
             data->cancel = data->escapecancel = true;
+            
+            /* For BLOCK_KEEP_OPEN popups, also close the popup itself when clicking outside.
+             * Normally button_activate_exit won't set menuretval for BLOCK_KEEP_OPEN,
+             * so we set it directly here. */
+            if ((block->flag & BLOCK_KEEP_OPEN) && block->handle) {
+              block->handle->menuretval = RETURN_CANCEL;
+              printf("DEBUG LMB PRESS: -> set menuretval=RETURN_CANCEL directly\n");
+            }
           }
 #ifdef WITH_INPUT_IME
           else if (is_ime_composing && ime_data->composite.size() && but->type == ButtonType::Text)
@@ -4081,6 +4137,7 @@ static int do_but_textedit(
         /* if we allow activation on key press,
          * it gives problems launching operators #35713. */
         if (event->val == KM_RELEASE) {
+          printf("DEBUG LMB RELEASE: inbox=TRUE val=RELEASE -> EXIT searchbox\n");
           button_activate_state(C, but, BUTTON_STATE_EXIT);
           retval = WM_UI_HANDLER_BREAK;
         }
@@ -9321,7 +9378,13 @@ static void button_activate_exit(
       menu = block->handle;
       menu->butretval = data->retval;
       menu->menuretval = (data->cancel) ? RETURN_CANCEL : RETURN_OK;
+      printf("DEBUG button_activate_exit: KEEP_OPEN=0 cancel=%d escapecancel=%d -> menuretval=%d\n",
+             data->cancel, data->escapecancel, menu->menuretval);
     }
+  }
+  else if (block->handle && (block->flag & BLOCK_KEEP_OPEN)) {
+    printf("DEBUG button_activate_exit: KEEP_OPEN=1 cancel=%d escapecancel=%d -> menuretval NOT set (current=%d)\n",
+           data->cancel, data->escapecancel, block->handle->menuretval);
   }
 
   if (!onfree && !data->cancel) {
@@ -11096,6 +11159,18 @@ static int handle_menu_event(bContext *C,
   /* if there's an active modal button, don't check events or outside, except for search menu */
   but = region_find_active_but(region);
 
+  if (ELEM(event->type, LEFTMOUSE, MIDDLEMOUSE, RIGHTMOUSE) &&
+      ELEM(event->val, KM_PRESS, KM_DBL_CLICK, KM_RELEASE))
+  {
+    printf("DEBUG handler_region_menu: event=%d val=%d xy=[%d,%d] block_mx=%d block_my=%d inside=%d KEEP_OPEN=%d LOOP=%d menuretval=%d active_but=%p\n",
+           event->type, event->val, event->xy[0], event->xy[1], mx, my,
+           inside,
+           (block->flag & BLOCK_KEEP_OPEN) ? 1 : 0,
+           (block->flag & BLOCK_LOOP) ? 1 : 0,
+           menu->menuretval,
+           (void *)but);
+  }
+
 #ifdef USE_DRAG_POPUP
 
 #  if defined(__APPLE__)
@@ -11611,6 +11686,10 @@ static int handle_menu_event(bContext *C,
 
         if (ELEM(event->type, LEFTMOUSE, MIDDLEMOUSE, RIGHTMOUSE)) {
           if (ELEM(event->val, KM_PRESS, KM_DBL_CLICK)) {
+            printf("DEBUG handler_region_menu: BLOCK_LOOP outside click xy=[%d,%d] KEEP_OPEN=%d is_parent_menu=%d\n",
+                   event->xy[0], event->xy[1],
+                   (block->flag & BLOCK_KEEP_OPEN) ? 1 : 0,
+                   is_parent_menu);
             if ((is_parent_menu == false) && (U.uiflag & USER_MENUOPENAUTO) == 0) {
               /* for root menus, allow clicking to close */
               if (block->flag & BLOCK_OUT_1) {

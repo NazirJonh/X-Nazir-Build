@@ -28,6 +28,7 @@
 #include "DEG_depsgraph_query.hh"
 
 #include "DNA_collection_types.h"
+#include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
@@ -67,6 +68,9 @@ struct TemplateID {
 
   /* Filter context for advanced filtering (material/slot type). */
   TemplateIDFilterContext filter_context = {};
+
+  /** When true, the search popup will always show filter mode buttons (for image browsing). */
+  bool show_filter_ui = false;
 };
 
 /* Global state for the active ID search menu to allow live updates from buttons. */
@@ -87,7 +91,6 @@ struct SearchFilterContext {
 static void id_search_on_searchbox_created(ARegion *searchbox_region, void *arg)
 {
   SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg);
-  printf("DEBUG: id_search_on_searchbox_created: searchbox_region=%p\n", (void *)searchbox_region);
   ctx->searchbox_region = searchbox_region;
 }
 
@@ -168,6 +171,12 @@ static bool id_search_allows_id(TemplateID *template_ui, const int flag, ID *id,
   if (template_ui->idcode == ID_IM && template_ui->filter != TEMPLATE_ID_FILTER_ALL) {
     Image *ima = id_cast<Image *>(id);
     if (ima == nullptr) {
+      return false;
+    }
+
+    /* Exclude internal/compositor images from paint-slot filtering.
+     * These should only show up in the unfiltered "All Images" mode. */
+    if (ELEM(ima->type, IMA_TYPE_R_RESULT, IMA_TYPE_COMPOSITE)) {
       return false;
     }
 
@@ -284,7 +293,6 @@ static void id_search_cb(const bContext *C,
     }
     count++;
   }
-  printf("DEBUG: id_search_cb: filter=%d items_added=%d\n", (int)template_ui->filter, count);
 }
 
 /**
@@ -364,6 +372,8 @@ static void id_search_filter_mode_button_cb(bContext *C, void *arg_ctx, void *ar
 {
   SearchFilterContext *ctx = static_cast<SearchFilterContext *>(arg_ctx);
   const int new_mode = POINTER_AS_INT(arg_mode);
+  printf("DEBUG id_search_filter_mode_button_cb: CALLED new_mode=%d searchbox_region=%p\n",
+         new_mode, (void *)ctx->searchbox_region);
 
   if (ctx->sima) {
     ctx->sima->image_filter_mode = new_mode;
@@ -392,7 +402,7 @@ static void id_search_filter_mode_button_cb(bContext *C, void *arg_ctx, void *ar
 static void template_ID_filter_buttons_add(Block *block, bContext * /*C*/, SearchFilterContext *ctx)
 {
   SpaceImage *sima = ctx->sima;
-  const int current_mode = sima->image_filter_mode;
+  const int current_mode = sima ? sima->image_filter_mode : int(ctx->template_ui.filter);
 
   const int but_height = UI_UNIT_Y;
   const int ypos = UI_UNIT_Y / 2;
@@ -464,16 +474,20 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
     }
   }
 
-  /* Determine if we need extra space at the bottom for filter mode buttons. */
+  /* Determine if we need extra space at the bottom for filter mode buttons.
+   * Show filter buttons whenever the template was created with show_filter_ui=true
+   * (i.e. via template_id_browse_with_context), regardless of the current filter value.
+   * This ensures the buttons are visible even when the initial mode is "All Images". */
   const bool show_filter_buttons = (s_filter_ctx.template_ui.idcode == ID_IM &&
-                                    s_filter_ctx.template_ui.filter != TEMPLATE_ID_FILTER_ALL);
-  s_filter_ctx.sima = show_filter_buttons ? CTX_wm_space_image(C) : nullptr;
+                                    s_filter_ctx.template_ui.show_filter_ui);
+  /* Optional: when available (Image Editor), keep filter mode in sync with SpaceImage. */
+  s_filter_ctx.sima = CTX_wm_space_image(C);
 
   /* Reserve space at the bottom: button height + spacing gap above buttons. */
-  const int filter_but_height = (s_filter_ctx.sima != nullptr) ? (UI_UNIT_Y + UI_UNIT_Y) : 0;
+  const int filter_but_height = show_filter_buttons ? (UI_UNIT_Y + UI_UNIT_Y) : 0;
 
   int filter_buttons_width = 0;
-  if (s_filter_ctx.sima != nullptr) {
+  if (show_filter_buttons) {
     const uiStyle *style = style_get_dpi();
     auto calc_button_width = [&](const char *text) {
       return fontstyle_string_width(&style->widget, text) + int(UI_UNIT_X);
@@ -520,7 +534,7 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
   }
 
   /* Add filter mode buttons for image browser when using advanced filtering. */
-  if (s_filter_ctx.sima != nullptr) {
+  if (show_filter_buttons) {
     template_ID_filter_buttons_add(block, C, &s_filter_ctx);
   }
 
@@ -2050,7 +2064,8 @@ void template_id_browse_with_context(Layout *layout,
   template_ui.prv_cols = 0;
   template_ui.scale = 1.0f;
   template_ui.filter = filter;
-  
+  template_ui.show_filter_ui = true;
+
   /* Set filter context. */
   template_ui.filter_context.material = material;
   template_ui.filter_context.slot_type = slot_type;
@@ -2062,9 +2077,15 @@ void template_id_browse_with_context(Layout *layout,
 
   /* create UI elements for this template. */
   if (template_ui.idlb) {
+    int flag = UI_ID_BROWSE | UI_ID_RENAME | UI_ID_DELETE;
+    if (newop) {
+      flag |= UI_ID_ADD_NEW;
+    }
+    if (openop) {
+      flag |= UI_ID_OPEN;
+    }
     Layout &row = layout->row(true);
-    template_ID(C, row, template_ui, type, UI_ID_BROWSE | UI_ID_RENAME, newop, openop, unlinkop,
-                text, false, false);
+    template_ID(C, row, template_ui, type, flag, newop, openop, unlinkop, text, false, false);
   }
 }
 

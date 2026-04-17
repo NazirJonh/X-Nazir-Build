@@ -74,6 +74,22 @@ void DepsgraphNodeBuilder::build_scene_parameters(Scene *scene)
   for (TimeMarker &marker : scene->markers) {
     build_idproperties(marker.prop);
   }
+
+  /* Build IMAGE_DATA nodes for paint canvas images so that
+   * DepsgraphRelationBuilder::build_object_paint_canvas_relations() can connect
+   * them to object shading. Without this the relation builder finds no node for
+   * IMAGE_DATA and logs "Could not find ID" errors. */
+  const ToolSettings *ts = scene->toolsettings;
+  if (ts != nullptr) {
+    if (ts->imapaint.mode == PAINT_CANVAS_SOURCE_IMAGE && ts->imapaint.canvas != nullptr) {
+      build_image(ts->imapaint.canvas);
+    }
+    if (ts->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE &&
+        ts->paint_mode.canvas_image != nullptr)
+    {
+      build_image(ts->paint_mode.canvas_image);
+    }
+  }
 }
 
 void DepsgraphNodeBuilder::build_scene_compositor(Scene *scene)

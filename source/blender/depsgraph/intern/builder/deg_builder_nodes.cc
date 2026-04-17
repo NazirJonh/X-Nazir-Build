@@ -2175,11 +2175,17 @@ void DepsgraphNodeBuilder::build_image(Image *image)
   if (built_map_.check_is_built_and_tag(image)) {
     return;
   }
-  build_parameters(&image->id);
+  /* Image ID node must be created before adding any operations/components. */
+  add_id_node(&image->id);
+  /* Pixel data updates for texture paint, compositing, external file reload, etc.
+   * This is the primary component for paint canvas images, layer images, and masks.
+   * Architecture ready for hierarchical layer-system: per-layer granularity via separate
+   * IMAGE_DATA nodes for each layer.image, mask.image, and channel.result. */
+  add_operation_node(
+      &image->id, NodeType::IMAGE_DATA, OperationCode::GENERIC_DATABLOCK_UPDATE);
   build_idproperties(image->id.properties);
   build_idproperties(image->id.system_properties);
-  add_operation_node(
-      &image->id, NodeType::GENERIC_DATABLOCK, OperationCode::GENERIC_DATABLOCK_UPDATE);
+  build_parameters(&image->id);
 }
 
 void DepsgraphNodeBuilder::build_cachefile(CacheFile *cache_file)

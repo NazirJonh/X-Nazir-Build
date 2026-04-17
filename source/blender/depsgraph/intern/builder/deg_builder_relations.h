@@ -161,6 +161,14 @@ class DepsgraphRelationBuilder : public DepsgraphBuilder {
 
   virtual void build_object_shading(Object *object);
 
+  /* Build depsgraph relations between the scene's active paint canvas image(s) and the given
+   * object's shading component, so that tagging a canvas image propagates through the graph
+   * to all objects that depend on it — without manual per-object iteration at paint time.
+   *
+   * Layer-system readiness: when a layer-based paint system is introduced, extend this function
+   * to iterate all layer images and call add_paint_canvas_image_relation() for each one. */
+  virtual void build_object_paint_canvas_relations(Object *object);
+
   virtual void build_object_light_linking(Object *emitter);
   virtual void build_light_linking_collection(Object *emitter, Collection *collection);
 
@@ -333,6 +341,11 @@ class DepsgraphRelationBuilder : public DepsgraphBuilder {
   bool is_same_nodetree_node_dependency(const KeyFrom &key_from, const KeyTo &key_to);
 
  private:
+  /* Add a single Image → Object (SHADING) relation for paint canvas support.
+   * Called from build_object_paint_canvas_relations() and intended to be reused
+   * by a future layer-stack builder (one call per layer image). */
+  void add_paint_canvas_image_relation(Image *canvas_image, Object *object);
+
   struct BuilderWalkUserData {
     DepsgraphRelationBuilder *builder;
   };

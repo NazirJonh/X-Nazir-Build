@@ -173,6 +173,21 @@ void depsgraph_tag_to_component_opcode(const ID *id,
     case ID_RECALC_SHADING:
       *component_type = NodeType::SHADING;
       break;
+    case ID_RECALC_IMAGE_PIXELS:
+      /* Pixel data of an Image changed (texture paint stroke, GPU texture upload,
+       * compositing output, external file reload). Only meaningful for ID_IM;
+       * for other ID types this flag is silently ignored.
+       * Maps to IMAGE_DATA — dedicated component for image pixel data (not GENERIC_DATABLOCK).
+       * Tagging Image with this flag triggers propagation via:
+       *   Image (IMAGE_DATA) → NodeTree → Material → Object  [shader-node path]
+       *   Image (IMAGE_DATA) → Object (SHADING)              [canvas relation path]
+       * Architecture ready for hierarchical layer-system: each layer.image, mask.image,
+       * and channel.result will have its own IMAGE_DATA node for per-layer granularity.
+       * See DepsgraphRelationBuilder::build_object_paint_canvas_relations(). */
+      if (GS(id->name) == ID_IM) {
+        *component_type = NodeType::IMAGE_DATA;
+      }
+      break;
     case ID_RECALC_SELECT:
       depsgraph_select_tag_to_component_opcode(id, component_type, operation_code);
       break;
@@ -220,7 +235,6 @@ void depsgraph_tag_to_component_opcode(const ID *id,
       *operation_code = OperationCode::HIERARCHY;
       break;
 
-    case ID_RECALC_PROVISION_27:
     case ID_RECALC_PROVISION_28:
     case ID_RECALC_PROVISION_29:
     case ID_RECALC_PROVISION_30:
@@ -430,9 +444,11 @@ const char *update_source_as_string(eUpdateSource source)
 
 int deg_recalc_flags_for_legacy_zero()
 {
-  const uint ID_RECALC_PROVISION_ALL = (ID_RECALC_PROVISION_27 | ID_RECALC_PROVISION_28 |
-                                        ID_RECALC_PROVISION_29 | ID_RECALC_PROVISION_30 |
-                                        ID_RECALC_PROVISION_31);
+  /* ID_RECALC_IMAGE_PIXELS (bit 27) is a real flag now, not a provision placeholder.
+   * Include it in the LEGACY_0 mask so that flags=0 on an Image also triggers pixel
+   * propagation (backward-compat with pre-ID_RECALC_IMAGE_PIXELS callers using flags=0). */
+  const uint ID_RECALC_PROVISION_ALL = (ID_RECALC_PROVISION_28 | ID_RECALC_PROVISION_29 |
+                                        ID_RECALC_PROVISION_30 | ID_RECALC_PROVISION_31);
   return ID_RECALC_ALL & ~(ID_RECALC_PSYS_ALL | ID_RECALC_ANIMATION | ID_RECALC_FRAME_CHANGE |
                            ID_RECALC_SOURCE | ID_RECALC_EDITORS | ID_RECALC_PROVISION_ALL);
 }
@@ -814,7 +830,9 @@ const char *DEG_update_tag_as_string(IDRecalcFlag flag)
     case ID_RECALC_HIERARCHY:
       return "ID_RECALC_HIERARCHY";
 
-    case ID_RECALC_PROVISION_27:
+    case ID_RECALC_IMAGE_PIXELS:
+      return "IMAGE_PIXELS";
+
     case ID_RECALC_PROVISION_28:
     case ID_RECALC_PROVISION_29:
     case ID_RECALC_PROVISION_30:

@@ -22,6 +22,8 @@
 
 #include "BKE_paint.hh"
 
+#include "DEG_depsgraph_build.hh"
+
 #include "WM_api.hh"
 #include "WM_types.hh"
 
@@ -388,7 +390,7 @@ static void rna_ImaPaint_viewport_update(Main * /*bmain*/, Scene * /*scene*/, Po
 
 static void rna_ImaPaint_mode_update(bContext *C, PointerRNA * /*ptr*/)
 {
-  const Main *bmain = CTX_data_main(C);
+  Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
   BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
@@ -403,6 +405,11 @@ static void rna_ImaPaint_mode_update(bContext *C, PointerRNA * /*ptr*/)
     ED_paint_proj_mesh_data_check(*scene, *ob, nullptr, nullptr, nullptr, nullptr);
     WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
   }
+
+  /* Paint mode changed: the depsgraph canvas relations depend on imapaint.mode
+   * (PAINT_CANVAS_SOURCE_IMAGE vs MATERIAL). Rebuild relations so that the correct
+   * Image → Object edges are present for the new mode. */
+  DEG_relations_tag_update(bmain);
 }
 
 static void rna_ImaPaint_stencil_update(bContext *C, PointerRNA * /*ptr*/)
@@ -434,6 +441,8 @@ static void rna_ImaPaint_canvas_update(bContext *C, PointerRNA * /*ptr*/)
     ED_paint_proj_mesh_data_check(*scene, *ob, nullptr, nullptr, nullptr, nullptr);
     WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
   }
+  /* Canvas image changed: rebuild depsgraph relations so the new Image → Object edges are added. */
+  DEG_relations_tag_update(bmain);
 }
 
 static void rna_UvSculpt_curve_preset_set(PointerRNA *ptr, int value)
@@ -453,6 +462,7 @@ static void rna_UvSculpt_curve_preset_set(PointerRNA *ptr, int value)
 
 static void rna_PaintModeSettings_canvas_source_update(bContext *C, PointerRNA * /*ptr*/)
 {
+  Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
   Object *ob = CTX_data_active_object(C);
   /* When canvas source changes the #pbvh::Tree would require updates when switching between color
@@ -462,6 +472,15 @@ static void rna_PaintModeSettings_canvas_source_update(bContext *C, PointerRNA *
     DEG_id_tag_update(&ob->id, 0);
     WM_main_add_notifier(NC_GEOM | ND_DATA, &ob->id);
   }
+  /* Canvas source changed: rebuild relations so the correct Image → Object edges exist. */
+  DEG_relations_tag_update(bmain);
+}
+
+static void rna_PaintModeSettings_canvas_image_update(bContext *C, PointerRNA * /*ptr*/)
+{
+  Main *bmain = CTX_data_main(C);
+  /* Canvas image pointer changed: rebuild relations to wire the new Image into the depsgraph. */
+  DEG_relations_tag_update(bmain);
 }
 
 /** \} */
@@ -1416,6 +1435,7 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       prop, nullptr, nullptr, nullptr, "rna_Image_no_renderresult_or_viewer_poll");
   RNA_def_property_flag(prop, PROP_EDITABLE | PROP_CONTEXT_UPDATE);
   RNA_def_property_ui_text(prop, "Texture", "Image used as painting target");
+  RNA_def_property_update(prop, 0, "rna_PaintModeSettings_canvas_image_update");
 }
 
 static void rna_def_image_paint(BlenderRNA *brna)

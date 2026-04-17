@@ -34,6 +34,7 @@
 #include "BLI_task.h"
 #include "BLI_threads.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "atomic_ops.h"
 
@@ -84,6 +85,7 @@
 #include "BKE_screen.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "ED_image.hh"
@@ -4700,7 +4702,7 @@ static void project_paint_end(ProjPaintState *ps)
     ProjPaintImage *projIma;
     for (a = 0, projIma = ps->projImages; a < ps->image_tot; a++, projIma++) {
       BKE_image_release_ibuf(projIma->ima, projIma->ibuf, nullptr);
-      DEG_id_tag_update(&projIma->ima->id, 0);
+      DEG_id_tag_update(&projIma->ima->id, ID_RECALC_IMAGE_PIXELS);
     }
   }
 
@@ -4803,13 +4805,13 @@ static bool partial_redraw_array_merge(ImagePaintPartialRedraw *pr,
   return touch;
 }
 
-/* Loop over all images on this mesh and update any we have touched */
-static bool project_image_refresh_tagged(ProjPaintState *ps)
+/* Loop over all images on this mesh and update any we have touched.
+ * Caller is responsible for emitting notifiers to keep Image Editor and 3D Viewport in sync. */
+static void project_image_refresh_tagged(ProjPaintState *ps)
 {
   ImagePaintPartialRedraw *pr;
   ProjPaintImage *projIma;
   int a, i;
-  bool redraw = false;
 
   for (a = 0, projIma = ps->projImages; a < ps->image_tot; a++, projIma++) {
     if (projIma->touch) {
@@ -4819,7 +4821,6 @@ static bool project_image_refresh_tagged(ProjPaintState *ps)
         if (BLI_rcti_is_valid(&pr->dirty_region)) {
           set_imapaintpartial(pr);
           imapaint_image_update(nullptr, projIma->ima, projIma->ibuf, &projIma->iuser, true);
-          redraw = true;
         }
 
         partial_redraw_single_init(pr);
@@ -4829,8 +4830,6 @@ static bool project_image_refresh_tagged(ProjPaintState *ps)
       projIma->touch = false;
     }
   }
-
-  return redraw;
 }
 
 /* run this per painting onto each mouse location */
@@ -5842,7 +5841,7 @@ static bool project_paint_op(void *state, const float lastpos[2], const float po
   return touch_any;
 }
 
-static void paint_proj_stroke_ps(const bContext * /*C*/,
+static void paint_proj_stroke_ps(const bContext *C,
                                  void *ps_handle_p,
                                  const float prev_pos[2],
                                  const float pos[2],
@@ -5913,7 +5912,24 @@ static void paint_proj_stroke_ps(const bContext * /*C*/,
 
   if (project_paint_op(ps, prev_pos, pos)) {
     ps_handle->need_redraw = true;
+
+    /* Collect touched images before refresh clears the touch flags. */
+    Vector<Image *> touched_images;
+    for (int i = 0; i < ps->image_tot; i++) {
+      if (ps->projImages[i].touch) {
+        touched_images.append(ps->projImages[i].ima);
+      }
+    }
+
     project_image_refresh_tagged(ps);
+
+    /* Notify Image Editor regions (#NA_PAINTING) about painted images.
+     * Propagate changes through depsgraph to all objects using these images,
+     * ensuring 3D Viewports and other dependent editors stay in sync during stroke. */
+    for (Image *ima : touched_images) {
+      WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, ima);
+      DEG_id_tag_update(&ima->id, ID_RECALC_IMAGE_PIXELS);
+    }
   }
 }
 
@@ -6338,6 +6354,8 @@ static wmOperatorStatus texture_paint_camera_project_exec(bContext *C, wmOperato
 
   for (a = 0; a < ps.image_tot; a++) {
     BKE_image_free_gputextures(ps.projImages[a].ima);
+    /* Notify that images have been edited (NC_IMAGE | NA_EDITED is for final completions,
+     * while NA_PAINTING would be for interactive updates). */
     WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ps.projImages[a].ima);
   }
 
@@ -6928,6 +6946,13 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
       BKE_image_signal(bmain, ima, nullptr, IMA_SIGNAL_USER_NEW_IMAGE);
       WM_event_add_notifier(C, NC_IMAGE | NA_ADDED, ima);
       ED_space_image_sync(bmain, ima, false);
+
+      /* Set the new image as the canvas for paint operations in Texture Paint mode.
+       * For Sculpt Mode, the image is used through material texpaintslot, not imapaint.canvas. */
+      if (ob->mode != OB_MODE_SCULPT) {
+        scene->toolsettings->imapaint.canvas = ima;
+        scene->toolsettings->imapaint.mode = PAINT_CANVAS_SOURCE_IMAGE;
+      }
     }
     if (layer) {
       BKE_texpaint_slot_refresh_cache(scene, ma, ob);
@@ -6937,6 +6962,9 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
 
     DEG_id_tag_update(&ntree->id, 0);
     DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
+    /* Rebuild depsgraph relations so the new Image (IMAGE_DATA) → Object (SHADING) edge is added.
+     * imapaint.canvas is already set above, so build_scene_parameters() will call build_image()
+     * for it and create the IMAGE_DATA node before the relation builder runs. */
     DEG_relations_tag_update(bmain);
     ED_area_tag_redraw(CTX_wm_area(C));
 

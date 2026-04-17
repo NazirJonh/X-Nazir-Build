@@ -1687,7 +1687,10 @@ void BKE_texpaint_slot_refresh_cache(Scene *scene, Material *ma, const Object *o
   ma->texpaintslot = nullptr;
   ma->tot_slots = 0;
 
-  if (scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
+  /* In Sculpt Mode, image is used through material texpaintslot, not imapaint.canvas,
+   * so we should not reset slots when imapaint.mode is set to IMAGEPAINT_MODE_IMAGE. */
+  const bool is_sculpt_mode = ob && ob->mode == OB_MODE_SCULPT;
+  if (!is_sculpt_mode && scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
     ma->paint_active_slot = 0;
     ma->paint_clone_slot = 0;
   }

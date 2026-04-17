@@ -12,6 +12,8 @@
 #include "MEM_guardedalloc.h"
 
 #include "DNA_brush_types.h"
+#include "DNA_material_types.h"
+#include "DNA_object_enums.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 
@@ -26,11 +28,13 @@
 #include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 
 #include "ED_paint.hh"
 #include "ED_screen.hh"
@@ -1631,6 +1635,16 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     MEM_delete(s);
     return nullptr;
   }
+
+  /* Ensure canvas is set to current image so depsgraph relations are correct.
+   * This guarantees Image (IMAGE_DATA) → Object (SHADING) edge exists in depsgraph
+   * for viewport sync during 2D image paint. */
+  if (s->image != settings->imapaint.canvas) {
+    settings->imapaint.canvas = s->image;
+    settings->imapaint.mode = PAINT_CANVAS_SOURCE_IMAGE;
+    /* Rebuild relations to include the new canvas image. */
+    DEG_relations_tag_update(CTX_data_main(C));
+  }
   if (BKE_image_has_packedfile(s->image) && s->image->rr != nullptr) {
     BKE_report(op->reports, RPT_WARNING, "Packed MultiLayer files cannot be painted");
     MEM_delete(s);
@@ -1706,7 +1720,9 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
     if (s->tiles[i].need_redraw) {
       ImBuf *ibuf = BKE_image_acquire_ibuf(s->image, &s->tiles[i].iuser, nullptr);
 
-      imapaint_image_update(s->sima, s->image, ibuf, &s->tiles[i].iuser, false);
+      /* `texpaint=true` uploads dirty regions to the GPU texture so 3D Viewport (texture paint,
+       * materials) updates during the stroke, not only the Image Editor. */
+      imapaint_image_update(s->sima, s->image, ibuf, &s->tiles[i].iuser, true);
 
       BKE_image_release_ibuf(s->image, ibuf, nullptr);
 
@@ -1717,12 +1733,19 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
 
   if (had_redraw) {
     ED_imapaint_clear_partial_redraw();
+    /* Notifies Image Editor regions (#NA_PAINTING) and 3D Viewports (#NC_IMAGE) showing this
+     * texture, so paint stays in sync across editors during a stroke. */
+    WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, s->image);
     if (s->sima == nullptr || !s->sima->lock) {
       ED_region_tag_redraw(CTX_wm_region(C));
     }
-    else {
-      WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, s->image);
-    }
+
+    /* Pixel data changed: tag via ID_RECALC_IMAGE_PIXELS which maps to IMAGE_DATA component
+     * for Image IDs, triggering two depsgraph propagation paths:
+     *   1. Image (IMAGE_DATA) → NodeTree → Material → Object  [shader-node images]
+     *   2. Image (IMAGE_DATA) → Object (SHADING)              [canvas relation for paint slots]
+     * Both paths are built at graph construction time — no manual per-object tagging needed. */
+    DEG_id_tag_update(&s->image->id, ID_RECALC_IMAGE_PIXELS);
   }
 
   if (final) {
@@ -1732,18 +1755,8 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
 
     /* compositor listener deals with updating */
     WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, s->image);
-    DEG_id_tag_update(&s->image->id, 0);
+    DEG_id_tag_update(&s->image->id, ID_RECALC_IMAGE_PIXELS);
 
-    /* Ideally, we shouldn't have to tag the object as needing to be recalculated if using this
-     * paint mode, however, because the image isn't connected as part of the shader nodes, the draw
-     * code is unaware of the corresponding image tag. See #150957 for more details. */
-    const Scene *scene = CTX_data_scene(C);
-    Object *object = CTX_data_active_object(C);
-    if (object && object->type == OB_MESH && scene &&
-        scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_IMAGE)
-    {
-      DEG_id_tag_update(&object->id, ID_RECALC_SHADING);
-    }
   }
 }
 

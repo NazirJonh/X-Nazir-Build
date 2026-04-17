@@ -69,6 +69,24 @@ void DepsgraphRelationBuilder::build_scene_parameters(Scene *scene)
 
   /* See the comment in the DepsgraphNodeBuilder::build_scene_parameters(). */
   build_scene_compositor(scene);
+
+  /* Ensure paint canvas images are registered as depsgraph nodes so that
+   * build_object_paint_canvas_relations() can connect them to objects.
+   * These are DNA fields, so they are safe to read during graph building.
+   *
+   * Layer-system readiness: when PaintLayerStack is introduced, also iterate
+   * all layer images in the stack here so they become part of the graph. */
+  const ToolSettings *ts = scene->toolsettings;
+  if (ts != nullptr) {
+    if (ts->imapaint.mode == PAINT_CANVAS_SOURCE_IMAGE && ts->imapaint.canvas != nullptr) {
+      build_image(ts->imapaint.canvas);
+    }
+    if (ts->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE &&
+        ts->paint_mode.canvas_image != nullptr)
+    {
+      build_image(ts->paint_mode.canvas_image);
+    }
+  }
 }
 
 void DepsgraphRelationBuilder::build_scene_compositor(Scene *scene)

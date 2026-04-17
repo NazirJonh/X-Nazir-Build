@@ -12,6 +12,8 @@
 #include "MEM_guardedalloc.h"
 
 #include "DNA_brush_types.h"
+#include "DNA_material_types.h"
+#include "DNA_object_enums.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 
@@ -26,6 +28,7 @@
 #include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -1706,7 +1709,9 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
     if (s->tiles[i].need_redraw) {
       ImBuf *ibuf = BKE_image_acquire_ibuf(s->image, &s->tiles[i].iuser, nullptr);
 
-      imapaint_image_update(s->sima, s->image, ibuf, &s->tiles[i].iuser, false);
+      /* `texpaint=true` uploads dirty regions to the GPU texture so 3D Viewport (texture paint,
+       * materials) updates during the stroke, not only the Image Editor. */
+      imapaint_image_update(s->sima, s->image, ibuf, &s->tiles[i].iuser, true);
 
       BKE_image_release_ibuf(s->image, ibuf, nullptr);
 
@@ -1717,11 +1722,48 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
 
   if (had_redraw) {
     ED_imapaint_clear_partial_redraw();
+    /* Notifies Image Editor regions (#NA_PAINTING) and 3D Viewports (#NC_IMAGE) showing this
+     * texture, so paint stays in sync across editors during a stroke. */
+    WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, s->image);
     if (s->sima == nullptr || !s->sima->lock) {
       ED_region_tag_redraw(CTX_wm_region(C));
     }
-    else {
-      WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, s->image);
+
+    /* Same rationale as the `final` block below (#150957): GPU texture can change without the
+     * depsgraph knowing the mesh draw should refresh. Tag shading during the stroke so View3D
+     * (texture paint, sculpt canvas) updates immediately. */
+    const Scene *scene = CTX_data_scene(C);
+    Object *object = CTX_data_active_object(C);
+    if (object && object->type == OB_MESH && scene) {
+      bool tag_object_shading = false;
+
+      Image *paint_mode_canvas = nullptr;
+      ImageUser *paint_mode_iuser = nullptr;
+      if (BKE_paint_canvas_image_get(
+              &scene->toolsettings->paint_mode, object, &paint_mode_canvas, &paint_mode_iuser) &&
+          paint_mode_canvas == s->image)
+      {
+        tag_object_shading = true;
+      }
+
+      if (!tag_object_shading && scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
+        tag_object_shading = true;
+      }
+
+      if (!tag_object_shading && scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_MATERIAL &&
+          (object->mode & OB_MODE_TEXTURE_PAINT) != 0)
+      {
+        Material *mat = BKE_object_material_get(object, object->actcol);
+        if (mat && mat->texpaintslot && mat->paint_active_slot < mat->tot_slots &&
+            mat->texpaintslot[mat->paint_active_slot].ima == s->image)
+        {
+          tag_object_shading = true;
+        }
+      }
+
+      if (tag_object_shading) {
+        DEG_id_tag_update(&object->id, ID_RECALC_SHADING);
+      }
     }
   }
 

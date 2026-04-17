@@ -908,7 +908,10 @@ static void image_main_region_listener(const wmRegionListenerParams *params)
       break;
     case NC_IMAGE:
       if (wmn->action == NA_PAINTING) {
-        ED_region_tag_redraw(region);
+        SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+        if (wmn->reference == nullptr || wmn->reference == sima->image) {
+          ED_region_tag_redraw(region);
+        }
       }
       WM_gizmomap_tag_refresh(region->runtime->gizmo_map);
       break;

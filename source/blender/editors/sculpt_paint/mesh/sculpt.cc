@@ -5166,11 +5166,14 @@ void flush_update_step(ViewContext &vc, Object &object, const UpdateType update_
 
   if (update_type == UpdateType::Image) {
     ED_region_tag_redraw(vc.region);
-    if (update_type == UpdateType::Image) {
-      /* Early exit when only need to update the images. We don't want to tag any geometry updates
-       * that would rebuild the bke::pbvh::Tree. */
-      return;
+    if (vc.C && ss.cache && ss.cache->image_data && ss.cache->image_data->image) {
+      /* Sculpt canvas (Paint brush in Sculpt Mode) notifies the Image Editor so it
+       * stays in sync during the stroke. */
+      WM_event_add_notifier(vc.C, NC_IMAGE | NA_PAINTING, ss.cache->image_data->image);
     }
+    /* Early exit when only need to update the images. We don't want to tag any geometry updates
+     * that would rebuild the bke::pbvh::Tree. */
+    return;
   }
 
   DEG_id_tag_update(&object.id, ID_RECALC_SHADING);

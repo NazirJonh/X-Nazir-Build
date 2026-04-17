@@ -4804,7 +4804,7 @@ static bool partial_redraw_array_merge(ImagePaintPartialRedraw *pr,
 }
 
 /* Loop over all images on this mesh and update any we have touched */
-static bool project_image_refresh_tagged(ProjPaintState *ps)
+static bool project_image_refresh_tagged(const bContext *C, ProjPaintState *ps)
 {
   ImagePaintPartialRedraw *pr;
   ProjPaintImage *projIma;
@@ -4813,16 +4813,26 @@ static bool project_image_refresh_tagged(ProjPaintState *ps)
 
   for (a = 0, projIma = ps->projImages; a < ps->image_tot; a++, projIma++) {
     if (projIma->touch) {
+      bool painted_any = false;
       /* look over each bound cell */
       for (i = 0; i < PROJ_BOUNDBOX_SQUARED; i++) {
         pr = &(projIma->partRedrawRect[i]);
         if (BLI_rcti_is_valid(&pr->dirty_region)) {
           set_imapaintpartial(pr);
+
           imapaint_image_update(nullptr, projIma->ima, projIma->ibuf, &projIma->iuser, true);
+
           redraw = true;
+          painted_any = true;
         }
 
         partial_redraw_single_init(pr);
+      }
+
+      if (painted_any && C) {
+        /* Image Editor (Paint 2D) listens for #NA_PAINTING on the main region; View3D redraws on
+         * #NC_IMAGE. Keeps 2D/3D views in sync during texture paint strokes. */
+        WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, projIma->ima);
       }
 
       /* clear for reuse */
@@ -5842,7 +5852,7 @@ static bool project_paint_op(void *state, const float lastpos[2], const float po
   return touch_any;
 }
 
-static void paint_proj_stroke_ps(const bContext * /*C*/,
+static void paint_proj_stroke_ps(const bContext *C,
                                  void *ps_handle_p,
                                  const float prev_pos[2],
                                  const float pos[2],
@@ -5913,7 +5923,7 @@ static void paint_proj_stroke_ps(const bContext * /*C*/,
 
   if (project_paint_op(ps, prev_pos, pos)) {
     ps_handle->need_redraw = true;
-    project_image_refresh_tagged(ps);
+    project_image_refresh_tagged(C, ps);
   }
 }
 
@@ -6159,7 +6169,7 @@ void *paint_proj_new_stroke(bContext *C,
 
     ps->source = (ps->brush_type == IMAGE_PAINT_BRUSH_TYPE_FILL) ? PROJ_SRC_VIEW_FILL :
                                                                    PROJ_SRC_VIEW;
-    project_image_refresh_tagged(ps);
+    project_image_refresh_tagged(C, ps);
 
     /* re-use! */
     if (i != 0) {
@@ -6334,7 +6344,7 @@ static wmOperatorStatus texture_paint_camera_project_exec(bContext *C, wmOperato
 
   project_paint_op(&ps, lastpos, pos);
 
-  project_image_refresh_tagged(&ps);
+  project_image_refresh_tagged(C, &ps);
 
   for (a = 0; a < ps.image_tot; a++) {
     BKE_image_free_gputextures(ps.projImages[a].ima);

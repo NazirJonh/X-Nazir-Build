@@ -171,17 +171,18 @@ void depsgraph_tag_to_component_opcode(const ID *id,
       *component_type = NodeType::COPY_ON_EVAL;
       break;
     case ID_RECALC_SHADING:
-      /* Image has no SHADING component in the depsgraph — only GENERIC_DATABLOCK is built
-       * in build_image(). Remap to GENERIC_DATABLOCK so that tagging an Image with
-       * ID_RECALC_SHADING triggers the Image → NodeTree → Material → Object propagation
-       * chain and the explicit paint-canvas → Object relation (see
-       * DepsgraphRelationBuilder::build_object_paint_canvas_relations).
-       * All other ID types keep the normal SHADING component semantics. */
+      *component_type = NodeType::SHADING;
+      break;
+    case ID_RECALC_IMAGE_PIXELS:
+      /* Pixel data of an Image changed. Maps to GENERIC_DATABLOCK — the only depsgraph
+       * component that Image has (build_image() in deg_builder_nodes.cc only adds
+       * GENERIC_DATABLOCK_UPDATE). For non-Image IDs this flag is silently ignored.
+       * Tagging Image with this flag triggers propagation via:
+       *   Image (GENERIC_DATABLOCK) → NodeTree → Material → Object  [shader-node path]
+       *   Image (GENERIC_DATABLOCK) → Object (SHADING)              [canvas relation path]
+       * See DepsgraphRelationBuilder::build_object_paint_canvas_relations(). */
       if (GS(id->name) == ID_IM) {
         *component_type = NodeType::GENERIC_DATABLOCK;
-      }
-      else {
-        *component_type = NodeType::SHADING;
       }
       break;
     case ID_RECALC_SELECT:
@@ -231,7 +232,6 @@ void depsgraph_tag_to_component_opcode(const ID *id,
       *operation_code = OperationCode::HIERARCHY;
       break;
 
-    case ID_RECALC_PROVISION_27:
     case ID_RECALC_PROVISION_28:
     case ID_RECALC_PROVISION_29:
     case ID_RECALC_PROVISION_30:
@@ -441,9 +441,11 @@ const char *update_source_as_string(eUpdateSource source)
 
 int deg_recalc_flags_for_legacy_zero()
 {
-  const uint ID_RECALC_PROVISION_ALL = (ID_RECALC_PROVISION_27 | ID_RECALC_PROVISION_28 |
-                                        ID_RECALC_PROVISION_29 | ID_RECALC_PROVISION_30 |
-                                        ID_RECALC_PROVISION_31);
+  /* ID_RECALC_IMAGE_PIXELS (bit 27) is a real flag now, not a provision placeholder.
+   * Include it in the LEGACY_0 mask so that flags=0 on an Image also triggers pixel
+   * propagation (backward-compat with pre-ID_RECALC_IMAGE_PIXELS callers using flags=0). */
+  const uint ID_RECALC_PROVISION_ALL = (ID_RECALC_PROVISION_28 | ID_RECALC_PROVISION_29 |
+                                        ID_RECALC_PROVISION_30 | ID_RECALC_PROVISION_31);
   return ID_RECALC_ALL & ~(ID_RECALC_PSYS_ALL | ID_RECALC_ANIMATION | ID_RECALC_FRAME_CHANGE |
                            ID_RECALC_SOURCE | ID_RECALC_EDITORS | ID_RECALC_PROVISION_ALL);
 }
@@ -825,7 +827,9 @@ const char *DEG_update_tag_as_string(IDRecalcFlag flag)
     case ID_RECALC_HIERARCHY:
       return "ID_RECALC_HIERARCHY";
 
-    case ID_RECALC_PROVISION_27:
+    case ID_RECALC_IMAGE_PIXELS:
+      return "IMAGE_PIXELS";
+
     case ID_RECALC_PROVISION_28:
     case ID_RECALC_PROVISION_29:
     case ID_RECALC_PROVISION_30:

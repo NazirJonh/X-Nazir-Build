@@ -4700,7 +4700,7 @@ static void project_paint_end(ProjPaintState *ps)
     ProjPaintImage *projIma;
     for (a = 0, projIma = ps->projImages; a < ps->image_tot; a++, projIma++) {
       BKE_image_release_ibuf(projIma->ima, projIma->ibuf, nullptr);
-      DEG_id_tag_update(&projIma->ima->id, 0);
+      DEG_id_tag_update(&projIma->ima->id, ID_RECALC_IMAGE_PIXELS);
     }
   }
 
@@ -5917,7 +5917,7 @@ static void paint_proj_stroke_ps(const bContext *C,
       WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, ps->projImages[i].ima);
       /* Tag image itself in depsgraph to propagate changes through the dependency graph to all
        * objects using this image. This ensures all 3D Viewports update during stroke. */
-      DEG_id_tag_update(&ps->projImages[i].ima->id, ID_RECALC_SHADING);
+      DEG_id_tag_update(&ps->projImages[i].ima->id, ID_RECALC_IMAGE_PIXELS);
     }
   }
 }

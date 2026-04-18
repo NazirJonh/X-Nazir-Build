@@ -1729,13 +1729,12 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
       ED_region_tag_redraw(CTX_wm_region(C));
     }
 
-    /* Tag the image in the depsgraph. ID_RECALC_SHADING on Image correctly maps to
-     * GENERIC_DATABLOCK (the only component Image has), which triggers two propagation paths:
+    /* Pixel data changed: tag via ID_RECALC_IMAGE_PIXELS which maps to GENERIC_DATABLOCK
+     * for Image IDs, triggering two depsgraph propagation paths:
      *   1. Image (GENERIC_DATABLOCK) → NodeTree → Material → Object  [shader-node images]
      *   2. Image (GENERIC_DATABLOCK) → Object (SHADING)              [canvas relation, #150957]
-     * Both paths are built by DepsgraphRelationBuilder::build_object_paint_canvas_relations()
-     * and the existing build_nodetree() traversal. No manual per-object tagging needed. */
-    DEG_id_tag_update(&s->image->id, ID_RECALC_SHADING);
+     * Both paths are built at graph construction time — no manual per-object tagging needed. */
+    DEG_id_tag_update(&s->image->id, ID_RECALC_IMAGE_PIXELS);
   }
 
   if (final) {
@@ -1745,7 +1744,7 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
 
     /* compositor listener deals with updating */
     WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, s->image);
-    DEG_id_tag_update(&s->image->id, ID_RECALC_SHADING);
+    DEG_id_tag_update(&s->image->id, ID_RECALC_IMAGE_PIXELS);
 
   }
 }

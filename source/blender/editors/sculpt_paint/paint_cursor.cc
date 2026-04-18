@@ -33,6 +33,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
+#include "DEG_depsgraph_query.hh"
 #include "BKE_grease_pencil.hh"
 #include "BKE_image.hh"
 #include "BKE_node_runtime.hh"
@@ -57,6 +58,13 @@
 
 #include "../paint_cursor_sync/paint_cursor_sync_manager.hh"
 #include "../paint_cursor_sync/sources/sculpt_cursor_source.hh"
+
+#include "mesh/sculpt_intern.hh"
+
+#include "BKE_bvhutils.hh"
+#include "BKE_mesh.hh"
+#include "BKE_mesh_sample.hh"
+#include "BKE_material.hh"
 
 using blender::editors::SculptCursorSource;
 using blender::editors::PaintCursorSyncManager;
@@ -2201,6 +2209,143 @@ static void paint_cursor_restore_drawing_state()
   GPU_line_smooth(false);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name UV Coordinate Calculation for Texture Paint Sync
+ * \{ */
+
+/**
+ * Raycast to find triangle under cursor.
+ * Replicated from paint_sample_color.cc for use in cursor sync.
+ */
+static bool imapaint_pick_face_for_cursor(ViewContext *vc,
+                                          const int mval[2],
+                                          int *r_tri_index,
+                                          int *r_face_index,
+                                          float3 *r_bary_coord,
+                                          const Mesh &mesh)
+{
+  if (mesh.faces_num == 0) {
+    return false;
+  }
+
+  float3 start_world;
+  float3 end_world;
+  ED_view3d_win_to_segment_clipped(
+      vc->depsgraph, vc->region, vc->v3d, float2(mval[0], mval[1]), start_world, end_world, true);
+
+  const float4x4 &world_to_object = vc->obact->world_to_object();
+  const float3 start_object = math::transform_point(world_to_object, start_world);
+  const float3 end_object = math::transform_point(world_to_object, end_world);
+
+  bke::BVHTreeFromMesh mesh_bvh = mesh.bvh_corner_tris();
+
+  BVHTreeRayHit ray_hit;
+  ray_hit.dist = FLT_MAX;
+  ray_hit.index = -1;
+  BLI_bvhtree_ray_cast(mesh_bvh.tree,
+                       start_object,
+                       math::normalize(end_object - start_object),
+                       0.0f,
+                       &ray_hit,
+                       mesh_bvh.raycast_callback,
+                       &mesh_bvh);
+  if (ray_hit.index == -1) {
+    return false;
+  }
+
+  *r_bary_coord = bke::mesh_surface_sample::compute_bary_coord_in_triangle(
+      mesh.vert_positions(), mesh.corner_verts(), mesh.corner_tris()[ray_hit.index], ray_hit.co);
+
+  *r_tri_index = ray_hit.index;
+  *r_face_index = mesh.corner_tri_faces()[ray_hit.index];
+  return true;
+}
+
+/**
+ * Compute UV coordinates from 3D cursor position for texture paint synchronization.
+ * This replicates the logic from imapaint_pick_uv in paint_sample_color.cc
+ */
+static std::optional<float2> paint_cursor_calc_uv_position(const PaintCursorContext &pcontext)
+{
+  if (pcontext.mode != PaintMode::Texture3D || !pcontext.object || !pcontext.ss) {
+    return std::nullopt;
+  }
+
+  Object *ob_eval = DEG_get_evaluated(pcontext.depsgraph, pcontext.object);
+  const Mesh *mesh_eval = BKE_object_get_evaluated_mesh(ob_eval);
+  
+  if (!mesh_eval || mesh_eval->uv_map_names().is_empty()) {
+    return std::nullopt;
+  }
+
+  /* For Texture3D mode, we need to perform our own raycast to get face information.
+   * SculptSession may not be updated for Texture3D mode. */
+  const ViewContext &vc = pcontext.vc;
+  
+  /* Perform raycast to get triangle and barycentric coordinates. */
+  int tri_index;
+  float3 bary_coord;
+  int face_index;
+  int mval_arr[2] = {pcontext.mval[0], pcontext.mval[1]};
+  
+  if (!imapaint_pick_face_for_cursor(const_cast<ViewContext*>(&vc), mval_arr, &tri_index, &face_index, &bary_coord, *mesh_eval)) {
+    return std::nullopt;
+  }
+  
+  const bke::AttributeAccessor attributes = mesh_eval->attributes();
+  const VArray<int> material_indices = *attributes.lookup_or_default<int>(
+      "material_index", bke::AttrDomain::Face, 0);
+
+  VArraySpan<float2> uv_map;
+  const ePaintCanvasSource mode = ePaintCanvasSource(pcontext.scene->toolsettings->imapaint.mode);
+
+  if (mode == PAINT_CANVAS_SOURCE_MATERIAL) {
+    const Material *ma = BKE_object_material_get(ob_eval, material_indices[face_index] + 1);
+    const TexPaintSlot *slot = &ma->texpaintslot[ma->paint_active_slot];
+    if (slot && slot->uvname) {
+      uv_map = *attributes.lookup<float2>(slot->uvname, bke::AttrDomain::Corner);
+    }
+  }
+
+  if (uv_map.is_empty()) {
+    uv_map = *attributes.lookup<float2>(mesh_eval->active_uv_map_name(), bke::AttrDomain::Corner);
+  }
+
+  if (uv_map.is_empty()) {
+    return std::nullopt;
+  }
+
+  const Span<int3> tris = mesh_eval->corner_tris();
+  float2 uv = bke::mesh_surface_sample::sample_corner_attribute_with_bary_coords(
+      bary_coord, tris[tri_index], uv_map);
+  
+  return uv;
+}
+
+/**
+ * Get the active image for texture paint sync.
+ */
+static Image *paint_cursor_get_active_image(const PaintCursorContext &pcontext)
+{
+  if (pcontext.mode != PaintMode::Texture3D || !pcontext.scene) {
+    return nullptr;
+  }
+
+  ImagePaintSettings *imapaint = &pcontext.scene->toolsettings->imapaint;
+  if (imapaint->mode == IMAGEPAINT_MODE_MATERIAL) {
+    /* Image is determined per-face based on material. */
+    /* Return nullptr - will be handled by target. */
+    return nullptr;
+  }
+  else {
+    return imapaint->canvas;
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+
 static SculptCursorSource g_cursor_source;
 
 static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, void * /*unused*/)
@@ -2210,8 +2355,24 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
     return;
   }
 
+  /* Calculate UV position for texture paint sync to 2D image editor. */
+  std::optional<float2> uv_position = paint_cursor_calc_uv_position(pcontext);
+  
+  /* Get active image for texture paint. */
+  Image *active_image = nullptr;
+  if (pcontext.mode == PaintMode::Texture3D && pcontext.scene) {
+    ImagePaintSettings *imapaint = &pcontext.scene->toolsettings->imapaint;
+    if (imapaint->mode == IMAGEPAINT_MODE_MATERIAL) {
+      /* Image will be set from material in calc_uv_position. */
+      /* For now, leave as nullptr - target will use source_image from CursorSyncData if available. */
+    }
+    else {
+      active_image = imapaint->canvas;
+    }
+  }
+  
   g_cursor_source.update_from_cursor_data(
-      pcontext.location, pcontext.normal, pcontext.object, pcontext.pixel_radius, true);
+      pcontext.location, pcontext.normal, pcontext.object, pcontext.pixel_radius, true, uv_position, active_image);
   PaintCursorSyncManager::get().sync_from_source(&g_cursor_source);
 
   if (!paint_cursor_is_brush_cursor_enabled(pcontext)) {

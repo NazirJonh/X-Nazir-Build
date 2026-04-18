@@ -25,7 +25,9 @@ class SculptCursorSource : public PaintCursorSource {
                                       const float3 &normal,
                                       Object *object,
                                       float pixel_radius,
-                                      bool is_valid)
+                                      bool is_valid,
+                                      const std::optional<float2> &uv_position = std::nullopt,
+                                      Image *source_image = nullptr)
   {
     is_active_ = is_valid;
 
@@ -40,6 +42,13 @@ class SculptCursorSource : public PaintCursorSource {
     data_.brush_radius_px = pixel_radius;
     data_.is_valid = true;
     data_.last_update = std::chrono::steady_clock::now();
+
+    if (uv_position.has_value()) {
+      data_.uv_position = uv_position;
+    }
+    if (source_image) {
+      data_.source_image = source_image;
+    }
 
     if (callback_) {
       callback_(data_);

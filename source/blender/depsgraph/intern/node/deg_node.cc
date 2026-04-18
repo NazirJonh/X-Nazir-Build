@@ -82,6 +82,8 @@ const char *nodeTypeAsString(NodeType type)
       return "POINT_CACHE";
     case NodeType::IMAGE_ANIMATION:
       return "IMAGE_ANIMATION";
+    case NodeType::IMAGE_DATA:
+      return "IMAGE_DATA";
     case NodeType::BATCH_CACHE:
       return "BATCH_CACHE";
     case NodeType::INSTANCING:

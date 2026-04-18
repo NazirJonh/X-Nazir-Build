@@ -128,6 +128,12 @@ enum class NodeType {
   POINT_CACHE,
   /* Image Animation Component */
   IMAGE_ANIMATION,
+  /* Image Pixel Data Component - for texture paint, compositing, file reload.
+   * Used for canvas images, layer images, masks, and all Image-related pixel updates.
+   * Ready for hierarchical layer-system with per-layer granularity.
+   * See: DepsgraphRelationBuilder::build_object_paint_canvas_relations()
+   * and future: TASK-003 (PaintLayerStack), TASK-004 (LAYER_STACK_COMPOSITE) */
+  IMAGE_DATA,
   /* Cache Component */
   /* TODO(sergey); Verify that we really need this. */
   CACHE,

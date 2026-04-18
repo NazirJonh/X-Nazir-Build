@@ -4803,44 +4803,31 @@ static bool partial_redraw_array_merge(ImagePaintPartialRedraw *pr,
   return touch;
 }
 
-/* Loop over all images on this mesh and update any we have touched */
-static bool project_image_refresh_tagged(const bContext *C, ProjPaintState *ps)
+/* Loop over all images on this mesh and update any we have touched.
+ * Caller is responsible for emitting notifiers to keep Image Editor and 3D Viewport in sync. */
+static void project_image_refresh_tagged(ProjPaintState *ps)
 {
   ImagePaintPartialRedraw *pr;
   ProjPaintImage *projIma;
   int a, i;
-  bool redraw = false;
 
   for (a = 0, projIma = ps->projImages; a < ps->image_tot; a++, projIma++) {
     if (projIma->touch) {
-      bool painted_any = false;
       /* look over each bound cell */
       for (i = 0; i < PROJ_BOUNDBOX_SQUARED; i++) {
         pr = &(projIma->partRedrawRect[i]);
         if (BLI_rcti_is_valid(&pr->dirty_region)) {
           set_imapaintpartial(pr);
-
           imapaint_image_update(nullptr, projIma->ima, projIma->ibuf, &projIma->iuser, true);
-
-          redraw = true;
-          painted_any = true;
         }
 
         partial_redraw_single_init(pr);
-      }
-
-      if (painted_any && C) {
-        /* Image Editor (Paint 2D) listens for #NA_PAINTING on the main region; View3D redraws on
-         * #NC_IMAGE. Keeps 2D/3D views in sync during texture paint strokes. */
-        WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, projIma->ima);
       }
 
       /* clear for reuse */
       projIma->touch = false;
     }
   }
-
-  return redraw;
 }
 
 /* run this per painting onto each mouse location */
@@ -5923,7 +5910,15 @@ static void paint_proj_stroke_ps(const bContext *C,
 
   if (project_paint_op(ps, prev_pos, pos)) {
     ps_handle->need_redraw = true;
-    project_image_refresh_tagged(C, ps);
+    project_image_refresh_tagged(ps);
+    /* Notifies Image Editor regions (#NA_PAINTING) and 3D Viewports (#NC_IMAGE) about painted
+     * images, so paint stays in sync across editors during the stroke. */
+    for (int i = 0; i < ps->image_tot; i++) {
+      WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, ps->projImages[i].ima);
+      /* Tag image itself in depsgraph to propagate changes through the dependency graph to all
+       * objects using this image. This ensures all 3D Viewports update during stroke. */
+      DEG_id_tag_update(&ps->projImages[i].ima->id, 0);
+    }
   }
 }
 
@@ -6169,7 +6164,7 @@ void *paint_proj_new_stroke(bContext *C,
 
     ps->source = (ps->brush_type == IMAGE_PAINT_BRUSH_TYPE_FILL) ? PROJ_SRC_VIEW_FILL :
                                                                    PROJ_SRC_VIEW;
-    project_image_refresh_tagged(C, ps);
+    project_image_refresh_tagged(ps);
 
     /* re-use! */
     if (i != 0) {
@@ -6344,10 +6339,12 @@ static wmOperatorStatus texture_paint_camera_project_exec(bContext *C, wmOperato
 
   project_paint_op(&ps, lastpos, pos);
 
-  project_image_refresh_tagged(C, &ps);
+  project_image_refresh_tagged(&ps);
 
   for (a = 0; a < ps.image_tot; a++) {
     BKE_image_free_gputextures(ps.projImages[a].ima);
+    /* Notify that images have been edited (NC_IMAGE | NA_EDITED is for final completions,
+     * while NA_PAINTING would be for interactive updates). */
     WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ps.projImages[a].ima);
   }
 

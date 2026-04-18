@@ -84,6 +84,7 @@
 #include "BKE_screen.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "ED_image.hh"
@@ -6935,6 +6936,11 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
       BKE_image_signal(bmain, ima, nullptr, IMA_SIGNAL_USER_NEW_IMAGE);
       WM_event_add_notifier(C, NC_IMAGE | NA_ADDED, ima);
       ED_space_image_sync(bmain, ima, false);
+
+      /* Set the new image as the canvas for paint operations.
+       * This ensures depsgraph relations Image → Object are created correctly. */
+      scene->toolsettings->imapaint.canvas = ima;
+      scene->toolsettings->imapaint.mode = PAINT_CANVAS_SOURCE_IMAGE;
     }
     if (layer) {
       BKE_texpaint_slot_refresh_cache(scene, ma, ob);
@@ -6944,7 +6950,11 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
 
     DEG_id_tag_update(&ntree->id, 0);
     DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
-    DEG_relations_tag_update(bmain);
+    /* Note: do NOT call DEG_relations_tag_update() here for newly created Single Image slots.
+     * The Image nodes will be built in depsgraph when first needed (during paint or material update).
+     * Calling it here causes "Could not find IMAGE_DATA component" errors because Image nodes
+     * aren't yet in the depsgraph at this point. Instead, rely on paint_image_2d.cc to sync
+     * imapaint.canvas when user starts painting, which will trigger proper relation updates. */
     ED_area_tag_redraw(CTX_wm_area(C));
 
     ED_paint_proj_mesh_data_check(*scene, *ob, nullptr, nullptr, nullptr, nullptr);

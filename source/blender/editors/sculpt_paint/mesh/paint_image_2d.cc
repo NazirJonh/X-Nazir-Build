@@ -34,6 +34,7 @@
 #include "BKE_report.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 
 #include "ED_paint.hh"
 #include "ED_screen.hh"
@@ -1634,6 +1635,16 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     MEM_delete(s);
     return nullptr;
   }
+
+  /* Ensure canvas is set to current image so depsgraph relations are correct.
+   * This guarantees Image (IMAGE_DATA) → Object (SHADING) edge exists in depsgraph
+   * for viewport sync during 2D image paint. */
+  if (s->image != settings->imapaint.canvas) {
+    settings->imapaint.canvas = s->image;
+    settings->imapaint.mode = PAINT_CANVAS_SOURCE_IMAGE;
+    /* Rebuild relations to include the new canvas image. */
+    DEG_relations_tag_update(CTX_data_main(C));
+  }
   if (BKE_image_has_packedfile(s->image) && s->image->rr != nullptr) {
     BKE_report(op->reports, RPT_WARNING, "Packed MultiLayer files cannot be painted");
     MEM_delete(s);
@@ -1729,10 +1740,10 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
       ED_region_tag_redraw(CTX_wm_region(C));
     }
 
-    /* Pixel data changed: tag via ID_RECALC_IMAGE_PIXELS which maps to GENERIC_DATABLOCK
+    /* Pixel data changed: tag via ID_RECALC_IMAGE_PIXELS which maps to IMAGE_DATA component
      * for Image IDs, triggering two depsgraph propagation paths:
-     *   1. Image (GENERIC_DATABLOCK) → NodeTree → Material → Object  [shader-node images]
-     *   2. Image (GENERIC_DATABLOCK) → Object (SHADING)              [canvas relation, #150957]
+     *   1. Image (IMAGE_DATA) → NodeTree → Material → Object  [shader-node images]
+     *   2. Image (IMAGE_DATA) → Object (SHADING)              [canvas relation for paint slots]
      * Both paths are built at graph construction time — no manual per-object tagging needed. */
     DEG_id_tag_update(&s->image->id, ID_RECALC_IMAGE_PIXELS);
   }

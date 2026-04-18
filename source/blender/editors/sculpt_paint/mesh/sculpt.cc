@@ -5172,7 +5172,7 @@ void flush_update_step(ViewContext &vc, Object &object, const UpdateType update_
       WM_event_add_notifier(vc.C, NC_IMAGE | NA_PAINTING, ss.cache->image_data->image);
       /* Tag image itself in depsgraph to propagate changes through the dependency graph to all
        * objects using this image. This ensures all 3D Viewports update during stroke. */
-      DEG_id_tag_update(&ss.cache->image_data->image->id, 0);
+      DEG_id_tag_update(&ss.cache->image_data->image->id, ID_RECALC_SHADING);
     }
     /* Early exit when only need to update the images. We don't want to tag any geometry updates
      * that would rebuild the bke::pbvh::Tree. */
@@ -5260,7 +5260,7 @@ void flush_update_done(ViewContext &vc,
        * Ensures all 3D Viewports are properly updated after Paint brush stroke. */
       const SculptSession &ss = *ob.runtime->sculpt_session;
       if (ss.cache && ss.cache->image_data && ss.cache->image_data->image) {
-        DEG_id_tag_update(&ss.cache->image_data->image->id, 0);
+        DEG_id_tag_update(&ss.cache->image_data->image->id, ID_RECALC_SHADING);
       }
     }
   }

@@ -171,7 +171,18 @@ void depsgraph_tag_to_component_opcode(const ID *id,
       *component_type = NodeType::COPY_ON_EVAL;
       break;
     case ID_RECALC_SHADING:
-      *component_type = NodeType::SHADING;
+      /* Image has no SHADING component in the depsgraph — only GENERIC_DATABLOCK is built
+       * in build_image(). Remap to GENERIC_DATABLOCK so that tagging an Image with
+       * ID_RECALC_SHADING triggers the Image → NodeTree → Material → Object propagation
+       * chain and the explicit paint-canvas → Object relation (see
+       * DepsgraphRelationBuilder::build_object_paint_canvas_relations).
+       * All other ID types keep the normal SHADING component semantics. */
+      if (GS(id->name) == ID_IM) {
+        *component_type = NodeType::GENERIC_DATABLOCK;
+      }
+      else {
+        *component_type = NodeType::SHADING;
+      }
       break;
     case ID_RECALC_SELECT:
       depsgraph_select_tag_to_component_opcode(id, component_type, operation_code);

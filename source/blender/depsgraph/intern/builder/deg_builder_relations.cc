@@ -855,6 +855,7 @@ void DepsgraphRelationBuilder::build_object(Object *object)
   build_object_pointcache(object);
 
   build_object_shading(object);
+  build_object_paint_canvas_relations(object);
   build_object_light_linking(object);
 
   /* Synchronization back to original object. */
@@ -1339,6 +1340,50 @@ void DepsgraphRelationBuilder::build_object_shading(Object *object)
                OperationKey(&object->id, NodeType::INSTANCING, OperationCode::INSTANCE),
                "Light Linking -> Instance",
                RELATION_FLAG_NO_FLUSH);
+}
+
+void DepsgraphRelationBuilder::add_paint_canvas_image_relation(Image *canvas_image,
+                                                                Object *object)
+{
+  if (canvas_image == nullptr) {
+    return;
+  }
+  build_image(canvas_image);
+  ComponentKey canvas_key(&canvas_image->id, NodeType::GENERIC_DATABLOCK);
+  OperationKey object_shading_key(&object->id, NodeType::SHADING, OperationCode::SHADING);
+  add_relation(canvas_key, object_shading_key, "Paint Canvas -> Object Shading");
+}
+
+void DepsgraphRelationBuilder::build_object_paint_canvas_relations(Object *object)
+{
+  if (scene_ == nullptr || scene_->toolsettings == nullptr) {
+    return;
+  }
+  const ToolSettings *ts = scene_->toolsettings;
+
+  /* Image Paint mode: directly selected canvas (scene->toolsettings->imapaint.canvas).
+   * When this image is NOT referenced by any SH_NODE_TEX_IMAGE in a material shader graph,
+   * the normal Image → NodeTree → Material → Object chain does not exist.
+   * This explicit relation ensures that tagging the canvas propagates to all objects.
+   *
+   * When the image IS in a shader graph the existing chain already covers propagation;
+   * the extra edge here is redundant but harmless.
+   *
+   * Layer-system readiness: when a PaintLayerStack is introduced, replace the two calls
+   * below with a loop over all layer images:
+   *   for (PaintLayer *layer : stack->layers) {
+   *     add_paint_canvas_image_relation(layer->image, object);
+   *   }
+   * This gives per-layer granularity: only objects using a changed layer are updated. */
+  if (ts->imapaint.mode == PAINT_CANVAS_SOURCE_IMAGE) {
+    add_paint_canvas_image_relation(ts->imapaint.canvas, object);
+  }
+
+  /* Sculpt / generic paint-mode canvas (scene->toolsettings->paint_mode).
+   * Same rationale as above for PAINT_CANVAS_SOURCE_IMAGE. */
+  if (ts->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE) {
+    add_paint_canvas_image_relation(ts->paint_mode.canvas_image, object);
+  }
 }
 
 void DepsgraphRelationBuilder::build_object_light_linking(Object *emitter)

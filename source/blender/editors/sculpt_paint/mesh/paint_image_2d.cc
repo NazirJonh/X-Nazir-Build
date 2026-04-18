@@ -1729,74 +1729,13 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
       ED_region_tag_redraw(CTX_wm_region(C));
     }
 
-    /* Tag image itself in depsgraph to propagate changes through the dependency graph to all
-     * objects using this image. This ensures View3D updates for inactive objects during stroke. */
-    DEG_id_tag_update(&s->image->id, 0);
-
-    /* Same rationale as the `final` block below (#150957): GPU texture can change without the
-     * depsgraph knowing the mesh draw should refresh. Tag shading during the stroke so View3D
-     * (texture paint, sculpt canvas) updates immediately.
-     * Important: Find ALL objects using this image, not just the active one. User may have
-     * painted on object AA, then selected object BB, but continue painting on AA's texture. */
-    const Scene *scene = CTX_data_scene(C);
-
-    if (scene && s->image) {
-      /* Find all objects in scene that use this image and tag them for shading update. */
-      for (Base *base = static_cast<Base *>(scene->base.first); base; base = base->next) {
-        Object *object = base->object;
-
-        if (object->type != OB_MESH) {
-          continue;
-        }
-
-        bool tag_object_shading = false;
-
-        /* Check if this object is the active sculpt/paint canvas. */
-        Image *paint_mode_canvas = nullptr;
-        ImageUser *paint_mode_iuser = nullptr;
-        if (BKE_paint_canvas_image_get(
-                &scene->toolsettings->paint_mode, object, &paint_mode_canvas, &paint_mode_iuser) &&
-            paint_mode_canvas == s->image)
-        {
-          tag_object_shading = true;
-        }
-
-        /* In IMAGEPAINT_MODE_IMAGE, any object with any material using this image needs update. */
-        if (!tag_object_shading && scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
-          /* Check all materials on this object */
-          for (int mat_index = 0; mat_index < object->totcol; mat_index++) {
-            Material *mat = BKE_object_material_get(object, mat_index + 1);
-            if (mat && mat->texpaintslot) {
-              for (int slot_index = 0; slot_index < mat->tot_slots; slot_index++) {
-                if (mat->texpaintslot[slot_index].ima == s->image) {
-                  tag_object_shading = true;
-                  break;
-                }
-              }
-              if (tag_object_shading) {
-                break;
-              }
-            }
-          }
-        }
-
-        /* In IMAGEPAINT_MODE_MATERIAL, check only active material slot. */
-        if (!tag_object_shading && scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_MATERIAL &&
-            (object->mode & OB_MODE_TEXTURE_PAINT) != 0)
-        {
-          Material *mat = BKE_object_material_get(object, object->actcol);
-          if (mat && mat->texpaintslot && mat->paint_active_slot < mat->tot_slots &&
-              mat->texpaintslot[mat->paint_active_slot].ima == s->image)
-          {
-            tag_object_shading = true;
-          }
-        }
-
-        if (tag_object_shading) {
-          DEG_id_tag_update(&object->id, ID_RECALC_SHADING);
-        }
-      }
-    }
+    /* Tag the image in the depsgraph. ID_RECALC_SHADING on Image correctly maps to
+     * GENERIC_DATABLOCK (the only component Image has), which triggers two propagation paths:
+     *   1. Image (GENERIC_DATABLOCK) → NodeTree → Material → Object  [shader-node images]
+     *   2. Image (GENERIC_DATABLOCK) → Object (SHADING)              [canvas relation, #150957]
+     * Both paths are built by DepsgraphRelationBuilder::build_object_paint_canvas_relations()
+     * and the existing build_nodetree() traversal. No manual per-object tagging needed. */
+    DEG_id_tag_update(&s->image->id, ID_RECALC_SHADING);
   }
 
   if (final) {
@@ -1806,50 +1745,8 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
 
     /* compositor listener deals with updating */
     WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, s->image);
-    DEG_id_tag_update(&s->image->id, 0);
+    DEG_id_tag_update(&s->image->id, ID_RECALC_SHADING);
 
-    /* Ideally, we shouldn't have to tag the object as needing to be recalculated if using this
-     * paint mode, however, because the image isn't connected as part of the shader nodes, the draw
-     * code is unaware of the corresponding image tag. See #150957 for more details.
-     * Important: Find ALL objects using this image, not just the active one. User may have
-     * painted on object AA, then selected object BB, but continue painting on AA's texture. */
-    const Scene *scene = CTX_data_scene(C);
-
-    if (scene && s->image) {
-      /* Find all objects in scene that use this image and tag them for shading update. */
-      for (Base *base = static_cast<Base *>(scene->base.first); base; base = base->next) {
-        Object *object = base->object;
-
-        if (object->type != OB_MESH) {
-          continue;
-        }
-
-        bool tag_object_shading = false;
-
-        /* In IMAGEPAINT_MODE_IMAGE, any object with any material using this image needs update. */
-        if (scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
-          /* Check all materials on this object */
-          for (int mat_index = 0; mat_index < object->totcol; mat_index++) {
-            Material *mat = BKE_object_material_get(object, mat_index + 1);
-            if (mat && mat->texpaintslot) {
-              for (int slot_index = 0; slot_index < mat->tot_slots; slot_index++) {
-                if (mat->texpaintslot[slot_index].ima == s->image) {
-                  tag_object_shading = true;
-                  break;
-                }
-              }
-              if (tag_object_shading) {
-                break;
-              }
-            }
-          }
-        }
-
-        if (tag_object_shading) {
-          DEG_id_tag_update(&object->id, ID_RECALC_SHADING);
-        }
-      }
-    }
   }
 }
 

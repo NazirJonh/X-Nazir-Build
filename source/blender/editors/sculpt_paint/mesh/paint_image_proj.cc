@@ -5917,7 +5917,7 @@ static void paint_proj_stroke_ps(const bContext *C,
       WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, ps->projImages[i].ima);
       /* Tag image itself in depsgraph to propagate changes through the dependency graph to all
        * objects using this image. This ensures all 3D Viewports update during stroke. */
-      DEG_id_tag_update(&ps->projImages[i].ima->id, 0);
+      DEG_id_tag_update(&ps->projImages[i].ima->id, ID_RECALC_SHADING);
     }
   }
 }

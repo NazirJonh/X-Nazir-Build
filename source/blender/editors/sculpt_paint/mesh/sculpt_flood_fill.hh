@@ -13,6 +13,7 @@
 #include "BLI_bit_vector.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_offset_indices.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -26,7 +27,8 @@ struct Object;
 namespace ed::sculpt_paint::flood_fill {
 
 struct FillDataMesh {
-  std::queue<int> queue;
+  Vector<int> queue_current;
+  Vector<int> queue_next;
   BitVector<> visited_verts;
   Span<int> fake_neighbors;
 

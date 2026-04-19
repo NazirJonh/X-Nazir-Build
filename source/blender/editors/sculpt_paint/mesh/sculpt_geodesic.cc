@@ -6,12 +6,15 @@
  * \ingroup edsculpt
  */
 
+#include <atomic>
 #include <cstdlib>
 
 #include "BLI_bit_vector.hh"
-#include "BLI_linklist_stack.h"
+#include "BLI_enumerable_thread_specific.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
+#include "BLI_task.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_mesh_types.h"
 
@@ -21,8 +24,21 @@
 
 namespace blender::ed::sculpt_paint::geodesic {
 
-/* Propagate distance from v1 and v2 to v0. */
-static bool sculpt_geodesic_mesh_test_dist_add(Span<float3> vert_positions,
+/* Atomic min update: sets dists[v0] = min(dists[v0], dist0). Returns true if updated. */
+static bool atomic_dist_min(MutableSpan<float> dists, const int v0, const float dist0)
+{
+  std::atomic_ref<float> a(dists[v0]);
+  float old = a.load(std::memory_order_relaxed);
+  while (dist0 < old) {
+    if (a.compare_exchange_weak(old, dist0, std::memory_order_relaxed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Propagate distance from v1 and v2 to v0 — parallel-safe version. */
+static bool sculpt_geodesic_mesh_test_dist_add(const Span<float3> vert_positions,
                                                const int v0,
                                                const int v1,
                                                const int v2,
@@ -33,32 +49,33 @@ static bool sculpt_geodesic_mesh_test_dist_add(Span<float3> vert_positions,
     return false;
   }
 
-  BLI_assert(dists[v1] != FLT_MAX);
-  if (dists[v0] <= dists[v1]) {
+  const float d1 = std::atomic_ref<float>(dists[v1]).load(std::memory_order_relaxed);
+  if (d1 == FLT_MAX) {
+    return false;
+  }
+  if (std::atomic_ref<float>(dists[v0]).load(std::memory_order_relaxed) <= d1) {
     return false;
   }
 
   float dist0;
   if (v2 != SCULPT_GEODESIC_VERTEX_NONE) {
-    BLI_assert(dists[v2] != FLT_MAX);
-    if (dists[v0] <= dists[v2]) {
+    const float d2 = std::atomic_ref<float>(dists[v2]).load(std::memory_order_relaxed);
+    if (d2 == FLT_MAX) {
+      return false;
+    }
+    if (std::atomic_ref<float>(dists[v0]).load(std::memory_order_relaxed) <= d2) {
       return false;
     }
     dist0 = geodesic_distance_propagate_across_triangle(
-        vert_positions[v0], vert_positions[v1], vert_positions[v2], dists[v1], dists[v2]);
+        vert_positions[v0], vert_positions[v1], vert_positions[v2], d1, d2);
   }
   else {
     float vec[3];
     sub_v3_v3v3(vec, vert_positions[v1], vert_positions[v0]);
-    dist0 = dists[v1] + len_v3(vec);
+    dist0 = d1 + len_v3(vec);
   }
 
-  if (dist0 < dists[v0]) {
-    dists[v0] = dist0;
-    return true;
-  }
-
-  return false;
+  return atomic_dist_min(dists, v0, dist0);
 }
 
 Array<float> distances_create(const Span<float3> vert_positions,
@@ -74,22 +91,16 @@ Array<float> distances_create(const Span<float3> vert_positions,
   const float limit_radius_sq = limit_radius * limit_radius;
 
   Array<float> dists(vert_positions.size());
-  BitVector<> edge_tag(edges.size());
+  /* Byte array instead of BitVector for lock-free atomic test-and-set per entry. */
+  Array<uint8_t> edge_tag(edges.size(), 0);
 
-  /* Both contain edge indices encoded as *void. */
-  BLI_LINKSTACK_DECLARE(queue, void *);
-  BLI_LINKSTACK_DECLARE(queue_next, void *);
-
-  BLI_LINKSTACK_INIT(queue);
-  BLI_LINKSTACK_INIT(queue_next);
+  Vector<int> queue;
+  Vector<int> queue_next;
+  queue.reserve(edges.size() / 8);
+  queue_next.reserve(edges.size() / 8);
 
   for (const int i : vert_positions.index_range()) {
-    if (initial_verts.contains(i)) {
-      dists[i] = 0.0f;
-    }
-    else {
-      dists[i] = FLT_MAX;
-    }
+    dists[i] = initial_verts.contains(i) ? 0.0f : FLT_MAX;
   }
 
   /* Masks vertices that are further than limit radius from an initial vertex. As there is no need
@@ -123,69 +134,85 @@ Array<float> distances_create(const Span<float3> vert_positions,
       continue;
     }
     if (dists[v1] != FLT_MAX || dists[v2] != FLT_MAX) {
-      BLI_LINKSTACK_PUSH(queue, POINTER_FROM_INT(i));
+      queue.append(i);
     }
   }
 
-  do {
-    while (BLI_LINKSTACK_SIZE(queue)) {
-      const int e = POINTER_AS_INT(BLI_LINKSTACK_POP(queue));
-      int v1 = edges[e][0];
-      int v2 = edges[e][1];
+  threading::EnumerableThreadSpecific<Vector<int>> tls_queue_next;
 
-      if (dists[v1] == FLT_MAX || dists[v2] == FLT_MAX) {
-        if (dists[v1] > dists[v2]) {
-          std::swap(v1, v2);
-        }
-        sculpt_geodesic_mesh_test_dist_add(
-            vert_positions, v2, v1, SCULPT_GEODESIC_VERTEX_NONE, dists, initial_verts);
-      }
+  while (!queue.is_empty()) {
+    threading::parallel_for(queue.index_range(), 256, [&](const IndexRange range) {
+      Vector<int> &local_next = tls_queue_next.local();
+      for (const int qi : range) {
+        const int e = queue[qi];
+        int v1 = edges[e][0];
+        int v2 = edges[e][1];
 
-      for (const int face : edge_to_face_map[e]) {
-        if (!hide_poly.is_empty() && hide_poly[face]) {
-          continue;
+        const float d1 = std::atomic_ref<float>(dists[v1]).load(std::memory_order_relaxed);
+        const float d2 = std::atomic_ref<float>(dists[v2]).load(std::memory_order_relaxed);
+
+        if (d1 == FLT_MAX || d2 == FLT_MAX) {
+          /* One endpoint unreached: propagate edge-only distance from known to unknown. */
+          if (d1 > d2) {
+            std::swap(v1, v2);
+          }
+          sculpt_geodesic_mesh_test_dist_add(
+              vert_positions, v2, v1, SCULPT_GEODESIC_VERTEX_NONE, dists, initial_verts);
         }
-        for (const int v_other : corner_verts.slice(faces[face])) {
-          if (ELEM(v_other, v1, v2)) {
+
+        for (const int face : edge_to_face_map[e]) {
+          if (!hide_poly.is_empty() && hide_poly[face]) {
             continue;
           }
-          if (sculpt_geodesic_mesh_test_dist_add(
-                  vert_positions, v_other, v1, v2, dists, initial_verts))
-          {
-            for (const int e_other : vert_to_edge_map[v_other]) {
-              int ev_other;
-              if (edges[e_other][0] == v_other) {
-                ev_other = edges[e_other][1];
-              }
-              else {
-                ev_other = edges[e_other][0];
-              }
-
-              if (e_other != e && !edge_tag[e_other] &&
-                  (edge_to_face_map[e_other].is_empty() || dists[ev_other] != FLT_MAX))
-              {
-                if (affected_vert[v_other] || affected_vert[ev_other]) {
-                  edge_tag[e_other].set();
-                  BLI_LINKSTACK_PUSH(queue_next, POINTER_FROM_INT(e_other));
+          for (const int v_other : corner_verts.slice(faces[face])) {
+            if (ELEM(v_other, v1, v2)) {
+              continue;
+            }
+            if (sculpt_geodesic_mesh_test_dist_add(
+                    vert_positions, v_other, v1, v2, dists, initial_verts))
+            {
+              for (const int e_other : vert_to_edge_map[v_other]) {
+                const int ev_other = edges[e_other][0] == v_other ? edges[e_other][1] :
+                                                                    edges[e_other][0];
+                if (e_other == e) {
+                  continue;
+                }
+                if (!edge_to_face_map[e_other].is_empty() &&
+                    std::atomic_ref<float>(dists[ev_other]).load(std::memory_order_relaxed) ==
+                        FLT_MAX)
+                {
+                  continue;
+                }
+                if (!affected_vert[v_other] && !affected_vert[ev_other]) {
+                  continue;
+                }
+                /* Atomic test-and-set: only one thread enqueues each edge. */
+                if (std::atomic_ref<uint8_t>(edge_tag[e_other])
+                        .exchange(1, std::memory_order_relaxed) == 0)
+                {
+                  local_next.append(e_other);
                 }
               }
             }
           }
         }
       }
+    });
+
+    /* Merge thread-local next queues. */
+    for (Vector<int> &local : tls_queue_next) {
+      queue_next.extend(local);
+      local.clear();
     }
 
-    for (LinkNode *lnk = queue_next; lnk; lnk = lnk->next) {
-      const int e = POINTER_AS_INT(lnk->link);
-      edge_tag[e].reset();
+    /* Reset edge tags for next level. */
+    for (const int e : queue_next) {
+      edge_tag[e] = 0;
     }
 
-    BLI_LINKSTACK_SWAP(queue, queue_next);
-
-  } while (BLI_LINKSTACK_SIZE(queue));
-
-  BLI_LINKSTACK_FREE(queue);
-  BLI_LINKSTACK_FREE(queue_next);
+    queue.clear();
+    std::swap(queue, queue_next);
+  }
 
   return dists;
 }

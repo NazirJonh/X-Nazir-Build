@@ -6950,11 +6950,10 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
 
     DEG_id_tag_update(&ntree->id, 0);
     DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
-    /* Note: do NOT call DEG_relations_tag_update() here for newly created Single Image slots.
-     * The Image nodes will be built in depsgraph when first needed (during paint or material update).
-     * Calling it here causes "Could not find IMAGE_DATA component" errors because Image nodes
-     * aren't yet in the depsgraph at this point. Instead, rely on paint_image_2d.cc to sync
-     * imapaint.canvas when user starts painting, which will trigger proper relation updates. */
+    /* Rebuild depsgraph relations so the new Image (IMAGE_DATA) → Object (SHADING) edge is added.
+     * imapaint.canvas is already set above, so build_scene_parameters() will call build_image()
+     * for it and create the IMAGE_DATA node before the relation builder runs. */
+    DEG_relations_tag_update(bmain);
     ED_area_tag_redraw(CTX_wm_area(C));
 
     ED_paint_proj_mesh_data_check(*scene, *ob, nullptr, nullptr, nullptr, nullptr);

@@ -75,6 +75,7 @@
 #include "BKE_nla.hh"
 #include "BKE_node.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_paint.hh"
 #include "BKE_pointcache.h"
 #include "BKE_shader_fx.hh"
 #include "BKE_shrinkwrap.hh"
@@ -1381,10 +1382,34 @@ void DepsgraphRelationBuilder::build_object_paint_canvas_relations(Object *objec
     add_paint_canvas_image_relation(ts->imapaint.canvas, object);
   }
 
+  /* Texture Paint mode with material-based canvas.
+   * Image comes from material->texpaintslot[active_slot].ima.
+   * Same rationale as above: ensures depsgraph tracks image dependencies for material-based painting. */
+  if (ts->imapaint.mode == PAINT_CANVAS_SOURCE_MATERIAL) {
+    Material *mat = BKE_object_material_get(object, object->actcol);
+    if (mat != nullptr && mat->texpaintslot != nullptr &&
+        mat->paint_active_slot < mat->tot_slots) {
+      TexPaintSlot *slot = &mat->texpaintslot[mat->paint_active_slot];
+      add_paint_canvas_image_relation(slot->ima, object);
+    }
+  }
+
   /* Sculpt / generic paint-mode canvas (scene->toolsettings->paint_mode).
    * Same rationale as above for PAINT_CANVAS_SOURCE_IMAGE. */
   if (ts->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE) {
     add_paint_canvas_image_relation(ts->paint_mode.canvas_image, object);
+  }
+
+  /* Sculpt / generic paint-mode canvas with material-based source.
+   * Image comes from material->texpaintslot[active_slot].ima.
+   * Ensures depsgraph tracks dependencies when painting on material textures in Sculpt mode. */
+  if (ts->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
+    Material *mat = BKE_object_material_get(object, object->actcol);
+    if (mat != nullptr && mat->texpaintslot != nullptr &&
+        mat->paint_active_slot < mat->tot_slots) {
+      TexPaintSlot *slot = &mat->texpaintslot[mat->paint_active_slot];
+      add_paint_canvas_image_relation(slot->ima, object);
+    }
   }
 }
 

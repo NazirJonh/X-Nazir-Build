@@ -1756,7 +1756,6 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
     /* compositor listener deals with updating */
     WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, s->image);
     DEG_id_tag_update(&s->image->id, ID_RECALC_IMAGE_PIXELS);
-
   }
 }
 

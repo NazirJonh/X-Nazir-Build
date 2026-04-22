@@ -441,7 +441,8 @@ static void rna_ImaPaint_canvas_update(bContext *C, PointerRNA * /*ptr*/)
     ED_paint_proj_mesh_data_check(*scene, *ob, nullptr, nullptr, nullptr, nullptr);
     WM_main_add_notifier(NC_OBJECT | ND_DRAW, nullptr);
   }
-  /* Canvas image changed: rebuild depsgraph relations so the new Image → Object edges are added. */
+  /* Canvas image changed: rebuild depsgraph relations so the new Image → Object edges are added.
+   */
   DEG_relations_tag_update(bmain);
 }
 

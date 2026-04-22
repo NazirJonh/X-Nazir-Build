@@ -1343,8 +1343,7 @@ void DepsgraphRelationBuilder::build_object_shading(Object *object)
                RELATION_FLAG_NO_FLUSH);
 }
 
-void DepsgraphRelationBuilder::add_paint_canvas_image_relation(Image *canvas_image,
-                                                                Object *object)
+void DepsgraphRelationBuilder::add_paint_canvas_image_relation(Image *canvas_image, Object *object)
 {
   if (canvas_image == nullptr) {
     return;
@@ -1384,11 +1383,12 @@ void DepsgraphRelationBuilder::build_object_paint_canvas_relations(Object *objec
 
   /* Texture Paint mode with material-based canvas.
    * Image comes from material->texpaintslot[active_slot].ima.
-   * Same rationale as above: ensures depsgraph tracks image dependencies for material-based painting. */
+   * Same rationale as above: ensures depsgraph tracks image dependencies for material-based
+   * painting. */
   if (ts->imapaint.mode == PAINT_CANVAS_SOURCE_MATERIAL) {
     Material *mat = BKE_object_material_get(object, object->actcol);
-    if (mat != nullptr && mat->texpaintslot != nullptr &&
-        mat->paint_active_slot < mat->tot_slots) {
+    if (mat != nullptr && mat->texpaintslot != nullptr && mat->paint_active_slot < mat->tot_slots)
+    {
       TexPaintSlot *slot = &mat->texpaintslot[mat->paint_active_slot];
       add_paint_canvas_image_relation(slot->ima, object);
     }
@@ -1405,8 +1405,8 @@ void DepsgraphRelationBuilder::build_object_paint_canvas_relations(Object *objec
    * Ensures depsgraph tracks dependencies when painting on material textures in Sculpt mode. */
   if (ts->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
     Material *mat = BKE_object_material_get(object, object->actcol);
-    if (mat != nullptr && mat->texpaintslot != nullptr &&
-        mat->paint_active_slot < mat->tot_slots) {
+    if (mat != nullptr && mat->texpaintslot != nullptr && mat->paint_active_slot < mat->tot_slots)
+    {
       TexPaintSlot *slot = &mat->texpaintslot[mat->paint_active_slot];
       add_paint_canvas_image_relation(slot->ima, object);
     }

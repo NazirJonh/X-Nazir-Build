@@ -2181,8 +2181,7 @@ void DepsgraphNodeBuilder::build_image(Image *image)
    * This is the primary component for paint canvas images, layer images, and masks.
    * Architecture ready for hierarchical layer-system: per-layer granularity via separate
    * IMAGE_DATA nodes for each layer.image, mask.image, and channel.result. */
-  add_operation_node(
-      &image->id, NodeType::IMAGE_DATA, OperationCode::GENERIC_DATABLOCK_UPDATE);
+  add_operation_node(&image->id, NodeType::IMAGE_DATA, OperationCode::GENERIC_DATABLOCK_UPDATE);
   build_idproperties(image->id.properties);
   build_idproperties(image->id.system_properties);
   build_parameters(&image->id);

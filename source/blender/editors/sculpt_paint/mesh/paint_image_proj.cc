@@ -6964,7 +6964,8 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
     DEG_id_tag_update(&ntree->id, 0);
     /* Sync material changes to depsgraph to ensure the new image from texpaintslot is tracked.
      * The depsgraph builder's build_object_paint_canvas_relations() will handle adding
-     * Image → Object relations for both PAINT_CANVAS_SOURCE_IMAGE and PAINT_CANVAS_SOURCE_MATERIAL. */
+     * Image → Object relations for both PAINT_CANVAS_SOURCE_IMAGE and
+     * PAINT_CANVAS_SOURCE_MATERIAL. */
     DEG_id_tag_update(&ma->id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
     ED_area_tag_redraw(CTX_wm_area(C));
 

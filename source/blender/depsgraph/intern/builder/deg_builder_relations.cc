@@ -75,7 +75,6 @@
 #include "BKE_nla.hh"
 #include "BKE_node.hh"
 #include "BKE_node_runtime.hh"
-#include "BKE_paint.hh"
 #include "BKE_pointcache.h"
 #include "BKE_shader_fx.hh"
 #include "BKE_shrinkwrap.hh"
@@ -1361,37 +1360,20 @@ void DepsgraphRelationBuilder::build_object_paint_canvas_relations(Object *objec
   }
   const ToolSettings *ts = scene_->toolsettings;
 
-  /* Image Paint: canvas image may not be referenced by any shader node, so the normal
+  /* Image Paint (IMAGE source): canvas may not be referenced by any shader node, so the normal
    * Image → NodeTree → Material → Object chain may not exist. This explicit edge ensures
-   * canvas pixel changes always propagate to object shading. When the image IS in a shader
-   * graph the extra edge is redundant but harmless. */
+   * canvas pixel changes propagate to object shading. When the image IS in a shader graph
+   * the extra edge is redundant but harmless.
+   * MATERIAL source is intentionally omitted: those images are referenced by SH_NODE_TEX_IMAGE
+   * nodes, so build_nodetree_links() already creates Image → NodeTree relations and the normal
+   * chain handles propagation without accessing evaluated texpaintslot state here. */
   if (ts->imapaint.mode == PAINT_CANVAS_SOURCE_IMAGE) {
     add_paint_canvas_image_relation(ts->imapaint.canvas, object);
   }
 
-  /* Texture Paint (MATERIAL mode): image from material->texpaintslot[active_slot].ima. */
-  if (ts->imapaint.mode == PAINT_CANVAS_SOURCE_MATERIAL) {
-    Material *mat = BKE_object_material_get(object, object->actcol);
-    if (mat != nullptr && mat->texpaintslot != nullptr && mat->paint_active_slot < mat->tot_slots)
-    {
-      TexPaintSlot *slot = &mat->texpaintslot[mat->paint_active_slot];
-      add_paint_canvas_image_relation(slot->ima, object);
-    }
-  }
-
-  /* Sculpt mode / generic paint canvas (IMAGE source). */
+  /* Sculpt mode / generic paint canvas (IMAGE source only, same rationale as above). */
   if (ts->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE) {
     add_paint_canvas_image_relation(ts->paint_mode.canvas_image, object);
-  }
-
-  /* Sculpt mode / generic paint canvas (MATERIAL source). */
-  if (ts->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
-    Material *mat = BKE_object_material_get(object, object->actcol);
-    if (mat != nullptr && mat->texpaintslot != nullptr && mat->paint_active_slot < mat->tot_slots)
-    {
-      TexPaintSlot *slot = &mat->texpaintslot[mat->paint_active_slot];
-      add_paint_canvas_image_relation(slot->ima, object);
-    }
   }
 }
 

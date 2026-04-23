@@ -72,7 +72,8 @@ void DepsgraphRelationBuilder::build_scene_parameters(Scene *scene)
 
   /* Ensure IMAGE_DATA nodes exist for direct-image canvas sources so that
    * build_object_paint_canvas_relations() can connect them to object shading.
-   * Material-based canvas images are built lazily in add_paint_canvas_image_relation(). */
+   * Material-based canvas images are already tracked via node tree references and
+   * need no special handling here. */
   const ToolSettings *ts = scene->toolsettings;
   if (ts != nullptr) {
     if (ts->imapaint.mode == PAINT_CANVAS_SOURCE_IMAGE && ts->imapaint.canvas != nullptr) {

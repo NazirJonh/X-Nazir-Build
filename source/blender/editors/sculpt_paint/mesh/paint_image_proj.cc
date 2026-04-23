@@ -6951,13 +6951,10 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
       WM_event_add_notifier(C, NC_IMAGE | NA_ADDED, ima);
       ED_space_image_sync(bmain, ima, false);
 
-      /* Set the new image as the canvas for paint operations in Texture Paint mode.
-       * For Sculpt Mode, the image is used through material texpaintslot via the depsgraph
-       * builder's support for PAINT_CANVAS_SOURCE_MATERIAL. */
+      /* Set the new image as the canvas for paint operations in Texture Paint mode. */
       if (ob->mode == OB_MODE_TEXTURE_PAINT) {
         scene->toolsettings->imapaint.canvas = ima;
         scene->toolsettings->imapaint.mode = PAINT_CANVAS_SOURCE_IMAGE;
-        DEG_relations_tag_update(bmain);
       }
     }
     if (layer) {
@@ -6967,11 +6964,10 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
     }
 
     DEG_id_tag_update(&ntree->id, 0);
-    /* Sync material changes to depsgraph to ensure the new image from texpaintslot is tracked.
-     * The depsgraph builder's build_object_paint_canvas_relations() will handle adding
-     * Image → Object relations for both PAINT_CANVAS_SOURCE_IMAGE and
-     * PAINT_CANVAS_SOURCE_MATERIAL. */
-    DEG_id_tag_update(&ma->id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+    DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
+    /* Rebuild depsgraph so the new image gets an IMAGE_DATA node and
+     * Image → NodeTree relation, enabling DEG_id_tag_update propagation during painting. */
+    DEG_relations_tag_update(bmain);
     ED_area_tag_redraw(CTX_wm_area(C));
 
     ED_paint_proj_mesh_data_check(*scene, *ob, nullptr, nullptr, nullptr, nullptr);

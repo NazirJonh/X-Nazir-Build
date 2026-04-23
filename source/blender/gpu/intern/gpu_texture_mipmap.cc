@@ -157,6 +157,17 @@ static void update_mipmaps(Texture &texture, Shader &shader)
                                               GPU_TEXTURE_USAGE_SHADER_WRITE,
                                           nullptr);
     }
+    if (UNLIKELY(texture_ptr == nullptr)) {
+      /* GPU allocation failed (e.g. VRAM exhaustion at high resolutions).
+       * Skip mipmap generation for this frame; mipmaps will be regenerated on the next
+       * successful full update. */
+      CLOG_WARN(&LOG,
+                "Failed to allocate temporary texture for SRGB mipmap generation "
+                "(%dx%d). Skipping mipmap update.",
+                texture.width_get(),
+                texture.height_get());
+      return;
+    }
     texture.copy_to(texture_ptr, IndexRange(1));
   }
 

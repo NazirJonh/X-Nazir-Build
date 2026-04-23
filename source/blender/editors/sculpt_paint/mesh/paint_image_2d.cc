@@ -1720,9 +1720,7 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
     if (s->tiles[i].need_redraw) {
       ImBuf *ibuf = BKE_image_acquire_ibuf(s->image, &s->tiles[i].iuser, nullptr);
 
-      /* `texpaint=true` uploads dirty regions to the GPU texture so 3D Viewport (texture paint,
-       * materials) updates during the stroke, not only the Image Editor. */
-      imapaint_image_update(s->sima, s->image, ibuf, &s->tiles[i].iuser, true);
+      imapaint_image_update(s->sima, s->image, ibuf, &s->tiles[i].iuser, false);
 
       BKE_image_release_ibuf(s->image, ibuf, nullptr);
 

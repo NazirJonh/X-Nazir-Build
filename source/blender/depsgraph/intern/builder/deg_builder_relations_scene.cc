@@ -70,15 +70,9 @@ void DepsgraphRelationBuilder::build_scene_parameters(Scene *scene)
   /* See the comment in the DepsgraphNodeBuilder::build_scene_parameters(). */
   build_scene_compositor(scene);
 
-  /* Ensure paint canvas images are registered as depsgraph nodes so that
-   * build_object_paint_canvas_relations() can connect them to objects.
-   * These are DNA fields, so they are safe to read during graph building.
-   *
-   * Layer-system readiness: when PaintLayerStack is introduced, also iterate
-   * all layer images in the stack here so they become part of the graph.
-   *
-   * NOTE: IMAGE nodes for material-based paint canvas are created when
-   * add_paint_canvas_image_relation() calls build_image(). */
+  /* Ensure IMAGE_DATA nodes exist for direct-image canvas sources so that
+   * build_object_paint_canvas_relations() can connect them to object shading.
+   * Material-based canvas images are built lazily in add_paint_canvas_image_relation(). */
   const ToolSettings *ts = scene->toolsettings;
   if (ts != nullptr) {
     if (ts->imapaint.mode == PAINT_CANVAS_SOURCE_IMAGE && ts->imapaint.canvas != nullptr) {

@@ -1349,8 +1349,6 @@ void DepsgraphRelationBuilder::add_paint_canvas_image_relation(Image *canvas_ima
     return;
   }
   build_image(canvas_image);
-  /* Connect canvas image pixel data (IMAGE_DATA component) to object shading.
-   * When canvas image pixels change (texture paint), object shading is marked for update. */
   ComponentKey canvas_key(&canvas_image->id, NodeType::IMAGE_DATA);
   OperationKey object_shading_key(&object->id, NodeType::SHADING, OperationCode::SHADING);
   add_relation(canvas_key, object_shading_key, "Paint Canvas -> Object Shading");
@@ -1363,28 +1361,15 @@ void DepsgraphRelationBuilder::build_object_paint_canvas_relations(Object *objec
   }
   const ToolSettings *ts = scene_->toolsettings;
 
-  /* Image Paint mode: directly selected canvas (scene->toolsettings->imapaint.canvas).
-   * When this image is NOT referenced by any SH_NODE_TEX_IMAGE in a material shader graph,
-   * the normal Image → NodeTree → Material → Object chain does not exist.
-   * This explicit relation ensures that tagging the canvas propagates to all objects.
-   *
-   * When the image IS in a shader graph the existing chain already covers propagation;
-   * the extra edge here is redundant but harmless.
-   *
-   * Layer-system readiness: when a PaintLayerStack is introduced, replace the two calls
-   * below with a loop over all layer images:
-   *   for (PaintLayer *layer : stack->layers) {
-   *     add_paint_canvas_image_relation(layer->image, object);
-   *   }
-   * This gives per-layer granularity: only objects using a changed layer are updated. */
+  /* Image Paint: canvas image may not be referenced by any shader node, so the normal
+   * Image → NodeTree → Material → Object chain may not exist. This explicit edge ensures
+   * canvas pixel changes always propagate to object shading. When the image IS in a shader
+   * graph the extra edge is redundant but harmless. */
   if (ts->imapaint.mode == PAINT_CANVAS_SOURCE_IMAGE) {
     add_paint_canvas_image_relation(ts->imapaint.canvas, object);
   }
 
-  /* Texture Paint mode with material-based canvas.
-   * Image comes from material->texpaintslot[active_slot].ima.
-   * Same rationale as above: ensures depsgraph tracks image dependencies for material-based
-   * painting. */
+  /* Texture Paint (MATERIAL mode): image from material->texpaintslot[active_slot].ima. */
   if (ts->imapaint.mode == PAINT_CANVAS_SOURCE_MATERIAL) {
     Material *mat = BKE_object_material_get(object, object->actcol);
     if (mat != nullptr && mat->texpaintslot != nullptr && mat->paint_active_slot < mat->tot_slots)
@@ -1394,15 +1379,12 @@ void DepsgraphRelationBuilder::build_object_paint_canvas_relations(Object *objec
     }
   }
 
-  /* Sculpt / generic paint-mode canvas (scene->toolsettings->paint_mode).
-   * Same rationale as above for PAINT_CANVAS_SOURCE_IMAGE. */
+  /* Sculpt mode / generic paint canvas (IMAGE source). */
   if (ts->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE) {
     add_paint_canvas_image_relation(ts->paint_mode.canvas_image, object);
   }
 
-  /* Sculpt / generic paint-mode canvas with material-based source.
-   * Image comes from material->texpaintslot[active_slot].ima.
-   * Ensures depsgraph tracks dependencies when painting on material textures in Sculpt mode. */
+  /* Sculpt mode / generic paint canvas (MATERIAL source). */
   if (ts->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
     Material *mat = BKE_object_material_get(object, object->actcol);
     if (mat != nullptr && mat->texpaintslot != nullptr && mat->paint_active_slot < mat->tot_slots)

@@ -6953,6 +6953,7 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
       if (ob->mode == OB_MODE_TEXTURE_PAINT) {
         scene->toolsettings->imapaint.canvas = ima;
         scene->toolsettings->imapaint.mode = PAINT_CANVAS_SOURCE_IMAGE;
+        DEG_relations_tag_update(bmain);
       }
     }
     if (layer) {

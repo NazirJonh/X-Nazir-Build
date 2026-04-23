@@ -1119,14 +1119,12 @@ enum IDRecalcFlag {
 
   /* Pixel data of an Image data-block changed (texture paint stroke, GPU texture upload,
    * compositing output, external file reload).
-   * Maps to GENERIC_DATABLOCK — the only depsgraph component that Image has.
+   * Maps to IMAGE_DATA component (NodeType::IMAGE_DATA).
    * Use this flag (not ID_RECALC_SHADING) when tagging an Image whose pixels changed.
-   * Correct propagation path:
-   *   Image (GENERIC_DATABLOCK) → NodeTree → Material → Object  [shader-node images]
-   *   Image (GENERIC_DATABLOCK) → Object   [explicit canvas relation, see
-   *     DepsgraphRelationBuilder::build_object_paint_canvas_relations()]
-   * Layer-system readiness: when PaintLayerStack is introduced, each layer image will use
-   * this same flag so per-layer granularity is maintained without new depsgraph machinery. */
+   * Propagation paths:
+   *   Image (IMAGE_DATA) → NodeTree → Material → Object  [shader-node images]
+   *   Image (IMAGE_DATA) → Object (SHADING)              [canvas relation, see
+   *     DepsgraphRelationBuilder::build_object_paint_canvas_relations()] */
   ID_RECALC_IMAGE_PIXELS = (1 << 27),
 
   /* Provisioned flags.

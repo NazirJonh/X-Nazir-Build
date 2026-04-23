@@ -174,16 +174,9 @@ void depsgraph_tag_to_component_opcode(const ID *id,
       *component_type = NodeType::SHADING;
       break;
     case ID_RECALC_IMAGE_PIXELS:
-      /* Pixel data of an Image changed (texture paint stroke, GPU texture upload,
-       * compositing output, external file reload). Only meaningful for ID_IM;
-       * for other ID types this flag is silently ignored.
-       * Maps to IMAGE_DATA — dedicated component for image pixel data (not GENERIC_DATABLOCK).
-       * Tagging Image with this flag triggers propagation via:
-       *   Image (IMAGE_DATA) → NodeTree → Material → Object  [shader-node path]
-       *   Image (IMAGE_DATA) → Object (SHADING)              [canvas relation path]
-       * Architecture ready for hierarchical layer-system: each layer.image, mask.image,
-       * and channel.result will have its own IMAGE_DATA node for per-layer granularity.
-       * See DepsgraphRelationBuilder::build_object_paint_canvas_relations(). */
+      /* Only meaningful for Image IDs; maps to IMAGE_DATA component.
+       * Propagation: Image (IMAGE_DATA) → NodeTree → Material → Object [shader path]
+       *              Image (IMAGE_DATA) → Object (SHADING)              [canvas path] */
       if (GS(id->name) == ID_IM) {
         *component_type = NodeType::IMAGE_DATA;
       }

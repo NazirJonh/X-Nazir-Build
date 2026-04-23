@@ -4807,11 +4807,12 @@ static bool partial_redraw_array_merge(ImagePaintPartialRedraw *pr,
 
 /* Loop over all images on this mesh and update any we have touched.
  * Caller is responsible for emitting notifiers to keep Image Editor and 3D Viewport in sync. */
-static void project_image_refresh_tagged(ProjPaintState *ps)
+static bool project_image_refresh_tagged(ProjPaintState *ps)
 {
   ImagePaintPartialRedraw *pr;
   ProjPaintImage *projIma;
   int a, i;
+  bool redraw = false;
 
   for (a = 0, projIma = ps->projImages; a < ps->image_tot; a++, projIma++) {
     if (projIma->touch) {
@@ -4821,6 +4822,7 @@ static void project_image_refresh_tagged(ProjPaintState *ps)
         if (BLI_rcti_is_valid(&pr->dirty_region)) {
           set_imapaintpartial(pr);
           imapaint_image_update(nullptr, projIma->ima, projIma->ibuf, &projIma->iuser, true);
+          redraw = true;
         }
 
         partial_redraw_single_init(pr);
@@ -4830,6 +4832,8 @@ static void project_image_refresh_tagged(ProjPaintState *ps)
       projIma->touch = false;
     }
   }
+
+  return redraw;
 }
 
 /* run this per painting onto each mouse location */

@@ -132,6 +132,8 @@ static TexSnapshot primary_snap = {nullptr};
 static TexSnapshot secondary_snap = {nullptr};
 static CursorSnapshot cursor_snap = {nullptr};
 
+static bool g_paint_overlay_debug = true;
+
 /* RAII guard for GPU blend and depth test state during paint cursor drawing. */
 class PaintCursorGPUStateGuard {
  private:
@@ -338,9 +340,31 @@ static int load_tex(Paint *paint, Brush *br, ViewContext *vc, float zoom, bool c
 
   if (refresh) {
     ImagePool *pool = nullptr;
-    /* Stencil is rotated later. */
-    const float rotation = (mtex->brush_map_mode != MTEX_MAP_MODE_STENCIL) ? -mtex->rot : 0.0f;
+    /* Stencil and Area modes apply rotation later via GPU matrix (in cursor/3D space).
+     * For View and Tiled modes, pre-rotate the sample coordinates so the GPU matrix only
+     * needs to account for rake; mixing screen-space UV pre-rotation with cursor-space GPU
+     * rotation for Area mode would apply mtex->rot twice in incompatible coordinate systems. */
+    const float rotation = (mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL ||
+                            mtex->brush_map_mode == MTEX_MAP_MODE_AREA) ?
+                               0.0f :
+                               -mtex->rot;
     const float radius = BKE_brush_radius_get(paint, br) * zoom;
+
+    if (g_paint_overlay_debug) {
+      printf(
+          "[paint_overlay] load_tex: primary=%d col=%d map_mode=%d mtex.rot(rad)=%.6f "
+          "sample_rotation(rad)=%.6f zoom=%.6f brush_radius=%d radius_px=%.3f win=%dx%d\n",
+          primary,
+          col,
+          int(mtex->brush_map_mode),
+          mtex->rot,
+          rotation,
+          zoom,
+          BKE_brush_radius_get(paint, br),
+          radius,
+          vc->region ? vc->region->winx : -1,
+          vc->region ? vc->region->winy : -1);
+    }
 
     make_tex_snap(target, vc, zoom, br, mtex);
 
@@ -665,9 +689,22 @@ static bool paint_draw_tex_overlay(Paint *paint,
 
     /* Brush rotation. */
     GPU_matrix_translate_2fv(center);
-    GPU_matrix_rotate_2d(
-        RAD2DEGF(primary ? paint_runtime->brush_rotation : paint_runtime->brush_rotation_sec));
+    const float brush_rotation = (primary ? paint_runtime->brush_rotation :
+                                            paint_runtime->brush_rotation_sec);
+    GPU_matrix_rotate_2d(RAD2DEGF(brush_rotation));
     GPU_matrix_translate_2f(-center[0], -center[1]);
+
+    if (g_paint_overlay_debug) {
+      printf(
+          "[paint_overlay] draw_tex_overlay(VIEW): primary=%d center=(%.2f,%.2f) "
+          "brush_rotation(rad)=%.6f (deg)=%.3f anchored=%d\n",
+          primary,
+          center[0],
+          center[1],
+          brush_rotation,
+          RAD2DEGF(brush_rotation),
+          int(paint_runtime->draw_anchored));
+    }
 
     /* Scale based on tablet pressure. */
     if (primary && paint_runtime->stroke_active && BKE_brush_use_size_pressure(brush)) {
@@ -719,6 +756,20 @@ static bool paint_draw_tex_overlay(Paint *paint,
       GPU_matrix_translate_2fv(brush->mask_stencil_pos);
     }
     GPU_matrix_rotate_2d(RAD2DEGF(mtex->rot));
+
+    if (g_paint_overlay_debug) {
+      const float *st_pos = primary ? brush->stencil_pos : brush->mask_stencil_pos;
+      printf(
+          "[paint_overlay] draw_tex_overlay(STENCIL): primary=%d stencil_pos=(%.2f,%.2f) "
+          "mtex.rot(rad)=%.6f (deg)=%.3f dim=(%.2f,%.2f)\n",
+          primary,
+          st_pos[0],
+          st_pos[1],
+          mtex->rot,
+          RAD2DEGF(mtex->rot),
+          primary ? brush->stencil_dimension[0] : brush->mask_stencil_dimension[0],
+          primary ? brush->stencil_dimension[1] : brush->mask_stencil_dimension[1]);
+    }
   }
 
   /* Set quad color. Colored overlay does not get blending. */
@@ -2519,16 +2570,11 @@ static float brush_rotation_to_cursor_space(const ViewContext &vc,
   const math::AxisAngle between_vecs(z_axis, normal_vec);
   const float4x4 cursor_rot = math::from_rotation<float4x4>(between_vecs);
 
+  /* cursor_rot is column-major (ptr()[col][row]); extract columns, not rows.
+   * Column 0 is the cursor X axis in local space, column 1 is the cursor Y axis. */
   const float (*rot_ptr)[4] = cursor_rot.ptr();
-  float cursor_x[3];
-  cursor_x[0] = rot_ptr[0][0];
-  cursor_x[1] = rot_ptr[1][0];
-  cursor_x[2] = rot_ptr[2][0];
-
-  float cursor_y[3];
-  cursor_y[0] = rot_ptr[0][1];
-  cursor_y[1] = rot_ptr[1][1];
-  cursor_y[2] = rot_ptr[2][1];
+  float cursor_x[3] = {rot_ptr[0][0], rot_ptr[0][1], rot_ptr[0][2]};
+  float cursor_y[3] = {rot_ptr[1][0], rot_ptr[1][1], rot_ptr[1][2]};
 
   normalize_v3(cursor_x);
   normalize_v3(cursor_y);
@@ -2643,6 +2689,19 @@ bool paint_draw_tex_overlay_3d(Paint *paint,
     if (mtex->brush_map_mode == MTEX_MAP_MODE_AREA) {
       total_rotation = brush_rotation_to_cursor_space(*vc, location, normal, total_rotation);
     }
+
+    if (g_paint_overlay_debug && mtex->brush_map_mode == MTEX_MAP_MODE_AREA) {
+      printf(
+          "[paint_overlay] draw_tex_overlay_3d(AREA): primary=%d mtex.rot(rad)=%.6f "
+          "brush_rotation(rad)=%.6f screen_total(rad)=%.6f cursor_total(rad)=%.6f (deg)=%.3f\n",
+          primary,
+          mtex->rot,
+          brush_rotation,
+          brush_rotation + mtex->rot,
+          total_rotation,
+          RAD2DEGF(total_rotation));
+    }
+
     if (total_rotation != 0.0f) {
       GPU_matrix_push();
       GPU_matrix_rotate_axis(RAD2DEGF(total_rotation), 'Z');

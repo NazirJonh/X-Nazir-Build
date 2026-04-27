@@ -7,6 +7,8 @@
  */
 
 #include <algorithm>
+#include <memory>
+#include <vector>
 
 #include "MEM_guardedalloc.h"
 
@@ -98,6 +100,9 @@ struct TexSnapshot {
   int old_size;
   float old_zoom;
   bool old_col;
+  /* Pointers to detect when brush or texture changes. */
+  const Brush *brush_ptr;
+  const Tex *texture_ptr;
 };
 
 struct CursorSnapshot {
@@ -107,33 +112,56 @@ struct CursorSnapshot {
   int curve_preset;
 };
 
+namespace ed::sculpt_paint {
+
+/* Forward declaration */
+bool paint_draw_tex_overlay_3d(Paint *paint,
+                               Brush *brush,
+                               ViewContext *vc,
+                               float zoom,
+                               const PaintMode mode,
+                               bool col,
+                               bool primary,
+                               float radius,
+                               float brush_rotation,
+                               const float location[3],
+                               const float normal[3]);
+
+/* Global variables for texture snapshots */
 static TexSnapshot primary_snap = {nullptr};
 static TexSnapshot secondary_snap = {nullptr};
 static CursorSnapshot cursor_snap = {nullptr};
 
-void paint_cursor_delete_textures()
+/* RAII guard for GPU blend and depth test state during paint cursor drawing. */
+class PaintCursorGPUStateGuard {
+ private:
+  GPUBlend saved_blend_state_;
+  GPUDepthTest saved_depth_test_state_;
+
+ public:
+  PaintCursorGPUStateGuard()
+  {
+    saved_blend_state_ = GPU_blend_get();
+    saved_depth_test_state_ = GPU_depth_test_get();
+  }
+
+  ~PaintCursorGPUStateGuard()
+  {
+    GPU_blend(saved_blend_state_);
+    GPU_depth_test(saved_depth_test_state_);
+  }
+
+  PaintCursorGPUStateGuard(const PaintCursorGPUStateGuard &) = delete;
+  PaintCursorGPUStateGuard &operator=(const PaintCursorGPUStateGuard &) = delete;
+};
+
+static int same_tex_snap(
+    TexSnapshot *snap, MTex *mtex, ViewContext *vc, bool col, float zoom, Brush *brush)
 {
-  if (primary_snap.overlay_texture) {
-    GPU_texture_free(primary_snap.overlay_texture);
-  }
-  if (secondary_snap.overlay_texture) {
-    GPU_texture_free(secondary_snap.overlay_texture);
-  }
-  if (cursor_snap.overlay_texture) {
-    GPU_texture_free(cursor_snap.overlay_texture);
+  if (snap->brush_ptr != brush || snap->texture_ptr != mtex->tex) {
+    return 0;
   }
 
-  memset(&primary_snap, 0, sizeof(TexSnapshot));
-  memset(&secondary_snap, 0, sizeof(TexSnapshot));
-  memset(&cursor_snap, 0, sizeof(CursorSnapshot));
-
-  BKE_paint_invalidate_overlay_all();
-}
-
-namespace ed::sculpt_paint {
-
-static int same_tex_snap(TexSnapshot *snap, MTex *mtex, ViewContext *vc, bool col, float zoom)
-{
   return (/* make brush smaller shouldn't cause a resample */
           //(mtex->brush_map_mode != MTEX_MAP_MODE_VIEW ||
           //(BKE_brush_size_get(vc->scene, brush) <= snap->BKE_brush_size_get)) &&
@@ -144,11 +172,13 @@ static int same_tex_snap(TexSnapshot *snap, MTex *mtex, ViewContext *vc, bool co
           snap->old_col == col);
 }
 
-static void make_tex_snap(TexSnapshot *snap, ViewContext *vc, float zoom)
+static void make_tex_snap(TexSnapshot *snap, ViewContext *vc, float zoom, Brush *brush, MTex *mtex)
 {
   snap->old_zoom = zoom;
   snap->winx = vc->region->winx;
   snap->winy = vc->region->winy;
+  snap->brush_ptr = brush;
+  snap->texture_ptr = mtex->tex;
 }
 
 struct LoadTexData {
@@ -250,7 +280,18 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
 
         /* Clamp to avoid precision overflow. */
         CLAMP(avg, 0.0f, 1.0f);
-        buffer[index] = 255 - uchar(255 * avg);
+
+        /* Convert texture intensity to alpha-based display (like radial_control):
+         * Light parts (high avg) -> dark color (low RGB) with high alpha
+         * Dark parts (low avg) -> transparent (low alpha)
+         * RGB channels store inverted intensity for dark appearance
+         * Alpha channel stores intensity for transparency control */
+        const float inverted_intensity = 1.0f - avg;
+        const int rgba_index = index * 4;
+        buffer[rgba_index] = uchar(255 * inverted_intensity);     /* R - dark for light parts */
+        buffer[rgba_index + 1] = uchar(255 * inverted_intensity); /* G - dark for light parts */
+        buffer[rgba_index + 2] = uchar(255 * inverted_intensity); /* B - dark for light parts */
+        buffer[rgba_index + 3] = uchar(255 * avg); /* A - transparent for dark parts */
       }
     }
     else {
@@ -261,11 +302,18 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
         buffer[index * 4 + 3] = 0;
       }
       else {
-        buffer[index] = 0;
+        /* Set all RGBA channels to 0 (transparent) */
+        const int rgba_index = index * 4;
+        buffer[rgba_index] = 0;     /* R */
+        buffer[rgba_index + 1] = 0; /* G */
+        buffer[rgba_index + 2] = 0; /* B */
+        buffer[rgba_index + 3] = 0; /* A */
       }
     }
   }
 }
+
+static int load_tex(Paint *paint, Brush *br, ViewContext *vc, float zoom, bool col, bool primary);
 
 static int load_tex(Paint *paint, Brush *br, ViewContext *vc, float zoom, bool col, bool primary)
 {
@@ -283,8 +331,8 @@ static int load_tex(Paint *paint, Brush *br, ViewContext *vc, float zoom, bool c
                    (overlay_flags & PAINT_OVERLAY_INVALID_TEXTURE_SECONDARY));
   target = (primary) ? &primary_snap : &secondary_snap;
 
-  refresh = !target->overlay_texture || (invalid != 0) ||
-            !same_tex_snap(target, mtex, vc, col, zoom);
+  bool same_snap_result = same_tex_snap(target, mtex, vc, col, zoom, br);
+  refresh = !target->overlay_texture || (invalid != 0) || !same_snap_result;
 
   init = (target->overlay_texture != nullptr);
 
@@ -294,7 +342,7 @@ static int load_tex(Paint *paint, Brush *br, ViewContext *vc, float zoom, bool c
     const float rotation = (mtex->brush_map_mode != MTEX_MAP_MODE_STENCIL) ? -mtex->rot : 0.0f;
     const float radius = BKE_brush_radius_get(paint, br) * zoom;
 
-    make_tex_snap(target, vc, zoom);
+    make_tex_snap(target, vc, zoom, br, mtex);
 
     if (mtex->brush_map_mode == MTEX_MAP_MODE_VIEW) {
       int s = BKE_brush_radius_get(paint, br);
@@ -323,12 +371,8 @@ static int load_tex(Paint *paint, Brush *br, ViewContext *vc, float zoom, bool c
       target->old_size = size;
       target->old_col = col;
     }
-    if (col) {
-      buffer = MEM_new_array_uninitialized<uchar>(size * size * 4, "load_tex");
-    }
-    else {
-      buffer = MEM_new_array_uninitialized<uchar>(size * size, "load_tex");
-    }
+    /* Always use RGBA format to support alpha channel for transparency */
+    buffer = MEM_new_array_uninitialized<uchar>(size * size * 4, "load_tex");
 
     pool = BKE_image_pool_new();
 
@@ -361,16 +405,14 @@ static int load_tex(Paint *paint, Brush *br, ViewContext *vc, float zoom, bool c
     }
 
     if (!target->overlay_texture) {
-      gpu::TextureFormat format = col ? gpu::TextureFormat::UNORM_8_8_8_8 :
-                                        gpu::TextureFormat::UNORM_8;
+      /* Use RGBA format for both colored and grayscale textures to support alpha channel */
+      gpu::TextureFormat format = gpu::TextureFormat::UNORM_8_8_8_8;
       eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_ATTACHMENT;
       target->overlay_texture = GPU_texture_create_2d(
           "paint_cursor_overlay", size, size, 1, format, usage, nullptr);
       GPU_texture_update(target->overlay_texture, GPU_DATA_UBYTE, buffer);
 
-      if (!col) {
-        GPU_texture_swizzle_set(target->overlay_texture, "rrrr");
-      }
+      /* No swizzle needed - we already store RGB and Alpha in correct channels */
     }
 
     if (init) {
@@ -605,122 +647,126 @@ static bool paint_draw_tex_overlay(Paint *paint,
   }
 
   bke::PaintRuntime *paint_runtime = paint->runtime;
-  if (load_tex(paint, brush, vc, zoom, col, primary)) {
-    GPU_color_mask(true, true, true, true);
-    GPU_depth_test(GPU_DEPTH_NONE);
 
-    if (mtex->brush_map_mode == MTEX_MAP_MODE_VIEW) {
-      GPU_matrix_push();
+  if (!load_tex(paint, brush, vc, zoom, col, primary)) {
+    return false;
+  }
 
-      float center[2] = {
-          paint_runtime->draw_anchored ? paint_runtime->anchored_initial_mouse[0] : x,
-          paint_runtime->draw_anchored ? paint_runtime->anchored_initial_mouse[1] : y,
-      };
+  GPU_color_mask(true, true, true, true);
+  GPU_depth_test(GPU_DEPTH_NONE);
 
-      /* Brush rotation. */
+  if (mtex->brush_map_mode == MTEX_MAP_MODE_VIEW) {
+    GPU_matrix_push();
+
+    float center[2] = {
+        paint_runtime->draw_anchored ? paint_runtime->anchored_initial_mouse[0] : x,
+        paint_runtime->draw_anchored ? paint_runtime->anchored_initial_mouse[1] : y,
+    };
+
+    /* Brush rotation. */
+    GPU_matrix_translate_2fv(center);
+    GPU_matrix_rotate_2d(
+        RAD2DEGF(primary ? paint_runtime->brush_rotation : paint_runtime->brush_rotation_sec));
+    GPU_matrix_translate_2f(-center[0], -center[1]);
+
+    /* Scale based on tablet pressure. */
+    if (primary && paint_runtime->stroke_active && BKE_brush_use_size_pressure(brush)) {
+      const float scale = paint_runtime->size_pressure_value;
       GPU_matrix_translate_2fv(center);
-      GPU_matrix_rotate_2d(
-          RAD2DEGF(primary ? paint_runtime->brush_rotation : paint_runtime->brush_rotation_sec));
+      GPU_matrix_scale_2f(scale, scale);
       GPU_matrix_translate_2f(-center[0], -center[1]);
-
-      /* Scale based on tablet pressure. */
-      if (primary && paint_runtime->stroke_active && BKE_brush_use_size_pressure(brush)) {
-        const float scale = paint_runtime->size_pressure_value;
-        GPU_matrix_translate_2fv(center);
-        GPU_matrix_scale_2f(scale, scale);
-        GPU_matrix_translate_2f(-center[0], -center[1]);
-      }
-
-      if (paint_runtime->draw_anchored) {
-        quad.xmin = center[0] - paint_runtime->anchored_size;
-        quad.ymin = center[1] - paint_runtime->anchored_size;
-        quad.xmax = center[0] + paint_runtime->anchored_size;
-        quad.ymax = center[1] + paint_runtime->anchored_size;
-      }
-      else {
-        const int radius = BKE_brush_radius_get(paint, brush) * zoom;
-        quad.xmin = center[0] - radius;
-        quad.ymin = center[1] - radius;
-        quad.xmax = center[0] + radius;
-        quad.ymax = center[1] + radius;
-      }
     }
-    else if (mtex->brush_map_mode == MTEX_MAP_MODE_TILED) {
-      quad.xmin = 0;
-      quad.ymin = 0;
-      quad.xmax = BLI_rcti_size_x(&vc->region->winrct);
-      quad.ymax = BLI_rcti_size_y(&vc->region->winrct);
+
+    if (paint_runtime->draw_anchored) {
+      quad.xmin = center[0] - paint_runtime->anchored_size;
+      quad.ymin = center[1] - paint_runtime->anchored_size;
+      quad.xmax = center[0] + paint_runtime->anchored_size;
+      quad.ymax = center[1] + paint_runtime->anchored_size;
     }
-    /* Stencil code goes here. */
     else {
-      if (primary) {
-        quad.xmin = -brush->stencil_dimension[0];
-        quad.ymin = -brush->stencil_dimension[1];
-        quad.xmax = brush->stencil_dimension[0];
-        quad.ymax = brush->stencil_dimension[1];
-      }
-      else {
-        quad.xmin = -brush->mask_stencil_dimension[0];
-        quad.ymin = -brush->mask_stencil_dimension[1];
-        quad.xmax = brush->mask_stencil_dimension[0];
-        quad.ymax = brush->mask_stencil_dimension[1];
-      }
-      GPU_matrix_push();
-      if (primary) {
-        GPU_matrix_translate_2fv(brush->stencil_pos);
-      }
-      else {
-        GPU_matrix_translate_2fv(brush->mask_stencil_pos);
-      }
-      GPU_matrix_rotate_2d(RAD2DEGF(mtex->rot));
-    }
-
-    /* Set quad color. Colored overlay does not get blending. */
-    GPUVertFormat *format = immVertexFormat();
-    uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
-    uint texCoord = GPU_vertformat_attr_add(format, "texCoord", gpu::VertAttrType::SFLOAT_32_32);
-
-    /* Premultiplied alpha blending. */
-    GPU_blend(GPU_BLEND_ALPHA_PREMULT);
-
-    immBindBuiltinProgram(GPU_SHADER_3D_IMAGE_COLOR);
-
-    float final_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    if (!col) {
-      copy_v3_v3(final_color, U.sculpt_paint_overlay_col);
-    }
-    mul_v4_fl(final_color, overlay_alpha * 0.01f);
-    immUniformColor4fv(final_color);
-
-    gpu::Texture *texture = (primary) ? primary_snap.overlay_texture :
-                                        secondary_snap.overlay_texture;
-
-    GPUSamplerExtendMode extend_mode = (mtex->brush_map_mode == MTEX_MAP_MODE_VIEW) ?
-                                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER :
-                                           GPU_SAMPLER_EXTEND_MODE_REPEAT;
-    immBindTextureSampler(
-        "image", texture, {GPU_SAMPLER_FILTERING_LINEAR, extend_mode, extend_mode});
-
-    /* Draw textured quad. */
-    immBegin(GPU_PRIM_TRI_FAN, 4);
-    immAttr2f(texCoord, 0.0f, 0.0f);
-    immVertex2f(pos, quad.xmin, quad.ymin);
-    immAttr2f(texCoord, 1.0f, 0.0f);
-    immVertex2f(pos, quad.xmax, quad.ymin);
-    immAttr2f(texCoord, 1.0f, 1.0f);
-    immVertex2f(pos, quad.xmax, quad.ymax);
-    immAttr2f(texCoord, 0.0f, 1.0f);
-    immVertex2f(pos, quad.xmin, quad.ymax);
-    immEnd();
-
-    immUnbindProgram();
-
-    GPU_texture_unbind(texture);
-
-    if (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_STENCIL, MTEX_MAP_MODE_VIEW)) {
-      GPU_matrix_pop();
+      const int radius = BKE_brush_radius_get(paint, brush) * zoom;
+      quad.xmin = center[0] - radius;
+      quad.ymin = center[1] - radius;
+      quad.xmax = center[0] + radius;
+      quad.ymax = center[1] + radius;
     }
   }
+  else if (mtex->brush_map_mode == MTEX_MAP_MODE_TILED) {
+    quad.xmin = 0;
+    quad.ymin = 0;
+    quad.xmax = BLI_rcti_size_x(&vc->region->winrct);
+    quad.ymax = BLI_rcti_size_y(&vc->region->winrct);
+  }
+  /* Stencil code goes here. */
+  else {
+    if (primary) {
+      quad.xmin = -brush->stencil_dimension[0];
+      quad.ymin = -brush->stencil_dimension[1];
+      quad.xmax = brush->stencil_dimension[0];
+      quad.ymax = brush->stencil_dimension[1];
+    }
+    else {
+      quad.xmin = -brush->mask_stencil_dimension[0];
+      quad.ymin = -brush->mask_stencil_dimension[1];
+      quad.xmax = brush->mask_stencil_dimension[0];
+      quad.ymax = brush->mask_stencil_dimension[1];
+    }
+    GPU_matrix_push();
+    if (primary) {
+      GPU_matrix_translate_2fv(brush->stencil_pos);
+    }
+    else {
+      GPU_matrix_translate_2fv(brush->mask_stencil_pos);
+    }
+    GPU_matrix_rotate_2d(RAD2DEGF(mtex->rot));
+  }
+
+  /* Set quad color. Colored overlay does not get blending. */
+  GPUVertFormat *format = immVertexFormat();
+  uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  uint texCoord = GPU_vertformat_attr_add(format, "texCoord", gpu::VertAttrType::SFLOAT_32_32);
+
+  /* Premultiplied alpha blending. */
+  GPU_blend(GPU_BLEND_ALPHA_PREMULT);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_IMAGE_COLOR);
+
+  float final_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  if (!col) {
+    copy_v3_v3(final_color, U.sculpt_paint_overlay_col);
+  }
+  mul_v4_fl(final_color, overlay_alpha * 0.01f);
+  immUniformColor4fv(final_color);
+
+  gpu::Texture *texture = (primary) ? primary_snap.overlay_texture :
+                                      secondary_snap.overlay_texture;
+
+  GPUSamplerExtendMode extend_mode = (mtex->brush_map_mode == MTEX_MAP_MODE_VIEW) ?
+                                         GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER :
+                                         GPU_SAMPLER_EXTEND_MODE_REPEAT;
+  immBindTextureSampler(
+      "image", texture, {GPU_SAMPLER_FILTERING_LINEAR, extend_mode, extend_mode});
+
+  /* Draw textured quad. */
+  immBegin(GPU_PRIM_TRI_FAN, 4);
+  immAttr2f(texCoord, 0.0f, 0.0f);
+  immVertex2f(pos, quad.xmin, quad.ymin);
+  immAttr2f(texCoord, 1.0f, 0.0f);
+  immVertex2f(pos, quad.xmax, quad.ymin);
+  immAttr2f(texCoord, 1.0f, 1.0f);
+  immVertex2f(pos, quad.xmax, quad.ymax);
+  immAttr2f(texCoord, 0.0f, 1.0f);
+  immVertex2f(pos, quad.xmin, quad.ymax);
+  immEnd();
+
+  immUnbindProgram();
+
+  GPU_texture_unbind(texture);
+
+  if (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_STENCIL, MTEX_MAP_MODE_VIEW)) {
+    GPU_matrix_pop();
+  }
+
   return true;
 }
 
@@ -1264,6 +1310,13 @@ enum class PaintCursorDrawingType {
   Cursor3D,
 };
 
+enum class PaintCursorContextState {
+  CLEAN,           /* Initial state after initialization. */
+  IMM_SETUP,       /* IMM shader bound, GPU format configured. */
+  TEXTURE_DRAWING, /* Texture overlay draw in progress. */
+  RESTORED         /* GPU state restored, context finished. */
+};
+
 struct PaintCursorContext {
   ARegion *region;
   wmWindow *win;
@@ -1306,6 +1359,10 @@ struct PaintCursorContext {
   /* GPU attribute for drawing. */
   uint pos;
 
+  /* Context Manager State Machine */
+  PaintCursorContextState state = PaintCursorContextState::CLEAN;
+  std::optional<PaintCursorGPUStateGuard> gpu_guard;
+
   PaintCursorDrawingType cursor_type;
 
   /* This variable is set after drawing the overlay, not on initialization. It can't be used for
@@ -1323,7 +1380,91 @@ struct PaintCursorContext {
 
   float final_radius;
   int pixel_radius;
+
+  /* Performance optimization: Cached results for expensive checks */
+  bool brush_cursor_enabled_cached = false;
+  bool overlay_conditions_met_cached = false;
+  uint64_t last_brush_id = 0;
+  bool cache_valid = false;
+
+  /* Check if brush has changed since last cache update */
+  bool brush_changed() const
+  {
+    return brush && (brush->id.name[2] != last_brush_id);
+  }
+
+  /* Update cache when brush changes */
+  void update_cache()
+  {
+    if (brush_changed()) {
+      brush_cursor_enabled_cached = false;
+      overlay_conditions_met_cached = brush && (brush->overlay_flags &
+                                                (BRUSH_OVERLAY_PRIMARY | BRUSH_OVERLAY_SECONDARY));
+      last_brush_id = brush->id.name[2];
+      cache_valid = true;
+    }
+  }
 };
+
+static void paint_cursor_context_setup_3D_drawing(PaintCursorContext &pcontext)
+{
+  BLI_assert(pcontext.state == PaintCursorContextState::CLEAN);
+
+  pcontext.gpu_guard.emplace();
+
+  GPU_line_width(2.0f);
+  GPU_blend(GPU_BLEND_ALPHA);
+  GPU_line_smooth(true);
+
+  pcontext.pos = GPU_vertformat_attr_add(
+      immVertexFormat(), "pos", blender::gpu::VertAttrType::SFLOAT_32_32_32);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  pcontext.state = PaintCursorContextState::IMM_SETUP;
+}
+
+static bool paint_cursor_context_draw_texture(PaintCursorContext &pcontext, float radius)
+{
+  BLI_assert(pcontext.state == PaintCursorContextState::IMM_SETUP);
+
+  pcontext.state = PaintCursorContextState::TEXTURE_DRAWING;
+
+  bke::PaintRuntime *paint_runtime = pcontext.paint->runtime;
+  bool result = paint_draw_tex_overlay_3d(pcontext.paint,
+                                          pcontext.brush,
+                                          &pcontext.vc,
+                                          pcontext.zoomx,
+                                          pcontext.mode,
+                                          false,
+                                          true,
+                                          radius,
+                                          paint_runtime->brush_rotation,
+                                          pcontext.location,
+                                          pcontext.normal);
+
+  pcontext.state = PaintCursorContextState::IMM_SETUP;
+  return result;
+}
+
+/**
+ * Context Manager: Restore drawing state and cleanup resources with state validation.
+ * Unbinds IMM shader, cleans up GPU state guard, and transitions to final state.
+ */
+static void paint_cursor_context_restore_drawing_state(PaintCursorContext &pcontext)
+{
+  BLI_assert(pcontext.state == PaintCursorContextState::IMM_SETUP ||
+             pcontext.state == PaintCursorContextState::TEXTURE_DRAWING);
+
+  if (immIsShaderBound()) {
+    immUnbindProgram();
+  }
+
+  /* Destructor restores GPU blend and depth test states saved at setup. */
+  pcontext.gpu_guard.reset();
+
+  pcontext.state = PaintCursorContextState::RESTORED;
+}
 
 static bool paint_cursor_context_init(bContext *C,
                                       const int2 &xy,
@@ -1476,7 +1617,34 @@ static void paint_cursor_sculpt_session_update_and_init(PaintCursorContext &pcon
   paint_cursor_update_pixel_radius(pcontext);
 
   if (BKE_brush_use_locked_size(pcontext.paint, &brush)) {
-    BKE_brush_size_set(pcontext.paint, &brush, pcontext.pixel_radius * 2.0f);
+    /* In Scene mode (use_locked_size = 1), size is calculated dynamically from unprojected_size
+     * during rendering. We should NOT update brush.size here from pixel_radius, because:
+     * 1. pixel_radius may be incorrect immediately after mode switching
+     * 2. size should be recalculated from unprojected_size based on current view, not cached
+     * 3. When user sets unprojected_size via UI (e.g., 1000), size should update correctly
+     *    from that value, not be blocked by incorrect pixel_radius calculations.
+     *
+     * However, we can update size if pixel_radius is reasonable and cursor is over mesh,
+     * to keep size in sync for display purposes. But we must be very conservative. */
+    int current_size = BKE_brush_size_get(pcontext.paint, &brush);
+    int new_size = pcontext.pixel_radius;
+
+    /* Only update size if:
+     * 1. Cursor is over mesh (pixel_radius is reliable)
+     * 2. Size change is reasonable (not too extreme)
+     * 3. New size is not too small (at least 10 pixels)
+     * This ensures size stays in sync when valid, but doesn't break when unprojected_size
+     * is set to large values (like 1000) via UI. */
+    if (pcontext.is_cursor_over_mesh && std::abs(current_size - new_size) > 1) {
+      float size_ratio = (current_size > 0) ? float(new_size) / float(current_size) : 1.0f;
+
+      bool size_too_small = (new_size < 10);
+      bool ratio_too_extreme = (size_ratio < 0.5f || size_ratio > 2.0f);
+
+      if (!size_too_small && !ratio_too_extreme) {
+        BKE_brush_size_set(pcontext.paint, &brush, new_size);
+      }
+    }
   }
 
   if (pcontext.is_cursor_over_mesh) {
@@ -1828,6 +1996,46 @@ static void paint_cursor_preview_boundary_data_update(const PaintCursorContext &
       *pcontext.depsgraph, *pcontext.vc.obact, pcontext.brush, pcontext.radius);
 }
 
+static void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext,
+                                               const float location[3],
+                                               const float normal[3])
+{
+  Brush &brush = *pcontext.brush;
+  if (!(brush.overlay_flags & (BRUSH_OVERLAY_PRIMARY | BRUSH_OVERLAY_SECONDARY))) {
+    return;
+  }
+
+  bke::PaintRuntime *paint_runtime = pcontext.paint->runtime;
+
+  if (brush.overlay_flags & BRUSH_OVERLAY_PRIMARY) {
+    paint_draw_tex_overlay_3d(pcontext.paint,
+                              pcontext.brush,
+                              &pcontext.vc,
+                              pcontext.zoomx,
+                              pcontext.mode,
+                              false,
+                              true,
+                              pcontext.radius,
+                              paint_runtime->brush_rotation,
+                              location,
+                              normal);
+  }
+
+  if (brush.overlay_flags & BRUSH_OVERLAY_SECONDARY) {
+    paint_draw_tex_overlay_3d(pcontext.paint,
+                              pcontext.brush,
+                              &pcontext.vc,
+                              pcontext.zoomx,
+                              pcontext.mode,
+                              false,
+                              false,
+                              pcontext.radius,
+                              paint_runtime->brush_rotation_sec,
+                              location,
+                              normal);
+  }
+}
+
 static void paint_cursor_draw_3d_view_brush_cursor_inactive(PaintCursorContext &pcontext)
 {
   const Brush &brush = *pcontext.brush;
@@ -1985,8 +2193,11 @@ static void paint_cursor_draw_3d_view_brush_cursor_inactive(PaintCursorContext &
    */
   GPU_matrix_push();
   paint_cursor_drawing_setup_cursor_space(pcontext);
+
   /* Main inactive cursor. */
   paint_cursor_draw_main_inactive_cursor(pcontext);
+
+  paint_cursor_draw_texture_overlays(pcontext, pcontext.location, pcontext.normal);
 
   /* Cloth brush local simulation areas. */
   if (pcontext.is_brush_active && brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLOTH &&
@@ -2088,6 +2299,12 @@ static void paint_cursor_cursor_draw_3d_view_brush_cursor_active(PaintCursorCont
     }
   }
 
+  {
+    const float *location = ss.cache ? ss.cache->location : pcontext.location;
+    const float *normal = ss.cache ? ss.cache->sculpt_normal : pcontext.normal;
+    paint_cursor_draw_texture_overlays(pcontext, location, normal);
+  }
+
   GPU_matrix_pop();
 
   GPU_matrix_pop_projection();
@@ -2096,7 +2313,6 @@ static void paint_cursor_cursor_draw_3d_view_brush_cursor_active(PaintCursorCont
 
 static void paint_cursor_draw_3D_view_brush_cursor(PaintCursorContext &pcontext)
 {
-
   /* These paint tools are not using the SculptSession, so they need to use the default 2D brush
    * cursor in the 3D view. */
   if (pcontext.mode != PaintMode::Sculpt || !pcontext.ss) {
@@ -2178,16 +2394,10 @@ static void paint_cursor_setup_2D_drawing(PaintCursorContext &pcontext)
   immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
 }
 
-static void paint_cursor_setup_3D_drawing(PaintCursorContext &pcontext)
-{
-  GPU_line_width(2.0f);
-  GPU_blend(GPU_BLEND_ALPHA);
-  GPU_line_smooth(true);
-  pcontext.pos = GPU_vertformat_attr_add(
-      immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32_32);
-  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-}
-
+/**
+ * Restore GPU drawing state for 2D cursor (legacy function for compatibility).
+ * This function is kept for 2D cursor support while 3D cursor uses Context Manager.
+ */
 static void paint_cursor_restore_drawing_state()
 {
   immUnbindProgram();
@@ -2240,18 +2450,253 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
       paint_cursor_check_and_draw_alpha_overlays(pcontext);
       paint_cursor_update_anchored_location(pcontext);
 
-      paint_cursor_setup_3D_drawing(pcontext);
+      paint_cursor_context_setup_3D_drawing(pcontext);
       paint_cursor_draw_3D_view_brush_cursor(pcontext);
-      paint_cursor_restore_drawing_state();
+      paint_cursor_context_restore_drawing_state(pcontext);
       break;
     default:
       BLI_assert_unreachable();
   }
 }
 
-}  // namespace ed::sculpt_paint
+static float brush_rotation_to_cursor_space(const ViewContext &vc,
+                                            const float location[3],
+                                            const float normal[3],
+                                            float brush_rotation_screen)
+{
+  Object &ob = *vc.obact;
 
-/* Public API */
+  /* Edge case: degenerate normal, return original angle unchanged. */
+  if (len_squared_v3(normal) < 1e-6f) {
+    return brush_rotation_screen;
+  }
+
+  /* Convert angle to screen-space direction vector.
+   * Following calc_brush_local_mat convention: motion direction is the brush Y axis,
+   * angle represents the X axis, normal is 90 degrees CCW from motion direction. */
+  float motion_normal_screen[2];
+  motion_normal_screen[0] = cosf(brush_rotation_screen);
+  motion_normal_screen[1] = sinf(brush_rotation_screen);
+
+  /* Convert to object-local coordinates, matching calc_local_from_screen logic. */
+  float loc[3];
+  mul_v3_m4v3(loc, ob.object_to_world().ptr(), location);
+  const float zfac = ED_view3d_calc_zfac(vc.rv3d, loc);
+
+  float motion_normal_world[3];
+  ED_view3d_win_to_delta(vc.region, motion_normal_screen, zfac, motion_normal_world);
+  normalize_v3(motion_normal_world);
+
+  float motion_normal_local[3];
+  /* Bias by object location, matching calc_local_from_screen convention. */
+  add_v3_v3(motion_normal_world, ob.loc);
+  mul_m4_v3(ob.world_to_object().ptr(), motion_normal_world);
+  copy_v3_v3(motion_normal_local, motion_normal_world);
+  normalize_v3(motion_normal_local);
+
+  /* Compute motion direction (brush Y axis) in local space.
+   * It lies at the intersection of the tangent plane and the motion plane. */
+  float motion_dir_local[3];
+  cross_v3_v3v3(motion_dir_local, normal, motion_normal_local);
+  const float motion_dir_len = len_v3(motion_dir_local);
+
+  /* Edge case: motion direction parallel to normal, return unchanged. */
+  if (motion_dir_len < 1e-6f) {
+    return brush_rotation_screen;
+  }
+  normalize_v3(motion_dir_local);
+
+  /* Compute brush X axis in local space. */
+  float brush_x_local[3];
+  cross_v3_v3v3(brush_x_local, motion_dir_local, normal);
+  normalize_v3(brush_x_local);
+
+  /* Build the cursor-space rotation (Z aligned to normal), matching
+   * paint_cursor_drawing_setup_cursor_space, and extract its X and Y axes. */
+  const float3 z_axis = {0.0f, 0.0f, 1.0f};
+  const float3 normal_vec = {normal[0], normal[1], normal[2]};
+
+  const math::AxisAngle between_vecs(z_axis, normal_vec);
+  const float4x4 cursor_rot = math::from_rotation<float4x4>(between_vecs);
+
+  const float (*rot_ptr)[4] = cursor_rot.ptr();
+  float cursor_x[3];
+  cursor_x[0] = rot_ptr[0][0];
+  cursor_x[1] = rot_ptr[1][0];
+  cursor_x[2] = rot_ptr[2][0];
+
+  float cursor_y[3];
+  cursor_y[0] = rot_ptr[0][1];
+  cursor_y[1] = rot_ptr[1][1];
+  cursor_y[2] = rot_ptr[2][1];
+
+  normalize_v3(cursor_x);
+  normalize_v3(cursor_y);
+
+  /* Angle between cursor X axis and brush X axis in the surface plane. */
+  float dot_x = dot_v3v3(brush_x_local, cursor_x);
+  float dot_y = dot_v3v3(brush_x_local, cursor_y);
+  float angle = atan2f(dot_y, dot_x);
+
+  return angle;
+}
+
+bool paint_draw_tex_overlay_3d(Paint *paint,
+                               Brush *brush,
+                               ViewContext *vc,
+                               float zoom,
+                               const PaintMode mode,
+                               bool col,
+                               bool primary,
+                               float radius,
+                               float brush_rotation,
+                               const float location[3],
+                               const float normal[3])
+{
+  /* Check for overlay mode. */
+  MTex *mtex = (primary) ? &brush->mtex : &brush->mask_mtex;
+  bool valid = ((primary) ? (brush->overlay_flags & BRUSH_OVERLAY_PRIMARY) != 0 :
+                            (brush->overlay_flags & BRUSH_OVERLAY_SECONDARY) != 0);
+  int overlay_alpha = (primary) ? brush->texture_overlay_alpha : brush->mask_overlay_alpha;
+
+  if (mode == PaintMode::Texture3D) {
+    if (primary && brush->image_brush_type != IMAGE_PAINT_BRUSH_TYPE_DRAW) {
+      /* All non-draw tools don't use the primary texture (clone, smear, soften.. etc). */
+      return false;
+    }
+  }
+
+  bool texture_condition =
+      !(mtex->tex) ||
+      !((mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL) ||
+        (valid &&
+         ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_AREA)));
+
+  if (texture_condition) {
+    return false;
+  }
+
+  bool is_brush_tool = WM_toolsystem_active_tool_is_brush(vc->C);
+
+  if (!is_brush_tool) {
+    return false;
+  }
+
+  if (!load_tex(paint, brush, vc, zoom, col, primary)) {
+    return false;
+  }
+
+  {
+    PaintCursorGPUStateGuard gpu_state_guard;
+
+    GPU_color_mask(true, true, true, true);
+    GPU_depth_test(GPU_DEPTH_NONE);
+
+    /* Setup vertex format for 3D coordinates */
+    GPUVertFormat *format = immVertexFormat();
+    uint pos = GPU_vertformat_attr_add(format, "pos", blender::gpu::VertAttrType::SFLOAT_32_32_32);
+    uint texCoord = GPU_vertformat_attr_add(
+        format, "texCoord", blender::gpu::VertAttrType::SFLOAT_32_32);
+
+    /* Alpha blending for texture overlay with transparency. */
+    GPU_blend(GPU_BLEND_ALPHA);
+
+    /* Handle anchored mode and pressure scaling */
+    bke::PaintRuntime *paint_runtime = paint->runtime;
+
+    /* Scale based on tablet pressure for primary brush */
+    if (primary && paint_runtime->stroke_active && BKE_brush_use_size_pressure(brush)) {
+      const float scale = paint_runtime->size_pressure_value;
+      GPU_matrix_push();
+      GPU_matrix_scale_2f(scale, scale);
+    }
+
+    blender::gpu::Texture *texture = (primary) ? primary_snap.overlay_texture :
+                                                 secondary_snap.overlay_texture;
+    GPUSamplerExtendMode extend_mode = (mtex->brush_map_mode == MTEX_MAP_MODE_VIEW ||
+                                        mtex->brush_map_mode == MTEX_MAP_MODE_AREA) ?
+                                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER :
+                                           GPU_SAMPLER_EXTEND_MODE_REPEAT;
+
+    if (!texture) {
+      return false;
+    }
+
+    if (immIsShaderBound()) {
+      immUnbindProgram();
+    }
+    immBindBuiltinProgram(GPU_SHADER_3D_IMAGE_COLOR);
+    immBindTextureSampler(
+        "image", texture, {GPU_SAMPLER_FILTERING_LINEAR, extend_mode, extend_mode});
+
+    float final_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    if (!col) {
+      copy_v3_v3(final_color, U.sculpt_paint_overlay_col);
+    }
+    mul_v4_fl(final_color, overlay_alpha * 0.01f);
+    immUniformColor4fv(final_color);
+
+    /* Combined rotation matches calc_brush_local_mat: angle = rotation + special_rotation,
+     * where rotation = mtex->rot and special_rotation = brush_rotation. */
+    float total_rotation = brush_rotation + mtex->rot;
+
+    if (mtex->brush_map_mode == MTEX_MAP_MODE_AREA) {
+      total_rotation = brush_rotation_to_cursor_space(*vc, location, normal, total_rotation);
+    }
+    if (total_rotation != 0.0f) {
+      GPU_matrix_push();
+      GPU_matrix_rotate_axis(RAD2DEGF(total_rotation), 'Z');
+    }
+
+    /* Draw textured quad in 3D cursor space */
+    immBegin(GPU_PRIM_TRI_FAN, 4);
+    immAttr2f(texCoord, 0.0f, 0.0f);
+    immVertex3f(pos, -radius, -radius, 0.0f);
+    immAttr2f(texCoord, 1.0f, 0.0f);
+    immVertex3f(pos, radius, -radius, 0.0f);
+    immAttr2f(texCoord, 1.0f, 1.0f);
+    immVertex3f(pos, radius, radius, 0.0f);
+    immAttr2f(texCoord, 0.0f, 1.0f);
+    immVertex3f(pos, -radius, radius, 0.0f);
+    immEnd();
+
+    GPU_texture_unbind(texture);
+    immUnbindProgram();
+
+    if (total_rotation != 0.0f) {
+      GPU_matrix_pop();
+    }
+
+    /* Restore pressure scaling matrix */
+    if (primary && paint_runtime->stroke_active && BKE_brush_use_size_pressure(brush)) {
+      GPU_matrix_pop();
+    }
+
+    return true;
+  }
+}
+
+void paint_cursor_delete_textures()
+{
+  if (primary_snap.overlay_texture) {
+    GPU_texture_free(primary_snap.overlay_texture);
+  }
+  if (secondary_snap.overlay_texture) {
+    GPU_texture_free(secondary_snap.overlay_texture);
+  }
+  if (cursor_snap.overlay_texture) {
+    GPU_texture_free(cursor_snap.overlay_texture);
+  }
+
+  /* Reset snapshots, including brush_id and texture_id */
+  memset(&primary_snap, 0, sizeof(TexSnapshot));
+  memset(&secondary_snap, 0, sizeof(TexSnapshot));
+  memset(&cursor_snap, 0, sizeof(CursorSnapshot));
+
+  BKE_paint_invalidate_overlay_all();
+}
+
+}  // namespace ed::sculpt_paint
 
 void ED_paint_cursor_start(Paint *paint, bool (*poll)(bContext *C))
 {

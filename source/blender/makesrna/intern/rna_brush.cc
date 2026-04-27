@@ -737,6 +737,17 @@ static void rna_Brush_stroke_update(Main *bmain, Scene *scene, PointerRNA *ptr)
   rna_Brush_update(bmain, scene, ptr);
 }
 
+static void rna_Brush_use_locked_size_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  Brush *br = static_cast<Brush *>(ptr->data);
+
+  /* Only invalidate overlay when use_locked_size changes - don't modify brush properties */
+  BKE_paint_invalidate_overlay_all();
+
+  /* Minimal notification without side effects */
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
+}
+
 static void rna_TextureSlot_brush_angle_update(bContext *C, PointerRNA *ptr)
 {
   Scene *scene = CTX_data_scene(C);
@@ -754,9 +765,15 @@ static void rna_Brush_set_size(PointerRNA *ptr, int value)
 {
   Brush *brush = static_cast<Brush *>(ptr->data);
 
-  /* scale unprojected size so it stays consistent with brush size */
-  BKE_brush_scale_unprojected_size(&brush->unprojected_size, value, brush->size);
-  brush->size = value;
+  /* Don't scale unprojected_size if size hasn't actually changed.
+   * This prevents unwanted scaling when UI updates size during mode switching. */
+  if (brush->size != value) {
+    /* Scale unprojected size so it stays consistent with brush size.
+     * This is important for WM_OT_radial_control to work correctly - it changes size
+     * and expects unprojected_size to be synchronized. */
+    BKE_brush_scale_unprojected_size(&brush->unprojected_size, value, brush->size);
+    brush->size = value;
+  }
 }
 
 static void rna_Brush_use_gradient_set(PointerRNA *ptr, int value)
@@ -779,9 +796,22 @@ static void rna_Brush_set_unprojected_size(PointerRNA *ptr, float value)
 {
   Brush *brush = static_cast<Brush *>(ptr->data);
 
-  /* scale brush size so it stays consistent with unprojected_size */
-  BKE_brush_scale_size(&brush->size, value, brush->unprojected_size);
-  brush->unprojected_size = value;
+  /* Don't scale brush size if unprojected_size hasn't actually changed.
+   * This prevents unwanted scaling when UI updates unprojected_size during mode switching. */
+  if (brush->unprojected_size != value) {
+    /* When use_locked_size is enabled (Scene mode), don't scale size here.
+     * Size will be recalculated in paint_cursor based on unprojected_size and current view.
+     * This ensures correct size calculation when switching to Scene mode. */
+    if (brush->flag & BRUSH_LOCK_SIZE) {
+      /* Just update unprojected_size, size will be recalculated in paint_cursor */
+      brush->unprojected_size = value;
+    }
+    else {
+      /* View mode: scale brush size so it stays consistent with unprojected_size */
+      BKE_brush_scale_size(&brush->size, value, brush->unprojected_size);
+      brush->unprojected_size = value;
+    }
+  }
 }
 
 static const EnumPropertyItem *rna_Brush_direction_itemf(bContext *C,
@@ -3811,7 +3841,7 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, brush_size_unit_items);
   RNA_def_property_ui_text(
       prop, "Size Unit", "Measure brush size relative to the view or the scene");
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
+  RNA_def_property_update(prop, 0, "rna_Brush_use_locked_size_update");
 
   prop = RNA_def_property(srna, "color_type", PROP_ENUM, PROP_NONE); /* as an enum */
   RNA_def_property_enum_bitflag_sdna(prop, nullptr, "flag");

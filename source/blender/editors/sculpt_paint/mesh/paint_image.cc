@@ -475,7 +475,7 @@ static void toggle_paint_cursor(Scene &scene, bool enable)
   if (p.runtime->paint_cursor && !enable) {
     WM_paint_cursor_end(static_cast<wmPaintCursor *>(p.runtime->paint_cursor));
     p.runtime->paint_cursor = nullptr;
-    paint_cursor_delete_textures();
+    ed::sculpt_paint::paint_cursor_delete_textures();
   }
   else if (enable) {
     ED_paint_cursor_start(&p, ED_image_tools_paint_poll);
@@ -506,7 +506,7 @@ void ED_space_image_paint_update(Main *bmain, wmWindowManager *wm, Scene *scene)
     ED_paint_cursor_start(&imapaint->paint, ED_image_tools_paint_poll);
   }
   else {
-    paint_cursor_delete_textures();
+    ed::sculpt_paint::paint_cursor_delete_textures();
   }
 }
 

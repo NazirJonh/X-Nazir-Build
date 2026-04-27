@@ -1235,6 +1235,8 @@ void BKE_brush_size_set(Paint *paint, Brush *brush, int size)
 {
   UnifiedPaintSettings *ups = &paint->unified_paint_settings;
 
+  int old_size = (ups->flag & UNIFIED_PAINT_SIZE) ? ups->size : brush->size;
+
   /* make sure range is sane */
   CLAMP(size, 1, MAX_BRUSH_PIXEL_DIAMETER);
 

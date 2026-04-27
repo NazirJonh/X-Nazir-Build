@@ -173,14 +173,6 @@ void depsgraph_tag_to_component_opcode(const ID *id,
     case ID_RECALC_SHADING:
       *component_type = NodeType::SHADING;
       break;
-    case ID_RECALC_IMAGE_PIXELS:
-      /* Only meaningful for Image IDs; maps to IMAGE_DATA component.
-       * Propagation: Image (IMAGE_DATA) → NodeTree → Material → Object [shader path]
-       *              Image (IMAGE_DATA) → Object (SHADING)              [canvas path] */
-      if (GS(id->name) == ID_IM) {
-        *component_type = NodeType::IMAGE_DATA;
-      }
-      break;
     case ID_RECALC_SELECT:
       depsgraph_select_tag_to_component_opcode(id, component_type, operation_code);
       break;
@@ -228,6 +220,7 @@ void depsgraph_tag_to_component_opcode(const ID *id,
       *operation_code = OperationCode::HIERARCHY;
       break;
 
+    case ID_RECALC_PROVISION_27:
     case ID_RECALC_PROVISION_28:
     case ID_RECALC_PROVISION_29:
     case ID_RECALC_PROVISION_30:
@@ -823,9 +816,7 @@ const char *DEG_update_tag_as_string(IDRecalcFlag flag)
     case ID_RECALC_HIERARCHY:
       return "ID_RECALC_HIERARCHY";
 
-    case ID_RECALC_IMAGE_PIXELS:
-      return "IMAGE_PIXELS";
-
+    case ID_RECALC_PROVISION_27:
     case ID_RECALC_PROVISION_28:
     case ID_RECALC_PROVISION_29:
     case ID_RECALC_PROVISION_30:

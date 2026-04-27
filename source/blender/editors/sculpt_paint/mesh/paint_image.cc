@@ -935,7 +935,7 @@ void ED_imapaint_bucket_fill(bContext *C, float const color[3], wmOperator *op, 
 
     ED_image_undo_push_end();
 
-    DEG_id_tag_update(&ima->id, 0);
+    DEG_id_tag_update(&ima->id, ID_RECALC_SHADING);
   }
 }
 

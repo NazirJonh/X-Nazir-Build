@@ -89,9 +89,8 @@ static const int deg_debug_node_type_color_map[][2] = {
     {NodeType::SHADING, 8},
     {NodeType::CACHE, 9},
     {NodeType::POINT_CACHE, 10},
-    {NodeType::IMAGE_DATA, 11},
-    {NodeType::LAYER_COLLECTIONS, 12},
-    {NodeType::COPY_ON_EVAL, 13},
+    {NodeType::LAYER_COLLECTIONS, 11},
+    {NodeType::COPY_ON_EVAL, 12},
     {-1, 0},
 };
 #endif
@@ -402,7 +401,6 @@ static void deg_debug_graphviz_node(DotExportContext &ctx,
     case NodeType::CACHE:
     case NodeType::POINT_CACHE:
     case NodeType::IMAGE_ANIMATION:
-    case NodeType::IMAGE_DATA:
     case NodeType::LAYER_COLLECTIONS:
     case NodeType::PARTICLE_SYSTEM:
     case NodeType::PARTICLE_SETTINGS:

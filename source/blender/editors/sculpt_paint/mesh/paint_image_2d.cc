@@ -1738,12 +1738,9 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
       ED_region_tag_redraw(CTX_wm_region(C));
     }
 
-    /* Pixel data changed: tag via ID_RECALC_IMAGE_PIXELS which maps to IMAGE_DATA component
-     * for Image IDs, triggering two depsgraph propagation paths:
-     *   1. Image (IMAGE_DATA) → NodeTree → Material → Object  [shader-node images]
-     *   2. Image (IMAGE_DATA) → Object (SHADING)              [canvas relation for paint slots]
-     * Both paths are built at graph construction time — no manual per-object tagging needed. */
-    DEG_id_tag_update(&s->image->id, ID_RECALC_IMAGE_PIXELS);
+    /* Pixel data changed: tag PARAMETERS to propagate through image relations
+     * (canvas → object shading, shader nodes, textures). */
+    DEG_id_tag_update(&s->image->id, ID_RECALC_PARAMETERS);
   }
 
   if (final) {
@@ -1753,7 +1750,7 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
 
     /* compositor listener deals with updating */
     WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, s->image);
-    DEG_id_tag_update(&s->image->id, ID_RECALC_IMAGE_PIXELS);
+    DEG_id_tag_update(&s->image->id, ID_RECALC_PARAMETERS);
   }
 }
 

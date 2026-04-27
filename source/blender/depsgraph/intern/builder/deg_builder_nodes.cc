@@ -2175,8 +2175,6 @@ void DepsgraphNodeBuilder::build_image(Image *image)
   if (built_map_.check_is_built_and_tag(image)) {
     return;
   }
-  add_id_node(&image->id);
-  add_operation_node(&image->id, NodeType::IMAGE_DATA, OperationCode::GENERIC_DATABLOCK_UPDATE);
   build_idproperties(image->id.properties);
   build_idproperties(image->id.system_properties);
   build_parameters(&image->id);

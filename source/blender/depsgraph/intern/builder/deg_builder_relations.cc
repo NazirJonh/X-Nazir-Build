@@ -1348,7 +1348,7 @@ void DepsgraphRelationBuilder::add_paint_canvas_image_relation(Image *canvas_ima
     return;
   }
   build_image(canvas_image);
-  ComponentKey canvas_key(&canvas_image->id, NodeType::IMAGE_DATA);
+  ComponentKey canvas_key(&canvas_image->id, NodeType::PARAMETERS);
   OperationKey object_shading_key(&object->id, NodeType::SHADING, OperationCode::SHADING);
   add_relation(canvas_key, object_shading_key, "Paint Canvas -> Object Shading");
 }
@@ -3128,9 +3128,7 @@ void DepsgraphRelationBuilder::build_nodetree(bNodeTree *ntree)
     }
     else if (id_type == ID_IM) {
       build_image(id_cast<Image *>(id));
-      /* Image pixel data (IMAGE_DATA) → shader node output.
-       * When image pixels change, materials using this image are marked for shading update. */
-      ComponentKey image_key(id, NodeType::IMAGE_DATA);
+      ComponentKey image_key(id, NodeType::PARAMETERS);
       add_relation(image_key, ntree_output_key, "Image -> Node");
     }
     else if (id_type == ID_OB) {
@@ -3295,9 +3293,9 @@ void DepsgraphRelationBuilder::build_texture(Tex *texture)
     if (texture->ima != nullptr) {
       build_image(texture->ima);
 
-      /* Texture image pixel data → texture evaluation.
+      /* Texture image (PARAMETERS) → texture evaluation.
        * When image pixels change, textures using this image are marked for update. */
-      ComponentKey image_key(&texture->ima->id, NodeType::IMAGE_DATA);
+      ComponentKey image_key(&texture->ima->id, NodeType::PARAMETERS);
       add_relation(image_key, texture_key, "Texture Image");
     }
   }

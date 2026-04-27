@@ -1117,20 +1117,11 @@ enum IDRecalcFlag {
   /* Hierarchy of collection and object within collection changed. */
   ID_RECALC_HIERARCHY = (1 << 26),
 
-  /* Pixel data of an Image data-block changed (texture paint stroke, GPU texture upload,
-   * compositing output, external file reload).
-   * Maps to IMAGE_DATA component (NodeType::IMAGE_DATA).
-   * Use this flag (not ID_RECALC_SHADING) when tagging an Image whose pixels changed.
-   * Propagation paths:
-   *   Image (IMAGE_DATA) → NodeTree → Material → Object  [shader-node images]
-   *   Image (IMAGE_DATA) → Object (SHADING)              [canvas relation, see
-   *     DepsgraphRelationBuilder::build_object_paint_canvas_relations()] */
-  ID_RECALC_IMAGE_PIXELS = (1 << 27),
-
   /* Provisioned flags.
    *
    * Not for actual use. The idea of them is to have all bits of the `IDRecalcFlag` defined to a
    * known value, silencing sanitizer warnings when checking bits of the ID_RECALC_ALL. */
+  ID_RECALC_PROVISION_27 = (1 << 27),
   ID_RECALC_PROVISION_28 = (1 << 28),
   ID_RECALC_PROVISION_29 = (1 << 29),
   ID_RECALC_PROVISION_30 = (1 << 30),

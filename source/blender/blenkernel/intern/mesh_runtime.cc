@@ -322,6 +322,8 @@ void BKE_mesh_runtime_clear_geometry(Mesh *mesh)
   mesh->runtime->max_material_index.tag_dirty();
   mesh->runtime->subsurf_face_dot_tags.clear_and_shrink();
   mesh->runtime->subsurf_optimal_display_edges.clear_and_shrink();
+  mesh->runtime->subsurf_use_optimal_display_filter = false;
+  mesh->runtime->subsurf_edge_subdivision_level = {};
   mesh->runtime->spatial_groups.reset();
   mesh->flag &= ~(ME_NO_OVERLAPPING_TOPOLOGY | ME_FLAG_UV_SELECT_SYNC_VALID);
 }
@@ -353,6 +355,8 @@ void Mesh::tag_edges_split()
   }
   this->runtime->subsurf_face_dot_tags.clear_and_shrink();
   this->runtime->subsurf_optimal_display_edges.clear_and_shrink();
+  this->runtime->subsurf_use_optimal_display_filter = false;
+  this->runtime->subsurf_edge_subdivision_level = {};
   this->runtime->shrinkwrap_boundary_cache.tag_dirty();
 }
 

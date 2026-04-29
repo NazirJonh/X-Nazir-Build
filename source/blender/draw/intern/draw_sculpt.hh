@@ -10,6 +10,7 @@
 
 #include "BLI_enum_flags.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
 #include "BLI_vector.hh"
 
 namespace blender {
@@ -39,8 +40,16 @@ enum SculptBatchFeature {
 };
 ENUM_OPERATORS(SculptBatchFeature);
 
-/** Used by engines that don't use GPUMaterials, like the Workbench and Overlay engines. */
-Vector<SculptBatch> sculpt_batches_get(const Object *ob, SculptBatchFeature features);
+/**
+ * Used by engines that don't use GPUMaterials, like the Workbench and Overlay engines.
+ *
+ * \param per_node_multires_levels: For an adaptive Multires wireframe draw, the highest
+ * subdivision level (per PBVH node) whose edges should be kept in the line index buffer. An
+ * empty span keeps every edge.
+ */
+Vector<SculptBatch> sculpt_batches_get(const Object *ob,
+                                       SculptBatchFeature features,
+                                       Span<int> per_node_multires_levels = {});
 
 /** Used by EEVEE. */
 Vector<SculptBatch> sculpt_batches_per_material_get(const Object *ob,

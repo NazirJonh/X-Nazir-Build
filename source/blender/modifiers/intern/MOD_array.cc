@@ -713,6 +713,8 @@ static Mesh *arrayModifier_doArray(ArrayModifierData *amd,
   if (!use_merge && !mesh->runtime->subsurf_optimal_display_edges.is_empty()) {
     const BoundedBitSpan src = mesh->runtime->subsurf_optimal_display_edges;
 
+    result->runtime->subsurf_use_optimal_display_filter =
+        mesh->runtime->subsurf_use_optimal_display_filter;
     result->runtime->subsurf_optimal_display_edges.resize(result->edges_num);
     MutableBoundedBitSpan dst = result->runtime->subsurf_optimal_display_edges;
     for (const int i : IndexRange(count)) {

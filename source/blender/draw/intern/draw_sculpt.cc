@@ -50,7 +50,8 @@ float3 SculptBatch::debug_color()
 
 static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
                                                  const bool use_wire,
-                                                 const Span<pbvh::AttributeRequest> attrs)
+                                                 const Span<pbvh::AttributeRequest> attrs,
+                                                 const Span<int> per_node_multires_levels = {})
 {
   /* pbvh::Tree should always exist for non-empty meshes, created by depsgraph eval. */
   bke::pbvh::Tree *pbvh = ob->runtime->sculpt_session ?
@@ -110,7 +111,8 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
 
   Span<gpu::Batch *> batches;
   if (use_wire) {
-    batches = draw_data.ensure_lines_batches(*ob, {{}, fast_mode}, nodes_to_update);
+    batches = draw_data.ensure_lines_batches(
+        *ob, {{}, fast_mode}, nodes_to_update, per_node_multires_levels);
   }
   else {
     batches = draw_data.ensure_tris_batches(*ob, {attrs, fast_mode}, nodes_to_update);
@@ -132,7 +134,9 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
   return result_batches;
 }
 
-Vector<SculptBatch> sculpt_batches_get(const Object *ob, SculptBatchFeature features)
+Vector<SculptBatch> sculpt_batches_get(const Object *ob,
+                                       SculptBatchFeature features,
+                                       Span<int> per_node_multires_levels)
 {
   Vector<pbvh::AttributeRequest, 16> attrs;
 
@@ -159,7 +163,8 @@ Vector<SculptBatch> sculpt_batches_get(const Object *ob, SculptBatchFeature feat
     }
   }
 
-  return sculpt_batches_get_ex(ob, features & SCULPT_BATCH_WIREFRAME, attrs);
+  return sculpt_batches_get_ex(
+      ob, features & SCULPT_BATCH_WIREFRAME, attrs, per_node_multires_levels);
 }
 
 Vector<SculptBatch> sculpt_batches_per_material_get(const Object *ob,

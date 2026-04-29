@@ -234,6 +234,14 @@ BLI_INLINE void BKE_multires_construct_tangent_matrix(float3x3 &tangent_matrix,
  */
 void multires_do_versions_simple_to_catmull_clark(Object *object, MultiresModifierData *mmd);
 
+/**
+ * Compute the subdivision level for every edge of an evaluated Multires mesh using BFS
+ * from base-mesh edges (#MeshRuntime::subsurf_optimal_display_edges).
+ * Writes results into #MeshRuntime::subsurf_edge_subdivision_level.
+ * Does nothing if `subsurf_optimal_display_edges` is empty.
+ */
+void BKE_multires_tag_edge_levels(Mesh *mesh, int totlvl);
+
 }  // namespace blender
 
 #include "intern/multires_inline.hh"  // IWYU pragma: export

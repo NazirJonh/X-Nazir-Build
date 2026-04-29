@@ -27,12 +27,15 @@ struct Line {
   float dist;
   float dist_raw;
 
-  static Line decode(float3 data)
+  float width;
+
+  static Line decode(float4 data)
   {
     return {
         .dir = data.xy * 2.0f - 1.0f,
         .dist = (data.z - 0.1f) * 4.0f - 2.0f,
         .dist_raw = data.z,
+        .width = data.w,
     };
   }
 
@@ -63,7 +66,7 @@ struct Resources {
     return {
         .color = texelFetch(color_tx, texel_actual, 0),
         .depth = texelFetch(depth_tx, texel_actual, 0).r,
-        .line = Line::decode(texelFetch(line_tx, texel_actual, 0).rgb),
+        .line = Line::decode(texelFetch(line_tx, texel_actual, 0)),
     };
   }
 };
@@ -73,7 +76,7 @@ struct Resources {
  * Here, `line_kernel_size` is the inner size of the line with 100% coverage.
  */
 template<typename T>
-T line_coverage(T distance_to_line, float line_kernel_size, bool do_smooth_lines)
+T line_coverage(T distance_to_line, T line_kernel_size, bool do_smooth_lines)
 {
   if (do_smooth_lines) {
     return smoothstep(
@@ -161,13 +164,19 @@ struct FragOut {
                                  neighbor_dist(neighbors[3], int2(0, -1)));
 
   /* Compute per-neighbor line coverage */
-  float line_kernel = theme.sizes.pixel * 0.5f - 0.5f;
-  float4 coverage = line_coverage(neighbor_dists, line_kernel, srt.do_smooth_lines);
+  float4 neighbor_widths = float4(neighbors[0].line.width,
+                                  neighbors[1].line.width,
+                                  neighbors[2].line.width,
+                                  neighbors[3].line.width);
+  float4 line_kernels = theme.sizes.pixel * neighbor_widths * 0.5f - 0.5f;
+  float4 coverage = line_coverage(neighbor_dists, line_kernels, srt.do_smooth_lines);
+
+  float center_kernel = theme.sizes.pixel * center.line.width * 0.5f - 0.5f;
 
   /* Multiply current output color by center pixel's line coverage. */
   if (center.line.is_valid()) {
-    float coverage = line_coverage(center.line.dist, line_kernel, srt.do_smooth_lines);
-    center.color *= coverage;
+    float center_coverage = line_coverage(center.line.dist, center_kernel, srt.do_smooth_lines);
+    center.color *= center_coverage;
   }
 
   /* We don't order fragments; instead, we blend using alpha-over/alpha-under
@@ -180,7 +189,7 @@ struct FragOut {
 
 #if 1
   /* Fix aliasing issue with really dense meshes and 1 pixel sized lines. */
-  if (!original_center_has_alpha && center.line.is_valid() && line_kernel < 0.45f) {
+  if (!original_center_has_alpha && center.line.is_valid() && center_kernel < 0.45f) {
     float4 lines_raw = float4(neighbors[0].line.dist_raw,
                               neighbors[1].line.dist_raw,
                               neighbors[2].line.dist_raw,

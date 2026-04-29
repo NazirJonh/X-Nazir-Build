@@ -195,11 +195,40 @@ class Wireframe : Overlay {
         const bool bypass_mode_check = wireframe_no_overlay || !edit_wires_overlap_all;
 
         if (show_surface_wire) {
-          if (BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d)) {
-            ResourceHandleRange handle = manager.unique_handle(ob_ref);
+          /* Check for Multires modifier to enable adaptive wireframe. */
+          const MultiresModifierData *mmd = reinterpret_cast<const MultiresModifierData *>(
+              BKE_modifiers_findby_type(ob_ref.object, eModifierType_Multires));
+          const bool is_pbvh = BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d);
+          const bool use_multires_wire = mmd != nullptr;
 
+          if (use_multires_wire) {
+            const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*ob_ref.object);
+            const std::optional<blender::Bounds<float3>> bounds = mesh.bounds_min_max();
+            const float object_diameter = bounds ?
+                                              math::distance(bounds->min, bounds->max) :
+                                              1.0f;
+
+            /* Compute real camera-to-object distance instead of pivot distance. */
+            const float3 cam_pos = float3(state.rv3d->viewinv[3]);
+            const float3 ob_center = ob_ref.object->object_to_world().location();
+            const float cam_dist = math::distance(cam_pos, ob_center);
+
+            multires_wire_ubo_.wire_level = compute_multires_wire_level(
+                cam_dist, mmd, object_diameter);
+            multires_wire_ubo_.wire_level_max = float(mmd->totlvl);
+            multires_wire_ubo_.base_wire_width = 2.0f;
+            multires_wire_ubo_._pad = 0.0f;
+            multires_wire_ubo_.push_update();
+          }
+
+          if (is_pbvh) {
+            ResourceHandleRange handle = manager.unique_handle(ob_ref);
+            PassMain::Sub *mesh_pass = use_multires_wire ? coloring.mesh_multires_ps_ : coloring.mesh_all_edges_ps_;
+            if (use_multires_wire) {
+              mesh_pass->bind_ubo("multires_wire_buf", &multires_wire_ubo_);
+            }
             for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, SCULPT_BATCH_WIREFRAME)) {
-              coloring.mesh_all_edges_ps_->draw(batch.batch, handle);
+              mesh_pass->draw(batch.batch, handle);
             }
           }
           else if (!in_edit_mode || bypass_mode_check) {
@@ -208,59 +237,8 @@ class Wireframe : Overlay {
              * unpleasant aliasing. */
             gpu::Batch *geom = DRW_cache_mesh_face_wireframe_get(ob_ref.object);
 
-            /* Check for Multires modifier to enable adaptive wireframe. */
-            const MultiresModifierData *mmd = reinterpret_cast<const MultiresModifierData *>(
-                BKE_modifiers_findby_type(ob_ref.object, eModifierType_Multires));
-            const bool use_multires_wire =
-                mmd && !BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d);
-            {
-              static int log_count = 0;
-              if (log_count < 5) {
-                log_count++;
-                printf("[WIRE_OBJ] ob=%s show_wire=%d mmd=%s ctrl_edges=%d use_multires=%d\n",
-                       ob_ref.object->id.name + 2,
-                       int(show_surface_wire),
-                       mmd ? "YES" : "NO",
-                       mmd ? int(!!(mmd->flags & eMultiresModifierFlag_ControlEdges)) : -1,
-                       int(use_multires_wire));
-                fflush(stdout);
-              }
-            }
-
             PassMain::Sub *mesh_pass;
             if (use_multires_wire) {
-              const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*ob_ref.object);
-              const std::optional<blender::Bounds<float3>> bounds = mesh.bounds_min_max();
-              const float object_diameter = bounds ?
-                                                math::distance(bounds->min, bounds->max) :
-                                                1.0f;
-
-              /* Compute real camera-to-object distance instead of pivot distance. */
-              const float3 cam_pos = float3(state.rv3d->viewinv[3]);
-              const float3 ob_center = ob_ref.object->object_to_world().location();
-              const float cam_dist = math::distance(cam_pos, ob_center);
-
-              multires_wire_ubo_.wire_level = compute_multires_wire_level(
-                  cam_dist, mmd, object_diameter);
-              multires_wire_ubo_.wire_level_max = float(mmd->totlvl);
-              multires_wire_ubo_.base_wire_width = 2.0f;
-              multires_wire_ubo_._pad = 0.0f;
-              multires_wire_ubo_.push_update();
-              {
-                const float base = float(mmd->totlvl) * object_diameter * 4.0f;
-                printf("[WIRE_UBO] ob=%s totlvl=%d diam=%.2f rv3d_dist=%.2f cam_dist=%.2f"
-                       " wire_level=%.2f thr_lvl1=%.2f thr_lvl2=%.2f\n",
-                       ob_ref.object->id.name + 2,
-                       mmd->totlvl,
-                       object_diameter,
-                       state.rv3d->dist,
-                       cam_dist,
-                       multires_wire_ubo_.wire_level,
-                       base / 2.0f,
-                       base / 4.0f);
-                fflush(stdout);
-              }
-
               mesh_pass = all_edges ? coloring.mesh_all_edges_ps_ : coloring.mesh_multires_ps_;
               mesh_pass->bind_ubo("multires_wire_buf", &multires_wire_ubo_);
             }

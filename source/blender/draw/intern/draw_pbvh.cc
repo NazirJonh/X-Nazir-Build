@@ -305,6 +305,13 @@ static const GPUVertFormat &face_set_format()
   return format;
 }
 
+static const GPUVertFormat &subdivision_level_format()
+{
+  static const GPUVertFormat format = GPU_vertformat_from_attribute(
+      "subdiv_level", gpu::VertAttrType::UINT_32);
+  return format;
+}
+
 static GPUVertFormat attribute_format(const OrigMeshData &orig_mesh_data,
                                       const StringRef name,
                                       const bke::AttrType data_type)
@@ -946,6 +953,71 @@ BLI_NOINLINE static void fill_face_sets_grids(const Object &object,
   }
 }
 
+BLI_NOINLINE static void fill_subdivision_levels_grids(const Object &object,
+                                                       const BitSpan use_flat_layout,
+                                                       const IndexMask &node_mask,
+                                                       const MutableSpan<gpu::VertBufPtr> vbos)
+{
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+  const SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  ensure_vbos_allocated_grids(object, subdivision_level_format(), use_flat_layout, node_mask, vbos);
+
+  int max_level = 0;
+  while ((key.grid_size - 1) % (1 << max_level) == 0 && (1 << max_level) < key.grid_size) {
+    max_level++;
+  }
+
+  node_mask.foreach_index(
+      [&](const int i) {
+        uint *data = vbos[i]->data<uint>().data();
+        if (use_flat_layout[i]) {
+          const int grid_size_1 = key.grid_size - 1;
+          for (int grid_idx = 0; grid_idx < nodes[i].grids().size(); grid_idx++) {
+            for (int y = 0; y < grid_size_1; y++) {
+              for (int x = 0; x < grid_size_1; x++) {
+                auto get_level = [&](int px, int py) -> uint {
+                  uint level_x = max_level;
+                  for (int l = 0; l <= max_level; l++) {
+                    if (px % (1 << (max_level - l)) == 0) { level_x = l; break; }
+                  }
+                  uint level_y = max_level;
+                  for (int l = 0; l <= max_level; l++) {
+                    if (py % (1 << (max_level - l)) == 0) { level_y = l; break; }
+                  }
+                  return std::min(level_x, level_y);
+                };
+                *data = get_level(x, y); data++;
+                *data = get_level(x + 1, y); data++;
+                *data = get_level(x + 1, y + 1); data++;
+                *data = get_level(x, y + 1); data++;
+              }
+            }
+          }
+        }
+        else {
+          for (int grid_idx = 0; grid_idx < nodes[i].grids().size(); grid_idx++) {
+            for (int y = 0; y < key.grid_size; y++) {
+              for (int x = 0; x < key.grid_size; x++) {
+                uint level_x = max_level;
+                for (int l = 0; l <= max_level; l++) {
+                  if (x % (1 << (max_level - l)) == 0) { level_x = l; break; }
+                }
+                uint level_y = max_level;
+                for (int l = 0; l <= max_level; l++) {
+                  if (y % (1 << (max_level - l)) == 0) { level_y = l; break; }
+                }
+                *data = std::min(level_x, level_y);
+                data++;
+              }
+            }
+          }
+        }
+      },
+      exec_mode::grain_size(1));
+}
+
 BLI_NOINLINE static void update_positions_bmesh(const Object &object,
                                                 const IndexMask &node_mask,
                                                 const MutableSpan<gpu::VertBufPtr> vbos)
@@ -1296,6 +1368,19 @@ static void create_lines_index_grids(const Span<int> grid_indices,
                                      const int totgrid,
                                      MutableSpan<uint2> data)
 {
+  int max_level = 0;
+  while ((gridsize - 1) % (1 << max_level) == 0 && (1 << max_level) < gridsize) {
+    max_level++;
+  }
+  auto get_level = [&](int val) -> uint {
+    for (int l = 0; l <= max_level; l++) {
+      if (val % (1 << (max_level - l)) == 0) {
+        return l;
+      }
+    }
+    return max_level;
+  };
+
   int line_index = 0;
   int offset = 0;
   const int grid_vert_len = gridsize * gridsize;
@@ -1318,20 +1403,27 @@ static void create_lines_index_grids(const Span<int> grid_indices,
         v2 = offset + CCG_grid_xy_to_index(gridsize, x + skip, y + skip);
         v3 = offset + CCG_grid_xy_to_index(gridsize, x, y + skip);
 
-        data[line_index] = uint2(v0, v1);
+        uint lx0 = get_level(x);
+        uint lx1 = get_level(x + skip);
+        uint ly0 = get_level(y);
+        uint ly1 = get_level(y + skip);
+
+        data[line_index] = (lx0 >= ly0) ? uint2(v0, v1) : uint2(v1, v0);
         line_index++;
-        data[line_index] = uint2(v0, v3);
+        data[line_index] = (ly0 >= lx0) ? uint2(v0, v3) : uint2(v3, v0);
         line_index++;
 
         if (y / skip + 2 == display_gridsize) {
-          data[line_index] = uint2(v2, v3);
+          data[line_index] = (lx0 >= ly1) ? uint2(v3, v2) : uint2(v2, v3);
           line_index++;
         }
         grid_visible = true;
       }
 
       if (grid_visible) {
-        data[line_index] = uint2(v1, v2);
+        uint lx1 = get_level(gridsize - 1);
+        uint ly0 = get_level(y);
+        data[line_index] = (ly0 >= lx1) ? uint2(v1, v2) : uint2(v2, v1);
         line_index++;
       }
     }
@@ -1346,6 +1438,19 @@ static void create_lines_index_grids_flat_layout(const Span<int> grid_indices,
                                                  const int totgrid,
                                                  MutableSpan<uint2> data)
 {
+  int max_level = 0;
+  while ((gridsize - 1) % (1 << max_level) == 0 && (1 << max_level) < gridsize) {
+    max_level++;
+  }
+  auto get_level = [&](int val) -> uint {
+    for (int l = 0; l <= max_level; l++) {
+      if (val % (1 << (max_level - l)) == 0) {
+        return l;
+      }
+    }
+    return max_level;
+  };
+
   int line_index = 0;
   int offset = 0;
   const int grid_vert_len = square_uint(gridsize - 1) * 4;
@@ -1382,20 +1487,27 @@ static void create_lines_index_grids_flat_layout(const Span<int> grid_indices,
         v2 += offset + 2;
         v3 += offset + 3;
 
-        data[line_index] = uint2(v0, v1);
+        uint lx0 = get_level(x);
+        uint lx1 = get_level(x + skip);
+        uint ly0 = get_level(y);
+        uint ly1 = get_level(y + skip);
+
+        data[line_index] = (lx0 >= ly0) ? uint2(v0, v1) : uint2(v1, v0);
         line_index++;
-        data[line_index] = uint2(v0, v3);
+        data[line_index] = (ly0 >= lx0) ? uint2(v0, v3) : uint2(v3, v0);
         line_index++;
 
         if (y / skip + 2 == display_gridsize) {
-          data[line_index] = uint2(v2, v3);
+          data[line_index] = (lx0 >= ly1) ? uint2(v3, v2) : uint2(v2, v3);
           line_index++;
         }
         grid_visible = true;
       }
 
       if (grid_visible) {
-        data[line_index] = uint2(v1, v2);
+        uint lx1 = get_level(gridsize - 1);
+        uint ly0 = get_level(y);
+        data[line_index] = (ly0 >= lx1) ? uint2(v1, v2) : uint2(v2, v1);
         line_index++;
       }
     }
@@ -1763,6 +1875,9 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
           case CustomRequest::FaceSet:
             fill_face_sets_grids(object, orig_mesh_data, use_flat_layout_, mask, vbos);
             break;
+          case CustomRequest::SubdivisionLevel:
+            fill_subdivision_levels_grids(object, use_flat_layout_, mask, vbos);
+            break;
         }
       }
       else {
@@ -1943,6 +2058,12 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_lines_batches(const Object &object,
   const Span<gpu::IndexBufPtr> lines = this->ensure_lines_indices(
       object, orig_mesh_data, nodes_to_update, request.use_coarse_grids);
 
+  Span<gpu::VertBufPtr> subdiv_level;
+  if (pbvh.type() == bke::pbvh::Type::Grids) {
+    subdiv_level = this->ensure_attribute_data(
+        object, orig_mesh_data, CustomRequest::SubdivisionLevel, nodes_to_update);
+  }
+
   /* Except for the first iteration of the draw loop, we only need to rebuild batches for nodes
    * with changed topology (visible triangle count). */
   Vector<gpu::Batch *> &batches = request.use_coarse_grids ? lines_batches_coarse_ :
@@ -1953,6 +2074,9 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_lines_batches(const Object &object,
         if (!batches[i]) {
           batches[i] = GPU_batch_create(GPU_PRIM_LINES, nullptr, lines[i].get());
           GPU_batch_vertbuf_add(batches[i], position[i].get(), false);
+          if (!subdiv_level.is_empty() && subdiv_level[i]) {
+            GPU_batch_vertbuf_add(batches[i], subdiv_level[i].get(), false);
+          }
         }
       },
       exec_mode::grain_size(64));

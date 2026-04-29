@@ -154,6 +154,7 @@ void main()
    * FIRST_VERTEX_CONVENTION ensures the provoking vertex is the first corner of each edge,
    * which matches the corner that owns the edge in our VBO layout. */
   subdiv_level_iface = subdiv_level;
+  line_width_iface = 1.0f;
 
   if (!use_custom_depth_bias) {
     float facing_ratio = clamp(1.0f - facing * facing, 0.0f, 1.0f);
@@ -172,6 +173,7 @@ void main()
   /* CURVES uses the same interface (overlay_wireframe_iface) but has no subdiv_level
    * vertex input. Default to level 0 so it is always fully visible. */
   subdiv_level_iface = 0u;
+  line_width_iface = 1.0f;
   /* POINTS has a different interface entirely — no subdiv_level_iface field at all. */
 #endif
 
@@ -222,6 +224,9 @@ void main()
     }
     else {
       final_color *= fade;
+      if (level == 0u) {
+        line_width_iface = multires_wire_buf.base_wire_width;
+      }
     }
   }
 #  endif

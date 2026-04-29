@@ -27,6 +27,7 @@ FLAT(float2, edge_start)
 NO_PERSPECTIVE(float2, edge_pos)
 /* subdiv_level is passed as flat uint from vertex to fragment to avoid undefined interpolation. */
 FLAT(uint, subdiv_level_iface)
+FLAT(float, line_width_iface)
 GPU_SHADER_INTERFACE_END()
 
 GPU_SHADER_CREATE_INFO(overlay_wireframe_base)

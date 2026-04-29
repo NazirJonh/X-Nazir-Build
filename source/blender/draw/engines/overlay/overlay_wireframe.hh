@@ -8,9 +8,13 @@
 
 #pragma once
 
+#include "BKE_modifier.hh"
 #include "BKE_paint.hh"
+#include "DNA_modifier_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_volume_types.h"
 
+#include "DRW_gpu_wrapper.hh"
 #include "DRW_render.hh"
 #include "draw_common.hh"
 #include "draw_sculpt.hh"
@@ -37,6 +41,8 @@ class Wireframe : Overlay {
     PassMain::Sub *mesh_ps_ = nullptr;
     /* Variant for meshes that force drawing all edges. */
     PassMain::Sub *mesh_all_edges_ps_ = nullptr;
+    /* Adaptive wireframe for Multires objects. */
+    PassMain::Sub *mesh_multires_ps_ = nullptr;
     PassMain::Sub *points_ps_ = nullptr;
     PassMain::Sub *pointcloud_ps_ = nullptr;
   } colored, non_colored;
@@ -47,6 +53,9 @@ class Wireframe : Overlay {
 
   /* Force display of wireframe on surface objects, regardless of the object display settings. */
   bool show_wire_ = false;
+
+  /* Per-object Multires wireframe data updated each frame before drawing. */
+  draw::UniformBuffer<OVERLAY_MultiresWireData> multires_wire_ubo_;
 
  public:
   void begin_sync(Resources &res, const State &state) final
@@ -82,10 +91,15 @@ class Wireframe : Overlay {
       res.select_bind(pass);
 
       auto shader_pass =
-          [&](gpu::Shader *shader, const char *name, bool use_coloring, float wire_threshold) {
+          [&](gpu::Shader *shader,
+              const char *name,
+              bool use_coloring,
+              float wire_threshold,
+              bool use_multires = false) {
             auto &sub = pass.sub(name);
             if (res.shaders->wireframe_mesh.get() == shader) {
               sub.specialize_constant(shader, "use_custom_depth_bias", do_smooth_lines);
+              sub.specialize_constant(shader, "use_multires_wireframe", use_multires);
             }
             sub.shader_set(shader);
             sub.bind_texture("depth_tx", depth_tex);
@@ -103,6 +117,8 @@ class Wireframe : Overlay {
         overlay::ShaderModule &sh = *res.shaders;
         ps.mesh_ps_ = shader_pass(sh.wireframe_mesh.get(), "Mesh", use_color, wire_threshold);
         ps.mesh_all_edges_ps_ = shader_pass(sh.wireframe_mesh.get(), "Wire", use_color, 1.0f);
+        ps.mesh_multires_ps_ = shader_pass(
+            sh.wireframe_mesh.get(), "MeshMultires", use_color, wire_threshold, true);
         ps.points_ps_ = shader_pass(sh.wireframe_points.get(), "Points", use_color, 1.0f);
         ps.pointcloud_ps_ = shader_pass(
             sh.wireframe_points_with_radius.get(), "PtCloud", use_color, 1.0f);
@@ -179,11 +195,38 @@ class Wireframe : Overlay {
         const bool bypass_mode_check = wireframe_no_overlay || !edit_wires_overlap_all;
 
         if (show_surface_wire) {
-          if (BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d)) {
-            ResourceHandleRange handle = manager.unique_handle(ob_ref);
+          /* Check for Multires modifier to enable adaptive wireframe. */
+          const MultiresModifierData *mmd = reinterpret_cast<const MultiresModifierData *>(
+              BKE_modifiers_findby_type(ob_ref.object, eModifierType_Multires));
+          const bool is_pbvh = BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d);
+          const bool use_multires_wire = mmd != nullptr;
 
+          if (use_multires_wire) {
+            const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*ob_ref.object);
+            const std::optional<blender::Bounds<float3>> bounds = mesh.bounds_min_max();
+            const float object_diameter = bounds ?
+                                              math::distance(bounds->min, bounds->max) :
+                                              1.0f;
+
+            float cam_dist = state.rv3d->is_persp ? 0.0f : state.rv3d->dist;
+
+            /* Pass the base threshold via the UBO.
+             * The shader will compute the actual wire_level per vertex. */
+            multires_wire_ubo_.base_threshold = compute_multires_base_threshold(object_diameter);
+            multires_wire_ubo_.wire_level_max = float(mmd->totlvl);
+            multires_wire_ubo_.base_wire_width = 2.0f;
+            multires_wire_ubo_.ortho_dist = cam_dist;
+            multires_wire_ubo_.push_update();
+          }
+
+          if (is_pbvh) {
+            ResourceHandleRange handle = manager.unique_handle(ob_ref);
+            PassMain::Sub *mesh_pass = use_multires_wire ? coloring.mesh_multires_ps_ : coloring.mesh_all_edges_ps_;
+            if (use_multires_wire) {
+              mesh_pass->bind_ubo("multires_wire_buf", &multires_wire_ubo_);
+            }
             for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, SCULPT_BATCH_WIREFRAME)) {
-              coloring.mesh_all_edges_ps_->draw(batch.batch, handle);
+              mesh_pass->draw(batch.batch, handle);
             }
           }
           else if (!in_edit_mode || bypass_mode_check) {
@@ -191,8 +234,16 @@ class Wireframe : Overlay {
              * Otherwise the wireframe will conflict with the edit cage drawing and produce
              * unpleasant aliasing. */
             gpu::Batch *geom = DRW_cache_mesh_face_wireframe_get(ob_ref.object);
-            (all_edges ? coloring.mesh_all_edges_ps_ : coloring.mesh_ps_)
-                ->draw(geom, manager.unique_handle(ob_ref), res.select_id(ob_ref).get());
+
+            PassMain::Sub *mesh_pass;
+            if (use_multires_wire) {
+              mesh_pass = all_edges ? coloring.mesh_all_edges_ps_ : coloring.mesh_multires_ps_;
+              mesh_pass->bind_ubo("multires_wire_buf", &multires_wire_ubo_);
+            }
+            else {
+              mesh_pass = all_edges ? coloring.mesh_all_edges_ps_ : coloring.mesh_ps_;
+            }
+            mesh_pass->draw(geom, manager.unique_handle(ob_ref), res.select_id(ob_ref).get());
           }
         }
 
@@ -283,6 +334,15 @@ class Wireframe : Overlay {
   }
 
  private:
+  /* The shader will compute wire_level = log2(base_threshold / dist_to_vertex).
+   * We pass base_threshold via the UBO's wire_level field.
+   * A multiplier of 8.0 gives a good balance: no noise when zoomed out,
+   * but allows seeing highest levels when the camera is very close to the surface. */
+  inline float compute_multires_base_threshold(float object_diameter)
+  {
+    return object_diameter * 8.0f;
+  }
+
   float wire_discard_threshold_get(float threshold)
   {
     /* Use `sqrt` since the value stored in the edge is a variation of the cosine, so its square

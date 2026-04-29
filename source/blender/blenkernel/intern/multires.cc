@@ -799,4 +799,86 @@ void multiresModifier_ensure_external_read(Mesh *mesh, const MultiresModifierDat
   multires_ensure_external_read(mesh, mmd->totlvl);
 }
 
+void BKE_multires_tag_edge_levels(Mesh *mesh, int totlvl)
+{
+  bke::MeshRuntime &runtime = *mesh->runtime;
+  const BoundedBitSpan base_edges = runtime.subsurf_optimal_display_edges;
+
+  if (base_edges.is_empty()) {
+    return;
+  }
+
+  const int edges_num = mesh->edges_num;
+  Array<uint8_t> &levels = runtime.subsurf_edge_subdivision_level;
+  levels.reinitialize(edges_num);
+  levels.fill(0xFF);
+
+  /* Build edge to faces mapping to find opposite edges in quads. */
+  Array<Vector<int, 2>> edge_faces(edges_num);
+  const OffsetIndices faces = mesh->faces();
+  const Span<int> corner_edges = mesh->corner_edges();
+
+  for (const int face_i : faces.index_range()) {
+    const IndexRange corners = faces[face_i];
+    if (corners.size() == 4) {
+      for (int k = 0; k < 4; k++) {
+        edge_faces[corner_edges[corners[k]]].append(face_i);
+      }
+    }
+  }
+
+  Array<int> dist(edges_num, -1);
+  Vector<int> queue;
+  int queue_head = 0;
+
+  for (const int edge_i : IndexRange(edges_num)) {
+    if (base_edges[edge_i]) {
+      dist[edge_i] = 0;
+      queue.append(edge_i);
+    }
+  }
+
+  while (queue_head < queue.size()) {
+    const int edge_i = queue[queue_head++];
+    const int next_dist = dist[edge_i] + 1;
+
+    for (const int face_i : edge_faces[edge_i]) {
+      const IndexRange corners = faces[face_i];
+      for (int k = 0; k < 4; k++) {
+        if (corner_edges[corners[k]] == edge_i) {
+          const int opp_edge = corner_edges[corners[(k + 2) % 4]];
+          if (dist[opp_edge] == -1) {
+            dist[opp_edge] = next_dist;
+            queue.append(opp_edge);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  /* Compute level from opposite-edge distance. */
+  for (const int edge_i : IndexRange(edges_num)) {
+    if (dist[edge_i] == 0) {
+      levels[edge_i] = 0;
+    }
+    else if (dist[edge_i] > 0) {
+      /* Number of trailing zeros of `d` indicates the subdivision level.
+       * Cap trailing zeros to totlvl - 1 to handle radial edges correctly. */
+      int d = dist[edge_i];
+      int p = 0;
+      while ((d & 1) == 0 && d > 0) {
+        p++;
+        d >>= 1;
+      }
+      p = std::min(p, std::max(0, totlvl - 1));
+      levels[edge_i] = std::max(1, totlvl - p);
+    }
+    else {
+      /* Fallback for unconnected components or non-quad geometry. */
+      levels[edge_i] = 0;
+    }
+  }
+}
+
 }  // namespace blender

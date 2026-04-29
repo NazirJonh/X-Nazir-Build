@@ -279,6 +279,7 @@ gpu::VertBufPtr extract_edge_factor(const MeshRenderData &mr);
 gpu::VertBufPtr extract_edge_factor_subdiv(const DRWSubdivCache &subdiv_cache,
                                            const MeshRenderData &mr,
                                            gpu::VertBuf &pos);
+gpu::VertBufPtr extract_edge_subdiv_level(const MeshRenderData &mr);
 
 gpu::IndexBufPtr extract_tris(const MeshRenderData &mr, const SortedFaceData &face_sorted);
 void create_material_subranges(const SortedFaceData &face_sorted,

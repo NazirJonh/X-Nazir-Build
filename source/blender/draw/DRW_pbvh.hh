@@ -44,6 +44,8 @@ enum class CustomRequest : int8_t {
   Normal,
   Mask,
   FaceSet,
+  SubdivisionLevel,
+  EdgeFac,
 };
 
 using AttributeRequest = std::variant<CustomRequest, GenericRequest>;

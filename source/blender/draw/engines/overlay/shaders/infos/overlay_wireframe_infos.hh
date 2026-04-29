@@ -19,9 +19,15 @@
 #include "gpu_shader_create_info.hh"
 
 GPU_SHADER_INTERFACE_INFO(overlay_wireframe_iface)
-SMOOTH(float4, final_color)
+/* Using FLAT for final_color so that multires wireframe opacity is uniform along each edge.
+ * Both face corners of the same GPU edge share the same subdiv_level, so FLAT does not
+ * change the result for regular wireframe but fixes artifacts for the adaptive mode. */
+FLAT(float4, final_color)
 FLAT(float2, edge_start)
 NO_PERSPECTIVE(float2, edge_pos)
+/* subdiv_level is passed as flat uint from vertex to fragment to avoid undefined interpolation. */
+FLAT(uint, subdiv_level_iface)
+FLAT(float, line_width_iface)
 GPU_SHADER_INTERFACE_END()
 
 GPU_SHADER_CREATE_INFO(overlay_wireframe_base)
@@ -38,6 +44,9 @@ SAMPLER(0, sampler2DDepth, depth_tx)
 VERTEX_IN(0, float3, pos)
 VERTEX_IN(1, float3, nor)
 VERTEX_IN(2, float, wd) /* wire-data. */
+VERTEX_IN(3, uint, subdiv_level)
+UNIFORM_BUF(2, OVERLAY_MultiresWireData, multires_wire_buf)
+SPECIALIZATION_CONSTANT(bool, use_multires_wireframe, false)
 VERTEX_OUT(overlay_wireframe_iface)
 VERTEX_SOURCE("overlay_wireframe_vert.glsl")
 FRAGMENT_SOURCE("overlay_wireframe_frag.glsl")

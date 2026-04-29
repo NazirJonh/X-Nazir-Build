@@ -47,6 +47,9 @@ static void extract_edge_factor_mesh(const MeshRenderData &mr, MutableSpan<float
   const Span<int> corner_edges = mr.corner_edges;
   const Span<float3> face_normals = mr.face_normals;
   const BitSpan optimal_display_edges = mr.mesh->runtime->subsurf_optimal_display_edges;
+  /* Only use optimal display edges for hiding when Optimal Display is explicitly enabled.
+   * The array is always computed now (for BFS level tagging), so check the filter flag. */
+  const bool filter_optimal = mr.mesh->runtime->subsurf_use_optimal_display_filter;
 
   Array<int8_t> edge_face_count(mr.edges_num, 0);
   Array<MEdgeDataPrev> edge_data(mr.edges_num);
@@ -54,7 +57,7 @@ static void extract_edge_factor_mesh(const MeshRenderData &mr, MutableSpan<float
   for (const int face : faces.index_range()) {
     for (const int corner : faces[face]) {
       const int edge = corner_edges[corner];
-      if (!optimal_display_edges.is_empty() && !optimal_display_edges[edge]) {
+      if (filter_optimal && !optimal_display_edges.is_empty() && !optimal_display_edges[edge]) {
         vbo_data[corner] = 1.0f;
         continue;
       }
@@ -206,6 +209,40 @@ gpu::VertBufPtr extract_edge_factor_subdiv(const DRWSubdivCache &subdiv_cache,
   for (const int i : IndexRange(loose_edges_num)) {
     GPU_vertbuf_update_sub(vbo.get(), (offset + i * 2) * sizeof(float), sizeof(values), values);
   }
+  return vbo;
+}
+
+gpu::VertBufPtr extract_edge_subdiv_level(const MeshRenderData &mr)
+{
+  static const GPUVertFormat format = GPU_vertformat_from_attribute("subdiv_level",
+                                                                    gpu::VertAttrType::UINT_32);
+  gpu::VertBufPtr vbo = gpu::VertBufPtr(GPU_vertbuf_create_with_format(format));
+  GPU_vertbuf_data_alloc(*vbo, mr.corners_num + mr.loose_indices_num);
+  MutableSpan<uint32_t> vbo_data = vbo->data<uint32_t>();
+
+  if (mr.extract_type != MeshExtractType::Mesh) {
+    vbo_data.fill(0u);
+    return vbo;
+  }
+
+  const Span<int> corner_edges = mr.corner_edges;
+  const Span<uint8_t> edge_levels =
+      mr.mesh->runtime->subsurf_edge_subdivision_level.as_span();
+  const bool has_levels = !edge_levels.is_empty();
+  printf("[EXTRACT_SUBDIV_LEVEL] has_levels=%d edge_levels.size=%d corners=%d\n",
+         int(has_levels),
+         int(edge_levels.size()),
+         int(mr.corners_num));
+  fflush(stdout);
+
+  const OffsetIndices faces = mr.faces;
+  for (const int face : faces.index_range()) {
+    for (const int corner : faces[face]) {
+      vbo_data[corner] = has_levels ? uint32_t(edge_levels[corner_edges[corner]]) : 0u;
+    }
+  }
+
+  vbo_data.take_back(mr.loose_indices_num).fill(0u);
   return vbo;
 }
 

@@ -22,7 +22,9 @@ static IndexMask calc_mesh_edge_visibility(const MeshRenderData &mr,
                                            IndexMaskMemory &memory)
 {
   IndexMask visible = mask;
-  if (!mr.mesh->runtime->subsurf_optimal_display_edges.is_empty()) {
+  if (mr.mesh->runtime->subsurf_use_optimal_display_filter &&
+      !mr.mesh->runtime->subsurf_optimal_display_edges.is_empty())
+  {
     const BoundedBitSpan visible_bits = mr.mesh->runtime->subsurf_optimal_display_edges;
     visible = IndexMask::from_bits(visible, visible_bits, memory);
   }

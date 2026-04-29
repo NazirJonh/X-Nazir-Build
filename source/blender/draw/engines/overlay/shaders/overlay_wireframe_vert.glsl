@@ -22,6 +22,53 @@ bool is_edge_sharpness_visible(float wire_data)
 }
 #endif
 
+#if !defined(POINTS) && !defined(CURVES)
+/**
+ * Returns dynamic alpha [0..1] for an edge at `level` based on camera zoom (`wire_level`).
+ * 
+ * As the camera gets closer (`wire_level` increases):
+ * - Level 0 (base mesh) is always fully bright (1.0).
+ * - Deeper levels fade in progressively.
+ * - When a level first appears, it is dim.
+ * - As the camera gets *even closer*, that level becomes brighter, while the *next*
+ *   deeper level starts appearing dimly inside it.
+ * 
+ * The multiplier controls how quickly a level reaches full brightness.
+ * With 0.5, it takes 2 full subdivision steps of zoom to reach 100% opacity.
+ */
+float multires_level_fade(uint level, float wire_level)
+{
+  if (level == 0u) {
+    return 1.0f;
+  }
+  
+  float relative_depth = wire_level - float(level);
+  
+  /* Final hierarchical touch: even at 100% fade, make deeper levels slightly dimmer
+   * (e.g. level 9 will be ~57% of level 1 brightness) so they don't perfectly merge. */
+  float hierarchy_dimmer = pow(0.94f, float(level));
+  return saturate(relative_depth * 0.5f) * hierarchy_dimmer;
+}
+
+float compute_wire_level(float3 wpos)
+{
+  bool is_persp = (drw_view().winmat[3][3] == 0.0f);
+  float dist;
+  if (is_persp) {
+    dist = distance(wpos, drw_view().viewinv[3].xyz);
+  } else {
+    dist = multires_wire_buf.ortho_dist;
+  }
+  
+  dist = max(dist, 1e-6);
+  float level = log2(multires_wire_buf.base_threshold / dist);
+  
+  /* Clamp up to max_level + 2.0 so that the highest level can reach a relative_depth of 2.0
+   * and become 100% opaque when zoomed in extremely close. */
+  return clamp(level, 1.0f, multires_wire_buf.wire_level_max + 2.0f);
+}
+#endif
+
 void wire_color_get(float3 &rim_col, float3 &wire_col)
 {
   eObjectInfoFlag ob_flag = drw_object_infos().flag;
@@ -125,6 +172,12 @@ void main()
   gl_Position = drw_point_world_to_homogenous(wpos);
 
 #if !defined(POINTS) && !defined(CURVES)
+  /* Pass subdivision level as a flat varying to avoid undefined integer interpolation.
+   * FIRST_VERTEX_CONVENTION ensures the provoking vertex is the first corner of each edge,
+   * which matches the corner that owns the edge in our VBO layout. */
+  subdiv_level_iface = subdiv_level;
+  line_width_iface = 1.0f;
+
   if (!use_custom_depth_bias) {
     float facing_ratio = clamp(1.0f - facing * facing, 0.0f, 1.0f);
     float flip = sign(facing); /* Flip when not facing the normal (i.e.: back-facing). */
@@ -138,11 +191,17 @@ void main()
     /* Push the vertex towards the camera. Helps a bit. */
     gl_Position.z -= facing_ratio * curvature * 1.0e-6f * gl_Position.w;
   }
+#elif defined(CURVES)
+  /* CURVES uses the same interface (overlay_wireframe_iface) but has no subdiv_level
+   * vertex input. Default to level 0 so it is always fully visible. */
+  subdiv_level_iface = 0u;
+  line_width_iface = 1.0f;
+  /* POINTS has a different interface entirely — no subdiv_level_iface field at all. */
 #endif
 
   /* Curves do not need the offset since they *are* the curve geometry. */
 #if !defined(CURVES)
-  gl_Position.z -= ndc_offset_factor * 0.5f;
+  gl_Position.z -= ndc_offset_factor * gl_Position.w;
 #endif
 
   float3 rim_col, wire_col;
@@ -174,6 +233,26 @@ void main()
 
   final_color.a = wire_opacity;
   final_color.rgb *= wire_opacity;
+
+#  if !defined(CURVES)
+  if (use_multires_wireframe) {
+    uint level = subdiv_level_iface;
+    float wire_level = compute_wire_level(wpos);
+    float fade = multires_level_fade(level, wire_level);
+    if (fade <= 0.0f) {
+      /* Hide edges that are above the current visible level. */
+      edge_start = float2(-1.0f);
+    }
+    else {
+      final_color *= fade;
+      if (level == 0u) {
+        line_width_iface = multires_wire_buf.base_wire_width;
+      } else {
+        line_width_iface = 1.0f;
+      }
+    }
+  }
+#  endif
 
 #  if !defined(CURVES)
   /* Cull flat edges below threshold. */

@@ -229,6 +229,9 @@ void mesh_buffer_cache_create_requested(TaskGraph & /*task_graph*/,
       case VBOType::EdgeFactor:
         created_vbos[i] = extract_edge_factor(mr);
         break;
+      case VBOType::SubdivisionLevel:
+        created_vbos[i] = extract_edge_subdiv_level(mr);
+        break;
       case VBOType::VertexGroupWeight:
         created_vbos[i] = extract_weights(mr, cache);
         break;

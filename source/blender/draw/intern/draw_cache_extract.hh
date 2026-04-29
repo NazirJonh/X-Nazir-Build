@@ -75,6 +75,7 @@ enum class VBOType : int8_t {
   Position,
   CornerNormal,
   EdgeFactor,
+  SubdivisionLevel,
   VertexGroupWeight,
   UVs,
   Tangents,

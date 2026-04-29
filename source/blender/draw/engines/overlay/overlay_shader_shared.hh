@@ -146,6 +146,17 @@ struct [[host_shared]] OVERLAY_GridData {
   uint _pad1;
 };
 
+struct [[host_shared]] OVERLAY_MultiresWireData {
+  /* Distance threshold based on object diameter. */
+  float base_threshold;
+  /* Maximum subdivision level on the object (totlvl). */
+  float wire_level_max;
+  /* Base wire width in pixels (level 0 thickness). */
+  float base_wire_width;
+  /* Camera distance (used for orthographic projection). */
+  float ortho_dist;
+};
+
 #ifdef GPU_SHADER
 /* Keep the same values as in `draw_cache_impl_curves.cc` */
 #  define EDIT_CURVES_NURBS_CONTROL_POINT (1u)

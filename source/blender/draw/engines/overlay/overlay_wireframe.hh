@@ -208,10 +208,18 @@ class Wireframe : Overlay {
                                               math::distance(bounds->min, bounds->max) :
                                               1.0f;
 
-            /* Compute real camera-to-object distance instead of pivot distance. */
-            const float3 cam_pos = float3(state.rv3d->viewinv[3]);
-            const float3 ob_center = ob_ref.object->object_to_world().location();
-            const float cam_dist = math::distance(cam_pos, ob_center);
+            /* Compute appropriate distance for level-of-detail.
+             * In Perspective, use Euclidean distance to object.
+             * In Orthographic, distance to camera doesn't affect scale; use rv3d->dist. */
+            float cam_dist;
+            if (state.rv3d->is_persp) {
+              const float3 cam_pos = float3(state.rv3d->viewinv[3]);
+              const float3 ob_center = ob_ref.object->object_to_world().location();
+              cam_dist = math::distance(cam_pos, ob_center);
+            }
+            else {
+              cam_dist = state.rv3d->dist;
+            }
 
             multires_wire_ubo_.wire_level = compute_multires_wire_level(
                 cam_dist, mmd, object_diameter);

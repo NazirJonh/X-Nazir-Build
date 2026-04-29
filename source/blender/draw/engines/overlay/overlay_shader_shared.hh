@@ -146,6 +146,17 @@ struct [[host_shared]] OVERLAY_GridData {
   uint _pad1;
 };
 
+struct [[host_shared]] OVERLAY_MultiresWireData {
+  /* Fractional camera level: 0.0 = far (only base mesh visible),
+   * N.0 = close (all levels up to N fully visible). */
+  float wire_level;
+  /* Maximum subdivision level on the object (totlvl). */
+  float wire_level_max;
+  /* Base wire width in pixels (level 0 thickness). */
+  float base_wire_width;
+  float _pad;
+};
+
 #ifdef GPU_SHADER
 /* Keep the same values as in `draw_cache_impl_curves.cc` */
 #  define EDIT_CURVES_NURBS_CONTROL_POINT (1u)

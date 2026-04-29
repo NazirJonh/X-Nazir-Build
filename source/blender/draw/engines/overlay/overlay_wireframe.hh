@@ -8,9 +8,13 @@
 
 #pragma once
 
+#include "BKE_modifier.hh"
 #include "BKE_paint.hh"
+#include "DNA_modifier_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_volume_types.h"
 
+#include "DRW_gpu_wrapper.hh"
 #include "DRW_render.hh"
 #include "draw_common.hh"
 #include "draw_sculpt.hh"
@@ -37,6 +41,8 @@ class Wireframe : Overlay {
     PassMain::Sub *mesh_ps_ = nullptr;
     /* Variant for meshes that force drawing all edges. */
     PassMain::Sub *mesh_all_edges_ps_ = nullptr;
+    /* Adaptive wireframe for Multires objects. */
+    PassMain::Sub *mesh_multires_ps_ = nullptr;
     PassMain::Sub *points_ps_ = nullptr;
     PassMain::Sub *pointcloud_ps_ = nullptr;
   } colored, non_colored;
@@ -47,6 +53,9 @@ class Wireframe : Overlay {
 
   /* Force display of wireframe on surface objects, regardless of the object display settings. */
   bool show_wire_ = false;
+
+  /* Per-object Multires wireframe data updated each frame before drawing. */
+  draw::UniformBuffer<OVERLAY_MultiresWireData> multires_wire_ubo_;
 
  public:
   void begin_sync(Resources &res, const State &state) final
@@ -82,10 +91,15 @@ class Wireframe : Overlay {
       res.select_bind(pass);
 
       auto shader_pass =
-          [&](gpu::Shader *shader, const char *name, bool use_coloring, float wire_threshold) {
+          [&](gpu::Shader *shader,
+              const char *name,
+              bool use_coloring,
+              float wire_threshold,
+              bool use_multires = false) {
             auto &sub = pass.sub(name);
             if (res.shaders->wireframe_mesh.get() == shader) {
               sub.specialize_constant(shader, "use_custom_depth_bias", do_smooth_lines);
+              sub.specialize_constant(shader, "use_multires_wireframe", use_multires);
             }
             sub.shader_set(shader);
             sub.bind_texture("depth_tx", depth_tex);
@@ -103,6 +117,8 @@ class Wireframe : Overlay {
         overlay::ShaderModule &sh = *res.shaders;
         ps.mesh_ps_ = shader_pass(sh.wireframe_mesh.get(), "Mesh", use_color, wire_threshold);
         ps.mesh_all_edges_ps_ = shader_pass(sh.wireframe_mesh.get(), "Wire", use_color, 1.0f);
+        ps.mesh_multires_ps_ = shader_pass(
+            sh.wireframe_mesh.get(), "MeshMultires", use_color, wire_threshold, true);
         ps.points_ps_ = shader_pass(sh.wireframe_points.get(), "Points", use_color, 1.0f);
         ps.pointcloud_ps_ = shader_pass(
             sh.wireframe_points_with_radius.get(), "PtCloud", use_color, 1.0f);
@@ -191,8 +207,67 @@ class Wireframe : Overlay {
              * Otherwise the wireframe will conflict with the edit cage drawing and produce
              * unpleasant aliasing. */
             gpu::Batch *geom = DRW_cache_mesh_face_wireframe_get(ob_ref.object);
-            (all_edges ? coloring.mesh_all_edges_ps_ : coloring.mesh_ps_)
-                ->draw(geom, manager.unique_handle(ob_ref), res.select_id(ob_ref).get());
+
+            /* Check for Multires modifier to enable adaptive wireframe. */
+            const MultiresModifierData *mmd = reinterpret_cast<const MultiresModifierData *>(
+                BKE_modifiers_findby_type(ob_ref.object, eModifierType_Multires));
+            const bool use_multires_wire =
+                mmd && !BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d);
+            {
+              static int log_count = 0;
+              if (log_count < 5) {
+                log_count++;
+                printf("[WIRE_OBJ] ob=%s show_wire=%d mmd=%s ctrl_edges=%d use_multires=%d\n",
+                       ob_ref.object->id.name + 2,
+                       int(show_surface_wire),
+                       mmd ? "YES" : "NO",
+                       mmd ? int(!!(mmd->flags & eMultiresModifierFlag_ControlEdges)) : -1,
+                       int(use_multires_wire));
+                fflush(stdout);
+              }
+            }
+
+            PassMain::Sub *mesh_pass;
+            if (use_multires_wire) {
+              const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*ob_ref.object);
+              const std::optional<blender::Bounds<float3>> bounds = mesh.bounds_min_max();
+              const float object_diameter = bounds ?
+                                                math::distance(bounds->min, bounds->max) :
+                                                1.0f;
+
+              /* Compute real camera-to-object distance instead of pivot distance. */
+              const float3 cam_pos = float3(state.rv3d->viewinv[3]);
+              const float3 ob_center = ob_ref.object->object_to_world().location();
+              const float cam_dist = math::distance(cam_pos, ob_center);
+
+              multires_wire_ubo_.wire_level = compute_multires_wire_level(
+                  cam_dist, mmd, object_diameter);
+              multires_wire_ubo_.wire_level_max = float(mmd->totlvl);
+              multires_wire_ubo_.base_wire_width = 2.0f;
+              multires_wire_ubo_._pad = 0.0f;
+              multires_wire_ubo_.push_update();
+              {
+                const float base = float(mmd->totlvl) * object_diameter * 4.0f;
+                printf("[WIRE_UBO] ob=%s totlvl=%d diam=%.2f rv3d_dist=%.2f cam_dist=%.2f"
+                       " wire_level=%.2f thr_lvl1=%.2f thr_lvl2=%.2f\n",
+                       ob_ref.object->id.name + 2,
+                       mmd->totlvl,
+                       object_diameter,
+                       state.rv3d->dist,
+                       cam_dist,
+                       multires_wire_ubo_.wire_level,
+                       base / 2.0f,
+                       base / 4.0f);
+                fflush(stdout);
+              }
+
+              mesh_pass = all_edges ? coloring.mesh_all_edges_ps_ : coloring.mesh_multires_ps_;
+              mesh_pass->bind_ubo("multires_wire_buf", &multires_wire_ubo_);
+            }
+            else {
+              mesh_pass = all_edges ? coloring.mesh_all_edges_ps_ : coloring.mesh_ps_;
+            }
+            mesh_pass->draw(geom, manager.unique_handle(ob_ref), res.select_id(ob_ref).get());
           }
         }
 
@@ -283,6 +358,48 @@ class Wireframe : Overlay {
   }
 
  private:
+  static float compute_multires_wire_level(const float dist,
+                                            const MultiresModifierData *mmd,
+                                            const float object_diameter)
+  {
+    /* wire_level semantics (matches shader multires_level_fade formula):
+     *   wire_level >= L+1  => level L fully visible  (fade = 1)
+     *   L < wire_level < L+1 => level L fading in   (fade = wire_level - L)
+     *   wire_level <= L      => level L hidden       (fade <= 0)
+     *
+     * wire_level is always clamped to >= 1 so level-0 base edges are never hidden.
+     *
+     * Camera-distance thresholds for showing level k (k=1..totlvl):
+     *   outer[k] = base_threshold / 2^k    (camera must be closer than this)
+     *   inner[k] = outer[k] / 2            (camera closer = level k fully visible)
+     */
+    const float base_threshold = float(mmd->totlvl) * object_diameter * 4.0f;
+
+    float result = 1.0f; /* Default: only base (level 0) visible. */
+
+    for (int k = 1; k <= mmd->totlvl; k++) {
+      const float outer = base_threshold / float(1 << k);
+      const float inner = outer * 0.5f;
+
+      if (dist >= outer) {
+        /* Camera too far: level k and deeper hidden. Stop here. */
+        break;
+      }
+
+      if (dist >= inner) {
+        /* In fade band [inner, outer): level k is fading in. */
+        const float t = (outer - dist) / (outer - inner); /* 0 at outer, 1 at inner */
+        result = float(k) + math::clamp(t, 0.0f, 1.0f);
+        break;
+      }
+
+      /* dist < inner: level k fully visible. Advance result and check next. */
+      result = float(k) + 1.0f;
+    }
+
+    return result;
+  }
+
   float wire_discard_threshold_get(float threshold)
   {
     /* Use `sqrt` since the value stored in the edge is a variation of the cosine, so its square

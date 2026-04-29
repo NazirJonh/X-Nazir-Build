@@ -926,9 +926,8 @@ static bool subdiv_mesh_topology_info(const ForeachContext *foreach_context,
   subdiv_mesh_prepare_accumulator(subdiv_context, num_vertices);
   subdiv_mesh.runtime->subsurf_face_dot_tags.clear();
   subdiv_mesh.runtime->subsurf_face_dot_tags.resize(num_vertices);
-  if (subdiv_context->settings->use_optimal_display) {
-    subdiv_context->subdiv_display_edges = Array<bool>(num_edges, false);
-  }
+  /* Always compute coarse-edge flags; used by BFS level tagging regardless of Optimal Display. */
+  subdiv_context->subdiv_display_edges = Array<bool>(num_edges, false);
   return true;
 }
 
@@ -1213,9 +1212,8 @@ static void subdiv_copy_edge_data(SubdivMeshContext *ctx,
   if (!ctx->coarse_edge_origindex.is_empty()) {
     ctx->subdiv_edge_origindex[subdiv_edge_index] = ctx->coarse_edge_origindex[coarse_edge_index];
   }
-  if (ctx->settings->use_optimal_display) {
-    ctx->subdiv_display_edges[subdiv_edge_index] = true;
-  }
+  /* Always mark coarse-origin edges; BFS needs this regardless of Optimal Display setting. */
+  ctx->subdiv_display_edges[subdiv_edge_index] = true;
 }
 
 static void subdiv_mesh_edge(const ForeachContext *foreach_context,
@@ -1565,10 +1563,13 @@ Mesh *subdiv_to_mesh(Subdiv *subdiv, const ToMeshSettings *settings, const Mesh 
    * calculating them here. The work may have been pointless anyway if the mesh is deformed or
    * changed afterwards. */
 
-  /* Move the optimal display edge array to the final bit vector. */
+  /* Move the coarse-edge flags to the result mesh.
+   * Always computed (for BFS level tagging). The filter flag controls whether the IBO extractor
+   * actually uses them to hide subdivision edges (Optimal Display behaviour). */
   if (!subdiv_context.subdiv_display_edges.is_empty()) {
     result->runtime->subsurf_optimal_display_edges = BitVector<>(
         subdiv_context.subdiv_display_edges);
+    result->runtime->subsurf_use_optimal_display_filter = settings->use_optimal_display;
   }
 
   if (coarse_mesh->verts_no_face().is_empty()) {

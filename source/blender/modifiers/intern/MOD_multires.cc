@@ -229,6 +229,16 @@ static Mesh *modify_mesh(ModifierData *md, const ModifierEvalContext *ctx, Mesh 
 
     result = multires_as_mesh(mmd, ctx, mesh, subdiv);
 
+    /* Tag per-edge subdivision levels for adaptive wireframe display. */
+    printf("[MULTIRES_MOD] multires_as_mesh done: edges=%d, subsurf_opt_edges_empty=%d\n",
+           result->edges_num,
+           int(result->runtime->subsurf_optimal_display_edges.is_empty()));
+    fflush(stdout);
+    BKE_multires_tag_edge_levels(result, mmd->totlvl);
+    printf("[MULTIRES_MOD] after tag_edge_levels: levels_empty=%d\n",
+           int(result->runtime->subsurf_edge_subdivision_level.is_empty()));
+    fflush(stdout);
+
     if (use_clnors) {
       bke::mesh_set_custom_normals_normalized(
           *result,

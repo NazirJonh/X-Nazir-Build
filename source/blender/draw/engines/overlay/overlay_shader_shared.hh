@@ -147,14 +147,14 @@ struct [[host_shared]] OVERLAY_GridData {
 };
 
 struct [[host_shared]] OVERLAY_MultiresWireData {
-  /* Fractional camera level: 0.0 = far (only base mesh visible),
-   * N.0 = close (all levels up to N fully visible). */
-  float wire_level;
+  /* Distance threshold based on object diameter. */
+  float base_threshold;
   /* Maximum subdivision level on the object (totlvl). */
   float wire_level_max;
   /* Base wire width in pixels (level 0 thickness). */
   float base_wire_width;
-  float _pad;
+  /* Camera distance (used for orthographic projection). */
+  float ortho_dist;
 };
 
 #ifdef GPU_SHADER

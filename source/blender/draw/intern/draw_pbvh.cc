@@ -984,10 +984,12 @@ BLI_NOINLINE static void fill_subdivision_levels_grids(const Object &object,
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
   ensure_vbos_allocated_grids(object, subdivision_level_format(), use_flat_layout, node_mask, vbos);
 
-  int max_level = 0;
-  while ((key.grid_size - 1) % (1 << max_level) == 0 && (1 << max_level) < key.grid_size) {
-    max_level++;
+  const int total_level = subdiv_ccg.level;
+  int grid_depth = 0;
+  while ((1 << grid_depth) < (key.grid_size - 1)) {
+    grid_depth++;
   }
+  const int level_offset = std::max(0, total_level - grid_depth);
 
   node_mask.foreach_index(
       [&](const int i) {
@@ -998,15 +1000,21 @@ BLI_NOINLINE static void fill_subdivision_levels_grids(const Object &object,
             for (int y = 0; y < grid_size_1; y++) {
               for (int x = 0; x < grid_size_1; x++) {
                 auto get_level = [&](int px, int py) -> uint {
-                  uint level_x = max_level;
-                  for (int l = 0; l <= max_level; l++) {
-                    if (px % (1 << (max_level - l)) == 0) { level_x = l; break; }
+                  uint level_x = grid_depth;
+                  for (int l = 0; l <= grid_depth; l++) {
+                    if (px % (1 << (grid_depth - l)) == 0) {
+                      level_x = l;
+                      break;
+                    }
                   }
-                  uint level_y = max_level;
-                  for (int l = 0; l <= max_level; l++) {
-                    if (py % (1 << (max_level - l)) == 0) { level_y = l; break; }
+                  uint level_y = grid_depth;
+                  for (int l = 0; l <= grid_depth; l++) {
+                    if (py % (1 << (grid_depth - l)) == 0) {
+                      level_y = l;
+                      break;
+                    }
                   }
-                  return std::min(level_x, level_y);
+                  return uint(level_offset + std::min(level_x, level_y));
                 };
                 *data = get_level(x, y); data++;
                 *data = get_level(x + 1, y); data++;
@@ -1020,15 +1028,21 @@ BLI_NOINLINE static void fill_subdivision_levels_grids(const Object &object,
           for (int grid_idx = 0; grid_idx < nodes[i].grids().size(); grid_idx++) {
             for (int y = 0; y < key.grid_size; y++) {
               for (int x = 0; x < key.grid_size; x++) {
-                uint level_x = max_level;
-                for (int l = 0; l <= max_level; l++) {
-                  if (x % (1 << (max_level - l)) == 0) { level_x = l; break; }
+                uint level_x = grid_depth;
+                for (int l = 0; l <= grid_depth; l++) {
+                  if (x % (1 << (grid_depth - l)) == 0) {
+                    level_x = l;
+                    break;
+                  }
                 }
-                uint level_y = max_level;
-                for (int l = 0; l <= max_level; l++) {
-                  if (y % (1 << (max_level - l)) == 0) { level_y = l; break; }
+                uint level_y = grid_depth;
+                for (int l = 0; l <= grid_depth; l++) {
+                  if (y % (1 << (grid_depth - l)) == 0) {
+                    level_y = l;
+                    break;
+                  }
                 }
-                *data = std::min(level_x, level_y);
+                *data = uint(level_offset + std::min(level_x, level_y));
                 data++;
               }
             }
@@ -1903,6 +1917,8 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
           case CustomRequest::EdgeFac:
             update_edge_fac_mesh(object, mask, vbos);
             break;
+          case CustomRequest::SubdivisionLevel:
+            break;
         }
       }
       else {
@@ -1963,6 +1979,8 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
             break;
           case CustomRequest::EdgeFac:
             update_edge_fac_bmesh(object, mask, vbos);
+            break;
+          case CustomRequest::SubdivisionLevel:
             break;
         }
       }

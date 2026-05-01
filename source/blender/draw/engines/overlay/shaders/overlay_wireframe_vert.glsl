@@ -43,7 +43,29 @@ float multires_level_fade(uint level, float wire_level)
   }
   
   float relative_depth = wire_level - float(level);
-  return saturate(relative_depth * 0.5f);
+  
+  /* Final hierarchical touch: even at 100% fade, make deeper levels slightly dimmer
+   * (e.g. level 9 will be ~57% of level 1 brightness) so they don't perfectly merge. */
+  float hierarchy_dimmer = pow(0.94f, float(level));
+  return saturate(relative_depth * 0.5f) * hierarchy_dimmer;
+}
+
+float compute_wire_level(float3 wpos)
+{
+  bool is_persp = (drw_view().winmat[3][3] == 0.0f);
+  float dist;
+  if (is_persp) {
+    dist = distance(wpos, drw_view().viewinv[3].xyz);
+  } else {
+    dist = multires_wire_buf.ortho_dist;
+  }
+  
+  dist = max(dist, 1e-6);
+  float level = log2(multires_wire_buf.base_threshold / dist);
+  
+  /* Clamp up to max_level + 2.0 so that the highest level can reach a relative_depth of 2.0
+   * and become 100% opaque when zoomed in extremely close. */
+  return clamp(level, 1.0f, multires_wire_buf.wire_level_max + 2.0f);
 }
 #endif
 
@@ -215,17 +237,18 @@ void main()
 #  if !defined(CURVES)
   if (use_multires_wireframe) {
     uint level = subdiv_level_iface;
-    float fade = multires_level_fade(level, multires_wire_buf.wire_level);
+    float wire_level = compute_wire_level(wpos);
+    float fade = multires_level_fade(level, wire_level);
     if (fade <= 0.0f) {
-      /* Hide edges that are above the current visible level.
-       * Using edge_start = -1 is the standard Blender mechanism for culling
-       * an edge in the geometry stage without discard overhead. */
+      /* Hide edges that are above the current visible level. */
       edge_start = float2(-1.0f);
     }
     else {
       final_color *= fade;
       if (level == 0u) {
         line_width_iface = multires_wire_buf.base_wire_width;
+      } else {
+        line_width_iface = 1.0f;
       }
     }
   }

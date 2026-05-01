@@ -208,24 +208,14 @@ class Wireframe : Overlay {
                                               math::distance(bounds->min, bounds->max) :
                                               1.0f;
 
-            /* Compute appropriate distance for level-of-detail.
-             * In Perspective, use Euclidean distance to object.
-             * In Orthographic, distance to camera doesn't affect scale; use rv3d->dist. */
-            float cam_dist;
-            if (state.rv3d->is_persp) {
-              const float3 cam_pos = float3(state.rv3d->viewinv[3]);
-              const float3 ob_center = ob_ref.object->object_to_world().location();
-              cam_dist = math::distance(cam_pos, ob_center);
-            }
-            else {
-              cam_dist = state.rv3d->dist;
-            }
+            float cam_dist = state.rv3d->is_persp ? 0.0f : state.rv3d->dist;
 
-            multires_wire_ubo_.wire_level = compute_multires_wire_level(
-                cam_dist, mmd, object_diameter);
+            /* Pass the base threshold via the UBO.
+             * The shader will compute the actual wire_level per vertex. */
+            multires_wire_ubo_.base_threshold = compute_multires_base_threshold(object_diameter);
             multires_wire_ubo_.wire_level_max = float(mmd->totlvl);
             multires_wire_ubo_.base_wire_width = 2.0f;
-            multires_wire_ubo_._pad = 0.0f;
+            multires_wire_ubo_.ortho_dist = cam_dist;
             multires_wire_ubo_.push_update();
           }
 
@@ -344,46 +334,13 @@ class Wireframe : Overlay {
   }
 
  private:
-  static float compute_multires_wire_level(const float dist,
-                                            const MultiresModifierData *mmd,
-                                            const float object_diameter)
+  /* The shader will compute wire_level = log2(base_threshold / dist_to_vertex).
+   * We pass base_threshold via the UBO's wire_level field.
+   * A multiplier of 8.0 gives a good balance: no noise when zoomed out,
+   * but allows seeing highest levels when the camera is very close to the surface. */
+  inline float compute_multires_base_threshold(float object_diameter)
   {
-    /* wire_level semantics (matches shader multires_level_fade formula):
-     *   wire_level >= L+1  => level L fully visible  (fade = 1)
-     *   L < wire_level < L+1 => level L fading in   (fade = wire_level - L)
-     *   wire_level <= L      => level L hidden       (fade <= 0)
-     *
-     * wire_level is always clamped to >= 1 so level-0 base edges are never hidden.
-     *
-     * Camera-distance thresholds for showing level k (k=1..totlvl):
-     *   outer[k] = base_threshold / 2^k    (camera must be closer than this)
-     *   inner[k] = outer[k] / 2            (camera closer = level k fully visible)
-     */
-    const float base_threshold = float(mmd->totlvl) * object_diameter * 4.0f;
-
-    float result = 1.0f; /* Default: only base (level 0) visible. */
-
-    for (int k = 1; k <= mmd->totlvl; k++) {
-      const float outer = base_threshold / float(1 << k);
-      const float inner = outer * 0.5f;
-
-      if (dist >= outer) {
-        /* Camera too far: level k and deeper hidden. Stop here. */
-        break;
-      }
-
-      if (dist >= inner) {
-        /* In fade band [inner, outer): level k is fading in. */
-        const float t = (outer - dist) / (outer - inner); /* 0 at outer, 1 at inner */
-        result = float(k) + math::clamp(t, 0.0f, 1.0f);
-        break;
-      }
-
-      /* dist < inner: level k fully visible. Advance result and check next. */
-      result = float(k) + 1.0f;
-    }
-
-    return result;
+    return object_diameter * 8.0f;
   }
 
   float wire_discard_threshold_get(float threshold)

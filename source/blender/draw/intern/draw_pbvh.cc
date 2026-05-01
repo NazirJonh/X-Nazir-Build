@@ -298,6 +298,13 @@ static const GPUVertFormat &mask_format()
   return format;
 }
 
+static const GPUVertFormat &edge_fac_format()
+{
+  static const GPUVertFormat format = GPU_vertformat_from_attribute("wd",
+                                                                    gpu::VertAttrType::SFLOAT_32);
+  return format;
+}
+
 static const GPUVertFormat &face_set_format()
 {
   static const GPUVertFormat format = GPU_vertformat_from_attribute(
@@ -819,7 +826,10 @@ BLI_NOINLINE static void fill_normals_grids(const Object &object,
           const int grid_size_1 = key.grid_size - 1;
           for (const int grid : nodes[i].grids()) {
             const Span<float3> grid_positions = positions.slice(bke::ccg::grid_range(key, grid));
-            const Span<float3> grid_normals = normals.slice(bke::ccg::grid_range(key, grid));
+            const Span<float3> grid_normals = normals.is_empty() ? 
+                                              Span<float3>() : 
+                                              normals.slice(bke::ccg::grid_range(key, grid));
+            
             if (!sharp_faces.is_empty() && sharp_faces[grid_to_face_map[grid]]) {
               for (int y = 0; y < grid_size_1; y++) {
                 for (int x = 0; x < grid_size_1; x++) {
@@ -837,10 +847,10 @@ BLI_NOINLINE static void fill_normals_grids(const Object &object,
             else {
               for (int y = 0; y < grid_size_1; y++) {
                 for (int x = 0; x < grid_size_1; x++) {
-                  std::fill_n(data,
-                              4,
-                              normal_float_to_short(
-                                  grid_normals[CCG_grid_xy_to_index(key.grid_size, x, y)]));
+                  float3 no = grid_normals.is_empty() ? 
+                               float3(0.0f, 0.0f, 1.0f) : 
+                               grid_normals[CCG_grid_xy_to_index(key.grid_size, x, y)];
+                  std::fill_n(data, 4, normal_float_to_short(no));
                   data += 4;
                 }
               }
@@ -850,9 +860,19 @@ BLI_NOINLINE static void fill_normals_grids(const Object &object,
         else {
           /* The non-flat VBO layout does not support sharp faces. */
           for (const int grid : nodes[i].grids()) {
-            for (const float3 &normal : normals.slice(bke::ccg::grid_range(key, grid))) {
-              *data = normal_float_to_short(normal);
-              data++;
+            const Span<float3> grid_normals = normals.is_empty() ? 
+                                              Span<float3>() : 
+                                              normals.slice(bke::ccg::grid_range(key, grid));
+            const int grid_vert_len = square_i(key.grid_size);
+            if (grid_normals.is_empty()) {
+              std::fill_n(data, grid_vert_len, normal_float_to_short(float3(0.0f, 0.0f, 1.0f)));
+              data += grid_vert_len;
+            }
+            else {
+              for (const float3 &normal : grid_normals) {
+                *data = normal_float_to_short(normal);
+                data++;
+              }
             }
           }
         }
@@ -1016,6 +1036,34 @@ BLI_NOINLINE static void fill_subdivision_levels_grids(const Object &object,
         }
       },
       exec_mode::grain_size(1));
+}
+
+static void fill_edge_fac_grids(const Object &object,
+                                     const BitSpan use_flat_layout,
+                                     const IndexMask &node_mask,
+                                     const MutableSpan<gpu::VertBufPtr> vbos)
+{
+  ensure_vbos_allocated_grids(object, edge_fac_format(), use_flat_layout, node_mask, vbos);
+  node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(0.0f); },
+                          exec_mode::grain_size(64));
+}
+
+static void update_edge_fac_mesh(const Object &object,
+                                  const IndexMask &node_mask,
+                                  const MutableSpan<gpu::VertBufPtr> vbos)
+{
+  ensure_vbos_allocated_mesh(object, edge_fac_format(), node_mask, vbos);
+  node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(0.0f); },
+                          exec_mode::grain_size(64));
+}
+
+static void update_edge_fac_bmesh(const Object &object,
+                                   const IndexMask &node_mask,
+                                   const MutableSpan<gpu::VertBufPtr> vbos)
+{
+  ensure_vbos_allocated_bmesh(object, edge_fac_format(), node_mask, vbos);
+  node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(0.0f); },
+                          exec_mode::grain_size(64));
 }
 
 BLI_NOINLINE static void update_positions_bmesh(const Object &object,
@@ -1852,6 +1900,9 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
           case CustomRequest::FaceSet:
             update_face_sets_mesh(object, orig_mesh_data, mask, vbos);
             break;
+          case CustomRequest::EdgeFac:
+            update_edge_fac_mesh(object, mask, vbos);
+            break;
         }
       }
       else {
@@ -1877,6 +1928,9 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
             break;
           case CustomRequest::SubdivisionLevel:
             fill_subdivision_levels_grids(object, use_flat_layout_, mask, vbos);
+            break;
+          case CustomRequest::EdgeFac:
+            fill_edge_fac_grids(object, use_flat_layout_, mask, vbos);
             break;
         }
       }
@@ -1906,6 +1960,9 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
             break;
           case CustomRequest::FaceSet:
             update_face_sets_bmesh(object, orig_mesh_data, mask, vbos);
+            break;
+          case CustomRequest::EdgeFac:
+            update_edge_fac_bmesh(object, mask, vbos);
             break;
         }
       }
@@ -2055,6 +2112,10 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_lines_batches(const Object &object,
 
   const Span<gpu::VertBufPtr> position = this->ensure_attribute_data(
       object, orig_mesh_data, CustomRequest::Position, nodes_to_update);
+  const Span<gpu::VertBufPtr> normal = this->ensure_attribute_data(
+      object, orig_mesh_data, CustomRequest::Normal, nodes_to_update);
+  const Span<gpu::VertBufPtr> edge_fac = this->ensure_attribute_data(
+      object, orig_mesh_data, CustomRequest::EdgeFac, nodes_to_update);
   const Span<gpu::IndexBufPtr> lines = this->ensure_lines_indices(
       object, orig_mesh_data, nodes_to_update, request.use_coarse_grids);
 
@@ -2072,8 +2133,15 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_lines_batches(const Object &object,
   nodes_to_update.foreach_index(
       [&](const int i) {
         if (!batches[i]) {
-          batches[i] = GPU_batch_create(GPU_PRIM_LINES, nullptr, lines[i].get());
-          GPU_batch_vertbuf_add(batches[i], position[i].get(), false);
+          batches[i] = GPU_batch_create(GPU_PRIM_LINES, position[i].get(), lines[i].get());
+          if (pbvh.type() == bke::pbvh::Type::Grids) {
+            if (normal[i]) {
+              GPU_batch_vertbuf_add(batches[i], normal[i].get(), false);
+            }
+            if (edge_fac[i]) {
+              GPU_batch_vertbuf_add(batches[i], edge_fac[i].get(), false);
+            }
+          }
           if (!subdiv_level.is_empty() && subdiv_level[i]) {
             GPU_batch_vertbuf_add(batches[i], subdiv_level[i].get(), false);
           }

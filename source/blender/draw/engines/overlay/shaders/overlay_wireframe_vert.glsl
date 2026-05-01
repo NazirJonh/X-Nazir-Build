@@ -179,7 +179,7 @@ void main()
 
   /* Curves do not need the offset since they *are* the curve geometry. */
 #if !defined(CURVES)
-  gl_Position.z -= ndc_offset_factor * 0.5f;
+  gl_Position.z -= ndc_offset_factor * gl_Position.w;
 #endif
 
   float3 rim_col, wire_col;

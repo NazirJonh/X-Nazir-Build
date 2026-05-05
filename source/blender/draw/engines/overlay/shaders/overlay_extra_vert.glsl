@@ -91,6 +91,23 @@ void main()
       vpos.z *= -abs(camera_dist);
     }
     vpos.xy = (camera_center + camera_corner * vpos.xy) * abs(vpos.z);
+    
+    if (!flag_test(vclass, VCLASS_CAMERA_VOLUME)) {
+      final_color.a = 1.0f;
+    }
+  }
+  else if (flag_test(vclass, VCLASS_CAMERA_TRIA)) {
+    if (camera_dist > 0.0f) {
+      vpos.z = -abs(camera_dist);
+    }
+    else {
+      vpos.z *= -abs(camera_dist);
+    }
+    
+    vofs = float3(0.0f);
+    vpos.xy = (camera_center + camera_corner.x * vpos.xy) * abs(vpos.z);
+    
+    final_color.a = camera_corner.y;
   }
   else if (flag_test(vclass, VCLASS_CAMERA_DIST)) {
     vofs.xy = float2(0.0f);

@@ -10,6 +10,7 @@
 
 #include "BKE_camera.h"
 #include "BKE_tracking.hh"
+#include "BLI_math_base.h"
 #include "BLI_math_color.h"
 #include "BLI_math_rotation.h"
 #include "DEG_depsgraph_query.hh"
@@ -78,6 +79,8 @@ class Cameras : Overlay {
     CameraInstanceBuf frame_buf = {selection_type_, "camera_frame_buf"};
     CameraInstanceBuf tria_buf = {selection_type_, "camera_tria_buf"};
     CameraInstanceBuf tria_wire_buf = {selection_type_, "camera_tria_wire_buf"};
+    CameraInstanceBuf tria_transp_buf = {selection_type_, "camera_tria_transp_buf"};
+    CameraInstanceBuf tria_wire_transp_buf = {selection_type_, "camera_tria_wire_transp_buf"};
     CameraInstanceBuf volume_buf = {selection_type_, "camera_volume_buf"};
     CameraInstanceBuf volume_wire_buf = {selection_type_, "camera_volume_wire_buf"};
     CameraInstanceBuf sphere_solid_buf = {selection_type_, "camera_sphere_solid_buf"};
@@ -111,6 +114,8 @@ class Cameras : Overlay {
       call_buffers_.frame_buf.clear();
       call_buffers_.tria_buf.clear();
       call_buffers_.tria_wire_buf.clear();
+      call_buffers_.tria_transp_buf.clear();
+      call_buffers_.tria_wire_transp_buf.clear();
       call_buffers_.volume_buf.clear();
       call_buffers_.volume_wire_buf.clear();
       call_buffers_.sphere_solid_buf.clear();
@@ -201,6 +206,16 @@ class Cameras : Overlay {
       call_buffers_.tria_buf.end_sync(sub_pass, res.shapes.camera_tria.get());
       call_buffers_.tria_wire_buf.end_sync(sub_pass, res.shapes.camera_tria_wire.get());
       call_buffers_.sphere_solid_buf.end_sync(sub_pass, res.shapes.sphere_low_detail.get());
+    }
+
+    {
+      PassSimple::Sub &sub_pass = ps_.sub("camera_tria");
+      sub_pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA |
+                             DRW_STATE_DEPTH_LESS_EQUAL,
+                         state.clipping_plane_count);
+      sub_pass.shader_set(res.shaders->extra_shape.get());
+      call_buffers_.tria_transp_buf.end_sync(sub_pass, res.shapes.camera_tria.get());
+      call_buffers_.tria_wire_transp_buf.end_sync(sub_pass, res.shapes.camera_tria_wire.get());
     }
 
     {
@@ -382,8 +397,42 @@ class Cameras : Overlay {
       float tria_margin = 0.1f * drawsize / fabsf(data.depth);
       data.center_x = center.x;
       data.center_y = center.y + data.corner_y + tria_margin + tria_size;
-      data.corner_x = data.corner_y = -tria_size;
-      (is_active ? call_buffers_.tria_buf : call_buffers_.tria_wire_buf).append(data, select_id);
+      data.corner_x = -tria_size;
+      data.corner_y = (ob->base_flag & BASE_SELECTED) ? 1.0f : 0.0f;
+      
+      float alpha = 1.0f;
+      if (data.corner_y > 0.5f) {
+        alpha = 0.5f;
+      } else {
+        float3 local_center = float3(center.x * fabsf(data.depth), center.y * fabsf(data.depth), -fabsf(data.depth));
+        float3 local_corner = float3((center.x + tria_size) * fabsf(data.depth), (center.y - tria_size) * fabsf(data.depth), -fabsf(data.depth));
+        float4x4 obmat = data.matrix;
+        obmat[0][3] = 0.0f;
+        obmat[1][3] = 0.0f;
+        obmat[2][3] = 0.0f;
+        obmat[3][3] = 1.0f;
+        
+        float4x4 persmat(state.rv3d->persmat);
+        float4 clip_center = persmat * (obmat * float4(local_center, 1.0f));
+        float4 clip_corner = persmat * (obmat * float4(local_corner, 1.0f));
+        
+        float2 ndc_center = float2(clip_center.x / clip_center.w, clip_center.y / clip_center.w);
+        float2 ndc_corner = float2(clip_corner.x / clip_corner.w, clip_corner.y / clip_corner.w);
+        
+        float2 viewport = float2(state.region->winx, state.region->winy);
+        float screen_size_pixels = math::length((ndc_corner - ndc_center) * 0.2f * viewport);
+        
+        alpha = 1.0f - blender::smoothstep(60.0f, 150.0f, screen_size_pixels) * 0.85f;
+      }
+
+      data.corner_y = alpha;
+      bool is_transparent = (alpha < 0.99f);
+
+      if (is_transparent) {
+        (is_active ? call_buffers_.tria_transp_buf : call_buffers_.tria_wire_transp_buf).append(data, select_id);
+      } else {
+        (is_active ? call_buffers_.tria_buf : call_buffers_.tria_wire_buf).append(data, select_id);
+      }
     }
 
     if (cam.flag & CAM_SHOWLIMITS) {

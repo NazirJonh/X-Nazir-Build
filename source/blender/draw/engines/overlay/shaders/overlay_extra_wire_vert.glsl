@@ -28,6 +28,13 @@ void main()
   float3 world_pos = drw_point_object_to_world(pos);
   gl_Position = drw_point_world_to_homogenous(world_pos);
 
+#ifdef CONTOUR_DEPTH_BIAS
+  /* Подталкиваем вперёд в clip space, чтобы не просвечивало сзади. */
+  /* Увеличенный bias: в Texture Paint контур может теряться из-за несовпадения глубины
+   * между отображаемой поверхностью и геометрией контура. */
+  gl_Position.z -= 1e-3 * gl_Position.w;
+#endif
+
 #if defined(SELECT_ENABLE)
   /* HACK: to avoid losing sub-pixel object in selections, we add a bit of randomness to the
    * wire to at least create one fragment that will pass the occlusion query. */
@@ -52,7 +59,9 @@ void main()
   }
   else {
     final_color = color;
+#ifndef CONTOUR_KEEP_ALPHA
     final_color.a = 1.0f; /* Stipple */
+#endif
   }
 #endif
 

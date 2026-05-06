@@ -227,6 +227,7 @@ enum class Type {
  */
 class Tree {
   friend Node;
+  friend IndexMask pbvh_positions_dirty_mask(const Tree &pbvh, IndexMaskMemory &memory);
   Type type_;
 
   /** Memory backing for #Node::prim_indices. Without an inline buffer to make #Tree movable. */
@@ -330,6 +331,12 @@ class Tree {
   /** Build a BVH tree from pre-computed MeshGroup data. */
   static Tree from_spatially_organized_mesh(const Mesh &mesh);
 };
+
+/**
+ * Возвращает маску листовых узлов, у которых были помечены изменения позиций
+ * (bounds_dirty_). Используется внешними потребителями для выборочного обновления.
+ */
+IndexMask pbvh_positions_dirty_mask(const Tree &pbvh, IndexMaskMemory &memory);
 
 void build_pixels(const Depsgraph &depsgraph, Object &object, Image &image, ImageUser &image_user);
 

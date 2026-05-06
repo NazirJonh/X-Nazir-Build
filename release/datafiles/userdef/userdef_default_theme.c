@@ -391,6 +391,7 @@ const bTheme U_theme_default = {
     .face_select = RGBA(0xffa30033),
     .face_mode_select = RGBA(0xffb70033),
     .face_retopology = RGBA(0x50c8ff0f),
+    .sculpt_symmetry_contour = RGBA(0xf0f000ff),
     .face_back = RGBA(0xff0000b3),
     .face_front = RGBA(0x0000ff00),
     .extra_edge_len = RGBA(0x150806ff),

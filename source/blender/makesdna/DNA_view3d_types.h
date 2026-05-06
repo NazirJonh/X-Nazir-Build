@@ -694,6 +694,22 @@ struct View3DOverlay {
 
   /** Curves sculpt mode settings. */
   float sculpt_curves_cage_opacity = 0;
+
+  /** Show symmetry plane in sculpt mode. */
+  char show_sculpt_symmetry_plane = 0;
+  /** Show symmetry contour in sculpt mode. */
+  char show_sculpt_symmetry_contour = 0;
+  /** Show symmetry contour in weight paint mode. */
+  char show_weight_paint_symmetry_contour = 0;
+  /** Show symmetry contour in vertex paint mode. */
+  char show_vertex_paint_symmetry_contour = 0;
+  /** Show symmetry contour in texture paint mode. */
+  char show_texture_paint_symmetry_contour = 0;
+  char _pad_sculpt[3] = {};
+  /** Opacity of the symmetry plane. */
+  float sculpt_symmetry_plane_opacity = 0.2f;
+  /** Thickness of the symmetry contour. */
+  float sculpt_symmetry_contour_thickness = 1.0f;
 };
 
 struct View3D_Runtime {

@@ -673,6 +673,11 @@ void Tree::tag_attribute_changed(const IndexMask &node_mask, const StringRef att
   }
 }
 
+IndexMask pbvh_positions_dirty_mask(const Tree &pbvh, IndexMaskMemory &memory)
+{
+  return IndexMask::from_bits(pbvh.bounds_dirty_, memory);
+}
+
 static bool tree_is_empty(const Tree &pbvh)
 {
   return std::visit([](const auto &nodes) { return nodes.is_empty(); }, pbvh.nodes_);

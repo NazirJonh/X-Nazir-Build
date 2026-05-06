@@ -26,13 +26,17 @@ struct Line {
   float2 dir;
   float dist;
   float dist_raw;
+  float width;
 
-  static Line decode(float3 data)
+  static Line decode(float4 data)
   {
+    float encoded_width = data.a;
+    float width = (encoded_width >= 0.999f) ? 1.0f : max(encoded_width * 255.0f, 1.0f);
     return {
         .dir = data.xy * 2.0f - 1.0f,
         .dist = (data.z - 0.1f) * 4.0f - 2.0f,
         .dist_raw = data.z,
+        .width = width,
     };
   }
 
@@ -63,7 +67,7 @@ struct Resources {
     return {
         .color = texelFetch(color_tx, texel_actual, 0),
         .depth = texelFetch(depth_tx, texel_actual, 0).r,
-        .line = Line::decode(texelFetch(line_tx, texel_actual, 0).rgb),
+        .line = Line::decode(texelFetch(line_tx, texel_actual, 0)),
     };
   }
 };
@@ -161,12 +165,24 @@ struct FragOut {
                                  neighbor_dist(neighbors[3], int2(0, -1)));
 
   /* Compute per-neighbor line coverage */
-  float line_kernel = theme.sizes.pixel * 0.5f - 0.5f;
-  float4 coverage = line_coverage(neighbor_dists, line_kernel, srt.do_smooth_lines);
+  float4 coverage;
+  coverage.x = line_coverage(neighbor_dists.x,
+                             theme.sizes.pixel * 0.5f * neighbors[0].line.width - 0.5f,
+                             srt.do_smooth_lines);
+  coverage.y = line_coverage(neighbor_dists.y,
+                             theme.sizes.pixel * 0.5f * neighbors[1].line.width - 0.5f,
+                             srt.do_smooth_lines);
+  coverage.z = line_coverage(neighbor_dists.z,
+                             theme.sizes.pixel * 0.5f * neighbors[2].line.width - 0.5f,
+                             srt.do_smooth_lines);
+  coverage.w = line_coverage(neighbor_dists.w,
+                             theme.sizes.pixel * 0.5f * neighbors[3].line.width - 0.5f,
+                             srt.do_smooth_lines);
 
   /* Multiply current output color by center pixel's line coverage. */
   if (center.line.is_valid()) {
-    float coverage = line_coverage(center.line.dist, line_kernel, srt.do_smooth_lines);
+    float center_kernel = theme.sizes.pixel * 0.5f * center.line.width - 0.5f;
+    float coverage = line_coverage(center.line.dist, center_kernel, srt.do_smooth_lines);
     center.color *= coverage;
   }
 
@@ -180,7 +196,8 @@ struct FragOut {
 
 #if 1
   /* Fix aliasing issue with really dense meshes and 1 pixel sized lines. */
-  if (!original_center_has_alpha && center.line.is_valid() && line_kernel < 0.45f) {
+  float center_kernel = theme.sizes.pixel * 0.5f * center.line.width - 0.5f;
+  if (!original_center_has_alpha && center.line.is_valid() && center_kernel < 0.45f) {
     float4 lines_raw = float4(neighbors[0].line.dist_raw,
                               neighbors[1].line.dist_raw,
                               neighbors[2].line.dist_raw,

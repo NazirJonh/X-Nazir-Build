@@ -95,6 +95,7 @@ set(SRC_GLSL_VERT
   overlay_sculpt_curves_cage_vert.glsl
   overlay_sculpt_curves_selection_vert.glsl
   overlay_sculpt_mask_vert.glsl
+  overlay_sculpt_symmetry_plane_vert.glsl
   overlay_viewer_attribute_curve_vert.glsl
   overlay_viewer_attribute_curves_vert.glsl
   overlay_viewer_attribute_mesh_vert.glsl
@@ -138,13 +139,13 @@ set(SRC_GLSL_FRAG
   overlay_point_varying_color_varying_outline_aa_frag.glsl
   overlay_sculpt_curves_selection_frag.glsl
   overlay_sculpt_mask_frag.glsl
+  overlay_sculpt_symmetry_plane_frag.glsl
   overlay_uniform_color_frag.glsl
   # TODO(fclem): rename to overlay_varying_color_frag.glsl
   overlay_varying_color.glsl
   overlay_viewer_attribute_frag.glsl
   overlay_wireframe_frag.glsl
 )
-
 
 set(SRC_GLSL_COMP
 )

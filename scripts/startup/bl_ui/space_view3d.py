@@ -7596,6 +7596,20 @@ class VIEW3D_PT_overlay_sculpt(Panel):
             row = layout.row(align=True)
             row.prop(sculpt, "show_bvh_nodes")
 
+        # Symmetry plane overlay
+        row = layout.row(align=True)
+        row.prop(overlay, "show_sculpt_symmetry_plane", text="")
+        sub = row.row()
+        sub.active = overlay.show_sculpt_symmetry_plane
+        sub.prop(overlay, "sculpt_symmetry_plane_opacity", text="Symmetry Plane")
+        
+        # Symmetry contour overlay
+        row = layout.row(align=True)
+        row.prop(overlay, "show_sculpt_symmetry_contour", text="")
+        sub = row.row()
+        sub.active = overlay.show_sculpt_symmetry_contour
+        sub.prop(overlay, "sculpt_symmetry_contour_thickness", text="Contours")
+
 
 class VIEW3D_PT_overlay_sculpt_curves(Panel):
     bl_space_type = 'VIEW_3D'
@@ -7702,6 +7716,11 @@ class VIEW3D_PT_overlay_texture_paint(Panel):
         col = layout.column()
         col.active = display_all
         col.prop(overlay, "texture_paint_mode_opacity")
+        row = col.row(align=True)
+        row.prop(overlay, "show_texture_paint_symmetry_contour", text="")
+        sub = row.row()
+        sub.active = overlay.show_texture_paint_symmetry_contour
+        sub.prop(overlay, "sculpt_symmetry_contour_thickness", text="Contours")
 
 
 class VIEW3D_PT_overlay_vertex_paint(Panel):
@@ -7726,6 +7745,11 @@ class VIEW3D_PT_overlay_vertex_paint(Panel):
 
         col.prop(overlay, "vertex_paint_mode_opacity")
         col.prop(overlay, "show_paint_wire")
+        row = col.row(align=True)
+        row.prop(overlay, "show_vertex_paint_symmetry_contour", text="")
+        sub = row.row()
+        sub.active = overlay.show_vertex_paint_symmetry_contour
+        sub.prop(overlay, "sculpt_symmetry_contour_thickness", text="Contours")
 
 
 class VIEW3D_PT_overlay_weight_paint(Panel):
@@ -7758,6 +7782,11 @@ class VIEW3D_PT_overlay_weight_paint(Panel):
 
         col.prop(overlay, "show_wpaint_contours")
         col.prop(overlay, "show_paint_wire")
+        row = col.row(align=True)
+        row.prop(overlay, "show_weight_paint_symmetry_contour", text="")
+        sub = row.row()
+        sub.active = overlay.show_weight_paint_symmetry_contour
+        sub.prop(overlay, "sculpt_symmetry_contour_thickness", text="Contours")
 
 
 class VIEW3D_PT_snapping(Panel):

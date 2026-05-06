@@ -6,11 +6,21 @@
  * \ingroup overlay
  */
 
+#include <iostream>
+#include <cstdio>
+
+#define OVERLAY_INSTANCE_DEBUG(msg, ...) \
+  do { \
+    printf("[OVERLAY_INSTANCE_DEBUG] " msg "\n", ##__VA_ARGS__); \
+    fflush(stdout); \
+  } while (0)
+
 #include "BKE_colorband.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "ED_view3d.hh"
 
+#include "BLI_math_color.h"
 #include "BKE_paint.hh"
 
 #include "draw_debug.hh"
@@ -86,7 +96,15 @@ void Instance::init()
     state.is_render_depth_available |= state.is_depth_only_drawing;
 
     if (!state.hide_overlays) {
+      OVERLAY_INSTANCE_DEBUG(
+          "Before copying overlay: v3d->overlay.show_sculpt_symmetry_plane = %d, contour = %d",
+          state.v3d->overlay.show_sculpt_symmetry_plane,
+          state.v3d->overlay.show_sculpt_symmetry_contour);
       state.overlay = state.v3d->overlay;
+      OVERLAY_INSTANCE_DEBUG(
+          "After copying overlay: state.overlay.show_sculpt_symmetry_plane = %d, contour = %d",
+          state.overlay.show_sculpt_symmetry_plane,
+          state.overlay.show_sculpt_symmetry_contour);
       state.v3d_flag = state.v3d->flag;
       state.v3d_gridflag = state.v3d->gridflag;
       state.show_text = !resources.is_selection() && !state.is_depth_only_drawing &&
@@ -280,6 +298,30 @@ void Resources::update_theme_settings(const DRWContext *ctx, const State &state)
   ui::theme::get_color_4fv(TH_FACE_SELECT, gb.colors.face_select);
   ui::theme::get_color_4fv(TH_FACE_MODE_SELECT, gb.colors.face_mode_select);
   ui::theme::get_color_4fv(TH_FACE_RETOPOLOGY, gb.colors.face_retopology);
+  /* Symmetry contour is View3D-only. Query it explicitly from SPACE_VIEW3D to avoid
+   * picking zeroed values from unrelated space theme states (e.g. Texture Paint context changes). */
+  ui::theme::get_color_type_4fv(
+      TH_SCULPT_SYMMETRY_CONTOUR, SPACE_VIEW3D, gb.colors.sculpt_symmetry_contour);
+  if (gb.colors.sculpt_symmetry_contour[3] == 0.0f) {
+    /* Runtime safety net for legacy/custom themes carrying fully transparent contour color.
+     * Reuse selection color so the contour remains visible without affecting draw order. */
+    ui::theme::get_color_type_4fv(TH_SELECT, SPACE_VIEW3D, gb.colors.sculpt_symmetry_contour);
+    gb.colors.sculpt_symmetry_contour[3] = 1.0f;
+    OVERLAY_INSTANCE_DEBUG(
+        "Theme TH_SCULPT_SYMMETRY_CONTOUR fallback -> TH_SELECT: (%.3f %.3f %.3f %.3f)",
+        gb.colors.sculpt_symmetry_contour[0],
+        gb.colors.sculpt_symmetry_contour[1],
+        gb.colors.sculpt_symmetry_contour[2],
+        gb.colors.sculpt_symmetry_contour[3]);
+  }
+  else {
+    OVERLAY_INSTANCE_DEBUG(
+        "Theme TH_SCULPT_SYMMETRY_CONTOUR = (%.3f %.3f %.3f %.3f)",
+        gb.colors.sculpt_symmetry_contour[0],
+        gb.colors.sculpt_symmetry_contour[1],
+        gb.colors.sculpt_symmetry_contour[2],
+        gb.colors.sculpt_symmetry_contour[3]);
+  }
   ui::theme::get_color_4fv(TH_FACE_BACK, gb.colors.face_back);
   ui::theme::get_color_4fv(TH_FACE_FRONT, gb.colors.face_front);
   ui::theme::get_color_4fv(TH_NORMAL, gb.colors.normal);
@@ -382,11 +424,15 @@ void Resources::update_theme_settings(const DRWContext *ctx, const State &state)
   /* Color management. */
   {
     float4 *color = reinterpret_cast<float4 *>(&gb.colors);
-    float4 *color_end = color + (sizeof(gb.colors) / sizeof(float4));
-    do {
-      /* TODO: more accurate transform. */
-      srgb_to_linearrgb_v4(&color->x, &color->x);
-    } while (++color <= color_end);
+    const int color_len = int(sizeof(gb.colors) / sizeof(float4));
+    for (int i = 0; i < color_len; i++, color++) {
+      float3 rgb = color->xyz();
+      /* Преобразуем только RGB, alpha не трогаем. */
+      srgb_to_linearrgb_v3_v3(rgb, rgb);
+      color->x = rgb.x;
+      color->y = rgb.y;
+      color->z = rgb.z;
+    }
   }
 
   gb.sizes.pixel = 1.0f;
@@ -690,6 +736,7 @@ void Instance::end_sync()
     layer.relations.end_sync(resources, state);
     layer.fluids.end_sync(resources, state);
     layer.speakers.end_sync(resources, state);
+    layer.sculpts.end_sync(resources, state);
   };
   end_sync_layer(regular);
   end_sync_layer(infront);
@@ -863,6 +910,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
     layer.attribute_viewer.draw_line(framebuffer, manager, view);
     layer.armatures.draw_line(framebuffer, manager, view);
     layer.sculpts.draw_line(framebuffer, manager, view);
+    /* NOTE: layer.paints.draw_line moved after grid and meshes to avoid being overdrawn */
     layer.grease_pencil.draw_line(framebuffer, manager, view);
     /* NOTE: Temporarily moved after grid drawing (See #136764). */
     // layer.meshes.draw_line(framebuffer, manager, view);
@@ -882,8 +930,8 @@ void Instance::draw_v3d(Manager &manager, View &view)
     regular.cameras.draw_scene_background_images(resources.render_fb, manager, view);
     infront.cameras.draw_scene_background_images(resources.render_in_front_fb, manager, view);
 
-    regular.sculpts.draw_on_render(resources.render_fb, manager, view);
-    infront.sculpts.draw_on_render(resources.render_in_front_fb, manager, view);
+    regular.sculpts.draw_on_render(resources.render_fb, manager, view, state);
+    infront.sculpts.draw_on_render(resources.render_in_front_fb, manager, view, state);
   }
   {
     /* Overlay Line prepass. */
@@ -939,6 +987,9 @@ void Instance::draw_v3d(Manager &manager, View &view)
   }
   {
     /* Overlay (+Line) pass. */
+    const bool is_texture_paint_mode =
+        (state.ctx_mode == CTX_MODE_PAINT_TEXTURE) || (state.object_mode & OB_MODE_TEXTURE_PAINT);
+
     draw(regular, resources.overlay_fb);
     draw_line(regular, resources.overlay_line_fb);
 
@@ -946,20 +997,38 @@ void Instance::draw_v3d(Manager &manager, View &view)
     if (!state.is_depth_only_drawing) {
       grid.draw_line(resources.overlay_line_fb, manager, view);
     }
+    /* Paint symmetry contour.
+     * In Texture Paint we draw it later (after mesh line overlays) to avoid being covered by
+     * subsequent line passes. */
+    if (!is_texture_paint_mode) {
+      regular.paints.draw_line(resources.overlay_line_fb, manager, view);
+    }
 
     /* Here because of custom order of regular.facing. */
     infront.facing.draw(resources.overlay_fb, manager, view);
 
     draw(infront, resources.overlay_in_front_fb);
     draw_line(infront, resources.overlay_line_in_front_fb);
+    if (!is_texture_paint_mode) {
+      infront.paints.draw_line(resources.overlay_line_in_front_fb, manager, view);
+    }
   }
   {
     /* Color only pass. */
+    const bool is_texture_paint_mode =
+        (state.ctx_mode == CTX_MODE_PAINT_TEXTURE) || (state.object_mode & OB_MODE_TEXTURE_PAINT);
+
     motion_paths.draw_color_only(resources.overlay_color_only_fb, manager, view);
     xray_fade.draw_color_only(resources.overlay_color_only_fb, manager, view);
 
     regular.meshes.draw_line(resources.overlay_line_fb, manager, view);
     infront.meshes.draw_line(resources.overlay_line_in_front_fb, manager, view);
+
+    if (is_texture_paint_mode) {
+      /* Keep Texture Paint symmetry contour visible by drawing it after mesh line overlays. */
+      regular.paints.draw_line(resources.overlay_line_fb, manager, view);
+      infront.paints.draw_line(resources.overlay_line_in_front_fb, manager, view);
+    }
 
     draw_color_only(regular, resources.overlay_color_only_fb);
     draw_color_only(infront, resources.overlay_color_only_fb);

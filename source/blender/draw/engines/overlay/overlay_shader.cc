@@ -18,6 +18,11 @@ StaticShader ShaderModule::shader_clippable(const char *create_info_name)
     name += "_clipped";
   }
 
+  // DEBUG: Log shader creation for symmetry plane
+  if (std::string(create_info_name) == "overlay_sculpt_symmetry_plane") {
+    std::cout << "[SYMMETRY_PLANE_DEBUG] Creating shader: " << name << std::endl;
+  }
+
   return StaticShader(name);
 }
 

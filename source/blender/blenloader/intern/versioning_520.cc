@@ -18,6 +18,9 @@
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
+
+#include "BLI_listbase_wrapper.hh"
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_string.h"
@@ -580,6 +583,21 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     FOREACH_NODETREE_END;
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 27)) {
+    /* Enable paint symmetry contours by default for older files. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea *area : ListBaseWrapper<ScrArea>(&screen.areabase)) {
+        for (SpaceLink *sl : ListBaseWrapper<SpaceLink>(&area->spacedata)) {
+          if (sl->spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(sl);
+            v3d->overlay.show_weight_paint_symmetry_contour = true;
+            v3d->overlay.show_vertex_paint_symmetry_contour = true;
+            v3d->overlay.show_texture_paint_symmetry_contour = true;
+          }
+        }
+      }
+    }
+  }
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

@@ -18,6 +18,7 @@
 #include "draw_cache_impl.hh"
 
 #include "overlay_base.hh"
+#include "overlay_symmetry_contour.hh"
 
 namespace blender::draw::overlay {
 
@@ -51,14 +52,19 @@ class Curves : Overlay {
   View view_edit_cage = {"view_edit_cage"};
   View::OffsetData offset_data_;
 
+  SymmetryContourOverlay symmetry_contour_ = {SelectionType::DISABLED, "EditCurvesSymmetryContour"};
+
  public:
   void begin_sync(Resources &res, const State &state) final
   {
     enabled_ = state.is_space_v3d();
 
     if (!enabled_) {
+      symmetry_contour_.begin_sync(res, state, false);
       return;
     }
+
+    symmetry_contour_.begin_sync(res, state, state.ctx_mode == CTX_MODE_EDIT_CURVES);
 
     offset_data_ = state.offset_data_get();
 
@@ -194,10 +200,19 @@ class Curves : Overlay {
   void edit_object_sync(Manager &manager,
                         const ObjectRef &ob_ref,
                         Resources & /*res*/,
-                        const State & /*state*/) final
+                        const State &state) final
   {
     if (!enabled_) {
       return;
+    }
+
+    if (ob_ref.object->type == OB_CURVES) {
+      const blender::Curves &curves_id = DRW_object_get_data_for_drawing<blender::Curves>(
+          *ob_ref.object);
+      const int symmetry_flags = symmetry_flags_from_curves_symmetry(curves_id.symmetry);
+      if (symmetry_flags != 0) {
+        symmetry_contour_.object_sync(ob_ref.object, symmetry_flags, state);
+      }
     }
 
     Object *ob = ob_ref.object;
@@ -267,6 +282,16 @@ class Curves : Overlay {
     manager.submit(edit_curves_ps_, view);
     manager.submit(edit_curves_handles_ps_, view_edit_cage);
     manager.submit(edit_legacy_surface_handles_ps, view);
+
+    symmetry_contour_.draw_line(framebuffer, manager, view);
+  }
+
+  void end_sync(Resources & /*res*/, const State & /*state*/) final
+  {
+    if (!enabled_) {
+      return;
+    }
+    symmetry_contour_.end_sync();
   }
 
   void draw_color_only(Framebuffer &framebuffer, Manager &manager, View &view) final

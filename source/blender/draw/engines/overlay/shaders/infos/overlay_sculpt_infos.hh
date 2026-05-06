@@ -12,6 +12,17 @@
 
 #include "overlay_common_infos.hh"
 
+/* DEBUG: Symmetry plane shader info debugging */
+#ifndef GPU_SHADER
+#include <iostream>
+#define DEBUG_SYMMETRY_PLANE_INFO 1
+#if DEBUG_SYMMETRY_PLANE_INFO
+#define DEBUG_PRINT_INFO(msg) std::cout << "[SHADER_INFO_DEBUG] " << msg << std::endl
+#else
+#define DEBUG_PRINT_INFO(msg)
+#endif
+#endif
+
 GPU_SHADER_INTERFACE_INFO(overlay_sculpt_mask_iface)
 FLAT(float3, faceset_color)
 SMOOTH(float, mask_color)
@@ -34,4 +45,17 @@ ADDITIONAL_INFO(draw_modelmat)
 ADDITIONAL_INFO(draw_globals)
 GPU_SHADER_CREATE_END()
 
+GPU_SHADER_CREATE_INFO(overlay_sculpt_symmetry_plane)
+DO_STATIC_COMPILATION()
+PUSH_CONSTANT(float, opacity)
+VERTEX_IN(0, float3, pos)
+VERTEX_SOURCE("overlay_sculpt_symmetry_plane_vert.glsl")
+FRAGMENT_SOURCE("overlay_sculpt_symmetry_plane_frag.glsl")
+FRAGMENT_OUT(0, float4, frag_color)
+ADDITIONAL_INFO(draw_view)
+ADDITIONAL_INFO(draw_modelmat)
+ADDITIONAL_INFO(draw_globals)
+GPU_SHADER_CREATE_END()
+
 CREATE_INFO_VARIANT(overlay_sculpt_mask_clipped, overlay_sculpt_mask, drw_clipped)
+CREATE_INFO_VARIANT(overlay_sculpt_symmetry_plane_clipped, overlay_sculpt_symmetry_plane, drw_clipped)

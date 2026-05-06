@@ -29,6 +29,7 @@ namespace blender {
 /** From UI_resources.hh. */
 using BIFIconID = int;
 
+struct bContext;
 struct PointerRNA;
 namespace ui {
 struct TooltipData;
@@ -36,7 +37,8 @@ struct TooltipData;
 
 namespace ed::asset {
 
-void asset_tooltip(const asset_system::AssetRepresentation &asset,
+void asset_tooltip(const bContext *C,
+                   const asset_system::AssetRepresentation &asset,
                    ui::TooltipData &tip,
                    bool include_name = true);
 

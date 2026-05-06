@@ -92,4 +92,8 @@ void grease_pencil_cursor_draw(PaintCursorContext &pcontext);
 void mesh_cursor_update_and_init(PaintCursorContext &pcontext);
 void mesh_cursor_active_draw(PaintCursorContext &pcontext);
 void mesh_cursor_inactive_draw(PaintCursorContext &pcontext);
+
+void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext,
+                                        const float location[3],
+                                        const float normal[3]);
 }  // namespace blender::ed::sculpt_paint

@@ -724,11 +724,13 @@ static void layer_brush_height_preview_draw(const uint gpuattr,
   GPU_matrix_pop();
 }
 
-static void cursor_space_overlays_draw(const PaintCursorContext &pcontext)
+static void cursor_space_overlays_draw(PaintCursorContext &pcontext)
 {
   const Brush &brush = *pcontext.brush;
   /* Main inactive cursor. */
   main_inactive_cursor_draw(pcontext);
+
+  paint_cursor_draw_texture_overlays(pcontext, pcontext.location, pcontext.normal);
 
   if (pcontext.mode != PaintMode::Sculpt) {
     return;

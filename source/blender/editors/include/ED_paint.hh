@@ -124,6 +124,12 @@ void ED_paintcurve_undo_push_end(bContext *C);
 /** Export for ED_undo_sys. */
 void ED_paintcurve_undosys_type(UndoType *ut);
 
+/* `paint_cursor.cc` */
+
+/** Free GPU overlay textures used by the paint cursor. Must be called while a GPU context is
+ * active. Called on application exit to ensure Vulkan memory allocations are released. */
+void ED_paint_cursor_delete_textures();
+
 /* `paint_canvas.cc` */
 
 /** Color type of an object can be overridden in sculpt/paint mode. */

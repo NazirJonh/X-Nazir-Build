@@ -351,12 +351,12 @@ void BRUSH_OT_asset_delete(wmOperatorType *ot);
 void BRUSH_OT_asset_save(wmOperatorType *ot);
 void BRUSH_OT_asset_revert(wmOperatorType *ot);
 
-}  // namespace ed::sculpt_paint
-
 /**
  * Delete overlay cursor textures to preserve memory and invalidate all overlay flags.
  */
 void paint_cursor_delete_textures();
+
+}  // namespace ed::sculpt_paint
 
 /* `paint_vertex.cc` */
 

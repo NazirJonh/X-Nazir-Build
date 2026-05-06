@@ -1171,16 +1171,24 @@ static void shader_preview_texture(ShaderPreview *sp, Tex *tex, Scene *sce, Rend
   ImagePool *img_pool = BKE_image_pool_new();
   BKE_texture_fetch_images_for_pool(tex, img_pool);
 
+  /* Compute aspect ratio correction for image textures.
+   * This ensures the texture is not squashed when the preview rect is non-square. */
+  float aspect_x = 1.0f, aspect_y = 1.0f;
+  if (tex->type == TEX_IMAGE && tex->ima) {
+    BKE_image_get_aspect_ratio_correction(
+        tex->ima, &tex->iuser, img_pool, width, height, &aspect_x, &aspect_y);
+  }
+
   /* Fill in image buffer. */
   float *rect_float = rv_ibuf->float_data_for_write();
   float tex_coord[3] = {0.0f, 0.0f, 0.0f};
 
   for (int y = 0; y < height; y++) {
     /* Tex coords between -1.0f and 1.0f. */
-    tex_coord[1] = (float(y) / float(height)) * 2.0f - 1.0f;
+    tex_coord[1] = ((float(y) / float(height)) * 2.0f - 1.0f) * aspect_y;
 
     for (int x = 0; x < width; x++) {
-      tex_coord[0] = (float(x) / float(height)) * 2.0f - 1.0f;
+      tex_coord[0] = ((float(x) / float(width)) * 2.0f - 1.0f) * aspect_x;
 
       /* Evaluate texture at tex_coord. */
       TexResult texres = {0};

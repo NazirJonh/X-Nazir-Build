@@ -5539,6 +5539,64 @@ ImBuf *BKE_image_get_first_ibuf(Image *image)
   return ibuf;
 }
 
+bool BKE_image_get_aspect_ratio(Image *image, float *r_aspect)
+{
+  BLI_assert(r_aspect != nullptr);
+
+  ImBuf *ibuf = BKE_image_get_first_ibuf(image);
+  if (ibuf == nullptr) {
+    return false;
+  }
+  if (ibuf->x <= 0 || ibuf->y <= 0) {
+    IMB_freeImBuf(ibuf);
+    return false;
+  }
+
+  *r_aspect = float(ibuf->y) / float(ibuf->x);
+  IMB_freeImBuf(ibuf);
+  return true;
+}
+
+bool BKE_image_get_aspect_ratio_correction(Image *image,
+                                           ImageUser *iuser,
+                                           ImagePool *pool,
+                                           int preview_width,
+                                           int preview_height,
+                                           float *r_aspect_x,
+                                           float *r_aspect_y)
+{
+  BLI_assert(r_aspect_x != nullptr && r_aspect_y != nullptr);
+  BLI_assert(pool != nullptr);
+
+  *r_aspect_x = 1.0f;
+  *r_aspect_y = 1.0f;
+
+  ImBuf *ibuf = BKE_image_pool_acquire_ibuf(image, iuser, pool);
+  if (ibuf == nullptr || ibuf->x <= 0 || ibuf->y <= 0) {
+    if (ibuf != nullptr) {
+      BKE_image_pool_release_ibuf(image, ibuf, pool);
+    }
+    return false;
+  }
+
+  const float img_aspect = float(ibuf->y) / float(ibuf->x);
+  const float preview_aspect = float(preview_height) / float(preview_width);
+
+  /* Expand the coordinate range in the shorter image dimension so each tiled repetition
+   * appears at the correct aspect ratio.  The image occupies [0,1] in texture coordinate
+   * space; factors > 1.0 spread more repetitions across the preview, keeping each tile
+   * proportional to the actual pixel dimensions. */
+  if (img_aspect < preview_aspect) {
+    *r_aspect_y = preview_aspect / img_aspect;
+  }
+  else if (img_aspect > preview_aspect) {
+    *r_aspect_x = img_aspect / preview_aspect;
+  }
+
+  BKE_image_pool_release_ibuf(image, ibuf, pool);
+  return true;
+}
+
 static void image_update_views_format(Image *ima, ImageUser *iuser)
 {
   ImageView *iv;

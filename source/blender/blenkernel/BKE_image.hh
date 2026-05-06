@@ -607,6 +607,26 @@ ImBuf *BKE_image_get_ibuf_with_name(Image *image, const char *filepath);
 ImBuf *BKE_image_get_first_ibuf(Image *image);
 
 /**
+ * Get aspect ratio (height/width) from first loaded image buffer.
+ * \return True if buffer was found and aspect computed.
+ */
+bool BKE_image_get_aspect_ratio(Image *image, float *r_aspect);
+
+/**
+ * Compute aspect ratio correction factors for texture coordinates.
+ * Prevents image squashing in non-square preview rectangles.
+ * \param pool: Must be non-null; the ibuf is acquired and released through the pool.
+ * \return True if correction factors were computed.
+ */
+bool BKE_image_get_aspect_ratio_correction(Image *image,
+                                           ImageUser *iuser,
+                                           ImagePool *pool,
+                                           int preview_width,
+                                           int preview_height,
+                                           float *r_aspect_x,
+                                           float *r_aspect_y);
+
+/**
  * Not to be use directly.
  */
 gpu::Texture *BKE_image_create_gpu_texture_from_ibuf(Image *image, ImBuf *ibuf);

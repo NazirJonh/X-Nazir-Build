@@ -8,6 +8,7 @@
 
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
+#include "BKE_image.hh"
 #include "BKE_linestyle.h"
 #include "BKE_scene.hh"
 
@@ -101,9 +102,21 @@ void template_preview(Layout *layout,
       BLI_findstring(&region->ui_previews, preview_id, offsetof(uiPreview, preview_id)));
 
   if (!ui_preview) {
+    /* Compute initial height from slot texture aspect ratio if available. */
+    short initial_height = short(UI_UNIT_Y * 7.6f);
+    if (slot && slot->tex && slot->tex->type == TEX_IMAGE && slot->tex->ima) {
+      float aspect_ratio = 1.0f;
+      if (BKE_image_get_aspect_ratio(slot->tex->ima, &aspect_ratio)) {
+        const float preview_width = UI_UNIT_X * 10;
+        const float h = preview_width * aspect_ratio;
+        initial_height = short(h < float(UI_UNIT_Y) ? float(UI_UNIT_Y) :
+                               h > float(UI_UNIT_Y * 50) ? float(UI_UNIT_Y * 50) : h);
+      }
+    }
+
     ui_preview = MEM_new<uiPreview>(__func__);
     STRNCPY_UTF8(ui_preview->preview_id, preview_id);
-    ui_preview->height = short(UI_UNIT_Y * 7.6f);
+    ui_preview->height = initial_height;
     ui_preview->id_session_uid = pid->session_uid;
     ui_preview->tag = UI_PREVIEW_TAG_DIRTY;
     BLI_addtail(&region->ui_previews, ui_preview);

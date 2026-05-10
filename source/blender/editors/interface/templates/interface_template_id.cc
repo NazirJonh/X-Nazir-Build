@@ -397,37 +397,14 @@ static void id_search_filter_mode_button_cb(bContext *C, void *arg_ctx, void *ar
     }
   }
 
-  /* Update searchbox content with new filter applied */
+  /* Update searchbox content with new filter applied.
+   * NOTE: We intentionally do NOT call button_activate_event() here to reactivate
+   * the search button. That call creates a HandleButtonData with ctx->menu_region,
+   * which may become stale after the popup block refreshes, causing
+   * EXCEPTION_ACCESS_VIOLATION in ED_region_tag_redraw(data->region).
+   * The searchbox is updated in place; the user can click in it naturally. */
   if (ctx->search_but && ctx->searchbox_region) {
     UI_searchbox_update_by_region(C, ctx->searchbox_region, ctx->search_but);
-    
-    /* Reactivate searchbox if mouse is over it and it's not currently active.
-     * This provides better UX: after clicking a filter button, if the mouse is over
-     * the search results, the searchbox is automatically reactivated so the user can
-     * immediately interact with the updated results (click on an item or type to search).
-     * 
-     * Implementation notes:
-     * - We check if mouse is inside searchbox region using BLI_rcti_isect_pt()
-     * - We only reactivate if searchbox is not already active (ctx->search_but->active == nullptr)
-     * - After reactivation, we set searchbox_skip_next_release flag to prevent the pending
-     *   RELEASE event from the filter button click from immediately closing the searchbox
-     * - This works in both Image Editor and Node Editor (with different UI scales) */
-    if (ctx->search_but->active == nullptr) {
-      wmWindow *win = CTX_wm_window(C);
-      if (win && win->runtime && win->runtime->eventstate) {
-        const int *mval = win->runtime->eventstate->xy;
-        if (BLI_rcti_isect_pt(&ctx->searchbox_region->winrct, mval[0], mval[1])) {
-          printf("DEBUG id_search_filter_mode_button_cb: Mouse over searchbox -> reactivating\n");
-          button_activate_event(C, ctx->menu_region, ctx->search_but);
-          
-          /* Set flag to skip next RELEASE event to prevent immediate closure.
-           * The searchbox was just reactivated, and the pending RELEASE from the filter button
-           * click should not close it. The flag will be cleared when the RELEASE is processed. */
-          button_searchbox_skip_next_release_set(ctx->search_but, true);
-          printf("DEBUG id_search_filter_mode_button_cb: Set skip_next_release flag\n");
-        }
-      }
-    }
   }
 }
 

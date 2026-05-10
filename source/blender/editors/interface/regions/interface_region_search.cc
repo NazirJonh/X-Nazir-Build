@@ -493,7 +493,9 @@ void searchbox_update(bContext *C, ARegion *region, Button *but, const bool rese
     const bool is_first_search = !but->changed;
     if (is_first_search && search_but->items_update_fn && search_but->item_active) {
       data->items.active = search_but->item_active;
-      searchbox_update_fn(C, search_but, but->editstr, &data->items);
+      /* Use `query` (not `but->editstr`) to avoid potential nullptr dereference when
+       * the search button has been deactivated (e.g. after clicking a filter button). */
+      searchbox_update_fn(C, search_but, query, &data->items);
       data->items.active = nullptr;
 
       /* found active item, calculate real offset by centering it */

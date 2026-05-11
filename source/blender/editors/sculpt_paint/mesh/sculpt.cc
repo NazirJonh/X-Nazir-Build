@@ -2494,7 +2494,8 @@ void sculpt_apply_texture(const SculptSession &ss,
 
   if (mtex->brush_map_mode == MTEX_MAP_MODE_3D) {
     /* Get strength by feeding the vertex location directly into a texture. */
-    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, mtex, point, r_rgba, 0, ss.tex_pool);
+    /* NOTE: Using thread_id instead of 0 for thread safety during parallel evaluation. */
+    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, mtex, point, r_rgba, thread_id, ss.tex_pool);
   }
   else {
     /* If the active area is being applied for symmetry, flip it
@@ -2532,8 +2533,9 @@ void sculpt_apply_texture(const SculptSession &ss,
       const float2 point_2d = ED_view3d_project_float_v2_m4(
           cache.vc->region, symm_point, cache.projection_mat);
       const float point_3d[3] = {point_2d[0], point_2d[1], 0.0f};
+      /* NOTE: Using thread_id instead of 0 for thread safety during parallel evaluation. */
       *r_value = BKE_brush_sample_tex_3d(
-          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool);
+          cache.paint, &brush, mtex, point_3d, r_rgba, thread_id, ss.tex_pool);
     }
   }
 }
@@ -3296,7 +3298,10 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
                             const IndexMask &node_mask)
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
+  const bool write_face_sets = (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
   bool need_coords = ss.cache->supports_gravity;
+  bool need_face_sets = false;
+  bool need_color = false;
 
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
     /* Draw face sets in smooth mode moves the vertices. */
@@ -3304,21 +3309,53 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
       need_coords = true;
     }
     else {
-      undo::push_nodes(depsgraph, ob, node_mask, undo::Type::FaceSet);
+      need_face_sets = write_face_sets;
+      if (brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE &&
+          brush.write_vcol)
+      {
+        need_color = true;
+      }
     }
   }
   else if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
     undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Mask);
   }
   else if (brush_type_is_paint(brush.sculpt_brush_type)) {
-    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Color);
+    need_color = true;
   }
   else {
     need_coords = true;
   }
 
-  if (need_coords) {
+  if (brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE)
+  {
+    need_face_sets = write_face_sets;
+    if (brush.write_vcol) {
+      need_color = true;
+    }
+  }
+
+  if (need_coords && need_face_sets && need_color) {
+    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::PositionAndFaceSetAndColor);
+  }
+  else if (need_coords && need_face_sets) {
+    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::PositionAndFaceSet);
+  }
+  else if (need_coords && need_color) {
+    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::PositionAndColor);
+  }
+  else if (need_face_sets && need_color) {
+    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::FaceSetAndColor);
+  }
+  else if (need_coords) {
     undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Position);
+  }
+  else if (need_face_sets) {
+    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::FaceSet);
+  }
+  else if (need_color) {
+    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Color);
   }
 }
 
@@ -3334,8 +3371,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
   IndexMask texnode_mask;
 
   const bool use_original = brush_type_needs_original(brush.sculpt_brush_type) ? true :
-                                                                                 !ss.cache->accum;
+                                                                                  !ss.cache->accum;
   const bool use_pixels = sculpt_needs_pbvh_pixels(brush, ob);
+  const bool write_face_sets = (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
 
   if (sculpt_needs_pbvh_pixels(brush, ob)) {
     sculpt_pbvh_update_pixels(depsgraph, ob);
@@ -3579,6 +3617,14 @@ static void do_brush_action(const Depsgraph &depsgraph,
       cloth::sim_activate_nodes(ob, *ss.cache->cloth_sim, node_mask);
       cloth::do_simulation_step(depsgraph, sd, ob, *ss.cache->cloth_sim, node_mask);
     }
+  }
+
+  if (!use_pixels &&
+      brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE &&
+      (write_face_sets || brush.write_vcol))
+  {
+    blender::ed::sculpt_paint::face_set::apply_from_texture(depsgraph, ob, brush, node_mask);
   }
 
   /* Update average stroke position. */

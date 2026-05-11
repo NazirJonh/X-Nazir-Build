@@ -38,6 +38,10 @@ enum class Type : int8_t {
   Geometry,
   FaceSet,
   Color,
+  PositionAndFaceSet,
+  FaceSetAndColor,
+  PositionAndColor,
+  PositionAndFaceSetAndColor,
 };
 
 struct StepData;

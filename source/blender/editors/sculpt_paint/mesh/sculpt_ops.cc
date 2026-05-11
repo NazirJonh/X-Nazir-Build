@@ -1519,6 +1519,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(face_set::SCULPT_OT_face_set_box_gesture);
   WM_operatortype_append(face_set::SCULPT_OT_face_set_line_gesture);
   WM_operatortype_append(face_set::SCULPT_OT_face_set_polyline_gesture);
+  WM_operatortype_append(face_set::SCULPT_OT_sample_face_set_id);
   WM_operatortype_append(trim::SCULPT_OT_trim_box_gesture);
   WM_operatortype_append(trim::SCULPT_OT_trim_lasso_gesture);
   WM_operatortype_append(trim::SCULPT_OT_trim_line_gesture);

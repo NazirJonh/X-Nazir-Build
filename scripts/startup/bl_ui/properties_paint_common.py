@@ -1604,6 +1604,34 @@ def brush_texture_settings(layout, brush, sculpt):
         # texture_sample_bias
         layout.prop(brush, "texture_sample_bias", slider=True, text="Sample Bias")
 
+        if brush.sculpt_brush_type in {
+            'DRAW_FACE_SETS',
+            'DRAW',
+            'CLAY',
+            'CLAY_STRIPS',
+            'CREASE',
+            'BLOB',
+            'INFLATE',
+            'SMOOTH',
+            'PINCH',
+            'DRAW_SHARP',
+            'MULTIPLANE_SCRAPE',
+        }:
+            layout.separator()
+            layout.prop(brush, "texture_data_mode", text="Data Mode")
+            if brush.texture_data_mode == 'FACE_SETS_FROM_TEXTURE':
+                row = layout.row(align=True)
+                row.active = brush.write_face_sets
+                row.prop(brush, "face_set_id", text="Face Set ID")
+                row.operator("sculpt.sample_face_set_id", icon='EYEDROPPER', text="")
+                layout.prop(brush, "texture_threshold", text="Threshold", slider=True)
+                layout.prop(brush, "texture_invert_alpha", text="Invert Alpha")
+                layout.prop(brush, "write_face_sets", text="Write to Face Sets")
+                layout.prop(brush, "write_vcol", text="Write to Vertex Color")
+                if brush.write_vcol:
+                    layout.prop(brush, "vcol_channel", text="Channel")
+                    layout.prop(brush, "vcol_mode", text="Mode")
+
         if brush.sculpt_brush_type == 'DRAW':
             col = layout.column()
             col.active = tex_slot.map_mode == 'AREA_PLANE'

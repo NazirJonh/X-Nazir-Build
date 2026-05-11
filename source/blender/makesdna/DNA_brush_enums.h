@@ -398,8 +398,31 @@ enum eBrushFlags2 : int {
   BRUSH_USE_COLOR_AS_DISPLACEMENT = (1 << 9),
   BRUSH_JITTER_COLOR = (1 << 10),
   BRUSH_PROJECT_USE_BIDIRECTIONAL = (1 << 11),
+  /** Invert alpha channel in texture-as-data-source mode. */
+  BRUSH_TEXTURE_INVERT_ALPHA = (1 << 12),
+  /** Disable Face Set assignment in texture-as-data-source mode. */
+  BRUSH_DISABLE_FACE_SET_WRITE = (1 << 13),
+};
+
+/** #Brush.texture_data_mode */
+enum BrushTextureDataMode {
+  /** Use texture as intensity multiplier (default). */
+  BRUSH_TEXTURE_DATA_MODE_NONE = 0,
+  /** Sample texture to determine Face Set ID assignment (binary threshold mode). */
+  BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE = 1,
 };
 ENUM_OPERATORS(eBrushFlags2)
+
+enum BrushVertexColorChannel {
+  BRUSH_VCOL_CHANNEL_R = 0,
+  BRUSH_VCOL_CHANNEL_G = 1,
+  BRUSH_VCOL_CHANNEL_B = 2,
+};
+
+enum BrushVertexColorMode {
+  BRUSH_VCOL_MODE_GRAYSCALE = 0,
+  BRUSH_VCOL_MODE_BINARY = 1,
+};
 
 enum BrushMaskPressureFlags : int {
   BRUSH_MASK_PRESSURE_RAMP = (1 << 1),

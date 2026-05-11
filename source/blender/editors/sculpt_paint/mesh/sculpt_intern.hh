@@ -977,6 +977,8 @@ void SCULPT_OT_face_set_box_gesture(wmOperatorType *ot);
 void SCULPT_OT_face_set_line_gesture(wmOperatorType *ot);
 void SCULPT_OT_face_set_polyline_gesture(wmOperatorType *ot);
 
+void SCULPT_OT_sample_face_set_id(wmOperatorType *ot);
+
 }  // namespace ed::sculpt_paint::face_set
 
 namespace ed::sculpt_paint {

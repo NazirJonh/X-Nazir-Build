@@ -2494,7 +2494,8 @@ void sculpt_apply_texture(const SculptSession &ss,
 
   if (mtex->brush_map_mode == MTEX_MAP_MODE_3D) {
     /* Get strength by feeding the vertex location directly into a texture. */
-    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, mtex, point, r_rgba, 0, ss.tex_pool);
+    /* NOTE: Using thread_id instead of 0 for thread safety during parallel evaluation. */
+    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, mtex, point, r_rgba, thread_id, ss.tex_pool);
   }
   else {
     /* If the active area is being applied for symmetry, flip it
@@ -2532,8 +2533,9 @@ void sculpt_apply_texture(const SculptSession &ss,
       const float2 point_2d = ED_view3d_project_float_v2_m4(
           cache.vc->region, symm_point, cache.projection_mat);
       const float point_3d[3] = {point_2d[0], point_2d[1], 0.0f};
+      /* NOTE: Using thread_id instead of 0 for thread safety during parallel evaluation. */
       *r_value = BKE_brush_sample_tex_3d(
-          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool);
+          cache.paint, &brush, mtex, point_3d, r_rgba, thread_id, ss.tex_pool);
     }
   }
 }
@@ -3176,10 +3178,10 @@ static void dynamic_topology_update(const Depsgraph &depsgraph,
   }
 
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
-    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Mask);
+    undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::Mask);
   }
   else {
-    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Position);
+    undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::Position);
   }
   pbvh.tag_positions_changed(node_mask);
   pbvh.tag_topology_changed(node_mask);
@@ -3296,29 +3298,53 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
                             const IndexMask &node_mask)
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
-  bool need_coords = ss.cache->supports_gravity;
+  const bool write_face_sets = (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
+
+  undo::NodeDataFlag flags{};
 
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
-    /* Draw face sets in smooth mode moves the vertices. */
-    if (ss.cache->toggle_settings.alt_smooth) {
-      need_coords = true;
+    if (ss.cache->bstrength < 0.0f) {
+      /* Smooth mode moves vertices. */
+      flags |= undo::NodeDataFlag::Position;
     }
     else {
-      undo::push_nodes(depsgraph, ob, node_mask, undo::Type::FaceSet);
+      if (write_face_sets) {
+        flags |= undo::NodeDataFlag::FaceSet;
+      }
+      if (brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE &&
+          brush.write_vcol)
+      {
+        flags |= undo::NodeDataFlag::Color;
+      }
     }
   }
   else if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
-    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Mask);
+    flags |= undo::NodeDataFlag::Mask;
   }
   else if (brush_type_is_paint(brush.sculpt_brush_type)) {
-    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Color);
+    flags |= undo::NodeDataFlag::Color;
   }
   else {
-    need_coords = true;
+    flags |= undo::NodeDataFlag::Position;
   }
 
-  if (need_coords) {
-    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Position);
+  if (brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE)
+  {
+    if (write_face_sets) {
+      flags |= undo::NodeDataFlag::FaceSet;
+    }
+    if (brush.write_vcol) {
+      flags |= undo::NodeDataFlag::Color;
+    }
+  }
+
+  if (ss.cache->supports_gravity) {
+    flags |= undo::NodeDataFlag::Position;
+  }
+
+  if (flags != undo::NodeDataFlag{}) {
+    undo::push_nodes(depsgraph, ob, node_mask, flags);
   }
 }
 
@@ -3334,8 +3360,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
   IndexMask texnode_mask;
 
   const bool use_original = brush_type_needs_original(brush.sculpt_brush_type) ? true :
-                                                                                 !ss.cache->accum;
+                                                                                  !ss.cache->accum;
   const bool use_pixels = sculpt_needs_pbvh_pixels(brush, ob);
+  const bool write_face_sets = (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
 
   if (sculpt_needs_pbvh_pixels(brush, ob)) {
     sculpt_pbvh_update_pixels(depsgraph, ob);
@@ -3579,6 +3606,14 @@ static void do_brush_action(const Depsgraph &depsgraph,
       cloth::sim_activate_nodes(ob, *ss.cache->cloth_sim, node_mask);
       cloth::do_simulation_step(depsgraph, sd, ob, *ss.cache->cloth_sim, node_mask);
     }
+  }
+
+  if (!use_pixels &&
+      brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE &&
+      (write_face_sets || brush.write_vcol))
+  {
+    blender::ed::sculpt_paint::face_set::apply_from_texture(depsgraph, ob, brush, node_mask);
   }
 
   /* Update average stroke position. */
@@ -5516,7 +5551,7 @@ void store_mesh_from_eval(const wmOperator &op,
     const IndexMask leaf_nodes = bke::pbvh::all_leaf_nodes(pbvh, memory);
     if (changed_attributes.as_span() == Span<StringRef>{"position"}) {
       undo::push_begin(scene, object, &op);
-      undo::push_nodes(depsgraph, object, leaf_nodes, undo::Type::Position);
+      undo::push_nodes(depsgraph, object, leaf_nodes, undo::NodeDataFlag::Position);
       undo::push_end(object);
       mesh.attribute_storage.wrap().remove("position");
       const bke::AttributeReader position = new_mesh->attributes().lookup<float3>("position");
@@ -5545,7 +5580,7 @@ void store_mesh_from_eval(const wmOperator &op,
     }
     else if (changed_attributes.as_span() == Span<StringRef>{".sculpt_mask"}) {
       undo::push_begin(scene, object, &op);
-      undo::push_nodes(depsgraph, object, leaf_nodes, undo::Type::Mask);
+      undo::push_nodes(depsgraph, object, leaf_nodes, undo::NodeDataFlag::Mask);
       undo::push_end(object);
       replace_attribute(new_mesh->attributes(),
                         ".sculpt_mask",
@@ -5558,7 +5593,7 @@ void store_mesh_from_eval(const wmOperator &op,
     }
     else if (changed_attributes.as_span() == Span<StringRef>{".sculpt_face_set"}) {
       undo::push_begin(scene, object, &op);
-      undo::push_nodes(depsgraph, object, leaf_nodes, undo::Type::FaceSet);
+      undo::push_nodes(depsgraph, object, leaf_nodes, undo::NodeDataFlag::FaceSet);
       undo::push_end(object);
       replace_attribute(new_mesh->attributes(),
                         ".sculpt_face_set",

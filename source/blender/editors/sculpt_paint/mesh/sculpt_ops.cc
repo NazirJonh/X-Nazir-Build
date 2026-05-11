@@ -243,7 +243,7 @@ static wmOperatorStatus symmetrize_exec(bContext *C, wmOperator *op)
        * are logged as added (as opposed to attempting to store just the
        * parts that symmetrize modifies). */
       undo::push_begin(scene, ob, op);
-      undo::push_node(depsgraph, ob, nullptr, undo::Type::Geometry);
+      undo::push_node_special(depsgraph, ob, undo::Type::Geometry);
       BM_log_before_all_removed(ss.bm, ss.bm_log);
 
       BM_mesh_toolflags_set(ss.bm, true);
@@ -467,7 +467,7 @@ void object_sculpt_mode_enter(Main &bmain,
       }
       dyntopo::enable_ex(bmain, depsgraph, ob);
       if (has_undo) {
-        undo::push_node(depsgraph, ob, nullptr, undo::Type::DyntopoBegin);
+        undo::push_node_special(depsgraph, ob, undo::Type::DyntopoBegin);
         undo::push_end(ob);
       }
     }
@@ -1212,7 +1212,7 @@ static wmOperatorStatus mask_from_cavity_exec(bContext *C, wmOperator *op)
   }
 
   undo::push_begin(scene, ob, op);
-  undo::push_nodes(*depsgraph, ob, node_mask, undo::Type::Mask);
+  undo::push_nodes(*depsgraph, ob, node_mask, undo::NodeDataFlag::Mask);
 
   automasking->calc_cavity_factor(*depsgraph, ob, node_mask);
   apply_mask_from_settings(*depsgraph, ob, pbvh, node_mask, *automasking, mode, factor);
@@ -1406,7 +1406,7 @@ static wmOperatorStatus mask_from_boundary_exec(bContext *C, wmOperator *op)
   }
 
   undo::push_begin(scene, ob, op);
-  undo::push_nodes(*depsgraph, ob, node_mask, undo::Type::Mask);
+  undo::push_nodes(*depsgraph, ob, node_mask, undo::NodeDataFlag::Mask);
 
   apply_mask_from_settings(*depsgraph, ob, pbvh, node_mask, *automasking, mode, factor);
 
@@ -1519,6 +1519,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(face_set::SCULPT_OT_face_set_box_gesture);
   WM_operatortype_append(face_set::SCULPT_OT_face_set_line_gesture);
   WM_operatortype_append(face_set::SCULPT_OT_face_set_polyline_gesture);
+  WM_operatortype_append(face_set::SCULPT_OT_sample_face_set_id);
   WM_operatortype_append(trim::SCULPT_OT_trim_box_gesture);
   WM_operatortype_append(trim::SCULPT_OT_trim_lasso_gesture);
   WM_operatortype_append(trim::SCULPT_OT_trim_line_gesture);

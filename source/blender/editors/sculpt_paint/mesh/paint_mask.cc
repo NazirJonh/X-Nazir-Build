@@ -255,7 +255,7 @@ void update_mask_mesh(const Depsgraph &depsgraph,
             return;
           }
         }
-        undo::push_node(depsgraph, object, &nodes[i], undo::Type::Mask);
+        undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::Mask);
         scatter_data_mesh(
             tls.mask.as_span().take_front(unique_verts.size()), unique_verts, mask.span);
         bke::pbvh::node_update_mask_mesh(mask.span, nodes[i]);
@@ -408,7 +408,7 @@ static bool try_remove_mask_mesh(const Depsgraph &depsgraph,
       },
       exec_mode::grain_size(1));
 
-  undo::push_nodes(depsgraph, object, changed_nodes, undo::Type::Mask);
+  undo::push_nodes(depsgraph, object, changed_nodes, undo::NodeDataFlag::Mask);
   attributes.remove(".sculpt_mask");
   changed_nodes.foreach_index([&](const int i) {
     BKE_pbvh_node_fully_masked_set(nodes[i], false);
@@ -449,7 +449,7 @@ static void fill_mask_mesh(const Depsgraph &depsgraph,
         {
           return;
         }
-        undo::push_node(depsgraph, object, &nodes[i], undo::Type::Mask);
+        undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::Mask);
         mask.span.fill_indices(verts, value);
         node_changed[i] = true;
       },
@@ -505,7 +505,7 @@ static void fill_mask_grids(Main &bmain,
         {
           return;
         }
-        undo::push_node(depsgraph, object, &nodes[i], undo::Type::Mask);
+        undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::Mask);
 
         if (grid_hidden.is_empty()) {
           for (const int grid : grid_indices) {
@@ -555,7 +555,7 @@ static void fill_mask_bmesh(const Depsgraph &depsgraph,
     return;
   }
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::Mask);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::Mask);
 
   Array<bool> node_changed(node_mask.min_array_size(), false);
 
@@ -617,7 +617,7 @@ static void invert_mask_grids(Main &bmain,
   MultiresModifierData &mmd = *BKE_sculpt_multires_active(&scene, &object);
   BKE_sculpt_mask_layers_ensure(&depsgraph, &bmain, &object, &mmd);
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::Mask);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::Mask);
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
@@ -664,7 +664,7 @@ static void invert_mask_bmesh(const Depsgraph &depsgraph,
     return;
   }
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::Mask);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::Mask);
   node_mask.foreach_index(
       [&](const int i) {
         for (BMVert *vert : BKE_pbvh_bmesh_node_unique_verts(&nodes[i])) {
@@ -842,7 +842,7 @@ static void gesture_apply_for_symmetry_pass(bContext & /*C*/, gesture::GestureDa
                   float &mask = masks[vert];
                   if (!any_changed) {
                     any_changed = true;
-                    undo::push_node(depsgraph, object, &node, undo::Type::Mask);
+                    undo::push_node(depsgraph, object, &node, undo::NodeDataFlag::Mask);
                   }
                   mask = mask_gesture_get_new_value(mask, op.mode, op.value);
                 }
@@ -875,7 +875,7 @@ static void gesture_apply_for_symmetry_pass(bContext & /*C*/, gesture::GestureDa
                 const float old_mask = BM_ELEM_CD_GET_FLOAT(vert, offset);
                 if (!any_changed) {
                   any_changed = true;
-                  undo::push_node(depsgraph, object, &nodes[i], undo::Type::Mask);
+                  undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::Mask);
                 }
                 const float new_mask = mask_gesture_get_new_value(old_mask, op.mode, op.value);
                 BM_ELEM_CD_SET_FLOAT(vert, offset, new_mask);

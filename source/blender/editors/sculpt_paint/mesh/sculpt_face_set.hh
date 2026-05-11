@@ -15,8 +15,13 @@
 
 #include "BKE_attribute.hh"
 
+struct bContext;
+struct Depsgraph;
+struct Brush;
+
 namespace blender {
 
+class IndexMask;
 struct BMesh;
 struct BMFace;
 struct BMVert;
@@ -28,10 +33,11 @@ struct SubdivCCGCoord;
 namespace ed::sculpt_paint::face_set {
 
 int active_face_set_get(const Object &object);
-
 /* TODO: vert_face_set_max_get should likely be avoided and existing usages cleaned up, since by
  * definition, a vertex can be associated to more than a single face set. */
 int vert_face_set_max_get(GroupedSpan<int> vert_to_face_map, Span<int> face_sets, int vert);
+int active_update_and_get(bContext *C, Object &ob, const float mval[2]);
+int vert_face_set_get(GroupedSpan<int> vert_to_face_map, Span<int> face_sets, int vert);
 int vert_face_set_get(const SubdivCCG &subdiv_ccg, Span<int> face_sets, int grid);
 int vert_face_set_max_get(int face_set_offset, const BMVert &vert);
 
@@ -125,6 +131,11 @@ void filter_verts_with_unique_face_sets_bmesh(int face_set_offset,
                                               bool unique,
                                               const Set<BMVert *, 0> &verts,
                                               MutableSpan<float> factors);
+
+void apply_from_texture(const Depsgraph &depsgraph,
+                        Object &object,
+                        const Brush &brush,
+                        const IndexMask &node_mask);
 
 }  // namespace ed::sculpt_paint::face_set
 

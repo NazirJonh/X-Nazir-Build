@@ -5,7 +5,7 @@
 /** \file
  * \ingroup edcurves
  *
- * Utility functions and base class implementation for Curves Weight Paint operations.
+ * Weight paint specific utilities and base class implementation for Curves Weight Paint operations.
  */
 
 #include "curves_weight_paint_intern.hh"
@@ -35,6 +35,7 @@
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
 
+#include "ED_object_vgroup.hh"
 #include "ED_view3d.hh"
 
 #include "RNA_access.hh"
@@ -89,7 +90,7 @@ CurvesWeightPaintCommonContext::CurvesWeightPaintCommonContext(const bContext &C
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name CurvesWeightPaintOperationBase - Brush Settings
+/** \name CurvesWeightPaintOperationBase - Weight Paint Specific
  * \{ */
 
 void CurvesWeightPaintOperationBase::get_brush_settings(const bContext &C,
@@ -110,12 +111,6 @@ void CurvesWeightPaintOperationBase::get_brush_settings(const bContext &C,
   }
 
   if (!object || object->type != OB_CURVES || object->data == nullptr) {
-    printf("[DEBUG] CurvesWeightPaint get_brush_settings: invalid active object for stroke "
-           "(object=%s type=%d mode=%d data=%p)\n",
-           object ? object->id.name + 2 : "NULL",
-           object ? object->type : -1,
-           object ? object->mode : -1,
-           object ? object->data : nullptr);
     curves_id = nullptr;
     curves = nullptr;
     brush = nullptr;
@@ -124,13 +119,6 @@ void CurvesWeightPaintOperationBase::get_brush_settings(const bContext &C,
 
   ID *object_data_id = static_cast<ID *>(object->data);
   if (GS(object_data_id->name) != ID_CV) {
-    printf("[DEBUG] CurvesWeightPaint get_brush_settings: object data type mismatch "
-           "(object=%s type=%d mode=%d data_id=%c%c expected=CV)\n",
-           object->id.name + 2,
-           object->type,
-           object->mode,
-           object_data_id->name[0],
-           object_data_id->name[1]);
     curves_id = nullptr;
     curves = nullptr;
     brush = nullptr;
@@ -142,20 +130,17 @@ void CurvesWeightPaintOperationBase::get_brush_settings(const bContext &C,
 
   Paint *paint = BKE_paint_get_active_from_context(&C);
   if (paint == nullptr) {
-    printf("[DEBUG] CurvesWeightPaint get_brush_settings: active paint is null\n");
     brush = nullptr;
     return;
   }
   brush = BKE_paint_brush(paint);
   if (brush == nullptr) {
-    printf("[DEBUG] CurvesWeightPaint get_brush_settings: active brush is null\n");
     return;
   }
 
   /* Get initial brush parameters. */
   initial_brush_radius = BKE_brush_radius_get(paint, brush);
   initial_brush_strength = BKE_brush_alpha_get(paint, brush);
-  brush_weight = BKE_brush_weight_get(paint, brush);
 
   /* Store previous mouse position before updating. */
   mouse_position_previous = mouse_position;
@@ -175,6 +160,9 @@ void CurvesWeightPaintOperationBase::get_brush_settings(const bContext &C,
 
   /* Initialize falloff curve. */
   BKE_curvemapping_init(brush->curve_distance_falloff);
+
+  /* Weight paint specific settings. */
+  brush_weight = BKE_brush_weight_get(paint, brush);
 
   /* Get auto-normalize setting. */
   const ToolSettings *ts = CTX_data_tool_settings(&C);
@@ -273,118 +261,18 @@ void CurvesWeightPaintOperationBase::apply_weight_to_point(int point_index,
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name CurvesWeightPaintOperationBase - Mouse Input
+/** \name CurvesWeightPaintOperationBase - Paint Operation Override
  * \{ */
 
-void CurvesWeightPaintOperationBase::get_mouse_input(const StrokeExtension &stroke_extension,
-                                                      float brush_widen_factor)
+void CurvesWeightPaintOperationBase::apply_operation_to_point(const CurvesBrushPoint &point)
 {
-  mouse_position = stroke_extension.mouse_position;
-
-  /* Calculate effective brush radius. */
-  float effective_radius = brush_radius * brush_widen_factor;
-
-  /* Update brush bounding box for quick rejection tests. */
-  BLI_rctf_init(&brush_bbox,
-                mouse_position.x - effective_radius,
-                mouse_position.x + effective_radius,
-                mouse_position.y - effective_radius,
-                mouse_position.y + effective_radius);
+  /* Default weight paint behavior: apply brush weight to points. */
+  apply_weight_to_point(point.point_index, brush_weight, point.influence);
 }
 
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name CurvesWeightPaintOperationBase - Brush Sampling
- * \{ */
-
-bool CurvesWeightPaintOperationBase::is_point_in_brush(const float2 &point_position_re)
+void CurvesWeightPaintOperationBase::init_paint_mode(const bContext & /*C*/)
 {
-  /* Quick bounding box rejection. */
-  if (!BLI_rctf_isect_pt_v(&brush_bbox, point_position_re)) {
-    return false;
-  }
-
-  /* Precise circle test. */
-  const float dist_sq = math::distance_squared(point_position_re, mouse_position);
-  return dist_sq <= (brush_radius * brush_radius);
-}
-
-float CurvesWeightPaintOperationBase::calculate_brush_falloff(float distance_re)
-{
-  if (distance_re >= brush_radius) {
-    return 0.0f;
-  }
-
-  /* Use brush falloff curve for smooth falloff. */
-  return BKE_brush_curve_strength(brush, distance_re, brush_radius);
-}
-
-void CurvesWeightPaintOperationBase::sample_curves_3d_brush(
-    const bContext &C, const StrokeExtension & /*stroke_extension*/)
-{
-  /* Clear previous points. */
-  points_in_brush.clear();
-
-  if (!curves || curves->is_empty()) {
-    return;
-  }
-
-  ARegion *region = CTX_wm_region(&C);
-  if (!region) {
-    return;
-  }
-
-  const Depsgraph *depsgraph = CTX_data_depsgraph_pointer(&C);
-  const Object *eval_object = (depsgraph != nullptr && object != nullptr) ?
-                                  DEG_get_evaluated(depsgraph, object) :
-                                  nullptr;
-  const float4x4 object_to_world = (eval_object != nullptr) ? eval_object->object_to_world() :
-                                                               object->object_to_world();
-
-  bke::crazyspace::GeometryDeformation deformation;
-  Span<float3> positions = curves->positions();
-  if (depsgraph != nullptr && object != nullptr) {
-    deformation = bke::crazyspace::get_evaluated_curves_deformation(*depsgraph, *object);
-    if (!deformation.positions.is_empty()) {
-      positions = deformation.positions;
-    }
-  }
-
-  const int points_num = curves->points_num();
-  const float brush_radius_sq = brush_radius * brush_radius;
-
-  /* Collect points within brush radius. */
-  for (const int point_i : IndexRange(points_num)) {
-    /* Project object-space point to screen space in a context-independent way. */
-    const float3 point_pos_wo = math::transform_point(object_to_world, positions[point_i]);
-    float2 point_pos_re;
-    if (ED_view3d_project_float_global(region, point_pos_wo, point_pos_re, V3D_PROJ_TEST_NOP) !=
-        V3D_PROJ_RET_OK)
-    {
-      continue;
-    }
-
-    /* Quick bounding box rejection. */
-    if (!BLI_rctf_isect_pt_v(&brush_bbox, point_pos_re)) {
-      continue;
-    }
-
-    /* Check if point is within brush radius. */
-    const float distance_sq_re = math::distance_squared(mouse_position, point_pos_re);
-    if (distance_sq_re > brush_radius_sq) {
-      continue;
-    }
-
-    /* Calculate falloff influence. */
-    const float distance_re = math::sqrt(distance_sq_re);
-    const float falloff = calculate_brush_falloff(distance_re);
-    const float influence = brush_strength * falloff;
-
-    if (influence > 0.0f) {
-      points_in_brush.append({influence, point_i});
-    }
-  }
+  /* This will be called by the base class on_stroke_begin. */
 }
 
 /** \} */
@@ -396,11 +284,10 @@ void CurvesWeightPaintOperationBase::sample_curves_3d_brush(
 void CurvesWeightPaintOperationBase::on_stroke_begin(const bContext &C,
                                                       const StrokeExtension &start_extension)
 {
-  /* Get brush settings from context. */
-  get_brush_settings(C, start_extension);
+  /* Call base class implementation. */
+  CurvesPaintOperationBase::on_stroke_begin(C, start_extension);
 
   if (!object || !curves_id || !curves || !brush) {
-    printf("[DEBUG] CurvesWeightPaint on_stroke_begin: aborted (invalid context)\n");
     return;
   }
 
@@ -410,95 +297,19 @@ void CurvesWeightPaintOperationBase::on_stroke_begin(const bContext &C,
 
   /* Ensure deform verts exist in the curves geometry. */
   bke::curves::ensure_deform_verts(object);
-
-  const Object *context_object = CTX_data_active_object(&C);
-  const Depsgraph *depsgraph = CTX_data_depsgraph_pointer(&C);
-  const Object *eval_object = (depsgraph != nullptr && object != nullptr) ?
-                                  DEG_get_evaluated(depsgraph, object) :
-                                  nullptr;
-  const Curves *context_curves =
-      (context_object != nullptr) ? id_cast<const Curves *>(context_object->data) : nullptr;
-  const Curves *orig_curves = (object != nullptr) ? id_cast<const Curves *>(object->data) : nullptr;
-  const Curves *eval_curves = (eval_object != nullptr) ? id_cast<const Curves *>(eval_object->data) :
-                                                         nullptr;
-
-  const int context_dverts_num = (context_curves != nullptr) ? context_curves->geometry.wrap().deform_verts().size() :
-                                                               -1;
-  const int orig_dverts_num = (orig_curves != nullptr) ? orig_curves->geometry.wrap().deform_verts().size() :
-                                                         -1;
-  const int eval_dverts_num = (eval_curves != nullptr) ? eval_curves->geometry.wrap().deform_verts().size() :
-                                                         -1;
-
-  printf("[DEBUG] CurvesWeightPaint source-of-truth: ctx_ob=%p('%s') write_ob=%p('%s') eval_ob=%p('%s') "
-         "ctx_cv=%p orig_cv=%p eval_cv=%p dverts(ctx/orig/eval)=%d/%d/%d\n",
-         context_object,
-         context_object ? context_object->id.name + 2 : "NULL",
-         object,
-         object ? object->id.name + 2 : "NULL",
-         eval_object,
-         eval_object ? eval_object->id.name + 2 : "NULL",
-         context_curves,
-         orig_curves,
-         eval_curves,
-         context_dverts_num,
-         orig_dverts_num,
-         eval_dverts_num);
-
-  printf("[DEBUG] CurvesWeightPaint on_stroke_begin: object='%s' mode=%d active_vgroup_1based=%d "
-         "active_vgroup_0based=%d brush_radius=%.3f brush_strength=%.3f brush_weight=%.3f\n",
-         object ? object->id.name + 2 : "NULL",
-         object ? object->mode : -1,
-         object ? BKE_object_defgroup_active_index_get(object) : -1,
-         active_vertex_group,
-         brush_radius,
-         brush_strength,
-         brush_weight);
-
-  /* Initialize mouse input. */
-  get_mouse_input(start_extension);
 }
 
 void CurvesWeightPaintOperationBase::on_stroke_extended(const bContext &C,
                                                          const StrokeExtension &stroke_extension)
 {
-  /* Update brush settings for this stroke sample. */
-  get_brush_settings(C, stroke_extension);
-
-  if (!object || !curves_id || !curves || !brush) {
-    return;
-  }
-
-  /* Update mouse input and bounding box. */
-  get_mouse_input(stroke_extension);
-
-  if (!curves || curves->is_empty()) {
-    return;
-  }
-
-  /* Sample points under the brush. */
-  sample_curves_3d_brush(C, stroke_extension);
-
-  /* Default implementation: apply brush weight to all points under the brush. */
-  for (const BrushPoint &point : points_in_brush) {
-    apply_weight_to_point(point.point_index, brush_weight, point.influence);
-  }
-
-  /* Notify about geometry changes. */
-  DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, object);
-  WM_event_add_notifier(&C, NC_GEOM | ND_DATA, curves_id);
+  /* Call base class implementation which will call apply_operation_to_point for each point. */
+  CurvesPaintOperationBase::on_stroke_extended(C, stroke_extension);
 }
 
-void CurvesWeightPaintOperationBase::on_stroke_done(const bContext & /*C*/)
+void CurvesWeightPaintOperationBase::on_stroke_done(const bContext &C)
 {
-  /* Clear collected points. */
-  points_in_brush.clear();
-
-  /* Reset state. */
-  object = nullptr;
-  curves_id = nullptr;
-  brush = nullptr;
-  curves = nullptr;
+  /* Call base class implementation. */
+  CurvesPaintOperationBase::on_stroke_done(C);
 }
 
 /** \} */

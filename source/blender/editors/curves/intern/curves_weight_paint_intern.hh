@@ -8,7 +8,6 @@
 
 #include "BLI_vector.hh"
 #include "BLI_set.hh"
-#include "BLI_rect.h"
 #include "BKE_attribute.hh"
 #include "BKE_curves.hh"
 #include "BKE_deform.hh"
@@ -16,7 +15,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_object_types.h"
 
-#include "../../sculpt_paint/curves/sculpt_intern.hh"
+#include "curves_paint_intern.hh"
 
 struct bContext;
 struct Depsgraph;
@@ -30,107 +29,47 @@ namespace blender::ed::sculpt_paint {
 
 using bke::CurvesGeometry;
 
-/**
- * Brush point data structure for weight paint operations.
- * Contains influence factor and point index for weight application.
- */
-struct BrushPoint {
-  /** Influence factor based on brush falloff curve (0.0 - 1.0). */
-  float influence;
-  /** Index of the curve point in the geometry. */
-  int point_index;
-};
+/* For backward compatibility, alias BrushPoint to CurvesBrushPoint. */
+using BrushPoint = CurvesBrushPoint;
+
+/* For backward compatibility, alias the stroke operation interface. */
+using CurvesWeightPaintStrokeOperation = CurvesPaintStrokeOperation;
 
 /**
- * Base class for stroke based operations in curves weight paint mode.
- * Similar to GreasePencilStrokeOperation but for Curves objects.
+ * Base class for curves weight paint operations with common weight-specific utilities.
+ * Inherits common paint functionality from CurvesPaintOperationBase.
+ * Provides weight-specific functionality for all weight paint brush types (Draw, Blur, Average, Smear).
  */
-class CurvesWeightPaintStrokeOperation {
- public:
-  virtual ~CurvesWeightPaintStrokeOperation() = default;
-  
-  /**
-   * Called at the beginning of a stroke.
-   * Initialize brush settings, ensure vertex groups exist, etc.
-   */
-  virtual void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) = 0;
-  
-  /**
-   * Called for each stroke sample during the stroke.
-   * Apply weight paint to points under the brush.
-   */
-  virtual void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) = 0;
-  
-  /**
-   * Called when the stroke is finished.
-   * Perform cleanup and final operations.
-   */
-  virtual void on_stroke_done(const bContext &C) = 0;
-};
-
-/**
- * Base class for curves weight paint operations with common utilities.
- * Provides shared functionality for all weight paint brush types (Draw, Blur, Average, Smear).
- */
-class CurvesWeightPaintOperationBase : public CurvesWeightPaintStrokeOperation {
+class CurvesWeightPaintOperationBase : public CurvesPaintOperationBase {
  protected:
-  /* ----- Object and brush data ----- */
-  Object *object = nullptr;
-  Curves *curves_id = nullptr;
-  Brush *brush = nullptr;
-  bke::CurvesGeometry *curves = nullptr;
-  
-  /* ----- Brush parameters ----- */
-  float initial_brush_radius = 0.0f;
-  float brush_radius = 0.0f;
-  float initial_brush_strength = 0.0f;
-  float brush_strength = 0.0f;
+  /* ----- Weight paint specific settings ----- */
   float brush_weight = 0.0f;
-  
-  /* ----- Mouse/stroke state ----- */
-  float2 mouse_position;
-  float2 mouse_position_previous;
-  rctf brush_bbox;
-  
-  /* ----- Weight paint settings ----- */
   bool auto_normalize = false;
-  BrushStrokeMode stroke_mode = BrushStrokeMode::Normal;
   bool invert_brush_weight = false;
   int active_vertex_group = -1;
   bDeformGroup *object_defgroup = nullptr;
-  
+
   /* ----- Locked vertex groups (object level) ----- */
   Set<std::string> object_locked_defgroups;
-  
-  /* ----- Collected points under brush ----- */
-  Vector<BrushPoint> points_in_brush;
 
  public:
-  /* ----- Virtual interface with default implementations ----- */
-  
   void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override;
   void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) override;
   void on_stroke_done(const bContext &C) override;
 
-  /* ----- Utility methods ----- */
-  
-  /**
-   * Get brush settings from context and stroke extension.
-   * Updates radius, strength, weight based on pressure if enabled.
-   */
-  void get_brush_settings(const bContext &C, const StrokeExtension &stroke_extension);
-  
+  /* ----- Weight paint specific utilities ----- */
+
   /**
    * Ensure active vertex group exists in the object.
    * Creates a default group if none exists.
    */
   void ensure_active_vertex_group_in_object();
-  
+
   /**
    * Get list of locked vertex groups from the object.
    */
   void get_locked_vertex_groups();
-  
+
   /**
    * Apply weight to a specific point with given influence.
    * @param point_index Index of the curve point
@@ -140,44 +79,36 @@ class CurvesWeightPaintOperationBase : public CurvesWeightPaintStrokeOperation {
   void apply_weight_to_point(int point_index, float target_weight, float influence);
 
  protected:
+  /* ----- Weight access utilities ----- */
+
   /**
    * Get current weight of a point in the active vertex group.
    * @return Weight value (0.0 - 1.0), or 0.0 if not in group
    */
   float get_vertex_weight(int point_index);
-  
+
   /**
    * Set weight of a point in the active vertex group.
    * @param weight Weight value (0.0 - 1.0)
    */
   void set_vertex_weight(int point_index, float weight);
-  
+
   /**
-   * Update mouse input and calculate brush bounding box.
-   * @param stroke_extension Current stroke sample
-   * @param brush_widen_factor Factor to widen brush for neighbor sampling (default 1.0)
+   * Override to get weight-specific brush settings.
+   * Adds brush_weight parameter from brush.
    */
-  void get_mouse_input(const StrokeExtension &stroke_extension, float brush_widen_factor = 1.0f);
-  
+  void get_brush_settings(const bContext &C, const StrokeExtension &stroke_extension);
+
   /**
-   * Sample curve points under the brush and add them to points_in_brush buffer.
-   * Uses screen-space projection for point-to-brush distance calculation.
+   * Override to apply weight to points collected in brush.
+   * Default implementation applies brush weight to all points.
    */
-  void sample_curves_3d_brush(const bContext &C, const StrokeExtension &stroke_extension);
-  
+  void apply_operation_to_point(const CurvesBrushPoint &point) override;
+
   /**
-   * Check if a point is within the brush radius.
-   * @param point_position_re Screen-space position of the point
-   * @return true if point is under the brush
+   * Initialize weight paint mode (vertex group setup).
    */
-  bool is_point_in_brush(const float2 &point_position_re);
-  
-  /**
-   * Calculate brush falloff for a point based on distance.
-   * @param distance_re Screen-space distance from brush center
-   * @return Falloff factor (0.0 - 1.0)
-   */
-  float calculate_brush_falloff(float distance_re);
+  void init_paint_mode(const bContext & /*C*/) override;
 };
 
 /**

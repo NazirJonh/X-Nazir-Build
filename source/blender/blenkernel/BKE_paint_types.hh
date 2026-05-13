@@ -34,11 +34,12 @@ enum class PaintMode : int8_t {
   WeightGPencil = 9,
   /** Curves. */
   SculptCurves = 10,
-  WeightCurves = 11,
+  VertexCurves = 11,
+  WeightCurves = 12,
 
   /** Keep last. */
   /* TODO: Shift the ordering so that invalid is first so that zero-initialization makes sense. */
-  Invalid = 12,
+  Invalid = 13,
 };
 
 namespace bke {

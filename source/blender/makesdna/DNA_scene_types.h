@@ -1526,6 +1526,10 @@ struct CurvesSculpt {
   Paint paint;
 };
 
+struct CurvesVertexPaint {
+  Paint paint;
+};
+
 struct CurvesWeightPaint {
   Paint paint;
 
@@ -2228,6 +2232,8 @@ struct ToolSettings {
   GpWeightPaint *gp_weightpaint = nullptr;
   /** Curves sculpt. */
   CurvesSculpt *curves_sculpt = nullptr;
+  /** Curves vertex paint. */
+  CurvesVertexPaint *curves_vertex_paint = nullptr;
   /** Curves weight paint. */
   CurvesWeightPaint *curves_weight_paint = nullptr;
 

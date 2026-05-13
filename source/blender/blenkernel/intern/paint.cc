@@ -370,6 +370,9 @@ bool BKE_paint_ensure_from_paintmode(Scene *sce, PaintMode mode)
     case PaintMode::WeightCurves:
       paint_ptr = (Paint **)&ts->curves_weight_paint;
       break;
+    case PaintMode::VertexCurves:
+      paint_ptr = (Paint **)&ts->curves_vertex_paint;
+      break;
     case PaintMode::Invalid:
       break;
   }
@@ -407,6 +410,8 @@ Paint *BKE_paint_get_active_from_paintmode(Scene *sce, PaintMode mode)
         return &ts->curves_sculpt->paint;
       case PaintMode::WeightCurves:
         return &ts->curves_weight_paint->paint;
+      case PaintMode::VertexCurves:
+        return &ts->curves_vertex_paint->paint;
       case PaintMode::Invalid:
         return nullptr;
       default:
@@ -441,6 +446,8 @@ const EnumPropertyItem *BKE_paint_get_tool_enum_from_paintmode(const PaintMode m
       return rna_enum_brush_curves_sculpt_brush_type_items;
     case PaintMode::WeightCurves:
       return rna_enum_brush_weight_brush_type_items;
+    case PaintMode::VertexCurves:
+      return rna_enum_brush_vertex_brush_type_items;
     case PaintMode::Invalid:
       break;
   }
@@ -474,6 +481,8 @@ Paint *BKE_paint_get_active(const Main &bmain, Scene *sce, ViewLayer *view_layer
           return &ts->gp_weightpaint->paint;
         case OB_MODE_SCULPT_CURVES:
           return &ts->curves_sculpt->paint;
+        case OB_MODE_VERTEX_CURVES:
+          return &ts->curves_vertex_paint->paint;
         case OB_MODE_WEIGHT_CURVES:
           return &ts->curves_weight_paint->paint;
         default:
@@ -562,6 +571,8 @@ PaintMode BKE_paintmode_get_active_from_context(const bContext *C)
           return PaintMode::Texture3D;
         case OB_MODE_SCULPT_CURVES:
           return PaintMode::SculptCurves;
+        case OB_MODE_VERTEX_CURVES:
+          return PaintMode::VertexCurves;
         case OB_MODE_WEIGHT_CURVES:
           return PaintMode::WeightCurves;
         default:
@@ -791,6 +802,8 @@ static const char *paint_brush_essentials_asset_file_name_from_paint_mode(
       return "essentials_brushes-curve_sculpt.blend";
     case PaintMode::WeightCurves:
       return "essentials_brushes-mesh_weight.blend";
+    case PaintMode::VertexCurves:
+      return "essentials_brushes-mesh_vertex.blend";
     default:
       return nullptr;
   }
@@ -1065,6 +1078,25 @@ static void paint_brush_default_essentials_name_get(const PaintMode paint_mode,
         }
       }
       break;
+    case PaintMode::VertexCurves:
+      name = "Paint Hard";
+      if (brush_type) {
+        switch (eBrushVertexPaintType(*brush_type)) {
+          case VPAINT_BRUSH_TYPE_BLUR:
+            name = "Blur";
+            break;
+          case VPAINT_BRUSH_TYPE_AVERAGE:
+            name = "Average";
+            break;
+          case VPAINT_BRUSH_TYPE_SMEAR:
+            name = "Smear";
+            break;
+          case VPAINT_BRUSH_TYPE_DRAW:
+            /* Use default, don't override. */
+            break;
+        }
+      }
+      break;
     default:
       BLI_assert_unreachable();
       break;
@@ -1216,6 +1248,10 @@ static void paint_runtime_init(const ToolSettings *ts, Paint *paint)
     paint->runtime->ob_mode = OB_MODE_SCULPT_CURVES;
     paint->runtime->paint_mode = PaintMode::SculptCurves;
   }
+  else if (ts->curves_vertex_paint && paint == &ts->curves_vertex_paint->paint) {
+    paint->runtime->ob_mode = OB_MODE_VERTEX_CURVES;
+    paint->runtime->paint_mode = PaintMode::VertexCurves;
+  }
   else if (ts->curves_weight_paint && paint == &ts->curves_weight_paint->paint) {
     paint->runtime->ob_mode = OB_MODE_WEIGHT_CURVES | OB_MODE_WEIGHT_PAINT;
     paint->runtime->paint_mode = PaintMode::WeightCurves;
@@ -1251,6 +1287,8 @@ uint BKE_paint_get_brush_type_offset_from_paintmode(const PaintMode mode)
       return offsetof(Brush, curves_sculpt_brush_type);
     case PaintMode::WeightCurves:
       return offsetof(Brush, weight_brush_type);
+    case PaintMode::VertexCurves:
+      return offsetof(Brush, vertex_brush_type);
     case PaintMode::Invalid:
       break; /* We don't use these yet. */
   }
@@ -1280,6 +1318,8 @@ std::optional<int> BKE_paint_get_brush_type_from_obmode(const Brush *brush,
       return brush->gpencil_weight_brush_type;
     case OB_MODE_SCULPT_CURVES:
       return brush->curves_sculpt_brush_type;
+    case OB_MODE_VERTEX_CURVES:
+      return brush->vertex_brush_type;
     case OB_MODE_WEIGHT_CURVES:
       return brush->weight_brush_type;
     default:
@@ -1310,6 +1350,8 @@ std::optional<int> BKE_paint_get_brush_type_from_paintmode(const Brush *brush,
       return brush->gpencil_weight_brush_type;
     case PaintMode::SculptCurves:
       return brush->curves_sculpt_brush_type;
+    case PaintMode::VertexCurves:
+      return brush->vertex_brush_type;
     case PaintMode::WeightCurves:
       return brush->weight_brush_type;
     case PaintMode::Invalid:
@@ -1462,6 +1504,8 @@ eObjectMode BKE_paint_object_mode_from_paintmode(const PaintMode mode)
       return OB_MODE_TEXTURE_PAINT;
     case PaintMode::SculptCurves:
       return OB_MODE_SCULPT_CURVES;
+    case PaintMode::VertexCurves:
+      return OB_MODE_VERTEX_CURVES;
     case PaintMode::WeightCurves:
       return OB_MODE_WEIGHT_CURVES;
     case PaintMode::GPencil:
@@ -1517,6 +1561,7 @@ bool BKE_paint_ensure(ToolSettings *ts, Paint **r_paint)
                       (Paint *)ts->wpaint,
                       (Paint *)ts->curves_sculpt,
                       (Paint *)ts->curves_weight_paint,
+                      (Paint *)ts->curves_vertex_paint,
                       (Paint *)&ts->imapaint));
 #ifndef NDEBUG
       Paint paint_test = dna::shallow_copy(**r_paint);
@@ -1570,6 +1615,11 @@ bool BKE_paint_ensure(ToolSettings *ts, Paint **r_paint)
   }
   else if ((CurvesWeightPaint **)r_paint == &ts->curves_weight_paint) {
     CurvesWeightPaint *data = MEM_new<CurvesWeightPaint>(__func__);
+    paint = &data->paint;
+    paint_init_data(*paint);
+  }
+  else if ((CurvesVertexPaint **)r_paint == &ts->curves_vertex_paint) {
+    CurvesVertexPaint *data = MEM_new<CurvesVertexPaint>(__func__);
     paint = &data->paint;
     paint_init_data(*paint);
   }
@@ -1971,6 +2021,9 @@ bool supports_scene_size(const PaintMode paint_mode)
       return true;
     case PaintMode::SculptCurves:
       return false;
+    case PaintMode::WeightCurves:
+    case PaintMode::VertexCurves:
+      return false;
     case PaintMode::Texture2D:
       return false;
     case PaintMode::Invalid:
@@ -1995,6 +2048,8 @@ bool supports_symmetry_tiling(const PaintMode paint_mode)
     case PaintMode::WeightGPencil:
       return false;
     case PaintMode::SculptCurves:
+    case PaintMode::WeightCurves:
+    case PaintMode::VertexCurves:
       return false;
     case PaintMode::Texture2D:
       return false;

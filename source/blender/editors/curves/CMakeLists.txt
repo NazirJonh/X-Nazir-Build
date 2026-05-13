@@ -26,6 +26,9 @@ set(SRC
   intern/curves_pen.cc
   intern/curves_selection.cc
   intern/curves_undo.cc
+  intern/curves_vertex_paint_utils.cc
+  intern/curves_vertex_paint_draw.cc
+  intern/curves_vertex_paint_ops.cc
   intern/curves_weight_paint_ops.cc
   intern/curves_weight_paint_draw.cc
   intern/curves_weight_paint_utils.cc
@@ -45,6 +48,7 @@ set(LIB
   PRIVATE bf::functions
   PRIVATE bf::geometry
   PRIVATE bf::gpu
+  PRIVATE bf::imbuf
   PRIVATE bf::intern::clog
   PRIVATE bf::intern::guardedalloc
   PRIVATE bf::nodes

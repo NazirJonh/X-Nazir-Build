@@ -713,6 +713,10 @@ static wmOperatorStatus paintcurve_draw_exec(bContext *C, wmOperator * /*op*/)
       name = "CURVES_OT_weight_paint_brush_stroke";
       printf("[DEBUG] PAINTCURVE_OT_draw dispatch: mode=WeightCurves -> %s\n", name);
       break;
+    case PaintMode::VertexCurves:
+      name = "CURVES_OT_vertex_paint_brush_stroke";
+      printf("[DEBUG] PAINTCURVE_OT_draw dispatch: mode=VertexCurves -> %s\n", name);
+      break;
     case PaintMode::GPencil:
       name = "GREASE_PENCIL_OT_brush_stroke";
       break;

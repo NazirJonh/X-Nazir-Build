@@ -229,6 +229,12 @@ class VIEW3D_HT_tool_header(Header):
             sub = row.row(align=True)
             sub.active = ob.data.use_sculpt_collision
             sub.prop(ob.data, "surface_collision_distance")
+        elif mode_string == "VERTEX_CURVES":
+            ob = context.object
+            _row, sub = row_for_mirror()
+            sub.prop(ob.data, "use_mirror_x", text="X", toggle=True)
+            sub.prop(ob.data, "use_mirror_y", text="Y", toggle=True)
+            sub.prop(ob.data, "use_mirror_z", text="Z", toggle=True)
 
         # Expand panels from the side-bar as popovers.
         popover_kw = {"space_type": "VIEW_3D", "region_type": "UI", "category": "Tool"}
@@ -733,6 +739,44 @@ class _draw_tool_settings_context_mode:
         return True
 
     @staticmethod
+    def VERTEX_CURVES(context, layout, tool):
+        if (tool is None) or (not tool.use_brushes):
+            return False
+
+        tool_settings = context.tool_settings
+        paint = tool_settings.curves_vertex_paint
+        brush = paint.brush
+
+        BrushAssetShelf.draw_popup_selector(layout, context, brush)
+
+        if brush is None:
+            return False
+
+        UnifiedPaintPanel.prop_unified(
+            layout,
+            context,
+            brush,
+            "size",
+            unified_name="use_unified_size",
+            pressure_name="use_pressure_size",
+            text="Size",
+            slider=True,
+            header=True,
+        )
+
+        UnifiedPaintPanel.prop_unified(
+            layout,
+            context,
+            brush,
+            "strength",
+            unified_name="use_unified_strength",
+            pressure_name="use_pressure_strength",
+            header=True,
+        )
+
+        return True
+
+    @staticmethod
     def PAINT_GREASE_PENCIL(context, layout, tool):
         if (tool is None) or (not tool.use_brushes):
             return False
@@ -860,6 +904,7 @@ class VIEW3D_HT_header(Header):
                     "SCULPT",
                     "SCULPT_CURVES",
                     "WEIGHT_CURVES",
+                    "VERTEX_CURVES",
                     "VERTEX_PAINT",
                     "WEIGHT_PAINT",
                     "TEXTURE_PAINT",
@@ -1247,6 +1292,12 @@ class VIEW3D_HT_header(Header):
                 panel="VIEW3D_PT_overlay_weight_paint_curves",
                 text="",
                 icon="WPAINT_HLT",
+            )
+        elif mode_string == "VERTEX_CURVES":
+            sub.popover(
+                panel="VIEW3D_PT_overlay_vertex_paint_curves",
+                text="",
+                icon="VPAINT_HLT",
             )
         elif mode_string == "PAINT_WEIGHT":
             sub.popover(

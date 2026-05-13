@@ -164,6 +164,7 @@ class BrushAssetShelf:
             'VERTEX_GREASE_PENCIL': "VIEW3D_AST_brush_gpencil_vertex",
             'SCULPT_CURVES': "VIEW3D_AST_brush_sculpt_curves",
             'WEIGHT_CURVES': "VIEW3D_AST_brush_weight_paint_curves",
+            'VERTEX_CURVES': "VIEW3D_AST_brush_vertex_paint_curves",
         }
         mode = UnifiedPaintPanel.get_brush_mode(context)
         if not mode:
@@ -252,6 +253,11 @@ class UnifiedPaintPanel:
                         return mode
                     else:
                         return None
+                if mode == 'VERTEX_CURVES':
+                    if tool_settings.curves_vertex_paint:
+                        return mode
+                    else:
+                        return None
                 return mode
         return None
 
@@ -279,6 +285,8 @@ class UnifiedPaintPanel:
             return tool_settings.curves_sculpt
         elif mode == 'WEIGHT_CURVES':
             return tool_settings.curves_weight_paint
+        elif mode == 'VERTEX_CURVES':
+            return tool_settings.curves_vertex_paint
         elif mode == 'CURVES_WEIGHT_PAINT':
             return tool_settings.curves_weight_paint
         # Grease Pencil settings

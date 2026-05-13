@@ -1,0 +1,692 @@
+/* SPDX-FileCopyrightText: 2024 Blender Authors
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+/** \file
+ * \ingroup edcurves
+ *
+ * Additional vertex paint operations for Curves (Blur, Average, Smear, Replace).
+ */
+
+#include "BKE_brush.hh"
+#include "BKE_context.hh"
+#include "BKE_curves.hh"
+#include "BKE_object.hh"
+#include "BKE_paint.hh"
+#include "BKE_paint_types.hh"
+#include "BKE_report.hh"
+
+#include "DNA_brush_types.h"
+#include "DNA_object_enums.h"
+#include "DNA_object_types.h"
+#include "DNA_scene_types.h"
+
+#include "BLI_math_vector.hh"
+
+#include "WM_api.hh"
+#include "WM_toolsystem.hh"
+#include "WM_message.hh"
+#include "WM_types.hh"
+
+#include "DEG_depsgraph.hh"
+
+#include "ED_object.hh"
+#include "ED_paint.hh"
+#include "ED_image.hh"
+#include "ED_view3d.hh"
+
+#include "RNA_access.hh"
+#include "RNA_define.hh"
+
+#include "MEM_guardedalloc.h"
+
+#include "../sculpt_paint/paint_intern.hh"
+#include "curves_vertex_paint_intern.hh"
+
+namespace blender::ed::sculpt_paint {
+
+/* -------------------------------------------------------------------- */
+/** \name Blur Vertex Paint Operation
+ *
+ * Blurs/smooths color values by averaging nearby points.
+ * \{ */
+
+class BlurVertexPaintOperation : public CurvesVertexPaintOperationBase {
+ public:
+  BlurVertexPaintOperation()
+  {
+    this->stroke_mode = BrushStrokeMode::Normal;
+  }
+
+  void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override
+  {
+    CurvesVertexPaintOperationBase::on_stroke_begin(C, start_extension);
+  }
+
+  void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) override
+  {
+    get_brush_settings(C, stroke_extension);
+    get_mouse_input(stroke_extension, 1.5f); /* Wider brush for neighbor sampling. */
+
+    if (!curves || curves->is_empty()) {
+      return;
+    }
+
+    sample_curves_3d_brush(C, stroke_extension);
+    apply_blur_operation();
+
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, object);
+    WM_event_add_notifier(&C, NC_GEOM | ND_DATA, curves_id);
+  }
+
+  void on_stroke_done(const bContext &C) override
+  {
+    CurvesVertexPaintOperationBase::on_stroke_done(C);
+  }
+
+ private:
+  void apply_blur_operation()
+  {
+    if (points_in_brush.is_empty()) {
+      return;
+    }
+
+    /* Calculate average color of all points under the brush. */
+    ColorPaint4f color_sum = ColorPaint4f(0.0f);
+    for (const CurvesBrushPoint &point : points_in_brush) {
+      const ColorGeometry4f color = get_point_color(point.point_index);
+      color_sum.r += color.r;
+      color_sum.g += color.g;
+      color_sum.b += color.b;
+      color_sum.a += color.a;
+    }
+    color_sum.r /= float(points_in_brush.size());
+    color_sum.g /= float(points_in_brush.size());
+    color_sum.b /= float(points_in_brush.size());
+    color_sum.a /= float(points_in_brush.size());
+
+    /* Apply blurred color to all points. */
+    for (const CurvesBrushPoint &point : points_in_brush) {
+      apply_color_to_point(point.point_index, color_sum, point.influence * brush_strength);
+    }
+  }
+};
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Average Vertex Paint Operation
+ *
+ * Averages color values of all points under the brush.
+ * \{ */
+
+class AverageVertexPaintOperation : public CurvesVertexPaintOperationBase {
+ public:
+  AverageVertexPaintOperation()
+  {
+    this->stroke_mode = BrushStrokeMode::Normal;
+  }
+
+  void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override
+  {
+    CurvesVertexPaintOperationBase::on_stroke_begin(C, start_extension);
+  }
+
+  void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) override
+  {
+    get_brush_settings(C, stroke_extension);
+    get_mouse_input(stroke_extension);
+
+    if (!curves || curves->is_empty()) {
+      return;
+    }
+
+    sample_curves_3d_brush(C, stroke_extension);
+    apply_average_operation();
+
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, object);
+    WM_event_add_notifier(&C, NC_GEOM | ND_DATA, curves_id);
+  }
+
+  void on_stroke_done(const bContext &C) override
+  {
+    CurvesVertexPaintOperationBase::on_stroke_done(C);
+  }
+
+ private:
+  void apply_average_operation()
+  {
+    if (points_in_brush.is_empty()) {
+      return;
+    }
+
+    /* Calculate weighted average based on influence. */
+    ColorPaint4f color_sum = ColorPaint4f(0.0f);
+    float influence_sum = 0.0f;
+
+    for (const CurvesBrushPoint &point : points_in_brush) {
+      const ColorGeometry4f color = get_point_color(point.point_index);
+      color_sum.r += color.r * point.influence;
+      color_sum.g += color.g * point.influence;
+      color_sum.b += color.b * point.influence;
+      color_sum.a += color.a * point.influence;
+      influence_sum += point.influence;
+    }
+
+    if (influence_sum < 1e-6f) {
+      return;
+    }
+
+    color_sum.r /= influence_sum;
+    color_sum.g /= influence_sum;
+    color_sum.b /= influence_sum;
+    color_sum.a /= influence_sum;
+
+    /* Apply averaged color to all points. */
+    for (const CurvesBrushPoint &point : points_in_brush) {
+      apply_color_to_point(point.point_index, color_sum, point.influence * brush_strength);
+    }
+  }
+};
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Smear Vertex Paint Operation
+ *
+ * Smears color values in the direction of brush movement.
+ * \{ */
+
+class SmearVertexPaintOperation : public CurvesVertexPaintOperationBase {
+ private:
+  /* Cached colors from the previous stroke sample for smearing. */
+  Array<ColorGeometry4f> previous_colors_;
+  bool has_previous_sample_ = false;
+
+ public:
+  SmearVertexPaintOperation()
+  {
+    this->stroke_mode = BrushStrokeMode::Normal;
+  }
+
+  void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override
+  {
+    CurvesVertexPaintOperationBase::on_stroke_begin(C, start_extension);
+
+    /* Initialize previous colors array. */
+    if (curves) {
+      previous_colors_.reinitialize(curves->points_num());
+      previous_colors_.fill(ColorGeometry4f());
+    }
+    has_previous_sample_ = false;
+  }
+
+  void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) override
+  {
+    get_brush_settings(C, stroke_extension);
+    get_mouse_input(stroke_extension);
+
+    if (!curves || curves->is_empty()) {
+      return;
+    }
+
+    sample_curves_3d_brush(C, stroke_extension);
+
+    if (has_previous_sample_) {
+      apply_smear_operation();
+    }
+
+    /* Cache current colors for next sample. */
+    cache_current_colors();
+    has_previous_sample_ = true;
+
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, object);
+    WM_event_add_notifier(&C, NC_GEOM | ND_DATA, curves_id);
+  }
+
+  void on_stroke_done(const bContext &C) override
+  {
+    CurvesVertexPaintOperationBase::on_stroke_done(C);
+    previous_colors_ = Array<ColorGeometry4f>();
+    has_previous_sample_ = false;
+  }
+
+ private:
+  void cache_current_colors()
+  {
+    for (const CurvesBrushPoint &point : points_in_brush) {
+      previous_colors_[point.point_index] = get_point_color(point.point_index);
+    }
+  }
+
+  void apply_smear_operation()
+  {
+    if (points_in_brush.is_empty()) {
+      return;
+    }
+
+    /* Calculate brush movement direction. */
+    const float2 brush_direction = mouse_position - mouse_position_previous;
+    const float brush_movement = math::length(brush_direction);
+
+    if (brush_movement < 1e-6f) {
+      return;
+    }
+
+    /* Apply smeared colors. */
+    for (const CurvesBrushPoint &point : points_in_brush) {
+      const ColorGeometry4f current_color = get_point_color(point.point_index);
+      const ColorGeometry4f prev_color = previous_colors_[point.point_index];
+
+      /* Smear factor based on brush movement. */
+      const float smear_factor = math::min(1.0f, brush_movement / brush_radius);
+
+      /* Interpolate between current and previous color. */
+      ColorGeometry4f smeared_color;
+      smeared_color.r = math::interpolate(current_color.r, prev_color.r, smear_factor);
+      smeared_color.g = math::interpolate(current_color.g, prev_color.g, smear_factor);
+      smeared_color.b = math::interpolate(current_color.b, prev_color.b, smear_factor);
+      smeared_color.a = math::interpolate(current_color.a, prev_color.a, smear_factor);
+
+      /* Apply smeared color with influence. */
+      ColorPaint4f color_paint(smeared_color.r, smeared_color.g, smeared_color.b, smeared_color.a);
+      apply_color_to_point(point.point_index, color_paint, point.influence * brush_strength);
+    }
+  }
+};
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Replace Vertex Paint Operation
+ *
+ * Replaces colors with brush color regardless of previous color.
+ * \{ */
+
+class ReplaceVertexPaintOperation : public CurvesVertexPaintOperationBase {
+ public:
+  ReplaceVertexPaintOperation()
+  {
+    this->stroke_mode = BrushStrokeMode::Normal;
+  }
+
+  void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override
+  {
+    CurvesVertexPaintOperationBase::on_stroke_begin(C, start_extension);
+  }
+
+  void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) override
+  {
+    get_brush_settings(C, stroke_extension);
+    get_mouse_input(stroke_extension);
+
+    if (!curves || curves->is_empty()) {
+      return;
+    }
+
+    sample_curves_3d_brush(C, stroke_extension);
+
+    /* Apply replace operation to all points under the brush. */
+    for (const CurvesBrushPoint &point : points_in_brush) {
+      ColorGeometry4f current = get_point_color(point.point_index);
+      current.r = math::interpolate(current.r, brush_color.r, point.influence);
+      current.g = math::interpolate(current.g, brush_color.g, point.influence);
+      current.b = math::interpolate(current.b, brush_color.b, point.influence);
+      set_point_color(point.point_index, current);
+    }
+
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, object);
+    WM_event_add_notifier(&C, NC_GEOM | ND_DATA, curves_id);
+  }
+
+  void on_stroke_done(const bContext &C) override
+  {
+    CurvesVertexPaintOperationBase::on_stroke_done(C);
+  }
+};
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Factory Functions
+ * \{ */
+
+std::unique_ptr<CurvesPaintStrokeOperation> new_vertex_paint_blur_operation()
+{
+  return std::make_unique<BlurVertexPaintOperation>();
+}
+
+std::unique_ptr<CurvesPaintStrokeOperation> new_vertex_paint_average_operation()
+{
+  return std::make_unique<AverageVertexPaintOperation>();
+}
+
+std::unique_ptr<CurvesPaintStrokeOperation> new_vertex_paint_smear_operation()
+{
+  return std::make_unique<SmearVertexPaintOperation>();
+}
+
+std::unique_ptr<CurvesPaintStrokeOperation> new_vertex_paint_replace_operation()
+{
+  return std::make_unique<ReplaceVertexPaintOperation>();
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Vertex Paint Mode Functions
+ * \{ */
+
+static bool curves_vertex_paint_poll(bContext *C)
+{
+  const Object *ob = CTX_data_active_object(C);
+  return ob && ob->type == OB_CURVES && ob->data;
+}
+
+static void curves_vertex_paint_mode_enter(bContext *C)
+{
+  Scene *scene = CTX_data_scene(C);
+  wmMsgBus *mbus = CTX_wm_message_bus(C);
+  Object *ob = CTX_data_active_object(C);
+
+  /* Ensure vertex paint data exists */
+  BKE_paint_ensure(scene->toolsettings, (Paint **)&scene->toolsettings->curves_vertex_paint);
+  CurvesVertexPaint *curves_vertex_paint = scene->toolsettings->curves_vertex_paint;
+
+  /* Set object mode */
+  ob->mode = OB_MODE_VERTEX_CURVES;
+
+  /* Set paint mode */
+  Paint *paint = BKE_paint_get_active_from_paintmode(scene, PaintMode::VertexCurves);
+
+  /* Ensure brushes exist */
+  BKE_paint_brushes_ensure(CTX_data_main(C), paint);
+
+  /* Start paint cursor */
+  ED_paint_cursor_start(&curves_vertex_paint->paint, curves_vertex_paint_poll);
+
+  /* Update dependency graph and notify */
+  DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+  WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
+  WM_event_add_notifier(C, NC_SCENE | ND_MODE, nullptr);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+}
+
+static void curves_vertex_paint_mode_exit(bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  wmMsgBus *mbus = CTX_wm_message_bus(C);
+
+  /* Set object mode back to object */
+  ob->mode = OB_MODE_OBJECT;
+
+  /* Update dependency graph and notify */
+  DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+  WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
+  WM_event_add_notifier(C, NC_SCENE | ND_MODE, nullptr);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Vertex Paint Mode Toggle Operator
+ * \{ */
+
+static bool curves_vertex_paint_toggle_poll(bContext *C)
+{
+  const Object *ob = CTX_data_active_object(C);
+  return ob && ob->type == OB_CURVES && ob->data;
+}
+
+static wmOperatorStatus curves_vertex_paint_toggle_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  wmMsgBus *mbus = CTX_wm_message_bus(C);
+
+  const bool is_mode_set = ob->mode == OB_MODE_VERTEX_CURVES;
+
+  if (!is_mode_set) {
+    if (!blender::ed::object::mode_compat_set(C, ob, OB_MODE_VERTEX_CURVES, op->reports)) {
+      return OPERATOR_CANCELLED;
+    }
+  }
+
+  if (is_mode_set) {
+    curves_vertex_paint_mode_exit(C);
+  }
+  else {
+    curves_vertex_paint_mode_enter(C);
+  }
+
+  WM_toolsystem_update_from_context_view3d(C);
+
+  DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+  WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
+  WM_event_add_notifier(C, NC_SCENE | ND_MODE, nullptr);
+
+  return OPERATOR_FINISHED;
+}
+
+void CURVES_OT_vertex_paint_toggle(wmOperatorType *ot)
+{
+  ot->name = "Curves Vertex Paint Mode";
+  ot->idname = "CURVES_OT_vertex_paint_toggle";
+  ot->description = "Toggle curves vertex paint mode in 3D view";
+
+  ot->exec = curves_vertex_paint_toggle_exec;
+  ot->poll = curves_vertex_paint_toggle_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Brush Stroke Operators
+ * \{ */
+
+static std::unique_ptr<CurvesPaintStrokeOperation> start_stroke_operation_vertex_paint(
+    const BrushStrokeMode brush_mode, const BrushSwitchMode brush_switch_mode, const bContext &C)
+{
+  const Object *object = CTX_data_active_object(&C);
+  if (!object || object->type != OB_CURVES) {
+    return nullptr;
+  }
+
+  const Paint *paint = BKE_paint_get_active_from_context(&C);
+  const Brush *brush = BKE_paint_brush_for_read(paint);
+  if (!brush) {
+    return nullptr;
+  }
+
+  if (brush_switch_mode == BrushSwitchMode::Smooth) {
+    return new_vertex_paint_blur_operation();
+  }
+
+  switch (eBrushVertexPaintType(brush->vertex_brush_type)) {
+    case VPAINT_BRUSH_TYPE_DRAW:
+      return new_vertex_paint_draw_operation(brush_mode);
+    case VPAINT_BRUSH_TYPE_BLUR:
+      return new_vertex_paint_blur_operation();
+    case VPAINT_BRUSH_TYPE_AVERAGE:
+      return new_vertex_paint_average_operation();
+    case VPAINT_BRUSH_TYPE_SMEAR:
+      return new_vertex_paint_smear_operation();
+  }
+
+  return nullptr;
+}
+
+struct CurvesVertexPaintBrushStroke final : public PaintStroke {
+  CurvesVertexPaintBrushStroke(bContext *C, wmOperator *op, const int event_type)
+      : PaintStroke(C, op, event_type)
+  {
+  }
+
+  bool get_location(float out[3], const float mouse[2], bool /*force_original*/) override
+  {
+    out[0] = mouse[0];
+    out[1] = mouse[1];
+    out[2] = 0.0f;
+    return true;
+  }
+
+  bool test_start(wmOperator * /*op*/, const float /*mouse*/[2]) override
+  {
+    return true;
+  }
+
+  void update_step(wmOperator *op, PointerRNA *stroke_element) override
+  {
+    StrokeExtension stroke_extension;
+    RNA_float_get_array(stroke_element, "mouse", stroke_extension.mouse_position);
+    stroke_extension.pressure = RNA_float_get(stroke_element, "pressure");
+    stroke_extension.reports = op->reports;
+
+    if (!operation_) {
+      stroke_extension.is_first = true;
+      operation_ = start_stroke_operation_vertex_paint(
+          BrushStrokeMode(RNA_enum_get(op->ptr, "mode")),
+          BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")),
+          *this->evil_C);
+      if (!operation_) {
+        return;
+      }
+      operation_->on_stroke_begin(*this->evil_C, stroke_extension);
+    }
+    else {
+      stroke_extension.is_first = false;
+    }
+
+    operation_->on_stroke_extended(*this->evil_C, stroke_extension);
+  }
+
+  void redraw(bool /*final*/) override {}
+
+  bool test_cancel() override
+  {
+    return false;
+  }
+
+  void done(bool /*is_cancel*/, bool /*stroke_started*/) override
+  {
+    if (operation_) {
+      operation_->on_stroke_done(*this->evil_C);
+    }
+  }
+
+ private:
+  std::unique_ptr<CurvesPaintStrokeOperation> operation_;
+};
+
+static bool curves_vertex_paint_brush_stroke_poll(bContext *C)
+{
+  const bool mode_ok = (CTX_data_active_object(C) &&
+                        CTX_data_active_object(C)->type == OB_CURVES &&
+                        CTX_data_active_object(C)->mode == OB_MODE_VERTEX_CURVES);
+  const bool tool_ok = WM_toolsystem_active_tool_is_brush(C);
+
+  return mode_ok && tool_ok;
+}
+
+static wmOperatorStatus curves_vertex_paint_brush_stroke_invoke(bContext *C,
+                                                                wmOperator *op,
+                                                                const wmEvent *event)
+{
+  const Object *object = CTX_data_active_object(C);
+  if (!object || object->type != OB_CURVES) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const Paint *paint = BKE_paint_get_active_from_context(C);
+  const Brush *brush = BKE_paint_brush_for_read(paint);
+  if (brush == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  CurvesVertexPaintBrushStroke *stroke = MEM_new<CurvesVertexPaintBrushStroke>(
+      __func__, C, op, event->type);
+  op->customdata = stroke;
+
+  const wmOperatorStatus retval = op->type->modal(C, op, event);
+  OPERATOR_RETVAL_CHECK(retval);
+
+  if (retval == OPERATOR_FINISHED) {
+    MEM_delete(stroke);
+    op->customdata = nullptr;
+    return OPERATOR_FINISHED;
+  }
+
+  WM_event_add_modal_handler(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus curves_vertex_paint_brush_stroke_modal(bContext *C,
+                                                               wmOperator *op,
+                                                               const wmEvent *event)
+{
+  CurvesVertexPaintBrushStroke *stroke = static_cast<CurvesVertexPaintBrushStroke *>(
+      op->customdata);
+
+  if (!stroke) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const wmOperatorStatus retval = stroke->modal(C, op, event);
+  OPERATOR_RETVAL_CHECK(retval);
+
+  if (retval != OPERATOR_RUNNING_MODAL) {
+    MEM_delete(stroke);
+    op->customdata = nullptr;
+  }
+
+  return retval;
+}
+
+static void curves_vertex_paint_brush_stroke_cancel(bContext *C, wmOperator *op)
+{
+  if (op->customdata != nullptr) {
+    CurvesVertexPaintBrushStroke *stroke = static_cast<CurvesVertexPaintBrushStroke *>(
+        op->customdata);
+    stroke->cancel(C);
+    MEM_delete(stroke);
+    op->customdata = nullptr;
+  }
+}
+
+static void CURVES_OT_vertex_paint_brush_stroke(wmOperatorType *ot)
+{
+  ot->name = "Curves Vertex Paint Brush Stroke";
+  ot->idname = "CURVES_OT_vertex_paint_brush_stroke";
+  ot->description = "Paint vertex colors on curves points";
+
+  ot->poll = curves_vertex_paint_brush_stroke_poll;
+  ot->invoke = curves_vertex_paint_brush_stroke_invoke;
+  ot->modal = curves_vertex_paint_brush_stroke_modal;
+  ot->cancel = curves_vertex_paint_brush_stroke_cancel;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  paint_stroke_operator_properties(ot);
+}
+
+/** \} */
+
+}  // namespace blender::ed::sculpt_paint
+
+/* -------------------------------------------------------------------- */
+/** \name Registration
+ * \{ */
+
+void ED_operatortypes_curves_vertex_paint()
+{
+  using namespace blender::ed::sculpt_paint;
+  WM_operatortype_append(CURVES_OT_vertex_paint_toggle);
+  WM_operatortype_append(CURVES_OT_vertex_paint_brush_stroke);
+}
+
+/** \} */

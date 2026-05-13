@@ -67,6 +67,7 @@
 #include "GEO_transform.hh"
 
 #include "curves_weight_paint_intern.hh"
+#include "curves_vertex_paint_intern.hh"
 
 /**
  * The code below uses a suffix naming convention to indicate the coordinate space:
@@ -1874,6 +1875,9 @@ void operatortypes_curves()
 
   /* Weight paint operators */
   ED_operatortypes_curves_weight_paint();
+
+  /* Vertex paint operators */
+  ED_operatortypes_curves_vertex_paint();
 
   ED_operatortypes_curves_pen();
 }

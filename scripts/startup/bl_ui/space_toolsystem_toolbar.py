@@ -2015,6 +2015,16 @@ class _defs_vertex_paint:
         )
 
     @ToolDef.from_fn
+    def draw():
+        return dict(
+            idname="builtin_brush.draw",
+            label="Draw",
+            icon="brush.paint_vertex.draw",
+            options={'USE_BRUSHES'},
+            brush_type='DRAW',
+        )
+
+    @ToolDef.from_fn
     def blur():
         return dict(
             idname="builtin_brush.blur",
@@ -4135,6 +4145,15 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
                 _defs_weight_paint.sample_weight,
                 _defs_weight_paint.sample_weight_group,
             ),
+            None,
+            *_tools_annotate,
+        ],
+        'VERTEX_CURVES': [
+            _brush_tool,
+            _defs_vertex_paint.draw,
+            _defs_vertex_paint.blur,
+            _defs_vertex_paint.average,
+            _defs_vertex_paint.smear,
             None,
             *_tools_annotate,
         ],

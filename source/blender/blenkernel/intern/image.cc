@@ -137,6 +137,62 @@ static void image_runtime_free_data(Image *image)
   BKE_image_partial_update_register_free(image);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Image Paint Selection Masks (runtime, per-tile)
+ * \{ */
+
+ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int width, int height)
+{
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+  if (mask_ptr) {
+    ImBuf *mask = *mask_ptr;
+    if (mask->x == width && mask->y == height) {
+      return mask;
+    }
+    /* Size changed, free old mask. */
+    IMB_freeImBuf(mask);
+    runtime->paint_selection_masks.remove(tile_number);
+  }
+
+  ImBuf *mask = IMB_allocImBuf(width, height, 0);
+  IMB_alloc_float_pixels(mask, 1);
+  memset(mask->float_buffer.data, 0, size_t(width) * height * sizeof(float));
+  runtime->paint_selection_masks.add_new(tile_number, mask);
+  return mask;
+}
+
+void BKE_image_paint_selection_mask_free(Image *image)
+{
+  bke::ImageRuntime *runtime = image->runtime;
+  for (ImBuf *mask : runtime->paint_selection_masks.values()) {
+    IMB_freeImBuf(mask);
+  }
+  runtime->paint_selection_masks.clear();
+
+  for (gpu::Texture *tex : runtime->paint_selection_mask_textures.values()) {
+    GPU_texture_free(tex);
+  }
+  runtime->paint_selection_mask_textures.clear();
+}
+
+void BKE_image_paint_selection_mask_tile_free(Image *image, int tile_number)
+{
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+  if (mask_ptr) {
+    IMB_freeImBuf(*mask_ptr);
+    runtime->paint_selection_masks.remove(tile_number);
+  }
+  gpu::Texture **tex_ptr = runtime->paint_selection_mask_textures.lookup_ptr(tile_number);
+  if (tex_ptr) {
+    GPU_texture_free(*tex_ptr);
+    runtime->paint_selection_mask_textures.remove(tile_number);
+  }
+}
+
+/** \} */
+
 static void image_init_data(ID *id)
 {
   Image *image = id_cast<Image *>(id);
@@ -210,6 +266,7 @@ static void image_free_data(ID *id)
 
   BLI_freelistN(&image->tiles);
 
+  BKE_image_paint_selection_mask_free(image);
   image_runtime_free_data(image);
   MEM_delete(image->runtime);
 }

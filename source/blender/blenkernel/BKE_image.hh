@@ -10,6 +10,7 @@
 #include "DNA_listBase.h"
 
 #include "BLI_compiler_attrs.h"
+#include "BLI_map.hh"
 #include "BLI_mutex.hh"
 
 #include <cstdint>
@@ -89,6 +90,10 @@ struct ImageRuntime {
 
   float view_offset[2] = {};
   float view_zoom = 1.0f;
+
+  /* Per-tile selection masks for 2D image paint (runtime only). */
+  Map<int, ImBuf *> paint_selection_masks;
+  Map<int, gpu::Texture *> paint_selection_mask_textures;
 };
 
 }  // namespace bke
@@ -107,6 +112,11 @@ void BKE_image_free_gputextures(Image *ima);
  * \note Call from library.
  */
 void BKE_image_free_data(Image *image);
+
+/* Image paint selection masks (runtime, per-tile). */
+ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int width, int height);
+void BKE_image_paint_selection_mask_free(Image *image);
+void BKE_image_paint_selection_mask_tile_free(Image *image, int tile_number);
 
 typedef void(StampCallback)(void *data,
                             const char *propname,

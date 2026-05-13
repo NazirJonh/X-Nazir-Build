@@ -110,6 +110,9 @@
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
+
+#include "GPU_texture.hh"
 
 #include "DRW_engine.hh"
 
@@ -1761,6 +1764,8 @@ ToolSettings *BKE_toolsettings_copy(ToolSettings *toolsettings, const int flag)
       toolsettings->unified_paint_settings.curve_rand_value);
 
   BKE_paint_copy(&toolsettings->imapaint.paint, &ts->imapaint.paint, flag);
+  /* Runtime selection masks live in ImageRuntime, not copied with scene. */
+  ts->imapaint.use_selection_mask = 0;
   ts->particle.paintcursor = nullptr;
   ts->particle.scene = nullptr;
   ts->particle.object = nullptr;

@@ -2805,6 +2805,10 @@ def km_image_paint(params):
         op_tool_cycle("builtin.annotate", {"type": 'D', "value": 'PRESS'}),
         op_asset_shelf_popup("VIEW3D_AST_brush_texture_paint", {"type": 'B', "value": 'PRESS'}),
         op_asset_shelf_popup("IMAGE_AST_brush_paint", {"type": 'B', "value": 'PRESS'}),
+        # Copy selection.
+        ("PAINT_OT_image_select_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
+        # Paste selection.
+        ("PAINT_OT_image_select_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
     ])
 
     return keymap

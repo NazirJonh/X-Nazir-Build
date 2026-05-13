@@ -38,6 +38,7 @@
 #include "ED_screen.hh"
 
 #include "WM_api.hh"
+#include "WM_keymap.hh"
 #include "WM_types.hh"
 
 #include "RNA_access.hh"
@@ -670,6 +671,22 @@ void ED_operatortypes_paint()
   WM_operatortype_append(mask::PAINT_OT_mask_box_gesture);
   WM_operatortype_append(mask::PAINT_OT_mask_line_gesture);
   WM_operatortype_append(mask::PAINT_OT_mask_polyline_gesture);
+
+  /* image selection */
+  WM_operatortype_append(PAINT_OT_image_select_all);
+  WM_operatortype_append(PAINT_OT_image_select_none);
+  WM_operatortype_append(PAINT_OT_image_select_box);
+  WM_operatortype_append(PAINT_OT_image_select_lasso);
+  WM_operatortype_append(PAINT_OT_image_select_circle);
+  WM_operatortype_append(PAINT_OT_image_select_invert);
+  WM_operatortype_append(PAINT_OT_image_select_move);
+  WM_operatortype_append(PAINT_OT_image_select_move_confirm);
+  WM_operatortype_append(PAINT_OT_image_select_move_cancel);
+  WM_operatortype_append(PAINT_OT_image_select_move_undo_step);
+  WM_operatortype_append(PAINT_OT_image_select_copy);
+  WM_operatortype_append(PAINT_OT_image_select_paste);
+
+  image_paint_clipboard_ensure_atexit_handler();
 }
 
 void ED_keymap_paint(wmKeyConfig *keyconf)

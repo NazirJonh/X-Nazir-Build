@@ -81,6 +81,19 @@ void ED_image_undo_push_begin_with_image_all_udims(const char *name,
 void ED_image_undo_push(Image *image, ImBuf *ibuf, ImageUser *iuser, ImageUndoStep *us);
 void ED_image_undo_push_end();
 /**
+ * Capture a snapshot of the selection mask for `tile_number` into the currently open image undo
+ * step. Must be called after #ED_image_undo_push_begin* and before any mask modifications.
+ * On undo, the mask is restored alongside the pixel data.
+ */
+void ED_image_undo_capture_selection_mask(Image *image, int tile_number);
+/**
+ * Begin an image undo step that records only selection mask changes (no pixel data).
+ * Captures the pre-operation mask state for all tiles of `image`.
+ * The caller must call #ED_image_undo_push_end when the mask modification is complete.
+ * Do NOT combine with OPTYPE_UNDO on the operator — the step is managed manually.
+ */
+void ED_image_undo_push_begin_selection(const char *name, Image *image);
+/**
  * Restore painting image to previous state. Used for anchored and drag-dot style brushes.
  */
 void ED_image_undo_restore(UndoStep *us);

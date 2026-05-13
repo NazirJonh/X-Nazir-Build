@@ -65,6 +65,7 @@ class PaintModeData;
 struct PaintStroke;
 struct PaintSample;
 struct StrokeCache;
+
 }  // namespace ed::sculpt_paint
 
 namespace ocio {
@@ -518,6 +519,21 @@ void PAINT_OT_image_from_view(wmOperatorType *ot);
 void PAINT_OT_add_texture_paint_slot(wmOperatorType *ot);
 void PAINT_OT_image_paint(wmOperatorType *ot);
 void PAINT_OT_add_simple_uvs(wmOperatorType *ot);
+
+/* paint_image_2d_select.cc */
+void PAINT_OT_image_select_all(wmOperatorType *ot);
+void PAINT_OT_image_select_none(wmOperatorType *ot);
+void PAINT_OT_image_select_box(wmOperatorType *ot);
+void PAINT_OT_image_select_lasso(wmOperatorType *ot);
+void PAINT_OT_image_select_circle(wmOperatorType *ot);
+void PAINT_OT_image_select_invert(wmOperatorType *ot);
+void PAINT_OT_image_select_move(wmOperatorType *ot);
+void PAINT_OT_image_select_move_confirm(wmOperatorType *ot);
+void PAINT_OT_image_select_move_cancel(wmOperatorType *ot);
+void PAINT_OT_image_select_move_undo_step(wmOperatorType *ot);
+void PAINT_OT_image_select_copy(wmOperatorType *ot);
+void PAINT_OT_image_select_paste(wmOperatorType *ot);
+void image_paint_clipboard_ensure_atexit_handler();
 
 /* paint_image_2d_curve_mask.cc */
 

@@ -24,7 +24,9 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_listbase_wrapper.hh"
 #include "BLI_map.hh"
+#include "BLI_vector.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
 #include "BLI_string.h"
@@ -733,6 +735,14 @@ static UndoImageHandle *uhandle_ensure(ListBaseT<UndoImageHandle> *undo_handles,
 /** \name Implements ED Undo System
  * \{ */
 
+/** Snapshot of a single selection mask tile, capturing both pre- and post-operation states. */
+struct SelectionMaskSnapshot {
+  Image *image;
+  int tile_number;
+  ImBuf *pre_mask_ibuf;  /* State before the operation; nullptr if mask didn't exist. */
+  ImBuf *post_mask_ibuf; /* State after the operation; filled during encode. */
+};
+
 struct ImageUndoStep {
   UndoStep step;
 
@@ -746,6 +756,13 @@ struct ImageUndoStep {
 
   bool is_encode_init;
   PaintMode paint_mode;
+
+  /**
+   * Optional selection-mask snapshots captured before the operation.
+   * Populated via #ED_image_undo_capture_selection_mask.
+   * Restored during undo alongside the pixel data.
+   */
+  blender::Vector<SelectionMaskSnapshot> selection_mask_snapshots;
 };
 
 /**
@@ -777,10 +794,12 @@ static UndoImageBuf *ubuf_lookup_from_reference(ImageUndoStep *us_prev,
 static void image_undosys_step_encode_init(bContext * /*C*/, UndoStep *us_p)
 {
   ImageUndoStep *us = reinterpret_cast<ImageUndoStep *>(us_p);
-  /* dummy, memory is cleared anyway. */
+  /* Memory is zero-initialized by MEM_new_zeroed, so non-trivially constructible C++ members
+   * must be explicitly constructed here via placement new. */
   us->is_encode_init = true;
   BLI_listbase_clear(&us->handles);
   us->paint_tile_map = MEM_new<PaintTileMap>(__func__);
+  new (&us->selection_mask_snapshots) blender::Vector<SelectionMaskSnapshot>();
 }
 
 static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *us_p)
@@ -903,6 +922,16 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
     if (false) {
       uhandle_restore_list(&us->handles, false);
     }
+
+    /* Capture post-operation mask state for redo support. */
+    for (SelectionMaskSnapshot &snap : us->selection_mask_snapshots) {
+      if (!snap.image || !snap.image->runtime) {
+        continue;
+      }
+      BLI_assert(snap.post_mask_ibuf == nullptr);
+      ImBuf **mask_ptr = snap.image->runtime->paint_selection_masks.lookup_ptr(snap.tile_number);
+      snap.post_mask_ibuf = (mask_ptr && *mask_ptr) ? IMB_dupImBuf(*mask_ptr) : nullptr;
+    }
   }
   else {
     BLI_assert(C != nullptr);
@@ -917,21 +946,101 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
   return true;
 }
 
-static void image_undosys_step_decode_undo_impl(ImageUndoStep *us, bool is_final)
+/** Restore a selection mask snapshot (either pre or post) into the image runtime map. */
+static void selection_mask_snapshot_restore(const SelectionMaskSnapshot &entry, ImBuf *src_ibuf)
+{
+  if (!entry.image || !entry.image->runtime) {
+    return;
+  }
+  auto *runtime = entry.image->runtime;
+  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(entry.tile_number);
+
+  if (src_ibuf) {
+    if (mask_ptr && *mask_ptr) {
+      ImBuf *cur = *mask_ptr;
+      if (cur->float_buffer.data && src_ibuf->float_buffer.data) {
+        if (cur->x == src_ibuf->x && cur->y == src_ibuf->y) {
+          memcpy(cur->float_buffer.data,
+                 src_ibuf->float_buffer.data,
+                 sizeof(float) * cur->x * cur->y);
+          cur->userflags |= IB_DISPLAY_BUFFER_INVALID;
+        }
+        else {
+          /* Dimensions changed — replace the stored ImBuf entirely. */
+          IMB_freeImBuf(cur);
+          *mask_ptr = IMB_dupImBuf(src_ibuf);
+        }
+      }
+    }
+    else {
+      /* Mask was absent — recreate it from the snapshot. */
+      runtime->paint_selection_masks.add(entry.tile_number, IMB_dupImBuf(src_ibuf));
+    }
+  }
+  else {
+    /* Snapshot had no mask — remove whatever currently exists. */
+    if (mask_ptr && *mask_ptr) {
+      IMB_freeImBuf(*mask_ptr);
+      runtime->paint_selection_masks.remove(entry.tile_number);
+    }
+  }
+
+  DEG_id_tag_update(&entry.image->id, 0);
+}
+
+/** After restoring mask snapshots, sync #ImagePaintSettings::use_selection_mask for context. */
+static void selection_mask_update_use_flag(bContext *C,
+                                           const blender::Vector<SelectionMaskSnapshot> &snapshots)
+{
+  if (snapshots.is_empty()) {
+    return;
+  }
+  Scene *scene = CTX_data_scene(C);
+  if (!scene) {
+    return;
+  }
+  /* Enable the flag if any image still has a mask, disable if all are gone. */
+  bool any_mask = false;
+  for (const SelectionMaskSnapshot &entry : snapshots) {
+    if (entry.image && entry.image->runtime &&
+        !entry.image->runtime->paint_selection_masks.is_empty())
+    {
+      any_mask = true;
+      break;
+    }
+  }
+  scene->toolsettings->imapaint.use_selection_mask = any_mask ? 1 : 0;
+}
+
+static void image_undosys_step_decode_undo_impl(bContext *C, ImageUndoStep *us, bool is_final)
 {
   BLI_assert(us->step.is_applied == true);
   uhandle_restore_list(&us->handles, !is_final);
+
+  /* Restore the pre-operation mask state for each snapshot. */
+  for (const SelectionMaskSnapshot &entry : us->selection_mask_snapshots) {
+    selection_mask_snapshot_restore(entry, entry.pre_mask_ibuf);
+  }
+  selection_mask_update_use_flag(C, us->selection_mask_snapshots);
+
   us->step.is_applied = false;
 }
 
-static void image_undosys_step_decode_redo_impl(ImageUndoStep *us)
+static void image_undosys_step_decode_redo_impl(bContext *C, ImageUndoStep *us)
 {
   BLI_assert(us->step.is_applied == false);
   uhandle_restore_list(&us->handles, false);
+
+  /* Restore the post-operation mask state for each snapshot. */
+  for (const SelectionMaskSnapshot &entry : us->selection_mask_snapshots) {
+    selection_mask_snapshot_restore(entry, entry.post_mask_ibuf);
+  }
+  selection_mask_update_use_flag(C, us->selection_mask_snapshots);
+
   us->step.is_applied = true;
 }
 
-static void image_undosys_step_decode_undo(ImageUndoStep *us, bool is_final)
+static void image_undosys_step_decode_undo(bContext *C, ImageUndoStep *us, bool is_final)
 {
   /* Walk forward over any applied steps of same type,
    * then walk back in the next loop, un-applying them. */
@@ -944,7 +1053,7 @@ static void image_undosys_step_decode_undo(ImageUndoStep *us, bool is_final)
   }
   while (us_iter != us || (!is_final && us_iter == us)) {
     BLI_assert(us_iter->step.type == us->step.type); /* Previous loop ensures this. */
-    image_undosys_step_decode_undo_impl(us_iter, is_final);
+    image_undosys_step_decode_undo_impl(C, us_iter, is_final);
     if (us_iter == us) {
       break;
     }
@@ -952,7 +1061,7 @@ static void image_undosys_step_decode_undo(ImageUndoStep *us, bool is_final)
   }
 }
 
-static void image_undosys_step_decode_redo(ImageUndoStep *us)
+static void image_undosys_step_decode_redo(bContext *C, ImageUndoStep *us)
 {
   ImageUndoStep *us_iter = us;
   while (us_iter->step.prev && (us_iter->step.prev->type == us_iter->step.type)) {
@@ -962,7 +1071,7 @@ static void image_undosys_step_decode_redo(ImageUndoStep *us)
     us_iter = reinterpret_cast<ImageUndoStep *>(us_iter->step.prev);
   }
   while (us_iter && (us_iter->step.is_applied == false)) {
-    image_undosys_step_decode_redo_impl(us_iter);
+    image_undosys_step_decode_redo_impl(C, us_iter);
     if (us_iter == us) {
       break;
     }
@@ -978,10 +1087,10 @@ static void image_undosys_step_decode(
 
   ImageUndoStep *us = reinterpret_cast<ImageUndoStep *>(us_p);
   if (dir == STEP_UNDO) {
-    image_undosys_step_decode_undo(us, is_final);
+    image_undosys_step_decode_undo(C, us, is_final);
   }
   else if (dir == STEP_REDO) {
-    image_undosys_step_decode_redo(us);
+    image_undosys_step_decode_redo(C, us);
   }
 
   if (us->paint_mode == PaintMode::Texture3D) {
@@ -1011,6 +1120,20 @@ static void image_undosys_step_free(UndoStep *us_p)
   /* Typically this map will have been cleared. */
   MEM_delete(us->paint_tile_map);
   us->paint_tile_map = nullptr;
+
+  for (SelectionMaskSnapshot &entry : us->selection_mask_snapshots) {
+    if (entry.pre_mask_ibuf) {
+      IMB_freeImBuf(entry.pre_mask_ibuf);
+      entry.pre_mask_ibuf = nullptr;
+    }
+    if (entry.post_mask_ibuf) {
+      IMB_freeImBuf(entry.post_mask_ibuf);
+      entry.post_mask_ibuf = nullptr;
+    }
+  }
+  /* Explicitly destroy the vector: MEM_delete(us) casts to UndoStep* and will not reach
+   * ImageUndoStep's subobject destructors. */
+  us->selection_mask_snapshots.~Vector();
 }
 
 static void image_undosys_foreach_ID_ref(UndoStep *us_p,
@@ -1149,6 +1272,35 @@ void ED_image_undo_push(Image *image, ImBuf *ibuf, ImageUser *iuser, ImageUndoSt
   }
   else {
     ubuf_from_image_all_tiles(ubuf_pre, ibuf);
+  }
+}
+
+void ED_image_undo_capture_selection_mask(Image *image, int tile_number)
+{
+  UndoStack *ustack = ED_undo_stack_get();
+  UndoStep *us_p = ustack->step_init;
+  if (!us_p || us_p->type != BKE_UNDOSYS_TYPE_IMAGE) {
+    return;
+  }
+  ImageUndoStep *us = reinterpret_cast<ImageUndoStep *>(us_p);
+
+  if (!image || !image->runtime) {
+    return;
+  }
+
+  ImBuf **mask_ptr = image->runtime->paint_selection_masks.lookup_ptr(tile_number);
+  ImBuf *pre_snapshot = (mask_ptr && *mask_ptr) ? IMB_dupImBuf(*mask_ptr) : nullptr;
+  us->selection_mask_snapshots.append({image, tile_number, pre_snapshot, nullptr});
+}
+
+void ED_image_undo_push_begin_selection(const char *name, Image *image)
+{
+  image_undo_push_begin(name, PaintMode::Texture2D);
+
+  /* Capture the pre-operation mask state for all tiles so undo can restore them.
+   * The post-state is captured later in image_undosys_step_encode (called from push_end). */
+  for (ImageTile *tile : ListBaseWrapper<ImageTile>(image->tiles)) {
+    ED_image_undo_capture_selection_mask(image, tile->tile_number);
   }
 }
 

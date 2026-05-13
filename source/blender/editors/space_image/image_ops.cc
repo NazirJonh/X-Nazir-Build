@@ -3302,6 +3302,166 @@ void IMAGE_OT_invert(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Crop Selection Operator
+ * \{ */
+
+/* Computes bounding box of selected pixels in a 1-channel float mask ImBuf.
+ * Returns false if the mask is null or has no selected pixels. */
+static bool image_selection_bounding_box(
+    const ImBuf *mask, int *r_x_min, int *r_y_min, int *r_x_max, int *r_y_max)
+{
+  if (!mask) {
+    return false;
+  }
+  const float *pixels = mask->float_data();
+  if (!pixels) {
+    return false;
+  }
+
+  *r_x_min = mask->x;
+  *r_y_min = mask->y;
+  *r_x_max = 0;
+  *r_y_max = 0;
+
+  for (int y = 0; y < mask->y; y++) {
+    for (int x = 0; x < mask->x; x++) {
+      if (pixels[y * mask->x + x] > 0.5f) {
+        *r_x_min = min_ii(*r_x_min, x);
+        *r_y_min = min_ii(*r_y_min, y);
+        *r_x_max = max_ii(*r_x_max, x + 1);
+        *r_y_max = max_ii(*r_y_max, y + 1);
+      }
+    }
+  }
+
+  return *r_x_max > *r_x_min && *r_y_max > *r_y_min;
+}
+
+static bool image_crop_selection_poll(bContext *C)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  if (!sima || sima->mode != SI_MODE_PAINT) {
+    return false;
+  }
+
+  Image *ima = image_from_context(C);
+  if (ima && !ID_IS_EDITABLE(&ima->id)) {
+    CTX_wm_operator_poll_msg_set(C, "Image is not editable");
+    return false;
+  }
+
+  ImageUser iuser = image_user_from_context_and_active_tile(C, ima);
+  if (!BKE_image_has_ibuf(ima, &iuser)) {
+    return false;
+  }
+
+  const Scene *scene = CTX_data_scene(C);
+  if (!scene || !scene->toolsettings->imapaint.use_selection_mask) {
+    CTX_wm_operator_poll_msg_set(C, "Selection mask is not active");
+    return false;
+  }
+
+  const ImageTile *active_tile = BKE_image_get_tile_from_iuser(ima, &iuser);
+  const int tile_number = active_tile ? active_tile->tile_number : 1001;
+  ImBuf **mask_ptr = ima->runtime->paint_selection_masks.lookup_ptr(tile_number);
+  if (!mask_ptr || !*mask_ptr) {
+    CTX_wm_operator_poll_msg_set(C, "No selection on active tile");
+    return false;
+  }
+
+  return true;
+}
+
+static wmOperatorStatus image_crop_selection_exec(bContext *C, wmOperator *op)
+{
+  Image *ima = image_from_context(C);
+  ImageUser iuser = image_user_from_context_and_active_tile(C, ima);
+
+  /* Resolve tile_number: iuser.tile == 0 for non-UDIM images; first tile is always 1001. */
+  const ImageTile *active_tile = BKE_image_get_tile_from_iuser(ima, &iuser);
+  const int tile_number = active_tile ? active_tile->tile_number : 1001;
+
+  /* Get the selection mask for the active tile. */
+  ImBuf **mask_ptr = ima->runtime->paint_selection_masks.lookup_ptr(tile_number);
+  if (!mask_ptr || !*mask_ptr) {
+    BKE_report(op->reports, RPT_ERROR, "No selection on active tile");
+    return OPERATOR_CANCELLED;
+  }
+  ImBuf *mask = *mask_ptr;
+
+  /* Find bounding box of the selection. */
+  int x_min, y_min, x_max, y_max;
+  if (!image_selection_bounding_box(mask, &x_min, &y_min, &x_max, &y_max)) {
+    BKE_report(op->reports, RPT_ERROR, "Selection is empty");
+    return OPERATOR_CANCELLED;
+  }
+
+  const int new_w = x_max - x_min;
+  const int new_h = y_max - y_min;
+
+  /* Acquire image buffer. */
+  ImBuf *ibuf = BKE_image_acquire_ibuf(ima, &iuser, nullptr);
+  if (!ibuf) {
+    BKE_report(op->reports, RPT_ERROR, "Could not acquire image buffer");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Validate bounding box against image dimensions. */
+  if (x_min >= ibuf->x || y_min >= ibuf->y || new_w <= 0 || new_h <= 0) {
+    BKE_image_release_ibuf(ima, ibuf, nullptr);
+    BKE_report(op->reports, RPT_ERROR, "Selection bounding box is out of range");
+    return OPERATOR_CANCELLED;
+  }
+
+  ED_imapaint_clear_partial_redraw();
+  ED_image_undo_push_begin_with_image(op->type->name, ima, ibuf, &iuser);
+
+  ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
+  IMB_crop(ibuf, int2{x_min, y_min}, int2{new_w, new_h});
+  BKE_image_mark_dirty(ima, ibuf);
+
+  /* Replace the old mask (now mismatched in size) with a full selection of the cropped
+   * image dimensions. The crop region was derived from the selection, so the entire new
+   * image is selected — this preserves the visible dash line after crop. */
+  BKE_image_paint_selection_mask_tile_free(ima, tile_number);
+  ImBuf *new_mask = BKE_image_paint_selection_mask_get(ima, tile_number, ibuf->x, ibuf->y);
+  float *mask_data = new_mask->float_buffer.data;
+  const int mask_total = new_mask->x * new_mask->y;
+  for (int i = 0; i < mask_total; i++) {
+    mask_data[i] = 1.0f;
+  }
+
+  BKE_image_release_ibuf(ima, ibuf, nullptr);
+  ED_image_undo_push_end();
+
+  Scene *scene = CTX_data_scene(C);
+
+  BKE_image_partial_update_mark_full_update(ima);
+  DEG_id_tag_update(&ima->id, 0);
+  DEG_id_tag_update(&scene->id, ID_RECALC_EDITORS);
+  WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
+
+  return OPERATOR_FINISHED;
+}
+
+void IMAGE_OT_crop_selection(wmOperatorType *ot)
+{
+  /* identifiers */
+  ot->name = "Crop to Selection";
+  ot->idname = "IMAGE_OT_crop_selection";
+  ot->description = "Crop the image to the bounding box of the active paint selection";
+
+  /* API callbacks. */
+  ot->exec = image_crop_selection_exec;
+  ot->poll = image_crop_selection_poll;
+
+  /* flags */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Scale Operator
  * \{ */
 

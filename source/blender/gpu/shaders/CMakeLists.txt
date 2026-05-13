@@ -46,6 +46,7 @@ set(SRC_GLSL_VERT
 
 set(SRC_GLSL_FRAG
   gpu_shader_2D_area_borders_frag.glsl
+  gpu_shader_2D_line_dashed_animated_frag.glsl
   gpu_shader_2D_line_dashed_frag.glsl
   gpu_shader_2D_node_socket_frag.glsl
   gpu_shader_2D_widget_shadow_frag.glsl

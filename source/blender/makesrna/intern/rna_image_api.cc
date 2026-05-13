@@ -256,6 +256,58 @@ static void rna_Image_buffers_free(Image *image)
   BKE_image_free_buffers_ex(image, true);
 }
 
+static void rna_Image_get_selection_bounding_box(Image *image,
+                                                 ReportList * /*reports*/,
+                                                 int tile_number,
+                                                 int r_bbox[4],
+                                                 bool *r_has_selection)
+{
+  if (!image->runtime) {
+    *r_has_selection = false;
+    r_bbox[0] = r_bbox[1] = r_bbox[2] = r_bbox[3] = 0;
+    return;
+  }
+
+  ImBuf **mask_ptr = image->runtime->paint_selection_masks.lookup_ptr(tile_number);
+  if (!mask_ptr || !*mask_ptr) {
+    *r_has_selection = false;
+    r_bbox[0] = r_bbox[1] = r_bbox[2] = r_bbox[3] = 0;
+    return;
+  }
+
+  const ImBuf *mask = *mask_ptr;
+  const float *pixels = mask->float_data();
+  if (!pixels) {
+    *r_has_selection = false;
+    r_bbox[0] = r_bbox[1] = r_bbox[2] = r_bbox[3] = 0;
+    return;
+  }
+
+  int x_min = mask->x, y_min = mask->y, x_max = 0, y_max = 0;
+  for (int y = 0; y < mask->y; y++) {
+    for (int x = 0; x < mask->x; x++) {
+      if (pixels[y * mask->x + x] > 0.5f) {
+        x_min = min_ii(x_min, x);
+        y_min = min_ii(y_min, y);
+        x_max = max_ii(x_max, x + 1);
+        y_max = max_ii(y_max, y + 1);
+      }
+    }
+  }
+
+  if (x_max > x_min && y_max > y_min) {
+    *r_has_selection = true;
+    r_bbox[0] = x_min;
+    r_bbox[1] = y_min;
+    r_bbox[2] = x_max;
+    r_bbox[3] = y_max;
+  }
+  else {
+    *r_has_selection = false;
+    r_bbox[0] = r_bbox[1] = r_bbox[2] = r_bbox[3] = 0;
+  }
+}
+
 }  // namespace blender
 
 #else
@@ -358,6 +410,20 @@ void RNA_api_image(StructRNA *srna)
   RNA_def_int(func, "frame", 0, 0, INT_MAX, "Frame", "Frame (for image sequences)", 0, INT_MAX);
   RNA_def_int(
       func, "tile_index", 0, 0, INT_MAX, "Tile", "Tile index (for tiled images)", 0, INT_MAX);
+
+  func = RNA_def_function(
+      srna, "get_selection_bounding_box", "rna_Image_get_selection_bounding_box");
+  RNA_def_function_ui_description(
+      func,
+      "Get the bounding box in pixels of the active paint selection mask for the given UDIM tile");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_int(func, "tile", 1001, 1001, 2000, "Tile", "UDIM tile number", 1001, 2000);
+  parm = RNA_def_int_array(func, "bbox", 4, nullptr, 0, INT_MAX, "Bounding Box",
+                           "Pixel bounding box [x_min, y_min, x_max, y_max]", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_OUTPUT);
+  parm = RNA_def_boolean(func, "has_selection", false, "Has Selection",
+                         "True if there is an active selection on the tile");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_OUTPUT);
 
   func = RNA_def_function(srna, "gl_touch", "rna_Image_gl_touch");
   RNA_def_function_ui_description(

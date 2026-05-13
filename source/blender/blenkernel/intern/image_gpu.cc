@@ -891,17 +891,6 @@ static void gpu_texture_update_from_ibuf(
     MEM_delete(rect_float);
   }
 
-  /* Regenerate the mipmap chain only for full-texture updates. Partial updates (e.g. brush
-   * strokes during texture painting) skip mipmap generation to avoid the cost of creating a
-   * temporary same-size texture for SRGB conversion — at 8K that is 256 MB per update.
-   * Mipmaps are marked incomplete so the next full update will regenerate them correctly. */
-  if (x == 0 && y == 0 && w == ibuf->x && h == ibuf->y) {
-    GPU_texture_update_mipmap_chain(tex);
-    ima->runtime->gpuflag |= IMA_GPU_MIPMAP_COMPLETE;
-  }
-  else {
-    ima->runtime->gpuflag &= ~IMA_GPU_MIPMAP_COMPLETE;
-  }
 
   GPU_texture_unbind(tex);
 }

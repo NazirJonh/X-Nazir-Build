@@ -426,8 +426,13 @@ static bool rna_TextureCapabilities_has_texture_angle_source_get(PointerRNA *ptr
 static bool rna_BrushCapabilities_has_overlay_get(PointerRNA *ptr)
 {
   Brush *br = static_cast<Brush *>(ptr->data);
-  return ELEM(
-      br->mtex.brush_map_mode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL);
+  return ELEM(br->mtex.brush_map_mode,
+              MTEX_MAP_MODE_VIEW,
+              MTEX_MAP_MODE_TILED,
+              MTEX_MAP_MODE_3D,
+              MTEX_MAP_MODE_AREA,
+              MTEX_MAP_MODE_RANDOM,
+              MTEX_MAP_MODE_STENCIL);
 }
 
 static bool rna_BrushCapabilities_has_random_texture_angle_get(PointerRNA *ptr)

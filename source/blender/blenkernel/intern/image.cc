@@ -137,6 +137,258 @@ static void image_runtime_free_data(Image *image)
   BKE_image_partial_update_register_free(image);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Image Paint Selection Masks (runtime, per-tile)
+ * \{ */
+
+ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int width, int height)
+{
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+  if (mask_ptr) {
+    ImBuf *mask = *mask_ptr;
+    if (mask->x == width && mask->y == height) {
+      return mask;
+    }
+    /* Size changed, free old mask. */
+    IMB_freeImBuf(mask);
+    runtime->paint_selection_masks.remove(tile_number);
+  }
+
+  ImBuf *mask = IMB_allocImBuf(width, height, ImBufFlags::Zero);
+  IMB_alloc_float_pixels(mask, 1);
+  memset(mask->float_data_for_write(), 0, size_t(width) * height * sizeof(float));
+  runtime->paint_selection_masks.add_new(tile_number, mask);
+  return mask;
+}
+
+void BKE_image_paint_selection_mask_free(Image *image)
+{
+  bke::ImageRuntime *runtime = image->runtime;
+  for (ImBuf *mask : runtime->paint_selection_masks.values()) {
+    IMB_freeImBuf(mask);
+  }
+  runtime->paint_selection_masks.clear();
+
+  for (gpu::Texture *tex : runtime->paint_selection_mask_textures.values()) {
+    GPU_texture_free(tex);
+  }
+  runtime->paint_selection_mask_textures.clear();
+}
+
+void BKE_image_paint_selection_mask_tile_free(Image *image, int tile_number)
+{
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+  if (mask_ptr) {
+    IMB_freeImBuf(*mask_ptr);
+    runtime->paint_selection_masks.remove(tile_number);
+  }
+  gpu::Texture **tex_ptr = runtime->paint_selection_mask_textures.lookup_ptr(tile_number);
+  if (tex_ptr) {
+    GPU_texture_free(*tex_ptr);
+    runtime->paint_selection_mask_textures.remove(tile_number);
+  }
+}
+
+ImBuf *BKE_image_paint_selection_mask_lookup(Image *image, int tile_number)
+{
+  if (!image || !image->runtime) {
+    return nullptr;
+  }
+  ImBuf **mask_ptr = image->runtime->paint_selection_masks.lookup_ptr(tile_number);
+  return mask_ptr ? *mask_ptr : nullptr;
+}
+
+static bool image_paint_selection_mask_imbuf_bounds(const ImBuf *mask, int r_min[2], int r_max[2])
+{
+  if (!mask) {
+    return false;
+  }
+  const float *pixels = mask->float_data();
+  if (!pixels) {
+    return false;
+  }
+
+  r_min[0] = mask->x;
+  r_min[1] = mask->y;
+  r_max[0] = 0;
+  r_max[1] = 0;
+
+  for (int y = 0; y < mask->y; y++) {
+    for (int x = 0; x < mask->x; x++) {
+      if (pixels[y * mask->x + x] > IMAGE_PAINT_SELECTION_MASK_THRESHOLD) {
+        r_min[0] = std::min(r_min[0], x);
+        r_min[1] = std::min(r_min[1], y);
+        r_max[0] = std::max(r_max[0], x + 1);
+        r_max[1] = std::max(r_max[1], y + 1);
+      }
+    }
+  }
+
+  return r_max[0] > r_min[0] && r_max[1] > r_min[1];
+}
+
+bool BKE_image_paint_selection_mask_bounds(
+    const Image *image, int tile_number, int r_min[2], int r_max[2])
+{
+  const ImBuf *mask = BKE_image_paint_selection_mask_lookup(
+      const_cast<Image *>(image), tile_number);
+  return image_paint_selection_mask_imbuf_bounds(mask, r_min, r_max);
+}
+
+float BKE_image_paint_selection_mask_sample(const Image *image, int tile_number, int x, int y)
+{
+  const ImBuf *mask = BKE_image_paint_selection_mask_lookup(
+      const_cast<Image *>(image), tile_number);
+  if (!mask) {
+    return 0.0f;
+  }
+  if (x < 0 || x >= mask->x || y < 0 || y >= mask->y) {
+    return 0.0f;
+  }
+  const float *pixels = mask->float_buffer.data;
+  if (!pixels) {
+    return 0.0f;
+  }
+  return pixels[size_t(y) * mask->x + x];
+}
+
+void BKE_image_paint_selection_mask_fill(Image *image, int tile_number, float value)
+{
+  ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  if (!mask) {
+    return;
+  }
+  float *data = mask->float_data_for_write();
+  if (!data) {
+    return;
+  }
+  const int total = mask->x * mask->y;
+  for (int i = 0; i < total; i++) {
+    data[i] = value;
+  }
+  mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
+}
+
+void BKE_image_paint_selection_mask_invert(Image *image, int tile_number)
+{
+  ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  if (!mask) {
+    return;
+  }
+  float *data = mask->float_data_for_write();
+  if (!data) {
+    return;
+  }
+  const int total = mask->x * mask->y;
+  for (int i = 0; i < total; i++) {
+    data[i] = 1.0f - data[i];
+  }
+  mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
+}
+
+void BKE_image_paint_selection_mask_merge(Image *image,
+                                          int tile_number,
+                                          const ImBuf *fragment_mask,
+                                          const int origin[2])
+{
+  ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  if (!mask || !fragment_mask) {
+    return;
+  }
+  float *mdata = mask->float_data_for_write();
+  const float *fmask = fragment_mask->float_buffer.data;
+  if (!mdata || !fmask) {
+    return;
+  }
+
+  const int ox = origin[0];
+  const int oy = origin[1];
+  for (int ly = 0; ly < fragment_mask->y; ly++) {
+    const int py = oy + ly;
+    if (py < 0 || py >= mask->y) {
+      continue;
+    }
+    for (int lx = 0; lx < fragment_mask->x; lx++) {
+      const int px = ox + lx;
+      if (px < 0 || px >= mask->x) {
+        continue;
+      }
+      mdata[py * mask->x + px] = fmask[ly * fragment_mask->x + lx];
+    }
+  }
+  mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
+}
+
+bool BKE_image_paint_selection_mask_has_any(const Image *image)
+{
+  if (!image || !image->runtime) {
+    return false;
+  }
+  return !image->runtime->paint_selection_masks.is_empty();
+}
+
+int BKE_image_paint_selection_mask_first_tile_with_selection(const Image *image)
+{
+  if (!image || !image->runtime) {
+    return 0;
+  }
+  for (const auto &item : image->runtime->paint_selection_masks.items()) {
+    int r_min[2], r_max[2];
+    if (image_paint_selection_mask_imbuf_bounds(item.value, r_min, r_max)) {
+      return item.key;
+    }
+  }
+  return 0;
+}
+
+ImBuf *BKE_image_paint_selection_mask_dup_tile(Image *image, int tile_number)
+{
+  ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  return mask ? IMB_dupImBuf(mask) : nullptr;
+}
+
+void BKE_image_paint_selection_mask_restore_tile(Image *image,
+                                                 int tile_number,
+                                                 const ImBuf *src_mask)
+{
+  if (!image || !image->runtime) {
+    return;
+  }
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+
+  if (src_mask) {
+    if (mask_ptr && *mask_ptr) {
+      ImBuf *cur = *mask_ptr;
+      if (cur->float_data() && src_mask->float_data()) {
+        if (cur->x == src_mask->x && cur->y == src_mask->y) {
+          memcpy(cur->float_data_for_write(),
+                 src_mask->float_data(),
+                 sizeof(float) * cur->x * cur->y);
+          cur->userflags |= IB_DISPLAY_BUFFER_INVALID;
+        }
+        else {
+          IMB_freeImBuf(cur);
+          *mask_ptr = IMB_dupImBuf(src_mask);
+        }
+      }
+    }
+    else {
+      runtime->paint_selection_masks.add(tile_number, IMB_dupImBuf(src_mask));
+    }
+  }
+  else {
+    if (mask_ptr && *mask_ptr) {
+      IMB_freeImBuf(*mask_ptr);
+      runtime->paint_selection_masks.remove(tile_number);
+    }
+  }
+}
+
+/** \} */
+
 static void image_init_data(ID *id)
 {
   Image *image = id_cast<Image *>(id);
@@ -210,6 +462,7 @@ static void image_free_data(ID *id)
 
   BLI_freelistN(&image->tiles);
 
+  BKE_image_paint_selection_mask_free(image);
   image_runtime_free_data(image);
   MEM_delete(image->runtime);
 }

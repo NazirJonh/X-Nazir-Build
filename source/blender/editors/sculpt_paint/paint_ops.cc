@@ -38,6 +38,7 @@
 #include "ED_screen.hh"
 
 #include "WM_api.hh"
+#include "WM_keymap.hh"
 #include "WM_types.hh"
 
 #include "RNA_access.hh"
@@ -670,6 +671,26 @@ void ED_operatortypes_paint()
   WM_operatortype_append(mask::PAINT_OT_mask_box_gesture);
   WM_operatortype_append(mask::PAINT_OT_mask_line_gesture);
   WM_operatortype_append(mask::PAINT_OT_mask_polyline_gesture);
+
+  /* image selection */
+  WM_operatortype_append(PAINT_OT_image_select_all);
+  WM_operatortype_append(PAINT_OT_image_select_none);
+  WM_operatortype_append(PAINT_OT_image_select_box);
+  WM_operatortype_append(PAINT_OT_image_select_lasso);
+  WM_operatortype_append(PAINT_OT_image_select_circle);
+  WM_operatortype_append(PAINT_OT_image_select_invert);
+  WM_operatortype_append(PAINT_OT_image_select_move);
+  WM_operatortype_append(PAINT_OT_image_select_move_confirm);
+  WM_operatortype_append(PAINT_OT_image_select_move_cancel);
+  WM_operatortype_append(PAINT_OT_image_select_move_undo_step);
+  WM_operatortype_append(PAINT_OT_image_select_copy);
+  WM_operatortype_append(PAINT_OT_image_select_paste);
+  WM_operatortype_append(PAINT_OT_image_select_transform);
+  WM_operatortype_append(PAINT_OT_image_select_transform_confirm);
+  WM_operatortype_append(PAINT_OT_image_select_transform_cancel);
+  WM_operatortype_append(PAINT_OT_image_select_transform_drag);
+
+  image_paint_clipboard_ensure_atexit_handler();
 }
 
 void ED_keymap_paint(wmKeyConfig *keyconf)
@@ -700,6 +721,28 @@ void ED_keymap_paint(wmKeyConfig *keyconf)
   /* Image/Texture Paint mode */
   keymap = WM_keymap_ensure(keyconf, "Image Paint", SPACE_EMPTY, RGN_TYPE_WINDOW);
   keymap->poll = image_texture_paint_poll;
+  {
+    KeyMapItem_Params params{};
+    params.value = KM_PRESS;
+    params.modifier = 0;
+    params.direction = KM_ANY;
+
+    /* Re-drag transform handles while floating; pass-through on miss for pan/zoom. */
+    params.type = LEFTMOUSE;
+    WM_keymap_add_item(keymap, "PAINT_OT_image_select_transform_drag", &params);
+    params.value = KM_PRESS_DRAG;
+    WM_keymap_add_item(keymap, "PAINT_OT_image_select_transform_drag", &params);
+    params.value = KM_PRESS;
+
+    params.type = EVT_RETKEY;
+    WM_keymap_add_item(keymap, "PAINT_OT_image_select_transform_confirm", &params);
+
+    params.type = EVT_PADENTER;
+    WM_keymap_add_item(keymap, "PAINT_OT_image_select_transform_confirm", &params);
+
+    params.type = EVT_ESCKEY;
+    WM_keymap_add_item(keymap, "PAINT_OT_image_select_transform_cancel", &params);
+  }
 
   /* face-mask mode */
   keymap = WM_keymap_ensure(

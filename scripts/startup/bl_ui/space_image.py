@@ -144,8 +144,21 @@ class IMAGE_MT_view_zoom(Menu):
 class IMAGE_MT_select(Menu):
     bl_label = "Select"
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
+        sima = context.space_data
+
+        if sima.mode == 'PAINT':
+            layout.operator("PAINT_OT_image_select_all", text="All")
+            layout.operator("PAINT_OT_image_select_none", text="None")
+            layout.operator("PAINT_OT_image_select_invert", text="Invert")
+            layout.separator()
+            layout.operator("PAINT_OT_image_select_move", text="Move Selection")
+            layout.operator("PAINT_OT_image_select_transform", text="Transform Selection")
+            layout.separator()
+            layout.operator("PAINT_OT_image_select_copy", text="Copy Selection")
+            layout.operator("PAINT_OT_image_select_paste", text="Paste Selection")
+            return
 
         layout.operator("uv.select_all", text="All").action = 'SELECT'
         layout.operator("uv.select_all", text="None").action = 'DESELECT'
@@ -251,6 +264,8 @@ class IMAGE_MT_image(Menu):
 
             layout.menu("IMAGE_MT_image_invert")
             layout.operator("image.resize", text="Resize")
+            if context.tool_settings.image_paint.use_selection_mask:
+                layout.operator("image.crop_selection", text="Crop to Selection")
             layout.menu("IMAGE_MT_image_transform")
 
             if ima.packed_file:
@@ -978,7 +993,7 @@ class IMAGE_MT_editor_menus(Menu):
 
         layout.menu("IMAGE_MT_view")
 
-        if show_uvedit:
+        if show_uvedit or sima.mode == 'PAINT':
             layout.menu("IMAGE_MT_select")
         if show_maskedit:
             layout.menu("MASK_MT_select")

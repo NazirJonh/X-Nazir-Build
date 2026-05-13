@@ -530,6 +530,7 @@ set(GLSL_SRC
   shaders/gpu_shader_2D_node_socket_vert.glsl
   shaders/gpu_shader_2D_nodelink.bsl.hh
   shaders/gpu_shader_2D_line_dashed_frag.glsl
+  shaders/gpu_shader_2D_line_dashed_animated_frag.glsl
   shaders/gpu_shader_2D_image_vert.glsl
   shaders/gpu_shader_2D_image_rect_vert.glsl
   shaders/gpu_shader_icon_multi_vert.glsl

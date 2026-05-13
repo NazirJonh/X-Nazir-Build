@@ -10,6 +10,7 @@
 #include "DNA_listBase.h"
 
 #include "BLI_compiler_attrs.h"
+#include "BLI_map.hh"
 #include "BLI_mutex.hh"
 
 #include "IMB_imbuf_enums.h"
@@ -91,6 +92,10 @@ struct ImageRuntime {
 
   float view_offset[2] = {};
   float view_zoom = 1.0f;
+
+  /* Per-tile selection masks for 2D image paint (runtime only). */
+  Map<int, ImBuf *> paint_selection_masks;
+  Map<int, gpu::Texture *> paint_selection_mask_textures;
 };
 
 }  // namespace bke
@@ -109,6 +114,32 @@ void BKE_image_free_gputextures(Image *ima);
  * \note Call from library.
  */
 void BKE_image_free_data(Image *image);
+
+/* Image paint selection masks (runtime, per-tile). */
+
+/** A mask pixel is considered selected when its value exceeds this threshold. */
+inline constexpr float IMAGE_PAINT_SELECTION_MASK_THRESHOLD = 0.5f;
+
+ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int width, int height);
+ImBuf *BKE_image_paint_selection_mask_lookup(Image *image, int tile_number);
+float BKE_image_paint_selection_mask_sample(const Image *image, int tile_number, int x, int y);
+bool BKE_image_paint_selection_mask_bounds(
+    const Image *image, int tile_number, int r_min[2], int r_max[2]);
+void BKE_image_paint_selection_mask_fill(Image *image, int tile_number, float value);
+void BKE_image_paint_selection_mask_invert(Image *image, int tile_number);
+void BKE_image_paint_selection_mask_merge(Image *image,
+                                          int tile_number,
+                                          const ImBuf *fragment_mask,
+                                          const int origin[2]);
+bool BKE_image_paint_selection_mask_has_any(const Image *image);
+/** First UDIM tile number that has a non-empty selection, or 0 if none. */
+int BKE_image_paint_selection_mask_first_tile_with_selection(const Image *image);
+ImBuf *BKE_image_paint_selection_mask_dup_tile(Image *image, int tile_number);
+void BKE_image_paint_selection_mask_restore_tile(Image *image,
+                                                 int tile_number,
+                                                 const ImBuf *src_mask);
+void BKE_image_paint_selection_mask_free(Image *image);
+void BKE_image_paint_selection_mask_tile_free(Image *image, int tile_number);
 
 typedef void(StampCallback)(void *data,
                             const char *propname,

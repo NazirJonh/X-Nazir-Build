@@ -80,6 +80,7 @@ set(SRC
   mesh/paint_hide.cc
   mesh/paint_image.cc
   mesh/paint_image_2d.cc
+  mesh/paint_image_2d_select.cc
   mesh/paint_image_2d_curve_mask.cc
   mesh/paint_image_ops_paint.cc
   mesh/paint_image_proj.cc
@@ -183,6 +184,7 @@ set(SRC
 set(LIB
   PRIVATE bf::asset_system
   PRIVATE bf::blenkernel
+  PRIVATE bf::blenfont
   PRIVATE bf::animrig
   PRIVATE bf::blenlib
   PRIVATE bf::blenloader

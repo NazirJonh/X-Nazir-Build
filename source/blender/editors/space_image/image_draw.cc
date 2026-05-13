@@ -16,14 +16,18 @@
 #include "DNA_space_types.h"
 #include "DNA_view2d_types.h"
 
+#include "BLI_listbase_wrapper.hh"
 #include "BLI_rect.h"
 #include "BLI_string_utf8.h"
 #include "BLI_threads.h"
+#include "BLI_time.h"
 #include "BLI_utildefines.h"
 
 #include "IMB_cache.hh"
 #include "IMB_colormanagement.hh"
+#include "IMB_imbuf.hh"
 #include "IMB_imbuf_enums.h"
+#include "IMB_imbuf_types.hh"
 
 #include "BKE_context.hh"
 #include "BKE_image.hh"
@@ -34,6 +38,7 @@
 #include "GPU_immediate.hh"
 #include "GPU_immediate_util.hh"
 #include "GPU_matrix.hh"
+#include "GPU_shader.hh"
 #include "GPU_state.hh"
 
 #include "BLF_api.hh"
@@ -53,6 +58,8 @@
 #include "RE_pipeline.h"
 
 #include "image_intern.hh"
+
+#include "../sculpt_paint/paint_intern.hh"
 
 namespace blender {
 
@@ -435,6 +442,209 @@ void draw_image_sample_line(SpaceImage *sima)
   }
 }
 
+void draw_image_paint_selection_mask(const bContext *C, ARegion *region)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  if (sima->mode != SI_MODE_PAINT) {
+    return;
+  }
+
+  Image *ima = ED_space_image(sima);
+  if (!ima) {
+    return;
+  }
+
+  Scene *scene = CTX_data_scene(C);
+  ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
+  if (!imapaint->use_selection_mask) {
+    return;
+  }
+
+  GPU_matrix_push_projection();
+  ED_region_pixelspace(region);
+
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_LINE_DASHED_ANIMATED_COLOR);
+
+  float viewport_size[4];
+  GPU_viewport_size_get_f(viewport_size);
+  immUniform2f("viewport_size", viewport_size[2] / UI_SCALE_FAC, viewport_size[3] / UI_SCALE_FAC);
+  immUniform1i("colors_len", 2);
+  immUniform4f("color", 0.4f, 0.4f, 0.4f, 1.0f);
+  immUniform4f("color2", 1.0f, 1.0f, 1.0f, 1.0f);
+  immUniform1f("dash_width", 8.0f);
+
+  /* Animate dashes with clockwise movement for visual feedback of selection region.
+   * udash_factor is used as animation offset (0.0 to 1.0) to shift dash positions. */
+  float dash_offset = fmod(BLI_time_now_seconds() * 1.0f, 1.0f);
+  immUniform1f("udash_factor", dash_offset);
+
+  GPU_line_width(1.0f);
+  GPU_blend(GPU_BLEND_ALPHA);
+
+  for (ImageTile *tile : ListBaseWrapper<ImageTile>(ima->tiles)) {
+    ImBuf **mask_ptr = ima->runtime->paint_selection_masks.lookup_ptr(tile->tile_number);
+    if (!mask_ptr) {
+      continue;
+    }
+    ImBuf *mask = *mask_ptr;
+    const float *data = mask->float_buffer.data;
+    if (!data) {
+      continue;
+    }
+
+    const float uv_origin[2] = {float((tile->tile_number - 1001) % 10),
+                                float((tile->tile_number - 1001) / 10)};
+
+    immBeginAtMost(GPU_PRIM_LINES, size_t(mask->x + 1) * (mask->y + 1) * 2);
+
+    /* Horizontal edges тАФ borders between selected and unselected rows. */
+    for (int y = 0; y <= mask->y; y++) {
+      int x_start = -1;
+      bool current_bot_sel = false;
+      for (int x = 0; x <= mask->x; x++) {
+        bool is_edge = false;
+        bool bot_sel = false;
+        if (x < mask->x) {
+          if (y < mask->y) {
+            const bool top_sel = (y > 0) && (data[(y - 1) * mask->x + x] > 0.5f);
+            bot_sel = (data[y * mask->x + x] > 0.5f);
+            is_edge = (top_sel != bot_sel);
+          }
+          else {
+            /* Top image boundary: edge exists if the topmost pixel is selected. */
+            is_edge = (data[(y - 1) * mask->x + x] > 0.5f);
+            bot_sel = false;
+          }
+        }
+
+        if (is_edge) {
+          if (x_start < 0) {
+            x_start = x;
+            current_bot_sel = bot_sel;
+          }
+          else if (current_bot_sel != bot_sel) {
+            /* Edge type changed (Top vs Bottom), draw previous segment. */
+            const float fx1 = uv_origin[0] + (float(x_start) / float(mask->x));
+            const float fx2 = uv_origin[0] + (float(x) / float(mask->x));
+            const float fy = uv_origin[1] + (float(y) / float(mask->y));
+            int rx1, ry1, rx2, ry2;
+            ui::view2d_view_to_region(&region->v2d, fx1, fy, &rx1, &ry1);
+            ui::view2d_view_to_region(&region->v2d, fx2, fy, &rx2, &ry2);
+
+            if (current_bot_sel) {
+              immVertex2f(pos, float(rx2), float(ry2));
+              immVertex2f(pos, float(rx1), float(ry1));
+            }
+            else {
+              immVertex2f(pos, float(rx1), float(ry1));
+              immVertex2f(pos, float(rx2), float(ry2));
+            }
+
+            x_start = x;
+            current_bot_sel = bot_sel;
+          }
+        }
+        else if (x_start >= 0) {
+          const float fx1 = uv_origin[0] + (float(x_start) / float(mask->x));
+          const float fx2 = uv_origin[0] + (float(x) / float(mask->x));
+          const float fy = uv_origin[1] + (float(y) / float(mask->y));
+          int rx1, ry1, rx2, ry2;
+          ui::view2d_view_to_region(&region->v2d, fx1, fy, &rx1, &ry1);
+          ui::view2d_view_to_region(&region->v2d, fx2, fy, &rx2, &ry2);
+
+          if (current_bot_sel) {
+            immVertex2f(pos, float(rx2), float(ry2));
+            immVertex2f(pos, float(rx1), float(ry1));
+          }
+          else {
+            immVertex2f(pos, float(rx1), float(ry1));
+            immVertex2f(pos, float(rx2), float(ry2));
+          }
+          x_start = -1;
+        }
+      }
+    }
+
+    /* Vertical edges тАФ borders between selected and unselected columns. */
+    for (int x = 0; x <= mask->x; x++) {
+      int y_start = -1;
+      bool current_right_sel = false;
+      for (int y = 0; y <= mask->y; y++) {
+        bool is_edge = false;
+        bool right_sel = false;
+        if (y < mask->y) {
+          if (x < mask->x) {
+            const bool left_sel = (x > 0) && (data[y * mask->x + (x - 1)] > 0.5f);
+            right_sel = (data[y * mask->x + x] > 0.5f);
+            is_edge = (left_sel != right_sel);
+          }
+          else {
+            /* Right image boundary: edge exists if the rightmost pixel is selected. */
+            is_edge = (data[y * mask->x + (x - 1)] > 0.5f);
+            right_sel = false;
+          }
+        }
+
+        if (is_edge) {
+          if (y_start < 0) {
+            y_start = y;
+            current_right_sel = right_sel;
+          }
+          else if (current_right_sel != right_sel) {
+            /* Edge type changed (Left vs Right), draw previous segment. */
+            const float fx = uv_origin[0] + (float(x) / float(mask->x));
+            const float fy1 = uv_origin[1] + (float(y_start) / float(mask->y));
+            const float fy2 = uv_origin[1] + (float(y) / float(mask->y));
+            int rx1, ry1, rx2, ry2;
+            ui::view2d_view_to_region(&region->v2d, fx, fy1, &rx1, &ry1);
+            ui::view2d_view_to_region(&region->v2d, fx, fy2, &rx2, &ry2);
+
+            if (current_right_sel) {
+              immVertex2f(pos, float(rx1), float(ry1));
+              immVertex2f(pos, float(rx2), float(ry2));
+            }
+            else {
+              immVertex2f(pos, float(rx2), float(ry2));
+              immVertex2f(pos, float(rx1), float(ry1));
+            }
+
+            y_start = y;
+            current_right_sel = right_sel;
+          }
+        }
+        else if (y_start >= 0) {
+          const float fx = uv_origin[0] + (float(x) / float(mask->x));
+          const float fy1 = uv_origin[1] + (float(y_start) / float(mask->y));
+          const float fy2 = uv_origin[1] + (float(y) / float(mask->y));
+          int rx1, ry1, rx2, ry2;
+          ui::view2d_view_to_region(&region->v2d, fx, fy1, &rx1, &ry1);
+          ui::view2d_view_to_region(&region->v2d, fx, fy2, &rx2, &ry2);
+
+          if (current_right_sel) {
+            immVertex2f(pos, float(rx1), float(ry1));
+            immVertex2f(pos, float(rx2), float(ry2));
+          }
+          else {
+            immVertex2f(pos, float(rx2), float(ry2));
+            immVertex2f(pos, float(rx1), float(ry1));
+          }
+          y_start = -1;
+        }
+      }
+    }
+
+    immEnd();
+  }
+
+  immUnbindProgram();
+
+  GPU_blend(GPU_BLEND_NONE);
+  GPU_matrix_pop_projection();
+}
+
 void draw_image_main_helpers(const bContext *C, ARegion *region)
 {
   SpaceImage *sima = CTX_wm_space_image(C);
@@ -455,6 +665,9 @@ void draw_image_main_helpers(const bContext *C, ARegion *region)
       draw_image_uv_custom_region(region, ts->uv_custom_region);
     }
   }
+
+  /* Selection mask overlay for Texture Paint mode. */
+  draw_image_paint_selection_mask(C, region);
 }
 
 bool ED_space_image_show_cache(const SpaceImage *sima)

@@ -19,6 +19,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
 #include "BLI_math_color_blend.h"
+#include "BLI_math_vector_types.hh"
 #include "BLI_stack.h"
 #include "BLI_task.h"
 
@@ -47,6 +48,28 @@
 #include "../paint_intern.hh"
 
 namespace blender {
+
+static float paint_2d_selection_mask_sample(
+    const Scene *scene, const Image *image, int tile_number, int x, int y)
+{
+  const ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
+  if (!imapaint->use_selection_mask || !image) {
+    return 1.0f;
+  }
+
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+  if (!mask_ptr) {
+    return 0.0f;
+  }
+
+  const ImBuf *mask = *mask_ptr;
+  if (x < 0 || x >= mask->x || y < 0 || y >= mask->y) {
+    return 0.0f;
+  }
+
+  return mask->float_buffer.data[size_t(y) * mask->x + x];
+}
 
 /* Brush Painting for 2D image editor */
 
@@ -810,6 +833,44 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
   /* Re-initialize the curve mask. Mask is always recreated due to the change of position. */
   paint_curve_mask_cache_update(&cache->curve_mask_cache, brush, diameter, size, pos);
+
+  /* Apply selection mask to the curve mask in-place. */
+  const ImagePaintSettings *imapaint_settings = &s->scene->toolsettings->imapaint;
+  if (imapaint_settings->use_selection_mask) {
+    ImBuf **mask_ptr = s->image->runtime->paint_selection_masks.lookup_ptr(tile->iuser.tile);
+    if (mask_ptr) {
+      const ImBuf *sel_mask = *mask_ptr;
+      const float brush_origin_x = pos[0] - diameter * 0.5f;
+      const float brush_origin_y = pos[1] - diameter * 0.5f;
+      ushort *cm = cache->curve_mask_cache.curve_mask;
+      for (int y = 0; y < diameter; y++) {
+        const int my = int(brush_origin_y + float(y));
+        if (my < 0 || my >= sel_mask->y) {
+          for (int x = 0; x < diameter; x++, cm++) {
+            *cm = 0;
+          }
+          continue;
+        }
+        const float *mask_row = sel_mask->float_buffer.data + size_t(my) * sel_mask->x;
+        for (int x = 0; x < diameter; x++, cm++) {
+          if (*cm == 0) {
+            continue;
+          }
+          const int mx = int(brush_origin_x + float(x));
+          if (mx < 0 || mx >= sel_mask->x) {
+            *cm = 0;
+            continue;
+          }
+          *cm = ushort(float(*cm) * mask_row[mx]);
+        }
+      }
+    }
+    else {
+      /* No mask for this tile, so nothing is selected. */
+      ushort *cm = cache->curve_mask_cache.curve_mask;
+      memset(cm, 0, size_t(diameter) * diameter * sizeof(ushort));
+    }
+  }
 
   /* detect if we need to recreate image brush buffer */
   if (diameter != cache->lastdiameter || (tex_rotation != cache->last_tex_rotation) || do_random ||
@@ -1758,7 +1819,10 @@ void paint_2d_stroke_done(void *ps)
   MEM_delete(s);
 }
 
-static void paint_2d_fill_add_pixel_byte(const int x_px,
+static void paint_2d_fill_add_pixel_byte(const Scene *scene,
+                                         const Image *image,
+                                         int tile_number,
+                                         const int x_px,
                                          const int y_px,
                                          ImBuf *ibuf,
                                          BLI_Stack *stack,
@@ -1775,6 +1839,12 @@ static void paint_2d_fill_add_pixel_byte(const int x_px,
   coordinate = size_t(y_px) * ibuf->x + x_px;
 
   if (!BLI_BITMAP_TEST(touched, coordinate)) {
+    if (scene->toolsettings->imapaint.use_selection_mask) {
+      if (paint_2d_selection_mask_sample(scene, image, tile_number, x_px, y_px) <= 0.0f) {
+        BLI_BITMAP_SET(touched, coordinate, true);
+        return;
+      }
+    }
     float color_f[4];
     const uchar *color_b = ibuf->byte_data() + 4 * coordinate;
     rgba_uchar_to_float(color_f, color_b);
@@ -1787,7 +1857,10 @@ static void paint_2d_fill_add_pixel_byte(const int x_px,
   }
 }
 
-static void paint_2d_fill_add_pixel_float(const int x_px,
+static void paint_2d_fill_add_pixel_float(const Scene *scene,
+                                          const Image *image,
+                                          int tile_number,
+                                          const int x_px,
                                           const int y_px,
                                           ImBuf *ibuf,
                                           BLI_Stack *stack,
@@ -1804,6 +1877,12 @@ static void paint_2d_fill_add_pixel_float(const int x_px,
   coordinate = size_t(y_px) * ibuf->x + x_px;
 
   if (!BLI_BITMAP_TEST(touched, coordinate)) {
+    if (scene->toolsettings->imapaint.use_selection_mask) {
+      if (paint_2d_selection_mask_sample(scene, image, tile_number, x_px, y_px) <= 0.0f) {
+        BLI_BITMAP_SET(touched, coordinate, true);
+        return;
+      }
+    }
     if (len_squared_v4v4(ibuf->float_data() + 4 * coordinate, color) <= threshold_sq) {
       BLI_stack_push(stack, &coordinate);
     }
@@ -1839,6 +1918,7 @@ void paint_2d_bucket_fill(const bContext *C,
   Image *ima = sima->image;
 
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
+  Scene *scene = CTX_data_scene(C);
 
   ImBuf *ibuf;
   int x_px, y_px;
@@ -1858,6 +1938,15 @@ void paint_2d_bucket_fill(const bContext *C,
   paint_2d_transform_mouse(v2d, mouse_init, image_init);
 
   int tile_number = BKE_image_get_tile_from_pos(ima, image_init, image_init, uv_origin);
+  /* BKE_image_get_tile_from_pos returns 0 for non-UDIM images, but the selection mask
+   * system stores masks under the actual tile number (1001 for non-UDIM). Normalize so
+   * selection mask lookups use the same key as selection operators. */
+  if (tile_number == 0) {
+    const ImageTile *first_tile = static_cast<const ImageTile *>(ima->tiles.first);
+    if (first_tile) {
+      tile_number = first_tile->tile_number;
+    }
+  }
 
   ImageUser local_iuser, *iuser;
   if (s != nullptr) {
@@ -1899,9 +1988,17 @@ void paint_2d_bucket_fill(const bContext *C,
       float *float_data = ibuf->float_data_for_write();
       for (x_px = 0; x_px < ibuf->x; x_px++) {
         for (y_px = 0; y_px < ibuf->y; y_px++) {
+          const float mask_val = paint_2d_selection_mask_sample(
+              scene, ima, tile_number, x_px, y_px);
+          if (mask_val <= 0.0f) {
+            continue;
+          }
+          float color_f_masked[4];
+          copy_v4_v4(color_f_masked, color_f);
+          mul_v4_fl(color_f_masked, mask_val);
           blend_color_mix_float(float_data + 4 * (size_t(y_px) * ibuf->x + x_px),
                                 float_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                                color_f);
+                                color_f_masked);
         }
       }
     }
@@ -1909,9 +2006,19 @@ void paint_2d_bucket_fill(const bContext *C,
       uchar *byte_data = ibuf->byte_data_for_write();
       for (x_px = 0; x_px < ibuf->x; x_px++) {
         for (y_px = 0; y_px < ibuf->y; y_px++) {
+          const float mask_val = paint_2d_selection_mask_sample(
+              scene, ima, tile_number, x_px, y_px);
+          if (mask_val <= 0.0f) {
+            continue;
+          }
+          float color_f_masked[4];
+          rgba_uchar_to_float(color_f_masked, reinterpret_cast<uchar *>(&color_b));
+          mul_v4_fl(color_f_masked, mask_val);
+          uchar color_b_masked[4];
+          rgba_float_to_uchar(color_b_masked, color_f_masked);
           blend_color_mix_byte(byte_data + 4 * (size_t(y_px) * ibuf->x + x_px),
                                byte_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                               reinterpret_cast<uchar *>(&color_b));
+                               color_b_masked);
         }
       }
     }
@@ -1931,7 +2038,7 @@ void paint_2d_bucket_fill(const bContext *C,
     x_px = image_init[0] * ibuf->x;
     y_px = image_init[1] * ibuf->y;
 
-    if (x_px >= ibuf->x || x_px < 0 || y_px > ibuf->y || y_px < 0) {
+    if (x_px >= ibuf->x || x_px < 0 || y_px >= ibuf->y || y_px < 0) {
       BKE_image_release_ibuf(ima, ibuf, nullptr);
       return;
     }
@@ -1960,62 +2067,76 @@ void paint_2d_bucket_fill(const bContext *C,
       while (!BLI_stack_is_empty(stack)) {
         BLI_stack_pop(stack, &coordinate);
 
-        IMB_blend_color_float(ibuf->float_data_for_write() + 4 * (coordinate),
-                              ibuf->float_data_for_write() + 4 * (coordinate),
-                              color_f,
-                              IMB_BlendMode(br->blend));
-
         /* reconstruct the coordinates here */
         x_px = coordinate % width;
         y_px = coordinate / width;
 
+        const float mask_val_f = paint_2d_selection_mask_sample(
+            scene, ima, tile_number, x_px, y_px);
+        float color_f_masked[4];
+        copy_v4_v4(color_f_masked, color_f);
+        mul_v4_fl(color_f_masked, mask_val_f);
+
+        IMB_blend_color_float(ibuf->float_data_for_write() + 4 * coordinate,
+                              ibuf->float_data_for_write() + 4 * coordinate,
+                              color_f_masked,
+                              IMB_BlendMode(br->blend));
+
         paint_2d_fill_add_pixel_float(
-            x_px - 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px - 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_float(
-            x_px - 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px - 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_float(
-            x_px - 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px - 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_float(
-            x_px, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_float(
-            x_px, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_float(
-            x_px + 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px + 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_float(
-            x_px + 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px + 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_float(
-            x_px + 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px + 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
       }
     }
     else {
       while (!BLI_stack_is_empty(stack)) {
         BLI_stack_pop(stack, &coordinate);
 
-        IMB_blend_color_byte(ibuf->byte_data_for_write() + 4 * coordinate,
-                             ibuf->byte_data_for_write() + 4 * coordinate,
-                             reinterpret_cast<uchar *>(&color_b),
-                             IMB_BlendMode(br->blend));
-
         /* reconstruct the coordinates here */
         x_px = coordinate % width;
         y_px = coordinate / width;
 
+        const float mask_val_b = paint_2d_selection_mask_sample(
+            scene, ima, tile_number, x_px, y_px);
+        float color_f_masked_b[4];
+        rgba_uchar_to_float(color_f_masked_b, reinterpret_cast<uchar *>(&color_b));
+        mul_v4_fl(color_f_masked_b, mask_val_b);
+        uchar color_b_masked[4];
+        rgba_float_to_uchar(color_b_masked, color_f_masked_b);
+
+        IMB_blend_color_byte(ibuf->byte_data_for_write() + 4 * coordinate,
+                             ibuf->byte_data_for_write() + 4 * coordinate,
+                             color_b_masked,
+                             IMB_BlendMode(br->blend));
+
         paint_2d_fill_add_pixel_byte(
-            x_px - 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px - 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_byte(
-            x_px - 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px - 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_byte(
-            x_px - 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px - 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_byte(
-            x_px, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_byte(
-            x_px, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_byte(
-            x_px + 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px + 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_byte(
-            x_px + 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px + 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
         paint_2d_fill_add_pixel_byte(
-            x_px + 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
+            scene, ima, tile_number, x_px + 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
       }
     }
 
@@ -2048,13 +2169,21 @@ void paint_2d_gradient_fill(
   const float brush_alpha = BKE_brush_alpha_get(s->paint, br);
 
   bool do_float;
+  Scene *scene = CTX_data_scene(C);
 
-  if (ima == nullptr) {
+  if (ima == nullptr || s == nullptr) {
     return;
   }
 
   float uv_origin[2];
   int tile_number = BKE_image_get_tile_from_pos(ima, image_init, image_init, uv_origin);
+  /* Normalize tile_number for non-UDIM images (same reason as in paint_2d_bucket_fill). */
+  if (tile_number == 0) {
+    const ImageTile *first_tile = static_cast<const ImageTile *>(ima->tiles.first);
+    if (first_tile) {
+      tile_number = first_tile->tile_number;
+    }
+  }
   ImageUser *iuser = paint_2d_get_tile_iuser(s, tile_number);
   if (!iuser) {
     return;
@@ -2109,6 +2238,8 @@ void paint_2d_gradient_fill(
         /* convert to premultiplied */
         mul_v3_fl(color_f, color_f[3]);
         color_f[3] *= brush_alpha;
+        mul_v4_fl(color_f,
+                  paint_2d_selection_mask_sample(scene, ima, tile_number, x_px, y_px));
         IMB_blend_color_float(float_data + 4 * (size_t(y_px) * ibuf->x + x_px),
                               float_data + 4 * (size_t(y_px) * ibuf->x + x_px),
                               color_f,
@@ -2137,8 +2268,10 @@ void paint_2d_gradient_fill(
 
         BKE_colorband_evaluate(br->gradient, f, color_f);
         IMB_colormanagement_scene_linear_to_colorspace_v3(color_f, ibuf->byte_buffer.colorspace);
+        color_f[3] *= brush_alpha;
+        mul_v4_fl(color_f,
+                  paint_2d_selection_mask_sample(scene, ima, tile_number, x_px, y_px));
         rgba_float_to_uchar(reinterpret_cast<uchar *>(&color_b), color_f);
-        (reinterpret_cast<uchar *>(&color_b))[3] *= brush_alpha;
         IMB_blend_color_byte(byte_data + 4 * (size_t(y_px) * ibuf->x + x_px),
                              byte_data + 4 * (size_t(y_px) * ibuf->x + x_px),
                              reinterpret_cast<uchar *>(&color_b),

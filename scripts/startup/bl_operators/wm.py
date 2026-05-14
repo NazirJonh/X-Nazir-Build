@@ -2229,6 +2229,11 @@ class WM_OT_properties_remove(Operator):
         return {'FINISHED'}
 
 
+# NOTE: WM_OT_properties_send has been moved to C++ (NODE_OT_properties_send)
+# because Python API doesn't have access to socket.runtime.location needed for
+# modal socket detection under the mouse cursor.
+
+
 class WM_OT_sysinfo(Operator):
     """Generate system information, saved into a text file"""
 
@@ -3723,6 +3728,7 @@ classes = (
     WM_OT_properties_edit,
     WM_OT_properties_edit_value,
     WM_OT_properties_remove,
+    # WM_OT_properties_send - moved to C++ (NODE_OT_properties_send)
     WM_OT_sysinfo,
     WM_OT_owner_disable,
     WM_OT_owner_enable,

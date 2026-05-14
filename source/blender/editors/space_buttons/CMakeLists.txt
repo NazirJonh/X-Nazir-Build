@@ -16,6 +16,7 @@ set(INC_SYS
 set(SRC
   buttons_context.cc
   buttons_ops.cc
+  buttons_prop_drop.cc
   buttons_texture.cc
   space_buttons.cc
 

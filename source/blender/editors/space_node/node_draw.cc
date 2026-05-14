@@ -1824,6 +1824,7 @@ static void node_draw_socket(const bContext &C,
                              const bNode &node,
                              PointerRNA &node_ptr,
                              ui::Block &block,
+                             const SpaceNode &snode,
                              const bNodeSocket &sock,
                              const float outline_thickness,
                              const bool selected,
@@ -1837,7 +1838,18 @@ static void node_draw_socket(const bContext &C,
   ColorTheme4f socket_color;
   ColorTheme4f outline_color;
   node_socket_color_get(C, ntree, node_ptr, sock, socket_color);
-  node_socket_outline_color_get(selected, sock.type, outline_color);
+
+  std::string socket_path = sock.identifier;
+  const bool is_highlighted = !snode.runtime->highlighted_socket_path.empty() &&
+                              (snode.runtime->highlighted_socket_path == socket_path);
+
+  if (is_highlighted) {
+    /* Highlight color - bright green/yellow */
+    outline_color = {1.0f, 1.0f, 0.2f, 1.0f};
+  }
+  else {
+    node_socket_outline_color_get(selected, sock.type, outline_color);
+  }
 
   const float2 socket_location = sock.runtime->location;
 
@@ -1882,7 +1894,7 @@ static void node_draw_sockets(const bContext &C,
     }
     const bool selected = (sock->flag & SELECT);
     node_draw_socket(
-        C, ntree, node, nodeptr, block, *sock, outline_thickness, selected, snode.runtime->aspect);
+        C, ntree, node, nodeptr, block, snode, *sock, outline_thickness, selected, snode.runtime->aspect);
   }
 
   /* Output sockets. */
@@ -1892,7 +1904,7 @@ static void node_draw_sockets(const bContext &C,
     }
     const bool selected = (sock->flag & SELECT);
     node_draw_socket(
-        C, ntree, node, nodeptr, block, *sock, outline_thickness, selected, snode.runtime->aspect);
+        C, ntree, node, nodeptr, block, snode, *sock, outline_thickness, selected, snode.runtime->aspect);
   }
   nodesocket_batch_end();
 }

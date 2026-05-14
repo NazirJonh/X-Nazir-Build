@@ -7,6 +7,7 @@
 #include "editors/sculpt_paint/mesh/sculpt_automask.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_scene_types.h"
 
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
@@ -333,11 +334,22 @@ void do_draw_face_sets_brush(const Depsgraph &depsgraph,
   if (object.runtime->sculpt_session->cache->paint_face_set == face_set_none_id) {
     if (object.runtime->sculpt_session->cache->toggle_settings.invert) {
       /* When inverting the brush, pick the paint face mask ID from the mesh. */
-      object.runtime->sculpt_session->cache->paint_face_set = face_set::active_face_set_get(
-          object);
+      const int sampled_id = face_set::active_face_set_get(object);
+      object.runtime->sculpt_session->cache->paint_face_set = sampled_id;
+      /* Save sampled ID and switch to Sample mode so it persists for the next strokes. */
+      if (sampled_id != face_set_none_id) {
+        const_cast<Sculpt &>(sd).face_set_sample_id = sampled_id;
+        const_cast<Sculpt &>(sd).face_set_draw_mode = SCULPT_FACE_SET_DRAW_MODE_SAMPLE;
+      }
+    }
+    else if (sd.face_set_draw_mode == SCULPT_FACE_SET_DRAW_MODE_SAMPLE &&
+             sd.face_set_sample_id > 0)
+    {
+      /* Sample mode: always reuse the stored ID. */
+      object.runtime->sculpt_session->cache->paint_face_set = sd.face_set_sample_id;
     }
     else {
-      /* By default, create a new Face Sets. */
+      /* Random mode: create a new Face Set. */
       object.runtime->sculpt_session->cache->paint_face_set = face_set::find_next_available_id(
           object);
     }

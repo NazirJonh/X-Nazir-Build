@@ -15,6 +15,7 @@
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
+#include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 
 #include "BKE_attribute.hh"
@@ -922,18 +923,18 @@ BLI_NOINLINE static void fill_face_sets_grids(const Object &object,
                                                             bke::AttrDomain::Face))
   {
     const VArraySpan<int> face_sets_span(face_sets);
-    node_mask.foreach_index(GrainSize(1), [&](const int i) {
-      const Span<int> grids = nodes[i].grids();
-      const int verts_per_grid = use_flat_layout[i] ? square_i(key.grid_size - 1) * 4 :
-                                                      square_i(key.grid_size);
-      uchar4 *data = vbos[i]->data<uchar4>().data();
-      for (const int i : grids.index_range()) {
-        uchar4 color{UCHAR_MAX};
-        const int fset = face_sets[grid_to_face_map[grids[i]]];
-        if (fset != color_default) {
-          BKE_paint_face_set_overlay_color_get(fset, color_seed, color, &mesh);
-        }
-
+    node_mask.foreach_index(
+        [&](const int i) {
+          const Span<int> grids = nodes[i].grids();
+          const int verts_per_grid = use_flat_layout[i] ? square_i(key.grid_size - 1) * 4 :
+                                                          square_i(key.grid_size);
+          uchar4 *data = vbos[i]->data<uchar4>().data();
+          for (const int i : grids.index_range()) {
+            uchar4 color{UCHAR_MAX};
+            const int fset = face_sets[grid_to_face_map[grids[i]]];
+            if (fset != color_default) {
+              BKE_paint_face_set_overlay_color_get(fset, color_seed, color, &mesh);
+            }
             std::fill_n(data, verts_per_grid, color);
             data += verts_per_grid;
           }
@@ -1051,34 +1052,32 @@ BLI_NOINLINE static void update_face_sets_bmesh(const Object &object,
 {
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Span<bke::pbvh::BMeshNode> nodes = pbvh.nodes<bke::pbvh::BMeshNode>();
-<<<<<<< HEAD
   const BMesh &bm = *object.runtime->sculpt_session->bm;
-=======
-  const BMesh &bm = *object.sculpt->bm;
   const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(object);
->>>>>>> b22a18297f3 (Sculpt Mode: manual assignment of the Face Sets index by the user)
   const int color_default = orig_mesh_data.face_set_default;
   const int color_seed = orig_mesh_data.face_set_seed;
   const int offset = CustomData_get_offset_named(&bm.pdata, CD_PROP_INT32, ".sculpt_face_set");
   ensure_vbos_allocated_bmesh(object, face_set_format(), node_mask, vbos);
   if (offset != -1) {
-    node_mask.foreach_index(GrainSize(1), [&](const int i) {
-      uchar4 *data = vbos[i]->data<uchar4>().data();
-      for (const BMFace *face :
-           BKE_pbvh_bmesh_node_faces(&const_cast<bke::pbvh::BMeshNode &>(nodes[i])))
-      {
-        if (BM_elem_flag_test(face, BM_ELEM_HIDDEN)) {
-          continue;
-        }
-        uchar4 color{UCHAR_MAX};
-        const int fset = bmesh_cd_face_get<int>(*face, offset);
-        if (fset != color_default) {
-          BKE_paint_face_set_overlay_color_get(fset, color_seed, color, &mesh);
-        }
-        std::fill_n(data, 3, color);
-        data += 3;
-      }
-    });
+    node_mask.foreach_index(
+        [&](const int i) {
+          uchar4 *data = vbos[i]->data<uchar4>().data();
+          for (const BMFace *face :
+               BKE_pbvh_bmesh_node_faces(&const_cast<bke::pbvh::BMeshNode &>(nodes[i])))
+          {
+            if (BM_elem_flag_test(face, BM_ELEM_HIDDEN)) {
+              continue;
+            }
+            uchar4 color{UCHAR_MAX};
+            const int fset = bmesh_cd_face_get<int>(*face, offset);
+            if (fset != color_default) {
+              BKE_paint_face_set_overlay_color_get(fset, color_seed, color, &mesh);
+            }
+            std::fill_n(data, 3, color);
+            data += 3;
+          }
+        },
+        exec_mode::grain_size(1));
   }
   else {
     node_mask.foreach_index([&](const int i) { vbos[i]->data<uchar4>().fill(uchar4(255)); },

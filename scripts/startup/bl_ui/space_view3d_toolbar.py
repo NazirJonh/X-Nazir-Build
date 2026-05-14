@@ -943,6 +943,38 @@ class VIEW3D_PT_tools_brush_falloff_normal(View3DPaintPanel, Panel):
         row.prop(ipaint, "normal_angle", text="Angle")
 
 
+class VIEW3D_PT_sculpt_face_set_draw(Panel, View3DPaintPanel):
+    bl_context = ".sculpt_mode"
+    bl_label = "Face Set Draw"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        if not context.sculpt_object:
+            return False
+        settings = cls.paint_settings(context)
+        if not settings or not settings.brush:
+            return False
+        return settings.brush.sculpt_brush_type == 'DRAW_FACE_SETS'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        sculpt = context.tool_settings.sculpt
+
+        layout.prop(sculpt, "face_set_draw_mode", text="Mode")
+
+        col = layout.column()
+        col.active = (sculpt.face_set_draw_mode == 'SAMPLE')
+        if sculpt.face_set_sample_id > 0:
+            col.label(text="Sampled ID: {:d}".format(sculpt.face_set_sample_id))
+        else:
+            col.label(text="No ID sampled yet", icon='INFO')
+        col.label(text="Ctrl+LMB to sample", icon='MOUSE_LMB')
+
+
 class VIEW3D_PT_sculpt_dyntopo(Panel, View3DPaintPanel):
     bl_context = ".sculpt_mode"  # dot on purpose (access from topbar)
     bl_label = "Dyntopo"
@@ -2354,6 +2386,7 @@ classes = (
     VIEW3D_PT_tools_brush_display,
     VIEW3D_PT_tools_weight_gradient,
 
+    VIEW3D_PT_sculpt_face_set_draw,
     VIEW3D_PT_sculpt_dyntopo,
     VIEW3D_PT_sculpt_voxel_remesh,
     VIEW3D_PT_sculpt_symmetry,

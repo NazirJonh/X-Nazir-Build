@@ -578,7 +578,7 @@ void SCULPT_OT_face_sets_create(wmOperatorType *ot)
   ot->description = "Create a new face set";
 
   ot->exec = create_op_exec;
-  ot->poll = sculpt_mode_poll;
+  ot->poll = nullptr;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
@@ -843,7 +843,7 @@ void SCULPT_OT_face_sets_init(wmOperatorType *ot)
   ot->description = "Initializes all face sets in the mesh";
 
   ot->exec = init_op_exec;
-  ot->poll = sculpt_mode_poll;
+  ot->poll = nullptr;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
@@ -1138,7 +1138,7 @@ void SCULPT_OT_face_set_change_visibility(wmOperatorType *ot)
 
   ot->exec = change_visibility_exec;
   ot->invoke = change_visibility_invoke;
-  ot->poll = sculpt_mode_poll;
+  ot->poll = nullptr;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
 
@@ -1215,7 +1215,7 @@ void SCULPT_OT_face_sets_randomize_colors(wmOperatorType *ot)
   ot->description = "Generates a new set of random colors to render the face sets in the viewport";
 
   ot->exec = randomize_colors_exec;
-  ot->poll = sculpt_mode_poll;
+  ot->poll = nullptr;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
@@ -1242,7 +1242,7 @@ static wmOperatorStatus set_custom_color_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  Mesh *mesh = static_cast<Mesh *>(ob.data);
+  Mesh *mesh = id_cast<Mesh *>(ob.data);
   printf("[DEBUG] Mesh: %s\n", mesh->id.name + 2);
   
   const bke::AttributeAccessor attributes = mesh->attributes();
@@ -1262,7 +1262,7 @@ static wmOperatorStatus set_custom_color_exec(bContext *C, wmOperator *op)
     printf("[DEBUG] Using active face set: %d\n", face_set_id);
   }
   
-  if (face_set_id == SCULPT_FACE_SET_NONE) {
+  if (face_set_id == face_set_none_id) {
     printf("[DEBUG] No valid face set ID, cancelling\n");
     return OPERATOR_CANCELLED;
   }
@@ -1282,7 +1282,7 @@ static wmOperatorStatus set_custom_color_exec(bContext *C, wmOperator *op)
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
   pbvh.tag_face_sets_changed(node_mask);
 
-  SCULPT_tag_update_overlays(C);
+  tag_update_overlays(C);
   
   /* Additional viewport update */
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &ob);
@@ -1325,7 +1325,7 @@ void SCULPT_OT_face_set_set_custom_color(wmOperatorType *ot)
 
   ot->exec = set_custom_color_exec;
   ot->invoke = set_custom_color_invoke;
-  ot->poll = SCULPT_mode_poll;
+  ot->poll = nullptr;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
 
@@ -1355,7 +1355,7 @@ static wmOperatorStatus clear_custom_color_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  Mesh *mesh = static_cast<Mesh *>(ob.data);
+  Mesh *mesh = id_cast<Mesh *>(ob.data);
   printf("[DEBUG] Mesh: %s\n", mesh->id.name + 2);
   
   const bke::AttributeAccessor attributes = mesh->attributes();
@@ -1375,7 +1375,7 @@ static wmOperatorStatus clear_custom_color_exec(bContext *C, wmOperator *op)
     printf("[DEBUG] Using active face set: %d\n", face_set_id);
   }
   
-  if (face_set_id == SCULPT_FACE_SET_NONE) {
+  if (face_set_id == face_set_none_id) {
     printf("[DEBUG] No valid face set ID, cancelling\n");
     return OPERATOR_CANCELLED;
   }
@@ -1397,7 +1397,7 @@ static wmOperatorStatus clear_custom_color_exec(bContext *C, wmOperator *op)
   pbvh.tag_face_sets_changed(node_mask);
 
   /* Force viewport redraw */
-  SCULPT_tag_update_overlays(C);
+  tag_update_overlays(C);
   
   /* Additional viewport update */
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &ob);
@@ -1420,17 +1420,17 @@ void SCULPT_OT_face_set_clear_custom_color(wmOperatorType *ot)
   ot->description = "Clear the custom color for the specified Face Set";
 
   ot->exec = clear_custom_color_exec;
-  ot->poll = SCULPT_mode_poll;
+  ot->poll = nullptr;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
   RNA_def_int(ot->srna, "face_set_id", 0, 0, INT_MAX, "Face Set ID", "ID of the Face Set to clear color (0 = active face set)", 0, INT_MAX);
 }
 
-static wmOperatorStatus clear_all_custom_colors_exec(bContext *C, wmOperator *op)
+static wmOperatorStatus clear_all_custom_colors_exec(bContext *C, wmOperator * /*op*/)
 {
   printf("[DEBUG] clear_all_custom_colors_exec called\n");
-  
+
   Object &ob = *CTX_data_active_object(C);
   printf("[DEBUG] Active object: %s\n", ob.id.name + 2);
 
@@ -1449,7 +1449,7 @@ static wmOperatorStatus clear_all_custom_colors_exec(bContext *C, wmOperator *op
     return OPERATOR_CANCELLED;
   }
 
-  Mesh *mesh = static_cast<Mesh *>(ob.data);
+  Mesh *mesh = id_cast<Mesh *>(ob.data);
   printf("[DEBUG] Mesh: %s\n", mesh->id.name + 2);
   
   const bke::AttributeAccessor attributes = mesh->attributes();
@@ -1476,7 +1476,7 @@ static wmOperatorStatus clear_all_custom_colors_exec(bContext *C, wmOperator *op
   pbvh.tag_face_sets_changed(node_mask);
 
   /* Force viewport redraw */
-  SCULPT_tag_update_overlays(C);
+  tag_update_overlays(C);
   
   /* Additional viewport update */
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &ob);
@@ -1499,7 +1499,7 @@ void SCULPT_OT_face_set_clear_all_custom_colors(wmOperatorType *ot)
   ot->description = "Clear all custom colors for Face Sets";
 
   ot->exec = clear_all_custom_colors_exec;
-  ot->poll = SCULPT_mode_poll;
+  ot->poll = nullptr;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
@@ -1900,7 +1900,7 @@ void SCULPT_OT_face_sets_edit(wmOperatorType *ot)
 
   ot->invoke = edit_op_invoke;
   ot->exec = edit_op_exec;
-  ot->poll = sculpt_mode_poll;
+  ot->poll = nullptr;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
 

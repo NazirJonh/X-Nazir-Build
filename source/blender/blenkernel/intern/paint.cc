@@ -2892,7 +2892,7 @@ void BKE_paint_face_set_custom_color_set(Mesh *mesh, int face_set_id, const floa
   /* Add new color */
   mesh->face_set_colors_num++;
   mesh->face_set_colors = static_cast<FaceSetColor *>(
-      MEM_reallocN(mesh->face_set_colors, sizeof(FaceSetColor) * mesh->face_set_colors_num));
+      MEM_realloc_uninitialized(mesh->face_set_colors, sizeof(FaceSetColor) * mesh->face_set_colors_num));
 
   FaceSetColor *new_color = &mesh->face_set_colors[mesh->face_set_colors_num - 1];
   new_color->face_set_id = face_set_id;
@@ -2961,10 +2961,10 @@ void BKE_paint_face_set_custom_color_remove(Mesh *mesh, int face_set_id)
 
       mesh->face_set_colors_num--;
       if (mesh->face_set_colors_num == 0) {
-        MEM_SAFE_FREE(mesh->face_set_colors);
+        MEM_SAFE_DELETE(mesh->face_set_colors);
       } else {
         mesh->face_set_colors = static_cast<FaceSetColor *>(
-            MEM_reallocN(mesh->face_set_colors, sizeof(FaceSetColor) * mesh->face_set_colors_num));
+            MEM_realloc_uninitialized(mesh->face_set_colors, sizeof(FaceSetColor) * mesh->face_set_colors_num));
       }
       return;
     }
@@ -2977,7 +2977,7 @@ void BKE_paint_face_set_custom_colors_clear(Mesh *mesh)
     return;
   }
 
-  MEM_SAFE_FREE(mesh->face_set_colors);
+  MEM_SAFE_DELETE(mesh->face_set_colors);
   mesh->face_set_colors_num = 0;
 }
 

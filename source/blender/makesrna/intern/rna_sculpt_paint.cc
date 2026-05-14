@@ -1193,6 +1193,20 @@ static void rna_def_sculpt(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem face_set_draw_mode_items[] = {
+      {SCULPT_FACE_SET_DRAW_MODE_RANDOM,
+       "RANDOM",
+       0,
+       "Random",
+       "Create a new Face Set with a unique ID for each stroke"},
+      {SCULPT_FACE_SET_DRAW_MODE_SAMPLE,
+       "SAMPLE",
+       0,
+       "Sample",
+       "Use a previously sampled Face Set ID for each stroke"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   StructRNA *srna;
   PropertyRNA *prop;
 
@@ -1287,6 +1301,20 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Orientation", "Object whose Z axis defines orientation of gravity");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "face_set_draw_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, face_set_draw_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Face Set Draw Mode",
+                           "How the Face Set ID is determined when using the Draw Face Sets brush");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "face_set_sample_id", PROP_INT, PROP_NONE);
+  RNA_def_property_range(prop, -1, INT_MAX);
+  RNA_def_property_ui_text(prop,
+                           "Sampled Face Set",
+                           "Face Set ID used when Draw Face Sets is in Sample mode");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 

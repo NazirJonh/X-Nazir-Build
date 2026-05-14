@@ -15,6 +15,7 @@
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
+#include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 
 #include "BKE_attribute.hh"
@@ -682,7 +683,7 @@ BLI_NOINLINE static void update_face_sets_mesh(const Object &object,
 
             uchar4 fset_color(UCHAR_MAX);
             if (id != color_default) {
-              BKE_paint_face_set_overlay_color_get(id, color_seed, fset_color);
+              BKE_paint_face_set_overlay_color_get(id, color_seed, fset_color, &mesh);
             }
             else {
               /* Skip for the default color face set to render it white. */
@@ -912,6 +913,7 @@ BLI_NOINLINE static void fill_face_sets_grids(const Object &object,
   const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
   const SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(object);
   const int color_default = orig_mesh_data.face_set_default;
   const int color_seed = orig_mesh_data.face_set_seed;
   const Span<int> grid_to_face_map = subdiv_ccg.grid_to_face_map;
@@ -931,9 +933,8 @@ BLI_NOINLINE static void fill_face_sets_grids(const Object &object,
             uchar4 color{UCHAR_MAX};
             const int fset = face_sets[grid_to_face_map[grids[i]]];
             if (fset != color_default) {
-              BKE_paint_face_set_overlay_color_get(fset, color_seed, color);
+              BKE_paint_face_set_overlay_color_get(fset, color_seed, color, &mesh);
             }
-
             std::fill_n(data, verts_per_grid, color);
             data += verts_per_grid;
           }
@@ -1052,6 +1053,7 @@ BLI_NOINLINE static void update_face_sets_bmesh(const Object &object,
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Span<bke::pbvh::BMeshNode> nodes = pbvh.nodes<bke::pbvh::BMeshNode>();
   const BMesh &bm = *object.runtime->sculpt_session->bm;
+  const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(object);
   const int color_default = orig_mesh_data.face_set_default;
   const int color_seed = orig_mesh_data.face_set_seed;
   const int offset = CustomData_get_offset_named(&bm.pdata, CD_PROP_INT32, ".sculpt_face_set");
@@ -1069,7 +1071,7 @@ BLI_NOINLINE static void update_face_sets_bmesh(const Object &object,
             uchar4 color{UCHAR_MAX};
             const int fset = bmesh_cd_face_get<int>(*face, offset);
             if (fset != color_default) {
-              BKE_paint_face_set_overlay_color_get(fset, color_seed, color);
+              BKE_paint_face_set_overlay_color_get(fset, color_seed, color, &mesh);
             }
             std::fill_n(data, 3, color);
             data += 3;

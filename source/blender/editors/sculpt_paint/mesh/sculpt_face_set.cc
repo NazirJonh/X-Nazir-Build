@@ -8,6 +8,7 @@
 #include "sculpt_face_set.hh"
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <queue>
 
@@ -29,6 +30,7 @@
 
 #include "BLT_translation.hh"
 
+#include "DNA_brush_types.h"
 #include "DNA_customdata_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -1177,7 +1179,11 @@ static wmOperatorStatus randomize_colors_exec(bContext *C, wmOperator * /*op*/)
     return OPERATOR_CANCELLED;
   }
 
-  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  bke::pbvh::Tree *pbvh_ptr = bke::object::pbvh_get(ob);
+  if (!pbvh_ptr) {
+    return OPERATOR_CANCELLED;
+  }
+  bke::pbvh::Tree &pbvh = *pbvh_ptr;
 
   /* Dyntopo not supported. */
   if (pbvh.type() == bke::pbvh::Type::BMesh) {
@@ -1216,6 +1222,273 @@ void SCULPT_OT_face_sets_randomize_colors(wmOperatorType *ot)
 
   ot->exec = randomize_colors_exec;
   ot->poll = sculpt_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus set_custom_color_exec(bContext *C, wmOperator *op)
+{
+  Object &ob = *CTX_data_active_object(C);
+
+  const View3D *v3d = CTX_wm_view3d(C);
+  const Base *base = CTX_data_active_base(C);
+  if (!BKE_base_is_visible(v3d, base)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  bke::pbvh::Tree *pbvh_ptr = bke::object::pbvh_get(ob);
+  if (!pbvh_ptr) {
+    return OPERATOR_CANCELLED;
+  }
+  bke::pbvh::Tree &pbvh = *pbvh_ptr;
+
+  /* Dyntopo not supported. */
+  if (pbvh.type() == bke::pbvh::Type::BMesh) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Mesh *mesh = id_cast<Mesh *>(ob.data);
+  const bke::AttributeAccessor attributes = mesh->attributes();
+
+  if (!attributes.contains(".sculpt_face_set")) {
+    return OPERATOR_CANCELLED;
+  }
+
+  int face_set_id = RNA_int_get(op->ptr, "face_set_id");
+  if (face_set_id == 0) {
+    face_set_id = active_face_set_get(ob);
+  }
+  if (face_set_id == face_set_none_id) {
+    return OPERATOR_CANCELLED;
+  }
+
+  float color[3];
+  RNA_float_get_array(op->ptr, "color", color);
+
+  BKE_paint_face_set_custom_color_set(mesh, face_set_id, color);
+
+  DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY);
+
+  IndexMaskMemory memory;
+  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  pbvh.tag_face_sets_changed(node_mask);
+
+  tag_update_overlays(C);
+  WM_event_add_notifier(C, NC_GEOM | ND_DATA, mesh);
+
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus set_custom_color_invoke(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  Object &ob = *CTX_data_active_object(C);
+
+  const View3D *v3d = CTX_wm_view3d(C);
+  const Base *base = CTX_data_active_base(C);
+  if (!BKE_base_is_visible(v3d, base)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Update the active vertex and Face Set using the cursor position */
+  CursorGeometryInfo cgi;
+  const float mval_fl[2] = {float(event->mval[0]), float(event->mval[1])};
+  vert_random_access_ensure(ob);
+  cursor_geometry_info_update(C, &cgi, mval_fl, false);
+
+  return set_custom_color_exec(C, op);
+}
+
+void SCULPT_OT_face_set_set_custom_color(wmOperatorType *ot)
+{
+  ot->name = "Set Face Set Custom Color";
+  ot->idname = "SCULPT_OT_face_set_set_custom_color";
+  ot->description = "Set a custom color for the specified Face Set";
+
+  ot->exec = set_custom_color_exec;
+  ot->invoke = set_custom_color_invoke;
+  ot->poll = sculpt_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
+
+  RNA_def_float_color(ot->srna, "color", 3, nullptr, 0.0f, 1.0f, "Color", "Custom color for the Face Set", 0.0f, 1.0f);
+  RNA_def_int(ot->srna, "face_set_id", 0, 0, INT_MAX, "Face Set ID", "ID of the Face Set to color (0 = active face set)", 0, INT_MAX);
+}
+
+static wmOperatorStatus clear_custom_color_exec(bContext *C, wmOperator *op)
+{
+  Object &ob = *CTX_data_active_object(C);
+
+  const View3D *v3d = CTX_wm_view3d(C);
+  const Base *base = CTX_data_active_base(C);
+  if (!BKE_base_is_visible(v3d, base)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  bke::pbvh::Tree *pbvh_ptr = bke::object::pbvh_get(ob);
+  if (!pbvh_ptr) {
+    return OPERATOR_CANCELLED;
+  }
+  bke::pbvh::Tree &pbvh = *pbvh_ptr;
+
+  /* Dyntopo not supported. */
+  if (pbvh.type() == bke::pbvh::Type::BMesh) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Mesh *mesh = id_cast<Mesh *>(ob.data);
+  const bke::AttributeAccessor attributes = mesh->attributes();
+
+  if (!attributes.contains(".sculpt_face_set")) {
+    return OPERATOR_CANCELLED;
+  }
+
+  int face_set_id = RNA_int_get(op->ptr, "face_set_id");
+  if (face_set_id == 0) {
+    face_set_id = active_face_set_get(ob);
+  }
+  if (face_set_id == face_set_none_id) {
+    return OPERATOR_CANCELLED;
+  }
+
+  BKE_paint_face_set_custom_color_remove(mesh, face_set_id);
+
+  DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY);
+
+  IndexMaskMemory memory;
+  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  pbvh.tag_face_sets_changed(node_mask);
+
+  tag_update_overlays(C);
+  WM_event_add_notifier(C, NC_GEOM | ND_DATA, mesh);
+
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_face_set_clear_custom_color(wmOperatorType *ot)
+{
+  ot->name = "Clear Face Set Custom Color";
+  ot->idname = "SCULPT_OT_face_set_clear_custom_color";
+  ot->description = "Clear the custom color for the specified Face Set";
+
+  ot->exec = clear_custom_color_exec;
+  ot->poll = sculpt_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna, "face_set_id", 0, 0, INT_MAX, "Face Set ID", "ID of the Face Set to clear color (0 = active face set)", 0, INT_MAX);
+}
+
+static wmOperatorStatus clear_all_custom_colors_exec(bContext *C, wmOperator *op)
+{
+  Scene &scene = *CTX_data_scene(C);
+  Object &ob = *CTX_data_active_object(C);
+
+  const View3D *v3d = CTX_wm_view3d(C);
+  const Base *base = CTX_data_active_base(C);
+  if (!BKE_base_is_visible(v3d, base)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  bke::pbvh::Tree *pbvh_ptr = bke::object::pbvh_get(ob);
+  if (!pbvh_ptr) {
+    return OPERATOR_CANCELLED;
+  }
+  bke::pbvh::Tree &pbvh = *pbvh_ptr;
+
+  /* Dyntopo not supported. */
+  if (pbvh.type() == bke::pbvh::Type::BMesh) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Mesh *mesh = id_cast<Mesh *>(ob.data);
+  bke::MutableAttributeAccessor attributes = mesh->attributes_for_write();
+
+  if (!attributes.contains(".sculpt_face_set")) {
+    return OPERATOR_CANCELLED;
+  }
+
+  undo::push_begin(scene, ob, op);
+
+  /* Assign Default Face Set ID to all faces. */
+  bke::SpanAttributeWriter<int> face_sets = attributes.lookup_or_add_for_write_span<int>(
+      ".sculpt_face_set", bke::AttrDomain::Face);
+  face_sets.span.fill(face_set_none_id);
+  face_sets.finish();
+
+  /* Also clear custom colors. */
+  BKE_paint_face_set_custom_colors_clear(mesh);
+
+  /* Ensure ID 0 is rendered as grey by making sure it's not the default white ID. */
+  mesh->face_sets_color_default = 1;
+
+  printf("Face Sets: All face sets cleared and custom colors removed. All faces assigned ID %d.\n", face_set_none_id);
+
+  undo::push_end(ob);
+
+  DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY);
+
+  IndexMaskMemory memory;
+  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  pbvh.tag_face_sets_changed(node_mask);
+
+  tag_update_overlays(C);
+  WM_event_add_notifier(C, NC_GEOM | ND_DATA, mesh);
+
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_face_set_clear_all_custom_colors(wmOperatorType *ot)
+{
+  ot->name = "Clear All Face Sets";
+  ot->idname = "SCULPT_OT_face_set_clear_all_custom_colors";
+  ot->description = "Clear all Face Sets from the mesh, assigning the default ID to all faces";
+
+  ot->exec = clear_all_custom_colors_exec;
+  ot->poll = sculpt_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static bool face_set_colors_flip_poll(bContext *C)
+{
+  if (!sculpt_mode_poll(C)) {
+    return false;
+  }
+  /* Only available while the Draw Face Sets brush is active, so the X shortcut does not
+   * conflict with the regular brush color flip. */
+  const Scene *scene = CTX_data_scene(C);
+  const Sculpt *sd = scene->toolsettings->sculpt;
+  if (!sd) {
+    return false;
+  }
+  const Brush *brush = BKE_paint_brush_for_read(&sd->paint);
+  return brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS;
+}
+
+static wmOperatorStatus face_set_colors_flip_exec(bContext *C, wmOperator * /*op*/)
+{
+  Scene *scene = CTX_data_scene(C);
+  Sculpt *sd = scene->toolsettings->sculpt;
+
+  /* Swap the primary and secondary Face Set colors. */
+  float tmp[3];
+  copy_v3_v3(tmp, sd->face_set_custom_color);
+  copy_v3_v3(sd->face_set_custom_color, sd->face_set_secondary_color);
+  copy_v3_v3(sd->face_set_secondary_color, tmp);
+
+  WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, scene);
+
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_face_set_colors_flip(wmOperatorType *ot)
+{
+  ot->name = "Flip Face Set Colors";
+  ot->idname = "SCULPT_OT_face_set_colors_flip";
+  ot->description = "Swap the primary and secondary Face Set colors";
+
+  ot->exec = face_set_colors_flip_exec;
+  ot->poll = face_set_colors_flip_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }

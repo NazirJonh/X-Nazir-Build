@@ -65,8 +65,12 @@
 #include "BKE_subdiv_ccg.hh"
 #include "BLI_math_rotation_legacy.hh"
 #include "BLI_math_vector.hh"
+#include "BLI_utildefines.h"
 
 #include "BLT_translation.hh"
+
+#include "UI_interface.hh"
+#include "UI_interface_types.hh"
 
 #include "NOD_texture.h"
 
@@ -6008,8 +6012,19 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     brush = BKE_paint_brush(&sd.paint);
   }
 
+  /* Restore cursor if it was changed to eyedropper during Face Sets color sampling. */
+  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
+    wmWindow *win = CTX_wm_window(this->evil_C);
+    if (win) {
+      WM_cursor_modal_restore(win);
+    }
+  }
+
   MEM_delete(ss.cache);
   ss.cache = nullptr;
+
+  /* Clear status bar message set during stroke. */
+  ED_workspace_status_text(this->evil_C, nullptr);
 
   if (!is_cancel && stroke_started) {
     stroke_undo_end(*paint_mode_settings_, *this->object, brush);
@@ -6104,6 +6119,14 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   }
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
     face_set_overlay_check(*C, *op);
+
+    /* When sampling face set color (Ctrl held), show sampling hints in status bar. */
+    SculptSession &ss = *ob.runtime->sculpt_session;
+    if (ss.cache && ss.cache->toggle_settings.invert) {
+      WorkspaceStatus status(C);
+      status.item(IFACE_("Sample Color"), ICON_MOUSE_LMB);
+      status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
+    }
   }
 
   op->customdata = stroke;

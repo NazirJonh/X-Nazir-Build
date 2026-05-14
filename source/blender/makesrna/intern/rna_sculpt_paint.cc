@@ -1193,6 +1193,12 @@ static void rna_def_sculpt(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem face_set_draw_mode_items[] = {
+      {SCULPT_FACE_SET_DRAW_MODE_COLOR, "CUSTOM", 0, "Custom", "Use a specific Face Set identified by a chosen color"},
+      {SCULPT_FACE_SET_DRAW_MODE_RANDOM, "RANDOM", 0, "Random", "Create a new Face Set ID on each stroke"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   StructRNA *srna;
   PropertyRNA *prop;
 
@@ -1287,6 +1293,38 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Orientation", "Object whose Z axis defines orientation of gravity");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "face_set_draw_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, face_set_draw_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Face Set Color Mode",
+                           "How the Face Set ID is determined when using the Draw Face Sets brush");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "face_set_secondary_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "face_set_secondary_color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Secondary Face Set Color",
+                           "Secondary color, swapped with the primary color using the X key");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "face_set_sample_id", PROP_INT, PROP_NONE);
+  RNA_def_property_range(prop, -1, INT_MAX);
+  RNA_def_property_ui_text(prop,
+                           "Sampled Face Set",
+                           "Face Set ID of the last sampled Face Set");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "face_set_custom_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "face_set_custom_color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Face Set Color",
+                           "Color used to find or create a Face Set");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 

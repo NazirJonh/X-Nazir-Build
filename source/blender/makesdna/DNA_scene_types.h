@@ -1531,6 +1531,23 @@ struct Sculpt {
   /** For use by operators. */
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve_op = nullptr;
   struct Object *gravity_object = nullptr;
+
+  /** Draw Face Sets ID assignment mode (#eSculptFaceSetDrawMode). */
+  int face_set_draw_mode = 0;
+  /** Stored Face Set ID of the last sampled Face Set. -1 if unset. */
+  int face_set_sample_id = -1;
+  /** Secondary color for X-swap when draw mode is Custom (linear RGB). */
+  float face_set_secondary_color[3] = {0.2f, 0.5f, 1.0f};
+  char _pad_fsc[4] = {};
+  /** Color used to identify the target Face Set when draw mode is Custom (linear RGB). */
+  float face_set_custom_color[3] = {1.0f, 0.5f, 0.2f};
+  char _pad_fcc[4] = {};
+};
+
+/** #Sculpt.face_set_draw_mode */
+enum eSculptFaceSetDrawMode {
+  SCULPT_FACE_SET_DRAW_MODE_RANDOM = 0,
+  SCULPT_FACE_SET_DRAW_MODE_COLOR = 1,
 };
 
 struct CurvesSculpt {

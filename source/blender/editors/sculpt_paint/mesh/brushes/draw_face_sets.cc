@@ -7,9 +7,11 @@
 #include "editors/sculpt_paint/mesh/sculpt_automask.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_scene_types.h"
 
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
 
@@ -22,6 +24,11 @@
 #include "editors/sculpt_paint/mesh/sculpt_undo.hh"
 
 #include "ED_sculpt.hh"
+
+#include "DEG_depsgraph.hh"
+
+#include "WM_api.hh"
+#include "WM_types.hh"
 
 #include "bmesh.hh"
 
@@ -324,7 +331,7 @@ static void do_draw_face_sets_brush_bmesh(const Depsgraph &depsgraph,
 }  // namespace draw_face_sets_cc
 
 void do_draw_face_sets_brush(const Depsgraph &depsgraph,
-                             const Sculpt &sd,
+                             Sculpt &sd,
                              Object &object,
                              const IndexMask &node_mask)
 {
@@ -333,11 +340,58 @@ void do_draw_face_sets_brush(const Depsgraph &depsgraph,
   if (object.runtime->sculpt_session->cache->paint_face_set == face_set_none_id) {
     if (object.runtime->sculpt_session->cache->toggle_settings.invert) {
       /* When inverting the brush, pick the paint face mask ID from the mesh. */
-      object.runtime->sculpt_session->cache->paint_face_set = face_set::active_face_set_get(
-          object);
+      const int sampled_id = face_set::active_face_set_get(object);
+      object.runtime->sculpt_session->cache->paint_face_set = sampled_id;
+
+      /* Save sampled ID and update color. */
+      if (sampled_id != face_set_none_id) {
+        const Mesh &mesh = *id_cast<Mesh *>(object.data);
+        float sampled_color_fl[3];
+
+        /* Get the color of the sampled Face Set (custom or random). */
+        if (BKE_paint_face_set_custom_color_exists(&mesh, sampled_id)) {
+          BKE_paint_face_set_custom_color_get(&mesh, sampled_id, sampled_color_fl);
+        }
+        else {
+          uchar sampled_color_ub[4];
+          BKE_paint_face_set_overlay_color_get(
+              sampled_id, mesh.face_sets_color_seed, sampled_color_ub, &mesh);
+          sampled_color_fl[0] = sampled_color_ub[0] / 255.0f;
+          sampled_color_fl[1] = sampled_color_ub[1] / 255.0f;
+          sampled_color_fl[2] = sampled_color_ub[2] / 255.0f;
+        }
+
+        /* Always update the primary Face Set Color. */
+        copy_v3_v3(sd.face_set_custom_color, sampled_color_fl);
+        sd.face_set_sample_id = sampled_id;
+
+        /* If a color was sampled, automatically switch to Color Mode (Custom),
+         * as the user likely wants to use the sampled color. */
+        sd.face_set_draw_mode = SCULPT_FACE_SET_DRAW_MODE_COLOR;
+
+        /* Notify the UI that tool settings have changed. */
+        WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+      }
+    }
+    else if (sd.face_set_draw_mode == SCULPT_FACE_SET_DRAW_MODE_COLOR) {
+      /* Custom mode: find the Face Set whose custom color matches
+       * the chosen color, or create a new Face Set and assign the custom color to it. */
+      Mesh *mesh = id_cast<Mesh *>(object.data);
+      const int found_id = BKE_paint_face_set_find_by_custom_color(mesh, sd.face_set_custom_color);
+      if (found_id > 0) {
+        object.runtime->sculpt_session->cache->paint_face_set = found_id;
+      }
+      else {
+        const int new_id = face_set::find_next_available_id(object);
+        BKE_paint_face_set_custom_color_set(mesh, new_id, sd.face_set_custom_color);
+        object.runtime->sculpt_session->cache->paint_face_set = new_id;
+
+        /* Notify the draw system that the Face Set color mapping has changed. */
+        DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY);
+      }
     }
     else {
-      /* By default, create a new Face Sets. */
+      /* Random mode: create a new Face Set. */
       object.runtime->sculpt_session->cache->paint_face_set = face_set::find_next_available_id(
           object);
     }

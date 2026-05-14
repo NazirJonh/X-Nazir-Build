@@ -91,6 +91,11 @@ class VIEW3D_HT_tool_header(Header):
             is_valid_context = draw_fn(context, layout, tool)
 
         def draw_3d_brush_settings(layout, tool_mode):
+            if tool_mode == 'SCULPT':
+                sculpt = context.tool_settings.sculpt
+                if sculpt and sculpt.brush and sculpt.brush.sculpt_brush_type == 'DRAW_FACE_SETS':
+                    layout.popover("VIEW3D_PT_tools_brush_face_set_settings", text="Face Sets")
+
             layout.popover("VIEW3D_PT_tools_brush_settings_advanced", text="Brush")
             if tool_mode != 'PAINT_WEIGHT':
                 layout.popover("VIEW3D_PT_tools_brush_texture")
@@ -272,6 +277,27 @@ class _draw_tool_settings_context_mode:
 
         if brush is None:
             return False
+
+        if brush.sculpt_brush_type == 'DRAW_FACE_SETS':
+            is_custom = (paint.face_set_draw_mode == 'CUSTOM')
+            row = layout.row(align=True)
+            row.ui_units_x = 4.8
+
+            sub = row.row(align=True)
+            sub.active = is_custom
+            sub.prop(paint, "face_set_custom_color", text="")
+            sub.prop(paint, "face_set_secondary_color", text="")
+
+            # Toggle button remains outside 'sub' so it's always active.
+            props = row.operator(
+                "wm.context_toggle_enum",
+                text="",
+                icon='EVENT_R',
+                depress=(not is_custom),
+            )
+            props.data_path = "tool_settings.sculpt.face_set_draw_mode"
+            props.value_1 = 'CUSTOM'
+            props.value_2 = 'RANDOM'
 
         capabilities = brush.sculpt_capabilities
 
@@ -4051,6 +4077,12 @@ class VIEW3D_MT_face_sets(Menu):
         layout.separator()
 
         props = layout.operator("sculpt.face_sets_randomize_colors", text="Randomize Colors")
+
+        layout.separator()
+
+        layout.operator("sculpt.face_set_set_custom_color", text="Set Custom Color")
+        layout.operator("sculpt.face_set_clear_custom_color", text="Clear Custom Color")
+        layout.operator("sculpt.face_set_clear_all_custom_colors", text="Clear All Custom Colors")
 
         layout.template_node_operator_asset_menu_items(catalog_path=self.bl_label)
 

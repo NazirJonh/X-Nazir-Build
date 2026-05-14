@@ -5340,6 +5340,8 @@ def km_sculpt(params):
         ("paint.sample_color",
          {"type": 'X', "value": 'PRESS', "shift": True, "ctrl": True},
          {"properties": [("merged", True)]}),
+        # Flip Face Set colors (only polls while the Draw Face Sets brush is active).
+        ("sculpt.face_set_colors_flip", {"type": 'X', "value": 'PRESS'}, None),
         ("paint.brush_colors_flip", {"type": 'X', "value": 'PRESS', }, None),
         ("sculpt.color_filter",
          {"type": 'X', "value": 'PRESS', "ctrl": True},

@@ -47,7 +47,10 @@
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf_types.hh"
 
+#include "BLT_translation.hh"
+
 #include "ED_image.hh"
+#include "ED_screen.hh"
 #include "ED_view3d.hh"
 
 #include "GPU_immediate.hh"
@@ -1081,6 +1084,16 @@ static void paint_update_mouse_cursor(PaintCursorContext &pcontext)
     return;
   }
 
+  /* Don't override eyedropper cursor for face sets color sampling. */
+  if (pcontext.mode == PaintMode::Sculpt && pcontext.brush != nullptr &&
+      pcontext.brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS)
+  {
+    const wmEvent *event_state = pcontext.win->runtime->eventstate;
+    if (event_state && (event_state->modifier & KM_CTRL)) {
+      return;
+    }
+  }
+
   if (ELEM(pcontext.mode, PaintMode::GPencil, PaintMode::VertexGPencil)) {
     WM_cursor_set(pcontext.win, WM_CURSOR_DOT);
   }
@@ -1257,6 +1270,38 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
   PaintCursorContext pcontext;
   if (!paint_cursor_context_init(C, xy, tilt, pcontext)) {
     return;
+  }
+
+  /* Handle cursor and status bar for DRAW_FACE_SETS brush when no stroke is active. */
+  if (pcontext.mode == PaintMode::Sculpt && pcontext.brush != nullptr &&
+      pcontext.brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      pcontext.win->modalcursor == 0)
+  {
+    const wmEvent *event_state = pcontext.win->runtime->eventstate;
+    const bool ctrl_held = event_state && (event_state->modifier & KM_CTRL);
+
+    /* Only update cursor when Ctrl state changes to avoid flickering from repeated
+     * WM_cursor_set calls on every MOUSEMOVE event. */
+    static bool prev_ctrl_held = false;
+    if (ctrl_held != prev_ctrl_held) {
+      prev_ctrl_held = ctrl_held;
+      WM_cursor_set(
+          pcontext.win, ctrl_held ? WM_CURSOR_EYEDROPPER : WM_CURSOR_DEFAULT);
+    }
+
+    if (ctrl_held) {
+      /* Ctrl held: eyedropper cursor and sampling hint. */
+      WorkspaceStatus status(C);
+      status.item(IFACE_("Sample Color"), ICON_MOUSE_LMB);
+      status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
+    }
+    else {
+      /* Normal state: restore cursor and show draw hints. */
+      WorkspaceStatus status(C);
+      status.item(IFACE_("Draw"), ICON_MOUSE_LMB);
+      status.item(IFACE_("Sample Color"), ICON_MOUSE_LMB, ICON_EVENT_CTRL);
+      status.item(IFACE_("Erase"), ICON_MOUSE_RMB);
+    }
   }
 
   if (!paint_cursor_is_brush_cursor_enabled(pcontext)) {

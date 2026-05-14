@@ -943,6 +943,44 @@ class VIEW3D_PT_tools_brush_falloff_normal(View3DPaintPanel, Panel):
         row.prop(ipaint, "normal_angle", text="Angle")
 
 
+class VIEW3D_PT_tools_brush_face_set_settings(Panel, View3DPaintPanel):
+    bl_context = ".sculpt_face_set"
+    bl_label = "Face Sets"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_ui_units_x = 16
+
+    @classmethod
+    def poll(cls, context):
+        sculpt = context.tool_settings.sculpt
+        if not (context.sculpt_object and sculpt):
+            return False
+        brush = sculpt.brush
+        return brush and brush.sculpt_brush_type == 'DRAW_FACE_SETS'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        sculpt = context.tool_settings.sculpt
+
+        col = layout.column()
+        col.label(text="Color Mode")
+        row = col.row(align=True)
+        row.prop(sculpt, "face_set_draw_mode", expand=True)
+
+        is_custom = (sculpt.face_set_draw_mode == 'CUSTOM')
+        col_color = col.column()
+        col_color.active = is_custom
+        col_color.enabled = is_custom
+
+        row = col_color.row(align=True)
+        row.prop(sculpt, "face_set_custom_color", text="Color")
+        row.prop(sculpt, "face_set_secondary_color", text="")
+
+        col.separator()
+
+
 class VIEW3D_PT_sculpt_dyntopo(Panel, View3DPaintPanel):
     bl_context = ".sculpt_mode"  # dot on purpose (access from topbar)
     bl_label = "Dyntopo"
@@ -2336,6 +2374,7 @@ classes = (
     VIEW3D_PT_slots_paint_canvas,
     VIEW3D_PT_slots_color_attributes,
     VIEW3D_PT_slots_vertex_groups,
+
     VIEW3D_PT_tools_brush_select,
     VIEW3D_PT_tools_brush_settings,
     VIEW3D_PT_tools_brush_color,
@@ -2352,6 +2391,7 @@ classes = (
     VIEW3D_PT_tools_brush_falloff_frontface,
     VIEW3D_PT_tools_brush_falloff_normal,
     VIEW3D_PT_tools_brush_display,
+    VIEW3D_PT_tools_brush_face_set_settings,
     VIEW3D_PT_tools_weight_gradient,
 
     VIEW3D_PT_sculpt_dyntopo,

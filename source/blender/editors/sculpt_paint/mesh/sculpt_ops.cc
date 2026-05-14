@@ -54,7 +54,11 @@
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
 
+#include "ED_sculpt.hh"
+#include "DRW_engine.hh"
+
 #include "../paint_intern.hh"
+
 #include "mesh_brush_common.hh"
 #include "paint_mask.hh"
 #include "sculpt_automask.hh"
@@ -169,6 +173,10 @@ static wmOperatorStatus optimize_exec(bContext *C, wmOperator * /*op*/)
 
   BKE_sculptsession_free_pbvh(ob);
   DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+  if (ob.type == OB_MESH && ob.data) {
+    Mesh *mesh = id_cast<Mesh *>(ob.data);
+    BKE_mesh_batch_cache_dirty_tag(mesh, BKE_MESH_BATCH_DIRTY_SCULPT_CUSTOM);
+  }
 
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &ob);
 
@@ -514,6 +522,10 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
   if (true || /* flush_recalc || */ (ob.runtime->sculpt_session && ob.runtime->sculpt_session->bm))
   {
     DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+    if (ob.type == OB_MESH && ob.data) {
+      Mesh *mesh = id_cast<Mesh *>(ob.data);
+      BKE_mesh_batch_cache_dirty_tag(mesh, BKE_MESH_BATCH_DIRTY_SCULPT_CUSTOM);
+    }
   }
 
   if (mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) {
@@ -532,6 +544,10 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
   BKE_sculptsession_free(&ob);
 
   paint_cursor_delete_textures();
+
+  /* Clear sculpt custom overlay batch flags from static map before freeing caches.
+   * This prevents stale entries when re-entering sculpt mode. */
+  draw::DRW_mesh_batch_cache_clear_sculpt_custom_flags(*mesh, &ob);
 
   /* Never leave derived meshes behind. */
   BKE_object_free_derived_caches(&ob);

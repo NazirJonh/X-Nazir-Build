@@ -59,6 +59,8 @@ void DRW_curve_batch_cache_free(Curve *cu);
 void DRW_mesh_batch_cache_dirty_tag(Mesh *mesh, eMeshBatchDirtyMode mode);
 void DRW_mesh_batch_cache_validate(Mesh &mesh);
 void DRW_mesh_batch_cache_free(draw::MeshBatchCache *batch_cache);
+/* Clear sculpt custom flags from static map. Internal implementation. */
+void DRW_mesh_batch_cache_clear_sculpt_custom_flags(const Mesh &mesh, const Object *ob);
 
 void DRW_lattice_batch_cache_dirty_tag(Lattice *lt, int mode);
 void DRW_lattice_batch_cache_validate(Lattice *lt);
@@ -213,6 +215,51 @@ gpu::Batch *DRW_mesh_batch_cache_get_surface_sculpt(Object &object, Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_weights(Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_sculpt_overlays(Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_viewer_attribute(Mesh &mesh);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Custom Overlay API (Edit Mode & Sculpt Mode)
+ * \{ */
+
+/** Type of batch for custom overlay API. */
+enum class CustomOverlayType {
+  TypeTriangles,
+  TypeEdges,
+  TypeVertices,
+};
+
+/** Mode for custom overlay API. */
+enum class CustomOverlayMode {
+  ModeNone,
+  ModeEdit,
+  ModeSculpt,
+};
+
+/** Determine overlay mode based on object mode. */
+CustomOverlayMode get_custom_overlay_mode(const Object *ob);
+
+/**
+ * Universal function to get custom overlay batch.
+ * Works in both Edit Mode and Sculpt Mode.
+ * 
+ * @param mesh The mesh to get batch for.
+ * @param ob The object (used to determine mode). Can be nullptr.
+ * @param type Type of batch to get (Triangles, Edges, or Vertices).
+ * @return GPU batch or nullptr if not available.
+ */
+blender::gpu::Batch *DRW_mesh_batch_cache_get_custom_overlay(
+    Mesh &mesh, Object *ob, CustomOverlayType type);
+
+/** Convenience wrapper functions. */
+blender::gpu::Batch *DRW_mesh_batch_cache_get_custom_overlay_triangles(Mesh &mesh, Object *ob = nullptr);
+blender::gpu::Batch *DRW_mesh_batch_cache_get_custom_overlay_edges(Mesh &mesh, Object *ob = nullptr);
+blender::gpu::Batch *DRW_mesh_batch_cache_get_custom_overlay_vertices(Mesh &mesh, Object *ob = nullptr);
+
+/** Legacy Sculpt Mode functions (for backward compatibility). */
+blender::gpu::Batch *DRW_mesh_batch_cache_get_sculpt_custom_triangles(Mesh &mesh, Object *ob = nullptr);
+blender::gpu::Batch *DRW_mesh_batch_cache_get_sculpt_custom_edges(Mesh &mesh, Object *ob = nullptr);
+blender::gpu::Batch *DRW_mesh_batch_cache_get_sculpt_custom_vertices(Mesh &mesh, Object *ob = nullptr);
 
 /** \} */
 

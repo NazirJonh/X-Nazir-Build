@@ -1133,6 +1133,17 @@ bool bpygpu_shader_is_polyline(gpu::Shader *shader)
               GPU_shader_get_builtin_shader(GPU_SHADER_3D_POLYLINE_UNIFORM_COLOR));
 }
 
+bool bpygpu_shader_is_point(blender::gpu::Shader *shader)
+{
+  return ELEM(shader,
+              GPU_shader_get_builtin_shader(GPU_SHADER_3D_POINT_FLAT_COLOR),
+              GPU_shader_get_builtin_shader(GPU_SHADER_3D_POINT_UNIFORM_COLOR),
+              GPU_shader_get_builtin_shader(GPU_SHADER_3D_POINT_VARYING_SIZE_VARYING_COLOR),
+              GPU_shader_get_builtin_shader(GPU_SHADER_3D_POINT_UNIFORM_SIZE_UNIFORM_COLOR_AA),
+              GPU_shader_get_builtin_shader(GPU_SHADER_2D_POINT_UNIFORM_SIZE_UNIFORM_COLOR_AA),
+              GPU_shader_get_builtin_shader(GPU_SHADER_2D_POINT_UNIFORM_SIZE_UNIFORM_COLOR_OUTLINE_AA));
+}
+
 /** \} */
 
 }  // namespace blender

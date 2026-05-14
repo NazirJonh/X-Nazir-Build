@@ -238,7 +238,18 @@ static const char *pygpu_shader_check_compatibility(gpu::Batch *batch)
     return nullptr;
   }
 
-  /* Currently only POLYLINE shaders are checked. */
+  /* Check POINTS primitive type compatibility. */
+  if (batch->prim_type == GPU_PRIM_POINTS) {
+    if (!bpygpu_shader_is_point(batch->shader)) {
+      return "GPU_PRIM_POINTS requires a point shader (e.g., GPU_SHADER_3D_POINT_FLAT_COLOR, "
+             "GPU_SHADER_3D_POINT_UNIFORM_COLOR). Regular shaders cannot be used with POINTS "
+             "primitive type as they don't set gl_PointSize.";
+    }
+    /* Point shader compatibility check passed. */
+    return nullptr;
+  }
+
+  /* Check POLYLINE shader compatibility. */
   if (!bpygpu_shader_is_polyline(batch->shader)) {
     return nullptr;
   }
@@ -581,7 +592,10 @@ static int pygpu_batch__tp_is_gc(BPyGPUBatch *self)
 
 static void pygpu_batch__tp_dealloc(BPyGPUBatch *self)
 {
-  GPU_batch_discard(self->batch);
+  /* Only discard the batch if Python owns it. */
+  if (self->owns_batch) {
+    GPU_batch_discard(self->batch);
+  }
 
 #ifdef USE_GPU_PY_REFERENCES
   PyObject_GC_UnTrack(self);
@@ -697,6 +711,24 @@ PyObject *BPyGPUBatch_CreatePyObject(gpu::Batch *batch)
 #endif
 
   self->batch = batch;
+  self->owns_batch = true; /* Python owns the batch by default. */
+
+  return (PyObject *)self;
+}
+
+PyObject *BPyGPUBatch_CreatePyObject_Wrap(blender::gpu::Batch *batch)
+{
+  BPyGPUBatch *self;
+
+#ifdef USE_GPU_PY_REFERENCES
+  self = (BPyGPUBatch *)_PyObject_GC_New(&BPyGPUBatch_Type);
+  self->references = nullptr;
+#else
+  self = PyObject_New(BPyGPUBatch, &BPyGPUBatch_Type);
+#endif
+
+  self->batch = batch;
+  self->owns_batch = false; /* Python does NOT own the batch (external cache manages it). */
 
   return reinterpret_cast<PyObject *>(self);
 }

@@ -74,6 +74,7 @@ struct BPyGPUShaderCreateInfo {
 
 [[nodiscard]] PyObject *BPyGPUStageInterfaceInfo_CreatePyObject(GPUStageInterfaceInfo *interface);
 [[nodiscard]] PyObject *BPyGPUShaderCreateInfo_CreatePyObject(GPUShaderCreateInfo *info);
-[[nodiscard]] bool bpygpu_shader_is_polyline(gpu::Shader *shader);
+[[nodiscard]] bool bpygpu_shader_is_polyline(blender::gpu::Shader *shader);
+[[nodiscard]] bool bpygpu_shader_is_point(blender::gpu::Shader *shader);
 
 }  // namespace blender

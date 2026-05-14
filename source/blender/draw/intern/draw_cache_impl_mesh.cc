@@ -9,15 +9,22 @@
  */
 
 #include <array>
+#include <cstdio>
 #include <optional>
+
+#ifdef _WIN32
+#  include <windows.h>
+#endif
 
 #include "MEM_guardedalloc.h"
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 
+#include "DNA_ID.h"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -46,15 +53,43 @@
 #include "draw_cache_impl.hh" /* own include */
 #include "draw_context_private.hh"
 
+#include "DEG_depsgraph_query.hh"
+
 #include "mesh_extractors/extract_mesh.hh"
 
 namespace blender::draw {
+
+/* Static map to preserve sculpt custom batch flags across cache recreations and
+ * different mesh instances (evaluated vs original). Uses pointer to original Object
+ * as key (preferred) or original mesh ID as fallback. */
+static Map<const void *, DRWBatchFlag> sculpt_custom_flags_preserved;
+
+/* Get stable key for mesh. Uses original Object as key if available (preferred),
+ * otherwise falls back to original mesh ID. */
+static const void *get_mesh_key(const Mesh &mesh, const Object *ob = nullptr)
+{
+  if (ob) {
+    /* We have Object - use original Object as key (preferred) */
+    const Object *orig_ob = DEG_get_original(ob);
+    const void *key = orig_ob ? static_cast<const void *>(orig_ob) : static_cast<const void *>(ob);
+    // fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] get_mesh_key: ob=%p, orig_ob=%p, mesh.id=%p, key=%p (Object)\n",
+    //         ob, orig_ob, &mesh.id, key);
+    return key;
+  }
+  /* Fallback: use original mesh ID (for Python API where Object is not available) */
+  const ID *orig_id = DEG_get_original_id(&mesh.id);
+  const void *key = orig_id ? static_cast<const void *>(orig_id) : static_cast<const void *>(&mesh.id);
+  // fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] get_mesh_key: fallback, mesh.id=%p, orig_id=%p, key=%p (ID)\n",
+  //         &mesh.id, orig_id, key);
+  return key;
+}
 
 /* ---------------------------------------------------------------------- */
 /** \name Dependencies between buffer and batch
  * \{ */
 
 #define TRIS_PER_MAT_INDEX BUFFER_LEN
+
 
 static void mesh_batch_cache_clear(MeshBatchCache &cache);
 
@@ -392,20 +427,29 @@ static bool mesh_batch_cache_valid(Mesh &mesh)
   MeshBatchCache *cache = mesh.runtime->batch_cache;
 
   if (cache == nullptr) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] mesh_batch_cache_valid: cache is nullptr\n");
     return false;
   }
 
   /* NOTE: bke::pbvh::Tree draw data should not be checked here. */
 
   if (cache->is_editmode != (mesh.runtime->edit_mesh != nullptr)) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] mesh_batch_cache_valid: editmode mismatch "
+                    "(cache=%d, mesh=%d)\n",
+            cache->is_editmode, (mesh.runtime->edit_mesh != nullptr));
     return false;
   }
 
   if (cache->is_dirty) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] mesh_batch_cache_valid: cache is dirty\n");
     return false;
   }
 
-  if (cache->mat_len != BKE_id_material_used_with_fallback_eval(mesh.id)) {
+  const int current_mat_len = BKE_id_material_used_with_fallback_eval(mesh.id);
+  if (cache->mat_len != current_mat_len) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] mesh_batch_cache_valid: mat_len mismatch "
+                    "(cache=%d, mesh=%d)\n",
+            cache->mat_len, current_mat_len);
     return false;
   }
 
@@ -414,11 +458,46 @@ static bool mesh_batch_cache_valid(Mesh &mesh)
 
 static void mesh_batch_cache_init(Mesh &mesh)
 {
+  const DRWBatchFlag sculpt_custom_flags = MBC_SCULPT_CUSTOM_TRIANGLES | MBC_SCULPT_CUSTOM_EDGES |
+                                           MBC_SCULPT_CUSTOM_VERTICES;
+  DRWBatchFlag preserved_sculpt_custom = (DRWBatchFlag)0;
+  const void *mesh_key = get_mesh_key(mesh);
+  
+  /* Check static map for flags that were set by Python before cache was created */
+  if (sculpt_custom_flags_preserved.contains(mesh_key)) {
+    preserved_sculpt_custom = sculpt_custom_flags_preserved.lookup(mesh_key);
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] mesh_batch_cache_init: restored flags from static map: 0x%llx\n",
+            uint64_t(preserved_sculpt_custom));
+  }
+  
   if (!mesh.runtime->batch_cache) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] mesh_batch_cache_init: creating new cache, mesh_key=%p\n",
+            mesh_key);
     mesh.runtime->batch_cache = MEM_new<MeshBatchCache>(__func__);
   }
   else {
-    *mesh.runtime->batch_cache = {};
+    MeshBatchCache *old_cache = static_cast<MeshBatchCache *>(mesh.runtime->batch_cache);
+    /* Preserve sculpt custom flags from old cache - they may have been set by Python
+     * after the last batch creation and need to persist across cache resets. */
+    DRWBatchFlag old_sculpt_custom = old_cache->batch_requested & sculpt_custom_flags;
+    if (old_sculpt_custom != 0) {
+      preserved_sculpt_custom |= old_sculpt_custom;
+      /* Also save to static map */
+      sculpt_custom_flags_preserved.add_or_modify(
+          mesh_key,
+          [&](DRWBatchFlag *value) { *value = old_sculpt_custom; },
+          [&](DRWBatchFlag *value) { *value |= old_sculpt_custom; });
+    }
+
+    /* Clear old batch pointers before resetting cache to prevent access violations.
+     * Old batches will be freed when cache is reset, but we need to clear pointers
+     * to prevent stale references. */
+    old_cache->batch.sculpt_custom_triangles = nullptr;
+    old_cache->batch.sculpt_custom_edges = nullptr;
+    old_cache->batch.sculpt_custom_vertices = nullptr;
+
+    /* Reset cache - this will free old batches */
+    *old_cache = {};
   }
   MeshBatchCache *cache = mesh.runtime->batch_cache;
 
@@ -437,18 +516,32 @@ static void mesh_batch_cache_init(Mesh &mesh)
 
   cache->is_dirty = false;
   cache->batch_ready = DRWBatchFlag(0);
-  cache->batch_requested = DRWBatchFlag(0);
+  /* Restore preserved sculpt custom batch requests. These flags are set by Python
+   * and must persist until the batches are created and ready. */
+  cache->batch_requested = preserved_sculpt_custom;
 
   drw_mesh_weight_state_clear(&cache->weight_state);
 }
 
 void DRW_mesh_batch_cache_validate(Mesh &mesh)
 {
-  if (!mesh_batch_cache_valid(mesh)) {
+  /* If mesh has no runtime, we cannot create batch cache */
+  if (!mesh.runtime) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] validate: mesh.runtime is nullptr!\n");
+    return;
+  }
+  
+  bool is_valid = mesh_batch_cache_valid(mesh);
+  fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] validate: mesh=%p runtime=%p batch_cache=%p valid=%d\n",
+          &mesh, mesh.runtime, mesh.runtime ? mesh.runtime->batch_cache : nullptr, is_valid);
+  if (!is_valid) {
     if (mesh.runtime->batch_cache) {
       mesh_batch_cache_clear(*mesh.runtime->batch_cache);
     }
+    /* mesh_batch_cache_init will automatically preserve sculpt custom flags */
     mesh_batch_cache_init(mesh);
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] validate: after init, batch_cache=%p\n",
+            mesh.runtime->batch_cache);
   }
 }
 
@@ -552,6 +645,26 @@ void DRW_mesh_batch_cache_dirty_tag(Mesh *mesh, eMeshBatchDirtyMode mode)
       break;
     case BKE_MESH_BATCH_DIRTY_ALL:
       cache.is_dirty = true;
+      /* Also invalidate custom sculpt batches */
+      {
+        const DRWBatchFlag sculpt_custom_flags = MBC_SCULPT_CUSTOM_TRIANGLES |
+                                                 MBC_SCULPT_CUSTOM_EDGES |
+                                                 MBC_SCULPT_CUSTOM_VERTICES;
+        cache.batch_ready &= ~sculpt_custom_flags;
+        cache.batch.sculpt_custom_triangles = nullptr;
+        cache.batch.sculpt_custom_edges = nullptr;
+        cache.batch.sculpt_custom_vertices = nullptr;
+        /* Re-request batches so they will be recreated on next frame */
+        cache.batch_requested |= sculpt_custom_flags;
+        /* Also ensure flags are in preserved map so they persist across cache recreation */
+        if (mesh->runtime) {
+          const void *mesh_key = get_mesh_key(*mesh, nullptr);
+          sculpt_custom_flags_preserved.add_or_modify(
+              mesh_key,
+              [&](DRWBatchFlag *value) { *value = sculpt_custom_flags; },
+              [&](DRWBatchFlag *value) { *value |= sculpt_custom_flags; });
+        }
+      }
       break;
     case BKE_MESH_BATCH_DIRTY_SHADING:
       mesh_batch_cache_discard_shaded_tri(cache);
@@ -563,6 +676,90 @@ void DRW_mesh_batch_cache_dirty_tag(Mesh *mesh, eMeshBatchDirtyMode mode)
     case BKE_MESH_BATCH_DIRTY_UVEDIT_SELECT:
       discard_buffers(cache, {VBOType::EditUVData, VBOType::FaceDotEditUVData}, {});
       break;
+    case BKE_MESH_BATCH_DIRTY_SCULPT_CUSTOM: {
+      /* Invalidate only custom sculpt batches */
+      const DRWBatchFlag sculpt_custom_flags = MBC_SCULPT_CUSTOM_TRIANGLES |
+                                               MBC_SCULPT_CUSTOM_EDGES |
+                                               MBC_SCULPT_CUSTOM_VERTICES;
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:674\",\"message\":\"INVALIDATION: BKE_MESH_BATCH_DIRTY_SCULPT_CUSTOM\",\"data\":{\"mesh_id\":\"%p\",\"batch_ready_before\":\"0x%llx\",\"batch_requested_before\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\"}\n",
+                  counter++, mesh, (unsigned long long)cache.batch_ready, (unsigned long long)cache.batch_requested);
+          fclose(f);
+        }
+      }
+      // #endregion
+      cache.batch_ready &= ~sculpt_custom_flags;
+      /* Clear batch pointers */
+      cache.batch.sculpt_custom_triangles = nullptr;
+      cache.batch.sculpt_custom_edges = nullptr;
+      cache.batch.sculpt_custom_vertices = nullptr;
+      /* CRITICAL: Discard VBO/IBO buffers used by sculpt custom batches so they will be
+       * recreated with new geometry data. Sculpt custom batches use:
+       * - VBOType::Position (for vertex positions)
+       * - VBOType::CornerNormal (for normals)
+       * - IBOType::Tris (for triangles)
+       * - IBOType::Lines (for edges)
+       * - IBOType::Points (for vertices)
+       * 
+       * IMPORTANT: We only discard buffers in the Final buffer cache, as sculpt custom
+       * batches use BufferList::Final. We don't discard buffers used by other batches
+       * (e.g., MBC_SURFACE) to avoid unnecessary recreation. */
+      FOREACH_MESH_BUFFER_CACHE (cache, mbc) {
+        /* Remove VBO Position and CornerNormal - these are used by sculpt custom batches */
+        mbc->buff.vbos.remove(VBOType::Position);
+        mbc->buff.vbos.remove(VBOType::CornerNormal);
+        /* Remove IBO Tris, Lines, and Points - these are used by sculpt custom batches */
+        mbc->buff.ibos.remove(IBOType::Tris);
+        mbc->buff.ibos.remove(IBOType::Lines);
+        mbc->buff.ibos.remove(IBOType::Points);
+      }
+      /* Re-request batches so they will be recreated on next frame.
+       * Don't remove from preserved map - Python may still need these batches. */
+      cache.batch_requested |= sculpt_custom_flags;
+      /* Also ensure flags are in preserved map so they persist across cache recreation.
+       * IMPORTANT: We need to check both mesh.id key (used here) and Object key (used in create_requested).
+       * If flags exist with mesh.id key but Object key is available, migrate to Object key.
+       * This ensures consistency with DRW_mesh_batch_cache_create_requested which prefers Object key. */
+      if (mesh->runtime) {
+        const void *mesh_key_id = get_mesh_key(*mesh, nullptr);
+        /* Try to find Object key by checking if this mesh is used by any Object.
+         * We can't get Object directly here, but we can check if flags exist with Object key
+         * by looking for original mesh ID and finding associated Object. */
+        /* For now, add flags using mesh.id key, but also check if we need to migrate.
+         * The migration will happen in DRW_mesh_batch_cache_create_requested when Object is available. */
+        // #region agent log
+        {
+          static unsigned long long counter = 0;
+          FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+          if (f) {
+            fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:700\",\"message\":\"INVALIDATION: Adding flags to map (mesh.id key)\",\"data\":{\"mesh_key_id\":\"%p\",\"flags\":\"0x%llx\",\"map_size_before\":%zu},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"B\"}\n",
+                    counter++, mesh_key_id, (unsigned long long)sculpt_custom_flags, sculpt_custom_flags_preserved.size());
+            fclose(f);
+          }
+        }
+        // #endregion
+        sculpt_custom_flags_preserved.add_or_modify(
+            mesh_key_id,
+            [&](DRWBatchFlag *value) { *value = sculpt_custom_flags; },
+            [&](DRWBatchFlag *value) { *value |= sculpt_custom_flags; });
+        // #region agent log
+        {
+          static unsigned long long counter = 0;
+          FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+          if (f) {
+            fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:710\",\"message\":\"INVALIDATION: Flags added to map (mesh.id key)\",\"data\":{\"mesh_key_id\":\"%p\",\"map_size_after\":%zu,\"batch_ready_after\":\"0x%llx\",\"batch_requested_after\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"B\"}\n",
+                    counter++, mesh_key_id, sculpt_custom_flags_preserved.size(), (unsigned long long)cache.batch_ready, (unsigned long long)cache.batch_requested);
+            fclose(f);
+          }
+        }
+        // #endregion
+      }
+      break;
+    }
     default:
       BLI_assert(0);
   }
@@ -594,8 +791,26 @@ static void mesh_batch_cache_clear(MeshBatchCache &cache)
 
   cache.tris_per_mat = {};
 
+  /* Clear sculpt custom batch pointers first to prevent access violations.
+   * These batches may be shared with evaluated mesh cache and already freed.
+   * We need to save pointers before clearing to skip them in the loop below. */
+  gpu::Batch *sculpt_custom_triangles = cache.batch.sculpt_custom_triangles;
+  gpu::Batch *sculpt_custom_edges = cache.batch.sculpt_custom_edges;
+  gpu::Batch *sculpt_custom_vertices = cache.batch.sculpt_custom_vertices;
+  cache.batch.sculpt_custom_triangles = nullptr;
+  cache.batch.sculpt_custom_edges = nullptr;
+  cache.batch.sculpt_custom_vertices = nullptr;
+
   for (int i = 0; i < sizeof(cache.batch) / sizeof(void *); i++) {
     gpu::Batch **batch = reinterpret_cast<gpu::Batch **>(&cache.batch);
+    /* Skip sculpt custom batches - they may be shared with evaluated mesh cache
+     * and already freed. We clear pointers but don't try to free them here. */
+    if (batch[i] == sculpt_custom_triangles ||
+        batch[i] == sculpt_custom_edges ||
+        batch[i] == sculpt_custom_vertices) {
+      continue;
+    }
+    /* GPU_BATCH_DISCARD_SAFE already checks for nullptr, so it's safe to call */
     GPU_BATCH_DISCARD_SAFE(batch[i]);
   }
   for (const int i : cache.surface_per_mat.index_range()) {
@@ -617,6 +832,19 @@ void DRW_mesh_batch_cache_free(draw::MeshBatchCache *batch_cache)
 {
   mesh_batch_cache_clear(*batch_cache);
   MEM_delete(batch_cache);
+}
+
+/* Clear sculpt custom flags from static map for a specific mesh/object.
+ * Called when exiting sculpt mode to prevent stale entries.
+ * Implementation of public API in DRW_engine.hh. */
+void DRW_mesh_batch_cache_clear_sculpt_custom_flags(const Mesh &mesh, const Object *ob)
+{
+  const void *mesh_key = get_mesh_key(mesh, ob);
+  if (sculpt_custom_flags_preserved.contains(mesh_key)) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_clear_sculpt_custom_flags: "
+                    "clearing flags for mesh_key=%p\n", mesh_key);
+    sculpt_custom_flags_preserved.remove(mesh_key);
+  }
 }
 
 /** \} */
@@ -817,6 +1045,252 @@ gpu::Batch *DRW_mesh_batch_cache_get_surface_viewer_attribute(Mesh &mesh)
 }
 
 /** \} */
+
+/* ---------------------------------------------------------------------- */
+/** \name Sculpt Mode Custom Overlay API (for Python addons)
+ * \{ */
+
+/**
+ * Check if a batch is valid and safe to draw.
+ * Returns true if the batch has valid data (non-zero vertex or index count).
+ * 
+ * Safely handles cases where batch may have been freed (e.g., after cache recreation)
+ * by catching access violations on Windows using SEH.
+ */
+static bool is_batch_valid_for_drawing(gpu::Batch *batch)
+{
+  if (!batch) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] is_batch_valid_for_drawing: batch is null\n");
+    return false;
+  }
+
+#ifdef _WIN32
+  /* Use SEH to catch access violations on Windows. */
+  __try {
+#endif
+    /* Check procedural batch. */
+    if (batch->procedural_vertices >= 0) {
+      const bool valid = batch->procedural_vertices > 0;
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] is_batch_valid_for_drawing: procedural batch, "
+                      "procedural_vertices=%d, valid=%d\n",
+              batch->procedural_vertices, valid);
+      return valid;
+    }
+
+    /* Check indexed batch. */
+    if (batch->elem) {
+      gpu::IndexBuf *elem = batch->elem_();
+      if (!elem) {
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] is_batch_valid_for_drawing: elem_() returned null\n");
+        return false;
+      }
+      const uint32_t index_len = elem->index_len_get();
+      const bool is_init = elem->is_init();
+      const bool valid = index_len > 0 && is_init;
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] is_batch_valid_for_drawing: indexed batch, "
+                      "index_len=%u, is_init=%d, valid=%d\n",
+              index_len, is_init, valid);
+      return valid;
+    }
+
+    /* Check vertex-only batch. */
+    if (batch->verts_(0)) {
+      const uint vertex_len = GPU_vertbuf_get_vertex_len(batch->verts_(0));
+      const bool valid = vertex_len > 0;
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] is_batch_valid_for_drawing: vertex-only batch, "
+                      "vertex_len=%u, valid=%d\n",
+              vertex_len, valid);
+      return valid;
+    }
+
+    /* Batch has no valid data. */
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] is_batch_valid_for_drawing: batch has no valid data "
+                    "(no elem, no verts[0])\n");
+    return false;
+#ifdef _WIN32
+  }
+  __except (EXCEPTION_EXECUTE_HANDLER) {
+    /* Batch was likely freed - return false to indicate invalid batch. */
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] is_batch_valid_for_drawing: access violation "
+                    "accessing batch (likely freed), returning false\n");
+    return false;
+  }
+#endif
+}
+
+/* ---------------------------------------------------------------------- */
+/** \name Custom Overlay API Implementation
+ * \{ */
+
+/** Determine overlay mode based on object mode. */
+CustomOverlayMode get_custom_overlay_mode(const Object *ob)
+{
+  if (!ob) {
+    return CustomOverlayMode::ModeNone;
+  }
+
+  switch (ob->mode) {
+    case OB_MODE_EDIT:
+      return CustomOverlayMode::ModeEdit;
+    case OB_MODE_SCULPT:
+    case OB_MODE_WEIGHT_PAINT:
+    case OB_MODE_VERTEX_PAINT:
+    case OB_MODE_TEXTURE_PAINT:
+      return CustomOverlayMode::ModeSculpt;
+    default:
+      return CustomOverlayMode::ModeNone;
+  }
+}
+
+gpu::Batch *DRW_mesh_batch_cache_get_custom_overlay(
+    Mesh &mesh,
+    Object *ob,
+    CustomOverlayType type)
+{
+  /* If mesh has no runtime, we cannot access batch cache. This can happen
+   * when mesh is being created or destroyed. */
+  if (!mesh.runtime) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] get_custom_overlay: mesh.runtime is nullptr!\n");
+    return nullptr;
+  }
+
+  CustomOverlayMode mode = get_custom_overlay_mode(ob);
+  
+  DRW_mesh_batch_cache_validate(mesh);
+
+  fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] get_custom_overlay: post-validate mesh=%p runtime=%p batch_cache=%p\n",
+          &mesh, mesh.runtime, mesh.runtime ? mesh.runtime->batch_cache : nullptr);
+  
+  if (mode == CustomOverlayMode::ModeNone) {
+    return nullptr;
+  }
+  
+  /* Now get the cache (guaranteed to proceed if validate succeeded, or null if failed) */
+  MeshBatchCache *cache = mesh_batch_cache_get(mesh);
+  if (!cache) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_get_custom_overlay: failed to get cache after validation! mesh=%p\n", &mesh);
+    return nullptr;
+  }
+  
+  gpu::Batch **batch_ptr = nullptr;
+  DRWBatchFlag flag = DRWBatchFlag(0);
+  
+  switch (mode) {
+    case CustomOverlayMode::ModeEdit: {
+      switch (type) {
+        case CustomOverlayType::TypeTriangles:
+          batch_ptr = &cache->batch.edit_triangles;
+          flag = MBC_EDIT_TRIANGLES;
+          break;
+        case CustomOverlayType::TypeEdges:
+          batch_ptr = &cache->batch.edit_edges;
+          flag = MBC_EDIT_EDGES;
+          break;
+        case CustomOverlayType::TypeVertices:
+          batch_ptr = &cache->batch.edit_vertices;
+          flag = MBC_EDIT_VERTICES;
+          break;
+      }
+      break;
+    }
+    
+    case CustomOverlayMode::ModeSculpt: {
+      switch (type) {
+        case CustomOverlayType::TypeTriangles:
+          batch_ptr = &cache->batch.sculpt_custom_triangles;
+          flag = MBC_SCULPT_CUSTOM_TRIANGLES;
+          break;
+        case CustomOverlayType::TypeEdges:
+          batch_ptr = &cache->batch.sculpt_custom_edges;
+          flag = MBC_SCULPT_CUSTOM_EDGES;
+          break;
+        case CustomOverlayType::TypeVertices:
+          batch_ptr = &cache->batch.sculpt_custom_vertices;
+          flag = MBC_SCULPT_CUSTOM_VERTICES;
+          break;
+      }
+      break;
+    }
+    
+    case CustomOverlayMode::ModeNone:
+    default:
+      return nullptr;
+  }
+  
+  if (!batch_ptr) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_get_custom_overlay: batch_ptr is null (invalid type/mode mix?)\n");
+    return nullptr;
+  }
+  
+  cache->batch_requested |= flag;
+  
+  /* Mark cache as dirty to ensure batches are created on next draw call.
+   * This is necessary because the batch creation happens asynchronously in
+   * mesh_buffer_cache_create_requested which is called by the render engine.
+   * By marking dirty, we ensure the batches will be created on the next frame. */
+  cache->is_dirty = true;
+  
+  /* For Sculpt Custom batches, we also need to ensure flags are preserved in static map */
+  if (mode == CustomOverlayMode::ModeSculpt) {
+    const void *mesh_key = get_mesh_key(mesh, ob);
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_get_custom_overlay: adding flag 0x%llx for key %p, marked dirty\n",
+            uint64_t(flag), mesh_key);
+    sculpt_custom_flags_preserved.add_or_modify(
+        mesh_key,
+        [&](DRWBatchFlag *value) { *value = flag; },
+        [&](DRWBatchFlag *value) { *value |= flag; });
+  }
+
+  return DRW_batch_request(batch_ptr);
+}
+
+/* Wrapper functions implementation */
+gpu::Batch *DRW_mesh_batch_cache_get_custom_overlay_triangles(Mesh &mesh, Object *ob)
+{
+  return DRW_mesh_batch_cache_get_custom_overlay(mesh, ob, CustomOverlayType::TypeTriangles);
+}
+
+gpu::Batch *DRW_mesh_batch_cache_get_custom_overlay_edges(Mesh &mesh, Object *ob)
+{
+  return DRW_mesh_batch_cache_get_custom_overlay(mesh, ob, CustomOverlayType::TypeEdges);
+}
+
+gpu::Batch *DRW_mesh_batch_cache_get_custom_overlay_vertices(Mesh &mesh, Object *ob)
+{
+  return DRW_mesh_batch_cache_get_custom_overlay(mesh, ob, CustomOverlayType::TypeVertices);
+}
+
+/** \} */
+
+/* ---------------------------------------------------------------------- */
+/** \name Legacy Sculpt Mode API (redirects to universal API)
+ * \{ */
+
+gpu::Batch *DRW_mesh_batch_cache_get_sculpt_custom_triangles(Mesh &mesh, Object *ob)
+{
+  return DRW_mesh_batch_cache_get_custom_overlay(mesh, ob, CustomOverlayType::TypeTriangles);
+}
+
+
+gpu::Batch *DRW_mesh_batch_cache_get_sculpt_custom_edges(Mesh &mesh, Object *ob)
+{
+  return DRW_mesh_batch_cache_get_custom_overlay(mesh, ob, CustomOverlayType::TypeEdges);
+}
+  
+
+  
+
+  
+
+
+gpu::Batch *DRW_mesh_batch_cache_get_sculpt_custom_vertices(Mesh &mesh, Object *ob)
+{
+  return DRW_mesh_batch_cache_get_custom_overlay(mesh, ob, CustomOverlayType::TypeVertices);
+}
+
+/** \} */
+  
+
 
 /* ---------------------------------------------------------------------- */
 /** \name Edit Mode API
@@ -1069,11 +1543,489 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
 {
   const ToolSettings *ts = scene.toolsettings;
 
+  /* Validate cache before accessing it - this may recreate the cache! */
+  DRW_mesh_batch_cache_validate(mesh);
+  
   MeshBatchCache &cache = *mesh_batch_cache_get(mesh);
   bool cd_uv_update = false;
+  
+  /* Restore sculpt custom flags from static map if they were set by Python for a different mesh instance */
+  const DRWBatchFlag sculpt_custom_flags = MBC_SCULPT_CUSTOM_TRIANGLES | MBC_SCULPT_CUSTOM_EDGES |
+                                           MBC_SCULPT_CUSTOM_VERTICES;
+  /* Try to find preserved flags using both Object key (preferred) and mesh.id key (fallback).
+   * This is needed because:
+   * - Python API uses Object key (preferred)
+   * - DRW_mesh_batch_cache_dirty_tag uses mesh.id key (when Object is not available)
+   * - mesh_batch_cache_init uses mesh.id key (when Object is not available) */
+  const void *mesh_key_object = get_mesh_key(mesh, &ob);
+  const void *mesh_key_id = get_mesh_key(mesh, nullptr);
+  DRWBatchFlag preserved = (DRWBatchFlag)0;
+  const void *found_key = nullptr;
+  
+  // #region agent log
+  {
+    static unsigned long long counter = 0;
+    FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+    if (f) {
+      fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1536\",\"message\":\"LOOKUP: Checking map for flags\",\"data\":{\"mesh_key_object\":\"%p\",\"mesh_key_id\":\"%p\",\"map_size\":%zu,\"contains_object\":%s,\"contains_id\":%s},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"B\"}\n",
+              counter++, mesh_key_object, mesh_key_id, sculpt_custom_flags_preserved.size(),
+              sculpt_custom_flags_preserved.contains(mesh_key_object) ? "true" : "false",
+              sculpt_custom_flags_preserved.contains(mesh_key_id) ? "true" : "false");
+      fclose(f);
+    }
+  }
+  // #endregion
+  /* First try Object key (preferred) */
+  if (sculpt_custom_flags_preserved.contains(mesh_key_object)) {
+    preserved = sculpt_custom_flags_preserved.lookup(mesh_key_object);
+    found_key = mesh_key_object;
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_create_requested: found in map using Object key=%p, preserved=0x%llx\n",
+            found_key, uint64_t(preserved));
+  }
+  /* Fallback to mesh.id key if Object key not found */
+  else if (mesh_key_id != mesh_key_object && sculpt_custom_flags_preserved.contains(mesh_key_id)) {
+    preserved = sculpt_custom_flags_preserved.lookup(mesh_key_id);
+    found_key = mesh_key_id;
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_create_requested: found in map using mesh.id key=%p, preserved=0x%llx\n",
+            found_key, uint64_t(preserved));
+    /* Migrate to Object key for future lookups (preferred) */
+    sculpt_custom_flags_preserved.add_or_modify(
+        mesh_key_object,
+        [&](DRWBatchFlag *value) { *value = preserved; },
+        [&](DRWBatchFlag *value) { *value |= preserved; });
+    sculpt_custom_flags_preserved.remove(mesh_key_id);
+    // #region agent log
+    {
+      static unsigned long long counter = 0;
+      FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+      if (f) {
+        fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1554\",\"message\":\"MIGRATION: Migrated flags from mesh.id to Object key\",\"data\":{\"mesh_key_id\":\"%p\",\"mesh_key_object\":\"%p\",\"preserved\":\"0x%llx\",\"map_size_after\":%zu},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"B\"}\n",
+                counter++, mesh_key_id, mesh_key_object, (unsigned long long)preserved, sculpt_custom_flags_preserved.size());
+        fclose(f);
+      }
+    }
+    // #endregion
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_create_requested: migrated flags from mesh.id key to Object key\n");
+  }
+  
+  fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_create_requested: checking map, "
+                  "mesh_key_object=%p, mesh_key_id=%p, map_size=%zu, found_key=%p\n",
+          mesh_key_object, mesh_key_id, sculpt_custom_flags_preserved.size(), found_key);
+  
+  if (found_key != nullptr) {
+    
+    /* Check which batch_ready flags actually have valid batches.
+     * IMPORTANT: Python works with original mesh, so we need to check original mesh cache,
+     * not evaluated mesh cache. After cache recreation, batch_ready may be set but batches may be freed. */
+    DRWBatchFlag valid_batch_ready = (DRWBatchFlag)0;
+    Mesh *orig_mesh = BKE_object_get_original_mesh(&ob);
+    MeshBatchCache *orig_cache = nullptr;
+    if (orig_mesh && orig_mesh != &mesh && orig_mesh->runtime) {
+      DRW_mesh_batch_cache_validate(*orig_mesh);
+      orig_cache = mesh_batch_cache_get(*orig_mesh);
+    }
+    
+    /* Check original mesh cache if it exists, otherwise check evaluated mesh cache.
+     * IMPORTANT: We need to check BOTH caches because:
+     * - Original mesh cache is used by Python API
+     * - Evaluated mesh cache is used for batch creation (batches_to_create calculation)
+     * - If either cache has invalid batches, we need to clear batch_ready in BOTH */
+    
+    /* IMPORTANT: Check evaluated mesh cache FIRST, because if batch_ready is cleared there
+     * (e.g., after invalidation), batches should NOT be considered valid, even if they are
+     * technically valid in original cache. This ensures that after invalidation, batches
+     * are recreated even if they still exist in original cache. */
+    
+    /* First check original mesh cache */
+    // #region agent log
+    {
+      static unsigned long long counter = 0;
+      FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+      if (f) {
+        fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1540\",\"message\":\"VALIDATION: Starting batch validation\",\"data\":{\"orig_cache\":%s,\"orig_batch_ready\":\"0x%llx\",\"eval_batch_ready\":\"0x%llx\",\"preserved\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"C\"}\n",
+                counter++, orig_cache ? "true" : "false",
+                orig_cache ? (unsigned long long)orig_cache->batch_ready : 0ULL,
+                (unsigned long long)cache.batch_ready, (unsigned long long)preserved);
+        fclose(f);
+      }
+    }
+    // #endregion
+    
+    /* CRITICAL: If original cache has batch_ready cleared (indicating invalidation),
+     * we MUST also clear batch_ready in evaluated cache, even if batches still exist.
+     * This ensures that after invalidation, batches are recreated even if they are
+     * technically valid in evaluated cache.
+     * IMPORTANT: We must also clear batch pointers to prevent re-initialization of
+     * already initialized batches, which would cause GPU_batch_init_ex() assert. */
+    if (orig_cache && (orig_cache->batch_ready & sculpt_custom_flags) == 0) {
+      /* Original cache has been invalidated - clear batch_ready in evaluated cache too */
+      DRWBatchFlag eval_batch_ready_before = cache.batch_ready;
+      /* Clear batch pointers BEFORE clearing batch_ready to prevent re-initialization */
+      if ((eval_batch_ready_before & MBC_SCULPT_CUSTOM_TRIANGLES) != 0) {
+        cache.batch.sculpt_custom_triangles = nullptr;
+      }
+      if ((eval_batch_ready_before & MBC_SCULPT_CUSTOM_EDGES) != 0) {
+        cache.batch.sculpt_custom_edges = nullptr;
+      }
+      if ((eval_batch_ready_before & MBC_SCULPT_CUSTOM_VERTICES) != 0) {
+        cache.batch.sculpt_custom_vertices = nullptr;
+      }
+      cache.batch_ready &= ~sculpt_custom_flags;
+      
+      /* CRITICAL: Also discard VBO/IBO buffers in evaluated cache so they will be
+       * recreated with new geometry data. This ensures that when batches are recreated
+       * in evaluated cache, they use fresh VBO/IBO with updated geometry, not stale buffers. */
+      FOREACH_MESH_BUFFER_CACHE (cache, mbc) {
+        mbc->buff.vbos.remove(VBOType::Position);
+        mbc->buff.vbos.remove(VBOType::CornerNormal);
+        mbc->buff.ibos.remove(IBOType::Tris);
+        mbc->buff.ibos.remove(IBOType::Lines);
+        mbc->buff.ibos.remove(IBOType::Points);
+      }
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1630\",\"message\":\"INVALIDATION_SYNC: Clearing eval batch_ready and VBO/IBO after orig invalidation\",\"data\":{\"orig_batch_ready\":\"0x%llx\",\"eval_batch_ready_before\":\"0x%llx\",\"eval_batch_ready_after\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"I\"}\n",
+                  counter++, (unsigned long long)orig_cache->batch_ready, (unsigned long long)eval_batch_ready_before, (unsigned long long)cache.batch_ready);
+          fclose(f);
+        }
+      }
+      // #endregion
+    }
+    
+    /* Check evaluated mesh cache FIRST - if batch_ready is not set here, batches are invalid
+     * even if they exist in original cache. This handles the case where invalidation cleared
+     * batch_ready in evaluated cache but batches still exist in original cache. */
+    if (cache.batch_ready & MBC_SCULPT_CUSTOM_TRIANGLES) {
+      bool is_valid = cache.batch.sculpt_custom_triangles && is_batch_valid_for_drawing(cache.batch.sculpt_custom_triangles);
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1571\",\"message\":\"VALIDATION: Checking eval TRIANGLES\",\"data\":{\"batch_ptr\":\"%p\",\"is_valid\":%s,\"batch_ready\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"C\"}\n",
+                  counter++, cache.batch.sculpt_custom_triangles, is_valid ? "true" : "false",
+                  (unsigned long long)cache.batch_ready);
+          fclose(f);
+        }
+      }
+      // #endregion
+      if (is_valid) {
+        valid_batch_ready |= MBC_SCULPT_CUSTOM_TRIANGLES;
+      }
+      else {
+        /* Batch marked as ready but invalid - clear the flag in evaluated cache */
+        cache.batch_ready &= ~MBC_SCULPT_CUSTOM_TRIANGLES;
+        /* Also clear in original cache if it exists */
+        if (orig_cache) {
+          orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_TRIANGLES;
+        }
+      }
+    }
+    if (cache.batch_ready & MBC_SCULPT_CUSTOM_EDGES) {
+      bool is_valid = cache.batch.sculpt_custom_edges && is_batch_valid_for_drawing(cache.batch.sculpt_custom_edges);
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1584\",\"message\":\"VALIDATION: Checking eval EDGES\",\"data\":{\"batch_ptr\":\"%p\",\"is_valid\":%s},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"C\"}\n",
+                  counter++, cache.batch.sculpt_custom_edges, is_valid ? "true" : "false");
+          fclose(f);
+        }
+      }
+      // #endregion
+      if (is_valid) {
+        valid_batch_ready |= MBC_SCULPT_CUSTOM_EDGES;
+      }
+      else {
+        cache.batch_ready &= ~MBC_SCULPT_CUSTOM_EDGES;
+        if (orig_cache) {
+          orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_EDGES;
+        }
+      }
+    }
+    if (cache.batch_ready & MBC_SCULPT_CUSTOM_VERTICES) {
+      bool is_valid = cache.batch.sculpt_custom_vertices && is_batch_valid_for_drawing(cache.batch.sculpt_custom_vertices);
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1595\",\"message\":\"VALIDATION: Checking eval VERTICES\",\"data\":{\"batch_ptr\":\"%p\",\"is_valid\":%s},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"C\"}\n",
+                  counter++, cache.batch.sculpt_custom_vertices, is_valid ? "true" : "false");
+          fclose(f);
+        }
+      }
+      // #endregion
+      if (is_valid) {
+        valid_batch_ready |= MBC_SCULPT_CUSTOM_VERTICES;
+      }
+      else {
+        cache.batch_ready &= ~MBC_SCULPT_CUSTOM_VERTICES;
+        if (orig_cache) {
+          orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_VERTICES;
+        }
+      }
+    }
+    
+    /* Also check original mesh cache - but only if evaluated cache has batch_ready set.
+     * This ensures that if evaluated cache was invalidated (batch_ready cleared), batches
+     * are not considered valid even if they exist in original cache. */
+    if (orig_cache) {
+      /* Only check original cache if evaluated cache also has batch_ready set.
+       * If evaluated cache doesn't have batch_ready, batches are invalid regardless. */
+      if (orig_cache->batch_ready & MBC_SCULPT_CUSTOM_TRIANGLES) {
+        /* Only consider valid if evaluated cache also has batch_ready set */
+        if (cache.batch_ready & MBC_SCULPT_CUSTOM_TRIANGLES) {
+          bool is_valid = orig_cache->batch.sculpt_custom_triangles && is_batch_valid_for_drawing(orig_cache->batch.sculpt_custom_triangles);
+          // #region agent log
+          {
+            static unsigned long long counter = 0;
+            FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+            if (f) {
+              fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1543\",\"message\":\"VALIDATION: Checking orig TRIANGLES\",\"data\":{\"batch_ptr\":\"%p\",\"is_valid\":%s,\"batch_ready\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"C\"}\n",
+                      counter++, orig_cache->batch.sculpt_custom_triangles, is_valid ? "true" : "false",
+                      (unsigned long long)orig_cache->batch_ready);
+              fclose(f);
+            }
+          }
+          // #endregion
+          if (is_valid) {
+            valid_batch_ready |= MBC_SCULPT_CUSTOM_TRIANGLES;
+          }
+          else {
+            orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_TRIANGLES;
+          }
+        }
+        else {
+          /* Evaluated cache doesn't have batch_ready - clear in original cache too */
+          orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_TRIANGLES;
+        }
+      }
+      if (orig_cache->batch_ready & MBC_SCULPT_CUSTOM_EDGES) {
+        if (cache.batch_ready & MBC_SCULPT_CUSTOM_EDGES) {
+          bool is_valid = orig_cache->batch.sculpt_custom_edges && is_batch_valid_for_drawing(orig_cache->batch.sculpt_custom_edges);
+          // #region agent log
+          {
+            static unsigned long long counter = 0;
+            FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+            if (f) {
+              fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1551\",\"message\":\"VALIDATION: Checking orig EDGES\",\"data\":{\"batch_ptr\":\"%p\",\"is_valid\":%s},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"C\"}\n",
+                      counter++, orig_cache->batch.sculpt_custom_edges, is_valid ? "true" : "false");
+              fclose(f);
+            }
+          }
+          // #endregion
+          if (is_valid) {
+            valid_batch_ready |= MBC_SCULPT_CUSTOM_EDGES;
+          }
+          else {
+            orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_EDGES;
+          }
+        }
+        else {
+          orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_EDGES;
+        }
+      }
+      if (orig_cache->batch_ready & MBC_SCULPT_CUSTOM_VERTICES) {
+        if (cache.batch_ready & MBC_SCULPT_CUSTOM_VERTICES) {
+          bool is_valid = orig_cache->batch.sculpt_custom_vertices && is_batch_valid_for_drawing(orig_cache->batch.sculpt_custom_vertices);
+          // #region agent log
+          {
+            static unsigned long long counter = 0;
+            FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+            if (f) {
+              fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1559\",\"message\":\"VALIDATION: Checking orig VERTICES\",\"data\":{\"batch_ptr\":\"%p\",\"is_valid\":%s},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"C\"}\n",
+                      counter++, orig_cache->batch.sculpt_custom_vertices, is_valid ? "true" : "false");
+              fclose(f);
+            }
+          }
+          // #endregion
+          if (is_valid) {
+            valid_batch_ready |= MBC_SCULPT_CUSTOM_VERTICES;
+          }
+          else {
+            orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_VERTICES;
+          }
+        }
+        else {
+          orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_VERTICES;
+        }
+      }
+    }
+    
+    /* CRITICAL: If flags are in preserved map, it means invalidation occurred.
+     * In this case, batches should NOT be considered valid, even if batch_ready is set,
+     * because the evaluated mesh may have been recreated and batches may be stale.
+     * Only consider batches valid if they were created AFTER the last invalidation.
+     * 
+     * IMPORTANT: The presence of flags in preserved map is the PRIMARY indicator of invalidation.
+     * We check this FIRST, before checking batch_ready flags, because:
+     * - After invalidation, orig_batch_ready is cleared immediately
+     * - eval_batch_ready may be cleared by INVALIDATION_SYNC (line 1617)
+     * - But if INVALIDATION_SYNC hasn't run yet, eval_batch_ready may still be set
+     * - So we use preserved map as the definitive source of truth for invalidation state */
+    // #region agent log
+    {
+      static unsigned long long counter = 0;
+      FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+      if (f) {
+        fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1840\",\"message\":\"INVALIDATION_CHECK: Before invalidation check\",\"data\":{\"orig_cache\":%s,\"orig_batch_ready\":\"0x%llx\",\"eval_batch_ready\":\"0x%llx\",\"valid_batch_ready\":\"0x%llx\",\"preserved\":\"0x%llx\",\"found_key\":\"%p\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\"}\n",
+                counter++, orig_cache ? "true" : "false",
+                orig_cache ? (unsigned long long)orig_cache->batch_ready : 0ULL,
+                (unsigned long long)cache.batch_ready, (unsigned long long)valid_batch_ready,
+                (unsigned long long)preserved, found_key);
+        fclose(f);
+      }
+    }
+    // #endregion
+    /* PRIMARY CHECK: If flags are in preserved map, invalidation occurred.
+     * Clear valid_batch_ready to force recreation, regardless of batch_ready state. */
+    if (found_key != nullptr && (preserved & sculpt_custom_flags) != 0) {
+      /* Flags are in preserved map - invalidation occurred.
+       * Clear valid_batch_ready to force recreation, even if batches appear valid. */
+      DRWBatchFlag valid_batch_ready_before = valid_batch_ready;
+      valid_batch_ready &= ~sculpt_custom_flags;
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1860\",\"message\":\"INVALIDATION_CHECK: Invalidation detected (flags in preserved map) - clearing valid_batch_ready\",\"data\":{\"orig_batch_ready\":\"0x%llx\",\"eval_batch_ready\":\"0x%llx\",\"valid_batch_ready_before\":\"0x%llx\",\"valid_batch_ready_after\":\"0x%llx\",\"preserved\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\"}\n",
+                  counter++, orig_cache ? (unsigned long long)orig_cache->batch_ready : 0ULL, (unsigned long long)cache.batch_ready,
+                  (unsigned long long)valid_batch_ready_before, (unsigned long long)valid_batch_ready, (unsigned long long)preserved);
+          fclose(f);
+        }
+      }
+      // #endregion
+    }
+    /* SECONDARY CHECK: If original cache doesn't have batch_ready but evaluated cache does,
+     * it also means invalidation occurred (original was invalidated, but evaluated wasn't synced yet). */
+    else if (orig_cache && (orig_cache->batch_ready & sculpt_custom_flags) == 0 && 
+             (cache.batch_ready & sculpt_custom_flags) != 0) {
+      /* Original cache doesn't have batch_ready, but evaluated cache does.
+       * This means invalidation occurred and batches in evaluated cache are stale.
+       * Clear valid_batch_ready to force recreation. */
+      DRWBatchFlag valid_batch_ready_before = valid_batch_ready;
+      valid_batch_ready &= ~sculpt_custom_flags;
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1875\",\"message\":\"INVALIDATION_CHECK: Invalidation detected (orig cleared, eval not) - clearing valid_batch_ready\",\"data\":{\"orig_batch_ready\":\"0x%llx\",\"eval_batch_ready\":\"0x%llx\",\"valid_batch_ready_before\":\"0x%llx\",\"valid_batch_ready_after\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\"}\n",
+                  counter++, (unsigned long long)orig_cache->batch_ready, (unsigned long long)cache.batch_ready,
+                  (unsigned long long)valid_batch_ready_before, (unsigned long long)valid_batch_ready);
+          fclose(f);
+        }
+      }
+      // #endregion
+    }
+    else {
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1885\",\"message\":\"INVALIDATION_CHECK: No invalidation detected\",\"data\":{\"orig_cache\":%s,\"orig_batch_ready\":\"0x%llx\",\"eval_batch_ready\":\"0x%llx\",\"valid_batch_ready\":\"0x%llx\",\"found_key\":\"%p\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\"}\n",
+                  counter++, orig_cache ? "true" : "false",
+                  orig_cache ? (unsigned long long)orig_cache->batch_ready : 0ULL,
+                  (unsigned long long)cache.batch_ready, (unsigned long long)valid_batch_ready, found_key);
+          fclose(f);
+        }
+      }
+      // #endregion
+    }
+    
+    /* Only restore flags that are not already valid */
+    const DRWBatchFlag preserved_unprocessed = preserved & ~valid_batch_ready;
+    // #region agent log
+    {
+      static unsigned long long counter = 0;
+      FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+      if (f) {
+        fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1625\",\"message\":\"VALIDATION: Calculated preserved_unprocessed\",\"data\":{\"valid_batch_ready\":\"0x%llx\",\"preserved\":\"0x%llx\",\"preserved_unprocessed\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"D\"}\n",
+                counter++, (unsigned long long)valid_batch_ready, (unsigned long long)preserved, (unsigned long long)preserved_unprocessed);
+        fclose(f);
+      }
+    }
+    // #endregion
+    if (preserved_unprocessed != 0) {
+      DRWBatchFlag batch_requested_before = cache.batch_requested;
+      cache.batch_requested |= preserved_unprocessed;
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1830\",\"message\":\"RESTORE: Restoring flags to batch_requested\",\"data\":{\"preserved_unprocessed\":\"0x%llx\",\"batch_requested_before\":\"0x%llx\",\"batch_requested_after\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"D\"}\n",
+                  counter++, (unsigned long long)preserved_unprocessed, (unsigned long long)batch_requested_before, (unsigned long long)cache.batch_requested);
+          fclose(f);
+        }
+      }
+      // #endregion
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_create_requested: restored flags from map: 0x%llx "
+                      "(valid_batch_ready=0x%llx, preserved=0x%llx, check_cache=%s)\n",
+              uint64_t(preserved_unprocessed), uint64_t(valid_batch_ready), uint64_t(preserved),
+              orig_cache ? "original" : "evaluated");
+    }
+    else {
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1840\",\"message\":\"RESTORE: All flags already processed, NOT restoring\",\"data\":{\"valid_batch_ready\":\"0x%llx\",\"preserved\":\"0x%llx\",\"preserved_unprocessed\":\"0x0\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"D\"}\n",
+                  counter++, (unsigned long long)valid_batch_ready, (unsigned long long)preserved);
+          fclose(f);
+        }
+      }
+      // #endregion
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_create_requested: found in map but all flags already processed "
+                      "(valid_batch_ready=0x%llx, preserved=0x%llx, check_cache=%s)\n",
+              uint64_t(valid_batch_ready), uint64_t(preserved),
+              orig_cache ? "original" : "evaluated");
+    }
+  }
+  else {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_create_requested: NOT found in map for "
+                    "mesh_key_object=%p, mesh_key_id=%p\n",
+            mesh_key_object, mesh_key_id);
+  }
 
-  /* Early out */
+  fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] DRW_mesh_batch_cache_create_requested: "
+                  "batch_requested=0x%llx, batch_ready=0x%llx, mesh.id=%p, mesh_key_object=%p\n",
+          uint64_t(cache.batch_requested), uint64_t(cache.batch_ready), &mesh.id, mesh_key_object);
+
+  // #region agent log
+  {
+    static unsigned long long counter = 0;
+    FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+    if (f) {
+      fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1877\",\"message\":\"EARLY_OUT: Checking if should early out\",\"data\":{\"batch_requested\":\"0x%llx\",\"batch_ready\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"D\"}\n",
+              counter++, (unsigned long long)cache.batch_requested, (unsigned long long)cache.batch_ready);
+      fclose(f);
+    }
+  }
+  // #endregion
+
+  /* Early out if nothing is requested */
   if (cache.batch_requested == 0) {
+    // #region agent log
+    {
+      static unsigned long long counter = 0;
+      FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+      if (f) {
+        fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:1942\",\"message\":\"EARLY_OUT: Early out - batch_requested is 0\",\"data\":{\"found_key\":\"%p\",\"preserved\":\"0x%llx\",\"map_size\":%zu},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"D\"}\n",
+                counter++, found_key, (unsigned long long)preserved, sculpt_custom_flags_preserved.size());
+        fclose(f);
+      }
+    }
+    // #endregion
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Early out: batch_requested is 0\n");
     return;
   }
 
@@ -1084,6 +2036,11 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
 
   const bool is_editmode = ob.mode == OB_MODE_EDIT;
 
+  /* Sculpt custom batches use a different request/ready lifecycle:
+   * - Normal batches: requested and created in the same frame
+   * - Sculpt custom: requested by Python in POST_VIEW (after batch creation),
+   *   so flags persist in batch_requested across frames until batches are ready.
+   * We include sculpt custom flags in batch_requested for processing. */
   DRWBatchFlag batch_requested = cache.batch_requested;
   cache.batch_requested = DRWBatchFlag(0);
 
@@ -1238,7 +2195,24 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                   mesh.runtime->wrapper_type == ME_WRAPPER_TYPE_BMESH);
   }
 
+  /* Calculate which batches need to be created: requested but not ready yet */
   const DRWBatchFlag batches_to_create = batch_requested & ~cache.batch_ready;
+  // #region agent log
+  {
+    static unsigned long long counter = 0;
+    FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+    if (f) {
+      fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:2126\",\"message\":\"BATCHES_TO_CREATE: Calculated batches_to_create\",\"data\":{\"batch_requested\":\"0x%llx\",\"batch_ready\":\"0x%llx\",\"batches_to_create\":\"0x%llx\",\"sculpt_custom_in_batches_to_create\":\"0x%llx\",\"sculpt_custom_flags\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"F\"}\n",
+              counter++, (unsigned long long)batch_requested, (unsigned long long)cache.batch_ready, (unsigned long long)batches_to_create, (unsigned long long)(batches_to_create & sculpt_custom_flags), (unsigned long long)sculpt_custom_flags);
+      fclose(f);
+    }
+  }
+  // #endregion
+  fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] batches_to_create=0x%llx (batch_requested=0x%llx, batch_ready=0x%llx)\n",
+          uint64_t(batches_to_create), uint64_t(batch_requested), uint64_t(cache.batch_ready));
+  fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Sculpt custom flags: TRIANGLES=0x%llx, EDGES=0x%llx, VERTICES=0x%llx\n",
+          uint64_t(MBC_SCULPT_CUSTOM_TRIANGLES), uint64_t(MBC_SCULPT_CUSTOM_EDGES),
+          uint64_t(MBC_SCULPT_CUSTOM_VERTICES));
 
   const bool do_subdivision = BKE_subsurf_modifier_has_gpu_subdiv(&mesh);
 
@@ -1250,6 +2224,7 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
     BufferList list;
     std::optional<IBOType> ibo;
     Vector<VBOType> vbos;
+    DRWBatchFlag flag; /* Flag to set in batch_ready when batch is successfully created */
   };
   Vector<BatchCreateData> batch_info;
 
@@ -1260,7 +2235,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                             GPU_PRIM_TRIS,
                             list,
                             IBOType::Tris,
-                            {VBOType::CornerNormal, VBOType::Position}};
+                            {VBOType::CornerNormal, VBOType::Position},
+                            (DRWBatchFlag)0};
       if (!cache.cd_used.uv.is_empty()) {
         batch.vbos.append(VBOType::UVs);
       }
@@ -1274,7 +2250,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                             GPU_PRIM_TRIS,
                             list,
                             IBOType::Tris,
-                            {VBOType::Position, VBOType::PaintOverlayFlag}};
+                            {VBOType::Position, VBOType::PaintOverlayFlag},
+                            (DRWBatchFlag)0};
       batch_info.append(std::move(batch));
     }
     if (batches_to_create & MBC_VIEWER_ATTRIBUTE_OVERLAY) {
@@ -1282,68 +2259,180 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                          GPU_PRIM_TRIS,
                          list,
                          IBOType::Tris,
-                         {VBOType::Position, VBOType::AttrViewer}});
+                         {VBOType::Position, VBOType::AttrViewer},
+                         (DRWBatchFlag)0});
     }
     if (batches_to_create & MBC_ALL_VERTS) {
       batch_info.append(
-          {*cache.batch.all_verts, GPU_PRIM_POINTS, list, std::nullopt, {VBOType::Position}});
+          {*cache.batch.all_verts, GPU_PRIM_POINTS, list, std::nullopt, {VBOType::Position}, (DRWBatchFlag)0});
     }
     if (batches_to_create & MBC_PAINT_OVERLAY_VERTS) {
       batch_info.append({*cache.batch.paint_overlay_verts,
                          GPU_PRIM_POINTS,
                          list,
                          std::nullopt,
-                         {VBOType::Position, VBOType::PaintOverlayFlag}});
+                         {VBOType::Position, VBOType::PaintOverlayFlag},
+                         (DRWBatchFlag)0});
     }
     if (batches_to_create & MBC_SCULPT_OVERLAYS) {
       batch_info.append({*cache.batch.sculpt_overlays,
                          GPU_PRIM_TRIS,
                          list,
                          IBOType::Tris,
-                         {VBOType::Position, VBOType::SculptData}});
+                         {VBOType::Position, VBOType::SculptData},
+                         (DRWBatchFlag)0});
+    }
+    /* Sculpt Mode Custom Overlays (for Python addons) */
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Checking MBC_SCULPT_CUSTOM_TRIANGLES: "
+                    "flag=0x%llx, batches_to_create=0x%llx, result=%d\n",
+            uint64_t(MBC_SCULPT_CUSTOM_TRIANGLES), uint64_t(batches_to_create),
+            (batches_to_create & MBC_SCULPT_CUSTOM_TRIANGLES) != 0);
+    if (batches_to_create & MBC_SCULPT_CUSTOM_TRIANGLES) {
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:2186\",\"message\":\"CREATING: Starting SCULPT_CUSTOM_TRIANGLES batch creation\",\"data\":{\"batches_to_create\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"F\"}\n",
+                  counter++, (unsigned long long)batches_to_create);
+          fclose(f);
+        }
+      }
+      // #endregion
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Creating SCULPT_CUSTOM_TRIANGLES batch, flag=0x%llx\n",
+              uint64_t(MBC_SCULPT_CUSTOM_TRIANGLES));
+      DRW_batch_request(&cache.batch.sculpt_custom_triangles);
+      if (!cache.batch.sculpt_custom_triangles) {
+        // #region agent log
+        {
+          static unsigned long long counter = 0;
+          FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+          if (f) {
+            fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:2191\",\"message\":\"CREATING: ERROR - sculpt_custom_triangles batch is nullptr\",\"data\":{},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"F\"}\n",
+                    counter++);
+            fclose(f);
+          }
+        }
+        // #endregion
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] ERROR: sculpt_custom_triangles batch is nullptr!\n");
+      }
+      else {
+        batch_info.append({*cache.batch.sculpt_custom_triangles,
+                           GPU_PRIM_TRIS,
+                           list,
+                           IBOType::Tris,
+                           {VBOType::Position, VBOType::CornerNormal},
+                           MBC_SCULPT_CUSTOM_TRIANGLES});
+        // #region agent log
+        {
+          static unsigned long long counter = 0;
+          FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+          if (f) {
+            fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:2194\",\"message\":\"CREATING: Added SCULPT_CUSTOM_TRIANGLES to batch_info\",\"data\":{\"batch_info_size\":%zu},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"F\"}\n",
+                    counter++, batch_info.size());
+            fclose(f);
+          }
+        }
+        // #endregion
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Added batch_info entry, batch_info.size()=%zu\n",
+                batch_info.size());
+      }
+    }
+    else {
+      // #region agent log
+      {
+        static unsigned long long counter = 0;
+        FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+        if (f) {
+          fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:2205\",\"message\":\"CREATING: MBC_SCULPT_CUSTOM_TRIANGLES NOT in batches_to_create\",\"data\":{\"batches_to_create\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"F\"}\n",
+                  counter++, (unsigned long long)batches_to_create);
+          fclose(f);
+        }
+      }
+      // #endregion
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] MBC_SCULPT_CUSTOM_TRIANGLES not in batches_to_create "
+                      "(0x%llx)\n",
+              uint64_t(batches_to_create));
+    }
+    if (batches_to_create & MBC_SCULPT_CUSTOM_EDGES) {
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Creating SCULPT_CUSTOM_EDGES batch, flag=0x%llx\n",
+              uint64_t(MBC_SCULPT_CUSTOM_EDGES));
+      DRW_batch_request(&cache.batch.sculpt_custom_edges);
+      if (!cache.batch.sculpt_custom_edges) {
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] ERROR: sculpt_custom_edges batch is nullptr!\n");
+      }
+      else {
+        batch_info.append({*cache.batch.sculpt_custom_edges,
+                           GPU_PRIM_LINES,
+                           list,
+                           IBOType::Lines,
+                           {VBOType::Position, VBOType::CornerNormal},
+                           MBC_SCULPT_CUSTOM_EDGES});
+      }
+    }
+    if (batches_to_create & MBC_SCULPT_CUSTOM_VERTICES) {
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Creating SCULPT_CUSTOM_VERTICES batch, flag=0x%llx\n",
+              uint64_t(MBC_SCULPT_CUSTOM_VERTICES));
+      DRW_batch_request(&cache.batch.sculpt_custom_vertices);
+      if (!cache.batch.sculpt_custom_vertices) {
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] ERROR: sculpt_custom_vertices batch is nullptr!\n");
+      }
+      else {
+        batch_info.append({*cache.batch.sculpt_custom_vertices,
+                           GPU_PRIM_POINTS,
+                           list,
+                           IBOType::Points,
+                           {VBOType::Position, VBOType::CornerNormal},
+                           MBC_SCULPT_CUSTOM_VERTICES});
+      }
     }
     if (batches_to_create & MBC_ALL_EDGES) {
       batch_info.append(
-          {*cache.batch.all_edges, GPU_PRIM_LINES, list, IBOType::Lines, {VBOType::Position}});
+          {*cache.batch.all_edges, GPU_PRIM_LINES, list, IBOType::Lines, {VBOType::Position}, (DRWBatchFlag)0});
     }
     if (batches_to_create & MBC_LOOSE_EDGES) {
       batch_info.append({*cache.batch.loose_edges,
                          GPU_PRIM_LINES,
                          list,
                          IBOType::LinesLoose,
-                         {VBOType::Position}});
+                         {VBOType::Position},
+                         (DRWBatchFlag)0});
     }
     if (batches_to_create & MBC_EDGE_DETECTION) {
       batch_info.append({*cache.batch.edge_detection,
                          GPU_PRIM_LINES_ADJ,
                          list,
                          IBOType::LinesAdjacency,
-                         {VBOType::Position}});
+                         {VBOType::Position},
+                         (DRWBatchFlag)0});
     }
     if (batches_to_create & MBC_SURFACE_WEIGHTS) {
       batch_info.append({*cache.batch.surface_weights,
                          GPU_PRIM_TRIS,
                          list,
                          IBOType::Tris,
-                         {VBOType::Position, VBOType::CornerNormal, VBOType::VertexGroupWeight}});
+                         {VBOType::Position, VBOType::CornerNormal, VBOType::VertexGroupWeight},
+                         (DRWBatchFlag)0});
     }
     if (batches_to_create & MBC_PAINT_OVERLAY_WIRE_LOOPS) {
       batch_info.append({*cache.batch.paint_overlay_wire_loops,
                          GPU_PRIM_LINES,
                          list,
                          IBOType::LinesPaintMask,
-                         {VBOType::Position, VBOType::PaintOverlayFlag}});
+                         {VBOType::Position, VBOType::PaintOverlayFlag},
+                         (DRWBatchFlag)0});
     }
     if (batches_to_create & MBC_WIRE_EDGES) {
       batch_info.append({*cache.batch.wire_edges,
                          GPU_PRIM_LINES,
                          list,
                          IBOType::Lines,
-                         {VBOType::Position, VBOType::CornerNormal, VBOType::EdgeFactor}});
+                         {VBOType::Position, VBOType::CornerNormal, VBOType::EdgeFactor},
+                         (DRWBatchFlag)0});
     }
     if (batches_to_create & MBC_WIRE_LOOPS_ALL_UVS) {
       BatchCreateData batch{
-          *cache.batch.wire_loops_all_uvs, GPU_PRIM_LINES, list, IBOType::AllUVLines, {}};
+          *cache.batch.wire_loops_all_uvs, GPU_PRIM_LINES, list, IBOType::AllUVLines, {}, (DRWBatchFlag)0};
       if (!cache.cd_used.uv.is_empty()) {
         batch.vbos.append(VBOType::UVs);
       }
@@ -1351,7 +2440,7 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
     }
     if (batches_to_create & MBC_WIRE_LOOPS_UVS) {
       BatchCreateData batch{
-          *cache.batch.wire_loops_uvs, GPU_PRIM_LINES, list, IBOType::UVLines, {}};
+          *cache.batch.wire_loops_uvs, GPU_PRIM_LINES, list, IBOType::UVLines, {}, (DRWBatchFlag)0};
       if (!cache.cd_used.uv.is_empty()) {
         batch.vbos.append(VBOType::UVs);
       }
@@ -1359,7 +2448,7 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
     }
     if (batches_to_create & MBC_WIRE_LOOPS_EDITUVS) {
       BatchCreateData batch{
-          *cache.batch.wire_loops_edituvs, GPU_PRIM_LINES, list, IBOType::EditUVLines, {}};
+          *cache.batch.wire_loops_edituvs, GPU_PRIM_LINES, list, IBOType::EditUVLines, {}, (DRWBatchFlag)0};
       if (!cache.cd_used.uv.is_empty()) {
         batch.vbos.append(VBOType::UVs);
       }
@@ -1374,7 +2463,7 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
           use_face_selection;
 
       const IBOType ibo = is_face_selectable || is_editmode ? IBOType::UVTris : IBOType::Tris;
-      BatchCreateData batch{*cache.batch.uv_faces, GPU_PRIM_TRIS, list, ibo, {}};
+      BatchCreateData batch{*cache.batch.uv_faces, GPU_PRIM_TRIS, list, ibo, {}, (DRWBatchFlag)0};
       if (!cache.cd_used.uv.is_empty()) {
         batch.vbos.append(VBOType::UVs);
       }
@@ -1385,7 +2474,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                          GPU_PRIM_TRIS,
                          list,
                          IBOType::Tris,
-                         {VBOType::Position, VBOType::MeshAnalysis}});
+                         {VBOType::Position, VBOType::MeshAnalysis},
+                         (DRWBatchFlag)0});
     }
   }
 
@@ -1404,7 +2494,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_TRIS,
                            list,
                            IBOType::Tris,
-                           {VBOType::Position, VBOType::EditData}});
+                           {VBOType::Position, VBOType::EditData},
+                           (DRWBatchFlag)0});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edit_triangles);
@@ -1416,7 +2507,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                               GPU_PRIM_POINTS,
                               list,
                               IBOType::Points,
-                              {VBOType::Position, VBOType::EditData}};
+                              {VBOType::Position, VBOType::EditData},
+                              (DRWBatchFlag)0};
         if (!do_subdivision || do_cage) {
           batch.vbos.append(VBOType::CornerNormal);
         }
@@ -1432,7 +2524,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                               GPU_PRIM_LINES,
                               list,
                               IBOType::Lines,
-                              {VBOType::CornerNormal, VBOType::Position, VBOType::EditData}};
+                              {VBOType::CornerNormal, VBOType::Position, VBOType::EditData},
+                              (DRWBatchFlag)0};
         batch_info.append(std::move(batch));
       }
       else {
@@ -1445,7 +2538,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_POINTS,
                            list,
                            IBOType::Points,
-                           {VBOType::Position, VBOType::VertexNormal}});
+                           {VBOType::Position, VBOType::VertexNormal},
+                           (DRWBatchFlag)0});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edit_vnor);
@@ -1457,7 +2551,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_POINTS,
                            list,
                            IBOType::Tris,
-                           {VBOType::Position, VBOType::CornerNormal}});
+                           {VBOType::Position, VBOType::CornerNormal},
+                           (DRWBatchFlag)0});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edit_lnor);
@@ -1469,7 +2564,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_POINTS,
                            list,
                            IBOType::FaceDots,
-                           {VBOType::FaceDotPosition, VBOType::FaceDotNormal}});
+                           {VBOType::FaceDotPosition, VBOType::FaceDotNormal},
+                           (DRWBatchFlag)0});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edit_fdots);
@@ -1481,7 +2577,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_POINTS,
                            list,
                            std::nullopt,
-                           {VBOType::SkinRoots}});
+                           {VBOType::SkinRoots},
+                           (DRWBatchFlag)0});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edit_skin_roots);
@@ -1496,7 +2593,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_POINTS,
                            list,
                            IBOType::Points,
-                           {VBOType::Position, VBOType::IndexVert}});
+                           {VBOType::Position, VBOType::IndexVert},
+                           (DRWBatchFlag)0});
       }
     }
     if (batches_to_create & MBC_EDIT_SELECTION_EDGES) {
@@ -1508,7 +2606,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_LINES,
                            list,
                            IBOType::Lines,
-                           {VBOType::Position, VBOType::IndexEdge}});
+                           {VBOType::Position, VBOType::IndexEdge},
+                           (DRWBatchFlag)0});
       }
     }
     if (batches_to_create & MBC_EDIT_SELECTION_FACES) {
@@ -1520,7 +2619,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_TRIS,
                            list,
                            IBOType::Tris,
-                           {VBOType::Position, VBOType::IndexFace}});
+                           {VBOType::Position, VBOType::IndexFace},
+                           (DRWBatchFlag)0});
       }
     }
     if (batches_to_create & MBC_EDIT_SELECTION_FACEDOTS) {
@@ -1532,7 +2632,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_POINTS,
                            list,
                            IBOType::FaceDots,
-                           {VBOType::FaceDotPosition, VBOType::IndexFaceDot}});
+                           {VBOType::FaceDotPosition, VBOType::IndexFaceDot},
+                           (DRWBatchFlag)0});
       }
     }
   }
@@ -1551,7 +2652,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_TRIS,
                            list,
                            IBOType::EditUVTris,
-                           {VBOType::UVs, VBOType::EditUVData}});
+                           {VBOType::UVs, VBOType::EditUVData},
+                           (DRWBatchFlag)0});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edituv_faces);
@@ -1563,7 +2665,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_TRIS,
                            list,
                            IBOType::EditUVTris,
-                           {VBOType::UVs, VBOType::EditUVData, VBOType::EditUVStretchArea}});
+                           {VBOType::UVs, VBOType::EditUVData, VBOType::EditUVStretchArea},
+                           (DRWBatchFlag)0});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edituv_faces_stretch_area);
@@ -1575,7 +2678,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_TRIS,
                            list,
                            IBOType::EditUVTris,
-                           {VBOType::UVs, VBOType::EditUVData, VBOType::EditUVStretchAngle}});
+                           {VBOType::UVs, VBOType::EditUVData, VBOType::EditUVStretchAngle},
+                           (DRWBatchFlag)0});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edituv_faces_stretch_angle);
@@ -1587,7 +2691,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_LINES,
                            list,
                            IBOType::EditUVLines,
-                           {VBOType::UVs, VBOType::EditUVData}});
+                           {VBOType::UVs, VBOType::EditUVData},
+                           (DRWBatchFlag)0});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edituv_edges);
@@ -1599,7 +2704,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_POINTS,
                            list,
                            IBOType::EditUVPoints,
-                           {VBOType::UVs, VBOType::EditUVData}});
+                           {VBOType::UVs, VBOType::EditUVData},
+                           (DRWBatchFlag)0});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edituv_verts);
@@ -1611,7 +2717,8 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                            GPU_PRIM_POINTS,
                            list,
                            IBOType::EditUVFaceDots,
-                           {VBOType::FaceDotUV, VBOType::FaceDotEditUVData}});
+                           {VBOType::FaceDotUV, VBOType::FaceDotEditUVData},
+                           (DRWBatchFlag)0});
       }
       else {
         init_empty_dummy_batch(*cache.batch.edituv_fdots);
@@ -1624,8 +2731,14 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
   for (const BatchCreateData &batch : batch_info) {
     if (batch.ibo) {
       ibo_requests[int(batch.list)].add(*batch.ibo);
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Added IBO request: list=%d, ibo=%d\n",
+              int(batch.list), int(*batch.ibo));
     }
     vbo_requests[int(batch.list)].add_multiple(batch.vbos);
+    for (const VBOType vbo : batch.vbos) {
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Added VBO request: list=%d, vbo=%d\n",
+              int(batch.list), int(vbo));
+    }
   }
 
   if (batches_to_create & MBC_SURFACE_PER_MAT) {
@@ -1699,6 +2812,21 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
     mesh_batch_cache_free_subdiv_cache(cache);
   }
 
+  // #region agent log
+  {
+    static unsigned long long counter = 0;
+    FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+    if (f) {
+      fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:2726\",\"message\":\"VBO_IBO: Calling mesh_buffer_cache_create_requested\",\"data\":{\"ibo_count\":%zu,\"vbo_count\":%zu,\"sculpt_custom_in_batches_to_create\":\"0x%llx\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"G\"}\n",
+              counter++, ibo_requests[int(BufferList::Final)].size(), vbo_requests[int(BufferList::Final)].size(), (unsigned long long)(batches_to_create & sculpt_custom_flags));
+      fclose(f);
+    }
+  }
+  // #endregion
+  fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Calling mesh_buffer_cache_create_requested for Final: "
+                  "ibo_count=%zu, vbo_count=%zu\n",
+          ibo_requests[int(BufferList::Final)].size(),
+          vbo_requests[int(BufferList::Final)].size());
   mesh_buffer_cache_create_requested(task_graph,
                                      scene,
                                      cache,
@@ -1712,16 +2840,132 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                                      true,
                                      false,
                                      use_hide);
+  // #region agent log
+  {
+    static unsigned long long counter = 0;
+    FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+    if (f) {
+      fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:2739\",\"message\":\"VBO_IBO: After mesh_buffer_cache_create_requested\",\"data\":{\"ibos_size\":%zu,\"vbos_size\":%zu,\"has_position\":%s,\"has_tris\":%s},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"G\"}\n",
+              counter++, cache.final.buff.ibos.size(), cache.final.buff.vbos.size(),
+              cache.final.buff.vbos.contains(VBOType::Position) ? "true" : "false",
+              cache.final.buff.ibos.contains(IBOType::Tris) ? "true" : "false");
+      fclose(f);
+    }
+  }
+  // #endregion
+  fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] After mesh_buffer_cache_create_requested: "
+                  "final.buff.ibos.size()=%zu, final.buff.vbos.size()=%zu\n",
+          cache.final.buff.ibos.size(),
+          cache.final.buff.vbos.size());
 
   std::array<MeshBufferCache *, 3> caches{&cache.final, &cache.cage, &cache.uv_cage};
+  fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Processing %zu batches in batch_info\n", batch_info.size());
   for (const BatchCreateData &batch : batch_info) {
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Processing batch, flag=0x%llx\n", uint64_t(batch.flag));
     MeshBufferCache &cache_for_batch = *caches[int(batch.list)];
-    gpu::IndexBuf *ibo = batch.ibo ? caches[int(batch.list)]->buff.ibos.lookup(*batch.ibo).get() :
-                                     nullptr;
+    
+    /* Safely lookup IBO - use dummy batch if buffer doesn't exist or is empty. */
+    gpu::IndexBuf *ibo = nullptr;
+    if (batch.ibo) {
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Looking for IBO: list=%d, ibo=%d\n",
+              int(batch.list), int(*batch.ibo));
+      if (const auto *ibo_ptr = cache_for_batch.buff.ibos.lookup_ptr(*batch.ibo)) {
+        ibo = ibo_ptr->get();
+        const uint32_t ibo_len = ibo->index_len_get();
+        // #region agent log
+        {
+          static unsigned long long counter = 0;
+          FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+          if (f) {
+            fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:2755\",\"message\":\"VBO_IBO: IBO found for batch\",\"data\":{\"batch_flag\":\"0x%llx\",\"ibo_ptr\":\"%p\",\"ibo_len\":%u,\"is_init\":%d},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"G\"}\n",
+                    counter++, (unsigned long long)batch.flag, ibo, ibo_len, ibo->is_init());
+            fclose(f);
+          }
+        }
+        // #endregion
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] IBO found: %p, index_len=%u, is_init=%d\n",
+                ibo, ibo_len, ibo->is_init());
+        if (ibo_len == 0 || !ibo->is_init()) {
+          /* IBO is empty or not initialized - use dummy batch. */
+          fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] ERROR: IBO is empty or not initialized! "
+                          "list=%d, ibo=%d, index_len=%u, using dummy batch\n",
+                  int(batch.list), int(*batch.ibo), ibo_len);
+          init_empty_dummy_batch(batch.batch);
+          continue;
+        }
+      }
+      else {
+        /* IBO not found, initialize empty dummy batch. */
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] ERROR: IBO not found! list=%d, ibo=%d, using dummy batch\n",
+                int(batch.list), int(*batch.ibo));
+        init_empty_dummy_batch(batch.batch);
+        continue;
+      }
+    }
+    
     GPU_batch_init(&batch.batch, batch.prim_type, nullptr, ibo);
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Batch initialized: prim_type=%d, ibo=%p\n",
+            int(batch.prim_type), ibo);
+    
+    /* Safely lookup and add VBOs - use dummy batch if any required VBO is missing or empty. */
+    bool all_vbos_found = true;
+    bool all_vbos_valid = true;
     for (const VBOType vbo_request : batch.vbos) {
-      GPU_batch_vertbuf_add(
-          &batch.batch, cache_for_batch.buff.vbos.lookup(vbo_request).get(), false);
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Looking for VBO: list=%d, vbo=%d\n",
+              int(batch.list), int(vbo_request));
+      if (const auto *vbo_ptr = cache_for_batch.buff.vbos.lookup_ptr(vbo_request)) {
+        gpu::VertBuf *vbo = vbo_ptr->get();
+        const uint vbo_len = GPU_vertbuf_get_vertex_len(vbo);
+        // #region agent log
+        {
+          static unsigned long long counter = 0;
+          FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+          if (f) {
+            fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:2733\",\"message\":\"VBO_IBO: VBO found for batch\",\"data\":{\"batch_flag\":\"0x%llx\",\"vbo_type\":%d,\"vbo_ptr\":\"%p\",\"vbo_len\":%u},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"G\"}\n",
+                    counter++, (unsigned long long)batch.flag, int(vbo_request), vbo, vbo_len);
+            fclose(f);
+          }
+        }
+        // #endregion
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] VBO found: %p, vertex_len=%u\n", vbo, vbo_len);
+        if (vbo_len == 0) {
+          fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] ERROR: VBO is empty! list=%d, vbo=%d, vertex_len=%u\n",
+                  int(batch.list), int(vbo_request), vbo_len);
+          all_vbos_valid = false;
+          break;
+        }
+        GPU_batch_vertbuf_add(&batch.batch, vbo, false);
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] VBO added to batch\n");
+      }
+      else {
+        /* Required VBO not found - use dummy batch instead. */
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] ERROR: VBO not found! list=%d, vbo=%d\n",
+                int(batch.list), int(vbo_request));
+        all_vbos_found = false;
+        break;
+      }
+    }
+    
+    if (!all_vbos_found || !all_vbos_valid) {
+      /* Clear the partially initialized batch and use dummy batch. */
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] VBO check failed (found=%d, valid=%d), using dummy batch\n",
+              all_vbos_found, all_vbos_valid);
+      GPU_BATCH_CLEAR_SAFE(&batch.batch);
+      init_empty_dummy_batch(batch.batch);
+      /* Don't set batch_ready for dummy batches */
+    }
+    else {
+      fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Batch fully initialized successfully, flag=0x%llx\n",
+              uint64_t(batch.flag));
+      /* Set batch_ready flag for successfully created batch */
+      if (batch.flag != (DRWBatchFlag)0) {
+        cache.batch_ready |= batch.flag;
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Set batch_ready flag: 0x%llx, new batch_ready=0x%llx\n",
+                uint64_t(batch.flag), uint64_t(cache.batch_ready));
+      }
+      else {
+        fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] WARNING: batch.flag is 0, not setting batch_ready!\n");
+      }
     }
   }
 
@@ -1753,7 +2997,277 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
     }
   }
 
-  cache.batch_ready |= batch_requested;
+  /* Update batch_ready for successfully created batches.
+   * IMPORTANT: Sculpt custom batches set batch_ready in the loop above (line 2439),
+   * so we exclude them here to avoid setting batch_ready for batches that weren't created. */
+  const DRWBatchFlag non_sculpt_custom_batch_requested = batch_requested & ~sculpt_custom_flags;
+  cache.batch_ready |= non_sculpt_custom_batch_requested;
+  
+  /* Synchronize batch_ready with original mesh cache if it exists.
+   * Python works with original mesh, but batches are created in evaluated mesh cache.
+   * We need to sync batch_ready so Python can see that batches are ready.
+   * IMPORTANT: Only sync batches that are actually valid. */
+  const DRWBatchFlag sculpt_custom_ready = cache.batch_ready & sculpt_custom_flags;
+  if (sculpt_custom_ready != 0) {
+    Mesh *orig_mesh = BKE_object_get_original_mesh(&ob);
+    if (orig_mesh && orig_mesh != &mesh && orig_mesh->runtime) {
+      DRW_mesh_batch_cache_validate(*orig_mesh);
+      MeshBatchCache *orig_cache = mesh_batch_cache_get(*orig_mesh);
+      if (orig_cache) {
+        /* Verify which batches are actually valid before syncing */
+        DRWBatchFlag valid_sculpt_custom_ready = (DRWBatchFlag)0;
+        
+        if (sculpt_custom_ready & MBC_SCULPT_CUSTOM_TRIANGLES) {
+          if (cache.batch.sculpt_custom_triangles && is_batch_valid_for_drawing(cache.batch.sculpt_custom_triangles)) {
+            valid_sculpt_custom_ready |= MBC_SCULPT_CUSTOM_TRIANGLES;
+            // #region agent log
+            {
+              static unsigned long long counter = 0;
+              FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+              if (f) {
+                fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:3012\",\"message\":\"SYNC: Syncing TRIANGLES batch to orig cache\",\"data\":{\"orig_batch_ptr\":\"%p\",\"eval_batch_ptr\":\"%p\",\"orig_batch_valid\":%s},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"H\"}\n",
+                        counter++, orig_cache->batch.sculpt_custom_triangles, cache.batch.sculpt_custom_triangles,
+                        orig_cache->batch.sculpt_custom_triangles && is_batch_valid_for_drawing(orig_cache->batch.sculpt_custom_triangles) ? "true" : "false");
+                fclose(f);
+              }
+            }
+            // #endregion
+            /* CRITICAL: Always update batch pointer in original cache, even if it already exists.
+             * After invalidation, batches are recreated in evaluated cache with new geometry data.
+             * Original cache must use the new batch pointer, not the old one.
+             * 
+             * IMPORTANT: We check if orig batch is different from eval batch to avoid unnecessary updates,
+             * but we always update if they differ, even if orig batch appears valid. */
+            if (orig_cache->batch.sculpt_custom_triangles != cache.batch.sculpt_custom_triangles) {
+              /* Old batch pointer exists but is different - update to new batch */
+              orig_cache->batch.sculpt_custom_triangles = cache.batch.sculpt_custom_triangles;
+              // #region agent log
+              {
+                static unsigned long long counter = 0;
+                FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+                if (f) {
+                  fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:3020\",\"message\":\"SYNC: Updated orig TRIANGLES batch pointer\",\"data\":{\"old_ptr\":\"%p\",\"new_ptr\":\"%p\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"H\"}\n",
+                          counter++, orig_cache->batch.sculpt_custom_triangles, cache.batch.sculpt_custom_triangles);
+                  fclose(f);
+                }
+              }
+              // #endregion
+            }
+            else if (orig_cache->batch.sculpt_custom_triangles && 
+                     !is_batch_valid_for_drawing(orig_cache->batch.sculpt_custom_triangles)) {
+              /* Same pointer but invalid - clear it */
+              orig_cache->batch.sculpt_custom_triangles = nullptr;
+              orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_TRIANGLES;
+              // #region agent log
+              {
+                static unsigned long long counter = 0;
+                FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+                if (f) {
+                  fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:3030\",\"message\":\"SYNC: Cleared invalid orig TRIANGLES batch pointer\",\"data\":{},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"H\"}\n",
+                          counter++);
+                  fclose(f);
+                }
+              }
+              // #endregion
+            }
+            else if (!orig_cache->batch.sculpt_custom_triangles) {
+              /* No batch pointer - copy from evaluated cache */
+              orig_cache->batch.sculpt_custom_triangles = cache.batch.sculpt_custom_triangles;
+              // #region agent log
+              {
+                static unsigned long long counter = 0;
+                FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+                if (f) {
+                  fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:3040\",\"message\":\"SYNC: Copied TRIANGLES batch pointer to orig cache\",\"data\":{\"batch_ptr\":\"%p\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"H\"}\n",
+                          counter++, cache.batch.sculpt_custom_triangles);
+                  fclose(f);
+                }
+              }
+              // #endregion
+            }
+          }
+        }
+        
+        if (sculpt_custom_ready & MBC_SCULPT_CUSTOM_EDGES) {
+          if (cache.batch.sculpt_custom_edges && is_batch_valid_for_drawing(cache.batch.sculpt_custom_edges)) {
+            valid_sculpt_custom_ready |= MBC_SCULPT_CUSTOM_EDGES;
+            // #region agent log
+            {
+              static unsigned long long counter = 0;
+              FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+              if (f) {
+                fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:3048\",\"message\":\"SYNC: Syncing EDGES batch to orig cache\",\"data\":{\"orig_batch_ptr\":\"%p\",\"eval_batch_ptr\":\"%p\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"H\"}\n",
+                        counter++, orig_cache->batch.sculpt_custom_edges, cache.batch.sculpt_custom_edges);
+                fclose(f);
+              }
+            }
+            // #endregion
+            /* CRITICAL: Always update batch pointer in original cache if it differs from evaluated cache */
+            if (orig_cache->batch.sculpt_custom_edges != cache.batch.sculpt_custom_edges) {
+              orig_cache->batch.sculpt_custom_edges = cache.batch.sculpt_custom_edges;
+              // #region agent log
+              {
+                static unsigned long long counter = 0;
+                FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+                if (f) {
+                  fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:3055\",\"message\":\"SYNC: Updated orig EDGES batch pointer\",\"data\":{\"old_ptr\":\"%p\",\"new_ptr\":\"%p\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"H\"}\n",
+                          counter++, orig_cache->batch.sculpt_custom_edges, cache.batch.sculpt_custom_edges);
+                  fclose(f);
+                }
+              }
+              // #endregion
+            }
+            else if (orig_cache->batch.sculpt_custom_edges && 
+                     !is_batch_valid_for_drawing(orig_cache->batch.sculpt_custom_edges)) {
+              orig_cache->batch.sculpt_custom_edges = nullptr;
+              orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_EDGES;
+            }
+            else if (!orig_cache->batch.sculpt_custom_edges) {
+              orig_cache->batch.sculpt_custom_edges = cache.batch.sculpt_custom_edges;
+            }
+          }
+        }
+        
+        if (sculpt_custom_ready & MBC_SCULPT_CUSTOM_VERTICES) {
+          if (cache.batch.sculpt_custom_vertices && is_batch_valid_for_drawing(cache.batch.sculpt_custom_vertices)) {
+            valid_sculpt_custom_ready |= MBC_SCULPT_CUSTOM_VERTICES;
+            // #region agent log
+            {
+              static unsigned long long counter = 0;
+              FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+              if (f) {
+                fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:3074\",\"message\":\"SYNC: Syncing VERTICES batch to orig cache\",\"data\":{\"orig_batch_ptr\":\"%p\",\"eval_batch_ptr\":\"%p\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"H\"}\n",
+                        counter++, orig_cache->batch.sculpt_custom_vertices, cache.batch.sculpt_custom_vertices);
+                fclose(f);
+              }
+            }
+            // #endregion
+            /* CRITICAL: Always update batch pointer in original cache if it differs from evaluated cache */
+            if (orig_cache->batch.sculpt_custom_vertices != cache.batch.sculpt_custom_vertices) {
+              orig_cache->batch.sculpt_custom_vertices = cache.batch.sculpt_custom_vertices;
+              // #region agent log
+              {
+                static unsigned long long counter = 0;
+                FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+                if (f) {
+                  fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:3081\",\"message\":\"SYNC: Updated orig VERTICES batch pointer\",\"data\":{\"old_ptr\":\"%p\",\"new_ptr\":\"%p\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"H\"}\n",
+                          counter++, orig_cache->batch.sculpt_custom_vertices, cache.batch.sculpt_custom_vertices);
+                  fclose(f);
+                }
+              }
+              // #endregion
+            }
+            else if (orig_cache->batch.sculpt_custom_vertices && 
+                     !is_batch_valid_for_drawing(orig_cache->batch.sculpt_custom_vertices)) {
+              orig_cache->batch.sculpt_custom_vertices = nullptr;
+              orig_cache->batch_ready &= ~MBC_SCULPT_CUSTOM_VERTICES;
+            }
+            else if (!orig_cache->batch.sculpt_custom_vertices) {
+              orig_cache->batch.sculpt_custom_vertices = cache.batch.sculpt_custom_vertices;
+            }
+          }
+        }
+        
+        /* Only sync batch_ready for valid batches */
+        if (valid_sculpt_custom_ready != 0) {
+          orig_cache->batch_ready |= valid_sculpt_custom_ready;
+          fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Synced batch_ready to original mesh cache: 0x%llx "
+                          "(sculpt_custom_ready=0x%llx, valid=0x%llx)\n",
+                  uint64_t(valid_sculpt_custom_ready), uint64_t(sculpt_custom_ready), uint64_t(valid_sculpt_custom_ready));
+          
+          /* CRITICAL: After syncing batches, we need to ensure viewport redraw happens.
+           * We use DEG_id_tag_update to mark the mesh as changed, which will trigger
+           * viewport redraw through the dependency graph system. */
+          if (orig_mesh) {
+            DEG_id_tag_update(&orig_mesh->id, ID_RECALC_GEOMETRY);
+          }
+          // #region agent log
+          {
+            static unsigned long long counter = 0;
+            FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+            if (f) {
+              fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:3120\",\"message\":\"SYNC_COMPLETE: Batches synced to orig cache - tagged mesh for redraw\",\"data\":{\"valid_sculpt_custom_ready\":\"0x%llx\",\"orig_batch_ready\":\"0x%llx\",\"mesh_id\":\"%p\"},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"K\"}\n",
+                      counter++, (unsigned long long)valid_sculpt_custom_ready, (unsigned long long)orig_cache->batch_ready, orig_mesh ? &orig_mesh->id : nullptr);
+              fclose(f);
+            }
+          }
+          // #endregion
+        }
+        else {
+          fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] NOT syncing batch_ready: no valid batches "
+                          "(sculpt_custom_ready=0x%llx)\n",
+                  uint64_t(sculpt_custom_ready));
+        }
+      }
+    }
+  }
+  
+  /* Clear only the flags we processed in THIS call.
+   * CRITICAL: We must clear only batch_requested (what we processed),
+   * NOT cache.batch_ready (which might include flags from previous frames).
+   * Python may add new flags to cache.batch_requested during this function,
+   * and we must preserve them for the next frame. */
+  cache.batch_requested &= ~batch_requested;
+  
+  /* Clear sculpt custom flags from static map if they are now ready AND valid.
+   * IMPORTANT: Only clear flags if batches are actually valid, not just marked as ready.
+   * After cache recreation, batch_ready may be set but batches may be freed.
+   * Use Object key (preferred) - by this point any mesh.id keys should have been migrated. */
+  // #region agent log
+  {
+    static unsigned long long counter = 0;
+    FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+    if (f) {
+      fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:2601\",\"message\":\"CLEAR_MAP: Checking if should clear flags\",\"data\":{\"mesh_key_object\":\"%p\",\"in_map\":%s,\"sculpt_custom_ready\":\"0x%llx\",\"map_size\":%zu},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"E\"}\n",
+              counter++, mesh_key_object, sculpt_custom_flags_preserved.contains(mesh_key_object) ? "true" : "false",
+              (unsigned long long)sculpt_custom_ready, sculpt_custom_flags_preserved.size());
+      fclose(f);
+    }
+  }
+  // #endregion
+  /* IMPORTANT: Do NOT clear flags from map here, even if batches are valid.
+   * Flags should persist across cache recreations and geometry changes.
+   * They will be cleared only when explicitly requested (e.g., when overlay is disabled).
+   * This ensures that flags added during invalidation are preserved and can be found
+   * even if evaluated mesh is recreated with a different ID. */
+  if (sculpt_custom_flags_preserved.contains(mesh_key_object) && sculpt_custom_ready != 0) {
+    /* Verify that batches are actually valid - but don't clear flags from map.
+     * Flags should persist to handle cache recreation and evaluated mesh ID changes. */
+    DRWBatchFlag valid_sculpt_custom_ready = (DRWBatchFlag)0;
+    if (sculpt_custom_ready & MBC_SCULPT_CUSTOM_TRIANGLES) {
+      if (cache.batch.sculpt_custom_triangles && is_batch_valid_for_drawing(cache.batch.sculpt_custom_triangles)) {
+        valid_sculpt_custom_ready |= MBC_SCULPT_CUSTOM_TRIANGLES;
+      }
+    }
+    if (sculpt_custom_ready & MBC_SCULPT_CUSTOM_EDGES) {
+      if (cache.batch.sculpt_custom_edges && is_batch_valid_for_drawing(cache.batch.sculpt_custom_edges)) {
+        valid_sculpt_custom_ready |= MBC_SCULPT_CUSTOM_EDGES;
+      }
+    }
+    if (sculpt_custom_ready & MBC_SCULPT_CUSTOM_VERTICES) {
+      if (cache.batch.sculpt_custom_vertices && is_batch_valid_for_drawing(cache.batch.sculpt_custom_vertices)) {
+        valid_sculpt_custom_ready |= MBC_SCULPT_CUSTOM_VERTICES;
+      }
+    }
+    
+    // #region agent log
+    {
+      static unsigned long long counter = 0;
+      FILE *f = fopen("i:\\Blender_DAD\\blender\\.cursor\\debug.log", "a");
+      if (f) {
+        fprintf(f, "{\"id\":\"log_%llu\",\"location\":\"draw_cache_impl_mesh.cc:2795\",\"message\":\"CLEAR_MAP: Batches valid but NOT clearing flags (flags should persist)\",\"data\":{\"mesh_key_object\":\"%p\",\"sculpt_custom_ready\":\"0x%llx\",\"valid_sculpt_custom_ready\":\"0x%llx\",\"map_size\":%zu},\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"E\"}\n",
+                counter++, mesh_key_object, (unsigned long long)sculpt_custom_ready, (unsigned long long)valid_sculpt_custom_ready, sculpt_custom_flags_preserved.size());
+        fclose(f);
+      }
+    }
+    // #endregion
+    fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Batches valid but NOT clearing flags from map (flags should persist): "
+                    "sculpt_custom_ready=0x%llx, valid=0x%llx\n",
+            uint64_t(sculpt_custom_ready), uint64_t(valid_sculpt_custom_ready));
+  }
+  
+  fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] After batch creation: batch_ready=0x%llx, batch_requested=0x%llx (cleared 0x%llx)\n",
+          uint64_t(cache.batch_ready), uint64_t(cache.batch_requested), uint64_t(batch_requested));
 }
 
 /** \} */

@@ -93,6 +93,11 @@
 /* only for callbacks */
 #include "draw_cache_impl.hh"
 
+/* Forward declaration to ensure visibility. */
+namespace blender::draw {
+void DRW_mesh_batch_cache_clear_sculpt_custom_flags(const Mesh &mesh, const Object *ob);
+}
+
 #include "engines/compositor/compositor_engine.h"
 #include "engines/eevee/eevee_engine.h"
 #include "engines/external/external_engine.h"
@@ -1873,6 +1878,11 @@ void DRW_render_to_image(
 
   /* End GPU workload Boundary */
   GPU_render_end();
+}
+
+void DRW_mesh_batch_cache_clear_sculpt_custom_flags(const Mesh &mesh, const Object *ob)
+{
+  blender::draw::DRW_mesh_batch_cache_clear_sculpt_custom_flags(mesh, ob);
 }
 
 void DRW_render_object_iter(

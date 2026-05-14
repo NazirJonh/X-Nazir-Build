@@ -4,6 +4,7 @@
 
 set(INC
   ..
+  ../../draw/intern
   ../../editors/include
   ../../imbuf/intern/oiio
   ../../makesrna
@@ -129,6 +130,7 @@ set(LIB
   PRIVATE bf::blentranslation
   PRIVATE bf::depsgraph
   PRIVATE bf::dna
+  PRIVATE bf::draw
   bf_editor_animation
   bf_editor_interface
   bf_editor_space_api

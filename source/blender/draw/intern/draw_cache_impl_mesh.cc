@@ -645,7 +645,11 @@ void DRW_mesh_batch_cache_dirty_tag(Mesh *mesh, eMeshBatchDirtyMode mode)
       break;
     case BKE_MESH_BATCH_DIRTY_ALL:
       cache.is_dirty = true;
-      /* Also invalidate custom sculpt batches */
+      /* Invalidate custom sculpt batches so they are rebuilt with new geometry.
+       * Do not re-add to batch_requested here: the preserved-flags map in
+       * DRW_mesh_batch_cache_create_requested already re-requests them every
+       * draw frame, so adding them here as well would cause a double-request
+       * and, when triggered by DEG_id_tag_update, an infinite invalidation loop. */
       {
         const DRWBatchFlag sculpt_custom_flags = MBC_SCULPT_CUSTOM_TRIANGLES |
                                                  MBC_SCULPT_CUSTOM_EDGES |
@@ -654,16 +658,6 @@ void DRW_mesh_batch_cache_dirty_tag(Mesh *mesh, eMeshBatchDirtyMode mode)
         cache.batch.sculpt_custom_triangles = nullptr;
         cache.batch.sculpt_custom_edges = nullptr;
         cache.batch.sculpt_custom_vertices = nullptr;
-        /* Re-request batches so they will be recreated on next frame */
-        cache.batch_requested |= sculpt_custom_flags;
-        /* Also ensure flags are in preserved map so they persist across cache recreation */
-        if (mesh->runtime) {
-          const void *mesh_key = get_mesh_key(*mesh, nullptr);
-          sculpt_custom_flags_preserved.add_or_modify(
-              mesh_key,
-              [&](DRWBatchFlag *value) { *value = sculpt_custom_flags; },
-              [&](DRWBatchFlag *value) { *value |= sculpt_custom_flags; });
-        }
       }
       break;
     case BKE_MESH_BATCH_DIRTY_SHADING:
@@ -1223,13 +1217,7 @@ gpu::Batch *DRW_mesh_batch_cache_get_custom_overlay(
   }
   
   cache->batch_requested |= flag;
-  
-  /* Mark cache as dirty to ensure batches are created on next draw call.
-   * This is necessary because the batch creation happens asynchronously in
-   * mesh_buffer_cache_create_requested which is called by the render engine.
-   * By marking dirty, we ensure the batches will be created on the next frame. */
-  cache->is_dirty = true;
-  
+
   /* For Sculpt Custom batches, we also need to ensure flags are preserved in static map */
   if (mode == CustomOverlayMode::ModeSculpt) {
     const void *mesh_key = get_mesh_key(mesh, ob);
@@ -3174,13 +3162,6 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
           fprintf(stderr, "[SCULPT_CUSTOM_DEBUG] Synced batch_ready to original mesh cache: 0x%llx "
                           "(sculpt_custom_ready=0x%llx, valid=0x%llx)\n",
                   uint64_t(valid_sculpt_custom_ready), uint64_t(sculpt_custom_ready), uint64_t(valid_sculpt_custom_ready));
-          
-          /* CRITICAL: After syncing batches, we need to ensure viewport redraw happens.
-           * We use DEG_id_tag_update to mark the mesh as changed, which will trigger
-           * viewport redraw through the dependency graph system. */
-          if (orig_mesh) {
-            DEG_id_tag_update(&orig_mesh->id, ID_RECALC_GEOMETRY);
-          }
           // #region agent log
           {
             static unsigned long long counter = 0;

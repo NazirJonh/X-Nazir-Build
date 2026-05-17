@@ -153,18 +153,11 @@ struct [[host_shared]] OVERLAY_MultiresWireData {
   /* Maximum subdivision level present in the data (`effective_max_level`).
    * Stored as float for std140 uniformity with the other fields; value is always integral. */
   float wire_level_max;
-  /* Base wire width in pixels for level 0. */
-  float base_wire_width;
-  /* `smoothstep` lower bound: below this cell pixel size, the level is fully invisible. */
-  float min_cell_size_px;
-  /* `smoothstep` upper bound: above this cell pixel size, the level is at full visibility. */
-  float full_visibility_cell_size_px;
   /* Minimum subdiv_level value written to the VBO (= level_offset in PBVH grids fill).
    * Non-zero in Sculpt Mode when total_level > grid_depth. The shader normalises raw VBO
    * levels by subtracting this so that level 0 always means "coarsest visible edge". */
   float wire_level_min;
-  float _pad1;
-  float _pad2;
+  float _pad0;
 };
 
 #ifdef GPU_SHADER

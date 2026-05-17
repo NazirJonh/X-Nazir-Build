@@ -129,6 +129,8 @@ static void mesh_copy_data(Main *bmain,
       mesh_src->runtime->subsurf_optimal_display_edges;
   mesh_dst->runtime->subsurf_use_optimal_display_filter =
       mesh_src->runtime->subsurf_use_optimal_display_filter;
+  mesh_dst->runtime->subsurf_edge_subdivision_level =
+      mesh_src->runtime->subsurf_edge_subdivision_level;
   if ((mesh_src->id.tag & ID_TAG_NO_MAIN) == 0) {
     /* This is a direct copy of a main mesh, so for now it has the same topology. */
     mesh_dst->runtime->deformed_only = true;

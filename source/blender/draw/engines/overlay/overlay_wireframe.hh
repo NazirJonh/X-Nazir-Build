@@ -218,10 +218,14 @@ class Wireframe : Overlay {
 
         if (show_surface_wire) {
           /* Check for Multires modifier to enable adaptive wireframe. */
+          ModifierData *mmd_md = BKE_modifiers_findby_type(ob_ref.object,
+                                                           eModifierType_Multires);
           const MultiresModifierData *mmd = reinterpret_cast<const MultiresModifierData *>(
-              BKE_modifiers_findby_type(ob_ref.object, eModifierType_Multires));
+              mmd_md);
           const bool is_pbvh = BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d);
-          const bool use_multires_wire = mmd != nullptr;
+          const bool use_multires_wire = mmd != nullptr &&
+                                        BKE_modifier_is_enabled(
+                                            state.scene, mmd_md, eModifierMode_Realtime);
 
           /* Reused below to estimate the visible subdivision level for the PBVH draw. */
           float object_diameter = 1.0f;
@@ -234,7 +238,12 @@ class Wireframe : Overlay {
            * (and therefore the `subdiv_level` VBO) only contains values up to that level,
            * even when `mmd->totlvl` is higher. Using `totlvl` here would make the shader
            * expect levels that physically do not exist in the buffer. */
-          int effective_max_level = mmd ? mmd->totlvl : 0;
+          /* For the non-PBVH (Object Mode) path the evaluated mesh is tagged with
+           * `BKE_multires_tag_edge_levels(result, mmd->lvl)`, so the VBO data is bounded
+           * by the viewport level, not `totlvl`. Using `totlvl` would make the shader
+           * normalise on the wrong denominator when `lvl < totlvl`. The PBVH path
+           * overrides this below with the actual CCG level. */
+          int effective_max_level = mmd ? mmd->lvl : 0;
           /* Minimum subdiv_level stored in the VBO (non-zero in Sculpt Mode when the PBVH
            * grid depth is smaller than the total SubdivCCG level). Matches `level_offset` in
            * `fill_subdivision_levels_grids` in draw_pbvh.cc so the shader can normalise raw
@@ -254,10 +263,11 @@ class Wireframe : Overlay {
               }
             }
 
-            /* Use base mesh bounds (before Multires) for consistent object diameter.
-             * The evaluated mesh bounds may change due to Multires smoothing, which would
-             * alter wire_level and show more subdivision levels when adding subdivisions.
-             * By using the base mesh, object diameter stays constant regardless of Multires level. */
+            /* Use the evaluated mesh bounds for the object diameter. `ob_ref.object` is the
+             * evaluated object from the depsgraph, so `->data` is the evaluated mesh
+             * (after Multires). Multires smoothing may slightly alter the bounds compared
+             * to the original base mesh, but the difference is negligible for the adaptive
+             * wireframe LOD computation. */
             const Mesh *base_mesh = id_cast<const Mesh *>(ob_ref.object->data);
             std::optional<blender::Bounds<float3>> bounds;
 
@@ -294,12 +304,9 @@ class Wireframe : Overlay {
              * below remains valid until the next `begin_sync`. */
             multires_wire_ubo_pool_.append(std::make_unique<MultiresWireUBO>());
             object_ubo = multires_wire_ubo_pool_.last().get();
-            (*object_ubo).object_diameter = compute_multires_base_threshold(object_diameter);
+            (*object_ubo).object_diameter = object_diameter;
             (*object_ubo).wire_level_max = float(effective_max_level); /* std140: stored as float */
             (*object_ubo).wire_level_min = float(effective_min_level);
-            (*object_ubo).base_wire_width = BASE_WIRE_WIDTH_PX;
-            (*object_ubo).min_cell_size_px = MIN_CELL_SIZE_PX;
-            (*object_ubo).full_visibility_cell_size_px = FULL_VIS_CELL_SIZE_PX;
             object_ubo->push_update();
           }
 
@@ -307,7 +314,6 @@ class Wireframe : Overlay {
             ResourceHandleRange handle = manager.unique_handle(ob_ref);
             PassMain::Sub *mesh_pass = use_multires_wire ? coloring.mesh_multires_ps_ :
                                                            coloring.mesh_all_edges_ps_;
-            Vector<int> per_node_multires_levels;
             if (use_multires_wire) {
               /* `&(*object_ubo)` invokes the `operator&` overload on
                * `draw::UniformBuffer<T>` which returns `gpu::UniformBuf**`,
@@ -315,16 +321,9 @@ class Wireframe : Overlay {
                * `object_ubo` directly would not match any overload because the
                * conversion to `gpu::UniformBuf*` only fires on glvalues. */
               mesh_pass->bind_ubo("multires_wire_buf", &(*object_ubo));
-              /* Request only the subdivision levels that can be visible at the current camera
-               * distance to each PBVH node. The line index buffers are built (and only ever
-               * regrown — see `ensure_lines_batches`) up to these per-node levels; edges above
-               * a node's level are not uploaded to the GPU at all. The shader still fades the
-               * topmost visible level so the user does not perceive the cutoff. */
-              per_node_multires_levels = compute_multires_per_node_levels(
-                  *ob_ref.object, object_diameter, effective_max_level, state);
             }
             for (SculptBatch &batch : sculpt_batches_get(
-                     ob_ref.object, SCULPT_BATCH_WIREFRAME, per_node_multires_levels))
+                     ob_ref.object, SCULPT_BATCH_WIREFRAME, {}))
             {
               mesh_pass->draw(batch.batch, handle);
             }
@@ -337,9 +336,15 @@ class Wireframe : Overlay {
 
             PassMain::Sub *mesh_pass;
             if (use_multires_wire) {
-              mesh_pass = all_edges ? coloring.mesh_all_edges_ps_ : coloring.mesh_multires_ps_;
-              /* See note above for why `&(*object_ubo)` is required here. */
-              mesh_pass->bind_ubo("multires_wire_buf", &(*object_ubo));
+              if (all_edges) {
+                /* Force-all-edges mode: use the standard pass (shader does not read the UBO). */
+                mesh_pass = coloring.mesh_all_edges_ps_;
+              }
+              else {
+                mesh_pass = coloring.mesh_multires_ps_;
+                /* See note in the PBVH branch for why `&(*object_ubo)` is required here. */
+                mesh_pass->bind_ubo("multires_wire_buf", &(*object_ubo));
+              }
             }
             else {
               mesh_pass = all_edges ? coloring.mesh_all_edges_ps_ : coloring.mesh_ps_;
@@ -435,113 +440,6 @@ class Wireframe : Overlay {
   }
 
  private:
-  /* Lower threshold for cell size (in pixels) when close to the mesh.
-   * At distance, dynamic_threshold scales up to FULL_VIS_CELL_SIZE_PX. */
-  static constexpr float MIN_CELL_SIZE_PX = 4.0f;
-
-  /* Upper threshold of the `smoothstep`. Above this projected cell size a level reaches
-   * full brightness (still multiplied by the hierarchy dimmer in the shader). */
-  static constexpr float FULL_VIS_CELL_SIZE_PX = 12.0f;
-
-  /* Level-0 (base mesh) edges are drawn wider to stand out from finer subdivision edges.
-   * Subdivision edges scale down from a thicker starting width in the shader. */
-  static constexpr float BASE_WIRE_WIDTH_PX = 6.0f;
-
-  /* Per-PBVH-node estimate of the highest Multires level that can be usefully visible at the
-   * current camera projection. Mirrors the shader formula
-   * `pixels_per_world = winmat[1][1] * viewport_h * 0.5 / |w_clip|` and selects the deepest
-   * level whose projected cell size still exceeds `MIN_CELL_SIZE_PX`, plus one level of margin
-   * so the smoothstep fade has room to act. Far-away nodes (e.g. the back of a sculpted
-   * character) get a low target level and their IBO stays compact.
-   *
-   * `object_diameter` here is the world-space diameter computed at the call site; the AABB
-   * lives in object-local space, but the per-level cell size is taken in world units to match
-   * the shader. */
-  Vector<int> compute_multires_per_node_levels(const Object &object,
-                                               float object_diameter,
-                                               int max_level,
-                                               const State &state)
-  {
-    const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
-    if (!pbvh) {
-      return {};
-    }
-    const int nodes_num = pbvh->nodes_num();
-    Vector<int> result(nodes_num);
-
-    const bool is_persp = state.rv3d->is_persp;
-    /* Camera world position. */
-    const float3 cam_world(state.rv3d->viewinv[3]);
-    /* Transform camera into object-local space so the per-node AABB clamp is cheap. */
-    const float4x4 obmat = object.object_to_world();
-    const float4x4 world_to_object = math::invert(obmat);
-    const float3 cam_local = math::transform_point(world_to_object, cam_world);
-    /* `view_x_obmat` projects an object-local point into view space so we can read its
-     * `|view_z|` as the clip-space `w` (perspective only — ortho uses `w_clip == 1`). */
-    const float4x4 view_x_obmat = float4x4(state.rv3d->viewmat) * obmat;
-    const float winmat_scale_y = state.rv3d->winmat[1][1];
-    const float vp_h = float(state.region->winy);
-    /* Combined constant for the screen-size math, unified persp+ortho. */
-    const float ppw_factor = winmat_scale_y * vp_h * 0.5f;
-
-    auto level_for_node = [&](const blender::Bounds<float3> &aabb_local) -> int {
-      const float3 closest_local = math::clamp(cam_local, aabb_local.min, aabb_local.max);
-      float w_clip;
-      if (is_persp) {
-        const float3 closest_view = math::transform_point(view_x_obmat, closest_local);
-        /* Absolute guard against NaN — mirrors the `1e-6f` clamp in the GLSL shader.
-         * Using a scale-independent constant avoids over-clamping on large objects. */
-        w_clip = std::max(std::abs(closest_view.z), 1e-4f);
-      }
-      else {
-        w_clip = 1.0f;
-      }
-      const float pixels_per_world = ppw_factor / w_clip;
-
-      /* Conservative approach: load only levels whose cell size is comfortably above
-       * the fade threshold. Higher levels are loaded only when significantly visible. */
-      const float cell_size_threshold = FULL_VIS_CELL_SIZE_PX * 1.5f;  /* 18 pixels */
-
-      for (int level = max_level; level >= 1; --level) {
-        const float cell_world = object_diameter / float(1 << level);
-        const float cell_px = cell_world * pixels_per_world;
-        if (cell_px > cell_size_threshold) {
-          return level;
-        }
-      }
-      return 1;
-    };
-
-    /* Deduplicates the identical per-node loop across all three PBVH node types. */
-    auto fill_levels = [&](auto nodes) {
-      for (const int i : IndexRange(nodes_num)) {
-        result[i] = level_for_node(nodes[i].bounds());
-      }
-    };
-
-    switch (pbvh->type()) {
-      case bke::pbvh::Type::Grids:
-        fill_levels(pbvh->nodes<bke::pbvh::GridsNode>());
-        break;
-      case bke::pbvh::Type::Mesh:
-        fill_levels(pbvh->nodes<bke::pbvh::MeshNode>());
-        break;
-      case bke::pbvh::Type::BMesh:
-        fill_levels(pbvh->nodes<bke::pbvh::BMeshNode>());
-        break;
-    }
-    return result;
-  }
-
-  /* Pass the raw object diameter to the shader. The shader applies its own
-   * distance-dependent adaptive multiplier (see `compute_multires_wire_level`
-   * in `overlay_wireframe_vert.glsl`) so that close range stays unchanged
-   * while distant views still reveal one or two subdivision levels. */
-  inline float compute_multires_base_threshold(float object_diameter)
-  {
-    return object_diameter;
-  }
-
   float wire_discard_threshold_get(float threshold)
   {
     /* Use `sqrt` since the value stored in the edge is a variation of the cosine, so its square

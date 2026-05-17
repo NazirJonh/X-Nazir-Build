@@ -260,9 +260,9 @@ void main()
   gl_Position = drw_point_world_to_homogenous(wpos);
 
 #if !defined(POINTS) && !defined(CURVES)
-  /* Pass subdivision level as a flat varying to avoid undefined integer interpolation.
-   * FIRST_VERTEX_CONVENTION ensures the provoking vertex is the first corner of each edge,
-   * which matches the corner that owns the edge in our VBO layout. */
+  /* Integer varyings cannot be smoothly interpolated by the pipeline — GLSL requires
+   * `flat` for integer types. `FIRST_VERTEX_CONVENTION` ties the provoking vertex to
+   * the first corner of each edge, matching the per-corner VBO layout. */
   subdiv_level_iface = subdiv_level;
   line_width_iface = 1.0f;
 

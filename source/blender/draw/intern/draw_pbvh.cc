@@ -1005,7 +1005,7 @@ BLI_NOINLINE static void fill_subdivision_levels_grids(const Object &object,
   const int level_offset = std::max(0, total_level - grid_depth);
 
   /* Memoize coordinate-to-level mapping to avoid O(grid_depth) loops per coordinate. */
-  Array<uint> coord_level(key.grid_size);
+  Array<uint32_t> coord_level(key.grid_size);
   for (int val = 0; val < key.grid_size; val++) {
     for (int l = 0; l <= grid_depth; l++) {
       if (val % (1 << (grid_depth - l)) == 0) {
@@ -1853,7 +1853,7 @@ static gpu::IndexBufPtr create_lines_index_grids(const CCGKey &key,
   while ((gridsize - 1) % (1 << max_level) == 0 && (1 << max_level) < gridsize) {
     max_level++;
   }
-  Array<uint> coord_level(gridsize);
+  Array<uint32_t> coord_level(gridsize);
   for (int val = 0; val < gridsize; val++) {
     for (int l = 0; l <= max_level; l++) {
       if (val % (1 << (max_level - l)) == 0) {
@@ -2288,6 +2288,9 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_lines_batches(const Object &object,
 
   Span<gpu::VertBufPtr> subdiv_level;
   if (pbvh.type() == bke::pbvh::Type::Grids) {
+    /* SubdivisionLevel VBO is only meaningful for Multires (Grids) PBVH. Multires always
+     * produces a Grids PBVH in Sculpt Mode, so Mesh and BMesh PBVH types never have
+     * per-vertex subdivision level data and do not use the `mesh_multires_ps_` pass. */
     subdiv_level = this->ensure_attribute_data(
         object, orig_mesh_data, CustomRequest::SubdivisionLevel, nodes_to_update);
   }

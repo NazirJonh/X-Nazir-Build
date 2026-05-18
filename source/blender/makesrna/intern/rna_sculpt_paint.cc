@@ -672,10 +672,19 @@ namespace blender {
 static void rna_def_paint_curve(BlenderRNA *brna)
 {
   StructRNA *srna;
+  PropertyRNA *prop;
 
   srna = RNA_def_struct(brna, "PaintCurve", "ID");
   RNA_def_struct_ui_text(srna, "Paint Curve", "");
   RNA_def_struct_ui_icon(srna, ICON_CURVE_BEZCURVE);
+
+  prop = RNA_def_property(srna, "use_3d_space", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_3d_space", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "3D Space",
+      "Store and edit curve in 3D object space instead of 2D screen space");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 static void rna_def_paint_curve_visibility_flag(StructRNA *srna,

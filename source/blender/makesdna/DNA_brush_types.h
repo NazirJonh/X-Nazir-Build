@@ -491,11 +491,25 @@ struct PaintCurve {
 #endif
 
   ID id;
-  /** Points of curve. */
+  /** Points of curve (2D screen-space, legacy / sync target). */
   PaintCurvePoint *points = nullptr;
   int tot_points = 0;
   /** Index where next point will be added. */
   int add_index = 0;
+
+  /**
+   * 3D coordinates in object space for all three BezTriple handles.
+   * Size: tot_points * 9 floats. Layout per point: [left[3], pivot[3], right[3]].
+   * NULL until the curve is first activated in 3D mode.
+   */
+  float *points_3d = nullptr;
+
+  /**
+   * When non-zero, points_3d is the authoritative representation.
+   * Defaults to 1 so new curves are created in 3D mode.
+   */
+  char use_3d_space = 1;
+  char _pad0[7] = {0};
 };
 
 }  // namespace blender

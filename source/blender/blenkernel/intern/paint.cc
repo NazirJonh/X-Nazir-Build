@@ -195,6 +195,13 @@ static void paint_curve_copy_data(Main * /*bmain*/,
     paint_curve_dst->points = static_cast<PaintCurvePoint *>(
         MEM_dupalloc(paint_curve_src->points));
   }
+
+  /* NEW: copy 3D data. */
+  if (paint_curve_src->points_3d != nullptr) {
+    const size_t count = paint_curve_src->tot_points * 9;
+    paint_curve_dst->points_3d = MEM_new_array_uninitialized<float>(count, "PaintCurve.points_3d");
+    memcpy(paint_curve_dst->points_3d, paint_curve_src->points_3d, count * sizeof(float));
+  }
 }
 
 static void paint_curve_free_data(ID *id)
@@ -203,6 +210,8 @@ static void paint_curve_free_data(ID *id)
 
   MEM_SAFE_DELETE(paint_curve->points);
   paint_curve->tot_points = 0;
+  /* NEW: */
+  MEM_SAFE_DELETE(paint_curve->points_3d);
 }
 
 static void paint_curve_blend_write(BlendWriter *writer, ID *id, const void *id_address)
@@ -213,12 +222,22 @@ static void paint_curve_blend_write(BlendWriter *writer, ID *id, const void *id_
   BKE_id_blend_write(writer, &pc->id);
 
   writer->write_struct_array(pc->tot_points, pc->points);
+
+  /* NEW: write 3D data if present. */
+  if (pc->points_3d != nullptr) {
+    writer->write_float_array(pc->tot_points * 9, pc->points_3d);
+  }
 }
 
 static void paint_curve_blend_read_data(BlendDataReader *reader, ID *id)
 {
   PaintCurve *pc = id_cast<PaintCurve *>(id);
   BLO_read_array_and_validate_size(reader, &pc->points, &pc->tot_points);
+
+  /* NEW: read 3D data. Pointer from file is non-null only if it was written. */
+  if (pc->points_3d != nullptr) {
+    (void)BLO_read_array(reader, &pc->points_3d, pc->tot_points * 9);
+  }
 }
 
 IDTypeInfo IDType_ID_PC = {
@@ -1272,6 +1291,9 @@ std::optional<int> BKE_paint_get_brush_type_from_paintmode(const Brush *brush,
 PaintCurve *BKE_paint_curve_add(Main *bmain, const char *name)
 {
   PaintCurve *pc = BKE_id_new<PaintCurve>(bmain, name);
+  /* MEM_new_zeroed zeros all fields; the C++ default initializer `= 1` is never called.
+   * Set explicitly so new curves start in 3D mode as intended. */
+  pc->use_3d_space = 1;
   return pc;
 }
 

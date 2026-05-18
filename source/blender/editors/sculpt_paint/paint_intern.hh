@@ -672,6 +672,12 @@ void PAINTCURVE_OT_slide(wmOperatorType *ot);
 void PAINTCURVE_OT_draw(wmOperatorType *ot);
 void PAINTCURVE_OT_cursor(wmOperatorType *ot);
 
+void ED_paintcurve_sync_3d_to_2d(struct PaintCurve *pc,
+                                 const struct ViewContext *vc,
+                                 const float ob_to_world[4][4]);
+
+void paintcurve_init_3d_from_2d(struct PaintCurve *pc, const struct ViewContext *vc);
+
 /* image painting blur kernel */
 struct BlurKernel {
   float *wdata;     /* actual kernel */

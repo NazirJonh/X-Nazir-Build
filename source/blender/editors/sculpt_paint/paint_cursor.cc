@@ -8,6 +8,7 @@
 #include "paint_cursor.hh"
 
 #include <algorithm>
+#include <vector>
 
 #include "MEM_guardedalloc.h"
 
@@ -876,7 +877,33 @@ static void paint_draw_curve_cursor(Brush *brush, ViewContext *vc)
 
   if (brush->paint_curve && brush->paint_curve->points) {
     PaintCurve *pc = brush->paint_curve;
+    std::vector<PaintCurvePoint> temp_points;
     PaintCurvePoint *cp = pc->points;
+
+    if (pc->use_3d_space && pc->points_3d != nullptr) {
+      temp_points.resize(pc->tot_points);
+      Object *ob = vc->obact;
+      const float (*ob_to_world)[4] = ob ? ob->object_to_world().ptr() : nullptr;
+      for (int i = 0; i < pc->tot_points; i++) {
+        temp_points[i] = pc->points[i];
+        for (int j = 0; j < 3; j++) {
+          float world_co[3];
+          if (ob_to_world) {
+            mul_v3_m4v3(world_co, ob_to_world, pc->points_3d + (i * 9 + j * 3));
+          }
+          else {
+            copy_v3_v3(world_co, pc->points_3d + (i * 9 + j * 3));
+          }
+          float screen_co[2];
+          /* ED_view3d_project_v2 returns region-local coordinates (0,0 = bottom-left of
+           * region). The GPU matrix is already translated by winrct, so store as-is. */
+          ED_view3d_project_v2(vc->region, world_co, screen_co);
+          temp_points[i].bez.vec[j][0] = screen_co[0];
+          temp_points[i].bez.vec[j][1] = screen_co[1];
+        }
+      }
+      cp = temp_points.data();
+    }
 
     GPU_line_smooth(true);
     GPU_blend(GPU_BLEND_ALPHA);

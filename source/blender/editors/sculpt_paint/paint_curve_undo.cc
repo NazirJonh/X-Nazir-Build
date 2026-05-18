@@ -39,6 +39,9 @@ struct UndoCurve {
   PaintCurvePoint *points; /* points of curve */
   int tot_points;
   int add_index;
+  float *points_3d;
+  char use_3d_space;
+  char _pad0[7];
 };
 
 }  // namespace
@@ -46,22 +49,36 @@ struct UndoCurve {
 static void undocurve_from_paintcurve(UndoCurve *uc, const PaintCurve *pc)
 {
   BLI_assert(BLI_array_is_zeroed(uc, 1));
-  uc->points = MEM_dupalloc(pc->points);
+  uc->points = static_cast<PaintCurvePoint *>(MEM_dupalloc(pc->points));
   uc->tot_points = pc->tot_points;
   uc->add_index = pc->add_index;
+  if (pc->points_3d != nullptr) {
+    const size_t count = pc->tot_points * 9;
+    uc->points_3d = MEM_new_array_uninitialized<float>(count, "UndoCurve.points_3d");
+    memcpy(uc->points_3d, pc->points_3d, count * sizeof(float));
+  }
+  uc->use_3d_space = pc->use_3d_space;
 }
 
 static void undocurve_to_paintcurve(const UndoCurve *uc, PaintCurve *pc)
 {
   MEM_SAFE_DELETE(pc->points);
-  pc->points = MEM_dupalloc(uc->points);
+  pc->points = static_cast<PaintCurvePoint *>(MEM_dupalloc(uc->points));
   pc->tot_points = uc->tot_points;
   pc->add_index = uc->add_index;
+  MEM_SAFE_DELETE(pc->points_3d);
+  if (uc->points_3d != nullptr) {
+    const size_t count = uc->tot_points * 9;
+    pc->points_3d = MEM_new_array_uninitialized<float>(count, "PaintCurve.points_3d_undo");
+    memcpy(pc->points_3d, uc->points_3d, count * sizeof(float));
+  }
+  pc->use_3d_space = uc->use_3d_space;
 }
 
 static void undocurve_free_data(UndoCurve *uc)
 {
   MEM_SAFE_DELETE(uc->points);
+  MEM_SAFE_DELETE(uc->points_3d);
 }
 
 /** \} */

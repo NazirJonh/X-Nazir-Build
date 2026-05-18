@@ -594,6 +594,8 @@ class StrokePanel(BrushPanel):
         if brush.stroke_method == 'CURVE':
             col.separator()
             col.template_ID(brush, "paint_curve", new="paintcurve.new")
+            if brush.paint_curve:
+                col.prop(brush.paint_curve, "use_3d_space", text="3D Curve")
             col.operator("paintcurve.draw")
             col.separator()
 

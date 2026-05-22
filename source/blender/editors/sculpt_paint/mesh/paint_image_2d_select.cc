@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <cstring>
 
@@ -159,9 +160,14 @@ static void image_paint_selection_reset(bContext *C)
   }
 }
 
+/* Forward declaration — defined later in this file alongside the transform state. */
+bool image_select_transform_is_floating(bContext *C);
+
 /**
  * Poll for all image paint selection operators.
  * Does not require an active brush тАФ selection tools are independent of the brush.
+ * Blocked while a free-transform is in progress so that stray LMB clicks outside the
+ * transform widget cannot accidentally start a new selection gesture.
  */
 static bool image_paint_selection_poll(bContext *C)
 {
@@ -175,6 +181,9 @@ static bool image_paint_selection_poll(bContext *C)
   if (sima->image != nullptr &&
       (!ID_IS_EDITABLE(sima->image) || ID_IS_OVERRIDE_LIBRARY(sima->image)))
   {
+    return false;
+  }
+  if (image_select_transform_is_floating(C)) {
     return false;
   }
   const ARegion *region = CTX_wm_region(C);
@@ -351,6 +360,10 @@ struct ImageSelectTransformState {
 static ImageSelectTransformState *g_transform_state = nullptr;
 
 bool image_select_transform_is_floating(bContext *C);
+static bool image_select_move_cursor_in_fragment(const ImageSelectMoveState *state,
+                                                 const ARegion *region,
+                                                 const wmEvent *event,
+                                                 Image *ima);
 
 #if IMAGE_SELECT_DEBUG
 static const char *image_select_debug_handle_name(
@@ -552,11 +565,17 @@ static void draw_select_move_preview(const bContext *C, ARegion *region, void *a
   const int dst_x = state->origin_px.x + state->drag_offset.x;
   const int dst_y = state->origin_px.y + state->drag_offset.y;
 
-  /* Convert destination bbox to normalised UV (0..1 for single tile). */
-  const float v_x0 = float(dst_x) / float(ibuf->x);
-  const float v_y0 = float(dst_y) / float(ibuf->y);
-  const float v_x1 = float(dst_x + state->size_px.x) / float(ibuf->x);
-  const float v_y1 = float(dst_y + state->size_px.y) / float(ibuf->y);
+  /* UDIM tile UV origin: tile 1001 → (0,0), tile 1012 → (1,1), etc.
+   * view2d in the Image Editor uses this global UV convention, so we must add
+   * the tile origin before converting to screen space. */
+  const float tile_uv_x = float((state->tile_number - 1001) % 10);
+  const float tile_uv_y = float((state->tile_number - 1001) / 10);
+
+  /* Convert destination bbox to global UV (tile origin + tile-local [0..1]). */
+  const float v_x0 = tile_uv_x + float(dst_x) / float(ibuf->x);
+  const float v_y0 = tile_uv_y + float(dst_y) / float(ibuf->y);
+  const float v_x1 = tile_uv_x + float(dst_x + state->size_px.x) / float(ibuf->x);
+  const float v_y1 = tile_uv_y + float(dst_y + state->size_px.y) / float(ibuf->y);
 
   BKE_image_release_ibuf(sima->image, ibuf, lock);
 
@@ -976,8 +995,12 @@ static void image_select_move_restore_source(bContext *C, ImageSelectMoveState *
 /**
  * Commit the move: blit the floating fragment to the destination and update the selection mask.
  * Source pixels were already cleared by lift_source on invoke.
- * Closes the undo step opened there тАФ undoing this step restores both source and destination.
- * Pixels that fall outside the canvas boundary are clipped, not shifted back.
+ * Closes the undo step opened there — undoing this step restores both source and destination.
+ *
+ * Position and scale are preserved in UV space so that UDIM tiles with different pixel
+ * resolutions display the fragment exactly as seen in the Image Editor: the same UV region
+ * is covered, resampled to the target tile's pixel density when necessary.
+ * Float images use bilinear interpolation; byte images use nearest-neighbor.
  */
 static void image_select_move_commit(bContext *C, ImageSelectMoveState *state)
 {
@@ -989,126 +1012,207 @@ static void image_select_move_commit(bContext *C, ImageSelectMoveState *state)
     return;
   }
   Image *ima = sima->image;
-  ImageUser iuser = state->iuser;
 
-  void *lock;
-  ImBuf *ibuf = BKE_image_acquire_ibuf(ima, &iuser, &lock);
-  if (!ibuf || (!ibuf->float_buffer.data && !ibuf->byte_buffer.data)) {
-    if (ibuf) {
-      BKE_image_release_ibuf(ima, ibuf, lock);
+  /* Acquire the source tile ibuf to read its pixel dimensions.
+   * drag_offset was accumulated using these dimensions, so they are needed to convert
+   * the offset back to UV units. */
+  ImageUser iuser_src = state->iuser;
+  void *lock_src;
+  ImBuf *ibuf_src = BKE_image_acquire_ibuf(ima, &iuser_src, &lock_src);
+  if (!ibuf_src || (!ibuf_src->float_buffer.data && !ibuf_src->byte_buffer.data)) {
+    if (ibuf_src) {
+      BKE_image_release_ibuf(ima, ibuf_src, lock_src);
     }
     if (state->undo_begun) {
       ED_image_undo_push_end();
     }
     return;
   }
+  const float src_w = float(ibuf_src->x);
+  const float src_h = float(ibuf_src->y);
+  BKE_image_release_ibuf(ima, ibuf_src, lock_src);
 
-  /* Raw destination тАФ no clamping. Per-pixel bounds checks below handle clipping. */
-  const int2 dst = {
-      state->origin_px.x + state->drag_offset.x,
-      state->origin_px.y + state->drag_offset.y,
-  };
+  /* Source tile grid position.
+   * Tile 1001 → (col=0, row=0), tile 1011 → (col=0, row=1), tile 1012 → (col=1, row=1), etc. */
+  const int src_col = (state->tile_number - 1001) % 10;
+  const int src_row = (state->tile_number - 1001) / 10;
 
-  ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
+  /* Fragment bounds in UV space.
+   * drag_offset is in source-tile pixels; dividing by source dimensions converts to UV units.
+   * UV (0,0)-(1,1) is tile 1001; UV (0,1)-(1,2) is tile 1011, etc. */
+  const float frag_uv_x0 = float(src_col) +
+                            float(state->origin_px.x + state->drag_offset.x) / src_w;
+  const float frag_uv_y0 = float(src_row) +
+                            float(state->origin_px.y + state->drag_offset.y) / src_h;
+  const float frag_uv_x1 = frag_uv_x0 + float(state->size_px.x) / src_w;
+  const float frag_uv_y1 = frag_uv_y0 + float(state->size_px.y) / src_h;
 
-  /* Blit only the selected pixels (mask-aware) to the destination. */
-  const float *fmask = state->fragment_mask_ibuf ? state->fragment_mask_ibuf->float_buffer.data :
-                                                    nullptr;
-  if (fmask) {
+  const float *fmask = state->fragment_mask_ibuf ?
+                           state->fragment_mask_ibuf->float_buffer.data :
+                           nullptr;
+
+  /* Iterate all tiles and write pixels to those the fragment overlaps. */
+  for (ImageTile *tile : ListBaseWrapper<ImageTile>(ima->tiles)) {
+    const int t_col = (tile->tile_number - 1001) % 10;
+    const int t_row = (tile->tile_number - 1001) / 10;
+    const float t_uv_x0 = float(t_col);
+    const float t_uv_y0 = float(t_row);
+
+    /* Fragment UV bounds clipped to this tile's UV space. */
+    const float iu_x0 = std::max(frag_uv_x0, t_uv_x0);
+    const float iu_y0 = std::max(frag_uv_y0, t_uv_y0);
+    const float iu_x1 = std::min(frag_uv_x1, t_uv_x0 + 1.0f);
+    const float iu_y1 = std::min(frag_uv_y1, t_uv_y0 + 1.0f);
+    if (iu_x0 >= iu_x1 || iu_y0 >= iu_y1) {
+      continue;
+    }
+
+    ImageUser tile_iuser = state->iuser;
+    tile_iuser.tile = tile->tile_number;
+    void *lock;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(ima, &tile_iuser, &lock);
+    if (!ibuf || (!ibuf->float_buffer.data && !ibuf->byte_buffer.data)) {
+      if (ibuf) {
+        BKE_image_release_ibuf(ima, ibuf, lock);
+      }
+      continue;
+    }
+
+    /* Destination tile's actual pixel dimensions (may differ from source tile). */
+    const float dst_w = float(ibuf->x);
+    const float dst_h = float(ibuf->y);
+
+    /* Convert the UV intersection to destination-tile pixel bounds.
+     * floor/ceil ensures every pixel that partially overlaps the fragment is included. */
+    const int dp_x0 = std::max(0, int(std::floor((iu_x0 - t_uv_x0) * dst_w)));
+    const int dp_y0 = std::max(0, int(std::floor((iu_y0 - t_uv_y0) * dst_h)));
+    const int dp_x1 = std::min(int(dst_w), int(std::ceil((iu_x1 - t_uv_x0) * dst_w)));
+    const int dp_y1 = std::min(int(dst_h), int(std::ceil((iu_y1 - t_uv_y0) * dst_h)));
+
+    ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
+
     const bool is_float = ibuf->float_data() != nullptr;
-    if (is_float) {
+
+    if (is_float && state->fragment_ibuf->float_data()) {
       const int channels = ibuf->channels ? ibuf->channels : 4;
       float *dst_data = ibuf->float_data_for_write();
       const float *src_data = state->fragment_ibuf->float_data();
-      for (int ly = 0; ly < state->size_px.y; ly++) {
-        const int py = dst.y + ly;
-        if (py < 0 || py >= ibuf->y) {
+
+      for (int py = dp_y0; py < dp_y1; py++) {
+        /* UV at the center of this destination pixel → fragment-local float coordinate.
+         * fy = 0.5 is the center of fragment pixel 0, fy = 1.5 is the center of pixel 1, etc.
+         * For same-resolution tiles the value is always ly + 0.5 (no bilinear blending). */
+        const float fy = (t_uv_y0 + (float(py) + 0.5f) / dst_h - frag_uv_y0) * src_h;
+        if (fy < 0.0f || fy >= float(state->size_px.y)) {
           continue;
         }
-        for (int lx = 0; lx < state->size_px.x; lx++) {
-          if (fmask[ly * state->size_px.x + lx] <= 0.5f) {
+
+        /* Nearest-neighbor y index for mask lookup. */
+        const int mask_ly = int(fy);
+
+        /* Bilinear y weights: shift to pixel-corner convention and clamp to fragment bounds. */
+        const float bly = std::max(0.0f,
+                                   std::min(float(state->size_px.y) - 1.0001f, fy - 0.5f));
+        const int by0 = int(bly);
+        const int by1 = std::min(state->size_px.y - 1, by0 + 1);
+        const float wy1 = bly - float(by0);
+        const float wy0 = 1.0f - wy1;
+
+        for (int px = dp_x0; px < dp_x1; px++) {
+          const float fx = (t_uv_x0 + (float(px) + 0.5f) / dst_w - frag_uv_x0) * src_w;
+          if (fx < 0.0f || fx >= float(state->size_px.x)) {
             continue;
           }
-          const int px = dst.x + lx;
-          if (px < 0 || px >= ibuf->x) {
+          const int mask_lx = int(fx);
+
+          /* Skip pixels that fall outside the lasso selection. */
+          if (fmask && fmask[mask_ly * state->size_px.x + mask_lx] <= 0.5f) {
             continue;
           }
-          memcpy(dst_data + (py * ibuf->x + px) * channels,
-                 src_data + (ly * state->size_px.x + lx) * channels,
-                 channels * sizeof(float));
+
+          /* Bilinear x weights. */
+          const float blx = std::max(0.0f,
+                                     std::min(float(state->size_px.x) - 1.0001f, fx - 0.5f));
+          const int bx0 = int(blx);
+          const int bx1 = std::min(state->size_px.x - 1, bx0 + 1);
+          const float wx1 = blx - float(bx0);
+          const float wx0 = 1.0f - wx1;
+
+          for (int c = 0; c < channels; c++) {
+            dst_data[(py * int(dst_w) + px) * channels + c] =
+                src_data[(by0 * state->size_px.x + bx0) * channels + c] * wx0 * wy0 +
+                src_data[(by0 * state->size_px.x + bx1) * channels + c] * wx1 * wy0 +
+                src_data[(by1 * state->size_px.x + bx0) * channels + c] * wx0 * wy1 +
+                src_data[(by1 * state->size_px.x + bx1) * channels + c] * wx1 * wy1;
+          }
         }
       }
     }
-    else if (ibuf->byte_data()) {
+    else if (!is_float && ibuf->byte_data() && state->fragment_ibuf->byte_data()) {
+      /* Byte images: nearest-neighbor sampling. */
       uint8_t *dst_data = ibuf->byte_data_for_write();
       const uint8_t *src_data = state->fragment_ibuf->byte_data();
-      for (int ly = 0; ly < state->size_px.y; ly++) {
-        const int py = dst.y + ly;
-        if (py < 0 || py >= ibuf->y) {
+
+      for (int py = dp_y0; py < dp_y1; py++) {
+        const float fy = (t_uv_y0 + (float(py) + 0.5f) / dst_h - frag_uv_y0) * src_h;
+        if (fy < 0.0f || fy >= float(state->size_px.y)) {
           continue;
         }
-        for (int lx = 0; lx < state->size_px.x; lx++) {
-          if (fmask[ly * state->size_px.x + lx] <= 0.5f) {
+        const int ly = int(fy);
+
+        for (int px = dp_x0; px < dp_x1; px++) {
+          const float fx = (t_uv_x0 + (float(px) + 0.5f) / dst_w - frag_uv_x0) * src_w;
+          if (fx < 0.0f || fx >= float(state->size_px.x)) {
             continue;
           }
-          const int px = dst.x + lx;
-          if (px < 0 || px >= ibuf->x) {
+          const int lx = int(fx);
+
+          if (fmask && fmask[ly * state->size_px.x + lx] <= 0.5f) {
             continue;
           }
-          memcpy(dst_data + (py * ibuf->x + px) * 4, src_data + (ly * state->size_px.x + lx) * 4, 4);
+          memcpy(dst_data + (py * int(dst_w) + px) * 4,
+                 src_data + (ly * state->size_px.x + lx) * 4,
+                 4);
         }
       }
     }
-  }
-  else {
-    /* Fallback: no mask. Clip the fragment to canvas bounds before blit so IMB_copy_rect
-     * never receives out-of-range coordinates. */
-    const int clip_x0 = std::max(0, dst.x);
-    const int clip_y0 = std::max(0, dst.y);
-    const int clip_x1 = std::min(ibuf->x, dst.x + state->size_px.x);
-    const int clip_y1 = std::min(ibuf->y, dst.y + state->size_px.y);
-    if (clip_x0 < clip_x1 && clip_y0 < clip_y1) {
-      const int2 src_offset = {clip_x0 - dst.x, clip_y0 - dst.y};
-      const int2 dst_offset = {clip_x0, clip_y0};
-      const int2 clip_size = {clip_x1 - clip_x0, clip_y1 - clip_y0};
-      IMB_copy_rect(ibuf, state->fragment_ibuf, src_offset, dst_offset, clip_size);
-    }
-  }
-  BKE_image_mark_dirty(ima, ibuf);
 
-  /* Update selection mask at destination using the actual lasso shape. */
-  ImBuf **mask_ptr = ima->runtime->paint_selection_masks.lookup_ptr(state->tile_number);
-  if (mask_ptr && *mask_ptr) {
-    ImBuf *mask = *mask_ptr;
-    float *mdata = mask->float_data_for_write();
-    if (mdata) {
-      for (int ly = 0; ly < state->size_px.y; ly++) {
-        const int py = dst.y + ly;
-        if (py < 0 || py >= mask->y) {
-          continue;
-        }
-        for (int lx = 0; lx < state->size_px.x; lx++) {
-          const int px = dst.x + lx;
-          if (px < 0 || px >= mask->x) {
+    BKE_image_mark_dirty(ima, ibuf);
+
+    /* Update the destination tile's selection mask (nearest-neighbor — mask is binary). */
+    ImBuf **mask_ptr = ima->runtime->paint_selection_masks.lookup_ptr(tile->tile_number);
+    if (mask_ptr && *mask_ptr) {
+      ImBuf *mask = *mask_ptr;
+      float *mdata = mask->float_data_for_write();
+      if (mdata) {
+        for (int py = dp_y0; py < dp_y1; py++) {
+          const float fy = (t_uv_y0 + (float(py) + 0.5f) / dst_h - frag_uv_y0) * src_h;
+          if (fy < 0.0f || fy >= float(state->size_px.y)) {
             continue;
           }
-          mdata[py * mask->x + px] = fmask ? fmask[ly * state->size_px.x + lx] : 1.0f;
+          const int ly = int(fy);
+          for (int px = dp_x0; px < dp_x1; px++) {
+            if (py < 0 || py >= mask->y || px < 0 || px >= mask->x) {
+              continue;
+            }
+            const float fx = (t_uv_x0 + (float(px) + 0.5f) / dst_w - frag_uv_x0) * src_w;
+            if (fx < 0.0f || fx >= float(state->size_px.x)) {
+              continue;
+            }
+            const int lx = int(fx);
+            mdata[py * mask->x + px] = fmask ? fmask[ly * state->size_px.x + lx] : 1.0f;
+          }
         }
       }
     }
+
+    /* Mark the modified region dirty (tile-local pixel coordinates). */
+    rcti dirty;
+    BLI_rcti_init(&dirty, dp_x0, dp_x1, dp_y0, dp_y1);
+    BKE_image_partial_update_mark_region(ima, tile, ibuf, &dirty);
+
+    BKE_image_release_ibuf(ima, ibuf, lock);
   }
-
-  /* Mark the destination region dirty, clipped to canvas bounds. */
-  rcti dirty;
-  BLI_rcti_init(&dirty,
-                std::max(0, dst.x),
-                std::min(ibuf->x, dst.x + state->size_px.x),
-                std::max(0, dst.y),
-                std::min(ibuf->y, dst.y + state->size_px.y));
-  const ImageTile *tile = BKE_image_get_tile(ima, state->tile_number);
-  BKE_image_partial_update_mark_region(ima, tile, ibuf, &dirty);
-
-  BKE_image_release_ibuf(ima, ibuf, lock);
 
   if (state->undo_begun) {
     ED_image_undo_push_end();
@@ -1175,6 +1279,14 @@ static wmOperatorStatus image_select_all_exec(bContext *C, wmOperator * /*op*/)
 
   /* Only select the active tile, not all tiles. */
   ImageUser iuser = sima->iuser;
+  /* For UDIM images, sima->iuser.tile is reset to 0 after each temporary acquire.
+   * The true active tile is tracked by ima->active_tile_index. */
+  if (image->source == IMA_SRC_TILED) {
+    const ImageTile *active = static_cast<const ImageTile *>(
+        BLI_findlink(&image->tiles, image->active_tile_index));
+    iuser.tile = active ? active->tile_number :
+                          static_cast<const ImageTile *>(image->tiles.first)->tile_number;
+  }
   const ImageTile *active_tile = BKE_image_get_tile_from_iuser(image, &iuser);
   if (!active_tile) {
     return OPERATOR_CANCELLED;
@@ -1490,6 +1602,19 @@ static wmOperatorStatus image_select_box_invoke(bContext *C,
                                                 wmOperator *op,
                                                 const wmEvent *event)
 {
+  /* When a fragment is floating and LMB is pressed inside it, delegate to the move
+   * operator instead of starting a box selection. */
+  SpaceImage *sima = CTX_wm_space_image(C);
+  if (g_floating_state && sima && g_floating_state->owner_sima == sima) {
+    ARegion *region = CTX_wm_region(C);
+    if (region &&
+        image_select_move_cursor_in_fragment(g_floating_state, region, event, sima->image))
+    {
+      WM_operator_name_call(
+          C, "PAINT_OT_image_select_move", wm::OpCallContext::InvokeDefault, nullptr, event);
+      return OPERATOR_FINISHED;
+    }
+  }
   RNA_int_set(op->ptr, "click_x", event->xy[0]);
   RNA_int_set(op->ptr, "click_y", event->xy[1]);
   RNA_boolean_set(op->ptr, "is_simple_click", true);
@@ -1593,6 +1718,18 @@ static wmOperatorStatus image_select_lasso_invoke(bContext *C,
                                                    wmOperator *op,
                                                    const wmEvent *event)
 {
+  /* Delegate to move when a fragment is floating and LMB is pressed inside it. */
+  SpaceImage *sima = CTX_wm_space_image(C);
+  if (g_floating_state && sima && g_floating_state->owner_sima == sima) {
+    ARegion *region = CTX_wm_region(C);
+    if (region &&
+        image_select_move_cursor_in_fragment(g_floating_state, region, event, sima->image))
+    {
+      WM_operator_name_call(
+          C, "PAINT_OT_image_select_move", wm::OpCallContext::InvokeDefault, nullptr, event);
+      return OPERATOR_FINISHED;
+    }
+  }
   RNA_int_set(op->ptr, "click_x", event->xy[0]);
   RNA_int_set(op->ptr, "click_y", event->xy[1]);
   RNA_boolean_set(op->ptr, "is_simple_click", true);
@@ -1766,6 +1903,18 @@ static wmOperatorStatus image_select_circle_invoke(bContext *C,
                                                     wmOperator *op,
                                                     const wmEvent *event)
 {
+  /* Delegate to move when a fragment is floating and LMB is pressed inside it. */
+  SpaceImage *sima = CTX_wm_space_image(C);
+  if (g_floating_state && sima && g_floating_state->owner_sima == sima) {
+    ARegion *region = CTX_wm_region(C);
+    if (region &&
+        image_select_move_cursor_in_fragment(g_floating_state, region, event, sima->image))
+    {
+      WM_operator_name_call(
+          C, "PAINT_OT_image_select_move", wm::OpCallContext::InvokeDefault, nullptr, event);
+      return OPERATOR_FINISHED;
+    }
+  }
   RNA_int_set(op->ptr, "click_x", event->xy[0]);
   RNA_int_set(op->ptr, "click_y", event->xy[1]);
   RNA_boolean_set(op->ptr, "is_simple_click", true);
@@ -2019,6 +2168,7 @@ static wmOperatorStatus image_select_move_modal(bContext *C,
          * Navigation (pan/zoom) is fully available between drag gestures. */
         state->is_dragging = false;
         op->customdata = nullptr;
+        WM_cursor_modal_restore(CTX_wm_window(C));
         IMG_SEL_DBG("move_modal: LMB release -> FINISHED (still floating)");
         return OPERATOR_FINISHED;
       }
@@ -2029,6 +2179,7 @@ static wmOperatorStatus image_select_move_modal(bContext *C,
     case EVT_ESCKEY:
       if (event->val == KM_PRESS) {
         IMG_SEL_DBG("move_modal: cancel");
+        WM_cursor_modal_restore(CTX_wm_window(C));
         image_select_move_restore_source(C, state);
         image_select_move_state_free(state);
         g_floating_state = nullptr;
@@ -2046,6 +2197,10 @@ static wmOperatorStatus image_select_move_modal(bContext *C,
 static void image_select_move_cancel(bContext *C, wmOperator *op)
 {
   /* Called by WM when the modal is forcibly removed (e.g. area close, mode change). */
+  wmWindow *win = CTX_wm_window(C);
+  if (win) {
+    WM_cursor_modal_restore(win);
+  }
   if (g_floating_state) {
     image_select_move_restore_source(C, g_floating_state);
     image_select_move_state_free(g_floating_state);
@@ -2064,6 +2219,44 @@ static void image_select_move_cancel(bContext *C, wmOperator *op)
 /** \name Invoke тАФ extract fragment, start initial drag
  * \{ */
 
+/**
+ * Return true when the cursor (from `event->mval`) is inside the floating fragment's
+ * current bounding box in tile-pixel space.  Used to decide whether a new LMB press
+ * should start a drag or be passed through to a selection/commit operator.
+ */
+static bool image_select_move_cursor_in_fragment(const ImageSelectMoveState *state,
+                                                 const ARegion *region,
+                                                 const wmEvent *event,
+                                                 Image *ima)
+{
+  ImageUser iuser = state->iuser;
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(ima, &iuser, &lock);
+  if (!ibuf) {
+    return true;
+  }
+  const float ibuf_w = float(ibuf->x);
+  const float ibuf_h = float(ibuf->y);
+  BKE_image_release_ibuf(ima, ibuf, lock);
+
+  /* Convert region-relative cursor to view2d (global UV) space. */
+  float uv_x, uv_y;
+  ui::view2d_region_to_view(
+      &region->v2d, float(event->mval[0]), float(event->mval[1]), &uv_x, &uv_y);
+
+  /* Remove tile UV origin to get tile-local UV, then convert to pixel coords. */
+  const float tile_uv_x = float((state->tile_number - 1001) % 10);
+  const float tile_uv_y = float((state->tile_number - 1001) / 10);
+  const float px_x = (uv_x - tile_uv_x) * ibuf_w;
+  const float px_y = (uv_y - tile_uv_y) * ibuf_h;
+
+  const int dst_x = state->origin_px.x + state->drag_offset.x;
+  const int dst_y = state->origin_px.y + state->drag_offset.y;
+
+  return (px_x >= float(dst_x) && px_x <= float(dst_x + state->size_px.x) &&
+          px_y >= float(dst_y) && px_y <= float(dst_y + state->size_px.y));
+}
+
 static wmOperatorStatus image_select_move_invoke(bContext *C,
                                                  wmOperator *op,
                                                  const wmEvent *event)
@@ -2075,14 +2268,24 @@ static wmOperatorStatus image_select_move_invoke(bContext *C,
               (void *)g_transform_state,
               int(image_select_transform_is_floating(C)));
 
-  /* Re-drag path: a fragment is already floating in this space тАФ start another drag gesture.
-   * Push the current position before the new drag so Ctrl+Z can step back to it. */
+  /* Re-drag path: a fragment is already floating in this space — start another drag gesture,
+   * but only when LMB was pressed inside the fragment's current bounding box.
+   * If the press is outside, pass through so selection/commit operators handle it. */
   if (g_floating_state && g_floating_state->owner_sima == sima) {
+    ARegion *region_for_hit = CTX_wm_region(C);
+    if (region_for_hit &&
+        !image_select_move_cursor_in_fragment(g_floating_state, region_for_hit, event, sima->image))
+    {
+      IMG_SEL_DBG("move_invoke -> PASS_THROUGH (cursor outside fragment)");
+      return OPERATOR_PASS_THROUGH;
+    }
+    /* Push the current position so Ctrl+Z can step back to it. */
     g_floating_state->drag_position_history.append(g_floating_state->drag_offset);
     g_floating_state->is_dragging = true;
     g_floating_state->prev_mouse_xy = int2{event->xy[0], event->xy[1]};
     op->customdata = g_floating_state;
     WM_event_add_modal_handler(C, op);
+    WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
     IMG_SEL_DBG("move_invoke -> %s (re-drag)", image_select_debug_op_status(OPERATOR_RUNNING_MODAL));
     return OPERATOR_RUNNING_MODAL;
   }
@@ -2096,10 +2299,17 @@ static wmOperatorStatus image_select_move_invoke(bContext *C,
   }
   Image *ima = sima->image;
 
-  const ImageTile *active_tile = BKE_image_get_tile_from_iuser(ima, &sima->iuser);
-  const int tile_number = active_tile ? active_tile->tile_number : 1001;
-
+  /* For UDIM images, sima->iuser.tile is reset to 0 after each temporary acquire.
+   * The true active tile is tracked by ima->active_tile_index. */
   ImageUser iuser = sima->iuser;
+  if (ima->source == IMA_SRC_TILED) {
+    const ImageTile *active = static_cast<const ImageTile *>(
+        BLI_findlink(&ima->tiles, ima->active_tile_index));
+    iuser.tile = active ? active->tile_number :
+                          static_cast<const ImageTile *>(ima->tiles.first)->tile_number;
+  }
+  const ImageTile *active_tile = BKE_image_get_tile_from_iuser(ima, &iuser);
+  const int tile_number = active_tile ? active_tile->tile_number : 1001;
   iuser.tile = tile_number;
 
   auto *state = MEM_new<ImageSelectMoveState>(__func__);
@@ -2136,6 +2346,7 @@ static wmOperatorStatus image_select_move_invoke(bContext *C,
   g_floating_state = state;
   op->customdata = state;
   WM_event_add_modal_handler(C, op);
+  WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
   ED_region_tag_redraw(region);
   IMG_SEL_DBG("move_invoke -> %s (new floating, size_px=%d,%d)",
               image_select_debug_op_status(OPERATOR_RUNNING_MODAL),
@@ -2270,8 +2481,31 @@ static wmOperatorStatus image_select_copy_exec(bContext *C, wmOperator *op)
   ImBuf *canvas_ibuf = nullptr;
   void *canvas_lock = nullptr;
 
-  /* Acquire the image buffer for the current tile. */
-  canvas_ibuf = BKE_image_acquire_ibuf(ima, &sima->iuser, &canvas_lock);
+  /* Resolve the source tile. For UDIM images, scan all tiles that have a selection mask and
+   * use the first one with a non-empty selection. This allows copy to work without requiring
+   * the user to manually activate the tile first. Falls back to active_tile_index when
+   * no selection exists anywhere. */
+  ImageUser iuser = sima->iuser;
+  if (ima->source == IMA_SRC_TILED) {
+    int source_tile = 0;
+    for (const auto &item : ima->runtime->paint_selection_masks.items()) {
+      int dummy_min_x, dummy_min_y, dummy_max_x, dummy_max_y;
+      if (image_selection_bbox(item.value, &dummy_min_x, &dummy_min_y, &dummy_max_x, &dummy_max_y)) {
+        source_tile = item.key;
+        break;
+      }
+    }
+    if (source_tile == 0) {
+      const ImageTile *active = static_cast<const ImageTile *>(
+          BLI_findlink(&ima->tiles, ima->active_tile_index));
+      source_tile = active ? active->tile_number :
+                             static_cast<const ImageTile *>(ima->tiles.first)->tile_number;
+    }
+    iuser.tile = source_tile;
+  }
+
+  /* Acquire the image buffer for the active tile. */
+  canvas_ibuf = BKE_image_acquire_ibuf(ima, &iuser, &canvas_lock);
   if (!canvas_ibuf) {
     printf("[DEBUG] copy_exec: Cannot acquire image buffer\n");
     BKE_report(op->reports, RPT_ERROR, "Cannot acquire image buffer");
@@ -2280,7 +2514,7 @@ static wmOperatorStatus image_select_copy_exec(bContext *C, wmOperator *op)
   printf("[DEBUG] copy_exec: Canvas buffer acquired. Size: %dx%d\n", canvas_ibuf->x, canvas_ibuf->y);
 
   /* Get the selection mask for this tile. */
-  ImageTile *tile = BKE_image_get_tile_from_iuser(ima, &sima->iuser);
+  ImageTile *tile = BKE_image_get_tile_from_iuser(ima, &iuser);
   if (!tile) {
     printf("[DEBUG] copy_exec: Cannot get tile from ImageUser\n");
     BKE_image_release_ibuf(ima, canvas_ibuf, canvas_lock);
@@ -2434,6 +2668,26 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
   }
   printf("[DEBUG] image_select_paste_exec: Image found: %s\n", sima->image->id.name);
 
+  Image *ima = sima->image;
+
+  /* For UDIM images, resolve the paste target tile. When pasting from the local clipboard
+   * (which stores the source tile number), paste back to that same tile so the result
+   * always lands where the copy was made. For system clipboard fall back to active tile. */
+  ImageUser iuser = sima->iuser;
+  if (ima->source == IMA_SRC_TILED) {
+    int target_tile = 0;
+    if (g_clipboard_state && g_clipboard_state->has_mask) {
+      target_tile = g_clipboard_state->tile_number;
+    }
+    if (target_tile == 0) {
+      const ImageTile *active = static_cast<const ImageTile *>(
+          BLI_findlink(&ima->tiles, ima->active_tile_index));
+      target_tile = active ? active->tile_number :
+                             static_cast<const ImageTile *>(ima->tiles.first)->tile_number;
+    }
+    iuser.tile = target_tile;
+  }
+
   ImBuf *paste_ibuf = nullptr;
   ImBuf *paste_mask_ibuf = nullptr;
   int2 paste_origin = {0, 0};
@@ -2474,7 +2728,7 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
     }
     /* Acquire canvas to center the paste. */
     void *lock = nullptr;
-    ImBuf *canvas_ibuf = BKE_image_acquire_ibuf(sima->image, &sima->iuser, &lock);
+    ImBuf *canvas_ibuf = BKE_image_acquire_ibuf(ima, &iuser, &lock);
     if (canvas_ibuf) {
       paste_origin.x = (canvas_ibuf->x - paste_ibuf->x) / 2;
       paste_origin.y = (canvas_ibuf->y - paste_ibuf->y) / 2;
@@ -2489,7 +2743,7 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
   }
 
   /* Get the correct tile number for this paste operation. */
-  ImageTile *paste_tile = BKE_image_get_tile_from_iuser(sima->image, &sima->iuser);
+  ImageTile *paste_tile = BKE_image_get_tile_from_iuser(ima, &iuser);
   if (!paste_tile) {
     printf("[DEBUG] paste_exec: Cannot get tile from ImageUser\n");
     IMB_freeImBuf(paste_ibuf);
@@ -2511,7 +2765,7 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
   state->size_px = {paste_ibuf->x, paste_ibuf->y};
   state->drag_offset = {0, 0};
   state->tile_number = paste_tile_number;
-  state->iuser = sima->iuser;
+  state->iuser = iuser;
 
   /* If clipboard has a mask, create display buffer for lasso preview. */
   if (has_mask && paste_mask_ibuf) {
@@ -2535,11 +2789,6 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
   printf("[DEBUG] image_select_paste_exec: Floating state created. Size: %dx%d, Origin: (%d, %d)\n",
          paste_ibuf->x, paste_ibuf->y, paste_origin.x, paste_origin.y);
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
-
-  /* Activate Move Selection tool for convenient positioning. */
-  printf("[DEBUG] image_select_paste_exec: Attempting to activate Move Selection tool\n");
-  WM_operator_name_call(C, "PAINT_OT_image_select_move", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
-  printf("[DEBUG] image_select_paste_exec: Move Selection tool called\n");
 
   return OPERATOR_FINISHED;
 }
@@ -2652,6 +2901,10 @@ static void image_select_transform_cache_screen_coords(ImageSelectTransformState
   const float canvas_h = float(canvas_ibuf->y);
   BKE_image_release_ibuf(sima->image, canvas_ibuf, canvas_lock);
 
+  /* UDIM tile UV origin so screen conversion lands in the correct tile's view2d region. */
+  const float tile_uv_x = float((state->tile_number - 1001) % 10);
+  const float tile_uv_y = float((state->tile_number - 1001) / 10);
+
   const float2 pivot = state->anchor;
   const float cos_r = cosf(state->rotation);
   const float sin_r = sinf(state->rotation);
@@ -2675,8 +2928,8 @@ static void image_select_transform_cache_screen_coords(ImageSelectTransformState
   float2 scr_coords[4];
   for (int i = 0; i < 4; i++) {
     float2 tile_co = apply_forward(local_corners[i]);
-    float uv_x = tile_co.x / canvas_w;
-    float uv_y = tile_co.y / canvas_h;
+    float uv_x = tile_uv_x + tile_co.x / canvas_w;
+    float uv_y = tile_uv_y + tile_co.y / canvas_h;
     int rx, ry;
     ui::view2d_view_to_region(&region->v2d, uv_x, uv_y, &rx, &ry);
     scr_coords[i] = float2(rx, ry);
@@ -2694,7 +2947,10 @@ static void image_select_transform_cache_screen_coords(ImageSelectTransformState
 
   int arx, ary;
   ui::view2d_view_to_region(
-      &region->v2d, (state->anchor.x + state->translation.x) / canvas_w, (state->anchor.y + state->translation.y) / canvas_h, &arx, &ary);
+      &region->v2d,
+      tile_uv_x + (state->anchor.x + state->translation.x) / canvas_w,
+      tile_uv_y + (state->anchor.y + state->translation.y) / canvas_h,
+      &arx, &ary);
   state->screen_anchor = float2(arx, ary);
 }
 
@@ -3323,138 +3579,211 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
   Image *ima = sima->image;
   ImageUser iuser = state->iuser;
 
+  /* Acquire source tile to determine canvas dimensions and pixel format. */
   void *lock = nullptr;
-  ImBuf *ibuf = BKE_image_acquire_ibuf(ima, &iuser, &lock);
-  if (!ibuf) {
+  iuser.tile = state->tile_number;
+  ImBuf *src_ibuf = BKE_image_acquire_ibuf(ima, &iuser, &lock);
+  if (!src_ibuf) {
     return;
   }
+  const bool is_float = src_ibuf->float_buffer.data != nullptr;
+  const int canvas_w = src_ibuf->x;
+  const int canvas_h = src_ibuf->y;
+  BKE_image_release_ibuf(ima, src_ibuf, lock);
 
-  const bool is_float = ibuf->float_buffer.data != nullptr;
-  /* temp_pixels must match the fragment buffer type so IMB_transform works (it does not
-   * support mixed src/dst types, e.g. byte source → float destination). */
-  ImBuf *temp_pixels = IMB_allocImBuf(
-      ibuf->x, ibuf->y, is_float ? ImBufFlags::FloatData : ImBufFlags::ByteData);
-  ImBuf *temp_mask = IMB_allocImBuf(ibuf->x, ibuf->y, ImBufFlags::FloatData);
-  temp_pixels->channels = 4;
-  /* temp_mask keeps channels = 4 (default) because IMB_transform requires dst->channels == 4. */
-  IMB_rectfill_alpha(temp_pixels, 0.0f);
-  IMB_rectfill_alpha(temp_mask, 0.0f);
-
-  /* Compute inverse matrix mapping global tile dst to global tile src.
-   * Forward transform: fragment_local → canvas_global
-   *   X_dst = R·S·(origin_px + X_local - anchor) + anchor + translation
-   * IMB_transform ожидает backward матрицу: canvas_global → fragment_local
-   *
-   * Строим forward 3x3 матрицу явно в однородных координатах:
-   *   M = T(anchor + translation) · R(θ) · S · T(-anchor) · T(origin_px)
-   * Затем берём инверсию.
-   */
+  /* Build the forward transform matrix: fragment_local → source_tile_pixel_space.
+   * Forward: X_dst = R·S·(origin_px + X_local - anchor) + anchor + translation
+   * column-major float3x3: m[col][row]. */
   const float2 pivot_commit = state->anchor;
-  const float cos_r_commit = cosf(state->rotation);
-  const float sin_r_commit = sinf(state->rotation);
+  const float cos_r = cosf(state->rotation);
+  const float sin_r = sinf(state->rotation);
 
-  /* Строим forward матрицу 3x3 (2D affine в однородных координатах):
-   * Колонки: [cos*sx, sin*sx, tx], [-sin*sy, cos*sy, ty], [0, 0, 1]
-   * где tx, ty — полное смещение с учётом pivot и translation */
   float3x3 forward_matrix;
   {
-    /* R·S часть */
-    const float a = cos_r_commit * state->scale.x;
-    const float b = -sin_r_commit * state->scale.y;
-    const float c = sin_r_commit * state->scale.x;
-    const float d = cos_r_commit * state->scale.y;
-
-    /* Полное смещение: pivot + translation - R·S·(pivot - origin_px) */
+    const float a = cos_r * state->scale.x;
+    const float b = -sin_r * state->scale.y;
+    const float c = sin_r * state->scale.x;
+    const float d = cos_r * state->scale.y;
     const float2 rs_pivot = float2(
-        a * (pivot_commit.x - float(state->origin_px.x)) + b * (pivot_commit.y - float(state->origin_px.y)),
-        c * (pivot_commit.x - float(state->origin_px.x)) + d * (pivot_commit.y - float(state->origin_px.y)));
+        a * (pivot_commit.x - float(state->origin_px.x)) +
+            b * (pivot_commit.y - float(state->origin_px.y)),
+        c * (pivot_commit.x - float(state->origin_px.x)) +
+            d * (pivot_commit.y - float(state->origin_px.y)));
     const float tx = pivot_commit.x + state->translation.x - rs_pivot.x;
     const float ty = pivot_commit.y + state->translation.y - rs_pivot.y;
-
-    /* Матрица в column-major (Blender float3x3): forward_matrix[col][row] */
-    forward_matrix[0] = float3(a, c, 0.0f);   /* col 0 */
-    forward_matrix[1] = float3(b, d, 0.0f);   /* col 1 */
-    forward_matrix[2] = float3(tx, ty, 1.0f); /* col 2 */
+    forward_matrix[0] = float3(a, c, 0.0f);
+    forward_matrix[1] = float3(b, d, 0.0f);
+    forward_matrix[2] = float3(tx, ty, 1.0f);
   }
-  const float3x3 backward_matrix = math::invert(forward_matrix);
+  /* IMB_transform expects a backward matrix: dest_pixel → fragment_local. */
+  const float3x3 backward_matrix_src = math::invert(forward_matrix);
 
-  /* Transform fragment pixels and mask into temporary tile buffer */
-  rctf src_crop{0.0f, float(state->size_px.x), 0.0f, float(state->size_px.y)};
-  IMB_transform(state->fragment_ibuf, temp_pixels, IMB_TRANSFORM_MODE_CROP_SRC,
-                IMB_FILTER_BILINEAR, backward_matrix, &src_crop);
+  /* Compute source tile UV origin. */
+  const int src_col = (state->tile_number - 1001) % 10;
+  const int src_row = (state->tile_number - 1001) / 10;
+  const float2 uv_origin_src = float2(float(src_col), float(src_row));
 
-  IMB_transform(state->fragment_mask_ibuf, temp_mask, IMB_TRANSFORM_MODE_CROP_SRC,
-                IMB_FILTER_BILINEAR, backward_matrix, &src_crop);
+  /* Compute the UV-space AABB of the transformed fragment by projecting all four corners
+   * through the forward matrix into source-tile pixel space, then into UV space. */
+  const float2 corners_local[4] = {
+      {0.0f, 0.0f},
+      {float(state->size_px.x), 0.0f},
+      {float(state->size_px.x), float(state->size_px.y)},
+      {0.0f, float(state->size_px.y)}};
+  float2 uv_min = float2(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
+  float2 uv_max = float2(std::numeric_limits<float>::lowest(),
+                         std::numeric_limits<float>::lowest());
+  for (const float2 &corner : corners_local) {
+    const float3 src_px = forward_matrix * float3(corner.x, corner.y, 1.0f);
+    const float2 uv = float2(src_px.x / float(canvas_w) + uv_origin_src.x,
+                             src_px.y / float(canvas_h) + uv_origin_src.y);
+    uv_min = math::min(uv_min, uv);
+    uv_max = math::max(uv_max, uv);
+  }
 
-  /* Alpha-blend transformed fragment onto canvas.
-   * Blend factor = mask * fragment_alpha so partially-transparent pixels are respected. */
-  const float *mask_data = temp_mask->float_buffer.data;
-  const int total_pixels = ibuf->x * ibuf->y;
+  /* Fragment crop rect in fragment-local space — constant across all destination tiles. */
+  const rctf src_crop{0.0f, float(state->size_px.x), 0.0f, float(state->size_px.y)};
 
-  if (ibuf->float_data() && temp_pixels->float_buffer.data) {
-    const float *frag_data = temp_pixels->float_buffer.data;
-    float *canvas = ibuf->float_data_for_write();
-    const int ch = ibuf->channels ? ibuf->channels : 4;
-    for (int i = 0; i < total_pixels; i++) {
-      const float m = mask_data[i * 4 + 0];
-      if (m <= 0.001f) {
-        continue;
-      }
-      const float frag_alpha = (ch >= 4) ? frag_data[i * 4 + 3] : 1.0f;
-      const float blend = m * frag_alpha;
-      if (blend <= 0.001f) {
-        continue;
-      }
-      canvas[i * ch + 0] = (1.0f - blend) * canvas[i * ch + 0] + blend * frag_data[i * 4 + 0];
-      canvas[i * ch + 1] = (1.0f - blend) * canvas[i * ch + 1] + blend * frag_data[i * 4 + 1];
-      canvas[i * ch + 2] = (1.0f - blend) * canvas[i * ch + 2] + blend * frag_data[i * 4 + 2];
-      if (ch >= 4) {
-        canvas[i * ch + 3] = (1.0f - blend) * canvas[i * ch + 3] + blend * frag_data[i * 4 + 3];
+  /* Iterate over every tile in the image and apply the fragment to those that intersect
+   * the UV AABB. When dest == source the pixel offset is zero and the math is identical
+   * to the previous single-tile implementation. */
+  for (ImageTile *dest_tile : ListBaseWrapper<ImageTile>(ima->tiles)) {
+    const int dest_tile_num = dest_tile->tile_number;
+    const int dst_col = (dest_tile_num - 1001) % 10;
+    const int dst_row = (dest_tile_num - 1001) / 10;
+
+    /* Skip tiles whose UV range [dst_col, dst_col+1) × [dst_row, dst_row+1) does not
+     * intersect the transformed fragment's AABB. */
+    if (uv_max.x <= float(dst_col) || uv_min.x >= float(dst_col + 1) ||
+        uv_max.y <= float(dst_row) || uv_min.y >= float(dst_row + 1)) {
+      continue;
+    }
+
+    iuser.tile = dest_tile_num;
+    ImBuf *dest_ibuf = BKE_image_acquire_ibuf(ima, &iuser, &lock);
+    if (!dest_ibuf) {
+      continue;
+    }
+
+    const int dest_w = dest_ibuf->x;
+    const int dest_h = dest_ibuf->y;
+
+    /* Build the mapping from destination-tile pixel → source-tile pixel.
+     *
+     * A destination pixel (px, py) has UV: (px/dest_w + dst_col, py/dest_h + dst_row).
+     * The same UV in source-tile pixel space is:
+     *   src_x = px * (canvas_w / dest_w) + (dst_col - src_col) * canvas_w
+     *   src_y = py * (canvas_h / dest_h) + (dst_row - src_row) * canvas_h
+     *
+     * This is a scale + translate (not a pure translate) when resolutions differ.
+     * In column-major homogeneous 3×3: M[col][row].
+     */
+    const float sx = float(canvas_w) / float(dest_w);
+    const float sy = float(canvas_h) / float(dest_h);
+    const float tx = float(dst_col - src_col) * float(canvas_w);
+    const float ty = float(dst_row - src_row) * float(canvas_h);
+
+    float3x3 M_dest_to_src = float3x3::identity();
+    M_dest_to_src[0] = float3(sx, 0.0f, 0.0f);
+    M_dest_to_src[1] = float3(0.0f, sy, 0.0f);
+    M_dest_to_src[2] = float3(tx, ty, 1.0f);
+
+    /* backward_dest maps: dest_tile_px → src_tile_px → fragment_local. */
+    const float3x3 backward_dest = backward_matrix_src * M_dest_to_src;
+
+    /* temp_pixels must match the destination buffer type — IMB_transform does not support
+     * mixed src/dst types. */
+    ImBuf *temp_pixels = IMB_allocImBuf(
+        dest_ibuf->x, dest_ibuf->y, is_float ? ImBufFlags::FloatData : ImBufFlags::ByteData);
+    ImBuf *temp_mask = IMB_allocImBuf(dest_ibuf->x, dest_ibuf->y, ImBufFlags::FloatData);
+    temp_pixels->channels = 4;
+    IMB_rectfill_alpha(temp_pixels, 0.0f);
+    IMB_rectfill_alpha(temp_mask, 0.0f);
+
+    IMB_transform(state->fragment_ibuf, temp_pixels, IMB_TRANSFORM_MODE_CROP_SRC,
+                  IMB_FILTER_BILINEAR, backward_dest, &src_crop);
+    IMB_transform(state->fragment_mask_ibuf, temp_mask, IMB_TRANSFORM_MODE_CROP_SRC,
+                  IMB_FILTER_BILINEAR, backward_dest, &src_crop);
+
+    const float *mask_data = temp_mask->float_buffer.data;
+    const int total_pixels = dest_ibuf->x * dest_ibuf->y;
+
+    /* Alpha-blend the transformed fragment onto the destination canvas.
+     * blend = mask * fragment_alpha so partially-transparent pixels are respected. */
+    if (dest_ibuf->float_data() && temp_pixels->float_buffer.data) {
+      const float *frag_data = temp_pixels->float_buffer.data;
+      float *canvas = dest_ibuf->float_data_for_write();
+      const int ch = dest_ibuf->channels ? dest_ibuf->channels : 4;
+      for (int i = 0; i < total_pixels; i++) {
+        const float m = mask_data[i * 4 + 0];
+        if (m <= 0.001f) {
+          continue;
+        }
+        const float frag_alpha = (ch >= 4) ? frag_data[i * 4 + 3] : 1.0f;
+        const float blend = m * frag_alpha;
+        if (blend <= 0.001f) {
+          continue;
+        }
+        canvas[i * ch + 0] = (1.0f - blend) * canvas[i * ch + 0] + blend * frag_data[i * 4 + 0];
+        canvas[i * ch + 1] = (1.0f - blend) * canvas[i * ch + 1] + blend * frag_data[i * 4 + 1];
+        canvas[i * ch + 2] = (1.0f - blend) * canvas[i * ch + 2] + blend * frag_data[i * 4 + 2];
+        if (ch >= 4) {
+          canvas[i * ch + 3] = (1.0f - blend) * canvas[i * ch + 3] +
+                               blend * frag_data[i * 4 + 3];
+        }
       }
     }
-  }
-  else if (ibuf->byte_data() && temp_pixels->byte_buffer.data) {
-    const uint8_t *frag_data = temp_pixels->byte_buffer.data;
-    uint8_t *canvas = ibuf->byte_data_for_write();
-    for (int i = 0; i < total_pixels; i++) {
-      const float m = mask_data[i * 4 + 0];
-      if (m <= 0.001f) {
-        continue;
+    else if (dest_ibuf->byte_data() && temp_pixels->byte_buffer.data) {
+      const uint8_t *frag_data = temp_pixels->byte_buffer.data;
+      uint8_t *canvas = dest_ibuf->byte_data_for_write();
+      for (int i = 0; i < total_pixels; i++) {
+        const float m = mask_data[i * 4 + 0];
+        if (m <= 0.001f) {
+          continue;
+        }
+        const float frag_alpha = frag_data[i * 4 + 3] / 255.0f;
+        const float blend = m * frag_alpha;
+        if (blend <= 0.001f) {
+          continue;
+        }
+        canvas[i * 4 + 0] = uint8_t(std::clamp(
+            (1.0f - blend) * float(canvas[i * 4 + 0]) + blend * float(frag_data[i * 4 + 0]),
+            0.0f,
+            255.0f));
+        canvas[i * 4 + 1] = uint8_t(std::clamp(
+            (1.0f - blend) * float(canvas[i * 4 + 1]) + blend * float(frag_data[i * 4 + 1]),
+            0.0f,
+            255.0f));
+        canvas[i * 4 + 2] = uint8_t(std::clamp(
+            (1.0f - blend) * float(canvas[i * 4 + 2]) + blend * float(frag_data[i * 4 + 2]),
+            0.0f,
+            255.0f));
+        canvas[i * 4 + 3] = uint8_t(std::clamp(
+            (1.0f - blend) * float(canvas[i * 4 + 3]) + blend * float(frag_data[i * 4 + 3]),
+            0.0f,
+            255.0f));
       }
-      const float frag_alpha = frag_data[i * 4 + 3] / 255.0f;
-      const float blend = m * frag_alpha;
-      if (blend <= 0.001f) {
-        continue;
+    }
+
+    /* Merge the transformed selection mask into the destination tile's runtime mask. */
+    ImBuf **global_mask_ptr = ima->runtime->paint_selection_masks.lookup_ptr(dest_tile_num);
+    if (global_mask_ptr && *global_mask_ptr) {
+      float *g_mask = (*global_mask_ptr)->float_data_for_write();
+      for (int i = 0; i < total_pixels; i++) {
+        g_mask[i] = std::clamp(g_mask[i] + mask_data[i * 4 + 0], 0.0f, 1.0f);
       }
-      canvas[i * 4 + 0] = uint8_t(
-          std::clamp((1.0f - blend) * canvas[i * 4 + 0] + blend * frag_data[i * 4 + 0], 0.0f, 255.0f));
-      canvas[i * 4 + 1] = uint8_t(
-          std::clamp((1.0f - blend) * canvas[i * 4 + 1] + blend * frag_data[i * 4 + 1], 0.0f, 255.0f));
-      canvas[i * 4 + 2] = uint8_t(
-          std::clamp((1.0f - blend) * canvas[i * 4 + 2] + blend * frag_data[i * 4 + 2], 0.0f, 255.0f));
-      canvas[i * 4 + 3] = uint8_t(
-          std::clamp((1.0f - blend) * canvas[i * 4 + 3] + blend * frag_data[i * 4 + 3], 0.0f, 255.0f));
+      (*global_mask_ptr)->userflags |= IB_DISPLAY_BUFFER_INVALID;
     }
+
+    IMB_freeImBuf(temp_pixels);
+    IMB_freeImBuf(temp_mask);
+
+    dest_ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
+    BKE_image_mark_dirty(ima, dest_ibuf);
+    BKE_image_release_ibuf(ima, dest_ibuf, lock);
   }
 
-  /* Merge selection mask back into runtime mask */
-  ImBuf **global_mask_ptr = ima->runtime->paint_selection_masks.lookup_ptr(state->tile_number);
-  if (global_mask_ptr && *global_mask_ptr) {
-    float *g_mask = (*global_mask_ptr)->float_data_for_write();
-    for (int i = 0; i < total_pixels; i++) {
-      g_mask[i] = std::clamp(g_mask[i] + mask_data[i * 4 + 0], 0.0f, 1.0f);
-    }
-    (*global_mask_ptr)->userflags |= IB_DISPLAY_BUFFER_INVALID;
-  }
-
-  IMB_freeImBuf(temp_pixels);
-  IMB_freeImBuf(temp_mask);
-
-  ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
-  BKE_image_mark_dirty(ima, ibuf);
-  
   BKE_image_partial_update_mark_full_update(ima);
-  BKE_image_release_ibuf(ima, ibuf, lock);
   BKE_image_free_gputextures(ima);
 
   if (state->undo_begun) {
@@ -3559,10 +3888,18 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
   }
 
   Image *ima = sima->image;
-  const ImageTile *active_tile = BKE_image_get_tile_from_iuser(ima, &sima->iuser);
-  const int tile_number = active_tile ? active_tile->tile_number : 1001;
 
+  /* For UDIM images, sima->iuser.tile is reset to 0 after each temporary acquire.
+   * The true active tile is tracked by ima->active_tile_index. */
   ImageUser iuser = sima->iuser;
+  if (ima->source == IMA_SRC_TILED) {
+    const ImageTile *active = static_cast<const ImageTile *>(
+        BLI_findlink(&ima->tiles, ima->active_tile_index));
+    iuser.tile = active ? active->tile_number :
+                          static_cast<const ImageTile *>(ima->tiles.first)->tile_number;
+  }
+  const ImageTile *active_tile = BKE_image_get_tile_from_iuser(ima, &iuser);
+  const int tile_number = active_tile ? active_tile->tile_number : 1001;
   iuser.tile = tile_number;
 
   auto *state = MEM_new<ImageSelectTransformState>(__func__);
@@ -3917,8 +4254,14 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
           };
           float2 H_start = apply_forward_start(local_offset);
 
-          float2 V_curr = mouse_px - state->drag_start_anchor;
-          float2 V_start = H_start - state->drag_start_anchor;
+          /* Use the visual anchor (untransformed anchor + translation) as reference so that
+           * the direction convention for each handle is always correct regardless of how far
+           * the fragment has been translated. Without this, large negative translations can
+           * flip the sign of proj_start_x, causing both left and right handles to respond
+           * identically to mouse direction. */
+          const float2 ref_anchor = state->drag_start_anchor + state->drag_start_translation;
+          float2 V_curr = mouse_px - ref_anchor;
+          float2 V_start = H_start - ref_anchor;
 
           float rad = state->drag_start_rotation;
           float2 Ux(cosf(rad), sinf(rad));

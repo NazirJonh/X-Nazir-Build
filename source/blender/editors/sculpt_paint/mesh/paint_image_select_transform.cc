@@ -38,6 +38,7 @@
 
 #include "DEG_depsgraph.hh"
 
+#include "ED_gizmo_library.hh"
 #include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
@@ -64,7 +65,6 @@
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_geom.h"
 
-#include "BLF_api.hh"
 #include "UI_interface.hh"
 #include "UI_view2d.hh"
 
@@ -81,6 +81,7 @@ namespace blender {
 struct ImageSelectTransformState {
   /* Context & target details */
   SpaceImage *owner_sima = nullptr;
+  ScrArea *owner_area = nullptr;
   ARegion *owner_region = nullptr;
   ARegionType *owner_region_type = nullptr;
   ImageUser iuser = {};
@@ -221,33 +222,23 @@ static float2x2 image_select_rotation_pixel_from_screen(const float2x2 &pixel_to
   return J_inv * R_screen * pixel_to_screen_jacobian;
 }
 
-static void image_select_transform_cache_screen_coords(ImageSelectTransformState *state, ARegion *region)
+/**
+ * Same path as texture preview: scale/translate in tile px, map to screen, rotate in screen space
+ * around the anchor pivot.
+ */
+static bool image_select_transform_screen_corners(const ImageSelectTransformState *state,
+                                                  const ARegion *region,
+                                                  const float canvas_w,
+                                                  const float canvas_h,
+                                                  float2 r_scr_corners[4],
+                                                  float2 *r_scr_pivot)
 {
-  if (!state || !state->fragment_ibuf || !region) {
-    return;
+  if (!state || !region) {
+    return false;
   }
-  /* Draw callback is registered on #ARegionType; only update hit-test coords for the invoking region. */
-  if (state->owner_region && region != state->owner_region) {
-    return;
-  }
-
-  SpaceImage *sima = state->owner_sima;
-  if (!sima || !sima->image) {
-    return;
-  }
-  void *canvas_lock = nullptr;
-  ImBuf *canvas_ibuf = BKE_image_acquire_ibuf(sima->image, &state->iuser, &canvas_lock);
-  if (!canvas_ibuf) {
-    return;
-  }
-  const float canvas_w = float(canvas_ibuf->x);
-  const float canvas_h = float(canvas_ibuf->y);
-  BKE_image_release_ibuf(sima->image, canvas_ibuf, canvas_lock);
 
   const float2 pivot = state->anchor;
 
-  /* Scale + translate in tile pixels, then map to screen, then rotate in screen space.
-   * Rotating in pixel space first skews the cage when view2d X/Y scale differs (zoom / aspect). */
   auto apply_forward_no_rotation = [&](const float2 local) -> float2 {
     const float2 global = float2(state->origin_px) + local;
     const float2 centered = global - pivot;
@@ -274,10 +265,49 @@ static void image_select_transform_cache_screen_coords(ImageSelectTransformState
 
   const float cos_r = cosf(state->rotation);
   const float sin_r = sinf(state->rotation);
-  float2 scr_coords[4];
   for (int i = 0; i < 4; i++) {
     const float2 v = scr_base[i] - scr_pivot;
-    scr_coords[i] = float2(v.x * cos_r - v.y * sin_r, v.x * sin_r + v.y * cos_r) + scr_pivot;
+    r_scr_corners[i] = float2(v.x * cos_r - v.y * sin_r, v.x * sin_r + v.y * cos_r) + scr_pivot;
+  }
+
+  if (r_scr_pivot) {
+    *r_scr_pivot = scr_pivot;
+  }
+  return true;
+}
+
+static void image_select_transform_cache_screen_coords(ImageSelectTransformState *state, ARegion *region)
+{
+  if (!state || !state->fragment_ibuf || !region) {
+    return;
+  }
+  /* Draw callback is registered on #ARegionType; only update hit-test coords for the invoking region. */
+  if (state->owner_region && region != state->owner_region) {
+    return;
+  }
+
+  SpaceImage *sima = state->owner_sima;
+  if (!sima || !sima->image) {
+    return;
+  }
+  void *canvas_lock = nullptr;
+  ImBuf *canvas_ibuf = BKE_image_acquire_ibuf(sima->image, &state->iuser, &canvas_lock);
+  if (!canvas_ibuf) {
+    return;
+  }
+  const float canvas_w = float(canvas_ibuf->x);
+  const float canvas_h = float(canvas_ibuf->y);
+  BKE_image_release_ibuf(sima->image, canvas_ibuf, canvas_lock);
+
+  float2 scr_coords[4];
+  float2 scr_pivot;
+  if (!image_select_transform_screen_corners(
+          state, region, canvas_w, canvas_h, scr_coords, &scr_pivot))
+  {
+    return;
+  }
+
+  for (int i = 0; i < 4; i++) {
     state->screen_corners[i] = scr_coords[i];
   }
 
@@ -292,7 +322,7 @@ static void image_select_transform_cache_screen_coords(ImageSelectTransformState
   state->screen_anchor = scr_pivot;
 }
 
-static void draw_select_transform_preview(const bContext * /*C*/, ARegion *region, void *clientdata)
+static void draw_select_transform_texture(const bContext * /*C*/, ARegion *region, void *clientdata)
 {
   ImageSelectTransformState *state = static_cast<ImageSelectTransformState *>(clientdata);
   if (!state || !state->fragment_ibuf) {
@@ -346,105 +376,6 @@ static void draw_select_transform_preview(const bContext * /*C*/, ARegion *regio
 
     GPU_texture_unbind(state->fragment_tex);
     immUnbindProgram();
-  }
-
-  /* All remaining drawing uses GPU_SHADER_3D_UNIFORM_COLOR with a pos-only format. */
-  {
-    GPUVertFormat *fmt = immVertexFormat();
-    const uint pos = GPU_vertformat_attr_add(fmt, "pos", gpu::VertAttrType::SFLOAT_32_32);
-
-    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-    /* --- 2. Draw Bounding Box Outline --- */
-    GPU_line_width(1.0f);
-    immUniformColor4f(1.0f, 0.85f, 0.0f, 0.9f); /* Yellow outline */
-
-    immBegin(GPU_PRIM_LINE_LOOP, 4);
-    for (int i = 0; i < 4; i++) {
-      immVertex2f(pos, scr_coords[i].x, scr_coords[i].y);
-    }
-    immEnd();
-
-    /* Line from top-midpoint to rotation handle */
-    immBegin(GPU_PRIM_LINES, 2);
-    immVertex2f(pos, state->screen_midpoints[2].x, state->screen_midpoints[2].y);
-    immVertex2f(pos, state->screen_rotate_handle.x, state->screen_rotate_handle.y);
-    immEnd();
-
-    /* --- 3. Draw Handle Squares --- */
-    /* Helper: draw a filled square as two triangles. */
-    auto draw_handle_square = [&](float2 center, float size) {
-      const float r = size * 0.5f;
-      const float x0 = center.x - r, x1 = center.x + r;
-      const float y0 = center.y - r, y1 = center.y + r;
-      immBegin(GPU_PRIM_TRIS, 6);
-      immVertex2f(pos, x0, y0);
-      immVertex2f(pos, x1, y0);
-      immVertex2f(pos, x1, y1);
-      immVertex2f(pos, x0, y0);
-      immVertex2f(pos, x1, y1);
-      immVertex2f(pos, x0, y1);
-      immEnd();
-    };
-
-    immUniformColor4f(1.0f, 1.0f, 1.0f, 1.0f); /* White handles */
-    for (int i = 0; i < 4; i++) {
-      draw_handle_square(state->screen_corners[i], 8.0f);
-    }
-    for (int i = 0; i < 4; i++) {
-      draw_handle_square(state->screen_midpoints[i], 8.0f);
-    }
-    draw_handle_square(state->screen_rotate_handle, 8.0f);
-
-    /* --- 4. Snap Feedback --- */
-    if (state->is_snapped) {
-      immUniformColor4f(0.0f, 1.0f, 0.2f, 0.7f);
-      draw_handle_square(state->snap_indicator_screen, 12.0f);
-    }
-
-    /* --- 5. Anchor Crosshair --- */
-    immUniformColor4f(0.1f, 0.6f, 1.0f, 1.0f); /* Cyan pivot */
-    draw_handle_square(state->screen_anchor, 6.0f);
-
-    immBegin(GPU_PRIM_LINES, 4);
-    immVertex2f(pos, state->screen_anchor.x - 12.0f, state->screen_anchor.y);
-    immVertex2f(pos, state->screen_anchor.x + 12.0f, state->screen_anchor.y);
-    immVertex2f(pos, state->screen_anchor.x, state->screen_anchor.y - 12.0f);
-    immVertex2f(pos, state->screen_anchor.x, state->screen_anchor.y + 12.0f);
-    immEnd();
-
-    /* --- 6. Tooltip Background (when dragging anchor) --- */
-    if (state->active_handle == ImageSelectTransformState::HANDLE_ANCHOR) {
-      const float tx = state->screen_anchor.x + 15.0f;
-      const float ty = state->screen_anchor.y - 25.0f;
-      const float tw = 160.0f;
-      const float th = 20.0f;
-
-      immUniformColor4f(0.0f, 0.0f, 0.0f, 0.65f);
-      immBegin(GPU_PRIM_TRIS, 6);
-      immVertex2f(pos, tx, ty);
-      immVertex2f(pos, tx + tw, ty);
-      immVertex2f(pos, tx + tw, ty + th);
-      immVertex2f(pos, tx, ty);
-      immVertex2f(pos, tx + tw, ty + th);
-      immVertex2f(pos, tx, ty + th);
-      immEnd();
-    }
-
-    immUnbindProgram();
-
-    /* --- 6b. Tooltip Text --- */
-    if (state->active_handle == ImageSelectTransformState::HANDLE_ANCHOR) {
-      char tooltip[64];
-      snprintf(tooltip, sizeof(tooltip), "Pivot: X: %.1f px, Y: %.1f px",
-               state->anchor.x, state->anchor.y);
-      const float tx = state->screen_anchor.x + 15.0f;
-      const float ty = state->screen_anchor.y - 25.0f;
-      BLF_size(blf_mono_font, 11.0f * UI_SCALE_FAC);
-      BLF_position(blf_mono_font, tx + 8.0f, ty + 5.0f, 0.0f);
-      BLF_color4f(blf_mono_font, 1.0f, 1.0f, 1.0f, 1.0f);
-      BLF_draw(blf_mono_font, tooltip, strlen(tooltip));
-    }
   }
 
   GPU_blend(GPU_BLEND_NONE);
@@ -692,6 +623,9 @@ void image_select_transform_state_free(ImageSelectTransformState *state)
   if (!state) {
     return;
   }
+  if (state->owner_region && state->owner_region->runtime->gizmo_map) {
+    WM_gizmomap_tag_refresh(state->owner_region->runtime->gizmo_map);
+  }
   if (state->draw_handle && state->owner_region_type) {
     ED_region_draw_cb_exit(state->owner_region_type, state->draw_handle);
     state->draw_handle = nullptr;
@@ -784,6 +718,11 @@ static wmOperatorStatus image_select_transform_confirm_exec(bContext *C, wmOpera
   g_transform_state = nullptr;
   image_select_transform_commit(C, state);
   image_select_transform_state_free(state);
+  if (ARegion *region = CTX_wm_region(C)) {
+    if (region->runtime->gizmo_map) {
+      WM_gizmomap_tag_refresh(region->runtime->gizmo_map);
+    }
+  }
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
   return OPERATOR_FINISHED;
 }
@@ -803,6 +742,11 @@ static wmOperatorStatus image_select_transform_cancel_exec(bContext *C, wmOperat
   g_transform_state = nullptr;
   image_select_transform_restore_source(C, state);
   image_select_transform_state_free(state);
+  if (ARegion *region = CTX_wm_region(C)) {
+    if (region->runtime->gizmo_map) {
+      WM_gizmomap_tag_refresh(region->runtime->gizmo_map);
+    }
+  }
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
   return OPERATOR_FINISHED;
 }
@@ -884,6 +828,496 @@ static void image_select_transform_begin_handle_drag(ImageSelectTransformState *
   state->drag_start_scale = state->scale;
   state->drag_start_anchor = state->anchor;
   state->is_snapped = false;
+}
+
+static ImageSelectTransformState::HandleType image_select_transform_handle_to_internal(
+    const ImageSelectTransformHandleType handle)
+{
+  return static_cast<ImageSelectTransformState::HandleType>(int(handle));
+}
+
+bool image_select_transform_is_floating_in_space(const SpaceImage *sima)
+{
+  return sima && sima->runtime && sima->runtime->paint_select.transform != nullptr;
+}
+
+ImageSelectTransformState *image_select_transform_state_get(SpaceImage *sima)
+{
+  if (!sima || !sima->runtime) {
+    return nullptr;
+  }
+  return sima->runtime->paint_select.transform;
+}
+
+ImageSelectTransformHandleType image_select_transform_cage_part_to_handle_type(const int cage_part)
+{
+  switch (cage_part) {
+    case ED_GIZMO_CAGE2D_PART_TRANSLATE:
+      return ImageSelectTransformHandleType::Move;
+    case ED_GIZMO_CAGE2D_PART_ROTATE:
+      return ImageSelectTransformHandleType::Rotate;
+    case ED_GIZMO_CAGE2D_PART_SCALE_MIN_X_MIN_Y:
+      return ImageSelectTransformHandleType::C0;
+    case ED_GIZMO_CAGE2D_PART_SCALE_MAX_X_MIN_Y:
+      return ImageSelectTransformHandleType::C1;
+    case ED_GIZMO_CAGE2D_PART_SCALE_MAX_X_MAX_Y:
+      return ImageSelectTransformHandleType::C2;
+    case ED_GIZMO_CAGE2D_PART_SCALE_MIN_X_MAX_Y:
+      return ImageSelectTransformHandleType::C3;
+    case ED_GIZMO_CAGE2D_PART_SCALE_MIN_X:
+      return ImageSelectTransformHandleType::MLeft;
+    case ED_GIZMO_CAGE2D_PART_SCALE_MAX_X:
+      return ImageSelectTransformHandleType::MRight;
+    case ED_GIZMO_CAGE2D_PART_SCALE_MIN_Y:
+      return ImageSelectTransformHandleType::MBottom;
+    case ED_GIZMO_CAGE2D_PART_SCALE_MAX_Y:
+      return ImageSelectTransformHandleType::MTop;
+    default:
+      return ImageSelectTransformHandleType::None;
+  }
+}
+
+void image_select_transform_begin_drag(ImageSelectTransformState *state,
+                                       const wmEvent *event,
+                                       const ImageSelectTransformHandleType handle)
+{
+  if (!state || handle == ImageSelectTransformHandleType::None) {
+    return;
+  }
+  image_select_transform_begin_handle_drag(
+      state, event, image_select_transform_handle_to_internal(handle));
+}
+
+void image_select_transform_end_drag(ImageSelectTransformState *state)
+{
+  if (!state) {
+    return;
+  }
+  if (state->owner_area) {
+    ED_area_status_text(state->owner_area, nullptr);
+  }
+  state->active_handle = ImageSelectTransformState::HANDLE_NONE;
+  state->is_snapped = false;
+}
+
+bool image_select_transform_has_active_handle(const ImageSelectTransformState *state)
+{
+  return state && state->active_handle != ImageSelectTransformState::HANDLE_NONE;
+}
+
+void image_select_transform_gizmo_refresh_tweak(const bContext *C,
+                                                wmGizmo *gz_cage,
+                                                wmGizmo *gz_anchor,
+                                                bool *r_was_modal_tweak)
+{
+  if (!C || !gz_cage || !gz_anchor || !r_was_modal_tweak) {
+    return;
+  }
+
+  const SpaceImage *sima = CTX_wm_space_image(C);
+  ImageSelectTransformState *state = image_select_transform_state_get(
+      const_cast<SpaceImage *>(sima));
+
+  ARegion *region = state ? state->owner_region : CTX_wm_region(C);
+  wmGizmoMap *gzmap = (region && region->runtime) ? region->runtime->gizmo_map : nullptr;
+  wmGizmo *modal_gz = gzmap ? WM_gizmomap_get_modal(gzmap) : nullptr;
+  const bool is_our_modal = modal_gz && (modal_gz == gz_cage || modal_gz == gz_anchor);
+
+  /* GIZMOGROUP_OT_gizmo_tweak finishes on button release before custom_modal runs, so release
+   * handlers in paint_select_transform_*_modal never clear header status text. */
+  if (*r_was_modal_tweak && !is_our_modal && state &&
+      image_select_transform_has_active_handle(state))
+  {
+    image_select_transform_end_drag(state);
+  }
+  *r_was_modal_tweak = is_our_modal;
+}
+
+void image_select_transform_apply_handle(bContext *C,
+                                         ImageSelectTransformState *state,
+                                         const wmEvent *event,
+                                         const ImageSelectTransformHandleType handle,
+                                         ARegion *region)
+{
+  if (!state || !event || !region || handle == ImageSelectTransformHandleType::None) {
+    return;
+  }
+
+  const ImageSelectTransformState::HandleType active =
+      image_select_transform_handle_to_internal(handle);
+  state->active_handle = active;
+
+  image_select_transform_cache_screen_coords(state, region);
+
+  const float2 mouse_co(event->mval[0], event->mval[1]);
+  state->mouse_curr_pos = mouse_co;
+
+  float2 mouse_uv;
+  ui::view2d_region_to_view(&region->v2d, mouse_co.x, mouse_co.y, &mouse_uv.x, &mouse_uv.y);
+
+  float2 mouse_start_uv;
+  ui::view2d_region_to_view(
+      &region->v2d, state->mouse_start_pos.x, state->mouse_start_pos.y, &mouse_start_uv.x, &mouse_start_uv.y);
+
+  SpaceImage *sima_modal = state->owner_sima;
+  float canvas_w_modal = float(state->fragment_ibuf->x);
+  float canvas_h_modal = float(state->fragment_ibuf->y);
+  if (sima_modal && sima_modal->image) {
+    void *modal_lock = nullptr;
+    ImBuf *modal_canvas = BKE_image_acquire_ibuf(sima_modal->image, &state->iuser, &modal_lock);
+    if (modal_canvas) {
+      canvas_w_modal = float(modal_canvas->x);
+      canvas_h_modal = float(modal_canvas->y);
+      BKE_image_release_ibuf(sima_modal->image, modal_canvas, modal_lock);
+    }
+  }
+
+  const float2 mouse_px = image_select_view_to_tile_px(
+      state, mouse_uv, canvas_w_modal, canvas_h_modal);
+  const float2 start_px = image_select_view_to_tile_px(
+      state, mouse_start_uv, canvas_w_modal, canvas_h_modal);
+
+  const float2 pivot_modal = state->anchor;
+  const float cos_r_modal = cosf(state->rotation);
+  const float sin_r_modal = sinf(state->rotation);
+  auto apply_forward_modal = [&](const float2 local) -> float2 {
+    const float2 global = float2(state->origin_px) + local;
+    const float2 centered = global - pivot_modal;
+    const float2 scaled = centered * state->scale;
+    const float2 rotated = float2(scaled.x * cos_r_modal - scaled.y * sin_r_modal,
+                                  scaled.x * sin_r_modal + scaled.y * cos_r_modal);
+    return rotated + pivot_modal + state->translation;
+  };
+
+  if (active == ImageSelectTransformState::HANDLE_MOVE) {
+    const float2 delta_scr = mouse_co - state->mouse_start_pos;
+    const float2 delta_px = mouse_px - start_px;
+
+    const bool anchor_inside = (state->drag_start_anchor.x >= state->origin_px.x - 0.1f &&
+                                state->drag_start_anchor.x <= state->origin_px.x + state->size_px.x + 0.1f &&
+                                state->drag_start_anchor.y >= state->origin_px.y - 0.1f &&
+                                state->drag_start_anchor.y <= state->origin_px.y + state->size_px.y + 0.1f);
+
+    if (anchor_inside) {
+      /* Preview moves in screen space (then rotates around pivot). Map screen drag delta to
+       * tile-pixel translation so the point under the cursor does not jump on press. */
+      bool jac_ok;
+      const float2x2 J = image_select_pixel_to_screen_jacobian(state,
+                                                               region,
+                                                               state->drag_start_anchor,
+                                                               canvas_w_modal,
+                                                               canvas_h_modal);
+      const float2x2 J_inv = math::invert(J, jac_ok);
+      const float2 delta_translation = jac_ok ? J_inv * delta_scr : delta_px;
+      state->translation = state->drag_start_translation + delta_translation;
+      state->anchor = state->drag_start_anchor;
+    }
+    else {
+      const float inv_cos = cosf(-state->rotation);
+      const float inv_sin = sinf(-state->rotation);
+      const float2 inv_rotated = float2(delta_px.x * inv_cos - delta_px.y * inv_sin,
+                                        delta_px.x * inv_sin + delta_px.y * inv_cos);
+      const float2 delta_pivot = float2(state->scale.x != 0.0f ? inv_rotated.x / state->scale.x :
+                                                                 0.0f,
+                                        state->scale.y != 0.0f ? inv_rotated.y / state->scale.y :
+                                                                 0.0f);
+
+      state->anchor = state->drag_start_anchor - delta_pivot;
+      state->translation = state->drag_start_translation + delta_pivot;
+    }
+  }
+  else if (active == ImageSelectTransformState::HANDLE_ROTATE) {
+    const float2 center_scr = state->screen_anchor;
+    const float2 start_vec = state->mouse_start_pos - center_scr;
+    const float2 curr_vec = mouse_co - center_scr;
+    const float angle_start = atan2f(start_vec.y, start_vec.x);
+    const float angle_curr = atan2f(curr_vec.y, curr_vec.x);
+    const float delta_angle = angle_curr - angle_start;
+    const float raw_angle = state->drag_start_rotation + delta_angle;
+    if (event->modifier & KM_CTRL) {
+      const float snap_interval = 15.0f * (float(M_PI) / 180.0f);
+      state->rotation = roundf(raw_angle / snap_interval) * snap_interval;
+    }
+    else {
+      state->rotation = raw_angle;
+    }
+    char status_str[128];
+    snprintf(status_str,
+             sizeof(status_str),
+             "Rotation: %.2f°",
+             state->rotation * 180.0f / float(M_PI));
+    ED_area_status_text(state->owner_area ? state->owner_area : CTX_wm_area(C), status_str);
+  }
+  else if (active == ImageSelectTransformState::HANDLE_ANCHOR) {
+    float2 target_anchor_px = mouse_px;
+
+    const float2 snap_points_scr[9] = {state->screen_corners[0],
+                                        state->screen_corners[1],
+                                        state->screen_corners[2],
+                                        state->screen_corners[3],
+                                        state->screen_midpoints[0],
+                                        state->screen_midpoints[1],
+                                        state->screen_midpoints[2],
+                                        state->screen_midpoints[3],
+                                        state->screen_center};
+
+    const float2 snap_points_px[9] = {
+        apply_forward_modal(float2(0, 0)),
+        apply_forward_modal(float2(state->size_px.x, 0)),
+        apply_forward_modal(float2(state->size_px.x, state->size_px.y)),
+        apply_forward_modal(float2(0, state->size_px.y)),
+        apply_forward_modal(float2(state->size_px.x * 0.5f, 0.0f)),
+        apply_forward_modal(float2(state->size_px.x, state->size_px.y * 0.5f)),
+        apply_forward_modal(float2(state->size_px.x * 0.5f, state->size_px.y)),
+        apply_forward_modal(float2(0.0f, state->size_px.y * 0.5f)),
+        apply_forward_modal(float2(state->size_px.x * 0.5f, state->size_px.y * 0.5f))};
+
+    state->is_snapped = false;
+    const float snap_threshold_scr = 12.0f;
+    float min_dist = snap_threshold_scr;
+    int snap_idx = -1;
+
+    for (int i = 0; i < 9; i++) {
+      const float dist = math::distance(snap_points_scr[i], mouse_co);
+      if (dist < min_dist) {
+        min_dist = dist;
+        snap_idx = i;
+      }
+    }
+
+    if (snap_idx >= 0) {
+      target_anchor_px = snap_points_px[snap_idx];
+      state->is_snapped = true;
+      state->snap_indicator_screen = snap_points_scr[snap_idx];
+    }
+
+    const float2 offset = target_anchor_px - state->anchor - state->translation;
+    const float inv_cos = cosf(-state->rotation);
+    const float inv_sin = sinf(-state->rotation);
+    const float2 inv_rotated = float2(offset.x * inv_cos - offset.y * inv_sin,
+                                      offset.x * inv_sin + offset.y * inv_cos);
+    const float2 inv_scaled = float2(state->scale.x != 0.0f ? inv_rotated.x / state->scale.x :
+                                                              0.0f,
+                                      state->scale.y != 0.0f ? inv_rotated.y / state->scale.y :
+                                                              0.0f);
+
+    const float2 target_anchor_untransformed = state->anchor + inv_scaled;
+
+    const float2 delta_anchor = target_anchor_untransformed - state->anchor;
+    const float2 scaled_delta = delta_anchor * state->scale;
+    const float2 rotated_scaled_delta = float2(scaled_delta.x * cos_r_modal - scaled_delta.y * sin_r_modal,
+                                               scaled_delta.x * sin_r_modal + scaled_delta.y * cos_r_modal);
+    state->translation += (rotated_scaled_delta - delta_anchor);
+    state->anchor = target_anchor_untransformed;
+  }
+  else if (active >= ImageSelectTransformState::HANDLE_C0 &&
+           active <= ImageSelectTransformState::HANDLE_M_LEFT)
+  {
+    float2 local_offset(0.0f, 0.0f);
+    switch (active) {
+      case ImageSelectTransformState::HANDLE_C0:
+        local_offset = float2(0.0f, 0.0f);
+        break;
+      case ImageSelectTransformState::HANDLE_C1:
+        local_offset = float2(state->size_px.x, 0.0f);
+        break;
+      case ImageSelectTransformState::HANDLE_C2:
+        local_offset = float2(state->size_px.x, state->size_px.y);
+        break;
+      case ImageSelectTransformState::HANDLE_C3:
+        local_offset = float2(0.0f, state->size_px.y);
+        break;
+      case ImageSelectTransformState::HANDLE_M_BOTTOM:
+        local_offset = float2(state->size_px.x * 0.5f, 0.0f);
+        break;
+      case ImageSelectTransformState::HANDLE_M_RIGHT:
+        local_offset = float2(state->size_px.x, state->size_px.y * 0.5f);
+        break;
+      case ImageSelectTransformState::HANDLE_M_TOP:
+        local_offset = float2(state->size_px.x * 0.5f, state->size_px.y);
+        break;
+      case ImageSelectTransformState::HANDLE_M_LEFT:
+        local_offset = float2(0.0f, state->size_px.y * 0.5f);
+        break;
+      default:
+        break;
+    }
+
+    const float2 pivot_start = state->drag_start_anchor;
+    const float cos_r_start = cosf(state->drag_start_rotation);
+    const float sin_r_start = sinf(state->drag_start_rotation);
+    auto apply_forward_start = [&](const float2 local) -> float2 {
+      const float2 global = float2(state->origin_px) + local;
+      const float2 centered = global - pivot_start;
+      const float2 scaled = centered * state->drag_start_scale;
+      const float2 rotated = float2(scaled.x * cos_r_start - scaled.y * sin_r_start,
+                                      scaled.x * sin_r_start + scaled.y * cos_r_start);
+      return rotated + pivot_start + state->drag_start_translation;
+    };
+    const float2 H_start = apply_forward_start(local_offset);
+
+    const float2 ref_anchor = state->drag_start_anchor + state->drag_start_translation;
+    const float2 V_curr = mouse_px - ref_anchor;
+    const float2 V_start = H_start - ref_anchor;
+
+    const float rad = state->drag_start_rotation;
+    const float2 Ux(cosf(rad), sinf(rad));
+    const float2 Uy(-sinf(rad), cosf(rad));
+
+    const float proj_start_x = math::dot(V_start, Ux);
+    const float proj_start_y = math::dot(V_start, Uy);
+    const float proj_curr_x = math::dot(V_curr, Ux);
+    const float proj_curr_y = math::dot(V_curr, Uy);
+
+    float sx = state->drag_start_scale.x;
+    float sy = state->drag_start_scale.y;
+
+    if (fabsf(proj_start_x) > 0.001f) {
+      sx *= (proj_curr_x / proj_start_x);
+    }
+    if (fabsf(proj_start_y) > 0.001f) {
+      sy *= (proj_curr_y / proj_start_y);
+    }
+
+    if (active == ImageSelectTransformState::HANDLE_M_LEFT ||
+        active == ImageSelectTransformState::HANDLE_M_RIGHT)
+    {
+      sy = state->drag_start_scale.y;
+    }
+    if (active == ImageSelectTransformState::HANDLE_M_TOP ||
+        active == ImageSelectTransformState::HANDLE_M_BOTTOM)
+    {
+      sx = state->drag_start_scale.x;
+    }
+
+    bool proportional = state->use_proportional_scale;
+    if (event->modifier & KM_SHIFT) {
+      proportional = !proportional;
+    }
+    if (proportional && (active >= ImageSelectTransformState::HANDLE_C0 &&
+                         active <= ImageSelectTransformState::HANDLE_C3))
+    {
+      const float aspect_ratio = state->drag_start_scale.x / state->drag_start_scale.y;
+      const float scale_ratio_x = sx / state->drag_start_scale.x;
+      const float scale_ratio_y = sy / state->drag_start_scale.y;
+      const float max_ratio = (fabsf(scale_ratio_x - 1.0f) > fabsf(scale_ratio_y - 1.0f)) ?
+                                  scale_ratio_x :
+                                  scale_ratio_y;
+      sx = state->drag_start_scale.x * max_ratio;
+      sy = sx / aspect_ratio;
+    }
+
+    if (fabsf(sx) < 0.001f) {
+      sx = sx < 0.0f ? -0.001f : 0.001f;
+    }
+    if (fabsf(sy) < 0.001f) {
+      sy = sy < 0.0f ? -0.001f : 0.001f;
+    }
+
+    state->scale = float2(sx, sy);
+  }
+
+  ED_region_tag_redraw(region);
+}
+
+bool image_select_transform_calc_gizmo_matrices(const bContext *C,
+                                                const ImageSelectTransformState *state,
+                                                ImageSelectTransformGizmoMatrices *r_mats)
+{
+  if (!state || !state->fragment_ibuf || !r_mats) {
+    return false;
+  }
+
+  ARegion *region = state->owner_region ? state->owner_region : CTX_wm_region(C);
+  if (!region) {
+    return false;
+  }
+
+  const SpaceImage *sima = state->owner_sima;
+  if (!sima || !sima->image) {
+    return false;
+  }
+
+  float canvas_w = 1.0f;
+  float canvas_h = 1.0f;
+  void *lock = nullptr;
+  ImageUser iuser = state->iuser;
+  ImBuf *canvas_ibuf = BKE_image_acquire_ibuf(sima->image, &iuser, &lock);
+  if (canvas_ibuf) {
+    canvas_w = float(canvas_ibuf->x);
+    canvas_h = float(canvas_ibuf->y);
+    BKE_image_release_ibuf(sima->image, canvas_ibuf, lock);
+  }
+
+  float2 scr_corners[4];
+  float2 scr_pivot;
+  if (!image_select_transform_screen_corners(
+          state, region, canvas_w, canvas_h, scr_corners, &scr_pivot))
+  {
+    return false;
+  }
+
+  /* Work entirely in region/screen pixel space.
+   *
+   * The preview quad is produced by a screen-space rotation, so the four corners always
+   * form a true rectangle in region pixels.  Encoding the cage in the same space avoids
+   * the non-uniform-zoom problem that arises when converting to view UV first:
+   *   - screen rotation angle != UV rotation angle when view2d x/y scales differ,
+   *   - the four view-UV corners form a parallelogram, not a rectangle, so the old
+   *     R + diag(w,h) fit in UV was only exact for one corner (BL), leaving the other
+   *     three displaced -- the visible "collapse" when rotating.
+   *
+   * With matrix_space = identity, the cage2d final matrix is:
+   *   matrix_final = I * I * matrix_offset = matrix_offset
+   *
+   * matrix_offset is constructed so that for cage2d local coords [-0.5, 0.5]^2:
+   *   col 0  (local +X)  = e0 = scr_corners[1] - scr_corners[0]  (BL->BR screen edge)
+   *   col 1  (local +Y)  = e1 = scr_corners[3] - scr_corners[0]  (BL->TL screen edge)
+   *   col 3  (translate) = center of the screen quad
+   *
+   * Proof (BL corner, local = (-0.5, -0.5)):
+   *   center = BL + 0.5*e0 + 0.5*e1
+   *   M * (-0.5,-0.5) + center = -0.5*e0 - 0.5*e1 + BL + 0.5*e0 + 0.5*e1 = BL  ✓
+   *
+   * Because the corners come from a screen-space rotation, e0 ⊥ e1 is always guaranteed,
+   * so the cage stays a proper rectangle for any rotation angle and any view2d aspect ratio
+   * (including non-square UDIM tiles and asymmetric zoom). */
+  unit_m4(r_mats->matrix_space);
+  unit_m4(r_mats->matrix_basis);
+
+  const float2 e0 = scr_corners[1] - scr_corners[0]; /* BL -> BR */
+  const float2 e1 = scr_corners[3] - scr_corners[0]; /* BL -> TL */
+
+  /* Guard against degenerate (zero-area) cage. */
+  if (math::length_squared(e0) < 1e-8f || math::length_squared(e1) < 1e-8f) {
+    return false;
+  }
+
+  const float2 center = 0.25f *
+                        (scr_corners[0] + scr_corners[1] + scr_corners[2] + scr_corners[3]);
+
+  /* Build matrix_offset in Blender column-major float4x4 convention (m[col][row]). */
+  unit_m4(r_mats->matrix_offset);
+  /* Column 0: cage +X axis maps to BL->BR screen edge. */
+  r_mats->matrix_offset[0][0] = e0.x;
+  r_mats->matrix_offset[0][1] = e0.y;
+  /* Column 1: cage +Y axis maps to BL->TL screen edge. */
+  r_mats->matrix_offset[1][0] = e1.x;
+  r_mats->matrix_offset[1][1] = e1.y;
+  /* Column 3: translation to the geometric centre of the quad. */
+  r_mats->matrix_offset[3][0] = center.x;
+  r_mats->matrix_offset[3][1] = center.y;
+
+  /* cage_center_uv repurposed as cage_center_screen (field name kept to avoid API churn). */
+  r_mats->cage_center_uv[0] = center.x;
+  r_mats->cage_center_uv[1] = center.y;
+  r_mats->cage_center_uv[2] = 0.0f;
+
+  r_mats->anchor_screen[0] = scr_pivot.x;
+  r_mats->anchor_screen[1] = scr_pivot.y;
+  r_mats->anchor_screen[2] = 0.0f;
+
+  return true;
 }
 
 static void image_select_transform_commit(bContext *C, ImageSelectTransformState *state)
@@ -970,6 +1404,16 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
   /* Fragment crop rect in fragment-local space -- constant across all destination tiles. */
   const rctf src_crop{0.0f, float(state->size_px.x), 0.0f, float(state->size_px.y)};
 
+  /* Obtain the currently-open image undo step (lives in step_init until push_end).
+   * Destination tiles other than the source tile were not registered at lift time, so their
+   * pre-state must be snapshotted here -- before any pixel data is overwritten -- to make
+   * Ctrl+Z restore them correctly. */
+  UndoStack *ustack = ED_undo_stack_get();
+  ImageUndoStep *us_open = (ustack && ustack->step_init &&
+                            ustack->step_init->type == BKE_UNDOSYS_TYPE_IMAGE) ?
+                               reinterpret_cast<ImageUndoStep *>(ustack->step_init) :
+                               nullptr;
+
   /* Iterate over every tile in the image and apply the fragment to those that intersect
    * the UV AABB. When dest == source the pixel offset is zero and the math is identical
    * to the previous single-tile implementation. */
@@ -989,6 +1433,17 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
     ImBuf *dest_ibuf = BKE_image_acquire_ibuf(ima, &iuser, &lock);
     if (!dest_ibuf) {
       continue;
+    }
+
+    /* Register the pre-state of every destination tile that differs from the source tile.
+     * The source tile was already snapshotted (with its original pixels) inside
+     * lift_source, so re-snapshotting it here would overwrite that with the cleared
+     * (hole) state and break undo for the source tile as well. */
+    if (us_open && dest_tile_num != state->tile_number) {
+      ED_image_undo_push(ima, dest_ibuf, &iuser, us_open);
+      /* Also capture the selection mask pre-state for this tile so it is restored
+       * together with the pixel data on undo. */
+      ED_image_undo_capture_selection_mask(ima, dest_tile_num);
     }
 
     const int dest_w = dest_ibuf->x;
@@ -1141,7 +1596,8 @@ static wmOperatorStatus image_select_transform_start_drag_gesture(bContext *C,
                                                                 const wmEvent *event,
                                                                 ImageSelectTransformState::HandleType hit)
 {
-  image_select_transform_begin_handle_drag(state, event, hit);
+  image_select_transform_begin_drag(
+      state, event, static_cast<ImageSelectTransformHandleType>(int(hit)));
   state->is_dragging = true;
   op->customdata = state;
   WM_event_add_modal_handler(C, op);
@@ -1278,19 +1734,23 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
   image_select_transform_lift_source(C, state);
 
   ARegion *region = CTX_wm_region(C);
+  state->owner_area = CTX_wm_area(C);
   state->owner_region = region;
   state->owner_region_type = region->runtime->type;
 
   state->draw_handle = ED_region_draw_cb_activate(
-      state->owner_region_type, draw_select_transform_preview, state, REGION_DRAW_POST_PIXEL);
+      state->owner_region_type, draw_select_transform_texture, state, REGION_DRAW_POST_VIEW);
 
   g_transform_state = state;
   op->customdata = nullptr;
   state->is_dragging = false;
   state->active_handle = ImageSelectTransformState::HANDLE_NONE;
 
-  /* Enter floating mode as a long-lived modal so LMB handle hits have the highest
-   * event priority (modal > tool keymaps).  Miss events pass through to box-select etc. */
+  if (region->runtime->gizmo_map) {
+    WM_gizmomap_tag_refresh(region->runtime->gizmo_map);
+  }
+
+  /* Long-lived modal for Enter/Esc; handle drags are owned by IMAGE_GGT_paint_select_transform. */
   ED_region_tag_redraw(region);
   WM_event_add_modal_handler(C, op);
   return OPERATOR_RUNNING_MODAL;
@@ -1314,29 +1774,15 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
   ARegion *region = CTX_wm_region(C);
 
   if (!state->is_dragging) {
-    /* Floating state: intercept LMB, Enter, Esc directly; pass everything else through so
-     * pan/zoom, box-select and other operators still work normally. */
-    if (event->type == LEFTMOUSE && ELEM(event->val, KM_PRESS, KM_PRESS_DRAG)) {
-      if (region) {
-        image_select_transform_cache_screen_coords(state, region);
-      }
-      const float2 mouse_co(event->mval[0], event->mval[1]);
-      const ImageSelectTransformState::HandleType hit = get_active_handle_hit(state, mouse_co);
-      if (hit != ImageSelectTransformState::HANDLE_NONE) {
-        image_select_transform_begin_handle_drag(state, event, hit);
-        state->is_dragging = true;
-        op->customdata = state;
-        if (region) {
-          ED_region_tag_redraw(region);
-        }
-        return OPERATOR_RUNNING_MODAL;
-      }
+    /* Floating state: handles are owned by IMAGE_GGT_paint_select_transform gizmos.
+     * Enter/Esc are handled here; LMB and other events pass through. */
+    if (event->type == LEFTMOUSE) {
       return OPERATOR_PASS_THROUGH;
     }
 
     /* Enter -- commit the transform. */
     if (ELEM(event->type, EVT_RETKEY, EVT_PADENTER) && event->val == KM_PRESS) {
-      ED_area_status_text(CTX_wm_area(C), nullptr);
+      ED_area_status_text(state->owner_area, nullptr);
       g_transform_state = nullptr;
       image_select_transform_commit(C, state);
       image_select_transform_state_free(state);
@@ -1347,7 +1793,22 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
 
     /* Esc -- cancel the transform. */
     if (event->type == EVT_ESCKEY && event->val == KM_PRESS) {
-      ED_area_status_text(CTX_wm_area(C), nullptr);
+      ED_area_status_text(state->owner_area, nullptr);
+      g_transform_state = nullptr;
+      image_select_transform_restore_source(C, state);
+      image_select_transform_state_free(state);
+      op->customdata = nullptr;
+      WM_event_add_notifier(C, NC_WINDOW, nullptr);
+      return OPERATOR_FINISHED;
+    }
+
+    /* Ctrl+Z: cancel the floating transform rather than passing the undo event through to
+     * the WM. The open image undo step (opened at lift time) is discarded inside
+     * image_select_transform_restore_source so the undo stack stays clean. */
+    if (event->type == EVT_ZKEY && event->val == KM_PRESS &&
+        (event->modifier & KM_CTRL) && !(event->modifier & KM_SHIFT))
+    {
+      ED_area_status_text(state->owner_area, nullptr);
       g_transform_state = nullptr;
       image_select_transform_restore_source(C, state);
       image_select_transform_state_free(state);
@@ -1364,7 +1825,7 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
 
   if (!region) {
     /* Lost region temporarily during drag; suspend drag, stay floating. */
-    ED_area_status_text(CTX_wm_area(C), nullptr);
+    ED_area_status_text(state->owner_area, nullptr);
     state->active_handle = ImageSelectTransformState::HANDLE_NONE;
     state->is_snapped = false;
     state->is_dragging = false;
@@ -1379,15 +1840,14 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
         const float2 mouse_co(event->mval[0], event->mval[1]);
         const ImageSelectTransformState::HandleType hit = get_active_handle_hit(state, mouse_co);
         if (hit != ImageSelectTransformState::HANDLE_NONE) {
-          image_select_transform_begin_handle_drag(state, event, hit);
+          image_select_transform_begin_drag(
+              state, event, static_cast<ImageSelectTransformHandleType>(int(hit)));
           ED_region_tag_redraw(region);
         }
         return OPERATOR_RUNNING_MODAL;
       }
       if (event->val == KM_RELEASE) {
-        ED_area_status_text(CTX_wm_area(C), nullptr);
-        state->active_handle = ImageSelectTransformState::HANDLE_NONE;
-        state->is_snapped = false;
+        image_select_transform_end_drag(state);
         state->is_dragging = false;
         op->customdata = nullptr;
         ED_region_tag_redraw(region);
@@ -1397,256 +1857,13 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
     }
 
     case MOUSEMOVE: {
-      float2 mouse_co(event->mval[0], event->mval[1]);
-      state->mouse_curr_pos = mouse_co;
-
       if (state->active_handle != ImageSelectTransformState::HANDLE_NONE) {
-        /* Handle active drag transformations */
-        float2 mouse_uv;
-        ui::view2d_region_to_view(&region->v2d, mouse_co.x, mouse_co.y, &mouse_uv.x, &mouse_uv.y);
-
-        float2 mouse_start_uv;
-        ui::view2d_region_to_view(&region->v2d, state->mouse_start_pos.x, state->mouse_start_pos.y, &mouse_start_uv.x, &mouse_start_uv.y);
-
-        /* Acquire the canvas dimensions for converting UV to tile-pixel coordinates. */
-        SpaceImage *sima_modal = state->owner_sima;
-        float canvas_w_modal = float(state->fragment_ibuf->x);
-        float canvas_h_modal = float(state->fragment_ibuf->y);
-        if (sima_modal && sima_modal->image) {
-          void *modal_lock = nullptr;
-          ImBuf *modal_canvas = BKE_image_acquire_ibuf(sima_modal->image, &state->iuser, &modal_lock);
-          if (modal_canvas) {
-            canvas_w_modal = float(modal_canvas->x);
-            canvas_h_modal = float(modal_canvas->y);
-            BKE_image_release_ibuf(sima_modal->image, modal_canvas, modal_lock);
-          }
-        }
-
-        /* View2d -> tile-local pixels (subtract UDIM tile origin; same as move selection). */
-        const float2 mouse_px = image_select_view_to_tile_px(
-            state, mouse_uv, canvas_w_modal, canvas_h_modal);
-        const float2 start_px = image_select_view_to_tile_px(
-            state, mouse_start_uv, canvas_w_modal, canvas_h_modal);
-
-        /* Helper lambda applying the current forward transform for snap point evaluation. */
-        const float2 pivot_modal = state->anchor;
-        const float cos_r_modal = cosf(state->rotation);
-        const float sin_r_modal = sinf(state->rotation);
-        auto apply_forward_modal = [&](float2 local) -> float2 {
-          float2 global = float2(state->origin_px) + local;
-          float2 centered = global - pivot_modal;
-          float2 scaled = centered * state->scale;
-          float2 rotated = float2(scaled.x * cos_r_modal - scaled.y * sin_r_modal,
-                                  scaled.x * sin_r_modal + scaled.y * cos_r_modal);
-          return rotated + pivot_modal + state->translation;
-        };
-
-        if (state->active_handle == ImageSelectTransformState::HANDLE_MOVE) {
-          float2 delta = mouse_px - start_px;
-          
-          bool anchor_inside = (state->drag_start_anchor.x >= state->origin_px.x - 0.1f &&
-                                state->drag_start_anchor.x <= state->origin_px.x + state->size_px.x + 0.1f &&
-                                state->drag_start_anchor.y >= state->origin_px.y - 0.1f &&
-                                state->drag_start_anchor.y <= state->origin_px.y + state->size_px.y + 0.1f);
-          
-          if (anchor_inside) {
-            state->translation = state->drag_start_translation + delta;
-            state->anchor = state->drag_start_anchor;
-          }
-          else {
-            float inv_cos = cosf(-state->rotation);
-            float inv_sin = sinf(-state->rotation);
-            float2 inv_rotated = float2(
-                delta.x * inv_cos - delta.y * inv_sin,
-                delta.x * inv_sin + delta.y * inv_cos);
-            float2 delta_pivot = float2(
-                state->scale.x != 0.0f ? inv_rotated.x / state->scale.x : 0.0f,
-                state->scale.y != 0.0f ? inv_rotated.y / state->scale.y : 0.0f);
-                
-            state->anchor = state->drag_start_anchor - delta_pivot;
-            state->translation = state->drag_start_translation + delta_pivot;
-          }
-        }
-        else if (state->active_handle == ImageSelectTransformState::HANDLE_ROTATE) {
-          float2 center_scr = state->screen_anchor;
-          float2 start_vec = state->mouse_start_pos - center_scr;
-          float2 curr_vec = mouse_co - center_scr;
-          float angle_start = atan2f(start_vec.y, start_vec.x);
-          float angle_curr = atan2f(curr_vec.y, curr_vec.x);
-          float delta_angle = angle_curr - angle_start;
-          float raw_angle = state->drag_start_rotation + delta_angle;
-          if (event->modifier & KM_CTRL) {
-            const float snap_interval = 15.0f * (float(M_PI) / 180.0f);
-            state->rotation = roundf(raw_angle / snap_interval) * snap_interval;
-          }
-          else {
-            state->rotation = raw_angle;
-          }
-          char status_str[128];
-          snprintf(status_str, sizeof(status_str), "Rotation: %.2f°", state->rotation * 180.0f / float(M_PI));
-          ED_area_status_text(CTX_wm_area(C), status_str);
-        }
-        else if (state->active_handle == ImageSelectTransformState::HANDLE_ANCHOR) {
-          float2 target_anchor_px = mouse_px;
-          
-          /* Snap points in tile-pixel space, computed via the explicit forward transform. */
-          float2 snap_points_scr[9] = {
-              state->screen_corners[0], state->screen_corners[1],
-              state->screen_corners[2], state->screen_corners[3],
-              state->screen_midpoints[0], state->screen_midpoints[1],
-              state->screen_midpoints[2], state->screen_midpoints[3],
-              state->screen_center
-          };
-
-          float2 snap_points_px[9] = {
-              apply_forward_modal(float2(0, 0)),
-              apply_forward_modal(float2(state->size_px.x, 0)),
-              apply_forward_modal(float2(state->size_px.x, state->size_px.y)),
-              apply_forward_modal(float2(0, state->size_px.y)),
-              apply_forward_modal(float2(state->size_px.x * 0.5f, 0.0f)),
-              apply_forward_modal(float2(state->size_px.x, state->size_px.y * 0.5f)),
-              apply_forward_modal(float2(state->size_px.x * 0.5f, state->size_px.y)),
-              apply_forward_modal(float2(0.0f, state->size_px.y * 0.5f)),
-              apply_forward_modal(float2(state->size_px.x * 0.5f, state->size_px.y * 0.5f))
-          };
-
-          state->is_snapped = false;
-          const float snap_threshold_scr = 12.0f;
-          float min_dist = snap_threshold_scr;
-          int snap_idx = -1;
-
-          for (int i = 0; i < 9; i++) {
-            float dist = math::distance(snap_points_scr[i], mouse_co);
-            if (dist < min_dist) {
-              min_dist = dist;
-              snap_idx = i;
-            }
-          }
-
-          if (snap_idx >= 0) {
-            target_anchor_px = snap_points_px[snap_idx];
-            state->is_snapped = true;
-            state->snap_indicator_screen = snap_points_scr[snap_idx];
-          }
-
-          /* Compute the untransformed position of the new anchor using the inverse transform. */
-          float2 offset = target_anchor_px - state->anchor - state->translation;
-          float inv_cos = cosf(-state->rotation);
-          float inv_sin = sinf(-state->rotation);
-          float2 inv_rotated = float2(
-              offset.x * inv_cos - offset.y * inv_sin,
-              offset.x * inv_sin + offset.y * inv_cos);
-          float2 inv_scaled = float2(
-              state->scale.x != 0.0f ? inv_rotated.x / state->scale.x : 0.0f,
-              state->scale.y != 0.0f ? inv_rotated.y / state->scale.y : 0.0f);
-          
-          float2 target_anchor_untransformed = state->anchor + inv_scaled;
-
-          /* Anti-shift correction: move the pivot without visually shifting the fragment.
-           * T_new = T + (R*S - I) * (P_new - P_old) */
-          float2 delta_anchor = target_anchor_untransformed - state->anchor;
-          /* Apply R*S to the delta vector (without translation). */
-          float2 scaled_delta = delta_anchor * state->scale;
-          float2 rotated_scaled_delta = float2(
-              scaled_delta.x * cos_r_modal - scaled_delta.y * sin_r_modal,
-              scaled_delta.x * sin_r_modal + scaled_delta.y * cos_r_modal);
-          state->translation += (rotated_scaled_delta - delta_anchor);
-          state->anchor = target_anchor_untransformed;
-        }
-        else if (state->active_handle >= ImageSelectTransformState::HANDLE_C0 &&
-                 state->active_handle <= ImageSelectTransformState::HANDLE_M_LEFT) {
-          /* Edge or corner scaling */
-          float2 local_offset(0.0f, 0.0f);
-          switch (state->active_handle) {
-            case ImageSelectTransformState::HANDLE_C0: local_offset = float2(0.0f, 0.0f); break;
-            case ImageSelectTransformState::HANDLE_C1: local_offset = float2(state->size_px.x, 0.0f); break;
-            case ImageSelectTransformState::HANDLE_C2: local_offset = float2(state->size_px.x, state->size_px.y); break;
-            case ImageSelectTransformState::HANDLE_C3: local_offset = float2(0.0f, state->size_px.y); break;
-            case ImageSelectTransformState::HANDLE_M_BOTTOM: local_offset = float2(state->size_px.x * 0.5f, 0.0f); break;
-            case ImageSelectTransformState::HANDLE_M_RIGHT: local_offset = float2(state->size_px.x, state->size_px.y * 0.5f); break;
-            case ImageSelectTransformState::HANDLE_M_TOP: local_offset = float2(state->size_px.x * 0.5f, state->size_px.y); break;
-            case ImageSelectTransformState::HANDLE_M_LEFT: local_offset = float2(0.0f, state->size_px.y * 0.5f); break;
-            default: break;
-          }
-
-          /* Compute the initial handle position using the explicit forward transform. */
-          const float2 pivot_start = state->drag_start_anchor;
-          const float cos_r_start = cosf(state->drag_start_rotation);
-          const float sin_r_start = sinf(state->drag_start_rotation);
-          auto apply_forward_start = [&](float2 local) -> float2 {
-            float2 global = float2(state->origin_px) + local;
-            float2 centered = global - pivot_start;
-            float2 scaled = centered * state->drag_start_scale;
-            float2 rotated = float2(scaled.x * cos_r_start - scaled.y * sin_r_start,
-                                    scaled.x * sin_r_start + scaled.y * cos_r_start);
-            return rotated + pivot_start + state->drag_start_translation;
-          };
-          float2 H_start = apply_forward_start(local_offset);
-
-          /* Use the visual anchor (untransformed anchor + translation) as reference so that
-           * the direction convention for each handle is always correct regardless of how far
-           * the fragment has been translated. Without this, large negative translations can
-           * flip the sign of proj_start_x, causing both left and right handles to respond
-           * identically to mouse direction. */
-          const float2 ref_anchor = state->drag_start_anchor + state->drag_start_translation;
-          float2 V_curr = mouse_px - ref_anchor;
-          float2 V_start = H_start - ref_anchor;
-
-          float rad = state->drag_start_rotation;
-          float2 Ux(cosf(rad), sinf(rad));
-          float2 Uy(-sinf(rad), cosf(rad));
-
-          float proj_start_x = math::dot(V_start, Ux);
-          float proj_start_y = math::dot(V_start, Uy);
-          float proj_curr_x = math::dot(V_curr, Ux);
-          float proj_curr_y = math::dot(V_curr, Uy);
-
-          float sx = state->drag_start_scale.x;
-          float sy = state->drag_start_scale.y;
-
-          if (fabsf(proj_start_x) > 0.001f) {
-            sx *= (proj_curr_x / proj_start_x);
-          }
-          if (fabsf(proj_start_y) > 0.001f) {
-            sy *= (proj_curr_y / proj_start_y);
-          }
-
-          /* Constrain scale flags for edge drags */
-          if (state->active_handle == ImageSelectTransformState::HANDLE_M_LEFT ||
-              state->active_handle == ImageSelectTransformState::HANDLE_M_RIGHT) {
-            sy = state->drag_start_scale.y;
-          }
-          if (state->active_handle == ImageSelectTransformState::HANDLE_M_TOP ||
-              state->active_handle == ImageSelectTransformState::HANDLE_M_BOTTOM) {
-            sx = state->drag_start_scale.x;
-          }
-
-          /* Check proportional constraint (with shift toggle) */
-          bool proportional = state->use_proportional_scale;
-          if (event->modifier & KM_SHIFT) {
-            proportional = !proportional;
-          }
-          if (proportional && (state->active_handle >= ImageSelectTransformState::HANDLE_C0 &&
-                               state->active_handle <= ImageSelectTransformState::HANDLE_C3)) {
-            float aspect_ratio = state->drag_start_scale.x / state->drag_start_scale.y;
-            float scale_ratio_x = sx / state->drag_start_scale.x;
-            float scale_ratio_y = sy / state->drag_start_scale.y;
-            float max_ratio = (fabsf(scale_ratio_x - 1.0f) > fabsf(scale_ratio_y - 1.0f)) ? scale_ratio_x : scale_ratio_y;
-            sx = state->drag_start_scale.x * max_ratio;
-            sy = sx / aspect_ratio;
-          }
-
-          /* Clamp scales to avoid division by zero or negative flip bugs if undesirable */
-          if (fabsf(sx) < 0.001f) {
-            sx = sx < 0.0f ? -0.001f : 0.001f;
-          }
-          if (fabsf(sy) < 0.001f) {
-            sy = sy < 0.0f ? -0.001f : 0.001f;
-          }
-
-          state->scale = float2(sx, sy);
-        }
-        ED_region_tag_redraw(region);
+        image_select_transform_apply_handle(
+            C,
+            state,
+            event,
+            static_cast<ImageSelectTransformHandleType>(int(state->active_handle)),
+            region);
       }
       return OPERATOR_RUNNING_MODAL;
     }

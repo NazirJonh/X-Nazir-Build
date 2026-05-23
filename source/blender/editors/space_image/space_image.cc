@@ -64,6 +64,8 @@
 #include "image_intern.hh"
 #include "image_runtime.hh"
 
+#include "../sculpt_paint/mesh/paint_image_select_intern.hh"
+
 namespace blender {
 
 /**************************** common state *****************************/
@@ -494,6 +496,15 @@ static void image_listener(const wmSpaceTypeListenerParams *params)
       if (wmn->data == ND_UNDO) {
         ED_area_tag_redraw(area);
         ED_area_tag_refresh(area);
+        /* Discard any floating transform whose source pixels have been invalidated by the
+         * undo/redo step. The image_refresh callback cannot restore the fragment because
+         * the undo step may have already changed the canvas; simply freeing the state
+         * hides the gizmo and avoids a stale preview. The pending undo-step (if still in
+         * step_init) will be cleaned up automatically on the next push_init call. */
+        if (sima->runtime && sima->runtime->paint_select.transform) {
+          image_select_transform_state_free(sima->runtime->paint_select.transform);
+          sima->runtime->paint_select.transform = nullptr;
+        }
       }
       break;
   }
@@ -675,6 +686,11 @@ static void IMAGE_GGT_compositor_split(wmGizmoGroupType *gzgt)
   gzgt->refresh = nodes::gizmos::split_refresh;
 }
 
+static void IMAGE_GGT_paint_select_transform(wmGizmoGroupType *gzgt)
+{
+  ED_image_paint_select_transform_gizmo_setup(gzgt);
+}
+
 static void image_widgets()
 {
   const wmGizmoMapType_Params params{SPACE_IMAGE, RGN_TYPE_WINDOW};
@@ -693,6 +709,7 @@ static void image_widgets()
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_compositor_corner_pin);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_compositor_ellipse_mask);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_compositor_split);
+  WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_select_transform);
 }
 
 /************************** main region ***************************/
@@ -928,6 +945,9 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
                         nullptr,
                         C);
   }
+  /* Floating paint-selection previews (transform/move) draw here so gizmos render on top. */
+  ED_region_draw_cb_draw(C, region, REGION_DRAW_POST_VIEW);
+
   if ((sima->gizmo_flag & SI_GIZMO_HIDE) == 0) {
     WM_gizmomap_draw(region->runtime->gizmo_map, C, WM_GIZMOMAP_DRAWSTEP_2D);
   }

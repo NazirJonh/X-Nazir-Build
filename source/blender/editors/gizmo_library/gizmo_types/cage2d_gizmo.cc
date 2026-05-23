@@ -538,10 +538,10 @@ static void cage2d_draw_rect_wire(const rctf *r,
       const float center[2] = {BLI_rctf_cent_x(r), BLI_rctf_cent_y(r)};
 
       immBegin(GPU_PRIM_LINES, 4);
-      immVertex3f(pos, center[0] - rad[0], center[1] - rad[1], 0.0f);
-      immVertex3f(pos, center[0] + rad[0], center[1] + rad[1], 0.0f);
-      immVertex3f(pos, center[0] + rad[0], center[1] - rad[1], 0.0f);
-      immVertex3f(pos, center[0] - rad[0], center[1] + rad[1], 0.0f);
+      immVertex3f(pos, center[0] - rad[0], center[1], 0.0f);
+      immVertex3f(pos, center[0] + rad[0], center[1], 0.0f);
+      immVertex3f(pos, center[0], center[1] - rad[1], 0.0f);
+      immVertex3f(pos, center[0], center[1] + rad[1], 0.0f);
       immEnd();
     }
   }
@@ -594,10 +594,10 @@ static void cage2d_draw_circle_wire(const float color[3],
       const float center[2] = {0.0f, 0.0f};
 
       immBegin(GPU_PRIM_LINES, 4);
-      immVertex3f(pos, center[0] - rad[0], center[1] - rad[1], 0.0f);
-      immVertex3f(pos, center[0] + rad[0], center[1] + rad[1], 0.0f);
-      immVertex3f(pos, center[0] + rad[0], center[1] - rad[1], 0.0f);
-      immVertex3f(pos, center[0] - rad[0], center[1] + rad[1], 0.0f);
+      immVertex3f(pos, center[0] - rad[0], center[1], 0.0f);
+      immVertex3f(pos, center[0] + rad[0], center[1], 0.0f);
+      immVertex3f(pos, center[0], center[1] - rad[1], 0.0f);
+      immVertex3f(pos, center[0], center[1] + rad[1], 0.0f);
       immEnd();
     }
   }
@@ -690,6 +690,22 @@ static void cage2d_draw_rect_edge_handles(const rctf *r,
   }
 
   immUnbindProgram();
+}
+
+static void cage2d_draw_rect_all_edge_handles(const rctf *r,
+                                              const float size[2],
+                                              const float margin[2],
+                                              const float color[3],
+                                              const bool solid)
+{
+  cage2d_draw_rect_edge_handles(
+      r, ED_GIZMO_CAGE2D_PART_SCALE_MIN_X, size, margin, color, solid);
+  cage2d_draw_rect_edge_handles(
+      r, ED_GIZMO_CAGE2D_PART_SCALE_MAX_X, size, margin, color, solid);
+  cage2d_draw_rect_edge_handles(
+      r, ED_GIZMO_CAGE2D_PART_SCALE_MIN_Y, size, margin, color, solid);
+  cage2d_draw_rect_edge_handles(
+      r, ED_GIZMO_CAGE2D_PART_SCALE_MAX_Y, size, margin, color, solid);
 }
 
 /** \} */
@@ -831,14 +847,20 @@ static void gizmo_cage2d_draw_intern(wmGizmo *gz,
         cage2d_draw_rect_wire(&r, margin, black, transform_flag, draw_options, outline_line_width);
         cage2d_draw_rect_wire(&r, margin, color, transform_flag, draw_options, gz->line_width);
 
-        /* Edge handles. */
-        cage2d_draw_rect_edge_handles(&r, gz->highlight_part, size_real, margin, color, true);
-        cage2d_draw_rect_edge_handles(&r, gz->highlight_part, size_real, margin, black, false);
-
-        /* Only draw corner handles when hovering over the corners. */
-        if (is_corner_highlighted(gz->highlight_part)) {
+        if (draw_options & ED_GIZMO_CAGE_DRAW_FLAG_CORNER_HANDLES) {
+          /* Same visibility as #ED_GIZMO_CAGE2D_STYLE_CIRCLE with #ED_GIZMO_CAGE_DRAW_FLAG_CORNER_HANDLES. */
           cage2d_draw_rect_corner_handles(&r, margin, color, true);
           cage2d_draw_rect_corner_handles(&r, margin, black, false);
+          cage2d_draw_rect_all_edge_handles(&r, size_real, margin, color, true);
+          cage2d_draw_rect_all_edge_handles(&r, size_real, margin, black, false);
+        }
+        else {
+          cage2d_draw_rect_edge_handles(&r, gz->highlight_part, size_real, margin, color, true);
+          cage2d_draw_rect_edge_handles(&r, gz->highlight_part, size_real, margin, black, false);
+          if (is_corner_highlighted(gz->highlight_part)) {
+            cage2d_draw_rect_corner_handles(&r, margin, color, true);
+            cage2d_draw_rect_corner_handles(&r, margin, black, false);
+          }
         }
 
         /* Rotate handles. */
@@ -896,6 +918,7 @@ static void gizmo_cage2d_draw(const bContext * /*C*/, wmGizmo *gz)
 static int gizmo_cage2d_get_cursor(wmGizmo *gz)
 {
   int highlight_part = gz->highlight_part;
+  const int draw_options = RNA_enum_get(gz->ptr, "draw_options");
 
   if (gz->parent_gzgroup->type->flag & WM_GIZMOGROUPTYPE_3D) {
     return WM_CURSOR_NSEW_SCROLL;
@@ -903,6 +926,12 @@ static int gizmo_cage2d_get_cursor(wmGizmo *gz)
 
   switch (highlight_part) {
     case ED_GIZMO_CAGE2D_PART_TRANSLATE:
+      /* Interior move uses the full rectangle as a hot-spot; show the move cursor only while dragging. */
+      if ((draw_options & ED_GIZMO_CAGE_DRAW_FLAG_XFORM_INTERIOR_TRANSLATE) &&
+          (gz->state & WM_GIZMO_STATE_MODAL) == 0)
+      {
+        return WM_CURSOR_DEFAULT;
+      }
       return WM_CURSOR_NSEW_SCROLL;
     case ED_GIZMO_CAGE2D_PART_SCALE_MIN_X:
     case ED_GIZMO_CAGE2D_PART_SCALE_MAX_X:
@@ -947,7 +976,9 @@ static int gizmo_cage2d_test_select(bContext *C, wmGizmo *gz, const int mval[2])
 
   if (transform_flag & ED_GIZMO_CAGE_XFORM_FLAG_TRANSLATE) {
     rctf r;
-    if (draw_options & ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE) {
+    if ((draw_options & ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE) &&
+        (draw_options & ED_GIZMO_CAGE_DRAW_FLAG_XFORM_INTERIOR_TRANSLATE) == 0)
+    {
       r.xmin = -margin[0] / 2;
       r.ymin = -margin[1] / 2;
       r.xmax = margin[0] / 2;
@@ -1448,6 +1479,11 @@ static void GIZMO_GT_cage_2d(wmGizmoType *gzt)
   static const EnumPropertyItem rna_enum_draw_options[] = {
       {ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE, "XFORM_CENTER_HANDLE", 0, "Center Handle", ""},
       {ED_GIZMO_CAGE_DRAW_FLAG_CORNER_HANDLES, "CORNER_HANDLES", 0, "Corner Handles", ""},
+      {ED_GIZMO_CAGE_DRAW_FLAG_XFORM_INTERIOR_TRANSLATE,
+       "XFORM_INTERIOR_TRANSLATE",
+       0,
+       "Interior Translate",
+       ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
   static const float unit_v2[2] = {1.0f, 1.0f};

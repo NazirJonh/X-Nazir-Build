@@ -25,6 +25,8 @@ struct bContext;
 struct wmEvent;
 struct wmOperator;
 struct wmOperatorType;
+struct wmGizmo;
+struct wmGizmoGroupType;
 
 namespace blender {
 
@@ -111,6 +113,59 @@ ImBuf *image_select_move_extract(wmOperator *op,
  * Build a 4-channel RGBA float ImBuf for GPU preview: RGB from \a src, alpha from \a mask.
  */
 ImBuf *image_select_make_display_ibuf(const ImBuf *src, const ImBuf *mask);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Transform gizmo integration (opaque state API)
+ * \{ */
+
+enum class ImageSelectTransformHandleType {
+  None = 0,
+  Move,
+  Rotate,
+  Anchor,
+  C0,
+  C1,
+  C2,
+  C3,
+  MBottom,
+  MRight,
+  MTop,
+  MLeft,
+};
+
+struct ImageSelectTransformGizmoMatrices {
+  float matrix_space[4][4];
+  float matrix_basis[4][4];
+  float matrix_offset[4][4];
+  float cage_center_uv[3];
+  float anchor_screen[3];
+};
+
+bool image_select_transform_is_floating_in_space(const SpaceImage *sima);
+ImageSelectTransformState *image_select_transform_state_get(SpaceImage *sima);
+
+ImageSelectTransformHandleType image_select_transform_cage_part_to_handle_type(int cage_part);
+void image_select_transform_begin_drag(ImageSelectTransformState *state,
+                                       const wmEvent *event,
+                                       ImageSelectTransformHandleType handle);
+void image_select_transform_end_drag(ImageSelectTransformState *state);
+void image_select_transform_apply_handle(bContext *C,
+                                         ImageSelectTransformState *state,
+                                         const wmEvent *event,
+                                         ImageSelectTransformHandleType handle,
+                                         ARegion *region);
+bool image_select_transform_calc_gizmo_matrices(const bContext *C,
+                                                const ImageSelectTransformState *state,
+                                                ImageSelectTransformGizmoMatrices *r_mats);
+bool image_select_transform_has_active_handle(const ImageSelectTransformState *state);
+void image_select_transform_gizmo_refresh_tweak(const bContext *C,
+                                                wmGizmo *gz_cage,
+                                                wmGizmo *gz_anchor,
+                                                bool *r_was_modal_tweak);
+
+void ED_image_paint_select_transform_gizmo_setup(wmGizmoGroupType *gzgt);
 
 /** \} */
 

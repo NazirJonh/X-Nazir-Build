@@ -754,10 +754,13 @@ static void image_select_move_restore_source(bContext *C, ImageSelectMoveState *
 
   if (state->undo_begun) {
     /* Close the undo step opened in lift_source (pre/post are identical since we restored),
-     * then immediately discard the no-op step so Ctrl+Z is not wasted on it. */
-    ED_image_undo_push_end();
+     * then immediately discard the no-op step so Ctrl+Z is not wasted on it.
+     * Guard against calling push_end when step_init was stolen by another operator
+     * (tool switch / intervening undo-bearing operator) -- see image_select_move_commit
+     * for a full explanation of the crash path. */
     UndoStack *undo_stack = ED_undo_stack_get();
-    if (undo_stack) {
+    if (undo_stack && undo_stack->step_init != nullptr) {
+      ED_image_undo_push_end();
       BKE_undosys_stack_clear_active(undo_stack);
     }
   }
@@ -778,9 +781,15 @@ static void image_select_move_restore_source(bContext *C, ImageSelectMoveState *
  */
 void image_select_move_commit(bContext *C, ImageSelectMoveState *state)
 {
+  /* Retrieve the undo stack once; all push_end guard checks in this function use this
+   * pointer to verify that step_init is still open before calling ED_image_undo_push_end.
+   * See the comment above the final guard at the end of this function for a full explanation
+   * of why step_init can be nullptr at commit time and why the guard is necessary. */
+  UndoStack *ustack = ED_undo_stack_get();
+
   SpaceImage *sima = state->owner_sima ? state->owner_sima : CTX_wm_space_image(C);
   if (!sima || !sima->image) {
-    if (state->undo_begun) {
+    if (state->undo_begun && ustack && ustack->step_init != nullptr) {
       ED_image_undo_push_end();
     }
     return;
@@ -797,7 +806,7 @@ void image_select_move_commit(bContext *C, ImageSelectMoveState *state)
     if (ibuf_src) {
       BKE_image_release_ibuf(ima, ibuf_src, lock_src);
     }
-    if (state->undo_begun) {
+    if (state->undo_begun && ustack && ustack->step_init != nullptr) {
       ED_image_undo_push_end();
     }
     return;
@@ -825,6 +834,17 @@ void image_select_move_commit(bContext *C, ImageSelectMoveState *state)
                            state->fragment_mask_ibuf->float_buffer.data :
                            nullptr;
 
+  /* Obtain the currently-open image undo step (lives in step_init until push_end).
+   * Destination tiles that differ from the source/paste tile were not registered when the
+   * undo step was opened, so their pre-state must be snapshotted here -- before any pixel
+   * data is overwritten -- to make Ctrl+Z restore them correctly.
+   * This mirrors the identical pattern applied to image_select_transform_commit.
+   * `ustack` was already retrieved at the top of this function. */
+  ImageUndoStep *us_open = (ustack && ustack->step_init &&
+                            ustack->step_init->type == BKE_UNDOSYS_TYPE_IMAGE) ?
+                               reinterpret_cast<ImageUndoStep *>(ustack->step_init) :
+                               nullptr;
+
   /* Iterate all tiles and write pixels to those the fragment overlaps. */
   for (ImageTile *tile : ListBaseWrapper<ImageTile>(ima->tiles)) {
     const int t_col = (tile->tile_number - 1001) % 10;
@@ -850,6 +870,15 @@ void image_select_move_commit(bContext *C, ImageSelectMoveState *state)
         BKE_image_release_ibuf(ima, ibuf, lock);
       }
       continue;
+    }
+
+    /* Register the pre-state of every destination tile that differs from the source/paste
+     * tile.  That tile was already snapshotted at lift/paste time, so re-snapshotting it
+     * here would overwrite the original (pre-lift) pixels with the cleared-hole state and
+     * break undo for the primary tile. */
+    if (us_open && tile->tile_number != state->tile_number) {
+      ED_image_undo_push(ima, ibuf, &tile_iuser, us_open);
+      ED_image_undo_capture_selection_mask(ima, tile->tile_number);
     }
 
     /* Destination tile's actual pixel dimensions (may differ from source tile). */
@@ -987,7 +1016,24 @@ void image_select_move_commit(bContext *C, ImageSelectMoveState *state)
     BKE_image_release_ibuf(ima, ibuf, lock);
   }
 
-  if (state->undo_begun) {
+  /* Only close the undo step if it is still open.
+   * step_init can be prematurely set to nullptr in two ways:
+   *   1. A selection operator (box/lasso/circle) that was invoked while this
+   *      floating fragment was live called push_begin_selection, which in turn
+   *      calls BKE_undosys_step_push_init_with_type.  That function frees and
+   *      unlinks any existing step_init before creating its own.
+   *   2. Any operator with OPTYPE_UNDO that completed after lift_source called
+   *      BKE_undosys_step_push, which finalises step_init and sets it to nullptr.
+   * In either case, calling ED_image_undo_push_end() would reach the branch
+   *   ut = BKE_undosys_type_from_context(nullptr)
+   * because step_init is nullptr and push_end always passes nullptr for C.
+   * BKE_undosys_type_from_context then iterates all undo-type poll functions
+   * with a null context; armature_undosys_poll dereferences it and crashes.
+   * Skipping push_end is safe: the pixels have already been written above, so
+   * the commit is applied to the canvas.  The undo record is unfortunately lost
+   * (the earlier step_init was destroyed by the intervening operator), but that
+   * is preferable to crashing. */
+  if (state->undo_begun && ustack && ustack->step_init != nullptr) {
     ED_image_undo_push_end();
   }
 
@@ -1744,8 +1790,31 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
         state->owner_region_type, draw_select_move_preview, state, REGION_DRAW_POST_PIXEL);
   }
 
-  /* Begin undo step for the floating selection. */
-  ED_image_undo_push_begin("Paste Selection", PaintMode::Texture2D);
+  /* Begin undo step for the floating selection.
+   * Capture the destination tile's pixel pre-state immediately so that Ctrl+Z can restore
+   * the canvas after the paste is confirmed.  Using push_begin_with_image (rather than
+   * plain push_begin) mirrors what lift_source does for Move Selection and ensures the
+   * undo step is non-empty even before commit writes any pixels.
+   * If the ibuf cannot be acquired (uncommon), fall back to the empty-step variant so
+   * undo_begun is still set and the step is closed cleanly in image_select_move_commit. */
+  {
+    ImageUser undo_iuser = iuser;
+    undo_iuser.tile = paste_tile_number;
+    void *undo_lock = nullptr;
+    ImBuf *undo_ibuf = BKE_image_acquire_ibuf(ima, &undo_iuser, &undo_lock);
+    if (undo_ibuf) {
+      ED_image_undo_push_begin_with_image("Paste Selection", ima, undo_ibuf, &undo_iuser);
+      BKE_image_release_ibuf(ima, undo_ibuf, undo_lock);
+    }
+    else {
+      ED_image_undo_push_begin("Paste Selection", PaintMode::Texture2D);
+    }
+    /* Capture the copy-source tile's selection mask before it is freed below so that
+     * Ctrl+Z also restores the original selection outline. */
+    if (has_mask && cb) {
+      ED_image_undo_capture_selection_mask(ima, cb->tile_number);
+    }
+  }
   state->undo_begun = true;
 
   g_floating_state = state;

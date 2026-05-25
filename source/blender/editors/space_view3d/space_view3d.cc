@@ -282,6 +282,8 @@ static void view3d_free(SpaceLink *sl)
   }
 
   BKE_viewer_path_clear(&vd->viewer_path);
+
+  ed::view3d::image_grid_state_remove(*vd);
 }
 
 /* spacetype; init callback */

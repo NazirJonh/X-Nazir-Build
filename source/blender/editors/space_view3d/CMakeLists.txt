@@ -39,6 +39,8 @@ set(SRC
   view3d_gizmo_ruler.cc
   view3d_gizmo_tool_generic.cc
   view3d_header.cc
+  view3d_image_grid.cc
+  view3d_image_grid_state.cc
   view3d_iterators.cc
   view3d_navigate.cc
   view3d_navigate_fly.cc

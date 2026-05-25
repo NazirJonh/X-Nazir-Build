@@ -8,11 +8,14 @@
 
 #pragma once
 
+#include <string>
+
 #include "BLI_bounds_types.hh"
 #include "BLI_enum_flags.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 
+#include "DNA_asset_types.h"
 #include "DNA_scene_types.h"
 
 namespace blender {
@@ -1459,5 +1462,46 @@ bool ED_view3d_is_region_xr_mirror_active(const wmWindowManager *wm,
                                           const View3D *v3d,
                                           const ARegion *region);
 #endif
+
+/* -------------------------------------------------------------------- */
+/** \name Image Asset Grid (view3d_image_grid.cc / view3d_image_grid_state.cc)
+ * \{ */
+
+namespace ed::view3d {
+
+/**
+ * Per-View3D persistent UI state for the compact image asset grid template.
+ * Stored externally (not in DNA) so it survives redraw without being serialized.
+ */
+struct ImageGridUIState {
+  AssetLibraryReference lib_ref{};
+  std::string active_catalog_path;
+
+  /** First visible row (0-based). Session-only; not DNA. */
+  int scroll_row = 0;
+
+  /** Filled after build_grid_view each frame; scrollbar bounds on the *next* frame. */
+  int cached_item_count = 0;
+  int cached_cols = 0;
+
+  /** Visible grid height in pixels for #ButtonType::Grip (like #AbstractTreeView::custom_height_). */
+  int grip_pixel_height = 0;
+};
+
+ImageGridUIState &image_grid_state_get(const View3D &v3d);
+ImageGridUIState &image_grid_state_get_from_context(const bContext &C);
+void image_grid_state_reset_catalog(ImageGridUIState &state);
+void image_grid_state_remove(const View3D &v3d);
+void image_grid_notify_change(bContext &C);
+
+int image_grid_effective_rows(const View3D &v3d);
+int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d);
+void image_grid_clamp_scroll_row(ImageGridUIState &state, const View3D &v3d);
+bool image_grid_wheel_poll(bContext *C, const wmEvent *event);
+int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *region);
+
+}  // namespace ed::view3d
+
+/** \} */
 
 }  // namespace blender

@@ -16,6 +16,7 @@
 #include "BKE_icons.hh"
 
 #include "BLI_index_range.hh"
+#include "BLI_math_base.h"
 
 #include "WM_types.hh"
 
@@ -122,6 +123,11 @@ void AbstractGridView::set_tile_size(int tile_width, int tile_height)
 {
   style_.tile_width = tile_width;
   style_.tile_height = tile_height;
+}
+
+void AbstractGridView::set_cols_per_row_hint(const int cols)
+{
+  cols_per_row_hint_ = std::max(cols, 0);
 }
 
 static std::optional<int> find_filtered_item_index(const AbstractGridViewItem &item)
@@ -319,6 +325,8 @@ class BuildOnlyVisibleButtonsHelper {
   const AbstractGridView &grid_view_;
   const GridViewStyle &style_;
   const int cols_per_row_ = 0;
+  /** Local #View2D from embedded templates (e.g. sculpt image grid). */
+  const bool embedded_v2d_ = false;
   /* Indices of items within the view. Calculated by constructor. If this is unset it means all
    * items/buttons should be drawn. */
   std::optional<IndexRange> visible_items_range_;
@@ -327,7 +335,8 @@ class BuildOnlyVisibleButtonsHelper {
   BuildOnlyVisibleButtonsHelper(const View2D &v2d,
                                 const AbstractGridView &grid_view,
                                 int cols_per_row,
-                                const AbstractGridViewItem *force_visible_item);
+                                const AbstractGridViewItem *force_visible_item,
+                                const bool embedded_v2d = false);
 
   bool is_item_visible(int item_idx) const;
   void fill_layout_before_visible(Block &block) const;
@@ -343,8 +352,12 @@ BuildOnlyVisibleButtonsHelper::BuildOnlyVisibleButtonsHelper(
     const View2D &v2d,
     const AbstractGridView &grid_view,
     const int cols_per_row,
-    const AbstractGridViewItem *force_visible_item)
-    : grid_view_(grid_view), style_(grid_view.get_style()), cols_per_row_(cols_per_row)
+    const AbstractGridViewItem *force_visible_item,
+    const bool embedded_v2d)
+    : grid_view_(grid_view),
+      style_(grid_view.get_style()),
+      cols_per_row_(cols_per_row),
+      embedded_v2d_(embedded_v2d)
 {
   if (v2d.flag & V2D_IS_INIT && grid_view.get_item_count_filtered()) {
     visible_items_range_ = this->get_visible_range(v2d, force_visible_item);
@@ -358,16 +371,45 @@ IndexRange BuildOnlyVisibleButtonsHelper::get_visible_range(
 
   int first_idx_in_view = 0;
 
-  const float scroll_ofs_y = std::abs(v2d.cur.ymax - v2d.tot.ymax);
-  if (!IS_EQF(scroll_ofs_y, 0)) {
-    const int scrolled_away_rows = int(scroll_ofs_y) / style_.tile_height;
+  if (embedded_v2d_) {
+    /* Fixed viewport: map #View2D::cur.ymax (0 at top, negative when scrolled) to row index. */
+    const float scrolled_past_top = v2d.tot.ymax - v2d.cur.ymax;
+    if (scrolled_past_top > 0.0f) {
+      const int scrolled_away_rows = int(scrolled_past_top) / style_.tile_height;
+      first_idx_in_view = scrolled_away_rows * cols_per_row_;
+    }
+  }
+  else {
+    const float scroll_ofs_y = std::abs(v2d.cur.ymax - v2d.tot.ymax);
+    float scrolled_past_grid_top = scroll_ofs_y;
 
-    first_idx_in_view = scrolled_away_rows * cols_per_row_;
+    /* Grids are often embedded below other UI (panel headers, catalog pills, etc.). The view
+     * bounds from the previous redraw are used to only virtualize once the scroll offset is past
+     * that content, not from the top of the entire region. */
+    if (const std::optional<rcti> bounds = grid_view_.get_bounds()) {
+      if (!BLI_rcti_is_empty(&*bounds)) {
+        const float grid_top = float(bounds->ymax);
+        const float content_top = v2d.tot.ymax;
+        scrolled_past_grid_top = scroll_ofs_y - (content_top - grid_top);
+      }
+    }
+
+    if (scrolled_past_grid_top > 0.0f) {
+      const int scrolled_away_rows = int(scrolled_past_grid_top) / style_.tile_height;
+      first_idx_in_view = scrolled_away_rows * cols_per_row_;
+    }
+  }
+
+  const int item_count = grid_view_.get_item_count_filtered();
+  if (item_count > 0 && first_idx_in_view >= item_count) {
+    first_idx_in_view = max_ii(0, item_count - cols_per_row_);
   }
 
   const int view_height = BLI_rcti_size_y(&v2d.mask);
   const int count_rows_in_view = std::max(view_height / style_.tile_height, 1);
-  const int max_items_in_view = (count_rows_in_view + 1) * cols_per_row_;
+  /* Embedded grids use a fixed viewport height; do not add an extra buffer row. */
+  const int max_items_in_view = embedded_v2d_ ? count_rows_in_view * cols_per_row_ :
+                                                (count_rows_in_view + 1) * cols_per_row_;
   BLI_assert(max_items_in_view > 0);
 
   IndexRange visible_items(first_idx_in_view, max_items_in_view);
@@ -377,7 +419,8 @@ IndexRange BuildOnlyVisibleButtonsHelper::get_visible_range(
     if (std::optional<int> item_idx = find_filtered_item_index(*force_visible_item)) {
       if (!visible_items.contains(*item_idx)) {
         /* Move range so the first row contains #force_visible_item. */
-        return IndexRange((item_idx == 0) ? 0 : *item_idx % cols_per_row_, max_items_in_view);
+        const int aligned_start = *item_idx - (*item_idx % cols_per_row_);
+        return IndexRange(aligned_start, max_items_in_view);
       }
     }
   }
@@ -453,7 +496,10 @@ class GridViewLayoutBuilder {
  public:
   GridViewLayoutBuilder(Layout &layout);
 
-  void build_from_view(const bContext &C, AbstractGridView &grid_view, const View2D &v2d) const;
+  void build_from_view(const bContext &C,
+                       AbstractGridView &grid_view,
+                       const View2D &v2d,
+                       const bool embedded_v2d) const;
 
  private:
   void build_grid_tile(const bContext &C, Layout &grid_layout, AbstractGridViewItem &item) const;
@@ -476,7 +522,8 @@ void GridViewLayoutBuilder::build_grid_tile(const bContext &C,
 
 void GridViewLayoutBuilder::build_from_view(const bContext &C,
                                             AbstractGridView &grid_view,
-                                            const View2D &v2d) const
+                                            const View2D &v2d,
+                                            const bool embedded_v2d) const
 {
   Layout &parent_layout = this->current_layout();
 
@@ -486,19 +533,28 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
   /* We might not actually know the width available for the grid view. Let's just assume that
    * either there is a fixed width defined via #uiLayoutSetUnitsX() or that the layout is close to
    * the root level and inherits its width. Might need a more reliable method. */
-  const int guessed_layout_width = (parent_layout.ui_units_x() > 0) ?
-                                       parent_layout.ui_units_x() * UI_UNIT_X :
-                                       parent_layout.width();
-  const int cols_per_row = std::max(guessed_layout_width / style.tile_width, 1);
+  const int cols_per_row = [&]() {
+    if (grid_view.cols_per_row_hint_ > 0) {
+      return grid_view.cols_per_row_hint_;
+    }
+    const int guessed_layout_width = (parent_layout.ui_units_x() > 0) ?
+                                           parent_layout.ui_units_x() * UI_UNIT_X :
+                                           parent_layout.width();
+    return std::max(guessed_layout_width / style.tile_width, 1);
+  }();
   grid_view.cols_per_row_ = cols_per_row;
 
   const AbstractGridViewItem *search_highlight_item = dynamic_cast<const AbstractGridViewItem *>(
       grid_view.search_highlight_item());
 
   BuildOnlyVisibleButtonsHelper build_visible_helper(
-      v2d, grid_view, cols_per_row, search_highlight_item);
+      v2d, grid_view, cols_per_row, search_highlight_item, embedded_v2d);
 
-  build_visible_helper.fill_layout_before_visible(block_);
+  /* Spacers simulate full scroll height in region #View2D grids; embedded fixed viewports only
+   * swap visible tiles inside a clipped layout (see sculpt image grid). */
+  if (!embedded_v2d) {
+    build_visible_helper.fill_layout_before_visible(block_);
+  }
 
   int item_idx = 0;
   Layout *row = nullptr;
@@ -509,8 +565,9 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
       return;
     }
 
-    /* Start a new row for every first item in the row. */
-    if ((item_idx % cols_per_row) == 0) {
+    /* Start a new row for every first item in the row. Also when the first *visible* item
+     * starts mid-row (virtualization), #row may still be null. */
+    if (row == nullptr || (item_idx % cols_per_row) == 0) {
       row = &layout.row(true);
     }
 
@@ -520,7 +577,9 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
 
   block_layout_set_current(&block_, &parent_layout);
 
-  build_visible_helper.fill_layout_after_visible(block_);
+  if (!embedded_v2d) {
+    build_visible_helper.fill_layout_after_visible(block_);
+  }
 }
 
 Layout &GridViewLayoutBuilder::current_layout() const
@@ -535,23 +594,26 @@ GridViewBuilder::GridViewBuilder(Block & /*block*/) {}
 void GridViewBuilder::build_grid_view(const bContext &C,
                                       AbstractGridView &grid_view,
                                       Layout &layout,
-                                      std::optional<StringRef> search_string)
+                                      std::optional<StringRef> search_string,
+                                      const View2D *v2d_override)
 {
   Block &block = *layout.block();
 
   const ARegion *region = CTX_wm_region_popup(&C) ? CTX_wm_region_popup(&C) : CTX_wm_region(&C);
-  block_view_persistent_state_restore(*region, block, grid_view);
+  if (!v2d_override) {
+    block_view_persistent_state_restore(*region, block, grid_view);
+  }
 
   grid_view.build_items();
   grid_view.update_from_old(block);
   grid_view.change_state_delayed();
   grid_view.filter(search_string);
 
-  /* Ensure the given layout is actually active. */
   block_layout_set_current(&block, &layout);
 
   GridViewLayoutBuilder builder(layout);
-  builder.build_from_view(C, grid_view, region->v2d);
+  const View2D &v2d = v2d_override ? *v2d_override : region->v2d;
+  builder.build_from_view(C, grid_view, v2d, v2d_override != nullptr);
 }
 
 /* ---------------------------------------------------------------------- */

@@ -78,6 +78,8 @@
 #include "WM_types.hh"
 #include "wm_event_system.hh"
 
+#include "ED_view3d.hh"
+
 #ifdef WITH_INPUT_IME
 #  include "wm_window.hh"
 #endif
@@ -4661,6 +4663,9 @@ static void numedit_apply(bContext *C, Block *block, Button *but, HandleButtonDa
   }
 
   ED_region_tag_redraw(data->region);
+  if (ELEM(but->type, ButtonType::Scroll, ButtonType::Grip)) {
+    ED_region_tag_refresh_ui(data->region);
+  }
 }
 
 static void but_extra_operator_icon_apply(bContext *C, Button *but, ButtonExtraOpIcon *op_icon)
@@ -12650,6 +12655,10 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
         button_tooltip_timer_remove(C, but);
       }
     }
+  }
+
+  if (retval == WM_UI_HANDLER_CONTINUE) {
+    retval = ed::view3d::handle_image_grid_wheel_event(C, event, region);
   }
 
   if (retval == WM_UI_HANDLER_CONTINUE) {

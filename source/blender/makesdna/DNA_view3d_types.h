@@ -821,6 +821,10 @@ struct View3D {
   /** Path to the viewer node that is currently previewed. This is retrieved from the workspace. */
   ViewerPath viewer_path;
 
+  /** Number of visible rows for the sculpt image grid. 0 = use default (3). */
+  short image_grid_rows = 0;
+  short _pad_image_grid[3] = {};
+
   /** Runtime evaluation data (keep last). */
   View3D_Runtime runtime;
 };

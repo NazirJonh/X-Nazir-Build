@@ -2413,6 +2413,10 @@ void template_id_preview(Layout *layout,
                          int cols,
                          int filter = TEMPLATE_ID_FILTER_ALL,
                          bool hide_buttons = false);
+void template_asset_image_grid(Layout *layout,
+                               bContext *C,
+                               PointerRNA *ptr,
+                               const char *propname);
 void template_matrix(Layout *layout, PointerRNA *ptr, StringRefNull propname);
 /**
  * Version of #template_id using tabs.
@@ -3120,6 +3124,10 @@ AbstractView *region_view_find_at(const ARegion *region,
                                   const int xy[2],
                                   int pad,
                                   Block **r_block = nullptr);
+bool region_view_has_idname_at(const ARegion *region,
+                               const int xy[2],
+                               int pad,
+                               StringRef idname);
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event);
 /**
  * \param xy: Coordinate to find a view item at, in window space.

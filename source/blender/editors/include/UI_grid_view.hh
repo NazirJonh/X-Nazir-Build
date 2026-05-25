@@ -96,6 +96,8 @@ class AbstractGridView : public AbstractView {
   Map<StringRef, AbstractGridViewItem *> item_map_;
   GridViewStyle style_;
   int cols_per_row_ = 0;
+  /** When > 0, overrides width-based column guess in #GridViewLayoutBuilder. */
+  int cols_per_row_hint_ = 0;
 
  public:
   AbstractGridView();
@@ -122,8 +124,11 @@ class AbstractGridView : public AbstractView {
   const GridViewStyle &get_style() const;
   int get_item_count() const;
   int get_item_count_filtered() const;
+  int cols_per_row() const { return cols_per_row_; }
 
   void set_tile_size(int tile_width, int tile_height);
+  /** Fixed column count (e.g. from #template_asset_image_grid `cols`). 0 = guess from layout width. */
+  void set_cols_per_row_hint(int cols);
   AbstractViewItem *find_active_or_visible_item() const override;
   AbstractViewItem *navigate_left(AbstractViewItem *from) override;
   AbstractViewItem *navigate_right(AbstractViewItem *from) override;
@@ -186,7 +191,8 @@ class GridViewBuilder {
   void build_grid_view(const bContext &C,
                        AbstractGridView &grid_view,
                        Layout &layout,
-                       std::optional<StringRef> search_string = {});
+                       std::optional<StringRef> search_string = {},
+                       const View2D *v2d_override = nullptr);
 };
 
 /** \} */

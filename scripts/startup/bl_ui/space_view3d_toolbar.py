@@ -792,7 +792,7 @@ class VIEW3D_PT_tools_brush_texture(Panel, View3DPaintPanel):
         tex_slot = brush.texture_slot
 
         col = layout.column()
-        col.template_ID_preview(tex_slot, "texture", new="texture.new", rows=3, cols=8)
+        col.template_asset_image_grid(tex_slot, "texture")
 
         brush_texture_settings(col, brush, context.sculpt_object)
 

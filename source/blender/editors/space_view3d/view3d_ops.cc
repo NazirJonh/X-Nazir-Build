@@ -258,6 +258,12 @@ void view3d_operatortypes()
   WM_operatortype_append(VIEW3D_OT_ruler_add);
   WM_operatortype_append(VIEW3D_OT_ruler_remove);
 
+  WM_operatortype_append(VIEW3D_OT_image_grid_set_library);
+  WM_operatortype_append(VIEW3D_OT_image_grid_set_catalog);
+  WM_operatortype_append(VIEW3D_OT_image_grid_mark_asset);
+  WM_operatortype_append(VIEW3D_OT_image_grid_browse_assets);
+  WM_operatortype_append(VIEW3D_OT_image_grid_scroll);
+
   ed::transform::transform_operatortypes();
 }
 

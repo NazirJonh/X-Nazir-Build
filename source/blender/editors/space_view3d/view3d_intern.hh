@@ -239,4 +239,12 @@ extern bool view3d_camera_border_hack_test;
 /* view3d_navigate_smoothview.cc */
 void view3d_smooth_free(RegionView3D *rv3d);
 
+/* view3d_image_grid.cc — operators (state + helpers declared in ED_view3d.hh) */
+
+void VIEW3D_OT_image_grid_set_library(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_set_catalog(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_mark_asset(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_browse_assets(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_scroll(wmOperatorType *ot);
+
 }  // namespace blender

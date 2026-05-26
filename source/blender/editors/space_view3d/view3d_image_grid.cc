@@ -6,6 +6,8 @@
  * \ingroup spview3d
  */
 
+#include <cstdio>
+
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
 
@@ -16,12 +18,14 @@
 #include "DNA_windowmanager_types.h"
 
 #include "AS_asset_catalog_path.hh"
+#include "AS_asset_catalog_tree.hh"
 #include "AS_asset_library.hh"
 
 #include "BKE_asset.hh"
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_preferences.h"
 #include "BKE_screen.hh"
 
 #include "BLT_translation.hh"
@@ -30,6 +34,8 @@
 #include "ED_asset_list.hh"
 #include "ED_asset_mark_clear.hh"
 #include "ED_screen.hh"
+
+#include "BLI_string_utf8.h"
 
 #include "DNA_userdef_types.h"
 
@@ -42,6 +48,8 @@
 
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
+#include "UI_interface_layout.hh"
+#include "UI_tree_view.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -87,6 +95,30 @@ int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d)
 void image_grid_clamp_scroll_row(ImageGridUIState &state, const View3D &v3d)
 {
   state.scroll_row = clamp_i(state.scroll_row, 0, image_grid_max_scroll_row(state, v3d));
+}
+
+const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref)
+{
+  switch (lib_ref.type) {
+    case ASSET_LIBRARY_ALL:
+      return IFACE_("All Libraries");
+    case ASSET_LIBRARY_LOCAL:
+      return IFACE_("Current File");
+    case ASSET_LIBRARY_ESSENTIALS:
+      return IFACE_("Essentials");
+    case ASSET_LIBRARY_ONLINE_ESSENTIALS:
+      return IFACE_("Online Essentials");
+    case ASSET_LIBRARY_CUSTOM: {
+      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
+          &U, lib_ref.custom_library_index);
+      if (user_library && user_library->name[0]) {
+        return user_library->name;
+      }
+      return IFACE_("Asset Library");
+    }
+    default:
+      return IFACE_("Asset Library");
+  }
 }
 
 bool image_grid_wheel_poll(bContext *C, const wmEvent *event)
@@ -175,15 +207,29 @@ static const EnumPropertyItem *rna_image_grid_library_itemf(bContext * /*C*/,
                                                             PropertyRNA * /*prop*/,
                                                             bool *r_free)
 {
+  printf("[ImageGrid] rna_image_grid_library_itemf: building library enum...\n");
+
   const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
       /*include_readonly=*/true,
       /*include_current_file=*/true,
       /*include_remote_libraries=*/false,
       /*include_separate_online_essentials=*/false);
   if (!items) {
+    printf("[ImageGrid] rna_image_grid_library_itemf: items is NULL — no libraries found\n");
     *r_free = false;
     return nullptr;
   }
+
+  int count = 0;
+  for (const EnumPropertyItem *it = items; it->identifier != nullptr; it++) {
+    printf("[ImageGrid]   library[%d]: value=%d, identifier='%s', name='%s'\n",
+           count,
+           it->value,
+           it->identifier ? it->identifier : "(null)",
+           it->name ? it->name : "(null)");
+    count++;
+  }
+  printf("[ImageGrid] rna_image_grid_library_itemf: total libraries = %d\n", count);
 
   *r_free = true;
   return items;
@@ -192,13 +238,19 @@ static const EnumPropertyItem *rna_image_grid_library_itemf(bContext * /*C*/,
 static wmOperatorStatus image_grid_set_library_exec(bContext *C, wmOperator *op)
 {
   View3D *v3d = CTX_wm_view3d(C);
+  printf("[ImageGrid] set_library_exec: v3d=%p\n", (void *)v3d);
   if (!v3d) {
+    printf("[ImageGrid] set_library_exec: CANCELLED — no v3d in context\n");
     return OPERATOR_CANCELLED;
   }
 
   const int enum_value = RNA_enum_get(op->ptr, "asset_library_reference");
   const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(
       enum_value);
+
+  printf("[ImageGrid] set_library_exec: switching to lib_ref.type=%d, custom_index=%d\n",
+         new_ref.type,
+         new_ref.custom_library_index);
 
   ImageGridUIState &state = image_grid_state_get(*v3d);
   state.lib_ref = new_ref;
@@ -236,6 +288,9 @@ void VIEW3D_OT_image_grid_set_library(wmOperatorType *ot)
   PropertyRNA *prop = RNA_def_property(ot->srna, "asset_library_reference", PROP_ENUM, PROP_NONE);
   RNA_def_enum_funcs(prop, rna_image_grid_library_itemf);
   RNA_def_property_ui_text(prop, "Library", "Asset library to browse");
+  /* Required by WM_enum_search_invoke / operator_enum_search_update_fn to know which property
+   * to enumerate for the search popup. */
+  ot->prop = prop;
 }
 
 /** \} */
@@ -445,6 +500,180 @@ void VIEW3D_OT_image_grid_scroll(wmOperatorType *ot)
   ot->exec = image_grid_scroll_exec;
   ot->poll = [](bContext *C) { return CTX_wm_view3d(C) != nullptr; };
   RNA_def_int(ot->srna, "delta", 0, -100, 100, "Delta", "Rows to scroll", -16, 16);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Catalog Selector Popover
+ * \{ */
+
+/** Tree view listing catalogs of the current image-grid library for single-path selection. */
+class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
+  const bContext &C_;
+  ed::view3d::ImageGridUIState &state_;
+  /* Full catalog tree shared from the library's catalog service. Using a shared_ptr avoids
+   * copying the tree (which has raw parent pointers) and ensures the data stays alive. */
+  std::shared_ptr<const asset_system::AssetCatalogTree> catalog_tree_;
+
+ public:
+  class Item;
+
+  ImageGridCatalogSelectorTree(const bContext &C,
+                                ed::view3d::ImageGridUIState &state,
+                                const asset_system::AssetLibrary &library)
+      : C_(C), state_(state)
+  {
+    printf("[ImageGrid] CatalogSelectorTree ctor: lib_ref.type=%d, custom_library_index=%d\n",
+           state.lib_ref.type,
+           state.lib_ref.custom_library_index);
+
+    /* Use the full catalog tree of the library rather than a filtered tree built from
+     * catalog IDs of loaded assets. The filtered approach shows nothing when assets have
+     * no catalog assignment (nil UUID), which is the common case after a plain
+     * "Mark as Asset" without assigning a catalog path. Showing ALL registered catalogs
+     * lets the user navigate to any catalog regardless of current asset assignments. */
+    catalog_tree_ = library.catalog_service().catalog_tree();
+
+    printf("[ImageGrid] CatalogSelectorTree ctor: catalog_tree_ valid=%s, is_empty=%s\n",
+           catalog_tree_ ? "true" : "false",
+           (!catalog_tree_ || catalog_tree_->is_empty()) ? "true" : "false");
+  }
+
+  void build_tree() override;
+
+  static Item &build_catalog_items_recursive(
+      ui::TreeViewOrItem &parent,
+      const asset_system::AssetCatalogTreeItem &catalog_item,
+      ed::view3d::ImageGridUIState &state);
+
+  class Item : public ui::BasicTreeViewItem {
+    std::string catalog_path_;
+    ed::view3d::ImageGridUIState &state_;
+
+   public:
+    Item(StringRef label, const std::string &catalog_path, ed::view3d::ImageGridUIState &state)
+        : ui::BasicTreeViewItem(label), catalog_path_(catalog_path), state_(state)
+    {
+      this->set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem & /*item*/) {
+        state_.active_catalog_path = catalog_path_;
+        state_.scroll_row = 0;
+        ed::view3d::image_grid_notify_change(C);
+      });
+      this->set_is_active_fn(
+          [this]() -> bool { return state_.active_catalog_path == catalog_path_; });
+    }
+  };
+};
+
+void ImageGridCatalogSelectorTree::build_tree()
+{
+  Item &all_item = add_tree_item<Item>(IFACE_("All"), "", state_);
+  all_item.uncollapse_by_default();
+
+  if (!catalog_tree_ || catalog_tree_->is_empty()) {
+    printf("[ImageGrid] build_tree: catalog tree is null/empty — no catalog items\n");
+    return;
+  }
+
+  int root_count = 0;
+  catalog_tree_->foreach_root_item(
+      [this, &root_count](const asset_system::AssetCatalogTreeItem &cat_item) {
+        root_count++;
+        printf("[ImageGrid] build_tree root item #%d: name='%s', path='%s'\n",
+               root_count,
+               cat_item.get_name().c_str(),
+               cat_item.catalog_path().str().c_str());
+        Item &item = build_catalog_items_recursive(*this, cat_item, state_);
+        item.uncollapse_by_default();
+      });
+  printf("[ImageGrid] build_tree: total root items = %d\n", root_count);
+}
+
+ImageGridCatalogSelectorTree::Item &ImageGridCatalogSelectorTree::build_catalog_items_recursive(
+    ui::TreeViewOrItem &parent,
+    const asset_system::AssetCatalogTreeItem &catalog_item,
+    ed::view3d::ImageGridUIState &state)
+{
+  Item &item = parent.add_tree_item<Item>(
+      catalog_item.get_name(), catalog_item.catalog_path().str(), state);
+
+  catalog_item.foreach_child([&](const asset_system::AssetCatalogTreeItem &child) {
+    build_catalog_items_recursive(item, child, state);
+  });
+
+  return item;
+}
+
+static void image_grid_catalog_selector_draw(const bContext *C, Panel *panel)
+{
+  View3D *v3d = CTX_wm_view3d(C);
+  if (!v3d) {
+    printf("[ImageGrid] catalog_selector_draw: v3d is NULL — aborting\n");
+    return;
+  }
+
+  ed::view3d::ImageGridUIState &state = image_grid_state_get(*v3d);
+  printf("[ImageGrid] catalog_selector_draw: lib_ref.type=%d, custom_library_index=%d, "
+         "active_catalog_path='%s'\n",
+         state.lib_ref.type,
+         state.lib_ref.custom_library_index,
+         state.active_catalog_path.c_str());
+
+  ui::Layout &layout = *panel->layout;
+  layout.operator_context_set(wm::OpCallContext::InvokeDefault);
+
+  /* Library selector row. */
+  ui::Layout &lib_row = layout.row(true);
+  lib_row.op("VIEW3D_OT_image_grid_set_library",
+              ed::view3d::image_grid_library_ui_name(state.lib_ref),
+              ICON_ASSET_MANAGER,
+              wm::OpCallContext::InvokeDefault,
+              UI_ITEM_NONE);
+  if (state.lib_ref.type != ASSET_LIBRARY_LOCAL) {
+    lib_row.op("ASSET_OT_library_refresh", "", ICON_FILE_REFRESH);
+  }
+
+  /* Catalog tree. */
+  printf("[ImageGrid] catalog_selector_draw: calling storage_fetch...\n");
+  ed::asset::list::storage_fetch(&state.lib_ref, C);
+
+  const bool is_loaded = ed::asset::list::is_loaded(&state.lib_ref);
+  printf("[ImageGrid] catalog_selector_draw: is_loaded=%s\n", is_loaded ? "true" : "false");
+
+  const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
+      state.lib_ref);
+  if (!library) {
+    printf("[ImageGrid] catalog_selector_draw: library NOT yet available (still loading)\n");
+    layout.label(IFACE_("Loading\xe2\x80\xa6"), ICON_NONE);
+    return;
+  }
+
+  printf("[ImageGrid] catalog_selector_draw: library OK at %p, building tree view\n",
+         (const void *)library);
+
+  ui::Block *block = layout.block();
+  ui::AbstractTreeView *tree_view = ui::block_add_view(
+      *block,
+      "image_grid_catalog_selector",
+      std::make_unique<ImageGridCatalogSelectorTree>(*C, state, *library));
+  ui::TreeViewBuilder::build_tree_view(*C, *tree_view, layout);
+}
+
+void image_grid_catalog_selector_panel_register()
+{
+  if (WM_paneltype_find("VIEW3D_PT_image_grid_catalog_selector", true)) {
+    return;
+  }
+
+  PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
+  STRNCPY_UTF8(pt->idname, "VIEW3D_PT_image_grid_catalog_selector");
+  STRNCPY_UTF8(pt->label, N_("Catalog Selector"));
+  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  pt->description = N_("Select the asset library and catalog to display in the image grid");
+  pt->draw = image_grid_catalog_selector_draw;
+  pt->listener = ed::asset::list::asset_reading_region_listen_fn;
+  WM_paneltype_add(pt);
 }
 
 /** \} */

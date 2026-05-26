@@ -264,6 +264,8 @@ void view3d_operatortypes()
   WM_operatortype_append(VIEW3D_OT_image_grid_browse_assets);
   WM_operatortype_append(VIEW3D_OT_image_grid_scroll);
 
+  image_grid_catalog_selector_panel_register();
+
   ed::transform::transform_operatortypes();
 }
 

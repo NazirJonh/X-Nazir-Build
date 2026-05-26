@@ -1494,6 +1494,9 @@ void image_grid_state_reset_catalog(ImageGridUIState &state);
 void image_grid_state_remove(const View3D &v3d);
 void image_grid_notify_change(bContext &C);
 
+/** Return the short display name for an asset library reference (used in image grid UI). */
+const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref);
+
 int image_grid_effective_rows(const View3D &v3d);
 int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d);
 void image_grid_clamp_scroll_row(ImageGridUIState &state, const View3D &v3d);

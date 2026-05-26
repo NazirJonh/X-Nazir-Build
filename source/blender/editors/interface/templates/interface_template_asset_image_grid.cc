@@ -32,14 +32,12 @@
 #include "BKE_texture.h"
 #include "BKE_global.hh"
 #include "BKE_idtype.hh"
-#include "BKE_preferences.h"
 #include "BKE_screen.hh"
 
 #include "BLI_set.hh"
 #include "BLT_translation.hh"
 
 #include "ED_asset.hh"
-#include "ED_asset_filter.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_render.hh"
@@ -64,11 +62,8 @@
 
 namespace blender::ui {
 
-constexpr int MAX_CATALOG_PILLS = 8;
 /** Safety cap for N-panel performance; not the old MVP `rows * cols` display limit. */
 constexpr int IMAGE_GRID_MAX_ITEMS = 128;
-/** Catalog pill row hidden below this many widget units (see #UI_UNIT_X). */
-constexpr int IMAGE_GRID_CATALOG_PILLS_MIN_WIDTH_UNITS = 9;
 
 /* -------------------------------------------------------------------- */
 /** \name Helpers
@@ -103,29 +98,6 @@ static bool image_grid_is_assignable_texture(const Image &image)
   return true;
 }
 
-static const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref)
-{
-  switch (lib_ref.type) {
-    case ASSET_LIBRARY_ALL:
-      return IFACE_("All Libraries");
-    case ASSET_LIBRARY_LOCAL:
-      return IFACE_("Current File");
-    case ASSET_LIBRARY_ESSENTIALS:
-      return IFACE_("Essentials");
-    case ASSET_LIBRARY_ONLINE_ESSENTIALS:
-      return IFACE_("Online Essentials");
-    case ASSET_LIBRARY_CUSTOM: {
-      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
-          &U, lib_ref.custom_library_index);
-      if (user_library && user_library->name[0]) {
-        return user_library->name;
-      }
-      return IFACE_("Asset Library");
-    }
-    default:
-      return IFACE_("Asset Library");
-  }
-}
 
 static void image_grid_block_listener(const wmRegionListenerParams *params)
 {
@@ -554,65 +526,19 @@ static void add_browse_more_button(Layout &layout,
 
 static void draw_header_row(Layout &layout,
                             ed::view3d::ImageGridUIState &state,
-                            const bContext & /*C*/)
+                            const bContext &C)
 {
-  Layout &row = layout.row(false);
+  Layout &row = layout.row(true);
+  /* Library selector: opens enum search to change the active library. */
   row.op("VIEW3D_OT_image_grid_set_library",
-         image_grid_library_ui_name(state.lib_ref),
+         ed::view3d::image_grid_library_ui_name(state.lib_ref),
          ICON_ASSET_MANAGER,
          wm::OpCallContext::InvokeDefault,
          UI_ITEM_NONE);
+  /* Catalog selector: opens a popover with library selector + catalog tree. */
+  row.popover(&C, "VIEW3D_PT_image_grid_catalog_selector", std::nullopt, ICON_COLLAPSEMENU);
 }
 
-static void draw_catalog_pills(Layout &layout,
-                               ed::view3d::ImageGridUIState &state,
-                               const bContext &C)
-{
-  if (layout.width() > 0 && layout.width() < UI_UNIT_X * IMAGE_GRID_CATALOG_PILLS_MIN_WIDTH_UNITS) {
-    return;
-  }
-
-  Layout &row = layout.row(true);
-
-  auto add_pill = [&](const StringRef label, const StringRefNull path, const bool is_active) {
-    PointerRNA op_ptr = row.op("VIEW3D_OT_image_grid_set_catalog",
-                               label,
-                               ICON_NONE,
-                               wm::OpCallContext::ExecDefault,
-                               is_active ? ITEM_O_DEPRESS : UI_ITEM_NONE);
-    RNA_string_set(&op_ptr, "catalog_path", path.c_str());
-  };
-
-  add_pill(IFACE_("All"), "", state.active_catalog_path.empty());
-
-  ed::asset::list::storage_fetch(&state.lib_ref, &C);
-  const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
-      state.lib_ref);
-  if (!library) {
-    return;
-  }
-
-  const asset_system::AssetCatalogTree catalog_tree = ed::asset::build_filtered_catalog_tree(
-      *library,
-      state.lib_ref,
-      [](const asset_system::AssetRepresentation &asset) {
-        return asset.get_id_type() == ID_IM;
-      });
-
-  if (catalog_tree.is_empty()) {
-    return;
-  }
-
-  int pill_count = 0;
-  catalog_tree.foreach_item([&](const asset_system::AssetCatalogTreeItem &item) {
-    if (pill_count >= MAX_CATALOG_PILLS) {
-      return;
-    }
-    const std::string path = item.catalog_path().str();
-    add_pill(item.get_name(), path, state.active_catalog_path == path);
-    pill_count++;
-  });
-}
 
 static void build_image_grid(Layout &layout,
                              const bContext &C,
@@ -794,7 +720,6 @@ void template_asset_image_grid(Layout *layout,
   block_add_dynamic_listener(block, image_grid_block_listener);
 
   draw_header_row(*layout, state, *C);
-  draw_catalog_pills(*layout, state, *C);
   build_image_grid(*layout, *C, state, *ptr, prop);
   add_browse_more_button(*layout, *C, state.lib_ref);
 }

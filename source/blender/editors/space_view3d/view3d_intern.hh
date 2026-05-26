@@ -247,4 +247,7 @@ void VIEW3D_OT_image_grid_mark_asset(wmOperatorType *ot);
 void VIEW3D_OT_image_grid_browse_assets(wmOperatorType *ot);
 void VIEW3D_OT_image_grid_scroll(wmOperatorType *ot);
 
+/** Register the global popover panel for the image-grid catalog selector. */
+void image_grid_catalog_selector_panel_register();
+
 }  // namespace blender

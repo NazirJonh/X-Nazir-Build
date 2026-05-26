@@ -718,6 +718,15 @@ static void rna_Brush_color_update(Main *bmain, Scene *scene, PointerRNA *ptr)
   BKE_brush_color_sync_legacy(br);
 }
 
+static void rna_Brush_face_set_color_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  /* Reset the cached sample ID so that the next stroke uses a color→ID lookup
+   * rather than the stale sampled ID from a previous Ctrl+LMB sample. */
+  Brush *br = static_cast<Brush *>(ptr->data);
+  br->face_set_sample_id = -1;
+  rna_Brush_color_update(bmain, scene, ptr);
+}
+
 static void rna_Brush_material_update(bContext * /*C*/, PointerRNA *ptr)
 {
   Brush *br = static_cast<Brush *>(ptr->data);
@@ -4024,6 +4033,59 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "MeshAutomaskingSettings");
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Mesh Automasking Settings", nullptr);
+
+  /* Face Sets (Draw Face Sets brush). */
+  static const EnumPropertyItem face_set_draw_mode_items[] = {
+      {SCULPT_FACE_SET_DRAW_MODE_COLOR,
+       "CUSTOM",
+       0,
+       "Custom",
+       "Use a specific Face Set identified by a chosen color"},
+      {SCULPT_FACE_SET_DRAW_MODE_RANDOM,
+       "RANDOM",
+       0,
+       "Random",
+       "Create a new Face Set ID on each stroke"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "face_set_draw_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "face_set_draw_mode");
+  RNA_def_property_enum_items(prop, face_set_draw_mode_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Face Set Color Mode",
+      "How the Face Set ID is determined when using the Draw Face Sets brush");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "face_set_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "face_set_color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop,
+      "Face Set Color",
+      "Color used to find or create a Face Set when using the Draw Face Sets brush");
+  /* Use the dedicated callback to also reset the cached sample ID when the color is changed
+   * manually, preventing the stale sampled ID from overriding the new color. */
+  RNA_def_property_update(prop, 0, "rna_Brush_face_set_color_update");
+
+  prop = RNA_def_property(srna, "face_set_secondary_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "face_set_secondary_color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Secondary Face Set Color", "Secondary color, swapped with the primary via the X key");
+  RNA_def_property_update(prop, 0, "rna_Brush_color_update");
+
+  prop = RNA_def_property(srna, "face_set_sample_id", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "face_set_sample_id");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Face Set Sample ID",
+      "Face Set ID last sampled via Ctrl+LMB; used by the Draw Face Sets brush "
+      "to paint the exact sampled face set without a color lookup (-1 if unset)");
 }
 
 /**

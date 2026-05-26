@@ -423,7 +423,7 @@ template<typename T> constexpr bool value_is_zero(const T &value)
 
 #define INIT_DEFAULT_STRUCT_AFTER(struct_dst, member) \
   { \
-    const typename std::remove_reference<decltype(*(struct_dst))>::type struct_src; \
+    const typename std::remove_reference<decltype(*(struct_dst))>::type struct_src{}; \
     BLI_assert(MEMCMP_STRUCT_AFTER_IS_ZERO_OR_EQUAL(struct_dst, &struct_src, member)); \
     MEMCPY_STRUCT_AFTER(struct_dst, &struct_src, member); \
   }

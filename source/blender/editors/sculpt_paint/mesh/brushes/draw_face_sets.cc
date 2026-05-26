@@ -7,9 +7,11 @@
 #include "editors/sculpt_paint/mesh/sculpt_automask.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_scene_types.h"
 
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
 
@@ -24,6 +26,11 @@
 #include "editors/sculpt_paint/mesh/sculpt_undo.hh"
 
 #include "ED_sculpt.hh"
+
+#include "DEG_depsgraph.hh"
+
+#include "WM_api.hh"
+#include "WM_types.hh"
 
 #include "bmesh.hh"
 
@@ -327,25 +334,87 @@ static void do_draw_face_sets_brush_bmesh(const Depsgraph &depsgraph,
 
 }  // namespace draw_face_sets_cc
 
+/**
+ * Sample the Face Set under the cursor and update the brush's active color and ID.
+ * Called from the invert (Ctrl+LMB) branch; does not paint anything.
+ */
+static void sample_face_set_color(const Object &object, Brush &brush)
+{
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  if (!mesh.attributes().contains(".sculpt_face_set")) {
+    return;
+  }
+
+  const int sampled_id = face_set::active_face_set_get(object);
+
+  /* BKE_paint_face_set_overlay_color_get handles all IDs including 0 (returns grey).
+   * Convert to float for storage in the brush color field. */
+  uchar sampled_color_ub[4];
+  BKE_paint_face_set_overlay_color_get(
+      sampled_id, mesh.face_sets_color_seed, sampled_color_ub, &mesh);
+  float sampled_color_fl[3];
+  sampled_color_fl[0] = sampled_color_ub[0] / 255.0f;
+  sampled_color_fl[1] = sampled_color_ub[1] / 255.0f;
+  sampled_color_fl[2] = sampled_color_ub[2] / 255.0f;
+
+  copy_v3_v3(brush.face_set_color, sampled_color_fl);
+  brush.face_set_sample_id = sampled_id;
+
+  /* Switch to Custom mode so the sampled ID is used on the next stroke. */
+  brush.face_set_draw_mode = SCULPT_FACE_SET_DRAW_MODE_COLOR;
+
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, &brush);
+}
+
+/**
+ * Determine the face set ID to paint with and write it into the stroke cache.
+ * For Custom mode, prefers the previously sampled `face_set_sample_id` (set via Ctrl+LMB)
+ * over the lossy color→ID reverse lookup, so painting with a sampled face set is exact.
+ */
+static void resolve_paint_face_set(StrokeCache &cache, Object &object, Brush &brush)
+{
+  if (brush.face_set_draw_mode == SCULPT_FACE_SET_DRAW_MODE_COLOR) {
+    if (brush.face_set_sample_id > 0) {
+      /* Sampled ID is available — use it directly to avoid the lossy color→ID lookup. */
+      cache.paint_face_set = brush.face_set_sample_id;
+    }
+    else {
+      Mesh *mesh = id_cast<Mesh *>(object.data);
+      const int found_id = BKE_paint_face_set_find_by_custom_color(mesh, brush.face_set_color);
+      if (found_id > 0) {
+        cache.paint_face_set = found_id;
+      }
+      else {
+        /* No face set matches this color yet — create one and record the custom color. */
+        const int new_id = face_set::find_next_available_id(object);
+        BKE_paint_face_set_custom_color_set(mesh, new_id, brush.face_set_color);
+        cache.paint_face_set = new_id;
+        DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY);
+      }
+    }
+  }
+  else {
+    /* Random mode: create a new Face Set ID for each stroke. */
+    cache.paint_face_set = face_set::find_next_available_id(object);
+  }
+}
+
 void do_draw_face_sets_brush(const Depsgraph &depsgraph,
-                             const Sculpt &sd,
+                             Sculpt &sd,
                              Object &object,
                              const IndexMask &node_mask)
 {
   PRF_scope(ProfileCategory::Editor);
-  const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
+  Brush &brush = *BKE_paint_brush(&sd.paint);
+  StrokeCache &cache = *object.runtime->sculpt_session->cache;
 
-  if (object.runtime->sculpt_session->cache->paint_face_set == face_set_none_id) {
-    if (object.runtime->sculpt_session->cache->toggle_settings.invert) {
-      /* When inverting the brush, pick the paint face mask ID from the mesh. */
-      object.runtime->sculpt_session->cache->paint_face_set = face_set::active_face_set_get(
-          object);
+  if (cache.paint_face_set == face_set_none_id) {
+    if (cache.toggle_settings.invert) {
+      /* Ctrl+LMB: sample the Face Set color under the cursor, then return without painting. */
+      sample_face_set_color(object, brush);
+      return;
     }
-    else {
-      /* By default, create a new Face Sets. */
-      object.runtime->sculpt_session->cache->paint_face_set = face_set::find_next_available_id(
-          object);
-    }
+    resolve_paint_face_set(cache, object, brush);
   }
 
   switch (bke::object::pbvh_get(object)->type()) {

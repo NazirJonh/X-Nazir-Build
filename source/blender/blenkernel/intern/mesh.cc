@@ -101,6 +101,8 @@ static void mesh_init_data(ID *id)
   mesh->runtime = new bke::MeshRuntime();
 
   mesh->face_sets_color_seed = BLI_hash_int(BLI_time_now_seconds_i() & UINT_MAX);
+  mesh->face_set_colors = nullptr;
+  mesh->face_set_colors_num = 0;
 }
 
 static void mesh_copy_data(Main *bmain,
@@ -210,6 +212,9 @@ static void mesh_copy_data(Main *bmain,
   mesh_dst->clone_uv_map_attribute = static_cast<char *>(
       MEM_dupalloc(mesh_src->clone_uv_map_attribute));
 
+  mesh_dst->face_set_colors = static_cast<FaceSetColor *>(MEM_dupalloc(mesh_src->face_set_colors));
+  mesh_dst->face_set_colors_num = mesh_src->face_set_colors_num;
+
   CustomData_init_from(
       &mesh_src->vert_data, &mesh_dst->vert_data, mask.vmask, mesh_dst->verts_num);
   CustomData_init_from(
@@ -265,6 +270,8 @@ static void mesh_free_data(ID *id)
   MEM_SAFE_DELETE(mesh->default_uv_map_attribute);
   MEM_SAFE_DELETE(mesh->stencil_uv_map_attribute);
   MEM_SAFE_DELETE(mesh->clone_uv_map_attribute);
+  MEM_SAFE_DELETE(mesh->face_set_colors);
+  mesh->face_set_colors_num = 0;
   mesh->attribute_storage.wrap().~AttributeStorage();
   if (mesh->face_offset_indices) {
     implicit_sharing::free_shared_data(&mesh->face_offset_indices,
@@ -401,6 +408,7 @@ static void mesh_blend_write(BlendWriter *writer, ID *id, const void *id_address
 
   writer->write_pointer_array(mesh->totcol, mesh->mat);
   writer->write_struct_array(mesh->totselect, mesh->mselect);
+  writer->write_struct_array(mesh->face_set_colors_num, mesh->face_set_colors);
 
   CustomData_blend_write(
       writer, &mesh->vert_data, vert_layers, mesh->verts_num, CD_MASK_MESH.vmask, &mesh->id);
@@ -449,6 +457,7 @@ static void mesh_blend_read_data(BlendDataReader *reader, ID *id)
   (void)BLO_read_array(reader, &mesh->mcol, mesh->totface_legacy);
 
   BLO_read_array_and_validate_size(reader, &mesh->mselect, &mesh->totselect);
+  BLO_read_array_and_validate_size(reader, &mesh->face_set_colors, &mesh->face_set_colors_num);
 
   BLO_read_struct_list(reader, bDeformGroup, &mesh->vertex_group_names);
 

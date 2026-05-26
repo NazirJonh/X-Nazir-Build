@@ -299,7 +299,27 @@ bool paint_is_bmesh_face_hidden(const BMFace *f);
 
 float paint_grid_paint_mask(const GridPaintMask *gpm, uint level, uint x, uint y);
 
-void BKE_paint_face_set_overlay_color_get(int face_set, int seed, uchar r_color[4]);
+/**
+ * Returns the overlay color for a Face Set.
+ * Checks custom colors on `mesh` first; falls back to a deterministic random color.
+ * Pass `mesh = nullptr` to always get the random color.
+ */
+void BKE_paint_face_set_overlay_color_get(int face_set,
+                                          int seed,
+                                          uchar r_color[4],
+                                          const Mesh *mesh);
+
+/* Face Set Custom Colors */
+void BKE_paint_face_set_custom_color_set(Mesh *mesh, int face_set_id, const float color[3]);
+void BKE_paint_face_set_custom_color_get(const Mesh *mesh, int face_set_id, float r_color[3]);
+bool BKE_paint_face_set_custom_color_exists(const Mesh *mesh, int face_set_id);
+void BKE_paint_face_set_custom_color_remove(Mesh *mesh, int face_set_id);
+void BKE_paint_face_set_custom_colors_clear(Mesh *mesh);
+/**
+ * Find the Face Set ID whose custom color matches \a color within a tolerance of 1/255 per
+ * channel. Returns 0 if no match is found.
+ */
+int BKE_paint_face_set_find_by_custom_color(const Mesh *mesh, const float color[3]);
 
 /* Stroke related. */
 

@@ -449,6 +449,17 @@ struct Brush {
 
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve = nullptr;
   struct MeshAutomaskingSettings *mesh_automasking_settings = nullptr;
+
+  /** Draw Face Sets color assignment mode (#eSculptFaceSetDrawMode). */
+  int face_set_draw_mode = 0;
+  /** Last sampled Face Set ID via Ctrl+LMB; -1 if unset. */
+  int face_set_sample_id = -1;
+  /** Primary color used to identify or create a Face Set when draw mode is Custom (linear RGB). */
+  float face_set_color[3] = {1.0f, 0.5f, 0.2f};
+  char _pad_fsc[4] = {};
+  /** Secondary color, swapped with the primary via the X key (linear RGB). */
+  float face_set_secondary_color[3] = {0.2f, 0.5f, 1.0f};
+  char _pad_fssc[4] = {};
 };
 
 struct PaletteColor {

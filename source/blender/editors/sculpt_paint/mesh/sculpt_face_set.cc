@@ -29,6 +29,7 @@
 
 #include "BLT_translation.hh"
 
+#include "DNA_brush_types.h"
 #include "DNA_customdata_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -1219,6 +1220,161 @@ void SCULPT_OT_face_sets_randomize_colors(wmOperatorType *ot)
   ot->poll = sculpt_mode_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus clear_all_custom_colors_exec(bContext *C, wmOperator *op)
+{
+  Scene &scene = *CTX_data_scene(C);
+  Object &ob = *CTX_data_active_object(C);
+
+  const View3D *v3d = CTX_wm_view3d(C);
+  const Base *base = CTX_data_active_base(C);
+  if (!BKE_base_is_visible(v3d, base)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+
+  /* Dyntopo not supported. */
+  if (pbvh.type() == bke::pbvh::Type::BMesh) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Mesh *mesh = id_cast<Mesh *>(ob.data);
+  bke::MutableAttributeAccessor attributes = mesh->attributes_for_write();
+
+  if (!attributes.contains(".sculpt_face_set")) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* TODO: custom color data (#face_set_colors) and #face_sets_color_default are not captured
+   * by the PBVH-based sculpt undo system. Undoing this operator restores face set IDs but
+   * leaves the color table cleared. A proper fix requires a dedicated sculpt undo node type
+   * that snapshots the full color table, or an ID-level undo fallback. */
+
+  /* Clear custom colors and reset the default color before entering the undo block.
+   * These fields are not covered by sculpt undo, so their modification is intentionally
+   * outside push_begin/push_end rather than creating a misleading partial undo. */
+  BKE_paint_face_set_custom_colors_clear(mesh);
+  mesh->face_sets_color_default = 1;
+
+  undo::push_begin(scene, ob, op);
+
+  /* Assign default Face Set ID to all faces. */
+  bke::SpanAttributeWriter<int> face_sets = attributes.lookup_or_add_for_write_span<int>(
+      ".sculpt_face_set", bke::AttrDomain::Face);
+  face_sets.span.fill(face_set_none_id);
+  face_sets.finish();
+
+  undo::push_end(ob);
+
+  DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY);
+
+  IndexMaskMemory memory;
+  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  pbvh.tag_face_sets_changed(node_mask);
+
+  tag_update_overlays(C);
+  WM_event_add_notifier(C, NC_GEOM | ND_DATA, mesh);
+
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_face_set_clear_all_custom_colors(wmOperatorType *ot)
+{
+  ot->name = "Clear All Colors";
+  ot->idname = "SCULPT_OT_face_set_clear_all_custom_colors";
+  ot->description =
+      "Clear all Face Sets and custom colors from the mesh, "
+      "assigning the default ID to all faces";
+
+  ot->exec = clear_all_custom_colors_exec;
+  ot->poll = sculpt_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static bool face_set_colors_flip_poll(bContext *C)
+{
+  if (!sculpt_mode_poll(C)) {
+    return false;
+  }
+  /* Only available while the Draw Face Sets brush is active, so the X shortcut does not
+   * conflict with the regular brush color flip. */
+  const Scene *scene = CTX_data_scene(C);
+  const Sculpt *sd = scene->toolsettings->sculpt;
+  if (!sd) {
+    return false;
+  }
+  const Brush *brush = BKE_paint_brush_for_read(&sd->paint);
+  return brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS;
+}
+
+static wmOperatorStatus face_set_colors_flip_exec(bContext *C, wmOperator * /*op*/)
+{
+  Scene *scene = CTX_data_scene(C);
+  Sculpt *sd = scene->toolsettings->sculpt;
+  Brush *brush = BKE_paint_brush(&sd->paint);
+  if (!brush) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Swap the primary and secondary Face Set colors. */
+  float tmp[3];
+  copy_v3_v3(tmp, brush->face_set_color);
+  copy_v3_v3(brush->face_set_color, brush->face_set_secondary_color);
+  copy_v3_v3(brush->face_set_secondary_color, tmp);
+
+  /* The primary color has changed; the cached sample ID no longer corresponds to it. */
+  brush->face_set_sample_id = -1;
+
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_face_set_colors_flip(wmOperatorType *ot)
+{
+  ot->name = "Flip Face Set Colors";
+  ot->idname = "SCULPT_OT_face_set_colors_flip";
+  ot->description = "Swap the primary and secondary Face Set colors";
+
+  ot->exec = face_set_colors_flip_exec;
+  ot->poll = face_set_colors_flip_poll;
+
+  /* Only modifies brush properties, not scene data — no undo entry needed. */
+  ot->flag = OPTYPE_REGISTER;
+}
+
+static wmOperatorStatus face_set_draw_mode_toggle_exec(bContext *C, wmOperator * /*op*/)
+{
+  Scene *scene = CTX_data_scene(C);
+  Sculpt *sd = scene->toolsettings->sculpt;
+  Brush *brush = BKE_paint_brush(&sd->paint);
+  if (!brush) {
+    return OPERATOR_CANCELLED;
+  }
+
+  brush->face_set_draw_mode = (brush->face_set_draw_mode == SCULPT_FACE_SET_DRAW_MODE_COLOR) ?
+                                  SCULPT_FACE_SET_DRAW_MODE_RANDOM :
+                                  SCULPT_FACE_SET_DRAW_MODE_COLOR;
+
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_face_set_draw_mode_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Face Set Color Mode";
+  ot->idname = "SCULPT_OT_face_set_draw_mode_toggle";
+  ot->description = "Toggle between Custom and Random Face Set color modes";
+
+  ot->exec = face_set_draw_mode_toggle_exec;
+  ot->poll = face_set_colors_flip_poll;
+
+  /* Only modifies brush properties, not scene data — no undo entry needed. */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 enum class EditMode {

@@ -33,6 +33,7 @@
 #include "BLI_span.hh"
 #include "BLI_task.h"
 #include "BLI_task.hh"
+#include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
 #include "DNA_brush_types.h"
@@ -67,6 +68,9 @@
 #include "BKE_subdiv_ccg.hh"
 
 #include "BLT_translation.hh"
+
+#include "UI_interface.hh"
+#include "UI_interface_types.hh"
 
 #include "NOD_texture.h"
 
@@ -6018,8 +6022,19 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     brush = BKE_paint_brush(&sd.paint);
   }
 
+  /* Restore cursor if it was changed to eyedropper during Face Sets color sampling. */
+  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
+    wmWindow *win = CTX_wm_window(this->evil_C);
+    if (win) {
+      WM_cursor_modal_restore(win);
+    }
+  }
+
   MEM_delete(ss.cache);
   ss.cache = nullptr;
+
+  /* Clear status bar message set during stroke. */
+  ED_workspace_status_text(this->evil_C, nullptr);
 
   if (!is_cancel && stroke_started) {
     stroke_undo_end(*paint_mode_settings_, *this->object, brush);
@@ -6114,6 +6129,16 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   }
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
     face_set_overlay_check(*C, *op);
+
+    WorkspaceStatus status(C);
+    if (BrushStrokeMode(RNA_enum_get(op->ptr, "mode")) == BrushStrokeMode::Invert) {
+      status.item(IFACE_("Sample Color"), ICON_MOUSE_LMB);
+      status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
+    }
+    else {
+      status.item(IFACE_("Draw Face Set"), ICON_MOUSE_LMB);
+      status.item(IFACE_("Sample Color"), ICON_EVENT_CTRL, ICON_MOUSE_LMB);
+    }
   }
 
   op->customdata = stroke;
@@ -6143,6 +6168,21 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     }
     return retval;
   }
+
+  /* Draw Face Sets: after a sampling stroke (Ctrl+LMB), finish immediately.
+   * The modal handler must not be added so mouse drag cannot accidentally paint. */
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      BrushStrokeMode(RNA_enum_get(op->ptr, "mode")) == BrushStrokeMode::Invert)
+  {
+    SculptPaintStroke *s = static_cast<SculptPaintStroke *>(op->customdata);
+    if (s) {
+      s->finish(C);
+      MEM_delete(s);
+      op->customdata = nullptr;
+    }
+    return OPERATOR_FINISHED;
+  }
+
   /* Add modal handler. */
   WM_event_add_modal_handler(C, op);
 

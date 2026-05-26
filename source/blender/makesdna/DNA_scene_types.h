@@ -1522,6 +1522,12 @@ struct Sculpt {
   struct Object *gravity_object = nullptr;
 };
 
+/** #Sculpt.face_set_draw_mode */
+enum eSculptFaceSetDrawMode {
+  SCULPT_FACE_SET_DRAW_MODE_RANDOM = 0,
+  SCULPT_FACE_SET_DRAW_MODE_COLOR = 1,
+};
+
 struct CurvesSculpt {
   Paint paint;
 };

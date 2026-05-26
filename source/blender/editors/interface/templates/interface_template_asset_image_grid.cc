@@ -21,7 +21,10 @@
 
 #include "BLI_math_base.h"
 
+#include "IMB_imbuf.hh"
+
 #include "BKE_context.hh"
+#include "BKE_image.hh"
 #include "BKE_icons.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
@@ -199,6 +202,8 @@ class ImageAssetGridItem : public PreviewGridItem {
   mutable PointerRNA target_ptr_;
   PropertyRNA *target_prop_ = nullptr;
   AssetLibraryReference library_ref_;
+  /** Preview icon for on-disk image assets without a local ID (not in #G_MAIN). */
+  mutable int external_preview_icon_id_ = 0;
 
  public:
   ImageAssetGridItem(asset_system::AssetRepresentation &asset,
@@ -229,17 +234,33 @@ class ImageAssetGridItem : public PreviewGridItem {
     this->init_item_callbacks();
   }
 
+  ~ImageAssetGridItem() override
+  {
+    if (external_preview_icon_id_) {
+      BKE_icon_delete(external_preview_icon_id_);
+      external_preview_icon_id_ = 0;
+    }
+  }
+
   void init_item_callbacks()
   {
     this->hide_label();
     this->always_reactivate_on_click();
     this->set_on_activate_fn([this](bContext &C, PreviewGridItem & /*item*/) {
-      ID *image_id = this->get_id();
-      if (!image_id || GS(image_id->name) != ID_IM) {
+      Image *image = nullptr;
+      if (kind_ == ImageGridItemKind::BlendImage) {
+        image = image_;
+      }
+      else if (ID *local_id = asset_->local_id()) {
+        image = id_cast<Image *>(local_id);
+      }
+      else {
+        image = BKE_image_load(CTX_data_main(&C), asset_->full_path().c_str());
+      }
+      if (!image || GS(image->id.name) != ID_IM) {
         return;
       }
 
-      Image *image = reinterpret_cast<Image *>(image_id);
       Main *bmain = CTX_data_main(&C);
       Tex *tex = brush_texture_for_image(*bmain, *image, target_ptr_.owner_id);
 
@@ -248,6 +269,21 @@ class ImageAssetGridItem : public PreviewGridItem {
       RNA_property_update(&C, &target_ptr_, target_prop_);
     });
     this->set_is_active_fn([this]() { return this->is_active_texture(); });
+  }
+
+  int ensure_external_preview_icon_id() const
+  {
+    if (external_preview_icon_id_) {
+      return external_preview_icon_id_;
+    }
+    ImBuf *ibuf = IMB_load_image_from_filepath(
+        asset_->full_path().c_str(), ImBufFlags::ByteData, nullptr);
+    if (!ibuf) {
+      return 0;
+    }
+    external_preview_icon_id_ = BKE_icon_imbuf_create(ibuf);
+    IMB_freeImBuf(ibuf);
+    return external_preview_icon_id_;
   }
 
   ID *get_id() const
@@ -317,6 +353,10 @@ class ImageAssetGridItem : public PreviewGridItem {
 
       if (ID *local_id = asset_->local_id()) {
         return preview_icon_id_for_id(C, *local_id);
+      }
+      const int external_icon = this->ensure_external_preview_icon_id();
+      if (external_icon) {
+        return external_icon;
       }
       return asset_icon;
     }
@@ -478,7 +518,7 @@ class ImageAssetGridView : public AbstractGridView {
           continue;
         }
 
-        Image *image = reinterpret_cast<Image *>(id);
+        Image *image = id_cast<Image *>(id);
         if (!image_grid_is_assignable_texture(*image)) {
           continue;
         }

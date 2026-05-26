@@ -150,6 +150,13 @@ void filelist_readjob_main_assets_add_items(FileListReadJob *job_params,
 
 void filelist_readjob_load_asset_library_data(FileListReadJob *job_params, bool *do_update);
 
+void filelist_readjob_ensure_image_library_indexed(FileListReadJob *job_params);
+
+void filelist_readjob_image_files_add_items(FileListReadJob *job_params,
+                                            const bool *stop,
+                                            bool *do_update,
+                                            float *progress);
+
 void remote_asset_library_request(FileListReadJob *job_params,
                                   const asset_system::RemoteLibraryDefinitionRef &library);
 void remote_asset_library_load(FileListReadJob *job_params,

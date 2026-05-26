@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 set(INC
+  ../asset
   ../include
   ../../makesrna
 
@@ -21,6 +22,7 @@ set(SRC
 )
 
 set(LIB
+  bf_editor_asset
   PRIVATE bf::asset_system
   PRIVATE bf::blenkernel
   PRIVATE bf::blenlib

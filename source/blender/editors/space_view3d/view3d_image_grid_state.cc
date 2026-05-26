@@ -38,7 +38,7 @@ ImageGridUIState &image_grid_state_get_from_context(const bContext &C)
 
 void image_grid_state_reset_catalog(ImageGridUIState &state)
 {
-  state.active_catalog_path.clear();
+  state.enabled_catalog_paths.clear();
 }
 
 void image_grid_state_remove(const View3D &v3d)

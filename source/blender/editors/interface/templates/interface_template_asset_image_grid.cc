@@ -35,6 +35,7 @@
 #include "BKE_screen.hh"
 
 #include "BLI_set.hh"
+#include "BLI_vector.hh"
 #include "BLT_translation.hh"
 
 #include "ED_asset.hh"
@@ -84,6 +85,25 @@ static std::optional<asset_system::AssetCatalogFilter> catalog_filter_from_path(
   }
 
   return library.catalog_service().create_catalog_filter(active_catalog->catalog_id);
+}
+
+static blender::Vector<asset_system::AssetCatalogFilter> catalog_filters_from_enabled_paths(
+    const asset_system::AssetLibrary &library,
+    const blender::Set<std::string> &enabled_paths)
+{
+  blender::Vector<asset_system::AssetCatalogFilter> filters;
+  if (enabled_paths.is_empty()) {
+    return filters;
+  }
+  filters.reserve(enabled_paths.size());
+  for (const std::string &path : enabled_paths) {
+    if (std::optional<asset_system::AssetCatalogFilter> filter = catalog_filter_from_path(
+            library, path.c_str()))
+    {
+      filters.append(*filter);
+    }
+  }
+  return filters;
 }
 
 /** Textures assignable from the grid (exclude render result, viewer, generated). */
@@ -413,19 +433,23 @@ class ImageAssetGridItem : public PreviewGridItem {
 class ImageAssetGridView : public AbstractGridView {
   const bContext &context_;
   AssetLibraryReference library_ref_;
-  std::optional<asset_system::AssetCatalogFilter> catalog_filter_;
+  /** When true, only assets matching at least one entry in #catalog_filters_ are shown. */
+  bool catalog_filtering_enabled_ = false;
+  blender::Vector<asset_system::AssetCatalogFilter> catalog_filters_;
   PointerRNA target_ptr_;
   PropertyRNA *target_prop_ = nullptr;
 
  public:
   ImageAssetGridView(const bContext &context,
                      const AssetLibraryReference &library_ref,
-                     std::optional<asset_system::AssetCatalogFilter> catalog_filter,
+                     const bool catalog_filtering_enabled,
+                     blender::Vector<asset_system::AssetCatalogFilter> catalog_filters,
                      const PointerRNA &target_ptr,
                      PropertyRNA *target_prop)
       : context_(context),
         library_ref_(library_ref),
-        catalog_filter_(std::move(catalog_filter)),
+        catalog_filtering_enabled_(catalog_filtering_enabled),
+        catalog_filters_(std::move(catalog_filters)),
         target_ptr_(target_ptr),
         target_prop_(target_prop)
   {
@@ -445,8 +469,20 @@ class ImageAssetGridView : public AbstractGridView {
       if (asset.get_id_type() != ID_IM) {
         return true;
       }
-      if (catalog_filter_ && !catalog_filter_->contains(asset.get_metadata().catalog_id)) {
-        return true;
+      if (catalog_filtering_enabled_) {
+        if (catalog_filters_.is_empty()) {
+          return true;
+        }
+        bool in_any_filter = false;
+        for (const asset_system::AssetCatalogFilter &f : catalog_filters_) {
+          if (f.contains(asset.get_metadata().catalog_id)) {
+            in_any_filter = true;
+            break;
+          }
+        }
+        if (!in_any_filter) {
+          return true;
+        }
       }
 
       if (ID *id = asset.local_id()) {
@@ -554,18 +590,20 @@ static void build_image_grid(Layout &layout,
 
   ed::view3d::image_grid_clamp_scroll_row(state, *v3d);
 
-  const std::optional<asset_system::AssetCatalogFilter> cat_filter =
-      [&]() -> std::optional<asset_system::AssetCatalogFilter> {
-    const asset_system::AssetLibrary *library =
-        ed::asset::list::library_get_once_available(state.lib_ref);
-    if (!library) {
-      return std::nullopt;
-    }
-    return catalog_filter_from_path(*library, state.active_catalog_path);
-  }();
+  const bool catalog_filtering_enabled = !state.enabled_catalog_paths.is_empty();
+  blender::Vector<asset_system::AssetCatalogFilter> catalog_filters;
+  if (const asset_system::AssetLibrary *library =
+          ed::asset::list::library_get_once_available(state.lib_ref))
+  {
+    catalog_filters = catalog_filters_from_enabled_paths(*library, state.enabled_catalog_paths);
+  }
 
-  auto view_unique = std::make_unique<ImageAssetGridView>(
-      C, state.lib_ref, std::move(cat_filter), ptr, prop);
+  auto view_unique = std::make_unique<ImageAssetGridView>(C,
+                                                          state.lib_ref,
+                                                          catalog_filtering_enabled,
+                                                          std::move(catalog_filters),
+                                                          ptr,
+                                                          prop);
   view_unique->set_tile_size(3 * UI_UNIT_X, 3 * UI_UNIT_Y);
   AbstractGridView *grid_view = block_add_view(*block, "image_asset_grid", std::move(view_unique));
 

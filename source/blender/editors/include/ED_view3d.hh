@@ -11,6 +11,7 @@
 #include <string>
 
 #include "BLI_bounds_types.hh"
+#include "BLI_set.hh"
 #include "BLI_enum_flags.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
@@ -1475,7 +1476,11 @@ namespace ed::view3d {
  */
 struct ImageGridUIState {
   AssetLibraryReference lib_ref{};
-  std::string active_catalog_path;
+  /**
+   * Set of catalog paths currently enabled for display in the grid.
+   * An empty set means "show all" (no catalog filter).
+   */
+  blender::Set<std::string> enabled_catalog_paths;
 
   /** First visible row (0-based). Session-only; not DNA. */
   int scroll_row = 0;

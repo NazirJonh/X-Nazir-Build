@@ -6,8 +6,6 @@
  * \ingroup spview3d
  */
 
-#include <cstdio>
-
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
 
@@ -176,7 +174,17 @@ static wmOperatorStatus image_grid_set_catalog_exec(bContext *C, wmOperator *op)
   RNA_string_get(op->ptr, "catalog_path", path_buf);
 
   ImageGridUIState &state = image_grid_state_get(*v3d);
-  state.active_catalog_path = path_buf;
+  if (path_buf[0] == '\0') {
+    /* Empty path means "show all" — clear the filter set. */
+    state.enabled_catalog_paths.clear();
+  }
+  else {
+    /* Toggle the path in the enabled set. */
+    const std::string path(path_buf);
+    if (!state.enabled_catalog_paths.remove(path)) {
+      state.enabled_catalog_paths.add(path);
+    }
+  }
   state.scroll_row = 0;
 
   image_grid_notify_change(*C);
@@ -207,30 +215,15 @@ static const EnumPropertyItem *rna_image_grid_library_itemf(bContext * /*C*/,
                                                             PropertyRNA * /*prop*/,
                                                             bool *r_free)
 {
-  printf("[ImageGrid] rna_image_grid_library_itemf: building library enum...\n");
-
   const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
       /*include_readonly=*/true,
       /*include_current_file=*/true,
       /*include_remote_libraries=*/false,
       /*include_separate_online_essentials=*/false);
   if (!items) {
-    printf("[ImageGrid] rna_image_grid_library_itemf: items is NULL — no libraries found\n");
     *r_free = false;
     return nullptr;
   }
-
-  int count = 0;
-  for (const EnumPropertyItem *it = items; it->identifier != nullptr; it++) {
-    printf("[ImageGrid]   library[%d]: value=%d, identifier='%s', name='%s'\n",
-           count,
-           it->value,
-           it->identifier ? it->identifier : "(null)",
-           it->name ? it->name : "(null)");
-    count++;
-  }
-  printf("[ImageGrid] rna_image_grid_library_itemf: total libraries = %d\n", count);
-
   *r_free = true;
   return items;
 }
@@ -238,9 +231,7 @@ static const EnumPropertyItem *rna_image_grid_library_itemf(bContext * /*C*/,
 static wmOperatorStatus image_grid_set_library_exec(bContext *C, wmOperator *op)
 {
   View3D *v3d = CTX_wm_view3d(C);
-  printf("[ImageGrid] set_library_exec: v3d=%p\n", (void *)v3d);
   if (!v3d) {
-    printf("[ImageGrid] set_library_exec: CANCELLED — no v3d in context\n");
     return OPERATOR_CANCELLED;
   }
 
@@ -248,13 +239,9 @@ static wmOperatorStatus image_grid_set_library_exec(bContext *C, wmOperator *op)
   const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(
       enum_value);
 
-  printf("[ImageGrid] set_library_exec: switching to lib_ref.type=%d, custom_index=%d\n",
-         new_ref.type,
-         new_ref.custom_library_index);
-
   ImageGridUIState &state = image_grid_state_get(*v3d);
   state.lib_ref = new_ref;
-  state.active_catalog_path.clear();
+  state.enabled_catalog_paths.clear();
   state.scroll_row = 0;
 
   image_grid_notify_change(*C);
@@ -271,7 +258,7 @@ static wmOperatorStatus image_grid_set_library_invoke(bContext *C,
                  "asset_library_reference",
                  ed::asset::library_reference_to_enum_value(&state.lib_ref));
   }
-  return WM_enum_search_invoke(C, op, event);
+  return WM_menu_invoke(C, op, event);
 }
 
 void VIEW3D_OT_image_grid_set_library(wmOperatorType *ot)
@@ -325,12 +312,15 @@ static wmOperatorStatus image_grid_mark_asset_exec(bContext *C, wmOperator * /*o
   ed::asset::generate_preview(C, id);
 
   ImageGridUIState &state = image_grid_state_get_from_context(*C);
-  if (!state.active_catalog_path.empty()) {
+  if (!state.enabled_catalog_paths.is_empty()) {
     asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
         asset_system::current_file_library_reference());
     if (library) {
+      /* Assign the asset to the first enabled catalog path. If multiple catalogs are
+       * enabled, the first one encountered in set iteration is used. */
+      const std::string &path_str = *state.enabled_catalog_paths.begin();
       const asset_system::AssetCatalogPath cat_path =
-          asset_system::AssetCatalogPath::from_user_input(state.active_catalog_path.c_str());
+          asset_system::AssetCatalogPath::from_user_input(path_str.c_str());
       const asset_system::AssetCatalog &catalog = ed::asset::library_ensure_catalogs_in_path(
           *library, cat_path);
       BKE_asset_metadata_catalog_id_set(
@@ -508,7 +498,8 @@ void VIEW3D_OT_image_grid_scroll(wmOperatorType *ot)
 /** \name Catalog Selector Popover
  * \{ */
 
-/** Tree view listing catalogs of the current image-grid library for single-path selection. */
+/** Tree view listing catalogs of the current image-grid library. Individual catalogs can be
+ * enabled or disabled via checkboxes. An empty selection means "show all". */
 class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
   const bContext &C_;
   ed::view3d::ImageGridUIState &state_;
@@ -517,6 +508,7 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
   std::shared_ptr<const asset_system::AssetCatalogTree> catalog_tree_;
 
  public:
+  class AllItem;
   class Item;
 
   ImageGridCatalogSelectorTree(const bContext &C,
@@ -524,70 +516,145 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
                                 const asset_system::AssetLibrary &library)
       : C_(C), state_(state)
   {
-    printf("[ImageGrid] CatalogSelectorTree ctor: lib_ref.type=%d, custom_library_index=%d\n",
-           state.lib_ref.type,
-           state.lib_ref.custom_library_index);
-
     /* Use the full catalog tree of the library rather than a filtered tree built from
      * catalog IDs of loaded assets. The filtered approach shows nothing when assets have
      * no catalog assignment (nil UUID), which is the common case after a plain
      * "Mark as Asset" without assigning a catalog path. Showing ALL registered catalogs
      * lets the user navigate to any catalog regardless of current asset assignments. */
     catalog_tree_ = library.catalog_service().catalog_tree();
-
-    printf("[ImageGrid] CatalogSelectorTree ctor: catalog_tree_ valid=%s, is_empty=%s\n",
-           catalog_tree_ ? "true" : "false",
-           (!catalog_tree_ || catalog_tree_->is_empty()) ? "true" : "false");
   }
 
   void build_tree() override;
+
+  void update_enabled_catalogs_from_items(bContext &C);
 
   static Item &build_catalog_items_recursive(
       ui::TreeViewOrItem &parent,
       const asset_system::AssetCatalogTreeItem &catalog_item,
       ed::view3d::ImageGridUIState &state);
 
-  class Item : public ui::BasicTreeViewItem {
-    std::string catalog_path_;
+  /** Activatable item that clears the catalog filter (shows all assets). */
+  class AllItem : public ui::BasicTreeViewItem {
     ed::view3d::ImageGridUIState &state_;
 
    public:
-    Item(StringRef label, const std::string &catalog_path, ed::view3d::ImageGridUIState &state)
-        : ui::BasicTreeViewItem(label), catalog_path_(catalog_path), state_(state)
+    AllItem(ed::view3d::ImageGridUIState &state)
+        : ui::BasicTreeViewItem(IFACE_("All")), state_(state)
     {
       this->set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem & /*item*/) {
-        state_.active_catalog_path = catalog_path_;
+        state_.enabled_catalog_paths.clear();
         state_.scroll_row = 0;
         ed::view3d::image_grid_notify_change(C);
       });
       this->set_is_active_fn(
-          [this]() -> bool { return state_.active_catalog_path == catalog_path_; });
+          [this]() -> bool { return state_.enabled_catalog_paths.is_empty(); });
+    }
+  };
+
+  /** Checkbox item for an individual catalog path. */
+  class Item : public ui::BasicTreeViewItem {
+    const asset_system::AssetCatalogTreeItem &catalog_item_;
+    /* Is the catalog path enabled in this redraw? Set on construction, updated by the UI (which
+     * gets a pointer to it). The UI needs it as char. */
+    char catalog_path_enabled_ = false;
+
+   public:
+    Item(const asset_system::AssetCatalogTreeItem &catalog_item,
+         ed::view3d::ImageGridUIState &state)
+        : ui::BasicTreeViewItem(catalog_item.get_name()),
+          catalog_item_(catalog_item),
+          catalog_path_enabled_(
+              state.enabled_catalog_paths.contains(catalog_item.catalog_path().str()) ? 1 : 0)
+    {
+      disable_activatable();
+    }
+
+    bool is_catalog_path_enabled() const
+    {
+      return catalog_path_enabled_ != 0;
+    }
+
+    bool has_enabled_in_subtree()
+    {
+      bool has_enabled = false;
+      foreach_item_recursive(
+          [&has_enabled](const ui::AbstractTreeViewItem &abstract_item) {
+            const Item *item = dynamic_cast<const Item *>(&abstract_item);
+            if (item && item->is_catalog_path_enabled()) {
+              has_enabled = true;
+            }
+          },
+          IterOptions::SkipFiltered);
+      return has_enabled;
+    }
+
+    asset_system::AssetCatalogPath catalog_path() const
+    {
+      return catalog_item_.catalog_path();
+    }
+
+    void build_row(ui::Layout &row) override
+    {
+      ImageGridCatalogSelectorTree &tree =
+          dynamic_cast<ImageGridCatalogSelectorTree &>(get_tree_view());
+      ui::Block *block = row.block();
+
+      row.emboss_set(ui::EmbossType::Emboss);
+
+      ui::Layout &subrow = row.row(false);
+      subrow.active_set(catalog_path_enabled_);
+      subrow.label(catalog_item_.get_name(), ICON_NONE);
+      ui::block_layout_set_current(block, &row);
+
+      ui::Button *toggle_but = uiDefButV(block,
+                                         ui::ButtonType::Checkbox,
+                                         "",
+                                         0,
+                                         0,
+                                         UI_UNIT_X,
+                                         UI_UNIT_Y,
+                                         &catalog_path_enabled_,
+                                         0,
+                                         0,
+                                         TIP_("Toggle catalog visibility in the image grid"));
+      ui::button_func_set(toggle_but, [&tree](bContext &C) {
+        tree.update_enabled_catalogs_from_items(C);
+      });
+      if (!is_catalog_path_enabled() && has_enabled_in_subtree()) {
+        ui::button_drawflag_enable(toggle_but, ui::BUT_INDETERMINATE);
+      }
+      ui::button_flag_disable(toggle_but, ui::BUT_UNDO);
     }
   };
 };
 
+void ImageGridCatalogSelectorTree::update_enabled_catalogs_from_items(bContext &C)
+{
+  state_.enabled_catalog_paths.clear();
+  foreach_item([this](ui::AbstractTreeViewItem &view_item) {
+    const Item *item = dynamic_cast<const Item *>(&view_item);
+    if (item && item->is_catalog_path_enabled()) {
+      state_.enabled_catalog_paths.add(item->catalog_path().str());
+    }
+  });
+  state_.scroll_row = 0;
+  ed::view3d::image_grid_notify_change(C);
+}
+
 void ImageGridCatalogSelectorTree::build_tree()
 {
-  Item &all_item = add_tree_item<Item>(IFACE_("All"), "", state_);
+  AllItem &all_item = add_tree_item<AllItem>(state_);
   all_item.uncollapse_by_default();
 
   if (!catalog_tree_ || catalog_tree_->is_empty()) {
-    printf("[ImageGrid] build_tree: catalog tree is null/empty — no catalog items\n");
     return;
   }
 
-  int root_count = 0;
   catalog_tree_->foreach_root_item(
-      [this, &root_count](const asset_system::AssetCatalogTreeItem &cat_item) {
-        root_count++;
-        printf("[ImageGrid] build_tree root item #%d: name='%s', path='%s'\n",
-               root_count,
-               cat_item.get_name().c_str(),
-               cat_item.catalog_path().str().c_str());
+      [this](const asset_system::AssetCatalogTreeItem &cat_item) {
         Item &item = build_catalog_items_recursive(*this, cat_item, state_);
         item.uncollapse_by_default();
       });
-  printf("[ImageGrid] build_tree: total root items = %d\n", root_count);
 }
 
 ImageGridCatalogSelectorTree::Item &ImageGridCatalogSelectorTree::build_catalog_items_recursive(
@@ -595,8 +662,7 @@ ImageGridCatalogSelectorTree::Item &ImageGridCatalogSelectorTree::build_catalog_
     const asset_system::AssetCatalogTreeItem &catalog_item,
     ed::view3d::ImageGridUIState &state)
 {
-  Item &item = parent.add_tree_item<Item>(
-      catalog_item.get_name(), catalog_item.catalog_path().str(), state);
+  Item &item = parent.add_tree_item<Item>(catalog_item, state);
 
   catalog_item.foreach_child([&](const asset_system::AssetCatalogTreeItem &child) {
     build_catalog_items_recursive(item, child, state);
@@ -609,16 +675,10 @@ static void image_grid_catalog_selector_draw(const bContext *C, Panel *panel)
 {
   View3D *v3d = CTX_wm_view3d(C);
   if (!v3d) {
-    printf("[ImageGrid] catalog_selector_draw: v3d is NULL — aborting\n");
     return;
   }
 
   ed::view3d::ImageGridUIState &state = image_grid_state_get(*v3d);
-  printf("[ImageGrid] catalog_selector_draw: lib_ref.type=%d, custom_library_index=%d, "
-         "active_catalog_path='%s'\n",
-         state.lib_ref.type,
-         state.lib_ref.custom_library_index,
-         state.active_catalog_path.c_str());
 
   ui::Layout &layout = *panel->layout;
   layout.operator_context_set(wm::OpCallContext::InvokeDefault);
@@ -635,22 +695,14 @@ static void image_grid_catalog_selector_draw(const bContext *C, Panel *panel)
   }
 
   /* Catalog tree. */
-  printf("[ImageGrid] catalog_selector_draw: calling storage_fetch...\n");
   ed::asset::list::storage_fetch(&state.lib_ref, C);
-
-  const bool is_loaded = ed::asset::list::is_loaded(&state.lib_ref);
-  printf("[ImageGrid] catalog_selector_draw: is_loaded=%s\n", is_loaded ? "true" : "false");
 
   const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
       state.lib_ref);
   if (!library) {
-    printf("[ImageGrid] catalog_selector_draw: library NOT yet available (still loading)\n");
     layout.label(IFACE_("Loading\xe2\x80\xa6"), ICON_NONE);
     return;
   }
-
-  printf("[ImageGrid] catalog_selector_draw: library OK at %p, building tree view\n",
-         (const void *)library);
 
   ui::Block *block = layout.block();
   ui::AbstractTreeView *tree_view = ui::block_add_view(

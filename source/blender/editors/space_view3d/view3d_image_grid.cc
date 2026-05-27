@@ -10,7 +10,9 @@
 #include "BLI_math_base.h"
 
 #include "DNA_ID.h"
+#include "DNA_brush_types.h"
 #include "DNA_image_types.h"
+#include "DNA_texture_types.h"
 #include "DNA_space_enums.h"
 #include "DNA_space_types.h"
 #include "DNA_windowmanager_types.h"
@@ -20,14 +22,21 @@
 #include "AS_asset_library.hh"
 
 #include "BKE_asset.hh"
+#include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
+#include "BKE_image.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_main.hh"
+#include "BKE_main_idmap.hh"
+#include "BKE_paint.hh"
 #include "BKE_preferences.h"
 #include "BKE_screen.hh"
+#include "BKE_texture.h"
 
 #include "BLT_translation.hh"
 
+#include "ED_asset_import.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_mark_clear.hh"
@@ -95,6 +104,18 @@ void image_grid_clamp_scroll_row(ImageGridUIState &state, const View3D &v3d)
   state.scroll_row = clamp_i(state.scroll_row, 0, image_grid_max_scroll_row(state, v3d));
 }
 
+bool image_grid_slot_is_mask(const PointerRNA &texture_slot_ptr)
+{
+  if (!texture_slot_ptr.data || !texture_slot_ptr.owner_id) {
+    return false;
+  }
+  if (GS(texture_slot_ptr.owner_id->name) != ID_BR) {
+    return false;
+  }
+  const Brush *brush = reinterpret_cast<const Brush *>(texture_slot_ptr.owner_id);
+  return texture_slot_ptr.data == &brush->mask_mtex;
+}
+
 const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref)
 {
   switch (lib_ref.type) {
@@ -155,9 +176,232 @@ int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion * /
 
 }  // namespace blender::ed::view3d
 
+namespace blender::ed::view3d {
+
+/**
+ * BrushTextureSlot.texture is a #Tex (ID_TE), while the grid lists #Image (ID_IM) assets.
+ * Find or create an image texture datablock for assignment.
+ */
+static Tex *brush_texture_for_image(Main &bmain, Image &image, const ID *owner_id)
+{
+  ID *id;
+  FOREACH_MAIN_ID_BEGIN (&bmain, id) {
+    if (GS(id->name) != ID_TE) {
+      continue;
+    }
+    Tex *tex = reinterpret_cast<Tex *>(id);
+    if (tex->type == TEX_IMAGE && tex->ima == &image) {
+      return tex;
+    }
+  }
+  FOREACH_MAIN_ID_END;
+
+  Tex *tex = BKE_texture_add(&bmain, image.id.name + 2);
+  BKE_texture_type_set(tex, TEX_IMAGE);
+  /* Register the image as a user of this texture — #texture_foreach_id uses
+   * #IDWALK_CB_USER for `tex->ima`, so the reference must be counted. */
+  tex->ima = &image;
+  id_us_plus(&image.id);
+
+  if (owner_id) {
+    BKE_id_move_to_same_lib(bmain, tex->id, *owner_id);
+  }
+
+  return tex;
+}
+
+static void brush_mtex_slot_set_texture(MTex *mtex, Tex *tex, Brush *brush)
+{
+  if (mtex->tex) {
+    id_us_min(&mtex->tex->id);
+  }
+  mtex->tex = tex;
+  if (tex) {
+    id_us_plus(&tex->id);
+  }
+  BKE_brush_tag_unsaved_changes(brush);
+}
+
+}  // namespace blender::ed::view3d
+
 namespace blender {
 
 using namespace ed::view3d;
+
+static const EnumPropertyItem *rna_image_grid_library_itemf(bContext *C,
+                                                            PointerRNA *ptr,
+                                                            PropertyRNA *prop,
+                                                            bool *r_free);
+
+/* -------------------------------------------------------------------- */
+/** \name Assign Brush Texture
+ * \{ */
+
+static bool image_grid_id_is_valid(Main &bmain, const ID *id)
+{
+  if (!id) {
+    return false;
+  }
+  IDNameLib_Map *id_map = BKE_main_idmap_create(
+      &bmain, true, nullptr, MAIN_IDMAP_TYPE_UID | MAIN_IDMAP_TYPE_NAME);
+  const bool is_valid = BKE_main_idmap_lookup_id(id_map, id) != nullptr;
+  BKE_main_idmap_destroy(id_map);
+  return is_valid;
+}
+
+static Image *image_grid_resolve_image(bContext &C, wmOperator &op)
+{
+  Main *bmain = CTX_data_main(&C);
+
+  if (RNA_struct_property_is_set(op.ptr, "image_session_uid")) {
+    const uint32_t session_uid = uint32_t(RNA_int_get(op.ptr, "image_session_uid"));
+    if (session_uid == MAIN_ID_SESSION_UID_UNSET) {
+      return nullptr;
+    }
+    ID *id = BKE_libblock_find_session_uid(bmain, ID_IM, session_uid);
+    Image *image = reinterpret_cast<Image *>(id);
+    if (!image || !image_grid_id_is_valid(*bmain, &image->id)) {
+      return nullptr;
+    }
+    return image;
+  }
+
+  if (!RNA_struct_property_is_set(op.ptr, "asset_identifier")) {
+    return nullptr;
+  }
+
+  char identifier[FILE_MAX_LIBEXTRA];
+  RNA_string_get(op.ptr, "asset_identifier", identifier);
+  if (identifier[0] == '\0') {
+    return nullptr;
+  }
+
+  const int lib_enum = RNA_enum_get(op.ptr, "asset_library_reference");
+  const AssetLibraryReference lib_ref = ed::asset::library_reference_from_enum_value(
+      lib_enum);
+
+  Image *found_image = nullptr;
+  ed::asset::list::storage_fetch(&lib_ref, &C);
+  ed::asset::list::iterate(lib_ref, [&](asset_system::AssetRepresentation &asset) {
+    if (asset.get_id_type() != ID_IM) {
+      return true;
+    }
+    if (asset.library_relative_identifier() != identifier) {
+      return true;
+    }
+
+    if (ID *local_id = asset.local_id()) {
+      found_image = id_cast<Image *>(local_id);
+    }
+    else if (!asset.full_library_path().empty()) {
+      ID *imported_id = ed::asset::asset_local_id_ensure_imported(*bmain, asset);
+      if (imported_id && GS(imported_id->name) == ID_IM) {
+        found_image = id_cast<Image *>(imported_id);
+      }
+    }
+    else {
+      found_image = BKE_image_load_exists(bmain, asset.full_path().c_str());
+    }
+    return false;
+  });
+
+  if (found_image && !image_grid_id_is_valid(*bmain, &found_image->id)) {
+    return nullptr;
+  }
+  return found_image;
+}
+
+static wmOperatorStatus image_grid_assign_texture_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+
+  const uint32_t brush_session_uid = uint32_t(RNA_int_get(op->ptr, "brush_session_uid"));
+  if (brush_session_uid == MAIN_ID_SESSION_UID_UNSET) {
+    return OPERATOR_CANCELLED;
+  }
+  Brush *brush = reinterpret_cast<Brush *>(
+      BKE_libblock_find_session_uid(bmain, ID_BR, brush_session_uid));
+  if (!brush) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool use_mask_slot = RNA_boolean_get(op->ptr, "use_mask_slot");
+  MTex *mtex = use_mask_slot ? &brush->mask_mtex : &brush->mtex;
+
+  Image *image = image_grid_resolve_image(*C, *op);
+  if (!image) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Tex *tex = brush_texture_for_image(*bmain, *image, &brush->id);
+  if (!tex) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Same refcount rules as #set_current_brush_texture() — avoid RNA pointer set, which
+   * double-counts users and breaks memfile undo refcount recompute. */
+  brush_mtex_slot_set_texture(mtex, tex, brush);
+
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  BKE_paint_invalidate_overlay_tex(*bmain, scene, view_layer, tex);
+
+  WM_event_add_notifier(C, NC_BRUSH, brush);
+  WM_event_add_notifier(C, NC_ID | NA_EDITED, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void VIEW3D_OT_image_grid_assign_texture(wmOperatorType *ot)
+{
+  ot->name = "Assign Image Grid Texture";
+  ot->description = "Assign an image asset as the brush texture";
+  ot->idname = "VIEW3D_OT_image_grid_assign_texture";
+
+  ot->exec = image_grid_assign_texture_exec;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  PropertyRNA *prop = RNA_def_int(ot->srna,
+                                  "brush_session_uid",
+                                  int(MAIN_ID_SESSION_UID_UNSET),
+                                  INT32_MIN,
+                                  INT32_MAX,
+                                  "Brush Session UID",
+                                  "Session UID of the brush to assign the texture to",
+                                  INT32_MIN,
+                                  INT32_MAX);
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
+
+  prop = RNA_def_int(ot->srna,
+                     "image_session_uid",
+                     int(MAIN_ID_SESSION_UID_UNSET),
+                     INT32_MIN,
+                     INT32_MAX,
+                     "Image Session UID",
+                     "Session UID of a local image; when unset, use asset library properties",
+                     INT32_MIN,
+                     INT32_MAX);
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
+
+  RNA_def_boolean(ot->srna,
+                  "use_mask_slot",
+                  false,
+                  "Mask Texture Slot",
+                  "Assign to the mask texture slot instead of the main texture slot");
+
+  prop = RNA_def_property(ot->srna, "asset_library_reference", PROP_ENUM, PROP_NONE);
+  RNA_def_enum_funcs(prop, rna_image_grid_library_itemf);
+  RNA_def_property_ui_text(prop, "Library", "Asset library of the image asset");
+
+  RNA_def_string(ot->srna,
+                 "asset_identifier",
+                 nullptr,
+                 FILE_MAX_LIBEXTRA,
+                 "Asset Identifier",
+                 "Library-relative asset identifier when the image is not local");
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Set Catalog

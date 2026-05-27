@@ -29,7 +29,6 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_preview_image.hh"
-#include "BKE_texture.h"
 #include "BKE_global.hh"
 #include "BKE_idtype.hh"
 #include "BKE_screen.hh"
@@ -138,45 +137,15 @@ static void image_grid_block_listener(const wmRegionListenerParams *params)
         ED_region_tag_redraw(params->region);
       }
       break;
+    case NC_WM:
+      if (wmn->data == ND_UNDO) {
+        ED_region_tag_redraw(params->region);
+        ED_region_tag_refresh_ui(params->region);
+      }
+      break;
     default:
       break;
   }
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Brush texture assignment
- * \{ */
-
-/**
- * BrushTextureSlot.texture is a #Tex (ID_TE), while the grid lists #Image (ID_IM) assets.
- * Find or create an image texture datablock for assignment.
- */
-static Tex *brush_texture_for_image(Main &bmain, Image &image, const ID *owner_id)
-{
-  ID *id;
-  FOREACH_MAIN_ID_BEGIN (&bmain, id) {
-    if (GS(id->name) != ID_TE) {
-      continue;
-    }
-    Tex *tex = reinterpret_cast<Tex *>(id);
-    if (tex->type == TEX_IMAGE && tex->ima == &image) {
-      return tex;
-    }
-  }
-  FOREACH_MAIN_ID_END;
-
-  Tex *tex = BKE_texture_add(&bmain, image.id.name + 2);
-  BKE_texture_type_set(tex, TEX_IMAGE);
-  id_us_plus(&image.id);
-  tex->ima = &image;
-
-  if (owner_id) {
-    BKE_id_move_to_same_lib(bmain, tex->id, *owner_id);
-  }
-
-  return tex;
 }
 
 /** \} */
@@ -239,26 +208,35 @@ class ImageAssetGridItem : public PreviewGridItem {
     this->hide_label();
     this->always_reactivate_on_click();
     this->set_on_activate_fn([this](bContext &C, PreviewGridItem & /*item*/) {
-      Image *image = nullptr;
-      if (kind_ == ImageGridItemKind::BlendImage) {
-        image = image_;
-      }
-      else if (ID *local_id = asset_->local_id()) {
-        image = id_cast<Image *>(local_id);
-      }
-      else {
-        image = BKE_image_load(CTX_data_main(&C), asset_->full_path().c_str());
-      }
-      if (!image || GS(image->id.name) != ID_IM) {
+      wmOperatorType *ot = WM_operatortype_find("VIEW3D_OT_image_grid_assign_texture", true);
+      if (!ot) {
         return;
       }
 
-      Main *bmain = CTX_data_main(&C);
-      Tex *tex = brush_texture_for_image(*bmain, *image, target_ptr_.owner_id);
+      PointerRNA op_ptr = WM_operator_properties_create_ptr(ot);
+      if (target_ptr_.owner_id) {
+        RNA_int_set(&op_ptr, "brush_session_uid", int(target_ptr_.owner_id->session_uid));
+      }
+      RNA_boolean_set(&op_ptr, "use_mask_slot", ed::view3d::image_grid_slot_is_mask(target_ptr_));
 
-      PointerRNA tex_ptr = RNA_id_pointer_create(&tex->id);
-      RNA_property_pointer_set(&target_ptr_, target_prop_, tex_ptr, nullptr);
-      RNA_property_update(&C, &target_ptr_, target_prop_);
+      if (kind_ == ImageGridItemKind::BlendImage) {
+        RNA_int_set(&op_ptr, "image_session_uid", int(image_->id.session_uid));
+      }
+      else if (ID *local_id = asset_->local_id()) {
+        if (GS(local_id->name) == ID_IM) {
+          RNA_int_set(&op_ptr, "image_session_uid", int(local_id->session_uid));
+        }
+      }
+      else {
+        RNA_enum_set(&op_ptr,
+                     "asset_library_reference",
+                     ed::asset::library_reference_to_enum_value(&library_ref_));
+        RNA_string_set(
+            &op_ptr, "asset_identifier", asset_->library_relative_identifier().c_str());
+      }
+
+      WM_operator_name_call_ptr(&C, ot, wm::OpCallContext::ExecDefault, &op_ptr, nullptr);
+      WM_operator_properties_free(&op_ptr);
     });
     this->set_is_active_fn([this]() { return this->is_active_texture(); });
   }

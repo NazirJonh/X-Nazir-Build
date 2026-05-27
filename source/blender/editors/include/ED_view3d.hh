@@ -52,6 +52,7 @@ struct ViewContext;
 struct ViewLayer;
 struct ViewOpsData;
 struct bContext;
+struct PointerRNA;
 struct bGPDlayer;
 struct bPoseChannel;
 struct bScreen;
@@ -1507,6 +1508,9 @@ int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d);
 void image_grid_clamp_scroll_row(ImageGridUIState &state, const View3D &v3d);
 bool image_grid_wheel_poll(bContext *C, const wmEvent *event);
 int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *region);
+
+/** True when \a texture_slot_ptr refers to #Brush.mask_mtex (not #Brush.mtex). */
+bool image_grid_slot_is_mask(const PointerRNA &texture_slot_ptr);
 
 }  // namespace ed::view3d
 

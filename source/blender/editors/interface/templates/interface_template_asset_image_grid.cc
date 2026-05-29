@@ -21,8 +21,6 @@
 
 #include "BLI_math_base.h"
 
-#include "IMB_imbuf.hh"
-
 #include "BKE_context.hh"
 #include "BKE_image.hh"
 #include "BKE_icons.hh"
@@ -105,6 +103,28 @@ static blender::Vector<asset_system::AssetCatalogFilter> catalog_filters_from_en
   return filters;
 }
 
+static bool image_grid_asset_preview_is_drawable(const PreviewImage &preview)
+{
+  return preview.w[ICON_SIZE_PREVIEW] > 0 && preview.h[ICON_SIZE_PREVIEW] > 0 &&
+         preview.rect[ICON_SIZE_PREVIEW] != nullptr &&
+         !BKE_previewimg_is_invalid(&preview, ICON_SIZE_PREVIEW) &&
+         BKE_previewimg_is_finished(&preview, ICON_SIZE_PREVIEW);
+}
+
+/**
+ * Return the preview icon attached by #BKE_icon_preview_ensure(), even while deferred loading is
+ * in progress. Using the type icon instead would skip #icon_ensure_deferred() / #PreviewLoadJob.
+ */
+static int image_grid_asset_preview_icon_id(const asset_system::AssetRepresentation &asset)
+{
+  if (const PreviewImage *preview = asset.get_preview()) {
+    if (preview->runtime->icon_id) {
+      return preview->runtime->icon_id;
+    }
+  }
+  return ed::asset::asset_preview_or_icon(asset);
+}
+
 /** Textures assignable from the grid (exclude render result, viewer, generated). */
 static bool image_grid_is_assignable_texture(const Image &image)
 {
@@ -123,11 +143,11 @@ static void image_grid_block_listener(const wmRegionListenerParams *params)
   const wmNotifier *wmn = params->notifier;
   switch (wmn->category) {
     case NC_ASSET:
-      if (ELEM(wmn->data,
-               int(ND_ASSET_LIST),
-               int(ND_ASSET_LIST_READING),
-               int(ND_ASSET_LIST_PREVIEW)))
-      {
+      if (wmn->data == int(ND_ASSET_LIST_PREVIEW)) {
+        /* Preview pixels updated: redraw only. Full UI refresh rebuilds all grid items. */
+        ED_region_tag_redraw(params->region);
+      }
+      else if (ELEM(wmn->data, int(ND_ASSET_LIST), int(ND_ASSET_LIST_READING))) {
         ED_region_tag_redraw(params->region);
         ED_region_tag_refresh_ui(params->region);
       }
@@ -163,8 +183,6 @@ class ImageAssetGridItem : public PreviewGridItem {
   mutable PointerRNA target_ptr_;
   PropertyRNA *target_prop_ = nullptr;
   AssetLibraryReference library_ref_;
-  /** Preview icon for on-disk image assets without a local ID (not in #G_MAIN). */
-  mutable int external_preview_icon_id_ = 0;
 
  public:
   ImageAssetGridItem(asset_system::AssetRepresentation &asset,
@@ -193,14 +211,6 @@ class ImageAssetGridItem : public PreviewGridItem {
         library_ref_(library_ref)
   {
     this->init_item_callbacks();
-  }
-
-  ~ImageAssetGridItem() override
-  {
-    if (external_preview_icon_id_) {
-      BKE_icon_delete(external_preview_icon_id_);
-      external_preview_icon_id_ = 0;
-    }
   }
 
   void init_item_callbacks()
@@ -239,21 +249,6 @@ class ImageAssetGridItem : public PreviewGridItem {
       WM_operator_properties_free(&op_ptr);
     });
     this->set_is_active_fn([this]() { return this->is_active_texture(); });
-  }
-
-  int ensure_external_preview_icon_id() const
-  {
-    if (external_preview_icon_id_) {
-      return external_preview_icon_id_;
-    }
-    ImBuf *ibuf = IMB_load_image_from_filepath(
-        asset_->full_path().c_str(), ImBufFlags::ByteData, nullptr);
-    if (!ibuf) {
-      return 0;
-    }
-    external_preview_icon_id_ = BKE_icon_imbuf_create(ibuf);
-    IMB_freeImBuf(ibuf);
-    return external_preview_icon_id_;
   }
 
   ID *get_id() const
@@ -296,12 +291,16 @@ class ImageAssetGridItem : public PreviewGridItem {
     const int icon_id = BKE_icon_id_ensure(&id);
     icon_render_id(&C, nullptr, &id, ICON_SIZE_PREVIEW, !G.background);
 
+    /* Keep the preview icon id so #def_but_icon queues loading; draw shows a spinner via
+     * #icon_is_preview_deferred_loading(). */
     if (icon_is_preview_deferred_loading(icon_id, true)) {
-      return ICON_PREVIEW_LOADING;
+      return icon_id;
     }
 
     PreviewImage *preview = BKE_previewimg_id_get(&id);
-    if (preview && !BKE_previewimg_is_invalid(preview, ICON_SIZE_PREVIEW)) {
+    if (preview && !BKE_previewimg_is_invalid(preview, ICON_SIZE_PREVIEW) &&
+        image_grid_asset_preview_is_drawable(*preview))
+    {
       return BKE_icon_preview_ensure(&id, preview);
     }
 
@@ -311,32 +310,15 @@ class ImageAssetGridItem : public PreviewGridItem {
   int get_preview_icon_id(const bContext &C) const
   {
     if (kind_ == ImageGridItemKind::Asset) {
-      asset_->ensure_previewable(C);
       if (!ed::asset::list::is_loaded(&library_ref_)) {
         return ICON_PREVIEW_LOADING;
-      }
-
-      const int asset_icon = ed::asset::asset_preview_or_icon(*asset_);
-      if (asset_icon != ICON_NONE && asset_icon != ui::icon_from_idcode(ID_IM)) {
-        if (const PreviewImage *preview = asset_->get_preview()) {
-          if (preview->rect[ICON_SIZE_PREVIEW]) {
-            return asset_icon;
-          }
-        }
-        else if (asset_->local_id()) {
-          return asset_icon;
-        }
-        /* Deferred preview not loaded yet (e.g. wrong thumb source in cache). */
       }
 
       if (ID *local_id = asset_->local_id()) {
         return preview_icon_id_for_id(C, *local_id);
       }
-      const int external_icon = this->ensure_external_preview_icon_id();
-      if (external_icon) {
-        return external_icon;
-      }
-      return asset_icon;
+
+      return image_grid_asset_preview_icon_id(*asset_);
     }
 
     return preview_icon_id_for_id(C, image_->id);
@@ -354,6 +336,11 @@ class ImageAssetGridItem : public PreviewGridItem {
     if (ID *id = this->get_id()) {
       PointerRNA id_ptr = RNA_id_pointer_create(id);
       button_context_ptr_set(block, view_but, "id", &id_ptr);
+    }
+
+    /* Match #AssetViewItem::build_grid_tile — deferred thumbnails via #PreviewLoadJob. */
+    if (kind_ == ImageGridItemKind::Asset) {
+      asset_->ensure_previewable(C);
     }
 
     const int preview_id = this->get_preview_icon_id(C);

@@ -13,6 +13,7 @@
 #include <string>
 
 #include "BLI_fileops.h"
+#include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_path_utils.hh"
 #include "BLI_serialize.hh"
@@ -28,6 +29,9 @@
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_preferences.h"
+#include "BKE_preview_image.hh"
+
+#include "IMB_thumbs.hh"
 
 #include "AS_asset_catalog.hh"
 #include "AS_asset_library.hh"
@@ -487,6 +491,29 @@ void image_library_on_library_added(const bContext *C, const char *library_root_
   }
 }
 
+static bool image_library_invalidate_preview_callback(void * /*userdata*/,
+                                                      const char *library_root,
+                                                      const char *relative_image_path,
+                                                      const char * /*image_name*/,
+                                                      const bUUID & /*catalog_id*/)
+{
+  char full_path[FILE_MAX];
+  BLI_path_join(full_path, sizeof(full_path), library_root, relative_image_path);
+  BKE_previewimg_cached_release(full_path);
+  IMB_thumb_delete(full_path, THB_LARGE);
+  IMB_thumb_delete(full_path, THB_NORMAL);
+  return true;
+}
+
+void image_library_invalidate_cached_previews(const char *library_root_path)
+{
+  if (!library_root_path || !library_root_path[0]) {
+    return;
+  }
+  image_library_foreach_image(
+      library_root_path, image_library_invalidate_preview_callback, nullptr);
+}
+
 bool image_library_foreach_image(const char *library_root,
                                  ImageLibraryForeachCallback callback,
                                  void *userdata)
@@ -518,6 +545,22 @@ bool image_library_foreach_image(const char *library_root,
   }
 
   return true;
+}
+
+void image_library_on_startup()
+{
+  for (const bUserAssetLibrary &user_lib : U.asset_libraries) {
+    if (user_lib.flag & (ASSET_LIBRARY_DISABLED | ASSET_LIBRARY_USE_REMOTE_URL)) {
+      continue;
+    }
+    if (!user_lib.dirpath[0]) {
+      continue;
+    }
+    if (!image_library_needs_reindex(user_lib.dirpath)) {
+      continue;
+    }
+    image_library_scan_and_index(user_lib.dirpath);
+  }
 }
 
 }  // namespace blender::ed::asset

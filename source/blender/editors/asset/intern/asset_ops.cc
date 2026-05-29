@@ -450,6 +450,19 @@ static bool asset_library_refresh_poll(bContext *C)
 static wmOperatorStatus asset_library_refresh_exec(bContext *C, wmOperator * /*unused*/)
 {
   const AssetLibraryReference *library = CTX_wm_asset_library_ref(C);
+
+  /* For custom on-disk libraries, update the image index before clearing the list so
+   * that the next read job picks up any files added, moved or deleted since the last
+   * scan.  The index write is atomic and fast for unchanged libraries. */
+  if (library && library->type == ASSET_LIBRARY_CUSTOM) {
+    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_index(
+        &U, library->custom_library_index);
+    if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
+      image_library_scan_and_index(user_lib->dirpath);
+      image_library_invalidate_cached_previews(user_lib->dirpath);
+    }
+  }
+
   /* Handles both global asset list storage and asset browsers. */
   list::clear(library, C);
   WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
@@ -503,6 +516,7 @@ static wmOperatorStatus image_library_refresh_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  image_library_invalidate_cached_previews(user_lib->dirpath);
   image_library_notify_catalogs_changed(C, user_lib->dirpath);
   list::clear(library, C);
   WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);

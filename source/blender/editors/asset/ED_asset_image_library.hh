@@ -50,8 +50,21 @@ bool image_library_needs_reindex(const char *library_root_path);
 /** Called after library registered in U.asset_libraries or when path changes. */
 void image_library_on_library_added(const bContext *C, const char *library_root_path);
 
+/**
+ * Scan all registered local image libraries at Blender startup.
+ * Updates any stale blender_image_index.json files without sending UI notifications,
+ * so that the index is current before the first asset list read job runs.
+ */
+void image_library_on_startup();
+
 /** Invalidate catalog caches and refresh open UI. */
 void image_library_notify_catalogs_changed(const bContext *C, const char *library_root_path);
+
+/**
+ * Drop cached #PreviewImage entries for all images in the library index so the next
+ * #AssetRepresentation::ensure_previewable() reloads thumbnails from disk.
+ */
+void image_library_invalidate_cached_previews(const char *library_root_path);
 
 using ImageLibraryForeachCallback = bool (*)(void *userdata,
                                               const char *library_root,

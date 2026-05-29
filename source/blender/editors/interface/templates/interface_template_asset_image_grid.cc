@@ -318,7 +318,15 @@ class ImageAssetGridItem : public PreviewGridItem {
 
       const int asset_icon = ed::asset::asset_preview_or_icon(*asset_);
       if (asset_icon != ICON_NONE && asset_icon != ui::icon_from_idcode(ID_IM)) {
-        return asset_icon;
+        if (const PreviewImage *preview = asset_->get_preview()) {
+          if (preview->rect[ICON_SIZE_PREVIEW]) {
+            return asset_icon;
+          }
+        }
+        else if (asset_->local_id()) {
+          return asset_icon;
+        }
+        /* Deferred preview not loaded yet (e.g. wrong thumb source in cache). */
       }
 
       if (ID *local_id = asset_->local_id()) {

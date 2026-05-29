@@ -50,11 +50,13 @@ static bool filelist_readjob_image_file_callback(void *userdata,
 
   auto metadata = std::make_unique<AssetMetaData>();
   metadata->catalog_id = catalog_id;
+  metadata->preferred_import_method = ASSET_IMPORT_APPEND_REUSE;
+  metadata->flag |= ASSETDATA_USE_OWN_IMPORT_METHOD;
 
   FileListInternEntry *entry = MEM_new<FileListInternEntry>(__func__);
   /* Paths in the image index are relative to the library root, not #FileListReadJob::cur_relbase. */
   entry->relpath = BLI_strdup(relative_image_path);
-  entry->typeflag = FILE_TYPE_BLENDERLIB | FILE_TYPE_ASSET;
+  entry->typeflag = FILE_TYPE_BLENDERLIB | FILE_TYPE_ASSET | FILE_TYPE_IMAGE;
   entry->blentype = ID_IM;
   entry->asset = job_params->load_asset_library->add_external_on_disk_asset(
       relative_image_path, image_name, ID_IM, std::move(metadata));

@@ -36,6 +36,7 @@
 
 #include "BLT_translation.hh"
 
+#include "ED_asset_image_library.hh"
 #include "ED_asset_import.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
@@ -739,6 +740,56 @@ void VIEW3D_OT_image_grid_scroll(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Refresh Image Grid Library
+ * \{ */
+
+static bool image_grid_refresh_library_poll(bContext *C)
+{
+  const View3D *v3d = CTX_wm_view3d(C);
+  if (!v3d) {
+    return false;
+  }
+  const ImageGridUIState &state = image_grid_state_get(*v3d);
+  return state.lib_ref.type != ASSET_LIBRARY_LOCAL;
+}
+
+static wmOperatorStatus image_grid_refresh_library_exec(bContext *C, wmOperator * /*op*/)
+{
+  View3D *v3d = CTX_wm_view3d(C);
+  if (!v3d) {
+    return OPERATOR_CANCELLED;
+  }
+
+  ImageGridUIState &state = image_grid_state_get(*v3d);
+
+  if (state.lib_ref.type == ASSET_LIBRARY_CUSTOM) {
+    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_index(
+        &U, state.lib_ref.custom_library_index);
+    if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
+      ed::asset::image_library_scan_and_index(user_lib->dirpath);
+      ed::asset::image_library_invalidate_cached_previews(user_lib->dirpath);
+    }
+  }
+
+  ed::asset::list::clear(&state.lib_ref, C);
+  WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void VIEW3D_OT_image_grid_refresh_library(wmOperatorType *ot)
+{
+  ot->name = "Refresh Image Grid Library";
+  ot->description =
+      "Rescan the image library for added, moved or deleted files and reload the image grid";
+  ot->idname = "VIEW3D_OT_image_grid_refresh_library";
+
+  ot->exec = image_grid_refresh_library_exec;
+  ot->poll = image_grid_refresh_library_poll;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Catalog Selector Popover
  * \{ */
 
@@ -935,7 +986,7 @@ static void image_grid_catalog_selector_draw(const bContext *C, Panel *panel)
               wm::OpCallContext::InvokeDefault,
               UI_ITEM_NONE);
   if (state.lib_ref.type != ASSET_LIBRARY_LOCAL) {
-    lib_row.op("ASSET_OT_library_refresh", "", ICON_FILE_REFRESH);
+    lib_row.op("VIEW3D_OT_image_grid_refresh_library", "", ICON_FILE_REFRESH);
   }
 
   /* Catalog tree. */

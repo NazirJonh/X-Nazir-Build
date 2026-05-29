@@ -44,6 +44,7 @@
 #include "BKE_preview_image.hh"
 
 #include "DNA_asset_types.h"
+#include "DNA_ID.h"
 #include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 
@@ -706,6 +707,29 @@ void filelist_online_asset_preview_request(const bContext *C, FileDirEntry *entr
     entry->asset->ensure_previewable(*C, CTX_wm_reports(C));
     entry->preview_icon_id = entry->asset->get_preview()->runtime->icon_id;
   }
+}
+
+void filelist_on_disk_image_asset_preview_request(const bContext *C, FileDirEntry *entry)
+{
+  if (!entry->asset || entry->preview_icon_id) {
+    return;
+  }
+  if (entry->asset->is_online() || entry->asset->local_id()) {
+    return;
+  }
+  if (entry->asset->get_id_type() != ID_IM) {
+    return;
+  }
+  if (!filelist_file_preview_load_poll(entry)) {
+    return;
+  }
+
+  entry->asset->ensure_previewable(*C, CTX_wm_reports(C));
+  const PreviewImage *preview = entry->asset->get_preview();
+  if (!preview || !preview->runtime->icon_id) {
+    return;
+  }
+  entry->preview_icon_id = preview->runtime->icon_id;
 }
 
 /**

@@ -17,6 +17,7 @@
 #include "RNA_access.hh"
 
 #include "ED_asset_catalog.hh"
+#include "ED_asset_image_library.hh"
 
 #include "WM_api.hh"
 
@@ -67,6 +68,10 @@ asset_system::AssetCatalog *catalog_add(AssetLibrary *library,
   }
   catalog_service.tag_has_unsaved_changes(new_catalog);
 
+  if (const char *library_root = image_library_editable_root_from_asset_library(*library)) {
+    image_library_catalog_directory_ensure(library_root, new_catalog->path.c_str());
+  }
+
   WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
   return new_catalog;
 }
@@ -103,8 +108,16 @@ void catalog_rename(AssetLibrary *library,
     return;
   }
 
+  const AssetCatalogPath old_path = catalog->path;
+
   catalog_service.undo_push();
   catalog_service.tag_has_unsaved_changes(catalog);
+
+  if (const char *library_root = image_library_editable_root_from_asset_library(*library)) {
+    image_library_catalog_directory_relocate(
+        library_root, old_path.c_str(), clean_new_path.c_str());
+  }
+
   catalog_service.update_catalog_path(catalog_id, clean_new_path);
   WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
 }
@@ -144,8 +157,16 @@ void catalog_move(AssetLibrary *library,
     return;
   }
 
+  const AssetCatalogPath old_path = src_catalog->path;
+
   catalog_service.undo_push();
   catalog_service.tag_has_unsaved_changes(src_catalog);
+
+  if (const char *library_root = image_library_editable_root_from_asset_library(*library)) {
+    image_library_catalog_directory_relocate(
+        library_root, old_path.c_str(), clean_new_path.c_str());
+  }
+
   catalog_service.update_catalog_path(src_catalog_id, clean_new_path);
   WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
 }

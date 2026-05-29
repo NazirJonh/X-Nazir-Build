@@ -6,6 +6,7 @@
  * \ingroup spfile
  */
 
+#include <cstdio>
 #include <cstring>
 
 #include "AS_asset_library.hh"
@@ -201,12 +202,23 @@ static SpaceLink *file_duplicate(SpaceLink *sl)
   return reinterpret_cast<SpaceLink *>(sfilen);
 }
 
-static void file_refresh(const bContext *C, ScrArea *area)
+static void file_refresh_ex(const bContext *C, SpaceFile *sfile, ScrArea *area)
 {
   using namespace blender::ed;
+  if (!sfile) {
+    printf("[IMG_ASSET_DROP] file_refresh_ex: sfile=null\n");
+    fflush(stdout);
+    return;
+  }
+
+  printf("[IMG_ASSET_DROP] file_refresh_ex: sfile=%p area=%p\n",
+         static_cast<void *>(sfile),
+         static_cast<void *>(area));
+  fflush(stdout);
+  filelist_debug_log_state(sfile->files, "file_refresh_ex_begin");
+
   wmWindowManager *wm = CTX_wm_manager(C);
   wmWindow *win = CTX_wm_window(C);
-  SpaceFile *sfile = CTX_wm_space_file(C);
   FileSelectParams *params = ED_fileselect_ensure_active_params(sfile);
   FileAssetSelectParams *asset_params = ED_fileselect_get_asset_params(sfile);
   FSMenu *fsmenu = ED_fsmenu_get();
@@ -282,14 +294,26 @@ static void file_refresh(const bContext *C, ScrArea *area)
   sfile->recentnr = fsmenu_get_active_indices(fsmenu, FS_CATEGORY_RECENT, params->dir);
 
   if (filelist_needs_force_reset(sfile->files)) {
+    printf("[IMG_ASSET_DROP] file_refresh_ex: clear_from_reset_tag\n");
+    fflush(stdout);
     filelist_readjob_stop(sfile->files, wm);
     filelist_clear_from_reset_tag(sfile->files);
   }
 
   if (filelist_needs_reading(sfile->files)) {
     if (!filelist_pending(sfile->files)) {
+      printf("[IMG_ASSET_DROP] file_refresh_ex: filelist_readjob_start (async)\n");
+      fflush(stdout);
       filelist_readjob_start(sfile->files, NC_SPACE | ND_SPACE_FILE_LIST, C);
     }
+    else {
+      printf("[IMG_ASSET_DROP] file_refresh_ex: needs_reading but job already pending\n");
+      fflush(stdout);
+    }
+  }
+  else {
+    printf("[IMG_ASSET_DROP] file_refresh_ex: SKIP read job (needs_reading=0)\n");
+    fflush(stdout);
   }
 
   filelist_sort(sfile->files);
@@ -340,7 +364,35 @@ static void file_refresh(const bContext *C, ScrArea *area)
     }
   }
 
-  ED_area_tag_redraw(area);
+  filelist_debug_log_state(sfile->files, "file_refresh_ex_end");
+
+  if (area) {
+    ED_area_tag_redraw(area);
+  }
+}
+
+static void file_refresh(const bContext *C, ScrArea *area)
+{
+  if (!area) {
+    return;
+  }
+  file_refresh_ex(C, reinterpret_cast<SpaceFile *>(area->spacedata.first), area);
+}
+
+void ED_fileselect_refresh_filelist(bContext *C, SpaceFile *sfile)
+{
+  printf("[IMG_ASSET_DROP] ED_fileselect_refresh_filelist\n");
+  fflush(stdout);
+  if (!sfile) {
+    return;
+  }
+
+  ScrArea *area = nullptr;
+  if (wmWindow *win = CTX_wm_window(C)) {
+    const bScreen *screen = WM_window_get_active_screen(win);
+    area = BKE_screen_find_area_from_space(screen, reinterpret_cast<SpaceLink *>(sfile));
+  }
+  file_refresh_ex(C, sfile, area);
 }
 
 void file_on_reload_callback_register(SpaceFile *sfile,

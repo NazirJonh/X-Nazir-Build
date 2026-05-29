@@ -91,6 +91,12 @@ struct FileListReadJob {
   std::optional<std::function<void(const asset_system::AssetRepresentation &)>> on_asset_added =
       std::nullopt;
 
+  /**
+   * Points to the job's stop flag (#wmJobWorkerStatus::stop). When set, #filelist_readjob_endjob
+   * must not apply partial results (see #filelist_readjob_stop / #WM_jobs_kill_type).
+   */
+  const bool *stop = nullptr;
+
   /** Shallow copy of #filelist for thread-safe access.
    *
    * The job system calls #filelist_readjob_update which moves any read file from #tmp_filelist

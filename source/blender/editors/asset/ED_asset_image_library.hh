@@ -13,13 +13,15 @@
 
 #pragma once
 
+#include "BLI_string_ref.hh"
 #include "BLI_uuid.h"
 
 struct bContext;
 
 namespace blender::asset_system {
 class AssetLibrary;
-}
+class AssetRepresentation;
+}  // namespace blender::asset_system
 
 namespace blender::ed::asset {
 
@@ -80,5 +82,38 @@ using ImageLibraryForeachCallback = bool (*)(void *userdata,
 bool image_library_foreach_image(const char *library_root,
                                  ImageLibraryForeachCallback callback,
                                  void *userdata);
+
+/**
+ * Local custom asset library path that supports mirroring catalogs to folders on disk.
+ * Returns null if \a library is not such a library.
+ */
+const char *image_library_editable_root_from_asset_library(
+    const asset_system::AssetLibrary &library);
+
+/**
+ * On-disk image asset from a local image library (external #ID_IM under library root).
+ */
+bool image_library_asset_is_movable_on_disk(const asset_system::AssetRepresentation &asset);
+
+/**
+ * Create the directory that mirrors \a catalog_path under \a library_root_path.
+ */
+bool image_library_catalog_directory_ensure(const char *library_root_path,
+                                            StringRef catalog_path);
+
+/**
+ * Rename or move the on-disk folder when a catalog path changes.
+ */
+bool image_library_catalog_directory_relocate(const char *library_root_path,
+                                              StringRef old_catalog_path,
+                                              StringRef new_catalog_path);
+
+/**
+ * Move an indexed image file into the folder for \a catalog_id and update the JSON index.
+ */
+bool image_library_assign_image_to_catalog(const char *library_root_path,
+                                           asset_system::AssetLibrary &library,
+                                           StringRef relative_image_path,
+                                           const bUUID &catalog_id);
 
 }  // namespace blender::ed::asset

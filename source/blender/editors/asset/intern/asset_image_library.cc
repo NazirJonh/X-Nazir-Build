@@ -7,23 +7,28 @@
  */
 
 #include <climits>
+#include <cstdio>
 #include <fstream>
 #include <optional>
 #include <set>
 #include <string>
 
 #include "BLI_fileops.h"
+#include "BLI_uuid.h"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_path_utils.hh"
 #include "BLI_serialize.hh"
 #include "BLI_string.h"
+#include "BLI_string_utils.hh"
 #include "BLI_vector.hh"
 #ifdef WIN32
 #  include "BLI_winstuff.h"
 #endif
 
 #include "DNA_asset_types.h"
+#include "DNA_ID.h"
+#include "DNA_uuid_types.h"
 #include "DNA_userdef_types.h"
 
 #include "BKE_context.hh"
@@ -35,6 +40,7 @@
 
 #include "AS_asset_catalog.hh"
 #include "AS_asset_library.hh"
+#include "AS_asset_representation.hh"
 
 #include "ED_asset_image_library.hh"
 #include "ED_asset_library.hh"
@@ -99,6 +105,41 @@ bool image_library_is_image_filepath(const char *filepath)
 static void image_library_index_filepath(const char *library_root_path, char r_path[FILE_MAX])
 {
   BLI_path_join(r_path, FILE_MAX, library_root_path, IMAGE_LIBRARY_INDEX_FILENAME);
+}
+
+static std::string relative_dir_from_catalog_path(const StringRef catalog_path)
+{
+  std::string rel_dir(catalog_path);
+  if (rel_dir == IMAGE_LIBRARY_ROOT_CATALOG_PATH) {
+    return {};
+  }
+  /* Catalogs created under the virtual root item use paths like "Root/Textures". */
+  const char *root_prefix = IMAGE_LIBRARY_ROOT_CATALOG_PATH;
+  const size_t root_prefix_len = strlen(root_prefix);
+  if (rel_dir.size() > root_prefix_len && rel_dir[root_prefix_len] == '/' &&
+      BLI_str_startswith(rel_dir.c_str(), root_prefix))
+  {
+    rel_dir = rel_dir.substr(root_prefix_len + 1);
+  }
+  for (char &c : rel_dir) {
+    if (c == '/') {
+      c = SEP;
+    }
+  }
+  return rel_dir;
+}
+
+static void join_library_root_and_relative(const char *library_root,
+                                           const StringRef relative,
+                                           char r_path[FILE_MAX])
+{
+  if (relative.is_empty()) {
+    BLI_strncpy(r_path, library_root, FILE_MAX);
+  }
+  else {
+    BLI_path_join(r_path, FILE_MAX, library_root, relative.data());
+  }
+  BLI_path_normalize(r_path);
 }
 
 static std::string catalog_path_from_image_relative_path(const char *relative_image_path)
@@ -357,6 +398,61 @@ static bool image_library_is_remote_root(const char *library_root_path)
   return user_lib && (user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL);
 }
 
+static bool image_library_is_editable_root(const char *library_root_path)
+{
+  if (!library_root_path || !library_root_path[0]) {
+    return false;
+  }
+  if (!BLI_is_dir(library_root_path) || image_library_is_remote_root(library_root_path)) {
+    return false;
+  }
+  return true;
+}
+
+static bool image_library_index_update_entry(const char *library_root_path,
+                                             const char *old_relative_path,
+                                             const char *new_relative_path,
+                                             const bUUID &catalog_id)
+{
+  std::unique_ptr<ImageLibraryIndex> index = image_library_index_read(library_root_path);
+  if (!index) {
+    return false;
+  }
+
+  bool found = false;
+  for (ImageLibraryIndexEntry &entry : index->entries) {
+    if (entry.relative_path != old_relative_path) {
+      continue;
+    }
+    entry.relative_path = new_relative_path;
+    entry.catalog_id = catalog_id;
+
+    char abs_path[FILE_MAX];
+    join_library_root_and_relative(library_root_path, new_relative_path, abs_path);
+    BLI_stat_t st;
+    if (BLI_stat(abs_path, &st) == 0) {
+      entry.mtime = int64_t(st.st_mtime);
+      entry.size = int64_t(st.st_size);
+    }
+    found = true;
+    break;
+  }
+
+  if (!found) {
+    printf("[IMG_ASSET_DROP] assign: index update fail, no entry for \"%s\"\n", old_relative_path);
+    fflush(stdout);
+    return false;
+  }
+  return image_library_index_write_atomic(library_root_path, *index);
+}
+
+static void image_library_invalidate_preview_at_path(const char *abs_path)
+{
+  BKE_previewimg_cached_release(abs_path);
+  IMB_thumb_delete(abs_path, THB_LARGE);
+  IMB_thumb_delete(abs_path, THB_NORMAL);
+}
+
 int image_library_scan_and_index(const char *library_root_path,
                                  asset_system::AssetLibrary *library)
 {
@@ -561,6 +657,216 @@ void image_library_on_startup()
     }
     image_library_scan_and_index(user_lib.dirpath);
   }
+}
+
+const char *image_library_editable_root_from_asset_library(const AssetLibrary &library)
+{
+  const std::optional<AssetLibraryReference> ref = library.library_reference();
+  if (!ref || ref->type != ASSET_LIBRARY_CUSTOM) {
+    return nullptr;
+  }
+  const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_index(
+      &U, ref->custom_library_index);
+  if (!user_lib || (user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) || !user_lib->dirpath[0]) {
+    return nullptr;
+  }
+  if (!image_library_is_editable_root(user_lib->dirpath)) {
+    return nullptr;
+  }
+  return user_lib->dirpath;
+}
+
+bool image_library_asset_is_movable_on_disk(const AssetRepresentation &asset)
+{
+  if (asset.local_id() || asset.get_id_type() != ID_IM) {
+    return false;
+  }
+  const char *library_root = image_library_editable_root_from_asset_library(
+      asset.owner_asset_library());
+  if (!library_root) {
+    return false;
+  }
+  const std::string full_path = asset.full_path();
+  if (!BLI_path_contains(library_root, full_path.c_str())) {
+    return false;
+  }
+  return image_library_is_image_filepath(full_path.c_str());
+}
+
+bool image_library_catalog_directory_ensure(const char *library_root_path,
+                                            const StringRef catalog_path)
+{
+  if (!image_library_is_editable_root(library_root_path)) {
+    return false;
+  }
+
+  const std::string rel_dir = relative_dir_from_catalog_path(catalog_path);
+  if (rel_dir.empty()) {
+    return true;
+  }
+
+  char abs_dir[FILE_MAX];
+  join_library_root_and_relative(library_root_path, rel_dir, abs_dir);
+  return BLI_dir_create_recursive(abs_dir);
+}
+
+bool image_library_catalog_directory_relocate(const char *library_root_path,
+                                              const StringRef old_catalog_path,
+                                              const StringRef new_catalog_path)
+{
+  if (!image_library_is_editable_root(library_root_path)) {
+    return false;
+  }
+
+  const std::string old_rel = relative_dir_from_catalog_path(old_catalog_path);
+  const std::string new_rel = relative_dir_from_catalog_path(new_catalog_path);
+  if (old_rel == new_rel) {
+    return true;
+  }
+  if (old_rel.empty()) {
+    return true;
+  }
+
+  char old_abs[FILE_MAX];
+  char new_abs[FILE_MAX];
+  join_library_root_and_relative(library_root_path, old_rel, old_abs);
+  join_library_root_and_relative(library_root_path, new_rel, new_abs);
+
+  if (BLI_exists(new_abs) && BLI_path_cmp(old_abs, new_abs) != 0) {
+    return false;
+  }
+
+  if (!BLI_exists(old_abs)) {
+    return BLI_dir_create_recursive(new_abs);
+  }
+
+  if (!BLI_file_ensure_parent_dir_exists(new_abs)) {
+    return false;
+  }
+
+  return BLI_rename(old_abs, new_abs) == 0;
+}
+
+bool image_library_assign_image_to_catalog(const char *library_root_path,
+                                           AssetLibrary &library,
+                                           const StringRef relative_image_path,
+                                           const bUUID &catalog_id)
+{
+  if (!image_library_is_editable_root(library_root_path)) {
+    printf("[IMG_ASSET_DROP] assign: fail not editable root \"%s\"\n", library_root_path);
+    fflush(stdout);
+    return false;
+  }
+
+  const AssetCatalog *catalog = library.catalog_service().find_catalog(catalog_id);
+  if (!catalog) {
+    char catalog_id_str[UUID_STRING_SIZE];
+    BLI_uuid_format(catalog_id_str, catalog_id);
+    printf("[IMG_ASSET_DROP] assign: fail catalog not found id=%s\n", catalog_id_str);
+    fflush(stdout);
+    return false;
+  }
+
+  const std::string target_rel_dir = relative_dir_from_catalog_path(catalog->path.c_str());
+  printf("[IMG_ASSET_DROP] assign: catalog_path=\"%s\" target_rel_dir=\"%s\"\n",
+         catalog->path.c_str(),
+         target_rel_dir.c_str());
+  fflush(stdout);
+
+  char filename[FILE_MAX];
+  BLI_path_split_file_part(relative_image_path.data(), filename, sizeof(filename));
+
+  char new_relative[FILE_MAX];
+  if (target_rel_dir.empty()) {
+    STRNCPY(new_relative, filename);
+  }
+  else {
+    BLI_path_join(new_relative, sizeof(new_relative), target_rel_dir.c_str(), filename);
+  }
+  for (char &c : new_relative) {
+    if (c == SEP) {
+      c = '/';
+    }
+  }
+
+  if (relative_image_path == new_relative) {
+    return image_library_index_update_entry(
+        library_root_path, relative_image_path.data(), new_relative, catalog_id);
+  }
+
+  char old_abs[FILE_MAX];
+  char new_abs[FILE_MAX];
+  join_library_root_and_relative(library_root_path, relative_image_path, old_abs);
+  join_library_root_and_relative(library_root_path, new_relative, new_abs);
+
+  if (BLI_path_cmp(old_abs, new_abs) == 0) {
+    return image_library_index_update_entry(
+        library_root_path, relative_image_path.data(), new_relative, catalog_id);
+  }
+
+  if (BLI_exists(new_abs) && BLI_path_cmp(old_abs, new_abs) != 0) {
+    char unique_name[FILE_MAX];
+    BLI_uniquename_cb(
+        [&](const StringRef check_name) {
+          char test_relative[FILE_MAX];
+          if (target_rel_dir.empty()) {
+            BLI_strncpy(test_relative, check_name.data(), sizeof(test_relative));
+          }
+          else {
+            BLI_path_join(
+                test_relative, sizeof(test_relative), target_rel_dir.c_str(), check_name.data());
+          }
+          char test_abs[FILE_MAX];
+          join_library_root_and_relative(library_root_path, test_relative, test_abs);
+          return BLI_exists(test_abs);
+        },
+        filename,
+        '.',
+        unique_name,
+        sizeof(unique_name));
+
+    if (target_rel_dir.empty()) {
+      STRNCPY(new_relative, unique_name);
+    }
+    else {
+      BLI_path_join(new_relative, sizeof(new_relative), target_rel_dir.c_str(), unique_name);
+    }
+    for (char &c : new_relative) {
+      if (c == SEP) {
+        c = '/';
+      }
+    }
+    join_library_root_and_relative(library_root_path, new_relative, new_abs);
+  }
+
+  if (!BLI_exists(old_abs)) {
+    if (BLI_exists(new_abs)) {
+      printf("[IMG_ASSET_DROP] assign: old missing, new exists -> index-only \"%s\"\n", new_abs);
+      fflush(stdout);
+      return image_library_index_update_entry(
+          library_root_path, relative_image_path.data(), new_relative, catalog_id);
+    }
+    printf("[IMG_ASSET_DROP] assign: fail source missing \"%s\"\n", old_abs);
+    fflush(stdout);
+    return false;
+  }
+
+  if (!BLI_file_ensure_parent_dir_exists(new_abs)) {
+    printf("[IMG_ASSET_DROP] assign: fail create parent dir for \"%s\"\n", new_abs);
+    fflush(stdout);
+    return false;
+  }
+  if (BLI_rename(old_abs, new_abs) != 0) {
+    printf("[IMG_ASSET_DROP] assign: fail rename \"%s\" -> \"%s\"\n", old_abs, new_abs);
+    fflush(stdout);
+    return false;
+  }
+
+  image_library_invalidate_preview_at_path(old_abs);
+  image_library_invalidate_preview_at_path(new_abs);
+
+  return image_library_index_update_entry(
+      library_root_path, relative_image_path.data(), new_relative, catalog_id);
 }
 
 }  // namespace blender::ed::asset

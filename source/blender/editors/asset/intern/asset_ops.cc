@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <cstdio>
 #include <iostream>
 
 #include <fmt/format.h>
@@ -447,26 +448,50 @@ static bool asset_library_refresh_poll(bContext *C)
          list::has_asset_browser_storage_for_library(library, C);
 }
 
-static wmOperatorStatus asset_library_refresh_exec(bContext *C, wmOperator * /*unused*/)
+static void asset_library_refresh_impl(bContext *C, const AssetLibraryReference *library)
 {
-  const AssetLibraryReference *library = CTX_wm_asset_library_ref(C);
+  if (!library) {
+    printf("[IMG_ASSET_DROP] asset_library_refresh_impl: library=null\n");
+    fflush(stdout);
+    return;
+  }
+
+  printf("[IMG_ASSET_DROP] asset_library_refresh_impl: type=%d custom_index=%d\n",
+         int(library->type),
+         library->custom_library_index);
+  fflush(stdout);
 
   /* For custom on-disk libraries, update the image index before clearing the list so
    * that the next read job picks up any files added, moved or deleted since the last
    * scan.  The index write is atomic and fast for unchanged libraries. */
-  if (library && library->type == ASSET_LIBRARY_CUSTOM) {
+  if (library->type == ASSET_LIBRARY_CUSTOM) {
     const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_index(
         &U, library->custom_library_index);
     if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
-      image_library_scan_and_index(user_lib->dirpath);
+      const int indexed = image_library_scan_and_index(user_lib->dirpath);
       image_library_invalidate_cached_previews(user_lib->dirpath);
+      printf("[IMG_ASSET_DROP] image_library_scan_and_index: dir=\"%s\" indexed=%d\n",
+             user_lib->dirpath,
+             indexed);
+      fflush(stdout);
+    }
+    else {
+      printf("[IMG_ASSET_DROP] image_library_scan_and_index: skipped (user_lib=%p remote=%d)\n",
+             static_cast<const void *>(user_lib),
+             user_lib ? int(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) : -1);
+      fflush(stdout);
     }
   }
 
   /* Handles both global asset list storage and asset browsers. */
   list::clear(library, C);
   WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
+  list::tag_refresh_visible_asset_browsers(*library, C);
+}
 
+static wmOperatorStatus asset_library_refresh_exec(bContext *C, wmOperator * /*unused*/)
+{
+  asset_library_refresh_impl(C, CTX_wm_asset_library_ref(C));
   return OPERATOR_FINISHED;
 }
 
@@ -1779,5 +1804,34 @@ void operatortypes_asset()
   WM_operatortype_append(ASSET_OT_images_to_assets);
   WM_operatortype_append(ASSET_OT_image_library_refresh);
 }
+
+namespace list {
+
+void library_refresh(bContext *C, const AssetLibraryReference *library_reference)
+{
+  if (!C) {
+    return;
+  }
+
+  /* Callers with an explicit library (e.g. after drag-drop) run the same logic as the operator
+   * without relying on context poll or #CTX_wm_asset_library_ref. */
+  if (library_reference) {
+    asset_library_refresh_impl(C, library_reference);
+    return;
+  }
+
+  wmOperatorType *ot = WM_operatortype_find("ASSET_OT_library_refresh", false);
+  if (ot && WM_operator_poll(C, ot)) {
+    const wmOperatorStatus status = WM_operator_name_call(
+        C, "ASSET_OT_library_refresh", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+    if (ELEM(status, OPERATOR_FINISHED, OPERATOR_RUNNING_MODAL)) {
+      return;
+    }
+  }
+
+  asset_library_refresh_impl(C, CTX_wm_asset_library_ref(C));
+}
+
+}  // namespace list
 
 }  // namespace blender::ed::asset

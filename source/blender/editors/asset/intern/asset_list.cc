@@ -12,6 +12,7 @@
  * there's not much time for a more long-term solution.
  */
 
+#include <cstdio>
 #include <optional>
 #include <string>
 
@@ -508,17 +509,69 @@ static void foreach_visible_asset_browser_showing_library(
   }
 }
 
+void tag_refresh_visible_asset_browsers(const AssetLibraryReference &library_reference,
+                                        const bContext *C)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (!wm) {
+    printf("[IMG_ASSET_DROP] tag_refresh_visible_asset_browsers: wm=null\n");
+    fflush(stdout);
+    return;
+  }
+
+  int refresh_area_count = 0;
+  for (const wmWindow &win : wm->windows) {
+    const bScreen *screen = WM_window_get_active_screen(&win);
+    for (ScrArea &area : screen->areabase) {
+      if (area.spacetype != SPACE_FILE) {
+        continue;
+      }
+      SpaceFile *sfile = reinterpret_cast<SpaceFile *>(area.spacedata.first);
+      if (sfile->browse_mode != FILE_BROWSE_MODE_ASSETS) {
+        continue;
+      }
+      if (!sfile->asset_params) {
+        continue;
+      }
+      if (sfile->asset_params->asset_library_ref != library_reference) {
+        continue;
+      }
+      refresh_area_count++;
+      ED_area_tag_refresh(&area);
+    }
+  }
+  printf("[IMG_ASSET_DROP] tag_refresh_visible_asset_browsers: tagged %d area(s)\n",
+         refresh_area_count);
+  fflush(stdout);
+}
+
 void clear(const AssetLibraryReference *library_reference, wmWindowManager *wm)
 {
+  printf("[IMG_ASSET_DROP] list::clear: type=%d custom_index=%d\n",
+         int(library_reference->type),
+         library_reference->custom_library_index);
+  fflush(stdout);
+
   AssetList *list = lookup_list(*library_reference);
   if (list) {
     list->clear(wm);
   }
+  else {
+    printf("[IMG_ASSET_DROP] list::clear: no global AssetList storage for library\n");
+    fflush(stdout);
+  }
 
+  int browser_clear_count = 0;
   /* Only needs to cover visible file/asset browsers, since others are already cleared through area
    * exiting. */
   foreach_visible_asset_browser_showing_library(
-      *library_reference, wm, [&](SpaceFile &sfile) { ED_fileselect_clear(wm, &sfile); });
+      *library_reference, wm, [&](SpaceFile &sfile) {
+        browser_clear_count++;
+        ED_fileselect_clear(wm, &sfile);
+      });
+  printf("[IMG_ASSET_DROP] list::clear: ED_fileselect_clear on %d asset browser(s)\n",
+         browser_clear_count);
+  fflush(stdout);
 
   /* Always clear the all library when clearing a nested one. */
   if (library_reference->type != ASSET_LIBRARY_ALL) {

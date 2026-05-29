@@ -20,6 +20,7 @@
 #include "AS_asset_representation.hh"
 
 #include "BLI_math_base.h"
+#include "BLI_path_utils.hh"
 
 #include "BKE_context.hh"
 #include "BKE_image.hh"
@@ -259,27 +260,67 @@ class ImageAssetGridItem : public PreviewGridItem {
     return &image_->id;
   }
 
+  const Image *item_image() const
+  {
+    if (kind_ == ImageGridItemKind::BlendImage) {
+      return image_;
+    }
+    if (ID *id = asset_->local_id()) {
+      if (GS(id->name) == ID_IM) {
+        return reinterpret_cast<const Image *>(id);
+      }
+    }
+    return nullptr;
+  }
+
+  static const Image *active_slot_image(const PointerRNA &active_ptr)
+  {
+    if (!active_ptr.data || !active_ptr.type || !RNA_struct_is_ID(active_ptr.type)) {
+      return nullptr;
+    }
+    ID *active_id = static_cast<ID *>(active_ptr.data);
+    if (GS(active_id->name) == ID_TE) {
+      const Tex *tex = reinterpret_cast<const Tex *>(active_id);
+      if (tex->type == TEX_IMAGE) {
+        return tex->ima;
+      }
+      return nullptr;
+    }
+    if (GS(active_id->name) == ID_IM) {
+      return reinterpret_cast<const Image *>(active_id);
+    }
+    return nullptr;
+  }
+
+  static bool image_matches_asset(const Image &image, const asset_system::AssetRepresentation &asset)
+  {
+    if (const ID *local_id = asset.local_id()) {
+      return &image.id == local_id;
+    }
+    const std::string asset_path = asset.full_path();
+    if (asset_path.empty() || image.filepath[0] == '\0') {
+      return false;
+    }
+    return BLI_path_cmp_normalized(asset_path.c_str(), image.filepath) == 0;
+  }
+
   bool is_active_texture() const
   {
     const PointerRNA active_ptr = RNA_property_pointer_get(&target_ptr_, target_prop_);
-    if (!active_ptr.data) {
+    const Image *active_image = active_slot_image(active_ptr);
+    if (!active_image) {
       return false;
     }
 
-    const ID *image_id = this->get_id();
-    if (!image_id) {
-      return false;
+    if (const Image *item_im = this->item_image()) {
+      return item_im == active_image;
     }
 
-    if (active_ptr.type && RNA_struct_is_ID(active_ptr.type)) {
-      ID *active_id = static_cast<ID *>(active_ptr.data);
-      if (GS(active_id->name) == ID_TE) {
-        const Tex *tex = reinterpret_cast<const Tex *>(active_id);
-        return tex->type == TEX_IMAGE && tex->ima == reinterpret_cast<const Image *>(image_id);
-      }
+    if (kind_ == ImageGridItemKind::Asset) {
+      return image_matches_asset(*active_image, *asset_);
     }
 
-    return active_ptr.data == image_id;
+    return false;
   }
 
   static int preview_icon_id_for_id(const bContext &C, ID &id)

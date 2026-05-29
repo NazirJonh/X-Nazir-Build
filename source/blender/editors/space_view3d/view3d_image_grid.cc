@@ -88,7 +88,7 @@ void image_grid_notify_change(bContext &C)
 int image_grid_effective_rows(const View3D &v3d)
 {
   const int stored = v3d.image_grid_rows;
-  return clamp_i(stored ? stored : 3, 1, 16);
+  return clamp_i(stored ? stored : 1, 1, 16);
 }
 
 int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d)

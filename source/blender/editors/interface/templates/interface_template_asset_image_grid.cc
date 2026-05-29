@@ -57,9 +57,12 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "ED_asset_shelf.hh"
 #include "ED_view3d.hh"
 
 namespace blender::ui {
+
+static const char *IMAGE_TEXTURE_SHELF_IDNAME = "VIEW3D_AST_image_texture";
 
 /** Safety cap for N-panel performance; not the old MVP `rows * cols` display limit. */
 constexpr int IMAGE_GRID_MAX_ITEMS = 128;
@@ -559,19 +562,16 @@ class ImageAssetGridView : public AbstractGridView {
 /** \name Template UI
  * \{ */
 
-static void add_browse_more_button(Layout &layout,
-                                   bContext & /*C*/,
-                                   const AssetLibraryReference &library_ref)
+static void add_browse_image_button(Layout &layout,
+                                    bContext &C,
+                                    ed::view3d::ImageGridUIState &state,
+                                    PointerRNA &target_ptr)
 {
-  Layout &row = layout.row(false);
-  PointerRNA op_ptr = row.op("VIEW3D_OT_image_grid_browse_assets",
-                             IFACE_("Browse More"),
-                             ICON_FILEBROWSER,
-                             wm::OpCallContext::ExecDefault,
-                             UI_ITEM_NONE);
-  RNA_enum_set(&op_ptr,
-               "asset_library_reference",
-               ed::asset::library_reference_to_enum_value(&library_ref));
+  ed::view3d::image_grid_prepare_browse_shelf(C, state, IMAGE_TEXTURE_SHELF_IDNAME);
+
+  layout.context_string_set("asset_shelf_idname", IMAGE_TEXTURE_SHELF_IDNAME);
+  layout.context_ptr_set("image_grid_target", &target_ptr);
+  layout.popover(&C, "ASSETSHELF_PT_popover_panel", IFACE_("Browse Image"), ICON_FILEBROWSER);
 }
 
 static void draw_header_row(Layout &layout,
@@ -773,7 +773,7 @@ void template_asset_image_grid(Layout *layout,
 
   draw_header_row(*layout, state, *C);
   build_image_grid(*layout, *C, state, *ptr, prop);
-  add_browse_more_button(*layout, *C, state.lib_ref);
+  add_browse_image_button(*layout, *C, state, *ptr);
 }
 
 /** \} */

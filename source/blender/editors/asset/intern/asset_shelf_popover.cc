@@ -75,7 +75,7 @@ static AssetShelf *lookup_shelf_for_popup(const bContext &C, const AssetShelfTyp
   return nullptr;
 }
 
-static AssetShelf *get_shelf_for_popup(const bContext &C, AssetShelfType &shelf_type)
+AssetShelf *popup_shelf_get_or_create(const bContext &C, AssetShelfType &shelf_type)
 {
   Vector<AssetShelf *> &popup_shelves = StaticPopupShelves::shelves();
 
@@ -231,7 +231,7 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
   ui::Layout &layout = *panel->layout;
   layout.ui_units_x_set(layout_width_units);
 
-  AssetShelf *shelf = get_shelf_for_popup(*C, *shelf_type);
+  AssetShelf *shelf = popup_shelf_get_or_create(*C, *shelf_type);
   if (!shelf) {
     BLI_assert_unreachable();
     return;

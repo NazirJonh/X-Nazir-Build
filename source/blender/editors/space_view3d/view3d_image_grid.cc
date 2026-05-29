@@ -41,7 +41,10 @@
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_mark_clear.hh"
+#include "ED_asset_menu_utils.hh"
+#include "ED_asset_shelf.hh"
 #include "ED_screen.hh"
+#include "ED_view3d.hh"
 
 #include "BLI_string_utf8.h"
 
@@ -312,6 +315,7 @@ static Image *image_grid_resolve_image(bContext &C, wmOperator &op)
   return found_image;
 }
 
+
 static wmOperatorStatus image_grid_assign_texture_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
@@ -402,6 +406,112 @@ void VIEW3D_OT_image_grid_assign_texture(wmOperatorType *ot)
                  "Library-relative asset identifier when the image is not local");
 }
 
+static wmOperatorStatus image_shelf_activate_asset_exec(bContext *C, wmOperator *op)
+{
+  PointerRNA target_ptr = CTX_data_pointer_get(C, "image_grid_target");
+  if (!target_ptr.data || !target_ptr.owner_id || GS(target_ptr.owner_id->name) != ID_BR) {
+    BKE_report(op->reports, RPT_ERROR, "No brush target in context");
+    return OPERATOR_CANCELLED;
+  }
+
+  Main *bmain = CTX_data_main(C);
+  Brush *brush = reinterpret_cast<Brush *>(
+      BKE_libblock_find_session_uid(bmain, ID_BR, target_ptr.owner_id->session_uid));
+  if (!brush) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Reconstruct the asset weak reference from operator properties set by the asset shelf. */
+  AssetWeakReference weak_ref{};
+  weak_ref.asset_library_type = eAssetLibraryType(RNA_enum_get(op->ptr, "asset_library_type"));
+  weak_ref.asset_library_identifier = RNA_string_get_alloc(
+      op->ptr, "asset_library_identifier", nullptr, 0, nullptr);
+  weak_ref.relative_asset_identifier = RNA_string_get_alloc(
+      op->ptr, "relative_asset_identifier", nullptr, 0, nullptr);
+
+  /* Search for the asset in the shelf's current library first. The shelf fetches its specific
+   * library (e.g. a custom image library), which may not yet appear in the combined ALL-library
+   * view when that combined fetch hasn't been separately requested. */
+  const asset_system::AssetRepresentation *asset = nullptr;
+  if (AssetShelfType *shelf_type = ed::asset::shelf::type_find_from_idname(
+          "VIEW3D_AST_image_texture"))
+  {
+    if (AssetShelf *shelf = ed::asset::shelf::popup_shelf_get_or_create(*C, *shelf_type)) {
+      ed::asset::list::iterate(
+          shelf->settings.asset_library_reference,
+          [&](asset_system::AssetRepresentation &a) {
+            if (a.make_weak_reference() == weak_ref) {
+              asset = &a;
+              return false;
+            }
+            return true;
+          });
+    }
+  }
+
+  /* Fallback: search the combined all-library view (standard path for .blend library assets). */
+  if (!asset) {
+    asset = ed::asset::find_asset_from_weak_ref(*C, weak_ref, op->reports);
+  }
+
+  if (!asset || asset->get_id_type() != ID_IM) {
+    if (asset) {
+      BKE_report(op->reports, RPT_ERROR, "Selected asset is not an image");
+    }
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Resolve image: prefer already-loaded local ID, then import from .blend library, then
+   * load from disk for direct-file assets stored outside a .blend library. */
+  Image *image = nullptr;
+  if (ID *local_id = asset->local_id()) {
+    image = id_cast<Image *>(local_id);
+  }
+  else if (!asset->full_library_path().empty()) {
+    if (ID *imported_id = ed::asset::asset_local_id_ensure_imported(*bmain, *asset)) {
+      if (GS(imported_id->name) == ID_IM) {
+        image = id_cast<Image *>(imported_id);
+      }
+    }
+  }
+  else {
+    image = BKE_image_load_exists(bmain, asset->full_path().c_str());
+  }
+
+  if (!image) {
+    BKE_report(op->reports, RPT_ERROR, "Could not load image asset");
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool use_mask_slot = image_grid_slot_is_mask(target_ptr);
+  MTex *mtex = use_mask_slot ? &brush->mask_mtex : &brush->mtex;
+
+  Tex *tex = brush_texture_for_image(*bmain, *image, &brush->id);
+  if (!tex) {
+    return OPERATOR_CANCELLED;
+  }
+
+  brush_mtex_slot_set_texture(mtex, tex, brush);
+
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  BKE_paint_invalidate_overlay_tex(*bmain, scene, view_layer, tex);
+
+  WM_event_add_notifier(C, NC_BRUSH, brush);
+  WM_event_add_notifier(C, NC_ID | NA_EDITED, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void VIEW3D_OT_image_shelf_activate_asset(wmOperatorType *ot)
+{
+  ot->name = "Activate Image Asset";
+  ot->description = "Assign the selected image asset to the brush texture slot";
+  ot->idname = "VIEW3D_OT_image_shelf_activate_asset";
+  ot->exec = image_shelf_activate_asset_exec;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ed::asset::operator_asset_reference_props_register(*ot->srna);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -488,6 +598,8 @@ static wmOperatorStatus image_grid_set_library_exec(bContext *C, wmOperator *op)
   state.lib_ref = new_ref;
   state.enabled_catalog_paths.clear();
   state.scroll_row = 0;
+
+  image_grid_prepare_browse_shelf(*C, state, "VIEW3D_AST_image_texture");
 
   image_grid_notify_change(*C);
   return OPERATOR_FINISHED;
@@ -977,17 +1089,6 @@ static void image_grid_catalog_selector_draw(const bContext *C, Panel *panel)
 
   ui::Layout &layout = *panel->layout;
   layout.operator_context_set(wm::OpCallContext::InvokeDefault);
-
-  /* Library selector row. */
-  ui::Layout &lib_row = layout.row(true);
-  lib_row.op("VIEW3D_OT_image_grid_set_library",
-              ed::view3d::image_grid_library_ui_name(state.lib_ref),
-              ICON_ASSET_MANAGER,
-              wm::OpCallContext::InvokeDefault,
-              UI_ITEM_NONE);
-  if (state.lib_ref.type != ASSET_LIBRARY_LOCAL) {
-    lib_row.op("VIEW3D_OT_image_grid_refresh_library", "", ICON_FILE_REFRESH);
-  }
 
   /* Catalog tree. */
   ed::asset::list::storage_fetch(&state.lib_ref, C);

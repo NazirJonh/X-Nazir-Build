@@ -23,6 +23,7 @@ namespace blender {
 
 /* ********* exports for space_view3d/ module ********** */
 struct ARegion;
+struct AssetShelf;
 struct BMEdge;
 struct BMElem;
 struct BMEditMesh;
@@ -1499,6 +1500,17 @@ ImageGridUIState &image_grid_state_get_from_context(const bContext &C);
 void image_grid_state_reset_catalog(ImageGridUIState &state);
 void image_grid_state_remove(const View3D &v3d);
 void image_grid_notify_change(bContext &C);
+
+/** Copy grid library/catalog filter into popup asset shelf before opening browse UI. */
+void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState &state);
+
+/** Copy popup shelf library/catalog back into grid state; resets scroll row. */
+void image_grid_sync_state_from_shelf(ImageGridUIState &state, const AssetShelf &shelf);
+
+/** Prepare popup shelf for image browse; returns null if shelf type missing or poll fails. */
+AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
+                                            ImageGridUIState &state,
+                                            const char *shelf_idname);
 
 /** Return the short display name for an asset library reference (used in image grid UI). */
 const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref);

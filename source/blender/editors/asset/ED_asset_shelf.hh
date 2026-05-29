@@ -14,6 +14,7 @@ namespace blender {
 
 struct ARegion;
 struct ARegionType;
+struct AssetLibraryReference;
 struct AssetShelf;
 struct AssetShelfSettings;
 struct AssetShelfType;
@@ -31,6 +32,7 @@ struct wmWindowManager;
 class StringRef;
 class StringRefNull;
 namespace asset_system {
+class AssetCatalogPath;
 class AssetRepresentation;
 }
 
@@ -98,6 +100,24 @@ AssetShelfType *type_find_from_idname(StringRef idname);
 
 void type_popup_unlink(const AssetShelfType &shelf_type);
 void ensure_asset_library_fetched(const bContext &C, const AssetShelfType &shelf_type);
+
+/**
+ * Return the static popup #AssetShelf instance for \a shelf_type, creating it if
+ * #type_poll_for_popup passes. Used by UI outside the default asset-shelf popover panel.
+ */
+AssetShelf *popup_shelf_get_or_create(const bContext &C, AssetShelfType &shelf_type);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Asset Shelf Settings
+ * \{ */
+
+AssetLibraryReference &settings_ensure_valid_library_ref(AssetShelfSettings &settings);
+void settings_set_active_catalog(AssetShelfSettings &settings,
+                                 const asset_system::AssetCatalogPath &path);
+void settings_set_all_catalog_active(AssetShelfSettings &settings);
+bool settings_is_all_catalog_active(const AssetShelfSettings &settings);
 
 /** \} */
 

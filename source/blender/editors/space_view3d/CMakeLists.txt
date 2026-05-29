@@ -41,6 +41,7 @@ set(SRC
   view3d_header.cc
   view3d_image_grid.cc
   view3d_image_grid_state.cc
+  view3d_image_shelf_sync.cc
   view3d_iterators.cc
   view3d_navigate.cc
   view3d_navigate_fly.cc
@@ -84,6 +85,7 @@ set(LIB
   PRIVATE bf::depsgraph
   PRIVATE bf::dna
   PRIVATE bf::draw
+  bf_editor_asset
   bf_editor_curves
   bf_editor_lattice
   bf_editor_mesh

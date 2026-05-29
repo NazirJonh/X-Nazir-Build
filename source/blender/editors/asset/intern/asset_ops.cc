@@ -7,7 +7,6 @@
  */
 
 #include <algorithm>
-#include <cstdio>
 #include <iostream>
 
 #include <fmt/format.h>
@@ -451,15 +450,8 @@ static bool asset_library_refresh_poll(bContext *C)
 static void asset_library_refresh_impl(bContext *C, const AssetLibraryReference *library)
 {
   if (!library) {
-    printf("[IMG_ASSET_DROP] asset_library_refresh_impl: library=null\n");
-    fflush(stdout);
     return;
   }
-
-  printf("[IMG_ASSET_DROP] asset_library_refresh_impl: type=%d custom_index=%d\n",
-         int(library->type),
-         library->custom_library_index);
-  fflush(stdout);
 
   /* For custom on-disk libraries, update the image index before clearing the list so
    * that the next read job picks up any files added, moved or deleted since the last
@@ -468,18 +460,8 @@ static void asset_library_refresh_impl(bContext *C, const AssetLibraryReference 
     const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_index(
         &U, library->custom_library_index);
     if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
-      const int indexed = image_library_scan_and_index(user_lib->dirpath);
+      image_library_scan_and_index(user_lib->dirpath);
       image_library_invalidate_cached_previews(user_lib->dirpath);
-      printf("[IMG_ASSET_DROP] image_library_scan_and_index: dir=\"%s\" indexed=%d\n",
-             user_lib->dirpath,
-             indexed);
-      fflush(stdout);
-    }
-    else {
-      printf("[IMG_ASSET_DROP] image_library_scan_and_index: skipped (user_lib=%p remote=%d)\n",
-             static_cast<const void *>(user_lib),
-             user_lib ? int(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) : -1);
-      fflush(stdout);
     }
   }
 

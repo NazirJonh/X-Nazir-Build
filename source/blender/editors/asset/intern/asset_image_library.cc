@@ -7,7 +7,6 @@
  */
 
 #include <climits>
-#include <cstdio>
 #include <fstream>
 #include <optional>
 #include <set>
@@ -439,8 +438,6 @@ static bool image_library_index_update_entry(const char *library_root_path,
   }
 
   if (!found) {
-    printf("[IMG_ASSET_DROP] assign: index update fail, no entry for \"%s\"\n", old_relative_path);
-    fflush(stdout);
     return false;
   }
   return image_library_index_write_atomic(library_root_path, *index);
@@ -595,9 +592,7 @@ static bool image_library_invalidate_preview_callback(void * /*userdata*/,
 {
   char full_path[FILE_MAX];
   BLI_path_join(full_path, sizeof(full_path), library_root, relative_image_path);
-  BKE_previewimg_cached_release(full_path);
-  IMB_thumb_delete(full_path, THB_LARGE);
-  IMB_thumb_delete(full_path, THB_NORMAL);
+  image_library_invalidate_preview_at_path(full_path);
   return true;
 }
 
@@ -753,25 +748,15 @@ bool image_library_assign_image_to_catalog(const char *library_root_path,
                                            const bUUID &catalog_id)
 {
   if (!image_library_is_editable_root(library_root_path)) {
-    printf("[IMG_ASSET_DROP] assign: fail not editable root \"%s\"\n", library_root_path);
-    fflush(stdout);
     return false;
   }
 
   const AssetCatalog *catalog = library.catalog_service().find_catalog(catalog_id);
   if (!catalog) {
-    char catalog_id_str[UUID_STRING_SIZE];
-    BLI_uuid_format(catalog_id_str, catalog_id);
-    printf("[IMG_ASSET_DROP] assign: fail catalog not found id=%s\n", catalog_id_str);
-    fflush(stdout);
     return false;
   }
 
   const std::string target_rel_dir = relative_dir_from_catalog_path(catalog->path.c_str());
-  printf("[IMG_ASSET_DROP] assign: catalog_path=\"%s\" target_rel_dir=\"%s\"\n",
-         catalog->path.c_str(),
-         target_rel_dir.c_str());
-  fflush(stdout);
 
   char filename[FILE_MAX];
   BLI_path_split_file_part(relative_image_path.data(), filename, sizeof(filename));
@@ -841,24 +826,17 @@ bool image_library_assign_image_to_catalog(const char *library_root_path,
 
   if (!BLI_exists(old_abs)) {
     if (BLI_exists(new_abs)) {
-      printf("[IMG_ASSET_DROP] assign: old missing, new exists -> index-only \"%s\"\n", new_abs);
-      fflush(stdout);
+      /* File was already moved (e.g. by a previous interrupted drop); only update the index. */
       return image_library_index_update_entry(
           library_root_path, relative_image_path.data(), new_relative, catalog_id);
     }
-    printf("[IMG_ASSET_DROP] assign: fail source missing \"%s\"\n", old_abs);
-    fflush(stdout);
     return false;
   }
 
   if (!BLI_file_ensure_parent_dir_exists(new_abs)) {
-    printf("[IMG_ASSET_DROP] assign: fail create parent dir for \"%s\"\n", new_abs);
-    fflush(stdout);
     return false;
   }
   if (BLI_rename(old_abs, new_abs) != 0) {
-    printf("[IMG_ASSET_DROP] assign: fail rename \"%s\" -> \"%s\"\n", old_abs, new_abs);
-    fflush(stdout);
     return false;
   }
 

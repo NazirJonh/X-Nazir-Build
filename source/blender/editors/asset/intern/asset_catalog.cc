@@ -110,14 +110,20 @@ void catalog_rename(AssetLibrary *library,
 
   const AssetCatalogPath old_path = catalog->path;
 
-  catalog_service.undo_push();
-  catalog_service.tag_has_unsaved_changes(catalog);
-
+  /* Rename the on-disk mirror folder before touching the in-memory catalog state so that a failed
+   * rename (destination already exists) aborts the operation and leaves both disk and memory
+   * consistent.  NOTE: the catalog undo stack is memory-only; pressing Ctrl+Z will revert the
+   * in-memory path but will not rename the folder back on disk. */
   if (const char *library_root = image_library_editable_root_from_asset_library(*library)) {
-    image_library_catalog_directory_relocate(
-        library_root, old_path.c_str(), clean_new_path.c_str());
+    if (!image_library_catalog_directory_relocate(
+            library_root, old_path.c_str(), clean_new_path.c_str()))
+    {
+      return;
+    }
   }
 
+  catalog_service.undo_push();
+  catalog_service.tag_has_unsaved_changes(catalog);
   catalog_service.update_catalog_path(catalog_id, clean_new_path);
   WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
 }
@@ -159,14 +165,17 @@ void catalog_move(AssetLibrary *library,
 
   const AssetCatalogPath old_path = src_catalog->path;
 
-  catalog_service.undo_push();
-  catalog_service.tag_has_unsaved_changes(src_catalog);
-
+  /* See comment in catalog_rename: disk rename must succeed before memory state changes. */
   if (const char *library_root = image_library_editable_root_from_asset_library(*library)) {
-    image_library_catalog_directory_relocate(
-        library_root, old_path.c_str(), clean_new_path.c_str());
+    if (!image_library_catalog_directory_relocate(
+            library_root, old_path.c_str(), clean_new_path.c_str()))
+    {
+      return;
+    }
   }
 
+  catalog_service.undo_push();
+  catalog_service.tag_has_unsaved_changes(src_catalog);
   catalog_service.update_catalog_path(src_catalog_id, clean_new_path);
   WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
 }

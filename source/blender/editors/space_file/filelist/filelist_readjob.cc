@@ -9,8 +9,6 @@
 #include "BKE_context.hh"
 #include "BKE_main.hh"
 
-#include <cstdio>
-
 #include "BLI_listbase.h"
 #include "BLI_string.h"
 
@@ -142,9 +140,6 @@ static void filelist_readjob_endjob(void *flrjv)
   /* Canceled jobs (#filelist_readjob_stop) must not resurrect partial entries into the filelist.
    * That would clear #FL_FORCE_RESET semantics and leave stale UI until a manual refresh. */
   if (flrj->stop && *flrj->stop) {
-    printf("[IMG_ASSET_DROP] filelist_readjob_endjob: CANCELED (stop=true), skip update\n");
-    fflush(stdout);
-    filelist_debug_log_state(flrj->filelist, "readjob_endjob_canceled");
     flrj->filelist->flags &= ~FL_IS_PENDING;
     WM_reports_from_reports_move(flrj->wm, &flrj->reports);
     BKE_reports_free(&flrj->reports);
@@ -156,10 +151,6 @@ static void filelist_readjob_endjob(void *flrjv)
 
   flrj->filelist->flags &= ~FL_IS_PENDING;
   flrj->filelist->flags |= FL_IS_READY;
-  printf("[IMG_ASSET_DROP] filelist_readjob_endjob: finished entries_num=%d\n",
-         flrj->filelist->filelist.entries_num);
-  fflush(stdout);
-  filelist_debug_log_state(flrj->filelist, "readjob_endjob_done");
 
   WM_reports_from_reports_move(flrj->wm, &flrj->reports);
   BKE_reports_free(&flrj->reports);
@@ -212,20 +203,8 @@ static void filelist_readjob_start_ex(FileList *filelist,
   FileListReadJob *flrj;
 
   if (!filelist_is_dir(filelist, filelist->filelist.root)) {
-    printf("[IMG_ASSET_DROP] filelist_readjob_start_ex: ABORT root is not a dir \"%s\" "
-           "(blocking=%d)\n",
-           filelist->filelist.root,
-           int(force_blocking_read));
-    fflush(stdout);
-    filelist_debug_log_state(filelist, "readjob_start_aborted_not_dir");
     return;
   }
-
-  printf("[IMG_ASSET_DROP] filelist_readjob_start_ex: root=\"%s\" blocking=%d\n",
-         filelist->filelist.root,
-         int(force_blocking_read));
-  fflush(stdout);
-  filelist_debug_log_state(filelist, "readjob_start_ex");
 
   /* prepare job data */
   flrj = MEM_new<FileListReadJob>(__func__);

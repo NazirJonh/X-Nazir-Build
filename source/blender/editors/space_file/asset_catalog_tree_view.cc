@@ -39,8 +39,6 @@
 #include "file_intern.hh"
 #include "filelist.hh"
 
-#include <cstdio>
-
 #include <fmt/format.h>
 
 namespace blender {
@@ -486,75 +484,40 @@ bool AssetCatalogDropTarget::drop_assets_into_catalog(bContext *C,
   BLI_assert(drag.type == WM_DRAG_ASSET_LIST);
   const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
   if (!asset_drags) {
-    printf("[IMG_ASSET_DROP] drop_assets_into_catalog: no asset drag items\n");
-    fflush(stdout);
     return false;
   }
 
   const char *library_root = asset::image_library_editable_root_from_asset_library(
       *tree_view.asset_library_);
-  printf("[IMG_ASSET_DROP] drop_assets_into_catalog: library_root=%s browse_mode=%d files=%p\n",
-         library_root ? library_root : "(null)",
-         int(tree_view.space_file_.browse_mode),
-         static_cast<void *>(tree_view.space_file_.files));
-  fflush(stdout);
-  filelist_debug_log_state(tree_view.space_file_.files, "drop_begin");
 
   bool did_update = false;
-  bool moved_image_on_disk = false;
-  /** Tried to move an on-disk image; refresh even if assign failed (UI may be stale). */
+  /* Set when an on-disk image drop was attempted (even if the assign itself failed) so that the
+   * filelist is refreshed and any stale entries are cleared from the UI. */
   bool attempted_image_catalog_drop = false;
   for (wmDragAssetListItem &asset_item : *asset_drags) {
     if (asset_item.is_external) {
       const asset_system::AssetRepresentation *asset =
           asset_item.asset_data.external_info->asset;
-      if (!asset) {
-        printf("[IMG_ASSET_DROP] skip external: asset=null\n");
-        fflush(stdout);
-        continue;
-      }
-      if (!asset::image_library_asset_is_movable_on_disk(*asset)) {
-        printf("[IMG_ASSET_DROP] skip external: not movable path=\"%s\"\n",
-               asset->library_relative_identifier().c_str());
-        fflush(stdout);
-        continue;
-      }
-      if (!library_root) {
-        printf("[IMG_ASSET_DROP] skip external: library_root=null\n");
-        fflush(stdout);
+      if (!asset || !asset::image_library_asset_is_movable_on_disk(*asset) || !library_root) {
         continue;
       }
 
       attempted_image_catalog_drop = true;
 
-      printf("[IMG_ASSET_DROP] assign_image_to_catalog: from=\"%s\" catalog_id=%s\n",
-             asset->library_relative_identifier().c_str(),
-             catalog_id.str().c_str());
-      fflush(stdout);
-
       if (!asset::image_library_assign_image_to_catalog(library_root,
-                                                 *tree_view.asset_library_,
-                                                 asset->library_relative_identifier(),
-                                                 catalog_id))
+                                                        *tree_view.asset_library_,
+                                                        asset->library_relative_identifier(),
+                                                        catalog_id))
       {
-        printf("[IMG_ASSET_DROP] assign_image_to_catalog: FAILED (will still refresh filelist)\n");
-        fflush(stdout);
         continue;
       }
 
-      printf("[IMG_ASSET_DROP] assign_image_to_catalog: OK\n");
-      fflush(stdout);
-
       BKE_asset_metadata_catalog_id_set(
           &asset->get_metadata(), catalog_id, simple_name.c_str());
-      /* Drop holds a pointer to the pre-move representation; remove it so the next read job does
-       * not reuse stale paths from the in-memory asset library cache. */
-      const bool removed = tree_view.asset_library_->remove_asset(
-          const_cast<AssetRepresentation &>(*asset));
-      printf("[IMG_ASSET_DROP] remove_asset(pre-move): %s\n", removed ? "ok" : "not_found");
-      fflush(stdout);
+      /* Remove the pre-move representation so the next read job does not reuse stale paths from
+       * the in-memory asset library cache. */
+      tree_view.asset_library_->remove_asset(const_cast<AssetRepresentation &>(*asset));
       did_update = true;
-      moved_image_on_disk = true;
       continue;
     }
 
@@ -563,75 +526,26 @@ bool AssetCatalogDropTarget::drop_assets_into_catalog(bContext *C,
         asset_item.asset_data.local_id->asset_data, catalog_id, simple_name.c_str());
   }
 
-  printf("[IMG_ASSET_DROP] drop loop done: did_update=%d moved_image_on_disk=%d "
-         "attempted_image=%d\n",
-         int(did_update),
-         int(moved_image_on_disk),
-         int(attempted_image_catalog_drop));
-  fflush(stdout);
-
-  const bool needs_image_library_refresh = moved_image_on_disk || attempted_image_catalog_drop;
-
-  if (needs_image_library_refresh) {
-    /* Same path as bpy.ops.asset.library_refresh(), then reload this browser's filelist
-       * immediately (area tag refresh alone may not run #file_refresh before the next draw). */
-      const std::optional<AssetLibraryReference> library_ref =
-          tree_view.asset_library_->library_reference();
-      FileAssetSelectParams *asset_params = ED_fileselect_get_asset_params(&tree_view.space_file_);
-      printf("[IMG_ASSET_DROP] refresh: library_ref=%s asset_params=%p\n",
-             library_ref ? "yes" : "no",
-             static_cast<void *>(asset_params));
-      fflush(stdout);
-
-      if (library_ref) {
-        printf("[IMG_ASSET_DROP] calling library_refresh (from AssetLibrary)\n");
-        fflush(stdout);
-        asset::list::library_refresh(C, &*library_ref);
-      }
-      else if (asset_params) {
-        printf("[IMG_ASSET_DROP] calling library_refresh (from asset_params)\n");
-        fflush(stdout);
-        asset::list::library_refresh(C, &asset_params->asset_library_ref);
-      }
-      else {
-        printf("[IMG_ASSET_DROP] WARNING: no library_ref for library_refresh\n");
-        fflush(stdout);
-      }
-
-      printf("[IMG_ASSET_DROP] calling ED_fileselect_refresh_filelist\n");
-      fflush(stdout);
-      ED_fileselect_refresh_filelist(C, &tree_view.space_file_);
-      filelist_debug_log_state(tree_view.space_file_.files, "after_ED_fileselect_refresh");
-
-      wmWindowManager *wm = CTX_wm_manager(C);
-      FileList *files = tree_view.space_file_.files;
-      if (!wm) {
-        printf("[IMG_ASSET_DROP] WARNING: wm=null, skip blocking read\n");
-        fflush(stdout);
-      }
-      else if (!files) {
-        printf("[IMG_ASSET_DROP] WARNING: files=null, skip blocking read\n");
-        fflush(stdout);
-      }
-      else {
-        filelist_readjob_stop(files, wm);
-        filelist_debug_log_state(files, "after_readjob_stop");
-        const int needs_reading = filelist_needs_reading(files);
-        printf("[IMG_ASSET_DROP] blocking_read: needs_reading=%d\n", needs_reading);
-        fflush(stdout);
-        if (needs_reading) {
-          filelist_readjob_blocking_run(files, NC_SPACE | ND_SPACE_FILE_LIST, C);
-        }
-        filelist_sort(files);
-        filelist_filter(files);
-        filelist_debug_log_state(files, "after_blocking_read_and_filter");
-      }
+  if (attempted_image_catalog_drop) {
+    /* Follow the same path as #ASSET_OT_library_refresh: scan+index, clear filelist with
+     * force-reset, send notifier, tag visible browsers — the async read job starts on next draw. */
+    const std::optional<AssetLibraryReference> library_ref =
+        tree_view.asset_library_->library_reference();
+    if (library_ref) {
+      asset::list::library_refresh(C, &*library_ref);
+    }
+    else if (const FileAssetSelectParams *asset_params =
+                 ED_fileselect_get_asset_params(&tree_view.space_file_))
+    {
+      asset::list::library_refresh(C, &asset_params->asset_library_ref);
+    }
   }
   else if (did_update && tree_view.space_file_.files) {
+    /* Internal asset: re-run filter to update visible assets. */
     filelist_tag_needs_filtering(tree_view.space_file_.files);
   }
 
-  if (did_update || needs_image_library_refresh) {
+  if (did_update || attempted_image_catalog_drop) {
     file_select_deselect_all(&tree_view.space_file_, FILE_SEL_SELECTED | FILE_SEL_HIGHLIGHTED);
     WM_main_add_notifier(NC_SPACE | ND_SPACE_FILE_LIST, nullptr);
     WM_main_add_notifier(NC_ASSET | ND_ASSET_CATALOGS, nullptr);

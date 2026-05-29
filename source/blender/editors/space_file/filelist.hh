@@ -140,8 +140,6 @@ void filelist_setdir(FileList *filelist, char dirpath[/*FILE_MAX_LIBEXTRA*/ 1282
  */
 int filelist_files_ensure(FileList *filelist);
 int filelist_needs_reading(const FileList *filelist);
-/** Temporary debug logging for image asset drop refresh (grep console for IMG_ASSET_DROP). */
-void filelist_debug_log_state(const FileList *filelist, const char *tag);
 /**
  * Request a file from the file browser cache, adding it to the cache if necessary.
  *

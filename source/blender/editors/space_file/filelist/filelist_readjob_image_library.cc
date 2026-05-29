@@ -20,8 +20,6 @@
 
 #include "ED_asset_image_library.hh"
 
-#include <cstdio>
-
 #include "filelist_intern.hh"
 #include "filelist_readjob.hh"
 
@@ -102,26 +100,17 @@ void filelist_readjob_image_files_add_items(FileListReadJob *job_params,
                                             float * /*progress*/)
 {
   if (!job_params->load_asset_library) {
-    printf("[IMG_ASSET_DROP] image_files_add_items: no load_asset_library\n");
-    fflush(stdout);
     return;
   }
   if (job_params->load_asset_library->library_type() == ASSET_LIBRARY_ALL) {
-    printf("[IMG_ASSET_DROP] image_files_add_items: skip ALL library\n");
-    fflush(stdout);
     return;
   }
 
   FileList *filelist = job_params->tmp_filelist;
   const char *root = filelist->filelist.root;
   if (!root[0]) {
-    printf("[IMG_ASSET_DROP] image_files_add_items: empty root\n");
-    fflush(stdout);
     return;
   }
-
-  printf("[IMG_ASSET_DROP] image_files_add_items: root=\"%s\"\n", root);
-  fflush(stdout);
 
   ImageFilelistReadData data{};
   data.job_params = job_params;
@@ -130,13 +119,8 @@ void filelist_readjob_image_files_add_items(FileListReadJob *job_params,
   if (!ed::asset::image_library_foreach_image(
           root, filelist_readjob_image_file_callback, &data))
   {
-    printf("[IMG_ASSET_DROP] image_files_add_items: image_library_foreach_image FAILED\n");
-    fflush(stdout);
     return;
   }
-
-  printf("[IMG_ASSET_DROP] image_files_add_items: indexed image count=%d\n", data.entries_num);
-  fflush(stdout);
 
   if (data.entries_num == 0) {
     return;

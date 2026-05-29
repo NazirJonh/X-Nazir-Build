@@ -9,7 +9,6 @@
 /* global includes */
 
 #include <algorithm>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -1933,31 +1932,6 @@ int filelist_needs_reading(const FileList *filelist)
          filelist_needs_force_reset(filelist);
 }
 
-void filelist_debug_log_state(const FileList *filelist, const char *tag)
-{
-  if (!filelist) {
-    printf("[IMG_ASSET_DROP] %s: filelist=null\n", tag);
-    fflush(stdout);
-    return;
-  }
-
-  printf("[IMG_ASSET_DROP] %s: filelist=%p root=\"%s\" entries_num=%d entries_filtered_num=%d "
-         "flags=0x%x needs_reading=%d needs_force_reset=%d pending=%d ready=%d "
-         "asset_library_ref=%p asset_library=%p\n",
-         tag,
-         static_cast<const void *>(filelist),
-         filelist->filelist.root,
-         filelist->filelist.entries_num,
-         filelist->filelist.entries_filtered_num,
-         filelist->flags,
-         filelist_needs_reading(filelist),
-         filelist_needs_force_reset(filelist),
-         filelist_pending(filelist),
-         filelist_is_ready(filelist),
-         static_cast<const void *>(filelist->asset_library_ref),
-         static_cast<const void *>(filelist->asset_library));
-  fflush(stdout);
-}
 
 uint filelist_entry_select_set(const FileList *filelist,
                                const FileDirEntry *entry,

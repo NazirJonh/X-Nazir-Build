@@ -154,11 +154,6 @@ void ED_operatormacros_file();
 
 void ED_fileselect_clear(wmWindowManager *wm, SpaceFile *sfile);
 void ED_fileselect_clear_main_assets(wmWindowManager *wm, SpaceFile *sfile);
-/**
- * Run the same filelist update as the File Browser space refresh (read job, filter, redraw).
- * Use after the asset library changed on disk while the Asset Browser is open.
- */
-void ED_fileselect_refresh_filelist(bContext *C, SpaceFile *sfile);
 
 void ED_fileselect_exit(wmWindowManager *wm, SpaceFile *sfile);
 

@@ -569,9 +569,10 @@ static void add_browse_image_button(Layout &layout,
 {
   ed::view3d::image_grid_prepare_browse_shelf(C, state, IMAGE_TEXTURE_SHELF_IDNAME);
 
-  layout.context_string_set("asset_shelf_idname", IMAGE_TEXTURE_SHELF_IDNAME);
-  layout.context_ptr_set("image_grid_target", &target_ptr);
-  layout.popover(&C, "ASSETSHELF_PT_popover_panel", IFACE_("Browse Image"), ICON_FILEBROWSER);
+  Layout &row = layout.row(false);
+  row.context_string_set("asset_shelf_idname", IMAGE_TEXTURE_SHELF_IDNAME);
+  row.context_ptr_set("image_grid_target", &target_ptr);
+  row.popover(&C, "ASSETSHELF_PT_popover_panel", IFACE_("Browse Image"), ICON_FILEBROWSER);
 }
 
 static void draw_header_row(Layout &layout,

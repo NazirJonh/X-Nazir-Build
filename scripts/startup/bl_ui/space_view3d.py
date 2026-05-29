@@ -9248,9 +9248,14 @@ class VIEW3D_AST_image_texture(AssetShelfHiddenByDefault, bpy.types.AssetShelf):
     bl_idname = "VIEW3D_AST_image_texture"
     bl_label = "Image Textures"
     bl_activate_operator = "view3d.image_shelf_activate_asset"
+    filter_image = True
 
     @classmethod
     def poll(cls, context):
+        # Popover-only: never become the active shelf in the permanent View3D asset shelf region.
+        region = context.region
+        if region and region.type == 'ASSET_SHELF':
+            return False
         if context.space_data.type != 'VIEW_3D':
             return False
         if context.mode not in {

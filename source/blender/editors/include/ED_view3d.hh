@@ -1516,6 +1516,7 @@ AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
 const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref);
 
 int image_grid_effective_rows(const View3D &v3d);
+int image_grid_preview_size_get(const View3D &v3d);
 int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d);
 void image_grid_clamp_scroll_row(ImageGridUIState &state, const View3D &v3d);
 bool image_grid_wheel_poll(bContext *C, const wmEvent *event);

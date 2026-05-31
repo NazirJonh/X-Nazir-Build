@@ -778,6 +778,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
      * image_grid_state_get() treats type==0 as "use current file library". */
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 39)) {
+    /* image_grid_preview_size added to View3D. Zero means use default (48 px). */
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

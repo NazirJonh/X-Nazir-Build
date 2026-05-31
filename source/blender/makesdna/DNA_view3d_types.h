@@ -828,6 +828,9 @@ struct View3D {
   short image_grid_library_type = 0;
   /** Custom asset library index for the image grid (used when type is #ASSET_LIBRARY_CUSTOM). */
   int image_grid_library_custom_index = 0;
+  /** Preview thumbnail size in pixels for the image grid. 0 = use default (48). */
+  short image_grid_preview_size = 0;
+  char _pad_image_grid[6] = {};
   /** Catalog paths currently enabled as filter in the image grid (empty = show all). */
   ListBaseT<AssetCatalogPathLink> image_grid_enabled_catalog_paths = {nullptr, nullptr};
 

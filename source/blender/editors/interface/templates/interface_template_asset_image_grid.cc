@@ -575,6 +575,22 @@ static void add_browse_image_button(Layout &layout,
   row.popover(&C, "ASSETSHELF_PT_popover_panel", IFACE_("Browse Image"), ICON_FILEBROWSER);
 }
 
+/** Icon-only popover with menu arrow (same footprint as #ASSETSHELF_PT_display in the shelf header). */
+static void image_grid_header_popover(Layout &row,
+                                    const bContext &C,
+                                    const StringRefNull panel_id,
+                                    const int icon)
+{
+  Block *block = row.block();
+  Layout &popover_row = row.row(false);
+  popover_row.emboss_set(EmbossType::Emboss);
+  popover_row.ui_units_x_set(1.6f);
+  popover_row.popover(&C, panel_id, "", icon);
+  /* #layout_add_but() marks compact icon buttons as fixed width (#UI_UNIT_X); widen for arrow. */
+  Button *but = block->buttons_ptrs.last().get();
+  but->rect.xmax = but->rect.xmin + short(1.6f * UI_UNIT_X);
+}
+
 static void draw_header_row(Layout &layout,
                             ed::view3d::ImageGridUIState &state,
                             const bContext &C)
@@ -587,7 +603,9 @@ static void draw_header_row(Layout &layout,
          wm::OpCallContext::InvokeDefault,
          UI_ITEM_NONE);
   /* Catalog selector: opens a popover with library selector + catalog tree. */
-  row.popover(&C, "VIEW3D_PT_image_grid_catalog_selector", std::nullopt, ICON_COLLAPSEMENU);
+  image_grid_header_popover(row, C, "VIEW3D_PT_image_grid_catalog_selector", ICON_COLLAPSEMENU);
+  /* Display settings: preview thumbnail size. */
+  image_grid_header_popover(row, C, "VIEW3D_PT_image_grid_display", ICON_IMGDISPLAY);
 }
 
 
@@ -619,7 +637,9 @@ static void build_image_grid(Layout &layout,
                                                           std::move(catalog_filters),
                                                           ptr,
                                                           prop);
-  view_unique->set_tile_size(3 * UI_UNIT_X, 3 * UI_UNIT_Y);
+  const int preview_size = ed::view3d::image_grid_preview_size_get(*v3d);
+  view_unique->set_tile_size(ui::preview_tile_size_x(preview_size),
+                             ui::preview_tile_size_y_no_label(preview_size));
   AbstractGridView *grid_view = block_add_view(*block, "image_asset_grid", std::move(view_unique));
 
   const GridViewStyle &style = grid_view->get_style();

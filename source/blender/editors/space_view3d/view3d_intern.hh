@@ -253,4 +253,7 @@ void VIEW3D_OT_image_grid_refresh_library(wmOperatorType *ot);
 /** Register the global popover panel for the image-grid catalog selector. */
 void image_grid_catalog_selector_panel_register();
 
+/** Register the global popover panel for the image-grid display settings. */
+void image_grid_display_panel_register();
+
 }  // namespace blender

@@ -7,6 +7,9 @@
  */
 
 #include "DNA_screen_types.h"
+#include "DNA_view3d_types.h"
+
+#include "BKE_context.hh"
 
 #include "ED_view3d.hh"
 #include "ED_asset_shelf.hh"
@@ -59,6 +62,9 @@ AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
     return nullptr;
   }
   image_grid_sync_shelf_from_state(*shelf, state);
+  if (View3D *v3d = CTX_wm_view3d(&C)) {
+    shelf->settings.preview_size = image_grid_preview_size_get(*v3d);
+  }
   ed::asset::shelf::ensure_asset_library_fetched(C, *shelf_type);
   return shelf;
 }

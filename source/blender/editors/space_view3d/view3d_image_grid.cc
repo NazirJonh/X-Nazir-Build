@@ -28,6 +28,7 @@
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
+#include "BKE_screen.hh"
 #include "BKE_main_idmap.hh"
 #include "BKE_paint.hh"
 #include "BKE_preferences.h"
@@ -92,6 +93,15 @@ int image_grid_effective_rows(const View3D &v3d)
 {
   const int stored = v3d.image_grid_rows;
   return clamp_i(stored ? stored : 1, 1, 16);
+}
+
+int image_grid_preview_size_get(const View3D &v3d)
+{
+  const int stored = v3d.image_grid_preview_size;
+  if (stored >= 24) {
+    return stored;
+  }
+  return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
 }
 
 int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d)
@@ -1097,6 +1107,36 @@ ImageGridCatalogSelectorTree::Item &ImageGridCatalogSelectorTree::build_catalog_
   });
 
   return item;
+}
+
+static void image_grid_display_panel_draw(const bContext *C, Panel *panel)
+{
+  View3D *v3d = CTX_wm_view3d(C);
+  if (!v3d) {
+    return;
+  }
+
+  ui::Layout &layout = *panel->layout;
+  layout.use_property_split_set(true);
+  layout.use_property_decorate_set(false);
+
+  PointerRNA v3d_ptr = RNA_pointer_create_discrete(nullptr, RNA_SpaceView3D, v3d);
+  layout.prop(&v3d_ptr, "image_grid_preview_size", UI_ITEM_NONE, IFACE_("Size"), ICON_NONE);
+}
+
+void image_grid_display_panel_register()
+{
+  if (WM_paneltype_find("VIEW3D_PT_image_grid_display", true)) {
+    return;
+  }
+
+  PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
+  STRNCPY_UTF8(pt->idname, "VIEW3D_PT_image_grid_display");
+  STRNCPY_UTF8(pt->label, N_("Display Settings"));
+  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  pt->description = N_("Adjust display settings for the image grid");
+  pt->draw = image_grid_display_panel_draw;
+  WM_paneltype_add(pt);
 }
 
 static void image_grid_catalog_selector_draw(const bContext *C, Panel *panel)

@@ -268,6 +268,7 @@ void view3d_operatortypes()
   WM_operatortype_append(VIEW3D_OT_image_grid_refresh_library);
 
   image_grid_catalog_selector_panel_register();
+  image_grid_display_panel_register();
 
   ed::transform::transform_operatortypes();
 }

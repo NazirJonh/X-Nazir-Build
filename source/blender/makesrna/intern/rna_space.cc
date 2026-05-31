@@ -1205,6 +1205,22 @@ static void rna_SpaceView3D_use_local_camera_set(PointerRNA *ptr, bool value)
   }
 }
 
+static int rna_SpaceView3D_image_grid_preview_size_get(PointerRNA *ptr)
+{
+  View3D *v3d = static_cast<View3D *>(ptr->data);
+  const int stored = v3d->image_grid_preview_size;
+  if (stored >= 24) {
+    return stored;
+  }
+  return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
+}
+
+static void rna_SpaceView3D_image_grid_preview_size_set(PointerRNA *ptr, const int value)
+{
+  View3D *v3d = static_cast<View3D *>(ptr->data);
+  v3d->image_grid_preview_size = short(std::clamp(value, 24, 256));
+}
+
 static float rna_View3DOverlay_GridScaleUnit_get(PointerRNA *ptr)
 {
   View3D *v3d = static_cast<View3D *>(ptr->data);
@@ -5957,6 +5973,17 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_range(prop, 0, 16);
   RNA_def_property_ui_text(
       prop, "Image Grid Rows", "Number of visible rows in the sculpt texture image grid (0 uses default 1)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "image_grid_preview_size", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "image_grid_preview_size");
+  RNA_def_property_int_funcs(prop,
+                             "rna_SpaceView3D_image_grid_preview_size_get",
+                             "rna_SpaceView3D_image_grid_preview_size_set",
+                             nullptr);
+  RNA_def_property_range(prop, 24, 256);
+  RNA_def_property_ui_text(
+      prop, "Preview Size", "Size of the image grid preview thumbnails in pixels");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   /* Nested Structs */

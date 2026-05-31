@@ -4837,10 +4837,12 @@ static void widget_list_itembut(Button *but,
       is_selected = true;
     }
     if (item_but->draw_width > 0) {
-      BLI_rcti_resize_x(&draw_rect, zoom * item_but->draw_width);
+      const int draw_w = min_ii(zoom * item_but->draw_width, BLI_rcti_size_x(&draw_rect));
+      BLI_rcti_resize_x(&draw_rect, draw_w);
     }
     if (item_but->draw_height > 0) {
-      BLI_rcti_resize_y(&draw_rect, zoom * item_but->draw_height);
+      const int draw_h = min_ii(zoom * item_but->draw_height, BLI_rcti_size_y(&draw_rect));
+      BLI_rcti_resize_y(&draw_rect, draw_h);
     }
   }
 

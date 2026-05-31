@@ -771,6 +771,13 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 38)) {
+    /* image_grid_library_type, image_grid_library_custom_index, and
+     * image_grid_enabled_catalog_paths added to View3D. Old files receive
+     * zero-initialization from the DNA layer; the runtime code in
+     * image_grid_state_get() treats type==0 as "use current file library". */
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

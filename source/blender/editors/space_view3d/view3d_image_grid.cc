@@ -542,6 +542,12 @@ static wmOperatorStatus image_grid_set_catalog_exec(bContext *C, wmOperator *op)
   }
   state.scroll_row = 0;
 
+  /* Persist catalog filter to DNA. */
+  BKE_asset_catalog_path_list_free(v3d->image_grid_enabled_catalog_paths);
+  for (const std::string &path : state.enabled_catalog_paths) {
+    BKE_asset_catalog_path_list_add_path(v3d->image_grid_enabled_catalog_paths, path.c_str());
+  }
+
   image_grid_notify_change(*C);
   return OPERATOR_FINISHED;
 }
@@ -598,6 +604,11 @@ static wmOperatorStatus image_grid_set_library_exec(bContext *C, wmOperator *op)
   state.lib_ref = new_ref;
   state.enabled_catalog_paths.clear();
   state.scroll_row = 0;
+
+  /* Persist to DNA. */
+  v3d->image_grid_library_type = short(new_ref.type);
+  v3d->image_grid_library_custom_index = new_ref.custom_library_index;
+  BKE_asset_catalog_path_list_free(v3d->image_grid_enabled_catalog_paths);
 
   image_grid_prepare_browse_shelf(*C, state, "VIEW3D_AST_image_texture");
 
@@ -1045,6 +1056,16 @@ void ImageGridCatalogSelectorTree::update_enabled_catalogs_from_items(bContext &
     }
   });
   state_.scroll_row = 0;
+
+  /* Persist catalog filter to DNA. */
+  View3D *v3d = CTX_wm_view3d(&C);
+  if (v3d) {
+    BKE_asset_catalog_path_list_free(v3d->image_grid_enabled_catalog_paths);
+    for (const std::string &path : state_.enabled_catalog_paths) {
+      BKE_asset_catalog_path_list_add_path(v3d->image_grid_enabled_catalog_paths, path.c_str());
+    }
+  }
+
   ed::view3d::image_grid_notify_change(C);
 }
 

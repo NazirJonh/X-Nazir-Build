@@ -283,6 +283,7 @@ static void view3d_free(SpaceLink *sl)
 
   BKE_viewer_path_clear(&vd->viewer_path);
 
+  BKE_asset_catalog_path_list_free(vd->image_grid_enabled_catalog_paths);
   ed::view3d::image_grid_state_remove(*vd);
 }
 
@@ -321,6 +322,9 @@ static SpaceLink *view3d_duplicate(SpaceLink *sl)
   }
 
   BKE_viewer_path_copy(&v3dn->viewer_path, &v3do->viewer_path);
+
+  v3dn->image_grid_enabled_catalog_paths =
+      BKE_asset_catalog_path_list_duplicate(v3do->image_grid_enabled_catalog_paths);
 
   /* copy or clear inside new stuff */
 
@@ -1575,6 +1579,7 @@ static void view3d_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
   BKE_screen_view3d_do_versions_250(v3d, &sl->regionbase);
 
   BKE_viewer_path_blend_read_data(reader, &v3d->viewer_path);
+  BKE_asset_catalog_path_list_blend_read_data(reader, v3d->image_grid_enabled_catalog_paths);
 }
 
 static void view3d_space_blend_write(BlendWriter *writer, SpaceLink *sl)
@@ -1589,6 +1594,7 @@ static void view3d_space_blend_write(BlendWriter *writer, SpaceLink *sl)
   BKE_screen_view3d_shading_blend_write(writer, &v3d->shading);
 
   BKE_viewer_path_blend_write(writer, &v3d->viewer_path);
+  BKE_asset_catalog_path_list_blend_write(writer, v3d->image_grid_enabled_catalog_paths);
 }
 
 void ED_spacetype_view3d()

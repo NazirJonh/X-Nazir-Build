@@ -19,6 +19,7 @@
 #include "DNA_space_enums.h"
 #include "DNA_view3d_enums.h"
 #include "DNA_viewer_path_types.h"
+#include "DNA_asset_types.h"
 
 namespace blender {
 
@@ -823,7 +824,12 @@ struct View3D {
 
   /** Number of visible rows for the sculpt image grid. 0 = use default (3). */
   short image_grid_rows = 0;
-  short _pad_image_grid[3] = {};
+  /** Asset library type for the image grid (#eAssetLibraryType). 0 = unset, use current file. */
+  short image_grid_library_type = 0;
+  /** Custom asset library index for the image grid (used when type is #ASSET_LIBRARY_CUSTOM). */
+  int image_grid_library_custom_index = 0;
+  /** Catalog paths currently enabled as filter in the image grid (empty = show all). */
+  ListBaseT<AssetCatalogPathLink> image_grid_enabled_catalog_paths = {nullptr, nullptr};
 
   /** Runtime evaluation data (keep last). */
   View3D_Runtime runtime;

@@ -596,12 +596,12 @@ static void draw_header_row(Layout &layout,
                             const bContext &C)
 {
   Layout &row = layout.row(true);
-  /* Library selector: opens enum search to change the active library. */
-  row.op("VIEW3D_OT_image_grid_set_library",
-         ed::view3d::image_grid_library_ui_name(state.lib_ref),
-         ICON_ASSET_MANAGER,
-         wm::OpCallContext::InvokeDefault,
-         UI_ITEM_NONE);
+  /* Library selector: dropdown menu of asset libraries. */
+  row.op_menu_enum(&C,
+                   "VIEW3D_OT_image_grid_set_library",
+                   "asset_library_reference",
+                   ed::view3d::image_grid_library_ui_name(state.lib_ref),
+                   ICON_ASSET_MANAGER);
   /* Catalog selector: opens a popover with library selector + catalog tree. */
   image_grid_header_popover(row, C, "VIEW3D_PT_image_grid_catalog_selector", ICON_COLLAPSEMENU);
   /* Display settings: preview thumbnail size. */

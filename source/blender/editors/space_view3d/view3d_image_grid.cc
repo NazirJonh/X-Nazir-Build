@@ -611,6 +611,10 @@ static wmOperatorStatus image_grid_set_library_exec(bContext *C, wmOperator *op)
       enum_value);
 
   ImageGridUIState &state = image_grid_state_get(*v3d);
+  if (enum_value == ed::asset::library_reference_to_enum_value(&state.lib_ref)) {
+    return OPERATOR_CANCELLED;
+  }
+
   state.lib_ref = new_ref;
   state.enabled_catalog_paths.clear();
   state.scroll_row = 0;
@@ -626,19 +630,6 @@ static wmOperatorStatus image_grid_set_library_exec(bContext *C, wmOperator *op)
   return OPERATOR_FINISHED;
 }
 
-static wmOperatorStatus image_grid_set_library_invoke(bContext *C,
-                                                    wmOperator *op,
-                                                    const wmEvent *event)
-{
-  ImageGridUIState &state = image_grid_state_get_from_context(*C);
-  if (!RNA_struct_property_is_set_ex(op->ptr, "asset_library_reference", false)) {
-    RNA_enum_set(op->ptr,
-                 "asset_library_reference",
-                 ed::asset::library_reference_to_enum_value(&state.lib_ref));
-  }
-  return WM_menu_invoke(C, op, event);
-}
-
 void VIEW3D_OT_image_grid_set_library(wmOperatorType *ot)
 {
   ot->name = "Set Image Grid Library";
@@ -646,16 +637,12 @@ void VIEW3D_OT_image_grid_set_library(wmOperatorType *ot)
   ot->idname = "VIEW3D_OT_image_grid_set_library";
 
   ot->exec = image_grid_set_library_exec;
-  ot->invoke = image_grid_set_library_invoke;
 
   ot->flag = OPTYPE_REGISTER;
 
   PropertyRNA *prop = RNA_def_property(ot->srna, "asset_library_reference", PROP_ENUM, PROP_NONE);
   RNA_def_enum_funcs(prop, rna_image_grid_library_itemf);
   RNA_def_property_ui_text(prop, "Library", "Asset library to browse");
-  /* Required by WM_enum_search_invoke / operator_enum_search_update_fn to know which property
-   * to enumerate for the search popup. */
-  ot->prop = prop;
 }
 
 /** \} */

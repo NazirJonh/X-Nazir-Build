@@ -443,15 +443,19 @@ static wmOperatorStatus image_shelf_activate_asset_exec(bContext *C, wmOperator 
    * library (e.g. a custom image library), which may not yet appear in the combined ALL-library
    * view when that combined fetch hasn't been separately requested. */
   const asset_system::AssetRepresentation *asset = nullptr;
+  AssetLibraryReference shelf_lib_ref{};
+  bool resolved_from_shelf = false;
   if (AssetShelfType *shelf_type = ed::asset::shelf::type_find_from_idname(
           "VIEW3D_AST_image_texture"))
   {
     if (AssetShelf *shelf = ed::asset::shelf::popup_shelf_get_or_create(*C, *shelf_type)) {
+      shelf_lib_ref = shelf->settings.asset_library_reference;
       ed::asset::list::iterate(
           shelf->settings.asset_library_reference,
           [&](asset_system::AssetRepresentation &a) {
             if (a.make_weak_reference() == weak_ref) {
               asset = &a;
+              resolved_from_shelf = true;
               return false;
             }
             return true;
@@ -509,6 +513,30 @@ static wmOperatorStatus image_shelf_activate_asset_exec(bContext *C, wmOperator 
 
   WM_event_add_notifier(C, NC_BRUSH, brush);
   WM_event_add_notifier(C, NC_ID | NA_EDITED, nullptr);
+
+  if (resolved_from_shelf) {
+    View3D *v3d = CTX_wm_view3d(C);
+    if (v3d) {
+      ImageGridUIState &state = image_grid_state_get(*v3d);
+      const std::optional<std::string> catalog_path = image_grid_catalog_path_for_asset(
+          *asset, shelf_lib_ref);
+      image_grid_request_scroll_to_asset(state, asset->library_relative_identifier());
+      if (image_grid_asset_is_visible_in_state(state, shelf_lib_ref, catalog_path)) {
+        image_grid_pending_clear(state);
+        /* Do not call image_grid_notify_change while the browse popover is open: it would
+         * trigger a full grid rebuild (storage_fetch + refresh_ui) on every asset click.
+         * NC_BRUSH and NC_ID notifiers sent above already schedule a redraw, on which
+         * image_grid_apply_focus_scroll will update scroll_row without a rebuild. */
+      }
+      else {
+        image_grid_pending_schedule_from_asset(state,
+                                               shelf_lib_ref,
+                                               catalog_path,
+                                               asset->library_relative_identifier());
+      }
+    }
+  }
+
   return OPERATOR_FINISHED;
 }
 
@@ -551,13 +579,9 @@ static wmOperatorStatus image_grid_set_catalog_exec(bContext *C, wmOperator *op)
     }
   }
   state.scroll_row = 0;
+  image_grid_pending_clear(state);
 
-  /* Persist catalog filter to DNA. */
-  BKE_asset_catalog_path_list_free(v3d->image_grid_enabled_catalog_paths);
-  for (const std::string &path : state.enabled_catalog_paths) {
-    BKE_asset_catalog_path_list_add_path(v3d->image_grid_enabled_catalog_paths, path.c_str());
-  }
-
+  image_grid_state_persist_to_view3d(*v3d, state);
   image_grid_notify_change(*C);
   return OPERATOR_FINISHED;
 }
@@ -618,12 +642,9 @@ static wmOperatorStatus image_grid_set_library_exec(bContext *C, wmOperator *op)
   state.lib_ref = new_ref;
   state.enabled_catalog_paths.clear();
   state.scroll_row = 0;
+  image_grid_pending_clear(state);
 
-  /* Persist to DNA. */
-  v3d->image_grid_library_type = short(new_ref.type);
-  v3d->image_grid_library_custom_index = new_ref.custom_library_index;
-  BKE_asset_catalog_path_list_free(v3d->image_grid_enabled_catalog_paths);
-
+  image_grid_state_persist_to_view3d(*v3d, state);
   image_grid_prepare_browse_shelf(*C, state, "VIEW3D_AST_image_texture");
 
   image_grid_notify_change(*C);
@@ -1053,14 +1074,10 @@ void ImageGridCatalogSelectorTree::update_enabled_catalogs_from_items(bContext &
     }
   });
   state_.scroll_row = 0;
+  ed::view3d::image_grid_pending_clear(state_);
 
-  /* Persist catalog filter to DNA. */
-  View3D *v3d = CTX_wm_view3d(&C);
-  if (v3d) {
-    BKE_asset_catalog_path_list_free(v3d->image_grid_enabled_catalog_paths);
-    for (const std::string &path : state_.enabled_catalog_paths) {
-      BKE_asset_catalog_path_list_add_path(v3d->image_grid_enabled_catalog_paths, path.c_str());
-    }
+  if (View3D *v3d = CTX_wm_view3d(&C)) {
+    ed::view3d::image_grid_state_persist_to_view3d(*v3d, state_);
   }
 
   ed::view3d::image_grid_notify_change(C);

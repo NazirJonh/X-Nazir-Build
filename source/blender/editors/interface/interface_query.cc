@@ -17,6 +17,7 @@
 
 #include "DNA_screen_types.h"
 
+#include "BKE_context.hh"
 #include "BKE_screen.hh"
 
 #include "UI_view2d.hh"
@@ -675,6 +676,22 @@ bool block_is_menu(const Block *block)
 bool block_is_popover(const Block *block)
 {
   return (block->flag & BLOCK_POPOVER) != 0;
+}
+
+bool region_popup_has_panel(const bContext *C, const char *panel_idname)
+{
+  const ARegion *region = CTX_wm_region_popup(C);
+  if (!region || !region->runtime || panel_idname == nullptr || panel_idname[0] == '\0') {
+    return false;
+  }
+  for (Block &block : region->runtime->uiblocks) {
+    if (block.panel && block.panel->type) {
+      if (STREQ(block.panel->type->idname, panel_idname)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 bool block_is_pie_menu(const Block *block)

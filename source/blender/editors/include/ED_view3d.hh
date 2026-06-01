@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include "BLI_bounds_types.hh"
@@ -24,6 +25,9 @@ namespace blender {
 /* ********* exports for space_view3d/ module ********** */
 struct ARegion;
 struct AssetShelf;
+namespace asset_system {
+class AssetRepresentation;
+}
 struct BMEdge;
 struct BMElem;
 struct BMEditMesh;
@@ -1493,6 +1497,24 @@ struct ImageGridUIState {
 
   /** Visible grid height in pixels for #ButtonType::Grip (like #AbstractTreeView::custom_height_). */
   int grip_pixel_height = 0;
+
+  /**
+   * Deferred sync from asset shelf browse popover (applied after popover closes).
+   * See #image_grid_pending_schedule_from_asset() / #image_grid_pending_apply_if_ready().
+   */
+  bool pending_apply_after_popover = false;
+  AssetLibraryReference pending_lib_ref{};
+  bool pending_use_all_catalogs = false;
+  std::string pending_catalog_path;
+  std::string pending_focus_asset_identifier;
+  /** Index in the full filtered asset list; computed on apply if still -1. */
+  int pending_focus_filtered_index = -1;
+
+  /**
+   * When non-empty, next grid build scrolls to this asset's filtered index (session-only).
+   * Used after shelf activation and after pending library/catalog apply.
+   */
+  std::string focus_asset_identifier;
 };
 
 ImageGridUIState &image_grid_state_get(const View3D &v3d);
@@ -1511,6 +1533,39 @@ void image_grid_sync_state_from_shelf(ImageGridUIState &state, const AssetShelf 
 AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
                                             ImageGridUIState &state,
                                             const char *shelf_idname);
+
+void image_grid_pending_clear(ImageGridUIState &state);
+
+bool image_grid_asset_is_visible_in_state(const ImageGridUIState &state,
+                                          const AssetLibraryReference &asset_lib_ref,
+                                          const std::optional<std::string> &asset_catalog_path);
+
+void image_grid_state_persist_to_view3d(View3D &v3d, const ImageGridUIState &state);
+
+void image_grid_pending_schedule_from_asset(ImageGridUIState &state,
+                                            const AssetLibraryReference &lib_ref,
+                                            const std::optional<std::string> &catalog_path,
+                                            const std::string &asset_identifier);
+
+std::optional<std::string> image_grid_catalog_path_for_asset(
+    const asset_system::AssetRepresentation &asset, const AssetLibraryReference &lib_ref);
+
+void image_grid_request_scroll_to_asset(ImageGridUIState &state, const std::string &asset_identifier);
+
+/**
+ * Set #ImageGridUIState::scroll_row from #focus_asset_identifier using \a cols columns per row.
+ * Returns true when scroll was applied (or no focus was requested).
+ */
+bool image_grid_apply_focus_scroll(const bContext &C,
+                                   View3D &v3d,
+                                   ImageGridUIState &state,
+                                   int cols);
+
+/**
+ * Apply pending shelf selection when the browse popover is closed.
+ * Safe to call every image grid redraw.
+ */
+void image_grid_pending_apply_if_ready(bContext &C, View3D &v3d);
 
 /** Return the short display name for an asset library reference (used in image grid UI). */
 const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref);

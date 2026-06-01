@@ -449,26 +449,33 @@ class ImageAssetGridItem : public PreviewGridItem {
 
 class ImageAssetGridView : public AbstractGridView {
   const bContext &context_;
+  ed::view3d::ImageGridUIState &state_;
   AssetLibraryReference library_ref_;
   /** When true, only assets matching at least one entry in #catalog_filters_ are shown. */
   bool catalog_filtering_enabled_ = false;
   blender::Vector<asset_system::AssetCatalogFilter> catalog_filters_;
   PointerRNA target_ptr_;
   PropertyRNA *target_prop_ = nullptr;
+  /** Column estimate when #state_.cached_cols is not yet known (first redraw). */
+  int cols_hint_ = 1;
 
  public:
   ImageAssetGridView(const bContext &context,
+                     ed::view3d::ImageGridUIState &state,
                      const AssetLibraryReference &library_ref,
                      const bool catalog_filtering_enabled,
                      blender::Vector<asset_system::AssetCatalogFilter> catalog_filters,
                      const PointerRNA &target_ptr,
-                     PropertyRNA *target_prop)
+                     PropertyRNA *target_prop,
+                     const int cols_hint)
       : context_(context),
+        state_(state),
         library_ref_(library_ref),
         catalog_filtering_enabled_(catalog_filtering_enabled),
         catalog_filters_(std::move(catalog_filters)),
         target_ptr_(target_ptr),
-        target_prop_(target_prop)
+        target_prop_(target_prop),
+        cols_hint_(max_ii(1, cols_hint))
   {
   }
 
@@ -479,10 +486,12 @@ class ImageAssetGridView : public AbstractGridView {
 
     ed::asset::list::storage_fetch(&library_ref_, &context_);
 
-    auto add_asset = [&](asset_system::AssetRepresentation &asset) -> bool {
-      if (this->get_item_count() >= IMAGE_GRID_MAX_ITEMS) {
-        return false;
-      }
+    const int cols = state_.cached_cols > 0 ? state_.cached_cols : cols_hint_;
+    const int first_index = state_.scroll_row * cols;
+    const int last_index = first_index + IMAGE_GRID_MAX_ITEMS;
+    int filtered_index = 0;
+
+    auto maybe_add_asset = [&](asset_system::AssetRepresentation &asset) -> bool {
       if (asset.get_id_type() != ID_IM) {
         return true;
       }
@@ -515,24 +524,22 @@ class ImageAssetGridView : public AbstractGridView {
         seen_ids.add_new(id);
       }
 
-      this->add_item<ImageAssetGridItem>(asset, target_ptr_, target_prop_, library_ref_);
+      if (filtered_index >= first_index && filtered_index < last_index) {
+        this->add_item<ImageAssetGridItem>(asset, target_ptr_, target_prop_, library_ref_);
+      }
+      filtered_index++;
       return true;
     };
 
     if (ed::asset::list::library_get_once_available(library_ref_)) {
       ed::asset::list::iterate(library_ref_, [&](asset_system::AssetRepresentation &asset) {
-        return add_asset(asset);
+        return maybe_add_asset(asset);
       });
     }
 
-    if (library_ref_.type == ASSET_LIBRARY_LOCAL &&
-        this->get_item_count() < IMAGE_GRID_MAX_ITEMS)
-    {
+    if (library_ref_.type == ASSET_LIBRARY_LOCAL) {
       ID *id;
       FOREACH_MAIN_ID_BEGIN (bmain, id) {
-        if (this->get_item_count() >= IMAGE_GRID_MAX_ITEMS) {
-          break;
-        }
         if (GS(id->name) != ID_IM) {
           continue;
         }
@@ -549,10 +556,15 @@ class ImageAssetGridView : public AbstractGridView {
         }
         seen_ids.add_new(id);
 
-        this->add_item<ImageAssetGridItem>(*image, target_ptr_, target_prop_, library_ref_);
+        if (filtered_index >= first_index && filtered_index < last_index) {
+          this->add_item<ImageAssetGridItem>(*image, target_ptr_, target_prop_, library_ref_);
+        }
+        filtered_index++;
       }
       FOREACH_MAIN_ID_END;
     }
+
+    state_.cached_item_count = filtered_index;
   }
 };
 
@@ -631,15 +643,24 @@ static void build_image_grid(Layout &layout,
     catalog_filters = catalog_filters_from_enabled_paths(*library, state.enabled_catalog_paths);
   }
 
+  const int preview_size = ed::view3d::image_grid_preview_size_get(*v3d);
+  const int tile_w = ui::preview_tile_size_x(preview_size);
+  const int panel_width = max_ii(layout.width(), 0);
+  const int cols_est = (state.cached_cols > 0) ?
+                           state.cached_cols :
+                           max_ii(1, panel_width / max_ii(tile_w, 1));
+
+  ed::view3d::image_grid_apply_focus_scroll(C, *v3d, state, cols_est);
+
   auto view_unique = std::make_unique<ImageAssetGridView>(C,
+                                                          state,
                                                           state.lib_ref,
                                                           catalog_filtering_enabled,
                                                           std::move(catalog_filters),
                                                           ptr,
-                                                          prop);
-  const int preview_size = ed::view3d::image_grid_preview_size_get(*v3d);
-  view_unique->set_tile_size(ui::preview_tile_size_x(preview_size),
-                             ui::preview_tile_size_y_no_label(preview_size));
+                                                          prop,
+                                                          cols_est);
+  view_unique->set_tile_size(tile_w, ui::preview_tile_size_y_no_label(preview_size));
   AbstractGridView *grid_view = block_add_view(*block, "image_asset_grid", std::move(view_unique));
 
   const GridViewStyle &style = grid_view->get_style();
@@ -659,8 +680,6 @@ static void build_image_grid(Layout &layout,
   Layout &grid_layout = outer_row.column(true);
   grid_layout.fixed_size_set(true);
 
-  const int panel_width = max_ii(layout.width(), 0);
-  const int tile_w = style.tile_width;
   const int visible_height = effective_rows * tile_h;
   if (panel_width > 0) {
     grid_layout.ui_units_x_set(float(panel_width) / float(UI_UNIT_X));
@@ -674,15 +693,11 @@ static void build_image_grid(Layout &layout,
   }
   grid_stack.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
 
-  const int grid_width = (panel_width > 0) ? panel_width : max_ii(tile_w, 1);
-  const int cols_est = (state.cached_cols > 0) ?
-                           state.cached_cols :
-                           max_ii(1, grid_width / max_ii(tile_w, 1));
+  const int grid_width = (panel_width > 0) ? panel_width : max_ii(style.tile_width, 1);
   const int total_rows = (state.cached_item_count > 0 && cols_est > 0) ?
                              int(ceilf(float(state.cached_item_count) / float(cols_est))) :
                              effective_rows;
   const int total_height = max_ii(visible_height, total_rows * tile_h);
-  const int scroll_px = state.scroll_row * tile_h;
 
   View2D local_v2d{};
   local_v2d.flag |= V2D_IS_INIT;
@@ -693,14 +708,18 @@ static void build_image_grid(Layout &layout,
   local_v2d.tot.ymax = 0.0f;
   local_v2d.cur.xmin = 0.0f;
   local_v2d.cur.xmax = float(grid_width);
-  local_v2d.cur.ymin = float(-(scroll_px + visible_height));
-  local_v2d.cur.ymax = float(-scroll_px);
+  /* Keep cur at the top of the content (ymax == tot.ymax == 0) so that
+   * BuildOnlyVisibleButtonsHelper::get_visible_range (embedded_v2d path) computes
+   * first_idx_in_view = 0.  The windowed build_items already pre-selects the items for
+   * the current scroll_row, so the helper must start from item_idx 0 — not re-offset
+   * by scroll_row*cols again, which would cause a double-skip and show wrong items. */
+  local_v2d.cur.ymin = float(-visible_height);
+  local_v2d.cur.ymax = 0.0f;
   BLI_rcti_init(&local_v2d.mask, 0, grid_width, -visible_height, 0);
 
   GridViewBuilder builder(*block);
   builder.build_grid_view(C, *grid_view, grid_stack, "", &local_v2d);
 
-  state.cached_item_count = grid_view->get_item_count_filtered();
   state.cached_cols = grid_view->cols_per_row();
   ed::view3d::image_grid_clamp_scroll_row(state, *v3d);
 
@@ -787,6 +806,9 @@ void template_asset_image_grid(Layout *layout,
   }
 
   ed::view3d::ImageGridUIState &state = ed::view3d::image_grid_state_get(*v3d);
+
+  ed::view3d::image_grid_pending_apply_if_ready(*C, *v3d);
+
   Block *block = layout->block();
 
   block_add_dynamic_listener(block, ed::asset::list::asset_reading_region_listen_fn);

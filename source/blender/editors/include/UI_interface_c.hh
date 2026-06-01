@@ -2286,6 +2286,10 @@ bool panel_list_matches_data(ARegion *region,
  * as screen/ if ED_KEYMAP_UI is set, or internally in popup functions. */
 
 void region_handlers_add(ListBaseT<wmEventHandler> *handlers);
+/**
+ * True when #CTX_wm_region_popup has a panel with the given #PanelType.idname.
+ */
+bool region_popup_has_panel(const bContext *C, const char *panel_idname);
 void popup_handlers_add(bContext *C,
                         ListBaseT<wmEventHandler> *handlers,
                         PopupBlockHandle *popup,

@@ -544,11 +544,18 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
   }();
   grid_view.cols_per_row_ = cols_per_row;
 
-  const AbstractGridViewItem *search_highlight_item = dynamic_cast<const AbstractGridViewItem *>(
+  const AbstractGridViewItem *force_visible_item = dynamic_cast<const AbstractGridViewItem *>(
       grid_view.search_highlight_item());
+  if (!force_visible_item) {
+    grid_view.foreach_filtered_item([&](AbstractGridViewItem &item) {
+      if (item.is_active()) {
+        force_visible_item = &item;
+      }
+    });
+  }
 
   BuildOnlyVisibleButtonsHelper build_visible_helper(
-      v2d, grid_view, cols_per_row, search_highlight_item, embedded_v2d);
+      v2d, grid_view, cols_per_row, force_visible_item, embedded_v2d);
 
   /* Spacers simulate full scroll height in region #View2D grids; embedded fixed viewports only
    * swap visible tiles inside a clipped layout (see sculpt image grid). */

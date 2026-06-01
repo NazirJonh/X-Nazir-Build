@@ -7,8 +7,10 @@
  */
 
 #include "DNA_ID.h"
+#include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_texture_types.h"
 #include "DNA_view3d_types.h"
 
 #include "AS_asset_catalog.hh"
@@ -17,14 +19,17 @@
 
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
+#include "BLI_path_utils.hh"
 #include "BLI_set.hh"
 #include "BLI_vector.hh"
 
 #include "MEM_guardedalloc.h"
 
 #include "BKE_asset.hh"
+#include "BKE_asset_edit.hh"
 #include "BKE_context.hh"
 #include "BKE_main.hh"
+#include "BKE_screen.hh"
 
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
@@ -204,7 +209,7 @@ void image_grid_request_scroll_to_asset(ImageGridUIState &state, const std::stri
 }
 
 bool image_grid_apply_focus_scroll(const bContext &C,
-                                   View3D &v3d,
+                                   View3D & /*v3d*/,
                                    ImageGridUIState &state,
                                    const int cols)
 {
@@ -353,6 +358,108 @@ void image_grid_pending_apply_if_ready(bContext &C, View3D &v3d)
 /** \name Shelf sync
  * \{ */
 
+static const char *IMAGE_TEXTURE_SHELF_IDNAME = "VIEW3D_AST_image_texture";
+
+/* Global storage for the AssetWeakReference returned by the shelf type callback.
+ * The callback must return a pointer that stays valid until the next call. */
+static AssetWeakReference g_image_shelf_active_asset_storage;
+
+static bool image_grid_asset_represents_image(const asset_system::AssetRepresentation &asset,
+                                              const Image &image)
+{
+  if (const ID *local_id = asset.local_id()) {
+    return local_id == &image.id;
+  }
+  const std::string asset_path = asset.full_path();
+  if (asset_path.empty()) {
+    return false;
+  }
+  return BLI_path_cmp_normalized(asset_path.c_str(), image.filepath) == 0;
+}
+
+static const Image *image_grid_active_image_from_context(const bContext &C)
+{
+  const PointerRNA target_ptr = CTX_data_pointer_get(&C, "image_grid_target");
+  if (!target_ptr.data || !target_ptr.owner_id || GS(target_ptr.owner_id->name) != ID_BR) {
+    return nullptr;
+  }
+  const MTex *mtex = static_cast<const MTex *>(target_ptr.data);
+  if (!mtex->tex || mtex->tex->type != TEX_IMAGE) {
+    return nullptr;
+  }
+  return mtex->tex->ima;
+}
+
+std::optional<AssetWeakReference> image_grid_shelf_active_asset_weak_ref(
+    const bContext &C, const AssetLibraryReference &library_ref)
+{
+  const Image *image = image_grid_active_image_from_context(C);
+  if (!image) {
+    return std::nullopt;
+  }
+
+  /* First try to find the matching AssetRepresentation in the library (gives the correct
+   * library-relative weak ref that matches shelf item identifiers). */
+  std::optional<AssetWeakReference> weak_ref;
+  ed::asset::list::iterate(library_ref, [&](asset_system::AssetRepresentation &asset) {
+    if (image_grid_asset_represents_image(asset, *image)) {
+      weak_ref = asset.make_weak_reference();
+      return false;
+    }
+    return true;
+  });
+
+  if (weak_ref) {
+    return weak_ref;
+  }
+  /* Fallback: local-file image — produces "Image/<id-name>" format. */
+  return bke::asset_edit_weak_reference_from_id(image->id);
+}
+
+static const AssetWeakReference *image_texture_shelf_active_asset_type_callback(
+    const AssetShelfType * /*shelf_type*/, const bContext *C)
+{
+  if (!C) {
+    return nullptr;
+  }
+
+  std::optional<AssetWeakReference> weak_ref;
+  if (image_grid_active_image_from_context(*C)) {
+    AssetShelfType *type = ed::asset::shelf::type_find_from_idname(IMAGE_TEXTURE_SHELF_IDNAME);
+    if (!type) {
+      return nullptr;
+    }
+    AssetShelf *shelf = ed::asset::shelf::popup_shelf_get_or_create(*C, *type);
+    if (!shelf) {
+      return nullptr;
+    }
+    weak_ref = image_grid_shelf_active_asset_weak_ref(
+        *C, shelf->settings.asset_library_reference);
+  }
+  else if (const View3D *v3d = CTX_wm_view3d(C)) {
+    const ImageGridUIState &state = image_grid_state_get(*v3d);
+    if (state.shelf_active_asset_valid) {
+      weak_ref = state.shelf_active_asset;
+    }
+  }
+
+  if (!weak_ref) {
+    return nullptr;
+  }
+  g_image_shelf_active_asset_storage = *weak_ref;
+  return &g_image_shelf_active_asset_storage;
+}
+
+void image_grid_shelf_sync_register()
+{
+  AssetShelfType *type = ed::asset::shelf::type_find_from_idname(IMAGE_TEXTURE_SHELF_IDNAME);
+  if (!type) {
+    return;
+  }
+  /* Re-apply after Python class re-registration replaces the #AssetShelfType. */
+  type->get_active_asset_from_context = image_texture_shelf_active_asset_type_callback;
+}
+
 void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState &state)
 {
   shelf.settings.asset_library_reference = state.lib_ref;
@@ -390,6 +497,8 @@ AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
                                             ImageGridUIState &state,
                                             const char *shelf_idname)
 {
+  image_grid_shelf_sync_register();
+
   AssetShelfType *shelf_type = ed::asset::shelf::type_find_from_idname(shelf_idname);
   if (!shelf_type) {
     return nullptr;
@@ -402,6 +511,17 @@ AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
   if (View3D *v3d = CTX_wm_view3d(&C)) {
     shelf->settings.preview_size = image_grid_preview_size_get(*v3d);
   }
+
+  if (std::optional<AssetWeakReference> weak_ref = image_grid_shelf_active_asset_weak_ref(
+          C, state.lib_ref))
+  {
+    state.shelf_active_asset = *weak_ref;
+    state.shelf_active_asset_valid = true;
+  }
+  else {
+    state.shelf_active_asset_valid = false;
+  }
+
   ed::asset::shelf::ensure_asset_library_fetched(C, *shelf_type);
   return shelf;
 }

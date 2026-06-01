@@ -1521,6 +1521,14 @@ struct ImageGridUIState {
    * Used after shelf activation and after pending library/catalog apply.
    */
   std::string focus_asset_identifier;
+
+  /**
+   * Last brush texture weak reference for the image browse popover (session-only).
+   * Updated in #image_grid_prepare_browse_shelf(); used when the popover redraws without
+   * `image_grid_target` in context.
+   */
+  bool shelf_active_asset_valid = false;
+  AssetWeakReference shelf_active_asset{};
 };
 
 ImageGridUIState &image_grid_state_get(const View3D &v3d);
@@ -1563,6 +1571,16 @@ std::optional<std::string> image_grid_catalog_path_for_asset(
     const asset_system::AssetRepresentation &asset, const AssetLibraryReference &lib_ref);
 
 void image_grid_request_scroll_to_asset(ImageGridUIState &state, const std::string &asset_identifier);
+
+/**
+ * Weak reference to the image texture currently assigned to the brush slot in
+ * context `image_grid_target`, for asset shelf popover highlighting.
+ */
+std::optional<AssetWeakReference> image_grid_shelf_active_asset_weak_ref(
+    const bContext &C, const AssetLibraryReference &library_ref);
+
+/** Register popover shelf resolver; safe to call repeatedly. */
+void image_grid_shelf_sync_register();
 
 /**
  * Set #ImageGridUIState::scroll_row from #focus_asset_identifier using \a cols columns per row.

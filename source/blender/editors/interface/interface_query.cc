@@ -27,6 +27,7 @@
 #include "interface_intern.hh"
 
 #include "UI_abstract_view.hh"
+#include "UI_grid_view.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -525,6 +526,25 @@ static bool but_is_active_view_item(const Button *but, const void *view)
 Button *view_item_find_active(const ARegion *region, const AbstractView *view)
 {
   return but_find(region, but_is_active_view_item, view);
+}
+
+static bool but_is_active_grid_view_item(const Button *but, const void * /*customdata*/)
+{
+  if (but->type != ButtonType::ViewItem) {
+    return false;
+  }
+
+  const auto *view_item_but = static_cast<const ButtonViewItem *>(but);
+  if (!view_item_but->view_item->is_active()) {
+    return false;
+  }
+  return dynamic_cast<const AbstractGridView *>(&view_item_but->view_item->get_view()) !=
+         nullptr;
+}
+
+Button *view_item_find_active_grid(const ARegion *region)
+{
+  return but_find(region, but_is_active_grid_view_item, nullptr);
 }
 
 Button *view_item_find_search_highlight(const ARegion *region)

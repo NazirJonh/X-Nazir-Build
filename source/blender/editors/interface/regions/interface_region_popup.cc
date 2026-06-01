@@ -614,6 +614,68 @@ void layout_panel_popup_scroll_apply(Panel *panel, const float dy)
   }
 }
 
+void popup_block_scroll_apply_offset_y(ARegion *region, Block *block, const float dy)
+{
+  BLI_assert(dy != 0.0f);
+
+  PopupBlockHandle *handle = block->handle;
+  const float prev_scroll = handle->scrolloffset;
+  handle->scrolloffset = std::clamp(
+      handle->scrolloffset + dy, handle->scrollmin, handle->scrollmax);
+  const float applied_dy = handle->scrolloffset - prev_scroll;
+  layout_panel_popup_scroll_apply(block->panel, applied_dy);
+
+  for (Button &bt : block->buttons()) {
+    bt.rect.ymin += applied_dy;
+    bt.rect.ymax += applied_dy;
+  }
+
+  popup_block_scrolltest(block);
+  ED_region_tag_redraw(region);
+}
+
+static bool popup_scroll_to_but(ARegion *region, Block *block, Button *but_target)
+{
+  float dy = 0.0f;
+  if (block->flag & BLOCK_CLIPTOP) {
+    if (but_target->rect.ymax > block->rect.ymax - UI_MENU_SCROLL_MOUSE / block->aspect) {
+      dy = block->rect.ymax - but_target->rect.ymax - UI_MENU_SCROLL_MOUSE / block->aspect;
+    }
+  }
+  if (block->flag & BLOCK_CLIPBOTTOM) {
+    if (but_target->rect.ymin < block->rect.ymin + UI_MENU_SCROLL_MOUSE / block->aspect) {
+      dy = block->rect.ymin - but_target->rect.ymin + UI_MENU_SCROLL_MOUSE / block->aspect;
+    }
+  }
+  if (dy != 0.0f) {
+    popup_block_scroll_apply_offset_y(region, block, dy);
+    return true;
+  }
+  return false;
+}
+
+static void popup_scroll_active_grid_item_into_view_on_open(ARegion *region,
+                                                            Block *block,
+                                                            PopupBlockHandle *handle)
+{
+  if (handle->refresh) {
+    return;
+  }
+  if ((block->flag & BLOCK_POPOVER) == 0) {
+    return;
+  }
+  if (handle->scrollmin == 0.0f && handle->scrollmax == 0.0f) {
+    return;
+  }
+
+  Button *but_target = view_item_find_active_grid(region);
+  if (!but_target) {
+    return;
+  }
+
+  popup_scroll_to_but(region, block, but_target);
+}
+
 /**
  * Persistent storage of open-close-state of layout panels in popups.
  *
@@ -901,6 +963,10 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
 
   /* checks which buttons are visible, sets flags to prevent draw (do after region init) */
   popup_block_scrolltest(block);
+
+  if ((block->flag & BLOCK_PIE_MENU) == 0) {
+    popup_scroll_active_grid_item_into_view_on_open(region, block, handle);
+  }
 
   /* Adds sub-window. */
   ED_region_floating_init(region);

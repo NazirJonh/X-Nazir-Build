@@ -11047,30 +11047,6 @@ static char menu_scroll_test(Block *block, int2 xy)
   return 0;
 }
 
-static void menu_scroll_apply_offset_y(ARegion *region, Block *block, float dy)
-{
-  BLI_assert(dy != 0.0f);
-
-  /* remember scroll offset for refreshes */
-  const float prev_scroll = block->handle->scrolloffset;
-  block->handle->scrolloffset = std::clamp(
-      block->handle->scrolloffset + dy, block->handle->scrollmin, block->handle->scrollmax);
-  dy = block->handle->scrolloffset - prev_scroll;
-  /* Apply popup scroll delta to layout panels too. */
-  layout_panel_popup_scroll_apply(block->panel, dy);
-
-  /* apply scroll offset */
-  for (Button &bt : block->buttons()) {
-    bt.rect.ymin += dy;
-    bt.rect.ymax += dy;
-  }
-
-  /* set flags again */
-  popup_block_scrolltest(block);
-
-  ED_region_tag_redraw(region);
-}
-
 /** Scroll to activated button. */
 static bool menu_scroll_to_but(ARegion *region, Block *block, Button *but_target)
 {
@@ -11086,7 +11062,7 @@ static bool menu_scroll_to_but(ARegion *region, Block *block, Button *but_target
     }
   }
   if (dy != 0.0f) {
-    menu_scroll_apply_offset_y(region, block, dy);
+    popup_block_scroll_apply_offset_y(region, block, dy);
     return true;
   }
   return false;
@@ -11106,7 +11082,7 @@ static bool menu_scroll_to_y(ARegion *region, Block *block, int y)
     dy = UI_UNIT_Y / block->aspect; /* scroll to the bottom */
   }
   if (dy != 0.0f) {
-    menu_scroll_apply_offset_y(region, block, dy);
+    popup_block_scroll_apply_offset_y(region, block, dy);
     return true;
   }
   return false;
@@ -11343,7 +11319,7 @@ static int handle_menu_mmb_event(bContext *C,
     const int delta = (menu->mmb_panning_last_y - event->xy[1]) *
                       (event->flag & WM_EVENT_SCROLL_INVERT ? 1 : -1);
     if (delta) {
-      menu_scroll_apply_offset_y(region, block, delta);
+      popup_block_scroll_apply_offset_y(region, block, delta);
       menu->mmb_panning_last_y = event->xy[1];
     }
     retval = WM_UI_HANDLER_BREAK;
@@ -11583,7 +11559,7 @@ static int handle_menu_event(bContext *C,
           else if (block->flag & (BLOCK_CLIPTOP | BLOCK_CLIPBOTTOM)) {
             const float dy = event->xy[1] - event->prev_xy[1];
             if (dy != 0.0f) {
-              menu_scroll_apply_offset_y(region, block, dy);
+              popup_block_scroll_apply_offset_y(region, block, dy);
 
               if (but) {
                 but->active->cancel = true;

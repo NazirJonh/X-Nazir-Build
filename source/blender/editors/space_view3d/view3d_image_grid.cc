@@ -578,6 +578,7 @@ static wmOperatorStatus image_grid_set_catalog_exec(bContext *C, wmOperator *op)
       state.enabled_catalog_paths.add(path);
     }
   }
+  image_grid_catalog_commit_active(state);
   state.scroll_row = 0;
   image_grid_pending_clear(state);
 
@@ -639,8 +640,8 @@ static wmOperatorStatus image_grid_set_library_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  state.lib_ref = new_ref;
-  state.enabled_catalog_paths.clear();
+  const AssetLibraryReference old_lib_ref = state.lib_ref;
+  image_grid_catalog_swap_library(state, old_lib_ref, new_ref);
   state.scroll_row = 0;
   image_grid_pending_clear(state);
 
@@ -979,6 +980,7 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
     {
       this->set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem & /*item*/) {
         state_.enabled_catalog_paths.clear();
+        ed::view3d::image_grid_catalog_commit_active(state_);
         state_.scroll_row = 0;
         ed::view3d::image_grid_notify_change(C);
       });
@@ -1073,6 +1075,7 @@ void ImageGridCatalogSelectorTree::update_enabled_catalogs_from_items(bContext &
       state_.enabled_catalog_paths.add(item->catalog_path().str());
     }
   });
+  ed::view3d::image_grid_catalog_commit_active(state_);
   state_.scroll_row = 0;
   ed::view3d::image_grid_pending_clear(state_);
 

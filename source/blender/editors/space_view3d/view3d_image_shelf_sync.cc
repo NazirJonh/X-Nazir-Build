@@ -15,9 +15,12 @@
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 
+#include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_set.hh"
 #include "BLI_vector.hh"
+
+#include "MEM_guardedalloc.h"
 
 #include "BKE_asset.hh"
 #include "BKE_context.hh"
@@ -252,13 +255,37 @@ bool image_grid_asset_is_visible_in_state(const ImageGridUIState &state,
   return state.enabled_catalog_paths.contains(*asset_catalog_path);
 }
 
-void image_grid_state_persist_to_view3d(View3D &v3d, const ImageGridUIState &state)
+void image_grid_state_persist_to_view3d(View3D &v3d, ImageGridUIState &state)
 {
   v3d.image_grid_library_type = short(state.lib_ref.type);
   v3d.image_grid_library_custom_index = state.lib_ref.custom_library_index;
+
+  image_grid_catalog_commit_active(state);
+
+  while (ImageGridLibraryCatalogState *libcat_state = static_cast<ImageGridLibraryCatalogState *>(
+             BLI_pophead(&v3d.image_grid_library_catalog_states)))
+  {
+    BKE_asset_catalog_path_list_free(libcat_state->enabled_catalog_paths);
+    MEM_delete(libcat_state);
+  }
+
   BKE_asset_catalog_path_list_free(v3d.image_grid_enabled_catalog_paths);
-  for (const std::string &path : state.enabled_catalog_paths) {
-    BKE_asset_catalog_path_list_add_path(v3d.image_grid_enabled_catalog_paths, path.c_str());
+
+  for (const auto item : state.enabled_catalogs_by_library.items()) {
+    const Set<std::string> &paths = item.value;
+    if (paths.is_empty()) {
+      continue;
+    }
+
+    const AssetLibraryReference lib_ref = ed::asset::library_reference_from_enum_value(
+        item.key);
+    ImageGridLibraryCatalogState *libcat_state = MEM_new<ImageGridLibraryCatalogState>(
+        __func__);
+    libcat_state->library_ref = lib_ref;
+    for (const std::string &path : paths) {
+      BKE_asset_catalog_path_list_add_path(libcat_state->enabled_catalog_paths, path.c_str());
+    }
+    BLI_addtail(&v3d.image_grid_library_catalog_states, libcat_state);
   }
 }
 
@@ -301,11 +328,13 @@ void image_grid_pending_apply_if_ready(bContext &C, View3D &v3d)
     return;
   }
 
-  state.lib_ref = state.pending_lib_ref;
+  const AssetLibraryReference old_lib_ref = state.lib_ref;
+  image_grid_catalog_swap_library(state, old_lib_ref, state.pending_lib_ref);
   state.enabled_catalog_paths.clear();
   if (!state.pending_use_all_catalogs && !state.pending_catalog_path.empty()) {
     state.enabled_catalog_paths.add(state.pending_catalog_path);
   }
+  image_grid_catalog_commit_active(state);
 
   ed::asset::list::storage_fetch(&state.lib_ref, &C);
 
@@ -344,13 +373,16 @@ void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState 
 
 void image_grid_sync_state_from_shelf(ImageGridUIState &state, const AssetShelf &shelf)
 {
-  state.lib_ref = shelf.settings.asset_library_reference;
+  const AssetLibraryReference new_lib_ref = shelf.settings.asset_library_reference;
+  const AssetLibraryReference old_lib_ref = state.lib_ref;
+  image_grid_catalog_swap_library(state, old_lib_ref, new_lib_ref);
   state.enabled_catalog_paths.clear();
   if (!ed::asset::shelf::settings_is_all_catalog_active(shelf.settings)) {
     if (shelf.settings.active_catalog_path && shelf.settings.active_catalog_path[0] != '\0') {
       state.enabled_catalog_paths.add(shelf.settings.active_catalog_path);
     }
   }
+  image_grid_catalog_commit_active(state);
   state.scroll_row = 0;
 }
 

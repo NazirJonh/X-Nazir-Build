@@ -697,6 +697,14 @@ struct View3DOverlay {
   float sculpt_curves_cage_opacity = 0;
 };
 
+/** Per-library enabled catalog paths stored on #View3D for the sculpt image asset grid. */
+struct ImageGridLibraryCatalogState {
+  ImageGridLibraryCatalogState *next = nullptr, *prev = nullptr;
+  AssetLibraryReference library_ref;
+  /** Enabled catalog paths (empty = show all catalogs for this library). */
+  ListBaseT<AssetCatalogPathLink> enabled_catalog_paths = {nullptr, nullptr};
+};
+
 struct View3D_Runtime {
   /** Nkey panel stores stuff here. */
   void *properties_storage = nullptr;
@@ -831,8 +839,13 @@ struct View3D {
   /** Preview thumbnail size in pixels for the image grid. 0 = use default (48). */
   short image_grid_preview_size = 0;
   char _pad_image_grid[6] = {};
-  /** Catalog paths currently enabled as filter in the image grid (empty = show all). */
+  /**
+   * Legacy per-view catalog filter (migrated to #image_grid_library_catalog_states).
+   * Kept for do-version migration from files written before 5.2 subversion 40.
+   */
   ListBaseT<AssetCatalogPathLink> image_grid_enabled_catalog_paths = {nullptr, nullptr};
+  /** Per-asset-library catalog selection for the image grid (empty paths = show all). */
+  ListBaseT<ImageGridLibraryCatalogState> image_grid_library_catalog_states = {nullptr, nullptr};
 
   /** Runtime evaluation data (keep last). */
   View3D_Runtime runtime;

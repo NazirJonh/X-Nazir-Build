@@ -12,6 +12,7 @@
 #include <string>
 
 #include "BLI_bounds_types.hh"
+#include "BLI_map.hh"
 #include "BLI_set.hh"
 #include "BLI_enum_flags.hh"
 #include "BLI_math_matrix_types.hh"
@@ -1487,6 +1488,11 @@ struct ImageGridUIState {
    * An empty set means "show all" (no catalog filter).
    */
   blender::Set<std::string> enabled_catalog_paths;
+  /**
+   * Per-asset-library catalog filters (session), keyed by
+   * #ed::asset::library_reference_to_enum_value(). Synced to #View3D DNA on persist.
+   */
+  blender::Map<int, blender::Set<std::string>> enabled_catalogs_by_library;
 
   /** First visible row (0-based). Session-only; not DNA. */
   int scroll_row = 0;
@@ -1520,6 +1526,12 @@ struct ImageGridUIState {
 ImageGridUIState &image_grid_state_get(const View3D &v3d);
 ImageGridUIState &image_grid_state_get_from_context(const bContext &C);
 void image_grid_state_reset_catalog(ImageGridUIState &state);
+/** Store #enabled_catalog_paths into #enabled_catalogs_by_library for the current library. */
+void image_grid_catalog_commit_active(ImageGridUIState &state);
+/** Save the old library filter, switch to \a new_lib_ref, restore its saved filter (or all). */
+void image_grid_catalog_swap_library(ImageGridUIState &state,
+                                    const AssetLibraryReference &old_lib_ref,
+                                    const AssetLibraryReference &new_lib_ref);
 void image_grid_state_remove(const View3D &v3d);
 void image_grid_notify_change(bContext &C);
 
@@ -1540,7 +1552,7 @@ bool image_grid_asset_is_visible_in_state(const ImageGridUIState &state,
                                           const AssetLibraryReference &asset_lib_ref,
                                           const std::optional<std::string> &asset_catalog_path);
 
-void image_grid_state_persist_to_view3d(View3D &v3d, const ImageGridUIState &state);
+void image_grid_state_persist_to_view3d(View3D &v3d, ImageGridUIState &state);
 
 void image_grid_pending_schedule_from_asset(ImageGridUIState &state,
                                             const AssetLibraryReference &lib_ref,

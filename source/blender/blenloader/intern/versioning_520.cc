@@ -19,8 +19,14 @@
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_view3d_types.h"
 
+#include "BKE_asset.hh"
+
+#include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
+
+#include "MEM_guardedalloc.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
@@ -780,6 +786,31 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 39)) {
     /* image_grid_preview_size added to View3D. Zero means use default (48 px). */
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 40)) {
+    /* image_grid_library_catalog_states: migrate legacy single-library catalog list. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_VIEW3D) {
+            continue;
+          }
+          View3D *v3d = reinterpret_cast<View3D *>(&sl);
+          if (!v3d->image_grid_enabled_catalog_paths.is_empty() &&
+              v3d->image_grid_library_catalog_states.is_empty())
+          {
+            ImageGridLibraryCatalogState *libcat_state = MEM_new<ImageGridLibraryCatalogState>(
+                "ImageGridLibraryCatalogState");
+            libcat_state->library_ref.type = eAssetLibraryType(v3d->image_grid_library_type);
+            libcat_state->library_ref.custom_library_index = v3d->image_grid_library_custom_index;
+            BLI_movelisttolist(&libcat_state->enabled_catalog_paths,
+                               &v3d->image_grid_enabled_catalog_paths);
+            BLI_addtail(&v3d->image_grid_library_catalog_states, libcat_state);
+          }
+        }
+      }
+    }
   }
 
   /**

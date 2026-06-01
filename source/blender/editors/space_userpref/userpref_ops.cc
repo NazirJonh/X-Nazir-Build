@@ -198,6 +198,20 @@ static wmOperatorStatus preferences_asset_library_add_exec(bContext *C, wmOperat
     }
   }
 
+  /* Check if a parent folder was specified. */
+  bUserAssetLibrary *parent_folder = nullptr;
+  PropertyRNA *parent_prop = RNA_struct_find_property(op->ptr, "parent_folder_name");
+  if (parent_prop && RNA_property_is_set(op->ptr, parent_prop)) {
+    char parent_name[sizeof(bUserAssetLibrary::name)];
+    RNA_property_string_get(op->ptr, parent_prop, parent_name);
+    parent_folder = BKE_preferences_asset_library_find_by_name(&U, parent_name);
+  }
+
+  /* Move to parent folder if specified. */
+  if (parent_folder) {
+    BKE_preferences_asset_library_move_to_folder(&U, new_library, parent_folder);
+  }
+
   /* Activate new library in the UI for further setup. */
   U.active_asset_library = BLI_findindex(&U.asset_libraries, new_library);
   U.runtime.is_dirty = true;
@@ -337,6 +351,14 @@ static void PREFERENCES_OT_asset_library_add(wmOperatorType *ot)
       ot->srna, "type", custom_library_type_items, 0, "Type", "The kind of asset library to add");
   RNA_def_enum_funcs(ot->prop, custom_library_type_itemf);
   RNA_def_property_flag(ot->prop, PROP_SKIP_SAVE | PROP_HIDDEN);
+
+  PropertyRNA *prop = RNA_def_string(ot->srna,
+                                     "parent_folder_name",
+                                     nullptr,
+                                     sizeof(bUserAssetLibrary::name),
+                                     "Parent Folder",
+                                     "Name of the parent folder to add the library into");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
 }
 
 /** \} */
@@ -421,6 +443,72 @@ static void PREFERENCES_OT_asset_library_remove(wmOperatorType *ot)
   ot->flag = OPTYPE_INTERNAL;
 
   RNA_def_int(ot->srna, "index", 0, 0, INT_MAX, "Index", "", 0, 1000);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Add Asset Library Folder Operator
+ * \{ */
+
+static wmOperatorStatus preferences_asset_library_folder_add_exec(bContext * /*C*/,
+                                                                   wmOperator *op)
+{
+  char name[sizeof(bUserAssetLibrary::name)] = "";
+
+  PropertyRNA *prop = RNA_struct_find_property(op->ptr, "name");
+  if (RNA_property_is_set(op->ptr, prop)) {
+    RNA_property_string_get(op->ptr, prop, name);
+  }
+
+  if (!name[0]) {
+    STRNCPY(name, DATA_("New Folder"));
+  }
+
+  bUserAssetLibrary *parent_folder = nullptr;
+  prop = RNA_struct_find_property(op->ptr, "parent_folder_name");
+  if (RNA_property_is_set(op->ptr, prop)) {
+    char parent_name[sizeof(bUserAssetLibrary::name)];
+    RNA_property_string_get(op->ptr, prop, parent_name);
+    parent_folder = BKE_preferences_asset_library_find_by_name(&U, parent_name);
+  }
+
+  bUserAssetLibrary *new_folder = BKE_preferences_asset_library_folder_add(&U, name, parent_folder);
+
+  /* Activate new folder in the UI. */
+  U.active_asset_library = BLI_findindex(&U.asset_libraries, new_folder);
+  U.runtime.is_dirty = true;
+
+  /* There's no dedicated notifier for the Preferences. */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+
+  return OPERATOR_FINISHED;
+}
+
+static void PREFERENCES_OT_asset_library_folder_add(wmOperatorType *ot)
+{
+  ot->name = "Add Asset Library Folder";
+  ot->idname = "PREFERENCES_OT_asset_library_folder_add";
+  ot->description = "Add a new folder to organize asset libraries";
+
+  ot->exec = preferences_asset_library_folder_add_exec;
+
+  ot->flag = OPTYPE_INTERNAL | OPTYPE_REGISTER;
+
+  RNA_def_string(ot->srna,
+                 "name",
+                 nullptr,
+                 sizeof(bUserAssetLibrary::name),
+                 "Name",
+                 "Name of the folder");
+
+  PropertyRNA *prop = RNA_def_string(ot->srna,
+                                     "parent_folder_name",
+                                     nullptr,
+                                     sizeof(bUserAssetLibrary::name),
+                                     "Parent Folder",
+                                     "Name of the parent folder");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 }
 
 /** \} */
@@ -1318,6 +1406,7 @@ void ED_operatortypes_userpref()
   WM_operatortype_append(PREFERENCES_OT_autoexec_path_remove);
 
   WM_operatortype_append(PREFERENCES_OT_asset_library_add);
+  WM_operatortype_append(PREFERENCES_OT_asset_library_folder_add);
   WM_operatortype_append(PREFERENCES_OT_asset_library_remove);
 
   WM_operatortype_append(PREFERENCES_OT_extension_repo_add);

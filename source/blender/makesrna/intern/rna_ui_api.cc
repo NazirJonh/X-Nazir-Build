@@ -2507,6 +2507,12 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
 
   func = RNA_def_function(
+      srna, "template_asset_library_tree_view", "template_asset_library_tree_view");
+  RNA_def_function_ui_description(
+      func, "Show a tree view of asset libraries with folder organization support");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+
+  func = RNA_def_function(
       srna, "template_grease_pencil_layer_tree", "template_grease_pencil_layer_tree");
   RNA_def_function_ui_description(func, "View of the active Grease Pencil layer tree");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);

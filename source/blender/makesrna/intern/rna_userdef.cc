@@ -120,6 +120,12 @@ static const EnumPropertyItem rna_enum_date_format_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_user_asset_library_type_items[] = {
+    {USER_ASSET_LIBRARY_ITEM_TYPE_LEAF, "LIBRARY", ICON_FILE_BLEND, "Library", "An asset library"},
+    {USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER, "FOLDER", ICON_FILE_FOLDER, "Folder", "A folder for organizing asset libraries"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem audio_device_items[] = {
     {0, "None", 0, "None", "No device - there will be no audio output"},
     {0, nullptr, 0, nullptr, nullptr},
@@ -7014,6 +7020,19 @@ static void rna_def_userdef_filepaths_asset_library(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", ASSET_LIBRARY_USE_REMOTE_URL);
   RNA_def_property_ui_text(prop, "Use Remote", "Synchronize the asset library with a remote URL");
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+
+  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_user_asset_library_type_items);
+  RNA_def_property_ui_text(prop, "Type", "Type of item (library or folder)");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_userdef_asset_libraries_refresh");
+
+  prop = RNA_def_property(srna, "parent", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "UserAssetLibrary");
+  RNA_def_property_pointer_sdna(prop, nullptr, "parent");
+  RNA_def_property_ui_text(prop, "Parent", "Parent folder for hierarchical organization");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_userdef_asset_libraries_refresh");
 }
 
 static void rna_def_userdef_filepaths_extension_repo(BlenderRNA *brna)

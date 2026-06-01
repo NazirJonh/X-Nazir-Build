@@ -2778,19 +2778,17 @@ class USERPREF_PT_file_paths_asset_libraries(AssetsPanel, Panel):
         paths = context.preferences.filepaths
         active_library_index = paths.active_asset_library
 
+        # Tree view with folder organization support
         row = layout.row()
+        row.template_asset_library_tree_view()
 
-        row.template_list(
-            "USERPREF_UL_asset_libraries", "user_asset_libraries",
-            paths, "asset_libraries",
-            paths, "active_asset_library",
-        )
-
+        # Add buttons for library and folder management
         col = row.column(align=True)
         if context.preferences.experimental.use_remote_asset_libraries:
             col.operator_menu_enum("preferences.asset_library_add", "type", text="", icon='ADD')
         else:
             col.operator("preferences.asset_library_add", text="", icon='ADD').type = 'LOCAL'
+        col.operator("preferences.asset_library_folder_add", text="", icon='NEWFOLDER')
         props = col.operator("preferences.asset_library_remove", text="", icon='REMOVE')
         props.index = active_library_index
 
@@ -2800,6 +2798,9 @@ class USERPREF_PT_file_paths_asset_libraries(AssetsPanel, Panel):
             active_library = None
 
         if active_library is None:
+            return
+
+        if active_library.type == 'FOLDER':
             return
 
         layout.separator()

@@ -638,13 +638,27 @@ struct bUserMenuItem_Prop {
   char _pad0[4] = {};
 };
 
+/**
+ * Type of asset library item in Preferences.
+ * Used to distinguish between actual asset libraries and folder containers.
+ */
+enum eUserAssetLibraryItemType {
+  /** Regular asset library with a path on disk. */
+  USER_ASSET_LIBRARY_ITEM_TYPE_LEAF = 0,
+  /** Folder/container for organizing asset libraries. */
+  USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER = 1,
+};
+
 struct bUserAssetLibrary {
   struct bUserAssetLibrary *next = nullptr, *prev = nullptr;
+  /** Parent folder name for hierarchical organization. Empty string for root level items.
+   * Used for DNA serialization - the parent pointer is restored from this after loading. */
+  char parent_name[/*MAX_NAME*/ 64] = "";
 
   char name[/*MAX_NAME*/ 64] = "";
   /** The path on disk for this asset library. For remote libraries
    * (#ASSET_LIBRARY_USE_REMOTE_URL), this is the download cache directory, where already
-   * downloaded assets will be placed. */
+   * downloaded assets will be placed. Empty for folder containers. */
   char dirpath[/*FILE_MAX*/ 1024] = "";
   /** Only for remote asset libraries (#ASSET_LIBRARY_USE_REMOTE_URL is set). Update using
    * #BKE_preferences_remote_asset_library_url_set() only. */
@@ -652,7 +666,14 @@ struct bUserAssetLibrary {
 
   short import_method = ASSET_IMPORT_PACK;  /* eAssetImportMethod */
   short flag = ASSET_LIBRARY_RELATIVE_PATH; /* eAssetLibrary_Flag */
-  char _pad0[4] = {};
+  /** Type of item: #eUserAssetLibraryItemType (LEAF for library, FOLDER for container). */
+  short type = USER_ASSET_LIBRARY_ITEM_TYPE_LEAF;
+  char _pad0[2] = {};
+
+  /* Runtime field (not serialized by DNA) */
+  /** Runtime pointer to parent folder. Restored from parent_name after loading.
+   * This field is NOT saved to disk - it's reconstructed when reading the file. */
+  struct bUserAssetLibrary *parent = nullptr;
 
 #ifdef __cplusplus
   bool is_enabled() const

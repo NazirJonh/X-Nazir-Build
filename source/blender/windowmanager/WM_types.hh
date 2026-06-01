@@ -1274,6 +1274,8 @@ enum eWM_DragDataType : int8_t {
   WM_DRAG_COLOR,
   WM_DRAG_DATASTACK,
   WM_DRAG_ASSET_CATALOG,
+  /** Dragging an asset library or folder from Preferences. */
+  WM_DRAG_ASSET_LIBRARY,
   WM_DRAG_GREASE_PENCIL_LAYER,
   WM_DRAG_GREASE_PENCIL_GROUP,
   WM_DRAG_NODE_TREE_INTERFACE,
@@ -1302,6 +1304,12 @@ struct wmDragAsset {
 
 struct wmDragAssetCatalog {
   bUUID drag_catalog_id;
+};
+
+/** Drag data for asset library items from Preferences. */
+struct wmDragAssetLibrary {
+  char library_name[64];
+  int library_index;
 };
 
 /**

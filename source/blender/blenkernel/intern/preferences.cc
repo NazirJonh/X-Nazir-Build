@@ -26,6 +26,8 @@
 
 #include "BLI_utildefines.h"
 
+#include "CLG_log.h"
+
 #include "BLT_translation.hh"
 
 #include "BLO_read_write.hh"
@@ -35,6 +37,8 @@
 namespace blender {
 
 #define U BLI_STATIC_ASSERT(false, "Global 'U' not allowed, only use arguments passed in!")
+
+static CLG_LogRef LOG = {"bke.preferences"};
 
 /* -------------------------------------------------------------------- */
 /** \name Preferences File
@@ -55,6 +59,121 @@ bool exists()
 }
 
 }  // namespace bke::preferences
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Asset Library Hierarchy Helpers
+ * \{ */
+
+namespace blender::bke::preferences {
+
+/**
+ * Find an asset library by name using linear search in the linked list.
+ * Used primarily during hierarchy restoration after file loading.
+ *
+ * @param userdef: The UserDef structure containing asset libraries.
+ * @param name: The name to search for. Must not be NULL.
+ * @return: Pointer to the asset library with matching name, or nullptr if not found.
+ * @note: The search is case-sensitive and uses full name matching.
+ */
+static bUserAssetLibrary *find_asset_library_by_name(const UserDef *userdef,
+                                                     const char *name)
+{
+  if (!name || name[0] == '\0') {
+    return nullptr;
+  }
+
+  for (bUserAssetLibrary *lib = static_cast<bUserAssetLibrary *>(userdef->asset_libraries.first);
+       lib;
+       lib = lib->next) {
+    if (STREQ(lib->name, name)) {
+      return lib;
+    }
+  }
+
+  return nullptr;
+}
+
+/**
+ * Update both the parent pointer and parent_name when changing a library's parent.
+ * This ensures parent_name and parent pointer stay synchronized.
+ *
+ * @param library: The library whose parent is being changed.
+ * @param new_parent: The new parent library, or nullptr for root level.
+ * @note: This is an internal helper function.
+ */
+static void update_asset_library_parent_name(bUserAssetLibrary *library,
+                                             bUserAssetLibrary *new_parent)
+{
+  library->parent = new_parent;
+  if (new_parent) {
+    STRNCPY(library->parent_name, new_parent->name);
+  }
+  else {
+    library->parent_name[0] = '\0';
+  }
+}
+
+/**
+ * Restore parent pointers from parent_name strings in the asset library hierarchy.
+ *
+ * Performs two passes:
+ * 1. First pass: Restore parent pointers from parent_name
+ * 2. Second pass: Detect and break cycles (shouldn't happen normally, but defensive)
+ *
+ * This function must be called after loading UserDef from a file.
+ *
+ * @param userdef: The UserDef structure with asset libraries.
+ * @note: Any broken parent_name references will result in the library being placed at root level.
+ */
+void restore_asset_library_hierarchy(UserDef *userdef)
+{
+  /* First pass: restore parent pointers from parent_name strings saved in DNA. */
+  for (bUserAssetLibrary *lib = static_cast<bUserAssetLibrary *>(userdef->asset_libraries.first);
+       lib;
+       lib = lib->next) {
+    lib->parent = find_asset_library_by_name(userdef, lib->parent_name);
+    if (!lib->parent && lib->parent_name[0]) {
+      CLOG_WARN(&LOG,
+                "Asset library '%s': parent '%s' not found, placing at root level",
+                lib->name,
+                lib->parent_name);
+      lib->parent_name[0] = '\0';
+    }
+  }
+
+  /* Second pass: detect and break cycles using depth limit. */
+  for (bUserAssetLibrary *lib = static_cast<bUserAssetLibrary *>(userdef->asset_libraries.first);
+       lib;
+       lib = lib->next) {
+    if (!lib->parent) {
+      continue;
+    }
+    const int MAX_DEPTH = 1000;
+    int depth = 0;
+    bUserAssetLibrary *current = lib->parent;
+    while (current && depth < MAX_DEPTH) {
+      if (current == lib) {
+        CLOG_WARN(&LOG, "Asset library '%s': cycle detected, placing at root level", lib->name);
+        lib->parent = nullptr;
+        lib->parent_name[0] = '\0';
+        break;
+      }
+      current = current->parent;
+      depth++;
+    }
+    if (depth >= MAX_DEPTH && current) {
+      CLOG_WARN(&LOG,
+                "Asset library '%s': hierarchy depth exceeds limit, placing at root level",
+                lib->name);
+      lib->parent = nullptr;
+      lib->parent_name[0] = '\0';
+    }
+  }
+}
+
+}  // namespace blender::bke::preferences
 
 /** \} */
 
@@ -84,6 +203,9 @@ bUserAssetLibrary *BKE_preferences_asset_library_add(UserDef *userdef,
 
 void BKE_preferences_asset_library_remove(UserDef *userdef, bUserAssetLibrary *library)
 {
+  /* Caller must ensure the library has no children (use BKE_preferences_asset_library_can_delete).
+   * Removing a library with children would leave dangling parent pointers. */
+  BLI_assert(BKE_preferences_asset_library_can_delete(userdef, library));
   BLI_freelinkN(&userdef->asset_libraries, library);
 }
 
@@ -98,6 +220,16 @@ void BKE_preferences_asset_library_name_set(UserDef *userdef,
                  '.',
                  offsetof(bUserAssetLibrary, name),
                  sizeof(library->name));
+
+  /* When a folder is renamed, propagate the new name to all direct children's parent_name.
+   * This keeps parent_name in sync so hierarchy is correctly restored after file reload. */
+  if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+    for (bUserAssetLibrary &item : userdef->asset_libraries) {
+      if (item.parent == library) {
+        STRNCPY(item.parent_name, library->name);
+      }
+    }
+  }
 }
 
 void BKE_preferences_asset_library_path_set(bUserAssetLibrary *library, const char *path)
@@ -242,6 +374,231 @@ void BKE_preferences_remote_asset_library_url_set(bUserAssetLibrary *library,
           std::string{asset_system::online_essentials_cache_directory_path()} :
           asset_system::remote_library_cache_directory_path_from_url(remote_url);
   BLI_strncpy_utf8(library->dirpath, library_dirpath.c_str(), sizeof(library->dirpath));
+}
+bUserAssetLibrary *BKE_preferences_asset_library_folder_add(UserDef *userdef,
+                                                            const char *name,
+                                                            bUserAssetLibrary *parent)
+{
+  bUserAssetLibrary *folder = MEM_new<bUserAssetLibrary>(__func__);
+
+  folder->type = USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER;
+  /* Set parent using helper function to keep parent_name synchronized. */
+  blender::bke::preferences::update_asset_library_parent_name(folder, parent);
+  folder->dirpath[0] = '\0';
+  folder->remote_url[0] = '\0';
+  folder->import_method = ASSET_IMPORT_PACK;
+  folder->flag = ASSET_LIBRARY_RELATIVE_PATH;
+
+  if (name) {
+    BKE_preferences_asset_library_name_set(userdef, folder, name);
+  }
+
+  /* Insert the folder in the correct position in the list:
+   * after the parent and all its descendants. */
+  if (parent) {
+    bUserAssetLibrary *insert_after = parent;
+
+    /* Find the last descendant of the parent. */
+    for (bUserAssetLibrary &item : userdef->asset_libraries) {
+      if (item.parent == parent) {
+        insert_after = &item;
+      }
+    }
+
+    BLI_insertlinkafter(&userdef->asset_libraries, insert_after, folder);
+  }
+  else {
+    /* For root level folders, add to the end of the list. */
+    BLI_addtail(&userdef->asset_libraries, folder);
+  }
+
+  return folder;
+}
+
+void BKE_preferences_asset_library_move_to_folder(UserDef *userdef,
+                                                  bUserAssetLibrary *library,
+                                                  bUserAssetLibrary *new_parent)
+{
+  if (library->parent == new_parent) {
+    return; /* Already in the correct folder. */
+  }
+
+  /* Prevent moving a folder into itself or its descendants. */
+  if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+    bUserAssetLibrary *current = new_parent;
+    while (current) {
+      if (current == library) {
+        return; /* Cannot move folder into itself. */
+      }
+      current = current->parent;
+    }
+  }
+
+  /* Update parent using helper function to keep parent_name synchronized. */
+  blender::bke::preferences::update_asset_library_parent_name(library, new_parent);
+
+  /* Remove from current position. */
+  BLI_remlink(&userdef->asset_libraries, library);
+
+  /* Insert in the correct position. */
+  if (new_parent) {
+    bUserAssetLibrary *insert_after = new_parent;
+
+    /* Find the last descendant of the new parent. */
+    for (bUserAssetLibrary &item : userdef->asset_libraries) {
+      if (item.parent == new_parent) {
+        insert_after = &item;
+      }
+    }
+
+    BLI_insertlinkafter(&userdef->asset_libraries, insert_after, library);
+  }
+  else {
+    /* For root level, add to the end of the list. */
+    BLI_addtail(&userdef->asset_libraries, library);
+  }
+}
+
+bool BKE_preferences_asset_library_is_folder(const bUserAssetLibrary *library)
+{
+  return library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER;
+}
+
+bool BKE_preferences_asset_library_can_delete(const UserDef *userdef,
+                                              const bUserAssetLibrary *library)
+{
+  if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+    /* Folders can only be deleted if they are empty. */
+    for (const bUserAssetLibrary &item : userdef->asset_libraries) {
+      if (item.parent == library) {
+        return false; /* Folder has children. */
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * Reorder an asset library or folder within its parent.
+ * \param userdef: The user preferences.
+ * \param library: The library or folder to reorder.
+ * \param target: The target library or folder to reorder relative to.
+ * \param location: Where to place the library relative to the target (Before, After, Into).
+ * \return True if the reorder was successful.
+ */
+bool BKE_preferences_asset_library_reorder(UserDef *userdef,
+                                           bUserAssetLibrary *library,
+                                           bUserAssetLibrary *target,
+                                           eBKE_AssetLibraryMoveLocation location)
+{
+  if (!library || !target || library == target) {
+    return false;
+  }
+
+  /* Prevent moving a folder into itself or its descendants. */
+  if (location == ASSET_LIBRARY_MOVE_INTO) {
+    if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      bUserAssetLibrary *current = target;
+      while (current) {
+        if (current == library) {
+          return false; /* Cannot move folder into itself. */
+        }
+        current = current->parent;
+      }
+    }
+  }
+
+  bUserAssetLibrary *new_parent = nullptr;
+
+  if (location == ASSET_LIBRARY_MOVE_INTO) {
+    /* Into: Move into the target folder. */
+    if (target->type != USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      return false; /* Can only move into folders. */
+    }
+    new_parent = target;
+  }
+  else {
+    /* Before/After: Move to the same parent as the target. */
+    new_parent = target->parent;
+  }
+
+  /* If moving a folder, collect all items in its subtree to move together. */
+  Vector<bUserAssetLibrary *> items_to_move;
+  items_to_move.append(library);
+
+  if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+    for (bUserAssetLibrary &item : userdef->asset_libraries) {
+      bUserAssetLibrary *current_parent = item.parent;
+      bool is_descendant = false;
+      while (current_parent) {
+        if (current_parent == library) {
+          is_descendant = true;
+          break;
+        }
+        current_parent = current_parent->parent;
+      }
+      if (is_descendant) {
+        items_to_move.append(&item);
+      }
+    }
+  }
+
+  /* Remove all items from current position (in reverse order to maintain relative positions). */
+  for (int i = items_to_move.size() - 1; i >= 0; i--) {
+    BLI_remlink(&userdef->asset_libraries, items_to_move[i]);
+  }
+
+  /* Update parent for the main item. Descendant items keep their internal parent relationships.
+   * This also updates parent_name so the hierarchy survives a file save/load cycle. */
+  blender::bke::preferences::update_asset_library_parent_name(library, new_parent);
+
+  /* Insert the main item in the correct position. */
+  if (location == ASSET_LIBRARY_MOVE_BEFORE) {
+    BLI_insertlinkbefore(&userdef->asset_libraries, target, library);
+  }
+  else if (location == ASSET_LIBRARY_MOVE_AFTER) {
+    BLI_insertlinkafter(&userdef->asset_libraries, target, library);
+  }
+  else {
+    /* Into: Insert after the last descendant of the new parent. */
+    if (new_parent) {
+      bUserAssetLibrary *insert_after = new_parent;
+
+      /* Find the last descendant in the entire subtree of the new parent.
+       * We need to check all items and find the one with the deepest nesting
+       * that has new_parent as an ancestor. */
+      for (bUserAssetLibrary &item : userdef->asset_libraries) {
+        /* Check if item is a descendant of new_parent. */
+        bUserAssetLibrary *current_parent = item.parent;
+        bool is_descendant = false;
+
+        while (current_parent) {
+          if (current_parent == new_parent) {
+            is_descendant = true;
+            break;
+          }
+          current_parent = current_parent->parent;
+        }
+
+        if (is_descendant) {
+          insert_after = &item;
+        }
+      }
+
+      BLI_insertlinkafter(&userdef->asset_libraries, insert_after, library);
+    }
+    else {
+      /* For root level, add to the end of the list. */
+      BLI_addtail(&userdef->asset_libraries, library);
+    }
+  }
+
+  /* Insert all descendant items after the main item, maintaining their relative order. */
+  for (int i = 1; i < items_to_move.size(); i++) {
+    BLI_insertlinkafter(&userdef->asset_libraries, items_to_move[i - 1], items_to_move[i]);
+  }
+
+  return true;
 }
 
 /** \} */
@@ -713,4 +1070,18 @@ bool BKE_preferences_asset_shelf_settings_ensure_catalog_path_enabled(UserDef *u
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Asset Library Hierarchy Restoration (Public API)
+ * \{ */
+
+void BKE_preferences_asset_library_restore_hierarchy(UserDef *userdef)
+{
+  blender::bke::preferences::restore_asset_library_hierarchy(userdef);
+}
+
+/** \} */
+
 }  // namespace blender
+
+
+

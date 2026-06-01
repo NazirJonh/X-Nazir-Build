@@ -64,8 +64,11 @@ namespace blender::ui {
 
 static const char *IMAGE_TEXTURE_SHELF_IDNAME = "VIEW3D_AST_image_texture";
 
-/** Safety cap for N-panel performance; not the old MVP `rows * cols` display limit. */
-constexpr int IMAGE_GRID_MAX_ITEMS = 128;
+/**
+ * Upper bound on tiles built per redraw (16 rows × wide N-panel). The actual window is
+ * #image_grid_build_item_window_size() from visible rows × columns.
+ */
+constexpr int IMAGE_GRID_MAX_ITEMS = 512;
 
 /* -------------------------------------------------------------------- */
 /** \name Helpers
@@ -139,6 +142,19 @@ static bool image_grid_is_assignable_texture(const Image &image)
     return false;
   }
   return true;
+}
+
+/** Items to build for the current scroll window: all visible grid cells, capped for performance. */
+static int image_grid_build_item_window_size(const ed::view3d::ImageGridUIState &state,
+                                             const GridViewStyle &style,
+                                             const int cols)
+{
+  const int safe_cols = max_ii(1, cols);
+  const int tile_h = max_ii(1, style.tile_height);
+  const int effective_rows = clamp_i(
+      round_fl_to_int(float(state.grip_pixel_height) / float(tile_h)), 1, 16);
+  const int visible_slots = max_ii(1, effective_rows * safe_cols);
+  return min_ii(visible_slots, IMAGE_GRID_MAX_ITEMS);
 }
 
 
@@ -488,7 +504,8 @@ class ImageAssetGridView : public AbstractGridView {
 
     const int cols = state_.cached_cols > 0 ? state_.cached_cols : cols_hint_;
     const int first_index = state_.scroll_row * cols;
-    const int last_index = first_index + IMAGE_GRID_MAX_ITEMS;
+    const int item_window = image_grid_build_item_window_size(state_, this->get_style(), cols);
+    const int last_index = first_index + item_window;
     int filtered_index = 0;
 
     auto maybe_add_asset = [&](asset_system::AssetRepresentation &asset) -> bool {

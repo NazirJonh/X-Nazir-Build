@@ -342,6 +342,17 @@ struct Brush {
 
   float texture_sample_bias = 0; /* value to added to texture samples */
 
+  /** How texture affects brush behavior. #eBrushTextureDataMode. */
+  int texture_data_mode = BRUSH_TEXTURE_DATA_MODE_NONE;
+  /** Alpha threshold for binary texture mode. Range [0..1], default 0.5. */
+  float texture_threshold = 0.5f;
+  /** Explicit Face Set ID to assign (0 = auto-generate on first stroke). */
+  int face_set_id = 0;
+  char write_vcol = 0;
+  char vcol_channel = 0;
+  char vcol_mode = 0;
+  char _pad_vcol[1] = {};
+
   /**
    * This preset is used to specify an exact function used for the distance falloff instead
    * of doing a Bezier spline evaluation via CurveMapping for performance reasons.

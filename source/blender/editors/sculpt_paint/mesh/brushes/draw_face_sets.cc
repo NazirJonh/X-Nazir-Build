@@ -17,8 +17,10 @@
 
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_math_base.hh"
+#include "BLI_task.h"
 #include "BLI_task.hh"
 
+#include "editors/sculpt_paint/mesh/sculpt_color.hh"
 #include "editors/sculpt_paint/mesh/sculpt_face_set.hh"
 #include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 #include "editors/sculpt_paint/mesh/sculpt_undo.hh"
@@ -125,6 +127,84 @@ static void calc_faces(const Depsgraph &depsgraph,
   apply_face_set(face_set_id, face_indices, factors, face_sets);
 }
 
+/* Samples texture alpha as a binary data source for Face Set assignment.
+ * Unlike `calc_faces()`, strength does not scale the assignment — the texture
+ * threshold alone determines which faces receive the ID. */
+static void calc_faces_from_texture(const Depsgraph &depsgraph,
+                                    Object &object,
+                                    const Brush &brush,
+                                    const int face_set_id,
+                                    Span<float3> positions_eval,
+                                    const bke::pbvh::MeshNode &node,
+                                    const Span<int> face_indices,
+                                    MeshLocalData &tls,
+                                    const MutableSpan<int> face_sets,
+                                    bke::GSpanAttributeWriter &color_attribute,
+                                    const GroupedSpan<int> &vert_to_face_map)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  const StrokeCache &cache = *ss.cache;
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+
+  tls.positions.resize(face_indices.size());
+  const MutableSpan<float3> face_centers = tls.positions;
+  face_set::calc_face_centers(faces, corner_verts, positions_eval, face_indices, face_centers);
+
+  tls.normals.resize(face_indices.size());
+  const MutableSpan<float3> face_normals = tls.normals;
+  calc_face_normals(faces, corner_verts, positions_eval, face_indices, face_normals);
+
+  tls.factors.resize(face_indices.size());
+  const MutableSpan<float> factors = tls.factors;
+
+  face_set::fill_factor_from_hide_and_mask(mesh, face_indices, factors);
+
+  filter_region_clip_factors(ss, face_centers, factors);
+  if (brush.flag & BRUSH_FRONTFACE) {
+    calc_front_face(cache.view_normal_symm, face_normals, factors);
+  }
+
+  tls.distances.resize(face_indices.size());
+  const MutableSpan<float> distances = tls.distances;
+  calc_brush_distances(ss, face_centers, eBrushFalloffShape(brush.falloff_shape), distances);
+  filter_distances_with_radius(cache.radius, distances, factors);
+  apply_hardness_to_distances(cache, distances);
+  /* Intentionally skip calc_brush_strength_factors and scale_factors: strength must not
+   * gate the discrete face set assignment in this mode. */
+
+  if (cache.automasking) {
+    auto_mask::calc_face_factors(
+        depsgraph, object, faces, corner_verts, *cache.automasking, node, face_indices, factors);
+  }
+
+  /* Binary threshold: texture alpha determines which faces receive the Face Set ID.
+   * Samples at each vertex for accuracy; the average across all face vertices is compared
+   * against the threshold. */
+  const int thread_id = BLI_task_parallel_thread_id(nullptr);
+  bke::GSpanAttributeWriter *col_attr_ptr = color_attribute ? &color_attribute : nullptr;
+  for (const int i : face_indices.index_range()) {
+    if (factors[i] == 0.0f) {
+      continue;
+    }
+    const float avg = face_set::sample_face_texture_avg(ss,
+                                                        brush,
+                                                        positions_eval,
+                                                        faces,
+                                                        corner_verts,
+                                                        vert_to_face_map,
+                                                        face_indices[i],
+                                                        col_attr_ptr,
+                                                        thread_id);
+    factors[i] = (avg > brush.texture_threshold) ? 1.0f : 0.0f;
+  }
+
+  if (!face_sets.is_empty()) {
+    apply_face_set(face_set_id, face_indices, factors, face_sets);
+  }
+}
+
 static void do_draw_face_sets_brush_mesh(const Depsgraph &depsgraph,
                                          Object &object,
                                          const Brush &brush,
@@ -134,10 +214,33 @@ static void do_draw_face_sets_brush_mesh(const Depsgraph &depsgraph,
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Span<float3> positions_eval = bke::pbvh::vert_positions_eval(depsgraph, object);
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::FaceSet);
+  const bool use_texture_data_source = (brush.texture_data_mode ==
+                                        BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE);
+  const bool write_face_sets = !use_texture_data_source ||
+                               (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
+  const bool write_color = use_texture_data_source && brush.write_vcol;
 
-  bke::SpanAttributeWriter<int> face_sets = face_set::ensure_face_sets_mesh(
-      *id_cast<Mesh *>(object.data));
+  undo::NodeDataFlag undo_flags{};
+  if (write_face_sets) {
+    undo_flags |= undo::NodeDataFlag::FaceSet;
+  }
+  if (write_color) {
+    undo_flags |= undo::NodeDataFlag::Color;
+  }
+  undo::push_nodes(depsgraph, object, node_mask, undo_flags);
+
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  bke::SpanAttributeWriter<int> face_sets;
+  if (write_face_sets) {
+    face_sets = face_set::ensure_face_sets_mesh(mesh);
+  }
+
+  bke::GSpanAttributeWriter color_attribute;
+  GroupedSpan<int> vert_to_face_map;
+  if (write_color) {
+    color_attribute = color::active_color_attribute_for_write(mesh);
+    vert_to_face_map = mesh.vert_to_face_map();
+  }
 
   threading::EnumerableThreadSpecific<MeshLocalData> all_tls;
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
@@ -145,20 +248,43 @@ static void do_draw_face_sets_brush_mesh(const Depsgraph &depsgraph,
       [&](const int i) {
         MeshLocalData &tls = all_tls.local();
         const Span<int> face_indices = nodes[i].faces();
-        calc_faces(depsgraph,
-                   object,
-                   brush,
-                   ss.cache->bstrength,
-                   ss.cache->paint_face_set,
-                   positions_eval,
-                   nodes[i],
-                   face_indices,
-                   tls,
-                   face_sets.span);
+        if (use_texture_data_source) {
+          calc_faces_from_texture(depsgraph,
+                                  object,
+                                  brush,
+                                  ss.cache->paint_face_set,
+                                  positions_eval,
+                                  nodes[i],
+                                  face_indices,
+                                  tls,
+                                  face_sets ? face_sets.span : MutableSpan<int>(),
+                                  color_attribute,
+                                  vert_to_face_map);
+        }
+        else {
+          calc_faces(depsgraph,
+                     object,
+                     brush,
+                     ss.cache->bstrength,
+                     ss.cache->paint_face_set,
+                     positions_eval,
+                     nodes[i],
+                     face_indices,
+                     tls,
+                     face_sets.span);
+        }
       },
       exec_mode::grain_size(1));
-  pbvh.tag_face_sets_changed(node_mask);
-  face_sets.finish();
+
+  if (face_sets) {
+    pbvh.tag_face_sets_changed(node_mask);
+    face_sets.finish();
+  }
+
+  if (color_attribute) {
+    pbvh.tag_attribute_changed(node_mask, mesh.active_color_attribute);
+    color_attribute.finish();
+  }
 }
 
 struct GridLocalData {
@@ -219,7 +345,7 @@ static void do_draw_face_sets_brush_grids(const Depsgraph &depsgraph,
   SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::FaceSet);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::FaceSet);
 
   bke::SpanAttributeWriter<int> face_sets = face_set::ensure_face_sets_mesh(
       *id_cast<Mesh *>(object.data));
@@ -307,7 +433,7 @@ static void do_draw_face_sets_brush_bmesh(const Depsgraph &depsgraph,
   SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::FaceSet);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::FaceSet);
 
   const int cd_offset = face_set::ensure_face_sets_bmesh(object);
 
@@ -353,7 +479,7 @@ static void sample_face_set_color(const Object &object, Brush &brush)
   sampled_color_fl[1] = sampled_color_ub[1] / 255.0f;
   sampled_color_fl[2] = sampled_color_ub[2] / 255.0f;
 
-  copy_v3_v3(brush.face_set_color, sampled_color_fl);
+  face_set::brush_face_set_color_set(&brush, sampled_color_fl);
   brush.face_set_sample_id = sampled_id;
 
   /* Switch to Custom mode so the sampled ID is used on the next stroke. */
@@ -404,12 +530,18 @@ void do_draw_face_sets_brush(const Depsgraph &depsgraph,
   StrokeCache &cache = *object.runtime->sculpt_session->cache;
 
   if (cache.paint_face_set == face_set_none_id) {
-    if (cache.toggle_settings.invert) {
+    if (brush.face_set_id > 0) {
+      /* Use explicitly assigned Face Set ID from brush settings (set via texture panel eyedropper). */
+      cache.paint_face_set = brush.face_set_id;
+    }
+    else if (cache.toggle_settings.invert) {
       /* Ctrl+LMB: sample the Face Set color under the cursor, then return without painting. */
       sample_face_set_color(object, brush);
       return;
     }
-    resolve_paint_face_set(cache, object, brush);
+    else {
+      resolve_paint_face_set(cache, object, brush);
+    }
   }
 
   switch (bke::object::pbvh_get(object)->type()) {

@@ -973,11 +973,82 @@ class VIEW3D_PT_tools_brush_face_set_settings(Panel, View3DPaintPanel):
         col_color.active = is_custom
         col_color.enabled = is_custom
 
-        row = col_color.row(align=True)
-        row.prop(brush, "face_set_color", text="Color")
-        row.prop(brush, "face_set_secondary_color", text="")
+        _draw_face_set_color_row(col_color.row(align=True), context, brush)
 
-        col.separator()
+
+class VIEW3D_PT_tools_brush_face_set_texture(Panel, View3DPaintPanel):
+    bl_context = ".paint_common"  # dot on purpose (access from topbar, not sculpt_mode group)
+    bl_label = "Face Sets"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_ui_units_x = 16
+
+    _BRUSH_TYPES = {
+        'DRAW',
+        'CLAY',
+        'CLAY_STRIPS',
+        'CREASE',
+        'BLOB',
+        'INFLATE',
+        'SMOOTH',
+        'PINCH',
+        'DRAW_SHARP',
+        'MULTIPLANE_SCRAPE',
+    }
+
+    @classmethod
+    def poll(cls, context):
+        sculpt = context.tool_settings.sculpt
+        if not (context.sculpt_object and sculpt):
+            return False
+        brush = sculpt.brush
+        return brush and brush.sculpt_brush_type in cls._BRUSH_TYPES
+
+    def draw_header(self, context):
+        sculpt = context.tool_settings.sculpt
+        if not (context.sculpt_object and sculpt and sculpt.brush):
+            return
+        if self.is_popover:
+            return
+        self.layout.prop(sculpt.brush, "use_face_set_texture", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        brush = context.tool_settings.sculpt.brush
+        is_active = (brush.texture_data_mode == 'FACE_SETS_FROM_TEXTURE')
+
+        if self.is_popover:
+            row = layout.row(align=True)
+            row.use_property_split = False
+            row.prop(brush, "use_face_set_texture", text="Face Sets from Texture")
+
+        # --- Face Set Colors ---
+        col = layout.column()
+        row = col.row(align=True)
+        row.prop(brush, "face_set_draw_mode", expand=True)
+
+        is_custom = (brush.face_set_draw_mode == 'CUSTOM')
+        col_color = col.column()
+        col_color.active = is_custom
+        col_color.enabled = is_custom
+
+        _draw_face_set_color_row(col_color.row(align=True), context, brush)
+
+        layout.separator()
+
+        # --- Face Sets from Texture ---
+        col = layout.column()
+        col.active = is_active
+
+        col.prop(brush, "texture_threshold", text="Threshold", slider=True)
+        col.prop(brush, "texture_invert_alpha", text="Invert Alpha")
+        col.prop(brush, "write_face_sets", text="Write to Face Sets")
+        col.prop(brush, "write_vcol", text="Write to Vertex Color")
+        if brush.write_vcol:
+            col.prop(brush, "vcol_channel", text="Channel")
+            col.prop(brush, "vcol_mode", text="Mode")
 
 
 class VIEW3D_PT_sculpt_dyntopo(Panel, View3DPaintPanel):
@@ -2359,7 +2430,281 @@ class VIEW3D_PT_tools_grease_pencil_v3_brush_gap_closure(View3DPanel, Panel):
             row.prop(gp_settings, "use_collide_strokes")
 
 
+def _brush_face_set_texture_get(self):
+    return self.texture_data_mode == 'FACE_SETS_FROM_TEXTURE'
+
+
+def _brush_face_set_texture_set(self, value):
+    self.texture_data_mode = 'FACE_SETS_FROM_TEXTURE' if value else 'NONE'
+
+
+bpy.types.Brush.use_face_set_texture = bpy.props.BoolProperty(
+    name="Face Sets from Texture",
+    description="Sample texture alpha to determine Face Set ID assignment",
+    get=_brush_face_set_texture_get,
+    set=_brush_face_set_texture_set,
+)
+
+_face_set_unified_sync_owner = object()
+_face_set_unified_sync_guard = False
+
+
+def _get_active_brush_face_set_colors():
+    """Return (primary, secondary) from the active sculpt brush, with sensible fallbacks."""
+    try:
+        sculpt = bpy.context.tool_settings.sculpt
+        if sculpt and sculpt.brush and hasattr(sculpt.brush, 'face_set_color'):
+            brush = sculpt.brush
+            return brush.face_set_color[:], brush.face_set_secondary_color[:]
+    except (AttributeError, RuntimeError):
+        pass
+    for brush in bpy.data.brushes:
+        if getattr(brush, 'sculpt_brush_type', None) == 'DRAW_FACE_SETS':
+            return brush.face_set_color[:], brush.face_set_secondary_color[:]
+    return (1.0, 1.0, 1.0), (0.0, 0.0, 0.0)
+
+
+def _face_set_colors_equal(color_a, color_b, epsilon=1e-6):
+    return all(abs(a - b) <= epsilon for a, b in zip(color_a, color_b))
+
+
+def _apply_face_set_colors_to_all_brushes(primary, secondary):
+    for brush in bpy.data.brushes:
+        if getattr(brush, 'sculpt_brush_type', None) is None:
+            continue
+        if hasattr(brush, 'face_set_color'):
+            if not _face_set_colors_equal(brush.face_set_color[:], primary):
+                brush.face_set_color = primary
+        if hasattr(brush, 'face_set_secondary_color'):
+            if not _face_set_colors_equal(brush.face_set_secondary_color[:], secondary):
+                brush.face_set_secondary_color = secondary
+
+
+def _push_face_set_colors_to_brushes(primary, secondary):
+    """Write canonical face set colors to every sculpt brush."""
+    global _face_set_unified_sync_guard
+    if _face_set_unified_sync_guard:
+        return
+    _face_set_unified_sync_guard = True
+    try:
+        _apply_face_set_colors_to_all_brushes(primary, secondary)
+    finally:
+        _face_set_unified_sync_guard = False
+
+
+def _sync_unified_colors_to_brushes(wm):
+    """Push stored unified colors to all sculpt brushes."""
+    _push_face_set_colors_to_brushes(
+        wm.unified_face_set_color[:],
+        wm.unified_face_set_secondary_color[:],
+    )
+
+
+def _on_brush_face_set_color_changed():
+    """Mirror active brush colors into WM storage and propagate to all brushes."""
+    try:
+        wm = bpy.context.window_manager
+    except (AttributeError, RuntimeError):
+        return
+    if wm is None or not getattr(wm, 'use_unified_face_set_color', False):
+        return
+    if _face_set_unified_sync_guard:
+        return
+    primary, secondary = _get_active_brush_face_set_colors()
+    _face_set_unified_sync_guard = True
+    try:
+        wm.unified_face_set_color = primary
+        wm.unified_face_set_secondary_color = secondary
+        _apply_face_set_colors_to_all_brushes(primary, secondary)
+    finally:
+        _face_set_unified_sync_guard = False
+
+
+def _on_active_sculpt_brush_changed():
+    """After switching sculpt brushes, apply stored unified colors to the new active brush."""
+    try:
+        wm = bpy.context.window_manager
+        sculpt = bpy.context.tool_settings.sculpt
+    except (AttributeError, RuntimeError):
+        return
+    if wm is None or not wm.use_unified_face_set_color:
+        return
+    if sculpt is None or sculpt.brush is None:
+        return
+    if _face_set_unified_sync_guard:
+        return
+    primary = wm.unified_face_set_color[:]
+    secondary = wm.unified_face_set_secondary_color[:]
+    brush = sculpt.brush
+    if not hasattr(brush, 'face_set_color'):
+        return
+    if (brush.face_set_color[:] == primary and
+            brush.face_set_secondary_color[:] == secondary):
+        return
+    _face_set_unified_sync_guard = True
+    try:
+        brush.face_set_color = primary
+        brush.face_set_secondary_color = secondary
+    finally:
+        _face_set_unified_sync_guard = False
+
+
+def _register_face_set_unified_color_sync():
+    for prop_name in ("face_set_color", "face_set_secondary_color"):
+        bpy.msgbus.subscribe_rna(
+            key=(bpy.types.Brush, prop_name),
+            owner=_face_set_unified_sync_owner,
+            notify=_on_brush_face_set_color_changed,
+            options={'PERSISTENT'},
+        )
+    bpy.msgbus.subscribe_rna(
+        key=(bpy.types.Sculpt, "brush"),
+        owner=_face_set_unified_sync_owner,
+        notify=_on_active_sculpt_brush_changed,
+        options={'PERSISTENT'},
+    )
+
+
+def _unregister_face_set_unified_color_sync():
+    bpy.msgbus.clear_by_owner(_face_set_unified_sync_owner)
+
+
+def _wm_unified_face_set_colors_value_update(self, _context):
+    if _face_set_unified_sync_guard:
+        return
+    if not self.use_unified_face_set_color:
+        return
+    _push_face_set_colors_to_brushes(
+        self.unified_face_set_color[:],
+        self.unified_face_set_secondary_color[:],
+    )
+
+
+def _wm_unified_face_set_color_toggle_update(self, _context):
+    if _face_set_unified_sync_guard:
+        return
+    if not self.use_unified_face_set_color:
+        return
+    primary, secondary = _get_active_brush_face_set_colors()
+    _face_set_unified_sync_guard = True
+    try:
+        self.unified_face_set_color = primary
+        self.unified_face_set_secondary_color = secondary
+        _apply_face_set_colors_to_all_brushes(primary, secondary)
+    finally:
+        _face_set_unified_sync_guard = False
+
+
+bpy.types.WindowManager.use_unified_face_set_color = bpy.props.BoolProperty(
+    name="Use Unified Face Set Color",
+    description="Use the same face set colors for all brushes",
+    default=True,
+    update=_wm_unified_face_set_color_toggle_update,
+)
+
+bpy.types.WindowManager.unified_face_set_color = bpy.props.FloatVectorProperty(
+    name="Face Set Color",
+    subtype='COLOR',
+    size=3,
+    min=0.0, max=1.0,
+    default=(1.0, 1.0, 1.0),
+    update=_wm_unified_face_set_colors_value_update,
+)
+
+bpy.types.WindowManager.unified_face_set_secondary_color = bpy.props.FloatVectorProperty(
+    name="Secondary Face Set Color",
+    subtype='COLOR',
+    size=3,
+    min=0.0, max=1.0,
+    default=(0.0, 0.0, 0.0),
+    update=_wm_unified_face_set_colors_value_update,
+)
+
+
+@bpy.app.handlers.persistent
+def _face_set_unified_color_load_pre(*_):
+    _unregister_face_set_unified_color_sync()
+
+
+@bpy.app.handlers.persistent
+def _face_set_unified_color_load_post(*_):
+    _register_face_set_unified_color_sync()
+    for wm in bpy.data.window_managers:
+        if not getattr(wm, 'use_unified_face_set_color', False):
+            continue
+        primary, secondary = _get_active_brush_face_set_colors()
+        global _face_set_unified_sync_guard
+        _face_set_unified_sync_guard = True
+        try:
+            wm.unified_face_set_color = primary
+            wm.unified_face_set_secondary_color = secondary
+            _apply_face_set_colors_to_all_brushes(primary, secondary)
+        finally:
+            _face_set_unified_sync_guard = False
+
+
+bpy.app.handlers.load_pre.append(_face_set_unified_color_load_pre)
+bpy.app.handlers.load_post.append(_face_set_unified_color_load_post)
+
+try:
+    _register_face_set_unified_color_sync()
+    _face_set_unified_color_load_post()
+except Exception:
+    pass
+
+
+def _draw_face_set_color_row(row, context, brush):
+    wm = context.window_manager
+    if wm.use_unified_face_set_color:
+        row.prop(wm, "unified_face_set_color", text="Color")
+        row.prop(wm, "unified_face_set_secondary_color", text="")
+    else:
+        row.prop(brush, "face_set_color", text="Color")
+        row.prop(brush, "face_set_secondary_color", text="")
+    row.operator("sculpt.sample_face_set_id", icon='EYEDROPPER', text="")
+    row.operator("sculpt.face_set_colors_swap", icon='FILE_REFRESH', text="")
+    row.prop(context.window_manager, "use_unified_face_set_color", text="", icon='BRUSHES_ALL')
+
+
+class VIEW3D_OT_face_set_colors_swap(bpy.types.Operator):
+    bl_idname = "sculpt.face_set_colors_swap"
+    bl_label = "Swap Face Set Colors"
+    bl_description = "Swap the primary and secondary Face Set colors"
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        sculpt = context.tool_settings.sculpt
+        if not (context.sculpt_object and sculpt and sculpt.brush):
+            return False
+        brush = sculpt.brush
+        if brush.sculpt_brush_type == 'DRAW_FACE_SETS':
+            return True
+        return getattr(brush, 'texture_data_mode', 'NONE') == 'FACE_SETS_FROM_TEXTURE'
+
+    def execute(self, context):
+        wm = context.window_manager
+        if wm.use_unified_face_set_color:
+            global _face_set_unified_sync_guard
+            tmp = wm.unified_face_set_color[:]
+            secondary = wm.unified_face_set_secondary_color[:]
+            _face_set_unified_sync_guard = True
+            try:
+                wm.unified_face_set_color = secondary
+                wm.unified_face_set_secondary_color = tmp
+            finally:
+                _face_set_unified_sync_guard = False
+            _push_face_set_colors_to_brushes(secondary, tmp)
+        else:
+            brush = context.tool_settings.sculpt.brush
+            tmp = brush.face_set_color[:]
+            brush.face_set_color = brush.face_set_secondary_color[:]
+            brush.face_set_secondary_color = tmp
+        return {'FINISHED'}
+
+
 classes = (
+    VIEW3D_OT_face_set_colors_swap,
     VIEW3D_MT_brush_context_menu,
     VIEW3D_PT_tools_object_options,
     VIEW3D_PT_tools_object_options_transform,
@@ -2390,6 +2735,7 @@ classes = (
     VIEW3D_PT_tools_brush_falloff_normal,
     VIEW3D_PT_tools_brush_display,
     VIEW3D_PT_tools_brush_face_set_settings,
+    VIEW3D_PT_tools_brush_face_set_texture,
     VIEW3D_PT_tools_weight_gradient,
 
     VIEW3D_PT_sculpt_dyntopo,

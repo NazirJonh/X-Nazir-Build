@@ -2839,13 +2839,13 @@ static void undo_push(const Depsgraph &depsgraph, Object &ob, Cache &expand_cach
 
   switch (expand_cache.target) {
     case TargetType::Mask:
-      undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Mask);
+      undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::Mask);
       break;
     case TargetType::FaceSets:
-      undo::push_nodes(depsgraph, ob, node_mask, undo::Type::FaceSet);
+      undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::FaceSet);
       break;
     case TargetType::Colors: {
-      undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Color);
+      undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::Color);
       break;
     }
   }

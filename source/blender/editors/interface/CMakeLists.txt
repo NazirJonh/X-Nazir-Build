@@ -73,6 +73,7 @@ set(SRC
   templates/interface_template_grease_pencil_layer_tree.cc
   templates/interface_template_icon.cc
   templates/interface_template_id.cc
+  templates/interface_template_image_browse.cc
   templates/interface_template_keymap.cc
   templates/interface_template_layers.cc
   templates/interface_template_light_linking.cc

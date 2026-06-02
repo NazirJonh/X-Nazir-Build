@@ -96,6 +96,8 @@ class AbstractGridView : public AbstractView {
   Map<StringRef, AbstractGridViewItem *> item_map_;
   GridViewStyle style_;
   int cols_per_row_ = 0;
+  /** When set, empty row spacers are added so the grid block is at least this tall (pixels). */
+  std::optional<int> min_viewport_height_;
 
  public:
   AbstractGridView();
@@ -124,6 +126,9 @@ class AbstractGridView : public AbstractView {
   int get_item_count_filtered() const;
 
   void set_tile_size(int tile_width, int tile_height);
+  /** Ensure the laid-out grid uses at least this height, using the same row spacers as scrolling. */
+  void set_min_viewport_height(int height_px);
+  [[nodiscard]] std::optional<int> min_viewport_height() const;
   AbstractViewItem *find_active_or_visible_item() const override;
   AbstractViewItem *navigate_left(AbstractViewItem *from) override;
   AbstractViewItem *navigate_right(AbstractViewItem *from) override;

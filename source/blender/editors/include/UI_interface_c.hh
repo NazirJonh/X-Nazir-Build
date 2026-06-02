@@ -43,6 +43,7 @@ struct IDProperty;
 struct ImBuf;
 struct Image;
 struct ImageUser;
+struct Material;
 struct MTex;
 struct Panel;
 struct PanelType;
@@ -1645,6 +1646,18 @@ std::string button_extra_icon_string_get_operator_keymap(const bContext &C,
 enum {
   TEMPLATE_ID_FILTER_ALL = 0,
   TEMPLATE_ID_FILTER_AVAILABLE = 1,
+  /** Filter images by current active material. */
+  TEMPLATE_ID_FILTER_CURRENT_MATERIAL = 2,
+  /** Filter images by slot type (requires slot_type context). */
+  TEMPLATE_ID_FILTER_SLOT_TYPE = 4,
+};
+
+/** Filter context for template ID browsing. */
+struct TemplateIDFilterContext {
+  /** Current active material to filter by (for CURRENT_MATERIAL filter). */
+  struct Material *material;
+  /** Slot type to filter by (for SLOT_TYPE filter). */
+  char slot_type;
 };
 
 /***************************** ID Utilities *******************************/
@@ -2406,6 +2419,34 @@ void template_id_browse(Layout *layout,
                         const char *unlinkop,
                         int filter = TEMPLATE_ID_FILTER_ALL,
                         const char *text = nullptr);
+/**
+ * Extended version with filter context for material/slot type filtering.
+ */
+void template_id_browse_with_context(Layout *layout,
+                                     bContext *C,
+                                     PointerRNA *ptr,
+                                     StringRefNull propname,
+                                     const char *newop,
+                                     const char *openop,
+                                     const char *unlinkop,
+                                     int filter,
+                                     const char *text,
+                                     struct Material *material,
+                                     char slot_type);
+/**
+ * Browse/assign an Image ID-block via a popover panel with paint-slot filters, a grid/list view
+ * toggle and a search field. \a ptr / \a propname identify the Image pointer property to set.
+ * \a material and \a slot_type seed the filter context (may be null / NODE_TEX_IMAGE_SLOT_NONE).
+ */
+void uiTemplateImageBrowse(Layout *layout,
+                           const bContext *C,
+                           PointerRNA *ptr,
+                           const char *propname,
+                           struct Material *material,
+                           int slot_type,
+                           const char *newop,
+                           const char *openop,
+                           const char *unlinkop);
 void template_id_preview(Layout *layout,
                          bContext *C,
                          PointerRNA *ptr,
@@ -3032,6 +3073,8 @@ ARegion *tooltip_create_from_search_item_generic(bContext *C,
                                                  const ARegion *searchbox_region,
                                                  const rcti *item_rect,
                                                  ID *id);
+/** Same content as search-box ID tooltips (incl. image preview), for custom button tooltips. */
+void tooltip_from_id(TooltipData &tip, ID *id);
 
 /* How long before a tool-tip shows. */
 #define UI_TOOLTIP_DELAY 0.5

@@ -10047,10 +10047,21 @@ wmOperator *context_active_operator_get(const bContext *C)
   return nullptr;
 }
 
+/* Resolve the searchbox handling data of \a but, accounting for semi-modal search fields whose
+ * state lives in #Button.semi_modal_state (with #Button.active null outside the semi-modal scope). */
+static const HandleButtonData *button_handle_data_get(const Button *but)
+{
+  return but->semi_modal_state ? but->semi_modal_state : but->active;
+}
+
 ARegion *region_searchbox_region_get(const ARegion *button_region)
 {
-  Button *but = region_active_but_get(button_region);
-  return (but != nullptr) ? but->active->searchbox : nullptr;
+  const Button *but = region_active_but_get(button_region);
+  if (but == nullptr) {
+    return nullptr;
+  }
+  const HandleButtonData *data = button_handle_data_get(but);
+  return data ? data->searchbox : nullptr;
 }
 
 void context_update_anim_flag(const bContext *C)
@@ -10163,7 +10174,12 @@ static int handle_button_over(bContext *C, const wmEvent *event, ARegion *region
     Button *but = but_find_open_event(region, event);
     if (but) {
       button_activate_init(C, region, but, BUTTON_ACTIVATE_OVER);
-      do_button(C, but->block, but, event);
+      /* Semi-modal buttons (e.g. a search field with #BUT2_FORCE_SEMI_MODAL_ACTIVE) are not
+       * activated the normal way; their handling state lives in #Button.semi_modal_state and
+       * #Button.active stays null. Skip #do_button to avoid dereferencing a null active. */
+      if (but->active) {
+        do_button(C, but->block, but, event);
+      }
     }
   }
 

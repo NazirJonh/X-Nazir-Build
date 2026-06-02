@@ -10,6 +10,7 @@
 #include "BKE_collection.hh"
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
+#include "BKE_image.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_override.hh"
@@ -27,12 +28,17 @@
 #include "DEG_depsgraph_query.hh"
 
 #include "DNA_collection_types.h"
+#include "DNA_image_types.h"
+#include "DNA_material_types.h"
+#include "DNA_node_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_space_types.h"
 #include "DNA_workspace_types.h"
 
 #include "ED_id_management.hh"
 #include "ED_node.hh"
 #include "ED_object.hh"
+#include "ED_screen.hh"
 #include "ED_undo.hh"
 
 #include "RNA_access.hh"
@@ -40,6 +46,7 @@
 
 #include "WM_api.hh"
 
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_string_search.hh"
 #include "interface_intern.hh"
@@ -69,6 +76,10 @@ struct TemplateID {
   int prv_cols = 0;
   bool preview = false;
   float scale = 0.0f;
+
+  /* Context for the image-only material/slot-type filters (#TEMPLATE_ID_FILTER_CURRENT_MATERIAL
+   * and #TEMPLATE_ID_FILTER_SLOT_TYPE). Set via #template_id_browse_with_context. */
+  TemplateIDFilterContext filter_context = {};
 };
 
 /* Search browse menu, assign. */
@@ -121,6 +132,42 @@ static bool id_search_allows_id(TemplateID *template_ui, const int flag, ID *id,
     }
   }
 
+  /* Advanced filtering for images by material usage and/or paint slot type. */
+  if (template_ui->idcode == ID_IM && template_ui->filter != TEMPLATE_ID_FILTER_ALL) {
+    Image *ima = id_cast<Image *>(id);
+
+    /* Exclude internal/compositor images from paint-slot filtering. These should only show up in
+     * the unfiltered "All Images" mode. */
+    if (ELEM(ima->type, IMA_TYPE_R_RESULT, IMA_TYPE_COMPOSITE)) {
+      return false;
+    }
+
+    const bool filter_material = (template_ui->filter & TEMPLATE_ID_FILTER_CURRENT_MATERIAL) != 0;
+    const bool filter_slot_type = (template_ui->filter & TEMPLATE_ID_FILTER_SLOT_TYPE) != 0;
+    const Material *mat = template_ui->filter_context.material;
+    const char slot_type = template_ui->filter_context.slot_type;
+
+    if (filter_material && filter_slot_type) {
+      /* Combined filter (AND): the image must be used by the material in the given slot type,
+       * within the same usage record. */
+      if (mat == nullptr || !BKE_image_paint_slot_info_is_used_in_material(ima, mat, slot_type)) {
+        return false;
+      }
+    }
+    else {
+      if (filter_material) {
+        if (mat == nullptr || !BKE_image_paint_slot_info_is_used_in_material(ima, mat, 0)) {
+          return false;
+        }
+      }
+      if (filter_slot_type && slot_type != NODE_TEX_IMAGE_SLOT_NONE) {
+        if (!BKE_image_paint_slot_info_has_slot_type(ima, slot_type)) {
+          return false;
+        }
+      }
+    }
+  }
+
   return true;
 }
 
@@ -163,6 +210,7 @@ static void id_search_cb(const bContext *C,
                          const bool /*is_first*/)
 {
   TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
+
   ListBaseT<ID> *lb = template_ui->idlb;
   const int flag = RNA_property_flag(template_ui->prop);
 
@@ -276,16 +324,18 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
     }
   }
 
-  return template_common_search_menu(C,
-                                     region,
-                                     id_search_update_fn,
-                                     &template_ui,
-                                     template_ID_set_property_exec_fn,
-                                     active_item_ptr.data,
-                                     template_ID_search_menu_item_tooltip,
-                                     template_ui.prv_rows,
-                                     template_ui.prv_cols,
-                                     template_ui.scale);
+  Block *block = template_common_search_menu(C,
+                                             region,
+                                             id_search_update_fn,
+                                             &template_ui,
+                                             template_ID_set_property_exec_fn,
+                                             active_item_ptr.data,
+                                             template_ID_search_menu_item_tooltip,
+                                             template_ui.prv_rows,
+                                             template_ui.prv_cols,
+                                             template_ui.scale);
+
+  return block;
 }
 
 static Block *id_search_menu_session_uid(bContext *C, ARegion *region, void *arg_litem)
@@ -1748,6 +1798,85 @@ void template_id_browse(Layout *layout,
               1.0f,
               false,
               false);
+}
+
+void template_id_image_row_append_standard(const bContext *C,
+                                           Layout &layout,
+                                           PointerRNA *ptr,
+                                           PropertyRNA *prop,
+                                           const char *newop,
+                                           const char *openop,
+                                           const char *unlinkop)
+{
+  TemplateID template_ui = {};
+  template_ui.ptr = *ptr;
+  template_ui.prop = prop;
+  template_ui.scale = 1.0f;
+
+  StructRNA *type = RNA_property_pointer_type(ptr, prop);
+  const short idcode = RNA_type_to_ID_code(type);
+  template_ui.idcode = idcode;
+  template_ui.idlb = which_libbase(CTX_data_main(C), idcode);
+
+  if (!template_ui.idlb) {
+    return;
+  }
+
+  int flag = UI_ID_RENAME | UI_ID_DELETE;
+  if (newop) {
+    flag |= UI_ID_ADD_NEW;
+  }
+  if (openop) {
+    flag |= UI_ID_OPEN;
+  }
+
+  template_ID(C, layout, template_ui, type, flag, newop, openop, unlinkop, std::nullopt, false, false);
+}
+
+void template_id_browse_with_context(Layout *layout,
+                                     bContext *C,
+                                     PointerRNA *ptr,
+                                     const StringRefNull propname,
+                                     const char *newop,
+                                     const char *openop,
+                                     const char *unlinkop,
+                                     int filter,
+                                     const char *text,
+                                     Material *material,
+                                     char slot_type)
+{
+  PropertyRNA *prop = RNA_struct_find_property(ptr, propname.c_str());
+
+  if (!prop || RNA_property_type(prop) != PROP_POINTER) {
+    RNA_warning(
+        "pointer property not found: %s.%s", RNA_struct_identifier(ptr->type), propname.c_str());
+    return;
+  }
+
+  TemplateID template_ui = {};
+  template_ui.ptr = *ptr;
+  template_ui.prop = prop;
+  template_ui.scale = 1.0f;
+  template_ui.filter = short(filter);
+  template_ui.filter_context.material = material;
+  template_ui.filter_context.slot_type = slot_type;
+
+  StructRNA *type = RNA_property_pointer_type(ptr, prop);
+  const short idcode = RNA_type_to_ID_code(type);
+  template_ui.idcode = idcode;
+  template_ui.idlb = which_libbase(CTX_data_main(C), idcode);
+
+  if (template_ui.idlb) {
+    int flag = UI_ID_BROWSE | UI_ID_RENAME | UI_ID_DELETE;
+    if (newop) {
+      flag |= UI_ID_ADD_NEW;
+    }
+    if (openop) {
+      flag |= UI_ID_OPEN;
+    }
+    Layout &row = layout->row(true);
+    template_ID(C, row, template_ui, type, flag, newop, openop, unlinkop, text, false, false);
+  }
 }
 
 void template_id_preview(Layout *layout,

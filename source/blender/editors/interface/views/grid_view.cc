@@ -124,6 +124,16 @@ void AbstractGridView::set_tile_size(int tile_width, int tile_height)
   style_.tile_height = tile_height;
 }
 
+void AbstractGridView::set_min_viewport_height(const int height_px)
+{
+  min_viewport_height_ = height_px;
+}
+
+std::optional<int> AbstractGridView::min_viewport_height() const
+{
+  return min_viewport_height_;
+}
+
 static std::optional<int> find_filtered_item_index(const AbstractGridViewItem &item)
 {
   BLI_assert(item.is_filtered_visible());
@@ -394,6 +404,9 @@ class BuildOnlyVisibleButtonsHelper {
   bool is_item_visible(int item_idx) const;
   void fill_layout_before_visible(Block &block) const;
   void fill_layout_after_visible(Block &block) const;
+  void fill_min_viewport_height(Block &block,
+                                const AbstractGridView &grid_view,
+                                int cols_per_row) const;
 
  private:
   IndexRange get_visible_range(const View2D &v2d,
@@ -446,6 +459,30 @@ void BuildOnlyVisibleButtonsHelper::fill_layout_after_visible(Block &block) cons
                                                      0;
     BuildOnlyVisibleButtonsHelper::add_spacer_button(block, remaining_rows);
   }
+}
+
+void BuildOnlyVisibleButtonsHelper::fill_min_viewport_height(Block &block,
+                                                             const AbstractGridView &grid_view,
+                                                             const int cols_per_row) const
+{
+  const std::optional<int> min_height_opt = grid_view.min_viewport_height();
+  if (!min_height_opt) {
+    return;
+  }
+
+  const int item_count = grid_view.get_item_count_filtered();
+  const int content_rows = (item_count > 0 && cols_per_row > 0) ?
+                               ((item_count - 1) / cols_per_row + 1) :
+                               0;
+  const int content_height = content_rows * style_.tile_height;
+  const int min_height = *min_height_opt;
+
+  if (content_height >= min_height) {
+    return;
+  }
+
+  const int pad_rows = (min_height - content_height + style_.tile_height - 1) / style_.tile_height;
+  this->add_spacer_button(block, pad_rows);
 }
 
 void BuildOnlyVisibleButtonsHelper::add_spacer_button(Block &block, const int row_count) const
@@ -549,6 +586,7 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
   block_layout_set_current(&block_, &parent_layout);
 
   build_visible_helper.fill_layout_after_visible(block_);
+  build_visible_helper.fill_min_viewport_height(block_, grid_view, cols_per_row);
 }
 
 Layout &GridViewLayoutBuilder::current_layout() const

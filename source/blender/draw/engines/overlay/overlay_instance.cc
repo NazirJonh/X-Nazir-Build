@@ -478,6 +478,7 @@ void Instance::begin_sync()
     layer.cameras.begin_sync(resources, state);
     layer.curves.begin_sync(resources, state);
     layer.curves_weight_paint.begin_sync(resources, state);
+    layer.curves_vertex_paint.begin_sync(resources, state);
     layer.text.begin_sync(resources, state);
     layer.empties.begin_sync(resources, state);
     layer.facing.begin_sync(resources, state);
@@ -562,6 +563,7 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
         break;
       case OB_CURVES:
         layer.curves_weight_paint.object_sync(manager, ob_ref, resources, state);
+        layer.curves_vertex_paint.object_sync(manager, ob_ref, resources, state);
         break;
       default:
         break;
@@ -854,6 +856,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
     layer.text.draw(framebuffer, manager, view);
     layer.paints.draw(framebuffer, manager, view);
     layer.curves_weight_paint.draw(framebuffer, manager, view);
+    layer.curves_vertex_paint.draw(framebuffer, manager, view);
     layer.particles.draw(framebuffer, manager, view);
   };
 
@@ -897,8 +900,10 @@ void Instance::draw_v3d(Manager &manager, View &view)
 
     regular.sculpts.draw_on_render(resources.render_fb, manager, view);
     regular.curves_weight_paint.draw_on_render(resources.render_fb, manager, view);
+    regular.curves_vertex_paint.draw_on_render(resources.render_fb, manager, view);
     infront.sculpts.draw_on_render(resources.render_in_front_fb, manager, view);
     infront.curves_weight_paint.draw_on_render(resources.render_in_front_fb, manager, view);
+    infront.curves_vertex_paint.draw_on_render(resources.render_in_front_fb, manager, view);
   }
   {
     /* Overlay Line prepass. */
@@ -1151,9 +1156,9 @@ bool Instance::object_needs_prepass(const ObjectRef &ob_ref, bool in_paint_mode)
     }
     
     /* Add curves weight paint support for depth culling */
-    if (ob_ref.object->type == OB_CURVES && 
-        ob_ref.object->mode == OB_MODE_WEIGHT_CURVES) {
-      printf("[DEBUG] Prepass: Curves object %s in weight paint mode needs prepass\n", ob_ref.object->id.name);
+    if (ob_ref.object->type == OB_CURVES &&
+        ELEM(ob_ref.object->mode, OB_MODE_WEIGHT_CURVES, OB_MODE_VERTEX_CURVES))
+    {
       return true;
     }
   }

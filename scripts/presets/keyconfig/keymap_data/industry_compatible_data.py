@@ -3507,6 +3507,35 @@ def km_weight_curves(params):
     return keymap
 
 
+def km_vertex_curves(params):
+    items = []
+    keymap = (
+        "Vertex Curves",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW'},
+        {"items": items},
+    )
+
+    items.extend([
+        ("curves.vertex_paint_brush_stroke", {"type": 'LEFTMOUSE', "value": 'PRESS'},
+         {"properties": [("mode", 'NORMAL')]}),
+        ("curves.vertex_paint_brush_stroke",
+         {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True},
+         {"properties": [("mode", 'INVERT')]}),
+        ("curves.vertex_paint_brush_stroke",
+         {"type": 'LEFTMOUSE', "value": 'PRESS', "shift": True},
+         {"properties": [("brush_toggle", 'SMOOTH')]}),
+        *_template_paint_radial_control("curves_vertex_paint", color=True, rotation=True),
+        ("brush.scale_size", {"type": 'LEFT_BRACKET', "value": 'PRESS', "repeat": True},
+         {"properties": [("scalar", 0.9)]}),
+        ("brush.scale_size", {"type": 'RIGHT_BRACKET', "value": 'PRESS', "repeat": True},
+         {"properties": [("scalar", 1.0 / 0.9)]}),
+        *_template_items_context_panel("VIEW3D_PT_curves_vertex_context_menu", {"type": 'RIGHTMOUSE', "value": 'PRESS'}),
+        op_asset_shelf_popup("VIEW3D_AST_brush_vertex_paint_curves", {"type": 'B', "value": 'PRESS'}),
+    ])
+
+    return keymap
+
+
 # Point cloud edit mode.
 def km_pointcloud(params):
     items = []
@@ -3886,6 +3915,7 @@ def generate_keymaps_impl(params=None):
         km_curves(params),
         km_sculpt_curves(params),
         km_weight_curves(params),
+        km_vertex_curves(params),
         km_pointcloud(params),
         km_object_non_modal(params),
 

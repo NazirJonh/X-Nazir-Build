@@ -1153,6 +1153,7 @@ static const char *toolsystem_default_tool(const bToolKey *tkey)
         case CTX_MODE_VERTEX_GREASE_PENCIL:
         case CTX_MODE_SCULPT_CURVES:
         case CTX_MODE_WEIGHT_CURVES:
+        case CTX_MODE_VERTEX_CURVES:
           return "builtin.brush";
         case CTX_MODE_PARTICLE:
           return "builtin_brush.Comb";

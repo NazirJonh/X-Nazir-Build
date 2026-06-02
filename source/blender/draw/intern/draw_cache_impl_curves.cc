@@ -109,6 +109,12 @@ static void clear_edit_data(CurvesBatchCache *cache)
   GPU_VERTBUF_DISCARD_SAFE(cache->weight_points_pos);
   GPU_INDEXBUF_DISCARD_SAFE(cache->weight_points_indices);
   GPU_INDEXBUF_DISCARD_SAFE(cache->weight_lines_indices);
+
+  GPU_BATCH_DISCARD_SAFE(cache->vertex_paint_points);
+  GPU_BATCH_DISCARD_SAFE(cache->vertex_paint_lines);
+  GPU_VERTBUF_DISCARD_SAFE(cache->vertex_paint_points_pos);
+  GPU_INDEXBUF_DISCARD_SAFE(cache->vertex_paint_points_indices);
+  GPU_INDEXBUF_DISCARD_SAFE(cache->vertex_paint_lines_indices);
 }
 
 void CurvesEvalCache::discard_attributes()

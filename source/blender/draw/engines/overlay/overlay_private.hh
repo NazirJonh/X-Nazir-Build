@@ -503,6 +503,8 @@ class ShaderModule {
   StaticShader paint_weight_fake_shading = shader_clippable("overlay_paint_weight_fake_shading");
   StaticShader curves_weight_paint = shader_clippable("overlay_curves_weight_paint");
   StaticShader curves_weight_paint_fake_shading = shader_clippable("overlay_curves_weight_paint_fake_shading");
+  StaticShader curves_vertex_paint = shader_clippable("overlay_curves_vertex_paint");
+  StaticShader curves_vertex_paint_fake_shading = shader_clippable("overlay_curves_vertex_paint_fake_shading");
   StaticShader particle_edit_vert = shader_clippable("overlay_edit_particle_point");
   StaticShader particle_edit_edge = shader_clippable("overlay_edit_particle_strand");
   StaticShader pointcloud_points = shader_clippable("overlay_edit_pointcloud");
@@ -753,6 +755,8 @@ struct Resources : public select::SelectMap {
     shaders->paint_weight_fake_shading.ensure_compile_async();
     shaders->curves_weight_paint.ensure_compile_async();
     shaders->curves_weight_paint_fake_shading.ensure_compile_async();
+    shaders->curves_vertex_paint.ensure_compile_async();
+    shaders->curves_vertex_paint_fake_shading.ensure_compile_async();
     shaders->particle_dot.ensure_compile_async();
     shaders->particle_edit_edge.ensure_compile_async();
     shaders->particle_edit_vert.ensure_compile_async();

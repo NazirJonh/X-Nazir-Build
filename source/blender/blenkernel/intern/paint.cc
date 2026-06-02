@@ -614,6 +614,8 @@ PaintMode BKE_paintmode_get_from_tool(const bToolRef *tref)
         return PaintMode::SculptCurves;
       case CTX_MODE_WEIGHT_CURVES:
         return PaintMode::WeightCurves;
+      case CTX_MODE_VERTEX_CURVES:
+        return PaintMode::VertexCurves;
       case CTX_MODE_PAINT_GREASE_PENCIL:
         return PaintMode::GPencil;
       case CTX_MODE_SCULPT_GREASE_PENCIL:

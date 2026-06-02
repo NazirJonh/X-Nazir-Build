@@ -10,14 +10,18 @@
 
 #include "curves_vertex_paint_intern.hh"
 
+#include "BLI_color_mix.hh"
 #include "BLI_math_vector.hh"
 
+#include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
 #include "BKE_paint.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_curves_types.h"
+#include "DNA_object_types.h"
 
 #include "IMB_imbuf.hh"
 
@@ -28,20 +32,63 @@
 
 namespace blender::ed::sculpt_paint {
 
+static constexpr const char *vertex_color_attr_name = "vertex_color";
+
+/* -------------------------------------------------------------------- */
+/** \name Poll Functions
+ * \{ */
+
+bool curves_vertex_paint_poll(bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || ob->type != OB_CURVES) {
+    return false;
+  }
+  return ob->mode == OB_MODE_VERTEX_CURVES;
+}
+
+bool curves_vertex_paint_mode_poll(bContext *C)
+{
+  return curves_vertex_paint_poll(C);
+}
+
+void curves_vertex_paint_ensure_color_attribute(Object *ob)
+{
+  if (!ob || ob->type != OB_CURVES || ob->data == nullptr) {
+    return;
+  }
+
+  Curves *curves_id = reinterpret_cast<Curves *>(ob->data);
+  bke::CurvesGeometry &curves = curves_id->geometry.wrap();
+  bke::MutableAttributeAccessor attributes = curves.wrap().attributes_for_write();
+  bke::SpanAttributeWriter<ColorGeometry4f> writer =
+      attributes.lookup_or_add_for_write_span<ColorGeometry4f>(vertex_color_attr_name,
+                                                             bke::AttrDomain::Point);
+  if (writer) {
+    writer.finish();
+  }
+}
+
+/** \} */
+
 /* -------------------------------------------------------------------- */
 /** \name CurvesVertexPaintOperationBase - Color Access
  * \{ */
 
-ColorGeometry4f CurvesVertexPaintOperationBase::get_point_color(int point_index)
+ColorGeometry4f CurvesVertexPaintOperationBase::get_point_color(const int point_index)
 {
-  /* Return white as default color. */
-  return ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f);
+  if (!vertex_colors_writer_) {
+    return ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f);
+  }
+  return vertex_colors_writer_->span[point_index];
 }
 
-void CurvesVertexPaintOperationBase::set_point_color(int point_index,
-                                                      const ColorGeometry4f &color)
+void CurvesVertexPaintOperationBase::set_point_color(const int point_index,
+                                                     const ColorGeometry4f &color)
 {
-  /* Stub implementation. */
+  if (vertex_colors_writer_) {
+    vertex_colors_writer_->span[point_index] = color;
+  }
 }
 
 /** \} */
@@ -52,23 +99,17 @@ void CurvesVertexPaintOperationBase::set_point_color(int point_index,
 
 ColorPaint4f CurvesVertexPaintOperationBase::blend_colors(const ColorPaint4f &src,
                                                           const ColorPaint4f &dst,
-                                                          float influence)
+                                                          const float influence)
 {
   if (influence <= 0.0f) {
     return dst;
   }
-  if (influence >= 1.0f) {
-    return src;
-  }
 
-  /* Simple linear interpolation. */
-  ColorPaint4f result;
-  result.r = dst.r + (src.r - dst.r) * influence;
-  result.g = dst.g + (src.g - dst.g) * influence;
-  result.b = dst.b + (src.b - dst.b) * influence;
-  result.a = dst.a + (src.a - dst.a) * influence;
+  using Color = ColorPaint4f;
+  using Traits = color::Traits<Color>;
 
-  return result;
+  return color::BLI_mix_colors<Color, Traits>(
+      blend_mode, dst, src, Traits::range * influence);
 }
 
 /** \} */
@@ -77,22 +118,44 @@ ColorPaint4f CurvesVertexPaintOperationBase::blend_colors(const ColorPaint4f &sr
 /** \name CurvesVertexPaintOperationBase - Paint Operation Override
  * \{ */
 
-void CurvesVertexPaintOperationBase::apply_color_to_point(int point_index,
-                                                          const ColorPaint4f &color,
-                                                          float influence)
+void CurvesVertexPaintOperationBase::apply_color_to_point(const int point_index,
+                                                        const ColorPaint4f &color,
+                                                        const float influence)
 {
-  /* Stub implementation. */
+  if (!vertex_colors_writer_) {
+    return;
+  }
+
+  ColorGeometry4f &dst = vertex_colors_writer_->span[point_index];
+  const ColorPaint4f dst_paint = color::unpremultiply_alpha(dst);
+  const ColorPaint4f result = blend_colors(color, dst_paint, influence);
+  dst = color::premultiply_alpha(result);
 }
 
 void CurvesVertexPaintOperationBase::apply_operation_to_point(const CurvesBrushPoint &point)
 {
-  /* Default vertex paint behavior: apply brush color to points. */
   apply_color_to_point(point.point_index, brush_color, point.influence);
 }
 
-void CurvesVertexPaintOperationBase::init_paint_mode(const bContext &C)
+void CurvesVertexPaintOperationBase::init_paint_mode(const bContext & /*C*/)
 {
-  /* Stub implementation. */
+  vertex_colors_writer_.reset();
+
+  if (!curves) {
+    return;
+  }
+
+  bke::MutableAttributeAccessor attributes = curves->wrap().attributes_for_write();
+  vertex_colors_writer_ = attributes.lookup_or_add_for_write_span<ColorGeometry4f>(
+      ATTR_VERTEX_COLOR, bke::AttrDomain::Point);
+}
+
+void CurvesVertexPaintOperationBase::finalize_paint_mode(const bContext & /*C*/)
+{
+  if (vertex_colors_writer_) {
+    vertex_colors_writer_->finish();
+    vertex_colors_writer_.reset();
+  }
 }
 
 /** \} */
@@ -102,14 +165,14 @@ void CurvesVertexPaintOperationBase::init_paint_mode(const bContext &C)
  * \{ */
 
 void CurvesVertexPaintOperationBase::on_stroke_begin(const bContext &C,
-                                                      const StrokeExtension &start_extension)
+                                                     const StrokeExtension &start_extension)
 {
-  /* Initialize paint operation. */
-  if (!object || !curves_id || !curves || !brush) {
+  CurvesPaintOperationBase::on_stroke_begin(C, start_extension);
+
+  if (!object || !brush) {
     return;
   }
 
-  /* Get brush color from context. */
   Paint *paint = BKE_paint_get_active_from_context(&C);
   if (paint == nullptr) {
     return;
@@ -118,20 +181,18 @@ void CurvesVertexPaintOperationBase::on_stroke_begin(const bContext &C,
   float color_linear[3];
   copy_v3_v3(color_linear, BKE_brush_color_get(paint, brush));
   brush_color = ColorPaint4f(color_linear[0], color_linear[1], color_linear[2], 1.0f);
-
-  /* Get blend mode from brush. */
-  blend_mode = static_cast<IMB_BlendMode>(brush->blend);
+  blend_mode = IMB_BlendMode(brush->blend);
 }
 
-void CurvesVertexPaintOperationBase::on_stroke_extended(const bContext &C,
-                                                         const StrokeExtension &stroke_extension)
+void CurvesVertexPaintOperationBase::on_stroke_extended(const bContext & /*C*/,
+                                                          const StrokeExtension & /*stroke_extension*/)
 {
-  /* Extend paint stroke. */
+  /* Handled by subclasses or the base paint operation. */
 }
 
 void CurvesVertexPaintOperationBase::on_stroke_done(const bContext &C)
 {
-  /* Finish paint stroke. */
+  CurvesPaintOperationBase::on_stroke_done(C);
 }
 
 /** \} */

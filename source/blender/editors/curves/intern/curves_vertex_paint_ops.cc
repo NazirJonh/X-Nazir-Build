@@ -381,12 +381,6 @@ std::unique_ptr<CurvesPaintStrokeOperation> new_vertex_paint_replace_operation()
 /** \name Vertex Paint Mode Functions
  * \{ */
 
-static bool curves_vertex_paint_poll(bContext *C)
-{
-  const Object *ob = CTX_data_active_object(C);
-  return ob && ob->type == OB_CURVES && ob->data;
-}
-
 static void curves_vertex_paint_mode_enter(bContext *C)
 {
   Scene *scene = CTX_data_scene(C);
@@ -405,6 +399,8 @@ static void curves_vertex_paint_mode_enter(bContext *C)
 
   /* Ensure brushes exist */
   BKE_paint_brushes_ensure(CTX_data_main(C), paint);
+
+  curves_vertex_paint_ensure_color_attribute(ob);
 
   /* Start paint cursor */
   ED_paint_cursor_start(&curves_vertex_paint->paint, curves_vertex_paint_poll);
@@ -516,6 +512,8 @@ static std::unique_ptr<CurvesPaintStrokeOperation> start_stroke_operation_vertex
       return new_vertex_paint_average_operation();
     case VPAINT_BRUSH_TYPE_SMEAR:
       return new_vertex_paint_smear_operation();
+    default:
+      break;
   }
 
   return nullptr;

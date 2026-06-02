@@ -1915,6 +1915,9 @@ void keymap_curves(wmKeyConfig *keyconf)
   keymap = WM_keymap_ensure(keyconf, "Weight Curves", SPACE_EMPTY, RGN_TYPE_WINDOW);
   keymap->poll = ed::sculpt_paint::curves_weight_paint_mode_poll;
 
+  keymap = WM_keymap_ensure(keyconf, "Vertex Curves", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  keymap->poll = ed::sculpt_paint::curves_vertex_paint_mode_poll;
+
   ED_curves_pentool_modal_keymap(keyconf);
 }
 

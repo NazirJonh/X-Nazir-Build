@@ -696,7 +696,7 @@ class FalloffPanel(BrushPanel):
         settings = cls.paint_settings(context)
         if not (settings and settings.brush and settings.brush.curve_distance_falloff):
             return False
-        if cls.get_brush_mode(context) in {'SCULPT_CURVES', 'WEIGHT_CURVES'}:
+        if cls.get_brush_mode(context) in {'SCULPT_CURVES', 'WEIGHT_CURVES', 'VERTEX_CURVES'}:
             brush = settings.brush
             if brush.curves_sculpt_brush_type in {'ADD', 'DELETE'}:
                 return False

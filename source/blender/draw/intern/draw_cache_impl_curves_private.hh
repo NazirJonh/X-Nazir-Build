@@ -55,6 +55,13 @@ struct CurvesBatchCache {
   gpu::IndexBuf *weight_points_indices = nullptr;
   gpu::IndexBuf *weight_lines_indices = nullptr;
 
+  /* Vertex paint batches */
+  gpu::Batch *vertex_paint_points = nullptr;
+  gpu::Batch *vertex_paint_lines = nullptr;
+  gpu::VertBuf *vertex_paint_points_pos = nullptr;
+  gpu::IndexBuf *vertex_paint_points_indices = nullptr;
+  gpu::IndexBuf *vertex_paint_lines_indices = nullptr;
+
   /* Whether the cache is invalid. */
   bool is_dirty;
 };

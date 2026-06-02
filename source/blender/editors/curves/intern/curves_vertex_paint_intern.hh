@@ -5,6 +5,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 
 #include "BLI_color.hh"
 #include "BLI_math_color.hh"
@@ -28,11 +29,14 @@ using ColorPaint4f = blender::ColorPaint4f;
  */
 class CurvesVertexPaintOperationBase : public CurvesPaintOperationBase {
  protected:
+  static constexpr const char *ATTR_VERTEX_COLOR = "vertex_color";
+
   /* ----- Vertex paint specific settings ----- */
   ColorPaint4f brush_color{0.0f, 0.0f, 0.0f, 0.0f};
   IMB_BlendMode blend_mode{IMB_BLEND_MIX};
   bool paint_stroke_points{true};
   bool paint_fill{false};
+  std::optional<bke::SpanAttributeWriter<ColorGeometry4f>> vertex_colors_writer_;
 
  public:
   void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override;
@@ -78,6 +82,8 @@ class CurvesVertexPaintOperationBase : public CurvesPaintOperationBase {
    */
   void init_paint_mode(const bContext &C) override;
 
+  void finalize_paint_mode(const bContext &C) override;
+
   /**
    * Apply color to a specific point with given influence.
    * @param point_index Index of the curve point
@@ -113,6 +119,11 @@ std::unique_ptr<CurvesPaintStrokeOperation> new_vertex_paint_replace_operation()
  */
 void curves_vertex_paint_mode_enter(struct bContext *C);
 void curves_vertex_paint_mode_exit(struct bContext *C);
+
+bool curves_vertex_paint_poll(bContext *C);
+bool curves_vertex_paint_mode_poll(bContext *C);
+
+void curves_vertex_paint_ensure_color_attribute(Object *ob);
 
 }  // namespace blender::ed::sculpt_paint
 

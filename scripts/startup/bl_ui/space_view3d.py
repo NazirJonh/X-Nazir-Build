@@ -8572,6 +8572,30 @@ class VIEW3D_PT_overlay_weight_paint_curves(Panel):
         subrow.prop(overlay, "sculpt_curves_cage_opacity", text="Cage Opacity")
 
 
+class VIEW3D_PT_overlay_vertex_paint_curves(Panel):
+    bl_space_type = "VIEW_3D"
+    bl_context = ".curves_vertex_paint"
+    bl_region_type = "HEADER"
+    bl_label = "Vertex Paint"
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "VERTEX_CURVES"
+
+    def draw(self, context):
+        layout = self.layout
+        view = context.space_data
+        overlay = view.overlay
+        display_all = overlay.show_overlays
+
+        layout.label(text="Curve Vertex Paint Overlays")
+
+        col = layout.column()
+        col.active = display_all
+        col.prop(overlay, "vertex_paint_mode_opacity")
+        col.prop(overlay, "show_paint_wire")
+
+
 class VIEW3D_PT_overlay_bones(Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "HEADER"
@@ -9910,6 +9934,57 @@ class VIEW3D_PT_paint_weight_context_menu(Panel):
         )
 
 
+class VIEW3D_PT_curves_vertex_context_menu(Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "WINDOW"
+    bl_label = "Vertex Paint Curves"
+
+    def draw(self, context):
+        layout = self.layout
+
+        paint = context.tool_settings.curves_vertex_paint
+        if paint is None:
+            return
+
+        brush = paint.brush
+        if brush is None:
+            return
+
+        capabilities = brush.vertex_paint_capabilities
+
+        if capabilities.has_color:
+            split = layout.split(factor=0.1)
+            UnifiedPaintPanel.prop_unified_color(
+                split, context, brush, "color", text=""
+            )
+            UnifiedPaintPanel.prop_unified_color_picker(
+                split, context, brush, "color", value_slider=True
+            )
+            layout.prop(brush, "blend", text="")
+
+        UnifiedPaintPanel.prop_unified(
+            layout,
+            context,
+            brush,
+            "size",
+            unified_name="use_unified_size",
+            pressure_name="use_pressure_size",
+            text="Size",
+            slider=True,
+        )
+        UnifiedPaintPanel.prop_unified(
+            layout,
+            context,
+            brush,
+            "strength",
+            unified_name="use_unified_strength",
+            pressure_name="use_pressure_strength",
+            text="Strength",
+            slider=True,
+        )
+        layout.prop(brush, "direction", expand=True)
+
+
 class VIEW3D_PT_curves_weight_context_menu(Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "WINDOW"
@@ -10318,6 +10393,12 @@ class VIEW3D_AST_brush_weight_paint_curves(View3DAssetShelf, bpy.types.AssetShel
     brush_type_prop = "curves_weight_paint_brush_type"
 
 
+class VIEW3D_AST_brush_vertex_paint_curves(View3DAssetShelf, bpy.types.AssetShelf):
+    mode = "VERTEX_CURVES"
+    mode_prop = "use_paint_vertex"
+    brush_type_prop = "vertex_brush_type"
+
+
 class VIEW3D_AST_brush_vertex_paint(View3DAssetShelf, bpy.types.AssetShelf):
     mode = "VERTEX_PAINT"
     mode_prop = "use_paint_vertex"
@@ -10612,6 +10693,7 @@ classes = (
     VIEW3D_PT_overlay_sculpt,
     VIEW3D_PT_overlay_sculpt_curves,
     VIEW3D_PT_overlay_weight_paint_curves,
+    VIEW3D_PT_overlay_vertex_paint_curves,
     VIEW3D_PT_snapping,
     VIEW3D_PT_sculpt_snapping,
     VIEW3D_PT_proportional_edit,
@@ -10626,6 +10708,7 @@ classes = (
     VIEW3D_PT_paint_texture_context_menu,
     VIEW3D_PT_paint_weight_context_menu,
     VIEW3D_PT_curves_weight_context_menu,
+    VIEW3D_PT_curves_vertex_context_menu,
     VIEW3D_PT_sculpt_automasking,
     VIEW3D_PT_sculpt_context_menu,
     TOPBAR_PT_grease_pencil_materials,
@@ -10639,6 +10722,7 @@ classes = (
     VIEW3D_AST_brush_sculpt,
     VIEW3D_AST_brush_sculpt_curves,
     VIEW3D_AST_brush_weight_paint_curves,
+    VIEW3D_AST_brush_vertex_paint_curves,
     VIEW3D_AST_brush_vertex_paint,
     VIEW3D_AST_brush_weight_paint,
     VIEW3D_AST_brush_texture_paint,

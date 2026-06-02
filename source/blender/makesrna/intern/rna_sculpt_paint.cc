@@ -360,6 +360,11 @@ static std::optional<std::string> rna_CurvesWeightPaint_path(const PointerRNA * 
   return "tool_settings.curves_weight_paint";
 }
 
+static std::optional<std::string> rna_CurvesVertexPaint_path(const PointerRNA * /*ptr*/)
+{
+  return "tool_settings.curves_vertex_paint";
+}
+
 static std::optional<std::string> rna_GpPaint_path(const PointerRNA * /*ptr*/)
 {
   return "tool_settings.gpencil_paint";
@@ -2046,6 +2051,16 @@ static void rna_def_curves_weight_paint(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
+static void rna_def_curves_vertex_paint(BlenderRNA *brna)
+{
+  StructRNA *srna;
+
+  srna = RNA_def_struct(brna, "CurvesVertexPaint", "Paint");
+  RNA_def_struct_path_func(srna, "rna_CurvesVertexPaint_path");
+  RNA_def_struct_ui_text(srna, "Curves Vertex Paint", "");
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+}
+
 void RNA_def_sculpt_paint(BlenderRNA *brna)
 {
   /* *** Non-Animated *** */
@@ -2068,6 +2083,7 @@ void RNA_def_sculpt_paint(BlenderRNA *brna)
   rna_def_gpencil_sculpt(brna);
   rna_def_curves_sculpt(brna);
   rna_def_curves_weight_paint(brna);
+  rna_def_curves_vertex_paint(brna);
   RNA_define_animate_sdna(true);
 }
 

@@ -9,6 +9,7 @@
 #pragma once
 
 #include "BLI_index_mask_fwd.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rand.hh"
 #include "BLI_span.hh"
@@ -27,9 +28,14 @@ namespace blender {
 
 enum class PaintMode : int8_t;
 
+namespace bke {
+class CurvesGeometry;
+}
+
 struct ARegion;
 struct bContext;
 struct Brush;
+struct Curve;
 struct Depsgraph;
 struct Image;
 struct ImagePool;
@@ -671,12 +677,33 @@ void PAINTCURVE_OT_select(wmOperatorType *ot);
 void PAINTCURVE_OT_slide(wmOperatorType *ot);
 void PAINTCURVE_OT_draw(wmOperatorType *ot);
 void PAINTCURVE_OT_cursor(wmOperatorType *ot);
+void PAINTCURVE_OT_from_curve_object(wmOperatorType *ot);
 
-void ED_paintcurve_sync_3d_to_2d(struct PaintCurve *pc,
-                                 const struct ViewContext *vc,
-                                 const float ob_to_world[4][4]);
+float *paintcurve_geom_co(bke::CurvesGeometry &geom, int point_idx, int handle_idx);
+void paintcurve_geometry_init_bezier(bke::CurvesGeometry &geom, int point_num);
+void paintcurve_geometry_from_2d(struct PaintCurve *pc, const struct ViewContext *vc);
+void ED_paintcurve_sync_geometry_to_2d(struct PaintCurve *pc,
+                                       const struct ViewContext *vc,
+                                       const float ob_to_world[4][4]);
+void paintcurve_geometry_from_curves(struct PaintCurve *pc,
+                                     const bke::CurvesGeometry &src,
+                                     const float4x4 &transform);
+void paintcurve_geometry_from_legacy_curve(struct PaintCurve *pc,
+                                           const Curve *curve,
+                                           const float4x4 &transform);
+bool ED_paintcurve_sync_to_source_object(struct bContext *C, struct PaintCurve *pc);
 
-void paintcurve_init_3d_from_2d(struct PaintCurve *pc, const struct ViewContext *vc);
+inline void ED_paintcurve_sync_3d_to_2d(struct PaintCurve *pc,
+                                        const struct ViewContext *vc,
+                                        const float ob_to_world[4][4])
+{
+  ED_paintcurve_sync_geometry_to_2d(pc, vc, ob_to_world);
+}
+
+inline void paintcurve_init_3d_from_2d(struct PaintCurve *pc, const struct ViewContext *vc)
+{
+  paintcurve_geometry_from_2d(pc, vc);
+}
 
 /* image painting blur kernel */
 struct BlurKernel {

@@ -596,6 +596,12 @@ class StrokePanel(BrushPanel):
             col.template_ID(brush, "paint_curve", new="paintcurve.new")
             if brush.paint_curve:
                 col.prop(brush.paint_curve, "use_3d_space", text="3D Curve")
+                if mode == 'SCULPT':
+                    sculpt = context.tool_settings.sculpt
+                    if sculpt:
+                        col.prop(sculpt, "paint_curve_source_object", text="Source Curve")
+                        col.prop(sculpt, "paint_curve_sync_to_source", text="Sync to Source")
+                col.operator("paintcurve.from_curve_object", text="Import from Source", icon='IMPORT')
             col.operator("paintcurve.draw")
             col.separator()
 

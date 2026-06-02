@@ -8,15 +8,20 @@
 
 #include <climits>
 #include <cstring>
+#include <utility>
 
 #include "MEM_guardedalloc.h"
 
 #include "DNA_brush_types.h"
+#include "DNA_curve_types.h"
+#include "DNA_curves_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 #include "DNA_view3d_types.h"
 
+#include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_matrix.h"
 
@@ -24,6 +29,7 @@
 
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
+#include "BKE_curves.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
@@ -47,79 +53,6 @@ namespace blender {
 
 #define PAINT_CURVE_SELECT_THRESHOLD 40.0f
 #define PAINT_CURVE_POINT_SELECT(pcp, i) (*(&pcp->bez.f1 + i) = BEZT_FLAG_SELECT)
-
-/* Helper to get mutable reference or pointer to a point in points_3d.
- * Layout: [left[3], pivot[3], right[3]] for each of the tot_points. */
-inline float *paintcurve_3d_co(PaintCurve *pc, int point_idx, int handle_idx)
-{
-  BLI_assert(pc->points_3d != nullptr);
-  BLI_assert(point_idx >= 0 && point_idx < pc->tot_points);
-  BLI_assert(handle_idx >= 0 && handle_idx < 3);
-  return &pc->points_3d[(point_idx * 3 + handle_idx) * 3];
-}
-
-/* Ensure 3D coordinate buffer is allocated and initialized to zero. */
-void paintcurve_ensure_3d_buffer(PaintCurve *pc)
-{
-  if (pc->points_3d == nullptr && pc->tot_points > 0) {
-    pc->points_3d = MEM_new_array_zeroed<float>(pc->tot_points * 9, "PaintCurve.points_3d");
-  }
-}
-
-/* Initialize points_3d by unprojecting existing 2D points onto the plane
- * parallel to the viewport passing through the active object's origin. */
-void paintcurve_init_3d_from_2d(PaintCurve *pc, const ViewContext *vc)
-{
-  if (pc->tot_points == 0) {
-    return;
-  }
-  paintcurve_ensure_3d_buffer(pc);
-  if (pc->points_3d == nullptr) {
-    return;
-  }
-
-  /* Get evaluated object location in world space. */
-  float ob_origin_world[3];
-  copy_v3_v3(ob_origin_world, vc->obact->object_to_world().location());
-  float ob_origin_screen[2];
-  ED_view3d_project_v2(vc->region, ob_origin_world, ob_origin_screen);
-
-  /* For each handle, unproject the 2D screen coord to 3D world space,
-   * then convert to object space. */
-  const float (*world_to_ob)[4] = vc->obact->world_to_object().ptr();
-  for (int i = 0; i < pc->tot_points; i++) {
-    for (int j = 0; j < 3; j++) {
-      const float *screen_co_2d = pc->points[i].bez.vec[j];
-      float world_co[3];
-      float mval_fl[2] = {screen_co_2d[0], screen_co_2d[1]};
-      ED_view3d_win_to_3d(vc->v3d, vc->region, ob_origin_world, mval_fl, world_co);
-      mul_v3_m4v3(paintcurve_3d_co(pc, i, j), world_to_ob, world_co);
-    }
-  }
-}
-
-/* Sync 3D coordinates back to 2D screen coordinates.
- * This is used to maintain backward compatibility with 2D paint brush code,
- * overlay drawing, and standard UI. */
-void ED_paintcurve_sync_3d_to_2d(PaintCurve *pc,
-                                 const ViewContext *vc,
-                                 const float ob_to_world[4][4])
-{
-  if (pc->points_3d == nullptr || pc->tot_points == 0) {
-    return;
-  }
-
-  for (int i = 0; i < pc->tot_points; i++) {
-    for (int j = 0; j < 3; j++) {
-      float world_co[3];
-      mul_v3_m4v3(world_co, ob_to_world, paintcurve_3d_co(pc, i, j));
-      float screen_co[2];
-      ED_view3d_project_v2(vc->region, world_co, screen_co);
-      pc->points[i].bez.vec[j][0] = screen_co[0];
-      pc->points[i].bez.vec[j][1] = screen_co[1];
-    }
-  }
-}
 
 bool paint_curve_poll(bContext *C)
 {
@@ -203,12 +136,12 @@ static PaintCurvePoint *paintcurve_find_point(bContext *C,
                                               char *point)
 {
   RegionView3D *rv3d = CTX_wm_region_view3d(C);
-  if (pc->use_3d_space && rv3d && pc->points_3d != nullptr) {
+  if (pc->use_3d_space && rv3d && pc->geometry.wrap().points_num() > 0) {
     Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
     ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
     float ob_to_world[4][4];
     copy_m4_m4(ob_to_world, vc.obact->object_to_world().ptr());
-    ED_paintcurve_sync_3d_to_2d(pc, &vc, ob_to_world);
+    ED_paintcurve_sync_geometry_to_2d(pc, &vc, ob_to_world);
   }
   return paintcurve_point_get_closest(pc, pos, ignore_pivot, threshold, point);
 }
@@ -303,12 +236,12 @@ static void paintcurve_point_add(bContext *C,
 
   ED_paintcurve_undo_push_begin(op->type->name);
 
-  /* Lazy-init existing 3D buffer if needed. */
+  /* Lazy-init embedded geometry from legacy 2D points if needed. */
   if (pc->use_3d_space && rv3d) {
     Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
     ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
-    if (pc->points_3d == nullptr && pc->tot_points > 0) {
-      paintcurve_init_3d_from_2d(pc, &vc);
+    if (pc->geometry.wrap().points_num() != pc->tot_points && pc->tot_points > 0) {
+      paintcurve_geometry_from_2d(pc, &vc);
     }
   }
 
@@ -329,7 +262,7 @@ static void paintcurve_point_add(bContext *C,
   }
   pc->points = pcp;
 
-  /* Handle 3D coordinates insertion. */
+  /* Handle 3D coordinates insertion into the embedded geometry. */
   if (pc->use_3d_space && rv3d) {
     Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
     ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
@@ -343,7 +276,6 @@ static void paintcurve_point_add(bContext *C,
     }
 
     if (!used_snap) {
-      /* Fallback: unproject onto plane at object origin depth. */
       float ob_origin_world[3];
       copy_v3_v3(ob_origin_world, vc.obact->object_to_world().location());
       float world_co[3];
@@ -352,25 +284,27 @@ static void paintcurve_point_add(bContext *C,
       mul_v3_m4v3(obj_co, world_to_ob, world_co);
     }
 
-    float *points_3d_new = MEM_new_array_zeroed<float>((pc->tot_points + 1) * 9, "PaintCurve.points_3d");
+    bke::CurvesGeometry &geom = pc->geometry.wrap();
+    bke::CurvesGeometry new_geom;
+    paintcurve_geometry_init_bezier(new_geom, pc->tot_points + 1);
 
-    if (pc->points_3d != nullptr) {
-      if (add_index > 0) {
-        memcpy(points_3d_new, pc->points_3d, add_index * 9 * sizeof(float));
+    const int old_num = geom.points_num();
+    for (int dst = 0, src = 0; dst < pc->tot_points + 1; dst++) {
+      if (dst == add_index) {
+        for (int j = 0; j < 3; j++) {
+          copy_v3_v3(paintcurve_geom_co(new_geom, dst, j), obj_co);
+        }
+        continue;
       }
-      if (add_index < pc->tot_points) {
-        memcpy(points_3d_new + (add_index + 1) * 9,
-               pc->points_3d + add_index * 9,
-               (pc->tot_points - add_index) * 9 * sizeof(float));
+      if (src < old_num) {
+        for (int j = 0; j < 3; j++) {
+          copy_v3_v3(paintcurve_geom_co(new_geom, dst, j), paintcurve_geom_co(geom, src, j));
+        }
+        src++;
       }
-      MEM_SAFE_DELETE(pc->points_3d);
     }
-    pc->points_3d = points_3d_new;
-
-    /* Initialize the 3D handles of the new point. */
-    for (int j = 0; j < 3; j++) {
-      copy_v3_v3(&pc->points_3d[(add_index * 3 + j) * 3], obj_co);
-    }
+    new_geom.tag_positions_changed();
+    geom = std::move(new_geom);
   }
 
   pc->tot_points++;
@@ -381,13 +315,17 @@ static void paintcurve_point_add(bContext *C,
   copy_v3_v3(pcp[add_index].bez.vec[1], vec);
   copy_v3_v3(pcp[add_index].bez.vec[2], vec);
 
-  /* sync to 2D to ensure pixel-perfect coordinates matching 3D location */
-  if (pc->use_3d_space && rv3d && pc->points_3d != nullptr) {
+  /* Sync to 2D to ensure pixel-perfect coordinates matching 3D location. */
+  if (pc->use_3d_space && rv3d && pc->geometry.wrap().points_num() > 0) {
     Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
     ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
     float ob_to_world[4][4];
     copy_m4_m4(ob_to_world, vc.obact->object_to_world().ptr());
-    ED_paintcurve_sync_3d_to_2d(pc, &vc, ob_to_world);
+    ED_paintcurve_sync_geometry_to_2d(pc, &vc, ob_to_world);
+  }
+
+  if (pc->use_3d_space) {
+    ED_paintcurve_sync_to_source_object(C, pc);
   }
 
   /* last step, clear selection from all bezier handles expect the next */
@@ -513,21 +451,21 @@ static wmOperatorStatus paintcurve_delete_point_exec(bContext *C, wmOperator *op
         pc->add_index = j;
       }
     }
-    /* Shrink the 3D buffer as well if it exists. */
-    if (pc->points_3d != nullptr) {
-      float *points_3d_new = nullptr;
-      if (new_tot > 0) {
-        points_3d_new = MEM_new_array_zeroed<float>(new_tot * 9, "PaintCurve.points_3d");
-        int k = 0;
-        for (i = 0, pcp = pc->points; i < pc->tot_points; i++, pcp++) {
-          if (!(pcp->bez.f2 & DELETE_TAG)) {
-            memcpy(points_3d_new + k * 9, pc->points_3d + i * 9, 9 * sizeof(float));
-            k++;
+    if (pc->use_3d_space && pc->geometry.wrap().points_num() > 0) {
+      bke::CurvesGeometry &geom = pc->geometry.wrap();
+      bke::CurvesGeometry new_geom;
+      paintcurve_geometry_init_bezier(new_geom, new_tot);
+      int k = 0;
+      for (i = 0, pcp = pc->points; i < pc->tot_points; i++, pcp++) {
+        if (!(pcp->bez.f2 & DELETE_TAG)) {
+          for (int j = 0; j < 3; j++) {
+            copy_v3_v3(paintcurve_geom_co(new_geom, k, j), paintcurve_geom_co(geom, i, j));
           }
+          k++;
         }
       }
-      MEM_SAFE_DELETE(pc->points_3d);
-      pc->points_3d = points_3d_new;
+      new_geom.tag_positions_changed();
+      geom = std::move(new_geom);
     }
 
     MEM_delete(pc->points);
@@ -538,6 +476,9 @@ static wmOperatorStatus paintcurve_delete_point_exec(bContext *C, wmOperator *op
 
 #undef DELETE_TAG
 
+  if (pc->use_3d_space) {
+    ED_paintcurve_sync_to_source_object(C, pc);
+  }
   ED_paintcurve_undo_push_end(C);
   BKE_brush_tag_unsaved_changes(br);
 
@@ -781,9 +722,12 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
       copy_v2_v2(psd->point_initial_loc[i], pcp->bez.vec[i]);
     }
     psd->align = align;
-    if (pc->points_3d != nullptr) {
+    RegionView3D *rv3d = CTX_wm_region_view3d(C);
+    if (pc->use_3d_space && rv3d && pc->geometry.wrap().points_num() == pc->tot_points) {
+      bke::CurvesGeometry &geom = pc->geometry.wrap();
+      const int pcp_idx = int(pcp - pc->points);
       for (i = 0; i < 3; i++) {
-        copy_v3_v3(psd->point_initial_loc_3d[i], paintcurve_3d_co(pc, pcp - pc->points, i));
+        copy_v3_v3(psd->point_initial_loc_3d[i], paintcurve_geom_co(geom, pcp_idx, i));
       }
     }
     op->customdata = psd;
@@ -811,7 +755,13 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
   PointSlideData *psd = static_cast<PointSlideData *>(op->customdata);
 
   if (event->type == psd->event && event->val == KM_RELEASE) {
+    Paint *release_paint = BKE_paint_get_active_from_context(C);
+    Brush *release_br = BKE_paint_brush(release_paint);
+    PaintCurve *release_pc = release_br ? release_br->paint_curve : nullptr;
     MEM_delete(psd);
+    if (release_pc && release_pc->use_3d_space) {
+      ED_paintcurve_sync_to_source_object(C, release_pc);
+    }
     ED_paintcurve_undo_push_begin(op->type->name);
     ED_paintcurve_undo_push_end(C);
     return OPERATOR_FINISHED;
@@ -826,9 +776,10 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
       Brush *br = BKE_paint_brush(paint);
       PaintCurve *pc = br ? br->paint_curve : nullptr;
 
-      if (pc && pc->use_3d_space && rv3d && pc->points_3d != nullptr) {
+      if (pc && pc->use_3d_space && rv3d && pc->geometry.wrap().points_num() > 0) {
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+        bke::CurvesGeometry &geom = pc->geometry.wrap();
 
         float ob_to_world[4][4];
         float world_to_ob[4][4];
@@ -838,7 +789,7 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
         float mval_curr_fl[2] = {float(event->mval[0]), float(event->mval[1])};
         const bool snap_to_surface = (event->modifier & KM_CTRL) != 0;
 
-        int pcp_idx = psd->pcp - pc->points;
+        const int pcp_idx = int(psd->pcp - pc->points);
 
         /* Try surface snap via PBVH raycast when Ctrl is held. Falls back to plane-drag on miss. */
         bool snapped = false;
@@ -852,21 +803,21 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
               sub_v3_v3v3(snap_delta, hit_obj, psd->point_initial_loc_3d[1]);
               for (int i = 0; i < 3; i++) {
                 add_v3_v3v3(
-                    paintcurve_3d_co(pc, pcp_idx, i), snap_delta, psd->point_initial_loc_3d[i]);
+                    paintcurve_geom_co(geom, pcp_idx, i), snap_delta, psd->point_initial_loc_3d[i]);
               }
             }
             else {
               /* Individual handle snapped to surface. */
-              copy_v3_v3(paintcurve_3d_co(pc, pcp_idx, psd->select), hit_obj);
+              copy_v3_v3(paintcurve_geom_co(geom, pcp_idx, psd->select), hit_obj);
               if (psd->align) {
                 /* Mirror the opposite handle through the pivot. */
                 float dir[3];
                 sub_v3_v3v3(dir,
-                             paintcurve_3d_co(pc, pcp_idx, psd->select),
-                             paintcurve_3d_co(pc, pcp_idx, 1));
+                             paintcurve_geom_co(geom, pcp_idx, psd->select),
+                             paintcurve_geom_co(geom, pcp_idx, 1));
                 const char opposite = (psd->select == 0) ? 2 : 0;
-                sub_v3_v3v3(paintcurve_3d_co(pc, pcp_idx, opposite),
-                             paintcurve_3d_co(pc, pcp_idx, 1),
+                sub_v3_v3v3(paintcurve_geom_co(geom, pcp_idx, opposite),
+                             paintcurve_geom_co(geom, pcp_idx, 1),
                              dir);
               }
             }
@@ -892,11 +843,11 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
           if (psd->select == 1) {
             for (int i = 0; i < 3; i++) {
               add_v3_v3v3(
-                  paintcurve_3d_co(pc, pcp_idx, i), obj_delta, psd->point_initial_loc_3d[i]);
+                  paintcurve_geom_co(geom, pcp_idx, i), obj_delta, psd->point_initial_loc_3d[i]);
             }
           }
           else {
-            add_v3_v3v3(paintcurve_3d_co(pc, pcp_idx, psd->select),
+            add_v3_v3v3(paintcurve_geom_co(geom, pcp_idx, psd->select),
                         obj_delta,
                         psd->point_initial_loc_3d[psd->select]);
 
@@ -904,16 +855,17 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
               const char opposite = (psd->select == 0) ? 2 : 0;
               float opposite_delta[3];
               sub_v3_v3v3(opposite_delta,
-                          paintcurve_3d_co(pc, pcp_idx, 1),
-                          paintcurve_3d_co(pc, pcp_idx, psd->select));
-              add_v3_v3v3(paintcurve_3d_co(pc, pcp_idx, opposite),
-                          paintcurve_3d_co(pc, pcp_idx, 1),
+                          paintcurve_geom_co(geom, pcp_idx, 1),
+                          paintcurve_geom_co(geom, pcp_idx, psd->select));
+              add_v3_v3v3(paintcurve_geom_co(geom, pcp_idx, opposite),
+                          paintcurve_geom_co(geom, pcp_idx, 1),
                           opposite_delta);
             }
           }
         }
 
-        ED_paintcurve_sync_3d_to_2d(pc, &vc, ob_to_world);
+        geom.tag_positions_changed();
+        ED_paintcurve_sync_geometry_to_2d(pc, &vc, ob_to_world);
       }
       else {
         float diff[2] = {float(event->mval[0] - psd->initial_loc[0]),
@@ -1060,6 +1012,92 @@ void PAINTCURVE_OT_cursor(wmOperatorType *ot)
 
   /* flags */
   ot->flag = 0;
+}
+
+static wmOperatorStatus paintcurve_from_curve_object_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *br = BKE_paint_brush(paint);
+  Object *active = CTX_data_active_object(C);
+
+  if (active == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active object");
+    return OPERATOR_CANCELLED;
+  }
+
+  Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr || scene->toolsettings == nullptr || scene->toolsettings->sculpt == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Sculpt tool settings not available");
+    return OPERATOR_CANCELLED;
+  }
+
+  Object *src_ob = scene->toolsettings->sculpt->paint_curve_source_object;
+  if (src_ob == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Pick a source Curves or Curve object");
+    return OPERATOR_CANCELLED;
+  }
+
+  PaintCurve *pc = br->paint_curve;
+  if (!pc) {
+    br->paint_curve = pc = paintcurve_for_brush_add(bmain, DATA_("PaintCurve"), br);
+  }
+  if (!ELEM(src_ob->type, OB_CURVES, OB_CURVES_LEGACY)) {
+    BKE_report(op->reports, RPT_ERROR, "Source object must be a Curves or Curve object");
+    return OPERATOR_CANCELLED;
+  }
+
+  const float4x4 transform = active->world_to_object() * src_ob->object_to_world();
+
+  ED_paintcurve_undo_push_begin(op->type->name);
+
+  if (src_ob->type == OB_CURVES) {
+    const Curves &curves_id = *id_cast<const Curves *>(src_ob->data);
+    paintcurve_geometry_from_curves(pc, curves_id.geometry.wrap(), transform);
+  }
+  else {
+    const Curve &curve = *id_cast<const Curve *>(src_ob->data);
+    paintcurve_geometry_from_legacy_curve(pc, &curve, transform);
+  }
+
+  MEM_SAFE_DELETE(pc->points);
+  pc->points = nullptr;
+  if (pc->tot_points > 0) {
+    pc->points = MEM_new_array<PaintCurvePoint>(pc->tot_points, "PaintCurvePoint");
+    for (int i = 0; i < pc->tot_points; i++) {
+      pc->points[i] = PaintCurvePoint{};
+    }
+  }
+  pc->add_index = pc->tot_points;
+  pc->use_3d_space = 1;
+
+  RegionView3D *rv3d = CTX_wm_region_view3d(C);
+  if (rv3d) {
+    Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+    ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+    float ob_to_world[4][4];
+    copy_m4_m4(ob_to_world, vc.obact->object_to_world().ptr());
+    ED_paintcurve_sync_geometry_to_2d(pc, &vc, ob_to_world);
+  }
+  scene->toolsettings->sculpt->paint_curve_sync_to_source = 1;
+
+  ED_paintcurve_undo_push_end(C);
+  BKE_brush_tag_unsaved_changes(br);
+  WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+  return OPERATOR_FINISHED;
+}
+
+void PAINTCURVE_OT_from_curve_object(wmOperatorType *ot)
+{
+  ot->name = "Paint Curve from Curve Object";
+  ot->description = "Fill the active paint curve from the source object chosen in the picker";
+  ot->idname = "PAINTCURVE_OT_from_curve_object";
+
+  ot->exec = paintcurve_from_curve_object_exec;
+  ot->poll = paint_curve_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
 }  // namespace blender

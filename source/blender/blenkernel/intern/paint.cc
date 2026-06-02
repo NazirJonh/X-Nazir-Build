@@ -35,6 +35,7 @@
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_noise.hh"
+#include "BLI_resource_scope.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
@@ -49,6 +50,7 @@
 #include "BKE_ccg.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
+#include "BKE_curves.hh"
 #include "BKE_crazyspace.hh"
 #include "BKE_deform.hh"
 #include "BKE_idtype.hh"
@@ -182,6 +184,12 @@ IDTypeInfo IDType_ID_PAL = {
     .lib_override_apply_post = nullptr,
 };
 
+static void paint_curve_init_data(ID *id)
+{
+  PaintCurve *paint_curve = id_cast<PaintCurve *>(id);
+  new (&paint_curve->geometry) bke::CurvesGeometry();
+}
+
 static void paint_curve_copy_data(Main * /*bmain*/,
                                   std::optional<Library *> /*owner_library*/,
                                   ID *id_dst,
@@ -196,12 +204,8 @@ static void paint_curve_copy_data(Main * /*bmain*/,
         MEM_dupalloc(paint_curve_src->points));
   }
 
-  /* NEW: copy 3D data. */
-  if (paint_curve_src->points_3d != nullptr) {
-    const size_t count = paint_curve_src->tot_points * 9;
-    paint_curve_dst->points_3d = MEM_new_array_uninitialized<float>(count, "PaintCurve.points_3d");
-    memcpy(paint_curve_dst->points_3d, paint_curve_src->points_3d, count * sizeof(float));
-  }
+  new (&paint_curve_dst->geometry)
+      bke::CurvesGeometry(paint_curve_src->geometry.wrap());
 }
 
 static void paint_curve_free_data(ID *id)
@@ -210,34 +214,29 @@ static void paint_curve_free_data(ID *id)
 
   MEM_SAFE_DELETE(paint_curve->points);
   paint_curve->tot_points = 0;
-  /* NEW: */
-  MEM_SAFE_DELETE(paint_curve->points_3d);
+  paint_curve->geometry.wrap().~CurvesGeometry();
 }
 
 static void paint_curve_blend_write(BlendWriter *writer, ID *id, const void *id_address)
 {
   PaintCurve *pc = id_cast<PaintCurve *>(id);
 
+  ResourceScope scope;
+  bke::CurvesGeometry::BlendWriteData write_data(writer, scope);
+  pc->geometry.wrap().blend_write_prepare(write_data, !BLO_write_is_undo(writer));
+
   writer->write_id_struct(id_address, pc);
   BKE_id_blend_write(writer, &pc->id);
 
   writer->write_struct_array(pc->tot_points, pc->points);
-
-  /* NEW: write 3D data if present. */
-  if (pc->points_3d != nullptr) {
-    writer->write_float_array(pc->tot_points * 9, pc->points_3d);
-  }
+  pc->geometry.wrap().blend_write(*writer, pc->id, write_data);
 }
 
 static void paint_curve_blend_read_data(BlendDataReader *reader, ID *id)
 {
   PaintCurve *pc = id_cast<PaintCurve *>(id);
   BLO_read_array_and_validate_size(reader, &pc->points, &pc->tot_points);
-
-  /* NEW: read 3D data. Pointer from file is non-null only if it was written. */
-  if (pc->points_3d != nullptr) {
-    (void)BLO_read_array(reader, &pc->points_3d, pc->tot_points * 9);
-  }
+  pc->geometry.wrap().blend_read(*reader);
 }
 
 IDTypeInfo IDType_ID_PC = {
@@ -252,7 +251,7 @@ IDTypeInfo IDType_ID_PC = {
     .flags = IDTYPE_FLAGS_NO_ANIMDATA,
     .asset_type_info = nullptr,
 
-    .init_data = nullptr,
+    .init_data = paint_curve_init_data,
     .copy_data = paint_curve_copy_data,
     .free_data = paint_curve_free_data,
     .make_local = nullptr,
@@ -1294,6 +1293,11 @@ PaintCurve *BKE_paint_curve_add(Main *bmain, const char *name)
   /* MEM_new_zeroed zeros all fields; the C++ default initializer `= 1` is never called.
    * Set explicitly so new curves start in 3D mode as intended. */
   pc->use_3d_space = 1;
+  /* Embedded `CurvesGeometry` requires placement-new via `init_data`. Guard against a missing
+   * call (would crash on the first undo snapshot copying uninitialized geometry). */
+  if (UNLIKELY(pc->geometry.wrap().runtime == nullptr)) {
+    new (&pc->geometry) bke::CurvesGeometry();
+  }
   return pc;
 }
 

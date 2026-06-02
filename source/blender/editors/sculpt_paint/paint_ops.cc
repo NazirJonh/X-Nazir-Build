@@ -581,6 +581,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINTCURVE_OT_select);
   WM_operatortype_append(PAINTCURVE_OT_slide);
   WM_operatortype_append(PAINTCURVE_OT_draw);
+  WM_operatortype_append(PAINTCURVE_OT_from_curve_object);
   WM_operatortype_append(PAINTCURVE_OT_cursor);
 
   /* brush */

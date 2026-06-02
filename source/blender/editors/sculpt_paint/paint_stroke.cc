@@ -16,6 +16,7 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
+#include "BLI_vector.hh"
 #include "BLI_rand.hh"
 #include "BLI_utildefines.h"
 
@@ -30,6 +31,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
+#include "BKE_curves.hh"
 #include "BKE_global.hh"
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
@@ -1279,77 +1281,55 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
     return true;
   }
 
-  /* Lazy init: if 3D mode was enabled on an existing 2D curve (e.g. via the UI toggle),
-   * points_3d may still be nullptr. Initialize from the current 2D screen positions so
-   * the 3D stroke path can run without requiring the user to re-add all points. */
-  if (br.paint_curve->use_3d_space && br.paint_curve->points_3d == nullptr &&
+  /* Lazy init: if 3D mode was enabled on an existing 2D curve, the embedded geometry may be
+   * out of sync. Rebuild it from the current 2D screen positions. */
+  if (br.paint_curve->use_3d_space &&
+      br.paint_curve->geometry.wrap().points_num() != br.paint_curve->tot_points &&
       br.paint_curve->tot_points >= 2)
   {
-    paintcurve_init_3d_from_2d(br.paint_curve, &this->vc);
+    paintcurve_geometry_from_2d(br.paint_curve, &this->vc);
   }
 
-  /* NEW: 3D stroke path — view-independent curve shape. */
-  if (pc->use_3d_space && pc->points_3d != nullptr && pc->tot_points >= 2) {
+  /* 3D stroke path — view-independent curve shape. */
+  if (pc->use_3d_space && pc->geometry.wrap().points_num() >= 2 && pc->tot_points >= 2) {
     Object *ob = this->vc.obact;
     const float (*ob_to_world)[4] = ob->object_to_world().ptr();
+
+    const bke::CurvesGeometry &geom = pc->geometry.wrap();
+    const Span<float3> eval = geom.evaluated_positions();
 
     paint_runtime->overlap_factor = paint_stroke_integrate_overlap(br, 1.0);
     float length_residue = 0.0f;
 
-    for (int i = 0; i < pc->tot_points - 1; i++) {
-      const float *p0 = pc->points_3d + (i * 9 + 3);       /* pivot i */
-      const float *p1 = pc->points_3d + (i * 9 + 6);       /* right handle i */
-      const float *p2 = pc->points_3d + ((i + 1) * 9 + 0); /* left handle i+1 */
-      const float *p3 = pc->points_3d + ((i + 1) * 9 + 3); /* pivot i+1 */
+    Vector<float2> screen(eval.size());
+    for (const int k : eval.index_range()) {
+      float world_pos[3];
+      mul_v3_m4v3(world_pos, ob_to_world, eval[k]);
+      ED_view3d_project_v2(this->vc.region, world_pos, screen[k]);
+    }
 
-      float obj_x[PAINT_CURVE_NUM_SEGMENTS + 1];
-      float obj_y[PAINT_CURVE_NUM_SEGMENTS + 1];
-      float obj_z[PAINT_CURVE_NUM_SEGMENTS + 1];
+    for (int j = 0; j + 1 < screen.size(); j++) {
+      float *cur = &screen[j].x;
+      float *next = &screen[j + 1].x;
+      if (!stroke_started_) {
+        last_pressure_ = 1.0;
+        copy_v2_v2(this->last_mouse_position, cur);
 
-      BKE_curve_forward_diff_bezier(p0[0], p1[0], p2[0], p3[0],
-                                    obj_x, PAINT_CURVE_NUM_SEGMENTS, sizeof(float));
-      BKE_curve_forward_diff_bezier(p0[1], p1[1], p2[1], p3[1],
-                                    obj_y, PAINT_CURVE_NUM_SEGMENTS, sizeof(float));
-      BKE_curve_forward_diff_bezier(p0[2], p1[2], p2[2], p3[2],
-                                    obj_z, PAINT_CURVE_NUM_SEGMENTS, sizeof(float));
+        if (paint_stroke_use_scene_spacing(br, mode)) {
+          BLI_assert(mode != PaintMode::Texture2D);
+          stroke_over_mesh_ = this->get_location(last_world_space_position_, cur, original_);
+          mul_m4_v3(this->vc.obact->object_to_world().ptr(), last_world_space_position_);
+        }
 
-      float data[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];
+        stroke_started_ = this->test_start(op, this->last_mouse_position);
 
-      for (int j = 0; j <= PAINT_CURVE_NUM_SEGMENTS; j++) {
-        float obj_pos[3] = {obj_x[j], obj_y[j], obj_z[j]};
-        float world_pos[3];
-        mul_v3_m4v3(world_pos, ob_to_world, obj_pos);
-
-        float screen_pos[2];
-        ED_view3d_project_v2(this->vc.region, world_pos, screen_pos);
-        data[j * 2] = screen_pos[0];
-        data[j * 2 + 1] = screen_pos[1];
+        if (stroke_started_) {
+          this->add_step(C, op, cur, 1.0);
+          this->lines_spacing(C, op, no_pressure_spacing, &length_residue, cur, next);
+        }
       }
-
-      for (int j = 0; j < PAINT_CURVE_NUM_SEGMENTS; j++) {
-        if (!stroke_started_) {
-          last_pressure_ = 1.0;
-          copy_v2_v2(this->last_mouse_position, data + 2 * j);
-
-          if (paint_stroke_use_scene_spacing(br, mode)) {
-            BLI_assert(mode != PaintMode::Texture2D);
-            stroke_over_mesh_ = this->get_location(
-                last_world_space_position_, data + 2 * j, original_);
-            mul_m4_v3(this->vc.obact->object_to_world().ptr(), last_world_space_position_);
-          }
-
-          stroke_started_ = this->test_start(op, this->last_mouse_position);
-
-          if (stroke_started_) {
-            this->add_step(C, op, data + 2 * j, 1.0);
-            this->lines_spacing(
-                C, op, no_pressure_spacing, &length_residue, data + 2 * j, data + 2 * (j + 1));
-          }
-        }
-        else {
-          this->lines_spacing(
-              C, op, no_pressure_spacing, &length_residue, data + 2 * j, data + 2 * (j + 1));
-        }
+      else {
+        this->lines_spacing(C, op, no_pressure_spacing, &length_residue, cur, next);
       }
     }
 

@@ -33,6 +33,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
+#include "BKE_curves.hh"
 #include "BKE_image.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object_types.hh"
@@ -880,19 +881,20 @@ static void paint_draw_curve_cursor(Brush *brush, ViewContext *vc)
     std::vector<PaintCurvePoint> temp_points;
     PaintCurvePoint *cp = pc->points;
 
-    if (pc->use_3d_space && pc->points_3d != nullptr) {
+    if (pc->use_3d_space && pc->geometry.wrap().points_num() == pc->tot_points) {
       temp_points.resize(pc->tot_points);
       Object *ob = vc->obact;
       const float (*ob_to_world)[4] = ob ? ob->object_to_world().ptr() : nullptr;
+      bke::CurvesGeometry &geom = pc->geometry.wrap();
       for (int i = 0; i < pc->tot_points; i++) {
         temp_points[i] = pc->points[i];
         for (int j = 0; j < 3; j++) {
           float world_co[3];
           if (ob_to_world) {
-            mul_v3_m4v3(world_co, ob_to_world, pc->points_3d + (i * 9 + j * 3));
+            mul_v3_m4v3(world_co, ob_to_world, paintcurve_geom_co(geom, i, j));
           }
           else {
-            copy_v3_v3(world_co, pc->points_3d + (i * 9 + j * 3));
+            copy_v3_v3(world_co, paintcurve_geom_co(geom, i, j));
           }
           float screen_co[2];
           /* ED_view3d_project_v2 returns region-local coordinates (0,0 = bottom-left of

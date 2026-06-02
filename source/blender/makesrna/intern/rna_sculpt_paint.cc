@@ -685,6 +685,7 @@ static void rna_def_paint_curve(BlenderRNA *brna)
       "3D Space",
       "Store and edit curve in 3D object space instead of 2D screen space");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
 }
 
 static void rna_def_paint_curve_visibility_flag(StructRNA *srna,
@@ -1296,6 +1297,24 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Orientation", "Object whose Z axis defines orientation of gravity");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "paint_curve_source_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, nullptr, nullptr, "rna_PaintCurve_source_object_poll");
+  RNA_def_property_ui_text(
+      prop,
+      "Source Curve",
+      "Curves or Curve object to import into the active paint curve");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "paint_curve_sync_to_source", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "paint_curve_sync_to_source", 0);
+  RNA_def_property_ui_text(prop,
+                           "Sync to Source Curve",
+                           "Live update of the picked source object while editing the paint curve");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 

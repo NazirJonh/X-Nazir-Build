@@ -32,7 +32,8 @@ struct SimulationData;
 }
 namespace undo {
 enum class Type : int8_t;
-}
+enum class NodeDataFlag : uint8_t;
+}  // namespace undo
 }  // namespace ed::sculpt_paint
 
 namespace ed::sculpt_paint::filter {
@@ -114,7 +115,7 @@ struct Cache {
 void cache_init(bContext *C,
                 Object &ob,
                 Sculpt &sd,
-                undo::Type undo_type,
+                undo::NodeDataFlag undo_flags,
                 const float mval_fl[2],
                 float area_normal_radius,
                 float start_strength);

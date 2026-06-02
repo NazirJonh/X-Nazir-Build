@@ -2478,7 +2478,7 @@ static wmOperatorStatus sculpt_cloth_filter_invoke(bContext *C,
   filter::cache_init(C,
                      ob,
                      sd,
-                     undo::Type::Position,
+                     undo::NodeDataFlag::Position,
                      mval_fl,
                      RNA_float_get(op->ptr, "area_normal_radius"),
                      RNA_float_get(op->ptr, "strength"));

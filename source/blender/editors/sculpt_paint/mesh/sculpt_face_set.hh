@@ -15,8 +15,14 @@
 
 #include "BKE_attribute.hh"
 
+struct bContext;
+struct Depsgraph;
+struct Brush;
+struct SculptSession;
+
 namespace blender {
 
+class IndexMask;
 struct BMesh;
 struct BMFace;
 struct BMVert;
@@ -28,10 +34,11 @@ struct SubdivCCGCoord;
 namespace ed::sculpt_paint::face_set {
 
 int active_face_set_get(const Object &object);
-
 /* TODO: vert_face_set_max_get should likely be avoided and existing usages cleaned up, since by
  * definition, a vertex can be associated to more than a single face set. */
 int vert_face_set_max_get(GroupedSpan<int> vert_to_face_map, Span<int> face_sets, int vert);
+int active_update_and_get(bContext *C, Object &ob, const float mval[2]);
+int vert_face_set_get(GroupedSpan<int> vert_to_face_map, Span<int> face_sets, int vert);
 int vert_face_set_get(const SubdivCCG &subdiv_ccg, Span<int> face_sets, int grid);
 int vert_face_set_max_get(int face_set_offset, const BMVert &vert);
 
@@ -125,6 +132,30 @@ void filter_verts_with_unique_face_sets_bmesh(int face_set_offset,
                                               bool unique,
                                               const Set<BMVert *, 0> &verts,
                                               MutableSpan<float> factors);
+
+void apply_from_texture(const Depsgraph &depsgraph,
+                        Object &object,
+                        const Brush &brush,
+                        const IndexMask &node_mask);
+
+/**
+ * Samples the brush texture at each vertex of face \a face_index, writes the result to
+ * \a color_attribute when non-null, and returns the average texture value across all vertices.
+ * Alpha inversion is controlled by #BRUSH_TEXTURE_INVERT_ALPHA in brush.flag2.
+ */
+float sample_face_texture_avg(SculptSession &ss,
+                              const Brush &brush,
+                              Span<float3> positions_eval,
+                              OffsetIndices<int> faces,
+                              Span<int> corner_verts,
+                              GroupedSpan<int> vert_to_face_map,
+                              int face_index,
+                              bke::GSpanAttributeWriter *color_attribute,
+                              int thread_id);
+
+/** Set face set colors through RNA so unified-color sync handlers are notified. */
+void brush_face_set_color_set(Brush *brush, const float color[3]);
+void brush_face_set_secondary_color_set(Brush *brush, const float color[3]);
 
 }  // namespace ed::sculpt_paint::face_set
 

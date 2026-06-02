@@ -7,6 +7,11 @@
  */
 #include "sculpt_face_set.hh"
 
+#include "BLI_task.h"
+#include "DNA_brush_types.h"
+#include "sculpt_automask.hh"
+#include "sculpt_color.hh"
+
 #include <cmath>
 #include <cstdlib>
 #include <queue>
@@ -47,6 +52,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_screen.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph.hh"
@@ -54,6 +60,7 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "ED_screen.hh"
 #include "ED_sculpt.hh"
 
 #include "mesh_brush_common.hh"
@@ -66,10 +73,25 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_prototypes.hh"
 
 #include "bmesh.hh"
 
 namespace blender::ed::sculpt_paint::face_set {
+
+void brush_face_set_color_set(Brush *brush, const float color[3])
+{
+  PointerRNA ptr = RNA_id_pointer_create(&brush->id);
+  PropertyRNA *prop = RNA_struct_find_property(&ptr, "face_set_color");
+  RNA_property_float_set_array(&ptr, prop, color);
+}
+
+void brush_face_set_secondary_color_set(Brush *brush, const float color[3])
+{
+  PointerRNA ptr = RNA_id_pointer_create(&brush->id);
+  PropertyRNA *prop = RNA_struct_find_property(&ptr, "face_set_secondary_color");
+  RNA_property_float_set_array(&ptr, prop, color);
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Public API
@@ -320,7 +342,7 @@ static void face_sets_update(const Depsgraph &depsgraph,
             return;
           }
 
-          undo::push_node(depsgraph, object, &nodes[i], undo::Type::FaceSet);
+          undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::FaceSet);
           scatter_data_mesh(new_face_sets.as_span(), faces, face_sets.span);
           node_changed[i] = true;
         },
@@ -342,7 +364,7 @@ static void face_sets_update(const Depsgraph &depsgraph,
             return;
           }
 
-          undo::push_node(depsgraph, object, &nodes[i], undo::Type::FaceSet);
+          undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::FaceSet);
           scatter_data_mesh(new_face_sets.as_span(), faces, face_sets.span);
           node_changed[i] = true;
         },
@@ -384,7 +406,7 @@ static void clear_face_sets(const Depsgraph &depsgraph, Object &object, const In
                 return face_sets[face] != default_face_set;
               }))
           {
-            undo::push_node(depsgraph, object, &nodes[i], undo::Type::FaceSet);
+            undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::FaceSet);
             node_changed[i] = true;
           }
         },
@@ -402,7 +424,7 @@ static void clear_face_sets(const Depsgraph &depsgraph, Object &object, const In
                 return face_sets[face] != default_face_set;
               }))
           {
-            undo::push_node(depsgraph, object, &nodes[i], undo::Type::FaceSet);
+            undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::FaceSet);
             node_changed[i] = true;
           }
         },
@@ -743,7 +765,7 @@ static wmOperatorStatus init_op_exec(bContext *C, wmOperator *op)
   }
 
   undo::push_begin(scene, ob, op);
-  undo::push_nodes(*depsgraph, ob, node_mask, undo::Type::FaceSet);
+  undo::push_nodes(*depsgraph, ob, node_mask, undo::NodeDataFlag::FaceSet);
 
   const float threshold = RNA_float_get(op->ptr, "threshold");
 
@@ -947,7 +969,7 @@ static void face_hide_update(const Depsgraph &depsgraph,
             return;
           }
 
-          undo::push_node(depsgraph, object, &nodes[i], undo::Type::HideFace);
+          undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::HideFace);
           scatter_data_mesh(new_hide.as_span(), faces, hide_poly.span);
           node_changed[i] = true;
         },
@@ -969,7 +991,7 @@ static void face_hide_update(const Depsgraph &depsgraph,
             return;
           }
 
-          undo::push_node(depsgraph, object, &nodes[i], undo::Type::HideFace);
+          undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::HideFace);
           scatter_data_mesh(new_hide.as_span(), faces, hide_poly.span);
           node_changed[i] = true;
         },
@@ -1322,8 +1344,8 @@ static wmOperatorStatus face_set_colors_flip_exec(bContext *C, wmOperator * /*op
   /* Swap the primary and secondary Face Set colors. */
   float tmp[3];
   copy_v3_v3(tmp, brush->face_set_color);
-  copy_v3_v3(brush->face_set_color, brush->face_set_secondary_color);
-  copy_v3_v3(brush->face_set_secondary_color, tmp);
+  brush_face_set_color_set(brush, brush->face_set_secondary_color);
+  brush_face_set_secondary_color_set(brush, tmp);
 
   /* The primary color has changed; the cached sample ID no longer corresponds to it. */
   brush->face_set_sample_id = -1;
@@ -1666,7 +1688,7 @@ static void edit_modify_coordinates(
   const float strength = RNA_float_get(op->ptr, "strength");
 
   undo::push_begin(scene, ob, op);
-  undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Position);
+  undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::Position);
 
   switch (mode) {
     case EditMode::FairPositions:
@@ -1984,7 +2006,8 @@ static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMa
     node_mask.foreach_index(
         [&](const int i) {
           TLS &tls = all_tls.local();
-          undo::push_node(depsgraph, *gesture_data.vc.obact, &nodes[i], undo::Type::FaceSet);
+          undo::push_node(
+              depsgraph, *gesture_data.vc.obact, &nodes[i], undo::NodeDataFlag::FaceSet);
           bool any_updated = false;
 
           const Span<int> face_indices = nodes[i].faces();
@@ -2025,7 +2048,8 @@ static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMa
     node_mask.foreach_index(
         [&](const int i) {
           TLS &tls = all_tls.local();
-          undo::push_node(depsgraph, *gesture_data.vc.obact, &nodes[i], undo::Type::FaceSet);
+          undo::push_node(
+              depsgraph, *gesture_data.vc.obact, &nodes[i], undo::NodeDataFlag::FaceSet);
 
           bool any_updated = false;
 
@@ -2092,7 +2116,7 @@ static void gesture_apply_bmesh(gesture::GestureData &gesture_data, const IndexM
   node_mask.foreach_index(
       [&](const int i) {
         TLS &tls = all_tls.local();
-        undo::push_node(depsgraph, *gesture_data.vc.obact, &nodes[i], undo::Type::FaceSet);
+        undo::push_node(depsgraph, *gesture_data.vc.obact, &nodes[i], undo::NodeDataFlag::FaceSet);
 
         bool any_updated = false;
 
@@ -2332,6 +2356,341 @@ void SCULPT_OT_face_set_line_gesture(wmOperatorType *ot)
   WM_operator_properties_gesture_straightline(ot, WM_CURSOR_EDIT);
   gesture::operator_properties(ot, gesture::ShapeType::Line);
 }
+
 /** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Sample Face Set ID Operator
+ * \{ */
+
+static bool sample_face_set_id_poll(bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || ob->mode != OB_MODE_SCULPT) {
+    return false;
+  }
+  if (!ob->runtime->sculpt_session) {
+    return false;
+  }
+  return true;
+}
+
+static wmOperatorStatus sample_face_set_id_invoke(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent * /*event*/)
+{
+  ED_workspace_status_text(C, IFACE_("Click on a face set to sample its color"));
+  WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_EYEDROPPER);
+  WM_event_add_modal_handler(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus sample_face_set_id_modal(bContext *C,
+                                                 wmOperator * /*op*/,
+                                                 const wmEvent *event)
+{
+  if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
+    wmWindow *win = CTX_wm_window(C);
+    ScrArea *area = BKE_screen_find_area_xy(CTX_wm_screen(C), SPACE_VIEW3D, event->xy);
+    ARegion *region = area ? BKE_area_find_region_xy(area, RGN_TYPE_WINDOW, event->xy) : nullptr;
+    if (!area || !region) {
+      WM_cursor_modal_restore(win);
+      ED_workspace_status_text(C, nullptr);
+      return OPERATOR_CANCELLED;
+    }
+
+    Object *ob_ptr = CTX_data_active_object(C);
+    if (!ob_ptr) {
+      WM_cursor_modal_restore(win);
+      ED_workspace_status_text(C, nullptr);
+      return OPERATOR_CANCELLED;
+    }
+
+    ScrArea *prev_area = CTX_wm_area(C);
+    ARegion *prev_region = CTX_wm_region(C);
+    CTX_wm_area_set(C, area);
+    CTX_wm_region_set(C, region);
+
+    const float mval[2] = {float(event->xy[0] - region->winrct.xmin),
+                             float(event->xy[1] - region->winrct.ymin)};
+
+    const int sampled_id = active_update_and_get(C, *ob_ptr, mval);
+
+    CTX_wm_area_set(C, prev_area);
+    CTX_wm_region_set(C, prev_region);
+
+    WM_cursor_modal_restore(win);
+    ED_workspace_status_text(C, nullptr);
+
+    if (sampled_id == face_set_none_id) {
+      return OPERATOR_CANCELLED;
+    }
+
+    Paint *paint = BKE_paint_get_active_from_context(C);
+    if (!paint) {
+      return OPERATOR_CANCELLED;
+    }
+    Brush *brush = BKE_paint_brush(paint);
+    if (!brush) {
+      return OPERATOR_CANCELLED;
+    }
+    /* Sample the display color so the color swatch updates and the next stroke
+     * targets this face set by its sampled color. Clear face_set_id so it does
+     * not take priority over the color-based painting path in the brush stroke. */
+    const Mesh &mesh = *id_cast<const Mesh *>(ob_ptr->data);
+    uchar sampled_color_ub[4];
+    BKE_paint_face_set_overlay_color_get(
+        sampled_id, mesh.face_sets_color_seed, sampled_color_ub, &mesh);
+    const float sampled_color_fl[3] = {sampled_color_ub[0] / 255.0f,
+                                       sampled_color_ub[1] / 255.0f,
+                                       sampled_color_ub[2] / 255.0f};
+    brush_face_set_color_set(brush, sampled_color_fl);
+    brush->face_set_sample_id = sampled_id;
+    brush->face_set_draw_mode = SCULPT_FACE_SET_DRAW_MODE_COLOR;
+    brush->face_set_id = 0;
+
+    WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+    return OPERATOR_FINISHED;
+  }
+
+  if (ELEM(event->type, RIGHTMOUSE, EVT_ESCKEY)) {
+    WM_cursor_modal_restore(CTX_wm_window(C));
+    ED_workspace_status_text(C, nullptr);
+    return OPERATOR_CANCELLED;
+  }
+
+  return OPERATOR_RUNNING_MODAL;
+}
+
+void SCULPT_OT_sample_face_set_id(wmOperatorType *ot)
+{
+  ot->name = "Sample Face Set ID";
+  ot->idname = "SCULPT_OT_sample_face_set_id";
+  ot->description = "Sample a Face Set ID from the mesh under the cursor";
+
+  ot->invoke = sample_face_set_id_invoke;
+  ot->modal = sample_face_set_id_modal;
+  ot->poll = sample_face_set_id_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/** \} */
+
+float sample_face_texture_avg(SculptSession &ss,
+                              const Brush &brush,
+                              const Span<float3> positions_eval,
+                              const OffsetIndices<int> faces,
+                              const Span<int> corner_verts,
+                              const GroupedSpan<int> vert_to_face_map,
+                              const int face_index,
+                              bke::GSpanAttributeWriter *color_attribute,
+                              const int thread_id)
+{
+  const IndexRange face_corners = faces[face_index];
+  float sum = 0.0f;
+  int num_verts = 0;
+
+  for (const int corner : face_corners) {
+    const int vert_index = corner_verts[corner];
+    float texture_value;
+    float4 texture_rgba;
+    sculpt_apply_texture(
+        ss, brush, positions_eval[vert_index], thread_id, &texture_value, texture_rgba);
+
+    if (brush.flag2 & BRUSH_TEXTURE_INVERT_ALPHA) {
+      texture_value = 1.0f - texture_value;
+    }
+
+    sum += texture_value;
+    num_verts++;
+
+    if (color_attribute) {
+      const float value = (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) ?
+                              ((texture_value > brush.texture_threshold) ? 1.0f : 0.0f) :
+                              clamp_f(texture_value, 0.0f, 1.0f);
+      float4 col = color::color_vert_get(faces,
+                                         corner_verts,
+                                         vert_to_face_map,
+                                         color_attribute->span,
+                                         color_attribute->domain,
+                                         vert_index);
+      col[brush.vcol_channel] = value;
+      color::color_vert_set(faces,
+                            corner_verts,
+                            vert_to_face_map,
+                            color_attribute->domain,
+                            vert_index,
+                            col,
+                            color_attribute->span);
+    }
+  }
+  return (num_verts > 0) ? (sum / float(num_verts)) : 0.0f;
+}
+
+void apply_from_texture(const Depsgraph &depsgraph,
+                        Object &object,
+                        const Brush &brush,
+                        const IndexMask &node_mask)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  if (!ss.cache) {
+    return;
+  }
+  const StrokeCache &cache = *ss.cache;
+  const bool write_face_sets = (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
+
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  if (pbvh.type() != bke::pbvh::Type::Mesh) {
+    return;
+  }
+
+  const Span<float3> positions_eval = bke::pbvh::vert_positions_eval(depsgraph, object);
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+
+  /* Record undo state before any modifications so the step can be fully reversed.
+   * Flags must match exactly what will be written below. */
+  {
+    undo::NodeDataFlag undo_flags{};
+    if (write_face_sets) {
+      undo_flags |= undo::NodeDataFlag::FaceSet;
+    }
+    if (brush.write_vcol) {
+      undo_flags |= undo::NodeDataFlag::Color;
+    }
+    if (undo_flags != undo::NodeDataFlag{}) {
+      undo::push_nodes(depsgraph, object, node_mask, undo_flags);
+    }
+  }
+
+  /* Ensure the Face Sets attribute exists before querying IDs when writing them. */
+  bke::SpanAttributeWriter<int> face_sets;
+  if (write_face_sets) {
+    face_sets = ensure_face_sets_mesh(mesh);
+  }
+
+  bke::GSpanAttributeWriter color_attribute;
+  if (brush.write_vcol) {
+    color_attribute = color::active_color_attribute_for_write(mesh);
+  }
+
+  /* Initialize paint_face_set if not set (first step of the stroke). */
+  if (write_face_sets && ss.cache->paint_face_set == face_set_none_id) {
+    if (brush.face_set_id > 0) {
+      ss.cache->paint_face_set = brush.face_set_id;
+    }
+    else if (ss.cache->toggle_settings.invert) {
+      ss.cache->paint_face_set = active_face_set_get(object);
+    }
+    else if (brush.face_set_draw_mode == SCULPT_FACE_SET_DRAW_MODE_COLOR) {
+      /* Custom mode: find or create a face set by the brush color. */
+      if (brush.face_set_sample_id > 0) {
+        ss.cache->paint_face_set = brush.face_set_sample_id;
+      }
+      else {
+        const int found_id = BKE_paint_face_set_find_by_custom_color(&mesh, brush.face_set_color);
+        if (found_id > 0) {
+          ss.cache->paint_face_set = found_id;
+        }
+        else {
+          const int new_id = find_next_available_id(object);
+          BKE_paint_face_set_custom_color_set(&mesh, new_id, brush.face_set_color);
+          ss.cache->paint_face_set = new_id;
+          DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+        }
+      }
+    }
+    else {
+      /* Random mode: create a new face set ID for each stroke. */
+      ss.cache->paint_face_set = find_next_available_id(object);
+    }
+  }
+  const int face_set_id = ss.cache->paint_face_set;
+
+  MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+
+  node_mask.foreach_index(
+      [&](const int i) {
+        const Span<int> face_indices = nodes[i].faces();
+        if (face_indices.is_empty()) {
+          return;
+        }
+
+        Vector<float3> face_centers(face_indices.size());
+        calc_face_centers(faces, corner_verts, positions_eval, face_indices, face_centers);
+
+        Vector<float3> face_normals(face_indices.size());
+        for (const int i_face : face_indices.index_range()) {
+          face_normals[i_face] = bke::mesh::face_normal_calc(
+              positions_eval, corner_verts.slice(faces[face_indices[i_face]]));
+        }
+
+        Vector<float> factors(face_indices.size(), 1.0f);
+        fill_factor_from_hide_and_mask(mesh, face_indices, factors);
+
+        filter_region_clip_factors(ss, face_centers, factors);
+        if (brush.flag & BRUSH_FRONTFACE) {
+          calc_front_face(cache.view_normal_symm, face_normals, factors);
+        }
+
+        Vector<float> distances(face_indices.size());
+        calc_brush_distances(ss, face_centers, eBrushFalloffShape(brush.falloff_shape), distances);
+        filter_distances_with_radius(cache.radius, distances, factors);
+        apply_hardness_to_distances(cache, distances);
+
+        if (cache.automasking) {
+          auto_mask::calc_face_factors(depsgraph,
+                                       object,
+                                       faces,
+                                       corner_verts,
+                                       *cache.automasking,
+                                       nodes[i],
+                                       face_indices,
+                                       factors);
+        }
+
+        const int thread_id = BLI_task_parallel_thread_id(nullptr);
+
+        bke::GSpanAttributeWriter *col_attr_ptr = color_attribute ? &color_attribute : nullptr;
+        for (const int i_face : face_indices.index_range()) {
+          if (factors[i_face] == 0.0f) {
+            continue;
+          }
+          const float avg = sample_face_texture_avg(ss,
+                                                    brush,
+                                                    positions_eval,
+                                                    faces,
+                                                    corner_verts,
+                                                    vert_to_face_map,
+                                                    face_indices[i_face],
+                                                    col_attr_ptr,
+                                                    thread_id);
+          factors[i_face] = (avg > brush.texture_threshold) ? 1.0f : 0.0f;
+        }
+
+        if (write_face_sets) {
+          /* Apply the resulting Face Set ID to the mesh face sets span. */
+          for (const int i_face : face_indices.index_range()) {
+            if (factors[i_face] > FACE_SET_MIN_FADE) {
+              face_sets.span[face_indices[i_face]] = face_set_id;
+            }
+          }
+        }
+      },
+      exec_mode::grain_size(1));
+
+  if (face_sets) {
+    pbvh.tag_face_sets_changed(node_mask);
+    face_sets.finish();
+  }
+
+  if (color_attribute) {
+    pbvh.tag_attribute_changed(node_mask, mesh.active_color_attribute);
+    color_attribute.finish();
+  }
+}
 
 }  // namespace blender::ed::sculpt_paint::face_set

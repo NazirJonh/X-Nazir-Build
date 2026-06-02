@@ -90,11 +90,28 @@ class VIEW3D_HT_tool_header(Header):
         if draw_fn is not None:
             is_valid_context = draw_fn(context, layout, tool)
 
+        _FACE_SET_TEXTURE_BRUSH_TYPES = {
+            'DRAW',
+            'CLAY',
+            'CLAY_STRIPS',
+            'CREASE',
+            'BLOB',
+            'INFLATE',
+            'SMOOTH',
+            'PINCH',
+            'DRAW_SHARP',
+            'MULTIPLANE_SCRAPE',
+        }
+
         def draw_3d_brush_settings(layout, tool_mode):
             if tool_mode == 'SCULPT':
                 sculpt = context.tool_settings.sculpt
-                if sculpt and sculpt.brush and sculpt.brush.sculpt_brush_type == 'DRAW_FACE_SETS':
-                    layout.popover("VIEW3D_PT_tools_brush_face_set_settings", text="Face Sets")
+                if sculpt and sculpt.brush:
+                    brush_type = sculpt.brush.sculpt_brush_type
+                    if brush_type == 'DRAW_FACE_SETS':
+                        layout.popover("VIEW3D_PT_tools_brush_face_set_settings", text="Face Sets")
+                    elif brush_type in _FACE_SET_TEXTURE_BRUSH_TYPES:
+                        layout.popover("VIEW3D_PT_tools_brush_face_set_texture", text="Face Sets")
 
             layout.popover("VIEW3D_PT_tools_brush_settings_advanced", text="Brush")
             if tool_mode != 'PAINT_WEIGHT':
@@ -283,10 +300,16 @@ class _draw_tool_settings_context_mode:
             row = layout.row(align=True)
             row.ui_units_x = 4.8
 
+            wm = context.window_manager
+            use_unified = getattr(wm, 'use_unified_face_set_color', False)
+            color_owner = wm if use_unified else brush
+            primary_prop = "unified_face_set_color" if use_unified else "face_set_color"
+            secondary_prop = "unified_face_set_secondary_color" if use_unified else "face_set_secondary_color"
+
             sub = row.row(align=True)
             sub.active = is_custom
-            sub.prop(brush, "face_set_color", text="")
-            sub.prop(brush, "face_set_secondary_color", text="")
+            sub.prop(color_owner, primary_prop, text="")
+            sub.prop(color_owner, secondary_prop, text="")
 
             # Toggle button remains outside 'sub' so it's always active.
             row.operator(

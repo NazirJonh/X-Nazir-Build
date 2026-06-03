@@ -733,16 +733,16 @@ static void rna_ui_template_ID_session_uid(
 }
 
 static void rna_uiTemplateID_with_filter_context(Layout *layout,
-                                                  bContext *C,
-                                                  PointerRNA *ptr,
-                                                  const char *propname,
-                                                  const char *newop,
-                                                  const char *openop,
-                                                  const char *unlinkop,
-                                                  int filter,
-                                                  const char *text,
-                                                  PointerRNA *material_ptr,
-                                                  int slot_type)
+                                                 bContext *C,
+                                                 PointerRNA *ptr,
+                                                 const char *propname,
+                                                 const char *newop,
+                                                 const char *openop,
+                                                 const char *unlinkop,
+                                                 int filter,
+                                                 const char *text,
+                                                 PointerRNA *material_ptr,
+                                                 int slot_type)
 {
   Material *material = nullptr;
   if (material_ptr && material_ptr->data) {
@@ -760,15 +760,13 @@ static void rna_uiTemplateImageBrowse(Layout *layout,
                                       const char *newop,
                                       const char *openop,
                                       const char *unlinkop,
-                                      PointerRNA *material_ptr,
-                                      int slot_type)
+                                      PointerRNA *material_ptr)
 {
   Material *material = nullptr;
   if (material_ptr && material_ptr->data) {
     material = static_cast<Material *>(material_ptr->data);
   }
-  ui::uiTemplateImageBrowse(
-      layout, C, ptr, propname, material, slot_type, newop, openop, unlinkop);
+  ui::uiTemplateImageBrowse(layout, C, ptr, propname, material, newop, openop, unlinkop);
 }
 
 static void rna_uiTemplateAnyID(Layout *layout,
@@ -1964,8 +1962,7 @@ void RNA_api_ui_layout(StructRNA *srna)
   func = RNA_def_function(srna, "template_image_browse", "rna_uiTemplateImageBrowse");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   RNA_def_function_ui_description(
-      func,
-      "Browse and assign an image via a filtered popover, with standard new/open controls");
+      func, "Browse and assign an image via a filtered popover, with standard new/open controls");
   api_ui_item_rna_common(func);
   RNA_def_string(func, "new", nullptr, 0, "", "Operator identifier to create a new ID block");
   RNA_def_string(func,
@@ -1978,12 +1975,6 @@ void RNA_api_ui_layout(StructRNA *srna)
   parm = RNA_def_pointer(
       func, "material", "Material", "", "Material providing the filter context");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
-  RNA_def_enum(func,
-               "slot_type",
-               rna_enum_node_tex_image_paint_slot_type_items,
-               NODE_TEX_IMAGE_SLOT_NONE,
-               "Slot Type",
-               "Paint slot type used when filtering by slot type");
 
   func = RNA_def_function(srna, "template_ID_session_uid", "rna_ui_template_ID_session_uid");
   RNA_def_function_ui_description(func,

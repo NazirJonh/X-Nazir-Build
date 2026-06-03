@@ -912,7 +912,6 @@ class IMAGE_HT_header(Header):
                 new="image.new",
                 open="image.open",
                 material=mat,
-                slot_type=sima.image_filter_slot_type,
             )
         else:
             layout.template_ID(sima, "image", new="image.new", open="image.open")

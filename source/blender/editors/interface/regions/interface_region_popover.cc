@@ -174,7 +174,7 @@ static Block *block_func_POPOVER(bContext *C, PopupBlockHandle *handle, void *ar
                                          static_cast<ButtonMenu *>(pup->but) :
                                          nullptr;
   const PopupAttachDirection attach_dir = popover_button ? popover_button->popup_attach_direction :
-                                                         PopupAttachDirection::Vertical;
+                                                           PopupAttachDirection::Vertical;
   const int direction = popover_direction_from_attach(attach_dir);
   block_direction_set(block, direction);
 

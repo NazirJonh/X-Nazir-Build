@@ -10048,7 +10048,8 @@ wmOperator *context_active_operator_get(const bContext *C)
 }
 
 /* Resolve the searchbox handling data of \a but, accounting for semi-modal search fields whose
- * state lives in #Button.semi_modal_state (with #Button.active null outside the semi-modal scope). */
+ * state lives in #Button.semi_modal_state (with #Button.active null outside the semi-modal scope).
+ */
 static const HandleButtonData *button_handle_data_get(const Button *but)
 {
   return but->semi_modal_state ? but->semi_modal_state : but->active;

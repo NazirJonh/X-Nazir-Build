@@ -17,6 +17,9 @@
 
 #include "UI_interface_layout.hh"
 
+struct Image;
+struct Main;
+
 namespace blender {
 
 struct bContext;
@@ -94,13 +97,20 @@ void template_id_image_row_append_standard(const bContext *C,
                                            const char *unlinkop);
 
 /**
+ * Shared predicate for the image paint-slot filters, used by both the ID search menu
+ * (#template_id_browse_with_context) and the image-browser popover. Returns true when \a image
+ * passes \a filter_mode (a mask of #TEMPLATE_ID_FILTER_CURRENT_MATERIAL and/or
+ * #TEMPLATE_ID_FILTER_SLOT_TYPE). Render-result and compositor images never pass. The cached
+ * usage index is rebuilt from \a bmain on demand.
+ */
+bool image_id_passes_paint_filter(
+    Main &bmain, const Image &image, int filter_mode, const Material *material, char slot_type);
+
+/**
  * Add the image-browser popover button to \a row (replaces the browse search-menu button).
  */
-void image_browser_add_popover_button(Layout &row,
-                                      const bContext *C,
-                                      PointerRNA *ptr,
-                                      const char *propname,
-                                      Material *material);
+void image_browser_add_popover_button(
+    Layout &row, const bContext *C, PointerRNA *ptr, const char *propname, Material *material);
 
 }  // namespace ui
 }  // namespace blender

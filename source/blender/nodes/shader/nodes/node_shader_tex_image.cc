@@ -280,14 +280,6 @@ NODE_SHADER_MATERIALX_END
 
 }  // namespace nodes::node_shader_tex_image_cc
 
-static void node_shader_free_tex_image(bNode *node)
-{
-  if (node->id != nullptr) {
-    BKE_image_paint_slot_info_invalidate(id_cast<Image *>(node->id));
-  }
-  node_free_standard_storage(node);
-}
-
 void register_node_type_sh_tex_image()
 {
   namespace file_ns = nodes::node_shader_tex_image_cc;
@@ -302,7 +294,7 @@ void register_node_type_sh_tex_image()
   ntype.declare = file_ns::sh_node_tex_image_declare;
   ntype.initfunc = file_ns::node_shader_init_tex_image;
   bke::node_type_storage(
-      ntype, "NodeTexImage", node_shader_free_tex_image, node_copy_standard_storage);
+      ntype, "NodeTexImage", node_free_standard_storage, node_copy_standard_storage);
   ntype.gpu_fn = file_ns::node_shader_gpu_tex_image;
   ntype.labelfunc = node_image_label;
   ntype.default_width = bke::NodeWidth::_240;

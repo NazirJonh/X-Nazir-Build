@@ -108,7 +108,8 @@ static void template_ID_set_int_property_session_uid_exec_fn(bContext * /*C*/,
       &template_ui->ptr, template_ui->prop, int(static_cast<ID *>(item)->session_uid));
 }
 
-static bool id_search_allows_id(TemplateID *template_ui, const int flag, ID *id, const char *query)
+static bool id_search_allows_id(
+    Main &bmain, TemplateID *template_ui, const int flag, ID *id, const char *query)
 {
   ID *id_from = template_ui->ptr.owner_id;
 
@@ -132,39 +133,17 @@ static bool id_search_allows_id(TemplateID *template_ui, const int flag, ID *id,
     }
   }
 
-  /* Advanced filtering for images by material usage and/or paint slot type. */
+  /* Advanced filtering for images by material usage and/or paint slot type. The shared predicate
+   * also excludes render-result/compositor images, so it is only consulted when a paint-slot
+   * filter is active (the unfiltered "All" mode keeps showing every image as usual). */
   if (template_ui->idcode == ID_IM && template_ui->filter != TEMPLATE_ID_FILTER_ALL) {
-    Image *ima = id_cast<Image *>(id);
-
-    /* Exclude internal/compositor images from paint-slot filtering. These should only show up in
-     * the unfiltered "All Images" mode. */
-    if (ELEM(ima->type, IMA_TYPE_R_RESULT, IMA_TYPE_COMPOSITE)) {
+    if (!image_id_passes_paint_filter(bmain,
+                                      *id_cast<Image *>(id),
+                                      template_ui->filter,
+                                      template_ui->filter_context.material,
+                                      template_ui->filter_context.slot_type))
+    {
       return false;
-    }
-
-    const bool filter_material = (template_ui->filter & TEMPLATE_ID_FILTER_CURRENT_MATERIAL) != 0;
-    const bool filter_slot_type = (template_ui->filter & TEMPLATE_ID_FILTER_SLOT_TYPE) != 0;
-    const Material *mat = template_ui->filter_context.material;
-    const char slot_type = template_ui->filter_context.slot_type;
-
-    if (filter_material && filter_slot_type) {
-      /* Combined filter (AND): the image must be used by the material in the given slot type,
-       * within the same usage record. */
-      if (mat == nullptr || !BKE_image_paint_slot_info_is_used_in_material(ima, mat, slot_type)) {
-        return false;
-      }
-    }
-    else {
-      if (filter_material) {
-        if (mat == nullptr || !BKE_image_paint_slot_info_is_used_in_material(ima, mat, 0)) {
-          return false;
-        }
-      }
-      if (filter_slot_type && slot_type != NODE_TEX_IMAGE_SLOT_NONE) {
-        if (!BKE_image_paint_slot_info_has_slot_type(ima, slot_type)) {
-          return false;
-        }
-      }
     }
   }
 
@@ -210,6 +189,7 @@ static void id_search_cb(const bContext *C,
                          const bool /*is_first*/)
 {
   TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
+  Main &bmain = *CTX_data_main(C);
 
   ListBaseT<ID> *lb = template_ui->idlb;
   const int flag = RNA_property_flag(template_ui->prop);
@@ -218,7 +198,7 @@ static void id_search_cb(const bContext *C,
 
   /* ID listbase */
   for (ID &id : *lb) {
-    if (id_search_allows_id(template_ui, flag, &id, str)) {
+    if (id_search_allows_id(bmain, template_ui, flag, &id, str)) {
       search.add(id.name + 2, &id);
     }
   }
@@ -241,6 +221,7 @@ static void id_search_cb_tagged(const bContext *C,
                                 SearchItems *items)
 {
   TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
+  Main &bmain = *CTX_data_main(C);
   ListBaseT<ID> *lb = template_ui->idlb;
   const int flag = RNA_property_flag(template_ui->prop);
 
@@ -250,7 +231,7 @@ static void id_search_cb_tagged(const bContext *C,
   /* ID listbase */
   for (ID &id : *lb) {
     if (id.tag & ID_TAG_DOIT) {
-      if (id_search_allows_id(template_ui, flag, &id, str)) {
+      if (id_search_allows_id(bmain, template_ui, flag, &id, str)) {
         search.add(id.name + 2, &id);
       }
       id.tag &= ~ID_TAG_DOIT;
@@ -1830,7 +1811,8 @@ void template_id_image_row_append_standard(const bContext *C,
     flag |= UI_ID_OPEN;
   }
 
-  template_ID(C, layout, template_ui, type, flag, newop, openop, unlinkop, std::nullopt, false, false);
+  template_ID(
+      C, layout, template_ui, type, flag, newop, openop, unlinkop, std::nullopt, false, false);
 }
 
 void template_id_browse_with_context(Layout *layout,

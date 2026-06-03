@@ -126,7 +126,8 @@ class AbstractGridView : public AbstractView {
   int get_item_count_filtered() const;
 
   void set_tile_size(int tile_width, int tile_height);
-  /** Ensure the laid-out grid uses at least this height, using the same row spacers as scrolling. */
+  /** Ensure the laid-out grid uses at least this height, using the same row spacers as scrolling.
+   */
   void set_min_viewport_height(int height_px);
   [[nodiscard]] std::optional<int> min_viewport_height() const;
   AbstractViewItem *find_active_or_visible_item() const override;

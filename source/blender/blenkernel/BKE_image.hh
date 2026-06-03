@@ -72,16 +72,22 @@ namespace bke {
  * Used for runtime indexing to enable fast filtering.
  */
 struct UsageRecord {
-  /** Material that uses this image. */
-  struct Material *material;
+  /**
+   * Session UID of the material that uses this image (see #ID.session_uid). A session UID is
+   * stored instead of a raw #Material pointer so a stale index can never dereference or falsely
+   * match freed data: UIDs are unique and never reused within a session.
+   */
+  uint32_t material_session_uid;
   /** Slot type this image is used as (from NodeTexImage::paint_slot_type). */
   char slot_type;
 };
 
 /**
  * Runtime index structure for fast image filtering by material and slot type.
- * Stored in ImageRuntime and rebuilt on demand. The index is freed (and the pointer cleared)
- * whenever something it depends on changes, so a non-null index is always current.
+ * Stored in #ImageRuntime and rebuilt on demand. The index is invalidated on the known mutation
+ * paths (node image/slot edits, material removal); it is best-effort, so it may briefly lag behind
+ * actual usage. Records store material session UIDs (not pointers) so a stale index is always safe
+ * to read.
  */
 struct ImagePaintSlotInfo {
   /** List of all usage records for this image. */
@@ -759,9 +765,9 @@ void BKE_image_update_gputexture_delayed(
 
 /**
  * Build or rebuild the paint slot usage index for this image.
- * Scans all materials and collects information about how this image is used.
+ * Scans all materials in \a bmain and collects information about how this image is used.
  */
-void BKE_image_paint_slot_info_rebuild(Image *ima);
+void BKE_image_paint_slot_info_rebuild(Main *bmain, Image *ima);
 void BKE_image_paint_slot_info_invalidate(Image *ima);
 
 /**
@@ -772,21 +778,22 @@ bool BKE_image_paint_slot_info_is_valid(const Image *ima);
 
 /**
  * Quick check if image is used in any material (uses cached index).
- * Rebuilds index if needed.
+ * Rebuilds index from \a bmain if needed.
  */
-bool BKE_image_paint_slot_info_is_used_in_any_material(const Image *ima);
+bool BKE_image_paint_slot_info_is_used_in_any_material(Main *bmain, const Image *ima);
 
 /**
  * Quick check if image has a specific slot type usage (uses cached index).
- * Rebuilds index if needed.
+ * Rebuilds index from \a bmain if needed.
  */
-bool BKE_image_paint_slot_info_has_slot_type(const Image *ima, char slot_type);
+bool BKE_image_paint_slot_info_has_slot_type(Main *bmain, const Image *ima, char slot_type);
 
 /**
  * Quick check if image is used in a specific material with optional slot type filter
- * (uses cached index). Rebuilds index if needed.
+ * (uses cached index). Rebuilds index from \a bmain if needed.
  */
-bool BKE_image_paint_slot_info_is_used_in_material(const Image *ima,
+bool BKE_image_paint_slot_info_is_used_in_material(Main *bmain,
+                                                   const Image *ima,
                                                    const Material *material,
                                                    char slot_type = 0);
 

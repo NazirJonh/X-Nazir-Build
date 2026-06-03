@@ -2436,14 +2436,14 @@ void template_id_browse_with_context(Layout *layout,
 /**
  * Browse/assign an Image ID-block via a popover panel with paint-slot filters, a grid/list view
  * toggle and a search field. \a ptr / \a propname identify the Image pointer property to set.
- * \a material and \a slot_type seed the filter context (may be null / NODE_TEX_IMAGE_SLOT_NONE).
+ * \a material seeds the material filter context (may be null). The active slot-type filter is
+ * driven by the editor's own #SpaceImage / #SpaceNode `image_filter_slot_type` property.
  */
 void uiTemplateImageBrowse(Layout *layout,
                            const bContext *C,
                            PointerRNA *ptr,
                            const char *propname,
                            struct Material *material,
-                           int slot_type,
                            const char *newop,
                            const char *openop,
                            const char *unlinkop);

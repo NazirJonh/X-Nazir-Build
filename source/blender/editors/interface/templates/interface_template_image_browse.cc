@@ -95,23 +95,29 @@ static SpaceLink *image_browser_active_space(const bContext *C, StructRNA **r_sr
   return nullptr;
 }
 
-/* Mirror of #id_search_allows_id()'s image branch. */
-static bool image_passes_filter(const Image *ima, int mode, const Material *mat, char slot_type)
+bool image_id_passes_paint_filter(Main &bmain,
+                                  const Image &image,
+                                  const int filter_mode,
+                                  const Material *material,
+                                  char slot_type)
 {
-  if (ELEM(ima->type, IMA_TYPE_R_RESULT, IMA_TYPE_COMPOSITE)) {
+  if (ELEM(image.type, IMA_TYPE_R_RESULT, IMA_TYPE_COMPOSITE)) {
     return false;
   }
-  const bool filter_material = (mode & TEMPLATE_ID_FILTER_CURRENT_MATERIAL) != 0;
-  const bool filter_slot = (mode & TEMPLATE_ID_FILTER_SLOT_TYPE) != 0;
+  const bool filter_material = (filter_mode & TEMPLATE_ID_FILTER_CURRENT_MATERIAL) != 0;
+  const bool filter_slot = (filter_mode & TEMPLATE_ID_FILTER_SLOT_TYPE) != 0;
 
   if (filter_material && filter_slot) {
-    return mat && BKE_image_paint_slot_info_is_used_in_material(ima, mat, slot_type);
+    return material &&
+           BKE_image_paint_slot_info_is_used_in_material(&bmain, &image, material, slot_type);
   }
-  if (filter_material && (!mat || !BKE_image_paint_slot_info_is_used_in_material(ima, mat, 0))) {
+  if (filter_material &&
+      (!material || !BKE_image_paint_slot_info_is_used_in_material(&bmain, &image, material, 0)))
+  {
     return false;
   }
   if (filter_slot && slot_type != NODE_TEX_IMAGE_SLOT_NONE &&
-      !BKE_image_paint_slot_info_has_slot_type(ima, slot_type))
+      !BKE_image_paint_slot_info_has_slot_type(&bmain, &image, slot_type))
   {
     return false;
   }
@@ -138,11 +144,8 @@ class ImageBrowserGridItem : public PreviewGridItem {
   }
 
  public:
-  ImageBrowserGridItem(StringRef identifier,
-                       StringRef label,
-                       int preview_icon_id,
-                       Image *ima,
-                       const bool list_mode)
+  ImageBrowserGridItem(
+      StringRef identifier, StringRef label, int preview_icon_id, Image *ima, const bool list_mode)
       : PreviewGridItem(identifier, label, preview_icon_id), ima_(ima), list_mode_(list_mode)
   {
   }
@@ -196,7 +199,8 @@ class ImageBrowserGridItem : public PreviewGridItem {
     this->install_id_preview_tooltip();
 
     if (Button *item_but = this->view_item_button()) {
-      /* Match highlight area to the full list row (see #AbstractTreeViewItem::add_treerow_button). */
+      /* Match highlight area to the full list row (see #AbstractTreeViewItem::add_treerow_button).
+       */
       button_view_item_draw_size_set(item_but, style.tile_width, style.tile_height);
     }
   }
@@ -238,7 +242,7 @@ class ImageBrowserView : public AbstractGridView {
     const ID *active_id = active_ptr.data ? static_cast<ID *>(active_ptr.data) : nullptr;
 
     for (Image &ima : bmain_->images) {
-      if (!image_passes_filter(&ima, mode_, material_, slot_type_)) {
+      if (!image_id_passes_paint_filter(*bmain_, ima, mode_, material_, slot_type_)) {
         continue;
       }
       const StringRef name = ima.id.name + 2;
@@ -249,16 +253,15 @@ class ImageBrowserView : public AbstractGridView {
       PointerRNA target_ptr = target_ptr_;
       PropertyRNA *target_prop = target_prop_;
       Image *ima_ptr = &ima;
-      item.set_on_activate_fn([target_ptr, target_prop, ima_ptr](bContext &C,
-                                                                 PreviewGridItem & /*item*/) {
-        PointerRNA value = RNA_id_pointer_create(&ima_ptr->id);
-        PointerRNA ptr = target_ptr;
-        RNA_property_pointer_set(&ptr, target_prop, value, nullptr);
-        RNA_property_update(&C, &ptr, target_prop);
-      });
-      item.set_is_active_fn([active_id, ima_ptr]() {
-        return active_id != nullptr && &ima_ptr->id == active_id;
-      });
+      item.set_on_activate_fn(
+          [target_ptr, target_prop, ima_ptr](bContext &C, PreviewGridItem & /*item*/) {
+            PointerRNA value = RNA_id_pointer_create(&ima_ptr->id);
+            PointerRNA ptr = target_ptr;
+            RNA_property_pointer_set(&ptr, target_prop, value, nullptr);
+            RNA_property_update(&C, &ptr, target_prop);
+          });
+      item.set_is_active_fn(
+          [active_id, ima_ptr]() { return active_id != nullptr && &ima_ptr->id == active_id; });
     }
   }
 };
@@ -385,11 +388,8 @@ static void image_browser_popover_draw(const bContext *C, Panel *panel)
   build_image_grid(*C, layout);
 }
 
-void image_browser_add_popover_button(Layout &row,
-                                      const bContext *C,
-                                      PointerRNA *ptr,
-                                      const char *propname,
-                                      Material *material)
+void image_browser_add_popover_button(
+    Layout &row, const bContext *C, PointerRNA *ptr, const char *propname, Material *material)
 {
   image_browser_popover_register();
 
@@ -418,7 +418,6 @@ void uiTemplateImageBrowse(Layout *layout,
                            PointerRNA *ptr,
                            const char *propname,
                            Material *material,
-                           int /*slot_type*/,
                            const char *newop,
                            const char *openop,
                            const char *unlinkop)

@@ -363,7 +363,7 @@ static void node_shader_buts_tex_image(ui::Layout &layout, bContext *C, PointerR
 
   layout.context_ptr_set("image_user", &iuserptr);
 
-  /* Get material and slot type for filtering. */
+  /* Get material for filtering. */
   Material *mat = nullptr;
   {
     PointerRNA mat_ptr = CTX_data_pointer_get(C, "material");
@@ -371,8 +371,6 @@ static void node_shader_buts_tex_image(ui::Layout &layout, bContext *C, PointerR
       mat = static_cast<Material *>(mat_ptr.data);
     }
   }
-  bNode *node = (bNode *)ptr->data;
-  NodeTexImage *storage = (NodeTexImage *)node->storage;
 
   const Object *ob = CTX_data_active_object(C);
   Scene *scene = CTX_data_scene(C);
@@ -381,15 +379,8 @@ static void node_shader_buts_tex_image(ui::Layout &layout, bContext *C, PointerR
     BKE_texpaint_slot_refresh_cache(scene, mat, ob);
   }
 
-  ui::uiTemplateImageBrowse(&layout,
-                            C,
-                            ptr,
-                            "image",
-                            mat,
-                            storage->paint_slot_type,
-                            "IMAGE_OT_new",
-                            "IMAGE_OT_open",
-                            nullptr);
+  ui::uiTemplateImageBrowse(
+      &layout, C, ptr, "image", mat, "IMAGE_OT_new", "IMAGE_OT_open", nullptr);
 
   layout.prop(ptr, "interpolation", DEFAULT_FLAGS, "", ICON_NONE);
   layout.prop(ptr, "projection", DEFAULT_FLAGS, "", ICON_NONE);

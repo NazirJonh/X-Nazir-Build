@@ -58,6 +58,7 @@
 #include "DEG_depsgraph.hh"
 
 #include "WM_api.hh"
+#include "WM_message.hh"
 #include "WM_types.hh"
 
 #include "ED_screen.hh"
@@ -177,6 +178,54 @@ int active_update_and_get(bContext *C, Object &ob, const float mval[2])
   }
 
   return active_face_set_get(ob);
+}
+
+void sample_face_set_color_at_active(const Object &object, Brush &brush)
+{
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  if (!mesh.attributes().contains(".sculpt_face_set")) {
+    return;
+  }
+
+  const int sampled_id = active_face_set_get(object);
+
+  uchar sampled_color_ub[4];
+  BKE_paint_face_set_overlay_color_get(
+      sampled_id, mesh.face_sets_color_seed, sampled_color_ub, &mesh);
+  const float sampled_color_fl[3] = {sampled_color_ub[0] / 255.0f,
+                                     sampled_color_ub[1] / 255.0f,
+                                     sampled_color_ub[2] / 255.0f};
+
+  /* Clear explicit ID so color/sampled ID take priority over texture-panel assignment. */
+  brush.face_set_id = 0;
+  brush.face_set_draw_mode = SCULPT_FACE_SET_DRAW_MODE_COLOR;
+  brush_face_set_color_set(&brush, sampled_color_fl);
+  brush.face_set_sample_id = sampled_id;
+
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, &brush);
+}
+
+bool sample_face_set_color_at_cursor(bContext *C, Object &object, Brush &brush, const float mval[2])
+{
+  if (!object.runtime->sculpt_session) {
+    return false;
+  }
+
+  CursorGeometryInfo gi;
+  if (!cursor_geometry_info_update(C, &gi, float2(mval[0], mval[1]), false)) {
+    return false;
+  }
+
+  sample_face_set_color_at_active(object, brush);
+
+  /* Notify message-bus subscribers that the brush color changed. The unified Face Set color UI
+   * mirrors the active brush color into a WindowManager property through such a subscription, so
+   * without this its swatch keeps showing the previous color after sampling. A plain RNA set via
+   * #brush_face_set_color_set does not publish to the message bus on its own. */
+  if (wmMsgBus *mbus = CTX_wm_message_bus(C)) {
+    WM_msg_publish_rna_prop(mbus, &brush.id, &brush, Brush, face_set_color);
+  }
+  return true;
 }
 
 bool create_face_sets_mesh(Object &object)
@@ -2414,7 +2463,9 @@ static wmOperatorStatus sample_face_set_id_modal(bContext *C,
     const float mval[2] = {float(event->xy[0] - region->winrct.xmin),
                              float(event->xy[1] - region->winrct.ymin)};
 
-    const int sampled_id = active_update_and_get(C, *ob_ptr, mval);
+    Paint *paint = BKE_paint_get_active_from_context(C);
+    Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+    const bool sampled = brush && sample_face_set_color_at_cursor(C, *ob_ptr, *brush, mval);
 
     CTX_wm_area_set(C, prev_area);
     CTX_wm_region_set(C, prev_region);
@@ -2422,32 +2473,9 @@ static wmOperatorStatus sample_face_set_id_modal(bContext *C,
     WM_cursor_modal_restore(win);
     ED_workspace_status_text(C, nullptr);
 
-    if (sampled_id == face_set_none_id) {
+    if (!sampled) {
       return OPERATOR_CANCELLED;
     }
-
-    Paint *paint = BKE_paint_get_active_from_context(C);
-    if (!paint) {
-      return OPERATOR_CANCELLED;
-    }
-    Brush *brush = BKE_paint_brush(paint);
-    if (!brush) {
-      return OPERATOR_CANCELLED;
-    }
-    /* Sample the display color so the color swatch updates and the next stroke
-     * targets this face set by its sampled color. Clear face_set_id so it does
-     * not take priority over the color-based painting path in the brush stroke. */
-    const Mesh &mesh = *id_cast<const Mesh *>(ob_ptr->data);
-    uchar sampled_color_ub[4];
-    BKE_paint_face_set_overlay_color_get(
-        sampled_id, mesh.face_sets_color_seed, sampled_color_ub, &mesh);
-    const float sampled_color_fl[3] = {sampled_color_ub[0] / 255.0f,
-                                       sampled_color_ub[1] / 255.0f,
-                                       sampled_color_ub[2] / 255.0f};
-    brush_face_set_color_set(brush, sampled_color_fl);
-    brush->face_set_sample_id = sampled_id;
-    brush->face_set_draw_mode = SCULPT_FACE_SET_DRAW_MODE_COLOR;
-    brush->face_set_id = 0;
 
     WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
     return OPERATOR_FINISHED;

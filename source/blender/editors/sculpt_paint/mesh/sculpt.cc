@@ -3369,6 +3369,14 @@ static void do_brush_action(const Depsgraph &depsgraph,
   const bool use_pixels = sculpt_needs_pbvh_pixels(brush, ob);
   const bool write_face_sets = (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
 
+  /* Ctrl+LMB samples color from the face under the cursor; it does not need brush nodes. */
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      ss.cache->toggle_settings.invert)
+  {
+    face_set::sample_face_set_color_at_active(ob, *BKE_paint_brush(&sd.paint));
+    return;
+  }
+
   if (sculpt_needs_pbvh_pixels(brush, ob)) {
     sculpt_pbvh_update_pixels(depsgraph, ob);
 
@@ -6118,11 +6126,31 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  stroke = MEM_new<SculptPaintStroke>(__func__, C, op, event->type);
-  brush_stroke_init(C, op);
-
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   Brush &brush = *BKE_paint_brush(&sd.paint);
+
+  /* Ctrl+LMB samples a face set color without starting a sculpt stroke.
+   * A regular stroke never reaches sampling because #PaintStroke::add_step aborts when
+   * #PaintRuntime.last_hit is false, which is common for zero-strength sampling clicks. */
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      BrushStrokeMode(RNA_enum_get(op->ptr, "mode")) == BrushStrokeMode::Invert)
+  {
+    face_set_overlay_check(*C, *op);
+    if (!CTX_wm_region_view3d(C)) {
+      return OPERATOR_CANCELLED;
+    }
+    const ARegion *region = CTX_wm_region(C);
+    const float mval[2] = {float(event->xy[0] - region->winrct.xmin),
+                             float(event->xy[1] - region->winrct.ymin)};
+    if (face_set::sample_face_set_color_at_cursor(C, ob, brush, mval)) {
+      WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, &brush);
+      return OPERATOR_FINISHED;
+    }
+    return OPERATOR_CANCELLED;
+  }
+
+  stroke = MEM_new<SculptPaintStroke>(__func__, C, op, event->type);
+  brush_stroke_init(C, op);
 
   if (brush_type_is_paint(brush.sculpt_brush_type) &&
       !color_supported_check(scene, ob, op->reports))
@@ -6196,20 +6224,6 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
       MEM_delete(stroke);
     }
     return retval;
-  }
-
-  /* Draw Face Sets: after a sampling stroke (Ctrl+LMB), finish immediately.
-   * The modal handler must not be added so mouse drag cannot accidentally paint. */
-  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
-      BrushStrokeMode(RNA_enum_get(op->ptr, "mode")) == BrushStrokeMode::Invert)
-  {
-    SculptPaintStroke *s = static_cast<SculptPaintStroke *>(op->customdata);
-    if (s) {
-      s->finish(C);
-      MEM_delete(s);
-      op->customdata = nullptr;
-    }
-    return OPERATOR_FINISHED;
   }
 
   /* Add modal handler. */

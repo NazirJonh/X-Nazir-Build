@@ -2502,6 +2502,7 @@ def _sync_unified_colors_to_brushes(wm):
 
 def _on_brush_face_set_color_changed():
     """Mirror active brush colors into WM storage and propagate to all brushes."""
+    global _face_set_unified_sync_guard
     try:
         wm = bpy.context.window_manager
     except (AttributeError, RuntimeError):
@@ -2522,6 +2523,7 @@ def _on_brush_face_set_color_changed():
 
 def _on_active_sculpt_brush_changed():
     """After switching sculpt brushes, apply stored unified colors to the new active brush."""
+    global _face_set_unified_sync_guard
     try:
         wm = bpy.context.window_manager
         sculpt = bpy.context.tool_settings.sculpt
@@ -2554,12 +2556,14 @@ def _register_face_set_unified_color_sync():
         bpy.msgbus.subscribe_rna(
             key=(bpy.types.Brush, prop_name),
             owner=_face_set_unified_sync_owner,
+            args=(),
             notify=_on_brush_face_set_color_changed,
             options={'PERSISTENT'},
         )
     bpy.msgbus.subscribe_rna(
         key=(bpy.types.Sculpt, "brush"),
         owner=_face_set_unified_sync_owner,
+        args=(),
         notify=_on_active_sculpt_brush_changed,
         options={'PERSISTENT'},
     )
@@ -2570,6 +2574,7 @@ def _unregister_face_set_unified_color_sync():
 
 
 def _wm_unified_face_set_colors_value_update(self, _context):
+    global _face_set_unified_sync_guard
     if _face_set_unified_sync_guard:
         return
     if not self.use_unified_face_set_color:
@@ -2581,6 +2586,7 @@ def _wm_unified_face_set_colors_value_update(self, _context):
 
 
 def _wm_unified_face_set_color_toggle_update(self, _context):
+    global _face_set_unified_sync_guard
     if _face_set_unified_sync_guard:
         return
     if not self.use_unified_face_set_color:

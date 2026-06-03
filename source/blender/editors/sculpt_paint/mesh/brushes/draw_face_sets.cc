@@ -461,38 +461,6 @@ static void do_draw_face_sets_brush_bmesh(const Depsgraph &depsgraph,
 }  // namespace draw_face_sets_cc
 
 /**
- * Sample the Face Set under the cursor and update the brush's active color and ID.
- * Called from the invert (Ctrl+LMB) branch; does not paint anything.
- */
-static void sample_face_set_color(const Object &object, Brush &brush)
-{
-  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
-  if (!mesh.attributes().contains(".sculpt_face_set")) {
-    return;
-  }
-
-  const int sampled_id = face_set::active_face_set_get(object);
-
-  /* BKE_paint_face_set_overlay_color_get handles all IDs including 0 (returns grey).
-   * Convert to float for storage in the brush color field. */
-  uchar sampled_color_ub[4];
-  BKE_paint_face_set_overlay_color_get(
-      sampled_id, mesh.face_sets_color_seed, sampled_color_ub, &mesh);
-  float sampled_color_fl[3];
-  sampled_color_fl[0] = sampled_color_ub[0] / 255.0f;
-  sampled_color_fl[1] = sampled_color_ub[1] / 255.0f;
-  sampled_color_fl[2] = sampled_color_ub[2] / 255.0f;
-
-  face_set::brush_face_set_color_set(&brush, sampled_color_fl);
-  brush.face_set_sample_id = sampled_id;
-
-  /* Switch to Custom mode so the sampled ID is used on the next stroke. */
-  brush.face_set_draw_mode = SCULPT_FACE_SET_DRAW_MODE_COLOR;
-
-  WM_main_add_notifier(NC_BRUSH | NA_EDITED, &brush);
-}
-
-/**
  * Determine the face set ID to paint with and write it into the stroke cache.
  * For Custom mode, prefers the previously sampled `face_set_sample_id` (set via Ctrl+LMB)
  * over the lossy color→ID reverse lookup, so painting with a sampled face set is exact.
@@ -538,11 +506,6 @@ void do_draw_face_sets_brush(const Depsgraph &depsgraph,
     if (brush.face_set_id > 0) {
       /* Use explicitly assigned Face Set ID from brush settings (set via texture panel eyedropper). */
       cache.paint_face_set = brush.face_set_id;
-    }
-    else if (cache.toggle_settings.invert) {
-      /* Ctrl+LMB: sample the Face Set color under the cursor, then return without painting. */
-      sample_face_set_color(object, brush);
-      return;
     }
     else {
       resolve_paint_face_set(cache, object, brush);

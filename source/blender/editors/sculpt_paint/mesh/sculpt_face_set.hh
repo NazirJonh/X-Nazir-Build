@@ -38,6 +38,13 @@ int active_face_set_get(const Object &object);
  * definition, a vertex can be associated to more than a single face set. */
 int vert_face_set_max_get(GroupedSpan<int> vert_to_face_map, Span<int> face_sets, int vert);
 int active_update_and_get(bContext *C, Object &ob, const float mval[2]);
+
+/** Sample the face set under the cursor into brush color and #face_set_sample_id. */
+void sample_face_set_color_at_active(const Object &object, Brush &brush);
+
+/** Update cursor picking and sample the face set color at \a mval. Returns false on miss. */
+bool sample_face_set_color_at_cursor(bContext *C, Object &object, Brush &brush, const float mval[2]);
+
 int vert_face_set_get(GroupedSpan<int> vert_to_face_map, Span<int> face_sets, int vert);
 int vert_face_set_get(const SubdivCCG &subdiv_ccg, Span<int> face_sets, int grid);
 int vert_face_set_max_get(int face_set_offset, const BMVert &vert);

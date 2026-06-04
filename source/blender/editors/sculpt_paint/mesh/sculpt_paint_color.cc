@@ -27,6 +27,10 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 
+#include "BLT_translation.hh"
+
+#include "ED_mesh.hh"
+
 #include "IMB_colormanagement.hh"
 
 #include "mesh_brush_common.hh"
@@ -249,6 +253,14 @@ bke::GSpanAttributeWriter active_color_attribute_for_write(Mesh &mesh)
     return {};
   }
   return colors;
+}
+
+bke::GSpanAttributeWriter ensure_active_color_attribute_for_write(Mesh &mesh)
+{
+  if (!active_color_attribute(mesh)) {
+    ED_mesh_color_ensure(&mesh, DATA_("Color"));
+  }
+  return active_color_attribute_for_write(mesh);
 }
 
 struct ColorPaintLocalData {

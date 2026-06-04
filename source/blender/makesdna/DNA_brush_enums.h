@@ -418,6 +418,8 @@ enum eBrushTextureDataMode {
   BRUSH_TEXTURE_DATA_MODE_NONE = 0,
   /** Sample texture to determine Face Set ID assignment (binary threshold mode). */
   BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE = 1,
+  /** Sample RGB texture per face to assign Face Set IDs (alpha mtex = mask). */
+  BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE = 2,
 };
 ENUM_OPERATORS(eBrushFlags2)
 

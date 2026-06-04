@@ -2953,6 +2953,74 @@ void BKE_paint_face_set_custom_colors_clear(Mesh *mesh)
   mesh->face_set_colors_num = 0;
 }
 
+void BKE_paint_face_set_quantize_color(const float color[3], float r_quant[3])
+{
+  uchar ub[3];
+  for (int i = 0; i < 3; i++) {
+    ub[i] = unit_float_to_uchar_clamp(color[i]);
+  }
+  rgb_uchar_to_float(r_quant, ub);
+}
+
+/** Channels weaker than this fraction of the strongest channel are treated as fringe. */
+static constexpr float face_set_texture_color_chroma_ratio = 0.35f;
+/** Below this peak value the sample is treated as color-map background. */
+static constexpr float face_set_texture_color_min_luminance = 0.02f;
+
+void BKE_paint_face_set_snap_texture_sample_color(const float color[3], float r_snapped[3])
+{
+  const float max_c = max_fff(color[0], color[1], color[2]);
+  if (max_c < face_set_texture_color_min_luminance) {
+    zero_v3(r_snapped);
+    return;
+  }
+
+  float max_kept = 0.0f;
+  for (int i = 0; i < 3; i++) {
+    const float kept = (color[i] >= max_c * face_set_texture_color_chroma_ratio) ? color[i] : 0.0f;
+    r_snapped[i] = kept;
+    max_kept = max_ff(max_kept, kept);
+  }
+
+  if (max_kept > 1e-6f) {
+    mul_v3_fl(r_snapped, 1.0f / max_kept);
+    return;
+  }
+
+  /* Near-gray fringe: keep a single dominant channel. */
+  zero_v3(r_snapped);
+  if (color[0] >= color[1]) {
+    r_snapped[color[0] >= color[2] ? 0 : 2] = 1.0f;
+  }
+  else {
+    r_snapped[color[1] >= color[2] ? 1 : 2] = 1.0f;
+  }
+}
+
+void BKE_paint_face_set_quantize_texture_color(const float color[3], float r_quant[3])
+{
+  float snapped[3];
+  BKE_paint_face_set_snap_texture_sample_color(color, snapped);
+  BKE_paint_face_set_quantize_color(snapped, r_quant);
+}
+
+uint32_t BKE_paint_face_set_quantize_color_pack(const float color[3])
+{
+  float quant[3];
+  BKE_paint_face_set_quantize_color(color, quant);
+  const uint32_t r = uint32_t(unit_float_to_uchar_clamp(quant[0]));
+  const uint32_t g = uint32_t(unit_float_to_uchar_clamp(quant[1])) << 8;
+  const uint32_t b = uint32_t(unit_float_to_uchar_clamp(quant[2])) << 16;
+  return r | g | b;
+}
+
+uint32_t BKE_paint_face_set_quantize_texture_color_pack(const float color[3])
+{
+  float quant[3];
+  BKE_paint_face_set_quantize_texture_color(color, quant);
+  return BKE_paint_face_set_quantize_color_pack(quant);
+}
+
 int BKE_paint_face_set_find_by_custom_color(const Mesh *mesh, const float color[3])
 {
   if (!mesh || mesh->face_set_colors_num == 0) {

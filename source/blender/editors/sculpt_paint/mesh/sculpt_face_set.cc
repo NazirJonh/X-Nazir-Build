@@ -8,7 +8,9 @@
 #include "sculpt_face_set.hh"
 
 #include "BLI_task.h"
+#include "DNA_brush_enums.h"
 #include "DNA_brush_types.h"
+
 #include "sculpt_automask.hh"
 #include "sculpt_color.hh"
 
@@ -24,6 +26,8 @@
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_hash.h"
+#include "BLI_map.hh"
+#include "BLI_math_color.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
@@ -34,12 +38,13 @@
 
 #include "BLT_translation.hh"
 
-#include "DNA_brush_types.h"
 #include "DNA_customdata_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_texture_types.h"
 
 #include "BKE_attribute.hh"
+#include "BKE_brush.hh"
 #include "BKE_ccg.hh"
 #include "BKE_context.hh"
 #include "BKE_customdata.hh"
@@ -54,6 +59,7 @@
 #include "BKE_paint_types.hh"
 #include "BKE_screen.hh"
 #include "BKE_subdiv_ccg.hh"
+#include "BKE_texture.h"
 
 #include "DEG_depsgraph.hh"
 
@@ -2505,6 +2511,250 @@ void SCULPT_OT_sample_face_set_id(wmOperatorType *ot)
 
 /** \} */
 
+void sync_face_set_color_mtex_mapping_from_mask(Brush &brush)
+{
+  if (brush.texture_data_mode != BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE) {
+    return;
+  }
+
+  const MTex &mask_mtex = *BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
+  MTex &color_mtex = brush.face_set_color_mtex;
+
+  color_mtex.brush_map_mode = mask_mtex.brush_map_mode;
+  copy_v3_v3(color_mtex.ofs, mask_mtex.ofs);
+  copy_v3_v3(color_mtex.size, mask_mtex.size);
+  color_mtex.rot = mask_mtex.rot;
+  color_mtex.brush_angle_mode = mask_mtex.brush_angle_mode;
+  color_mtex.random_angle = mask_mtex.random_angle;
+}
+
+void FaceSetColorStrokeCache::clear()
+{
+  enabled = false;
+  color_mtex = nullptr;
+  mesh_color_to_id.clear();
+  stroke_color_to_id.clear();
+  mesh_geometry_tagged = false;
+  next_face_set_id = 0;
+}
+
+void FaceSetColorStrokeCache::preload_mesh_colors(const Mesh &mesh)
+{
+  mesh_color_to_id.clear();
+  for (const int i : IndexRange(mesh.face_set_colors_num)) {
+    const FaceSetColor &entry = mesh.face_set_colors[i];
+    float quant[3];
+    BKE_paint_face_set_quantize_color(entry.color, quant);
+    const uint32_t key = BKE_paint_face_set_quantize_color_pack(quant);
+    mesh_color_to_id.add_overwrite(key, entry.face_set_id);
+  }
+}
+
+int FaceSetColorStrokeCache::ensure_face_set_id_for_quant_color(Object &object,
+                                                                const float quant[3])
+{
+  const uint32_t key = BKE_paint_face_set_quantize_color_pack(quant);
+  if (const int *found = stroke_color_to_id.lookup_ptr(key)) {
+    return *found;
+  }
+  if (const int *found = mesh_color_to_id.lookup_ptr(key)) {
+    stroke_color_to_id.add(key, *found);
+    return *found;
+  }
+
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const int existing = BKE_paint_face_set_find_by_custom_color(&mesh, quant);
+  if (existing > 0) {
+    stroke_color_to_id.add(key, existing);
+    mesh_color_to_id.add_overwrite(key, existing);
+    return existing;
+  }
+
+  if (next_face_set_id <= 0) {
+    next_face_set_id = find_next_available_id(mesh);
+  }
+  const int new_id = next_face_set_id++;
+  BKE_paint_face_set_custom_color_set(&mesh, new_id, quant);
+  stroke_color_to_id.add(key, new_id);
+  mesh_color_to_id.add_overwrite(key, new_id);
+  mesh_geometry_tagged = true;
+  return new_id;
+}
+
+void apply_color_face_quant_writes(Object &object,
+                                   FaceSetColorStrokeCache &cache,
+                                   const Span<ColorFaceQuantWrite> writes,
+                                   const MutableSpan<int> face_sets)
+{
+  Map<uint32_t, int> resolved;
+  for (const ColorFaceQuantWrite &write : writes) {
+    const uint32_t key = BKE_paint_face_set_quantize_color_pack(write.quant);
+    const int *found = resolved.lookup_ptr(key);
+    const int id = found ? *found : cache.ensure_face_set_id_for_quant_color(object, write.quant);
+    if (!found) {
+      resolved.add(key, id);
+    }
+    face_sets[write.face_index] = id;
+  }
+}
+
+void face_set_color_deferred_geometry_update(Object &object, FaceSetColorStrokeCache &cache)
+{
+  if (!cache.mesh_geometry_tagged) {
+    return;
+  }
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+  cache.mesh_geometry_tagged = false;
+}
+
+void face_set_color_stroke_cache_init(StrokeCache &cache, const Brush &brush, const Mesh &mesh)
+{
+  if (!cache.face_set_color_cache) {
+    cache.face_set_color_cache = std::make_unique<FaceSetColorStrokeCache>();
+  }
+  FaceSetColorStrokeCache &fcache = *cache.face_set_color_cache;
+  if (fcache.enabled &&
+      fcache.color_mtex == BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT))
+  {
+    fcache.preload_mesh_colors(mesh);
+    if (fcache.next_face_set_id <= 0) {
+      fcache.next_face_set_id = find_next_available_id(mesh);
+    }
+    return;
+  }
+  fcache.clear();
+  fcache.color_mtex = BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT);
+  if (!fcache.color_mtex->tex) {
+    fcache.enabled = false;
+    return;
+  }
+  fcache.enabled = true;
+  fcache.preload_mesh_colors(mesh);
+  fcache.next_face_set_id = find_next_available_id(mesh);
+}
+
+void face_set_color_stroke_cache_clear(StrokeCache &cache)
+{
+  cache.face_set_color_cache.reset();
+}
+
+FaceSetColorStrokeCache *face_set_color_stroke_cache_get(StrokeCache &cache)
+{
+  return cache.face_set_color_cache.get();
+}
+
+FaceSetColorStrokeCache *face_set_color_stroke_cache_ensure(StrokeCache &cache,
+                                                              const Brush &brush,
+                                                              const Mesh &mesh)
+{
+  if (!BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT)->tex) {
+    return nullptr;
+  }
+  FaceSetColorStrokeCache *fcache = face_set_color_stroke_cache_get(cache);
+  if (fcache && fcache->enabled) {
+    return fcache;
+  }
+  face_set_color_stroke_cache_init(cache, brush, mesh);
+  fcache = face_set_color_stroke_cache_get(cache);
+  return fcache;
+}
+
+static bool is_face_set_color_background(const float rgb[3])
+{
+  float quant[3];
+  BKE_paint_face_set_quantize_texture_color(rgb, quant);
+  return quant[0] == 0.0f && quant[1] == 0.0f && quant[2] == 0.0f;
+}
+
+static bool sample_face_color_rgb_at_point(const SculptSession &ss,
+                                           const Brush &brush,
+                                           const float3 &sample_point,
+                                           const int thread_id,
+                                           float r_rgb[3])
+{
+  if (!sculpt_sample_face_set_color_texture(
+          ss, brush, sample_point, thread_id, r_rgb))
+  {
+    return false;
+  }
+  return !is_face_set_color_background(r_rgb);
+}
+
+static bool sample_face_color_rgb(SculptSession &ss,
+                                  const Brush &brush,
+                                  const OffsetIndices<int> faces,
+                                  const Span<int> corner_verts,
+                                  const Span<float3> positions_eval,
+                                  const int face_index,
+                                  const float3 &sample_point,
+                                  const int thread_id,
+                                  float r_rgb[3])
+{
+  const IndexRange face_corners = faces[face_index];
+  float best_rgb[3];
+  float best_weight = -1.0f;
+  bool found = false;
+
+  auto try_point = [&](const float3 &point) {
+    float point_rgb[3];
+    if (!sample_face_color_rgb_at_point(ss, brush, point, thread_id, point_rgb)) {
+      return;
+    }
+    const float weight = max_fff(point_rgb[0], point_rgb[1], point_rgb[2]);
+    if (weight > best_weight) {
+      best_weight = weight;
+      copy_v3_v3(best_rgb, point_rgb);
+      found = true;
+    }
+  };
+
+  try_point(sample_point);
+  for (const int corner : face_corners) {
+    try_point(positions_eval[corner_verts[corner]]);
+  }
+
+  if (found) {
+    copy_v3_v3(r_rgb, best_rgb);
+    return true;
+  }
+
+  return false;
+}
+
+bool sample_face_color_for_face(SculptSession &ss,
+                                const Brush &brush,
+                                const OffsetIndices<int> faces,
+                                const Span<int> corner_verts,
+                                const Span<float3> positions_eval,
+                                const int face_index,
+                                const float3 &sample_point,
+                                const int thread_id,
+                                float r_quant[3])
+{
+  float rgb[3];
+  if (!sample_face_color_rgb(ss,
+                             brush,
+                             faces,
+                             corner_verts,
+                             positions_eval,
+                             face_index,
+                             sample_point,
+                             thread_id,
+                             rgb))
+  {
+    return false;
+  }
+
+  BKE_paint_face_set_quantize_texture_color(rgb, r_quant);
+
+  /* Black (after snap + 8-bit quantize) is the color-map background. */
+  if (is_face_set_color_background(rgb)) {
+    return false;
+  }
+  return true;
+}
+
 float sample_face_texture_avg(SculptSession &ss,
                               const Brush &brush,
                               const Span<float3> positions_eval,
@@ -2556,6 +2806,56 @@ float sample_face_texture_avg(SculptSession &ss,
   return (num_verts > 0) ? (sum / float(num_verts)) : 0.0f;
 }
 
+static void write_face_color_map_to_vertex_colors(SculptSession &ss,
+                                                  const Brush &brush,
+                                                  const OffsetIndices<int> faces,
+                                                  const Span<int> corner_verts,
+                                                  const GroupedSpan<int> vert_to_face_map,
+                                                  const Span<float3> positions_eval,
+                                                  const Span<int> face_indices,
+                                                  const Span<float> factors,
+                                                  bke::GSpanAttributeWriter &color_attribute,
+                                                  const int thread_id)
+{
+  for (const int i_face : face_indices.index_range()) {
+    if (factors[i_face] <= FACE_SET_MIN_FADE) {
+      continue;
+    }
+    const int face_index = face_indices[i_face];
+    for (const int corner : faces[face_index]) {
+      const int vert_index = corner_verts[corner];
+      float rgb[3];
+      if (!sculpt_sample_face_set_color_texture(
+              ss, brush, positions_eval[vert_index], thread_id, rgb))
+      {
+        continue;
+      }
+      float4 col = color::color_vert_get(faces,
+                                          corner_verts,
+                                          vert_to_face_map,
+                                          color_attribute.span,
+                                          color_attribute.domain,
+                                          vert_index);
+      if (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) {
+        const float luma = (rgb[0] + rgb[1] + rgb[2]) / 3.0f;
+        col[brush.vcol_channel] = (luma > brush.texture_threshold) ? 1.0f : 0.0f;
+      }
+      else {
+        col.x = rgb[0];
+        col.y = rgb[1];
+        col.z = rgb[2];
+      }
+      color::color_vert_set(faces,
+                            corner_verts,
+                            vert_to_face_map,
+                            color_attribute.domain,
+                            vert_index,
+                            col,
+                            color_attribute.span);
+    }
+  }
+}
+
 void apply_from_texture(const Depsgraph &depsgraph,
                         Object &object,
                         const Brush &brush,
@@ -2579,30 +2879,19 @@ void apply_from_texture(const Depsgraph &depsgraph,
   const Span<int> corner_verts = mesh.corner_verts();
   const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
 
-  /* Record undo state before any modifications so the step can be fully reversed.
-   * Flags must match exactly what will be written below. */
-  {
-    undo::NodeDataFlag undo_flags{};
-    if (write_face_sets) {
-      undo_flags |= undo::NodeDataFlag::FaceSet;
-    }
-    if (brush.write_vcol) {
-      undo_flags |= undo::NodeDataFlag::Color;
-    }
-    if (undo_flags != undo::NodeDataFlag{}) {
-      undo::push_nodes(depsgraph, object, node_mask, undo_flags);
-    }
+  bke::GSpanAttributeWriter color_attribute;
+  if (brush.write_vcol) {
+    color_attribute = color::ensure_active_color_attribute_for_write(mesh);
   }
+
+  /* Undo nodes (Position/FaceSet/Color) are pushed once by #push_undo_nodes in #do_brush_action
+   * with the same node mask, before this function runs. Pushing again here with a partial flag set
+   * would register nodes inconsistently within the step and corrupt position undo restoration. */
 
   /* Ensure the Face Sets attribute exists before querying IDs when writing them. */
   bke::SpanAttributeWriter<int> face_sets;
   if (write_face_sets) {
     face_sets = ensure_face_sets_mesh(mesh);
-  }
-
-  bke::GSpanAttributeWriter color_attribute;
-  if (brush.write_vcol) {
-    color_attribute = color::active_color_attribute_for_write(mesh);
   }
 
   /* Initialize paint_face_set if not set (first step of the stroke). */
@@ -2709,6 +2998,172 @@ void apply_from_texture(const Depsgraph &depsgraph,
         }
       },
       exec_mode::grain_size(1));
+
+  if (face_sets) {
+    pbvh.tag_face_sets_changed(node_mask);
+    face_sets.finish();
+  }
+
+  if (color_attribute) {
+    pbvh.tag_attribute_changed(node_mask, mesh.active_color_attribute);
+    color_attribute.finish();
+  }
+}
+
+void apply_from_color_texture(const Depsgraph &depsgraph,
+                              Object &object,
+                              const Brush &brush,
+                              const IndexMask &node_mask)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  if (!ss.cache) {
+    return;
+  }
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+
+  const StrokeCache &cache = *ss.cache;
+  const bool write_face_sets = (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
+  const bool write_vcol = brush.write_vcol;
+  if (!write_face_sets && !write_vcol) {
+    return;
+  }
+
+  FaceSetColorStrokeCache *color_cache = nullptr;
+  if (write_face_sets) {
+    color_cache = face_set_color_stroke_cache_ensure(*ss.cache, brush, mesh);
+    if (!color_cache || !color_cache->enabled) {
+      return;
+    }
+  }
+
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  if (pbvh.type() != bke::pbvh::Type::Mesh) {
+    return;
+  }
+
+  if (const MTex *color_mtex = BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT)) {
+    if (color_mtex->tex != nullptr && ss.tex_pool != nullptr) {
+      BKE_texture_fetch_images_for_pool(color_mtex->tex, ss.tex_pool);
+    }
+  }
+
+  const Span<float3> positions_eval = bke::pbvh::vert_positions_eval(depsgraph, object);
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+
+  bke::GSpanAttributeWriter color_attribute;
+  if (write_vcol) {
+    color_attribute = color::ensure_active_color_attribute_for_write(mesh);
+  }
+
+  /* Undo nodes (Position/FaceSet/Color) are pushed once by #push_undo_nodes in #do_brush_action
+   * with the same node mask, before this function runs. Pushing again here with a partial flag set
+   * would register nodes inconsistently within the step and corrupt position undo restoration. */
+
+  bke::SpanAttributeWriter<int> face_sets;
+  if (write_face_sets) {
+    face_sets = ensure_face_sets_mesh(mesh);
+  }
+
+  MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+
+  threading::EnumerableThreadSpecific<Vector<ColorFaceQuantWrite>> pending_writes;
+
+  node_mask.foreach_index(
+      [&](const int i) {
+        const Span<int> face_indices = nodes[i].faces();
+        if (face_indices.is_empty()) {
+          return;
+        }
+
+        Vector<float3> face_centers(face_indices.size());
+        calc_face_centers(faces, corner_verts, positions_eval, face_indices, face_centers);
+
+        Vector<float3> face_normals(face_indices.size());
+        for (const int i_face : face_indices.index_range()) {
+          face_normals[i_face] = bke::mesh::face_normal_calc(
+              positions_eval, corner_verts.slice(faces[face_indices[i_face]]));
+        }
+
+        Vector<float> factors(face_indices.size(), 1.0f);
+        fill_factor_from_hide_and_mask(mesh, face_indices, factors);
+
+        filter_region_clip_factors(ss, face_centers, factors);
+        if (brush.flag & BRUSH_FRONTFACE) {
+          calc_front_face(cache.view_normal_symm, face_normals, factors);
+        }
+
+        Vector<float> distances(face_indices.size());
+        calc_brush_distances(ss, face_centers, eBrushFalloffShape(brush.falloff_shape), distances);
+        filter_distances_with_radius(cache.radius, distances, factors);
+        apply_hardness_to_distances(cache, distances);
+        calc_brush_strength_factors(cache, brush, distances, factors);
+
+        if (cache.automasking) {
+          auto_mask::calc_face_factors(depsgraph,
+                                       object,
+                                       faces,
+                                       corner_verts,
+                                       *cache.automasking,
+                                       nodes[i],
+                                       face_indices,
+                                       factors);
+        }
+
+        /* Color map defines valid regions (non-black samples); skip brush alpha mask here. */
+        const int thread_id = BLI_task_parallel_thread_id(nullptr);
+
+        if (write_face_sets) {
+          Vector<ColorFaceQuantWrite> &writes = pending_writes.local();
+          for (const int i_face : face_indices.index_range()) {
+            if (factors[i_face] <= FACE_SET_MIN_FADE) {
+              continue;
+            }
+            float quant[3];
+            if (!sample_face_color_for_face(ss,
+                                            brush,
+                                            faces,
+                                            corner_verts,
+                                            positions_eval,
+                                            face_indices[i_face],
+                                            face_centers[i_face],
+                                            thread_id,
+                                            quant))
+            {
+              continue;
+            }
+            ColorFaceQuantWrite write;
+            write.face_index = face_indices[i_face];
+            copy_v3_v3(write.quant, quant);
+            writes.append(write);
+          }
+        }
+
+        if (write_vcol && color_attribute) {
+          write_face_color_map_to_vertex_colors(ss,
+                                                brush,
+                                                faces,
+                                                corner_verts,
+                                                vert_to_face_map,
+                                                positions_eval,
+                                                face_indices,
+                                                factors,
+                                                color_attribute,
+                                                thread_id);
+        }
+      },
+      exec_mode::grain_size(1));
+
+  if (write_face_sets) {
+    for (Vector<ColorFaceQuantWrite> &writes : pending_writes) {
+      if (!writes.is_empty()) {
+        apply_color_face_quant_writes(object, *color_cache, writes, face_sets.span);
+        writes.clear();
+      }
+    }
+    face_set_color_deferred_geometry_update(object, *color_cache);
+  }
 
   if (face_sets) {
     pbvh.tag_face_sets_changed(node_mask);

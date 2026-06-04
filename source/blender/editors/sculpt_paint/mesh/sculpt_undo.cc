@@ -1191,7 +1191,7 @@ static void restore_block_mask(Object &object,
                                SculptSession &ss,
                                bke::pbvh::Tree &pbvh,
                                StepData &step_data,
-                               Depsgraph *depsgraph,
+                               Depsgraph * /*depsgraph*/,
                                IndexMaskMemory &memory)
 {
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
@@ -1558,10 +1558,14 @@ static void store_mask_grids(const SubdivCCG &subdiv_ccg, Node &unode)
 static void store_color(const Mesh &mesh, const bke::pbvh::MeshNode &node, Node &unode)
 {
   PRF_scope(ProfileCategory::Editor);
+  const bke::GAttributeReader color_attribute = color::active_color_attribute(mesh);
+  if (!color_attribute) {
+    return;
+  }
+
   const OffsetIndices<int> faces = mesh.faces();
   const Span<int> corner_verts = mesh.corner_verts();
   const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
-  const bke::GAttributeReader color_attribute = color::active_color_attribute(mesh);
   const GVArraySpan colors(*color_attribute);
 
   /* NOTE: even with loop colors we still store (derived)
@@ -1790,7 +1794,7 @@ static Node *ensure_node(StepData &step_data, const bke::pbvh::Node &node, bool 
   return unode.get();
 }
 
-void push_node_special(const Depsgraph &depsgraph, Object &object, const Type special_type)
+void push_node_special(const Depsgraph & /*depsgraph*/, Object &object, const Type special_type)
 {
   SculptSession &ss = *object.runtime->sculpt_session;
   BLI_assert(ELEM(special_type, Type::Geometry, Type::DyntopoBegin, Type::DyntopoEnd));
@@ -2117,7 +2121,11 @@ void push_end_ex(Object &ob, const bool use_nested_undo)
         r_node->face_sets = std::move(unode->face_sets);
       }
       if (bool(step_data->node_flags & NodeDataFlag::Color)) {
-        r_node->vert_indices = std::move(unode->vert_indices);
+        /* Copy (don't move) the vertex indices: when the step also stores positions, the
+         * #PositionUndoStorage built below reads #Node.vert_indices from these same nodes to know
+         * which vertices each compressed block maps to. Moving the indices out here would leave the
+         * position storage with empty indices and crash #restore_position_mesh. */
+        r_node->vert_indices = unode->vert_indices;
         r_node->unique_verts_num = unode->unique_verts_num;
         r_node->corner_indices = std::move(unode->corner_indices);
         r_node->col = std::move(unode->col);

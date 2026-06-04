@@ -9,6 +9,7 @@
 #include "DNA_brush_types.h"
 #include "DNA_scene_types.h"
 
+#include "BKE_brush.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
@@ -42,6 +43,7 @@ struct MeshLocalData {
   Vector<float3> normals;
   Vector<float> factors;
   Vector<float> distances;
+  Vector<face_set::ColorFaceQuantWrite> pending_color_writes;
 };
 
 static void calc_face_normals(const OffsetIndices<int> faces,
@@ -205,6 +207,85 @@ static void calc_faces_from_texture(const Depsgraph &depsgraph,
   }
 }
 
+static void calc_faces_from_color_texture(const Depsgraph &depsgraph,
+                                          Object &object,
+                                          const Brush &brush,
+                                          const float strength,
+                                          Span<float3> positions_eval,
+                                          const bke::pbvh::MeshNode &node,
+                                          const Span<int> face_indices,
+                                          MeshLocalData &tls)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  const StrokeCache &cache = *ss.cache;
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  face_set::FaceSetColorStrokeCache *color_cache = face_set::face_set_color_stroke_cache_ensure(
+      *ss.cache, brush, mesh);
+  if (!color_cache || !color_cache->enabled) {
+    return;
+  }
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+
+  tls.positions.resize(face_indices.size());
+  const MutableSpan<float3> face_centers = tls.positions;
+  face_set::calc_face_centers(faces, corner_verts, positions_eval, face_indices, face_centers);
+
+  tls.normals.resize(face_indices.size());
+  const MutableSpan<float3> face_normals = tls.normals;
+  calc_face_normals(faces, corner_verts, positions_eval, face_indices, face_normals);
+
+  tls.factors.resize(face_indices.size());
+  const MutableSpan<float> factors = tls.factors;
+
+  face_set::fill_factor_from_hide_and_mask(mesh, face_indices, factors);
+
+  filter_region_clip_factors(ss, face_centers, factors);
+  if (brush.flag & BRUSH_FRONTFACE) {
+    calc_front_face(cache.view_normal_symm, face_normals, factors);
+  }
+
+  tls.distances.resize(face_indices.size());
+  const MutableSpan<float> distances = tls.distances;
+  calc_brush_distances(ss, face_centers, eBrushFalloffShape(brush.falloff_shape), distances);
+  filter_distances_with_radius(cache.radius, distances, factors);
+  apply_hardness_to_distances(cache, distances);
+  calc_brush_strength_factors(cache, brush, distances, factors);
+
+  if (cache.automasking) {
+    auto_mask::calc_face_factors(
+        depsgraph, object, faces, corner_verts, *cache.automasking, node, face_indices, factors);
+  }
+
+  /* Color map defines valid regions; do not multiply by brush alpha mask. */
+  scale_factors(factors, strength);
+
+  const int thread_id = BLI_task_parallel_thread_id(nullptr);
+
+  for (const int i : face_indices.index_range()) {
+    if (factors[i] <= face_set::FACE_SET_MIN_FADE) {
+      continue;
+    }
+    float quant[3];
+    if (!face_set::sample_face_color_for_face(ss,
+                                              brush,
+                                              faces,
+                                              corner_verts,
+                                              positions_eval,
+                                              face_indices[i],
+                                              face_centers[i],
+                                              thread_id,
+                                              quant))
+    {
+      continue;
+    }
+    face_set::ColorFaceQuantWrite write;
+    write.face_index = face_indices[i];
+    copy_v3_v3(write.quant, quant);
+    tls.pending_color_writes.append(write);
+  }
+}
+
 static void do_draw_face_sets_brush_mesh(const Depsgraph &depsgraph,
                                          Object &object,
                                          const Brush &brush,
@@ -214,10 +295,14 @@ static void do_draw_face_sets_brush_mesh(const Depsgraph &depsgraph,
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Span<float3> positions_eval = bke::pbvh::vert_positions_eval(depsgraph, object);
 
-  const bool use_texture_data_source = (brush.texture_data_mode ==
-                                        BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE);
-  const bool write_face_sets = !use_texture_data_source ||
-                               (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
+  const bool use_color_texture = (brush.texture_data_mode ==
+                                  BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE) &&
+                                 BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT)->tex;
+  const bool use_alpha_texture = (brush.texture_data_mode ==
+                                  BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE);
+  const bool use_texture_data_source = use_alpha_texture;
+  const bool write_face_sets = ((!use_texture_data_source && !use_color_texture) ||
+                                (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0);
   const bool write_color = use_texture_data_source && brush.write_vcol;
 
   undo::NodeDataFlag undo_flags{};
@@ -248,7 +333,17 @@ static void do_draw_face_sets_brush_mesh(const Depsgraph &depsgraph,
       [&](const int i) {
         MeshLocalData &tls = all_tls.local();
         const Span<int> face_indices = nodes[i].faces();
-        if (use_texture_data_source) {
+        if (use_color_texture) {
+          calc_faces_from_color_texture(depsgraph,
+                                        object,
+                                        brush,
+                                        ss.cache->bstrength,
+                                        positions_eval,
+                                        nodes[i],
+                                        face_indices,
+                                        tls);
+        }
+        else if (use_alpha_texture) {
           calc_faces_from_texture(depsgraph,
                                   object,
                                   brush,
@@ -275,6 +370,21 @@ static void do_draw_face_sets_brush_mesh(const Depsgraph &depsgraph,
         }
       },
       exec_mode::grain_size(1));
+
+  if (use_color_texture && write_face_sets) {
+    if (face_set::FaceSetColorStrokeCache *color_cache = face_set::face_set_color_stroke_cache_get(
+            *ss.cache))
+    {
+      for (MeshLocalData &tls : all_tls) {
+        if (!tls.pending_color_writes.is_empty()) {
+          face_set::apply_color_face_quant_writes(
+              object, *color_cache, tls.pending_color_writes, face_sets.span);
+          tls.pending_color_writes.clear();
+        }
+      }
+      face_set::face_set_color_deferred_geometry_update(object, *color_cache);
+    }
+  }
 
   if (face_sets) {
     pbvh.tag_face_sets_changed(node_mask);
@@ -497,12 +607,16 @@ void do_draw_face_sets_brush(const Depsgraph &depsgraph,
   Brush &brush = *BKE_paint_brush(&sd.paint);
   StrokeCache &cache = *object.runtime->sculpt_session->cache;
 
+  const bool use_color_texture = (brush.texture_data_mode ==
+                                  BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE) &&
+                                 BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT)->tex;
+
   if (cache.paint_face_set == face_set_none_id) {
     if (brush.face_set_id > 0) {
       /* Use explicitly assigned Face Set ID from brush settings (set via texture panel eyedropper). */
       cache.paint_face_set = brush.face_set_id;
     }
-    else {
+    else if (!use_color_texture) {
       resolve_paint_face_set(cache, object, brush);
     }
   }
@@ -512,9 +626,11 @@ void do_draw_face_sets_brush(const Depsgraph &depsgraph,
       do_draw_face_sets_brush_mesh(depsgraph, object, brush, node_mask);
       break;
     case bke::pbvh::Type::Grids:
+      /* Color texture mode is mesh-only in v1. */
       do_draw_face_sets_brush_grids(depsgraph, object, brush, node_mask);
       break;
     case bke::pbvh::Type::BMesh:
+      /* Color texture mode is mesh-only in v1. */
       do_draw_face_sets_brush_bmesh(depsgraph, object, brush, node_mask);
       break;
   }

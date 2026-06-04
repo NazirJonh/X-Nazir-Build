@@ -1003,52 +1003,75 @@ class VIEW3D_PT_tools_brush_face_set_texture(Panel, View3DPaintPanel):
         brush = sculpt.brush
         return brush and brush.sculpt_brush_type in cls._BRUSH_TYPES
 
-    def draw_header(self, context):
-        sculpt = context.tool_settings.sculpt
-        if not (context.sculpt_object and sculpt and sculpt.brush):
-            return
-        if self.is_popover:
-            return
-        self.layout.prop(sculpt.brush, "use_face_set_texture", text="")
-
     def draw(self, context):
         layout = self.layout
-        layout.use_property_split = True
         layout.use_property_decorate = False
 
         brush = context.tool_settings.sculpt.brush
-        is_active = (brush.texture_data_mode == 'FACE_SETS_FROM_TEXTURE')
+        use_from_texture = brush.use_face_sets_from_texture
+        is_alpha = (brush.texture_data_mode == 'FACE_SETS_FROM_TEXTURE')
+        is_color = (brush.texture_data_mode == 'FACE_SETS_COLOR_FROM_TEXTURE')
 
-        if self.is_popover:
-            row = layout.row(align=True)
+        layout.use_property_split = False
+        header, tex_panel = layout.panel(
+            "sculpt_face_sets_from_texture",
+            default_closed=False,
+        )
+        header.use_property_split = False
+        row = header.row(align=True)
+        row.alignment = 'LEFT'
+        row.prop(brush, "use_face_sets_from_texture", text="Face Sets From Texture")
+
+        if tex_panel:
+            tex_panel.active = use_from_texture
+            tex_panel.use_property_split = True
+            tex_panel.use_property_decorate = False
+
+            col = tex_panel.column()
+            row = col.row(align=True)
             row.use_property_split = False
-            row.prop(brush, "use_face_set_texture", text="Face Sets from Texture")
+            row.prop(brush, "face_set_draw_mode", expand=True)
 
-        # --- Face Set Colors ---
-        col = layout.column()
-        row = col.row(align=True)
-        row.prop(brush, "face_set_draw_mode", expand=True)
+            is_custom = (brush.face_set_draw_mode == 'CUSTOM')
+            col_color = col.column()
+            col_color.active = is_custom
+            col_color.enabled = is_custom
+            color_row = col_color.row(align=True)
+            color_row.use_property_split = False
+            _draw_face_set_color_row(color_row, context, brush)
 
-        is_custom = (brush.face_set_draw_mode == 'CUSTOM')
-        col_color = col.column()
-        col_color.active = is_custom
-        col_color.enabled = is_custom
+            tex_panel.separator()
 
-        _draw_face_set_color_row(col_color.row(align=True), context, brush)
+            col_mode = tex_panel.column(align=True)
+            col_mode.use_property_split = False
+            row = col_mode.row(align=True)
+            row.prop(brush, "use_face_set_texture", text="Alpha Mask", toggle=True)
+            row.prop(brush, "use_face_set_color_texture", text="Color Map", toggle=True)
 
-        layout.separator()
+            tex_panel.separator()
 
-        # --- Face Sets from Texture ---
-        col = layout.column()
-        col.active = is_active
+            col = tex_panel.column()
+            col.active = is_alpha
+            col.prop(brush, "texture_invert_alpha", text="Invert Alpha")
+            col.prop(brush, "texture_threshold", text="Threshold", slider=True)
 
-        col.prop(brush, "texture_threshold", text="Threshold", slider=True)
-        col.prop(brush, "texture_invert_alpha", text="Invert Alpha")
-        col.prop(brush, "write_face_sets", text="Write to Face Sets")
-        col.prop(brush, "write_vcol", text="Write to Vertex Color")
-        if brush.write_vcol:
-            col.prop(brush, "vcol_channel", text="Channel")
-            col.prop(brush, "vcol_mode", text="Mode")
+            tex_panel.separator()
+
+            col_color_tex = tex_panel.column()
+            col_color_tex.active = is_color
+            col_color_tex.label(text="Face Set Color Texture")
+            tex_slot = brush.face_set_color_texture_slot
+            col_color_tex.template_ID_preview(tex_slot, "texture", new="texture.new", rows=3, cols=8)
+
+            tex_panel.separator()
+
+            col_write = tex_panel.column()
+            col_write.label(text="Write Color Data to:")
+            col_write.prop(brush, "write_face_sets", text="Face Sets")
+            col_write.prop(brush, "write_vcol", text="Vertex Color")
+            if brush.write_vcol:
+                col_write.prop(brush, "vcol_channel", text="Channel")
+                col_write.prop(brush, "vcol_mode", text="Mode")
 
 
 class VIEW3D_PT_sculpt_dyntopo(Panel, View3DPaintPanel):
@@ -2430,19 +2453,67 @@ class VIEW3D_PT_tools_grease_pencil_v3_brush_gap_closure(View3DPanel, Panel):
             row.prop(gp_settings, "use_collide_strokes")
 
 
+def _brush_use_face_sets_from_texture_get(self):
+    return self.texture_data_mode != 'NONE'
+
+
+def _brush_use_face_sets_from_texture_set(self, value):
+    if value:
+        if self.texture_data_mode == 'NONE':
+            self.texture_data_mode = 'FACE_SETS_FROM_TEXTURE'
+    else:
+        self.texture_data_mode = 'NONE'
+
+
 def _brush_face_set_texture_get(self):
     return self.texture_data_mode == 'FACE_SETS_FROM_TEXTURE'
 
 
 def _brush_face_set_texture_set(self, value):
-    self.texture_data_mode = 'FACE_SETS_FROM_TEXTURE' if value else 'NONE'
+    if value:
+        self.texture_data_mode = 'FACE_SETS_FROM_TEXTURE'
+    elif self.texture_data_mode == 'FACE_SETS_FROM_TEXTURE':
+        self.texture_data_mode = 'NONE'
 
+
+def _brush_face_set_color_texture_get(self):
+    return self.texture_data_mode == 'FACE_SETS_COLOR_FROM_TEXTURE'
+
+
+def _brush_face_set_color_texture_set(self, value):
+    if value:
+        self.texture_data_mode = 'FACE_SETS_COLOR_FROM_TEXTURE'
+        src = self.texture_slot
+        dst = self.face_set_color_texture_slot
+        # Match main brush texture mapping (view / stencil / area plane) for stroke projection.
+        dst.map_mode = src.map_mode
+        dst.offset = src.offset
+        dst.scale = src.scale
+        dst.angle = src.angle
+    elif self.texture_data_mode == 'FACE_SETS_COLOR_FROM_TEXTURE':
+        self.texture_data_mode = 'FACE_SETS_FROM_TEXTURE'
+
+
+bpy.types.Brush.use_face_sets_from_texture = bpy.props.BoolProperty(
+    name="Face Sets From Texture",
+    description="Use a texture to assign Face Sets while sculpting",
+    get=_brush_use_face_sets_from_texture_get,
+    set=_brush_use_face_sets_from_texture_set,
+    default=False,
+)
 
 bpy.types.Brush.use_face_set_texture = bpy.props.BoolProperty(
-    name="Face Sets from Texture",
+    name="Alpha Mask",
     description="Sample texture alpha to determine Face Set ID assignment",
     get=_brush_face_set_texture_get,
     set=_brush_face_set_texture_set,
+)
+
+bpy.types.Brush.use_face_set_color_texture = bpy.props.BoolProperty(
+    name="Face Sets from Color Texture",
+    description="Assign Face Sets per face from RGB texture; alpha texture is the stroke mask",
+    get=_brush_face_set_color_texture_get,
+    set=_brush_face_set_color_texture_set,
 )
 
 _face_set_unified_sync_owner = object()

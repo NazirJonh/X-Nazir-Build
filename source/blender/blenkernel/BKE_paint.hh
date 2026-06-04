@@ -320,6 +320,15 @@ void BKE_paint_face_set_custom_colors_clear(Mesh *mesh);
  * channel. Returns 0 if no match is found.
  */
 int BKE_paint_face_set_find_by_custom_color(const Mesh *mesh, const float color[3]);
+void BKE_paint_face_set_quantize_color(const float color[3], float r_quant[3]);
+uint32_t BKE_paint_face_set_quantize_color_pack(const float color[3]);
+/**
+ * Snap antialiased texture samples to a saturated dominant hue, then quantize to 8-bit steps.
+ * Used by Face Set color-from-texture so halftones map to the same ID as pure red/green/blue.
+ */
+void BKE_paint_face_set_snap_texture_sample_color(const float color[3], float r_snapped[3]);
+void BKE_paint_face_set_quantize_texture_color(const float color[3], float r_quant[3]);
+uint32_t BKE_paint_face_set_quantize_texture_color_pack(const float color[3]);
 
 /* Stroke related. */
 

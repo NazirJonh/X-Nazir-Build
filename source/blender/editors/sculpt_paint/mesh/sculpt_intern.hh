@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include "BKE_brush.hh"
@@ -51,6 +52,9 @@ namespace undo {
 struct Node;
 enum class Type : int8_t;
 }  // namespace undo
+namespace face_set {
+struct FaceSetColorStrokeCache;
+}
 }  // namespace ed::sculpt_paint
 struct bContext;
 struct BMLog;
@@ -308,6 +312,8 @@ struct StrokeCache {
 
   /* The face set being painted. */
   int paint_face_set = face_set_none_id;
+
+  std::unique_ptr<face_set::FaceSetColorStrokeCache> face_set_color_cache;
 
   /* The symmetry pass we are currently on between 0 and 7. */
   ePaintSymmetryFlags mirror_symmetry_pass = ePaintSymmetryFlags(0);
@@ -793,6 +799,13 @@ void sculpt_apply_texture(const SculptSession &ss,
                           int thread_id,
                           float *r_value,
                           float4 &r_rgba);
+
+/** Sample face_set_color_mtex RGB at brush_point; returns false if no texture. */
+bool sculpt_sample_face_set_color_texture(const SculptSession &ss,
+                                          const Brush &brush,
+                                          const float brush_point[3],
+                                          int thread_id,
+                                          float r_rgb[3]);
 
 /**
  * Calculates the vertex offset for a single vertex depending on the brush setting rgb as vector

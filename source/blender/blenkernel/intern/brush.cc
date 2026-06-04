@@ -234,6 +234,8 @@ static void brush_foreach_id(ID *id, LibraryForeachIDData *data)
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, BKE_texture_mtex_foreach_id(data, &brush->mtex));
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data,
                                           BKE_texture_mtex_foreach_id(data, &brush->mask_mtex));
+  BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data,
+                                          BKE_texture_mtex_foreach_id(data, &brush->face_set_color_mtex));
 }
 
 static void brush_foreach_working_space_color(ID *id, const IDTypeForeachColorFunctionCallback &fn)
@@ -637,6 +639,7 @@ static void brush_defaults(Brush *brush)
   FROM_DEFAULT(stencil_dimension);
   FROM_DEFAULT(mtex);
   FROM_DEFAULT(mask_mtex);
+  FROM_DEFAULT(face_set_color_mtex);
   FROM_DEFAULT(falloff_shape);
   FROM_DEFAULT(tip_scale_x);
   FROM_DEFAULT(tip_roundness);
@@ -935,6 +938,11 @@ const MTex *BKE_brush_color_texture_get(const Brush *brush, const eObjectMode ob
     return &brush->mask_mtex;
   }
   return &brush->mtex;
+}
+
+const MTex *BKE_brush_face_set_color_texture_get(const Brush *brush, const eObjectMode /*object_mode*/)
+{
+  return &brush->face_set_color_mtex;
 }
 
 float BKE_brush_sample_tex_3d(const Paint *paint,

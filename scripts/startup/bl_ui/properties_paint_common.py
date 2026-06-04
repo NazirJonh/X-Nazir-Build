@@ -1561,9 +1561,20 @@ def draw_color_settings(context, layout, brush, color_type=False):
                 col.prop(brush, "grad_spacing")
 
 
+def _brush_texture_for_slot(brush, tex_slot):
+    if tex_slot == brush.texture_slot:
+        return brush.texture
+    if tex_slot == brush.mask_texture_slot:
+        return brush.mask_texture
+    if tex_slot == brush.face_set_color_texture_slot:
+        return brush.face_set_color_texture
+    return brush.texture
+
+
 # Used in both the View3D toolbar and texture properties
-def brush_texture_settings(layout, brush, sculpt):
-    tex_slot = brush.texture_slot
+def brush_texture_settings(layout, brush, sculpt, tex_slot=None):
+    if tex_slot is None:
+        tex_slot = brush.texture_slot
 
     layout.use_property_split = True
     layout.use_property_decorate = False
@@ -1573,8 +1584,9 @@ def brush_texture_settings(layout, brush, sculpt):
 
     layout.separator()
 
+    brush_texture = _brush_texture_for_slot(brush, tex_slot)
     if tex_slot.map_mode == 'STENCIL':
-        if brush.texture and brush.texture.type == 'IMAGE':
+        if brush_texture and brush_texture.type == 'IMAGE':
             layout.operator("brush.stencil_fit_image_aspect").mask = False
         layout.operator("brush.stencil_reset_transform").mask = False
 

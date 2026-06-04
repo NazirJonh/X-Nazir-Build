@@ -468,6 +468,8 @@ struct Brush {
   /** Secondary color, swapped with the primary via the X key (linear RGB). */
   float face_set_secondary_color[3] = {0.2f, 0.5f, 1.0f};
   char _pad_fssc[4] = {};
+  /** RGB texture for per-face Face Set color assignment (#eBrushTextureDataMode). */
+  struct MTex face_set_color_mtex;
 };
 
 struct PaletteColor {

@@ -19,6 +19,7 @@
 #include "BLI_rand.hh"
 #include "BLI_utildefines.h"
 
+#include "DNA_brush_enums.h"
 #include "DNA_brush_types.h"
 #include "DNA_curve_types.h"
 #include "DNA_object_types.h"
@@ -284,8 +285,15 @@ bool PaintStroke::update(bContext *C,
   paint_runtime.initial_pixel_radius = BKE_brush_radius_get(paint, &brush);
 
   if (paint_supports_dynamic_tex_coords(brush, mode)) {
+    /* Face-set color map shares mask/alpha stroke coordinates (#Brush.mtex in sculpt). */
+    const MTex *coord_mtex = &brush.mtex;
+    if (brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE &&
+        mode == PaintMode::Sculpt)
+    {
+      coord_mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
+    }
 
-    if (ELEM(brush.mtex.brush_map_mode,
+    if (ELEM(coord_mtex->brush_map_mode,
              MTEX_MAP_MODE_VIEW,
              MTEX_MAP_MODE_AREA,
              MTEX_MAP_MODE_RANDOM))
@@ -293,7 +301,7 @@ bool PaintStroke::update(bContext *C,
       do_random = true;
     }
 
-    if (brush.mtex.brush_map_mode == MTEX_MAP_MODE_RANDOM) {
+    if (coord_mtex->brush_map_mode == MTEX_MAP_MODE_RANDOM) {
       BKE_brush_randomize_texture_coords(paint, false);
     }
     else {

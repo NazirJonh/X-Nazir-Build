@@ -9,16 +9,14 @@
 #pragma once
 
 #include "BLI_array.hh"
+#include "BLI_map.hh"
 #include "BLI_offset_indices.hh"
 #include "BLI_set.hh"
 #include "BLI_span.hh"
 
 #include "BKE_attribute.hh"
 
-struct bContext;
-struct Depsgraph;
-struct Brush;
-struct SculptSession;
+
 
 namespace blender {
 
@@ -31,7 +29,54 @@ struct Object;
 struct SubdivCCG;
 struct SubdivCCGCoord;
 
+struct bContext;
+struct Depsgraph;
+struct Brush;
+struct MTex;
+struct SculptSession;
+
+namespace ed::sculpt_paint {
+struct StrokeCache;
+}
+
 namespace ed::sculpt_paint::face_set {
+
+struct ColorFaceQuantWrite {
+  int face_index;
+  float quant[3];
+};
+
+struct FaceSetColorStrokeCache {
+  bool enabled = false;
+  const MTex *color_mtex = nullptr;
+
+  Map<uint32_t, int> mesh_color_to_id;
+  Map<uint32_t, int> stroke_color_to_id;
+  bool mesh_geometry_tagged = false;
+  /** Next ID to assign; initialized once per stroke from mesh data. */
+  int next_face_set_id = 0;
+
+  void clear();
+  void preload_mesh_colors(const Mesh &mesh);
+  int ensure_face_set_id_for_quant_color(Object &object, const float quant[3]);
+};
+
+/** Resolve pending face writes on the main thread (after parallel sampling). */
+void apply_color_face_quant_writes(Object &object,
+                                   FaceSetColorStrokeCache &cache,
+                                   Span<ColorFaceQuantWrite> writes,
+                                   MutableSpan<int> face_sets);
+void face_set_color_deferred_geometry_update(Object &object, FaceSetColorStrokeCache &cache);
+
+/** Copy mask/alpha mapping (offset, scale, angle, mode) onto #Brush.face_set_color_mtex. */
+void sync_face_set_color_mtex_mapping_from_mask(Brush &brush);
+void face_set_color_stroke_cache_init(StrokeCache &cache, const Brush &brush, const Mesh &mesh);
+void face_set_color_stroke_cache_clear(StrokeCache &cache);
+FaceSetColorStrokeCache *face_set_color_stroke_cache_get(StrokeCache &cache);
+/** (Re)build stroke cache when color texture mode is active; returns null if unavailable. */
+FaceSetColorStrokeCache *face_set_color_stroke_cache_ensure(StrokeCache &cache,
+                                                            const Brush &brush,
+                                                            const Mesh &mesh);
 
 int active_face_set_get(const Object &object);
 /* TODO: vert_face_set_max_get should likely be avoided and existing usages cleaned up, since by
@@ -145,6 +190,11 @@ void apply_from_texture(const Depsgraph &depsgraph,
                         const Brush &brush,
                         const IndexMask &node_mask);
 
+void apply_from_color_texture(const Depsgraph &depsgraph,
+                              Object &object,
+                              const Brush &brush,
+                              const IndexMask &node_mask);
+
 /**
  * Samples the brush texture at each vertex of face \a face_index, writes the result to
  * \a color_attribute when non-null, and returns the average texture value across all vertices.
@@ -159,6 +209,20 @@ float sample_face_texture_avg(SculptSession &ss,
                               int face_index,
                               bke::GSpanAttributeWriter *color_attribute,
                               int thread_id);
+
+/**
+ * Sample RGB from face_set_color_mtex using the same brush projection as the alpha mask
+ * (view / stencil / area plane / 3D) at the face center and corner positions; quantizes to 8-bit.
+ */
+bool sample_face_color_for_face(SculptSession &ss,
+                                const Brush &brush,
+                                const OffsetIndices<int> faces,
+                                const Span<int> corner_verts,
+                                const Span<float3> positions_eval,
+                                const int face_index,
+                                const float3 &sample_point,
+                                const int thread_id,
+                                float r_quant[3]);
 
 /** Set face set colors through RNA so unified-color sync handlers are notified. */
 void brush_face_set_color_set(Brush *brush, const float color[3]);

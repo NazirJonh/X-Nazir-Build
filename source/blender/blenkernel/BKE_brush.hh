@@ -163,6 +163,8 @@ const MTex *BKE_brush_mask_texture_get(const Brush *brush, eObjectMode object_mo
  */
 const MTex *BKE_brush_color_texture_get(const Brush *brush, eObjectMode object_mode);
 
+const MTex *BKE_brush_face_set_color_texture_get(const Brush *brush, eObjectMode object_mode);
+
 /**
  * Radial control.
  */

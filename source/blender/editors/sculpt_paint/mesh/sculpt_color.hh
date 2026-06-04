@@ -63,6 +63,8 @@ float4 color_vert_get(OffsetIndices<int> faces,
 
 bke::GAttributeReader active_color_attribute(const Mesh &mesh);
 bke::GSpanAttributeWriter active_color_attribute_for_write(Mesh &mesh);
+/** Create a default color attribute on \a mesh when missing, then return a writer. */
+bke::GSpanAttributeWriter ensure_active_color_attribute_for_write(Mesh &mesh);
 
 void do_paint_brush(const Depsgraph &depsgraph,
                     PaintModeSettings &paint_mode_settings,

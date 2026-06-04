@@ -764,6 +764,16 @@ static void rna_Brush_secondary_tex_update(bContext *C, PointerRNA *ptr)
   rna_Brush_update(bmain, scene, ptr);
 }
 
+static void rna_Brush_face_set_color_tex_update(bContext *C, PointerRNA *ptr)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  Brush *br = static_cast<Brush *>(ptr->data);
+  BKE_paint_invalidate_overlay_tex(*bmain, scene, view_layer, br->face_set_color_mtex.tex);
+  rna_Brush_update(bmain, scene, ptr);
+}
+
 static void rna_Brush_size_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   BKE_paint_invalidate_overlay_all();
@@ -1178,6 +1188,11 @@ static const EnumPropertyItem brush_texture_data_mode_items[] = {
      0,
      "Face Sets from Texture",
      "Sample texture alpha to determine Face Set ID assignment (binary threshold mode)"},
+    {BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE,
+     "FACE_SETS_COLOR_FROM_TEXTURE",
+     0,
+     "Face Sets from Color Texture",
+     "Sample RGB texture per face to assign Face Set IDs; alpha texture remains the stroke mask"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -4035,6 +4050,18 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_EDITABLE | PROP_CONTEXT_UPDATE);
   RNA_def_property_ui_text(prop, "Mask Texture", "");
   RNA_def_property_update(prop, NC_TEXTURE, "rna_Brush_secondary_tex_update");
+
+  prop = RNA_def_property(srna, "face_set_color_texture_slot", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "BrushTextureSlot");
+  RNA_def_property_pointer_sdna(prop, nullptr, "face_set_color_mtex");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Face Set Color Texture Slot", "");
+
+  prop = RNA_def_property(srna, "face_set_color_texture", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "face_set_color_mtex.tex");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_CONTEXT_UPDATE);
+  RNA_def_property_ui_text(prop, "Face Set Color Texture", "RGB map for per-face Face Set colors");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_Brush_face_set_color_tex_update");
 
   prop = RNA_def_property(srna, "texture_overlay_alpha", PROP_INT, PROP_PERCENTAGE);
   RNA_def_property_int_sdna(prop, nullptr, "texture_overlay_alpha");

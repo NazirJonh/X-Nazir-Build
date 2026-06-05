@@ -349,7 +349,7 @@ struct Brush {
   /** Explicit Face Set ID to assign (0 = auto-generate on first stroke). */
   int face_set_id = 0;
   char write_vcol = 0;
-  char vcol_channel = 0;
+  char vcol_channel = BRUSH_VCOL_CHANNEL_RGB;
   char vcol_mode = 0;
   char _pad_vcol[1] = {};
 

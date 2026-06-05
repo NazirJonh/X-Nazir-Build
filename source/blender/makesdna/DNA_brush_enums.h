@@ -427,6 +427,7 @@ enum eBrushVertexColorChannel {
   BRUSH_VCOL_CHANNEL_R = 0,
   BRUSH_VCOL_CHANNEL_G = 1,
   BRUSH_VCOL_CHANNEL_B = 2,
+  BRUSH_VCOL_CHANNEL_RGB = 3,
 };
 
 enum eBrushVertexColorMode {

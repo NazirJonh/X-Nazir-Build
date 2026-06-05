@@ -2499,6 +2499,7 @@ def _brush_face_set_color_texture_get(self):
 def _brush_face_set_color_texture_set(self, value):
     if value:
         self.texture_data_mode = 'FACE_SETS_COLOR_FROM_TEXTURE'
+        self.vcol_channel = 'RGB'
         src = self.texture_slot
         dst = self.face_set_color_texture_slot
         # Match main brush texture mapping (view / stencil / area plane) for stroke projection.

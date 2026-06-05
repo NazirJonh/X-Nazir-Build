@@ -2788,12 +2788,19 @@ float sample_face_texture_avg(SculptSession &ss,
                               ((texture_value > brush.texture_threshold) ? 1.0f : 0.0f) :
                               clamp_f(texture_value, 0.0f, 1.0f);
       float4 col = color::color_vert_get(faces,
-                                         corner_verts,
-                                         vert_to_face_map,
-                                         color_attribute->span,
-                                         color_attribute->domain,
-                                         vert_index);
-      col[brush.vcol_channel] = value;
+                                          corner_verts,
+                                          vert_to_face_map,
+                                          color_attribute->span,
+                                          color_attribute->domain,
+                                          vert_index);
+      if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
+        col.x = value;
+        col.y = value;
+        col.z = value;
+      }
+      else {
+        col[brush.vcol_channel] = value;
+      }
       color::color_vert_set(faces,
                             corner_verts,
                             vert_to_face_map,
@@ -2838,12 +2845,25 @@ static void write_face_color_map_to_vertex_colors(SculptSession &ss,
                                           vert_index);
       if (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) {
         const float luma = (rgb[0] + rgb[1] + rgb[2]) / 3.0f;
-        col[brush.vcol_channel] = (luma > brush.texture_threshold) ? 1.0f : 0.0f;
+        const float value = (luma > brush.texture_threshold) ? 1.0f : 0.0f;
+        if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
+          col.x = value;
+          col.y = value;
+          col.z = value;
+        }
+        else {
+          col[brush.vcol_channel] = value;
+        }
       }
       else {
-        col.x = rgb[0];
-        col.y = rgb[1];
-        col.z = rgb[2];
+        if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
+          col.x = rgb[0];
+          col.y = rgb[1];
+          col.z = rgb[2];
+        }
+        else {
+          col[brush.vcol_channel] = rgb[brush.vcol_channel];
+        }
       }
       color::color_vert_set(faces,
                             corner_verts,

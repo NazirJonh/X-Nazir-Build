@@ -982,6 +982,7 @@ void SCULPT_OT_face_sets_create(wmOperatorType *ot);
 void SCULPT_OT_face_sets_edit(wmOperatorType *ot);
 void SCULPT_OT_face_set_clear_all_custom_colors(wmOperatorType *ot);
 void SCULPT_OT_face_set_colors_flip(wmOperatorType *ot);
+void SCULPT_OT_face_set_color_texture_open(wmOperatorType *ot);
 void SCULPT_OT_face_set_draw_mode_toggle(wmOperatorType *ot);
 
 void SCULPT_OT_face_set_lasso_gesture(wmOperatorType *ot);

@@ -1061,7 +1061,14 @@ class VIEW3D_PT_tools_brush_face_set_texture(Panel, View3DPaintPanel):
             col_color_tex.active = is_color
             col_color_tex.label(text="Face Set Color Texture")
             tex_slot = brush.face_set_color_texture_slot
-            col_color_tex.template_ID_preview(tex_slot, "texture", new="texture.new", rows=3, cols=8)
+            col_color_tex.template_ID_preview(
+                tex_slot,
+                "texture",
+                new="texture.new",
+                open="sculpt.face_set_color_texture_open",
+                rows=3,
+                cols=8,
+            )
 
             tex_panel.separator()
 

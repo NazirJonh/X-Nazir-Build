@@ -38,7 +38,9 @@
 
 #include "BLT_translation.hh"
 
+#include "DNA_ID.h"
 #include "DNA_customdata_types.h"
+#include "DNA_image_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
@@ -57,9 +59,20 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_global.hh"
+#include "BKE_image.hh"
+#include "BKE_lib_id.hh"
+#include "BKE_main.hh"
+#include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_texture.h"
+
+#include "BLI_fileops.h"
+#include "BLI_path_utils.hh"
+#include "BLI_string.h"
+
+#include "UI_interface_c.hh"
 
 #include "DEG_depsgraph.hh"
 
@@ -1421,6 +1434,175 @@ void SCULPT_OT_face_set_colors_flip(wmOperatorType *ot)
 
   /* Only modifies brush properties, not scene data — no undo entry needed. */
   ot->flag = OPTYPE_REGISTER;
+}
+
+struct FaceSetColorTextureOpenData {
+  PropertyPointerRNA pprop;
+};
+
+static void face_set_color_texture_open_init(bContext *C, wmOperator *op)
+{
+  auto *data = MEM_new<FaceSetColorTextureOpenData>(__func__);
+  ui::context_active_but_prop_get_templateID(C, &data->pprop.ptr, &data->pprop.prop);
+  op->customdata = data;
+}
+
+static void face_set_color_texture_open_cancel(bContext * /*C*/, wmOperator *op)
+{
+  MEM_delete(static_cast<FaceSetColorTextureOpenData *>(op->customdata));
+  op->customdata = nullptr;
+}
+
+static bool face_set_color_texture_open_poll(bContext *C)
+{
+  if (!sculpt_mode_poll(C)) {
+    return false;
+  }
+  const Scene *scene = CTX_data_scene(C);
+  const Sculpt *sd = scene->toolsettings->sculpt;
+  return sd && BKE_paint_brush_for_read(&sd->paint);
+}
+
+static wmOperatorStatus face_set_color_texture_open_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+
+  if (!op->customdata) {
+    face_set_color_texture_open_init(C, op);
+  }
+  FaceSetColorTextureOpenData *data = static_cast<FaceSetColorTextureOpenData *>(op->customdata);
+
+  char filepath[FILE_MAX];
+  RNA_string_get(op->ptr, "filepath", filepath);
+  if (filepath[0] == '\0') {
+    face_set_color_texture_open_cancel(C, op);
+    return OPERATOR_CANCELLED;
+  }
+
+  bool exists = false;
+  Image *ima = BKE_image_load_exists(bmain, filepath, &exists);
+  if (!ima) {
+    BKE_report(op->reports, RPT_ERROR, "Cannot load image");
+    face_set_color_texture_open_cancel(C, op);
+    return OPERATOR_CANCELLED;
+  }
+
+  Brush *brush = nullptr;
+  if (data->pprop.ptr.owner_id && GS(data->pprop.ptr.owner_id->name) == ID_BR) {
+    brush = reinterpret_cast<Brush *>(data->pprop.ptr.owner_id);
+  }
+  if (!brush) {
+    Sculpt *sd = scene->toolsettings->sculpt;
+    if (sd) {
+      brush = BKE_paint_brush(&sd->paint);
+    }
+  }
+  if (!brush) {
+    face_set_color_texture_open_cancel(C, op);
+    return OPERATOR_CANCELLED;
+  }
+
+  Tex *tex = data->pprop.prop ?
+                 static_cast<Tex *>(RNA_property_pointer_get(&data->pprop.ptr, data->pprop.prop).data) :
+                 brush->face_set_color_mtex.tex;
+
+  if (!tex) {
+    tex = BKE_texture_add(bmain, ima->id.name + 2);
+    BKE_texture_type_set(tex, TEX_IMAGE);
+
+    if (data->pprop.prop) {
+      id_us_min(&tex->id);
+      if (data->pprop.ptr.owner_id) {
+        BKE_id_move_to_same_lib(*bmain, tex->id, *data->pprop.ptr.owner_id);
+      }
+      PointerRNA texptr = RNA_id_pointer_create(&tex->id);
+      RNA_property_pointer_set(&data->pprop.ptr, data->pprop.prop, texptr, nullptr);
+      RNA_property_update(C, &data->pprop.ptr, data->pprop.prop);
+    }
+    else {
+      brush->face_set_color_mtex.tex = tex;
+      id_us_plus(&tex->id);
+    }
+  }
+  else if (tex->type != TEX_IMAGE) {
+    BKE_texture_type_set(tex, TEX_IMAGE);
+  }
+
+  tex->ima = ima;
+  id_us_plus(&ima->id);
+
+  BKE_image_signal(bmain, ima, nullptr, IMA_SIGNAL_RELOAD);
+
+  if (brush->texture_data_mode != BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE) {
+    brush->texture_data_mode = BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE;
+    brush->vcol_channel = BRUSH_VCOL_CHANNEL_RGB;
+    sync_face_set_color_mtex_mapping_from_mask(*brush);
+  }
+
+  BKE_paint_invalidate_overlay_tex(*bmain, scene, view_layer, tex);
+  BKE_brush_tag_unsaved_changes(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  WM_event_add_notifier(C, NC_TEXTURE | NA_EDITED, tex);
+
+  face_set_color_texture_open_cancel(C, op);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus face_set_color_texture_open_invoke(bContext *C,
+                                                           wmOperator *op,
+                                                           const wmEvent * /*event*/)
+{
+  const char *path = U.textudir;
+
+  PointerRNA ptr;
+  PropertyRNA *prop;
+  ui::context_active_but_prop_get_templateID(C, &ptr, &prop);
+  if (prop) {
+    Tex *tex = static_cast<Tex *>(RNA_property_pointer_get(&ptr, prop).data);
+    if (tex && tex->type == TEX_IMAGE && tex->ima) {
+      char image_path[FILE_MAX];
+      STRNCPY(image_path, tex->ima->filepath);
+      BLI_path_abs(image_path, ID_BLEND_PATH(CTX_data_main(C), &tex->ima->id));
+      if (BLI_exists(image_path)) {
+        path = image_path;
+      }
+    }
+  }
+
+  if (RNA_struct_property_is_set(op->ptr, "filepath")) {
+    face_set_color_texture_open_init(C, op);
+    return face_set_color_texture_open_exec(C, op);
+  }
+
+  face_set_color_texture_open_init(C, op);
+  RNA_string_set(op->ptr, "filepath", path);
+  WM_event_add_fileselect(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+void SCULPT_OT_face_set_color_texture_open(wmOperatorType *ot)
+{
+  ot->name = "Open Face Set Color Texture";
+  ot->idname = "SCULPT_OT_face_set_color_texture_open";
+  ot->description = "Open an image from disk and assign it as the Face Set Color Texture";
+
+  ot->invoke = face_set_color_texture_open_invoke;
+  ot->exec = face_set_color_texture_open_exec;
+  ot->cancel = face_set_color_texture_open_cancel;
+  ot->poll = face_set_color_texture_open_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  WM_operator_properties_filesel(ot,
+                               FILE_TYPE_FOLDER | FILE_TYPE_IMAGE | FILE_TYPE_MOVIE,
+                               FILE_SPECIAL,
+                               FILE_OPENFILE,
+                               WM_FILESEL_FILEPATH | WM_FILESEL_DIRECTORY | WM_FILESEL_FILES |
+                                   WM_FILESEL_RELPATH,
+                               FILE_DEFAULTDISPLAY,
+                               FILE_SORT_DEFAULT);
 }
 
 static wmOperatorStatus face_set_draw_mode_toggle_exec(bContext *C, wmOperator * /*op*/)

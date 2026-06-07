@@ -17,9 +17,13 @@
 
 #include "UI_interface_layout.hh"
 
+struct Image;
+struct Main;
+
 namespace blender {
 
 struct bContext;
+struct Material;
 
 namespace ui {
 
@@ -79,6 +83,34 @@ Block *template_common_search_menu(const bContext *C,
                                    const int preview_rows,
                                    const int preview_cols,
                                    float scale);
+
+/**
+ * Append the standard #template_ID controls (rename, new, open, users, etc.) without the browse
+ * search-menu button. Used with #image_browser_add_popover_button for image paint browsing.
+ */
+void template_id_image_row_append_standard(const bContext *C,
+                                           Layout &layout,
+                                           PointerRNA *ptr,
+                                           PropertyRNA *prop,
+                                           const char *newop,
+                                           const char *openop,
+                                           const char *unlinkop);
+
+/**
+ * Shared predicate for the image paint-slot filters, used by both the ID search menu
+ * (#template_id_browse_with_context) and the image-browser popover. Returns true when \a image
+ * passes \a filter_mode (a mask of #TEMPLATE_ID_FILTER_CURRENT_MATERIAL and/or
+ * #TEMPLATE_ID_FILTER_SLOT_TYPE). Render-result and compositor images never pass. The cached
+ * usage index is rebuilt from \a bmain on demand.
+ */
+bool image_id_passes_paint_filter(
+    Main &bmain, const Image &image, int filter_mode, const Material *material, char slot_type);
+
+/**
+ * Add the image-browser popover button to \a row (replaces the browse search-menu button).
+ */
+void image_browser_add_popover_button(
+    Layout &row, const bContext *C, PointerRNA *ptr, const char *propname, Material *material);
 
 }  // namespace ui
 }  // namespace blender

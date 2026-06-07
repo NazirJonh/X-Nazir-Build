@@ -1997,6 +1997,13 @@ static std::unique_ptr<TooltipData> tooltip_data_from_search_item_tooltip_data(I
   return data->fields.is_empty() ? nullptr : std::move(data);
 }
 
+void tooltip_from_id(TooltipData &tip, ID *id)
+{
+  if (std::unique_ptr<TooltipData> data = tooltip_data_from_search_item_tooltip_data(id)) {
+    tip.fields = std::move(data->fields);
+  }
+}
+
 ARegion *tooltip_create_from_search_item_generic(bContext *C,
                                                  const ARegion *searchbox_region,
                                                  const rcti *item_rect,

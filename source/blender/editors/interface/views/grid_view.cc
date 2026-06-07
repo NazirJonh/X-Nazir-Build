@@ -15,14 +15,19 @@
 #include "BKE_context.hh"
 #include "BKE_icons.hh"
 
+#include "BLI_rect.h"
+
 #include "BLI_index_range.hh"
 
 #include "WM_types.hh"
+
+#include "GPU_state.hh"
 
 #include "RNA_access.hh"
 
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
+#include "UI_resources.hh"
 #include "UI_view2d.hh"
 #include "interface_intern.hh"
 
@@ -84,6 +89,11 @@ void AbstractGridView::update_children_from_old(const AbstractView &old_view)
 {
   const AbstractGridView &old_grid_view = dynamic_cast<const AbstractGridView &>(old_view);
 
+  /* Share the scroll position with the previous view so it survives popover rebuilds (the same
+   * mechanism #AbstractTreeView uses). The region #View2D is re-initialized on every refresh and
+   * can't be relied on for this. */
+  scroll_value_ = old_grid_view.scroll_value_;
+
   this->foreach_item([this, &old_grid_view](AbstractGridViewItem &new_item) {
     const AbstractGridViewItem *matching_old_item = find_matching_item(new_item, old_grid_view);
     if (!matching_old_item) {
@@ -122,6 +132,259 @@ void AbstractGridView::set_tile_size(int tile_width, int tile_height)
 {
   style_.tile_width = tile_width;
   style_.tile_height = tile_height;
+}
+
+void AbstractGridView::set_min_viewport_height(const int height_px)
+{
+  min_viewport_height_ = height_px;
+}
+
+std::optional<int> AbstractGridView::min_viewport_height() const
+{
+  return min_viewport_height_;
+}
+
+void AbstractGridView::set_fixed_viewport_layout(const bool fixed_viewport_layout)
+{
+  fixed_viewport_layout_ = fixed_viewport_layout;
+}
+
+bool AbstractGridView::use_fixed_viewport_layout() const
+{
+  return fixed_viewport_layout_;
+}
+
+AbstractGridView::FixedViewportGeometry AbstractGridView::fixed_viewport_geometry() const
+{
+  const int item_count = this->get_item_count_filtered();
+  const int cols = cols_per_row_ > 0 ? cols_per_row_ : 1;
+  const int content_rows = (item_count > 0) ? ((item_count - 1) / cols + 1) : 0;
+  /* #min_viewport_height_ is always set for fixed-viewport layouts; the fallback only guards
+   * misuse. */
+  const int viewport_h = min_viewport_height_.value_or(int(UI_UNIT_Y * 12));
+  const int visible_rows = std::max(viewport_h / style_.tile_height, 1);
+  const int max_first_row = std::max(0, content_rows - visible_rows);
+  return {cols, content_rows, visible_rows, max_first_row};
+}
+
+int AbstractGridView::fixed_viewport_first_row() const
+{
+  if (!scroll_value_) {
+    return 0;
+  }
+  const FixedViewportGeometry geo = this->fixed_viewport_geometry();
+  return std::clamp(*scroll_value_, 0, geo.max_first_row);
+}
+
+IndexRange AbstractGridView::fixed_viewport_visible_range() const
+{
+  const FixedViewportGeometry geo = this->fixed_viewport_geometry();
+  const int first_idx = this->fixed_viewport_first_row() * geo.cols;
+  const int count = geo.visible_rows * geo.cols;
+  return IndexRange(first_idx, count);
+}
+
+void AbstractGridView::fixed_viewport_clamp_scroll_value()
+{
+  if (!scroll_value_) {
+    scroll_value_ = std::make_shared<int>(0);
+  }
+  const FixedViewportGeometry geo = this->fixed_viewport_geometry();
+  *scroll_value_ = std::clamp(*scroll_value_, 0, geo.max_first_row);
+}
+
+bool AbstractGridView::supports_scrolling() const
+{
+  if (!fixed_viewport_layout_) {
+    return false;
+  }
+  return !this->is_fully_visible();
+}
+
+bool AbstractGridView::is_fully_visible() const
+{
+  if (!fixed_viewport_layout_) {
+    return false;
+  }
+  if (this->get_item_count_filtered() == 0) {
+    return true;
+  }
+  const FixedViewportGeometry geo = this->fixed_viewport_geometry();
+  return geo.content_rows <= geo.visible_rows;
+}
+
+void AbstractGridView::scroll(const ViewScrollDirection direction)
+{
+  if (!fixed_viewport_layout_) {
+    AbstractView::scroll(direction);
+    return;
+  }
+  if (!scroll_value_) {
+    scroll_value_ = std::make_shared<int>(0);
+  }
+  /* The value is clamped to the valid row range during the next build
+   * (#fixed_viewport_clamp_scroll_value). */
+  *scroll_value_ += (direction == ViewScrollDirection::UP) ? -1 : 1;
+}
+
+std::optional<uiViewState> AbstractGridView::persistent_state() const
+{
+  if (!scroll_value_) {
+    return {};
+  }
+  uiViewState state{};
+  state.scroll_offset = *scroll_value_;
+  return state;
+}
+
+void AbstractGridView::persistent_state_apply(const uiViewState &state)
+{
+  if (state.scroll_offset) {
+    scroll_value_ = std::make_shared<int>(state.scroll_offset);
+  }
+}
+
+void AbstractGridView::fixed_viewport_scroll_active_into_view(const bool scroll_active_to_center)
+{
+  if (!scroll_value_) {
+    scroll_value_ = std::make_shared<int>(0);
+  }
+  const FixedViewportGeometry geo = this->fixed_viewport_geometry();
+  if (geo.cols <= 0) {
+    return;
+  }
+
+  int index = 0;
+  this->foreach_filtered_item([&](AbstractViewItem &item) {
+    if (item.is_active()) {
+      const int row = index / geo.cols;
+      if (scroll_active_to_center) {
+        *scroll_value_ = std::clamp(
+            row - geo.visible_rows / 2, 0, geo.max_first_row);
+      }
+      else if (row < *scroll_value_) {
+        *scroll_value_ = row;
+      }
+      else if (row >= *scroll_value_ + geo.visible_rows) {
+        *scroll_value_ = std::min(row - geo.visible_rows + 1, geo.max_first_row);
+      }
+    }
+    index++;
+  });
+}
+
+std::optional<ViewScrollDirection> AbstractGridView::fixed_viewport_scroll_at_y(
+    const Block &block, const float block_space_y) const
+{
+  if (!fixed_viewport_layout_ || !this->supports_scrolling()) {
+    return std::nullopt;
+  }
+
+  const std::optional<rcti> bounds = this->get_bounds();
+  if (!bounds || BLI_rcti_is_empty(&*bounds)) {
+    return std::nullopt;
+  }
+
+  /* Extend the active edge band into the ~0.5 #UI_UNIT_Y separator gaps above/below the grid so the
+   * persistent scroll arrows drawn there (see #draw_overlays) are themselves hoverable. */
+  const float gap = (0.5f * UI_UNIT_Y) / block.aspect;
+  if (block_space_y > bounds->ymax + gap || block_space_y < bounds->ymin - gap) {
+    return std::nullopt;
+  }
+
+  const int first_row = this->fixed_viewport_first_row();
+  const float scroll_mouse = UI_MENU_SCROLL_MOUSE / block.aspect;
+  if (block_space_y > bounds->ymax - scroll_mouse) {
+    if (first_row > 0) {
+      return ViewScrollDirection::UP;
+    }
+  }
+  else if (block_space_y < bounds->ymin + scroll_mouse) {
+    if (first_row < this->fixed_viewport_geometry().max_first_row) {
+      return ViewScrollDirection::DOWN;
+    }
+  }
+  return std::nullopt;
+}
+
+void AbstractGridView::draw_overlays(const ARegion &region, const Block &block) const
+{
+  if (!fixed_viewport_layout_ || !this->supports_scrolling()) {
+    return;
+  }
+
+  /* Persistent scroll-arrow affordances, drawn whenever there is more content in that direction
+   * (mirrors #draw_clip_tri for #BLOCK_CLIPTOP / #BLOCK_CLIPBOTTOM menus). The current scroll row
+   * comes from #scroll_value_. */
+  const int first_row = this->fixed_viewport_first_row();
+  const bool can_scroll_up = first_row > 0;
+  const bool can_scroll_down = first_row < this->fixed_viewport_geometry().max_first_row;
+  if (!can_scroll_up && !can_scroll_down) {
+    return;
+  }
+
+  /* Union visible tile rects in region pixel space (same path as #draw_button). */
+  rcti pixel_bounds;
+  BLI_rcti_init_minmax(&pixel_bounds);
+  bool has_visible_tile = false;
+  int tile_pixel_width = 0;
+  for (const Button &but : block.buttons()) {
+    if (but.type != ButtonType::ViewItem) {
+      continue;
+    }
+    const auto *view_item_but = static_cast<const ButtonViewItem *>(&but);
+    if (view_item_but->view_item == nullptr ||
+        &view_item_but->view_item->get_view() != static_cast<const AbstractView *>(this))
+    {
+      continue;
+    }
+    if (but.flag & (UI_HIDDEN | UI_SCROLLED)) {
+      continue;
+    }
+    rcti but_pixel{};
+    button_to_pixelrect(&but_pixel, &region, &block, &but);
+    BLI_rcti_do_minmax_rcti(&pixel_bounds, &but_pixel);
+    tile_pixel_width = BLI_rcti_size_x(&but_pixel);
+    has_visible_tile = true;
+  }
+  if (!has_visible_tile || BLI_rcti_is_empty(&pixel_bounds)) {
+    return;
+  }
+
+  /* Center the arrows on the full grid width, not the union of visible tiles. The bottom row may be
+   * partial (fewer than #cols_per_row_ tiles), and at high zoom the viewport can show only that one
+   * row, so the union would be narrower than the grid and pull the arrow off-center to the left.
+   * Tiles are left-aligned, so the grid's left edge is stable at #pixel_bounds xmin; extend it by
+   * the full column count. With a full row visible this equals #BLI_rcti_cent_x(&pixel_bounds). */
+  const int cols = std::max(cols_per_row_, 1);
+  const int center_x = pixel_bounds.xmin + (cols * tile_pixel_width) / 2;
+
+  float draw_color[4];
+  theme::get_color_4fv(TH_TEXT, draw_color);
+
+  /* Layout gap above/below the grid is ~0.5 #UI_UNIT_Y in block space; map through the block
+   * matrix so arrows stay centered in those gaps when the parent UI is scaled (e.g. zoomed node
+   * editor sets #Block::aspect on the popover via the browse button). */
+  const float gap_px = 0.5f * UI_UNIT_Y * block_to_window_scale(&region, &block);
+  const float aspect = block.aspect;
+  GPU_blend(GPU_BLEND_ALPHA);
+  if (can_scroll_up) {
+    /* Lift the up-arrow an extra half #UI_UNIT_Y (one #gap_px) off the top grid row so it doesn't
+     * crowd the tiles. */
+    draw_icon_tri(float(center_x),
+                  pixel_bounds.ymax + gap_px * 1.5f,
+                  't',
+                  draw_color,
+                  aspect);
+  }
+  if (can_scroll_down) {
+    draw_icon_tri(float(center_x),
+                  pixel_bounds.ymin - gap_px * 0.5f,
+                  'v',
+                  draw_color,
+                  aspect);
+  }
+  GPU_blend(GPU_BLEND_NONE);
 }
 
 static std::optional<int> find_filtered_item_index(const AbstractGridViewItem &item)
@@ -262,11 +525,28 @@ IndexRange AbstractGridView::get_visible_range(
 
 void AbstractGridView::scroll_active_into_view(bContext *C, bool scroll_active_to_center)
 {
+  if (fixed_viewport_layout_) {
+    /* Fixed-viewport scrolling is a row index in #scroll_value_, applied by the next build. When
+     * #cols_per_row_ isn't known yet (no build has run), defer to the build instead. */
+    if (cols_per_row_ > 0) {
+      this->fixed_viewport_scroll_active_into_view(scroll_active_to_center);
+    }
+    else {
+      scroll_active_into_view_on_build_ = true;
+    }
+    return;
+  }
+
   int index = 0;
   this->foreach_filtered_item([&](AbstractViewItem &item) {
     if (item.is_active()) {
       Button *but = reinterpret_cast<Button *>(item.view_item_button());
-      ARegion *region = CTX_wm_region(C);
+      /* Prefer the popup region so we don't accidentally scroll the host editor's View2D
+       * when this is called from inside a popover draw callback. */
+      ARegion *region = CTX_wm_region_popup(C);
+      if (!region) {
+        region = CTX_wm_region(C);
+      }
 
       if (but) {
         but_ensure_in_view(C, region, but);
@@ -394,6 +674,9 @@ class BuildOnlyVisibleButtonsHelper {
   bool is_item_visible(int item_idx) const;
   void fill_layout_before_visible(Block &block) const;
   void fill_layout_after_visible(Block &block) const;
+  void fill_min_viewport_height(Block &block,
+                                const AbstractGridView &grid_view,
+                                int cols_per_row) const;
 
  private:
   IndexRange get_visible_range(const View2D &v2d,
@@ -408,6 +691,14 @@ BuildOnlyVisibleButtonsHelper::BuildOnlyVisibleButtonsHelper(
     const AbstractGridViewItem *force_visible_item)
     : grid_view_(grid_view), style_(grid_view.get_style()), cols_per_row_(cols_per_row)
 {
+  if (grid_view.use_fixed_viewport_layout()) {
+    /* Fixed-viewport layouts derive the visible rows from #scroll_value_, not the region #View2D
+     * (which the popup pipeline re-initializes on every refresh). */
+    if (grid_view.get_item_count_filtered()) {
+      visible_items_range_ = grid_view.fixed_viewport_visible_range();
+    }
+    return;
+  }
   if (v2d.flag & V2D_IS_INIT && grid_view.get_item_count_filtered()) {
     visible_items_range_ = this->grid_view_.get_visible_range(v2d, force_visible_item);
   }
@@ -420,6 +711,9 @@ bool BuildOnlyVisibleButtonsHelper::is_item_visible(const int item_idx) const
 
 void BuildOnlyVisibleButtonsHelper::fill_layout_before_visible(Block &block) const
 {
+  if (grid_view_.use_fixed_viewport_layout()) {
+    return;
+  }
   if (!visible_items_range_ || visible_items_range_->is_empty()) {
     return;
   }
@@ -434,6 +728,9 @@ void BuildOnlyVisibleButtonsHelper::fill_layout_before_visible(Block &block) con
 
 void BuildOnlyVisibleButtonsHelper::fill_layout_after_visible(Block &block) const
 {
+  if (grid_view_.use_fixed_viewport_layout()) {
+    return;
+  }
   if (!visible_items_range_ || visible_items_range_->is_empty()) {
     return;
   }
@@ -446,6 +743,30 @@ void BuildOnlyVisibleButtonsHelper::fill_layout_after_visible(Block &block) cons
                                                      0;
     BuildOnlyVisibleButtonsHelper::add_spacer_button(block, remaining_rows);
   }
+}
+
+void BuildOnlyVisibleButtonsHelper::fill_min_viewport_height(Block &block,
+                                                             const AbstractGridView &grid_view,
+                                                             const int cols_per_row) const
+{
+  const std::optional<int> min_height_opt = grid_view.min_viewport_height();
+  if (!min_height_opt) {
+    return;
+  }
+
+  const int item_count = grid_view.get_item_count_filtered();
+  const int content_rows = (item_count > 0 && cols_per_row > 0) ?
+                               ((item_count - 1) / cols_per_row + 1) :
+                               0;
+  const int content_height = content_rows * style_.tile_height;
+  const int min_height = *min_height_opt;
+
+  if (content_height >= min_height) {
+    return;
+  }
+
+  const int pad_rows = (min_height - content_height + style_.tile_height - 1) / style_.tile_height;
+  this->add_spacer_button(block, pad_rows);
 }
 
 void BuildOnlyVisibleButtonsHelper::add_spacer_button(Block &block, const int row_count) const
@@ -520,6 +841,17 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
   const int cols_per_row = std::max(guessed_layout_width / style.tile_width, 1);
   grid_view.cols_per_row_ = cols_per_row;
 
+  if (grid_view.use_fixed_viewport_layout()) {
+    /* Now that the column count and filtered items are known, snap the stored scroll row into the
+     * valid range, then apply any deferred "scroll active into view" request (e.g. on first open of
+     * the popover) before the visible rows are selected below. */
+    grid_view.fixed_viewport_clamp_scroll_value();
+    if (grid_view.scroll_active_into_view_on_build_) {
+      grid_view.fixed_viewport_scroll_active_into_view(false);
+      grid_view.scroll_active_into_view_on_build_ = false;
+    }
+  }
+
   const AbstractGridViewItem *search_highlight_item = dynamic_cast<const AbstractGridViewItem *>(
       grid_view.search_highlight_item());
 
@@ -549,6 +881,7 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
   block_layout_set_current(&block_, &parent_layout);
 
   build_visible_helper.fill_layout_after_visible(block_);
+  build_visible_helper.fill_min_viewport_height(block_, grid_view, cols_per_row);
 }
 
 Layout &GridViewLayoutBuilder::current_layout() const
@@ -568,6 +901,9 @@ void GridViewBuilder::build_grid_view(const bContext &C,
   Block &block = *layout.block();
 
   const ARegion *region = CTX_wm_region_popup(&C) ? CTX_wm_region_popup(&C) : CTX_wm_region(&C);
+  if (block.handle != nullptr && block.handle->region != nullptr && block_is_popup_any(&block)) {
+    region = block.handle->region;
+  }
   block_view_persistent_state_restore(*region, block, grid_view);
 
   grid_view.build_items();

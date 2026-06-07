@@ -49,6 +49,40 @@
 
 namespace blender::ui {
 
+/** Map #PopupAttachDirection to #Block::direction (primary open direction). */
+static int popover_direction_from_attach(const PopupAttachDirection attach_dir)
+{
+  switch (attach_dir) {
+    case PopupAttachDirection::Horizontal:
+      return UI_DIR_LEFT;
+    case PopupAttachDirection::VerticalAlignLeft:
+      return UI_DIR_DOWN;
+    case PopupAttachDirection::VerticalAlignRight:
+      return UI_DIR_DOWN | UI_DIR_RIGHT;
+    case PopupAttachDirection::Vertical:
+      return UI_DIR_DOWN | UI_DIR_CENTER_X;
+  }
+  BLI_assert_unreachable();
+  return UI_DIR_DOWN | UI_DIR_CENTER_X;
+}
+
+/** Same as #popover_direction_from_attach, but opening upward when there is no room below. */
+static int popover_direction_from_attach_flip_up(const PopupAttachDirection attach_dir)
+{
+  switch (attach_dir) {
+    case PopupAttachDirection::Horizontal:
+      return UI_DIR_LEFT;
+    case PopupAttachDirection::VerticalAlignLeft:
+      return UI_DIR_UP;
+    case PopupAttachDirection::VerticalAlignRight:
+      return UI_DIR_UP | UI_DIR_RIGHT;
+    case PopupAttachDirection::Vertical:
+      return UI_DIR_UP | UI_DIR_CENTER_X;
+  }
+  BLI_assert_unreachable();
+  return UI_DIR_UP | UI_DIR_CENTER_X;
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Popup Menu with Callback or String
  * \{ */
@@ -139,10 +173,9 @@ static Block *block_func_POPOVER(bContext *C, PopupBlockHandle *handle, void *ar
   const ButtonMenu *popover_button = pup->but && pup->but->type == ButtonType::Popover ?
                                          static_cast<ButtonMenu *>(pup->but) :
                                          nullptr;
-  const int direction = (popover_button && (popover_button->popup_attach_direction ==
-                                            PopupAttachDirection::Horizontal)) ?
-                            UI_DIR_LEFT :
-                            UI_DIR_DOWN | UI_DIR_CENTER_X;
+  const PopupAttachDirection attach_dir = popover_button ? popover_button->popup_attach_direction :
+                                                           PopupAttachDirection::Vertical;
+  const int direction = popover_direction_from_attach(attach_dir);
   block_direction_set(block, direction);
 
   const int block_margin = U.widget_unit / 2;
@@ -178,13 +211,13 @@ static Block *block_func_POPOVER(bContext *C, PopupBlockHandle *handle, void *ar
       if (region && region->panels.first && (direction & UI_DIR_DOWN)) {
         /* For regions with panels, prefer to open to top so we can
          * see the values of the buttons below changing. */
-        block_direction_set(block, UI_DIR_UP | UI_DIR_CENTER_X);
+        block_direction_set(block, popover_direction_from_attach_flip_up(attach_dir));
       }
       /* Prefer popover from header to be positioned into the editor. */
       else if (region) {
         if (RGN_TYPE_IS_HEADER_ANY(region->regiontype)) {
           if (RGN_ALIGN_ENUM_FROM_MASK(region->alignment) == RGN_ALIGN_BOTTOM) {
-            block_direction_set(block, UI_DIR_UP | UI_DIR_CENTER_X);
+            block_direction_set(block, popover_direction_from_attach_flip_up(attach_dir));
           }
         }
       }

@@ -764,6 +764,12 @@ enum eSpaceImage_Mode : char {
   SI_MODE_UV = 3,
 };
 
+/** #SpaceImage.image_browser_view_mode / #SpaceNode.image_browser_view_mode. */
+enum eImageBrowserViewMode : char {
+  IMAGE_BROWSER_VIEW_GRID = 0,
+  IMAGE_BROWSER_VIEW_LIST = 1,
+};
+
 /** #SpaceImage.flag */
 enum eSpaceImage_Flag : int {
   SI_FLAG_UNUSED_0 = (1 << 0), /* cleared */

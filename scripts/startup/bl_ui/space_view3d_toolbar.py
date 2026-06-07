@@ -483,7 +483,19 @@ class SelectPaintSlotHelper:
             case 'IMAGE':
                 mesh = ob.data
                 uv_text = mesh.uv_layers.active.name if mesh.uv_layers.active else ""
-                layout.template_ID(mode_settings, self.canvas_image_attr_name, new="image.new", open="image.open")
+                # Filter the image selector by the current material when one is available.
+                mat = ob.active_material if ob else None
+                if mat:
+                    layout.template_ID_with_filter_context(
+                        mode_settings, self.canvas_image_attr_name,
+                        new="image.new", open="image.open",
+                        filter='CURRENT_MATERIAL',
+                        text="",
+                        material=mat,
+                        slot_type='NONE',  # Slot type is not used for the canvas image.
+                    )
+                else:
+                    layout.template_ID(mode_settings, self.canvas_image_attr_name, new="image.new", open="image.open")
                 if settings.missing_uvs:
                     layout.operator("paint.add_simple_uvs", icon='ADD', text="Add UVs")
                 else:
@@ -738,7 +750,20 @@ class VIEW3D_PT_stencil_projectpaint(Panel):
         col.active = ipaint.use_stencil_layer
 
         col.label(text="Stencil Image")
-        col.template_ID(ipaint, "stencil_image", new="image.new", open="image.open")
+        # Filter the image selector by the current material when one is available.
+        # The stencil image is not tied to a slot type, so only filter by material.
+        mat = ob.active_material if ob else None
+        if mat:
+            col.template_ID_with_filter_context(
+                ipaint, "stencil_image",
+                new="image.new", open="image.open",
+                filter='CURRENT_MATERIAL',
+                text="",
+                material=mat,
+                slot_type='NONE',
+            )
+        else:
+            col.template_ID(ipaint, "stencil_image", new="image.new", open="image.open")
 
         stencil_text = mesh.uv_layer_stencil.name if mesh.uv_layer_stencil else ""
 

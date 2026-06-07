@@ -10047,10 +10047,22 @@ wmOperator *context_active_operator_get(const bContext *C)
   return nullptr;
 }
 
+/* Resolve the searchbox handling data of \a but, accounting for semi-modal search fields whose
+ * state lives in #Button.semi_modal_state (with #Button.active null outside the semi-modal scope).
+ */
+static const HandleButtonData *button_handle_data_get(const Button *but)
+{
+  return but->semi_modal_state ? but->semi_modal_state : but->active;
+}
+
 ARegion *region_searchbox_region_get(const ARegion *button_region)
 {
-  Button *but = region_active_but_get(button_region);
-  return (but != nullptr) ? but->active->searchbox : nullptr;
+  const Button *but = region_active_but_get(button_region);
+  if (but == nullptr) {
+    return nullptr;
+  }
+  const HandleButtonData *data = button_handle_data_get(but);
+  return data ? data->searchbox : nullptr;
 }
 
 void context_update_anim_flag(const bContext *C)
@@ -10163,7 +10175,12 @@ static int handle_button_over(bContext *C, const wmEvent *event, ARegion *region
     Button *but = but_find_open_event(region, event);
     if (but) {
       button_activate_init(C, region, but, BUTTON_ACTIVATE_OVER);
-      do_button(C, but->block, but, event);
+      /* Semi-modal buttons (e.g. a search field with #BUT2_FORCE_SEMI_MODAL_ACTIVE) are not
+       * activated the normal way; their handling state lives in #Button.semi_modal_state and
+       * #Button.active stays null. Skip #do_button to avoid dereferencing a null active. */
+      if (but->active) {
+        do_button(C, but->block, but, event);
+      }
     }
   }
 
@@ -11587,7 +11604,10 @@ static int handle_menu_event(bContext *C,
     }
   }
   else if (event->type == TIMER && event->customdata == menu->scrolltimer) {
-    if (!menu_scroll_test(block, {mx, my})) {
+    if (popup_image_browser_scrolltimer_step(C, menu, block, my)) {
+      /* Image browser grid edge auto-scroll. */
+    }
+    else if (!menu_scroll_test(block, {mx, my})) {
       WM_event_timer_remove(CTX_wm_manager(C), win, menu->scrolltimer);
       menu->scrolltimer = nullptr;
     }
@@ -11604,11 +11624,21 @@ static int handle_menu_event(bContext *C,
       }
 
       /* add menu scroll timer, if needed */
-      if (menu_scroll_test(block, {mx, my})) {
+      if (menu_scroll_test(block, {mx, my}) ||
+          popup_image_browser_autoscroll_at_pointer(block, my))
+      {
         if (menu->scrolltimer == nullptr) {
           menu->scrolltimer = WM_event_timer_add(
               CTX_wm_manager(C), CTX_wm_window(C), TIMER, MENU_SCROLL_INTERVAL);
         }
+      }
+      else if (menu->scrolltimer) {
+        WM_event_timer_remove(CTX_wm_manager(C), win, menu->scrolltimer);
+        menu->scrolltimer = nullptr;
+      }
+
+      if (block->flag & BLOCK_POPOVER) {
+        popup_image_browser_redraw_for_scroll_overlay(region, block);
       }
     }
 
@@ -11688,6 +11718,16 @@ static int handle_menu_event(bContext *C,
           if (event->modifier) {
             /* pass */
           }
+          else if ((block->flag & BLOCK_POPOVER) &&
+                   popup_block_grid_view2d_scroll(C, region, event))
+          {
+            if (but) {
+              but->active->cancel = true;
+              button_activate_exit(C, but, but->active, false, false);
+            }
+            WM_event_add_mousemove(CTX_wm_window(C));
+            break;
+          }
           else if (block->flag & (BLOCK_CLIPTOP | BLOCK_CLIPBOTTOM)) {
             const float dy = event->xy[1] - event->prev_xy[1];
             if (dy != 0.0f) {
@@ -11710,6 +11750,16 @@ static int handle_menu_event(bContext *C,
         case WHEELDOWNMOUSE: {
           if (event->modifier) {
             /* pass */
+          }
+          else if ((block->flag & BLOCK_POPOVER) &&
+                   popup_block_grid_view2d_scroll(C, region, event))
+          {
+            if (but) {
+              but->active->cancel = true;
+              button_activate_exit(C, but, but->active, false, false);
+            }
+            WM_event_add_mousemove(CTX_wm_window(C));
+            break;
           }
           else if (block->flag & (BLOCK_CLIPTOP | BLOCK_CLIPBOTTOM)) {
             const int scroll_dir = (event->type == WHEELUPMOUSE) ? 1 : -1;

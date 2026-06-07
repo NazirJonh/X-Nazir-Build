@@ -22,6 +22,7 @@
 #include "BKE_image.hh"
 #include "BKE_main.hh"
 #include "BKE_main_invariants.hh"
+#include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_enum.hh"
 #include "BKE_node_legacy_types.hh"
@@ -361,7 +362,26 @@ static void node_shader_buts_tex_image(ui::Layout &layout, bContext *C, PointerR
   PointerRNA iuserptr = RNA_pointer_get(ptr, "image_user");
 
   layout.context_ptr_set("image_user", &iuserptr);
-  template_id(&layout, C, ptr, "image", "IMAGE_OT_new", "IMAGE_OT_open", nullptr);
+
+  /* Get material for filtering. */
+  Material *mat = nullptr;
+  {
+    PointerRNA mat_ptr = CTX_data_pointer_get(C, "material");
+    if (mat_ptr.data != nullptr && RNA_struct_is_a(mat_ptr.type, RNA_Material)) {
+      mat = static_cast<Material *>(mat_ptr.data);
+    }
+  }
+
+  const Object *ob = CTX_data_active_object(C);
+  Scene *scene = CTX_data_scene(C);
+  if (mat && ob && scene) {
+    /* Ensure TexPaintSlot cache + NodeTexImage::paint_slot_type are up-to-date for filtering. */
+    BKE_texpaint_slot_refresh_cache(scene, mat, ob);
+  }
+
+  ui::uiTemplateImageBrowse(
+      &layout, C, ptr, "image", mat, "IMAGE_OT_new", "IMAGE_OT_open", nullptr);
+
   layout.prop(ptr, "interpolation", DEFAULT_FLAGS, "", ICON_NONE);
   layout.prop(ptr, "projection", DEFAULT_FLAGS, "", ICON_NONE);
 

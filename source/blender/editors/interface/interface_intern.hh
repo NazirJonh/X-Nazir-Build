@@ -1238,6 +1238,20 @@ LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int
 void layout_panel_popup_scroll_apply(Panel *panel, const float dy);
 
 /**
+ * Scroll a popover region's #View2D when the cursor is over a grid view (e.g. image browser).
+ * \return True if the event was handled.
+ */
+bool popup_block_grid_view2d_scroll(bContext *C, ARegion *region, const wmEvent *event);
+
+/** Image browser popover: edge hover auto-scroll (#PopupBlockHandle::scrolltimer). */
+bool popup_image_browser_scrolltimer_step(bContext *C,
+                                          PopupBlockHandle *menu,
+                                          Block *block,
+                                          int my);
+bool popup_image_browser_autoscroll_at_pointer(Block *block, int my);
+void popup_image_browser_redraw_for_scroll_overlay(ARegion *region, Block *block);
+
+/**
  * Draws in resolution of 48x4 colors.
  */
 void draw_gradient(const rcti *rect,
@@ -1758,6 +1772,7 @@ void interface_tag_script_reload_queries();
 /* `views/interface_view.cc` */
 
 void block_free_views(Block *block);
+AbstractView *block_view_find_by_idname(Block &block, StringRef idname);
 void block_views_end(ARegion *region, const Block *block);
 void block_view_persistent_state_restore(const ARegion &region,
                                          const Block &block,

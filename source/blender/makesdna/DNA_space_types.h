@@ -666,6 +666,14 @@ struct SpaceImage {
   /* Storage for sub-space types. */
   eSpaceImage_Mode mode_prev = SI_MODE_VIEW;
 
+  /** Image browser filter mode for ID browsing. */
+  char image_filter_mode = 0;
+  /** Slot type filter used when image_filter_mode == SLOT_TYPE. */
+  char image_filter_slot_type = 0;
+  /** Image browser popover view mode: 0 = grid, 1 = list. #eImageBrowserViewMode. */
+  char image_browser_view_mode = 0;
+  char _pad_filter[5] = {};
+
   char pin = 0;
 
   eSpaceImage_PixelRoundMode pixel_round_mode = SI_PIXEL_ROUND_DISABLED;
@@ -899,7 +907,14 @@ struct SpaceNode {
   struct bGPdata *gpd = nullptr;
 
   eSpaceNode_Gizmo_Flag gizmo_flag = {};
-  char _pad2[7] = {};
+
+  /** Image browser filter mode for ID browsing. Mirrors #SpaceImage. */
+  char image_filter_mode = 0;
+  /** Slot type filter used when image_filter_mode includes the slot bit. */
+  char image_filter_slot_type = 0;
+  /** Image browser popover view mode: 0 = grid, 1 = list. #eImageBrowserViewMode. */
+  char image_browser_view_mode = 0;
+  char _pad2[4] = {};
 
   SpaceNodeOverlay overlay;
 

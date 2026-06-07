@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include "BLI_function_ref.hh"
@@ -96,6 +97,23 @@ class AbstractGridView : public AbstractView {
   Map<StringRef, AbstractGridViewItem *> item_map_;
   GridViewStyle style_;
   int cols_per_row_ = 0;
+  /** When set, empty row spacers are added so the grid block is at least this tall (pixels). */
+  std::optional<int> min_viewport_height_;
+  /**
+   * Popover/fixed-height layouts: only the visible tile rows are placed (no scroll spacer labels).
+   * The scroll position is stored as a row index in #scroll_value_ instead of the region #View2D,
+   * mirroring #AbstractTreeView. This is robust against the popup draw pipeline re-initializing the
+   * region #View2D every refresh.
+   */
+  bool fixed_viewport_layout_ = false;
+  /**
+   * Fixed-viewport scroll position: number of tile rows scrolled out of view at the top (see
+   * #uiViewState.scroll_offset). Shared with the previous view via #update_children_from_old so it
+   * survives popover rebuilds. Null until the first fixed-viewport build allocates it.
+   */
+  std::shared_ptr<int> scroll_value_;
+  /** Request scrolling the active item into view during the next fixed-viewport build. */
+  bool scroll_active_into_view_on_build_ = false;
 
  public:
   AbstractGridView();
@@ -124,7 +142,26 @@ class AbstractGridView : public AbstractView {
   int get_item_count_filtered() const;
 
   void set_tile_size(int tile_width, int tile_height);
+  /** Ensure the laid-out grid uses at least this height, using the same row spacers as scrolling.
+   */
+  void set_min_viewport_height(int height_px);
+  [[nodiscard]] std::optional<int> min_viewport_height() const;
+  void set_fixed_viewport_layout(bool fixed_viewport_layout);
+  [[nodiscard]] bool use_fixed_viewport_layout() const;
+  /**
+   * Menu-style scroll zones (#UI_MENU_SCROLL_MOUSE) over the grid bounds in block space, extended
+   * into the separator gaps so the persistent scroll arrows are themselves hoverable. Used for edge
+   * auto-scroll. The current scroll row comes from #scroll_value_.
+   */
+  [[nodiscard]] std::optional<ViewScrollDirection> fixed_viewport_scroll_at_y(
+      const Block &block, float block_space_y) const;
+  void draw_overlays(const ARegion &region, const Block &block) const override;
   AbstractViewItem *find_active_or_visible_item() const override;
+  bool supports_scrolling() const override;
+  bool is_fully_visible() const override;
+  void scroll(ViewScrollDirection direction) override;
+  std::optional<uiViewState> persistent_state() const override;
+  void persistent_state_apply(const uiViewState &state) override;
   AbstractViewItem *navigate_left(AbstractViewItem *from) override;
   AbstractViewItem *navigate_right(AbstractViewItem *from) override;
   AbstractViewItem *navigate_up(AbstractViewItem *from) override;
@@ -134,11 +171,29 @@ class AbstractGridView : public AbstractView {
 
   IndexRange get_visible_range(const View2D &v2d,
                                const AbstractGridViewItem *force_visible_item) const;
+  /** Item index range to build for the current fixed-viewport scroll position (#scroll_value_). */
+  IndexRange fixed_viewport_visible_range() const;
 
  protected:
   virtual void build_items() = 0;
 
  private:
+  /** Row/column geometry of the fixed viewport for the current filtered item count. */
+  struct FixedViewportGeometry {
+    int cols;
+    int content_rows;
+    int visible_rows;
+    /** Highest possible first visible row (0 when everything fits). */
+    int max_first_row;
+  };
+  FixedViewportGeometry fixed_viewport_geometry() const;
+  /** First visible row, read (and clamped) from #scroll_value_. */
+  int fixed_viewport_first_row() const;
+  /** Allocate #scroll_value_ if needed and clamp it to the valid row range. */
+  void fixed_viewport_clamp_scroll_value();
+  /** Set #scroll_value_ so the active item's row is within the fixed viewport. */
+  void fixed_viewport_scroll_active_into_view(bool scroll_active_to_center);
+
   void foreach_view_item(FunctionRef<void(AbstractViewItem &)> iter_fn) const final;
   void update_children_from_old(const AbstractView &old_view) override;
   AbstractGridViewItem *find_matching_item(const AbstractGridViewItem &item_to_match,

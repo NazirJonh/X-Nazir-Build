@@ -103,8 +103,14 @@ enum class NodeAssetMenuOperatorType : int8_t {
  * Panel popup draw direction.
  */
 enum class PopupAttachDirection : int8_t {
+  /** Below the button, horizontally centered on it. */
   Vertical = 0,
+  /** Beside the button (to the left of it). */
   Horizontal = 1,
+  /** Below (or above) the button, left edges aligned. */
+  VerticalAlignLeft = 2,
+  /** Below (or above) the button, right edges aligned. */
+  VerticalAlignRight = 3,
 };
 
 enum class EnumTabExpand {

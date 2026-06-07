@@ -136,6 +136,12 @@ static void image_runtime_free_data(Image *image)
     image->runtime->partial_update_user = nullptr;
   }
   BKE_image_partial_update_register_free(image);
+
+  /* Free paint slot info runtime index. */
+  if (image->runtime->paint_slot_info != nullptr) {
+    MEM_delete(image->runtime->paint_slot_info);
+    image->runtime->paint_slot_info = nullptr;
+  }
 }
 
 static void image_init_data(ID *id)
@@ -3259,6 +3265,170 @@ void BKE_image_init_imageuser(Image *ima, ImageUser *iuser)
     BKE_image_multilayer_index(rr, iuser);
   }
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Runtime Paint Slot Info Index Functions
+ * \{ */
+
+/**
+ * Collect usage records for `image` within `ntree`, recursing into node groups so that
+ * images referenced only inside a group are indexed too. `material` is the material that
+ * owns the top-level tree the recursion started from.
+ */
+static void image_paint_slot_info_collect_tree(bNodeTree &ntree,
+                                               Material &material,
+                                               const Image &image,
+                                               blender::Vector<bke::UsageRecord> &records)
+{
+  for (bNode *node : ntree.all_nodes()) {
+    if (node->type_legacy == SH_NODE_TEX_IMAGE && node->id == &image.id) {
+      const NodeTexImage *storage = static_cast<const NodeTexImage *>(node->storage);
+      const char slot_type = (storage != nullptr) ? storage->paint_slot_type :
+                                                    NODE_TEX_IMAGE_SLOT_NONE;
+      records.append(bke::UsageRecord{material.id.session_uid, slot_type});
+    }
+    else if (node->is_group() && node->id != nullptr) {
+      if (bNodeTree *group_tree = id_cast<bNodeTree *>(node->id)) {
+        image_paint_slot_info_collect_tree(*group_tree, material, image, records);
+      }
+    }
+  }
+}
+
+static void image_paint_slot_info_collect(Main &bmain,
+                                          const Image *ima,
+                                          blender::Vector<bke::UsageRecord> &records)
+{
+  for (Material &material : bmain.materials) {
+    if (material.nodetree != nullptr) {
+      image_paint_slot_info_collect_tree(*material.nodetree, material, *ima, records);
+    }
+  }
+}
+
+void BKE_image_paint_slot_info_invalidate(Image *ima)
+{
+  if (ima == nullptr || ima->runtime == nullptr) {
+    return;
+  }
+  if (ima->runtime->paint_slot_info != nullptr) {
+    MEM_delete(ima->runtime->paint_slot_info);
+    ima->runtime->paint_slot_info = nullptr;
+  }
+}
+
+void BKE_image_paint_slot_info_rebuild(Main *bmain, Image *ima)
+{
+  BKE_image_paint_slot_info_invalidate(ima);
+
+  if (bmain == nullptr || ima == nullptr || ima->runtime == nullptr) {
+    return;
+  }
+
+  bke::ImagePaintSlotInfo *info = MEM_new<bke::ImagePaintSlotInfo>(__func__);
+  ima->runtime->paint_slot_info = info;
+
+  image_paint_slot_info_collect(*bmain, ima, info->usage_records);
+
+  for (const bke::UsageRecord &record : info->usage_records) {
+    info->is_used = true;
+    if (record.slot_type > NODE_TEX_IMAGE_SLOT_NONE &&
+        record.slot_type <= NODE_TEX_IMAGE_SLOT_DISPLACEMENT)
+    {
+      info->slot_types_mask |= uint16_t(1 << record.slot_type);
+    }
+  }
+}
+
+bool BKE_image_paint_slot_info_is_valid(const Image *ima)
+{
+  if (ima == nullptr || ima->runtime == nullptr) {
+    return false;
+  }
+  /* A non-null index is treated as current: it is cleared on the known mutation paths (see
+   * #BKE_image_paint_slot_info_invalidate). This is best-effort and may briefly lag, which is
+   * acceptable for a UI filter. */
+  return ima->runtime->paint_slot_info != nullptr;
+}
+
+bool BKE_image_paint_slot_info_is_used_in_any_material(Main *bmain, const Image *ima)
+{
+  if (ima == nullptr) {
+    return false;
+  }
+
+  /* Rebuild index if needed. */
+  if (!BKE_image_paint_slot_info_is_valid(ima)) {
+    BKE_image_paint_slot_info_rebuild(bmain, const_cast<Image *>(ima));
+  }
+
+  const bke::ImagePaintSlotInfo *info = ima->runtime->paint_slot_info;
+  return (info != nullptr) ? info->is_used : false;
+}
+
+bool BKE_image_paint_slot_info_has_slot_type(Main *bmain, const Image *ima, char slot_type)
+{
+  if (ima == nullptr) {
+    return false;
+  }
+
+  /* None means "any slot" - just check if image is used at all. */
+  if (slot_type == NODE_TEX_IMAGE_SLOT_NONE) {
+    return BKE_image_paint_slot_info_is_used_in_any_material(bmain, ima);
+  }
+
+  /* Rebuild index if needed. */
+  if (!BKE_image_paint_slot_info_is_valid(ima)) {
+    BKE_image_paint_slot_info_rebuild(bmain, const_cast<Image *>(ima));
+  }
+
+  const bke::ImagePaintSlotInfo *info = ima->runtime->paint_slot_info;
+  if (info == nullptr || !info->is_used) {
+    return false;
+  }
+
+  /* Check bitmask. */
+  if (slot_type > NODE_TEX_IMAGE_SLOT_NONE && slot_type <= NODE_TEX_IMAGE_SLOT_DISPLACEMENT) {
+    return (info->slot_types_mask & (1 << slot_type)) != 0;
+  }
+
+  return false;
+}
+
+bool BKE_image_paint_slot_info_is_used_in_material(Main *bmain,
+                                                   const Image *ima,
+                                                   const Material *material,
+                                                   char slot_type)
+{
+  if (ima == nullptr || material == nullptr) {
+    return false;
+  }
+
+  /* Rebuild index if needed. */
+  if (!BKE_image_paint_slot_info_is_valid(ima)) {
+    BKE_image_paint_slot_info_rebuild(bmain, const_cast<Image *>(ima));
+  }
+
+  const bke::ImagePaintSlotInfo *info = ima->runtime->paint_slot_info;
+  if (info == nullptr || !info->is_used) {
+    return false;
+  }
+
+  /* Search through usage records, matching on session UID so a stale record can never match a
+   * freed material. */
+  for (const bke::UsageRecord &record : info->usage_records) {
+    if (record.material_session_uid == material->id.session_uid) {
+      /* If slot_type is 0 (NONE), any match counts. */
+      if (slot_type == NODE_TEX_IMAGE_SLOT_NONE || record.slot_type == slot_type) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/** \} */
 
 static void image_free_tile(Image *ima, ImageTile *tile)
 {

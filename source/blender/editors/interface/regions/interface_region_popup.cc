@@ -415,12 +415,17 @@ static void block_region_refresh(const bContext *C, ARegion *region)
 
   ScrArea *ctx_area = CTX_wm_area(C);
   ARegion *ctx_region = CTX_wm_region(C);
+  ARegion *ctx_region_popup = CTX_wm_region_popup(C);
 
   if (region->runtime->do_draw & RGN_REFRESH_UI) {
     ScrArea *handle_ctx_area;
     ARegion *handle_ctx_region;
 
     region->runtime->do_draw &= ~RGN_REFRESH_UI;
+    /* Mirror what #popup_block_create does: make the popup region accessible via
+     * CTX_wm_region_popup so that draw callbacks can distinguish it from the host region
+     * returned by CTX_wm_region. */
+    CTX_wm_region_popup_set(const_cast<bContext *>(C), region);
     for (Block &block : region->runtime->uiblocks.items_mutable()) {
       PopupBlockHandle *handle = block.handle;
 
@@ -444,6 +449,7 @@ static void block_region_refresh(const bContext *C, ARegion *region)
 
   CTX_wm_area_set(const_cast<bContext *>(C), ctx_area);
   CTX_wm_region_set(const_cast<bContext *>(C), ctx_region);
+  CTX_wm_region_popup_set(const_cast<bContext *>(C), ctx_region_popup);
 }
 
 static void block_region_draw(const bContext *C, ARegion *region)
@@ -901,6 +907,12 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
 
   /* checks which buttons are visible, sets flags to prevent draw (do after region init) */
   popup_block_scrolltest(block);
+
+  /* Update bounds of all views in this block. For region panels this happens in #panels_end(), and
+   * #block_end() skips it for panel blocks. Popups own a dummy #Block::panel (see
+   * #popup_dummy_panel_set) and never go through #panels_end(), so without this a view's bounds
+   * would stay unset. Needed e.g. by the image-browser popover's fixed-viewport edge scrolling. */
+  block_views_end(region, block);
 
   /* Adds sub-window. */
   ED_region_floating_init(region);

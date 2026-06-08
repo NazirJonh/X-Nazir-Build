@@ -984,6 +984,7 @@ void SCULPT_OT_set_pivot_position(wmOperatorType *ot);
 void SCULPT_OT_paint_mask_extract(wmOperatorType *ot);
 void SCULPT_OT_face_set_extract(wmOperatorType *ot);
 void SCULPT_OT_paint_mask_slice(wmOperatorType *ot);
+void SCULPT_OT_vdm_insert_mesh(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint
 

@@ -2357,6 +2357,15 @@ static float brush_strength(const Sculpt &sd,
     case SCULPT_BRUSH_TYPE_DRAW:
     case SCULPT_BRUSH_TYPE_DRAW_SHARP:
     case SCULPT_BRUSH_TYPE_LAYER:
+      /* VDM insert-mesh must faithfully reproduce a baked texture across the standard 0..1 Strength
+       * range, with 1.0 giving the full baked shape. Skip the sensitivity squaring so the slider is
+       * a linear displacement multiplier (shared by the live preview and the generated stamp, with
+       * no non-linear overshoot), and apply a fixed calibration so that full strength matches the
+       * scale at which a standard VDM bake is reproduced 1:1. */
+      if (brush_uses_vector_displacement(brush) && (brush.flag2 & BRUSH_VDM_INSERT_MESH)) {
+        const float vdm_insert_scale = 4.0f;
+        return vdm_insert_scale * root_alpha * flip * pressure * overlap * feather;
+      }
       return alpha * flip * pressure * overlap * feather;
     case SCULPT_BRUSH_TYPE_DISPLACEMENT_ERASER:
       return alpha * pressure * overlap * feather;
@@ -3468,6 +3477,50 @@ static void do_brush_action(const Depsgraph &depsgraph,
 
   update_brush_local_mat(sd, ob);
 
+  /* Capture a VDM stamp for the current symmetry pass.
+   *
+   * Regular stroke: only on the first dab — position, orientation and scale are fixed at the
+   * moment the stroke begins.
+   * Anchored stroke: update on every dab so that the stamp always reflects the final dragged-out
+   * radius and position when the mouse button is released. The existing entry for the same
+   * symmetry pass is replaced; a new one is appended when first seen. */
+  if (brush_uses_vector_displacement(brush) && (brush.flag2 & BRUSH_VDM_INSERT_MESH)) {
+    const bool is_anchored = (brush.stroke_method == BRUSH_STROKE_ANCHORED);
+    if (is_anchored || ss.cache->first_time) {
+      VDMStampData stamp;
+      stamp.location = ss.cache->location_symm;
+      stamp.brush_local_mat = ss.cache->brush_local_mat;
+      stamp.brush_local_mat_inv = ss.cache->brush_local_mat_inv;
+      stamp.plane_offset = ss.cache->plane_offset;
+      stamp.radius = ss.cache->radius;
+      stamp.bstrength = ss.cache->bstrength;
+      stamp.mirror_symmetry_pass = ss.cache->mirror_symmetry_pass;
+      stamp.radial_symmetry_pass = ss.cache->radial_symmetry_pass;
+      stamp.symm_rot_mat = ss.cache->symm_rot_mat;
+      stamp.symm_rot_mat_inv = ss.cache->symm_rot_mat_inv;
+
+      if (is_anchored) {
+        /* Replace the existing stamp for this symmetry pass if one already exists. */
+        bool found = false;
+        for (VDMStampData &existing : ss.vdm_stamps) {
+          if (existing.mirror_symmetry_pass == stamp.mirror_symmetry_pass &&
+              existing.radial_symmetry_pass == stamp.radial_symmetry_pass)
+          {
+            existing = stamp;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          ss.vdm_stamps.append(stamp);
+        }
+      }
+      else {
+        ss.vdm_stamps.append(stamp);
+      }
+    }
+  }
+
   if (brush.deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM) {
     if (!ss.cache->cloth_sim) {
       ss.cache->cloth_sim = cloth::brush_simulation_create(
@@ -3486,6 +3539,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
   switch (brush.sculpt_brush_type) {
     case SCULPT_BRUSH_TYPE_DRAW: {
       if (brush_uses_vector_displacement(brush)) {
+        /* Run the VDM Draw brush normally. In VDM Insert Mesh mode this deformation is
+         * a preview; the original mesh is restored at stroke end before the stamp object
+         * is created (see #SculptPaintStroke::done). */
         brushes::do_draw_vector_displacement_brush(depsgraph, sd, ob, node_mask);
       }
       else {
@@ -6021,8 +6077,34 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   MEM_delete(ss.cache);
   ss.cache = nullptr;
 
+  /* For VDM Insert Mesh mode the stroke was run purely as a visual preview. Restore the
+   * original vertex positions before committing the undo step so that the mesh is left
+   * untouched. The clean stamp geometry is built independently from the stamp data. */
+  const bool is_vdm_insert_preview =
+      !is_cancel && stroke_started && brush &&
+      brush_uses_vector_displacement(*brush) &&
+      (brush->flag2 & BRUSH_VDM_INSERT_MESH) &&
+      !ss.vdm_stamps.is_empty();
+
+  if (is_vdm_insert_preview) {
+    undo::restore_position_from_undo_step(*this->depsgraph, ob);
+    bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+    if (pbvh) {
+      bke::pbvh::update_normals(*this->depsgraph, ob, *pbvh);
+    }
+    /* batch cache / depsgraph tag are handled by flush_update_done below. */
+  }
+
   if (!is_cancel && stroke_started) {
     stroke_undo_end(*paint_mode_settings_, *this->object, brush);
+  }
+
+  if (!is_cancel && stroke_started && !ss.vdm_stamps.is_empty()) {
+    WM_operator_name_call(
+        this->evil_C, "SCULPT_OT_vdm_insert_mesh", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+  }
+  else {
+    ss.vdm_stamps.clear();
   }
 
   if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {

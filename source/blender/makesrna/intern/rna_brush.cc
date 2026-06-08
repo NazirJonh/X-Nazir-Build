@@ -3769,6 +3769,21 @@ static void rna_def_brush(BlenderRNA *brna)
                            "inverse, choosing the closest intersection.");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  prop = RNA_def_property(srna, "use_vdm_insert_mesh", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_VDM_INSERT_MESH);
+  RNA_def_property_ui_text(prop,
+                           "VDM Insert Mesh",
+                           "Create a new mesh object from VDM stamp instead of deforming the active mesh");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_vdm_insert_into_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_VDM_INSERT_INTO_ACTIVE);
+  RNA_def_property_ui_text(prop,
+                           "Into Active Mesh",
+                           "Add the generated VDM geometry to the active mesh instead of "
+                           "creating a separate object");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   prop = RNA_def_property(srna, "use_accumulate", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_ACCUMULATE);
   RNA_def_property_ui_text(prop, "Accumulate", "Accumulate stroke daubs on top of each other");

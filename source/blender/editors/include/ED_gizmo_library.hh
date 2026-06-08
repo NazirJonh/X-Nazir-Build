@@ -134,6 +134,8 @@ enum {
    * Needed for large rectangles that we don't want to swallow all events. */
   ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE = (1 << 0),
   ED_GIZMO_CAGE_DRAW_FLAG_CORNER_HANDLES = (1 << 1),
+  /** Interior rectangle is a move hot-spot; center cross still draws when #ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE is set. */
+  ED_GIZMO_CAGE_DRAW_FLAG_XFORM_INTERIOR_TRANSLATE = (1 << 2),
 };
 
 /** #wmGizmo.highlight_part */

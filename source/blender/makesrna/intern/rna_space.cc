@@ -20,6 +20,7 @@
 
 #include "ED_asset.hh"
 #include "ED_buttons.hh"
+#include "ED_paint.hh"
 #include "ED_spreadsheet.hh"
 #include "ED_userpref.hh"
 
@@ -2019,6 +2020,66 @@ static bool rna_SpaceImageEditor_show_maskedit_get(PointerRNA *ptr)
     obedit = BKE_view_layer_edit_object_get(view_layer);
   }
   return ED_space_image_check_show_maskedit(sima, obedit);
+}
+
+static bool rna_SpaceImageEditor_paint_select_is_transforming_get(PointerRNA *ptr)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  return ED_image_paint_select_is_transforming(sima);
+}
+
+static void rna_SpaceImageEditor_paint_select_translation_get(PointerRNA *ptr, float *values)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  ED_image_paint_select_translation_get(sima, values);
+}
+
+static void rna_SpaceImageEditor_paint_select_translation_set(PointerRNA *ptr, const float *values)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  ED_image_paint_select_translation_set(sima, values);
+}
+
+static float rna_SpaceImageEditor_paint_select_rotation_get(PointerRNA *ptr)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  return ED_image_paint_select_rotation_get(sima);
+}
+
+static void rna_SpaceImageEditor_paint_select_rotation_set(PointerRNA *ptr, float value)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  ED_image_paint_select_rotation_set(sima, value);
+}
+
+static void rna_SpaceImageEditor_paint_select_scale_get(PointerRNA *ptr, float *values)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  ED_image_paint_select_scale_get(sima, values);
+}
+
+static void rna_SpaceImageEditor_paint_select_scale_set(PointerRNA *ptr, const float *values)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  ED_image_paint_select_scale_set(sima, values);
+}
+
+static bool rna_SpaceImageEditor_paint_select_is_moving_get(PointerRNA *ptr)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  return ED_image_paint_select_is_moving(sima);
+}
+
+static void rna_SpaceImageEditor_paint_select_move_offset_get(PointerRNA *ptr, float *values)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  ED_image_paint_select_move_offset_get(sima, values);
+}
+
+static void rna_SpaceImageEditor_paint_select_move_offset_set(PointerRNA *ptr, const float *values)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  ED_image_paint_select_move_offset_set(sima, values);
 }
 
 static void rna_SpaceImageEditor_image_set(PointerRNA *ptr,
@@ -6489,6 +6550,58 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_pointer_funcs(prop, "rna_SpaceImage_overlay_get", nullptr, nullptr, nullptr);
   RNA_def_property_ui_text(
       prop, "Overlay Settings", "Settings for display of overlays in the UV/Image editor");
+
+  /* Paint select transform state (runtime only, backed by ImageSelectTransformState). */
+  prop = RNA_def_property(srna, "paint_select_is_transforming", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_SpaceImageEditor_paint_select_is_transforming_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Is Transforming", "A paint selection transform is currently in progress");
+
+  prop = RNA_def_property(srna, "paint_select_translation", PROP_FLOAT, PROP_TRANSLATION);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_float_funcs(prop,
+                               "rna_SpaceImageEditor_paint_select_translation_get",
+                               "rna_SpaceImageEditor_paint_select_translation_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Translation", "UV translation of the active paint selection");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "paint_select_rotation", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_SpaceImageEditor_paint_select_rotation_get",
+                               "rna_SpaceImageEditor_paint_select_rotation_set",
+                               nullptr);
+  RNA_def_property_ui_text(
+      prop, "Rotation", "Rotation angle (radians) of the active paint selection");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "paint_select_scale", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_float_funcs(prop,
+                               "rna_SpaceImageEditor_paint_select_scale_get",
+                               "rna_SpaceImageEditor_paint_select_scale_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Scale", "UV scale of the active paint selection");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  /* Paint select move state (runtime only, backed by ImageSelectMoveState). */
+  prop = RNA_def_property(srna, "paint_select_is_moving", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_SpaceImageEditor_paint_select_is_moving_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Is Moving", "A paint selection move is currently in progress");
+
+  prop = RNA_def_property(srna, "paint_select_move_offset", PROP_FLOAT, PROP_TRANSLATION);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_float_funcs(prop,
+                               "rna_SpaceImageEditor_paint_select_move_offset_get",
+                               "rna_SpaceImageEditor_paint_select_move_offset_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Offset", "UV offset of the active paint selection move");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 
   rna_def_space_image_uv(brna);
   rna_def_space_image_overlay(brna);

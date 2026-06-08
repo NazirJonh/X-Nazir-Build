@@ -2763,6 +2763,11 @@ def km_image_paint(params):
     )
 
     items.extend([
+        # Temporary lasso selection mask (does not switch the active tool).
+        ("paint.image_select_lasso", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True},
+         {"properties": [("mode", 'ADD')]}),
+        ("paint.image_select_lasso", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True, "ctrl": True},
+         {"properties": [("mode", 'SUB')]}),
         # Brush strokes
         ("paint.image_paint", {"type": 'LEFTMOUSE', "value": 'PRESS'},
          {"properties": [("mode", 'NORMAL')]}),
@@ -2809,6 +2814,12 @@ def km_image_paint(params):
         op_tool_cycle("builtin.annotate", {"type": 'D', "value": 'PRESS'}),
         op_asset_shelf_popup("VIEW3D_AST_brush_texture_paint", {"type": 'B', "value": 'PRESS'}),
         op_asset_shelf_popup("IMAGE_AST_brush_paint", {"type": 'B', "value": 'PRESS'}),
+        # Copy selection.
+        ("paint.image_select_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
+        # Paste selection.
+        ("paint.image_select_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
+        # Transform selection.
+        ("paint.image_select_transform", {"type": 'T', "value": 'PRESS', "ctrl": True, "shift": True}, None),
     ])
 
     return keymap

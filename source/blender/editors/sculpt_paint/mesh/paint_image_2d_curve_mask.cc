@@ -12,6 +12,8 @@
 
 #include "BKE_brush.hh"
 
+#include "IMB_imbuf_types.hh"
+
 #include "BLI_math_vector.h"
 
 #include "../paint_intern.hh"
@@ -165,12 +167,10 @@ static void curve_mask_allocate(CurveMaskCache *curve_mask_cache, const int diam
 
 }  // namespace ed::sculpt_paint
 
-using namespace blender::ed::sculpt_paint;
-
 void paint_curve_mask_cache_free_data(CurveMaskCache *curve_mask_cache)
 {
-  sampled_curve_free(curve_mask_cache);
-  curve_mask_free(curve_mask_cache);
+  ed::sculpt_paint::sampled_curve_free(curve_mask_cache);
+  ed::sculpt_paint::curve_mask_free(curve_mask_cache);
 }
 
 void paint_curve_mask_cache_update(CurveMaskCache *curve_mask_cache,
@@ -179,15 +179,14 @@ void paint_curve_mask_cache_update(CurveMaskCache *curve_mask_cache,
                                    const float radius,
                                    const float cursor_position[2])
 {
-  if (!is_sampled_curve_valid(curve_mask_cache, brush)) {
-    update_sampled_curve(curve_mask_cache, brush);
+  if (!ed::sculpt_paint::is_sampled_curve_valid(curve_mask_cache, brush)) {
+    ed::sculpt_paint::update_sampled_curve(curve_mask_cache, brush);
   }
-
-  if (!is_curve_mask_size_valid(curve_mask_cache, diameter)) {
-    curve_mask_free(curve_mask_cache);
-    curve_mask_allocate(curve_mask_cache, diameter);
+  if (!ed::sculpt_paint::is_curve_mask_size_valid(curve_mask_cache, diameter)) {
+    ed::sculpt_paint::curve_mask_free(curve_mask_cache);
+    ed::sculpt_paint::curve_mask_allocate(curve_mask_cache, diameter);
   }
-  update_curve_mask(curve_mask_cache, brush, diameter, radius, cursor_position);
+  ed::sculpt_paint::update_curve_mask(curve_mask_cache, brush, diameter, radius, cursor_position);
 }
 
 }  // namespace blender

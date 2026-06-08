@@ -138,6 +138,491 @@ static void image_runtime_free_data(Image *image)
   BKE_image_partial_update_register_free(image);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Image Paint Selection Masks (runtime, per-tile)
+ * \{ */
+
+ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int width, int height)
+{
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+  if (mask_ptr) {
+    ImBuf *mask = *mask_ptr;
+    if (mask->x == width && mask->y == height) {
+      return mask;
+    }
+    /* Size changed, free old mask. */
+    IMB_freeImBuf(mask);
+    runtime->paint_selection_masks.remove(tile_number);
+  }
+
+  ImBuf *mask = IMB_allocImBuf(width, height, ImBufFlags::Zero);
+  IMB_alloc_float_pixels(mask, 1);
+  memset(mask->float_data_for_write(), 0, size_t(width) * height * sizeof(float));
+  runtime->paint_selection_masks.add_new(tile_number, mask);
+  return mask;
+}
+
+void BKE_image_paint_selection_mask_free(Image *image)
+{
+  bke::ImageRuntime *runtime = image->runtime;
+  for (ImBuf *mask : runtime->paint_selection_masks.values()) {
+    IMB_freeImBuf(mask);
+  }
+  runtime->paint_selection_masks.clear();
+
+  for (gpu::Texture *tex : runtime->paint_selection_mask_textures.values()) {
+    GPU_texture_free(tex);
+  }
+  runtime->paint_selection_mask_textures.clear();
+}
+
+void BKE_image_paint_selection_mask_tile_free(Image *image, int tile_number)
+{
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+  if (mask_ptr) {
+    IMB_freeImBuf(*mask_ptr);
+    runtime->paint_selection_masks.remove(tile_number);
+  }
+  gpu::Texture **tex_ptr = runtime->paint_selection_mask_textures.lookup_ptr(tile_number);
+  if (tex_ptr) {
+    GPU_texture_free(*tex_ptr);
+    runtime->paint_selection_mask_textures.remove(tile_number);
+  }
+}
+
+ImBuf *BKE_image_paint_selection_mask_lookup(Image *image, int tile_number)
+{
+  if (!image || !image->runtime) {
+    return nullptr;
+  }
+  ImBuf **mask_ptr = image->runtime->paint_selection_masks.lookup_ptr(tile_number);
+  return mask_ptr ? *mask_ptr : nullptr;
+}
+
+static bool image_paint_selection_mask_imbuf_bounds(const ImBuf *mask, int r_min[2], int r_max[2])
+{
+  if (!mask) {
+    return false;
+  }
+  const float *pixels = mask->float_data();
+  if (!pixels) {
+    return false;
+  }
+
+  r_min[0] = mask->x;
+  r_min[1] = mask->y;
+  r_max[0] = 0;
+  r_max[1] = 0;
+
+  for (int y = 0; y < mask->y; y++) {
+    for (int x = 0; x < mask->x; x++) {
+      if (pixels[y * mask->x + x] > IMAGE_PAINT_SELECTION_MASK_THRESHOLD) {
+        r_min[0] = std::min(r_min[0], x);
+        r_min[1] = std::min(r_min[1], y);
+        r_max[0] = std::max(r_max[0], x + 1);
+        r_max[1] = std::max(r_max[1], y + 1);
+      }
+    }
+  }
+
+  return r_max[0] > r_min[0] && r_max[1] > r_min[1];
+}
+
+bool BKE_image_paint_selection_mask_bounds(
+    const Image *image, int tile_number, int r_min[2], int r_max[2])
+{
+  const ImBuf *mask = BKE_image_paint_selection_mask_lookup(
+      const_cast<Image *>(image), tile_number);
+  return image_paint_selection_mask_imbuf_bounds(mask, r_min, r_max);
+}
+
+float BKE_image_paint_selection_mask_sample(const Image *image, int tile_number, int x, int y)
+{
+  const ImBuf *mask = BKE_image_paint_selection_mask_lookup(
+      const_cast<Image *>(image), tile_number);
+  if (!mask) {
+    return 0.0f;
+  }
+  if (x < 0 || x >= mask->x || y < 0 || y >= mask->y) {
+    return 0.0f;
+  }
+  const float *pixels = mask->float_buffer.data;
+  if (!pixels) {
+    return 0.0f;
+  }
+  return pixels[size_t(y) * mask->x + x];
+}
+
+void BKE_image_paint_selection_mask_fill(Image *image, int tile_number, float value)
+{
+  ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  if (!mask) {
+    return;
+  }
+  float *data = mask->float_data_for_write();
+  if (!data) {
+    return;
+  }
+  const int total = mask->x * mask->y;
+  for (int i = 0; i < total; i++) {
+    data[i] = value;
+  }
+  mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
+}
+
+void BKE_image_paint_selection_mask_invert(Image *image, int tile_number)
+{
+  ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  if (!mask) {
+    return;
+  }
+  float *data = mask->float_data_for_write();
+  if (!data) {
+    return;
+  }
+  const int total = mask->x * mask->y;
+  for (int i = 0; i < total; i++) {
+    data[i] = 1.0f - data[i];
+  }
+  mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
+}
+
+void BKE_image_paint_selection_mask_merge(Image *image,
+                                          int tile_number,
+                                          const ImBuf *fragment_mask,
+                                          const int origin[2])
+{
+  ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  if (!mask || !fragment_mask) {
+    return;
+  }
+  float *mdata = mask->float_data_for_write();
+  const float *fmask = fragment_mask->float_buffer.data;
+  if (!mdata || !fmask) {
+    return;
+  }
+
+  const int ox = origin[0];
+  const int oy = origin[1];
+  for (int ly = 0; ly < fragment_mask->y; ly++) {
+    const int py = oy + ly;
+    if (py < 0 || py >= mask->y) {
+      continue;
+    }
+    for (int lx = 0; lx < fragment_mask->x; lx++) {
+      const int px = ox + lx;
+      if (px < 0 || px >= mask->x) {
+        continue;
+      }
+      mdata[py * mask->x + px] = fmask[ly * fragment_mask->x + lx];
+    }
+  }
+  mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
+}
+
+bool BKE_image_paint_selection_mask_has_any(const Image *image)
+{
+  if (!image || !image->runtime) {
+    return false;
+  }
+  return !image->runtime->paint_selection_masks.is_empty();
+}
+
+int BKE_image_paint_selection_mask_first_tile_with_selection(const Image *image)
+{
+  if (!image || !image->runtime) {
+    return 0;
+  }
+  for (const auto &item : image->runtime->paint_selection_masks.items()) {
+    int r_min[2], r_max[2];
+    if (image_paint_selection_mask_imbuf_bounds(item.value, r_min, r_max)) {
+      return item.key;
+    }
+  }
+  return 0;
+}
+
+ImBuf *BKE_image_paint_selection_mask_dup_tile(Image *image, int tile_number)
+{
+  ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  return mask ? IMB_dupImBuf(mask) : nullptr;
+}
+
+void BKE_image_paint_selection_mask_restore_tile(Image *image,
+                                                 int tile_number,
+                                                 const ImBuf *src_mask)
+{
+  if (!image || !image->runtime) {
+    return;
+  }
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+
+  if (src_mask) {
+    if (mask_ptr && *mask_ptr) {
+      ImBuf *cur = *mask_ptr;
+      if (cur->float_data() && src_mask->float_data()) {
+        if (cur->x == src_mask->x && cur->y == src_mask->y) {
+          memcpy(cur->float_data_for_write(),
+                 src_mask->float_data(),
+                 sizeof(float) * cur->x * cur->y);
+          cur->userflags |= IB_DISPLAY_BUFFER_INVALID;
+        }
+        else {
+          IMB_freeImBuf(cur);
+          *mask_ptr = IMB_dupImBuf(src_mask);
+        }
+      }
+    }
+    else {
+      runtime->paint_selection_masks.add(tile_number, IMB_dupImBuf(src_mask));
+    }
+  }
+  else {
+    if (mask_ptr && *mask_ptr) {
+      IMB_freeImBuf(*mask_ptr);
+      runtime->paint_selection_masks.remove(tile_number);
+    }
+  }
+}
+
+ImBuf *BKE_image_paint_selection_extract_pixels(Image *image,
+                                                int tile_number,
+                                                ImageUser *iuser,
+                                                int r_origin[2],
+                                                int r_size[2],
+                                                ImBuf **r_mask_out)
+{
+  if (!image || !image->runtime) {
+    return nullptr;
+  }
+
+  int r_min[2], r_max[2];
+  if (!BKE_image_paint_selection_mask_bounds(image, tile_number, r_min, r_max)) {
+    return nullptr;
+  }
+
+  const int x_min = r_min[0];
+  const int y_min = r_min[1];
+  const int w = r_max[0] - x_min;
+  const int h = r_max[1] - y_min;
+
+  /* Use a local iuser if none provided; overwrite tile in either case. */
+  ImageUser local_iuser;
+  if (!iuser) {
+    BKE_imageuser_default(&local_iuser);
+    iuser = &local_iuser;
+  }
+  iuser->tile = tile_number;
+
+  void *lock;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, iuser, &lock);
+  if (!ibuf) {
+    return nullptr;
+  }
+  if (!ibuf->float_buffer.data && !ibuf->byte_buffer.data) {
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return nullptr;
+  }
+
+  const bool is_float = ibuf->float_buffer.data != nullptr;
+
+  /* Clamp bbox to ibuf dimensions for safety (mask and ibuf should agree, but guard anyway). */
+  const int safe_x = std::max(x_min, 0);
+  const int safe_y = std::max(y_min, 0);
+  const int safe_w = std::min(w, ibuf->x - safe_x);
+  const int safe_h = std::min(h, ibuf->y - safe_y);
+
+  if (safe_w <= 0 || safe_h <= 0) {
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return nullptr;
+  }
+
+  ImBuf *fragment = IMB_allocImBuf(
+      safe_w, safe_h, is_float ? ImBufFlags::FloatData : ImBufFlags::ByteData);
+  if (!fragment) {
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return nullptr;
+  }
+  if (is_float) {
+    /* Match the source channel count so IMB_copy_rect uses the correct stride. */
+    fragment->channels = ibuf->channels ? ibuf->channels : 4;
+  }
+
+  IMB_copy_rect(fragment, ibuf, int2{safe_x, safe_y}, int2{0, 0}, int2{safe_w, safe_h});
+
+  /* Preserve colorspace so downstream tools see the correct color encoding. */
+  if (is_float) {
+    const ColorSpace *cs = ibuf->float_buffer.colorspace;
+    if (cs) {
+      IMB_colormanagement_assign_float_colorspace(
+          fragment, IMB_colormanagement_colorspace_get_name(cs));
+    }
+  }
+  else {
+    const ColorSpace *cs = ibuf->byte_buffer.colorspace;
+    if (cs) {
+      IMB_colormanagement_assign_byte_colorspace(
+          fragment, IMB_colormanagement_colorspace_get_name(cs));
+    }
+  }
+
+  BKE_image_release_ibuf(image, ibuf, lock);
+
+  r_origin[0] = safe_x;
+  r_origin[1] = safe_y;
+  r_size[0] = safe_w;
+  r_size[1] = safe_h;
+
+  /* Optionally extract the corresponding mask sub-region. */
+  if (r_mask_out) {
+    const ImBuf *tile_mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+    ImBuf *fmask = IMB_allocImBuf(safe_w, safe_h, ImBufFlags::Zero);
+    IMB_alloc_float_pixels(fmask, 1);
+    float *dst_mask = fmask->float_data_for_write();
+    if (tile_mask && tile_mask->float_buffer.data) {
+      const float *src_mask = tile_mask->float_data();
+      const int full_w = tile_mask->x;
+      for (int row = 0; row < safe_h; row++) {
+        memcpy(dst_mask + row * safe_w,
+               src_mask + (safe_y + row) * full_w + safe_x,
+               size_t(safe_w) * sizeof(float));
+      }
+    }
+    else {
+      memset(dst_mask, 0, size_t(safe_w) * safe_h * sizeof(float));
+    }
+    *r_mask_out = fmask;
+  }
+
+  return fragment;
+}
+
+bool BKE_image_paint_selection_write_region(Image *image,
+                                            int tile_number,
+                                            ImageUser *iuser,
+                                            const float *pixels,
+                                            int channels,
+                                            int x,
+                                            int y,
+                                            int width,
+                                            int height,
+                                            const float *mask)
+{
+  if (!image || !image->runtime || !pixels || width <= 0 || height <= 0 || channels <= 0) {
+    return false;
+  }
+
+  ImageUser local_iuser;
+  if (!iuser) {
+    BKE_imageuser_default(&local_iuser);
+    iuser = &local_iuser;
+  }
+  iuser->tile = tile_number;
+
+  void *lock;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, iuser, &lock);
+  if (!ibuf) {
+    return false;
+  }
+  if (!ibuf->float_buffer.data && !ibuf->byte_buffer.data) {
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return false;
+  }
+
+  /* Require exact channel match to avoid silent data corruption. */
+  const int ibuf_channels = ibuf->channels ? ibuf->channels : 4;
+  if (channels != ibuf_channels) {
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return false;
+  }
+
+  const bool is_float = ibuf->float_buffer.data != nullptr;
+
+  /* Clamp region to image bounds; allow partial writes at image edges. */
+  const int rx = std::max(0, x);
+  const int ry = std::max(0, y);
+  const int rx2 = std::min(x + width, ibuf->x);
+  const int ry2 = std::min(y + height, ibuf->y);
+  const int rw = rx2 - rx;
+  const int rh = ry2 - ry;
+
+  if (rw <= 0 || rh <= 0) {
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return false;
+  }
+
+  /* Offsets into the src pixels buffer when the region extends beyond the image boundary. */
+  const int src_x_off = rx - x; /* >= 0 */
+  const int src_y_off = ry - y; /* >= 0 */
+
+  if (is_float) {
+    float *dst = ibuf->float_data_for_write();
+    for (int row = 0; row < rh; row++) {
+      const int src_row = src_y_off + row;
+      for (int col = 0; col < rw; col++) {
+        const int src_col = src_x_off + col;
+        const int dst_idx = ((ry + row) * ibuf->x + (rx + col)) * channels;
+        const int src_idx = (src_row * width + src_col) * channels;
+        if (mask) {
+          const float m = mask[src_row * width + src_col];
+          for (int c = 0; c < channels; c++) {
+            dst[dst_idx + c] = dst[dst_idx + c] * (1.0f - m) + pixels[src_idx + c] * m;
+          }
+        }
+        else {
+          memcpy(dst + dst_idx, pixels + src_idx, size_t(channels) * sizeof(float));
+        }
+      }
+    }
+  }
+  else {
+    uint8_t *dst = ibuf->byte_data_for_write();
+    for (int row = 0; row < rh; row++) {
+      const int src_row = src_y_off + row;
+      for (int col = 0; col < rw; col++) {
+        const int src_col = src_x_off + col;
+        const int dst_idx = ((ry + row) * ibuf->x + (rx + col)) * channels;
+        const int src_idx = (src_row * width + src_col) * channels;
+        const float m = mask ? mask[src_row * width + src_col] : 1.0f;
+        for (int c = 0; c < channels; c++) {
+          float src_f = pixels[src_idx + c];
+          if (mask) {
+            const float dst_f = float(dst[dst_idx + c]) * (1.0f / 255.0f);
+            src_f = dst_f * (1.0f - m) + src_f * m;
+          }
+          dst[dst_idx + c] = static_cast<uint8_t>(
+              std::max(0.0f, std::min(1.0f, src_f)) * 255.0f + 0.5f);
+        }
+      }
+    }
+  }
+
+  /* Mark the affected region dirty so the viewport and GPU texture update. */
+  ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
+  BKE_image_mark_dirty(image, ibuf);
+
+  rcti dirty_rect;
+  dirty_rect.xmin = rx;
+  dirty_rect.xmax = rx2;
+  dirty_rect.ymin = ry;
+  dirty_rect.ymax = ry2;
+  const ImageTile *tile = BKE_image_get_tile(image, tile_number);
+  if (tile) {
+    BKE_image_partial_update_mark_region(image, tile, ibuf, &dirty_rect);
+  }
+  else {
+    BKE_image_partial_update_mark_full_update(image);
+  }
+
+  BKE_image_release_ibuf(image, ibuf, lock);
+  return true;
+}
+
+/** \} */
+
 static void image_init_data(ID *id)
 {
   Image *image = id_cast<Image *>(id);
@@ -213,6 +698,7 @@ static void image_free_data(ID *id)
 
   image->tiles.free_no_destruct();
 
+  BKE_image_paint_selection_mask_free(image);
   image_runtime_free_data(image);
   MEM_delete(image->runtime);
 }

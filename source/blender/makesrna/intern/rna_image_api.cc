@@ -25,6 +25,7 @@
 #  include "BLI_listbase.h"
 #  include "BLI_math_base.h"
 #  include "BLI_string.h"
+#  include "BLI_vector.hh"
 
 #  include "BKE_context.hh"
 #  include "BKE_image.hh"
@@ -256,6 +257,260 @@ static void rna_Image_buffers_free(Image *image)
   BKE_image_free_buffers_ex(image, true);
 }
 
+static void rna_Image_get_selection_bounding_box(Image *image,
+                                                 ReportList * /*reports*/,
+                                                 int tile_number,
+                                                 int r_bbox[4],
+                                                 bool *r_has_selection)
+{
+  if (!image->runtime) {
+    *r_has_selection = false;
+    r_bbox[0] = r_bbox[1] = r_bbox[2] = r_bbox[3] = 0;
+    return;
+  }
+
+  int r_min[2], r_max[2];
+  if (BKE_image_paint_selection_mask_bounds(image, tile_number, r_min, r_max)) {
+    *r_has_selection = true;
+    r_bbox[0] = r_min[0];
+    r_bbox[1] = r_min[1];
+    r_bbox[2] = r_max[0];
+    r_bbox[3] = r_max[1];
+  }
+  else {
+    *r_has_selection = false;
+    r_bbox[0] = r_bbox[1] = r_bbox[2] = r_bbox[3] = 0;
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Paint Selection Mask Python API (runtime-only, no undo)
+ * \{ */
+
+static void rna_Image_get_selection_tiles(Image *image,
+                                          ReportList * /*reports*/,
+                                          int **r_tiles,
+                                          int *r_tiles_len)
+{
+  blender::Vector<int> tile_nums;
+  for (const ImageTile &tile : image->tiles) {
+    if (BKE_image_paint_selection_mask_lookup(image, tile.tile_number) != nullptr) {
+      tile_nums.append(tile.tile_number);
+    }
+  }
+  *r_tiles_len = int(tile_nums.size());
+  if (tile_nums.is_empty()) {
+    *r_tiles = nullptr;
+    return;
+  }
+  *r_tiles = MEM_new_array_uninitialized<int>(tile_nums.size(), __func__);
+  memcpy(*r_tiles, tile_nums.data(), tile_nums.size() * sizeof(int));
+}
+
+static void rna_Image_get_selection_mask(Image *image,
+                                         ReportList *reports,
+                                         int tile_number,
+                                         float **r_mask,
+                                         int *r_mask_len,
+                                         int *r_width,
+                                         int *r_height)
+{
+  *r_mask = nullptr;
+  *r_mask_len = 0;
+  *r_width = 0;
+  *r_height = 0;
+
+  ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  if (mask == nullptr) {
+    return;
+  }
+
+  const float *src = mask->float_buffer.data;
+  if (src == nullptr) {
+    BKE_reportf(reports, RPT_ERROR, "Selection mask for tile %d has no float buffer", tile_number);
+    return;
+  }
+
+  const int w = mask->x;
+  const int h = mask->y;
+  const int total = w * h;
+  float *out = MEM_new_array_uninitialized<float>(total, __func__);
+  memcpy(out, src, sizeof(float) * total);
+  *r_mask = out;
+  *r_mask_len = total;
+  *r_width = w;
+  *r_height = h;
+}
+
+static void rna_Image_get_selection_pixels(Image *image,
+                                           ReportList *reports,
+                                           int tile_number,
+                                           float **r_pixels,
+                                           int *r_pixels_len,
+                                           int *r_x,
+                                           int *r_y,
+                                           int *r_width,
+                                           int *r_height,
+                                           int *r_channels)
+{
+  *r_pixels = nullptr;
+  *r_pixels_len = 0;
+  *r_x = *r_y = *r_width = *r_height = *r_channels = 0;
+
+  int origin[2] = {0, 0};
+  int size[2] = {0, 0};
+  ImBuf *fragment = BKE_image_paint_selection_extract_pixels(
+      image, tile_number, nullptr, origin, size, nullptr);
+
+  if (fragment == nullptr) {
+    return;
+  }
+
+  const int w = fragment->x;
+  const int h = fragment->y;
+  float *out = nullptr;
+  int actual_channels = 0;
+
+  if (fragment->float_buffer.data != nullptr) {
+    actual_channels = fragment->channels ? fragment->channels : 4;
+    const int total = w * h * actual_channels;
+    out = MEM_new_array_uninitialized<float>(total, __func__);
+    memcpy(out, fragment->float_buffer.data, sizeof(float) * total);
+    *r_pixels_len = total;
+  }
+  else if (fragment->byte_buffer.data != nullptr) {
+    /* Byte buffer is always 4-channel RGBA. */
+    actual_channels = 4;
+    const int total = w * h * 4;
+    out = MEM_new_array_uninitialized<float>(total, __func__);
+    IMB_buffer_float_from_byte(out, fragment->byte_buffer.data, w, h, w, w);
+    *r_pixels_len = total;
+  }
+  else {
+    BKE_reportf(reports, RPT_ERROR, "Image tile %d has no pixel buffer", tile_number);
+    IMB_freeImBuf(fragment);
+    return;
+  }
+
+  *r_pixels = out;
+  *r_x = origin[0];
+  *r_y = origin[1];
+  *r_width = w;
+  *r_height = h;
+  *r_channels = actual_channels;
+  IMB_freeImBuf(fragment);
+}
+
+static void rna_Image_set_selection_mask(Image *image,
+                                         ReportList *reports,
+                                         int tile_number,
+                                         const float *mask,
+                                         int mask_len,
+                                         int width,
+                                         int height)
+{
+  if (mask == nullptr || mask_len <= 0) {
+    BKE_report(reports, RPT_ERROR, "No mask data provided");
+    return;
+  }
+  if (width <= 0 || height <= 0) {
+    BKE_report(reports, RPT_ERROR, "Invalid mask dimensions");
+    return;
+  }
+  if (mask_len != width * height) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Mask length %d does not match width * height = %d",
+                mask_len,
+                width * height);
+    return;
+  }
+  if (!image->runtime) {
+    BKE_report(reports, RPT_ERROR, "Image has no runtime data");
+    return;
+  }
+
+  /* BKE_image_paint_selection_mask_get creates or resizes the mask to the requested dimensions. */
+  ImBuf *mask_ibuf = BKE_image_paint_selection_mask_get(image, tile_number, width, height);
+  if (mask_ibuf == nullptr) {
+    BKE_reportf(reports, RPT_ERROR, "Failed to get selection mask for tile %d", tile_number);
+    return;
+  }
+
+  float *dst = mask_ibuf->float_data_for_write();
+  if (dst == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Selection mask has no float buffer");
+    return;
+  }
+
+  memcpy(dst, mask, sizeof(float) * mask_len);
+  WM_main_add_notifier(NC_IMAGE | NA_EDITED, image);
+}
+
+static void rna_Image_write_region(Image *image,
+                                   ReportList *reports,
+                                   int tile_number,
+                                   int x,
+                                   int y,
+                                   int width,
+                                   int height,
+                                   const float *pixels,
+                                   int pixels_len,
+                                   int channels,
+                                   const float *mask,
+                                   int mask_len)
+{
+  if (pixels == nullptr || pixels_len <= 0) {
+    BKE_report(reports, RPT_ERROR, "No pixel data provided");
+    return;
+  }
+  if (width <= 0 || height <= 0) {
+    BKE_report(reports, RPT_ERROR, "Invalid region dimensions");
+    return;
+  }
+  if (pixels_len < width * height * channels) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Pixel array too small: expected %d elements, got %d",
+                width * height * channels,
+                pixels_len);
+    return;
+  }
+  if (mask != nullptr && mask_len > 0 && mask_len < width * height) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Mask array too small: expected %d elements, got %d",
+                width * height,
+                mask_len);
+    return;
+  }
+
+  const float *mask_ptr = (mask != nullptr && mask_len > 0) ? mask : nullptr;
+  if (!BKE_image_paint_selection_write_region(
+          image, tile_number, nullptr, pixels, channels, x, y, width, height, mask_ptr))
+  {
+    BKE_reportf(reports, RPT_ERROR, "Failed to write region to image tile %d", tile_number);
+    return;
+  }
+  WM_main_add_notifier(NC_IMAGE | NA_EDITED, image);
+}
+
+static void rna_Image_clear_selection_mask(Image *image,
+                                           ReportList * /*reports*/,
+                                           int tile_number,
+                                           bool all_tiles)
+{
+  if (all_tiles) {
+    BKE_image_paint_selection_mask_free(image);
+  }
+  else {
+    BKE_image_paint_selection_mask_tile_free(image, tile_number);
+  }
+  WM_main_add_notifier(NC_IMAGE | NA_EDITED, image);
+}
+
+/** \} */
+
 }  // namespace blender
 
 #else
@@ -359,6 +614,20 @@ void RNA_api_image(StructRNA *srna)
   RNA_def_int(
       func, "tile_index", 0, 0, INT_MAX, "Tile", "Tile index (for tiled images)", 0, INT_MAX);
 
+  func = RNA_def_function(
+      srna, "get_selection_bounding_box", "rna_Image_get_selection_bounding_box");
+  RNA_def_function_ui_description(
+      func,
+      "Get the bounding box in pixels of the active paint selection mask for the given UDIM tile");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_int(func, "tile", 1001, 1001, 2000, "Tile", "UDIM tile number", 1001, 2000);
+  parm = RNA_def_int_array(func, "bbox", 4, nullptr, 0, INT_MAX, "Bounding Box",
+                           "Pixel bounding box [x_min, y_min, x_max, y_max]", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_OUTPUT);
+  parm = RNA_def_boolean(func, "has_selection", false, "Has Selection",
+                         "True if there is an active selection on the tile");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_OUTPUT);
+
   func = RNA_def_function(srna, "gl_touch", "rna_Image_gl_touch");
   RNA_def_function_ui_description(
       func, "Delay the image from being cleaned from the cache due inactivity");
@@ -442,6 +711,189 @@ void RNA_api_image(StructRNA *srna)
 
   func = RNA_def_function(srna, "buffers_free", "rna_Image_buffers_free");
   RNA_def_function_ui_description(func, "Free the image buffers from memory");
+
+  /* Paint selection mask API (runtime-only, no undo). */
+
+  func = RNA_def_function(srna, "get_selection_tiles", "rna_Image_get_selection_tiles");
+  RNA_def_function_ui_description(
+      func, "Get the UDIM tile numbers that currently have a paint selection mask");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_int_array(
+      func, "tiles", 1, nullptr, 1001, 2000, "Tiles", "Tile numbers with a selection mask", 1001, 2000);
+  RNA_def_parameter_flags(parm, PROP_DYNAMIC, PARM_OUTPUT);
+
+  func = RNA_def_function(srna, "get_selection_mask", "rna_Image_get_selection_mask");
+  RNA_def_function_ui_description(
+      func, "Get the full selection mask buffer for the given UDIM tile as a flat float array");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_int(func, "tile", 1001, 1001, 2000, "Tile", "UDIM tile number", 1001, 2000);
+  parm = RNA_def_float_array(func,
+                             "mask",
+                             1,
+                             nullptr,
+                             0.0f,
+                             1.0f,
+                             "Mask",
+                             "Flat float array of mask values [0..1], row-major (bottom to top)",
+                             0.0f,
+                             1.0f);
+  RNA_def_parameter_flags(parm, PROP_DYNAMIC, PARM_OUTPUT);
+  parm = RNA_def_int(func, "width", 0, 0, INT_MAX, "Width", "Mask width in pixels", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_OUTPUT);
+  parm = RNA_def_int(
+      func, "height", 0, 0, INT_MAX, "Height", "Mask height in pixels", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_OUTPUT);
+
+  func = RNA_def_function(srna, "get_selection_pixels", "rna_Image_get_selection_pixels");
+  RNA_def_function_ui_description(
+      func,
+      "Extract pixel data from the bounding box of the active paint selection on the given tile");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_int(func, "tile", 1001, 1001, 2000, "Tile", "UDIM tile number", 1001, 2000);
+  parm = RNA_def_float_array(func,
+                             "pixels",
+                             1,
+                             nullptr,
+                             -FLT_MAX,
+                             FLT_MAX,
+                             "Pixels",
+                             "Flat float pixel array, row-major (bottom to top)",
+                             -FLT_MAX,
+                             FLT_MAX);
+  RNA_def_parameter_flags(parm, PROP_DYNAMIC, PARM_OUTPUT);
+  parm = RNA_def_int(
+      func, "x", 0, 0, INT_MAX, "X", "Left edge of the extracted region in tile space", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_OUTPUT);
+  parm = RNA_def_int(func,
+                     "y",
+                     0,
+                     0,
+                     INT_MAX,
+                     "Y",
+                     "Bottom edge of the extracted region in tile space",
+                     0,
+                     INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_OUTPUT);
+  parm = RNA_def_int(func,
+                     "width",
+                     0,
+                     0,
+                     INT_MAX,
+                     "Width",
+                     "Width of the extracted region in pixels",
+                     0,
+                     INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_OUTPUT);
+  parm = RNA_def_int(func,
+                     "height",
+                     0,
+                     0,
+                     INT_MAX,
+                     "Height",
+                     "Height of the extracted region in pixels",
+                     0,
+                     INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_OUTPUT);
+  parm = RNA_def_int(
+      func, "channels", 0, 0, 4, "Channels", "Number of channels per pixel", 0, 4);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_OUTPUT);
+
+  func = RNA_def_function(srna, "set_selection_mask", "rna_Image_set_selection_mask");
+  RNA_def_function_ui_description(
+      func,
+      "Write a new selection mask buffer for the given UDIM tile. "
+      "Does not push an undo step. The mask must contain width * height float values");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_int(func, "tile", 1001, 1001, 2000, "Tile", "UDIM tile number", 1001, 2000);
+  parm = RNA_def_float_array(func,
+                             "mask",
+                             1,
+                             nullptr,
+                             0.0f,
+                             1.0f,
+                             "Mask",
+                             "Flat float array of mask values [0..1], row-major; "
+                             "size must equal width * height",
+                             0.0f,
+                             1.0f);
+  RNA_def_parameter_flags(parm, PROP_DYNAMIC, PARM_REQUIRED);
+  parm = RNA_def_int(
+      func, "width", 1, 1, INT_MAX, "Width", "Mask width in pixels", 1, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(
+      func, "height", 1, 1, INT_MAX, "Height", "Mask height in pixels", 1, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "write_region", "rna_Image_write_region");
+  RNA_def_function_ui_description(
+      func,
+      "Write pixel data into a rectangular region of the given UDIM tile. "
+      "Does not push an undo step");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_int(func, "tile", 1001, 1001, 2000, "Tile", "UDIM tile number", 1001, 2000);
+  parm = RNA_def_int(
+      func, "x", 0, 0, INT_MAX, "X", "Left edge of the destination region in tile space", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func,
+                     "y",
+                     0,
+                     0,
+                     INT_MAX,
+                     "Y",
+                     "Bottom edge of the destination region in tile space",
+                     0,
+                     INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(
+      func, "width", 1, 1, INT_MAX, "Width", "Region width in pixels", 1, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(
+      func, "height", 1, 1, INT_MAX, "Height", "Region height in pixels", 1, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_float_array(func,
+                             "pixels",
+                             1,
+                             nullptr,
+                             -FLT_MAX,
+                             FLT_MAX,
+                             "Pixels",
+                             "Flat float pixel array, row-major; size = width * height * channels",
+                             -FLT_MAX,
+                             FLT_MAX);
+  RNA_def_parameter_flags(parm, PROP_DYNAMIC, PARM_REQUIRED);
+  parm = RNA_def_int(func,
+                     "channels",
+                     4,
+                     1,
+                     4,
+                     "Channels",
+                     "Number of channels per pixel; must match the image buffer",
+                     1,
+                     4);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_float_array(func,
+                             "mask",
+                             1,
+                             nullptr,
+                             0.0f,
+                             1.0f,
+                             "Mask",
+                             "Optional 1-channel blend mask [0..1], same width * height size. "
+                             "When provided: dst = dst * (1 - mask) + pixels * mask",
+                             0.0f,
+                             1.0f);
+  RNA_def_parameter_flags(parm, PROP_DYNAMIC, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "clear_selection_mask", "rna_Image_clear_selection_mask");
+  RNA_def_function_ui_description(
+      func, "Clear the paint selection mask for one tile or all tiles");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_int(func, "tile", 1001, 1001, 2000, "Tile", "UDIM tile number (ignored when all_tiles is true)", 1001, 2000);
+  RNA_def_boolean(func,
+                  "all_tiles",
+                  false,
+                  "All Tiles",
+                  "Clear the selection mask on all UDIM tiles instead of just the given tile");
 
   /* TODO: pack/unpack, maybe should be generic functions? */
 }

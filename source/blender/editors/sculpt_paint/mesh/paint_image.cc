@@ -12,6 +12,16 @@
 #include <cstdio>
 #include <cstring>
 
+#ifndef IMAGE_SELECT_DEBUG
+#  define IMAGE_SELECT_DEBUG 1
+#endif
+#if IMAGE_SELECT_DEBUG
+#  define IMG_SEL_DBG_PAINT(fmt, ...) \
+    printf("[image_select] %s:%d: " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
+#else
+#  define IMG_SEL_DBG_PAINT(fmt, ...) ((void)0)
+#endif
+
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
@@ -268,6 +278,15 @@ static Brush *image_paint_brush(bContext *C)
 
 static bool image_paint_poll_ex(bContext *C, bool check_tool)
 {
+  if (image_select_transform_is_floating(C)) {
+    const wmWindow *win = CTX_wm_window(C);
+    const wmEvent *ev = (win && win->runtime) ? win->runtime->eventstate : nullptr;
+    if (ev && ev->type == LEFTMOUSE && ev->val == KM_PRESS) {
+      IMG_SEL_DBG_PAINT("image_paint_poll: FAIL (transform floating blocks brush LMB)");
+    }
+    return false;
+  }
+
   if (!image_paint_brush(C)) {
     return false;
   }
@@ -953,6 +972,12 @@ float3 seed_hsv_jitter()
 bool image_texture_paint_poll(bContext *C)
 {
   if (CTX_wm_space_image(C)) {
+    /* Keep keymap active while a transform gizmo is floating so that
+     * PAINT_OT_image_select_transform_drag can intercept LMB events.
+     * Individual operator polls still gate the brush stroke correctly. */
+    if (image_select_transform_is_floating(C)) {
+      return true;
+    }
     return ED_image_tools_paint_poll(C);
   }
 

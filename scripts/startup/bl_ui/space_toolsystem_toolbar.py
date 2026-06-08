@@ -2115,6 +2115,126 @@ class _defs_texture_paint:
         )
 
 
+class _defs_image_paint_select:
+
+    @staticmethod
+    def draw_select_uv_island(context, layout):
+        imapaint = context.tool_settings.image_paint
+        layout.prop(imapaint, "use_selection_uv_island", text="UV Island")
+
+    @ToolDef.from_fn
+    def move():
+        return dict(
+            idname="builtin.select_move",
+            label="Move Selection",
+            icon="ops.transform.translate",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Move Selection",
+        )
+
+    @ToolDef.from_fn
+    def transform():
+        return dict(
+            idname="builtin.select_transform",
+            label="Transform Selection",
+            icon="ops.transform.transform",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Transform Select",
+        )
+
+    @ToolDef.from_fn
+    def box():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("paint.image_select_box")
+            row = layout.row()
+            row.use_property_split = False
+            row.prop(props, "mode", text="", expand=True, icon_only=True)
+            _defs_image_paint_select.draw_select_uv_island(context, layout)
+
+        return dict(
+            idname="builtin.select_box",
+            label="Select Box",
+            icon="ops.generic.select_box",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Select Box",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
+    def lasso():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("paint.image_select_lasso")
+            row = layout.row()
+            row.use_property_split = False
+            row.prop(props, "mode", text="", expand=True, icon_only=True)
+            _defs_image_paint_select.draw_select_uv_island(context, layout)
+
+        return dict(
+            idname="builtin.select_lasso",
+            label="Select Lasso",
+            icon="ops.generic.select_lasso",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Select Lasso",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
+    def circle():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("paint.image_select_circle")
+            row = layout.row()
+            row.use_property_split = False
+            row.prop(props, "mode", text="", expand=True, icon_only=True)
+            layout.prop(props, "radius")
+            _defs_image_paint_select.draw_select_uv_island(context, layout)
+
+        def draw_cursor(_context, tool, xy):
+            from gpu_extras.presets import draw_circle_2d
+            props = tool.operator_properties("paint.image_select_circle")
+            radius = props.radius
+            draw_circle_2d(xy, (1.0,) * 4, radius, segments=32)
+
+        return dict(
+            idname="builtin.select_circle",
+            label="Select Circle",
+            icon="ops.generic.select_circle",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Select Circle",
+            draw_settings=draw_settings,
+            draw_cursor=draw_cursor,
+        )
+
+    @ToolDef.from_fn
+    def invert():
+        return dict(
+            idname="paint.image_select_invert",
+            label="Invert Selection",
+            icon="ops.generic.select_inverse",
+            widget=None,
+            keymap=(),
+        )
+
+    @ToolDef.from_fn
+    def all():
+        return dict(
+            idname="paint.image_select_all",
+            label="Select All",
+            icon="ops.generic.select_all",
+            widget=None,
+            keymap=(),
+        )
+
+    @ToolDef.from_fn
+    def none():
+        return dict(
+            idname="paint.image_select_none",
+            label="Deselect All",
+            icon="ops.generic.deselect_all",
+            widget=None,
+            keymap=(),
+        )
+
+
 class _defs_weight_paint:
 
     @staticmethod
@@ -3552,6 +3672,16 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
         ),
     )
 
+    _tools_image_paint_select = (
+        (
+            _defs_image_paint_select.box,
+            _defs_image_paint_select.circle,
+            _defs_image_paint_select.lasso,
+            _defs_image_paint_select.move,
+            _defs_image_paint_select.transform,
+        ),
+    )
+
     # Private tools dictionary, store data to implement `tools_all` & `tools_from_context`.
     # The keys match image spaces modes: `context.space_data.mode`.
     # The values represent the tools, see `ToolSelectPanelHelper` for details.
@@ -3595,6 +3725,8 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_texture_paint.clone,
             _defs_texture_paint.fill,
             _defs_texture_paint.mask,
+            None,
+            *_tools_image_paint_select,
             None,
             *_tools_annotate,
         ],

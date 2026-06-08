@@ -1325,6 +1325,12 @@ struct ImagePaintSettings {
   /** Transparency for drawing of clone image in Image editor. */
   float clone_alpha = 0.5f;
   char _pad2[4] = {};
+
+  /** Whether 2D texture paint selection masking is active. */
+  char use_selection_mask = 0;
+  /** Expand paint selection to full UV islands (like UV Editor island select). */
+  char use_selection_uv_island = 0;
+  char _pad3[6] = {};
 };
 
 /** \} */

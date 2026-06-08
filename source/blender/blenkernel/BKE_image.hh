@@ -11,6 +11,7 @@
 
 #include "BLI_compiler_attrs.h"
 #include "BLI_function_ref.hh"
+#include "BLI_map.hh"
 #include "BLI_mutex.hh"
 #include "BLI_string_ref.hh"
 
@@ -35,6 +36,7 @@ struct Depsgraph;
 struct ID;
 struct ImBuf;
 struct ImBufCache;
+struct ImageUser;
 struct MovieReader;
 struct Image;
 struct ImageFormatData;
@@ -93,6 +95,10 @@ struct ImageRuntime {
 
   float view_offset[2] = {};
   float view_zoom = 1.0f;
+
+  /* Per-tile selection masks for 2D image paint (runtime only). */
+  Map<int, ImBuf *> paint_selection_masks;
+  Map<int, gpu::Texture *> paint_selection_mask_textures;
 };
 
 }  // namespace bke
@@ -117,6 +123,79 @@ void BKE_image_free_gputextures(Image *ima);
  * \note Call from library.
  */
 void BKE_image_free_data(Image *image);
+
+/* Image paint selection masks (runtime, per-tile). */
+
+/** A mask pixel is considered selected when its value exceeds this threshold. */
+inline constexpr float IMAGE_PAINT_SELECTION_MASK_THRESHOLD = 0.5f;
+
+ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int width, int height);
+ImBuf *BKE_image_paint_selection_mask_lookup(Image *image, int tile_number);
+float BKE_image_paint_selection_mask_sample(const Image *image, int tile_number, int x, int y);
+bool BKE_image_paint_selection_mask_bounds(
+    const Image *image, int tile_number, int r_min[2], int r_max[2]);
+void BKE_image_paint_selection_mask_fill(Image *image, int tile_number, float value);
+void BKE_image_paint_selection_mask_invert(Image *image, int tile_number);
+void BKE_image_paint_selection_mask_merge(Image *image,
+                                          int tile_number,
+                                          const ImBuf *fragment_mask,
+                                          const int origin[2]);
+bool BKE_image_paint_selection_mask_has_any(const Image *image);
+/** First UDIM tile number that has a non-empty selection, or 0 if none. */
+int BKE_image_paint_selection_mask_first_tile_with_selection(const Image *image);
+ImBuf *BKE_image_paint_selection_mask_dup_tile(Image *image, int tile_number);
+void BKE_image_paint_selection_mask_restore_tile(Image *image,
+                                                 int tile_number,
+                                                 const ImBuf *src_mask);
+void BKE_image_paint_selection_mask_free(Image *image);
+void BKE_image_paint_selection_mask_tile_free(Image *image, int tile_number);
+
+/**
+ * Extract the pixel data from the bounding box of the active paint selection on the given
+ * UDIM tile. Returns a newly-allocated #ImBuf on success; caller must free it via
+ * #IMB_freeImBuf(). Preserves the source image's color-space on the returned buffer.
+ *
+ * \param tile_number: UDIM tile number (1001 for a non-tiled image).
+ * \param iuser: Optional image user; its `tile` field is overwritten by this function.
+ *   Pass null to use a default image user.
+ * \param r_origin: Receives the tile-local pixel coordinates of the bounding box origin [x, y].
+ * \param r_size: Receives the dimensions of the returned buffer [width, height].
+ * \param r_mask_out: If non-null, receives a newly-allocated 1-channel float #ImBuf containing
+ *   the mask fragment (same dimensions as the returned buffer). Caller must free it.
+ *   Pass null to skip mask extraction.
+ * \return nullptr if there is no selection, the tile has no pixel data, or the bbox is empty.
+ */
+ImBuf *BKE_image_paint_selection_extract_pixels(Image *image,
+                                                int tile_number,
+                                                ImageUser *iuser,
+                                                int r_origin[2],
+                                                int r_size[2],
+                                                ImBuf **r_mask_out);
+
+/**
+ * Write pixel data into the given UDIM tile at the pixel-coordinate region (x, y, width, height).
+ * Marks the image dirty and triggers a partial viewport update. Does NOT push an undo step —
+ * follow the same convention as #Image.pixels in the Python API.
+ *
+ * \param pixels: Flat float array, size = `width * height * channels`.
+ * \param channels: Number of channels per pixel. Must match the image buffer channel count.
+ * \param x, y: Top-left corner of the destination region in tile-local pixel coordinates.
+ * \param width, height: Dimensions of the region to write.
+ * \param mask: Optional 1-channel float mask (same `width x height`). When non-null, blending
+ *   is lerp: `dst = dst_original * (1 - mask[i]) + pixels[i] * mask[i]`. Pass null for a
+ *   hard write of all pixels.
+ * \return false if the image has no pixel data, region is out of bounds, or channels mismatch.
+ */
+bool BKE_image_paint_selection_write_region(Image *image,
+                                            int tile_number,
+                                            ImageUser *iuser,
+                                            const float *pixels,
+                                            int channels,
+                                            int x,
+                                            int y,
+                                            int width,
+                                            int height,
+                                            const float *mask);
 
 typedef void(StampCallback)(void *data,
                             const char *propname,

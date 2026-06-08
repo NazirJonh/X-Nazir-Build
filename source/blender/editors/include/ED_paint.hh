@@ -28,6 +28,7 @@ struct PaintModeSettings;
 struct PaintTileMap;
 struct ReportList;
 struct Scene;
+struct SpaceImage;
 struct UndoStep;
 struct UndoType;
 struct wmKeyConfig;
@@ -80,6 +81,19 @@ void ED_image_undo_push_begin_with_image_all_udims(const char *name,
                                                    ImageUser *iuser);
 void ED_image_undo_push(Image *image, ImBuf *ibuf, ImageUser *iuser, ImageUndoStep *us);
 void ED_image_undo_push_end();
+/**
+ * Capture a snapshot of the selection mask for `tile_number` into the currently open image undo
+ * step. Must be called after #ED_image_undo_push_begin* and before any mask modifications.
+ * On undo, the mask is restored alongside the pixel data.
+ */
+void ED_image_undo_capture_selection_mask(Image *image, int tile_number);
+/**
+ * Begin an image undo step that records only selection mask changes (no pixel data).
+ * Captures the pre-operation mask state for all tiles of `image`.
+ * The caller must call #ED_image_undo_push_end when the mask modification is complete.
+ * Do NOT combine with OPTYPE_UNDO on the operator тАФ the step is managed manually.
+ */
+void ED_image_undo_push_begin_selection(const char *name, Image *image);
 /**
  * Restore painting image to previous state. Used for anchored and drag-dot style brushes.
  */
@@ -160,5 +174,21 @@ void ED_object_texture_paint_mode_enter(bContext *C);
 
 void ED_object_texture_paint_mode_exit_ex(Main &bmain, Scene &scene, Object &ob);
 void ED_object_texture_paint_mode_exit(bContext *C);
+
+/* `paint_image_select_transform.cc` */
+
+bool ED_image_paint_select_is_transforming(SpaceImage *sima);
+void ED_image_paint_select_translation_get(SpaceImage *sima, float r_translation[2]);
+void ED_image_paint_select_translation_set(SpaceImage *sima, const float translation[2]);
+float ED_image_paint_select_rotation_get(SpaceImage *sima);
+void ED_image_paint_select_rotation_set(SpaceImage *sima, float rotation);
+void ED_image_paint_select_scale_get(SpaceImage *sima, float r_scale[2]);
+void ED_image_paint_select_scale_set(SpaceImage *sima, const float scale[2]);
+
+/* `paint_image_select_move.cc` */
+
+bool ED_image_paint_select_is_moving(SpaceImage *sima);
+void ED_image_paint_select_move_offset_get(SpaceImage *sima, float r_offset[2]);
+void ED_image_paint_select_move_offset_set(SpaceImage *sima, const float offset[2]);
 
 }  // namespace blender

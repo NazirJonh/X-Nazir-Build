@@ -144,8 +144,21 @@ class IMAGE_MT_view_zoom(Menu):
 class IMAGE_MT_select(Menu):
     bl_label = "Select"
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
+        sima = context.space_data
+
+        if sima.mode == 'PAINT':
+            layout.operator("paint.image_select_all", text="All")
+            layout.operator("paint.image_select_none", text="None")
+            layout.operator("paint.image_select_invert", text="Invert")
+            layout.separator()
+            layout.operator("paint.image_select_move", text="Move Selection")
+            layout.operator("paint.image_select_transform", text="Transform Selection")
+            layout.separator()
+            layout.operator("paint.image_select_copy", text="Copy Selection")
+            layout.operator("paint.image_select_paste", text="Paste Selection")
+            return
 
         layout.operator("uv.select_all", text="All").action = 'SELECT'
         layout.operator("uv.select_all", text="None").action = 'DESELECT'
@@ -251,6 +264,8 @@ class IMAGE_MT_image(Menu):
 
             layout.menu("IMAGE_MT_image_invert")
             layout.operator("image.resize", text="Resize")
+            if context.tool_settings.image_paint.use_selection_mask:
+                layout.operator("image.crop_selection", text="Crop to Selection")
             layout.menu("IMAGE_MT_image_transform")
 
             if ima.packed_file:
@@ -735,6 +750,33 @@ class IMAGE_HT_tool_header(Header):
             draw_fn(context, layout, tool)
 
         if tool_mode == 'PAINT':
+            sima = context.space_data
+            if sima is not None and sima.paint_select_is_transforming:
+                layout.separator()
+
+                row = layout.row(align=True)
+                row.ui_units_x = 10
+                row.prop(sima, "paint_select_translation", text="Translation")
+
+                row = layout.row(align=True)
+                row.ui_units_x = 6
+                row.prop(sima, "paint_select_rotation", text="Rotation")
+
+                row = layout.row(align=True)
+                row.ui_units_x = 10
+                row.prop(sima, "paint_select_scale", text="Scale")
+
+                layout.separator()
+
+            if sima is not None and sima.paint_select_is_moving:
+                layout.separator()
+
+                row = layout.row(align=True)
+                row.ui_units_x = 10
+                row.prop(sima, "paint_select_move_offset", text="Offset")
+
+                layout.separator()
+
             if (tool is not None) and tool.use_brushes:
                 layout.popover("IMAGE_PT_paint_settings_advanced")
                 layout.popover("IMAGE_PT_tools_brush_texture")
@@ -978,7 +1020,7 @@ class IMAGE_MT_editor_menus(Menu):
 
         layout.menu("IMAGE_MT_view")
 
-        if show_uvedit:
+        if show_uvedit or sima.mode == 'PAINT':
             layout.menu("IMAGE_MT_select")
         if show_maskedit:
             layout.menu("MASK_MT_select")
@@ -1246,6 +1288,47 @@ class IMAGE_PT_paint_select(Panel, ImagePaintPanel, BrushSelectPanel):
     bl_label = "Brush Asset"
     bl_context = ".paint_common_2d"
     bl_category = "Tool"
+
+
+class IMAGE_PT_paint_select_transform(Panel):
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'UI'
+    bl_label = "Transform Selection"
+    bl_category = "Tool"
+    bl_context = ".paint_common_2d"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        sima = context.space_data
+        return sima is not None and sima.paint_select_is_transforming
+
+    def draw(self, context):
+        layout = self.layout
+        sima = context.space_data
+        col = layout.column()
+        col.prop(sima, "paint_select_translation", text="Translation")
+        col.prop(sima, "paint_select_rotation", text="Rotation")
+        col.prop(sima, "paint_select_scale", text="Scale")
+
+
+class IMAGE_PT_paint_select_move_props(Panel):
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'UI'
+    bl_label = "Move Selection"
+    bl_category = "Tool"
+    bl_context = ".paint_common_2d"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        sima = context.space_data
+        return sima is not None and sima.paint_select_is_moving
+
+    def draw(self, _context):
+        layout = self.layout
+        sima = _context.space_data
+        layout.column().prop(sima, "paint_select_move_offset", text="Offset")
 
 
 class IMAGE_PT_paint_settings(Panel, ImagePaintPanel):
@@ -1879,6 +1962,8 @@ classes = (
     IMAGE_PT_udim_tiles,
     IMAGE_PT_view_display,
     IMAGE_PT_paint_select,
+    IMAGE_PT_paint_select_transform,
+    IMAGE_PT_paint_select_move_props,
     IMAGE_PT_paint_settings,
     IMAGE_PT_paint_color,
     IMAGE_PT_paint_swatches,

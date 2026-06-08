@@ -458,6 +458,32 @@ def _template_items_select_lasso(params, operator):
         ]
 
 
+def _template_items_image_paint_select_lasso_gesture(params):
+    """Temporary lasso for Image Paint selection mask (does not switch the active tool).
+
+    Uses #KM_PRESS (not #KM_PRESS_DRAG) so the gesture starts immediately and is not blocked
+    by other Image Editor operators that also bind Ctrl+action_mouse on press.
+    """
+    if params.select_mouse == 'RIGHTMOUSE':
+        return [
+            ("paint.image_select_lasso",
+             {"type": params.action_mouse, "value": 'PRESS', "shift": True, "ctrl": True},
+             {"properties": [("mode", 'SUB')]}),
+            ("paint.image_select_lasso",
+             {"type": params.action_mouse, "value": 'PRESS', "shift": True, "ctrl": True, "alt": True},
+             {"properties": [("mode", 'ADD')]}),
+        ]
+    else:
+        return [
+            ("paint.image_select_lasso",
+             {"type": params.action_mouse, "value": 'PRESS', "shift": True, "ctrl": True},
+             {"properties": [("mode", 'SUB')]}),
+            ("paint.image_select_lasso",
+             {"type": params.action_mouse, "value": 'PRESS', "ctrl": True},
+             {"properties": [("mode", 'ADD')]}),
+        ]
+
+
 def _template_items_hide_reveal_actions(op_hide, op_reveal):
     return [
         (op_reveal, {"type": 'H', "value": 'PRESS', "alt": True}, None),
@@ -2200,6 +2226,8 @@ def km_image(params):
         ) for key, ratio in zip(keys, ratios, strict=True)),
         ("image.change_frame", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("image.sample", {"type": params.action_mouse, "value": 'PRESS'}, None),
+        # Temporary lasso selection mask in Paint mode (does not switch the active tool).
+        *_template_items_image_paint_select_lasso_gesture(params),
         ("image.curves_point_set", {"type": params.action_mouse, "value": 'PRESS', "ctrl": True},
          {"properties": [("point", 'BLACK_POINT')]}),
         ("image.curves_point_set", {"type": params.action_mouse, "value": 'PRESS', "shift": True},
@@ -2220,6 +2248,19 @@ def km_image(params):
         ("wm.context_toggle", {"type": 'Z', "value": 'PRESS', "alt": True, "shift": True},
          {"properties": [("data_path", "space_data.overlay.show_overlays")]}),
         *_template_items_context_menu("IMAGE_MT_mask_context_menu", params.context_menu_event),
+        # Paint selection hotkeys (for menu hotkey display in Paint mode).
+        ("paint.image_select_all", {"type": 'A', "value": 'PRESS'}, None),
+        ("paint.image_select_none", {"type": 'A', "value": 'PRESS', "alt": True}, None),
+        ("paint.image_select_invert", {"type": 'I', "value": 'PRESS', "ctrl": True}, None),
+        ("paint.image_select_move", {"type": 'T', "value": 'PRESS', "ctrl": True}, None),
+        ("paint.image_select_transform", {"type": 'T', "value": 'PRESS', "ctrl": True, "shift": True}, None),
+        # Copy and paste selection.
+        ("paint.image_select_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
+        ("paint.image_select_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
+        # Floating selection: undo step / commit / discard (poll gates these when no fragment is floating).
+        ("paint.image_select_move_undo_step", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
+        ("paint.image_select_move_confirm", {"type": 'RET', "value": 'PRESS'}, None),
+        ("paint.image_select_move_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
     ])
 
     if not params.legacy:
@@ -5042,6 +5083,8 @@ def km_image_paint(params):
     )
 
     items.extend([
+        # Temporary lasso selection mask (does not switch the active tool).
+        *_template_items_image_paint_select_lasso_gesture(params),
         ("paint.image_paint", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("paint.image_paint", {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True},
          {"properties": [("mode", 'INVERT')]}),
@@ -5078,6 +5121,19 @@ def km_image_paint(params):
          {"properties": [("data_path", "tool_settings.image_paint.brush.use_smooth_stroke")]}),
         ("wm.context_menu_enum", {"type": 'E', "value": 'PRESS', "alt": True},
          {"properties": [("data_path", "tool_settings.image_paint.brush.stroke_method")]}),
+        ("paint.image_select_all", {"type": 'A', "value": 'PRESS'}, None),
+        ("paint.image_select_none", {"type": 'A', "value": 'PRESS', "alt": True}, None),
+        ("paint.image_select_invert", {"type": 'I', "value": 'PRESS', "ctrl": True}, None),
+        ("paint.image_select_move", {"type": 'T', "value": 'PRESS', "ctrl": True}, None),
+        ("paint.image_select_transform", {"type": 'T', "value": 'PRESS', "ctrl": True, "shift": True}, None),
+        # Floating selection: undo step / commit / discard (poll gates these when no fragment is floating).
+        ("paint.image_select_move_undo_step", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
+        ("paint.image_select_move_confirm", {"type": 'RET', "value": 'PRESS'}, None),
+        ("paint.image_select_move_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
+        # Copy selection.
+        ("paint.image_select_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
+        # Paste selection.
+        ("paint.image_select_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
         *_template_items_context_panel("VIEW3D_PT_paint_texture_context_menu", params.context_menu_event),
         *_template_asset_shelf_popup("VIEW3D_AST_brush_texture_paint", params.spacebar_action),
         *_template_asset_shelf_popup("IMAGE_AST_brush_paint", params.spacebar_action),
@@ -7373,6 +7429,101 @@ def km_image_editor_tool_mask_primitive_circle(params):
 
 
 # ------------------------------------------------------------------------------
+# Tool System (Image Paint тАФ Selection)
+
+def km_image_editor_tool_paint_select_box(params, *, fallback):
+    return (
+        _fallback_id("Image Editor Tool: Paint, Select Box", fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else _template_items_image_paint_select_lasso_gesture(params)),
+            *([] if (fallback and not params.use_fallback_tool) else _template_items_tool_select_actions_simple(
+                "paint.image_select_box",
+                **(params.select_tweak_event if (fallback and params.use_fallback_tool_select_mouse) else
+                   params.tool_tweak_event))),
+            # Simple click (no drag): reset selection.
+            *([] if (fallback and not params.use_fallback_tool) else [
+                ("paint.image_select_none",
+                 {"type": params.tool_mouse, "value": 'CLICK'}, None),
+            ]),
+        ]},
+    )
+
+
+def km_image_editor_tool_paint_select_circle(params, *, fallback):
+    return (
+        _fallback_id("Image Editor Tool: Paint, Select Circle", fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else _template_items_image_paint_select_lasso_gesture(params)),
+            *([] if (fallback and not params.use_fallback_tool) else _template_items_tool_select_actions_simple(
+                "paint.image_select_circle",
+                **(params.select_tweak_event if (fallback and params.use_fallback_tool_select_mouse) else
+                   {"type": params.tool_mouse, "value": 'PRESS'}),
+                properties=[("wait_for_input", False)])),
+            # Simple click (no drag): reset selection.
+            *([] if (fallback and not params.use_fallback_tool) else [
+                ("paint.image_select_none",
+                 {"type": params.tool_mouse, "value": 'CLICK'}, None),
+            ]),
+        ]},
+    )
+
+
+def km_image_editor_tool_paint_select_lasso(params, *, fallback):
+    return (
+        _fallback_id("Image Editor Tool: Paint, Select Lasso", fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else _template_items_tool_select_actions_simple(
+                "paint.image_select_lasso",
+                **(params.select_tweak_event if (fallback and params.use_fallback_tool_select_mouse) else
+                   params.tool_tweak_event))),
+            # Simple click (no drag): reset selection.
+            *([] if (fallback and not params.use_fallback_tool) else [
+                ("paint.image_select_none",
+                 {"type": params.tool_mouse, "value": 'CLICK'}, None),
+            ]),
+        ]},
+    )
+
+
+def km_image_editor_tool_paint_select_move(params, *, fallback):
+    return (
+        _fallback_id("Image Editor Tool: Paint, Move Selection", fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else _template_items_image_paint_select_lasso_gesture(params)),
+            *([] if (fallback and not params.use_fallback_tool) else [
+                ("paint.image_select_move",
+                 {"type": params.tool_mouse, "value": 'PRESS'},
+                 None),
+            ]),
+            # Simple click (no drag): reset selection.
+            *([] if (fallback and not params.use_fallback_tool) else [
+                ("paint.image_select_none",
+                 {"type": params.tool_mouse, "value": 'CLICK'}, None),
+            ]),
+        ]},
+    )
+
+
+def km_image_editor_tool_paint_select_transform(params, *, fallback):
+    return (
+        _fallback_id("Image Editor Tool: Paint, Transform Select", fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else _template_items_image_paint_select_lasso_gesture(params)),
+            *([] if (fallback and not params.use_fallback_tool) else [
+                ("paint.image_select_transform",
+                 {"type": params.tool_mouse, "value": 'PRESS'},
+                 None),
+            ]),
+        ]},
+    )
+
+
+# ------------------------------------------------------------------------------
 # Tool System (Node Editor)
 
 def km_node_editor_tool_select(params, *, fallback):
@@ -9148,6 +9299,11 @@ def generate_keymaps(params=None):
         km_image_editor_tool_mask_transform(params),
         km_image_editor_tool_mask_primitive_circle(params),
         km_image_editor_tool_mask_primitive_square(params),
+        *(km_image_editor_tool_paint_select_box(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_select_circle(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_select_lasso(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_select_move(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_select_transform(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_box(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_lasso(params, fallback=fallback) for fallback in (False, True)),

@@ -2587,6 +2587,126 @@ static bool uv_select_linked_delimit_check(const BMFace *f_src,
   return false;
 }
 
+/**
+ * Flood-fill UV-connected islands from a pre-seeded work stack.
+ *
+ * The caller seeds \a flag and \a stack with the initial faces: \a flag[i] is non-zero for each
+ * seeded face and the first \a stacksize entries of \a stack hold their indices. On return, every
+ * face UV-connected to a seed (vertex connectivity via \a vmap, subject to \a delimit_mode) has its
+ * \a flag set.
+ *
+ * Shared by #uv_select_linked_multi, #ED_uvedit_uv_islands_tag_from_face_indices and
+ * #UVSelectLinkedHelper. The visited-flag element type is a template parameter so each caller can
+ * use its natural storage (`char` or `bool`) without an extra copy.
+ *
+ * \param flag: Per-face visited array of size `bm->totface`.
+ * \param stack: Work stack with capacity for at least `bm->totface + 1` indices.
+ * \param stacksize: Number of seed faces already pushed onto \a stack.
+ */
+template<typename FlagT>
+static void uv_island_flood_fill(BMesh *bm,
+                                 UvVertMap *vmap,
+                                 MutableSpan<FlagT> flag,
+                                 MutableSpan<int> stack,
+                                 int stacksize,
+                                 const UVDelimitMode delimit_mode)
+{
+  while (stacksize > 0) {
+    stacksize--;
+    const int a = stack[stacksize];
+    BMFace *efa = BM_face_at_index(bm, a);
+
+    BMLoop *l;
+    BMIter liter;
+    BM_ITER_ELEM (l, &liter, efa, BM_LOOPS_OF_FACE) {
+      /* `make_uv_vert_map_EM` sets verts `tmp.l` to the indices. */
+      UvMapVert *vlist = BM_uv_vert_map_at_index(vmap, BM_elem_index_get(l->v));
+      UvMapVert *startv = vlist;
+
+      for (UvMapVert *iterv = vlist; iterv; iterv = iterv->next) {
+        if (iterv->separate) {
+          startv = iterv;
+        }
+        if (iterv->face_index == a) {
+          break;
+        }
+      }
+
+      for (UvMapVert *iterv = startv; iterv; iterv = iterv->next) {
+        if ((startv != iterv) && (iterv->separate)) {
+          break;
+        }
+        if (!flag[iterv->face_index]) {
+          if (delimit_mode != UVDelimitMode(0)) {
+            BMFace *iterv_f = BM_face_at_index(bm, iterv->face_index);
+            if (uv_select_linked_delimit_check(efa, l, iterv_f, delimit_mode)) {
+              continue;
+            }
+          }
+          flag[iterv->face_index] = FlagT(1);
+          stack[stacksize++] = iterv->face_index;
+        }
+      }
+    }
+  }
+}
+
+void ED_uvedit_uv_islands_tag_from_face_indices(const Scene *scene,
+                                                BMesh *bm,
+                                                const BMUVOffsets &offsets,
+                                                const Span<int> seed_face_indices,
+                                                const int delimit_mode,
+                                                MutableSpan<bool> r_island_face_tag)
+{
+  BLI_assert(r_island_face_tag.size() == bm->totface);
+  r_island_face_tag.fill(false);
+
+  if (seed_face_indices.is_empty() || offsets.uv < 0) {
+    return;
+  }
+
+  const UVDelimitMode delimit = UVDelimitMode(delimit_mode);
+
+  BM_mesh_elem_table_ensure(bm, BM_FACE);
+
+  UvVertMap *vmap = BM_uv_vert_map_create(bm, true, true);
+  if (vmap == nullptr) {
+    return;
+  }
+
+  Array<int> stack(bm->totface + 1);
+  Array<char> flag(bm->totface, 0);
+
+  int stacksize = 0;
+  for (const int face_i : seed_face_indices) {
+    if (face_i < 0 || face_i >= bm->totface) {
+      continue;
+    }
+    BMFace *efa = BM_face_at_index(bm, face_i);
+    if (BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
+      continue;
+    }
+    if (!uvedit_face_visible_test(scene, efa)) {
+      continue;
+    }
+    if (flag[face_i]) {
+      continue;
+    }
+    stack[stacksize++] = face_i;
+    flag[face_i] = 1;
+  }
+
+  uv_island_flood_fill<char>(bm, vmap, flag, stack, stacksize, delimit);
+
+  for (const int i : IndexRange(bm->totface)) {
+    if (flag[i]) {
+      r_island_face_tag[i] = true;
+    }
+  }
+
+  BM_uv_vert_map_free(vmap);
+}
+
 static void uv_select_linked_multi(const Scene *scene,
                                    const Span<Object *> objects,
                                    UvNearestHit *hit,
@@ -2623,8 +2743,7 @@ static void uv_select_linked_multi(const Scene *scene,
     BMFace *efa;
     BMLoop *l;
     BMIter iter, liter;
-    UvMapVert *vlist, *iterv, *startv;
-    int i, stacksize = 0, *stack;
+    int stacksize = 0, *stack;
     uint a;
     char *flag;
     BMesh *bm = BKE_editmesh_from_object(obedit)->bm;
@@ -2727,47 +2846,12 @@ static void uv_select_linked_multi(const Scene *scene,
       }
     }
 
-    while (stacksize > 0) {
-
-      stacksize--;
-      a = stack[stacksize];
-
-      efa = BM_face_at_index(bm, a);
-
-      BM_ITER_ELEM_INDEX (l, &liter, efa, BM_LOOPS_OF_FACE, i) {
-
-        /* make_uv_vert_map_EM sets verts tmp.l to the indices */
-        vlist = BM_uv_vert_map_at_index(vmap, BM_elem_index_get(l->v));
-
-        startv = vlist;
-
-        for (iterv = vlist; iterv; iterv = iterv->next) {
-          if (iterv->separate) {
-            startv = iterv;
-          }
-          if (iterv->face_index == a) {
-            break;
-          }
-        }
-
-        for (iterv = startv; iterv; iterv = iterv->next) {
-          if ((startv != iterv) && (iterv->separate)) {
-            break;
-          }
-          if (!flag[iterv->face_index]) {
-            if (delimit_mode != UVDelimitMode(0)) {
-              BMFace *iterv_f = BM_face_at_index(bm, iterv->face_index);
-              if (uv_select_linked_delimit_check(efa, l, iterv_f, delimit_mode)) {
-                continue;
-              }
-            }
-            flag[iterv->face_index] = 1;
-            stack[stacksize] = iterv->face_index;
-            stacksize++;
-          }
-        }
-      }
-    }
+    uv_island_flood_fill(bm,
+                         vmap,
+                         MutableSpan<char>(flag, bm->totface),
+                         MutableSpan<int>(stack, bm->totface + 1),
+                         stacksize,
+                         delimit_mode);
 
     /* Toggling - if any of the linked vertices is selected (and visible), we deselect. */
     if ((toggle == true) && (extend == false) && (deselect == false)) {
@@ -3000,43 +3084,17 @@ struct UVSelectLinkedHelper : NonCopyable, NonMovable {
       return false;
     }
 
-    /* Flood-fill to find and tag all linked faces. */
+    /* Flood-fill to find and tag all linked faces. No delimiting for linked-island select. */
     int stack_len = 0;
     stack_[stack_len++] = face_index;
     face_is_tagged_[face_index] = true;
 
-    while (stack_len > 0) {
-      const int i = stack_[--stack_len];
-      BMFace *efa = BM_face_at_index(bm, i);
-
-      BMLoop *l;
-      BMIter liter;
-      BM_ITER_ELEM (l, &liter, efa, BM_LOOPS_OF_FACE) {
-        UvMapVert *vlist = BM_uv_vert_map_at_index(vmap_, BM_elem_index_get(l->v));
-
-        /* Find the start of the UV island segment for this vertex. */
-        UvMapVert *startv = vlist;
-        for (UvMapVert *iterv = vlist; iterv; iterv = iterv->next) {
-          if (iterv->separate) {
-            startv = iterv;
-          }
-          if (iterv->face_index == i) {
-            break;
-          }
-        }
-
-        /* Add all connected faces from this UV island segment. */
-        for (UvMapVert *iterv = startv; iterv; iterv = iterv->next) {
-          if ((startv != iterv) && iterv->separate) {
-            break;
-          }
-          if (!face_is_tagged_[iterv->face_index]) {
-            face_is_tagged_[iterv->face_index] = true;
-            stack_[stack_len++] = iterv->face_index;
-          }
-        }
-      }
-    }
+    uv_island_flood_fill<bool>(bm,
+                               vmap_,
+                               MutableSpan<bool>(face_is_tagged_, bm->totface),
+                               MutableSpan<int>(stack_, bm->totface + 1),
+                               stack_len,
+                               UVDelimitMode(0));
 
     return true;
   }

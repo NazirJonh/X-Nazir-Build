@@ -1601,6 +1601,20 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Clone Offset", "");
   RNA_def_property_ui_range(prop, -1.0f, 1.0f, 10.0f, 3);
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_selection_mask", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_selection_mask", 1);
+  RNA_def_property_ui_text(
+      prop, "Selection Mask", "Enable selection masking for 2D texture painting");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_selection_uv_island", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_selection_uv_island", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "UV Island",
+      "When selecting, expand the result to include entire UV islands that overlap the selection");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 static void rna_def_particle_edit(BlenderRNA *brna)

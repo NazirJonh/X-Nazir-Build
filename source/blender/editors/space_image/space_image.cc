@@ -17,6 +17,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_threads.h"
 
@@ -26,6 +27,7 @@
 #include "BKE_layer.hh"
 #include "BKE_lib_query.hh"
 #include "BKE_lib_remap.hh"
+#include "BKE_main.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
 
@@ -60,6 +62,9 @@
 #include "DRW_engine.hh"
 
 #include "image_intern.hh"
+#include "image_runtime.hh"
+
+#include "../sculpt_paint/mesh/paint_image_select_intern.hh"
 
 namespace blender {
 
@@ -133,6 +138,7 @@ static SpaceLink *image_create(const ScrArea * /*area*/, const Scene * /*scene*/
   simage->custom_grid_subdiv[1] = 10;
 
   simage->mask_info = MaskSpaceInfo();
+  simage->runtime = MEM_new<ed::image::SpaceImage_Runtime>(__func__);
 
   /* header */
   region = BKE_area_region_new();
@@ -187,12 +193,64 @@ static SpaceLink *image_create(const ScrArea * /*area*/, const Scene * /*scene*/
   return reinterpret_cast<SpaceLink *>(simage);
 }
 
+/* Per-space tracking of the selection-mask animation timer. Runtime only.
+ * Avoids adding a runtime pointer to SpaceImage DNA. */
+static blender::Map<SpaceImage *, wmTimer *> g_selection_mask_timers;
+
+/* Add/remove a notifier timer that drives the selection-mask "marching ants"
+ * animation. The timer posts NC_SPACE | ND_SPACE_IMAGE notifiers at ~30 FPS,
+ * which the main region listener uses to tag a redraw. */
+static void image_selection_mask_timer_update(const Main *bmain,
+                                              wmWindow *win,
+                                              SpaceImage *sima,
+                                              const Scene *scene)
+{
+  const bool wants_timer = (scene && scene->toolsettings->imapaint.use_selection_mask);
+  wmTimer *timer = g_selection_mask_timers.lookup_default(sima, nullptr);
+  if (wants_timer == (timer != nullptr)) {
+    return;
+  }
+
+  wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first);
+  if (!wm) {
+    return;
+  }
+
+  if (wants_timer) {
+    timer = WM_event_timer_add_notifier(wm, win, NC_SPACE | ND_SPACE_IMAGE, 1.0 / 30.0);
+    g_selection_mask_timers.add(sima, timer);
+  }
+  else {
+    WM_event_timer_remove_notifier(wm, win, timer);
+    g_selection_mask_timers.remove(sima);
+  }
+}
+
 /* Doesn't free the space-link itself. */
 static void image_free(SpaceLink *sl)
 {
   SpaceImage *simage = reinterpret_cast<SpaceImage *>(sl);
 
   BKE_scopes_free(&simage->scopes);
+
+  /* The wmTimer (if any) is removed in #image_exit while the wmWindowManager
+   * is still available; here we just forget any leftover map entry as a
+   * defensive cleanup. */
+  g_selection_mask_timers.remove(simage);
+
+  if (simage->runtime) {
+    paint_select_session_free(simage->runtime->paint_select);
+    MEM_delete(simage->runtime);
+    simage->runtime = nullptr;
+  }
+}
+
+static void image_exit(wmWindowManager *wm, ScrArea *area)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+  if (wmTimer *timer = g_selection_mask_timers.pop_default(sima, nullptr)) {
+    WM_event_timer_remove_notifier(wm, nullptr, timer);
+  }
 }
 
 /* spacetype; init callback, add handlers */
@@ -211,6 +269,9 @@ static SpaceLink *image_duplicate(SpaceLink *sl)
   /* clear or remove stuff from old */
 
   BKE_scopes_new(&simagen->scopes);
+
+  /* Floating selection sessions are not copied -- each editor instance owns its own session. */
+  simagen->runtime = MEM_new<ed::image::SpaceImage_Runtime>(__func__);
 
   return reinterpret_cast<SpaceLink *>(simagen);
 }
@@ -250,6 +311,7 @@ static void image_operatortypes()
   WM_operatortype_append(IMAGE_OT_rotate_orthogonal);
   WM_operatortype_append(IMAGE_OT_invert);
   WM_operatortype_append(IMAGE_OT_resize);
+  WM_operatortype_append(IMAGE_OT_crop_selection);
 
   WM_operatortype_append(IMAGE_OT_cycle_render_slot);
   WM_operatortype_append(IMAGE_OT_clear_render_slot);
@@ -434,9 +496,23 @@ static void image_listener(const wmSpaceTypeListenerParams *params)
       if (wmn->data == ND_UNDO) {
         ED_area_tag_redraw(area);
         ED_area_tag_refresh(area);
+        /* Discard any floating transform whose source pixels have been invalidated by the
+         * undo/redo step. The image_refresh callback cannot restore the fragment because
+         * the undo step may have already changed the canvas; simply freeing the state
+         * hides the gizmo and avoids a stale preview. The pending undo-step (if still in
+         * step_init) will be cleaned up automatically on the next push_init call. */
+        if (sima->runtime && sima->runtime->paint_select.transform) {
+          image_select_transform_state_free(sima->runtime->paint_select.transform);
+          sima->runtime->paint_select.transform = nullptr;
+        }
       }
       break;
   }
+
+  /* Manage the selection-mask animation timer. The listener fires on enough
+   * notifiers (mode/frame/scene changes, paint events) that selection-mask
+   * toggling is picked up promptly without polling. */
+  image_selection_mask_timer_update(params->bmain, win, sima, params->scene);
 }
 
 const char *image_context_dir[] = {"edit_image", "edit_mask", nullptr};
@@ -610,6 +686,11 @@ static void IMAGE_GGT_compositor_split(wmGizmoGroupType *gzgt)
   gzgt->refresh = nodes::gizmos::split_refresh;
 }
 
+static void IMAGE_GGT_paint_select_transform(wmGizmoGroupType *gzgt)
+{
+  ED_image_paint_select_transform_gizmo_setup(gzgt);
+}
+
 static void image_widgets()
 {
   const wmGizmoMapType_Params params{SPACE_IMAGE, RGN_TYPE_WINDOW};
@@ -628,6 +709,7 @@ static void image_widgets()
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_compositor_corner_pin);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_compositor_ellipse_mask);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_compositor_split);
+  WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_select_transform);
 }
 
 /************************** main region ***************************/
@@ -860,6 +942,9 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
                         nullptr,
                         C);
   }
+  /* Floating paint-selection previews (transform/move) draw here so gizmos render on top. */
+  ED_region_draw_cb_draw(C, region, REGION_DRAW_POST_VIEW);
+
   if ((sima->gizmo_flag & SI_GIZMO_HIDE) == 0) {
     WM_gizmomap_draw(region->runtime->gizmo_map, C, WM_GIZMOMAP_DRAWSTEP_2D);
   }
@@ -871,6 +956,17 @@ static void image_main_region_listener(const wmRegionListenerParams *params)
   ScrArea *area = params->area;
   ARegion *region = params->region;
   const wmNotifier *wmn = params->notifier;
+
+  SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
+  Scene *scene = sima->iuser.scene;
+
+  /* Redraw selection mask animation on frame change. */
+  if (scene && wmn->category == NC_SCENE && wmn->data == ND_FRAME) {
+    ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
+    if (imapaint->use_selection_mask) {
+      ED_region_tag_redraw(region);
+    }
+  }
 
   /* context changes */
   switch (wmn->category) {
@@ -1284,6 +1380,7 @@ static void image_space_blend_read_data(BlendDataReader * /*reader*/, SpaceLink 
 
   sima->iuser.scene = nullptr;
   sima->scopes.waveform_1 = nullptr;
+  sima->runtime = MEM_new<ed::image::SpaceImage_Runtime>(__func__);
   sima->scopes.waveform_2 = nullptr;
   sima->scopes.waveform_3 = nullptr;
   sima->scopes.vecscope = nullptr;
@@ -1320,6 +1417,7 @@ void ED_spacetype_image()
   st->create = image_create;
   st->free = image_free;
   st->init = image_init;
+  st->exit = image_exit;
   st->duplicate = image_duplicate;
   st->operatortypes = image_operatortypes;
   st->keymap = image_keymap;

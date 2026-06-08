@@ -1122,6 +1122,10 @@ void wm_gizmomap_modal_set(
     gz->state |= WM_GIZMO_STATE_MODAL;
     gzmap->gzmap_context.modal = gz;
 
+    if (C && gz->type->cursor_get) {
+      WM_cursor_set(CTX_wm_window(C), gz->type->cursor_get(gz));
+    }
+
     if ((gz->flag & WM_GIZMO_MOVE_CURSOR) && (event->tablet.is_motion_absolute == false)) {
       WM_cursor_grab_enable(win, WM_CURSOR_WRAP_XY, nullptr, true);
       copy_v2_v2_int(gzmap->gzmap_context.event_xy, event->xy);
@@ -1173,6 +1177,10 @@ void wm_gizmomap_modal_set(
         else {
           WM_cursor_warp(win, UNPACK2(gzmap->gzmap_context.event_xy));
         }
+      }
+      wmGizmo *highlight = gzmap->gzmap_context.highlight;
+      if (highlight && highlight->type->cursor_get) {
+        WM_cursor_set(win, highlight->type->cursor_get(highlight));
       }
       ED_region_tag_redraw_editor_overlays(CTX_wm_region(C));
       WM_event_add_mousemove(win);

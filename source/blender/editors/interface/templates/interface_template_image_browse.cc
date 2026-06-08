@@ -101,6 +101,10 @@ static SpaceLink *image_browser_active_space(const bContext *C, StructRNA **r_sr
     *r_srna = RNA_SpaceNodeEditor;
     return sl;
   }
+  if (sl->spacetype == SPACE_VIEW3D) {
+    *r_srna = RNA_SpaceView3D;
+    return sl;
+  }
   return nullptr;
 }
 

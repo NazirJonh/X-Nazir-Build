@@ -1753,6 +1753,11 @@ static char detect_slot_type_from_links(const bNode *tex_node, const bNodeTree *
   return best_slot;
 }
 
+char BKE_material_node_detect_tex_image_slot_type(const bNode *tex_node, const bNodeTree *ntree)
+{
+  return detect_slot_type_from_links(tex_node, ntree);
+}
+
 static bool fill_texpaint_slots_cb(bNodeTree *nodetree, bNode *node, void *userdata)
 {
   FillTexPaintSlotsData *fill_data = static_cast<FillTexPaintSlotsData *>(userdata);
@@ -1779,6 +1784,8 @@ static bool fill_texpaint_slots_cb(bNodeTree *nodetree, bNode *node, void *userd
         if (effective_slot_type != NODE_TEX_IMAGE_SLOT_NONE) {
           /* Persist the detected type back to the node so it's stable across refreshes. */
           storage->paint_slot_type = effective_slot_type;
+          /* The image's runtime usage index is now stale — force a rebuild next access. */
+          BKE_image_paint_slot_info_invalidate(slot->ima);
         }
       }
 

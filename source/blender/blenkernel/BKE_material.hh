@@ -132,6 +132,13 @@ void BKE_texpaint_slots_refresh_object(Scene *scene, Object *ob);
 std::pair<bNodeTree *, bNode *> BKE_texpaint_slot_material_find_node(Material *ma,
                                                                      short texpaint_slot);
 
+/**
+ * Detect the paint slot type of an Image Texture node by tracing its output links.
+ * Used as a fallback when #NodeTexImage::paint_slot_type has not been set explicitly.
+ * Returns #NODE_TEX_IMAGE_SLOT_NONE when no known connection is found.
+ */
+char BKE_material_node_detect_tex_image_slot_type(const bNode *tex_node, const bNodeTree *ntree);
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

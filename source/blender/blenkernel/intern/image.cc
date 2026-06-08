@@ -82,6 +82,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -3283,8 +3284,16 @@ static void image_paint_slot_info_collect_tree(bNodeTree &ntree,
   for (bNode *node : ntree.all_nodes()) {
     if (node->type_legacy == SH_NODE_TEX_IMAGE && node->id == &image.id) {
       const NodeTexImage *storage = static_cast<const NodeTexImage *>(node->storage);
-      const char slot_type = (storage != nullptr) ? storage->paint_slot_type :
-                                                    NODE_TEX_IMAGE_SLOT_NONE;
+      char slot_type = NODE_TEX_IMAGE_SLOT_NONE;
+      if (storage != nullptr) {
+        slot_type = storage->paint_slot_type;
+        if (slot_type == NODE_TEX_IMAGE_SLOT_NONE) {
+          /* paint_slot_type may not have been written yet if the texpaint slot cache hasn't been
+           * refreshed since the node was connected. Detect it from output links so filtering
+           * works even before BKE_texpaint_slot_refresh_cache runs. */
+          slot_type = BKE_material_node_detect_tex_image_slot_type(node, &ntree);
+        }
+      }
       records.append(bke::UsageRecord{material.id.session_uid, slot_type});
     }
     else if (node->is_group() && node->id != nullptr) {

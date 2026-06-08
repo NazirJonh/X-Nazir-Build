@@ -483,19 +483,12 @@ class SelectPaintSlotHelper:
             case 'IMAGE':
                 mesh = ob.data
                 uv_text = mesh.uv_layers.active.name if mesh.uv_layers.active else ""
-                # Filter the image selector by the current material when one is available.
                 mat = ob.active_material if ob else None
-                if mat:
-                    layout.template_ID_with_filter_context(
-                        mode_settings, self.canvas_image_attr_name,
-                        new="image.new", open="image.open",
-                        filter='CURRENT_MATERIAL',
-                        text="",
-                        material=mat,
-                        slot_type='NONE',  # Slot type is not used for the canvas image.
-                    )
-                else:
-                    layout.template_ID(mode_settings, self.canvas_image_attr_name, new="image.new", open="image.open")
+                layout.template_image_browse(
+                    mode_settings, self.canvas_image_attr_name,
+                    new="image.new", open="image.open",
+                    material=mat,
+                )
                 if settings.missing_uvs:
                     layout.operator("paint.add_simple_uvs", icon='ADD', text="Add UVs")
                 else:

@@ -903,9 +903,9 @@ class IMAGE_HT_header(Header):
 
         IMAGE_HT_header.draw_xform_template(layout, context)
 
-        if sima.mode == 'PAINT' and context.image_paint_object:
+        if sima.mode == 'PAINT':
             ob = context.image_paint_object
-            mat = ob.active_material
+            mat = ob.active_material if ob else None
             layout.template_image_browse(
                 sima,
                 "image",

@@ -30,6 +30,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_sequence_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_workspace_types.h"
 #include "DNA_world_types.h"
@@ -4582,6 +4583,26 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
           else if (sl.spacetype == SPACE_NODE) {
             SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
             snode->image_browser_view_mode = IMAGE_BROWSER_VIEW_GRID;
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 43)) {
+    /* Initialize SpaceView3D image browser filter fields, mirroring SpaceImage and SpaceNode. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            if (v3d->image_filter_mode == 0) {
+              v3d->image_filter_mode = ui::TEMPLATE_ID_FILTER_ALL;
+            }
+            if (v3d->image_filter_slot_type == 0) {
+              v3d->image_filter_slot_type = NODE_TEX_IMAGE_SLOT_NONE;
+            }
+            v3d->image_browser_view_mode = IMAGE_BROWSER_VIEW_GRID;
           }
         }
       }

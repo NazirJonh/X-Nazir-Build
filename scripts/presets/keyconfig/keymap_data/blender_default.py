@@ -4741,17 +4741,18 @@ def km_paint_curve(params):
     )
 
     items.extend([
+        ("paintcurve.slide", {"type": params.action_mouse, "value": 'PRESS', "ctrl": True, "shift": True},
+         {"properties": [("insert_point", True), ("select", False)]}),
         ("paintcurve.add_point_slide", {"type": params.action_mouse, "value": 'PRESS', "ctrl": True}, None),
-        ("paintcurve.select", {"type": params.select_mouse, "value": 'PRESS'}, None),
-        ("paintcurve.select", {"type": params.select_mouse, "value": 'PRESS', "shift": True},
-         {"properties": [("extend", True)]}),
-        ("paintcurve.slide", {"type": params.action_mouse, "value": 'PRESS'},
-         {"properties": [("align", False)]}),
-        ("paintcurve.slide", {"type": params.action_mouse, "value": 'PRESS', "shift": True},
-         {"properties": [("align", True)]}),
+        ("paintcurve.slide", {"type": params.select_mouse, "value": 'PRESS'},
+         {"properties": [("align", False), ("move_segment", True)]}),
+        ("paintcurve.slide", {"type": params.select_mouse, "value": 'PRESS', "shift": True},
+         {"properties": [("extend", True), ("move_segment", True)]}),
+        ("paintcurve.slide_radius", {"type": params.select_mouse, "value": 'PRESS'}, None),
         ("paintcurve.select", {"type": 'A', "value": 'PRESS'},
          {"properties": [("toggle", True)]}),
         ("paintcurve.cursor", {"type": params.action_mouse, "value": 'PRESS', "shift": True, "ctrl": True}, None),
+        ("paintcurve.duplicate_move", {"type": 'D', "value": 'PRESS', "shift": True}, None),
         ("paintcurve.delete_point", {"type": 'X', "value": 'PRESS'}, None),
         ("paintcurve.delete_point", {"type": 'DEL', "value": 'PRESS'}, None),
         ("paintcurve.draw", {"type": 'RET', "value": 'PRESS'}, None),
@@ -4760,6 +4761,8 @@ def km_paint_curve(params):
         ("transform.translate", {"type": params.select_mouse, "value": 'CLICK_DRAG'}, None),
         ("transform.rotate", {"type": 'R', "value": 'PRESS'}, None),
         ("transform.resize", {"type": 'S', "value": 'PRESS'}, None),
+        ("transform.transform", {"type": 'S', "value": 'PRESS', "alt": True},
+         {"properties": [("mode", 'CURVE_SHRINKFATTEN')]}),
     ])
 
     return keymap
@@ -8404,6 +8407,37 @@ def km_3d_view_tool_sculpt_face_set_edit(params):
     )
 
 
+def km_3d_view_tool_sculpt_curves_edit(params):
+    return (
+        "3D View Tool: Sculpt, Curves Edit",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            # Pick a scene curve / pass-through to point editing.
+            ("paintcurve.sculpt_pick", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+            # Point + handle editing (mirrors the "Paint Curve" keymap).
+            ("paintcurve.slide", {"type": params.tool_mouse, "value": 'PRESS', "ctrl": True, "shift": True},
+             {"properties": [("insert_point", True), ("select", False)]}),
+            ("paintcurve.add_point_slide", {"type": params.tool_mouse, "value": 'PRESS', "ctrl": True}, None),
+            ("paintcurve.slide", {"type": params.tool_mouse, "value": 'PRESS'},
+             {"properties": [("align", False), ("move_segment", True), ("select", True)]}),
+            ("paintcurve.slide", {"type": params.tool_mouse, "value": 'PRESS', "shift": True},
+             {"properties": [("extend", True), ("move_segment", True)]}),
+            ("paintcurve.slide_radius", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+            ("paintcurve.select", {"type": 'A', "value": 'PRESS'},
+             {"properties": [("toggle", True)]}),
+            ("paintcurve.duplicate_move", {"type": 'D', "value": 'PRESS', "shift": True}, None),
+            ("paintcurve.delete_point", {"type": 'X', "value": 'PRESS'}, None),
+            ("paintcurve.delete_point", {"type": 'DEL', "value": 'PRESS'}, None),
+            # Transforms operate on the picked curve (CTX_PAINT_CURVE set in transform_generics.cc).
+            ("transform.translate", {"type": 'G', "value": 'PRESS'}, None),
+            ("transform.rotate", {"type": 'R', "value": 'PRESS'}, None),
+            ("transform.resize", {"type": 'S', "value": 'PRESS'}, None),
+            ("transform.transform", {"type": 'S', "value": 'PRESS', "alt": True},
+             {"properties": [("mode", 'CURVE_SHRINKFATTEN')]}),
+        ]},
+    )
+
+
 # ------------------------------------------------------------------------------
 # Tool System (3D View, Weight Paint)
 
@@ -9200,6 +9234,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_color_filter(params),
         km_3d_view_tool_sculpt_mask_by_color(params),
         km_3d_view_tool_sculpt_face_set_edit(params),
+        km_3d_view_tool_sculpt_curves_edit(params),
         km_3d_view_tool_paint_weight_sample_weight(params),
         km_3d_view_tool_paint_weight_sample_vertex_group(params),
         km_3d_view_tool_paint_weight_gradient(params),

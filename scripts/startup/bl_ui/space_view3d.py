@@ -262,7 +262,19 @@ class VIEW3D_HT_tool_header(Header):
 class _draw_tool_settings_context_mode:
     @staticmethod
     def SCULPT(context, layout, tool):
-        if (tool is None) or (not tool.use_brushes):
+        if tool is None:
+            return False
+
+        # Show source scene curve selector when Curve Edit tool is active.
+        if tool.idname == "builtin.curves_edit":
+            sculpt = context.tool_settings.sculpt
+            if sculpt is not None:
+                row = layout.row()
+                row.scale_x = 2.0
+                row.prop(sculpt, "paint_curve_source_object", text="Curve")
+            return False
+
+        if not tool.use_brushes:
             return False
 
         paint = context.tool_settings.sculpt
@@ -1209,6 +1221,9 @@ class VIEW3D_MT_editor_menus(Menu):
             if mode_string == 'SCULPT':
                 layout.menu("VIEW3D_MT_mask")
                 layout.menu("VIEW3D_MT_face_sets")
+                active_tool = context.workspace.tools.from_space_view3d_mode(mode_string)
+                if active_tool and active_tool.idname == "builtin.curves_edit":
+                    layout.menu("VIEW3D_MT_sculpt_paint_curves")
                 layout.template_node_operator_asset_root_items()
             elif mode_string == 'SCULPT_CURVES':
                 layout.menu("VIEW3D_MT_select_sculpt_curves")
@@ -4048,6 +4063,15 @@ class VIEW3D_MT_face_sets(Menu):
         props = layout.operator("sculpt.face_sets_randomize_colors", text="Randomize Colors")
 
         layout.template_node_operator_asset_menu_items(catalog_path=self.bl_label)
+
+
+class VIEW3D_MT_sculpt_paint_curves(Menu):
+    bl_label = "Curves"
+
+    def draw(self, _context):
+        layout = self.layout
+
+        layout.operator("paintcurve.duplicate")
 
 
 class VIEW3D_MT_sculpt_set_pivot(Menu):
@@ -9355,6 +9379,7 @@ classes = (
     VIEW3D_MT_mask,
     VIEW3D_MT_face_sets,
     VIEW3D_MT_face_sets_init,
+    VIEW3D_MT_sculpt_paint_curves,
     VIEW3D_MT_random_mask,
     VIEW3D_MT_particle,
     VIEW3D_MT_particle_context_menu,

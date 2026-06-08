@@ -815,13 +815,21 @@ short transform_orientation_matrix_get(bContext *C,
       *t->bmain, scene, t->view_layer, v3d, rv3d, ob, obedit, orient_index, t->around, r_spacemtx);
 
   if (rv3d && (t->options & CTX_PAINT_CURVE)) {
-    /* Screen space in the 3d region. */
-    if (orient_index_result == V3D_ORIENT_VIEW) {
+    if (t->mode == TFM_TRANSLATION) {
+      /* Paint curve translation applies world-space deltas directly in the flush function,
+       * so constraint axes must always be world axes (X/Y/Z = identity rows).
+       * Force Global regardless of the user's current orientation setting. */
       unit_m3(r_spacemtx);
     }
-    else {
-      mul_m3_m4m3(r_spacemtx, rv3d->viewmat, r_spacemtx);
-      normalize_m3(r_spacemtx);
+    else if (t->mode != TFM_ROTATION) {
+      /* Screen space in the 3d region. */
+      if (orient_index_result == V3D_ORIENT_VIEW) {
+        unit_m3(r_spacemtx);
+      }
+      else {
+        mul_m3_m4m3(r_spacemtx, rv3d->viewmat, r_spacemtx);
+        normalize_m3(r_spacemtx);
+      }
     }
   }
 

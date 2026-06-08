@@ -1520,6 +1520,11 @@ struct Sculpt {
   /** For use by operators. */
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve_op = nullptr;
   struct Object *gravity_object = nullptr;
+  /** Source Curves/Curve object for paint-curve import (`PAINTCURVE_OT_from_curve_object`). */
+  struct Object *paint_curve_source_object = nullptr;
+  /** Enable live sync of edited paint curve back to the picked source object. */
+  char paint_curve_sync_to_source = 0;
+  char _pad1[7] = {};
 };
 
 struct CurvesSculpt {

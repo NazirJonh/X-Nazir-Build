@@ -28,6 +28,7 @@
 
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
+#include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
@@ -64,7 +65,7 @@
 
 namespace blender::ed::sculpt_paint {
 
-static bool vdm_insert_mesh_poll(bContext *C)
+static bool insert_mesh_poll(bContext *C)
 {
   Object *ob = CTX_data_active_object(C);
   if (ob != nullptr && ob->mode == OB_MODE_SCULPT) {
@@ -96,15 +97,22 @@ static float3 stamp_plane_point(const VDMStampData &stamp, const float2 &uv)
 }
 
 /**
- * VDM displacement for a plane point, in object space.
+ * Stamp displacement for a plane point, in object space.
  *
- * Mirrors `sculpt_apply_texture()` (the `MTEX_MAP_MODE_AREA` branch) for the texture lookup and
- * `calc_vertex_displacement()` for turning the sampled color into an object-space vector.
+ * Mirrors `sculpt_apply_texture()` (the `MTEX_MAP_MODE_AREA` branch) for the texture lookup. The
+ * sampled texel is then turned into an object-space vector in one of two ways:
+ * - Vector displacement (VDM): the RGB is a displacement vector, matching `calc_vertex_displacement()`.
+ * - Plain alpha texture: the scalar value is a height along the brush normal (local +Z), matching
+ *   the regular Draw brush (see #do_draw_brush).
+ *
+ * In both cases the final vector is transformed by `brush_local_mat_inv`, which already embeds the
+ * brush radius and orientation, and then mapped back through the active symmetry pass.
  */
 static float3 stamp_displacement(const VDMStampData &stamp,
                                  const Brush &brush,
                                  SculptSession &ss,
-                                 const float3 &plane_co)
+                                 const float3 &plane_co,
+                                 const bool use_vector_displacement)
 {
   const MTex *mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
   if (!mtex->tex) {
@@ -125,18 +133,30 @@ static float3 stamp_displacement(const VDMStampData &stamp,
   float value;
   float4 rgba;
   paint_get_tex_pixel(mtex, x, y, ss.tex_pool, 0, &value, rgba);
-  add_v3_fl(rgba, brush.texture_sample_bias);
 
-  /* Color -> object-space displacement, matching `calc_vertex_displacement()`. */
-  float3 disp = float3(rgba);
-  mul_v3_fl(disp, stamp.bstrength);
-  if (stamp.bstrength < 0.0f) {
-    disp.x *= -1.0f;
-    disp.y *= -1.0f;
+  float3 disp;
+  if (use_vector_displacement) {
+    /* Color -> object-space displacement, matching `calc_vertex_displacement()`. */
+    add_v3_fl(rgba, brush.texture_sample_bias);
+    disp = float3(rgba);
+    mul_v3_fl(disp, stamp.bstrength);
+    if (stamp.bstrength < 0.0f) {
+      disp.x *= -1.0f;
+      disp.y *= -1.0f;
+    }
+    for (int i = 0; i < 3; i++) {
+      disp[i] *= math::safe_divide(1.0f, pow2f(brush.mtex.size[i]));
+    }
   }
-  for (int i = 0; i < 3; i++) {
-    disp[i] *= math::safe_divide(1.0f, pow2f(brush.mtex.size[i]));
+  else {
+    /* Plain alpha texture: height field along the brush normal (local +Z). The brush-local matrix
+     * already embeds the brush radius, so the local height only needs the sampled value scaled by
+     * the brush strength. Negative strength simply carves inward. Matches `sculpt_apply_texture()`'s
+     * `*r_value -= texture_sample_bias`. */
+    value -= brush.texture_sample_bias;
+    disp = float3(0.0f, 0.0f, value * stamp.bstrength);
   }
+
   mul_mat3_m4_v3(stamp.brush_local_mat_inv.ptr(), disp);
   if (stamp.radial_symmetry_pass) {
     mul_m4_v3(stamp.symm_rot_mat.ptr(), disp);
@@ -207,7 +227,8 @@ static void add_stamp_to_bmesh(BMesh *bm,
                                const VDMStampData &stamp,
                                const Brush &brush,
                                SculptSession &ss,
-                               const int resolution)
+                               const int resolution,
+                               const bool use_vector_displacement)
 {
   BLI_assert(resolution >= 2);
   const int side = resolution;
@@ -232,7 +253,7 @@ static void add_stamp_to_bmesh(BMesh *bm,
       const float v = -1.0f + 2.0f * (float(j) / float(last));
       const float3 base = stamp_plane_point(stamp, float2(u, v));
       base_cos[idx(i, j)] = base;
-      disp_vecs[idx(i, j)] = stamp_displacement(stamp, brush, ss, base);
+      disp_vecs[idx(i, j)] = stamp_displacement(stamp, brush, ss, base, use_vector_displacement);
     }
   }
 
@@ -377,6 +398,7 @@ static BMesh *build_stamps_bmesh(const Span<VDMStampData> stamps,
                                  const Brush &brush,
                                  SculptSession &ss,
                                  const int resolution,
+                                 const bool use_vector_displacement,
                                  Mesh *existing_mesh)
 {
   BMAllocTemplate allocsize = bm_mesh_allocsize_default;
@@ -396,7 +418,7 @@ static BMesh *build_stamps_bmesh(const Span<VDMStampData> stamps,
 
   BM_mesh_elem_hflag_disable_all(bm, BM_VERT | BM_EDGE | BM_FACE, BM_ELEM_TAG, false);
   for (const VDMStampData &stamp : stamps) {
-    add_stamp_to_bmesh(bm, stamp, brush, ss, resolution);
+    add_stamp_to_bmesh(bm, stamp, brush, ss, resolution, use_vector_displacement);
   }
 
   /* Orient only the freshly created stamp faces outward, leaving existing geometry untouched.
@@ -416,7 +438,7 @@ static BMesh *build_stamps_bmesh(const Span<VDMStampData> stamps,
 /** \name Operator
  * \{ */
 
-static wmOperatorStatus vdm_insert_mesh_exec(bContext *C, wmOperator *op)
+static wmOperatorStatus insert_mesh_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
   Object *ob = CTX_data_active_object(C);
@@ -434,7 +456,10 @@ static wmOperatorStatus vdm_insert_mesh_exec(bContext *C, wmOperator *op)
   }
 
   const Brush &brush = *BKE_paint_brush_for_read(&scene->toolsettings->sculpt->paint);
-  const bool into_active = (brush.flag2 & BRUSH_VDM_INSERT_INTO_ACTIVE) != 0;
+  const bool into_active = (brush.flag2 & BRUSH_INSERT_INTO_ACTIVE) != 0;
+  /* The stamp surface is built either from a vector-displacement (VDM) texture or from a plain
+   * alpha texture sampled as a height field; #stamp_displacement branches on this. */
+  const bool use_vector_displacement = brush_uses_vector_displacement(brush);
 
   const Vector<VDMStampData> stamps = ss.vdm_stamps;
   ss.vdm_stamps.clear();
@@ -454,7 +479,8 @@ static wmOperatorStatus vdm_insert_mesh_exec(bContext *C, wmOperator *op)
     undo::geometry_begin(*scene, *ob, op);
 
     Mesh *work_mesh = id_cast<Mesh *>(BKE_id_copy(bmain, &active_mesh.id));
-    BMesh *bm = build_stamps_bmesh(stamps, brush, ss, resolution, work_mesh);
+    BMesh *bm = build_stamps_bmesh(
+        stamps, brush, ss, resolution, use_vector_displacement, work_mesh);
     BKE_id_free(bmain, work_mesh);
     Mesh *result = BKE_mesh_from_bmesh_nomain(bm, &bm_to_mesh_params, &active_mesh);
     BM_mesh_free(bm);
@@ -471,7 +497,7 @@ static wmOperatorStatus vdm_insert_mesh_exec(bContext *C, wmOperator *op)
   }
 
   /* Separate object: build the stamps in their own mesh. */
-  BMesh *bm = build_stamps_bmesh(stamps, brush, ss, resolution, nullptr);
+  BMesh *bm = build_stamps_bmesh(stamps, brush, ss, resolution, use_vector_displacement, nullptr);
 
   /* `add_type` only applies the active object's location and rotation, so bake its scale into the
    * geometry to keep the stamp aligned with where the stroke happened. */
@@ -506,17 +532,26 @@ static wmOperatorStatus vdm_insert_mesh_exec(bContext *C, wmOperator *op)
   DEG_id_tag_update(&new_ob->id, ID_RECALC_GEOMETRY);
   WM_event_add_notifier(C, NC_GEOM | ND_DATA, new_ob->data);
 
+  /* `add_type` activates the freshly created object, which is in Object Mode, dropping the viewport
+   * out of Sculpt Mode. Re-activate the original sculpted object's base so the user stays in Sculpt
+   * Mode on the same object; the new object remains in the scene, selected but not active. */
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  if (Base *orig_base = BKE_view_layer_base_find(view_layer, ob)) {
+    ed::object::base_activate(C, orig_base);
+  }
+
   return OPERATOR_FINISHED;
 }
 
-void SCULPT_OT_vdm_insert_mesh(wmOperatorType *ot)
+void SCULPT_OT_insert_mesh(wmOperatorType *ot)
 {
-  ot->name = "VDM Insert Mesh";
-  ot->description = "Create a watertight mesh from VDM brush stamps";
-  ot->idname = "SCULPT_OT_vdm_insert_mesh";
+  ot->name = "Insert Mesh";
+  ot->description = "Create a watertight mesh from brush stamps (vector displacement or alpha texture)";
+  ot->idname = "SCULPT_OT_insert_mesh";
 
-  ot->poll = vdm_insert_mesh_poll;
-  ot->exec = vdm_insert_mesh_exec;
+  ot->poll = insert_mesh_poll;
+  ot->exec = insert_mesh_exec;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 

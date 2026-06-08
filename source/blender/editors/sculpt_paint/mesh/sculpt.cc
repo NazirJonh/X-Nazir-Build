@@ -2362,7 +2362,7 @@ static float brush_strength(const Sculpt &sd,
        * a linear displacement multiplier (shared by the live preview and the generated stamp, with
        * no non-linear overshoot), and apply a fixed calibration so that full strength matches the
        * scale at which a standard VDM bake is reproduced 1:1. */
-      if (brush_uses_vector_displacement(brush) && (brush.flag2 & BRUSH_VDM_INSERT_MESH)) {
+      if (brush_uses_vector_displacement(brush) && (brush.flag2 & BRUSH_INSERT_MESH)) {
         const float vdm_insert_scale = 4.0f;
         return vdm_insert_scale * root_alpha * flip * pressure * overlap * feather;
       }
@@ -3477,14 +3477,14 @@ static void do_brush_action(const Depsgraph &depsgraph,
 
   update_brush_local_mat(sd, ob);
 
-  /* Capture a VDM stamp for the current symmetry pass.
+  /* Capture an insert-mesh stamp for the current symmetry pass.
    *
    * Regular stroke: only on the first dab — position, orientation and scale are fixed at the
    * moment the stroke begins.
    * Anchored stroke: update on every dab so that the stamp always reflects the final dragged-out
    * radius and position when the mouse button is released. The existing entry for the same
    * symmetry pass is replaced; a new one is appended when first seen. */
-  if (brush_uses_vector_displacement(brush) && (brush.flag2 & BRUSH_VDM_INSERT_MESH)) {
+  if (brush_uses_insert_mesh(brush)) {
     const bool is_anchored = (brush.stroke_method == BRUSH_STROKE_ANCHORED);
     if (is_anchored || ss.cache->first_time) {
       VDMStampData stamp;
@@ -6077,16 +6077,13 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   MEM_delete(ss.cache);
   ss.cache = nullptr;
 
-  /* For VDM Insert Mesh mode the stroke was run purely as a visual preview. Restore the
+  /* For Insert Mesh mode the stroke was run purely as a visual preview. Restore the
    * original vertex positions before committing the undo step so that the mesh is left
    * untouched. The clean stamp geometry is built independently from the stamp data. */
-  const bool is_vdm_insert_preview =
-      !is_cancel && stroke_started && brush &&
-      brush_uses_vector_displacement(*brush) &&
-      (brush->flag2 & BRUSH_VDM_INSERT_MESH) &&
-      !ss.vdm_stamps.is_empty();
+  const bool is_insert_preview = !is_cancel && stroke_started && brush &&
+                                 brush_uses_insert_mesh(*brush) && !ss.vdm_stamps.is_empty();
 
-  if (is_vdm_insert_preview) {
+  if (is_insert_preview) {
     undo::restore_position_from_undo_step(*this->depsgraph, ob);
     bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
     if (pbvh) {
@@ -6099,27 +6096,38 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     stroke_undo_end(*paint_mode_settings_, *this->object, brush);
   }
 
+  /* Insert Mesh in "Into Active Mesh" mode rebuilds the active mesh and frees the sculpt PBVH
+   * inside the operator, so the PBVH-dependent #flush_update_done below must be skipped for it
+   * (otherwise it dereferences the freed PBVH and crashes). The operator already tags the
+   * geometry, dirties the batch cache and sends its own notifier; the PBVH is rebuilt on next
+   * access. Evaluated before the operator call because the operator clears #vdm_stamps. */
+  const bool insert_into_active = !is_cancel && stroke_started && brush &&
+                                  brush_uses_insert_mesh(*brush) && !ss.vdm_stamps.is_empty() &&
+                                  (brush->flag2 & BRUSH_INSERT_INTO_ACTIVE);
+
   if (!is_cancel && stroke_started && !ss.vdm_stamps.is_empty()) {
     WM_operator_name_call(
-        this->evil_C, "SCULPT_OT_vdm_insert_mesh", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+        this->evil_C, "SCULPT_OT_insert_mesh", wm::OpCallContext::ExecDefault, nullptr, nullptr);
   }
   else {
     ss.vdm_stamps.clear();
   }
 
-  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
-    flush_update_done(this->vc, *wm_, ob, UpdateType::Mask);
-  }
-  else if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
-    if (SCULPT_use_image_paint_brush(*this->paint_mode_settings_, ob)) {
-      flush_update_done(this->vc, *wm_, ob, UpdateType::Image);
+  if (!insert_into_active) {
+    if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
+      flush_update_done(this->vc, *wm_, ob, UpdateType::Mask);
+    }
+    else if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
+      if (SCULPT_use_image_paint_brush(*this->paint_mode_settings_, ob)) {
+        flush_update_done(this->vc, *wm_, ob, UpdateType::Image);
+      }
+      else {
+        flush_update_done(this->vc, *wm_, ob, UpdateType::Color);
+      }
     }
     else {
-      flush_update_done(this->vc, *wm_, ob, UpdateType::Color);
+      flush_update_done(this->vc, *wm_, ob, UpdateType::Position);
     }
-  }
-  else {
-    flush_update_done(this->vc, *wm_, ob, UpdateType::Position);
   }
 
   WM_event_add_notifier(this->evil_C, NC_OBJECT | ND_DRAW, &ob);

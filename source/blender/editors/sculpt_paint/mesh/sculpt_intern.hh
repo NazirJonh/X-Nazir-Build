@@ -908,6 +908,20 @@ inline bool brush_uses_vector_displacement(const Brush &brush)
          brush.mtex.brush_map_mode == MTEX_MAP_MODE_AREA;
 }
 
+/**
+ * Whether the brush stamps a watertight mesh (Insert Mesh) rather than deforming the active mesh.
+ *
+ * Unlike #brush_uses_vector_displacement this does not require "Vector Displacement": the stamp can
+ * be built from a plain alpha texture (height field along the brush normal) as well as from a VDM.
+ * The area-plane texture projection is still required because the stamp grid is generated in the
+ * brush-local space set up by #calc_brush_local_mat.
+ */
+inline bool brush_uses_insert_mesh(const Brush &brush)
+{
+  return brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW && (brush.flag2 & BRUSH_INSERT_MESH) &&
+         brush.mtex.brush_map_mode == MTEX_MAP_MODE_AREA;
+}
+
 void ensure_valid_pivot(const Object &ob, Paint &paint);
 
 /** Retrieve or calculate the object space radius depending on brush settings. */
@@ -984,7 +998,7 @@ void SCULPT_OT_set_pivot_position(wmOperatorType *ot);
 void SCULPT_OT_paint_mask_extract(wmOperatorType *ot);
 void SCULPT_OT_face_set_extract(wmOperatorType *ot);
 void SCULPT_OT_paint_mask_slice(wmOperatorType *ot);
-void SCULPT_OT_vdm_insert_mesh(wmOperatorType *ot);
+void SCULPT_OT_insert_mesh(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint
 

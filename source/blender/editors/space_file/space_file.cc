@@ -201,12 +201,15 @@ static SpaceLink *file_duplicate(SpaceLink *sl)
   return reinterpret_cast<SpaceLink *>(sfilen);
 }
 
-static void file_refresh(const bContext *C, ScrArea *area)
+static void file_refresh_ex(const bContext *C, SpaceFile *sfile, ScrArea *area)
 {
   using namespace blender::ed;
+  if (!sfile) {
+    return;
+  }
+
   wmWindowManager *wm = CTX_wm_manager(C);
   wmWindow *win = CTX_wm_window(C);
-  SpaceFile *sfile = CTX_wm_space_file(C);
   FileSelectParams *params = ED_fileselect_ensure_active_params(sfile);
   FileAssetSelectParams *asset_params = ED_fileselect_get_asset_params(sfile);
   FSMenu *fsmenu = ED_fsmenu_get();
@@ -340,7 +343,17 @@ static void file_refresh(const bContext *C, ScrArea *area)
     }
   }
 
-  ED_area_tag_redraw(area);
+  if (area) {
+    ED_area_tag_redraw(area);
+  }
+}
+
+static void file_refresh(const bContext *C, ScrArea *area)
+{
+  if (!area) {
+    return;
+  }
+  file_refresh_ex(C, reinterpret_cast<SpaceFile *>(area->spacedata.first), area);
 }
 
 void file_on_reload_callback_register(SpaceFile *sfile,

@@ -24,8 +24,9 @@ from bl_ui.properties_paint_common import (
     SmoothStrokePanel,
     FalloffPanel,
     DisplayPanel,
-    brush_texture_settings,
-    brush_mask_texture_settings,
+    draw_brush_texture_image_grid,
+    draw_brush_texture_properties,
+    draw_brush_mask_texture_properties,
     brush_settings,
     brush_settings_advanced,
     draw_color_settings,
@@ -770,7 +771,7 @@ class VIEW3D_PT_tools_brush_texture(Panel, View3DPaintPanel):
     bl_parent_id = "VIEW3D_PT_tools_brush_settings"
     bl_label = "Texture"
     bl_options = {'DEFAULT_CLOSED'}
-    bl_ui_units_x = 13
+    bl_ui_units_x = 12
 
     @classmethod
     def poll(cls, context):
@@ -791,10 +792,14 @@ class VIEW3D_PT_tools_brush_texture(Panel, View3DPaintPanel):
         brush = settings.brush
         tex_slot = brush.texture_slot
 
-        col = layout.column()
-        col.template_ID_preview(tex_slot, "texture", new="texture.new", rows=3, cols=8)
+        col = draw_brush_texture_image_grid(layout, tex_slot)
 
-        brush_texture_settings(col, brush, context.sculpt_object)
+        draw_brush_texture_properties(
+            col,
+            brush,
+            context.sculpt_object,
+            default_closed=not self.is_popover,
+        )
 
 
 class VIEW3D_PT_tools_mask_texture(Panel, View3DPaintPanel, TextureMaskPanel):
@@ -818,9 +823,13 @@ class VIEW3D_PT_tools_mask_texture(Panel, View3DPaintPanel, TextureMaskPanel):
         col = layout.column()
         mask_tex_slot = brush.mask_texture_slot
 
-        col.template_ID_preview(mask_tex_slot, "texture", new="texture.new", rows=3, cols=8)
+        col = draw_brush_texture_image_grid(layout, mask_tex_slot)
 
-        brush_mask_texture_settings(col, brush)
+        draw_brush_mask_texture_properties(
+            col,
+            brush,
+            default_closed=not self.is_popover,
+        )
 
 
 class VIEW3D_PT_tools_brush_stroke(Panel, View3DPaintPanel, StrokePanel):

@@ -11,7 +11,8 @@ from bpy.types import (
 )
 from bl_ui.properties_paint_common import (
     UnifiedPaintPanel,
-    brush_texture_settings,
+    draw_brush_texture_image_grid,
+    draw_brush_texture_properties,
     brush_basic_texpaint_settings,
     brush_settings,
     brush_settings_advanced,
@@ -1356,10 +1357,14 @@ class IMAGE_PT_tools_brush_texture(BrushButtonsPanel, Panel):
         brush = tool_settings.brush
         tex_slot = brush.texture_slot
 
-        col = layout.column()
-        col.template_ID_preview(tex_slot, "texture", new="texture.new", rows=3, cols=8)
+        col = draw_brush_texture_image_grid(layout, tex_slot)
 
-        brush_texture_settings(col, brush, 0)
+        draw_brush_texture_properties(
+            col,
+            brush,
+            0,
+            default_closed=not self.is_popover,
+        )
 
 
 class IMAGE_PT_tools_mask_texture(Panel, BrushButtonsPanel, TextureMaskPanel):

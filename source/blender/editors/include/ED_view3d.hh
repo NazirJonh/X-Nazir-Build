@@ -8,17 +8,28 @@
 
 #pragma once
 
+#include <optional>
+#include <string>
+
 #include "BLI_bounds_types.hh"
 #include "BLI_enum_flags.hh"
+#include "BLI_function_ref.hh"
+#include "BLI_map.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_set.hh"
 
+#include "DNA_asset_types.h"
 #include "DNA_scene_types.h"
 
 namespace blender {
 
 /* ********* exports for space_view3d/ module ********** */
 struct ARegion;
+struct AssetShelf;
+namespace asset_system {
+class AssetRepresentation;
+}
 struct BMEdge;
 struct BMElem;
 struct BMEditMesh;
@@ -48,6 +59,7 @@ struct ViewContext;
 struct ViewLayer;
 struct ViewOpsData;
 struct bContext;
+struct PointerRNA;
 struct bGPDlayer;
 struct bPoseChannel;
 struct bScreen;
@@ -59,6 +71,7 @@ struct wmKeyMapItem;
 struct wmOperator;
 struct wmWindow;
 struct wmWindowManager;
+struct Image;
 namespace ed::transform {
 struct SnapObjectContext;
 }
@@ -1459,5 +1472,231 @@ bool ED_view3d_is_region_xr_mirror_active(const wmWindowManager *wm,
                                           const View3D *v3d,
                                           const ARegion *region);
 #endif
+
+/* -------------------------------------------------------------------- */
+/** \name Image Asset Grid (view3d_image_grid.cc / view3d_image_grid_state.cc)
+ * \{ */
+
+namespace ed::view3d {
+
+/** Library + catalog filter state (which library and which catalog paths are enabled). */
+struct ImageGridFilter {
+  AssetLibraryReference lib_ref{};
+  /**
+   * Set of catalog paths currently enabled for display in the grid.
+   * An empty set means "show all" (no catalog filter).
+   */
+  blender::Set<std::string> enabled_catalog_paths;
+  /**
+   * Per-asset-library catalog filters (session), keyed by
+   * #ed::asset::library_reference_to_enum_value(). Synced to #View3D DNA on persist.
+   */
+  blender::Map<int, blender::Set<std::string>> enabled_catalogs_by_library;
+};
+
+/** Viewport / scroll state (what is currently visible in the grid). */
+struct ImageGridViewport {
+  /** First visible row (0-based). Session-only; not DNA. */
+  int scroll_row = 0;
+
+  /**
+   * Sub-row pixel offset within #scroll_row for smooth scrolling, range [0, tile_height).
+   * The grid is drawn shifted up by this many pixels and clipped to the visible window, so rows
+   * appear/disappear partially instead of snapping a whole row at a time. Session-only.
+   */
+  int scroll_offset_px = 0;
+
+  /** Filled after build_grid_view each frame; scrollbar bounds on the *next* frame. */
+  int cached_item_count = 0;
+  int cached_cols = 0;
+
+  /** Visible grid height in pixels for #ButtonType::Grip (like #AbstractTreeView::custom_height_).
+   */
+  int grip_pixel_height = 0;
+
+  /**
+   * When non-empty, next grid build scrolls to this asset's filtered index (session-only).
+   * Used after shelf activation and after pending library/catalog apply.
+   */
+  std::string focus_asset_identifier;
+};
+
+/**
+ * Deferred sync from asset shelf browse popover (applied after popover closes).
+ * See #image_grid_pending_schedule_from_asset() / #image_grid_pending_apply_if_ready().
+ */
+struct ImageGridPendingSync {
+  bool apply_after_popover = false;
+  AssetLibraryReference lib_ref{};
+  bool use_all_catalogs = false;
+  std::string catalog_path;
+  std::string focus_asset_identifier;
+  /** Index in the full filtered asset list; computed on apply if still -1. */
+  int focus_filtered_index = -1;
+};
+
+/**
+ * Per-View3D persistent UI state for the compact image asset grid template.
+ * Stored externally (not in DNA) so it survives redraw without being serialized.
+ */
+struct ImageGridUIState {
+  ImageGridFilter filter;
+  ImageGridViewport viewport;
+  ImageGridPendingSync pending;
+
+  /**
+   * Last brush texture weak reference for the image browse popover (session-only).
+   * Updated in #image_grid_prepare_browse_shelf(); used when the popover redraws without
+   * `image_grid_target` in context.
+   */
+  bool shelf_active_asset_valid = false;
+  AssetWeakReference shelf_active_asset{};
+};
+
+ImageGridUIState &image_grid_state_get(const View3D &v3d, bool is_mask_slot = false);
+ImageGridUIState &image_grid_state_get_from_context(const bContext &C);
+bool image_grid_is_mask_slot_from_context(const bContext &C);
+void image_grid_state_reset_catalog(ImageGridUIState &state);
+/** Store #enabled_catalog_paths into #enabled_catalogs_by_library for the current library. */
+void image_grid_catalog_commit_active(ImageGridUIState &state);
+/** Save the old library filter, switch to \a new_lib_ref, restore its saved filter (or all). */
+void image_grid_catalog_swap_library(ImageGridUIState &state,
+                                     const AssetLibraryReference &old_lib_ref,
+                                     const AssetLibraryReference &new_lib_ref);
+void image_grid_state_remove(const View3D &v3d);
+void image_grid_notify_change(bContext &C, bool is_mask_slot = false);
+
+/** Copy grid library/catalog filter into popup asset shelf before opening browse UI. */
+void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState &state);
+
+/** Copy popup shelf library/catalog back into grid state; resets scroll row. */
+void image_grid_sync_state_from_shelf(ImageGridUIState &state, const AssetShelf &shelf);
+
+/** Prepare popup shelf for image browse; returns null if shelf type missing or poll fails. */
+AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
+                                            ImageGridUIState &state,
+                                            const char *shelf_idname);
+
+void image_grid_pending_clear(ImageGridUIState &state);
+
+bool image_grid_asset_is_visible_in_state(const ImageGridUIState &state,
+                                          const AssetLibraryReference &asset_lib_ref,
+                                          const std::optional<std::string> &asset_catalog_path);
+
+/** Catalog filter implied by popup asset shelf settings (nullopt = All). */
+std::optional<std::string> image_grid_catalog_path_from_shelf(const AssetShelf &shelf);
+
+/** True when grid library + catalog filter already match \a shelf. */
+bool image_grid_filter_matches_shelf(const ImageGridUIState &state, const AssetShelf &shelf);
+
+/** Drop unknown catalog paths so an empty set means All is selected. */
+void image_grid_catalog_sanitize_selection(ImageGridUIState &state);
+
+void image_grid_state_persist_to_view3d(View3D &v3d,
+                                        ImageGridUIState &state,
+                                        bool is_mask_slot = false);
+
+void image_grid_pending_schedule_from_asset(ImageGridUIState &state,
+                                            const AssetLibraryReference &lib_ref,
+                                            const std::optional<std::string> &catalog_path,
+                                            const std::string &asset_identifier);
+
+std::optional<std::string> image_grid_catalog_path_for_asset(
+    const asset_system::AssetRepresentation &asset, const AssetLibraryReference &lib_ref);
+
+void image_grid_request_scroll_to_asset(ImageGridUIState &state,
+                                        const std::string &asset_identifier);
+
+/**
+ * Weak reference to the image texture currently assigned to the brush slot in
+ * context `image_grid_target`, for asset shelf popover highlighting.
+ */
+std::optional<AssetWeakReference> image_grid_shelf_active_asset_weak_ref(
+    const bContext &C, const AssetLibraryReference &library_ref);
+
+/** Register popover shelf resolver; safe to call repeatedly. */
+void image_grid_shelf_sync_register();
+
+/**
+ * Set #ImageGridUIState::scroll_row from #focus_asset_identifier using \a cols columns per row,
+ * centering the target asset vertically within the visible area (scroll_row is shifted back by
+ * half of \a effective_rows_hint so the active asset lands in the middle of the popover).
+ *
+ * \param effective_rows_hint: Number of visible grid rows, pre-computed by the caller from
+ * #grip_pixel_height and tile_h *before* #View3D::image_grid_rows is written for the current
+ * frame. This avoids the first-frame case where image_grid_rows is still 0 (DNA default),
+ * which would otherwise give center_offset = 0 and produce no vertical centering.
+ *
+ * Returns true when scroll was applied (or no focus was requested).
+ */
+bool image_grid_apply_focus_scroll(const bContext &C,
+                                   View3D &v3d,
+                                   ImageGridUIState &state,
+                                   int cols,
+                                   int effective_rows_hint);
+
+/**
+ * Apply pending shelf selection when the browse popover is closed.
+ * Safe to call every image grid redraw.
+ */
+void image_grid_pending_apply_if_ready(bContext &C, View3D &v3d);
+
+/** Return the short display name for an asset library reference (used in image grid UI). */
+const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref);
+
+int image_grid_effective_rows(const View3D &v3d);
+int image_grid_preview_size_get(const View3D &v3d);
+int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d);
+void image_grid_clamp_scroll_row(ImageGridUIState &state, const View3D &v3d);
+bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region);
+int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *region);
+int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegion *region);
+
+/** True when \a texture_slot_ptr refers to #Brush.mask_mtex (not #Brush.mtex). */
+bool image_grid_slot_is_mask(const PointerRNA &texture_slot_ptr);
+
+/* -------------------------------------------------------------------- */
+/** \name Image Grid Filtered Sequence
+ * \{ */
+
+/**
+ * Discriminated item yielded by #image_grid_foreach_filtered_item.
+ * Exactly one of the two pointers is non-null per item.
+ */
+struct ImageGridFilteredItem {
+  /** Non-null for image assets from the library list. */
+  asset_system::AssetRepresentation *asset = nullptr;
+  /** Non-null for non-asset blend-file images (LOCAL library only). */
+  Image *image = nullptr;
+};
+
+/**
+ * True when \a image can be assigned as a brush texture from the grid.
+ * Excludes render results, composites, viewer nodes, and generated images.
+ */
+bool image_grid_is_assignable_texture(const Image &image);
+
+/**
+ * Iterate all visible image items for \a lib_ref and \a enabled_catalog_paths in display order.
+ *
+ * Handles: ID type filtering, catalog filter, assignability check, asset deduplication,
+ * and the LOCAL blend-file image extension (non-asset images from #Main).
+ *
+ * The callback receives each item and its zero-based filtered index.
+ * Return false from \a fn to stop early; the total count continues to accumulate.
+ *
+ * \return Total filtered item count (consistent ordering guarantee for focus-scroll).
+ */
+int image_grid_foreach_filtered_item(
+    Main &bmain,
+    const AssetLibraryReference &lib_ref,
+    const blender::Set<std::string> &enabled_catalog_paths,
+    blender::FunctionRef<bool(const ImageGridFilteredItem &item, int filtered_index)> fn);
+
+/** \} */
+
+}  // namespace ed::view3d
+
+/** \} */
 
 }  // namespace blender

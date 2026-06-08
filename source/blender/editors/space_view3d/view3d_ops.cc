@@ -258,6 +258,20 @@ void view3d_operatortypes()
   WM_operatortype_append(VIEW3D_OT_ruler_add);
   WM_operatortype_append(VIEW3D_OT_ruler_remove);
 
+  WM_operatortype_append(VIEW3D_OT_image_grid_set_library);
+  WM_operatortype_append(VIEW3D_OT_image_grid_assign_texture);
+  WM_operatortype_append(VIEW3D_OT_image_grid_set_catalog);
+  WM_operatortype_append(VIEW3D_OT_image_grid_mark_asset);
+  WM_operatortype_append(VIEW3D_OT_image_grid_new);
+  WM_operatortype_append(VIEW3D_OT_image_grid_open);
+  WM_operatortype_append(VIEW3D_OT_image_grid_assign_catalog);
+  WM_operatortype_append(VIEW3D_OT_image_grid_copy_to_library);
+  WM_operatortype_append(VIEW3D_OT_image_grid_move_to_library);
+  WM_operatortype_append(VIEW3D_OT_image_grid_browse_assets);
+  WM_operatortype_append(VIEW3D_OT_image_shelf_activate_asset);
+  WM_operatortype_append(VIEW3D_OT_image_grid_scroll);
+  WM_operatortype_append(VIEW3D_OT_image_grid_refresh_library);
+
   ed::transform::transform_operatortypes();
 }
 

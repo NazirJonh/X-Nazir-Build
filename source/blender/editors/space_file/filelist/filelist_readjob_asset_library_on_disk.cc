@@ -61,7 +61,9 @@ static void filelist_readjob_asset_library(FileListReadJob *job_params,
     job_params->load_asset_library = original_file_library;
   }
   if (!job_params->only_main_data) {
+    filelist_readjob_ensure_image_library_indexed(job_params);
     filelist_readjob_recursive_dir_add_items(true, job_params, stop, do_update, progress);
+    filelist_readjob_image_files_add_items(job_params, stop, do_update, progress);
   }
 }
 

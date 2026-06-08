@@ -386,7 +386,10 @@ void BKE_previewimg_ensure(PreviewImage *prv, const int size)
   int icon_w, icon_h;
 
   ImBuf *thumb = IMB_thumb_manage(prv_deferred.filepath.c_str(), THB_LARGE, prv_deferred.source);
-  if (!thumb) {
+  if (!thumb || thumb->x <= 0 || thumb->y <= 0) {
+    if (thumb) {
+      IMB_freeImBuf(thumb);
+    }
     return;
   }
 

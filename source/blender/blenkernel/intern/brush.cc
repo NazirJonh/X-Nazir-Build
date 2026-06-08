@@ -1727,6 +1727,24 @@ ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br, bool secondary, bool displa
   return im;
 }
 
+void BKE_brush_texture_slots_validate(Main *bmain)
+{
+  /* After a memfile undo step, a linked, no-undo asset brush is not visited by the no-undo ID
+   * pointer remap (#read_undo_remap_noundo_data skips linked IDs). If such a brush references a
+   * local image texture assigned through the asset image grid, that texture may have been freed or
+   * relocated by the undo step, leaving a dangling pointer in the brush texture slots. Sampling it
+   * afterwards (paint stroke, radial control preview, brush cursor overlay, ...) reads freed memory
+   * and crashes. Drop any slot pointer that no longer refers to a texture present in `bmain`. */
+  const ListBaseT<ID> *tex_lb = which_libbase(bmain, ID_TE);
+  for (Brush &brush : bmain->brushes) {
+    for (MTex *mtex : {&brush.mtex, &brush.mask_mtex}) {
+      if (mtex->tex != nullptr && BLI_findindex(tex_lb, mtex->tex) == -1) {
+        mtex->tex = nullptr;
+      }
+    }
+  }
+}
+
 bool BKE_brush_has_cube_tip(const Brush *brush, PaintMode paint_mode)
 {
   switch (paint_mode) {

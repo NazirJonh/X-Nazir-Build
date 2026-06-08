@@ -17,6 +17,7 @@
 #include "BLI_utildefines.h"
 
 #include "BKE_blender_undo.hh"
+#include "BKE_brush.hh"
 #include "BKE_callbacks.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
@@ -200,6 +201,11 @@ static void ed_undo_step_post(bContext *C,
 
   Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
+
+  /* Linked, no-undo asset brushes are skipped by the no-undo ID pointer remap, so a local image
+   * texture assigned to such a brush (e.g. via the asset image grid) can leave a dangling pointer
+   * in the brush texture slots after the step. Clear those before any sampling can read them. */
+  BKE_brush_texture_slots_validate(bmain);
 
   /* App-Handlers (post). */
   {

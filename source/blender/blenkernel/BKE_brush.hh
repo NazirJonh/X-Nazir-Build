@@ -96,6 +96,14 @@ void BKE_brush_tag_unsaved_changes(Brush *brush);
 float2 BKE_brush_jitter_pos(const Paint &paint, const Brush &brush, const float2 &pos);
 void BKE_brush_randomize_texture_coords(Paint *paint, bool mask);
 
+/**
+ * Clear brush texture slot pointers (#MTex::tex) that no longer refer to a texture present in
+ * \a bmain. This recovers from dangling pointers left in linked, no-undo asset brushes after a
+ * memfile undo step (see implementation for details), and should be called once after each undo /
+ * redo step.
+ */
+void BKE_brush_texture_slots_validate(Main *bmain);
+
 /* Brush curve. */
 
 /**

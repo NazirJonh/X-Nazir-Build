@@ -594,7 +594,27 @@ class StrokePanel(BrushPanel):
         if brush.stroke_method == 'CURVE':
             col.separator()
             col.template_ID(brush, "paint_curve", new="paintcurve.new")
+            if brush.paint_curve:
+                col.prop(brush.paint_curve, "use_3d_space", text="3D Curve")
+                if mode == 'SCULPT':
+                    sculpt = context.tool_settings.sculpt
+                    if sculpt:
+                        col.prop(sculpt, "paint_curve_source_object", text="Source Curve")
+                        col.prop(sculpt, "paint_curve_sync_to_source", text="Sync to Source")
+                        row = col.row(align=True)
+                        row.operator(
+                            "paintcurve.from_curve_object",
+                            text="Re-import from Source",
+                            icon='IMPORT',
+                        )
+                        row.operator(
+                            "paintcurve.to_curve_object",
+                            text="Export to Scene Curve",
+                            icon='OUTLINER_OB_CURVE',
+                        )
             col.operator("paintcurve.draw")
+            if brush.paint_curve:
+                col.prop(brush.paint_curve, "show_radius_handles", text="Radius Handles")
             col.separator()
 
         if brush.stroke_method in {'SPACE', 'LINE', 'CURVE'}:

@@ -118,11 +118,29 @@ PaintTileMap *ED_image_paint_tile_map_get();
 
 /* `paint_curve_undo.cc` */
 
-void ED_paintcurve_undo_push_begin(const char *name);
+void ED_paintcurve_undo_push_begin(bContext *C, const char *name);
 void ED_paintcurve_undo_push_end(bContext *C);
 
 /** Export for ED_undo_sys. */
 void ED_paintcurve_undosys_type(UndoType *ut);
+
+/**
+ * Copy geometry from #Sculpt.paint_curve_source_object into the active brush paint curve.
+ * \return true when import was performed.
+ */
+bool ED_paintcurve_import_from_source_object(bContext *C, ReportList *reports, bool use_undo);
+
+/** Re-import the paint curve after entering sculpt mode when a source curve is assigned. */
+void ED_paintcurve_refresh_on_sculpt_mode_enter(bContext *C);
+
+/** Commit radius edits from transform (Curve Shrink/Fatten) to paint-curve data. */
+void ED_paintcurve_flush_radius_transform(bContext *C, struct PaintCurve *pc);
+
+/**
+ * Write the paint-curve geometry positions back to the linked source Curves or Curve object.
+ * Does nothing when no source object is set or sync is disabled.
+ */
+bool ED_paintcurve_sync_to_source(bContext *C, struct PaintCurve *pc);
 
 /* `paint_canvas.cc` */
 

@@ -25,6 +25,7 @@
 
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
+#include "BKE_curves.hh"
 #include "BKE_layer.hh"
 #include "BKE_mask.hh"
 #include "BKE_modifier.hh"
@@ -39,6 +40,7 @@
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_uvedit.hh"
+#include "ED_view3d.hh"
 
 #include "WM_api.hh"
 
@@ -1128,10 +1130,37 @@ bool calculateCenterActive(TransInfo *t, bool select_only, float r_center[3])
   else if (t->options & CTX_PAINT_CURVE) {
     Paint *paint = BKE_paint_get_active(*t->bmain, t->scene, t->view_layer);
     Brush *br = BKE_paint_brush(paint);
-    PaintCurve *pc = br->paint_curve;
-    copy_v3_v3(r_center, pc->points[pc->add_index - 1].bez.vec[1]);
+    PaintCurve *pc = br ? br->paint_curve : nullptr;
+    if (!pc) {
+      return false;
+    }
+    const bke::CurvesGeometry &geom = pc->geometry.wrap();
+    const int add_idx = pc->add_index - 1;
+    if (geom.runtime == nullptr || add_idx < 0 || add_idx >= geom.points_num()) {
+      return false;
+    }
+    const float3 obj_co = geom.positions()[add_idx];
+    BKE_view_layer_synced_ensure(*t->bmain, t->scene, t->view_layer);
+    const Object *ob = BKE_view_layer_active_object_get(t->view_layer);
+    float world_co[3];
+    if (ob) {
+      mul_v3_m4v3(world_co, ob->object_to_world().ptr(), obj_co);
+    }
+    else {
+      copy_v3_v3(world_co, obj_co);
+    }
+    if (t->region) {
+      float screen_co[2];
+      ED_view3d_project_v2(t->region, world_co, screen_co);
+      r_center[0] = screen_co[0];
+      r_center[1] = screen_co[1];
+      r_center[2] = 0.0f;
+    }
+    else {
+      copy_v3_v3(r_center, world_co);
+      r_center[2] = 0.0f;
+    }
     BKE_brush_tag_unsaved_changes(br);
-    r_center[2] = 0.0f;
     return true;
   }
   else {

@@ -4741,14 +4741,14 @@ def km_paint_curve(params):
     )
 
     items.extend([
+        ("paintcurve.slide", {"type": params.action_mouse, "value": 'PRESS', "ctrl": True, "shift": True},
+         {"properties": [("insert_point", True), ("select", False)]}),
         ("paintcurve.add_point_slide", {"type": params.action_mouse, "value": 'PRESS', "ctrl": True}, None),
-        ("paintcurve.select", {"type": params.select_mouse, "value": 'PRESS'}, None),
-        ("paintcurve.select", {"type": params.select_mouse, "value": 'PRESS', "shift": True},
-         {"properties": [("extend", True)]}),
-        ("paintcurve.slide", {"type": params.action_mouse, "value": 'PRESS'},
-         {"properties": [("align", False)]}),
-        ("paintcurve.slide", {"type": params.action_mouse, "value": 'PRESS', "shift": True},
-         {"properties": [("align", True)]}),
+        ("paintcurve.slide", {"type": params.select_mouse, "value": 'PRESS'},
+         {"properties": [("align", False), ("move_segment", True)]}),
+        ("paintcurve.slide", {"type": params.select_mouse, "value": 'PRESS', "shift": True},
+         {"properties": [("align", True), ("move_segment", True)]}),
+        ("paintcurve.slide_radius", {"type": params.select_mouse, "value": 'PRESS'}, None),
         ("paintcurve.select", {"type": 'A', "value": 'PRESS'},
          {"properties": [("toggle", True)]}),
         ("paintcurve.cursor", {"type": params.action_mouse, "value": 'PRESS', "shift": True, "ctrl": True}, None),
@@ -4760,6 +4760,8 @@ def km_paint_curve(params):
         ("transform.translate", {"type": params.select_mouse, "value": 'CLICK_DRAG'}, None),
         ("transform.rotate", {"type": 'R', "value": 'PRESS'}, None),
         ("transform.resize", {"type": 'S', "value": 'PRESS'}, None),
+        ("transform.transform", {"type": 'S', "value": 'PRESS', "alt": True},
+         {"properties": [("mode", 'CURVE_SHRINKFATTEN')]}),
     ])
 
     return keymap

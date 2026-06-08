@@ -259,8 +259,6 @@ bool BKE_paint_eraser_brush_set_essentials(Main *bmain, Paint *paint, const char
 
 Palette *BKE_paint_palette(Paint *paint);
 void BKE_paint_palette_set(Paint *paint, Palette *palette);
-void BKE_paint_curve_clamp_endpoint_add_index(PaintCurve *pc, int add_index);
-
 /**
  * Return true when in vertex/weight/texture paint + face-select mode?
  */

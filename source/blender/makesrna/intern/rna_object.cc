@@ -2047,6 +2047,12 @@ bool rna_Curve_object_poll(PointerRNA * /*ptr*/, PointerRNA value)
   return (reinterpret_cast<Object *>(value.owner_id))->type == OB_CURVES_LEGACY;
 }
 
+bool rna_PaintCurve_source_object_poll(PointerRNA * /*ptr*/, PointerRNA value)
+{
+  const Object *ob = reinterpret_cast<Object *>(value.owner_id);
+  return ELEM(ob->type, OB_CURVES, OB_CURVES_LEGACY);
+}
+
 bool rna_Armature_object_poll(PointerRNA * /*ptr*/, PointerRNA value)
 {
   return (reinterpret_cast<Object *>(value.owner_id))->type == OB_ARMATURE;

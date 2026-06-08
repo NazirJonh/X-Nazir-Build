@@ -26,7 +26,9 @@
 
 #include "DEG_depsgraph_query.hh"
 
+#include "DNA_brush_types.h"
 #include "DNA_collection_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_workspace_types.h"
 
@@ -218,6 +220,104 @@ static void id_search_cb_tagged(const bContext *C,
   }
 }
 
+static bool template_id_is_brush_paint_curve(const TemplateID *template_ui)
+{
+  if (template_ui->idcode != ID_PC) {
+    return false;
+  }
+  if (!RNA_struct_is_a(template_ui->ptr.type, RNA_Brush)) {
+    return false;
+  }
+  return STREQ(RNA_property_identifier(template_ui->prop), "paint_curve");
+}
+
+static bool template_id_paint_curve_extended_search_enabled(const bContext *C,
+                                                            const TemplateID *template_ui)
+{
+  if (!template_id_is_brush_paint_curve(template_ui)) {
+    return false;
+  }
+  const Brush *brush = static_cast<const Brush *>(template_ui->ptr.data);
+  if (brush->stroke_method != BRUSH_STROKE_CURVE) {
+    return false;
+  }
+  const Object *ob = CTX_data_active_object(C);
+  return ob && (ob->mode & OB_MODE_SCULPT);
+}
+
+static void sculpt_paint_curve_source_object_set(bContext *C, Object *ob)
+{
+  Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr || scene->toolsettings == nullptr || scene->toolsettings->sculpt == nullptr) {
+    return;
+  }
+
+  PointerRNA scene_ptr = RNA_id_pointer_create(&scene->id);
+  PointerRNA ts_ptr = RNA_pointer_get(&scene_ptr, "tool_settings");
+  PointerRNA sculpt_ptr = RNA_pointer_get(&ts_ptr, "sculpt");
+  PropertyRNA *prop = RNA_struct_find_property(&sculpt_ptr, "paint_curve_source_object");
+  if (prop == nullptr) {
+    return;
+  }
+
+  PointerRNA ob_ptr = RNA_id_pointer_create(&ob->id);
+  RNA_property_pointer_set(&sculpt_ptr, prop, ob_ptr, nullptr);
+  RNA_property_update(C, &sculpt_ptr, prop);
+}
+
+/**
+ * Lists paint-curve data-blocks and, in sculpt mode, scene Curves/Curve objects that can be
+ * imported into the active brush paint curve.
+ */
+static void id_search_cb_brush_paint_curve_extended(const bContext *C,
+                                                    void *arg_template,
+                                                    const char *str,
+                                                    SearchItems *items,
+                                                    const bool is_first)
+{
+  id_search_cb(C, arg_template, str, items, is_first);
+
+  Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr) {
+    return;
+  }
+
+  string_search::StringSearch<Object> search;
+  FOREACH_SCENE_OBJECT_BEGIN (scene, ob) {
+    if (!ELEM(ob->type, OB_CURVES, OB_CURVES_LEGACY)) {
+      continue;
+    }
+    search.add(ob->id.name + 2, ob);
+  }
+  FOREACH_SCENE_OBJECT_END;
+
+  const Vector<Object *> filtered_objects = search.query(str);
+  for (Object *ob : filtered_objects) {
+    char name_ui[MAX_ID_FULL_NAME_UI];
+    SNPRINTF_UTF8(name_ui, "%s (%s)", ob->id.name + 2, IFACE_("Object"));
+    if (!search_item_add(items, name_ui, &ob->id, ICON_OUTLINER_OB_CURVE, 0, 0)) {
+      break;
+    }
+  }
+}
+
+static void template_ID_set_brush_paint_curve_exec_fn(bContext *C,
+                                                      void *arg_template,
+                                                      void *item)
+{
+  TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
+  ID *id = static_cast<ID *>(item);
+
+  if (id != nullptr && GS(id->name) == ID_OB &&
+      template_id_paint_curve_extended_search_enabled(C, template_ui))
+  {
+    sculpt_paint_curve_source_object_set(C, id_cast<Object *>(id));
+    return;
+  }
+
+  template_ID_set_property_exec_fn(C, arg_template, item);
+}
+
 /**
  * A version of 'id_search_cb' that lists scene objects.
  */
@@ -262,10 +362,16 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
   PointerRNA active_item_ptr;
   void (*id_search_update_fn)(
       const bContext *, void *, const char *, SearchItems *, const bool) = id_search_cb;
+  ButtonHandleFunc search_exec_fn = template_ID_set_property_exec_fn;
 
   /* arg_litem is malloced, can be freed by parent button */
   template_ui = *(static_cast<TemplateID *>(arg_litem));
   active_item_ptr = RNA_property_pointer_get(&template_ui.ptr, template_ui.prop);
+
+  if (template_id_paint_curve_extended_search_enabled(C, &template_ui)) {
+    id_search_update_fn = id_search_cb_brush_paint_curve_extended;
+    search_exec_fn = template_ID_set_brush_paint_curve_exec_fn;
+  }
 
   if (template_ui.filter) {
     /* Currently only used for objects. */
@@ -280,7 +386,7 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
                                      region,
                                      id_search_update_fn,
                                      &template_ui,
-                                     template_ID_set_property_exec_fn,
+                                     search_exec_fn,
                                      active_item_ptr.data,
                                      template_ID_search_menu_item_tooltip,
                                      template_ui.prv_rows,

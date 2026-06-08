@@ -553,7 +553,7 @@ void ED_operatormacros_paint()
   ot = WM_operatortype_append_macro("PAINTCURVE_OT_add_point_slide",
                                     "Add Curve Point and Slide",
                                     "Add new curve point and slide it",
-                                    OPTYPE_UNDO);
+                                    OPTYPE_REGISTER);
   ot->description = "Add new curve point and slide it";
   WM_operatortype_macro_define(ot, "PAINTCURVE_OT_add_point");
   otmacro = WM_operatortype_macro_define(ot, "PAINTCURVE_OT_slide");
@@ -580,7 +580,10 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINTCURVE_OT_delete_point);
   WM_operatortype_append(PAINTCURVE_OT_select);
   WM_operatortype_append(PAINTCURVE_OT_slide);
+  WM_operatortype_append(PAINTCURVE_OT_slide_radius);
   WM_operatortype_append(PAINTCURVE_OT_draw);
+  WM_operatortype_append(PAINTCURVE_OT_from_curve_object);
+  WM_operatortype_append(PAINTCURVE_OT_to_curve_object);
   WM_operatortype_append(PAINTCURVE_OT_cursor);
 
   /* brush */
@@ -679,6 +682,7 @@ void ED_keymap_paint(wmKeyConfig *keyconf)
 
   keymap = WM_keymap_ensure(keyconf, "Paint Curve", SPACE_EMPTY, RGN_TYPE_WINDOW);
   keymap->poll = paint_curve_poll;
+  paintcurve_slide_modal_keymap(keyconf);
 
   /* Sculpt mode */
   keymap = WM_keymap_ensure(keyconf, "Sculpt", SPACE_EMPTY, RGN_TYPE_WINDOW);

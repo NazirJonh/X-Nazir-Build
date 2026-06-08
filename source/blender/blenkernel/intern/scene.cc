@@ -723,6 +723,24 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
     if (toolsett_old != toolsett) {
       toolsett_old->sculpt->gravity_object = gravity_object_old;
     }
+
+    Object *paint_curve_source_object = toolsett->sculpt ?
+                                            toolsett->sculpt->paint_curve_source_object :
+                                            nullptr;
+    Object *paint_curve_source_object_old = toolsett_old->sculpt->paint_curve_source_object;
+    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                      &paint_curve_source_object,
+                                                      do_undo_restore,
+                                                      SCENE_FOREACH_UNDO_NO_RESTORE,
+                                                      reader,
+                                                      &paint_curve_source_object_old,
+                                                      IDWALK_CB_NOP);
+    if (toolsett->sculpt) {
+      toolsett->sculpt->paint_curve_source_object = paint_curve_source_object;
+    }
+    if (toolsett_old != toolsett) {
+      toolsett_old->sculpt->paint_curve_source_object = paint_curve_source_object_old;
+    }
   }
   if (toolsett_old->gp_paint) {
     paint = toolsett->gp_paint ? &toolsett->gp_paint->paint : nullptr;

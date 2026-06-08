@@ -8,11 +8,15 @@
 
 #pragma once
 
+#include "BLI_function_ref.hh"
 #include "BLI_index_mask_fwd.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rand.hh"
 #include "BLI_span.hh"
+#include "BLI_vector.hh"
 
+#include "DNA_brush_types.h"
 #include "DNA_object_enums.h"
 #include "DNA_scene_enums.h"
 #include "DNA_scene_types.h"
@@ -27,9 +31,14 @@ namespace blender {
 
 enum class PaintMode : int8_t;
 
+namespace bke {
+class CurvesGeometry;
+}
+
 struct ARegion;
 struct bContext;
 struct Brush;
+struct Curve;
 struct Depsgraph;
 struct Image;
 struct ImagePool;
@@ -282,7 +291,11 @@ struct PaintStroke : NonCopyable, NonMovable {
 
  private:
   void done(bContext *C, bool is_cancel);
-  void add_step(bContext *C, wmOperator *op, float2 mval, float pressure);
+  void add_step(bContext *C,
+               wmOperator *op,
+               float2 mval,
+               float pressure,
+               std::optional<float> curve_point_radius = std::nullopt);
 
   void add_sample(int input_samples, float x, float y, float pressure);
   void calc_average_sample(PaintSample *average);
@@ -292,7 +305,9 @@ struct PaintStroke : NonCopyable, NonMovable {
                      float spacing,
                      float *length_residue,
                      float2 old_pos,
-                     float2 new_pos);
+                     float2 new_pos,
+                     std::optional<float> old_curve_radius = std::nullopt,
+                     std::optional<float> new_curve_radius = std::nullopt);
   int space_stroke(bContext *C, wmOperator *op, float2 final_mouse, float final_pressure);
 
   void line_end(bContext *C, wmOperator *op, float2 mouse);
@@ -669,8 +684,85 @@ void PAINTCURVE_OT_add_point(wmOperatorType *ot);
 void PAINTCURVE_OT_delete_point(wmOperatorType *ot);
 void PAINTCURVE_OT_select(wmOperatorType *ot);
 void PAINTCURVE_OT_slide(wmOperatorType *ot);
+void PAINTCURVE_OT_slide_radius(wmOperatorType *ot);
 void PAINTCURVE_OT_draw(wmOperatorType *ot);
 void PAINTCURVE_OT_cursor(wmOperatorType *ot);
+void PAINTCURVE_OT_from_curve_object(wmOperatorType *ot);
+void PAINTCURVE_OT_to_curve_object(wmOperatorType *ot);
+wmKeyMap *paintcurve_slide_modal_keymap(wmKeyConfig *keyconf);
+
+float *paintcurve_geom_co(bke::CurvesGeometry &geom, int point_idx, int handle_idx);
+bool paintcurve_is_cyclic(const struct PaintCurve *pc);
+bool paintcurve_is_curve_cyclic(const struct PaintCurve *pc, int curve_index);
+bool paintcurve_has_multi_curves(const struct PaintCurve *pc);
+bool paintcurve_uses_3d_geometry(const struct PaintCurve *pc);
+void paintcurve_foreach_bezier_segment(
+    const struct PaintCurve *pc,
+    blender::FunctionRef<void(int point_index_a, int point_index_b)> fn);
+void paintcurve_geometry_init_bezier(bke::CurvesGeometry &geom, int point_num);
+void paintcurve_geometry_from_2d(struct PaintCurve *pc, const struct ViewContext *vc);
+/**
+ * Ensure the embedded 3D geometry is in sync with the legacy 2D points.
+ * Called when `use_3d_space` is enabled on a curve that was created before the 3D
+ * representation existed, so the geometry array may be empty or stale.
+ * No-op if the geometry already matches `pc->tot_points`.
+ */
+void paintcurve_ensure_3d_geometry(PaintCurve *pc, const ViewContext *vc);
+/** Cycle the handle type of a control point: Auto → Vector → Free → Auto. */
+void paintcurve_cycle_point_handle_type(PaintCurve *pc, int point_index);
+void ED_paintcurve_sync_geometry_to_2d(struct PaintCurve *pc,
+                                       const struct ViewContext *vc,
+                                       const float ob_to_world[4][4]);
+void paintcurve_geometry_from_curves(struct PaintCurve *pc,
+                                     const bke::CurvesGeometry &src,
+                                     const float4x4 &transform);
+void paintcurve_geometry_from_legacy_curve(struct PaintCurve *pc,
+                                           const Curve *curve,
+                                           const float4x4 &transform);
+bool ED_paintcurve_sync_to_source_object(struct bContext *C, struct PaintCurve *pc);
+
+/**
+ * Map radius from a curve object (bevel radius semantics) to paint-curve brush factor.
+ * Uninitialized/zero source values become 1.0 (full brush). Values above 1.0 are kept as-is.
+ */
+float paintcurve_radius_from_source_geometry(float source_radius);
+/** Radius of a paint-curve control point (>= 0, unbounded above). */
+float paintcurve_get_point_radius(const struct PaintCurve *pc, int point_index);
+/** Normalize embedded geometry radii and copy them to legacy `bez.radius`. */
+void paintcurve_init_points_radius_from_geometry(struct PaintCurve *pc);
+/**
+ * Map paint-curve radius to brush pixel radius.
+ * 0 -> 1 px, 1 -> full brush size, >1 -> brush size multiplied by radius.
+ */
+float paintcurve_radius_to_pixel_radius(const struct Paint *paint,
+                                        const struct Brush *brush,
+                                        float point_radius);
+/** Size factor relative to the brush radius, for stroke spacing along a paint curve. */
+float paintcurve_radius_to_size_factor(const struct Paint *paint,
+                                       const struct Brush *brush,
+                                       float point_radius);
+/** Copy legacy `bez.radius` values into the embedded curves geometry. */
+void paintcurve_sync_geometry_radius_from_points(struct PaintCurve *pc);
+
+struct PaintCurveRadiusHandleScreen {
+  float2 point;
+  float2 end;
+  float2 perp;
+};
+
+void paintcurve_build_screen_points(const struct PaintCurve *pc,
+                                    const struct ViewContext *vc,
+                                    blender::Vector<PaintCurvePoint> &r_screen_points);
+void paintcurve_radius_handle_screen_get(const struct PaintCurve *pc,
+                                         const PaintCurvePoint *screen_points,
+                                         int point_index,
+                                         PaintCurveRadiusHandleScreen *r_handle);
+int paintcurve_find_radius_handle_at_pos(const struct PaintCurve *pc,
+                                         const PaintCurvePoint *screen_points,
+                                         const float pos[2],
+                                         float threshold);
+float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScreen *handle,
+                                               const float pos[2]);
 
 /* image painting blur kernel */
 struct BlurKernel {
@@ -692,6 +784,10 @@ void paint_init_pivot(Object *ob, Scene *scene, Paint *paint);
 
 /* paint curve defines */
 #define PAINT_CURVE_NUM_SEGMENTS 40
+/** Screen-space handle length at paint-curve radius factor 1.0. */
+#define PAINT_CURVE_RADIUS_HANDLE_BASE_LEN 40.0f
+/** Screen-space radius of the radius-handle endpoint circle. */
+#define PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS 10.0f
 
 /* palette.cc */
 

@@ -14,7 +14,10 @@
 #include "BLI_math_vector.h"
 
 #include "BKE_brush.hh"
+#include "BKE_context.hh"
 #include "BKE_paint.hh"
+
+#include "ED_paint.hh"
 
 #include "transform.hh"
 #include "transform_convert.hh"
@@ -62,7 +65,8 @@ static void PaintCurveConvertHandle(
 static void PaintCurvePointToTransData(PaintCurvePoint *pcp,
                                        TransData *td,
                                        TransData2D *td2d,
-                                       TransDataPaintCurve *tdpc)
+                                       TransDataPaintCurve *tdpc,
+                                       const TransInfo *t)
 {
   BezTriple *bezt = &pcp->bez;
 
@@ -81,7 +85,13 @@ static void PaintCurvePointToTransData(PaintCurvePoint *pcp,
       memset(td->axismtx, 0, sizeof(td->axismtx));
       td->axismtx[2][2] = 1.0f;
 
-      td->val = nullptr;
+      if (i == 1 && t->mode == TFM_CURVE_SHRINKFATTEN) {
+        td->val = &bezt->radius;
+        td->ival = bezt->radius;
+      }
+      else {
+        td->val = nullptr;
+      }
       td->flag |= TD_SELECTED;
       td->dist = 0.0;
 
@@ -160,7 +170,7 @@ static void createTransPaintCurveVerts(bContext *C, TransInfo *t)
 
   for (pcp = pc->points, i = 0; i < pc->tot_points; i++, pcp++) {
     if (PC_IS_ANY_SEL(pcp)) {
-      PaintCurvePointToTransData(pcp, td, td2d, tdpc);
+      PaintCurvePointToTransData(pcp, td, td2d, tdpc, t);
 
       if (pcp->bez.f2 & SELECT) {
         td += 3;
@@ -200,12 +210,19 @@ static void flushTransPaintCurve(TransInfo *t)
 
   for (i = 0; i < tc->data_len; i++, tdpc++, td2d++) {
     PaintCurvePoint *pcp = tdpc->pcp;
+    if (pcp == nullptr) {
+      continue;
+    }
     copy_v2_v2(pcp->bez.vec[tdpc->id], td2d->loc);
   }
 
   if (t->context) {
     Paint *paint = BKE_paint_get_active_from_context(t->context);
     Brush *br = (paint) ? BKE_paint_brush(paint) : nullptr;
+    PaintCurve *pc = br ? br->paint_curve : nullptr;
+    if (pc && t->mode == TFM_CURVE_SHRINKFATTEN) {
+      ED_paintcurve_flush_radius_transform(t->context, pc);
+    }
     BKE_brush_tag_unsaved_changes(br);
   }
 }

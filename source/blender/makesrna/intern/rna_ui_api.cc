@@ -1171,6 +1171,14 @@ static int rna_ui_get_enum_icon(bContext *C,
   return icon;
 }
 
+static void rna_uiTemplateAssetImageGrid(Layout *layout,
+                                         bContext *C,
+                                         PointerRNA *ptr,
+                                         const char *propname)
+{
+  ui::template_asset_image_grid(layout, C, ptr, propname);
+}
+
 void rna_uiTemplateAssetShelfPopover(Layout *layout,
                                      bContext *C,
                                      const char *asset_shelf_id,
@@ -1911,6 +1919,11 @@ void RNA_api_ui_layout(StructRNA *srna)
                "",
                "Optionally limit the items which can be selected");
   RNA_def_boolean(func, "hide_buttons", false, "", "Show only list, no buttons");
+
+  func = RNA_def_function(srna, "template_asset_image_grid", "rna_uiTemplateAssetImageGrid");
+  RNA_def_function_ui_description(func, "Compact image asset grid for brush texture slot");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  api_ui_item_rna_common(func);
 
   func = RNA_def_function(srna, "template_matrix", "template_matrix");
   RNA_def_function_ui_description(

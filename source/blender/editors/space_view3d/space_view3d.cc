@@ -282,6 +282,22 @@ static void view3d_free(SpaceLink *sl)
   }
 
   BKE_viewer_path_clear(&vd->viewer_path);
+
+  BKE_asset_catalog_path_list_free(vd->image_grid_enabled_catalog_paths);
+  while (ImageGridLibraryCatalogState *libcat_state = static_cast<ImageGridLibraryCatalogState *>(
+             BLI_pophead(&vd->image_grid_library_catalog_states)))
+  {
+    BKE_asset_catalog_path_list_free(libcat_state->enabled_catalog_paths);
+    MEM_delete(libcat_state);
+  }
+  BKE_asset_catalog_path_list_free(vd->image_grid_mask_enabled_catalog_paths);
+  while (ImageGridLibraryCatalogState *libcat_state = static_cast<ImageGridLibraryCatalogState *>(
+             BLI_pophead(&vd->image_grid_mask_library_catalog_states)))
+  {
+    BKE_asset_catalog_path_list_free(libcat_state->enabled_catalog_paths);
+    MEM_delete(libcat_state);
+  }
+  ed::view3d::image_grid_state_remove(*vd);
 }
 
 /* spacetype; init callback */
@@ -319,6 +335,34 @@ static SpaceLink *view3d_duplicate(SpaceLink *sl)
   }
 
   BKE_viewer_path_copy(&v3dn->viewer_path, &v3do->viewer_path);
+
+  v3dn->image_grid_enabled_catalog_paths = BKE_asset_catalog_path_list_duplicate(
+      v3do->image_grid_enabled_catalog_paths);
+
+  for (const ImageGridLibraryCatalogState &libcat_state_src :
+       v3do->image_grid_library_catalog_states)
+  {
+    ImageGridLibraryCatalogState *libcat_state_dst = MEM_new<ImageGridLibraryCatalogState>(
+        __func__);
+    libcat_state_dst->library_ref = libcat_state_src.library_ref;
+    libcat_state_dst->enabled_catalog_paths = BKE_asset_catalog_path_list_duplicate(
+        libcat_state_src.enabled_catalog_paths);
+    BLI_addtail(&v3dn->image_grid_library_catalog_states, libcat_state_dst);
+  }
+
+  v3dn->image_grid_mask_enabled_catalog_paths = BKE_asset_catalog_path_list_duplicate(
+      v3do->image_grid_mask_enabled_catalog_paths);
+
+  for (const ImageGridLibraryCatalogState &libcat_state_src :
+       v3do->image_grid_mask_library_catalog_states)
+  {
+    ImageGridLibraryCatalogState *libcat_state_dst = MEM_new<ImageGridLibraryCatalogState>(
+        __func__);
+    libcat_state_dst->library_ref = libcat_state_src.library_ref;
+    libcat_state_dst->enabled_catalog_paths = BKE_asset_catalog_path_list_duplicate(
+        libcat_state_src.enabled_catalog_paths);
+    BLI_addtail(&v3dn->image_grid_mask_library_catalog_states, libcat_state_dst);
+  }
 
   /* copy or clear inside new stuff */
 
@@ -1573,6 +1617,19 @@ static void view3d_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
   BKE_screen_view3d_do_versions_250(v3d, &sl->regionbase);
 
   BKE_viewer_path_blend_read_data(reader, &v3d->viewer_path);
+  BKE_asset_catalog_path_list_blend_read_data(reader, v3d->image_grid_enabled_catalog_paths);
+  BLO_read_struct_list(
+      reader, ImageGridLibraryCatalogState, &v3d->image_grid_library_catalog_states);
+  for (ImageGridLibraryCatalogState &libcat_state : v3d->image_grid_library_catalog_states) {
+    BKE_asset_catalog_path_list_blend_read_data(reader, libcat_state.enabled_catalog_paths);
+  }
+  BKE_asset_catalog_path_list_blend_read_data(reader, v3d->image_grid_mask_enabled_catalog_paths);
+  BLO_read_struct_list(
+      reader, ImageGridLibraryCatalogState, &v3d->image_grid_mask_library_catalog_states);
+  for (ImageGridLibraryCatalogState &libcat_state : v3d->image_grid_mask_library_catalog_states)
+  {
+    BKE_asset_catalog_path_list_blend_read_data(reader, libcat_state.enabled_catalog_paths);
+  }
 }
 
 static void view3d_space_blend_write(BlendWriter *writer, SpaceLink *sl)
@@ -1587,6 +1644,18 @@ static void view3d_space_blend_write(BlendWriter *writer, SpaceLink *sl)
   BKE_screen_view3d_shading_blend_write(writer, &v3d->shading);
 
   BKE_viewer_path_blend_write(writer, &v3d->viewer_path);
+  BKE_asset_catalog_path_list_blend_write(writer, v3d->image_grid_enabled_catalog_paths);
+  for (const ImageGridLibraryCatalogState &libcat_state : v3d->image_grid_library_catalog_states) {
+    writer->write_struct(&libcat_state);
+    BKE_asset_catalog_path_list_blend_write(writer, libcat_state.enabled_catalog_paths);
+  }
+  BKE_asset_catalog_path_list_blend_write(writer, v3d->image_grid_mask_enabled_catalog_paths);
+  for (const ImageGridLibraryCatalogState &libcat_state :
+       v3d->image_grid_mask_library_catalog_states)
+  {
+    writer->write_struct(&libcat_state);
+    BKE_asset_catalog_path_list_blend_write(writer, libcat_state.enabled_catalog_paths);
+  }
 }
 
 void ED_spacetype_view3d()
@@ -1680,6 +1749,8 @@ void ED_spacetype_view3d()
   art->init = view3d_header_region_init;
   art->draw = view3d_header_region_draw;
   BLI_addhead(&st->regiontypes, art);
+  image_grid_catalog_selector_panel_register(art);
+  image_grid_display_panel_register(art);
 
   /* regions: asset shelf */
   art = MEM_new_zeroed<ARegionType>("spacetype view3d asset shelf region");

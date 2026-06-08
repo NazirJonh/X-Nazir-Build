@@ -233,6 +233,31 @@ AbstractView *region_view_find_at(const ARegion *region,
   return nullptr;
 }
 
+static StringRef block_view_find_idname(const Block &block, const AbstractView &view)
+{
+  /* First get the `idname` of the view we're looking for. */
+  for (ViewLink &view_link : block.views) {
+    if (view_link.view.get() == &view) {
+      return view_link.idname;
+    }
+  }
+
+  return {};
+}
+
+bool region_view_has_idname_at(const ARegion *region,
+                               const int xy[2],
+                               const int pad,
+                               const StringRef idname)
+{
+  Block *block = nullptr;
+  AbstractView *view = region_view_find_at(region, xy, pad, &block);
+  if (!view || !block) {
+    return false;
+  }
+  return block_view_find_idname(*block, *view) == idname;
+}
+
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event)
 {
   Block *block = nullptr;
@@ -363,18 +388,6 @@ std::unique_ptr<DropTargetInterface> region_views_find_drop_target_at(const AReg
   }
 
   return nullptr;
-}
-
-static StringRef block_view_find_idname(const Block &block, const AbstractView &view)
-{
-  /* First get the `idname` of the view we're looking for. */
-  for (ViewLink &view_link : block.views) {
-    if (view_link.view.get() == &view) {
-      return view_link.idname;
-    }
-  }
-
-  return {};
 }
 
 template<class T>

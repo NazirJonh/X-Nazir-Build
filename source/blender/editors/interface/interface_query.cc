@@ -17,6 +17,7 @@
 
 #include "DNA_screen_types.h"
 
+#include "BKE_context.hh"
 #include "BKE_screen.hh"
 
 #include "UI_view2d.hh"
@@ -26,6 +27,7 @@
 #include "interface_intern.hh"
 
 #include "UI_abstract_view.hh"
+#include "UI_grid_view.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -526,6 +528,24 @@ Button *view_item_find_active(const ARegion *region, const AbstractView *view)
   return but_find(region, but_is_active_view_item, view);
 }
 
+static bool but_is_active_grid_view_item(const Button *but, const void * /*customdata*/)
+{
+  if (but->type != ButtonType::ViewItem) {
+    return false;
+  }
+
+  const auto *view_item_but = static_cast<const ButtonViewItem *>(but);
+  if (!view_item_but->view_item->is_active()) {
+    return false;
+  }
+  return dynamic_cast<const AbstractGridView *>(&view_item_but->view_item->get_view()) != nullptr;
+}
+
+Button *view_item_find_active_grid(const ARegion *region)
+{
+  return but_find(region, but_is_active_grid_view_item, nullptr);
+}
+
 Button *view_item_find_search_highlight(const ARegion *region)
 {
   return but_find(
@@ -675,6 +695,22 @@ bool block_is_menu(const Block *block)
 bool block_is_popover(const Block *block)
 {
   return (block->flag & BLOCK_POPOVER) != 0;
+}
+
+bool region_popup_has_panel(const bContext *C, const char *panel_idname)
+{
+  const ARegion *region = CTX_wm_region_popup(C);
+  if (!region || !region->runtime || panel_idname == nullptr || panel_idname[0] == '\0') {
+    return false;
+  }
+  for (Block &block : region->runtime->uiblocks) {
+    if (block.panel && block.panel->type) {
+      if (STREQ(block.panel->type->idname, panel_idname)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 bool block_is_pie_menu(const Block *block)

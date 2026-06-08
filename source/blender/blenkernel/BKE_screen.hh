@@ -750,6 +750,10 @@ struct AssetShelfType {
                             ui::Layout &layout);
 
   const AssetWeakReference *(*get_active_asset)(const AssetShelfType *shelf_type);
+  /* Like #get_active_asset but with context (e.g. image grid brush texture slot in popover).
+   * When set, asset shelf grid build prefers this over #get_active_asset. */
+  const AssetWeakReference *(*get_active_asset_from_context)(const AssetShelfType *shelf_type,
+                                                             const bContext *C);
 
   /** RNA integration. */
   ExtensionRNA rna_ext;

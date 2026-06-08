@@ -16,6 +16,7 @@
 #include "BLI_fnmatch.h"
 #include "BLI_listbase.h"
 #include "BLI_string.h"
+#include "BLI_utildefines.h"
 
 #include "BLT_translation.hh"
 
@@ -49,7 +50,9 @@ class AssetView : public ui::AbstractGridView {
   friend class AssetDragController;
 
  public:
-  AssetView(const AssetLibraryReference &library_ref, const AssetShelf &shelf);
+  AssetView(const AssetLibraryReference &library_ref,
+            const AssetShelf &shelf,
+            const std::optional<AssetWeakReference> &active_asset_override);
 
   void build_items() override;
   bool begin_filtering(const bContext &C) const override;
@@ -85,16 +88,31 @@ class AssetDragController : public ui::AbstractViewItemDragController {
   void on_drag_start(bContext &C, ui::AbstractViewItem &item) override;
 };
 
-AssetView::AssetView(const AssetLibraryReference &library_ref, const AssetShelf &shelf)
-    : library_ref_(library_ref), shelf_(shelf)
+static std::optional<AssetWeakReference> active_asset_for_shelf(const AssetShelf &shelf,
+                                                                const bContext &C)
 {
+  if (shelf.type->get_active_asset_from_context) {
+    if (const AssetWeakReference *weak_ref = shelf.type->get_active_asset_from_context(shelf.type,
+                                                                                       &C))
+    {
+      return *weak_ref;
+    }
+  }
   if (shelf.type->get_active_asset) {
     if (const AssetWeakReference *weak_ref = shelf.type->get_active_asset(shelf.type)) {
-      active_asset_ = *weak_ref;
+      return *weak_ref;
     }
-    else {
-      active_asset_.reset();
-    }
+  }
+  return std::nullopt;
+}
+
+AssetView::AssetView(const AssetLibraryReference &library_ref,
+                     const AssetShelf &shelf,
+                     const std::optional<AssetWeakReference> &active_asset_override)
+    : library_ref_(library_ref), shelf_(shelf)
+{
+  if (active_asset_override) {
+    active_asset_ = *active_asset_override;
   }
 }
 
@@ -315,16 +333,32 @@ std::optional<bool> AssetViewItem::should_be_active() const
 {
   const AssetView &asset_view = dynamic_cast<const AssetView &>(this->get_view());
   const AssetShelfType &shelf_type = *asset_view.shelf_.type;
-  if (!shelf_type.get_active_asset) {
+  /* Return no preference when neither the Python callback nor the context-aware C++ callback
+   * has provided an active asset. Shelf types that set #get_active_asset_from_context
+   * (e.g. VIEW3D_AST_image_texture) store the result in #AssetView::active_asset_ via
+   * #active_asset_for_shelf(); honour that here instead of treating it as "no active asset". */
+  if (!shelf_type.get_active_asset && !asset_view.active_asset_) {
     return {};
   }
   if (!asset_view.active_asset_) {
     return false;
   }
-  AssetWeakReference weak_ref = asset_.make_weak_reference();
-  const bool matches = *asset_view.active_asset_ == weak_ref;
-
-  return matches;
+  const AssetWeakReference item_weak_ref = asset_.make_weak_reference();
+  if (*asset_view.active_asset_ == item_weak_ref) {
+    return true;
+  }
+  /* #bke::asset_edit_weak_reference_from_id() uses "Image/<id-name>" while shelf assets use the
+   * library-relative path from #AssetRepresentation::make_weak_reference(). Match by local ID
+   * name for the image-texture browse popover. */
+  if (STREQ(shelf_type.idname, "VIEW3D_AST_image_texture")) {
+    if (const ID *local_id = asset_.local_id()) {
+      const char *active_identifier = asset_view.active_asset_->relative_asset_identifier;
+      if (active_identifier && STRPREFIX(active_identifier, "Image/")) {
+        return STREQ(local_id->name + 2, active_identifier + 6);
+      }
+    }
+  }
+  return false;
 }
 
 void AssetViewItem::on_activate(bContext &C)
@@ -387,7 +421,9 @@ void build_asset_view(ui::Layout &layout,
   BLI_assert(tile_width != 0);
   BLI_assert(tile_height != 0);
 
-  std::unique_ptr asset_view = std::make_unique<AssetView>(library_ref, shelf);
+  const std::optional<AssetWeakReference> active_asset = active_asset_for_shelf(shelf, C);
+
+  std::unique_ptr asset_view = std::make_unique<AssetView>(library_ref, shelf, active_asset);
   asset_view->set_catalog_filter(catalog_filter_from_shelf_settings(shelf.settings, *library));
   asset_view->set_tile_size(tile_width, tile_height);
 

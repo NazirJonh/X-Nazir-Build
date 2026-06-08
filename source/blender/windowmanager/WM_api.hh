@@ -1938,6 +1938,8 @@ void *WM_jobs_customdata_from_type(wmWindowManager *wm, const void *owner, int j
 bool WM_jobs_is_running(const wmJob *wm_job);
 bool WM_jobs_is_stopped(const wmWindowManager *wm, const void *owner);
 void *WM_jobs_customdata_get(wmJob *wm_job);
+/** Stop flag for the worker; valid until the job is freed. */
+const bool *WM_jobs_stop_flag(wmJob *wm_job);
 void WM_jobs_customdata_set(wmJob *wm_job, void *customdata, void (*free)(void *));
 void WM_jobs_timer(wmJob *wm_job,
                    double time_step,

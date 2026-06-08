@@ -344,10 +344,17 @@ void id_us_plus_no_lib(ID *id)
 {
   if (id) {
     if ((id->tag & ID_TAG_EXTRAUSER) && (id->tag & ID_TAG_EXTRAUSER_SET)) {
-      BLI_assert(id->us >= 1);
-      /* No need to increase count, just tag extra user as no more set.
-       * Avoids annoying & inconsistent +1 in user count. */
-      id->tag &= ~ID_TAG_EXTRAUSER_SET;
+      if (id->us >= 1) {
+        /* No need to increase count, just tag extra user as no more set.
+         * Avoids annoying & inconsistent +1 in user count. */
+        id->tag &= ~ID_TAG_EXTRAUSER_SET;
+      }
+      else {
+        /* UI extra-user tags can be out of sync with `us` after memfile undo or texture
+         * reassignment. Treat as a normal user increment. */
+        id->tag &= ~(ID_TAG_EXTRAUSER | ID_TAG_EXTRAUSER_SET);
+        id->us++;
+      }
     }
     else {
       BLI_assert(id->us >= 0);

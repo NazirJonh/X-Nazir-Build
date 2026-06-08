@@ -1182,6 +1182,8 @@ void pie_menu_level_create(Block *block,
 void popup_translate(ARegion *region, const int mdiff[2]);
 void popup_block_free(bContext *C, PopupBlockHandle *handle);
 void popup_block_scrolltest(Block *block);
+/** Apply popup menu scroll delta (#PopupBlockHandle::scrolloffset and button rects). */
+void popup_block_scroll_apply_offset_y(ARegion *region, Block *block, float dy);
 
 /** \} */
 
@@ -1607,6 +1609,8 @@ Button *listrow_find_index(const ARegion *region,
                            Button *listbox) ATTR_WARN_UNUSED_RESULT;
 Button *view_item_find_mouse_over(const ARegion *region, const int xy[2]) ATTR_NONNULL(1, 2);
 Button *view_item_find_active(const ARegion *region, const AbstractView *view = nullptr);
+/** Active #ButtonType::ViewItem in an #AbstractGridView (skips tree/list view items). */
+Button *view_item_find_active_grid(const ARegion *region);
 Button *view_item_find_search_highlight(const ARegion *region);
 
 using ButtonFindPollFn = bool (*)(const Button *but, const void *customdata);

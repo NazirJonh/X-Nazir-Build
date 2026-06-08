@@ -21,6 +21,8 @@ set(SRC
   intern/asset_catalog.cc
   intern/asset_filter.cc
   intern/asset_import.cc
+  intern/asset_image_library.cc
+  intern/asset_image_utils.cc
   intern/asset_indexer.cc
   intern/asset_indexer_remote_listing.cc
   intern/asset_indexer_remote_listing_v1.cc
@@ -40,6 +42,8 @@ set(SRC
   intern/asset_type.cc
   intern/asset_ui_utils.cc
 
+  ED_asset_image_library.hh
+  ED_asset_image_utils.hh
   ED_asset_catalog.hh
   ED_asset_filter.hh
   ED_asset_import.hh

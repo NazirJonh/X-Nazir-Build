@@ -407,6 +407,12 @@ void mesh_flip_faces(Mesh &mesh, const IndexMask &selection);
 
 void mesh_ensure_required_data_layers(Mesh &mesh);
 
+/**
+ * Append all geometry from \a append onto \a mesh, growing its arrays in place.
+ * Topology indices from \a append are offset to reference existing elements in \a mesh.
+ */
+void mesh_append(Mesh &mesh, const Mesh &append);
+
 /** Set mesh vertex normals to known-correct values, avoiding future lazy computation. */
 void mesh_vert_normals_assign(Mesh &mesh, Span<float3> vert_normals);
 

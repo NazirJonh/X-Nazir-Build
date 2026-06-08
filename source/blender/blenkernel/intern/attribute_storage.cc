@@ -2,6 +2,10 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
+#include <chrono>
+#include <cstdio>
+#include <thread>
+
 #include "CLG_log.h"
 
 #include "BLI_array_utils.hh"
@@ -11,6 +15,7 @@
 #include "BLI_memory_counter.hh"
 #include "BLI_resource_scope.hh"
 #include "BLI_string_utils.hh"
+#include "BLI_task.hh"
 #include "BLI_vector_set.hh"
 
 #include "PRF_profile.hh"
@@ -118,6 +123,7 @@ Attribute::ArrayData Attribute::ArrayData::from_uninitialized(const CPPType &typ
   data.data = MEM_new_array_uninitialized_aligned(
       domain_size, type.size, type.alignment, __func__);
   data.size = domain_size;
+  data.capacity = domain_size;
   BLI_assert(type.is_trivially_destructible);
   data.sharing_info = ImplicitSharingPtr<>(implicit_sharing::info_for_mem_free(data.data));
   return data;
@@ -402,6 +408,193 @@ void AttributeStorage::resize(const AttrDomain domain, const int64_t new_size)
         break;
       }
     }
+  }
+}
+
+void AttributeStorage::grow_domains(const int64_t point_num,
+                                    const int64_t edge_num,
+                                    const int64_t face_num,
+                                    const int64_t corner_num)
+{
+  PRF_scope_with_name("AttributeStorage::grow_domains", ProfileCategory::Default);
+  const auto domain_size = [&](const AttrDomain domain) {
+    switch (domain) {
+      case AttrDomain::Point:
+        return point_num;
+      case AttrDomain::Edge:
+        return edge_num;
+      case AttrDomain::Face:
+        return face_num;
+      case AttrDomain::Corner:
+        return corner_num;
+      default:
+        return int64_t(0);
+    }
+  };
+
+  Vector<Attribute *> growable;
+  for (Attribute &attr : *this) {
+    if (attr.storage_type() != AttrStorageType::Array) {
+      continue;
+    }
+    const auto &data = std::get<Attribute::ArrayData>(attr.data());
+    if (domain_size(attr.domain()) <= data.size) {
+      continue;
+    }
+    growable.append(&attr);
+  }
+
+  /* Amortized three-phase grow with capacity tracking.
+   *
+   * Each stamp adds ~0.5% to the active mesh. Copying 500+ MB on every stamp is the dominant
+   * bottleneck (~54 ms). With amortized 1.5× capacity, realloc happens only once per ~90 stamps;
+   * in between, grow_domains just updates the `size` counter with no allocation or copy.
+   *
+   * Phase 1 — serial alloc: attributes that exceed current capacity are allocated serially
+   *   (1.5× amortized factor) so threads never contend on the guardedalloc global mutex.
+   * Phase 2 — parallel copy: copy threads for realloc-needed attributes run simultaneously.
+   *   Page faults for the new pages are handled by separate CPU cores in parallel.
+   * Phase 3 — serial assign: data pointers are swapped. Attributes that fit in existing
+   *   capacity get only a size-counter update (same buffer, no copy).
+   *
+   * threading::parallel_for cannot be used: TBB arena_max_concurrency == 1 in the sculpt stroke
+   * cleanup context, making it single-threaded. */
+  struct GrowWork {
+    Attribute *attr;
+    int64_t new_size;
+    Attribute::ArrayData new_data;
+    bool needs_realloc;
+  };
+
+  /* Phase 1: classify and alloc.
+   *
+   * Three outcomes per attribute:
+   *   (a) Fits in existing capacity AND buffer is exclusively owned (ref == 1): size-only update,
+   *       no allocation or copy.
+   *   (b) Exceeds capacity OR buffer is shared (undo/CoW holds a ref): allocate a fresh buffer
+   *       with 1.5× amortized capacity and parallel-copy the existing elements.
+   *
+   * Case (b) handles the undo system: after each sculpt stroke Blender snapshots the mesh via
+   * implicit-sharing (incrementing the sharing_info ref). If we leave the buffer shared, every
+   * subsequent call to `data_for_write()` (topology copy, attribute accessor) would trigger a
+   * serial CoW copy — often totalling 60–100 ms. By proactively reallocating here (in parallel),
+   * we guarantee ref == 1 on the new buffer before the topology-copy phase begins. */
+  /* Temporary diagnostic timing/counters (mirrors the [APPEND] logging in mesh_append). */
+  using GrowClock = std::chrono::steady_clock;
+  const auto grow_ms = [](GrowClock::time_point a, GrowClock::time_point b) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count() * 1e-6;
+  };
+  int num_realloc = 0;
+  int num_fast = 0;
+  int64_t bytes_copied = 0;
+  int64_t bytes_allocated = 0;
+  int64_t largest_copy_bytes = 0;
+
+  GrowClock::time_point gt0;
+  if (VDM_PERF_LOG_ENABLED) {
+    gt0 = GrowClock::now();
+  }
+  Vector<GrowWork> work;
+  work.reserve(growable.size());
+  for (Attribute *attr_ptr : growable) {
+    const int64_t new_size = domain_size(attr_ptr->domain());
+    const auto &old_arr = std::get<Attribute::ArrayData>(attr_ptr->data());
+    const int64_t cap = std::max(old_arr.capacity, old_arr.size);
+    const bool mutable_buf = old_arr.sharing_info && old_arr.sharing_info->is_mutable();
+    if (new_size <= cap && mutable_buf) {
+      work.append(GrowWork{attr_ptr, new_size, {}, false});
+      num_fast++;
+      continue;
+    }
+    /* Allocate exactly the needed size (preserving any larger existing capacity). The 1.5×
+     * amortized over-allocation that used to live here was wasted: the fast no-copy path requires
+     * an exclusively-owned (ref == 1) buffer, but the per-stamp sculpt undo snapshot always holds a
+     * shared reference, so every stamp reallocates regardless. Over-allocating only first-touches
+     * (page-faults) extra pages and inflates the memory the undo history retains. */
+    const CPPType &type = attribute_type_to_cpp_type(attr_ptr->data_type());
+    const int64_t new_cap = std::max(new_size, cap);
+    Attribute::ArrayData new_arr{};
+    new_arr.data = MEM_new_array_uninitialized_aligned(new_cap, type.size, type.alignment, __func__);
+    new_arr.size = new_size;
+    new_arr.capacity = new_cap;
+    BLI_assert(type.is_trivially_destructible);
+    new_arr.sharing_info = ImplicitSharingPtr<>(implicit_sharing::info_for_mem_free(new_arr.data));
+    num_realloc++;
+    bytes_allocated += new_cap * type.size;
+    const int64_t copy_bytes = old_arr.size * type.size;
+    bytes_copied += copy_bytes;
+    largest_copy_bytes = std::max(largest_copy_bytes, copy_bytes);
+    work.append(GrowWork{attr_ptr, new_size, std::move(new_arr), true});
+  }
+  GrowClock::time_point gt1;
+  if (VDM_PERF_LOG_ENABLED) {
+    gt1 = GrowClock::now();
+  }
+
+  /* Phase 2: parallel copies for attributes that needed reallocation. One OS thread per attribute.
+   *
+   * The cost here is dominated by first-touch page faults on the freshly allocated buffers (the
+   * kernel zero-fills new pages under a lock), not raw copy bandwidth. Splitting a single buffer
+   * across many threads does NOT help and actively hurts under memory pressure, because many
+   * threads fault pages simultaneously and contend on the kernel page lock. Manual OS threads are
+   * used because threading::parallel_for is single-threaded here (TBB arena_max_concurrency == 1
+   * in the sculpt stroke cleanup context). */
+  Vector<std::thread> threads;
+  threads.reserve(work.size());
+  for (GrowWork &w : work) {
+    if (!w.needs_realloc) {
+      continue;
+    }
+    threads.append(std::thread([&w] {
+      const CPPType &type = attribute_type_to_cpp_type(w.attr->data_type());
+      const auto &old_arr = std::get<Attribute::ArrayData>(w.attr->data());
+      type.copy_construct_n(old_arr.data, w.new_data.data, old_arr.size);
+      type.default_construct_n(POINTER_OFFSET(w.new_data.data, type.size * old_arr.size),
+                               w.new_size - old_arr.size);
+    }));
+  }
+  for (std::thread &t : threads) {
+    t.join();
+  }
+  GrowClock::time_point gt2;
+  if (VDM_PERF_LOG_ENABLED) {
+    gt2 = GrowClock::now();
+  }
+
+  /* Phase 3: assign new buffers or update size counter in-place (no copy). */
+  for (GrowWork &w : work) {
+    if (w.needs_realloc) {
+      w.attr->assign_data(std::move(w.new_data));
+    }
+    else {
+      /* Buffer already has capacity — share the same allocation with an updated size. */
+      const auto &old_arr = std::get<Attribute::ArrayData>(w.attr->data());
+      Attribute::ArrayData updated{};
+      updated.data = old_arr.data;
+      updated.size = w.new_size;
+      updated.capacity = old_arr.capacity;
+      updated.sharing_info = old_arr.sharing_info;
+      w.attr->assign_data(std::move(updated));
+    }
+  }
+  GrowClock::time_point gt3;
+  if (VDM_PERF_LOG_ENABLED) {
+    gt3 = GrowClock::now();
+  }
+
+  if (VDM_PERF_LOG_ENABLED) {
+    printf(
+        "[GROW] attrs: %d realloc / %d fast | copied %.1f MB (largest %.1f MB) | alloc %.1f MB | "
+        "phase1 alloc %.2f ms  phase2 copy %.2f ms  phase3 assign %.2f ms\n",
+        num_realloc,
+        num_fast,
+        double(bytes_copied) / (1024.0 * 1024.0),
+        double(largest_copy_bytes) / (1024.0 * 1024.0),
+        double(bytes_allocated) / (1024.0 * 1024.0),
+        grow_ms(gt0, gt1),
+        grow_ms(gt1, gt2),
+        grow_ms(gt2, gt3));
+    fflush(stdout);
   }
 }
 

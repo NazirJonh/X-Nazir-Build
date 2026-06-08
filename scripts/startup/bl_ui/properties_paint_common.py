@@ -1615,6 +1615,12 @@ def brush_texture_settings(layout, brush, sculpt):
             col = layout.column()
             col.active = tex_slot.map_mode == 'AREA_PLANE'
             col.prop(brush, "use_color_as_displacement", text="Vector Displacement")
+            # Insert Mesh works for both vector displacement and plain alpha textures,
+            # so it is exposed independently of "Vector Displacement".
+            col.prop(brush, "use_insert_mesh", text="Insert Mesh")
+            sub = col.column()
+            sub.active = brush.use_insert_mesh
+            sub.prop(brush, "use_insert_into_active", text="Into Active Mesh")
 
 
 def brush_mask_texture_settings(layout, brush):

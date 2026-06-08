@@ -1539,6 +1539,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_mask_extract);
   WM_operatortype_append(SCULPT_OT_face_set_extract);
   WM_operatortype_append(SCULPT_OT_paint_mask_slice);
+  WM_operatortype_append(SCULPT_OT_insert_mesh);
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

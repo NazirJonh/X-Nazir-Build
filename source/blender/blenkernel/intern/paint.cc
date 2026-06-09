@@ -199,20 +199,14 @@ static void paint_curve_copy_data(Main * /*bmain*/,
   PaintCurve *paint_curve_dst = id_cast<PaintCurve *>(id_dst);
   const PaintCurve *paint_curve_src = id_cast<const PaintCurve *>(id_src);
 
-  if (paint_curve_src->tot_points != 0) {
-    paint_curve_dst->points = static_cast<PaintCurvePoint *>(
-        MEM_dupalloc(paint_curve_src->points));
-  }
-
   new (&paint_curve_dst->geometry) bke::CurvesGeometry(paint_curve_src->geometry.wrap());
+  paint_curve_dst->active_curve = paint_curve_src->active_curve;
 }
 
 static void paint_curve_free_data(ID *id)
 {
   PaintCurve *paint_curve = id_cast<PaintCurve *>(id);
 
-  MEM_SAFE_DELETE(paint_curve->points);
-  paint_curve->tot_points = 0;
   paint_curve->geometry.wrap().~CurvesGeometry();
 }
 
@@ -227,14 +221,12 @@ static void paint_curve_blend_write(BlendWriter *writer, ID *id, const void *id_
   writer->write_id_struct(id_address, pc);
   BKE_id_blend_write(writer, &pc->id);
 
-  writer->write_struct_array(pc->tot_points, pc->points);
   pc->geometry.wrap().blend_write(*writer, pc->id, write_data);
 }
 
 static void paint_curve_blend_read_data(BlendDataReader *reader, ID *id)
 {
   PaintCurve *pc = id_cast<PaintCurve *>(id);
-  BLO_read_array_and_validate_size(reader, &pc->points, &pc->tot_points);
   pc->geometry.wrap().blend_read(*reader);
 }
 
@@ -1314,10 +1306,6 @@ void BKE_paint_palette_set(Paint *paint, Palette *palette)
   }
 }
 
-void BKE_paint_curve_clamp_endpoint_add_index(PaintCurve *pc, const int add_index)
-{
-  pc->add_index = (add_index || pc->tot_points == 1) ? (add_index + 1) : 0;
-}
 
 void BKE_palette_color_remove(Palette *palette, PaletteColor *color)
 {

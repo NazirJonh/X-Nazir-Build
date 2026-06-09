@@ -968,11 +968,15 @@ static void paint_draw_curve_cursor(Brush *brush, ViewContext *vc)
   GPU_matrix_push();
   GPU_matrix_translate_2f(vc->region->winrct.xmin, vc->region->winrct.ymin);
 
-  if (brush->paint_curve && brush->paint_curve->points) {
+  if (brush->paint_curve && paintcurve_geometry_is_valid(brush->paint_curve->geometry.wrap())) {
     PaintCurve *pc = brush->paint_curve;
     blender::Vector<PaintCurvePoint> temp_points;
     paintcurve_build_screen_points(pc, vc, temp_points);
-    PaintCurvePoint *cp = temp_points.is_empty() ? pc->points : temp_points.data();
+    if (temp_points.is_empty()) {
+      GPU_matrix_pop();
+      return;
+    }
+    PaintCurvePoint *cp = temp_points.data();
 
     GPU_line_smooth(true);
     GPU_blend(GPU_BLEND_ALPHA);
@@ -988,7 +992,7 @@ static void paint_draw_curve_cursor(Brush *brush, ViewContext *vc)
     ui::theme::get_color_type_4fv(TH_WIRE, SPACE_VIEW3D, wire_col);
     ui::theme::get_color_type_4fv(TH_EDGE_SELECT, SPACE_VIEW3D, radius_col);
 
-    for (int i = 0; i < pc->tot_points; i++) {
+    for (int i = 0; i < int(temp_points.size()); i++) {
       PaintCurvePoint *pcp = &cp[i];
       const int8_t h1 = int8_t(pcp->bez.h1);
       const int8_t h2 = int8_t(pcp->bez.h2);
@@ -1003,7 +1007,7 @@ static void paint_draw_curve_cursor(Brush *brush, ViewContext *vc)
     }
 
     if (pc->show_radius_handles && !paintcurve_has_multi_curves(pc)) {
-      for (int i = 0; i < pc->tot_points; i++) {
+      for (int i = 0; i < int(temp_points.size()); i++) {
         PaintCurveRadiusHandleScreen handle;
         paintcurve_radius_handle_screen_get(pc, cp, i, &handle);
         draw_radius_handle(pos, radius_col, handle);

@@ -1318,12 +1318,8 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
     return true;
   }
 
-  if (br.paint_curve->use_3d_space && br.paint_curve->tot_points >= 2) {
-    paintcurve_ensure_3d_geometry(br.paint_curve, &this->vc);
-  }
-
   /* 3D stroke path — view-independent curve shape. */
-  if (paintcurve_uses_3d_geometry(pc) && pc->tot_points >= 2) {
+  if (paintcurve_uses_3d_geometry(pc)) {
     Object *ob = this->vc.obact;
     const float (*ob_to_world)[4] = ob->object_to_world().ptr();
 
@@ -1331,7 +1327,6 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
     const Span<float3> eval = geom.evaluated_positions();
     const OffsetIndices<int> evaluated_points_by_curve = geom.evaluated_points_by_curve();
 
-    paintcurve_sync_geometry_radius_from_points(br.paint_curve);
     Vector<float> eval_radii(eval.size());
     geom.ensure_can_interpolate_to_evaluated();
     geom.interpolate_to_evaluated(VArraySpan(geom.radius()), eval_radii.as_mutable_span());
@@ -1390,9 +1385,12 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
 
   float length_residue = 0.0f;
 
+  Vector<PaintCurvePoint> stroke_screen_points;
+  paintcurve_build_screen_points(pc, &this->vc, stroke_screen_points);
+
   paintcurve_foreach_bezier_segment(pc, [&](const int point_a, const int point_b) {
-    const PaintCurvePoint *pcp = &pc->points[point_a];
-    const PaintCurvePoint *pcp_next = &pc->points[point_b];
+    const PaintCurvePoint *pcp = &stroke_screen_points[point_a];
+    const PaintCurvePoint *pcp_next = &stroke_screen_points[point_b];
     const float radius_a = paintcurve_get_point_radius(pc, point_a);
     const float radius_b = paintcurve_get_point_radius(pc, point_b);
     float data[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];

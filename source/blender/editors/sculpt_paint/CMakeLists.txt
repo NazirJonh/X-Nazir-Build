@@ -216,6 +216,7 @@ if(WITH_GTESTS)
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc
     mesh/sculpt_undo_test.cc
+    paint_curve_geometry_test.cc
   )
   set(TEST_INC
   )

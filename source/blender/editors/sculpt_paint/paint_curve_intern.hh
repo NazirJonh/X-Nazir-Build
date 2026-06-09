@@ -42,6 +42,7 @@ struct wmOperatorType;
 
 void PAINTCURVE_OT_new(wmOperatorType *ot);
 void PAINTCURVE_OT_add_point(wmOperatorType *ot);
+void PAINTCURVE_OT_new_spline(wmOperatorType *ot);
 void PAINTCURVE_OT_delete_point(wmOperatorType *ot);
 void PAINTCURVE_OT_select(wmOperatorType *ot);
 void PAINTCURVE_OT_slide(wmOperatorType *ot);
@@ -65,6 +66,7 @@ wmKeyMap *paintcurve_slide_modal_keymap(wmKeyConfig *keyconf);
 bool paintcurve_geometry_is_valid(const bke::CurvesGeometry &geom);
 /** Mutable reference to a control point position (`handle_idx` 0 = left, 1 = co, 2 = right). */
 float3 &paintcurve_geom_co(bke::CurvesGeometry &geom, int point_idx, int handle_idx);
+/** Check if the paint curve is cyclic (single-curve only, use paintcurve_is_curve_cyclic for multi-curve). */
 bool paintcurve_is_cyclic(const PaintCurve *pc);
 bool paintcurve_is_curve_cyclic(const PaintCurve *pc, int curve_index);
 bool paintcurve_has_multi_curves(const PaintCurve *pc);
@@ -74,24 +76,36 @@ void paintcurve_foreach_bezier_segment(
 void paintcurve_geometry_init_bezier(bke::CurvesGeometry &geom, int point_num);
 /** Cycle the handle type of a control point: Auto → Vector → Free → Auto. */
 void paintcurve_cycle_point_handle_type(PaintCurve *pc, int point_index);
+/** Index of the spline that owns point `point_index`, or -1 if out of range. */
+int paintcurve_curve_of_point(const PaintCurve *pc, int point_index);
+/** Clamp/validate the active spline index against current topology. */
+int paintcurve_active_curve_get(const PaintCurve *pc);
+/** Append `point_num` bezier points as a NEW spline; returns new spline index (or -1). */
+int paintcurve_geometry_add_spline(bke::CurvesGeometry &geom, int point_num);
+/** Remove selected points (mask over all points), dropping any spline left empty. */
+void paintcurve_geometry_remove_points(bke::CurvesGeometry &geom,
+                                       const IndexMask &points_to_remove);
+/**
+ * Find the point index in `screen_points` whose control position is closest to `pos`.
+ * Returns -1 if `screen_points` is empty.
+ */
+int paintcurve_find_point_index(Span<PaintCurvePoint> screen_points,
+                                const float pos[2],
+                                float threshold);
 
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Legacy 2D Sync Bridge
+/** \name Per-Point Selection Attributes
+ *
+ * Packed `int8_t` attribute per point: bit 0 = left handle, bit 1 = control point,
+ * bit 2 = right handle.  Stored as geometry attribute so it persists across save/load/undo.
  * \{ */
 
-void paintcurve_geometry_from_2d(PaintCurve *pc, const ViewContext *vc);
-/**
- * Ensure the embedded 3D geometry is in sync with the legacy 2D points.
- * Called when `use_3d_space` is enabled on a curve that was created before the 3D
- * representation existed, so the geometry array may be empty or stale.
- * No-op if the geometry already matches `pc->tot_points`.
- */
-void paintcurve_ensure_3d_geometry(PaintCurve *pc, const ViewContext *vc);
-void paintcurve_sync_geometry_to_2d(PaintCurve *pc,
-                                       const ViewContext *vc,
-                                       const float ob_to_world[4][4]);
+uint8_t paintcurve_geom_get_selection(const bke::CurvesGeometry &geom, int point_index);
+void paintcurve_geom_set_selection(bke::CurvesGeometry &geom, int point_index, uint8_t flags);
+void paintcurve_geom_set_all_selection(bke::CurvesGeometry &geom, uint8_t flags);
+bool paintcurve_geom_any_selected(const bke::CurvesGeometry &geom);
 
 /** \} */
 
@@ -120,10 +134,8 @@ bool paintcurve_sync_to_source_object(bContext *C, PaintCurve *pc);
  * Uninitialized/zero source values become 1.0 (full brush). Values above 1.0 are kept as-is.
  */
 float paintcurve_radius_from_source_geometry(float source_radius);
-/** Radius of a paint-curve control point (>= 0, unbounded above). */
+/** Radius of a paint-curve control point (>= 0, unbounded above). Read from geometry. */
 float paintcurve_get_point_radius(const PaintCurve *pc, int point_index);
-/** Normalize embedded geometry radii and copy them to legacy `bez.radius`. */
-void paintcurve_init_points_radius_from_geometry(PaintCurve *pc);
 /**
  * Map paint-curve radius to brush pixel radius.
  * 0 -> 1 px, 1 -> full brush size, >1 -> brush size multiplied by radius.
@@ -131,8 +143,6 @@ void paintcurve_init_points_radius_from_geometry(PaintCurve *pc);
 float paintcurve_radius_to_pixel_radius(const Paint *paint, const Brush *brush, float point_radius);
 /** Size factor relative to the brush radius, for stroke spacing along a paint curve. */
 float paintcurve_radius_to_size_factor(const Paint *paint, const Brush *brush, float point_radius);
-/** Copy legacy `bez.radius` values into the embedded curves geometry. */
-void paintcurve_sync_geometry_radius_from_points(PaintCurve *pc);
 
 /** \} */
 

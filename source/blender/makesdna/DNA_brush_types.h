@@ -492,17 +492,15 @@ struct PaintCurve {
 #endif
 
   ID id;
-  /** Points of curve (2D screen-space, legacy / sync target). */
-  PaintCurvePoint *points = nullptr;
-  int tot_points = 0;
+  /** Legacy 2D screen-space representation, no longer written or read. */
+  DNA_DEPRECATED PaintCurvePoint *points = nullptr;
+  DNA_DEPRECATED int tot_points = 0;
   /** Index where next point will be added. */
   int add_index = 0;
 
   /**
    * Authoritative 3D representation with full attribute support.
-   * One bezier curve with `tot_points` control points, stored in object space
-   * of the active object. The legacy `points` array above is derived from this
-   * via projection while `use_3d_space` is set.
+   * One bezier curve with control points stored in object space of the active object.
    */
   CurvesGeometry geometry;
 
@@ -513,7 +511,9 @@ struct PaintCurve {
   char use_3d_space = 1;
   /** When set, draw interactive radius handles at each control point. */
   char show_radius_handles = 1;
-  char _pad0[6] = {0};
+  char _pad0[2] = {0};
+  /** Active spline index for multi-spline editing (clamped at use). */
+  int active_curve = 0;
 };
 
 }  // namespace blender

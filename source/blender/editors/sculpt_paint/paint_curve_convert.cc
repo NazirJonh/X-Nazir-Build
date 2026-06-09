@@ -70,8 +70,6 @@ void paintcurve_geometry_from_curves(PaintCurve *pc,
   }
   geom.tag_positions_changed();
 
-  pc->tot_points = geom.points_num();
-
   if (geom.points_num() > 0) {
     MutableSpan<float> radii = geom.radius_for_write();
     for (float &r : radii) {
@@ -87,7 +85,6 @@ void paintcurve_geometry_from_legacy_curve(PaintCurve *pc,
   Curves *temp_curves = bke::curve_legacy_to_curves(*curve);
   if (temp_curves == nullptr) {
     paintcurve_geometry_init_bezier(pc->geometry.wrap(), 0);
-    pc->tot_points = 0;
     return;
   }
   paintcurve_geometry_from_curves(pc, temp_curves->geometry.wrap(), transform);
@@ -348,26 +345,9 @@ bool ED_paintcurve_import_from_source_object(bContext *C, ReportList *reports, c
     paintcurve_geometry_from_legacy_curve(pc, &curve, transform);
   }
 
-  MEM_SAFE_DELETE(pc->points);
-  pc->points = nullptr;
-  if (pc->tot_points > 0) {
-    pc->points = MEM_new_array<PaintCurvePoint>(pc->tot_points, "PaintCurvePoint");
-    for (int i = 0; i < pc->tot_points; i++) {
-      pc->points[i] = PaintCurvePoint{};
-    }
-    paintcurve_init_points_radius_from_geometry(pc);
-  }
-  pc->add_index = pc->tot_points;
+  const bke::CurvesGeometry &geom = pc->geometry.wrap();
+  pc->add_index = geom.points_num();
   pc->use_3d_space = 1;
-
-  RegionView3D *rv3d = CTX_wm_region_view3d(C);
-  if (rv3d) {
-    Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
-    ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
-    float ob_to_world[4][4];
-    copy_m4_m4(ob_to_world, vc.obact->object_to_world().ptr());
-    paintcurve_sync_geometry_to_2d(pc, &vc, ob_to_world);
-  }
   scene->toolsettings->sculpt->paint_curve_sync_to_source = 1;
 
   if (use_undo) {
@@ -397,13 +377,17 @@ void ED_paintcurve_refresh_on_sculpt_mode_enter(bContext *C)
 
 void ED_paintcurve_flush_radius_transform(bContext *C, PaintCurve *pc)
 {
-  if (pc == nullptr || pc->points == nullptr) {
+  if (pc == nullptr) {
     return;
   }
-  for (int i = 0; i < pc->tot_points; i++) {
-    pc->points[i].bez.radius = max_ff(pc->points[i].bez.radius, 0.0f);
+  bke::CurvesGeometry &geom = pc->geometry.wrap();
+  if (!paintcurve_geometry_is_valid(geom)) {
+    return;
   }
-  paintcurve_sync_geometry_radius_from_points(pc);
+  MutableSpan<float> radii = geom.radius_for_write();
+  for (float &r : radii) {
+    r = max_ff(r, 0.0f);
+  }
   paintcurve_sync_to_source_object(C, pc);
 }
 

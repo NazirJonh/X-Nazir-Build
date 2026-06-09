@@ -578,6 +578,7 @@ void ED_operatortypes_paint()
   /* paint curve */
   WM_operatortype_append(PAINTCURVE_OT_new);
   WM_operatortype_append(PAINTCURVE_OT_add_point);
+  WM_operatortype_append(PAINTCURVE_OT_new_spline);
   WM_operatortype_append(PAINTCURVE_OT_delete_point);
   WM_operatortype_append(PAINTCURVE_OT_select);
   WM_operatortype_append(PAINTCURVE_OT_slide);

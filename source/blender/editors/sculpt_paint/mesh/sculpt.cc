@@ -5854,8 +5854,7 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
   /* Truly temporary data that isn't stored in properties. */
   if (brush.stroke_method == BRUSH_STROKE_CURVE) {
     const float pixel_radius = RNA_float_get(ptr, "size");
-    cache.initial_radius = paint_calc_object_space_radius(
-        *cache.vc, cache.location, pixel_radius);
+    cache.initial_radius = paint_calc_object_space_radius(*cache.vc, cache.location, pixel_radius);
   }
   else if (stroke_is_first_brush_step_of_symmetry_pass(*ss.cache)) {
     cache.initial_radius = object_space_radius_get(*cache.vc, paint, brush, cache.location);
@@ -5887,7 +5886,8 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
     cache.radius = cache.initial_radius;
     cache.dyntopo_pixel_radius = RNA_float_get(ptr, "size");
   }
-  else if (BKE_brush_use_size_pressure(&brush) && paint_supports_dynamic_size(brush, PaintMode::Sculpt))
+  else if (BKE_brush_use_size_pressure(&brush) &&
+           paint_supports_dynamic_size(brush, PaintMode::Sculpt))
   {
     cache.radius = brush_dynamic_size_get(brush, cache, cache.initial_radius);
     cache.dyntopo_pixel_radius = brush_dynamic_size_get(

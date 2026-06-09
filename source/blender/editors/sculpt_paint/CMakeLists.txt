@@ -24,6 +24,8 @@ set(SRC
   paint_cursor.cc
   paint_curve.cc
   paint_curve_convert.cc
+  paint_curve_geometry.cc
+  paint_curve_sync.cc
   paint_curve_undo.cc
   paint_ops.cc
   paint_sample_color.cc
@@ -118,6 +120,7 @@ set(SRC
   mesh/sculpt_undo.cc
 
   paint_cursor.hh
+  paint_curve_intern.hh
   paint_intern.hh
 
   curves/sculpt_intern.hh

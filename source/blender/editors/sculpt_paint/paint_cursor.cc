@@ -7,8 +7,8 @@
  */
 #include "paint_cursor.hh"
 
-#include <algorithm>
 #include "BLI_vector.hh"
+#include <algorithm>
 
 #include "MEM_guardedalloc.h"
 
@@ -60,6 +60,7 @@
 
 #include "UI_resources.hh"
 
+#include "paint_curve_intern.hh"
 #include "paint_intern.hh"
 
 namespace blender {
@@ -816,11 +817,8 @@ static void paintcurve_theme_handle_color(const int8_t handle_type,
   ui::theme::get_color_type_4fv(color, SPACE_VIEW3D, r_col);
 }
 
-BLI_INLINE void draw_handle_endpoint(uint pos,
-                                     const float col[4],
-                                     const float *co,
-                                     const float width,
-                                     const int8_t handle_type)
+BLI_INLINE void draw_handle_endpoint(
+    uint pos, const float col[4], const float *co, const float width, const int8_t handle_type)
 {
   immUniformColor4fv(col);
 
@@ -924,12 +922,10 @@ BLI_INLINE void draw_radius_handle(uint pos,
 
   immUniformColor4f(1.0f, 1.0f, 1.0f, 0.5f);
   GPU_line_width(1.0f);
-  imm_draw_circle_wire_2d(
-      pos, end[0], end[1], PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS, 16);
+  imm_draw_circle_wire_2d(pos, end[0], end[1], PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS, 16);
 
   immUniformColor4fv(col);
-  imm_draw_circle_wire_2d(
-      pos, end[0], end[1], PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS, 16);
+  imm_draw_circle_wire_2d(pos, end[0], end[1], PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS, 16);
 }
 
 BLI_INLINE void draw_bezier_handle_lines(uint pos,
@@ -1001,8 +997,7 @@ static void paint_draw_curve_cursor(Brush *brush, ViewContext *vc)
       paintcurve_theme_handle_color(h2, pcp->bez.f3 || pcp->bez.f2, right_col);
 
       draw_bezier_handle_lines(pos, &pcp->bez, h1, h2);
-      draw_control_point(
-          pos, selec_col, vert_col, &pcp->bez.vec[1][0], 10.0f, pcp->bez.f2 != 0);
+      draw_control_point(pos, selec_col, vert_col, &pcp->bez.vec[1][0], 10.0f, pcp->bez.f2 != 0);
       draw_handle_endpoint(pos, left_col, &pcp->bez.vec[0][0], 8.0f, h1);
       draw_handle_endpoint(pos, right_col, &pcp->bez.vec[2][0], 8.0f, h2);
     }

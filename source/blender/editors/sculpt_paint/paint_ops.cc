@@ -45,6 +45,7 @@
 
 #include "IMB_colormanagement.hh"
 
+#include "paint_curve_intern.hh"
 #include "paint_intern.hh"
 
 #include "curves/sculpt_intern.hh"

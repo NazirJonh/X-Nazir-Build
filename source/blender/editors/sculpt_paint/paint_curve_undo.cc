@@ -26,6 +26,7 @@
 
 #include "WM_api.hh"
 
+#include "paint_curve_intern.hh"
 #include "paint_intern.hh"
 
 #ifndef NDEBUG
@@ -55,8 +56,7 @@ struct UndoCurve {
  * Return true when the embedded `CurvesGeometry` has been placement-new'd.
  * Zeroed DNA/stack memory leaves `runtime` as null — accessing it is undefined behaviour.
  */
-template<typename T>
-static bool geometry_runtime_is_initialized(const T *obj)
+template<typename T> static bool geometry_runtime_is_initialized(const T *obj)
 {
   return obj->geometry.wrap().runtime != nullptr;
 }
@@ -174,9 +174,7 @@ static void paintcurve_insert_point_preserve_positions(PaintCurve *pc,
   pc->points = points_new;
   pc->tot_points = new_tot;
 
-  if (pc->use_3d_space && geometry_runtime_is_initialized(pc) &&
-      uc->geometry.runtime != nullptr)
-  {
+  if (pc->use_3d_space && geometry_runtime_is_initialized(pc) && uc->geometry.runtime != nullptr) {
     bke::CurvesGeometry &geom = pc->geometry.wrap();
     bke::CurvesGeometry new_geom;
     paintcurve_geometry_init_bezier(new_geom, new_tot);
@@ -187,14 +185,13 @@ static void paintcurve_insert_point_preserve_positions(PaintCurve *pc,
           copy_v3_v3(paintcurve_geom_co(new_geom, i, h), paintcurve_geom_co(geom, i, h));
         }
         else {
-          copy_v3_v3(paintcurve_geom_co(new_geom, i, h),
-                      paintcurve_geom_co(uc->geometry, i, h));
+          copy_v3_v3(paintcurve_geom_co(new_geom, i, h), paintcurve_geom_co(uc->geometry, i, h));
         }
       }
     }
     for (int h = 0; h < 3; h++) {
       copy_v3_v3(paintcurve_geom_co(new_geom, insert_index, h),
-                  paintcurve_geom_co(uc->geometry, insert_index, h));
+                 paintcurve_geom_co(uc->geometry, insert_index, h));
     }
     for (int i = insert_index; i < old_tot; i++) {
       for (int h = 0; h < 3; h++) {
@@ -203,7 +200,7 @@ static void paintcurve_insert_point_preserve_positions(PaintCurve *pc,
         }
         else {
           copy_v3_v3(paintcurve_geom_co(new_geom, i + 1, h),
-                      paintcurve_geom_co(uc->geometry, i + 1, h));
+                     paintcurve_geom_co(uc->geometry, i + 1, h));
         }
       }
     }
@@ -334,11 +331,8 @@ static bool paintcurve_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoSt
   return true;
 }
 
-static void paintcurve_undosys_step_decode(bContext *C,
-                                           Main * /*bmain*/,
-                                           UndoStep *us_p,
-                                           const eUndoStepDir dir,
-                                           bool /*is_final*/)
+static void paintcurve_undosys_step_decode(
+    bContext *C, Main * /*bmain*/, UndoStep *us_p, const eUndoStepDir dir, bool /*is_final*/)
 {
   PaintCurveUndoStep *us = reinterpret_cast<PaintCurveUndoStep *>(us_p);
   PaintCurve *pc = us->pc_ref.ptr;
@@ -350,7 +344,7 @@ static void paintcurve_undosys_step_decode(bContext *C,
   undocurve_to_paintcurve_preserve_positions(&us->data, pc, dir);
 
   if (C && pc->use_3d_space && pc->tot_points != tot_points_before) {
-    ED_paintcurve_sync_to_source_object(C, pc);
+    paintcurve_sync_to_source_object(C, pc);
   }
 }
 

@@ -128,9 +128,7 @@ void ED_paintcurve_undosys_type(UndoType *ut);
  * Copy geometry from #Sculpt.paint_curve_source_object into the active brush paint curve.
  * \return true when import was performed.
  */
-bool ED_paintcurve_import_from_source_object(bContext *C,
-                                             ReportList *reports,
-                                             bool use_undo);
+bool ED_paintcurve_import_from_source_object(bContext *C, ReportList *reports, bool use_undo);
 
 /** Re-import the paint curve after entering sculpt mode when a source curve is assigned. */
 void ED_paintcurve_refresh_on_sculpt_mode_enter(bContext *C);

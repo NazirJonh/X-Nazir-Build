@@ -50,8 +50,8 @@
 #include "BKE_ccg.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
-#include "BKE_curves.hh"
 #include "BKE_crazyspace.hh"
+#include "BKE_curves.hh"
 #include "BKE_deform.hh"
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
@@ -204,8 +204,7 @@ static void paint_curve_copy_data(Main * /*bmain*/,
         MEM_dupalloc(paint_curve_src->points));
   }
 
-  new (&paint_curve_dst->geometry)
-      bke::CurvesGeometry(paint_curve_src->geometry.wrap());
+  new (&paint_curve_dst->geometry) bke::CurvesGeometry(paint_curve_src->geometry.wrap());
 }
 
 static void paint_curve_free_data(ID *id)

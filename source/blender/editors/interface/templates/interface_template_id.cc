@@ -248,7 +248,8 @@ static bool template_id_paint_curve_extended_search_enabled(const bContext *C,
 static void sculpt_paint_curve_source_object_set(bContext *C, Object *ob)
 {
   Scene *scene = CTX_data_scene(C);
-  if (scene == nullptr || scene->toolsettings == nullptr || scene->toolsettings->sculpt == nullptr) {
+  if (scene == nullptr || scene->toolsettings == nullptr || scene->toolsettings->sculpt == nullptr)
+  {
     return;
   }
 
@@ -301,9 +302,7 @@ static void id_search_cb_brush_paint_curve_extended(const bContext *C,
   }
 }
 
-static void template_ID_set_brush_paint_curve_exec_fn(bContext *C,
-                                                      void *arg_template,
-                                                      void *item)
+static void template_ID_set_brush_paint_curve_exec_fn(bContext *C, void *arg_template, void *item)
 {
   TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
   ID *id = static_cast<ID *>(item);

@@ -16,9 +16,9 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
-#include "BLI_vector.hh"
 #include "BLI_rand.hh"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "DNA_brush_types.h"
 #include "DNA_curve_types.h"
@@ -48,6 +48,7 @@
 
 #include "IMB_imbuf_types.hh"
 
+#include "paint_curve_intern.hh"
 #include "paint_intern.hh"
 
 #include "mesh/sculpt_cloth.hh"

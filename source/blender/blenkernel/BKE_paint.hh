@@ -29,6 +29,10 @@
 
 namespace blender {
 
+namespace gpu {
+class Texture;
+}
+
 struct AssetWeakReference;
 struct BMFace;
 struct BMLog;
@@ -54,6 +58,55 @@ struct Cache;
 namespace filter {
 struct Cache;
 }
+namespace mask {
+
+/**
+ * Persistent screen-space float canvas for the Mask brush SCREEN_SPACE mode.
+ *
+ * Coordinate system: region pixel space, origin at bottom-left corner,
+ * matching `ED_view3d_project_float_v2_m4` output.
+ *
+ * Stored in `SculptSession::mask_canvas`; lifetime matches the sculpt session.
+ */
+struct MaskCanvas {
+  /** Whether a canvas session is currently active. */
+  bool active = false;
+
+  /**
+   * Region pixel dimensions at session start.
+   * Projection is only meaningful for this viewport state.
+   */
+  int width = 0;
+  int height = 0;
+
+  /**
+   * Saved object→screen projection matrix from `ED_view3d_ob_project_mat_get`.
+   * Used both during canvas painting (brush dab pixel lookup) and during Apply
+   * (vertex projection).
+   */
+  float4x4 projviewobjmat = float4x4::identity();
+
+  /**
+   * View direction in object space saved at session start, used for front-faces-only test.
+   * Updated per symmetry pass during Apply via #symmetry_flip.
+   */
+  float3 true_view_normal = float3(0, 0, 1);
+
+  /**
+   * Float buffer of size `width * height`, values in [0..1].
+   * Index convention: `pixel[y * width + x]`.
+   */
+  blender::Vector<float> pixels;
+
+  /** When true, skip vertices whose normal faces away from `view_normal`. */
+  bool use_front_faces_only = false;
+
+  /** GPU texture for drawing the overlay (created on demand). */
+  gpu::Texture *texture = nullptr;
+  bool texture_dirty = false;
+};
+
+}  // namespace mask
 struct StrokeCache;
 }  // namespace ed::sculpt_paint
 struct GHash;
@@ -510,6 +563,9 @@ struct SculptSession : NonCopyable, NonMovable {
   float3 last_normal;
 
   std::unique_ptr<SculptTopologyIslandCache> topology_island_cache;
+
+  /** Persistent screen-space canvas for the Mask brush in SCREEN_SPACE_CANVAS mode. */
+  std::unique_ptr<ed::sculpt_paint::mask::MaskCanvas> mask_canvas;
 
  private:
   /* In general, this value is expected to be valid (non-empty) as long as the cursor is over the

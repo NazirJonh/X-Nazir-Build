@@ -1564,6 +1564,7 @@ class _defs_sculpt:
     def mask_border():
         def draw_settings(_context, layout, tool):
             props = tool.operator_properties("paint.mask_box_gesture")
+            layout.prop(props, "use_canvas_mode", expand=False)
             layout.prop(props, "use_front_faces_only", expand=False)
 
         return dict(
@@ -1583,6 +1584,7 @@ class _defs_sculpt:
             props = tool.operator_properties("paint.mask_lasso_gesture")
 
             if not extra:
+                layout.prop(props, "use_canvas_mode", expand=False)
                 layout.prop(props, "use_front_faces_only", expand=False)
                 region_is_header = bpy.context.region.type == 'TOOL_HEADER'
                 if region_is_header:
@@ -1606,6 +1608,7 @@ class _defs_sculpt:
     def mask_line():
         def draw_settings(_context, layout, tool):
             props = tool.operator_properties("paint.mask_line_gesture")
+            layout.prop(props, "use_canvas_mode", expand=False)
             layout.prop(props, "use_front_faces_only", expand=False)
             layout.prop(props, "use_limit_to_segment", expand=False)
 
@@ -1623,6 +1626,7 @@ class _defs_sculpt:
     def mask_polyline():
         def draw_settings(_context, layout, tool):
             props = tool.operator_properties("paint.mask_polyline_gesture")
+            layout.prop(props, "use_canvas_mode", expand=False)
             layout.prop(props, "use_front_faces_only", expand=False)
 
         return dict(

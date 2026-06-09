@@ -83,6 +83,7 @@ set(SRC
   mesh/paint_image_2d_curve_mask.cc
   mesh/paint_image_ops_paint.cc
   mesh/paint_image_proj.cc
+  mesh/mask_canvas.cc
   mesh/paint_mask.cc
   mesh/paint_vertex.cc
   mesh/paint_vertex_color_ops.cc

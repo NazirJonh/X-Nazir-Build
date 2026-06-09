@@ -5358,6 +5358,8 @@ def km_sculpt(params):
          {"properties": [("mode", 'INVERT')]}),
         ("paint.mask_box_gesture", {"type": 'B', "value": 'PRESS'},
          {"properties": [("mode", 'VALUE'), ("value", 0.0)]}),
+        ("paint.mask_canvas_apply", {"type": 'RET', "value": 'PRESS'}, None),
+        ("paint.mask_canvas_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
         # Dynamic topology
         ("sculpt.dyntopo_detail_size_edit", {"type": 'R', "value": 'PRESS'}, None),
         ("sculpt.detail_flood_fill", {"type": 'R', "value": 'PRESS', "ctrl": True}, None),

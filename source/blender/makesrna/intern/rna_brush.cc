@@ -2366,6 +2366,20 @@ static void rna_def_brush(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem brush_mask_projection_mode_items[] = {
+      {BRUSH_MASK_PROJ_SURFACE,
+       "SURFACE",
+       0,
+       "Surface",
+       "Standard brush mask painted directly onto the mesh surface"},
+      {BRUSH_MASK_PROJ_SCREEN_SPACE,
+       "SCREEN_SPACE",
+       0,
+       "Screen Space Canvas",
+       "Paint mask on a 2D screen-space canvas, then project it onto the mesh on Enter"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   static const EnumPropertyItem brush_blur_mode_items[] = {
       {KERNEL_BOX, "BOX", 0, "Box", ""},
       {KERNEL_GAUSSIAN, "GAUSSIAN", 0, "Gaussian", ""},
@@ -2736,6 +2750,15 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, brush_mask_tool_items);
   RNA_def_property_ui_text(prop, "Mask Tool", "");
   RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_MASK);
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "mask_projection_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "mask_projection_mode");
+  RNA_def_property_enum_items(prop, brush_mask_projection_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Projection Mode",
+                           "How the mask brush accumulates paint: directly on the mesh surface, "
+                           "or on a 2D screen-space canvas projected on Enter");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "curve_distance_falloff_preset", PROP_ENUM, PROP_NONE);

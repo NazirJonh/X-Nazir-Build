@@ -71,6 +71,9 @@ void PAINT_OT_mask_lasso_gesture(wmOperatorType *ot);
 void PAINT_OT_mask_box_gesture(wmOperatorType *ot);
 void PAINT_OT_mask_line_gesture(wmOperatorType *ot);
 void PAINT_OT_mask_polyline_gesture(wmOperatorType *ot);
+
+void PAINT_OT_mask_canvas_apply(wmOperatorType *ot);
+void PAINT_OT_mask_canvas_cancel(wmOperatorType *ot);
 }  // namespace ed::sculpt_paint::mask
 
 }  // namespace blender

@@ -47,6 +47,8 @@
 #include "sculpt_intern.hh"
 #include "sculpt_undo.hh"
 
+#include "mask_canvas.hh"
+
 namespace blender::ed::sculpt_paint::mask {
 
 /* -------------------------------------------------------------------- */
@@ -935,13 +937,50 @@ static void gesture_operator_properties(wmOperatorType *ot)
       0.0f,
       1.0f,
       "Value",
-      "Mask level to use when mode is 'Value'; zero means no masking and one is fully masked",
+      "Mask value to rasterize into the canvas",
       0.0f,
       1.0f);
+  RNA_def_boolean(ot->srna,
+                  "use_canvas_mode",
+                  false,
+                  "Canvas Mode",
+                  "Rasterize gesture shape into the screen-space canvas instead of applying to mesh");
+}
+
+static float gesture_canvas_fill_value(const wmOperator *op)
+{
+  const FloodFillMode mode = FloodFillMode(RNA_enum_get(op->ptr, "mode"));
+  const float value = RNA_float_get(op->ptr, "value");
+  switch (mode) {
+    case FloodFillMode::Value:
+      return value;
+    case FloodFillMode::InverseValue:
+      return 1.0f - value;
+    case FloodFillMode::InverseMeshValue:
+      /* NOTE: In canvas mode, we don't have access to per-vertex mask values during
+       * rasterization. The inversion will be applied later when the canvas is applied
+       * to the mesh. For now, treat this mode as InverseValue. */
+      return 1.0f - value;
+  }
+  BLI_assert_unreachable();
+  return value;
 }
 
 static wmOperatorStatus gesture_box_exec(bContext *C, wmOperator *op)
 {
+  if (RNA_boolean_get(op->ptr, "use_canvas_mode")) {
+    Object *ob = CTX_data_active_object(C);
+    mask::MaskCanvas &canvas = mask::canvas_ensure(*C, *ob);
+
+    rcti rect;
+    WM_operator_properties_border_to_rcti(op, &rect);
+    const float value = gesture_canvas_fill_value(op);
+
+    mask::canvas_set_rect(canvas, rect.xmin, rect.ymin, rect.xmax, rect.ymax, value);
+    tag_update_overlays(C);
+    return OPERATOR_FINISHED;
+  }
+
   std::unique_ptr<gesture::GestureData> gesture_data = gesture::init_from_box(C, op);
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
@@ -954,6 +993,20 @@ static wmOperatorStatus gesture_box_exec(bContext *C, wmOperator *op)
 
 static wmOperatorStatus gesture_lasso_exec(bContext *C, wmOperator *op)
 {
+  if (RNA_boolean_get(op->ptr, "use_canvas_mode")) {
+    Object *ob = CTX_data_active_object(C);
+    mask::MaskCanvas &canvas = mask::canvas_ensure(*C, *ob);
+
+    const float value = gesture_canvas_fill_value(op);
+    const Array<int2> points = WM_gesture_lasso_path_to_array(C, op);
+
+    if (points.size() > 2) {
+      mask::canvas_set_polygon(canvas, points, value);
+    }
+    tag_update_overlays(C);
+    return OPERATOR_FINISHED;
+  }
+
   std::unique_ptr<gesture::GestureData> gesture_data = gesture::init_from_lasso(C, op);
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
@@ -966,6 +1019,24 @@ static wmOperatorStatus gesture_lasso_exec(bContext *C, wmOperator *op)
 
 static wmOperatorStatus gesture_line_exec(bContext *C, wmOperator *op)
 {
+  if (RNA_boolean_get(op->ptr, "use_canvas_mode")) {
+    Object *ob = CTX_data_active_object(C);
+    mask::MaskCanvas &canvas = mask::canvas_ensure(*C, *ob);
+
+    const float2 p0 = {float(RNA_int_get(op->ptr, "xstart")),
+                       float(RNA_int_get(op->ptr, "ystart"))};
+    const float2 p1 = {float(RNA_int_get(op->ptr, "xend")), float(RNA_int_get(op->ptr, "yend"))};
+    const RegionView3D *rv3d = static_cast<RegionView3D *>(CTX_wm_region(C)->regiondata);
+    /* Flip logic matches gesture::init_from_line behavior for consistency. */
+    const bool flip = RNA_boolean_get(op->ptr, "flip") ^ (!rv3d->is_persp);
+    const bool limit_to_segment = RNA_boolean_get(op->ptr, "use_limit_to_segment");
+    const float value = gesture_canvas_fill_value(op);
+
+    mask::canvas_set_line_halfplane(canvas, p0, p1, flip, limit_to_segment, value);
+    tag_update_overlays(C);
+    return OPERATOR_FINISHED;
+  }
+
   std::unique_ptr<gesture::GestureData> gesture_data = gesture::init_from_line(C, op);
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
@@ -978,6 +1049,20 @@ static wmOperatorStatus gesture_line_exec(bContext *C, wmOperator *op)
 
 static wmOperatorStatus gesture_polyline_exec(bContext *C, wmOperator *op)
 {
+  if (RNA_boolean_get(op->ptr, "use_canvas_mode")) {
+    Object *ob = CTX_data_active_object(C);
+    mask::MaskCanvas &canvas = mask::canvas_ensure(*C, *ob);
+
+    const float value = gesture_canvas_fill_value(op);
+    const Array<int2> points = WM_gesture_lasso_path_to_array(C, op);
+
+    if (points.size() > 2) {
+      mask::canvas_set_polygon(canvas, points, value);
+    }
+    tag_update_overlays(C);
+    return OPERATOR_FINISHED;
+  }
+
   std::unique_ptr<gesture::GestureData> gesture_data = gesture::init_from_polyline(C, op);
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
@@ -1066,6 +1151,240 @@ void PAINT_OT_mask_polyline_gesture(wmOperatorType *ot)
   gesture::operator_properties(ot, gesture::ShapeType::Lasso);
 
   gesture_operator_properties(ot);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Canvas Operators
+ * \{ */
+
+static bool mask_canvas_operator_poll(bContext *C)
+{
+  if (!sculpt_mode_poll_view3d(C)) {
+    return false;
+  }
+  const Object *ob = CTX_data_active_object(C);
+  if (!ob || !ob->runtime || !ob->runtime->sculpt_session) {
+    return false;
+  }
+  const SculptSession &ss = *ob->runtime->sculpt_session;
+  return ss.mask_canvas && ss.mask_canvas->active;
+}
+
+static float sample_canvas_for_position(const mask::MaskCanvas &canvas,
+                                      const float3 &position,
+                                      const float3 &normal,
+                                      const ePaintSymmetryFlags symm)
+{
+  float canvas_val_max = 0.0f;
+  for (int symmpass = 0; symmpass <= symm; symmpass++) {
+    if (!is_symmetry_iteration_valid(symmpass, symm)) {
+      continue;
+    }
+    const ePaintSymmetryFlags sym = ePaintSymmetryFlags(symmpass);
+    const float3 view_normal = symmetry_flip(canvas.true_view_normal, sym);
+    const float3 co = symmetry_flip(position, sym);
+
+    if (canvas.use_front_faces_only && math::dot(normal, view_normal) < 0.0f) {
+      continue;
+    }
+
+    const std::optional<float2> screen_co = mask::canvas_project_co(canvas, co);
+    if (!screen_co) {
+      continue;
+    }
+
+    canvas_val_max = std::max(
+        canvas_val_max, mask::canvas_sample(canvas, screen_co->x, screen_co->y));
+  }
+  return canvas_val_max;
+}
+
+static wmOperatorStatus mask_canvas_apply_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || !ob->runtime || !ob->runtime->sculpt_session) {
+    return OPERATOR_CANCELLED;
+  }
+  SculptSession &ss = *ob->runtime->sculpt_session;
+
+  if (!ss.mask_canvas || !ss.mask_canvas->active) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const mask::MaskCanvas &canvas = *ss.mask_canvas;
+
+  const Scene &scene = *CTX_data_scene(C);
+  Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
+  Main *bmain = CTX_data_main(C);
+  MultiresModifierData *mmd = BKE_sculpt_multires_active(&scene, ob);
+
+  BKE_sculpt_update_object_for_edit(&depsgraph, ob, false);
+  BKE_sculpt_mask_layers_ensure(&depsgraph, bmain, ob, mmd);
+
+  ed::sculpt_paint::mask_overlay_check(*C, *op);
+
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(*ob);
+  IndexMaskMemory memory;
+  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  if (node_mask.is_empty()) {
+    return OPERATOR_CANCELLED;
+  }
+
+  undo::push_begin(scene, *ob, op);
+
+  const bool keep_canvas = RNA_boolean_get(op->ptr, "keep_canvas");
+  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(*ob);
+
+  switch (pbvh.type()) {
+    case bke::pbvh::Type::Mesh: {
+      update_mask_mesh(depsgraph, *ob, node_mask, [&](MutableSpan<float> masks, const Span<int> verts) {
+        const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, *ob);
+        const Span<float3> normals = bke::pbvh::vert_normals_eval(depsgraph, *ob);
+        for (const int i : verts.index_range()) {
+          const float canvas_val = sample_canvas_for_position(
+              canvas, positions[verts[i]], normals[verts[i]], symm);
+          if (canvas_val != 0.0f) {
+            masks[i] = std::clamp(masks[i] + canvas_val, 0.0f, 1.0f);
+          }
+        }
+      });
+      break;
+    }
+    case bke::pbvh::Type::Grids: {
+      MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+      SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+      const Span<float3> positions = subdiv_ccg.positions;
+      const Span<float3> normals = subdiv_ccg.normals;
+      MutableSpan<float> masks = subdiv_ccg.masks;
+      const BitGroupVector<> &grid_hidden = subdiv_ccg.grid_hidden;
+      const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+
+      Array<bool> node_changed(node_mask.min_array_size(), false);
+
+      node_mask.foreach_index(
+          [&](const int node_index) {
+            bke::pbvh::GridsNode &node = nodes[node_index];
+            bool any_changed = false;
+            for (const int grid : node.grids()) {
+              const int vert_start = grid * key.grid_area;
+              BKE_subdiv_ccg_foreach_visible_grid_vert(key, grid_hidden, grid, [&](const int i) {
+                const int vert = vert_start + i;
+                const float canvas_val = sample_canvas_for_position(
+                    canvas, positions[vert], normals[vert], symm);
+                if (canvas_val != 0.0f) {
+                  float &mask = masks[vert];
+                  if (!any_changed) {
+                    any_changed = true;
+                    undo::push_node(depsgraph, *ob, &node, undo::Type::Mask);
+                  }
+                  mask = std::clamp(mask + canvas_val, 0.0f, 1.0f);
+                }
+              });
+            }
+            if (any_changed) {
+              bke::pbvh::node_update_mask_grids(key, masks, node);
+              node_changed[node_index] = true;
+            }
+          },
+          exec_mode::grain_size(1));
+
+      pbvh.tag_masks_changed(IndexMask::from_bools(node_changed, memory));
+      break;
+    }
+    case bke::pbvh::Type::BMesh: {
+      MutableSpan<bke::pbvh::BMeshNode> nodes = pbvh.nodes<bke::pbvh::BMeshNode>();
+      BMesh &bm = *ss.bm;
+      const int offset = CustomData_get_offset_named(&bm.vdata, CD_PROP_FLOAT, ".sculpt_mask");
+
+      Array<bool> node_changed(node_mask.min_array_size(), false);
+
+      node_mask.foreach_index(
+          [&](const int i) {
+            bool any_changed = false;
+            for (BMVert *vert : BKE_pbvh_bmesh_node_unique_verts(&nodes[i])) {
+              const float canvas_val = sample_canvas_for_position(
+                  canvas, float3(vert->co), float3(vert->no), symm);
+              if (canvas_val != 0.0f) {
+                if (!any_changed) {
+                  any_changed = true;
+                  undo::push_node(depsgraph, *ob, &nodes[i], undo::Type::Mask);
+                }
+                const float old_mask = BM_ELEM_CD_GET_FLOAT(vert, offset);
+                BM_ELEM_CD_SET_FLOAT(
+                    vert, offset, std::clamp(old_mask + canvas_val, 0.0f, 1.0f));
+              }
+            }
+            if (any_changed) {
+              bke::pbvh::node_update_mask_bmesh(offset, nodes[i]);
+              node_changed[i] = true;
+            }
+          },
+          exec_mode::grain_size(1));
+
+      pbvh.tag_masks_changed(IndexMask::from_bools(node_changed, memory));
+      break;
+    }
+  }
+
+  if (!keep_canvas) {
+    mask::canvas_end(*ss.mask_canvas);
+  }
+
+  if (mmd) {
+    multires_mark_as_modified(&depsgraph, ob, MULTIRES_COORDS_MODIFIED);
+  }
+  undo::push_end(*ob);
+
+  tag_update_overlays(C);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_mask_canvas_apply(wmOperatorType *ot)
+{
+  ot->name = "Apply Canvas Mask";
+  ot->idname = "PAINT_OT_mask_canvas_apply";
+  ot->description = "Project the 2D screen-space mask canvas onto the 3D mesh";
+
+  ot->exec = mask_canvas_apply_exec;
+  ot->poll = mask_canvas_operator_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_boolean(ot->srna,
+                  "keep_canvas",
+                  false,
+                  "Keep Canvas",
+                  "Keep the canvas active and its contents after applying");
+}
+
+static wmOperatorStatus mask_canvas_cancel_exec(bContext *C, wmOperator * /*op*/)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || !ob->runtime || !ob->runtime->sculpt_session) {
+    return OPERATOR_CANCELLED;
+  }
+  SculptSession &ss = *ob->runtime->sculpt_session;
+
+  if (ss.mask_canvas) {
+    mask::canvas_end(*ss.mask_canvas);
+    tag_update_overlays(C);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+    return OPERATOR_FINISHED;
+  }
+  return OPERATOR_CANCELLED;
+}
+
+void PAINT_OT_mask_canvas_cancel(wmOperatorType *ot)
+{
+  ot->name = "Cancel Canvas Mask";
+  ot->idname = "PAINT_OT_mask_canvas_cancel";
+  ot->description = "Discard the 2D screen-space mask canvas without modifying the mesh";
+
+  ot->exec = mask_canvas_cancel_exec;
+  ot->poll = mask_canvas_operator_poll;
+  ot->flag = OPTYPE_REGISTER;
 }
 
 /** \} */

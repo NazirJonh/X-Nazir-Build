@@ -571,6 +571,14 @@ enum BrushMaskTool : char {
   BRUSH_MASK_SMOOTH = 1,
 };
 
+/** #Brush.mask_projection_mode — only used if sculpt_brush_type is SCULPT_BRUSH_TYPE_MASK. */
+enum BrushMaskProjectionMode : char {
+  /** Standard behavior: brush dabs are written directly to `.sculpt_mask` on the mesh. */
+  BRUSH_MASK_PROJ_SURFACE = 0,
+  /** Screen-space canvas: dabs are painted into a 2D float buffer; Enter projects it to mesh. */
+  BRUSH_MASK_PROJ_SCREEN_SPACE = 1,
+};
+
 /* blur kernel types, Brush.blur_mode */
 enum eBlurKernelType : int {
   KERNEL_GAUSSIAN = 0,

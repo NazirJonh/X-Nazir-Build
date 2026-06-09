@@ -670,6 +670,9 @@ void ED_operatortypes_paint()
   WM_operatortype_append(mask::PAINT_OT_mask_box_gesture);
   WM_operatortype_append(mask::PAINT_OT_mask_line_gesture);
   WM_operatortype_append(mask::PAINT_OT_mask_polyline_gesture);
+
+  WM_operatortype_append(mask::PAINT_OT_mask_canvas_apply);
+  WM_operatortype_append(mask::PAINT_OT_mask_canvas_cancel);
 }
 
 void ED_keymap_paint(wmKeyConfig *keyconf)

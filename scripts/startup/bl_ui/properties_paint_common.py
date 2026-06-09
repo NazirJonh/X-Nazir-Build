@@ -1075,6 +1075,16 @@ def brush_settings(layout, context, brush, popover=False):
 
         elif sculpt_brush_type == 'MASK':
             layout.row().prop(brush, "mask_tool", expand=True)
+            col = layout.column()
+            col.use_property_split = True
+            col.use_property_decorate = False
+            col.prop(brush, "mask_projection_mode", text="Projection")
+
+            if brush.mask_projection_mode == 'SCREEN_SPACE':
+                row = layout.row(align=True)
+                row.operator("paint.mask_canvas_apply", text="Apply Canvas", icon='CHECKMARK')
+                row.operator("paint.mask_canvas_cancel", text="Cancel", icon='X')
+
 
         # End sculpt_brush_type interface.
 

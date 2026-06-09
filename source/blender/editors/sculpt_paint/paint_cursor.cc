@@ -58,6 +58,8 @@
 
 #include "PRF_profile.hh"
 
+#include "mesh/mask_canvas.hh"
+
 #include "UI_resources.hh"
 
 #include "paint_intern.hh"
@@ -1312,6 +1314,10 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
       break;
     default:
       BLI_assert_unreachable();
+  }
+
+  if (pcontext.ss && pcontext.ss->mask_canvas && pcontext.ss->mask_canvas->active) {
+    mask::canvas_draw_overlay(*pcontext.ss->mask_canvas, pcontext.region);
   }
 }
 

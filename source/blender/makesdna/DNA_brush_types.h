@@ -305,8 +305,14 @@ struct Brush {
   eBrushWeightPaintType weight_brush_type = WPAINT_BRUSH_TYPE_DRAW;
   /** Active image paint brush type. */
   eBrushImagePaintType image_brush_type = IMAGE_PAINT_BRUSH_TYPE_DRAW;
-  /** Enum eBrushMaskTool, only used if sculpt_brush_type is SCULPT_BRUSH_TYPE_MASK. */
+  /** Enum BrushMaskTool, only used if sculpt_brush_type is SCULPT_BRUSH_TYPE_MASK. */
   BrushMaskTool mask_tool = BRUSH_MASK_DRAW;
+  /**
+   * Enum BrushMaskProjectionMode, only used if sculpt_brush_type is SCULPT_BRUSH_TYPE_MASK.
+   * NOTE: Replaces `_pad1[0]`. Default value (0) equals BRUSH_MASK_PROJ_SURFACE,
+   * ensuring backward compatibility without versioning code.
+   */
+  BrushMaskProjectionMode mask_projection_mode = BRUSH_MASK_PROJ_SURFACE;
   /** Active grease pencil brush type. */
   eBrushGPaintType gpencil_brush_type = GPAINT_BRUSH_TYPE_DRAW;
   /** Active grease pencil vertex brush type. */
@@ -318,7 +324,7 @@ struct Brush {
   /** Active curves sculpt brush type. */
   eBrushCurvesSculptType curves_sculpt_brush_type = CURVES_SCULPT_BRUSH_TYPE_COMB;
 
-  char _pad1[2] = {};
+  char _pad1[1] = {};
 
   float autosmooth_factor = 0.0f;
 

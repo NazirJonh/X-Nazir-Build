@@ -1611,13 +1611,22 @@ std::optional<AssetWeakReference> image_grid_shelf_active_asset_weak_ref(
 void image_grid_shelf_sync_register();
 
 /**
- * Set #ImageGridUIState::scroll_row from #focus_asset_identifier using \a cols columns per row.
+ * Set #ImageGridUIState::scroll_row from #focus_asset_identifier using \a cols columns per row,
+ * centering the target asset vertically within the visible area (scroll_row is shifted back by
+ * half of \a effective_rows_hint so the active asset lands in the middle of the popover).
+ *
+ * \param effective_rows_hint: Number of visible grid rows, pre-computed by the caller from
+ * #grip_pixel_height and tile_h *before* #View3D::image_grid_rows is written for the current
+ * frame. This avoids the first-frame case where image_grid_rows is still 0 (DNA default),
+ * which would otherwise give center_offset = 0 and produce no vertical centering.
+ *
  * Returns true when scroll was applied (or no focus was requested).
  */
 bool image_grid_apply_focus_scroll(const bContext &C,
                                    View3D &v3d,
                                    ImageGridUIState &state,
-                                   int cols);
+                                   int cols,
+                                   int effective_rows_hint);
 
 /**
  * Apply pending shelf selection when the browse popover is closed.

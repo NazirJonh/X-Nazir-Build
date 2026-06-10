@@ -671,7 +671,19 @@ static void build_image_grid(Layout &layout,
                            state.viewport.cached_cols :
                            max_ii(1, panel_width / max_ii(tile_w, 1));
 
-  ed::view3d::image_grid_apply_focus_scroll(C, *v3d, state, cols_est);
+  /* Pre-compute the number of visible rows for centering in image_grid_apply_focus_scroll.
+   * This must happen BEFORE image_grid_rows is updated (line below), because on the first
+   * frame image_grid_rows == 0 (DNA default) and would give center_offset = 0 (no centering).
+   * We derive effective_rows from grip_pixel_height (set from the previous frame) if available,
+   * otherwise fall back to image_grid_effective_rows which safely clamps 0 → 1. */
+  const int tile_h_hint = ui::preview_tile_size_y_no_label(preview_size);
+  const int effective_rows_hint = (state.viewport.grip_pixel_height >= tile_h_hint) ?
+                                      clamp_i(round_fl_to_int(float(state.viewport.grip_pixel_height) /
+                                                              float(tile_h_hint)),
+                                              1,
+                                              16) :
+                                      ed::view3d::image_grid_effective_rows(*v3d);
+  ed::view3d::image_grid_apply_focus_scroll(C, *v3d, state, cols_est, effective_rows_hint);
 
   auto view_unique = std::make_unique<ImageAssetGridView>(
       C, state, state.filter.lib_ref, ptr, prop, cols_est);

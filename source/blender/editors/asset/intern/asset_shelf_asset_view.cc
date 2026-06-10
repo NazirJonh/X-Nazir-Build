@@ -431,6 +431,9 @@ void build_asset_view(ui::Layout &layout,
   ui::AbstractGridView *grid_view = block_add_view(
       *block, "asset shelf asset view", std::move(asset_view));
   grid_view->set_context_menu_title("Asset Shelf");
+  if (STREQ(shelf.type->idname, "VIEW3D_AST_image_texture")) {
+    grid_view->scroll_active_into_center_on_draw_ = true;
+  }
 
   ui::GridViewBuilder builder(*block);
   builder.build_grid_view(C, *grid_view, layout, filter_string_get(shelf));

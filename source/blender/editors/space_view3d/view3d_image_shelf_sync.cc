@@ -97,9 +97,10 @@ void image_grid_request_scroll_to_asset(ImageGridUIState &state,
 }
 
 bool image_grid_apply_focus_scroll(const bContext &C,
-                                   View3D & /*v3d*/,
+                                   View3D &v3d,
                                    ImageGridUIState &state,
-                                   const int cols)
+                                   const int cols,
+                                   const int effective_rows_hint)
 {
   if (state.viewport.focus_asset_identifier.empty()) {
     return true;
@@ -124,10 +125,26 @@ bool image_grid_apply_focus_scroll(const bContext &C,
     return false;
   }
 
-  state.viewport.scroll_row = filtered_index / cols_clamped;
-  /* Do NOT clamp here: cached_item_count may be stale (from a previous library). A premature
-   * clamp would cap scroll_row below the true max_scroll_row, causing the wrong rows to be
-   * built. The post-build clamp in build_image_grid uses the correct cached_item_count. */
+  /* If the active asset is on the first "page" of the grid (i.e. it fits within the
+   * initial visible rows), just show the top of the grid without scrolling.
+   * Hiding the very first rows just to mathematically center an asset near the top
+   * feels unnatural to the user.
+   * Otherwise, center the active asset vertically in the visible area.
+   * NOTE: Do NOT clamp here — cached_item_count may be stale (from a previous library). A
+   * premature clamp would cap scroll_row below the true max_scroll_row, causing the wrong
+   * rows to be built. The post-build clamp in build_image_grid uses the correct
+   * cached_item_count. */
+  const int target_row = filtered_index / cols_clamped;
+  const int effective_rows = max_ii(1, effective_rows_hint);
+  
+  if (target_row < effective_rows) {
+    state.viewport.scroll_row = 0;
+  }
+  else {
+    const int center_offset = effective_rows / 2;
+    state.viewport.scroll_row = max_ii(0, target_row - center_offset);
+  }
+
   state.viewport.focus_asset_identifier.clear();
   return true;
 }

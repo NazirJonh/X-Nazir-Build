@@ -140,6 +140,9 @@ class AbstractGridView : public AbstractView {
   AbstractViewItem *navigate_down(AbstractViewItem *from) override;
 
   void scroll_active_into_view(bContext *C) override;
+  void scroll_active_into_center(bContext *C);
+
+  bool scroll_active_into_center_on_draw_ = false;
 
  protected:
   virtual void build_items() = 0;

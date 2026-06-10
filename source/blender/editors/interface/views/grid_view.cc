@@ -22,6 +22,8 @@
 
 #include "RNA_access.hh"
 
+#include "ED_screen.hh"
+
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_view2d.hh"
@@ -240,6 +242,37 @@ void AbstractGridView::scroll_active_into_view(bContext *C)
       ARegion *region = CTX_wm_region(C);
       if (but && region) {
         but_ensure_in_view(C, region, but);
+      }
+    }
+  });
+}
+
+void AbstractGridView::scroll_active_into_center(bContext *C)
+{
+  this->foreach_filtered_item([&](AbstractViewItem &item) {
+    if (item.is_active()) {
+      Button *but = reinterpret_cast<Button *>(item.view_item_button());
+      ARegion *region = CTX_wm_region(C);
+      if (but && region && but->block) {
+        View2D *v2d = &region->v2d;
+        if ((v2d->flag & V2D_IS_INIT) == 0) {
+          return;
+        }
+
+        rctf region_rect;
+        block_to_region_rctf(region, but->block, &region_rect, &but->rect);
+
+        rctf view_rect;
+        view2d_region_to_view_rctf(v2d, &region_rect, &view_rect);
+
+        const float target_center_y = BLI_rctf_cent_y(&view_rect);
+        const float old_center_y = BLI_rctf_cent_y(&v2d->cur);
+
+        if (fabsf(old_center_y - target_center_y) > 1.0f) {
+          view2d_center_set(v2d, BLI_rctf_cent_x(&v2d->cur), target_center_y);
+          view2d_curRect_changed(C, v2d);
+          ED_region_tag_redraw_no_rebuild(region);
+        }
       }
     }
   });
@@ -621,6 +654,11 @@ void GridViewBuilder::build_grid_view(const bContext &C,
   GridViewLayoutBuilder builder(layout);
   const View2D &v2d = v2d_override ? *v2d_override : region->v2d;
   builder.build_from_view(C, grid_view, v2d, v2d_override != nullptr);
+
+  if (grid_view.scroll_active_into_center_on_draw_) {
+    grid_view.scroll_active_into_center(const_cast<bContext *>(&C));
+    grid_view.scroll_active_into_center_on_draw_ = false;
+  }
 }
 
 /* ---------------------------------------------------------------------- */

@@ -43,6 +43,9 @@
 #include "ED_view3d.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
+
+#include "DNA_workspace_types.h"
 
 #include "UI_view2d.hh"
 
@@ -281,7 +284,14 @@ void initTransInfo(bContext *C, TransInfo *t, wmOperator *op, const wmEvent *eve
     {
       Paint *paint = BKE_paint_get_active_from_context(C);
       Brush *brush = (paint) ? BKE_paint_brush(paint) : nullptr;
-      if (brush && (brush->stroke_method == BRUSH_STROKE_CURVE)) {
+      bool use_paint_curve = brush && (brush->stroke_method == BRUSH_STROKE_CURVE);
+      if (!use_paint_curve) {
+        /* The standalone Curve Edit tool edits the paint curve regardless of the active
+         * brush stroke method, so transforms must target the curve, not the mesh. */
+        const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+        use_paint_curve = tref && STREQ(tref->idname, "builtin.curves_edit");
+      }
+      if (use_paint_curve) {
         t->options |= CTX_PAINT_CURVE;
       }
     }

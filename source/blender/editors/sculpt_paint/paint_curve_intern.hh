@@ -160,6 +160,32 @@ struct PaintCurveRadiusHandleScreen {
 void paintcurve_build_screen_points(const PaintCurve *pc,
                                     const ViewContext *vc,
                                     Vector<PaintCurvePoint> &r_screen_points);
+
+/**
+ * Project every bezier spline of `geom` (in object local space) into screen-space polylines,
+ * one #blender::Vector<float2> per spline, smoothed with forward-difference subdivision.
+ * `ob_to_world` is the curve object's transform; `vc` supplies the region used for projection.
+ * Non-bezier splines are skipped. Coordinates are guarded against NaN/Inf.
+ */
+void paintcurve_build_object_screen_polylines(const blender::bke::CurvesGeometry &geom,
+                                              const blender::float4x4 &ob_to_world,
+                                              const ViewContext *vc,
+                                              blender::Vector<blender::Vector<blender::float2>>
+                                                  &r_polylines);
+
+/**
+ * Return the view-layer curve object (#OB_CURVES or #OB_CURVES_LEGACY) whose projected
+ * silhouette passes closest to screen-space `mval`, within `threshold` pixels, or nullptr.
+ * `exclude` is skipped. When non-null, `r_polylines` receives the winning object's
+ * screen polylines so the caller can draw them without recomputing.
+ */
+Object *paintcurve_nearest_scene_curve(const ViewContext *vc,
+                                       blender::float2 mval,
+                                       float threshold,
+                                       const Object *exclude,
+                                       blender::Vector<blender::Vector<blender::float2>>
+                                           *r_polylines);
+
 void paintcurve_radius_handle_screen_get(const PaintCurve *pc,
                                          const PaintCurvePoint *screen_points,
                                          int point_index,
@@ -186,6 +212,8 @@ float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScree
 /** Minimum screen-space offset of the radius-handle endpoint from the pivot. Keeps the handle a
  * distinct, grabbable target that never shadows clicks on the pivot, even at radius 0. */
 #define PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET 10.0f
+/** Screen-space pixel radius within which the cursor "hovers" a scene curve silhouette. */
+#define PAINT_CURVE_HOVER_THRESHOLD 12.0f
 
 /** \} */
 

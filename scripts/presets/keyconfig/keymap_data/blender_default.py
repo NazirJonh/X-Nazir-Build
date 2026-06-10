@@ -8411,10 +8411,27 @@ def km_3d_view_tool_sculpt_curves_edit(params):
         "3D View Tool: Sculpt, Curves Edit",
         {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
         {"items": [
+            # Pick a scene curve / pass-through to point editing.
             ("paintcurve.sculpt_pick", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+            # Point + handle editing (mirrors the "Paint Curve" keymap).
+            ("paintcurve.slide", {"type": params.tool_mouse, "value": 'PRESS', "ctrl": True, "shift": True},
+             {"properties": [("insert_point", True), ("select", False)]}),
+            ("paintcurve.add_point_slide", {"type": params.tool_mouse, "value": 'PRESS', "ctrl": True}, None),
             ("paintcurve.slide", {"type": params.tool_mouse, "value": 'PRESS'},
-             {"properties": [("select", True)]}),
+             {"properties": [("align", False), ("move_segment", True), ("select", True)]}),
+            ("paintcurve.slide", {"type": params.tool_mouse, "value": 'PRESS', "shift": True},
+             {"properties": [("align", True), ("move_segment", True)]}),
             ("paintcurve.slide_radius", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+            ("paintcurve.select", {"type": 'A', "value": 'PRESS'},
+             {"properties": [("toggle", True)]}),
+            ("paintcurve.delete_point", {"type": 'X', "value": 'PRESS'}, None),
+            ("paintcurve.delete_point", {"type": 'DEL', "value": 'PRESS'}, None),
+            # Transforms operate on the picked curve (CTX_PAINT_CURVE set in transform_generics.cc).
+            ("transform.translate", {"type": 'G', "value": 'PRESS'}, None),
+            ("transform.rotate", {"type": 'R', "value": 'PRESS'}, None),
+            ("transform.resize", {"type": 'S', "value": 'PRESS'}, None),
+            ("transform.transform", {"type": 'S', "value": 'PRESS', "alt": True},
+             {"properties": [("mode", 'CURVE_SHRINKFATTEN')]}),
         ]},
     )
 

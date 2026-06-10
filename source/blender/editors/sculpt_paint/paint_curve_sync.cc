@@ -9,10 +9,18 @@
  */
 
 #include "DNA_brush_types.h"
+#include "DNA_curve_types.h"
+#include "DNA_layer_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_types.h"
 
+#include "BKE_curve.hh"
+#include "BKE_curve_legacy_convert.hh"
 #include "BKE_curves.hh"
+#include "BKE_layer.hh"
+#include "BKE_lib_id.hh"
 
+#include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
@@ -197,6 +205,162 @@ float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScree
    * by a fixed minimum so the handle clears the pivot. */
   return max_ff((dist - PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET) / PAINT_CURVE_RADIUS_HANDLE_BASE_LEN,
                 0.0f);
+}
+
+void paintcurve_build_object_screen_polylines(const bke::CurvesGeometry &geom,
+                                              const float4x4 &ob_to_world,
+                                              const ViewContext *vc,
+                                              Vector<Vector<float2>> &r_polylines)
+{
+  r_polylines.clear();
+  if (!paintcurve_geometry_is_valid(geom) || vc == nullptr || vc->region == nullptr) {
+    return;
+  }
+
+  const std::optional<Span<float3>> handles_left = geom.handle_positions_left();
+  const std::optional<Span<float3>> handles_right = geom.handle_positions_right();
+  if (!handles_left.has_value() || !handles_right.has_value()) {
+    return;
+  }
+
+  const Span<float3> positions = geom.positions();
+  const Span<float3> hl = handles_left.value();
+  const Span<float3> hr = handles_right.value();
+  const VArray<bool> cyclic = geom.cyclic();
+  const OffsetIndices<int> points_by_curve = geom.points_by_curve();
+
+  auto project = [&](const float3 &local_co, float2 &r_screen) -> bool {
+    float world_co[3];
+    mul_v3_m4v3(world_co, ob_to_world.ptr(), local_co);
+    float screen_co[2];
+    ED_view3d_project_v2(vc->region, world_co, screen_co);
+    if (!isfinite(screen_co[0]) || !isfinite(screen_co[1])) {
+      return false;
+    }
+    r_screen = float2(screen_co[0], screen_co[1]);
+    return true;
+  };
+
+  for (const int curve_i : points_by_curve.index_range()) {
+    const IndexRange pts = points_by_curve[curve_i];
+    if (pts.size() < 2) {
+      continue;
+    }
+    Vector<float2> polyline;
+    const int segment_num = cyclic[curve_i] ? int(pts.size()) : int(pts.size()) - 1;
+
+    for (int seg = 0; seg < segment_num; seg++) {
+      const int a = pts[seg];
+      const int b = pts[(seg + 1) % int(pts.size())];
+
+      float data[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];
+      for (int j = 0; j < 2; j++) {
+        float2 p1, h1, h2, p2;
+        if (!project(positions[a], p1) || !project(hr[a], h1) ||
+            !project(hl[b], h2) || !project(positions[b], p2))
+        {
+          goto next_segment;
+        }
+        BKE_curve_forward_diff_bezier(p1[j],
+                                      h1[j],
+                                      h2[j],
+                                      p2[j],
+                                      data + j,
+                                      PAINT_CURVE_NUM_SEGMENTS,
+                                      sizeof(float[2]));
+      }
+
+      {
+        float (*v)[2] = reinterpret_cast<float (*)[2]>(data);
+        const int start = polyline.is_empty() ? 0 : 1;
+        for (int k = start; k <= PAINT_CURVE_NUM_SEGMENTS; k++) {
+          polyline.append(float2(v[k][0], v[k][1]));
+        }
+      }
+    next_segment:;
+    }
+
+    if (polyline.size() >= 2) {
+      r_polylines.append(std::move(polyline));
+    }
+  }
+}
+
+/* Shortest distance from `p` to segment [a, b] in screen space. */
+static float paintcurve_dist_point_segment(const float2 p, const float2 a, const float2 b)
+{
+  const float2 ab = b - a;
+  const float len_sq = math::length_squared(ab);
+  if (len_sq < 1e-8f) {
+    return math::distance(p, a);
+  }
+  const float t = math::clamp(math::dot(p - a, ab) / len_sq, 0.0f, 1.0f);
+  return math::distance(p, a + ab * t);
+}
+
+Object *paintcurve_nearest_scene_curve(const ViewContext *vc,
+                                       const float2 mval,
+                                       const float threshold,
+                                       const Object *exclude,
+                                       Vector<Vector<float2>> *r_polylines)
+{
+  if (vc == nullptr || vc->scene == nullptr || vc->view_layer == nullptr) {
+    return nullptr;
+  }
+
+  BKE_view_layer_synced_ensure(*vc->bmain, vc->scene, vc->view_layer);
+
+  Object *best_ob = nullptr;
+  float best_dist = threshold;
+  Vector<Vector<float2>> best_polylines;
+  Vector<Vector<float2>> scratch;
+
+  for (Base &base : *BKE_view_layer_object_bases_get(vc->view_layer)) {
+    Object *ob = base.object;
+    if (ob == exclude || !ELEM(ob->type, OB_CURVES, OB_CURVES_LEGACY)) {
+      continue;
+    }
+    if ((base.flag & BASE_ENABLED_AND_MAYBE_VISIBLE_IN_VIEWPORT) == 0) {
+      continue;
+    }
+
+    Curves *temp_curves = nullptr;
+    const bke::CurvesGeometry *geom = nullptr;
+    if (ob->type == OB_CURVES) {
+      geom = &id_cast<const Curves *>(ob->data)->geometry.wrap();
+    }
+    else {
+      temp_curves = bke::curve_legacy_to_curves(*id_cast<const Curve *>(ob->data));
+      if (temp_curves) {
+        geom = &temp_curves->geometry.wrap();
+      }
+    }
+
+    if (geom) {
+      paintcurve_build_object_screen_polylines(*geom, ob->object_to_world(), vc, scratch);
+      for (const Vector<float2> &polyline : scratch) {
+        for (const int i : IndexRange(polyline.size() - 1)) {
+          const float d = paintcurve_dist_point_segment(mval, polyline[i], polyline[i + 1]);
+          if (d < best_dist) {
+            best_dist = d;
+            best_ob = ob;
+          }
+        }
+      }
+      if (best_ob == ob && r_polylines) {
+        best_polylines = scratch;
+      }
+    }
+
+    if (temp_curves) {
+      BKE_id_free(nullptr, &temp_curves->id);
+    }
+  }
+
+  if (r_polylines && best_ob) {
+    *r_polylines = std::move(best_polylines);
+  }
+  return best_ob;
 }
 
 /** \} */

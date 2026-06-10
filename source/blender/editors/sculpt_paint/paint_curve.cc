@@ -1250,7 +1250,7 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
   /* Yield to slide_radius when the cursor is within the radius handle endpoint circle.
    * slide_radius is registered right after slide in the keymap, so PASS_THROUGH hands control
    * to it without requiring a separate poll check. */
-  if (pc->show_radius_handles && !paintcurve_has_multi_curves(pc)) {
+  if (pc->show_radius_handles) {
     const int radius_hit = paintcurve_find_radius_handle_at_pos(
         pc, screen_points.data(), loc_fl, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
     if (radius_hit >= 0) {
@@ -1607,7 +1607,7 @@ static bool paintcurve_slide_radius_poll(bContext *C)
   Paint *paint = BKE_paint_get_active_from_context(C);
   Brush *brush = BKE_paint_brush(paint);
   PaintCurve *pc = brush ? brush->paint_curve : nullptr;
-  return pc && pc->show_radius_handles && !paintcurve_has_multi_curves(pc);
+  return pc && pc->show_radius_handles;
 }
 
 static wmOperatorStatus paintcurve_slide_radius_invoke(bContext *C,
@@ -1985,7 +1985,7 @@ static wmOperatorStatus paintcurve_sculpt_pick_invoke(bContext *C,
       return OPERATOR_PASS_THROUGH;
     }
     /* Check radius handles too. */
-    if (pc->show_radius_handles && !paintcurve_has_multi_curves(pc)) {
+    if (pc->show_radius_handles) {
       const int radius_hit = paintcurve_find_radius_handle_at_pos(
           pc, screen_points.data(), loc_fl, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
       if (radius_hit >= 0) {
@@ -1994,11 +1994,25 @@ static wmOperatorStatus paintcurve_sculpt_pick_invoke(bContext *C,
     }
   }
 
-  /* 2. Curve object under cursor → pick it and import its geometry. */
-  Object *ob_under = ED_view3d_give_object_under_cursor(C, event->mval);
+  /* 2. Curve under cursor (screen proximity, sees through the mesh) → pick and import.
+   * Fall back to the depth-occluded object raycast for a direct click on the curve object.
+   * We exclude the current source object so that clicking its segments passes through to
+   * the slide operator (move_segment=True). */
+  Scene *scene = CTX_data_scene(C);
+  Sculpt *sculpt = (scene && scene->toolsettings) ? scene->toolsettings->sculpt : nullptr;
+  const Object *source_ob = sculpt ? sculpt->paint_curve_source_object : nullptr;
+
+  Depsgraph *pick_depsgraph = CTX_data_depsgraph_pointer(C);
+  ViewContext pick_vc = ED_view3d_viewcontext_init(C, pick_depsgraph);
+  Object *ob_under = paintcurve_nearest_scene_curve(
+      &pick_vc, float2(loc_fl[0], loc_fl[1]), PAINT_CURVE_HOVER_THRESHOLD, source_ob, nullptr);
+  if (ob_under == nullptr) {
+    Object *raycast = ED_view3d_give_object_under_cursor(C, event->mval);
+    if (raycast && raycast != source_ob && ELEM(raycast->type, OB_CURVES, OB_CURVES_LEGACY)) {
+      ob_under = raycast;
+    }
+  }
   if (ob_under && ELEM(ob_under->type, OB_CURVES, OB_CURVES_LEGACY)) {
-    Scene *scene = CTX_data_scene(C);
-    Sculpt *sculpt = (scene && scene->toolsettings) ? scene->toolsettings->sculpt : nullptr;
     if (sculpt == nullptr) {
       return OPERATOR_CANCELLED;
     }
@@ -2012,15 +2026,10 @@ static wmOperatorStatus paintcurve_sculpt_pick_invoke(bContext *C,
     return OPERATOR_FINISHED;
   }
 
-  /* 3. Click on empty space or mesh → deactivate the source curve. */
-  Scene *scene = CTX_data_scene(C);
-  Sculpt *sculpt = (scene && scene->toolsettings) ? scene->toolsettings->sculpt : nullptr;
-  if (sculpt && sculpt->paint_curve_source_object != nullptr) {
-    sculpt->paint_curve_source_object = nullptr;
-    WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
-    WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
-  }
-  return OPERATOR_FINISHED;
+  /* 3. Click on empty space or mesh → pass through so slide can check for segments.
+   * If slide also doesn't find anything, the curve remains active (default behavior).
+   * To explicitly deactivate, the user can click where no segments exist. */
+  return OPERATOR_PASS_THROUGH;
 }
 
 void PAINTCURVE_OT_sculpt_pick(wmOperatorType *ot)

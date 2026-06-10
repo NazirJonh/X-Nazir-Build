@@ -20,7 +20,9 @@
 #include "BLI_task.h"
 #include "BLI_utildefines.h"
 
+#include "DNA_curve_types.h"
 #include "DNA_curves_types.h"
+#include "DNA_layer_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -34,7 +36,10 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
+#include "BKE_curve_legacy_convert.hh"
 #include "BKE_curves.hh"
+#include "BKE_layer.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_image.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object_types.hh"
@@ -965,10 +970,92 @@ BLI_INLINE void draw_bezier_handle_lines(uint pos,
   immEnd();
 }
 
-static void paint_draw_curve_cursor(Brush *brush, ViewContext *vc)
+static void paint_draw_curve_cursor(Brush *brush,
+                                    ViewContext *vc,
+                                    const int2 mval,
+                                    const bool is_curve_edit_tool,
+                                    const Object *source_object)
 {
   GPU_matrix_push();
   GPU_matrix_translate_2f(vc->region->winrct.xmin, vc->region->winrct.ymin);
+
+  if (is_curve_edit_tool) {
+    uint sil_pos = GPU_vertformat_attr_add(
+        immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
+    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+    GPU_line_smooth(true);
+    GPU_blend(GPU_BLEND_ALPHA);
+
+    /* Determine the hovered curve once. */
+    Vector<Vector<float2>> hover_polylines;
+    const Object *hover_ob = paintcurve_nearest_scene_curve(
+        vc, float2(mval.x, mval.y), PAINT_CURVE_HOVER_THRESHOLD, source_object, &hover_polylines);
+
+    float faint_col[4], hover_col[4];
+    ui::theme::get_color_type_4fv(TH_WIRE, SPACE_VIEW3D, faint_col);
+    faint_col[3] = 0.5f;
+    ui::theme::get_color_type_4fv(TH_VERTEX_SELECT, SPACE_VIEW3D, hover_col);
+    hover_col[3] = 1.0f;
+
+    auto draw_polylines = [&](const Vector<Vector<float2>> &polylines) {
+      for (const Vector<float2> &polyline : polylines) {
+        if (polyline.size() < 2) {
+          continue;
+        }
+        immBegin(GPU_PRIM_LINE_STRIP, polyline.size());
+        for (const float2 &p : polyline) {
+          immVertex2fv(sil_pos, p);
+        }
+        immEnd();
+      }
+    };
+
+    /* Faint pass: every scene curve except the source and the hovered one. */
+    BKE_view_layer_synced_ensure(*vc->bmain, vc->scene, vc->view_layer);
+    GPU_line_width(1.0f);
+    immUniformColor4fv(faint_col);
+    for (Base &base : *BKE_view_layer_object_bases_get(vc->view_layer)) {
+      Object *ob = base.object;
+      if (ob == source_object || ob == hover_ob ||
+          !ELEM(ob->type, OB_CURVES, OB_CURVES_LEGACY))
+      {
+        continue;
+      }
+      if ((base.flag & BASE_ENABLED_AND_MAYBE_VISIBLE_IN_VIEWPORT) == 0) {
+        continue;
+      }
+      Curves *temp_curves = nullptr;
+      const bke::CurvesGeometry *geom = nullptr;
+      if (ob->type == OB_CURVES) {
+        geom = &id_cast<const Curves *>(ob->data)->geometry.wrap();
+      }
+      else {
+        temp_curves = bke::curve_legacy_to_curves(*id_cast<const Curve *>(ob->data));
+        if (temp_curves) {
+          geom = &temp_curves->geometry.wrap();
+        }
+      }
+      if (geom) {
+        Vector<Vector<float2>> polylines;
+        paintcurve_build_object_screen_polylines(*geom, ob->object_to_world(), vc, polylines);
+        draw_polylines(polylines);
+      }
+      if (temp_curves) {
+        BKE_id_free(nullptr, &temp_curves->id);
+      }
+    }
+
+    /* Bright pass: the hovered curve on top. */
+    if (hover_ob) {
+      GPU_line_width(3.0f);
+      immUniformColor4fv(hover_col);
+      draw_polylines(hover_polylines);
+    }
+
+    immUnbindProgram();
+    GPU_line_smooth(false);
+    GPU_blend(GPU_BLEND_NONE);
+  }
 
   if (brush->paint_curve && paintcurve_geometry_is_valid(brush->paint_curve->geometry.wrap())) {
     PaintCurve *pc = brush->paint_curve;
@@ -1008,7 +1095,7 @@ static void paint_draw_curve_cursor(Brush *brush, ViewContext *vc)
       draw_handle_endpoint(pos, right_col, &pcp->bez.vec[2][0], 8.0f, h2);
     }
 
-    if (pc->show_radius_handles && !paintcurve_has_multi_curves(pc)) {
+    if (pc->show_radius_handles) {
       for (int i = 0; i < int(temp_points.size()); i++) {
         PaintCurveRadiusHandleScreen handle;
         paintcurve_radius_handle_screen_get(pc, cp, i, &handle);
@@ -1392,9 +1479,19 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
   }
 
   switch (pcontext.cursor_type) {
-    case PaintCursorDrawingType::Curve:
-      paint_draw_curve_cursor(pcontext.brush, &pcontext.vc);
+    case PaintCursorDrawingType::Curve: {
+      const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+      const bool is_curve_edit_tool = tref && STREQ(tref->idname, "builtin.curves_edit");
+      Scene *cursor_scene = pcontext.vc.scene;
+      const Object *source_object = (cursor_scene && cursor_scene->toolsettings &&
+                                     cursor_scene->toolsettings->sculpt) ?
+                                        cursor_scene->toolsettings->sculpt
+                                            ->paint_curve_source_object :
+                                        nullptr;
+      paint_draw_curve_cursor(
+          pcontext.brush, &pcontext.vc, pcontext.mval, is_curve_edit_tool, source_object);
       break;
+    }
     case PaintCursorDrawingType::Cursor2D:
       paint_update_mouse_cursor(pcontext);
 

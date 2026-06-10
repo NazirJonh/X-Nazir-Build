@@ -258,6 +258,15 @@ bool region_view_has_idname_at(const ARegion *region,
   return block_view_find_idname(*block, *view) == idname;
 }
 
+bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], const StringRef idname)
+{
+  auto *item_but = static_cast<ButtonViewItem *>(view_item_find_mouse_over(region, xy));
+  if (!item_but || !item_but->view_item) {
+    return false;
+  }
+  return block_view_find_idname(*item_but->block, item_but->view_item->get_view()) == idname;
+}
+
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event)
 {
   Block *block = nullptr;

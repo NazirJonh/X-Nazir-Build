@@ -512,6 +512,24 @@ Button *view_item_find_mouse_over(const ARegion *region, const int xy[2])
   return button_find_mouse_over_ex(region, xy, false, false, but_is_view_item_fn, nullptr);
 }
 
+bool region_scroll_button_under_mouse(const ARegion *region, const int xy[2], const void *poin)
+{
+  if (!poin || !region_contains_point_px(region, xy)) {
+    return false;
+  }
+  for (Block &block : region->runtime->uiblocks) {
+    for (Button &but : block.buttons()) {
+      if (but.type != ButtonType::Scroll || but.poin != poin) {
+        continue;
+      }
+      if (button_contains_point_px(&but, region, xy)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static bool but_is_active_view_item(const Button *but, const void *view)
 {
   if (but->type != ButtonType::ViewItem) {

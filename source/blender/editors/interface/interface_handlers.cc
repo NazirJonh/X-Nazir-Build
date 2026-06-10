@@ -12523,6 +12523,10 @@ static int handle_menus_recursive(bContext *C,
   /* now handle events for our own menu */
 
   if (retval == WM_UI_HANDLER_CONTINUE) {
+    retval = ed::view3d::handle_image_grid_wheel_event(C, event, menu->region);
+  }
+
+  if (retval == WM_UI_HANDLER_CONTINUE) {
     retval = handle_region_semi_modal_buttons(C, event, menu->region);
   }
 

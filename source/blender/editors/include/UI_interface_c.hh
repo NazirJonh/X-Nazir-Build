@@ -3126,6 +3126,10 @@ AbstractView *region_view_find_at(const ARegion *region,
                                   int pad,
                                   Block **r_block = nullptr);
 bool region_view_has_idname_at(const ARegion *region, const int xy[2], int pad, StringRef idname);
+/** Like #region_view_has_idname_at, but also matches a #ButtonType::ViewItem under \a xy. */
+bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], StringRef idname);
+/** True when \a xy is over a #ButtonType::Scroll bound to \a poin. */
+bool region_scroll_button_under_mouse(const ARegion *region, const int xy[2], const void *poin);
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event);
 /**
  * \param xy: Coordinate to find a view item at, in window space.

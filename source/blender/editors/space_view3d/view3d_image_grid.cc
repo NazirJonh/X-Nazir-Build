@@ -163,42 +163,84 @@ const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref)
   }
 }
 
-bool image_grid_wheel_poll(bContext *C, const wmEvent *event)
+static bool image_grid_scroll_under_mouse(const ARegion *region,
+                                        const int xy[2],
+                                        const View3D &v3d,
+                                        bool *r_is_mask_slot)
+{
+  if (ui::region_scroll_button_under_mouse(
+          region, xy, &image_grid_state_get(v3d, false).viewport.scroll_row))
+  {
+    *r_is_mask_slot = false;
+    return true;
+  }
+  if (ui::region_scroll_button_under_mouse(
+          region, xy, &image_grid_state_get(v3d, true).viewport.scroll_row))
+  {
+    *r_is_mask_slot = true;
+    return true;
+  }
+  return false;
+}
+
+static bool image_grid_mouse_over(const ARegion *region, const int xy[2], bool *r_is_mask_slot)
+{
+  if (ui::region_view_has_idname_at(region, xy, 0, "image_asset_grid_mask") ||
+      ui::region_view_item_has_idname_at(region, xy, "image_asset_grid_mask"))
+  {
+    *r_is_mask_slot = true;
+    return true;
+  }
+  if (ui::region_view_has_idname_at(region, xy, 0, "image_asset_grid") ||
+      ui::region_view_item_has_idname_at(region, xy, "image_asset_grid"))
+  {
+    *r_is_mask_slot = false;
+    return true;
+  }
+  return false;
+}
+
+bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region)
 {
   if (!ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE) || event->modifier) {
     return false;
   }
   View3D *v3d = CTX_wm_view3d(C);
-  ARegion *region = CTX_wm_region(C);
   if (!v3d || !region) {
     return false;
   }
-  const bool is_mask_slot = ui::region_view_has_idname_at(
-      region, event->xy, 0, "image_asset_grid_mask");
-  if (!is_mask_slot && !ui::region_view_has_idname_at(region, event->xy, 0, "image_asset_grid")) {
+  bool is_mask_slot = false;
+  if (!image_grid_mouse_over(region, event->xy, &is_mask_slot) &&
+      !image_grid_scroll_under_mouse(region, event->xy, *v3d, &is_mask_slot))
+  {
     return false;
   }
   ImageGridUIState &state = image_grid_state_get(*v3d, is_mask_slot);
   return image_grid_max_scroll_row(state, *v3d) > 0;
 }
 
-int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion * /*region*/)
+int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *region)
 {
-  if (!image_grid_wheel_poll(C, event)) {
+  if (!image_grid_wheel_poll(C, event, region)) {
     return WM_UI_HANDLER_CONTINUE;
   }
   wmOperatorType *ot = WM_operatortype_find("VIEW3D_OT_image_grid_scroll", true);
   if (!ot) {
     return WM_UI_HANDLER_CONTINUE;
   }
-  const bool is_mask_slot = ui::region_view_has_idname_at(
-      CTX_wm_region(C), event->xy, 0, "image_asset_grid_mask");
+  bool is_mask_slot = false;
+  if (!image_grid_mouse_over(region, event->xy, &is_mask_slot)) {
+    image_grid_scroll_under_mouse(region, event->xy, *CTX_wm_view3d(C), &is_mask_slot);
+  }
   PointerRNA op_ptr = WM_operator_properties_create_ptr(ot);
   const int delta = (event->type == WHEELUPMOUSE) ? -1 : 1;
   RNA_int_set(&op_ptr, "delta", delta);
   RNA_boolean_set(&op_ptr, "use_mask_slot", is_mask_slot);
   WM_operator_name_call_ptr(C, ot, wm::OpCallContext::ExecDefault, &op_ptr, nullptr);
   WM_operator_properties_free(&op_ptr);
+  /* Popovers use a temporary region; CTX_wm_region() still points at the opener (e.g. tool header). */
+  ED_region_tag_redraw(region);
+  ED_region_tag_refresh_ui(region);
   return WM_UI_HANDLER_BREAK;
 }
 
@@ -1221,7 +1263,10 @@ static wmOperatorStatus image_grid_scroll_exec(bContext *C, wmOperator *op)
   state.viewport.scroll_row = clamp_i(
       state.viewport.scroll_row + delta, 0, image_grid_max_scroll_row(state, *v3d));
 
-  ARegion *region = CTX_wm_region(C);
+  ARegion *region = CTX_wm_region_popup(C);
+  if (!region) {
+    region = CTX_wm_region(C);
+  }
   if (region) {
     ED_region_tag_redraw(region);
     ED_region_tag_refresh_ui(region);

@@ -91,6 +91,12 @@ void paintcurve_build_screen_points(const PaintCurve *pc,
       float screen_co[2];
       if (vc && vc->region) {
         ED_view3d_project_v2(vc->region, world_co, screen_co);
+        /* Guard against NaN/Inf from points behind or at the camera plane.
+         * Corrupted GPU vertex coordinates can crash the GPU driver on Windows. */
+        if (!isfinite(screen_co[0]) || !isfinite(screen_co[1])) {
+          screen_co[0] = -1e6f;
+          screen_co[1] = -1e6f;
+        }
       }
       else {
         zero_v2(screen_co);
@@ -140,7 +146,10 @@ void paintcurve_radius_handle_screen_get(const PaintCurve *pc,
 
   const float2 perp(-tangent.y, tangent.x);
   const float radius = paintcurve_get_point_radius(pc, point_index);
-  const float len = radius * PAINT_CURVE_RADIUS_HANDLE_BASE_LEN;
+  /* Offset the endpoint by a fixed minimum so it never collapses onto the pivot. Without this a
+   * near-zero radius would draw and hit-test the handle directly on top of the pivot, shadowing
+   * every click meant to grab the pivot itself. */
+  const float len = PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET + radius * PAINT_CURVE_RADIUS_HANDLE_BASE_LEN;
 
   r_handle->point = pivot;
   r_handle->perp = perp;
@@ -184,7 +193,10 @@ float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScree
 {
   const float2 delta = float2(pos) - handle->point;
   const float dist = math::dot(delta, handle->perp);
-  return max_ff(dist / PAINT_CURVE_RADIUS_HANDLE_BASE_LEN, 0.0f);
+  /* Invert the forward mapping in paintcurve_radius_handle_screen_get, which offsets the endpoint
+   * by a fixed minimum so the handle clears the pivot. */
+  return max_ff((dist - PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET) / PAINT_CURVE_RADIUS_HANDLE_BASE_LEN,
+                0.0f);
 }
 
 /** \} */

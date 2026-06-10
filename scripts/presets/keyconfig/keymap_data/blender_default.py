@@ -8406,6 +8406,19 @@ def km_3d_view_tool_sculpt_face_set_edit(params):
     )
 
 
+def km_3d_view_tool_sculpt_curves_edit(params):
+    return (
+        "3D View Tool: Sculpt, Curves Edit",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("paintcurve.sculpt_pick", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+            ("paintcurve.slide", {"type": params.tool_mouse, "value": 'PRESS'},
+             {"properties": [("select", True)]}),
+            ("paintcurve.slide_radius", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+        ]},
+    )
+
+
 # ------------------------------------------------------------------------------
 # Tool System (3D View, Weight Paint)
 
@@ -9202,6 +9215,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_color_filter(params),
         km_3d_view_tool_sculpt_mask_by_color(params),
         km_3d_view_tool_sculpt_face_set_edit(params),
+        km_3d_view_tool_sculpt_curves_edit(params),
         km_3d_view_tool_paint_weight_sample_weight(params),
         km_3d_view_tool_paint_weight_sample_vertex_group(params),
         km_3d_view_tool_paint_weight_gradient(params),

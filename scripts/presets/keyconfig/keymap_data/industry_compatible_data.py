@@ -3728,6 +3728,19 @@ def _template_node_select(*, type, value, select_passthrough):
     return items
 
 
+def km_3d_view_tool_sculpt_curves_edit(_params):
+    return (
+        "3D View Tool: Sculpt, Curves Edit",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("paintcurve.sculpt_pick", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+            ("paintcurve.slide", {"type": 'LEFTMOUSE', "value": 'PRESS'},
+             {"properties": [("select", True)]}),
+            ("paintcurve.slide_radius", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+        ]},
+    )
+
+
 def km_3d_view_tool_interactive_add(params):
     return (
         "3D View Tool: Object, Add Primitive",
@@ -3858,6 +3871,7 @@ def generate_keymaps_impl(params=None):
         # Tool System.
         km_3d_view_tool_select(params),
         km_3d_view_tool_interactive_add(params),
+        km_3d_view_tool_sculpt_curves_edit(params),
         km_image_editor_tool_uv_select(params),
         km_sequencer_editor_tool_select_preview(params),
         km_sequencer_editor_tool_select_timeline(params),

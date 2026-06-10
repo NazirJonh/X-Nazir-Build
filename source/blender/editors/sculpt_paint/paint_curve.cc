@@ -21,6 +21,7 @@
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 #include "DNA_view3d_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
@@ -50,6 +51,7 @@
 
 #include "WM_api.hh"
 #include "WM_keymap.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "RNA_access.hh"
@@ -116,6 +118,12 @@ bool paint_curve_poll(bContext *C)
   Brush *brush = (paint) ? BKE_paint_brush(paint) : nullptr;
 
   if (brush && (brush->stroke_method == BRUSH_STROKE_CURVE)) {
+    return true;
+  }
+
+  /* Also allow paint-curve operators when the standalone Curve Edit tool is active. */
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  if (tref && STREQ(tref->idname, "builtin.curves_edit")) {
     return true;
   }
 
@@ -1701,6 +1709,15 @@ void PAINTCURVE_OT_slide_radius(wmOperatorType *ot)
   ot->flag = OPTYPE_BLOCKING;
 }
 
+static void paintcurve_slide_cancel(bContext * /*C*/, wmOperator *op)
+{
+  PointSlideData *psd = static_cast<PointSlideData *>(op->customdata);
+  if (psd) {
+    MEM_delete(psd);
+    op->customdata = nullptr;
+  }
+}
+
 void PAINTCURVE_OT_slide(wmOperatorType *ot)
 {
   /* identifiers */
@@ -1711,6 +1728,7 @@ void PAINTCURVE_OT_slide(wmOperatorType *ot)
   /* API callbacks. */
   ot->invoke = paintcurve_slide_invoke;
   ot->modal = paintcurve_slide_modal;
+  ot->cancel = paintcurve_slide_cancel;
   ot->poll = paint_curve_poll;
 
   /* flags */
@@ -1928,5 +1946,95 @@ void PAINTCURVE_OT_to_curve_object(wmOperatorType *ot)
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Sculpt Mode Curve Edit Tool — Pick Operator
+ * \{ */
+
+static bool paintcurve_sculpt_pick_poll(bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (!(ob && (ob->mode & OB_MODE_SCULPT))) {
+    return false;
+  }
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  return tref && STREQ(tref->idname, "builtin.curves_edit");
+}
+
+static wmOperatorStatus paintcurve_sculpt_pick_invoke(bContext *C,
+                                                      wmOperator *op,
+                                                      const wmEvent *event)
+{
+  const float loc_fl[2] = {float(event->mval[0]), float(event->mval[1])};
+
+  /* 1. Control point under cursor → pass through so PAINTCURVE_OT_slide handles the drag.
+   * This check must come before the object-under-cursor pick so that pivots that visually
+   * lie ON the spline are not intercepted by the object pick and accidentally re-imported. */
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *br = BKE_paint_brush(paint);
+  PaintCurve *pc = br ? br->paint_curve : nullptr;
+  if (pc && paintcurve_geometry_is_valid(pc->geometry.wrap())) {
+    Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+    ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+    Vector<PaintCurvePoint> screen_points;
+    paintcurve_build_screen_points(pc, &vc, screen_points);
+    char selflag = 0;
+    const int point_index = paintcurve_find_in_screen_points(
+        screen_points.as_span(), loc_fl, false, PAINT_CURVE_SELECT_THRESHOLD, &selflag);
+    if (point_index >= 0) {
+      return OPERATOR_PASS_THROUGH;
+    }
+    /* Check radius handles too. */
+    if (pc->show_radius_handles && !paintcurve_has_multi_curves(pc)) {
+      const int radius_hit = paintcurve_find_radius_handle_at_pos(
+          pc, screen_points.data(), loc_fl, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
+      if (radius_hit >= 0) {
+        return OPERATOR_PASS_THROUGH;
+      }
+    }
+  }
+
+  /* 2. Curve object under cursor → pick it and import its geometry. */
+  Object *ob_under = ED_view3d_give_object_under_cursor(C, event->mval);
+  if (ob_under && ELEM(ob_under->type, OB_CURVES, OB_CURVES_LEGACY)) {
+    Scene *scene = CTX_data_scene(C);
+    Sculpt *sculpt = (scene && scene->toolsettings) ? scene->toolsettings->sculpt : nullptr;
+    if (sculpt == nullptr) {
+      return OPERATOR_CANCELLED;
+    }
+    sculpt->paint_curve_source_object = ob_under;
+    sculpt->paint_curve_sync_to_source = 1;
+    if (!ED_paintcurve_import_from_source_object(C, op->reports, true)) {
+      return OPERATOR_CANCELLED;
+    }
+    WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+    WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+    return OPERATOR_FINISHED;
+  }
+
+  /* 3. Click on empty space or mesh → deactivate the source curve. */
+  Scene *scene = CTX_data_scene(C);
+  Sculpt *sculpt = (scene && scene->toolsettings) ? scene->toolsettings->sculpt : nullptr;
+  if (sculpt && sculpt->paint_curve_source_object != nullptr) {
+    sculpt->paint_curve_source_object = nullptr;
+    WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+    WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  }
+  return OPERATOR_FINISHED;
+}
+
+void PAINTCURVE_OT_sculpt_pick(wmOperatorType *ot)
+{
+  ot->name = "Pick and Edit Curve";
+  ot->description = "Pick a scene curve object and edit its paint-curve control points";
+  ot->idname = "PAINTCURVE_OT_sculpt_pick";
+
+  ot->invoke = paintcurve_sculpt_pick_invoke;
+  ot->poll = paintcurve_sculpt_pick_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/** \} */
 
 }  // namespace blender

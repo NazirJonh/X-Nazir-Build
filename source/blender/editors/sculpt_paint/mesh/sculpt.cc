@@ -39,6 +39,7 @@
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
@@ -3853,9 +3854,23 @@ static bool is_brush_related_tool(bContext *C)
   return false;
 }
 
+static bool is_curve_edit_tool_active(bContext *C)
+{
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  return tref && strcmp(tref->idname, "builtin.curves_edit") == 0;
+}
+
 bool brush_cursor_poll(bContext *C)
 {
-  return sculpt_mode_poll(C) && (paint_brush_cursor_poll(C) || is_brush_related_tool(C));
+  if (!sculpt_mode_poll(C)) {
+    return false;
+  }
+  if (paint_brush_cursor_poll(C) || is_brush_related_tool(C)) {
+    return true;
+  }
+  /* Also draw the paint cursor for the standalone Curve Edit tool so control
+   * points remain visible regardless of the active brush stroke method. */
+  return is_curve_edit_tool_active(C);
 }
 
 static const char *sculpt_brush_type_name(const Brush &brush)

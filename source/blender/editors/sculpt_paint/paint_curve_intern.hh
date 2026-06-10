@@ -51,6 +51,7 @@ void PAINTCURVE_OT_draw(wmOperatorType *ot);
 void PAINTCURVE_OT_cursor(wmOperatorType *ot);
 void PAINTCURVE_OT_from_curve_object(wmOperatorType *ot);
 void PAINTCURVE_OT_to_curve_object(wmOperatorType *ot);
+void PAINTCURVE_OT_sculpt_pick(wmOperatorType *ot);
 wmKeyMap *paintcurve_slide_modal_keymap(wmKeyConfig *keyconf);
 
 /** \} */
@@ -182,6 +183,9 @@ float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScree
 #define PAINT_CURVE_RADIUS_HANDLE_BASE_LEN 40.0f
 /** Screen-space radius of the radius-handle endpoint circle. */
 #define PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS 10.0f
+/** Minimum screen-space offset of the radius-handle endpoint from the pivot. Keeps the handle a
+ * distinct, grabbable target that never shadows clicks on the pivot, even at radius 0. */
+#define PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET 10.0f
 
 /** \} */
 

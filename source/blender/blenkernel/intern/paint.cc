@@ -1284,6 +1284,9 @@ PaintCurve *BKE_paint_curve_add(Main *bmain, const char *name)
   /* MEM_new_zeroed zeros all fields; the C++ default initializer `= 1` is never called.
    * Set explicitly so new curves start in 3D mode as intended. */
   pc->use_3d_space = 1;
+  /* Same gotcha: the DNA member initializer is not applied here, so enable the radius handles
+   * explicitly. Otherwise the field stays zeroed and the handles are never drawn or hit-tested. */
+  pc->show_radius_handles = 1;
   /* Embedded `CurvesGeometry` requires placement-new via `init_data`. Guard against a missing
    * call (would crash on the first undo snapshot copying uninitialized geometry). */
   if (UNLIKELY(pc->geometry.wrap().runtime == nullptr)) {

@@ -2001,6 +2001,17 @@ class _defs_sculpt:
             draw_settings=draw_settings,
         )
 
+    @ToolDef.from_fn
+    def curves_edit():
+        return dict(
+            idname="builtin.curves_edit",
+            label="Curve Edit",
+            icon="ops.sculpt.face_set_edit",
+            widget=None,
+            cursor='CROSSHAIR',
+            keymap="3D View Tool: Sculpt, Curves Edit",
+        )
+
 
 class _defs_vertex_paint:
 
@@ -4001,6 +4012,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.color_filter,
             None,
             _defs_sculpt.face_set_edit,
+            _defs_sculpt.curves_edit,
             _defs_sculpt.mask_by_color,
             None,
             _defs_transform.translate,

@@ -17,6 +17,7 @@
 #include "DNA_curves_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BKE_context.hh"
 #include "BKE_curve_legacy_convert.hh"
@@ -43,6 +44,7 @@
 #include "ED_view3d.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "paint_curve_intern.hh"
@@ -276,7 +278,10 @@ bool ED_paintcurve_import_from_source_object(bContext *C, ReportList *reports, c
     return false;
   }
 
-  if (br == nullptr || br->stroke_method != BRUSH_STROKE_CURVE) {
+  const bool is_curve_stroke_brush = br && br->stroke_method == BRUSH_STROKE_CURVE;
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  const bool is_curve_edit_tool = tref && STREQ(tref->idname, "builtin.curves_edit");
+  if (!is_curve_stroke_brush && !is_curve_edit_tool) {
     return false;
   }
 

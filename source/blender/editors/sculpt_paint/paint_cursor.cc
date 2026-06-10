@@ -28,6 +28,7 @@
 #include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BKE_brush.hh"
 #include "BKE_colortools.hh"
@@ -44,6 +45,7 @@
 #include "NOD_texture.h"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "wm_cursors.hh"
 
 #include "IMB_colormanagement.hh"
@@ -1122,11 +1124,17 @@ static bool paint_cursor_context_init(bContext *C,
   if (pcontext.brush->stroke_method == BRUSH_STROKE_CURVE) {
     pcontext.cursor_type = PaintCursorDrawingType::Curve;
   }
-  else if (paint_use_2d_cursor(pcontext.mode)) {
-    pcontext.cursor_type = PaintCursorDrawingType::Cursor2D;
-  }
   else {
-    pcontext.cursor_type = PaintCursorDrawingType::Cursor3D;
+    const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+    if (tref && STREQ(tref->idname, "builtin.curves_edit")) {
+      pcontext.cursor_type = PaintCursorDrawingType::Curve;
+    }
+    else if (paint_use_2d_cursor(pcontext.mode)) {
+      pcontext.cursor_type = PaintCursorDrawingType::Cursor2D;
+    }
+    else {
+      pcontext.cursor_type = PaintCursorDrawingType::Cursor3D;
+    }
   }
 
   pcontext.mval = xy;

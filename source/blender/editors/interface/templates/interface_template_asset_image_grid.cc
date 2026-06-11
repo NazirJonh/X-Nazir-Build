@@ -188,6 +188,9 @@ class ImageAssetGridItem : public PreviewGridItem {
   void init_item_callbacks()
   {
     this->hide_label();
+    /* Activate on release (KM_CLICK), not on press — enables drag-to-scroll without
+     * triggering texture assignment mid-gesture (mobile/pen UX pattern). */
+    this->select_on_click_set();
     this->always_reactivate_on_click();
     this->set_on_activate_fn([this](bContext &C, PreviewGridItem & /*item*/) {
       wmOperatorType *ot = WM_operatortype_find("VIEW3D_OT_image_grid_assign_texture", true);

@@ -244,6 +244,98 @@ int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *re
   return WM_UI_HANDLER_BREAK;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Drag Scroll (pen / tablet LMB drag)
+ * \{ */
+
+struct ImageGridDragScrollState {
+  bool active = false;
+  bool dragging = false;
+  bool is_mask_slot = false;
+  int start_y = 0;
+  int last_y = 0;
+  /* Sub-row pixel remainder, buffered between scroll steps. */
+  float accum_px = 0.0f;
+};
+
+static ImageGridDragScrollState s_image_grid_drag_scroll;
+
+int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegion *region)
+{
+  View3D *v3d = CTX_wm_view3d(C);
+  if (!v3d || !region) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
+    /* Reset on any new LMB press so a missed release never leaves stale state. */
+    s_image_grid_drag_scroll = {};
+    bool is_mask = false;
+    if (image_grid_mouse_over(region, event->xy, &is_mask)) {
+      const ImageGridUIState &state = image_grid_state_get(*v3d, is_mask);
+      if (image_grid_max_scroll_row(state, *v3d) > 0) {
+        s_image_grid_drag_scroll.active = true;
+        s_image_grid_drag_scroll.is_mask_slot = is_mask;
+        s_image_grid_drag_scroll.start_y = event->xy[1];
+        s_image_grid_drag_scroll.last_y = event->xy[1];
+      }
+    }
+    /* Always continue so grid items still receive the press for click-selection. */
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+    if (s_image_grid_drag_scroll.active) {
+      const bool was_dragging = s_image_grid_drag_scroll.dragging;
+      s_image_grid_drag_scroll = {};
+      /* Consume the release after a drag to prevent item activation. */
+      return was_dragging ? WM_UI_HANDLER_BREAK : WM_UI_HANDLER_CONTINUE;
+    }
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  if (event->type == MOUSEMOVE && s_image_grid_drag_scroll.active) {
+    const int dy = event->xy[1] - s_image_grid_drag_scroll.last_y;
+    s_image_grid_drag_scroll.last_y = event->xy[1];
+
+    if (!s_image_grid_drag_scroll.dragging) {
+      /* Enter drag mode once the cursor travels more than 8 px from the press origin. */
+      if (abs(event->xy[1] - s_image_grid_drag_scroll.start_y) >= 8) {
+        s_image_grid_drag_scroll.dragging = true;
+        s_image_grid_drag_scroll.accum_px = 0.0f;
+      }
+    }
+
+    if (s_image_grid_drag_scroll.dragging) {
+      /* Phone UX: drag up (dy > 0 in Blender Y-up coords) → content scrolls up →
+       * scroll_row increases (later rows appear). Positive accum_px → positive row_delta. */
+      const int preview_size = image_grid_preview_size_get(*v3d);
+      const float tile_h = float(ui::preview_tile_size_y_no_label(preview_size));
+
+      s_image_grid_drag_scroll.accum_px += float(dy);
+      const int row_delta = int(s_image_grid_drag_scroll.accum_px / tile_h);
+      if (row_delta != 0) {
+        s_image_grid_drag_scroll.accum_px -= float(row_delta) * tile_h;
+        wmOperatorType *ot = WM_operatortype_find("VIEW3D_OT_image_grid_scroll", true);
+        if (ot) {
+          PointerRNA op_ptr = WM_operator_properties_create_ptr(ot);
+          RNA_int_set(&op_ptr, "delta", row_delta);
+          RNA_boolean_set(&op_ptr, "use_mask_slot", s_image_grid_drag_scroll.is_mask_slot);
+          WM_operator_name_call_ptr(C, ot, wm::OpCallContext::ExecDefault, &op_ptr, nullptr);
+          WM_operator_properties_free(&op_ptr);
+        }
+        ED_region_tag_redraw(region);
+        ED_region_tag_refresh_ui(region);
+      }
+      return WM_UI_HANDLER_BREAK;
+    }
+  }
+
+  return WM_UI_HANDLER_CONTINUE;
+}
+
+/** \} */
+
 }  // namespace blender::ed::view3d
 
 namespace blender::ed::view3d {

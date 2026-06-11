@@ -5591,7 +5591,11 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
 
           if (block_is_popup_any(but->block)) {
             /* TODO(!147047): This should be handled in selection operator. */
-            force_activate_view_item_but(C, data->region, view_item_but, false);
+            /* For select-on-click items, defer activation to KM_CLICK in
+             * handle_view_item_event so drag-to-scroll does not trigger selection on press. */
+            if (!view_item_but->view_item->is_select_on_click()) {
+              force_activate_view_item_but(C, data->region, view_item_but, false);
+            }
             return WM_UI_HANDLER_BREAK;
           }
 
@@ -10793,7 +10797,9 @@ static int handle_view_item_event(bContext *C,
                 view_item_find_mouse_over(region, event->xy));
 
         if (view_but) {
-          if (view_item_supports_drag(*view_but->view_item)) {
+          if (view_item_supports_drag(*view_but->view_item) ||
+              view_but->view_item->is_select_on_click())
+          {
             if (event->val != KM_CLICK) {
               break;
             }
@@ -12527,6 +12533,10 @@ static int handle_menus_recursive(bContext *C,
   }
 
   if (retval == WM_UI_HANDLER_CONTINUE) {
+    retval = ed::view3d::handle_image_grid_drag_scroll_event(C, event, menu->region);
+  }
+
+  if (retval == WM_UI_HANDLER_CONTINUE) {
     retval = handle_region_semi_modal_buttons(C, event, menu->region);
   }
 
@@ -12639,6 +12649,10 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
 
   if (retval == WM_UI_HANDLER_CONTINUE) {
     retval = ed::view3d::handle_image_grid_wheel_event(C, event, region);
+  }
+
+  if (retval == WM_UI_HANDLER_CONTINUE) {
+    retval = ed::view3d::handle_image_grid_drag_scroll_event(C, event, region);
   }
 
   if (retval == WM_UI_HANDLER_CONTINUE) {

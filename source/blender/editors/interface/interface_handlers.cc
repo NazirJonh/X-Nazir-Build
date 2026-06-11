@@ -5609,6 +5609,16 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
            * registered to add custom activate or drag operators (the pose library does this for
            * example). */
           return WM_UI_HANDLER_CONTINUE;
+        case KM_RELEASE:
+          if (block_is_popup_any(but->block) && view_item_but->view_item->is_select_on_click()) {
+            /* Popup handlers always consume events (return `WM_UI_HANDLER_BREAK`), preventing
+             * the WM from synthesizing `KM_CLICK`. Activate on `KM_RELEASE` as a substitute.
+             * Drag-to-scroll releases are filtered upstream by returning `WM_UI_HANDLER_BREAK`
+             * before this handler is reached. */
+            force_activate_view_item_but(C, data->region, view_item_but, false);
+            return WM_UI_HANDLER_BREAK;
+          }
+          break;
         case KM_DBL_CLICK:
           if (view_item_can_rename(*view_item_but->view_item)) {
             data->cancel = true;

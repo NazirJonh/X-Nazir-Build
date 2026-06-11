@@ -106,7 +106,8 @@ static int image_grid_build_item_window_size(const ed::view3d::ImageGridUIState 
   const int tile_h = max_ii(1, style.tile_height);
   const int effective_rows = clamp_i(
       round_fl_to_int(float(state.viewport.grip_pixel_height) / float(tile_h)), 1, 16);
-  const int visible_slots = max_ii(1, effective_rows * safe_cols);
+  /* One extra buffer row so sub-row scrolling can reveal a partial row at the bottom. */
+  const int visible_slots = max_ii(1, (effective_rows + 1) * safe_cols);
   return min_ii(visible_slots, IMAGE_GRID_MAX_ITEMS);
 }
 
@@ -708,6 +709,16 @@ static void build_image_grid(Layout &layout,
   v3d->image_grid_rows = short(effective_rows);
   ed::view3d::image_grid_clamp_scroll_row(state, *v3d);
 
+  /* Sub-row scroll offset within the current row, clamped to [0, tile_h). On the last row there is
+   * nothing below to reveal, so pin it to a whole-row boundary. */
+  if (state.viewport.scroll_row >= ed::view3d::image_grid_max_scroll_row(state, *v3d)) {
+    state.viewport.scroll_offset_px = 0;
+  }
+  else {
+    state.viewport.scroll_offset_px = clamp_i(state.viewport.scroll_offset_px, 0, tile_h - 1);
+  }
+  const int scroll_offset_px = state.viewport.scroll_offset_px;
+
   Layout &outer_row = layout.row(false);
   Layout &grid_layout = outer_row.column(true);
   grid_layout.fixed_size_set(true);
@@ -746,12 +757,26 @@ static void build_image_grid(Layout &layout,
    * first_idx_in_view = 0.  The windowed build_items already pre-selects the items for
    * the current scroll_row, so the helper must start from item_idx 0 — not re-offset
    * by scroll_row*cols again, which would cause a double-skip and show wrong items. */
-  local_v2d.cur.ymin = float(-visible_height);
+  /* Include one buffer row in the visible range so #BuildOnlyVisibleButtonsHelper builds the extra
+   * row that sub-row scrolling reveals at the bottom; #view_scroll_clip_set clips it back to
+   * #visible_height when drawing. */
+  const int build_height = visible_height + tile_h;
+  local_v2d.cur.ymin = float(-build_height);
   local_v2d.cur.ymax = 0.0f;
-  BLI_rcti_init(&local_v2d.mask, 0, grid_width, -visible_height, 0);
+  BLI_rcti_init(&local_v2d.mask, 0, grid_width, -build_height, 0);
+
+  /* Dedicated fixed-height clip window for the grid tiles only (not the overlay scrollbar), so the
+   * buffer row and the partial-row pixel offset are clipped to the visible area. */
+  Layout &grid_view_col = grid_stack.column(true);
+  grid_view_col.fixed_size_set(true);
+  if (panel_width > 0) {
+    grid_view_col.ui_units_x_set(float(panel_width) / float(UI_UNIT_X));
+  }
+  grid_view_col.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
+  grid_view_col.view_scroll_clip_set(visible_height, scroll_offset_px);
 
   GridViewBuilder builder(*block);
-  builder.build_grid_view(C, *grid_view, grid_stack, "", &local_v2d);
+  builder.build_grid_view(C, *grid_view, grid_view_col, "", &local_v2d);
 
   state.viewport.cached_cols = grid_view->cols_per_row();
   ed::view3d::image_grid_clamp_scroll_row(state, *v3d);

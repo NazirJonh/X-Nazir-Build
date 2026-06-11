@@ -144,6 +144,8 @@ bool image_grid_apply_focus_scroll(const bContext &C,
     const int center_offset = effective_rows / 2;
     state.viewport.scroll_row = max_ii(0, target_row - center_offset);
   }
+  /* Land on a whole-row boundary when focusing an asset. */
+  state.viewport.scroll_offset_px = 0;
 
   state.viewport.focus_asset_identifier.clear();
   return true;

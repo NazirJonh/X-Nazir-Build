@@ -518,6 +518,13 @@ enum {
 
   /** Draw icon inverted to indicate a special state. */
   BUT_ICON_INVERT = 1 << 27,
+
+  /**
+   * Button belongs to a clip-scrolled view region (see #Layout::view_scroll_clip_set). When drawn,
+   * #block_draw clips it to #Block::view_scroll_clip_rect and skips it entirely when fully outside,
+   * so partially-scrolled grid rows are cut cleanly instead of overflowing the visible area.
+   */
+  BUT_GRID_SCROLL_CLIP = 1 << 28,
 };
 
 enum class ButPointerType : uint8_t {

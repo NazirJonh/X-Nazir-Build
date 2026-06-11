@@ -1499,6 +1499,13 @@ struct ImageGridViewport {
   /** First visible row (0-based). Session-only; not DNA. */
   int scroll_row = 0;
 
+  /**
+   * Sub-row pixel offset within #scroll_row for smooth scrolling, range [0, tile_height).
+   * The grid is drawn shifted up by this many pixels and clipped to the visible window, so rows
+   * appear/disappear partially instead of snapping a whole row at a time. Session-only.
+   */
+  int scroll_offset_px = 0;
+
   /** Filled after build_grid_view each frame; scrollbar bounds on the *next* frame. */
   int cached_item_count = 0;
   int cached_cols = 0;

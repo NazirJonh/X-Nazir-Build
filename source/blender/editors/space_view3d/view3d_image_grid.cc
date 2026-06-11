@@ -254,8 +254,6 @@ struct ImageGridDragScrollState {
   bool is_mask_slot = false;
   int start_y = 0;
   int last_y = 0;
-  /* Sub-row pixel remainder, buffered between scroll steps. */
-  float accum_px = 0.0f;
 };
 
 static ImageGridDragScrollState s_image_grid_drag_scroll;
@@ -302,31 +300,25 @@ int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegi
       /* Enter drag mode once the cursor travels more than 8 px from the press origin. */
       if (abs(event->xy[1] - s_image_grid_drag_scroll.start_y) >= 8) {
         s_image_grid_drag_scroll.dragging = true;
-        s_image_grid_drag_scroll.accum_px = 0.0f;
       }
     }
 
     if (s_image_grid_drag_scroll.dragging) {
-      /* Phone UX: drag up (dy > 0 in Blender Y-up coords) → content scrolls up →
-       * scroll_row increases (later rows appear). Positive accum_px → positive row_delta. */
+      /* Phone UX: drag up (dy > 0 in Blender Y-up coords) → content scrolls up → later rows
+       * appear. Scroll by sub-row pixel amounts for smooth motion: accumulate into a combined
+       * pixel position and split it back into whole rows plus a sub-row offset. */
+      ImageGridUIState &state = image_grid_state_get(*v3d, s_image_grid_drag_scroll.is_mask_slot);
       const int preview_size = image_grid_preview_size_get(*v3d);
-      const float tile_h = float(ui::preview_tile_size_y_no_label(preview_size));
+      const int tile_h = max_ii(1, ui::preview_tile_size_y_no_label(preview_size));
+      const int max_scroll_px = image_grid_max_scroll_row(state, *v3d) * tile_h;
 
-      s_image_grid_drag_scroll.accum_px += float(dy);
-      const int row_delta = int(s_image_grid_drag_scroll.accum_px / tile_h);
-      if (row_delta != 0) {
-        s_image_grid_drag_scroll.accum_px -= float(row_delta) * tile_h;
-        wmOperatorType *ot = WM_operatortype_find("VIEW3D_OT_image_grid_scroll", true);
-        if (ot) {
-          PointerRNA op_ptr = WM_operator_properties_create_ptr(ot);
-          RNA_int_set(&op_ptr, "delta", row_delta);
-          RNA_boolean_set(&op_ptr, "use_mask_slot", s_image_grid_drag_scroll.is_mask_slot);
-          WM_operator_name_call_ptr(C, ot, wm::OpCallContext::ExecDefault, &op_ptr, nullptr);
-          WM_operator_properties_free(&op_ptr);
-        }
-        ED_region_tag_redraw(region);
-        ED_region_tag_refresh_ui(region);
-      }
+      int total_px = state.viewport.scroll_row * tile_h + state.viewport.scroll_offset_px;
+      total_px = clamp_i(total_px + dy, 0, max_scroll_px);
+      state.viewport.scroll_row = total_px / tile_h;
+      state.viewport.scroll_offset_px = total_px % tile_h;
+
+      ED_region_tag_redraw(region);
+      ED_region_tag_refresh_ui(region);
       return WM_UI_HANDLER_BREAK;
     }
   }
@@ -1354,6 +1346,8 @@ static wmOperatorStatus image_grid_scroll_exec(bContext *C, wmOperator *op)
   image_grid_clamp_scroll_row(state, *v3d);
   state.viewport.scroll_row = clamp_i(
       state.viewport.scroll_row + delta, 0, image_grid_max_scroll_row(state, *v3d));
+  /* Mouse-wheel scrolls in whole rows; align the sub-row offset to the row boundary. */
+  state.viewport.scroll_offset_px = 0;
 
   ARegion *region = CTX_wm_region_popup(C);
   if (!region) {

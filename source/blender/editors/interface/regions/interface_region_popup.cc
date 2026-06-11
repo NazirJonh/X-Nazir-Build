@@ -320,6 +320,12 @@ static void popup_block_position(wmWindow *window, ARegion *butregion, Button *b
     button_update(&bt);
   }
 
+  if (block->view_scroll_clip_enabled) {
+    block_to_window_rctf(
+        butregion, but->block, &block->view_scroll_clip_rect, &block->view_scroll_clip_rect);
+    BLI_rctf_translate(&block->view_scroll_clip_rect, offset_x, offset_y);
+  }
+
   BLI_rctf_translate(&block->rect, offset_x, offset_y);
 
   /* Safety calculus. */
@@ -508,6 +514,7 @@ static void popup_block_clip(wmWindow *window, Block *block)
     bt.rect.xmin += xofs;
     bt.rect.xmax += xofs;
   }
+  block_view_scroll_clip_translate(block, xofs, 0.0f);
 }
 
 void popup_block_scrolltest(Block *block)
@@ -529,6 +536,11 @@ void popup_block_scrolltest(Block *block)
   }
 
   for (Button &bt : block->buttons()) {
+    /* Sub-row scrolled grid tiles can extend past the popup block bounds while still being inside
+     * #view_scroll_clip_rect; keep them drawable (see #block_grid_scroll_clip_contains_button). */
+    if (block_grid_scroll_clip_contains_button(block, &bt)) {
+      continue;
+    }
     /* Tag buttons that are outside boundary */
     if (bt.rect.ymax < block->rect.ymin) {
       bt.flag |= UI_SCROLLED;
@@ -629,6 +641,7 @@ void popup_block_scroll_apply_offset_y(ARegion *region, Block *block, const floa
     bt.rect.ymin += applied_dy;
     bt.rect.ymax += applied_dy;
   }
+  block_view_scroll_clip_offset_apply(block, applied_dy);
 
   popup_block_scrolltest(block);
   ED_region_tag_redraw(region);
@@ -928,12 +941,18 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
     region->winrct.ymax = block->rect.ymax + UI_POPUP_MENU_TOP;
 
     block_translate(block, -region->winrct.xmin, -region->winrct.ymin);
-    /* Popups can change size, fix scroll offset if a panel was closed. */
+    /* Popups can change size, fix scroll offset if a panel was closed. Use the clip-clamped rect so
+     * a sub-row-scrolled image grid's buffer/partial rows (clipped away when drawn) don't inflate
+     * the measured content height and trigger a spurious popup auto-scroll. */
     float ymin = FLT_MAX;
     float ymax = -FLT_MAX;
     for (const Button &bt : block->buttons()) {
-      ymin = min_ff(ymin, bt.rect.ymin);
-      ymax = max_ff(ymax, bt.rect.ymax);
+      rctf bounds_rect;
+      if (!block_grid_scroll_clip_bounds_rect(block, &bt, &bounds_rect)) {
+        continue;
+      }
+      ymin = min_ff(ymin, bounds_rect.ymin);
+      ymax = max_ff(ymax, bounds_rect.ymax);
     }
     const float bounds = block->bounds / block->aspect;
 
@@ -947,6 +966,7 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
         bt.rect.ymin += handle->scrolloffset;
         bt.rect.ymax += handle->scrolloffset;
       }
+      block_view_scroll_clip_offset_apply(block, handle->scrolloffset);
     }
     /* Layout panels are relative to `block->rect.ymax`. Rather than a
      * scroll, this is a offset applied due to the overflow at the top. */

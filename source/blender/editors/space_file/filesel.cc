@@ -1326,6 +1326,10 @@ void ED_fileselect_clear(wmWindowManager *wm, SpaceFile *sfile)
     filelist_readjob_stop(sfile->files, wm);
     filelist_freelib(sfile->files);
     filelist_clear(sfile->files);
+    /* Ensure a new read job starts even when the old job had partially moved entries into the
+     * filelist (entries_num > 0). Without FL_FORCE_RESET, filelist_needs_reading() returns false
+     * and file_refresh() skips starting the read job. Mirrors AssetList::clear(). */
+    filelist_tag_force_reset(sfile->files);
   }
 
   FileSelectParams *params = ED_fileselect_get_active_params(sfile);

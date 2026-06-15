@@ -750,6 +750,22 @@ struct AssetShelfType {
                             ui::Layout &layout);
 
   const AssetWeakReference *(*get_active_asset)(const AssetShelfType *shelf_type);
+  /* Like #get_active_asset but with context (e.g. image grid brush texture slot in popover).
+   * When set, asset shelf grid build prefers this over #get_active_asset. */
+  const AssetWeakReference *(*get_active_asset_from_context)(const AssetShelfType *shelf_type,
+                                                             const bContext *C);
+
+  /**
+   * Called once before the browse popover block is created (e.g. to sync shelf state).
+   * Set by the shelf owner module; avoids a direct dependency from bf_editor_interface on
+   * bf_editor_space_view3d.
+   */
+  void (*pre_popover_invoke)(bContext &C, AssetShelfType *shelf_type);
+  /**
+   * Called on every popover refresh to push layout context members required by the shelf's
+   * activate operator (e.g. brush target pointer for the image-texture shelf).
+   */
+  void (*setup_popover_layout)(bContext &C, ui::Layout &layout);
 
   /** RNA integration. */
   ExtensionRNA rna_ext;

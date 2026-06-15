@@ -57,6 +57,7 @@ set(SRC
   regions/interface_regions.cc
   interface_string_search.cc
   interface_style.cc
+  templates/interface_template_asset_image_grid.cc
   templates/interface_template_asset_shelf_popover.cc
   templates/interface_template_attribute_search.cc
   templates/interface_template_bone_collection_tree.cc
@@ -127,6 +128,7 @@ set(LIB
   PRIVATE bf::depsgraph
   PRIVATE bf::dna
   PRIVATE bf::draw
+  bf_editor_asset
   bf_editor_datafiles
   bf_editor_id_management
   PRIVATE bf::functions

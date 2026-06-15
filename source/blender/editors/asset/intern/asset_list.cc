@@ -508,6 +508,38 @@ static void foreach_visible_asset_browser_showing_library(
   }
 }
 
+void tag_refresh_visible_asset_browsers(const AssetLibraryReference &library_reference,
+                                        const bContext *C)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (!wm) {
+    return;
+  }
+
+  /* Tag each matching area for refresh so file_refresh() re-runs on next draw.
+   * foreach_visible_asset_browser_showing_library iterates const ScrArea and therefore cannot
+   * call ED_area_tag_refresh, so the loop is inlined here with a mutable area reference. */
+  for (const wmWindow &win : wm->windows) {
+    const bScreen *screen = WM_window_get_active_screen(&win);
+    for (ScrArea &area : screen->areabase) {
+      if (area.spacetype != SPACE_FILE) {
+        continue;
+      }
+      const SpaceFile *sfile = reinterpret_cast<const SpaceFile *>(area.spacedata.first);
+      if (sfile->browse_mode != FILE_BROWSE_MODE_ASSETS) {
+        continue;
+      }
+      if (!sfile->asset_params) {
+        continue;
+      }
+      if (sfile->asset_params->asset_library_ref != library_reference) {
+        continue;
+      }
+      ED_area_tag_refresh(&area);
+    }
+  }
+}
+
 void clear(const AssetLibraryReference *library_reference, wmWindowManager *wm)
 {
   AssetList *list = lookup_list(*library_reference);

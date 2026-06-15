@@ -292,6 +292,11 @@ void WM_init(bContext *C, int argc, const char **argv)
   /* For file-system. Called here so can include user preference paths if needed. */
   ED_file_init();
 
+  /* Scan all registered local image libraries and rebuild any stale indexes before
+   * the first asset list read job runs.  No UI notifications needed here since no
+   * windows are open yet; the fresh index will be picked up automatically. */
+  blender::ed::asset::image_library_on_startup();
+
   if (!G.background) {
     wmWindowManager *wm = CTX_wm_manager(C);
     if (wm != nullptr) {

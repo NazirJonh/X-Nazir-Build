@@ -397,6 +397,38 @@ void region_winrct_get_no_margin(const ARegion *region, rcti *r_rect)
 
 /* ******************* block calc ************************* */
 
+void block_view_scroll_clip_translate(Block *block, const float dx, const float dy)
+{
+  if (!block->view_scroll_clip_enabled) {
+    return;
+  }
+  BLI_rctf_translate(&block->view_scroll_clip_rect, dx, dy);
+}
+
+void block_view_scroll_clip_offset_apply(Block *block, const float dy)
+{
+  block_view_scroll_clip_translate(block, 0.0f, dy);
+}
+
+bool block_grid_scroll_clip_contains_button(const Block *block, const Button *but)
+{
+  if (!block->view_scroll_clip_enabled || !(but->drawflag & BUT_GRID_SCROLL_CLIP)) {
+    return false;
+  }
+  return BLI_rctf_isect(&block->view_scroll_clip_rect, &but->rect, nullptr);
+}
+
+bool block_grid_scroll_clip_bounds_rect(const Block *block, const Button *but, rctf *r_rect)
+{
+  if (!block->view_scroll_clip_enabled || !(but->drawflag & BUT_GRID_SCROLL_CLIP)) {
+    *r_rect = but->rect;
+    return true;
+  }
+  /* Clamp the tile to the visible window so the clipped-away buffer/partial rows don't inflate
+   * block bounds (which drive panel size, popup size and popup auto-scroll). */
+  return BLI_rctf_isect(&block->view_scroll_clip_rect, &but->rect, r_rect);
+}
+
 void block_translate(Block *block, float x, float y)
 {
   for (Button &but : block->buttons()) {
@@ -404,6 +436,7 @@ void block_translate(Block *block, float x, float y)
   }
 
   BLI_rctf_translate(&block->rect, x, y);
+  block_view_scroll_clip_translate(block, x, y);
 }
 
 static bool but_is_row_alignment_group(const Button *left, const Button *right)
@@ -500,7 +533,10 @@ void block_bounds_calc(Block *block)
     BLI_rctf_init_minmax(&block->rect);
 
     for (const Button &bt : block->buttons()) {
-      BLI_rctf_union(&block->rect, &bt.rect);
+      rctf bounds_rect;
+      if (block_grid_scroll_clip_bounds_rect(block, &bt, &bounds_rect)) {
+        BLI_rctf_union(&block->rect, &bounds_rect);
+      }
     }
 
     block->rect.xmin -= block->bounds;
@@ -2309,9 +2345,31 @@ void block_draw(const bContext *C, Block *block)
     const int ymin = rect.ymin + ((block->flag & BLOCK_CLIPBOTTOM) ? arrow_size : 0.0f);
     GPU_scissor(rect.xmin, ymin, BLI_rcti_size_x(&rect), ymax - ymin);
   }
+
+  /* Pixel-space clip rect for #BUT_GRID_SCROLL_CLIP buttons (sub-row scrolled grid views).
+   * Intersect it with the current scissor: #GPU_scissor REPLACES (does not intersect) the active
+   * box, and during a partial region redraw that active box is #ARegion::drawrct (see
+   * #wmPartialViewport). Without the intersection the grid tiles could paint outside the area being
+   * repainted this pass, smearing over the (not-redrawn) grip/Browse below the grid. */
+  rcti grid_clip_rect = {};
+  bool grid_clip_has_area = false;
+  if (block->view_scroll_clip_enabled) {
+    grid_clip_rect = rect_to_pixelrect(region, block, &block->view_scroll_clip_rect);
+    rcti cur_scissor;
+    BLI_rcti_init(
+        &cur_scissor, scissor[0], scissor[0] + scissor[2], scissor[1], scissor[1] + scissor[3]);
+    grid_clip_has_area = BLI_rcti_isect(&grid_clip_rect, &cur_scissor, &grid_clip_rect);
+  }
+
   /* widgets */
+  bool grid_scissor_active = false;
   for (Button &but : block->buttons()) {
-    if (but.flag & (UI_HIDDEN | UI_SCROLLED)) {
+    if (but.flag & UI_HIDDEN) {
+      continue;
+    }
+    /* Popup #popup_block_scrolltest can mark sub-row scrolled grid tiles #UI_SCROLLED when they
+     * extend past #Block::rect even though they are still inside #view_scroll_clip_rect. */
+    if ((but.flag & UI_SCROLLED) && !block_grid_scroll_clip_contains_button(block, &but)) {
       continue;
     }
 
@@ -2319,6 +2377,27 @@ void block_draw(const bContext *C, Block *block)
     /* Optimization: Don't draw buttons that are not visible (outside view bounds). */
     if (!but_pixelrect_in_view(region, &rect)) {
       continue;
+    }
+
+    /* Grid-scroll-clipped buttons: skip rows fully scrolled out of the visible window, and clip
+     * the partially-visible rows to it so the sub-row scroll offset cuts them cleanly. */
+    const bool grid_clipped = block->view_scroll_clip_enabled &&
+                              (but.drawflag & BUT_GRID_SCROLL_CLIP);
+    if (grid_clipped) {
+      /* Nothing of the clip window is inside the current (partial) scissor, or this tile row is
+       * fully outside the window: skip it entirely. */
+      if (!grid_clip_has_area || rect.ymax <= grid_clip_rect.ymin ||
+          rect.ymin >= grid_clip_rect.ymax)
+      {
+        continue;
+      }
+    }
+
+    if (grid_scissor_active && !grid_clipped) {
+      widgetbase_draw_cache_flush();
+      BLF_batch_draw_flush();
+      GPU_scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
+      grid_scissor_active = false;
     }
 
     /* Don't draw buttons that are wider than enclosing panel. #150173 */
@@ -2335,8 +2414,28 @@ void block_draw(const bContext *C, Block *block)
     /* XXX: figure out why invalid coordinates happen when closing render window */
     /* and material preview is redrawn in main window (temp fix for bug #23848) */
     if (rect.xmin < rect.xmax && rect.ymin < rect.ymax) {
-      draw_button(C, region, &style, &but, &rect);
+      if (grid_clipped) {
+        if (!grid_scissor_active) {
+          widgetbase_draw_cache_flush();
+          BLF_batch_draw_flush();
+          GPU_scissor(grid_clip_rect.xmin,
+                      grid_clip_rect.ymin,
+                      BLI_rcti_size_x(&grid_clip_rect),
+                      BLI_rcti_size_y(&grid_clip_rect));
+          grid_scissor_active = true;
+        }
+        draw_button(C, region, &style, &but, &rect);
+      }
+      else {
+        draw_button(C, region, &style, &but, &rect);
+      }
     }
+  }
+
+  if (grid_scissor_active) {
+    widgetbase_draw_cache_flush();
+    BLF_batch_draw_flush();
+    GPU_scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
   }
 
   widgetbase_draw_cache_end();
@@ -3916,6 +4015,8 @@ Block *block_begin(const bContext *C,
   block->active = true;
   block->emboss = emboss;
   block->evil_C = (void *)C; /* XXX */
+  block->view_scroll_clip_enabled = false;
+  block->view_scroll_clip_rect = {};
 
   if (scene) {
     /* store display device name, don't lookup for transformations yet

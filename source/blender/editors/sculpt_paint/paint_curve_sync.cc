@@ -81,10 +81,12 @@ void paintcurve_build_screen_points(const PaintCurve *pc,
     for (const int j : IndexRange(3)) {
       float3 obj_co;
       if (j == 0) {
-        obj_co = handles_left.value()[i];
+        /* Use handle if available, otherwise fall back to point position. */
+        obj_co = handles_left.has_value() ? handles_left.value()[i] : positions[i];
       }
       else if (j == 2) {
-        obj_co = handles_right.value()[i];
+        /* Use handle if available, otherwise fall back to point position. */
+        obj_co = handles_right.has_value() ? handles_right.value()[i] : positions[i];
       }
       else {
         obj_co = positions[i];

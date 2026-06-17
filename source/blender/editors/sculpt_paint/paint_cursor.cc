@@ -16,6 +16,7 @@
 #include "BLI_math_axis_angle.hh"
 #include "BLI_math_color.h"
 #include "BLI_math_rotation.h"
+#include "BLI_offset_indices.hh"
 #include "BLI_rect.h"
 #include "BLI_task.h"
 #include "BLI_utildefines.h"
@@ -906,6 +907,65 @@ BLI_INLINE void draw_control_point(uint pos,
   immEnd();
 }
 
+/** Check if radius handle should be displayed for a given point. */
+static bool should_show_radius_handle(const Sculpt *sculpt,
+                                      const PaintCurve *pc,
+                                      const Span<PaintCurvePoint> points,
+                                      const int point_index)
+{
+  if (!sculpt || !sculpt->paint_curve_show_radius_handles) {
+    return false;
+  }
+
+  const int8_t display_mode = sculpt->paint_curve_radius_display_mode;
+
+  /* Show all radius handles. */
+  if (display_mode == SCULPT_PAINT_CURVE_RADIUS_ALL) {
+    return true;
+  }
+
+  /* Show only for splines with selected points. */
+  if (display_mode == SCULPT_PAINT_CURVE_RADIUS_SELECT) {
+    /* Get the spline index for the current point. */
+    const int curve_index = paintcurve_curve_of_point(pc, point_index);
+    if (curve_index < 0) {
+      return false;
+    }
+
+    /* Get the range of points in this spline. */
+    const bke::CurvesGeometry &geom = pc->geometry.wrap();
+    const OffsetIndices<int> points_by_curve = geom.points_by_curve();
+    const IndexRange curve_points = points_by_curve[curve_index];
+
+    /* Check if any point in THIS spline is selected. */
+    for (const int i : curve_points) {
+      const PaintCurvePoint &pcp = points[i];
+      if (pcp.bez.f1 || pcp.bez.f2 || pcp.bez.f3) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /* Show only at tips (start and end points of each spline). */
+  if (display_mode == SCULPT_PAINT_CURVE_RADIUS_TIPS) {
+    const int curve_index = paintcurve_curve_of_point(pc, point_index);
+    if (curve_index < 0) {
+      return false;
+    }
+
+    /* Get the range of points in this spline. */
+    const bke::CurvesGeometry &geom = pc->geometry.wrap();
+    const OffsetIndices<int> points_by_curve = geom.points_by_curve();
+    const IndexRange curve_points = points_by_curve[curve_index];
+
+    /* Check if point is the first or last point of the spline. */
+    return (point_index == curve_points.first() || point_index == curve_points.last());
+  }
+
+  return false;
+}
+
 BLI_INLINE void draw_radius_handle(uint pos,
                                    const float col[4],
                                    const PaintCurveRadiusHandleScreen &handle)
@@ -974,7 +1034,8 @@ static void paint_draw_curve_cursor(Brush *brush,
                                     ViewContext *vc,
                                     const int2 mval,
                                     const bool is_curve_edit_tool,
-                                    const Object *source_object)
+                                    const Object *source_object,
+                                    const Sculpt *sculpt)
 {
   GPU_matrix_push();
   GPU_matrix_translate_2f(vc->region->winrct.xmin, vc->region->winrct.ymin);
@@ -1105,9 +1166,11 @@ static void paint_draw_curve_cursor(Brush *brush,
 
     if (pc->show_radius_handles) {
       for (int i = 0; i < int(temp_points.size()); i++) {
-        PaintCurveRadiusHandleScreen handle;
-        paintcurve_radius_handle_screen_get(pc, cp, i, &handle);
-        draw_radius_handle(pos, radius_col, handle);
+        if (should_show_radius_handle(sculpt, pc, temp_points, i)) {
+          PaintCurveRadiusHandleScreen handle;
+          paintcurve_radius_handle_screen_get(pc, cp, i, &handle);
+          draw_radius_handle(pos, radius_col, handle);
+        }
       }
     }
 
@@ -1491,13 +1554,18 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
       const bToolRef *tref = WM_toolsystem_ref_from_context(C);
       const bool is_curve_edit_tool = tref && STREQ(tref->idname, "builtin.curves_edit");
       Scene *cursor_scene = pcontext.vc.scene;
-      const Object *source_object = (cursor_scene && cursor_scene->toolsettings &&
-                                     cursor_scene->toolsettings->sculpt) ?
-                                        cursor_scene->toolsettings->sculpt
-                                            ->paint_curve_source_object :
-                                        nullptr;
-      paint_draw_curve_cursor(
-          pcontext.brush, &pcontext.vc, pcontext.mval, is_curve_edit_tool, source_object);
+      const Sculpt *sculpt_settings = (cursor_scene && cursor_scene->toolsettings &&
+                                       cursor_scene->toolsettings->sculpt) ?
+                                          cursor_scene->toolsettings->sculpt :
+                                          nullptr;
+      const Object *source_object = sculpt_settings ? sculpt_settings->paint_curve_source_object :
+                                                      nullptr;
+      paint_draw_curve_cursor(pcontext.brush,
+                             &pcontext.vc,
+                             pcontext.mval,
+                             is_curve_edit_tool,
+                             source_object,
+                             sculpt_settings);
       break;
     }
     case PaintCursorDrawingType::Cursor2D:

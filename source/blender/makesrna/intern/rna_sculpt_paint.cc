@@ -1336,6 +1336,38 @@ static void rna_def_sculpt(BlenderRNA *brna)
       "Sync to Source Curve",
       "Live update of the picked source object while editing the paint curve");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "paint_curve_show_radius_handles", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "paint_curve_show_radius_handles", 0);
+  RNA_def_property_ui_text(
+      prop, "Show Radius Handles", "Display radius handles for paint curve points");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  static const EnumPropertyItem radius_display_items[] = {
+      {SCULPT_PAINT_CURVE_RADIUS_ALL,
+       "ALL",
+       0,
+       "All",
+       "Show radius handles for all points"},
+      {SCULPT_PAINT_CURVE_RADIUS_SELECT,
+       "SELECT",
+       0,
+       "Selected",
+       "Show radius handles only for curves with selected points"},
+      {SCULPT_PAINT_CURVE_RADIUS_TIPS,
+       "TIPS",
+       0,
+       "Tips",
+       "Show radius handles only at start and end points"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "paint_curve_radius_display_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "paint_curve_radius_display_mode");
+  RNA_def_property_enum_items(prop, radius_display_items);
+  RNA_def_property_ui_text(
+      prop, "Radius Display Mode", "Which radius handles to display");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 }
 
 static void rna_def_uv_sculpt(BlenderRNA *brna)

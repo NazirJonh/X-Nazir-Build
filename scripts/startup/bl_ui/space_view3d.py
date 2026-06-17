@@ -272,6 +272,12 @@ class _draw_tool_settings_context_mode:
                 row = layout.row()
                 row.scale_x = 2.0
                 row.prop(sculpt, "paint_curve_source_object", text="Curve")
+                
+                # Add Overlay Curve popover button
+                layout.popover(
+                    panel="VIEW3D_PT_overlay_sculpt_curve_edit",
+                    text="Overlay Curve"
+                )
             return False
 
         if not tool.use_brushes:
@@ -7647,6 +7653,45 @@ class VIEW3D_PT_overlay_sculpt_curves(Panel):
         subrow.prop(overlay, "sculpt_curves_cage_opacity", text="Cage Opacity")
 
 
+class VIEW3D_PT_overlay_sculpt_curve_edit(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_label = "Overlay Curve"
+    bl_ui_units_x = 10
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode != 'SCULPT':
+            return False
+        tool_settings = context.tool_settings
+        if tool_settings is None:
+            return False
+        # Check if Curve Edit tool is active
+        tool = context.workspace.tools.from_space_view3d_mode('SCULPT', create=False)
+        return tool is not None and tool.idname == "builtin.curves_edit"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = False
+        
+        tool_settings = context.tool_settings
+        sculpt = tool_settings.sculpt
+
+        col = layout.column(align=True)
+        
+        # Checkbox with label "Show Radius Handles"
+        row = col.row(align=True)
+        row.prop(sculpt, "paint_curve_show_radius_handles", text="Show Radius Handles")
+        
+        # Display mode buttons - always visible but disabled when checkbox is off
+        row = col.row(align=True)
+        row.enabled = sculpt.paint_curve_show_radius_handles
+        row.prop_enum(sculpt, "paint_curve_radius_display_mode", 'ALL')
+        row.prop_enum(sculpt, "paint_curve_radius_display_mode", 'SELECT')
+        row.prop_enum(sculpt, "paint_curve_radius_display_mode", 'TIPS')
+
+
 class VIEW3D_PT_overlay_bones(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
@@ -9518,6 +9563,7 @@ classes = (
     VIEW3D_PT_overlay_bones,
     VIEW3D_PT_overlay_sculpt,
     VIEW3D_PT_overlay_sculpt_curves,
+    VIEW3D_PT_overlay_sculpt_curve_edit,
     VIEW3D_PT_snapping,
     VIEW3D_PT_sculpt_snapping,
     VIEW3D_PT_proportional_edit,

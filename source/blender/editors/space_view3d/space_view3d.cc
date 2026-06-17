@@ -47,6 +47,7 @@
 #include "ED_info.hh"
 #include "ED_object.hh"
 #include "ED_outliner.hh"
+#include "ED_paint.hh"
 #include "ED_render.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
@@ -1629,6 +1630,7 @@ void ED_spacetype_view3d()
   art->message_subscribe = view3d_main_region_message_subscribe;
   art->cursor = view3d_main_region_cursor;
   art->lock = REGION_DRAW_LOCK_ALL;
+  art->draw_overlay = ED_paint_draw_curve_view3d_overlay;
   BLI_addhead(&st->regiontypes, art);
 
   /* regions: list-view/buttons */

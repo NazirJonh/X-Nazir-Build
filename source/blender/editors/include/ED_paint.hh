@@ -15,6 +15,7 @@
 namespace blender {
 
 enum class PaintMode : int8_t;
+struct ARegion;
 struct bContext;
 struct bToolRef;
 struct Depsgraph;
@@ -141,6 +142,15 @@ void ED_paintcurve_flush_radius_transform(bContext *C, struct PaintCurve *pc);
  * Does nothing when no source object is set or sync is disabled.
  */
 bool ED_paintcurve_sync_to_source(bContext *C, struct PaintCurve *pc);
+
+/* `paint_cursor.cc` */
+
+/**
+ * Draw paint-curve edit handles in the 3D viewport overlay pass.
+ * Registered as #ARegionType::draw_overlay for the 3D viewport window region so that
+ * handles remain visible even when the mouse is over a header or other UI element.
+ */
+void ED_paint_draw_curve_view3d_overlay(const bContext *C, ARegion *region);
 
 /* `paint_canvas.cc` */
 

@@ -1610,4 +1610,67 @@ void ED_paint_cursor_start(Paint *paint, bool (*poll)(bContext *C))
   BKE_paint_invalidate_overlay_all();
 }
 
+void ED_paint_draw_curve_view3d_overlay(const bContext *C, ARegion *region)
+{
+  /* Only draw when the Curve Edit tool is active in sculpt mode. */
+  bContext *nc = const_cast<bContext *>(C);
+
+  const bToolRef *tref = WM_toolsystem_ref_from_context(nc);
+  if (!tref || !STREQ(tref->idname, "builtin.curves_edit")) {
+    return;
+  }
+
+  /* The paint cursor already handles this region when it is the active (mouse-under) region.
+   * Avoid drawing curve handles twice. */
+  const bScreen *screen = CTX_wm_screen(nc);
+  if (screen && region == screen->active_region) {
+    return;
+  }
+
+  Paint *paint = BKE_paint_get_active_from_context(nc);
+  if (!paint) {
+    return;
+  }
+  Brush *brush = BKE_paint_brush(paint);
+  if (!brush) {
+    return;
+  }
+
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(nc);
+  ViewContext vc = ED_view3d_viewcontext_init(nc, depsgraph);
+  if (!vc.rv3d || !vc.region) {
+    return;
+  }
+
+  Scene *scene = CTX_data_scene(nc);
+  const Sculpt *sculpt_settings = (scene && scene->toolsettings && scene->toolsettings->sculpt) ?
+                                      scene->toolsettings->sculpt :
+                                      nullptr;
+  const Object *source_object = sculpt_settings ? sculpt_settings->paint_curve_source_object :
+                                                   nullptr;
+
+  /* Mouse position in window coordinates. When the mouse is outside the viewport
+   * (e.g. over a header), no curve will pass the hover threshold — which is correct. */
+  const wmWindow *win = CTX_wm_window(nc);
+  const int *cursor_xy = win->runtime->eventstate->xy;
+  const int2 mval = int2(cursor_xy[0], cursor_xy[1]);
+
+  /* The overlay system called wmViewport(&region->winrct), placing us in region-local
+   * pixel coordinates. Switch back to full-window pixel space so that
+   * paint_draw_curve_cursor can apply its own region-offset translate. */
+  wmWindowViewport(win);
+
+  /* Re-apply the region scissor so handles don't bleed outside the 3D viewport. */
+  GPU_scissor_test(true);
+  GPU_scissor(region->winrct.xmin,
+              region->winrct.ymin,
+              BLI_rcti_size_x(&region->winrct) + 1,
+              BLI_rcti_size_y(&region->winrct) + 1);
+
+  ed::sculpt_paint::paint_draw_curve_cursor(
+      brush, &vc, mval, true, source_object, sculpt_settings);
+
+  GPU_scissor_test(false);
+}
+
 }  // namespace blender

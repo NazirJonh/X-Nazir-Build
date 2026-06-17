@@ -690,6 +690,108 @@ static void uilist_filter_items(uiList *ui_list,
   RNA_parameter_list_free(&list);
 }
 
+/* UIGrid */
+
+static bool rna_UIGrid_unregister(Main *bmain, StructRNA *type)
+{
+  uiGridType *ugt = static_cast<uiGridType *>(RNA_struct_blender_type_get(type));
+
+  if (!ugt) {
+    return false;
+  }
+
+  RNA_struct_free_extension(type, &ugt->rna_ext);
+  RNA_struct_free(&RNA_blender_rna_get(), type);
+
+  WM_uigridtype_remove_ptr(bmain, ugt);
+
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  return true;
+}
+
+static StructRNA *rna_UIGrid_register(Main *bmain,
+                                      ReportList *reports,
+                                      void *data,
+                                      const char *identifier,
+                                      StructValidateFunc validate,
+                                      StructCallbackFunc call,
+                                      StructFreeFunc free)
+{
+  const char *error_prefix = "Registering uigrid class:";
+  uiGridType *ugt;
+  uiGridType dummy_ugt = {};
+  uiGrid dummy_ug = {};
+  bool have_function[3];
+
+  dummy_ug.type = &dummy_ugt;
+  PointerRNA dummy_ug_ptr = RNA_pointer_create_discrete(nullptr, RNA_UIGrid, &dummy_ug);
+
+  if (validate(&dummy_ug_ptr, data, have_function) != 0) {
+    return nullptr;
+  }
+
+  if (!have_function[0] || !have_function[1]) {
+    BKE_report(reports, RPT_ERROR, "UIGrid classes must define get_item_count and get_item");
+    return nullptr;
+  }
+
+  if (strlen(identifier) >= sizeof(dummy_ugt.idname)) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "%s '%s' is too long, maximum length is %d",
+                error_prefix,
+                identifier,
+                int(sizeof(dummy_ugt.idname)));
+    return nullptr;
+  }
+
+  ugt = WM_uigridtype_find(dummy_ugt.idname, true);
+  if (ugt) {
+    BKE_reportf(reports,
+                RPT_INFO,
+                "%s '%s', bl_idname '%s' has been registered before, unregistering previous",
+                error_prefix,
+                identifier,
+                dummy_ugt.idname);
+
+    StructRNA *srna = ugt->rna_ext.srna;
+    if (!(srna && rna_UIGrid_unregister(bmain, srna))) {
+      BKE_reportf(reports,
+                  RPT_ERROR,
+                  "%s '%s', bl_idname '%s' %s",
+                  error_prefix,
+                  identifier,
+                  dummy_ugt.idname,
+                  srna ? "is built-in" : "could not be unregistered");
+      return nullptr;
+    }
+  }
+  if (!RNA_struct_available_or_report(reports, dummy_ugt.idname)) {
+    return nullptr;
+  }
+
+  ugt = MEM_new_zeroed<uiGridType>("python uigrid");
+  memcpy(ugt, &dummy_ugt, sizeof(dummy_ugt));
+
+  ugt->rna_ext.srna = RNA_def_struct_ptr(&RNA_blender_rna_get(), ugt->idname, RNA_UIGrid);
+  ugt->rna_ext.data = data;
+  ugt->rna_ext.call = call;
+  ugt->rna_ext.free = free;
+  RNA_struct_blender_type_set(ugt->rna_ext.srna, ugt);
+
+  WM_uigridtype_add(ugt);
+
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+
+  return ugt->rna_ext.srna;
+}
+
+static StructRNA *rna_UIGrid_refine(PointerRNA *ptr)
+{
+  uiGrid *grid = static_cast<uiGrid *>(ptr->data);
+  return (grid->type && grid->type->rna_ext.srna) ? grid->type->rna_ext.srna : RNA_UIGrid;
+}
+
 static bool rna_UIList_unregister(Main *bmain, StructRNA *type)
 {
   uiListType *ult = static_cast<uiListType *>(RNA_struct_blender_type_get(type));
@@ -2184,6 +2286,85 @@ static void rna_def_uilist(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
 }
 
+static void rna_def_uigrid(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+  PropertyRNA *parm;
+  FunctionRNA *func;
+
+  srna = RNA_def_struct(brna, "UIGrid", nullptr);
+  RNA_def_struct_ui_text(srna, "UIGrid", "Python item provider for reusable grid views");
+  RNA_def_struct_sdna(srna, "uiGrid");
+  RNA_def_struct_refine_func(srna, "rna_UIGrid_refine");
+  RNA_def_struct_register_funcs(srna, "rna_UIGrid_register", "rna_UIGrid_unregister", nullptr);
+  RNA_def_struct_flag(srna, STRUCT_NO_DATABLOCK_IDPROPERTIES | STRUCT_PUBLIC_NAMESPACE_INHERIT);
+
+  RNA_define_verify_sdna(false); /* uiGrid is runtime-only, not in file DNA */
+
+  prop = RNA_def_property(srna, "bl_idname", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "type->idname");
+  RNA_def_property_flag(prop, PROP_REGISTER);
+  RNA_def_property_ui_text(prop, "ID Name", "Unique identifier for this grid type");
+
+  prop = RNA_def_property(srna, "bl_activate_operator", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "type->activate_operator");
+  RNA_def_property_flag(prop, PROP_REGISTER_OPTIONAL);
+  RNA_def_property_ui_text(prop, "Activate Operator", "Operator run when an item is activated");
+
+  prop = RNA_def_property(srna, "bl_drag_operator", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "type->drag_operator");
+  RNA_def_property_flag(prop, PROP_REGISTER_OPTIONAL);
+  RNA_def_property_ui_text(prop, "Drag Operator", "Operator run when an item is dragged");
+
+  func = RNA_def_function(srna, "get_item_count", nullptr);
+  RNA_def_function_ui_description(
+      func, "Return the total number of items to display in the grid");
+  RNA_def_function_flag(func, FUNC_REGISTER);
+  parm = RNA_def_pointer(func, "context", "Context", "", "The context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(
+      func, "data", "AnyType", "", "Data from which to take the collection property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(
+      func, "propname", nullptr, 0, "", "Identifier of the collection property on data");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_int(func, "result", 0, 0, INT_MAX, "", "", 0, INT_MAX));
+
+  func = RNA_def_function(srna, "get_item", nullptr);
+  RNA_def_function_ui_description(
+      func, "Return display data for the item at the given index (visible window only)");
+  RNA_def_function_flag(func, FUNC_REGISTER);
+  parm = RNA_def_pointer(func, "context", "Context", "", "The context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(
+      func, "data", "AnyType", "", "Data from which to take the collection property");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(
+      func, "propname", nullptr, 0, "", "Identifier of the collection property on data");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "index", 0, 0, INT_MAX, "", "Item index", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "identifier", nullptr, 0, "", "Stable item identifier");
+  RNA_def_function_output(func, parm);
+  parm = RNA_def_string(func, "label", nullptr, 0, "", "Item label");
+  RNA_def_function_output(func, parm);
+  parm = RNA_def_int(func, "icon", 0, 0, INT_MAX, "", "Preview icon", 0, INT_MAX);
+  RNA_def_function_output(func, parm);
+  parm = RNA_def_int(func, "badge_icon", 0, 0, INT_MAX, "", "Optional badge icon", 0, INT_MAX);
+  RNA_def_function_output(func, parm);
+
+  func = RNA_def_function(srna, "draw_context_menu", nullptr);
+  RNA_def_function_ui_description(func, "Draw the right-click context menu for an item");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL);
+  parm = RNA_def_pointer(func, "context", "Context", "", "The context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "identifier", nullptr, 0, "", "Item identifier");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "layout", "UILayout", "", "Layout to draw into");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+}
+
 static void rna_def_header(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -2609,17 +2790,48 @@ static void rna_def_ui_textbox_state(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
 }
 
+static void rna_def_grid_view_settings(BlenderRNA *brna)
+{
+  StructRNA *srna = RNA_def_struct(brna, "GridViewSettings", "PropertyGroup");
+  RNA_def_struct_ui_text(
+      srna, "Grid View Settings", "Persistent settings for a reusable grid view");
+
+  PropertyRNA *prop;
+
+  /* Asset library shown in the grid — same enum + dynamic itemf as AssetShelf. */
+  prop = RNA_def_property(srna, "asset_library_reference", PROP_ENUM, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_enum_items(prop, rna_enum_asset_library_type_items);
+  RNA_def_property_enum_funcs(prop, nullptr, nullptr, "rna_asset_library_ui_reference_itemf");
+  RNA_def_property_ui_text(prop, "Asset Library", "Asset library shown in the grid");
+
+  /* Preview tile size in pixels (32..256). */
+  prop = RNA_def_property(srna, "preview_size", PROP_INT, PROP_PIXEL);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_range(prop, 32, 256);
+  RNA_def_property_int_default(prop, 96);
+  RNA_def_property_ui_text(prop, "Preview Size", "Preview tile size in pixels");
+
+  /* Comma-separated catalog paths to show; empty string means show all. */
+  prop = RNA_def_property(srna, "enabled_catalogs", PROP_STRING, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(
+      prop, "Enabled Catalogs", "Comma-separated catalog paths shown (empty = all)");
+}
+
 void RNA_def_ui(BlenderRNA *brna)
 {
   rna_def_ui_layout(brna);
   rna_def_panel(brna);
   rna_def_uilist(brna);
+  rna_def_uigrid(brna);
   rna_def_header(brna);
   rna_def_menu(brna);
   rna_def_asset_shelf(brna);
   rna_def_file_handler(brna);
   rna_def_layout_panel_state(brna);
   rna_def_ui_textbox_state(brna);
+  rna_def_grid_view_settings(brna);
 }
 
 }  // namespace blender

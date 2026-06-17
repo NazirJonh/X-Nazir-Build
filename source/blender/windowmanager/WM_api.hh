@@ -52,6 +52,7 @@ struct ViewLayer;
 struct bContext;
 struct rcti;
 struct uiListType;
+struct uiGridType;
 struct WorkSpace;
 struct WorkSpaceLayout;
 struct wmDrag;
@@ -1518,6 +1519,14 @@ void WM_uilisttype_to_full_list_id(const uiListType *ult,
  * \note Assumes `uiList.list_id` was set using #WM_uilisttype_to_full_list_id()!
  */
 const char *WM_uilisttype_list_id_get(const uiListType *ult, uiList *list);
+
+/* `wm_uigrid_type.cc` */
+
+void WM_uigridtype_init();
+uiGridType *WM_uigridtype_find(StringRef idname, bool quiet);
+bool WM_uigridtype_add(uiGridType *ugt);
+void WM_uigridtype_remove_ptr(Main *bmain, uiGridType *ugt);
+void WM_uigridtype_free();
 
 /* `wm_menu_type.cc` */
 

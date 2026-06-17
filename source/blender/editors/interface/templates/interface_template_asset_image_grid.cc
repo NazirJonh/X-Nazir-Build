@@ -51,6 +51,7 @@
 #include "UI_resources.hh"
 #include "UI_view2d.hh"
 
+#include "interface_grid_view.hh"
 #include "interface_intern.hh"
 
 #include "WM_api.hh"
@@ -585,6 +586,102 @@ class ImageAssetGridView : public AbstractGridView {
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name View3D-backed GridStateAccess adapter (Stage 2a)
+ * \{ */
+
+/** Forwards #GridStateAccess reads/writes to #ImageGridUIState and #View3D. Callback factories
+ * re-derive state from #bContext so no dangling references when lambdas fire after the frame. */
+class View3DGridStateAccess : public GridStateAccess {
+  ed::view3d::ImageGridUIState &state_;
+  View3D &v3d_;
+  std::string idname_;
+  bool is_mask_slot_;
+
+ public:
+  View3DGridStateAccess(ed::view3d::ImageGridUIState &state,
+                        View3D &v3d,
+                        std::string idname,
+                        const bool is_mask_slot)
+      : state_(state),
+        v3d_(v3d),
+        idname_(std::move(idname)),
+        is_mask_slot_(is_mask_slot)
+  {
+  }
+
+  int grip_pixel_height() const override { return state_.viewport.grip_pixel_height; }
+  void grip_pixel_height_set(const int value) override
+  {
+    state_.viewport.grip_pixel_height = value;
+  }
+  int *grip_pixel_height_ptr() override { return &state_.viewport.grip_pixel_height; }
+
+  int scroll_row() const override { return state_.viewport.scroll_row; }
+  void scroll_row_set(const int value) override { state_.viewport.scroll_row = value; }
+  int *scroll_row_ptr() override { return &state_.viewport.scroll_row; }
+
+  int scroll_offset_px() const override { return state_.viewport.scroll_offset_px; }
+  void scroll_offset_px_set(const int value) override
+  {
+    state_.viewport.scroll_offset_px = value;
+  }
+
+  int cached_item_count() const override { return state_.viewport.cached_item_count; }
+  void cached_item_count_set(const int value) override
+  {
+    state_.viewport.cached_item_count = value;
+  }
+  int cached_cols() const override { return state_.viewport.cached_cols; }
+  void cached_cols_set(const int value) override { state_.viewport.cached_cols = value; }
+
+  void store_scroll_for_layout(const int cols, const int rows) override
+  {
+    ed::view3d::image_grid_viewport_store_scroll_for_layout(state_.viewport, cols, rows);
+  }
+  void focus_clear() override { ed::view3d::image_grid_focus_clear(state_.viewport); }
+
+  int effective_rows_dna_fallback() const override
+  {
+    return ed::view3d::image_grid_effective_rows(v3d_);
+  }
+
+  std::function<void(bContext &)> make_scroll_widget_fn(const int store_cols,
+                                                        const int store_rows) const override
+  {
+    const bool is_mask_slot = is_mask_slot_;
+    return [is_mask_slot, store_cols, store_rows](bContext &C) {
+      View3D *v3d = CTX_wm_view3d(&C);
+      if (!v3d) {
+        return;
+      }
+      ed::view3d::ImageGridUIState &st = ed::view3d::image_grid_state_get(*v3d, is_mask_slot);
+      st.viewport.scroll_offset_px = 0;
+      ed::view3d::image_grid_focus_clear(st.viewport);
+      ed::view3d::image_grid_viewport_store_scroll_for_layout(st.viewport, store_cols, store_rows);
+      if (ARegion *region = CTX_wm_region(&C)) {
+        ED_region_tag_redraw(region);
+        ED_region_tag_refresh_ui(region);
+      }
+    };
+  }
+
+  std::function<void(bContext &)> make_grip_change_fn() const override
+  {
+    return [](bContext &C) {
+      WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+      if (ARegion *region = CTX_wm_region(&C)) {
+        ED_region_tag_redraw(region);
+        ED_region_tag_refresh_ui(region);
+      }
+    };
+  }
+
+  StringRef grid_idname() const override { return idname_; }
+};
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Template UI
  * \{ */
 
@@ -670,33 +767,26 @@ static void build_image_grid(Layout &layout,
   const int cols_est = (panel_width > 0) ? max_ii(1, panel_width / max_ii(tile_w, 1)) :
                                            max_ii(1, state.viewport.cached_cols);
 
-  /* Publish this context's column count immediately. #cached_cols is shared between the N-Panel
-   * and the texture popover; the scroll clamps below (#image_grid_clamp_scroll_row /
-   * #image_grid_max_scroll_row) rely on it. Without this, the first draw of a freshly opened
-   * popover would clamp a just-centered #scroll_row against the *other* grid's column count and,
-   * when the two grids have a different number of items per row, land on the wrong row (the
-   * focused asset would be scrolled out of view). It is reaffirmed from the actual
-   * #cols_per_row() after the build below. */
+  /* Publish this context's column count immediately so the focus/clamp helpers below use the
+   * column count for *this* panel, not the other grid's count from the previous frame. */
   state.viewport.cached_cols = cols_est;
 
-  /* Pre-compute the number of visible rows for centering in image_grid_apply_focus_scroll.
-   * This must happen BEFORE image_grid_rows is updated (line below), because on the first
-   * frame image_grid_rows == 0 (DNA default) and would give center_offset = 0 (no centering).
-   * We derive effective_rows from grip_pixel_height (set from the previous frame) if available,
-   * otherwise fall back to image_grid_effective_rows which safely clamps 0 → 1. */
+  /* Pre-compute visible rows for image_grid_apply_focus_scroll.
+   * Derived from grip_pixel_height (previous frame) when available; falls back to DNA rows on
+   * the first frame so focus centering starts from a sensible offset instead of row 0. */
   const int tile_h_hint = ui::preview_tile_size_y_no_label(preview_size);
   const int effective_rows_hint = (state.viewport.grip_pixel_height >= tile_h_hint) ?
-                                      clamp_i(int(divide_ceil_u(uint(state.viewport.grip_pixel_height),
-                                                                uint(tile_h_hint))),
+                                      clamp_i(int(divide_ceil_u(
+                                                  uint(state.viewport.grip_pixel_height),
+                                                  uint(tile_h_hint))),
                                               1,
                                               16) :
                                       ed::view3d::image_grid_effective_rows(*v3d);
 
-  /* Restore this (cols, rows) layout's saved scroll before applying focus so the "already visible"
-   * check in image_grid_apply_focus_scroll sees this layout's own current position. */
+  /* Restore this (cols, rows) layout's saved scroll before applying focus so the "already
+   * visible" check in image_grid_apply_focus_scroll sees this layout's own current position. */
   ed::view3d::image_grid_viewport_restore_scroll_for_layout(
       state.viewport, cols_est, effective_rows_hint);
-
   ed::view3d::image_grid_apply_focus_scroll(C, *v3d, state, cols_est, effective_rows_hint);
 
   auto view_unique = std::make_unique<ImageAssetGridView>(
@@ -706,182 +796,20 @@ static void build_image_grid(Layout &layout,
   const char *grid_view_id = is_mask_slot ? "image_asset_grid_mask" : "image_asset_grid";
   AbstractGridView *grid_view = block_add_view(*block, grid_view_id, std::move(view_unique));
 
-  const GridViewStyle &style = grid_view->get_style();
-  const int tile_h = style.tile_height;
-
-  /* The grip stores the user-chosen grid height in pixels and is the source of truth; it is never
-   * re-quantized to whole rows here, so changing the preview size (and thus #tile_h) keeps the grid
-   * height the user set. Reconstruct it from the persisted #image_grid_rows only on the first frame
-   * or after file reload, when the session-only grip value is still unset. */
-  if (state.viewport.grip_pixel_height < tile_h) {
-    state.viewport.grip_pixel_height = ed::view3d::image_grid_effective_rows(*v3d) * tile_h;
-  }
-  /* Clamp into a local value for display only; the raw grip value is preserved so a temporary
-   * preview-size change does not permanently shrink a height the user set at a smaller tile. */
-  const int visible_height = clamp_i(state.viewport.grip_pixel_height, tile_h, 16 * tile_h);
-  /* Rows are derived. #ceil so a partially visible bottom row counts: the build window adds one
-   * buffer row and #view_scroll_clip_set clips it back to #visible_height. */
-  const int effective_rows = clamp_i(
-      int(divide_ceil_u(uint(visible_height), uint(tile_h))), 1, 16);
-  /* Persist a whole-row approximation to DNA for reload reconstruction (nearest row). */
-  v3d->image_grid_rows = short(
-      clamp_i(round_fl_to_int(float(visible_height) / float(tile_h)), 1, 16));
-  ed::view3d::image_grid_clamp_scroll_row(state, *v3d);
-
-  /* Sub-row scroll offset within the current row, clamped to [0, tile_h). On the last row there is
-   * nothing below to reveal, so pin it to a whole-row boundary. */
-  if (state.viewport.scroll_row >= ed::view3d::image_grid_max_scroll_row(state, *v3d)) {
-    state.viewport.scroll_offset_px = 0;
-  }
-  else {
-    state.viewport.scroll_offset_px = clamp_i(state.viewport.scroll_offset_px, 0, tile_h - 1);
-  }
-  const int scroll_offset_px = state.viewport.scroll_offset_px;
-
-  Layout &outer_row = layout.row(false);
-  Layout &grid_layout = outer_row.column(true);
-  grid_layout.fixed_size_set(true);
-
-  if (panel_width > 0) {
-    grid_layout.ui_units_x_set(float(panel_width) / float(UI_UNIT_X));
-  }
-  grid_layout.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
-
-  Layout &grid_stack = grid_layout.overlap();
-  grid_stack.fixed_size_set(true);
-  if (panel_width > 0) {
-    grid_stack.ui_units_x_set(float(panel_width) / float(UI_UNIT_X));
-  }
-  grid_stack.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
-
-  const int grid_width = (panel_width > 0) ? panel_width : max_ii(style.tile_width, 1);
-  const int total_rows = (state.viewport.cached_item_count > 0 && cols_est > 0) ?
-                             int(ceilf(float(state.viewport.cached_item_count) /
-                                       float(cols_est))) :
-                             effective_rows;
-  const int total_height = max_ii(visible_height, total_rows * tile_h);
-
-  View2D local_v2d{};
-  local_v2d.flag |= V2D_IS_INIT;
-  /* #rctf member order: xmin, xmax, ymin, ymax (ymax = 0 at top, ymin negative downward). */
-  local_v2d.tot.xmin = 0.0f;
-  local_v2d.tot.xmax = float(grid_width);
-  local_v2d.tot.ymin = float(-total_height);
-  local_v2d.tot.ymax = 0.0f;
-  local_v2d.cur.xmin = 0.0f;
-  local_v2d.cur.xmax = float(grid_width);
-  /* Keep cur at the top of the content (ymax == tot.ymax == 0) so that
-   * BuildOnlyVisibleButtonsHelper::get_visible_range (embedded_v2d path) computes
-   * first_idx_in_view = 0.  The windowed build_items already pre-selects the items for
-   * the current scroll_row, so the helper must start from item_idx 0 — not re-offset
-   * by scroll_row*cols again, which would cause a double-skip and show wrong items. */
-  /* Include one buffer row in the visible range so #BuildOnlyVisibleButtonsHelper builds the extra
-   * row that sub-row scrolling reveals at the bottom; #view_scroll_clip_set clips it back to
-   * #visible_height when drawing. */
-  const int build_height = visible_height + tile_h;
-  local_v2d.cur.ymin = float(-build_height);
-  local_v2d.cur.ymax = 0.0f;
-  BLI_rcti_init(&local_v2d.mask, 0, grid_width, -build_height, 0);
-
-  /* Dedicated fixed-height clip window for the grid tiles only (not the overlay scrollbar), so the
-   * buffer row and the partial-row pixel offset are clipped to the visible area. */
-  Layout &grid_view_col = grid_stack.column(true);
-  grid_view_col.fixed_size_set(true);
-  if (panel_width > 0) {
-    grid_view_col.ui_units_x_set(float(panel_width) / float(UI_UNIT_X));
-  }
-  grid_view_col.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
-  grid_view_col.view_scroll_clip_set(visible_height, scroll_offset_px);
-
-  GridViewBuilder builder(*block);
-  builder.build_grid_view(C, *grid_view, grid_view_col, "", &local_v2d);
-
-  state.viewport.cached_cols = grid_view->cols_per_row();
-  ed::view3d::image_grid_clamp_scroll_row(state, *v3d);
-  ed::view3d::image_grid_viewport_store_scroll_for_layout(
-      state.viewport, state.viewport.cached_cols, effective_rows);
-
-  const int max_scroll_row = ed::view3d::image_grid_max_scroll_row(state, *v3d);
-  if (max_scroll_row > 0) {
-    /* Overlay scrollbar (does not steal grid width). Narrow fixed column so #widget_scroll
-     * stays vertical (#BLI_rcti_size_x < #BLI_rcti_size_y). */
-    Layout &scroll_anchor = grid_stack.row(false);
-    scroll_anchor.alignment_set(LayoutAlign::Right);
-    Layout &scroll_col = scroll_anchor.column(false);
-    scroll_col.fixed_size_set(true);
-    scroll_col.ui_units_x_set(float(V2D_SCROLL_WIDTH) / float(UI_UNIT_X));
-    scroll_col.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
-
-    block_layout_set_current(block, &scroll_col);
-    /* Default block emboss — #EmbossType::None maps scroll to #WidgetStyle::Icon (invisible). */
-    Button *but = uiDefButV(block,
-                            ButtonType::Scroll,
-                            "",
-                            0,
-                            0,
-                            short(V2D_SCROLL_WIDTH),
-                            visible_height,
-                            &state.viewport.scroll_row,
-                            0.0f,
-                            float(max_scroll_row),
-                            "");
-    auto *but_scroll = reinterpret_cast<ButtonScrollBar *>(but);
-    but_scroll->visual_height = float(effective_rows);
-    /* Opaque track over preview tiles (theme #wcol_scroll inner alpha is often 0). */
-    uchar scroll_track_bg[4];
-    theme::get_color_4ubv(TH_BACK, scroll_track_bg);
-    scroll_track_bg[3] = 255;
-    button_color_set(but, scroll_track_bg);
-    button_flag_disable(but, BUT_UNDO);
-    /* The scrollbar widget writes the new row straight into #scroll_row. Persist it into this
-     * layout's (cols, rows) bucket so the restore at the start of the next build keeps it; without
-     * this the change is clobbered immediately and the grid never scrolls. Mirrors the wheel/drag
-     * handlers (store bucket + dismiss focus). */
-    const int scroll_store_cols = state.viewport.cached_cols;
-    const int scroll_store_rows = effective_rows;
-    button_func_set(but, [is_mask_slot, scroll_store_cols, scroll_store_rows](bContext &C) {
-      View3D *v3d = CTX_wm_view3d(&C);
-      if (!v3d) {
-        return;
-      }
-      ed::view3d::ImageGridUIState &state = ed::view3d::image_grid_state_get(*v3d, is_mask_slot);
-      /* Whole-row scrollbar: align the sub-row offset to the row boundary. */
-      state.viewport.scroll_offset_px = 0;
-      ed::view3d::image_grid_focus_clear(state.viewport);
-      ed::view3d::image_grid_viewport_store_scroll_for_layout(
-          state.viewport, scroll_store_cols, scroll_store_rows);
-      if (ARegion *region = CTX_wm_region(&C)) {
-        ED_region_tag_redraw(region);
-        ED_region_tag_refresh_ui(region);
-      }
-    });
-    block_layout_set_current(block, &layout);
-  }
-
-  Layout &grip_row = layout.row(false);
-  grip_row.scale_x_set(1.0f);
-  block_layout_set_current(block, &grip_row);
-  /* Grip in pixels (softmin/max 0) — same model as #AbstractTreeView::custom_height_. */
-  Button *grip_but = uiDefIconButV(block,
-                                   ButtonType::Grip,
-                                   ICON_GRIP,
-                                   0,
-                                   0,
-                                   short(max_ii(panel_width, int(UI_UNIT_X * 10))),
-                                   short(UI_UNIT_Y * 0.5f),
-                                   &state.viewport.grip_pixel_height,
-                                   0.0f,
-                                   0.0f,
-                                   "");
-  button_flag_disable(grip_but, BUT_UNDO);
-  button_func_set(grip_but, [](bContext &C) {
-    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
-    if (ARegion *region = CTX_wm_region(&C)) {
-      ED_region_tag_redraw(region);
-      ED_region_tag_refresh_ui(region);
+  /* Persist a whole-row approximation to DNA for reload reconstruction (nearest row). Done here
+   * so the generic core does not need to know about View3D DNA. Removed in Stage 7. */
+  {
+    const GridViewStyle &style = grid_view->get_style();
+    const int tile_h = max_ii(1, style.tile_height);
+    const int grip = state.viewport.grip_pixel_height;
+    if (grip >= tile_h) {
+      v3d->image_grid_rows = short(clamp_i(round_fl_to_int(float(grip) / float(tile_h)), 1, 16));
     }
-  });
-  block_layout_set_current(block, &layout);
+  }
+
+  View3DGridStateAccess state_access(state, *v3d, grid_view_id, is_mask_slot);
+  build_grid_view(
+      C, layout, *grid_view, state_access, state.viewport.cached_item_count, cols_est, panel_width);
 }
 
 void template_asset_image_grid(Layout *layout, bContext *C, PointerRNA *ptr, const char *propname)

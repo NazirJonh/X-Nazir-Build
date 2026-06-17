@@ -614,6 +614,22 @@ struct uiListType {
   ExtensionRNA rna_ext;
 };
 
+/** Registered Python grid provider type (no file persistence). */
+struct uiGridType {
+  uiGridType *next, *prev;
+
+  char idname[BKE_ST_MAXNAME];
+  char activate_operator[BKE_ST_MAXNAME];
+  char drag_operator[BKE_ST_MAXNAME];
+
+  ExtensionRNA rna_ext;
+};
+
+/** Ephemeral instance used when dispatching Python #UIGrid callbacks. */
+struct uiGrid {
+  uiGridType *type = nullptr;
+};
+
 /* Header types. */
 
 struct HeaderType {

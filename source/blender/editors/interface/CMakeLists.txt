@@ -18,6 +18,14 @@ set(INC_SYS
 )
 
 set(SRC
+  interface_grid_asset_source.cc
+  interface_grid_core_math.cc
+  interface_grid_python_source.cc
+  interface_grid_view.hh
+  interface_grid_view_settings_utils.hh
+  interface_grid_view_sources.hh
+  templates/interface_template_grid_selectors.cc
+  templates/interface_template_grid_view.cc
   buttons/interface_textbox.cc
   eyedroppers/eyedropper_bone.cc
   eyedroppers/eyedropper_color.cc
@@ -171,6 +179,7 @@ if(WITH_GTESTS)
   )
   set(TEST_SRC
     interface_ops_test.cc
+    tests/grid_core_math_test.cc
   )
 
   set(TEST_LIB

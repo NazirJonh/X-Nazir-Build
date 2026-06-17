@@ -2435,6 +2435,34 @@ void template_id_preview(Layout *layout,
                          int filter = TEMPLATE_ID_FILTER_ALL,
                          bool hide_buttons = false);
 void template_asset_image_grid(Layout *layout, bContext *C, PointerRNA *ptr, const char *propname);
+
+/** Reusable grid view header widgets operating on #GridViewSettings. */
+void template_grid_library_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+void template_grid_catalog_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+void template_grid_preview_size(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+
+/**
+ * Reusable asset-library grid. Activating an item runs \a activate_operator with standard asset
+ * reference properties set.
+ */
+void template_grid_view_asset(Layout *layout,
+                              bContext *C,
+                              const char *grid_id,
+                              PointerRNA *settings_ptr,
+                              const char *activate_operator,
+                              const char *drag_operator);
+
+/**
+ * Reusable grid driven by a registered Python #UIGrid type over a collection property.
+ */
+void template_grid_view_custom(Layout *layout,
+                               bContext *C,
+                               const char *grid_id,
+                               const char *gridtype_name,
+                               PointerRNA *dataptr,
+                               const char *propname,
+                               PointerRNA *settings_ptr);
+
 void template_matrix(Layout *layout, PointerRNA *ptr, StringRefNull propname);
 /**
  * Version of #template_id using tabs.

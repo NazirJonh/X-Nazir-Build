@@ -215,6 +215,7 @@ void WM_init(bContext *C, int argc, const char **argv)
   WM_paneltype_init(); /* Lookup table only. */
   WM_menutype_init();
   WM_uilisttype_init();
+  WM_uigridtype_init();
   wm_gizmotype_init();
   wm_gizmogrouptype_init();
 
@@ -647,6 +648,7 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
   wm_gizmotype_free();
   /* Same for UI-list types. */
   WM_uilisttype_free();
+  WM_uigridtype_free();
 
   BLF_exit();
 

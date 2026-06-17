@@ -340,9 +340,10 @@ static void paintcurve_point_add(bContext *C,
     const int old_total = geom.points_num();
     geom.resize(old_total + 1, geom.curves_num());
 
-    /* Shift offsets for all splines that come after the active one. */
+    /* Shift offsets for all splines that come after the active one, and the sentinel.
+     * `resize` with the same curve count skips the sentinel update, so we must do it here. */
     MutableSpan<int> offsets = geom.offsets_for_write();
-    for (int ci = active_curve + 1; ci < geom.curves_num(); ci++) {
+    for (int ci = active_curve + 1; ci <= geom.curves_num(); ci++) {
       offsets[ci]++;
     }
 
@@ -1244,6 +1245,11 @@ static bool paintcurve_insert_point_at_segment(
 
   ED_paintcurve_undo_push_end(C);
   WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+  /* Full region redraw so the synced source object's evaluated geometry is rebuilt immediately,
+   * matching the slide path. */
+  if (paintcurve_uses_3d_geometry(pc)) {
+    ED_region_tag_redraw(CTX_wm_region(C));
+  }
   return true;
 }
 
@@ -1468,15 +1474,21 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
     select = selflag;
   }
   else {
-    /* Find first already-selected point. */
+    /* Slide an already-selected point, but only when the cursor is actually over it. Without this
+     * hit-test the slide would start from anywhere on screen as long as some point was selected. */
     bke::CurvesGeometry &geom = pc->geometry.wrap();
     if (paintcurve_geometry_is_valid(geom)) {
-      for (const int i : geom.points_range()) {
-        const uint8_t sel = paintcurve_geom_get_selection(geom, i);
+      char selflag = 0;
+      const int hit = paintcurve_find_in_screen_points(
+          screen_points.as_span(), loc_fl, align, PAINT_CURVE_SELECT_THRESHOLD, &selflag);
+      if (hit >= 0) {
+        const uint8_t sel = paintcurve_geom_get_selection(geom, hit);
         if (sel != 0) {
-          select = (sel & 0x01) ? 0 : (sel & 0x02) ? 1 : 2;
-          point_index = i;
-          break;
+          /* Convert selection bits to the bit-flag form that paintcurve_point_co_index expects.
+           * Using raw indices (0/1/2) here causes an infinite loop in that function when the
+           * left-handle bit (0x01) is set, because paintcurve_point_co_index(0) never exits. */
+          select = (sel & 0x01) ? SEL_F1 : (sel & 0x02) ? SEL_F2 : SEL_F3;
+          point_index = hit;
         }
       }
     }
@@ -1604,6 +1616,9 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
     }
     ED_paintcurve_undo_push_end(C);
     paintcurve_sync_to_source_if_3d(C, release_pc);
+    if (paintcurve_uses_3d_geometry(release_pc)) {
+      ED_region_tag_redraw(CTX_wm_region(C));
+    }
     return OPERATOR_FINISHED;
   }
 
@@ -1693,6 +1708,11 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
       copy_v2_v2_int(psd->prev_mval, event->mval);
       paintcurve_sync_to_source_if_3d(C, pc);
       WM_paint_cursor_tag_redraw(window, region);
+      /* The paint-cursor redraw above only re-composites the cursor. The synced source object is
+       * drawn from evaluated geometry, so it needs a full region redraw to rebuild its batch. */
+      if (paintcurve_uses_3d_geometry(pc)) {
+        ED_region_tag_redraw(region);
+      }
       break;
     }
     default:

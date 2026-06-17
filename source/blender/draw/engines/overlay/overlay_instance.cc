@@ -44,6 +44,9 @@ void Instance::init()
   state.is_depth_only_drawing = ctx->is_depth();
   state.skip_particles = ctx->mode == DRWContext::DEPTH_ACTIVE_OBJECT;
   state.is_material_select = ctx->is_material_select();
+  state.cursor_mval = ctx->cursor_mval;
+  state.cursor_mval_valid = ctx->cursor_mval_valid;
+  state.active_tool_idname = ctx->active_tool_idname;
   state.draw_background = ctx->options.draw_background;
   state.show_text = false;
 
@@ -464,6 +467,7 @@ void Instance::begin_sync()
 
   background.begin_sync(resources, state);
   cursor.begin_sync(resources, state);
+  paint_curve_cursor.begin_sync(resources, state);
   image_prepass.begin_sync(resources, state);
   motion_paths.begin_sync(resources, state);
   origins.begin_sync(resources, state);
@@ -834,6 +838,7 @@ void Instance::draw_v2d(Manager &manager, View &view)
   regular.mesh_uvs.draw(resources.overlay_output_fb, manager, view);
 
   cursor.draw_output(resources.overlay_output_color_only_fb, manager, view);
+  paint_curve_cursor.draw_output(resources.overlay_output_color_only_fb, manager, view);
 }
 
 void Instance::draw_v3d(Manager &manager, View &view)
@@ -992,6 +997,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
     background.draw_output(resources.overlay_output_color_only_fb, manager, view);
     anti_aliasing.draw_output(resources.overlay_output_color_only_fb, manager, view);
     cursor.draw_output(resources.overlay_output_color_only_fb, manager, view);
+    paint_curve_cursor.draw_output(resources.overlay_output_color_only_fb, manager, view);
 
     draw_text(resources.overlay_output_color_only_fb);
 

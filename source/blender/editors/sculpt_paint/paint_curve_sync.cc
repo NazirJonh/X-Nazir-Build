@@ -20,6 +20,7 @@
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_math_matrix.h"
@@ -362,6 +363,50 @@ Object *paintcurve_nearest_scene_curve(const ViewContext *vc,
   if (r_polylines && best_ob) {
     *r_polylines = std::move(best_polylines);
   }
+  return best_ob;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Cached polyline nearest-distance query
+ * \{ */
+
+const Object *paintcurve_nearest_from_cached_polylines(
+    const float2 mval,
+    const float threshold,
+    const Object *exclude,
+    Span<ed::sculpt_paint::PaintCurveCachedObjectSilhouette> cached,
+    Vector<Vector<float2>> *r_hover_polylines)
+{
+  const Object *best_ob = nullptr;
+  float best_dist = threshold;
+
+  for (const ed::sculpt_paint::PaintCurveCachedObjectSilhouette &entry : cached) {
+    if (entry.object == exclude) {
+      continue;
+    }
+    for (const Vector<float2> &polyline : entry.polylines) {
+      for (const int i : IndexRange(polyline.size() - 1)) {
+        const float d = paintcurve_dist_point_segment(mval, polyline[i], polyline[i + 1]);
+        if (d < best_dist) {
+          best_dist = d;
+          best_ob = entry.object;
+        }
+      }
+    }
+  }
+
+  if (best_ob && r_hover_polylines) {
+    r_hover_polylines->clear();
+    for (const ed::sculpt_paint::PaintCurveCachedObjectSilhouette &entry : cached) {
+      if (entry.object == best_ob) {
+        *r_hover_polylines = entry.polylines;
+        break;
+      }
+    }
+  }
+
   return best_ob;
 }
 

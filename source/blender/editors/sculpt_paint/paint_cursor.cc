@@ -58,6 +58,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include "ED_image.hh"
+#include "ED_screen.hh"
 #include "ED_view3d.hh"
 
 #include "GPU_immediate.hh"
@@ -785,436 +786,10 @@ static bool paint_draw_alpha_overlay(
   return alpha_overlay_active;
 }
 
-static void paintcurve_theme_handle_color(const int8_t handle_type,
-                                          const bool selected,
-                                          float r_col[4])
-{
-  int color;
-  if (selected) {
-    switch (handle_type) {
-      case BEZIER_HANDLE_AUTO:
-        color = TH_HANDLE_SEL_AUTO;
-        break;
-      case BEZIER_HANDLE_VECTOR:
-        color = TH_HANDLE_SEL_VECT;
-        break;
-      case BEZIER_HANDLE_ALIGN:
-        color = TH_HANDLE_SEL_ALIGN;
-        break;
-      default:
-        color = TH_HANDLE_SEL_FREE;
-        break;
-    }
-  }
-  else {
-    switch (handle_type) {
-      case BEZIER_HANDLE_AUTO:
-        color = TH_HANDLE_AUTO;
-        break;
-      case BEZIER_HANDLE_VECTOR:
-        color = TH_HANDLE_VECT;
-        break;
-      case BEZIER_HANDLE_ALIGN:
-        color = TH_HANDLE_ALIGN;
-        break;
-      default:
-        color = TH_HANDLE_FREE;
-        break;
-    }
-  }
-  ui::theme::get_color_type_4fv(color, SPACE_VIEW3D, r_col);
-}
-
-BLI_INLINE void draw_handle_endpoint(
-    uint pos, const float col[4], const float *co, const float width, const int8_t handle_type)
-{
-  immUniformColor4fv(col);
-
-  GPU_line_width(3.0f);
-
-  const float w = width / 2.0f;
-  if (handle_type == BEZIER_HANDLE_VECTOR) {
-    const float tri[3][2] = {
-        {co[0], co[1] + w},
-        {co[0] - w, co[1] - w},
-        {co[0] + w, co[1] - w},
-    };
-    immBegin(GPU_PRIM_LINE_LOOP, 3);
-    immVertex2fv(pos, tri[0]);
-    immVertex2fv(pos, tri[1]);
-    immVertex2fv(pos, tri[2]);
-    immEnd();
-  }
-  else {
-    const float minx = co[0] - w;
-    const float miny = co[1] - w;
-    const float maxx = co[0] + w;
-    const float maxy = co[1] + w;
-    imm_draw_box_wire_2d(pos, minx, miny, maxx, maxy);
-  }
-
-  immUniformColor4f(1.0f, 1.0f, 1.0f, 0.5f);
-  GPU_line_width(1.0f);
-
-  if (handle_type == BEZIER_HANDLE_VECTOR) {
-    const float tri[3][2] = {
-        {co[0], co[1] + w},
-        {co[0] - w, co[1] - w},
-        {co[0] + w, co[1] - w},
-    };
-    immBegin(GPU_PRIM_LINE_LOOP, 3);
-    immVertex2fv(pos, tri[0]);
-    immVertex2fv(pos, tri[1]);
-    immVertex2fv(pos, tri[2]);
-    immEnd();
-  }
-  else {
-    const float minx = co[0] - w;
-    const float miny = co[1] - w;
-    const float maxx = co[0] + w;
-    const float maxy = co[1] + w;
-    imm_draw_box_wire_2d(pos, minx, miny, maxx, maxy);
-  }
-}
-
-BLI_INLINE void draw_control_point(uint pos,
-                                   const float sel_col[4],
-                                   const float vert_col[4],
-                                   const float *co,
-                                   const float width,
-                                   const bool selected)
-{
-  immUniformColor4fv(selected ? sel_col : vert_col);
-
-  GPU_line_width(3.0f);
-
-  const float w = width / 2.0f;
-  immBegin(GPU_PRIM_LINE_LOOP, 4);
-  immVertex2f(pos, co[0] - w, co[1]);
-  immVertex2f(pos, co[0], co[1] + w);
-  immVertex2f(pos, co[0] + w, co[1]);
-  immVertex2f(pos, co[0], co[1] - w);
-  immEnd();
-
-  immUniformColor4f(1.0f, 1.0f, 1.0f, 0.5f);
-  GPU_line_width(1.0f);
-
-  immBegin(GPU_PRIM_LINE_LOOP, 4);
-  immVertex2f(pos, co[0] - w, co[1]);
-  immVertex2f(pos, co[0], co[1] + w);
-  immVertex2f(pos, co[0] + w, co[1]);
-  immVertex2f(pos, co[0], co[1] - w);
-  immEnd();
-}
-
-/** Check if radius handle should be displayed for a given point. */
-static bool should_show_radius_handle(const Sculpt *sculpt,
-                                      const PaintCurve *pc,
-                                      const Span<PaintCurvePoint> points,
-                                      const int point_index)
-{
-  if (!sculpt || !sculpt->paint_curve_show_radius_handles) {
-    return false;
-  }
-
-  const int8_t display_mode = sculpt->paint_curve_radius_display_mode;
-
-  /* Show all radius handles. */
-  if (display_mode == SCULPT_PAINT_CURVE_RADIUS_ALL) {
-    return true;
-  }
-
-  /* Show only for splines with selected points. */
-  if (display_mode == SCULPT_PAINT_CURVE_RADIUS_SELECT) {
-    /* Get the spline index for the current point. */
-    const int curve_index = paintcurve_curve_of_point(pc, point_index);
-    if (curve_index < 0) {
-      return false;
-    }
-
-    /* Get the range of points in this spline. */
-    const bke::CurvesGeometry &geom = pc->geometry.wrap();
-    const OffsetIndices<int> points_by_curve = geom.points_by_curve();
-    const IndexRange curve_points = points_by_curve[curve_index];
-
-    /* Check if any point in THIS spline is selected. */
-    for (const int i : curve_points) {
-      const PaintCurvePoint &pcp = points[i];
-      if (pcp.bez.f1 || pcp.bez.f2 || pcp.bez.f3) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /* Show only at tips (start and end points of each spline). */
-  if (display_mode == SCULPT_PAINT_CURVE_RADIUS_TIPS) {
-    const int curve_index = paintcurve_curve_of_point(pc, point_index);
-    if (curve_index < 0) {
-      return false;
-    }
-
-    /* Get the range of points in this spline. */
-    const bke::CurvesGeometry &geom = pc->geometry.wrap();
-    const OffsetIndices<int> points_by_curve = geom.points_by_curve();
-    const IndexRange curve_points = points_by_curve[curve_index];
-
-    /* Check if point is the first or last point of the spline. */
-    return (point_index == curve_points.first() || point_index == curve_points.last());
-  }
-
-  return false;
-}
-
-BLI_INLINE void draw_radius_handle(uint pos,
-                                   const float col[4],
-                                   const PaintCurveRadiusHandleScreen &handle)
-{
-  const float start[2] = {handle.point.x, handle.point.y};
-  const float end[2] = {handle.end.x, handle.end.y};
-
-  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.5f);
-  GPU_line_width(3.0f);
-  immBegin(GPU_PRIM_LINES, 2);
-  immVertex2fv(pos, start);
-  immVertex2fv(pos, end);
-  immEnd();
-
-  immUniformColor4fv(col);
-  GPU_line_width(1.0f);
-  immBegin(GPU_PRIM_LINES, 2);
-  immVertex2fv(pos, start);
-  immVertex2fv(pos, end);
-  immEnd();
-
-  immUniformColor4f(1.0f, 1.0f, 1.0f, 0.5f);
-  GPU_line_width(1.0f);
-  imm_draw_circle_wire_2d(pos, end[0], end[1], PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS, 16);
-
-  immUniformColor4fv(col);
-  imm_draw_circle_wire_2d(pos, end[0], end[1], PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS, 16);
-}
-
-BLI_INLINE void draw_bezier_handle_lines(uint pos,
-                                         const BezTriple *bez,
-                                         const int8_t handle_type_left,
-                                         const int8_t handle_type_right)
-{
-  float left_col[4], right_col[4];
-  const bool left_sel = bez->f1 || bez->f2;
-  const bool right_sel = bez->f3 || bez->f2;
-  paintcurve_theme_handle_color(handle_type_left, left_sel, left_col);
-  paintcurve_theme_handle_color(handle_type_right, right_sel, right_col);
-
-  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.5f);
-  GPU_line_width(3.0f);
-
-  immBegin(GPU_PRIM_LINE_STRIP, 3);
-  immVertex2fv(pos, bez->vec[0]);
-  immVertex2fv(pos, bez->vec[1]);
-  immVertex2fv(pos, bez->vec[2]);
-  immEnd();
-
-  GPU_line_width(1.0f);
-
-  immUniformColor4fv(left_col);
-  immBegin(GPU_PRIM_LINES, 2);
-  immVertex2fv(pos, bez->vec[0]);
-  immVertex2fv(pos, bez->vec[1]);
-  immEnd();
-
-  immUniformColor4fv(right_col);
-  immBegin(GPU_PRIM_LINES, 2);
-  immVertex2fv(pos, bez->vec[1]);
-  immVertex2fv(pos, bez->vec[2]);
-  immEnd();
-}
-
-static void paint_draw_curve_cursor(Brush *brush,
-                                    ViewContext *vc,
-                                    const int2 mval,
-                                    const bool is_curve_edit_tool,
-                                    const Object *source_object,
-                                    const Sculpt *sculpt)
-{
-  GPU_matrix_push();
-  GPU_matrix_translate_2f(vc->region->winrct.xmin, vc->region->winrct.ymin);
-
-  if (is_curve_edit_tool) {
-    uint sil_pos = GPU_vertformat_attr_add(
-        immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
-    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-    GPU_line_smooth(true);
-    GPU_blend(GPU_BLEND_ALPHA);
-
-    /* Determine the hovered curve once.
-     * `mval` arrives in window-level coordinates; polylines are built with
-     * `ED_view3d_project_v2` which returns region-local coordinates, so
-     * subtract the region origin before the distance test. */
-    const float2 mval_region(float(mval.x) - float(vc->region->winrct.xmin),
-                              float(mval.y) - float(vc->region->winrct.ymin));
-    Vector<Vector<float2>> hover_polylines;
-    const Object *hover_ob = nullptr;
-    if (!paintcurve_slide_is_active()) {
-      hover_ob = paintcurve_nearest_scene_curve(
-          vc, mval_region, PAINT_CURVE_HOVER_THRESHOLD, source_object, &hover_polylines);
-    }
-
-    float faint_col[4], hover_col[4];
-    ui::theme::get_color_type_4fv(TH_WIRE, SPACE_VIEW3D, faint_col);
-    faint_col[3] = 0.5f;
-    ui::theme::get_color_type_4fv(TH_VERTEX_SELECT, SPACE_VIEW3D, hover_col);
-    hover_col[3] = 1.0f;
-
-    auto draw_polylines = [&](const Vector<Vector<float2>> &polylines) {
-      for (const Vector<float2> &polyline : polylines) {
-        if (polyline.size() < 2) {
-          continue;
-        }
-        immBegin(GPU_PRIM_LINE_STRIP, polyline.size());
-        for (const float2 &p : polyline) {
-          immVertex2fv(sil_pos, p);
-        }
-        immEnd();
-      }
-    };
-
-    /* Faint pass: every scene curve except the source and the hovered one. */
-    BKE_view_layer_synced_ensure(*vc->bmain, vc->scene, vc->view_layer);
-    GPU_line_width(1.0f);
-    immUniformColor4fv(faint_col);
-    for (Base &base : *BKE_view_layer_object_bases_get(vc->view_layer)) {
-      Object *ob = base.object;
-      if (ob == source_object || ob == hover_ob ||
-          !ELEM(ob->type, OB_CURVES, OB_CURVES_LEGACY))
-      {
-        continue;
-      }
-      if ((base.flag & BASE_ENABLED_AND_MAYBE_VISIBLE_IN_VIEWPORT) == 0) {
-        continue;
-      }
-      Curves *temp_curves = nullptr;
-      const bke::CurvesGeometry *geom = nullptr;
-      if (ob->type == OB_CURVES) {
-        geom = &id_cast<const Curves *>(ob->data)->geometry.wrap();
-      }
-      else {
-        temp_curves = bke::curve_legacy_to_curves(*id_cast<const Curve *>(ob->data));
-        if (temp_curves) {
-          geom = &temp_curves->geometry.wrap();
-        }
-      }
-      if (geom) {
-        Vector<Vector<float2>> polylines;
-        paintcurve_build_object_screen_polylines(*geom, ob->object_to_world(), vc, polylines);
-        draw_polylines(polylines);
-      }
-      if (temp_curves) {
-        BKE_id_free(nullptr, &temp_curves->id);
-      }
-    }
-
-    /* Bright pass: the hovered curve on top. */
-    if (hover_ob) {
-      GPU_line_width(3.0f);
-      immUniformColor4fv(hover_col);
-      draw_polylines(hover_polylines);
-    }
-
-    immUnbindProgram();
-    GPU_line_smooth(false);
-    GPU_blend(GPU_BLEND_NONE);
-  }
-
-  if (brush->paint_curve && paintcurve_geometry_is_valid(brush->paint_curve->geometry.wrap())) {
-    PaintCurve *pc = brush->paint_curve;
-    blender::Vector<PaintCurvePoint> temp_points;
-    paintcurve_build_screen_points(pc, vc, temp_points);
-    if (temp_points.is_empty()) {
-      GPU_matrix_pop();
-      return;
-    }
-    PaintCurvePoint *cp = temp_points.data();
-
-    GPU_line_smooth(true);
-    GPU_blend(GPU_BLEND_ALPHA);
-
-    /* Draw the bezier handles and the curve segment between the current and next point. */
-    uint pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
-
-    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-    float selec_col[4], vert_col[4], wire_col[4], radius_col[4];
-    ui::theme::get_color_type_4fv(TH_VERTEX_SELECT, SPACE_VIEW3D, selec_col);
-    ui::theme::get_color_type_4fv(TH_VERTEX, SPACE_VIEW3D, vert_col);
-    ui::theme::get_color_type_4fv(TH_WIRE, SPACE_VIEW3D, wire_col);
-    ui::theme::get_color_type_4fv(TH_EDGE_SELECT, SPACE_VIEW3D, radius_col);
-
-    for (int i = 0; i < int(temp_points.size()); i++) {
-      PaintCurvePoint *pcp = &cp[i];
-      const int8_t h1 = int8_t(pcp->bez.h1);
-      const int8_t h2 = int8_t(pcp->bez.h2);
-      float left_col[4], right_col[4];
-      paintcurve_theme_handle_color(h1, pcp->bez.f1 || pcp->bez.f2, left_col);
-      paintcurve_theme_handle_color(h2, pcp->bez.f3 || pcp->bez.f2, right_col);
-
-      draw_bezier_handle_lines(pos, &pcp->bez, h1, h2);
-      draw_control_point(pos, selec_col, vert_col, &pcp->bez.vec[1][0], 10.0f, pcp->bez.f2 != 0);
-      draw_handle_endpoint(pos, left_col, &pcp->bez.vec[0][0], 8.0f, h1);
-      draw_handle_endpoint(pos, right_col, &pcp->bez.vec[2][0], 8.0f, h2);
-    }
-
-    if (pc->show_radius_handles) {
-      for (int i = 0; i < int(temp_points.size()); i++) {
-        if (should_show_radius_handle(sculpt, pc, temp_points, i)) {
-          PaintCurveRadiusHandleScreen handle;
-          paintcurve_radius_handle_screen_get(pc, cp, i, &handle);
-          draw_radius_handle(pos, radius_col, handle);
-        }
-      }
-    }
-
-    paintcurve_foreach_bezier_segment(pc, [&](const int point_a, const int point_b) {
-      const PaintCurvePoint *cp_a = &cp[point_a];
-      const PaintCurvePoint *cp_b = &cp[point_b];
-      float data[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];
-
-      for (int j = 0; j < 2; j++) {
-        BKE_curve_forward_diff_bezier(cp_a->bez.vec[1][j],
-                                      cp_a->bez.vec[2][j],
-                                      cp_b->bez.vec[0][j],
-                                      cp_b->bez.vec[1][j],
-                                      data + j,
-                                      PAINT_CURVE_NUM_SEGMENTS,
-                                      sizeof(float[2]));
-      }
-
-      float (*v)[2] = reinterpret_cast<float (*)[2]>(data);
-
-      immUniformColor4f(0.0f, 0.0f, 0.0f, 0.5f);
-      GPU_line_width(3.0f);
-      immBegin(GPU_PRIM_LINE_STRIP, PAINT_CURVE_NUM_SEGMENTS + 1);
-      for (int j = 0; j <= PAINT_CURVE_NUM_SEGMENTS; j++) {
-        immVertex2fv(pos, v[j]);
-      }
-      immEnd();
-
-      immUniformColor4fv(wire_col);
-      GPU_line_width(1.0f);
-      immBegin(GPU_PRIM_LINE_STRIP, PAINT_CURVE_NUM_SEGMENTS + 1);
-      for (int j = 0; j <= PAINT_CURVE_NUM_SEGMENTS; j++) {
-        immVertex2fv(pos, v[j]);
-      }
-      immEnd();
-    });
-
-    GPU_blend(GPU_BLEND_NONE);
-    GPU_line_smooth(false);
-
-    immUnbindProgram();
-  }
-  GPU_matrix_pop();
-}
+/* paint_draw_curve_cursor and its helpers (paintcurve_theme_handle_color,
+ * draw_handle_endpoint, draw_control_point, should_show_radius_handle,
+ * draw_radius_handle, draw_bezier_handle_lines) were removed.
+ * Replaced by the Overlay engine PaintCurveCursor (overlay_paint_curve_cursor.hh). */
 
 static bool paint_use_2d_cursor(PaintMode mode)
 {
@@ -1279,20 +854,12 @@ static bool paint_cursor_context_init(bContext *C,
 
   pcontext.vc = ED_view3d_viewcontext_init(C, pcontext.depsgraph);
 
-  if (pcontext.brush->stroke_method == BRUSH_STROKE_CURVE) {
-    pcontext.cursor_type = PaintCursorDrawingType::Curve;
+  /* Curve drawing is now handled by the PaintCurveCursor overlay. */
+  if (paint_use_2d_cursor(pcontext.mode)) {
+    pcontext.cursor_type = PaintCursorDrawingType::Cursor2D;
   }
   else {
-    const bToolRef *tref = WM_toolsystem_ref_from_context(C);
-    if (tref && STREQ(tref->idname, "builtin.curves_edit")) {
-      pcontext.cursor_type = PaintCursorDrawingType::Curve;
-    }
-    else if (paint_use_2d_cursor(pcontext.mode)) {
-      pcontext.cursor_type = PaintCursorDrawingType::Cursor2D;
-    }
-    else {
-      pcontext.cursor_type = PaintCursorDrawingType::Cursor3D;
-    }
+    pcontext.cursor_type = PaintCursorDrawingType::Cursor3D;
   }
 
   pcontext.mval = xy;
@@ -1550,24 +1117,6 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
   }
 
   switch (pcontext.cursor_type) {
-    case PaintCursorDrawingType::Curve: {
-      const bToolRef *tref = WM_toolsystem_ref_from_context(C);
-      const bool is_curve_edit_tool = tref && STREQ(tref->idname, "builtin.curves_edit");
-      Scene *cursor_scene = pcontext.vc.scene;
-      const Sculpt *sculpt_settings = (cursor_scene && cursor_scene->toolsettings &&
-                                       cursor_scene->toolsettings->sculpt) ?
-                                          cursor_scene->toolsettings->sculpt :
-                                          nullptr;
-      const Object *source_object = sculpt_settings ? sculpt_settings->paint_curve_source_object :
-                                                      nullptr;
-      paint_draw_curve_cursor(pcontext.brush,
-                             &pcontext.vc,
-                             pcontext.mval,
-                             is_curve_edit_tool,
-                             source_object,
-                             sculpt_settings);
-      break;
-    }
     case PaintCursorDrawingType::Cursor2D:
       paint_update_mouse_cursor(pcontext);
 
@@ -1599,6 +1148,45 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
 
 /* Public API */
 
+namespace {
+
+/** Poll for the paint-curve overlay redraw cursor: tags the viewport for redraw on mouse move. */
+static bool paint_curve_overlay_redraw_poll(bContext *C)
+{
+  if (!ed::sculpt_paint::ED_paint_curve_overlay_wants_redraw(C)) {
+    return false;
+  }
+  ARegion *region = CTX_wm_region(C);
+  if (region) {
+    ED_region_tag_redraw(region);
+  }
+  return true;
+}
+
+/** Empty draw callback — the actual drawing happens in the Overlay engine. */
+static void paint_curve_overlay_redraw_draw(bContext * /*C*/,
+                                            const int2 & /*xy*/,
+                                            const float2 & /*tilt*/,
+                                            void * /*customdata*/)
+{
+}
+
+}  // anonymous namespace
+
+void ED_paint_curve_overlay_redraw_register()
+{
+  static bool registered = false;
+  if (registered) {
+    return;
+  }
+  registered = true;
+  WM_paint_cursor_activate(SPACE_TYPE_ANY,
+                           RGN_TYPE_ANY,
+                           paint_curve_overlay_redraw_poll,
+                           paint_curve_overlay_redraw_draw,
+                           nullptr);
+}
+
 void ED_paint_cursor_start(Paint *paint, bool (*poll)(bContext *C))
 {
   if (paint && paint->runtime && !paint->runtime->paint_cursor) {
@@ -1606,71 +1194,14 @@ void ED_paint_cursor_start(Paint *paint, bool (*poll)(bContext *C))
         SPACE_TYPE_ANY, RGN_TYPE_ANY, poll, ed::sculpt_paint::paint_draw_cursor, nullptr);
   }
 
+  /* Register the overlay-redraw cursor (once, guarded internally). */
+  ED_paint_curve_overlay_redraw_register();
+
   /* Invalidate the paint cursors. */
   BKE_paint_invalidate_overlay_all();
 }
 
-void ED_paint_draw_curve_view3d_overlay(const bContext *C, ARegion *region)
-{
-  /* Only draw when the Curve Edit tool is active in sculpt mode. */
-  bContext *nc = const_cast<bContext *>(C);
-
-  const bToolRef *tref = WM_toolsystem_ref_from_context(nc);
-  if (!tref || !STREQ(tref->idname, "builtin.curves_edit")) {
-    return;
-  }
-
-  /* The paint cursor already handles this region when it is the active (mouse-under) region.
-   * Avoid drawing curve handles twice. */
-  const bScreen *screen = CTX_wm_screen(nc);
-  if (screen && region == screen->active_region) {
-    return;
-  }
-
-  Paint *paint = BKE_paint_get_active_from_context(nc);
-  if (!paint) {
-    return;
-  }
-  Brush *brush = BKE_paint_brush(paint);
-  if (!brush) {
-    return;
-  }
-
-  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(nc);
-  ViewContext vc = ED_view3d_viewcontext_init(nc, depsgraph);
-  if (!vc.rv3d || !vc.region) {
-    return;
-  }
-
-  Scene *scene = CTX_data_scene(nc);
-  const Sculpt *sculpt_settings = (scene && scene->toolsettings && scene->toolsettings->sculpt) ?
-                                      scene->toolsettings->sculpt :
-                                      nullptr;
-  const Object *source_object = sculpt_settings ? sculpt_settings->paint_curve_source_object :
-                                                   nullptr;
-
-  /* Mouse position in window coordinates. When the mouse is outside the viewport
-   * (e.g. over a header), no curve will pass the hover threshold — which is correct. */
-  const wmWindow *win = CTX_wm_window(nc);
-  const int *cursor_xy = win->runtime->eventstate->xy;
-  const int2 mval = int2(cursor_xy[0], cursor_xy[1]);
-
-  /* The overlay system called wmViewport(&region->winrct), placing us in region-local
-   * pixel coordinates. Switch back to full-window pixel space so that
-   * paint_draw_curve_cursor can apply its own region-offset translate. */
-  wmWindowViewport(win);
-
-  /* Re-apply the region scissor so handles don't bleed outside the 3D viewport. */
-  GPU_scissor_test(true);
-  GPU_scissor(region->winrct.xmin,
-              region->winrct.ymin,
-              BLI_rcti_size_x(&region->winrct) + 1,
-              BLI_rcti_size_y(&region->winrct) + 1);
-
-  ed::sculpt_paint::paint_draw_curve_cursor(
-      brush, &vc, mval, true, source_object, sculpt_settings);
-
-  GPU_scissor_test(false);
-}
+/* ED_paint_draw_curve_view3d_overlay removed: drawing is now handled
+ * by overlay_paint_curve_cursor.hh via the Overlay draw engine. */
 
 }  // namespace blender

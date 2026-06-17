@@ -146,11 +146,11 @@ bool ED_paintcurve_sync_to_source(bContext *C, struct PaintCurve *pc);
 /* `paint_cursor.cc` */
 
 /**
- * Draw paint-curve edit handles in the 3D viewport overlay pass.
- * Registered as #ARegionType::draw_overlay for the 3D viewport window region so that
- * handles remain visible even when the mouse is over a header or other UI element.
+ * Register the WM paint-cursor that tags the viewport for redraw when the mouse moves
+ * (Unit D). Must be called once during editor init (after WM is ready).
+ * Safe to call multiple times — guards against double-registration internally.
  */
-void ED_paint_draw_curve_view3d_overlay(const bContext *C, ARegion *region);
+void ED_paint_curve_overlay_redraw_register();
 
 /* `paint_canvas.cc` */
 

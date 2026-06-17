@@ -16,7 +16,10 @@
 #include "BLI_function_ref.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
 #include "BLI_vector.hh"
+
+#include "ED_paint_curve_draw.hh"
 
 #include "DNA_brush_types.h"
 
@@ -192,6 +195,18 @@ Object *paintcurve_nearest_scene_curve(const ViewContext *vc,
                                        const Object *exclude,
                                        blender::Vector<blender::Vector<blender::float2>>
                                            *r_polylines);
+
+/**
+ * Distance-test `mval` against pre-projected cached polylines; returns the nearest object within
+ * `threshold` pixels (or nullptr). `r_hover_polylines` receives that object's polylines.
+ * Used by ED_paint_curve_screen_silhouettes_build_cached so the draw module avoids re-projecting.
+ */
+const Object *paintcurve_nearest_from_cached_polylines(
+    float2 mval,
+    float threshold,
+    const Object *exclude,
+    Span<ed::sculpt_paint::PaintCurveCachedObjectSilhouette> cached,
+    Vector<Vector<float2>> *r_hover_polylines);
 
 void paintcurve_radius_handle_screen_get(const PaintCurve *pc,
                                          const PaintCurvePoint *screen_points,

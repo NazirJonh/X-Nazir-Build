@@ -25,6 +25,7 @@ set(SRC
   paint_curve.cc
   paint_curve_convert.cc
   paint_curve_geometry.cc
+  paint_curve_draw.cc
   paint_curve_sync.cc
   paint_curve_undo.cc
   paint_ops.cc

@@ -1541,8 +1541,9 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
     }
   }
 
-  /* Point-editing mode: ignore segment drags and stray clicks that miss control points. */
-  if (point_index < 0 && any_selected) {
+  /* Point-editing mode: ignore stray clicks that miss control points, but still allow
+   * segment slide (move_segment) when the cursor is on a curve segment. */
+  if (point_index < 0 && any_selected && !move_segment) {
     return OPERATOR_PASS_THROUGH;
   }
 

@@ -58,6 +58,7 @@ AssetShelfSettings &AssetShelfSettings::operator=(const AssetShelfSettings &othe
   STRNCPY_UTF8(this->search_string, other.search_string);
   this->preview_size = other.preview_size;
   this->display_flag = other.display_flag;
+  this->popup_width_units = other.popup_width_units;
 
   if (other.active_catalog_path) {
     this->active_catalog_path = BLI_strdup(other.active_catalog_path);

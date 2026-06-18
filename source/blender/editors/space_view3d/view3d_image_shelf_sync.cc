@@ -564,9 +564,8 @@ AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
     return nullptr;
   }
   image_grid_sync_shelf_from_state(*shelf, state);
-  if (View3D *v3d = CTX_wm_view3d(&C)) {
-    shelf->settings.preview_size = image_grid_preview_size_get(*v3d);
-  }
+  /* The popover keeps its own preview size (persisted per shelf type in the Preferences), so it is
+   * intentionally not overwritten from the N-panel image grid's #View3D preview size here. */
 
   if (std::optional<AssetWeakReference> weak_ref = image_grid_shelf_active_asset_weak_ref(
           C, state.filter.lib_ref))

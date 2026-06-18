@@ -909,7 +909,14 @@ static void asset_shelf_header_draw(const bContext *C, Header *header)
 
   layout.separator_spacer();
 
-  layout.popover(C, "ASSETSHELF_PT_display", "", ICON_IMGDISPLAY);
+  if (shelf_ptr.data) {
+    PropertyRNA *prop = RNA_struct_find_property(&shelf_ptr, "preview_size_preset");
+    layout.prop_with_popover(
+        &shelf_ptr, prop, -1, 0, ui::ITEM_R_ICON_ONLY, {}, ICON_NONE, "ASSETSHELF_PT_display");
+  }
+  else {
+    layout.popover(C, "ASSETSHELF_PT_display", "", ICON_IMGDISPLAY);
+  }
   ui::Layout &sub = layout.row(false);
   /* Same as file/asset browser header. */
   sub.ui_units_x_set(8);

@@ -10,6 +10,7 @@
 
 #include "asset_shelf.hh"
 
+#include "BKE_preferences.h"
 #include "BKE_screen.hh"
 
 #include "BLI_listbase.h"
@@ -17,6 +18,9 @@
 
 #include "BLT_translation.hh"
 
+#include "DNA_userdef_types.h"
+
+#include "UI_interface.hh"
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_tree_view.hh"
@@ -24,11 +28,13 @@
 #include "ED_asset_filter.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
+#include "ED_screen.hh"
 
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
 #include "WM_api.hh"
+#include "WM_types.hh"
 
 namespace blender::ed::asset::shelf {
 
@@ -83,16 +89,31 @@ AssetShelf *popup_shelf_get_or_create(const bContext &C, AssetShelfType &shelf_t
     return shelf;
   }
 
-  if (type_poll_for_popup(C, &shelf_type)) {
-    AssetShelf *new_shelf = create_shelf_from_type(shelf_type);
-    new_shelf->settings.display_flag |= ASSETSHELF_SHOW_NAMES;
-    /* Increased size of previews, to leave more space for the name. */
-    new_shelf->settings.preview_size = ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
-    popup_shelves.append(new_shelf);
-    return new_shelf;
+  if (!type_poll_for_popup(C, &shelf_type)) {
+    return nullptr;
   }
 
-  return nullptr;
+  AssetShelf *new_shelf = create_shelf_from_type(shelf_type);
+  new_shelf->is_popup = 1;
+  new_shelf->settings.display_flag |= ASSETSHELF_SHOW_NAMES;
+  /* Increased size of previews, to leave more space for the name. */
+  new_shelf->settings.preview_size = ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
+  /* #create_shelf_from_type zero-initializes the settings, so the DNA member default doesn't
+   * apply here. Seed an explicit default before the user preferences may override it. */
+  new_shelf->settings.popup_width_units = ASSET_SHELF_POPUP_WIDTH_UNITS_DEFAULT;
+
+  /* Overlay the user's persisted popup view preferences on top of the type defaults. The load is a
+   * no-op unless the user has explicitly stored preferences for this shelf type. */
+  short display_flag = short(new_shelf->settings.display_flag);
+  BKE_preferences_asset_shelf_popup_view_load(&U,
+                                              shelf_type.idname,
+                                              &new_shelf->settings.preview_size,
+                                              &display_flag,
+                                              &new_shelf->settings.popup_width_units);
+  new_shelf->settings.display_flag = AssetShelfSettings_DisplayFlag(display_flag);
+
+  popup_shelves.append(new_shelf);
+  return new_shelf;
 }
 
 void ensure_asset_library_fetched(const bContext &C, const AssetShelfType &shelf_type)
@@ -209,27 +230,24 @@ static AssetShelfType *lookup_type_from_idname_in_context(const bContext *C)
 }
 
 constexpr int LEFT_COL_WIDTH_UNITS = 10;
-constexpr int RIGHT_COL_WIDTH_UNITS_DEFAULT = 50;
 
 /**
  * Ensure the popover width fits into the window: Clamp width by the window width, minus some
  * padding.
  */
-static int layout_width_units_clamped(const wmWindow *win)
+static int layout_width_units_clamped(const wmWindow *win, int right_col_width)
 {
+  /* Ensure a reasonable minimum width for the right column. */
+  const int effective_right_width = std::max(right_col_width, 20);
   const int max_units_x = (WM_window_native_pixel_x(win) / UI_UNIT_X) - 2;
-  return std::min(LEFT_COL_WIDTH_UNITS + RIGHT_COL_WIDTH_UNITS_DEFAULT, max_units_x);
+  return std::min(LEFT_COL_WIDTH_UNITS + effective_right_width, max_units_x);
 }
 
 static void popover_panel_draw(const bContext *C, Panel *panel)
 {
   const wmWindow *win = CTX_wm_window(C);
-  const int layout_width_units = layout_width_units_clamped(win);
   AssetShelfType *shelf_type = lookup_type_from_idname_in_context(C);
   BLI_assert_msg(shelf_type != nullptr, "couldn't find asset shelf type from context");
-
-  ui::Layout &layout = *panel->layout;
-  layout.ui_units_x_set(layout_width_units);
 
   AssetShelf *shelf = popup_shelf_get_or_create(*C, *shelf_type);
   if (!shelf) {
@@ -239,10 +257,24 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
 
   settings_ensure_valid_library_ref(shelf->settings);
 
+  const int layout_width_units = layout_width_units_clamped(win,
+                                                            shelf->settings.popup_width_units);
+
+  /* Ensure the assertion doesn't fail if the window is extremely small. */
+  if (layout_width_units <= LEFT_COL_WIDTH_UNITS) {
+    return;
+  }
+  ui::Layout &layout = *panel->layout;
+  layout.ui_units_x_set(layout_width_units);
+
   bScreen *screen = CTX_wm_screen(C);
   PointerRNA library_ref_ptr = RNA_pointer_create_discrete(
       &screen->id, RNA_AssetLibraryReference, &shelf->settings.asset_library_reference);
   layout.context_ptr_set("asset_library_reference", &library_ref_ptr);
+
+  /* Make the shelf accessible to nested popovers (e.g. display settings panel). */
+  PointerRNA shelf_ptr = RNA_pointer_create_discrete(&screen->id, RNA_AssetShelf, shelf);
+  layout.context_ptr_set("asset_shelf", &shelf_ptr);
 
   ui::Layout &row = layout.row(false);
   ui::Layout &catalogs_col = row.column(false);
@@ -251,20 +283,50 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
   library_selector_draw(C, catalogs_col, *shelf);
   catalog_tree_draw(*C, catalogs_col, *shelf);
 
+  const int right_col_width_units = layout_width_units - LEFT_COL_WIDTH_UNITS;
+
   ui::Layout &right_col = row.column(false);
-  ui::Layout &sub = right_col.row(false);
-  /* Same as file/asset browser header. */
-  PointerRNA shelf_ptr = RNA_pointer_create_discrete(&screen->id, RNA_AssetShelf, shelf);
-  sub.prop(&shelf_ptr,
-           "search_filter",
-           /* Force the button to be active in a semi-modal state. */
-           ui::ITEM_R_TEXT_BUT_FORCE_SEMI_MODAL_ACTIVE,
-           "",
-           ICON_VIEWZOOM);
+  right_col.ui_units_x_set(right_col_width_units);
+  right_col.fixed_size_set(true);
+
+  ui::Layout &header_row = right_col.row(false);
+  header_row.ui_units_x_set(float(right_col_width_units));
+
+  /* Wrapper row expands to fill the header up to the fixed-width control buttons. */
+  ui::Layout &search_row = header_row.row(false);
+  search_row.prop(&shelf_ptr,
+                  "search_filter",
+                  /* Force the button to be active in a semi-modal state. */
+                  ui::ITEM_R_TEXT_BUT_FORCE_SEMI_MODAL_ACTIVE,
+                  "",
+                  ICON_VIEWZOOM);
+
+  /* Fixed-width preset buttons merged with the display settings popover.
+   * Non-default alignment is required in popover panels so button width is based on
+   * label content instead of the default 10 UI-unit placeholder width. */
+  ui::Layout &controls = header_row.row(true);
+  controls.fixed_size_set(true);
+  controls.alignment_set(ui::LayoutAlign::Right);
+  controls.prop_enum(
+      &shelf_ptr, "preview_size_preset", "SMALL", IFACE_("Small"), ICON_SHORTDISPLAY);
+  controls.prop_enum(
+      &shelf_ptr, "preview_size_preset", "MEDIUM", IFACE_("Medium"), ICON_IMGDISPLAY);
+  controls.prop_enum(
+      &shelf_ptr, "preview_size_preset", "LARGE", IFACE_("Large"), ICON_LONGDISPLAY);
+  {
+    PropertyRNA *preset_prop = RNA_struct_find_property(&shelf_ptr, "preview_size_preset");
+    controls.prop_with_popover(&shelf_ptr,
+                               preset_prop,
+                               -1,
+                               0,
+                               ui::ITEM_R_ICON_ONLY,
+                               std::nullopt,
+                               ICON_NONE,
+                               "ASSETSHELF_PT_popover_display");
+  }
 
   ui::Layout &asset_view_col = right_col.column(false);
-  BLI_assert((layout_width_units - LEFT_COL_WIDTH_UNITS) > 0);
-  asset_view_col.ui_units_x_set(layout_width_units - LEFT_COL_WIDTH_UNITS);
+  asset_view_col.ui_units_x_set(right_col_width_units);
   asset_view_col.fixed_size_set(true);
 
   build_asset_view(asset_view_col, shelf->settings.asset_library_reference, *shelf, *C);
@@ -280,6 +342,56 @@ static bool popover_panel_poll(const bContext *C, PanelType * /*panel_type*/)
   return type_poll_for_popup(*C, shelf_type);
 }
 
+/* ---------------------------------------------------------------------- */
+/** \name Display settings panel for the popover
+ * \{ */
+
+static void popover_display_panel_draw(const bContext *C, Panel *panel)
+{
+  ui::Layout &layout = *panel->layout;
+  layout.use_property_split_set(true);
+  layout.use_property_decorate_set(false);
+
+  /* Retrieve shelf from the popover context (set by popover_panel_draw). */
+  PointerRNA shelf_ptr = CTX_data_pointer_get_type(C, "asset_shelf", RNA_AssetShelf);
+  if (!shelf_ptr.data) {
+    return;
+  }
+
+  ui::Layout &col = layout.column(false);
+  col.prop(&shelf_ptr, "preview_size", UI_ITEM_NONE, IFACE_("Preview Size"), ICON_NONE);
+  col.prop(&shelf_ptr, "show_names", UI_ITEM_NONE, IFACE_("Show Names"), ICON_NONE);
+  col.prop(&shelf_ptr, "popup_width_units", UI_ITEM_NONE, IFACE_("Popup Width"), ICON_NONE);
+}
+
+static bool popover_display_panel_poll(const bContext *C, PanelType * /*panel_type*/)
+{
+  PointerRNA shelf_ptr = CTX_data_pointer_get_type(C, "asset_shelf", RNA_AssetShelf);
+  return shelf_ptr.data != nullptr;
+}
+
+static void asset_shelf_popover_listen(const wmRegionListenerParams *params)
+{
+  const wmNotifier *wmn = params->notifier;
+  ARegion *region = params->region;
+
+  switch (wmn->category) {
+    case NC_ASSET:
+      if (ELEM(wmn->data, ND_ASSET_LIST_READING, ND_ASSET_LIST_PREVIEW)) {
+        ED_region_tag_refresh_ui(region);
+      }
+      break;
+    case NC_SPACE:
+      if (wmn->data == ND_REGIONS_ASSET_SHELF) {
+        /* Redraw to apply changes to preview size or show names instantly. */
+        ED_region_tag_refresh_ui(region);
+      }
+      break;
+  }
+}
+
+/** \} */
+
 void popover_panel_register(ARegionType *region_type)
 {
   /* Uses global paneltype registry to allow usage as popover. So only register this once (may be
@@ -288,20 +400,37 @@ void popover_panel_register(ARegionType *region_type)
     return;
   }
 
-  PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
-  STRNCPY_UTF8(pt->idname, "ASSETSHELF_PT_popover_panel");
-  STRNCPY_UTF8(pt->label, N_("Asset Shelf Panel"));
-  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
-  pt->description = N_("Display an asset shelf in a popover panel");
-  pt->draw = popover_panel_draw;
-  pt->poll = popover_panel_poll;
-  pt->listener = asset::list::asset_reading_region_listen_fn;
-  /* Move to have first asset item under cursor. */
-  pt->offset_units_xy.x = -(LEFT_COL_WIDTH_UNITS + 1.5f);
-  /* Offset so mouse is below search button, over the first row of assets. */
-  pt->offset_units_xy.y = 2.5f;
-  BLI_addtail(&region_type->paneltypes, pt);
-  WM_paneltype_add(pt);
+  /* Register the main asset shelf popover panel. */
+  {
+    PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
+    STRNCPY_UTF8(pt->idname, "ASSETSHELF_PT_popover_panel");
+    STRNCPY_UTF8(pt->label, N_("Asset Shelf Panel"));
+    STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+    pt->description = N_("Display an asset shelf in a popover panel");
+    pt->draw = popover_panel_draw;
+    pt->poll = popover_panel_poll;
+    pt->listener = asset_shelf_popover_listen;
+    /* Move to have first asset item under cursor. */
+    pt->offset_units_xy.x = -(LEFT_COL_WIDTH_UNITS + 1.5f);
+    /* Offset so mouse is below search button, over the first row of assets. */
+    pt->offset_units_xy.y = 2.5f;
+    BLI_addtail(&region_type->paneltypes, pt);
+    WM_paneltype_add(pt);
+  }
+
+  /* Register the display settings panel (opened from the gear icon). */
+  {
+    PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
+    STRNCPY_UTF8(pt->idname, "ASSETSHELF_PT_popover_display");
+    STRNCPY_UTF8(pt->label, N_("Display Settings"));
+    STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+    pt->description = N_("Adjust preview size and display options for the brush asset popup");
+    pt->draw = popover_display_panel_draw;
+    pt->poll = popover_display_panel_poll;
+    /* No listener needed — the parent popover handles redraws. */
+    BLI_addtail(&region_type->paneltypes, pt);
+    WM_paneltype_add(pt);
+  }
 }
 
 }  // namespace blender::ed::asset::shelf

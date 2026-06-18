@@ -722,6 +722,9 @@ ENUM_OPERATORS(AssetShelfTypeFlag);
 
 #define ASSET_SHELF_PREVIEW_SIZE_DEFAULT 48
 
+/** Default width (in UI units) of the asset popover grid area when no user preference is stored. */
+#define ASSET_SHELF_POPUP_WIDTH_UNITS_DEFAULT 60
+
 struct AssetShelfType {
   /** Unique name. */
   char idname[BKE_ST_MAXNAME];

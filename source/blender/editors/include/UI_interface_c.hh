@@ -518,6 +518,13 @@ enum {
 
   /** Draw icon inverted to indicate a special state. */
   BUT_ICON_INVERT = 1 << 27,
+
+  /**
+   * Button belongs to a clip-scrolled view region (see #Layout::view_scroll_clip_set). When drawn,
+   * #block_draw clips it to #Block::view_scroll_clip_rect and skips it entirely when fully outside,
+   * so partially-scrolled grid rows are cut cleanly instead of overflowing the visible area.
+   */
+  BUT_GRID_SCROLL_CLIP = 1 << 28,
 };
 
 enum class ButPointerType : uint8_t {
@@ -2286,6 +2293,20 @@ bool panel_list_matches_data(ARegion *region,
  * as screen/ if ED_KEYMAP_UI is set, or internally in popup functions. */
 
 void region_handlers_add(ListBaseT<wmEventHandler> *handlers);
+/**
+ * True when #CTX_wm_region_popup has a panel with the given #PanelType.idname.
+ */
+bool region_popup_has_panel(const bContext *C, const char *panel_idname);
+
+/**
+ * Handler tried during region and popup-menu event handling, *before* button activation, so an
+ * editor that embeds a custom view can intercept events (e.g. wheel/drag scroll over the brush
+ * texture image grid). Registered by the owning editor to keep the generic UI layer free of
+ * space-specific dependencies. Returns a #WM_UI_HANDLER_* value; #WM_UI_HANDLER_BREAK stops both
+ * the remaining pre-button handlers and the default button handling.
+ */
+using RegionPreButtonHandlerFn = int (*)(bContext *C, const wmEvent *event, ARegion *region);
+void region_pre_button_handler_add(RegionPreButtonHandlerFn fn);
 void popup_handlers_add(bContext *C,
                         ListBaseT<wmEventHandler> *handlers,
                         PopupBlockHandle *popup,
@@ -2413,6 +2434,35 @@ void template_id_preview(Layout *layout,
                          int cols,
                          int filter = TEMPLATE_ID_FILTER_ALL,
                          bool hide_buttons = false);
+void template_asset_image_grid(Layout *layout, bContext *C, PointerRNA *ptr, const char *propname);
+
+/** Reusable grid view header widgets operating on #GridViewSettings. */
+void template_grid_library_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+void template_grid_catalog_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+void template_grid_preview_size(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+
+/**
+ * Reusable asset-library grid. Activating an item runs \a activate_operator with standard asset
+ * reference properties set.
+ */
+void template_grid_view_asset(Layout *layout,
+                              bContext *C,
+                              const char *grid_id,
+                              PointerRNA *settings_ptr,
+                              const char *activate_operator,
+                              const char *drag_operator);
+
+/**
+ * Reusable grid driven by a registered Python #UIGrid type over a collection property.
+ */
+void template_grid_view_custom(Layout *layout,
+                               bContext *C,
+                               const char *grid_id,
+                               const char *gridtype_name,
+                               PointerRNA *dataptr,
+                               const char *propname,
+                               PointerRNA *settings_ptr);
+
 void template_matrix(Layout *layout, PointerRNA *ptr, StringRefNull propname);
 /**
  * Version of #template_id using tabs.
@@ -3120,6 +3170,11 @@ AbstractView *region_view_find_at(const ARegion *region,
                                   const int xy[2],
                                   int pad,
                                   Block **r_block = nullptr);
+bool region_view_has_idname_at(const ARegion *region, const int xy[2], int pad, StringRef idname);
+/** Like #region_view_has_idname_at, but also matches a #ButtonType::ViewItem under \a xy. */
+bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], StringRef idname);
+/** True when \a xy is over a #ButtonType::Scroll bound to \a poin. */
+bool region_scroll_button_under_mouse(const ARegion *region, const int xy[2], const void *poin);
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event);
 /**
  * \param xy: Coordinate to find a view item at, in window space.

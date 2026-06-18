@@ -52,6 +52,7 @@ struct ViewLayer;
 struct bContext;
 struct rcti;
 struct uiListType;
+struct uiGridType;
 struct WorkSpace;
 struct WorkSpaceLayout;
 struct wmDrag;
@@ -1519,6 +1520,14 @@ void WM_uilisttype_to_full_list_id(const uiListType *ult,
  */
 const char *WM_uilisttype_list_id_get(const uiListType *ult, uiList *list);
 
+/* `wm_uigrid_type.cc` */
+
+void WM_uigridtype_init();
+uiGridType *WM_uigridtype_find(StringRef idname, bool quiet);
+bool WM_uigridtype_add(uiGridType *ugt);
+void WM_uigridtype_remove_ptr(Main *bmain, uiGridType *ugt);
+void WM_uigridtype_free();
+
 /* `wm_menu_type.cc` */
 
 /**
@@ -1938,6 +1947,8 @@ void *WM_jobs_customdata_from_type(wmWindowManager *wm, const void *owner, int j
 bool WM_jobs_is_running(const wmJob *wm_job);
 bool WM_jobs_is_stopped(const wmWindowManager *wm, const void *owner);
 void *WM_jobs_customdata_get(wmJob *wm_job);
+/** Stop flag for the worker; valid until the job is freed. */
+const bool *WM_jobs_stop_flag(wmJob *wm_job);
 void WM_jobs_customdata_set(wmJob *wm_job, void *customdata, void (*free)(void *));
 void WM_jobs_timer(wmJob *wm_job,
                    double time_step,

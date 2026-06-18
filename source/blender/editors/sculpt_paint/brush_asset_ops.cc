@@ -475,12 +475,10 @@ static bool brush_asset_edit_metadata_poll(bContext *C)
     return false;
   }
   if (!ID_IS_ASSET(&brush->id)) {
-    BLI_assert_unreachable();
     return false;
   }
   const AssetWeakReference *brush_weak_ref = paint->brush_asset_reference;
   if (!brush_weak_ref) {
-    BLI_assert_unreachable();
     return false;
   }
   const asset_system::AssetRepresentation *asset = asset::find_asset_from_weak_ref(
@@ -492,7 +490,6 @@ static bool brush_asset_edit_metadata_poll(bContext *C)
   const std::optional<AssetLibraryReference> library_ref =
       asset->owner_asset_library().library_reference();
   if (!library_ref) {
-    BLI_assert_unreachable();
     return false;
   }
   if (asset->owner_asset_library().is_read_only()) {
@@ -664,12 +661,10 @@ static std::optional<AssetLibraryReference> get_asset_library_reference(const bC
                                                                         const Brush &brush)
 {
   if (!ID_IS_ASSET(&brush.id)) {
-    BLI_assert_unreachable();
     return std::nullopt;
   }
   const AssetWeakReference *brush_weak_ref = paint.brush_asset_reference;
   if (!brush_weak_ref) {
-    BLI_assert_unreachable();
     return std::nullopt;
   }
   const asset_system::AssetRepresentation *asset = asset::find_asset_from_weak_ref(
@@ -692,7 +687,6 @@ static bool brush_asset_save_poll(bContext *C)
   const std::optional<AssetLibraryReference> library_ref = get_asset_library_reference(
       *C, *paint, *brush);
   if (!library_ref) {
-    BLI_assert_unreachable();
     return false;
   }
 
@@ -755,7 +749,6 @@ static bool brush_asset_revert_poll(bContext *C)
   const std::optional<AssetLibraryReference> library_ref = get_asset_library_reference(
       *C, *paint, *brush);
   if (!library_ref) {
-    BLI_assert_unreachable();
     return false;
   }
   if (library_ref->type == ASSET_LIBRARY_LOCAL) {

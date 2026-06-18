@@ -59,6 +59,12 @@ struct Popover {
   Button *but;
   ARegion *butregion;
 
+  /* Snapshot of pup->but->context taken the first time the popover block is created.
+   * pup->but becomes a dangling pointer after the parent block redraws (e.g. N-panel
+   * refresh triggered by async asset loading), so subsequent refreshes of the popover
+   * must use this copy instead of reading pup->but->context directly. */
+  bContextStore *saved_but_context;
+
   /* Needed for keymap removal. */
   wmWindow *window;
   wmKeyMap *keymap;
@@ -102,10 +108,16 @@ static void popover_create_block(bContext *C,
 
   pup->layout->operator_context_set(opcontext);
 
-  if (pup->but) {
-    if (pup->but->context) {
-      pup->layout->context_copy(pup->but->context);
-    }
+  if (pup->saved_but_context) {
+    /* On refresh pup->but is a dangling pointer; use the previously saved snapshot. */
+    pup->layout->context_copy(pup->saved_but_context);
+  }
+  else if (pup->but && pup->but->context) {
+    /* First call: capture a snapshot before pup->but becomes dangling after the parent block
+     * redraws (e.g. N-panel refresh triggered by async asset loading). */
+    pup->saved_but_context = MEM_new<bContextStore>(__func__);
+    pup->saved_but_context->entries = pup->but->context->entries;
+    pup->layout->context_copy(pup->saved_but_context);
   }
 }
 
@@ -256,6 +268,7 @@ static void block_free_func_POPOVER(void *arg_pup)
     wmWindow *window = pup->window;
     WM_event_remove_keymap_handler(&window->runtime->modalhandlers, pup->keymap);
   }
+  MEM_SAFE_DELETE(pup->saved_but_context);
   MEM_delete(pup);
 }
 

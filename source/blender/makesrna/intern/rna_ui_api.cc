@@ -1171,6 +1171,57 @@ static int rna_ui_get_enum_icon(bContext *C,
   return icon;
 }
 
+static void rna_uiTemplateAssetImageGrid(Layout *layout,
+                                         bContext *C,
+                                         PointerRNA *ptr,
+                                         const char *propname,
+                                         const bool is_popover)
+{
+  ui::template_asset_image_grid(layout, C, ptr, propname, is_popover);
+}
+
+static void rna_uiTemplateGridLibrarySelector(Layout *layout,
+                                              bContext *C,
+                                              PointerRNA *settings)
+{
+  ui::template_grid_library_selector(layout, C, settings);
+}
+
+static void rna_uiTemplateGridCatalogSelector(Layout *layout,
+                                                bContext *C,
+                                                PointerRNA *settings)
+{
+  ui::template_grid_catalog_selector(layout, C, settings);
+}
+
+static void rna_uiTemplateGridPreviewSize(Layout *layout, bContext *C, PointerRNA *settings)
+{
+  ui::template_grid_preview_size(layout, C, settings);
+}
+
+static void rna_uiTemplateGridViewAsset(Layout *layout,
+                                        bContext *C,
+                                        const char *grid_id,
+                                        PointerRNA *settings,
+                                        const char *activate_operator,
+                                        const char *drag_operator)
+{
+  ui::template_grid_view_asset(
+      layout, C, grid_id, settings, activate_operator, drag_operator);
+}
+
+static void rna_uiTemplateGridViewCustom(Layout *layout,
+                                         bContext *C,
+                                         const char *grid_id,
+                                         const char *gridtype_name,
+                                         PointerRNA *dataptr,
+                                         const char *propname,
+                                         PointerRNA *settings)
+{
+  ui::template_grid_view_custom(
+      layout, C, grid_id, gridtype_name, dataptr, propname, settings);
+}
+
 void rna_uiTemplateAssetShelfPopover(Layout *layout,
                                      bContext *C,
                                      const char *asset_shelf_id,
@@ -1911,6 +1962,56 @@ void RNA_api_ui_layout(StructRNA *srna)
                "",
                "Optionally limit the items which can be selected");
   RNA_def_boolean(func, "hide_buttons", false, "", "Show only list, no buttons");
+
+  func = RNA_def_function(srna, "template_asset_image_grid", "rna_uiTemplateAssetImageGrid");
+  RNA_def_function_ui_description(func, "Compact image asset grid for brush texture slot");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  api_ui_item_rna_common(func);
+  RNA_def_boolean(func, "is_popover", false, "Is Popover", "Grid is drawn inside a popover; uses an independent height that is not saved to disk");
+
+  func = RNA_def_function(srna, "template_grid_library_selector", "rna_uiTemplateGridLibrarySelector");
+  RNA_def_function_ui_description(func, "Asset-library dropdown for a reusable grid view");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+
+  func = RNA_def_function(srna, "template_grid_catalog_selector", "rna_uiTemplateGridCatalogSelector");
+  RNA_def_function_ui_description(func, "Catalog filter popover for a reusable grid view");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+
+  func = RNA_def_function(srna, "template_grid_preview_size", "rna_uiTemplateGridPreviewSize");
+  RNA_def_function_ui_description(func, "Preview tile size control for a reusable grid view");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+
+  func = RNA_def_function(srna, "template_grid_view_asset", "rna_uiTemplateGridViewAsset");
+  RNA_def_function_ui_description(func, "Reusable asset grid showing a library and catalog filter");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_string(func, "grid_id", nullptr, 0, "", "Unique identifier for grid UI state");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_string(func, "activate_operator", nullptr, 0, "", "Operator run when an item is clicked");
+  RNA_def_string(func, "drag_operator", nullptr, 0, "", "Operator run when an item is dragged");
+
+  func = RNA_def_function(srna, "template_grid_view_custom", "rna_uiTemplateGridViewCustom");
+  RNA_def_function_ui_description(
+      func, "Reusable grid driven by a registered Python UIGrid type");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_string(func, "grid_id", nullptr, 0, "", "Unique identifier for grid UI state");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(
+      func, "gridtype_name", nullptr, 0, "", "Identifier of the UIGrid type to use");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data owning the collection property");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "propname", nullptr, 0, "", "Collection property identifier");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
 
   func = RNA_def_function(srna, "template_matrix", "template_matrix");
   RNA_def_function_ui_description(

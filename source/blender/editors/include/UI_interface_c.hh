@@ -518,6 +518,13 @@ enum {
 
   /** Draw icon inverted to indicate a special state. */
   BUT_ICON_INVERT = 1 << 27,
+
+  /**
+   * Button belongs to a clip-scrolled view region (see #Layout::view_scroll_clip_set). When drawn,
+   * #block_draw clips it to #Block::view_scroll_clip_rect and skips it entirely when fully outside,
+   * so partially-scrolled grid rows are cut cleanly instead of overflowing the visible area.
+   */
+  BUT_GRID_SCROLL_CLIP = 1 << 28,
 };
 
 enum class ButPointerType : uint8_t {
@@ -2286,6 +2293,29 @@ bool panel_list_matches_data(ARegion *region,
  * as screen/ if ED_KEYMAP_UI is set, or internally in popup functions. */
 
 void region_handlers_add(ListBaseT<wmEventHandler> *handlers);
+/**
+ * True when \a region has a block whose panel matches the given #PanelType.idname.
+ * For popups, \a region is typically the popup region (e.g. #CTX_wm_region_popup),
+ * but it may also be passed directly when the context popup isn't set yet
+ * (e.g. pre-button handlers invoked from button-attached popovers).
+ */
+bool region_popup_has_panel(const ARegion *region, const char *panel_idname);
+
+/**
+ * Handler tried during region and popup-menu event handling, *before* button activation, so an
+ * editor that embeds a custom view can intercept events (e.g. wheel/drag scroll over the brush
+ * texture image grid). Registered by the owning editor to keep the generic UI layer free of
+ * space-specific dependencies. Returns a #WM_UI_HANDLER_* value; #WM_UI_HANDLER_BREAK stops both
+ * the remaining pre-button handlers and the default button handling.
+ */
+using RegionPreButtonHandlerFn = int (*)(bContext *C, const wmEvent *event, ARegion *region);
+void region_pre_button_handler_add(RegionPreButtonHandlerFn fn);
+/**
+ * Apply a Y-axis scroll delta (screen pixels) to the first popup block in \a region.
+ * Uses the same mechanism as MMB panning. No-op when the popup fits entirely on screen.
+ * Returns true if any scrolling was actually applied.
+ */
+bool popup_region_scroll_apply_dy(ARegion *region, float dy);
 void popup_handlers_add(bContext *C,
                         ListBaseT<wmEventHandler> *handlers,
                         PopupBlockHandle *popup,
@@ -2413,6 +2443,39 @@ void template_id_preview(Layout *layout,
                          int cols,
                          int filter = TEMPLATE_ID_FILTER_ALL,
                          bool hide_buttons = false);
+void template_asset_image_grid(Layout *layout,
+                               bContext *C,
+                               PointerRNA *ptr,
+                               const char *propname,
+                               bool is_popover = false);
+
+/** Reusable grid view header widgets operating on #GridViewSettings. */
+void template_grid_library_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+void template_grid_catalog_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+void template_grid_preview_size(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+
+/**
+ * Reusable asset-library grid. Activating an item runs \a activate_operator with standard asset
+ * reference properties set.
+ */
+void template_grid_view_asset(Layout *layout,
+                              bContext *C,
+                              const char *grid_id,
+                              PointerRNA *settings_ptr,
+                              const char *activate_operator,
+                              const char *drag_operator);
+
+/**
+ * Reusable grid driven by a registered Python #UIGrid type over a collection property.
+ */
+void template_grid_view_custom(Layout *layout,
+                               bContext *C,
+                               const char *grid_id,
+                               const char *gridtype_name,
+                               PointerRNA *dataptr,
+                               const char *propname,
+                               PointerRNA *settings_ptr);
+
 void template_matrix(Layout *layout, PointerRNA *ptr, StringRefNull propname);
 /**
  * Version of #template_id using tabs.
@@ -3120,6 +3183,25 @@ AbstractView *region_view_find_at(const ARegion *region,
                                   const int xy[2],
                                   int pad,
                                   Block **r_block = nullptr);
+bool region_view_has_idname_at(const ARegion *region, const int xy[2], int pad, StringRef idname);
+/** Like #region_view_has_idname_at, but also matches a #ButtonType::ViewItem under \a xy. */
+bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], StringRef idname);
+/**
+ * Like #region_view_item_has_idname_at, but only true when that view item is the *top-most*
+ * interactive button under the cursor — i.e. nothing else (an overlay scrollbar, a resize grip, …)
+ * sits above it. Uses the same hit test the window manager routes presses through, so callers can
+ * tell "the press lands on a tile" apart from "a tile happens to be behind another widget".
+ */
+bool region_view_item_topmost_at(const ARegion *region, const wmEvent *event, StringRef idname);
+/**
+ * True when a view registered under \a idname exists in \a region this redraw and has non-empty hit
+ * bounds. Unlike #region_view_has_idname_at this ignores the cursor position; it answers "was this
+ * view actually built and laid out this frame", letting callers tell a genuine cursor-outside result
+ * apart from a transient rebuild where the view has no tiles yet.
+ */
+bool region_view_idname_has_bounds(const ARegion *region, StringRef idname);
+/** True when \a xy is over a #ButtonType::Scroll bound to \a poin. */
+bool region_scroll_button_under_mouse(const ARegion *region, const int xy[2], const void *poin);
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event);
 /**
  * \param xy: Coordinate to find a view item at, in window space.

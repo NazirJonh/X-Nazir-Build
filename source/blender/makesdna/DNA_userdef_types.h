@@ -876,6 +876,29 @@ struct bUserScriptDirectory {
   char dir_path[/*FILE_MAXDIR*/ 768] = "";
 };
 
+/** #bUserAssetShelfSettings.popup_view_flag */
+enum eUserAssetShelfPopupViewFlag {
+  /**
+   * The popup view preferences (#bUserAssetShelfSettings.popup_preview_size etc.) were explicitly
+   * stored by the user. Needed to distinguish "never set" from a stored zero value, such as all
+   * display flags being disabled.
+   */
+  USER_ASSET_SHELF_POPUP_VIEW_STORED = (1 << 0),
+};
+
+/**
+ * Per-asset-library collapsed state of catalog paths, stored in the user preferences so it
+ * persists across sessions and editors.
+ */
+struct bUserAssetBrowserSettings {
+  struct bUserAssetBrowserSettings *next = nullptr, *prev = nullptr;
+
+  /** Asset library identifier (see asset_library_identifier_from_library_ref). */
+  char library_name[/*MAX_NAME*/ 64] = "";
+
+  ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
+};
+
 /**
  * Settings for an asset shelf, stored in the Preferences. Most settings are still stored in the
  * asset shelf instance in #AssetShelfSettings. This is just for the options that should be shared
@@ -888,6 +911,17 @@ struct bUserAssetShelfSettings {
   char shelf_idname[/*MAX_NAME*/ 64] = "";
 
   ListBaseT<AssetCatalogPathLink> enabled_catalog_paths = {nullptr, nullptr};
+
+  /**
+   * Popup-shelf view preferences. Persisted per shelf type in the Preferences so that the asset
+   * popover (e.g. brush asset popup) keeps its size and display options between sessions and
+   * across `.blend` files. Only meaningful once #USER_ASSET_SHELF_POPUP_VIEW_STORED is set in
+   * #popup_view_flag; otherwise the shelf type's defaults are used.
+   */
+  short popup_preview_size = 0;
+  short popup_display_flag = 0; /* #AssetShelfSettings_DisplayFlag */
+  short popup_width_units = 0;
+  short popup_view_flag = 0; /* #eUserAssetShelfPopupViewFlag */
 };
 
 /**
@@ -1054,6 +1088,7 @@ struct UserDef {
   ListBaseT<bUserMenu> user_menus = {nullptr, nullptr};
   ListBaseT<bUserAssetLibrary> asset_libraries = {nullptr, nullptr};
   ListBaseT<bUserExtensionRepo> extension_repos = {nullptr, nullptr};
+  ListBaseT<bUserAssetBrowserSettings> asset_browser_settings = {nullptr, nullptr};
   ListBaseT<bUserAssetShelfSettings> asset_shelves_settings = {nullptr, nullptr};
 
   char keyconfigstr[64] = "Blender";

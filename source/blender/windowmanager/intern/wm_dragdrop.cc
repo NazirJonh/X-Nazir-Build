@@ -13,6 +13,7 @@
 
 #include "AS_asset_representation.hh"
 
+#include "DNA_ID.h"
 #include "DNA_asset_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
@@ -992,6 +993,15 @@ const ListBaseT<wmDragAssetListItem> *WM_drag_asset_list_get(const wmDrag *drag)
   return &drag->asset_items;
 }
 
+static bool wm_drag_external_asset_exists_on_disk(const asset_system::AssetRepresentation &asset)
+{
+  /* Standalone image files are not stored inside a .blend. */
+  if (asset.get_id_type() == ID_IM) {
+    return BLI_is_file(asset.full_path().c_str());
+  }
+  return BLI_is_file(asset.full_library_path().c_str());
+}
+
 std::optional<bool> wm_drag_asset_path_exists(const wmDrag *drag)
 {
   if (!ELEM(drag->type, WM_DRAG_ASSET, WM_DRAG_ASSET_LIST)) {
@@ -999,7 +1009,11 @@ std::optional<bool> wm_drag_asset_path_exists(const wmDrag *drag)
   }
 
   if (const wmDragAsset *asset_drag = WM_drag_get_asset_data(drag, 0)) {
-    return BLI_is_file(asset_drag->asset->full_library_path().c_str());
+    const asset_system::AssetRepresentation &asset = *asset_drag->asset;
+    if (asset.local_id()) {
+      return true;
+    }
+    return wm_drag_external_asset_exists_on_disk(asset);
   }
 
   if (const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(drag)) {
@@ -1014,7 +1028,7 @@ std::optional<bool> wm_drag_asset_path_exists(const wmDrag *drag)
 
     for (wmDragAssetListItem &asset_item : *asset_drags) {
       if (!asset_item.is_external ||
-          BLI_is_file(asset_item.asset_data.external_info->asset->full_library_path().c_str()))
+          wm_drag_external_asset_exists_on_disk(*asset_item.asset_data.external_info->asset))
       {
         return true;
       }

@@ -462,6 +462,9 @@ struct FileAssetSelectParams {
    * catalog to show. */
   bUUID catalog_id;
 
+  /** Persistent collapsed state of catalog paths in the asset browser catalog tree. */
+  ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
+
   eFileAssetImportMethod import_method = FILE_ASSET_IMPORT_LINK;
   eFileAssetImportFlags import_flags = {};
 

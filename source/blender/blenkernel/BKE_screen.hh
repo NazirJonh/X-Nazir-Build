@@ -567,6 +567,15 @@ struct ARegionRuntime {
 
   /** Dummy panel used in popups so they can support layout panels. */
   Panel *popup_block_panel = nullptr;
+
+  /**
+   * Set during a panels layout pass (by the drawing code, e.g. the image-grid template) to request
+   * that #ED_region_panels_layout_ex keep the current scroll offset even when the content overflows
+   * the region. Used while a resize-grip is shrinking the content, so the panel area above the grip
+   * does not drift as #View2D::tot shrinks. Consumed (reset to false) at the end of the same layout
+   * pass — it must never persist across passes.
+   */
+  bool keep_scroll_offset_on_resize = false;
 };
 
 }  // namespace bke
@@ -612,6 +621,22 @@ struct uiListType {
 
   /** RNA integration. */
   ExtensionRNA rna_ext;
+};
+
+/** Registered Python grid provider type (no file persistence). */
+struct uiGridType {
+  uiGridType *next, *prev;
+
+  char idname[BKE_ST_MAXNAME];
+  char activate_operator[BKE_ST_MAXNAME];
+  char drag_operator[BKE_ST_MAXNAME];
+
+  ExtensionRNA rna_ext;
+};
+
+/** Ephemeral instance used when dispatching Python #UIGrid callbacks. */
+struct uiGrid {
+  uiGridType *type = nullptr;
 };
 
 /* Header types. */
@@ -706,6 +731,9 @@ ENUM_OPERATORS(AssetShelfTypeFlag);
 
 #define ASSET_SHELF_PREVIEW_SIZE_DEFAULT 48
 
+/** Default width (in UI units) of the asset popover grid area when no user preference is stored. */
+#define ASSET_SHELF_POPUP_WIDTH_UNITS_DEFAULT 60
+
 struct AssetShelfType {
   /** Unique name. */
   char idname[BKE_ST_MAXNAME];
@@ -750,6 +778,22 @@ struct AssetShelfType {
                             ui::Layout &layout);
 
   const AssetWeakReference *(*get_active_asset)(const AssetShelfType *shelf_type);
+  /* Like #get_active_asset but with context (e.g. image grid brush texture slot in popover).
+   * When set, asset shelf grid build prefers this over #get_active_asset. */
+  const AssetWeakReference *(*get_active_asset_from_context)(const AssetShelfType *shelf_type,
+                                                             const bContext *C);
+
+  /**
+   * Called once before the browse popover block is created (e.g. to sync shelf state).
+   * Set by the shelf owner module; avoids a direct dependency from bf_editor_interface on
+   * bf_editor_space_view3d.
+   */
+  void (*pre_popover_invoke)(bContext &C, AssetShelfType *shelf_type);
+  /**
+   * Called on every popover refresh to push layout context members required by the shelf's
+   * activate operator (e.g. brush target pointer for the image-texture shelf).
+   */
+  void (*setup_popover_layout)(bContext &C, ui::Layout &layout);
 
   /** RNA integration. */
   ExtensionRNA rna_ext;

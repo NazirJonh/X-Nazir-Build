@@ -30,6 +30,9 @@
 #include "ED_outliner.hh"
 #include "ED_screen.hh"
 #include "ED_transform.hh"
+#include "ED_view3d.hh"
+
+#include "UI_interface_c.hh"
 
 #include "view3d_intern.hh"
 #include "view3d_navigate.hh"
@@ -186,6 +189,27 @@ static void VIEW3D_OT_pastebuffer(wmOperatorType *ot)
 /** \name Registration
  * \{ */
 
+/**
+ * Pre-button UI handler for the brush texture image grid: lets wheel and pen/tablet drag scroll
+ * the embedded grid, plus a numpad-period shortcut to recenter on the active texture (including
+ * inside popovers), before button activation. Registered with the UI layer so the generic
+ * interface handler stays free of view3d dependencies.
+ */
+static int view3d_image_grid_ui_event_handler(bContext *C,
+                                              const wmEvent *event,
+                                              ARegion *region)
+{
+  int retval = ed::view3d::handle_image_grid_wheel_event(C, event, region);
+  if (retval != WM_UI_HANDLER_CONTINUE) {
+    return retval;
+  }
+  retval = ed::view3d::handle_image_grid_focus_active_event(C, event, region);
+  if (retval != WM_UI_HANDLER_CONTINUE) {
+    return retval;
+  }
+  return ed::view3d::handle_image_grid_drag_scroll_event(C, event, region);
+}
+
 void view3d_operatortypes()
 {
   WM_operatortype_append(VIEW3D_OT_rotate);
@@ -257,6 +281,24 @@ void view3d_operatortypes()
 
   WM_operatortype_append(VIEW3D_OT_ruler_add);
   WM_operatortype_append(VIEW3D_OT_ruler_remove);
+
+  WM_operatortype_append(VIEW3D_OT_image_grid_set_library);
+  WM_operatortype_append(VIEW3D_OT_image_grid_assign_texture);
+  WM_operatortype_append(VIEW3D_OT_image_grid_set_catalog);
+  WM_operatortype_append(VIEW3D_OT_image_grid_mark_asset);
+  WM_operatortype_append(VIEW3D_OT_image_grid_new);
+  WM_operatortype_append(VIEW3D_OT_image_grid_open);
+  WM_operatortype_append(VIEW3D_OT_image_grid_assign_catalog);
+  WM_operatortype_append(VIEW3D_OT_image_grid_copy_to_library);
+  WM_operatortype_append(VIEW3D_OT_image_grid_move_to_library);
+  WM_operatortype_append(VIEW3D_OT_image_grid_browse_assets);
+  WM_operatortype_append(VIEW3D_OT_image_shelf_activate_asset);
+  WM_operatortype_append(VIEW3D_OT_image_grid_scroll);
+  WM_operatortype_append(VIEW3D_OT_image_grid_refresh_library);
+
+  /* Invert the UI→view3d dependency: register the image-grid scroll interceptor with the generic
+   * UI layer instead of having #interface_handlers call into view3d directly. */
+  ui::region_pre_button_handler_add(view3d_image_grid_ui_event_handler);
 
   ed::transform::transform_operatortypes();
 }

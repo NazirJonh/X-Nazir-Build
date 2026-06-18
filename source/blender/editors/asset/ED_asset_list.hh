@@ -72,6 +72,18 @@ bool is_loaded(const AssetLibraryReference *library_reference);
  */
 void clear(const AssetLibraryReference *library_reference, const bContext *C);
 /**
+ * Tag all visible asset browser areas showing \a library_reference for refresh so #file_refresh()
+ * runs (starts a new read job when the filelist was force-reset).
+ */
+void tag_refresh_visible_asset_browsers(const AssetLibraryReference &library_reference,
+                                        const bContext *C);
+/**
+ * Reload assets from disk for \a library_reference (or the context's active library when null).
+ * Runs #ASSET_OT_library_refresh when its poll passes (same as `bpy.ops.asset.library_refresh()`),
+ * otherwise executes the same logic directly.
+ */
+void library_refresh(bContext *C, const AssetLibraryReference *library_reference = nullptr);
+/**
  * Clears the all asset library for reload in both the static asset list storage, as well as for
  * all open asset browsers. Call this whenever any asset library content changed in a way that a
  * reload is necessary.

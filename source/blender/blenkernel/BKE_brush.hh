@@ -50,6 +50,11 @@ Brush *BKE_brush_add(Main *bmain, const char *name, eObjectMode ob_mode);
 bool BKE_brush_delete(Main *bmain, Brush *brush);
 
 /**
+ * Initialize smooth algorithm parameters for existing brushes.
+ */
+void BKE_brush_init_smooth_algorithm_settings(Brush *brush);
+
+/**
  * Perform deep-copy of a Brush and its 'children' data-blocks.
  *
  * \param dupflag: Controls which sub-data are also duplicated

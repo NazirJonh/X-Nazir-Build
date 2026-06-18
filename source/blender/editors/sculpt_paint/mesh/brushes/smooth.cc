@@ -17,6 +17,7 @@
 
 #include "BLI_array.hh"
 #include "BLI_enumerable_thread_specific.hh"
+#include "BLI_index_mask.hh"
 #include "BLI_task.hh"
 
 #include "editors/sculpt_paint/mesh/mesh_brush_common.hh"
@@ -128,22 +129,46 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
               node_factors,
               all_distances.as_mutable_span().slice(node_vert_offsets[pos]));
           scale_factors(node_factors, strength);
-          const GroupedSpan<int> neighbors = calc_vert_neighbors_interior(
-              faces,
-              corner_verts,
-              vert_to_face_map,
-              ss.boundary_info_cache->verts,
-              ss.boundary_info_cache->edges,
-              attribute_data.hide_poly,
-              verts,
-              node_factors,
-              tls.neighbor_offsets,
-              tls.neighbor_data);
-          smooth::neighbor_data_average_mesh_check_loose(
-              position_data.eval,
-              verts,
-              neighbors,
-              new_positions.as_mutable_span().slice(node_vert_offsets[pos]));
+
+          const bool use_aggressive = (brush.smooth_algorithm == 2);
+          const bool use_moderate = (brush.smooth_algorithm == 1);
+
+          if (use_aggressive || (use_moderate && mesh.verts_num > 100000)) {
+            IndexMaskMemory mask_memory;
+            smooth::radius_based_smooth_mesh_aggressive(
+                pbvh,
+                position_data.eval,
+                faces,
+                corner_verts,
+                vert_to_face_map,
+                attribute_data.hide_poly,
+                ss.boundary_info_cache->verts,
+                ss.cache->location,
+                ss.cache->radius,
+                brush.smooth_radius_factor,
+                brush.smooth_distance_exponent,
+                IndexMask::from_indices(verts, mask_memory),
+                node_factors,
+                new_positions.as_mutable_span().slice(node_vert_offsets[pos]));
+          }
+          else {
+            const GroupedSpan<int> neighbors = calc_vert_neighbors_interior(
+                faces,
+                corner_verts,
+                vert_to_face_map,
+                ss.boundary_info_cache->verts,
+                ss.boundary_info_cache->edges,
+                attribute_data.hide_poly,
+                verts,
+                node_factors,
+                tls.neighbor_offsets,
+                tls.neighbor_data);
+            smooth::neighbor_data_average_mesh_check_loose(
+                position_data.eval,
+                verts,
+                neighbors,
+                new_positions.as_mutable_span().slice(node_vert_offsets[pos]));
+          }
         },
         exec_mode::grain_size(1));
 

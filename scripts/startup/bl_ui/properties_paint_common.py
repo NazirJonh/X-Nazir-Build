@@ -1063,6 +1063,13 @@ def brush_settings(layout, context, brush, popover=False):
                 col.prop(brush, "surface_smooth_current_vertex")
                 col.prop(brush, "surface_smooth_iterations")
 
+            col.separator()
+            col.label(text="Smoothing Algorithm:")
+            col.prop(brush, "smooth_algorithm")
+            if brush.smooth_algorithm == 2:  # AGGRESSIVE
+                col.prop(brush, "smooth_radius_factor", text="Search Radius")
+                col.prop(brush, "smooth_distance_exponent", text="Distance Weight")
+
         elif sculpt_brush_type == 'DISPLACEMENT_SMEAR':
             col = layout.column()
             col.prop(brush, "smear_deform_type")

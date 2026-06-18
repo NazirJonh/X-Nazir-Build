@@ -9,10 +9,13 @@
 #pragma once
 
 #include "BLI_generic_span.hh"
+#include "BLI_index_mask.hh"
 #include "BLI_offset_indices.hh"
 #include "BLI_ordered_edge.hh"
 #include "BLI_set.hh"
+#include "BLI_virtual_array.hh"
 
+#include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
 
 namespace blender {
@@ -129,6 +132,26 @@ void calc_relaxed_translations_bmesh(const Set<BMVert *, 0> &verts,
                                      bool filter_boundary_face_sets,
                                      Span<float> factors,
                                      MutableSpan<float3> translations);
+
+/**
+ * Hybrid topology-aware smoothing using spatial neighbor search.
+ * Finds neighbors within a given radius crossing PBVH node boundaries,
+ * providing more effective smoothing on high-poly meshes.
+ */
+void radius_based_smooth_mesh_aggressive(const bke::pbvh::Tree &pbvh,
+                                         const Span<float3> vert_positions,
+                                         const OffsetIndices<int> faces,
+                                         const Span<int> corner_verts,
+                                         const GroupedSpan<int> vert_to_face_map,
+                                         const VArraySpan<bool> &hide_poly,
+                                         const BitSpan boundary_verts,
+                                         const float3 &brush_center,
+                                         const float brush_radius,
+                                         const float search_radius_factor,
+                                         const float distance_exponent,
+                                         const IndexMask &affected_verts,
+                                         const Span<float> factors,
+                                         MutableSpan<float3> new_positions);
 
 }  // namespace ed::sculpt_paint::smooth
 

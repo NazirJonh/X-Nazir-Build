@@ -27,6 +27,8 @@
 
 #include "WM_types.hh"
 
+#include "BKE_brush.hh"
+
 namespace blender {
 
 static const EnumPropertyItem prop_direction_items[] = {
@@ -706,6 +708,7 @@ static PointerRNA rna_Brush_capabilities_get(PointerRNA *ptr)
 static void rna_Brush_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   Brush *br = static_cast<Brush *>(ptr->data);
+  BKE_brush_init_smooth_algorithm_settings(br);
   BKE_brush_tag_unsaved_changes(br);
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
   // WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
@@ -2571,6 +2574,25 @@ static void rna_def_brush(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem brush_smooth_algorithm_items[] = {
+      {0,
+       "CONSERVATIVE",
+       0,
+       "Conservative",
+       "Standard topological smoothing, fast but limited by mesh density"},
+      {1,
+       "MODERATE",
+       0,
+       "Moderate",
+       "Auto-selects algorithm based on mesh size (aggressive for meshes >100k vertices)"},
+      {2,
+       "AGGRESSIVE",
+       0,
+       "Aggressive",
+       "Radius-based spatial smoothing, slower but works well on high-poly meshes"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   static const EnumPropertyItem brush_pose_deform_type_items[] = {
       {BRUSH_POSE_DEFORM_ROTATE_TWIST, "ROTATE_TWIST", 0, "Rotate/Twist", ""},
       {BRUSH_POSE_DEFORM_SCALE_TRANSLATE, "SCALE_TRANSLATE", 0, "Scale/Translate", ""},
@@ -3375,6 +3397,33 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_range(prop, 1, 10);
   RNA_def_property_ui_range(prop, 1, 10, 1, 3);
   RNA_def_property_ui_text(prop, "Iterations", "Number of smoothing iterations per brush step");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "smooth_algorithm", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, brush_smooth_algorithm_items);
+  RNA_def_property_enum_sdna(prop, nullptr, "smooth_algorithm");
+  RNA_def_property_ui_text(prop, "Smoothing Algorithm", "Algorithm used for mesh smoothing");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "smooth_radius_factor", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "smooth_radius_factor");
+  RNA_def_property_range(prop, 1.0f, 3.0f);
+  RNA_def_property_ui_range(prop, 1.0f, 3.0f, 0.1f, 2);
+  RNA_def_property_ui_text(
+      prop,
+      "Search Radius Factor",
+      "Multiplier for spatial search radius in aggressive smoothing");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "smooth_distance_exponent", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "smooth_distance_exponent");
+  RNA_def_property_range(prop, 1.0f, 4.0f);
+  RNA_def_property_ui_range(prop, 1.0f, 4.0f, 0.1f, 2);
+  RNA_def_property_ui_text(
+      prop,
+      "Distance Weighting",
+      "Controls Gaussian kernel width: 1.0 = wide kernel, pulls toward large-scale "
+      "surface (sigma=radius); 4.0 = narrow kernel, only local neighbors matter");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "multiplane_scrape_angle", PROP_FLOAT, PROP_FACTOR);

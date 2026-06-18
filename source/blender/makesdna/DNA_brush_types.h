@@ -317,8 +317,9 @@ struct Brush {
   eBrushGPWeightType gpencil_weight_brush_type = GPWEIGHT_BRUSH_TYPE_DRAW;
   /** Active curves sculpt brush type. */
   eBrushCurvesSculptType curves_sculpt_brush_type = CURVES_SCULPT_BRUSH_TYPE_COMB;
-
-  char _pad1[2] = {};
+  /** Smoothing algorithm type: 0=Conservative, 1=Moderate, 2=Aggressive. */
+  char smooth_algorithm = 0;
+  char _pad1[1] = {};
 
   float autosmooth_factor = 0.0f;
 
@@ -402,6 +403,12 @@ struct Brush {
   float surface_smooth_shape_preservation = 0;
   float surface_smooth_current_vertex = 0;
   int surface_smooth_iterations = 0;
+
+  /* TASK-001: Radius-Based Aggressive Smoothing Algorithm */
+  /** Radius multiplier for spatial search (1.0-3.0, default 1.5). */
+  float smooth_radius_factor = 1.5f;
+  /** Distance weighting exponent (1.0-4.0, default 1.0). Lower = wider sigma = more large-scale. */
+  float smooth_distance_exponent = 1.0f;
 
   /* multiplane scrape */
   float multiplane_scrape_angle = 0;

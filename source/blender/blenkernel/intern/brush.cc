@@ -655,6 +655,11 @@ Brush *BKE_brush_add(Main *bmain, const char *name, const eObjectMode ob_mode)
 
   brush->ob_mode = ob_mode;
 
+  /* Initialize smooth algorithm parameters for new brushes. */
+  brush->smooth_algorithm = 0;
+  brush->smooth_radius_factor = 1.5f;
+  brush->smooth_distance_exponent = 1.0f;
+
   if (ob_mode == OB_MODE_SCULPT_CURVES) {
     BKE_brush_init_curves_sculpt_settings(brush);
   }
@@ -671,6 +676,19 @@ Brush *BKE_brush_add(Main *bmain, const char *name, const eObjectMode ob_mode)
   }
 
   return brush;
+}
+
+void BKE_brush_init_smooth_algorithm_settings(Brush *brush)
+{
+  if (brush == nullptr) {
+    return;
+  }
+
+  if (brush->smooth_radius_factor == 0.0f && brush->smooth_distance_exponent == 0.0f) {
+    brush->smooth_algorithm = 0;
+    brush->smooth_radius_factor = 1.5f;
+    brush->smooth_distance_exponent = 1.0f;
+  }
 }
 
 void BKE_brush_init_gpencil_settings(Brush *brush)

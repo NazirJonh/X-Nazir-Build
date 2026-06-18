@@ -12,6 +12,7 @@
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
+#include "BLI_task.hh"
 
 #include "BKE_attribute_math.hh"
 #include "BKE_mesh.hh"
@@ -859,5 +860,179 @@ void blur_geometry_data_array(const Object &object,
     }
   }
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Radius-Based Aggressive Smoothing
+ * \{ */
+
+static void spatial_neighbor_search(const bke::pbvh::Tree &pbvh,
+                                    const Span<float3> vert_positions,
+                                    const float3 &center,
+                                    const float radius,
+                                    const int exclude_vert_index,
+                                    Vector<int> &neighbor_verts,
+                                    Vector<float> &distances)
+{
+  neighbor_verts.clear();
+  distances.clear();
+
+  const int max_neighbors = 4096;
+  const float radius_squared = radius * radius;
+
+  IndexMaskMemory memory;
+  const IndexMask node_mask = bke::pbvh::search_nodes(
+      pbvh, memory, [&](const bke::pbvh::Node &node) {
+        const Bounds<float3> &bounds = node.bounds();
+        const float3 closest_point = math::clamp(center, bounds.min, bounds.max);
+        return math::distance_squared(center, closest_point) <= radius_squared;
+      });
+
+  switch (pbvh.type()) {
+    case bke::pbvh::Type::Mesh: {
+      const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+      node_mask.foreach_index([&](const int node_index) {
+        if (neighbor_verts.size() >= max_neighbors) {
+          return;
+        }
+        for (const int vert_index : nodes[node_index].all_verts()) {
+          if (neighbor_verts.size() >= max_neighbors) {
+            break;
+          }
+          /* Skip the query vertex itself to avoid self-weighting in the average. */
+          if (vert_index == exclude_vert_index) {
+            continue;
+          }
+          const float dist_sq = math::distance_squared(vert_positions[vert_index], center);
+          if (dist_sq <= radius_squared) {
+            neighbor_verts.append(vert_index);
+            distances.append(sqrtf(dist_sq));
+          }
+        }
+      });
+      break;
+    }
+    case bke::pbvh::Type::Grids:
+    case bke::pbvh::Type::BMesh:
+      break;
+  }
+}
+
+static float3 weighted_average_by_distance(const Span<float3> vert_positions,
+                                           const Span<int> neighbor_indices,
+                                           const Span<float> distances,
+                                           const float max_radius,
+                                           const float distance_exponent)
+{
+  if (neighbor_indices.is_empty()) {
+    return float3(0);
+  }
+
+  /* Gaussian sigma controlled by distance_exponent: sigma = max_radius / exponent.
+   * Lower exponent → wider sigma → distant (flat-area) vertices contribute more weight.
+   * exponent=1 → sigma=R, weight at boundary=0.607 (large-scale smoothing).
+   * exponent=3 → sigma=R/3, weight at boundary=0.011 (effectively local). */
+  const float sigma = max_radius / std::max(distance_exponent, 0.1f);
+  if (sigma < 1e-6f) {
+    float3 sum(0);
+    for (const int idx : neighbor_indices) {
+      sum += vert_positions[idx];
+    }
+    return sum / float(neighbor_indices.size());
+  }
+
+  const float sigma_sq_inv = 1.0f / (2.0f * sigma * sigma);
+  float3 weighted_sum(0);
+  float total_weight = 0.0f;
+
+  for (const int i : neighbor_indices.index_range()) {
+    const float distance_sq = distances[i] * distances[i];
+    const float weight = expf(-distance_sq * sigma_sq_inv);
+    if (UNLIKELY(!isfinite(weight))) {
+      continue;
+    }
+    weighted_sum += vert_positions[neighbor_indices[i]] * weight;
+    total_weight += weight;
+  }
+
+  if (total_weight < 1e-6f) {
+    float3 sum(0);
+    for (const int idx : neighbor_indices) {
+      sum += vert_positions[idx];
+    }
+    return sum / float(neighbor_indices.size());
+  }
+
+  return weighted_sum / total_weight;
+}
+
+void radius_based_smooth_mesh_aggressive(const bke::pbvh::Tree &pbvh,
+                                         const Span<float3> vert_positions,
+                                         const OffsetIndices<int> /*faces*/,
+                                         const Span<int> /*corner_verts*/,
+                                         const GroupedSpan<int> /*vert_to_face_map*/,
+                                         const VArraySpan<bool> & /*hide_poly*/,
+                                         const BitSpan /*boundary_verts*/,
+                                         const float3 & /*brush_center*/,
+                                         const float brush_radius,
+                                         const float search_radius_factor,
+                                         const float distance_exponent,
+                                         const IndexMask &affected_verts,
+                                         const Span<float> factors,
+                                         MutableSpan<float3> new_positions)
+{
+  BLI_assert(affected_verts.size() == factors.size());
+  BLI_assert(affected_verts.size() == new_positions.size());
+
+  if (affected_verts.is_empty()) {
+    return;
+  }
+
+  const float base_search_radius = brush_radius * search_radius_factor;
+
+  struct LocalData {
+    Vector<int> neighbors;
+    Vector<float> distances;
+  };
+
+  threading::EnumerableThreadSpecific<LocalData> all_tls;
+
+  affected_verts.foreach_index([&](const int vert_index, const int i) {
+    LocalData &tls = all_tls.local();
+
+    const float factor = factors[i];
+    if (factor == 0.0f) {
+      new_positions[i] = vert_positions[vert_index];
+      return;
+    }
+
+    const float3 &vert_pos = vert_positions[vert_index];
+
+    /* Exclude the vertex itself so the weighted average is computed from true neighbors only.
+     * Without this, the vertex's own position (at distance 0) dominates the Gaussian weighting
+     * and smoothing becomes nearly ineffective. */
+    spatial_neighbor_search(
+        pbvh, vert_positions, vert_pos, base_search_radius, vert_index, tls.neighbors, tls.distances);
+
+    if (tls.neighbors.is_empty()) {
+      new_positions[i] = vert_pos;
+      return;
+    }
+
+    const float3 smooth_pos = weighted_average_by_distance(
+        vert_positions, tls.neighbors, tls.distances, base_search_radius, distance_exponent);
+
+    if (!isfinite(smooth_pos.x) || !isfinite(smooth_pos.y) || !isfinite(smooth_pos.z)) {
+      new_positions[i] = vert_pos;
+      return;
+    }
+
+    /* Return the raw smoothed target position. The caller (apply_positions_faces) applies
+     * the brush factor via scale_translations, so we must not apply it here to avoid
+     * squaring the factor (factor² effect). */
+    new_positions[i] = smooth_pos;
+  }, exec_mode::grain_size(32));
+}
+
+/** \} */
 
 }  // namespace blender::ed::sculpt_paint::smooth

@@ -60,6 +60,15 @@ void cancel_modal_transform(bContext *C, Object &ob);
 void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char *undo_name);
 void end_transform(bContext *C, Object &ob);
 
+/**
+ * Set the sculpt session pivot to the average position of the unmasked geometry.
+ *
+ * Shares the logic used by the #PivotPositionMode::Unmasked mode of
+ * #SCULPT_OT_set_pivot_position so callers can position the pivot without invoking the operator
+ * (which would push a redundant undo step when called from inside another undoable operator).
+ */
+void set_pivot_to_unmasked_position(bContext *C, Object &ob);
+
 /* `sculpt_undo.cc` */
 
 namespace undo {

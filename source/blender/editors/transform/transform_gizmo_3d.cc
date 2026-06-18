@@ -16,6 +16,7 @@
 #include "BLI_listbase.hh"
 #include "BLI_math_geom_c.hh"
 #include "BLI_math_matrix_c.hh"
+#include "BLI_math_rotation_c.hh"
 
 #include "DNA_armature_types.h"
 #include "DNA_lattice_types.h"
@@ -1013,6 +1014,13 @@ int calc_gizmo_stats(const bContext *C,
     calc_orientation_from_type_ex(
         *bmain, scene, view_layer, v3d, rv3d, ob, obedit, orient_index, pivot_point, mat);
     copy_m3_m3(tbounds->axis, mat);
+
+    if ((ob->mode & OB_MODE_SCULPT) && ob->runtime->sculpt_session) {
+      const SculptSession &ss = *ob->runtime->sculpt_session;
+      float pivot_rot_mat[3][3];
+      quat_to_mat3(pivot_rot_mat, ss.pivot_rot);
+      mul_m3_m3m3(tbounds->axis, tbounds->axis, pivot_rot_mat);
+    }
   }
 
   reset_tw_center(tbounds);

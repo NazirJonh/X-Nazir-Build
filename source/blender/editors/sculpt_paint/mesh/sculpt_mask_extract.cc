@@ -6,6 +6,7 @@
  * \ingroup edmesh
  */
 
+#include "DNA_key_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
@@ -19,9 +20,12 @@
 #include "BKE_modifier.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_scene.hh"
 #include "BKE_shrinkwrap.hh"
 
 #include "BLI_math_vector_c.hh"
+#include "BLI_set.hh"
+#include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
 
@@ -560,4 +564,420 @@ void SCULPT_OT_paint_mask_slice(wmOperatorType *ot)
                          "Create a new object from the sliced mask");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Mask Duplicate/Cut Operator
+ * \{ */
+
+enum class MaskDuplicateMode {
+  DUPLICATE = 0,
+  CUT = 1,
+};
+
+/* Tag faces whose vertices are all masked above the threshold. Returns whether any face was
+ * tagged. */
+static bool tag_masked_faces_for_duplicate(BMesh *bm, const float mask_threshold)
+{
+  const int cd_vert_mask_offset = CustomData_get_offset_named(
+      &bm->vdata, CD_PROP_FLOAT, ".sculpt_mask");
+  BLI_assert(cd_vert_mask_offset != -1);
+
+  BM_mesh_elem_hflag_disable_all(bm, BM_VERT | BM_EDGE | BM_FACE, BM_ELEM_TAG, false);
+
+  BMFace *f;
+  BMIter iter;
+  bool any_tagged = false;
+
+  BM_ITER_MESH (f, &iter, bm, BM_FACES_OF_MESH) {
+    if (BM_elem_flag_test_bool(f, BM_ELEM_HIDDEN)) {
+      continue;
+    }
+
+    bool all_masked = true;
+    BMVert *v;
+    BMIter face_iter;
+    BM_ITER_ELEM (v, &face_iter, f, BM_VERTS_OF_FACE) {
+      const float mask = BM_ELEM_CD_GET_FLOAT(v, cd_vert_mask_offset);
+      if (mask < mask_threshold) {
+        all_masked = false;
+        break;
+      }
+    }
+
+    if (all_masked) {
+      BM_elem_flag_set(f, BM_ELEM_TAG, true);
+      any_tagged = true;
+    }
+  }
+
+  return any_tagged;
+}
+
+static int bmesh_find_next_face_set_id(BMesh *bm)
+{
+  const int cd_face_sets_offset = CustomData_get_offset_named(
+      &bm->pdata, CD_PROP_INT32, ".sculpt_face_set");
+  if (cd_face_sets_offset == -1) {
+    return -1;
+  }
+
+  int next_face_set = 1;
+  BMFace *face;
+  BMIter iter;
+  BM_ITER_MESH (face, &iter, bm, BM_FACES_OF_MESH) {
+    next_face_set = std::max(next_face_set, BM_ELEM_CD_GET_INT(face, cd_face_sets_offset));
+  }
+  return next_face_set + 1;
+}
+
+static void bmesh_assign_face_set_to_tagged_faces(BMesh *bm, const int face_set_id)
+{
+  const int cd_face_sets_offset = CustomData_get_offset_named(
+      &bm->pdata, CD_PROP_INT32, ".sculpt_face_set");
+  if (cd_face_sets_offset == -1) {
+    return;
+  }
+
+  BMFace *face;
+  BMIter iter;
+  BM_ITER_MESH (face, &iter, bm, BM_FACES_OF_MESH) {
+    if (BM_elem_flag_test_bool(face, BM_ELEM_TAG)) {
+      BM_ELEM_CD_SET_INT(face, cd_face_sets_offset, face_set_id);
+    }
+  }
+}
+
+static void edgenet_fill_tagged_boundary_edges(BMesh *bm, const bool use_face_sets)
+{
+  BM_mesh_edgenet(bm, true, true);
+  BM_mesh_normals_update(bm);
+  BMO_op_callf(bm,
+               (BMO_FLAG_DEFAULTS & ~BMO_FLAG_RESPECT_HIDE),
+               "triangulate faces=%hf quad_method=%i ngon_method=%i",
+               BM_ELEM_TAG,
+               0,
+               0);
+
+  /* Assign face sets to new fill geometry before tagging all faces for normal recalc. */
+  if (use_face_sets) {
+    const int face_set_id = bmesh_find_next_face_set_id(bm);
+    if (face_set_id != -1) {
+      bmesh_assign_face_set_to_tagged_faces(bm, face_set_id);
+    }
+  }
+
+  BM_mesh_elem_hflag_enable_all(bm, BM_FACE, BM_ELEM_TAG, false);
+  BMO_op_callf(bm,
+               (BMO_FLAG_DEFAULTS & ~BMO_FLAG_RESPECT_HIDE),
+               "recalc_face_normals faces=%hf",
+               BM_ELEM_TAG);
+
+  BM_mesh_elem_hflag_disable_all(bm, BM_VERT | BM_EDGE | BM_FACE, BM_ELEM_TAG, false);
+}
+
+static void collect_verts_in_face_islands(const Span<BMVert *> seeds, Set<BMVert *> &r_verts)
+{
+  for (BMVert *vert : seeds) {
+    r_verts.add(vert);
+  }
+
+  Vector<BMFace *> face_stack;
+  for (BMVert *vert : seeds) {
+    BMIter iter;
+    BMFace *face;
+    BM_ITER_ELEM (face, &iter, vert, BM_FACES_OF_VERT) {
+      face_stack.append(face);
+    }
+  }
+
+  Set<BMFace *> visited_faces;
+  while (!face_stack.is_empty()) {
+    BMFace *face = face_stack.pop_last();
+    if (visited_faces.contains(face)) {
+      continue;
+    }
+    visited_faces.add(face);
+
+    BMIter iter;
+    BMVert *face_vert;
+    BM_ITER_ELEM (face_vert, &iter, face, BM_VERTS_OF_FACE) {
+      if (r_verts.add(face_vert)) {
+        BMIter face_iter;
+        BMFace *other_face;
+        BM_ITER_ELEM (other_face, &face_iter, face_vert, BM_FACES_OF_VERT) {
+          face_stack.append(other_face);
+        }
+      }
+    }
+  }
+}
+
+static int object_active_shapekey_index(const Object &ob)
+{
+  const Mesh *mesh = id_cast<const Mesh *>(ob.data);
+  if ((ob.shapenr == 0) && mesh->key && !mesh->key->block.is_empty()) {
+    return 1;
+  }
+  return ob.shapenr;
+}
+
+/**
+ * Fill open boundary holes on either the separated piece or the remaining mesh.
+ *
+ * \param fill_piece: true  → fill boundaries where both edge verts belong to \a verts
+ *                            (i.e. the piece's open boundary).
+ *                    false → fill boundaries where NOT both verts belong to \a verts
+ *                            (i.e. the hole left in the remaining mesh after a cut).
+ */
+static void fill_boundary_holes(BMesh *bm,
+                                const Span<BMVert *> verts,
+                                const bool fill_piece,
+                                const bool use_face_sets)
+{
+  Set<BMVert *> vert_set;
+  for (BMVert *vert : verts) {
+    vert_set.add(vert);
+  }
+
+  BM_mesh_elem_hflag_disable_all(bm, BM_VERT | BM_EDGE | BM_FACE, BM_ELEM_TAG, false);
+
+  BMEdge *e;
+  BMIter iter;
+  BM_ITER_MESH (e, &iter, bm, BM_EDGES_OF_MESH) {
+    if (!BM_edge_is_boundary(e)) {
+      continue;
+    }
+    const bool both_in_set = vert_set.contains(e->v1) && vert_set.contains(e->v2);
+    if (fill_piece != both_in_set) {
+      continue;
+    }
+    BM_elem_flag_set(e, BM_ELEM_TAG, true);
+  }
+
+  edgenet_fill_tagged_boundary_edges(bm, use_face_sets);
+}
+
+static wmOperatorStatus mask_duplicate_exec(bContext *C, wmOperator *op)
+{
+  using namespace blender::ed;
+
+  const Scene &scene = *CTX_data_scene(C);
+  Object &ob = *CTX_data_active_object(C);
+  Mesh *mesh = id_cast<Mesh *>(ob.data);
+  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+
+  if (!mesh->attributes().contains(".sculpt_mask")) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Get operator properties. */
+  const MaskDuplicateMode mode = MaskDuplicateMode(RNA_enum_get(op->ptr, "mode"));
+  const bool fill_holes = RNA_boolean_get(op->ptr, "fill_holes");
+  const bool fill_piece_holes = RNA_boolean_get(op->ptr, "fill_piece_holes");
+  const float mask_threshold = RNA_float_get(op->ptr, "mask_threshold");
+  const bool use_face_sets = mesh->attributes().contains(".sculpt_face_set");
+
+  /* Sync sculpt session state. */
+  BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
+
+  /* Create BMesh. */
+  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(mesh);
+  BMeshCreateParams bm_create_params{};
+  bm_create_params.use_toolflags = true;
+  BMesh *bm = BM_mesh_create(&allocsize, &bm_create_params);
+  BM_mesh_elem_toolflags_ensure(bm);
+
+  BMeshFromMeshParams mesh_to_bm_params{};
+  mesh_to_bm_params.calc_face_normal = true;
+  mesh_to_bm_params.use_shapekey = true;
+  mesh_to_bm_params.active_shapekey = object_active_shapekey_index(ob);
+  mesh_to_bm_params.add_key_index = true;
+  BM_mesh_bm_from_me(bm, mesh, &mesh_to_bm_params);
+
+  /* Tag masked faces. */
+  if (!tag_masked_faces_for_duplicate(bm, mask_threshold)) {
+    BM_mesh_free(bm);
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Get mask offset for later mask inversion. */
+  const int cd_vert_mask_offset = CustomData_get_offset_named(
+      &bm->vdata, CD_PROP_FLOAT, ".sculpt_mask");
+  if (cd_vert_mask_offset == -1) {
+    /* Shouldn't happen: we checked mesh->attributes().contains(".sculpt_mask") above. */
+    BM_mesh_free(bm);
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Begin geometry undo only after confirming the operation will proceed. */
+  sculpt_paint::undo::geometry_begin(scene, ob, op);
+
+  /* Execute duplicate or split operation. */
+  BMOperator bmo_op;
+  if (mode == MaskDuplicateMode::CUT) {
+    BMO_op_init(bm, &bmo_op, (BMO_FLAG_DEFAULTS & ~BMO_FLAG_RESPECT_HIDE), "split");
+    BMO_slot_bool_set(bmo_op.slots_in, "use_only_faces", true);
+  }
+  else {
+    BMO_op_init(bm, &bmo_op, (BMO_FLAG_DEFAULTS & ~BMO_FLAG_RESPECT_HIDE), "duplicate");
+  }
+  BMO_slot_buffer_from_enabled_hflag(
+      bm, &bmo_op, bmo_op.slots_in, "geom", BM_FACE, BM_ELEM_TAG);
+  BMO_op_exec(bm, &bmo_op);
+
+  Vector<BMVert *> split_verts;
+  BMOIter oiter;
+  BMVert *v;
+  BMO_ITER (v, &oiter, bmo_op.slots_out, "geom.out", BM_VERT) {
+    split_verts.append(v);
+  }
+
+  BMO_op_finish(bm, &bmo_op);
+
+  if (fill_piece_holes) {
+    fill_boundary_holes(bm, split_verts, true, use_face_sets);
+  }
+
+  if (mode == MaskDuplicateMode::CUT && fill_holes) {
+    fill_boundary_holes(bm, split_verts, false, use_face_sets);
+  }
+
+  /* Mask inversion: piece island unmasked, everything else masked for transform. */
+  Set<BMVert *> piece_verts;
+  collect_verts_in_face_islands(split_verts, piece_verts);
+
+  BMIter iter;
+  BM_ITER_MESH (v, &iter, bm, BM_VERTS_OF_MESH) {
+    if (!BM_elem_flag_test_bool(v, BM_ELEM_HIDDEN)) {
+      BM_ELEM_CD_SET_FLOAT(v, cd_vert_mask_offset, 1.0f);
+    }
+  }
+  for (BMVert *piece_vert : piece_verts) {
+    if (!BM_elem_flag_test_bool(piece_vert, BM_ELEM_HIDDEN)) {
+      BM_ELEM_CD_SET_FLOAT(piece_vert, cd_vert_mask_offset, 0.0f);
+    }
+  }
+
+  /* Write back to the object's mesh directly so existing shape keys are updated. */
+  BMeshToMeshParams bm_to_mesh_params{};
+  bm_to_mesh_params.calc_object_remap = false;
+  BM_mesh_bm_to_me(nullptr, bm, mesh, &bm_to_mesh_params);
+  BM_mesh_free(bm);
+
+  /* Assign a face set only to new faces that still have the default none id. */
+  if (use_face_sets) {
+    const int next_face_set_id = sculpt_paint::face_set::find_next_available_id(ob);
+    sculpt_paint::face_set::initialize_none_to_id(mesh, next_face_set_id);
+  }
+
+  /* End geometry undo and rebuild PBVH. */
+  sculpt_paint::undo::geometry_end(ob);
+  BKE_sculptsession_free_pbvh(ob);
+
+  /* The vertex count changed, so drop the cached deform coordinates. The sculpt session only
+   * rebuilds #SculptSession.deform_cos when it is empty, so leaving the stale array (sized to the
+   * old vertex count) would make #cache_source_get assert during the next depsgraph evaluation on
+   * shape-keyed or deform-modifier meshes. */
+  BKE_sculptsession_free_deformMats(ob.runtime->sculpt_session);
+
+  BKE_mesh_batch_cache_dirty_tag(mesh, BKE_MESH_BATCH_DIRTY_ALL);
+  DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_GEOM | ND_DATA, mesh);
+
+  /* Re-evaluate the modified mesh so the pivot computation below operates on the new geometry
+   * (and updated shape keys) instead of stale evaluated data. */
+  Main *bmain = CTX_data_main(C);
+  BKE_scene_graph_update_tagged(depsgraph, bmain);
+
+  /* Set pivot to center of unmasked geometry (the duplicated/cut piece). Call the shared helper
+   * directly rather than invoking #SCULPT_OT_set_pivot_position, which would push a redundant
+   * undo step from inside this operator. */
+  set_pivot_to_unmasked_position(C, ob);
+
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus mask_duplicate_invoke(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  const wmOperatorStatus retval = mask_duplicate_exec(C, op);
+  OPERATOR_RETVAL_CHECK(retval);
+
+  if (retval & OPERATOR_CANCELLED) {
+    return retval;
+  }
+  if (!RNA_boolean_get(op->ptr, "move_away")) {
+    return retval;
+  }
+
+  return WM_operator_name_call(
+      C, "TRANSFORM_OT_translate", wm::OpCallContext::InvokeDefault, nullptr, event);
+}
+
+void SCULPT_OT_paint_mask_duplicate(wmOperatorType *ot)
+{
+  static const EnumPropertyItem mode_items[] = {
+      {int(MaskDuplicateMode::DUPLICATE),
+       "DUPLICATE",
+       0,
+       "Duplicate",
+       "Copy the masked region as new geometry inside the same object. Original masked faces "
+       "remain"},
+      {int(MaskDuplicateMode::CUT),
+       "CUT",
+       0,
+       "Cut",
+       "Extract the masked region as new geometry and delete the original masked faces"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  ot->name = "Mask Duplicate";
+  ot->description =
+      "Duplicate or cut the masked region as new geometry within the same object and prepare for "
+      "transformation";
+  ot->idname = "SCULPT_OT_paint_mask_duplicate";
+
+  ot->poll = geometry_extract_poll;
+  ot->invoke = mask_duplicate_invoke;
+  ot->exec = mask_duplicate_exec;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_enum(ot->srna,
+               "mode",
+               mode_items,
+               int(MaskDuplicateMode::DUPLICATE),
+               "Mode",
+               "Operation mode: duplicate or cut");
+
+  RNA_def_float_factor(ot->srna,
+                       "mask_threshold",
+                       0.5f,
+                       0.0f,
+                       1.0f,
+                       "Threshold",
+                       "Minimum mask value to consider the vertex valid to extract a face",
+                       0.0f,
+                       1.0f);
+
+  RNA_def_boolean(ot->srna,
+                  "fill_holes",
+                  false,
+                  "Fill Holes",
+                  "Fill the hole left in the remaining mesh after cutting (only for CUT mode)");
+
+  RNA_def_boolean(ot->srna,
+                  "fill_piece_holes",
+                  true,
+                  "Fill Piece Holes",
+                  "Fill open boundaries on the duplicated or separated geometry");
+
+  RNA_def_boolean(ot->srna,
+                  "move_away",
+                  true,
+                  "Move",
+                  "Start transform to move the duplicated or cut geometry after the operation");
+}
+
+/** \} */
+
 }  // namespace blender::ed::sculpt_paint

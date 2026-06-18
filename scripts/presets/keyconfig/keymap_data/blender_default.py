@@ -5397,6 +5397,7 @@ def km_sculpt(params):
         # Sculpt Session Pivot Point
         ("sculpt.set_pivot_position", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True},
          {"properties": [("mode", 'SURFACE')]}),
+        ("sculpt.paint_mask_duplicate", {"type": 'D', "value": 'PRESS', "shift": True}, None),
         # Menus
         ("wm.context_menu_enum", {"type": 'E', "value": 'PRESS', "alt": True},
          {"properties": [("data_path", "tool_settings.sculpt.brush.stroke_method")]}),

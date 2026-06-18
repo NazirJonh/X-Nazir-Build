@@ -29,6 +29,8 @@
 
 #include "CLG_log.h"
 
+#include "MEM_guardedalloc.h"
+
 #include "BLI_array.hh"
 #include "BLI_bit_group_vector.hh"
 #include "BLI_compression.hh"
@@ -173,6 +175,15 @@ struct SculptAttrRef {
   bool was_set;
 };
 
+/* Snapshot of a single #KeyBlock's shape data. The rest of #NodeGeometry only covers mesh
+ * #CustomData, but shape keys live in a separate #Mesh.key data-block, so their per-block element
+ * data must be stored alongside the geometry to stay in sync across undo/redo. */
+struct UndoShapeKeyBlock {
+  /* Owning copy of #KeyBlock.data (guarded allocator), or null when the block had no data. */
+  void *data;
+  int totelem;
+};
+
 /* Storage of geometry for the undo node.
  * Is used as a storage for either original or modified geometry. */
 struct NodeGeometry {
@@ -191,6 +202,10 @@ struct NodeGeometry {
   int edges_num;
   int corners_num;
   int faces_num;
+
+  /* Per-#KeyBlock shape key data, in #Mesh.key block order. Empty when the mesh has no shape
+   * keys. */
+  Vector<UndoShapeKeyBlock> shape_key_blocks;
 };
 
 struct Node;
@@ -946,6 +961,18 @@ static void store_geometry_data(NodeGeometry *geometry, const Object &object)
   geometry->edges_num = mesh->edges_num;
   geometry->corners_num = mesh->corners_num;
   geometry->faces_num = mesh->faces_num;
+
+  /* Shape keys are stored in a separate #Mesh.key data-block that #restore_geometry_data leaves
+   * untouched, so snapshot each #KeyBlock's data here to keep it in sync with the geometry across
+   * undo/redo (otherwise the block element count drifts after a topology change). */
+  if (const Key *key = mesh->key) {
+    for (const KeyBlock &kb : key->block) {
+      UndoShapeKeyBlock block;
+      block.data = kb.data ? MEM_dupalloc_void(kb.data) : nullptr;
+      block.totelem = kb.totelem;
+      geometry->shape_key_blocks.append(block);
+    }
+  }
 }
 
 static void restore_geometry_data(const NodeGeometry *geometry, Mesh *mesh)
@@ -974,6 +1001,24 @@ static void restore_geometry_data(const NodeGeometry *geometry, Mesh *mesh)
                                         geometry->face_offsets_sharing_info,
                                         &mesh->face_offset_indices,
                                         &mesh->runtime->face_offsets_sharing_info);
+
+  /* Restore the shape key block data snapshotted in #store_geometry_data. The #Mesh.key
+   * data-block and its #KeyBlock list survive #BKE_mesh_clear_geometry, so only the per-block data
+   * arrays are rebuilt. Copy (not move) from the snapshot so undo/redo can be repeated. */
+  if (Key *key = mesh->key) {
+    const int blocks_num = geometry->shape_key_blocks.size();
+    int i = 0;
+    for (KeyBlock &kb : key->block) {
+      if (i >= blocks_num) {
+        break;
+      }
+      const UndoShapeKeyBlock &block = geometry->shape_key_blocks[i];
+      MEM_SAFE_DELETE_VOID(kb.data);
+      kb.data = block.data ? MEM_dupalloc_void(block.data) : nullptr;
+      kb.totelem = block.totelem;
+      i++;
+    }
+  }
 }
 
 static void geometry_free_data(NodeGeometry *geometry)
@@ -985,6 +1030,11 @@ static void geometry_free_data(NodeGeometry *geometry)
   CustomData_free(&geometry->face_data);
   implicit_sharing::free_shared_data(&geometry->face_offset_indices,
                                      &geometry->face_offsets_sharing_info);
+
+  for (UndoShapeKeyBlock &block : geometry->shape_key_blocks) {
+    MEM_SAFE_DELETE_VOID(block.data);
+  }
+  geometry->shape_key_blocks.clear();
 }
 
 static void restore_geometry(StepData &step_data, Object &object)
@@ -2380,6 +2430,12 @@ static size_t calculate_node_geometry_allocated_size(const NodeGeometry &node_ge
   CustomData_count_memory(node_geometry.vert_data, node_geometry.verts_num, memory_counter);
   CustomData_count_memory(node_geometry.edge_data, node_geometry.edges_num, memory_counter);
   node_geometry.attribute_storage.wrap().count_memory(memory_counter);
+
+  for (const UndoShapeKeyBlock &block : node_geometry.shape_key_blocks) {
+    if (block.data) {
+      memory_counter.add(MEM_allocN_len(block.data));
+    }
+  }
 
   return memory.total_bytes;
 }

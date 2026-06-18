@@ -3977,6 +3977,19 @@ class VIEW3D_MT_mask(Menu):
 
         layout.separator()
 
+        props = layout.operator("sculpt.paint_mask_duplicate", text="Mask Duplicate")
+        props.mode = 'DUPLICATE'
+
+        props = layout.operator("sculpt.paint_mask_duplicate", text="Mask Cut")
+        props.mode = 'CUT'
+        props.fill_holes = False
+
+        props = layout.operator("sculpt.paint_mask_duplicate", text="Mask Cut and Fill Holes")
+        props.mode = 'CUT'
+        props.fill_holes = True
+
+        layout.separator()
+
         props = layout.operator("sculpt.paint_mask_slice", text="Mask Slice")
         props.fill_holes = False
         props.new_object = False

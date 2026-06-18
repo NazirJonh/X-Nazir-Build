@@ -6,6 +6,8 @@
  * \ingroup edasset
  */
 
+#include <optional>
+
 #include "AS_asset_library.hh"
 
 #include "asset_shelf.hh"
@@ -127,6 +129,32 @@ void ensure_asset_library_fetched(const bContext &C, const AssetShelfType &shelf
   }
 }
 
+/* Catalog tree item that persists its collapsed state into the shelf settings. */
+class AssetShelfCatalogTreeViewItem : public ui::BasicTreeViewItem {
+  AssetShelf &shelf_;
+  std::string catalog_path_;
+
+ public:
+  AssetShelfCatalogTreeViewItem(StringRef name, AssetShelf &shelf, std::string catalog_path)
+      : BasicTreeViewItem(name), shelf_(shelf), catalog_path_(std::move(catalog_path))
+  {
+  }
+
+  std::optional<bool> should_be_collapsed() const override
+  {
+    return settings_get_catalog_path_collapsed(shelf_.settings,
+                                               asset_system::AssetCatalogPath(catalog_path_));
+  }
+
+  bool set_collapsed(bool collapsed) override
+  {
+    const bool result = BasicTreeViewItem::set_collapsed(collapsed);
+    settings_set_catalog_path_collapsed(
+        shelf_.settings, asset_system::AssetCatalogPath(catalog_path_), collapsed);
+    return result;
+  }
+};
+
 class AssetCatalogTreeView : public ui::AbstractTreeView {
   AssetShelf &shelf_;
   asset_system::AssetCatalogTree catalog_tree_;
@@ -172,14 +200,15 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
     });
   }
 
-  ui::BasicTreeViewItem &build_catalog_items_recursive(
+  AssetShelfCatalogTreeViewItem &build_catalog_items_recursive(
       ui::TreeViewOrItem &parent_view_item,
       const asset_system::AssetCatalogTreeItem &catalog_item) const
   {
-    ui::BasicTreeViewItem &view_item = parent_view_item.add_tree_item<ui::BasicTreeViewItem>(
-        catalog_item.get_name());
-
     std::string catalog_path = catalog_item.catalog_path().str();
+    AssetShelfCatalogTreeViewItem &view_item =
+        parent_view_item.add_tree_item<AssetShelfCatalogTreeViewItem>(
+            catalog_item.get_name(), shelf_, catalog_path);
+
     view_item.set_on_activate_fn([this, catalog_path](bContext &C, ui::BasicTreeViewItem &) {
       settings_set_active_catalog(shelf_.settings, catalog_path);
       send_redraw_notifier(C);
@@ -200,6 +229,12 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
     });
 
     return view_item;
+  }
+
+  /* Redraw the catalog tree when catalogs (and thus their collapsed state) change. */
+  bool listen(const wmNotifier &notifier) const override
+  {
+    return notifier.category == NC_ASSET && notifier.data == ND_ASSET_CATALOGS;
   }
 };
 

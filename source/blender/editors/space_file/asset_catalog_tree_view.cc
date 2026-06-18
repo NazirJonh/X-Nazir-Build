@@ -7,6 +7,7 @@
  */
 
 #include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
 
 #include "AS_asset_catalog.hh"
 #include "AS_asset_catalog_tree.hh"
@@ -14,6 +15,7 @@
 
 #include "BKE_asset.hh"
 #include "BKE_context.hh"
+#include "BKE_preferences.h"
 
 #include "BLI_listbase.h"
 #include "BLI_string_ref.hh"
@@ -100,6 +102,13 @@ class AssetCatalogTreeViewItem : public ui::BasicTreeViewItem {
   std::unique_ptr<ui::AbstractViewItemDragController> create_drag_controller() const override;
   /** Add dropping support for catalog items. */
   std::unique_ptr<ui::TreeViewItemDropTarget> create_drop_target() override;
+
+  /** Saved collapsed state for this catalog, or nullopt to use the tree's default. */
+  std::optional<bool> should_be_collapsed() const override;
+  /** Update the per-editor working copy of the collapsed state. */
+  bool set_collapsed(bool collapsed) override;
+  /** Persist the collapsed state to the user preferences when changed through the UI. */
+  void on_collapse_change(bContext &C, bool is_collapsed) override;
 };
 
 class AssetCatalogDragController : public ui::AbstractViewItemDragController {
@@ -367,6 +376,58 @@ std::unique_ptr<ui::AbstractViewItemDragController> AssetCatalogTreeViewItem::
 {
   return std::make_unique<AssetCatalogDragController>(
       static_cast<AssetCatalogTreeView &>(this->get_tree_view()), catalog_item_);
+}
+
+std::optional<bool> AssetCatalogTreeViewItem::should_be_collapsed() const
+{
+  const AssetCatalogTreeView &tree_view = static_cast<const AssetCatalogTreeView &>(
+      this->get_tree_view());
+  if (!tree_view.asset_library_ || !tree_view.params_) {
+    return std::nullopt;
+  }
+  const AssetCatalogPath catalog_path = catalog_item_.catalog_path();
+  return BKE_asset_catalog_state_get_collapsed(tree_view.params_->catalog_states,
+                                               catalog_path.c_str());
+}
+
+bool AssetCatalogTreeViewItem::set_collapsed(bool collapsed)
+{
+  const bool result = BasicTreeViewItem::set_collapsed(collapsed);
+  if (!result) {
+    return false;
+  }
+
+  AssetCatalogTreeView &tree_view = static_cast<AssetCatalogTreeView &>(this->get_tree_view());
+  if (!tree_view.asset_library_ || !tree_view.params_) {
+    return result;
+  }
+
+  /* Update the per-editor working copy. */
+  const AssetCatalogPath catalog_path = catalog_item_.catalog_path();
+  BKE_asset_catalog_state_set_collapsed(
+      tree_view.params_->catalog_states, catalog_path.c_str(), collapsed);
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_FILE_PARAMS, nullptr);
+  return result;
+}
+
+void AssetCatalogTreeViewItem::on_collapse_change(bContext & /*C*/, bool is_collapsed)
+{
+  AssetCatalogTreeView &tree_view = static_cast<AssetCatalogTreeView &>(this->get_tree_view());
+  if (!tree_view.asset_library_ || !tree_view.params_) {
+    return;
+  }
+
+  const AssetCatalogPath catalog_path = catalog_item_.catalog_path();
+  const AssetLibraryReference *library_ref = &tree_view.params_->asset_library_ref;
+
+  /* Persist to the user preferences for the current library only (no cross-library sync). */
+  bUserAssetBrowserSettings *settings =
+      BKE_preferences_asset_browser_settings_get_from_library_ref(&U, library_ref);
+  if (settings) {
+    BKE_preferences_asset_browser_settings_set_catalog_collapsed(
+        &U, settings->library_name, catalog_path.c_str(), is_collapsed);
+  }
+  WM_main_add_notifier(NC_ASSET | ND_ASSET_CATALOGS, nullptr);
 }
 
 /* ---------------------------------------------------------------------- */

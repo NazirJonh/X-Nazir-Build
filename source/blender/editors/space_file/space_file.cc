@@ -18,6 +18,7 @@
 #include "BLI_utildefines.h"
 
 #include "BKE_appdir.hh"
+#include "BKE_asset.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_lib_query.hh"
@@ -129,6 +130,9 @@ static void file_free(SpaceLink *sl)
   folder_history_list_free(sfile);
 
   MEM_SAFE_DELETE(sfile->params);
+  if (sfile->asset_params) {
+    BKE_asset_catalog_state_list_free(sfile->asset_params->catalog_states);
+  }
   MEM_SAFE_DELETE(sfile->asset_params);
   if (sfile->runtime != nullptr) {
     BKE_reports_free(&sfile->runtime->is_blendfile_readable_reports);
@@ -191,6 +195,10 @@ static SpaceLink *file_duplicate(SpaceLink *sl)
   if (sfileo->asset_params) {
     sfilen->asset_params = static_cast<FileAssetSelectParams *>(
         MEM_dupalloc(sfileo->asset_params));
+    /* The shallow copy aliases the original list; deep-copy the catalog collapsed states. */
+    sfilen->asset_params->catalog_states.clear_no_delete();
+    BKE_asset_catalog_state_list_duplicate(sfilen->asset_params->catalog_states,
+                                           sfileo->asset_params->catalog_states);
   }
 
   sfilen->folder_histories = folder_history_list_duplicate(&sfileo->folder_histories);
@@ -515,6 +523,16 @@ static void file_main_region_listener(const wmRegionListenerParams *listener_par
         ED_region_tag_redraw(region);
       }
       break;
+    case NC_ASSET:
+      if (ELEM(wmn->data,
+               ND_ASSET_LIST,
+               ND_ASSET_CATALOGS,
+               ND_ASSET_LIST_READING,
+               ND_ASSET_LIST_PREVIEW))
+      {
+        ED_region_tag_redraw(region);
+      }
+      break;
   }
 }
 
@@ -620,7 +638,7 @@ static void file_main_region_draw(const bContext *C, ARegion *region)
   View2D *v2d = &region->v2d;
 
   if (file_main_region_needs_refresh_before_draw(sfile)) {
-    file_refresh(C, nullptr);
+    file_refresh(C, CTX_wm_area(C));
   }
 
   /* clear and setup matrix */
@@ -772,6 +790,21 @@ static void file_tools_region_listener(const wmRegionListenerParams *listener_pa
   switch (wmn->category) {
     case NC_SCENE:
       if (ELEM(wmn->data, ND_MODE)) {
+        ED_region_tag_redraw(region);
+      }
+      break;
+    case NC_SPACE:
+      if (ELEM(wmn->data, ND_SPACE_FILE_LIST, ND_SPACE_ASSET_PARAMS)) {
+        ED_region_tag_redraw(region);
+      }
+      break;
+    case NC_ASSET:
+      if (ELEM(wmn->data,
+               ND_ASSET_LIST,
+               ND_ASSET_LIST_READING,
+               ND_ASSET_LIST_PREVIEW,
+               ND_ASSET_CATALOGS))
+      {
         ED_region_tag_redraw(region);
       }
       break;
@@ -992,6 +1025,7 @@ static void file_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
       default:
         sfile->asset_params->import_method = FILE_ASSET_IMPORT_FOLLOW_PREFS;
     }
+    BKE_asset_catalog_state_list_blend_read_data(reader, sfile->asset_params->catalog_states);
   }
 }
 
@@ -1014,6 +1048,7 @@ static void file_space_blend_write(BlendWriter *writer, SpaceLink *sl)
   }
   if (sfile->asset_params) {
     writer->write_struct(sfile->asset_params);
+    BKE_asset_catalog_state_list_blend_write(writer, sfile->asset_params->catalog_states);
   }
 }
 

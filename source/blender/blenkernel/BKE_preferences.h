@@ -8,13 +8,19 @@
 
 #pragma once
 
+#include <optional>
+
 #include "BLI_compiler_attrs.h"
 #include "BLI_sys_types.h"
 
 namespace blender {
 
+struct AssetCatalogState;
+struct AssetLibraryReference;
+struct BlendDataReader;
 struct BlendWriter;
 struct UserDef;
+struct bUserAssetBrowserSettings;
 struct bUserExtensionRepo;
 struct bUserAssetLibrary;
 struct bUserAssetShelfSettings;
@@ -239,6 +245,34 @@ void BKE_preferences_asset_shelf_popup_view_store(UserDef *userdef,
                                                   short preview_size,
                                                   short display_flag,
                                                   short width_units);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name #bUserAssetBrowserSettings
+ *
+ * Per-library persistent collapse state of asset catalog paths in the asset browser.
+ * \{ */
+
+bUserAssetBrowserSettings *BKE_preferences_asset_browser_settings_get(
+    const UserDef *userdef, const char *library_identifier);
+/**
+ * Resolve (and lazily create) the settings entry for the given asset library reference.
+ */
+bUserAssetBrowserSettings *BKE_preferences_asset_browser_settings_get_from_library_ref(
+    UserDef *userdef, const AssetLibraryReference *library_ref);
+/** Collapsed state for a catalog path in a library, or nullopt when not saved yet. */
+std::optional<bool> BKE_preferences_asset_browser_settings_is_catalog_collapsed(
+    const UserDef *userdef, const char *library_identifier, const char *catalog_path);
+void BKE_preferences_asset_browser_settings_set_catalog_collapsed(UserDef *userdef,
+                                                                  const char *library_identifier,
+                                                                  const char *catalog_path,
+                                                                  bool collapsed);
+
+void BKE_preferences_asset_browser_settings_blend_write(
+    BlendWriter *writer, const bUserAssetBrowserSettings *settings);
+void BKE_preferences_asset_browser_settings_blend_read_data(BlendDataReader *reader,
+                                                            bUserAssetBrowserSettings *settings);
 
 /** \} */
 

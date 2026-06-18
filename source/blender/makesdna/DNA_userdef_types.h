@@ -887,6 +887,19 @@ enum eUserAssetShelfPopupViewFlag {
 };
 
 /**
+ * Per-asset-library collapsed state of catalog paths, stored in the user preferences so it
+ * persists across sessions and editors.
+ */
+struct bUserAssetBrowserSettings {
+  struct bUserAssetBrowserSettings *next = nullptr, *prev = nullptr;
+
+  /** Asset library identifier (see asset_library_identifier_from_library_ref). */
+  char library_name[/*MAX_NAME*/ 64] = "";
+
+  ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
+};
+
+/**
  * Settings for an asset shelf, stored in the Preferences. Most settings are still stored in the
  * asset shelf instance in #AssetShelfSettings. This is just for the options that should be shared
  * as Preferences.
@@ -1075,6 +1088,7 @@ struct UserDef {
   ListBaseT<bUserMenu> user_menus = {nullptr, nullptr};
   ListBaseT<bUserAssetLibrary> asset_libraries = {nullptr, nullptr};
   ListBaseT<bUserExtensionRepo> extension_repos = {nullptr, nullptr};
+  ListBaseT<bUserAssetBrowserSettings> asset_browser_settings = {nullptr, nullptr};
   ListBaseT<bUserAssetShelfSettings> asset_shelves_settings = {nullptr, nullptr};
 
   char keyconfigstr[64] = "Blender";

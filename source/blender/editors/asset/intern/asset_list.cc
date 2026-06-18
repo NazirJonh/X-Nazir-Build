@@ -419,7 +419,7 @@ void asset_reading_region_listen_fn(const wmRegionListenerParams *params)
 
   switch (wmn->category) {
     case NC_ASSET:
-      if (ELEM(wmn->data, ND_ASSET_LIST_READING, ND_ASSET_LIST_PREVIEW)) {
+      if (ELEM(wmn->data, ND_ASSET_LIST_READING, ND_ASSET_LIST_PREVIEW, ND_ASSET_CATALOGS)) {
         ED_region_tag_refresh_ui(region);
       }
       break;

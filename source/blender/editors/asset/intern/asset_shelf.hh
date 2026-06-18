@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "BLI_function_ref.hh"
 
 namespace blender {
@@ -91,6 +93,15 @@ void settings_set_catalog_path_enabled(AssetShelf &shelf,
 void settings_foreach_enabled_catalog_path(
     const AssetShelf &shelf,
     FunctionRef<void(const asset_system::AssetCatalogPath &catalog_path)> fn);
+
+/** Collapsed state of a catalog path in the shelf, or nullopt when not saved yet. */
+std::optional<bool> settings_get_catalog_path_collapsed(
+    const AssetShelfSettings &settings, const asset_system::AssetCatalogPath &path);
+
+/** Save the collapsed state of a catalog path in the shelf settings. */
+void settings_set_catalog_path_collapsed(AssetShelfSettings &settings,
+                                         const asset_system::AssetCatalogPath &path,
+                                         bool collapsed);
 
 }  // namespace ed::asset::shelf
 }  // namespace blender

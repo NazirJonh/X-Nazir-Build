@@ -44,6 +44,7 @@
 #include "BLT_translation.hh"
 
 #include "BKE_appdir.hh"
+#include "BKE_asset.hh"
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
 #include "BKE_main.hh"
@@ -116,6 +117,16 @@ static void fileselect_ensure_updated_asset_params(SpaceFile *sfile)
     asset_params->asset_library_ref.custom_library_index = -1;
     asset_params->import_method = FILE_ASSET_IMPORT_FOLLOW_PREFS;
     asset_params->import_flags = FILE_ASSET_IMPORT_INSTANCE_COLLECTIONS_ON_LINK;
+
+    /* Catalog collapsed states: per-editor working copy, seeded from the user preferences. */
+    asset_params->catalog_states.clear_no_delete();
+    if (const bUserAssetBrowserSettings *global_settings =
+            BKE_preferences_asset_browser_settings_get_from_library_ref(
+                &U, &asset_params->asset_library_ref))
+    {
+      BKE_asset_catalog_state_list_duplicate(asset_params->catalog_states,
+                                             global_settings->catalog_states);
+    }
   }
 
   FileSelectParams *base_params = &asset_params->base_params;

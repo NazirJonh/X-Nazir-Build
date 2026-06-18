@@ -197,6 +197,49 @@ static int paintcurve_find_in_screen_points(const Span<PaintCurvePoint> screen_p
   return found_idx;
 }
 
+bool ED_paintcurve_cursor_on_selected_handle(bContext *C, const float mval[2])
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *br = BKE_paint_brush(paint);
+  PaintCurve *pc = br ? br->paint_curve : nullptr;
+  if (pc == nullptr) {
+    return false;
+  }
+
+  const bke::CurvesGeometry &geom = pc->geometry.wrap();
+  if (!paintcurve_geometry_is_valid(geom) || !paintcurve_geom_any_selected(geom)) {
+    return false;
+  }
+
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  Vector<PaintCurvePoint> screen_points;
+  paintcurve_build_screen_points(pc, &vc, screen_points);
+
+  char selflag = 0;
+  const int hit = paintcurve_find_in_screen_points(
+      screen_points.as_span(), mval, false, PAINT_CURVE_HOVER_THRESHOLD, &selflag);
+  if (hit < 0) {
+    return false;
+  }
+
+  const uint8_t pt_sel = paintcurve_geom_get_selection(geom, hit);
+  if (!pt_sel) {
+    return false;
+  }
+  /* Pivot selected: all three handles participate in the transform. */
+  if (pt_sel & 0x02) {
+    return true;
+  }
+  if (selflag == SEL_F1) {
+    return (pt_sel & 0x01) != 0;
+  }
+  if (selflag == SEL_F3) {
+    return (pt_sel & 0x04) != 0;
+  }
+  return false;
+}
+
 static int paintcurve_point_co_index(char sel)
 {
   char i = 0;
@@ -1467,21 +1510,25 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
   int point_index = -1;
   char select = 0;
 
-  if (do_select) {
+  const bke::CurvesGeometry &geom = pc->geometry.wrap();
+  const bool geom_valid = paintcurve_geometry_is_valid(geom);
+  const bool any_selected = geom_valid && paintcurve_geom_any_selected(geom);
+  /* When a handle is already selected, use the tighter hover threshold so a click away from
+   * control points does not accidentally hit a distant handle (40 px manhattan is too large). */
+  const float hit_threshold = any_selected ? PAINT_CURVE_HOVER_THRESHOLD :
+                                             PAINT_CURVE_SELECT_THRESHOLD;
+
+  if (geom_valid) {
     char selflag = 0;
-    point_index = paintcurve_find_in_screen_points(
-        screen_points.as_span(), loc_fl, align, PAINT_CURVE_SELECT_THRESHOLD, &selflag);
-    select = selflag;
-  }
-  else {
-    /* Slide an already-selected point, but only when the cursor is actually over it. Without this
-     * hit-test the slide would start from anywhere on screen as long as some point was selected. */
-    bke::CurvesGeometry &geom = pc->geometry.wrap();
-    if (paintcurve_geometry_is_valid(geom)) {
-      char selflag = 0;
-      const int hit = paintcurve_find_in_screen_points(
-          screen_points.as_span(), loc_fl, align, PAINT_CURVE_SELECT_THRESHOLD, &selflag);
-      if (hit >= 0) {
+    const int hit = paintcurve_find_in_screen_points(
+        screen_points.as_span(), loc_fl, align, hit_threshold, &selflag);
+    if (hit >= 0) {
+      if (do_select) {
+        point_index = hit;
+        select = selflag;
+      }
+      else {
+        /* Slide an already-selected handle only when the cursor is over it. */
         const uint8_t sel = paintcurve_geom_get_selection(geom, hit);
         if (sel != 0) {
           /* Convert selection bits to the bit-flag form that paintcurve_point_co_index expects.
@@ -1492,6 +1539,11 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
         }
       }
     }
+  }
+
+  /* Point-editing mode: ignore segment drags and stray clicks that miss control points. */
+  if (point_index < 0 && any_selected) {
+    return OPERATOR_PASS_THROUGH;
   }
 
   if (point_index < 0 && move_segment) {

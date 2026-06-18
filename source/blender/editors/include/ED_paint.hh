@@ -138,6 +138,13 @@ void ED_paintcurve_refresh_on_sculpt_mode_enter(bContext *C);
 void ED_paintcurve_flush_radius_transform(bContext *C, struct PaintCurve *pc);
 
 /**
+ * Return true when `mval` is over a paint-curve handle that is currently selected.
+ * Used to block #transform.translate CLICK_DRAG from moving selected points without a
+ * direct click on a control point.
+ */
+bool ED_paintcurve_cursor_on_selected_handle(bContext *C, const float mval[2]);
+
+/**
  * Write the paint-curve geometry positions back to the linked source Curves or Curve object.
  * Does nothing when no source object is set or sync is disabled.
  */

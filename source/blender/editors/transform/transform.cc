@@ -23,6 +23,7 @@
 
 #include "ED_clip.hh"
 #include "ED_image.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_uvedit.hh"
@@ -2029,6 +2030,26 @@ bool initTransform(bContext *C, TransInfo *t, wmOperator *op, const wmEvent *eve
   unit_m3(t->spacemtx);
 
   initTransInfo(C, t, op, event);
+
+  /* Paint-curve CLICK_DRAG (from the global 3D View / Paint Curve keymaps) must not move
+   * selected control points unless the drag started on a selected handle. Without this,
+   * paintcurve.slide can correctly pass-through a press away from handles while transform
+   * still grabs the selection on the generated CLICK_DRAG event. */
+  if ((t->options & CTX_PAINT_CURVE) && t->is_launch_event_drag &&
+      ELEM(t->mode, TFM_TRANSLATION, TFM_ROTATION, TFM_RESIZE, TFM_CURVE_SHRINKFATTEN))
+  {
+    float hit_mval[2];
+    if (event && t->region) {
+      WM_event_drag_start_mval_fl(event, t->region, hit_mval);
+    }
+    else {
+      copy_v2_v2(hit_mval, t->mval);
+    }
+    if (!ED_paintcurve_cursor_on_selected_handle(C, hit_mval)) {
+      postTrans(C, t);
+      return false;
+    }
+  }
 
   if (!G.background) {
     if (t->spacetype == SPACE_VIEW3D) {

@@ -1290,6 +1290,17 @@ def brush_shared_settings(layout, context, brush, popover=False):
     if direction:
         layout.row().prop(brush, "direction", expand=True)
 
+    # Add jitter control for all paint modes that support it
+    if (mode == 'SCULPT' and brush.sculpt_capabilities.has_jitter) or mode != 'SCULPT':
+        layout.separator()
+        row = layout.row(align=True)
+        if brush.jitter_unit == 'BRUSH':
+            row.prop(brush, "jitter", slider=True)
+        else:
+            row.prop(brush, "jitter_absolute")
+        row.prop(brush, "use_pressure_jitter", toggle=True, text="")
+        layout.row().prop(brush, "jitter_unit", expand=True)
+
 
 def draw_color_jitter_panel(layout, context, brush):
     ups = UnifiedPaintPanel.paint_settings_from_active_tool(context).unified_paint_settings

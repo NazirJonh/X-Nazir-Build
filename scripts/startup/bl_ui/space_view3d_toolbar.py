@@ -794,6 +794,10 @@ class VIEW3D_PT_tools_brush_texture(Panel, View3DPaintPanel):
         col = layout.column()
         col.template_ID_preview(tex_slot, "texture", new="texture.new", rows=3, cols=8)
 
+        # Add brush stroke preview
+        col.separator()
+        col.template_brush_stroke_preview(brush, angle=brush.texture_slot.angle, spacing=brush.spacing, show_grip=True)
+
         brush_texture_settings(col, brush, context.sculpt_object)
 
 

@@ -16,12 +16,21 @@
 
 #include "BLT_translation.hh"
 
+#include "MEM_guardedalloc.h"
+
+#include "DNA_brush_types.h"
 #include "DNA_light_types.h"
 #include "DNA_material_types.h"
 #include "DNA_texture_types.h"
 #include "DNA_world_types.h"
 
+#include <cstdlib>  /* For rand() */
+
+#include "GPU_immediate.hh"
+#include "GPU_state.hh"
+
 #include "ED_render.hh"
+#include "ED_screen.hh"
 
 #include "RNA_access.hh"
 
@@ -29,6 +38,8 @@
 
 #include "UI_interface.hh"
 #include "UI_interface_layout.hh"
+
+#include "interface_template_preview_brush.hh"
 
 namespace blender::ui {
 
@@ -263,6 +274,100 @@ void template_preview(Layout *layout,
       }
     }
   }
+}
+
+
+void template_brush_stroke_preview(Layout *layout,
+                                   bContext *C,
+                                   PointerRNA *brush_ptr,
+                                   float angle,
+                                   float spacing,
+                                   const char *preview_id,
+                                   bool show_grip)
+{
+  char _preview_id[sizeof(uiPreview::preview_id)];
+
+  if (!brush_ptr || !brush_ptr->data) {
+    RNA_warning("Expected valid brush pointer for brush stroke preview");
+    return;
+  }
+
+  if (!preview_id || (preview_id[0] == '\0')) {
+    SNPRINTF_UTF8(_preview_id, "uiBrushStrokePreview_%p", brush_ptr->data);
+    preview_id = _preview_id;
+  }
+
+  ARegion *region = CTX_wm_region(C);
+  uiPreview *ui_preview = static_cast<uiPreview *>(
+      BLI_findstring(&region->ui_previews, preview_id, offsetof(uiPreview, preview_id)));
+
+  if (!ui_preview) {
+    ui_preview = MEM_new<uiPreview>(__func__);
+    STRNCPY_UTF8(ui_preview->preview_id, preview_id);
+    ui_preview->height = short(UI_UNIT_Y * 4.0f);
+    ui_preview->tag = UI_PREVIEW_TAG_DIRTY;
+    BLI_addtail(&region->ui_previews, ui_preview);
+  }
+  else {
+    ui_preview->tag |= UI_PREVIEW_TAG_DIRTY;
+  }
+
+  if (ui_preview->height < UI_UNIT_Y) {
+    ui_preview->height = UI_UNIT_Y;
+  }
+  else if (ui_preview->height > UI_UNIT_Y * 10) {
+    ui_preview->height = UI_UNIT_Y * 10;
+  }
+
+  Block *block = layout->block();
+  Layout *col = &layout->column(false);
+
+  /* The preview button reads the current brush parameters at draw time. Both `angle` and
+   * `spacing` are captured by value: the panel is rebuilt (and this template re-evaluated) on
+   * every brush property change, so the captured snapshot always reflects the latest values. */
+  void *brush_data = brush_ptr->data;
+  uiDefBut(block,
+           ButtonType::Extra,
+           "",
+           0,
+           0,
+           UI_UNIT_X * 50,
+           ui_preview->height,
+           brush_data,
+           0.0,
+           0.0,
+           "Brush Stroke Preview");
+  button_func_drawextra_set(block, [brush_data, angle, spacing](const bContext *C, rcti *rect) {
+    ED_brush_stroke_preview_draw(C, brush_data, angle, spacing, rect);
+  });
+
+  if (show_grip) {
+    uiDefIconButV(block,
+                  ButtonType::Grip,
+                  ICON_GRIP,
+                  0,
+                  0,
+                  UI_UNIT_X * 20,
+                  short(UI_UNIT_Y * 0.3f),
+                  &ui_preview->height,
+                  UI_UNIT_Y * 4.0f,
+                  UI_UNIT_Y * 5.0f,
+                  "Resize brush stroke preview");
+  }
+
+  Layout *row = &col->row(true);
+
+  PointerRNA texture_slot_ptr = RNA_pointer_get(brush_ptr, "texture_slot");
+  if (!RNA_pointer_is_null(&texture_slot_ptr)) {
+    bool use_random = RNA_boolean_get(&texture_slot_ptr, "use_random");
+    if (use_random) {
+      row->prop(&texture_slot_ptr, "random_angle", UI_ITEM_NONE, "Random Angle", ICON_NONE);
+    }
+    else {
+      row->prop(&texture_slot_ptr, "angle", UI_ITEM_NONE, "Angle", ICON_NONE);
+    }
+  }
+  row->prop(brush_ptr, "spacing", UI_ITEM_NONE, "Spacing", ICON_NONE);
 }
 
 }  // namespace blender::ui

@@ -609,6 +609,47 @@ enum eBrushColorJitterSettings_Flag : int {
 };
 ENUM_OPERATORS(eBrushColorJitterSettings_Flag)
 
+/* Brush Texture Preview System Constants */
+typedef enum eBrushTexturePatternType {
+  BRUSH_TEXTURE_PATTERN_RANDOM = 0,
+  BRUSH_TEXTURE_PATTERN_GRID = 1,
+  BRUSH_TEXTURE_PATTERN_RADIAL = 2,
+  BRUSH_TEXTURE_PATTERN_SPIRAL = 3,
+} eBrushTexturePatternType;
+
+typedef enum eBrushTextureBlendMode {
+  BRUSH_TEXTURE_BLEND_NORMAL = 0,
+  BRUSH_TEXTURE_BLEND_MULTIPLY = 1,
+  BRUSH_TEXTURE_BLEND_SCREEN = 2,
+  BRUSH_TEXTURE_BLEND_OVERLAY = 3,
+  BRUSH_TEXTURE_BLEND_ADD = 4,
+  BRUSH_TEXTURE_BLEND_SUBTRACT = 5,
+} eBrushTextureBlendMode;
+
+typedef enum eBrushTextureQuality {
+  BRUSH_TEXTURE_QUALITY_LOW = 0,
+  BRUSH_TEXTURE_QUALITY_MEDIUM = 1,
+  BRUSH_TEXTURE_QUALITY_HIGH = 2,
+  BRUSH_TEXTURE_QUALITY_ULTRA = 3,
+} eBrushTextureQuality;
+
+typedef enum eBrushTextureStatusFlags {
+  BRUSH_TEXTURE_STATUS_DIRTY = (1 << 0),
+  BRUSH_TEXTURE_STATUS_RENDERING = (1 << 1),
+  BRUSH_TEXTURE_STATUS_CACHED = (1 << 2),
+} eBrushTextureStatusFlags;
+
+typedef enum eBrushTexturePreviewFlags {
+  BRUSH_TEXTURE_PREVIEW_ENABLED = (1 << 0),
+  BRUSH_TEXTURE_PREVIEW_AUTO_UPDATE = (1 << 1),
+  BRUSH_TEXTURE_PREVIEW_SHOW_GRID = (1 << 2),
+  BRUSH_TEXTURE_PREVIEW_SHOW_INFO = (1 << 3),
+  BRUSH_TEXTURE_UI_SHOW_PATTERN = (1 << 4),
+  BRUSH_TEXTURE_UI_SHOW_MASK = (1 << 5),
+  BRUSH_TEXTURE_UI_INTERACTIVE = (1 << 6),
+  BRUSH_TEXTURE_CACHE_ENABLED = (1 << 7),
+} eBrushTexturePreviewFlags;
+
 #define MAX_BRUSH_PIXEL_RADIUS 500
 #define MAX_BRUSH_PIXEL_DIAMETER 1000
 

@@ -8,6 +8,8 @@
 
 #include <cstdlib>
 
+#include "BLI_math_base_c.hh"
+
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
 
@@ -684,6 +686,20 @@ static void rna_uiLayoutContextStringSet(Layout *layout, const char *name, const
 static void rna_uiLayoutSeparatorSpacer(Layout *layout)
 {
   layout->separator_spacer();
+}
+
+static void rna_uiTemplateBrushStrokePreview(Layout *layout,
+                                              bContext *C,
+                                              PointerRNA *brush_ptr,
+                                              float angle,
+                                              float spacing,
+                                              const char *preview_id,
+                                              bool show_grip)
+{
+  if (!brush_ptr || !brush_ptr->data) {
+    return;
+  }
+  ui::template_brush_stroke_preview(layout, C, brush_ptr, angle, spacing, preview_id, show_grip);
 }
 
 static void rna_uiTemplateID(Layout *layout,
@@ -2089,6 +2105,25 @@ void RNA_api_ui_layout(StructRNA *srna)
       "",
       "Identifier of this preview widget, if not set the ID type will be used "
       "(i.e. all previews of materials without explicit ID will have the same size...).");
+
+  func = RNA_def_function(
+      srna, "template_brush_stroke_preview", "rna_uiTemplateBrushStrokePreview");
+  RNA_def_function_ui_description(func, "Item. A preview window for brush stroke patterns.");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_pointer(func, "brush_ptr", "Brush", "", "Brush data pointer");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_float(func, "angle", 0.0f, -M_PI, M_PI, "Angle", "Brush stroke angle", -M_PI, M_PI);
+  RNA_def_float(func,
+                "spacing",
+                10.0f,
+                1.0f,
+                500.0f,
+                "Spacing",
+                "Brush stroke spacing as percentage",
+                1.0f,
+                500.0f);
+  RNA_def_string(func, "preview_id", nullptr, 0, "", "Identifier of this brush stroke preview widget.");
+  RNA_def_boolean(func, "show_grip", true, "Show Grip", "Show resize grip for the preview");
 
   func = RNA_def_function(srna, "template_curve_mapping", "template_curve_mapping");
   RNA_def_function_ui_description(

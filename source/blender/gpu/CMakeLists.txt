@@ -28,9 +28,22 @@ set(INC
   ../draw/engines/workbench/shaders/infos
   ../draw/intern
   ../draw/intern/shaders
+  intern/brush
   metal/kernels
   vulkan/shaders
   shaders/infos
+
+  # For brush texture preview system
+  ../blenkernel
+  ../blenlib
+  ../bmesh
+  ../depsgraph
+  ../imbuf
+  ../makesdna
+  ../makesrna/intern
+  ../nodes
+  ../render
+  ../windowmanager
 
 
   # For shader includes
@@ -125,6 +138,13 @@ set(SRC
 
   shader_tool/lexit/lexit.cc
 
+  # Brush Texture Preview System
+  intern/brush/brush_texture_preview_api.cc
+  intern/brush/brush_texture_pattern.cc
+  intern/brush/brush_texture_cache.cc
+  intern/brush/brush_texture_shaders.cc
+  intern/brush/brush_texture_ui.cc
+
   GPU_attribute_convert.hh
   GPU_batch.hh
   GPU_batch_presets.hh
@@ -191,6 +211,14 @@ set(SRC
   intern/gpu_texture_private.hh
   intern/gpu_uniform_buffer_private.hh
   intern/gpu_vertex_format_private.hh
+
+  # Brush Texture Preview System Headers
+  intern/brush/brush_texture_preview.h
+  intern/brush/brush_texture_preview_api.h
+  intern/brush/brush_texture_shaders.h
+  intern/brush/brush_texture_ui.h
+
+
 
   dummy/dummy_backend.hh
   dummy/dummy_batch.hh
@@ -574,6 +602,13 @@ set(GLSL_SRC
   shaders/gpu_shader_sequencer_thumbs_frag.glsl
   shaders/gpu_shader_sequencer_zebra_frag.glsl
 
+  # Brush texture preview shaders.
+  shaders/infos/brush_texture_shader_infos.hh
+  shaders/editors_interface_brush_brush_texture_vertex.glsl
+  shaders/editors_interface_brush_brush_texture_fragment.glsl
+  shaders/editors_interface_brush_brush_blend_fragment.glsl
+  shaders/editors_interface_brush_brush_pattern_compute.glsl
+
   shaders/gpu_shader_codegen_lib.glsl
 
   shaders/gpu_shader_python_comp.glsl
@@ -904,6 +939,8 @@ endif()
 
 blender_add_lib(bf_gpu "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
 add_library(bf::gpu ALIAS bf_gpu)
+
+# Brush texture preview system is now integrated into main bf_gpu library
 target_link_libraries(bf_gpu PUBLIC
   bf_compositor_shaders
   bf_draw_shaders

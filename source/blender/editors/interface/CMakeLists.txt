@@ -7,6 +7,7 @@ set(INC
   ../asset
   ../include
   ../../animrig
+  ../../gpu/intern
   ../../makesrna
   ../../python
   ../../../../intern/ghost
@@ -82,6 +83,7 @@ set(SRC
   templates/interface_template_node_inputs.cc
   templates/interface_template_node_tree_interface.cc
   templates/interface_template_operator_property.cc
+  templates/interface_template_preview_brush.cc
   templates/interface_template_preview.cc
   templates/interface_template_recent_files.cc
   templates/interface_template_running_jobs.cc

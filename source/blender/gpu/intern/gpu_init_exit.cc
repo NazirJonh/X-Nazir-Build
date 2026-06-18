@@ -16,6 +16,12 @@
 #include "intern/gpu_shader_create_info_private.hh"
 #include "intern/gpu_shader_dependency_private.hh"
 
+/* Release brush stroke preview GPU resources while the GPU context is still valid. Forward
+ * declared to avoid pulling the editor-side header into this shutdown unit. */
+namespace blender::ed::interface {
+void BKE_brush_texture_preview_free_all();
+}
+
 namespace blender {
 
 /**
@@ -46,6 +52,8 @@ void GPU_init()
 
 void GPU_exit()
 {
+  ed::interface::BKE_brush_texture_preview_free_all();
+
   gpu_batch_exit();
 
   GPU_pass_cache_free();

@@ -461,6 +461,7 @@ struct wmNotifier {
 #define ND_COMPO_RESULT (13 << 16)
 #define ND_KEYINGSET (14 << 16)
 #define ND_TOOLSETTINGS (15 << 16)
+#define ND_BRUSH_SETTINGS (102 << 16)
 #define ND_LAYER (16 << 16)
 #define ND_FRAME_RANGE (17 << 16)
 #define ND_WORLD (92 << 16)

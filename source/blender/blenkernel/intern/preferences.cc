@@ -710,6 +710,41 @@ bool BKE_preferences_asset_shelf_settings_ensure_catalog_path_enabled(UserDef *u
   return true;
 }
 
+void BKE_preferences_asset_shelf_popup_view_load(const UserDef *userdef,
+                                                 const char *shelf_idname,
+                                                 short *r_preview_size,
+                                                 short *r_display_flag,
+                                                 short *r_width_units)
+{
+  const bUserAssetShelfSettings *settings = BKE_preferences_asset_shelf_settings_get(userdef,
+                                                                                     shelf_idname);
+  if (!settings || (settings->popup_view_flag & USER_ASSET_SHELF_POPUP_VIEW_STORED) == 0) {
+    return;
+  }
+  if (r_preview_size) {
+    *r_preview_size = settings->popup_preview_size;
+  }
+  if (r_display_flag) {
+    *r_display_flag = settings->popup_display_flag;
+  }
+  if (r_width_units) {
+    *r_width_units = settings->popup_width_units;
+  }
+}
+
+void BKE_preferences_asset_shelf_popup_view_store(UserDef *userdef,
+                                                  const char *shelf_idname,
+                                                  short preview_size,
+                                                  short display_flag,
+                                                  short width_units)
+{
+  bUserAssetShelfSettings *settings = asset_shelf_settings_ensure(userdef, shelf_idname);
+  settings->popup_preview_size = preview_size;
+  settings->popup_display_flag = display_flag;
+  settings->popup_width_units = width_units;
+  settings->popup_view_flag |= USER_ASSET_SHELF_POPUP_VIEW_STORED;
+}
+
 /** \} */
 
 }  // namespace blender

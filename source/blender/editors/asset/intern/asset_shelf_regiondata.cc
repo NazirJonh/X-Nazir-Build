@@ -52,6 +52,13 @@ RegionAssetShelf *regiondata_duplicate(const RegionAssetShelf *shelf_regiondata)
 
   BLI_listbase_clear(&new_shelf_regiondata->shelves);
   for (const AssetShelf &shelf : shelf_regiondata->shelves) {
+    /* Popup shelves are transient — don't carry them over when an area is duplicated. */
+    if (shelf.is_popup) {
+      if (shelf_regiondata->active_shelf == &shelf) {
+        new_shelf_regiondata->active_shelf = nullptr;
+      }
+      continue;
+    }
     AssetShelf *new_shelf = MEM_new<AssetShelf>("duplicate asset shelf", dna::shallow_copy(shelf));
     new_shelf->settings = shelf.settings;
     BLI_addtail(&new_shelf_regiondata->shelves, new_shelf);
@@ -75,6 +82,11 @@ void regiondata_blend_write(BlendWriter *writer, const RegionAssetShelf *shelf_r
 {
   writer->write_struct(shelf_regiondata);
   for (const AssetShelf &shelf : shelf_regiondata->shelves) {
+    /* Popup shelves are transient and live in the region only during the session — skip them so
+     * they don't leak into the .blend file. */
+    if (shelf.is_popup) {
+      continue;
+    }
     writer->write_struct(&shelf);
     settings_blend_write(writer, shelf.settings);
   }

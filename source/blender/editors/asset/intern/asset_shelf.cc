@@ -246,7 +246,7 @@ static AssetShelf *update_active_shelf(const bContext &C,
   /* Case 2 (no active shelf or the poll of it isn't succeeding anymore. Poll all shelf types to
    * determine a new active one): */
   for (AssetShelf &shelf : shelf_regiondata.shelves) {
-    if (&shelf == shelf_regiondata.active_shelf) {
+    if (&shelf == shelf_regiondata.active_shelf || shelf.is_popup) {
       continue;
     }
 
@@ -910,7 +910,14 @@ static void asset_shelf_header_draw(const bContext *C, Header *header)
 
   layout.separator_spacer();
 
-  layout.popover(C, "ASSETSHELF_PT_display", "", ICON_IMGDISPLAY);
+  if (shelf_ptr.data) {
+    PropertyRNA *prop = RNA_struct_find_property(&shelf_ptr, "preview_size_preset");
+    layout.prop_with_popover(
+        &shelf_ptr, prop, -1, 0, ui::ITEM_R_ICON_ONLY, {}, ICON_NONE, "ASSETSHELF_PT_display");
+  }
+  else {
+    layout.popover(C, "ASSETSHELF_PT_display", "", ICON_IMGDISPLAY);
+  }
   ui::Layout &sub = layout.row(false);
   /* Same as file/asset browser header. */
   sub.ui_units_x_set(8);
@@ -962,6 +969,9 @@ void type_unlink(const Main &bmain, const AssetShelfType &shelf_type)
             continue;
           }
           for (AssetShelf &shelf : shelf_regiondata->shelves) {
+            /* Popup shelves stored area-locally must be cleared too, otherwise they keep a
+             * dangling #AssetShelf.type after the type is unregistered (see
+             * #ensure_shelf_has_type, which returns the cached pointer early). */
             if (shelf.type == &shelf_type) {
               shelf.type = nullptr;
             }

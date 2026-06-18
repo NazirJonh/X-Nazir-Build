@@ -9,10 +9,12 @@
 #include <cstdlib>
 
 #include "DNA_screen_types.h"
+#include "DNA_userdef_types.h"
 
 #include "BLT_translation.hh"
 
 #include "BKE_file_handler.hh"
+#include "BKE_preferences.h"
 #include "BKE_screen.hh"
 
 #include "RNA_define.hh"
@@ -1372,6 +1374,47 @@ static int rna_AssetShelf_preview_size_default(PointerRNA *ptr, PropertyRNA * /*
   return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
 }
 
+static int rna_AssetShelf_preview_size_preset_get(PointerRNA *ptr)
+{
+  const AssetShelf *shelf = static_cast<const AssetShelf *>(ptr->data);
+  const int size = shelf->settings.preview_size;
+  if (size <= 48) {
+    return 32;
+  }
+  if (size <= 82) {
+    return 56;
+  }
+  return 96;
+}
+
+static void rna_AssetShelf_preview_size_preset_set(PointerRNA *ptr, int value)
+{
+  AssetShelf *shelf = static_cast<AssetShelf *>(ptr->data);
+  shelf->settings.preview_size = value;
+}
+
+/**
+ * Update callback for popup-shelf view properties (#preview_size, #show_names, #popup_width_units).
+ * For popup shelves, persist the change into the User Preferences so the popover keeps the user's
+ * choice across sessions and across `.blend` files. For permanent shelves, the per-instance value
+ * on the shelf is enough.
+ */
+static void rna_AssetShelf_popup_settings_update(Main * /*bmain*/,
+                                                 Scene * /*scene*/,
+                                                 PointerRNA *ptr)
+{
+  AssetShelf *shelf = static_cast<AssetShelf *>(ptr->data);
+  if (!shelf->is_popup || shelf->idname[0] == '\0') {
+    return;
+  }
+  BKE_preferences_asset_shelf_popup_view_store(&U,
+                                               shelf->idname,
+                                               shelf->settings.preview_size,
+                                               short(shelf->settings.display_flag),
+                                               shelf->settings.popup_width_units);
+  U.runtime.is_dirty = true;
+}
+
 static void rna_Panel_bl_description_set(PointerRNA *ptr, const char *value)
 {
   Panel *data = static_cast<Panel *>(ptr->data);
@@ -2497,14 +2540,42 @@ static void rna_def_asset_shelf(BlenderRNA *brna)
                            "Show Names",
                            "Show the asset name together with the preview. Otherwise only the "
                            "preview will be visible.");
-  RNA_def_property_update(prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_AssetShelf_popup_settings_update");
 
   prop = RNA_def_property(srna, "preview_size", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_int_sdna(prop, nullptr, "settings.preview_size");
   RNA_def_property_range(prop, 24, 256);
   RNA_def_property_int_default_func(prop, "rna_AssetShelf_preview_size_default");
   RNA_def_property_ui_text(prop, "Preview Size", "Size of the asset preview thumbnails in pixels");
-  RNA_def_property_update(prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_AssetShelf_popup_settings_update");
+
+  {
+    static const EnumPropertyItem preview_size_preset_items[] = {
+        {32, "SMALL", ICON_SHORTDISPLAY, "Small", "Small preview size (32 px)"},
+        {56, "MEDIUM", ICON_IMGDISPLAY, "Medium", "Medium preview size (56 px)"},
+        {96, "LARGE", ICON_LONGDISPLAY, "Large", "Large preview size (96 px)"},
+        {0, nullptr, 0, nullptr, nullptr},
+    };
+    prop = RNA_def_property(srna, "preview_size_preset", PROP_ENUM, PROP_NONE);
+    RNA_def_property_enum_items(prop, preview_size_preset_items);
+    RNA_def_property_enum_funcs(prop,
+                                "rna_AssetShelf_preview_size_preset_get",
+                                "rna_AssetShelf_preview_size_preset_set",
+                                nullptr);
+    RNA_def_property_ui_text(
+        prop, "Preview Size", "Size of the asset preview thumbnails as a preset");
+    RNA_def_property_update(
+        prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_AssetShelf_popup_settings_update");
+  }
+
+  prop = RNA_def_property(srna, "popup_width_units", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "settings.popup_width_units");
+  RNA_def_property_range(prop, 20, 120);
+  RNA_def_property_ui_text(prop, "Popup Width", "Width of the popup grid area in UI units");
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_AssetShelf_popup_settings_update");
 
   prop = RNA_def_property(srna, "search_filter", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "settings.search_string");

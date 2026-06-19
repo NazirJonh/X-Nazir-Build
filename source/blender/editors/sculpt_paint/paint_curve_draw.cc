@@ -31,6 +31,7 @@
 #include "BKE_paint.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_offset_indices.hh"
@@ -142,6 +143,20 @@ static bool should_show_radius_handle_draw(const Sculpt *sculpt,
   }
 
   return false;
+}
+
+static float paintcurve_polyline_distance_sq(const Span<float2> polyline, const float2 mval)
+{
+  if (polyline.size() < 2) {
+    return FLT_MAX;
+  }
+
+  float min_dist_sq = FLT_MAX;
+  for (const int i : IndexRange(polyline.size() - 1)) {
+    const float seg_dist_sq = dist_squared_to_line_segment_v2(mval, polyline[i], polyline[i + 1]);
+    min_dist_sq = min_ff(min_dist_sq, seg_dist_sq);
+  }
+  return min_dist_sq;
 }
 
 /**
@@ -268,6 +283,8 @@ Paint *ED_paint_curve_resolve_active_paint(Depsgraph *depsgraph,
 void ED_paint_curve_screen_handles_build(const ViewContext &vc,
                                          const Brush &brush,
                                          const Sculpt *sculpt,
+                                         const float2 mval_region,
+                                         const bool compute_segment_hover,
                                          PaintCurveScreenHandles &r_out)
 {
   r_out.points.clear();
@@ -290,6 +307,9 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
   ui::theme::get_color_type_4fv(TH_VERTEX, SPACE_VIEW3D, vert_col);
   ui::theme::get_color_type_4fv(TH_WIRE, SPACE_VIEW3D, wire_col);
   ui::theme::get_color_type_4fv(TH_EDGE_SELECT, SPACE_VIEW3D, radius_col);
+
+  int64_t hover_segment_index = -1;
+  float hover_segment_dist_sq = square_f(PAINT_CURVE_SEGMENT_HOVER_THRESHOLD);
 
   for (const int i : screen_points.index_range()) {
     const PaintCurvePoint &pcp = screen_points[i];
@@ -352,8 +372,19 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
     }
     copy_v4_v4(seg.wire_color, wire_col);
     seg.outline_color = float4(0.0f, 0.0f, 0.0f, 0.5f);
+    if (compute_segment_hover) {
+      const float dist_sq = paintcurve_polyline_distance_sq(seg.polyline, mval_region);
+      if (dist_sq < hover_segment_dist_sq) {
+        hover_segment_dist_sq = dist_sq;
+        hover_segment_index = r_out.segments.size();
+      }
+    }
     r_out.segments.append(std::move(seg));
   });
+
+  if (hover_segment_index >= 0) {
+    r_out.segments[hover_segment_index].hovered = true;
+  }
 }
 
 /** \} */

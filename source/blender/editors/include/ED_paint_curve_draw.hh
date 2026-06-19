@@ -52,6 +52,7 @@ struct PaintCurveSegmentDrawData {
   blender::Vector<float2> polyline;
   float4 wire_color;
   float4 outline_color;
+  bool hovered = false;
 };
 
 struct PaintCurveScreenHandles {
@@ -101,6 +102,8 @@ Paint *ED_paint_curve_resolve_active_paint(Depsgraph *depsgraph,
 void ED_paint_curve_screen_handles_build(const ViewContext &vc,
                                          const Brush &brush,
                                          const Sculpt *sculpt,
+                                         float2 mval_region,
+                                         bool compute_segment_hover,
                                          PaintCurveScreenHandles &r_out);
 
 void ED_paint_curve_screen_silhouettes_build(const ViewContext &vc,

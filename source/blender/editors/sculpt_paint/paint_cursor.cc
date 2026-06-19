@@ -58,6 +58,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include "ED_image.hh"
+#include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
 
@@ -1108,6 +1109,12 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
     if (pcontext.mode == PaintMode::GPencil && pcontext.win->modalcursor == 0) {
       WM_cursor_set(pcontext.win, WM_CURSOR_DOT);
     }
+    return;
+  }
+
+  /* Suppress brush cursor for the curves edit tool; the overlay engine draws the cursor there. */
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  if (tref && ed::sculpt_paint::ED_paint_curve_is_curves_edit_tool(tref->idname)) {
     return;
   }
   if (paint_cursor_is_3d_view_navigating(pcontext)) {

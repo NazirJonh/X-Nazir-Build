@@ -234,8 +234,12 @@ float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScree
 /** Minimum screen-space offset of the radius-handle endpoint from the pivot. Keeps the handle a
  * distinct, grabbable target that never shadows clicks on the pivot, even at radius 0. */
 #define PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET 10.0f
-/** Screen-space pixel radius within which the cursor "hovers" a scene curve silhouette. */
+/** Screen-space pixel radius within which the cursor "hovers" a scene curve silhouette,
+ * or a handle point on the active curve. */
 #define PAINT_CURVE_HOVER_THRESHOLD 12.0f
+/** Screen-space pixel radius (Euclidean) within which the cursor hovers a Bezier segment
+ * on the active curve, used for the segment-slide affordance. */
+#define PAINT_CURVE_SEGMENT_HOVER_THRESHOLD 30.0f
 
 /** \} */
 

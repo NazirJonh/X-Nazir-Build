@@ -132,7 +132,7 @@ class PaintCurveCursor : Overlay {
                                !ed::sculpt_paint::ED_paint_curve_slide_is_active();
 
     ed::sculpt_paint::ED_paint_curve_screen_handles_build(
-        vc, *brush, sculpt, handles_);
+        vc, *brush, sculpt, mval_region, compute_hover, handles_);
 
     if (is_curves_edit && state.is_space_v3d()) {
       const uint64_t key = ed::sculpt_paint::ED_paint_curve_silhouette_cache_key_hash(vc);
@@ -272,7 +272,7 @@ class PaintCurveCursor : Overlay {
     }
 
     /* --- 3 & 4. Bezier segment outlines then wires --- */
-    /* Build batches once, draw twice (outline then wire). */
+    /* Build batches once, draw in order: outline → wire → hover (on top). */
     {
       Vector<gpu::Batch *> seg_batches;
       seg_batches.reserve(handles_.segments.size());
@@ -295,6 +295,22 @@ class PaintCurveCursor : Overlay {
         if (seg_batches[i]) {
           const float4 &wc = handles_.segments[i].wire_color;
           ps_.push_constant("color", wc);
+          draw_strip(seg_batches[i]);
+        }
+      }
+
+      /* Hovered segment highlight for segment-slide affordance.
+       * Drawn last so it appears on top of outline and wire passes.
+       * Uses TH_VERTEX_SELECT (matches hover silhouette) because TH_UV_SHADOW is not
+       * defined for SPACE_VIEW3D and returns alpha=0 in that context. */
+      float hover_col[4];
+      ui::theme::get_color_type_4fv(TH_VERTEX_SELECT, SPACE_VIEW3D, hover_col);
+      hover_col[3] = 1.0f;
+      ps_.push_constant("lineWidth", 3.0f);
+      ps_.push_constant(
+          "color", float4(hover_col[0], hover_col[1], hover_col[2], hover_col[3]));
+      for (const int i : IndexRange(handles_.segments.size())) {
+        if (seg_batches[i] && handles_.segments[i].hovered) {
           draw_strip(seg_batches[i]);
         }
       }

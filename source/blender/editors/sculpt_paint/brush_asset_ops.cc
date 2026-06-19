@@ -100,6 +100,15 @@ static wmOperatorStatus brush_asset_activate_exec(bContext *C, wmOperator *op)
   Brush *brush = reinterpret_cast<Brush *>(
       bke::asset_edit_id_from_weak_reference(*bmain, ID_BR, brush_asset_reference));
 
+  /* Prefer an existing local copy that was made local from this asset (e.g. a brush localized to
+   * hold an assigned image texture). Re-activating then keeps those edits instead of switching to a
+   * pristine re-link of the source asset, which would silently drop the texture. */
+  if (brush) {
+    if (ID *local = bke::asset_edit_id_find_local(*bmain, brush->id)) {
+      brush = reinterpret_cast<Brush *>(local);
+    }
+  }
+
   /* Activate brush through tool system rather than calling #BKE_paint_brush_set() directly, to let
    * the tool system switch tools if necessary, and update which brush was the last recently used
    * one for the current tool. */

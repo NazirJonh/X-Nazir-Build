@@ -11,6 +11,8 @@
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 
+#include "BKE_asset_edit.hh"
+#include "BKE_context.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_screen.hh"
 
@@ -96,19 +98,34 @@ class AssetDragController : public ui::AbstractViewItemDragController {
 static std::optional<AssetWeakReference> active_asset_for_shelf(const AssetShelf &shelf,
                                                                 const bContext &C)
 {
+  std::optional<AssetWeakReference> active;
   if (shelf.type->get_active_asset_from_context) {
     if (const AssetWeakReference *weak_ref = shelf.type->get_active_asset_from_context(shelf.type,
                                                                                        &C))
     {
-      return *weak_ref;
+      active = *weak_ref;
     }
   }
-  if (shelf.type->get_active_asset) {
+  if (!active && shelf.type->get_active_asset) {
     if (const AssetWeakReference *weak_ref = shelf.type->get_active_asset(shelf.type)) {
-      return *weak_ref;
+      active = *weak_ref;
     }
   }
-  return std::nullopt;
+  if (!active) {
+    return std::nullopt;
+  }
+
+  /* The active datablock may be a local copy made local from an asset (e.g. a brush localized to
+   * receive a texture), whose local reference does not match the source library item shown in the
+   * shelf. Map it back to the source asset so that item is still highlighted as active. */
+  if (active->asset_library_type == ASSET_LIBRARY_LOCAL) {
+    if (std::optional<AssetWeakReference> source = bke::asset_edit_local_to_source_weak_reference(
+            *CTX_data_main(&C), *active))
+    {
+      return source;
+    }
+  }
+  return active;
 }
 
 AssetView::AssetView(const AssetLibraryReference &library_ref,

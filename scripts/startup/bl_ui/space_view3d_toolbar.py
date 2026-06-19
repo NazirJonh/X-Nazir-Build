@@ -792,7 +792,7 @@ class VIEW3D_PT_tools_brush_texture(Panel, View3DPaintPanel):
         brush = settings.brush
         tex_slot = brush.texture_slot
 
-        col = draw_brush_texture_image_grid(layout, tex_slot)
+        col = draw_brush_texture_image_grid(layout, tex_slot, self.is_popover)
 
         draw_brush_texture_properties(
             col,
@@ -823,7 +823,7 @@ class VIEW3D_PT_tools_mask_texture(Panel, View3DPaintPanel, TextureMaskPanel):
         col = layout.column()
         mask_tex_slot = brush.mask_texture_slot
 
-        col = draw_brush_texture_image_grid(layout, mask_tex_slot)
+        col = draw_brush_texture_image_grid(layout, mask_tex_slot, self.is_popover)
 
         draw_brush_mask_texture_properties(
             col,

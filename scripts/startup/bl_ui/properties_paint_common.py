@@ -1560,14 +1560,14 @@ def draw_color_settings(context, layout, brush, color_type=False):
                 col.prop(brush, "grad_spacing")
 
 
-def draw_brush_texture_image_grid(layout, tex_slot):
+def draw_brush_texture_image_grid(layout, tex_slot, is_popover=False):
     """
     Asset image grid in the 3D Viewport; legacy ID preview elsewhere (e.g. Image Editor).
     """
     col = layout.column()
     space = bpy.context.space_data
     if space and space.type == 'VIEW_3D':
-        col.template_asset_image_grid(tex_slot, "texture")
+        col.template_asset_image_grid(tex_slot, "texture", is_popover=is_popover)
     else:
         col.template_ID_preview(tex_slot, "texture", new="texture.new", rows=3, cols=8)
     return col

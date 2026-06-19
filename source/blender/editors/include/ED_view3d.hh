@@ -1527,8 +1527,12 @@ struct ImageGridViewport {
   bool scroll_row_by_layout_init[layout_bucket_num] = {};
 
   /** Visible grid height in pixels for #ButtonType::Grip (like #AbstractTreeView::custom_height_).
+   * Used by the N-Panel sidebar layout.
    */
   int grip_pixel_height = 0;
+  /** Independent grip height for the same grid when drawn inside a popover (e.g. tool header
+   * Texture popover). Session-only — not persisted to DNA. */
+  int grip_pixel_height_popover = 0;
 
   /**
    * When non-empty, the grid should scroll to this asset's filtered index (session-only).
@@ -1705,10 +1709,10 @@ void image_grid_pending_apply_if_ready(bContext &C, View3D &v3d);
 /** Return the short display name for an asset library reference (used in image grid UI). */
 const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref);
 
-int image_grid_effective_rows(const View3D &v3d);
+int image_grid_effective_rows(const View3D &v3d, bool is_mask_slot);
 int image_grid_preview_size_get(const View3D &v3d);
-int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d);
-void image_grid_clamp_scroll_row(ImageGridUIState &state, const View3D &v3d);
+int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d, bool is_mask_slot);
+void image_grid_clamp_scroll_row(ImageGridUIState &state, const View3D &v3d, bool is_mask_slot);
 bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region);
 int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *region);
 int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegion *region);

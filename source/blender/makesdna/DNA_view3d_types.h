@@ -855,7 +855,8 @@ struct View3D {
 
   /** Mask texture image grid library (#eAssetLibraryType). 0 = unset, use current file. */
   short image_grid_mask_library_type = 0;
-  char _pad_image_grid_mask[2] = {};
+  /** Number of visible rows for the mask texture image grid. 0 = use default (1). */
+  short image_grid_mask_rows = 0;
   /** Custom asset library index for the mask image grid. */
   int image_grid_mask_library_custom_index = 0;
   /**

@@ -2443,7 +2443,11 @@ void template_id_preview(Layout *layout,
                          int cols,
                          int filter = TEMPLATE_ID_FILTER_ALL,
                          bool hide_buttons = false);
-void template_asset_image_grid(Layout *layout, bContext *C, PointerRNA *ptr, const char *propname);
+void template_asset_image_grid(Layout *layout,
+                               bContext *C,
+                               PointerRNA *ptr,
+                               const char *propname,
+                               bool is_popover = false);
 
 /** Reusable grid view header widgets operating on #GridViewSettings. */
 void template_grid_library_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);

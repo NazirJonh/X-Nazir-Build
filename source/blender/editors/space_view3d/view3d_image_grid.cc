@@ -99,9 +99,9 @@ void image_grid_notify_change(bContext &C, const bool is_mask_slot)
   }
 }
 
-int image_grid_effective_rows(const View3D &v3d)
+int image_grid_effective_rows(const View3D &v3d, const bool is_mask_slot)
 {
-  const int stored = v3d.image_grid_rows;
+  const int stored = is_mask_slot ? v3d.image_grid_mask_rows : v3d.image_grid_rows;
   return clamp_i(stored ? stored : 1, 1, 16);
 }
 
@@ -114,9 +114,11 @@ int image_grid_preview_size_get(const View3D &v3d)
   return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
 }
 
-int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d)
+int image_grid_max_scroll_row(const ImageGridUIState &state,
+                              const View3D &v3d,
+                              const bool is_mask_slot)
 {
-  const int effective_rows = image_grid_effective_rows(v3d);
+  const int effective_rows = image_grid_effective_rows(v3d, is_mask_slot);
   const int total_rows = (state.viewport.cached_cols > 0) ?
                              int(ceil(float(state.viewport.cached_item_count) /
                                       float(state.viewport.cached_cols))) :
@@ -124,10 +126,12 @@ int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d)
   return max_ii(0, total_rows - effective_rows);
 }
 
-void image_grid_clamp_scroll_row(ImageGridUIState &state, const View3D &v3d)
+void image_grid_clamp_scroll_row(ImageGridUIState &state,
+                                 const View3D &v3d,
+                                 const bool is_mask_slot)
 {
   state.viewport.scroll_row = clamp_i(
-      state.viewport.scroll_row, 0, image_grid_max_scroll_row(state, v3d));
+      state.viewport.scroll_row, 0, image_grid_max_scroll_row(state, v3d, is_mask_slot));
 }
 
 bool image_grid_slot_is_mask(const PointerRNA &texture_slot_ptr)
@@ -219,7 +223,7 @@ bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region)
     return false;
   }
   ImageGridUIState &state = image_grid_state_get(*v3d, is_mask_slot);
-  return image_grid_max_scroll_row(state, *v3d) > 0;
+  return image_grid_max_scroll_row(state, *v3d, is_mask_slot) > 0;
 }
 
 int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *region)
@@ -268,7 +272,7 @@ int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegi
     bool is_mask = false;
     if (image_grid_mouse_over(region, event->xy, &is_mask)) {
       const ImageGridUIState &state = image_grid_state_get(*v3d, is_mask);
-      if (image_grid_max_scroll_row(state, *v3d) > 0) {
+      if (image_grid_max_scroll_row(state, *v3d, is_mask) > 0) {
         drag.active = true;
         drag.is_mask_slot = is_mask;
         drag.start_y = event->xy[1];
@@ -307,7 +311,7 @@ int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegi
       ImageGridUIState &state = image_grid_state_get(*v3d, drag.is_mask_slot);
       const int preview_size = image_grid_preview_size_get(*v3d);
       const int tile_h = max_ii(1, ui::preview_tile_size_y_no_label(preview_size));
-      const int max_scroll_px = image_grid_max_scroll_row(state, *v3d) * tile_h;
+      const int max_scroll_px = image_grid_max_scroll_row(state, *v3d, drag.is_mask_slot) * tile_h;
 
       int total_px = state.viewport.scroll_row * tile_h + state.viewport.scroll_offset_px;
       total_px = clamp_i(total_px + dy, 0, max_scroll_px);
@@ -1471,9 +1475,9 @@ static wmOperatorStatus image_grid_scroll_exec(bContext *C, wmOperator *op)
   const bool is_mask_slot = RNA_boolean_get(op->ptr, "use_mask_slot");
   ImageGridUIState &state = image_grid_state_get(*v3d, is_mask_slot);
   const int delta = RNA_int_get(op->ptr, "delta");
-  image_grid_clamp_scroll_row(state, *v3d);
+  image_grid_clamp_scroll_row(state, *v3d, is_mask_slot);
   state.viewport.scroll_row = clamp_i(
-      state.viewport.scroll_row + delta, 0, image_grid_max_scroll_row(state, *v3d));
+      state.viewport.scroll_row + delta, 0, image_grid_max_scroll_row(state, *v3d, is_mask_slot));
   /* Mouse-wheel scrolls in whole rows; align the sub-row offset to the row boundary. */
   state.viewport.scroll_offset_px = 0;
   /* User scrolled manually — dismiss any pending focus-to-asset request so the grid does not

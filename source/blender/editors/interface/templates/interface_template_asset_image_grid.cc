@@ -596,25 +596,34 @@ class View3DGridStateAccess : public GridStateAccess {
   View3D &v3d_;
   std::string idname_;
   bool is_mask_slot_;
+  /** True when the grid is drawn inside a popover (tool-header Texture button).
+   * Popover and sidebar share the same #ImageGridUIState but keep independent grip heights so
+   * resizing one does not affect the other. Popover height is session-only (not written to DNA). */
+  bool is_popover_;
 
  public:
   View3DGridStateAccess(ed::view3d::ImageGridUIState &state,
                         View3D &v3d,
                         std::string idname,
-                        const bool is_mask_slot)
+                        const bool is_mask_slot,
+                        const bool is_popover)
       : state_(state),
         v3d_(v3d),
         idname_(std::move(idname)),
-        is_mask_slot_(is_mask_slot)
+        is_mask_slot_(is_mask_slot),
+        is_popover_(is_popover)
   {
   }
 
-  int grip_pixel_height() const override { return state_.viewport.grip_pixel_height; }
-  void grip_pixel_height_set(const int value) override
+  int &grip_height_ref_() const
   {
-    state_.viewport.grip_pixel_height = value;
+    return is_popover_ ? state_.viewport.grip_pixel_height_popover :
+                         state_.viewport.grip_pixel_height;
   }
-  int *grip_pixel_height_ptr() override { return &state_.viewport.grip_pixel_height; }
+
+  int grip_pixel_height() const override { return grip_height_ref_(); }
+  void grip_pixel_height_set(const int value) override { grip_height_ref_() = value; }
+  int *grip_pixel_height_ptr() override { return &grip_height_ref_(); }
 
   int scroll_row() const override { return state_.viewport.scroll_row; }
   void scroll_row_set(const int value) override { state_.viewport.scroll_row = value; }
@@ -642,7 +651,11 @@ class View3DGridStateAccess : public GridStateAccess {
 
   int effective_rows_dna_fallback() const override
   {
-    return ed::view3d::image_grid_effective_rows(v3d_);
+    /* Popover height is not persisted to DNA; use a sensible session default. */
+    if (is_popover_) {
+      return 3;
+    }
+    return ed::view3d::image_grid_effective_rows(v3d_, is_mask_slot_);
   }
 
   std::function<void(bContext &)> make_scroll_widget_fn(const int store_cols,
@@ -749,7 +762,8 @@ static void build_image_grid(Layout &layout,
                              ed::view3d::ImageGridUIState &state,
                              PointerRNA &ptr,
                              PropertyRNA *prop,
-                             const bool is_mask_slot)
+                             const bool is_mask_slot,
+                             const bool is_popover)
 {
   Block *block = layout.block();
   View3D *v3d = CTX_wm_view3d(&C);
@@ -757,7 +771,7 @@ static void build_image_grid(Layout &layout,
     return;
   }
 
-  ed::view3d::image_grid_clamp_scroll_row(state, *v3d);
+  ed::view3d::image_grid_clamp_scroll_row(state, *v3d, is_mask_slot);
 
   const int preview_size = ed::view3d::image_grid_preview_size_get(*v3d);
   const int tile_w = ui::preview_tile_size_x(preview_size);
@@ -772,16 +786,14 @@ static void build_image_grid(Layout &layout,
   state.viewport.cached_cols = cols_est;
 
   /* Pre-compute visible rows for image_grid_apply_focus_scroll.
-   * Derived from grip_pixel_height (previous frame) when available; falls back to DNA rows on
-   * the first frame so focus centering starts from a sensible offset instead of row 0. */
+   * Use the correct grip height for this context (popover has its own independent height). */
+  const int grip_height = is_popover ? state.viewport.grip_pixel_height_popover :
+                                       state.viewport.grip_pixel_height;
   const int tile_h_hint = ui::preview_tile_size_y_no_label(preview_size);
-  const int effective_rows_hint = (state.viewport.grip_pixel_height >= tile_h_hint) ?
-                                      clamp_i(int(divide_ceil_u(
-                                                  uint(state.viewport.grip_pixel_height),
-                                                  uint(tile_h_hint))),
-                                              1,
-                                              16) :
-                                      ed::view3d::image_grid_effective_rows(*v3d);
+  const int effective_rows_hint =
+      (grip_height >= tile_h_hint) ?
+          clamp_i(int(divide_ceil_u(uint(grip_height), uint(tile_h_hint))), 1, 16) :
+          (is_popover ? 3 : ed::view3d::image_grid_effective_rows(*v3d, is_mask_slot));
 
   /* Restore this (cols, rows) layout's saved scroll before applying focus so the "already
    * visible" check in image_grid_apply_focus_scroll sees this layout's own current position. */
@@ -797,22 +809,33 @@ static void build_image_grid(Layout &layout,
   AbstractGridView *grid_view = block_add_view(*block, grid_view_id, std::move(view_unique));
 
   /* Persist a whole-row approximation to DNA for reload reconstruction (nearest row). Done here
-   * so the generic core does not need to know about View3D DNA. Removed in Stage 7. */
-  {
+   * so the generic core does not need to know about View3D DNA. Removed in Stage 7.
+   * Popover height is session-only — never written to DNA. */
+  if (!is_popover) {
     const GridViewStyle &style = grid_view->get_style();
     const int tile_h = max_ii(1, style.tile_height);
     const int grip = state.viewport.grip_pixel_height;
     if (grip >= tile_h) {
-      v3d->image_grid_rows = short(clamp_i(round_fl_to_int(float(grip) / float(tile_h)), 1, 16));
+      const short row_count = short(clamp_i(round_fl_to_int(float(grip) / float(tile_h)), 1, 16));
+      if (is_mask_slot) {
+        v3d->image_grid_mask_rows = row_count;
+      }
+      else {
+        v3d->image_grid_rows = row_count;
+      }
     }
   }
 
-  View3DGridStateAccess state_access(state, *v3d, grid_view_id, is_mask_slot);
+  View3DGridStateAccess state_access(state, *v3d, grid_view_id, is_mask_slot, is_popover);
   build_grid_view(
       C, layout, *grid_view, state_access, state.viewport.cached_item_count, cols_est, panel_width);
 }
 
-void template_asset_image_grid(Layout *layout, bContext *C, PointerRNA *ptr, const char *propname)
+void template_asset_image_grid(Layout *layout,
+                               bContext *C,
+                               PointerRNA *ptr,
+                               const char *propname,
+                               const bool is_popover)
 {
   View3D *v3d = CTX_wm_view3d(C);
   if (!v3d || !ptr || !propname) {
@@ -836,7 +859,7 @@ void template_asset_image_grid(Layout *layout, bContext *C, PointerRNA *ptr, con
   block_add_dynamic_listener(block, image_grid_block_listener);
 
   draw_header_row(*layout, state, *C, is_mask_slot);
-  build_image_grid(*layout, *C, state, *ptr, prop, is_mask_slot);
+  build_image_grid(*layout, *C, state, *ptr, prop, is_mask_slot, is_popover);
   add_browse_image_button(*layout, *C, state, *ptr);
 }
 

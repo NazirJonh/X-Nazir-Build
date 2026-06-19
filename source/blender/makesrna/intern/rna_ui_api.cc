@@ -1174,9 +1174,10 @@ static int rna_ui_get_enum_icon(bContext *C,
 static void rna_uiTemplateAssetImageGrid(Layout *layout,
                                          bContext *C,
                                          PointerRNA *ptr,
-                                         const char *propname)
+                                         const char *propname,
+                                         const bool is_popover)
 {
-  ui::template_asset_image_grid(layout, C, ptr, propname);
+  ui::template_asset_image_grid(layout, C, ptr, propname, is_popover);
 }
 
 static void rna_uiTemplateGridLibrarySelector(Layout *layout,
@@ -1966,6 +1967,7 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_function_ui_description(func, "Compact image asset grid for brush texture slot");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   api_ui_item_rna_common(func);
+  RNA_def_boolean(func, "is_popover", false, "Is Popover", "Grid is drawn inside a popover; uses an independent height that is not saved to disk");
 
   func = RNA_def_function(srna, "template_grid_library_selector", "rna_uiTemplateGridLibrarySelector");
   RNA_def_function_ui_description(func, "Asset-library dropdown for a reusable grid view");

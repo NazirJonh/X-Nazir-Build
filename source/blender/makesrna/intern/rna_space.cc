@@ -5977,6 +5977,15 @@ static void rna_def_space_view3d(BlenderRNA *brna)
       "Number of visible rows in the sculpt texture image grid (0 uses default 1)");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  prop = RNA_def_property(srna, "image_grid_mask_rows", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "image_grid_mask_rows");
+  RNA_def_property_range(prop, 0, 16);
+  RNA_def_property_ui_text(
+      prop,
+      "Mask Grid Rows",
+      "Number of visible rows in the sculpt mask texture image grid (0 uses default 1)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   prop = RNA_def_property(srna, "image_grid_preview_size", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_int_sdna(prop, nullptr, "image_grid_preview_size");
   RNA_def_property_int_funcs(prop,

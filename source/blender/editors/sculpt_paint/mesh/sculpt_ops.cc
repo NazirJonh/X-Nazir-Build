@@ -60,6 +60,7 @@
 #include "sculpt_automask.hh"
 #include "sculpt_color.hh"
 #include "sculpt_dyntopo.hh"
+#include "sculpt_extract_loop.hh"
 #include "sculpt_flood_fill.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_undo.hh"
@@ -570,6 +571,7 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
   }
 
   if (is_mode_set) {
+    extract_loop::extract_loop_hover_free();
     object_sculpt_mode_exit(bmain, *depsgraph, scene, ob);
   }
   else {
@@ -1536,6 +1538,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_mask_extract);
   WM_operatortype_append(SCULPT_OT_face_set_extract);
   WM_operatortype_append(SCULPT_OT_paint_mask_slice);
+  WM_operatortype_append(extract_loop::SCULPT_OT_extract_loop_gesture);
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

@@ -11,6 +11,7 @@
 #include "DNA_mesh_types.h"
 
 #include "BKE_brush.hh"
+#include "BKE_context.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
@@ -27,11 +28,15 @@
 #include "GPU_matrix.hh"
 #include "GPU_state.hh"
 
+#include "RNA_access.hh"
+
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 
 #include "sculpt_boundary.hh"
 #include "sculpt_cloth.hh"
 #include "sculpt_expand.hh"
+#include "sculpt_extract_loop.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_pose.hh"
 
@@ -42,6 +47,43 @@
 #include "bmesh.hh"
 
 namespace blender::ed::sculpt_paint {
+
+/* Fetch the Extract Loop tool's stored operator properties for the active tool.
+ * Returns true and fills \a r_ptr when the Extract Loop tool is active. */
+static bool extract_loop_tool_properties(bContext *C, PointerRNA *r_ptr)
+{
+  ScrArea *area = CTX_wm_area(C);
+  if (!area || !area->runtime.tool) {
+    return false;
+  }
+  wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_extract_loop_gesture", false);
+  return WM_toolsystem_ref_properties_get_from_operator(area->runtime.tool, ot, r_ptr);
+}
+
+static bool is_extract_loop_tool_active(bContext *C)
+{
+  PointerRNA ptr;
+  return extract_loop_tool_properties(C, &ptr);
+}
+
+static extract_loop::ExtractionMode extract_loop_tool_mode(bContext *C)
+{
+  PointerRNA ptr;
+  if (!extract_loop_tool_properties(C, &ptr)) {
+    return extract_loop::ExtractionMode::Loop;
+  }
+  return extract_loop::ExtractionMode(RNA_enum_get(&ptr, "mode"));
+}
+
+static extract_loop::LoopOrientation extract_loop_tool_loop_orientation(bContext *C)
+{
+  PointerRNA ptr;
+  if (!extract_loop_tool_properties(C, &ptr)) {
+    return extract_loop::LoopOrientation::Horizontal;
+  }
+  return extract_loop::LoopOrientation(RNA_enum_get(&ptr, "loop_orientation"));
+}
+
 static int brush_radius_project(ViewContext *vc, float radius, const float location[3])
 {
   float view[3], nonortho[3], ortho[3], offset[3], p1[2], p2[2];
@@ -197,6 +239,33 @@ void mesh_cursor_update_and_init(PaintCursorContext &pcontext)
     if (pcontext.is_cursor_over_mesh) {
       brush_unprojected_size_update(*pcontext.paint, brush, vc, pcontext.scene_space_location);
     }
+  }
+
+  bContext *ctx = pcontext.vc.C;
+  const bool extract_loop_tool = ctx && is_extract_loop_tool_active(ctx);
+  const bool idle_extract_loop_hover = extract_loop_tool &&
+                                       !extract_loop::extract_loop_hover_is_activated();
+
+  if (!extract_loop_tool && extract_loop::extract_loop_hover_is_enabled()) {
+    extract_loop::extract_loop_hover_free();
+  }
+
+  if (!paint_runtime.stroke_active && !pcontext.is_brush_active && idle_extract_loop_hover) {
+    if (!extract_loop::extract_loop_hover_is_enabled() && pcontext.vc.obact) {
+      extract_loop::extract_loop_hover_init(ctx,
+                                            pcontext.vc.obact,
+                                            pcontext.region,
+                                            pcontext.vc.rv3d,
+                                            extract_loop_tool_mode(ctx),
+                                            extract_loop_tool_loop_orientation(ctx));
+    }
+  }
+
+  if (idle_extract_loop_hover && extract_loop::extract_loop_hover_is_enabled() &&
+      pcontext.is_cursor_over_mesh)
+  {
+    extract_loop::extract_loop_hover_update(
+        ctx, mval_fl, extract_loop_tool_mode(ctx), extract_loop_tool_loop_orientation(ctx));
   }
 }
 
@@ -807,6 +876,42 @@ void mesh_cursor_inactive_draw(PaintCursorContext &pcontext)
   GPU_matrix_pop();
 
   /* Reset drawing. */
+  GPU_matrix_pop_projection();
+  wmWindowViewport(pcontext.win);
+}
+
+void mesh_cursor_extract_loop_hover_draw(PaintCursorContext &pcontext)
+{
+  bContext *ctx = pcontext.vc.C;
+  if (!ctx || !is_extract_loop_tool_active(ctx)) {
+    return;
+  }
+  if (extract_loop::extract_loop_hover_is_activated()) {
+    return;
+  }
+  if (!extract_loop::extract_loop_hover_is_enabled()) {
+    return;
+  }
+  if (!pcontext.vc.obact) {
+    extract_loop::extract_loop_hover_free();
+    return;
+  }
+
+  wmViewport(&pcontext.region->winrct);
+
+  GPU_matrix_push_projection();
+  ED_view3d_draw_setup_view(pcontext.wm,
+                            pcontext.win,
+                            pcontext.depsgraph,
+                            pcontext.scene,
+                            pcontext.region,
+                            pcontext.vc.v3d,
+                            nullptr,
+                            nullptr,
+                            nullptr);
+
+  extract_loop::extract_loop_hover_draw();
+
   GPU_matrix_pop_projection();
   wmWindowViewport(pcontext.win);
 }

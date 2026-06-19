@@ -1160,14 +1160,13 @@ static void paint_cursor_draw_3D_view_brush_cursor(PaintCursorContext &pcontext)
      * there is no need to draw anything else. */
     if (brush.falloff_shape == PAINT_FALLOFF_SHAPE_TUBE) {
       paint_draw_legacy_3D_view_brush_cursor(pcontext);
-      return;
     }
-    if (pcontext.alpha_overlay_drawn) {
+    else if (pcontext.alpha_overlay_drawn) {
       paint_draw_legacy_3D_view_brush_cursor(pcontext);
-      return;
     }
-
-    mesh_cursor_inactive_draw(pcontext);
+    else {
+      mesh_cursor_inactive_draw(pcontext);
+    }
   }
 }
 
@@ -1300,6 +1299,7 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
       paint_cursor_setup_3D_drawing(pcontext);
       paint_cursor_draw_3D_view_brush_cursor(pcontext);
       paint_cursor_restore_drawing_state();
+      mesh_cursor_extract_loop_hover_draw(pcontext);
       break;
     default:
       BLI_assert_unreachable();

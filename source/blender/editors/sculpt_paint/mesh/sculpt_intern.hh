@@ -1022,6 +1022,4 @@ void SCULPT_OT_dynamic_topology_toggle(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint::dyntopo
 
-/** \} */
-
 }  // namespace blender

@@ -3731,6 +3731,9 @@ class VIEW3D_MT_sculpt(Menu):
         # Project
         layout.operator("sculpt.project_line_gesture", text="Line Project")
 
+        # Extract Loop/Ring
+        layout.operator("sculpt.extract_loop_gesture", text="Extract Loop")
+
         # Trim/Add
         layout.menu("VIEW3D_MT_sculpt_trim", text="Trim/Add")
 
@@ -8973,6 +8976,9 @@ class VIEW3D_PT_sculpt_context_menu(Panel):
 
     def draw(self, context):
         layout = self.layout
+
+        if UnifiedPaintPanel.get_brush_mode(context) is None:
+            return
 
         paint = context.tool_settings.sculpt
         brush = paint.brush

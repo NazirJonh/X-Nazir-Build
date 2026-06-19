@@ -92,4 +92,5 @@ void grease_pencil_cursor_draw(PaintCursorContext &pcontext);
 void mesh_cursor_update_and_init(PaintCursorContext &pcontext);
 void mesh_cursor_active_draw(PaintCursorContext &pcontext);
 void mesh_cursor_inactive_draw(PaintCursorContext &pcontext);
+void mesh_cursor_extract_loop_hover_draw(PaintCursorContext &pcontext);
 }  // namespace blender::ed::sculpt_paint

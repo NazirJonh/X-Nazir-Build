@@ -1885,6 +1885,43 @@ class _defs_sculpt:
         )
 
     @ToolDef.from_fn
+    def extract_loop():
+        def draw_settings(_context, layout, tool):
+            props = tool.operator_properties("sculpt.extract_loop_gesture")
+            row = layout.row(align=True)
+            row.use_property_split = False
+            row.prop(props, "mode", expand=True)
+            row = layout.row(align=True)
+            row.use_property_split = False
+            row.prop(props, "loop_orientation", expand=True)
+            if props.mode == 'FACE_STRIP':
+                row = layout.row(align=True)
+                row.use_property_split = False
+                row.prop(props, "output_type", expand=True)
+                row = layout.row()
+                row.active = props.output_type != 'EXTRUDE'
+                row.prop(props, "new_object", text="New Object")
+            else:
+                layout.prop(props, "new_object", text="New Object")
+                row = layout.row(align=True)
+                row.use_property_split = False
+                row.active = props.new_object
+                row.prop(props, "output_type", expand=True)
+            row = layout.row()
+            row.active = not props.new_object and props.output_type != 'EXTRUDE'
+            row.prop(props, "mask_selection", text="Mask Selection")
+
+        return dict(
+            idname="builtin.extract_loop",
+            label="Extract Loop",
+            icon="ops.sculpt.line_project",
+            widget=None,
+            cursor='PAINT_CROSS',
+            keymap=(),
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def mesh_filter():
         def draw_settings(_context, layout, tool):
             props = tool.operator_properties("sculpt.mesh_filter")
@@ -3995,6 +4032,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
                 _defs_sculpt.trim_polyline,
             ),
             _defs_sculpt.project_line,
+            _defs_sculpt.extract_loop,
             None,
             _defs_sculpt.mesh_filter,
             _defs_sculpt.cloth_filter,

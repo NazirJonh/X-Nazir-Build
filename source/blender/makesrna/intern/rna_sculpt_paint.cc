@@ -1338,7 +1338,7 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "paint_curve_show_radius_handles", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "paint_curve_show_radius_handles", 0);
+  RNA_def_property_boolean_sdna(prop, nullptr, "paint_curve_show_radius_handles", 1);
   RNA_def_property_ui_text(
       prop, "Show Radius Handles", "Display radius handles for paint curve points");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);

@@ -45,6 +45,7 @@ struct wmOperatorType;
 
 void PAINTCURVE_OT_new(wmOperatorType *ot);
 void PAINTCURVE_OT_add_point(wmOperatorType *ot);
+void PAINTCURVE_OT_insert_or_add_point(wmOperatorType *ot);
 void PAINTCURVE_OT_new_spline(wmOperatorType *ot);
 void PAINTCURVE_OT_delete_point(wmOperatorType *ot);
 void PAINTCURVE_OT_duplicate(wmOperatorType *ot);

@@ -2612,9 +2612,9 @@ def km_paint_curve(params):
     )
 
     items.extend([
-        ("paintcurve.add_point_slide", {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True}, None),
+        ("paintcurve.insert_or_add_point", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True}, None),
         ("paintcurve.slide", {"type": 'LEFTMOUSE', "value": 'PRESS'},
-         {"properties": [("align", False), ("move_segment", True)]}),
+         {"properties": [("align", False), ("move_segment", True), ("select", True)]}),
         ("paintcurve.slide", {"type": 'LEFTMOUSE', "value": 'PRESS', "shift": True},
          {"properties": [("extend", True), ("move_segment", True)]}),
         ("paintcurve.slide_radius", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
@@ -3735,9 +3735,7 @@ def km_3d_view_tool_sculpt_curves_edit(_params):
         {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
         {"items": [
             ("paintcurve.sculpt_pick", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
-            ("paintcurve.slide", {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True, "shift": True},
-             {"properties": [("insert_point", True), ("select", False)]}),
-            ("paintcurve.add_point_slide", {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True}, None),
+            ("paintcurve.insert_or_add_point", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True}, None),
             ("paintcurve.slide", {"type": 'LEFTMOUSE', "value": 'PRESS'},
              {"properties": [("align", False), ("move_segment", True), ("select", True)]}),
             ("paintcurve.slide", {"type": 'LEFTMOUSE', "value": 'PRESS', "shift": True},

@@ -4741,9 +4741,9 @@ def km_paint_curve(params):
     )
 
     items.extend([
-        ("paintcurve.slide", {"type": params.action_mouse, "value": 'PRESS', "ctrl": True, "shift": True},
-         {"properties": [("insert_point", True), ("select", False)]}),
-        ("paintcurve.add_point_slide", {"type": params.action_mouse, "value": 'PRESS', "ctrl": True}, None),
+        ("paintcurve.insert_or_add_point", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True}, None),
+        ("paintcurve.slide", {"type": params.action_mouse, "value": 'PRESS'},
+         {"properties": [("align", False), ("move_segment", True), ("select", True)]}),
         ("paintcurve.slide", {"type": params.select_mouse, "value": 'PRESS'},
          {"properties": [("align", False), ("move_segment", True)]}),
         ("paintcurve.slide", {"type": params.select_mouse, "value": 'PRESS', "shift": True},
@@ -8414,10 +8414,7 @@ def km_3d_view_tool_sculpt_curves_edit(params):
         {"items": [
             # Pick a scene curve / pass-through to point editing.
             ("paintcurve.sculpt_pick", {"type": params.tool_mouse, "value": 'PRESS'}, None),
-            # Point + handle editing (mirrors the "Paint Curve" keymap).
-            ("paintcurve.slide", {"type": params.tool_mouse, "value": 'PRESS', "ctrl": True, "shift": True},
-             {"properties": [("insert_point", True), ("select", False)]}),
-            ("paintcurve.add_point_slide", {"type": params.tool_mouse, "value": 'PRESS', "ctrl": True}, None),
+            ("paintcurve.insert_or_add_point", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True}, None),
             ("paintcurve.slide", {"type": params.tool_mouse, "value": 'PRESS'},
              {"properties": [("align", False), ("move_segment", True), ("select", True)]}),
             ("paintcurve.slide", {"type": params.tool_mouse, "value": 'PRESS', "shift": True},

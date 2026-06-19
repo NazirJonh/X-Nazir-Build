@@ -72,6 +72,20 @@ namespace blender {
 static bool paintcurve_skip_next_slide = false;
 static bool paintcurve_slide_active = false;
 
+static bool paintcurve_find_closest_segment(PaintCurve *pc,
+                                            const Span<PaintCurvePoint> screen_points,
+                                            const float pos[2],
+                                            const float threshold,
+                                            int *r_segment_index,
+                                            int *r_segment_index_next,
+                                            float *r_edge_t);
+static bool paintcurve_insert_point_at_segment(
+    bContext *C, wmOperator *op, PaintCurve *pc, const int segment_index, const float edge_t);
+static bool paintcurve_try_insert_point_at_mouse(bContext *C,
+                                                 wmOperator *op,
+                                                 PaintCurve *pc,
+                                                 const float loc_fl[2]);
+
 bool paintcurve_slide_is_active()
 {
   return paintcurve_slide_active;
@@ -104,6 +118,45 @@ static bool paintcurve_cycle_handle_type_at_point(bContext *C,
   paintcurve_sync_after_handle_type_change(C, pc);
   ED_paintcurve_undo_push_end(C);
   paintcurve_skip_next_slide = true;
+  return true;
+}
+
+/**
+ * When exactly one control point is selected, set #PaintCurve.active_curve and #PaintCurve.add_index
+ * so the next added point extends from that end of the spline (start vs end).
+ */
+static bool paintcurve_update_add_index_from_selection(PaintCurve *pc,
+                                                       const bke::CurvesGeometry &geom)
+{
+  if (pc == nullptr || !paintcurve_geometry_is_valid(geom)) {
+    return false;
+  }
+
+  int selected_point = -1;
+  int selected_count = 0;
+  for (const int i : geom.points_range()) {
+    if (paintcurve_geom_get_selection(geom, i) & 0x07) {
+      selected_point = i;
+      selected_count++;
+      if (selected_count > 1) {
+        return false;
+      }
+    }
+  }
+  if (selected_count != 1) {
+    return false;
+  }
+
+  const int spline_idx = paintcurve_curve_of_point(pc, selected_point);
+  if (spline_idx < 0) {
+    return false;
+  }
+
+  pc->active_curve = spline_idx;
+  const OffsetIndices<int> pbc = geom.points_by_curve();
+  const int idx_in_spline = selected_point - pbc[spline_idx].start();
+  const int spline_size = pbc[spline_idx].size();
+  pc->add_index = (idx_in_spline || spline_size == 1) ? (idx_in_spline + 1) : 0;
   return true;
 }
 
@@ -367,6 +420,9 @@ static void paintcurve_point_add(bContext *C,
   int global_insert_idx;
   int add_index_in_spline;
 
+  /* Respect the selected endpoint when extending (Curve Edit and Stroke Method: Curve). */
+  paintcurve_update_add_index_from_selection(pc, geom);
+
   if (create_new_spline) {
     active_curve = paintcurve_geometry_add_spline(geom, 1);
     pc->active_curve = active_curve;
@@ -502,6 +558,76 @@ void PAINTCURVE_OT_add_point(wmOperatorType *ot)
                      "Location of vertex in area space",
                      0,
                      SHRT_MAX);
+}
+
+/** Try to insert a control point on the bezier segment under the cursor. */
+static bool paintcurve_try_insert_point_at_mouse(bContext *C,
+                                                 wmOperator *op,
+                                                 PaintCurve *pc,
+                                                 const float loc_fl[2])
+{
+  if (pc == nullptr) {
+    return false;
+  }
+
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  Vector<PaintCurvePoint> screen_points;
+  paintcurve_build_screen_points(pc, &vc, screen_points);
+
+  int segment_index;
+  int segment_index_next;
+  float edge_t;
+  if (!paintcurve_find_closest_segment(pc,
+                                       screen_points.as_span(),
+                                       loc_fl,
+                                       PAINT_CURVE_SELECT_THRESHOLD,
+                                       &segment_index,
+                                       &segment_index_next,
+                                       &edge_t))
+  {
+    return false;
+  }
+  if (!paintcurve_insert_point_at_segment(C, op, pc, segment_index, edge_t)) {
+    return false;
+  }
+  paintcurve_skip_next_slide = true;
+  return true;
+}
+
+static wmOperatorStatus paintcurve_insert_or_add_point_invoke(bContext *C,
+                                                              wmOperator *op,
+                                                              const wmEvent *event)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *br = BKE_paint_brush(paint);
+  PaintCurve *pc = br ? br->paint_curve : nullptr;
+
+  const int loc[2] = {event->mval[0], event->mval[1]};
+  const float loc_fl[2] = {float(loc[0]), float(loc[1])};
+
+  if (paintcurve_try_insert_point_at_mouse(C, op, pc, loc_fl)) {
+    return OPERATOR_FINISHED;
+  }
+
+  const bool snap_to_surface = (event->modifier & KM_CTRL) != 0;
+  paintcurve_point_add(C, op, loc, snap_to_surface);
+  RNA_int_set_array(op->ptr, "location", loc);
+  return OPERATOR_FINISHED;
+}
+
+void PAINTCURVE_OT_insert_or_add_point(wmOperatorType *ot)
+{
+  ot->name = "Insert or Add Paint Curve Point";
+  ot->description =
+      "Insert a control point on the curve segment under the cursor, or add a new point to extend "
+      "the spline";
+  ot->idname = "PAINTCURVE_OT_insert_or_add_point";
+
+  ot->invoke = paintcurve_insert_or_add_point_invoke;
+  ot->poll = paint_curve_poll;
+
+  ot->flag = OPTYPE_REGISTER;
 }
 
 static wmOperatorStatus paintcurve_new_spline_exec(bContext *C, wmOperator *op)
@@ -823,19 +949,11 @@ static bool paintcurve_point_select(bContext *C,
         screen_points.as_span(), loc_fl, false, PAINT_CURVE_SELECT_THRESHOLD, &selflag);
 
     if (found_idx >= 0) {
-      /* Track active spline and add_index based on selected point. */
       const int spline_idx = paintcurve_curve_of_point(pc, found_idx);
       if (spline_idx >= 0) {
         pc->active_curve = spline_idx;
-        if (!paintcurve_has_multi_curves(pc)) {
-          const OffsetIndices<int> pbc = geom.points_by_curve();
-          const int idx_in_spline = found_idx - pbc[spline_idx].start();
-          const int spline_size = pbc[spline_idx].size();
-          pc->add_index = (idx_in_spline || spline_size == 1) ? (idx_in_spline + 1) : 0;
-        }
       }
 
-      /* Convert selflag to bit mask. */
       uint8_t sel_bit;
       if (selflag == SEL_F1) {
         sel_bit = 0x01;
@@ -855,6 +973,7 @@ static bool paintcurve_point_select(bContext *C,
         const uint8_t cur = paintcurve_geom_get_selection(geom, found_idx);
         paintcurve_geom_set_selection(geom, found_idx, cur ^ sel_bit);
       }
+      paintcurve_update_add_index_from_selection(pc, geom);
     }
     else {
       ED_paintcurve_undo_push_end(C);
@@ -1095,7 +1214,7 @@ static bool paintcurve_find_closest_segment(PaintCurve *pc,
 
   paintcurve_foreach_bezier_segment(pc, [&](const int point_a, const int point_b) {
     float segment_min_dist = min_dist;
-    int segment_start = -1;
+    int segment_start = point_a;
     float segment_param = 0.0f;
     paintcurve_find_closest_on_bezier_segment(pos,
                                               screen_points[point_a],
@@ -1181,10 +1300,6 @@ static void paintcurve_apply_segment_move_3d(bke::CurvesGeometry &geom,
 static bool paintcurve_insert_point_at_segment(
     bContext *C, wmOperator *op, PaintCurve *pc, const int segment_index, const float edge_t)
 {
-  if (paintcurve_has_multi_curves(pc)) {
-    return false;
-  }
-
   bke::CurvesGeometry &geom = pc->geometry.wrap();
   if (!paintcurve_geometry_is_valid(geom)) {
     return false;
@@ -1269,12 +1384,14 @@ static bool paintcurve_insert_point_at_segment(
   geom.calculate_bezier_aligned_handles();
   geom.tag_positions_changed();
 
-  if (pc->add_index >= insert_index) {
-    pc->add_index++;
-  }
-
   paintcurve_geom_set_all_selection(geom, 0);
   paintcurve_geom_set_selection(geom, insert_index, 0x02);
+  pc->active_curve = active_curve;
+  {
+    const OffsetIndices<int> pbc = geom.points_by_curve();
+    const int idx_in_spline = insert_index - pbc[active_curve].start();
+    pc->add_index = idx_in_spline + 1;
+  }
 
   if (pc->use_3d_space) {
     paintcurve_sync_to_source_if_3d(C, pc);
@@ -1477,21 +1594,8 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
   paintcurve_build_screen_points(pc, &vc, screen_points);
 
   if (insert_point) {
-    int segment_index;
-    int segment_index_next;
-    float edge_t;
-    if (paintcurve_find_closest_segment(pc,
-                                        screen_points.as_span(),
-                                        loc_fl,
-                                        PAINT_CURVE_SELECT_THRESHOLD,
-                                        &segment_index,
-                                        &segment_index_next,
-                                        &edge_t))
-    {
-      if (paintcurve_insert_point_at_segment(C, op, pc, segment_index, edge_t)) {
-        paintcurve_skip_next_slide = true;
-        return OPERATOR_FINISHED;
-      }
+    if (paintcurve_try_insert_point_at_mouse(C, op, pc, loc_fl)) {
+      return OPERATOR_FINISHED;
     }
     return OPERATOR_CANCELLED;
   }
@@ -1632,6 +1736,8 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
       /* Select the active handle. */
       paintcurve_geom_set_selection(pc->geometry.wrap(), point_index, new_sel);
     }
+
+    paintcurve_update_add_index_from_selection(pc, pc->geometry.wrap());
 
     BKE_brush_tag_unsaved_changes(br);
     paintcurve_slide_active = true;

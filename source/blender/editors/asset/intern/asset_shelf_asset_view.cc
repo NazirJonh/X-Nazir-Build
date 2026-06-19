@@ -150,12 +150,11 @@ void AssetView::build_items()
     if (shelf_.type->flag & ASSET_SHELF_TYPE_FLAG_NO_ASSET_DRAG) {
       item.disable_asset_drag();
     }
-    if (!shelf_.type->drag_operator.empty()) {
-      /* For now always select/activate items on click instead of press when there's a drag
-       * operator set. Important for pose library blending. Maybe we want to make this an explicit
-       * option of the asset shelf instead. */
-      item.select_on_click_set();
-    }
+    /* Activate on click (release) rather than press so that LMB drag-scroll can intercept the
+     * gesture before selection triggers. Without this, popovers activate view items on press via
+     * #handle_view_item_event (unconditionally, before drag is detectable). Matches the image-grid
+     * template pattern (#select_on_click_set + #always_reactivate_on_click). */
+    item.select_on_click_set();
     /* Make sure every click calls the #bl_activate_operator. We might want to add a flag to
      * enable/disable this. Or we only call #bl_activate_operator when an item becomes active, and
      * add a #bl_click_operator for repeated execution on every click. So far it seems like every

@@ -47,6 +47,12 @@ AssetShelf *active_shelf_from_context(const bContext *C);
 
 void send_redraw_notifier(const bContext &C);
 
+/**
+ * Register the LMB drag-scroll pre-button handler for asset views (asset shelf, asset shelf
+ * popover, asset browser). Called once from #operatortypes_asset() at startup.
+ */
+void register_drag_scroll_handler();
+
 AssetShelfType *ensure_shelf_has_type(AssetShelf &shelf);
 AssetShelf *create_shelf_from_type(AssetShelfType &type);
 

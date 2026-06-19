@@ -722,15 +722,20 @@ bool block_is_popover(const Block *block)
   return (block->flag & BLOCK_POPOVER) != 0;
 }
 
-bool region_popup_has_panel(const bContext *C, const char *panel_idname)
+bool region_popup_has_panel(const ARegion *region, const char *panel_idname)
 {
-  const ARegion *region = CTX_wm_region_popup(C);
   if (!region || !region->runtime || panel_idname == nullptr || panel_idname[0] == '\0') {
     return false;
   }
   for (Block &block : region->runtime->uiblocks) {
-    if (block.panel && block.panel->type) {
-      if (STREQ(block.panel->type->idname, panel_idname)) {
+    if (block.panel) {
+      /* For panels drawn inline via `paneltype_draw_impl` (e.g. popovers), the block's
+       * panel has a shared dummy PanelType with an empty idname. The actual panel idname
+       * is stored in `panelname` by `popup_dummy_panel_set`. Check both to cover all cases. */
+      if (STREQ(block.panel->panelname, panel_idname)) {
+        return true;
+      }
+      if (block.panel->type && STREQ(block.panel->type->idname, panel_idname)) {
         return true;
       }
     }

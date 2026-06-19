@@ -491,14 +491,17 @@ static void file_main_region_init(wmWindowManager *wm, ARegion *region)
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "File Browser", SPACE_FILE, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
 
-  keymap = WM_keymap_ensure(
-      wm->runtime->defaultconf, "File Browser Main", SPACE_FILE, RGN_TYPE_WINDOW);
-  WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
-
+  /* Asset-browser-specific overrides must be processed before the generic "File Browser Main"
+   * keymap so they can shadow it (e.g. select-on-click instead of select-on-press, which keeps the
+   * item under the cursor unselected while starting an LMB drag-scroll gesture). */
   keymap = WM_keymap_ensure(
       wm->runtime->defaultconf, "Asset Browser Main", SPACE_FILE, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
   keymap->poll = [](bContext *C) { return ED_operator_asset_browsing_active(C); };
+
+  keymap = WM_keymap_ensure(
+      wm->runtime->defaultconf, "File Browser Main", SPACE_FILE, RGN_TYPE_WINDOW);
+  WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
 }
 
 static void file_main_region_listener(const wmRegionListenerParams *listener_params)

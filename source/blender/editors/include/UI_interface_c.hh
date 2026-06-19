@@ -2294,9 +2294,12 @@ bool panel_list_matches_data(ARegion *region,
 
 void region_handlers_add(ListBaseT<wmEventHandler> *handlers);
 /**
- * True when #CTX_wm_region_popup has a panel with the given #PanelType.idname.
+ * True when \a region has a block whose panel matches the given #PanelType.idname.
+ * For popups, \a region is typically the popup region (e.g. #CTX_wm_region_popup),
+ * but it may also be passed directly when the context popup isn't set yet
+ * (e.g. pre-button handlers invoked from button-attached popovers).
  */
-bool region_popup_has_panel(const bContext *C, const char *panel_idname);
+bool region_popup_has_panel(const ARegion *region, const char *panel_idname);
 
 /**
  * Handler tried during region and popup-menu event handling, *before* button activation, so an
@@ -2307,6 +2310,12 @@ bool region_popup_has_panel(const bContext *C, const char *panel_idname);
  */
 using RegionPreButtonHandlerFn = int (*)(bContext *C, const wmEvent *event, ARegion *region);
 void region_pre_button_handler_add(RegionPreButtonHandlerFn fn);
+/**
+ * Apply a Y-axis scroll delta (screen pixels) to the first popup block in \a region.
+ * Uses the same mechanism as MMB panning. No-op when the popup fits entirely on screen.
+ * Returns true if any scrolling was actually applied.
+ */
+bool popup_region_scroll_apply_dy(ARegion *region, float dy);
 void popup_handlers_add(bContext *C,
                         ListBaseT<wmEventHandler> *handlers,
                         PopupBlockHandle *popup,

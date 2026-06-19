@@ -105,7 +105,7 @@ void image_grid_viewport_store_scroll_for_layout(ImageGridViewport &viewport,
 
 static bool image_grid_browse_popover_is_open(const bContext &C)
 {
-  return ui::region_popup_has_panel(&C, "ASSETSHELF_PT_popover_panel");
+  return ui::region_popup_has_panel(CTX_wm_region_popup(&C), "ASSETSHELF_PT_popover_panel");
 }
 
 static int image_grid_find_asset_filtered_index(const bContext &C,

@@ -38,6 +38,7 @@
 #include "DNA_image_types.h"
 
 #include "ED_asset.hh"
+#include "asset_shelf.hh"
 #include "ED_asset_image_library.hh"
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_list.hh"
@@ -1789,6 +1790,8 @@ void operatortypes_asset()
 
   WM_operatortype_append(ASSET_OT_images_to_assets);
   WM_operatortype_append(ASSET_OT_image_library_refresh);
+
+  shelf::register_drag_scroll_handler();
 }
 
 namespace list {

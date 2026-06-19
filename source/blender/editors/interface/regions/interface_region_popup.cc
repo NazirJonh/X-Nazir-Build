@@ -22,6 +22,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
+#include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector_set.hh"
 
@@ -647,6 +648,24 @@ void popup_block_scroll_apply_offset_y(ARegion *region, Block *block, const floa
   ED_region_tag_redraw(region);
 }
 
+bool popup_region_scroll_apply_dy(ARegion *region, const float dy)
+{
+  if (dy == 0.0f) {
+    return false;
+  }
+  Block *block = static_cast<Block *>(region->runtime->uiblocks.first);
+  if (!block || !block->handle) {
+    return false;
+  }
+  PopupBlockHandle *handle = block->handle;
+  /* Both 0 means the popup fits on screen and has no scrollable range. */
+  if (handle->scrollmin == 0.0f && handle->scrollmax == 0.0f) {
+    return false;
+  }
+  popup_block_scroll_apply_offset_y(region, block, dy);
+  return true;
+}
+
 static bool popup_scroll_to_but(ARegion *region, Block *block, Button *but_target)
 {
   float dy = 0.0f;
@@ -743,6 +762,9 @@ void popup_dummy_panel_set(ARegion *region, Block *block, StringRef idname)
     }();
     panel = BKE_panel_new(&panel_type);
   }
+  /* Store the actual panel idname so callers can identify which panel type this popup
+   * represents via `panel->panelname`, even though the PanelType is a shared dummy. */
+  STRNCPY_UTF8(panel->panelname, idname.data());
   panel->runtime->layout_panels.clear();
   panel->runtime->layout_panel_states_storage = &popup_persistent_layout_panel_states(idname);
   block->panel = panel;

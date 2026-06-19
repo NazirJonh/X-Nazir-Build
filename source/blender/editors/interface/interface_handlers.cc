@@ -5641,8 +5641,9 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
             /* Popup handlers always consume events (return `WM_UI_HANDLER_BREAK`), preventing
              * the WM from synthesizing `KM_CLICK`. Activate on `KM_RELEASE` as a substitute.
              * Drag-to-scroll releases are filtered upstream by returning `WM_UI_HANDLER_BREAK`
-             * before this handler is reached. */
-            force_activate_view_item_but(C, data->region, view_item_but, false);
+             * before this handler is reached, so reaching here means a genuine tap — close the
+             * popup (unless the view opts to stay open via #set_popup_keep_open). */
+            force_activate_view_item_but(C, data->region, view_item_but, true);
             return WM_UI_HANDLER_BREAK;
           }
           break;
@@ -12894,8 +12895,15 @@ static int handler_region_menu(bContext *C, const wmEvent *event, void * /*userd
       }
     }
     else {
-      /* handle events for the activated button */
-      retval = handle_button_event(C, event, but);
+      /* Run pre-button handlers (e.g. drag-scroll) before default button handling, even while a
+       * button is in a modal state (e.g. #BUTTON_STATE_WAIT_RELEASE). Without this, LMB drag-scroll
+       * over items in non-popup regions (e.g. Asset Browser) is bypassed once the button is pressed,
+       * because this window-level modal handler routes events straight to #handle_button_event. */
+      retval = region_pre_button_handlers_call(C, event, region);
+      if (retval == WM_UI_HANDLER_CONTINUE) {
+        /* handle events for the activated button */
+        retval = handle_button_event(C, event, but);
+      }
     }
   }
 

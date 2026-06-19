@@ -3916,7 +3916,7 @@ static bool is_brush_related_tool(bContext *C)
   {
     bToolRef *tref = area->runtime.tool;
     if (tref && tref->runtime && tref->runtime->keymap[0]) {
-      std::array<wmOperatorType *, 7> trim_operators = {
+      std::array<wmOperatorType *, 8> trim_operators = {
           WM_operatortype_find("SCULPT_OT_trim_box_gesture", false),
           WM_operatortype_find("SCULPT_OT_trim_lasso_gesture", false),
           WM_operatortype_find("SCULPT_OT_trim_line_gesture", false),
@@ -3924,6 +3924,7 @@ static bool is_brush_related_tool(bContext *C)
           WM_operatortype_find("SCULPT_OT_mesh_filter", false),
           WM_operatortype_find("SCULPT_OT_cloth_filter", false),
           WM_operatortype_find("SCULPT_OT_color_filter", false),
+          WM_operatortype_find("SCULPT_OT_extract_loop_gesture", false),
       };
 
       return std::any_of(trim_operators.begin(), trim_operators.end(), [tref](wmOperatorType *ot) {

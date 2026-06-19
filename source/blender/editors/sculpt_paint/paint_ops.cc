@@ -50,6 +50,7 @@
 #include "curves/sculpt_intern.hh"
 #include "mesh/paint_hide.hh"
 #include "mesh/paint_mask.hh"
+#include "mesh/sculpt_extract_loop.hh"
 #include "mesh/sculpt_intern.hh"
 
 namespace blender {
@@ -719,6 +720,9 @@ void ED_keymap_paint(wmKeyConfig *keyconf)
 
   /* sculpt expand. */
   expand::modal_keymap(keyconf);
+
+  /* sculpt extract loop. */
+  extract_loop::modal_keymap(keyconf);
 }
 
 }  // namespace blender

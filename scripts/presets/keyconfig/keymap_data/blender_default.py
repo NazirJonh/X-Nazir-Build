@@ -8381,6 +8381,16 @@ def km_3d_view_tool_sculpt_line_project(params):
     )
 
 
+def km_3d_view_tool_sculpt_extract_loop(params):
+    return (
+        "3D View Tool: Sculpt, Extract Loop",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("sculpt.extract_loop_gesture", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+        ]},
+    )
+
+
 def km_3d_view_tool_sculpt_mesh_filter(params):
     return (
         "3D View Tool: Sculpt, Mesh Filter",
@@ -9226,6 +9236,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_line_trim(params),
         km_3d_view_tool_sculpt_polyline_trim(params),
         km_3d_view_tool_sculpt_line_project(params),
+        km_3d_view_tool_sculpt_extract_loop(params),
         km_3d_view_tool_sculpt_mesh_filter(params),
         km_3d_view_tool_sculpt_cloth_filter(params),
         km_3d_view_tool_sculpt_color_filter(params),

@@ -40,6 +40,135 @@ namespace blender {
 /** \name Screen-Space Projection & Radius Handles
  * \{ */
 
+static bool paintcurve_project_local_to_screen(const ViewContext *vc,
+                                               const float4x4 &ob_to_world,
+                                               const float3 &local_co,
+                                               float2 &r_screen)
+{
+  if (vc == nullptr || vc->region == nullptr) {
+    return false;
+  }
+  if (vc->rv3d) {
+    const float4x4 projection = ED_view3d_ob_project_mat_get_from_obmat(vc->rv3d, ob_to_world);
+    r_screen = ED_view3d_project_float_v2_m4(vc->region, local_co, projection);
+  }
+  else {
+    float world_co[3];
+    mul_v3_m4v3(world_co, ob_to_world.ptr(), local_co);
+    float screen_co[2];
+    ED_view3d_project_v2(vc->region, world_co, screen_co);
+    r_screen = float2(screen_co[0], screen_co[1]);
+  }
+  return isfinite(r_screen.x) && isfinite(r_screen.y);
+}
+
+void paintcurve_build_screen_segment_polyline(const PaintCurve *pc,
+                                              const ViewContext *vc,
+                                              const int point_index_a,
+                                              const int point_index_b,
+                                              const Span<PaintCurvePoint> screen_points_fallback,
+                                              Vector<float2> &r_polyline)
+{
+  r_polyline.clear();
+  if (pc == nullptr || vc == nullptr) {
+    return;
+  }
+
+  const bke::CurvesGeometry &geom = pc->geometry.wrap();
+  if (!paintcurve_geometry_is_valid(geom)) {
+    return;
+  }
+
+  if (paintcurve_uses_3d_geometry(pc)) {
+    Object *ob = vc->obact;
+    const float4x4 ob_to_world = ob ? ob->object_to_world() : float4x4::identity();
+
+    const int curve_index = paintcurve_curve_of_point(pc, point_index_a);
+    if (curve_index < 0) {
+      return;
+    }
+
+    const OffsetIndices<int> points_by_curve = geom.points_by_curve();
+    const IndexRange curve_points = points_by_curve[curve_index];
+    if (!curve_points.contains(point_index_a) || !curve_points.contains(point_index_b)) {
+      return;
+    }
+
+    const int local_a = point_index_a - curve_points.first();
+    const int local_b = point_index_b - curve_points.first();
+    /* Populate evaluated offsets/positions caches before bezier_evaluated_offsets_for_curve. */
+    const Span<float3> evaluated_positions = geom.evaluated_positions();
+    const IndexRange curve_evaluated = geom.evaluated_points_by_curve()[curve_index];
+    const Span<int> bezier_offsets = geom.bezier_evaluated_offsets_for_curve(curve_index);
+    if (local_b >= bezier_offsets.size() || local_a + 1 >= bezier_offsets.size()) {
+      return;
+    }
+
+    /* Bezier offsets index tessellated spans between control points. The exact end control
+     * point of a segment lives at eval index #bezier_offsets[local_b] and must be included
+     * (exclusive range end is +1). Only the cyclic wrap-around segment uses the raw offset
+     * without the extra point (see #curves::bezier::calculate_evaluated_offsets). */
+    const bool is_cyclic = geom.cyclic()[curve_index];
+    const bool is_wrap_segment = is_cyclic && local_b <= local_a;
+    int range_end = bezier_offsets[local_a + 1];
+    if (!is_wrap_segment) {
+      range_end = bezier_offsets[local_b] + 1;
+    }
+
+    const IndexRange segment_evaluated = IndexRange::from_begin_end(bezier_offsets[local_a],
+                                                                    range_end);
+
+    if (segment_evaluated.size() <= 1) {
+      /* Vector segment: only one evaluated point is stored; draw the straight edge explicitly. */
+      const Span<float3> positions = geom.positions();
+      r_polyline.reinitialize(2);
+      if (!paintcurve_project_local_to_screen(
+              vc, ob_to_world, positions[point_index_a], r_polyline[0]) ||
+          !paintcurve_project_local_to_screen(
+              vc, ob_to_world, positions[point_index_b], r_polyline[1]))
+      {
+        r_polyline.clear();
+      }
+      return;
+    }
+
+    r_polyline.reinitialize(segment_evaluated.size());
+    for (const int i : segment_evaluated.index_range()) {
+      const float3 &local_co = evaluated_positions[curve_evaluated.start() + segment_evaluated[i]];
+      if (!paintcurve_project_local_to_screen(vc, ob_to_world, local_co, r_polyline[i])) {
+        r_polyline.clear();
+        return;
+      }
+    }
+    return;
+  }
+
+  if (screen_points_fallback.is_empty() || point_index_a >= screen_points_fallback.size() ||
+      point_index_b >= screen_points_fallback.size())
+  {
+    return;
+  }
+
+  const PaintCurvePoint &pcp_a = screen_points_fallback[point_index_a];
+  const PaintCurvePoint &pcp_b = screen_points_fallback[point_index_b];
+  float data[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];
+  for (int j = 0; j < 2; j++) {
+    BKE_curve_forward_diff_bezier(pcp_a.bez.vec[1][j],
+                                  pcp_a.bez.vec[2][j],
+                                  pcp_b.bez.vec[0][j],
+                                  pcp_b.bez.vec[1][j],
+                                  data + j,
+                                  PAINT_CURVE_NUM_SEGMENTS,
+                                  sizeof(float[2]));
+  }
+
+  r_polyline.reinitialize(PAINT_CURVE_NUM_SEGMENTS + 1);
+  const float(*v)[2] = reinterpret_cast<const float(*)[2]>(data);
+  for (int j = 0; j <= PAINT_CURVE_NUM_SEGMENTS; j++) {
+    r_polyline[j] = float2(v[j][0], v[j][1]);
+  }
+}
+
 void paintcurve_build_screen_points(const PaintCurve *pc,
                                     const ViewContext *vc,
                                     Vector<PaintCurvePoint> &r_screen_points)
@@ -220,67 +349,25 @@ void paintcurve_build_object_screen_polylines(const bke::CurvesGeometry &geom,
     return;
   }
 
-  const std::optional<Span<float3>> handles_left = geom.handle_positions_left();
-  const std::optional<Span<float3>> handles_right = geom.handle_positions_right();
-  if (!handles_left.has_value() || !handles_right.has_value()) {
-    return;
-  }
+  const Span<float3> evaluated_positions = geom.evaluated_positions();
+  const OffsetIndices<int> evaluated_points_by_curve = geom.evaluated_points_by_curve();
 
-  const Span<float3> positions = geom.positions();
-  const Span<float3> hl = handles_left.value();
-  const Span<float3> hr = handles_right.value();
-  const VArray<bool> cyclic = geom.cyclic();
-  const OffsetIndices<int> points_by_curve = geom.points_by_curve();
-
-  auto project = [&](const float3 &local_co, float2 &r_screen) -> bool {
-    float world_co[3];
-    mul_v3_m4v3(world_co, ob_to_world.ptr(), local_co);
-    float screen_co[2];
-    ED_view3d_project_v2(vc->region, world_co, screen_co);
-    if (!isfinite(screen_co[0]) || !isfinite(screen_co[1])) {
-      return false;
-    }
-    r_screen = float2(screen_co[0], screen_co[1]);
-    return true;
-  };
-
-  for (const int curve_i : points_by_curve.index_range()) {
-    const IndexRange pts = points_by_curve[curve_i];
-    if (pts.size() < 2) {
+  for (const int curve_i : geom.curves_range()) {
+    const IndexRange evaluated_points = evaluated_points_by_curve[curve_i];
+    if (evaluated_points.size() < 2) {
       continue;
     }
+
     Vector<float2> polyline;
-    const int segment_num = cyclic[curve_i] ? int(pts.size()) : int(pts.size()) - 1;
-
-    for (int seg = 0; seg < segment_num; seg++) {
-      const int a = pts[seg];
-      const int b = pts[(seg + 1) % int(pts.size())];
-
-      float data[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];
-      for (int j = 0; j < 2; j++) {
-        float2 p1, h1, h2, p2;
-        if (!project(positions[a], p1) || !project(hr[a], h1) ||
-            !project(hl[b], h2) || !project(positions[b], p2))
-        {
-          goto next_segment;
-        }
-        BKE_curve_forward_diff_bezier(p1[j],
-                                      h1[j],
-                                      h2[j],
-                                      p2[j],
-                                      data + j,
-                                      PAINT_CURVE_NUM_SEGMENTS,
-                                      sizeof(float[2]));
-      }
-
+    polyline.reserve(evaluated_points.size());
+    for (const int eval_i : evaluated_points) {
+      float2 screen;
+      if (!paintcurve_project_local_to_screen(vc, ob_to_world, evaluated_positions[eval_i], screen))
       {
-        float (*v)[2] = reinterpret_cast<float (*)[2]>(data);
-        const int start = polyline.is_empty() ? 0 : 1;
-        for (int k = start; k <= PAINT_CURVE_NUM_SEGMENTS; k++) {
-          polyline.append(float2(v[k][0], v[k][1]));
-        }
+        polyline.clear();
+        break;
       }
-    next_segment:;
+      polyline.append(screen);
     }
 
     if (polyline.size() >= 2) {

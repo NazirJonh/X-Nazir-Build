@@ -55,10 +55,19 @@ struct PaintCurveSegmentDrawData {
   bool hovered = false;
 };
 
+/** Perpendicular insert marker shown when hovering a segment for point insertion. */
+struct PaintCurveInsertPreviewDrawData {
+  bool valid = false;
+  float2 point = float2(0.0f);
+  float2 tangent = float2(1.0f, 0.0f);
+  float2 perp = float2(0.0f, 1.0f);
+};
+
 struct PaintCurveScreenHandles {
   blender::Vector<PaintCurveHandleDrawData> points;
   blender::Vector<PaintCurveRadiusHandleDrawData> radius_handles;
   blender::Vector<PaintCurveSegmentDrawData> segments;
+  PaintCurveInsertPreviewDrawData insert_preview;
 };
 
 struct PaintCurveCachedObjectSilhouette {
@@ -74,6 +83,15 @@ struct PaintCurveScreenSilhouettes {
 
 /** Screen-space radius of the radius-handle endpoint circle (matches paint_curve_intern). */
 constexpr float PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS = 10.0f;
+
+/** Half-length of the white perpendicular insert marker line (pixels). */
+constexpr float PAINT_CURVE_INSERT_PREVIEW_HALF_LEN = 24.0f;
+/** Arrow length along the perpendicular from tip to base (pixels). */
+constexpr float PAINT_CURVE_INSERT_PREVIEW_ARROW_LEN = 7.0f;
+/** Arrow wing half-width along the curve tangent (pixels). */
+constexpr float PAINT_CURVE_INSERT_PREVIEW_ARROW_WING = 4.0f;
+/** Distance from the curve to the arrow tip along the perpendicular (pixels). */
+constexpr float PAINT_CURVE_INSERT_PREVIEW_ARROW_INSET = 2.0f;
 
 bool ED_paint_curve_is_curves_edit_tool(const char *active_tool_idname);
 
@@ -104,6 +122,7 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
                                          const Sculpt *sculpt,
                                          float2 mval_region,
                                          bool compute_segment_hover,
+                                         bool show_insert_preview,
                                          PaintCurveScreenHandles &r_out);
 
 void ED_paint_curve_screen_silhouettes_build(const ViewContext &vc,

@@ -160,6 +160,53 @@ static float paintcurve_polyline_distance_sq(const Span<float2> polyline, const 
 }
 
 /**
+ * Closest point on a screen-space polyline and the local tangent there.
+ * \a r_edge_t is the normalized arc-length parameter in [0, 1] along the polyline.
+ */
+static bool paintcurve_polyline_closest_point_and_tangent(const Span<float2> polyline,
+                                                          const float2 mval,
+                                                          float2 &r_point,
+                                                          float2 &r_tangent,
+                                                          float &r_edge_t)
+{
+  if (polyline.size() < 2) {
+    return false;
+  }
+
+  float best_dist_sq = FLT_MAX;
+  float2 best_point = polyline[0];
+  float2 best_tangent = float2(1.0f, 0.0f);
+  float best_arc = 0.0f;
+
+  float arc_len = 0.0f;
+  for (const int i : IndexRange(polyline.size() - 1)) {
+    const float2 a = polyline[i];
+    const float2 b = polyline[i + 1];
+    const float2 ab = b - a;
+    const float seg_len_sq = math::length_squared(ab);
+    float seg_t = 0.0f;
+    float2 closest = a;
+    if (seg_len_sq >= 1e-8f) {
+      seg_t = math::clamp(math::dot(mval - a, ab) / seg_len_sq, 0.0f, 1.0f);
+      closest = a + ab * seg_t;
+    }
+    const float dist_sq = math::distance_squared(mval, closest);
+    if (dist_sq < best_dist_sq) {
+      best_dist_sq = dist_sq;
+      best_point = closest;
+      best_tangent = seg_len_sq >= 1e-8f ? math::normalize(ab) : float2(1.0f, 0.0f);
+      best_arc = arc_len + seg_t * sqrtf(seg_len_sq);
+    }
+    arc_len += sqrtf(max_ff(seg_len_sq, 0.0f));
+  }
+
+  r_point = best_point;
+  r_tangent = best_tangent;
+  r_edge_t = arc_len > 1e-8f ? best_arc / arc_len : 0.0f;
+  return true;
+}
+
+/**
  * Build screen-space polylines for a single scene Curves object.
  * Handles both OB_CURVES and OB_CURVES_LEGACY, including temporary conversion.
  */
@@ -285,11 +332,13 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
                                          const Sculpt *sculpt,
                                          const float2 mval_region,
                                          const bool compute_segment_hover,
+                                         const bool show_insert_preview,
                                          PaintCurveScreenHandles &r_out)
 {
   r_out.points.clear();
   r_out.radius_handles.clear();
   r_out.segments.clear();
+  r_out.insert_preview = {};
 
   PaintCurve *pc = brush.paint_curve;
   if (pc == nullptr || !paintcurve_geometry_is_valid(pc->geometry.wrap())) {
@@ -310,6 +359,7 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
 
   int64_t hover_segment_index = -1;
   float hover_segment_dist_sq = square_f(PAINT_CURVE_SEGMENT_HOVER_THRESHOLD);
+  const bool detect_segment_hover = compute_segment_hover || show_insert_preview;
 
   for (const int i : screen_points.index_range()) {
     const PaintCurvePoint &pcp = screen_points[i];
@@ -352,27 +402,15 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
   }
 
   paintcurve_foreach_bezier_segment(pc, [&](const int point_a, const int point_b) {
-    const PaintCurvePoint *cp_a = &screen_points[point_a];
-    const PaintCurvePoint *cp_b = &screen_points[point_b];
-    float data[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];
-    for (int j = 0; j < 2; j++) {
-      BKE_curve_forward_diff_bezier(cp_a->bez.vec[1][j],
-                                    cp_a->bez.vec[2][j],
-                                    cp_b->bez.vec[0][j],
-                                    cp_b->bez.vec[1][j],
-                                    data + j,
-                                    PAINT_CURVE_NUM_SEGMENTS,
-                                    sizeof(float[2]));
-    }
     PaintCurveSegmentDrawData seg;
-    seg.polyline.reinitialize(PAINT_CURVE_NUM_SEGMENTS + 1);
-    float(*v)[2] = reinterpret_cast<float(*)[2]>(data);
-    for (int j = 0; j <= PAINT_CURVE_NUM_SEGMENTS; j++) {
-      seg.polyline[j] = float2(v[j][0], v[j][1]);
+    paintcurve_build_screen_segment_polyline(
+        pc, &vc, point_a, point_b, screen_points.as_span(), seg.polyline);
+    if (seg.polyline.size() < 2) {
+      return;
     }
     copy_v4_v4(seg.wire_color, wire_col);
     seg.outline_color = float4(0.0f, 0.0f, 0.0f, 0.5f);
-    if (compute_segment_hover) {
+    if (detect_segment_hover) {
       const float dist_sq = paintcurve_polyline_distance_sq(seg.polyline, mval_region);
       if (dist_sq < hover_segment_dist_sq) {
         hover_segment_dist_sq = dist_sq;
@@ -382,8 +420,30 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
     r_out.segments.append(std::move(seg));
   });
 
-  if (hover_segment_index >= 0) {
+  if (hover_segment_index >= 0 && compute_segment_hover) {
     r_out.segments[hover_segment_index].hovered = true;
+  }
+
+  if (hover_segment_index >= 0 && show_insert_preview) {
+    const PaintCurveSegmentDrawData &hover_seg = r_out.segments[hover_segment_index];
+    float edge_t = 0.0f;
+    PaintCurveInsertPreviewDrawData preview;
+    if (paintcurve_polyline_closest_point_and_tangent(
+            hover_seg.polyline, mval_region, preview.point, preview.tangent, edge_t))
+    {
+      /* Match insert_or_add_point: do not preview subdivision near endpoints. */
+      if (edge_t >= 0.1f && edge_t <= 0.9f) {
+        if (math::length_squared(preview.tangent) < 1e-6f) {
+          preview.tangent = float2(1.0f, 0.0f);
+        }
+        else {
+          preview.tangent = math::normalize(preview.tangent);
+        }
+        preview.perp = float2(-preview.tangent.y, preview.tangent.x);
+        preview.valid = true;
+        r_out.insert_preview = preview;
+      }
+    }
   }
 }
 

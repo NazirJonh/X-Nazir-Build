@@ -7,11 +7,14 @@
  */
 
 #include "BKE_colorband.hh"
+#include "BKE_context.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "ED_view3d.hh"
 
 #include "BKE_paint.hh"
+
+#include "WM_types.hh"
 
 #include "draw_debug.hh"
 #include "overlay_instance.hh"
@@ -46,6 +49,14 @@ void Instance::init()
   state.is_material_select = ctx->is_material_select();
   state.cursor_mval = ctx->cursor_mval;
   state.cursor_mval_valid = ctx->cursor_mval_valid;
+  state.cursor_ctrl_pressed = false;
+  if (const bContext *C = ctx->evil_C) {
+    if (const wmWindow *win = CTX_wm_window(C)) {
+      if (win->runtime != nullptr && win->runtime->eventstate != nullptr) {
+        state.cursor_ctrl_pressed = (win->runtime->eventstate->modifier & KM_CTRL) != 0;
+      }
+    }
+  }
   state.active_tool_idname = ctx->active_tool_idname;
   state.draw_background = ctx->options.draw_background;
   state.show_text = false;

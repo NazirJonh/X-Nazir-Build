@@ -173,6 +173,18 @@ void paintcurve_build_screen_points(const PaintCurve *pc,
                                     Vector<PaintCurvePoint> &r_screen_points);
 
 /**
+ * Tessellate one Bezier segment into screen-space polyline vertices.
+ * For 3D paint curves, evaluates the segment in object space (matching viewport curve wires)
+ * then projects. For legacy 2D curves, tessellates projected control points in screen space.
+ */
+void paintcurve_build_screen_segment_polyline(const PaintCurve *pc,
+                                              const ViewContext *vc,
+                                              int point_index_a,
+                                              int point_index_b,
+                                              Span<PaintCurvePoint> screen_points_fallback,
+                                              Vector<float2> &r_polyline);
+
+/**
  * Project every bezier spline of `geom` (in object local space) into screen-space polylines,
  * one #blender::Vector<float2> per spline, smoothed with forward-difference subdivision.
  * `ob_to_world` is the curve object's transform; `vc` supplies the region used for projection.

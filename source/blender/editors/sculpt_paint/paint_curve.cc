@@ -73,6 +73,7 @@ static bool paintcurve_skip_next_slide = false;
 static bool paintcurve_slide_active = false;
 
 static bool paintcurve_find_closest_segment(PaintCurve *pc,
+                                            const ViewContext *vc,
                                             const Span<PaintCurvePoint> screen_points,
                                             const float pos[2],
                                             const float threshold,
@@ -84,7 +85,8 @@ static bool paintcurve_insert_point_at_segment(
 static bool paintcurve_try_insert_point_at_mouse(bContext *C,
                                                  wmOperator *op,
                                                  PaintCurve *pc,
-                                                 const float loc_fl[2]);
+                                                 const float loc_fl[2],
+                                                 const bool prefer_add);
 
 bool paintcurve_slide_is_active()
 {
@@ -158,6 +160,67 @@ static bool paintcurve_update_add_index_from_selection(PaintCurve *pc,
   const int spline_size = pbc[spline_idx].size();
   pc->add_index = (idx_in_spline || spline_size == 1) ? (idx_in_spline + 1) : 0;
   return true;
+}
+
+/** Match #subdivide_curves.cc: preserve aligned/auto boundary handles after segment split. */
+static int8_t paintcurve_aligned_or_free_handle_type(const int8_t handle_type)
+{
+  switch (handle_type) {
+    case BEZIER_HANDLE_FREE:
+      return BEZIER_HANDLE_FREE;
+    case BEZIER_HANDLE_AUTO:
+      return BEZIER_HANDLE_ALIGN;
+    case BEZIER_HANDLE_VECTOR:
+      return BEZIER_HANDLE_FREE;
+    case BEZIER_HANDLE_ALIGN:
+      return BEZIER_HANDLE_ALIGN;
+  }
+  BLI_assert_unreachable();
+  return BEZIER_HANDLE_FREE;
+}
+
+/**
+ * When a single endpoint handle is selected, Ctrl+RMB should extend the spline rather than
+ * insert into an adjacent segment (Stroke Method: Curve workflow).
+ */
+static bool paintcurve_should_prefer_add_over_insert(PaintCurve *pc,
+                                                     const bke::CurvesGeometry &geom)
+{
+  if (pc == nullptr || !paintcurve_geometry_is_valid(geom)) {
+    return false;
+  }
+
+  int selected_point = -1;
+  int selected_count = 0;
+  for (const int i : geom.points_range()) {
+    if (paintcurve_geom_get_selection(geom, i) & 0x07) {
+      selected_point = i;
+      if (++selected_count > 1) {
+        return false;
+      }
+    }
+  }
+  if (selected_count != 1) {
+    return false;
+  }
+
+  const int spline_idx = paintcurve_curve_of_point(pc, selected_point);
+  if (spline_idx < 0) {
+    return false;
+  }
+
+  const OffsetIndices<int> pbc = geom.points_by_curve();
+  const IndexRange range = pbc[spline_idx];
+  const int idx_in_spline = selected_point - range.start();
+  const uint8_t sel = paintcurve_geom_get_selection(geom, selected_point);
+
+  if (idx_in_spline == 0 && (sel & 0x01)) {
+    return true;
+  }
+  if (idx_in_spline == range.size() - 1 && ((sel & 0x04) || range.size() == 1)) {
+    return true;
+  }
+  return false;
 }
 
 bool paint_curve_poll(bContext *C)
@@ -468,9 +531,28 @@ static void paintcurve_point_add(bContext *C,
   geom.positions_for_write()[global_insert_idx] = co;
   geom.handle_positions_left_for_write()[global_insert_idx] = co;
   geom.handle_positions_right_for_write()[global_insert_idx] = co;
-  geom.handle_types_left_for_write()[global_insert_idx] = BEZIER_HANDLE_ALIGN;
-  geom.handle_types_right_for_write()[global_insert_idx] = BEZIER_HANDLE_ALIGN;
+  MutableSpan<int8_t> types_left = geom.handle_types_left_for_write();
+  MutableSpan<int8_t> types_right = geom.handle_types_right_for_write();
+  types_left[global_insert_idx] = BEZIER_HANDLE_ALIGN;
+  types_right[global_insert_idx] = BEZIER_HANDLE_ALIGN;
   geom.radius_for_write()[global_insert_idx] = 1.0f;
+
+  /* Preserve junction handle types when extending an existing spline. */
+  if (!create_new_spline) {
+    if (add_index_in_spline > 0) {
+      const int prev_idx = global_insert_idx - 1;
+      types_right[prev_idx] = paintcurve_aligned_or_free_handle_type(types_right[prev_idx]);
+      types_left[global_insert_idx] = BEZIER_HANDLE_ALIGN;
+    }
+    else if (add_index_in_spline == 0) {
+      const OffsetIndices<int> pbc = geom.points_by_curve();
+      if (pbc[active_curve].size() > 1) {
+        const int next_idx = global_insert_idx + 1;
+        types_left[next_idx] = paintcurve_aligned_or_free_handle_type(types_left[next_idx]);
+        types_right[global_insert_idx] = BEZIER_HANDLE_ALIGN;
+      }
+    }
+  }
 
   /* Clear all selection, then mark the new point's active handle. */
   paintcurve_geom_set_all_selection(geom, 0);
@@ -560,13 +642,31 @@ void PAINTCURVE_OT_add_point(wmOperatorType *ot)
                      SHRT_MAX);
 }
 
+/** Invoke handle slide after adding a point (matches #PAINTCURVE_OT_add_point_slide macro). */
+static wmOperatorStatus paintcurve_invoke_slide_after_point_add(bContext *C, const wmEvent *event)
+{
+  wmOperatorType *ot_slide = WM_operatortype_find("PAINTCURVE_OT_slide", false);
+  if (ot_slide == nullptr) {
+    return OPERATOR_FINISHED;
+  }
+
+  PointerRNA ptr = WM_operator_properties_create_ptr(ot_slide);
+  RNA_boolean_set(&ptr, "align", false);
+  RNA_boolean_set(&ptr, "select", false);
+  const wmOperatorStatus ret = WM_operator_name_call_ptr(
+      C, ot_slide, wm::OpCallContext::InvokeDefault, &ptr, event);
+  WM_operator_properties_free(&ptr);
+  return ret;
+}
+
 /** Try to insert a control point on the bezier segment under the cursor. */
 static bool paintcurve_try_insert_point_at_mouse(bContext *C,
                                                  wmOperator *op,
                                                  PaintCurve *pc,
-                                                 const float loc_fl[2])
+                                                 const float loc_fl[2],
+                                                 const bool prefer_add)
 {
-  if (pc == nullptr) {
+  if (pc == nullptr || prefer_add) {
     return false;
   }
 
@@ -575,10 +675,22 @@ static bool paintcurve_try_insert_point_at_mouse(bContext *C,
   Vector<PaintCurvePoint> screen_points;
   paintcurve_build_screen_points(pc, &vc, screen_points);
 
+  /* Do not insert when a control point is closer than the segment. */
+  char point_selflag;
+  if (paintcurve_find_in_screen_points(screen_points.as_span(),
+                                       loc_fl,
+                                       false,
+                                       PAINT_CURVE_HOVER_THRESHOLD,
+                                       &point_selflag) >= 0)
+  {
+    return false;
+  }
+
   int segment_index;
   int segment_index_next;
   float edge_t;
   if (!paintcurve_find_closest_segment(pc,
+                                       &vc,
                                        screen_points.as_span(),
                                        loc_fl,
                                        PAINT_CURVE_SELECT_THRESHOLD,
@@ -588,6 +700,12 @@ static bool paintcurve_try_insert_point_at_mouse(bContext *C,
   {
     return false;
   }
+
+  /* Clicks near segment endpoints should extend the spline, not subdivide it. */
+  if (edge_t < 0.1f || edge_t > 0.9f) {
+    return false;
+  }
+
   if (!paintcurve_insert_point_at_segment(C, op, pc, segment_index, edge_t)) {
     return false;
   }
@@ -606,14 +724,17 @@ static wmOperatorStatus paintcurve_insert_or_add_point_invoke(bContext *C,
   const int loc[2] = {event->mval[0], event->mval[1]};
   const float loc_fl[2] = {float(loc[0]), float(loc[1])};
 
-  if (paintcurve_try_insert_point_at_mouse(C, op, pc, loc_fl)) {
+  const bool prefer_add = pc && paintcurve_geometry_is_valid(pc->geometry.wrap()) &&
+                          paintcurve_should_prefer_add_over_insert(pc, pc->geometry.wrap());
+
+  if (paintcurve_try_insert_point_at_mouse(C, op, pc, loc_fl, prefer_add)) {
     return OPERATOR_FINISHED;
   }
 
   const bool snap_to_surface = (event->modifier & KM_CTRL) != 0;
   paintcurve_point_add(C, op, loc, snap_to_surface);
   RNA_int_set_array(op->ptr, "location", loc);
-  return OPERATOR_FINISHED;
+  return paintcurve_invoke_slide_after_point_add(C, event);
 }
 
 void PAINTCURVE_OT_insert_or_add_point(wmOperatorType *ot)
@@ -621,7 +742,7 @@ void PAINTCURVE_OT_insert_or_add_point(wmOperatorType *ot)
   ot->name = "Insert or Add Paint Curve Point";
   ot->description =
       "Insert a control point on the curve segment under the cursor, or add a new point to extend "
-      "the spline";
+      "the spline; drag to adjust the new point's handle";
   ot->idname = "PAINTCURVE_OT_insert_or_add_point";
 
   ot->invoke = paintcurve_insert_or_add_point_invoke;
@@ -1144,31 +1265,26 @@ static void paintcurve_update_edge_hit(const float point[2],
   }
 }
 
-static void paintcurve_find_closest_on_bezier_segment(const float pos[2],
-                                                      const PaintCurvePoint &pcp_a,
-                                                      const PaintCurvePoint &pcp_b,
+static void paintcurve_find_closest_on_bezier_segment(const ViewContext *vc,
+                                                      PaintCurve *pc,
+                                                      const float pos[2],
+                                                      const int point_index_a,
+                                                      const int point_index_b,
+                                                      const Span<PaintCurvePoint> screen_points,
                                                       const int segment_index,
                                                       float *r_min_dist,
                                                       int *r_best_segment,
                                                       float *r_best_param)
 {
-  const BezTriple *bezt1 = &pcp_a.bez;
-  const BezTriple *bezt2 = &pcp_b.bez;
-  float *points = MEM_new_array_uninitialized<float>(3 * (PAINT_CURVE_NUM_SEGMENTS + 1),
-                                                     "paintcurve_segment_eval");
-
-  for (int j = 0; j < 3; j++) {
-    BKE_curve_forward_diff_bezier(bezt1->vec[1][j],
-                                  bezt1->vec[2][j],
-                                  bezt2->vec[0][j],
-                                  bezt2->vec[1][j],
-                                  points + j,
-                                  PAINT_CURVE_NUM_SEGMENTS,
-                                  sizeof(float[3]));
+  Vector<float2> polyline;
+  paintcurve_build_screen_segment_polyline(
+      pc, vc, point_index_a, point_index_b, screen_points, polyline);
+  if (polyline.size() < 2) {
+    return;
   }
 
   float point1[2], point2[2];
-  copy_v2_v2(point1, points);
+  copy_v2_v2(point1, polyline[0]);
   const float len_vec1 = len_v2v2(pos, point1);
   float segment_min_dist = *r_min_dist;
   int local_segment_index = segment_index;
@@ -1179,23 +1295,23 @@ static void paintcurve_find_closest_on_bezier_segment(const float pos[2],
     param = 0.0f;
   }
 
-  for (int j = 0; j < PAINT_CURVE_NUM_SEGMENTS; j++) {
-    copy_v2_v2(point2, points + 3 * (j + 1));
+  const int segment_steps = int(polyline.size()) - 1;
+  for (int j = 0; j < segment_steps; j++) {
+    copy_v2_v2(point2, polyline[j + 1]);
     paintcurve_update_edge_hit(
         pos, point1, point2, segment_index, j, &segment_min_dist, &local_segment_index, &param);
     copy_v2_v2(point1, point2);
   }
 
-  MEM_delete(points);
-
   if (*r_min_dist > segment_min_dist) {
     *r_min_dist = segment_min_dist;
     *r_best_segment = local_segment_index;
-    *r_best_param = param / float(PAINT_CURVE_NUM_SEGMENTS);
+    *r_best_param = segment_steps > 0 ? param / float(segment_steps) : 0.0f;
   }
 }
 
 static bool paintcurve_find_closest_segment(PaintCurve *pc,
+                                            const ViewContext *vc,
                                             const Span<PaintCurvePoint> screen_points,
                                             const float pos[2],
                                             const float threshold,
@@ -1216,9 +1332,12 @@ static bool paintcurve_find_closest_segment(PaintCurve *pc,
     float segment_min_dist = min_dist;
     int segment_start = point_a;
     float segment_param = 0.0f;
-    paintcurve_find_closest_on_bezier_segment(pos,
-                                              screen_points[point_a],
-                                              screen_points[point_b],
+    paintcurve_find_closest_on_bezier_segment(vc,
+                                              pc,
+                                              pos,
+                                              point_a,
+                                              point_b,
+                                              screen_points,
                                               point_a,
                                               &segment_min_dist,
                                               &segment_start,
@@ -1239,6 +1358,32 @@ static bool paintcurve_find_closest_segment(PaintCurve *pc,
   *r_segment_index_next = best_segment_next;
   *r_edge_t = best_param;
   return true;
+}
+
+/** Match #remove_handle_movement_constraints in editcurve_pen.cc. */
+static void paintcurve_remove_handle_movement_constraints(int8_t &type_left,
+                                                            int8_t &type_right,
+                                                            const bool adjust_left,
+                                                            const bool adjust_right)
+{
+  if (adjust_left) {
+    if (type_left == BEZIER_HANDLE_VECTOR) {
+      type_left = BEZIER_HANDLE_FREE;
+    }
+    if (type_left == BEZIER_HANDLE_AUTO) {
+      type_left = BEZIER_HANDLE_ALIGN;
+      type_right = BEZIER_HANDLE_ALIGN;
+    }
+  }
+  if (adjust_right) {
+    if (type_right == BEZIER_HANDLE_VECTOR) {
+      type_right = BEZIER_HANDLE_FREE;
+    }
+    if (type_right == BEZIER_HANDLE_AUTO) {
+      type_left = BEZIER_HANDLE_ALIGN;
+      type_right = BEZIER_HANDLE_ALIGN;
+    }
+  }
 }
 
 static void paintcurve_apply_segment_move_3d(bke::CurvesGeometry &geom,
@@ -1285,13 +1430,18 @@ static void paintcurve_apply_segment_move_3d(bke::CurvesGeometry &geom,
 
   handles_right[point_i1] = P1;
   handles_left[point_i2] = P2;
-  types_right[point_i1] = BEZIER_HANDLE_FREE;
-  types_left[point_i2] = BEZIER_HANDLE_FREE;
-  if (types_left[point_i1] == BEZIER_HANDLE_ALIGN) {
-    types_left[point_i1] = BEZIER_HANDLE_FREE;
+
+  /* Preserve handle types (match legacy Curve Pen segment move). */
+  paintcurve_remove_handle_movement_constraints(
+      types_left[point_i1], types_right[point_i1], false, true);
+  paintcurve_remove_handle_movement_constraints(
+      types_left[point_i2], types_right[point_i2], true, false);
+
+  if (types_right[point_i1] == BEZIER_HANDLE_ALIGN) {
+    handles_left[point_i1] = 2.0f * P0 - P1;
   }
-  if (types_right[point_i2] == BEZIER_HANDLE_ALIGN) {
-    types_right[point_i2] = BEZIER_HANDLE_FREE;
+  if (types_left[point_i2] == BEZIER_HANDLE_ALIGN) {
+    handles_right[point_i2] = 2.0f * P3 - P2;
   }
 
   geom.calculate_bezier_auto_handles();
@@ -1318,6 +1468,10 @@ static bool paintcurve_insert_point_at_segment(
   const int point_i2 = segment_index_next;
   const int old_tot = geom.points_num();
   const int insert_index = segment_index + 1;
+  const int8_t type_prev_right = geom.handle_types_right()[segment_index];
+  const int8_t type_next_left = geom.handle_types_left()[point_i2];
+  const bool segment_is_vector = bke::curves::bezier::segment_is_vector(type_prev_right,
+                                                                        type_next_left);
 
   /* Compute insertion before resize (spans become invalid after resize). */
   const bke::curves::bezier::Insertion inserted = bke::curves::bezier::insert(
@@ -1356,27 +1510,29 @@ static bool paintcurve_insert_point_at_segment(
     radii[i] = radii[i - 1];
   }
 
-  /* Update right handle of segment start (not shifted). */
+  /* Update segment boundary handles (match #subdivide_bezier_segment in subdivide_curves.cc). */
   hr_w[segment_index] = inserted.handle_prev;
-  tr_w[segment_index] = BEZIER_HANDLE_FREE;
-  if (tl_w[segment_index] == BEZIER_HANDLE_ALIGN) {
-    tl_w[segment_index] = BEZIER_HANDLE_FREE;
-  }
-
-  /* Set new inserted point. */
   pos_w[insert_index] = inserted.position;
   hl_w[insert_index] = inserted.left_handle;
   hr_w[insert_index] = inserted.right_handle;
-  tl_w[insert_index] = BEZIER_HANDLE_ALIGN;
-  tr_w[insert_index] = BEZIER_HANDLE_ALIGN;
   radii[insert_index] = radii[segment_index];
 
-  /* Update left handle of segment end (shifted from point_i2 to insert_index+1). */
-  if (insert_index + 1 < geom.points_num()) {
-    hl_w[insert_index + 1] = inserted.handle_next;
-    tl_w[insert_index + 1] = BEZIER_HANDLE_FREE;
-    if (tr_w[insert_index + 1] == BEZIER_HANDLE_ALIGN) {
-      tr_w[insert_index + 1] = BEZIER_HANDLE_FREE;
+  if (segment_is_vector) {
+    tr_w[segment_index] = BEZIER_HANDLE_VECTOR;
+    tl_w[insert_index] = BEZIER_HANDLE_VECTOR;
+    tr_w[insert_index] = BEZIER_HANDLE_VECTOR;
+    if (insert_index + 1 < geom.points_num()) {
+      hl_w[insert_index + 1] = inserted.handle_next;
+      tl_w[insert_index + 1] = BEZIER_HANDLE_VECTOR;
+    }
+  }
+  else {
+    tr_w[segment_index] = paintcurve_aligned_or_free_handle_type(type_prev_right);
+    tl_w[insert_index] = BEZIER_HANDLE_ALIGN;
+    tr_w[insert_index] = BEZIER_HANDLE_ALIGN;
+    if (insert_index + 1 < geom.points_num()) {
+      hl_w[insert_index + 1] = inserted.handle_next;
+      tl_w[insert_index + 1] = paintcurve_aligned_or_free_handle_type(type_next_left);
     }
   }
 
@@ -1594,7 +1750,7 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
   paintcurve_build_screen_points(pc, &vc, screen_points);
 
   if (insert_point) {
-    if (paintcurve_try_insert_point_at_mouse(C, op, pc, loc_fl)) {
+    if (paintcurve_try_insert_point_at_mouse(C, op, pc, loc_fl, false)) {
       return OPERATOR_FINISHED;
     }
     return OPERATOR_CANCELLED;
@@ -1656,6 +1812,7 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
     int segment_index_next;
     float edge_t;
     if (paintcurve_find_closest_segment(pc,
+                                        &vc,
                                         screen_points.as_span(),
                                         loc_fl,
                                         PAINT_CURVE_SELECT_THRESHOLD,

@@ -127,12 +127,17 @@ class PaintCurveCursor : Overlay {
     const float2 mval_region = state.cursor_mval_valid ?
                                    float2(state.cursor_mval - origin) :
                                    float2(-1.0e6f);
+    const bool is_curve_stroke = brush->stroke_method == BRUSH_STROKE_CURVE;
     const bool compute_hover = state.cursor_mval_valid && is_curves_edit &&
                                state.is_space_v3d() &&
                                !ed::sculpt_paint::ED_paint_curve_slide_is_active();
+    const bool show_insert_preview = state.cursor_mval_valid && state.cursor_ctrl_pressed &&
+                                     state.is_space_v3d() &&
+                                     !ed::sculpt_paint::ED_paint_curve_slide_is_active() &&
+                                     (is_curves_edit || is_curve_stroke);
 
     ed::sculpt_paint::ED_paint_curve_screen_handles_build(
-        vc, *brush, sculpt, mval_region, compute_hover, handles_);
+        vc, *brush, sculpt, mval_region, compute_hover, show_insert_preview, handles_);
 
     if (is_curves_edit && state.is_space_v3d()) {
       const uint64_t key = ed::sculpt_paint::ED_paint_curve_silhouette_cache_key_hash(vc);
@@ -314,6 +319,49 @@ class PaintCurveCursor : Overlay {
           draw_strip(seg_batches[i]);
         }
       }
+    }
+
+    /* --- 4b. Segment insert preview (perpendicular line + inward arrows) --- */
+    if (handles_.insert_preview.valid) {
+      const ed::sculpt_paint::PaintCurveInsertPreviewDrawData &ip = handles_.insert_preview;
+      const float2 &p = ip.point;
+      const float2 &tan = ip.tangent;
+      const float2 &perp = ip.perp;
+      const float half_len = ed::sculpt_paint::PAINT_CURVE_INSERT_PREVIEW_HALF_LEN;
+      const float arrow_len = ed::sculpt_paint::PAINT_CURVE_INSERT_PREVIEW_ARROW_LEN;
+      const float arrow_wing = ed::sculpt_paint::PAINT_CURVE_INSERT_PREVIEW_ARROW_WING;
+      const float arrow_inset = ed::sculpt_paint::PAINT_CURVE_INSERT_PREVIEW_ARROW_INSET;
+
+      auto draw_line = [&](Span<float2> verts, float width, const float4 &col) {
+        if (gpu::Batch *b = make_line_strip(verts)) {
+          ps_.push_constant("lineWidth", width);
+          ps_.push_constant("color", col);
+          draw_strip(b);
+        }
+      };
+
+      /* White perpendicular line with dark underlay. */
+      {
+        const float2 line[2] = {p - perp * half_len, p + perp * half_len};
+        draw_line({line, 2}, 3.0f, float4(0.0f, 0.0f, 0.0f, 0.5f));
+        draw_line({line, 2}, 1.0f, float4(1.0f, 1.0f, 1.0f, 0.9f));
+      }
+
+      /* Arrow chevrons on each side, tips pointing toward the curve (each other). */
+      auto draw_arrow = [&](const float side_sign) {
+        const float2 tip = p + perp * side_sign * arrow_inset;
+        const float2 back = tip + perp * side_sign * arrow_len;
+        const float2 wing_a = back + tan * arrow_wing;
+        const float2 wing_b = back - tan * arrow_wing;
+        const float2 left_wing[2] = {tip, wing_a};
+        const float2 right_wing[2] = {tip, wing_b};
+        draw_line({left_wing, 2}, 3.0f, float4(0.0f, 0.0f, 0.0f, 0.5f));
+        draw_line({right_wing, 2}, 3.0f, float4(0.0f, 0.0f, 0.0f, 0.5f));
+        draw_line({left_wing, 2}, 1.0f, float4(1.0f, 1.0f, 1.0f, 0.9f));
+        draw_line({right_wing, 2}, 1.0f, float4(1.0f, 1.0f, 1.0f, 0.9f));
+      };
+      draw_arrow(-1.0f);
+      draw_arrow(1.0f);
     }
 
     /* --- 5 & 6. Handle lines (black underlay then colored) --- */

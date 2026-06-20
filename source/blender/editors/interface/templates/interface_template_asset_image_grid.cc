@@ -97,8 +97,11 @@ static int image_grid_asset_preview_icon_id(const asset_system::AssetRepresentat
 }
 
 /** Items to build for the current scroll window: all visible grid cells, capped for performance.
+ * The caller resolves #grip_pixel_height for the active context (the popover keeps its own
+ * #grip_pixel_height_popover), so this must use the passed-in height rather than reading the
+ * sidebar height directly — otherwise the popover builds the sidebar's row count.
  */
-static int image_grid_build_item_window_size(const ed::view3d::ImageGridUIState &state,
+static int image_grid_build_item_window_size(const int grip_pixel_height,
                                              const GridViewStyle &style,
                                              const int cols)
 {
@@ -106,7 +109,7 @@ static int image_grid_build_item_window_size(const ed::view3d::ImageGridUIState 
   const int tile_h = max_ii(1, style.tile_height);
   /* #ceil to match #build_image_grid: a partially visible bottom row must be built too. */
   const int effective_rows = clamp_i(
-      int(divide_ceil_u(uint(state.viewport.grip_pixel_height), uint(tile_h))), 1, 16);
+      int(divide_ceil_u(uint(grip_pixel_height), uint(tile_h))), 1, 16);
   /* One extra buffer row so sub-row scrolling can reveal a partial row at the bottom. */
   const int visible_slots = max_ii(1, (effective_rows + 1) * safe_cols);
   return min_ii(visible_slots, IMAGE_GRID_MAX_ITEMS);
@@ -535,6 +538,8 @@ class ImageAssetGridView : public AbstractGridView {
   PropertyRNA *target_prop_ = nullptr;
   /** Column estimate when #state_.cached_cols is not yet known (first redraw). */
   int cols_hint_ = 1;
+  /** Popover keeps its own grip height; the build window must use it, not the sidebar's. */
+  bool is_popover_ = false;
 
  public:
   ImageAssetGridView(const bContext &context,
@@ -542,13 +547,15 @@ class ImageAssetGridView : public AbstractGridView {
                      const AssetLibraryReference &library_ref,
                      const PointerRNA &target_ptr,
                      PropertyRNA *target_prop,
-                     const int cols_hint)
+                     const int cols_hint,
+                     const bool is_popover)
       : context_(context),
         state_(state),
         library_ref_(library_ref),
         target_ptr_(target_ptr),
         target_prop_(target_prop),
-        cols_hint_(max_ii(1, cols_hint))
+        cols_hint_(max_ii(1, cols_hint)),
+        is_popover_(is_popover)
   {
   }
 
@@ -560,7 +567,9 @@ class ImageAssetGridView : public AbstractGridView {
 
     const int cols = cols_hint_;
     const int first_index = state_.viewport.scroll_row * cols;
-    const int item_window = image_grid_build_item_window_size(state_, this->get_style(), cols);
+    const int grip_height = is_popover_ ? state_.viewport.grip_pixel_height_popover :
+                                          state_.viewport.grip_pixel_height;
+    const int item_window = image_grid_build_item_window_size(grip_height, this->get_style(), cols);
     const int last_index = first_index + item_window;
 
     state_.viewport.cached_item_count = ed::view3d::image_grid_foreach_filtered_item(
@@ -640,8 +649,13 @@ class View3DGridStateAccess : public GridStateAccess {
   {
     state_.viewport.cached_item_count = value;
   }
-  int cached_cols() const override { return state_.viewport.cached_cols; }
-  void cached_cols_set(const int value) override { state_.viewport.cached_cols = value; }
+  int &cached_cols_ref_() const
+  {
+    return is_popover_ ? state_.viewport.cached_cols_popover : state_.viewport.cached_cols;
+  }
+
+  int cached_cols() const override { return cached_cols_ref_(); }
+  void cached_cols_set(const int value) override { cached_cols_ref_() = value; }
 
   void store_scroll_for_layout(const int cols, const int rows) override
   {
@@ -771,19 +785,27 @@ static void build_image_grid(Layout &layout,
     return;
   }
 
-  ed::view3d::image_grid_clamp_scroll_row(state, *v3d, is_mask_slot);
+  ed::view3d::image_grid_clamp_scroll_row(state, *v3d, is_mask_slot, is_popover);
 
   const int preview_size = ed::view3d::image_grid_preview_size_get(*v3d);
   const int tile_w = ui::preview_tile_size_x(preview_size);
   const int panel_width = max_ii(layout.width(), 0);
   /* Always derive columns from this panel's width. #cached_cols is shared across N-Panel and
    * texture popover grids and would otherwise make the popover reuse the sidebar column count. */
+  const int cols_fallback = is_popover ? state.viewport.cached_cols_popover :
+                                         state.viewport.cached_cols;
   const int cols_est = (panel_width > 0) ? max_ii(1, panel_width / max_ii(tile_w, 1)) :
-                                           max_ii(1, state.viewport.cached_cols);
+                                           max_ii(1, cols_fallback);
 
   /* Publish this context's column count immediately so the focus/clamp helpers below use the
-   * column count for *this* panel, not the other grid's count from the previous frame. */
-  state.viewport.cached_cols = cols_est;
+   * column count for *this* panel, not the other grid's count from the previous frame. The popover
+   * tracks its own column count so the sidebar drawing afterwards cannot overwrite it. */
+  if (is_popover) {
+    state.viewport.cached_cols_popover = cols_est;
+  }
+  else {
+    state.viewport.cached_cols = cols_est;
+  }
 
   /* Pre-compute visible rows for image_grid_apply_focus_scroll.
    * Use the correct grip height for this context (popover has its own independent height). */
@@ -802,7 +824,7 @@ static void build_image_grid(Layout &layout,
   ed::view3d::image_grid_apply_focus_scroll(C, *v3d, state, cols_est, effective_rows_hint);
 
   auto view_unique = std::make_unique<ImageAssetGridView>(
-      C, state, state.filter.lib_ref, ptr, prop, cols_est);
+      C, state, state.filter.lib_ref, ptr, prop, cols_est, is_popover);
   view_unique->set_tile_size(tile_w, ui::preview_tile_size_y_no_label(preview_size));
   view_unique->set_cols_per_row_hint(cols_est);
   const char *grid_view_id = is_mask_slot ? "image_asset_grid_mask" : "image_asset_grid";

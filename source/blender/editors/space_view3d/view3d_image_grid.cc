@@ -15,6 +15,7 @@
 #include "DNA_ID.h"
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_space_enums.h"
 #include "DNA_space_types.h"
 #include "DNA_texture_types.h"
@@ -114,24 +115,64 @@ int image_grid_preview_size_get(const View3D &v3d)
   return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
 }
 
+/**
+ * Visible row count for the *current* drawing context. The popover keeps its own session-only
+ * #grip_pixel_height_popover (never written to DNA), so it cannot reuse #image_grid_effective_rows
+ * which reads #View3D::image_grid_rows.
+ */
+static int image_grid_context_effective_rows(const ImageGridUIState &state,
+                                             const View3D &v3d,
+                                             const bool is_mask_slot,
+                                             const bool is_popover)
+{
+  if (!is_popover) {
+    return image_grid_effective_rows(v3d, is_mask_slot);
+  }
+  const int tile_h = max_ii(1,
+                            ui::preview_tile_size_y_no_label(image_grid_preview_size_get(v3d)));
+  const int grip = max_ii(state.viewport.grip_pixel_height_popover, tile_h);
+  return clamp_i(int(divide_ceil_u(uint(grip), uint(tile_h))), 1, 16);
+}
+
+/** Column count of the grid for the current drawing context (popover tracks its own). */
+static int image_grid_context_cols(const ImageGridUIState &state, const bool is_popover)
+{
+  return is_popover ? state.viewport.cached_cols_popover : state.viewport.cached_cols;
+}
+
+/**
+ * Whether \a region is a popover. The pre-button handlers receive the popup's #RGN_TYPE_TEMPORARY
+ * region (see #region_pre_button_handlers_call with #uiPopupBlockHandle::region), while
+ * #CTX_wm_region_popup is not yet set at that point — so detect from the region, not the context.
+ */
+static bool image_grid_region_is_popover(const ARegion *region)
+{
+  return region && region->regiontype == RGN_TYPE_TEMPORARY;
+}
+
 int image_grid_max_scroll_row(const ImageGridUIState &state,
                               const View3D &v3d,
-                              const bool is_mask_slot)
+                              const bool is_mask_slot,
+                              const bool is_popover)
 {
-  const int effective_rows = image_grid_effective_rows(v3d, is_mask_slot);
-  const int total_rows = (state.viewport.cached_cols > 0) ?
-                             int(ceil(float(state.viewport.cached_item_count) /
-                                      float(state.viewport.cached_cols))) :
-                             effective_rows;
+  const int effective_rows = image_grid_context_effective_rows(
+      state, v3d, is_mask_slot, is_popover);
+  /* Use the column count of the grid being interacted with. The popover keeps its own count so a
+   * sidebar redraw cannot shrink the popover's row total and collapse its scroll range. */
+  const int cols = image_grid_context_cols(state, is_popover);
+  const int total_rows = (cols > 0) ? int(ceil(float(state.viewport.cached_item_count) /
+                                               float(cols))) :
+                                      effective_rows;
   return max_ii(0, total_rows - effective_rows);
 }
 
 void image_grid_clamp_scroll_row(ImageGridUIState &state,
                                  const View3D &v3d,
-                                 const bool is_mask_slot)
+                                 const bool is_mask_slot,
+                                 const bool is_popover)
 {
   state.viewport.scroll_row = clamp_i(
-      state.viewport.scroll_row, 0, image_grid_max_scroll_row(state, v3d, is_mask_slot));
+      state.viewport.scroll_row, 0, image_grid_max_scroll_row(state, v3d, is_mask_slot, is_popover));
 }
 
 bool image_grid_slot_is_mask(const PointerRNA &texture_slot_ptr)
@@ -223,7 +264,8 @@ bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region)
     return false;
   }
   ImageGridUIState &state = image_grid_state_get(*v3d, is_mask_slot);
-  return image_grid_max_scroll_row(state, *v3d, is_mask_slot) > 0;
+  const bool is_popover = image_grid_region_is_popover(region);
+  return image_grid_max_scroll_row(state, *v3d, is_mask_slot, is_popover) > 0;
 }
 
 int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *region)
@@ -243,6 +285,9 @@ int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *re
   const int delta = (event->type == WHEELUPMOUSE) ? -1 : 1;
   RNA_int_set(&op_ptr, "delta", delta);
   RNA_boolean_set(&op_ptr, "use_mask_slot", is_mask_slot);
+  /* CTX_wm_region_popup is not set during pre-button handling; pass the popover flag explicitly so
+   * the operator clamps against the popover's height/columns, not the sidebar's. */
+  RNA_boolean_set(&op_ptr, "is_popover", image_grid_region_is_popover(region));
   WM_operator_name_call_ptr(C, ot, wm::OpCallContext::ExecDefault, &op_ptr, nullptr);
   WM_operator_properties_free(&op_ptr);
   /* Popovers use a temporary region; CTX_wm_region() still points at the opener (e.g. tool header). */
@@ -272,7 +317,8 @@ int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegi
     bool is_mask = false;
     if (image_grid_mouse_over(region, event->xy, &is_mask)) {
       const ImageGridUIState &state = image_grid_state_get(*v3d, is_mask);
-      if (image_grid_max_scroll_row(state, *v3d, is_mask) > 0) {
+      const bool is_popover = image_grid_region_is_popover(region);
+      if (image_grid_max_scroll_row(state, *v3d, is_mask, is_popover) > 0) {
         drag.active = true;
         drag.is_mask_slot = is_mask;
         drag.start_y = event->xy[1];
@@ -309,9 +355,11 @@ int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegi
        * appear. Scroll by sub-row pixel amounts for smooth motion: accumulate into a combined
        * pixel position and split it back into whole rows plus a sub-row offset. */
       ImageGridUIState &state = image_grid_state_get(*v3d, drag.is_mask_slot);
+      const bool is_popover = image_grid_region_is_popover(region);
       const int preview_size = image_grid_preview_size_get(*v3d);
       const int tile_h = max_ii(1, ui::preview_tile_size_y_no_label(preview_size));
-      const int max_scroll_px = image_grid_max_scroll_row(state, *v3d, drag.is_mask_slot) * tile_h;
+      const int max_scroll_px =
+          image_grid_max_scroll_row(state, *v3d, drag.is_mask_slot, is_popover) * tile_h;
 
       int total_px = state.viewport.scroll_row * tile_h + state.viewport.scroll_offset_px;
       total_px = clamp_i(total_px + dy, 0, max_scroll_px);
@@ -320,12 +368,13 @@ int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegi
 
       /* User dragged manually — dismiss pending focus so the grid does not snap back. */
       image_grid_focus_clear(state.viewport);
+      const int grip_for_layout = is_popover ? state.viewport.grip_pixel_height_popover :
+                                               state.viewport.grip_pixel_height;
       const int drag_rows = clamp_i(
-          int(divide_ceil_u(uint(state.viewport.grip_pixel_height), uint(tile_h))), 1, 16);
+          int(divide_ceil_u(uint(max_ii(grip_for_layout, tile_h)), uint(tile_h))), 1, 16);
+      const int drag_cols = image_grid_context_cols(state, is_popover);
       image_grid_viewport_store_scroll_for_layout(
-          state.viewport,
-          clamp_i(state.viewport.cached_cols > 0 ? state.viewport.cached_cols : 1, 1, 16),
-          drag_rows);
+          state.viewport, clamp_i(drag_cols > 0 ? drag_cols : 1, 1, 16), drag_rows);
 
       ED_region_tag_redraw(region);
       ED_region_tag_refresh_ui(region);
@@ -624,9 +673,15 @@ static wmOperatorStatus image_grid_assign_texture_exec(bContext *C, wmOperator *
      * #grip_pixel_height its visible height. */
     const int preview_size = image_grid_preview_size_get(*v3d);
     const int tile_h = max_ii(1, ui::preview_tile_size_y_no_label(preview_size));
+    /* The clicked grid keeps its own height: the popover has an independent grip, so mark the
+     * layout key with the popover's height when the click came from a popover. Otherwise the key
+     * mismatches and the popover re-applies the focus scroll (a visible jump) on the next draw. */
+    const bool is_popover = CTX_wm_region_popup(C) != nullptr;
+    const int source_grip = is_popover ? state.viewport.grip_pixel_height_popover :
+                                         state.viewport.grip_pixel_height;
     const int source_rows = clamp_i(
-        int(divide_ceil_u(uint(state.viewport.grip_pixel_height), uint(tile_h))), 1, 16);
-    const int source_cols = max_ii(1, state.viewport.cached_cols);
+        int(divide_ceil_u(uint(max_ii(source_grip, tile_h)), uint(tile_h))), 1, 16);
+    const int source_cols = max_ii(1, image_grid_context_cols(state, is_popover));
     image_grid_focus_mark_applied(state.viewport, source_cols, source_rows);
 
     /* Refresh the UI (not just redraw) on all grids so build_image_grid re-runs and applies the
@@ -1473,11 +1528,17 @@ static wmOperatorStatus image_grid_scroll_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   const bool is_mask_slot = RNA_boolean_get(op->ptr, "use_mask_slot");
+  /* Popover keeps its own grip height/columns; clamp scrolling against the grid the wheel event was
+   * over, not the sidebar. The caller resolves this from the region (CTX_wm_region_popup is unset
+   * during pre-button handling) and passes it as a property. */
+  const bool is_popover = RNA_boolean_get(op->ptr, "is_popover");
   ImageGridUIState &state = image_grid_state_get(*v3d, is_mask_slot);
   const int delta = RNA_int_get(op->ptr, "delta");
-  image_grid_clamp_scroll_row(state, *v3d, is_mask_slot);
-  state.viewport.scroll_row = clamp_i(
-      state.viewport.scroll_row + delta, 0, image_grid_max_scroll_row(state, *v3d, is_mask_slot));
+  image_grid_clamp_scroll_row(state, *v3d, is_mask_slot, is_popover);
+  state.viewport.scroll_row = clamp_i(state.viewport.scroll_row + delta,
+                                      0,
+                                      image_grid_max_scroll_row(
+                                          state, *v3d, is_mask_slot, is_popover));
   /* Mouse-wheel scrolls in whole rows; align the sub-row offset to the row boundary. */
   state.viewport.scroll_offset_px = 0;
   /* User scrolled manually — dismiss any pending focus-to-asset request so the grid does not
@@ -1485,12 +1546,13 @@ static wmOperatorStatus image_grid_scroll_exec(bContext *C, wmOperator *op)
   image_grid_focus_clear(state.viewport);
   const int preview_size = image_grid_preview_size_get(*v3d);
   const int tile_h = max_ii(1, ui::preview_tile_size_y_no_label(preview_size));
+  const int grip_for_layout = is_popover ? state.viewport.grip_pixel_height_popover :
+                                           state.viewport.grip_pixel_height;
   const int scroll_rows = clamp_i(
-      int(divide_ceil_u(uint(state.viewport.grip_pixel_height), uint(tile_h))), 1, 16);
+      int(divide_ceil_u(uint(max_ii(grip_for_layout, tile_h)), uint(tile_h))), 1, 16);
+  const int scroll_cols = image_grid_context_cols(state, is_popover);
   image_grid_viewport_store_scroll_for_layout(
-      state.viewport,
-      clamp_i(state.viewport.cached_cols > 0 ? state.viewport.cached_cols : 1, 1, 16),
-      scroll_rows);
+      state.viewport, clamp_i(scroll_cols > 0 ? scroll_cols : 1, 1, 16), scroll_rows);
 
   ARegion *region = CTX_wm_region_popup(C);
   if (!region) {
@@ -1516,6 +1578,9 @@ void VIEW3D_OT_image_grid_scroll(wmOperatorType *ot)
                   false,
                   "Mask Texture Slot",
                   "Scroll the mask texture grid instead of the main texture grid");
+  PropertyRNA *prop = RNA_def_boolean(
+      ot->srna, "is_popover", false, "Is Popover", "Scroll the popover grid (uses its own height)");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
 }
 
 /** \} */

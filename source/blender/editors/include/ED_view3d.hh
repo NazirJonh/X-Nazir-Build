@@ -1513,6 +1513,15 @@ struct ImageGridViewport {
   /** Filled after build_grid_view each frame; scrollbar bounds on the *next* frame. */
   int cached_item_count = 0;
   int cached_cols = 0;
+  /**
+   * Column count of the popover grid, tracked separately from #cached_cols. The N-Panel sidebar
+   * and the Texture popover share one #ImageGridUIState but can have different widths (hence
+   * different column counts). Scroll clamping and the per-layout bucket key must use the column
+   * count of the grid being interacted with; without this, whichever grid drew last would
+   * overwrite #cached_cols and collapse the popover's scroll range (and mismatch its scroll
+   * bucket). Session-only.
+   */
+  int cached_cols_popover = 0;
 
   /**
    * Number of distinct grid layouts tracked for scroll/focus state: a (columns, rows) pair, each
@@ -1711,8 +1720,22 @@ const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref);
 
 int image_grid_effective_rows(const View3D &v3d, bool is_mask_slot);
 int image_grid_preview_size_get(const View3D &v3d);
-int image_grid_max_scroll_row(const ImageGridUIState &state, const View3D &v3d, bool is_mask_slot);
-void image_grid_clamp_scroll_row(ImageGridUIState &state, const View3D &v3d, bool is_mask_slot);
+/**
+ * Maximum whole-row scroll offset for the grid.
+ *
+ * \param is_popover: When true, derive the visible row count from the popover's own
+ * #grip_pixel_height_popover instead of the DNA-persisted sidebar row count. The Texture popover
+ * and the N-Panel sidebar share one #ImageGridUIState but keep independent heights, so using the
+ * sidebar height here would make the popover unable to scroll to its bottom rows.
+ */
+int image_grid_max_scroll_row(const ImageGridUIState &state,
+                              const View3D &v3d,
+                              bool is_mask_slot,
+                              bool is_popover = false);
+void image_grid_clamp_scroll_row(ImageGridUIState &state,
+                                 const View3D &v3d,
+                                 bool is_mask_slot,
+                                 bool is_popover = false);
 bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region);
 int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *region);
 int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegion *region);

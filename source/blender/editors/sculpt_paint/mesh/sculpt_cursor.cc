@@ -16,8 +16,12 @@
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector.h"
+#include "BLI_string_utf8.h"
+
+#include "BLT_translation.hh"
 
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_view3d_types.h"
 
 #include "BKE_context.hh"
@@ -26,14 +30,19 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_scene.hh"
+#include "BKE_unit.hh"
 
 #include "DEG_depsgraph.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "ED_numinput.hh"
+#include "ED_screen.hh"
 #include "ED_sculpt.hh"
 #include "ED_view3d.hh"
+
+#include "UI_interface_types.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -240,6 +249,140 @@ struct SculptCursorTransformData {
   bool constraint_axis[3];
 };
 
+static int sculpt_cursor_constraint_axis_index(const bool constraint_axis[3]);
+
+static bool sculpt_cursor_rotate_angle_from_mval(const bContext *C,
+                                                 const SculptCursorTransformData *data,
+                                                 const int axis,
+                                                 const float2 &curr_mval,
+                                                 float *r_angle);
+
+static void sculpt_cursor_dist_to_str(char *r_str,
+                                      const int str_maxncpy,
+                                      const double val,
+                                      const UnitSettings &unit)
+{
+  BKE_unit_value_as_string_scaled(
+      r_str, str_maxncpy, val, 4 * -1, B_UNIT_LENGTH, unit, false, true);
+}
+
+static const char *sculpt_cursor_constraint_axis_name(const int axis)
+{
+  BLI_assert(axis >= 0 && axis < 3);
+  static const char *axis_names[] = {IFACE_("X"), IFACE_("Y"), IFACE_("Z")};
+  return axis_names[axis];
+}
+
+static void sculpt_cursor_transform_header_clear(bContext *C)
+{
+  ED_area_status_text(CTX_wm_area(C), nullptr);
+}
+
+static void sculpt_cursor_transform_header_update(bContext *C,
+                                                  wmOperator *op,
+                                                  const Object &ob,
+                                                  const SculptSession &ss,
+                                                  const SculptCursorTransformData &data,
+                                                  const float2 *curr_mval = nullptr)
+{
+  ScrArea *area = CTX_wm_area(C);
+  if (!area) {
+    return;
+  }
+
+  const Scene *scene = CTX_data_scene(C);
+  const UnitSettings &unit = scene->unit;
+  char str[UI_MAX_DRAW_STR];
+  str[0] = '\0';
+
+  const eSculptCursorTransformMode mode = eSculptCursorTransformMode(RNA_enum_get(op->ptr, "mode"));
+  const int axis = sculpt_cursor_constraint_axis_index(data.constraint_axis);
+
+  switch (mode) {
+    case SCULPT_CURSOR_TRANSFORM_TRANSLATE: {
+      float3 world_pos = ss.sculpt_cursor_pos;
+      mul_m4_v3(ob.object_to_world().ptr(), world_pos);
+
+      float world_delta[3];
+      sub_v3_v3v3(world_delta, world_pos, data.initial_world_pos);
+
+      if (axis != -1) {
+        float axis_no[3];
+        normalize_v3_v3(axis_no, data.initial_world_mat[axis]);
+        const float along = dot_v3v3(axis_no, world_delta);
+
+        char val_str[NUM_STR_REP_LEN];
+        char dist_str[NUM_STR_REP_LEN];
+        sculpt_cursor_dist_to_str(val_str, sizeof(val_str), double(along), unit);
+        sculpt_cursor_dist_to_str(dist_str, sizeof(dist_str), double(fabsf(along)), unit);
+
+        char axis_text[64];
+        SNPRINTF_UTF8(axis_text,
+                      IFACE_(" along %s"),
+                      sculpt_cursor_constraint_axis_name(axis));
+        BLI_snprintf_utf8(str, sizeof(str), "D: %s (%s)%s", val_str, dist_str, axis_text);
+      }
+      else {
+        char dvec_str[3][NUM_STR_REP_LEN];
+        char dist_str[NUM_STR_REP_LEN];
+        for (int i = 0; i < 3; i++) {
+          sculpt_cursor_dist_to_str(dvec_str[i], sizeof(dvec_str[i]), double(world_delta[i]), unit);
+        }
+        sculpt_cursor_dist_to_str(dist_str, sizeof(dist_str), double(len_v3(world_delta)), unit);
+        BLI_snprintf_utf8(str,
+                          sizeof(str),
+                          "Dx: %s   Dy: %s   Dz: %s (%s)",
+                          dvec_str[0],
+                          dvec_str[1],
+                          dvec_str[2],
+                          dist_str);
+      }
+      break;
+    }
+    case SCULPT_CURSOR_TRANSFORM_ROTATE: {
+      float angle = 0.0f;
+      if (axis != -1 && curr_mval != nullptr) {
+        sculpt_cursor_rotate_angle_from_mval(C, &data, axis, *curr_mval, &angle);
+      }
+
+      if (axis != -1) {
+        char axis_text[64];
+        SNPRINTF_UTF8(axis_text,
+                      IFACE_(" along %s"),
+                      sculpt_cursor_constraint_axis_name(axis));
+        BLI_snprintf_utf8(str, sizeof(str), IFACE_("Rotation: %.2f%s"), RAD2DEGF(angle), axis_text);
+      }
+      else {
+        BLI_snprintf_utf8(str, sizeof(str), IFACE_("Rotation: %.2f"), RAD2DEGF(angle));
+      }
+      break;
+    }
+    case SCULPT_CURSOR_TRANSFORM_SCALE: {
+      float scale_delta[3];
+      for (int i = 0; i < 3; i++) {
+        scale_delta[i] = (data.initial_cursor_scale[i] != 0.0f) ?
+                             ss.sculpt_cursor_scale[i] / data.initial_cursor_scale[i] :
+                             1.0f;
+      }
+
+      if (axis != -1) {
+        BLI_snprintf_utf8(str, sizeof(str), IFACE_("Scale: %.4f"), scale_delta[axis]);
+      }
+      else {
+        BLI_snprintf_utf8(str,
+                          sizeof(str),
+                          IFACE_("Scale X: %.4f   Y: %.4f  Z: %.4f"),
+                          scale_delta[0],
+                          scale_delta[1],
+                          scale_delta[2]);
+      }
+      break;
+    }
+  }
+
+  ED_area_status_text(area, str);
+}
+
 static void sculpt_cursor_world_matrix_from_state(const Object &ob,
                                                   const float cursor_pos[3],
                                                   const float cursor_rot[4],
@@ -338,13 +481,16 @@ static bool sculpt_cursor_translate_along_axis(const bContext *C,
   return true;
 }
 
-static bool sculpt_cursor_rotate_around_axis(const bContext *C,
-                                             const SculptCursorTransformData *data,
-                                             const int axis,
-                                             const float2 &curr_mval,
-                                             float r_new_cursor_rot[4])
+static bool sculpt_cursor_rotate_angle_from_mval(const bContext *C,
+                                                 const SculptCursorTransformData *data,
+                                                 const int axis,
+                                                 const float2 &curr_mval,
+                                                 float *r_angle)
 {
   ARegion *region = CTX_wm_region(C);
+  if (!region) {
+    return false;
+  }
 
   float axis_vec[3];
   copy_v3_v3(axis_vec, data->initial_world_mat[axis]);
@@ -370,7 +516,20 @@ static bool sculpt_cursor_rotate_around_axis(const bContext *C,
     return false;
   }
 
-  const float angle = angle_signed_on_axis_v3v3_v3(proj_init, proj_curr, axis_vec);
+  *r_angle = angle_signed_on_axis_v3v3_v3(proj_init, proj_curr, axis_vec);
+  return true;
+}
+
+static bool sculpt_cursor_rotate_around_axis(const bContext *C,
+                                             const SculptCursorTransformData *data,
+                                             const int axis,
+                                             const float2 &curr_mval,
+                                             float r_new_cursor_rot[4])
+{
+  float angle;
+  if (!sculpt_cursor_rotate_angle_from_mval(C, data, axis, curr_mval, &angle)) {
+    return false;
+  }
 
   float cursor_mat[3][3];
   quat_to_mat3(cursor_mat, data->initial_cursor_rot);
@@ -525,6 +684,8 @@ static wmOperatorStatus sculpt_cursor_transform_invoke(bContext *C,
   data->initial_mouse = float2(float(event->mval[0]), float(event->mval[1]));
   RNA_boolean_get_array(op->ptr, "constraint_axis", data->constraint_axis);
 
+  sculpt_cursor_transform_header_update(C, op, *ob, *ss, *data);
+
   /* Add modal handler */
   WM_event_add_modal_handler(C, op);
 
@@ -537,6 +698,7 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
 {
   Object *ob = CTX_data_active_object(C);
   if (!ob || !ob->runtime->sculpt_session) {
+    sculpt_cursor_transform_header_clear(C);
     return OPERATOR_CANCELLED;
   }
 
@@ -583,6 +745,7 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
       }
 
       WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+      sculpt_cursor_transform_header_update(C, op, *ob, *ss, *data, &current_mouse);
       break;
     }
 
@@ -591,6 +754,7 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
         BKE_sculpt_cursor_session_to_storage(*ob, *ss);
         DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
         WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+        sculpt_cursor_transform_header_clear(C);
         MEM_delete(data);
         op->customdata = nullptr;
         return OPERATOR_FINISHED;
@@ -602,6 +766,7 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
         BKE_sculpt_cursor_session_to_storage(*ob, *ss);
         DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
         WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+        sculpt_cursor_transform_header_clear(C);
         MEM_delete(data);
         op->customdata = nullptr;
         return OPERATOR_FINISHED;
@@ -616,6 +781,7 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
       copy_v3_v3(ss->sculpt_cursor_scale, data->initial_cursor_scale);
       BKE_sculpt_cursor_session_to_storage(*ob, *ss);
       WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+      sculpt_cursor_transform_header_clear(C);
       MEM_delete(data);
       op->customdata = nullptr;
       return OPERATOR_CANCELLED;

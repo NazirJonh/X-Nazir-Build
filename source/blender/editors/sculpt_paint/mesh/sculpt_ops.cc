@@ -330,6 +330,7 @@ static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &s
   }
   ob.runtime->sculpt_session = MEM_new<SculptSession>(__func__);
   ob.runtime->sculpt_session->mode_type = OB_MODE_SCULPT;
+  BKE_sculpt_cursor_storage_to_session(ob, *ob.runtime->sculpt_session);
 
   /* Trigger evaluation of modifier stack to ensure
    * multires modifier sets .runtime.ccg in

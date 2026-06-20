@@ -589,6 +589,8 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
     case LEFTMOUSE:
       if (RNA_boolean_get(op->ptr, "release_confirm") && event->val == KM_RELEASE) {
         BKE_sculpt_cursor_session_to_storage(*ob, *ss);
+        DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+        WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
         MEM_delete(data);
         op->customdata = nullptr;
         return OPERATOR_FINISHED;
@@ -598,6 +600,8 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
     case EVT_RETKEY:
       if (event->val == KM_RELEASE) {
         BKE_sculpt_cursor_session_to_storage(*ob, *ss);
+        DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+        WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
         MEM_delete(data);
         op->customdata = nullptr;
         return OPERATOR_FINISHED;

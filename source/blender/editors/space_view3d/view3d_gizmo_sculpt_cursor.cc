@@ -504,12 +504,6 @@ static wmOperatorStatus sculpt_cursor_gizmo_modal(bContext *C,
 
 static bool gizmo_poll(const bContext *C, wmGizmoGroupType * /*gzgt*/)
 {
-  ScrArea *area = CTX_wm_area(C);
-  const bToolRef *tref = area ? area->runtime.tool : nullptr;
-  if (!tref || !STREQ(tref->idname, "builtin.sculpt_cursor")) {
-    return false;
-  }
-
   Object *ob = CTX_data_active_object(C);
   if (!ob || !(ob->mode & OB_MODE_SCULPT)) {
     return false;

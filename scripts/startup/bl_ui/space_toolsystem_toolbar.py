@@ -2016,7 +2016,6 @@ class _defs_sculpt:
                 "for sculpting operations"
             ),
             icon="ops.generic.cursor",
-            widget="VIEW3D_GGT_sculpt_cursor",
             keymap="3D View Tool: Sculpt, 3D Cursor",
             draw_settings=draw_settings,
         )

@@ -326,8 +326,6 @@ void mesh_cursor_active_draw(PaintCursorContext &pcontext)
       break;
   }
 
-  sculpt_cursor_overlay_draw(pcontext);
-
   GPU_matrix_pop();
 
   GPU_matrix_pop_projection();
@@ -545,6 +543,9 @@ static void sculpt_cursor_overlay_draw(const PaintCursorContext &pcontext)
   GPU_blend(GPU_BLEND_ALPHA);
   GPU_line_width(2.0f);
 
+  uint pos_id = GPU_vertformat_attr_add(
+      immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+
   immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
 
   const float axis_colors[3][4] = {
@@ -563,13 +564,13 @@ static void sculpt_cursor_overlay_draw(const PaintCursorContext &pcontext)
 
     immUniformColor4fv(axis_colors[axis]);
     immBegin(GPU_PRIM_LINES, 2);
-    immVertex3fv(pcontext.pos, pos);
-    immVertex3fv(pcontext.pos, end);
+    immVertex3fv(pos_id, pos);
+    immVertex3fv(pos_id, end);
     immEnd();
   }
 
   immUniformColor4f(1.0f, 0.85f, 0.15f, 0.85f);
-  imm_drawcircball(pos, radius, rv3d->viewinv, pcontext.pos);
+  imm_drawcircball(pos, radius, rv3d->viewinv, pos_id);
 
   immUnbindProgram();
   GPU_blend(GPU_BLEND_NONE);
@@ -865,7 +866,6 @@ void mesh_cursor_inactive_draw(PaintCursorContext &pcontext)
 
   /* Drawing Cursor overlays in 3D object space. */
   object_space_overlays_draw(pcontext);
-  sculpt_cursor_overlay_draw(pcontext);
 
   GPU_matrix_pop();
 

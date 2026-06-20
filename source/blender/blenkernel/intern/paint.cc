@@ -2137,10 +2137,14 @@ void BKE_sculptsession_free(Object *ob)
 
 void BKE_sculpt_cursor_storage_to_session(Object &ob, SculptSession &ss)
 {
-  ss.sculpt_cursor_initialized = ob.sculpt_cursor_initialized != 0;
-  if (!ss.sculpt_cursor_initialized) {
-    return;
+  if (!ob.sculpt_cursor_initialized) {
+    ob.sculpt_cursor_initialized = 1;
+    zero_v3(ob.sculpt_cursor_location);
+    unit_qt(ob.sculpt_cursor_rotation);
+    copy_v3_fl3(ob.sculpt_cursor_scale, 1.0f, 1.0f, 1.0f);
   }
+
+  ss.sculpt_cursor_initialized = true;
   copy_v3_v3(ss.sculpt_cursor_pos, ob.sculpt_cursor_location);
   copy_qt_qt(ss.sculpt_cursor_rot, ob.sculpt_cursor_rotation);
   copy_v3_v3(ss.sculpt_cursor_scale, ob.sculpt_cursor_scale);

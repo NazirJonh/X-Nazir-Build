@@ -267,6 +267,21 @@ bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], cons
   return block_view_find_idname(*item_but->block, item_but->view_item->get_view()) == idname;
 }
 
+bool region_view_idname_has_bounds(const ARegion *region, const StringRef idname)
+{
+  for (Block &block : region->runtime->uiblocks) {
+    for (ViewLink &view_link : block.views) {
+      if (block_view_find_idname(block, *view_link.view) != idname) {
+        continue;
+      }
+      if (view_link.view->get_bounds().has_value()) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event)
 {
   Block *block = nullptr;

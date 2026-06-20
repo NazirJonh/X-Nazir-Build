@@ -6,8 +6,6 @@
  * \ingroup spview3d
  */
 
-
-
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_string.h"
@@ -248,7 +246,15 @@ static bool image_grid_mouse_over(const ARegion *region, const int xy[2], bool *
   return false;
 }
 
-bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region)
+/** True when either grid view is laid out this redraw (used to tell a real cursor-exit from a
+ * transient rebuild where the view momentarily has no tiles). */
+static bool image_grid_any_grid_present(const ARegion *region)
+{
+  return ui::region_view_idname_has_bounds(region, "image_asset_grid") ||
+         ui::region_view_idname_has_bounds(region, "image_asset_grid_mask");
+}
+
+bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region, bool *r_is_mask_slot)
 {
   if (!ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE) || event->modifier) {
     return false;
@@ -257,11 +263,45 @@ bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region)
   if (!v3d || !region) {
     return false;
   }
+  ImageGridWheelLatch &latch = image_grid_wheel_latch(*v3d);
+
   bool is_mask_slot = false;
-  if (!image_grid_mouse_over(region, event->xy, &is_mask_slot) &&
-      !image_grid_scroll_under_mouse(region, event->xy, *v3d, &is_mask_slot))
-  {
-    return false;
+  const bool over = image_grid_mouse_over(region, event->xy, &is_mask_slot) ||
+                    image_grid_scroll_under_mouse(region, event->xy, *v3d, &is_mask_slot);
+  if (over) {
+    latch.over = true;
+    latch.is_mask_slot = is_mask_slot;
+    latch.region = region;
+    latch.xy[0] = event->xy[0];
+    latch.xy[1] = event->xy[1];
+  }
+  else {
+    /* Live bounds say "not over". Repeat the last consume decision only while the grid is genuinely
+     * absent this redraw AND the cursor held still, and only for the region the latch belongs to
+     * (#ImageGridWheelLatch). A real cursor exit (grid present here, cursor outside) or any move away
+     * clears the latch, so the wheel never scrolls the grid from outside its bounds and a grid that
+     * vanishes for good cannot stay captured; events in other regions never touch the latch. */
+    bool consume_via_latch = false;
+    if (latch.region == region && latch.over) {
+      const int tile_h = max_ii(1,
+                                ui::preview_tile_size_y_no_label(image_grid_preview_size_get(*v3d)));
+      const bool held_still = abs(event->xy[0] - latch.xy[0]) <= tile_h &&
+                              abs(event->xy[1] - latch.xy[1]) <= tile_h;
+      if (!image_grid_any_grid_present(region) && held_still) {
+        consume_via_latch = true;
+      }
+      else {
+        latch.over = false;
+      }
+    }
+    if (!consume_via_latch) {
+      return false;
+    }
+    is_mask_slot = latch.is_mask_slot;
+  }
+
+  if (r_is_mask_slot) {
+    *r_is_mask_slot = is_mask_slot;
   }
   ImageGridUIState &state = image_grid_state_get(*v3d, is_mask_slot);
   const bool is_popover = image_grid_region_is_popover(region);
@@ -270,16 +310,13 @@ bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region)
 
 int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *region)
 {
-  if (!image_grid_wheel_poll(C, event, region)) {
+  bool is_mask_slot = false;
+  if (!image_grid_wheel_poll(C, event, region, &is_mask_slot)) {
     return WM_UI_HANDLER_CONTINUE;
   }
   wmOperatorType *ot = WM_operatortype_find("VIEW3D_OT_image_grid_scroll", true);
   if (!ot) {
     return WM_UI_HANDLER_CONTINUE;
-  }
-  bool is_mask_slot = false;
-  if (!image_grid_mouse_over(region, event->xy, &is_mask_slot)) {
-    image_grid_scroll_under_mouse(region, event->xy, *CTX_wm_view3d(C), &is_mask_slot);
   }
   PointerRNA op_ptr = WM_operator_properties_create_ptr(ot);
   const int delta = (event->type == WHEELUPMOUSE) ? -1 : 1;

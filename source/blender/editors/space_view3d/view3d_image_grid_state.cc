@@ -39,6 +39,7 @@ struct ImageGridStatesPerView3D {
   bool texture_initialized = false;
   bool mask_initialized = false;
   ImageGridDragScrollState drag_scroll;
+  ImageGridWheelLatch wheel_latch;
 };
 
 /**
@@ -260,6 +261,11 @@ void image_grid_state_reset_catalog(ImageGridUIState &state)
 ImageGridDragScrollState &image_grid_drag_scroll_state(View3D &v3d)
 {
   return image_grid_states_ensure(v3d).drag_scroll;
+}
+
+ImageGridWheelLatch &image_grid_wheel_latch(View3D &v3d)
+{
+  return image_grid_states_ensure(v3d).wheel_latch;
 }
 
 void image_grid_state_remove(const View3D &v3d)

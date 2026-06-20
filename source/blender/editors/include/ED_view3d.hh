@@ -1604,10 +1604,35 @@ struct ImageGridDragScrollState {
   int last_y = 0;
 };
 
+/**
+ * Latches the last wheel hit-test decision so a transient rebuild does not break a scroll burst.
+ * A grid view's hit bounds span only the tiles built this frame and momentarily vanish during a
+ * fast-scroll rebuild (e.g. assets not yet loaded). Without this, the wheel event for that frame
+ * leaks to the panel #View2D pan, the pan shifts the grid out from under the cursor, and every
+ * following event leaks too — a runaway pan/hit-test cascade. When the live bounds are absent the
+ * wheel handler repeats the last decision instead; a real cursor exit (bounds present, cursor
+ * outside) clears it immediately, so the grid never captures the wheel outside its real bounds.
+ * One latch per #View3D, stored in #View3D_Runtime alongside the grid state.
+ */
+struct ImageGridWheelLatch {
+  bool over = false;
+  bool is_mask_slot = false;
+  /* Region the latch belongs to. The pre-button handler is global (runs for every region), so the
+   * latch is only honored for the region where the cursor was last over the grid; this keeps a stale
+   * latch from consuming the wheel in an unrelated editor. */
+  const ARegion *region = nullptr;
+  /* Window-space cursor position when the latch was last set over the grid. The latch is released
+   * once the cursor moves away from here, so a grid that vanishes for good (e.g. its panel is
+   * collapsed) cannot keep capturing the wheel. */
+  int xy[2] = {0, 0};
+};
+
 ImageGridUIState &image_grid_state_get(const View3D &v3d, bool is_mask_slot = false);
 ImageGridUIState &image_grid_state_get_from_context(const bContext &C);
 /** Drag-scroll gesture state for \a v3d (lives in #View3D_Runtime, created on demand). */
 ImageGridDragScrollState &image_grid_drag_scroll_state(View3D &v3d);
+/** Wheel hit-test latch for \a v3d (lives in #View3D_Runtime, created on demand). */
+ImageGridWheelLatch &image_grid_wheel_latch(View3D &v3d);
 bool image_grid_is_mask_slot_from_context(const bContext &C);
 void image_grid_state_reset_catalog(ImageGridUIState &state);
 /** Store #enabled_catalog_paths into #enabled_catalogs_by_library for the current library. */
@@ -1736,7 +1761,10 @@ void image_grid_clamp_scroll_row(ImageGridUIState &state,
                                  const View3D &v3d,
                                  bool is_mask_slot,
                                  bool is_popover = false);
-bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region);
+bool image_grid_wheel_poll(bContext *C,
+                           const wmEvent *event,
+                           ARegion *region,
+                           bool *r_is_mask_slot = nullptr);
 int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *region);
 int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegion *region);
 /**

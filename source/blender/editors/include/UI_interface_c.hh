@@ -3186,6 +3186,13 @@ AbstractView *region_view_find_at(const ARegion *region,
 bool region_view_has_idname_at(const ARegion *region, const int xy[2], int pad, StringRef idname);
 /** Like #region_view_has_idname_at, but also matches a #ButtonType::ViewItem under \a xy. */
 bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], StringRef idname);
+/**
+ * True when a view registered under \a idname exists in \a region this redraw and has non-empty hit
+ * bounds. Unlike #region_view_has_idname_at this ignores the cursor position; it answers "was this
+ * view actually built and laid out this frame", letting callers tell a genuine cursor-outside result
+ * apart from a transient rebuild where the view has no tiles yet.
+ */
+bool region_view_idname_has_bounds(const ARegion *region, StringRef idname);
 /** True when \a xy is over a #ButtonType::Scroll bound to \a poin. */
 bool region_scroll_button_under_mouse(const ARegion *region, const int xy[2], const void *poin);
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event);

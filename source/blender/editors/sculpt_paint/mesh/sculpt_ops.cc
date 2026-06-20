@@ -51,6 +51,7 @@
 
 #include "ED_image.hh"
 #include "ED_object.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
 
@@ -492,6 +493,7 @@ void object_sculpt_mode_enter(bContext *C, Depsgraph &depsgraph, ReportList *rep
   BKE_view_layer_synced_ensure(bmain, &scene, &view_layer);
   Object &ob = *BKE_view_layer_active_object_get(&view_layer);
   object_sculpt_mode_enter(bmain, depsgraph, scene, ob, false, reports);
+  ED_paintcurve_refresh_on_sculpt_mode_enter(C);
 }
 
 void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Object &ob)
@@ -577,6 +579,7 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
       depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
     }
     object_sculpt_mode_enter(bmain, *depsgraph, scene, ob, false, op->reports);
+    ED_paintcurve_refresh_on_sculpt_mode_enter(C);
     BKE_paint_brushes_validate(&bmain, &ts.sculpt->paint);
 
     if (ob.mode & mode_flag) {

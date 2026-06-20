@@ -501,7 +501,10 @@ static void blo_update_defaults_scene(Main *bmain, Scene *scene)
   }
 
   if (ts->sculpt) {
-    ts->sculpt->flags = Sculpt().flags;
+    const Sculpt defaults = {};
+    ts->sculpt->flags = defaults.flags;
+    ts->sculpt->paint_curve_show_radius_handles = defaults.paint_curve_show_radius_handles;
+    ts->sculpt->paint_curve_radius_display_mode = defaults.paint_curve_radius_display_mode;
   }
 
   /* Correct default startup UVs. */

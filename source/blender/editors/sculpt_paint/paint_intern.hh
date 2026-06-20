@@ -282,7 +282,11 @@ struct PaintStroke : NonCopyable, NonMovable {
 
  private:
   void done(bContext *C, bool is_cancel);
-  void add_step(bContext *C, wmOperator *op, float2 mval, float pressure);
+  void add_step(bContext *C,
+                wmOperator *op,
+                float2 mval,
+                float pressure,
+                std::optional<float> curve_point_radius = std::nullopt);
 
   void add_sample(int input_samples, float x, float y, float pressure);
   void calc_average_sample(PaintSample *average);
@@ -292,7 +296,9 @@ struct PaintStroke : NonCopyable, NonMovable {
                      float spacing,
                      float *length_residue,
                      float2 old_pos,
-                     float2 new_pos);
+                     float2 new_pos,
+                     std::optional<float> old_curve_radius = std::nullopt,
+                     std::optional<float> new_curve_radius = std::nullopt);
   int space_stroke(bContext *C, wmOperator *op, float2 final_mouse, float final_pressure);
 
   void line_end(bContext *C, wmOperator *op, float2 mouse);
@@ -662,16 +668,6 @@ inline float3 symmetry_flip(const float3 &src, const ePaintSymmetryFlags symm)
 
 }  // namespace ed::sculpt_paint
 
-/* `paint_curve.cc` */
-
-void PAINTCURVE_OT_new(wmOperatorType *ot);
-void PAINTCURVE_OT_add_point(wmOperatorType *ot);
-void PAINTCURVE_OT_delete_point(wmOperatorType *ot);
-void PAINTCURVE_OT_select(wmOperatorType *ot);
-void PAINTCURVE_OT_slide(wmOperatorType *ot);
-void PAINTCURVE_OT_draw(wmOperatorType *ot);
-void PAINTCURVE_OT_cursor(wmOperatorType *ot);
-
 /* image painting blur kernel */
 struct BlurKernel {
   float *wdata;     /* actual kernel */
@@ -689,9 +685,6 @@ void paint_delete_blur_kernel(BlurKernel *);
 
 /** Initialize viewport pivot from evaluated bounding box center of `ob`. */
 void paint_init_pivot(Object *ob, Scene *scene, Paint *paint);
-
-/* paint curve defines */
-#define PAINT_CURVE_NUM_SEGMENTS 40
 
 /* palette.cc */
 

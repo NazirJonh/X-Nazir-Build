@@ -51,12 +51,16 @@
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
 #include "BKE_subdiv_modifier.hh"
+#include "BKE_wm_runtime.hh"
 #include "BKE_volume.hh"
 
 #include "DNA_camera_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
+#include "DNA_windowmanager_types.h"
+#include "DNA_workspace_types.h"
 #include "DNA_world_types.h"
 
 #include "ED_gpencil_legacy.hh"
@@ -163,6 +167,21 @@ DRWContext::DRWContext(Mode mode_,
   /* fclem: Is this still needed ? */
   if (this->object_edit && rv3d) {
     ED_view3d_init_mats_rv3d(this->object_edit, rv3d);
+  }
+
+  this->cursor_mval_valid = false;
+  this->active_tool_idname = nullptr;
+  if (C != nullptr) {
+    const wmWindow *win = CTX_wm_window(C);
+    if (win != nullptr && win->runtime != nullptr && win->runtime->eventstate != nullptr) {
+      this->cursor_mval = int2(win->runtime->eventstate->xy[0],
+                               win->runtime->eventstate->xy[1]);
+      this->cursor_mval_valid = ELEM(this->mode, DRWContext::VIEWPORT, DRWContext::VIEWPORT_XR);
+    }
+    const ScrArea *area = CTX_wm_area(C);
+    if (area != nullptr && area->runtime.tool != nullptr) {
+      this->active_tool_idname = area->runtime.tool->idname;
+    }
   }
 
   BLI_assert(g_context == nullptr);

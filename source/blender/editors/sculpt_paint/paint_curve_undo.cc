@@ -6,14 +6,15 @@
  * \ingroup edsculpt
  */
 
-#include <cstring>
-
 #include "MEM_guardedalloc.h"
 
 #include "DNA_brush_types.h"
 #include "DNA_userdef_types.h"
 
+#include "BKE_context.hh"
+#include "BKE_curves.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_types.hh"
 #include "BKE_undo_system.hh"
 
 #include "ED_paint.hh"
@@ -21,11 +22,8 @@
 
 #include "WM_api.hh"
 
+#include "paint_curve_intern.hh"
 #include "paint_intern.hh"
-
-#ifndef NDEBUG
-#  include "BLI_array_utils.h" /* #BLI_array_is_zeroed */
-#endif
 
 namespace blender {
 
@@ -36,32 +34,52 @@ namespace blender {
 namespace {
 
 struct UndoCurve {
-  PaintCurvePoint *points; /* points of curve */
-  int tot_points;
+  bke::CurvesGeometry geometry;
   int add_index;
+  int active_curve;
+  char use_3d_space;
+  char _pad0[3];
 };
 
 }  // namespace
 
 static void undocurve_from_paintcurve(UndoCurve *uc, const PaintCurve *pc)
 {
-  BLI_assert(BLI_array_is_zeroed(uc, 1));
-  uc->points = MEM_dupalloc(pc->points);
-  uc->tot_points = pc->tot_points;
   uc->add_index = pc->add_index;
+  uc->active_curve = pc->active_curve;
+  uc->use_3d_space = pc->use_3d_space;
+  if (paintcurve_geometry_runtime_is_initialized(pc->geometry.wrap())) {
+    new (&uc->geometry) bke::CurvesGeometry(pc->geometry.wrap());
+  }
+  else {
+    new (&uc->geometry) bke::CurvesGeometry();
+  }
 }
 
 static void undocurve_to_paintcurve(const UndoCurve *uc, PaintCurve *pc)
 {
-  MEM_SAFE_DELETE(pc->points);
-  pc->points = MEM_dupalloc(uc->points);
-  pc->tot_points = uc->tot_points;
   pc->add_index = uc->add_index;
+  pc->active_curve = uc->active_curve;
+  pc->use_3d_space = uc->use_3d_space;
+  if (paintcurve_geometry_runtime_is_initialized(uc->geometry.wrap())) {
+    if (paintcurve_geometry_runtime_is_initialized(pc->geometry.wrap())) {
+      pc->geometry.wrap() = uc->geometry;
+    }
+    else {
+      new (&pc->geometry) bke::CurvesGeometry(uc->geometry);
+    }
+  }
+  else if (paintcurve_geometry_runtime_is_initialized(pc->geometry.wrap())) {
+    pc->geometry.wrap().~CurvesGeometry();
+    new (&pc->geometry) bke::CurvesGeometry();
+  }
 }
 
 static void undocurve_free_data(UndoCurve *uc)
 {
-  MEM_SAFE_DELETE(uc->points);
+  if (paintcurve_geometry_runtime_is_initialized(uc->geometry.wrap())) {
+    uc->geometry.wrap().~CurvesGeometry();
+  }
 }
 
 /** \} */
@@ -83,6 +101,11 @@ static bool paintcurve_undosys_poll(bContext *C)
   if (C == nullptr || !paint_curve_poll(C)) {
     return false;
   }
+  /* Sculpt uses BKE_UNDOSYS_TYPE_SCULPT for strokes; avoid hijacking generic
+   * #OPTYPE_UNDO pushes (and the "Original Mode" init step) via paint-curve poll. */
+  if (BKE_paintmode_get_active_from_context(C) == PaintMode::Sculpt) {
+    return false;
+  }
   Paint *paint = BKE_paint_get_active_from_context(C);
   Brush *brush = BKE_paint_brush(paint);
   return (brush && brush->paint_curve);
@@ -96,9 +119,7 @@ static void paintcurve_undosys_step_encode_init(bContext *C, UndoStep *us_p)
 
 static bool paintcurve_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *us_p)
 {
-  /* FIXME Double check this, it should not be needed here at all? undo system is supposed to
-   * ensure that. */
-  if (!paint_curve_poll(C)) {
+  if (C == nullptr || !paint_curve_poll(C)) {
     return false;
   }
 
@@ -118,14 +139,20 @@ static bool paintcurve_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoSt
   return true;
 }
 
-static void paintcurve_undosys_step_decode(bContext * /*C*/,
-                                           Main * /*bmain*/,
-                                           UndoStep *us_p,
-                                           const eUndoStepDir /*dir*/,
-                                           bool /*is_final*/)
+static void paintcurve_undosys_step_decode(
+    bContext *C, Main * /*bmain*/, UndoStep *us_p, const eUndoStepDir /*dir*/, bool /*is_final*/)
 {
   PaintCurveUndoStep *us = reinterpret_cast<PaintCurveUndoStep *>(us_p);
-  undocurve_to_paintcurve(&us->data, us->pc_ref.ptr);
+  PaintCurve *pc = us->pc_ref.ptr;
+  if (pc == nullptr) {
+    return;
+  }
+
+  undocurve_to_paintcurve(&us->data, pc);
+
+  if (C && pc->use_3d_space) {
+    paintcurve_sync_to_source_object(C, pc);
+  }
 }
 
 static void paintcurve_undosys_step_free(UndoStep *us_p)
@@ -164,10 +191,9 @@ void ED_paintcurve_undosys_type(UndoType *ut)
 /** \name Utilities
  * \{ */
 
-void ED_paintcurve_undo_push_begin(const char *name)
+void ED_paintcurve_undo_push_begin(bContext *C, const char *name)
 {
   UndoStack *ustack = ED_undo_stack_get();
-  bContext *C = nullptr; /* special case, we never read from this. */
   BKE_undosys_step_push_init_with_type(ustack, C, name, BKE_UNDOSYS_TYPE_PAINTCURVE);
 }
 
@@ -175,7 +201,6 @@ void ED_paintcurve_undo_push_end(bContext *C)
 {
   UndoStack *ustack = ED_undo_stack_get();
   BKE_undosys_step_push(ustack, C, nullptr);
-  BKE_undosys_stack_limit_steps_and_memory_defaults(ustack);
   WM_file_tag_modified();
 }
 

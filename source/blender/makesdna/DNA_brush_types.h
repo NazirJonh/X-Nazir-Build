@@ -11,6 +11,7 @@
 #include "DNA_ID.h"
 #include "DNA_brush_enums.h"
 #include "DNA_curve_types.h"
+#include "DNA_curves_types.h"
 #include "DNA_defs.h"
 #include "DNA_object_enums.h"
 #include "DNA_scene_types.h"
@@ -491,11 +492,28 @@ struct PaintCurve {
 #endif
 
   ID id;
-  /** Points of curve. */
-  PaintCurvePoint *points = nullptr;
-  int tot_points = 0;
+  /** Legacy 2D screen-space representation, no longer written or read. */
+  DNA_DEPRECATED PaintCurvePoint *points = nullptr;
+  DNA_DEPRECATED int tot_points = 0;
   /** Index where next point will be added. */
   int add_index = 0;
+
+  /**
+   * Authoritative 3D representation with full attribute support.
+   * One bezier curve with control points stored in object space of the active object.
+   */
+  CurvesGeometry geometry;
+
+  /**
+   * When non-zero, `geometry` is the authoritative representation.
+   * Defaults to 1 so new curves are created in 3D mode.
+   */
+  char use_3d_space = 1;
+  /** When set, draw interactive radius handles at each control point. */
+  char show_radius_handles = 1;
+  char _pad0[2] = {0};
+  /** Active spline index for multi-spline editing (clamped at use). */
+  int active_curve = 0;
 };
 
 }  // namespace blender

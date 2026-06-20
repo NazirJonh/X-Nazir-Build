@@ -306,6 +306,39 @@ static void rna_Sculpt_update(bContext *C, PointerRNA * /*ptr*/)
   }
 }
 
+static void rna_Sculpt_paint_curve_source_object_update(bContext *C, PointerRNA *ptr)
+{
+  const Sculpt *sculpt = static_cast<const Sculpt *>(ptr->data);
+  if (sculpt->paint_curve_source_object == nullptr) {
+    /* User explicitly clicked the clear button: detach from the source and wipe the intermediate
+     * paint curve so the Curve Edit tool starts with an empty canvas. */
+    ED_paintcurve_detach_source(C);
+    return;
+  }
+  /* ED_paintcurve_import_from_source_object already checks whether the active brush uses the
+   * Curve stroke method OR the Curve Edit tool is active, so no additional gate is needed here.
+   * The previous check (brush->stroke_method == BRUSH_STROKE_CURVE) wrongly blocked import
+   * when using the Curve Edit tool, leaving the picker without an immediate effect. */
+  ED_paintcurve_import_from_source_object(C, nullptr, true);
+}
+
+static void rna_PaintCurve_use_3d_space_update(bContext *C, PointerRNA *ptr)
+{
+  PaintCurve *pc = static_cast<PaintCurve *>(ptr->data);
+  if (pc == nullptr) {
+    return;
+  }
+
+  const char use_3d_old = !pc->use_3d_space;
+
+  if (!ED_paintcurve_convert_space_on_toggle(C, pc)) {
+    pc->use_3d_space = use_3d_old;
+    return;
+  }
+
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
 static void rna_Paint_update(bContext *C, PointerRNA * /*ptr*/)
 {
   const Main *bmain = CTX_data_main(C);
@@ -672,10 +705,24 @@ namespace blender {
 static void rna_def_paint_curve(BlenderRNA *brna)
 {
   StructRNA *srna;
+  PropertyRNA *prop;
 
   srna = RNA_def_struct(brna, "PaintCurve", "ID");
   RNA_def_struct_ui_text(srna, "Paint Curve", "");
   RNA_def_struct_ui_icon(srna, ICON_CURVE_BEZCURVE);
+
+  prop = RNA_def_property(srna, "use_3d_space", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_3d_space", 1);
+  RNA_def_property_ui_text(
+      prop, "3D Space", "Store and edit curve in 3D object space instead of 2D screen space");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintCurve_use_3d_space_update");
+
+  prop = RNA_def_property(srna, "show_radius_handles", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "show_radius_handles", 1);
+  RNA_def_property_ui_text(
+      prop, "Radius Handles", "Show draggable radius handles at each control point");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 static void rna_def_paint_curve_visibility_flag(StructRNA *srna,
@@ -1288,6 +1335,57 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Orientation", "Object whose Z axis defines orientation of gravity");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "paint_curve_source_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, nullptr, nullptr, "rna_PaintCurve_source_object_poll");
+  RNA_def_property_ui_text(
+      prop, "Source Curve", "Curves or Curve object to import into the active paint curve");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Sculpt_paint_curve_source_object_update");
+
+  prop = RNA_def_property(srna, "paint_curve_sync_to_source", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "paint_curve_sync_to_source", 0);
+  RNA_def_property_ui_text(
+      prop,
+      "Sync to Source Curve",
+      "Live update of the picked source object while editing the paint curve");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "paint_curve_show_radius_handles", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "paint_curve_show_radius_handles", 1);
+  RNA_def_property_ui_text(
+      prop, "Show Radius Handles", "Display radius handles for paint curve points");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  static const EnumPropertyItem radius_display_items[] = {
+      {SCULPT_PAINT_CURVE_RADIUS_ALL,
+       "ALL",
+       0,
+       "All",
+       "Show radius handles for all points"},
+      {SCULPT_PAINT_CURVE_RADIUS_SELECT,
+       "SELECT",
+       0,
+       "Selected",
+       "Show radius handles only for curves with selected points"},
+      {SCULPT_PAINT_CURVE_RADIUS_TIPS,
+       "TIPS",
+       0,
+       "Tips",
+       "Show radius handles only at start and end points"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "paint_curve_radius_display_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "paint_curve_radius_display_mode");
+  RNA_def_property_enum_items(prop, radius_display_items);
+  RNA_def_property_ui_text(
+      prop, "Radius Display Mode", "Which radius handles to display");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 }
 
 static void rna_def_uv_sculpt(BlenderRNA *brna)

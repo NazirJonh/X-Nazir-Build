@@ -7,6 +7,7 @@
  */
 #include "paint_cursor.hh"
 
+#include "BLI_vector.hh"
 #include <algorithm>
 
 #include "MEM_guardedalloc.h"
@@ -15,11 +16,14 @@
 #include "BLI_math_axis_angle.hh"
 #include "BLI_math_color.h"
 #include "BLI_math_rotation.h"
+#include "BLI_offset_indices.hh"
 #include "BLI_rect.h"
 #include "BLI_task.h"
 #include "BLI_utildefines.h"
 
-#include "DNA_brush_types.h"
+#include "DNA_curve_types.h"
+#include "DNA_curves_types.h"
+#include "DNA_layer_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -27,11 +31,16 @@
 #include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BKE_brush.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
+#include "BKE_curve_legacy_convert.hh"
+#include "BKE_curves.hh"
+#include "BKE_layer.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_image.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object_types.hh"
@@ -42,12 +51,15 @@
 #include "NOD_texture.h"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "wm_cursors.hh"
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf_types.hh"
 
 #include "ED_image.hh"
+#include "ED_paint_curve_draw.hh"
+#include "ED_screen.hh"
 #include "ED_view3d.hh"
 
 #include "GPU_immediate.hh"
@@ -58,6 +70,7 @@
 
 #include "UI_resources.hh"
 
+#include "paint_curve_intern.hh"
 #include "paint_intern.hh"
 
 namespace blender {
@@ -774,179 +787,10 @@ static bool paint_draw_alpha_overlay(
   return alpha_overlay_active;
 }
 
-BLI_INLINE void draw_tri_point(uint pos,
-                               const float sel_col[4],
-                               const float pivot_col[4],
-                               float *co,
-                               float width,
-                               bool selected)
-{
-  immUniformColor4fv(selected ? sel_col : pivot_col);
-
-  GPU_line_width(3.0f);
-
-  float w = width / 2.0f;
-  const float tri[3][2] = {
-      {co[0], co[1] + w},
-      {co[0] - w, co[1] - w},
-      {co[0] + w, co[1] - w},
-  };
-
-  immBegin(GPU_PRIM_LINE_LOOP, 3);
-  immVertex2fv(pos, tri[0]);
-  immVertex2fv(pos, tri[1]);
-  immVertex2fv(pos, tri[2]);
-  immEnd();
-
-  immUniformColor4f(1.0f, 1.0f, 1.0f, 0.5f);
-  GPU_line_width(1.0f);
-
-  immBegin(GPU_PRIM_LINE_LOOP, 3);
-  immVertex2fv(pos, tri[0]);
-  immVertex2fv(pos, tri[1]);
-  immVertex2fv(pos, tri[2]);
-  immEnd();
-}
-
-BLI_INLINE void draw_rect_point(uint pos,
-                                const float sel_col[4],
-                                const float handle_col[4],
-                                const float *co,
-                                float width,
-                                bool selected)
-{
-  immUniformColor4fv(selected ? sel_col : handle_col);
-
-  GPU_line_width(3.0f);
-
-  float w = width / 2.0f;
-  float minx = co[0] - w;
-  float miny = co[1] - w;
-  float maxx = co[0] + w;
-  float maxy = co[1] + w;
-
-  imm_draw_box_wire_2d(pos, minx, miny, maxx, maxy);
-
-  immUniformColor4f(1.0f, 1.0f, 1.0f, 0.5f);
-  GPU_line_width(1.0f);
-
-  imm_draw_box_wire_2d(pos, minx, miny, maxx, maxy);
-}
-
-BLI_INLINE void draw_bezier_handle_lines(uint pos, const float sel_col[4], BezTriple *bez)
-{
-  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.5f);
-  GPU_line_width(3.0f);
-
-  immBegin(GPU_PRIM_LINE_STRIP, 3);
-  immVertex2fv(pos, bez->vec[0]);
-  immVertex2fv(pos, bez->vec[1]);
-  immVertex2fv(pos, bez->vec[2]);
-  immEnd();
-
-  GPU_line_width(1.0f);
-
-  if (bez->f1 || bez->f2) {
-    immUniformColor4fv(sel_col);
-  }
-  else {
-    immUniformColor4f(1.0f, 1.0f, 1.0f, 0.5f);
-  }
-  immBegin(GPU_PRIM_LINES, 2);
-  immVertex2fv(pos, bez->vec[0]);
-  immVertex2fv(pos, bez->vec[1]);
-  immEnd();
-
-  if (bez->f3 || bez->f2) {
-    immUniformColor4fv(sel_col);
-  }
-  else {
-    immUniformColor4f(1.0f, 1.0f, 1.0f, 0.5f);
-  }
-  immBegin(GPU_PRIM_LINES, 2);
-  immVertex2fv(pos, bez->vec[1]);
-  immVertex2fv(pos, bez->vec[2]);
-  immEnd();
-}
-
-static void paint_draw_curve_cursor(Brush *brush, ViewContext *vc)
-{
-  GPU_matrix_push();
-  GPU_matrix_translate_2f(vc->region->winrct.xmin, vc->region->winrct.ymin);
-
-  if (brush->paint_curve && brush->paint_curve->points) {
-    PaintCurve *pc = brush->paint_curve;
-    PaintCurvePoint *cp = pc->points;
-
-    GPU_line_smooth(true);
-    GPU_blend(GPU_BLEND_ALPHA);
-
-    /* Draw the bezier handles and the curve segment between the current and next point. */
-    uint pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
-
-    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-    float selec_col[4], handle_col[4], pivot_col[4];
-    ui::theme::get_color_type_4fv(TH_VERTEX_SELECT, SPACE_VIEW3D, selec_col);
-    ui::theme::get_color_type_4fv(TH_GIZMO_PRIMARY, SPACE_VIEW3D, handle_col);
-    ui::theme::get_color_type_4fv(TH_GIZMO_SECONDARY, SPACE_VIEW3D, pivot_col);
-
-    for (int i = 0; i < pc->tot_points - 1; i++, cp++) {
-      int j;
-      PaintCurvePoint *cp_next = cp + 1;
-      float data[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];
-      /* Use color coding to distinguish handles vs curve segments. */
-      draw_bezier_handle_lines(pos, selec_col, &cp->bez);
-      draw_tri_point(pos, selec_col, pivot_col, &cp->bez.vec[1][0], 10.0f, cp->bez.f2);
-      draw_rect_point(
-          pos, selec_col, handle_col, &cp->bez.vec[0][0], 8.0f, cp->bez.f1 || cp->bez.f2);
-      draw_rect_point(
-          pos, selec_col, handle_col, &cp->bez.vec[2][0], 8.0f, cp->bez.f3 || cp->bez.f2);
-
-      for (j = 0; j < 2; j++) {
-        BKE_curve_forward_diff_bezier(cp->bez.vec[1][j],
-                                      cp->bez.vec[2][j],
-                                      cp_next->bez.vec[0][j],
-                                      cp_next->bez.vec[1][j],
-                                      data + j,
-                                      PAINT_CURVE_NUM_SEGMENTS,
-                                      sizeof(float[2]));
-      }
-
-      float (*v)[2] = reinterpret_cast<float (*)[2]>(data);
-
-      immUniformColor4f(0.0f, 0.0f, 0.0f, 0.5f);
-      GPU_line_width(3.0f);
-      immBegin(GPU_PRIM_LINE_STRIP, PAINT_CURVE_NUM_SEGMENTS + 1);
-      for (j = 0; j <= PAINT_CURVE_NUM_SEGMENTS; j++) {
-        immVertex2fv(pos, v[j]);
-      }
-      immEnd();
-
-      immUniformColor4f(0.9f, 0.9f, 1.0f, 0.5f);
-      GPU_line_width(1.0f);
-      immBegin(GPU_PRIM_LINE_STRIP, PAINT_CURVE_NUM_SEGMENTS + 1);
-      for (j = 0; j <= PAINT_CURVE_NUM_SEGMENTS; j++) {
-        immVertex2fv(pos, v[j]);
-      }
-      immEnd();
-    }
-
-    /* Draw last line segment. */
-    draw_bezier_handle_lines(pos, selec_col, &cp->bez);
-    draw_tri_point(pos, selec_col, pivot_col, &cp->bez.vec[1][0], 10.0f, cp->bez.f2);
-    draw_rect_point(
-        pos, selec_col, handle_col, &cp->bez.vec[0][0], 8.0f, cp->bez.f1 || cp->bez.f2);
-    draw_rect_point(
-        pos, selec_col, handle_col, &cp->bez.vec[2][0], 8.0f, cp->bez.f3 || cp->bez.f2);
-
-    GPU_blend(GPU_BLEND_NONE);
-    GPU_line_smooth(false);
-
-    immUnbindProgram();
-  }
-  GPU_matrix_pop();
-}
+/* paint_draw_curve_cursor and its helpers (paintcurve_theme_handle_color,
+ * draw_handle_endpoint, draw_control_point, should_show_radius_handle,
+ * draw_radius_handle, draw_bezier_handle_lines) were removed.
+ * Replaced by the Overlay engine PaintCurveCursor (overlay_paint_curve_cursor.hh). */
 
 static bool paint_use_2d_cursor(PaintMode mode)
 {
@@ -1011,10 +855,8 @@ static bool paint_cursor_context_init(bContext *C,
 
   pcontext.vc = ED_view3d_viewcontext_init(C, pcontext.depsgraph);
 
-  if (pcontext.brush->stroke_method == BRUSH_STROKE_CURVE) {
-    pcontext.cursor_type = PaintCursorDrawingType::Curve;
-  }
-  else if (paint_use_2d_cursor(pcontext.mode)) {
+  /* Curve drawing is now handled by the PaintCurveCursor overlay. */
+  if (paint_use_2d_cursor(pcontext.mode)) {
     pcontext.cursor_type = PaintCursorDrawingType::Cursor2D;
   }
   else {
@@ -1269,6 +1111,12 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
     }
     return;
   }
+
+  /* Suppress brush cursor for the curves edit tool; the overlay engine draws the cursor there. */
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  if (tref && ed::sculpt_paint::ED_paint_curve_is_curves_edit_tool(tref->idname)) {
+    return;
+  }
   if (paint_cursor_is_3d_view_navigating(pcontext)) {
     /* Still draw stencil while navigating. */
     paint_cursor_check_and_draw_alpha_overlays(pcontext);
@@ -1276,9 +1124,6 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
   }
 
   switch (pcontext.cursor_type) {
-    case PaintCursorDrawingType::Curve:
-      paint_draw_curve_cursor(pcontext.brush, &pcontext.vc);
-      break;
     case PaintCursorDrawingType::Cursor2D:
       paint_update_mouse_cursor(pcontext);
 
@@ -1310,6 +1155,45 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
 
 /* Public API */
 
+namespace {
+
+/** Poll for the paint-curve overlay redraw cursor: tags the viewport for redraw on mouse move. */
+static bool paint_curve_overlay_redraw_poll(bContext *C)
+{
+  if (!ed::sculpt_paint::ED_paint_curve_overlay_wants_redraw(C)) {
+    return false;
+  }
+  ARegion *region = CTX_wm_region(C);
+  if (region) {
+    ED_region_tag_redraw(region);
+  }
+  return true;
+}
+
+/** Empty draw callback — the actual drawing happens in the Overlay engine. */
+static void paint_curve_overlay_redraw_draw(bContext * /*C*/,
+                                            const int2 & /*xy*/,
+                                            const float2 & /*tilt*/,
+                                            void * /*customdata*/)
+{
+}
+
+}  // anonymous namespace
+
+void ED_paint_curve_overlay_redraw_register()
+{
+  static bool registered = false;
+  if (registered) {
+    return;
+  }
+  registered = true;
+  WM_paint_cursor_activate(SPACE_TYPE_ANY,
+                           RGN_TYPE_ANY,
+                           paint_curve_overlay_redraw_poll,
+                           paint_curve_overlay_redraw_draw,
+                           nullptr);
+}
+
 void ED_paint_cursor_start(Paint *paint, bool (*poll)(bContext *C))
 {
   if (paint && paint->runtime && !paint->runtime->paint_cursor) {
@@ -1317,8 +1201,14 @@ void ED_paint_cursor_start(Paint *paint, bool (*poll)(bContext *C))
         SPACE_TYPE_ANY, RGN_TYPE_ANY, poll, ed::sculpt_paint::paint_draw_cursor, nullptr);
   }
 
+  /* Register the overlay-redraw cursor (once, guarded internally). */
+  ED_paint_curve_overlay_redraw_register();
+
   /* Invalidate the paint cursors. */
   BKE_paint_invalidate_overlay_all();
 }
+
+/* ED_paint_draw_curve_view3d_overlay removed: drawing is now handled
+ * by overlay_paint_curve_cursor.hh via the Overlay draw engine. */
 
 }  // namespace blender

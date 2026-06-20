@@ -39,6 +39,7 @@
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
@@ -78,6 +79,7 @@
 #include "WM_types.hh"
 
 #include "ED_paint.hh"
+#include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
 #include "ED_view3d.hh"
@@ -3853,9 +3855,23 @@ static bool is_brush_related_tool(bContext *C)
   return false;
 }
 
+static bool is_curve_edit_tool_active(bContext *C)
+{
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  return tref && ed::sculpt_paint::ED_paint_curve_is_curves_edit_tool(tref->idname);
+}
+
 bool brush_cursor_poll(bContext *C)
 {
-  return sculpt_mode_poll(C) && (paint_brush_cursor_poll(C) || is_brush_related_tool(C));
+  if (!sculpt_mode_poll(C)) {
+    return false;
+  }
+  if (paint_brush_cursor_poll(C) || is_brush_related_tool(C)) {
+    return true;
+  }
+  /* Also draw the paint cursor for the standalone Curve Edit tool so control
+   * points remain visible regardless of the active brush stroke method. */
+  return is_curve_edit_tool_active(C);
 }
 
 static const char *sculpt_brush_type_name(const Brush &brush)
@@ -5852,7 +5868,11 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
   cache.tilt = {RNA_float_get(ptr, "x_tilt"), RNA_float_get(ptr, "y_tilt")};
 
   /* Truly temporary data that isn't stored in properties. */
-  if (stroke_is_first_brush_step_of_symmetry_pass(*ss.cache)) {
+  if (brush.stroke_method == BRUSH_STROKE_CURVE) {
+    const float pixel_radius = RNA_float_get(ptr, "size");
+    cache.initial_radius = paint_calc_object_space_radius(*cache.vc, cache.location, pixel_radius);
+  }
+  else if (stroke_is_first_brush_step_of_symmetry_pass(*ss.cache)) {
     cache.initial_radius = object_space_radius_get(*cache.vc, paint, brush, cache.location);
 
     if (!BKE_brush_use_locked_size(&paint, &brush)) {
@@ -5878,7 +5898,12 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
     }
   }
 
-  if (BKE_brush_use_size_pressure(&brush) && paint_supports_dynamic_size(brush, PaintMode::Sculpt))
+  if (brush.stroke_method == BRUSH_STROKE_CURVE) {
+    cache.radius = cache.initial_radius;
+    cache.dyntopo_pixel_radius = RNA_float_get(ptr, "size");
+  }
+  else if (BKE_brush_use_size_pressure(&brush) &&
+           paint_supports_dynamic_size(brush, PaintMode::Sculpt))
   {
     cache.radius = brush_dynamic_size_get(brush, cache, cache.initial_radius);
     cache.dyntopo_pixel_radius = brush_dynamic_size_get(

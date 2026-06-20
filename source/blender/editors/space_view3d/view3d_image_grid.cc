@@ -520,6 +520,41 @@ int handle_image_grid_focus_active_event(bContext *C, const wmEvent *event, AReg
   return WM_UI_HANDLER_BREAK;
 }
 
+void image_grid_auto_focus_on_brush_change(bContext &C,
+                                           View3D &v3d,
+                                           const bool is_mask_slot)
+{
+  Paint *paint = BKE_paint_get_active_from_context(&C);
+  const Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  const uint32_t brush_uid = brush ? brush->id.session_uid : 0;
+
+  ImageGridUIState &state = image_grid_state_get(v3d, is_mask_slot);
+  if (brush_uid == state.viewport.last_auto_focus_brush_uid) {
+    return;
+  }
+
+  if (!brush) {
+    state.viewport.last_auto_focus_brush_uid = brush_uid;
+    return;
+  }
+  const MTex &mtex = is_mask_slot ? brush->mask_mtex : brush->mtex;
+  if (!mtex.tex || mtex.tex->type != TEX_IMAGE || !mtex.tex->ima) {
+    state.viewport.last_auto_focus_brush_uid = brush_uid;
+    return;
+  }
+
+  /* Defer until the library finishes loading; NC_ASSET will retrigger a redraw. */
+  if (!ed::asset::list::library_get_once_available(state.filter.lib_ref)) {
+    return;
+  }
+
+  state.viewport.last_auto_focus_brush_uid = brush_uid;
+  const std::string identifier = image_grid_filtered_identifier_for_image(C, state, *mtex.tex->ima);
+  if (!identifier.empty()) {
+    image_grid_request_scroll_to_asset(state, identifier);
+  }
+}
+
 /** \} */
 
 }  // namespace blender::ed::view3d

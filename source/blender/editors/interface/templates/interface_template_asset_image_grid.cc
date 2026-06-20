@@ -141,6 +141,16 @@ static void image_grid_block_listener(const wmRegionListenerParams *params)
         ED_region_tag_refresh_ui(params->region);
       }
       break;
+    case NC_BRUSH:
+      if (ELEM(wmn->action, NA_SELECTED, NA_EDITED)) {
+        /* NA_SELECTED: active brush changed — auto-focus fires via
+         * #image_grid_auto_focus_on_brush_change on the next redraw.
+         * NA_EDITED: brush properties changed — redraw only to refresh the active highlight;
+         * auto-focus does not re-trigger because the brush session UID is unchanged. */
+        ED_region_tag_redraw(params->region);
+        ED_region_tag_refresh_ui(params->region);
+      }
+      break;
     case NC_WM:
       if (wmn->data == ND_UNDO) {
         ED_region_tag_redraw(params->region);
@@ -882,6 +892,9 @@ void template_asset_image_grid(Layout *layout,
 
   ed::view3d::image_grid_catalog_sanitize_selection(state);
   ed::view3d::image_grid_pending_apply_if_ready(*C, *v3d);
+  /* Called inside the template redraw; NC_BRUSH already triggered this pass, so
+   * #image_grid_notify_change must not be called here to avoid a recursive refresh. */
+  ed::view3d::image_grid_auto_focus_on_brush_change(*C, *v3d, is_mask_slot);
 
   Block *block = layout->block();
 

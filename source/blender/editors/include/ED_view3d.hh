@@ -1558,6 +1558,10 @@ struct ImageGridViewport {
    * scroll.
    */
   bool focus_applied_by_layout[layout_bucket_num] = {};
+
+  /** Session UID of the brush whose texture was last auto-focused on brush activation (0 if
+   * none). Compared on each grid redraw so auto-focus fires exactly once per brush switch. */
+  uint32_t last_auto_focus_brush_uid = 0;
 };
 
 /**
@@ -1684,6 +1688,15 @@ std::optional<std::string> image_grid_catalog_path_for_asset(
 
 void image_grid_request_scroll_to_asset(ImageGridUIState &state,
                                         const std::string &asset_identifier);
+
+/**
+ * When the active paint brush changes, request the grid to scroll to the image assigned to its
+ * texture slot (main or mask depending on \a is_mask_slot). No-op when the brush is unchanged,
+ * has no image texture assigned, the image is absent from the current library, or the library has
+ * not finished loading yet (an #NC_ASSET notifier will retrigger a redraw when it does).
+ * Call once per template redraw, before #image_grid_apply_focus_scroll runs.
+ */
+void image_grid_auto_focus_on_brush_change(bContext &C, View3D &v3d, bool is_mask_slot);
 
 /** Restore #scroll_row / #scroll_offset_px for a grid drawn with this (cols, rows) layout. */
 void image_grid_viewport_restore_scroll_for_layout(ImageGridViewport &viewport, int cols, int rows);

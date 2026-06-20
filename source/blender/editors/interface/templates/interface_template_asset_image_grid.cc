@@ -167,18 +167,23 @@ class ImageAssetGridItem : public PreviewGridItem {
   mutable PointerRNA target_ptr_;
   PropertyRNA *target_prop_ = nullptr;
   AssetLibraryReference library_ref_;
+  /** True when this item lives in the Texture popover, not the N-Panel. Forwarded to the assign
+   * operator so it marks the correct (cols, rows) layout as already focused. */
+  bool is_popover_ = false;
 
  public:
   ImageAssetGridItem(asset_system::AssetRepresentation &asset,
                      const PointerRNA &target_ptr,
                      PropertyRNA *target_prop,
-                     const AssetLibraryReference &library_ref)
+                     const AssetLibraryReference &library_ref,
+                     const bool is_popover)
       : PreviewGridItem(asset.library_relative_identifier(), asset.get_name(), ICON_NONE),
         kind_(ImageGridItemKind::Asset),
         asset_(&asset),
         target_ptr_(target_ptr),
         target_prop_(target_prop),
-        library_ref_(library_ref)
+        library_ref_(library_ref),
+        is_popover_(is_popover)
   {
     this->init_item_callbacks();
   }
@@ -186,13 +191,15 @@ class ImageAssetGridItem : public PreviewGridItem {
   ImageAssetGridItem(Image &image,
                      const PointerRNA &target_ptr,
                      PropertyRNA *target_prop,
-                     const AssetLibraryReference &library_ref)
+                     const AssetLibraryReference &library_ref,
+                     const bool is_popover)
       : PreviewGridItem(image.id.name + 2, image.id.name + 2, ICON_NONE),
         kind_(ImageGridItemKind::BlendImage),
         image_(&image),
         target_ptr_(target_ptr),
         target_prop_(target_prop),
-        library_ref_(library_ref)
+        library_ref_(library_ref),
+        is_popover_(is_popover)
   {
     this->init_item_callbacks();
   }
@@ -215,6 +222,7 @@ class ImageAssetGridItem : public PreviewGridItem {
         RNA_int_set(&op_ptr, "brush_session_uid", int(target_ptr_.owner_id->session_uid));
       }
       RNA_boolean_set(&op_ptr, "use_mask_slot", ed::view3d::image_grid_slot_is_mask(target_ptr_));
+      RNA_boolean_set(&op_ptr, "is_popover", is_popover_);
 
       if (kind_ == ImageGridItemKind::BlendImage) {
         RNA_int_set(&op_ptr, "image_session_uid", int(image_->id.session_uid));
@@ -580,11 +588,11 @@ class ImageAssetGridView : public AbstractGridView {
           if (filtered_index >= first_index && filtered_index < last_index) {
             if (item.asset) {
               this->add_item<ImageAssetGridItem>(
-                  *item.asset, target_ptr_, target_prop_, library_ref_);
+                  *item.asset, target_ptr_, target_prop_, library_ref_, is_popover_);
             }
             else {
               this->add_item<ImageAssetGridItem>(
-                  *item.image, target_ptr_, target_prop_, library_ref_);
+                  *item.image, target_ptr_, target_prop_, library_ref_, is_popover_);
             }
           }
           return true;

@@ -80,7 +80,7 @@ namespace gpu {
 class Texture;
 }
 namespace ui {
-class Layout;
+struct Layout;
 }
 
 /** For mesh drawing callbacks, for viewport selection, etc. */
@@ -1739,6 +1739,11 @@ void image_grid_clamp_scroll_row(ImageGridUIState &state,
 bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region);
 int handle_image_grid_wheel_event(bContext *C, const wmEvent *event, ARegion *region);
 int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegion *region);
+/**
+ * Numpad-period (KP_DEL) over a brush texture image grid: scroll-center both the N-Panel and the
+ * Texture popover grids on the slot's currently assigned texture, even when it scrolled out of view.
+ */
+int handle_image_grid_focus_active_event(bContext *C, const wmEvent *event, ARegion *region);
 
 /** True when \a texture_slot_ptr refers to #Brush.mask_mtex (not #Brush.mtex). */
 bool image_grid_slot_is_mask(const PointerRNA &texture_slot_ptr);

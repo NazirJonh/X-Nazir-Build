@@ -191,14 +191,19 @@ static void VIEW3D_OT_pastebuffer(wmOperatorType *ot)
 
 /**
  * Pre-button UI handler for the brush texture image grid: lets wheel and pen/tablet drag scroll
- * the embedded grid (including inside popovers) before button activation. Registered with the UI
- * layer so the generic interface handler stays free of view3d dependencies.
+ * the embedded grid, plus a numpad-period shortcut to recenter on the active texture (including
+ * inside popovers), before button activation. Registered with the UI layer so the generic
+ * interface handler stays free of view3d dependencies.
  */
 static int view3d_image_grid_ui_event_handler(bContext *C,
                                               const wmEvent *event,
                                               ARegion *region)
 {
-  const int retval = ed::view3d::handle_image_grid_wheel_event(C, event, region);
+  int retval = ed::view3d::handle_image_grid_wheel_event(C, event, region);
+  if (retval != WM_UI_HANDLER_CONTINUE) {
+    return retval;
+  }
+  retval = ed::view3d::handle_image_grid_focus_active_event(C, event, region);
   if (retval != WM_UI_HANDLER_CONTINUE) {
     return retval;
   }

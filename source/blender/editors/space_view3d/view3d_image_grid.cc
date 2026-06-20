@@ -387,6 +387,104 @@ int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegi
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Focus Active Texture (numpad-period hotkey)
+ * \{ */
+
+/** The image assigned to the active paint brush's main or mask texture slot, or null. */
+static const Image *image_grid_active_slot_image(bContext &C, const bool is_mask_slot)
+{
+  Paint *paint = BKE_paint_get_active_from_context(&C);
+  if (!paint) {
+    return nullptr;
+  }
+  const Brush *brush = BKE_paint_brush(paint);
+  if (!brush) {
+    return nullptr;
+  }
+  const MTex &mtex = is_mask_slot ? brush->mask_mtex : brush->mtex;
+  if (mtex.tex && mtex.tex->type == TEX_IMAGE) {
+    return mtex.tex->ima;
+  }
+  return nullptr;
+}
+
+/** Filtered-list identifier of \a image (asset identifier or blend-image name), empty if absent. */
+static std::string image_grid_filtered_identifier_for_image(bContext &C,
+                                                            const ImageGridUIState &state,
+                                                            const Image &image)
+{
+  Main *bmain = CTX_data_main(&C);
+  std::string identifier;
+  image_grid_foreach_filtered_item(
+      *bmain,
+      state.filter.lib_ref,
+      state.filter.enabled_catalog_paths,
+      [&](const ImageGridFilteredItem &item, int /*filtered_index*/) -> bool {
+        const bool matches = item.image ? (item.image == &image) :
+                                          image_grid_asset_represents_image(*item.asset, image);
+        if (matches) {
+          identifier = item.image ? std::string(item.image->id.name + 2) :
+                                    std::string(item.asset->library_relative_identifier());
+          return false;
+        }
+        return true;
+      });
+  return identifier;
+}
+
+/** Request every grid layout (N-Panel and Texture popover) to scroll-center on the slot's
+ * currently assigned texture. Returns false when there is nothing to focus. */
+static bool image_grid_focus_active_texture(bContext &C, const bool is_mask_slot)
+{
+  View3D *v3d = CTX_wm_view3d(&C);
+  if (!v3d) {
+    return false;
+  }
+  const Image *active_image = image_grid_active_slot_image(C, is_mask_slot);
+  if (!active_image) {
+    return false;
+  }
+  ImageGridUIState &state = image_grid_state_get(*v3d, is_mask_slot);
+  const std::string identifier = image_grid_filtered_identifier_for_image(
+      C, state, *active_image);
+  if (identifier.empty()) {
+    return false;
+  }
+  /* Reset every layout's applied flag so both grids re-center on their next redraw. The block
+   * listener refreshes each grid block on #NC_ASSET, so the popover and the N-Panel both re-run
+   * #build_image_grid and apply the centered focus scroll. */
+  image_grid_request_scroll_to_asset(state, identifier);
+  image_grid_notify_change(C, is_mask_slot);
+  return true;
+}
+
+int handle_image_grid_focus_active_event(bContext *C, const wmEvent *event, ARegion *region)
+{
+  if (event->type != EVT_PADPERIOD || event->val != KM_PRESS || event->modifier) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+  View3D *v3d = CTX_wm_view3d(C);
+  if (!v3d || !region) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+  /* Only react when the cursor is over a grid (or its scrollbar), matching the wheel handler. */
+  bool is_mask_slot = false;
+  if (!image_grid_mouse_over(region, event->xy, &is_mask_slot) &&
+      !image_grid_scroll_under_mouse(region, event->xy, *v3d, &is_mask_slot))
+  {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+  if (!image_grid_focus_active_texture(*C, is_mask_slot)) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+  ED_region_tag_redraw(region);
+  ED_region_tag_refresh_ui(region);
+  return WM_UI_HANDLER_BREAK;
+}
+
+/** \} */
+
 }  // namespace blender::ed::view3d
 
 namespace blender::ed::view3d {
@@ -675,8 +773,12 @@ static wmOperatorStatus image_grid_assign_texture_exec(bContext *C, wmOperator *
     const int tile_h = max_ii(1, ui::preview_tile_size_y_no_label(preview_size));
     /* The clicked grid keeps its own height: the popover has an independent grip, so mark the
      * layout key with the popover's height when the click came from a popover. Otherwise the key
-     * mismatches and the popover re-applies the focus scroll (a visible jump) on the next draw. */
-    const bool is_popover = CTX_wm_region_popup(C) != nullptr;
+     * mismatches and the popover re-applies the focus scroll (a visible jump) on the next draw.
+     * The popover flag must come from the grid view (set on the operator property), not from
+     * #CTX_wm_region_popup: the operator runs from the item-activation callback during button
+     * handling, where #region_popup is not yet set — a false negative would mark the N-Panel's
+     * layout bucket as applied and stop it from scrolling to the freshly assigned asset. */
+    const bool is_popover = RNA_boolean_get(op->ptr, "is_popover");
     const int source_grip = is_popover ? state.viewport.grip_pixel_height_popover :
                                          state.viewport.grip_pixel_height;
     const int source_rows = clamp_i(
@@ -729,6 +831,13 @@ void VIEW3D_OT_image_grid_assign_texture(wmOperatorType *ot)
                   false,
                   "Mask Texture Slot",
                   "Assign to the mask texture slot instead of the main texture slot");
+
+  prop = RNA_def_boolean(ot->srna,
+                         "is_popover",
+                         false,
+                         "From Popover",
+                         "The grid the item was clicked in is the Texture popover, not the N-Panel");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
 
   prop = RNA_def_property(ot->srna, "asset_library_reference", PROP_ENUM, PROP_NONE);
   RNA_def_enum_funcs(prop, rna_image_grid_library_itemf);

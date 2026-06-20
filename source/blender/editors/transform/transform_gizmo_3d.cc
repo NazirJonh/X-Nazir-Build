@@ -896,8 +896,10 @@ static int gizmo_3d_foreach_selected(const bContext *C,
   else if (ob && (ob->mode & OB_MODE_ALL_PAINT)) {
     if (ob->mode & OB_MODE_SCULPT) {
       totsel = 1;
-      run_coord_with_matrix(
-          ob->runtime->sculpt_session->pivot_pos, false, ob->object_to_world().ptr());
+      const SculptSession *ss = ob->runtime->sculpt_session;
+      const float3 pivot = (ss && ss->sculpt_cursor_initialized) ? ss->sculpt_cursor_pos :
+                                                                 ss->pivot_pos;
+      run_coord_with_matrix(pivot, false, ob->object_to_world().ptr());
     }
   }
   else if (ob && ob->mode & OB_MODE_PARTICLE_EDIT) {
@@ -1105,7 +1107,13 @@ static bool gizmo_3d_calc_pos(const bContext *C,
       if (ob != nullptr) {
         if ((ob->mode & OB_MODE_ALL_SCULPT) && ob->runtime->sculpt_session) {
           SculptSession *ss = ob->runtime->sculpt_session;
-          copy_v3_v3(r_pivot_pos, ss->pivot_pos);
+          if (ss->sculpt_cursor_initialized) {
+            copy_v3_v3(r_pivot_pos, ss->sculpt_cursor_pos);
+          }
+          else {
+            copy_v3_v3(r_pivot_pos, ss->pivot_pos);
+          }
+          mul_m4_v3(ob->object_to_world().ptr(), r_pivot_pos);
           return true;
         }
         if (object::calc_active_center(ob, false, r_pivot_pos)) {

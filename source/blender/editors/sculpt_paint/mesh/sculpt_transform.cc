@@ -53,12 +53,33 @@
 
 namespace blender::ed::sculpt_paint {
 
+static void sculpt_cursor_apply_to_transform_pivot(SculptSession &ss)
+{
+  if (!ss.sculpt_cursor_initialized) {
+    return;
+  }
+  ss.pivot_pos = ss.sculpt_cursor_pos;
+  ss.pivot_rot = ss.sculpt_cursor_rot;
+}
+
+static void sculpt_cursor_store_from_transform_pivot(Object &ob, SculptSession &ss)
+{
+  if (!ss.sculpt_cursor_initialized) {
+    return;
+  }
+  ss.sculpt_cursor_pos = ss.pivot_pos;
+  ss.sculpt_cursor_rot = ss.pivot_rot;
+  BKE_sculpt_cursor_session_to_storage(ob, ss);
+}
+
 void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char *undo_name)
 {
   const Scene &scene = *CTX_data_scene(C);
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   SculptSession &ss = *ob.runtime->sculpt_session;
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+
+  sculpt_cursor_apply_to_transform_pivot(ss);
 
   ss.init_pivot_pos = ss.pivot_pos;
   ss.init_pivot_rot = ss.pivot_rot;
@@ -593,7 +614,13 @@ void cancel_modal_transform(bContext *C, Object &ob)
    * requires restoring positions from undo. For "All Vertices" there is no benefit in using the
    * transform system to update to original positions either. */
   Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
+  SculptSession &ss = *ob.runtime->sculpt_session;
   undo::restore_position_from_undo_step(depsgraph, ob);
+
+  copy_v3_v3(ss.pivot_pos, ss.init_pivot_pos);
+  copy_qt_qt(ss.pivot_rot, ss.init_pivot_rot);
+  copy_v3_v3(ss.pivot_scale, ss.init_pivot_scale);
+  sculpt_cursor_store_from_transform_pivot(ob, ss);
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   bke::pbvh::update_normals(depsgraph, ob, pbvh);
@@ -603,6 +630,7 @@ void cancel_modal_transform(bContext *C, Object &ob)
 void end_transform(bContext *C, Object &ob)
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
+  sculpt_cursor_store_from_transform_pivot(ob, ss);
   MEM_delete(ss.filter_cache);
   ss.filter_cache = nullptr;
   undo::push_end(ob);

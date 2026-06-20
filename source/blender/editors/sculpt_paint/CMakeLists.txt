@@ -93,6 +93,7 @@ set(SRC
   mesh/sculpt_automasking.cc
   mesh/sculpt_boundary.cc
   mesh/sculpt_cloth.cc
+  mesh/sculpt_cursor.cc
   mesh/sculpt_detail.cc
   mesh/sculpt_dyntopo.cc
   mesh/sculpt_expand.cc

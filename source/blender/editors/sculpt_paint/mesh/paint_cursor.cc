@@ -19,6 +19,7 @@
 #include "BLI_math_axis_angle.hh"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 
 #include "ED_view3d.hh"
@@ -246,6 +247,8 @@ static void geometry_preview_lines_draw(const Depsgraph &depsgraph,
   }
 }
 
+static void sculpt_cursor_overlay_draw(const PaintCursorContext &pcontext);
+
 void mesh_cursor_active_draw(PaintCursorContext &pcontext)
 {
   PRF_scope(ProfileCategory::Draw);
@@ -322,6 +325,8 @@ void mesh_cursor_active_draw(PaintCursorContext &pcontext)
     default:
       break;
   }
+
+  sculpt_cursor_overlay_draw(pcontext);
 
   GPU_matrix_pop();
 
@@ -509,6 +514,65 @@ static void boundary_preview_pivot_draw(const PaintCursorContext &pcontext)
                           pcontext.ss->boundary_preview->pivot_position,
                           pcontext.vc.obact->object_to_world().ptr(),
                           3);
+}
+
+static void sculpt_cursor_overlay_draw(const PaintCursorContext &pcontext)
+{
+  if (pcontext.mode != PaintMode::Sculpt || pcontext.ss == nullptr) {
+    return;
+  }
+
+  SculptSession &ss = *pcontext.ss;
+  if (!ss.sculpt_cursor_initialized) {
+    return;
+  }
+
+  const RegionView3D *rv3d = pcontext.vc.rv3d;
+  if (rv3d == nullptr) {
+    return;
+  }
+
+  const float3 &pos = ss.sculpt_cursor_pos;
+  float rot_mat[3][3];
+  quat_to_mat3(rot_mat, ss.sculpt_cursor_rot);
+
+  const float avg_scale = (ss.sculpt_cursor_scale[0] + ss.sculpt_cursor_scale[1] +
+                           ss.sculpt_cursor_scale[2]) /
+                          3.0f;
+  const float axis_len = ED_view3d_pixel_size(rv3d, float3(pos)) * 12.0f * avg_scale;
+  const float radius = axis_len * 0.45f;
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  GPU_line_width(2.0f);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  const float axis_colors[3][4] = {
+      {1.0f, 0.25f, 0.25f, 0.9f},
+      {0.25f, 1.0f, 0.25f, 0.9f},
+      {0.25f, 0.45f, 1.0f, 0.9f},
+  };
+
+  for (int axis = 0; axis < 3; axis++) {
+    float dir[3] = {0};
+    dir[axis] = axis_len;
+    float end[3];
+    copy_v3_v3(end, dir);
+    mul_m3_v3(rot_mat, end);
+    add_v3_v3(end, pos);
+
+    immUniformColor4fv(axis_colors[axis]);
+    immBegin(GPU_PRIM_LINES, 2);
+    immVertex3fv(pcontext.pos, pos);
+    immVertex3fv(pcontext.pos, end);
+    immEnd();
+  }
+
+  immUniformColor4f(1.0f, 0.85f, 0.15f, 0.85f);
+  imm_drawcircball(pos, radius, rv3d->viewinv, pcontext.pos);
+
+  immUnbindProgram();
+  GPU_blend(GPU_BLEND_NONE);
 }
 
 static void boundary_preview_update(const PaintCursorContext &pcontext)
@@ -801,6 +865,7 @@ void mesh_cursor_inactive_draw(PaintCursorContext &pcontext)
 
   /* Drawing Cursor overlays in 3D object space. */
   object_space_overlays_draw(pcontext);
+  sculpt_cursor_overlay_draw(pcontext);
 
   GPU_matrix_pop();
 
@@ -813,6 +878,33 @@ void mesh_cursor_inactive_draw(PaintCursorContext &pcontext)
   GPU_matrix_pop();
 
   /* Reset drawing. */
+  GPU_matrix_pop_projection();
+  wmWindowViewport(pcontext.win);
+}
+
+void sculpt_cursor_3d_overlay_draw(PaintCursorContext &pcontext)
+{
+  if (pcontext.mode != PaintMode::Sculpt || pcontext.ss == nullptr ||
+      !pcontext.ss->sculpt_cursor_initialized)
+  {
+    return;
+  }
+
+  wmViewport(&pcontext.region->winrct);
+  GPU_matrix_push_projection();
+  ED_view3d_draw_setup_view(pcontext.wm,
+                            pcontext.win,
+                            pcontext.depsgraph,
+                            pcontext.scene,
+                            pcontext.region,
+                            pcontext.vc.v3d,
+                            nullptr,
+                            nullptr,
+                            nullptr);
+  GPU_matrix_push();
+  GPU_matrix_mul(pcontext.vc.obact->object_to_world().ptr());
+  sculpt_cursor_overlay_draw(pcontext);
+  GPU_matrix_pop();
   GPU_matrix_pop_projection();
   wmWindowViewport(pcontext.win);
 }

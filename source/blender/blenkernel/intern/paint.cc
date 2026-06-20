@@ -33,6 +33,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
 #include "BLI_math_matrix.hh"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_noise.hh"
 #include "BLI_string.h"
@@ -2119,6 +2120,8 @@ void BKE_sculptsession_free(Object *ob)
   if (ob && ob->runtime->sculpt_session) {
     SculptSession *ss = ob->runtime->sculpt_session;
 
+    BKE_sculpt_cursor_session_to_storage(*ob, *ss);
+
     if (ss->bm) {
       BKE_sculptsession_bm_to_me(ob);
       BM_mesh_free(ss->bm);
@@ -2130,6 +2133,31 @@ void BKE_sculptsession_free(Object *ob)
 
     ob->runtime->sculpt_session = nullptr;
   }
+}
+
+void BKE_sculpt_cursor_storage_to_session(Object &ob, SculptSession &ss)
+{
+  ss.sculpt_cursor_initialized = ob.sculpt_cursor_initialized != 0;
+  if (!ss.sculpt_cursor_initialized) {
+    return;
+  }
+  copy_v3_v3(ss.sculpt_cursor_pos, ob.sculpt_cursor_location);
+  copy_qt_qt(ss.sculpt_cursor_rot, ob.sculpt_cursor_rotation);
+  copy_v3_v3(ss.sculpt_cursor_scale, ob.sculpt_cursor_scale);
+  if (is_zero_v3(ss.sculpt_cursor_scale)) {
+    copy_v3_fl3(ss.sculpt_cursor_scale, 1.0f, 1.0f, 1.0f);
+  }
+}
+
+void BKE_sculpt_cursor_session_to_storage(Object &ob, const SculptSession &ss)
+{
+  ob.sculpt_cursor_initialized = char(ss.sculpt_cursor_initialized);
+  if (!ss.sculpt_cursor_initialized) {
+    return;
+  }
+  copy_v3_v3(ob.sculpt_cursor_location, ss.sculpt_cursor_pos);
+  copy_qt_qt(ob.sculpt_cursor_rotation, ss.sculpt_cursor_rot);
+  copy_v3_v3(ob.sculpt_cursor_scale, ss.sculpt_cursor_scale);
 }
 
 SculptSession::SculptSession() = default;

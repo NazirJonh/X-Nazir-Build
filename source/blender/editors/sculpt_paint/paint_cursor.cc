@@ -1175,6 +1175,8 @@ static void paint_cursor_draw_3D_view_brush_cursor(PaintCursorContext &pcontext)
 
     mesh_cursor_inactive_draw(pcontext);
   }
+
+  sculpt_cursor_3d_overlay_draw(pcontext);
 }
 
 static bool paint_cursor_is_3d_view_navigating(const PaintCursorContext &pcontext)

@@ -487,6 +487,12 @@ struct SculptSession : NonCopyable, NonMovable {
   float4 prev_pivot_rot = float4(0.0f, 0.0f, 0.0f, 1.0f);
   float3 prev_pivot_scale = {};
 
+  /* Sculpt Cursor - independent from transform pivot (runtime cache, synced to Object DNA). */
+  float3 sculpt_cursor_pos = {};
+  float4 sculpt_cursor_rot = float4(0.0f, 0.0f, 0.0f, 1.0f);
+  float3 sculpt_cursor_scale = float3(1.0f);
+  bool sculpt_cursor_initialized = false;
+
   eObjectMode mode_type;
 
   /**
@@ -570,6 +576,11 @@ struct SculptSession : NonCopyable, NonMovable {
 void BKE_sculptsession_free(Object *ob);
 void BKE_sculptsession_free_deformMats(SculptSession *ss);
 void BKE_sculptsession_free_pbvh(Object &object);
+
+/** Sync sculpt cursor between #Object DNA storage and #SculptSession runtime. */
+void BKE_sculpt_cursor_storage_to_session(Object &ob, SculptSession &ss);
+void BKE_sculpt_cursor_session_to_storage(Object &ob, const SculptSession &ss);
+
 void BKE_sculptsession_bm_to_me(Object *ob);
 void BKE_sculptsession_bm_to_me_for_render(Object *object);
 

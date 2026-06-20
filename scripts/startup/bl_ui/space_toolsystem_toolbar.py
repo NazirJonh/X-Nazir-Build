@@ -2001,6 +2001,26 @@ class _defs_sculpt:
             draw_settings=draw_settings,
         )
 
+    @ToolDef.from_fn
+    def sculpt_cursor():
+        def draw_settings(_context, layout, tool):
+            props = tool.operator_properties("sculpt.cursor_set")
+            layout.prop(props, "use_depth")
+            layout.prop(props, "orientation")
+
+        return dict(
+            idname="builtin.sculpt_cursor",
+            label="3D Cursor",
+            description=(
+                "Set and transform an independent sculpt cursor that keeps its position "
+                "for sculpting operations"
+            ),
+            icon="ops.generic.cursor",
+            widget="VIEW3D_GGT_sculpt_cursor",
+            keymap="3D View Tool: Sculpt, 3D Cursor",
+            draw_settings=draw_settings,
+        )
+
 
 class _defs_vertex_paint:
 
@@ -4011,6 +4031,8 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_transform.rotate,
             _defs_transform.scale,
             _defs_transform.transform,
+            None,
+            _defs_sculpt.sculpt_cursor,
             None,
             *_tools_annotate,
         ],

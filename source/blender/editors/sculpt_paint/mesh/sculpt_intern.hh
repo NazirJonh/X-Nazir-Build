@@ -1018,6 +1018,14 @@ void SCULPT_OT_dynamic_topology_toggle(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint::dyntopo
 
+namespace ed::sculpt_paint::cursor {
+
+void ED_operatortypes_sculpt_cursor();
+void SCULPT_OT_cursor_set(wmOperatorType *ot);
+void SCULPT_OT_cursor_transform(wmOperatorType *ot);
+
+}  // namespace ed::sculpt_paint::cursor
+
 /** \} */
 
 }  // namespace blender

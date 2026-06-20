@@ -8434,6 +8434,16 @@ def km_3d_view_tool_sculpt_face_set_edit(params):
     )
 
 
+def km_3d_view_tool_sculpt_cursor(params):
+    return (
+        "3D View Tool: Sculpt, 3D Cursor",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("sculpt.cursor_set", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+        ]},
+    )
+
+
 # ------------------------------------------------------------------------------
 # Tool System (3D View, Weight Paint)
 
@@ -9231,6 +9241,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_color_filter(params),
         km_3d_view_tool_sculpt_mask_by_color(params),
         km_3d_view_tool_sculpt_face_set_edit(params),
+        km_3d_view_tool_sculpt_cursor(params),
         km_3d_view_tool_paint_weight_sample_weight(params),
         km_3d_view_tool_paint_weight_sample_vertex_group(params),
         km_3d_view_tool_paint_weight_gradient(params),

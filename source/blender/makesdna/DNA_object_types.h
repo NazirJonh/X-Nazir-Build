@@ -669,6 +669,13 @@ struct Object {
   /** Irradiance caches baked for this object (light-probes only). */
   struct LightProbeObjectCache *lightprobe_cache = nullptr;
 
+  /** Sculpt mode 3D cursor (persistent per object, object-space). */
+  float sculpt_cursor_location[3] = {};
+  float sculpt_cursor_rotation[4] = _DNA_DEFAULT_UNIT_QT;
+  float sculpt_cursor_scale[3] = {1.0f, 1.0f, 1.0f};
+  char sculpt_cursor_initialized = 0;
+  char _pad_sculpt_cursor[7] = {};
+
   bke::ObjectRuntime *runtime = nullptr;
 
 #ifdef __cplusplus

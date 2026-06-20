@@ -4284,6 +4284,7 @@ void BKE_object_sculpt_data_create(Object *ob)
   BLI_assert((ob->runtime->sculpt_session == nullptr) && (ob->mode & OB_MODE_ALL_SCULPT));
   ob->runtime->sculpt_session = MEM_new<SculptSession>(__func__);
   ob->runtime->sculpt_session->mode_type = ob->mode;
+  BKE_sculpt_cursor_storage_to_session(*ob, *ob->runtime->sculpt_session);
 }
 
 bool BKE_object_obdata_texspace_get(Object *ob,

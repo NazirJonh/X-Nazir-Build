@@ -167,8 +167,17 @@ void cache_init(bContext *C,
   bke::PaintRuntime *paint_runtime = sd.paint.runtime;
 
   float3 co;
+  bool has_co = false;
 
-  if (vc.rv3d && stroke_get_location_bvh(C, co, mval_fl, false)) {
+  if (ss.sculpt_cursor_initialized) {
+    co = ss.sculpt_cursor_pos;
+    has_co = true;
+  }
+  else if (vc.rv3d && stroke_get_location_bvh(C, co, mval_fl, false)) {
+    has_co = true;
+  }
+
+  if (has_co) {
     /* Get radius from brush. */
     const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
 

@@ -55,6 +55,7 @@ struct rctf;
 struct rcti;
 struct wmEvent;
 struct wmGizmo;
+struct wmGizmoGroupType;
 struct wmKeyMapItem;
 struct wmOperator;
 struct wmWindow;
@@ -1459,5 +1460,11 @@ bool ED_view3d_is_region_xr_mirror_active(const wmWindowManager *wm,
                                           const View3D *v3d,
                                           const ARegion *region);
 #endif
+
+namespace ed::view3d {
+
+void VIEW3D_GGT_sculpt_cursor(wmGizmoGroupType *gzgt);
+
+}  // namespace ed::view3d
 
 }  // namespace blender

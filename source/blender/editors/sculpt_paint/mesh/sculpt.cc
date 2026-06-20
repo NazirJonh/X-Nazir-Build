@@ -5149,6 +5149,11 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
     ss.cache->toggle_settings = create_toggle_settings(*op, *CTX_data_main(C), sd.paint);
   }
 
+  if (ss.sculpt_cursor_initialized) {
+    ss.pivot_pos = ss.sculpt_cursor_pos;
+    ss.pivot_rot = ss.sculpt_cursor_rot;
+  }
+
   brush_init_tex(sd, ss);
 
   const bool needs_colors = brush_type_is_paint(brush->sculpt_brush_type) &&

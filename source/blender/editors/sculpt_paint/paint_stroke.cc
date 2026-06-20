@@ -18,6 +18,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_rand.hh"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "DNA_brush_types.h"
 #include "DNA_curve_types.h"
@@ -32,6 +33,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
+#include "BKE_curves.hh"
 #include "BKE_global.hh"
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
@@ -48,6 +50,7 @@
 
 #include "IMB_imbuf_types.hh"
 
+#include "paint_curve_intern.hh"
 #include "paint_intern.hh"
 
 #include "mesh/sculpt_cloth.hh"
@@ -470,7 +473,11 @@ float2 paint_stroke_jitter_pos(Paint *paint,
 }
 
 /* Put the location of the next stroke dot into the stroke RNA and apply it to the mesh */
-void PaintStroke::add_step(bContext *C, wmOperator *op, const float2 mval, float pressure)
+void PaintStroke::add_step(bContext *C,
+                           wmOperator *op,
+                           const float2 mval,
+                           const float pressure,
+                           const std::optional<float> curve_point_radius)
 {
   PRF_scope(ProfileCategory::Editor);
   const PaintMode mode = BKE_paintmode_get_active_from_context(C);
@@ -535,6 +542,11 @@ void PaintStroke::add_step(bContext *C, wmOperator *op, const float2 mval, float
   }
   if (!paint_runtime->last_hit) {
     return;
+  }
+
+  if (curve_point_radius) {
+    paint_runtime->pixel_radius = paintcurve_radius_to_pixel_radius(
+        this->paint, &brush, *curve_point_radius);
   }
 
   /* Dash */
@@ -1164,7 +1176,9 @@ void PaintStroke::lines_spacing(bContext *C,
                                 const float spacing,
                                 float *length_residue,
                                 const float2 old_pos,
-                                const float2 new_pos)
+                                const float2 new_pos,
+                                const std::optional<float> old_curve_radius,
+                                const std::optional<float> new_curve_radius)
 {
   PRF_scope(ProfileCategory::Editor);
   Paint *paint = BKE_paint_get_active_from_context(C);
@@ -1174,9 +1188,11 @@ void PaintStroke::lines_spacing(bContext *C,
   const ARegion *region = CTX_wm_region(C);
 
   const bool use_scene_spacing = paint_stroke_use_scene_spacing(brush, mode);
+  const bool use_curve_radius = old_curve_radius && new_curve_radius;
 
   float2 mouse_delta;
   float length;
+  float segment_length = 0.0f;
   float3 world_space_position_delta;
   float3 world_space_position_old;
 
@@ -1218,13 +1234,26 @@ void PaintStroke::lines_spacing(bContext *C,
     return;
   }
 
+  segment_length = length;
+
   float2 mouse;
   while (length > 0.0f) {
-    float spacing_final = spacing - *length_residue;
+    float dab_spacing = spacing;
+    if (use_curve_radius) {
+      const float t = segment_length > 0.0f ?
+                          clamp_f((segment_length - length) / segment_length, 0.0f, 1.0f) :
+                          0.0f;
+      const float curve_radius = math::interpolate(*old_curve_radius, *new_curve_radius, t);
+      const float size_factor = paintcurve_radius_to_size_factor(paint, &brush, curve_radius);
+      dab_spacing = paint_space_stroke_spacing(
+          this->vc, paint, &brush, last_world_space_position_, zoom_2d_, size_factor, 0.5f);
+    }
+
+    float spacing_final = dab_spacing - *length_residue;
     length += *length_residue;
     *length_residue = 0.0;
 
-    if (length >= spacing) {
+    if (length >= dab_spacing) {
       if (use_scene_spacing) {
         world_space_position_delta = math::normalize(world_space_position_delta);
         const float3 final_world_space_position = world_space_position_delta * spacing_final +
@@ -1237,11 +1266,21 @@ void PaintStroke::lines_spacing(bContext *C,
 
       paint_runtime->overlap_factor = paint_stroke_integrate_overlap(brush, 1.0);
 
-      stroke_distance_ += spacing / zoom_2d_;
-      this->add_step(C, op, mouse, 1.0);
+      stroke_distance_ += dab_spacing / zoom_2d_;
 
-      length -= spacing;
-      spacing_final = spacing;
+      std::optional<float> dab_curve_radius;
+      if (use_curve_radius) {
+        const float t = segment_length > 0.0f ?
+                            clamp_f((segment_length - length + spacing_final) / segment_length,
+                                    0.0f,
+                                    1.0f) :
+                            0.0f;
+        dab_curve_radius = math::interpolate(*old_curve_radius, *new_curve_radius, t);
+      }
+      this->add_step(C, op, mouse, 1.0, dab_curve_radius);
+
+      length -= dab_spacing;
+      spacing_final = dab_spacing;
     }
     else {
       break;
@@ -1283,14 +1322,79 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
     return true;
   }
 
-  const PaintCurvePoint *pcp = pc->points;
+  /* 3D stroke path — view-independent curve shape. */
+  if (paintcurve_uses_3d_geometry(pc)) {
+    Object *ob = this->vc.obact;
+    const float (*ob_to_world)[4] = ob->object_to_world().ptr();
+
+    const bke::CurvesGeometry &geom = pc->geometry.wrap();
+    const Span<float3> eval = geom.evaluated_positions();
+    const OffsetIndices<int> evaluated_points_by_curve = geom.evaluated_points_by_curve();
+
+    Vector<float> eval_radii(eval.size());
+    geom.ensure_can_interpolate_to_evaluated();
+    geom.interpolate_to_evaluated(VArraySpan(geom.radius()), eval_radii.as_mutable_span());
+
+    paint_runtime->overlap_factor = paint_stroke_integrate_overlap(br, 1.0);
+    float length_residue = 0.0f;
+
+    Vector<float2> screen(eval.size());
+    for (const int k : eval.index_range()) {
+      float world_pos[3];
+      mul_v3_m4v3(world_pos, ob_to_world, eval[k]);
+      ED_view3d_project_v2(this->vc.region, world_pos, screen[k]);
+    }
+
+    for (const int curve_i : geom.curves_range()) {
+      const IndexRange eval_range = evaluated_points_by_curve[curve_i];
+      for (int j = eval_range.start(); j + 1 < eval_range.one_after_last(); j++) {
+        float *cur = &screen[j].x;
+        float *next = &screen[j + 1].x;
+        const float radius_cur = eval_radii[j];
+        const float radius_next = eval_radii[j + 1];
+        if (!stroke_started_) {
+          last_pressure_ = 1.0;
+          copy_v2_v2(this->last_mouse_position, cur);
+
+          if (paint_stroke_use_scene_spacing(br, mode)) {
+            BLI_assert(mode != PaintMode::Texture2D);
+            stroke_over_mesh_ = this->get_location(last_world_space_position_, cur, original_);
+            mul_m4_v3(this->vc.obact->object_to_world().ptr(), last_world_space_position_);
+          }
+
+          stroke_started_ = this->test_start(op, this->last_mouse_position);
+
+          if (stroke_started_) {
+            this->add_step(C, op, cur, 1.0, radius_cur);
+            this->lines_spacing(
+                C, op, no_pressure_spacing, &length_residue, cur, next, radius_cur, radius_next);
+          }
+        }
+        else {
+          this->lines_spacing(
+              C, op, no_pressure_spacing, &length_residue, cur, next, radius_cur, radius_next);
+        }
+      }
+    }
+
+    this->done(C, false);
+    return true;
+  }
+
   paint_runtime->overlap_factor = paint_stroke_integrate_overlap(br, 1.0);
 
   float length_residue = 0.0f;
-  for (int i = 0; i < pc->tot_points - 1; i++, pcp++) {
+
+  Vector<PaintCurvePoint> stroke_screen_points;
+  paintcurve_build_screen_points(pc, &this->vc, stroke_screen_points);
+
+  paintcurve_foreach_bezier_segment(pc, [&](const int point_a, const int point_b) {
+    const PaintCurvePoint *pcp = &stroke_screen_points[point_a];
+    const PaintCurvePoint *pcp_next = &stroke_screen_points[point_b];
+    const float radius_a = paintcurve_get_point_radius(pc, point_a);
+    const float radius_b = paintcurve_get_point_radius(pc, point_b);
     float data[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];
     float tangents[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];
-    const PaintCurvePoint *pcp_next = pcp + 1;
     bool do_rake = false;
 
     for (int j = 0; j < 2; j++) {
@@ -1319,6 +1423,11 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
     }
 
     for (int j = 0; j < PAINT_CURVE_NUM_SEGMENTS; j++) {
+      const float t = float(j) / float(PAINT_CURVE_NUM_SEGMENTS);
+      const float t_next = float(j + 1) / float(PAINT_CURVE_NUM_SEGMENTS);
+      const float radius_j = math::interpolate(radius_a, radius_b, t);
+      const float radius_j_next = math::interpolate(radius_a, radius_b, t_next);
+
       if (do_rake) {
         const float rotation = atan2f(tangents[2 * j + 1], tangents[2 * j]) + float(0.5f * M_PI);
         paint_update_brush_rake_rotation(*paint, br, rotation);
@@ -1338,17 +1447,29 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
         stroke_started_ = this->test_start(op, this->last_mouse_position);
 
         if (stroke_started_) {
-          this->add_step(C, op, data + 2 * j, 1.0);
-          this->lines_spacing(
-              C, op, no_pressure_spacing, &length_residue, data + 2 * j, data + 2 * (j + 1));
+          this->add_step(C, op, data + 2 * j, 1.0, radius_j);
+          this->lines_spacing(C,
+                              op,
+                              no_pressure_spacing,
+                              &length_residue,
+                              data + 2 * j,
+                              data + 2 * (j + 1),
+                              radius_j,
+                              radius_j_next);
         }
       }
       else {
-        this->lines_spacing(
-            C, op, no_pressure_spacing, &length_residue, data + 2 * j, data + 2 * (j + 1));
+        this->lines_spacing(C,
+                            op,
+                            no_pressure_spacing,
+                            &length_residue,
+                            data + 2 * j,
+                            data + 2 * (j + 1),
+                            radius_j,
+                            radius_j_next);
       }
     }
-  }
+  });
 
   this->done(C, false);
 

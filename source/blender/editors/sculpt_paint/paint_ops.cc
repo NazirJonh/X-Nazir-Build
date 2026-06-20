@@ -38,6 +38,7 @@
 #include "ED_screen.hh"
 
 #include "WM_api.hh"
+#include "WM_keymap.hh"
 #include "WM_types.hh"
 
 #include "RNA_access.hh"
@@ -45,6 +46,7 @@
 
 #include "IMB_colormanagement.hh"
 
+#include "paint_curve_intern.hh"
 #include "paint_intern.hh"
 
 #include "curves/sculpt_intern.hh"
@@ -553,12 +555,21 @@ void ED_operatormacros_paint()
   ot = WM_operatortype_append_macro("PAINTCURVE_OT_add_point_slide",
                                     "Add Curve Point and Slide",
                                     "Add new curve point and slide it",
-                                    OPTYPE_UNDO);
+                                    OPTYPE_REGISTER);
   ot->description = "Add new curve point and slide it";
   WM_operatortype_macro_define(ot, "PAINTCURVE_OT_add_point");
   otmacro = WM_operatortype_macro_define(ot, "PAINTCURVE_OT_slide");
   RNA_boolean_set(otmacro->ptr, "align", true);
   RNA_boolean_set(otmacro->ptr, "select", false);
+
+  ot = WM_operatortype_append_macro("PAINTCURVE_OT_duplicate_move",
+                                    "Duplicate Curve Spline and Move",
+                                    "Duplicate selected paint curve splines and move them",
+                                    OPTYPE_UNDO | OPTYPE_REGISTER);
+  WM_operatortype_macro_define(ot, "PAINTCURVE_OT_duplicate");
+  otmacro = WM_operatortype_macro_define(ot, "TRANSFORM_OT_translate");
+  RNA_boolean_set(otmacro->ptr, "use_proportional_edit", false);
+  RNA_boolean_set(otmacro->ptr, "mirror", false);
 }
 
 void ED_operatortypes_paint()
@@ -577,11 +588,24 @@ void ED_operatortypes_paint()
   /* paint curve */
   WM_operatortype_append(PAINTCURVE_OT_new);
   WM_operatortype_append(PAINTCURVE_OT_add_point);
+  WM_operatortype_append(PAINTCURVE_OT_insert_or_add_point);
+  WM_operatortype_append(PAINTCURVE_OT_new_spline);
   WM_operatortype_append(PAINTCURVE_OT_delete_point);
+  WM_operatortype_append(PAINTCURVE_OT_duplicate);
   WM_operatortype_append(PAINTCURVE_OT_select);
   WM_operatortype_append(PAINTCURVE_OT_slide);
+  WM_operatortype_append(PAINTCURVE_OT_slide_radius);
   WM_operatortype_append(PAINTCURVE_OT_draw);
+  WM_operatortype_append(PAINTCURVE_OT_from_curve_object);
+  WM_operatortype_append(PAINTCURVE_OT_to_curve_object);
+  WM_operatortype_append(PAINTCURVE_OT_separate_to_curve_object);
   WM_operatortype_append(PAINTCURVE_OT_cursor);
+  WM_operatortype_append(PAINTCURVE_OT_sculpt_pick);
+  WM_operatortype_append(PAINTCURVE_OT_handle_type_set);
+  WM_operatortype_append(PAINTCURVE_OT_split);
+  WM_operatortype_append(PAINTCURVE_OT_make_segment);
+  WM_operatortype_append(PAINTCURVE_OT_select_linked);
+  WM_operatortype_append(PAINTCURVE_OT_context_menu);
 
   /* brush */
   WM_operatortype_append(BRUSH_OT_scale_size);
@@ -679,6 +703,15 @@ void ED_keymap_paint(wmKeyConfig *keyconf)
 
   keymap = WM_keymap_ensure(keyconf, "Paint Curve", SPACE_EMPTY, RGN_TYPE_WINDOW);
   keymap->poll = paint_curve_poll;
+  {
+    KeyMapItem_Params params{};
+    params.type = EVT_DKEY;
+    params.value = KM_PRESS;
+    params.modifier = KM_SHIFT;
+    params.direction = KM_ANY;
+    WM_keymap_add_item(keymap, "PAINTCURVE_OT_duplicate_move", &params);
+  }
+  paintcurve_slide_modal_keymap(keyconf);
 
   /* Sculpt mode */
   keymap = WM_keymap_ensure(keyconf, "Sculpt", SPACE_EMPTY, RGN_TYPE_WINDOW);
@@ -716,6 +749,14 @@ void ED_keymap_paint(wmKeyConfig *keyconf)
   /* Curves Sculpt mode. */
   keymap = WM_keymap_ensure(keyconf, "Sculpt Curves", SPACE_EMPTY, RGN_TYPE_WINDOW);
   keymap->poll = curves_sculpt_poll;
+  {
+    KeyMapItem_Params params{};
+    params.type = EVT_DKEY;
+    params.value = KM_PRESS;
+    params.modifier = KM_SHIFT;
+    params.direction = KM_ANY;
+    WM_keymap_add_item(keymap, "PAINTCURVE_OT_duplicate_move", &params);
+  }
 
   /* sculpt expand. */
   expand::modal_keymap(keyconf);

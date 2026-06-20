@@ -913,6 +913,16 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     FOREACH_NODETREE_END;
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
+    const Sculpt defaults = {};
+    for (Scene &scene : bmain->scenes) {
+      if (Sculpt *sculpt = scene.toolsettings->sculpt) {
+        sculpt->paint_curve_show_radius_handles = defaults.paint_curve_show_radius_handles;
+        sculpt->paint_curve_radius_display_mode = defaults.paint_curve_radius_display_mode;
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

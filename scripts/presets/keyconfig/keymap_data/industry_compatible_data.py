@@ -2614,18 +2614,17 @@ def km_paint_curve(params):
     )
 
     items.extend([
-        ("paintcurve.add_point_slide", {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True}, None),
-        ("paintcurve.select", {"type": 'LEFTMOUSE', "value": 'PRESS'},
-         {"properties": [("extend", False)]}),
-        ("paintcurve.select", {"type": 'LEFTMOUSE', "value": 'PRESS', "shift": True},
-         {"properties": [("extend", True)]}),
+        ("paintcurve.insert_or_add_point", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True}, None),
+        ("paintcurve.context_menu", {"type": 'RIGHTMOUSE', "value": 'PRESS'}, None),
         ("paintcurve.slide", {"type": 'LEFTMOUSE', "value": 'PRESS'},
-         {"properties": [("align", False)]}),
+         {"properties": [("align", False), ("move_segment", True), ("select", True)]}),
         ("paintcurve.slide", {"type": 'LEFTMOUSE', "value": 'PRESS', "shift": True},
-         {"properties": [("align", True)]}),
+         {"properties": [("extend", True), ("move_segment", True)]}),
+        ("paintcurve.slide_radius", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("paintcurve.select", {"type": 'A', "value": 'PRESS'},
          {"properties": [("toggle", True)]}),
         ("paintcurve.cursor", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+        ("paintcurve.duplicate_move", {"type": 'D', "value": 'PRESS', "shift": True}, None),
         ("paintcurve.delete_point", {"type": 'BACK_SPACE', "value": 'PRESS'}, None),
         ("paintcurve.delete_point", {"type": 'DEL', "value": 'PRESS'}, None),
         ("paintcurve.draw", {"type": 'RET', "value": 'PRESS'}, None),
@@ -3733,6 +3732,33 @@ def _template_node_select(*, type, value, select_passthrough):
     return items
 
 
+def km_3d_view_tool_sculpt_curves_edit(_params):
+    return (
+        "3D View Tool: Sculpt, Curves Edit",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("paintcurve.sculpt_pick", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+            ("paintcurve.insert_or_add_point", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True}, None),
+            ("paintcurve.context_menu", {"type": 'RIGHTMOUSE', "value": 'PRESS'}, None),
+            ("paintcurve.slide", {"type": 'LEFTMOUSE', "value": 'PRESS'},
+             {"properties": [("align", False), ("move_segment", True), ("select", True)]}),
+            ("paintcurve.slide", {"type": 'LEFTMOUSE', "value": 'PRESS', "shift": True},
+             {"properties": [("extend", True), ("move_segment", True)]}),
+            ("paintcurve.slide_radius", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+            ("paintcurve.select", {"type": 'A', "value": 'PRESS'},
+             {"properties": [("toggle", True)]}),
+            ("paintcurve.duplicate_move", {"type": 'D', "value": 'PRESS', "shift": True}, None),
+            ("paintcurve.delete_point", {"type": 'X', "value": 'PRESS'}, None),
+            ("paintcurve.delete_point", {"type": 'DEL', "value": 'PRESS'}, None),
+            ("transform.translate", {"type": 'G', "value": 'PRESS'}, None),
+            ("transform.rotate", {"type": 'R', "value": 'PRESS'}, None),
+            ("transform.resize", {"type": 'S', "value": 'PRESS'}, None),
+            ("transform.transform", {"type": 'S', "value": 'PRESS', "alt": True},
+             {"properties": [("mode", 'CURVE_SHRINKFATTEN')]}),
+        ]},
+    )
+
+
 def km_3d_view_tool_interactive_add(params):
     return (
         "3D View Tool: Object, Add Primitive",
@@ -3863,6 +3889,7 @@ def generate_keymaps_impl(params=None):
         # Tool System.
         km_3d_view_tool_select(params),
         km_3d_view_tool_interactive_add(params),
+        km_3d_view_tool_sculpt_curves_edit(params),
         km_image_editor_tool_uv_select(params),
         km_sequencer_editor_tool_select_preview(params),
         km_sequencer_editor_tool_select_timeline(params),

@@ -404,6 +404,7 @@ extern TransConvertTypeInfo TransConvertType_ObjectTexSpace;
 /* `transform_convert_paintcurve.cc` */
 
 extern TransConvertTypeInfo TransConvertType_PaintCurve;
+void paintcurve_center_median_3d_get(const TransInfo *t, float r_center[3]);
 
 /* `transform_convert_particle.cc` */
 

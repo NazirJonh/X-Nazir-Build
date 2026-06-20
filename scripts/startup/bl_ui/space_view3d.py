@@ -262,7 +262,25 @@ class VIEW3D_HT_tool_header(Header):
 class _draw_tool_settings_context_mode:
     @staticmethod
     def SCULPT(context, layout, tool):
-        if (tool is None) or (not tool.use_brushes):
+        if tool is None:
+            return False
+
+        # Show source scene curve selector when Curve Edit tool is active.
+        if tool.idname == "builtin.curves_edit":
+            sculpt = context.tool_settings.sculpt
+            if sculpt is not None:
+                row = layout.row()
+                row.scale_x = 2.0
+                row.prop(sculpt, "paint_curve_source_object", text="Curve")
+                
+                # Add Overlay Curve popover button
+                layout.popover(
+                    panel="VIEW3D_PT_overlay_sculpt_curve_edit",
+                    text="Overlay Curve"
+                )
+            return False
+
+        if not tool.use_brushes:
             return False
 
         paint = context.tool_settings.sculpt
@@ -1209,6 +1227,9 @@ class VIEW3D_MT_editor_menus(Menu):
             if mode_string == 'SCULPT':
                 layout.menu("VIEW3D_MT_mask")
                 layout.menu("VIEW3D_MT_face_sets")
+                active_tool = context.workspace.tools.from_space_view3d_mode(mode_string)
+                if active_tool and active_tool.idname == "builtin.curves_edit":
+                    layout.menu("VIEW3D_MT_sculpt_paint_curves")
                 layout.template_node_operator_asset_root_items()
             elif mode_string == 'SCULPT_CURVES':
                 layout.menu("VIEW3D_MT_select_sculpt_curves")
@@ -4057,6 +4078,83 @@ class VIEW3D_MT_face_sets(Menu):
         props = layout.operator("sculpt.face_sets_randomize_colors", text="Randomize Colors")
 
         layout.template_node_operator_asset_menu_items(catalog_path=self.bl_label)
+
+
+class VIEW3D_MT_sculpt_paint_curve_convert(Menu):
+    bl_label = "Convert to Curve Object"
+
+    def draw(self, context):
+        layout = self.layout
+
+        # Standalone paint curves only: once a source is linked, the scene object already holds
+        # the real data-block and sync keeps it up to date.
+        sculpt = context.tool_settings.sculpt if context.tool_settings else None
+        has_source = bool(sculpt and sculpt.paint_curve_source_object)
+        layout.enabled = not has_source
+
+        props = layout.operator(
+            "paintcurve.to_curve_object",
+            text="Bezier Curve",
+            icon='OUTLINER_OB_CURVE',
+        )
+        props.curve_type = 'BEZIER'
+        props.use_selection = False
+        props.assign_as_source = True
+
+        props = layout.operator(
+            "paintcurve.to_curve_object",
+            text="Curves",
+            icon='OUTLINER_OB_CURVE',
+        )
+        props.curve_type = 'CURVES'
+        props.use_selection = False
+        props.assign_as_source = True
+
+
+class VIEW3D_MT_sculpt_paint_curves(Menu):
+    bl_label = "Curves"
+
+    def draw(self, context):
+        layout = self.layout
+
+        props = layout.operator(
+            "paintcurve.to_curve_object",
+            text="Create Curves Object from Selection",
+            icon='OUTLINER_OB_CURVE',
+        )
+        props.curve_type = 'CURVES'
+        props.use_selection = True
+        props.assign_as_source = False
+
+        props = layout.operator(
+            "paintcurve.separate_to_curve_object",
+            text="Separate Curves Object from Selection",
+            icon='OUTLINER_OB_CURVE',
+        )
+        props.curve_type = 'CURVES'
+
+        layout.menu("VIEW3D_MT_sculpt_paint_curve_convert")
+
+        layout.separator()
+        layout.operator("paintcurve.duplicate")
+
+
+class VIEW3D_MT_paintcurve_context_menu(Menu):
+    bl_label = "Paint Curve"
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.operator_context = 'INVOKE_DEFAULT'
+
+        layout.operator_menu_enum("paintcurve.handle_type_set", "type")
+        layout.operator("paintcurve.select_linked")
+        layout.separator()
+        layout.operator("paintcurve.duplicate")
+        layout.separator()
+        layout.operator("paintcurve.split")
+        layout.operator("paintcurve.make_segment")
+        layout.separator()
+        layout.operator("paintcurve.delete_point")
 
 
 class VIEW3D_MT_sculpt_set_pivot(Menu):
@@ -7630,6 +7728,45 @@ class VIEW3D_PT_overlay_sculpt_curves(Panel):
         subrow.prop(overlay, "sculpt_curves_cage_opacity", text="Cage Opacity")
 
 
+class VIEW3D_PT_overlay_sculpt_curve_edit(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_label = "Overlay Curve"
+    bl_ui_units_x = 10
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode != 'SCULPT':
+            return False
+        tool_settings = context.tool_settings
+        if tool_settings is None:
+            return False
+        # Check if Curve Edit tool is active
+        tool = context.workspace.tools.from_space_view3d_mode('SCULPT', create=False)
+        return tool is not None and tool.idname == "builtin.curves_edit"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = False
+
+        tool_settings = context.tool_settings
+        sculpt = tool_settings.sculpt
+        if sculpt is None:
+            return
+
+        col = layout.column(align=True)
+
+        row = col.row(align=True)
+        row.prop(sculpt, "paint_curve_show_radius_handles", text="Show Radius Handles")
+
+        row = col.row(align=True)
+        row.enabled = sculpt.paint_curve_show_radius_handles
+        row.prop_enum(sculpt, "paint_curve_radius_display_mode", 'ALL')
+        row.prop_enum(sculpt, "paint_curve_radius_display_mode", 'SELECT')
+        row.prop_enum(sculpt, "paint_curve_radius_display_mode", 'TIPS')
+
+
 class VIEW3D_PT_overlay_bones(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
@@ -9362,6 +9499,9 @@ classes = (
     VIEW3D_MT_mask,
     VIEW3D_MT_face_sets,
     VIEW3D_MT_face_sets_init,
+    VIEW3D_MT_sculpt_paint_curves,
+    VIEW3D_MT_sculpt_paint_curve_convert,
+    VIEW3D_MT_paintcurve_context_menu,
     VIEW3D_MT_random_mask,
     VIEW3D_MT_particle,
     VIEW3D_MT_particle_context_menu,
@@ -9500,6 +9640,7 @@ classes = (
     VIEW3D_PT_overlay_bones,
     VIEW3D_PT_overlay_sculpt,
     VIEW3D_PT_overlay_sculpt_curves,
+    VIEW3D_PT_overlay_sculpt_curve_edit,
     VIEW3D_PT_snapping,
     VIEW3D_PT_sculpt_snapping,
     VIEW3D_PT_proportional_edit,

@@ -118,6 +118,7 @@ set(LIB
   PRIVATE bf::depsgraph
   PRIVATE bf::dna
   bf_editor_mask
+  bf_editor_sculpt_paint
   PRIVATE bf::gpu
   PRIVATE bf::imbuf
   PRIVATE bf::intern::guardedalloc

@@ -593,7 +593,11 @@ static void initTranslation(TransInfo *t, wmOperator * /*op*/)
 
   initMouseInputMode(t, &t->mouse, INPUT_VECTOR);
 
-  t->idx_max = (t->flag & T_2D_EDIT) ? 1 : 2;
+  /* 3D paint curves in the viewport use true 3D axis constraints, so all three axes must be
+   * available even though T_2D_EDIT is set (the flag is kept for other 2D-mode behaviour). */
+  const bool is_3d_paint_curve_translation = (t->options & CTX_PAINT_CURVE) &&
+                                              (t->spacetype == SPACE_VIEW3D);
+  t->idx_max = ((t->flag & T_2D_EDIT) && !is_3d_paint_curve_translation) ? 1 : 2;
   t->num.flag = 0;
   t->num.idx_max = t->idx_max;
 

@@ -8,6 +8,7 @@
 
 #include "../paint_intern.hh"
 
+#include "BLI_function_ref.hh"
 #include "BLI_vector.hh"
 
 #include "BKE_attribute.hh"
@@ -194,6 +195,12 @@ struct CurvesConstraintSolver {
 
 bool curves_sculpt_poll(bContext *C);
 bool curves_sculpt_poll_view3d(bContext *C);
+
+/**
+ * Iterate over selected editable Curves objects that are in sculpt mode.
+ */
+void foreach_curves_sculpt_target(const PaintStroke &stroke,
+                                  FunctionRef<void(Object &curves_ob, Curves &curves_id)> fn);
 
 }  // namespace ed::sculpt_paint
 

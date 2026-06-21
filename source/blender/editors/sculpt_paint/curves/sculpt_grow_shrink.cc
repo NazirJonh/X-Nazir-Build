@@ -7,6 +7,7 @@
 #include "BLI_math_vector.hh"
 
 #include "BLI_length_parameterize.hh"
+#include "BLI_map.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_task.hh"
@@ -221,7 +222,7 @@ class CurvesEffectOperation : public CurvesSculptStrokeOperation {
  private:
   std::unique_ptr<CurvesEffect> effect_;
   float2 last_mouse_position_;
-  CurvesBrush3D brush_3d_;
+  Map<Curves *, CurvesBrush3D> brush_3d_by_curves_;
 
   friend struct CurvesEffectOperationExecutor;
 
@@ -261,16 +262,16 @@ struct CurvesEffectOperationExecutor {
   float2 brush_pos_start_re_;
   float2 brush_pos_end_re_;
 
+  CurvesBrush3D *brush_3d_ = nullptr;
+
   CurvesEffectOperationExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
 
   void execute(CurvesEffectOperation &self, const StrokeExtension &stroke_extension)
   {
-    BLI_SCOPED_DEFER([&]() { self.last_mouse_position_ = stroke_extension.mouse_position; });
-
     self_ = &self;
-    object_ = ctx_.object;
-
-    curves_id_ = id_cast<Curves *>(object_->data);
+    BLI_assert(object_ != nullptr);
+    BLI_assert(curves_id_ != nullptr);
+    brush_3d_ = &self_->brush_3d_by_curves_.lookup_or_add(curves_id_, CurvesBrush3D());
     curves_ = &curves_id_->geometry.wrap();
     if (curves_->is_empty()) {
       return;
@@ -304,10 +305,10 @@ struct CurvesEffectOperationExecutor {
                 stroke_extension.mouse_position,
                 brush_radius_base_re_))
         {
-          self.brush_3d_ = *brush_3d;
+          *brush_3d_ = *brush_3d;
           remember_stroke_position(
               *curves_sculpt_,
-              math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu));
+              math::transform_point(transforms_.curves_to_world, brush_3d_->position_cu));
         }
       }
 
@@ -435,7 +436,7 @@ struct CurvesEffectOperationExecutor {
         bke::crazyspace::get_evaluated_curves_deformation(*ctx_.depsgraph, *object_);
 
     float3 brush_pos_wo = math::transform_point(transforms_.curves_to_world,
-                                                self_->brush_3d_.position_cu);
+                                                brush_3d_->position_cu);
 
     float3 brush_pos_start_wo, brush_pos_end_wo;
     ED_view3d_win_to_3d(
@@ -447,7 +448,7 @@ struct CurvesEffectOperationExecutor {
                                                           brush_pos_end_wo);
     const float3 brush_pos_diff_cu = brush_pos_end_cu - brush_pos_start_cu;
     const float brush_pos_diff_length_cu = math::length(brush_pos_diff_cu);
-    const float brush_radius_cu = self_->brush_3d_.radius_cu * brush_radius_factor_;
+    const float brush_radius_cu = brush_3d_->radius_cu * brush_radius_factor_;
     const float brush_radius_sq_cu = pow2f(brush_radius_cu);
 
     const Vector<float4x4> symmetry_brush_transforms = get_symmetry_brush_transforms(
@@ -504,8 +505,13 @@ struct CurvesEffectOperationExecutor {
 void CurvesEffectOperation::on_stroke_extended(const PaintStroke &stroke,
                                                const StrokeExtension &stroke_extension)
 {
-  CurvesEffectOperationExecutor executor{stroke};
-  executor.execute(*this, stroke_extension);
+  foreach_curves_sculpt_target(stroke, [&](Object &curves_ob, Curves &curves_id) {
+    CurvesEffectOperationExecutor executor{stroke};
+    executor.object_ = &curves_ob;
+    executor.curves_id_ = &curves_id;
+    executor.execute(*this, stroke_extension);
+  });
+  last_mouse_position_ = stroke_extension.mouse_position;
 }
 
 std::unique_ptr<CurvesSculptStrokeOperation> new_grow_shrink_operation(

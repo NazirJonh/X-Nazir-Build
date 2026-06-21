@@ -4,6 +4,7 @@
 
 #include "sculpt_intern.hh"
 
+#include "BLI_map.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_task.hh"
 #include "BLI_vector.hh"
@@ -37,15 +38,16 @@
 
 namespace blender::ed::sculpt_paint {
 
+struct PinchTargetState {
+  CurvesBrush3D brush_3d;
+  CurvesConstraintSolver constraint_solver;
+};
+
 class PinchOperation : public CurvesSculptStrokeOperation {
  private:
   bool invert_pinch_;
 
-  /** Solver for length and collision constraints. */
-  CurvesConstraintSolver constraint_solver_;
-
-  /** Only used when a 3D brush is used. */
-  CurvesBrush3D brush_3d_;
+  Map<Curves *, PinchTargetState> target_states_;
 
   friend struct PinchOperationExecutor;
 
@@ -80,14 +82,17 @@ struct PinchOperationExecutor {
 
   float2 brush_pos_re_;
 
+  PinchTargetState *target_state_ = nullptr;
+
   PinchOperationExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
 
   void execute(PinchOperation &self, const StrokeExtension &stroke_extension)
   {
     self_ = &self;
 
-    object_ = ctx_.object;
-    curves_id_ = id_cast<Curves *>(object_->data);
+    BLI_assert(object_ != nullptr);
+    BLI_assert(curves_id_ != nullptr);
+    target_state_ = &self_->target_states_.lookup_or_add(curves_id_, PinchTargetState());
     curves_ = &curves_id_->geometry.wrap();
     if (curves_->is_empty()) {
       return;
@@ -112,22 +117,23 @@ struct PinchOperationExecutor {
 
     if (stroke_extension.is_first) {
       if (falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE || (U.uiflag & USER_ORBIT_SELECTION)) {
-        self_->brush_3d_ = *sample_curves_3d_brush(*ctx_.depsgraph,
-                                                   *ctx_.region,
-                                                   *ctx_.v3d,
-                                                   *ctx_.rv3d,
-                                                   *object_,
-                                                   brush_pos_re_,
-                                                   brush_radius_base_re_);
+        target_state_->brush_3d = *sample_curves_3d_brush(*ctx_.depsgraph,
+                                                          *ctx_.region,
+                                                          *ctx_.v3d,
+                                                          *ctx_.rv3d,
+                                                          *object_,
+                                                          brush_pos_re_,
+                                                          brush_radius_base_re_);
         remember_stroke_position(
             *curves_sculpt_,
-            math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu));
+            math::transform_point(transforms_.curves_to_world,
+                                  target_state_->brush_3d.position_cu));
       }
 
-      self_->constraint_solver_.initialize(*curves_,
-                                           curve_selection_,
-                                           curves_id_->flag & CV_SCULPT_COLLISION_ENABLED,
-                                           curves_id_->surface_collision_distance);
+      target_state_->constraint_solver.initialize(*curves_,
+                                                  curve_selection_,
+                                                  curves_id_->flag & CV_SCULPT_COLLISION_ENABLED,
+                                                  curves_id_->surface_collision_distance);
     }
 
     Array<bool> changed_curves(curves_->curves_num(), false);
@@ -146,7 +152,7 @@ struct PinchOperationExecutor {
     const Mesh *surface = curves_id_->surface && curves_id_->surface->type == OB_MESH ?
                               id_cast<const Mesh *>(curves_id_->surface->data) :
                               nullptr;
-    self_->constraint_solver_.solve_step(*curves_, changed_curves_mask, surface, transforms_);
+    target_state_->constraint_solver.solve_step(*curves_, changed_curves_mask, surface, transforms_);
 
     curves_->tag_positions_changed();
     DEG_id_tag_update(&curves_id_->id, ID_RECALC_GEOMETRY);
@@ -230,11 +236,11 @@ struct PinchOperationExecutor {
     ED_view3d_win_to_3d(
         ctx_.v3d,
         ctx_.region,
-        math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu),
+        math::transform_point(transforms_.curves_to_world, target_state_->brush_3d.position_cu),
         brush_pos_re_,
         brush_pos_wo);
     const float3 brush_pos_cu = math::transform_point(transforms_.world_to_curves, brush_pos_wo);
-    const float brush_radius_cu = self_->brush_3d_.radius_cu * brush_radius_factor_;
+    const float brush_radius_cu = target_state_->brush_3d.radius_cu * brush_radius_factor_;
 
     const Vector<float4x4> symmetry_brush_transforms = get_symmetry_brush_transforms(
         eCurvesSymmetryType(curves_id_->symmetry));
@@ -290,8 +296,12 @@ struct PinchOperationExecutor {
 void PinchOperation::on_stroke_extended(const PaintStroke &stroke,
                                         const StrokeExtension &stroke_extension)
 {
-  PinchOperationExecutor executor{stroke};
-  executor.execute(*this, stroke_extension);
+  foreach_curves_sculpt_target(stroke, [&](Object &curves_ob, Curves &curves_id) {
+    PinchOperationExecutor executor{stroke};
+    executor.object_ = &curves_ob;
+    executor.curves_id_ = &curves_id;
+    executor.execute(*this, stroke_extension);
+  });
 }
 
 std::unique_ptr<CurvesSculptStrokeOperation> new_pinch_operation(const BrushStrokeMode brush_mode,

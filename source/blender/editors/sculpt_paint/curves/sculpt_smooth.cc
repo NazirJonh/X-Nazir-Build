@@ -16,6 +16,7 @@
 
 #include "WM_api.hh"
 
+#include "BLI_map.hh"
 #include "BLI_task.hh"
 
 #include "sculpt_intern.hh"
@@ -24,8 +25,7 @@ namespace blender::ed::sculpt_paint {
 
 class SmoothOperation : public CurvesSculptStrokeOperation {
  private:
-  /** Only used when a 3D brush is used. */
-  CurvesBrush3D brush_3d_;
+  Map<Curves *, CurvesBrush3D> brush_3d_by_curves_;
 
   friend struct SmoothOperationExecutor;
 
@@ -59,14 +59,17 @@ struct SmoothOperationExecutor {
 
   CurvesSurfaceTransforms transforms_;
 
+  CurvesBrush3D *brush_3d_ = nullptr;
+
   SmoothOperationExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
 
   void execute(SmoothOperation &self, const StrokeExtension &stroke_extension)
   {
     self_ = &self;
 
-    object_ = ctx_.object;
-    curves_id_ = id_cast<Curves *>(object_->data);
+    BLI_assert(object_ != nullptr);
+    BLI_assert(curves_id_ != nullptr);
+    brush_3d_ = &self_->brush_3d_by_curves_.lookup_or_add(curves_id_, CurvesBrush3D());
     curves_ = &curves_id_->geometry.wrap();
     if (curves_->is_empty()) {
       return;
@@ -87,16 +90,16 @@ struct SmoothOperationExecutor {
     const eBrushFalloffShape falloff_shape = eBrushFalloffShape(brush_->falloff_shape);
     if (stroke_extension.is_first) {
       if (falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE || (U.uiflag & USER_ORBIT_SELECTION)) {
-        self.brush_3d_ = *sample_curves_3d_brush(*ctx_.depsgraph,
-                                                 *ctx_.region,
-                                                 *ctx_.v3d,
-                                                 *ctx_.rv3d,
-                                                 *object_,
-                                                 brush_pos_re_,
-                                                 brush_radius_base_re_);
+        *brush_3d_ = *sample_curves_3d_brush(*ctx_.depsgraph,
+                                             *ctx_.region,
+                                             *ctx_.v3d,
+                                             *ctx_.rv3d,
+                                             *object_,
+                                             brush_pos_re_,
+                                             brush_radius_base_re_);
         remember_stroke_position(
             *curves_sculpt_,
-            math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu));
+            math::transform_point(transforms_.curves_to_world, brush_3d_->position_cu));
       }
     }
 
@@ -174,11 +177,11 @@ struct SmoothOperationExecutor {
     ED_view3d_win_to_3d(
         ctx_.v3d,
         ctx_.region,
-        math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu),
+        math::transform_point(transforms_.curves_to_world, brush_3d_->position_cu),
         brush_pos_re_,
         brush_pos_wo);
     const float3 brush_pos_cu = math::transform_point(transforms_.world_to_curves, brush_pos_wo);
-    const float brush_radius_cu = self_->brush_3d_.radius_cu * brush_radius_factor_;
+    const float brush_radius_cu = brush_3d_->radius_cu * brush_radius_factor_;
 
     const Vector<float4x4> symmetry_brush_transforms = get_symmetry_brush_transforms(
         eCurvesSymmetryType(curves_id_->symmetry));
@@ -257,8 +260,12 @@ struct SmoothOperationExecutor {
 void SmoothOperation::on_stroke_extended(const PaintStroke &stroke,
                                          const StrokeExtension &stroke_extension)
 {
-  SmoothOperationExecutor executor{stroke};
-  executor.execute(*this, stroke_extension);
+  foreach_curves_sculpt_target(stroke, [&](Object &curves_ob, Curves &curves_id) {
+    SmoothOperationExecutor executor{stroke};
+    executor.object_ = &curves_ob;
+    executor.curves_id_ = &curves_id;
+    executor.execute(*this, stroke_extension);
+  });
 }
 
 std::unique_ptr<CurvesSculptStrokeOperation> new_smooth_operation()

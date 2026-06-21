@@ -71,7 +71,18 @@ namespace ed::sculpt_paint {
 bool curves_sculpt_poll(bContext *C)
 {
   const Object *ob = CTX_data_active_object(C);
-  return ob && ob->mode & OB_MODE_SCULPT_CURVES;
+  if (ob && (ob->mode & OB_MODE_SCULPT_CURVES)) {
+    return true;
+  }
+
+  CTX_DATA_BEGIN (C, Object *, ob_iter, selected_objects) {
+    if (ob_iter->type == OB_CURVES && (ob_iter->mode & OB_MODE_SCULPT_CURVES)) {
+      return true;
+    }
+  }
+  CTX_DATA_END;
+
+  return false;
 }
 
 bool curves_sculpt_poll_view3d(bContext *C)
@@ -121,6 +132,20 @@ float brush_strength_get(const Paint &paint,
   return BKE_brush_alpha_get(&paint, &brush) * brush_strength_factor(brush, stroke_extension);
 }
 
+/** No-op stroke operation for unsupported brush types (e.g. unimplemented brushes in .blend files). */
+class UnsupportedCurvesSculptOperation : public CurvesSculptStrokeOperation {
+ public:
+  void on_stroke_extended(const PaintStroke & /*stroke*/,
+                          const StrokeExtension &stroke_extension) override
+  {
+    if (stroke_extension.is_first) {
+      BKE_report(stroke_extension.reports,
+                 RPT_WARNING,
+                 "Unsupported curves sculpt brush, stroke ignored");
+    }
+  }
+};
+
 static std::unique_ptr<CurvesSculptStrokeOperation> start_brush_operation(
     wmOperator &op,
     Scene &scene,
@@ -169,9 +194,10 @@ static std::unique_ptr<CurvesSculptStrokeOperation> start_brush_operation(
       return new_density_operation(mode, scene, depsgraph, region, v3d, object, stroke_start);
     case CURVES_SCULPT_BRUSH_TYPE_SLIDE:
       return new_slide_operation();
+    default:
+      BLI_assert_unreachable();
+      return std::make_unique<UnsupportedCurvesSculptOperation>();
   }
-  BLI_assert_unreachable();
-  return {};
 }
 
 struct SculptCurvesBrushStroke final : public PaintStroke {
@@ -313,62 +339,85 @@ static void SCULPT_CURVES_OT_brush_stroke(wmOperatorType *ot)
 /** \name Toggle Sculpt Mode
  * \{ */
 
-static void curves_sculptmode_enter(bContext *C)
-{
-  Scene *scene = CTX_data_scene(C);
-  wmMsgBus *mbus = CTX_wm_message_bus(C);
-
-  Object *ob = CTX_data_active_object(C);
-  BKE_paint_ensure(scene->toolsettings,
-                   reinterpret_cast<Paint **>(&scene->toolsettings->curves_sculpt));
-  CurvesSculpt *curves_sculpt = scene->toolsettings->curves_sculpt;
-
-  ob->mode = OB_MODE_SCULPT_CURVES;
-
-  Paint *paint = BKE_paint_get_active_from_paintmode(scene, PaintMode::SculptCurves);
-
-  BKE_paint_brushes_ensure(CTX_data_main(C), paint);
-
-  ED_paint_cursor_start(&curves_sculpt->paint, curves_sculpt_poll_view3d);
-  paint_init_pivot(ob, scene, paint);
-
-  /* Necessary to change the object mode on the evaluated object. */
-  DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
-  WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
-  WM_event_add_notifier(C, NC_SCENE | ND_MODE, nullptr);
-}
-
-static void curves_sculptmode_exit(bContext *C)
-{
-  Object *ob = CTX_data_active_object(C);
-  ob->mode = OB_MODE_OBJECT;
-}
-
 static wmOperatorStatus curves_sculptmode_toggle_exec(bContext *C, wmOperator *op)
 {
-  Object *ob = CTX_data_active_object(C);
   wmMsgBus *mbus = CTX_wm_message_bus(C);
 
-  const bool is_mode_set = ob->mode == OB_MODE_SCULPT_CURVES;
+  Vector<Object *> curves_objects;
+  CTX_DATA_BEGIN (C, Object *, ob, selected_editable_objects) {
+    if (ob->type == OB_CURVES) {
+      curves_objects.append(ob);
+    }
+  }
+  CTX_DATA_END;
 
-  if (is_mode_set) {
-    if (!object::mode_compat_set(C, ob, OB_MODE_SCULPT_CURVES, op->reports)) {
+  if (curves_objects.is_empty()) {
+    BKE_report(op->reports, RPT_ERROR, "No selected editable Curves objects");
+    return OPERATOR_CANCELLED;
+  }
+
+  Object *active_ob = CTX_data_active_object(C);
+  bool should_enter_mode = true;
+  if (active_ob && (active_ob->mode & OB_MODE_SCULPT_CURVES)) {
+    bool all_in_mode = true;
+    for (Object *ob : curves_objects) {
+      if ((ob->mode & OB_MODE_SCULPT_CURVES) == 0) {
+        all_in_mode = false;
+        break;
+      }
+    }
+    should_enter_mode = !all_in_mode;
+  }
+
+  Scene *scene = CTX_data_scene(C);
+  BKE_paint_ensure(scene->toolsettings, (Paint **)&scene->toolsettings->curves_sculpt);
+  CurvesSculpt *curves_sculpt = scene->toolsettings->curves_sculpt;
+  Paint *paint = BKE_paint_get_active_from_paintmode(scene, PaintMode::SculptCurves);
+
+  if (!should_enter_mode && curves_sculpt && curves_sculpt->paint.runtime &&
+      curves_sculpt->paint.runtime->paint_cursor)
+  {
+    WM_paint_cursor_end(static_cast<wmPaintCursor *>(curves_sculpt->paint.runtime->paint_cursor));
+    curves_sculpt->paint.runtime->paint_cursor = nullptr;
+  }
+
+  if (paint) {
+    BKE_paint_brushes_ensure(CTX_data_main(C), paint);
+    if (should_enter_mode) {
+      BKE_paint_init(CTX_data_main(C), scene, PaintMode::SculptCurves, false);
+      ED_paint_cursor_start(&curves_sculpt->paint, curves_sculpt_poll_view3d);
+    }
+  }
+
+  for (Object *curves_ob : curves_objects) {
+    if (!ed::object::mode_compat_set(C, curves_ob, OB_MODE_SCULPT_CURVES, op->reports)) {
       return OPERATOR_CANCELLED;
     }
   }
 
-  if (is_mode_set) {
-    curves_sculptmode_exit(C);
+  int toggled = 0;
+  for (Object *curves_ob : curves_objects) {
+    if (should_enter_mode) {
+      curves_ob->mode = OB_MODE_SCULPT_CURVES;
+      paint_init_pivot(curves_ob, scene, paint);
+      DEG_id_tag_update(&curves_ob->id, ID_RECALC_SYNC_TO_EVAL);
+      WM_msg_publish_rna_prop(mbus, &curves_ob->id, curves_ob, Object, mode);
+      toggled++;
+    }
+    else {
+      curves_ob->mode = OB_MODE_OBJECT;
+      DEG_id_tag_update(&curves_ob->id, ID_RECALC_SYNC_TO_EVAL);
+      WM_msg_publish_rna_prop(mbus, &curves_ob->id, curves_ob, Object, mode);
+      toggled++;
+    }
   }
-  else {
-    curves_sculptmode_enter(C);
+
+  if (toggled == 0) {
+    BKE_report(op->reports, RPT_ERROR, "No Curves objects toggled");
+    return OPERATOR_CANCELLED;
   }
 
   WM_toolsystem_update_from_context_view3d(C);
-
-  /* Necessary to change the object mode on the evaluated object. */
-  DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
-  WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
   WM_event_add_notifier(C, NC_SCENE | ND_MODE, nullptr);
   return OPERATOR_FINISHED;
 }
@@ -380,7 +429,7 @@ static void CURVES_OT_sculptmode_toggle(wmOperatorType *ot)
   ot->description = "Enter/Exit sculpt mode for curves";
 
   ot->exec = curves_sculptmode_toggle_exec;
-  ot->poll = curves::curves_poll;
+  ot->poll = curves::editable_curves_poll;
 
   ot->flag = OPTYPE_UNDO | OPTYPE_REGISTER;
 }
@@ -760,7 +809,6 @@ static void select_grow_invoke_per_curve(const Curves &curves_id,
 
 static wmOperatorStatus select_grow_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
-  Object *active_ob = CTX_data_active_object(C);
   ARegion *region = CTX_wm_region(C);
   View3D *v3d = CTX_wm_view3d(C);
   RegionView3D *rv3d = CTX_wm_region_view3d(C);
@@ -770,11 +818,40 @@ static wmOperatorStatus select_grow_invoke(bContext *C, wmOperator *op, const wm
 
   op_data->initial_mouse_x = event->xy[0];
 
-  Curves &curves_id = *id_cast<Curves *>(active_ob->data);
-  auto curve_op_data = std::make_unique<GrowOperatorDataPerCurve>();
-  curve_op_data->curves_id = &curves_id;
-  select_grow_invoke_per_curve(curves_id, *active_ob, *region, *v3d, *rv3d, *curve_op_data);
-  op_data->per_curve.append(std::move(curve_op_data));
+  VectorSet<Curves *> unique_curves = curves::get_unique_editable_curves(*C);
+  if (unique_curves.is_empty()) {
+    MEM_delete(op_data);
+    op->customdata = nullptr;
+    return OPERATOR_CANCELLED;
+  }
+
+  for (Curves *curves_id_ptr : unique_curves) {
+    Object *curves_ob = nullptr;
+    CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
+      if ((ob->mode & OB_MODE_SCULPT_CURVES) && ob->type == OB_CURVES &&
+          ob->data == &curves_id_ptr->id)
+      {
+        curves_ob = ob;
+        break;
+      }
+    }
+    CTX_DATA_END;
+
+    if (curves_ob == nullptr) {
+      continue;
+    }
+
+    auto curve_op_data = std::make_unique<GrowOperatorDataPerCurve>();
+    curve_op_data->curves_id = curves_id_ptr;
+    select_grow_invoke_per_curve(*curves_id_ptr, *curves_ob, *region, *v3d, *rv3d, *curve_op_data);
+    op_data->per_curve.append(std::move(curve_op_data));
+  }
+
+  if (op_data->per_curve.is_empty()) {
+    MEM_delete(op_data);
+    op->customdata = nullptr;
+    return OPERATOR_CANCELLED;
+  }
 
   WM_event_add_modal_handler(C, op);
   return OPERATOR_RUNNING_MODAL;

@@ -25,6 +25,7 @@
 #include "BLI_array_utils.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_kdtree.hh"
+#include "BLI_map.hh"
 #include "BLI_rand.hh"
 #include "BLI_task.hh"
 
@@ -39,26 +40,32 @@
 
 namespace blender::ed::sculpt_paint {
 
+struct DensityAddTargetState {
+  /** Used when some data should be interpolated from existing curves. */
+  KDTree<float3> *original_curve_roots_kdtree = nullptr;
+  /** Contains curve roots of all curves that existed before the brush started. */
+  KDTree<float3> *deformed_curve_roots_kdtree = nullptr;
+  /** Root positions of curves that have been added in the current brush stroke. */
+  Vector<float3> new_deformed_root_positions;
+  int original_curve_num = 0;
+};
+
 class DensityAddOperation : public CurvesSculptStrokeOperation {
  private:
-  /** Used when some data should be interpolated from existing curves. */
-  KDTree<float3> *original_curve_roots_kdtree_ = nullptr;
-  /** Contains curve roots of all curves that existed before the brush started. */
-  KDTree<float3> *deformed_curve_roots_kdtree_ = nullptr;
-  /** Root positions of curves that have been added in the current brush stroke. */
-  Vector<float3> new_deformed_root_positions_;
-  int original_curve_num_ = 0;
+  Map<Curves *, DensityAddTargetState> target_states_;
 
   friend struct DensityAddOperationExecutor;
 
  public:
   ~DensityAddOperation() override
   {
-    if (original_curve_roots_kdtree_ != nullptr) {
-      kdtree_free<float3>(original_curve_roots_kdtree_);
-    }
-    if (deformed_curve_roots_kdtree_ != nullptr) {
-      kdtree_free<float3>(deformed_curve_roots_kdtree_);
+    for (const auto item : target_states_.items()) {
+      if (item.value.original_curve_roots_kdtree != nullptr) {
+        kdtree_free<float3>(item.value.original_curve_roots_kdtree);
+      }
+      if (item.value.deformed_curve_roots_kdtree != nullptr) {
+        kdtree_free<float3>(item.value.deformed_curve_roots_kdtree);
+      }
     }
   }
 
@@ -93,17 +100,21 @@ struct DensityAddOperationExecutor {
 
   CurvesSurfaceTransforms transforms_;
 
+  DensityAddTargetState *target_state_ = nullptr;
+
   DensityAddOperationExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
 
   void execute(DensityAddOperation &self, const StrokeExtension &stroke_extension)
   {
     self_ = &self;
-    curves_ob_orig_ = ctx_.object;
-    curves_id_orig_ = id_cast<Curves *>(curves_ob_orig_->data);
+    BLI_assert(curves_ob_orig_ != nullptr);
+    BLI_assert(curves_id_orig_ != nullptr);
+    target_state_ = &self_->target_states_.lookup_or_add(curves_id_orig_, DensityAddTargetState());
     curves_orig_ = &curves_id_orig_->geometry.wrap();
 
     if (stroke_extension.is_first) {
-      self_->original_curve_num_ = curves_orig_->curves_num();
+      target_state_->original_curve_num = curves_orig_->curves_num();
+      target_state_->new_deformed_root_positions.clear();
     }
 
     if (curves_id_orig_->surface == nullptr || curves_id_orig_->surface->type != OB_MESH) {
@@ -178,7 +189,7 @@ struct DensityAddOperationExecutor {
       this->prepare_curve_roots_kdtrees();
     }
 
-    const int already_added_curves = self_->new_deformed_root_positions_.size();
+    const int already_added_curves = target_state_->new_deformed_root_positions.size();
     KDTree<float3> *new_roots_kdtree = kdtree_new<float3>(already_added_curves +
                                                           new_positions_cu.size());
     BLI_SCOPED_DEFER([&]() { kdtree_free<float3>(new_roots_kdtree); });
@@ -191,7 +202,7 @@ struct DensityAddOperationExecutor {
         /* Build kdtree from root points created by the current stroke. */
         [&]() {
           for (const int i : IndexRange(already_added_curves)) {
-            kdtree_insert<float3>(new_roots_kdtree, -1, self_->new_deformed_root_positions_[i]);
+            kdtree_insert<float3>(new_roots_kdtree, -1, target_state_->new_deformed_root_positions[i]);
           }
           for (const int new_i : new_positions_cu.index_range()) {
             const float3 &root_pos_cu = new_positions_cu[new_i];
@@ -209,7 +220,7 @@ struct DensityAddOperationExecutor {
                   KDTreeNearest<float3> nearest;
                   nearest.dist = FLT_MAX;
                   kdtree_find_nearest<float3>(
-                      self_->deformed_curve_roots_kdtree_, new_root_pos_cu, &nearest);
+                      target_state_->deformed_curve_roots_kdtree, new_root_pos_cu, &nearest);
                   if (nearest.dist < brush_settings_->minimum_distance) {
                     new_curve_skipped[new_i] = true;
                   }
@@ -247,7 +258,7 @@ struct DensityAddOperationExecutor {
         new_uvs.remove_and_reorder(i);
       }
     }
-    self_->new_deformed_root_positions_.extend(new_positions_cu);
+    target_state_->new_deformed_root_positions.extend(new_positions_cu);
 
     const Span<float3> corner_normals_su = surface_orig_->corner_normals();
     const Span<int3> surface_corner_tris_orig = surface_orig_->corner_tris();
@@ -272,7 +283,7 @@ struct DensityAddOperationExecutor {
     add_inputs.corner_normals_su = corner_normals_su;
     add_inputs.surface_corner_tris = surface_corner_tris_orig;
     add_inputs.reverse_uv_sampler = &reverse_uv_sampler;
-    add_inputs.old_roots_kdtree = self_->original_curve_roots_kdtree_;
+    add_inputs.old_roots_kdtree = target_state_->original_curve_roots_kdtree;
 
     const geometry::AddCurvesOnMeshOutputs add_outputs = geometry::add_curves_on_mesh(
         *curves_orig_, add_inputs);
@@ -324,10 +335,10 @@ struct DensityAddOperationExecutor {
     threading::parallel_invoke(
         1024 < original_positions.size() + deformed_positions.size(),
         [&]() {
-          self_->original_curve_roots_kdtree_ = roots_kdtree_from_positions(original_positions);
+          target_state_->original_curve_roots_kdtree = roots_kdtree_from_positions(original_positions);
         },
         [&]() {
-          self_->deformed_curve_roots_kdtree_ = roots_kdtree_from_positions(deformed_positions);
+          target_state_->deformed_curve_roots_kdtree = roots_kdtree_from_positions(deformed_positions);
         });
   }
 
@@ -472,20 +483,28 @@ struct DensityAddOperationExecutor {
 void DensityAddOperation::on_stroke_extended(const PaintStroke &stroke,
                                              const StrokeExtension &stroke_extension)
 {
-  DensityAddOperationExecutor executor{stroke};
-  executor.execute(*this, stroke_extension);
+  foreach_curves_sculpt_target(stroke, [&](Object &curves_ob, Curves &curves_id) {
+    DensityAddOperationExecutor executor{stroke};
+    executor.curves_ob_orig_ = &curves_ob;
+    executor.curves_id_orig_ = &curves_id;
+    executor.execute(*this, stroke_extension);
+  });
 }
 
-class DensitySubtractOperation : public CurvesSculptStrokeOperation {
- private:
-  friend struct DensitySubtractOperationExecutor;
-
+struct DensitySubtractTargetState {
   /**
    * Deformed root positions of curves that still exist. This has to be stored in case the brush is
    * executed more than once before the curves are evaluated again. This can happen when the mouse
    * is moved quickly and the brush spacing is small.
    */
-  Vector<float3> deformed_root_positions_;
+  Vector<float3> deformed_root_positions;
+};
+
+class DensitySubtractOperation : public CurvesSculptStrokeOperation {
+ private:
+  friend struct DensitySubtractOperationExecutor;
+
+  Map<Curves *, DensitySubtractTargetState> target_states_;
 
  public:
   void on_stroke_extended(const PaintStroke &stroke,
@@ -527,15 +546,17 @@ struct DensitySubtractOperationExecutor {
 
   KDTree<float3> *root_points_kdtree_;
 
+  DensitySubtractTargetState *target_state_ = nullptr;
+
   DensitySubtractOperationExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
 
   void execute(DensitySubtractOperation &self, const StrokeExtension &stroke_extension)
   {
     self_ = &self;
 
-    object_ = ctx_.object;
-
-    curves_id_ = id_cast<Curves *>(object_->data);
+    BLI_assert(object_ != nullptr);
+    BLI_assert(curves_id_ != nullptr);
+    target_state_ = &self_->target_states_.lookup_or_add(curves_id_, DensitySubtractTargetState());
     curves_ = &curves_id_->geometry.wrap();
     if (curves_->is_empty()) {
       return;
@@ -572,16 +593,17 @@ struct DensitySubtractOperationExecutor {
     if (stroke_extension.is_first) {
       const bke::crazyspace::GeometryDeformation deformation =
           bke::crazyspace::get_evaluated_curves_deformation(*ctx_.depsgraph, *object_);
+      target_state_->deformed_root_positions.clear();
       for (const int curve_i : curves_->curves_range()) {
         const int first_point_i = curves_->offsets()[curve_i];
-        self_->deformed_root_positions_.append(deformation.positions[first_point_i]);
+        target_state_->deformed_root_positions.append(deformation.positions[first_point_i]);
       }
     }
 
     root_points_kdtree_ = kdtree_new<float3>(curve_selection_.size());
     BLI_SCOPED_DEFER([&]() { kdtree_free<float3>(root_points_kdtree_); });
     curve_selection_.foreach_index([&](const int curve_i) {
-      const float3 &pos_cu = self_->deformed_root_positions_[curve_i];
+      const float3 &pos_cu = target_state_->deformed_root_positions[curve_i];
       kdtree_insert<float3>(root_points_kdtree_, curve_i, pos_cu);
     });
     kdtree_balance<float3>(root_points_kdtree_);
@@ -602,15 +624,15 @@ struct DensitySubtractOperationExecutor {
     const IndexMask mask_to_keep = IndexMask::from_bools(curves_to_keep, mask_memory);
 
     /* Remove deleted curves from the stored deformed root positions. */
-    BLI_assert(curves_->curves_num() == self_->deformed_root_positions_.size());
+    BLI_assert(curves_->curves_num() == target_state_->deformed_root_positions.size());
     Vector<float3> new_deformed_positions(mask_to_keep.size());
-    array_utils::gather(self_->deformed_root_positions_.as_span(),
+    array_utils::gather(target_state_->deformed_root_positions.as_span(),
                         mask_to_keep,
                         new_deformed_positions.as_mutable_span());
-    self_->deformed_root_positions_ = std::move(new_deformed_positions);
+    target_state_->deformed_root_positions = std::move(new_deformed_positions);
 
     *curves_ = bke::curves_copy_curve_selection(*curves_, mask_to_keep, {});
-    BLI_assert(curves_->curves_num() == self_->deformed_root_positions_.size());
+    BLI_assert(curves_->curves_num() == target_state_->deformed_root_positions.size());
 
     DEG_id_tag_update(&curves_id_->id, ID_RECALC_GEOMETRY);
     WM_main_add_notifier(NC_GEOM | ND_DATA, &curves_id_->id);
@@ -645,7 +667,7 @@ struct DensitySubtractOperationExecutor {
           continue;
         }
         const float3 pos_cu = math::transform_point(brush_transform,
-                                                    self_->deformed_root_positions_[curve_i]);
+                                                    target_state_->deformed_root_positions[curve_i]);
 
         const float2 pos_re = ED_view3d_project_float_v2_m4(ctx_.region, pos_cu, projection);
         const float dist_to_brush_sq_re = math::distance_squared(brush_pos_re_, pos_re);
@@ -671,7 +693,7 @@ struct DensitySubtractOperationExecutor {
         if (!allow_remove_curve[curve_i]) {
           continue;
         }
-        const float3 orig_pos_cu = self_->deformed_root_positions_[curve_i];
+        const float3 orig_pos_cu = target_state_->deformed_root_positions[curve_i];
         const float3 pos_cu = math::transform_point(brush_transform, orig_pos_cu);
         const float2 pos_re = ED_view3d_project_float_v2_m4(ctx_.region, pos_cu, projection);
         const float dist_to_brush_sq_re = math::distance_squared(brush_pos_re_, pos_re);
@@ -734,7 +756,7 @@ struct DensitySubtractOperationExecutor {
           allow_remove_curve[curve_i] = true;
           continue;
         }
-        const float3 pos_cu = self_->deformed_root_positions_[curve_i];
+        const float3 pos_cu = target_state_->deformed_root_positions[curve_i];
 
         const float dist_to_brush_sq_cu = math::distance_squared(brush_pos_cu, pos_cu);
         if (dist_to_brush_sq_cu > brush_radius_sq_cu) {
@@ -759,7 +781,7 @@ struct DensitySubtractOperationExecutor {
         if (!allow_remove_curve[curve_i]) {
           continue;
         }
-        const float3 &pos_cu = self_->deformed_root_positions_[curve_i];
+        const float3 &pos_cu = target_state_->deformed_root_positions[curve_i];
         const float dist_to_brush_sq_cu = math::distance_squared(pos_cu, brush_pos_cu);
         if (dist_to_brush_sq_cu > brush_radius_sq_cu) {
           continue;
@@ -786,8 +808,12 @@ struct DensitySubtractOperationExecutor {
 void DensitySubtractOperation::on_stroke_extended(const PaintStroke &stroke,
                                                   const StrokeExtension &stroke_extension)
 {
-  DensitySubtractOperationExecutor executor{stroke};
-  executor.execute(*this, stroke_extension);
+  foreach_curves_sculpt_target(stroke, [&](Object &curves_ob, Curves &curves_id) {
+    DensitySubtractOperationExecutor executor{stroke};
+    executor.object_ = &curves_ob;
+    executor.curves_id_ = &curves_id;
+    executor.execute(*this, stroke_extension);
+  });
 }
 
 /**

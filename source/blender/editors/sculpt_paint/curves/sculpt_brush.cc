@@ -9,6 +9,7 @@
 #include "BLI_math_geom.h"
 
 #include "DNA_mesh_types.h"
+#include "DNA_object_types.h"
 
 #include "BKE_bvhutils.hh"
 #include "BKE_context.hh"
@@ -22,6 +23,7 @@
 #include "UI_interface.hh"
 
 #include "BLI_length_parameterize.hh"
+#include "BLI_map.hh"
 #include "BLI_task.hh"
 
 #include "DEG_depsgraph_query.hh"
@@ -411,6 +413,40 @@ CurvesSculptCommonContext::CurvesSculptCommonContext(const PaintStroke &stroke)
   this->v3d = stroke.vc.v3d;
   this->rv3d = stroke.vc.rv3d;
   this->object = stroke.object;
+}
+
+void foreach_curves_sculpt_target(const PaintStroke &stroke,
+                                  FunctionRef<void(Object &, Curves &)> fn)
+{
+  if (stroke.evil_C == nullptr) {
+    return;
+  }
+
+  const bContext &C = *stroke.evil_C;
+  Map<Curves *, Object *> curves_to_object;
+
+  CTX_DATA_BEGIN (&C, Object *, ob, selected_editable_objects) {
+    if (ob->type != OB_CURVES || (ob->mode & OB_MODE_SCULPT_CURVES) == 0) {
+      continue;
+    }
+    Curves *curves_id = id_cast<Curves *>(ob->data);
+    if (!curves_to_object.contains(curves_id)) {
+      curves_to_object.add(curves_id, ob);
+    }
+  }
+  CTX_DATA_END;
+
+  Object *active_ob = CTX_data_active_object(&C);
+  if (active_ob != nullptr && active_ob->type == OB_CURVES &&
+      (active_ob->mode & OB_MODE_SCULPT_CURVES))
+  {
+    Curves *curves_id = id_cast<Curves *>(active_ob->data);
+    curves_to_object.add_overwrite(curves_id, active_ob);
+  }
+
+  for (const auto item : curves_to_object.items()) {
+    fn(*item.value, *item.key);
+  }
 }
 
 void report_empty_original_surface(ReportList *reports)

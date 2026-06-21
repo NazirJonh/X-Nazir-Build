@@ -4,6 +4,7 @@
 
 #include "sculpt_intern.hh"
 
+#include "BLI_map.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_rotation.h"
 #include "BLI_task.hh"
@@ -57,15 +58,19 @@ struct SlideInfo {
   Vector<SlideCurveInfo> curves_to_slide;
 };
 
+struct SlideTargetState {
+  /** Information about which curves to slide. This is initialized when the brush starts. */
+  Vector<SlideInfo> slide_info;
+  /** Positions of all curve points at the start of sliding. */
+  Array<float3> initial_positions_cu;
+  /** Deformed positions of all curve points at the start of sliding. */
+  Array<float3> initial_deformed_positions_cu;
+};
+
 class SlideOperation : public CurvesSculptStrokeOperation {
  private:
   float2 initial_brush_pos_re_;
-  /** Information about which curves to slide. This is initialized when the brush starts. */
-  Vector<SlideInfo> slide_info_;
-  /** Positions of all curve points at the start of sliding. */
-  Array<float3> initial_positions_cu_;
-  /** Deformed positions of all curve points at the start of sliding. */
-  Array<float3> initial_deformed_positions_cu_;
+  Map<Curves *, SlideTargetState> target_states_;
 
   friend struct SlideOperationExecutor;
 
@@ -114,6 +119,8 @@ struct SlideOperationExecutor {
 
   CurvesSurfaceTransforms transforms_;
 
+  SlideTargetState *target_state_ = nullptr;
+
   std::atomic<bool> found_invalid_uv_mapping_{false};
 
   SlideOperationExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
@@ -122,8 +129,9 @@ struct SlideOperationExecutor {
   {
     self_ = &self;
 
-    curves_ob_orig_ = ctx_.object;
-    curves_id_orig_ = id_cast<Curves *>(curves_ob_orig_->data);
+    BLI_assert(curves_ob_orig_ != nullptr);
+    BLI_assert(curves_id_orig_ != nullptr);
+    target_state_ = &self_->target_states_.lookup_or_add(curves_id_orig_, SlideTargetState());
     curves_orig_ = &curves_id_orig_->geometry.wrap();
     if (curves_id_orig_->surface == nullptr || curves_id_orig_->surface->type != OB_MESH) {
       report_missing_surface(stroke_extension.reports);
@@ -201,8 +209,9 @@ struct SlideOperationExecutor {
        * when sliding starts, but it's still used. */
       const bke::crazyspace::GeometryDeformation deformation =
           bke::crazyspace::get_evaluated_curves_deformation(*ctx_.depsgraph, *curves_ob_orig_);
-      self_->initial_positions_cu_ = curves_orig_->positions();
-      self_->initial_deformed_positions_cu_ = deformation.positions;
+      target_state_->initial_positions_cu = curves_orig_->positions();
+      target_state_->initial_deformed_positions_cu = deformation.positions;
+      target_state_->slide_info.clear();
 
       /* First find all curves to slide. When the mouse moves, only those curves will be moved. */
       this->find_curves_to_slide_with_symmetry();
@@ -254,7 +263,7 @@ struct SlideOperationExecutor {
       curve_selection_.foreach_segment([&](const IndexMaskSegment segment) {
         for (const int curve_i : segment) {
           const int first_point_i = offsets[curve_i];
-          const float3 old_pos_cu = self_->initial_deformed_positions_cu_[first_point_i];
+          const float3 old_pos_cu = target_state_->initial_deformed_positions_cu[first_point_i];
           const float dist_sq = math::distance_squared(old_pos_cu, brush_pos_cu);
 
           if (dist_sq <= brush_radius_sq_cu && dist_sq < min_dist_sq[curve_i]) {
@@ -267,8 +276,8 @@ struct SlideOperationExecutor {
 
     /* Main-pass: Gather curves per brush based on the pre-pass result. */
     for (const int brush_i : brush_transforms.index_range()) {
-      self_->slide_info_.append_as();
-      SlideInfo &slide_info = self_->slide_info_.last();
+      target_state_->slide_info.append_as();
+      SlideInfo &slide_info = target_state_->slide_info.last();
       slide_info.brush_transform = brush_transforms[brush_i];
       this->find_curves_to_slide(
           math::transform_point(brush_transforms[brush_i], brush_3d->position_cu),
@@ -298,7 +307,7 @@ struct SlideOperationExecutor {
         }
 
         const int first_point_i = offsets[curve_i];
-        const float3 old_pos_cu = self_->initial_deformed_positions_cu_[first_point_i];
+        const float3 old_pos_cu = target_state_->initial_deformed_positions_cu[first_point_i];
 
         /* Compute the falloff based on the distance to the brush. */
         const float dist_to_brush_cu = math::distance(old_pos_cu, brush_pos_cu);
@@ -329,7 +338,7 @@ struct SlideOperationExecutor {
   {
     const ReverseUVSampler reverse_uv_sampler_orig{surface_uv_map_orig_,
                                                    surface_corner_tris_orig_};
-    for (const SlideInfo &slide_info : self_->slide_info_) {
+    for (const SlideInfo &slide_info : target_state_->slide_info) {
       this->slide(slide_info.curves_to_slide, reverse_uv_sampler_orig, slide_info.brush_transform);
     }
   }
@@ -362,7 +371,7 @@ struct SlideOperationExecutor {
         const IndexRange points = points_by_curve[curve_i];
         const int first_point_i = points[0];
 
-        const float3 old_first_pos_eval_cu = self_->initial_deformed_positions_cu_[first_point_i];
+        const float3 old_first_pos_eval_cu = target_state_->initial_deformed_positions_cu[first_point_i];
         const float3 old_first_symm_pos_eval_cu = math::transform_point(brush_transform_inv,
                                                                         old_first_pos_eval_cu);
         const float3 old_first_pos_eval_su = math::transform_point(transforms_.curves_to_surface,
@@ -434,7 +443,7 @@ struct SlideOperationExecutor {
             positions_orig_su[corner_verts_orig[tri_orig[0]]],
             positions_orig_su[corner_verts_orig[tri_orig[1]]],
             positions_orig_su[corner_verts_orig[tri_orig[2]]]);
-        const float3 old_first_pos_orig_cu = self_->initial_positions_cu_[first_point_i];
+        const float3 old_first_pos_orig_cu = target_state_->initial_positions_cu[first_point_i];
         const float3 new_first_pos_orig_cu = math::transform_point(transforms_.surface_to_curves,
                                                                    new_first_pos_orig_su);
 
@@ -443,7 +452,7 @@ struct SlideOperationExecutor {
             old_first_pos_orig_cu, new_first_pos_orig_cu, initial_normal_cu, new_normal_cu);
         for (const int point_i : points) {
           positions_orig_cu[point_i] = math::transform_point(
-              slide_transform, self_->initial_positions_cu_[point_i]);
+              slide_transform, target_state_->initial_positions_cu[point_i]);
         }
         surface_uv_coords[curve_i] = uv;
       }
@@ -506,8 +515,12 @@ struct SlideOperationExecutor {
 void SlideOperation::on_stroke_extended(const PaintStroke &stroke,
                                         const StrokeExtension &stroke_extension)
 {
-  SlideOperationExecutor executor{stroke};
-  executor.execute(*this, stroke_extension);
+  foreach_curves_sculpt_target(stroke, [&](Object &curves_ob, Curves &curves_id) {
+    SlideOperationExecutor executor{stroke};
+    executor.curves_ob_orig_ = &curves_ob;
+    executor.curves_id_orig_ = &curves_id;
+    executor.execute(*this, stroke_extension);
+  });
 }
 
 std::unique_ptr<CurvesSculptStrokeOperation> new_slide_operation()

@@ -173,6 +173,8 @@ elseif(MSVC)
     # Restore warn C4100 (unreferenced formal parameter) back to w4.
     "/w34100"
   )
+  # Generated RNA files include most DNA headers and may require additional compiler heap space.
+  string(APPEND GENSRC_FLAGS " /Zm512")
 endif()
 
 set(GENSRC_C ${GENSRC})

@@ -116,10 +116,16 @@ set(SRC
   mesh/sculpt_trim.cc
   mesh/sculpt_undo.cc
 
+  multi_object/multi_object_undo.cc
+  multi_object/multi_object_pbvh.cc
+
   paint_cursor.hh
   paint_intern.hh
 
   curves/sculpt_intern.hh
+
+  multi_object/multi_object_undo.hh
+  multi_object/multi_object_pbvh.hh
 
   grease_pencil/grease_pencil_intern.hh
   grease_pencil/trace_util.hh
@@ -208,6 +214,10 @@ set(LIB
 if(WITH_GTESTS)
   set(TEST_SRC
     mesh/mesh_brush_common_tests.cc
+    multi_object/tests/multi_object_undo_test.cc
+    multi_object/tests/multi_object_pbvh_test.cc
+    multi_object/tests/multi_object_integration_test.cc
+    multi_object/tests/multi_object_performance_test.cc
     mesh/paint_test.cc
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc

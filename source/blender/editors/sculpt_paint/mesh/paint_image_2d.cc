@@ -57,7 +57,25 @@ static float paint_2d_selection_mask_sample(
     return 1.0f;
   }
 
-  return BKE_image_paint_selection_mask_sample(image, tile_number, x, y);
+  return BKE_image_paint_selection_blend_sample(image, tile_number, x, y);
+}
+
+static float paint_2d_selection_blend_sample_bilinear(
+    const Scene *scene, const Image *image, int tile_number, const float fx, const float fy)
+{
+  const ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
+  if (!imapaint->use_selection_mask || !image) {
+    return 1.0f;
+  }
+
+  return BKE_image_paint_selection_blend_sample_bilinear(image, tile_number, fx, fy);
+}
+
+/* Brush constraint: binary inside-test (hard edge, no feather weighting). */
+static bool paint_2d_selection_mask_is_inside(const Image *image, int tile_number, int x, int y)
+{
+  return BKE_image_paint_selection_mask_sample(image, tile_number, x, y) >
+         IMAGE_PAINT_SELECTION_MASK_THRESHOLD;
 }
 
 /* Brush Painting for 2D image editor */
@@ -826,8 +844,15 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
   /* Apply selection mask to the curve mask in-place. */
   const ImagePaintSettings *imapaint_settings = &s->scene->toolsettings->imapaint;
   if (imapaint_settings->use_selection_mask) {
-    const ImBuf *sel_mask = BKE_image_paint_selection_mask_lookup(s->image, tile->iuser.tile);
-    if (sel_mask) {
+    const Scene *scene = s->scene;
+    const int tile_number = tile->iuser.tile;
+    const ImBuf *sel_mask = BKE_image_paint_selection_mask_lookup(s->image, tile_number);
+    if (!sel_mask) {
+      /* No mask for this tile, so nothing is selected. */
+      ushort *cm = cache->curve_mask_cache.curve_mask;
+      memset(cm, 0, size_t(diameter) * diameter * sizeof(ushort));
+    }
+    else {
       /* Use integer half-diameter, matching paint_2d_convert_brushco's `ibufb->x / 2`
        * (integer division).  Floating-point `diameter * 0.5f` shifts the mask lookup
        * by -1 pixel relative to the canvas paint position for odd brush sizes when
@@ -838,30 +863,20 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
       ushort *cm = cache->curve_mask_cache.curve_mask;
       for (int y = 0; y < diameter; y++) {
         const int my = brush_origin_yi + y;
-        if (my < 0 || my >= sel_mask->y) {
-          for (int x = 0; x < diameter; x++, cm++) {
-            *cm = 0;
-          }
-          continue;
-        }
-        const float *mask_row = sel_mask->float_buffer.data + size_t(my) * sel_mask->x;
         for (int x = 0; x < diameter; x++, cm++) {
           if (*cm == 0) {
             continue;
           }
           const int mx = brush_origin_xi + x;
-          if (mx < 0 || mx >= sel_mask->x) {
+          const float blend_w = paint_2d_selection_blend_sample_bilinear(
+              scene, s->image, tile_number, float(mx) + 0.5f, float(my) + 0.5f);
+          if (blend_w <= 0.0f) {
             *cm = 0;
             continue;
           }
-          *cm = ushort(float(*cm) * mask_row[mx]);
+          *cm = ushort(float(*cm) * blend_w);
         }
       }
-    }
-    else {
-      /* No mask for this tile, so nothing is selected. */
-      ushort *cm = cache->curve_mask_cache.curve_mask;
-      memset(cm, 0, size_t(diameter) * diameter * sizeof(ushort));
     }
   }
 
@@ -1842,7 +1857,7 @@ static void paint_2d_fill_add_pixel_byte(const Scene *scene,
 
   if (!BLI_BITMAP_TEST(touched, coordinate)) {
     if (scene->toolsettings->imapaint.use_selection_mask) {
-      if (paint_2d_selection_mask_sample(scene, image, tile_number, x_px, y_px) <= 0.0f) {
+      if (!paint_2d_selection_mask_is_inside(image, tile_number, x_px, y_px)) {
         BLI_BITMAP_SET(touched, coordinate, true);
         return;
       }
@@ -1880,7 +1895,7 @@ static void paint_2d_fill_add_pixel_float(const Scene *scene,
 
   if (!BLI_BITMAP_TEST(touched, coordinate)) {
     if (scene->toolsettings->imapaint.use_selection_mask) {
-      if (paint_2d_selection_mask_sample(scene, image, tile_number, x_px, y_px) <= 0.0f) {
+      if (!paint_2d_selection_mask_is_inside(image, tile_number, x_px, y_px)) {
         BLI_BITMAP_SET(touched, coordinate, true);
         return;
       }
@@ -1992,7 +2007,7 @@ void paint_2d_bucket_fill(const bContext *C,
         for (y_px = 0; y_px < ibuf->y; y_px++) {
           const float mask_val = paint_2d_selection_mask_sample(
               scene, ima, tile_number, x_px, y_px);
-          if (mask_val <= 0.0f) {
+          if (mask_val <= 0.001f) {
             continue;
           }
           float color_f_masked[4];
@@ -2010,7 +2025,7 @@ void paint_2d_bucket_fill(const bContext *C,
         for (y_px = 0; y_px < ibuf->y; y_px++) {
           const float mask_val = paint_2d_selection_mask_sample(
               scene, ima, tile_number, x_px, y_px);
-          if (mask_val <= 0.0f) {
+          if (mask_val <= 0.001f) {
             continue;
           }
           float color_f_masked[4];

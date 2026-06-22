@@ -884,12 +884,13 @@ static wmOperatorStatus image_select_all_exec(bContext *C, wmOperator * /*op*/)
 
   BKE_image_paint_selection_mask_get(image, active_tile->tile_number, ibuf->x, ibuf->y);
   BKE_image_paint_selection_mask_fill(image, active_tile->tile_number, 1.0f);
+  BKE_image_paint_selection_set_edge_policy(image, BKE_image_paint_selection_edge_policy_hard());
 
   BKE_image_release_ibuf(image, ibuf, nullptr);
 
   DEG_id_tag_update(&scene->id, ID_RECALC_EDITORS);
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
-
+  BKE_image_paint_selection_blend_mask_invalidate(image);
   ED_image_undo_push_end();
   return OPERATOR_FINISHED;
 }
@@ -1138,6 +1139,8 @@ static wmOperatorStatus image_select_box_exec(bContext *C, wmOperator *op)
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
   ED_region_tag_redraw(region);
 
+  BKE_image_paint_selection_set_edge_policy(image, BKE_image_paint_selection_edge_policy_hard());
+  BKE_image_paint_selection_blend_mask_invalidate(image);
   ED_image_undo_push_end();
   return OPERATOR_FINISHED;
 }
@@ -1382,6 +1385,8 @@ static wmOperatorStatus image_select_lasso_exec(bContext *C, wmOperator *op)
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
   ED_region_tag_redraw(region);
 
+  BKE_image_paint_selection_set_edge_policy(image, BKE_image_paint_selection_edge_policy_feathered());
+  BKE_image_paint_selection_blend_mask_invalidate(image);
   ED_image_undo_push_end();
   return OPERATOR_FINISHED;
 }
@@ -1589,6 +1594,8 @@ static wmOperatorStatus image_select_circle_exec(bContext *C, wmOperator *op)
   DEG_id_tag_update(&scene->id, ID_RECALC_EDITORS);
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
 
+  BKE_image_paint_selection_set_edge_policy(image, BKE_image_paint_selection_edge_policy_feathered());
+  BKE_image_paint_selection_blend_mask_invalidate(image);
   ED_image_undo_push_end();
   return OPERATOR_FINISHED;
 }

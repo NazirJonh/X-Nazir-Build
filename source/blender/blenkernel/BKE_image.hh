@@ -64,6 +64,43 @@ constexpr int IMAGE_GPU_PASS_NONE = std::numeric_limits<short>::max();
 constexpr int IMAGE_GPU_LAYER_NONE = std::numeric_limits<short>::max();
 constexpr int IMAGE_GPU_VIEW_NONE = std::numeric_limits<short>::max();
 
+/* Image paint selection masks (runtime, per-tile). */
+
+/** A mask pixel is considered selected when its value exceeds this threshold. */
+inline constexpr float IMAGE_PAINT_SELECTION_MASK_THRESHOLD = 0.5f;
+
+/** Outward compositing feather in pixels (extends past the binary mask boundary). */
+inline constexpr int IMAGE_PAINT_SELECTION_BLEND_RADIUS_PX = 1;
+
+/** Edge weight gamma (>1 lowers opacity in the feather zone; interior stays 1). */
+inline constexpr float IMAGE_PAINT_SELECTION_BLEND_EDGE_GAMMA = 2.5f;
+
+/**
+ * Compositing edge policy for image paint selection (runtime mask + floating fragments).
+ * Single source of truth for hard vs outward-feather edges and feather parameters.
+ */
+struct PaintSelectionEdgePolicy {
+  /** When false, mask edges stay binary for paint, extract padding, and GPU preview. */
+  bool use_outward_feather = true;
+  /** Outward feather extent in pixels (extends past the binary mask boundary). */
+  int blend_radius_px = IMAGE_PAINT_SELECTION_BLEND_RADIUS_PX;
+  /** Edge weight gamma (>1 lowers opacity in the feather zone; interior stays 1). */
+  float edge_gamma = IMAGE_PAINT_SELECTION_BLEND_EDGE_GAMMA;
+};
+
+inline PaintSelectionEdgePolicy BKE_image_paint_selection_edge_policy_hard()
+{
+  PaintSelectionEdgePolicy policy;
+  policy.use_outward_feather = false;
+  policy.blend_radius_px = 0;
+  return policy;
+}
+
+inline PaintSelectionEdgePolicy BKE_image_paint_selection_edge_policy_feathered()
+{
+  return PaintSelectionEdgePolicy{};
+}
+
 namespace bke {
 
 struct ImageRuntime {
@@ -99,6 +136,10 @@ struct ImageRuntime {
   /* Per-tile selection masks for 2D image paint (runtime only). */
   Map<int, ImBuf *> paint_selection_masks;
   Map<int, gpu::Texture *> paint_selection_mask_textures;
+  /* Cached smooth blend weights derived from #paint_selection_masks (runtime only). */
+  Map<int, ImBuf *> paint_selection_blend_masks;
+  /** Edge compositing policy for the active selection (box=all hard, lasso/circle=feathered). */
+  PaintSelectionEdgePolicy paint_selection_edge_policy;
 };
 
 }  // namespace bke
@@ -124,14 +165,37 @@ void BKE_image_free_gputextures(Image *ima);
  */
 void BKE_image_free_data(Image *image);
 
-/* Image paint selection masks (runtime, per-tile). */
-
-/** A mask pixel is considered selected when its value exceeds this threshold. */
-inline constexpr float IMAGE_PAINT_SELECTION_MASK_THRESHOLD = 0.5f;
-
 ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int width, int height);
 ImBuf *BKE_image_paint_selection_mask_lookup(Image *image, int tile_number);
 float BKE_image_paint_selection_mask_sample(const Image *image, int tile_number, int x, int y);
+/** Paint/compositing weight: smooth falloff centered on the mask boundary. */
+float BKE_image_paint_selection_blend_sample(const Image *image, int tile_number, int x, int y);
+float BKE_image_paint_selection_blend_sample_bilinear(const Image *image,
+                                                      int tile_number,
+                                                      float fx,
+                                                      float fy);
+ImBuf *BKE_image_paint_selection_compute_blend_mask(
+    const ImBuf *binary_mask, const PaintSelectionEdgePolicy &edge_policy = {});
+void BKE_image_paint_selection_blend_mask_invalidate(Image *image);
+void BKE_image_paint_selection_blend_mask_invalidate_tile(Image *image, int tile_number);
+void BKE_image_paint_selection_bounds_expand_for_blend(int r_min[2],
+                                                       int r_max[2],
+                                                       int tile_width,
+                                                       int tile_height,
+                                                       const PaintSelectionEdgePolicy &edge_policy = {});
+void BKE_image_paint_selection_compute_blend_mask_to_4ch(const float *binary,
+                                                         int width,
+                                                         int height,
+                                                         float *blend_4ch,
+                                                         int binary_stride_channels = 1,
+                                                         const PaintSelectionEdgePolicy &edge_policy = {});
+const PaintSelectionEdgePolicy &BKE_image_paint_selection_edge_policy_get(const Image *image);
+void BKE_image_paint_selection_set_edge_policy(Image *image,
+                                               const PaintSelectionEdgePolicy &edge_policy);
+/** Convenience: true when #PaintSelectionEdgePolicy::use_outward_feather is set. */
+bool BKE_image_paint_selection_use_feather(const Image *image);
+/** Convenience: sets hard or default feathered edge policy. */
+void BKE_image_paint_selection_set_use_feather(Image *image, bool use_feather);
 bool BKE_image_paint_selection_mask_bounds(
     const Image *image, int tile_number, int r_min[2], int r_max[2]);
 void BKE_image_paint_selection_mask_fill(Image *image, int tile_number, float value);

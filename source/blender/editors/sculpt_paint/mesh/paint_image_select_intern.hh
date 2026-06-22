@@ -6,8 +6,26 @@
  * \ingroup edsculpt
  *
  * Internal shared declarations for the Image Paint selection system.
- * Consumed by paint_image_select_mask.cc, paint_image_select_move.cc, and
- * paint_image_select_transform.cc.
+ *
+ * Flow (high level):
+ * \code{.unparsed}
+ *   select (mask.cc) --> runtime binary mask per tile + edge_policy on Image
+ *        |
+ *        v
+ *   paint (paint_image_2d.cc) --> binary inside-test + blend weight for brush
+ *        |
+ *        v
+ *   move/transform (move/transform.cc) --> extract fragment --> lift source
+ *        |                                      |
+ *        |                                      v
+ *        +--> GPU preview (fragment preview buffers, two passes)
+ *        |
+ *        v
+ *   commit --> write pixels + merge mask back to canvas
+ * \endcode
+ *
+ * Consumed by paint_image_select_mask.cc, paint_image_select_move.cc,
+ * paint_image_select_transform.cc, and paint_image_select_fragment.cc.
  */
 
 #pragma once
@@ -36,7 +54,6 @@ namespace blender {
 /** \name Constants
  * \{ */
 
-/* Alias for BKE threshold -- single source of truth in BKE_image.hh. */
 constexpr float SELECTION_MASK_THRESHOLD = IMAGE_PAINT_SELECTION_MASK_THRESHOLD;
 
 /** \} */
@@ -45,33 +62,52 @@ constexpr float SELECTION_MASK_THRESHOLD = IMAGE_PAINT_SELECTION_MASK_THRESHOLD;
 /** \name Shared types
  * \{ */
 
-/* One compact fragment per UDIM tile that has an active selection.
- * origin_px and size_px are always in tile-local pixel coordinates (>= 0). */
-struct SelectionTileFragment {
+struct SelectionTileFragmentPixelData {
   ImBuf *fragment_ibuf = nullptr;
   ImBuf *fragment_mask_ibuf = nullptr;
-  /* 4-channel RGBA float preview with mask baked into alpha (GPU draw only). */
+};
+
+struct SelectionTileFragmentPreviewBuffers {
+  ImBuf *fragment_blend_mask_ibuf = nullptr;
   ImBuf *fragment_display_ibuf = nullptr;
+  ImBuf *fragment_feather_display_ibuf = nullptr;
+};
+
+struct SelectionTileFragmentGeometry {
   int2 origin_px = {0, 0};
   int2 size_px = {0, 0};
+  int2 selection_origin_px = {0, 0};
+  int2 selection_size_px = {0, 0};
   int2 tile_size_px = {1, 1};
   int tile_number = 1001;
 };
 
+struct SelectionTileFragment {
+  SelectionTileFragmentPixelData pixels;
+  SelectionTileFragmentPreviewBuffers preview;
+  SelectionTileFragmentGeometry geom;
+  PaintSelectionEdgePolicy edge_policy = BKE_image_paint_selection_edge_policy_feathered();
+};
+
+struct ImageSelectMoveState;
+struct ImageSelectTransformState;
+
+struct PaintSelectSession {
+  ImageSelectMoveState *move = nullptr;
+  ImageSelectTransformState *transform = nullptr;
+};
+
+/** \} */
+
+} /* namespace blender */
+
+#include "paint_image_select_fragment.hh"
+
+namespace blender {
+
 inline void selection_tile_fragment_free(SelectionTileFragment &frag)
 {
-  if (frag.fragment_ibuf) {
-    IMB_freeImBuf(frag.fragment_ibuf);
-    frag.fragment_ibuf = nullptr;
-  }
-  if (frag.fragment_mask_ibuf) {
-    IMB_freeImBuf(frag.fragment_mask_ibuf);
-    frag.fragment_mask_ibuf = nullptr;
-  }
-  if (frag.fragment_display_ibuf) {
-    IMB_freeImBuf(frag.fragment_display_ibuf);
-    frag.fragment_display_ibuf = nullptr;
-  }
+  image_select_fragment_free(frag);
 }
 
 inline void selection_tile_fragments_free(Vector<SelectionTileFragment> &fragments)
@@ -82,50 +118,18 @@ inline void selection_tile_fragments_free(Vector<SelectionTileFragment> &fragmen
   fragments.clear();
 }
 
-/* Forward declarations -- full definitions remain in the implementation files. */
-struct ImageSelectMoveState;
-struct ImageSelectTransformState;
-
-/* Per-Image-Editor floating-operation state, owned by SpaceImage_Runtime (Task 4). */
-struct PaintSelectSession {
-  ImageSelectMoveState *move = nullptr;
-  ImageSelectTransformState *transform = nullptr;
-};
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Session lifetime helpers
- * \{ */
-
-/* Free any in-progress move/transform state owned by the session.
- * Safe to call with null pointers; does not free the session itself. */
 void paint_select_session_free(PaintSelectSession &session);
 
 void image_select_move_commit(bContext *C, ImageSelectMoveState *state);
 void image_select_move_state_free(ImageSelectMoveState *state);
 void image_select_transform_state_free(ImageSelectTransformState *state);
 
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Cross-module helpers (mask / move / transform)
- * \{ */
-
 bool image_paint_selection_poll(bContext *C);
-/**
- * Prefer \a preferred_tile if it has a mask; otherwise the first tile with a non-empty
- * selection (UDIM), or \a preferred_tile as fallback.
- */
 int image_paint_selection_resolve_tile(Image *ima, const SpaceImage *sima, int preferred_tile);
 bool image_select_move_cursor_in_fragment(const ImageSelectMoveState *state,
                                           const ARegion *region,
                                           const wmEvent *event,
                                           Image *ima);
-/**
- * When a move-selection fragment is floating and the cursor is inside it, invoke
- * #PAINT_OT_image_select_move and return true. Otherwise return false.
- */
 bool image_select_move_delegate_to_move_operator(bContext *C, const wmEvent *event);
 ImBuf *image_select_move_extract(wmOperator *op,
                                  Image *ima,
@@ -135,26 +139,26 @@ ImBuf *image_select_move_extract(wmOperator *op,
                                  int2 *r_origin_px,
                                  int2 *r_size_px,
                                  ImBuf **r_fragment_mask);
-/**
- * Extract one #SelectionTileFragment per UDIM tile that has a non-empty selection mask.
- * Each fragment uses tile-local pixel coordinates (origin_px >= 0 always).
- * Appends to \a r_fragments; does not clear it first.
- * Returns true if at least one fragment was extracted.
- */
 bool image_select_extract_per_tile(wmOperator *op,
                                    Image *ima,
                                    const ImageUser &base_iuser,
                                    Vector<SelectionTileFragment> *r_fragments);
-/**
- * Build a 4-channel RGBA float ImBuf for GPU preview: RGB from \a src, alpha from \a mask.
- */
-ImBuf *image_select_make_display_ibuf(const ImBuf *src, const ImBuf *mask);
 
-/** \} */
+inline int2 image_select_fragment_ui_origin(const SelectionTileFragment &frag)
+{
+  if (frag.geom.selection_size_px.x > 0 && frag.geom.selection_size_px.y > 0) {
+    return frag.geom.selection_origin_px;
+  }
+  return frag.geom.origin_px;
+}
 
-/* -------------------------------------------------------------------- */
-/** \name Transform gizmo integration (opaque state API)
- * \{ */
+inline int2 image_select_fragment_ui_size(const SelectionTileFragment &frag)
+{
+  if (frag.geom.selection_size_px.x > 0 && frag.geom.selection_size_px.y > 0) {
+    return frag.geom.selection_size_px;
+  }
+  return frag.geom.size_px;
+}
 
 enum class ImageSelectTransformHandleType {
   None = 0,
@@ -180,22 +184,11 @@ struct ImageSelectTransformGizmoMatrices {
 };
 
 bool image_select_move_is_floating(bContext *C);
-/** Floating move in \a sima (not another Image Editor space). */
 bool image_select_move_is_floating_in_space(const SpaceImage *sima);
-/**
- * Replace floating move-selection with transform mode at the current offset.
- * Returns #OPERATOR_RUNNING_MODAL on success.
- */
 wmOperatorStatus image_select_move_convert_to_transform(bContext *C,
                                                         wmOperator *op,
                                                         const wmEvent *event);
 
-/**
- * Begin transform mode from pixels already lifted for move (no second lift / undo step).
- * Takes ownership of \a fragments (moved in).
- * \a uv_drag_offset is the accumulated UV-space drag from the move phase.
- * \a ref_tile_number is the first fragment's tile, used only to seed the ImageUser.
- */
 wmOperatorStatus image_select_transform_adopt_move_state(bContext *C,
                                                          wmOperator *op,
                                                          const wmEvent *event,
@@ -238,12 +231,6 @@ void image_select_transform_gizmo_refresh_tweak(const bContext *C,
 
 void ED_image_paint_select_transform_gizmo_setup(wmGizmoGroupType *gzgt);
 
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Operator registration prototypes
- * \{ */
-
 void PAINT_OT_image_select_all(wmOperatorType *ot);
 void PAINT_OT_image_select_none(wmOperatorType *ot);
 void PAINT_OT_image_select_invert(wmOperatorType *ot);
@@ -260,7 +247,5 @@ void PAINT_OT_image_select_transform(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_confirm(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_cancel(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_drag(wmOperatorType *ot);
-
-/** \} */
 
 } /* namespace blender */

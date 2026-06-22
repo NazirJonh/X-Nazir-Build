@@ -79,100 +79,6 @@
 
 namespace blender {
 
-/* -------------------------------------------------------------------- */
-/** \name Debug helpers
- * \{ */
-
-static void debug_print_mask1_stats(const char *tag, const int tile_number, const ImBuf *mask)
-{
-  if (!mask || !mask->float_buffer.data) {
-    printf("[img_sel_transform] %s: tile=%d mask=null\n", tag, tile_number);
-    fflush(stdout);
-    return;
-  }
-
-  const int w = mask->x;
-  const int h = mask->y;
-  const int tot = w * h;
-  const float *data = mask->float_data();
-
-  float min_v = std::numeric_limits<float>::max();
-  float max_v = -std::numeric_limits<float>::max();
-  int count_gt0 = 0;
-  for (int i = 0; i < tot; i++) {
-    const float v = data[i];
-    min_v = std::min(min_v, v);
-    max_v = std::max(max_v, v);
-    if (v > 0.001f) {
-      count_gt0++;
-    }
-  }
-
-  printf("[img_sel_transform] %s: tile=%d size=%dx%d min=%.4f max=%.4f count>0=%d\n",
-         tag,
-         tile_number,
-         w,
-         h,
-         min_v,
-         max_v,
-         count_gt0);
-  fflush(stdout);
-}
-
-static void debug_print_fragment_mask_stats(const char *tag, const SelectionTileFragment &frag)
-{
-  const ImBuf *mask = frag.fragment_mask_ibuf;
-  if (!mask || !mask->float_buffer.data) {
-    printf("[img_sel_transform] %s: src_tile=%d frag_mask=null size_px=(%d,%d)\n",
-           tag,
-           frag.tile_number,
-           frag.size_px.x,
-           frag.size_px.y);
-    fflush(stdout);
-    return;
-  }
-
-  const int w = mask->x;
-  const int h = mask->y;
-  const float *data = mask->float_data();
-  int count_gt0 = 0;
-  int count_edge_gt0 = 0;
-  float min_v = std::numeric_limits<float>::max();
-  float max_v = -std::numeric_limits<float>::max();
-
-  for (int y = 0; y < h; y++) {
-    for (int x = 0; x < w; x++) {
-      const float v = data[y * w + x];
-      min_v = std::min(min_v, v);
-      max_v = std::max(max_v, v);
-      if (v > 0.001f) {
-        count_gt0++;
-        if (x == 0 || y == 0 || x == w - 1 || y == h - 1) {
-          count_edge_gt0++;
-        }
-      }
-    }
-  }
-
-  printf(
-      "[img_sel_transform] %s: src_tile=%d frag_mask=%dx%d min=%.4f max=%.4f count>0=%d edge>0=%d origin_px=(%d,%d) size_px=(%d,%d)\n",
-      tag,
-      frag.tile_number,
-      w,
-      h,
-      min_v,
-      max_v,
-      count_gt0,
-      count_edge_gt0,
-      frag.origin_px.x,
-      frag.origin_px.y,
-      frag.size_px.x,
-      frag.size_px.y);
-  fflush(stdout);
-}
-
-/** \} */
-
 struct ImageSelectTransformState {
   SpaceImage *owner_sima = nullptr;
   ScrArea *owner_area = nullptr;
@@ -183,6 +89,7 @@ struct ImageSelectTransformState {
 
   blender::Vector<SelectionTileFragment> fragments;
   blender::Vector<gpu::Texture *> fragment_textures;
+  blender::Vector<gpu::Texture *> fragment_feather_textures;
 
   float2 uv_translation = {0.0f, 0.0f};
   float rotation = 0.0f;
@@ -241,7 +148,7 @@ static float2 image_select_tile_uv_origin(const int tile_number)
 
 static int image_select_transform_ref_tile(const ImageSelectTransformState *state)
 {
-  return state->fragments.is_empty() ? 1001 : state->fragments[0].tile_number;
+  return state->fragments.is_empty() ? 1001 : state->fragments[0].geom.tile_number;
 }
 
 /** View2d (global UV) -> tile-local pixel coords on the reference tile. */
@@ -277,17 +184,19 @@ static bool image_select_transform_source_uv_bounds(const ImageSelectTransformSt
   r_uv_y_max = std::numeric_limits<float>::lowest();
 
   for (const SelectionTileFragment &frag : state->fragments) {
-    if (!frag.fragment_ibuf) {
+    if (!frag.pixels.fragment_ibuf) {
       continue;
     }
-    const int t_col = (frag.tile_number - 1001) % 10;
-    const int t_row = (frag.tile_number - 1001) / 10;
-    const float fw = float(frag.tile_size_px.x);
-    const float fh = float(frag.tile_size_px.y);
-    const float x0 = float(t_col) + float(frag.origin_px.x) / fw + state->uv_translation.x;
-    const float y0 = float(t_row) + float(frag.origin_px.y) / fh + state->uv_translation.y;
-    const float x1 = x0 + float(frag.size_px.x) / fw;
-    const float y1 = y0 + float(frag.size_px.y) / fh;
+    const int t_col = (frag.geom.tile_number - 1001) % 10;
+    const int t_row = (frag.geom.tile_number - 1001) / 10;
+    const float fw = float(frag.geom.tile_size_px.x);
+    const float fh = float(frag.geom.tile_size_px.y);
+    const int2 ui_origin = image_select_fragment_ui_origin(frag);
+    const int2 ui_size = image_select_fragment_ui_size(frag);
+    const float x0 = float(t_col) + float(ui_origin.x) / fw + state->uv_translation.x;
+    const float y0 = float(t_row) + float(ui_origin.y) / fh + state->uv_translation.y;
+    const float x1 = x0 + float(ui_size.x) / fw;
+    const float y1 = y0 + float(ui_size.y) / fh;
     r_uv_x_min = std::min(r_uv_x_min, x0);
     r_uv_y_min = std::min(r_uv_y_min, y0);
     r_uv_x_max = std::max(r_uv_x_max, x1);
@@ -317,11 +226,11 @@ static bool image_select_transform_uv_to_containing_tile_px(const float2 &uv,
   }
   const int tile_num = 1001 + col + row * 10;
   for (const SelectionTileFragment &frag : fragments) {
-    if (frag.tile_number != tile_num) {
+    if (frag.geom.tile_number != tile_num) {
       continue;
     }
-    r_canvas_w = float(frag.tile_size_px.x);
-    r_canvas_h = float(frag.tile_size_px.y);
+    r_canvas_w = float(frag.geom.tile_size_px.x);
+    r_canvas_h = float(frag.geom.tile_size_px.y);
     r_tile_px = float2((uv.x - float(col)) * r_canvas_w, (uv.y - float(row)) * r_canvas_h);
     return true;
   }
@@ -598,20 +507,50 @@ static void image_select_transform_fragment_uv_corners(const SelectionTileFragme
                                                        const ImageSelectTransformState *state,
                                                        float2 r_uv_corners[4])
 {
-  const int t_col = (frag.tile_number - 1001) % 10;
-  const int t_row = (frag.tile_number - 1001) / 10;
-  const float tile_w = float(frag.tile_size_px.x);
-  const float tile_h = float(frag.tile_size_px.y);
+  const int t_col = (frag.geom.tile_number - 1001) % 10;
+  const int t_row = (frag.geom.tile_number - 1001) / 10;
+  const float tile_w = float(frag.geom.tile_size_px.x);
+  const float tile_h = float(frag.geom.tile_size_px.y);
 
-  const float uv_x0 = float(t_col) + float(frag.origin_px.x) / tile_w + state->uv_translation.x;
-  const float uv_y0 = float(t_row) + float(frag.origin_px.y) / tile_h + state->uv_translation.y;
-  const float uv_x1 = uv_x0 + float(frag.size_px.x) / tile_w;
-  const float uv_y1 = uv_y0 + float(frag.size_px.y) / tile_h;
+  const float uv_x0 = float(t_col) + float(frag.geom.origin_px.x) / tile_w + state->uv_translation.x;
+  const float uv_y0 = float(t_row) + float(frag.geom.origin_px.y) / tile_h + state->uv_translation.y;
+  const float uv_x1 = uv_x0 + float(frag.geom.size_px.x) / tile_w;
+  const float uv_y1 = uv_y0 + float(frag.geom.size_px.y) / tile_h;
 
   r_uv_corners[0] = float2(uv_x0, uv_y0);
   r_uv_corners[1] = float2(uv_x1, uv_y0);
   r_uv_corners[2] = float2(uv_x1, uv_y1);
   r_uv_corners[3] = float2(uv_x0, uv_y1);
+}
+
+static void draw_select_transform_textured_quad(const float2 scr_coords[4], gpu::Texture *tex)
+{
+  if (!tex) {
+    return;
+  }
+
+  GPUVertFormat *fmt_tex = immVertexFormat();
+  const uint pos_tex = GPU_vertformat_attr_add(fmt_tex, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  const uint texco = GPU_vertformat_attr_add(fmt_tex, "texCoord", gpu::VertAttrType::SFLOAT_32_32);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_IMAGE_COLOR);
+  GPU_texture_bind(tex, 0);
+  immBegin(GPU_PRIM_TRIS, 6);
+  immAttr2f(texco, 0.0f, 0.0f);
+  immVertex2f(pos_tex, scr_coords[0].x, scr_coords[0].y);
+  immAttr2f(texco, 1.0f, 0.0f);
+  immVertex2f(pos_tex, scr_coords[1].x, scr_coords[1].y);
+  immAttr2f(texco, 1.0f, 1.0f);
+  immVertex2f(pos_tex, scr_coords[2].x, scr_coords[2].y);
+  immAttr2f(texco, 0.0f, 0.0f);
+  immVertex2f(pos_tex, scr_coords[0].x, scr_coords[0].y);
+  immAttr2f(texco, 1.0f, 1.0f);
+  immVertex2f(pos_tex, scr_coords[2].x, scr_coords[2].y);
+  immAttr2f(texco, 0.0f, 1.0f);
+  immVertex2f(pos_tex, scr_coords[3].x, scr_coords[3].y);
+  immEnd();
+  GPU_texture_unbind(tex);
+  immUnbindProgram();
 }
 
 static void draw_select_transform_texture(const bContext * /*C*/, ARegion *region, void *clientdata)
@@ -626,76 +565,50 @@ static void draw_select_transform_texture(const bContext * /*C*/, ARegion *regio
 
   image_select_transform_cache_screen_coords(state, region);
 
-  GPU_blend(GPU_BLEND_ALPHA);
-
   for (const int frag_index : state->fragments.index_range()) {
     const SelectionTileFragment &frag = state->fragments[frag_index];
-    if (!frag.fragment_ibuf) {
+    if (!frag.pixels.fragment_ibuf) {
       continue;
     }
 
     float2 uv_corners[4];
     image_select_transform_fragment_uv_corners(frag, state, uv_corners);
 
-    static int transform_preview_log_counter = 0;
-    if ((transform_preview_log_counter++ % 30) == 0) {
-      printf("[img_sel_transform] preview: tile=%d uv_translation=(%.6f, %.6f) "
-             "uv_anchor=(%.6f, %.6f) scale=(%.6f, %.6f) rotation=%.6f rad "
-             "uv_corners BL=(%.6f,%.6f) TR=(%.6f,%.6f)\n",
-             frag.tile_number,
-             state->uv_translation.x,
-             state->uv_translation.y,
-             state->uv_anchor.x,
-             state->uv_anchor.y,
-             state->scale.x,
-             state->scale.y,
-             state->rotation,
-             uv_corners[0].x,
-             uv_corners[0].y,
-             uv_corners[2].x,
-             uv_corners[2].y);
-      fflush(stdout);
-    }
-
     float2 scr_coords[4];
     for (int i = 0; i < 4; i++) {
       scr_coords[i] = image_select_transform_uv_to_screen(state, region, uv_corners[i]);
     }
 
-    ImBuf *frag_for_gpu = frag.fragment_display_ibuf ? frag.fragment_display_ibuf :
-                                                       frag.fragment_ibuf;
+    ImBuf *interior_ibuf = frag.preview.fragment_display_ibuf ? frag.preview.fragment_display_ibuf :
+                                                        frag.pixels.fragment_ibuf;
 
     gpu::Texture *&frag_tex = state->fragment_textures[frag_index];
     if (!frag_tex) {
-      frag_tex = IMB_create_gpu_texture("TransformFragment", frag_for_gpu, true, true, false);
+      frag_tex = IMB_create_gpu_texture("TransformFragment", interior_ibuf, true, false, false);
+      if (frag_tex) {
+        GPU_texture_filter_mode(frag_tex, false);
+      }
     }
 
-    if (!frag_tex) {
-      continue;
+    if (frag_tex) {
+      GPU_blend(GPU_BLEND_ALPHA);
+      draw_select_transform_textured_quad(scr_coords, frag_tex);
     }
 
-    GPUVertFormat *fmt_tex = immVertexFormat();
-    const uint pos_tex = GPU_vertformat_attr_add(fmt_tex, "pos", gpu::VertAttrType::SFLOAT_32_32);
-    const uint texco = GPU_vertformat_attr_add(fmt_tex, "texCoord", gpu::VertAttrType::SFLOAT_32_32);
-
-    immBindBuiltinProgram(GPU_SHADER_3D_IMAGE_COLOR);
-    GPU_texture_bind(frag_tex, 0);
-    immBegin(GPU_PRIM_TRIS, 6);
-    immAttr2f(texco, 0.0f, 0.0f);
-    immVertex2f(pos_tex, scr_coords[0].x, scr_coords[0].y);
-    immAttr2f(texco, 1.0f, 0.0f);
-    immVertex2f(pos_tex, scr_coords[1].x, scr_coords[1].y);
-    immAttr2f(texco, 1.0f, 1.0f);
-    immVertex2f(pos_tex, scr_coords[2].x, scr_coords[2].y);
-    immAttr2f(texco, 0.0f, 0.0f);
-    immVertex2f(pos_tex, scr_coords[0].x, scr_coords[0].y);
-    immAttr2f(texco, 1.0f, 1.0f);
-    immVertex2f(pos_tex, scr_coords[2].x, scr_coords[2].y);
-    immAttr2f(texco, 0.0f, 1.0f);
-    immVertex2f(pos_tex, scr_coords[3].x, scr_coords[3].y);
-    immEnd();
-    GPU_texture_unbind(frag_tex);
-    immUnbindProgram();
+    gpu::Texture *&feather_tex = state->fragment_feather_textures[frag_index];
+    if (frag.preview.fragment_feather_display_ibuf && frag.edge_policy.use_outward_feather) {
+      if (!feather_tex) {
+        feather_tex = IMB_create_gpu_texture(
+            "TransformFragmentFeather", frag.preview.fragment_feather_display_ibuf, true, false, false);
+        if (feather_tex) {
+          GPU_texture_filter_mode(feather_tex, true);
+        }
+      }
+      if (feather_tex) {
+        GPU_blend(GPU_BLEND_ALPHA_PREMULT);
+        draw_select_transform_textured_quad(scr_coords, feather_tex);
+      }
+    }
   }
 
   GPU_blend(GPU_BLEND_NONE);
@@ -703,282 +616,22 @@ static void draw_select_transform_texture(const bContext * /*C*/, ARegion *regio
 
 static void image_select_transform_lift_source(bContext *C, ImageSelectTransformState *state)
 {
-  if (state->fragments.is_empty()) {
-    return;
-  }
-
   SpaceImage *sima = state->owner_sima ? state->owner_sima : CTX_wm_space_image(C);
   if (!sima || !sima->image) {
     return;
   }
-  Image *ima = sima->image;
-
-  const int first_tile = state->fragments[0].tile_number;
-  {
-    ImageUser undo_iuser = state->iuser;
-    undo_iuser.tile = first_tile;
-    void *undo_lock = nullptr;
-    ImBuf *undo_ibuf = BKE_image_acquire_ibuf(ima, &undo_iuser, &undo_lock);
-    if (undo_ibuf) {
-      ED_imapaint_clear_partial_redraw();
-      ED_image_undo_push_begin_with_image("Transform Selection", ima, undo_ibuf, &undo_iuser);
-      BKE_image_release_ibuf(ima, undo_ibuf, undo_lock);
-    }
-    else {
-      ED_image_undo_push_begin("Transform Selection", PaintMode::Texture2D);
-    }
-    ED_image_undo_capture_selection_mask(ima, first_tile);
-    state->undo_begun = true;
-  }
-
-  UndoStack *ustack = ED_undo_stack_get();
-  ImageUndoStep *us_open = (ustack && ustack->step_init &&
-                            ustack->step_init->type == BKE_UNDOSYS_TYPE_IMAGE) ?
-                               reinterpret_cast<ImageUndoStep *>(ustack->step_init) :
-                               nullptr;
-
-  for (const SelectionTileFragment &frag : state->fragments) {
-    if (us_open && frag.tile_number != first_tile) {
-      ImageUser tile_iuser = state->iuser;
-      tile_iuser.tile = frag.tile_number;
-      void *reg_lock = nullptr;
-      ImBuf *reg_ibuf = BKE_image_acquire_ibuf(ima, &tile_iuser, &reg_lock);
-      if (reg_ibuf) {
-        ED_image_undo_push(ima, reg_ibuf, &tile_iuser, us_open);
-        BKE_image_release_ibuf(ima, reg_ibuf, reg_lock);
-      }
-      ED_image_undo_capture_selection_mask(ima, frag.tile_number);
-    }
-
-    ImageUser tile_iuser = state->iuser;
-    tile_iuser.tile = frag.tile_number;
-    void *lock = nullptr;
-    ImBuf *ibuf = BKE_image_acquire_ibuf(ima, &tile_iuser, &lock);
-    if (!ibuf || (!ibuf->float_buffer.data && !ibuf->byte_buffer.data)) {
-      if (ibuf) {
-        BKE_image_release_ibuf(ima, ibuf, lock);
-      }
-      continue;
-    }
-
-    const float *fmask = frag.fragment_mask_ibuf ?
-                             frag.fragment_mask_ibuf->float_buffer.data :
-                             nullptr;
-    const int ox = frag.origin_px.x;
-    const int oy = frag.origin_px.y;
-
-    debug_print_fragment_mask_stats("lift_source_fragment", frag);
-
-    if (ibuf->float_data()) {
-      const int channels = ibuf->channels ? ibuf->channels : 4;
-      float *data = ibuf->float_data_for_write();
-      for (int ly = 0; ly < frag.size_px.y; ly++) {
-        const int py = oy + ly;
-        if (py < 0 || py >= ibuf->y) {
-          continue;
-        }
-        for (int lx = 0; lx < frag.size_px.x; lx++) {
-          if (fmask && fmask[ly * frag.size_px.x + lx] <= SELECTION_MASK_THRESHOLD) {
-            continue;
-          }
-          const int px = ox + lx;
-          if (px < 0 || px >= ibuf->x) {
-            continue;
-          }
-          memset(data + (py * ibuf->x + px) * channels, 0, sizeof(float) * channels);
-        }
-      }
-    }
-    else if (ibuf->byte_data()) {
-      uint8_t *data = ibuf->byte_data_for_write();
-      for (int ly = 0; ly < frag.size_px.y; ly++) {
-        const int py = oy + ly;
-        if (py < 0 || py >= ibuf->y) {
-          continue;
-        }
-        for (int lx = 0; lx < frag.size_px.x; lx++) {
-          if (fmask && fmask[ly * frag.size_px.x + lx] <= SELECTION_MASK_THRESHOLD) {
-            continue;
-          }
-          const int px = ox + lx;
-          if (px < 0 || px >= ibuf->x) {
-            continue;
-          }
-          memset(data + (py * ibuf->x + px) * 4, 0, 4);
-        }
-      }
-    }
-
-    ImBuf *tile_mask = BKE_image_paint_selection_mask_lookup(ima, frag.tile_number);
-    if (tile_mask) {
-      debug_print_mask1_stats("lift_source_tile_mask_before_clear", frag.tile_number, tile_mask);
-      float *mdata = tile_mask->float_data_for_write();
-      if (mdata) {
-        for (int ly = 0; ly < frag.size_px.y; ly++) {
-          const int py = oy + ly;
-          if (py < 0 || py >= tile_mask->y) {
-            continue;
-          }
-          for (int lx = 0; lx < frag.size_px.x; lx++) {
-            if (fmask && fmask[ly * frag.size_px.x + lx] <= SELECTION_MASK_THRESHOLD) {
-              continue;
-            }
-            const int px = ox + lx;
-            if (px < 0 || px >= tile_mask->x) {
-              continue;
-            }
-            mdata[py * tile_mask->x + px] = 0.0f;
-          }
-        }
-        tile_mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
-      }
-
-      debug_print_mask1_stats("lift_source_tile_mask_after_clear", frag.tile_number, tile_mask);
-    }
-    else {
-      printf("[img_sel_transform] lift_source: src_tile=%d tile_mask=null (no runtime selection mask?)\n",
-             frag.tile_number);
-      fflush(stdout);
-    }
-
-    ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
-    BKE_image_mark_dirty(ima, ibuf);
-
-    rcti dirty;
-    BLI_rcti_init(&dirty, ox, ox + frag.size_px.x, oy, oy + frag.size_px.y);
-    const ImageTile *itile = BKE_image_get_tile(ima, frag.tile_number);
-    BKE_image_partial_update_mark_region(ima, itile, ibuf, &dirty);
-
-    BKE_image_release_ibuf(ima, ibuf, lock);
-  }
-
-  BKE_image_free_gputextures(ima);
-  DEG_id_tag_update(&ima->id, 0);
-  WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
+  image_select_fragment_lift_source(
+      C, sima->image, state->iuser, state->fragments, "Transform Selection", state->undo_begun);
 }
 
 static void image_select_transform_restore_source(bContext *C, ImageSelectTransformState *state)
 {
   SpaceImage *sima = state->owner_sima ? state->owner_sima : CTX_wm_space_image(C);
-  if (!sima || !sima->image) {
-    if (state->undo_begun) {
-      ED_image_undo_push_end();
-    }
-    return;
-  }
-  Image *ima = sima->image;
-
-  for (const SelectionTileFragment &frag : state->fragments) {
-    if (!frag.fragment_ibuf) {
-      continue;
-    }
-
-    ImageUser tile_iuser = state->iuser;
-    tile_iuser.tile = frag.tile_number;
-    void *lock = nullptr;
-    ImBuf *ibuf = BKE_image_acquire_ibuf(ima, &tile_iuser, &lock);
-    if (!ibuf || (!ibuf->float_buffer.data && !ibuf->byte_buffer.data)) {
-      if (ibuf) {
-        BKE_image_release_ibuf(ima, ibuf, lock);
-      }
-      continue;
-    }
-
-    const float *fmask = frag.fragment_mask_ibuf ?
-                             frag.fragment_mask_ibuf->float_buffer.data :
-                             nullptr;
-    const int ox = frag.origin_px.x;
-    const int oy = frag.origin_px.y;
-
-    if (ibuf->float_data() && frag.fragment_ibuf->float_data()) {
-      const int channels = ibuf->channels ? ibuf->channels : 4;
-      float *dst = ibuf->float_data_for_write();
-      const float *src = frag.fragment_ibuf->float_data();
-      for (int ly = 0; ly < frag.size_px.y; ly++) {
-        const int py = oy + ly;
-        if (py < 0 || py >= ibuf->y) {
-          continue;
-        }
-        for (int lx = 0; lx < frag.size_px.x; lx++) {
-          if (fmask && fmask[ly * frag.size_px.x + lx] <= SELECTION_MASK_THRESHOLD) {
-            continue;
-          }
-          const int px = ox + lx;
-          if (px < 0 || px >= ibuf->x) {
-            continue;
-          }
-          memcpy(dst + (py * ibuf->x + px) * channels,
-                 src + (ly * frag.size_px.x + lx) * channels,
-                 channels * sizeof(float));
-        }
-      }
-    }
-    else if (ibuf->byte_data() && frag.fragment_ibuf->byte_data()) {
-      uint8_t *dst = ibuf->byte_data_for_write();
-      const uint8_t *src = frag.fragment_ibuf->byte_data();
-      for (int ly = 0; ly < frag.size_px.y; ly++) {
-        const int py = oy + ly;
-        if (py < 0 || py >= ibuf->y) {
-          continue;
-        }
-        for (int lx = 0; lx < frag.size_px.x; lx++) {
-          if (fmask && fmask[ly * frag.size_px.x + lx] <= SELECTION_MASK_THRESHOLD) {
-            continue;
-          }
-          const int px = ox + lx;
-          if (px < 0 || px >= ibuf->x) {
-            continue;
-          }
-          memcpy(dst + (py * ibuf->x + px) * 4, src + (ly * frag.size_px.x + lx) * 4, 4);
-        }
-      }
-    }
-
-    ImBuf *tile_mask = BKE_image_paint_selection_mask_lookup(ima, frag.tile_number);
-    if (tile_mask && frag.fragment_mask_ibuf && frag.fragment_mask_ibuf->float_buffer.data) {
-      float *mdata = tile_mask->float_data_for_write();
-      const float *fmask_restore = frag.fragment_mask_ibuf->float_data();
-      if (mdata && fmask_restore) {
-        for (int ly = 0; ly < frag.size_px.y; ly++) {
-          const int py = oy + ly;
-          if (py < 0 || py >= tile_mask->y) {
-            continue;
-          }
-          for (int lx = 0; lx < frag.size_px.x; lx++) {
-            const int px = ox + lx;
-            if (px < 0 || px >= tile_mask->x) {
-              continue;
-            }
-            mdata[py * tile_mask->x + px] = fmask_restore[ly * frag.size_px.x + lx];
-          }
-        }
-        tile_mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
-      }
-    }
-
-    ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
-    BKE_image_mark_dirty(ima, ibuf);
-
-    rcti dirty;
-    BLI_rcti_init(&dirty, ox, ox + frag.size_px.x, oy, oy + frag.size_px.y);
-    const ImageTile *itile = BKE_image_get_tile(ima, frag.tile_number);
-    BKE_image_partial_update_mark_region(ima, itile, ibuf, &dirty);
-    BKE_image_release_ibuf(ima, ibuf, lock);
-  }
-
-  BKE_image_free_gputextures(ima);
-
-  if (state->undo_begun) {
-    ED_image_undo_push_end();
-    UndoStack *undo_stack = ED_undo_stack_get();
-    if (undo_stack) {
-      BKE_undosys_stack_clear_active(undo_stack);
-    }
-  }
-
-  DEG_id_tag_update(&ima->id, 0);
-  WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
+  Image *ima = sima ? sima->image : nullptr;
+  image_select_fragment_restore_source(
+      C, ima, state->iuser, state->fragments, state->undo_begun);
 }
+
 
 void image_select_transform_state_free(ImageSelectTransformState *state)
 {
@@ -998,6 +651,12 @@ void image_select_transform_state_free(ImageSelectTransformState *state)
     }
   }
   state->fragment_textures.clear();
+  for (gpu::Texture *tex : state->fragment_feather_textures) {
+    if (tex) {
+      GPU_texture_free(tex);
+    }
+  }
+  state->fragment_feather_textures.clear();
   selection_tile_fragments_free(state->fragments);
   MEM_delete(state);
 }
@@ -1222,18 +881,6 @@ static void image_select_transform_begin_handle_drag(ImageSelectTransformState *
     state->drag_start_anchor_inside_bounds = true;
   }
   state->is_snapped = false;
-
-  printf("[img_sel_transform] begin_drag: handle=%d uv_translation=(%.6f, %.6f) "
-         "uv_anchor=(%.6f, %.6f) scale=(%.6f, %.6f) rotation=%.6f\n",
-         int(hit),
-         state->drag_start_translation.x,
-         state->drag_start_translation.y,
-         state->drag_start_anchor.x,
-         state->drag_start_anchor.y,
-         state->drag_start_scale.x,
-         state->drag_start_scale.y,
-         state->drag_start_rotation);
-  fflush(stdout);
 }
 
 static ImageSelectTransformState::HandleType image_select_transform_handle_to_internal(
@@ -1448,25 +1095,6 @@ void image_select_transform_apply_handle(bContext *C,
     state->uv_translation = state->drag_start_translation + uv_delta;
     state->uv_anchor = state->drag_start_anchor + uv_delta;
     state->uv_pivot = state->drag_start_pivot + uv_delta;
-
-    printf("[img_sel_transform] apply MOVE: mouse_uv=(%.6f, %.6f) mouse_start_uv=(%.6f, %.6f) "
-           "uv_delta=(%.6f, %.6f) uv_translation=(%.6f, %.6f) uv_anchor=(%.6f, %.6f) "
-           "drag_start_translation=(%.6f, %.6f) drag_start_anchor=(%.6f, %.6f)\n",
-           mouse_uv.x,
-           mouse_uv.y,
-           mouse_start_uv.x,
-           mouse_start_uv.y,
-           uv_delta.x,
-           uv_delta.y,
-           state->uv_translation.x,
-           state->uv_translation.y,
-           state->uv_anchor.x,
-           state->uv_anchor.y,
-           state->drag_start_translation.x,
-           state->drag_start_translation.y,
-           state->drag_start_anchor.x,
-           state->drag_start_anchor.y);
-    fflush(stdout);
   }
   else if (active == ImageSelectTransformState::HANDLE_ROTATE) {
     const float2 center_scr = image_select_transform_anchor_to_screen(state, region);
@@ -1737,47 +1365,11 @@ bool image_select_transform_calc_gizmo_matrices(const bContext *C,
   r_mats->anchor_screen[1] = anchor_scr.y;
   r_mats->anchor_screen[2] = 0.0f;
 
-  static int gizmo_log_counter = 0;
-  if ((gizmo_log_counter++ % 30) == 0) {
-    printf("[img_sel_transform] gizmo: center_screen=(%.2f, %.2f) anchor_screen=(%.2f, %.2f) "
-           "scr_corners BL=(%.2f,%.2f) BR=(%.2f,%.2f) TR=(%.2f,%.2f) TL=(%.2f,%.2f) "
-           "uv_translation=(%.6f, %.6f) uv_anchor=(%.6f, %.6f)\n",
-           center.x,
-           center.y,
-           anchor_scr.x,
-           anchor_scr.y,
-           scr_corners[0].x,
-           scr_corners[0].y,
-           scr_corners[1].x,
-           scr_corners[1].y,
-           scr_corners[2].x,
-           scr_corners[2].y,
-           scr_corners[3].x,
-           scr_corners[3].y,
-           state->uv_translation.x,
-           state->uv_translation.y,
-           state->uv_anchor.x,
-           state->uv_anchor.y);
-    fflush(stdout);
-  }
-
   return true;
 }
 
 static void image_select_transform_commit(bContext *C, ImageSelectTransformState *state)
 {
-  printf("[img_sel_transform] commit invoked: fragments=%d uv_translation=(%.6f, %.6f) "
-         "uv_anchor=(%.6f, %.6f) scale=(%.6f, %.6f) rotation=%.6f rad\n",
-         state ? int(state->fragments.size()) : 0,
-         state ? state->uv_translation.x : 0.0f,
-         state ? state->uv_translation.y : 0.0f,
-         state ? state->uv_anchor.x : 0.0f,
-         state ? state->uv_anchor.y : 0.0f,
-         state ? state->scale.x : 1.0f,
-         state ? state->scale.y : 1.0f,
-         state ? state->rotation : 0.0f);
-  fflush(stdout);
-
   SpaceImage *sima = state->owner_sima;
   if (!sima || !sima->image) {
     return;
@@ -1803,21 +1395,21 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
 
   blender::Set<int> snapshotted_tiles;
   for (const SelectionTileFragment &frag_init : state->fragments) {
-    snapshotted_tiles.add(frag_init.tile_number);
+    snapshotted_tiles.add(frag_init.geom.tile_number);
   }
 
   void *lock = nullptr;
 
   for (const SelectionTileFragment &frag : state->fragments) {
-    if (!frag.fragment_ibuf) {
+    if (!frag.pixels.fragment_ibuf) {
       continue;
     }
 
-    const int canvas_w = frag.tile_size_px.x;
-    const int canvas_h = frag.tile_size_px.y;
-    const bool is_float = frag.fragment_ibuf->float_buffer.data != nullptr;
-    const int src_col = (frag.tile_number - 1001) % 10;
-    const int src_row = (frag.tile_number - 1001) / 10;
+    const int canvas_w = frag.geom.tile_size_px.x;
+    const int canvas_h = frag.geom.tile_size_px.y;
+    const bool is_float = frag.pixels.fragment_ibuf->float_buffer.data != nullptr;
+    const int src_col = (frag.geom.tile_number - 1001) % 10;
+    const int src_row = (frag.geom.tile_number - 1001) / 10;
 
     const float2 pixel_translation = float2(
         state->uv_translation.x * float(canvas_w),
@@ -1825,31 +1417,6 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
     const float2 pixel_anchor = float2(
         (state->uv_pivot.x - float(src_col)) * float(canvas_w),
         (state->uv_pivot.y - float(src_row)) * float(canvas_h));
-
-    printf("[img_sel_transform] commit start: tile=%d origin_px=(%d,%d) size_px=(%d,%d) "
-           "canvas=%dx%d uv_translation=(%.6f, %.6f) uv_anchor=(%.6f, %.6f) "
-           "pixel_translation=(%.3f, %.3f) pixel_anchor=(%.3f, %.3f) "
-           "scale=(%.6f, %.6f) rotation=%.6f rad\n",
-           frag.tile_number,
-           frag.origin_px.x,
-           frag.origin_px.y,
-           frag.size_px.x,
-           frag.size_px.y,
-           canvas_w,
-           canvas_h,
-           state->uv_translation.x,
-           state->uv_translation.y,
-           state->uv_anchor.x,
-           state->uv_anchor.y,
-           pixel_translation.x,
-           pixel_translation.y,
-           pixel_anchor.x,
-           pixel_anchor.y,
-           state->scale.x,
-           state->scale.y,
-           state->rotation);
-    fflush(stdout);
-
     /* Build the forward transform matrix: fragment_local -> source_tile_pixel_space. */
     const float2 pivot_commit = pixel_anchor;
 
@@ -1874,7 +1441,7 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
     const float d = L[1][1];
     /* Match preview/gizmo order: translate in UV/pixel space, then scale+rotate around pivot.
      * p' = pivot + L * ((origin + p_local + translation) - pivot). */
-    const float2 origin_translated = float2(float(frag.origin_px.x), float(frag.origin_px.y)) +
+    const float2 origin_translated = float2(float(frag.geom.origin_px.x), float(frag.geom.origin_px.y)) +
                                      pixel_translation;
     const float2 linear_offset = origin_translated - pivot_commit;
     const float2 trans_vec = pivot_commit + L * linear_offset;
@@ -1882,18 +1449,6 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
     forward_matrix[1] = float3(b, d, 0.0f);
     forward_matrix[2] = float3(trans_vec.x, trans_vec.y, 1.0f);
   }
-
-  printf("[img_sel_transform] commit matrix: forward tx_ty=(%.3f, %.3f) "
-         "pivot_commit=(%.3f, %.3f) origin_translated=(%.3f, %.3f) jac_ok=%d\n",
-         forward_matrix[2][0],
-         forward_matrix[2][1],
-         pivot_commit.x,
-         pivot_commit.y,
-         float(frag.origin_px.x) + pixel_translation.x,
-         float(frag.origin_px.y) + pixel_translation.y,
-         jac_used ? 1 : 0);
-  fflush(stdout);
-
   /* IMB_transform expects a backward matrix: dest_pixel -> fragment_local. */
   const float3x3 backward_matrix_src = math::invert(forward_matrix);
 
@@ -1903,9 +1458,9 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
    * through the forward matrix into source-tile pixel space, then into UV space. */
   const float2 corners_local[4] = {
       {0.0f, 0.0f},
-      {float(frag.size_px.x), 0.0f},
-      {float(frag.size_px.x), float(frag.size_px.y)},
-      {0.0f, float(frag.size_px.y)}};
+      {float(frag.geom.size_px.x), 0.0f},
+      {float(frag.geom.size_px.x), float(frag.geom.size_px.y)},
+      {0.0f, float(frag.geom.size_px.y)}};
   float2 uv_min = float2(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
   float2 uv_max = float2(std::numeric_limits<float>::lowest(),
                          std::numeric_limits<float>::lowest());
@@ -1917,44 +1472,13 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
     uv_max = math::max(uv_max, uv);
   }
 
-  printf("[img_sel_transform] commit uv_aabb: [%.6f, %.6f] x [%.6f, %.6f]\n",
-         uv_min.x,
-         uv_max.x,
-         uv_min.y,
-         uv_max.y);
+  const rctf src_crop{0.0f, float(frag.geom.size_px.x), 0.0f, float(frag.geom.size_px.y)};
 
-  {
-    float preview_uv_x_min, preview_uv_y_min, preview_uv_x_max, preview_uv_y_max;
-    if (image_select_transform_source_uv_bounds(
-            state, preview_uv_x_min, preview_uv_y_min, preview_uv_x_max, preview_uv_y_max))
-    {
-      printf("[img_sel_transform] commit vs preview bounds (translation only, no rot/scale): "
-             "[%.6f, %.6f] x [%.6f, %.6f]\n",
-             preview_uv_x_min,
-             preview_uv_x_max,
-             preview_uv_y_min,
-             preview_uv_y_max);
-    }
-  }
-  fflush(stdout);
-
-  /* Fragment crop rect in fragment-local space -- constant across all destination tiles. */
-  const rctf src_crop{0.0f, float(frag.size_px.x), 0.0f, float(frag.size_px.y)};
-
-  /* Obtain the currently-open image undo step (lives in step_init until push_end).
-   * Destination tiles other than the source tile were not registered at lift time, so their
-   * pre-state must be snapshotted here -- before any pixel data is overwritten -- to make
-   * Ctrl+Z restore them correctly. */
-  /* Iterate over every tile in the image and apply the fragment to those that intersect
-   * the UV AABB. When dest == source the pixel offset is zero and the math is identical
-   * to the previous single-tile implementation. */
   for (ImageTile *dest_tile : ListBaseWrapper<ImageTile>(ima->tiles)) {
     const int dest_tile_num = dest_tile->tile_number;
     const int dst_col = (dest_tile_num - 1001) % 10;
     const int dst_row = (dest_tile_num - 1001) / 10;
 
-    /* Skip tiles whose UV range [dst_col, dst_col+1) x [dst_row, dst_row+1) does not
-     * intersect the transformed fragment's AABB. */
     if (uv_max.x <= float(dst_col) || uv_min.x >= float(dst_col + 1) ||
         uv_max.y <= float(dst_row) || uv_min.y >= float(dst_row + 1)) {
       continue;
@@ -1964,17 +1488,6 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
     ImBuf *dest_ibuf = BKE_image_acquire_ibuf(ima, &iuser, &lock);
     if (!dest_ibuf) {
       continue;
-    }
-
-    if (dest_ibuf->x != canvas_w || dest_ibuf->y != canvas_h) {
-      printf(
-          "[img_sel_transform] commit warn: dest_tile=%d canvas_size_mismatch src_canvas=%dx%d dest_ibuf=%dx%d\n",
-          dest_tile_num,
-          canvas_w,
-          canvas_h,
-          dest_ibuf->x,
-          dest_ibuf->y);
-      fflush(stdout);
     }
 
     /* Register the pre-state of every destination tile that differs from the source tile.
@@ -2012,23 +1525,12 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
 
     /* backward_dest maps: dest_tile_px -> src_tile_px -> fragment_local. */
     const float3x3 backward_dest = backward_matrix_src * M_dest_to_src;
-
-    printf("[img_sel_transform] commit dest_tile=%d M_dest_to_src scale=(%.6f, %.6f) "
-           "translate=(%.3f, %.3f) dest_ibuf=%dx%d\n",
-           dest_tile_num,
-           sx,
-           sy,
-           tx,
-           ty,
-           dest_w,
-           dest_h);
-    fflush(stdout);
-
     /* temp_pixels must match the destination buffer type -- IMB_transform does not support
      * mixed src/dst types. */
     ImBuf *temp_pixels = IMB_allocImBuf(
         dest_ibuf->x, dest_ibuf->y, is_float ? ImBufFlags::FloatData : ImBufFlags::ByteData);
     ImBuf *temp_mask = IMB_allocImBuf(dest_ibuf->x, dest_ibuf->y, ImBufFlags::FloatData);
+    ImBuf *temp_blend_mask = IMB_allocImBuf(dest_ibuf->x, dest_ibuf->y, ImBufFlags::FloatData);
     temp_pixels->channels = 4;
     IMB_rectfill_alpha(temp_pixels, 0.0f);
 
@@ -2039,7 +1541,7 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
       fill_data[i * 4 + 0] = 0.0f;
     }
 
-    IMB_transform(frag.fragment_ibuf, temp_pixels, IMB_TRANSFORM_MODE_CROP_SRC,
+    IMB_transform(frag.pixels.fragment_ibuf, temp_pixels, IMB_TRANSFORM_MODE_CROP_SRC,
                   IMB_FILTER_BILINEAR, backward_dest, &src_crop);
 
     /* Transform the fragment selection mask into temp_mask using the same matrix and crop as the
@@ -2057,8 +1559,8 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
      * brush still reaches them -- the user sees strokes bleeding outside the visible selection
      * boundary.  NEAREST skips edge_aa entirely, keeping global_mask strictly 0 or 1 so the
      * brush constraint matches the visual selection boundary exactly. */
-    if (frag.fragment_mask_ibuf) {
-      IMB_transform(frag.fragment_mask_ibuf, temp_mask, IMB_TRANSFORM_MODE_CROP_SRC,
+    if (frag.pixels.fragment_mask_ibuf) {
+      IMB_transform(frag.pixels.fragment_mask_ibuf, temp_mask, IMB_TRANSFORM_MODE_CROP_SRC,
                     IMB_FILTER_NEAREST, backward_dest, &src_crop);
     }
     else {
@@ -2068,15 +1570,17 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
       }
     }
 
-    const float *mask_data = temp_mask->float_buffer.data;
-    const int total_pixels = dest_ibuf->x * dest_ibuf->y;
+    /* Outward feather from the destination-grid binary mask (extends past the selection edge). */
+    float *blend_fill = temp_blend_mask->float_data_for_write();
+    BKE_image_paint_selection_compute_blend_mask_to_4ch(temp_mask->float_buffer.data,
+                                                        dest_ibuf->x,
+                                                        dest_ibuf->y,
+                                                        blend_fill,
+                                                        4,
+                                                        frag.edge_policy);
 
-    /* Debug counters to verify mask coverage during commit.
-     * The core symptom: pixels near UDIM borders can be missing from the merged mask, which
-     * then causes the commit to skip writing those pixels. */
-    int mask_nonzero = 0;
-    int mask_tiny = 0;
-    int blended_pixels = 0;
+    const float *mask_data = temp_blend_mask->float_buffer.data;
+    const int total_pixels = dest_ibuf->x * dest_ibuf->y;
 
     /* Alpha-blend the transformed fragment onto the destination canvas.
      * blend = mask * fragment_alpha so partially-transparent pixels are respected. */
@@ -2086,12 +1590,6 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
       const int ch = dest_ibuf->channels ? dest_ibuf->channels : 4;
       for (int i = 0; i < total_pixels; i++) {
         const float m = mask_data[i * 4 + 0];
-        if (m > 0.001f) {
-          mask_nonzero++;
-        }
-        else if (m > 0.0f) {
-          mask_tiny++;
-        }
         if (m <= 0.001f) {
           continue;
         }
@@ -2100,7 +1598,6 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
         if (blend <= 0.001f) {
           continue;
         }
-        blended_pixels++;
         canvas[i * ch + 0] = (1.0f - blend) * canvas[i * ch + 0] + blend * frag_data[i * 4 + 0];
         canvas[i * ch + 1] = (1.0f - blend) * canvas[i * ch + 1] + blend * frag_data[i * 4 + 1];
         canvas[i * ch + 2] = (1.0f - blend) * canvas[i * ch + 2] + blend * frag_data[i * 4 + 2];
@@ -2115,12 +1612,6 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
       uint8_t *canvas = dest_ibuf->byte_data_for_write();
       for (int i = 0; i < total_pixels; i++) {
         const float m = mask_data[i * 4 + 0];
-        if (m > 0.001f) {
-          mask_nonzero++;
-        }
-        else if (m > 0.0f) {
-          mask_tiny++;
-        }
         if (m <= 0.001f) {
           continue;
         }
@@ -2129,7 +1620,6 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
         if (blend <= 0.001f) {
           continue;
         }
-        blended_pixels++;
         canvas[i * 4 + 0] = uint8_t(std::clamp(
             (1.0f - blend) * float(canvas[i * 4 + 0]) + blend * float(frag_data[i * 4 + 0]),
             0.0f,
@@ -2155,61 +1645,20 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
       /* If the original selection didn't touch this tile, there may be no runtime mask yet.
        * Still create one so the merged result can be inspected and subsequent ops see it. */
       global_mask = BKE_image_paint_selection_mask_get(ima, dest_tile_num, dest_ibuf->x, dest_ibuf->y);
-      printf(
-          "[img_sel_transform] commit: created missing runtime mask for dest_tile=%d (size=%dx%d)\n",
-          dest_tile_num,
-          dest_ibuf->x,
-          dest_ibuf->y);
-      fflush(stdout);
     }
 
     if (global_mask) {
-      if (global_mask->x != dest_ibuf->x || global_mask->y != dest_ibuf->y) {
-        printf(
-            "[img_sel_transform] commit warn: global_mask size mismatch dest_tile=%d global=%dx%d dest=%dx%d\n",
-            dest_tile_num,
-            global_mask->x,
-            global_mask->y,
-            dest_ibuf->x,
-            dest_ibuf->y);
-        fflush(stdout);
-      }
       float *g_mask = global_mask->float_data_for_write();
-      int merged_nonzero = 0;
       for (int i = 0; i < total_pixels; i++) {
-        const float add = mask_data[i * 4 + 0];
-        if (add > 0.001f) {
-          merged_nonzero++;
-        }
+        const float add = temp_mask->float_buffer.data[i * 4 + 0];
         g_mask[i] = std::clamp(g_mask[i] + add, 0.0f, 1.0f);
       }
       global_mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
-
-      printf(
-          "[img_sel_transform] commit mask stats: src_tile=%d dest_tile=%d mask_nonzero=%d mask_tiny=%d blended=%d merged_nonzero=%d total=%d\n",
-          frag.tile_number,
-          dest_tile_num,
-          mask_nonzero,
-          mask_tiny,
-          blended_pixels,
-          merged_nonzero,
-          total_pixels);
-      fflush(stdout);
-    }
-    else {
-      printf(
-          "[img_sel_transform] commit mask stats: src_tile=%d dest_tile=%d global_mask=null (unexpected) mask_nonzero=%d mask_tiny=%d blended=%d total=%d\n",
-          frag.tile_number,
-          dest_tile_num,
-          mask_nonzero,
-          mask_tiny,
-          blended_pixels,
-          total_pixels);
-      fflush(stdout);
     }
 
     IMB_freeImBuf(temp_pixels);
     IMB_freeImBuf(temp_mask);
+    IMB_freeImBuf(temp_blend_mask);
 
     dest_ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
     BKE_image_mark_dirty(ima, dest_ibuf);
@@ -2312,6 +1761,7 @@ static wmOperatorStatus image_select_transform_exec(bContext *C, wmOperator *op)
   state->iuser = iuser;
   state->fragments = std::move(fragments);
   state->fragment_textures.resize(state->fragments.size(), nullptr);
+  state->fragment_feather_textures.resize(state->fragments.size(), nullptr);
   
   float uv_translation[2];
   float scale[2];
@@ -2415,7 +1865,8 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
   state->fragment_textures.resize(state->fragments.size(), nullptr);
-  state->iuser.tile = state->fragments[0].tile_number;
+  state->fragment_feather_textures.resize(state->fragments.size(), nullptr);
+  state->iuser.tile = state->fragments[0].geom.tile_number;
 
   {
     float uv_x_min, uv_y_min, uv_x_max, uv_y_max;
@@ -2425,13 +1876,14 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
     }
     else {
       const SelectionTileFragment &frag0 = state->fragments[0];
-      const int t0_col = (frag0.tile_number - 1001) % 10;
-      const int t0_row = (frag0.tile_number - 1001) / 10;
-      const float fw = float(frag0.tile_size_px.x);
-      const float fh = float(frag0.tile_size_px.y);
-      state->uv_anchor = float2(
-          float(t0_col) + (float(frag0.origin_px.x) + float(frag0.size_px.x) * 0.5f) / fw,
-          float(t0_row) + (float(frag0.origin_px.y) + float(frag0.size_px.y) * 0.5f) / fh);
+      const int t0_col = (frag0.geom.tile_number - 1001) % 10;
+      const int t0_row = (frag0.geom.tile_number - 1001) / 10;
+      const float fw = float(frag0.geom.tile_size_px.x);
+      const float fh = float(frag0.geom.tile_size_px.y);
+      const int2 ui_origin = image_select_fragment_ui_origin(frag0);
+      const int2 ui_size = image_select_fragment_ui_size(frag0);
+      state->uv_anchor = float2(float(t0_col) + (float(ui_origin.x) + float(ui_size.x) * 0.5f) / fw,
+                                float(t0_row) + (float(ui_origin.y) + float(ui_size.y) * 0.5f) / fh);
     }
     state->uv_pivot = state->uv_anchor;
   }
@@ -2611,33 +2063,29 @@ wmOperatorStatus image_select_transform_adopt_move_state(bContext *C,
   state->owner_sima = sima;
   state->fragments = std::move(fragments);
   state->fragment_textures.resize(state->fragments.size(), nullptr);
+  state->fragment_feather_textures.resize(state->fragments.size(), nullptr);
   state->iuser = iuser;
   state->iuser.tile = ref_tile_number;
   state->undo_begun = undo_begun;
   state->uv_translation = uv_drag_offset;
-
-  printf("[img_sel_transform] adopt_move_state: uv_drag_offset=(%.6f, %.6f) ref_tile=%d\n",
-         uv_drag_offset.x,
-         uv_drag_offset.y,
-         ref_tile_number);
-  fflush(stdout);
-
   float uv_x_min = std::numeric_limits<float>::max();
   float uv_y_min = std::numeric_limits<float>::max();
   float uv_x_max = std::numeric_limits<float>::lowest();
   float uv_y_max = std::numeric_limits<float>::lowest();
   for (const SelectionTileFragment &frag : state->fragments) {
-    if (!frag.fragment_ibuf) {
+    if (!frag.pixels.fragment_ibuf) {
       continue;
     }
-    const int t_col = (frag.tile_number - 1001) % 10;
-    const int t_row = (frag.tile_number - 1001) / 10;
-    const float tile_w = float(frag.tile_size_px.x);
-    const float tile_h = float(frag.tile_size_px.y);
-    const float uv_x0 = float(t_col) + float(frag.origin_px.x) / tile_w;
-    const float uv_y0 = float(t_row) + float(frag.origin_px.y) / tile_h;
-    const float uv_x1 = uv_x0 + float(frag.size_px.x) / tile_w;
-    const float uv_y1 = uv_y0 + float(frag.size_px.y) / tile_h;
+    const int t_col = (frag.geom.tile_number - 1001) % 10;
+    const int t_row = (frag.geom.tile_number - 1001) / 10;
+    const float tile_w = float(frag.geom.tile_size_px.x);
+    const float tile_h = float(frag.geom.tile_size_px.y);
+    const int2 ui_origin = image_select_fragment_ui_origin(frag);
+    const int2 ui_size = image_select_fragment_ui_size(frag);
+    const float uv_x0 = float(t_col) + float(ui_origin.x) / tile_w;
+    const float uv_y0 = float(t_row) + float(ui_origin.y) / tile_h;
+    const float uv_x1 = uv_x0 + float(ui_size.x) / tile_w;
+    const float uv_y1 = uv_y0 + float(ui_size.y) / tile_h;
     uv_x_min = std::min(uv_x_min, uv_x0);
     uv_y_min = std::min(uv_y_min, uv_y0);
     uv_x_max = std::max(uv_x_max, uv_x1);
@@ -2646,17 +2094,6 @@ wmOperatorStatus image_select_transform_adopt_move_state(bContext *C,
   state->uv_anchor = float2((uv_x_min + uv_x_max) * 0.5f + uv_drag_offset.x,
                             (uv_y_min + uv_y_max) * 0.5f + uv_drag_offset.y);
   state->uv_pivot = state->uv_anchor;
-
-  printf("[img_sel_transform] adopt_move_state: bounds_uv=[%.6f,%.6f]x[%.6f,%.6f] "
-         "uv_anchor=(%.6f, %.6f)\n",
-         uv_x_min,
-         uv_x_max,
-         uv_y_min,
-         uv_y_max,
-         state->uv_anchor.x,
-         state->uv_anchor.y);
-  fflush(stdout);
-
   state->prev_mouse_xy = int2{event->mval[0], event->mval[1]};
   state->mouse_start_pos = float2(event->mval[0], event->mval[1]);
   state->mouse_curr_pos = float2(event->mval[0], event->mval[1]);

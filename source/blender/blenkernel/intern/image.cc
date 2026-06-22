@@ -13,6 +13,7 @@
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
+#include <limits>
 #include <optional>
 #ifndef WIN32
 #  include <unistd.h>
@@ -142,6 +143,8 @@ static void image_runtime_free_data(Image *image)
 /** \name Image Paint Selection Masks (runtime, per-tile)
  * \{ */
 
+static void paint_selection_blend_mask_tile_invalidate(Image *image, int tile_number);
+
 ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int width, int height)
 {
   bke::ImageRuntime *runtime = image->runtime;
@@ -154,13 +157,47 @@ ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int wid
     /* Size changed, free old mask. */
     IMB_freeImBuf(mask);
     runtime->paint_selection_masks.remove(tile_number);
+    paint_selection_blend_mask_tile_invalidate(image, tile_number);
   }
 
   ImBuf *mask = IMB_allocImBuf(width, height, ImBufFlags::Zero);
   IMB_alloc_float_pixels(mask, 1);
   memset(mask->float_data_for_write(), 0, size_t(width) * height * sizeof(float));
   runtime->paint_selection_masks.add_new(tile_number, mask);
+  paint_selection_blend_mask_tile_invalidate(image, tile_number);
   return mask;
+}
+
+static void paint_selection_blend_mask_tile_invalidate(Image *image, int tile_number)
+{
+  if (!image || !image->runtime) {
+    return;
+  }
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **blend_ptr = runtime->paint_selection_blend_masks.lookup_ptr(tile_number);
+  if (blend_ptr) {
+    if (*blend_ptr) {
+      IMB_freeImBuf(*blend_ptr);
+    }
+    runtime->paint_selection_blend_masks.remove(tile_number);
+  }
+}
+
+void BKE_image_paint_selection_blend_mask_invalidate_tile(Image *image, int tile_number)
+{
+  paint_selection_blend_mask_tile_invalidate(image, tile_number);
+}
+
+void BKE_image_paint_selection_blend_mask_invalidate(Image *image)
+{
+  if (!image || !image->runtime) {
+    return;
+  }
+  bke::ImageRuntime *runtime = image->runtime;
+  for (ImBuf *blend : runtime->paint_selection_blend_masks.values()) {
+    IMB_freeImBuf(blend);
+  }
+  runtime->paint_selection_blend_masks.clear();
 }
 
 void BKE_image_paint_selection_mask_free(Image *image)
@@ -170,6 +207,9 @@ void BKE_image_paint_selection_mask_free(Image *image)
     IMB_freeImBuf(mask);
   }
   runtime->paint_selection_masks.clear();
+
+  BKE_image_paint_selection_blend_mask_invalidate(image);
+  image->runtime->paint_selection_edge_policy = BKE_image_paint_selection_edge_policy_feathered();
 
   for (gpu::Texture *tex : runtime->paint_selection_mask_textures.values()) {
     GPU_texture_free(tex);
@@ -185,6 +225,7 @@ void BKE_image_paint_selection_mask_tile_free(Image *image, int tile_number)
     IMB_freeImBuf(*mask_ptr);
     runtime->paint_selection_masks.remove(tile_number);
   }
+  paint_selection_blend_mask_tile_invalidate(image, tile_number);
   gpu::Texture **tex_ptr = runtime->paint_selection_mask_textures.lookup_ptr(tile_number);
   if (tex_ptr) {
     GPU_texture_free(*tex_ptr);
@@ -255,6 +296,322 @@ float BKE_image_paint_selection_mask_sample(const Image *image, int tile_number,
   return pixels[size_t(y) * mask->x + x];
 }
 
+static bool image_paint_selection_mask_pixel_is_inside(
+    const float *src, const int w, const int h, const int x, const int y, const int src_stride)
+{
+  if (x < 0 || x >= w || y < 0 || y >= h) {
+    return false;
+  }
+  return src[(y * w + x) * src_stride] > IMAGE_PAINT_SELECTION_MASK_THRESHOLD;
+}
+
+static float image_paint_selection_smoothstep(const float edge0, const float edge1, const float x)
+{
+  if (edge1 <= edge0) {
+    return x >= edge0 ? 1.0f : 0.0f;
+  }
+  const float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
+static float image_paint_selection_min_dist_to_opposite(const float *src,
+                                                        const int w,
+                                                        const int h,
+                                                        const int x,
+                                                        const int y,
+                                                        const int src_stride,
+                                                        const int blend_radius_px)
+{
+  const bool center_inside = image_paint_selection_mask_pixel_is_inside(
+      src, w, h, x, y, src_stride);
+  const int search = blend_radius_px + 3;
+  float min_dist_sq = std::numeric_limits<float>::max();
+
+  for (int dy = -search; dy <= search; dy++) {
+    const int sy = y + dy;
+    if (sy < 0 || sy >= h) {
+      continue;
+    }
+    for (int dx = -search; dx <= search; dx++) {
+      if (dx == 0 && dy == 0) {
+        continue;
+      }
+      const int sx = x + dx;
+      if (sx < 0 || sx >= w) {
+        continue;
+      }
+      const bool neighbor_inside = image_paint_selection_mask_pixel_is_inside(
+          src, w, h, sx, sy, src_stride);
+      if (neighbor_inside == center_inside) {
+        continue;
+      }
+      const float dist_sq = float(dx * dx + dy * dy);
+      min_dist_sq = std::min(min_dist_sq, dist_sq);
+    }
+  }
+
+  if (min_dist_sq == std::numeric_limits<float>::max()) {
+    return float(search + 1);
+  }
+  return std::sqrt(min_dist_sq);
+}
+
+static float image_paint_selection_smooth_blend_weight(const float *src,
+                                                       const int w,
+                                                       const int h,
+                                                       const int x,
+                                                       const int y,
+                                                       const int src_stride,
+                                                       const int blend_radius_px,
+                                                       const float edge_gamma)
+{
+  const bool inside = image_paint_selection_mask_pixel_is_inside(src, w, h, x, y, src_stride);
+
+  /* Preserve full interior content; feather only outside the binary mask. */
+  if (inside) {
+    return 1.0f;
+  }
+
+  const float radius = float(blend_radius_px);
+  const float dist_to_inside = image_paint_selection_min_dist_to_opposite(
+      src, w, h, x, y, src_stride, blend_radius_px);
+
+  if (dist_to_inside > radius + 1.5f) {
+    return 0.0f;
+  }
+
+  const float falloff_extent = radius + 0.5f;
+  const float dist_outside = dist_to_inside - 0.5f;
+  float weight = 1.0f - image_paint_selection_smoothstep(0.0f, falloff_extent, dist_outside);
+
+  /* Push outward feather weights toward zero for a more transparent rim. */
+  weight = std::pow(weight, edge_gamma);
+  return weight;
+}
+
+static float image_paint_selection_binary_blend_weight(
+    const float *src, const int w, const int h, const int x, const int y, const int src_stride)
+{
+  return image_paint_selection_mask_pixel_is_inside(src, w, h, x, y, src_stride) ? 1.0f : 0.0f;
+}
+
+const PaintSelectionEdgePolicy &BKE_image_paint_selection_edge_policy_get(const Image *image)
+{
+  static const PaintSelectionEdgePolicy default_policy = BKE_image_paint_selection_edge_policy_feathered();
+  if (!image || !image->runtime) {
+    return default_policy;
+  }
+  return image->runtime->paint_selection_edge_policy;
+}
+
+void BKE_image_paint_selection_set_edge_policy(Image *image,
+                                               const PaintSelectionEdgePolicy &edge_policy)
+{
+  if (!image || !image->runtime) {
+    return;
+  }
+  if (image->runtime->paint_selection_edge_policy.use_outward_feather ==
+          edge_policy.use_outward_feather &&
+      image->runtime->paint_selection_edge_policy.blend_radius_px == edge_policy.blend_radius_px &&
+      image->runtime->paint_selection_edge_policy.edge_gamma == edge_policy.edge_gamma)
+  {
+    return;
+  }
+  image->runtime->paint_selection_edge_policy = edge_policy;
+  BKE_image_paint_selection_blend_mask_invalidate(image);
+}
+
+bool BKE_image_paint_selection_use_feather(const Image *image)
+{
+  return BKE_image_paint_selection_edge_policy_get(image).use_outward_feather;
+}
+
+void BKE_image_paint_selection_set_use_feather(Image *image, const bool use_feather)
+{
+  BKE_image_paint_selection_set_edge_policy(
+      image,
+      use_feather ? BKE_image_paint_selection_edge_policy_feathered() :
+                    BKE_image_paint_selection_edge_policy_hard());
+}
+
+static ImBuf *paint_selection_blend_mask_ensure(Image *image, int tile_number)
+{
+  if (!image || !image->runtime) {
+    return nullptr;
+  }
+  ImBuf *binary = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  if (!binary || !binary->float_buffer.data) {
+    paint_selection_blend_mask_tile_invalidate(image, tile_number);
+    return nullptr;
+  }
+
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **blend_ptr = runtime->paint_selection_blend_masks.lookup_ptr(tile_number);
+  if (blend_ptr && *blend_ptr && (*blend_ptr)->x == binary->x && (*blend_ptr)->y == binary->y) {
+    return *blend_ptr;
+  }
+
+  paint_selection_blend_mask_tile_invalidate(image, tile_number);
+  const PaintSelectionEdgePolicy &edge_policy = BKE_image_paint_selection_edge_policy_get(image);
+  ImBuf *blend = BKE_image_paint_selection_compute_blend_mask(binary, edge_policy);
+  if (blend) {
+    runtime->paint_selection_blend_masks.add_new(tile_number, blend);
+  }
+  return blend;
+}
+
+static float paint_selection_blend_mask_sample_imbuf(const ImBuf *blend, const int x, const int y)
+{
+  if (!blend || !blend->float_buffer.data) {
+    return 1.0f;
+  }
+  if (x < 0 || x >= blend->x || y < 0 || y >= blend->y) {
+    return 0.0f;
+  }
+  return blend->float_data()[size_t(y) * blend->x + x];
+}
+
+static float paint_selection_blend_mask_sample_imbuf_bilinear(const ImBuf *blend,
+                                                              const float fx,
+                                                              const float fy)
+{
+  if (!blend || !blend->float_buffer.data) {
+    return 1.0f;
+  }
+  const int w = blend->x;
+  const int h = blend->y;
+  if (w <= 0 || h <= 0) {
+    return 0.0f;
+  }
+
+  const float px = std::clamp(fx - 0.5f, 0.0f, float(w) - 1.0001f);
+  const float py = std::clamp(fy - 0.5f, 0.0f, float(h) - 1.0001f);
+  const int x0 = int(px);
+  const int y0 = int(py);
+  const int x1 = std::min(x0 + 1, w - 1);
+  const int y1 = std::min(y0 + 1, h - 1);
+  const float wx = px - float(x0);
+  const float wy = py - float(y0);
+
+  const float *m = blend->float_data();
+  const float v00 = m[size_t(y0) * w + x0];
+  const float v10 = m[size_t(y0) * w + x1];
+  const float v01 = m[size_t(y1) * w + x0];
+  const float v11 = m[size_t(y1) * w + x1];
+  return (1.0f - wx) * (1.0f - wy) * v00 + wx * (1.0f - wy) * v10 +
+         (1.0f - wx) * wy * v01 + wx * wy * v11;
+}
+
+float BKE_image_paint_selection_blend_sample(const Image *image, int tile_number, int x, int y)
+{
+  const PaintSelectionEdgePolicy &edge_policy = BKE_image_paint_selection_edge_policy_get(image);
+  if (!edge_policy.use_outward_feather) {
+    return BKE_image_paint_selection_mask_sample(image, tile_number, x, y) >
+                   IMAGE_PAINT_SELECTION_MASK_THRESHOLD ?
+               1.0f :
+               0.0f;
+  }
+
+  ImBuf *blend = paint_selection_blend_mask_ensure(const_cast<Image *>(image), tile_number);
+  if (!blend) {
+    return 1.0f;
+  }
+  return paint_selection_blend_mask_sample_imbuf(blend, x, y);
+}
+
+float BKE_image_paint_selection_blend_sample_bilinear(const Image *image,
+                                                      const int tile_number,
+                                                      const float fx,
+                                                      const float fy)
+{
+  const PaintSelectionEdgePolicy &edge_policy = BKE_image_paint_selection_edge_policy_get(image);
+  if (!edge_policy.use_outward_feather) {
+    const int x = int(floorf(fx));
+    const int y = int(floorf(fy));
+    return BKE_image_paint_selection_mask_sample(image, tile_number, x, y) >
+                   IMAGE_PAINT_SELECTION_MASK_THRESHOLD ?
+               1.0f :
+               0.0f;
+  }
+
+  ImBuf *blend = paint_selection_blend_mask_ensure(const_cast<Image *>(image), tile_number);
+  if (!blend) {
+    return 1.0f;
+  }
+  return paint_selection_blend_mask_sample_imbuf_bilinear(blend, fx, fy);
+}
+
+ImBuf *BKE_image_paint_selection_compute_blend_mask(const ImBuf *binary_mask,
+                                                    const PaintSelectionEdgePolicy &edge_policy)
+{
+  BLI_assert(binary_mask && binary_mask->float_buffer.data);
+
+  const int w = binary_mask->x;
+  const int h = binary_mask->y;
+  ImBuf *blend = IMB_allocImBuf(w, h, ImBufFlags::Zero);
+  IMB_alloc_float_pixels(blend, 1);
+  float *dst = blend->float_data_for_write();
+  const float *src = binary_mask->float_data();
+
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      dst[y * w + x] = edge_policy.use_outward_feather ?
+                             image_paint_selection_smooth_blend_weight(src,
+                                                                       w,
+                                                                       h,
+                                                                       x,
+                                                                       y,
+                                                                       1,
+                                                                       edge_policy.blend_radius_px,
+                                                                       edge_policy.edge_gamma) :
+                             image_paint_selection_binary_blend_weight(src, w, h, x, y, 1);
+    }
+  }
+
+  return blend;
+}
+
+void BKE_image_paint_selection_bounds_expand_for_blend(int r_min[2],
+                                                       int r_max[2],
+                                                       int tile_width,
+                                                       int tile_height,
+                                                       const PaintSelectionEdgePolicy &edge_policy)
+{
+  if (!edge_policy.use_outward_feather) {
+    return;
+  }
+  const int pad = edge_policy.blend_radius_px + 1;
+  r_min[0] = std::max(0, r_min[0] - pad);
+  r_min[1] = std::max(0, r_min[1] - pad);
+  r_max[0] = std::min(tile_width, r_max[0] + pad);
+  r_max[1] = std::min(tile_height, r_max[1] + pad);
+}
+
+void BKE_image_paint_selection_compute_blend_mask_to_4ch(const float *binary,
+                                                         const int width,
+                                                         const int height,
+                                                         float *blend_4ch,
+                                                         const int binary_stride_channels,
+                                                         const PaintSelectionEdgePolicy &edge_policy)
+{
+  const int total = width * height;
+  for (int i = 0; i < total; i++) {
+    const int x = i % width;
+    const int y = i / width;
+    blend_4ch[i * 4 + 0] = edge_policy.use_outward_feather ?
+                               image_paint_selection_smooth_blend_weight(binary,
+                                                                         width,
+                                                                         height,
+                                                                         x,
+                                                                         y,
+                                                                         binary_stride_channels,
+                                                                         edge_policy.blend_radius_px,
+                                                                         edge_policy.edge_gamma) :
+                               image_paint_selection_binary_blend_weight(
+                                   binary, width, height, x, y, binary_stride_channels);
+  }
+}
+
 void BKE_image_paint_selection_mask_fill(Image *image, int tile_number, float value)
 {
   ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
@@ -270,6 +627,7 @@ void BKE_image_paint_selection_mask_fill(Image *image, int tile_number, float va
     data[i] = value;
   }
   mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
+  paint_selection_blend_mask_tile_invalidate(image, tile_number);
 }
 
 void BKE_image_paint_selection_mask_invert(Image *image, int tile_number)
@@ -287,6 +645,7 @@ void BKE_image_paint_selection_mask_invert(Image *image, int tile_number)
     data[i] = 1.0f - data[i];
   }
   mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
+  paint_selection_blend_mask_tile_invalidate(image, tile_number);
 }
 
 void BKE_image_paint_selection_mask_merge(Image *image,
@@ -320,6 +679,7 @@ void BKE_image_paint_selection_mask_merge(Image *image,
     }
   }
   mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
+  paint_selection_blend_mask_tile_invalidate(image, tile_number);
 }
 
 bool BKE_image_paint_selection_mask_has_any(const Image *image)
@@ -386,6 +746,7 @@ void BKE_image_paint_selection_mask_restore_tile(Image *image,
       runtime->paint_selection_masks.remove(tile_number);
     }
   }
+  paint_selection_blend_mask_tile_invalidate(image, tile_number);
 }
 
 ImBuf *BKE_image_paint_selection_extract_pixels(Image *image,
@@ -404,11 +765,6 @@ ImBuf *BKE_image_paint_selection_extract_pixels(Image *image,
     return nullptr;
   }
 
-  const int x_min = r_min[0];
-  const int y_min = r_min[1];
-  const int w = r_max[0] - x_min;
-  const int h = r_max[1] - y_min;
-
   /* Use a local iuser if none provided; overwrite tile in either case. */
   ImageUser local_iuser;
   if (!iuser) {
@@ -426,6 +782,14 @@ ImBuf *BKE_image_paint_selection_extract_pixels(Image *image,
     BKE_image_release_ibuf(image, ibuf, lock);
     return nullptr;
   }
+
+  BKE_image_paint_selection_bounds_expand_for_blend(
+      r_min, r_max, ibuf->x, ibuf->y, BKE_image_paint_selection_edge_policy_get(image));
+
+  const int x_min = r_min[0];
+  const int y_min = r_min[1];
+  const int w = r_max[0] - x_min;
+  const int h = r_max[1] - y_min;
 
   const bool is_float = ibuf->float_buffer.data != nullptr;
 

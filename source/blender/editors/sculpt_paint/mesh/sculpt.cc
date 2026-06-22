@@ -3437,6 +3437,16 @@ static void do_brush_action(const Depsgraph &depsgraph,
       depsgraph, ob, brush, memory);
   const IndexMask node_mask = cursor_sample_result.node_mask;
 
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK &&
+      brush.mask_projection_mode == BRUSH_MASK_PROJ_SCREEN_SPACE)
+  {
+    bContext *C = ss.cache->vc->C;
+    mask::MaskCanvas &canvas = mask::canvas_ensure(*C, ob);
+    mask::canvas_paint_brush_dab(canvas, *ss.cache, brush);
+    tag_update_overlays(C);
+    return;
+  }
+
   /* Only act if some verts are inside the brush area. */
   if (node_mask.is_empty()) {
     return;
@@ -3565,31 +3575,13 @@ static void do_brush_action(const Depsgraph &depsgraph,
       brushes::do_clay_thumb_brush(depsgraph, sd, ob, node_mask);
       break;
     case SCULPT_BRUSH_TYPE_MASK:
-      if (brush.mask_projection_mode == BRUSH_MASK_PROJ_SCREEN_SPACE) {
-        if (brush.mask_tool == BRUSH_MASK_DRAW) {
-          bContext *C = ss.cache->vc->C;
-          mask::MaskCanvas &canvas = mask::canvas_ensure(*C, ob);
-          const std::optional<float2> screen_co = mask::canvas_project_co(
-              canvas, ss.cache->location_symm);
-          if (screen_co) {
-            mask::canvas_draw_circle(canvas,
-                                     screen_co->x,
-                                     screen_co->y,
-                                     ss.cache->dyntopo_pixel_radius,
-                                     ss.cache->bstrength,
-                                     brush.hardness);
-          }
-        }
-      }
-      else {
-        switch (BrushMaskTool(brush.mask_tool)) {
-          case BRUSH_MASK_DRAW:
-            brushes::do_mask_brush(depsgraph, sd, ob, node_mask);
-            break;
-          case BRUSH_MASK_SMOOTH:
-            brushes::do_smooth_mask_brush(depsgraph, sd, ob, node_mask, ss.cache->bstrength);
-            break;
-        }
+      switch (BrushMaskTool(brush.mask_tool)) {
+        case BRUSH_MASK_DRAW:
+          brushes::do_mask_brush(depsgraph, sd, ob, node_mask);
+          break;
+        case BRUSH_MASK_SMOOTH:
+          brushes::do_smooth_mask_brush(depsgraph, sd, ob, node_mask, ss.cache->bstrength);
+          break;
       }
       break;
     case SCULPT_BRUSH_TYPE_POSE:
@@ -3959,7 +3951,18 @@ static bool is_brush_related_tool(bContext *C)
 
 bool brush_cursor_poll(bContext *C)
 {
-  return sculpt_mode_poll(C) && (paint_brush_cursor_poll(C) || is_brush_related_tool(C));
+  if (!sculpt_mode_poll(C)) {
+    return false;
+  }
+
+  const Object *ob = CTX_data_active_object(C);
+  if (ob && ob->runtime && ob->runtime->sculpt_session && ob->runtime->sculpt_session->mask_canvas &&
+      ob->runtime->sculpt_session->mask_canvas->active)
+  {
+    return true;
+  }
+
+  return paint_brush_cursor_poll(C) || is_brush_related_tool(C);
 }
 
 StrokeCache::StrokeCache() = default;

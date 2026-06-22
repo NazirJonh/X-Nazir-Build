@@ -86,6 +86,9 @@ struct MaskCanvas {
    */
   float4x4 projviewobjmat = float4x4::identity();
 
+  /** View projection type saved at session start (matches stencil projection). */
+  bool is_ortho = false;
+
   /**
    * View direction in object space saved at session start, used for front-faces-only test.
    * Updated per symmetry pass during Apply via #symmetry_flip.

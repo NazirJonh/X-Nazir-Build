@@ -30,7 +30,9 @@
 
 struct ARegion;
 struct bContext;
+struct Brush;
 struct Object;
+struct StrokeCache;
 
 namespace blender::ed::sculpt_paint::mask {
 
@@ -157,6 +159,34 @@ float canvas_sample(const MaskCanvas &canvas, float px, float py);
  * \return Pixel coordinates, or nullopt if the point is behind the camera.
  */
 std::optional<float2> canvas_project_co(const MaskCanvas &canvas, const float3 &co);
+
+struct ScreenProjectResult {
+  float2 screen;
+  float depth;
+};
+
+/**
+ * Project object-space position to screen pixel coordinates and normalized depth.
+ * Depth values match stencil texture projection (NDC z after perspective divide).
+ */
+std::optional<ScreenProjectResult> canvas_project_screen(const MaskCanvas &canvas,
+                                                         const float3 &co);
+
+/**
+ * Build a per-pixel front-most depth buffer from mesh triangles in object space.
+ * Used during canvas apply to skip occluded vertices (same principle as stencil painting).
+ */
+void canvas_build_depth_buffer(const MaskCanvas &canvas,
+                               blender::Span<blender::float3> vert_positions,
+                               blender::Span<blender::int3> corner_tris,
+                               blender::Span<int> corner_verts,
+                               blender::Vector<float> &r_depth);
+
+/**
+ * Paint one mask-brush dab into the canvas from stroke cache data.
+ * Uses mouse coordinates on the main symmetry pass, projected symmetric locations otherwise.
+ */
+void canvas_paint_brush_dab(MaskCanvas &canvas, const StrokeCache &cache, const Brush &brush);
 
 /** \} */
 

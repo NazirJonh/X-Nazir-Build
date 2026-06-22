@@ -19,6 +19,7 @@
 #include "BLI_array.hh"
 #include "BLI_index_range.hh"
 #include "BLI_vector.hh"
+#include "BLI_math_geom.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_assert.h"
@@ -31,6 +32,7 @@
 #include "GPU_texture.hh"
 
 #include "mask_canvas.hh"
+#include "sculpt_intern.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -61,6 +63,7 @@ MaskCanvas &canvas_ensure(bContext &C, Object &ob)
     canvas.height = region->winy;
 
     canvas.projviewobjmat = ED_view3d_ob_project_mat_get(rv3d, &ob);
+    canvas.is_ortho = !rv3d->is_persp;
 
     const float3x3 view_inv(float4x4(rv3d->viewinv));
     const float3 view_dir = math::normalize(math::transform_direction(view_inv, float3(0, 0, 1)));
@@ -327,21 +330,182 @@ void canvas_set_line_halfplane(MaskCanvas &canvas,
 /** \name Canvas Sampling
  * \{ */
 
-std::optional<float2> canvas_project_co(const MaskCanvas &canvas, const float3 &co)
+static bool canvas_project_screen_4(const MaskCanvas &canvas, const float3 &co, float r_screen[4])
 {
   if (!canvas.active) {
-    return std::nullopt;
+    return false;
   }
 
   float4 vec4(co.x, co.y, co.z, 1.0f);
   vec4 = canvas.projviewobjmat * vec4;
 
   if (vec4.w <= FLT_EPSILON) {
+    return false;
+  }
+
+  r_screen[0] = float(canvas.width) / 2.0f + (float(canvas.width) / 2.0f) * vec4.x / vec4.w;
+  r_screen[1] = float(canvas.height) / 2.0f + (float(canvas.height) / 2.0f) * vec4.y / vec4.w;
+  if (canvas.is_ortho) {
+    r_screen[2] = vec4.z;
+    r_screen[3] = 1.0f;
+  }
+  else {
+    r_screen[2] = vec4.z / vec4.w;
+    r_screen[3] = vec4.w;
+  }
+  return true;
+}
+
+static std::optional<ScreenProjectResult> canvas_project_screen_impl(const MaskCanvas &canvas,
+                                                                     const float3 &co)
+{
+  float screen[4];
+  if (!canvas_project_screen_4(canvas, co, screen)) {
     return std::nullopt;
   }
 
-  return float2(float(canvas.width) / 2.0f + (float(canvas.width) / 2.0f) * vec4.x / vec4.w,
-                float(canvas.height) / 2.0f + (float(canvas.height) / 2.0f) * vec4.y / vec4.w);
+  ScreenProjectResult result;
+  result.screen = float2(screen[0], screen[1]);
+  result.depth = screen[2];
+  return result;
+}
+
+std::optional<float2> canvas_project_co(const MaskCanvas &canvas, const float3 &co)
+{
+  const std::optional<ScreenProjectResult> result = canvas_project_screen_impl(canvas, co);
+  if (!result) {
+    return std::nullopt;
+  }
+  return result->screen;
+}
+
+std::optional<ScreenProjectResult> canvas_project_screen(const MaskCanvas &canvas,
+                                                         const float3 &co)
+{
+  return canvas_project_screen_impl(canvas, co);
+}
+
+static float canvas_triangle_depth_at_point(const MaskCanvas &canvas,
+                                            const float2 &pt,
+                                            const float tri_screen[3][4])
+{
+  float weights[3];
+  if (canvas.is_ortho) {
+    barycentric_weights_v2(UNPACK3(tri_screen), pt, weights);
+    return tri_screen[0][2] * weights[0] + tri_screen[1][2] * weights[1] +
+           tri_screen[2][2] * weights[2];
+  }
+
+  barycentric_weights_v2_persp(tri_screen[0], tri_screen[1], tri_screen[2], pt, weights);
+
+  float weights_sum[3];
+  weights_sum[0] = weights[0] * tri_screen[0][3];
+  weights_sum[1] = weights[1] * tri_screen[1][3];
+  weights_sum[2] = weights[2] * tri_screen[2][3];
+
+  const float wtot = weights_sum[0] + weights_sum[1] + weights_sum[2];
+  if (wtot == 0.0f) {
+    return tri_screen[0][2];
+  }
+  const float wtot_inv = 1.0f / wtot;
+  return (tri_screen[0][2] * weights_sum[0] + tri_screen[1][2] * weights_sum[1] +
+          tri_screen[2][2] * weights_sum[2]) *
+         wtot_inv;
+}
+
+static void canvas_rasterize_triangle_depth(const MaskCanvas &canvas,
+                                            const float tri_screen[3][4],
+                                            MutableSpan<float> depth_buf)
+{
+  float tri_screen_xy[3][2];
+  for (int i = 0; i < 3; i++) {
+    tri_screen_xy[i][0] = tri_screen[i][0];
+    tri_screen_xy[i][1] = tri_screen[i][1];
+  }
+
+  int min_x = canvas.width - 1;
+  int min_y = canvas.height - 1;
+  int max_x = 0;
+  int max_y = 0;
+  for (int i = 0; i < 3; i++) {
+    min_x = std::min(min_x, int(std::floor(tri_screen_xy[i][0])));
+    min_y = std::min(min_y, int(std::floor(tri_screen_xy[i][1])));
+    max_x = std::max(max_x, int(std::ceil(tri_screen_xy[i][0])));
+    max_y = std::max(max_y, int(std::ceil(tri_screen_xy[i][1])));
+  }
+
+  min_x = std::max(min_x, 0);
+  min_y = std::max(min_y, 0);
+  max_x = std::min(max_x, canvas.width - 1);
+  max_y = std::min(max_y, canvas.height - 1);
+
+  for (int y = min_y; y <= max_y; y++) {
+    for (int x = min_x; x <= max_x; x++) {
+      const float2 pt(float(x) + 0.5f, float(y) + 0.5f);
+      if (!isect_point_tri_v2(pt, UNPACK3(tri_screen_xy))) {
+        continue;
+      }
+      const float depth = canvas_triangle_depth_at_point(canvas, pt, tri_screen);
+      float &pixel_depth = depth_buf[y * canvas.width + x];
+      pixel_depth = std::min(pixel_depth, depth);
+    }
+  }
+}
+
+void canvas_build_depth_buffer(const MaskCanvas &canvas,
+                               const Span<float3> vert_positions,
+                               const Span<int3> corner_tris,
+                               const Span<int> corner_verts,
+                               Vector<float> &r_depth)
+{
+  r_depth.resize(canvas.width * canvas.height);
+  r_depth.fill(FLT_MAX);
+
+  if (!canvas.active) {
+    return;
+  }
+
+  for (const int3 &tri : corner_tris) {
+    float tri_screen[3][4];
+    bool valid = true;
+    for (int i = 0; i < 3; i++) {
+      if (!canvas_project_screen_4(canvas, vert_positions[corner_verts[tri[i]]], tri_screen[i])) {
+        valid = false;
+        break;
+      }
+    }
+    if (!valid) {
+      continue;
+    }
+    canvas_rasterize_triangle_depth(canvas, tri_screen, r_depth);
+  }
+}
+
+void canvas_paint_brush_dab(MaskCanvas &canvas, const StrokeCache &cache, const Brush &brush)
+{
+  if (brush.mask_tool != BRUSH_MASK_DRAW) {
+    return;
+  }
+
+  float2 screen_pos;
+  if (stroke_is_main_symmetry_pass(cache)) {
+    /* Screen-space canvas painting follows the cursor, not the mesh hit point. */
+    screen_pos = cache.mouse;
+  }
+  else {
+    const std::optional<float2> projected = canvas_project_co(canvas, cache.location_symm);
+    if (!projected) {
+      return;
+    }
+    screen_pos = *projected;
+  }
+
+  canvas_draw_circle(canvas,
+                     screen_pos.x,
+                     screen_pos.y,
+                     cache.dyntopo_pixel_radius,
+                     cache.bstrength,
+                     brush.hardness);
 }
 
 float canvas_sample(const MaskCanvas &canvas, float px, float py)

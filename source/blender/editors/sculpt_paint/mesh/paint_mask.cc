@@ -7,6 +7,7 @@
  */
 #include "paint_mask.hh"
 
+#include <cmath>
 #include <cstdlib>
 
 #include "MEM_guardedalloc.h"
@@ -25,10 +26,13 @@
 #include "BKE_context.hh"
 #include "BKE_mesh.hh"
 #include "BKE_multires.hh"
+#include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
+
+#include "DEG_depsgraph_query.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -966,9 +970,22 @@ static float gesture_canvas_fill_value(const wmOperator *op)
   return value;
 }
 
+static bool brush_uses_mask_canvas(const bContext *C)
+{
+  const Paint *paint = BKE_paint_get_active_from_context(C);
+  const Brush *brush = paint ? BKE_paint_brush_for_read(paint) : nullptr;
+  return brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK &&
+         brush->mask_projection_mode == BRUSH_MASK_PROJ_SCREEN_SPACE;
+}
+
+static bool gesture_use_canvas_mode(bContext *C, wmOperator *op)
+{
+  return RNA_boolean_get(op->ptr, "use_canvas_mode") || brush_uses_mask_canvas(C);
+}
+
 static wmOperatorStatus gesture_box_exec(bContext *C, wmOperator *op)
 {
-  if (RNA_boolean_get(op->ptr, "use_canvas_mode")) {
+  if (gesture_use_canvas_mode(C, op)) {
     Object *ob = CTX_data_active_object(C);
     mask::MaskCanvas &canvas = mask::canvas_ensure(*C, *ob);
 
@@ -993,7 +1010,7 @@ static wmOperatorStatus gesture_box_exec(bContext *C, wmOperator *op)
 
 static wmOperatorStatus gesture_lasso_exec(bContext *C, wmOperator *op)
 {
-  if (RNA_boolean_get(op->ptr, "use_canvas_mode")) {
+  if (gesture_use_canvas_mode(C, op)) {
     Object *ob = CTX_data_active_object(C);
     mask::MaskCanvas &canvas = mask::canvas_ensure(*C, *ob);
 
@@ -1019,7 +1036,7 @@ static wmOperatorStatus gesture_lasso_exec(bContext *C, wmOperator *op)
 
 static wmOperatorStatus gesture_line_exec(bContext *C, wmOperator *op)
 {
-  if (RNA_boolean_get(op->ptr, "use_canvas_mode")) {
+  if (gesture_use_canvas_mode(C, op)) {
     Object *ob = CTX_data_active_object(C);
     mask::MaskCanvas &canvas = mask::canvas_ensure(*C, *ob);
 
@@ -1049,7 +1066,7 @@ static wmOperatorStatus gesture_line_exec(bContext *C, wmOperator *op)
 
 static wmOperatorStatus gesture_polyline_exec(bContext *C, wmOperator *op)
 {
-  if (RNA_boolean_get(op->ptr, "use_canvas_mode")) {
+  if (gesture_use_canvas_mode(C, op)) {
     Object *ob = CTX_data_active_object(C);
     mask::MaskCanvas &canvas = mask::canvas_ensure(*C, *ob);
 
@@ -1172,9 +1189,22 @@ static bool mask_canvas_operator_poll(bContext *C)
   return ss.mask_canvas && ss.mask_canvas->active;
 }
 
+static float sample_depth_buffer(const Span<float> &depth_buf,
+                                 const mask::MaskCanvas &canvas,
+                                 const float2 &screen_co)
+{
+  const int x = int(std::floor(screen_co.x));
+  const int y = int(std::floor(screen_co.y));
+  if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) {
+    return FLT_MAX;
+  }
+  return depth_buf[y * canvas.width + x];
+}
+
 static float sample_canvas_for_position(const mask::MaskCanvas &canvas,
                                       const float3 &position,
                                       const float3 &normal,
+                                      const Span<float> &depth_buf,
                                       const ePaintSymmetryFlags symm)
 {
   float canvas_val_max = 0.0f;
@@ -1190,15 +1220,40 @@ static float sample_canvas_for_position(const mask::MaskCanvas &canvas,
       continue;
     }
 
-    const std::optional<float2> screen_co = mask::canvas_project_co(canvas, co);
-    if (!screen_co) {
+    const std::optional<mask::ScreenProjectResult> projected = mask::canvas_project_screen(
+        canvas, co);
+    if (!projected) {
       continue;
     }
 
+    if (!depth_buf.is_empty()) {
+      const float front_depth = sample_depth_buffer(depth_buf, canvas, projected->screen);
+      if (front_depth != FLT_MAX && projected->depth > front_depth + 1e-4f) {
+        continue;
+      }
+    }
+
     canvas_val_max = std::max(
-        canvas_val_max, mask::canvas_sample(canvas, screen_co->x, screen_co->y));
+        canvas_val_max, mask::canvas_sample(canvas, projected->screen.x, projected->screen.y));
   }
   return canvas_val_max;
+}
+
+static Vector<float> build_apply_depth_buffer(const Depsgraph &depsgraph,
+                                              Object &ob,
+                                              const mask::MaskCanvas &canvas)
+{
+  Vector<float> depth;
+  const Object &ob_eval = *DEG_get_evaluated(&depsgraph, &ob);
+  const Mesh *mesh = BKE_object_get_evaluated_mesh(&ob_eval);
+  if (!mesh) {
+    return depth;
+  }
+
+  const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
+  mask::canvas_build_depth_buffer(
+      canvas, positions, mesh->corner_tris(), mesh->corner_verts(), depth);
+  return depth;
 }
 
 static wmOperatorStatus mask_canvas_apply_exec(bContext *C, wmOperator *op)
@@ -1236,6 +1291,7 @@ static wmOperatorStatus mask_canvas_apply_exec(bContext *C, wmOperator *op)
 
   const bool keep_canvas = RNA_boolean_get(op->ptr, "keep_canvas");
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(*ob);
+  const Vector<float> depth_buf = build_apply_depth_buffer(depsgraph, *ob, canvas);
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
@@ -1244,7 +1300,7 @@ static wmOperatorStatus mask_canvas_apply_exec(bContext *C, wmOperator *op)
         const Span<float3> normals = bke::pbvh::vert_normals_eval(depsgraph, *ob);
         for (const int i : verts.index_range()) {
           const float canvas_val = sample_canvas_for_position(
-              canvas, positions[verts[i]], normals[verts[i]], symm);
+              canvas, positions[verts[i]], normals[verts[i]], depth_buf, symm);
           if (canvas_val != 0.0f) {
             masks[i] = std::clamp(masks[i] + canvas_val, 0.0f, 1.0f);
           }
@@ -1272,7 +1328,7 @@ static wmOperatorStatus mask_canvas_apply_exec(bContext *C, wmOperator *op)
               BKE_subdiv_ccg_foreach_visible_grid_vert(key, grid_hidden, grid, [&](const int i) {
                 const int vert = vert_start + i;
                 const float canvas_val = sample_canvas_for_position(
-                    canvas, positions[vert], normals[vert], symm);
+                    canvas, positions[vert], normals[vert], depth_buf, symm);
                 if (canvas_val != 0.0f) {
                   float &mask = masks[vert];
                   if (!any_changed) {
@@ -1305,7 +1361,7 @@ static wmOperatorStatus mask_canvas_apply_exec(bContext *C, wmOperator *op)
             bool any_changed = false;
             for (BMVert *vert : BKE_pbvh_bmesh_node_unique_verts(&nodes[i])) {
               const float canvas_val = sample_canvas_for_position(
-                  canvas, float3(vert->co), float3(vert->no), symm);
+                  canvas, float3(vert->co), float3(vert->no), depth_buf, symm);
               if (canvas_val != 0.0f) {
                 if (!any_changed) {
                   any_changed = true;

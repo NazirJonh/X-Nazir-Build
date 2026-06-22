@@ -1262,6 +1262,13 @@ static void paint_cursor_restore_drawing_state()
   GPU_line_smooth(false);
 }
 
+static void paint_draw_mask_canvas_overlay(const PaintCursorContext &pcontext)
+{
+  if (pcontext.ss && pcontext.ss->mask_canvas && pcontext.ss->mask_canvas->active) {
+    mask::canvas_draw_overlay(*pcontext.ss->mask_canvas, pcontext.region);
+  }
+}
+
 static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, void * /*unused*/)
 {
   PRF_scope(ProfileCategory::Default);
@@ -1278,11 +1285,13 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
     if (pcontext.mode == PaintMode::GPencil && pcontext.win->modalcursor == 0) {
       WM_cursor_set(pcontext.win, WM_CURSOR_DOT);
     }
+    paint_draw_mask_canvas_overlay(pcontext);
     return;
   }
   if (paint_cursor_is_3d_view_navigating(pcontext)) {
     /* Still draw stencil while navigating. */
     paint_cursor_check_and_draw_alpha_overlays(pcontext);
+    paint_draw_mask_canvas_overlay(pcontext);
     return;
   }
 
@@ -1316,9 +1325,7 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
       BLI_assert_unreachable();
   }
 
-  if (pcontext.ss && pcontext.ss->mask_canvas && pcontext.ss->mask_canvas->active) {
-    mask::canvas_draw_overlay(*pcontext.ss->mask_canvas, pcontext.region);
-  }
+  paint_draw_mask_canvas_overlay(pcontext);
 }
 
 }  // namespace ed::sculpt_paint

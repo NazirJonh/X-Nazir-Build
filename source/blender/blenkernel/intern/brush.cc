@@ -640,6 +640,7 @@ static void brush_defaults(Brush *brush)
   FROM_DEFAULT(mtex);
   FROM_DEFAULT(mask_mtex);
   FROM_DEFAULT(falloff_shape);
+  FROM_DEFAULT(texture_clip_shape);
   FROM_DEFAULT(tip_scale_x);
   FROM_DEFAULT(tip_roundness);
 
@@ -945,7 +946,8 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
                               const float3 &point,
                               float4 &rgba,
                               const int thread,
-                              ImagePool *pool)
+                              ImagePool *pool,
+                              const bool apply_texture_clip)
 {
   const bke::PaintRuntime *paint_runtime = paint->runtime;
   float intensity = 1.0;
@@ -1032,6 +1034,13 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
 
       x = flen * cosf(angle);
       y = flen * sinf(angle);
+    }
+
+    if (apply_texture_clip && br->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) {
+      if (std::max(std::fabs(x), std::fabs(y)) > 1.0f) {
+        zero_v4(rgba);
+        return 0.0f;
+      }
     }
 
     float3 co(x, y, 0.0f);
@@ -1144,6 +1153,13 @@ float BKE_brush_sample_masktex(
 
       x = flen * cosf(angle);
       y = flen * sinf(angle);
+    }
+
+    if (br->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) {
+      if (std::max(std::fabs(x), std::fabs(y)) > 1.0f) {
+        zero_v4(dummy_rgba);
+        return 0.0f;
+      }
     }
 
     co[0] = x;

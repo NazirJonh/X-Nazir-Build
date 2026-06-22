@@ -727,8 +727,40 @@ static void layer_brush_height_preview_draw(const uint gpuattr,
 static void cursor_space_overlays_draw(const PaintCursorContext &pcontext)
 {
   const Brush &brush = *pcontext.brush;
-  /* Main inactive cursor. */
-  main_inactive_cursor_draw(pcontext);
+
+  /* Main inactive cursor. For the rectangle clip shape in Sculpt mode, draw a square outline
+   * aligned to the brush-local XY plane instead of a circle. The GPU matrix is already set up
+   * by cursor_space_drawing_setup so that the surface normal is the Z axis; coordinates here are
+   * in brush units where ±radius maps to the brush boundary. */
+  if (pcontext.mode == PaintMode::Sculpt &&
+      brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE)
+  {
+    const float r = pcontext.radius;
+    GPU_line_width(2.0f);
+    immUniformColor3fvAlpha(pcontext.outline_col, pcontext.outline_alpha);
+    immBegin(GPU_PRIM_LINE_LOOP, 4);
+    immVertex3f(pcontext.pos, -r, -r, 0.0f);
+    immVertex3f(pcontext.pos,  r, -r, 0.0f);
+    immVertex3f(pcontext.pos,  r,  r, 0.0f);
+    immVertex3f(pcontext.pos, -r,  r, 0.0f);
+    immEnd();
+
+    GPU_line_width(1.0f);
+    immUniformColor3fvAlpha(pcontext.outline_col,
+                            pcontext.outline_alpha *
+                                clamp_f(BKE_brush_alpha_get(pcontext.paint, pcontext.brush),
+                                        0.0f,
+                                        1.0f));
+    immBegin(GPU_PRIM_LINE_LOOP, 4);
+    immVertex3f(pcontext.pos, -r, -r, 0.0f);
+    immVertex3f(pcontext.pos,  r, -r, 0.0f);
+    immVertex3f(pcontext.pos,  r,  r, 0.0f);
+    immVertex3f(pcontext.pos, -r,  r, 0.0f);
+    immEnd();
+  }
+  else {
+    main_inactive_cursor_draw(pcontext);
+  }
 
   if (pcontext.mode != PaintMode::Sculpt) {
     return;

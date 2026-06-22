@@ -317,8 +317,10 @@ struct Brush {
   eBrushGPWeightType gpencil_weight_brush_type = GPWEIGHT_BRUSH_TYPE_DRAW;
   /** Active curves sculpt brush type. */
   eBrushCurvesSculptType curves_sculpt_brush_type = CURVES_SCULPT_BRUSH_TYPE_COMB;
+  /** Shape used to clip the brush texture when stamping. */
+  eBrushTextureClipShape texture_clip_shape = BRUSH_TEXTURE_CLIP_SPHERE;
 
-  char _pad1[2] = {};
+  char _pad1[1] = {};
 
   float autosmooth_factor = 0.0f;
 

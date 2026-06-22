@@ -199,7 +199,20 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
 
     len = sqrtf(x * x + y * y);
 
-    if (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL) || len <= 1.0f) {
+    bool inside_bounds;
+    if (br->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+        mtex->brush_map_mode != MTEX_MAP_MODE_STENCIL)
+    {
+      inside_bounds = std::max(std::fabs(x), std::fabs(y)) <= 1.0f;
+    }
+    else if (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL)) {
+      inside_bounds = true;
+    }
+    else {
+      inside_bounds = len <= 1.0f;
+    }
+
+    if (inside_bounds) {
       /* It is probably worth optimizing for those cases where the texture is not rotated by
        * skipping the calls to atan2, sqrtf, sin, and cos. */
       if (mtex->tex && (rotation > 0.001f || rotation < -0.001f)) {
@@ -389,7 +402,9 @@ static void load_tex_cursor_task_cb(void *__restrict userdata,
     const int index = j * size + i;
     const float x = ((float(i) / size) - 0.5f) * 2.0f;
     const float y = ((float(j) / size) - 0.5f) * 2.0f;
-    const float len = sqrtf(x * x + y * y);
+    const float len = (br->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) ?
+                          std::max(std::abs(x), std::abs(y)) :
+                          sqrtf(x * x + y * y);
 
     if (len <= 1.0f) {
 
@@ -1162,13 +1177,18 @@ static void paint_cursor_draw_3D_view_brush_cursor(PaintCursorContext &pcontext)
   }
   else {
     const Brush &brush = *pcontext.brush;
-    /* 2D falloff is better represented with the default 2D cursor,
-     * there is no need to draw anything else. */
+    /* 2D falloff (tube) is better represented with the default 2D cursor,
+     * there is no need to draw anything else.
+     * Rectangle clip shape uses the 3D surface-aligned cursor path so that
+     * the rectangular outline is drawn in the brush-local XY plane (matching
+     * the brush_local_mat used for texture sampling and bounds testing). */
     if (brush.falloff_shape == PAINT_FALLOFF_SHAPE_TUBE) {
       paint_draw_legacy_3D_view_brush_cursor(pcontext);
       return;
     }
-    if (pcontext.alpha_overlay_drawn) {
+    if (pcontext.alpha_overlay_drawn &&
+        brush.texture_clip_shape != BRUSH_TEXTURE_CLIP_RECTANGLE)
+    {
       paint_draw_legacy_3D_view_brush_cursor(pcontext);
       return;
     }

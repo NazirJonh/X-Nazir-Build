@@ -732,6 +732,12 @@ class FalloffPanel(BrushPanel):
             row = col.row(align=True)
             row.use_property_split = True
             row.use_property_decorate = False
+            if mode == 'SCULPT':
+                row.prop(brush, "texture_clip_shape", expand=True)
+                col.separator()
+                row = col.row(align=True)
+                row.use_property_split = True
+                row.use_property_decorate = False
             row.prop(brush, "falloff_shape", expand=True)
 
 

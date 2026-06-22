@@ -326,6 +326,12 @@ struct StrokeCache {
    */
   float3 sculpt_normal = float3(0);
   float3 sculpt_normal_symm = float3(0);
+  /**
+   * Surface-aligned stamp plane normal for rectangle texture clip (area-averaged, with tilt).
+   * Independent of #Brush.sculpt_plane which controls displacement, not mask projection.
+   */
+  float3 texture_plane_normal = float3(0);
+  float3 texture_plane_normal_symm = float3(0);
 
   /**
    * Used for area texture mode, local_mat gets calculated by
@@ -794,6 +800,7 @@ IndexMask gather_nodes(const bke::pbvh::Tree &pbvh,
 
 const float *brush_frontface_normal_from_falloff_shape(const SculptSession &ss,
                                                        char falloff_shape);
+bool brush_uses_rectangle_texture_clip(const Brush &brush);
 void cube_tip_init(const Sculpt &sd, const Object &ob, const Brush &brush, float mat[4][4]);
 
 /** Sample the brush's texture value. */

@@ -957,8 +957,10 @@ static int sculpt_brush_needs_normal(const SculptSession &ss, const Brush &brush
                SCULPT_BRUSH_TYPE_THUMB) ||
           (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_SCENE_PROJECT &&
            brush.project_ray_direction_type == BRUSH_PROJECT_RAY_DIRECTION_PLANE_NORMAL) ||
-          (mask_tex->tex && mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA)) ||
-         brush_uses_topology_rake(ss, brush) || BKE_brush_has_cube_tip(&brush, PaintMode::Sculpt);
+          (mask_tex->tex && mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA) ||
+          brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE ||
+          brush_uses_topology_rake(ss, brush) ||
+          BKE_brush_has_cube_tip(&brush, PaintMode::Sculpt));
 }
 
 static bool brush_needs_rake_rotation(const Brush &brush)
@@ -2476,6 +2478,28 @@ static float brush_strength(const Sculpt &sd,
   return 0.0f;
 }
 
+static float3 sculpt_point_to_brush_local(const StrokeCache &cache, const float3 &object_space_point)
+{
+  float3 local_point = object_space_point;
+  mul_m4_v3(cache.brush_local_mat.ptr(), local_point);
+  return local_point;
+}
+
+static bool sculpt_point_inside_texture_rectangle_clip(const StrokeCache &cache,
+                                                       const float3 &symm_point)
+{
+  const float3 local_point = sculpt_point_to_brush_local(cache, symm_point);
+  return std::max(std::abs(local_point.x), std::abs(local_point.y)) <= 1.0f;
+}
+
+static float sculpt_texture_rectangle_distance_squared(const StrokeCache &cache,
+                                                       const float3 &object_space_point)
+{
+  const float3 local_pos = sculpt_point_to_brush_local(cache, object_space_point);
+  const float distance = std::max(std::abs(local_pos.x), std::abs(local_pos.y));
+  return math::square(distance * cache.radius);
+}
+
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const float brush_point[3],
@@ -2509,11 +2533,23 @@ void sculpt_apply_texture(const SculptSession &ss,
     }
     float3 symm_point = symmetry_flip(point, cache.mirror_symmetry_pass);
 
+    if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+        !sculpt_point_inside_texture_rectangle_clip(cache, symm_point))
+    {
+      *r_value = 0.0f;
+      zero_v4(r_rgba);
+      return;
+    }
+
     /* Still no symmetry supported for other paint modes.
      * Sculpt does it DIY. */
-    if (mtex->brush_map_mode == MTEX_MAP_MODE_AREA) {
-      /* Similar to fixed mode, but projects from brush angle
-       * rather than view direction. */
+    if (mtex->brush_map_mode == MTEX_MAP_MODE_AREA ||
+        brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE)
+    {
+      /* Similar to fixed mode, but projects from the brush plane rather than the view direction.
+       * Rectangle clipping needs to use the same surface-aligned projection for sampling as it
+       * uses for its bounds test, otherwise the clipped area is in brush-local space while the
+       * texture itself remains screen-projected. */
 
       mul_m4_v3(cache.brush_local_mat.ptr(), symm_point);
 
@@ -2535,8 +2571,9 @@ void sculpt_apply_texture(const SculptSession &ss,
       const float2 point_2d = ED_view3d_project_float_v2_m4(
           cache.vc->region, symm_point, cache.projection_mat);
       const float point_3d[3] = {point_2d[0], point_2d[1], 0.0f};
+      /* Rectangle clip is applied in brush local space above. */
       *r_value = BKE_brush_sample_tex_3d(
-          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool);
+          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool, false);
     }
   }
 }
@@ -2677,6 +2714,11 @@ static IndexMask pbvh_gather_cursor_update(Object &ob, bool use_original, IndexM
   });
 }
 
+bool brush_uses_rectangle_texture_clip(const Brush &brush)
+{
+  return brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
+}
+
 /** \return All nodes that are potentially within the cursor or brush's area of influence. */
 static IndexMask pbvh_gather_generic(Object &ob,
                                      const Brush &brush,
@@ -2688,7 +2730,10 @@ static IndexMask pbvh_gather_generic(Object &ob,
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
 
   const float3 center = ss.cache->location_symm;
-  const float radius_sq = math::square(ss.cache->radius * radius_scale);
+  float radius_sq = math::square(ss.cache->radius * radius_scale);
+  if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) {
+    radius_sq *= 2.0f;
+  }
   const bool ignore_ineffective = brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK;
   switch (brush.falloff_shape) {
     case PAINT_FALLOFF_SHAPE_SPHERE: {
@@ -2841,9 +2886,37 @@ static void update_sculpt_normal(const Depsgraph &depsgraph,
     }
     copy_v3_v3(cache.sculpt_normal_symm, cache.sculpt_normal);
   }
-  else {
+  else if (cache.mirror_symmetry_pass != 0 || cache.radial_symmetry_pass != 0) {
     cache.sculpt_normal_symm = symmetry_flip(cache.sculpt_normal, cache.mirror_symmetry_pass);
     mul_m4_v3(cache.symm_rot_mat.ptr(), cache.sculpt_normal_symm);
+    if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) {
+      cache.texture_plane_normal_symm = symmetry_flip(cache.texture_plane_normal,
+                                                    cache.mirror_symmetry_pass);
+      mul_m4_v3(cache.symm_rot_mat.ptr(), cache.texture_plane_normal_symm);
+      cache.texture_plane_normal_symm = tilt_apply_to_normal(
+          cache.texture_plane_normal_symm, cache, brush.tilt_strength_factor);
+    }
+  }
+
+  /* Rectangle clip must use the actual surface normal under the brush, regardless of
+   * #Brush.sculpt_plane. For planar brushes (Plane, Clay Strips) `cursor_sample_result` already
+   * contains a geometry-derived normal. For other brushes (Draw, Mask, …) it doesn't, so we
+   * explicitly compute the area normal here – exactly what MTEX_MAP_MODE_AREA does. */
+  if (cache.mirror_symmetry_pass == 0 && cache.radial_symmetry_pass == 0 &&
+      brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE)
+  {
+    if (cursor_sample_result.plane_normal) {
+      cache.texture_plane_normal = *cursor_sample_result.plane_normal;
+    }
+    else {
+      /* Fall back to an area-normal sample so the rectangle is always aligned to the mesh
+       * surface rather than to the sculpt_plane setting or the camera. */
+      const std::optional<float3> area_normal = calc_area_normal(
+          depsgraph, brush, ob, cursor_sample_result.node_mask);
+      cache.texture_plane_normal = area_normal.value_or(cache.sculpt_normal);
+    }
+    cache.texture_plane_normal_symm = tilt_apply_to_normal(
+        cache.texture_plane_normal, cache, brush.tilt_strength_factor);
   }
 }
 
@@ -2867,6 +2940,7 @@ static void calc_local_from_screen(const ViewContext &vc,
 
 static void calc_brush_local_mat(const float rotation,
                                  const Object &ob,
+                                 const float3 &plane_normal,
                                  float local_mat[4][4],
                                  float local_mat_inv[4][4])
 {
@@ -2908,12 +2982,12 @@ static void calc_brush_local_mat(const float rotation,
    * The Y-axis of the brush-local frame has to lie in the intersection of the tangent plane
    * and the motion plane. */
 
-  cross_v3_v3v3(v, cache->sculpt_normal, motion_normal_local);
+  cross_v3_v3v3(v, plane_normal, motion_normal_local);
   normalize_v3_v3(mat[1], v);
 
   /* Get other axes. */
-  cross_v3_v3v3(mat[0], mat[1], cache->sculpt_normal);
-  copy_v3_v3(mat[2], cache->sculpt_normal);
+  cross_v3_v3v3(mat[0], mat[1], plane_normal);
+  copy_v3_v3(mat[2], plane_normal);
 
   /* Set location. */
   copy_v3_v3(mat[3], cache->location_symm);
@@ -2968,13 +3042,23 @@ static void update_brush_local_mat(const Sculpt &sd, Object &ob)
 {
   PRF_scope(ProfileCategory::Editor);
   StrokeCache *cache = ob.runtime->sculpt_session->cache;
+  const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
+  const MTex *mask_tex = BKE_brush_mask_texture_get(brush, OB_MODE_SCULPT);
 
-  if (cache->mirror_symmetry_pass == 0 && cache->radial_symmetry_pass == 0) {
-    const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
-    const MTex *mask_tex = BKE_brush_mask_texture_get(brush, OB_MODE_SCULPT);
-    calc_brush_local_mat(
-        mask_tex->rot, ob, cache->brush_local_mat.ptr(), cache->brush_local_mat_inv.ptr());
+  const bool needs_local_mat = (mask_tex->tex && mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA) ||
+                               brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
+  if (!needs_local_mat) {
+    return;
   }
+
+  const float3 &plane_normal = brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE ?
+                                   cache->texture_plane_normal_symm :
+                                   cache->sculpt_normal_symm;
+  calc_brush_local_mat(mask_tex->rot,
+                       ob,
+                       plane_normal,
+                       cache->brush_local_mat.ptr(),
+                       cache->brush_local_mat_inv.ptr());
 }
 
 /** \} */
@@ -6848,7 +6932,7 @@ void cube_tip_init(const Sculpt & /*sd*/, const Object &ob, const Brush &brush, 
   float unused[4][4];
 
   zero_m4(mat);
-  calc_brush_local_mat(0.0, ob, unused, mat);
+  calc_brush_local_mat(0.0, ob, ss.cache->sculpt_normal_symm, unused, mat);
 
   /* NOTE: we ignore the radius scaling done inside of calc_brush_local_mat to
    * duplicate prior behavior.
@@ -7760,7 +7844,14 @@ void calc_brush_distances_squared(const SculptSession &ss,
   BLI_assert(verts.size() == r_distances.size());
 
   const float3 &test_location = ss.cache ? ss.cache->location_symm : ss.cursor_location;
-  if (falloff_shape == PAINT_FALLOFF_SHAPE_TUBE && (ss.cache || ss.filter_cache)) {
+  const Brush *brush = ss.cache ? ss.cache->brush : nullptr;
+
+  if (brush && brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE && ss.cache) {
+    for (const int i : verts.index_range()) {
+      r_distances[i] = sculpt_texture_rectangle_distance_squared(*ss.cache, positions[verts[i]]);
+    }
+  }
+  else if (falloff_shape == PAINT_FALLOFF_SHAPE_TUBE && (ss.cache || ss.filter_cache)) {
     /* The tube falloff shape requires the cached view normal. */
     const float3 &view_normal = ss.cache ? ss.cache->view_normal_symm :
                                            ss.filter_cache->view_normal;
@@ -7800,7 +7891,14 @@ void calc_brush_distances_squared(const SculptSession &ss,
   BLI_assert(positions.size() == r_distances.size());
 
   const float3 &test_location = ss.cache ? ss.cache->location_symm : ss.cursor_location;
-  if (falloff_shape == PAINT_FALLOFF_SHAPE_TUBE && (ss.cache || ss.filter_cache)) {
+  const Brush *brush = ss.cache ? ss.cache->brush : nullptr;
+
+  if (brush && brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE && ss.cache) {
+    for (const int i : positions.index_range()) {
+      r_distances[i] = sculpt_texture_rectangle_distance_squared(*ss.cache, positions[i]);
+    }
+  }
+  else if (falloff_shape == PAINT_FALLOFF_SHAPE_TUBE && (ss.cache || ss.filter_cache)) {
     /* The tube falloff shape requires the cached view normal. */
     const float3 &view_normal = ss.cache ? ss.cache->view_normal_symm :
                                            ss.filter_cache->view_normal;

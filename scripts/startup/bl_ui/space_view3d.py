@@ -583,6 +583,9 @@ class _draw_tool_settings_context_mode:
         elif curves_tool == 'ADD':
             layout.prop(brush, "falloff_shape", expand=True)
             layout.prop(brush.curves_sculpt_settings, "add_amount")
+            layout.prop(paint, "add_curves_target", text="Target")
+            if paint.add_curves_target == 'OBJECT':
+                layout.prop(paint, "add_curves_object", text="")
             layout.popover("VIEW3D_PT_curves_sculpt_add_shape", text="Curve Shape")
             layout.prop(brush, "use_frontface", text="Front Faces Only")
         elif curves_tool == 'GROW_SHRINK':
@@ -613,6 +616,9 @@ class _draw_tool_settings_context_mode:
             layout.prop(brush, "falloff_shape", expand=True)
             row = layout.row(align=True)
             row.prop(brush.curves_sculpt_settings, "density_mode", text="", expand=True)
+            layout.prop(paint, "add_curves_target", text="Target")
+            if paint.add_curves_target == 'OBJECT':
+                layout.prop(paint, "add_curves_object", text="")
             row = layout.row(align=True)
             row.prop(brush.curves_sculpt_settings, "minimum_distance", text="Distance Min")
             row.operator_context = 'INVOKE_REGION_WIN'

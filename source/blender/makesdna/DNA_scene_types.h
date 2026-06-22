@@ -1520,8 +1520,19 @@ struct Sculpt {
   struct Object *gravity_object = nullptr;
 };
 
+/** #CurvesSculpt::add_curves_target */
+enum eCurvesSculptAddTarget : int {
+  CURVES_SCULPT_ADD_TARGET_ALL = 0,
+  CURVES_SCULPT_ADD_TARGET_ACTIVE = 1,
+  CURVES_SCULPT_ADD_TARGET_OBJECT = 2,
+};
+
 struct CurvesSculpt {
   Paint paint;
+  struct Object *add_curves_object = nullptr;
+  /** Target for Add/Density brushes in multi-object sculpt mode. */
+  int add_curves_target = CURVES_SCULPT_ADD_TARGET_ALL;
+  char _pad[4] = {};
 };
 
 struct UvSculpt {

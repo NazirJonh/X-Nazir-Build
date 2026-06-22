@@ -759,6 +759,24 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
         data,
         do_undo_restore,
         scene_foreach_paint(data, paint, do_undo_restore, reader, paint_old));
+
+    Object *add_curves_object = toolsett->curves_sculpt ?
+                                    toolsett->curves_sculpt->add_curves_object :
+                                    nullptr;
+    Object *add_curves_object_old = toolsett_old->curves_sculpt->add_curves_object;
+    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                      &add_curves_object,
+                                                      do_undo_restore,
+                                                      SCENE_FOREACH_UNDO_NO_RESTORE,
+                                                      reader,
+                                                      &add_curves_object_old,
+                                                      IDWALK_CB_NOP);
+    if (toolsett->curves_sculpt) {
+      toolsett->curves_sculpt->add_curves_object = add_curves_object;
+    }
+    if (toolsett_old != toolsett) {
+      toolsett_old->curves_sculpt->add_curves_object = add_curves_object_old;
+    }
   }
 
   BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(

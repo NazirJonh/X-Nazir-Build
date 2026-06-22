@@ -10,6 +10,7 @@
 
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_types.h"
 
 #include "BKE_bvhutils.hh"
 #include "BKE_context.hh"
@@ -447,6 +448,42 @@ void foreach_curves_sculpt_target(const PaintStroke &stroke,
   for (const auto item : curves_to_object.items()) {
     fn(*item.value, *item.key);
   }
+}
+
+static bool is_curves_sculpt_target_object(const Object &ob)
+{
+  return ob.type == OB_CURVES && (ob.mode & OB_MODE_SCULPT_CURVES);
+}
+
+void foreach_curves_sculpt_add_target(const PaintStroke &stroke,
+                                      FunctionRef<void(Object &, Curves &)> fn)
+{
+  const CurvesSculpt *curves_sculpt = stroke.vc.scene->toolsettings->curves_sculpt;
+  const eCurvesSculptAddTarget add_target = eCurvesSculptAddTarget(
+      curves_sculpt ? curves_sculpt->add_curves_target : CURVES_SCULPT_ADD_TARGET_ALL);
+
+  if (add_target == CURVES_SCULPT_ADD_TARGET_ALL) {
+    foreach_curves_sculpt_target(stroke, fn);
+    return;
+  }
+
+  if (stroke.evil_C == nullptr) {
+    return;
+  }
+
+  Object *target_ob = nullptr;
+  if (add_target == CURVES_SCULPT_ADD_TARGET_ACTIVE) {
+    target_ob = CTX_data_active_object(stroke.evil_C);
+  }
+  else if (add_target == CURVES_SCULPT_ADD_TARGET_OBJECT) {
+    target_ob = curves_sculpt ? curves_sculpt->add_curves_object : nullptr;
+  }
+
+  if (target_ob == nullptr || !is_curves_sculpt_target_object(*target_ob)) {
+    return;
+  }
+
+  fn(*target_ob, *id_cast<Curves *>(target_ob->data));
 }
 
 void report_empty_original_surface(ReportList *reports)

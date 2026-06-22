@@ -18,6 +18,7 @@
 #include "rna_internal.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "BKE_paint.hh"
@@ -353,6 +354,11 @@ static std::optional<std::string> rna_UvSculpt_path(const PointerRNA * /*ptr*/)
 static std::optional<std::string> rna_CurvesSculpt_path(const PointerRNA * /*ptr*/)
 {
   return "tool_settings.curves_sculpt";
+}
+
+static bool rna_CurvesSculpt_add_curves_object_poll(PointerRNA * /*ptr*/, PointerRNA value)
+{
+  return (reinterpret_cast<Object *>(value.owner_id))->type == OB_CURVES;
 }
 
 static std::optional<std::string> rna_GpPaint_path(const PointerRNA * /*ptr*/)
@@ -2005,11 +2011,46 @@ static void rna_def_gpencil_sculpt(BlenderRNA *brna)
 static void rna_def_curves_sculpt(BlenderRNA *brna)
 {
   StructRNA *srna;
+  PropertyRNA *prop;
+
+  static const EnumPropertyItem add_curves_target_items[] = {
+      {CURVES_SCULPT_ADD_TARGET_ALL,
+       "ALL",
+       0,
+       "All Selected",
+       "Add curves to all selected Curves objects in sculpt mode"},
+      {CURVES_SCULPT_ADD_TARGET_ACTIVE,
+       "ACTIVE",
+       0,
+       "Active Object",
+       "Add curves only to the active Curves object"},
+      {CURVES_SCULPT_ADD_TARGET_OBJECT,
+       "OBJECT",
+       0,
+       "Object",
+       "Add curves to the specified Curves object"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
 
   srna = RNA_def_struct(brna, "CurvesSculpt", "Paint");
   RNA_def_struct_path_func(srna, "rna_CurvesSculpt_path");
   RNA_def_struct_ui_text(srna, "Curves Sculpt Paint", "");
   RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  prop = RNA_def_property(srna, "add_curves_target", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, add_curves_target_items);
+  RNA_def_property_ui_text(
+      prop, "Add Target", "Curves object to add new curves to in multi-object sculpt mode");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "add_curves_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "add_curves_object");
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, nullptr, nullptr, "rna_CurvesSculpt_add_curves_object_poll");
+  RNA_def_property_ui_text(prop, "Add Object", "Curves object to add new curves to");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 void RNA_def_sculpt_paint(BlenderRNA *brna)

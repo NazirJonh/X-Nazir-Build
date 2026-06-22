@@ -202,6 +202,13 @@ bool curves_sculpt_poll_view3d(bContext *C);
 void foreach_curves_sculpt_target(const PaintStroke &stroke,
                                   FunctionRef<void(Object &curves_ob, Curves &curves_id)> fn);
 
+/**
+ * Iterate over Curves objects that should receive newly added curves from the Add/Density brushes.
+ * Respects the add-curves target setting in tool settings.
+ */
+void foreach_curves_sculpt_add_target(const PaintStroke &stroke,
+                                      FunctionRef<void(Object &curves_ob, Curves &curves_id)> fn);
+
 }  // namespace ed::sculpt_paint
 
 }  // namespace blender

@@ -483,7 +483,7 @@ struct DensityAddOperationExecutor {
 void DensityAddOperation::on_stroke_extended(const PaintStroke &stroke,
                                              const StrokeExtension &stroke_extension)
 {
-  foreach_curves_sculpt_target(stroke, [&](Object &curves_ob, Curves &curves_id) {
+  foreach_curves_sculpt_add_target(stroke, [&](Object &curves_ob, Curves &curves_id) {
     DensityAddOperationExecutor executor{stroke};
     executor.curves_ob_orig_ = &curves_ob;
     executor.curves_id_orig_ = &curves_id;

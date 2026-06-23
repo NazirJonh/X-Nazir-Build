@@ -2500,6 +2500,24 @@ static float sculpt_texture_rectangle_distance_squared(const StrokeCache &cache,
   return math::square(distance * cache.radius);
 }
 
+/**
+ * Screen-based mapping modes (Tiled, View, Random) must keep screen projection even when
+ * rectangle clip is enabled. Brush-local projection is only used for Area mapping, or for
+ * rectangle clip with modes that do not define their own screen-space coordinates.
+ */
+static bool sculpt_texture_uses_brush_local_projection(const MTex &mtex, const Brush &brush)
+{
+  if (mtex.brush_map_mode == MTEX_MAP_MODE_AREA) {
+    return true;
+  }
+  if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+      !ELEM(mtex.brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_RANDOM))
+  {
+    return true;
+  }
+  return false;
+}
+
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const float brush_point[3],
@@ -2533,7 +2551,10 @@ void sculpt_apply_texture(const SculptSession &ss,
     }
     float3 symm_point = symmetry_flip(point, cache.mirror_symmetry_pass);
 
-    if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+    const bool use_brush_local_projection = sculpt_texture_uses_brush_local_projection(
+        *mtex, brush);
+
+    if (use_brush_local_projection && brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
         !sculpt_point_inside_texture_rectangle_clip(cache, symm_point))
     {
       *r_value = 0.0f;
@@ -2543,13 +2564,10 @@ void sculpt_apply_texture(const SculptSession &ss,
 
     /* Still no symmetry supported for other paint modes.
      * Sculpt does it DIY. */
-    if (mtex->brush_map_mode == MTEX_MAP_MODE_AREA ||
-        brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE)
-    {
+    if (use_brush_local_projection) {
       /* Similar to fixed mode, but projects from the brush plane rather than the view direction.
-       * Rectangle clipping needs to use the same surface-aligned projection for sampling as it
-       * uses for its bounds test, otherwise the clipped area is in brush-local space while the
-       * texture itself remains screen-projected. */
+       * Rectangle clipping uses the same surface-aligned projection for sampling as for its
+       * brush-local bounds test. */
 
       mul_m4_v3(cache.brush_local_mat.ptr(), symm_point);
 
@@ -2571,9 +2589,19 @@ void sculpt_apply_texture(const SculptSession &ss,
       const float2 point_2d = ED_view3d_project_float_v2_m4(
           cache.vc->region, symm_point, cache.projection_mat);
       const float point_3d[3] = {point_2d[0], point_2d[1], 0.0f};
-      /* Rectangle clip is applied in brush local space above. */
-      *r_value = BKE_brush_sample_tex_3d(
-          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool, false);
+      /* Tiled uses absolute screen coordinates, so rectangle clip cannot be applied here
+       * (same as Sphere – the rectangular boundary comes from brush falloff instead).
+       * View and Random use brush-relative coordinates, so clip there is valid. */
+      const bool apply_texture_clip = brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+                                      !ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED);
+      *r_value = BKE_brush_sample_tex_3d(cache.paint,
+                                         &brush,
+                                         mtex,
+                                         point_3d,
+                                         r_rgba,
+                                         0,
+                                         ss.tex_pool,
+                                         apply_texture_clip);
     }
   }
 }

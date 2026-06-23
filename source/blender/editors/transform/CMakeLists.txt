@@ -83,6 +83,7 @@ set(SRC
   transform_mode_tosphere.cc
   transform_mode_trackball.cc
   transform_mode_translate.cc
+  paint_curve_snap.cc
   transform_mode_vert_slide.cc
   transform_ops.cc
   transform_orientations.cc

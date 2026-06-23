@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "DNA_scene_types.h"
 #include "DNA_view3d_enums.h"
 
 #include <cstdint>
@@ -31,6 +32,7 @@ struct ReportList;
 struct Scene;
 struct UndoStep;
 struct UndoType;
+struct View3D;
 struct wmKeyConfig;
 struct wmOperator;
 
@@ -192,6 +194,41 @@ bool ED_paintcurve_export_to_scene_object(bContext *C,
  * Safe to call multiple times — guards against double-registration internally.
  */
 void ED_paint_curve_overlay_redraw_register();
+
+/* `paint_curve_snap.cc` (implemented in #bf_editor_transform) */
+
+struct PaintCurveSnapContext;
+
+PaintCurveSnapContext *ED_paintcurve_snap_context_create();
+void ED_paintcurve_snap_context_destroy(PaintCurveSnapContext *snap_ctx);
+
+/**
+ * Effective snap-element mask for paint-curve editing.
+ * Matches the header snap popover (#ToolSettings.snap_mode via `snap_elements`).
+ */
+eSnapMode ED_paintcurve_snap_elements(const ToolSettings *ts);
+
+/**
+ * When geometry snap targets are enabled, exclude increment/grid so a missed hit does not
+ * fall back to a different snap type (paint-curve editing uses exclusive snap modes).
+ */
+eSnapMode ED_paintcurve_snap_mode_sanitize(eSnapMode snap_mode);
+
+/**
+ * Snap under \a mval to scene geometry (vertex / edge / face per #ToolSettings.snap_mode).
+ *
+ * \param prev_co_world: Optional world-space reference (edge-perpendicular, etc.).
+ * \param r_hit_ob: Hit location in \a obact object space.
+ */
+bool ED_paintcurve_snap_point(bContext *C,
+                              PaintCurveSnapContext *snap_ctx,
+                              Depsgraph *depsgraph,
+                              const View3D *v3d,
+                              ARegion *region,
+                              Object *obact,
+                              const float mval[2],
+                              const float prev_co_world[3],
+                              float r_hit_ob[3]);
 
 /* `paint_canvas.cc` */
 

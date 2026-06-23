@@ -106,6 +106,13 @@ bool ED_paint_curve_overlay_wants_redraw(const bContext *C);
 
 bool ED_paint_curve_slide_is_active();
 
+/**
+ * Region-space position of the snap marker shown during a 3D paint-curve slide.
+ * Returns false when no geometry snap is currently active.
+ * \param r_type: receives the active snap elements (#SCE_SNAP_TO_GEOM subset) for marker styling.
+ */
+bool ED_paint_curve_snap_marker_get(float r_screen[2], int *r_type);
+
 /** Squared screen-space distance from \a mval to a tessellated curve polyline. */
 float ED_paint_curve_polyline_distance_sq(blender::Span<blender::float2> polyline,
                                           blender::float2 mval);

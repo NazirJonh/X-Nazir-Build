@@ -402,6 +402,11 @@ extern TransConvertTypeInfo TransConvertType_ObjectTexSpace;
 /* `transform_convert_paintcurve.cc` */
 
 extern TransConvertTypeInfo TransConvertType_PaintCurve;
+bool paintcurve_transform_use_3d_viewport(const TransInfo *t);
+bool paintcurve_trans_data_is_pivot(const TransDataContainer *tc, int data_index);
+void paintcurve_snap_source_world_get(const TransDataContainer *tc,
+                                      int data_index,
+                                      float r_world[3]);
 void paintcurve_center_median_3d_get(const TransInfo *t, float r_center[3]);
 
 /* `transform_convert_particle.cc` */

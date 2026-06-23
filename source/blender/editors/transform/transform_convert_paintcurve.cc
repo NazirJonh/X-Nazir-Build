@@ -522,6 +522,34 @@ static void flushTransPaintCurve(TransInfo *t)
 
 /** \} */
 
+bool paintcurve_transform_use_3d_viewport(const TransInfo *t)
+{
+  if ((t->options & CTX_PAINT_CURVE) == 0 || t->spacetype != SPACE_VIEW3D) {
+    return false;
+  }
+  Paint *paint = t->context ? BKE_paint_get_active_from_context(t->context) :
+                              BKE_paint_get_active(*t->bmain, t->scene, t->view_layer);
+  Brush *br = paint ? BKE_paint_brush(paint) : nullptr;
+  PaintCurve *pc = br ? br->paint_curve : nullptr;
+  return pc && pc->use_3d_space;
+}
+
+bool paintcurve_trans_data_is_pivot(const TransDataContainer *tc, const int data_index)
+{
+  const TransDataPaintCurve *tdpc_arr = static_cast<const TransDataPaintCurve *>(
+      tc->custom.type.data);
+  return tdpc_arr[data_index].handle_index == 1;
+}
+
+void paintcurve_snap_source_world_get(const TransDataContainer *tc,
+                                      const int data_index,
+                                      float r_world[3])
+{
+  const TransDataPaintCurve *tdpc_arr = static_cast<const TransDataPaintCurve *>(
+      tc->custom.type.data);
+  copy_v3_v3(r_world, tdpc_arr[data_index].co_orig_world);
+}
+
 void paintcurve_center_median_3d_get(const TransInfo *t, float r_center[3])
 {
   const TransDataContainer *tc = TRANS_DATA_CONTAINER_FIRST_SINGLE(t);

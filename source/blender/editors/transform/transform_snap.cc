@@ -31,6 +31,7 @@
 
 #include "ED_image.hh"
 #include "ED_node.hh"
+#include "ED_paint.hh"
 #include "ED_transform_snap_object_context.hh"
 #include "ED_uvedit.hh"
 
@@ -739,8 +740,11 @@ static eSnapMode snap_mode_from_spacetype(TransInfo *t)
   }
 
   if (t->spacetype == SPACE_VIEW3D) {
-    if (t->options & (CTX_CAMERA | CTX_EDGE_DATA | CTX_PAINT_CURVE)) {
+    if (t->options & (CTX_CAMERA | CTX_EDGE_DATA)) {
       return SCE_SNAP_TO_INCREMENT;
+    }
+    if (t->options & CTX_PAINT_CURVE) {
+      return ED_paintcurve_snap_elements(ts);
     }
 
     return eSnapMode(ts->snap_mode);
@@ -774,6 +778,12 @@ static eSnapTargetOP snap_target_select_from_spacetype_and_tool_settings(TransIn
 {
   /* `t->tsnap.target_operation` not initialized yet. */
   BLI_assert(t->tsnap.target_operation == SCE_SNAP_TARGET_ALL);
+
+  /* Match #ED_paintcurve_snap_point: paint-curve editing must snap to the active sculpt
+   * object as well as the rest of the scene. */
+  if (t->options & CTX_PAINT_CURVE) {
+    return SCE_SNAP_TARGET_ALL;
+  }
 
   eSnapTargetOP target_operation = SCE_SNAP_TARGET_ALL;
 
@@ -1022,6 +1032,11 @@ void transform_snap_reset_from_mode(TransInfo *t, wmOperator *op)
 
   t->tsnap.source_operation = snap_source;
   transform_snap_flag_from_modifiers_set(t);
+
+  if (t->options & CTX_PAINT_CURVE) {
+    t->tsnap.mode = ED_paintcurve_snap_mode_sanitize(t->tsnap.mode);
+  }
+
   setSnappingCallback(t);
 }
 
@@ -1485,6 +1500,8 @@ static void snap_source_closest_fn(TransInfo *t)
     return;
   }
 
+  bool snap_source_set = false;
+
   if (t->tsnap.target_type == SCE_SNAP_TO_GRID) {
     /* Previously Snap to Grid had its own snap source which was always the result of
      * #snap_source_median_fn. Now this mode shares the same code, so to not change the behavior
@@ -1495,6 +1512,7 @@ static void snap_source_closest_fn(TransInfo *t)
        * the median center. */
       t->tsnap.source_type = SCE_SNAP_TO_POINT;
     }
+    snap_source_set = true;
   }
   else {
     float dist_closest = 0.0f;
@@ -1557,17 +1575,28 @@ static void snap_source_closest_fn(TransInfo *t)
       }
     }
     else {
+      const bool use_3d_paint_curve_world = paintcurve_transform_use_3d_viewport(t);
+      const bool paint_curve_snap_pivot_only = (t->options & CTX_PAINT_CURVE) != 0;
       FOREACH_TRANS_DATA_CONTAINER (t, tc) {
         tc->foreach_index_selected([&](const int i) {
+          if (paint_curve_snap_pivot_only && !paintcurve_trans_data_is_pivot(tc, i)) {
+            return;
+          }
+
           TransData *td = &tc->data[i];
 
           float loc[3];
           float dist;
 
-          copy_v3_v3(loc, td->center);
+          if (use_3d_paint_curve_world) {
+            paintcurve_snap_source_world_get(tc, i, loc);
+          }
+          else {
+            copy_v3_v3(loc, td->center);
 
-          if (tc->use_local_mat) {
-            mul_m4_v3(tc->mat, loc);
+            if (tc->use_local_mat) {
+              mul_m4_v3(tc->mat, loc);
+            }
           }
 
           dist = t->mode_info->snap_distance_fn(t, loc, t->tsnap.snap_target);
@@ -1582,9 +1611,15 @@ static void snap_source_closest_fn(TransInfo *t)
         });
       }
     }
+
+    if (closest != nullptr) {
+      snap_source_set = true;
+    }
   }
 
-  t->tsnap.status |= SNAP_SOURCE_FOUND;
+  if (snap_source_set) {
+    t->tsnap.status |= SNAP_SOURCE_FOUND;
+  }
 }
 
 /** \} */

@@ -18,9 +18,13 @@
 #include "BLI_bitmap_draw_2d.hh"
 #include "BLI_lasso_2d.hh"
 #include "BLI_listbase.hh"
+#include "BLI_math_vector.hh"
 #include "BLI_math_vector_c.hh"
 #include "BLI_rect.hh"
+#include "BLI_string.hh"
 #include "BLI_utildefines.hh"
+
+#include "BLF_api.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -128,6 +132,39 @@ bool WM_gesture_is_modal_first(const wmGesture *gesture)
 
 /* ******************* gesture draw ******************* */
 
+/**
+ * Calculate the angle in degrees between two points in screen space.
+ * Returns angle in range [-180, 180].
+ */
+static float gesture_segment_angle_degrees(const float2 start, const float2 end)
+{
+  const float delta[2] = {end.x - start.x, end.y - start.y};
+  if (is_zero_v2(delta)) {
+    return 0.0f;
+  }
+  return RAD2DEGF(atan2f(delta[1], delta[0]));
+}
+
+/**
+ * Draw angle HUD text near the cursor position.
+ */
+static void wm_gesture_draw_angle_text(const int2 cursor, const float angle)
+{
+  char text[64];
+  SNPRINTF(text, "Angle = %.1f°", angle);
+
+  const float x = cursor.x + 15.0f * UI_SCALE_FAC;
+  const float y = cursor.y + 20.0f * UI_SCALE_FAC;
+
+  /* Draw shadow for better visibility. */
+  BLF_color4f(BLF_default(), 0.0f, 0.0f, 0.0f, 0.5f);
+  BLF_draw_default(x + 1.0f, y - 1.0f, 0.0f, text, strlen(text));
+
+  /* Draw main text. */
+  BLF_color4f(BLF_default(), 1.0f, 1.0f, 1.0f, 1.0f);
+  BLF_draw_default(x, y, 0.0f, text, strlen(text));
+}
+
 static void wm_gesture_draw_line_active_side(const rcti *rect, const bool flip)
 {
   GPUVertFormat *format = immVertexFormat();
@@ -209,6 +246,15 @@ static void wm_gesture_draw_line(wmGesture *gt)
   immEnd();
 
   immUnbindProgram();
+
+  /* Draw angle HUD only when the segment has non-trivial length. */
+  const float2 start(float(rect->xmin), float(rect->ymin));
+  const float2 end(float(rect->xmax), float(rect->ymax));
+  if (math::length_squared(end - start) > 1.0f) {
+    const float angle = gesture_segment_angle_degrees(start, end);
+    const int2 end_point(int(rect->xmax), int(rect->ymax));
+    wm_gesture_draw_angle_text(end_point, angle);
+  }
 }
 
 static void wm_gesture_draw_rect(wmGesture *gt)
@@ -512,9 +558,9 @@ static void wm_gesture_draw_polyline(wmGesture *gt)
 
   immBegin(GPU_PRIM_LINE_LOOP, numverts);
 
-  const short *border = static_cast<short *>(gt->customdata);
-  for (int i = 0; i < gt->points; i++, border += 2) {
-    immVertex2f(shdr_pos, float(border[0]), float(border[1]));
+  const short (*border_pts)[2] = static_cast<short int (*)[2]>(gt->customdata);
+  for (int i = 0; i < gt->points; i++) {
+    immVertex2f(shdr_pos, float(border_pts[i][0]), float(border_pts[i][1]));
   }
   immVertex2f(shdr_pos, float(gt->mval.x), float(gt->mval.y));
 
@@ -523,6 +569,19 @@ static void wm_gesture_draw_polyline(wmGesture *gt)
   immUnbindProgram();
 
   draw_start_vertex_circle(*gt, shdr_pos);
+
+  /* Draw angle HUD for the current segment (last fixed point to live cursor).
+   * Only shown when the segment has non-trivial length to avoid a flickering 0.0° on first click. */
+  if (gt->points >= 1) {
+    const float2 anchor{
+        float(border_pts[gt->points - 1][0]), float(border_pts[gt->points - 1][1])};
+    const float2 live_point{float(gt->mval.x), float(gt->mval.y)};
+
+    if (math::length_squared(live_point - anchor) > 1.0f) {
+      const float angle = gesture_segment_angle_degrees(anchor, live_point);
+      wm_gesture_draw_angle_text(gt->mval, angle);
+    }
+  }
 }
 
 static void wm_gesture_draw_cross(const wmWindow *win, const wmGesture *gt)

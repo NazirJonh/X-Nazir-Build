@@ -820,14 +820,47 @@ static wmOperatorStatus gesture_polyline_apply(bContext *C,
   return retval;
 }
 
+/* Snap angle struct and helper used by both polyline and straight line gestures. */
+struct SnapAngle {
+  float increment;
+  float precise_increment;
+};
+
+static SnapAngle get_snap_angle(const ScrArea &area, const ToolSettings &tool_settings)
+{
+  SnapAngle result;
+  if (area.spacetype == SPACE_VIEW3D) {
+    result.increment = tool_settings.snap_angle_increment_3d;
+    result.precise_increment = tool_settings.snap_angle_increment_3d_precision;
+  }
+  else {
+    result.increment = tool_settings.snap_angle_increment_2d;
+    result.precise_increment = tool_settings.snap_angle_increment_2d_precision;
+  }
+  return result;
+}
+
+/* Forward declaration for polyline snap function. */
+static float2 wm_gesture_snap_point_to_angle(const float2 anchor,
+                                             const float2 point,
+                                             const float snap_angle);
+
 wmOperatorStatus WM_gesture_polyline_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  const Scene *scene = CTX_data_scene(C);
+  const ScrArea *area = CTX_wm_area(C);
+  const SnapAngle snap_angle = get_snap_angle(*area, *scene->toolsettings);
+
   wmGesture *gesture = static_cast<wmGesture *>(op->customdata);
 
   if (event->type == EVT_MODAL_MAP) {
     switch (event->val) {
       case GESTURE_MODAL_MOVE:
         gesture->move = !gesture->move;
+        break;
+      case GESTURE_MODAL_SNAP:
+        /* Toggle snapping on/off. */
+        gesture->use_snap = !gesture->use_snap;
         break;
       case GESTURE_MODAL_SELECT: {
         wm_gesture_tag_redraw(CTX_wm_window(C));
@@ -853,6 +886,8 @@ wmOperatorStatus WM_gesture_polyline_modal(bContext *C, wmOperator *op, const wm
         gesture->points++;
         border[gesture->points - 1][0] = gesture->mval.x;
         border[gesture->points - 1][1] = gesture->mval.y;
+        /* Reset angle lock so the next segment starts fresh. */
+        gesture->use_angle_lock = false;
         break;
       }
       case GESTURE_MODAL_CONFIRM:
@@ -870,8 +905,9 @@ wmOperatorStatus WM_gesture_polyline_modal(bContext *C, wmOperator *op, const wm
       case MOUSEMOVE:
       case INBETWEEN_MOUSEMOVE: {
         wm_gesture_tag_redraw(CTX_wm_window(C));
-        gesture->mval = int2((event->xy[0] - gesture->winrct.xmin),
-                             (event->xy[1] - gesture->winrct.ymin));
+        const int2 raw_mval = int2((event->xy[0] - gesture->winrct.xmin),
+                                   (event->xy[1] - gesture->winrct.ymin));
+
         if (gesture->points == gesture->points_alloc) {
           gesture->points_alloc *= 2;
           gesture->customdata = MEM_realloc_uninitialized(
@@ -881,12 +917,63 @@ wmOperatorStatus WM_gesture_polyline_modal(bContext *C, wmOperator *op, const wm
 
         /* move the lasso */
         if (gesture->move) {
-          const int dx = gesture->mval.x - border[gesture->points - 1][0];
-          const int dy = gesture->mval.y - border[gesture->points - 1][1];
+          const int dx = raw_mval.x - border[gesture->points - 1][0];
+          const int dy = raw_mval.y - border[gesture->points - 1][1];
 
           for (int i = 0; i < gesture->points; i++) {
             border[i][0] += dx;
             border[i][1] += dy;
+          }
+          gesture->mval = raw_mval;
+        }
+        else {
+          /* Get anchor point (last fixed point). */
+          const int2 anchor(border[gesture->points - 1][0], border[gesture->points - 1][1]);
+
+          /* Apply Shift angle lock first if Shift is held. */
+          if (event->modifier & KM_SHIFT) {
+            if (!gesture->use_angle_lock) {
+              /* Initialize angle lock: capture direction from anchor to current cursor. */
+              const float2 raw_point(raw_mval.x, raw_mval.y);
+              const float2 anchor_f(anchor.x, anchor.y);
+              float2 direction = raw_point - anchor_f;
+              const float len = math::length(direction);
+
+              if (len > 0.01f) {
+                gesture->use_angle_lock = true;
+                gesture->angle_lock_anchor = anchor;
+                gesture->angle_lock_direction = direction / len;
+              }
+            }
+
+            if (gesture->use_angle_lock) {
+              /* Project raw point onto locked direction to get length. */
+              const float2 raw_point(raw_mval.x, raw_mval.y);
+              const float2 anchor_f(gesture->angle_lock_anchor.x, gesture->angle_lock_anchor.y);
+              const float2 delta = raw_point - anchor_f;
+              float length = math::dot(delta, gesture->angle_lock_direction);
+              length = std::max(0.0f, length);
+
+              const float2 locked_point = anchor_f + gesture->angle_lock_direction * length;
+              gesture->mval = int2(locked_point.x, locked_point.y);
+            }
+            else {
+              gesture->mval = raw_mval;
+            }
+          }
+          else {
+            /* Shift not held - release angle lock. */
+            gesture->use_angle_lock = false;
+            gesture->mval = raw_mval;
+
+            /* Apply Ctrl snap if enabled. */
+            if (gesture->use_snap) {
+              const float2 anchor_f(anchor.x, anchor.y);
+              const float2 raw_point(gesture->mval.x, gesture->mval.y);
+              const float2 snapped = wm_gesture_snap_point_to_angle(
+                  anchor_f, raw_point, snap_angle.increment);
+              gesture->mval = int2(snapped.x, snapped.y);
+            }
           }
         }
         break;
@@ -954,26 +1041,6 @@ void WM_OT_polyline_gesture(wmOperatorType *ot)
  * It stores 4 values: `xstart, ystart, xend, yend`.
  * \{ */
 
-struct SnapAngle {
-  float increment;
-  float precise_increment;
-};
-
-static SnapAngle get_snap_angle(const ScrArea &area, const ToolSettings &tool_settings)
-{
-  SnapAngle snap_angle;
-  if (area.spacetype == SPACE_VIEW3D) {
-    snap_angle.increment = tool_settings.snap_angle_increment_3d;
-    snap_angle.precise_increment = tool_settings.snap_angle_increment_3d_precision;
-  }
-  else {
-    snap_angle.increment = tool_settings.snap_angle_increment_2d;
-    snap_angle.precise_increment = tool_settings.snap_angle_increment_2d_precision;
-  }
-
-  return snap_angle;
-}
-
 static bool gesture_straightline_apply(bContext *C, wmOperator *op)
 {
   wmGesture *gesture = static_cast<wmGesture *>(op->customdata);
@@ -1032,15 +1099,24 @@ wmOperatorStatus WM_gesture_straightline_active_side_invoke(bContext *C,
   return OPERATOR_RUNNING_MODAL;
 }
 
-static void wm_gesture_straightline_do_angle_snap(rcti *rect, float snap_angle)
+/**
+ * Snap a point to the nearest angle increment relative to an anchor point.
+ * Returns the snapped point coordinates.
+ */
+static float2 wm_gesture_snap_point_to_angle(const float2 anchor,
+                                             const float2 point,
+                                             const float snap_angle)
 {
-  const float line_start[2] = {float(rect->xmin), float(rect->ymin)};
-  const float line_end[2] = {float(rect->xmax), float(rect->ymax)};
   const float x_axis[2] = {1.0f, 0.0f};
 
   float line_direction[2];
-  sub_v2_v2v2(line_direction, line_end, line_start);
+  line_direction[0] = point.x - anchor.x;
+  line_direction[1] = point.y - anchor.y;
   const float line_length = normalize_v2(line_direction);
+
+  if (line_length == 0.0f) {
+    return anchor;
+  }
 
   const float current_angle = angle_signed_v2v2(x_axis, line_direction);
   const float adjusted_angle = current_angle + (snap_angle / 2.0f);
@@ -1049,26 +1125,52 @@ static void wm_gesture_straightline_do_angle_snap(rcti *rect, float snap_angle)
   float line_snapped_end[2];
   rotate_v2_v2fl(line_snapped_end, x_axis, angle_snapped);
   mul_v2_fl(line_snapped_end, line_length);
-  add_v2_v2(line_snapped_end, line_start);
+  add_v2_v2(line_snapped_end, anchor);
 
-  rect->xmax = int(line_snapped_end[0]);
-  rect->ymax = int(line_snapped_end[1]);
+  float2 result;
+  result.x = line_snapped_end[0];
+  result.y = line_snapped_end[1];
 
   /* Check whether `angle_snapped` is a multiple of 45 degrees, if so ensure X and Y directions
    * are the same length (there could be an off-by-one due to rounding error). */
   const float fract_45 = fractf(angle_snapped / DEG2RADF(45.0f));
   const float fract_90 = fractf(angle_snapped / DEG2RADF(90.0f));
-  /* Check if it's a multiple of 45 but not 90 degrees. */
   if ((compare_ff(fract_45, 0.0f, 1e-6) || compare_ff(fabsf(fract_45), 1.0f, 1e-6)) &&
       !(compare_ff(fract_90, 0.0f, 1e-6) || compare_ff(fabsf(fract_90), 1.0f, 1e-6)))
   {
-    int xlen = abs(rect->xmax - rect->xmin);
-    int ylen = rect->ymax - rect->ymin;
+    const int xlen = abs(int(line_snapped_end[0]) - int(anchor.x));
+    int ylen = int(line_snapped_end[1]) - int(anchor.y);
     if (abs(ylen) != xlen) {
       ylen = xlen * (ylen >= 0 ? 1 : -1);
-      rect->ymax = rect->ymin + ylen;
+      result.y = anchor.y + ylen;
     }
   }
+
+  return result;
+}
+
+static void wm_gesture_snap_line_end_to_angle(const float line_start[2],
+                                              float line_end[2],
+                                              const float snap_angle)
+{
+  const float2 anchor(line_start[0], line_start[1]);
+  const float2 point(line_end[0], line_end[1]);
+
+  const float2 snapped = wm_gesture_snap_point_to_angle(anchor, point, snap_angle);
+
+  line_end[0] = snapped.x;
+  line_end[1] = snapped.y;
+}
+
+static void wm_gesture_straightline_do_angle_snap(rcti *rect, float snap_angle)
+{
+  const float line_start[2] = {float(rect->xmin), float(rect->ymin)};
+  float line_end[2] = {float(rect->xmax), float(rect->ymax)};
+
+  wm_gesture_snap_line_end_to_angle(line_start, line_end, snap_angle);
+
+  rect->xmax = int(line_end[0]);
+  rect->ymax = int(line_end[1]);
 }
 
 wmOperatorStatus WM_gesture_straightline_modal(bContext *C, wmOperator *op, const wmEvent *event)

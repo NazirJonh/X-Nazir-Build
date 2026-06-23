@@ -4451,6 +4451,7 @@ static void gesture_polyline_modal_keymap(wmKeyConfig *keyconf)
       {GESTURE_MODAL_CANCEL, "CANCEL", 0, "Cancel", ""},
       {GESTURE_MODAL_SELECT, "SELECT", 0, "Select", ""},
       {GESTURE_MODAL_MOVE, "MOVE", 0, "Move", ""},
+      {GESTURE_MODAL_SNAP, "SNAP", 0, "Snap", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -4462,6 +4463,17 @@ static void gesture_polyline_modal_keymap(wmKeyConfig *keyconf)
   }
 
   keymap = WM_modalkeymap_ensure(keyconf, "Gesture Polyline", modal_items);
+
+  /* Add keymap items for snap (Ctrl). */
+  {
+    KeyMapItem_Params params{};
+    params.type = EVT_LEFTCTRLKEY;
+    params.value = KM_PRESS;
+    params.modifier = KM_ANY;
+    params.keymodifier = KM_ANY;
+    params.direction = KM_ANY;
+    WM_modalkeymap_add_item(keymap, &params, GESTURE_MODAL_SNAP);
+  }
 
   /* assign map to operators */
   WM_modalkeymap_assign(keymap, "PAINT_OT_hide_show_polyline_gesture");

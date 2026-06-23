@@ -2147,6 +2147,12 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_function_ui_description(func, "Item. A color ramp widget.");
   api_ui_item_rna_common(func);
   RNA_def_boolean(func, "expand", false, "", "Expand button to show more detail");
+  RNA_def_boolean(func,
+                  "compact",
+                  false,
+                  "",
+                  "Compact layout: draw the ramp first, move the tools menu below it, hide the "
+                  "active stop selector, and insert stops by clicking the ramp");
 
   func = RNA_def_function(srna, "template_icon", "template_icon");
   RNA_def_function_ui_description(func, "Display a large icon");

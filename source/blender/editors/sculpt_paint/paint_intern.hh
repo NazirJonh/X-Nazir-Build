@@ -537,12 +537,17 @@ void PAINT_OT_image_select_transform(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_confirm(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_cancel(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_drag(wmOperatorType *ot);
+void PAINT_OT_image_select_gradient(wmOperatorType *ot);
+void PAINT_OT_image_select_gradient_apply(wmOperatorType *ot);
+void PAINT_OT_image_select_gradient_cancel(wmOperatorType *ot);
 /** True while a selection transform gizmo is active in the current Image Editor. */
 bool image_select_transform_is_floating(bContext *C);
 /** True while a move-selection fragment is floating in the current Image Editor. */
 bool image_select_move_is_floating(bContext *C);
 /** Floating move in the given Image Editor space (not another window/space). */
 bool image_select_move_is_floating_in_space(const SpaceImage *sima);
+bool image_select_gradient_is_floating(bContext *C);
+bool image_select_gradient_is_floating_in_space(const SpaceImage *sima);
 void image_paint_clipboard_ensure_atexit_handler();
 
 

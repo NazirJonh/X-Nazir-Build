@@ -45,6 +45,7 @@
 #include "BKE_appdir.hh"
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
+#include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
 #include "BKE_curveprofile.h"
 #include "BKE_customdata.hh"
@@ -563,6 +564,13 @@ static void blo_update_defaults_scene(Main *bmain, Scene *scene)
   blo_update_defaults_paint(reinterpret_cast<Paint *>(ts->gp_sculptpaint));
   blo_update_defaults_paint(reinterpret_cast<Paint *>(ts->curves_sculpt));
   blo_update_defaults_paint(reinterpret_cast<Paint *>(&ts->imapaint));
+
+  /* Gradient tool defaults for ImagePaintSettings. */
+  {
+    ImagePaintSettings &imapaint = ts->imapaint;
+    imapaint.gradient_opacity = 1.0f;
+    BKE_colorband_init(&imapaint.gradient_colorband, true);
+  }
 
   /* Weight Paint settings */
   ts->weightuser = OB_DRAW_GROUPUSER_ACTIVE;

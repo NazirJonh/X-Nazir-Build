@@ -23,6 +23,7 @@
 #include "DNA_ID.h"
 #include "DNA_brush_enums.h"
 #include "DNA_color_types.h" /* color management */
+#include "DNA_colorband_types.h"
 #include "DNA_curve_enums.h"
 #include "DNA_customdata_types.h" /* Scene's runtime custom-data masks. */
 #include "DNA_freestyle_types.h"
@@ -1293,6 +1294,22 @@ enum eImagePaint_MissingData : short {
 };
 ENUM_OPERATORS(eImagePaint_MissingData)
 
+/** #ImagePaintSettings::gradient_type */
+enum eImagePaint_GradientType : int8_t {
+  IMAGE_PAINT_GRADIENT_LINEAR = 0,
+  IMAGE_PAINT_GRADIENT_RADIAL = 1,
+  IMAGE_PAINT_GRADIENT_CONICAL = 2,
+  IMAGE_PAINT_GRADIENT_DIAMOND = 3,
+  IMAGE_PAINT_GRADIENT_SQUARE = 4,
+};
+
+/** #ImagePaintSettings::gradient_repeat */
+enum eImagePaint_GradientRepeat : int8_t {
+  IMAGE_PAINT_GRADIENT_REPEAT_NONE = 0,
+  IMAGE_PAINT_GRADIENT_REPEAT_REPEAT = 1,
+  IMAGE_PAINT_GRADIENT_REPEAT_REFLECT = 2,
+};
+
 /** Texture/Image Editor. */
 struct ImagePaintSettings {
   Paint paint;
@@ -1330,7 +1347,22 @@ struct ImagePaintSettings {
   char use_selection_mask = 0;
   /** Expand paint selection to full UV islands (like UV Editor island select). */
   char use_selection_uv_island = 0;
-  char _pad3[6] = {};
+  /** #eImagePaint_GradientType */
+  char gradient_type = IMAGE_PAINT_GRADIENT_LINEAR;
+  /** #eImagePaint_GradientRepeat */
+  char gradient_repeat = IMAGE_PAINT_GRADIENT_REPEAT_NONE;
+  /** IMB_BlendMode for the selection gradient tool. */
+  short gradient_blend_mode = 0;
+  char _pad_gradient[2] = {};
+  float gradient_opacity = 1.0f;
+  /* Pad so the embedded #ColorBand starts on an 8-byte boundary and the struct size (which holds
+   * pointers) stays a multiple of 8. */
+  char _pad_gradient2[4] = {};
+  /**
+   * Color ramp (stops + interpolation) for the selection gradient tool. Embedded by value like
+   * #ColorMapping::coba; initialized lazily (see #BKE_colorband_init) when empty.
+   */
+  struct ColorBand gradient_colorband;
 };
 
 /** \} */

@@ -690,6 +690,10 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_select_transform_cancel);
   WM_operatortype_append(PAINT_OT_image_select_transform_drag);
 
+  WM_operatortype_append(PAINT_OT_image_select_gradient);
+  WM_operatortype_append(PAINT_OT_image_select_gradient_apply);
+  WM_operatortype_append(PAINT_OT_image_select_gradient_cancel);
+
   image_paint_clipboard_ensure_atexit_handler();
 }
 

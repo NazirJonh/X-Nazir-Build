@@ -84,6 +84,7 @@ set(SRC
   mesh/paint_image_select_fragment.cc
   mesh/paint_image_select_move.cc
   mesh/paint_image_select_transform.cc
+  mesh/paint_image_select_gradient.cc
   mesh/paint_image_select_gizmo.cc
   mesh/paint_image_2d_curve_mask.cc
   mesh/paint_image_ops_paint.cc

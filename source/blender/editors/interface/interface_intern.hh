@@ -528,6 +528,11 @@ struct ButtonHSVCube : public Button {
 /** Derived struct for #ButtonType::ColorBand. */
 struct ButtonColorBand : public Button {
   ColorBand *edit_coba = nullptr;
+  /**
+   * When true, clicking an empty area of the ramp inserts a new stop at the cursor (clicking near
+   * an existing stop still selects and drags it). Used by the compact color ramp template.
+   */
+  bool insert_on_click = false;
 };
 
 /** Derived struct for #ButtonType::CurveProfile. */

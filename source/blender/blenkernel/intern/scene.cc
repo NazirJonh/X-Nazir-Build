@@ -61,6 +61,7 @@
 #include "BKE_bpath.hh"
 #include "BKE_callbacks.hh"
 #include "BKE_collection.hh"
+#include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
 #include "BKE_curveprofile.h"
 #include "BKE_duplilist.hh"
@@ -187,6 +188,9 @@ static void scene_init_data(ID *id)
   scene->toolsettings = MEM_new<ToolSettings>(__func__);
 
   scene->toolsettings->autokey_mode = U.autokey_mode;
+
+  /* Image paint gradient tool color ramp (embedded by value, needs runtime init). */
+  BKE_colorband_init(&scene->toolsettings->imapaint.gradient_colorband, true);
 
   scene->toolsettings->unified_paint_settings.curve_rand_hue = BKE_paint_default_curve();
   scene->toolsettings->unified_paint_settings.curve_rand_saturation = BKE_paint_default_curve();

@@ -155,6 +155,7 @@ class IMAGE_MT_select(Menu):
             layout.separator()
             layout.operator("paint.image_select_move", text="Move Selection")
             layout.operator("paint.image_select_transform", text="Transform Selection")
+            layout.operator("paint.image_select_gradient", text="Gradient")
             layout.separator()
             layout.operator("paint.image_select_copy", text="Copy Selection")
             layout.operator("paint.image_select_paste", text="Paste Selection")
@@ -1331,6 +1332,32 @@ class IMAGE_PT_paint_select_move_props(Panel):
         layout.column().prop(sima, "paint_select_move_offset", text="Offset")
 
 
+class IMAGE_PT_paint_select_gradient_advanced(Panel):
+    # Popover only, shown from the selection gradient tool's settings.
+    # Registered in the topbar header so it doesn't appear as an extra sidebar panel.
+    bl_label = "Color Ramp Advanced"
+    bl_space_type = 'TOPBAR'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    @classmethod
+    def poll(cls, context):
+        return context.tool_settings.image_paint is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False  # No animation.
+
+        coba = context.tool_settings.image_paint.color_ramp
+
+        layout.prop(coba, "color_mode", text="Color Mode")
+        if coba.color_mode in {'HSV', 'HSL'}:
+            layout.prop(coba, "hue_interpolation", text="Interpolation")
+        else:
+            layout.prop(coba, "interpolation", text="Interpolation")
+
+
 class IMAGE_PT_paint_settings(Panel, ImagePaintPanel):
     bl_context = ".paint_common_2d"
     bl_category = "Tool"
@@ -1964,6 +1991,7 @@ classes = (
     IMAGE_PT_paint_select,
     IMAGE_PT_paint_select_transform,
     IMAGE_PT_paint_select_move_props,
+    IMAGE_PT_paint_select_gradient_advanced,
     IMAGE_PT_paint_settings,
     IMAGE_PT_paint_color,
     IMAGE_PT_paint_swatches,

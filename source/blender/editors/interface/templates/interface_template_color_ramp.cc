@@ -233,17 +233,130 @@ static void colorband_update_cb(bContext * /*C*/, void *bt_v, void *coba_v)
   bt->rnapoin.data = coba->data + coba->cur;
 }
 
+/**
+ * Compact variant of the color ramp template used by tools that drive the ramp directly on the
+ * widget (e.g. the texture-paint selection gradient). The ramp is drawn first, the tools menu is
+ * moved below it, and the active-stop selector / position fields are hidden. Color mode and
+ * interpolation are expected to be exposed separately (e.g. through a popover).
+ */
+static void colorband_buttons_layout_compact(Layout &layout,
+                                             Block *block,
+                                             ColorBand *coba,
+                                             const rctf *butr,
+                                             const RNAUpdateCb &cb,
+                                             const float unit,
+                                             const float xs,
+                                             const float ys)
+{
+  Button *bt;
+
+  /* Color ramp widget first. Clicking an empty area inserts a new stop at the cursor. */
+  layout.row(false);
+  bt = uiDefBut(
+      block, ButtonType::ColorBand, "", xs, ys, BLI_rctf_size_x(butr), UI_UNIT_Y, coba, 0, 0, "");
+  bt->rnapoin = cb.ptr;
+  bt->rnaprop = cb.prop;
+  button_func_set(bt, [cb](bContext &C) { rna_update_cb(C, cb); });
+  static_cast<ButtonColorBand *>(bt)->insert_on_click = true;
+
+  /* Controls below the ramp: add / remove / tools on the left, active stop color on the right. */
+  Layout *split = &layout.split(0.4f, false);
+
+  block_emboss_set(block, EmbossType::None);
+  block_align_begin(block);
+  split->row(true);
+
+  bt = uiDefIconTextBut(block,
+                        ButtonType::But,
+                        ICON_ADD,
+                        "",
+                        0,
+                        0,
+                        2.0f * unit,
+                        UI_UNIT_Y,
+                        nullptr,
+                        TIP_("Add a new color stop to the color ramp"));
+  button_func_set(bt, [coba, cb](bContext &C) { colorband_add(C, cb, *coba); });
+
+  bt = uiDefIconTextBut(block,
+                        ButtonType::But,
+                        ICON_REMOVE,
+                        "",
+                        0,
+                        0,
+                        2.0f * unit,
+                        UI_UNIT_Y,
+                        nullptr,
+                        TIP_("Delete the active position"));
+  button_func_set(bt, [coba, cb](bContext &C) {
+    if (BKE_colorband_element_remove(coba, coba->cur)) {
+      rna_update_cb(C, cb);
+      ED_undo_push(&C, "Delete Color Ramp Stop");
+    }
+  });
+  if (coba->tot < 2) {
+    button_flag_enable(bt, BUT_DISABLED);
+    button_func_tooltip_custom_set(bt, colorramp_disabled_tip_func, nullptr, nullptr);
+  }
+
+  RNAUpdateCb *tools_cb = MEM_new<RNAUpdateCb>(__func__, cb);
+  bt = uiDefIconBlockBut(block,
+                         colorband_tools_fn,
+                         tools_cb,
+                         ICON_DOWNARROW_HLT,
+                         0,
+                         0,
+                         2.0f * unit,
+                         UI_UNIT_Y,
+                         TIP_("Tools"));
+  /* Pass ownership of `tools_cb` to the button. */
+  button_funcN_set(
+      bt,
+      [](bContext *, void *, void *) {},
+      tools_cb,
+      nullptr,
+      but_func_argN_free<RNAUpdateCb>,
+      but_func_argN_copy<RNAUpdateCb>);
+
+  block_align_end(block);
+  block_emboss_set(block, EmbossType::Emboss);
+
+  Layout *colrow = &split->row(false);
+  if (coba->tot) {
+    CBData *cbd = coba->data + coba->cur;
+    PointerRNA elem_ptr = RNA_pointer_create_discrete(cb.ptr.owner_id, RNA_ColorRampElement, cbd);
+    colrow->prop(&elem_ptr, "color", UI_ITEM_NONE, "", ICON_NONE);
+
+    /* Trigger the gradient update callback when the active stop color changes. */
+    for (Button &but : block->buttons() | std::views::reverse) {
+      if (but.rnapoin.data != elem_ptr.data || !but.rnaprop) {
+        continue;
+      }
+      if (STREQ(RNA_property_identifier(but.rnaprop), "color")) {
+        button_func_set(&but, [cb](bContext &C) { rna_update_cb(C, cb); });
+        break;
+      }
+    }
+  }
+}
+
 static void colorband_buttons_layout(Layout &layout,
                                      Block *block,
                                      ColorBand *coba,
                                      const rctf *butr,
                                      const RNAUpdateCb &cb,
-                                     int expand)
+                                     int expand,
+                                     bool compact)
 {
   Button *bt;
   const float unit = BLI_rctf_size_x(butr) / 14.0f;
   const float xs = butr->xmin;
   const float ys = butr->ymin;
+
+  if (compact) {
+    colorband_buttons_layout_compact(layout, block, coba, butr, cb, unit, xs, ys);
+    return;
+  }
 
   PointerRNA ptr = RNA_pointer_create_discrete(cb.ptr.owner_id, RNA_ColorRamp, coba);
 
@@ -407,7 +520,8 @@ static void colorband_buttons_layout(Layout &layout,
 void template_color_ramp(Layout *layout,
                          PointerRNA *ptr,
                          const StringRefNull propname,
-                         bool expand)
+                         bool expand,
+                         bool compact)
 {
   PropertyRNA *prop = RNA_struct_find_property(ptr, propname.c_str());
 
@@ -431,8 +545,13 @@ void template_color_ramp(Layout *layout,
   ID *id = cptr.owner_id;
   block_lock_set(block, (id && !ID_IS_EDITABLE(id)), ERROR_LIBDATA_MESSAGE);
 
-  colorband_buttons_layout(
-      *layout, block, static_cast<ColorBand *>(cptr.data), &rect, RNAUpdateCb{*ptr, prop}, expand);
+  colorband_buttons_layout(*layout,
+                           block,
+                           static_cast<ColorBand *>(cptr.data),
+                           &rect,
+                           RNAUpdateCb{*ptr, prop},
+                           expand,
+                           compact);
 
   block_lock_clear(block);
 }

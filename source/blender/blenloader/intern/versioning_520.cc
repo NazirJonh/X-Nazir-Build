@@ -24,6 +24,7 @@
 #include "DNA_xr_types.h"
 
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
@@ -32,6 +33,7 @@
 #include "BKE_anim_visualization.h"
 #include "BKE_animsys.h"
 #include "BKE_attribute.hh"
+#include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
 #include "BKE_curves.hh"
 #include "BKE_idprop.hh"
@@ -911,6 +913,19 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
+    /* Initialize gradient tool fields that were added to ImagePaintSettings.
+     * Old files may have garbage in these slots due to struct layout change. */
+    for (Scene &scene : bmain->scenes) {
+      ImagePaintSettings &imapaint = scene.toolsettings->imapaint;
+      imapaint.gradient_type = IMAGE_PAINT_GRADIENT_LINEAR;
+      imapaint.gradient_repeat = IMAGE_PAINT_GRADIENT_REPEAT_NONE;
+      imapaint.gradient_blend_mode = 0;
+      imapaint.gradient_opacity = 1.0f;
+      BKE_colorband_init(&imapaint.gradient_colorband, true);
+    }
   }
 
   /**

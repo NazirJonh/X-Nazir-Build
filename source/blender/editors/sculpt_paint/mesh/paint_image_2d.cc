@@ -20,6 +20,7 @@
 #include "BLI_math_color.h"
 #include "BLI_math_color_blend.h"
 #include "BLI_math_vector_types.hh"
+#include "BLI_rect.h"
 #include "BLI_stack.h"
 #include "BLI_task.h"
 
@@ -46,6 +47,7 @@
 #include "UI_view2d.hh"
 
 #include "../paint_intern.hh"
+#include "paint_image_select_gradient.hh"
 
 namespace blender {
 
@@ -2175,17 +2177,6 @@ void paint_2d_gradient_fill(
   SpaceImage *sima = CTX_wm_space_image(C);
   Image *ima = sima->image;
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
-
-  ImBuf *ibuf;
-  int x_px, y_px;
-  uint color_b;
-  float color_f[4];
-  float image_init[2], image_final[2];
-  float tangent[2];
-  float line_len_sq_inv, line_len;
-  const float brush_alpha = BKE_brush_alpha_get(s->paint, br);
-
-  bool do_float;
   Scene *scene = CTX_data_scene(C);
 
   if (ima == nullptr || s == nullptr) {
@@ -2193,6 +2184,7 @@ void paint_2d_gradient_fill(
   }
 
   float uv_origin[2];
+  float image_init[2], image_final[2];
   int tile_number = BKE_image_get_tile_from_pos(ima, image_init, image_init, uv_origin);
   /* Normalize tile_number for non-UDIM images (same reason as in paint_2d_bucket_fill). */
   if (tile_number == 0) {
@@ -2206,7 +2198,7 @@ void paint_2d_gradient_fill(
     return;
   }
 
-  ibuf = BKE_image_acquire_ibuf(ima, iuser, nullptr);
+  ImBuf *ibuf = BKE_image_acquire_ibuf(ima, iuser, nullptr);
   if (ibuf == nullptr) {
     return;
   }
@@ -2218,84 +2210,41 @@ void paint_2d_gradient_fill(
 
   image_final[0] *= ibuf->x;
   image_final[1] *= ibuf->y;
-
   image_init[0] *= ibuf->x;
   image_init[1] *= ibuf->y;
 
-  /* some math to get needed gradient variables */
-  sub_v2_v2v2(tangent, image_final, image_init);
-  line_len = len_squared_v2(tangent);
-  line_len_sq_inv = 1.0f / line_len;
-  line_len = sqrtf(line_len);
+  const ImagePaintGradientParams params = image_paint_gradient_params_from_brush(s->paint, br);
+  const float2 start_px(image_init[0], image_init[1]);
+  const float2 end_px(image_final[0], image_final[1]);
 
-  do_float = (ibuf->float_data() != nullptr);
+  rcti work_region;
+  image_paint_gradient_calc_work_region(scene,
+                                        ima,
+                                        tile_number,
+                                        ibuf->x,
+                                        ibuf->y,
+                                        params,
+                                        start_px,
+                                        end_px,
+                                        nullptr,
+                                        work_region);
 
-  /* this will be substituted by something else when selection is available */
-  ED_imapaint_dirty_region(ima, ibuf, iuser, 0, 0, ibuf->x, ibuf->y, false);
-
-  if (do_float) {
-    float *float_data = ibuf->float_data_for_write();
-    for (x_px = 0; x_px < ibuf->x; x_px++) {
-      for (y_px = 0; y_px < ibuf->y; y_px++) {
-        float f;
-        const float p[2] = {x_px - image_init[0], y_px - image_init[1]};
-
-        switch (br->gradient_fill_mode) {
-          case BRUSH_GRADIENT_LINEAR: {
-            f = dot_v2v2(p, tangent) * line_len_sq_inv;
-            break;
-          }
-          case BRUSH_GRADIENT_RADIAL:
-          default: {
-            f = len_v2(p) / line_len;
-            break;
-          }
-        }
-        BKE_colorband_evaluate(br->gradient, f, color_f);
-        /* convert to premultiplied */
-        mul_v3_fl(color_f, color_f[3]);
-        color_f[3] *= brush_alpha;
-        mul_v4_fl(color_f,
-                  paint_2d_selection_mask_sample(scene, ima, tile_number, x_px, y_px));
-        IMB_blend_color_float(float_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                              float_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                              color_f,
-                              IMB_BlendMode(br->blend));
-      }
-    }
+  if (BLI_rcti_is_empty(&work_region)) {
+    BKE_image_release_ibuf(ima, ibuf, nullptr);
+    return;
   }
-  else {
-    uchar *byte_data = ibuf->byte_data_for_write();
-    for (x_px = 0; x_px < ibuf->x; x_px++) {
-      for (y_px = 0; y_px < ibuf->y; y_px++) {
-        float f;
-        const float p[2] = {x_px - image_init[0], y_px - image_init[1]};
 
-        switch (br->gradient_fill_mode) {
-          case BRUSH_GRADIENT_LINEAR: {
-            f = dot_v2v2(p, tangent) * line_len_sq_inv;
-            break;
-          }
-          case BRUSH_GRADIENT_RADIAL:
-          default: {
-            f = len_v2(p) / line_len;
-            break;
-          }
-        }
+  ED_imapaint_dirty_region(ima,
+                           ibuf,
+                           iuser,
+                           work_region.xmin,
+                           work_region.ymin,
+                           BLI_rcti_size_x(&work_region),
+                           BLI_rcti_size_y(&work_region),
+                           false);
 
-        BKE_colorband_evaluate(br->gradient, f, color_f);
-        IMB_colormanagement_scene_linear_to_colorspace_v3(color_f, ibuf->byte_buffer.colorspace);
-        color_f[3] *= brush_alpha;
-        mul_v4_fl(color_f,
-                  paint_2d_selection_mask_sample(scene, ima, tile_number, x_px, y_px));
-        rgba_float_to_uchar(reinterpret_cast<uchar *>(&color_b), color_f);
-        IMB_blend_color_byte(byte_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                             byte_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                             reinterpret_cast<uchar *>(&color_b),
-                             IMB_BlendMode(br->blend));
-      }
-    }
-  }
+  image_paint_gradient_apply_region(
+      scene, ima, tile_number, ibuf, params, start_px, end_px, 0.5f, work_region);
 
   imapaint_image_update(sima, ima, ibuf, iuser, false);
   ED_imapaint_clear_partial_redraw();

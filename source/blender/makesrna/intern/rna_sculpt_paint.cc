@@ -20,7 +20,10 @@
 #include "DNA_brush_types.h"
 #include "DNA_scene_types.h"
 
+#include "BKE_colorband.hh"
 #include "BKE_paint.hh"
+
+#include "IMB_imbuf.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -124,6 +127,8 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 #  include "ED_image.hh"
 #  include "ED_paint.hh"
 #  include "ED_particle.hh"
+
+#  include "../../editors/sculpt_paint/mesh/paint_image_select_gradient.hh"
 
 namespace blender {
 
@@ -318,6 +323,25 @@ static void rna_Paint_update(bContext *C, PointerRNA * /*ptr*/)
     DEG_id_tag_update(&ob->id, ID_RECALC_SHADING);
     WM_main_add_notifier(NC_OBJECT | ND_OB_SHADING, ob);
   }
+}
+
+static void rna_ImagePaintSettings_gradient_update(Main * /*bmain*/,
+                                                   Scene * /*scene*/,
+                                                   PointerRNA * /*ptr*/)
+{
+  /* Invalidate the live gradient preview when any gradient setting (including a ramp stop) changes. */
+  image_paint_gradient_bump_settings_revision();
+}
+
+static PointerRNA rna_ImagePaintSettings_gradient_color_ramp_get(PointerRNA *ptr)
+{
+  ImagePaintSettings *imapaint = static_cast<ImagePaintSettings *>(ptr->data);
+  /* The ramp is embedded by value and may be empty in files saved before it existed; build the
+   * default two-stop ramp on first access so the widget always has valid data. */
+  if (imapaint->gradient_colorband.tot == 0) {
+    BKE_colorband_init(&imapaint->gradient_colorband, true);
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, &imapaint->gradient_colorband);
 }
 
 static std::optional<std::string> rna_Sculpt_path(const PointerRNA * /*ptr*/)
@@ -1615,6 +1639,78 @@ static void rna_def_image_paint(BlenderRNA *brna)
       "UV Island",
       "When selecting, expand the result to include entire UV islands that overlap the selection");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  static const EnumPropertyItem gradient_type_items[] = {
+      {IMAGE_PAINT_GRADIENT_LINEAR, "LINEAR", 0, "Linear", "Interpolate along the gradient line"},
+      {IMAGE_PAINT_GRADIENT_RADIAL, "RADIAL", 0, "Radial", "Interpolate radially from the start point"},
+      {IMAGE_PAINT_GRADIENT_CONICAL,
+       "CONICAL",
+       0,
+       "Conical",
+       "Interpolate by angle around the start point"},
+      {IMAGE_PAINT_GRADIENT_DIAMOND,
+       "DIAMOND",
+       0,
+       "Diamond",
+       "Interpolate along diamond-shaped iso-lines around the start point"},
+      {IMAGE_PAINT_GRADIENT_SQUARE,
+       "SQUARE",
+       0,
+       "Square",
+       "Interpolate along square-shaped iso-lines around the start point"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem gradient_repeat_items[] = {
+      {IMAGE_PAINT_GRADIENT_REPEAT_NONE, "NONE", 0, "None", ""},
+      {IMAGE_PAINT_GRADIENT_REPEAT_REPEAT, "REPEAT", 0, "Repeat", ""},
+      {IMAGE_PAINT_GRADIENT_REPEAT_REFLECT, "REFLECT", 0, "Reflect", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem gradient_blend_items[] = {
+      {IMB_BLEND_MIX, "MIX", 0, "Mix", ""},
+      {IMB_BLEND_MUL, "MUL", 0, "Multiply", ""},
+      {IMB_BLEND_ADD, "ADD", 0, "Add", ""},
+      {IMB_BLEND_SUB, "SUB", 0, "Subtract", ""},
+      {IMB_BLEND_OVERLAY, "OVERLAY", 0, "Overlay", ""},
+      {IMB_BLEND_SCREEN, "SCREEN", 0, "Screen", ""},
+      {IMB_BLEND_DARKEN, "DARKEN", 0, "Darken", ""},
+      {IMB_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "gradient_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_type");
+  RNA_def_property_enum_items(prop, gradient_type_items);
+  RNA_def_property_ui_text(prop, "Gradient Type", "Shape of the selection gradient");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
+
+  prop = RNA_def_property(srna, "gradient_repeat", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_repeat");
+  RNA_def_property_enum_items(prop, gradient_repeat_items);
+  RNA_def_property_ui_text(prop, "Gradient Repeat", "Behavior outside the gradient vector");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
+
+  prop = RNA_def_property(srna, "gradient_blend_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_blend_mode");
+  RNA_def_property_enum_items(prop, gradient_blend_items);
+  RNA_def_property_ui_text(prop, "Gradient Blend", "Blend mode for the selection gradient");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
+
+  prop = RNA_def_property(srna, "gradient_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "gradient_opacity");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_float_default(prop, 1.0f);
+  RNA_def_property_ui_text(prop, "Gradient Opacity", "Overall opacity of the selection gradient");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
+
+  prop = RNA_def_property(srna, "color_ramp", PROP_POINTER, PROP_NEVER_NULL);
+  RNA_def_property_struct_type(prop, "ColorRamp");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_ImagePaintSettings_gradient_color_ramp_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Color Ramp", "Colors of the selection gradient");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
 }
 
 static void rna_def_particle_edit(BlenderRNA *brna)

@@ -2105,6 +2105,26 @@ class _defs_texture_paint:
         )
 
     @ToolDef.from_fn
+    def selection_gradient():
+        def draw_settings(context, layout, _tool):
+            imapaint = context.tool_settings.image_paint
+            layout.prop(imapaint, "gradient_type", text="Type")
+            layout.template_color_ramp(imapaint, "color_ramp", expand=True, compact=True)
+            layout.popover("IMAGE_PT_paint_select_gradient_advanced", text="Color Ramp Advanced")
+            layout.prop(imapaint, "gradient_opacity", text="Opacity")
+            layout.prop(imapaint, "gradient_blend_mode", text="Blend")
+            layout.prop(imapaint, "gradient_repeat", text="Repeat")
+
+        return dict(
+            idname="builtin.select_gradient",
+            label="Gradient",
+            icon="ops.paint.weight_gradient",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Gradient",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def mask():
         return dict(
             idname="builtin_brush.mask",
@@ -3724,6 +3744,7 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_texture_paint.smear,
             _defs_texture_paint.clone,
             _defs_texture_paint.fill,
+            _defs_texture_paint.selection_gradient,
             _defs_texture_paint.mask,
             None,
             *_tools_image_paint_select,

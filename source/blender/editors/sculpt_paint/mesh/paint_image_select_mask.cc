@@ -92,6 +92,7 @@
 #include "../paint_intern.hh"
 #include "../../space_image/image_runtime.hh"
 #include "paint_image_select_intern.hh"
+#include "paint_image_select_gradient.hh"
 
 
 namespace blender {
@@ -141,6 +142,9 @@ bool image_paint_selection_poll(bContext *C)
     return false;
   }
   if (image_select_transform_is_floating(C)) {
+    return false;
+  }
+  if (image_select_gradient_is_floating(C)) {
     return false;
   }
   const ARegion *region = CTX_wm_region(C);
@@ -1636,6 +1640,10 @@ void paint_select_session_free(PaintSelectSession &session)
   if (session.transform) {
     image_select_transform_state_free(session.transform);
     session.transform = nullptr;
+  }
+  if (session.gradient) {
+    image_select_gradient_state_free(session.gradient);
+    session.gradient = nullptr;
   }
 }
 

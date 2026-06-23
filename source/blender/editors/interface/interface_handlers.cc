@@ -8050,36 +8050,50 @@ static int do_but_COLORBAND(
     if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
       ColorBand *coba = reinterpret_cast<ColorBand *>(but->poin);
 
-      if (event->modifier & KM_CTRL) {
-        /* insert new key on mouse location */
+      const ButtonColorBand *but_coba = static_cast<ButtonColorBand *>(but);
+
+      CBData *cbd;
+      /* ignore zoom-level for mindist */
+      const int select_dist = (50 * UI_SCALE_FAC) * block->aspect;
+      int mindist = select_dist;
+      int xco;
+
+      /* Find the closest stop to the cursor. */
+      int closest = coba->cur;
+      int a;
+      for (a = 0, cbd = coba->data; a < coba->tot; a++, cbd++) {
+        xco = but->rect.xmin + (cbd->pos * BLI_rctf_size_x(&but->rect));
+        xco = abs(xco - mx);
+        if (a == coba->cur) {
+          /* Selected one disadvantage. */
+          xco += 5;
+        }
+        if (xco < mindist) {
+          closest = a;
+          mindist = xco;
+        }
+      }
+
+      /* Insert a new stop at the cursor when Ctrl is held, or (in the compact template) when the
+       * click is not close to an existing stop handle. The hit distance is a bit wider than the
+       * drawn handle half-width so new stops aren't placed right on top of existing ones, while
+       * still allowing them to be inserted fairly close together. */
+      const int on_handle_dist = BLI_rctf_size_y(&but->rect) / 1.5f;
+      const bool insert = (event->modifier & KM_CTRL) ||
+                          (but_coba->insert_on_click && mindist > on_handle_dist);
+
+      if (insert) {
         const float pos = float(mx - but->rect.xmin) / BLI_rctf_size_x(&but->rect);
         BKE_colorband_element_add(coba, pos);
         button_activate_state(C, but, BUTTON_STATE_EXIT);
       }
       else {
-        CBData *cbd;
-        /* ignore zoom-level for mindist */
-        int mindist = (50 * UI_SCALE_FAC) * block->aspect;
-        int xco;
         data->dragstartx = mx;
         data->dragstarty = my;
         data->draglastx = mx;
         data->draglasty = my;
 
-        /* activate new key when mouse is close */
-        int a;
-        for (a = 0, cbd = coba->data; a < coba->tot; a++, cbd++) {
-          xco = but->rect.xmin + (cbd->pos * BLI_rctf_size_x(&but->rect));
-          xco = abs(xco - mx);
-          if (a == coba->cur) {
-            /* Selected one disadvantage. */
-            xco += 5;
-          }
-          if (xco < mindist) {
-            coba->cur = a;
-            mindist = xco;
-          }
-        }
+        coba->cur = closest;
 
         data->dragcbd = coba->data + coba->cur;
         data->dragfstart = data->dragcbd->pos;

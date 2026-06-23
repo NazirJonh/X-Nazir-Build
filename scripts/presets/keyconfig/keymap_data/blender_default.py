@@ -2261,6 +2261,9 @@ def km_image(params):
         ("paint.image_select_move_undo_step", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
         ("paint.image_select_move_confirm", {"type": 'RET', "value": 'PRESS'}, None),
         ("paint.image_select_move_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
+        ("paint.image_select_gradient_apply", {"type": 'RET', "value": 'PRESS'}, None),
+        ("paint.image_select_gradient_apply", {"type": 'NUMPAD_ENTER', "value": 'PRESS'}, None),
+        ("paint.image_select_gradient_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
     ])
 
     if not params.legacy:
@@ -7523,6 +7526,29 @@ def km_image_editor_tool_paint_select_transform(params, *, fallback):
     )
 
 
+def km_image_editor_tool_paint_select_gradient(params, *, fallback):
+    return (
+        _fallback_id("Image Editor Tool: Paint, Gradient", fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else [
+                ("paint.image_select_gradient",
+                 {"type": params.tool_mouse, "value": 'PRESS'},
+                 None),
+                ("paint.image_select_gradient_apply",
+                 {"type": 'RET', "value": 'PRESS'},
+                 None),
+                ("paint.image_select_gradient_apply",
+                 {"type": 'NUMPAD_ENTER', "value": 'PRESS'},
+                 None),
+                ("paint.image_select_gradient_cancel",
+                 {"type": 'ESC', "value": 'PRESS'},
+                 None),
+            ]),
+        ]},
+    )
+
+
 # ------------------------------------------------------------------------------
 # Tool System (Node Editor)
 
@@ -9304,6 +9330,7 @@ def generate_keymaps(params=None):
         *(km_image_editor_tool_paint_select_lasso(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_move(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_transform(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_select_gradient(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_box(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_lasso(params, fallback=fallback) for fallback in (False, True)),

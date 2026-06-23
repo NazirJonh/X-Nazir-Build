@@ -91,10 +91,12 @@ struct SelectionTileFragment {
 
 struct ImageSelectMoveState;
 struct ImageSelectTransformState;
+struct ImageSelectGradientState;
 
 struct PaintSelectSession {
   ImageSelectMoveState *move = nullptr;
   ImageSelectTransformState *transform = nullptr;
+  ImageSelectGradientState *gradient = nullptr;
 };
 
 /** \} */
@@ -185,6 +187,9 @@ struct ImageSelectTransformGizmoMatrices {
 
 bool image_select_move_is_floating(bContext *C);
 bool image_select_move_is_floating_in_space(const SpaceImage *sima);
+bool image_select_gradient_is_floating(bContext *C);
+bool image_select_gradient_is_floating_in_space(const SpaceImage *sima);
+void image_select_gradient_state_free(ImageSelectGradientState *state);
 wmOperatorStatus image_select_move_convert_to_transform(bContext *C,
                                                         wmOperator *op,
                                                         const wmEvent *event);
@@ -247,5 +252,8 @@ void PAINT_OT_image_select_transform(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_confirm(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_cancel(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_drag(wmOperatorType *ot);
+void PAINT_OT_image_select_gradient(wmOperatorType *ot);
+void PAINT_OT_image_select_gradient_apply(wmOperatorType *ot);
+void PAINT_OT_image_select_gradient_cancel(wmOperatorType *ot);
 
 } /* namespace blender */

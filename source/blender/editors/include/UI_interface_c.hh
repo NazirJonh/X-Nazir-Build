@@ -2553,7 +2553,8 @@ void template_preview(Layout *layout,
                       ID *parent,
                       MTex *slot,
                       const char *preview_id);
-void template_color_ramp(Layout *layout, PointerRNA *ptr, StringRefNull propname, bool expand);
+void template_color_ramp(
+    Layout *layout, PointerRNA *ptr, StringRefNull propname, bool expand, bool compact = false);
 /**
  * \param icon_scale: Scale of the icon, 1x == button height.
  */

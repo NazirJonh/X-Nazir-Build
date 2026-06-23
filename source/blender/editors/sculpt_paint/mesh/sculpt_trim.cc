@@ -26,8 +26,11 @@
 #include "BKE_report.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 
+#include "ED_object.hh"
 #include "ED_sculpt.hh"
+#include "ED_undo.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -42,6 +45,7 @@
 #include "sculpt_gesture.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_islands.hh"
+#include "sculpt_undo.hh"
 
 namespace blender::ed::sculpt_paint::trim {
 
@@ -50,6 +54,7 @@ enum class OperationType {
   Difference = 1,
   Union = 2,
   Join = 3,
+  Slice = 4,
 };
 
 /* Intersect is not exposed in the UI because it does not work correctly with symmetry (it deletes
@@ -66,6 +71,11 @@ static EnumPropertyItem operation_types[] = {
      0,
      "Join",
      "Join the new mesh as separate geometry, without performing any boolean operation"},
+    {int(OperationType::Slice),
+     "SLICE",
+     0,
+     "Slice",
+     "Slice the mesh into two parts, keeping both"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -128,6 +138,7 @@ static const EnumPropertyItem solver_items[] = {
 struct TrimOperation {
   gesture::Operation op;
   ReportList *reports;
+  wmOperator *wm_op;
 
   /* Operation-generated geometry. */
   Mesh *mesh;
@@ -144,6 +155,15 @@ struct TrimOperation {
   geometry::boolean::Solver solver_mode;
   OrientationType orientation;
   ExtrudeMode extrude_mode;
+
+  /* Slice-specific options. */
+  bool use_slice_mask_selection;
+  bool use_slice_random_face_set;
+  bool use_slice_new_object;
+
+  int slice_face_set_id;
+  int slice_face_index_start;
+  Mesh *slice_fragment_mesh;
 };
 
 /* Recalculate the mesh normals for the generated trim mesh. */
@@ -511,6 +531,7 @@ static void gesture_begin(bContext &C, wmOperator &op, gesture::GestureData &ges
   Object *object = gesture_data.vc.obact;
   SculptSession &ss = *object->runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(*object);
+  TrimOperation *trim_operation = reinterpret_cast<TrimOperation *>(gesture_data.operation);
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh:
@@ -522,7 +543,14 @@ static void gesture_begin(bContext &C, wmOperator &op, gesture::GestureData &ges
 
   generate_geometry(gesture_data);
   islands::invalidate(ss);
-  undo::geometry_begin(scene, *gesture_data.vc.obact, &op);
+  /* Undo crashes when a new object is created in the middle of a sculpt, see #87243. */
+  if (trim_operation->mode == OperationType::Slice && trim_operation->use_slice_new_object) {
+    /* Preserve the active object pointer while the slice object is created, see #103261. */
+    ED_undo_push_op(&C, &op);
+  }
+  else {
+    undo::geometry_begin(scene, *gesture_data.vc.obact, &op);
+  }
 }
 
 static void apply_join_operation(Object &object, Mesh &sculpt_mesh, Mesh &trim_mesh)
@@ -533,6 +561,233 @@ static void apply_join_operation(Object &object, Mesh &sculpt_mesh, Mesh &trim_m
       {});
   Mesh *result = joined.get_component_for_write<bke::MeshComponent>().release();
   BKE_mesh_nomain_to_mesh(result, &sculpt_mesh, &object);
+}
+
+/* Report a boolean solver error to the user. Returns true when there was no error. */
+static bool report_boolean_error(ReportList *reports,
+                                 const geometry::boolean::BooleanError &error)
+{
+  switch (error.type) {
+    case geometry::boolean::BooleanErrorType::NoError:
+      return true;
+    case geometry::boolean::BooleanErrorType::NonManifold:
+      BKE_report(reports, RPT_ERROR, "Solver requires a manifold mesh");
+      break;
+    case geometry::boolean::BooleanErrorType::ResultTooBig:
+      BKE_report(reports, RPT_ERROR, "Boolean result is too big for solver to handle");
+      break;
+    case geometry::boolean::BooleanErrorType::SolverNotAvailable:
+      BKE_report(reports, RPT_ERROR, "Boolean solver not available (compiled without it)");
+      break;
+    case geometry::boolean::BooleanErrorType::UnknownError:
+      BKE_report(reports, RPT_ERROR, "Unknown boolean error");
+      break;
+  }
+  return false;
+}
+
+/* Run a boolean operation between the sculpt mesh and the generated trim mesh. Both share the
+ * object transform space, so identity transforms are used. */
+static Mesh *mesh_boolean_calc(Mesh &sculpt_mesh,
+                               Mesh &trim_mesh,
+                               const geometry::boolean::Operation boolean_op,
+                               const geometry::boolean::Solver solver,
+                               geometry::boolean::BooleanError &r_error)
+{
+  geometry::boolean::BooleanOpParameters op_params;
+  op_params.boolean_mode = boolean_op;
+  op_params.no_self_intersections = true;
+  op_params.watertight = false;
+  op_params.no_nested_components = true;
+  return geometry::boolean::mesh_boolean({&sculpt_mesh, &trim_mesh},
+                                         {float4x4::identity(), float4x4::identity()},
+                                         {Array<short>(), Array<short>()},
+                                         op_params,
+                                         solver,
+                                         nullptr,
+                                         &r_error);
+}
+
+static void assign_face_set_to_mesh_except_cut_faces(Mesh &mesh, const int face_set_id)
+{
+  bke::SpanAttributeWriter<int> face_sets = face_set::ensure_face_sets_mesh(mesh);
+  for (const int i : face_sets.span.index_range()) {
+    if (face_sets.span[i] == face_set_none_id) {
+      continue;
+    }
+    face_sets.span[i] = face_set_id;
+  }
+  face_sets.finish();
+}
+
+static void assign_face_set_to_cut_faces(Mesh &mesh,
+                                         const int face_set_id,
+                                         const int face_index_start = 0)
+{
+  const bool had_face_sets = mesh.attributes().contains(".sculpt_face_set");
+  bke::SpanAttributeWriter<int> face_sets = face_set::ensure_face_sets_mesh(mesh);
+  for (const int i : face_sets.span.index_range()) {
+    if (i < face_index_start) {
+      continue;
+    }
+    /* Preserve face sets that already existed on the mesh, only fill in the new cut faces. */
+    if (had_face_sets && face_sets.span[i] != face_set_none_id) {
+      continue;
+    }
+    face_sets.span[i] = face_set_id;
+  }
+  face_sets.finish();
+}
+
+static void assign_random_cut_face_set(Mesh &mesh, Object &object, const int face_index_start = 0)
+{
+  const int cut_face_set_id = face_set::find_next_available_id(object);
+  assign_face_set_to_cut_faces(mesh, cut_face_set_id, face_index_start);
+  mesh.face_sets_color_default = cut_face_set_id;
+  mesh.face_sets_color_seed += 1;
+}
+
+static void prepare_slice_fragment_face_set(Mesh &sculpt_mesh,
+                                            Mesh &fragment_mesh,
+                                            TrimOperation &trim_operation)
+{
+  if (!trim_operation.use_slice_random_face_set) {
+    return;
+  }
+
+  const int slice_face_set_id = face_set::find_next_available_id(sculpt_mesh);
+  assign_face_set_to_mesh_except_cut_faces(fragment_mesh, slice_face_set_id);
+
+  sculpt_mesh.face_sets_color_default = slice_face_set_id;
+  sculpt_mesh.face_sets_color_seed += 1;
+  trim_operation.slice_face_set_id = slice_face_set_id;
+}
+
+static void apply_slice_selection_mask_mesh(Mesh &mesh,
+                                            const int slice_face_set_id,
+                                            const int slice_face_index_start)
+{
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  const VArraySpan<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
+                                                            bke::AttrDomain::Face);
+
+  bke::SpanAttributeWriter<float> mask =
+      mesh.attributes_for_write().lookup_or_add_for_write_span<float>(".sculpt_mask",
+                                                                      bke::AttrDomain::Point);
+  if (!mask) {
+    return;
+  }
+
+  /* Mask everything except the slice fragment so it remains available for sculpting. */
+  mask.span.fill(1.0f);
+
+  for (const int face : faces.index_range()) {
+    const bool is_fragment = (slice_face_set_id >= 0 && !face_sets.is_empty() &&
+                              face_sets[face] == slice_face_set_id) ||
+                             (slice_face_index_start >= 0 && face >= slice_face_index_start);
+    if (!is_fragment) {
+      continue;
+    }
+    for (const int vert : corner_verts.slice(faces[face])) {
+      mask.span[vert] = 0.0f;
+    }
+  }
+  mask.finish();
+}
+
+static void reactivate_object(bContext &C, Object &ob)
+{
+  Main *bmain = CTX_data_main(&C);
+  Scene *scene = CTX_data_scene(&C);
+  ViewLayer *view_layer = CTX_data_view_layer(&C);
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  if (Base *base = BKE_view_layer_base_find(view_layer, &ob)) {
+    ed::object::base_activate(&C, base);
+  }
+}
+
+static void create_slice_object(bContext &C, Object &ob, Mesh *fragment_mesh)
+{
+  Main *bmain = CTX_data_main(&C);
+  View3D *v3d = CTX_wm_view3d(&C);
+
+  ushort local_view_bits = 0;
+  if (v3d && v3d->localvd) {
+    local_view_bits = v3d->local_view_uid;
+  }
+  Object *new_ob = ed::object::add_type(
+      &C, OB_MESH, nullptr, ob.loc, ob.rot, false, local_view_bits);
+  Mesh *new_mesh = id_cast<Mesh *>(new_ob->data);
+  BKE_mesh_nomain_to_mesh(fragment_mesh, new_mesh, new_ob);
+
+  /* Remove the mask so the slice fragment can be sculpted directly. */
+  new_mesh->attributes_for_write().remove(".sculpt_mask");
+
+  WM_event_add_notifier(&C, NC_OBJECT | ND_MODIFIER, new_ob);
+  BKE_mesh_batch_cache_dirty_tag(new_mesh, BKE_MESH_BATCH_DIRTY_ALL);
+  DEG_relations_tag_update(bmain);
+  DEG_id_tag_update(&new_ob->id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(&C, NC_GEOM | ND_DATA, new_mesh);
+
+  /* add_type() activates the new object. Stay in sculpt mode on the original mesh. */
+  reactivate_object(C, ob);
+}
+
+static void apply_slice_operation(gesture::GestureData &gesture_data)
+{
+  TrimOperation *trim_operation = reinterpret_cast<TrimOperation *>(gesture_data.operation);
+  Object *object = gesture_data.vc.obact;
+  Mesh &sculpt_mesh = *id_cast<Mesh *>(object->data);
+  Mesh &trim_mesh = *trim_operation->mesh;
+
+  geometry::boolean::BooleanError slice_error;
+
+  /* Keep the part of the mesh outside the trim shape. */
+  Mesh *result_diff = mesh_boolean_calc(sculpt_mesh,
+                                        trim_mesh,
+                                        geometry::boolean::Operation::Difference,
+                                        trim_operation->solver_mode,
+                                        slice_error);
+  if (!report_boolean_error(trim_operation->reports, slice_error)) {
+    return;
+  }
+
+  /* Keep the part of the mesh inside the trim shape as the slice fragment. */
+  Mesh *result_inter = mesh_boolean_calc(sculpt_mesh,
+                                         trim_mesh,
+                                         geometry::boolean::Operation::Intersect,
+                                         trim_operation->solver_mode,
+                                         slice_error);
+  if (!report_boolean_error(trim_operation->reports, slice_error)) {
+    BKE_id_free(nullptr, result_diff);
+    return;
+  }
+
+  if (result_inter->faces_num == 0) {
+    BKE_report(trim_operation->reports, RPT_WARNING, "Trim shape does not intersect the mesh");
+    BKE_id_free(nullptr, result_diff);
+    BKE_id_free(nullptr, result_inter);
+    return;
+  }
+
+  prepare_slice_fragment_face_set(sculpt_mesh, *result_inter, *trim_operation);
+
+  if (trim_operation->use_slice_new_object) {
+    BKE_mesh_nomain_to_mesh(result_diff, &sculpt_mesh, object);
+    trim_operation->slice_fragment_mesh = result_inter;
+    return;
+  }
+
+  trim_operation->slice_face_index_start = result_diff->faces_num;
+
+  bke::GeometrySet joined = geometry::join_geometries(
+      {bke::GeometrySet::from_mesh(result_diff, bke::GeometryOwnershipType::Owned),
+       bke::GeometrySet::from_mesh(result_inter, bke::GeometryOwnershipType::Owned)},
+      {});
+  Mesh *final_result = joined.get_component_for_write<bke::MeshComponent>().release();
+  BKE_mesh_nomain_to_mesh(final_result, &sculpt_mesh, object);
 }
 
 static void apply_trim(gesture::GestureData &gesture_data)
@@ -556,37 +811,15 @@ static void apply_trim(gesture::GestureData &gesture_data)
     case OperationType::Join:
       apply_join_operation(*object, sculpt_mesh, trim_mesh);
       return;
+    case OperationType::Slice:
+      apply_slice_operation(gesture_data);
+      return;
   }
 
-  geometry::boolean::BooleanOpParameters op_params;
-  op_params.boolean_mode = boolean_op;
-  op_params.no_self_intersections = true;
-  op_params.watertight = false;
-  op_params.no_nested_components = true;
   geometry::boolean::BooleanError error;
-  Mesh *result = geometry::boolean::mesh_boolean({&sculpt_mesh, &trim_mesh},
-                                                 {float4x4::identity(), float4x4::identity()},
-                                                 {Array<short>(), Array<short>()},
-                                                 op_params,
-                                                 trim_operation->solver_mode,
-                                                 nullptr,
-                                                 &error);
-  if (error.type == geometry::boolean::BooleanErrorType::NonManifold) {
-    BKE_report(trim_operation->reports, RPT_ERROR, "Solver requires a manifold mesh");
-    return;
-  }
-  if (error.type == geometry::boolean::BooleanErrorType::ResultTooBig) {
-    BKE_report(
-        trim_operation->reports, RPT_ERROR, "Boolean result is too big for solver to handle");
-    return;
-  }
-  if (error.type == geometry::boolean::BooleanErrorType::SolverNotAvailable) {
-    BKE_report(
-        trim_operation->reports, RPT_ERROR, "Boolean solver not available (compiled without it)");
-    return;
-  }
-  if (error.type == geometry::boolean::BooleanErrorType::UnknownError) {
-    BKE_report(trim_operation->reports, RPT_ERROR, "Unknown boolean error");
+  Mesh *result = mesh_boolean_calc(
+      sculpt_mesh, trim_mesh, boolean_op, trim_operation->solver_mode, error);
+  if (!report_boolean_error(trim_operation->reports, error)) {
     return;
   }
 
@@ -610,21 +843,64 @@ static void free_geometry(gesture::GestureData &gesture_data)
   TrimOperation *trim_operation = reinterpret_cast<TrimOperation *>(gesture_data.operation);
   BKE_id_free(nullptr, trim_operation->mesh);
   MEM_delete(trim_operation->true_mesh_co);
+  if (trim_operation->slice_fragment_mesh) {
+    BKE_id_free(nullptr, trim_operation->slice_fragment_mesh);
+    trim_operation->slice_fragment_mesh = nullptr;
+  }
 }
 
-static void gesture_end(bContext & /*C*/, gesture::GestureData &gesture_data)
+static void gesture_end(bContext &C, gesture::GestureData &gesture_data)
 {
   Object *object = gesture_data.vc.obact;
   Mesh *mesh = id_cast<Mesh *>(object->data);
+  TrimOperation *trim_operation = reinterpret_cast<TrimOperation *>(gesture_data.operation);
+  const bool is_slice = trim_operation->mode == OperationType::Slice;
 
-  /* Assign a new face set ID to the new faces created by the trim operation. */
-  const int next_face_set_id = face_set::find_next_available_id(*object);
-  face_set::initialize_none_to_id(mesh, next_face_set_id);
+  /* Cut faces produced by the slice get their own face set ID so the cut surface is identifiable.
+   * When slicing to a new object the cut exists on both resulting meshes, so both are updated. */
+  if (is_slice) {
+    if (trim_operation->slice_fragment_mesh) {
+      /* Slice to new object: the cut surface exists on both halves. Give the new object (the
+       * fragment) and the mesh that stays in sculpt mode (`mesh`) each their own cut face set. */
+      assign_random_cut_face_set(*trim_operation->slice_fragment_mesh, *object);
+      assign_random_cut_face_set(*mesh, *object);
+    }
+    else if (trim_operation->slice_face_index_start >= 0) {
+      assign_random_cut_face_set(*mesh, *object, trim_operation->slice_face_index_start);
+    }
+  }
+  else {
+    const int next_face_set_id = face_set::find_next_available_id(*object);
+    face_set::initialize_none_to_id(mesh, next_face_set_id);
+    if (trim_operation->slice_fragment_mesh) {
+      face_set::initialize_none_to_id(trim_operation->slice_fragment_mesh, next_face_set_id);
+    }
+  }
+
+  if (is_slice && trim_operation->use_slice_mask_selection &&
+      !trim_operation->use_slice_new_object)
+  {
+    apply_slice_selection_mask_mesh(
+        *mesh, trim_operation->slice_face_set_id, trim_operation->slice_face_index_start);
+  }
+
+  if (is_slice && trim_operation->slice_fragment_mesh) {
+    create_slice_object(C, *object, trim_operation->slice_fragment_mesh);
+    trim_operation->slice_fragment_mesh = nullptr;
+  }
 
   free_geometry(gesture_data);
 
-  undo::geometry_end(*object);
-  BKE_sculptsession_free_pbvh(*object);
+  const bool slice_to_new_object = is_slice && trim_operation->use_slice_new_object;
+  if (!slice_to_new_object) {
+    undo::geometry_end(*object);
+    BKE_sculptsession_free_pbvh(*object);
+  }
+
+  if (slice_to_new_object && trim_operation->wm_op) {
+    ED_undo_push_op(&C, trim_operation->wm_op);
+  }
+
   BKE_mesh_batch_cache_dirty_tag(mesh, BKE_MESH_BATCH_DIRTY_ALL);
   DEG_id_tag_update(&gesture_data.vc.obact->id, ID_RECALC_GEOMETRY);
 }
@@ -633,9 +909,14 @@ static void init_operation(gesture::GestureData &gesture_data, wmOperator &op)
 {
   TrimOperation *trim_operation = reinterpret_cast<TrimOperation *>(gesture_data.operation);
   trim_operation->reports = op.reports;
+  trim_operation->wm_op = &op;
   trim_operation->op.begin = gesture_begin;
   trim_operation->op.apply_for_symmetry_pass = gesture_apply_for_symmetry_pass;
   trim_operation->op.end = gesture_end;
+
+  trim_operation->slice_face_set_id = -1;
+  trim_operation->slice_face_index_start = -1;
+  trim_operation->slice_fragment_mesh = nullptr;
 
   trim_operation->mode = OperationType(RNA_enum_get(op.ptr, "trim_mode"));
   trim_operation->use_cursor_depth = RNA_boolean_get(op.ptr, "use_cursor_depth");
@@ -643,14 +924,23 @@ static void init_operation(gesture::GestureData &gesture_data, wmOperator &op)
   trim_operation->extrude_mode = ExtrudeMode(RNA_enum_get(op.ptr, "trim_extrude_mode"));
   trim_operation->solver_mode = geometry::boolean::Solver(RNA_enum_get(op.ptr, "trim_solver"));
 
+  if (trim_operation->mode == OperationType::Slice) {
+    trim_operation->use_slice_mask_selection = RNA_boolean_get(op.ptr,
+                                                               "use_slice_mask_selection");
+    trim_operation->use_slice_random_face_set = RNA_boolean_get(op.ptr, "use_slice_random_face_set");
+    trim_operation->use_slice_new_object = RNA_boolean_get(op.ptr, "use_slice_new_object");
+  }
+
   /* If the cursor was not over the mesh, force the orientation to view. */
   if (!trim_operation->initial_hit) {
     trim_operation->orientation = OrientationType::View;
   }
 
   if (gesture_data.shape_type == gesture::ShapeType::Line) {
-    /* Line gestures only support Difference, no extrusion. */
-    trim_operation->mode = OperationType::Difference;
+    /* Line gestures support Difference and Slice, no extrusion. */
+    if (trim_operation->mode != OperationType::Slice) {
+      trim_operation->mode = OperationType::Difference;
+    }
   }
 }
 
@@ -701,6 +991,28 @@ static void operator_properties(wmOperatorType *ot)
                int(geometry::boolean::Solver::Manifold),
                "Solver",
                nullptr);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "use_slice_mask_selection",
+                         true,
+                         "Selection Mask Slice Fragment",
+                         "Mask all geometry except the slice fragment, leaving it available for "
+                         "sculpting");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "use_slice_random_face_set",
+                         false,
+                         "Random Face Set",
+                         "Assign a new face set with a distinct color to the slice fragment");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "use_slice_new_object",
+                         false,
+                         "Slice to New Object",
+                         "Create a new object from the geometry inside the trim shape");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 }
 
 static bool can_invoke(const bContext &C)

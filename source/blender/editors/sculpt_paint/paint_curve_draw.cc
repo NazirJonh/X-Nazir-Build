@@ -270,6 +270,11 @@ bool ED_paint_curve_slide_is_active()
   return paintcurve_slide_is_active();
 }
 
+bool ED_paint_curve_snap_marker_get(float r_screen[2], int *r_type)
+{
+  return paintcurve_snap_marker_get(r_screen, r_type);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

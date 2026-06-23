@@ -65,6 +65,11 @@ class PaintCurveCursor : Overlay {
   Vector<CachedSilhouetteBatches> silhouette_batches_;
   uint64_t silhouette_batches_key_ = 0;
 
+  /** Region-space snap marker shown during a 3D paint-curve slide (set by the slide modal). */
+  bool snap_marker_active_ = false;
+  float2 snap_marker_pos_ = float2(0.0f);
+  int snap_marker_type_ = 0;
+
  public:
   PaintCurveCursor() = default;
   ~PaintCurveCursor()
@@ -79,6 +84,7 @@ class PaintCurveCursor : Overlay {
     handles_ = {};
     silhouettes_ = {};
     enabled_ = false;
+    snap_marker_active_ = false;
 
     if (!state.is_space_v3d() && !state.is_space_image()) {
       return;
@@ -174,6 +180,18 @@ class PaintCurveCursor : Overlay {
           silhouette_batches_.append(std::move(cached));
         }
         silhouette_batches_key_ = silhouette_cache_key_;
+      }
+    }
+
+    /* Snap marker: shown only while a 3D slide is snapping to geometry. The slide modal stores the
+     * region-space target; here we just fetch it for #fill_pass_from_pod to draw. */
+    if (state.is_space_v3d() && ed::sculpt_paint::ED_paint_curve_slide_is_active()) {
+      float screen[2];
+      int type = 0;
+      if (ed::sculpt_paint::ED_paint_curve_snap_marker_get(screen, &type)) {
+        snap_marker_active_ = true;
+        snap_marker_pos_ = float2(screen[0], screen[1]);
+        snap_marker_type_ = type;
       }
     }
 
@@ -540,6 +558,41 @@ class PaintCurveCursor : Overlay {
           ps_.push_constant("color", float4(1.0f, 1.0f, 1.0f, 0.5f));
           draw_strip(b);
           ps_.push_constant("color", rd.color);
+          draw_strip(b);
+        }
+      }
+    }
+
+    /* --- 9. Snap marker (shown during a 3D slide snapping to geometry) --- */
+    if (snap_marker_active_) {
+      const float2 c = snap_marker_pos_;
+      constexpr int SEGS = 24;
+      const float r = 9.0f;
+      float2 circle[SEGS];
+      for (int i = 0; i < SEGS; i++) {
+        const float a = float(i) / float(SEGS) * float(M_PI) * 2.0f;
+        circle[i] = float2(c.x + r * cosf(a), c.y + r * sinf(a));
+      }
+      if (gpu::Batch *b = make_line_strip_closed({circle, SEGS})) {
+        ps_.push_constant("lineWidth", 3.0f);
+        ps_.push_constant("color", float4(0.0f, 0.0f, 0.0f, 0.6f));
+        draw_strip(b);
+        ps_.push_constant("lineWidth", 1.5f);
+        ps_.push_constant("color", float4(1.0f, 1.0f, 1.0f, 1.0f));
+        draw_strip(b);
+      }
+      /* Face Center target: add an inner dot at the face midpoint. */
+      if (snap_marker_type_ & SCE_SNAP_TO_FACE_MIDPOINT) {
+        constexpr int DOT_SEGS = 10;
+        const float rr = 2.5f;
+        float2 dot[DOT_SEGS];
+        for (int i = 0; i < DOT_SEGS; i++) {
+          const float a = float(i) / float(DOT_SEGS) * float(M_PI) * 2.0f;
+          dot[i] = float2(c.x + rr * cosf(a), c.y + rr * sinf(a));
+        }
+        if (gpu::Batch *b = make_line_strip_closed({dot, DOT_SEGS})) {
+          ps_.push_constant("lineWidth", 3.0f);
+          ps_.push_constant("color", float4(1.0f, 1.0f, 1.0f, 1.0f));
           draw_strip(b);
         }
       }

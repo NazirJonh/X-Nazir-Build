@@ -67,6 +67,12 @@ wmKeyMap *paintcurve_slide_modal_keymap(wmKeyConfig *keyconf);
 bool paintcurve_slide_is_active();
 bool paintcurve_slide_segment_active(int *r_point_a, int *r_point_b);
 
+/**
+ * Region-space position of the active 3D-slide snap marker, or false when no snap is active.
+ * \param r_type: receives the active geometry snap elements (#SCE_SNAP_TO_GEOM subset) for styling.
+ */
+bool paintcurve_snap_marker_get(float r_screen[2], int *r_type);
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

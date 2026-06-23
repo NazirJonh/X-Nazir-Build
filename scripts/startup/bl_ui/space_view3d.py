@@ -272,12 +272,13 @@ class _draw_tool_settings_context_mode:
                 row = layout.row()
                 row.scale_x = 2.0
                 row.prop(sculpt, "paint_curve_source_object", text="Curve")
-                
+
                 # Add Overlay Curve popover button
                 layout.popover(
                     panel="VIEW3D_PT_overlay_sculpt_curve_edit",
                     text="Overlay Curve"
                 )
+            VIEW3D_HT_header.draw_paint_curve_snap_template(layout, context)
             return False
 
         if not tool.use_brushes:
@@ -336,6 +337,9 @@ class _draw_tool_settings_context_mode:
         # direction
         if capabilities.has_direction:
             layout.row().prop(brush, "direction", expand=True, text="")
+
+        if brush.stroke_method == 'CURVE':
+            VIEW3D_HT_header.draw_paint_curve_snap_template(layout, context)
 
         return True
 
@@ -721,6 +725,54 @@ class VIEW3D_HT_header(Header):
     bl_space_type = 'VIEW_3D'
 
     @staticmethod
+    def paint_curve_uses_view3d_snapping(context):
+        """Paint-curve editing uses #VIEW3D_PT_snapping (vertex / edge / face targets)."""
+        if context.mode != 'SCULPT':
+            return False
+        tool = context.workspace.tools.from_space_view3d_mode('SCULPT', create=False)
+        if tool and tool.idname == "builtin.curves_edit":
+            return True
+        paint_settings = UnifiedPaintPanel.paint_settings(context)
+        if paint_settings:
+            brush = paint_settings.brush
+            if brush and getattr(brush, "stroke_method", None) == 'CURVE':
+                return True
+        return False
+
+    @staticmethod
+    def draw_paint_curve_snap_template(layout, context):
+        """Draw snap toggle and snapping popover for paint-curve editing."""
+        VIEW3D_HT_header.draw_snap_template(layout, context)
+
+    @staticmethod
+    def draw_snap_template(layout, context):
+        """Draw header snap toggle and #VIEW3D_PT_snapping popover."""
+        tool_settings = context.tool_settings
+
+        snap_items = bpy.types.ToolSettings.bl_rna.properties["snap_elements"].enum_items
+        snap_elements = tool_settings.snap_elements
+        if len(snap_elements) == 1:
+            text = ""
+            for elem in snap_elements:
+                icon = snap_items[elem].icon
+                break
+        else:
+            text = iface_("Mix", i18n_contexts.editor_view3d)
+            icon = 'NONE'
+        del snap_items, snap_elements
+
+        row = layout.row(align=True)
+        row.prop(tool_settings, "use_snap", text="")
+
+        sub = row.row(align=True)
+        sub.popover(
+            panel="VIEW3D_PT_snapping",
+            icon=icon,
+            text=text,
+            translate=False,
+        )
+
+    @staticmethod
     def draw_xform_template(layout, context):
         obj = context.active_object
         object_mode = 'OBJECT' if obj is None else obj.mode
@@ -755,45 +807,15 @@ class VIEW3D_HT_header(Header):
         show_snap = False
         if obj is None:
             show_snap = True
-        else:
-            if has_pose_mode or (object_mode not in {
-                    'SCULPT', 'SCULPT_CURVES',
-                    'VERTEX_PAINT', 'WEIGHT_PAINT', 'TEXTURE_PAINT',
-                    'PAINT_GREASE_PENCIL', 'SCULPT_GREASE_PENCIL', 'WEIGHT_GREASE_PENCIL', 'VERTEX_GREASE_PENCIL',
-            }):
-                show_snap = True
-            else:
-
-                paint_settings = UnifiedPaintPanel.paint_settings(context)
-
-                if paint_settings:
-                    brush = paint_settings.brush
-                    if brush and hasattr(brush, "stroke_method") and brush.stroke_method == 'CURVE':
-                        show_snap = True
+        elif has_pose_mode or (object_mode not in {
+                'SCULPT', 'SCULPT_CURVES',
+                'VERTEX_PAINT', 'WEIGHT_PAINT', 'TEXTURE_PAINT',
+                'PAINT_GREASE_PENCIL', 'SCULPT_GREASE_PENCIL', 'WEIGHT_GREASE_PENCIL', 'VERTEX_GREASE_PENCIL',
+        }):
+            show_snap = True
 
         if show_snap:
-            snap_items = bpy.types.ToolSettings.bl_rna.properties["snap_elements"].enum_items
-            snap_elements = tool_settings.snap_elements
-            if len(snap_elements) == 1:
-                text = ""
-                for elem in snap_elements:
-                    icon = snap_items[elem].icon
-                    break
-            else:
-                text = iface_("Mix", i18n_contexts.editor_view3d)
-                icon = 'NONE'
-            del snap_items, snap_elements
-
-            row = layout.row(align=True)
-            row.prop(tool_settings, "use_snap", text="")
-
-            sub = row.row(align=True)
-            sub.popover(
-                panel="VIEW3D_PT_snapping",
-                icon=icon,
-                text=text,
-                translate=False,
-            )
+            VIEW3D_HT_header.draw_snap_template(layout, context)
 
         # Proportional editing
         if object_mode in {
@@ -1010,12 +1032,15 @@ class VIEW3D_HT_header(Header):
             else:
                 row.popover(panel="VIEW3D_PT_slots_color_attributes", icon='GROUP_VCOL')
 
-            layout.popover(
-                panel="VIEW3D_PT_sculpt_snapping",
-                icon='SNAP_INCREMENT',
-                text="",
-                translate=False,
-            )
+            if VIEW3D_HT_header.paint_curve_uses_view3d_snapping(context):
+                VIEW3D_HT_header.draw_paint_curve_snap_template(layout, context)
+            else:
+                layout.popover(
+                    panel="VIEW3D_PT_sculpt_snapping",
+                    icon='SNAP_INCREMENT',
+                    text="",
+                    translate=False,
+                )
 
             layout.popover(
                 panel="VIEW3D_PT_sculpt_automasking",

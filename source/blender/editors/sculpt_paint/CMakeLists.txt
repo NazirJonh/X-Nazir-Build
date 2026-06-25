@@ -115,6 +115,8 @@ set(SRC
   mesh/sculpt_transform.cc
   mesh/sculpt_trim.cc
   mesh/sculpt_undo.cc
+  mesh/sculpt_lattice.cc
+  mesh/sculpt_lattice_deform.cc
 
   paint_cursor.hh
   paint_intern.hh
@@ -145,6 +147,8 @@ set(SRC
   mesh/sculpt_pose.hh
   mesh/sculpt_smooth.hh
   mesh/sculpt_undo.hh
+  mesh/sculpt_lattice.hh
+  mesh/sculpt_lattice_intern.hh
   mesh/vw_paint_intern.hh
 
   mesh/brushes/bmesh_topology_rake.cc

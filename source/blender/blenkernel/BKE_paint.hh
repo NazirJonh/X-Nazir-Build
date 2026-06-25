@@ -54,6 +54,9 @@ struct Cache;
 namespace filter {
 struct Cache;
 }
+namespace lattice {
+struct LatticeToolData;
+}
 struct StrokeCache;
 }  // namespace ed::sculpt_paint
 struct GHash;
@@ -426,6 +429,13 @@ struct SculptSession : NonCopyable, NonMovable {
   ed::sculpt_paint::filter::Cache *filter_cache = nullptr;
   ed::sculpt_paint::expand::Cache *expand_cache = nullptr;
 
+  /* Lattice Tool state (full type in editors; raw pointer, ADR-13).
+   * Created lazily on first interaction, freed via #sculpt_lattice_session_free
+   * on confirm / cancel / tool-switch / mode-exit. */
+  ed::sculpt_paint::lattice::LatticeToolData *lattice_tool_state = nullptr;
+  /** Set while #SCULPT_OT_lattice_slide modal is running; keeps PBVH alive for live preview. */
+  bool lattice_slide_active = false;
+
   /* Cursor data and active vertex for tools */
   std::optional<int> active_face_index;
   std::optional<int> active_grid_index;
@@ -568,6 +578,14 @@ struct SculptSession : NonCopyable, NonMovable {
 };
 
 void BKE_sculptsession_free(Object *ob);
+
+/**
+ * Hook called from #BKE_sculptsession_free to release Lattice Tool state (ADR-13).
+ * Implemented in editors (sculpt_lattice.cc); the full #LatticeToolData type lives there.
+ * Set during editor initialisation. May be null if the editor module is not loaded.
+ */
+extern void (*BKE_sculpt_lattice_state_free_cb)(Object *ob);
+
 void BKE_sculptsession_free_deformMats(SculptSession *ss);
 void BKE_sculptsession_free_pbvh(Object &object);
 void BKE_sculptsession_bm_to_me(Object *ob);

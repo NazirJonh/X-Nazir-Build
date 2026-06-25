@@ -2153,6 +2153,10 @@ static int direct_link_id_restore_recalc(const FileData *fd,
 
 static void readfile_id_runtime_data_ensure(ID &id)
 {
+  /* `id.runtime` may be null in rare but valid cases (e.g. objects whose runtime was freed
+   * between creation and undo-decode, or temp proxy IDs). Initialise it defensively so that
+   * the write path behaves like the read-only #BLO_readfile_id_runtime_tags. */
+  BKE_libblock_runtime_ensure(id);
   if (id.runtime->readfile_data) {
     return;
   }

@@ -62,6 +62,7 @@
 #include "sculpt_dyntopo.hh"
 #include "sculpt_flood_fill.hh"
 #include "sculpt_intern.hh"
+#include "sculpt_lattice.hh"
 #include "sculpt_undo.hh"
 
 #include "RNA_access.hh"
@@ -326,6 +327,7 @@ static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &s
 
   /* Create sculpt mode session data. */
   if (ob.runtime->sculpt_session != nullptr) {
+    lattice::sculpt_lattice_session_free(&bmain, &scene, &ob);
     BKE_sculptsession_free(&ob);
   }
   ob.runtime->sculpt_session = MEM_new<SculptSession>(__func__);
@@ -529,6 +531,9 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
   /* Leave sculpt mode. */
   ob.mode &= ~mode_flag;
 
+  if (ob.runtime->sculpt_session) {
+    lattice::sculpt_lattice_session_free(&bmain, &scene, &ob);
+  }
   BKE_sculptsession_free(&ob);
 
   paint_cursor_delete_textures();
@@ -1539,6 +1544,14 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_mask_extract);
   WM_operatortype_append(SCULPT_OT_face_set_extract);
   WM_operatortype_append(SCULPT_OT_paint_mask_slice);
+
+  /* Sculpt Lattice Tool (ADR-1 standalone tool). */
+  lattice::sculpt_lattice_register();
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_tool);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_pick);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_slide);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_confirm);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_cancel);
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

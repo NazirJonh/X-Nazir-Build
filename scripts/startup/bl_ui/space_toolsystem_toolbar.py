@@ -1911,6 +1911,29 @@ class _defs_sculpt:
         )
 
     @ToolDef.from_fn
+    def sculpt_lattice():
+        def draw_settings(_context, layout, tool):
+            props = tool.operator_properties("sculpt.lattice_tool")
+            layout.prop(props, "strength")
+            layout.prop(props, "margin")
+            row = layout.row(align=True)
+            row.prop(props, "resolution_u")
+            row.prop(props, "resolution_v")
+            row.prop(props, "resolution_w")
+            layout.prop(props, "interpolation", expand=False)
+            layout.prop(props, "mask_eps", expand=False)
+
+        return dict(
+            idname="builtin.sculpt_lattice",
+            label="Lattice",
+            icon="MOD_LATTICE",
+            widget=None,
+            cursor='CROSSHAIR',
+            keymap=(),
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def cloth_filter():
         def draw_settings(_context, layout, tool):
             props = tool.operator_properties("sculpt.cloth_filter")
@@ -4003,6 +4026,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.mesh_filter,
             _defs_sculpt.cloth_filter,
             _defs_sculpt.color_filter,
+            _defs_sculpt.sculpt_lattice,
             None,
             _defs_sculpt.face_set_edit,
             _defs_sculpt.mask_by_color,

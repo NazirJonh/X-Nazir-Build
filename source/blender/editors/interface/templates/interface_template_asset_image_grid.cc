@@ -590,7 +590,7 @@ class ImageAssetGridView : public AbstractGridView {
     const int item_window = image_grid_build_item_window_size(grip_height, this->get_style(), cols);
     const int last_index = first_index + item_window;
 
-    state_.viewport.cached_item_count = ed::view3d::image_grid_foreach_filtered_item(
+    const int filtered_count = ed::view3d::image_grid_foreach_filtered_item(
         *bmain,
         library_ref_,
         state_.filter.enabled_catalog_paths,
@@ -607,6 +607,16 @@ class ImageAssetGridView : public AbstractGridView {
           }
           return true;
         });
+
+    /* While the asset list is mid-(re)fetch the iteration above transiently yields zero (or a
+     * partial count of) items even though the library is still populated. Committing that transient
+     * value to #cached_item_count collapses #image_grid_max_scroll_row, which clamps #scroll_row to
+     * the top and momentarily shrinks the grid (the shrink in turn lets the wheel leak into the
+     * region's View2D pan, collapsing the panel to a single visible row). Keep the last known good
+     * count until the list is ready again. */
+    if (ed::asset::list::is_loaded(&library_ref_)) {
+      state_.viewport.cached_item_count = filtered_count;
+    }
   }
 };
 

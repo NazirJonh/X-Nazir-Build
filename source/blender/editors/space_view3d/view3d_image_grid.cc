@@ -246,14 +246,6 @@ static bool image_grid_mouse_over(const ARegion *region, const int xy[2], bool *
   return false;
 }
 
-/** True when either grid view is laid out this redraw (used to tell a real cursor-exit from a
- * transient rebuild where the view momentarily has no tiles). */
-static bool image_grid_any_grid_present(const ARegion *region)
-{
-  return ui::region_view_idname_has_bounds(region, "image_asset_grid") ||
-         ui::region_view_idname_has_bounds(region, "image_asset_grid_mask");
-}
-
 bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region, bool *r_is_mask_slot)
 {
   if (!ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE) || event->modifier) {
@@ -276,18 +268,20 @@ bool image_grid_wheel_poll(bContext *C, const wmEvent *event, ARegion *region, b
     latch.xy[1] = event->xy[1];
   }
   else {
-    /* Live bounds say "not over". Repeat the last consume decision only while the grid is genuinely
-     * absent this redraw AND the cursor held still, and only for the region the latch belongs to
-     * (#ImageGridWheelLatch). A real cursor exit (grid present here, cursor outside) or any move away
-     * clears the latch, so the wheel never scrolls the grid from outside its bounds and a grid that
-     * vanishes for good cannot stay captured; events in other regions never touch the latch. */
+    /* Live bounds say "not over". Repeat the last consume decision only while the cursor held still,
+     * and only for the region the latch belongs to (#ImageGridWheelLatch). During a fast-scroll
+     * rebuild the grid can momentarily disappear OR shrink to a shorter (still non-empty) layout that
+     * no longer reaches the cursor; consuming purely on cursor stillness keeps the wheel from leaking
+     * into the region's View2D pan (which collapses the N-panel to a single visible row). A genuine
+     * cursor exit moves the cursor, which #held_still detects and releases; events in other regions
+     * never touch the latch. */
     bool consume_via_latch = false;
     if (latch.region == region && latch.over) {
       const int tile_h = max_ii(1,
                                 ui::preview_tile_size_y_no_label(image_grid_preview_size_get(*v3d)));
       const bool held_still = abs(event->xy[0] - latch.xy[0]) <= tile_h &&
                               abs(event->xy[1] - latch.xy[1]) <= tile_h;
-      if (!image_grid_any_grid_present(region) && held_still) {
+      if (held_still) {
         consume_via_latch = true;
       }
       else {

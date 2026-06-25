@@ -323,6 +323,13 @@ void build_grid_view(const bContext &C,
   const int grid_width = (panel_width > 0) ? panel_width : max_ii(style.tile_width, 1);
   const int total_height = max_ii(visible_height, total_rows * tile_h);
 
+  /* Rows to mark visible (and build) beyond the clipped window. One buffer row covers a window
+   * height that is not an exact multiple of #tile_h. A sub-row #scroll_offset_px shifts content up,
+   * so the window then intersects one *more* row at the bottom; without a second buffer row that
+   * partial bottom row falls outside #BuildOnlyVisibleButtonsHelper's range and vanishes entirely
+   * instead of being drawn clipped (most visible during touch/drag scroll). */
+  const int buffer_rows = (scroll_offset_px > 0) ? 2 : 1;
+
   View2D local_v2d{};
   local_v2d.flag |= V2D_IS_INIT;
   local_v2d.tot.xmin = 0.0f;
@@ -334,7 +341,7 @@ void build_grid_view(const bContext &C,
   /* Keep cur at top of content so BuildOnlyVisibleButtonsHelper starts from item_idx 0.
    * The windowed build_items already offsets by scroll_row*cols; re-offsetting here would
    * cause a double-skip and show the wrong items. */
-  const int build_height = visible_height + tile_h;
+  const int build_height = visible_height + buffer_rows * tile_h;
   local_v2d.cur.ymin = float(-build_height);
   local_v2d.cur.ymax = 0.0f;
   BLI_rcti_init(&local_v2d.mask, 0, grid_width, -build_height, 0);

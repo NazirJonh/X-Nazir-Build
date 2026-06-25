@@ -33,6 +33,7 @@
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
 #include "BKE_image.hh"
+#include "BKE_layer.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
@@ -59,6 +60,7 @@
 #include "UI_resources.hh"
 
 #include "paint_intern.hh"
+#include "mesh/sculpt_intern.hh"
 
 namespace blender {
 
@@ -1011,6 +1013,26 @@ static bool paint_cursor_context_init(bContext *C,
 
   pcontext.vc = ED_view3d_viewcontext_init(C, pcontext.depsgraph);
 
+  const bke::PaintRuntime &paint_runtime = *pcontext.paint->runtime;
+  pcontext.is_stroke_active = paint_runtime.stroke_active;
+
+  /* If in sculpt mode, find the object under the cursor to display the cursor correctly. */
+  if (pcontext.mode == PaintMode::Sculpt && !pcontext.is_stroke_active) {
+    float out[3];
+    Object *hit_ob = nullptr;
+    const float mval_fl[2] = {float(xy[0] - region->winrct.xmin),
+                              float(xy[1] - region->winrct.ymin)};
+    if (stroke_get_location_bvh(
+            *pcontext.depsgraph, pcontext.vc, pcontext.sd, pcontext.brush, out, mval_fl, false, &hit_ob))
+    {
+      if (hit_ob && hit_ob->runtime->sculpt_session) {
+        pcontext.vc.obact = hit_ob;
+        pcontext.object = hit_ob;
+        pcontext.base = BKE_view_layer_base_find(pcontext.vc.view_layer, hit_ob);
+      }
+    }
+  }
+
   if (pcontext.brush->stroke_method == BRUSH_STROKE_CURVE) {
     pcontext.cursor_type = PaintCursorDrawingType::Curve;
   }
@@ -1030,7 +1052,6 @@ static bool paint_cursor_context_init(bContext *C,
   pcontext.zoomx = max_ff(zoomx, zoomy);
   pcontext.final_radius = (BKE_brush_radius_get(pcontext.paint, pcontext.brush) * zoomx);
 
-  const bke::PaintRuntime &paint_runtime = *pcontext.paint->runtime;
   /* There is currently no way to check if the direction is inverted before starting the stroke,
    * so this does not reflect the state of the brush in the UI. */
   if (((!paint_runtime.draw_inverted) ^ ((pcontext.brush->flag & BRUSH_DIR_IN) == 0)) &&
@@ -1058,8 +1079,6 @@ static bool paint_cursor_context_init(bContext *C,
     pcontext.outline_alpha = 0.8f;
     pcontext.outline_col = float3(0.8f);
   }
-
-  pcontext.is_stroke_active = paint_runtime.stroke_active;
 
   return true;
 }
@@ -1147,7 +1166,9 @@ static void paint_cursor_draw_3D_view_brush_cursor(PaintCursorContext &pcontext)
     return;
   }
 
-  BLI_assert(pcontext.ss);
+  if (!pcontext.ss) {
+    return;
+  }
 
   mesh_cursor_update_and_init(pcontext);
 

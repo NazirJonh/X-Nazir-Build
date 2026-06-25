@@ -148,11 +148,16 @@ static void brush_unprojected_size_update(Paint &paint,
 
 void mesh_cursor_update_and_init(PaintCursorContext &pcontext)
 {
-  BLI_assert(pcontext.ss != nullptr);
+  /* The object under the cursor (and its #SculptSession) was already resolved in
+   * #paint_cursor_context_init, which redirects #ViewContext.obact and #PaintCursorContext.ss to
+   * the hit object. We must not raycast all sculpt objects a second time here. */
+  if (!pcontext.ss) {
+    return;
+  }
 
+  bke::PaintRuntime &paint_runtime = *pcontext.paint->runtime;
   SculptSession &ss = *pcontext.ss;
   Brush &brush = *pcontext.brush;
-  bke::PaintRuntime &paint_runtime = *pcontext.paint->runtime;
   ViewContext &vc = pcontext.vc;
   CursorGeometryInfo gi;
 
@@ -244,7 +249,9 @@ static void geometry_preview_lines_draw(const Depsgraph &depsgraph,
 
 void mesh_cursor_active_draw(PaintCursorContext &pcontext)
 {
-  BLI_assert(pcontext.ss != nullptr);
+  if (!pcontext.ss) {
+    return;
+  }
 
   SculptSession &ss = *pcontext.ss;
   Brush &brush = *pcontext.brush;

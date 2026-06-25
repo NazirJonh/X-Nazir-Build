@@ -52,6 +52,7 @@
 #include "BKE_key.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
@@ -1246,7 +1247,7 @@ void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object)
     }
     case bke::pbvh::Type::BMesh: {
       MutableSpan<bke::pbvh::BMeshNode> nodes = pbvh.nodes<bke::pbvh::BMeshNode>();
-      if (!undo::has_bmesh_log_entry()) {
+      if (!undo::has_bmesh_log_entry(object)) {
         return;
       }
       const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
@@ -1732,7 +1733,7 @@ static void calc_area_normal_and_center_node_bmesh(const Object &object,
 
   bool use_original = false;
   if (ss.cache && !ss.cache->accum) {
-    use_original = undo::has_bmesh_log_entry();
+    use_original = undo::has_bmesh_log_entry(object);
   }
 
   /* When the mesh is edited we can't rely on original coords
@@ -4206,12 +4207,43 @@ static bool need_delta_for_tip_orientation(const Brush &brush)
 static void brush_delta_update(const Depsgraph &depsgraph,
                                Paint &paint,
                                const Object &ob,
-                               const Brush &brush)
+                               const Brush &brush,
+                               const Object *primary_ob,
+                               bool &r_world_grab_state_valid,
+                               float3 &r_world_grab_anchor,
+                               float3 &r_world_grab_delta)
 {
   bke::PaintRuntime &paint_runtime = *paint.runtime;
   SculptSession &ss = *ob.runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   StrokeCache *cache = ss.cache;
+
+  /* Multi-object drag path: instead of recomputing this secondary object's grab state from a cursor
+   * projection (which mixes object spaces and lets the affected region drift, causing a sudden jump
+   * in displacement), reuse the world-space anchor and delta captured from the primary object. The
+   * same world-space delta applied around the same world-space center makes every object deform
+   * consistently with a single joined mesh.
+   *
+   * This covers both families of drag brushes:
+   * - Anchored-origin (Grab, Pose, Boundary, Thumb, Elastic Deform, Cloth-grab): the search center
+   *   is the fixed origin, so it is also mirrored here.
+   * - Tip-orientation (Snake Hook, Clay Strips, Pinch, Nudge, ...): the search center keeps tracking
+   *   the cursor and is set from the shared world-space brush center afterwards in
+   *   #stroke_cache_set_location_from_world_sphere, so only the delta is mirrored here. */
+  const bool multi_object_secondary = (primary_ob != nullptr && &ob != primary_ob);
+  const bool anchored_origin = need_delta_from_anchored_origin(brush);
+  const bool tip_orientation = need_delta_for_tip_orientation(brush);
+  if (multi_object_secondary && r_world_grab_state_valid && (anchored_origin || tip_orientation)) {
+    cache->orig_grab_location = math::transform_point(ob.world_to_object(), r_world_grab_anchor);
+    cache->grab_delta = math::transform_direction(ob.world_to_object(), r_world_grab_delta);
+    if (anchored_origin) {
+      /* Anchored-origin brushes search the affected vertices around the fixed origin. */
+      cache->location = cache->orig_grab_location;
+    }
+    cache->rake_rotation = std::nullopt;
+    cache->rake_rotation_symm = std::nullopt;
+    return;
+  }
   const float mval[2] = {
       cache->mouse_event[0],
       cache->mouse_event[1],
@@ -4309,6 +4341,17 @@ static void brush_delta_update(const Depsgraph &depsgraph,
     paint_runtime.draw_anchored = true;
     copy_v2_v2(paint_runtime.anchored_initial_mouse, cache->initial_mouse);
     paint_runtime.anchored_size = paint_runtime.pixel_radius;
+  }
+
+  /* Capture the primary (or single) object's grab state in world space so secondary objects in
+   * multi-object sculpt mode can mirror it (see the multi-object path at the top of this function).
+   * Captured for both anchored-origin and tip-orientation drag brushes. The grab delta is already
+   * finalized and, for tube falloff, already projected onto the view plane; both transforms preserve
+   * that since the view plane is shared in world space. */
+  if ((anchored_origin || tip_orientation) && (primary_ob == nullptr || &ob == primary_ob)) {
+    r_world_grab_anchor = math::transform_point(ob.object_to_world(), cache->orig_grab_location);
+    r_world_grab_delta = math::transform_direction(ob.object_to_world(), cache->grab_delta);
+    r_world_grab_state_valid = true;
   }
 
   /* Handle 'rake' */
@@ -4872,6 +4915,143 @@ bool cursor_geometry_info_update(Depsgraph &depsgraph,
 }
 
 /**
+ * Raycast (or find closest point) on a single sculpt object.
+ * \return true when a valid location was found in the object's local space.
+ */
+static bool stroke_get_location_object(Depsgraph &depsgraph,
+                                     ViewContext &vc,
+                                     const Paint &paint,
+                                     const Sculpt *sd,
+                                     Object &ob,
+                                     float3 &out,
+                                     const float2 &mval,
+                                     const bool force_original,
+                                     const bool check_closest,
+                                     const bool limit_closest_radius)
+{
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  StrokeCache *cache = ss.cache;
+  const bool original = force_original || ((cache) ? !cache->accum : false);
+  const Brush *brush = BKE_paint_brush_for_read(&paint);
+
+  if (sd) {
+    stroke_modifiers_check(depsgraph, vc.rv3d, *sd, ob, brush);
+  }
+
+  float3 ray_start;
+  float3 ray_end;
+  float3 ray_normal;
+  const float depth = raycast_init(&vc, mval, ray_start, ray_end, ray_normal, original);
+
+  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+  if (!pbvh) {
+    return false;
+  }
+
+  RaycastData rd;
+  rd.object = &ob;
+  rd.is_mid_stroke = ss.cache != nullptr;
+  rd.ray_start = ray_start;
+  rd.ray_normal = ray_normal;
+  rd.hit = false;
+  if (pbvh->type() == bke::pbvh::Type::Mesh) {
+    const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+    rd.vert_positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
+    rd.faces = mesh.faces();
+    rd.corner_verts = mesh.corner_verts();
+    rd.corner_tris = mesh.corner_tris();
+    const bke::AttributeAccessor attributes = mesh.attributes();
+    rd.hide_poly = *attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face);
+  }
+  else if (pbvh->type() == bke::pbvh::Type::Grids) {
+    rd.subdiv_ccg = ss.subdiv_ccg;
+  }
+  vert_random_access_ensure(ob);
+  rd.depth = depth;
+  rd.use_original = original;
+  isect_ray_tri_watertight_v3_precalc(&rd.isect_precalc, ray_normal);
+
+  bke::pbvh::raycast(
+      *pbvh,
+      [&](bke::pbvh::Node &node, float *tmin) { sculpt_raycast_cb(node, rd, tmin); },
+      ray_start,
+      ray_normal,
+      rd.use_original);
+
+  if (rd.hit) {
+    out = ray_start + ray_normal * rd.depth;
+    return true;
+  }
+
+  if (!check_closest) {
+    return false;
+  }
+
+  FindNearestToRayData fntrd{};
+  fntrd.use_original = original;
+  fntrd.object = &ob;
+  fntrd.is_mid_stroke = ss.cache != nullptr;
+  fntrd.hit = false;
+  if (pbvh->type() == bke::pbvh::Type::Mesh) {
+    const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+    fntrd.vert_positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
+    fntrd.faces = mesh.faces();
+    fntrd.corner_verts = mesh.corner_verts();
+    fntrd.corner_tris = mesh.corner_tris();
+    const bke::AttributeAccessor attributes = mesh.attributes();
+    fntrd.hide_poly = *attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face);
+  }
+  else if (pbvh->type() == bke::pbvh::Type::Grids) {
+    fntrd.subdiv_ccg = ss.subdiv_ccg;
+  }
+  fntrd.ray_start = ray_start;
+  fntrd.ray_normal = ray_normal;
+  fntrd.depth = std::numeric_limits<float>::max();
+  fntrd.dist_sq_to_ray = std::numeric_limits<float>::max();
+
+  bke::pbvh::find_nearest_to_ray(
+      *pbvh,
+      [&](bke::pbvh::Node &node, float *tmin) {
+        sculpt_find_nearest_to_ray_cb(node, fntrd, tmin);
+      },
+      ray_start,
+      ray_normal,
+      fntrd.use_original);
+
+  if (!fntrd.hit) {
+    return false;
+  }
+
+  float closest_radius_sq = std::numeric_limits<float>::max();
+  if (limit_closest_radius && brush) {
+    const float3 nearest_out = ray_start + ray_normal * fntrd.depth;
+    closest_radius_sq = object_space_radius_get(vc, paint, *brush, nearest_out);
+    closest_radius_sq *= closest_radius_sq;
+  }
+
+  if (fntrd.dist_sq_to_ray < closest_radius_sq) {
+    out = ray_start + ray_normal * fntrd.depth;
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Return all mesh objects currently in sculpt mode in the view layer of \a vc.
+ *
+ * The multi-object ("global") sculpt mode applies brush strokes and builds undo steps across every
+ * object in the mode at once. The active object is returned first (see
+ * #BKE_view_layer_array_from_objects_in_mode_params).
+ */
+static Vector<Object *> sculpt_mode_objects(const ViewContext &vc)
+{
+  const ObjectsInModeParams params{OB_MODE_SCULPT, false, nullptr, nullptr};
+  return BKE_view_layer_array_from_objects_in_mode_params(
+      *vc.bmain, vc.scene, vc.view_layer, vc.v3d, &params);
+}
+
+/**
  * \param check_closest: if true and the ray test fails a point closest to the ray will be found.
  * \param limit_closest_radius: if true then the closest point will be tested against the active
  * brush radius.
@@ -4884,129 +5064,112 @@ static bool stroke_get_location_bvh_ex(Depsgraph &depsgraph,
                                        const float2 &mval,
                                        const bool force_original,
                                        const bool check_closest,
-                                       const bool limit_closest_radius)
+                                       const bool limit_closest_radius,
+                                       Object **r_hit_ob = nullptr)
 {
-  Object &ob = *vc.obact;
-
-  SculptSession &ss = *ob.runtime->sculpt_session;
-  StrokeCache *cache = ss.cache;
-  const bool original = force_original || ((cache) ? !cache->accum : false);
-  const Brush *brush = BKE_paint_brush_for_read(&paint);
-
-  if (sd) {
-    /* TODO: This code is shared by Sculpt, Vertex, and Weight paint. Ideally, we wouldn't need
-     * to pass in `Sculpt` and `Paint` separately, but until we have further C++ DNA types, this
-     * is fine */
-    stroke_modifiers_check(depsgraph, vc.rv3d, *sd, ob, brush);
+  if (r_hit_ob) {
+    *r_hit_ob = nullptr;
   }
 
-  float3 ray_start;
-  float3 ray_end;
-  float3 ray_normal;
-  const float depth = raycast_init(&vc, mval, ray_start, ray_end, ray_normal, original);
+  /* Get all objects in sculpt mode. */
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
 
-  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  if (objects.is_empty()) {
+    return false;
+  }
 
-  bool hit = false;
-  {
-    RaycastData rd;
-    rd.object = &ob;
-    rd.is_mid_stroke = ob.runtime->sculpt_session->cache != nullptr;
-    rd.ray_start = ray_start;
-    rd.ray_normal = ray_normal;
-    rd.hit = false;
-    if (pbvh.type() == bke::pbvh::Type::Mesh) {
-      const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
-      rd.vert_positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
-      rd.faces = mesh.faces();
-      rd.corner_verts = mesh.corner_verts();
-      rd.corner_tris = mesh.corner_tris();
-      const bke::AttributeAccessor attributes = mesh.attributes();
-      rd.hide_poly = *attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face);
+  float3 best_out;
+  float best_depth = std::numeric_limits<float>::max();
+  Object *best_ob = nullptr;
+
+  float3 ray_start_world;
+  float3 ray_end_world;
+  float3 ray_normal_world;
+  raycast_init(&vc, mval, ray_start_world, ray_end_world, ray_normal_world, force_original);
+
+  for (Object *object_ptr : objects) {
+    Object &ob = *object_ptr;
+    float3 object_out;
+    if (!stroke_get_location_object(
+            depsgraph, vc, paint, sd, ob, object_out, mval, force_original, false, false))
+    {
+      continue;
     }
-    else if (pbvh.type() == bke::pbvh::Type::Grids) {
-      rd.subdiv_ccg = ss.subdiv_ccg;
-    }
-    vert_random_access_ensure(ob);
-    rd.depth = depth;
-    rd.use_original = original;
-    isect_ray_tri_watertight_v3_precalc(&rd.isect_precalc, ray_normal);
 
-    bke::pbvh::raycast(
-        pbvh,
-        [&](bke::pbvh::Node &node, float *tmin) { sculpt_raycast_cb(node, rd, tmin); },
-        ray_start,
-        ray_normal,
-        rd.use_original);
-    if (rd.hit) {
-      hit = true;
-      out = ray_start + ray_normal * rd.depth;
+    const float3 hit_world = math::transform_point(ob.object_to_world(), object_out);
+    const float world_depth = math::distance_squared(ray_start_world, hit_world);
+
+    if (world_depth < best_depth) {
+      best_depth = world_depth;
+      best_out = object_out;
+      best_ob = &ob;
     }
   }
 
-  if (hit || !check_closest) {
-    return hit;
+  if (best_ob) {
+    out = best_out;
+    if (r_hit_ob) {
+      *r_hit_ob = best_ob;
+    }
+    return true;
   }
 
-  FindNearestToRayData fntrd{};
-  fntrd.use_original = original;
-  fntrd.object = &ob;
-  fntrd.is_mid_stroke = ss.cache != nullptr;
-  fntrd.hit = false;
-  if (pbvh.type() == bke::pbvh::Type::Mesh) {
-    const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
-    fntrd.vert_positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
-    fntrd.faces = mesh.faces();
-    fntrd.corner_verts = mesh.corner_verts();
-    fntrd.corner_tris = mesh.corner_tris();
-    const bke::AttributeAccessor attributes = mesh.attributes();
-    fntrd.hide_poly = *attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face);
-  }
-  else if (pbvh.type() == bke::pbvh::Type::Grids) {
-    fntrd.subdiv_ccg = ss.subdiv_ccg;
-  }
-  fntrd.ray_start = ray_start;
-  fntrd.ray_normal = ray_normal;
-  fntrd.depth = std::numeric_limits<float>::max();
-  fntrd.dist_sq_to_ray = std::numeric_limits<float>::max();
-
-  bke::pbvh::find_nearest_to_ray(
-      pbvh,
-      [&](bke::pbvh::Node &node, float *tmin) {
-        sculpt_find_nearest_to_ray_cb(node, fntrd, tmin);
-      },
-      ray_start,
-      ray_normal,
-      fntrd.use_original);
-  if (fntrd.hit && fntrd.dist_sq_to_ray) {
-    hit = true;
-    out = ray_start + ray_normal * fntrd.depth;
+  if (!check_closest) {
+    return false;
   }
 
-  float closest_radius_sq = std::numeric_limits<float>::max();
-  if (limit_closest_radius) {
-    if (brush) {
-      closest_radius_sq = object_space_radius_get(vc, paint, *brush, out);
-      closest_radius_sq *= closest_radius_sq;
+  for (Object *object_ptr : objects) {
+    Object &ob = *object_ptr;
+    float3 object_out;
+    if (!stroke_get_location_object(depsgraph,
+                                    vc,
+                                    paint,
+                                    sd,
+                                    ob,
+                                    object_out,
+                                    mval,
+                                    force_original,
+                                    true,
+                                    limit_closest_radius))
+    {
+      continue;
+    }
+
+    const float3 hit_world = math::transform_point(ob.object_to_world(), object_out);
+    const float world_dist_sq = math::distance_squared(ray_start_world, hit_world);
+
+    if (world_dist_sq < best_depth) {
+      best_depth = world_dist_sq;
+      best_out = object_out;
+      best_ob = &ob;
     }
   }
 
-  return hit && fntrd.dist_sq_to_ray < closest_radius_sq;
+  if (best_ob) {
+    out = best_out;
+    if (r_hit_ob) {
+      *r_hit_ob = best_ob;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 bool stroke_get_location_bvh(Depsgraph &depsgraph,
                              ViewContext &vc,
-                             const Sculpt &sd,
+                             const Sculpt *sd,
                              const Brush *brush,
                              float out[3],
                              const float mval[2],
-                             const bool force_original)
+                             const bool force_original,
+                             Object **r_hit_ob)
 {
   const bool check_closest = brush && brush->falloff_shape == PAINT_FALLOFF_SHAPE_TUBE;
 
   float3 location;
   const bool result = stroke_get_location_bvh_ex(
-      depsgraph, vc, sd.paint, &sd, location, mval, force_original, check_closest, true);
+      depsgraph, vc, sd->paint, sd, location, mval, force_original, check_closest, true, r_hit_ob);
   if (result) {
     copy_v3_v3(out, location);
   }
@@ -5019,13 +5182,14 @@ bool stroke_get_location_bvh(Depsgraph &depsgraph,
                              const Brush *brush,
                              float out[3],
                              const float mval[2],
-                             const bool force_original)
+                             const bool force_original,
+                             Object **r_hit_ob)
 {
   const bool check_closest = brush && brush->falloff_shape == PAINT_FALLOFF_SHAPE_TUBE;
 
   float3 location;
   const bool result = stroke_get_location_bvh_ex(
-      depsgraph, vc, paint, nullptr, location, mval, force_original, check_closest, true);
+      depsgraph, vc, paint, nullptr, location, mval, force_original, check_closest, true, r_hit_ob);
   if (result) {
     copy_v3_v3(out, location);
   }
@@ -5042,7 +5206,7 @@ bool stroke_get_location_bvh(bContext *C,
   const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   const Brush *brush = BKE_paint_brush(BKE_paint_get_active_from_context(C));
 
-  return stroke_get_location_bvh(*depsgraph, vc, sd, brush, out, mval, force_original);
+  return stroke_get_location_bvh(*depsgraph, vc, &sd, brush, out, mval, force_original);
 }
 
 struct SculptPaintStroke final : public PaintStroke {
@@ -5053,6 +5217,24 @@ struct SculptPaintStroke final : public PaintStroke {
 
   /* Needed to tag other viewports */
   wmWindowManager *wm_;
+
+  /* Shared world-space brush state for multi-object ("global") sculpt mode.
+   *
+   * Anchored-origin brushes (Grab, Pose, Boundary, Thumb, Elastic Deform, Cloth-grab) lock a single
+   * world-space anchor at stroke start and accumulate a single world-space delta. The primary
+   * (under-cursor) object computes these in #brush_delta_update; secondary objects then derive their
+   * own local grab state from them, so the whole mode deforms like one joined mesh instead of each
+   * object recomputing an inconsistent per-object delta. Recomputed every #update_step from the
+   * primary object. */
+  Object *primary_object_ = nullptr;
+  bool world_grab_state_valid_ = false;
+  float3 world_grab_anchor_ = float3(0.0f);
+  float3 world_grab_delta_ = float3(0.0f);
+
+  /* Objects in sculpt mode for the duration of this stroke. The membership is stable while a stroke
+   * is modal, so it is captured once in #test_start instead of re-querying the view layer (which
+   * allocates a vector and iterates every object base) on every event. */
+  Vector<Object *> mode_objects_;
 
   SculptPaintStroke(bContext *C, wmOperator *op, const int event_type)
       : PaintStroke(C, op, event_type)
@@ -5079,8 +5261,17 @@ struct SculptPaintStroke final : public PaintStroke {
 
 bool SculptPaintStroke::get_location(float out[3], const float mouse[2], bool force_original)
 {
-  return stroke_get_location_bvh(
-      *this->depsgraph, this->vc, *sculpt_, this->brush, out, mouse, force_original);
+  Object *hit_ob = nullptr;
+  const bool hit = stroke_get_location_bvh(
+      *this->depsgraph, this->vc, sculpt_, this->brush, out, mouse, force_original, &hit_ob);
+
+  if (hit && hit_ob && hit_ob != this->object) {
+    /* Switch active object of the stroke. */
+    this->object = hit_ob;
+    this->vc.obact = hit_ob;
+  }
+
+  return hit;
 }
 
 static void brush_init_tex(const Sculpt &sd, SculptSession &ss)
@@ -5612,30 +5803,51 @@ static bool over_mesh(Depsgraph &depsgraph,
 static void stroke_undo_begin(const Scene &scene,
                               const Brush *brush,
                               PaintModeSettings &paint_mode_settings,
-                              Object &object,
+                              const Span<Object *> objects,
                               wmOperator *op)
 {
-  /* Setup the correct undo system. Image painting and sculpting are mutual exclusive.
-   * Color attributes are part of the sculpting undo system. */
-  if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-      SCULPT_use_image_paint_brush(paint_mode_settings, object))
-  {
-    ED_image_undo_push_begin(op->type->name, PaintMode::Sculpt);
-  }
-  else {
-    undo::push_begin_ex(scene, object, sculpt_brush_type_name(*brush));
+  bool sculpt_undo_started = false;
+  for (Object *object_ptr : objects) {
+    Object &ob = *object_ptr;
+
+    /* Setup the correct undo system. Image painting and sculpting are mutual exclusive.
+     * Color attributes are part of the sculpting undo system. */
+    if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+        SCULPT_use_image_paint_brush(paint_mode_settings, ob))
+    {
+      ED_image_undo_push_begin(op->type->name, PaintMode::Sculpt);
+    }
+    else {
+      if (!sculpt_undo_started) {
+        undo::push_begin_ex(scene, ob, sculpt_brush_type_name(*brush));
+        sculpt_undo_started = true;
+      }
+      else {
+        undo::push_begin_add_object(ob);
+      }
+    }
   }
 }
 
-static void stroke_undo_end(PaintModeSettings &paint_mode_settings, Object &object, Brush *brush)
+static void stroke_undo_end(PaintModeSettings &paint_mode_settings,
+                            const Span<Object *> objects,
+                            Brush *brush)
 {
-  if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-      SCULPT_use_image_paint_brush(paint_mode_settings, object))
-  {
-    ED_image_undo_push_end();
+  bool any_sculpt_undo = false;
+  for (Object *object_ptr : objects) {
+    Object &ob = *object_ptr;
+    if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+        SCULPT_use_image_paint_brush(paint_mode_settings, ob))
+    {
+      ED_image_undo_push_end();
+    }
+    else {
+      any_sculpt_undo = true;
+    }
   }
-  else {
-    undo::push_end(object);
+
+  if (any_sculpt_undo) {
+    undo::push_end_all_ex(false, true);
   }
 }
 
@@ -5659,124 +5871,173 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
   bke::PaintRuntime *paint_runtime = sculpt_->paint.runtime;
   const Brush *brush = this->brush;
   ViewContext *vc = &this->vc;
-  Object &ob = *this->object;
 
-  SculptSession &ss = *ob.runtime->sculpt_session;
-  StrokeCache *cache = ss.cache;
+  const Span<Object *> objects = this->mode_objects_;
 
-  /* Set scaling adjustment. */
-  float max_scale = 0.0f;
-  for (int i = 0; i < 3; i++) {
-    max_scale = max_ff(max_scale, fabsf(ob.scale[i]));
-  }
-  cache->scale[0] = max_scale / ob.scale[0];
-  cache->scale[1] = max_scale / ob.scale[1];
-  cache->scale[2] = max_scale / ob.scale[2];
+  /* The object-space radius helpers read #ViewContext.obact (via #paint_calc_object_space_radius).
+   * Redirect it to the object being initialized so each object's closest-radius limit is computed
+   * in its own object space; restore the real active object after the loop. */
+  Object *original_obact = this->vc.obact;
 
-  cache->plane_trim_squared = brush->plane_trim * brush->plane_trim;
+  for (Object *object_ptr : objects) {
+    Object &ob = *object_ptr;
+    SculptSession &ss = *ob.runtime->sculpt_session;
+    vc->obact = &ob;
 
-  cache->mirror_modifier_clip.flag = 0;
+    if (!ss.cache) {
+      ss.cache = MEM_new<StrokeCache>(__func__);
+    }
+    StrokeCache *cache = ss.cache;
 
-  sculpt_init_mirror_clipping(ob, ss);
+    /* Set scaling adjustment. */
+    float max_scale = 0.0f;
+    for (int j = 0; j < 3; j++) {
+      max_scale = max_ff(max_scale, fabsf(ob.scale[j]));
+    }
+    cache->scale[0] = max_scale / ob.scale[0];
+    cache->scale[1] = max_scale / ob.scale[1];
+    cache->scale[2] = max_scale / ob.scale[2];
 
-  /* Initial mouse location. */
-  cache->initial_mouse = mval ? float2(mval) : float2(0.0f);
+    cache->plane_trim_squared = brush->plane_trim * brush->plane_trim;
 
-  cache->initial_location_symm = ss.cursor_location;
-  cache->initial_location = ss.cursor_location;
+    cache->mirror_modifier_clip.flag = 0;
 
-  cache->initial_normal_symm = ss.cursor_sampled_normal.value_or(ss.cursor_normal);
-  cache->initial_normal = ss.cursor_sampled_normal.value_or(ss.cursor_normal);
+    sculpt_init_mirror_clipping(ob, ss);
 
-  /* Not very nice, but with current events system implementation
-   * we can't handle brush appearance inversion hotkey separately (sergey). */
-  if (cache->toggle_settings.invert) {
-    paint_runtime->draw_inverted = true;
-  }
-  else {
-    paint_runtime->draw_inverted = false;
-  }
+    /* Initial mouse location. */
+    cache->initial_mouse = mval ? float2(mval) : float2(0.0f);
 
-  cache->mouse = cache->initial_mouse;
-  cache->mouse_event = cache->initial_mouse;
-  copy_v2_v2(paint_runtime->tex_mouse, cache->initial_mouse);
-
-  cache->initial_direction_flipped = brush_flip(*brush, *cache) < 0.0f;
-
-  /* Truly temporary data that isn't stored in properties. */
-  cache->vc = vc;
-  cache->brush = brush;
-  cache->paint = this->paint;
-
-  /* Cache projection matrix. */
-  cache->projection_mat = ED_view3d_ob_project_mat_get(cache->vc->rv3d, &ob);
-
-  const float3 z_axis(0.0f, 0.0f, 1.0f);
-  ob.runtime->world_to_object = math::invert(ob.object_to_world());
-  cache->view_normal = math::normalize(math::transform_direction(
-      ob.world_to_object() * float4x4(cache->vc->rv3d->viewinv), z_axis));
-  cache->view_origin = math::transform_point(ob.world_to_object(),
-                                             float3(cache->vc->rv3d->viewinv[3]));
-
-  cache->supports_gravity = bke::brush::supports_gravity(*brush) && sculpt_->gravity_factor > 0.0f;
-  /* Get gravity vector in world space. */
-  if (cache->supports_gravity) {
-    if (sculpt_->gravity_object) {
-      const Object *gravity_object = sculpt_->gravity_object;
-      cache->gravity_direction = gravity_object->object_to_world().z_axis();
+    const bool check_closest = brush->falloff_shape == PAINT_FALLOFF_SHAPE_TUBE;
+    float3 object_location;
+    if (mval && stroke_get_location_object(*this->depsgraph,
+                                           *vc,
+                                           *this->paint,
+                                           sculpt_,
+                                           ob,
+                                           object_location,
+                                           float2(mval),
+                                           false,
+                                           check_closest,
+                                           true))
+    {
+      cache->initial_location = object_location;
+      cache->initial_location_symm = object_location;
+      cache->location = object_location;
     }
     else {
-      cache->gravity_direction = {0.0f, 0.0f, 1.0f};
+      cache->initial_location_symm = ss.cursor_location;
+      cache->initial_location = ss.cursor_location;
     }
 
-    /* Transform to sculpted object space. */
-    cache->gravity_direction = math::normalize(
-        math::transform_direction(ob.world_to_object(), cache->gravity_direction));
-  }
+    /* cursor_geometry_info_update is only called for the active object (this->object).
+     * For secondary sculpt objects, cursor_normal/cursor_sampled_normal may be stale or
+     * uninitialized. We first store whatever is available; a safe view_normal fallback
+     * is applied below after view_normal is computed. */
+    cache->initial_normal_symm = ss.cursor_sampled_normal.value_or(ss.cursor_normal);
+    cache->initial_normal = ss.cursor_sampled_normal.value_or(ss.cursor_normal);
 
-  cache->accum = true;
+    /* Not very nice, but with current events system implementation
+     * we can't handle brush appearance inversion hotkey separately (sergey). */
+    if (cache->toggle_settings.invert) {
+      paint_runtime->draw_inverted = true;
+    }
+    else {
+      paint_runtime->draw_inverted = false;
+    }
 
-  /* Make copies of the mesh vertex locations and normals for some brushes. */
-  if (brush->stroke_method == BRUSH_STROKE_ANCHORED) {
-    cache->accum = false;
-  }
+    cache->mouse = cache->initial_mouse;
+    cache->mouse_event = cache->initial_mouse;
+    copy_v2_v2(paint_runtime->tex_mouse, cache->initial_mouse);
 
-  /* Draw sharp does not need the original coordinates to produce the accumulate effect, so it
-   * should work the opposite way. */
-  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_SHARP) {
-    cache->accum = false;
-  }
+    cache->initial_direction_flipped = brush_flip(*brush, *cache) < 0.0f;
 
-  if (bke::brush::supports_accumulate(*brush)) {
-    if (!(brush->flag & BRUSH_ACCUMULATE)) {
-      cache->accum = false;
-      if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_SHARP) {
-        cache->accum = true;
+    /* Truly temporary data that isn't stored in properties. */
+    cache->vc = vc;
+    cache->brush = brush;
+    cache->paint = this->paint;
+
+    /* Cache projection matrix. */
+    cache->projection_mat = ED_view3d_ob_project_mat_get(cache->vc->rv3d, &ob);
+
+    const float3 z_axis(0.0f, 0.0f, 1.0f);
+    ob.runtime->world_to_object = math::invert(ob.object_to_world());
+    cache->view_normal = math::normalize(math::transform_direction(
+        ob.world_to_object() * float4x4(cache->vc->rv3d->viewinv), z_axis));
+
+    /* Secondary objects: if cursor_normal is zero (cursor was never over this object),
+     * fall back to view_normal so that plane-based brushes (Clay, Flatten, Fill, Scrape)
+     * have a sensible orientation. The primary object retains its sampled surface normal. */
+    if (&ob != this->object &&
+        math::length_squared(cache->initial_normal) < 0.01f)
+    {
+      cache->initial_normal = cache->view_normal;
+      cache->initial_normal_symm = cache->view_normal;
+    }
+    cache->view_origin = math::transform_point(ob.world_to_object(),
+                                               float3(cache->vc->rv3d->viewinv[3]));
+
+    cache->supports_gravity = bke::brush::supports_gravity(*brush) && sculpt_->gravity_factor > 0.0f;
+    /* Get gravity vector in world space. */
+    if (cache->supports_gravity) {
+      if (sculpt_->gravity_object) {
+        const Object *gravity_object = sculpt_->gravity_object;
+        cache->gravity_direction = gravity_object->object_to_world().z_axis();
       }
-    }
-  }
+      else {
+        cache->gravity_direction = {0.0f, 0.0f, 1.0f};
+      }
 
-  /* Original coordinates require the sculpt undo system, which isn't used
-   * for image brushes. It's also not necessary, just disable it. */
-  if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-      SCULPT_use_image_paint_brush(*paint_mode_settings_, ob))
-  {
+      /* Transform to sculpted object space. */
+      cache->gravity_direction = math::normalize(
+          math::transform_direction(ob.world_to_object(), cache->gravity_direction));
+    }
+
     cache->accum = true;
 
-    cache->image_data = paint::image::ImageData::init_active_image(
-        ob, this->scene->toolsettings->paint_mode);
+    /* Make copies of the mesh vertex locations and normals for some brushes. */
+    if (brush->stroke_method == BRUSH_STROKE_ANCHORED) {
+      cache->accum = false;
+    }
+
+    /* Draw sharp does not need the original coordinates to produce the accumulate effect, so it
+     * should work the opposite way. */
+    if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_SHARP) {
+      cache->accum = false;
+    }
+
+    if (bke::brush::supports_accumulate(*brush)) {
+      if (!(brush->flag & BRUSH_ACCUMULATE)) {
+        cache->accum = false;
+        if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_SHARP) {
+          cache->accum = true;
+        }
+      }
+    }
+
+    /* Original coordinates require the sculpt undo system, which isn't used
+     * for image brushes. It's also not necessary, just disable it. */
+    if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+        SCULPT_use_image_paint_brush(*paint_mode_settings_, ob))
+    {
+      cache->accum = true;
+
+      cache->image_data = paint::image::ImageData::init_active_image(
+          ob, this->scene->toolsettings->paint_mode);
+    }
+
+    if (BKE_brush_color_jitter_get_settings(this->paint, brush)) {
+      cache->initial_hsv_jitter = seed_hsv_jitter();
+    }
+    cache->first_time = true;
+    cache->plane_brush.first_time = true;
+
+    if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_ROTATE) {
+      constexpr int pixel_input_threshold = 5;
+      cache->dial = BLI_dial_init(cache->initial_mouse, pixel_input_threshold);
+    }
   }
 
-  if (BKE_brush_color_jitter_get_settings(this->paint, brush)) {
-    cache->initial_hsv_jitter = seed_hsv_jitter();
-  }
-  cache->first_time = true;
-  cache->plane_brush.first_time = true;
-
-  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_ROTATE) {
-    constexpr int pixel_input_threshold = 5;
-    cache->dial = BLI_dial_init(cache->initial_mouse, pixel_input_threshold);
-  }
+  this->vc.obact = original_obact;
 }
 
 bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
@@ -5799,6 +6060,9 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 
     ED_view3d_init_mats_rv3d(&ob, this->vc.rv3d);
 
+    /* Capture the sculpt-mode object set once for the whole stroke (see #mode_objects_). */
+    this->mode_objects_ = sculpt_mode_objects(this->vc);
+
     stroke_cache_init(mval);
     if (brush && brush_type_is_paint(brush->sculpt_brush_type)) {
       BKE_curvemapping_init(brush->curve_rand_hue);
@@ -5810,14 +6074,120 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     cursor_geometry_info_update(
         *this->depsgraph, *paint, sculpt_, this->vc, base_, &cgi, mval, false);
 
-    stroke_undo_begin(*this->scene, this->brush, *this->paint_mode_settings_, *this->object, op);
+    stroke_undo_begin(*this->scene, this->brush, *this->paint_mode_settings_, this->mode_objects_, op);
 
     return true;
   }
   return false;
 }
 
-/* Initialize the stroke cache variants from operator properties. */
+/**
+ * Sets the brush location for a secondary sculpt object by projecting the world-space brush
+ * center into the object's local space and testing whether any PBVH nodes intersect the brush
+ * sphere. Used in multi-object sculpt mode for objects that are NOT directly under the cursor.
+ *
+ * Unlike the primary object, which keeps the framework-provided RNA "location", this function
+ * accepts any object whose geometry overlaps the brush sphere in 3D world space.
+ *
+ * \return true if any PBVH node of \a ob intersects the brush sphere and the cache was updated.
+ */
+static bool stroke_cache_set_location_from_world_sphere(Object &ob,
+                                                        StrokeCache &cache,
+                                                        Paint &paint,
+                                                        const Brush &brush,
+                                                        const float3 &world_center)
+{
+  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+  if (!pbvh) {
+    return false;
+  }
+
+  /* Transform the world-space brush center into this object's local space. */
+  const float3 obj_center = math::transform_point(ob.world_to_object(), world_center);
+
+  /* Compute the brush radius in this object's local space at the projected center.
+   * object_space_radius_get already accounts for the object's scale and camera distance. */
+  const float obj_radius = object_space_radius_get(*cache.vc, paint, brush, obj_center);
+  const float obj_radius_sq = obj_radius * obj_radius;
+
+  /* Quick PBVH sphere test: does any PBVH node of this object intersect the brush sphere?
+   * If not, there is no geometry to deform and we skip this object entirely.
+   *
+   * The test must use the same "original geometry" choice as the actual node gathering in
+   * #do_brush_action (see #brush_type_needs_original / #StrokeCache.accum). Anchored-origin brushes
+   * such as Grab gather nodes against their start-of-stroke bounds (#bke::pbvh::Node.bounds_orig);
+   * if this gate instead tested the deformed bounds, a secondary mesh being dragged would drift out
+   * of the sphere and get skipped mid-stroke even though the brush still affects it, so its
+   * deformation would cut off as the grab is pulled further. */
+  const bool use_original = brush_type_needs_original(brush.sculpt_brush_type) ? true : !cache.accum;
+  IndexMaskMemory memory;
+  const IndexMask nodes_in_range = bke::pbvh::search_nodes(
+      *pbvh, memory, [&](const bke::pbvh::Node &node) {
+        return node_in_sphere(node, obj_center, obj_radius_sq, use_original);
+      });
+
+  if (nodes_in_range.is_empty()) {
+    return false;
+  }
+
+  cache.location = obj_center;
+
+  if (stroke_is_first_brush_step_of_symmetry_pass(cache)) {
+    cache.initial_radius = obj_radius;
+    /* Do NOT call BKE_brush_unprojected_size_set here. Only the primary object (under the
+     * cursor) should modify the global brush size. Secondary objects must follow the same
+     * screen-space pixel radius to stay consistent. */
+  }
+
+  bke::PaintRuntime &paint_runtime = *paint.runtime;
+  if (BKE_brush_use_size_pressure(&brush) &&
+      paint_supports_dynamic_size(brush, PaintMode::Sculpt))
+  {
+    cache.radius = brush_dynamic_size_get(brush, cache, cache.initial_radius);
+    cache.dyntopo_pixel_radius = brush_dynamic_size_get(
+        brush, cache, paint_runtime.initial_pixel_radius);
+  }
+  else {
+    cache.radius = cache.initial_radius;
+    cache.dyntopo_pixel_radius = paint_runtime.initial_pixel_radius;
+  }
+
+  cache_paint_invariants_update(cache, brush);
+  cache.radius_squared = cache.radius * cache.radius;
+
+  if (brush.stroke_method == BRUSH_STROKE_ANCHORED) {
+    if (brush.flag & BRUSH_EDGE_TO_EDGE) {
+      cache.radius = paint_calc_object_space_radius(
+          *cache.vc, cache.location, paint_runtime.pixel_radius);
+      cache.radius_squared = cache.radius * cache.radius;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Finalize the primary (under-cursor) object's stroke cache after #stroke_cache_update.
+ *
+ * The brush location for the primary object is the framework-provided RNA "location" already stored
+ * by #stroke_cache_update, and the brush radius is likewise computed there from that location. We
+ * must NOT re-raycast the location here: doing so would move the brush location (and therefore the
+ * affected vertex region) mid-stroke, which breaks anchored-region brushes such as Grab and changes
+ * behavior even for a single object.
+ *
+ * The only step the primary object needs beyond #stroke_cache_update is updating the global
+ * unprojected brush size; #stroke_cache_update deliberately skips it so that secondary objects in
+ * multi-object mode don't each overwrite it.
+ */
+static void stroke_cache_finalize_primary_object(Paint &paint, StrokeCache &cache, Brush &brush)
+{
+  if (stroke_is_first_brush_step_of_symmetry_pass(cache) &&
+      !BKE_brush_use_locked_size(&paint, &brush))
+  {
+    BKE_brush_unprojected_size_set(&paint, &brush, cache.initial_radius * 2.0f);
+  }
+}
+
 void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
 {
   const Depsgraph &depsgraph = *this->depsgraph;
@@ -5854,13 +6224,13 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
 
   cache.tilt = {RNA_float_get(ptr, "x_tilt"), RNA_float_get(ptr, "y_tilt")};
 
-  /* Truly temporary data that isn't stored in properties. */
+  /* initial_radius is computed here from cache.location for every object in the multi-object loop.
+   * For secondary objects #stroke_cache_set_location_from_world_sphere recomputes it from the
+   * world-space brush sphere. We must NOT call BKE_brush_unprojected_size_set here because this
+   * runs for every object; only the primary object updates the global brush size, and it does so in
+   * #stroke_cache_finalize_primary_object. */
   if (stroke_is_first_brush_step_of_symmetry_pass(*ss.cache)) {
     cache.initial_radius = object_space_radius_get(*cache.vc, paint, brush, cache.location);
-
-    if (!BKE_brush_use_locked_size(&paint, &brush)) {
-      BKE_brush_unprojected_size_set(&paint, &brush, cache.initial_radius * 2.0f);
-    }
   }
 
   /* Clay stabilized pressure. */
@@ -5907,7 +6277,14 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
     cache.radius_squared = cache.radius * cache.radius;
   }
 
-  brush_delta_update(depsgraph, paint, *this->object, brush);
+  brush_delta_update(depsgraph,
+                     paint,
+                     *this->object,
+                     brush,
+                     this->primary_object_,
+                     this->world_grab_state_valid_,
+                     this->world_grab_anchor_,
+                     this->world_grab_delta_);
 
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_ROTATE) {
     cache.vertex_rotation = -BLI_dial_angle(cache.dial, cache.mouse) * cache.bstrength;
@@ -5927,44 +6304,144 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   const Scene &scene = *this->scene;
   Depsgraph &depsgraph = *this->depsgraph;
   Sculpt &sd = *sculpt_;
-  Object &ob = *this->object;
-  SculptSession &ss = *ob.runtime->sculpt_session;
-  const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
-  StrokeCache *cache = ss.cache;
-  cache->stroke_distance = this->stroke_distance();
 
-  stroke_modifiers_check(depsgraph, this->vc.rv3d, sd, ob, &brush);
-  stroke_cache_update(itemptr);
-  restore_from_undo_step_if_necessary(depsgraph, sd, ob);
+  /* Local copy because the primary object is swapped to the front below; the cached membership in
+   * #mode_objects_ must keep its original order for the rest of the stroke. */
+  Vector<Object *> objects = this->mode_objects_;
 
-  if (dyntopo::stroke_is_dyntopo(ob, brush)) {
-    do_symmetrical_brush_actions(
-        depsgraph, scene, sd, ob, dynamic_topology_update, *this->paint_mode_settings_);
+  /* ── Phase 1: determine the primary object and its world-space brush center for use by
+   *             secondary objects. ──
+   *
+   * The paint stroke framework already locked onto the object under the cursor
+   * (#SculptPaintStroke::get_location sets this->object) and stored that object's brush location in
+   * the RNA "location" property, in its local space. We reuse that instead of re-raycasting so the
+   * primary object behaves exactly as in single-object sculpt mode; re-raycasting here would move
+   * the brush location (and thus the affected region) mid-stroke and break anchored-region brushes
+   * such as Grab. */
+  Object *primary_ob = this->object;
+  this->primary_object_ = primary_ob;
+
+  /* The primary object is the one under the cursor (#this->object), which is NOT necessarily the
+   * active object that #sculpt_mode_objects returns first. Process the primary first regardless, so
+   * its world-space grab state is captured before any secondary object derives from it. Otherwise a
+   * secondary object processed before the primary would fall back to the per-object delta path with
+   * a brush origin expressed in the wrong object space, producing a large, misplaced deformation. */
+  for (const int i : objects.index_range()) {
+    if (objects[i] == primary_ob) {
+      if (i > 0) {
+        std::swap(objects[0], objects[i]);
+      }
+      break;
+    }
   }
+  /* Recomputed from the primary object below; brush_delta_update fills it for anchored-origin
+   * brushes. */
+  this->world_grab_state_valid_ = false;
 
-  do_symmetrical_brush_actions(
-      depsgraph, scene, sd, ob, do_brush_action, *this->paint_mode_settings_);
+  /* World-space brush center shared with secondary objects. Determined once the primary object has
+   * been processed (it is first in #objects). For anchored-origin brushes it is the fixed world
+   * anchor; for tracking brushes it is the current cursor hit. */
+  float3 primary_world_center(0.0f);
+  bool primary_world_center_valid = false;
 
-  /* Hack to fix noise texture tearing mesh. */
-  sculpt_fix_noise_tear(sd, ob);
+  /* ── Phase 2: per-object brush application ── */
+  for (Object *object_ptr : objects) {
+    Object &ob = *object_ptr;
+    SculptSession &ss = *ob.runtime->sculpt_session;
+    Brush &brush = *BKE_paint_brush(&sd.paint);
 
-  ss.cache->first_time = false;
-  copy_v3_v3(ss.cache->last_location, ss.cache->location);
+    /* stroke_cache_update and the object-space radius helpers read both this->object and
+     * vc.obact (the latter via #paint_calc_object_space_radius) for the current object's
+     * SculptSession and transform. Temporarily redirect both so that secondary objects
+     * compute their brush radius in their own object space rather than the active object's. */
+    Object *original_stroke_ob = this->object;
+    Object *original_obact = this->vc.obact;
+    this->object = &ob;
+    this->vc.obact = &ob;
 
-  /* Cleanup. */
-  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
-    flush_update_step(this->vc, *this->object, UpdateType::Mask);
-  }
-  else if (brush_type_is_paint(brush.sculpt_brush_type)) {
-    if (SCULPT_use_image_paint_brush(*this->paint_mode_settings_, ob)) {
-      flush_update_step(this->vc, *this->object, UpdateType::Image);
+    BLI_assert(ss.cache != nullptr);
+    StrokeCache *cache = ss.cache;
+    cache->stroke_distance = this->stroke_distance();
+
+    stroke_modifiers_check(depsgraph, this->vc.rv3d, sd, ob, &brush);
+
+    /* stroke_cache_update reads shared state from RNA (pressure, tilt, mouse) and sets
+     * cache.location from the RNA "location" property. For secondary objects that location
+     * is in the primary object's local space and will be overridden below. */
+    stroke_cache_update(itemptr);
+
+    bool has_location;
+    if (&ob == primary_ob) {
+      /* Primary object (under cursor): keep the framework-provided RNA "location" already set by
+       * stroke_cache_update; only update the global brush size here. */
+      stroke_cache_finalize_primary_object(*this->paint, *cache, brush);
+      has_location = true;
+
+      /* Establish the world-space brush center for secondary objects. For anchored-origin brushes
+       * use the fixed world anchor captured in brush_delta_update so the affected region does not
+       * chase the cursor mid-stroke (otherwise secondary meshes drop out of the search sphere). For
+       * tracking brushes use the current cursor hit. */
+      if (this->world_grab_state_valid_ && need_delta_from_anchored_origin(brush)) {
+        primary_world_center = this->world_grab_anchor_;
+      }
+      else {
+        float3 primary_loc;
+        RNA_float_get_array(itemptr, "location", primary_loc);
+        primary_world_center = math::transform_point(primary_ob->object_to_world(), primary_loc);
+      }
+      primary_world_center_valid = true;
     }
     else {
-      flush_update_step(this->vc, *this->object, UpdateType::Color);
+      /* Secondary objects: check whether any geometry intersects the world-space brush sphere
+       * centered at primary_ob's hit point. No pixel raycast required. */
+      if (!primary_world_center_valid) {
+        this->object = original_stroke_ob;
+        this->vc.obact = original_obact;
+        continue;
+      }
+      has_location = stroke_cache_set_location_from_world_sphere(
+          ob, *cache, *this->paint, brush, primary_world_center);
     }
-  }
-  else {
-    flush_update_step(this->vc, *this->object, UpdateType::Position);
+
+    if (!has_location) {
+      this->object = original_stroke_ob;
+      this->vc.obact = original_obact;
+      continue;
+    }
+
+    restore_from_undo_step_if_necessary(depsgraph, sd, ob);
+
+    if (dyntopo::stroke_is_dyntopo(ob, brush)) {
+      do_symmetrical_brush_actions(
+          depsgraph, scene, sd, ob, dynamic_topology_update, *this->paint_mode_settings_);
+    }
+
+    do_symmetrical_brush_actions(
+        depsgraph, scene, sd, ob, do_brush_action, *this->paint_mode_settings_);
+
+    /* Hack to fix noise texture tearing mesh. */
+    sculpt_fix_noise_tear(sd, ob);
+
+    ss.cache->first_time = false;
+    copy_v3_v3(ss.cache->last_location, ss.cache->location);
+
+    if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
+      flush_update_step(this->vc, ob, UpdateType::Mask);
+    }
+    else if (brush_type_is_paint(brush.sculpt_brush_type)) {
+      if (SCULPT_use_image_paint_brush(*this->paint_mode_settings_, ob)) {
+        flush_update_step(this->vc, ob, UpdateType::Image);
+      }
+      else {
+        flush_update_step(this->vc, ob, UpdateType::Color);
+      }
+    }
+    else {
+      flush_update_step(this->vc, ob, UpdateType::Position);
+    }
+
+    this->object = original_stroke_ob;
+    this->vc.obact = original_obact;
   }
 }
 
@@ -5980,15 +6457,27 @@ static void brush_exit_tex(Sculpt &sd)
 
 void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
 {
-  Object &ob = *this->object;
-  SculptSession &ss = *ob.runtime->sculpt_session;
   Sculpt &sd = *this->sculpt_;
+  const Span<Object *> objects = this->mode_objects_;
+
+  bool any_stroke_cache = false;
+  for (Object *object_ptr : objects) {
+    SculptSession *ss = object_ptr->runtime->sculpt_session;
+    if (ss && ss->cache) {
+      any_stroke_cache = true;
+      break;
+    }
+  }
 
   /* Finished. */
-  if (!ss.cache) {
+  if (!any_stroke_cache) {
     brush_exit_tex(sd);
     return;
   }
+
+  Object &ob = *this->object;
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  BLI_assert(ss.cache != nullptr);
   bke::PaintRuntime *paint_runtime = sd.paint.runtime;
   Brush *brush = BKE_paint_brush(&sd.paint);
   paint_runtime->draw_inverted = false;
@@ -6008,29 +6497,45 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     brush = BKE_paint_brush(&sd.paint);
   }
 
-  MEM_delete(ss.cache);
-  ss.cache = nullptr;
+  /* Free caches. */
+  for (Object *object_ptr : objects) {
+    Object &ob_iter = *object_ptr;
+    SculptSession &ss_iter = *ob_iter.runtime->sculpt_session;
+    if (ss_iter.cache) {
+      MEM_delete(ss_iter.cache);
+      ss_iter.cache = nullptr;
+    }
+  }
 
   if (!is_cancel && stroke_started) {
-    stroke_undo_end(*paint_mode_settings_, *this->object, brush);
+    stroke_undo_end(*paint_mode_settings_, this->mode_objects_, brush);
+  }
+  else if (is_cancel && stroke_started) {
+    undo::discard_init_step();
   }
 
-  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
-    flush_update_done(this->vc, *wm_, ob, UpdateType::Mask);
-  }
-  else if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
-    if (SCULPT_use_image_paint_brush(*this->paint_mode_settings_, ob)) {
-      flush_update_done(this->vc, *wm_, ob, UpdateType::Image);
+  /* Flush final geometry updates and send redraw notifiers for every object that was in
+   * sculpt mode during this stroke, not just the primary (active) object. */
+  for (Object *object_ptr : objects) {
+    Object &ob_iter = *object_ptr;
+
+    UpdateType update_type;
+    if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
+      update_type = UpdateType::Mask;
+    }
+    else if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
+      update_type = SCULPT_use_image_paint_brush(*this->paint_mode_settings_, ob_iter) ?
+                        UpdateType::Image :
+                        UpdateType::Color;
     }
     else {
-      flush_update_done(this->vc, *wm_, ob, UpdateType::Color);
+      update_type = UpdateType::Position;
     }
-  }
-  else {
-    flush_update_done(this->vc, *wm_, ob, UpdateType::Position);
+
+    flush_update_done(this->vc, *wm_, ob_iter, update_type);
+    WM_event_add_notifier(this->evil_C, NC_OBJECT | ND_DRAW, &ob_iter);
   }
 
-  WM_event_add_notifier(this->evil_C, NC_OBJECT | ND_DRAW, &ob);
   brush_exit_tex(sd);
 }
 

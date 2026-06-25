@@ -514,20 +514,6 @@ void tag_update_overlays(bContext *C);
  * TODO: This should be updated to return std::optional<float3>
  */
 bool stroke_get_location_bvh(bContext *C, float out[3], const float mval[2], bool force_original);
-bool stroke_get_location_bvh(Depsgraph &depsgraph,
-                             ViewContext &vc,
-                             const Sculpt &sd,
-                             const Brush *brush,
-                             float out[3],
-                             const float mval[2],
-                             bool force_original);
-bool stroke_get_location_bvh(Depsgraph &depsgraph,
-                             ViewContext &vc,
-                             const Paint &paint,
-                             const Brush *brush,
-                             float out[3],
-                             const float mval[2],
-                             bool force_original);
 
 struct ActiveElementInfo {
   ActiveVert vert = {};
@@ -552,6 +538,23 @@ struct CursorGeometryInfo {
  *
  * TODO: This should be updated to return `std::optional<CursorGeometryInfo>`
  */
+bool stroke_get_location_bvh(Depsgraph &depsgraph,
+                             ViewContext &vc,
+                             const Sculpt *sd,
+                             const Brush *brush,
+                             float out[3],
+                             const float mval[2],
+                             const bool force_original,
+                             Object **r_hit_ob = nullptr);
+bool stroke_get_location_bvh(Depsgraph &depsgraph,
+                             ViewContext &vc,
+                             const Paint &paint,
+                             const Brush *brush,
+                             float out[3],
+                             const float mval[2],
+                             const bool force_original,
+                             Object **r_hit_ob = nullptr);
+
 bool cursor_geometry_info_update(bContext *C,
                                  CursorGeometryInfo *out,
                                  const float2 &mval,

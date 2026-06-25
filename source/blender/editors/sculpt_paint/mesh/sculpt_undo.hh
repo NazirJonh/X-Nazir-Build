@@ -70,17 +70,23 @@ void push_begin(const Scene &scene, Object &ob, const wmOperator *op);
  * Similar to geometry_push, this undo type does not need the PBVH to be constructed.
  */
 void push_enter_sculpt_mode(const Scene &scene, Object &ob, const wmOperator *op);
+void push_enter_sculpt_mode_add_object(Object &ob);
 
 /**
  * NOTE: #push_begin is preferred since `name`
  * must match operator name for redo panels to work.
  */
 void push_begin_ex(const Scene &scene, Object &ob, const char *name);
+void push_begin_add_object(Object &ob);
 void push_end(Object &ob);
-void push_end_ex(Object &ob, bool use_nested_undo);
+void push_end_ex(Object &ob, bool use_nested_undo, bool finalize_undo_step = true);
+/** Finalize undo data for all objects in the active sculpt undo step and optionally push it. */
+void push_end_all_ex(bool use_nested_undo, bool finalize_undo_step = true);
+/** Discard the sculpt undo step currently being built without pushing it to the stack. */
+void discard_init_step();
 
 void restore_from_bmesh_enter_geometry(const StepData &step_data, Mesh &mesh);
-bool has_bmesh_log_entry();
+bool has_bmesh_log_entry(const Object &ob);
 
 void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object);
 

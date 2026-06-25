@@ -10,6 +10,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_enumerable_thread_specific.hh"
+#include "BLI_listbase.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
 
@@ -559,44 +560,101 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
   ToolSettings &ts = *scene.toolsettings;
   ViewLayer &view_layer = *CTX_data_view_layer(C);
   BKE_view_layer_synced_ensure(bmain, &scene, &view_layer);
-  Object &ob = *BKE_view_layer_active_object_get(&view_layer);
-  const eObjectMode mode_flag = OB_MODE_SCULPT;
-  const bool is_mode_set = (ob.mode & mode_flag) != 0;
-
-  if (!is_mode_set) {
-    if (!object::mode_compat_set(C, &ob, eObjectMode(mode_flag), op->reports)) {
-      return OPERATOR_CANCELLED;
-    }
+  Object *active_ob = BKE_view_layer_active_object_get(&view_layer);
+  if (!active_ob) {
+    return OPERATOR_CANCELLED;
   }
+
+  const eObjectMode mode_flag = OB_MODE_SCULPT;
+  const bool is_mode_set = (active_ob->mode & mode_flag) != 0;
 
   if (is_mode_set) {
-    object_sculpt_mode_exit(bmain, *depsgraph, scene, ob);
+    /* Exit sculpt mode for all objects that are currently in it. */
+    for (Base &base : view_layer.object_bases) {
+      Object *ob = base.object;
+      if (ob->mode & mode_flag) {
+        object_sculpt_mode_exit(bmain, *depsgraph, scene, *ob);
+      }
+    }
   }
   else {
-    if (depsgraph) {
-      depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+    /* Enter sculpt mode for all selected editable meshes. */
+    Vector<PointerRNA> selected_objects;
+    CTX_data_selected_objects(C, &selected_objects);
+
+    Vector<Object *> objects;
+    for (const PointerRNA &ptr : selected_objects) {
+      Object *ob = reinterpret_cast<Object *>(ptr.owner_id);
+      if (ob->type != OB_MESH) {
+        continue;
+      }
+      objects.append(ob);
     }
-    object_sculpt_mode_enter(bmain, *depsgraph, scene, ob, false, op->reports);
+
+    depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+    if (!depsgraph) {
+      return OPERATOR_CANCELLED;
+    }
+
+    if (objects.is_empty()) {
+      /* Fallback to active object if nothing selected. */
+      if (!object::mode_compat_set(C, active_ob, eObjectMode(mode_flag), op->reports)) {
+        return OPERATOR_CANCELLED;
+      }
+      object_sculpt_mode_enter(bmain, *depsgraph, scene, *active_ob, false, op->reports);
+    }
+    else {
+      for (Object *ob : objects) {
+        if (ob->type != OB_MESH) {
+          continue;
+        }
+
+        if (!object::mode_compat_set(C, ob, eObjectMode(mode_flag), op->reports)) {
+          continue;
+        }
+
+        object_sculpt_mode_enter(bmain, *depsgraph, scene, *ob, false, op->reports);
+      }
+    }
+
     BKE_paint_brushes_validate(&bmain, &ts.sculpt->paint);
 
-    if (ob.mode & mode_flag) {
-      Mesh *mesh = id_cast<Mesh *>(ob.data);
-      /* Dyntopo adds its own undo step. */
-      if ((mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) == 0) {
-        /* Without this the memfile undo step is used,
-         * while it works it causes lag when undoing the first undo step, see #71564. */
-        wmWindowManager *wm = CTX_wm_manager(C);
-        if (wm->op_undo_depth <= 1) {
-          undo::push_enter_sculpt_mode(scene, ob, op);
-          undo::push_end(ob);
+    /* Push initial undo step for all objects that successfully entered sculpt mode. */
+    wmWindowManager *wm = CTX_wm_manager(C);
+    if (wm->op_undo_depth <= 1) {
+      Vector<Object *> sculpt_objects;
+      for (Base &base : view_layer.object_bases) {
+        Object *ob = base.object;
+        if (!(ob->mode & mode_flag)) {
+          continue;
         }
+        Mesh *mesh = id_cast<Mesh *>(ob->data);
+        if (mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) {
+          continue;
+        }
+        sculpt_objects.append(ob);
+      }
+
+      bool sculpt_undo_started = false;
+      for (const int i : sculpt_objects.index_range()) {
+        Object *ob = sculpt_objects[i];
+        if (!sculpt_undo_started) {
+          undo::push_enter_sculpt_mode(scene, *ob, op);
+          sculpt_undo_started = true;
+        }
+        else {
+          undo::push_enter_sculpt_mode_add_object(*ob);
+        }
+      }
+      if (sculpt_undo_started) {
+        undo::push_end_all_ex(false, true);
       }
     }
   }
 
   WM_event_add_notifier(C, NC_SCENE | ND_MODE, &scene);
 
-  WM_msg_publish_rna_prop(mbus, &ob.id, &ob, Object, mode);
+  WM_msg_publish_rna_prop(mbus, &active_ob->id, active_ob, Object, mode);
 
   WM_toolsystem_update_from_context_view3d(C);
 

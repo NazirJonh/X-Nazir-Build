@@ -3463,8 +3463,11 @@ void ED_region_panels_layout_ex(const bContext *C,
     /* We always keep the scroll offset -
      * so the total view gets increased with the scrolled away part. */
     if (v2d->cur.ymax < -FLT_EPSILON) {
-      /* Clamp to lower view boundary */
-      if (v2d->tot.ymin < -v2d->winy) {
+      /* Clamp to lower view boundary. While a resize-grip is being dragged (see
+       * #ARegionRuntime::keep_scroll_offset_on_resize), keep the scroll offset even when the
+       * content overflows the region, so the area above the grip does not drift as the content
+       * shrinks. Otherwise the shorter content raises #tot.ymin and the view snaps up. */
+      if (v2d->tot.ymin < -v2d->winy && !region->runtime->keep_scroll_offset_on_resize) {
         y = min_ii(y, 0);
       }
       else {
@@ -3481,6 +3484,9 @@ void ED_region_panels_layout_ex(const bContext *C,
     /* this also changes the 'cur' */
     ui::view2d_totRect_set(v2d, x, y);
   }
+
+  /* Consume the per-pass keep-offset request (re-set by the drawing code each pass it applies). */
+  region->runtime->keep_scroll_offset_on_resize = false;
 
   if (use_categories) {
     region->runtime->category = category;

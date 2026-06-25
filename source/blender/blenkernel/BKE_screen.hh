@@ -567,6 +567,15 @@ struct ARegionRuntime {
 
   /** Dummy panel used in popups so they can support layout panels. */
   Panel *popup_block_panel = nullptr;
+
+  /**
+   * Set during a panels layout pass (by the drawing code, e.g. the image-grid template) to request
+   * that #ED_region_panels_layout_ex keep the current scroll offset even when the content overflows
+   * the region. Used while a resize-grip is shrinking the content, so the panel area above the grip
+   * does not drift as #View2D::tot shrinks. Consumed (reset to false) at the end of the same layout
+   * pass — it must never persist across passes.
+   */
+  bool keep_scroll_offset_on_resize = false;
 };
 
 }  // namespace bke

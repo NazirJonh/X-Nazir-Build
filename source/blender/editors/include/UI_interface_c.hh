@@ -3187,6 +3187,13 @@ bool region_view_has_idname_at(const ARegion *region, const int xy[2], int pad, 
 /** Like #region_view_has_idname_at, but also matches a #ButtonType::ViewItem under \a xy. */
 bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], StringRef idname);
 /**
+ * Like #region_view_item_has_idname_at, but only true when that view item is the *top-most*
+ * interactive button under the cursor — i.e. nothing else (an overlay scrollbar, a resize grip, …)
+ * sits above it. Uses the same hit test the window manager routes presses through, so callers can
+ * tell "the press lands on a tile" apart from "a tile happens to be behind another widget".
+ */
+bool region_view_item_topmost_at(const ARegion *region, const wmEvent *event, StringRef idname);
+/**
  * True when a view registered under \a idname exists in \a region this redraw and has non-empty hit
  * bounds. Unlike #region_view_has_idname_at this ignores the cursor position; it answers "was this
  * view actually built and laid out this frame", letting callers tell a genuine cursor-outside result

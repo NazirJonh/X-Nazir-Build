@@ -56,12 +56,17 @@ static int image_grid_cols_clamp(const int cols)
   return clamp_i(cols, 1, 16);
 }
 
-/* Map a (columns, rows) layout (each clamped to 1..16) to its per-layout bucket index. */
-static int image_grid_layout_bucket_index(const int cols, const int rows)
+/* Map a grid layout to its per-layout scroll/focus bucket index, keyed by column count only.
+ *
+ * The row count (grid height) deliberately does NOT take part in the key. Resizing the grip changes
+ * only the visible row count; if the bucket were keyed by rows too, each height would restore its
+ * own saved scroll, so dragging the grip would snap the grid to a stale row (typically the top)
+ * instead of keeping the current first visible row. Keying by columns still separates the N-Panel
+ * from the (usually narrower) Texture popover — the distinction that genuinely needs an independent
+ * scroll position — while a height change pins the displayed rows and only re-clips. */
+static int image_grid_layout_bucket_index(const int cols, const int /*rows*/)
 {
-  const int cols_clamped = image_grid_cols_clamp(cols);
-  const int rows_clamped = clamp_i(rows, 1, 16);
-  return (cols_clamped - 1) * 16 + (rows_clamped - 1);
+  return image_grid_cols_clamp(cols) - 1;
 }
 
 static void image_grid_focus_reset_applied(ImageGridViewport &viewport)

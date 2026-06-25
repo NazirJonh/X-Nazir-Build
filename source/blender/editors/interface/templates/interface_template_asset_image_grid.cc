@@ -10,6 +10,7 @@
 
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_texture_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view2d_types.h"
@@ -722,8 +723,20 @@ class View3DGridStateAccess : public GridStateAccess {
 
   std::function<void(bContext &)> make_grip_change_fn() const override
   {
-    return [](bContext &C) {
+    const bool is_mask_slot = is_mask_slot_;
+    const bool is_popover = is_popover_;
+    return [is_mask_slot, is_popover](bContext &C) {
       WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+      /* Arm the keep-scroll-offset latch for the sidebar grid so the panels region does not snap
+       * the view as the grid shrinks during this drag. A small count spans the idle redraws
+       * between mouse moves; it decays a few frames after the drag ends, then the view settles.
+       * The popover lives in its own temporary region, which never snaps, so skip it. */
+      if (!is_popover) {
+        if (View3D *v3d = CTX_wm_view3d(&C)) {
+          ed::view3d::ImageGridUIState &st = ed::view3d::image_grid_state_get(*v3d, is_mask_slot);
+          st.viewport.grip_resize_hold_frames = 4;
+        }
+      }
       if (ARegion *region = CTX_wm_region(&C)) {
         ED_region_tag_redraw(region);
         ED_region_tag_refresh_ui(region);
@@ -814,6 +827,30 @@ static void build_image_grid(Layout &layout,
   }
 
   ed::view3d::image_grid_clamp_scroll_row(state, *v3d, is_mask_slot, is_popover);
+
+  /* While the N-Panel sidebar grid's resize-grip is being dragged, keep the panels region's scroll
+   * offset for *every* pass of the gesture. When the grid shrinks while the region is scrolled, the
+   * shorter content would raise #View2D::tot.ymin and snap the view up, drifting the header. The
+   * grip change callback (#make_grip_change_fn) fires only on the frames the value moves, but idle
+   * redraws in between would still reset tot to the shrunk height and snap. So that callback arms a
+   * short frame latch (#grip_resize_hold_frames); keep the offset while it is non-zero, which spans
+   * the idle redraws around each move. The popover lives in its own temporary region — unaffected. */
+  if (!is_popover && state.viewport.grip_resize_hold_frames > 0) {
+    if (ARegion *region = CTX_wm_region(&C)) {
+      if (region->runtime) {
+        region->runtime->keep_scroll_offset_on_resize = true;
+      }
+      /* The grip change callback stops firing once the mouse is released, so drive the countdown
+       * ourselves: schedule another layout pass while the latch is non-zero. This guarantees a
+       * final pass with the latch at zero (and the flag clear) that settles the view, instead of
+       * leaving the held offset / phantom space until an unrelated UI refresh. Bounded by
+       * #grip_resize_hold_frames; during the drag the callback keeps re-arming it, so the countdown
+       * only runs to completion after the drag ends. */
+      ED_region_tag_redraw(region);
+      ED_region_tag_refresh_ui(region);
+    }
+    state.viewport.grip_resize_hold_frames--;
+  }
 
   const int preview_size = ed::view3d::image_grid_preview_size_get(*v3d);
   const int tile_w = ui::preview_tile_size_x(preview_size);

@@ -345,8 +345,20 @@ int handle_image_grid_drag_scroll_event(bContext *C, const wmEvent *event, ARegi
   if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
     /* Reset on any new LMB press so a missed release never leaves stale state. */
     drag = {};
+    /* Start a touch-drag only when the press lands directly on a grid tile. Using the window
+     * manager's top-most hit test (#region_view_item_topmost_at) means a widget drawn over the grid
+     * (the overlay scrollbar) or below it (the resize grip) keeps the press by z-order, so moving
+     * the bar or resizing the grid is never mistaken for a drag-scroll. */
     bool is_mask = false;
-    if (image_grid_mouse_over(region, event->xy, &is_mask)) {
+    bool over_tile = false;
+    if (ui::region_view_item_topmost_at(region, event, "image_asset_grid_mask")) {
+      is_mask = true;
+      over_tile = true;
+    }
+    else if (ui::region_view_item_topmost_at(region, event, "image_asset_grid")) {
+      over_tile = true;
+    }
+    if (over_tile) {
       const ImageGridUIState &state = image_grid_state_get(*v3d, is_mask);
       const bool is_popover = image_grid_region_is_popover(region);
       if (image_grid_max_scroll_row(state, *v3d, is_mask, is_popover) > 0) {

@@ -1542,6 +1542,11 @@ struct ImageGridViewport {
   /** Independent grip height for the same grid when drawn inside a popover (e.g. tool header
    * Texture popover). Session-only — not persisted to DNA. */
   int grip_pixel_height_popover = 0;
+  /** Short countdown (in redraws) armed by the sidebar grip's change callback while it is being
+   * dragged. While non-zero, the panels region keeps its scroll offset so the area above the grip
+   * does not drift as the grid shrinks. Spans the idle redraws between mouse moves; decays a few
+   * frames after the drag ends so the view then settles. Session-only. */
+  int grip_resize_hold_frames = 0;
 
   /**
    * When non-empty, the grid should scroll to this asset's filtered index (session-only).

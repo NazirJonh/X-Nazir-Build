@@ -101,8 +101,4 @@ void BUTTONS_OT_file_browse(wmOperatorType *ot);
 void BUTTONS_OT_directory_browse(wmOperatorType *ot);
 void BUTTONS_OT_context_menu(wmOperatorType *ot);
 
-/* `buttons_prop_drop.cc` */
-
-void buttons_dropboxes_property();
-
 }  // namespace blender

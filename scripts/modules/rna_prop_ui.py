@@ -247,8 +247,8 @@ def draw(layout, context, context_member, property_type, *, use_edit=True):
                 props = operator_row.operator("wm.properties_remove", text="", icon='X', emboss=False)
                 props.data_path = context_member
                 props.property_name = key
-                
-                props = operator_row.operator("wm.prop_drag_start", text="", icon='FORWARD', emboss=False)
+
+                props = operator_row.operator("node.driver_from_property", text="", icon='FORWARD', emboss=False)
                 props.data_path = context_member
                 props.property_name = key
 

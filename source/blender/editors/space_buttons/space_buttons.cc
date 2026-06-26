@@ -1160,9 +1160,6 @@ void ED_spacetype_buttons()
   art->message_subscribe = buttons_navigation_bar_region_message_subscribe;
   BLI_addhead(&st->regiontypes, art);
 
-  /* Drop boxes - registered via callback, called after all operators are registered. */
-  st->dropboxes = buttons_dropboxes_property;
-
   BKE_spacetype_register(std::move(st));
 }
 

@@ -9818,6 +9818,27 @@ Button *region_active_but_prop_get(const ARegion *region,
   return activebut;
 }
 
+Button *but_mouse_over_prop_get(const ARegion *region,
+                                const wmEvent *event,
+                                PointerRNA *r_ptr,
+                                PropertyRNA **r_prop,
+                                int *r_index)
+{
+  Button *but = but_find_mouse_over(region, event);
+
+  if (but && but->rnapoin.data && but->rnaprop) {
+    *r_ptr = but->rnapoin;
+    *r_prop = but->rnaprop;
+    *r_index = but->rnaindex;
+    return but;
+  }
+
+  *r_ptr = {};
+  *r_prop = nullptr;
+  *r_index = 0;
+  return nullptr;
+}
+
 Button *context_active_but_prop_get(const bContext *C,
                                     PointerRNA *r_ptr,
                                     PropertyRNA **r_prop,

@@ -881,6 +881,17 @@ bool block_has_active_default_button(const Block *block);
  */
 Button *but_find_mouse_over(const ARegion *region, const wmEvent *event) ATTR_WARN_UNUSED_RESULT;
 
+/**
+ * Version of #but_find_mouse_over that also returns the button's RNA property info.
+ *
+ * \return the button under the cursor, or null if none was found or it carries no valid RNA data.
+ */
+Button *but_mouse_over_prop_get(const ARegion *region,
+                                const wmEvent *event,
+                                PointerRNA *r_ptr,
+                                PropertyRNA **r_prop,
+                                int *r_index) ATTR_WARN_UNUSED_RESULT;
+
 uiList *uilist_find_mouse_over(const ARegion *region, const wmEvent *event);
 
 /* `interface_region_menu_popup.cc` */

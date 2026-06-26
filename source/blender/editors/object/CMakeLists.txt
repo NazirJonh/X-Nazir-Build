@@ -37,7 +37,6 @@ set(SRC
   object_modifier.cc
   object_multires_modifier.cc
   object_ops.cc
-  object_prop_drop.cc
   object_random.cc
   object_relations.cc
   object_remesh.cc

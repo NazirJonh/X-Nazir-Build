@@ -4356,50 +4356,6 @@ void wm_event_do_handlers(bContext *C)
       /* Check dragging, creates new event or frees, adds draw tag. */
       action |= wm_event_drag_and_drop_test(wm, &win, event);
 
-      if (!BLI_listbase_is_empty(&wm->runtime->drags)) {
-        if (ELEM(event->type, MOUSEMOVE, EVT_DROP) || ISKEYMODIFIER(event->type)) {
-          wm_drags_handle_events(C, event);
-
-          /* If it's a drop and reached this global level, execute it even if modal handlers 
-           * are active. This is necessary because modal operators for "Drag Property" 
-           * block the normal handler-based dispatch of EVT_DROP. */
-          if (event->type == EVT_DROP) {
-            for (wmDrag &drag : wm->runtime->drags.items_mutable()) {
-              if (drag.drop_state.active_dropbox) {
-                wmDropBox *drop = drag.drop_state.active_dropbox;
-                printf("[DEBUG DROP] Global execution of dropbox: %s\n", 
-                       drop->ot ? drop->ot->idname : "unknown");
-
-                /* Prepare the drop context and data. */
-                wm_drop_prepare(C, &drag, drop);
-
-                /* Logic to pass the drag payload to the operator, mirroring wm_handlers_do. */
-                ListBaseT<wmDrag> *lb = &wm->runtime->drags;
-                BLI_remlink(lb, &drag);
-                ListBaseT<wmDrag> single_lb = {nullptr};
-                BLI_addtail(&single_lb, &drag);
-
-                void *old_customdata = event->customdata;
-                short old_custom = event->custom;
-                event->customdata = &single_lb;
-                event->custom = EVT_DATA_DRAGDROP;
-
-                const wm::OpCallContext opcontext = wm_drop_operator_context_get(drop);
-                if (drop->ot) {
-                  wm_operator_call_internal(C, drop->ot, drop->ptr, nullptr, opcontext, false, event);
-                }
-
-                event->customdata = old_customdata;
-                event->custom = old_custom;
-                
-                action |= WM_HANDLER_BREAK;
-                break;
-              }
-            }
-          }
-        }
-      }
-
       if ((action & WM_HANDLER_BREAK) == 0) {
         /* NOTE: setting sub-window active should be done here,
          * after modal handlers have been done. */

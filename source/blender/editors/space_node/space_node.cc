@@ -954,8 +954,6 @@ static void node_main_region_init(wmWindowManager *wm, ARegion *region)
   /* add drop boxes */
   lb = WM_dropboxmap_find("Node Editor", SPACE_NODE, RGN_TYPE_WINDOW);
   WM_event_add_dropbox_handler(&region->runtime->handlers, lb);
-  printf("[DEBUG DROP] node_main_region_init: region=%p, handlers=%p, lb=%p, count=%d\n", 
-         (void*)region, (void*)&region->runtime->handlers, (void*)lb, lb ? BLI_listbase_count(lb) : -1);
 
   /* The backdrop image gizmo needs to change together with the view. So always refresh gizmos on
    * region size changes. */
@@ -1241,12 +1239,6 @@ static void node_dropboxes()
                  node_interface_item_drop_copy_all,
                  nullptr,
                  node_interface_item_drop_tooltip_all);
-  WM_dropbox_add(lb,
-                 "NODE_OT_prop_drop_to_socket",
-                 nullptr,
-                 nullptr,
-                 nullptr,
-                 nullptr);
 }
 
 /* ************* end drop *********** */

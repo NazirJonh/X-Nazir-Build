@@ -74,11 +74,6 @@ void OBJECT_OT_drop_named_material(wmOperatorType *ot);
  */
 void OBJECT_OT_drop_geometry_nodes(wmOperatorType *ot);
 /**
- * Used for drop-box.
- * Creates driver from custom property to any animatable field.
- */
-void OBJECT_OT_prop_drop_to_field(wmOperatorType *ot);
-/**
  * \note Only for empty-image objects, this operator is needed
  */
 void OBJECT_OT_unlink_data(wmOperatorType *ot);

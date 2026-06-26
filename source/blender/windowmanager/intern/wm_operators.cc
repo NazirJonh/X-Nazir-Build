@@ -32,13 +32,11 @@
 #include "DNA_ID.h"
 #include "DNA_armature_types.h"
 #include "DNA_brush_types.h"
-#include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
-#include "BKE_idtype.hh"
 
 #include "BLT_translation.hh"
 
@@ -4219,123 +4217,6 @@ static void WM_OT_stereo3d_set(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Property Drag Start Operator
- * \{ */
-
-static wmOperatorStatus wm_prop_drag_start_invoke(bContext *C,
-                                                  wmOperator *op,
-                                                  const wmEvent * /*event*/)
-{
-  char data_path[MAX_NAME];
-  char property_name[MAX_IDPROP_NAME];
-
-  RNA_string_get(op->ptr, "data_path", data_path);
-  RNA_string_get(op->ptr, "property_name", property_name);
-
-  if (!data_path[0] || !property_name[0]) {
-    return OPERATOR_CANCELLED;
-  }
-
-  char *dot = strchr(data_path, '.');
-  if (dot) {
-    *dot = '\0';
-  }
-  
-  PointerRNA ptr = CTX_data_pointer_get(C, data_path);
-  if (ptr.type == nullptr) {
-    PointerRNA ctx_ptr = RNA_pointer_create_discrete(nullptr, RNA_Context, (void *)C);
-    if (!RNA_path_resolve(&ctx_ptr, data_path, &ptr, nullptr)) {
-      ptr.type = nullptr;
-    }
-  }
-  
-  if (dot) {
-    *dot = '.';
-    if (ptr.type != nullptr) {
-      PointerRNA resolved_ptr;
-      if (RNA_path_resolve(&ptr, dot + 1, &resolved_ptr, nullptr)) {
-        ptr = resolved_ptr;
-      } else {
-        ptr.data = nullptr;
-        ptr.owner_id = nullptr;
-        ptr.type = nullptr;
-      }
-    }
-  }
-
-  if (!ptr.data || !ptr.owner_id) {
-    return OPERATOR_CANCELLED;
-  }
-
-  ID *id = ptr.owner_id;
-  char drag_string[512];
-  char id_type_code[3] = {id->name[0], id->name[1], '\0'};
-
-  /* Check if the resolved pointer points to a bNode (e.g. when dragging from
-   * Node Editor active node custom properties, context_member = "active_node").
-   * In that case the property lives at nodes["NodeName"]["prop"] on the NodeTree,
-   * not at ["prop"] directly on the ID.  Encode the node name as an extra field:
-   *   "NT:Shader Nodetree:NodeName:prop"   (property on a node)
-   *   "OB:Cube:prop"                        (property directly on an ID)
-   */
-  const char *node_name_for_payload = nullptr;
-  if (ptr.type != nullptr && RNA_struct_is_a(ptr.type, RNA_Node)) {
-    bNode *node = static_cast<bNode *>(ptr.data);
-    if (node && node->name[0]) {
-      node_name_for_payload = node->name;
-    }
-  }
-
-  if (node_name_for_payload) {
-    BLI_snprintf(drag_string, sizeof(drag_string), "%s:%s:%s:%s",
-                 id_type_code, id->name + 2, node_name_for_payload, property_name);
-  }
-  else {
-    BLI_snprintf(drag_string, sizeof(drag_string), "%s:%s:%s",
-                 id_type_code, id->name + 2, property_name);
-  }
-
-  printf("[DEBUG DRAG START] ID: '%s', Type: '%s', Prop: '%s', NodeName: '%s'\n",
-         id->name, id_type_code, property_name,
-         node_name_for_payload ? node_name_for_payload : "(none)");
-  printf("[DEBUG DRAG START] Generated string: '%s'\n", drag_string);
-
-  wmOperatorType *ot = WM_operatortype_find("NODE_OT_prop_drop_to_socket", false);
-  if (ot == nullptr) {
-    return OPERATOR_CANCELLED;
-  }
-
-  PointerRNA props = WM_operator_properties_create_ptr(ot);
-  RNA_string_set(&props, "drag_string", drag_string);
-  /* Ensure we start in picker mode (clear any previous target info). */
-  RNA_string_set(&props, "socket_node_name", "");
-  RNA_string_set(&props, "socket_identifier", "");
-
-  printf("[DEBUG DRAG START] Calling NODE_OT_prop_drop_to_socket...\n");
-  const wmOperatorStatus retval = WM_operator_name_call_ptr(
-      C, ot, wm::OpCallContext::InvokeDefault, &props, nullptr);
-  printf("[DEBUG DRAG START] Operator call result: %d\n", (int)retval);
-  
-  WM_operator_properties_free(&props);
-  return retval;
-}
-
-static void WM_OT_prop_drag_start(wmOperatorType *ot)
-{
-  ot->name = "Drag Property";
-  ot->idname = "WM_OT_prop_drag_start";
-  ot->description = "Start dragging a custom property for driver assignment";
-
-  ot->invoke = wm_prop_drag_start_invoke;
-  ot->flag = OPTYPE_INTERNAL;
-
-  RNA_def_string(ot->srna, "data_path", nullptr, MAX_NAME, "Data Path", "Path to the source data");
-  RNA_def_string(ot->srna, "property_name", nullptr, MAX_IDPROP_NAME, "Property Name", "Name of the property");
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
 /** \name Operator Registration & Keymaps
  * \{ */
 
@@ -4388,7 +4269,6 @@ void wm_operatortypes_register()
   WM_operatortype_append(WM_OT_previews_clear);
   WM_operatortype_append(WM_OT_doc_view_manual_ui_context);
   WM_operatortype_append(WM_OT_set_working_color_space);
-  WM_operatortype_append(WM_OT_prop_drag_start);
 
 #ifdef WITH_XR_OPENXR
   wm_xr_operatortypes_register();

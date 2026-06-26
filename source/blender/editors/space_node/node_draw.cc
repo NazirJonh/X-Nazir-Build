@@ -1839,12 +1839,8 @@ static void node_draw_socket(const bContext &C,
   ColorTheme4f outline_color;
   node_socket_color_get(C, ntree, node_ptr, sock, socket_color);
 
-  std::string socket_path = sock.identifier;
-  const bool is_highlighted = !snode.runtime->highlighted_socket_path.empty() &&
-                              (snode.runtime->highlighted_socket_path == socket_path);
-
-  if (is_highlighted) {
-    /* Highlight color - bright green/yellow */
+  /* Highlight the specific socket targeted by the driver-from-property eyedropper. */
+  if (snode.runtime->highlighted_socket == &sock) {
     outline_color = {1.0f, 1.0f, 0.2f, 1.0f};
   }
   else {
@@ -1893,8 +1889,16 @@ static void node_draw_sockets(const bContext &C,
       continue;
     }
     const bool selected = (sock->flag & SELECT);
-    node_draw_socket(
-        C, ntree, node, nodeptr, block, snode, *sock, outline_thickness, selected, snode.runtime->aspect);
+    node_draw_socket(C,
+                     ntree,
+                     node,
+                     nodeptr,
+                     block,
+                     snode,
+                     *sock,
+                     outline_thickness,
+                     selected,
+                     snode.runtime->aspect);
   }
 
   /* Output sockets. */
@@ -1903,8 +1907,16 @@ static void node_draw_sockets(const bContext &C,
       continue;
     }
     const bool selected = (sock->flag & SELECT);
-    node_draw_socket(
-        C, ntree, node, nodeptr, block, snode, *sock, outline_thickness, selected, snode.runtime->aspect);
+    node_draw_socket(C,
+                     ntree,
+                     node,
+                     nodeptr,
+                     block,
+                     snode,
+                     *sock,
+                     outline_thickness,
+                     selected,
+                     snode.runtime->aspect);
   }
   nodesocket_batch_end();
 }

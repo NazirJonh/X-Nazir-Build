@@ -305,8 +305,8 @@ struct SpaceNode_Runtime {
    */
   Map<int, bool> node_can_sync_states;
 
-  /** Temporary data for properties_send modal operator - stores highlighted socket path. */
-  std::string highlighted_socket_path;
+  /** Input socket highlighted as a driver-drop target by #NODE_OT_driver_from_property. */
+  const bNodeSocket *highlighted_socket = nullptr;
 };
 
 enum NodeResizeDirection {
@@ -646,10 +646,8 @@ void invoke_node_link_drag_add_menu(bContext &C,
 
 void NODE_OT_link_drag_operation_test(wmOperatorType *ot);
 
-/* `node_relationships.cc` - Property Send Operator */
-void NODE_OT_properties_send(wmOperatorType *ot);
-/* `node_relationships.cc` - Property Drop To Socket (WM Drag & Drop) */
-void NODE_OT_prop_drop_to_socket(wmOperatorType *ot);
+/* `node_add_driver.cc` */
+void NODE_OT_driver_from_property(wmOperatorType *ot);
 
 /* `add_menu_assets.cc` */
 

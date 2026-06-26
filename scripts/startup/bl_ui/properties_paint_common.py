@@ -1066,9 +1066,11 @@ def brush_settings(layout, context, brush, popover=False):
             col.separator()
             col.label(text="Smoothing Algorithm:")
             col.prop(brush, "smooth_algorithm")
-            if brush.smooth_algorithm == 2:  # AGGRESSIVE
+            if brush.smooth_algorithm in {2, 3}:  # AGGRESSIVE (Shape/Taubin) or FLATTEN
                 col.prop(brush, "smooth_radius_factor", text="Search Radius")
                 col.prop(brush, "smooth_distance_exponent", text="Distance Weight")
+            if brush.smooth_algorithm == 3:  # FLATTEN (Aggressive Flatten)
+                col.prop(brush, "smooth_flatten_iterations", text="Iterations")
 
         elif sculpt_brush_type == 'DISPLACEMENT_SMEAR':
             col = layout.column()

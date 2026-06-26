@@ -110,11 +110,18 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
 
   /* The "Spatial Taubin" path (aggressive, or moderate on dense meshes) averages each vertex over
    * a fixed world-space radius rather than its topological 1-ring, so a single stroke smooths large
-   * shapes equally on low- and high-poly meshes. Its region gather + hash-grid + Taubin pass are
+   * shapes equally on low- and high-poly meshes. Its region gather + hash-grid + Laplacian pass are
    * resolution-independent and run once per iteration, before the per-node loop, which then only
    * reads back the result for the vertices it owns. */
   const bool use_spatial_taubin = (brush.smooth_algorithm == 2) ||
+                                  (brush.smooth_algorithm == 3) ||
                                   (brush.smooth_algorithm == 1 && mesh.verts_num > 100000);
+
+  /* Mode 3 ("Aggressive Flatten") is a pure spatial Laplacian that does not preserve volume and
+   * runs a user-controlled number of diffusion passes. Modes 1/2 use the volume-preserving Taubin
+   * operator with a single lambda/mu pair. */
+  const bool preserve_volume = brush.smooth_algorithm != 3;
+  const int smooth_iterations = (brush.smooth_algorithm == 3) ? brush.smooth_flatten_iterations : 1;
 
   Vector<int> region_verts;
   Array<float3> region_positions;
@@ -133,6 +140,8 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
                                                   ss.cache->radius,
                                                   brush.smooth_radius_factor,
                                                   brush.smooth_distance_exponent,
+                                                  preserve_volume,
+                                                  smooth_iterations,
                                                   region_verts,
                                                   region_positions,
                                                   vert_to_region);

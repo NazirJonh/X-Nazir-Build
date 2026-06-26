@@ -945,6 +945,8 @@ void radius_based_smooth_mesh_aggressive(const bke::pbvh::Tree &pbvh,
                                          const float brush_radius,
                                          const float search_radius_factor,
                                          const float distance_exponent,
+                                         const bool preserve_volume,
+                                         const int iterations,
                                          Vector<int> &r_region_verts,
                                          Array<float3> &r_region_positions,
                                          Array<int> &r_vert_to_region)
@@ -1041,44 +1043,71 @@ void radius_based_smooth_mesh_aggressive(const bke::pbvh::Tree &pbvh,
   const float sigma = base_search_radius / std::max(distance_exponent, 0.1f);
   const float sigma_sq_inv = (sigma > 1e-6f) ? 1.0f / (2.0f * sigma * sigma) : 0.0f;
 
-  /* 4. Volume-preserving Taubin lambda/mu. mu is derived from lambda so the inflate step cancels
-   *    the shrink step's low-frequency loss: mu = lambda / (k*lambda - 1), with k ~ 0.1. */
-  constexpr float taubin_lambda = 0.5f;
-  constexpr float taubin_k = 0.1f;
-  constexpr float taubin_mu = taubin_lambda / (taubin_k * taubin_lambda - 1.0f);
-  constexpr int taubin_pairs = 1;
-
+  /* 4. Spatial Laplacian step: move each vertex a `factor` of the way toward its Gaussian-weighted
+   *    neighborhood average. This is the shared operator for both modes -- for `preserve_volume` it
+   *    is the shrink/inflate building block of Taubin; for the flatten mode it is applied directly
+   *    with factor = 1.0. Boundary vertices are anchored so smoothing does not drag the open edge
+   *    inward. */
   Array<float3> positions_b(region_num);
 
-  const auto taubin_step =
-      [&](const Span<float3> src, MutableSpan<float3> dst, const float factor) {
-        threading::parallel_for(IndexRange(region_num), 1024, [&](const IndexRange range) {
-          for (const int i : range) {
-            const int vert = r_region_verts[i];
-            /* Anchor boundary vertices so smoothing does not drag the open edge inward. */
-            if (!boundary_verts.is_empty() && boundary_verts[vert]) {
-              dst[i] = src[i];
-              continue;
-            }
-            const float3 avg = grid_weighted_average(
-                i, src, region_normals, grid, inv_cell_size, base_search_radius, sigma_sq_inv);
-            float3 result = src[i] + factor * (avg - src[i]);
-            if (UNLIKELY(!isfinite(result.x) || !isfinite(result.y) || !isfinite(result.z))) {
-              result = src[i];
-            }
-            dst[i] = result;
-          }
-        });
-      };
+  const auto step = [&](const Span<float3> src, MutableSpan<float3> dst, const float factor) {
+    threading::parallel_for(IndexRange(region_num), 1024, [&](const IndexRange range) {
+      for (const int i : range) {
+        const int vert = r_region_verts[i];
+        /* Anchor boundary vertices so smoothing does not drag the open edge inward. */
+        if (!boundary_verts.is_empty() && boundary_verts[vert]) {
+          dst[i] = src[i];
+          continue;
+        }
+        const float3 avg = grid_weighted_average(
+            i, src, region_normals, grid, inv_cell_size, base_search_radius, sigma_sq_inv);
+        float3 result = src[i] + factor * (avg - src[i]);
+        if (UNLIKELY(!isfinite(result.x) || !isfinite(result.y) || !isfinite(result.z))) {
+          result = src[i];
+        }
+        dst[i] = result;
+      }
+    });
+  };
 
-  for (int pair = 0; pair < taubin_pairs; pair++) {
-    taubin_step(positions_a, positions_b, taubin_lambda); /* Shrink. */
-    taubin_step(positions_b, positions_a, taubin_mu);     /* Inflate. */
+  if (preserve_volume) {
+    /* Volume-preserving Taubin lambda/mu. mu is derived from lambda so the inflate step cancels
+     * the shrink step's low-frequency loss: mu = lambda / (k*lambda - 1), with k ~ 0.1. The large-
+     * scale shape is thus kept while detail is smoothed. */
+    constexpr float taubin_lambda = 0.5f;
+    constexpr float taubin_k = 0.1f;
+    constexpr float taubin_mu = taubin_lambda / (taubin_k * taubin_lambda - 1.0f);
+
+    for (int pair = 0; pair < iterations; pair++) {
+      step(positions_a, positions_b, taubin_lambda); /* Shrink. */
+      step(positions_b, positions_a, taubin_mu);     /* Inflate. */
+    }
+    /* Each pair is an even number of sub-steps, so the result lands back in `positions_a`. The
+     * caller maps these back via `r_vert_to_region`. */
+    r_region_positions = std::move(positions_a);
   }
+  else {
+    /* Pure spatial Laplacian ("Aggressive Flatten"): lambda = 1.0 moves each vertex fully to its
+     * weighted average, with no inflate step, so volume is not preserved and bumps are flattened
+     * away. `iterations` diffusion passes ping-pong between the two buffers; each pass propagates
+     * the flattening beyond a single search radius, so more passes remove larger-scale shapes. */
+    constexpr float flatten_lambda = 1.0f;
 
-  /* `positions_a` now holds the smoothed region positions (ends here for an even number of
-   * sub-steps per pair). The caller maps these back via `r_vert_to_region`. */
-  r_region_positions = std::move(positions_a);
+    float3 *src = positions_a.data();
+    float3 *dst = positions_b.data();
+    for (int it = 0; it < iterations; it++) {
+      step(Span<float3>(src, region_num), MutableSpan<float3>(dst, region_num), flatten_lambda);
+      /* Swap so the just-written buffer becomes the source of the next pass. */
+      std::swap(src, dst);
+    }
+    /* After the loop `src` points at the last buffer that was written. */
+    if (src == positions_b.data()) {
+      r_region_positions = std::move(positions_b);
+    }
+    else {
+      r_region_positions = std::move(positions_a);
+    }
+  }
 }
 
 /** \} */

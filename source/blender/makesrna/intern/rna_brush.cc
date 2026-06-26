@@ -2588,8 +2588,15 @@ static void rna_def_brush(BlenderRNA *brna)
       {2,
        "AGGRESSIVE",
        0,
-       "Aggressive",
-       "Radius-based spatial smoothing, slower but works well on high-poly meshes"},
+       "Shape (Taubin)",
+       "Radius-based spatial Taubin smoothing: smooths detail while preserving large-scale shape "
+       "(volume preserving)"},
+      {3,
+       "FLATTEN",
+       0,
+       "Aggressive Flatten",
+       "Pure spatial Laplacian that removes large-scale shapes over repeated passes; volume is not "
+       "preserved (flattens bumps)"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -3424,6 +3431,16 @@ static void rna_def_brush(BlenderRNA *brna)
       "Distance Weighting",
       "Controls Gaussian kernel width: 1.0 = wide kernel, pulls toward large-scale "
       "surface (sigma=radius); 4.0 = narrow kernel, only local neighbors matter");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "smooth_flatten_iterations", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "smooth_flatten_iterations");
+  RNA_def_property_range(prop, 1, 50);
+  RNA_def_property_ui_range(prop, 1, 20, 1, 3);
+  RNA_def_property_ui_text(prop,
+                           "Flatten Iterations",
+                           "Number of diffusion passes per brush step for the Aggressive Flatten "
+                           "mode; more passes flatten larger-scale shapes");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "multiplane_scrape_angle", PROP_FLOAT, PROP_FACTOR);

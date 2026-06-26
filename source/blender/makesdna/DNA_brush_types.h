@@ -409,6 +409,9 @@ struct Brush {
   float smooth_radius_factor = 1.5f;
   /** Distance weighting exponent (1.0-4.0, default 1.0). Lower = wider sigma = more large-scale. */
   float smooth_distance_exponent = 1.0f;
+  /** Number of diffusion passes for the Aggressive Flatten smooth mode (1-20, default 5). */
+  int smooth_flatten_iterations = 5;
+  char _pad6[4] = {};
 
   /* multiplane scrape */
   float multiplane_scrape_angle = 0;

@@ -659,6 +659,7 @@ Brush *BKE_brush_add(Main *bmain, const char *name, const eObjectMode ob_mode)
   brush->smooth_algorithm = 0;
   brush->smooth_radius_factor = 1.5f;
   brush->smooth_distance_exponent = 1.0f;
+  brush->smooth_flatten_iterations = 5;
 
   if (ob_mode == OB_MODE_SCULPT_CURVES) {
     BKE_brush_init_curves_sculpt_settings(brush);
@@ -688,6 +689,7 @@ void BKE_brush_init_smooth_algorithm_settings(Brush *brush)
     brush->smooth_algorithm = 0;
     brush->smooth_radius_factor = 1.5f;
     brush->smooth_distance_exponent = 1.0f;
+    brush->smooth_flatten_iterations = 5;
   }
 }
 

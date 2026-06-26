@@ -26,6 +26,7 @@
 #include "BKE_context.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_screen.hh"
 
 #include "UI_interface_c.hh"
 #include "WM_api.hh"
@@ -1151,7 +1152,17 @@ static void block_colorpicker(
       if (palette_panel.body) {
         /* Palette ID selector (choose/create/browse palettes). */
         Layout &palette_selector = palette_panel.body->column(true);
+        const int64_t but_count_before = int64_t(block->buttons_ptrs.size());
         template_id(&palette_selector, C, &ptr, "palette", "palette.new", nullptr, nullptr);
+        /* When the active palette changes, rebuild the popup so the swatch grid and popup
+         * height update to match the new palette's contents. */
+        for (int64_t i = but_count_before; i < int64_t(block->buttons_ptrs.size()); i++) {
+          block->buttons_ptrs[i]->apply_func = [block](bContext & /*C*/) {
+            if (block->handle) {
+              block->handle->menuretval = RETURN_UPDATE;
+            }
+          };
+        }
 
         /* Color swatches, only when a palette is assigned. */
         if (paint->palette) {
@@ -1163,6 +1174,21 @@ static void block_colorpicker(
                            false); /* show_sort_buttons */
         }
       }
+
+      /* [CP_SCROLL] Diagnose palette section build. NOTE: layout buttons (palette swatches) are
+       * not realized until block_end, so button_num here counts only the picker widgets. */
+      const int palette_color_num = paint->palette ?
+                                        BLI_listbase_count(&paint->palette->colors) :
+                                        -1;
+      printf(
+          "[CP_SCROLL] palette build: content_top=%.1f yco=%.1f panel_open_body=%d "
+          "palette_color_num=%d block_button_num=%lld\n",
+          double(content_top),
+          double(yco),
+          palette_panel.body != nullptr ? 1 : 0,
+          palette_color_num,
+          (long long)block->buttons_ptrs.size());
+      fflush(stdout);
     }
   }
 }
@@ -1254,6 +1280,32 @@ Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but)
   block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
   block_bounds_set_normal(block, 0.5 * UI_UNIT_X);
 
+  /* [CP_SCROLL] After bounds are set, block->rect should enclose every button (incl. realized
+   * palette swatches). Compare its height against the realized button extents. */
+  {
+    float bymin = FLT_MAX, bymax = -FLT_MAX;
+    for (const Button &bt : block->buttons()) {
+      if (bt.rect.ymin < bymin) {
+        bymin = bt.rect.ymin;
+      }
+      if (bt.rect.ymax > bymax) {
+        bymax = bt.rect.ymax;
+      }
+    }
+    printf(
+        "[CP_SCROLL] block_func_COLOR bounds: button_num=%lld block.rect.y=[%.1f..%.1f] (h=%.1f) "
+        "buttons.y=[%.1f..%.1f] (h=%.1f) aspect=%.3f\n",
+        (long long)block->buttons_ptrs.size(),
+        double(block->rect.ymin),
+        double(block->rect.ymax),
+        double(block->rect.ymax - block->rect.ymin),
+        double(bymin),
+        double(bymax),
+        double(bymax - bymin),
+        double(block->aspect));
+    fflush(stdout);
+  }
+
   block->block_event_func = colorpicker_wheel_cb;
   block->direction = UI_DIR_UP;
 
@@ -1266,6 +1318,41 @@ ColorPicker *block_colorpicker_create(Block *block)
   BLI_addhead(&block->color_pickers.list, cpicker);
 
   return cpicker;
+}
+
+static bool colorpicker_rgb_get_from_region(const ARegion *region, float r_rgb[3])
+{
+  for (const Block &block : region->runtime->uiblocks) {
+    for (const ColorPicker &cpicker : block.color_pickers.list) {
+      if (cpicker.is_init) {
+        float rgb[3];
+        color_picker_hsv_to_rgb(cpicker.hsv_perceptual, rgb);
+        perceptual_to_scene_linear_space(block.is_color_gamma_picker, rgb);
+        copy_v3_v3(r_rgb, rgb);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool UI_colorpicker_active_rgb_get(const bContext *C, float r_rgb[3])
+{
+  /* Color picker popups are temporary regions stored in screen->regionbase. */
+  bScreen *screen = CTX_wm_screen(C);
+  if (screen) {
+    for (const ARegion &region : screen->regionbase) {
+      if (colorpicker_rgb_get_from_region(&region, r_rgb)) {
+        return true;
+      }
+    }
+  }
+  /* Also check the current region in case the operator runs inside the popup directly. */
+  const ARegion *region = CTX_wm_region(C);
+  if (region && colorpicker_rgb_get_from_region(region, r_rgb)) {
+    return true;
+  }
+  return false;
 }
 
 /** \} */

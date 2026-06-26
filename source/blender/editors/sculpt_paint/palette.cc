@@ -32,6 +32,8 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "UI_interface_c.hh"
+
 #include "paint_intern.hh"
 
 namespace blender {
@@ -288,22 +290,31 @@ static wmOperatorStatus palette_color_add_exec(bContext *C, wmOperator * /*op*/)
   color = BKE_palette_color_add(palette);
   palette->active_color = BLI_listbase_count(&palette->colors) - 1;
 
-  const Brush *brush = BKE_paint_brush_for_read(paint);
-  if (brush) {
-    if (ELEM(mode,
-             PaintMode::Texture3D,
-             PaintMode::Texture2D,
-             PaintMode::Vertex,
-             PaintMode::Sculpt,
-             PaintMode::GPencil,
-             PaintMode::VertexGPencil))
-    {
-      copy_v3_v3(color->color, BKE_brush_color_get(paint, brush));
-      color->value = 0.0;
-    }
-    else if (mode == PaintMode::Weight) {
-      zero_v3(color->color);
-      color->value = brush->weight;
+  /* When called from a color picker popup (e.g. a material property), read the currently
+   * displayed color from the picker rather than the brush color, which may differ. */
+  float picker_rgb[3];
+  if (ui::UI_colorpicker_active_rgb_get(C, picker_rgb)) {
+    copy_v3_v3(color->color, picker_rgb);
+    color->value = 0.0;
+  }
+  else {
+    const Brush *brush = BKE_paint_brush_for_read(paint);
+    if (brush) {
+      if (ELEM(mode,
+               PaintMode::Texture3D,
+               PaintMode::Texture2D,
+               PaintMode::Vertex,
+               PaintMode::Sculpt,
+               PaintMode::GPencil,
+               PaintMode::VertexGPencil))
+      {
+        copy_v3_v3(color->color, BKE_brush_color_get(paint, brush));
+        color->value = 0.0;
+      }
+      else if (mode == PaintMode::Weight) {
+        zero_v3(color->color);
+        color->value = brush->weight;
+      }
     }
   }
 

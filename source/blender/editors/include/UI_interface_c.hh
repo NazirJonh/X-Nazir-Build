@@ -1044,6 +1044,13 @@ void popup_block_close(bContext *C, wmWindow *win, Block *block);
 
 bool popup_block_name_exists(const bScreen *screen, StringRef name);
 
+/**
+ * Get the current color (in scene-linear space) from the first active color picker found in
+ * the screen's temporary popup regions. Returns true when an initialized color picker was found.
+ * Use this to read the displayed color in a color picker popup at operator execution time.
+ */
+bool UI_colorpicker_active_rgb_get(const bContext *C, float r_rgb[3]);
+
 /* Blocks
  *
  * Functions for creating, drawing and freeing blocks. A Block is a

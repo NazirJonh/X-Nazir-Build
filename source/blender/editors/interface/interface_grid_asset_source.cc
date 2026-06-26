@@ -220,18 +220,6 @@ void AssetGridDataSource::build_window(const bContext &C,
   });
 }
 
-void AssetGridDataSource::item_activate(bContext & /*C*/, const StringRef /*identifier*/)
-{
-  /* Activation is handled per-item in AssetGridItem::on_activate. */
-}
-
-void AssetGridDataSource::item_build_tooltip(const bContext & /*C*/,
-                                              StringRef /*identifier*/,
-                                              TooltipData & /*tip*/) const
-{
-  /* Tooltip is built per-item in AssetGridItem::build_grid_tile. */
-}
-
 /** \} */
 
 }  // namespace blender::ui

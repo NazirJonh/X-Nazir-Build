@@ -162,10 +162,13 @@ void ED_undo_memfile_push(bContext *C, const char *name)
    * mirroring the pattern used in WITH_GLOBAL_UNDO_ENSURE_UPDATED. */
   void *step_init_saved = ustack->step_init;
   ustack->step_init = nullptr;
-  BKE_undosys_step_push_with_type(ustack, C, name, BKE_UNDOSYS_TYPE_MEMFILE);
+  const eUndoPushReturn ret = BKE_undosys_step_push_with_type(
+      ustack, C, name, BKE_UNDOSYS_TYPE_MEMFILE);
   ustack->step_init = static_cast<UndoStep *>(step_init_saved);
 
-  WM_file_tag_modified();
+  if (ret & UNDO_PUSH_RET_SUCCESS) {
+    WM_file_tag_modified();
+  }
 }
 
 /**

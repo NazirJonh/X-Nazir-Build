@@ -579,7 +579,7 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
 
   const AbstractGridViewItem *force_visible_item = dynamic_cast<const AbstractGridViewItem *>(
       grid_view.search_highlight_item());
-  if (!force_visible_item) {
+  if (!force_visible_item && embedded_v2d) {
     grid_view.foreach_filtered_item([&](AbstractGridViewItem &item) {
       if (item.is_active()) {
         force_visible_item = &item;

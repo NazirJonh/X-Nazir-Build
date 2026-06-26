@@ -390,11 +390,12 @@ void image_grid_pending_apply_if_ready(bContext &C, View3D &v3d)
 
   if (applied_texture) {
     image_grid_state_persist_to_view3d(v3d, image_grid_state_get(v3d, false), false);
+    image_grid_notify_change(C, false);
   }
   if (applied_mask) {
     image_grid_state_persist_to_view3d(v3d, image_grid_state_get(v3d, true), true);
+    image_grid_notify_change(C, true);
   }
-  image_grid_notify_change(C);
 }
 
 /** \} */

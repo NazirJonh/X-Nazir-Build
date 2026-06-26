@@ -17,6 +17,7 @@
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
+#include "BLI_threads.h"
 
 #include "ED_asset_image_library.hh"
 
@@ -73,9 +74,37 @@ static bool filelist_readjob_image_file_callback(void *userdata,
   return true;
 }
 
+static void filelist_readjob_image_discard_entries(FileListReadJob *job_params,
+                                                   ListBaseT<FileListInternEntry> &entries)
+{
+  FileList *filelist = job_params->tmp_filelist ? job_params->tmp_filelist : job_params->filelist;
+  while (FileListInternEntry *entry = static_cast<FileListInternEntry *>(BLI_pophead(&entries))) {
+    if (auto asset_ptr = entry->asset.lock()) {
+      if (filelist->asset_library) {
+        filelist->asset_library->remove_asset(*asset_ptr);
+      }
+    }
+    if (entry->relpath) {
+      MEM_delete(entry->relpath);
+    }
+    if (entry->redirection_path) {
+      MEM_delete(entry->redirection_path);
+    }
+    if (entry->name && entry->free_name) {
+      MEM_delete(const_cast<char *>(entry->name));
+    }
+    MEM_delete(entry);
+  }
+}
+
 void filelist_readjob_ensure_image_library_indexed(FileListReadJob *job_params)
 {
-  FileList *filelist = job_params->tmp_filelist;
+  if (!BLI_thread_is_main()) {
+    /* Catalog mutations belong on the main thread; see #filelist_readjob_initjob. */
+    return;
+  }
+
+  FileList *filelist = job_params->tmp_filelist ? job_params->tmp_filelist : job_params->filelist;
   const char *root = filelist->filelist.root;
   if (!root[0]) {
     return;
@@ -84,15 +113,25 @@ void filelist_readjob_ensure_image_library_indexed(FileListReadJob *job_params)
     return;
   }
 
-  const int indexed = ed::asset::image_library_scan_and_index(root,
-                                                              job_params->load_asset_library);
+  asset_system::AssetLibrary *library = job_params->load_asset_library;
+  if (!library && job_params->filelist->asset_library_ref) {
+    library = AS_asset_library_load(job_params->current_main,
+                                    *job_params->filelist->asset_library_ref);
+    if (library) {
+      job_params->filelist->asset_library = library;
+    }
+  }
+
+  const int indexed = ed::asset::image_library_scan_and_index(root, library);
   if (indexed <= 0) {
     return;
   }
 
   job_params->reload_asset_library = true;
-  bool dummy_update = false;
-  filelist_readjob_load_asset_library_data(job_params, &dummy_update);
+  if (job_params->tmp_filelist) {
+    bool dummy_update = false;
+    filelist_readjob_load_asset_library_data(job_params, &dummy_update);
+  }
 }
 
 void filelist_readjob_image_files_add_items(FileListReadJob *job_params,
@@ -118,6 +157,7 @@ void filelist_readjob_image_files_add_items(FileListReadJob *job_params,
   data.stop = stop;
 
   if (!ed::asset::image_library_foreach_image(root, filelist_readjob_image_file_callback, &data)) {
+    filelist_readjob_image_discard_entries(job_params, data.entries);
     return;
   }
 

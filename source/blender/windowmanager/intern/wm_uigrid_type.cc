@@ -68,6 +68,9 @@ void WM_uigridtype_init()
 void WM_uigridtype_free()
 {
   for (uiGridType *ugt : get_grid_type_map()) {
+    if (ugt->rna_ext.free) {
+      ugt->rna_ext.free(ugt->rna_ext.data);
+    }
     MEM_delete(ugt);
   }
   get_grid_type_map().clear();

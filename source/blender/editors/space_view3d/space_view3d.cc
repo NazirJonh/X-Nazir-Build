@@ -339,6 +339,9 @@ static SpaceLink *view3d_duplicate(SpaceLink *sl)
   v3dn->image_grid_enabled_catalog_paths = BKE_asset_catalog_path_list_duplicate(
       v3do->image_grid_enabled_catalog_paths);
 
+  BLI_listbase_clear(&v3dn->image_grid_library_catalog_states);
+  BLI_listbase_clear(&v3dn->image_grid_mask_library_catalog_states);
+
   for (const ImageGridLibraryCatalogState &libcat_state_src :
        v3do->image_grid_library_catalog_states)
   {

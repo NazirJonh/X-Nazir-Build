@@ -24,6 +24,9 @@ namespace blender {
 static void filelist_readjob_initjob(void *flrjv)
 {
   FileListReadJob *flrj = static_cast<FileListReadJob *>(flrjv);
+  if (flrj->filelist->asset_library_ref) {
+    filelist_readjob_ensure_image_library_indexed(flrj);
+  }
   if (flrj->filelist->start_job_fn) {
     flrj->filelist->start_job_fn(flrj);
   }

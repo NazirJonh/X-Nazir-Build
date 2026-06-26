@@ -238,7 +238,10 @@ static std::unique_ptr<ImageLibraryIndex> image_library_index_read(const char *l
     }
     if (const std::optional<StringRefNull> catalog_id_str = entry_dict.lookup_str(ATTR_CATALOG_ID))
     {
-      entry.catalog_id = CatalogID(*catalog_id_str);
+      bUUID parsed;
+      if (BLI_uuid_parse_string(&parsed, catalog_id_str->c_str())) {
+        entry.catalog_id = parsed;
+      }
     }
 
     if (!entry.relative_path.empty()) {

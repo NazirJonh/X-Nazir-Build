@@ -53,22 +53,7 @@ class GridDataSource {
    */
   virtual void build_window(const bContext &C, AbstractGridView &view, IndexRange window) = 0;
 
-  /** Invoked when an item is activated (clicked). \a identifier is the item's stable id. */
-  virtual void item_activate(bContext &C, StringRef identifier) = 0;
-
-  /** Optional: fill the tooltip for \a identifier. Default: no custom tooltip. */
-  virtual void item_build_tooltip(const bContext & /*C*/,
-                                  StringRef /*identifier*/,
-                                  TooltipData & /*tip*/) const
-  {
-  }
-
-  /** Optional: build the right-click context menu for \a identifier. */
-  virtual void item_build_context_menu(bContext & /*C*/,
-                                       StringRef /*identifier*/,
-                                       Layout & /*layout*/) const
-  {
-  }
+  /** Item activation, tooltips, and context menus are owned by concrete #PreviewGridItem types. */
 };
 
 /** \} */

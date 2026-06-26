@@ -195,34 +195,4 @@ void PyCallbackGridDataSource::build_window(const bContext &C,
   }
 }
 
-void PyCallbackGridDataSource::item_activate(bContext & /*C*/, const StringRef /*identifier*/)
-{
-  /* Handled per-item in PyGridItem::on_activate. */
-}
-
-void PyCallbackGridDataSource::item_build_context_menu(bContext &C,
-                                                       const StringRef identifier,
-                                                       Layout &layout) const
-{
-  PointerRNA grid_ptr = uigrid_python_pointer(C, grid_type_);
-  FunctionRNA *func = RNA_struct_find_function(grid_ptr.type, "draw_context_menu");
-  if (!func) {
-    return;
-  }
-
-  ParameterList list;
-  RNA_parameter_list_create(&list, &grid_ptr, func);
-
-  const bContext *context = &C;
-  RNA_parameter_set_lookup(&list, "context", &context);
-  const std::string identifier_str(identifier);
-  const char *identifier_c = identifier_str.c_str();
-  RNA_parameter_set_lookup(&list, "identifier", &identifier_c);
-  Layout *layout_ptr = &layout;
-  RNA_parameter_set_lookup(&list, "layout", &layout_ptr);
-
-  grid_type_->rna_ext.call(&C, &grid_ptr, func, &list);
-  RNA_parameter_list_free(&list);
-}
-
 }  // namespace blender::ui

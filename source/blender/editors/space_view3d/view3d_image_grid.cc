@@ -158,9 +158,9 @@ int image_grid_max_scroll_row(const ImageGridUIState &state,
   /* Use the column count of the grid being interacted with. The popover keeps its own count so a
    * sidebar redraw cannot shrink the popover's row total and collapse its scroll range. */
   const int cols = image_grid_context_cols(state, is_popover);
-  const int total_rows = (cols > 0) ? int(ceil(float(state.viewport.cached_item_count) /
-                                               float(cols))) :
-                                      effective_rows;
+  const int total_rows = (cols > 0) ?
+                             int(divide_ceil_u(uint(state.viewport.cached_item_count), uint(cols))) :
+                             effective_rows;
   return max_ii(0, total_rows - effective_rows);
 }
 

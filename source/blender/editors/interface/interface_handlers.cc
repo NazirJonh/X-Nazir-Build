@@ -4691,7 +4691,10 @@ static void numedit_apply(bContext *C, Block *block, Button *but, HandleButtonDa
 
   ED_region_tag_redraw(data->region);
   if (ELEM(but->type, ButtonType::Scroll, ButtonType::Grip)) {
-    ED_region_tag_refresh_ui(data->region);
+    Block *block = but->block;
+    if (block->view_scroll_clip_enabled && (but->drawflag & BUT_GRID_SCROLL_CLIP)) {
+      ED_region_tag_refresh_ui(data->region);
+    }
   }
 }
 

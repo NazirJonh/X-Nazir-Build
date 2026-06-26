@@ -43,10 +43,6 @@ class AssetGridDataSource : public GridDataSource {
 
   int item_count(const bContext &C) const override;
   void build_window(const bContext &C, AbstractGridView &view, IndexRange window) override;
-  void item_activate(bContext &C, StringRef identifier) override;
-  void item_build_tooltip(const bContext &C,
-                          StringRef identifier,
-                          TooltipData &tip) const override;
 };
 
 /** \} */
@@ -68,10 +64,6 @@ class PyCallbackGridDataSource : public GridDataSource {
 
   int item_count(const bContext &C) const override;
   void build_window(const bContext &C, AbstractGridView &view, IndexRange window) override;
-  void item_activate(bContext &C, StringRef identifier) override;
-  void item_build_context_menu(bContext &C,
-                               StringRef identifier,
-                               Layout &layout) const override;
 };
 
 /** \} */

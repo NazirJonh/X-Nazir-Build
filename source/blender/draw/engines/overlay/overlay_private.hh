@@ -164,6 +164,8 @@ struct State {
   bool xray_enabled_and_not_wire = false;
   /** Can be true even if X-ray Alpha is 1.0. */
   bool xray_flag_enabled = false;
+  /** True when Retopology + Face Sets mode is enabled (requires depth restoration for Axes). */
+  bool retopology_face_sets_enabled = false;
   /** Brings the active pose armature in front of all objects. */
   bool do_pose_xray = false;
   /** Add a veil on top of all surfaces to make the active pose armature pop out. */
@@ -475,6 +477,7 @@ class ShaderModule {
   StaticShader light_spot_cone = shader_clippable("overlay_extra_spot_cone");
   StaticShader mesh_analysis = shader_clippable("overlay_edit_mesh_analysis");
   StaticShader mesh_edit_depth = shader_clippable("overlay_edit_mesh_depth");
+  StaticShader mesh_edit_face_sets = shader_clippable("overlay_edit_mesh_face_sets");
   StaticShader mesh_edit_edge = shader_clippable("overlay_edit_mesh_edge");
   StaticShader mesh_edit_face = shader_clippable("overlay_edit_mesh_face");
   StaticShader mesh_edit_facedot = shader_clippable("overlay_edit_mesh_facedot");
@@ -622,6 +625,8 @@ struct Resources : public select::SelectMap {
   /* Target containing depth of overlays when xray is enabled. */
   TextureFromPool xray_depth_tx = {"xray_depth_tx"};
   TextureFromPool xray_depth_in_front_tx = {"xray_depth_in_front_tx"};
+  /* Backup of original depth for Retopology + Face Sets mode (before prepass modifies it). */
+  TextureFromPool depth_backup_tx = {"depth_backup_tx"};
 
   /* Texture that are usually allocated inside. These are fallback when they aren't.
    * They are then wrapped inside the #TextureRefs below. */
@@ -735,6 +740,7 @@ struct Resources : public select::SelectMap {
     shaders->light_spot_cone.ensure_compile_async();
     shaders->mesh_analysis.ensure_compile_async();
     shaders->mesh_edit_depth.ensure_compile_async();
+    shaders->mesh_edit_face_sets.ensure_compile_async();
     shaders->mesh_edit_edge.ensure_compile_async();
     shaders->mesh_edit_face.ensure_compile_async();
     shaders->mesh_edit_facedot.ensure_compile_async();
@@ -799,6 +805,15 @@ struct Resources : public select::SelectMap {
       }
       this->depth_target_tx.wrap(this->depth_tx);
       this->depth_target_in_front_tx.wrap(this->depth_in_front_tx);
+
+      /* Backup original depth for Retopology + Face Sets mode.
+       * Prepass will modify depth_target_tx (which points to depth_tx),
+       * so we need a copy of original depth to restore later for Axes. */
+      if (state.retopology_face_sets_enabled) {
+        this->depth_backup_tx.acquire(render_size,
+                                      gpu::TextureFormat::SFLOAT_32_DEPTH_UINT_8);
+        GPU_texture_copy(this->depth_backup_tx, this->depth_tx);
+      }
     }
 
     /* TODO: Better semantics using a switch? */
@@ -854,6 +869,7 @@ struct Resources : public select::SelectMap {
     this->overlay_tx.release();
     this->xray_depth_tx.release();
     this->xray_depth_in_front_tx.release();
+    this->depth_backup_tx.release();
     this->depth_in_front_alloc_tx.release();
     this->color_overlay_alloc_tx.release();
     this->color_render_alloc_tx.release();

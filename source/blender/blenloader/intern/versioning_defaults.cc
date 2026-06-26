@@ -212,6 +212,8 @@ static void blo_update_defaults_screen(bScreen *screen,
       v3d->overlay.vertex_paint_mode_opacity = 1.0f;
       /* Update default Z bias for retopology overlay. */
       v3d->overlay.retopology_offset = 0.01f;
+      /* Set default face sets opacity for edit mode. */
+      v3d->overlay.face_sets_opacity = 1.0f;
       /* Clear this deprecated bit for later reuse. */
       v3d->overlay.edit_flag &= ~V3D_OVERLAY_EDIT_EDGES_DEPRECATED;
       /* grease pencil settings */

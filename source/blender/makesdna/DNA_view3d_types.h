@@ -28,7 +28,6 @@ struct SmoothView3DStore;
 struct SpaceLink;
 struct bGPdata;
 struct wmTimer;
-
 /** #View3DOverlay.handle_display */
 enum eHandleDisplay {
   /* Display only selected points. */
@@ -327,6 +326,7 @@ enum {
 
   V3D_OVERLAY_EDIT_CU_NORMALS = (1 << 21),
   V3D_OVERLAY_EDIT_CONSTANT_SCREEN_SIZE_NORMALS = (1 << 22),
+  V3D_OVERLAY_EDIT_FACE_SETS = (1 << 23),
 };
 
 /** #View3DOverlay.paint_flag */
@@ -648,6 +648,7 @@ struct View3DOverlay {
   float wireframe_threshold = 1.0f;
   float wireframe_opacity = 1.0f;
   float retopology_offset = 0.01f;
+  float face_sets_opacity = 0.4f;
 
   /** Grease pencil settings. */
   float gpencil_paper_opacity = 0.5f;
@@ -667,6 +668,7 @@ struct View3DOverlay {
 
   /** Curves sculpt mode settings. */
   float sculpt_curves_cage_opacity = 0;
+  char _pad[4] = {};
 };
 
 struct View3D_Runtime {

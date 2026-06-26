@@ -498,6 +498,10 @@ void Instance::begin_sync()
   begin_sync_layer(regular);
   begin_sync_layer(infront);
 
+  /* Set flag for Retopology + Face Sets mode (used for depth restoration). */
+  state.retopology_face_sets_enabled = regular.meshes.show_retopology() &&
+                                        regular.meshes.show_face_sets();
+
   grid.begin_sync(resources, state);
   anti_aliasing.begin_sync(resources, state);
   xray_fade.begin_sync(resources, state);
@@ -880,6 +884,9 @@ void Instance::draw_v3d(Manager &manager, View &view)
 
     regular.sculpts.draw_on_render(resources.render_fb, manager, view);
     infront.sculpts.draw_on_render(resources.render_in_front_fb, manager, view);
+
+    regular.meshes.draw_on_render(resources.render_fb, manager, view);
+    infront.meshes.draw_on_render(resources.render_in_front_fb, manager, view);
   }
   {
     /* Overlay Line prepass. */
@@ -936,6 +943,14 @@ void Instance::draw_v3d(Manager &manager, View &view)
   {
     /* Overlay (+Line) pass. */
     draw(regular, resources.overlay_fb);
+
+    /* Restore original depth before rendering Axes and other overlay elements.
+     * This is needed for Retopology + Face Sets mode where prepass writes depth with offset,
+     * which would break depth testing for Axes. */
+    if (state.retopology_face_sets_enabled && !state.is_depth_only_drawing) {
+      GPU_texture_copy(resources.depth_target_tx, resources.depth_backup_tx);
+    }
+
     draw_line(regular, resources.overlay_line_fb);
 
     /* Here as it does depth+blending, and should draw after most overlay line passes.. */

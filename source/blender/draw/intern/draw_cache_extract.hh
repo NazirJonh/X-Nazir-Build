@@ -81,6 +81,7 @@ enum class VBOType : int8_t {
   SculptData,
   Orco,
   EditData,
+  EditFaceSet,
   EditUVData,
   EditUVStretchArea,
   EditUVStretchAngle,

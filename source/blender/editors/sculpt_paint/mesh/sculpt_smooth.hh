@@ -8,11 +8,14 @@
 
 #pragma once
 
+#include "BLI_array.hh"
 #include "BLI_generic_span.hh"
 #include "BLI_index_mask.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_offset_indices.hh"
 #include "BLI_ordered_edge.hh"
 #include "BLI_set.hh"
+#include "BLI_vector.hh"
 #include "BLI_virtual_array.hh"
 
 #include "BKE_paint_bvh.hh"
@@ -134,24 +137,36 @@ void calc_relaxed_translations_bmesh(const Set<BMVert *, 0> &verts,
                                      MutableSpan<float3> translations);
 
 /**
- * Hybrid topology-aware smoothing using spatial neighbor search.
- * Finds neighbors within a given radius crossing PBVH node boundaries,
- * providing more effective smoothing on high-poly meshes.
+ * Resolution-independent "Spatial Taubin" shape smoothing for dense meshes.
+ *
+ * Instead of averaging each vertex over its topological 1-ring (whose world-space reach shrinks
+ * as resolution grows), this gathers a spatial region around the brush once, builds a uniform
+ * hash-grid over it, and runs a volume-preserving Taubin (lambda/mu) pass over a local working
+ * copy of the region positions. The averaging radius is fixed in world space, so a single brush
+ * stroke smooths large shapes on hi-poly meshes as strongly as on low-poly ones, while the mu
+ * inflate step keeps the overall volume from collapsing.
+ *
+ * The region is collected from PBVH nodes whose bounds intersect the brush sphere, so the cost
+ * scales with the brush footprint rather than the whole mesh (the previous per-vertex tree
+ * search did the latter). Results are returned per region vertex; the caller maps them back to
+ * the vertices it is responsible for via \a r_vert_to_region.
+ *
+ * \param r_region_verts: global vertex indices contained in the gathered region.
+ * \param r_region_positions: smoothed position for each entry in \a r_region_verts (parallel).
+ * \param r_vert_to_region: sized to the mesh vertex count; maps a global vertex index to its
+ *   index in \a r_region_verts, or -1 when the vertex is outside the region.
  */
 void radius_based_smooth_mesh_aggressive(const bke::pbvh::Tree &pbvh,
                                          const Span<float3> vert_positions,
-                                         const OffsetIndices<int> faces,
-                                         const Span<int> corner_verts,
-                                         const GroupedSpan<int> vert_to_face_map,
-                                         const VArraySpan<bool> &hide_poly,
+                                         const Span<float3> vert_normals,
                                          const BitSpan boundary_verts,
                                          const float3 &brush_center,
                                          const float brush_radius,
                                          const float search_radius_factor,
                                          const float distance_exponent,
-                                         const IndexMask &affected_verts,
-                                         const Span<float> factors,
-                                         MutableSpan<float3> new_positions);
+                                         Vector<int> &r_region_verts,
+                                         Array<float3> &r_region_positions,
+                                         Array<int> &r_vert_to_region);
 
 }  // namespace ed::sculpt_paint::smooth
 

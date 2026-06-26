@@ -8,11 +8,14 @@
 #include "sculpt_smooth.hh"
 
 #include "BLI_enumerable_thread_specific.hh"
+#include "BLI_map.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_task.hh"
+
+#include "CLG_log.h"
 
 #include "BKE_attribute_math.hh"
 #include "BKE_mesh.hh"
@@ -31,9 +34,12 @@
 
 #include "bmesh.hh"
 
+#include <algorithm>
 #include <cstdlib>
 
 namespace blender::ed::sculpt_paint::smooth {
+
+static CLG_LogRef LOG = {"sculpt.smooth"};
 
 template<typename T>
 void neighbor_data_average_mesh_check_loose(const Span<T> src,
@@ -865,172 +871,214 @@ void blur_geometry_data_array(const Object &object,
 /** \name Radius-Based Aggressive Smoothing
  * \{ */
 
-static void spatial_neighbor_search(const bke::pbvh::Tree &pbvh,
-                                    const Span<float3> vert_positions,
-                                    const float3 &center,
-                                    const float radius,
-                                    const int exclude_vert_index,
-                                    Vector<int> &neighbor_verts,
-                                    Vector<float> &distances)
+/* Integer cell coordinate of a position in the uniform hash-grid. `floorf` (not truncation) is
+ * required so negative coordinates map to the correct cell. */
+static int3 grid_cell_of(const float3 &position, const float inv_cell_size)
 {
-  neighbor_verts.clear();
-  distances.clear();
-
-  const int max_neighbors = 4096;
-  const float radius_squared = radius * radius;
-
-  IndexMaskMemory memory;
-  const IndexMask node_mask = bke::pbvh::search_nodes(
-      pbvh, memory, [&](const bke::pbvh::Node &node) {
-        const Bounds<float3> &bounds = node.bounds();
-        const float3 closest_point = math::clamp(center, bounds.min, bounds.max);
-        return math::distance_squared(center, closest_point) <= radius_squared;
-      });
-
-  switch (pbvh.type()) {
-    case bke::pbvh::Type::Mesh: {
-      const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
-      node_mask.foreach_index([&](const int node_index) {
-        if (neighbor_verts.size() >= max_neighbors) {
-          return;
-        }
-        for (const int vert_index : nodes[node_index].all_verts()) {
-          if (neighbor_verts.size() >= max_neighbors) {
-            break;
-          }
-          /* Skip the query vertex itself to avoid self-weighting in the average. */
-          if (vert_index == exclude_vert_index) {
-            continue;
-          }
-          const float dist_sq = math::distance_squared(vert_positions[vert_index], center);
-          if (dist_sq <= radius_squared) {
-            neighbor_verts.append(vert_index);
-            distances.append(sqrtf(dist_sq));
-          }
-        }
-      });
-      break;
-    }
-    case bke::pbvh::Type::Grids:
-    case bke::pbvh::Type::BMesh:
-      break;
-  }
+  const float3 c = position * inv_cell_size;
+  return int3(int(floorf(c.x)), int(floorf(c.y)), int(floorf(c.z)));
 }
 
-static float3 weighted_average_by_distance(const Span<float3> vert_positions,
-                                           const Span<int> neighbor_indices,
-                                           const Span<float> distances,
-                                           const float max_radius,
-                                           const float distance_exponent)
+/* Gaussian-weighted spatial average of region vertex `ri` over its neighbors within `radius`.
+ *
+ * Connectivity comes from the hash-grid (built once on the initial positions, read-only here);
+ * the weights and distances use the supplied `positions` buffer so the average tracks the current
+ * Taubin sub-step. Returns the averaged position itself (the caller forms the L(p) = avg - p
+ * displacement). When no neighbor qualifies the vertex is left in place. */
+static float3 grid_weighted_average(const int ri,
+                                    const Span<float3> positions,
+                                    const Span<float3> normals,
+                                    const Map<int3, Vector<int>> &grid,
+                                    const float inv_cell_size,
+                                    const float radius,
+                                    const float sigma_sq_inv)
 {
-  if (neighbor_indices.is_empty()) {
-    return float3(0);
-  }
+  const float3 &p = positions[ri];
+  const float3 &n_i = normals[ri];
+  const float radius_squared = radius * radius;
+  const int3 base = grid_cell_of(p, inv_cell_size);
 
-  /* Gaussian sigma controlled by distance_exponent: sigma = max_radius / exponent.
-   * Lower exponent → wider sigma → distant (flat-area) vertices contribute more weight.
-   * exponent=1 → sigma=R, weight at boundary=0.607 (large-scale smoothing).
-   * exponent=3 → sigma=R/3, weight at boundary=0.011 (effectively local). */
-  const float sigma = max_radius / std::max(distance_exponent, 0.1f);
-  if (sigma < 1e-6f) {
-    float3 sum(0);
-    for (const int idx : neighbor_indices) {
-      sum += vert_positions[idx];
-    }
-    return sum / float(neighbor_indices.size());
-  }
-
-  const float sigma_sq_inv = 1.0f / (2.0f * sigma * sigma);
   float3 weighted_sum(0);
   float total_weight = 0.0f;
 
-  for (const int i : neighbor_indices.index_range()) {
-    const float distance_sq = distances[i] * distances[i];
-    const float weight = expf(-distance_sq * sigma_sq_inv);
-    if (UNLIKELY(!isfinite(weight))) {
-      continue;
+  /* With cell size == search radius, the 3x3x3 block of cells fully covers `radius`. */
+  for (int dz = -1; dz <= 1; dz++) {
+    for (int dy = -1; dy <= 1; dy++) {
+      for (int dx = -1; dx <= 1; dx++) {
+        const Vector<int> *cell = grid.lookup_ptr(base + int3(dx, dy, dz));
+        if (cell == nullptr) {
+          continue;
+        }
+        for (const int nj : *cell) {
+          if (nj == ri) {
+            continue;
+          }
+          const float dist_sq = math::distance_squared(positions[nj], p);
+          if (dist_sq > radius_squared) {
+            continue;
+          }
+          float weight = expf(-dist_sq * sigma_sq_inv);
+          /* Soft normal weight: discard neighbors that face the opposite way so a folded-over
+           * surface does not blend its two sides together. */
+          weight *= std::max(0.0f, math::dot(n_i, normals[nj]));
+          if (UNLIKELY(!isfinite(weight))) {
+            continue;
+          }
+          weighted_sum += positions[nj] * weight;
+          total_weight += weight;
+        }
+      }
     }
-    weighted_sum += vert_positions[neighbor_indices[i]] * weight;
-    total_weight += weight;
   }
 
   if (total_weight < 1e-6f) {
-    float3 sum(0);
-    for (const int idx : neighbor_indices) {
-      sum += vert_positions[idx];
-    }
-    return sum / float(neighbor_indices.size());
+    return p;
   }
-
   return weighted_sum / total_weight;
 }
 
 void radius_based_smooth_mesh_aggressive(const bke::pbvh::Tree &pbvh,
                                          const Span<float3> vert_positions,
-                                         const OffsetIndices<int> /*faces*/,
-                                         const Span<int> /*corner_verts*/,
-                                         const GroupedSpan<int> /*vert_to_face_map*/,
-                                         const VArraySpan<bool> & /*hide_poly*/,
-                                         const BitSpan /*boundary_verts*/,
-                                         const float3 & /*brush_center*/,
+                                         const Span<float3> vert_normals,
+                                         const BitSpan boundary_verts,
+                                         const float3 &brush_center,
                                          const float brush_radius,
                                          const float search_radius_factor,
                                          const float distance_exponent,
-                                         const IndexMask &affected_verts,
-                                         const Span<float> factors,
-                                         MutableSpan<float3> new_positions)
+                                         Vector<int> &r_region_verts,
+                                         Array<float3> &r_region_positions,
+                                         Array<int> &r_vert_to_region)
 {
-  BLI_assert(affected_verts.size() == factors.size());
-  BLI_assert(affected_verts.size() == new_positions.size());
+  r_region_verts.clear();
+  r_vert_to_region.reinitialize(vert_positions.size());
+  r_vert_to_region.fill(-1);
+  r_region_positions.reinitialize(0);
 
-  if (affected_verts.is_empty()) {
+  /* Only the dense mesh PBVH is handled in this iteration. */
+  if (pbvh.type() != bke::pbvh::Type::Mesh) {
     return;
   }
 
   const float base_search_radius = brush_radius * search_radius_factor;
+  if (base_search_radius < 1e-6f) {
+    return;
+  }
+  const float radius_squared = base_search_radius * base_search_radius;
 
-  struct LocalData {
-    Vector<int> neighbors;
-    Vector<float> distances;
-  };
+  /* 1. Gather the region once: every vertex owned by a PBVH node whose bounds intersect the brush
+   *    sphere. Collected once per call (not per vertex), so the cost scales with the brush
+   *    footprint rather than the whole mesh. */
+  IndexMaskMemory memory;
+  const IndexMask node_mask = bke::pbvh::search_nodes(
+      pbvh, memory, [&](const bke::pbvh::Node &node) {
+        const Bounds<float3> &bounds = node.bounds();
+        const float3 closest_point = math::clamp(brush_center, bounds.min, bounds.max);
+        return math::distance_squared(brush_center, closest_point) <= radius_squared;
+      });
 
-  threading::EnumerableThreadSpecific<LocalData> all_tls;
-
-  affected_verts.foreach_index([&](const int vert_index, const int i) {
-    LocalData &tls = all_tls.local();
-
-    const float factor = factors[i];
-    if (factor == 0.0f) {
-      new_positions[i] = vert_positions[vert_index];
-      return;
+  const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+  node_mask.foreach_index([&](const int node_index) {
+    for (const int vert : nodes[node_index].verts()) {
+      if (r_vert_to_region[vert] == -1) {
+        r_vert_to_region[vert] = r_region_verts.size();
+        r_region_verts.append(vert);
+      }
     }
+  });
 
-    const float3 &vert_pos = vert_positions[vert_index];
+  if (r_region_verts.is_empty()) {
+    return;
+  }
 
-    /* Exclude the vertex itself so the weighted average is computed from true neighbors only.
-     * Without this, the vertex's own position (at distance 0) dominates the Gaussian weighting
-     * and smoothing becomes nearly ineffective. */
-    spatial_neighbor_search(
-        pbvh, vert_positions, vert_pos, base_search_radius, vert_index, tls.neighbors, tls.distances);
-
-    if (tls.neighbors.is_empty()) {
-      new_positions[i] = vert_pos;
-      return;
+  /* Perf guard: cap the region so a very large brush on a dense mesh cannot stall interactivity.
+   * Keep the vertices closest to the brush center and report the truncation rather than silently
+   * dropping work. */
+  constexpr int max_region_verts = 200000;
+  const int gathered_num = r_region_verts.size();
+  if (gathered_num > max_region_verts) {
+    std::nth_element(r_region_verts.begin(),
+                     r_region_verts.begin() + max_region_verts,
+                     r_region_verts.end(),
+                     [&](const int a, const int b) {
+                       return math::distance_squared(vert_positions[a], brush_center) <
+                              math::distance_squared(vert_positions[b], brush_center);
+                     });
+    r_region_verts.resize(max_region_verts);
+    /* `nth_element` reordered the vertices, so rebuild the global->region map from scratch. */
+    r_vert_to_region.fill(-1);
+    for (const int i : r_region_verts.index_range()) {
+      r_vert_to_region[r_region_verts[i]] = i;
     }
+    CLOG_WARN(&LOG,
+              "Spatial Taubin smooth region capped at %d vertices (gathered %d); reduce the brush "
+              "radius or smooth radius factor for full coverage.",
+              max_region_verts,
+              gathered_num);
+  }
 
-    const float3 smooth_pos = weighted_average_by_distance(
-        vert_positions, tls.neighbors, tls.distances, base_search_radius, distance_exponent);
+  const int region_num = r_region_verts.size();
 
-    if (!isfinite(smooth_pos.x) || !isfinite(smooth_pos.y) || !isfinite(smooth_pos.z)) {
-      new_positions[i] = vert_pos;
-      return;
+  /* 2. Local working copy of the region positions and normals (region-local indexing). */
+  Array<float3> positions_a(region_num);
+  Array<float3> region_normals(region_num);
+  threading::parallel_for(IndexRange(region_num), 4096, [&](const IndexRange range) {
+    for (const int i : range) {
+      positions_a[i] = vert_positions[r_region_verts[i]];
+      region_normals[i] = vert_normals[r_region_verts[i]];
     }
+  });
 
-    /* Return the raw smoothed target position. The caller (apply_positions_faces) applies
-     * the brush factor via scale_translations, so we must not apply it here to avoid
-     * squaring the factor (factor² effect). */
-    new_positions[i] = smooth_pos;
-  }, exec_mode::grain_size(32));
+  /* 3. Uniform hash-grid over the region. Cell size == search radius, so a neighbor query only
+   *    needs the surrounding 3x3x3 cells. Built once and used read-only during the Taubin pass. */
+  const float inv_cell_size = 1.0f / base_search_radius;
+  Map<int3, Vector<int>> grid;
+  for (const int i : IndexRange(region_num)) {
+    grid.lookup_or_add_default(grid_cell_of(positions_a[i], inv_cell_size)).append(i);
+  }
+
+  /* Gaussian sigma from `distance_exponent` (matching the previous weighted average):
+   * lower exponent -> wider sigma -> more large-scale smoothing. */
+  const float sigma = base_search_radius / std::max(distance_exponent, 0.1f);
+  const float sigma_sq_inv = (sigma > 1e-6f) ? 1.0f / (2.0f * sigma * sigma) : 0.0f;
+
+  /* 4. Volume-preserving Taubin lambda/mu. mu is derived from lambda so the inflate step cancels
+   *    the shrink step's low-frequency loss: mu = lambda / (k*lambda - 1), with k ~ 0.1. */
+  constexpr float taubin_lambda = 0.5f;
+  constexpr float taubin_k = 0.1f;
+  constexpr float taubin_mu = taubin_lambda / (taubin_k * taubin_lambda - 1.0f);
+  constexpr int taubin_pairs = 1;
+
+  Array<float3> positions_b(region_num);
+
+  const auto taubin_step =
+      [&](const Span<float3> src, MutableSpan<float3> dst, const float factor) {
+        threading::parallel_for(IndexRange(region_num), 1024, [&](const IndexRange range) {
+          for (const int i : range) {
+            const int vert = r_region_verts[i];
+            /* Anchor boundary vertices so smoothing does not drag the open edge inward. */
+            if (!boundary_verts.is_empty() && boundary_verts[vert]) {
+              dst[i] = src[i];
+              continue;
+            }
+            const float3 avg = grid_weighted_average(
+                i, src, region_normals, grid, inv_cell_size, base_search_radius, sigma_sq_inv);
+            float3 result = src[i] + factor * (avg - src[i]);
+            if (UNLIKELY(!isfinite(result.x) || !isfinite(result.y) || !isfinite(result.z))) {
+              result = src[i];
+            }
+            dst[i] = result;
+          }
+        });
+      };
+
+  for (int pair = 0; pair < taubin_pairs; pair++) {
+    taubin_step(positions_a, positions_b, taubin_lambda); /* Shrink. */
+    taubin_step(positions_b, positions_a, taubin_mu);     /* Inflate. */
+  }
+
+  /* `positions_a` now holds the smoothed region positions (ends here for an even number of
+   * sub-steps per pair). The caller maps these back via `r_vert_to_region`. */
+  r_region_positions = std::move(positions_a);
 }
 
 /** \} */

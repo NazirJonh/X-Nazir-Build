@@ -108,10 +108,36 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
 
   threading::EnumerableThreadSpecific<LocalData> all_tls;
 
+  /* The "Spatial Taubin" path (aggressive, or moderate on dense meshes) averages each vertex over
+   * a fixed world-space radius rather than its topological 1-ring, so a single stroke smooths large
+   * shapes equally on low- and high-poly meshes. Its region gather + hash-grid + Taubin pass are
+   * resolution-independent and run once per iteration, before the per-node loop, which then only
+   * reads back the result for the vertices it owns. */
+  const bool use_spatial_taubin = (brush.smooth_algorithm == 2) ||
+                                  (brush.smooth_algorithm == 1 && mesh.verts_num > 100000);
+
+  Vector<int> region_verts;
+  Array<float3> region_positions;
+  Array<int> vert_to_region;
+
   /* Calculate the new positions into a separate array in a separate loop because multiple loops
    * are updated in parallel. Without this there would be non-threadsafe access to changing
    * positions in other bke::pbvh::Tree nodes. */
   for (const float strength : iteration_strengths(brush_strength)) {
+    if (use_spatial_taubin) {
+      smooth::radius_based_smooth_mesh_aggressive(pbvh,
+                                                  position_data.eval,
+                                                  vert_normals,
+                                                  ss.boundary_info_cache->verts,
+                                                  ss.cache->location,
+                                                  ss.cache->radius,
+                                                  brush.smooth_radius_factor,
+                                                  brush.smooth_distance_exponent,
+                                                  region_verts,
+                                                  region_positions,
+                                                  vert_to_region);
+    }
+
     node_mask.foreach_index(
         [&](const int i, const int pos) {
           LocalData &tls = all_tls.local();
@@ -130,26 +156,17 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
               all_distances.as_mutable_span().slice(node_vert_offsets[pos]));
           scale_factors(node_factors, strength);
 
-          const bool use_aggressive = (brush.smooth_algorithm == 2);
-          const bool use_moderate = (brush.smooth_algorithm == 1);
+          const MutableSpan<float3> node_new_positions =
+              new_positions.as_mutable_span().slice(node_vert_offsets[pos]);
 
-          if (use_aggressive || (use_moderate && mesh.verts_num > 100000)) {
-            IndexMaskMemory mask_memory;
-            smooth::radius_based_smooth_mesh_aggressive(
-                pbvh,
-                position_data.eval,
-                faces,
-                corner_verts,
-                vert_to_face_map,
-                attribute_data.hide_poly,
-                ss.boundary_info_cache->verts,
-                ss.cache->location,
-                ss.cache->radius,
-                brush.smooth_radius_factor,
-                brush.smooth_distance_exponent,
-                IndexMask::from_indices(verts, mask_memory),
-                node_factors,
-                new_positions.as_mutable_span().slice(node_vert_offsets[pos]));
+          if (use_spatial_taubin) {
+            /* Read back the region result for this node's vertices. Vertices outside the gathered
+             * region keep their current position (no smoothing target). */
+            for (const int v : verts.index_range()) {
+              const int region_index = vert_to_region[verts[v]];
+              node_new_positions[v] = (region_index >= 0) ? region_positions[region_index] :
+                                                            position_data.eval[verts[v]];
+            }
           }
           else {
             const GroupedSpan<int> neighbors = calc_vert_neighbors_interior(
@@ -164,10 +181,7 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
                 tls.neighbor_offsets,
                 tls.neighbor_data);
             smooth::neighbor_data_average_mesh_check_loose(
-                position_data.eval,
-                verts,
-                neighbors,
-                new_positions.as_mutable_span().slice(node_vert_offsets[pos]));
+                position_data.eval, verts, neighbors, node_new_positions);
           }
         },
         exec_mode::grain_size(1));

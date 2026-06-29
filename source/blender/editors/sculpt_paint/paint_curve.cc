@@ -690,8 +690,6 @@ static wmOperatorStatus paintcurve_draw_exec(bContext *C, wmOperator * /*op*/)
   PaintMode mode = BKE_paintmode_get_active_from_context(C);
   const char *name;
 
-  printf("[DEBUG] PAINTCURVE_OT_draw exec: active_paint_mode=%d\n", int(mode));
-
   switch (mode) {
     case PaintMode::Texture2D:
     case PaintMode::Texture3D:
@@ -711,11 +709,9 @@ static wmOperatorStatus paintcurve_draw_exec(bContext *C, wmOperator * /*op*/)
       break;
     case PaintMode::WeightCurves:
       name = "CURVES_OT_weight_paint_brush_stroke";
-      printf("[DEBUG] PAINTCURVE_OT_draw dispatch: mode=WeightCurves -> %s\n", name);
       break;
     case PaintMode::VertexCurves:
       name = "CURVES_OT_vertex_paint_brush_stroke";
-      printf("[DEBUG] PAINTCURVE_OT_draw dispatch: mode=VertexCurves -> %s\n", name);
       break;
     case PaintMode::GPencil:
       name = "GREASE_PENCIL_OT_brush_stroke";
@@ -724,14 +720,10 @@ static wmOperatorStatus paintcurve_draw_exec(bContext *C, wmOperator * /*op*/)
       name = "GREASE_PENCIL_OT_sculpt_paint";
       break;
     default:
-      printf("[DEBUG] PAINTCURVE_OT_draw pass-through: unsupported_paint_mode=%d\n", int(mode));
       return OPERATOR_PASS_THROUGH;
   }
 
-  const wmOperatorStatus status = WM_operator_name_call(
-      C, name, wm::OpCallContext::InvokeDefault, nullptr, nullptr);
-  printf("[DEBUG] PAINTCURVE_OT_draw WM_operator_name_call('%s') -> %d\n", name, int(status));
-  return status;
+  return WM_operator_name_call(C, name, wm::OpCallContext::InvokeDefault, nullptr, nullptr);
 }
 
 void PAINTCURVE_OT_draw(wmOperatorType *ot)

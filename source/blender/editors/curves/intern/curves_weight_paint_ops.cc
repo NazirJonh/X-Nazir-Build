@@ -235,17 +235,12 @@ static wmOperatorStatus curves_vertex_group_add_exec(bContext *C, wmOperator *op
     return OPERATOR_CANCELLED;
   }
 
-  const ListBaseT<bDeformGroup> *defbase = BKE_object_defgroup_list(ob);
-  const int vgroup_count_before = BLI_listbase_count(defbase);
-  printf("[DEBUG] CURVES_OT_vertex_group_add: before add, groups=%d\n", vgroup_count_before);
-  
   /* Ensure we have deform verts */
   bke::curves::ensure_deform_verts(ob);
-  
+
   /* Add vertex group to object */
   bDeformGroup *defgroup = BKE_object_defgroup_add(ob);
   if (!defgroup) {
-    printf("[ERROR] CURVES_OT_vertex_group_add: BKE_object_defgroup_add returned nullptr\n");
     BKE_report(op->reports, RPT_ERROR, "Could not add vertex group");
     return OPERATOR_CANCELLED;
   }
@@ -254,11 +249,6 @@ static wmOperatorStatus curves_vertex_group_add_exec(bContext *C, wmOperator *op
   const int defgroup_index = BKE_object_defgroup_count(ob) - 1;
   BKE_object_defgroup_active_index_set(ob, defgroup_index + 1);
 
-  printf("[DEBUG] CURVES_OT_vertex_group_add: added='%s', groups=%d, active_index=%d\n",
-         defgroup->name,
-         BKE_object_defgroup_count(ob),
-         BKE_object_defgroup_active_index_get(ob));
-  
   /* Initialize all points with weight 1.0 for the new vertex group */
   const int total_points = bke::curves::get_curves_vertex_count(ob);
   for (int i = 0; i < total_points; i++) {
@@ -1114,41 +1104,10 @@ struct CurvesWeightPaintBrushStroke final : public PaintStroke {
 
 static bool curves_weight_paint_brush_stroke_poll(bContext *C)
 {
-  const bool mode_ok = curves_weight_paint_poll(C);
-  const bool tool_ok = WM_toolsystem_active_tool_is_brush(C);
-  static int debug_poll_count = 0;
-  debug_poll_count++;
-
-  if (debug_poll_count <= 40 || (debug_poll_count % 200) == 0) {
-    const Object *object = CTX_data_active_object(C);
-    printf("[DEBUG] CURVES_OT_weight_paint_brush_stroke poll: mode_ok=%d tool_ok=%d object=%s type=%d "
-           "mode=%d\n",
-           mode_ok,
-           tool_ok,
-           object ? object->id.name + 2 : "NULL",
-           object ? object->type : -1,
-           object ? object->mode : -1);
-  }
-
-  if (!mode_ok || !tool_ok) {
-    static int debug_poll_reject_count = 0;
-    debug_poll_reject_count++;
-    if (debug_poll_reject_count <= 20 || (debug_poll_reject_count % 200) == 0) {
-      const Object *object = CTX_data_active_object(C);
-      printf("[DEBUG] CURVES_OT_weight_paint_brush_stroke poll rejected: mode_ok=%d tool_ok=%d "
-             "object=%s type=%d mode=%d\n",
-             mode_ok,
-             tool_ok,
-             object ? object->id.name + 2 : "NULL",
-             object ? object->type : -1,
-             object ? object->mode : -1);
-    }
-  }
-
-  if (!mode_ok) {
+  if (!curves_weight_paint_poll(C)) {
     return false;
   }
-  if (!tool_ok) {
+  if (!WM_toolsystem_active_tool_is_brush(C)) {
     return false;
   }
   return true;

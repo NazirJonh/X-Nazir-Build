@@ -54,7 +54,6 @@ class CurvesWeightPaintOperationBase : public CurvesPaintOperationBase {
 
  public:
   void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override;
-  void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) override;
   void on_stroke_done(const bContext &C) override;
 
   /* ----- Weight paint specific utilities ----- */
@@ -94,14 +93,14 @@ class CurvesWeightPaintOperationBase : public CurvesPaintOperationBase {
   void set_vertex_weight(int point_index, float weight);
 
   /**
-   * Override to get weight-specific brush settings.
-   * Adds brush_weight parameter from brush.
+   * Extend the shared brush settings with weight-specific settings
+   * (brush weight, auto-normalize, add/subtract direction).
    */
-  void get_brush_settings(const bContext &C, const StrokeExtension &stroke_extension);
+  void get_brush_settings(const bContext &C, const StrokeExtension &stroke_extension) override;
 
   /**
-   * Override to apply weight to points collected in brush.
-   * Default implementation applies brush weight to all points.
+   * Default per-point weight paint behavior: blend the point weight towards the brush weight.
+   * Used by the Draw brush through the base apply_brush() implementation.
    */
   void apply_operation_to_point(const CurvesBrushPoint &point) override;
 

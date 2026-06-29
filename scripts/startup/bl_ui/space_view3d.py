@@ -9984,6 +9984,10 @@ class VIEW3D_PT_curves_vertex_context_menu(Panel):
         )
         layout.prop(brush, "direction", expand=True)
 
+        layout.separator()
+        layout.operator("curves.vertex_paint_sample", text="Sample Color")
+        layout.operator("curves.vertex_color_set", text="Set Vertex Colors")
+
 
 class VIEW3D_PT_curves_weight_context_menu(Panel):
     bl_space_type = "VIEW_3D"

@@ -60,11 +60,20 @@ void curves_vertex_paint_ensure_color_attribute(Object *ob)
 
   Curves *curves_id = reinterpret_cast<Curves *>(ob->data);
   bke::CurvesGeometry &curves = curves_id->geometry.wrap();
-  bke::MutableAttributeAccessor attributes = curves.wrap().attributes_for_write();
+  bke::MutableAttributeAccessor attributes = curves.attributes_for_write();
+
+  /* Keep the existing colors when the attribute is already present. */
+  if (attributes.contains(vertex_color_attr_name)) {
+    return;
+  }
+
+  /* Create the attribute initialized to opaque white, matching mesh vertex paint, so that the
+   * curves are visible in vertex paint mode before anything is painted. */
   bke::SpanAttributeWriter<ColorGeometry4f> writer =
-      attributes.lookup_or_add_for_write_span<ColorGeometry4f>(vertex_color_attr_name,
-                                                             bke::AttrDomain::Point);
+      attributes.lookup_or_add_for_write_only_span<ColorGeometry4f>(vertex_color_attr_name,
+                                                                    bke::AttrDomain::Point);
   if (writer) {
+    writer.span.fill(ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f));
     writer.finish();
   }
 }
@@ -182,12 +191,6 @@ void CurvesVertexPaintOperationBase::on_stroke_begin(const bContext &C,
   copy_v3_v3(color_linear, BKE_brush_color_get(paint, brush));
   brush_color = ColorPaint4f(color_linear[0], color_linear[1], color_linear[2], 1.0f);
   blend_mode = IMB_BlendMode(brush->blend);
-}
-
-void CurvesVertexPaintOperationBase::on_stroke_extended(const bContext & /*C*/,
-                                                          const StrokeExtension & /*stroke_extension*/)
-{
-  /* Handled by subclasses or the base paint operation. */
 }
 
 void CurvesVertexPaintOperationBase::on_stroke_done(const bContext &C)

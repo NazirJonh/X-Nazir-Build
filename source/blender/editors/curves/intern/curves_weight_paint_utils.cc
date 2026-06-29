@@ -96,77 +96,26 @@ CurvesWeightPaintCommonContext::CurvesWeightPaintCommonContext(const bContext &C
 void CurvesWeightPaintOperationBase::get_brush_settings(const bContext &C,
                                                          const StrokeExtension &stroke_extension)
 {
-  Object *object_from_context = CTX_data_active_object(&C);
-  if (object_from_context != nullptr) {
-    ID *original_id = DEG_get_original_id(&object_from_context->id);
-    if (original_id != nullptr && original_id != &object_from_context->id) {
-      object = reinterpret_cast<Object *>(original_id);
-    }
-    else {
-      object = object_from_context;
-    }
-  }
-  else {
-    object = nullptr;
-  }
+  /* Resolve object/curves/brush and the common brush parameters (radius, strength, falloff). */
+  CurvesPaintOperationBase::get_brush_settings(C, stroke_extension);
 
-  if (!object || object->type != OB_CURVES || object->data == nullptr) {
-    curves_id = nullptr;
-    curves = nullptr;
-    brush = nullptr;
+  if (!object || !curves_id || !curves || !brush) {
     return;
   }
 
-  ID *object_data_id = static_cast<ID *>(object->data);
-  if (GS(object_data_id->name) != ID_CV) {
-    curves_id = nullptr;
-    curves = nullptr;
-    brush = nullptr;
-    return;
-  }
-
-  curves_id = reinterpret_cast<Curves *>(object->data);
-  curves = &curves_id->geometry.wrap();
-
-  Paint *paint = BKE_paint_get_active_from_context(&C);
+  const Paint *paint = BKE_paint_get_active_from_context(&C);
   if (paint == nullptr) {
-    brush = nullptr;
     return;
   }
-  brush = BKE_paint_brush(paint);
-  if (brush == nullptr) {
-    return;
-  }
-
-  /* Get initial brush parameters. */
-  initial_brush_radius = BKE_brush_radius_get(paint, brush);
-  initial_brush_strength = BKE_brush_alpha_get(paint, brush);
-
-  /* Store previous mouse position before updating. */
-  mouse_position_previous = mouse_position;
-  mouse_position = stroke_extension.mouse_position;
-
-  /* Update brush radius based on pressure. */
-  brush_radius = initial_brush_radius;
-  if (BKE_brush_use_size_pressure(brush)) {
-    brush_radius *= stroke_extension.pressure;
-  }
-
-  /* Update brush strength based on pressure. */
-  brush_strength = initial_brush_strength;
-  if (BKE_brush_use_alpha_pressure(brush)) {
-    brush_strength *= stroke_extension.pressure;
-  }
-
-  /* Initialize falloff curve. */
-  BKE_curvemapping_init(brush->curve_distance_falloff);
 
   /* Weight paint specific settings. */
   brush_weight = BKE_brush_weight_get(paint, brush);
 
-  /* Get auto-normalize setting. */
+  /* Auto-normalize is only meaningful when more than one vertex group exists; with a single
+   * group every painted weight would be normalized straight back to 1.0, making the brush
+   * appear to do nothing. */
   const ToolSettings *ts = CTX_data_tool_settings(&C);
-  auto_normalize = ts->auto_normalize;
+  auto_normalize = ts->auto_normalize && (BKE_object_defgroup_count(object) > 1);
 
   /* Get brush add/subtract mode. */
   invert_brush_weight = (brush->flag & BRUSH_DIR_IN) != 0;
@@ -297,13 +246,6 @@ void CurvesWeightPaintOperationBase::on_stroke_begin(const bContext &C,
 
   /* Ensure deform verts exist in the curves geometry. */
   bke::curves::ensure_deform_verts(object);
-}
-
-void CurvesWeightPaintOperationBase::on_stroke_extended(const bContext &C,
-                                                         const StrokeExtension &stroke_extension)
-{
-  /* Call base class implementation which will call apply_operation_to_point for each point. */
-  CurvesPaintOperationBase::on_stroke_extended(C, stroke_extension);
 }
 
 void CurvesWeightPaintOperationBase::on_stroke_done(const bContext &C)

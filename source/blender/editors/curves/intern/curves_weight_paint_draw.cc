@@ -5,33 +5,24 @@
 /** \file
  * \ingroup edcurves
  *
- * Draw weight paint operation for Curves.
- * Similar to Grease Pencil's DrawWeightPaintOperation but adapted for Curves objects.
+ * Weight paint brush operations for Curves (Draw, Blur, Average, Smear).
+ *
+ * All brushes share the common stroke machinery in #CurvesPaintOperationBase /
+ * #CurvesWeightPaintOperationBase. Each brush only implements its specific behavior by
+ * overriding #apply_brush() (and, for the Draw brush, by relying on the default per-point
+ * #apply_operation_to_point()).
  */
 
-#include "BKE_brush.hh"
-#include "BKE_context.hh"
 #include "BKE_curves.hh"
 #include "BKE_curves_weight_paint.hh"
-#include "BKE_paint.hh"
-#include "BKE_object_deform.h"
-#include "BKE_deform.hh"
-
-#include "ED_screen.hh"
-#include "ED_view3d.hh"
-#include "ED_object_vgroup.hh"
-
-#include "DEG_depsgraph.hh"
 
 #include "DNA_brush_types.h"
-#include "DNA_curves_types.h"
-#include "DNA_scene_types.h"
 
-#include "WM_api.hh"
-
-#include "BLI_task.hh"
+#include "BLI_array.hh"
+#include "BLI_math_base.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_offset_indices.hh"
 
 #include "curves_weight_paint_intern.hh"
 
@@ -40,8 +31,11 @@ namespace blender::ed::sculpt_paint {
 /* -------------------------------------------------------------------- */
 /** \name Draw Weight Paint Operation
  *
- * Paints weight values directly onto curve points under the brush.
- * Similar to the standard mesh weight paint draw brush.
+ * Blends curve point weights towards the brush weight.
+ *
+ * The actual per-point math lives in #CurvesWeightPaintOperationBase::apply_operation_to_point()
+ * (which already accounts for the add/subtract direction and the Invert stroke mode), so the Draw
+ * brush only needs to remember the stroke mode and let the shared machinery do the rest.
  * \{ */
 
 class DrawWeightPaintOperation : public CurvesWeightPaintOperationBase {
@@ -50,117 +44,6 @@ class DrawWeightPaintOperation : public CurvesWeightPaintOperationBase {
   {
     this->stroke_mode = stroke_mode;
   }
-
-  void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override
-  {
-    /* Call base class implementation. */
-    CurvesWeightPaintOperationBase::on_stroke_begin(C, start_extension);
-
-    /* Get the add/subtract mode of the draw brush. */
-    invert_brush_weight = (brush->flag & BRUSH_DIR_IN) != 0;
-    if (stroke_mode == BrushStrokeMode::Invert) {
-      invert_brush_weight = !invert_brush_weight;
-    }
-  }
-
-  void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) override
-  {
-    /* Update brush settings for this stroke sample. */
-    get_brush_settings(C, stroke_extension);
-
-    if (!object || !curves_id || !curves || !brush) {
-      static int debug_invalid_context_count = 0;
-      debug_invalid_context_count++;
-      if (debug_invalid_context_count <= 20 || (debug_invalid_context_count % 100) == 0) {
-        printf("[DEBUG] CurvesWeightPaint draw::on_stroke_extended: invalid context "
-               "(object=%p curves_id=%p curves=%p brush=%p)\n",
-               object,
-               curves_id,
-               curves,
-               brush);
-      }
-      return;
-    }
-
-    /* Update mouse input and bounding box. */
-    get_mouse_input(stroke_extension);
-
-    if (!curves || curves->is_empty()) {
-      return;
-    }
-
-    /* Sample points under the brush. */
-    sample_curves_3d_brush(C, stroke_extension);
-
-    /* Apply draw operation to all points under the brush. */
-    apply_draw_operation(C, stroke_extension);
-
-    /* Notify about geometry changes. */
-    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
-    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, object);
-    WM_event_add_notifier(&C, NC_GEOM | ND_DATA, curves_id);
-  }
-
-  void on_stroke_done(const bContext &C) override
-  {
-    /* Call base class implementation. */
-    CurvesWeightPaintOperationBase::on_stroke_done(C);
-  }
-
- private:
-  /**
-   * Apply draw weight to all points collected in points_in_brush.
-   */
-  void apply_draw_operation(const bContext & /*C*/, const StrokeExtension & /*stroke_extension*/)
-  {
-    int changed_points = 0;
-    int invalid_points = 0;
-
-    for (const BrushPoint &point : points_in_brush) {
-      apply_draw_weight(point, changed_points, invalid_points);
-    }
-
-    if (invalid_points > 0) {
-      printf("[DEBUG] CurvesWeightPaint draw::apply_draw_operation: points_in_brush=%d changed=%d "
-             "invalid=%d\n",
-             int(points_in_brush.size()),
-             changed_points,
-             invalid_points);
-    }
-  }
-
-  /**
-   * Apply weight to a single brush point.
-   * Uses brush weight as target and influence for blending.
-   */
-  void apply_draw_weight(const BrushPoint &point,
-                         int &r_changed_points,
-                         int &r_invalid_points)
-  {
-    const float old_weight = get_vertex_weight(point.point_index);
-
-    if (old_weight < 0.0f) {
-      r_invalid_points++;
-      return;
-    }
-
-    /* Calculate effective target weight based on invert mode. */
-    const float effective_target = invert_brush_weight ? (1.0f - brush_weight) : brush_weight;
-
-    /* Calculate weight delta. */
-    const float weight_delta = effective_target - old_weight;
-
-    /* Blend current weight towards target using influence. */
-    const float new_weight = math::clamp(
-        old_weight + math::interpolate(0.0f, weight_delta, point.influence), 0.0f, 1.0f);
-
-    if (new_weight == old_weight) {
-      return;
-    }
-
-    set_vertex_weight(point.point_index, new_weight);
-    r_changed_points++;
-  }
 };
 
 /** \} */
@@ -168,67 +51,61 @@ class DrawWeightPaintOperation : public CurvesWeightPaintOperationBase {
 /* -------------------------------------------------------------------- */
 /** \name Blur Weight Paint Operation
  *
- * Blurs weight values by averaging nearby points.
+ * Smooths weights by blending every point under the brush towards the average weight of its
+ * neighbors along the curve.
  * \{ */
 
 class BlurWeightPaintOperation : public CurvesWeightPaintOperationBase {
- private:
-  static constexpr int BLUR_ITERATIONS = 1;
-
  public:
   BlurWeightPaintOperation()
   {
     this->stroke_mode = BrushStrokeMode::Normal;
   }
 
-  void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override
-  {
-    CurvesWeightPaintOperationBase::on_stroke_begin(C, start_extension);
-  }
-
-  void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) override
-  {
-    get_brush_settings(C, stroke_extension);
-    get_mouse_input(stroke_extension, 1.5f); /* Wider brush for neighbor sampling. */
-
-    if (!curves || curves->is_empty()) {
-      return;
-    }
-
-    sample_curves_3d_brush(C, stroke_extension);
-    apply_blur_operation(C);
-
-    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
-    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, object);
-    WM_event_add_notifier(&C, NC_GEOM | ND_DATA, curves_id);
-  }
-
-  void on_stroke_done(const bContext &C) override
-  {
-    CurvesWeightPaintOperationBase::on_stroke_done(C);
-  }
-
- private:
-  void apply_blur_operation(const bContext & /*C*/)
+ protected:
+  void apply_brush(const bContext & /*C*/, const StrokeExtension & /*stroke_extension*/) override
   {
     if (points_in_brush.is_empty()) {
       return;
     }
 
-    /* Calculate average weight of all points under the brush. */
-    float weight_sum = 0.0f;
-    for (const BrushPoint &point : points_in_brush) {
-      weight_sum += get_vertex_weight(point.point_index);
-    }
-    const float average_weight = weight_sum / float(points_in_brush.size());
+    const OffsetIndices<int> points_by_curve = curves->points_by_curve();
+    const Array<int> point_to_curve = curves->point_to_curve_map();
+    const VArray<bool> cyclic = curves->cyclic();
 
-    /* Apply blurred (averaged) weight to all points. */
-    for (const BrushPoint &point : points_in_brush) {
-      const float old_weight = get_vertex_weight(point.point_index);
-      const float weight_delta = average_weight - old_weight;
-      const float new_weight = math::clamp(
-          old_weight + math::interpolate(0.0f, weight_delta, point.influence), 0.0f, 1.0f);
-      set_vertex_weight(point.point_index, new_weight);
+    /* Compute all target weights first, then write them, so that the blur of one point does not
+     * feed back into the blur of an adjacent point in the same pass. */
+    Array<float> new_weights(points_in_brush.size());
+
+    for (const int i : points_in_brush.index_range()) {
+      const BrushPoint &point = points_in_brush[i];
+      const int point_index = point.point_index;
+      const float old_weight = get_vertex_weight(point_index);
+      new_weights[i] = old_weight;
+      if (old_weight < 0.0f) {
+        continue;
+      }
+
+      float neighbor_sum = 0.0f;
+      int neighbor_count = 0;
+      foreach_curve_neighbors(
+          point_index, points_by_curve, point_to_curve, cyclic, [&](const int nb) {
+            neighbor_sum += math::max(0.0f, get_vertex_weight(nb));
+            neighbor_count++;
+          });
+      if (neighbor_count == 0) {
+        continue;
+      }
+
+      const float target_weight = neighbor_sum / float(neighbor_count);
+      new_weights[i] = math::clamp(
+          old_weight + math::interpolate(0.0f, target_weight - old_weight, point.influence),
+          0.0f,
+          1.0f);
+    }
+
+    for (const int i : points_in_brush.index_range()) {
+      set_vertex_weight(points_in_brush[i].point_index, new_weights[i]);
     }
   }
 };
@@ -238,7 +115,8 @@ class BlurWeightPaintOperation : public CurvesWeightPaintOperationBase {
 /* -------------------------------------------------------------------- */
 /** \name Average Weight Paint Operation
  *
- * Averages weight values of all points under the brush.
+ * Blends every point under the brush towards the (influence weighted) average weight of all points
+ * under the brush.
  * \{ */
 
 class AverageWeightPaintOperation : public CurvesWeightPaintOperationBase {
@@ -248,46 +126,21 @@ class AverageWeightPaintOperation : public CurvesWeightPaintOperationBase {
     this->stroke_mode = BrushStrokeMode::Normal;
   }
 
-  void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override
-  {
-    CurvesWeightPaintOperationBase::on_stroke_begin(C, start_extension);
-  }
-
-  void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) override
-  {
-    get_brush_settings(C, stroke_extension);
-    get_mouse_input(stroke_extension);
-
-    if (!curves || curves->is_empty()) {
-      return;
-    }
-
-    sample_curves_3d_brush(C, stroke_extension);
-    apply_average_operation(C);
-
-    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
-    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, object);
-    WM_event_add_notifier(&C, NC_GEOM | ND_DATA, curves_id);
-  }
-
-  void on_stroke_done(const bContext &C) override
-  {
-    CurvesWeightPaintOperationBase::on_stroke_done(C);
-  }
-
- private:
-  void apply_average_operation(const bContext & /*C*/)
+ protected:
+  void apply_brush(const bContext & /*C*/, const StrokeExtension & /*stroke_extension*/) override
   {
     if (points_in_brush.is_empty()) {
       return;
     }
 
-    /* Calculate weighted average based on influence. */
+    /* Compute the influence-weighted average of all points under the brush. */
     float weight_sum = 0.0f;
     float influence_sum = 0.0f;
-
     for (const BrushPoint &point : points_in_brush) {
       const float weight = get_vertex_weight(point.point_index);
+      if (weight < 0.0f) {
+        continue;
+      }
       weight_sum += weight * point.influence;
       influence_sum += point.influence;
     }
@@ -295,15 +148,17 @@ class AverageWeightPaintOperation : public CurvesWeightPaintOperationBase {
     if (influence_sum < 1e-6f) {
       return;
     }
-
     const float average_weight = weight_sum / influence_sum;
 
-    /* Apply averaged weight to all points. */
+    /* Blend each point towards the average. The brush strength is already folded into the
+     * point influence during sampling. */
     for (const BrushPoint &point : points_in_brush) {
       const float old_weight = get_vertex_weight(point.point_index);
-      const float weight_delta = average_weight - old_weight;
+      if (old_weight < 0.0f) {
+        continue;
+      }
       const float new_weight = math::clamp(
-          old_weight + math::interpolate(0.0f, weight_delta, point.influence * brush_strength),
+          old_weight + math::interpolate(0.0f, average_weight - old_weight, point.influence),
           0.0f,
           1.0f);
       set_vertex_weight(point.point_index, new_weight);
@@ -316,12 +171,13 @@ class AverageWeightPaintOperation : public CurvesWeightPaintOperationBase {
 /* -------------------------------------------------------------------- */
 /** \name Smear Weight Paint Operation
  *
- * Smears weight values in the direction of brush movement.
+ * Drags weights along with the brush movement by blending each point towards the weight it had on
+ * the previous stroke sample.
  * \{ */
 
 class SmearWeightPaintOperation : public CurvesWeightPaintOperationBase {
  private:
-  /* Cached weights from the previous stroke sample for smearing. */
+  /* Weights from the previous stroke sample, indexed by curve point. */
   Array<float> previous_weights_;
   bool has_previous_sample_ = false;
 
@@ -335,36 +191,16 @@ class SmearWeightPaintOperation : public CurvesWeightPaintOperationBase {
   {
     CurvesWeightPaintOperationBase::on_stroke_begin(C, start_extension);
 
-    /* Initialize previous weights array. */
+    /* Seed the previous-sample weights with the actual point weights so that points entering the
+     * brush later are not smeared towards zero. */
     if (curves) {
-      previous_weights_.reinitialize(curves->points_num());
-      previous_weights_.fill(0.0f);
+      const int points_num = curves->points_num();
+      previous_weights_.reinitialize(points_num);
+      for (const int point_i : IndexRange(points_num)) {
+        previous_weights_[point_i] = math::max(0.0f, get_vertex_weight(point_i));
+      }
     }
     has_previous_sample_ = false;
-  }
-
-  void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) override
-  {
-    get_brush_settings(C, stroke_extension);
-    get_mouse_input(stroke_extension);
-
-    if (!curves || curves->is_empty()) {
-      return;
-    }
-
-    sample_curves_3d_brush(C, stroke_extension);
-
-    if (has_previous_sample_) {
-      apply_smear_operation(C);
-    }
-
-    /* Cache current weights for next sample. */
-    cache_current_weights();
-    has_previous_sample_ = true;
-
-    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
-    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, object);
-    WM_event_add_notifier(&C, NC_GEOM | ND_DATA, curves_id);
   }
 
   void on_stroke_done(const bContext &C) override
@@ -374,42 +210,50 @@ class SmearWeightPaintOperation : public CurvesWeightPaintOperationBase {
     has_previous_sample_ = false;
   }
 
- private:
-  void cache_current_weights()
+ protected:
+  void apply_brush(const bContext & /*C*/, const StrokeExtension & /*stroke_extension*/) override
   {
-    for (const BrushPoint &point : points_in_brush) {
-      previous_weights_[point.point_index] = get_vertex_weight(point.point_index);
+    /* Make sure the cache matches the current geometry (guards against a failed stroke begin). */
+    if (previous_weights_.size() != curves->points_num()) {
+      previous_weights_.reinitialize(curves->points_num());
+      previous_weights_.fill(0.0f);
+      has_previous_sample_ = false;
     }
+
+    if (!points_in_brush.is_empty() && has_previous_sample_) {
+      apply_smear();
+    }
+
+    /* Cache the resulting weights for the next stroke sample. */
+    for (const BrushPoint &point : points_in_brush) {
+      previous_weights_[point.point_index] = math::max(0.0f, get_vertex_weight(point.point_index));
+    }
+    has_previous_sample_ = true;
   }
 
-  void apply_smear_operation(const bContext & /*C*/)
+ private:
+  void apply_smear()
   {
-    if (points_in_brush.is_empty()) {
-      return;
-    }
-
-    /* Calculate brush movement direction. */
+    /* Smear strength is proportional to how far the brush moved this sample. */
     const float2 brush_direction = mouse_position - mouse_position_previous;
     const float brush_movement = math::length(brush_direction);
-
-    if (brush_movement < 1e-6f) {
+    if (brush_movement < 1e-6f || brush_radius < 1e-6f) {
       return;
     }
+    const float smear_factor = math::min(1.0f, brush_movement / brush_radius);
 
-    /* Apply smeared weights. */
     for (const BrushPoint &point : points_in_brush) {
       const float old_weight = get_vertex_weight(point.point_index);
+      if (old_weight < 0.0f) {
+        continue;
+      }
       const float prev_weight = previous_weights_[point.point_index];
 
-      /* Smear factor based on brush movement. */
-      const float smear_factor = math::min(1.0f, brush_movement / brush_radius);
-
-      /* Blend between current weight and previous cached weight. */
+      /* Blend the current weight towards the previous-sample weight, scaled by brush movement and
+       * the point influence (which already includes the brush strength). */
       const float smeared_weight = math::interpolate(old_weight, prev_weight, smear_factor);
       const float new_weight = math::clamp(
-          math::interpolate(old_weight, smeared_weight, point.influence * brush_strength),
-          0.0f,
-          1.0f);
+          math::interpolate(old_weight, smeared_weight, point.influence), 0.0f, 1.0f);
 
       set_vertex_weight(point.point_index, new_weight);
     }

@@ -527,8 +527,6 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
   layer.mode_transfer.object_sync(manager, ob_ref, resources, state);
 
   if (needs_prepass) {
-    printf("[DEBUG] Object sync: Running prepass for object %s (type: %d, mode: %d)\n", 
-           ob_ref.object->id.name, ob_ref.object->type, ob_ref.object->mode);
     layer.prepass.object_sync(manager, ob_ref, resources, state);
   }
 
@@ -1151,11 +1149,10 @@ bool Instance::object_needs_prepass(const ObjectRef &ob_ref, bool in_paint_mode)
     if (object_is_rendered_transparent(ob_ref.object, state) ||
         object_is_in_front(ob_ref.object, state))
     {
-      printf("[DEBUG] Prepass: Object %s needs prepass (transparent/in_front)\n", ob_ref.object->id.name);
       return true;
     }
-    
-    /* Add curves weight paint support for depth culling */
+
+    /* Add curves weight/vertex paint support for depth culling */
     if (ob_ref.object->type == OB_CURVES &&
         ELEM(ob_ref.object->mode, OB_MODE_WEIGHT_CURVES, OB_MODE_VERTEX_CURVES))
     {

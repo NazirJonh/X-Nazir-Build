@@ -6,7 +6,10 @@
 
 #include <memory>
 
+#include "BLI_function_ref.hh"
+#include "BLI_offset_indices.hh"
 #include "BLI_vector.hh"
+#include "BLI_virtual_array.hh"
 #include "BLI_rect.h"
 #include "BKE_context.hh"
 #include "DNA_brush_types.h"
@@ -103,8 +106,9 @@ class CurvesPaintOperationBase : public CurvesPaintStrokeOperation {
   /**
    * Get brush settings from context and stroke extension.
    * Updates radius, strength based on pressure if enabled.
+   * Virtual so paint modes (weight, vertex) can extend it with mode-specific settings.
    */
-  void get_brush_settings(const bContext &C, const StrokeExtension &stroke_extension);
+  virtual void get_brush_settings(const bContext &C, const StrokeExtension &stroke_extension);
 
   /**
    * Update mouse input and calculate brush bounding box.
@@ -120,27 +124,58 @@ class CurvesPaintOperationBase : public CurvesPaintStrokeOperation {
   void sample_curves_3d_brush(const bContext &C, const StrokeExtension &stroke_extension);
 
   /**
+   * Factor used to widen the sampling brush relative to the visible brush radius.
+   * Some brushes (e.g. Blur) need to look at a slightly larger neighborhood.
+   * Defaults to 1.0 (no widening).
+   */
+  virtual float brush_widen_factor() const
+  {
+    return 1.0f;
+  }
+
+  /**
+   * Calls \a fn for the index of each direct curve neighbor of \a point_index.
+   * Accounts for cyclic curves. Visits 0, 1, or 2 neighbors.
+   */
+  static void foreach_curve_neighbors(int point_index,
+                                      const OffsetIndices<int> &points_by_curve,
+                                      Span<int> point_to_curve,
+                                      const VArray<bool> &cyclic,
+                                      FunctionRef<void(int)> fn);
+
+  /**
    * Check if a point is within the brush radius.
    * @param point_position_re Screen-space position of the point
    * @return true if point is under the brush
    */
-  bool is_point_in_brush(const float2 &point_position_re);
+  bool is_point_in_brush(const float2 &point_position_re) const;
 
   /**
    * Calculate brush falloff for a point based on distance.
    * @param distance_re Screen-space distance from brush center
    * @return Falloff factor (0.0 - 1.0)
    */
-  float calculate_brush_falloff(float distance_re);
+  float calculate_brush_falloff(float distance_re) const;
 
   /* ----- Virtual methods for specific paint behavior ----- */
 
   /**
+   * Apply the brush to all points collected in points_in_brush.
+   *
+   * This is the main extension point for brush behavior. The default implementation
+   * applies the operation independently to every point under the brush (suitable for
+   * the Draw brush). Brushes that need to consider the whole set of points at once
+   * (Blur, Average, Smear) override this method instead.
+   */
+  virtual void apply_brush(const bContext &C, const StrokeExtension &stroke_extension);
+
+  /**
    * Apply the paint operation to a single point.
-   * Overridden by subclasses to implement specific paint behavior (weight, color, etc).
+   * Used by the default apply_brush() implementation. Overridden by subclasses to
+   * implement per-point paint behavior (weight, color, etc).
    * @param point Brush point data with influence factor
    */
-  virtual void apply_operation_to_point(const CurvesBrushPoint &point) = 0;
+  virtual void apply_operation_to_point(const CurvesBrushPoint & /*point*/) {}
 
   /**
    * Initialize paint mode before the stroke begins.

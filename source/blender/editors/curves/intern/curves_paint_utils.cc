@@ -136,10 +136,45 @@ void CurvesPaintOperationBase::get_mouse_input(const StrokeExtension &stroke_ext
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name CurvesPaintOperationBase - Curve Neighbor Traversal
+ * \{ */
+
+void CurvesPaintOperationBase::foreach_curve_neighbors(const int point_index,
+                                                       const OffsetIndices<int> &points_by_curve,
+                                                       const Span<int> point_to_curve,
+                                                       const VArray<bool> &cyclic,
+                                                       const FunctionRef<void(int)> fn)
+{
+  const int curve_index = point_to_curve[point_index];
+  const IndexRange curve_points = points_by_curve[curve_index];
+  if (curve_points.size() <= 1) {
+    return;
+  }
+  const int64_t local = int64_t(point_index) - curve_points.first();
+  const bool is_cyclic = cyclic[curve_index];
+
+  if (local > 0) {
+    fn(int(curve_points[local - 1]));
+  }
+  else if (is_cyclic) {
+    fn(int(curve_points.last()));
+  }
+
+  if (local + 1 < curve_points.size()) {
+    fn(int(curve_points[local + 1]));
+  }
+  else if (is_cyclic) {
+    fn(int(curve_points.first()));
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name CurvesPaintOperationBase - Point-in-Brush Tests
  * \{ */
 
-bool CurvesPaintOperationBase::is_point_in_brush(const float2 &point_position_re)
+bool CurvesPaintOperationBase::is_point_in_brush(const float2 &point_position_re) const
 {
   /* Quick bounding box rejection. */
   if (!BLI_rctf_isect_pt_v(&brush_bbox, point_position_re)) {
@@ -151,7 +186,7 @@ bool CurvesPaintOperationBase::is_point_in_brush(const float2 &point_position_re
   return dist_sq <= (brush_radius * brush_radius);
 }
 
-float CurvesPaintOperationBase::calculate_brush_falloff(float distance_re)
+float CurvesPaintOperationBase::calculate_brush_falloff(float distance_re) const
 {
   if (distance_re >= brush_radius) {
     return 0.0f;
@@ -257,6 +292,15 @@ void CurvesPaintOperationBase::on_stroke_begin(const bContext &C,
   init_paint_mode(C);
 }
 
+void CurvesPaintOperationBase::apply_brush(const bContext & /*C*/,
+                                           const StrokeExtension & /*stroke_extension*/)
+{
+  /* Default behavior: apply the operation independently to every point under the brush. */
+  for (const CurvesBrushPoint &point : points_in_brush) {
+    apply_operation_to_point(point);
+  }
+}
+
 void CurvesPaintOperationBase::on_stroke_extended(const bContext &C,
                                                    const StrokeExtension &stroke_extension)
 {
@@ -267,8 +311,8 @@ void CurvesPaintOperationBase::on_stroke_extended(const bContext &C,
     return;
   }
 
-  /* Update mouse input and bounding box. */
-  get_mouse_input(stroke_extension);
+  /* Update mouse input and bounding box (brushes may widen the sampling area). */
+  get_mouse_input(stroke_extension, brush_widen_factor());
 
   if (!curves || curves->is_empty()) {
     return;
@@ -277,10 +321,8 @@ void CurvesPaintOperationBase::on_stroke_extended(const bContext &C,
   /* Sample points under the brush. */
   sample_curves_3d_brush(C, stroke_extension);
 
-  /* Apply operation to all points under the brush. */
-  for (const CurvesBrushPoint &point : points_in_brush) {
-    apply_operation_to_point(point);
-  }
+  /* Apply the brush to the collected points. */
+  apply_brush(C, stroke_extension);
 
   /* Notify about geometry changes. */
   DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);

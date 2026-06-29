@@ -40,7 +40,6 @@ class CurvesVertexPaintOperationBase : public CurvesPaintOperationBase {
 
  public:
   void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override;
-  void on_stroke_extended(const bContext &C, const StrokeExtension &stroke_extension) override;
   void on_stroke_done(const bContext &C) override;
 
   /* ----- Vertex paint specific utilities ----- */

@@ -6016,6 +6016,12 @@ MenuType *button_menutype_get(const Button *but)
   return nullptr;
 }
 
+void button_tab_menu_set(Button *but, MenuType *menu)
+{
+  BLI_assert(but->type == ButtonType::Tab);
+  static_cast<ButtonTab *>(but)->menu = menu;
+}
+
 PanelType *button_paneltype_get(const Button *but)
 {
   if (but->menu_create_func == item_paneltype_func) {

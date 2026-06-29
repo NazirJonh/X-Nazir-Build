@@ -321,6 +321,7 @@ wmDrag *WM_drag_data_create(bContext *C, int icon, eWM_DragDataType type, void *
     case WM_DRAG_GREASE_PENCIL_LAYER:
     case WM_DRAG_ASSET:
     case WM_DRAG_ASSET_CATALOG:
+    case WM_DRAG_ASSET_SHELF_CATALOG:
       /* Move ownership of poin to wmDrag. */
       drag->poin = poin;
       drag->flags |= WM_DRAG_FREE_DATA;
@@ -459,6 +460,10 @@ void WM_drag_data_free(eWM_DragDataType dragtype, void *poin)
     case WM_DRAG_STRING: {
       std::string *str = static_cast<std::string *>(poin);
       MEM_delete(str);
+      break;
+    }
+    case WM_DRAG_ASSET_SHELF_CATALOG: {
+      MEM_delete(static_cast<wmDragAssetShelfCatalog *>(poin));
       break;
     }
     case WM_DRAG_NODE_TREE_INTERFACE: {
@@ -950,6 +955,15 @@ wmDragAssetCatalog *WM_drag_get_asset_catalog_data(const wmDrag *drag)
   }
 
   return static_cast<wmDragAssetCatalog *>(drag->poin);
+}
+
+wmDragAssetShelfCatalog *WM_drag_get_asset_shelf_catalog_data(const wmDrag *drag)
+{
+  if (drag->type != WM_DRAG_ASSET_SHELF_CATALOG) {
+    return nullptr;
+  }
+
+  return static_cast<wmDragAssetShelfCatalog *>(drag->poin);
 }
 
 void WM_drag_add_asset_list_item(wmDrag *drag, const asset_system::AssetRepresentation *asset)

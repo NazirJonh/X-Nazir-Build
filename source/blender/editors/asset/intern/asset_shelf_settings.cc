@@ -191,6 +191,33 @@ void settings_set_catalog_path_enabled(AssetShelf &shelf,
   }
 }
 
+bool settings_reorder_catalog_path(AssetShelf &shelf, const int from_index, const int to_index)
+{
+  ListBaseT<AssetCatalogPathLink> *enabled_catalog_paths = get_enabled_catalog_path_list(shelf);
+  if (!enabled_catalog_paths) {
+    return false;
+  }
+
+  const int count = BLI_listbase_count(enabled_catalog_paths);
+  if (from_index < 0 || from_index >= count || to_index < 0 || to_index > count) {
+    return false;
+  }
+
+  /* \a to_index is the position to insert in front of (the list size means "append"). Removing the
+   * dragged item shifts every following item down by one, so convert it to the final absolute index
+   * #BLI_listbase_move_index expects. It returns false (no change) when the item stays in place. */
+  const int dst_index = (from_index < to_index) ? to_index - 1 : to_index;
+  if (!BLI_listbase_move_index(enabled_catalog_paths, from_index, dst_index)) {
+    return false;
+  }
+
+  if (use_enabled_catalogs_from_prefs(shelf)) {
+    U.runtime.is_dirty = true;
+  }
+
+  return true;
+}
+
 void settings_foreach_enabled_catalog_path(
     const AssetShelf &shelf,
     FunctionRef<void(const asset_system::AssetCatalogPath &catalog_path)> fn)

@@ -385,6 +385,13 @@ Button *but_find_mouse_over(const ARegion *region, const wmEvent *event)
       region, event->xy, event->modifier & KM_CTRL, false, nullptr, nullptr);
 }
 
+rctf button_screen_rect(const Button *but, const ARegion *region)
+{
+  rctf rect;
+  block_to_window_rctf(region, but->block, &rect, &but->rect);
+  return rect;
+}
+
 Button *button_find_rect_over(const ARegion *region, const rcti *rect_px)
 {
   if (!region_contains_rect_px(region, rect_px)) {

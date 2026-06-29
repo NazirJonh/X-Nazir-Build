@@ -87,6 +87,14 @@ bool settings_is_catalog_path_enabled(const AssetShelf &shelf,
                                       const asset_system::AssetCatalogPath &path);
 void settings_set_catalog_path_enabled(AssetShelf &shelf,
                                        const asset_system::AssetCatalogPath &path);
+/**
+ * Reorder the enabled catalog paths (i.e. the asset shelf catalog tabs) by moving the path at \a
+ * from_index so that it ends up right before the path currently at \a to_index. Passing the number
+ * of enabled paths as \a to_index moves it to the end. Works on whichever storage is active for the
+ * shelf (Preferences or the shelf settings).
+ * \return True if the order actually changed.
+ */
+bool settings_reorder_catalog_path(AssetShelf &shelf, int from_index, int to_index);
 
 void settings_foreach_enabled_catalog_path(
     const AssetShelf &shelf,

@@ -71,6 +71,12 @@ void header_region_listen(const wmRegionListenerParams *params);
 int header_region_size();
 void types_register(ARegionType *region_type, const int space_type);
 
+/**
+ * Register the operator and drop-box used for drag & drop reordering of catalog tabs in the asset
+ * shelf header. Call once on startup (from #operatortypes_asset()).
+ */
+void catalog_tabs_drag_drop_register();
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

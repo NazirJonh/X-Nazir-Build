@@ -8,6 +8,8 @@
 
 #include "AS_asset_representation.hh"
 
+#include "MEM_guardedalloc.h"
+
 #include "ED_asset.hh"
 
 #include "WM_api.hh"
@@ -87,6 +89,19 @@ void button_drag_set_image(Button *but, const char *path, int icon, const ImBuf 
   def_but_icon(but, icon, 0); /* no flag UI_HAS_ICON, so icon doesn't draw in button */
   button_drag_set_path(but, path);
   button_drag_attach_image(but, imb, scale);
+}
+
+void button_drag_set_asset_shelf_catalog(Button *but, const int catalog_index)
+{
+  wmDragAssetShelfCatalog *catalog_drag = MEM_new<wmDragAssetShelfCatalog>(__func__);
+  catalog_drag->index = catalog_index;
+
+  but->dragtype = WM_DRAG_ASSET_SHELF_CATALOG;
+  if (but->dragflag & BUT_DRAGPOIN_FREE) {
+    WM_drag_data_free(but->dragtype, but->dragpoin);
+  }
+  but->dragpoin = catalog_drag;
+  but->dragflag |= BUT_DRAGPOIN_FREE;
 }
 
 void button_drag_free(Button *but)

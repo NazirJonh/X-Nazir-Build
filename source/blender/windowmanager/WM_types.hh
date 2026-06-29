@@ -1283,6 +1283,8 @@ enum eWM_DragDataType : int8_t {
   WM_DRAG_NODE_TREE_INTERFACE,
   WM_DRAG_BONE_COLLECTION,
   WM_DRAG_SHAPE_KEY,
+  /** Reordering a catalog tab within the asset shelf header (see #wmDragAssetShelfCatalog). */
+  WM_DRAG_ASSET_SHELF_CATALOG,
 };
 
 enum eWM_DragFlags {
@@ -1306,6 +1308,11 @@ struct wmDragAsset {
 
 struct wmDragAssetCatalog {
   bUUID drag_catalog_id;
+};
+
+struct wmDragAssetShelfCatalog {
+  /** Index of the dragged catalog tab within the asset shelf's enabled catalog paths. */
+  int index;
 };
 
 /**

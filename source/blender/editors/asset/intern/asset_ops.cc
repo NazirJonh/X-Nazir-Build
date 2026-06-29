@@ -35,6 +35,7 @@
 #include "BLI_string.hh"
 
 #include "ED_asset.hh"
+#include "ED_asset_shelf.hh"
 #include "ED_screen.hh"
 /* XXX needs access to the file list, should all be done via the asset system in future. */
 #include "ED_fileselect.hh"
@@ -1800,6 +1801,9 @@ void operatortypes_asset()
   WM_operatortype_append(ASSET_OT_screenshot_preview);
 
   WM_operatortype_append(ASSET_OT_assets_download);
+
+  /* Registers #ASSET_OT_shelf_catalog_reorder and its drop-box for reordering catalog tabs. */
+  shelf::catalog_tabs_drag_drop_register();
 }
 
 }  // namespace blender::ed::asset

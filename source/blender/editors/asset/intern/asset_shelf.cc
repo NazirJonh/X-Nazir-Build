@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <climits>
 
 #include "AS_asset_catalog_path.hh"
 #include "AS_asset_library.hh"
@@ -27,11 +28,13 @@
 #include "BLT_translation.hh"
 
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
 
 #include "ED_asset_list.hh"
 #include "ED_screen.hh"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
@@ -866,7 +869,11 @@ static void add_catalog_tabs(AssetShelf &shelf, ui::Layout &layout)
 
   layout.separator();
 
+  /* Right-click menu for reordering a catalog tab (see #catalog_tab_context_menu_register()). */
+  MenuType *tab_menu = WM_menutype_find("ASSETSHELF_MT_catalog_tab_context_menu", false);
+
   /* Regular catalog tabs. */
+  int catalog_index = 0;
   settings_foreach_enabled_catalog_path(shelf, [&](const asset_system::AssetCatalogPath &path) {
     ui::Button *but = add_tab_button(*block, path.name());
 
@@ -877,7 +884,288 @@ static void add_catalog_tabs(AssetShelf &shelf, ui::Layout &layout)
     button_func_pushed_state_set(but, [&shelf_settings, path](const ui::Button &) -> bool {
       return settings_is_active_catalog(shelf_settings, path);
     });
+
+    /* Enable drag & drop reordering of the tab (see #catalog_tabs_drag_drop_register()). The
+     * dragged tab is identified by its index in the enabled catalog paths; the drop target reads
+     * the same index back from the button context. */
+    button_drag_set_asset_shelf_catalog(but, catalog_index);
+    button_context_int_set(block, but, "asset_shelf_catalog_index", catalog_index);
+    if (tab_menu) {
+      ui::button_tab_menu_set(but, tab_menu);
+    }
+    catalog_index++;
   });
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Catalog Tab Reordering (Drag & Drop)
+ *
+ * Lets the user reorder the catalog tabs in the asset shelf header by dragging them. The tab
+ * buttons are made draggable in #add_catalog_tabs() (carrying the dragged catalog's index) and each
+ * tab stores its index in the button context ("asset_shelf_catalog_index"). A drop-box registered
+ * in the global "User Interface" drop-box map (so it is available in the header region) handles the
+ * drop and runs #ASSET_OT_shelf_catalog_reorder.
+ * \{ */
+
+/**
+ * Find the catalog tab under the cursor and return its index, or -1 if the cursor isn't over a
+ * catalog tab. \a r_after is set to true when the cursor is in the right half of the tab (i.e. the
+ * dragged tab should be inserted after it). \a r_tab_rect, when given, receives the tab's rectangle
+ * in window coordinates (only written when a tab is found).
+ */
+static int catalog_tab_index_under_cursor(const bContext &C,
+                                          const wmEvent &event,
+                                          bool &r_after,
+                                          rctf *r_tab_rect = nullptr)
+{
+  r_after = false;
+
+  const ARegion *region = CTX_wm_region(&C);
+  if (!region) {
+    return -1;
+  }
+  ui::Button *but = ui::but_find_mouse_over(region, &event);
+  if (!but) {
+    return -1;
+  }
+  const std::optional<int64_t> index = ui::button_context_int_get(but, "asset_shelf_catalog_index");
+  if (!index) {
+    return -1;
+  }
+
+  const rctf rect = ui::button_screen_rect(but, region);
+  const float center_x = (rect.xmin + rect.xmax) * 0.5f;
+  r_after = event.xy[0] > center_x;
+  if (r_tab_rect) {
+    *r_tab_rect = rect;
+  }
+  return int(*index);
+}
+
+static bool catalog_tab_reorder_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
+{
+  if (drag->type != WM_DRAG_ASSET_SHELF_CATALOG) {
+    return false;
+  }
+  const ARegion *region = CTX_wm_region(C);
+  if (!region || region->regiontype != RGN_TYPE_ASSET_SHELF_HEADER) {
+    return false;
+  }
+  ui::Button *but = ui::but_find_mouse_over(region, event);
+  if (!but) {
+    return false;
+  }
+  return ui::button_context_int_get(but, "asset_shelf_catalog_index").has_value();
+}
+
+static void catalog_tab_reorder_drop_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
+{
+  const wmDragAssetShelfCatalog *catalog_drag = WM_drag_get_asset_shelf_catalog_data(drag);
+  RNA_int_set(drop->ptr, "from_index", catalog_drag->index);
+
+  int to_index = -1;
+  const wmWindow *win = CTX_wm_window(C);
+  if (win && win->runtime->eventstate) {
+    bool after = false;
+    const int target_index = catalog_tab_index_under_cursor(
+        *C, *win->runtime->eventstate, after);
+    if (target_index >= 0) {
+      to_index = target_index + (after ? 1 : 0);
+    }
+  }
+  RNA_int_set(drop->ptr, "to_index", to_index);
+}
+
+static std::string catalog_tab_reorder_drop_tooltip(bContext * /*C*/,
+                                                    wmDrag * /*drag*/,
+                                                    const int /*xy*/[2],
+                                                    wmDropBox * /*drop*/)
+{
+  return TIP_("Reorder catalog tab");
+}
+
+/**
+ * Draw a vertical insertion line in the gap where the dragged catalog tab would be dropped, so the
+ * user sees the resulting position before releasing. Mirrors the insertion logic in
+ * #catalog_tab_reorder_drop_copy() so the indicator matches the actual drop.
+ */
+static void catalog_tab_reorder_draw_in_view(bContext *C,
+                                             wmWindow *win,
+                                             wmDrag *drag,
+                                             const int /*xy*/[2])
+{
+  const wmDragAssetShelfCatalog *catalog_drag = WM_drag_get_asset_shelf_catalog_data(drag);
+  if (!catalog_drag || !win->runtime->eventstate) {
+    return;
+  }
+  const ARegion *region = CTX_wm_region(C);
+  if (!region) {
+    return;
+  }
+
+  bool after = false;
+  rctf tab_rect;
+  const int target_index = catalog_tab_index_under_cursor(
+      *C, *win->runtime->eventstate, after, &tab_rect);
+  if (target_index < 0) {
+    return;
+  }
+
+  const int from_index = catalog_drag->index;
+  const int to_index = target_index + (after ? 1 : 0);
+  /* Dropping a tab onto its own position leaves the order unchanged; don't draw a misleading line. */
+  if (to_index == from_index || to_index == from_index + 1) {
+    return;
+  }
+
+  /* The draw buffer uses the region's viewport but sets up no transform, so configure region pixel
+   * space here. #button_screen_rect() returns window coordinates, so offset into region-local
+   * coordinates to match. */
+  wmOrtho2_region_pixelspace(region);
+
+  const float x = (after ? tab_rect.xmax : tab_rect.xmin) - region->winrct.xmin;
+  const float ymin = tab_rect.ymin - region->winrct.ymin;
+  const float ymax = tab_rect.ymax - region->winrct.ymin;
+  const float half_width = U.pixelsize;
+
+  rctf line_rect;
+  line_rect.xmin = x - half_width;
+  line_rect.xmax = x + half_width;
+  line_rect.ymin = ymin;
+  line_rect.ymax = ymax;
+
+  float color[4];
+  ui::theme::get_color_blend_4f(TH_TEXT, TH_BACK, 0.4f, color);
+  color[3] = 1.0f;
+
+  ui::draw_roundbox_corner_set(ui::CNR_NONE);
+  ui::draw_roundbox_4fv(&line_rect, true, 0.0f, color);
+}
+
+static bool catalog_tab_reorder_poll(bContext *C)
+{
+  return active_shelf_from_context(C) != nullptr;
+}
+
+static wmOperatorStatus catalog_tab_reorder_exec(bContext *C, wmOperator *op)
+{
+  AssetShelf *shelf = active_shelf_from_context(C);
+  if (!shelf) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const int from_index = RNA_int_get(op->ptr, "from_index");
+  const int to_index = RNA_int_get(op->ptr, "to_index");
+  if (to_index < 0) {
+    return OPERATOR_CANCELLED;
+  }
+
+  if (!settings_reorder_catalog_path(*shelf, from_index, to_index)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  send_redraw_notifier(*C);
+  return OPERATOR_FINISHED;
+}
+
+static void ASSET_OT_shelf_catalog_reorder(wmOperatorType *ot)
+{
+  ot->name = "Reorder Asset Shelf Catalog Tab";
+  ot->description = "Change the order of a catalog tab in the asset shelf";
+  ot->idname = "ASSET_OT_shelf_catalog_reorder";
+
+  ot->exec = catalog_tab_reorder_exec;
+  ot->poll = catalog_tab_reorder_poll;
+
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_int(ot->srna,
+              "from_index",
+              -1,
+              -1,
+              INT_MAX,
+              "From Index",
+              "Index of the catalog tab to move",
+              -1,
+              INT_MAX);
+  RNA_def_int(ot->srna,
+              "to_index",
+              -1,
+              -1,
+              INT_MAX,
+              "To Index",
+              "Index to insert the dragged catalog tab in front of",
+              -1,
+              INT_MAX);
+}
+
+/**
+ * Right-click context menu for a catalog tab, offering to move it one step towards the front or the
+ * back. The clicked tab's index is read from its button context ("asset_shelf_catalog_index", set in
+ * #add_catalog_tabs()); the menu reuses #ASSET_OT_shelf_catalog_reorder with explicit indices.
+ */
+static void catalog_tab_context_menu_draw(const bContext *C, Menu *menu)
+{
+  ui::Layout &layout = *menu->layout;
+
+  const std::optional<int64_t> index = CTX_data_int_get(C, "asset_shelf_catalog_index");
+  AssetShelf *shelf = active_shelf_from_context(C);
+  if (!index || !shelf) {
+    return;
+  }
+  const int from_index = int(*index);
+
+  int count = 0;
+  settings_foreach_enabled_catalog_path(
+      *shelf, [&count](const asset_system::AssetCatalogPath & /*path*/) { count++; });
+
+  /* Move one position towards the front. The reorder operator's "to_index" is the position to
+   * insert in front of (see #settings_reorder_catalog_path()). */
+  {
+    ui::Layout &row = layout.row(false);
+    row.enabled_set(from_index > 0);
+    PointerRNA op_ptr = row.op(
+        "ASSET_OT_shelf_catalog_reorder", IFACE_("Move Left"), ICON_TRIA_LEFT);
+    RNA_int_set(&op_ptr, "from_index", from_index);
+    RNA_int_set(&op_ptr, "to_index", from_index - 1);
+  }
+
+  /* Move one position towards the back. Inserting in front of the tab after the next one moves the
+   * dragged tab one slot to the right. */
+  {
+    ui::Layout &row = layout.row(false);
+    row.enabled_set(from_index < count - 1);
+    PointerRNA op_ptr = row.op(
+        "ASSET_OT_shelf_catalog_reorder", IFACE_("Move Right"), ICON_TRIA_RIGHT);
+    RNA_int_set(&op_ptr, "from_index", from_index);
+    RNA_int_set(&op_ptr, "to_index", from_index + 2);
+  }
+}
+
+static void catalog_tab_context_menu_register()
+{
+  MenuType *mt = MEM_new_zeroed<MenuType>(__func__);
+  STRNCPY_UTF8(mt->idname, "ASSETSHELF_MT_catalog_tab_context_menu");
+  STRNCPY_UTF8(mt->label, N_("Catalog Tab"));
+  mt->draw = catalog_tab_context_menu_draw;
+  WM_menutype_add(mt);
+}
+
+void catalog_tabs_drag_drop_register()
+{
+  WM_operatortype_append(ASSET_OT_shelf_catalog_reorder);
+  catalog_tab_context_menu_register();
+
+  ListBaseT<wmDropBox> *lb = WM_dropboxmap_find("User Interface", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  wmDropBox *drop = WM_dropbox_add(lb,
+                                   "ASSET_OT_shelf_catalog_reorder",
+                                   catalog_tab_reorder_drop_poll,
+                                   catalog_tab_reorder_drop_copy,
+                                   nullptr,
+                                   catalog_tab_reorder_drop_tooltip);
+  drop->draw_in_view = catalog_tab_reorder_draw_in_view;
 }
 
 /** \} */

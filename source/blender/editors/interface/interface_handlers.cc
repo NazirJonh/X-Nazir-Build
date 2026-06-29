@@ -2186,7 +2186,9 @@ static bool but_drag_init(bContext *C, Button *but, HandleButtonData *data, cons
     button_activate_state(C, but, BUTTON_STATE_EXIT);
     data->cancel = true;
 #ifdef USE_DRAG_TOGGLE
-    if (drag_toggle_but_is_supported(but)) {
+    /* An explicitly assigned drag (e.g. reorderable asset shelf catalog tabs) takes precedence over
+     * the implicit drag-toggle behavior that boolean buttons such as tabs would otherwise use. */
+    if (drag_toggle_but_is_supported(but) && !button_drag_is_draggable(but)) {
       uiDragToggleHandle *drag_info = MEM_new_zeroed<uiDragToggleHandle>(__func__);
       ARegion *region_prev;
 
@@ -5279,6 +5281,20 @@ static int do_but_TAB(
       button_activate_state(C, but, BUTTON_STATE_TEXT_EDITING);
       return WM_UI_HANDLER_BREAK;
     }
+
+    /* Non-property tabs that have drag data set (e.g. reorderable asset shelf catalog tabs) wait
+     * for a drag on press. If the cursor doesn't move far enough, the release is handled as a
+     * normal click in the #BUTTON_STATE_WAIT_DRAG state below. Property tabs and non-draggable tabs
+     * keep their existing behavior. */
+    if (!is_property && button_drag_is_draggable(but) && event->type == LEFTMOUSE &&
+        event->val == KM_PRESS)
+    {
+      button_activate_state(C, but, BUTTON_STATE_WAIT_DRAG);
+      data->dragstartx = event->xy[0];
+      data->dragstarty = event->xy[1];
+      return WM_UI_HANDLER_CONTINUE;
+    }
+
     if (ELEM(event->type, LEFTMOUSE, EVT_PADENTER, EVT_RETKEY)) {
       const int event_val = (is_property) ? KM_PRESS : KM_CLICK;
       if (event->val == event_val) {
@@ -5286,6 +5302,12 @@ static int do_but_TAB(
         return WM_UI_HANDLER_BREAK;
       }
     }
+  }
+  else if (data->state == BUTTON_STATE_WAIT_DRAG) {
+    /* Delegate the generic drag-wait state machine (drag init, release-as-click, event blocking),
+     * like #do_but_VIEW_ITEM does. For a tab, the release-without-drag case ends in
+     * #BUTTON_STATE_EXIT, which activates it. */
+    return do_but_EXIT(C, but, data, event);
   }
   else if (data->state == BUTTON_STATE_TEXT_EDITING) {
     do_but_textedit(C, block, but, data, event);

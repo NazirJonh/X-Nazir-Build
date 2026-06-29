@@ -881,6 +881,11 @@ bool block_has_active_default_button(const Block *block);
  */
 Button *but_find_mouse_over(const ARegion *region, const wmEvent *event) ATTR_WARN_UNUSED_RESULT;
 
+/**
+ * Get the rectangle of \a but in the window space of \a region (matching #wmEvent.xy coordinates).
+ */
+rctf button_screen_rect(const Button *but, const ARegion *region) ATTR_WARN_UNUSED_RESULT;
+
 uiList *uilist_find_mouse_over(const ARegion *region, const wmEvent *event);
 
 /* `interface_region_menu_popup.cc` */
@@ -2146,6 +2151,11 @@ void button_drag_set_rna(Button *but, PointerRNA *ptr);
  */
 void button_drag_set_path(Button *but, const char *path);
 void button_drag_set_name(Button *but, const char *name);
+/**
+ * Enable dragging an asset shelf catalog tab from this button, used to reorder catalog tabs. The
+ * dragged catalog is identified by its \a catalog_index within the shelf's enabled catalog paths.
+ */
+void button_drag_set_asset_shelf_catalog(Button *but, int catalog_index);
 
 /**
  * Sets #BUT_DRAG_FULL_BUT so the full button can be dragged.
@@ -2374,6 +2384,10 @@ wmOperatorType *button_operatortype_get_from_enum_menu(Button *but, PropertyRNA 
  * This is a bit of a hack but best keep it in one place at least.
  */
 MenuType *button_menutype_get(const Button *but);
+/**
+ * Set the menu shown as the right-click context menu of a tab button (#ButtonType::Tab).
+ */
+void button_tab_menu_set(Button *but, MenuType *menu);
 /**
  * This is a bit of a hack but best keep it in one place at least.
  */

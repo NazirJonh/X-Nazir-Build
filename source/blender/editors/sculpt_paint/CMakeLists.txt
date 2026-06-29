@@ -107,6 +107,10 @@ set(SRC
   mesh/sculpt_extract_loop_output.cc
   mesh/sculpt_extract_loop_pick.cc
   mesh/sculpt_extract_loop_walker.cc
+  mesh/sculpt_extract_region.cc
+  mesh/sculpt_extract_region_hover.cc
+  mesh/sculpt_extract_region_select.cc
+  mesh/sculpt_extract_shared.cc
   mesh/sculpt_geodesic.cc
   mesh/sculpt_gesture.cc
   mesh/sculpt_hide.cc
@@ -142,6 +146,9 @@ set(SRC
   mesh/sculpt_expand.hh
   mesh/sculpt_extract_loop.hh
   mesh/sculpt_extract_loop_intern.hh
+  mesh/sculpt_extract_region.hh
+  mesh/sculpt_extract_region_intern.hh
+  mesh/sculpt_extract_shared.hh
   mesh/sculpt_face_set.hh
   mesh/sculpt_filter.hh
   mesh/sculpt_flood_fill.hh

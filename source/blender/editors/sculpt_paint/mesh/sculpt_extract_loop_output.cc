@@ -5,9 +5,9 @@
 /** \file
  * \ingroup edsculpt
  *
- * Output paths for the Extract Loop tool: in-mesh duplication, face-strip
- * extrude (begin/commit), extraction to a new mesh or curves object, and the
- * #finish_extract dispatch over the selected output type.
+ * Output paths for the Extract Loop tool: in-mesh duplication, extraction to a
+ * new mesh or curves object, and the #finish_extract dispatch over the selected
+ * output type. The face-strip extrude engine lives in the shared #extract layer.
  */
 
 #include "BKE_attribute.hh"
@@ -22,7 +22,6 @@
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
-#include "BKE_unit.hh"
 
 #include "DNA_curves_types.h"
 #include "DNA_key_types.h"
@@ -30,7 +29,6 @@
 #include "DNA_object_types.h"
 #include "DNA_view3d_types.h"
 
-#include "ED_numinput.hh"
 #include "ED_object.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
@@ -45,13 +43,7 @@
 #include "DEG_depsgraph_build.hh"
 
 #include "BLI_listbase.h"
-#include "BLI_math_geom.h"
-#include "BLI_math_matrix.hh"
-#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
-#include "BLI_string.h"
-
-#include "BLT_translation.hh"
 
 #include "bmesh.hh"
 #include "bmesh_tools.hh"
@@ -84,8 +76,8 @@ static ExtractLoopSharedData rewalk_on_bmesh(const ExtractLoopSharedData &src,
                                              const bool use_boundary_walker)
 {
   ExtractLoopSharedData work = src;
-  work.bm = dst_bm;
-  work.preview_faces.clear();
+  work.base.bm = dst_bm;
+  work.base.preview_faces.clear();
   work.loop_edges.clear();
   work.preview_points.clear();
   work.seed_edge = BM_edge_at_index(dst_bm, BM_elem_index_get(src.seed_edge));
@@ -97,15 +89,6 @@ static ExtractLoopSharedData rewalk_on_bmesh(const ExtractLoopSharedData &src,
 /** \name In-Mesh Duplication
  * \{ */
 
-static int object_active_shapekey_index(const Object &ob)
-{
-  const Mesh *mesh = id_cast<const Mesh *>(ob.data);
-  if (UNLIKELY((ob.shapenr == 0) && mesh->key && !BLI_listbase_is_empty(&mesh->key->block))) {
-    return 1;
-  }
-  return ob.shapenr;
-}
-
 /**
  * Tag walked geometry in \a bm using element pointers from \a shared (same BMesh).
  */
@@ -114,10 +97,10 @@ static bool tag_walked_geometry(BMesh *bm, const ExtractLoopSharedData &shared)
   BM_mesh_elem_hflag_disable_all(bm, BM_VERT | BM_EDGE | BM_FACE, BM_ELEM_TAG, false);
 
   if (shared.mode == ExtractionMode::FaceStrip) {
-    if (shared.preview_faces.is_empty()) {
+    if (shared.base.preview_faces.is_empty()) {
       return false;
     }
-    for (BMFace *face : shared.preview_faces) {
+    for (BMFace *face : shared.base.preview_faces) {
       BM_elem_flag_set(face, BM_ELEM_TAG, true);
     }
     return true;
@@ -214,26 +197,6 @@ static void apply_mask_selection_to_duplicated(BMesh *bm,
   }
 }
 
-static BMesh *create_edit_bmesh_for_duplicate(Mesh *mesh, const Object &ob)
-{
-  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(mesh);
-  BMeshCreateParams bm_create_params{};
-  bm_create_params.use_toolflags = true;
-  BMesh *bm = BM_mesh_create(&allocsize, &bm_create_params);
-  BM_mesh_elem_toolflags_ensure(bm);
-
-  BMeshFromMeshParams mesh_to_bm_params{};
-  mesh_to_bm_params.calc_face_normal = true;
-  mesh_to_bm_params.use_shapekey = true;
-  mesh_to_bm_params.active_shapekey = object_active_shapekey_index(ob);
-  mesh_to_bm_params.add_key_index = true;
-  BM_mesh_bm_from_me(bm, mesh, &mesh_to_bm_params);
-
-  BM_mesh_elem_index_ensure(bm, BM_VERT | BM_EDGE | BM_FACE);
-  BM_mesh_elem_table_ensure(bm, BM_VERT | BM_EDGE | BM_FACE);
-  return bm;
-}
-
 /**
  * Duplicate the previewed loop or face strip inside the active mesh using #BMO_duplicate,
  * keeping the original geometry (same approach as mask duplicate).
@@ -241,11 +204,11 @@ static BMesh *create_edit_bmesh_for_duplicate(Mesh *mesh, const Object &ob)
 static void duplicate_geometry_in_object(bContext &C, wmOperator *op, ExtractLoopModalData &data)
 {
   Scene &scene = *CTX_data_scene(&C);
-  Object &ob = *data.shared.obact;
+  Object &ob = *data.shared.base.obact;
   Mesh *mesh = id_cast<Mesh *>(ob.data);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(&C);
 
-  if (data.shared.pbvh_type == bke::pbvh::Type::BMesh) {
+  if (data.shared.base.pbvh_type == bke::pbvh::Type::BMesh) {
     BKE_report(CTX_wm_reports(&C),
                RPT_ERROR,
                "Duplicate inside mesh requires dynamic topology to be disabled");
@@ -259,7 +222,7 @@ static void duplicate_geometry_in_object(bContext &C, wmOperator *op, ExtractLoo
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
   undo::geometry_begin(scene, ob, op);
 
-  BMesh *bm = create_edit_bmesh_for_duplicate(mesh, ob);
+  BMesh *bm = extract::create_edit_bmesh_for_extrude(mesh, ob);
   if (!bm) {
     undo::geometry_end(ob);
     return;
@@ -328,238 +291,6 @@ static void duplicate_geometry_in_object(bContext &C, wmOperator *op, ExtractLoo
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Face Strip Extrude (In-Mesh)
- * \{ */
-
-void extrude_apply_distance(ExtractLoopModalData &data, const float distance)
-{
-  data.extrude_distance = distance;
-  for (const int i : data.extrude_verts.index_range()) {
-    BMVert *vert = data.extrude_verts[i];
-    const float3 co = data.extrude_base_co[i] + data.extrude_normals[i] * distance;
-    copy_v3_v3(vert->co, co);
-  }
-}
-
-void extrude_update_from_mouse(ExtractLoopModalData &data, const float mval[2])
-{
-  ARegion *region = data.shared.region;
-  RegionView3D *rv3d = data.shared.rv3d;
-  Object *ob = data.shared.obact;
-  if (!region || !rv3d || !ob) {
-    return;
-  }
-
-  /* Extrude axis origin and direction in world space (object transform applied to the
-   * local strip center and average normal). This mirrors the projection the former
-   * extrude gizmo performed, so the drag feel is unchanged. */
-  const float4x4 &object_to_world = ob->object_to_world();
-  float arrow_co[3];
-  copy_v3_v3(arrow_co, math::transform_point(object_to_world, data.extrude_axis_center));
-  float arrow_no_world[3];
-  copy_v3_v3(arrow_no_world,
-             math::normalize(math::transform_direction(object_to_world, data.extrude_avg_normal)));
-
-  struct {
-    float2 mval;
-    float ray_origin[3], ray_direction[3];
-    float location[3];
-  } proj[2] = {};
-  proj[0].mval = data.extrude_init_mval;
-  proj[1].mval = float2(mval[0], mval[1]);
-
-  float arrow_no[3];
-  copy_v3_v3(arrow_no, arrow_no_world);
-
-  int ok = 0;
-  for (int j = 0; j < 2; j++) {
-    ED_view3d_win_to_ray(region, proj[j].mval, proj[j].ray_origin, proj[j].ray_direction);
-    /* Force the view's up axis when the cursor ray is nearly parallel to the extrude axis,
-     * otherwise the ray-plane intersection becomes unstable. */
-    if (j == 0) {
-      if (RAD2DEGF(acosf(dot_v3v3(proj[j].ray_direction, arrow_no_world))) < 5.0f) {
-        normalize_v3_v3(arrow_no, rv3d->viewinv[1]);
-      }
-    }
-
-    float arrow_no_proj[3];
-    project_plane_v3_v3v3(arrow_no_proj, arrow_no, proj[j].ray_direction);
-    normalize_v3(arrow_no_proj);
-
-    float lambda;
-    if (isect_ray_plane_v3_factor(arrow_co, arrow_no, proj[j].ray_origin, arrow_no_proj, &lambda)) {
-      madd_v3_v3v3fl(proj[j].location, arrow_co, arrow_no, lambda);
-      ok++;
-    }
-  }
-
-  if (ok != 2) {
-    return;
-  }
-
-  float offset[3];
-  sub_v3_v3v3(offset, proj[1].location, proj[0].location);
-  const float facdir = dot_v3v3(arrow_no, offset) < 0.0f ? -1.0f : 1.0f;
-  extrude_apply_distance(data, facdir * len_v3(offset));
-}
-
-void extrude_update_status_text(bContext *C, const ExtractLoopModalData &data)
-{
-  const Scene *scene = CTX_data_scene(C);
-  char distance_str[NUM_STR_REP_LEN];
-  if (hasNumInput(&data.num_input)) {
-    outputNumInput(const_cast<NumInput *>(&data.num_input), distance_str, scene->unit);
-  }
-  else {
-    BKE_unit_value_as_string_scaled(distance_str,
-                                    sizeof(distance_str),
-                                    data.extrude_distance,
-                                    4 * -1,
-                                    B_UNIT_LENGTH,
-                                    scene->unit,
-                                    true);
-  }
-
-  char status_str[NUM_STR_REP_LEN + 32];
-  BLI_snprintf(status_str, sizeof(status_str), "%s: %s", IFACE_("Extrude"), distance_str);
-  ED_workspace_status_text(C, status_str);
-}
-
-bool extrude_begin(bContext &C, wmOperator *op, ExtractLoopModalData &data)
-{
-  Object &ob = *data.shared.obact;
-  Mesh *mesh = id_cast<Mesh *>(ob.data);
-  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(&C);
-
-  if (data.shared.pbvh_type == bke::pbvh::Type::BMesh) {
-    BKE_report(CTX_wm_reports(&C),
-               RPT_ERROR,
-               "Face strip extrude requires dynamic topology to be disabled");
-    return false;
-  }
-
-  if (!extract_preview_is_valid(data.shared) || !data.shared.seed_edge) {
-    return false;
-  }
-
-  BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
-
-  data.edit_bm = create_edit_bmesh_for_duplicate(mesh, ob);
-  if (!data.edit_bm) {
-    return false;
-  }
-
-  ExtractLoopSharedData work = rewalk_on_bmesh(data.shared, data.edit_bm, data.use_boundary_walker);
-
-  if (!tag_walked_geometry(data.edit_bm, work)) {
-    BM_mesh_free(data.edit_bm);
-    data.edit_bm = nullptr;
-    return false;
-  }
-
-  BMOperator bmo_op;
-  BMO_op_init(data.edit_bm, &bmo_op, (BMO_FLAG_DEFAULTS & ~BMO_FLAG_RESPECT_HIDE), "extrude_face_region");
-  BMO_slot_buffer_from_enabled_hflag(
-      data.edit_bm, &bmo_op, bmo_op.slots_in, "geom", BM_FACE, BM_ELEM_TAG);
-  BMO_op_exec(data.edit_bm, &bmo_op);
-
-  data.extrude_verts.clear();
-  data.extrude_base_co.clear();
-  data.extrude_normals.clear();
-  data.extrude_preview_faces.clear();
-
-  BMOIter oiter;
-  BMVert *vert;
-  BMO_ITER (vert, &oiter, bmo_op.slots_out, "geom.out", BM_VERT) {
-    data.extrude_verts.append(vert);
-    data.extrude_base_co.append(float3(vert->co));
-    data.extrude_normals.append(float3(vert->no));
-  }
-
-  BMFace *face;
-  BMO_ITER (face, &oiter, bmo_op.slots_out, "geom.out", BM_FACE) {
-    data.extrude_preview_faces.append(face);
-  }
-
-  BMO_op_finish(data.edit_bm, &bmo_op);
-
-  if (data.extrude_verts.is_empty()) {
-    BM_mesh_free(data.edit_bm);
-    data.edit_bm = nullptr;
-    BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Could not extrude face strip");
-    return false;
-  }
-
-  BM_mesh_normals_update(data.edit_bm);
-  for (const int i : data.extrude_verts.index_range()) {
-    data.extrude_normals[i] = float3(data.extrude_verts[i]->no);
-  }
-
-  float3 avg_normal(0.0f);
-  for (const float3 &no : data.extrude_normals) {
-    avg_normal += no;
-  }
-  if (normalize_v3(avg_normal) == 0.0f) {
-    avg_normal = float3(0.0f, 0.0f, 1.0f);
-  }
-  data.extrude_avg_normal = float3(avg_normal);
-
-  float3 center(0.0f);
-  for (const float3 &co : data.extrude_base_co) {
-    center += co;
-  }
-  center /= float(data.extrude_base_co.size());
-  data.extrude_axis_center = center;
-
-  if (!data.num_input_initialized) {
-    initNumInput(&data.num_input);
-    data.num_input.idx_max = 0;
-    data.num_input.unit_type[0] = B_UNIT_LENGTH;
-    data.num_input_initialized = true;
-  }
-
-  data.phase = ModalPhase::Extrude;
-  data.extrude_distance = 0.0f;
-  extrude_apply_distance(data, 0.0f);
-  extrude_update_status_text(&C, data);
-  return true;
-}
-
-void extrude_commit(bContext &C, wmOperator *op, ExtractLoopModalData &data)
-{
-  Scene &scene = *CTX_data_scene(&C);
-  Object &ob = *data.shared.obact;
-  Mesh *mesh = id_cast<Mesh *>(ob.data);
-  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(&C);
-
-  if (!data.edit_bm) {
-    return;
-  }
-
-  undo::geometry_begin(scene, ob, op);
-
-  BMeshToMeshParams bm_to_mesh_params{};
-  bm_to_mesh_params.calc_object_remap = false;
-  BM_mesh_bm_to_me(nullptr, data.edit_bm, mesh, &bm_to_mesh_params);
-  BM_mesh_free(data.edit_bm);
-  data.edit_bm = nullptr;
-
-  undo::geometry_end(ob);
-  BKE_sculptsession_free_pbvh(ob);
-
-  BKE_mesh_batch_cache_dirty_tag(mesh, BKE_MESH_BATCH_DIRTY_ALL);
-  DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(&C, NC_GEOM | ND_DATA, mesh);
-
-  Main *bmain = CTX_data_main(&C);
-  BKE_scene_graph_update_tagged(depsgraph, bmain);
-
-  BKE_report(CTX_wm_reports(&C), RPT_INFO, "Face strip extruded");
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
 /** \name New Object Extraction
  * \{ */
 
@@ -582,23 +313,23 @@ static BMesh *create_source_bmesh_for_new_object(const Mesh &mesh)
 
 static void update_bmesh_positions_from_preview(ExtractLoopSharedData &shared)
 {
-  if (shared.pbvh_type == bke::pbvh::Type::BMesh || shared.preview_positions.is_empty()) {
+  if (shared.base.pbvh_type == bke::pbvh::Type::BMesh || shared.base.preview_positions.is_empty()) {
     return;
   }
 
   BMVert *v;
   BMIter iter;
-  BM_ITER_MESH (v, &iter, shared.bm, BM_VERTS_OF_MESH) {
+  BM_ITER_MESH (v, &iter, shared.base.bm, BM_VERTS_OF_MESH) {
     const int idx = BM_elem_index_get(v);
-    if (idx >= 0 && idx < shared.preview_positions.size()) {
-      copy_v3_v3(v->co, shared.preview_positions[idx]);
+    if (idx >= 0 && idx < shared.base.preview_positions.size()) {
+      copy_v3_v3(v->co, shared.base.preview_positions[idx]);
     }
   }
 }
 
 static void isolate_extraction_geometry_in_bmesh(ExtractLoopSharedData &shared)
 {
-  BMesh *bm = shared.bm;
+  BMesh *bm = shared.base.bm;
   if (!tag_walked_geometry(bm, shared)) {
     return;
   }
@@ -647,7 +378,7 @@ static Mesh *build_extracted_mesh_for_new_object(bContext &C, ExtractLoopModalDa
     return nullptr;
   }
 
-  Object *obact = data.shared.obact;
+  Object *obact = data.shared.base.obact;
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(&C);
   BKE_sculpt_update_object_for_edit(depsgraph, obact, false);
 
@@ -686,7 +417,7 @@ static void create_mesh_in_new_object(bContext &C, ExtractLoopModalData &data)
 
   Main *bmain = CTX_data_main(&C);
   View3D *v3d = CTX_wm_view3d(&C);
-  Object *obact = data.shared.obact;
+  Object *obact = data.shared.base.obact;
 
   ushort local_view_bits = 0;
   if (v3d && v3d->localvd) {
@@ -770,7 +501,7 @@ static void create_curves_in_new_object(bContext &C, ExtractLoopModalData &data)
 
   Main *bmain = CTX_data_main(&C);
   View3D *v3d = CTX_wm_view3d(&C);
-  Object *obact = data.shared.obact;
+  Object *obact = data.shared.base.obact;
 
   ushort local_view_bits = 0;
   if (v3d && v3d->localvd) {
@@ -801,7 +532,7 @@ static void create_curves_in_new_object(bContext &C, ExtractLoopModalData &data)
 void finish_extract(bContext *C, wmOperator *op, ExtractLoopModalData *data)
 {
   if (is_face_strip_extrude_output(op, data->shared.mode)) {
-    extrude_commit(*C, op, *data);
+    extract::extrude_commit(*C, op, data->shared.base, data->extrude);
   }
   else if (RNA_boolean_get(op->ptr, "new_object")) {
     if (ExtractionOutputType(RNA_enum_get(op->ptr, "output_type")) ==

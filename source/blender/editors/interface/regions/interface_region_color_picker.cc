@@ -11,6 +11,8 @@
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
+#include <string>
 
 #include "MEM_guardedalloc.h"
 
@@ -20,6 +22,8 @@
 
 #include "BLI_listbase.h"
 #include "BLI_rect.h"
+#include "BLI_string.h"
+#include "BLI_string_ref.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
 
@@ -33,6 +37,7 @@
 #include "WM_types.hh"
 
 #include "RNA_access.hh"
+#include "RNA_path.hh"
 #include "RNA_prototypes.hh"
 
 #include "BLT_translation.hh"
@@ -675,6 +680,16 @@ static void colorpicker_square(
   hsv_but->custom_data = cpicker;
 }
 
+/* Request a rebuild of the color picker popup so its layout (e.g. the palette swatch grid and the
+ * overall popup height) updates after a value change. Mirrors the `menuretval = RETURN_UPDATE`
+ * pattern used by the picker's other update callbacks. */
+static void colorpicker_popup_tag_refresh(Block *block)
+{
+  if (block->handle) {
+    block->handle->menuretval = RETURN_UPDATE;
+  }
+}
+
 /* Build an RNA pointer to the paint settings for `mode`, used to expose the active palette in the
  * color picker popup. Returns a null pointer (`ptr.data == nullptr`) when the mode has no paint
  * settings allocated. */
@@ -705,6 +720,43 @@ static PointerRNA paint_palette_settings_ptr_get(Scene &scene, const PaintMode m
       break;
   }
   return PointerRNA_NULL;
+}
+
+/* Build a stable identifier for the color picker that opened from `but`, combining the edited
+ * data-block name and the property's RNA path. Used to key per-popup state (palette assignment and
+ * the sub-panel's expanded/collapsed state). Returns an empty string when the button has no RNA
+ * property to derive a stable key from. */
+static std::string colorpicker_popup_key_get(const Button *but)
+{
+  std::string key;
+  if (but && but->rnapoin.owner_id && but->rnaprop) {
+    if (const std::optional<std::string> path = RNA_path_from_ID_to_property(&but->rnapoin,
+                                                                             but->rnaprop))
+    {
+      key += but->rnapoin.owner_id->name;
+      key += *path;
+    }
+  }
+  return key;
+}
+
+/* Find (or lazily create) the per-color-picker palette association for `key`. A freshly created
+ * entry defaults to `default_palette` (the tool's active palette), so a picker that has never been
+ * assigned a palette matches the previous behavior. */
+static ColorPickerPalette *colorpicker_palette_entry_ensure(ToolSettings &ts,
+                                                            const StringRefNull key,
+                                                            Palette *default_palette)
+{
+  for (ColorPickerPalette &cpp : ts.color_picker_palettes) {
+    if (cpp.key && key == cpp.key) {
+      return &cpp;
+    }
+  }
+  ColorPickerPalette *cpp = MEM_new<ColorPickerPalette>(__func__);
+  cpp->key = BLI_strdupn(key.c_str(), key.size());
+  cpp->palette = default_palette;
+  BLI_addtail(&ts.color_picker_palettes, cpp);
+  return cpp;
 }
 
 /* a HS circle, V slider, rgb/hsv/hex sliders */
@@ -1119,9 +1171,25 @@ static void block_colorpicker(
     Paint *paint = (mode != PaintMode::Invalid) ?
                        BKE_paint_get_active_from_paintmode(scene, mode) :
                        nullptr;
-    PointerRNA ptr = paint ? paint_palette_settings_ptr_get(*scene, mode) : PointerRNA_NULL;
 
-    if (ptr.data != nullptr) {
+    if (paint != nullptr) {
+      /* Each color picker keeps its own palette, stored per data-path in the tool settings and
+       * independent of the tool's active palette (#Paint::palette). Fall back to the shared paint
+       * settings when the button has no RNA property to derive a stable key from. */
+      const std::string key = colorpicker_popup_key_get(from_but);
+      ColorPickerPalette *palette_entry = nullptr;
+      PointerRNA palette_ptr;
+      if (!key.empty()) {
+        palette_entry = colorpicker_palette_entry_ensure(
+            *scene->toolsettings, key, paint->palette);
+        palette_ptr = RNA_pointer_create_discrete(
+            &scene->id, RNA_ColorPickerPalette, palette_entry);
+      }
+      else {
+        palette_ptr = paint_palette_settings_ptr_get(*scene, mode);
+      }
+      Palette *active_palette = palette_entry ? palette_entry->palette : paint->palette;
+
       /* The color wheel/square is placed above `y == 0`, so the block's top does not coincide with
        * the layout coordinate origin. Layout panels (the palette sub-panel added below) assume
        * `block->rect.ymax` is that origin (block top at `y == 0`), as in standard popovers. Shift
@@ -1150,45 +1218,38 @@ static void block_colorpicker(
       palette_panel.header->label(IFACE_("Color Palette"), ICON_COLOR);
 
       if (palette_panel.body) {
+        /* Expose the picker's palette as the "palette" context member, so the swatch operators
+         * (add/delete/move/sort) and the "New" button act on it instead of the tool's active
+         * palette. */
+        if (active_palette) {
+          PointerRNA active_palette_ptr = RNA_id_pointer_create(&active_palette->id);
+          palette_panel.body->context_ptr_set("palette", &active_palette_ptr);
+        }
+
         /* Palette ID selector (choose/create/browse palettes). */
         Layout &palette_selector = palette_panel.body->column(true);
         const int64_t but_count_before = int64_t(block->buttons_ptrs.size());
-        template_id(&palette_selector, C, &ptr, "palette", "palette.new", nullptr, nullptr);
+        template_id(&palette_selector, C, &palette_ptr, "palette", "palette.new", nullptr, nullptr);
         /* When the active palette changes, rebuild the popup so the swatch grid and popup
-         * height update to match the new palette's contents. */
+         * height update to match the new palette's contents. The palette ID selector buttons set
+         * their own internal callbacks via #template_id, so use `apply_func` (which runs in
+         * addition to those) rather than overriding them. */
         for (int64_t i = but_count_before; i < int64_t(block->buttons_ptrs.size()); i++) {
           block->buttons_ptrs[i]->apply_func = [block](bContext & /*C*/) {
-            if (block->handle) {
-              block->handle->menuretval = RETURN_UPDATE;
-            }
+            colorpicker_popup_tag_refresh(block);
           };
         }
 
         /* Color swatches, only when a palette is assigned. */
-        if (paint->palette) {
+        if (active_palette) {
           template_palette(palette_panel.body,
-                           &ptr,
+                           &palette_ptr,
                            "palette",
                            true,
                            false,  /* show_empty_message */
                            false); /* show_sort_buttons */
         }
       }
-
-      /* [CP_SCROLL] Diagnose palette section build. NOTE: layout buttons (palette swatches) are
-       * not realized until block_end, so button_num here counts only the picker widgets. */
-      const int palette_color_num = paint->palette ?
-                                        BLI_listbase_count(&paint->palette->colors) :
-                                        -1;
-      printf(
-          "[CP_SCROLL] palette build: content_top=%.1f yco=%.1f panel_open_body=%d "
-          "palette_color_num=%d block_button_num=%lld\n",
-          double(content_top),
-          double(yco),
-          palette_panel.body != nullptr ? 1 : 0,
-          palette_color_num,
-          (long long)block->buttons_ptrs.size());
-      fflush(stdout);
     }
   }
 }
@@ -1266,7 +1327,15 @@ Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but)
   Block *block;
 
   block = block_begin(C, handle->region, __func__, EmbossType::Emboss);
-  popup_dummy_panel_set(handle->region, block, "color_picker_popup");
+
+  /* Give each color picker its own persistent layout-panel state (notably the Color Palette
+   * sub-panel's expanded/collapsed state) by keying the dummy popup panel on the edited property's
+   * data path. Color pickers on different properties then remember their state independently. Falls
+   * back to a shared key when the button has no RNA property. */
+  const std::string key = colorpicker_popup_key_get(but);
+  const std::string popup_panel_idname = key.empty() ? std::string("color_picker_popup") :
+                                                       "color_picker_popup:" + key;
+  popup_dummy_panel_set(handle->region, block, popup_panel_idname);
 
   if (button_is_color_gamma(but)) {
     block->is_color_gamma_picker = true;
@@ -1279,32 +1348,6 @@ Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but)
   block->flag = BLOCK_LOOP | BLOCK_KEEP_OPEN | BLOCK_OUT_1 | BLOCK_MOVEMOUSE_QUIT | BLOCK_POPUP;
   block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
   block_bounds_set_normal(block, 0.5 * UI_UNIT_X);
-
-  /* [CP_SCROLL] After bounds are set, block->rect should enclose every button (incl. realized
-   * palette swatches). Compare its height against the realized button extents. */
-  {
-    float bymin = FLT_MAX, bymax = -FLT_MAX;
-    for (const Button &bt : block->buttons()) {
-      if (bt.rect.ymin < bymin) {
-        bymin = bt.rect.ymin;
-      }
-      if (bt.rect.ymax > bymax) {
-        bymax = bt.rect.ymax;
-      }
-    }
-    printf(
-        "[CP_SCROLL] block_func_COLOR bounds: button_num=%lld block.rect.y=[%.1f..%.1f] (h=%.1f) "
-        "buttons.y=[%.1f..%.1f] (h=%.1f) aspect=%.3f\n",
-        (long long)block->buttons_ptrs.size(),
-        double(block->rect.ymin),
-        double(block->rect.ymax),
-        double(block->rect.ymax - block->rect.ymin),
-        double(bymin),
-        double(bymax),
-        double(bymax - bymin),
-        double(block->aspect));
-    fflush(stdout);
-  }
 
   block->block_event_func = colorpicker_wheel_cb;
   block->direction = UI_DIR_UP;
@@ -1336,21 +1379,28 @@ static bool colorpicker_rgb_get_from_region(const ARegion *region, float r_rgb[3
   return false;
 }
 
-bool UI_colorpicker_active_rgb_get(const bContext *C, float r_rgb[3])
+bool colorpicker_active_rgb_get(const bContext *C, float r_rgb[3])
 {
-  /* Color picker popups are temporary regions stored in screen->regionbase. */
-  bScreen *screen = CTX_wm_screen(C);
-  if (screen) {
+  /* Prefer the popup region the caller is acting within (set while handling a button inside the
+   * color picker popup), then the current region. This targets the picker the user is interacting
+   * with instead of relying on screen iteration order. */
+  if (const ARegion *region = CTX_wm_region_popup(C)) {
+    if (colorpicker_rgb_get_from_region(region, r_rgb)) {
+      return true;
+    }
+  }
+  if (const ARegion *region = CTX_wm_region(C)) {
+    if (colorpicker_rgb_get_from_region(region, r_rgb)) {
+      return true;
+    }
+  }
+  /* Fallback: color picker popups are temporary regions stored in `screen->regionbase`. */
+  if (const bScreen *screen = CTX_wm_screen(C)) {
     for (const ARegion &region : screen->regionbase) {
       if (colorpicker_rgb_get_from_region(&region, r_rgb)) {
         return true;
       }
     }
-  }
-  /* Also check the current region in case the operator runs inside the popup directly. */
-  const ARegion *region = CTX_wm_region(C);
-  if (region && colorpicker_rgb_get_from_region(region, r_rgb)) {
-    return true;
   }
   return false;
 }

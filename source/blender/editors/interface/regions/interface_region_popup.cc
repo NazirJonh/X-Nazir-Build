@@ -127,6 +127,19 @@ static void popup_block_position(wmWindow *window, ARegion *butregion, Button *b
 
   block_to_window_rctf(butregion, but->block, &block->rect, &block->rect);
 
+  /* `block->rect` is already scaled with `butregion->winrct`,
+   * apply this scale to layout panels too. */
+  if (Panel *panel = block->panel) {
+    for (LayoutPanelBody &body : panel->runtime->layout_panels.bodies) {
+      body.start_y /= block->aspect;
+      body.end_y /= block->aspect;
+    }
+    for (LayoutPanelHeader &header : panel->runtime->layout_panels.headers) {
+      header.start_y /= block->aspect;
+      header.end_y /= block->aspect;
+    }
+  }
+
   /* Compute direction relative to button, based on available space. */
   const int size_x = BLI_rctf_size_x(&block->rect) + 0.2f * UI_UNIT_X; /* 4 for shadow */
   const int size_y = BLI_rctf_size_y(&block->rect) + 0.2f * UI_UNIT_Y;
@@ -486,33 +499,8 @@ static void popup_block_clip(wmWindow *window, Block *block)
     block->rect.xmax += xofs;
   }
 
-  /* [CP_SCROLL] Block y-extent before window clamp vs. the window limits. If the block already
-   * fits inside the window, no clamp happens, no overflow, and therefore no scroll arrows.
-   * Gated to the color-picker block to keep other menus out of the log. */
-  const bool cp_dbg = block->color_pickers.list.first != nullptr;
-  if (cp_dbg) {
-    printf(
-        "[CP_SCROLL] popup_block_clip: before y=[%.1f..%.1f] (h=%.1f) win_h=%d margin=%d "
-        "top_reserve=%d no_win_clip=%d\n",
-        double(block->rect.ymin),
-        double(block->rect.ymax),
-        double(block->rect.ymax - block->rect.ymin),
-        win_size[1],
-        margin,
-        int(UI_POPUP_MENU_TOP),
-        (block->flag & BLOCK_NO_WIN_CLIP) ? 1 : 0);
-  }
-
   block->rect.ymin = std::max<float>(block->rect.ymin, margin);
   block->rect.ymax = std::min<float>(block->rect.ymax, win_size[1] - UI_POPUP_MENU_TOP);
-
-  if (cp_dbg) {
-    printf("[CP_SCROLL] popup_block_clip: after  y=[%.1f..%.1f] (h=%.1f)\n",
-           double(block->rect.ymin),
-           double(block->rect.ymax),
-           double(block->rect.ymax - block->rect.ymin));
-    fflush(stdout);
-  }
 
   /* ensure menu items draw inside left/right boundary */
   const float xofs = block->rect.xmin - xmin_orig;
@@ -530,14 +518,7 @@ void popup_block_scrolltest(Block *block)
     bt.flag &= ~UI_SCROLLED;
   }
 
-  const bool cp_dbg = block->color_pickers.list.first != nullptr;
   if (block->buttons_ptrs.size() < 2) {
-    /* [CP_SCROLL] Early-out: fewer than 2 buttons means no scroll arrows are ever drawn. */
-    if (cp_dbg) {
-      printf("[CP_SCROLL] popup_block_scrolltest EARLY-OUT button_num=%lld (<2, no arrows)\n",
-             (long long)block->buttons_ptrs.size());
-      fflush(stdout);
-    }
     return;
   }
   if (block->handle->scrolloffset != block->handle->scrollmin) {
@@ -545,20 +526,6 @@ void popup_block_scrolltest(Block *block)
   }
   if (block->handle->scrolloffset != block->handle->scrollmax) {
     block->flag |= BLOCK_CLIPBOTTOM;
-  }
-
-  /* [CP_SCROLL] Final arrow decision. CLIPTOP => top arrow, CLIPBOTTOM => bottom arrow. */
-  if (cp_dbg) {
-    printf(
-        "[CP_SCROLL] popup_block_scrolltest: button_num=%lld scrolloffset=%.1f scrollmin=%.1f "
-        "scrollmax=%.1f CLIPTOP=%d CLIPBOTTOM=%d\n",
-        (long long)block->buttons_ptrs.size(),
-        double(block->handle->scrolloffset),
-        double(block->handle->scrollmin),
-        double(block->handle->scrollmax),
-        (block->flag & BLOCK_CLIPTOP) ? 1 : 0,
-        (block->flag & BLOCK_CLIPBOTTOM) ? 1 : 0);
-    fflush(stdout);
   }
 
   for (Button &bt : block->buttons()) {
@@ -879,8 +846,14 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
     popup_block_clip(window, block);
 
     /* Avoid menu moving down and losing cursor focus by keeping it at the same height when the
-     * popup is displaced down by at least one window unit. */
-    if (handle->refresh && (handle->prev_block_rect.ymax - block->rect.ymax) > 1.0f) {
+     * popup is displaced down by at least one window unit. Color picker popups are exempt: their
+     * height legitimately changes when the palette sub-panel is switched or collapsed, and pinning
+     * the old size would leave the popup oversized with empty space when the new palette has fewer
+     * swatches. */
+    const bool is_color_picker = block->color_pickers.list.first != nullptr;
+    if (!is_color_picker && handle->refresh &&
+        (handle->prev_block_rect.ymax - block->rect.ymax) > 1.0f)
+    {
       if (block->bounds_type != BLOCK_BOUNDS_POPUP_CENTER) {
         const float offset = handle->prev_block_rect.ymax - block->rect.ymax;
         block_translate(block, 0, offset);
@@ -911,25 +884,6 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
     handle->scrollmin = std::round(std::min(block->rect.ymax - (ymax + bounds), 0.0f));
     handle->scrollmax = std::round(std::max(block->rect.ymin - (ymin - bounds), 0.0f));
     handle->scrolloffset = std::clamp(handle->scrolloffset, handle->scrollmin, handle->scrollmax);
-
-    /* [CP_SCROLL] This is where scroll range is decided. Arrows appear only when scrollmin<0 or
-     * scrollmax>0 (i.e. the buttons' y-extent overflows the window-clipped block->rect). */
-    if (block->color_pickers.list.first != nullptr) {
-      printf(
-          "[CP_SCROLL] popup_block_create scroll: block.rect.y=[%.1f..%.1f] buttons.y=[%.1f..%.1f] "
-          "bounds=%.1f scrollmin=%.1f scrollmax=%.1f scrolloffset=%.1f flag&POPUP=%d panel=%p\n",
-          double(block->rect.ymin),
-          double(block->rect.ymax),
-          double(ymin),
-          double(ymax),
-          double(bounds),
-          double(handle->scrollmin),
-          double(handle->scrollmax),
-          double(handle->scrolloffset),
-          (block->flag & BLOCK_POPUP) ? 1 : 0,
-          (void *)block->panel);
-      fflush(stdout);
-    }
 
     /* apply scroll offset */
     if (handle->scrolloffset != 0.0f) {

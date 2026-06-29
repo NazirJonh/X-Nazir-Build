@@ -12,6 +12,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_prototypes.hh"
 
 #include "BLI_ghash.h"
 #include "BLI_listbase.h"
@@ -240,15 +241,40 @@ static bool palette_from_hash(Main *bmain, GHash *color_table, const char *name)
 
   return done;
 }
+/**
+ * Resolve the palette an operator should act on. Color picker popups expose their per-popup palette
+ * through the "palette" context member (see #ColorPickerPalette); everywhere else this falls back
+ * to the active paint palette.
+ */
+static Palette *active_palette_get(const bContext *C)
+{
+  const PointerRNA ptr = CTX_data_pointer_get_type(C, "palette", RNA_Palette);
+  if (ptr.data != nullptr) {
+    return static_cast<Palette *>(ptr.data);
+  }
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  return paint ? paint->palette : nullptr;
+}
+
 static wmOperatorStatus palette_new_exec(bContext *C, wmOperator * /*op*/)
 {
-  Paint *paint = BKE_paint_get_active_from_context(C);
   Main *bmain = CTX_data_main(C);
-  Palette *palette;
+  Palette *palette = BKE_palette_add(bmain, "Palette");
 
-  palette = BKE_palette_add(bmain, "Palette");
-
-  BKE_paint_palette_set(paint, palette);
+  /* When invoked from a `template_ID` whose bound property is a palette pointer (e.g. a color
+   * picker's per-popup palette), assign the new palette there. Otherwise assign to the active
+   * paint palette, matching the tool panels' behavior. */
+  PointerRNA owner_ptr;
+  PropertyRNA *prop;
+  ui::context_active_but_prop_get_templateID(C, &owner_ptr, &prop);
+  if (owner_ptr.data != nullptr && prop != nullptr) {
+    PointerRNA idptr = RNA_id_pointer_create(&palette->id);
+    RNA_property_pointer_set(&owner_ptr, prop, idptr, nullptr);
+    RNA_property_update(C, &owner_ptr, prop);
+  }
+  else if (Paint *paint = BKE_paint_get_active_from_context(C)) {
+    BKE_paint_palette_set(paint, palette);
+  }
 
   return OPERATOR_FINISHED;
 }
@@ -269,11 +295,9 @@ void PALETTE_OT_new(wmOperatorType *ot)
 
 static bool palette_poll(bContext *C)
 {
-  Paint *paint = BKE_paint_get_active_from_context(C);
+  const Palette *palette = active_palette_get(C);
 
-  if (paint && paint->palette != nullptr && ID_IS_EDITABLE(paint->palette) &&
-      !ID_IS_OVERRIDE_LIBRARY(paint->palette))
-  {
+  if (palette != nullptr && ID_IS_EDITABLE(palette) && !ID_IS_OVERRIDE_LIBRARY(palette)) {
     return true;
   }
 
@@ -284,7 +308,10 @@ static wmOperatorStatus palette_color_add_exec(bContext *C, wmOperator * /*op*/)
 {
   Paint *paint = BKE_paint_get_active_from_context(C);
   PaintMode mode = BKE_paintmode_get_active_from_context(C);
-  Palette *palette = paint->palette;
+  Palette *palette = active_palette_get(C);
+  if (palette == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
   PaletteColor *color;
 
   color = BKE_palette_color_add(palette);
@@ -293,12 +320,12 @@ static wmOperatorStatus palette_color_add_exec(bContext *C, wmOperator * /*op*/)
   /* When called from a color picker popup (e.g. a material property), read the currently
    * displayed color from the picker rather than the brush color, which may differ. */
   float picker_rgb[3];
-  if (ui::UI_colorpicker_active_rgb_get(C, picker_rgb)) {
+  if (ui::colorpicker_active_rgb_get(C, picker_rgb)) {
     copy_v3_v3(color->color, picker_rgb);
     color->value = 0.0;
   }
   else {
-    const Brush *brush = BKE_paint_brush_for_read(paint);
+    const Brush *brush = paint ? BKE_paint_brush_for_read(paint) : nullptr;
     if (brush) {
       if (ELEM(mode,
                PaintMode::Texture3D,
@@ -337,8 +364,10 @@ void PALETTE_OT_color_add(wmOperatorType *ot)
 
 static wmOperatorStatus palette_color_delete_exec(bContext *C, wmOperator * /*op*/)
 {
-  Paint *paint = BKE_paint_get_active_from_context(C);
-  Palette *palette = paint->palette;
+  Palette *palette = active_palette_get(C);
+  if (palette == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
   PaletteColor *color = static_cast<PaletteColor *>(
       BLI_findlink(&palette->colors, palette->active_color));
 
@@ -453,8 +482,7 @@ static wmOperatorStatus palette_sort_exec(bContext *C, wmOperator *op)
 {
   const int type = RNA_enum_get(op->ptr, "type");
 
-  Paint *paint = BKE_paint_get_active_from_context(C);
-  Palette *palette = paint->palette;
+  Palette *palette = active_palette_get(C);
 
   if (palette == nullptr) {
     return OPERATOR_CANCELLED;
@@ -547,8 +575,10 @@ void PALETTE_OT_sort(wmOperatorType *ot)
 /* Move colors in palette. */
 static wmOperatorStatus palette_color_move_exec(bContext *C, wmOperator *op)
 {
-  Paint *paint = BKE_paint_get_active_from_context(C);
-  Palette *palette = paint->palette;
+  Palette *palette = active_palette_get(C);
+  if (palette == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
   PaletteColor *palcolor = static_cast<PaletteColor *>(
       BLI_findlink(&palette->colors, palette->active_color));
 
@@ -594,8 +624,7 @@ void PALETTE_OT_color_move(wmOperatorType *ot)
 static wmOperatorStatus palette_join_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
-  Paint *paint = BKE_paint_get_active_from_context(C);
-  Palette *palette = paint->palette;
+  Palette *palette = active_palette_get(C);
   Palette *palette_join = nullptr;
   bool done = false;
 

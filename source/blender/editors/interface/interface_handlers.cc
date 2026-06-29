@@ -12472,13 +12472,19 @@ static int handle_menus_recursive(bContext *C,
   }
   else if (event->val == KM_PRESS && event->type == LEFTMOUSE) {
     for (Block &block : menu->region->runtime->uiblocks) {
+      /* A layout-panel header is normally toggled only when no button is active (the `!but` case
+       * below). The color picker popup keeps its color buttons active, so allow toggling its
+       * palette sub-panel as a special case while leaving all other menus' behavior unchanged. */
+      const bool is_color_picker = block.color_pickers.list.first != nullptr;
+      if (but && !is_color_picker) {
+        continue;
+      }
       if (block.panel) {
         int mx = event->xy[0];
         int my = event->xy[1];
         window_to_block(menu->region, &block, &mx, &my);
         if (IN_RANGE(float(mx), block.rect.xmin, block.rect.xmax)) {
-          LayoutPanelHeader *header = layout_panel_header_under_mouse(
-              *block.panel, my, menu->region);
+          LayoutPanelHeader *header = layout_panel_header_under_mouse(*block.panel, my);
           if (header) {
             ARegion *prev_region_popup = CTX_wm_region_popup(C);
             CTX_wm_region_popup_set(C, menu->region);

@@ -2382,16 +2382,16 @@ static void UI_OT_button_string_clear(wmOperatorType *ot)
 
 /* Session-only display preference shared by all #template_palette instances. Kept here (rather
  * than in DNA/RNA) because it is transient UI state with no need for persistence. */
-static bool g_palette_large_swatches = false;
+static bool palette_large_swatches = false;
 
 bool palette_swatch_size_large_get()
 {
-  return g_palette_large_swatches;
+  return palette_large_swatches;
 }
 
 static wmOperatorStatus palette_swatch_size_toggle_exec(bContext *C, wmOperator * /*op*/)
 {
-  g_palette_large_swatches = !g_palette_large_swatches;
+  palette_large_swatches = !palette_large_swatches;
 
   if (ARegion *region = CTX_wm_region(C)) {
     ED_region_tag_redraw(region);

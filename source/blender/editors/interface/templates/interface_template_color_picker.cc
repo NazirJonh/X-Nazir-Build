@@ -328,14 +328,14 @@ void template_palette(Layout *layout,
     }
   }
 
-  /* Size toggle button on the right side */
+  /* Swatch size toggle button on the right side. */
   Layout &row_toggle = row_split.row(true);
   row_toggle.alignment_set(LayoutAlign::Right);
   but = uiDefIconButO(block,
                       ButtonType::But,
                       "UI_OT_palette_swatch_size_toggle",
                       wm::OpCallContext::InvokeDefault,
-                      ICON_FULLSCREEN_ENTER,
+                      ICON_FIXED_SIZE,
                       0,
                       0,
                       UI_UNIT_X,

@@ -129,17 +129,6 @@ class DrawCacheImpl : public DrawCache {
   Vector<gpu::Batch *> lines_batches_;
   /** Batches for drawing coarse "fast navigate" wireframe geometry. */
   Vector<gpu::Batch *> lines_batches_coarse_;
-
-  /**
-   * Highest Multires subdivision level each cached per-node line index buffer was built for.
-   * This grows monotonically per node: when a node's request exceeds its cached level the IBO
-   * and its batch are dropped together (so no batch keeps a pointer to a freed index buffer) and
-   * rebuilt for the new level; requests below the cached level reuse the existing buffer and rely
-   * on the shader's per-vertex fade to hide edges that are no longer visible. `-1` means the
-   * node's IBO is unfiltered (non-Multires draw or not yet built). Sized to `pbvh.nodes_num()`.
-   */
-  Vector<int> lines_ibos_level_per_node_;
-  Vector<int> lines_ibos_coarse_level_per_node_;
   /**
    * Batches for drawing triangles, stored separately for each combination of attributes and
    * coarse-ness. Different viewports might request different sets of attributes, and we don't want
@@ -173,8 +162,7 @@ class DrawCacheImpl : public DrawCache {
 
   Span<gpu::Batch *> ensure_lines_batches(const Object &object,
                                           const ViewportRequest &request,
-                                          const IndexMask &nodes_to_update,
-                                          Span<int> per_node_multires_levels) override;
+                                          const IndexMask &nodes_to_update) override;
 
   Span<int> ensure_material_indices(const Object &object) override;
 
@@ -200,8 +188,7 @@ class DrawCacheImpl : public DrawCache {
   Span<gpu::IndexBufPtr> ensure_lines_indices(const Object &object,
                                               const OrigMeshData &orig_mesh_data,
                                               const IndexMask &node_mask,
-                                              bool coarse,
-                                              Span<int> per_node_target_levels);
+                                              bool coarse);
 };
 
 void DrawCacheImpl::AttributeData::tag_dirty(const IndexMask &node_mask)
@@ -1459,18 +1446,10 @@ static int create_lines_index_grids(const Span<int> grid_indices,
                                     const int gridsize,
                                     const int skip,
                                     const int totgrid,
-                                    const int target_level,
-                                    const int level_offset,
                                     const Span<uint> coord_level,
                                     MutableSpan<uint2> data)
 {
   auto get_level = [&](int val) -> uint { return coord_level[val]; };
-  /* An interior edge is hidden by the adaptive shader once the subdivision level of its provoking
-   * (first) vertex exceeds the camera-based wire level. Filtering those edges here keeps them off
-   * the GPU entirely. `target_level == -1` keeps every edge (non-Multires draw). */
-  auto keep_edge = [&](const uint provoking_level) -> bool {
-    return target_level < 0 || int(provoking_level) <= target_level;
-  };
 
   int line_index = 0;
   int offset = 0;
@@ -1495,30 +1474,20 @@ static int create_lines_index_grids(const Span<int> grid_indices,
         v3 = offset + CCG_grid_xy_to_index(gridsize, x, y + skip);
 
         uint lx0 = get_level(x);
-        uint lx1 = get_level(x + skip);
         uint ly0 = get_level(y);
         uint ly1 = get_level(y + skip);
 
-        /* Per-corner subdivision level, matching the value the shader reads from the
-         * SubdivisionLevel VBO (#fill_subdivision_levels_grids). */
-        const uint el_v0 = uint(level_offset) + std::min(lx0, ly0);
-        const uint el_v1 = uint(level_offset) + std::min(lx1, ly0);
-        const uint el_v3 = uint(level_offset) + std::min(lx0, ly1);
-
-        /* Edge v0-v1 (provoking vertex is the one written first). */
+        /* Order each edge so its provoking (first) vertex is the higher-level (finer) endpoint.
+         * The adaptive shader reads the level from the provoking vertex under
+         * FIRST_VERTEX_CONVENTION, attributing the edge to the level at which it appears.
+         * See #fill_subdivision_levels_grids. */
         const bool a_v0_first = (lx0 >= ly0);
-        if (keep_edge(a_v0_first ? el_v0 : el_v1)) {
-          data[line_index] = a_v0_first ? uint2(v0, v1) : uint2(v1, v0);
-          line_index++;
-        }
-        /* Edge v0-v3. */
+        data[line_index] = a_v0_first ? uint2(v0, v1) : uint2(v1, v0);
+        line_index++;
         const bool b_v0_first = (ly0 >= lx0);
-        if (keep_edge(b_v0_first ? el_v0 : el_v3)) {
-          data[line_index] = b_v0_first ? uint2(v0, v3) : uint2(v3, v0);
-          line_index++;
-        }
+        data[line_index] = b_v0_first ? uint2(v0, v3) : uint2(v3, v0);
+        line_index++;
 
-        /* Boundary edges are O(gridsize) and always kept. */
         if (y / skip + 2 == display_gridsize) {
           data[line_index] = (lx0 >= ly1) ? uint2(v3, v2) : uint2(v2, v3);
           line_index++;
@@ -1543,16 +1512,10 @@ static int create_lines_index_grids_flat_layout(const Span<int> grid_indices,
                                                  const int gridsize,
                                                  const int skip,
                                                  const int totgrid,
-                                                 const int target_level,
-                                                 const int level_offset,
                                                  const Span<uint> coord_level,
                                                  MutableSpan<uint2> data)
 {
   auto get_level = [&](int val) -> uint { return coord_level[val]; };
-  /* See the matching comment in #create_lines_index_grids. */
-  auto keep_edge = [&](const uint provoking_level) -> bool {
-    return target_level < 0 || int(provoking_level) <= target_level;
-  };
 
   int line_index = 0;
   int offset = 0;
@@ -1591,30 +1554,20 @@ static int create_lines_index_grids_flat_layout(const Span<int> grid_indices,
         v3 += offset + 3;
 
         uint lx0 = get_level(x);
-        uint lx1 = get_level(x + skip);
         uint ly0 = get_level(y);
         uint ly1 = get_level(y + skip);
 
-        /* Per-corner subdivision level, matching the value the shader reads from the
-         * SubdivisionLevel VBO (#fill_subdivision_levels_grids). */
-        const uint el_v0 = uint(level_offset) + std::min(lx0, ly0);
-        const uint el_v1 = uint(level_offset) + std::min(lx1, ly0);
-        const uint el_v3 = uint(level_offset) + std::min(lx0, ly1);
-
-        /* Edge v0-v1 (provoking vertex is the one written first). */
+        /* Order each edge so its provoking (first) vertex is the higher-level (finer) endpoint.
+         * The adaptive shader reads the level from the provoking vertex under
+         * FIRST_VERTEX_CONVENTION, attributing the edge to the level at which it appears.
+         * See #fill_subdivision_levels_grids. */
         const bool a_v0_first = (lx0 >= ly0);
-        if (keep_edge(a_v0_first ? el_v0 : el_v1)) {
-          data[line_index] = a_v0_first ? uint2(v0, v1) : uint2(v1, v0);
-          line_index++;
-        }
-        /* Edge v0-v3. */
+        data[line_index] = a_v0_first ? uint2(v0, v1) : uint2(v1, v0);
+        line_index++;
         const bool b_v0_first = (ly0 >= lx0);
-        if (keep_edge(b_v0_first ? el_v0 : el_v3)) {
-          data[line_index] = b_v0_first ? uint2(v0, v3) : uint2(v3, v0);
-          line_index++;
-        }
+        data[line_index] = b_v0_first ? uint2(v0, v3) : uint2(v3, v0);
+        line_index++;
 
-        /* Boundary edges are O(gridsize) and always kept. */
         if (y / skip + 2 == display_gridsize) {
           data[line_index] = (lx0 >= ly1) ? uint2(v3, v2) : uint2(v2, v3);
           line_index++;
@@ -1823,8 +1776,7 @@ static gpu::IndexBufPtr create_lines_index_grids(const CCGKey &key,
                                                  const BitGroupVector<> &grid_hidden,
                                                  const bool do_coarse,
                                                  const Span<int> grid_indices,
-                                                 const bool use_flat_layout,
-                                                 const int target_level)
+                                                 const bool use_flat_layout)
 {
   int gridsize = key.grid_size;
   int display_gridsize = gridsize;
@@ -1838,17 +1790,9 @@ static gpu::IndexBufPtr create_lines_index_grids(const CCGKey &key,
     skip = 1 << (key.level - display_level - 1);
   }
 
-  /* Edge levels computed inside the builders are relative to this grid's depth, while the
-   * SubdivisionLevel VBO read by the shader (and therefore `target_level`) is offset by the
-   * difference to the CCG's total level. Match that offset so edge filtering stays in sync.
-   * See #fill_subdivision_levels_grids. */
-  int grid_depth = 0;
-  while ((1 << grid_depth) < (key.grid_size - 1)) {
-    grid_depth++;
-  }
-  const int level_offset = std::max(0, key.level - grid_depth);
-
-  /* Memoize get_level to avoid O(grid_depth) loops per coordinate. */
+  /* Per-coordinate subdivision level, used by the builders to orient each edge so its provoking
+   * vertex is the finer endpoint (matching the SubdivisionLevel VBO the adaptive shader reads).
+   * Memoized to avoid an O(grid_depth) loop per coordinate. */
   int max_level = 0;
   while ((gridsize - 1) % (1 << max_level) == 0 && (1 << max_level) < gridsize) {
     max_level++;
@@ -1870,7 +1814,7 @@ static gpu::IndexBufPtr create_lines_index_grids(const CCGKey &key,
 
   MutableSpan<uint2> data = GPU_indexbuf_get_data(&builder).cast<uint2>();
 
-  /* The builders only write to the first `lines_written` slots (filtered and hidden edges are
+  /* The builders only write to the first `lines_written` slots (edges of hidden grid faces are
    * skipped, not stored as degenerate (0, 0) lines). Reporting the real count to the IBO keeps
    * the GPU from running the vertex shader over the unused tail of the buffer. */
   const int lines_written = use_flat_layout ? create_lines_index_grids_flat_layout(grid_indices,
@@ -1879,8 +1823,6 @@ static gpu::IndexBufPtr create_lines_index_grids(const CCGKey &key,
                                                                                    gridsize,
                                                                                    skip,
                                                                                    totgrid,
-                                                                                   target_level,
-                                                                                   level_offset,
                                                                                    coord_level,
                                                                                    data) :
                                               create_lines_index_grids(grid_indices,
@@ -1889,8 +1831,6 @@ static gpu::IndexBufPtr create_lines_index_grids(const CCGKey &key,
                                                                        gridsize,
                                                                        skip,
                                                                        totgrid,
-                                                                       target_level,
-                                                                       level_offset,
                                                                        coord_level,
                                                                        data);
 
@@ -1906,8 +1846,7 @@ static gpu::IndexBufPtr create_lines_index_grids(const CCGKey &key,
 Span<gpu::IndexBufPtr> DrawCacheImpl::ensure_lines_indices(const Object &object,
                                                            const OrigMeshData &orig_mesh_data,
                                                            const IndexMask &node_mask,
-                                                           const bool coarse,
-                                                           const Span<int> per_node_target_levels)
+                                                           const bool coarse)
 {
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   Vector<gpu::IndexBufPtr> &ibos = coarse ? lines_ibos_coarse_ : lines_ibos_;
@@ -1937,16 +1876,8 @@ Span<gpu::IndexBufPtr> DrawCacheImpl::ensure_lines_indices(const Object &object,
           [&](const int i) {
             const SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
             const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
-            /* Per-node target level. If the caller passed an empty span, keep every edge. */
-            const int target_level = per_node_target_levels.is_empty() ?
-                                         -1 :
-                                         per_node_target_levels[i];
-            ibos[i] = create_lines_index_grids(key,
-                                               subdiv_ccg.grid_hidden,
-                                               coarse,
-                                               nodes[i].grids(),
-                                               use_flat_layout_[i],
-                                               target_level);
+            ibos[i] = create_lines_index_grids(
+                key, subdiv_ccg.grid_hidden, coarse, nodes[i].grids(), use_flat_layout_[i]);
           },
           exec_mode::grain_size(1));
       break;
@@ -2229,8 +2160,7 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_tris_batches(const Object &object,
 
 Span<gpu::Batch *> DrawCacheImpl::ensure_lines_batches(const Object &object,
                                                        const ViewportRequest &request,
-                                                       const IndexMask &nodes_to_update,
-                                                       const Span<int> per_node_multires_levels)
+                                                       const IndexMask &nodes_to_update)
 {
   const Object &object_orig = *DEG_get_original(&object);
   const OrigMeshData orig_mesh_data(*id_cast<const Mesh *>(object_orig.data));
@@ -2239,44 +2169,6 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_lines_batches(const Object &object,
   this->ensure_use_flat_layout(object, orig_mesh_data);
   this->free_nodes_with_changed_topology(pbvh);
 
-  /* The Multires wireframe line index buffer only contains edges up to a chosen subdivision
-   * level, decided per PBVH node from the camera-to-node distance. We grow this level
-   * monotonically per node: when a node's request exceeds its cached level its IBO and the
-   * batch that references it are freed and rebuilt together (so no batch points at a freed
-   * index buffer); when the request drops below the cached level we keep the existing (larger)
-   * buffer and rely on the shader's per-vertex fade to hide edges that are no longer in view.
-   * This bounds the number of rebuilds to `totlvl` per node in the worst case while letting
-   * distant nodes stay light. Vertex buffers are level-independent and intentionally untouched. */
-  Vector<int> built_levels;
-  if (pbvh.type() == bke::pbvh::Type::Grids && !per_node_multires_levels.is_empty()) {
-    Vector<int> &cached_levels = request.use_coarse_grids ? lines_ibos_coarse_level_per_node_ :
-                                                            lines_ibos_level_per_node_;
-    cached_levels.resize(pbvh.nodes_num(), -1);
-    Vector<gpu::IndexBufPtr> &ibos = request.use_coarse_grids ? lines_ibos_coarse_ : lines_ibos_;
-    Vector<gpu::Batch *> &batches = request.use_coarse_grids ? lines_batches_coarse_ :
-                                                               lines_batches_;
-    ibos.resize(pbvh.nodes_num());
-    batches.resize(pbvh.nodes_num(), nullptr);
-
-    IndexMaskMemory memory;
-    const IndexMask nodes_to_grow = IndexMask::from_predicate(
-        nodes_to_update, memory, [&](const int i) {
-          return per_node_multires_levels[i] > cached_levels[i];
-        });
-    if (!nodes_to_grow.is_empty()) {
-      free_ibos(ibos, nodes_to_grow);
-      free_batches(batches, nodes_to_grow);
-      nodes_to_grow.foreach_index(
-          [&](const int i) { cached_levels[i] = per_node_multires_levels[i]; });
-    }
-
-    built_levels.resize(pbvh.nodes_num());
-    for (const int i : IndexRange(pbvh.nodes_num())) {
-      built_levels[i] = cached_levels[i];
-    }
-  }
-  /* Non-grids PBVH or caller passed no per-node info: keep every edge (target_level = -1). */
-
   const Span<gpu::VertBufPtr> position = this->ensure_attribute_data(
       object, orig_mesh_data, CustomRequest::Position, nodes_to_update);
   const Span<gpu::VertBufPtr> normal = this->ensure_attribute_data(
@@ -2284,7 +2176,7 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_lines_batches(const Object &object,
   const Span<gpu::VertBufPtr> edge_fac = this->ensure_attribute_data(
       object, orig_mesh_data, CustomRequest::EdgeFac, nodes_to_update);
   const Span<gpu::IndexBufPtr> lines = this->ensure_lines_indices(
-      object, orig_mesh_data, nodes_to_update, request.use_coarse_grids, built_levels);
+      object, orig_mesh_data, nodes_to_update, request.use_coarse_grids);
 
   Span<gpu::VertBufPtr> subdiv_level;
   if (pbvh.type() == bke::pbvh::Type::Grids) {

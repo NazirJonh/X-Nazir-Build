@@ -70,16 +70,10 @@ class DrawCache : public bke::pbvh::DrawCache {
   /**
    * Recalculate and copy data as necessary to prepare batches for drawing wireframe geometry for a
    * specific combination of attributes.
-   *
-   * `per_node_multires_levels` gives, per PBVH node, the highest Multires subdivision level whose
-   * edges should be kept in that node's line index buffer; deeper edges are filtered out at IBO
-   * build time instead of being drawn and faded to zero by the shader. An empty span disables
-   * filtering (non-Multires draw).
    */
   virtual Span<gpu::Batch *> ensure_lines_batches(const Object &object,
                                                   const ViewportRequest &request,
-                                                  const IndexMask &nodes_to_update,
-                                                  Span<int> per_node_multires_levels) = 0;
+                                                  const IndexMask &nodes_to_update) = 0;
 
   /**
    * Return the material index for each node (all faces in a node should have the same material

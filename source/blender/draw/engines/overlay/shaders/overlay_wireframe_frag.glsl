@@ -36,8 +36,9 @@ void main()
   float3 color = mix(final_front_col, rim_col, saturate(fac));
   frag_color = float4(color * color, final_color.a);
 #elif !defined(SELECT_ENABLE)
-  line_output = pack_line_data(gl_FragCoord.xy, edge_start, edge_pos, line_width_iface);
-  frag_color = final_color;
+  line_output = pack_line_data(gl_FragCoord.xy, edge_start, edge_pos);
+  /* Adaptive Multires fade; 1.0 for all other wireframe draws (set in the vertex shader). */
+  frag_color = final_color * multires_fade_iface;
 
 #  if !defined(CURVES)
   gl_FragDepth = gl_FragCoord.z;

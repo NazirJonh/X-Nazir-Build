@@ -19,15 +19,14 @@
 #include "gpu_shader_create_info.hh"
 
 GPU_SHADER_INTERFACE_INFO(overlay_wireframe_iface)
-/* Using FLAT for final_color so that multires wireframe opacity is uniform along each edge.
- * Both face corners of the same GPU edge share the same subdiv_level, so FLAT does not
- * change the result for regular wireframe but fixes artifacts for the adaptive mode. */
-FLAT(float4, final_color)
+SMOOTH(float4, final_color)
 FLAT(float2, edge_start)
 NO_PERSPECTIVE(float2, edge_pos)
 /* subdiv_level is passed as flat uint from vertex to fragment to avoid undefined interpolation. */
 FLAT(uint, subdiv_level_iface)
-FLAT(float, line_width_iface)
+/* Adaptive Multires wireframe per-edge fade factor. Kept flat so the whole edge fades uniformly
+ * while `final_color` retains its smooth facing gradient. Always 1.0 for non-Multires draws. */
+FLAT(float, multires_fade_iface)
 GPU_SHADER_INTERFACE_END()
 
 GPU_SHADER_CREATE_INFO(overlay_wireframe_base)

@@ -238,9 +238,9 @@ class Wireframe : Overlay {
            * (and therefore the `subdiv_level` VBO) only contains values up to that level,
            * even when `mmd->totlvl` is higher. Using `totlvl` here would make the shader
            * expect levels that physically do not exist in the buffer. */
-          /* For the non-PBVH (Object Mode) path the evaluated mesh is tagged with
-           * `BKE_multires_tag_edge_levels(result, mmd->lvl)`, so the VBO data is bounded
-           * by the viewport level, not `totlvl`. Using `totlvl` would make the shader
+          /* For the non-PBVH (Object Mode) path the evaluated mesh is tagged by
+           * `BKE_multires_tag_edge_levels()` at the viewport resolution, so the VBO data is
+           * bounded by the viewport level, not `totlvl`. Using `totlvl` would make the shader
            * normalise on the wrong denominator when `lvl < totlvl`. The PBVH path
            * overrides this below with the actual CCG level. */
           int effective_max_level = mmd ? mmd->lvl : 0;
@@ -322,9 +322,7 @@ class Wireframe : Overlay {
                * conversion to `gpu::UniformBuf*` only fires on glvalues. */
               mesh_pass->bind_ubo("multires_wire_buf", &(*object_ubo));
             }
-            for (SculptBatch &batch : sculpt_batches_get(
-                     ob_ref.object, SCULPT_BATCH_WIREFRAME, {}))
-            {
+            for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, SCULPT_BATCH_WIREFRAME)) {
               mesh_pass->draw(batch.batch, handle);
             }
           }

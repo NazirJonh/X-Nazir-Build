@@ -235,12 +235,17 @@ BLI_INLINE void BKE_multires_construct_tangent_matrix(float3x3 &tangent_matrix,
 void multires_do_versions_simple_to_catmull_clark(Object *object, MultiresModifierData *mmd);
 
 /**
- * Compute the subdivision level for every edge of an evaluated Multires mesh using BFS
- * from base-mesh edges (#MeshRuntime::subsurf_optimal_display_edges).
+ * Compute the subdivision level for every edge of an evaluated Multires mesh analytically from the
+ * deterministic ptex-grid layout (see #subdiv_foreach_ctx_init_offsets), used by the adaptive
+ * wireframe overlay. Level 0 is a coarse-mesh edge; higher values are finer subdivision edges.
+ * The values match the Sculpt-Mode (PBVH grids) levels from #fill_subdivision_levels_grids.
  * Writes results into #MeshRuntime::subsurf_edge_subdivision_level.
- * Does nothing if `subsurf_optimal_display_edges` is empty.
+ *
+ * \param coarse_mesh: the base mesh fed to subdivision (provides the face/edge layout).
+ * \param resolution: the ptex resolution used to evaluate `subdiv_mesh` (`(1 << level) + 1`).
+ * \param subdiv_mesh: the evaluated mesh whose runtime levels are filled.
  */
-void BKE_multires_tag_edge_levels(Mesh *mesh, int totlvl);
+void BKE_multires_tag_edge_levels(const Mesh &coarse_mesh, int resolution, Mesh &subdiv_mesh);
 
 }  // namespace blender
 

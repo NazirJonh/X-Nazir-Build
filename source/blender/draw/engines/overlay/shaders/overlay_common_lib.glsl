@@ -43,28 +43,6 @@ float4 pack_line_data(float2 frag_co, float2 edge_start, float2 edge_pos)
   }
 }
 
-/**
- * Same as above, but encodes a line width multiplier in the alpha channel.
- * The AA post-process pass reads this to scale the line kernel per-pixel.
- *   line_width = 1.0f : normal/thin (same as the non-width overload above)
- *   line_width = 2.0f : twice as thick
- * Must be > 0 so it doesn't collide with the "cleared pixel" sentinel (w == 0).
- */
-float4 pack_line_data(float2 frag_co, float2 edge_start, float2 edge_pos, float line_width)
-{
-  float2 edge = edge_start - edge_pos;
-  float len = length(edge);
-  if (len > 0.0f) {
-    edge /= len;
-    float2 perp = float2(-edge.y, edge.x);
-    float dist = dot(perp, frag_co - edge_start);
-    return float4(perp * 0.5f + 0.5f, dist * 0.25f + 0.5f + 0.1f, line_width);
-  }
-  else {
-    return float4(1.0f, 0.0f, 0.5f + 0.1f, line_width);
-  }
-}
-
 /* View-space Z is used to adjust for perspective projection.
  * Homogenous W is used to convert from NDC to homogenous space.
  * Offset is in view-space, so positive values are closer to the camera. */

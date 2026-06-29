@@ -130,6 +130,9 @@ static Mesh *multires_as_mesh(const MultiresModifierData *mmd,
   }
   bke::subdiv::displacement_attach_from_multires(subdiv, mesh, mmd);
   result = bke::subdiv::subdiv_to_mesh(subdiv, &mesh_settings, mesh);
+  /* Tag per-edge subdivision levels for the adaptive wireframe overlay. Use the resolution that
+   * was actually used to evaluate the mesh so the analytic edge layout matches `result` exactly. */
+  BKE_multires_tag_edge_levels(*mesh, mesh_settings.resolution, *result);
   return result;
 }
 
@@ -228,14 +231,6 @@ static Mesh *modify_mesh(ModifierData *md, const ModifierEvalContext *ctx, Mesh 
     }
 
     result = multires_as_mesh(mmd, ctx, mesh, subdiv);
-
-    /* Tag per-edge subdivision levels for adaptive wireframe display.
-     * The evaluated mesh from `multires_as_mesh()` contains only `mmd->lvl`
-     * subdivisions (the viewport level), not `mmd->totlvl`. Tagging with
-     * `totlvl` would shift every edge level upward by `totlvl - lvl`,
-     * causing the wireframe shader to cull subdivisions that physically
-     * exist at the current viewport level. */
-    BKE_multires_tag_edge_levels(result, mmd->lvl);
 
     if (use_clnors) {
       bke::mesh_set_custom_normals_normalized(

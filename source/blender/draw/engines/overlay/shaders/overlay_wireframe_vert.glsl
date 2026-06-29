@@ -264,7 +264,7 @@ void main()
    * `flat` for integer types. `FIRST_VERTEX_CONVENTION` ties the provoking vertex to
    * the first corner of each edge, matching the per-corner VBO layout. */
   subdiv_level_iface = subdiv_level;
-  line_width_iface = 1.0f;
+  multires_fade_iface = 1.0f;
 
   if (!use_custom_depth_bias) {
     float facing_ratio = clamp(1.0f - facing * facing, 0.0f, 1.0f);
@@ -283,7 +283,7 @@ void main()
   /* CURVES uses the same interface (overlay_wireframe_iface) but has no subdiv_level
    * vertex input. Default to level 0 so it is always fully visible. */
   subdiv_level_iface = 0u;
-  line_width_iface = 1.0f;
+  multires_fade_iface = 1.0f;
   /* POINTS has a different interface entirely — no subdiv_level_iface field at all. */
 #endif
 
@@ -338,8 +338,9 @@ void main()
       edge_start = float2(-1.0f);
     }
     else {
-      final_color.rgb *= fade;
-      final_color.a *= fade;
+      /* Keep `final_color` smooth; the fragment shader applies this flat factor so the facing
+       * gradient along the edge is preserved while the edge fades uniformly. */
+      multires_fade_iface = fade;
     }
   }
 #  endif

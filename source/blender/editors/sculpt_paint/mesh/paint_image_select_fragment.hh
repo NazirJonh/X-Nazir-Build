@@ -56,6 +56,20 @@ ImBuf *image_select_make_display_ibuf_feather(const ImBuf *src,
 float image_select_sample_mask_bilinear(const ImBuf *mask, float fx, float fy);
 
 /**
+ * Alpha-blend a prepared fragment-sized buffer into a same-sized destination canvas.
+ * The blend mask is expected to be a 4-channel float buffer; only channel 0 is sampled.
+ */
+void image_select_blend_buffer_into_canvas(ImBuf *dst_canvas,
+                                           const ImBuf *src_fragment,
+                                           const ImBuf *blend_mask);
+
+/**
+ * Close an image undo step only if it is still active.
+ * Floating selection commits may outlive the undo step opened during lift_source.
+ */
+void image_select_fragment_undo_push_end_if_open(bool &r_undo_begun);
+
+/**
  * Clear source canvas pixels and runtime mask for each fragment (lift).
  * Opens an image undo step on first tile; caller must push_end on commit/cancel.
  */

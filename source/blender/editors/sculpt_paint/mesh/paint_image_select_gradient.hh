@@ -44,10 +44,8 @@ struct ImagePaintGradientParams {
   ImagePaintGradientType type = ImagePaintGradientType::Linear;
   ImagePaintGradientRepeat repeat = ImagePaintGradientRepeat::None;
   IMB_BlendMode blend_mode = IMB_BLEND_MIX;
-  float color_start[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-  float color_end[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   float opacity = 1.0f;
-  /** When non-null, overrides start/end color interpolation. */
+  /** Color ramp used to evaluate the gradient; always set by the param builders. */
   ColorBand *colorband = nullptr;
 };
 

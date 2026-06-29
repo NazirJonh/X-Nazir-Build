@@ -1577,6 +1577,10 @@ void BKE_image_free_buffers_ex(Image *ima, bool do_lock)
 
   BKE_image_free_gputextures(ima);
 
+  /* Paint selection masks (and their GPU textures) are built against the image buffers being
+   * freed here; keeping them would leak the textures and leave stale-sized masks behind. */
+  BKE_image_paint_selection_mask_free(ima);
+
   if (do_lock) {
     ima->runtime->cache_mutex.unlock();
   }

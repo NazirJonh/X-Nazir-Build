@@ -1070,19 +1070,24 @@ static void image_undosys_step_free(UndoStep *us_p)
   MEM_delete(us->paint_tile_map);
   us->paint_tile_map = nullptr;
 
-  for (SelectionMaskSnapshot &entry : us->selection_mask_snapshots) {
-    if (entry.pre_mask_ibuf) {
-      IMB_freeImBuf(entry.pre_mask_ibuf);
-      entry.pre_mask_ibuf = nullptr;
+  /* The vector is only constructed (placement-new) in #image_undosys_step_encode_init. On the
+   * fallback push path where a step is allocated zeroed without encode-init, the memory is not a
+   * valid Vector, so neither iterate nor destruct it. */
+  if (us->is_encode_init) {
+    for (SelectionMaskSnapshot &entry : us->selection_mask_snapshots) {
+      if (entry.pre_mask_ibuf) {
+        IMB_freeImBuf(entry.pre_mask_ibuf);
+        entry.pre_mask_ibuf = nullptr;
+      }
+      if (entry.post_mask_ibuf) {
+        IMB_freeImBuf(entry.post_mask_ibuf);
+        entry.post_mask_ibuf = nullptr;
+      }
     }
-    if (entry.post_mask_ibuf) {
-      IMB_freeImBuf(entry.post_mask_ibuf);
-      entry.post_mask_ibuf = nullptr;
-    }
+    /* Explicitly destroy the vector: MEM_delete(us) casts to UndoStep* and will not reach
+     * ImageUndoStep's subobject destructors. */
+    us->selection_mask_snapshots.~Vector();
   }
-  /* Explicitly destroy the vector: MEM_delete(us) casts to UndoStep* and will not reach
-   * ImageUndoStep's subobject destructors. */
-  us->selection_mask_snapshots.~Vector();
 }
 
 static void image_undosys_foreach_ID_ref(UndoStep *us_p,

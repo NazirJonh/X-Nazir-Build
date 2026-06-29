@@ -168,6 +168,89 @@ float image_select_sample_mask_bilinear(const ImBuf *mask, float fx, float fy)
          (1.0f - wx) * wy * v01 + wx * wy * v11;
 }
 
+void image_select_blend_buffer_into_canvas(ImBuf *dst_canvas,
+                                           const ImBuf *src_fragment,
+                                           const ImBuf *blend_mask)
+{
+  if (!dst_canvas || !src_fragment || !blend_mask || !blend_mask->float_buffer.data) {
+    return;
+  }
+
+  const int total_pixels = dst_canvas->x * dst_canvas->y;
+  const float *mask_data = blend_mask->float_buffer.data;
+
+  if (dst_canvas->float_data() && src_fragment->float_buffer.data) {
+    const float *frag_data = src_fragment->float_buffer.data;
+    float *canvas = dst_canvas->float_data_for_write();
+    const int ch = dst_canvas->channels ? dst_canvas->channels : 4;
+    for (int i = 0; i < total_pixels; i++) {
+      const float m = mask_data[i * 4 + 0];
+      if (m <= 0.001f) {
+        continue;
+      }
+      const float frag_alpha = (ch >= 4) ? frag_data[i * 4 + 3] : 1.0f;
+      const float blend = m * frag_alpha;
+      if (blend <= 0.001f) {
+        continue;
+      }
+      canvas[i * ch + 0] = (1.0f - blend) * canvas[i * ch + 0] + blend * frag_data[i * 4 + 0];
+      canvas[i * ch + 1] = (1.0f - blend) * canvas[i * ch + 1] + blend * frag_data[i * 4 + 1];
+      canvas[i * ch + 2] = (1.0f - blend) * canvas[i * ch + 2] + blend * frag_data[i * 4 + 2];
+      if (ch >= 4) {
+        canvas[i * ch + 3] = (1.0f - blend) * canvas[i * ch + 3] +
+                             blend * frag_data[i * 4 + 3];
+      }
+    }
+  }
+  else if (dst_canvas->byte_data() && src_fragment->byte_buffer.data) {
+    const uint8_t *frag_data = src_fragment->byte_buffer.data;
+    uint8_t *canvas = dst_canvas->byte_data_for_write();
+    for (int i = 0; i < total_pixels; i++) {
+      const float m = mask_data[i * 4 + 0];
+      if (m <= 0.001f) {
+        continue;
+      }
+      const float frag_alpha = frag_data[i * 4 + 3] / 255.0f;
+      const float blend = m * frag_alpha;
+      if (blend <= 0.001f) {
+        continue;
+      }
+      canvas[i * 4 + 0] = uint8_t(std::clamp(
+          (1.0f - blend) * float(canvas[i * 4 + 0]) + blend * float(frag_data[i * 4 + 0]),
+          0.0f,
+          255.0f));
+      canvas[i * 4 + 1] = uint8_t(std::clamp(
+          (1.0f - blend) * float(canvas[i * 4 + 1]) + blend * float(frag_data[i * 4 + 1]),
+          0.0f,
+          255.0f));
+      canvas[i * 4 + 2] = uint8_t(std::clamp(
+          (1.0f - blend) * float(canvas[i * 4 + 2]) + blend * float(frag_data[i * 4 + 2]),
+          0.0f,
+          255.0f));
+      canvas[i * 4 + 3] = uint8_t(std::clamp(
+          (1.0f - blend) * float(canvas[i * 4 + 3]) + blend * float(frag_data[i * 4 + 3]),
+          0.0f,
+          255.0f));
+    }
+  }
+}
+
+void image_select_fragment_undo_push_end_if_open(bool &r_undo_begun)
+{
+  if (!r_undo_begun) {
+    return;
+  }
+
+  /* step_init can be prematurely set to nullptr when another undoable operator runs while a
+   * floating fragment is live. ED_image_undo_push_end() does not tolerate that state, so skip
+   * closing the already-lost undo record instead of crashing. */
+  UndoStack *ustack = ED_undo_stack_get();
+  if (ustack && ustack->step_init != nullptr) {
+    ED_image_undo_push_end();
+  }
+  r_undo_begun = false;
+}
+
 void image_select_fragment_update_preview_buffers(SelectionTileFragment &frag)
 {
   if (frag.preview.fragment_blend_mask_ibuf) {

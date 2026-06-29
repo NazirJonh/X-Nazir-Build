@@ -288,33 +288,13 @@ void image_paint_gradient_eval_color(const ImagePaintGradientParams &params,
                                      const float t,
                                      float r_color[4])
 {
-  if (params.colorband) {
-    BKE_colorband_evaluate(params.colorband, t, r_color);
-    /* Respect the per-stop alpha of the ramp, scaled by the global gradient opacity (and the
-     * selection mask weight at composite time). This lets a stop fade the gradient to transparent. */
-    r_color[3] *= params.opacity;
-    return;
-  }
-
-  /* Interpolate in perceptual (sRGB gamma) space so that the gradient appears
-   * visually smooth on a standard display.  Linearly interpolating scene-linear
-   * RGB compresses dark values: at t=0.5 the linear value 0.5 maps to ~73 %
-   * display brightness, making the dark→grey transition look abrupt.
-   * Photoshop, GIMP, CSS, and SVG all use the same gamma-space interpolation
-   * by default.  The round-trip linear→sRGB→lerp→linear is lossless for the
-   * endpoint colours (black and white are unchanged) and produces a 50 %
-   * display-brightness midpoint when t=0.5, exactly as expected. */
-  float start_srgb[3], end_srgb[3];
-  linearrgb_to_srgb_v3_v3(start_srgb, params.color_start);
-  linearrgb_to_srgb_v3_v3(end_srgb, params.color_end);
-
-  float srgb_lerped[3];
-  const float one_minus_t = 1.0f - t;
-  for (int i = 0; i < 3; i++) {
-    srgb_lerped[i] = start_srgb[i] * one_minus_t + end_srgb[i] * t;
-  }
-  srgb_to_linearrgb_v3_v3(r_color, srgb_lerped);
-  r_color[3] = params.opacity;
+  /* Both param builders always supply a color ramp (the tool's embedded ramp or the brush
+   * gradient), matching the long-standing 2D gradient-fill invariant. */
+  BLI_assert(params.colorband != nullptr);
+  BKE_colorband_evaluate(params.colorband, t, r_color);
+  /* Respect the per-stop alpha of the ramp, scaled by the global gradient opacity (and the
+   * selection mask weight at composite time). This lets a stop fade the gradient to transparent. */
+  r_color[3] *= params.opacity;
 }
 
 void image_paint_gradient_ensure_colorband(ImagePaintSettings &imapaint)
@@ -335,7 +315,8 @@ ImagePaintGradientParams image_paint_gradient_params_from_imapaint(
   params.repeat = ImagePaintGradientRepeat(imapaint.gradient_repeat);
   params.blend_mode = IMB_BlendMode(imapaint.gradient_blend_mode);
   params.opacity = imapaint.gradient_opacity;
-  /* The tool always uses its own embedded color ramp. */
+  /* The tool always uses its own embedded color ramp. The const_cast is safe: the ramp is only
+   * read (via #BKE_colorband_evaluate, whose legacy signature takes a non-const pointer). */
   params.colorband = const_cast<ColorBand *>(&imapaint.gradient_colorband);
   return params;
 }
@@ -396,9 +377,9 @@ void image_paint_gradient_calc_work_region(const Scene *scene,
                                            const int tile_number,
                                            const int tile_w,
                                            const int tile_h,
-                                           const ImagePaintGradientParams &params,
-                                           const float2 &start_px,
-                                           const float2 &end_px,
+                                           const ImagePaintGradientParams & /*params*/,
+                                           const float2 & /*start_px*/,
+                                           const float2 & /*end_px*/,
                                            const rcti *region_override,
                                            rcti &r_region)
 {
@@ -420,7 +401,7 @@ void image_paint_gradient_calc_work_region(const Scene *scene,
 
 static float2 image_paint_gradient_tile_uv_origin(const int tile_number)
 {
-  return float2(float((tile_number - 1001) % 10), float((tile_number - 1001) / 10));
+  return image_select_udim_tile_uv_origin(tile_number);
 }
 
 static void image_paint_gradient_uv_bounds(const ImagePaintGradientParams &params,

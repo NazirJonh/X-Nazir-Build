@@ -116,7 +116,8 @@ struct ImageClipboardState {
   bool has_mask = false;
 };
 
-/* Global clipboard buffer. Cleared on app exit via WM_exit_handler. */
+/* Global clipboard buffer. Cleared on app exit via WM_exit_handler.
+ * Main-thread only: accessed exclusively from operator callbacks, so it needs no locking. */
 static ImageClipboardState *g_clipboard_state = nullptr;
 static bool g_clipboard_atexit_registered = false;
 static void image_clipboard_state_free();
@@ -608,25 +609,17 @@ static void image_select_move_restore_source(bContext *C, ImageSelectMoveState *
  */
 void image_select_move_commit(bContext *C, ImageSelectMoveState *state)
 {
-  /* Retrieve the undo stack once; all push_end guard checks in this function use this
-   * pointer to verify that step_init is still open before calling ED_image_undo_push_end.
-   * See the comment above the final guard at the end of this function for a full explanation
-   * of why step_init can be nullptr at commit time and why the guard is necessary. */
   UndoStack *ustack = ED_undo_stack_get();
 
   SpaceImage *sima = state->owner_sima ? state->owner_sima : CTX_wm_space_image(C);
   if (!sima || !sima->image) {
-    if (state->undo_begun && ustack && ustack->step_init != nullptr) {
-      ED_image_undo_push_end();
-    }
+    image_select_fragment_undo_push_end_if_open(state->undo_begun);
     return;
   }
   Image *ima = sima->image;
 
   if (state->fragments.is_empty()) {
-    if (state->undo_begun && ustack && ustack->step_init != nullptr) {
-      ED_image_undo_push_end();
-    }
+    image_select_fragment_undo_push_end_if_open(state->undo_begun);
     return;
   }
 
@@ -881,26 +874,7 @@ void image_select_move_commit(bContext *C, ImageSelectMoveState *state)
     }
   }
 
-  /* Only close the undo step if it is still open.
-   * step_init can be prematurely set to nullptr in two ways:
-   *   1. A selection operator (box/lasso/circle) that was invoked while this
-   *      floating fragment was live called push_begin_selection, which in turn
-   *      calls BKE_undosys_step_push_init_with_type.  That function frees and
-   *      unlinks any existing step_init before creating its own.
-   *   2. Any operator with OPTYPE_UNDO that completed after lift_source called
-   *      BKE_undosys_step_push, which finalises step_init and sets it to nullptr.
-   * In either case, calling ED_image_undo_push_end() would reach the branch
-   *   ut = BKE_undosys_type_from_context(nullptr)
-   * because step_init is nullptr and push_end always passes nullptr for C.
-   * BKE_undosys_type_from_context then iterates all undo-type poll functions
-   * with a null context; armature_undosys_poll dereferences it and crashes.
-   * Skipping push_end is safe: the pixels have already been written above, so
-   * the commit is applied to the canvas.  The undo record is unfortunately lost
-   * (the earlier step_init was destroyed by the intervening operator), but that
-   * is preferable to crashing. */
-  if (state->undo_begun && ustack && ustack->step_init != nullptr) {
-    ED_image_undo_push_end();
-  }
+  image_select_fragment_undo_push_end_if_open(state->undo_begun);
 
   /* Free cached GPU textures so the Image Editor reloads from the modified ibuf. */
   BKE_image_free_gputextures(ima);
@@ -1428,7 +1402,6 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
   const ImageClipboardState *cb = clipboard_get();
   ImageUser iuser = sima->iuser;
   blender::Vector<SelectionTileFragment> paste_frags;
-  bool has_mask = false;
 
   if (cb && cb->has_mask) {
     paste_frags.reserve(cb->fragments.size());
@@ -1453,7 +1426,6 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
       dst_frag.geom.tile_number = src_frag.geom.tile_number;
       paste_frags.append(std::move(dst_frag));
     }
-    has_mask = true;
     if (!paste_frags.is_empty()) {
       iuser.tile = paste_frags[0].geom.tile_number;
     }
@@ -1554,7 +1526,6 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
     }
   }
   state->undo_begun = true;
-  UNUSED_VARS(has_mask);
 
   g_floating_state = state;
 

@@ -1122,7 +1122,7 @@ void wm_gizmomap_modal_set(
     gz->state |= WM_GIZMO_STATE_MODAL;
     gzmap->gzmap_context.modal = gz;
 
-    if (C && gz->type->cursor_get) {
+    if (C && (gz->flag & WM_GIZMO_REFRESH_CURSOR_ON_MODAL) && gz->type->cursor_get) {
       WM_cursor_set(CTX_wm_window(C), gz->type->cursor_get(gz));
     }
 
@@ -1179,7 +1179,9 @@ void wm_gizmomap_modal_set(
         }
       }
       wmGizmo *highlight = gzmap->gzmap_context.highlight;
-      if (highlight && highlight->type->cursor_get) {
+      if (highlight && (highlight->flag & WM_GIZMO_REFRESH_CURSOR_ON_MODAL) &&
+          highlight->type->cursor_get)
+      {
         WM_cursor_set(win, highlight->type->cursor_get(highlight));
       }
       ED_region_tag_redraw_editor_overlays(CTX_wm_region(C));

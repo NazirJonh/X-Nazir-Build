@@ -136,6 +136,12 @@ enum {
   ED_GIZMO_CAGE_DRAW_FLAG_CORNER_HANDLES = (1 << 1),
   /** Interior rectangle is a move hot-spot; center cross still draws when #ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE is set. */
   ED_GIZMO_CAGE_DRAW_FLAG_XFORM_INTERIOR_TRANSLATE = (1 << 2),
+  /** Always draw every edge and corner handle (not only the highlighted one).
+   * Opt-in so callers relying on hover-based handle visibility are unaffected. */
+  ED_GIZMO_CAGE_DRAW_FLAG_ALL_HANDLES = (1 << 3),
+  /** Draw the center handle as a plus (+) instead of the default cross (X).
+   * Opt-in so existing cage gizmos keep the cross glyph. */
+  ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE_PLUS = (1 << 4),
 };
 
 /** #wmGizmo.highlight_part */

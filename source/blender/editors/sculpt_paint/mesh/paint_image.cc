@@ -13,7 +13,7 @@
 #include <cstring>
 
 #ifndef IMAGE_SELECT_DEBUG
-#  define IMAGE_SELECT_DEBUG 1
+#  define IMAGE_SELECT_DEBUG 0
 #endif
 #if IMAGE_SELECT_DEBUG
 #  define IMG_SEL_DBG_PAINT(fmt, ...) \

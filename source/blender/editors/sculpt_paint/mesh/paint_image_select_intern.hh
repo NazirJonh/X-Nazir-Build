@@ -122,29 +122,8 @@ inline void selection_tile_fragments_free(Vector<SelectionTileFragment> &fragmen
 
 void paint_select_session_free(PaintSelectSession &session);
 
-void image_select_move_commit(bContext *C, ImageSelectMoveState *state);
-void image_select_move_state_free(ImageSelectMoveState *state);
-void image_select_transform_state_free(ImageSelectTransformState *state);
-
 bool image_paint_selection_poll(bContext *C);
 int image_paint_selection_resolve_tile(Image *ima, const SpaceImage *sima, int preferred_tile);
-bool image_select_move_cursor_in_fragment(const ImageSelectMoveState *state,
-                                          const ARegion *region,
-                                          const wmEvent *event,
-                                          Image *ima);
-bool image_select_move_delegate_to_move_operator(bContext *C, const wmEvent *event);
-ImBuf *image_select_move_extract(wmOperator *op,
-                                 Image *ima,
-                                 ImageUser *iuser,
-                                 const SpaceImage *sima,
-                                 int tile_number,
-                                 int2 *r_origin_px,
-                                 int2 *r_size_px,
-                                 ImBuf **r_fragment_mask);
-bool image_select_extract_per_tile(wmOperator *op,
-                                   Image *ima,
-                                   const ImageUser &base_iuser,
-                                   Vector<SelectionTileFragment> *r_fragments);
 
 inline int2 image_select_fragment_ui_origin(const SelectionTileFragment &frag)
 {
@@ -162,98 +141,41 @@ inline int2 image_select_fragment_ui_size(const SelectionTileFragment &frag)
   return frag.geom.size_px;
 }
 
-enum class ImageSelectTransformHandleType {
-  None = 0,
-  Move,
-  Rotate,
-  Anchor,
-  C0,
-  C1,
-  C2,
-  C3,
-  MBottom,
-  MRight,
-  MTop,
-  MLeft,
-};
+/** Column/row (0-based) of a 1001-based UDIM tile number in the 10-wide tile grid. */
+inline int2 image_select_udim_tile_col_row(int tile_number)
+{
+  return int2((tile_number - 1001) % 10, (tile_number - 1001) / 10);
+}
 
-struct ImageSelectTransformGizmoMatrices {
-  float matrix_space[4][4];
-  float matrix_basis[4][4];
-  float matrix_offset[4][4];
-  float cage_center_uv[3];
-  float anchor_screen[3];
-};
+/** Bottom-left UV corner of a UDIM tile (its column/row in whole-tile UV units). */
+inline float2 image_select_udim_tile_uv_origin(int tile_number)
+{
+  const int2 col_row = image_select_udim_tile_col_row(tile_number);
+  return float2(float(col_row.x), float(col_row.y));
+}
 
-bool image_select_move_is_floating(bContext *C);
-bool image_select_move_is_floating_in_space(const SpaceImage *sima);
+/* Gradient floating-state helpers. The gradient rasterization API lives in
+ * paint_image_select_gradient.hh; these operate on the runtime floating session. */
 bool image_select_gradient_is_floating(bContext *C);
 bool image_select_gradient_is_floating_in_space(const SpaceImage *sima);
 void image_select_gradient_state_free(ImageSelectGradientState *state);
-wmOperatorStatus image_select_move_convert_to_transform(bContext *C,
-                                                        wmOperator *op,
-                                                        const wmEvent *event);
 
-wmOperatorStatus image_select_transform_adopt_move_state(bContext *C,
-                                                         wmOperator *op,
-                                                         const wmEvent *event,
-                                                         SpaceImage *sima,
-                                                         Vector<SelectionTileFragment> &&fragments,
-                                                         float2 uv_drag_offset,
-                                                         int ref_tile_number,
-                                                         const ImageUser &iuser,
-                                                         bool undo_begun,
-                                                         bool proportional);
-bool image_select_transform_is_floating_in_space(const SpaceImage *sima);
-ImageSelectTransformState *image_select_transform_state_get(SpaceImage *sima);
-
-bool ED_image_paint_select_is_transforming(SpaceImage *sima);
-void ED_image_paint_select_translation_get(SpaceImage *sima, float r_translation[2]);
-void ED_image_paint_select_translation_set(SpaceImage *sima, const float translation[2]);
-float ED_image_paint_select_rotation_get(SpaceImage *sima);
-void ED_image_paint_select_rotation_set(SpaceImage *sima, float rotation);
-void ED_image_paint_select_scale_get(SpaceImage *sima, float r_scale[2]);
-void ED_image_paint_select_scale_set(SpaceImage *sima, const float scale[2]);
-
-ImageSelectTransformHandleType image_select_transform_cage_part_to_handle_type(int cage_part);
-void image_select_transform_begin_drag(ImageSelectTransformState *state,
-                                       const wmEvent *event,
-                                       ImageSelectTransformHandleType handle);
-void image_select_transform_end_drag(ImageSelectTransformState *state);
-void image_select_transform_apply_handle(bContext *C,
-                                         ImageSelectTransformState *state,
-                                         const wmEvent *event,
-                                         ImageSelectTransformHandleType handle,
-                                         ARegion *region);
-bool image_select_transform_calc_gizmo_matrices(const bContext *C,
-                                                const ImageSelectTransformState *state,
-                                                ImageSelectTransformGizmoMatrices *r_mats);
-bool image_select_transform_has_active_handle(const ImageSelectTransformState *state);
-void image_select_transform_gizmo_refresh_tweak(const bContext *C,
-                                                wmGizmo *gz_cage,
-                                                wmGizmo *gz_anchor,
-                                                bool *r_was_modal_tweak);
-
-void ED_image_paint_select_transform_gizmo_setup(wmGizmoGroupType *gzgt);
-
+/* Mask selection operators (box/lasso/circle and friends). */
 void PAINT_OT_image_select_all(wmOperatorType *ot);
 void PAINT_OT_image_select_none(wmOperatorType *ot);
 void PAINT_OT_image_select_invert(wmOperatorType *ot);
 void PAINT_OT_image_select_box(wmOperatorType *ot);
 void PAINT_OT_image_select_lasso(wmOperatorType *ot);
 void PAINT_OT_image_select_circle(wmOperatorType *ot);
-void PAINT_OT_image_select_move(wmOperatorType *ot);
-void PAINT_OT_image_select_move_confirm(wmOperatorType *ot);
-void PAINT_OT_image_select_move_cancel(wmOperatorType *ot);
-void PAINT_OT_image_select_move_undo_step(wmOperatorType *ot);
-void PAINT_OT_image_select_copy(wmOperatorType *ot);
-void PAINT_OT_image_select_paste(wmOperatorType *ot);
-void PAINT_OT_image_select_transform(wmOperatorType *ot);
-void PAINT_OT_image_select_transform_confirm(wmOperatorType *ot);
-void PAINT_OT_image_select_transform_cancel(wmOperatorType *ot);
-void PAINT_OT_image_select_transform_drag(wmOperatorType *ot);
+
+/* Gradient tool operators. */
 void PAINT_OT_image_select_gradient(wmOperatorType *ot);
 void PAINT_OT_image_select_gradient_apply(wmOperatorType *ot);
 void PAINT_OT_image_select_gradient_cancel(wmOperatorType *ot);
 
 } /* namespace blender */
+
+/* Subsystem declarations. Included here (after the shared types above) so the existing consumers
+ * keep a single include; the move/transform declarations physically live in their own files. */
+#include "paint_image_select_move_intern.hh"
+#include "paint_image_select_transform_intern.hh"

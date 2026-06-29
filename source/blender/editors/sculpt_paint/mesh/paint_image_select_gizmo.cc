@@ -182,12 +182,18 @@ static void paint_select_transform_gizmo_setup(const bContext * /*C*/, wmGizmoGr
                "transform",
                ED_GIZMO_CAGE_XFORM_FLAG_TRANSLATE | ED_GIZMO_CAGE_XFORM_FLAG_SCALE |
                    ED_GIZMO_CAGE_XFORM_FLAG_ROTATE);
+  /* Corner handles enable corner hit-testing; all-handles draws them permanently;
+   * center-handle-plus draws the interior cross as a plus glyph. */
   RNA_enum_set(ggd->gz_cage->ptr,
                "draw_options",
                ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE |
+                   ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE_PLUS |
                    ED_GIZMO_CAGE_DRAW_FLAG_CORNER_HANDLES |
+                   ED_GIZMO_CAGE_DRAW_FLAG_ALL_HANDLES |
                    ED_GIZMO_CAGE_DRAW_FLAG_XFORM_INTERIOR_TRANSLATE);
   WM_gizmo_set_fn_custom_modal(ggd->gz_cage, paint_select_transform_cage_modal);
+  /* Interior-translate cursor depends on modal state, so refresh it on modal transitions. */
+  ggd->gz_cage->flag |= WM_GIZMO_REFRESH_CURSOR_ON_MODAL;
 
   float cage_color[4] = {1.0f, 0.85f, 0.0f, 0.9f};
   float cage_color_hi[4] = {1.0f, 1.0f, 0.3f, 1.0f};

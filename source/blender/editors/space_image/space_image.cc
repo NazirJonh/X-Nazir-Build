@@ -193,20 +193,20 @@ static SpaceLink *image_create(const ScrArea * /*area*/, const Scene * /*scene*/
   return reinterpret_cast<SpaceLink *>(simage);
 }
 
-/* Per-space tracking of the selection-mask animation timer. Runtime only.
- * Avoids adding a runtime pointer to SpaceImage DNA. */
-static blender::Map<SpaceImage *, wmTimer *> g_selection_mask_timers;
-
 /* Add/remove a notifier timer that drives the selection-mask "marching ants"
  * animation. The timer posts NC_SPACE | ND_SPACE_IMAGE notifiers at ~30 FPS,
- * which the main region listener uses to tag a redraw. */
+ * which the main region listener uses to tag a redraw. The timer handle lives in
+ * #SpaceImage_Runtime, so its lifetime is tied to the editor instance. */
 static void image_selection_mask_timer_update(const Main *bmain,
                                               wmWindow *win,
                                               SpaceImage *sima,
                                               const Scene *scene)
 {
+  if (!sima->runtime) {
+    return;
+  }
   const bool wants_timer = (scene && scene->toolsettings->imapaint.use_selection_mask);
-  wmTimer *timer = g_selection_mask_timers.lookup_default(sima, nullptr);
+  wmTimer *&timer = sima->runtime->selection_mask_timer;
   if (wants_timer == (timer != nullptr)) {
     return;
   }
@@ -218,11 +218,10 @@ static void image_selection_mask_timer_update(const Main *bmain,
 
   if (wants_timer) {
     timer = WM_event_timer_add_notifier(wm, win, NC_SPACE | ND_SPACE_IMAGE, 1.0 / 30.0);
-    g_selection_mask_timers.add(sima, timer);
   }
   else {
     WM_event_timer_remove_notifier(wm, win, timer);
-    g_selection_mask_timers.remove(sima);
+    timer = nullptr;
   }
 }
 
@@ -233,11 +232,8 @@ static void image_free(SpaceLink *sl)
 
   BKE_scopes_free(&simage->scopes);
 
-  /* The wmTimer (if any) is removed in #image_exit while the wmWindowManager
-   * is still available; here we just forget any leftover map entry as a
-   * defensive cleanup. */
-  g_selection_mask_timers.remove(simage);
-
+  /* The wmTimer (if any) is removed in #image_exit while the wmWindowManager is still
+   * available; by the time the space-link is freed the timer reference is already gone. */
   if (simage->runtime) {
     paint_select_session_free(simage->runtime->paint_select);
     MEM_delete(simage->runtime);
@@ -248,8 +244,9 @@ static void image_free(SpaceLink *sl)
 static void image_exit(wmWindowManager *wm, ScrArea *area)
 {
   SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-  if (wmTimer *timer = g_selection_mask_timers.pop_default(sima, nullptr)) {
-    WM_event_timer_remove_notifier(wm, nullptr, timer);
+  if (sima->runtime && sima->runtime->selection_mask_timer) {
+    WM_event_timer_remove_notifier(wm, nullptr, sima->runtime->selection_mask_timer);
+    sima->runtime->selection_mask_timer = nullptr;
   }
 }
 

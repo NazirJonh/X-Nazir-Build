@@ -538,10 +538,20 @@ static void cage2d_draw_rect_wire(const rctf *r,
       const float center[2] = {BLI_rctf_cent_x(r), BLI_rctf_cent_y(r)};
 
       immBegin(GPU_PRIM_LINES, 4);
-      immVertex3f(pos, center[0] - rad[0], center[1], 0.0f);
-      immVertex3f(pos, center[0] + rad[0], center[1], 0.0f);
-      immVertex3f(pos, center[0], center[1] - rad[1], 0.0f);
-      immVertex3f(pos, center[0], center[1] + rad[1], 0.0f);
+      if (draw_options & ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE_PLUS) {
+        /* Axis-aligned plus (+). */
+        immVertex3f(pos, center[0] - rad[0], center[1], 0.0f);
+        immVertex3f(pos, center[0] + rad[0], center[1], 0.0f);
+        immVertex3f(pos, center[0], center[1] - rad[1], 0.0f);
+        immVertex3f(pos, center[0], center[1] + rad[1], 0.0f);
+      }
+      else {
+        /* Diagonal cross (X). */
+        immVertex3f(pos, center[0] - rad[0], center[1] - rad[1], 0.0f);
+        immVertex3f(pos, center[0] + rad[0], center[1] + rad[1], 0.0f);
+        immVertex3f(pos, center[0] + rad[0], center[1] - rad[1], 0.0f);
+        immVertex3f(pos, center[0] - rad[0], center[1] + rad[1], 0.0f);
+      }
       immEnd();
     }
   }
@@ -594,10 +604,20 @@ static void cage2d_draw_circle_wire(const float color[3],
       const float center[2] = {0.0f, 0.0f};
 
       immBegin(GPU_PRIM_LINES, 4);
-      immVertex3f(pos, center[0] - rad[0], center[1], 0.0f);
-      immVertex3f(pos, center[0] + rad[0], center[1], 0.0f);
-      immVertex3f(pos, center[0], center[1] - rad[1], 0.0f);
-      immVertex3f(pos, center[0], center[1] + rad[1], 0.0f);
+      if (draw_options & ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE_PLUS) {
+        /* Axis-aligned plus (+). */
+        immVertex3f(pos, center[0] - rad[0], center[1], 0.0f);
+        immVertex3f(pos, center[0] + rad[0], center[1], 0.0f);
+        immVertex3f(pos, center[0], center[1] - rad[1], 0.0f);
+        immVertex3f(pos, center[0], center[1] + rad[1], 0.0f);
+      }
+      else {
+        /* Diagonal cross (X). */
+        immVertex3f(pos, center[0] - rad[0], center[1] - rad[1], 0.0f);
+        immVertex3f(pos, center[0] + rad[0], center[1] + rad[1], 0.0f);
+        immVertex3f(pos, center[0] + rad[0], center[1] - rad[1], 0.0f);
+        immVertex3f(pos, center[0] - rad[0], center[1] + rad[1], 0.0f);
+      }
       immEnd();
     }
   }
@@ -847,8 +867,8 @@ static void gizmo_cage2d_draw_intern(wmGizmo *gz,
         cage2d_draw_rect_wire(&r, margin, black, transform_flag, draw_options, outline_line_width);
         cage2d_draw_rect_wire(&r, margin, color, transform_flag, draw_options, gz->line_width);
 
-        if (draw_options & ED_GIZMO_CAGE_DRAW_FLAG_CORNER_HANDLES) {
-          /* Same visibility as #ED_GIZMO_CAGE2D_STYLE_CIRCLE with #ED_GIZMO_CAGE_DRAW_FLAG_CORNER_HANDLES. */
+        if (draw_options & ED_GIZMO_CAGE_DRAW_FLAG_ALL_HANDLES) {
+          /* Show all edge and corner handles permanently (opt-in, e.g. image-paint selection). */
           cage2d_draw_rect_corner_handles(&r, margin, color, true);
           cage2d_draw_rect_corner_handles(&r, margin, black, false);
           cage2d_draw_rect_all_edge_handles(&r, size_real, margin, color, true);
@@ -1483,6 +1503,12 @@ static void GIZMO_GT_cage_2d(wmGizmoType *gzt)
        "XFORM_INTERIOR_TRANSLATE",
        0,
        "Interior Translate",
+       ""},
+      {ED_GIZMO_CAGE_DRAW_FLAG_ALL_HANDLES, "ALL_HANDLES", 0, "All Handles", ""},
+      {ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE_PLUS,
+       "XFORM_CENTER_HANDLE_PLUS",
+       0,
+       "Center Handle Plus",
        ""},
       {0, nullptr, 0, nullptr, nullptr},
   };

@@ -10,7 +10,6 @@
 #include <climits>
 #include <cmath>
 #include <limits>
-#include <cstdio>
 #include <cstring>
 
 #include "MEM_guardedalloc.h"
@@ -21,6 +20,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_span.hh"
+#include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_set.hh"
 #include "BLI_vector.hh"
@@ -143,7 +143,7 @@ struct ImageSelectTransformState {
 /** Tile UV origin for UDIM (tile 1001 -> (0, 0), tile 1012 -> (1, 1), etc.). */
 static float2 image_select_tile_uv_origin(const int tile_number)
 {
-  return float2(float((tile_number - 1001) % 10), float((tile_number - 1001) / 10));
+  return image_select_udim_tile_uv_origin(tile_number);
 }
 
 static int image_select_transform_ref_tile(const ImageSelectTransformState *state)
@@ -1112,10 +1112,7 @@ void image_select_transform_apply_handle(bContext *C,
       state->rotation = raw_angle;
     }
     char status_str[128];
-    snprintf(status_str,
-             sizeof(status_str),
-             "Rotation: %.2f°",
-             state->rotation * 180.0f / float(M_PI));
+    SNPRINTF(status_str, "Rotation: %.2f°", state->rotation * 180.0f / float(M_PI));
     ED_area_status_text(state->owner_area ? state->owner_area : CTX_wm_area(C), status_str);
   }
   else if (active == ImageSelectTransformState::HANDLE_ANCHOR) {
@@ -1378,12 +1375,7 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
   ImageUser iuser = state->iuser;
 
   if (state->fragments.is_empty()) {
-    if (state->undo_begun) {
-      UndoStack *ustack_empty = ED_undo_stack_get();
-      if (ustack_empty && ustack_empty->step_init) {
-        ED_image_undo_push_end();
-      }
-    }
+    image_select_fragment_undo_push_end_if_open(state->undo_begun);
     return;
   }
 
@@ -1531,6 +1523,14 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
         dest_ibuf->x, dest_ibuf->y, is_float ? ImBufFlags::FloatData : ImBufFlags::ByteData);
     ImBuf *temp_mask = IMB_allocImBuf(dest_ibuf->x, dest_ibuf->y, ImBufFlags::FloatData);
     ImBuf *temp_blend_mask = IMB_allocImBuf(dest_ibuf->x, dest_ibuf->y, ImBufFlags::FloatData);
+    if (!temp_pixels || !temp_mask || !temp_blend_mask) {
+      /* Out of memory: free any partial allocations and skip this tile. */
+      IMB_freeImBuf(temp_pixels);
+      IMB_freeImBuf(temp_mask);
+      IMB_freeImBuf(temp_blend_mask);
+      BKE_image_release_ibuf(ima, dest_ibuf, lock);
+      continue;
+    }
     temp_pixels->channels = 4;
     IMB_rectfill_alpha(temp_pixels, 0.0f);
 
@@ -1579,65 +1579,11 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
                                                         4,
                                                         frag.edge_policy);
 
-    const float *mask_data = temp_blend_mask->float_buffer.data;
     const int total_pixels = dest_ibuf->x * dest_ibuf->y;
 
     /* Alpha-blend the transformed fragment onto the destination canvas.
      * blend = mask * fragment_alpha so partially-transparent pixels are respected. */
-    if (dest_ibuf->float_data() && temp_pixels->float_buffer.data) {
-      const float *frag_data = temp_pixels->float_buffer.data;
-      float *canvas = dest_ibuf->float_data_for_write();
-      const int ch = dest_ibuf->channels ? dest_ibuf->channels : 4;
-      for (int i = 0; i < total_pixels; i++) {
-        const float m = mask_data[i * 4 + 0];
-        if (m <= 0.001f) {
-          continue;
-        }
-        const float frag_alpha = (ch >= 4) ? frag_data[i * 4 + 3] : 1.0f;
-        const float blend = m * frag_alpha;
-        if (blend <= 0.001f) {
-          continue;
-        }
-        canvas[i * ch + 0] = (1.0f - blend) * canvas[i * ch + 0] + blend * frag_data[i * 4 + 0];
-        canvas[i * ch + 1] = (1.0f - blend) * canvas[i * ch + 1] + blend * frag_data[i * 4 + 1];
-        canvas[i * ch + 2] = (1.0f - blend) * canvas[i * ch + 2] + blend * frag_data[i * 4 + 2];
-        if (ch >= 4) {
-          canvas[i * ch + 3] = (1.0f - blend) * canvas[i * ch + 3] +
-                               blend * frag_data[i * 4 + 3];
-        }
-      }
-    }
-    else if (dest_ibuf->byte_data() && temp_pixels->byte_buffer.data) {
-      const uint8_t *frag_data = temp_pixels->byte_buffer.data;
-      uint8_t *canvas = dest_ibuf->byte_data_for_write();
-      for (int i = 0; i < total_pixels; i++) {
-        const float m = mask_data[i * 4 + 0];
-        if (m <= 0.001f) {
-          continue;
-        }
-        const float frag_alpha = frag_data[i * 4 + 3] / 255.0f;
-        const float blend = m * frag_alpha;
-        if (blend <= 0.001f) {
-          continue;
-        }
-        canvas[i * 4 + 0] = uint8_t(std::clamp(
-            (1.0f - blend) * float(canvas[i * 4 + 0]) + blend * float(frag_data[i * 4 + 0]),
-            0.0f,
-            255.0f));
-        canvas[i * 4 + 1] = uint8_t(std::clamp(
-            (1.0f - blend) * float(canvas[i * 4 + 1]) + blend * float(frag_data[i * 4 + 1]),
-            0.0f,
-            255.0f));
-        canvas[i * 4 + 2] = uint8_t(std::clamp(
-            (1.0f - blend) * float(canvas[i * 4 + 2]) + blend * float(frag_data[i * 4 + 2]),
-            0.0f,
-            255.0f));
-        canvas[i * 4 + 3] = uint8_t(std::clamp(
-            (1.0f - blend) * float(canvas[i * 4 + 3]) + blend * float(frag_data[i * 4 + 3]),
-            0.0f,
-            255.0f));
-      }
-    }
+    image_select_blend_buffer_into_canvas(dest_ibuf, temp_pixels, temp_blend_mask);
 
     /* Merge the transformed selection mask into the destination tile's runtime mask. */
     ImBuf *global_mask = BKE_image_paint_selection_mask_lookup(ima, dest_tile_num);
@@ -1669,10 +1615,7 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
   BKE_image_partial_update_mark_full_update(ima);
   BKE_image_free_gputextures(ima);
 
-  if (state->undo_begun) {
-    ED_image_undo_push_end();
-    state->undo_begun = false;
-  }
+  image_select_fragment_undo_push_end_if_open(state->undo_begun);
 
   DEG_id_tag_update(&ima->id, 0);
   WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);

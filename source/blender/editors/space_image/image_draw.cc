@@ -499,7 +499,7 @@ void draw_image_paint_selection_mask(const bContext *C, ARegion *region)
 
     immBeginAtMost(GPU_PRIM_LINES, size_t(mask->x + 1) * (mask->y + 1) * 2);
 
-    /* Horizontal edges тАФ borders between selected and unselected rows. */
+    /* Horizontal edges - borders between selected and unselected rows. */
     for (int y = 0; y <= mask->y; y++) {
       int x_start = -1;
       bool current_bot_sel = false;
@@ -567,7 +567,7 @@ void draw_image_paint_selection_mask(const bContext *C, ARegion *region)
       }
     }
 
-    /* Vertical edges тАФ borders between selected and unselected columns. */
+    /* Vertical edges - borders between selected and unselected columns. */
     for (int x = 0; x <= mask->x; x++) {
       int y_start = -1;
       bool current_right_sel = false;

@@ -1326,9 +1326,9 @@ class IMAGE_PT_paint_select_move_props(Panel):
         sima = context.space_data
         return sima is not None and sima.paint_select_is_moving
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
-        sima = _context.space_data
+        sima = context.space_data
         layout.column().prop(sima, "paint_select_move_offset", text="Offset")
 
 

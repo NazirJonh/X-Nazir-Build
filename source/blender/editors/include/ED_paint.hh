@@ -91,7 +91,7 @@ void ED_image_undo_capture_selection_mask(Image *image, int tile_number);
  * Begin an image undo step that records only selection mask changes (no pixel data).
  * Captures the pre-operation mask state for all tiles of `image`.
  * The caller must call #ED_image_undo_push_end when the mask modification is complete.
- * Do NOT combine with OPTYPE_UNDO on the operator тАФ the step is managed manually.
+ * Do NOT combine with OPTYPE_UNDO on the operator - the step is managed manually.
  */
 void ED_image_undo_push_begin_selection(const char *name, Image *image);
 /**

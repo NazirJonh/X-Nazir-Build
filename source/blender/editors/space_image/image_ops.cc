@@ -378,8 +378,7 @@ static bool space_image_main_area_not_uv_brush_poll(bContext *C)
   if (CTX_data_edit_object(C)) {
     return false;
   }
-  /* Only in View mode; Paint/UV/Mask have their own operators on Ctrl+action_mouse. */
-  return sima->mode == SI_MODE_VIEW;
+  return true;
 }
 
 /** \} */
@@ -3425,7 +3424,7 @@ static wmOperatorStatus image_crop_selection_exec(bContext *C, wmOperator *op)
 
   /* Replace the old mask (now mismatched in size) with a full selection of the cropped
    * image dimensions. The crop region was derived from the selection, so the entire new
-   * image is selected тАФ this preserves the visible dash line after crop. */
+   * image is selected - this preserves the visible dash line after crop. */
   BKE_image_paint_selection_mask_tile_free(ima, tile_number);
   BKE_image_paint_selection_mask_get(ima, tile_number, ibuf->x, ibuf->y);
   BKE_image_paint_selection_mask_fill(ima, tile_number, 1.0f);

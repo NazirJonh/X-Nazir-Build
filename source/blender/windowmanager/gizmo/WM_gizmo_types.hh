@@ -94,6 +94,10 @@ enum eWM_GizmoFlag {
 
   /** This gizmo should be visually distinct and not shown grouped with other gizmos. */
   WM_GIZMO_NO_GROUPING = (1 << 14),
+
+  /** Refresh the cursor from #wmGizmoType.cursor_get when entering/leaving modal.
+   * Opt-in for gizmos whose cursor depends on modal state; others are unaffected. */
+  WM_GIZMO_REFRESH_CURSOR_ON_MODAL = (1 << 15),
 };
 ENUM_OPERATORS(eWM_GizmoFlag);
 

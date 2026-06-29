@@ -8056,6 +8056,10 @@ static int do_but_COLORBAND(
       /* ignore zoom-level for mindist */
       const int select_dist = (50 * UI_SCALE_FAC) * block->aspect;
       int mindist = select_dist;
+      /* Unbiased nearest-stop distance, used only for the insert gate so the decision does not
+       * depend on which stop happens to be active (the active stop gets a +5 disadvantage below
+       * which must not leak into the insert test). */
+      int mindist_unbiased = select_dist;
       int xco;
 
       /* Find the closest stop to the cursor. */
@@ -8064,6 +8068,9 @@ static int do_but_COLORBAND(
       for (a = 0, cbd = coba->data; a < coba->tot; a++, cbd++) {
         xco = but->rect.xmin + (cbd->pos * BLI_rctf_size_x(&but->rect));
         xco = abs(xco - mx);
+        if (xco < mindist_unbiased) {
+          mindist_unbiased = xco;
+        }
         if (a == coba->cur) {
           /* Selected one disadvantage. */
           xco += 5;
@@ -8078,9 +8085,10 @@ static int do_but_COLORBAND(
        * click is not close to an existing stop handle. The hit distance is a bit wider than the
        * drawn handle half-width so new stops aren't placed right on top of existing ones, while
        * still allowing them to be inserted fairly close together. */
-      const int on_handle_dist = BLI_rctf_size_y(&but->rect) / 1.5f;
+      const float handle_hit_factor = 1.5f;
+      const int on_handle_dist = int(BLI_rctf_size_y(&but->rect) / handle_hit_factor);
       const bool insert = (event->modifier & KM_CTRL) ||
-                          (but_coba->insert_on_click && mindist > on_handle_dist);
+                          (but_coba->insert_on_click && mindist_unbiased > on_handle_dist);
 
       if (insert) {
         const float pos = float(mx - but->rect.xmin) / BLI_rctf_size_x(&but->rect);

@@ -7432,7 +7432,7 @@ def km_image_editor_tool_mask_primitive_circle(params):
 
 
 # ------------------------------------------------------------------------------
-# Tool System (Image Paint тАФ Selection)
+# Tool System (Image Paint - Selection)
 
 def km_image_editor_tool_paint_select_box(params, *, fallback):
     return (

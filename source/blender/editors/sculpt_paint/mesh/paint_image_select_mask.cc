@@ -793,7 +793,7 @@ static bool image_paint_selection_has_any_tile_mask(Image *image)
 
 static float2 image_paint_selection_tile_uv_origin_get(const ImageTile &tile)
 {
-  return float2(float((tile.tile_number - 1001) % 10), float((tile.tile_number - 1001) / 10));
+  return image_select_udim_tile_uv_origin(tile.tile_number);
 }
 
 static bool image_paint_selection_tile_intersection_get(const float2 &uv_origin,
@@ -1031,6 +1031,95 @@ void PAINT_OT_image_select_invert(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Shared gesture-operator helpers
+ *
+ * Box / lasso / circle selection share the same invoke (delegate-to-move, then record the click
+ * for simple-click detection), modal (drag-distance detection), RNA properties, and the
+ * commit-floating / deselect / finish boilerplate. These helpers keep that logic in one place so a
+ * new gesture shape only has to provide its own rasterization.
+ * \{ */
+
+/** Cursor travel (in pixels) above which a press-release is treated as a drag, not a simple click. */
+constexpr int IMAGE_SELECT_CLICK_DRAG_THRESHOLD_PX = 3;
+
+/**
+ * Common gesture invoke: hand off to the move operator if the cursor is over a floating fragment,
+ * otherwise record the press location and assume a simple click until the cursor moves far enough.
+ * Returns true when the event was delegated (the caller should return #OPERATOR_FINISHED).
+ */
+static bool image_select_gesture_invoke_begin(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  if (image_select_move_delegate_to_move_operator(C, event)) {
+    return true;
+  }
+  RNA_int_set(op->ptr, "click_x", event->xy[0]);
+  RNA_int_set(op->ptr, "click_y", event->xy[1]);
+  RNA_boolean_set(op->ptr, "is_simple_click", true);
+  return false;
+}
+
+/** Clear the simple-click flag once the cursor has travelled past the drag threshold. */
+static void image_select_gesture_drag_detect(wmOperator *op, const wmEvent *event)
+{
+  if (event->type == MOUSEMOVE && op->customdata) {
+    const int start_x = RNA_int_get(op->ptr, "click_x");
+    const int start_y = RNA_int_get(op->ptr, "click_y");
+    if (abs(event->xy[0] - start_x) > IMAGE_SELECT_CLICK_DRAG_THRESHOLD_PX ||
+        abs(event->xy[1] - start_y) > IMAGE_SELECT_CLICK_DRAG_THRESHOLD_PX)
+    {
+      RNA_boolean_set(op->ptr, "is_simple_click", false);
+    }
+  }
+}
+
+/** Register the simple-click bookkeeping properties shared by every gesture operator. */
+static void image_select_gesture_properties(wmOperatorType *ot)
+{
+  RNA_def_boolean(ot->srna, "is_simple_click", false, "Simple Click", "Click without drag");
+  RNA_def_int(ot->srna, "click_x", 0, INT_MIN, INT_MAX, "Click X", "", INT_MIN, INT_MAX);
+  RNA_def_int(ot->srna, "click_y", 0, INT_MIN, INT_MAX, "Click Y", "", INT_MIN, INT_MAX);
+}
+
+/** Commit and discard any floating move-selection fragment for this editor. */
+static void image_select_commit_floating_move(bContext *C, SpaceImage *sima)
+{
+  ImageSelectMoveState *&state = sima->runtime->paint_select.move;
+  if (state) {
+    image_select_move_commit(C, state);
+    image_select_move_state_free(state);
+    state = nullptr;
+  }
+}
+
+/** Clear the whole selection (used for simple-click and empty-gesture paths). */
+static void image_select_apply_deselect(bContext *C, Scene *scene, Image *image)
+{
+  if (scene->toolsettings->imapaint.use_selection_mask) {
+    ED_image_undo_push_begin_selection("Deselect", image);
+    image_paint_selection_reset(C);
+    ED_image_undo_push_end();
+  }
+}
+
+/** Shared tail of a gesture exec: tag updates, apply the edge policy, and close the undo step. */
+static void image_select_gesture_finish(bContext *C,
+                                        Scene *scene,
+                                        ARegion *region,
+                                        Image *image,
+                                        const PaintSelectionEdgePolicy &edge_policy)
+{
+  DEG_id_tag_update(&scene->id, ID_RECALC_EDITORS);
+  WM_event_add_notifier(C, NC_WINDOW, nullptr);
+  ED_region_tag_redraw(region);
+
+  BKE_image_paint_selection_set_edge_policy(image, edge_policy);
+  BKE_image_paint_selection_blend_mask_invalidate(image);
+  ED_image_undo_push_end();
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Select Box
  * \{ */
 
@@ -1039,10 +1128,9 @@ static wmOperatorStatus image_select_box_exec(bContext *C, wmOperator *op)
   Scene *scene = CTX_data_scene(C);
   ARegion *region = CTX_wm_region(C);
   SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
+  if (!sima || !sima->runtime || !region) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *&g_floating_state = sima->runtime->paint_select.move;
   Image *image = sima->image;
   if (!image) {
     return OPERATOR_CANCELLED;
@@ -1055,26 +1143,13 @@ static wmOperatorStatus image_select_box_exec(bContext *C, wmOperator *op)
   if (is_simple_click ||
       (BLI_rctf_size_x(&rectf) == 0.0f && BLI_rctf_size_y(&rectf) == 0.0f))
   {
-    if (g_floating_state) {
-      image_select_move_commit(C, g_floating_state);
-      image_select_move_state_free(g_floating_state);
-      g_floating_state = nullptr;
-    }
-    ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
-    if (imapaint->use_selection_mask) {
-      ED_image_undo_push_begin_selection("Deselect", image);
-      image_paint_selection_reset(C);
-      ED_image_undo_push_end();
-    }
+    image_select_commit_floating_move(C, sima);
+    image_select_apply_deselect(C, scene, image);
     return OPERATOR_FINISHED;
   }
 
   /* Commit any floating move-selection fragment before starting a new selection. */
-  if (g_floating_state) {
-    image_select_move_commit(C, g_floating_state);
-    image_select_move_state_free(g_floating_state);
-    g_floating_state = nullptr;
-  }
+  image_select_commit_floating_move(C, sima);
 
   ui::view2d_region_to_view_rctf(&region->v2d, &rectf, &rectf);
 
@@ -1139,13 +1214,8 @@ static wmOperatorStatus image_select_box_exec(bContext *C, wmOperator *op)
     imapaint->use_selection_mask = image_paint_selection_has_any_tile_mask(image) ? 1 : 0;
   }
 
-  DEG_id_tag_update(&scene->id, ID_RECALC_EDITORS);
-  WM_event_add_notifier(C, NC_WINDOW, nullptr);
-  ED_region_tag_redraw(region);
-
-  BKE_image_paint_selection_set_edge_policy(image, BKE_image_paint_selection_edge_policy_hard());
-  BKE_image_paint_selection_blend_mask_invalidate(image);
-  ED_image_undo_push_end();
+  image_select_gesture_finish(
+      C, scene, region, image, BKE_image_paint_selection_edge_policy_hard());
   return OPERATOR_FINISHED;
 }
 
@@ -1153,12 +1223,9 @@ static wmOperatorStatus image_select_box_invoke(bContext *C,
                                                 wmOperator *op,
                                                 const wmEvent *event)
 {
-  if (image_select_move_delegate_to_move_operator(C, event)) {
+  if (image_select_gesture_invoke_begin(C, op, event)) {
     return OPERATOR_FINISHED;
   }
-  RNA_int_set(op->ptr, "click_x", event->xy[0]);
-  RNA_int_set(op->ptr, "click_y", event->xy[1]);
-  RNA_boolean_set(op->ptr, "is_simple_click", true);
   return WM_gesture_box_invoke(C, op, event);
 }
 
@@ -1166,14 +1233,7 @@ static wmOperatorStatus image_select_box_modal(bContext *C,
                                                wmOperator *op,
                                                const wmEvent *event)
 {
-  wmGesture *gesture = static_cast<wmGesture *>(op->customdata);
-  if (event->type == MOUSEMOVE && gesture) {
-    const int start_x = RNA_int_get(op->ptr, "click_x");
-    const int start_y = RNA_int_get(op->ptr, "click_y");
-    if (abs(event->xy[0] - start_x) > 3 || abs(event->xy[1] - start_y) > 3) {
-      RNA_boolean_set(op->ptr, "is_simple_click", false);
-    }
-  }
+  image_select_gesture_drag_detect(op, event);
   return WM_gesture_box_modal(C, op, event);
 }
 
@@ -1193,9 +1253,7 @@ void PAINT_OT_image_select_box(wmOperatorType *ot)
   WM_operator_properties_gesture_box(ot);
   WM_operator_properties_select_operation_simple(ot);
 
-  RNA_def_boolean(ot->srna, "is_simple_click", false, "Simple Click", "Click without drag");
-  RNA_def_int(ot->srna, "click_x", 0, INT_MIN, INT_MAX, "Click X", "", INT_MIN, INT_MAX);
-  RNA_def_int(ot->srna, "click_y", 0, INT_MIN, INT_MAX, "Click Y", "", INT_MIN, INT_MAX);
+  image_select_gesture_properties(ot);
 }
 
 /** \} */
@@ -1259,12 +1317,9 @@ static wmOperatorStatus image_select_lasso_invoke(bContext *C,
                                                    wmOperator *op,
                                                    const wmEvent *event)
 {
-  if (image_select_move_delegate_to_move_operator(C, event)) {
+  if (image_select_gesture_invoke_begin(C, op, event)) {
     return OPERATOR_FINISHED;
   }
-  RNA_int_set(op->ptr, "click_x", event->xy[0]);
-  RNA_int_set(op->ptr, "click_y", event->xy[1]);
-  RNA_boolean_set(op->ptr, "is_simple_click", true);
   return WM_gesture_lasso_invoke(C, op, event);
 }
 
@@ -1272,14 +1327,7 @@ static wmOperatorStatus image_select_lasso_modal(bContext *C,
                                                   wmOperator *op,
                                                   const wmEvent *event)
 {
-  wmGesture *gesture = static_cast<wmGesture *>(op->customdata);
-  if (event->type == MOUSEMOVE && gesture) {
-    const int start_x = RNA_int_get(op->ptr, "click_x");
-    const int start_y = RNA_int_get(op->ptr, "click_y");
-    if (abs(event->xy[0] - start_x) > 3 || abs(event->xy[1] - start_y) > 3) {
-      RNA_boolean_set(op->ptr, "is_simple_click", false);
-    }
-  }
+  image_select_gesture_drag_detect(op, event);
   return WM_gesture_lasso_modal(C, op, event);
 }
 
@@ -1288,10 +1336,9 @@ static wmOperatorStatus image_select_lasso_exec(bContext *C, wmOperator *op)
   Scene *scene = CTX_data_scene(C);
   ARegion *region = CTX_wm_region(C);
   SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
+  if (!sima || !sima->runtime || !region) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *&g_floating_state = sima->runtime->paint_select.move;
   Image *image = sima->image;
   if (!image) {
     return OPERATOR_CANCELLED;
@@ -1299,33 +1346,17 @@ static wmOperatorStatus image_select_lasso_exec(bContext *C, wmOperator *op)
 
   const bool is_simple_click = RNA_boolean_get(op->ptr, "is_simple_click");
   if (is_simple_click) {
-    if (g_floating_state) {
-      image_select_move_commit(C, g_floating_state);
-      image_select_move_state_free(g_floating_state);
-      g_floating_state = nullptr;
-    }
-    if (scene->toolsettings->imapaint.use_selection_mask) {
-      ED_image_undo_push_begin_selection("Deselect", image);
-      image_paint_selection_reset(C);
-      ED_image_undo_push_end();
-    }
+    image_select_commit_floating_move(C, sima);
+    image_select_apply_deselect(C, scene, image);
     return OPERATOR_FINISHED;
   }
 
   /* Commit any floating move-selection fragment before starting a new selection. */
-  if (g_floating_state) {
-    image_select_move_commit(C, g_floating_state);
-    image_select_move_state_free(g_floating_state);
-    g_floating_state = nullptr;
-  }
+  image_select_commit_floating_move(C, sima);
 
   Array<int2> mcoords = WM_gesture_lasso_path_to_array(C, op);
   if (mcoords.is_empty() || int(mcoords.size()) < 3) {
-    if (scene->toolsettings->imapaint.use_selection_mask) {
-      ED_image_undo_push_begin_selection("Deselect", image);
-      image_paint_selection_reset(C);
-      ED_image_undo_push_end();
-    }
+    image_select_apply_deselect(C, scene, image);
     return OPERATOR_FINISHED;
   }
 
@@ -1385,13 +1416,8 @@ static wmOperatorStatus image_select_lasso_exec(bContext *C, wmOperator *op)
     imapaint->use_selection_mask = image_paint_selection_has_any_tile_mask(image) ? 1 : 0;
   }
 
-  DEG_id_tag_update(&scene->id, ID_RECALC_EDITORS);
-  WM_event_add_notifier(C, NC_WINDOW, nullptr);
-  ED_region_tag_redraw(region);
-
-  BKE_image_paint_selection_set_edge_policy(image, BKE_image_paint_selection_edge_policy_feathered());
-  BKE_image_paint_selection_blend_mask_invalidate(image);
-  ED_image_undo_push_end();
+  image_select_gesture_finish(
+      C, scene, region, image, BKE_image_paint_selection_edge_policy_feathered());
   return OPERATOR_FINISHED;
 }
 
@@ -1410,9 +1436,7 @@ void PAINT_OT_image_select_lasso(wmOperatorType *ot)
   WM_operator_properties_gesture_lasso(ot);
   WM_operator_properties_select_operation_simple(ot);
 
-  RNA_def_boolean(ot->srna, "is_simple_click", false, "Simple Click", "Click without drag");
-  RNA_def_int(ot->srna, "click_x", 0, INT_MIN, INT_MAX, "Click X", "", INT_MIN, INT_MAX);
-  RNA_def_int(ot->srna, "click_y", 0, INT_MIN, INT_MAX, "Click Y", "", INT_MIN, INT_MAX);
+  image_select_gesture_properties(ot);
 }
 
 /** \} */
@@ -1456,12 +1480,9 @@ static wmOperatorStatus image_select_circle_invoke(bContext *C,
                                                     wmOperator *op,
                                                     const wmEvent *event)
 {
-  if (image_select_move_delegate_to_move_operator(C, event)) {
+  if (image_select_gesture_invoke_begin(C, op, event)) {
     return OPERATOR_FINISHED;
   }
-  RNA_int_set(op->ptr, "click_x", event->xy[0]);
-  RNA_int_set(op->ptr, "click_y", event->xy[1]);
-  RNA_boolean_set(op->ptr, "is_simple_click", true);
   return WM_gesture_circle_invoke(C, op, event);
 }
 
@@ -1469,14 +1490,7 @@ static wmOperatorStatus image_select_circle_modal(bContext *C,
                                                    wmOperator *op,
                                                    const wmEvent *event)
 {
-  wmGesture *gesture = static_cast<wmGesture *>(op->customdata);
-  if (event->type == MOUSEMOVE && gesture) {
-    const int start_x = RNA_int_get(op->ptr, "click_x");
-    const int start_y = RNA_int_get(op->ptr, "click_y");
-    if (abs(event->xy[0] - start_x) > 3 || abs(event->xy[1] - start_y) > 3) {
-      RNA_boolean_set(op->ptr, "is_simple_click", false);
-    }
-  }
+  image_select_gesture_drag_detect(op, event);
   return WM_gesture_circle_modal(C, op, event);
 }
 
@@ -1485,10 +1499,9 @@ static wmOperatorStatus image_select_circle_exec(bContext *C, wmOperator *op)
   Scene *scene = CTX_data_scene(C);
   ARegion *region = CTX_wm_region(C);
   SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
+  if (!sima || !sima->runtime || !region) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *&g_floating_state = sima->runtime->paint_select.move;
   Image *image = sima->image;
   if (!image) {
     return OPERATOR_CANCELLED;
@@ -1498,25 +1511,13 @@ static wmOperatorStatus image_select_circle_exec(bContext *C, wmOperator *op)
   const int mradius = RNA_int_get(op->ptr, "radius");
 
   if (is_simple_click || mradius <= 0) {
-    if (g_floating_state) {
-      image_select_move_commit(C, g_floating_state);
-      image_select_move_state_free(g_floating_state);
-      g_floating_state = nullptr;
-    }
-    if (scene->toolsettings->imapaint.use_selection_mask) {
-      ED_image_undo_push_begin_selection("Deselect", image);
-      image_paint_selection_reset(C);
-      ED_image_undo_push_end();
-    }
+    image_select_commit_floating_move(C, sima);
+    image_select_apply_deselect(C, scene, image);
     return OPERATOR_FINISHED;
   }
 
   /* Commit any floating move-selection fragment before starting a new selection. */
-  if (g_floating_state) {
-    image_select_move_commit(C, g_floating_state);
-    image_select_move_state_free(g_floating_state);
-    g_floating_state = nullptr;
-  }
+  image_select_commit_floating_move(C, sima);
 
   const eSelectOp sel_op = eSelectOp(RNA_enum_get(op->ptr, "mode"));
   const bool rasterize_gesture = image_paint_selection_should_rasterize_gesture(scene, sel_op);
@@ -1595,12 +1596,8 @@ static wmOperatorStatus image_select_circle_exec(bContext *C, wmOperator *op)
     imapaint->use_selection_mask = image_paint_selection_has_any_tile_mask(image) ? 1 : 0;
   }
 
-  DEG_id_tag_update(&scene->id, ID_RECALC_EDITORS);
-  WM_event_add_notifier(C, NC_WINDOW, nullptr);
-
-  BKE_image_paint_selection_set_edge_policy(image, BKE_image_paint_selection_edge_policy_feathered());
-  BKE_image_paint_selection_blend_mask_invalidate(image);
-  ED_image_undo_push_end();
+  image_select_gesture_finish(
+      C, scene, region, image, BKE_image_paint_selection_edge_policy_feathered());
   return OPERATOR_FINISHED;
 }
 
@@ -1620,9 +1617,7 @@ void PAINT_OT_image_select_circle(wmOperatorType *ot)
   WM_operator_properties_gesture_circle(ot);
   WM_operator_properties_select_operation_simple(ot);
 
-  RNA_def_boolean(ot->srna, "is_simple_click", false, "Simple Click", "Click without drag");
-  RNA_def_int(ot->srna, "click_x", 0, INT_MIN, INT_MAX, "Click X", "", INT_MIN, INT_MAX);
-  RNA_def_int(ot->srna, "click_y", 0, INT_MIN, INT_MAX, "Click Y", "", INT_MIN, INT_MAX);
+  image_select_gesture_properties(ot);
 }
 
 /** \} */

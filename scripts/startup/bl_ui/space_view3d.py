@@ -3733,6 +3733,7 @@ class VIEW3D_MT_sculpt(Menu):
 
         # Extract Loop/Ring
         layout.operator("sculpt.extract_loop_gesture", text="Extract Loop")
+        layout.operator("sculpt.extract_region", text="Extract Region")
 
         # Trim/Add
         layout.menu("VIEW3D_MT_sculpt_trim", text="Trim/Add")

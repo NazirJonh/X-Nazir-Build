@@ -1300,6 +1300,7 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
       paint_cursor_draw_3D_view_brush_cursor(pcontext);
       paint_cursor_restore_drawing_state();
       mesh_cursor_extract_loop_hover_draw(pcontext);
+      mesh_cursor_extract_region_hover_draw(pcontext);
       break;
     default:
       BLI_assert_unreachable();

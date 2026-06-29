@@ -37,6 +37,7 @@
 #include "sculpt_cloth.hh"
 #include "sculpt_expand.hh"
 #include "sculpt_extract_loop.hh"
+#include "sculpt_extract_region.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_pose.hh"
 
@@ -82,6 +83,42 @@ static extract_loop::LoopOrientation extract_loop_tool_loop_orientation(bContext
     return extract_loop::LoopOrientation::Horizontal;
   }
   return extract_loop::LoopOrientation(RNA_enum_get(&ptr, "loop_orientation"));
+}
+
+/* Fetch the Extract Region tool's stored operator properties for the active tool.
+ * Returns true and fills \a r_ptr when the Extract Region tool is active. */
+static bool extract_region_tool_properties(bContext *C, PointerRNA *r_ptr)
+{
+  ScrArea *area = CTX_wm_area(C);
+  if (!area || !area->runtime.tool) {
+    return false;
+  }
+  wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_extract_region", false);
+  return WM_toolsystem_ref_properties_get_from_operator(area->runtime.tool, ot, r_ptr);
+}
+
+static bool is_extract_region_tool_active(bContext *C)
+{
+  PointerRNA ptr;
+  return extract_region_tool_properties(C, &ptr);
+}
+
+static extract_region::RegionSource extract_region_tool_source(bContext *C)
+{
+  PointerRNA ptr;
+  if (!extract_region_tool_properties(C, &ptr)) {
+    return extract_region::RegionSource::FaceSet;
+  }
+  return extract_region::RegionSource(RNA_enum_get(&ptr, "region_source"));
+}
+
+static float extract_region_tool_mask_threshold(bContext *C)
+{
+  PointerRNA ptr;
+  if (!extract_region_tool_properties(C, &ptr)) {
+    return 0.5f;
+  }
+  return RNA_float_get(&ptr, "mask_threshold");
 }
 
 static int brush_radius_project(ViewContext *vc, float radius, const float location[3])
@@ -266,6 +303,32 @@ void mesh_cursor_update_and_init(PaintCursorContext &pcontext)
   {
     extract_loop::extract_loop_hover_update(
         ctx, mval_fl, extract_loop_tool_mode(ctx), extract_loop_tool_loop_orientation(ctx));
+  }
+
+  const bool extract_region_tool = ctx && is_extract_region_tool_active(ctx);
+  const bool idle_extract_region_hover = extract_region_tool &&
+                                         !extract_region::extract_region_hover_is_activated();
+
+  if (!extract_region_tool && extract_region::extract_region_hover_is_enabled()) {
+    extract_region::extract_region_hover_free();
+  }
+
+  if (!paint_runtime.stroke_active && !pcontext.is_brush_active && idle_extract_region_hover) {
+    if (!extract_region::extract_region_hover_is_enabled() && pcontext.vc.obact) {
+      extract_region::extract_region_hover_init(ctx,
+                                                pcontext.vc.obact,
+                                                pcontext.region,
+                                                pcontext.vc.rv3d,
+                                                extract_region_tool_source(ctx),
+                                                extract_region_tool_mask_threshold(ctx));
+    }
+  }
+
+  if (idle_extract_region_hover && extract_region::extract_region_hover_is_enabled() &&
+      pcontext.is_cursor_over_mesh)
+  {
+    extract_region::extract_region_hover_update(
+        ctx, mval_fl, extract_region_tool_source(ctx), extract_region_tool_mask_threshold(ctx));
   }
 }
 
@@ -911,6 +974,42 @@ void mesh_cursor_extract_loop_hover_draw(PaintCursorContext &pcontext)
                             nullptr);
 
   extract_loop::extract_loop_hover_draw();
+
+  GPU_matrix_pop_projection();
+  wmWindowViewport(pcontext.win);
+}
+
+void mesh_cursor_extract_region_hover_draw(PaintCursorContext &pcontext)
+{
+  bContext *ctx = pcontext.vc.C;
+  if (!ctx || !is_extract_region_tool_active(ctx)) {
+    return;
+  }
+  if (extract_region::extract_region_hover_is_activated()) {
+    return;
+  }
+  if (!extract_region::extract_region_hover_is_enabled()) {
+    return;
+  }
+  if (!pcontext.vc.obact) {
+    extract_region::extract_region_hover_free();
+    return;
+  }
+
+  wmViewport(&pcontext.region->winrct);
+
+  GPU_matrix_push_projection();
+  ED_view3d_draw_setup_view(pcontext.wm,
+                            pcontext.win,
+                            pcontext.depsgraph,
+                            pcontext.scene,
+                            pcontext.region,
+                            pcontext.vc.v3d,
+                            nullptr,
+                            nullptr,
+                            nullptr);
+
+  extract_region::extract_region_hover_draw();
 
   GPU_matrix_pop_projection();
   wmWindowViewport(pcontext.win);

@@ -83,8 +83,8 @@ static EnumPropertyItem extraction_output_type_items[] = {
 static void draw_preview_cb(const bContext * /*C*/, ARegion * /*region*/, void *userdata)
 {
   const ExtractLoopModalData *data = static_cast<const ExtractLoopModalData *>(userdata);
-  if (data->phase == ModalPhase::Extrude && data->edit_bm) {
-    draw_face_strip_preview(data->shared, data->edit_bm, data->extrude_preview_faces);
+  if (data->extrude.phase == extract::ModalPhase::Extrude && data->extrude.edit_bm) {
+    extract::draw_faces_preview(data->shared.base, data->extrude.edit_bm, data->extrude.preview_faces);
     return;
   }
   draw_loop_preview(data->shared);
@@ -93,7 +93,7 @@ static void draw_preview_cb(const bContext * /*C*/, ARegion * /*region*/, void *
 static void update_preview(bContext &C, ExtractLoopModalData &data, const float mval[2])
 {
   data.shared.preview_points.clear();
-  data.shared.preview_faces.clear();
+  data.shared.base.preview_faces.clear();
   data.shared.loop_edges.clear();
   data.loop_edges_set.clear();
   data.shared.is_cyclic = false;
@@ -106,7 +106,7 @@ static void update_preview(bContext &C, ExtractLoopModalData &data, const float 
     return;
   }
   data.initial_hit = true;
-  data.shared.hit_location = cgi.location;
+  data.shared.base.hit_location = cgi.location;
 
   data.shared.seed_edge = find_seed_edge_screen_space(data.shared, mval);
   if (!data.shared.seed_edge) {
@@ -130,13 +130,13 @@ void gesture_data_free(bContext *C, ExtractLoopModalData *data)
     ED_region_draw_cb_exit(CTX_wm_region(C)->runtime->type, data->draw_handle);
     data->draw_handle = nullptr;
   }
-  if (data->edit_bm) {
-    BM_mesh_free(data->edit_bm);
-    data->edit_bm = nullptr;
+  if (data->extrude.edit_bm) {
+    BM_mesh_free(data->extrude.edit_bm);
+    data->extrude.edit_bm = nullptr;
   }
-  if (data->shared.bm) {
-    BM_mesh_free(data->shared.bm);
-    data->shared.bm = nullptr;
+  if (data->shared.base.bm) {
+    BM_mesh_free(data->shared.base.bm);
+    data->shared.base.bm = nullptr;
   }
   MEM_delete(data);
 }
@@ -151,12 +151,12 @@ static void gesture_cancel(bContext *C, wmOperator *op)
 
 static void update_status_bar(bContext *C, ExtractLoopModalData *data, const wmOperator *op)
 {
-  if (data->phase == ModalPhase::Extrude) {
+  if (data->extrude.phase == extract::ModalPhase::Extrude) {
     WorkspaceStatus status(C);
     status.item(IFACE_("Confirm"), ICON_MOUSE_LMB, ICON_EVENT_RETURN);
     status.item(IFACE_("Cancel"), ICON_EVENT_ESC, ICON_MOUSE_RMB);
     status.item(IFACE_("Distance"), ICON_EVENT_PADPLUS, ICON_NONE);
-    extrude_update_status_text(C, *data);
+    extract::extrude_update_status_text(C, data->extrude);
     return;
   }
 
@@ -194,13 +194,14 @@ static wmOperatorStatus modal_phase_extrude(bContext *C,
                                             ExtractLoopModalData *data,
                                             const wmEvent *event)
 {
-  const bool has_numinput = hasNumInput(&data->num_input);
+  const bool has_numinput = hasNumInput(&data->extrude.num_input);
 
-  if (event->val == KM_PRESS && has_numinput && handleNumInput(C, &data->num_input, event)) {
-    float distance = data->extrude_distance;
-    if (applyNumInput(&data->num_input, &distance)) {
-      extrude_apply_distance(*data, distance);
-      extrude_update_status_text(C, *data);
+  if (event->val == KM_PRESS && has_numinput && handleNumInput(C, &data->extrude.num_input, event))
+  {
+    float distance = data->extrude.distance;
+    if (applyNumInput(&data->extrude.num_input, &distance)) {
+      extract::extrude_apply_distance(data->shared.base, data->extrude, distance);
+      extract::extrude_update_status_text(C, data->extrude);
       ED_region_tag_redraw(CTX_wm_region(C));
     }
     return OPERATOR_RUNNING_MODAL;
@@ -210,8 +211,8 @@ static wmOperatorStatus modal_phase_extrude(bContext *C,
     case MOUSEMOVE: {
       if (!has_numinput) {
         const float mval_fl[2] = {float(event->mval[0]), float(event->mval[1])};
-        extrude_update_from_mouse(*data, mval_fl);
-        extrude_update_status_text(C, *data);
+        extract::extrude_update_from_mouse(data->shared.base, data->extrude, mval_fl);
+        extract::extrude_update_status_text(C, data->extrude);
         ED_region_tag_redraw(CTX_wm_region(C));
       }
       return OPERATOR_RUNNING_MODAL;
@@ -243,11 +244,11 @@ static wmOperatorStatus modal_phase_extrude(bContext *C,
       break;
     }
     default: {
-      if (event->val == KM_PRESS && handleNumInput(C, &data->num_input, event)) {
-        float distance = data->extrude_distance;
-        applyNumInput(&data->num_input, &distance);
-        extrude_apply_distance(*data, distance);
-        extrude_update_status_text(C, *data);
+      if (event->val == KM_PRESS && handleNumInput(C, &data->extrude.num_input, event)) {
+        float distance = data->extrude.distance;
+        applyNumInput(&data->extrude.num_input, &distance);
+        extract::extrude_apply_distance(data->shared.base, data->extrude, distance);
+        extract::extrude_update_status_text(C, data->extrude);
         ED_region_tag_redraw(CTX_wm_region(C));
       }
       break;
@@ -288,8 +289,13 @@ static wmOperatorStatus modal_phase_select(bContext *C,
           if (!extract_preview_is_valid(data->shared)) {
             break;
           }
-          data->extrude_init_mval = float2(float(event->mval[0]), float(event->mval[1]));
-          if (extrude_begin(*C, op, *data)) {
+          data->extrude.init_mval = float2(float(event->mval[0]), float(event->mval[1]));
+          if (extract::extrude_begin(*C,
+                                     data->shared.base,
+                                     data->extrude,
+                                     data->shared.base.preview_faces,
+                                     data->extrude.init_mval))
+          {
             update_status_bar(C, data, op);
             ED_region_tag_redraw(CTX_wm_region(C));
           }
@@ -318,8 +324,13 @@ static wmOperatorStatus modal_phase_select(bContext *C,
     case EVT_PADENTER: {
       if (event->val == KM_PRESS) {
         if (face_strip_extrude) {
-          data->extrude_init_mval = float2(float(event->mval[0]), float(event->mval[1]));
-          if (extrude_begin(*C, op, *data)) {
+          data->extrude.init_mval = float2(float(event->mval[0]), float(event->mval[1]));
+          if (extract::extrude_begin(*C,
+                                     data->shared.base,
+                                     data->extrude,
+                                     data->shared.base.preview_faces,
+                                     data->extrude.init_mval))
+          {
             update_status_bar(C, data, op);
             ED_region_tag_redraw(CTX_wm_region(C));
           }
@@ -350,7 +361,7 @@ static wmOperatorStatus modal_phase_select(bContext *C,
 static wmOperatorStatus gesture_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
   ExtractLoopModalData *data = static_cast<ExtractLoopModalData *>(op->customdata);
-  if (data->phase == ModalPhase::Extrude) {
+  if (data->extrude.phase == extract::ModalPhase::Extrude) {
     return modal_phase_extrude(C, op, data, event);
   }
   return modal_phase_select(C, op, data, event);
@@ -361,32 +372,33 @@ static wmOperatorStatus gesture_invoke(bContext *C, wmOperator *op, const wmEven
   ExtractLoopModalData *data = MEM_new<ExtractLoopModalData>(__func__);
   data->shared.mode = ExtractionMode(RNA_enum_get(op->ptr, "mode"));
   data->shared.loop_orientation = LoopOrientation(RNA_enum_get(op->ptr, "loop_orientation"));
-  data->shared.obact = CTX_data_active_object(C);
-  data->shared.region = CTX_wm_region(C);
-  data->shared.rv3d = CTX_wm_region_view3d(C);
+  data->shared.base.obact = CTX_data_active_object(C);
+  data->shared.base.region = CTX_wm_region(C);
+  data->shared.base.rv3d = CTX_wm_region_view3d(C);
   data->use_boundary_walker = false;
 
-  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*data->shared.obact);
+  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*data->shared.base.obact);
   if (!pbvh) {
     MEM_delete(data);
     return OPERATOR_CANCELLED;
   }
-  data->shared.pbvh_type = pbvh->type();
+  data->shared.base.pbvh_type = pbvh->type();
 
-  data->shared.bm = create_modal_bmesh(data->shared.obact, data->shared.pbvh_type);
-  if (!data->shared.bm) {
+  data->shared.base.bm = extract::create_modal_bmesh(data->shared.base.obact,
+                                                     data->shared.base.pbvh_type);
+  if (!data->shared.base.bm) {
     MEM_delete(data);
     return OPERATOR_CANCELLED;
   }
 
-  if (data->shared.pbvh_type == bke::pbvh::Type::Mesh) {
+  if (data->shared.base.pbvh_type == bke::pbvh::Type::Mesh) {
     const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
-    data->shared.preview_positions = bke::pbvh::vert_positions_eval(depsgraph,
-                                                                    *data->shared.obact);
+    data->shared.base.preview_positions = bke::pbvh::vert_positions_eval(depsgraph,
+                                                                         *data->shared.base.obact);
   }
-  else if (data->shared.pbvh_type == bke::pbvh::Type::Grids) {
-    Mesh *mesh = id_cast<Mesh *>(data->shared.obact->data);
-    data->shared.preview_positions = mesh->vert_positions();
+  else if (data->shared.base.pbvh_type == bke::pbvh::Type::Grids) {
+    Mesh *mesh = id_cast<Mesh *>(data->shared.base.obact->data);
+    data->shared.base.preview_positions = mesh->vert_positions();
   }
 
   op->customdata = data;
@@ -412,6 +424,23 @@ static wmOperatorStatus gesture_invoke(bContext *C, wmOperator *op, const wmEven
     op->customdata = nullptr;
     extract_loop_hover_deactivate();
     return OPERATOR_CANCELLED;
+  }
+
+  if (face_strip_extrude) {
+    /* Begin the extrude immediately from the invoke press so the user can drag with the
+     * mouse held down to set the distance — no separate click is needed to start it. */
+    data->extrude.init_mval = float2(float(event->mval[0]), float(event->mval[1]));
+    if (!extract::extrude_begin(*C,
+                                data->shared.base,
+                                data->extrude,
+                                data->shared.base.preview_faces,
+                                data->extrude.init_mval))
+    {
+      gesture_data_free(C, data);
+      op->customdata = nullptr;
+      extract_loop_hover_deactivate();
+      return OPERATOR_CANCELLED;
+    }
   }
 
   update_status_bar(C, data, op);

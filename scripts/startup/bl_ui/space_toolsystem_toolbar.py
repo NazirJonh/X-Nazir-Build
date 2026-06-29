@@ -1922,6 +1922,29 @@ class _defs_sculpt:
         )
 
     @ToolDef.from_fn
+    def extract_region():
+        def draw_settings(_context, layout, tool):
+            props = tool.operator_properties("sculpt.extract_region")
+            row = layout.row(align=True)
+            row.use_property_split = False
+            row.prop(props, "region_source", expand=True)
+            row = layout.row(align=True)
+            row.use_property_split = False
+            row.prop(props, "output_type", expand=True)
+            if props.region_source == 'MASK':
+                layout.prop(props, "mask_threshold")
+
+        return dict(
+            idname="builtin.extract_region",
+            label="Extract Region",
+            icon="ops.sculpt.line_project",
+            widget=None,
+            cursor='PAINT_CROSS',
+            keymap=(),
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def mesh_filter():
         def draw_settings(_context, layout, tool):
             props = tool.operator_properties("sculpt.mesh_filter")
@@ -4033,6 +4056,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             ),
             _defs_sculpt.project_line,
             _defs_sculpt.extract_loop,
+            _defs_sculpt.extract_region,
             None,
             _defs_sculpt.mesh_filter,
             _defs_sculpt.cloth_filter,

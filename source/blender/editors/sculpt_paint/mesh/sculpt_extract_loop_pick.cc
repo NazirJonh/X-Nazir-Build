@@ -95,7 +95,7 @@ static BMEdge *pick_closest_edge_screen_space(ExtractLoopSharedData &shared,
   for (BMEdge *e : candidates) {
     const float3 co1 = vert_position(shared, e->v1);
     const float3 co2 = vert_position(shared, e->v2);
-    const float d = screen_dist_sq_to_edge(shared.region, mval, co1, co2);
+    const float d = screen_dist_sq_to_edge(shared.base.region, mval, co1, co2);
     if (d < best_dist_sq) {
       best_dist_sq = d;
       best = e;
@@ -122,7 +122,7 @@ static BMEdge *pick_oriented_edge_screen_space(ExtractLoopSharedData &shared,
   for (BMEdge *e : candidates) {
     const float3 co1 = vert_position(shared, e->v1);
     const float3 co2 = vert_position(shared, e->v2);
-    if (edge_is_horizontal_screen(shared.region, co1, co2) == want_horizontal) {
+    if (edge_is_horizontal_screen(shared.base.region, co1, co2) == want_horizontal) {
       oriented.append(e);
     }
   }
@@ -139,30 +139,30 @@ static BMEdge *pick_oriented_edge_screen_space(ExtractLoopSharedData &shared,
  */
 BMEdge *find_seed_edge_screen_space(ExtractLoopSharedData &shared, const float mval[2])
 {
-  Object *obact = shared.obact;
+  Object *obact = shared.base.obact;
   SculptSession *ss = obact->runtime->sculpt_session;
-  if (!ss || !shared.bm) {
+  if (!ss || !shared.base.bm) {
     return nullptr;
   }
 
-  ED_view3d_init_mats_rv3d(obact, shared.rv3d);
+  ED_view3d_init_mats_rv3d(obact, shared.base.rv3d);
 
   Mesh *mesh = id_cast<Mesh *>(obact->data);
   Vector<BMEdge *> candidates;
 
-  if (shared.pbvh_type == bke::pbvh::Type::Mesh) {
+  if (shared.base.pbvh_type == bke::pbvh::Type::Mesh) {
     if (ss->active_face_index.has_value()) {
       const int fi = *ss->active_face_index;
       if (fi >= 0 && fi < mesh->faces().size()) {
         const IndexRange face = mesh->faces()[fi];
         for (const int corner : face) {
           const int edge_i = mesh->corner_edges()[corner];
-          candidates.append(BM_edge_at_index(shared.bm, edge_i));
+          candidates.append(BM_edge_at_index(shared.base.bm, edge_i));
         }
       }
     }
   }
-  else if (shared.pbvh_type == bke::pbvh::Type::Grids) {
+  else if (shared.base.pbvh_type == bke::pbvh::Type::Grids) {
     if (ss->active_grid_index.has_value() && ss->subdiv_ccg) {
       const int grid_i = *ss->active_grid_index;
       const int fi = BKE_subdiv_ccg_grid_to_face_index(*ss->subdiv_ccg, grid_i);
@@ -170,7 +170,7 @@ BMEdge *find_seed_edge_screen_space(ExtractLoopSharedData &shared, const float m
         const IndexRange face = mesh->faces()[fi];
         for (const int corner : face) {
           const int edge_i = mesh->corner_edges()[corner];
-          candidates.append(BM_edge_at_index(shared.bm, edge_i));
+          candidates.append(BM_edge_at_index(shared.base.bm, edge_i));
         }
       }
     }
@@ -181,7 +181,7 @@ BMEdge *find_seed_edge_screen_space(ExtractLoopSharedData &shared, const float m
       BMVert *av_in_ss = std::get<BMVert *>(av);
       const int vi = BM_elem_index_get(av_in_ss);
       if (vi >= 0) {
-        BMVert *v = BM_vert_at_index(shared.bm, vi);
+        BMVert *v = BM_vert_at_index(shared.base.bm, vi);
         if (v) {
           BMEdge *e;
           BMIter iter;
@@ -202,8 +202,8 @@ BMEdge *find_seed_edge_screen_space(ExtractLoopSharedData &shared, const float m
 
   /* Fallback 1: active vertex index (valid for all PBVH types). */
   const int av_idx = ss->active_vert_index();
-  if (av_idx >= 0 && av_idx < shared.bm->totvert) {
-    BMVert *v = BM_vert_at_index(shared.bm, av_idx);
+  if (av_idx >= 0 && av_idx < shared.base.bm->totvert) {
+    BMVert *v = BM_vert_at_index(shared.base.bm, av_idx);
     if (v) {
       candidates.clear();
       BMEdge *e;
@@ -221,20 +221,20 @@ BMEdge *find_seed_edge_screen_space(ExtractLoopSharedData &shared, const float m
   }
 
   /* Fallback 2: brute-force 3D distance from cursor hit location. */
-  if (shared.hit_location == float3(0.0f)) {
+  if (shared.base.hit_location == float3(0.0f)) {
     return nullptr;
   }
-  const float3 hit_local = math::transform_point(obact->world_to_object(), shared.hit_location);
+  const float3 hit_local = math::transform_point(obact->world_to_object(), shared.base.hit_location);
 
   BMEdge *best = nullptr;
   float best_dist_sq = FLT_MAX;
   const bool want_horizontal = shared.loop_orientation == LoopOrientation::Horizontal;
   BMEdge *e;
   BMIter iter;
-  BM_ITER_MESH (e, &iter, shared.bm, BM_EDGES_OF_MESH) {
+  BM_ITER_MESH (e, &iter, shared.base.bm, BM_EDGES_OF_MESH) {
     const float3 co1 = vert_position(shared, e->v1);
     const float3 co2 = vert_position(shared, e->v2);
-    if (edge_is_horizontal_screen(shared.region, co1, co2) != want_horizontal) {
+    if (edge_is_horizontal_screen(shared.base.region, co1, co2) != want_horizontal) {
       continue;
     }
     float closest[3];
@@ -250,7 +250,7 @@ BMEdge *find_seed_edge_screen_space(ExtractLoopSharedData &shared, const float m
   }
 
   best_dist_sq = FLT_MAX;
-  BM_ITER_MESH (e, &iter, shared.bm, BM_EDGES_OF_MESH) {
+  BM_ITER_MESH (e, &iter, shared.base.bm, BM_EDGES_OF_MESH) {
     const float3 co1 = vert_position(shared, e->v1);
     const float3 co2 = vert_position(shared, e->v2);
     float closest[3];

@@ -27,7 +27,7 @@ static void run_face_loop_walker(ExtractLoopSharedData &shared, bool *r_has_boun
 {
   shared.loop_edges.clear();
   shared.preview_points.clear();
-  shared.preview_faces.clear();
+  shared.base.preview_faces.clear();
   shared.is_cyclic = false;
   if (r_has_boundary_seed) {
     *r_has_boundary_seed = false;
@@ -39,7 +39,7 @@ static void run_face_loop_walker(ExtractLoopSharedData &shared, bool *r_has_boun
 
   BMWalker walker;
   BMW_init(&walker,
-           shared.bm,
+           shared.base.bm,
            BMW_FACELOOP,
            BMW_MASK_NOP,
            BMW_MASK_NOP,
@@ -51,7 +51,7 @@ static void run_face_loop_walker(ExtractLoopSharedData &shared, bool *r_has_boun
   for (BMFace *f = static_cast<BMFace *>(BMW_begin(&walker, shared.seed_edge)); f;
        f = static_cast<BMFace *>(BMW_step(&walker)))
   {
-    shared.preview_faces.append(f);
+    shared.base.preview_faces.append(f);
   }
   BMW_end(&walker);
 }
@@ -59,7 +59,7 @@ static void run_face_loop_walker(ExtractLoopSharedData &shared, bool *r_has_boun
 bool extract_preview_is_valid(const ExtractLoopSharedData &shared)
 {
   if (shared.mode == ExtractionMode::FaceStrip) {
-    return !shared.preview_faces.is_empty();
+    return !shared.base.preview_faces.is_empty();
   }
   return !shared.loop_edges.is_empty();
 }
@@ -85,7 +85,7 @@ void run_walker(ExtractLoopSharedData &shared,
 {
   shared.loop_edges.clear();
   shared.preview_points.clear();
-  shared.preview_faces.clear();
+  shared.base.preview_faces.clear();
   shared.is_cyclic = false;
   if (r_has_boundary_seed) {
     *r_has_boundary_seed = false;
@@ -130,7 +130,7 @@ void run_walker(ExtractLoopSharedData &shared,
 
   BMWalker walker;
   BMW_init(&walker,
-           shared.bm,
+           shared.base.bm,
            walker_type,
            BMW_MASK_NOP,
            BMW_MASK_NOP,

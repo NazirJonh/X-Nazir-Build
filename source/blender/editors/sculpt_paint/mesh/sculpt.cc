@@ -530,6 +530,16 @@ Span<BMVert *> vert_neighbors_get_interior_bmesh(BMVert &vert, BMeshNeighborVert
   return r_neighbors;
 }
 
+BMesh *bmesh_from_mesh_with_toolflags(Mesh &mesh, const BMeshFromMeshParams &params)
+{
+  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(&mesh);
+  BMeshCreateParams bm_create_params{};
+  bm_create_params.use_toolflags = true;
+  BMesh *bm = BM_mesh_create(&allocsize, &bm_create_params);
+  BM_mesh_bm_from_me(bm, &mesh, &params);
+  return bm;
+}
+
 Span<int> vert_neighbors_get_mesh(const OffsetIndices<int> faces,
                                   const Span<int> corner_verts,
                                   const GroupedSpan<int> vert_to_face,

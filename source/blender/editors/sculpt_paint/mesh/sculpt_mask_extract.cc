@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /** \file
- * \ingroup edmesh
+ * \ingroup edsculpt
  */
 
 #include "DNA_key_types.h"
@@ -20,6 +20,7 @@
 #include "BKE_modifier.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_shrinkwrap.hh"
 
@@ -82,6 +83,19 @@ struct GeometryExtractParams {
 /* Function that tags in BMesh the faces that should be deleted in the extracted object. */
 using GeometryExtractTagMeshFunc = void(BMesh *, GeometryExtractParams *);
 
+/* Return true when every vertex of \a f has a mask value at or above \a threshold. */
+static bool face_verts_all_masked(BMFace *f, const int cd_vert_mask_offset, const float threshold)
+{
+  BMVert *v;
+  BMIter iter;
+  BM_ITER_ELEM (v, &iter, f, BM_VERTS_OF_FACE) {
+    if (BM_ELEM_CD_GET_FLOAT(v, cd_vert_mask_offset) < threshold) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static wmOperatorStatus geometry_extract_apply(bContext *C,
                                                wmOperator *op,
                                                GeometryExtractTagMeshFunc *tag_fn,
@@ -102,15 +116,10 @@ static wmOperatorStatus geometry_extract_apply(bContext *C,
   Mesh *mesh = id_cast<Mesh *>(ob->data);
   Mesh *new_mesh = id_cast<Mesh *>(BKE_id_copy(bmain, &mesh->id));
 
-  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(new_mesh);
-  BMeshCreateParams bm_create_params{};
-  bm_create_params.use_toolflags = true;
-  BMesh *bm = BM_mesh_create(&allocsize, &bm_create_params);
-
   BMeshFromMeshParams mesh_to_bm_params{};
   mesh_to_bm_params.calc_face_normal = true;
   mesh_to_bm_params.calc_vert_normal = true;
-  BM_mesh_bm_from_me(bm, new_mesh, &mesh_to_bm_params);
+  BMesh *bm = bmesh_from_mesh_with_toolflags(*new_mesh, mesh_to_bm_params);
 
   BMEditMesh *em = BKE_editmesh_create(bm);
 
@@ -221,21 +230,11 @@ static void geometry_extract_tag_masked_faces(BMesh *bm, GeometryExtractParams *
   BMFace *f;
   BMIter iter;
   BM_ITER_MESH (f, &iter, bm, BM_FACES_OF_MESH) {
-    bool keep_face = true;
-    BMVert *v;
-    BMIter face_iter;
     if (BM_elem_flag_test_bool(f, BM_ELEM_HIDDEN)) {
       BM_elem_flag_set(f, BM_ELEM_TAG, true);
       continue;
-    };
-    BM_ITER_ELEM (v, &face_iter, f, BM_VERTS_OF_FACE) {
-      const float mask = BM_ELEM_CD_GET_FLOAT(v, cd_vert_mask_offset);
-      if (mask < threshold) {
-        keep_face = false;
-        break;
-      }
     }
-    BM_elem_flag_set(f, BM_ELEM_TAG, !keep_face);
+    BM_elem_flag_set(f, BM_ELEM_TAG, !face_verts_all_masked(f, cd_vert_mask_offset, threshold));
   }
 }
 
@@ -385,10 +384,8 @@ void SCULPT_OT_face_set_extract(wmOperatorType *ot)
 
 static void slice_paint_mask(BMesh *bm, bool invert, bool fill_holes, float mask_threshold)
 {
-  BMVert *v;
   BMFace *f;
   BMIter iter;
-  BMIter face_iter;
 
   /* Delete all masked faces */
   const int cd_vert_mask_offset = CustomData_get_offset_named(
@@ -397,17 +394,10 @@ static void slice_paint_mask(BMesh *bm, bool invert, bool fill_holes, float mask
   BM_mesh_elem_hflag_disable_all(bm, BM_VERT | BM_EDGE | BM_FACE, BM_ELEM_TAG, false);
 
   BM_ITER_MESH (f, &iter, bm, BM_FACES_OF_MESH) {
-    bool keep_face = true;
-    BM_ITER_ELEM (v, &face_iter, f, BM_VERTS_OF_FACE) {
-      const float mask = BM_ELEM_CD_GET_FLOAT(v, cd_vert_mask_offset);
-      if (mask < mask_threshold) {
-        keep_face = false;
-        break;
-      }
-    }
+    bool keep_face = face_verts_all_masked(f, cd_vert_mask_offset, mask_threshold);
     if (BM_elem_flag_test_bool(f, BM_ELEM_HIDDEN)) {
       keep_face = false;
-    };
+    }
     /* This invert behavior is fragile, as it potentially marks faces which are hidden */
     if (invert) {
       keep_face = !keep_face;
@@ -462,14 +452,9 @@ static wmOperatorStatus paint_mask_slice_exec(bContext *C, wmOperator *op)
     sculpt_paint::undo::geometry_begin(scene, ob, op);
   }
 
-  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(new_mesh);
-  BMeshCreateParams bm_create_params{};
-  bm_create_params.use_toolflags = true;
-  BMesh *bm = BM_mesh_create(&allocsize, &bm_create_params);
-
   BMeshFromMeshParams mesh_to_bm_params{};
   mesh_to_bm_params.calc_face_normal = true;
-  BM_mesh_bm_from_me(bm, new_mesh, &mesh_to_bm_params);
+  BMesh *bm = bmesh_from_mesh_with_toolflags(*new_mesh, mesh_to_bm_params);
 
   slice_paint_mask(bm, false, fill_holes, mask_threshold);
   BKE_id_free(&bmain, new_mesh);
@@ -487,10 +472,7 @@ static wmOperatorStatus paint_mask_slice_exec(bContext *C, wmOperator *op)
         C, OB_MESH, nullptr, ob.loc, ob.rot, false, local_view_bits);
     Mesh *new_ob_mesh = id_cast<Mesh *>(BKE_id_copy(&bmain, &mesh->id));
 
-    const BMAllocTemplate allocsize_new_ob = BMALLOC_TEMPLATE_FROM_ME(new_ob_mesh);
-    bm = BM_mesh_create(&allocsize_new_ob, &bm_create_params);
-
-    BM_mesh_bm_from_me(bm, new_ob_mesh, &mesh_to_bm_params);
+    bm = bmesh_from_mesh_with_toolflags(*new_ob_mesh, mesh_to_bm_params);
 
     slice_paint_mask(bm, true, fill_holes, mask_threshold);
     BKE_id_free(&bmain, new_ob_mesh);
@@ -613,7 +595,7 @@ static bool tag_masked_faces_for_duplicate(BMesh *bm, const float mask_threshold
   return any_tagged;
 }
 
-static int bmesh_find_next_face_set_id(BMesh *bm)
+static int next_bm_face_set_id(BMesh *bm)
 {
   const int cd_face_sets_offset = CustomData_get_offset_named(
       &bm->pdata, CD_PROP_INT32, ".sculpt_face_set");
@@ -630,7 +612,7 @@ static int bmesh_find_next_face_set_id(BMesh *bm)
   return next_face_set + 1;
 }
 
-static void bmesh_assign_face_set_to_tagged_faces(BMesh *bm, const int face_set_id)
+static void assign_bm_face_set_to_tagged(BMesh *bm, const int face_set_id)
 {
   const int cd_face_sets_offset = CustomData_get_offset_named(
       &bm->pdata, CD_PROP_INT32, ".sculpt_face_set");
@@ -660,9 +642,9 @@ static void edgenet_fill_tagged_boundary_edges(BMesh *bm, const bool use_face_se
 
   /* Assign face sets to new fill geometry before tagging all faces for normal recalc. */
   if (use_face_sets) {
-    const int face_set_id = bmesh_find_next_face_set_id(bm);
+    const int face_set_id = next_bm_face_set_id(bm);
     if (face_set_id != -1) {
-      bmesh_assign_face_set_to_tagged_faces(bm, face_set_id);
+      assign_bm_face_set_to_tagged(bm, face_set_id);
     }
   }
 
@@ -724,9 +706,9 @@ static int object_active_shapekey_index(const Object &ob)
 /**
  * Fill open boundary holes on either the separated piece or the remaining mesh.
  *
- * \param fill_piece: true  → fill boundaries where both edge verts belong to \a verts
+ * \param fill_piece: true  -> fill boundaries where both edge verts belong to \a verts
  *                            (i.e. the piece's open boundary).
- *                    false → fill boundaries where NOT both verts belong to \a verts
+ *                    false -> fill boundaries where NOT both verts belong to \a verts
  *                            (i.e. the hole left in the remaining mesh after a cut).
  */
 static void fill_boundary_holes(BMesh *bm,
@@ -767,6 +749,7 @@ static wmOperatorStatus mask_duplicate_exec(bContext *C, wmOperator *op)
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
 
   if (!mesh->attributes().contains(".sculpt_mask")) {
+    BKE_report(op->reports, RPT_WARNING, "The mesh has no paint mask");
     return OPERATOR_CANCELLED;
   }
 
@@ -781,18 +764,13 @@ static wmOperatorStatus mask_duplicate_exec(bContext *C, wmOperator *op)
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
 
   /* Create BMesh. */
-  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(mesh);
-  BMeshCreateParams bm_create_params{};
-  bm_create_params.use_toolflags = true;
-  BMesh *bm = BM_mesh_create(&allocsize, &bm_create_params);
-  BM_mesh_elem_toolflags_ensure(bm);
-
   BMeshFromMeshParams mesh_to_bm_params{};
   mesh_to_bm_params.calc_face_normal = true;
   mesh_to_bm_params.use_shapekey = true;
   mesh_to_bm_params.active_shapekey = object_active_shapekey_index(ob);
   mesh_to_bm_params.add_key_index = true;
-  BM_mesh_bm_from_me(bm, mesh, &mesh_to_bm_params);
+  BMesh *bm = bmesh_from_mesh_with_toolflags(*mesh, mesh_to_bm_params);
+  BM_mesh_elem_toolflags_ensure(bm);
 
   /* Tag masked faces. */
   if (!tag_masked_faces_for_duplicate(bm, mask_threshold)) {

@@ -152,16 +152,10 @@ static void update_normals(gesture::GestureData &gesture_data)
   TrimOperation *trim_operation = reinterpret_cast<TrimOperation *>(gesture_data.operation);
   Mesh *trim_mesh = trim_operation->mesh;
 
-  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(trim_mesh);
-
-  BMeshCreateParams bm_create_params{};
-  bm_create_params.use_toolflags = true;
-  BMesh *bm = BM_mesh_create(&allocsize, &bm_create_params);
-
   BMeshFromMeshParams bm_from_me_params{};
   bm_from_me_params.calc_face_normal = true;
   bm_from_me_params.calc_vert_normal = true;
-  BM_mesh_bm_from_me(bm, trim_mesh, &bm_from_me_params);
+  BMesh *bm = bmesh_from_mesh_with_toolflags(*trim_mesh, bm_from_me_params);
 
   BM_mesh_elem_hflag_enable_all(bm, BM_FACE, BM_ELEM_TAG, false);
   BMO_op_callf(bm,

@@ -1340,15 +1340,10 @@ static void delete_geometry(Object &ob, const int active_face_set_id, const bool
   const VArraySpan<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
                                                             bke::AttrDomain::Face);
 
-  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(&mesh);
-  BMeshCreateParams create_params{};
-  create_params.use_toolflags = true;
-  BMesh *bm = BM_mesh_create(&allocsize, &create_params);
-
   BMeshFromMeshParams convert_params{};
   convert_params.calc_vert_normal = true;
   convert_params.calc_face_normal = true;
-  BM_mesh_bm_from_me(bm, &mesh, &convert_params);
+  BMesh *bm = bmesh_from_mesh_with_toolflags(mesh, convert_params);
 
   BM_mesh_elem_table_init(bm, BM_FACE);
   BM_mesh_elem_table_ensure(bm, BM_FACE);

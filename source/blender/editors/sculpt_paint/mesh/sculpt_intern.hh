@@ -53,6 +53,8 @@ enum class Type : int8_t;
 }  // namespace undo
 }  // namespace ed::sculpt_paint
 struct bContext;
+struct BMesh;
+struct BMeshFromMeshParams;
 struct BMLog;
 struct Dial;
 struct DistRayAABB_Precalc;
@@ -60,6 +62,7 @@ struct Image;
 struct ImageUser;
 struct Key;
 struct KeyBlock;
+struct Mesh;
 struct Object;
 struct PaintModeSettings;
 struct ReportList;
@@ -622,6 +625,15 @@ Span<float3> vert_positions_for_grab_active_get(const Depsgraph &depsgraph, cons
 using BMeshNeighborVerts = Vector<BMVert *, 64>;
 Span<BMVert *> vert_neighbors_get_bmesh(BMVert &vert, BMeshNeighborVerts &r_neighbors);
 Span<BMVert *> vert_neighbors_get_interior_bmesh(BMVert &vert, BMeshNeighborVerts &r_neighbors);
+
+/**
+ * Create a tool-flag enabled #BMesh from \a mesh for temporary geometry edits.
+ *
+ * Tool flags are required by the #BMOperator based operations used during such edits (split,
+ * duplicate, edge-net fill, triangulate, etc.). The caller controls the conversion options
+ * (normals, shape keys) through \a params; the allocation template is derived from \a mesh.
+ */
+BMesh *bmesh_from_mesh_with_toolflags(Mesh &mesh, const BMeshFromMeshParams &params);
 
 Span<int> vert_neighbors_get_mesh(OffsetIndices<int> faces,
                                   Span<int> corner_verts,

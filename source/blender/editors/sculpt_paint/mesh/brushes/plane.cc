@@ -211,10 +211,22 @@ static void calc_faces(const Depsgraph &depsgraph,
 
   const Span<int> verts = node.verts();
 
+  /* Base view: the plane target, local distances and texture coordinates are evaluated against
+   * the un-layered base so the layer pattern is not flattened into it (see
+   * #layers::stroke_base_view). The resulting translations still apply to the live positions. */
+  Vector<float3> base_view_storage;
+  const Span<float3> base_view_positions = layers::base_view_gather_mesh(
+      object, verts, position_data.eval, base_view_storage);
+
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
-  filter_region_clip_factors(ss, position_data.eval, verts, factors);
+  if (base_view_positions.is_empty()) {
+    filter_region_clip_factors(ss, position_data.eval, verts, factors);
+  }
+  else {
+    filter_region_clip_factors(ss, base_view_positions, factors);
+  }
 
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
@@ -222,7 +234,12 @@ static void calc_faces(const Depsgraph &depsgraph,
 
   tls.positions.resize(verts.size());
   const MutableSpan<float3> local_positions = tls.positions;
-  calc_local_positions(mat, verts, position_data.eval, local_positions);
+  if (base_view_positions.is_empty()) {
+    calc_local_positions(mat, verts, position_data.eval, local_positions);
+  }
+  else {
+    math::transform_points(base_view_positions, mat, local_positions, false);
+  }
 
   tls.distances.resize(verts.size());
   const MutableSpan<float> distances = tls.distances;
@@ -238,7 +255,12 @@ static void calc_faces(const Depsgraph &depsgraph,
 
   auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
 
-  calc_brush_texture_factors(ss, brush, position_data.eval, verts, factors);
+  if (base_view_positions.is_empty()) {
+    calc_brush_texture_factors(ss, brush, position_data.eval, verts, factors);
+  }
+  else {
+    calc_brush_texture_factors(ss, brush, base_view_positions, factors);
+  }
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
@@ -268,10 +290,15 @@ static void calc_grids(const Depsgraph &depsgraph,
   const Span<int> grids = node.grids();
   const MutableSpan positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
 
+  /* Base view: see #calc_faces above. */
+  Vector<float3> base_view_storage;
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, positions, base_view_storage);
+
   tls.factors.resize(positions.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
-  filter_region_clip_factors(ss, positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
 
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, subdiv_ccg, grids, factors);
@@ -279,7 +306,7 @@ static void calc_grids(const Depsgraph &depsgraph,
 
   tls.local_positions.resize(positions.size());
   const MutableSpan<float3> local_positions = tls.local_positions;
-  math::transform_points(positions, mat, local_positions, false);
+  math::transform_points(calc_positions, mat, local_positions, false);
 
   tls.distances.resize(positions.size());
   const MutableSpan<float> distances = tls.distances;
@@ -295,7 +322,7 @@ static void calc_grids(const Depsgraph &depsgraph,
 
   auto_mask::calc_grids_factors(depsgraph, object, cache.automasking.get(), node, grids, factors);
 
-  calc_brush_texture_factors(ss, brush, positions, factors);
+  calc_brush_texture_factors(ss, brush, calc_positions, factors);
 
   tls.translations.resize(positions.size());
   const MutableSpan<float3> translations = tls.translations;

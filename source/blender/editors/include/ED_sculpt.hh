@@ -19,6 +19,7 @@ struct Object;
 struct RegionView3D;
 struct ReportList;
 struct Scene;
+struct SculptLayer;
 struct UndoType;
 struct UndoStep;
 struct bContext;
@@ -116,6 +117,49 @@ void store_mesh_from_eval(const wmOperator &op,
                           const RegionView3D *rv3d,
                           Object &object,
                           Mesh *new_mesh);
+
+namespace layers {
+
+/**
+ * Fast viewport refresh after a sculpt-layer influence or visibility change that was already
+ * applied directly to the mesh vertex positions (see #rna_SculptLayer_apply_mesh_delta).
+ *
+ * When \a mesh is being sculpted with a vertex-domain #bke::pbvh::Tree (and not through a
+ * deform-modifier or shape-key session), this invalidates the PBVH nodes and requests a lightweight
+ * redraw instead of a full geometry re-evaluation, keeping the influence slider interactive.
+ *
+ * \return true if the fast path handled the update; false if the caller should fall back to a full
+ * #ID_RECALC_GEOMETRY tag (object not in sculpt mode, multires, shape-key / deform sessions, ...).
+ */
+bool flush_interactive_update(Main &bmain, Mesh &mesh);
+
+/**
+ * Grid-domain influence or visibility change from the RNA setter: request an honest geometry
+ * re-evaluation (the CCG is rebuilt from `MDisps + sum(enabled layers)`, which already reflects
+ * the changed value) and emit notifiers. MDisps are never written.
+ *
+ * Returns true when a live grid sculpt session was found; false when the caller should fall back
+ * to a full #ID_RECALC_GEOMETRY tag itself (object not in sculpt mode, or no live grid PBVH).
+ */
+bool sync_multires_for_rna(Main &bmain, Scene *scene, Mesh &mesh, SculptLayer &changed_layer);
+
+/**
+ * Drop the cached runtime mesh base (#SculptSession::layers::mesh_base) and mark the session
+ * state as needing a fresh re-capture. Multires keeps no runtime layer state. Safe to call when
+ * no session exists (no-op).
+ */
+void invalidate_runtime(Object &object);
+
+/**
+ * Multires: flush pending base sculpt edits from the live CCG into the base MDisps for the first
+ * sculpt-mode object using \a mesh with a grids PBVH. Must run BEFORE a grid layer's influence or
+ * visibility value changes (e.g. from an RNA setter): a later flush would reshape the stale
+ * composed CCG against the changed layer set and leak the difference into the base.
+ * Returns true when a live grid session was found.
+ */
+bool flush_pending_multires_base_for_mesh(Main &bmain, Mesh &mesh);
+
+}  // namespace layers
 
 }  // namespace ed::sculpt_paint
 

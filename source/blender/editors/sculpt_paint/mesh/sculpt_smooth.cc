@@ -105,13 +105,13 @@ static void neighbor_position_average_interior_grids_impl(const OffsetIndices<in
                                                           const BitSpan boundary_verts,
                                                           const Set<OrderedEdge> &boundary_edges,
                                                           const SubdivCCG &subdiv_ccg,
+                                                          const Span<float3> positions,
                                                           const Span<int> grids,
                                                           const Span<float> factors,
                                                           const MutableSpan<float3> new_positions)
 {
   PRF_scope(ProfileCategory::Editor);
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
-  const Span<float3> positions = subdiv_ccg.positions;
 
   BLI_assert(grids.size() * key.grid_area == new_positions.size());
   if constexpr (use_factors) {
@@ -181,8 +181,15 @@ void neighbor_position_average_interior_grids(const OffsetIndices<int> faces,
                                               const Span<int> grids,
                                               const MutableSpan<float3> new_positions)
 {
-  neighbor_position_average_interior_grids_impl<false>(
-      faces, corner_verts, boundary_verts, boundary_edges, subdiv_ccg, grids, {}, new_positions);
+  neighbor_position_average_interior_grids_impl<false>(faces,
+                                                       corner_verts,
+                                                       boundary_verts,
+                                                       boundary_edges,
+                                                       subdiv_ccg,
+                                                       subdiv_ccg.positions,
+                                                       grids,
+                                                       {},
+                                                       new_positions);
 }
 
 void neighbor_position_average_interior_grids(const OffsetIndices<int> faces,
@@ -199,6 +206,28 @@ void neighbor_position_average_interior_grids(const OffsetIndices<int> faces,
                                                       boundary_verts,
                                                       boundary_edges,
                                                       subdiv_ccg,
+                                                      subdiv_ccg.positions,
+                                                      grids,
+                                                      factors,
+                                                      new_positions);
+}
+
+void neighbor_position_average_interior_grids(const OffsetIndices<int> faces,
+                                              const Span<int> corner_verts,
+                                              const BitSpan boundary_verts,
+                                              const Set<OrderedEdge> &boundary_edges,
+                                              const SubdivCCG &subdiv_ccg,
+                                              const Span<float3> positions,
+                                              const Span<int> grids,
+                                              const Span<float> factors,
+                                              const MutableSpan<float3> new_positions)
+{
+  neighbor_position_average_interior_grids_impl<true>(faces,
+                                                      corner_verts,
+                                                      boundary_verts,
+                                                      boundary_edges,
+                                                      subdiv_ccg,
+                                                      positions,
                                                       grids,
                                                       factors,
                                                       new_positions);

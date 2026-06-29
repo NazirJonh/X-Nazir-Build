@@ -62,6 +62,7 @@ struct Key;
 struct KeyBlock;
 struct Object;
 struct PaintModeSettings;
+struct SculptLayer;
 struct ReportList;
 struct wmKeyConfig;
 struct wmKeyMap;
@@ -115,6 +116,17 @@ class PositionDeformData {
   MutableSpan<float3> orig_;
 
   std::optional<ShapeKeyData> shape_key_data_;
+
+  /**
+   * When a mesh sculpt-layer stroke is being recorded, the active layer's per-vertex offset buffer.
+   * The translation applied to #orig_ is accumulated into it per dab (see #deform), so the
+   * end-of-stroke recording does not have to rewrite the layer with a full random-access scatter
+   * of the whole brushed area. Empty when no mesh layer is being recorded.
+   */
+  MutableSpan<float3> layer_record_data_;
+
+  /** Accumulate \a translations into #layer_record_data_ at \a verts. No-op when not recording. */
+  void record_layer_offsets(Span<int> verts, Span<float3> translations) const;
 
  public:
   PositionDeformData(const Depsgraph &depsgraph, Object &object_orig);
@@ -1017,6 +1029,109 @@ void SCULPT_OT_dyntopo_detail_size_edit(wmOperatorType *ot);
 void SCULPT_OT_dynamic_topology_toggle(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint::dyntopo
+
+namespace ed::sculpt_paint::layers {
+
+/* Sculpt layers integration (non-destructive sculpt edits, see also #BKE_sculpt_layers.hh). */
+
+/** True when sculpt layers are available for this object (regular mesh or multires, not dyntopo). */
+bool is_supported(const Object &object);
+/** Element domain (#SCULPT_LAYER_DOMAIN_VERT / #SCULPT_LAYER_DOMAIN_GRID) for the sculpt target. */
+short domain_for(const Object &object);
+/** Number of layer elements for the object (mesh vertices, or total multires grid points). */
+int element_count(const Object &object);
+
+/** Initialize per-session layer state. Call when entering sculpt mode. */
+void session_state_ensure(Object &object);
+
+/* Stroke recording into the active layer. */
+void stroke_record_begin(const Depsgraph &depsgraph, Object &object);
+void stroke_record_end(const Depsgraph &depsgraph, Object &object);
+/** Revert a cancelled stroke's recording, restoring the pre-stroke influence/visibility state. */
+void stroke_record_cancel(const Depsgraph &depsgraph, Object &object);
+
+/**
+ * The active mesh-domain recording layer's per-vertex offset buffer, or an empty span when no mesh
+ * layer is currently being recorded. Used by #PositionDeformData to accumulate a stroke per dab.
+ */
+MutableSpan<float3> active_record_data(Object &object);
+
+/**
+ * Per-element object-space contribution of the enabled sculpt layers ("base view" offset
+ * `O = combined - base`) for the current non-REC stroke, or an empty span when the mode is
+ * inactive. Indexed like the PBVH positions (mesh vertex index / CCG element index) and constant
+ * for the stroke's duration. Brushes subtract it from the live positions when computing
+ * surface-shape-dependent inputs (falloff distances, area normal/center, smoothing targets, plane
+ * fits) so base edits do not absorb the layer residual; the resulting translations are still
+ * applied to the live (composed) positions.
+ */
+Span<float3> stroke_base_view(const Object &object);
+
+/**
+ * Base-view adjustment helpers for brush computations. Each returns the input span unchanged
+ * when the base view is inactive; otherwise the adjusted copy lives in \a r_storage.
+ */
+/** Compact node positions (one per element of \a verts) minus the base-view offset. */
+Span<float3> base_view_adjust_compact_mesh(const Object &object,
+                                           Span<int> verts,
+                                           Span<float3> positions,
+                                           Vector<float3> &r_storage);
+/**
+ * Gather base-view positions for \a verts from the full \a vert_positions array. Returns an
+ * EMPTY span when the base view is inactive (the caller keeps its indexed code path).
+ */
+Span<float3> base_view_gather_mesh(const Object &object,
+                                   Span<int> verts,
+                                   Span<float3> vert_positions,
+                                   Vector<float3> &r_storage);
+/** Compact node grid positions (CCG node layout) minus the base-view offset. */
+Span<float3> base_view_adjust_compact_grids(const Object &object,
+                                            const SubdivCCG &subdiv_ccg,
+                                            Span<int> grids,
+                                            Span<float3> positions,
+                                            Vector<float3> &r_storage);
+/**
+ * Undo the per-dab layer accumulation of an in-progress stroke that is being cancelled. Must run
+ * before the sculpt undo restores the pre-stroke positions, because the offset is recomputed as
+ * `current_position - pre_stroke_position` from the still-available per-node undo data.
+ */
+void cancel_recorded_offsets(Object &object);
+
+/**
+ * Bring the live positions in sync after a layer change (influence, visibility, data edit, list
+ * change): canonical recompute from `mesh_base + layers` with a lightweight PBVH refresh for the
+ * mesh domain, honest geometry re-evaluation for multires (the CCG is rebuilt from
+ * `MDisps + sum(enabled layers)`).
+ */
+void commit_layers_change(const Depsgraph &depsgraph, Object &object);
+
+/**
+ * Multires: reshape any pending (lazily flushed) base sculpt edits from the live CCG into the
+ * base MDisps while the CCG and the stored layer set are still consistent. MUST be called before
+ * any change to the grid layer set or influences — a later flush would reshape the stale composed
+ * CCG against the changed layer set and leak the difference into the base. No-op when nothing is
+ * pending or the object has no live grids session.
+ */
+void flush_pending_multires_base(Object &object);
+
+/* Operators. */
+void SCULPT_OT_layer_add(wmOperatorType *ot);
+void SCULPT_OT_layer_remove(wmOperatorType *ot);
+void SCULPT_OT_layer_move(wmOperatorType *ot);
+void SCULPT_OT_layer_duplicate(wmOperatorType *ot);
+void SCULPT_OT_layer_merge_down(wmOperatorType *ot);
+void SCULPT_OT_layer_bake(wmOperatorType *ot);
+void SCULPT_OT_layer_bake_and_editmode_enter(wmOperatorType *ot);
+void SCULPT_OT_layer_clear(wmOperatorType *ot);
+void SCULPT_OT_layer_invert(wmOperatorType *ot);
+void SCULPT_OT_layer_set_influence(wmOperatorType *ot);
+void SCULPT_OT_layer_influence_drag(wmOperatorType *ot);
+void SCULPT_OT_layer_toggle_visibility(wmOperatorType *ot);
+void SCULPT_OT_layer_select(wmOperatorType *ot);
+void SCULPT_OT_layer_toggle_rec(wmOperatorType *ot);
+void SCULPT_OT_layer_solo_base(wmOperatorType *ot);
+
+}  // namespace ed::sculpt_paint::layers
 
 /** \} */
 

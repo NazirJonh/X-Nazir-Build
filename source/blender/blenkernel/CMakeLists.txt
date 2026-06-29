@@ -222,6 +222,7 @@ set(SRC
   intern/multires_reshape_vertcos.cc
   intern/multires_subdiv.cc
   intern/multires_unsubdivide.cc
+  intern/multires_grid_resample.cc
   intern/multires_versioning.cc
   intern/nla.cc
   intern/node.cc
@@ -266,6 +267,7 @@ set(SRC
   intern/rigidbody.cc
   intern/scene.cc
   intern/screen.cc
+  intern/sculpt_layers.cc
   intern/shader_fx.cc
   intern/shrinkwrap.cc
   intern/softbody.cc
@@ -470,6 +472,7 @@ set(SRC
   BKE_modifier.hh
   BKE_movieclip.hh
   BKE_multires.hh
+  BKE_multires_grid_resample.hh
   BKE_nla.hh
   BKE_node.hh
   BKE_node_enum.hh
@@ -507,6 +510,7 @@ set(SRC
   BKE_scene.hh
   BKE_scene_runtime.hh
   BKE_screen.hh
+  BKE_sculpt_layers.hh
   BKE_shader_fx.hh
   BKE_shrinkwrap.hh
   BKE_softbody.h

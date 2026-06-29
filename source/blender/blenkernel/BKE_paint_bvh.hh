@@ -208,11 +208,31 @@ class DrawCache {
  public:
   virtual ~DrawCache() = default;
   virtual void tag_positions_changed(const IndexMask &node_mask) = 0;
+  /**
+   * Mark only the GPU position draw buffers dirty, leaving the normal draw buffers untouched. Used
+   * by interactive drags (e.g. the sculpt-layer influence drag) that refresh positions every tick
+   * and run a full #tag_positions_changed once when the drag ends.
+   */
+  virtual void tag_positions_changed_no_normals(const IndexMask &node_mask) = 0;
+  /**
+   * Mark only the GPU normal draw buffers dirty, leaving the position draw buffers untouched. The
+   * mirror of #tag_positions_changed_no_normals: used by the influence drag to periodically refresh
+   * normals (so shading reflects the deformation) while the GPU compute keeps owning the positions.
+   */
+  virtual void tag_normals_changed(const IndexMask &node_mask) = 0;
   virtual void tag_visibility_changed(const IndexMask &node_mask) = 0;
   virtual void tag_topology_changed(const IndexMask &node_mask) = 0;
   virtual void tag_face_sets_changed(const IndexMask &node_mask) = 0;
   virtual void tag_masks_changed(const IndexMask &node_mask) = 0;
   virtual void tag_attribute_changed(const IndexMask &node_mask, StringRef attribute_name) = 0;
+
+  /**
+   * Interactive sculpt-layer influence drag (see #Tree::begin_influence_drag). These only update
+   * lightweight state; the GPU work is deferred to the next draw where a context is bound.
+   */
+  virtual bool begin_influence_drag(int layer_uid) = 0;
+  virtual void add_influence_drag_delta(float scale) = 0;
+  virtual void end_influence_drag() = 0;
 };
 
 enum class Type {
@@ -227,6 +247,8 @@ enum class Type {
  */
 class Tree {
   friend Node;
+  /* Needs to reset #bounds_orig_dirty_ after a full original-bounds sync. */
+  friend void store_bounds_orig(Tree &pbvh);
   Type type_;
 
   /** Memory backing for #Node::prim_indices. Without an inline buffer to make #Tree movable. */
@@ -238,6 +260,16 @@ class Tree {
    * \note The vector's size may not match the size of the nodes array.
    */
   BitVector<> bounds_dirty_;
+
+  /**
+   * Accumulates leaf nodes whose positions changed since the last #store_bounds_orig_for_dirty_leaves.
+   * Unlike #bounds_dirty_, which is consumed and cleared on every #flush_bounds_to_parents call
+   * (i.e. once per brush dab), this persists across all dabs of a stroke. It lets the end-of-stroke
+   * "original bounds" sync touch only the affected part of the tree instead of every node.
+   * \note Only populated for #Type::Mesh, the only consumer of the partial sync.
+   * \note Values are only meaningful for leaf nodes.
+   */
+  BitVector<> bounds_orig_dirty_;
 
   /**
    * If true, the normals for the corresponding node index are out of date.
@@ -286,6 +318,33 @@ class Tree {
    */
   void tag_positions_changed(const IndexMask &node_mask);
 
+  /**
+   * Interactive-drag fast path: refresh only the GPU position draw buffers for \a node_mask,
+   * deliberately leaving node bounds and normals stale. A full #tag_positions_changed (plus a
+   * bounds update) must run once when the drag ends to recompute them.
+   * \warning Must not be called from multiple threads in parallel.
+   */
+  void tag_positions_changed_no_normals(const IndexMask &node_mask);
+
+  /**
+   * Interactive-drag companion to #tag_positions_changed_no_normals: refresh only the GPU normal
+   * draw buffers for \a node_mask, leaving the position draw buffers untouched (the influence drag
+   * keeps those on the GPU). The caller must have refreshed the mesh vertex normals first.
+   * \warning Must not be called from multiple threads in parallel.
+   */
+  void tag_normals_changed(const IndexMask &node_mask);
+
+  /**
+   * Interactive sculpt-layer influence drag. \a layer_uid is the dragged layer's stable id.
+   * #begin_influence_drag returns false when there is no draw cache yet (object never drawn), in
+   * which case the caller should fall back to the CPU update path. #add_influence_drag_delta queues
+   * this tick's influence change; the GPU compute runs at the next draw. #end_influence_drag ends
+   * the drag so the next full #tag_positions_changed re-extracts authoritative data.
+   */
+  bool begin_influence_drag(int layer_uid);
+  void add_influence_drag_delta(float scale);
+  void end_influence_drag();
+
   /** Tag nodes where face or vertex visibility has changed. */
   void tag_visibility_changed(const IndexMask &node_mask);
 
@@ -320,6 +379,17 @@ class Tree {
   void update_bounds_mesh(Span<float3> vert_positions);
   void update_bounds_grids(Span<float3> positions, int grid_area);
   void update_bounds_bmesh(const BMesh &bm);
+
+  /**
+   * Copy current bounds into the "original" bounds (see #Node::bounds_orig_), but only for the leaf
+   * nodes touched since the last call (tracked by #bounds_orig_dirty_) and their ancestors, instead
+   * of every node like #store_bounds_orig. Meant for the regular sculpt stroke end path, where the
+   * current bounds are already up to date for the whole tree. Consumes and clears
+   * #bounds_orig_dirty_. Only valid for #Type::Mesh.
+   *
+   * \return the number of touched leaf nodes that were consumed (useful for profiling locality).
+   */
+  int store_bounds_orig_for_dirty_leaves();
 
   void update_normals(Object &object_orig, Object &object_eval);
 

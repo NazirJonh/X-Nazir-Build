@@ -11,6 +11,9 @@
 #include "BLI_array.hh"
 #include "BLI_enum_flags.hh"
 #include "BLI_math_matrix_types.hh"
+#include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 namespace blender {
 
@@ -22,6 +25,7 @@ struct MultiresModifierData;
 struct Object;
 struct ReportList;
 struct Scene;
+struct SculptLayer;
 struct SubdivCCG;
 namespace bke::subdiv {
 struct Settings;
@@ -174,7 +178,61 @@ bool multiresModifier_reshapeFromDeformModifier(Depsgraph *depsgraph,
                                                 Object *ob,
                                                 MultiresModifierData *mmd,
                                                 ModifierData *deform_md);
-bool multiresModifier_reshapeFromCCG(int tot_level, Mesh *coarse_mesh, SubdivCCG *subdiv_ccg);
+
+enum class MultiresReshapeFromCCGMode : int8_t {
+  /** The CCG positions are the evaluated composed surface (`base + enabled sculpt layers`). */
+  Composed,
+  /** The CCG positions are a base-edit source; enabled sculpt layers must not be written back. */
+  Base,
+};
+
+bool multiresModifier_reshapeFromCCG(int tot_level,
+                                     Mesh *coarse_mesh,
+                                     SubdivCCG *subdiv_ccg,
+                                     MultiresReshapeFromCCGMode mode);
+
+/**
+ * Sculpt layer recording: convert the sculpted CCG surface to tangent displacement at the top
+ * level and accumulate the difference against the pre-stroke composed surface
+ * (`MDisps + sum(enabled layers)`) into \a layer for the \a touched_grids. #CD_MDISPS itself is
+ * left unchanged (it only ever stores the base surface, layers are composed at evaluation time).
+ *
+ * \param touched_grids: indices of the grids modified by the stroke.
+ * \param r_undo_delta: per-element deltas that were added to the layer, laid out as
+ * `touched_grids.size() * grid_area` values in the order of \a touched_grids.
+ */
+bool multiresModifier_reshapeFromCCG_into_sculpt_layer(int tot_level,
+                                                       Mesh *coarse_mesh,
+                                                       SubdivCCG *subdiv_ccg,
+                                                       Span<int> touched_grids,
+                                                       SculptLayer &layer,
+                                                       Vector<float3> &r_undo_delta);
+
+/**
+ * Add `layer.data * factor` to the mesh's #CD_MDISPS displacement (both are stored in the same
+ * tangent-space grid layout). Used to bake a layer's contribution into the base and to undo such
+ * a bake (negative factor). No-op for layers whose data does not match the MDisps layout.
+ */
+void BKE_multires_sculpt_layer_apply_to_mdisps(Mesh &mesh, const SculptLayer &layer, float factor);
+
+/**
+ * True when the mesh has any grid-domain sculpt layer with displacement data (regardless of
+ * visibility). Used to block destructive multires operations that would invalidate the layers.
+ */
+bool BKE_multires_mesh_has_grid_sculpt_layers(const Mesh &mesh);
+
+/**
+ * Compute the object-space contribution of \a layer (at influence 1.0) for every element of the
+ * given CCG at its current level: the layer's tangent coefficients subsampled to the CCG level
+ * and transformed by the base-mesh limit-surface tangent matrices. Used by the interactive
+ * influence drag to update positions incrementally (`positions += contribution * delta`).
+ *
+ * \param r_contrib: must hold `grids_num * ccg_grid_size^2` elements.
+ */
+bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
+                                                   SubdivCCG &subdiv_ccg,
+                                                   const SculptLayer &layer,
+                                                   MutableSpan<float3> r_contrib);
 
 /* Subdivide multi-res displacement once. */
 
@@ -226,6 +284,15 @@ BLI_INLINE void BKE_multires_construct_tangent_matrix(float3x3 &tangent_matrix,
                                                       const float3 &dPdv,
                                                       int corner);
 
+/**
+ * Tangent matrix construction as it was before the well-conditioned rewrite. Only used by
+ * versioning code to decode displacement grids stored by older files.
+ */
+BLI_INLINE void BKE_multires_construct_tangent_matrix_for_versioning(float3x3 &tangent_matrix,
+                                                                     const float3 &dPdu,
+                                                                     const float3 &dPdv,
+                                                                     int corner);
+
 /* Versioning. */
 
 /**
@@ -233,6 +300,12 @@ BLI_INLINE void BKE_multires_construct_tangent_matrix(float3x3 &tangent_matrix,
  * subdivided mesh.
  */
 void multires_do_versions_simple_to_catmull_clark(Object *object, MultiresModifierData *mmd);
+
+/**
+ * Re-encode displacement grids from the legacy tangent space (normalized axes) into the
+ * well-conditioned tangent space produced by #BKE_multires_construct_tangent_matrix.
+ */
+void multires_do_versions_tangent_space_conversion(Object *object, MultiresModifierData *mmd);
 
 }  // namespace blender
 

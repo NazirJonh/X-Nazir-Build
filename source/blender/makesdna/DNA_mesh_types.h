@@ -141,6 +141,73 @@ enum eMeshSymmetryType : char {
 };
 ENUM_OPERATORS(eMeshSymmetryType)
 
+/** #SculptLayer.flag */
+enum eSculptLayerFlag : int {
+  /** Layer contributes to the combined sculpted result. */
+  SCULPT_LAYER_ENABLED = 1 << 0,
+  /** Layer is protected from being recorded into or edited. */
+  SCULPT_LAYER_LOCKED = 1 << 1,
+  /**
+   * Layer was enabled but is temporarily hidden by the "Solo Base" mode, which isolates the base
+   * shape for direct sculpting (a brush over the composed surface would otherwise bake the layer
+   * residual into the base). Ending the mode re-enables exactly the layers carrying this flag.
+   */
+  SCULPT_LAYER_SOLO_HIDDEN = 1 << 2,
+};
+ENUM_OPERATORS(eSculptLayerFlag)
+
+/** #SculptLayer.domain (matches the #short storage type). */
+enum eSculptLayerDomain : int16_t {
+  /** #SculptLayer.data holds one `float3` per mesh vertex. */
+  SCULPT_LAYER_DOMAIN_VERT = 0,
+  /** #SculptLayer.data holds one `float3` per multires grid point. */
+  SCULPT_LAYER_DOMAIN_GRID = 1,
+};
+
+/**
+ * A single non-destructive sculpt layer.
+ *
+ * Stores a per-element displacement delta together with an #influence factor. The final sculpted
+ * position of an element is:
+ * \code{.unparsed}
+ *   position = base + sum_over_enabled_layers(layer.data[i] * layer.influence)
+ * \endcode
+ * The delta domain (#domain) is per mesh vertex for regular meshes and per multires grid point
+ * for multires:
+ * - VERT domain: object-space deltas, one `float3` per mesh vertex; the base is the un-layered
+ *   vertex position.
+ * - GRID domain: *tangent-space* displacement in the #MDisps grid layout, one `float3` per grid
+ *   point at subdivision level #level (always the multires top level). The base is #CD_MDISPS
+ *   (which never contains layer contributions); layers are composed with the base displacement
+ *   at subdivision-surface evaluation time (see `subdiv_displacement_multires.cc`).
+ * Owned by #Mesh::sculpt_layers, persisted in blend files.
+ */
+struct SculptLayer {
+  SculptLayer *next = nullptr;
+  SculptLayer *prev = nullptr;
+  /** MAX_NAME. */
+  char name[64] = {};
+  /** Influence factor (soft UI range `0..1` shown as 0..100%, hard range `-10..10`). */
+  float influence = 1.0f;
+  /** #eSculptLayerFlag. Defaults to 0; new layers are created enabled via the editor API. */
+  int flag = 0;
+  /** Number of elements in #data (mesh vertices, or multires grid points). */
+  int totelem = 0;
+  /** Unique identifier, stable across reordering of the list. */
+  int uid = 0;
+  /** #eSculptLayerDomain. */
+  short domain = 0;
+  /**
+   * Grid (multires) domain only: subdivision level at which #data is stored. Always equals the
+   * mesh's multires top level (`totlvl`); Subdivide / Delete Higher resample the data to keep
+   * this invariant. Mirrors #MDisps.level. Unused (0) for the vertex domain.
+   */
+  short level = 0;
+  char _pad[4] = {};
+  /** `float3[totelem]` array of per-element displacement deltas. May be null (treated as zeros). */
+  void *data = nullptr;
+};
+
 struct Mesh {
 #ifdef __cplusplus
   DNA_DEFINE_CXX_METHODS(Mesh)
@@ -196,6 +263,18 @@ struct Mesh {
   ListBaseT<bDeformGroup> vertex_group_names = {nullptr, nullptr};
   /** The active index in the #vertex_group_names list. */
   int vertex_group_active_index = 0;
+  /* Explicit padding: `vertex_group_active_index` (4 bytes) must be followed by 4 pad bytes so
+   * that `sculpt_layers` (a ListBase, containing two 8-byte pointers) starts on an 8-byte
+   * aligned boundary, as required by the DNA system. */
+  char _pad_sculpt[4] = {};
+
+  /**
+   * Non-destructive sculpt layers (#SculptLayer). Each layer stores per-element displacement
+   * deltas that are combined additively with the base geometry, scaled by a per-layer influence.
+   */
+  ListBaseT<SculptLayer> sculpt_layers = {nullptr, nullptr};
+  /** The active index in the #sculpt_layers list. */
+  int sculpt_layers_active_index = 0;
 
   /**
    * The index of the active attribute in the UI. The attribute list is a combination of the

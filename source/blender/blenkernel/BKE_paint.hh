@@ -13,6 +13,7 @@
 #include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
 #include "BLI_enum_flags.hh"
+#include "BLI_map.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_offset_indices.hh"
@@ -466,6 +467,32 @@ struct SculptSession : NonCopyable, NonMovable {
     int grids_num = -1;
     int grid_size = -1;
   } persistent;
+
+  /* Sculpt layers (non-destructive sculpt edits, see #BKE_sculpt_layers.hh). Runtime state used
+   * by the editor module to record strokes into the active layer. Multires (grid domain) layers
+   * keep no runtime base: the composed surface is evaluated from `MDisps + sum(enabled layers)`
+   * by the subdivision displacement evaluator, so grid state is fully derived from stored data. */
+  struct {
+    /* True between #stroke_record_begin and #stroke_record_end while a valid active layer is
+     * being recorded. This is the authoritative "recording" signal. */
+    bool recording = false;
+    /* True while REC (record) mode is on: brush strokes are recorded into the active layer (pinned
+     * to influence 1.0). When false, strokes edit the base geometry instead. Transient editing
+     * state, not saved to the blend file. */
+    bool rec_active = false;
+    /* For the mesh (vertex) domain: the vertex positions with every layer's contribution removed
+     * (the un-layered base). Captured lazily on sculpt-mode enter; kept current by non-REC strokes.
+     * Empty for the grid domain. */
+    Array<float3> mesh_base;
+    /* Whether #mesh_base has been initialized for this session. */
+    bool state_valid = false;
+    /* Per-element object-space contribution of the enabled layers ("base view" offset,
+     * `combined[i] - base[i]`), valid only for the duration of a non-REC stroke. Brushes subtract
+     * it from the live positions when computing surface-shape-dependent inputs (falloff, area
+     * normal, smoothing targets, plane fits) so base edits do not absorb the layer residual.
+     * Empty when the mode is inactive (REC on, no enabled layers, deform/shape-key sessions). */
+    Array<float3> base_view;
+  } layers;
 
   /* Contains information used by tools and brushes that require different logic based on boundary
    * elements. Typically used for anything which needs to consider neighbor values.

@@ -14,6 +14,7 @@
 #include "BKE_attribute.h"
 #include "BKE_editmesh.hh"
 #include "BKE_mesh_types.hh"
+#include "BKE_sculpt_layers.hh"
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
@@ -101,6 +102,8 @@ static const EnumPropertyItem rna_enum_mesh_remesh_mode_items[] = {
 
 #ifdef RNA_RUNTIME
 
+#  include <chrono>
+#  include <cstdio>
 #  include <fmt/format.h>
 
 #  include "DNA_material_types.h"
@@ -109,22 +112,29 @@ static const EnumPropertyItem rna_enum_mesh_remesh_mode_items[] = {
 
 #  include "BLI_math_geom.h"
 #  include "BLI_math_vector.h"
+#  include "BLI_listbase.h"
 #  include "BLI_string.h"
 #  include "BLI_string_utf8.h"
+#  include "BLI_string_utils.hh"
 
 #  include "BKE_anonymous_attribute_id.hh"
 #  include "BKE_attribute.hh"
 #  include "BKE_attribute_legacy_convert.hh"
 #  include "BKE_customdata.hh"
+#  include "BKE_global.hh"
 #  include "BKE_lib_id.hh"
 #  include "BKE_main.hh"
 #  include "BKE_mesh.hh"
 #  include "BKE_mesh_runtime.hh"
 #  include "BKE_report.hh"
+#  include "BLI_array.hh"
+
+#  include "BKE_sculpt_layers.hh"
 
 #  include "DEG_depsgraph.hh"
 
-#  include "ED_mesh.hh" /* XXX Bad level call */
+#  include "ED_mesh.hh"   /* XXX Bad level call */
+#  include "ED_sculpt.hh" /* XXX Bad level call */
 
 #  include "WM_api.hh"
 
@@ -217,6 +227,213 @@ static void rna_Mesh_update_data_edit_active_color(Main *bmain, Scene *scene, Po
 
   rna_Mesh_update_data_legacy_deg_tag_all(bmain, scene, ptr);
 }
+/* -------------------------------------------------------------------- */
+/** \name Sculpt Layers
+ * \{ */
+
+static void rna_Mesh_sculpt_layers_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  rna_iterator_listbase_begin(iter, ptr, &mesh->sculpt_layers, nullptr);
+}
+
+static int rna_Mesh_sculpt_layers_length(PointerRNA *ptr)
+{
+  return BLI_listbase_count(&rna_mesh(ptr)->sculpt_layers);
+}
+
+static PointerRNA rna_Mesh_sculpt_layers_active_get(PointerRNA *ptr)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  SculptLayer *layer = bke::sculpt_layers::active_get(*mesh);
+  return RNA_pointer_create_with_parent(*ptr, RNA_SculptLayer, layer);
+}
+
+static void rna_Mesh_sculpt_layers_active_set(PointerRNA *ptr,
+                                              PointerRNA value,
+                                              ReportList * /*reports*/)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  bke::sculpt_layers::active_set(*mesh, static_cast<SculptLayer *>(value.data));
+}
+
+static int rna_Mesh_sculpt_layers_active_index_get(PointerRNA *ptr)
+{
+  return rna_mesh(ptr)->sculpt_layers_active_index;
+}
+
+static void rna_Mesh_sculpt_layers_active_index_set(PointerRNA *ptr, int value)
+{
+  rna_mesh(ptr)->sculpt_layers_active_index = value;
+}
+
+static bool rna_Mesh_sculpt_layers_solo_active_get(PointerRNA *ptr)
+{
+  return bke::sculpt_layers::solo_active(*rna_mesh(ptr));
+}
+
+static void rna_Mesh_sculpt_layers_active_index_range(
+    PointerRNA *ptr, int *min, int *max, int *softmin, int *softmax)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  *min = 0;
+  const int count = BLI_listbase_count(&mesh->sculpt_layers);
+  *max = (count > 0) ? count - 1 : 0;
+  *softmin = *min;
+  *softmax = *max;
+}
+
+static std::optional<std::string> rna_SculptLayer_path(const PointerRNA *ptr)
+{
+  const SculptLayer *layer = static_cast<const SculptLayer *>(ptr->data);
+  char name_esc[sizeof(layer->name) * 2];
+  BLI_str_escape(name_esc, layer->name, sizeof(name_esc));
+  return fmt::format("sculpt_layers[\"{}\"]", name_esc);
+}
+
+static void rna_SculptLayer_name_set(PointerRNA *ptr, const char *value)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
+  STRNCPY_UTF8(layer->name, value);
+  BLI_uniquename(&mesh->sculpt_layers,
+                 layer,
+                 "Layer",
+                 '.',
+                 offsetof(SculptLayer, name),
+                 sizeof(layer->name));
+}
+
+/* [DEBUG-perf] Per-tick timing for the Sculpt Layers influence slider hot path. Tied to the
+ * module-wide #SCULPT_LAYERS_DEBUG_LOG switch (see `BKE_sculpt_layers.hh`). */
+#  define SCULPT_LAYERS_RNA_DEBUG_PERF SCULPT_LAYERS_DEBUG_LOG
+#  if SCULPT_LAYERS_RNA_DEBUG_PERF
+#    define SLP_RNA_PERF(...) printf(__VA_ARGS__)
+#  else
+#    define SLP_RNA_PERF(...) ((void)0)
+#  endif
+
+/* Apply an incremental influence delta to the mesh vertex positions for a single vert-domain layer.
+ * Grid-domain layers are driven by the sculpt-session operators (they need SubdivCCG), so this is
+ * a no-op for them. */
+static void rna_SculptLayer_apply_mesh_delta(Mesh *mesh, SculptLayer &layer, const float delta)
+{
+  if (mesh->verts_num == 0 || mesh->runtime->edit_mesh ||
+      layer.domain != SCULPT_LAYER_DOMAIN_VERT || delta == 0.0f)
+  {
+    return;
+  }
+  MutableSpan<float3> positions = mesh->vert_positions_for_write();
+  const std::chrono::high_resolution_clock::time_point apply_start =
+      std::chrono::high_resolution_clock::now();
+  bke::sculpt_layers::apply_delta_mesh(layer, delta, positions);
+  const int64_t apply_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::high_resolution_clock::now() - apply_start)
+                               .count();
+  SLP_RNA_PERF("[DEBUG-perf] rna_sculpt_layers: apply_delta_mesh verts=%d took %lld us\n",
+               mesh->verts_num,
+               (long long)apply_us);
+  mesh->tag_positions_changed();
+}
+
+static float rna_SculptLayer_influence_get(PointerRNA *ptr)
+{
+  return static_cast<const SculptLayer *>(ptr->data)->influence;
+}
+
+/* Grid (multires) layers: consume any pending base sculpt edits BEFORE the influence/visibility
+ * value changes. A later flush would reshape the stale composed CCG against the changed layer set
+ * and leak the difference into the base MDisps. Uses #G_MAIN because property setters get no
+ * context. No-op for the vertex domain and when nothing is pending. */
+static void rna_SculptLayer_flush_pending_base(Mesh *mesh, const SculptLayer &layer)
+{
+  if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || G_MAIN == nullptr) {
+    return;
+  }
+  ed::sculpt_paint::layers::flush_pending_multires_base_for_mesh(*G_MAIN, *mesh);
+}
+
+static void rna_SculptLayer_influence_set(PointerRNA *ptr, float value)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
+  value = (value < -10.0f) ? -10.0f : (value > 10.0f ? 10.0f : value);
+  rna_SculptLayer_flush_pending_base(mesh, *layer);
+  const float old_effective = bke::sculpt_layers::effective(*layer);
+  layer->influence = value;
+  rna_SculptLayer_apply_mesh_delta(mesh, *layer, bke::sculpt_layers::effective(*layer) - old_effective);
+}
+
+static bool rna_SculptLayer_enabled_get(PointerRNA *ptr)
+{
+  return (static_cast<const SculptLayer *>(ptr->data)->flag & SCULPT_LAYER_ENABLED) != 0;
+}
+
+static void rna_SculptLayer_enabled_set(PointerRNA *ptr, bool value)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
+  const bool was_enabled = (layer->flag & SCULPT_LAYER_ENABLED) != 0;
+  if (was_enabled == value) {
+    return;
+  }
+  rna_SculptLayer_flush_pending_base(mesh, *layer);
+  const float old_effective = bke::sculpt_layers::effective(*layer);
+  if (value) {
+    layer->flag |= SCULPT_LAYER_ENABLED;
+  }
+  else {
+    layer->flag &= ~SCULPT_LAYER_ENABLED;
+  }
+  rna_SculptLayer_apply_mesh_delta(mesh, *layer, bke::sculpt_layers::effective(*layer) - old_effective);
+}
+
+static void rna_Mesh_update_sculpt_layers(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  ID *id = ptr->owner_id;
+  if (id->us <= 0) {
+    return;
+  }
+  /* Grid (multires) layers require a full CCG recompute via the sculpt session — the incremental
+   * #rna_SculptLayer_apply_mesh_delta path is a no-op for them (see its domain check). */
+  SculptLayer *changed_layer = static_cast<SculptLayer *>(ptr->data);
+  if (changed_layer && changed_layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+    Mesh &mesh = *rna_mesh(ptr);
+    if (ed::sculpt_paint::layers::sync_multires_for_rna(*bmain, scene, mesh, *changed_layer)) {
+      return;
+    }
+    /* No live grid session: fall through to the full ID_RECALC_GEOMETRY below. */
+  }
+  /* In sculpt mode the live mesh positions were already updated incrementally by the layer setter
+   * (see #rna_SculptLayer_apply_mesh_delta). For a vertex-domain PBVH this lets us refresh the
+   * viewport with a lightweight PBVH invalidation instead of a full geometry re-evaluation, which
+   * keeps the influence slider interactive on dense meshes. */
+  const std::chrono::high_resolution_clock::time_point flush_start =
+      std::chrono::high_resolution_clock::now();
+  const bool flushed = ed::sculpt_paint::layers::flush_interactive_update(*bmain, *rna_mesh(ptr));
+  const int64_t flush_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::high_resolution_clock::now() - flush_start)
+                               .count();
+  SLP_RNA_PERF("[DEBUG-perf] rna_sculpt_layers: flush_interactive_update fast_path=%d took %lld us\n",
+               int(flushed),
+               (long long)flush_us);
+  if (flushed) {
+    return;
+  }
+  const std::chrono::high_resolution_clock::time_point fallback_start =
+      std::chrono::high_resolution_clock::now();
+  DEG_id_tag_update(id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_GEOM | ND_DATA, id);
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, nullptr);
+  const int64_t fallback_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::high_resolution_clock::now() - fallback_start)
+                                  .count();
+  SLP_RNA_PERF("[DEBUG-perf] rna_sculpt_layers: fallback ID_RECALC_GEOMETRY+notifiers took %lld us\n",
+               (long long)fallback_us);
+}
+
+/** \} */
+
 static void rna_Mesh_update_select(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   ID *id = ptr->owner_id;
@@ -2906,6 +3123,59 @@ static void rna_def_looptri_poly_value(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
 }
 
+static void rna_def_sculpt_layer(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  static const EnumPropertyItem domain_items[] = {
+      {SCULPT_LAYER_DOMAIN_VERT, "VERTEX", 0, "Vertex", "Per-vertex displacement (regular mesh)"},
+      {SCULPT_LAYER_DOMAIN_GRID, "GRID", 0, "Grid", "Per grid point displacement (multires)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "SculptLayer", nullptr);
+  RNA_def_struct_sdna(srna, "SculptLayer");
+  RNA_def_struct_ui_text(
+      srna, "Sculpt Layer", "A non-destructive sculpt layer storing per-element displacement");
+  RNA_def_struct_path_func(srna, "rna_SculptLayer_path");
+  RNA_def_struct_ui_icon(srna, ICON_OUTLINER_DATA_MESH);
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_SculptLayer_name_set");
+  RNA_def_property_ui_text(prop, "Name", "Name of the sculpt layer");
+  RNA_def_struct_name_property(srna, prop);
+
+  prop = RNA_def_property(srna, "influence", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(
+      prop, "rna_SculptLayer_influence_get", "rna_SculptLayer_influence_set", nullptr);
+  RNA_def_property_range(prop, -10.0f, 10.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1, 3);
+  /* The influence is applied incrementally to the geometry, so it must not be animated/driven. */
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Influence", "How much this layer contributes to the final sculpted shape");
+  RNA_def_property_update(prop, 0, "rna_Mesh_update_sculpt_layers");
+
+  prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_SculptLayer_enabled_get", "rna_SculptLayer_enabled_set");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Enabled", "Include this layer in the combined result");
+  RNA_def_property_update(prop, 0, "rna_Mesh_update_sculpt_layers");
+
+  prop = RNA_def_property(srna, "lock", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_LAYER_LOCKED);
+  RNA_def_property_ui_text(prop, "Lock", "Protect this layer from being recorded into");
+
+  prop = RNA_def_property(srna, "domain", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "domain");
+  RNA_def_property_enum_items(prop, domain_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Domain", "Element domain the layer is defined on");
+}
+
 static void rna_def_mesh(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3370,6 +3640,50 @@ static void rna_def_mesh(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Is Editmode", "True when used in editmode");
 
+  /* Sculpt Layers */
+  prop = RNA_def_property(srna, "sculpt_layers", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Mesh_sculpt_layers_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    "rna_Mesh_sculpt_layers_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_struct_type(prop, "SculptLayer");
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
+  RNA_def_property_ui_text(
+      prop, "Sculpt Layers", "Non-destructive sculpt layers combined onto the base geometry");
+
+  prop = RNA_def_property(srna, "sculpt_layers_active", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "SculptLayer");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_Mesh_sculpt_layers_active_get",
+                                 "rna_Mesh_sculpt_layers_active_set",
+                                 nullptr,
+                                 nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
+  RNA_def_property_ui_text(prop, "Active Sculpt Layer", "Active sculpt layer");
+
+  prop = RNA_def_property(srna, "sculpt_layers_active_index", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop,
+                             "rna_Mesh_sculpt_layers_active_index_get",
+                             "rna_Mesh_sculpt_layers_active_index_set",
+                             "rna_Mesh_sculpt_layers_active_index_range");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Active Sculpt Layer Index", "Active index in the sculpt layers list");
+
+  prop = RNA_def_property(srna, "sculpt_layers_solo_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Mesh_sculpt_layers_solo_active_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Solo Base Active",
+                           "Sculpt layers are temporarily hidden to sculpt the base shape "
+                           "directly (toggled by the Solo Base operator)");
+
   /* pointers */
   rna_def_animdata_common(srna);
   rna_def_texmat_common(srna, "rna_Mesh_texspace_editable");
@@ -3388,6 +3702,7 @@ void RNA_def_mesh(BlenderRNA *brna)
   rna_def_mpolygon(brna);
   rna_def_mloopuv(brna);
   rna_def_mloopcol(brna);
+  rna_def_sculpt_layer(brna);
 }
 
 }  // namespace blender

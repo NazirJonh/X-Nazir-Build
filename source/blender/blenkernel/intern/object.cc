@@ -123,6 +123,7 @@
 #include "BKE_report.hh"
 #include "BKE_rigidbody.h"
 #include "BKE_scene.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_shader_fx.hh"
 #include "BKE_softbody.h"
 #include "BKE_speaker.hh"
@@ -1717,7 +1718,25 @@ static void object_update_from_subsurf_ccg(Object *object)
   const int tot_level = mesh_eval->runtime->subdiv_ccg_tot_level;
   Object *object_orig = DEG_get_original(object);
   Mesh *mesh_orig = id_cast<Mesh *>(object_orig->data);
-  multiresModifier_reshapeFromCCG(tot_level, mesh_orig, subdiv_ccg);
+  /* [DEBUG-flush] Tied to the module-wide #SCULPT_LAYERS_DEBUG_LOG switch (see
+   * `BKE_sculpt_layers.hh`); see also SCULPT_LAYERS_DEBUG_FLUSH in `multires_reshape.cc`. */
+#if SCULPT_LAYERS_DEBUG_LOG
+  printf("[sculpt-layers][flush] object_update_from_subsurf_ccg: depsgraph-driven flush, "
+         "tot_level=%d ccg_level=%d\n",
+         tot_level,
+         subdiv_ccg->level);
+#endif
+  const bool flushed = multiresModifier_reshapeFromCCG(
+      tot_level, mesh_orig, subdiv_ccg, MultiresReshapeFromCCGMode::Base);
+  if (!flushed) {
+#if SCULPT_LAYERS_DEBUG_LOG
+    printf("[sculpt-layers][flush] WARNING: skipped depsgraph multires base flush; source could "
+           "not be converted to base without baking layers\n");
+#endif
+    subdiv_ccg->dirty.coords = false;
+    subdiv_ccg->dirty.hidden = false;
+    return;
+  }
   /* NOTE: we need to reshape into an original mesh from main database,
    * allowing:
    *

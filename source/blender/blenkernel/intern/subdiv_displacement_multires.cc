@@ -7,6 +7,7 @@
  */
 
 #include <cmath>
+#include <cstdio>
 
 #include "BKE_subdiv.hh"
 
@@ -14,13 +15,16 @@
 #include "DNA_meshdata_types.h"
 #include "DNA_modifier_types.h"
 
+#include "BLI_listbase_iterator.hh"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_offset_indices.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_customdata.hh"
 #include "BKE_multires.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_eval.hh"
 
 #include "MEM_guardedalloc.h"
@@ -30,6 +34,13 @@ namespace blender::bke::subdiv {
 struct PolyCornerIndex {
   int face_index;
   int corner;
+};
+
+/* An enabled grid-domain sculpt layer whose tangent displacement is composed with the base
+ * MDisps displacement at evaluation time (data layout matches MDisps at the top level). */
+struct MultiresLayerData {
+  const float3 *data;
+  float influence;
 };
 
 struct MultiresDisplacementData {
@@ -49,6 +60,9 @@ struct MultiresDisplacementData {
   /* Indexed by coarse face index, returns first PTEX face index corresponding
    * to that coarse face. */
   Span<int> face_ptex_offset = {};
+  /* Enabled grid-domain sculpt layers, composed with the base displacement on read. Empty for
+   * meshes without sculpt layers, in which case evaluation is identical to the base-only path. */
+  Vector<MultiresLayerData> layers = {};
   /* Sanity check, is used in debug builds.
    * Controls that initialize() was called prior to eval_displacement(). */
   bool is_initialized = false;
@@ -129,6 +143,28 @@ BLI_INLINE AverageWith read_displacement_grid(const MDisps &displacement_grid,
   return AverageWith::None;
 }
 
+/* Add the tangent-space contributions of the enabled sculpt layers on top of the base
+ * displacement read from MDisps. The layers share the MDisps grid layout, so the grid is
+ * identified by the MDisps pointer offset within the layer array. */
+BLI_INLINE void add_sculpt_layer_displacement(const MultiresDisplacementData &data,
+                                              const MDisps *displacement_grid,
+                                              const float grid_u,
+                                              const float grid_v,
+                                              float3 &r_tangent_D)
+{
+  if (data.layers.is_empty()) {
+    return;
+  }
+  const int grid_size = data.grid_size;
+  const int grid_index = int(displacement_grid - data.mdisps);
+  const int x = roundf(grid_u * (grid_size - 1));
+  const int y = roundf(grid_v * (grid_size - 1));
+  const int elem = grid_index * grid_size * grid_size + y * grid_size + x;
+  for (const MultiresLayerData &layer : data.layers) {
+    r_tangent_D += layer.data[elem] * layer.influence;
+  }
+}
+
 static void average_convert_grid_coord_to_ptex(const int num_corners,
                                                const int corner,
                                                const float grid_u,
@@ -162,16 +198,19 @@ static void average_construct_tangent_matrix(Subdiv &subdiv,
 }
 
 static void average_read_displacement_tangent(const MultiresDisplacementData &data,
-                                              const MDisps &other_displacement_grid,
+                                              const MDisps *other_displacement_grid,
                                               const float grid_u,
                                               const float grid_v,
                                               float3 &r_tangent_D)
 {
-  read_displacement_grid(other_displacement_grid, data.grid_size, grid_u, grid_v, r_tangent_D);
+  read_displacement_grid(*other_displacement_grid, data.grid_size, grid_u, grid_v, r_tangent_D);
+  /* Boundary averaging has to see the same composed displacement as the direct read, otherwise
+   * layered sculpting would show seams along grid boundaries. */
+  add_sculpt_layer_displacement(data, other_displacement_grid, grid_u, grid_v, r_tangent_D);
 }
 
 static void average_read_displacement_object(const MultiresDisplacementData &data,
-                                             const MDisps &displacement_grid,
+                                             const MDisps *displacement_grid,
                                              const float grid_u,
                                              const float grid_v,
                                              const int ptex_face_index,
@@ -224,7 +263,7 @@ static void average_with_other(const Displacement &displacement,
 {
   const MultiresDisplacementData &data = *static_cast<MultiresDisplacementData *>(
       displacement.user_data);
-  const MDisps other_displacement_grid = *displacement_get_other_grid(
+  const MDisps *other_displacement_grid = displacement_get_other_grid(
       displacement, ptex_face_index, corner, corner_delta);
   int other_ptex_face_index, other_corner_index;
   average_get_other_ptex_and_corner(
@@ -348,6 +387,9 @@ static void eval_displacement(Displacement *displacement,
   float3 tangent_D;
   const AverageWith average_with = read_displacement_grid(
       *displacement_grid, grid_size, grid_u, grid_v, tangent_D);
+  /* Compose the enabled sculpt layers on top of the base displacement (single point of truth for
+   * the combined surface, see #SculptLayer). */
+  add_sculpt_layer_displacement(data, displacement_grid, grid_u, grid_v, tangent_D);
   /* Convert it to the object space. */
   float3x3 tangent_matrix;
   BKE_multires_construct_tangent_matrix(tangent_matrix, dPdu, dPdv, corner_of_quad);
@@ -418,6 +460,43 @@ static void displacement_init_data(Displacement &displacement,
   data.faces = mesh.faces();
   data.mdisps = static_cast<const MDisps *>(CustomData_get_layer(&mesh.corner_data, CD_MDISPS));
   data.face_ptex_offset = face_ptex_offset_get(&subdiv);
+  /* Collect the enabled grid-domain sculpt layers whose data matches the MDisps layout at the
+   * top level. Layers at a mismatching size (e.g. after a base topology change) are skipped and
+   * handled by the sculpt-session validation. */
+  data.layers.clear();
+  const int64_t expected_totelem = int64_t(mesh.corners_num) * data.grid_size * data.grid_size;
+  for (const SculptLayer &layer : mesh.sculpt_layers) {
+    if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {
+      continue;
+    }
+    if (!(layer.flag & SCULPT_LAYER_ENABLED) || layer.influence == 0.0f) {
+      continue;
+    }
+    if (int64_t(layer.totelem) != expected_totelem) {
+#if SCULPT_LAYERS_DEBUG_LOG
+      /* Asymmetry with the reshape-side layer set would leak into the base. */
+      printf("[sculpt-layers][eval] layer '%s' SKIPPED: totelem=%d expected=%lld level=%d\n",
+             layer.name,
+             layer.totelem,
+             (long long)expected_totelem,
+             int(layer.level));
+#endif
+      continue;
+    }
+    data.layers.append({static_cast<const float3 *>(layer.data), layer.influence});
+  }
+#if SCULPT_LAYERS_DEBUG_LOG
+  /* [DEBUG-flush] Snapshot of the layer set the CCG is (re)built with; compare against the set a
+   * later flush subtracts (see SCULPT_LAYERS_DEBUG_FLUSH in `multires_reshape.cc`). Tied to the
+   * module-wide #SCULPT_LAYERS_DEBUG_LOG switch (see `BKE_sculpt_layers.hh`). */
+  printf("[sculpt-layers][eval] CCG displacement attach: layers=%d grid_size=%d influences=[",
+         int(data.layers.size()),
+         data.grid_size);
+  for (const MultiresLayerData &layer : data.layers) {
+    printf("%.3f ", double(layer.influence));
+  }
+  printf("]\n");
+#endif
   data.is_initialized = false;
   displacement_data_init_mapping(displacement, mesh);
 }

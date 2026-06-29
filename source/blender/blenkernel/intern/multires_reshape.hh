@@ -237,6 +237,40 @@ void multires_reshape_tangent_matrix_for_corner(const MultiresReshapeContext *re
                                                 const float3 &dPdv,
                                                 float3x3 &r_tangent_matrix);
 
+/** Same as above but uses the legacy tangent matrix construction (versioning only). */
+void multires_reshape_tangent_matrix_for_corner_for_versioning(
+    const MultiresReshapeContext *reshape_context,
+    int face_index,
+    int corner,
+    const float3 &dPdu,
+    const float3 &dPdv,
+    float3x3 &r_tangent_matrix);
+
+/* Diagnostics for displacement spikes at ill-conditioned tangent frames: aggregates the gain of
+ * tangent space conversions over one reshape pass and prints a single summary line per metric
+ * (worst grid point, its frame conditioning, counts above fixed thresholds), so the growth of an
+ * amplification hot-spot is visible per stroke without flooding the console. Set to 0 to compile
+ * out. */
+#define MULTIRES_TANGENT_DEBUG 1
+
+#if MULTIRES_TANGENT_DEBUG
+/** Begin aggregation for one reshape pass; `label` names the pass in the printed summary. */
+void multires_reshape_tangent_debug_begin(const MultiresReshapeContext *reshape_context,
+                                          const char *label);
+/**
+ * Track the gain `length(output) / length(input)` of a single tangent-space conversion under
+ * `metric` (must be a string literal: slots are keyed by pointer identity). Only the worst
+ * sample and threshold counts are kept; non-finite outputs are counted separately.
+ */
+void multires_reshape_tangent_debug_gain(const char *metric,
+                                         const GridCoord *grid_coord,
+                                         const float3x3 &tangent_matrix,
+                                         const float3 &input,
+                                         const float3 &output);
+/** Print one summary line per metric tracked since the matching `begin`. */
+void multires_reshape_tangent_debug_end();
+#endif
+
 /**
  * Get grid elements which are to be reshaped at a given or PTEX coordinate.
  * The data is coming from final custom mdata layers.
@@ -263,6 +297,13 @@ ReshapeConstGridElement multires_reshape_orig_grid_element_for_grid_coord(
  * This is the limit surface which defines tangent space for MDisps.
  */
 void multires_reshape_evaluate_base_mesh_limit_at_grid(
+    const MultiresReshapeContext *reshape_context,
+    const GridCoord *grid_coord,
+    float3 &r_P,
+    float3x3 &r_tangent_matrix);
+
+/** Same as above but uses the legacy tangent matrix construction (versioning only). */
+void multires_reshape_evaluate_base_mesh_limit_at_grid_for_versioning(
     const MultiresReshapeContext *reshape_context,
     const GridCoord *grid_coord,
     float3 &r_P,
@@ -324,6 +365,13 @@ bool multires_reshape_assign_final_coords_from_ccg(const MultiresReshapeContext 
  * Reads and writes to the current mesh #CD_MDISPS.
  */
 void multires_reshape_assign_final_coords_from_mdisps(
+    const MultiresReshapeContext *reshape_context);
+
+/**
+ * Same as #multires_reshape_assign_final_coords_from_mdisps but decodes the displacement with
+ * the legacy tangent matrix construction (versioning only).
+ */
+void multires_reshape_assign_final_coords_from_mdisps_for_versioning(
     const MultiresReshapeContext *reshape_context);
 
 /**

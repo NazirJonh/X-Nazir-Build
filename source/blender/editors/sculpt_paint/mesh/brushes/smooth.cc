@@ -55,6 +55,8 @@ struct LocalData {
   Vector<int> neighbor_data;
   Vector<float3> new_positions;
   Vector<float3> translations;
+  /* Neighbor average of the sculpt-layer base-view offset (see #layers::stroke_base_view). */
+  Vector<float3> base_view_avg;
 };
 
 BLI_NOINLINE static void apply_positions_faces(const Sculpt &sd,
@@ -139,11 +141,22 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
               node_factors,
               tls.neighbor_offsets,
               tls.neighbor_data);
+          const MutableSpan<float3> node_new_positions = new_positions.as_mutable_span().slice(
+              node_vert_offsets[pos]);
           smooth::neighbor_data_average_mesh_check_loose(
-              position_data.eval,
-              verts,
-              neighbors,
-              new_positions.as_mutable_span().slice(node_vert_offsets[pos]));
+              position_data.eval, verts, neighbors, node_new_positions);
+          const Span<float3> base_view = layers::stroke_base_view(object);
+          if (!base_view.is_empty()) {
+            /* Base-aware target `avg(base) + O[v]`: smooth the un-layered base and let the layer
+             * detail ride on top instead of being flattened into it. Averaging the offset with
+             * the same operator (same neighbor lists) keeps boundary handling exact. */
+            tls.base_view_avg.resize(verts.size());
+            smooth::neighbor_data_average_mesh_check_loose(
+                base_view, verts, neighbors, tls.base_view_avg.as_mutable_span());
+            for (const int vi : verts.index_range()) {
+              node_new_positions[vi] += base_view[verts[vi]] - tls.base_view_avg[vi];
+            }
+          }
         },
         exec_mode::grain_size(1));
 
@@ -194,6 +207,30 @@ static void calc_grids(const Depsgraph &depsgraph,
                                                    grids,
                                                    tls.factors,
                                                    new_positions);
+
+  const Span<float3> base_view = layers::stroke_base_view(object);
+  if (!base_view.is_empty()) {
+    /* Base-aware target `avg(base) + O[v]`; see the mesh path in #do_smooth_brush_mesh. */
+    tls.base_view_avg.resize(positions.size());
+    smooth::neighbor_position_average_interior_grids(faces,
+                                                     corner_verts,
+                                                     boundary_verts,
+                                                     boundary_edges,
+                                                     subdiv_ccg,
+                                                     base_view,
+                                                     grids,
+                                                     tls.factors,
+                                                     tls.base_view_avg.as_mutable_span());
+    const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+    for (const int i : grids.index_range()) {
+      const IndexRange node_range = bke::ccg::grid_range(key, i);
+      const IndexRange grid_range = bke::ccg::grid_range(key, grids[i]);
+      for (const int offset : IndexRange(key.grid_area)) {
+        new_positions[node_range[offset]] += base_view[grid_range[offset]] -
+                                             tls.base_view_avg[node_range[offset]];
+      }
+    }
+  }
 
   tls.translations.resize(positions.size());
   const MutableSpan<float3> translations = tls.translations;

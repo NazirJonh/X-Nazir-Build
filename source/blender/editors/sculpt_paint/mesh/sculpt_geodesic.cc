@@ -138,6 +138,12 @@ Array<float> distances_create(const Span<float3> vert_positions,
     }
   }
 
+  /* Parallel label-correcting traversal. Each level relaxes the whole current edge front in
+   * parallel; distance updates use atomic min, and an edge is re-queued whenever one of its
+   * endpoints improves. Because the relaxation is monotonic (a smaller neighbor distance can only
+   * produce a smaller propagated distance) the loop converges to the same unique fixpoint as the
+   * serial version, independent of the order in which threads process edges. Per-thread output
+   * lists are merged once per level to avoid contention on the shared next queue. */
   threading::EnumerableThreadSpecific<Vector<int>> tls_queue_next;
 
   while (!queue.is_empty()) {

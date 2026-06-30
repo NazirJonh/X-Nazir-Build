@@ -8,7 +8,6 @@
 #include "sculpt_expand.hh"
 
 #include <cmath>
-#include <cinttypes>
 
 #include "MEM_guardedalloc.h"
 
@@ -16,7 +15,6 @@
 #include "BLI_bit_vector.hh"
 #include "BLI_linklist_stack.h"
 #include "BLI_math_vector.hh"
-#include "BLI_time.h"
 
 #include "DNA_brush_types.h"
 #include "DNA_object_types.h"
@@ -137,13 +135,6 @@ enum {
   SCULPT_EXPAND_MODAL_TEXTURE_DISTORTION_INCREASE,
   SCULPT_EXPAND_MODAL_TEXTURE_DISTORTION_DECREASE,
 };
-
-/* Performance logging for Expand Mask initialization.
- * Set individual flags to false to disable logging during performance testing.
- * Logs are safe at function boundaries, NOT inside loops. */
-static bool g_perf_log_invoke = false;
-static bool g_perf_log_falloff = false;
-static bool g_perf_log_update = false;
 
 /* Functions for getting the state of mesh elements (vertices and base mesh faces). When the main
  * functions for getting the state of an element return true it means that data associated to that
@@ -880,17 +871,14 @@ static void calc_topology_falloff_from_verts(Object &ob,
                                              const IndexMask &initial_verts,
                                              MutableSpan<float> distances)
 {
-  const double t_start = g_perf_log_falloff ? BLI_time_now_seconds() : 0.0;
   SculptSession &ss = *ob.runtime->sculpt_session;
   const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
   const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   const int totvert = vertex_count_get(ob);
-  const char *pbvh_name = "Unknown";
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
-      pbvh_name = "Mesh";
       flood_fill::FillDataMesh flood(totvert);
       initial_verts.foreach_index([&](const int vert) { flood.add_and_skip_initial(vert); });
       flood.execute(ob, vert_to_face_map, [&](const int from_vert, const int to_vert) {
@@ -900,7 +888,6 @@ static void calc_topology_falloff_from_verts(Object &ob,
       break;
     }
     case bke::pbvh::Type::Grids: {
-      pbvh_name = "Grids";
       const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
       const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
 
@@ -926,7 +913,6 @@ static void calc_topology_falloff_from_verts(Object &ob,
       break;
     }
     case bke::pbvh::Type::BMesh: {
-      pbvh_name = "BMesh";
       BMesh &bm = *ss.bm;
       flood_fill::FillDataBMesh flood(totvert);
       initial_verts.foreach_index(
@@ -940,22 +926,12 @@ static void calc_topology_falloff_from_verts(Object &ob,
       break;
     }
   }
-
-  if (g_perf_log_falloff) {
-    printf("calc_topology_falloff_from_verts: seeds=%d totvert=%d pbvh=%s time=%.2fms\n",
-        int(initial_verts.size()),
-        totvert,
-        pbvh_name,
-        (BLI_time_now_seconds() - t_start) * 1000.0);
-    printf("  -> Calling flood fill now...\n");
-  }
 }
 
 static Array<float> topology_falloff_create(const Depsgraph &depsgraph,
                                             Object &ob,
                                             const int initial_vert)
 {
-  const double t_start = g_perf_log_falloff ? BLI_time_now_seconds() : 0.0;
   const Vector<int> symm_verts = find_symm_verts(depsgraph, ob, initial_vert);
 
   IndexMaskMemory memory;
@@ -963,13 +939,6 @@ static Array<float> topology_falloff_create(const Depsgraph &depsgraph,
 
   Array<float> dists(vertex_count_get(ob), 0.0f);
   calc_topology_falloff_from_verts(ob, mask, dists);
-
-  if (g_perf_log_falloff) {
-    printf("topology_falloff_create: seeds=%d totvert=%d total_time=%.2fms\n",
-           int(symm_verts.size()),
-           int(dists.size()),
-           (BLI_time_now_seconds() - t_start) * 1000.0);
-  }
   return dists;
 }
 
@@ -1187,7 +1156,6 @@ static Array<float> diagonals_falloff_create(const Depsgraph &depsgraph,
                                              Object &ob,
                                              const int vert)
 {
-  const double t_start = g_perf_log_falloff ? BLI_time_now_seconds() : 0.0;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
   const OffsetIndices<int> faces = mesh.faces();
@@ -1217,35 +1185,21 @@ static Array<float> diagonals_falloff_create(const Depsgraph &depsgraph,
     return dists;
   }
 
-  uint64_t queue_pops = 0;
-  uint64_t neighbor_iters = 0;
-
   /* Propagate the falloff increasing the value by 1 each time a new vertex is visited. */
   while (!queue.empty()) {
     const int next_vert = queue.front();
     queue.pop();
-    queue_pops++;
 
     for (const int face : vert_to_face_map[next_vert]) {
-      for (const int v : corner_verts.slice(faces[face])) {
-        neighbor_iters++;
-        if (visited_verts[v]) {
+      for (const int vert : corner_verts.slice(faces[face])) {
+        if (visited_verts[vert]) {
           continue;
         }
-        dists[v] = dists[next_vert] + 1.0f;
-        visited_verts[v].set();
-        queue.push(v);
+        dists[vert] = dists[next_vert] + 1.0f;
+        visited_verts[vert].set();
+        queue.push(vert);
       }
     }
-  }
-
-  if (g_perf_log_falloff) {
-    printf("diagonals_falloff_create: totvert=%d queue_pops=%" PRIu64
-           " neighbor_iters=%" PRIu64 " time=%.2fms\n",
-           totvert,
-           queue_pops,
-           neighbor_iters,
-           (BLI_time_now_seconds() - t_start) * 1000.0);
   }
 
   return dists;
@@ -2109,7 +2063,6 @@ static void face_sets_restore(Object &object, Cache &expand_cache)
 
 static void update_for_vert(bContext *C, Object &ob, const std::optional<int> vertex)
 {
-  const double t_start = g_perf_log_update ? BLI_time_now_seconds() : 0.0;
   const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
   SculptSession &ss = *ob.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
@@ -2137,8 +2090,6 @@ static void update_for_vert(bContext *C, Object &ob, const std::optional<int> ve
   const IndexMask &node_mask = expand_cache.node_mask;
 
   const BitVector<> enabled_verts = enabled_state_to_bitmap(depsgraph, ob, expand_cache);
-
-  const double t_after_bitmap = g_perf_log_update ? BLI_time_now_seconds() : 0.0;
 
   switch (expand_cache.target) {
     case TargetType::Mask: {
@@ -2241,13 +2192,6 @@ static void update_for_vert(bContext *C, Object &ob, const std::optional<int> ve
       flush_update_step(C, UpdateType::Color);
       break;
     }
-  }
-
-  if (g_perf_log_update) {
-    printf("update_for_vert: enabled_bitmap=%.2fms mask_write=%.2fms total=%.2fms\n",
-           (t_after_bitmap - t_start) * 1000.0,
-           (BLI_time_now_seconds() - t_after_bitmap) * 1000.0,
-           (BLI_time_now_seconds() - t_start) * 1000.0);
   }
 }
 
@@ -2965,7 +2909,6 @@ static bool any_nonzero_mask(const Object &object)
 
 static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
-  printf("DEBUG: sculpt_expand_invoke CALLED\n");
   const Scene &scene = *CTX_data_scene(C);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
   Object &ob = *CTX_data_active_object(C);
@@ -3004,12 +2947,7 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
     }
   }
 
-  const double t_invoke_start = g_perf_log_invoke ? BLI_time_now_seconds() : 0.0;
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, needs_colors);
-  if (g_perf_log_invoke) {
-    printf("invoke: BKE_sculpt_update_object_for_edit=%.2fms\n",
-           (BLI_time_now_seconds() - t_invoke_start) * 1000.0);
-  }
 
   if (ss.expand_cache->target == TargetType::Mask) {
     ed::sculpt_paint::mask_overlay_check(*C, *op);
@@ -3053,12 +2991,7 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
   ss.expand_cache->node_mask = bke::pbvh::all_leaf_nodes(pbvh, ss.expand_cache->node_mask_memory);
 
   /* Store initial state. */
-  const double t1 = g_perf_log_invoke ? BLI_time_now_seconds() : 0.0;
   original_state_store(ob, *ss.expand_cache);
-  if (g_perf_log_invoke) {
-    printf("invoke: original_state_store=%.2fms\n",
-               (BLI_time_now_seconds() - t1) * 1000.0);
-  }
 
   if (ss.expand_cache->modify_active_face_set) {
     delete_face_set_id(ss.expand_cache->initial_face_sets.data(),
@@ -3117,60 +3050,13 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
     }
   }
 
-  /* Precompute edge/face maps once so both topology BFS and geodesic paths find them cached. */
-  if (pbvh.type() == bke::pbvh::Type::Mesh) {
-    const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
-    const Span<int2> edges = mesh.edges();
-    if (ss.vert_to_edge_map.is_empty()) {
-      const double t_map = g_perf_log_invoke ? BLI_time_now_seconds() : 0.0;
-      ss.vert_to_edge_map = bke::mesh::build_vert_to_edge_map(
-          edges, mesh.verts_num, ss.vert_to_edge_offsets, ss.vert_to_edge_indices);
-      if (g_perf_log_invoke) {
-        printf("invoke: build_vert_to_edge_map=%.2fms (verts=%d edges=%d)\n",
-               (BLI_time_now_seconds() - t_map) * 1000.0,
-               mesh.verts_num,
-               int(edges.size()));
-      }
-    }
-    if (ss.edge_to_face_map.is_empty()) {
-      const double t_map = g_perf_log_invoke ? BLI_time_now_seconds() : 0.0;
-      const OffsetIndices faces = mesh.faces();
-      const Span<int> corner_edges = mesh.corner_edges();
-      ss.edge_to_face_map = bke::mesh::build_edge_to_face_map(
-          faces, corner_edges, edges.size(), ss.edge_to_face_offsets, ss.edge_to_face_indices);
-      if (g_perf_log_invoke) {
-        printf("invoke: build_edge_to_face_map=%.2fms (faces=%d edges=%d)\n",
-               (BLI_time_now_seconds() - t_map) * 1000.0,
-               int(faces.size()),
-               int(edges.size()));
-      }
-    }
-  }
-
-  const double t2 = g_perf_log_invoke ? BLI_time_now_seconds() : 0.0;
-  printf("DEBUG: falloff_type=%d (0=Geodesic, 1=Topology, 2=Diagonals, 3=Sphere, 4=BoundaryTopology, 5=BoundaryFaceSet, 6=ActiveFaceSet, 7=Normals)\n", (int)falloff_type);
   calc_falloff_from_vert_and_symmetry(
       *depsgraph, *ss.expand_cache, ob, initial_vert, falloff_type);
-  if (g_perf_log_invoke) {
-    printf("invoke: calc_falloff_from_vert_and_symmetry=%.2fms\n",
-               (BLI_time_now_seconds() - t2) * 1000.0);
-  }
 
-  const double t3 = g_perf_log_invoke ? BLI_time_now_seconds() : 0.0;
   check_topology_islands(ob, falloff_type);
-  if (g_perf_log_invoke) {
-    printf("invoke: check_topology_islands=%.2fms\n",
-               (BLI_time_now_seconds() - t3) * 1000.0);
-  }
 
   /* Initial mesh data update, resets all target data in the sculpt mesh. */
-  const double t4 = g_perf_log_invoke ? BLI_time_now_seconds() : 0.0;
   update_for_vert(C, ob, initial_vert);
-  if (g_perf_log_invoke) {
-    printf("invoke: update_for_vert_initial=%.2fms -- TOTAL_INVOKE=%.2fms\n",
-               (BLI_time_now_seconds() - t4) * 1000.0,
-               (BLI_time_now_seconds() - t_invoke_start) * 1000.0);
-  }
 
   sculpt_expand_status(C, op, ss.expand_cache);
 

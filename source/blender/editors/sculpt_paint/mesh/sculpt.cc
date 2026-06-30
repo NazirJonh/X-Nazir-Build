@@ -551,23 +551,6 @@ Span<int> vert_neighbors_get_mesh(const OffsetIndices<int> faces,
   return r_neighbors.as_span();
 }
 
-Span<int> vert_neighbors_get_mesh(const Span<int2> edges,
-                                  const GroupedSpan<int> vert_to_edge,
-                                  const Span<bool> hide_edge,
-                                  const int vert,
-                                  Vector<int> &r_neighbors)
-{
-  r_neighbors.clear();
-  for (const int edge_i : vert_to_edge[vert]) {
-    if (!hide_edge.is_empty() && hide_edge[edge_i]) {
-      continue;
-    }
-    const int2 &edge = edges[edge_i];
-    r_neighbors.append(edge[0] == vert ? edge[1] : edge[0]);
-  }
-  return r_neighbors.as_span();
-}
-
 inline void append_neighbors_to_vector(const OffsetIndices<int> faces,
                                        const Span<int> corner_verts,
                                        const GroupedSpan<int> vert_to_face,

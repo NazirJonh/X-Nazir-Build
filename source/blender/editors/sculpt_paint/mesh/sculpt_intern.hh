@@ -630,14 +630,6 @@ Span<int> vert_neighbors_get_mesh(OffsetIndices<int> faces,
                                   int vert,
                                   Vector<int> &r_neighbors);
 
-/* Edge-based overload: zero duplicates, better cache locality. hide_edge filters edges whose
- * adjacent faces are all hidden (equivalent semantics to the face-based hide_poly version). */
-Span<int> vert_neighbors_get_mesh(Span<int2> edges,
-                                  GroupedSpan<int> vert_to_edge,
-                                  Span<bool> hide_edge,
-                                  int vert,
-                                  Vector<int> &r_neighbors);
-
 /* Fake Neighbors */
 
 #define FAKE_NEIGHBOR_NONE -1

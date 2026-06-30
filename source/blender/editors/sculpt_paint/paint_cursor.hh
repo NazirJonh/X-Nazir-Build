@@ -61,6 +61,16 @@ struct PaintCursorContext {
   float3 scene_space_location = float3(0.0f);
   float3 normal = float3(0.0f);
 
+  /**
+   * Cursor-space orientation (object space), computed once per redraw by
+   * #cursor_space_drawing_setup and reused by the texture overlay. `cursor_space_normal` is the
+   * tilt-adjusted surface normal (cursor Z axis); `cursor_space_x`/`cursor_space_y` are the
+   * matching tangent axes. Cached here so the basis is not rebuilt for every overlay layer.
+   */
+  float3 cursor_space_normal = float3(0.0f, 0.0f, 1.0f);
+  float3 cursor_space_x = float3(1.0f, 0.0f, 0.0f);
+  float3 cursor_space_y = float3(0.0f, 1.0f, 0.0f);
+
   /* Cursor main colors. */
   float3 outline_col = float3(0.0f);
   float outline_alpha = 0.0f;
@@ -93,7 +103,5 @@ void mesh_cursor_update_and_init(PaintCursorContext &pcontext);
 void mesh_cursor_active_draw(PaintCursorContext &pcontext);
 void mesh_cursor_inactive_draw(PaintCursorContext &pcontext);
 
-void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext,
-                                        const float location[3],
-                                        const float normal[3]);
+void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext);
 }  // namespace blender::ed::sculpt_paint

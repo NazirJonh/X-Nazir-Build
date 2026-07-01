@@ -339,16 +339,17 @@ void do_draw_face_sets_brush(const Depsgraph &depsgraph,
 {
   Brush &brush = *BKE_paint_brush(&sd.paint);
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
-  const bool is_mesh = pbvh.type() == bke::pbvh::Type::Mesh;
+  const bool supports_texture_data_modes = pbvh.type() != bke::pbvh::Type::BMesh;
 
-  /* The texture-as-data Face Set modes share a single Mesh implementation with the generic
-   * (non-Draw-Face-Sets) brush path in #face_set. Grids and BMesh fall through to normal drawing
-   * until those pbvh types are supported (see the early return in #apply_from_color_texture). */
-  if (is_mesh && face_set::brush_texture_data_mode_is_alpha(brush)) {
+  /* The texture-as-data Face Set modes share a single implementation with the generic
+   * (non-Draw-Face-Sets) brush path in #face_set, dispatched internally by pbvh type. BMesh falls
+   * through to normal drawing until dyntopo is supported (see the early return in
+   * #apply_from_color_texture). */
+  if (supports_texture_data_modes && face_set::brush_texture_data_mode_is_alpha(brush)) {
     face_set::apply_from_texture(depsgraph, object, brush, node_mask);
     return;
   }
-  if (is_mesh && face_set::brush_uses_color_texture(brush)) {
+  if (supports_texture_data_modes && face_set::brush_uses_color_texture(brush)) {
     face_set::apply_from_color_texture(depsgraph, object, brush, node_mask);
     return;
   }

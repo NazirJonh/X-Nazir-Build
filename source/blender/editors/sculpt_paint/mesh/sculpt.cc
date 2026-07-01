@@ -6272,7 +6272,7 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     if (brush && face_set::brush_texture_data_mode_is_active(*brush) &&
         face_set::brush_texture_data_writes_color(*brush) && !ob.runtime->sculpt_session->bm)
     {
-      if (bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Mesh) {
+      if (bke::object::pbvh_get(ob)->type() != bke::pbvh::Type::BMesh) {
         ED_mesh_color_ensure(id_cast<Mesh *>(ob.data), nullptr);
       }
     }

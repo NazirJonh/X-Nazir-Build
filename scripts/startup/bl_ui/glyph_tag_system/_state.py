@@ -93,6 +93,13 @@ _last_discovered_ext_panel_categories = {}
 # {category_name: source_label} — provenance of each discovered category.
 _last_discovered_category_sources = {}
 
+# {extension_id or pkg_path: icon_path} — icons found by extension_post_install_handler()
+# (install-time disk scan + Popular Addons Database fallback), consumed by discovery merge to
+# attach icons to new/existing categories without re-scanning disk. Was previously stashed as
+# an ad-hoc attribute on the handler function itself; owned here so scan and merge helpers can
+# share it without either importing the other's module.
+_extension_install_icon_cache = {}
+
 # ---------------------------------------------------------------------------
 # Sync / background-task state
 # ---------------------------------------------------------------------------
@@ -323,6 +330,11 @@ def reset_merge_discovery_cache():
 def set_extension_manifest_keys_cache(key, value):
     """Set one entry in the extension manifest keys cache."""
     _extension_manifest_keys_cache[key] = value
+
+
+def set_extension_install_icon_cache_entry(key, value):
+    """Set one entry in the extension install-time icon cache."""
+    _extension_install_icon_cache[key] = value
 
 
 def reset_icon_detection_cache():

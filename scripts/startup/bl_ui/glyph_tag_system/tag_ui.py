@@ -172,8 +172,8 @@ class VIEW3D_OT_category_tabs_settings(Operator):
 
     def invoke(self, context, event):
         # Ensure glyph mappings are registered when opening settings
-        from bl_ui.glyph_tag_system import wm_sync as _wm_sync
-        _wm_sync.register_category_glyph_mappings()
+        from bl_ui.glyph_tag_system import wm_sync_to_wm as _wm_sync_to_wm
+        _wm_sync_to_wm.register_category_glyph_mappings()
         wm = context.window_manager
         return wm.invoke_popup(self, width=240) # in interface_panel void panel_category_tabs_settings_popover_open(bContext *C, ARegion *region) use const int popup_width = 240 * UI_SCALE_FAC;
 

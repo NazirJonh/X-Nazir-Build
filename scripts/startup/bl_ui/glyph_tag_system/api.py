@@ -258,11 +258,10 @@ from ._state import (
     is_glyph_system_registered,
 )
 
-# -- Extension discovery / merge ---------------------------------------------
-from .discovery import (
+# -- Extension discovery: scan (leaf, no wm_sync dependency) -----------------
+from .discovery_scan import (
     set_preview_mode_active,
     _scan_extension_icon_path,
-    extension_post_install_handler,
     _extension_id_match_keys,
     _extension_ids_match,
     _get_discovery_source_priority,
@@ -272,11 +271,16 @@ from .discovery import (
     _auto_detect_extension_icon_path,
     auto_detect_extension_icon_path_normalized,
     _discover_active_categories,
+)
+
+# -- Extension discovery: merge (decides how scan results enter the cache) ---
+from .discovery_merge import (
+    extension_post_install_handler,
     _merge_discovered_categories,
 )
 
-# -- WM synchronization ------------------------------------------------------
-from .wm_sync import (
+# -- WM synchronization: cache -> WM (+ registration) ------------------------
+from .wm_sync_to_wm import (
     toggle_category_tag_no_save,
     clear_category_tags_no_save,
     restore_category_tags_from_string,
@@ -292,6 +296,10 @@ from .wm_sync import (
     _auto_sync_to_wm,
     _sync_glyph_mappings_to_wm_impl,
     register_category_glyph_mappings,
+)
+
+# -- WM synchronization: WM -> cache ------------------------------------------
+from .wm_sync_from_wm import (
     sync_wm_to_glyph_cache,
     _sync_wm_to_glyph_cache_impl,
 )
@@ -360,3 +368,19 @@ from .tag_ui import (
     USERPREF_PT_custom_icon_picker,
     WM_OT_debug_tag_bar_state,
 )
+
+
+# -----------------------------------------------------------------------------
+# Post-extension-install orchestration
+# -----------------------------------------------------------------------------
+
+def sync_and_save_after_extension_install():
+    """Push cache changes to WM and persist tags after ``extension_post_install_handler()``
+    reports that it updated existing categories (return value is truthy).
+
+    ``discovery_merge`` and ``wm_sync_to_wm`` are both leaf modules with no dependency
+    on each other; this facade is the one place allowed to know about both, since that
+    is exactly what aggregating the system's public API means.
+    """
+    _auto_sync_to_wm()
+    _auto_save_tags()

@@ -224,7 +224,7 @@ def _save_tags_to_json():
     save_debug_print(f"[SAVE_TAGS_TO_JSON] Step 2: Syncing glyph mappings to WM")
     category_debug_print("[SAVE_TAGS_TO_JSON] Step 2: Syncing glyph mappings to WM")
     # OPTIMIZATION: Skip icon detection during save (will run in background)
-    from bl_ui.glyph_tag_system.wm_sync import sync_glyph_mappings_to_wm
+    from bl_ui.glyph_tag_system.wm_sync_to_wm import sync_glyph_mappings_to_wm
     sync_glyph_mappings_to_wm(skip_icon_detection=True)
     save_debug_print(f"[SAVE_TAGS_TO_JSON] Step 3: Saving to JSON file")
     category_debug_print("[SAVE_TAGS_TO_JSON] Step 3: Saving to JSON file")
@@ -289,15 +289,15 @@ def tag_enum_items_callback(self, context):
 @bpy.app.handlers.persistent
 def _on_load_post(dummy):
     """Load glyph mappings after file load."""
-    from bl_ui.glyph_tag_system import wm_sync as _wm_sync
-    _wm_sync.register_category_glyph_mappings()
+    from bl_ui.glyph_tag_system import wm_sync_to_wm as _wm_sync_to_wm
+    _wm_sync_to_wm.register_category_glyph_mappings()
 
 
 @bpy.app.handlers.persistent
 def _on_save_pre(dummy):
     """Sync glyph mappings from WM to JSON before saving preferences."""
-    from bl_ui.glyph_tag_system import wm_sync as _wm_sync
-    _wm_sync.sync_wm_to_glyph_cache()
+    from bl_ui.glyph_tag_system import wm_sync_from_wm as _wm_sync_from_wm
+    _wm_sync_from_wm.sync_wm_to_glyph_cache()
 
 
 @bpy.app.handlers.persistent
@@ -310,9 +310,10 @@ def _on_extension_repos_update_post(dummy=None):
     category_debug_print(f"[GLYPH EXTENSION UPDATE] Pending extension context: {_pending_extension_context}")
     category_debug_print("=" * 80)
     try:
-        from bl_ui.glyph_tag_system import discovery as _discovery
+        from bl_ui.glyph_tag_system import discovery_scan as _discovery_scan
+        from bl_ui.glyph_tag_system import discovery_merge as _discovery_merge
         from bl_ui.glyph_tag_system import unassigned as _unassigned
-        result_before = _discovery._discover_active_categories()
+        result_before = _discovery_scan._discover_active_categories()
         # Handle both old and new return format
         if isinstance(result_before, tuple):
             discovered_before, _ = result_before
@@ -327,10 +328,10 @@ def _on_extension_repos_update_post(dummy=None):
 
         category_debug_print("[GLYPH EXTENSION UPDATE] >>> Calling _merge_discovered_categories()...")
         # Enable icon detection for immediate response in extension updates
-        merge_result = _discovery._merge_discovered_categories(skip_icon_detection=False)
+        merge_result = _discovery_merge._merge_discovered_categories(skip_icon_detection=False)
         category_debug_print(f"[GLYPH EXTENSION UPDATE] >>> _merge_discovered_categories() returned: {merge_result}")
 
-        result_after = _discovery._discover_active_categories()
+        result_after = _discovery_scan._discover_active_categories()
         if isinstance(result_after, tuple):
             discovered_after, _ = result_after
         else:
@@ -345,7 +346,7 @@ def _on_extension_repos_update_post(dummy=None):
 
         category_debug_print("[GLYPH EXTENSION UPDATE] >>> Calling sync_glyph_mappings_to_wm()...")
         # OPTIMIZATION: Enable icon detection in extension update handler for immediate updates
-        from bl_ui.glyph_tag_system.wm_sync import sync_glyph_mappings_to_wm
+        from bl_ui.glyph_tag_system.wm_sync_to_wm import sync_glyph_mappings_to_wm
         sync_glyph_mappings_to_wm(skip_icon_detection=False)
         category_debug_print("[GLYPH EXTENSION UPDATE] >>> sync_glyph_mappings_to_wm() completed")
 
@@ -396,8 +397,9 @@ def _on_version_update(dummy):
     """Sync category glyphs after Blender version update or addon enable/disable."""
     # Re-discover categories in case new addons were enabled
     try:
-        from bl_ui.glyph_tag_system import discovery as _discovery
-        result_before = _discovery._discover_active_categories()
+        from bl_ui.glyph_tag_system import discovery_scan as _discovery_scan
+        from bl_ui.glyph_tag_system import discovery_merge as _discovery_merge
+        result_before = _discovery_scan._discover_active_categories()
         # Handle both old and new return format
         if isinstance(result_before, tuple):
             discovered_before, _ = result_before
@@ -411,9 +413,9 @@ def _on_version_update(dummy):
         )
 
         # Enable icon detection for immediate response in version updates
-        merge_result = _discovery._merge_discovered_categories(skip_icon_detection=False)
+        merge_result = _discovery_merge._merge_discovered_categories(skip_icon_detection=False)
 
-        result_after = _discovery._discover_active_categories()
+        result_after = _discovery_scan._discover_active_categories()
         if isinstance(result_after, tuple):
             discovered_after, _ = result_after
         else:
@@ -427,7 +429,7 @@ def _on_version_update(dummy):
         )
 
         # OPTIMIZATION: Enable icon detection in version update handler for immediate updates
-        from bl_ui.glyph_tag_system.wm_sync import sync_glyph_mappings_to_wm
+        from bl_ui.glyph_tag_system.wm_sync_to_wm import sync_glyph_mappings_to_wm
         sync_glyph_mappings_to_wm(skip_icon_detection=False)
     except Exception as e:
         category_debug_print(f"[GLYPH] Error during version update sync: {e}")

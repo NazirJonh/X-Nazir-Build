@@ -51,8 +51,8 @@ def _auto_save_tags():
 
 def _sync_wm_to_glyph_cache():
     """Thin forwarding shim — avoids a circular import at module load time."""
-    from bl_ui.glyph_tag_system import wm_sync as _wm_sync
-    _wm_sync.sync_wm_to_glyph_cache()
+    from bl_ui.glyph_tag_system import wm_sync_from_wm as _wm_sync_from_wm
+    _wm_sync_from_wm.sync_wm_to_glyph_cache()
 
 
 # -----------------------------------------------------------------------------

@@ -412,7 +412,7 @@ def set_category_tags(category, tags, space_type=-1, auto_save=True, update_wm=T
 
     # Only update WM override if requested (not during preview in edit dialog)
     if update_wm:
-        from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+        from bl_ui.glyph_tag_system import wm_sync_to_wm as _wm_sync
         _wm_sync.update_category_tags_in_wm(category, space_type)
 
     if auto_save:
@@ -508,7 +508,7 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1, update_w
 
     # Only update WM override if requested (not during preview in edit dialog)
     if update_wm:
-        from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+        from bl_ui.glyph_tag_system import wm_sync_to_wm as _wm_sync
         _wm_sync.update_category_tags_in_wm(category, space_type)
 
     if auto_save:
@@ -538,7 +538,7 @@ def remove_category_tag(category, tag_name, auto_save=True, space_type=-1, updat
 
     # Only update WM override if requested (not during preview in edit dialog)
     if update_wm:
-        from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+        from bl_ui.glyph_tag_system import wm_sync_to_wm as _wm_sync
         _wm_sync.update_category_tags_in_wm(category, space_type)
 
     if auto_save:

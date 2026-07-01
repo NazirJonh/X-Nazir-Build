@@ -397,7 +397,7 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
             f"space_type={space_type}, mode_flag={mode_flag:#010x}")
 
     # Debounced sync and save to prevent lags during rapid discovery
-    from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+    from bl_ui.glyph_tag_system import wm_sync_to_wm as _wm_sync
     from bl_ui.glyph_tag_system import handlers as _handlers
     _wm_sync._auto_sync_to_wm()
     _handlers._auto_save_tags()
@@ -496,7 +496,7 @@ def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
             category_debug_print(f"[ALT_CLICK] Cleared {cleared_count} siblings for '{category_name}'")
 
     if updated or cleared_siblings:
-        from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+        from bl_ui.glyph_tag_system import wm_sync_to_wm as _wm_sync
         from bl_ui.glyph_tag_system import handlers as _handlers
         _wm_sync._auto_sync_to_wm()
         _handlers._auto_save_tags()
@@ -618,7 +618,7 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
                 cleared_count += 1
 
     # Sync to window manager (DNA) so the change is reflected in C++ code
-    from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+    from bl_ui.glyph_tag_system import wm_sync_to_wm as _wm_sync
     _wm_sync.sync_glyph_mappings_to_wm()
 
     tag_log(f"assign_tag_to_category: category={category_id!r}, tag={tag_name!r}, pending cleared keys={len(matching_keys)}, extension={source_ext!r}, siblings_cleared={cleared_count}")
@@ -2017,8 +2017,8 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
             global_entry["icon_provider"] = ""
             # If category belongs to an extension, re-detect icon.png
             if global_entry.get("source_extension"):
-                from bl_ui.glyph_tag_system import discovery as _discovery
-                detected_path, detected_provider = _discovery._auto_detect_extension_icon_path(category)
+                from bl_ui.glyph_tag_system import discovery_scan as _discovery_scan
+                detected_path, detected_provider = _discovery_scan._auto_detect_extension_icon_path(category)
                 if detected_path:
                     global_entry["icon_source"] = "auto"
                     global_entry["icon_path"] = detected_path
@@ -2039,8 +2039,8 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
             cache_entry["icon_provider"] = ""
             # Re-detect extension icon for space-specific entry too
             if cache_entry.get("source_extension"):
-                from bl_ui.glyph_tag_system import discovery as _discovery
-                detected_path, detected_provider = _discovery._auto_detect_extension_icon_path(category)
+                from bl_ui.glyph_tag_system import discovery_scan as _discovery_scan
+                detected_path, detected_provider = _discovery_scan._auto_detect_extension_icon_path(category)
                 if detected_path:
                     cache_entry["icon_source"] = "auto"
                     cache_entry["icon_path"] = detected_path

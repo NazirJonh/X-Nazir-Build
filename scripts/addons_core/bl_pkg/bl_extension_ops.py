@@ -2296,7 +2296,7 @@ class EXTENSIONS_OT_package_upgrade_all(Operator, _ExtCmdMixIn):
 
                 # Call extension_post_install_handler for each upgraded package for category discovery
                 # This is needed for Upgrade operations to update category cache (icons may have changed)
-                from bl_ui.glyph_tag_system.api import extension_post_install_handler
+                from bl_ui.glyph_tag_system.api import extension_post_install_handler, sync_and_save_after_extension_install
                 if EXTENSION_DEBUG_ENABLED:
                     print(f"[UPGRADE ALL] ======= STARTING POST-UPGRADE PROCESSING =======")
                     print(f"[UPGRADE ALL] Processing {len(self._addon_restore)} repositories")
@@ -2308,13 +2308,15 @@ class EXTENSIONS_OT_package_upgrade_all(Operator, _ExtCmdMixIn):
                         extension_id = f"add-on-{repo_module}.{pkg_id}"
                         if EXTENSION_DEBUG_ENABLED:
                             print(f"[UPGRADE ALL] >>> Calling extension_post_install_handler for: {extension_id!r}")
-                        extension_post_install_handler(
+                        updated_existing = extension_post_install_handler(
                             extension_id=extension_id,
                             space_type=-1,  # Global
                             mode_flag=0,
                             tag_already_assigned=False,
                             is_install_from_disk=False  # Upgrade from repository, not from disk
                         )
+                        if updated_existing:
+                            sync_and_save_after_extension_install()
                         if EXTENSION_DEBUG_ENABLED:
                             print(f"[UPGRADE ALL] >>> Extension post-install handler completed for: {extension_id!r}")
 
@@ -2550,7 +2552,7 @@ class EXTENSIONS_OT_package_install_marked(Operator, _ExtCmdMixIn):
 
                 # Call extension_post_install_handler for each installed package for category discovery
                 # This is needed for Install Marked operations to update category cache
-                from bl_ui.glyph_tag_system.api import extension_post_install_handler
+                from bl_ui.glyph_tag_system.api import extension_post_install_handler, sync_and_save_after_extension_install
                 repos_all = list(extension_repos_read(use_active_only=False))
                 if EXTENSION_DEBUG_ENABLED:
                     print(f"[INSTALL MARKED] ======= STARTING POST-INSTALL PROCESSING =======")
@@ -2571,13 +2573,15 @@ class EXTENSIONS_OT_package_install_marked(Operator, _ExtCmdMixIn):
                             extension_id = f"add-on-{repo_module}.{pkg_id}"
                             if EXTENSION_DEBUG_ENABLED:
                                 print(f"[INSTALL MARKED] >>> Calling extension_post_install_handler for: {extension_id!r}")
-                            extension_post_install_handler(
+                            updated_existing = extension_post_install_handler(
                                 extension_id=extension_id,
                                 space_type=-1,  # Global
                                 mode_flag=0,
                                 tag_already_assigned=False,
                                 is_install_from_disk=False  # Install from repository, not from disk
                             )
+                            if updated_existing:
+                                sync_and_save_after_extension_install()
                             if EXTENSION_DEBUG_ENABLED:
                                 print(f"[INSTALL MARKED] >>> Extension post-install handler completed for: {extension_id!r}")
 
@@ -3040,7 +3044,7 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
 
                 # Call extension_post_install_handler with is_install_from_disk=True for each installed package.
                 # This triggers Python file scanning for bl_category values only for Install from Disk operations.
-                from bl_ui.glyph_tag_system.api import extension_post_install_handler
+                from bl_ui.glyph_tag_system.api import extension_post_install_handler, sync_and_save_after_extension_install
                 if EXTENSION_DEBUG_ENABLED:
                     print(f"[INSTALL FROM DISK] ======= STARTING POST-INSTALL PROCESSING =======")
                     print(f"[INSTALL FROM DISK] Installing {len(self.pkg_id_sequence)} packages: {list(self.pkg_id_sequence)}")
@@ -3051,13 +3055,15 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
                     extension_id = f"add-on-{repo_module}.{pkg_id}"
                     if EXTENSION_DEBUG_ENABLED:
                         print(f"[INSTALL FROM DISK] >>> Calling extension_post_install_handler for: {extension_id!r}")
-                    extension_post_install_handler(
+                    updated_existing = extension_post_install_handler(
                         extension_id=extension_id,
                         space_type=-1,  # Global
                         mode_flag=0,
                         tag_already_assigned=False,
                         is_install_from_disk=True  # Trigger Python file scanning
                     )
+                    if updated_existing:
+                        sync_and_save_after_extension_install()
                     if EXTENSION_DEBUG_ENABLED:
                         print(f"[INSTALL FROM DISK] >>> Extension post-install handler completed for: {extension_id!r}")
 
@@ -3509,19 +3515,21 @@ class EXTENSIONS_OT_package_install(Operator, _ExtCmdMixIn):
 
                 # Call extension_post_install_handler for category discovery and caching
                 # This is needed for Install from Repository operations to update category cache
-                from bl_ui.glyph_tag_system.api import extension_post_install_handler
+                from bl_ui.glyph_tag_system.api import extension_post_install_handler, sync_and_save_after_extension_install
                 repo_module = self.repo_item.module
                 extension_id = f"add-on-{repo_module}.{self.pkg_id}"
                 if EXTENSION_DEBUG_ENABLED:
                     print(f"[INSTALL FROM REPO] ======= STARTING POST-INSTALL PROCESSING =======")
                     print(f"[INSTALL FROM REPO] >>> Calling extension_post_install_handler for: {extension_id!r}")
-                extension_post_install_handler(
+                updated_existing = extension_post_install_handler(
                     extension_id=extension_id,
                     space_type=-1,  # Global
                     mode_flag=0,
                     tag_already_assigned=False,
                     is_install_from_disk=False  # Install from repository, not from disk
                 )
+                if updated_existing:
+                    sync_and_save_after_extension_install()
                 if EXTENSION_DEBUG_ENABLED:
                     print(f"[INSTALL FROM REPO] >>> Extension post-install handler completed for: {extension_id!r}")
 

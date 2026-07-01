@@ -890,9 +890,13 @@ struct AssetShelfSettings {
   /** For filtering assets displayed in the asset view. */
   char search_string[64] = "";
 
+  /** Persistent collapsed state of catalog paths in this shelf's catalog tree. */
+  ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
+
   short preview_size = 0;
   AssetShelfSettings_DisplayFlag display_flag = {};
-  char _pad1[4] = {};
+  short popup_width_units = 60;
+  char _pad1[2] = {};
 
 #if defined(__cplusplus) && !defined(DNA_NO_EXTERNAL_CONSTRUCTORS)
   /* Zero initializes. */
@@ -920,7 +924,8 @@ struct AssetShelf {
   /** Only for the permanent asset shelf regions, not asset shelves in temporary popups. */
   short preferred_row_count = 0;
   AssetShelf_InstanceFlag instance_flag = {};
-  char _pad[4] = {};
+  short is_popup = 0;
+  char _pad[2] = {};
 };
 
 /**

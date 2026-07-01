@@ -2050,26 +2050,33 @@ void PreviewLoadJob::run_fn(void *customdata, wmJobWorkerStatus *worker_status)
     IMB_thumb_path_unlock(filepath->c_str());
 
     if (thumb) {
-      /* PreviewImage assumes premultiplied alpha. */
-      IMB_premultiply_alpha(thumb);
+      if (thumb->x > 0 && thumb->y > 0) {
+        /* PreviewImage assumes premultiplied alpha. */
+        IMB_premultiply_alpha(thumb);
 
-      if (ED_preview_use_image_size(preview, request->icon_size)) {
-        preview->w[request->icon_size] = thumb->x;
-        preview->h[request->icon_size] = thumb->y;
-        BLI_assert(preview->rect[request->icon_size] == nullptr);
-        preview->rect[request->icon_size] = reinterpret_cast<uint *>(
-            MEM_dupalloc(thumb->byte_data()));
+        if (ED_preview_use_image_size(preview, request->icon_size)) {
+          preview->w[request->icon_size] = thumb->x;
+          preview->h[request->icon_size] = thumb->y;
+          BLI_assert(preview->rect[request->icon_size] == nullptr);
+          preview->rect[request->icon_size] = reinterpret_cast<uint *>(
+              MEM_dupalloc(thumb->byte_data()));
+        }
+        else {
+          icon_copy_rect(thumb,
+                         preview->w[request->icon_size],
+                         preview->h[request->icon_size],
+                         preview->rect[request->icon_size]);
+        }
+        request->state = PreviewState::Ready;
       }
       else {
-        icon_copy_rect(thumb,
-                       preview->w[request->icon_size],
-                       preview->h[request->icon_size],
-                       preview->rect[request->icon_size]);
+        request->state = PreviewState::Failed;
       }
       IMB_freeImBuf(thumb);
     }
-
-    request->state = thumb ? PreviewState::Ready : PreviewState::Failed;
+    else {
+      request->state = PreviewState::Failed;
+    }
     worker_status->do_update = true;
   }
 

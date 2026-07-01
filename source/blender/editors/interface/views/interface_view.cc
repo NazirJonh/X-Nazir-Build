@@ -233,6 +233,75 @@ AbstractView *region_view_find_at(const ARegion *region,
   return nullptr;
 }
 
+static StringRef block_view_find_idname(const Block &block, const AbstractView &view)
+{
+  /* First get the `idname` of the view we're looking for. */
+  for (ViewLink &view_link : block.views) {
+    if (view_link.view.get() == &view) {
+      return view_link.idname;
+    }
+  }
+
+  return {};
+}
+
+bool region_view_has_idname_at(const ARegion *region,
+                               const int xy[2],
+                               const int pad,
+                               const StringRef idname)
+{
+  Block *block = nullptr;
+  AbstractView *view = region_view_find_at(region, xy, pad, &block);
+  if (!view || !block) {
+    return false;
+  }
+  return block_view_find_idname(*block, *view) == idname;
+}
+
+bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], const StringRef idname)
+{
+  auto *item_but = static_cast<ButtonViewItem *>(view_item_find_mouse_over(region, xy));
+  if (!item_but || !item_but->view_item) {
+    return false;
+  }
+  return block_view_find_idname(*item_but->block, item_but->view_item->get_view()) == idname;
+}
+
+bool region_view_item_topmost_at(const ARegion *region,
+                                 const wmEvent *event,
+                                 const StringRef idname)
+{
+  /* #but_find_mouse_over is the same top-most hit test the window manager uses to route a press,
+   * so a button drawn over the tile (the overlay scrollbar) or below the grid (the resize grip) is
+   * returned instead of the tile behind it. #region_view_item_has_idname_at cannot be used here:
+   * it searches view-item buttons only and so reports the tile even when another widget covers it.
+   */
+  const Button *but = but_find_mouse_over(region, event);
+  if (!but || but->type != ButtonType::ViewItem) {
+    return false;
+  }
+  const auto *item_but = static_cast<const ButtonViewItem *>(but);
+  if (!item_but->view_item) {
+    return false;
+  }
+  return block_view_find_idname(*item_but->block, item_but->view_item->get_view()) == idname;
+}
+
+bool region_view_idname_has_bounds(const ARegion *region, const StringRef idname)
+{
+  for (Block &block : region->runtime->uiblocks) {
+    for (ViewLink &view_link : block.views) {
+      if (block_view_find_idname(block, *view_link.view) != idname) {
+        continue;
+      }
+      if (view_link.view->get_bounds().has_value()) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event)
 {
   Block *block = nullptr;
@@ -363,18 +432,6 @@ std::unique_ptr<DropTargetInterface> region_views_find_drop_target_at(const AReg
   }
 
   return nullptr;
-}
-
-static StringRef block_view_find_idname(const Block &block, const AbstractView &view)
-{
-  /* First get the `idname` of the view we're looking for. */
-  for (ViewLink &view_link : block.views) {
-    if (view_link.view.get() == &view) {
-      return view_link.idname;
-    }
-  }
-
-  return {};
 }
 
 template<class T>

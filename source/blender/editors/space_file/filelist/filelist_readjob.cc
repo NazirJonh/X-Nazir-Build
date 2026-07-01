@@ -24,6 +24,9 @@ namespace blender {
 static void filelist_readjob_initjob(void *flrjv)
 {
   FileListReadJob *flrj = static_cast<FileListReadJob *>(flrjv);
+  if (flrj->filelist->asset_library_ref) {
+    filelist_readjob_ensure_image_library_indexed(flrj);
+  }
   if (flrj->filelist->start_job_fn) {
     flrj->filelist->start_job_fn(flrj);
   }
@@ -137,6 +140,15 @@ static void filelist_readjob_endjob(void *flrjv)
 {
   FileListReadJob *flrj = static_cast<FileListReadJob *>(flrjv);
 
+  /* Canceled jobs (#filelist_readjob_stop) must not resurrect partial entries into the filelist.
+   * That would clear #FL_FORCE_RESET semantics and leave stale UI until a manual refresh. */
+  if (flrj->stop && *flrj->stop) {
+    flrj->filelist->flags &= ~FL_IS_PENDING;
+    WM_reports_from_reports_move(flrj->wm, &flrj->reports);
+    BKE_reports_free(&flrj->reports);
+    return;
+  }
+
   /* In case there would be some dangling update... */
   filelist_readjob_update(flrjv);
 
@@ -227,6 +239,7 @@ static void filelist_readjob_start_ex(FileList *filelist,
   if (force_blocking_read || no_threads) {
     /* Single threaded execution. Just directly call the callbacks. */
     wmJobWorkerStatus worker_status = {};
+    flrj->stop = &worker_status.stop;
     filelist_readjob_startjob(flrj, &worker_status);
     filelist_readjob_endjob(flrj);
     filelist_readjob_free(flrj);
@@ -252,6 +265,7 @@ static void filelist_readjob_start_ex(FileList *filelist,
                     filelist_readjob_initjob,
                     filelist_readjob_update,
                     filelist_readjob_endjob);
+  flrj->stop = WM_jobs_stop_flag(wm_job);
 
   /* start the job */
   WM_jobs_start(CTX_wm_manager(C), wm_job);

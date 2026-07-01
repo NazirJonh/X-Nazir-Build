@@ -29,13 +29,20 @@
 #include "BKE_screen.hh"
 
 #include "BLI_fnmatch.h"
+#include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
 #include "BLI_rect.h"
 #include "BLI_set.hh"
 #include "BLI_string.h"
 
+#include "DNA_image_types.h"
+
 #include "ED_asset.hh"
+#include "ED_asset_image_library.hh"
+#include "ED_asset_image_utils.hh"
+#include "ED_asset_list.hh"
 #include "ED_screen.hh"
+#include "asset_shelf.hh"
 /* XXX needs access to the file list, should all be done via the asset system in future. */
 #include "ED_fileselect.hh"
 #include "ED_render.hh"
@@ -102,11 +109,11 @@ static IDVecStats asset_operation_get_id_vec_stats_from_ids(const Span<PointerRN
 static const char *asset_operation_unsupported_type_msg(const bool is_single)
 {
   const char *msg_single = N_(
-      "Data-block does not support asset operations - must be a "
-      "Brush, Collection, Node Group, Object, Pose Action, Scene, or World");
+      "Data-block does not support asset operations - must be "
+      "a " ED_ASSET_TYPE_IDS_NON_EXPERIMENTAL_UI_STRING);
   const char *msg_multiple = N_(
-      "No data-block selected that supports asset operations - select at least one "
-      "Brush, Collection, Node Group, Object, Pose Action, Scene, or World");
+      "No data-block selected that supports asset operations - select at least "
+      "one " ED_ASSET_TYPE_IDS_NON_EXPERIMENTAL_UI_STRING);
   return is_single ? msg_single : msg_multiple;
 }
 
@@ -449,9 +456,26 @@ static bool asset_library_refresh_poll(bContext *C)
 static void do_asset_library_refresh(bContext *C)
 {
   const AssetLibraryReference *library = CTX_wm_asset_library_ref(C);
+  if (!library) {
+    return;
+  }
+
+  /* For custom on-disk libraries, update the image index before clearing the list so
+   * that the next read job picks up any files added, moved or deleted since the last
+   * scan.  The index write is atomic and fast for unchanged libraries. */
+  if (library->type == ASSET_LIBRARY_CUSTOM) {
+    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_index(
+        &U, library->custom_library_index);
+    if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
+      image_library_scan_and_index(user_lib->dirpath);
+      image_library_invalidate_cached_previews(user_lib->dirpath);
+    }
+  }
+
   /* Handles both global asset list storage and asset browsers. */
   list::clear(library, C);
   WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
+  list::tag_refresh_visible_asset_browsers(*library, C);
 }
 
 struct AssetLibraryAndRef {
@@ -521,7 +545,6 @@ static wmOperatorStatus asset_library_reload_listing_exec(bContext *C, wmOperato
    * thing on top of regular refreshing (otherwise it would be weird to use the refresh button for
    * this). */
   do_asset_library_refresh(C);
-
   return OPERATOR_FINISHED;
 }
 
@@ -629,6 +652,62 @@ static void ASSET_OT_library_refresh(wmOperatorType *ot)
                          "the remote asset library listing");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Refresh Image Library Index Operator
+ * \{ */
+
+static bool image_library_refresh_poll(bContext *C)
+{
+  return asset_library_refresh_poll(C);
+}
+
+static wmOperatorStatus image_library_refresh_exec(bContext *C, wmOperator *op)
+{
+  const AssetLibraryReference *library = CTX_wm_asset_library_ref(C);
+  if (!library || library->type != ASSET_LIBRARY_CUSTOM) {
+    BKE_report(op->reports, RPT_ERROR, "No custom on-disk asset library active");
+    return OPERATOR_CANCELLED;
+  }
+
+  const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_index(
+      &U, library->custom_library_index);
+  if (!user_lib || (user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL)) {
+    BKE_report(op->reports, RPT_ERROR, "Active library is not a local image library");
+    return OPERATOR_CANCELLED;
+  }
+  if (!user_lib->dirpath[0]) {
+    BKE_report(op->reports, RPT_ERROR, "Asset library has no directory path");
+    return OPERATOR_CANCELLED;
+  }
+
+  const int result = image_library_scan_and_index(user_lib->dirpath);
+  if (result < 0) {
+    BKE_report(op->reports, RPT_ERROR, "Failed to index images in asset library");
+    return OPERATOR_CANCELLED;
+  }
+
+  image_library_invalidate_cached_previews(user_lib->dirpath);
+  image_library_notify_catalogs_changed(C, user_lib->dirpath);
+  list::clear(library, C);
+  WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
+
+  BKE_reportf(op->reports, RPT_INFO, "Indexed %d image(s) in asset library", result);
+  return OPERATOR_FINISHED;
+}
+
+static void ASSET_OT_image_library_refresh(wmOperatorType *ot)
+{
+  ot->name = "Refresh Image Library";
+  ot->description =
+      "Rescan the active asset library for image files and update catalogs and the image index";
+  ot->idname = "ASSET_OT_image_library_refresh";
+
+  ot->exec = image_library_refresh_exec;
+  ot->poll = image_library_refresh_poll;
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 
@@ -1778,6 +1857,74 @@ static void ASSET_OT_assets_download(wmOperatorType *ot)
 }
 
 /* -------------------------------------------------------------------- */
+/** \name Convert All Images to Assets Operator
+ * \{ */
+
+static wmOperatorStatus images_to_assets_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  int converted = 0;
+  int already_asset = 0;
+  int skipped = 0;
+
+  for (Image &image : bmain->images) {
+    if (image.id.asset_data) {
+      already_asset++;
+      continue;
+    }
+    if (!image_can_be_asset(&image)) {
+      skipped++;
+      continue;
+    }
+    if (image_mark_as_asset(&image)) {
+      generate_preview(C, &image.id);
+      converted++;
+    }
+  }
+
+  if (converted == 0) {
+    if (already_asset > 0 && skipped == 0) {
+      BKE_report(op->reports, RPT_INFO, "All images are already assets");
+    }
+    else {
+      BKE_report(op->reports, RPT_WARNING, "No images converted to assets");
+    }
+    return OPERATOR_CANCELLED;
+  }
+
+  BKE_reportf(op->reports, RPT_INFO, "Converted %d image(s) to assets", converted);
+  WM_main_add_notifier(NC_ID | NA_EDITED, nullptr);
+  WM_main_add_notifier(NC_ASSET | NA_ADDED, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+static bool images_to_assets_poll(bContext *C)
+{
+  Main *bmain = CTX_data_main(C);
+  for (const Image &image : bmain->images) {
+    if (image_can_be_asset(&image)) {
+      return true;
+    }
+  }
+  CTX_wm_operator_poll_msg_set(C, "No images in this file can be marked as assets");
+  return false;
+}
+
+static void ASSET_OT_images_to_assets(wmOperatorType *ot)
+{
+  ot->name = "Convert Images to Assets";
+  ot->description = "Mark all eligible images in this file as assets in the Current File library";
+  ot->idname = "ASSET_OT_images_to_assets";
+
+  ot->exec = images_to_assets_exec;
+  ot->poll = images_to_assets_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 
 void operatortypes_asset()
 {
@@ -1800,6 +1947,42 @@ void operatortypes_asset()
   WM_operatortype_append(ASSET_OT_screenshot_preview);
 
   WM_operatortype_append(ASSET_OT_assets_download);
+
+  WM_operatortype_append(ASSET_OT_images_to_assets);
+  WM_operatortype_append(ASSET_OT_image_library_refresh);
+
+  shelf::register_drag_scroll_handler();
 }
+
+namespace list {
+
+void library_refresh(bContext *C, const AssetLibraryReference *library_reference)
+{
+  if (!C) {
+    return;
+  }
+
+  /* Callers with an explicit library (e.g. after drag-drop) run the same logic as the operator
+   * without relying on context poll or #CTX_wm_asset_library_ref. */
+  if (library_reference) {
+    list::clear(library_reference, C);
+    WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
+    list::tag_refresh_visible_asset_browsers(*library_reference, C);
+    return;
+  }
+
+  wmOperatorType *ot = WM_operatortype_find("ASSET_OT_library_refresh", false);
+  if (ot && WM_operator_poll(C, ot)) {
+    const wmOperatorStatus status = WM_operator_name_call(
+        C, "ASSET_OT_library_refresh", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+    if (ELEM(status, OPERATOR_FINISHED, OPERATOR_RUNNING_MODAL)) {
+      return;
+    }
+  }
+
+  do_asset_library_refresh(C);
+}
+
+}  // namespace list
 
 }  // namespace blender::ed::asset

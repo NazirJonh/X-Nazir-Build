@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "BLI_function_ref.hh"
 
 namespace blender {
@@ -44,6 +46,12 @@ void popover_panel_register(ARegionType *region_type);
 AssetShelf *active_shelf_from_context(const bContext *C);
 
 void send_redraw_notifier(const bContext &C);
+
+/**
+ * Register the LMB drag-scroll pre-button handler for asset views (asset shelf, asset shelf
+ * popover, asset browser). Called once from #operatortypes_asset() at startup.
+ */
+void register_drag_scroll_handler();
 
 AssetShelfType *ensure_shelf_has_type(AssetShelf &shelf);
 AssetShelf *create_shelf_from_type(AssetShelfType &type);
@@ -91,6 +99,15 @@ void settings_set_catalog_path_enabled(AssetShelf &shelf,
 void settings_foreach_enabled_catalog_path(
     const AssetShelf &shelf,
     FunctionRef<void(const asset_system::AssetCatalogPath &catalog_path)> fn);
+
+/** Collapsed state of a catalog path in the shelf, or nullopt when not saved yet. */
+std::optional<bool> settings_get_catalog_path_collapsed(
+    const AssetShelfSettings &settings, const asset_system::AssetCatalogPath &path);
+
+/** Save the collapsed state of a catalog path in the shelf settings. */
+void settings_set_catalog_path_collapsed(AssetShelfSettings &settings,
+                                         const asset_system::AssetCatalogPath &path,
+                                         bool collapsed);
 
 }  // namespace ed::asset::shelf
 }  // namespace blender

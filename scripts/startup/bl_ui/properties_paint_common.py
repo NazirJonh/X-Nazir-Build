@@ -520,8 +520,7 @@ class TextureMaskPanel(BrushPanel):
         brush = context.tool_settings.image_paint.brush
         mask_tex_slot = brush.mask_texture_slot
 
-        col = layout.column()
-        col.template_ID_preview(mask_tex_slot, "texture", new="texture.new", rows=3, cols=8)
+        draw_brush_texture_image_grid(layout, mask_tex_slot)
 
         # map_mode
         layout.row().prop(mask_tex_slot, "mask_map_mode", text="Mask Mapping")
@@ -1566,6 +1565,33 @@ def draw_color_settings(context, layout, brush, color_type=False):
             col.prop(brush, "gradient_stroke_mode", text="Gradient Mapping")
             if brush.gradient_stroke_mode in {'SPACING_REPEAT', 'SPACING_CLAMP'}:
                 col.prop(brush, "grad_spacing")
+
+
+def draw_brush_texture_image_grid(layout, tex_slot, is_popover=False):
+    """
+    Asset image grid in the 3D Viewport; legacy ID preview elsewhere (e.g. Image Editor).
+    """
+    col = layout.column()
+    space = bpy.context.space_data
+    if space and space.type == 'VIEW_3D':
+        col.template_asset_image_grid(tex_slot, "texture", is_popover=is_popover)
+    else:
+        col.template_ID_preview(tex_slot, "texture", new="texture.new", rows=3, cols=8)
+    return col
+
+
+def draw_brush_texture_properties(layout, brush, sculpt, *, default_closed=True):
+    header, panel = layout.panel("brush_texture_properties", default_closed=default_closed)
+    header.label(text="Properties")
+    if panel:
+        brush_texture_settings(panel, brush, sculpt)
+
+
+def draw_brush_mask_texture_properties(layout, brush, *, default_closed=True):
+    header, panel = layout.panel("brush_mask_texture_properties", default_closed=default_closed)
+    header.label(text="Properties")
+    if panel:
+        brush_mask_texture_settings(panel, brush)
 
 
 # Used in both the View3D toolbar and texture properties

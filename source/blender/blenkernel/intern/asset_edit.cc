@@ -433,6 +433,60 @@ std::optional<AssetWeakReference> asset_edit_weak_reference_from_id(const ID &id
   return asset_weak_reference_for_essentials(idcode, id.name + 2, id.lib->runtime->filepath_abs);
 }
 
+std::optional<AssetWeakReference> asset_edit_local_to_source_weak_reference(
+    Main &global_main, const AssetWeakReference &local_weak_ref)
+{
+  /* Only a local reference can map back to a source asset. */
+  if (local_weak_ref.asset_library_type != ASSET_LIBRARY_LOCAL) {
+    return std::nullopt;
+  }
+
+  char asset_full_path_buffer[FILE_MAX_LIBEXTRA];
+  char *asset_lib_path, *asset_group, *asset_name;
+  AS_asset_full_path_explode_from_weak_ref(
+      &local_weak_ref, asset_full_path_buffer, &asset_lib_path, &asset_group, &asset_name);
+  if (asset_group == nullptr || asset_name == nullptr) {
+    return std::nullopt;
+  }
+
+  const short idcode = BKE_idtype_idcode_from_name(asset_group);
+  if (idcode == 0) {
+    return std::nullopt;
+  }
+
+  /* A local reference has no library path; the datablock lives in the current file. */
+  const ID *local_id = BKE_libblock_find_name_and_library_filepath(
+      &global_main, idcode, asset_name, nullptr);
+  if (local_id == nullptr || local_id->lib != nullptr ||
+      local_id->library_weak_reference == nullptr)
+  {
+    return std::nullopt;
+  }
+
+  /* The stored source library path may be relative; make it absolute as required by the weak
+   * reference builders below. */
+  char source_filepath[FILE_MAX];
+  STRNCPY(source_filepath, local_id->library_weak_reference->library_filepath);
+  BLI_path_abs(source_filepath, BKE_main_blendfile_path(&global_main));
+
+  const char *source_idname = local_id->library_weak_reference->library_id_name + 2;
+
+  const bUserAssetLibrary *user_library = BKE_preferences_asset_library_containing_path(
+      &U, source_filepath);
+  if (user_library && user_library->dirpath[0]) {
+    return asset_weak_reference_for_user_library(
+        *user_library, idcode, source_idname, source_filepath);
+  }
+
+  if (BLI_path_contains(asset_system::online_essentials_cache_directory_path().c_str(),
+                        source_filepath))
+  {
+    return asset_weak_reference_for_online_essentials(idcode, source_idname, source_filepath);
+  }
+
+  return asset_weak_reference_for_essentials(idcode, source_idname, source_filepath);
+}
+
 bool asset_edit_id_is_editable(const ID &id)
 {
   return (id.lib && (id.lib->runtime->tag & LIBRARY_ASSET_EDITABLE));

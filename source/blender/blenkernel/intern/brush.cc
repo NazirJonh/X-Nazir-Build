@@ -236,8 +236,8 @@ static void brush_foreach_id(ID *id, LibraryForeachIDData *data)
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, BKE_texture_mtex_foreach_id(data, &brush->mtex));
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data,
                                           BKE_texture_mtex_foreach_id(data, &brush->mask_mtex));
-  BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data,
-                                          BKE_texture_mtex_foreach_id(data, &brush->face_set_color_mtex));
+  BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(
+      data, BKE_texture_mtex_foreach_id(data, &brush->face_set_color_mtex));
 }
 
 static void brush_foreach_working_space_color(ID *id, const IDTypeForeachColorFunctionCallback &fn)
@@ -942,7 +942,8 @@ const MTex *BKE_brush_color_texture_get(const Brush *brush, const eObjectMode ob
   return &brush->mtex;
 }
 
-const MTex *BKE_brush_face_set_color_texture_get(const Brush *brush, const eObjectMode /*object_mode*/)
+const MTex *BKE_brush_face_set_color_texture_get(const Brush *brush,
+                                                 const eObjectMode /*object_mode*/)
 {
   return &brush->face_set_color_mtex;
 }

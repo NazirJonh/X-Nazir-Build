@@ -2123,8 +2123,8 @@ void push_end_ex(Object &ob, const bool use_nested_undo)
       if (bool(step_data->node_flags & NodeDataFlag::Color)) {
         /* Copy (don't move) the vertex indices: when the step also stores positions, the
          * #PositionUndoStorage built below reads #Node.vert_indices from these same nodes to know
-         * which vertices each compressed block maps to. Moving the indices out here would leave the
-         * position storage with empty indices and crash #restore_position_mesh. */
+         * which vertices each compressed block maps to. Moving the indices out here would leave
+         * the position storage with empty indices and crash #restore_position_mesh. */
         r_node->vert_indices = unode->vert_indices;
         r_node->unique_verts_num = unode->unique_verts_num;
         r_node->corner_indices = std::move(unode->corner_indices);

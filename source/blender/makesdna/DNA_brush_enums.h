@@ -411,6 +411,7 @@ enum eBrushFlags2 : int {
   /** Disable Face Set assignment in texture-as-data-source mode. */
   BRUSH_DISABLE_FACE_SET_WRITE = (1 << 13),
 };
+ENUM_OPERATORS(eBrushFlags2)
 
 /** #Brush.texture_data_mode */
 enum eBrushTextureDataMode {
@@ -421,8 +422,8 @@ enum eBrushTextureDataMode {
   /** Sample RGB texture per face to assign Face Set IDs (alpha mtex = mask). */
   BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE = 2,
 };
-ENUM_OPERATORS(eBrushFlags2)
 
+/** #Brush.vcol_channel */
 enum eBrushVertexColorChannel {
   BRUSH_VCOL_CHANNEL_R = 0,
   BRUSH_VCOL_CHANNEL_G = 1,
@@ -430,9 +431,16 @@ enum eBrushVertexColorChannel {
   BRUSH_VCOL_CHANNEL_RGB = 3,
 };
 
+/** #Brush.vcol_mode */
 enum eBrushVertexColorMode {
   BRUSH_VCOL_MODE_GRAYSCALE = 0,
   BRUSH_VCOL_MODE_BINARY = 1,
+};
+
+/** #Brush.face_set_draw_mode */
+enum eSculptFaceSetDrawMode {
+  SCULPT_FACE_SET_DRAW_MODE_RANDOM = 0,
+  SCULPT_FACE_SET_DRAW_MODE_COLOR = 1,
 };
 
 enum BrushMaskPressureFlags : int {

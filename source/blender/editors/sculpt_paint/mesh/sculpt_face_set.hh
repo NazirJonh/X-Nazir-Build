@@ -16,8 +16,6 @@
 
 #include "BKE_attribute.hh"
 
-
-
 namespace blender {
 
 class IndexMask;
@@ -41,11 +39,11 @@ struct StrokeCache;
 
 namespace ed::sculpt_paint::face_set {
 
-struct ColorFaceQuantWrite {
-  int face_index;
-  float quant[3];
-};
-
+/**
+ * Per-stroke cache mapping quantized custom colors to Face Set IDs, owned by #StrokeCache.
+ * The full definition lives here because #StrokeCache holds it through a unique_ptr and must see
+ * the complete type to destroy it.
+ */
 struct FaceSetColorStrokeCache {
   bool enabled = false;
   const MTex *color_mtex = nullptr;
@@ -61,22 +59,11 @@ struct FaceSetColorStrokeCache {
   int ensure_face_set_id_for_quant_color(Object &object, const float quant[3]);
 };
 
-/** Resolve pending face writes on the main thread (after parallel sampling). */
-void apply_color_face_quant_writes(Object &object,
-                                   FaceSetColorStrokeCache &cache,
-                                   Span<ColorFaceQuantWrite> writes,
-                                   MutableSpan<int> face_sets);
-void face_set_color_deferred_geometry_update(Object &object, FaceSetColorStrokeCache &cache);
-
 /** Copy mask/alpha mapping (offset, scale, angle, mode) onto #Brush.face_set_color_mtex. */
 void sync_face_set_color_mtex_mapping_from_mask(Brush &brush);
+/** Build the per-stroke color cache once when color texture mode is active. */
 void face_set_color_stroke_cache_init(StrokeCache &cache, const Brush &brush, const Mesh &mesh);
 void face_set_color_stroke_cache_clear(StrokeCache &cache);
-FaceSetColorStrokeCache *face_set_color_stroke_cache_get(StrokeCache &cache);
-/** (Re)build stroke cache when color texture mode is active; returns null if unavailable. */
-FaceSetColorStrokeCache *face_set_color_stroke_cache_ensure(StrokeCache &cache,
-                                                            const Brush &brush,
-                                                            const Mesh &mesh);
 
 int active_face_set_get(const Object &object);
 /* TODO: vert_face_set_max_get should likely be avoided and existing usages cleaned up, since by
@@ -88,7 +75,10 @@ int active_update_and_get(bContext *C, Object &ob, const float mval[2]);
 void sample_face_set_color_at_active(const Object &object, Brush &brush);
 
 /** Update cursor picking and sample the face set color at \a mval. Returns false on miss. */
-bool sample_face_set_color_at_cursor(bContext *C, Object &object, Brush &brush, const float mval[2]);
+bool sample_face_set_color_at_cursor(bContext *C,
+                                     Object &object,
+                                     Brush &brush,
+                                     const float mval[2]);
 
 int vert_face_set_get(GroupedSpan<int> vert_to_face_map, Span<int> face_sets, int vert);
 int vert_face_set_get(const SubdivCCG &subdiv_ccg, Span<int> face_sets, int grid);
@@ -185,6 +175,34 @@ void filter_verts_with_unique_face_sets_bmesh(int face_set_offset,
                                               const Set<BMVert *, 0> &verts,
                                               MutableSpan<float> factors);
 
+/* -------------------------------------------------------------------- */
+/** \name Texture-as-data Face Set modes (#eBrushTextureDataMode)
+ *
+ * Centralized predicates for the "texture as data source" brush modes, so adding a new
+ * #eBrushTextureDataMode only touches one place. \{ */
+
+/** True when the brush samples its texture as a data source, not an intensity multiplier. */
+bool brush_texture_data_mode_is_active(const Brush &brush);
+/** Binary alpha-threshold mode (#BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE). */
+bool brush_texture_data_mode_is_alpha(const Brush &brush);
+/** Per-face RGB color mode (#BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE). */
+bool brush_texture_data_mode_is_color(const Brush &brush);
+/** Color mode with an actual RGB texture assigned. */
+bool brush_uses_color_texture(const Brush &brush);
+/** Whether the stroke writes Face Set IDs (vs. #BRUSH_DISABLE_FACE_SET_WRITE). */
+bool brush_texture_data_writes_face_sets(const Brush &brush);
+/** Whether the stroke also writes sampled values into a color attribute. */
+bool brush_texture_data_writes_color(const Brush &brush);
+
+/**
+ * Resolve the Face Set ID to paint for the current stroke into #StrokeCache.paint_face_set,
+ * creating a new custom-colored Face Set if needed. No-op once resolved. Handles explicit
+ * #Brush.face_set_id, inverted strokes, Custom color mode and Random mode.
+ */
+void ensure_stroke_face_set(Object &object, const Brush &brush);
+
+/** \} */
+
 void apply_from_texture(const Depsgraph &depsgraph,
                         Object &object,
                         const Brush &brush,
@@ -194,35 +212,6 @@ void apply_from_color_texture(const Depsgraph &depsgraph,
                               Object &object,
                               const Brush &brush,
                               const IndexMask &node_mask);
-
-/**
- * Samples the brush texture at each vertex of face \a face_index, writes the result to
- * \a color_attribute when non-null, and returns the average texture value across all vertices.
- * Alpha inversion is controlled by #BRUSH_TEXTURE_INVERT_ALPHA in brush.flag2.
- */
-float sample_face_texture_avg(SculptSession &ss,
-                              const Brush &brush,
-                              Span<float3> positions_eval,
-                              OffsetIndices<int> faces,
-                              Span<int> corner_verts,
-                              GroupedSpan<int> vert_to_face_map,
-                              int face_index,
-                              bke::GSpanAttributeWriter *color_attribute,
-                              int thread_id);
-
-/**
- * Sample RGB from face_set_color_mtex using the same brush projection as the alpha mask
- * (view / stencil / area plane / 3D) at the face center and corner positions; quantizes to 8-bit.
- */
-bool sample_face_color_for_face(SculptSession &ss,
-                                const Brush &brush,
-                                const OffsetIndices<int> faces,
-                                const Span<int> corner_verts,
-                                const Span<float3> positions_eval,
-                                const int face_index,
-                                const float3 &sample_point,
-                                const int thread_id,
-                                float r_quant[3]);
 
 /** Set face set colors through RNA so unified-color sync handlers are notified. */
 void brush_face_set_color_set(Brush *brush, const float color[3]);

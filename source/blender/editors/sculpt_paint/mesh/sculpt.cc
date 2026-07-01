@@ -58,8 +58,8 @@
 #include "BKE_lib_id.hh"
 #include "BKE_mesh.hh"
 #include "BKE_modifier.hh"
-#include "BKE_node_legacy_types.hh"
 #include "BKE_multires.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
@@ -2516,11 +2516,8 @@ struct SculptBrushTexSampleCoords {
 };
 
 /* Forward declarations for texture sampling functions. */
-static bool sculpt_sample_color_image_at_brush_tex_coords(const Tex &tex,
-                                                          const float x,
-                                                          const float y,
-                                                          ImagePool *pool,
-                                                          float r_rgb[3]);
+static bool sculpt_sample_color_image_at_brush_tex_coords(
+    const Tex &tex, const float x, const float y, ImagePool *pool, float r_rgb[3]);
 
 /**
  * Screen-space texture coordinates for a screen position (View, Tiled, Random, Stencil).
@@ -2562,7 +2559,7 @@ static SculptBrushTexSampleCoords sculpt_brush_texture_sample_coords_get_screen(
   else {
     const bool is_mask_projection = (coord_mtex == &brush.mask_mtex) ||
                                     (coord_mtex == &brush.face_set_color_mtex);
-    
+
     float invradius;
     if (coord_mtex->brush_map_mode == MTEX_MAP_MODE_TILED) {
       x = screen_co.x;
@@ -2664,11 +2661,8 @@ static Image *sculpt_brush_tex_image_get(const Tex &tex)
  * Sample image pixels using brush texture coordinates (same `x`, `y` as #paint_get_tex_pixel).
  * Needed when the Tex nodetree reads mesh UV and #RE_texture_evaluate returns black in sculpt.
  */
-static bool sculpt_sample_color_image_at_brush_tex_coords(const Tex &tex,
-                                                          const float x,
-                                                          const float y,
-                                                          ImagePool *pool,
-                                                          float r_rgb[3])
+static bool sculpt_sample_color_image_at_brush_tex_coords(
+    const Tex &tex, const float x, const float y, ImagePool *pool, float r_rgb[3])
 {
   Image *image = sculpt_brush_tex_image_get(tex);
   if (image == nullptr) {
@@ -2817,15 +2811,8 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
       else {
         const float2 point_2d = ED_view3d_project_float_v2_m4(
             cache.vc->region, symm_point, cache.projection_mat);
-        sculpt_sample_brush_mtex_at_screen(ss,
-                                           brush,
-                                           mtex,
-                                           coord_mtex,
-                                           point_2d,
-                                           thread_id,
-                                           apply_texture_bias,
-                                           r_value,
-                                           r_rgba);
+        sculpt_sample_brush_mtex_at_screen(
+            ss, brush, mtex, coord_mtex, point_2d, thread_id, apply_texture_bias, r_value, r_rgba);
         if (sculpt_brush_mtex_sample_is_black(*r_value, r_rgba)) {
           const bke::PaintRuntime &paint_runtime = *cache.paint->runtime;
           float rotation = -coord_mtex->rot;
@@ -2867,9 +2854,8 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
       float image_rgb[3];
       const SculptBrushTexSampleCoords coords = sculpt_brush_texture_sample_coords_get(
           ss, brush, coord_mtex, brush_point);
-      if (coords.valid &&
-          sculpt_sample_color_image_at_brush_tex_coords(
-              *mtex->tex, coords.x, coords.y, ss.tex_pool, image_rgb))
+      if (coords.valid && sculpt_sample_color_image_at_brush_tex_coords(
+                              *mtex->tex, coords.x, coords.y, ss.tex_pool, image_rgb))
       {
         copy_v3_v3(&r_rgba[0], image_rgb);
         r_rgba[3] = 1.0f;
@@ -2880,15 +2866,8 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
   }
 
   /* Projection from mask (or other) slot; RGB from color slot. */
-  sculpt_sample_brush_mtex_at_screen(ss,
-                                     brush,
-                                     mtex,
-                                     coord_mtex,
-                                     point_2d,
-                                     thread_id,
-                                     apply_texture_bias,
-                                     r_value,
-                                     r_rgba);
+  sculpt_sample_brush_mtex_at_screen(
+      ss, brush, mtex, coord_mtex, point_2d, thread_id, apply_texture_bias, r_value, r_rgba);
 }
 
 void sculpt_apply_texture(const SculptSession &ss,
@@ -2926,15 +2905,8 @@ bool sculpt_sample_face_set_color_texture(const SculptSession &ss,
   float texture_value;
   float4 texture_rgba;
   /* Projection from alpha/mask slot; RGB from color texture. */
-  sculpt_sample_brush_mtex(ss,
-                           brush,
-                           mtex,
-                           brush_point,
-                           thread_id,
-                           &texture_value,
-                           texture_rgba,
-                           false,
-                           mask_mtex);
+  sculpt_sample_brush_mtex(
+      ss, brush, mtex, brush_point, thread_id, &texture_value, texture_rgba, false, mask_mtex);
 
   copy_v3_v3(r_rgb, texture_rgba);
   return !sculpt_brush_mtex_sample_is_black(texture_value, texture_rgba);
@@ -3696,6 +3668,30 @@ static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgra
           std::nullopt};
 }
 
+/**
+ * Undo data flags for the texture-as-data Face Set modes, shared by every brush type.
+ *
+ * The color attribute is created once at stroke start (see #SculptPaintStroke::test_start), so
+ * this only flags the undo step; it must never create the attribute while pushing nodes, as
+ * mutating the mesh mid-step would desynchronize the position undo nodes in the same step.
+ */
+static undo::NodeDataFlag texture_data_undo_flags(const Brush &brush, const Object &ob)
+{
+  undo::NodeDataFlag flags{};
+  if (!face_set::brush_texture_data_mode_is_active(brush)) {
+    return flags;
+  }
+  if (face_set::brush_texture_data_writes_face_sets(brush)) {
+    flags |= undo::NodeDataFlag::FaceSet;
+  }
+  if (face_set::brush_texture_data_writes_color(brush) &&
+      color::active_color_attribute(*id_cast<const Mesh *>(ob.data)))
+  {
+    flags |= undo::NodeDataFlag::Color;
+  }
+  return flags;
+}
+
 static void push_undo_nodes(const Depsgraph &depsgraph,
                             Object &ob,
                             const Brush &brush,
@@ -3703,7 +3699,6 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
 {
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *ob.runtime->sculpt_session;
-  const bool write_face_sets = (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
 
   undo::NodeDataFlag flags{};
 
@@ -3712,47 +3707,25 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
       /* Smooth mode moves vertices. */
       flags |= undo::NodeDataFlag::Position;
     }
-    else {
-      if (write_face_sets) {
-        flags |= undo::NodeDataFlag::FaceSet;
-      }
-      if (brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE &&
-          brush.write_vcol)
-      {
-        /* The color attribute is created once at stroke start (see #SculptPaintStroke::test_start).
-         * Only flag the undo step here; never mutate the mesh during undo pushing, as that would
-         * desynchronize the position undo nodes captured in the same step. */
-        if (color::active_color_attribute(*id_cast<Mesh *>(ob.data))) {
-          flags |= undo::NodeDataFlag::Color;
-        }
-      }
+    else if (face_set::brush_texture_data_mode_is_active(brush)) {
+      flags |= texture_data_undo_flags(brush, ob);
     }
-  }
-  else if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
-    flags |= undo::NodeDataFlag::Mask;
-  }
-  else if (brush_type_is_paint(brush.sculpt_brush_type)) {
-    flags |= undo::NodeDataFlag::Color;
-  }
-  else {
-    flags |= undo::NodeDataFlag::Position;
-  }
-
-  if (brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
-      (brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE ||
-       brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE))
-  {
-    if (write_face_sets) {
+    else if (face_set::brush_texture_data_writes_face_sets(brush)) {
       flags |= undo::NodeDataFlag::FaceSet;
     }
-    if (brush.write_vcol) {
-      /* The color attribute is created once at stroke start (see #SculptPaintStroke::test_start).
-       * Only flag the undo step here; never mutate the mesh during undo pushing, as that would
-       * desynchronize the position undo nodes captured in the same step. */
-      if (color::active_color_attribute(*id_cast<Mesh *>(ob.data))) {
-        flags |= undo::NodeDataFlag::Color;
-      }
+  }
+  else {
+    if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
+      flags |= undo::NodeDataFlag::Mask;
     }
+    else if (brush_type_is_paint(brush.sculpt_brush_type)) {
+      flags |= undo::NodeDataFlag::Color;
+    }
+    else {
+      flags |= undo::NodeDataFlag::Position;
+    }
+    /* Any non-Draw-Face-Sets brush may additionally route texture samples to Face Sets/colors. */
+    flags |= texture_data_undo_flags(brush, ob);
   }
 
   if (ss.cache->supports_gravity) {
@@ -3852,7 +3825,6 @@ static void do_brush_action(const Depsgraph &depsgraph,
   const bool use_original = brush_type_needs_original(brush.sculpt_brush_type) ? true :
                                                                                  !ss.cache->accum;
   const bool use_pixels = sculpt_needs_pbvh_pixels(brush, ob);
-  const bool write_face_sets = (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
 
   /* Ctrl+LMB samples color from the face under the cursor; it does not need brush nodes. */
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
@@ -4107,13 +4079,15 @@ static void do_brush_action(const Depsgraph &depsgraph,
   }
 
   if (!use_pixels && brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
-      (write_face_sets || brush.write_vcol))
+      face_set::brush_texture_data_mode_is_active(brush) &&
+      (face_set::brush_texture_data_writes_face_sets(brush) ||
+       face_set::brush_texture_data_writes_color(brush)))
   {
-    if (brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE) {
-      blender::ed::sculpt_paint::face_set::apply_from_texture(depsgraph, ob, brush, node_mask);
+    if (face_set::brush_texture_data_mode_is_alpha(brush)) {
+      face_set::apply_from_texture(depsgraph, ob, brush, node_mask);
     }
-    else if (brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE) {
-      blender::ed::sculpt_paint::face_set::apply_from_color_texture(depsgraph, ob, brush, node_mask);
+    else if (face_set::brush_texture_data_mode_is_color(brush)) {
+      face_set::apply_from_color_texture(depsgraph, ob, brush, node_mask);
     }
   }
 
@@ -6248,7 +6222,7 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
     cache->dial = BLI_dial_init(cache->initial_mouse, pixel_input_threshold);
   }
 
-  if (brush->texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE) {
+  if (face_set::brush_texture_data_mode_is_color(*brush)) {
     const Mesh *mesh = id_cast<Mesh *>(ob.data);
     const MTex *color_mtex = BKE_brush_face_set_color_texture_get(brush, OB_MODE_SCULPT);
     if (color_mtex->tex && color_mtex->tex->type == TEX_IMAGE && color_mtex->tex->ima) {
@@ -6298,11 +6272,10 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     cursor_geometry_info_update(*this->depsgraph, *paint, sculpt_, this->vc, base_, mval, false);
 
     /* When writing texture data to vertex colors, create the color attribute once here, before the
-     * undo step begins. Creating it lazily while pushing undo nodes would mutate the mesh mid-stroke
-     * and corrupt the position undo nodes captured in the same step. */
-    if (brush && brush->write_vcol &&
-        brush->texture_data_mode != BRUSH_TEXTURE_DATA_MODE_NONE &&
-        !ob.runtime->sculpt_session->bm)
+     * undo step begins. Creating it lazily while pushing undo nodes would mutate the mesh
+     * mid-stroke and corrupt the position undo nodes captured in the same step. */
+    if (brush && face_set::brush_texture_data_mode_is_active(*brush) &&
+        face_set::brush_texture_data_writes_color(*brush) && !ob.runtime->sculpt_session->bm)
     {
       if (bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Mesh) {
         ED_mesh_color_ensure(id_cast<Mesh *>(ob.data), nullptr);
@@ -6596,7 +6569,7 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     }
     const ARegion *region = CTX_wm_region(C);
     const float mval[2] = {float(event->xy[0] - region->winrct.xmin),
-                             float(event->xy[1] - region->winrct.ymin)};
+                           float(event->xy[1] - region->winrct.ymin)};
     if (face_set::sample_face_set_color_at_cursor(C, ob, brush, mval)) {
       WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, &brush);
       return OPERATOR_FINISHED;

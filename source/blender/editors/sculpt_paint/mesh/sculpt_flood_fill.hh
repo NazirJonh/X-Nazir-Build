@@ -8,8 +8,6 @@
 
 #pragma once
 
-#include <queue>
-
 #include "BLI_bit_vector.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_offset_indices.hh"
@@ -48,7 +46,8 @@ struct FillDataMesh {
 };
 
 struct FillDataGrids {
-  std::queue<SubdivCCGCoord> queue;
+  Vector<SubdivCCGCoord> queue_current;
+  Vector<SubdivCCGCoord> queue_next;
   BitVector<> visited_verts;
   Span<int> fake_neighbors;
 
@@ -69,7 +68,8 @@ struct FillDataGrids {
 };
 
 struct FillDataBMesh {
-  std::queue<BMVert *> queue;
+  Vector<BMVert *> queue_current;
+  Vector<BMVert *> queue_next;
   BitVector<> visited_verts;
   Span<int> fake_neighbors;
 

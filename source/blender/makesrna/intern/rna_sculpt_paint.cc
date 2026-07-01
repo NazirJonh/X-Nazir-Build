@@ -691,6 +691,23 @@ static void rna_def_paint_curve_visibility_flag(StructRNA *srna,
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
+static void rna_def_color_picker_palette(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "ColorPickerPalette", nullptr);
+  RNA_def_struct_sdna(srna, "ColorPickerPalette");
+  RNA_def_struct_ui_text(
+      srna, "Color Picker Palette", "Palette associated with a specific color picker");
+
+  prop = RNA_def_property(srna, "palette", PROP_POINTER, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_struct_type(prop, "Palette");
+  RNA_def_property_ui_text(prop, "Palette", "Palette used by this color picker");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
 static void rna_def_paint(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -2017,6 +2034,7 @@ void RNA_def_sculpt_paint(BlenderRNA *brna)
   /* *** Non-Animated *** */
   RNA_define_animate_sdna(false);
   rna_def_paint_curve(brna);
+  rna_def_color_picker_palette(brna);
   rna_def_paint(brna);
   rna_def_unified_paint_settings(brna);
   rna_def_mesh_automasking_settings(brna);

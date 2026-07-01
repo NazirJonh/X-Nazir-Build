@@ -9,6 +9,7 @@
 #include <cstdlib>
 
 #include "DNA_scene_types.h"
+#include "DNA_space_enums.h"
 #include "DNA_windowmanager_types.h"
 
 #include "BLI_path_utils.hh"
@@ -25,6 +26,7 @@
 
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
+#include "UI_resources.hh"
 
 #include "WM_api.hh"
 #include "WM_keymap.hh"
@@ -3048,6 +3050,26 @@ static void rna_def_windowmanager(BlenderRNA *brna)
       prop,
       "Event Handling Break",
       "Remaining events in the queue are delayed until the next main loop iteration");
+
+  /* Persistent view mode of the ID-browser popover (#UI_PT_id_browser); see
+   * #UILayout.template_ID_browser. Stored on the window manager so the popover works from any
+   * editor. The transient name-search text is session-only (see
+   * #bke::WindowManagerRuntime::id_browser_search) and intentionally not exposed here. */
+  static const EnumPropertyItem id_browser_view_mode_items[] = {
+      {IMAGE_BROWSER_VIEW_GRID,
+       "GRID",
+       ICON_IMGDISPLAY,
+       "Grid",
+       "Show data-blocks as a grid of previews"},
+      {IMAGE_BROWSER_VIEW_LIST, "LIST", ICON_LONGDISPLAY, "List", "Show data-blocks as a list"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "id_browser_view_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "id_browser_view_mode");
+  RNA_def_property_enum_items(prop, id_browser_view_mode_items);
+  RNA_def_property_ui_text(
+      prop, "ID Browser View", "How data-blocks are listed in the image browser popover");
 
   RNA_api_wm(srna);
   RNA_api_asset_library_loading_status(srna);

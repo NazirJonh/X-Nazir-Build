@@ -6681,6 +6681,32 @@ static const EnumPropertyItem layer_type_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/**
+ * Map layer type enum to NodeTexImage paint_slot_type.
+ * This allows automatic assignment of slot types when creating paint slots.
+ */
+static char node_tex_image_paint_slot_type_from_layer_type(const int layer_type)
+{
+  switch (layer_type) {
+    case LAYER_BASE_COLOR:
+      return NODE_TEX_IMAGE_SLOT_BASE_COLOR;
+    case LAYER_SPECULAR:
+      return NODE_TEX_IMAGE_SLOT_SPECULAR;
+    case LAYER_ROUGHNESS:
+      return NODE_TEX_IMAGE_SLOT_ROUGHNESS;
+    case LAYER_METALLIC:
+      return NODE_TEX_IMAGE_SLOT_METALLIC;
+    case LAYER_NORMAL:
+      return NODE_TEX_IMAGE_SLOT_NORMAL;
+    case LAYER_BUMP:
+      return NODE_TEX_IMAGE_SLOT_BUMP;
+    case LAYER_DISPLACEMENT:
+      return NODE_TEX_IMAGE_SLOT_DISPLACEMENT;
+    default:
+      return NODE_TEX_IMAGE_SLOT_NONE;
+  }
+}
+
 static Material *get_or_create_current_material(bContext *C, Object *ob)
 {
   Material *ma = BKE_object_material_get(ob, ob->actcol);
@@ -6882,6 +6908,8 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
         new_node = bke::node_add_static_node(C, *ntree, SH_NODE_TEX_IMAGE);
         ima = proj_paint_image_create(op, bmain, is_data);
         new_node->id = &ima->id;
+        NodeTexImage *tex_image_storage = static_cast<NodeTexImage *>(new_node->storage);
+        tex_image_storage->paint_slot_type = node_tex_image_paint_slot_type_from_layer_type(type);
         break;
       }
       case PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE: {

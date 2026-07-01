@@ -46,6 +46,7 @@
 #include "WM_types.hh"
 
 #include "ED_asset.hh"
+#include "ED_asset_image_library.hh"
 #include "ED_screen.hh"
 #include "ED_userpref.hh"
 
@@ -149,6 +150,7 @@ static void PREFERENCES_OT_autoexec_path_remove(wmOperatorType *ot)
 enum class bUserAssetLibraryAddType {
   Remote = 0,
   Local = 1,
+  ImageLibrary = 2,
 };
 
 static wmOperatorStatus preferences_asset_library_add_exec(bContext *C, wmOperator *op)
@@ -177,6 +179,24 @@ static wmOperatorStatus preferences_asset_library_add_exec(bContext *C, wmOperat
       }
 
       new_library = BKE_preferences_asset_library_add(&U, name, dirpath);
+
+      MEM_delete(dirpath);
+      break;
+    }
+    case bUserAssetLibraryAddType::ImageLibrary: {
+      char *dirpath = RNA_string_get_alloc(op->ptr, "directory", nullptr, 0, nullptr);
+
+      BLI_path_slash_rstrip(dirpath);
+      if (!name[0]) {
+        BLI_path_split_file_part(dirpath, name, sizeof(name));
+      }
+      if (!name[0]) {
+        STRNCPY(name, DATA_("Image Library"));
+      }
+
+      new_library = BKE_preferences_asset_library_add(&U, name, dirpath);
+
+      blender::ed::asset::image_library_on_library_added(C, dirpath);
 
       MEM_delete(dirpath);
       break;
@@ -224,7 +244,9 @@ static wmOperatorStatus preferences_asset_library_add_invoke(bContext *C,
   const bUserAssetLibraryAddType library_type = bUserAssetLibraryAddType(
       RNA_enum_get(op->ptr, "type"));
 
-  if ((library_type == bUserAssetLibraryAddType::Local) &&
+  if ((ELEM(library_type,
+            bUserAssetLibraryAddType::Local,
+            bUserAssetLibraryAddType::ImageLibrary)) &&
       !RNA_struct_property_is_set(op->ptr, "directory"))
   {
     WM_event_add_fileselect(C, op);
@@ -249,7 +271,8 @@ static void preferences_asset_library_add_ui(bContext * /*C*/, wmOperator *op)
       layout->prop(op->ptr, "remote_url", ui::ITEM_R_IMMEDIATE, std::nullopt, ICON_NONE);
       break;
     }
-    case bUserAssetLibraryAddType::Local: {
+    case bUserAssetLibraryAddType::Local:
+    case bUserAssetLibraryAddType::ImageLibrary: {
       layout->prop(op->ptr, "name", ui::ITEM_R_IMMEDIATE, std::nullopt, ICON_NONE);
       break;
     }
@@ -269,6 +292,12 @@ static constexpr EnumPropertyItem custom_library_type_items[] = {
      "Add Local Asset Library",
      "Add an asset library managed via the file system without referencing an external "
      "repository"},
+    {int(bUserAssetLibraryAddType::ImageLibrary),
+     "IMAGE_LIBRARY",
+     ICON_FILE_IMAGE,
+     "Add Image Library",
+     "Add a folder of image files as an image asset library; "
+     "creates a catalog tree based on the folder structure"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

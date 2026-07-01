@@ -20,14 +20,20 @@
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_xr_types.h"
 
+#include "BKE_asset.hh"
+
+#include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
+
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
 #include "BLI_sys_types.h"
+#include "MEM_guardedalloc.h"
 
 #include "BKE_anim_visualization.h"
 #include "BKE_animsys.h"
@@ -841,6 +847,18 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 37)) {
     version_text_strip_abs_space_line(*bmain);
+
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_VIEW3D) {
+            continue;
+          }
+          View3D *v3d = reinterpret_cast<View3D *>(&sl);
+          v3d->image_grid.rows = 0;
+        }
+      }
+    }
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 38)) {
@@ -850,6 +868,11 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
         brush.gpencil_settings->flag |= GP_BRUSH_FILL_INTERNAL_GAPS;
       }
     }
+
+    /* image_grid_library_type, image_grid_library_custom_index, and
+     * image_grid_enabled_catalog_paths added to View3D. Old files receive
+     * zero-initialization from the DNA layer; the runtime code in
+     * image_grid_state_get() treats type==0 as "use current file library". */
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 39)) {
@@ -865,6 +888,8 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
         }
       }
     }
+
+    /* image_grid_preview_size added to View3D. Zero means use default (48 px). */
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 40)) {
@@ -878,10 +903,62 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       wm.xr.session_settings.viewfinder_passepartout_overscan = 0.5f;
       wm.xr.session_settings.viewfinder_passepartout_opacity = 0.5f;
     }
+
+    /* image_grid_library_catalog_states: migrate legacy single-library catalog list. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_VIEW3D) {
+            continue;
+          }
+          View3D *v3d = reinterpret_cast<View3D *>(&sl);
+          if (!v3d->image_grid.enabled_catalog_paths_legacy.is_empty() &&
+              v3d->image_grid.library_catalog_states.is_empty())
+          {
+            ImageGridLibraryCatalogState *libcat_state = MEM_new<ImageGridLibraryCatalogState>(
+                "ImageGridLibraryCatalogState");
+            libcat_state->library_ref.type = eAssetLibraryType(v3d->image_grid.library_type);
+            libcat_state->library_ref.custom_library_index =
+                v3d->image_grid.library_custom_index;
+            BLI_movelisttolist(&libcat_state->enabled_catalog_paths,
+                               &v3d->image_grid.enabled_catalog_paths_legacy);
+            BLI_addtail(&v3d->image_grid.library_catalog_states, libcat_state);
+          }
+        }
+      }
+    }
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 41)) {
     version_solid_color_width_height_defaults(*bmain);
+
+    /* Independent mask texture image grid library/catalog filters. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_VIEW3D) {
+            continue;
+          }
+          View3D *v3d = reinterpret_cast<View3D *>(&sl);
+          v3d->image_grid_mask.library_type = v3d->image_grid.library_type;
+          v3d->image_grid_mask.library_custom_index = v3d->image_grid.library_custom_index;
+
+          for (ImageGridLibraryCatalogState *libcat_state =
+                   static_cast<ImageGridLibraryCatalogState *>(
+                       v3d->image_grid.library_catalog_states.first);
+               libcat_state;
+               libcat_state = libcat_state->next)
+          {
+            ImageGridLibraryCatalogState *mask_libcat_state =
+                MEM_new<ImageGridLibraryCatalogState>("ImageGridLibraryCatalogState");
+            mask_libcat_state->library_ref = libcat_state->library_ref;
+            mask_libcat_state->enabled_catalog_paths = BKE_asset_catalog_path_list_duplicate(
+                libcat_state->enabled_catalog_paths);
+            BLI_addtail(&v3d->image_grid_mask.library_catalog_states, mask_libcat_state);
+          }
+        }
+      }
+    }
   }
 
   /* Fix the fact that previously, making a linked data local and/or clearing a liboverride would
@@ -912,6 +989,13 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
     FOREACH_NODETREE_END;
   }
+
+  /* NOTE: #View3D's per-slot image grid fields (image_grid_rows, image_grid_library_type,
+   * image_grid_library_custom_index, image_grid_enabled_catalog_paths,
+   * image_grid_library_catalog_states, and their image_grid_mask_* counterparts) were consolidated
+   * into #ImageGridSlotDNA (#View3D::image_grid / #View3D::image_grid_mask) during development.
+   * This is a pre-release feature, so files written before that change simply reset the image
+   * grid's persisted library/catalog/row state to defaults instead of being migrated. */
 
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning

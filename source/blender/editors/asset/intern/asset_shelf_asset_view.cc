@@ -11,14 +11,21 @@
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 
+#include "BKE_asset_edit.hh"
+#include "BKE_context.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_screen.hh"
 
 #include "BLI_fnmatch.h"
 #include "BLI_listbase.h"
 #include "BLI_string.h"
+#include "BLI_utildefines.h"
+
+#include <fmt/format.h>
 
 #include "BLT_translation.hh"
 
+#include "DNA_ID.h"
 #include "DNA_asset_types.h"
 #include "DNA_screen_types.h"
 
@@ -49,7 +56,9 @@ class AssetView : public ui::AbstractGridView {
   friend class AssetDragController;
 
  public:
-  AssetView(const AssetLibraryReference &library_ref, const AssetShelf &shelf);
+  AssetView(const AssetLibraryReference &library_ref,
+            const AssetShelf &shelf,
+            const std::optional<AssetWeakReference> &active_asset_override);
 
   void build_items() override;
   bool begin_filtering(const bContext &C) const override;
@@ -60,6 +69,9 @@ class AssetView : public ui::AbstractGridView {
 class AssetViewItem : public ui::PreviewGridItem {
   asset_system::AssetRepresentation &asset_;
   bool allow_asset_drag_ = true;
+  /* Cached from layout when building image-texture shelf tiles (see #build_grid_tile). */
+  mutable uint32_t image_texture_brush_session_uid_ = MAIN_ID_SESSION_UID_UNSET;
+  mutable bool image_texture_use_mask_slot_ = false;
 
  public:
   AssetViewItem(asset_system::AssetRepresentation &asset_, StringRef identifier, StringRef label);
@@ -85,16 +97,46 @@ class AssetDragController : public ui::AbstractViewItemDragController {
   void on_drag_start(bContext &C, ui::AbstractViewItem &item) override;
 };
 
-AssetView::AssetView(const AssetLibraryReference &library_ref, const AssetShelf &shelf)
+static std::optional<AssetWeakReference> active_asset_for_shelf(const AssetShelf &shelf,
+                                                                const bContext &C)
+{
+  std::optional<AssetWeakReference> active;
+  if (shelf.type->get_active_asset_from_context) {
+    if (const AssetWeakReference *weak_ref = shelf.type->get_active_asset_from_context(shelf.type,
+                                                                                       &C))
+    {
+      active = *weak_ref;
+    }
+  }
+  if (!active && shelf.type->get_active_asset) {
+    if (const AssetWeakReference *weak_ref = shelf.type->get_active_asset(shelf.type)) {
+      active = *weak_ref;
+    }
+  }
+  if (!active) {
+    return std::nullopt;
+  }
+
+  /* The active datablock may be a local copy made local from an asset (e.g. a brush localized to
+   * receive a texture), whose local reference does not match the source library item shown in the
+   * shelf. Map it back to the source asset so that item is still highlighted as active. */
+  if (active->asset_library_type == ASSET_LIBRARY_LOCAL) {
+    if (std::optional<AssetWeakReference> source = bke::asset_edit_local_to_source_weak_reference(
+            *CTX_data_main(&C), *active))
+    {
+      return source;
+    }
+  }
+  return active;
+}
+
+AssetView::AssetView(const AssetLibraryReference &library_ref,
+                     const AssetShelf &shelf,
+                     const std::optional<AssetWeakReference> &active_asset_override)
     : library_ref_(library_ref), shelf_(shelf)
 {
-  if (shelf.type->get_active_asset) {
-    if (const AssetWeakReference *weak_ref = shelf.type->get_active_asset(shelf.type)) {
-      active_asset_ = *weak_ref;
-    }
-    else {
-      active_asset_.reset();
-    }
+  if (active_asset_override) {
+    active_asset_ = *active_asset_override;
   }
 }
 
@@ -127,12 +169,11 @@ void AssetView::build_items()
     if (shelf_.type->flag & ASSET_SHELF_TYPE_FLAG_NO_ASSET_DRAG) {
       item.disable_asset_drag();
     }
-    if (!shelf_.type->drag_operator.empty()) {
-      /* For now always select/activate items on click instead of press when there's a drag
-       * operator set. Important for pose library blending. Maybe we want to make this an explicit
-       * option of the asset shelf instead. */
-      item.select_on_click_set();
-    }
+    /* Activate on click (release) rather than press so that LMB drag-scroll can intercept the
+     * gesture before selection triggers. Without this, popovers activate view items on press via
+     * #handle_view_item_event (unconditionally, before drag is detectable). Matches the image-grid
+     * template pattern (#select_on_click_set + #always_reactivate_on_click). */
+    item.select_on_click_set();
     /* Make sure every click calls the #bl_activate_operator. We might want to add a flag to
      * enable/disable this. Or we only call #bl_activate_operator when an item becomes active, and
      * add a #bl_click_operator for repeated execution on every click. So far it seems like every
@@ -202,11 +243,36 @@ void AssetViewItem::disable_asset_drag()
 }
 
 /**
+ * Read brush target from layout context so activation does not depend on a live UI context store
+ * (popover refresh can invalidate context inherited from the opening button).
+ */
+static void image_texture_shelf_brush_target_from_layout(const ui::Layout &layout,
+                                                         uint32_t &brush_session_uid,
+                                                         bool &use_mask_slot)
+{
+  brush_session_uid = MAIN_ID_SESSION_UID_UNSET;
+  use_mask_slot = false;
+
+  const PointerRNA *target_ptr = layout.context_ptr_get("image_grid_target", nullptr);
+  if (!target_ptr || !target_ptr->data || !target_ptr->owner_id) {
+    return;
+  }
+  if (GS(target_ptr->owner_id->name) != ID_BR) {
+    return;
+  }
+  brush_session_uid = target_ptr->owner_id->session_uid;
+  use_mask_slot = layout.context_int_get("image_grid_is_mask_slot").value_or(0) != 0;
+}
+
+/**
  * Needs freeing with #WM_operator_properties_free() (will be done by button if passed to that) and
  * #MEM_delete().
  */
 static std::optional<wmOperatorCallParams> create_asset_operator_params(
-    const StringRefNull op_name, const asset_system::AssetRepresentation &asset)
+    const StringRefNull op_name,
+    const asset_system::AssetRepresentation &asset,
+    const uint32_t brush_session_uid = MAIN_ID_SESSION_UID_UNSET,
+    const bool use_mask_slot = false)
 {
   if (op_name.is_empty()) {
     return {};
@@ -218,6 +284,10 @@ static std::optional<wmOperatorCallParams> create_asset_operator_params(
 
   PointerRNA *op_props = MEM_new<PointerRNA>(__func__, WM_operator_properties_create_ptr(ot));
   asset::operator_asset_reference_props_set(asset, *op_props);
+  if (brush_session_uid != MAIN_ID_SESSION_UID_UNSET) {
+    RNA_int_set(op_props, "brush_session_uid", int(brush_session_uid));
+    RNA_boolean_set(op_props, "use_mask_slot", use_mask_slot);
+  }
   return wmOperatorCallParams{ot, op_props, wm::OpCallContext::InvokeRegionWin};
 }
 
@@ -231,8 +301,15 @@ void AssetViewItem::build_grid_tile(const bContext &C, ui::Layout &layout) const
       layout.block(), reinterpret_cast<ui::Button *>(view_item_but_), "asset", &asset_ptr);
 
   ui::Button *item_but = reinterpret_cast<ui::Button *>(this->view_item_button());
+  if (STREQ(shelf_type.idname, "VIEW3D_AST_image_texture")) {
+    image_texture_shelf_brush_target_from_layout(
+        layout, image_texture_brush_session_uid_, image_texture_use_mask_slot_);
+  }
   if (std::optional<wmOperatorCallParams> activate_op = create_asset_operator_params(
-          shelf_type.activate_operator, asset_))
+          shelf_type.activate_operator,
+          asset_,
+          image_texture_brush_session_uid_,
+          image_texture_use_mask_slot_))
   {
     /* Attach the operator, but don't call it through the button. We call it using
      * #on_activate(). */
@@ -356,16 +433,32 @@ std::optional<bool> AssetViewItem::should_be_active() const
 {
   const AssetView &asset_view = dynamic_cast<const AssetView &>(this->get_view());
   const AssetShelfType &shelf_type = *asset_view.shelf_.type;
-  if (!shelf_type.get_active_asset) {
+  /* Return no preference when neither the Python callback nor the context-aware C++ callback
+   * has provided an active asset. Shelf types that set #get_active_asset_from_context
+   * (e.g. VIEW3D_AST_image_texture) store the result in #AssetView::active_asset_ via
+   * #active_asset_for_shelf(); honour that here instead of treating it as "no active asset". */
+  if (!shelf_type.get_active_asset && !asset_view.active_asset_) {
     return {};
   }
   if (!asset_view.active_asset_) {
     return false;
   }
-  AssetWeakReference weak_ref = asset_.make_weak_reference();
-  const bool matches = *asset_view.active_asset_ == weak_ref;
-
-  return matches;
+  const AssetWeakReference item_weak_ref = asset_.make_weak_reference();
+  if (*asset_view.active_asset_ == item_weak_ref) {
+    return true;
+  }
+  /* #bke::asset_edit_weak_reference_from_id() uses "Image/<id-name>" while shelf assets use the
+   * library-relative path from #AssetRepresentation::make_weak_reference(). Match by local ID
+   * name for the image-texture browse popover. */
+  if (STREQ(shelf_type.idname, "VIEW3D_AST_image_texture")) {
+    if (const ID *local_id = asset_.local_id()) {
+      const char *active_identifier = asset_view.active_asset_->relative_asset_identifier;
+      if (active_identifier && STRPREFIX(active_identifier, "Image/")) {
+        return STREQ(local_id->name + 2, active_identifier + 6);
+      }
+    }
+  }
+  return false;
 }
 
 void AssetViewItem::on_activate(bContext &C)
@@ -379,7 +472,10 @@ void AssetViewItem::on_activate(bContext &C)
   }
 
   if (std::optional<wmOperatorCallParams> activate_op = create_asset_operator_params(
-          shelf_type.activate_operator, asset_))
+          shelf_type.activate_operator,
+          asset_,
+          image_texture_brush_session_uid_,
+          image_texture_use_mask_slot_))
   {
     WM_operator_name_call_ptr(
         &C, activate_op->optype, activate_op->opcontext, activate_op->opptr, nullptr);
@@ -419,7 +515,9 @@ static std::string filter_string_get(const AssetShelf &shelf)
 void build_asset_view(ui::Layout &layout,
                       const AssetLibraryReference &library_ref,
                       const AssetShelf &shelf,
-                      const bContext &C)
+                      const bContext &C,
+                      std::optional<int> popup_grid_viewport_height_px,
+                      std::optional<int> cols_hint)
 {
   list::storage_fetch(&library_ref, &C);
 
@@ -433,14 +531,46 @@ void build_asset_view(ui::Layout &layout,
   BLI_assert(tile_width != 0);
   BLI_assert(tile_height != 0);
 
-  std::unique_ptr asset_view = std::make_unique<AssetView>(library_ref, shelf);
+  const std::optional<AssetWeakReference> active_asset = active_asset_for_shelf(shelf, C);
+
+  std::unique_ptr asset_view = std::make_unique<AssetView>(library_ref, shelf, active_asset);
   asset_view->set_catalog_filter(catalog_filter_from_shelf_settings(shelf.settings, *library));
   asset_view->set_tile_size(tile_width, tile_height);
+  if (cols_hint) {
+    /* Popover snaps its width to whole columns; forcing the column count here keeps the grid from
+     * computing one fewer column due to float rounding at the boundary (which would leave a gap). */
+    asset_view->set_cols_per_row_hint(*cols_hint);
+  }
+  if (popup_grid_viewport_height_px) {
+    /* Popover: bound the grid to a fixed viewport with internal row scrolling so the popover header
+     * (search / preview size / settings) stays put instead of scrolling away with the block. */
+    asset_view->set_fixed_viewport_layout(true);
+    asset_view->set_min_viewport_height(*popup_grid_viewport_height_px);
+  }
 
   ui::Block *block = layout.block();
   ui::AbstractGridView *grid_view = block_add_view(
       *block, "asset shelf asset view", std::move(asset_view));
+  if (popup_grid_viewport_height_px) {
+    /* Fixed-viewport popover: the scroll position must survive the per-refresh view rebuild and
+     * popover reopen; the session registry provides both. Keyed per shelf type so different
+     * shelves keep independent positions (the view idname is a shared constant). */
+    grid_view->use_session_scroll(fmt::format("asset_shelf_grid:{}", shelf.type->idname));
+  }
   grid_view->set_context_menu_title("Asset Shelf");
+  if (STREQ(shelf.type->idname, "VIEW3D_AST_image_texture")) {
+    if (popup_grid_viewport_height_px) {
+      /* Fixed-viewport popover: centre via the row-index scroll model, only on first open (a refresh
+       * fires on every scroll step; re-centring each time would fight the user's scrolling). */
+      if (ui::block_is_first_open(block)) {
+        grid_view->scroll_active_into_view(const_cast<bContext *>(&C),
+                                           /*scroll_active_to_center=*/true);
+      }
+    }
+    else {
+      grid_view->scroll_active_into_center_on_draw_ = true;
+    }
+  }
 
   ui::GridViewBuilder builder(*block);
   builder.build_grid_view(C, *grid_view, layout, filter_string_get(shelf));

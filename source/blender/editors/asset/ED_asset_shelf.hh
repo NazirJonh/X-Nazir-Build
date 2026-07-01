@@ -14,6 +14,7 @@ namespace blender {
 
 struct ARegion;
 struct ARegionType;
+struct AssetLibraryReference;
 struct AssetShelf;
 struct AssetShelfSettings;
 struct AssetShelfType;
@@ -31,8 +32,9 @@ struct wmWindowManager;
 class StringRef;
 class StringRefNull;
 namespace asset_system {
+class AssetCatalogPath;
 class AssetRepresentation;
-}
+}  // namespace asset_system
 
 namespace ed::asset::shelf {
 
@@ -98,6 +100,43 @@ AssetShelfType *type_find_from_idname(StringRef idname);
 
 void type_popup_unlink(const AssetShelfType &shelf_type);
 void ensure_asset_library_fetched(const bContext &C, const AssetShelfType &shelf_type);
+
+/**
+ * Return the static popup #AssetShelf instance for \a shelf_type, creating it if
+ * #type_poll_for_popup passes. Used by UI outside the default asset-shelf popover panel.
+ */
+AssetShelf *popup_shelf_get_or_create(const bContext &C, AssetShelfType &shelf_type);
+
+/**
+ * Per-`.blend` popup shelf size override, stored on #wmWindowManager keyed by
+ * #AssetShelfType.idname (see #AssetShelfPopupSize). Overrides the global Preferences default.
+ *
+ * #popup_size_load leaves an output untouched when no entry exists or its stored value is 0
+ * ("not set"), so callers can pre-seed with the prefs/type defaults. #popup_size_store upserts
+ * the entry; the caller is responsible for tagging the file modified (#WM_file_tag_modified).
+ */
+void popup_size_load(const wmWindowManager &wm,
+                     const char *shelf_idname,
+                     short *r_width_units,
+                     short *r_height_units,
+                     short *r_catalog_width_units);
+void popup_size_store(wmWindowManager &wm,
+                      const char *shelf_idname,
+                      short width_units,
+                      short height_units,
+                      short catalog_width_units);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Asset Shelf Settings
+ * \{ */
+
+AssetLibraryReference &settings_ensure_valid_library_ref(AssetShelfSettings &settings);
+void settings_set_active_catalog(AssetShelfSettings &settings,
+                                 const asset_system::AssetCatalogPath &path);
+void settings_set_all_catalog_active(AssetShelfSettings &settings);
+bool settings_is_all_catalog_active(const AssetShelfSettings &settings);
 
 /** \} */
 

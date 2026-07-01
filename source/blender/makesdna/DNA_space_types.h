@@ -467,6 +467,9 @@ struct FileAssetSelectParams {
    * catalog to show. */
   bUUID catalog_id;
 
+  /** Persistent collapsed state of catalog paths in the asset browser catalog tree. */
+  ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
+
   eFileAssetImportMethod import_method = FILE_ASSET_IMPORT_LINK;
   eFileAssetImportFlags import_flags = {};
 
@@ -665,6 +668,12 @@ struct SpaceImage {
   eSpaceImage_Mode mode = SI_MODE_VIEW;
   /* Storage for sub-space types. */
   eSpaceImage_Mode mode_prev = SI_MODE_VIEW;
+
+  /** Paint-slot filter mode for the image browser popover (#TEMPLATE_ID_FILTER_*). */
+  char image_filter_mode = 0;
+  /** Slot type filter used when image_filter_mode includes the slot bit. */
+  char image_filter_slot_type = 0;
+  char _pad_filter[6] = {};
 
   char pin = 0;
 
@@ -899,7 +908,13 @@ struct SpaceNode {
   struct bGPdata *gpd = nullptr;
 
   eSpaceNode_Gizmo_Flag gizmo_flag = {};
-  char _pad2[7] = {};
+
+  /** Paint-slot filter mode for the image browser popover (#TEMPLATE_ID_FILTER_*). Mirrors
+   * #SpaceImage. */
+  char image_filter_mode = 0;
+  /** Slot type filter used when image_filter_mode includes the slot bit. */
+  char image_filter_slot_type = 0;
+  char _pad2[5] = {};
 
   SpaceNodeOverlay overlay;
 

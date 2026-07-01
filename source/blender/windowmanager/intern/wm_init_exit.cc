@@ -215,6 +215,7 @@ void WM_init(bContext *C, int argc, const char **argv)
   WM_paneltype_init(); /* Lookup table only. */
   WM_menutype_init();
   WM_uilisttype_init();
+  WM_uigridtype_init();
   wm_gizmotype_init();
   wm_gizmogrouptype_init();
 
@@ -291,6 +292,11 @@ void WM_init(bContext *C, int argc, const char **argv)
 
   /* For file-system. Called here so can include user preference paths if needed. */
   ED_file_init();
+
+  /* Scan all registered local image libraries and rebuild any stale indexes before
+   * the first asset list read job runs.  No UI notifications needed here since no
+   * windows are open yet; the fresh index will be picked up automatically. */
+  blender::ed::asset::image_library_on_startup();
 
   if (!G.background) {
     wmWindowManager *wm = CTX_wm_manager(C);
@@ -642,6 +648,7 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
   wm_gizmotype_free();
   /* Same for UI-list types. */
   WM_uilisttype_free();
+  WM_uigridtype_free();
 
   BLF_exit();
 

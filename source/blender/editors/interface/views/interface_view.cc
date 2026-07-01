@@ -85,6 +85,18 @@ void block_free_views(Block *block)
   }
 }
 
+AbstractGridView *block_view_find_fixed_viewport_grid(Block &block)
+{
+  for (ViewLink &link : block.views) {
+    if (auto *grid_view = dynamic_cast<AbstractGridView *>(link.view.get())) {
+      if (grid_view->use_fixed_viewport_layout()) {
+        return grid_view;
+      }
+    }
+  }
+  return nullptr;
+}
+
 void ViewLink::views_bounds_calc(const Block &block)
 {
   Map<AbstractView *, rcti> views_bounds;
@@ -108,10 +120,35 @@ void ViewLink::views_bounds_calc(const Block &block)
     AbstractViewItem &view_item = *view_item_but->view_item;
     AbstractView &view = view_item.get_view();
 
+    /* Clamp grid-scroll-clipped tiles to the visible clip window: the buffer/partially-scrolled
+     * rows are masked away when drawn, so they must not extend the view bounds either (these
+     * bounds drive the scroll arrows, wheel hover checks and edge auto-scroll zones). */
+    rctf but_bounds_rect;
+    if (!block_grid_scroll_clip_bounds_rect(&block, view_item_but, &but_bounds_rect)) {
+      continue;
+    }
+
     rcti &bounds = views_bounds.lookup(&view);
     rcti but_rcti{};
-    BLI_rcti_rctf_copy_round(&but_rcti, &view_item_but->rect);
+    BLI_rcti_rctf_copy_round(&but_rcti, &but_bounds_rect);
     BLI_rcti_do_minmax_rcti(&bounds, &but_rcti);
+  }
+
+  /* A grid with a scroll-clip window exists independently of the tiles built this frame: during
+   * a fast-scroll rebuild few or zero tiles may be built, which would otherwise leave empty (or
+   * shrunken) bounds for a frame and leak wheel events to the region's own #View2D pan (the
+   * cascade the wheel latches used to paper over). The clip window is the grid's viewport, so it
+   * is the stable bounds source. */
+  if (block.view_scroll_clip_enabled) {
+    rcti clip_rect{};
+    BLI_rcti_rctf_copy_round(&clip_rect, &block.view_scroll_clip_rect);
+    for (ViewLink &link : block.views) {
+      if (dynamic_cast<AbstractGridView *>(link.view.get()) == nullptr) {
+        continue;
+      }
+      rcti &bounds = views_bounds.lookup(link.view.get());
+      BLI_rcti_do_minmax_rcti(&bounds, &clip_rect);
+    }
   }
 
   for (const auto item : views_bounds.items()) {
@@ -233,17 +270,121 @@ AbstractView *region_view_find_at(const ARegion *region,
   return nullptr;
 }
 
+static StringRef block_view_find_idname(const Block &block, const AbstractView &view)
+{
+  /* First get the `idname` of the view we're looking for. */
+  for (ViewLink &view_link : block.views) {
+    if (view_link.view.get() == &view) {
+      return view_link.idname;
+    }
+  }
+
+  return {};
+}
+
+bool region_view_has_idname_at(const ARegion *region,
+                               const int xy[2],
+                               const int pad,
+                               const StringRef idname)
+{
+  Block *block = nullptr;
+  AbstractView *view = region_view_find_at(region, xy, pad, &block);
+  if (!view || !block) {
+    return false;
+  }
+  return block_view_find_idname(*block, *view) == idname;
+}
+
+bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], const StringRef idname)
+{
+  auto *item_but = static_cast<ButtonViewItem *>(view_item_find_mouse_over(region, xy));
+  if (!item_but || !item_but->view_item) {
+    return false;
+  }
+  return block_view_find_idname(*item_but->block, item_but->view_item->get_view()) == idname;
+}
+
+bool region_view_item_topmost_at(const ARegion *region,
+                                 const wmEvent *event,
+                                 const StringRef idname)
+{
+  /* #but_find_mouse_over is the same top-most hit test the window manager uses to route a press,
+   * so a button drawn over the tile (the overlay scrollbar) or below the grid (the resize grip) is
+   * returned instead of the tile behind it. #region_view_item_has_idname_at cannot be used here:
+   * it searches view-item buttons only and so reports the tile even when another widget covers it.
+   */
+  const Button *but = but_find_mouse_over(region, event);
+  if (!but || but->type != ButtonType::ViewItem) {
+    return false;
+  }
+  const auto *item_but = static_cast<const ButtonViewItem *>(but);
+  if (!item_but->view_item) {
+    return false;
+  }
+  return block_view_find_idname(*item_but->block, item_but->view_item->get_view()) == idname;
+}
+
+StringRef region_view_item_topmost_idname_at(const ARegion *region,
+                                             const wmEvent *event,
+                                             AbstractView **r_view)
+{
+  const Button *but = but_find_mouse_over(region, event);
+  if (!but || but->type != ButtonType::ViewItem) {
+    return {};
+  }
+  const auto *item_but = static_cast<const ButtonViewItem *>(but);
+  if (!item_but->view_item) {
+    return {};
+  }
+  AbstractView &view = item_but->view_item->get_view();
+  if (r_view != nullptr) {
+    *r_view = &view;
+  }
+  return block_view_find_idname(*item_but->block, view);
+}
+
+static void region_view_scroll_at_borders_apply(ARegion *region,
+                                              AbstractView &view,
+                                              const ViewScrollDirection scroll_dir)
+{
+  if (auto *grid_view = dynamic_cast<AbstractGridView *>(&view)) {
+    if (grid_view->use_fixed_viewport_layout()) {
+      /* Fixed-viewport scroll is a row index in the grid view; the refresh rebuilds the visible
+       * rows from it. */
+      grid_view->scroll(scroll_dir);
+      ED_region_tag_refresh_ui(region);
+      return;
+    }
+  }
+  view.scroll(scroll_dir);
+  ED_region_tag_redraw(region);
+}
+
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event)
 {
   Block *block = nullptr;
-  ARegion *region = CTX_wm_region(C);
+  ARegion *region = CTX_wm_region_popup(C);
+  if (region == nullptr) {
+    region = CTX_wm_region(C);
+  }
   wmWindow *window = CTX_wm_window(C);
   wmWindowManager *wm = CTX_wm_manager(C);
-  if (!ELEM(event->type, MOUSEMOVE, TIMER)) {
+  if (!ELEM(event->type, MOUSEMOVE, TIMER) || region == nullptr) {
     return;
   }
+
   AbstractView *view = region_view_find_at(region, event->xy, UI_UNIT_Y, &block);
   if (view == nullptr) {
+    /* Fixed-viewport grid views (e.g. the image browser popover) lay out only their visible rows,
+     * so #region_view_find_at may miss them when the cursor is in the scroll-edge band. Fall back
+     * to the block's fixed-viewport grid so drag-auto-scroll still works there. */
+    block = static_cast<Block *>(region->runtime->uiblocks.first);
+    if (block) {
+      view = block_view_find_fixed_viewport_grid(*block);
+    }
+  }
+
+  if (view == nullptr || block == nullptr) {
     WM_event_timer_remove(wm, window, dropbox.timer);
     dropbox.timer = nullptr;
     return;
@@ -252,16 +393,19 @@ void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEven
   float x = event->xy[0], y = event->xy[1];
   window_to_block_fl(region, block, &x, &y);
 
-  const std::optional<rcti> bounds = view->get_bounds();
-  if (!bounds.has_value()) {
-    WM_event_timer_remove(wm, window, dropbox.timer);
-    dropbox.timer = nullptr;
-    return;
-  }
-
   const float margin = UI_UNIT_Y * 1 / 3;
   const std::optional<ViewScrollDirection> scroll_dir =
       [&]() -> std::optional<ViewScrollDirection> {
+    if (const auto *grid_view = dynamic_cast<const AbstractGridView *>(view)) {
+      if (grid_view->use_fixed_viewport_layout()) {
+        return grid_view->fixed_viewport_scroll_at_y(*block, y);
+      }
+    }
+
+    const std::optional<rcti> bounds = view->get_bounds();
+    if (!bounds.has_value()) {
+      return std::nullopt;
+    }
     if (y > bounds->ymax - margin) {
       return ViewScrollDirection::UP;
     }
@@ -279,8 +423,7 @@ void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEven
 
   if (dropbox.timer) {
     if (event->type == TIMER) {
-      view->scroll(scroll_dir.value());
-      ED_region_tag_redraw(region);
+      region_view_scroll_at_borders_apply(region, *view, *scroll_dir);
     }
   }
   else {
@@ -365,18 +508,6 @@ std::unique_ptr<DropTargetInterface> region_views_find_drop_target_at(const AReg
   }
 
   return nullptr;
-}
-
-static StringRef block_view_find_idname(const Block &block, const AbstractView &view)
-{
-  /* First get the `idname` of the view we're looking for. */
-  for (ViewLink &view_link : block.views) {
-    if (view_link.view.get() == &view) {
-      return view_link.idname;
-    }
-  }
-
-  return {};
 }
 
 template<class T>

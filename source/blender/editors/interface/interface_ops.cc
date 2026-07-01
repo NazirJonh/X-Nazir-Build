@@ -2380,6 +2380,44 @@ static void UI_OT_button_string_clear(wmOperatorType *ot)
   ot->flag = OPTYPE_INTERNAL;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Palette Swatch Size Toggle Operator
+ * \{ */
+
+/* Session-only display preference shared by all #template_palette instances. Kept here (rather
+ * than in DNA/RNA) because it is transient UI state with no need for persistence. */
+static bool palette_large_swatches = false;
+
+bool palette_swatch_size_large_get()
+{
+  return palette_large_swatches;
+}
+
+static wmOperatorStatus palette_swatch_size_toggle_exec(bContext *C, wmOperator * /*op*/)
+{
+  palette_large_swatches = !palette_large_swatches;
+
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+    ED_region_tag_refresh_ui(region);
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+static void UI_OT_palette_swatch_size_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Palette Swatch Size";
+  ot->idname = "UI_OT_palette_swatch_size_toggle";
+  ot->description = "Toggle between normal and large palette color swatches";
+
+  ot->poll = ED_operator_regionactive;
+  ot->exec = palette_swatch_size_toggle_exec;
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+/** \} */
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -3217,6 +3255,7 @@ void operatortypes_ui()
   WM_operatortype_append(UI_OT_reloadtranslation);
   WM_operatortype_append(UI_OT_button_execute);
   WM_operatortype_append(UI_OT_button_string_clear);
+  WM_operatortype_append(UI_OT_palette_swatch_size_toggle);
 
   WM_operatortype_append(UI_OT_list_start_filter);
 

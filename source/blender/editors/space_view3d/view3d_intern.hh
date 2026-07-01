@@ -244,4 +244,26 @@ extern bool view3d_camera_border_hack_test;
 /* view3d_navigate_smoothview.cc */
 void view3d_smooth_free(RegionView3D *rv3d);
 
+/* view3d_image_grid.cc — operators (state + helpers declared in ED_view3d.hh)
+ * view3d_image_grid_panels.cc — ImageGridCatalogSelectorTree + popover panel registration */
+
+void VIEW3D_OT_image_grid_set_library(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_assign_texture(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_set_catalog(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_mark_asset(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_new(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_open(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_assign_catalog(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_copy_to_library(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_move_to_library(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_browse_assets(wmOperatorType *ot);
+void VIEW3D_OT_image_shelf_activate_asset(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_refresh_library(wmOperatorType *ot);
+
+/** Register the global popover panel for the image-grid catalog selector. */
+void image_grid_catalog_selector_panel_register(ARegionType *region_type);
+
+/** Register the global popover panel for the image-grid display settings. */
+void image_grid_display_panel_register(ARegionType *region_type);
+
 }  // namespace blender

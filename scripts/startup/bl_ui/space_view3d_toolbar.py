@@ -24,8 +24,9 @@ from bl_ui.properties_paint_common import (
     SmoothStrokePanel,
     FalloffPanel,
     DisplayPanel,
-    brush_texture_settings,
-    brush_mask_texture_settings,
+    draw_brush_texture_image_grid,
+    draw_brush_texture_properties,
+    draw_brush_mask_texture_properties,
     brush_settings,
     brush_settings_advanced,
     draw_color_settings,
@@ -483,7 +484,12 @@ class SelectPaintSlotHelper:
             case 'IMAGE':
                 mesh = ob.data
                 uv_text = mesh.uv_layers.active.name if mesh.uv_layers.active else ""
-                layout.template_ID(mode_settings, self.canvas_image_attr_name, new="image.new", open="image.open")
+                mat = ob.active_material if ob else None
+                layout.template_ID_browser(
+                    mode_settings, self.canvas_image_attr_name,
+                    new="image.new", open="image.open",
+                    material=mat,
+                )
                 if settings.missing_uvs:
                     layout.operator("paint.add_simple_uvs", icon='ADD', text="Add UVs")
                 else:
@@ -738,7 +744,20 @@ class VIEW3D_PT_stencil_projectpaint(Panel):
         col.active = ipaint.use_stencil_layer
 
         col.label(text="Stencil Image")
-        col.template_ID(ipaint, "stencil_image", new="image.new", open="image.open")
+        # Filter the image selector by the current material when one is available.
+        # The stencil image is not tied to a slot type, so only filter by material.
+        mat = ob.active_material if ob else None
+        if mat:
+            col.template_ID_with_filter_context(
+                ipaint, "stencil_image",
+                new="image.new", open="image.open",
+                filter='CURRENT_MATERIAL',
+                text="",
+                material=mat,
+                slot_type='NONE',
+            )
+        else:
+            col.template_ID(ipaint, "stencil_image", new="image.new", open="image.open")
 
         stencil_text = mesh.uv_layer_stencil.name if mesh.uv_layer_stencil else ""
 
@@ -770,7 +789,7 @@ class VIEW3D_PT_tools_brush_texture(Panel, View3DPaintPanel):
     bl_parent_id = "VIEW3D_PT_tools_brush_settings"
     bl_label = "Texture"
     bl_options = {'DEFAULT_CLOSED'}
-    bl_ui_units_x = 13
+    bl_ui_units_x = 12
 
     @classmethod
     def poll(cls, context):
@@ -791,10 +810,14 @@ class VIEW3D_PT_tools_brush_texture(Panel, View3DPaintPanel):
         brush = settings.brush
         tex_slot = brush.texture_slot
 
-        col = layout.column()
-        col.template_ID_preview(tex_slot, "texture", new="texture.new", rows=3, cols=8)
+        col = draw_brush_texture_image_grid(layout, tex_slot, self.is_popover)
 
-        brush_texture_settings(col, brush, context.sculpt_object)
+        draw_brush_texture_properties(
+            col,
+            brush,
+            context.sculpt_object,
+            default_closed=not self.is_popover,
+        )
 
 
 class VIEW3D_PT_tools_mask_texture(Panel, View3DPaintPanel, TextureMaskPanel):
@@ -818,9 +841,13 @@ class VIEW3D_PT_tools_mask_texture(Panel, View3DPaintPanel, TextureMaskPanel):
         col = layout.column()
         mask_tex_slot = brush.mask_texture_slot
 
-        col.template_ID_preview(mask_tex_slot, "texture", new="texture.new", rows=3, cols=8)
+        col = draw_brush_texture_image_grid(layout, mask_tex_slot, self.is_popover)
 
-        brush_mask_texture_settings(col, brush)
+        draw_brush_mask_texture_properties(
+            col,
+            brush,
+            default_closed=not self.is_popover,
+        )
 
 
 class VIEW3D_PT_tools_brush_stroke(Panel, View3DPaintPanel, StrokePanel):

@@ -231,4 +231,22 @@ struct AssetCatalogPathLink {
   char *path = nullptr;
 };
 
+/**
+ * Persistent collapsed/expanded state of a single asset catalog path in a tree view.
+ * Kept separate from #AssetCatalogPathLink so existing enabled-catalog lists and their on-disk
+ * format are untouched.
+ */
+struct AssetCatalogState {
+  struct AssetCatalogState *next = nullptr, *prev = nullptr;
+
+  /** Full catalog path. */
+  char *path = nullptr;
+
+  /** Time when this entry was last used (seconds since epoch). Used to drop stale entries. */
+  uint32_t last_used = 0;
+
+  char is_collapsed = false;
+  char _pad[3] = {};
+};
+
 }  // namespace blender

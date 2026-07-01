@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "BLI_function_ref.hh"
 
 namespace blender {
@@ -36,7 +38,9 @@ namespace ed::asset::shelf {
 void build_asset_view(ui::Layout &layout,
                       const AssetLibraryReference &library_ref,
                       const AssetShelf &shelf,
-                      const bContext &C);
+                      const bContext &C,
+                      std::optional<int> popup_grid_viewport_height_px = std::nullopt,
+                      std::optional<int> cols_hint = std::nullopt);
 
 void catalog_selector_panel_register(ARegionType *region_type);
 void popover_panel_register(ARegionType *region_type);
@@ -91,6 +95,15 @@ void settings_set_catalog_path_enabled(AssetShelf &shelf,
 void settings_foreach_enabled_catalog_path(
     const AssetShelf &shelf,
     FunctionRef<void(const asset_system::AssetCatalogPath &catalog_path)> fn);
+
+/** Collapsed state of a catalog path in the shelf, or nullopt when not saved yet. */
+std::optional<bool> settings_get_catalog_path_collapsed(
+    const AssetShelfSettings &settings, const asset_system::AssetCatalogPath &path);
+
+/** Save the collapsed state of a catalog path in the shelf settings. */
+void settings_set_catalog_path_collapsed(AssetShelfSettings &settings,
+                                         const asset_system::AssetCatalogPath &path,
+                                         bool collapsed);
 
 }  // namespace ed::asset::shelf
 }  // namespace blender

@@ -11,6 +11,7 @@
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
 
+#include "DNA_node_types.h"
 #include "DNA_screen_types.h"
 
 #include "UI_interface.hh"
@@ -44,6 +45,16 @@ static const EnumPropertyItem popup_draw_direction_items[] = {
      0,
      "Horizontal",
      "Draw popup panel to the side of the button"},
+    {int(ui::PopupAttachDirection::VerticalAlignLeft),
+     "VERTICAL_ALIGN_LEFT",
+     0,
+     "Vertical Align Left",
+     "Draw popup panel above or below the button, aligned to its left edge"},
+    {int(ui::PopupAttachDirection::VerticalAlignRight),
+     "VERTICAL_ALIGN_RIGHT",
+     0,
+     "Vertical Align Right",
+     "Draw popup panel above or below the button, aligned to its right edge"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 }  // namespace blender
@@ -739,6 +750,56 @@ static void rna_ui_template_ID_session_uid(
   template_ID_session_uid(*layout, C, ptr, propname, idcode);
 }
 
+static void rna_uiTemplateID_with_filter_context(Layout *layout,
+                                                 bContext *C,
+                                                 PointerRNA *ptr,
+                                                 const char *propname,
+                                                 const char *newop,
+                                                 const char *openop,
+                                                 const char *unlinkop,
+                                                 int filter,
+                                                 const char *text,
+                                                 PointerRNA *material_ptr,
+                                                 int slot_type,
+                                                 const char *filter_type)
+{
+  Material *material = nullptr;
+  if (material_ptr && material_ptr->data) {
+    material = static_cast<Material *>(material_ptr->data);
+  }
+
+  template_id_browse_with_context(layout,
+                                  C,
+                                  ptr,
+                                  propname,
+                                  newop,
+                                  openop,
+                                  unlinkop,
+                                  filter,
+                                  text,
+                                  material,
+                                  char(slot_type),
+                                  filter_type);
+}
+
+static void rna_uiTemplateID_browser(Layout *layout,
+                                     bContext *C,
+                                     PointerRNA *ptr,
+                                     const char *propname,
+                                     const char *newop,
+                                     const char *openop,
+                                     const char *unlinkop,
+                                     PointerRNA *material_ptr,
+                                     const char *filter_type)
+{
+  Material *material = nullptr;
+  if (material_ptr && material_ptr->data) {
+    material = static_cast<Material *>(material_ptr->data);
+  }
+  ui::template_id_browser(
+      layout, C, ptr, propname, material, newop, openop, unlinkop, filter_type);
+}
+
 static void rna_uiTemplateAnyID(Layout *layout,
                                 PointerRNA *ptr,
                                 const char *propname,
@@ -1189,6 +1250,48 @@ static int rna_ui_get_enum_icon(bContext *C,
   return icon;
 }
 
+static void rna_uiTemplateAssetImageGrid(
+    Layout *layout, bContext *C, PointerRNA *ptr, const char *propname, const bool is_popover)
+{
+  ui::template_asset_image_grid(layout, C, ptr, propname, is_popover);
+}
+
+static void rna_uiTemplateGridLibrarySelector(Layout *layout, bContext *C, PointerRNA *settings)
+{
+  ui::template_grid_library_selector(layout, C, settings);
+}
+
+static void rna_uiTemplateGridCatalogSelector(Layout *layout, bContext *C, PointerRNA *settings)
+{
+  ui::template_grid_catalog_selector(layout, C, settings);
+}
+
+static void rna_uiTemplateGridPreviewSize(Layout *layout, bContext *C, PointerRNA *settings)
+{
+  ui::template_grid_preview_size(layout, C, settings);
+}
+
+static void rna_uiTemplateGridViewAsset(Layout *layout,
+                                        bContext *C,
+                                        const char *grid_id,
+                                        PointerRNA *settings,
+                                        const char *activate_operator,
+                                        const char *drag_operator)
+{
+  ui::template_grid_view_asset(layout, C, grid_id, settings, activate_operator, drag_operator);
+}
+
+static void rna_uiTemplateGridViewCustom(Layout *layout,
+                                         bContext *C,
+                                         const char *grid_id,
+                                         const char *gridtype_name,
+                                         PointerRNA *dataptr,
+                                         const char *propname,
+                                         PointerRNA *settings)
+{
+  ui::template_grid_view_custom(layout, C, grid_id, gridtype_name, dataptr, propname, settings);
+}
+
 void rna_uiTemplateAssetShelfPopover(Layout *layout,
                                      bContext *C,
                                      const char *asset_shelf_id,
@@ -1345,6 +1448,13 @@ void RNA_api_ui_layout(StructRNA *srna)
   static const EnumPropertyItem id_template_filter_items[] = {
       {ui::TEMPLATE_ID_FILTER_ALL, "ALL", 0, "All", ""},
       {ui::TEMPLATE_ID_FILTER_AVAILABLE, "AVAILABLE", 0, "Available", ""},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL, "CURRENT_MATERIAL", 0, "Current Material", ""},
+      {ui::TEMPLATE_ID_FILTER_SLOT_TYPE, "SLOT_TYPE", 0, "Slot Type", ""},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL | ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+       "CURRENT_MATERIAL_AND_SLOT_TYPE",
+       0,
+       "Current Material & Slot Type",
+       ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -1910,6 +2020,72 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_boolean(func, "live_icon", false, "", "Show preview instead of fixed icon");
   api_ui_item_common_text(func);
 
+  func = RNA_def_function(
+      srna, "template_ID_with_filter_context", "rna_uiTemplateID_with_filter_context");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "Template ID with filter context for material and slot type filtering (for texture paint)");
+  api_ui_item_rna_common(func);
+  RNA_def_string(func, "new", nullptr, 0, "", "Operator identifier to create a new ID block");
+  RNA_def_string(func,
+                 "open",
+                 nullptr,
+                 0,
+                 "",
+                 "Operator identifier to open a file for creating a new ID block");
+  RNA_def_string(func, "unlink", nullptr, 0, "", "Operator identifier to unlink the ID block");
+  RNA_def_enum(func,
+               "filter",
+               id_template_filter_items,
+               ui::TEMPLATE_ID_FILTER_ALL,
+               "",
+               "Optionally limit the items which can be selected");
+  RNA_def_string(func, "text", nullptr, 0, "", "Custom label to display in UI");
+  parm = RNA_def_pointer(
+      func, "material", "Material", "", "Material to filter images by (optional)");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_enum(func,
+               "slot_type",
+               rna_enum_node_tex_image_paint_slot_type_items,
+               NODE_TEX_IMAGE_SLOT_NONE,
+               "Slot Type",
+               "Paint slot type to filter images by");
+  RNA_def_string(func,
+                 "filter_type",
+                 nullptr,
+                 0,
+                 "Filter Type",
+                 "bl_idname of a registered IDFilter class to further filter the listed "
+                 "data-blocks");
+
+  func = RNA_def_function(srna, "template_ID_browser", "rna_uiTemplateID_browser");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "Browse and assign a data-block via a filtered popover, with standard new/open controls. "
+      "The listed data-blocks come from the pointer property's ID type; image properties also get "
+      "paint-slot/material filters");
+  api_ui_item_rna_common(func);
+  RNA_def_string(func, "new", nullptr, 0, "", "Operator identifier to create a new ID block");
+  RNA_def_string(func,
+                 "open",
+                 nullptr,
+                 0,
+                 "",
+                 "Operator identifier to open a file for creating a new ID block");
+  RNA_def_string(func, "unlink", nullptr, 0, "", "Operator identifier to unlink the ID block");
+  parm = RNA_def_pointer(
+      func, "material", "Material", "", "Material providing the filter context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_string(func,
+                 "filter_type",
+                 nullptr,
+                 0,
+                 "Filter Type",
+                 "bl_idname of a registered IDFilter class to further filter the listed "
+                 "data-blocks");
+
   func = RNA_def_function(srna, "template_ID_session_uid", "rna_ui_template_ID_session_uid");
   RNA_def_function_ui_description(func,
                                   "Template ID search menu button for session_uid Int properties");
@@ -1949,6 +2125,76 @@ void RNA_api_ui_layout(StructRNA *srna)
                "",
                "Optionally limit the items which can be selected");
   RNA_def_boolean(func, "hide_buttons", false, "", "Show only list, no buttons");
+
+  func = RNA_def_function(srna, "template_asset_image_grid", "rna_uiTemplateAssetImageGrid");
+  RNA_def_function_ui_description(func, "Compact image asset grid for brush texture slot");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  api_ui_item_rna_common(func);
+  RNA_def_boolean(
+      func,
+      "is_popover",
+      false,
+      "Is Popover",
+      "Grid is drawn inside a popover; uses an independent height that is not saved to disk");
+
+  func = RNA_def_function(
+      srna, "template_grid_library_selector", "rna_uiTemplateGridLibrarySelector");
+  RNA_def_function_ui_description(func, "Asset-library dropdown for a reusable grid view");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+
+  func = RNA_def_function(
+      srna, "template_grid_catalog_selector", "rna_uiTemplateGridCatalogSelector");
+  RNA_def_function_ui_description(func, "Catalog filter popover for a reusable grid view");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+
+  func = RNA_def_function(srna, "template_grid_preview_size", "rna_uiTemplateGridPreviewSize");
+  RNA_def_function_ui_description(func, "Preview tile size control for a reusable grid view");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+
+  func = RNA_def_function(srna, "template_grid_view_asset", "rna_uiTemplateGridViewAsset");
+  RNA_def_function_ui_description(func,
+                                  "Reusable asset grid showing a library and catalog filter");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_string(func,
+                        "grid_id",
+                        nullptr,
+                        0,
+                        "",
+                        "Identifier the grid's scroll and resize state is stored under; must be "
+                        "globally unique, as two grids sharing an id share that state");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_string(
+      func, "activate_operator", nullptr, 0, "", "Operator run when an item is clicked");
+  RNA_def_string(func, "drag_operator", nullptr, 0, "", "Operator run when an item is dragged");
+
+  func = RNA_def_function(srna, "template_grid_view_custom", "rna_uiTemplateGridViewCustom");
+  RNA_def_function_ui_description(func, "Reusable grid driven by a registered Python UIGrid type");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_string(func,
+                        "grid_id",
+                        nullptr,
+                        0,
+                        "",
+                        "Identifier the grid's scroll and resize state is stored under; must be "
+                        "globally unique, as two grids sharing an id share that state");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(
+      func, "gridtype_name", nullptr, 0, "", "Identifier of the UIGrid type to use");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data owning the collection property");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "propname", nullptr, 0, "", "Collection property identifier");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
 
   func = RNA_def_function(srna, "template_matrix", "template_matrix");
   RNA_def_function_ui_description(
@@ -2225,6 +2471,16 @@ void RNA_api_ui_layout(StructRNA *srna)
   func = RNA_def_function(srna, "template_palette", "template_palette");
   RNA_def_function_ui_description(func, "Item. A palette used to pick colors.");
   api_ui_item_rna_common(func);
+  RNA_def_boolean(func,
+                  "show_empty_message",
+                  true,
+                  "Show Empty Message",
+                  "Show a message when the palette contains no colors");
+  RNA_def_boolean(func,
+                  "show_sort_buttons",
+                  true,
+                  "Show Sort Buttons",
+                  "Show buttons for moving and sorting colors in the palette");
 
   func = RNA_def_function(srna, "template_image_layers", "uiTemplateImageLayers");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);

@@ -2196,6 +2196,21 @@ enum eGPencil_Guide_Reference : char {
   GP_GUIDE_REF_OBJECT = 2,
 };
 
+/**
+ * Per-color-picker palette association.
+ *
+ * Stored in #ToolSettings::color_picker_palettes so that each color picker popup can keep its own
+ * #Palette independently of the tool's active palette (#Paint::palette). Identified by #key, which
+ * combines the edited data-block name and the property's RNA path.
+ */
+typedef struct ColorPickerPalette {
+  struct ColorPickerPalette *next, *prev;
+  /** Identifier of the color picker: owning ID name + the edited property's RNA path. */
+  char *key;
+  /** Palette assigned to this color picker (may be null). */
+  struct Palette *palette;
+} ColorPickerPalette;
+
 struct ToolSettings {
   DNA_DEFINE_CXX_METHODS(ToolSettings)
 
@@ -2216,6 +2231,9 @@ struct ToolSettings {
   GpWeightPaint *gp_weightpaint = nullptr;
   /** Curves sculpt. */
   CurvesSculpt *curves_sculpt = nullptr;
+
+  /** Per-color-picker palette associations (#ColorPickerPalette). */
+  ListBaseT<ColorPickerPalette> color_picker_palettes = {nullptr, nullptr};
 
   /** Vertex group weight - used only for editmode, not weight paint. */
   float vgroup_weight = 1.0f;

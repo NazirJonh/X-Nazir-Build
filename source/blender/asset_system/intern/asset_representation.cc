@@ -113,10 +113,12 @@ void AssetRepresentation::ensure_previewable(const bContext &C, ReportList *repo
   else {
     /* Use the full path as preview name, it's the only unique identifier we have. */
     const std::string full_path = this->full_path();
+    const ThumbSource thumb_source = (this->get_id_type() == ID_IM) ? THB_SOURCE_IMAGE :
+                                                                      THB_SOURCE_BLEND;
 
     /* Doesn't do the actual reading, just allocates and attaches the derived load info. */
     extern_asset.preview_ = BKE_previewimg_cached_thumbnail_read(
-        full_path.c_str(), full_path.c_str(), THB_SOURCE_BLEND, false, count_preview_users);
+        full_path.c_str(), full_path.c_str(), thumb_source, false, count_preview_users);
   }
 
   BKE_icon_preview_ensure(nullptr, extern_asset.preview_);
@@ -256,7 +258,14 @@ std::optional<eAssetImportMethod> AssetRepresentation::get_import_method() const
   if (metadata.flag & ASSETDATA_USE_OWN_IMPORT_METHOD) {
     return metadata.preferred_import_method;
   }
-  return owner_asset_library_.import_method();
+  if (std::optional method = owner_asset_library_.import_method()) {
+    return method;
+  }
+  /* Standalone image files are not stored in a .blend; append-reuse is the only valid method. */
+  if (!this->is_local_id() && this->get_id_type() == ID_IM) {
+    return ASSET_IMPORT_APPEND_REUSE;
+  }
+  return {};
 }
 
 bool AssetRepresentation::may_override_import_method() const

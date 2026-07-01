@@ -128,6 +128,9 @@ class AbstractTreeView : public AbstractView, public TreeViewItemContainer {
    */
   /* TODO support region zoom. */
   std::shared_ptr<int> custom_height_ = nullptr;
+  /** When false, the fixed height set via #set_default_rows() shows the scroll bar but omits the
+   * bottom resize grip and filter row (used by popovers whose height is fixed externally). */
+  bool allow_height_resize_ = true;
   /** Scroll offset in items, also see #uiViewState.scroll_offset. Clamped before creating the
    * button layout. */
   std::shared_ptr<int> scroll_value_ = nullptr;
@@ -180,8 +183,17 @@ class AbstractTreeView : public AbstractView, public TreeViewItemContainer {
    * highlight).
    *
    * \note Value should be greater than #MIN_ROWS. This is to prevent resizing below certain
-   * height. */
-  void set_default_rows(int default_rows);
+   * height.
+   *
+   * \param allow_resize: when false, the view shows the scroll bar for overflow but omits the
+   * bottom resize grip and filter row (for popovers whose height is fixed externally). */
+  void set_default_rows(int default_rows, bool allow_resize = true);
+  /**
+   * Like #set_default_rows(), but the height is given directly in pixels (snapped to whole item
+   * rows on draw). Lets a caller match the view height to another element's exact pixel height (e.g.
+   * a sibling grid viewport in a popover) instead of guessing a row count.
+   */
+  void set_fixed_height_px(int height_px, bool allow_resize = true);
   TreeViewSortOrder invert_sort_type_get() const;
   /**
    * Scroll the view so the active item is visible.

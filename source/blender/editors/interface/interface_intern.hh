@@ -236,6 +236,14 @@ struct Button : NonMovable {
   rctf rect = {};
 
   char *poin = nullptr;
+  /** For a 2D corner #ButtonType::Grip: the second (vertical) raw value pointer; #poin drives the
+   * horizontal axis. Both point at `short` values. Set via #button_grip_2d_set. */
+  char *poin2 = nullptr;
+  /** This #ButtonType::Grip resizes on both axes at once (#poin = X, #poin2 = Y). */
+  bool grip_2d = false;
+  /** For a 2D corner grip placed at the *top* (e.g. a popover that opened upward): dragging up
+   * grows #poin2 instead of dragging down. #poin (width) is unaffected. */
+  bool grip_2d_flip_y = false;
   float hardmin = 0, hardmax = 0, softmin = 0, softmax = 0;
 
   /** See \ref button_func_identity_compare_set(). */
@@ -702,6 +710,20 @@ struct Block {
   rctf rect = {};
   float aspect = 0.0f;
 
+  /**
+   * Clip rect (block space) applied while drawing buttons flagged #BUT_GRID_SCROLL_CLIP. Set by
+   * #Layout::view_scroll_clip_set so an embedded grid view can scroll its rows by sub-row pixel
+   * amounts while the visible area stays a fixed window (e.g. the brush texture image grid).
+   * Grid tile buttons are shifted by the sub-row offset in layout resolve and excluded from
+   * #block_align_calc so this rect stays aligned with the visible window.
+   *
+   * Only one scroll-clip window per block is supported (asserted in #Layout::resolve): the rect
+   * and the button flag are block-global, so a second window would re-target the first window's
+   * buttons to its own rect.
+   */
+  bool view_scroll_clip_enabled = false;
+  rctf view_scroll_clip_rect = {};
+
   BlockAlertLevel alert_level = BlockAlertLevel::None;
 
   /** Unique hash used to implement popup menu memory. */
@@ -824,6 +846,30 @@ void fontscale(float *points, float aspect);
 /** Project button or block (but==nullptr) to pixels in region-space. */
 void button_to_pixelrect(rcti *rect, const ARegion *region, const Block *block, const Button *but);
 rcti rect_to_pixelrect(const ARegion *region, const Block *block, const rctf *src_rect);
+
+/** Translate #Block::view_scroll_clip_rect with buttons (e.g. #block_translate). */
+void block_view_scroll_clip_translate(Block *block, float dx, float dy);
+
+/** Vertical-only helper (e.g. #offset_panel_block, popup scroll offsets). */
+void block_view_scroll_clip_offset_apply(Block *block, float dy);
+
+/**
+ * True when \a but is a grid-scroll-clipped tile that intersects the effective clip rect.
+ * Such buttons must stay visible/interactive even if popup scroll tests mark them #UI_SCROLLED.
+ */
+bool block_grid_scroll_clip_contains_button(const Block *block, const Button *but);
+
+/**
+ * Effective rect of \a but for bounds/scroll computations.
+ *
+ * A #BUT_GRID_SCROLL_CLIP tile may overflow its fixed window (the extra buffer row and the
+ * sub-row-scrolled partial rows). That overflow is masked away at draw time, so it must not
+ * inflate block bounds either - otherwise it would grow the panel/popup size and feed the popup
+ * auto-scroll, shifting rows around. For such buttons \a r_rect is clamped to
+ * #Block::view_scroll_clip_rect; returns false when the button lies fully outside the window (it
+ * should be ignored). For all other buttons \a r_rect is the button rect and the result is true.
+ */
+bool block_grid_scroll_clip_bounds_rect(const Block *block, const Button *but, rctf *r_rect);
 
 void block_to_region_fl(const ARegion *region, const Block *block, float *x, float *y);
 void block_to_window_fl(const ARegion *region, const Block *block, float *x, float *y);
@@ -1228,6 +1274,14 @@ void pie_menu_level_create(Block *block,
 void popup_translate(ARegion *region, const int mdiff[2]);
 void popup_block_free(bContext *C, PopupBlockHandle *handle);
 void popup_block_scrolltest(Block *block);
+/** Apply popup menu scroll delta (#PopupBlockHandle::scrolloffset and button rects). */
+void popup_block_scroll_apply_offset_y(ARegion *region, Block *block, float dy);
+/**
+ * Vertical popover chrome (arrow hint + bounds padding, scaled by 1/aspect, + screen margin)
+ * that a build-time height budget must subtract. Defined next to the positioning code that
+ * applies these offsets so the two cannot drift apart.
+ */
+float popover_vertical_chrome_px(float aspect);
 
 /** \} */
 
@@ -1263,6 +1317,20 @@ bool layout_panel_toggle_open(const bContext *C, LayoutPanelHeader *header);
 LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int my);
 /** Apply scroll to layout panels when the main panel is used in popups. */
 void layout_panel_popup_scroll_apply(Panel *panel, const float dy);
+
+/** Fixed-viewport grid popover: edge hover auto-scroll (#PopupBlockHandle::scrolltimer). */
+bool popup_block_fixed_grid_scrolltimer_step(bContext *C,
+                                             PopupBlockHandle *menu,
+                                             Block *block,
+                                             int my);
+bool popup_block_fixed_grid_autoscroll_at_pointer(Block *block, int my);
+
+/**
+ * A region owning the unified grid handler's active fling or touch drag is being freed: stop the
+ * fling (removing its timer) and drop the drag, so no later event touches the dead region. Called
+ * from #popup_block_remove.
+ */
+void grid_view_input_region_freed(const ARegion *region);
 
 /**
  * Draws in resolution of 48x4 colors.
@@ -1653,6 +1721,8 @@ Button *listrow_find_index(const ARegion *region,
                            Button *listbox) ATTR_WARN_UNUSED_RESULT;
 Button *view_item_find_mouse_over(const ARegion *region, const int xy[2]) ATTR_NONNULL(1, 2);
 Button *view_item_find_active(const ARegion *region, const AbstractView *view = nullptr);
+/** Active #ButtonType::ViewItem in an #AbstractGridView (skips tree/list view items). */
+Button *view_item_find_active_grid(const ARegion *region);
 Button *view_item_find_search_highlight(const ARegion *region);
 
 using ButtonFindPollFn = bool (*)(const Button *but, const void *customdata);
@@ -1777,6 +1847,8 @@ void rna_collection_search_update_fn(
 /* `interface_ops.cc` */
 
 bool jump_to_target_button_poll(bContext *C);
+/** Session-only display state toggled by #UI_OT_palette_swatch_size_toggle. */
+bool palette_swatch_size_large_get();
 
 /* `interface_query.cc` */
 
@@ -1785,6 +1857,12 @@ void interface_tag_script_reload_queries();
 /* `views/interface_view.cc` */
 
 void block_free_views(Block *block);
+/**
+ * First grid view in \a block that uses a fixed-viewport layout (the popover/menu scroll model).
+ * Lets popup event handling drive grid scrolling without knowing the concrete view, so no caller
+ * needs to match a specific view idname. Returns null if there is no such view.
+ */
+AbstractGridView *block_view_find_fixed_viewport_grid(Block &block);
 void block_views_end(ARegion *region, const Block *block);
 void block_view_persistent_state_restore(const ARegion &region,
                                          const Block &block,

@@ -23,18 +23,21 @@
 #include "BKE_idtype.hh"
 #include "BKE_main.hh"
 #include "BKE_screen.hh"
+#include "BKE_wm_runtime.hh"
 
 #include "BLT_translation.hh"
 
 #include "DNA_screen_types.h"
 
 #include "ED_asset_list.hh"
+#include "ED_fileselect.hh"
 #include "ED_screen.hh"
 
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 #include "UI_tree_view.hh"
@@ -909,7 +912,14 @@ static void asset_shelf_header_draw(const bContext *C, Header *header)
 
   layout.separator_spacer();
 
-  layout.popover(C, "ASSETSHELF_PT_display", "", ICON_IMGDISPLAY);
+  if (shelf_ptr.data) {
+    PropertyRNA *prop = RNA_struct_find_property(&shelf_ptr, "preview_size_preset");
+    layout.prop_with_popover(
+        &shelf_ptr, prop, -1, 0, ui::ITEM_R_ICON_ONLY, {}, ICON_NONE, "ASSETSHELF_PT_display");
+  }
+  else {
+    layout.popover(C, "ASSETSHELF_PT_display", "", ICON_IMGDISPLAY);
+  }
   ui::Layout &sub = layout.row(false);
   /* Same as file/asset browser header. */
   sub.ui_units_x_set(8);

@@ -8,13 +8,19 @@
 
 #pragma once
 
+#include <optional>
+
 #include "BLI_compiler_attrs.h"
 #include "BLI_sys_types.h"
 
 namespace blender {
 
+struct AssetCatalogState;
+struct AssetLibraryReference;
+struct BlendDataReader;
 struct BlendWriter;
 struct UserDef;
+struct bUserAssetBrowserSettings;
 struct bUserExtensionRepo;
 struct bUserAssetLibrary;
 struct bUserAssetShelfSettings;
@@ -217,6 +223,56 @@ bool BKE_preferences_asset_shelf_settings_is_catalog_path_enabled(const UserDef 
 bool BKE_preferences_asset_shelf_settings_ensure_catalog_path_enabled(UserDef *userdef,
                                                                       const char *shelf_idname,
                                                                       const char *catalog_path);
+
+/**
+ * Read the popup-shelf view preferences (preview size, display flags, popup width) stored for
+ * the given shelf type. Fields whose stored value is 0 ("not set") are left untouched in the
+ * outputs, so callers can pre-seed them with the shelf type's defaults.
+ */
+void BKE_preferences_asset_shelf_popup_view_load(const UserDef *userdef,
+                                                 const char *shelf_idname,
+                                                 short *r_preview_size,
+                                                 short *r_display_flag,
+                                                 short *r_width_units);
+
+/**
+ * Persist the popup-shelf view preferences for the given shelf type. Creates the per-type
+ * settings entry in the Preferences when missing. Caller is responsible for tagging the
+ * Preferences as dirty (`U.runtime.is_dirty`).
+ */
+void BKE_preferences_asset_shelf_popup_view_store(UserDef *userdef,
+                                                  const char *shelf_idname,
+                                                  short preview_size,
+                                                  short display_flag,
+                                                  short width_units);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name #bUserAssetBrowserSettings
+ *
+ * Per-library persistent collapse state of asset catalog paths in the asset browser.
+ * \{ */
+
+bUserAssetBrowserSettings *BKE_preferences_asset_browser_settings_get(
+    const UserDef *userdef, const char *library_identifier);
+/**
+ * Resolve (and lazily create) the settings entry for the given asset library reference.
+ */
+bUserAssetBrowserSettings *BKE_preferences_asset_browser_settings_get_from_library_ref(
+    UserDef *userdef, const AssetLibraryReference *library_ref);
+/** Collapsed state for a catalog path in a library, or nullopt when not saved yet. */
+std::optional<bool> BKE_preferences_asset_browser_settings_is_catalog_collapsed(
+    const UserDef *userdef, const char *library_identifier, const char *catalog_path);
+void BKE_preferences_asset_browser_settings_set_catalog_collapsed(UserDef *userdef,
+                                                                  const char *library_identifier,
+                                                                  const char *catalog_path,
+                                                                  bool collapsed);
+
+void BKE_preferences_asset_browser_settings_blend_write(BlendWriter *writer,
+                                                        const bUserAssetBrowserSettings *settings);
+void BKE_preferences_asset_browser_settings_blend_read_data(BlendDataReader *reader,
+                                                            bUserAssetBrowserSettings *settings);
 
 /** \} */
 

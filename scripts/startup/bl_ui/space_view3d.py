@@ -9236,6 +9236,34 @@ class VIEW3D_AST_brush_texture_paint(View3DAssetShelf, bpy.types.AssetShelf):
         return context.space_data.type != 'IMAGE_EDITOR'
 
 
+class VIEW3D_AST_image_texture(AssetShelfHiddenByDefault, bpy.types.AssetShelf):
+    """Image texture assets for sculpt/paint toolbars (popover only)."""
+    bl_space_type = 'VIEW_3D'
+    bl_idname = "VIEW3D_AST_image_texture"
+    bl_label = "Image Textures"
+    bl_activate_operator = "view3d.image_shelf_activate_asset"
+    filter_image = True
+
+    @classmethod
+    def poll(cls, context):
+        # Popover-only: never become the active shelf in the permanent View3D asset shelf region.
+        region = context.region
+        if region and region.type == 'ASSET_SHELF':
+            return False
+        if context.space_data.type != 'VIEW_3D':
+            return False
+        if context.mode not in {
+            'SCULPT', 'PAINT_TEXTURE', 'PAINT_VERTEX', 'PAINT_WEIGHT',
+            'PAINT_GPENCIL', 'SCULPT_GPENCIL', 'VERTEX_GPENCIL', 'WEIGHT_GPENCIL',
+        }:
+            return False
+        return context.tool_settings is not None
+
+    @classmethod
+    def asset_poll(cls, asset):
+        return asset.id_type == 'IMAGE'
+
+
 class VIEW3D_AST_brush_gpencil_paint(View3DAssetShelf, bpy.types.AssetShelf):
     mode = 'PAINT_GREASE_PENCIL'
     mode_prop = "use_paint_grease_pencil"
@@ -9521,6 +9549,7 @@ classes = (
     VIEW3D_AST_brush_vertex_paint,
     VIEW3D_AST_brush_weight_paint,
     VIEW3D_AST_brush_texture_paint,
+    VIEW3D_AST_image_texture,
     VIEW3D_AST_brush_gpencil_paint,
     VIEW3D_AST_brush_gpencil_sculpt,
     VIEW3D_AST_brush_gpencil_vertex,

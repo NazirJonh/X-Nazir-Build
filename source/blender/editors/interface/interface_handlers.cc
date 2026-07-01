@@ -91,6 +91,35 @@ namespace blender::ui {
 static CLG_LogRef LOG = {"ui.handler"};
 
 /* -------------------------------------------------------------------- */
+/** \name Pre-Button Region Handlers
+ *
+ * Editor-registered handlers tried before button activation so embedded custom views (e.g. the
+ * brush texture image grid) can intercept events without the generic UI layer depending on a
+ * specific space. See #region_pre_button_handler_add.
+ * \{ */
+
+static Vector<RegionPreButtonHandlerFn> g_region_pre_button_handlers;
+
+void region_pre_button_handler_add(RegionPreButtonHandlerFn fn)
+{
+  if (fn && !g_region_pre_button_handlers.contains(fn)) {
+    g_region_pre_button_handlers.append(fn);
+  }
+}
+
+static int region_pre_button_handlers_call(bContext *C, const wmEvent *event, ARegion *region)
+{
+  for (const RegionPreButtonHandlerFn fn : g_region_pre_button_handlers) {
+    if (fn(C, event, region) == WM_UI_HANDLER_BREAK) {
+      return WM_UI_HANDLER_BREAK;
+    }
+  }
+  return WM_UI_HANDLER_CONTINUE;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Feature Defines
  *
  * These defines allow developers to locally toggle functionality which
@@ -4775,6 +4804,12 @@ static void numedit_apply(bContext *C, Block *block, Button *but, HandleButtonDa
   }
 
   ED_region_tag_redraw(data->region);
+  if (ELEM(but->type, ButtonType::Scroll, ButtonType::Grip)) {
+    Block *block = but->block;
+    if (block->view_scroll_clip_enabled && (but->drawflag & BUT_GRID_SCROLL_CLIP)) {
+      ED_region_tag_refresh_ui(data->region);
+    }
+  }
 }
 
 static void but_extra_operator_icon_apply(bContext *C, Button *but, ButtonExtraOpIcon *op_icon)
@@ -5700,7 +5735,11 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
 
           if (block_is_popup_any(but->block)) {
             /* TODO(!147047): This should be handled in selection operator. */
-            force_activate_view_item_but(C, data->region, view_item_but, false);
+            /* For select-on-click items, defer activation to KM_CLICK in
+             * handle_view_item_event so drag-to-scroll does not trigger selection on press. */
+            if (!view_item_but->view_item->is_select_on_click()) {
+              force_activate_view_item_but(C, data->region, view_item_but, false);
+            }
             return WM_UI_HANDLER_BREAK;
           }
 
@@ -5714,6 +5753,17 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
            * registered to add custom activate or drag operators (the pose library does this for
            * example). */
           return WM_UI_HANDLER_CONTINUE;
+        case KM_RELEASE:
+          if (block_is_popup_any(but->block) && view_item_but->view_item->is_select_on_click()) {
+            /* Popup handlers always consume events (return `WM_UI_HANDLER_BREAK`), preventing
+             * the WM from synthesizing `KM_CLICK`. Activate on `KM_RELEASE` as a substitute.
+             * Drag-to-scroll releases are filtered upstream by returning `WM_UI_HANDLER_BREAK`
+             * before this handler is reached, so reaching here means a genuine tap — close the
+             * popup (unless the view opts to stay open via #set_popup_keep_open). */
+            force_activate_view_item_but(C, data->region, view_item_but, true);
+            return WM_UI_HANDLER_BREAK;
+          }
+          break;
         case KM_DBL_CLICK:
           if (view_item_can_rename(*view_item_but->view_item)) {
             data->cancel = true;
@@ -10901,7 +10951,9 @@ static int handle_view_item_event(bContext *C,
                 view_item_find_mouse_over(region, event->xy));
 
         if (view_but) {
-          if (view_item_supports_drag(*view_but->view_item)) {
+          if (view_item_supports_drag(*view_but->view_item) ||
+              view_but->view_item->is_select_on_click())
+          {
             if (event->val != KM_CLICK) {
               break;
             }
@@ -11155,30 +11207,6 @@ static char menu_scroll_test(Block *block, int2 xy)
   return 0;
 }
 
-static void menu_scroll_apply_offset_y(ARegion *region, Block *block, float dy)
-{
-  BLI_assert(dy != 0.0f);
-
-  /* remember scroll offset for refreshes */
-  const float prev_scroll = block->handle->scrolloffset;
-  block->handle->scrolloffset = std::clamp(
-      block->handle->scrolloffset + dy, block->handle->scrollmin, block->handle->scrollmax);
-  dy = block->handle->scrolloffset - prev_scroll;
-  /* Apply popup scroll delta to layout panels too. */
-  layout_panel_popup_scroll_apply(block->panel, dy);
-
-  /* apply scroll offset */
-  for (Button &bt : block->buttons()) {
-    bt.rect.ymin += dy;
-    bt.rect.ymax += dy;
-  }
-
-  /* set flags again */
-  popup_block_scrolltest(block);
-
-  ED_region_tag_redraw(region);
-}
-
 /** Scroll to activated button. */
 static bool menu_scroll_to_but(ARegion *region, Block *block, Button *but_target)
 {
@@ -11194,7 +11222,7 @@ static bool menu_scroll_to_but(ARegion *region, Block *block, Button *but_target
     }
   }
   if (dy != 0.0f) {
-    menu_scroll_apply_offset_y(region, block, dy);
+    popup_block_scroll_apply_offset_y(region, block, dy);
     return true;
   }
   return false;
@@ -11214,7 +11242,7 @@ static bool menu_scroll_to_y(ARegion *region, Block *block, int y)
     dy = UI_UNIT_Y / block->aspect; /* scroll to the bottom */
   }
   if (dy != 0.0f) {
-    menu_scroll_apply_offset_y(region, block, dy);
+    popup_block_scroll_apply_offset_y(region, block, dy);
     return true;
   }
   return false;
@@ -11451,7 +11479,7 @@ static int handle_menu_mmb_event(bContext *C,
     const int delta = (menu->mmb_panning_last_y - event->xy[1]) *
                       (event->flag & WM_EVENT_SCROLL_INVERT ? 1 : -1);
     if (delta) {
-      menu_scroll_apply_offset_y(region, block, delta);
+      popup_block_scroll_apply_offset_y(region, block, delta);
       menu->mmb_panning_last_y = event->xy[1];
     }
     retval = WM_UI_HANDLER_BREAK;
@@ -11691,7 +11719,7 @@ static int handle_menu_event(bContext *C,
           else if (block->flag & (BLOCK_CLIPTOP | BLOCK_CLIPBOTTOM)) {
             const float dy = event->xy[1] - event->prev_xy[1];
             if (dy != 0.0f) {
-              menu_scroll_apply_offset_y(region, block, dy);
+              popup_block_scroll_apply_offset_y(region, block, dy);
 
               if (but) {
                 but->active->cancel = true;
@@ -12654,6 +12682,10 @@ static int handle_menus_recursive(bContext *C,
   /* now handle events for our own menu */
 
   if (retval == WM_UI_HANDLER_CONTINUE) {
+    retval = region_pre_button_handlers_call(C, event, menu->region);
+  }
+
+  if (retval == WM_UI_HANDLER_CONTINUE) {
     retval = handle_region_semi_modal_buttons(C, event, menu->region);
   }
 
@@ -12762,6 +12794,10 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
         button_tooltip_timer_remove(C, but);
       }
     }
+  }
+
+  if (retval == WM_UI_HANDLER_CONTINUE) {
+    retval = region_pre_button_handlers_call(C, event, region);
   }
 
   if (retval == WM_UI_HANDLER_CONTINUE) {
@@ -12974,8 +13010,16 @@ static int handler_region_menu(bContext *C, const wmEvent *event, void * /*userd
       }
     }
     else {
-      /* handle events for the activated button */
-      retval = handle_button_event(C, event, but);
+      /* Run pre-button handlers (e.g. drag-scroll) before default button handling, even while a
+       * button is in a modal state (e.g. #BUTTON_STATE_WAIT_RELEASE). Without this, LMB
+       * drag-scroll over items in non-popup regions (e.g. Asset Browser) is bypassed once the
+       * button is pressed, because this window-level modal handler routes events straight to
+       * #handle_button_event. */
+      retval = region_pre_button_handlers_call(C, event, region);
+      if (retval == WM_UI_HANDLER_CONTINUE) {
+        /* handle events for the activated button */
+        retval = handle_button_event(C, event, but);
+      }
     }
   }
 

@@ -2589,6 +2589,31 @@ def km_file_browser_main(params):
     return keymap
 
 
+def km_asset_browser_main(params):
+    items = []
+    keymap = (
+        "Asset Browser Main",
+        {"space_type": 'FILE_BROWSER', "region_type": 'WINDOW'},
+        {"items": items},
+    )
+
+    items.extend([
+        # Asset-browser-only override of the "File Browser Main" press-select: wait for a click or
+        # drag instead of selecting on press. This keeps the item under the cursor unselected while
+        # starting an LMB drag-scroll gesture (and lets that gesture pan instead of selecting).
+        # This keymap is processed before "File Browser Main", and the modal generic-select returns
+        # `PASS_THROUGH | RUNNING_MODAL` (handled as break), so the press-select there is shadowed.
+        ("file.select", {"type": 'LEFTMOUSE', "value": 'PRESS'},
+         {"properties": [
+             ("open", params.use_file_single_click),
+             ("deselect_all", not params.legacy),
+             ("use_select_on_click", True),
+         ]}),
+    ])
+
+    return keymap
+
+
 def km_file_browser_buttons(_params):
     items = []
     keymap = (
@@ -9004,6 +9029,7 @@ def generate_keymaps(params=None):
         km_info(params),
         km_file_browser(params),
         km_file_browser_main(params),
+        km_asset_browser_main(params),
         km_file_browser_buttons(params),
         km_dopesheet_generic(params),
         km_dopesheet(params),

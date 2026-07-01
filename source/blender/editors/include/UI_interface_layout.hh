@@ -143,6 +143,13 @@ struct Layout : public Item, NonCopyable, NonMovable {
   float units_[2] = {0.0f, 0.0f};
   /** Is copied to uiButs created in this layout. */
   float search_weight_ = 0.0f;
+  /**
+   * When > 0, this layout is a fixed-height scroll-clip window: its reported height is clamped to
+   * this many pixels regardless of content. See #view_scroll_clip_set.
+   */
+  int view_scroll_clip_height_ = 0;
+  /** Vertical pixel offset applied to descendant buttons of a scroll-clip window. */
+  int view_scroll_clip_offset_ = 0;
 
  public:
   Layout(ItemType type, LayoutRoot *root);
@@ -234,6 +241,20 @@ struct Layout : public Item, NonCopyable, NonMovable {
   [[nodiscard]] float ui_units_y() const;
   /** Sets a fixed height size for this layout. */
   void ui_units_y_set(float height);
+
+  /**
+   * Make this layout a fixed-height "scroll window": after layout resolve its reported height is
+   * clamped to \a height_px regardless of content, every descendant button is shifted vertically
+   * by
+   * \a offset_px and flagged #BUT_GRID_SCROLL_CLIP, and the owning block is told to clip those
+   * buttons to the visible window. This lets an embedded grid view scroll its rows by sub-row
+   * pixel amounts while occupying a fixed slot in the surrounding layout (brush texture image
+   * grid).
+   *
+   * \param height_px: Visible window height in pixels.
+   * \param offset_px: Positive shifts content up (scrolls down through the content).
+   */
+  void view_scroll_clip_set(int height_px, int offset_px);
 
   [[nodiscard]] bool use_property_split() const;
   /**
@@ -843,6 +864,12 @@ inline float Layout::ui_units_y() const
 inline void Layout::ui_units_y_set(float height)
 {
   units_[1] = height;
+}
+
+inline void Layout::view_scroll_clip_set(int height_px, int offset_px)
+{
+  view_scroll_clip_height_ = height_px;
+  view_scroll_clip_offset_ = offset_px;
 }
 
 inline int Layout::width() const

@@ -421,7 +421,6 @@ static void file_but_enable_drag(ui::Button *but,
            (file->typeflag & FILE_TYPE_ASSET) != 0)
   {
     const int import_method = ED_fileselect_asset_import_method_get(sfile, file);
-    BLI_assert(import_method > -1);
     if (import_method > -1) {
       AssetImportSettings import_settings{};
       import_settings.method = eAssetImportMethod(import_method);
@@ -432,6 +431,10 @@ static void file_but_enable_drag(ui::Button *but,
                 FILE_ASSET_IMPORT_INSTANCE_COLLECTIONS_ON_APPEND)) != 0;
 
       button_drag_set_asset(but, file->asset, import_settings, icon, file->preview_icon_id);
+    }
+    else if (file->asset->get_id_type() == ID_IM && preview_image) {
+      /* On-disk image assets may have no blend-library import method; drag as image file. */
+      button_drag_set_image(but, path, icon, preview_image, scale);
     }
   }
   else if (preview_image) {
@@ -1479,8 +1482,18 @@ void file_draw_list(const bContext *C, ARegion *region)
         /* Trigger the preview loader to wait until the download is done and load the preview from
          * disk. Has to be done explicitly here because the preview isn't attached to a button. */
         if (!file->asset->is_local_id()) {
-          ui::icon_render_id_ex(
-              C, nullptr, nullptr, ICON_SIZE_PREVIEW, true, file->asset->get_preview());
+          if (PreviewImage *preview = file->asset->get_preview()) {
+            ui::icon_render_id_ex(C, nullptr, nullptr, ICON_SIZE_PREVIEW, true, preview);
+          }
+        }
+      }
+      else if ((file->typeflag & FILE_TYPE_IMAGE) && file->asset && !filelist_loading &&
+               !file->preview_icon_id)
+      {
+        /* Fallback while the filelist image preview job is pending. */
+        filelist_on_disk_image_asset_preview_request(C, file);
+        if (file->preview_icon_id) {
+          ui::icon_ensure_deferred(C, file->preview_icon_id, true);
         }
       }
 

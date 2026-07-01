@@ -23,18 +23,21 @@
 #include "BKE_idtype.hh"
 #include "BKE_main.hh"
 #include "BKE_screen.hh"
+#include "BKE_wm_runtime.hh"
 
 #include "BLT_translation.hh"
 
 #include "DNA_screen_types.h"
 
 #include "ED_asset_list.hh"
+#include "ED_fileselect.hh"
 #include "ED_screen.hh"
 
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 #include "UI_tree_view.hh"
@@ -909,7 +912,14 @@ static void asset_shelf_header_draw(const bContext *C, Header *header)
 
   layout.separator_spacer();
 
-  layout.popover(C, "ASSETSHELF_PT_display", "", ICON_IMGDISPLAY);
+  if (shelf_ptr.data) {
+    PropertyRNA *prop = RNA_struct_find_property(&shelf_ptr, "preview_size_preset");
+    layout.prop_with_popover(
+        &shelf_ptr, prop, -1, 0, ui::ITEM_R_ICON_ONLY, {}, ICON_NONE, "ASSETSHELF_PT_display");
+  }
+  else {
+    layout.popover(C, "ASSETSHELF_PT_display", "", ICON_IMGDISPLAY);
+  }
   ui::Layout &sub = layout.row(false);
   /* Same as file/asset browser header. */
   sub.ui_units_x_set(8);
@@ -993,6 +1003,210 @@ void show_catalog_in_visible_shelves(const bContext &C, const StringRefNull cata
       }
     }
   }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name LMB Drag-Scroll for Asset Views
+ *
+ * Natural (phone-style) drag-to-scroll: holding LMB and dragging up moves content up,
+ * revealing items below. Works in the asset shelf region, the asset shelf popover, and
+ * the asset browser main window region.
+ * \{ */
+
+struct AssetViewDragScrollState {
+  bool active = false;
+  bool dragging = false;
+  /* Browser only: vertical direction decided but not yet committed — waiting one event so the
+   * button handler can call #WM_event_start_drag if the user intends drag-and-drop rather than
+   * scroll. If #wm->runtime->drags is still empty on the next event, commit to scroll. */
+  bool scroll_pending = false;
+  int start_x = 0;
+  int start_y = 0;
+  int last_y = 0;
+};
+
+/* Displacement (in pixels) at which the gesture's dominant direction is decided. Kept at/below the
+ * window-level drag threshold so the decision happens before the WM promotes the press to a
+ * click-drag operator (e.g. #FILE_OT_select_box). */
+static constexpr int ASSET_DRAG_DIRECTION_THRESHOLD = 3;
+/* Vertical displacement at which scrolling actually starts (a small dead-zone for a steady feel
+ * and to leave a quick click forgiving). */
+static constexpr int ASSET_DRAG_SCROLL_THRESHOLD = 8;
+
+static AssetViewDragScrollState g_asset_drag_scroll;
+
+static bool region_wants_drag_scroll(const bContext *C, const ARegion *region)
+{
+  if (!region) {
+    return false;
+  }
+  /* Permanent asset shelf region (e.g. bottom of 3D viewport). */
+  if (region->regiontype == RGN_TYPE_ASSET_SHELF) {
+    return true;
+  }
+  /* Asset browser main window region. */
+  if (region->regiontype == RGN_TYPE_WINDOW) {
+    const SpaceFile *sfile = CTX_wm_space_file(C);
+    if (sfile && ED_fileselect_is_asset_browser(sfile)) {
+      return true;
+    }
+  }
+  /* Asset shelf popover: the panel is drawn inline via `paneltype_draw_impl` and is never
+   * stored in `region->panels`. Use `region_popup_has_panel` which checks
+   * `block->panel->panelname` (set by `popup_dummy_panel_set` to the actual panel idname). */
+  if (region->regiontype == RGN_TYPE_TEMPORARY) {
+    /* Use the region argument directly rather than #CTX_wm_region_popup: the context popup
+     * region isn't set yet when events reach pre-button handlers from a button-attached popover
+     * (see #handler_region_menu -> #handle_menus_recursive), so the context lookup would miss. */
+    return ui::region_popup_has_panel(region, "ASSETSHELF_PT_popover_panel");
+  }
+  return false;
+}
+
+static int asset_view_drag_scroll_handler(bContext *C, const wmEvent *event, ARegion *region)
+{
+  if (!region_wants_drag_scroll(C, region)) {
+    if (g_asset_drag_scroll.active) {
+      g_asset_drag_scroll = {};
+    }
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
+    g_asset_drag_scroll = {};
+    g_asset_drag_scroll.active = true;
+    g_asset_drag_scroll.start_x = event->xy[0];
+    g_asset_drag_scroll.start_y = event->xy[1];
+    g_asset_drag_scroll.last_y = event->xy[1];
+    /* Pass through so buttons still receive the press for click-activation. */
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+    if (g_asset_drag_scroll.active) {
+      const bool was_dragging = g_asset_drag_scroll.dragging;
+      g_asset_drag_scroll = {};
+      /* Consume release after drag to prevent accidental item activation. */
+      return was_dragging ? WM_UI_HANDLER_BREAK : WM_UI_HANDLER_CONTINUE;
+    }
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  if (event->type == MOUSEMOVE && g_asset_drag_scroll.active) {
+    const int dy = event->xy[1] - g_asset_drag_scroll.last_y;
+    g_asset_drag_scroll.last_y = event->xy[1];
+
+    if (!g_asset_drag_scroll.dragging) {
+      /* Check whether a WM drag-and-drop was started by the button handler on the previous event
+       * (where we returned #WM_UI_HANDLER_CONTINUE via the deferred-capture path). */
+      wmWindowManager *wm = CTX_wm_manager(C);
+      if (wm && !wm->runtime->drags.is_empty()) {
+        if (g_asset_drag_scroll.scroll_pending) {
+          /* Scroll intent was already confirmed on the previous event, but the button handler
+           * started a WM drag in the meantime. Cancel that drag and fall through to commit
+           * scrolling — a purely vertical gesture should never trigger drag-and-drop. */
+          WM_drag_free_list(&wm->runtime->drags);
+          WM_cursor_modal_restore(CTX_wm_window(C));
+          /* Fall through: the scroll_pending block below will commit dragging and free the
+           * active button. */
+        }
+        else {
+          /* No scroll intent detected (diagonal or ambiguous gesture); a genuine asset
+           * drag-and-drop is in progress — yield completely so it can proceed. */
+          g_asset_drag_scroll = {};
+          return WM_UI_HANDLER_CONTINUE;
+        }
+      }
+
+      if (region->regiontype == RGN_TYPE_WINDOW) {
+        /* Asset Browser tiles are draggable buttons; drag-and-drop and box-select come from the
+         * region keymap. Relinquish horizontal gestures so they can drag-and-drop / box-select.
+         * For vertical gestures use a two-event protocol:
+         * - Event N: detect vertical dominant direction, set scroll_pending, return CONTINUE so
+         *   the button handler can call #WM_event_start_drag if the user intends drag-and-drop.
+         * - Event N+1: if wm->runtime->drags is non-empty and scroll_pending → cancel WM drag
+         *   and commit scroll; if drags non-empty but not scroll_pending → yield to drag.
+         *   If drags is empty → no drag started → scroll_pending commits here and falls through.
+         */
+        if (g_asset_drag_scroll.scroll_pending) {
+          /* Commit to scroll: either no WM drag started on the previous event, or one started
+           * but was already cancelled above (vertical gesture → scroll wins). */
+          g_asset_drag_scroll.dragging = true;
+          g_asset_drag_scroll.scroll_pending = false;
+          /* Cancel the active button so no tooltip or additional activation starts. NOTE: once
+           * freed we must return #WM_UI_HANDLER_BREAK (see below). */
+          ui::UI_region_free_active_but_all(C, region);
+          /* Fall through to the scroll block. */
+        }
+        else {
+          const int total_dx = std::abs(event->xy[0] - g_asset_drag_scroll.start_x);
+          const int total_dy = std::abs(event->xy[1] - g_asset_drag_scroll.start_y);
+          if (total_dx > total_dy && total_dx >= ASSET_DRAG_DIRECTION_THRESHOLD) {
+            g_asset_drag_scroll = {};
+            return WM_UI_HANDLER_CONTINUE;
+          }
+          if (total_dy > total_dx && total_dy >= ASSET_DRAG_DIRECTION_THRESHOLD) {
+            /* Deferred capture: return CONTINUE so the button handler runs this event and can
+             * start a WM asset drag if the user intends drag-and-drop (not scroll). */
+            g_asset_drag_scroll.scroll_pending = true;
+            return WM_UI_HANDLER_CONTINUE;
+          }
+        }
+      }
+      /* Asset shelf / popover: driven entirely by UI handlers, use a steadier dead-zone. */
+      else if (std::abs(event->xy[1] - g_asset_drag_scroll.start_y) >= ASSET_DRAG_SCROLL_THRESHOLD)
+      {
+        g_asset_drag_scroll.dragging = true;
+        /* Cancel any active button (e.g. an asset item that entered WAIT_RELEASE/WAIT_DRAG on
+         * press) so drag-scroll doesn't show a tooltip or trigger a click. In popovers,
+         * #select_on_click already defers activation to release. */
+        ui::UI_region_free_active_but_all(C, region);
+      }
+    }
+
+    if (g_asset_drag_scroll.dragging) {
+      if (region->regiontype == RGN_TYPE_TEMPORARY) {
+        /* Popover: buttons are in window pixel space, no view2d transform applied.
+         * Use the popup scroll mechanism (same as MMB panning) which moves button
+         * rects directly. Only has effect when the popup overflows the screen. */
+        ui::popup_region_scroll_apply_dy(region, float(dy));
+        /* popup_region_scroll_apply_dy already calls ED_region_tag_redraw internally. */
+      }
+      else {
+        View2D *v2d = &region->v2d;
+        /* Already dragging here, so the active button was freed above. Always return
+         * #WM_UI_HANDLER_BREAK (never CONTINUE) so the caller doesn't dereference its dangling
+         * `but`, even when the view can't be scrolled this event. */
+        if (!(v2d->flag & V2D_IS_INIT)) {
+          return WM_UI_HANDLER_BREAK;
+        }
+        const float region_height = float(BLI_rcti_size_y(&region->winrct) + 1);
+        if (region_height < 1.0f) {
+          return WM_UI_HANDLER_BREAK;
+        }
+
+        const float facy = BLI_rctf_size_y(&v2d->cur) / region_height;
+        /* Natural scroll: drag up (dy > 0) shifts cur downward → reveals content below. */
+        v2d->cur.ymin -= float(dy) * facy;
+        v2d->cur.ymax -= float(dy) * facy;
+
+        ui::view2d_curRect_validate(v2d);
+
+        ED_region_tag_redraw(region);
+        ED_region_tag_refresh_ui(region);
+      }
+      return WM_UI_HANDLER_BREAK;
+    }
+  }
+
+  return WM_UI_HANDLER_CONTINUE;
+}
+
+void register_drag_scroll_handler()
+{
+  ui::region_pre_button_handler_add(asset_view_drag_scroll_handler);
 }
 
 /** \} */

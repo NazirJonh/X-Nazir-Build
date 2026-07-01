@@ -698,6 +698,16 @@ struct Block {
   rctf rect = {};
   float aspect = 0.0f;
 
+  /**
+   * Clip rect (block space) applied while drawing buttons flagged #BUT_GRID_SCROLL_CLIP. Set by
+   * #Layout::view_scroll_clip_set so an embedded grid view can scroll its rows by sub-row pixel
+   * amounts while the visible area stays a fixed window (e.g. the brush texture image grid).
+   * Grid tile buttons are shifted by the sub-row offset in layout resolve and excluded from
+   * #block_align_calc so this rect stays aligned with the visible window.
+   */
+  bool view_scroll_clip_enabled = false;
+  rctf view_scroll_clip_rect = {};
+
   BlockAlertLevel alert_level = BlockAlertLevel::None;
 
   /** Unique hash used to implement popup menu memory. */
@@ -820,6 +830,30 @@ void fontscale(float *points, float aspect);
 /** Project button or block (but==nullptr) to pixels in region-space. */
 void button_to_pixelrect(rcti *rect, const ARegion *region, const Block *block, const Button *but);
 rcti rect_to_pixelrect(const ARegion *region, const Block *block, const rctf *src_rect);
+
+/** Translate #Block::view_scroll_clip_rect with buttons (e.g. #block_translate). */
+void block_view_scroll_clip_translate(Block *block, float dx, float dy);
+
+/** Vertical-only helper (e.g. #offset_panel_block). */
+void block_view_scroll_clip_offset_apply(Block *block, float dy);
+
+/**
+ * True when \a but is a grid-scroll-clipped tile that intersects the effective clip rect.
+ * Such buttons must stay visible/interactive even if popup scroll tests mark them #UI_SCROLLED.
+ */
+bool block_grid_scroll_clip_contains_button(const Block *block, const Button *but);
+
+/**
+ * Effective rect of \a but for bounds/scroll computations.
+ *
+ * A #BUT_GRID_SCROLL_CLIP tile may overflow its fixed window (the extra buffer row and the
+ * sub-row-scrolled partial rows). That overflow is masked away at draw time, so it must not
+ * inflate block bounds either - otherwise it would grow the panel/popup size and feed the popup
+ * auto-scroll, shifting rows around. For such buttons \a r_rect is clamped to
+ * #Block::view_scroll_clip_rect; returns false when the button lies fully outside the window (it
+ * should be ignored). For all other buttons \a r_rect is the button rect and the result is true.
+ */
+bool block_grid_scroll_clip_bounds_rect(const Block *block, const Button *but, rctf *r_rect);
 
 void block_to_region_fl(const ARegion *region, const Block *block, float *x, float *y);
 void block_to_window_fl(const ARegion *region, const Block *block, float *x, float *y);
@@ -1201,6 +1235,8 @@ void pie_menu_level_create(Block *block,
 void popup_translate(ARegion *region, const int mdiff[2]);
 void popup_block_free(bContext *C, PopupBlockHandle *handle);
 void popup_block_scrolltest(Block *block);
+/** Apply popup menu scroll delta (#PopupBlockHandle::scrolloffset and button rects). */
+void popup_block_scroll_apply_offset_y(ARegion *region, Block *block, float dy);
 
 /** \} */
 
@@ -1626,6 +1662,8 @@ Button *listrow_find_index(const ARegion *region,
                            Button *listbox) ATTR_WARN_UNUSED_RESULT;
 Button *view_item_find_mouse_over(const ARegion *region, const int xy[2]) ATTR_NONNULL(1, 2);
 Button *view_item_find_active(const ARegion *region, const AbstractView *view = nullptr);
+/** Active #ButtonType::ViewItem in an #AbstractGridView (skips tree/list view items). */
+Button *view_item_find_active_grid(const ARegion *region);
 Button *view_item_find_search_highlight(const ARegion *region);
 
 using ButtonFindPollFn = bool (*)(const Button *but, const void *customdata);

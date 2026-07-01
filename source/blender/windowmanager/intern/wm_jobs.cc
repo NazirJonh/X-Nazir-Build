@@ -374,6 +374,11 @@ void *WM_jobs_customdata_get(wmJob *wm_job)
   return wm_job->customdata;
 }
 
+const bool *WM_jobs_stop_flag(wmJob *wm_job)
+{
+  return &wm_job->worker_status.stop;
+}
+
 void WM_jobs_customdata_set(wmJob *wm_job, void *customdata, void (*free)(void *customdata))
 {
   /* Pending job? just free. */

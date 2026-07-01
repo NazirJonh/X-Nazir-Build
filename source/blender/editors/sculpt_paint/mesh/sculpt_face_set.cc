@@ -50,7 +50,11 @@
 #include "BKE_ccg.hh"
 #include "BKE_context.hh"
 #include "BKE_customdata.hh"
+#include "BKE_global.hh"
+#include "BKE_image.hh"
 #include "BKE_layer.hh"
+#include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_fair.hh"
 #include "BKE_mesh_mapping.hh"
@@ -59,10 +63,6 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
-#include "BKE_global.hh"
-#include "BKE_image.hh"
-#include "BKE_lib_id.hh"
-#include "BKE_main.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -211,9 +211,8 @@ void sample_face_set_color_at_active(const Object &object, Brush &brush)
   uchar sampled_color_ub[4];
   BKE_paint_face_set_overlay_color_get(
       sampled_id, mesh.face_sets_color_seed, sampled_color_ub, &mesh);
-  const float sampled_color_fl[3] = {sampled_color_ub[0] / 255.0f,
-                                     sampled_color_ub[1] / 255.0f,
-                                     sampled_color_ub[2] / 255.0f};
+  const float sampled_color_fl[3] = {
+      sampled_color_ub[0] / 255.0f, sampled_color_ub[1] / 255.0f, sampled_color_ub[2] / 255.0f};
 
   /* Clear explicit ID so color/sampled ID take priority over texture-panel assignment. */
   brush.face_set_id = 0;
@@ -224,7 +223,10 @@ void sample_face_set_color_at_active(const Object &object, Brush &brush)
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, &brush);
 }
 
-bool sample_face_set_color_at_cursor(bContext *C, Object &object, Brush &brush, const float mval[2])
+bool sample_face_set_color_at_cursor(bContext *C,
+                                     Object &object,
+                                     Brush &brush,
+                                     const float mval[2])
 {
   if (!object.runtime->sculpt_session) {
     return false;
@@ -1504,7 +1506,8 @@ static wmOperatorStatus face_set_color_texture_open_exec(bContext *C, wmOperator
   }
 
   Tex *tex = data->pprop.prop ?
-                 static_cast<Tex *>(RNA_property_pointer_get(&data->pprop.ptr, data->pprop.prop).data) :
+                 static_cast<Tex *>(
+                     RNA_property_pointer_get(&data->pprop.ptr, data->pprop.prop).data) :
                  brush->face_set_color_mtex.tex;
 
   if (!tex) {
@@ -1595,13 +1598,13 @@ void SCULPT_OT_face_set_color_texture_open(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
   WM_operator_properties_filesel(ot,
-                               FILE_TYPE_FOLDER | FILE_TYPE_IMAGE | FILE_TYPE_MOVIE,
-                               FILE_SPECIAL,
-                               FILE_OPENFILE,
-                               WM_FILESEL_FILEPATH | WM_FILESEL_DIRECTORY | WM_FILESEL_FILES |
-                                   WM_FILESEL_RELPATH,
-                               FILE_DEFAULTDISPLAY,
-                               FILE_SORT_DEFAULT);
+                                 FILE_TYPE_FOLDER | FILE_TYPE_IMAGE | FILE_TYPE_MOVIE,
+                                 FILE_SPECIAL,
+                                 FILE_OPENFILE,
+                                 WM_FILESEL_FILEPATH | WM_FILESEL_DIRECTORY | WM_FILESEL_FILES |
+                                     WM_FILESEL_RELPATH,
+                                 FILE_DEFAULTDISPLAY,
+                                 FILE_SORT_DEFAULT);
 }
 
 static wmOperatorStatus face_set_draw_mode_toggle_exec(bContext *C, wmOperator * /*op*/)
@@ -2649,7 +2652,7 @@ static wmOperatorStatus sample_face_set_id_modal(bContext *C,
     CTX_wm_region_set(C, region);
 
     const float mval[2] = {float(event->xy[0] - region->winrct.xmin),
-                             float(event->xy[1] - region->winrct.ymin)};
+                           float(event->xy[1] - region->winrct.ymin)};
 
     Paint *paint = BKE_paint_get_active_from_context(C);
     Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
@@ -2763,10 +2766,17 @@ int FaceSetColorStrokeCache::ensure_face_set_id_for_quant_color(Object &object,
   return new_id;
 }
 
-void apply_color_face_quant_writes(Object &object,
-                                   FaceSetColorStrokeCache &cache,
-                                   const Span<ColorFaceQuantWrite> writes,
-                                   const MutableSpan<int> face_sets)
+/** A pending per-face color write produced during parallel sampling. */
+struct ColorFaceQuantWrite {
+  int face_index;
+  float quant[3];
+};
+
+/** Resolve pending face writes on the main thread (after parallel sampling). */
+static void apply_color_face_quant_writes(Object &object,
+                                          FaceSetColorStrokeCache &cache,
+                                          const Span<ColorFaceQuantWrite> writes,
+                                          const MutableSpan<int> face_sets)
 {
   Map<uint32_t, int> resolved;
   for (const ColorFaceQuantWrite &write : writes) {
@@ -2780,7 +2790,7 @@ void apply_color_face_quant_writes(Object &object,
   }
 }
 
-void face_set_color_deferred_geometry_update(Object &object, FaceSetColorStrokeCache &cache)
+static void face_set_color_deferred_geometry_update(Object &object, FaceSetColorStrokeCache &cache)
 {
   if (!cache.mesh_geometry_tagged) {
     return;
@@ -2821,14 +2831,14 @@ void face_set_color_stroke_cache_clear(StrokeCache &cache)
   cache.face_set_color_cache.reset();
 }
 
-FaceSetColorStrokeCache *face_set_color_stroke_cache_get(StrokeCache &cache)
+static FaceSetColorStrokeCache *face_set_color_stroke_cache_get(StrokeCache &cache)
 {
   return cache.face_set_color_cache.get();
 }
 
-FaceSetColorStrokeCache *face_set_color_stroke_cache_ensure(StrokeCache &cache,
-                                                              const Brush &brush,
-                                                              const Mesh &mesh)
+static FaceSetColorStrokeCache *face_set_color_stroke_cache_ensure(StrokeCache &cache,
+                                                                   const Brush &brush,
+                                                                   const Mesh &mesh)
 {
   if (!BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT)->tex) {
     return nullptr;
@@ -2855,9 +2865,7 @@ static bool sample_face_color_rgb_at_point(const SculptSession &ss,
                                            const int thread_id,
                                            float r_rgb[3])
 {
-  if (!sculpt_sample_face_set_color_texture(
-          ss, brush, sample_point, thread_id, r_rgb))
-  {
+  if (!sculpt_sample_face_set_color_texture(ss, brush, sample_point, thread_id, r_rgb)) {
     return false;
   }
   return !is_face_set_color_background(r_rgb);
@@ -2904,15 +2912,15 @@ static bool sample_face_color_rgb(SculptSession &ss,
   return false;
 }
 
-bool sample_face_color_for_face(SculptSession &ss,
-                                const Brush &brush,
-                                const OffsetIndices<int> faces,
-                                const Span<int> corner_verts,
-                                const Span<float3> positions_eval,
-                                const int face_index,
-                                const float3 &sample_point,
-                                const int thread_id,
-                                float r_quant[3])
+static bool sample_face_color_for_face(SculptSession &ss,
+                                       const Brush &brush,
+                                       const OffsetIndices<int> faces,
+                                       const Span<int> corner_verts,
+                                       const Span<float3> positions_eval,
+                                       const int face_index,
+                                       const float3 &sample_point,
+                                       const int thread_id,
+                                       float r_quant[3])
 {
   float rgb[3];
   if (!sample_face_color_rgb(ss,
@@ -2937,15 +2945,15 @@ bool sample_face_color_for_face(SculptSession &ss,
   return true;
 }
 
-float sample_face_texture_avg(SculptSession &ss,
-                              const Brush &brush,
-                              const Span<float3> positions_eval,
-                              const OffsetIndices<int> faces,
-                              const Span<int> corner_verts,
-                              const GroupedSpan<int> vert_to_face_map,
-                              const int face_index,
-                              bke::GSpanAttributeWriter *color_attribute,
-                              const int thread_id)
+static float sample_face_texture_avg(SculptSession &ss,
+                                     const Brush &brush,
+                                     const Span<float3> positions_eval,
+                                     const OffsetIndices<int> faces,
+                                     const Span<int> corner_verts,
+                                     const GroupedSpan<int> vert_to_face_map,
+                                     const int face_index,
+                                     bke::GSpanAttributeWriter *color_attribute,
+                                     const int thread_id)
 {
   const IndexRange face_corners = faces[face_index];
   float sum = 0.0f;
@@ -2970,11 +2978,11 @@ float sample_face_texture_avg(SculptSession &ss,
                               ((texture_value > brush.texture_threshold) ? 1.0f : 0.0f) :
                               clamp_f(texture_value, 0.0f, 1.0f);
       float4 col = color::color_vert_get(faces,
-                                          corner_verts,
-                                          vert_to_face_map,
-                                          color_attribute->span,
-                                          color_attribute->domain,
-                                          vert_index);
+                                         corner_verts,
+                                         vert_to_face_map,
+                                         color_attribute->span,
+                                         color_attribute->domain,
+                                         vert_index);
       if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
         col.x = value;
         col.y = value;
@@ -3020,11 +3028,11 @@ static void write_face_color_map_to_vertex_colors(SculptSession &ss,
         continue;
       }
       float4 col = color::color_vert_get(faces,
-                                          corner_verts,
-                                          vert_to_face_map,
-                                          color_attribute.span,
-                                          color_attribute.domain,
-                                          vert_index);
+                                         corner_verts,
+                                         vert_to_face_map,
+                                         color_attribute.span,
+                                         color_attribute.domain,
+                                         vert_index);
       if (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) {
         const float luma = (rgb[0] + rgb[1] + rgb[2]) / 3.0f;
         const float value = (luma > brush.texture_threshold) ? 1.0f : 0.0f;
@@ -3058,23 +3066,156 @@ static void write_face_color_map_to_vertex_colors(SculptSession &ss,
   }
 }
 
-void apply_from_texture(const Depsgraph &depsgraph,
-                        Object &object,
-                        const Brush &brush,
-                        const IndexMask &node_mask)
+bool brush_texture_data_mode_is_active(const Brush &brush)
+{
+  return brush.texture_data_mode != BRUSH_TEXTURE_DATA_MODE_NONE;
+}
+
+bool brush_texture_data_mode_is_alpha(const Brush &brush)
+{
+  return brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE;
+}
+
+bool brush_texture_data_mode_is_color(const Brush &brush)
+{
+  return brush.texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE;
+}
+
+bool brush_uses_color_texture(const Brush &brush)
+{
+  return brush_texture_data_mode_is_color(brush) &&
+         BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT)->tex != nullptr;
+}
+
+bool brush_texture_data_writes_face_sets(const Brush &brush)
+{
+  return (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
+}
+
+bool brush_texture_data_writes_color(const Brush &brush)
+{
+  return brush.write_vcol != 0;
+}
+
+/* Find or create the Face Set whose custom color matches the brush color (Custom draw mode). */
+static int ensure_face_set_for_brush_color(Object &object, const Brush &brush)
+{
+  /* A previously sampled ID (Ctrl+LMB) is exact; prefer it over the lossy color->ID lookup. */
+  if (brush.face_set_sample_id > 0) {
+    return brush.face_set_sample_id;
+  }
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const int found_id = BKE_paint_face_set_find_by_custom_color(&mesh, brush.face_set_color);
+  if (found_id > 0) {
+    return found_id;
+  }
+  /* No Face Set matches this color yet: create one and record its custom color. */
+  const int new_id = find_next_available_id(object);
+  BKE_paint_face_set_custom_color_set(&mesh, new_id, brush.face_set_color);
+  DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+  return new_id;
+}
+
+void ensure_stroke_face_set(Object &object, const Brush &brush)
+{
+  StrokeCache &cache = *object.runtime->sculpt_session->cache;
+  if (cache.paint_face_set != face_set_none_id) {
+    return;
+  }
+  if (brush.face_set_id > 0) {
+    /* Explicit ID from the brush settings (e.g. assigned via the texture panel eyedropper). */
+    cache.paint_face_set = brush.face_set_id;
+  }
+  else if (cache.toggle_settings.invert) {
+    /* Inverted stroke paints with the Face Set already under the cursor. */
+    cache.paint_face_set = active_face_set_get(object);
+  }
+  else if (brush.face_set_draw_mode == SCULPT_FACE_SET_DRAW_MODE_COLOR) {
+    cache.paint_face_set = ensure_face_set_for_brush_color(object, brush);
+  }
+  else {
+    /* Random mode: a new Face Set ID per stroke. */
+    cache.paint_face_set = find_next_available_id(object);
+  }
+}
+
+/**
+ * Shared per-node brush factor pipeline for the texture-as-data Face Set modes (Mesh #pbvh::Tree).
+ *
+ * Fills \a face_centers (which callers reuse as texture sample points) and the per-face influence
+ * \a factors from hide/mask, region clip, front-face culling, the radial falloff
+ * (distance / radius / hardness) and automasking. When \a apply_strength is true the brush curve
+ * falloff is folded in for soft edges (color mode); the alpha-threshold mode keeps its discrete
+ * assignment ungated. The scalar brush strength is intentionally never applied: the color map (or
+ * alpha threshold) itself defines the valid region, so strength must not gate the discrete Face Set
+ * assignment. Both spans must be sized to \a face_indices.
+ */
+static void calc_texture_data_face_factors(const Depsgraph &depsgraph,
+                                           Object &object,
+                                           const Brush &brush,
+                                           const Span<float3> positions_eval,
+                                           const bke::pbvh::MeshNode &node,
+                                           const Span<int> face_indices,
+                                           const bool apply_strength,
+                                           const MutableSpan<float3> face_centers,
+                                           const MutableSpan<float> factors)
 {
   SculptSession &ss = *object.runtime->sculpt_session;
-  if (!ss.cache) {
-    return;
-  }
   const StrokeCache &cache = *ss.cache;
-  const bool write_face_sets = (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+
+  calc_face_centers(faces, corner_verts, positions_eval, face_indices, face_centers);
+
+  Array<float3> face_normals(face_indices.size());
+  for (const int i : face_indices.index_range()) {
+    face_normals[i] = bke::mesh::face_normal_calc(positions_eval,
+                                                  corner_verts.slice(faces[face_indices[i]]));
+  }
+
+  factors.fill(1.0f);
+  fill_factor_from_hide_and_mask(mesh, face_indices, factors);
+  filter_region_clip_factors(ss, face_centers, factors);
+  if (brush.flag & BRUSH_FRONTFACE) {
+    calc_front_face(cache.view_normal_symm, face_normals, factors);
+  }
+
+  Array<float> distances(face_indices.size());
+  calc_brush_distances(ss, face_centers, eBrushFalloffShape(brush.falloff_shape), distances);
+  filter_distances_with_radius(cache.radius, distances, factors);
+  apply_hardness_to_distances(cache, distances);
+  if (apply_strength) {
+    calc_brush_strength_factors(cache, brush, distances, factors);
+  }
+
+  if (cache.automasking) {
+    auto_mask::calc_face_factors(
+        depsgraph, object, faces, corner_verts, *cache.automasking, node, face_indices, factors);
+  }
+}
+
+/**
+ * Resolve the attribute that texture-sampled values are written into.
+ *
+ * This is the single seam for routing the sampled data to a destination: it currently always
+ * targets the active color attribute, but is the place to extend for writing to an arbitrary
+ * named attribute (e.g. carried on the #Brush) without touching the per-node sampling loops.
+ */
+static bke::GSpanAttributeWriter texture_data_write_attribute(Mesh &mesh, const Brush & /*brush*/)
+{
+  return color::ensure_active_color_attribute_for_write(mesh);
+}
+
+static void apply_from_texture_mesh(const Depsgraph &depsgraph,
+                                    Object &object,
+                                    const Brush &brush,
+                                    const IndexMask &node_mask)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  const bool write_face_sets = brush_texture_data_writes_face_sets(brush);
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
-  if (pbvh.type() != bke::pbvh::Type::Mesh) {
-    return;
-  }
-
   const Span<float3> positions_eval = bke::pbvh::vert_positions_eval(depsgraph, object);
   Mesh &mesh = *id_cast<Mesh *>(object.data);
   const OffsetIndices<int> faces = mesh.faces();
@@ -3082,50 +3223,19 @@ void apply_from_texture(const Depsgraph &depsgraph,
   const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
 
   bke::GSpanAttributeWriter color_attribute;
-  if (brush.write_vcol) {
-    color_attribute = color::ensure_active_color_attribute_for_write(mesh);
+  if (brush_texture_data_writes_color(brush)) {
+    color_attribute = texture_data_write_attribute(mesh, brush);
   }
 
   /* Undo nodes (Position/FaceSet/Color) are pushed once by #push_undo_nodes in #do_brush_action
    * with the same node mask, before this function runs. Pushing again here with a partial flag set
    * would register nodes inconsistently within the step and corrupt position undo restoration. */
 
-  /* Ensure the Face Sets attribute exists before querying IDs when writing them. */
   bke::SpanAttributeWriter<int> face_sets;
   if (write_face_sets) {
+    /* Ensure the Face Sets attribute exists, then resolve the ID to paint for this stroke. */
     face_sets = ensure_face_sets_mesh(mesh);
-  }
-
-  /* Initialize paint_face_set if not set (first step of the stroke). */
-  if (write_face_sets && ss.cache->paint_face_set == face_set_none_id) {
-    if (brush.face_set_id > 0) {
-      ss.cache->paint_face_set = brush.face_set_id;
-    }
-    else if (ss.cache->toggle_settings.invert) {
-      ss.cache->paint_face_set = active_face_set_get(object);
-    }
-    else if (brush.face_set_draw_mode == SCULPT_FACE_SET_DRAW_MODE_COLOR) {
-      /* Custom mode: find or create a face set by the brush color. */
-      if (brush.face_set_sample_id > 0) {
-        ss.cache->paint_face_set = brush.face_set_sample_id;
-      }
-      else {
-        const int found_id = BKE_paint_face_set_find_by_custom_color(&mesh, brush.face_set_color);
-        if (found_id > 0) {
-          ss.cache->paint_face_set = found_id;
-        }
-        else {
-          const int new_id = find_next_available_id(object);
-          BKE_paint_face_set_custom_color_set(&mesh, new_id, brush.face_set_color);
-          ss.cache->paint_face_set = new_id;
-          DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
-        }
-      }
-    }
-    else {
-      /* Random mode: create a new face set ID for each stroke. */
-      ss.cache->paint_face_set = find_next_available_id(object);
-    }
+    ensure_stroke_face_set(object, brush);
   }
   const int face_set_id = ss.cache->paint_face_set;
 
@@ -3138,46 +3248,26 @@ void apply_from_texture(const Depsgraph &depsgraph,
           return;
         }
 
-        Vector<float3> face_centers(face_indices.size());
-        calc_face_centers(faces, corner_verts, positions_eval, face_indices, face_centers);
-
-        Vector<float3> face_normals(face_indices.size());
-        for (const int i_face : face_indices.index_range()) {
-          face_normals[i_face] = bke::mesh::face_normal_calc(
-              positions_eval, corner_verts.slice(faces[face_indices[i_face]]));
-        }
-
-        Vector<float> factors(face_indices.size(), 1.0f);
-        fill_factor_from_hide_and_mask(mesh, face_indices, factors);
-
-        filter_region_clip_factors(ss, face_centers, factors);
-        if (brush.flag & BRUSH_FRONTFACE) {
-          calc_front_face(cache.view_normal_symm, face_normals, factors);
-        }
-
-        Vector<float> distances(face_indices.size());
-        calc_brush_distances(ss, face_centers, eBrushFalloffShape(brush.falloff_shape), distances);
-        filter_distances_with_radius(cache.radius, distances, factors);
-        apply_hardness_to_distances(cache, distances);
-
-        if (cache.automasking) {
-          auto_mask::calc_face_factors(depsgraph,
+        Array<float3> face_centers(face_indices.size());
+        Array<float> factors(face_indices.size());
+        calc_texture_data_face_factors(depsgraph,
                                        object,
-                                       faces,
-                                       corner_verts,
-                                       *cache.automasking,
+                                       brush,
+                                       positions_eval,
                                        nodes[i],
                                        face_indices,
+                                       /*apply_strength*/ false,
+                                       face_centers,
                                        factors);
-        }
 
         const int thread_id = BLI_task_parallel_thread_id(nullptr);
-
         bke::GSpanAttributeWriter *col_attr_ptr = color_attribute ? &color_attribute : nullptr;
         for (const int i_face : face_indices.index_range()) {
           if (factors[i_face] == 0.0f) {
             continue;
           }
+          /* Alpha-threshold mode: the average texture value over the face selects it; brush
+           * strength must not gate the discrete Face Set assignment. */
           const float avg = sample_face_texture_avg(ss,
                                                     brush,
                                                     positions_eval,
@@ -3187,15 +3277,8 @@ void apply_from_texture(const Depsgraph &depsgraph,
                                                     face_indices[i_face],
                                                     col_attr_ptr,
                                                     thread_id);
-          factors[i_face] = (avg > brush.texture_threshold) ? 1.0f : 0.0f;
-        }
-
-        if (write_face_sets) {
-          /* Apply the resulting Face Set ID to the mesh face sets span. */
-          for (const int i_face : face_indices.index_range()) {
-            if (factors[i_face] > FACE_SET_MIN_FADE) {
-              face_sets.span[face_indices[i_face]] = face_set_id;
-            }
+          if (write_face_sets && avg > brush.texture_threshold) {
+            face_sets.span[face_indices[i_face]] = face_set_id;
           }
         }
       },
@@ -3212,20 +3295,36 @@ void apply_from_texture(const Depsgraph &depsgraph,
   }
 }
 
-void apply_from_color_texture(const Depsgraph &depsgraph,
-                              Object &object,
-                              const Brush &brush,
-                              const IndexMask &node_mask)
+void apply_from_texture(const Depsgraph &depsgraph,
+                        Object &object,
+                        const Brush &brush,
+                        const IndexMask &node_mask)
 {
-  SculptSession &ss = *object.runtime->sculpt_session;
-  if (!ss.cache) {
+  if (!object.runtime->sculpt_session->cache) {
     return;
   }
+  switch (bke::object::pbvh_get(object)->type()) {
+    case bke::pbvh::Type::Mesh:
+      apply_from_texture_mesh(depsgraph, object, brush, node_mask);
+      break;
+    case bke::pbvh::Type::Grids:
+    case bke::pbvh::Type::BMesh:
+      /* TODO: the texture-as-data Face Set modes are Mesh-only for now. Add Grids/BMesh node
+       * loops here, mirroring #apply_from_texture_mesh. */
+      break;
+  }
+}
+
+static void apply_from_color_texture_mesh(const Depsgraph &depsgraph,
+                                          Object &object,
+                                          const Brush &brush,
+                                          const IndexMask &node_mask)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
   Mesh &mesh = *id_cast<Mesh *>(object.data);
 
-  const StrokeCache &cache = *ss.cache;
-  const bool write_face_sets = (brush.flag2 & BRUSH_DISABLE_FACE_SET_WRITE) == 0;
-  const bool write_vcol = brush.write_vcol;
+  const bool write_face_sets = brush_texture_data_writes_face_sets(brush);
+  const bool write_vcol = brush_texture_data_writes_color(brush);
   if (!write_face_sets && !write_vcol) {
     return;
   }
@@ -3239,9 +3338,6 @@ void apply_from_color_texture(const Depsgraph &depsgraph,
   }
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
-  if (pbvh.type() != bke::pbvh::Type::Mesh) {
-    return;
-  }
 
   if (const MTex *color_mtex = BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT)) {
     if (color_mtex->tex != nullptr && ss.tex_pool != nullptr) {
@@ -3256,7 +3352,7 @@ void apply_from_color_texture(const Depsgraph &depsgraph,
 
   bke::GSpanAttributeWriter color_attribute;
   if (write_vcol) {
-    color_attribute = color::ensure_active_color_attribute_for_write(mesh);
+    color_attribute = texture_data_write_attribute(mesh, brush);
   }
 
   /* Undo nodes (Position/FaceSet/Color) are pushed once by #push_undo_nodes in #do_brush_action
@@ -3279,41 +3375,20 @@ void apply_from_color_texture(const Depsgraph &depsgraph,
           return;
         }
 
-        Vector<float3> face_centers(face_indices.size());
-        calc_face_centers(faces, corner_verts, positions_eval, face_indices, face_centers);
-
-        Vector<float3> face_normals(face_indices.size());
-        for (const int i_face : face_indices.index_range()) {
-          face_normals[i_face] = bke::mesh::face_normal_calc(
-              positions_eval, corner_verts.slice(faces[face_indices[i_face]]));
-        }
-
-        Vector<float> factors(face_indices.size(), 1.0f);
-        fill_factor_from_hide_and_mask(mesh, face_indices, factors);
-
-        filter_region_clip_factors(ss, face_centers, factors);
-        if (brush.flag & BRUSH_FRONTFACE) {
-          calc_front_face(cache.view_normal_symm, face_normals, factors);
-        }
-
-        Vector<float> distances(face_indices.size());
-        calc_brush_distances(ss, face_centers, eBrushFalloffShape(brush.falloff_shape), distances);
-        filter_distances_with_radius(cache.radius, distances, factors);
-        apply_hardness_to_distances(cache, distances);
-        calc_brush_strength_factors(cache, brush, distances, factors);
-
-        if (cache.automasking) {
-          auto_mask::calc_face_factors(depsgraph,
+        Array<float3> face_centers(face_indices.size());
+        Array<float> factors(face_indices.size());
+        calc_texture_data_face_factors(depsgraph,
                                        object,
-                                       faces,
-                                       corner_verts,
-                                       *cache.automasking,
+                                       brush,
+                                       positions_eval,
                                        nodes[i],
                                        face_indices,
+                                       /*apply_strength*/ true,
+                                       face_centers,
                                        factors);
-        }
 
-        /* Color map defines valid regions (non-black samples); skip brush alpha mask here. */
+        /* The color map itself selects valid regions (non-black samples); the brush alpha texture
+         * is only used for projection here, never as an intensity mask. */
         const int thread_id = BLI_task_parallel_thread_id(nullptr);
 
         if (write_face_sets) {
@@ -3375,6 +3450,26 @@ void apply_from_color_texture(const Depsgraph &depsgraph,
   if (color_attribute) {
     pbvh.tag_attribute_changed(node_mask, mesh.active_color_attribute);
     color_attribute.finish();
+  }
+}
+
+void apply_from_color_texture(const Depsgraph &depsgraph,
+                              Object &object,
+                              const Brush &brush,
+                              const IndexMask &node_mask)
+{
+  if (!object.runtime->sculpt_session->cache) {
+    return;
+  }
+  switch (bke::object::pbvh_get(object)->type()) {
+    case bke::pbvh::Type::Mesh:
+      apply_from_color_texture_mesh(depsgraph, object, brush, node_mask);
+      break;
+    case bke::pbvh::Type::Grids:
+    case bke::pbvh::Type::BMesh:
+      /* TODO: color-from-texture is Mesh-only for now. Add Grids/BMesh node loops here,
+       * mirroring #apply_from_color_texture_mesh. */
+      break;
   }
 }
 

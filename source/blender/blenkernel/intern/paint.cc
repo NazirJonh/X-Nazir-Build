@@ -2829,6 +2829,24 @@ static void face_set_overlay_color_random(const int face_set, const int seed, uc
   rgba_float_to_uchar(r_color, rgba);
 }
 
+/**
+ * Index of the custom-color entry for \a face_set_id in \a mesh, or -1 when there is none.
+ * Centralizes the linear scan shared by every custom Face Set color query.
+ */
+static int face_set_color_index(const Mesh *mesh, const int face_set_id)
+{
+  if (!mesh || face_set_id <= 0) {
+    return -1;
+  }
+  const Span<FaceSetColor> colors(mesh->face_set_colors, mesh->face_set_colors_num);
+  for (const int i : colors.index_range()) {
+    if (colors[i].face_set_id == face_set_id) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 void BKE_paint_face_set_overlay_color_get(const int face_set,
                                           const int seed,
                                           uchar r_color[4],
@@ -2843,15 +2861,10 @@ void BKE_paint_face_set_overlay_color_get(const int face_set,
     return;
   }
 
-  /* Single pass: check and fetch custom color at the same time to avoid double scan. */
-  if (mesh) {
-    for (int i = 0; i < mesh->face_set_colors_num; i++) {
-      if (mesh->face_set_colors[i].face_set_id == face_set) {
-        rgb_float_to_uchar(r_color, mesh->face_set_colors[i].color);
-        r_color[3] = 255;
-        return;
-      }
-    }
+  if (const int i = face_set_color_index(mesh, face_set); i != -1) {
+    rgb_float_to_uchar(r_color, mesh->face_set_colors[i].color);
+    r_color[3] = 255;
+    return;
   }
   face_set_overlay_color_random(face_set, seed, r_color);
 }
@@ -2864,79 +2877,56 @@ void BKE_paint_face_set_custom_color_set(Mesh *mesh, int face_set_id, const floa
   }
 
   /* Update existing entry if present. */
-  for (int i = 0; i < mesh->face_set_colors_num; i++) {
-    if (mesh->face_set_colors[i].face_set_id == face_set_id) {
-      copy_v3_v3(mesh->face_set_colors[i].color, color);
-      return;
-    }
+  if (const int existing = face_set_color_index(mesh, face_set_id); existing != -1) {
+    copy_v3_v3(mesh->face_set_colors[existing].color, color);
+    return;
   }
 
-  /* Append new entry. */
+  /* Append a new entry. */
   mesh->face_set_colors_num++;
   mesh->face_set_colors = static_cast<FaceSetColor *>(MEM_realloc_uninitialized(
       mesh->face_set_colors, sizeof(FaceSetColor) * mesh->face_set_colors_num));
 
-  FaceSetColor *new_color = &mesh->face_set_colors[mesh->face_set_colors_num - 1];
-  new_color->face_set_id = face_set_id;
-  copy_v3_v3(new_color->color, color);
-  memset(new_color->_pad0, 0, sizeof(new_color->_pad0));
+  FaceSetColor &new_color = mesh->face_set_colors[mesh->face_set_colors_num - 1];
+  new_color.face_set_id = face_set_id;
+  copy_v3_v3(new_color.color, color);
+  memset(new_color._pad0, 0, sizeof(new_color._pad0));
 }
 
 void BKE_paint_face_set_custom_color_get(const Mesh *mesh, int face_set_id, float r_color[3])
 {
-  if (!mesh || face_set_id <= 0) {
-    zero_v3(r_color);
+  if (const int i = face_set_color_index(mesh, face_set_id); i != -1) {
+    copy_v3_v3(r_color, mesh->face_set_colors[i].color);
     return;
   }
-
-  for (int i = 0; i < mesh->face_set_colors_num; i++) {
-    if (mesh->face_set_colors[i].face_set_id == face_set_id) {
-      copy_v3_v3(r_color, mesh->face_set_colors[i].color);
-      return;
-    }
-  }
-
   zero_v3(r_color);
 }
 
 bool BKE_paint_face_set_custom_color_exists(const Mesh *mesh, int face_set_id)
 {
-  if (!mesh || face_set_id <= 0) {
-    return false;
-  }
-
-  for (int i = 0; i < mesh->face_set_colors_num; i++) {
-    if (mesh->face_set_colors[i].face_set_id == face_set_id) {
-      return true;
-    }
-  }
-
-  return false;
+  return face_set_color_index(mesh, face_set_id) != -1;
 }
 
 void BKE_paint_face_set_custom_color_remove(Mesh *mesh, int face_set_id)
 {
-  if (!mesh || face_set_id <= 0 || mesh->face_set_colors_num == 0) {
+  const int index = face_set_color_index(mesh, face_set_id);
+  if (index == -1) {
     return;
   }
 
-  for (int i = 0; i < mesh->face_set_colors_num; i++) {
-    if (mesh->face_set_colors[i].face_set_id == face_set_id) {
-      /* Move remaining colors down. */
-      for (int j = i; j < mesh->face_set_colors_num - 1; j++) {
-        mesh->face_set_colors[j] = mesh->face_set_colors[j + 1];
-      }
+  /* Shift the remaining colors down over the removed entry. */
+  MutableSpan<FaceSetColor> colors(mesh->face_set_colors, mesh->face_set_colors_num);
+  for (int j = index; j < colors.size() - 1; j++) {
+    colors[j] = colors[j + 1];
+  }
 
-      mesh->face_set_colors_num--;
-      if (mesh->face_set_colors_num == 0) {
-        MEM_SAFE_DELETE(mesh->face_set_colors);
-      }
-      else {
-        mesh->face_set_colors = static_cast<FaceSetColor *>(MEM_realloc_uninitialized(
-            mesh->face_set_colors, sizeof(FaceSetColor) * mesh->face_set_colors_num));
-      }
-      return;
-    }
+  mesh->face_set_colors_num--;
+  if (mesh->face_set_colors_num == 0) {
+    MEM_SAFE_DELETE(mesh->face_set_colors);
+  }
+  else {
+    mesh->face_set_colors = static_cast<FaceSetColor *>(MEM_realloc_uninitialized(
+        mesh->face_set_colors, sizeof(FaceSetColor) * mesh->face_set_colors_num));
   }
 }
 
@@ -3020,12 +3010,12 @@ uint32_t BKE_paint_face_set_quantize_texture_color_pack(const float color[3])
 
 int BKE_paint_face_set_find_by_custom_color(const Mesh *mesh, const float color[3])
 {
-  if (!mesh || mesh->face_set_colors_num == 0) {
+  if (!mesh) {
     return 0;
   }
   const float eps = 1.0f / 255.0f;
-  for (int i = 0; i < mesh->face_set_colors_num; i++) {
-    const FaceSetColor &entry = mesh->face_set_colors[i];
+  const Span<FaceSetColor> colors(mesh->face_set_colors, mesh->face_set_colors_num);
+  for (const FaceSetColor &entry : colors) {
     if (fabsf(entry.color[0] - color[0]) <= eps && fabsf(entry.color[1] - color[1]) <= eps &&
         fabsf(entry.color[2] - color[2]) <= eps)
     {

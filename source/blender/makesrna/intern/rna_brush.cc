@@ -1197,7 +1197,11 @@ static const EnumPropertyItem brush_texture_data_mode_items[] = {
 };
 
 static const EnumPropertyItem brush_vcol_channel_items[] = {
-    {BRUSH_VCOL_CHANNEL_RGB, "RGB", 0, "RGB", "Write sampled color to Red, Green, and Blue channels"},
+    {BRUSH_VCOL_CHANNEL_RGB,
+     "RGB",
+     0,
+     "RGB",
+     "Write sampled color to Red, Green, and Blue channels"},
     {BRUSH_VCOL_CHANNEL_R, "R", 0, "Red", "Write texture value to Red channel"},
     {BRUSH_VCOL_CHANNEL_G, "G", 0, "Green", "Write texture value to Green channel"},
     {BRUSH_VCOL_CHANNEL_B, "B", 0, "Blue", "Write texture value to Blue channel"},

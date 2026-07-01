@@ -10,6 +10,7 @@
 #pragma once
 
 #include "DNA_asset_types.h"
+#include "DNA_category_tabs_types.h" /* for CategoryTabsState */
 #include "DNA_color_types.h" /* for Histogram */
 #include "DNA_defs.h"
 #include "DNA_image_types.h" /* ImageUser */
@@ -169,62 +170,11 @@ struct SpaceProperties {
    */
   void *tag_bar_cache = nullptr;
 
-  /**
-   * Comma-separated list of active tag names for category filtering.
-   * Empty string = all categories are visible.
-   * Multiple tags are AND-combined (category must have ALL active tags).
-   */
-  char active_tag_filter_tags[256] = "";
+  /** Per-editor Category Tabs / Tag Bar state (see #CategoryTabsState). */
+  CategoryTabsState tabs_state;
 
-  /**
-   * Whether tag filtering is enabled (toggled via filter button).
-   * When false: all categories are shown regardless of tags.
-   * When true: only categories with matching active tags are shown.
-   */
-  char tag_filter_enabled = 0;
-  /** Category tabs display mode for this editor instance. */
-  char category_tabs_display_mode = 1;
-  char _pad_tag_filter[2] = {0, 0};
-
-  /** Per-editor scale factor for category tabs in Icon mode. */
-  float category_tabs_zoom_icon = 1.0f;
-  /** Per-editor scale factor for category tabs in Mixed mode. */
-  float category_tabs_zoom_mixed = 1.0f;
-  /** Per-editor scale factor for category tabs in Text mode. */
-  float category_tabs_zoom_text = 1.0f;
-
-  /**
-   * Horizontal scroll offset in the tag bar (in pixels).
-   */
-  int tag_bar_scroll_offset = 0;
-
-  /** Last active category for each tag combination (see View3D for format). */
-  char tag_last_active_categories[1024] = "";
-
-  /** Per-mode tag filter state (see View3D for format). */
-  char tag_filter_state_per_mode[1024] = "";
-  uint32_t tag_filter_last_mode = 0;
-  char _pad_per_mode[4] = {0};
-
-  /**
-   * Whether the "New Add-on!" virtual tag filter is active.
-   * When true, only pending (unassigned) categories are shown.
-   */
-  char new_addon_filter_active = 0;
-  /**
-   * Whether the filter was auto-activated (not by user).
-   * Used to distinguish auto-activation (after extension install) from manual activation.
-   */
-  char new_addon_filter_auto_activated = 0;
-  char _pad_new_addon[2] = {0, 0};
-
-  /**
-   * Saved tag filter state when "New Add-on!" filter is activated.
-   * Restored when the filter is deactivated.
-   */
-  char saved_tag_filter_tags[256] = "";
-
-  char _pad2[8] = {0};
+  /* CategoryTabsState is 2588 bytes (≡4 mod 8); pad 4 bytes so `runtime` stays 8-byte aligned. */
+  char _pad2[4] = {0};
 
   /* Doesn't necessarily need to be a pointer, but runtime structs are still written to files. */
   struct SpaceProperties_Runtime *runtime = nullptr;
@@ -763,62 +713,11 @@ struct SpaceImage {
   MaskSpaceInfo mask_info;
   SpaceImageOverlay overlay;
 
-  /**
-   * Comma-separated list of active tag names for category filtering.
-   * Empty string = all categories are visible.
-   * Multiple tags are AND-combined (category must have ALL active tags).
-   */
-  char active_tag_filter_tags[256] = "";
+  /** Per-editor Category Tabs / Tag Bar state (see #CategoryTabsState). */
+  CategoryTabsState tabs_state;
 
-  /**
-   * Whether tag filtering is enabled (toggled via filter button).
-   * When false: all categories are shown regardless of tags.
-   * When true: only categories with matching active tags are shown.
-   */
-  char tag_filter_enabled = 0;
-  /** Category tabs display mode for this editor instance. */
-  char category_tabs_display_mode = 1;
-  char _pad_tag_filter[2] = {0, 0};
-
-  /** Per-editor scale factor for category tabs in Icon mode. */
-  float category_tabs_zoom_icon = 1.0f;
-  /** Per-editor scale factor for category tabs in Mixed mode. */
-  float category_tabs_zoom_mixed = 1.0f;
-  /** Per-editor scale factor for category tabs in Text mode. */
-  float category_tabs_zoom_text = 1.0f;
-
-  /**
-   * Horizontal scroll offset in the tag bar (in pixels).
-   */
-  int tag_bar_scroll_offset = 0;
-
-  /** Last active category for each tag combination (see View3D for format). */
-  char tag_last_active_categories[1024] = "";
-
-  /** Per-mode tag filter state (see View3D for format). */
-  char tag_filter_state_per_mode[1024] = "";
-  uint32_t tag_filter_last_mode = 0;
-  char _pad_per_mode[4] = {0};
-
-  /**
-   * Whether the "New Add-on!" virtual tag filter is active.
-   * When true, only pending (unassigned) categories are shown.
-   */
-  char new_addon_filter_active = 0;
-  /**
-   * Whether the filter was auto-activated (not by user).
-   * Used to distinguish auto-activation (after extension install) from manual activation.
-   */
-  char new_addon_filter_auto_activated = 0;
-  char _pad_new_addon[2] = {0, 0};
-
-  /**
-   * Saved tag filter state when "New Add-on!" filter is activated.
-   * Restored when the filter is deactivated.
-   */
-  char saved_tag_filter_tags[256] = "";
-
-  char _pad_tag_filter2[8] = {0};
+  /* CategoryTabsState is 2588 bytes (≡4 mod 8); pad 4 bytes so the struct size stays 8-byte aligned. */
+  char _pad_tag_filter2[4] = {0};
 };
 
 /** \} */
@@ -1023,66 +922,14 @@ struct SpaceNode {
 
   SpaceNodeOverlay overlay;
 
-  /**
-   * Comma-separated list of active tag names for category filtering.
-   * Empty string = all categories are visible.
-   * Multiple tags are AND-combined (category must have ALL active tags).
-   */
-  char active_tag_filter_tags[256] = "";
+  /** Per-editor Category Tabs / Tag Bar state (see #CategoryTabsState). */
+  CategoryTabsState tabs_state;
 
-  /**
-   * Whether tag filtering is enabled (toggled via filter button).
-   * When false: all categories are shown regardless of tags.
-   * When true: only categories with matching active tags are shown.
-   */
-  char tag_filter_enabled = 0;
-  /** Category tabs display mode for this editor instance. */
-  char category_tabs_display_mode = 1;
-  char _pad_tag_filter[2] = {0, 0};
-
-  /** Per-editor scale factor for category tabs in Icon mode. */
-  float category_tabs_zoom_icon = 1.0f;
-  /** Per-editor scale factor for category tabs in Mixed mode. */
-  float category_tabs_zoom_mixed = 1.0f;
-  /** Per-editor scale factor for category tabs in Text mode. */
-  float category_tabs_zoom_text = 1.0f;
-
-  /**
-   * Horizontal scroll offset in the tag bar (in pixels).
-   */
-  int tag_bar_scroll_offset = 0;
-
-  /** Last active category for each tag combination (see View3D for format). */
-  char tag_last_active_categories[1024] = "";
-
-  /* The tag filter fields below are declared in a different order than in the other editor spaces.
-   * This is harmless: SDNA matches fields by name on read, so the layout difference does not affect
-   * .blend compatibility. The order is kept as-is to avoid risky reordering. */
-  /**
-   * Whether the "New Add-on!" virtual tag filter is active.
-   * When true, only pending (unassigned) categories are shown.
-   */
-  char new_addon_filter_active = 0;
   /** Whether user manually hid the tag bar (prevents auto-show for new add-ons). */
   char tag_bar_manually_hidden = 0;
   /** Whether tag bar was auto-shown due to new add-ons detection. */
   char has_new_addon_auto_shown = 0;
-  /**
-   * Whether the filter was auto-activated (not by user).
-   * Used to distinguish auto-activation (after extension install) from manual activation.
-   */
-  char new_addon_filter_auto_activated = 0;
-
-  /** Per-mode tag filter state (see View3D for format). */
-  char tag_filter_state_per_mode[1024] = "";
-  uint32_t tag_filter_last_mode = 0;
-  char _pad_per_mode[4] = {0};
-
-  /**
-   * Saved tag filter state when "New Add-on!" filter is activated.
-   * Restored when the filter is deactivated.
-   */
-  char saved_tag_filter_tags[256] = "";
+  char _pad_node_tag[2] = {0, 0};
 
   char _pad_tag_filter2[8] = {0};
 

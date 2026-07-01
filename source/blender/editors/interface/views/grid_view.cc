@@ -666,7 +666,7 @@ GlyphGridItem::GlyphGridItem(StringRef identifier, StringRef unicode, StringRef 
 {
 }
 
-void GlyphGridItem::build_grid_tile(const bContext &C, Layout &layout) const
+void GlyphGridItem::build_grid_tile(const bContext & /*C*/, Layout &layout) const
 {
   const GridViewStyle &style = this->get_view().get_style();
   Block *block = layout.block();

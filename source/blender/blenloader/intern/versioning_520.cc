@@ -141,15 +141,15 @@ static void do_versions_init_tag_filter_state_in_spaces(Main *bmain)
       for (SpaceLink &sl : area.spacedata) {
         if (sl.spacetype == SPACE_NODE) {
           SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
-          snode->active_tag_filter_tags[0] = '\0';
-          snode->tag_filter_enabled = 0;
-          snode->tag_bar_scroll_offset = 0;
+          snode->tabs_state.active_tag_filter_tags[0] = '\0';
+          snode->tabs_state.tag_filter_enabled = 0;
+          snode->tabs_state.tag_bar_scroll_offset = 0;
         }
         else if (sl.spacetype == SPACE_IMAGE) {
           SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
-          sima->active_tag_filter_tags[0] = '\0';
-          sima->tag_filter_enabled = 0;
-          sima->tag_bar_scroll_offset = 0;
+          sima->tabs_state.active_tag_filter_tags[0] = '\0';
+          sima->tabs_state.tag_filter_enabled = 0;
+          sima->tabs_state.tag_bar_scroll_offset = 0;
         }
       }
 
@@ -362,34 +362,34 @@ static void do_versions_init_category_tabs_display_and_zoom_in_spaces(Main *bmai
         switch (sl.spacetype) {
           case SPACE_VIEW3D: {
             View3D *v3d = reinterpret_cast<View3D *>(&sl);
-            v3d->category_tabs_display_mode = U.category_tabs_display_mode;
-            v3d->category_tabs_zoom_icon = U.category_tabs_zoom_icon;
-            v3d->category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
-            v3d->category_tabs_zoom_text = U.category_tabs_zoom_text;
+            v3d->tabs_state.category_tabs_display_mode = U.category_tabs_display_mode;
+            v3d->tabs_state.category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            v3d->tabs_state.category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            v3d->tabs_state.category_tabs_zoom_text = U.category_tabs_zoom_text;
             break;
           }
           case SPACE_PROPERTIES: {
             SpaceProperties *sbuts = reinterpret_cast<SpaceProperties *>(&sl);
-            sbuts->category_tabs_display_mode = U.category_tabs_display_mode;
-            sbuts->category_tabs_zoom_icon = U.category_tabs_zoom_icon;
-            sbuts->category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
-            sbuts->category_tabs_zoom_text = U.category_tabs_zoom_text;
+            sbuts->tabs_state.category_tabs_display_mode = U.category_tabs_display_mode;
+            sbuts->tabs_state.category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            sbuts->tabs_state.category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            sbuts->tabs_state.category_tabs_zoom_text = U.category_tabs_zoom_text;
             break;
           }
           case SPACE_NODE: {
             SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
-            snode->category_tabs_display_mode = U.category_tabs_display_mode;
-            snode->category_tabs_zoom_icon = U.category_tabs_zoom_icon;
-            snode->category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
-            snode->category_tabs_zoom_text = U.category_tabs_zoom_text;
+            snode->tabs_state.category_tabs_display_mode = U.category_tabs_display_mode;
+            snode->tabs_state.category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            snode->tabs_state.category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            snode->tabs_state.category_tabs_zoom_text = U.category_tabs_zoom_text;
             break;
           }
           case SPACE_IMAGE: {
             SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
-            sima->category_tabs_display_mode = U.category_tabs_display_mode;
-            sima->category_tabs_zoom_icon = U.category_tabs_zoom_icon;
-            sima->category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
-            sima->category_tabs_zoom_text = U.category_tabs_zoom_text;
+            sima->tabs_state.category_tabs_display_mode = U.category_tabs_display_mode;
+            sima->tabs_state.category_tabs_zoom_icon = U.category_tabs_zoom_icon;
+            sima->tabs_state.category_tabs_zoom_mixed = U.category_tabs_zoom_mixed;
+            sima->tabs_state.category_tabs_zoom_text = U.category_tabs_zoom_text;
             break;
           }
           default:
@@ -417,30 +417,30 @@ static void do_versions_fix_category_tabs_zoom_in_spaces(Main *bmain)
         switch (sl.spacetype) {
           case SPACE_VIEW3D: {
             View3D *v3d = reinterpret_cast<View3D *>(&sl);
-            heal(v3d->category_tabs_zoom_icon);
-            heal(v3d->category_tabs_zoom_mixed);
-            heal(v3d->category_tabs_zoom_text);
+            heal(v3d->tabs_state.category_tabs_zoom_icon);
+            heal(v3d->tabs_state.category_tabs_zoom_mixed);
+            heal(v3d->tabs_state.category_tabs_zoom_text);
             break;
           }
           case SPACE_PROPERTIES: {
             SpaceProperties *sbuts = reinterpret_cast<SpaceProperties *>(&sl);
-            heal(sbuts->category_tabs_zoom_icon);
-            heal(sbuts->category_tabs_zoom_mixed);
-            heal(sbuts->category_tabs_zoom_text);
+            heal(sbuts->tabs_state.category_tabs_zoom_icon);
+            heal(sbuts->tabs_state.category_tabs_zoom_mixed);
+            heal(sbuts->tabs_state.category_tabs_zoom_text);
             break;
           }
           case SPACE_NODE: {
             SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
-            heal(snode->category_tabs_zoom_icon);
-            heal(snode->category_tabs_zoom_mixed);
-            heal(snode->category_tabs_zoom_text);
+            heal(snode->tabs_state.category_tabs_zoom_icon);
+            heal(snode->tabs_state.category_tabs_zoom_mixed);
+            heal(snode->tabs_state.category_tabs_zoom_text);
             break;
           }
           case SPACE_IMAGE: {
             SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
-            heal(sima->category_tabs_zoom_icon);
-            heal(sima->category_tabs_zoom_mixed);
-            heal(sima->category_tabs_zoom_text);
+            heal(sima->tabs_state.category_tabs_zoom_icon);
+            heal(sima->tabs_state.category_tabs_zoom_mixed);
+            heal(sima->tabs_state.category_tabs_zoom_text);
             break;
           }
           default:
@@ -728,22 +728,22 @@ static void do_versions_init_tag_category_memory(Main *bmain)
         switch (sl.spacetype) {
           case SPACE_VIEW3D: {
             View3D *v3d = reinterpret_cast<View3D *>(&sl);
-            v3d->tag_last_active_categories[0] = '\0';
+            v3d->tabs_state.tag_last_active_categories[0] = '\0';
             break;
           }
           case SPACE_PROPERTIES: {
             SpaceProperties *sbuts = reinterpret_cast<SpaceProperties *>(&sl);
-            sbuts->tag_last_active_categories[0] = '\0';
+            sbuts->tabs_state.tag_last_active_categories[0] = '\0';
             break;
           }
           case SPACE_NODE: {
             SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
-            snode->tag_last_active_categories[0] = '\0';
+            snode->tabs_state.tag_last_active_categories[0] = '\0';
             break;
           }
           case SPACE_IMAGE: {
             SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
-            sima->tag_last_active_categories[0] = '\0';
+            sima->tabs_state.tag_last_active_categories[0] = '\0';
             break;
           }
           default:

@@ -7685,7 +7685,7 @@ static std::string category_tab_extension_dragged_name(wmDrag *drag)
 /* Fully qualified Python function used to register the pending extension context after a drop.
  * Centralized here so a rename on the Python side only needs to be mirrored in one place. */
 static const char *category_tab_extension_post_install_handler =
-    "__import__('bl_ui.space_userpref', fromlist=['']).extension_post_install_handler";
+    "__import__('bl_ui.glyph_tag_system.api', fromlist=['']).extension_post_install_handler";
 
 /* Escape a string so it can be safely embedded inside a single-quoted Python string literal.
  * Handles backslash, single quote and common control characters to avoid syntax errors or

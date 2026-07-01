@@ -929,7 +929,7 @@ def _sync_glyph_mappings_to_wm_impl(force_discovery_merge=False, skip_icon_detec
     if force_discovery_merge:
         _pref_log_once(f"[GLYPH SYNC] Running forced discovery merge")
         try:
-            from bl_ui.space_userpref import _merge_discovered_categories
+            from bl_ui.glyph_tag_system.discovery import _merge_discovered_categories
             discovered_changes = _merge_discovered_categories(force_refresh=True, skip_icon_detection=skip_icon_detection)
             _pref_log_once(f"[GLYPH SYNC] late discovery merge result: {discovered_changes}")
         except Exception as e:
@@ -1103,7 +1103,7 @@ def _sync_glyph_mappings_to_wm_impl(force_discovery_merge=False, skip_icon_detec
                                 f"[] sync attempt: category={category!r}, "
                                 f"icon_source={icon_source_str!r}"
                             )
-                            from bl_ui.space_userpref import _auto_detect_extension_icon_path
+                            from bl_ui.glyph_tag_system.discovery import _auto_detect_extension_icon_path
                             detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
                             if detected_icon_path:
                                 icon_path_val = detected_icon_path

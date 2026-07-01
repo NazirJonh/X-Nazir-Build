@@ -33,7 +33,7 @@ void category_py_reset_to_defaults(bContext *C, const int space_type)
   char cmd[512];
   BLI_snprintf(cmd,
                sizeof(cmd),
-               "from bl_ui.space_userpref import reset_category_to_defaults\n"
+               "from bl_ui.glyph_tag_system.api import reset_category_to_defaults\n"
                "import bpy\n"
                "wm = bpy.context.window_manager\n"
                "category = wm.category_tab_save_category\n"
@@ -54,7 +54,7 @@ void category_py_reset_tags(bContext *C, const int space_type)
   char cmd[512];
   BLI_snprintf(cmd,
                sizeof(cmd),
-               "from bl_ui.space_userpref import set_category_tags\n"
+               "from bl_ui.glyph_tag_system.api import set_category_tags\n"
                "import bpy\n"
                "wm = bpy.context.window_manager\n"
                "category = wm.category_tab_save_category\n"
@@ -75,7 +75,7 @@ void category_py_save_glyph_mappings_to_file(bContext *C)
   char cmd[1024];
   BLI_snprintf(cmd,
                sizeof(cmd),
-               "from bl_ui.space_userpref import _save_glyph_mappings_to_file\n"
+               "from bl_ui.glyph_tag_system.api import _save_glyph_mappings_to_file\n"
                "import bpy\n"
                "wm = bpy.context.window_manager\n"
                "category = wm.category_tab_save_category\n"
@@ -111,7 +111,7 @@ void category_py_save_category_data(bContext *C,
   char cmd[8192];
   BLI_snprintf(cmd,
                sizeof(cmd),
-               "from bl_ui.space_userpref import set_category_data, finalize_category_tag_changes\n"
+               "from bl_ui.glyph_tag_system.api import set_category_data, finalize_category_tag_changes\n"
                "set_category_data('%s', display_name='%s', first_letter='%s', glyph='%s', color='%s', "
                "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s', glyph_mode='%s', space_type=%d, skip_wm_sync=True)\n"
                "finalize_category_tag_changes('%s', space_type=%d, sync_wm=False)\n",
@@ -160,7 +160,7 @@ void category_py_restore_on_cancel(bContext *C,
   char cmd[2048];
   BLI_snprintf(cmd,
                sizeof(cmd),
-               "from bl_ui.space_userpref import restore_category_tags_from_string, restore_category_glyph_from_snapshot\n"
+               "from bl_ui.glyph_tag_system.api import restore_category_tags_from_string, restore_category_glyph_from_snapshot\n"
                "import bpy\n"
                "wm = bpy.context.window_manager\n"
                "category = wm.category_tab_save_category\n"
@@ -198,7 +198,7 @@ void category_py_update_tag_icon(bContext *C,
   char cmd[2048];
   BLI_snprintf(cmd,
                sizeof(cmd),
-               "from bl_ui.space_userpref import update_tag\n"
+               "from bl_ui.glyph_tag_system.api import update_tag\n"
                "update_tag(tag_name='%s', icon_key='%s', icon_source=%d, auto_save=True)\n",
                tag_name_esc.c_str(),
                icon_key_esc.c_str(),
@@ -219,7 +219,7 @@ void category_py_assign_tag(bContext *C,
   const std::string tag_esc = category_tab_escape_for_python_literal(tag);
   char cmd[1280];
   SNPRINTF(cmd,
-           "__import__('bl_ui.space_userpref', fromlist=[''])."
+           "__import__('bl_ui.glyph_tag_system.api', fromlist=[''])."
            "assign_tag_to_category('%s', '%s', %d)",
            cat_esc.c_str(),
            tag_esc.c_str(),
@@ -239,7 +239,7 @@ bool category_py_mark_all_unassigned_without_tag(bContext *C,
   char cmd[512];
   SNPRINTF(cmd,
            "import bpy; "
-           "updated = __import__('bl_ui.space_userpref', fromlist=['']).mark_all_unassigned_categories_as_without_tag(%d, %u); "
+           "updated = __import__('bl_ui.glyph_tag_system.api', fromlist=['']).mark_all_unassigned_categories_as_without_tag(%d, %u); "
            "bpy.context.window_manager.report({'INFO'}, f'{updated} unassigned categories marked as \"Without Tag\"')",
            space_type,
            mode_flag);
@@ -262,7 +262,7 @@ void category_py_mark_from_extension(bContext *C,
   const std::string esc_ext = category_tab_escape_for_python_literal(extension_id);
   char cmd[1280];
   SNPRINTF(cmd,
-           "__import__('bl_ui.space_userpref', fromlist=[''])."
+           "__import__('bl_ui.glyph_tag_system.api', fromlist=[''])."
            "mark_category_from_extension('%s', '%s', %d, %u)",
            esc_cat.c_str(),
            esc_ext.c_str(),
@@ -292,7 +292,7 @@ void category_py_set_category_order(bContext *C,
 
   const std::string escaped_key = category_tab_escape_for_python_literal(tag_key);
 
-  const std::string cmd = "from bl_ui.space_userpref import set_category_order\n"
+  const std::string cmd = "from bl_ui.glyph_tag_system.api import set_category_order\n"
                           "set_category_order('" +
                           escaped_key + "', " + python_list + ")\n";
 
@@ -309,7 +309,7 @@ void category_py_set_preview_mode(bContext *C, const bool active)
   char cmd[256];
   BLI_snprintf(cmd,
                sizeof(cmd),
-               "from bl_ui.space_userpref import set_preview_mode_active\n"
+               "from bl_ui.glyph_tag_system.api import set_preview_mode_active\n"
                "set_preview_mode_active(%s)",
                active ? "True" : "False");
   const char *imports_none[] = {nullptr};
@@ -336,7 +336,7 @@ int category_py_get_reserved_priority(bContext *C,
 
   char python_expr[640];
   SNPRINTF(python_expr,
-           "str(__import__('bl_ui.space_userpref', fromlist=[''])."
+           "str(__import__('bl_ui.glyph_tag_system.api', fromlist=[''])."
            "get_reserved_category_priority('%s', '%s'))",
            escaped_id.c_str(),
            escaped_space.c_str());
@@ -365,7 +365,7 @@ std::string category_py_get_category_order_json(bContext *C, const char *tag_key
   /* json.dumps converts the Python list to a JSON string for C++ parsing.
    * ensure_ascii=False preserves Unicode characters (not escaped as \uXXXX). */
   const std::string python_expr =
-      "json.dumps(__import__('bl_ui.space_userpref', fromlist=['']).get_category_order('" +
+      "json.dumps(__import__('bl_ui.glyph_tag_system.api', fromlist=['']).get_category_order('" +
       escaped_key + "') or [], ensure_ascii=False)";
 
   char *result_str = nullptr;
@@ -441,7 +441,7 @@ std::string category_py_auto_detect_extension_icon_json(bContext *C, const char 
   char python_expr[2048];
   SNPRINTF(python_expr,
            "(lambda _r: json.dumps([_r[0].replace('\\\\', '/'), _r[1]]))"
-           "(__import__('bl_ui.space_userpref', fromlist=[''])"
+           "(__import__('bl_ui.glyph_tag_system.api', fromlist=[''])"
            "._auto_detect_extension_icon_path('%s'))",
            escaped_category.c_str());
 

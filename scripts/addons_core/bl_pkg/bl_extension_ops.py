@@ -2296,7 +2296,7 @@ class EXTENSIONS_OT_package_upgrade_all(Operator, _ExtCmdMixIn):
 
                 # Call extension_post_install_handler for each upgraded package for category discovery
                 # This is needed for Upgrade operations to update category cache (icons may have changed)
-                from bl_ui.space_userpref import extension_post_install_handler
+                from bl_ui.glyph_tag_system.api import extension_post_install_handler
                 if EXTENSION_DEBUG_ENABLED:
                     print(f"[UPGRADE ALL] ======= STARTING POST-UPGRADE PROCESSING =======")
                     print(f"[UPGRADE ALL] Processing {len(self._addon_restore)} repositories")
@@ -2333,7 +2333,7 @@ class EXTENSIONS_OT_package_upgrade_all(Operator, _ExtCmdMixIn):
                     if EXTENSION_DEBUG_ENABLED:
                         print("[UPGRADE ALL] ======= STARTING CATEGORY SYNC =======")
                         print("[UPGRADE ALL] Syncing discovered categories from cache to WM after package upgrade...")
-                    from bl_ui.space_userpref import sync_glyph_mappings_to_wm
+                    from bl_ui.glyph_tag_system.api import sync_glyph_mappings_to_wm
                     sync_result = sync_glyph_mappings_to_wm(skip_icon_detection=False)
                     if EXTENSION_DEBUG_ENABLED:
                         print(f"[UPGRADE ALL] sync_glyph_mappings_to_wm returned: {sync_result}")
@@ -2550,7 +2550,7 @@ class EXTENSIONS_OT_package_install_marked(Operator, _ExtCmdMixIn):
 
                 # Call extension_post_install_handler for each installed package for category discovery
                 # This is needed for Install Marked operations to update category cache
-                from bl_ui.space_userpref import extension_post_install_handler
+                from bl_ui.glyph_tag_system.api import extension_post_install_handler
                 repos_all = list(extension_repos_read(use_active_only=False))
                 if EXTENSION_DEBUG_ENABLED:
                     print(f"[INSTALL MARKED] ======= STARTING POST-INSTALL PROCESSING =======")
@@ -2596,7 +2596,7 @@ class EXTENSIONS_OT_package_install_marked(Operator, _ExtCmdMixIn):
                     if EXTENSION_DEBUG_ENABLED:
                         print("[INSTALL MARKED] ======= STARTING CATEGORY SYNC =======")
                         print("[INSTALL MARKED] Syncing discovered categories from cache to WM after marked packages installation...")
-                    from bl_ui.space_userpref import sync_glyph_mappings_to_wm
+                    from bl_ui.glyph_tag_system.api import sync_glyph_mappings_to_wm
                     sync_result = sync_glyph_mappings_to_wm(skip_icon_detection=False)
                     if EXTENSION_DEBUG_ENABLED:
                         print(f"[INSTALL MARKED] sync_glyph_mappings_to_wm returned: {sync_result}")
@@ -3040,7 +3040,7 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
 
                 # Call extension_post_install_handler with is_install_from_disk=True for each installed package.
                 # This triggers Python file scanning for bl_category values only for Install from Disk operations.
-                from bl_ui.space_userpref import extension_post_install_handler
+                from bl_ui.glyph_tag_system.api import extension_post_install_handler
                 if EXTENSION_DEBUG_ENABLED:
                     print(f"[INSTALL FROM DISK] ======= STARTING POST-INSTALL PROCESSING =======")
                     print(f"[INSTALL FROM DISK] Installing {len(self.pkg_id_sequence)} packages: {list(self.pkg_id_sequence)}")
@@ -3076,7 +3076,7 @@ class EXTENSIONS_OT_package_install_files(Operator, _ExtCmdMixIn):
                     if EXTENSION_DEBUG_ENABLED:
                         print("[INSTALL FROM DISK] ======= STARTING CATEGORY SYNC =======")
                         print("[INSTALL FROM DISK] Syncing discovered categories from cache to WM after extension installation...")
-                    from bl_ui.space_userpref import sync_glyph_mappings_to_wm
+                    from bl_ui.glyph_tag_system.api import sync_glyph_mappings_to_wm
                     sync_result = sync_glyph_mappings_to_wm(skip_icon_detection=False)
                     if EXTENSION_DEBUG_ENABLED:
                         print(f"[INSTALL FROM DISK] sync_glyph_mappings_to_wm returned: {sync_result}")
@@ -3509,7 +3509,7 @@ class EXTENSIONS_OT_package_install(Operator, _ExtCmdMixIn):
 
                 # Call extension_post_install_handler for category discovery and caching
                 # This is needed for Install from Repository operations to update category cache
-                from bl_ui.space_userpref import extension_post_install_handler
+                from bl_ui.glyph_tag_system.api import extension_post_install_handler
                 repo_module = self.repo_item.module
                 extension_id = f"add-on-{repo_module}.{self.pkg_id}"
                 if EXTENSION_DEBUG_ENABLED:
@@ -3540,7 +3540,7 @@ class EXTENSIONS_OT_package_install(Operator, _ExtCmdMixIn):
                     if EXTENSION_DEBUG_ENABLED:
                         print("[INSTALL FROM REPO] ======= STARTING CATEGORY SYNC =======")
                         print("[INSTALL FROM REPO] Syncing discovered categories from cache to WM after extension installation...")
-                    from bl_ui.space_userpref import sync_glyph_mappings_to_wm
+                    from bl_ui.glyph_tag_system.api import sync_glyph_mappings_to_wm
                     sync_result = sync_glyph_mappings_to_wm(skip_icon_detection=False)
                     if EXTENSION_DEBUG_ENABLED:
                         print(f"[INSTALL FROM REPO] sync_glyph_mappings_to_wm returned: {sync_result}")

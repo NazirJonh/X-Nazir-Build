@@ -478,14 +478,14 @@ _GLYPH_SYNC_DEBUG = False
 def _refresh_category_glyphs_after_addon_change(context):
     """Refresh category tab glyph/icon mappings after add-on enable/disable."""
     try:
-        from bl_ui import space_userpref
+        from bl_ui.glyph_tag_system import api as _glyph_api
     except ImportError as ex:
         if _GLYPH_SYNC_DEBUG:
-            print("[GLYPH SYNC] addon change refresh: failed to import space_userpref: {:s}".format(str(ex)))
+            print("[GLYPH SYNC] addon change refresh: failed to import glyph_tag_system.api: {:s}".format(str(ex)))
         return
 
     try:
-        refresh_result = space_userpref.sync_glyph_mappings_to_wm()
+        refresh_result = _glyph_api.sync_glyph_mappings_to_wm()
         if _GLYPH_SYNC_DEBUG:
             print("[GLYPH SYNC] addon change refresh: sync_glyph_mappings_to_wm -> {!r}".format(refresh_result))
     except (AttributeError, RuntimeError, ValueError) as ex:

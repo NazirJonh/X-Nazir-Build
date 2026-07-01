@@ -38,19 +38,19 @@ eUserPref_CategoryTabsDisplayMode ED_category_tabs_display_mode_get(const ScrAre
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
-      return static_cast<eUserPref_CategoryTabsDisplayMode>(v3d->category_tabs_display_mode);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(v3d->tabs_state.category_tabs_display_mode);
     }
     case SPACE_PROPERTIES: {
       const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
-      return static_cast<eUserPref_CategoryTabsDisplayMode>(sbuts->category_tabs_display_mode);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(sbuts->tabs_state.category_tabs_display_mode);
     }
     case SPACE_NODE: {
       const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
-      return static_cast<eUserPref_CategoryTabsDisplayMode>(snode->category_tabs_display_mode);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(snode->tabs_state.category_tabs_display_mode);
     }
     case SPACE_IMAGE: {
       const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
-      return static_cast<eUserPref_CategoryTabsDisplayMode>(sima->category_tabs_display_mode);
+      return static_cast<eUserPref_CategoryTabsDisplayMode>(sima->tabs_state.category_tabs_display_mode);
     }
     default:
       return static_cast<eUserPref_CategoryTabsDisplayMode>(U.category_tabs_display_mode);
@@ -67,14 +67,14 @@ float ED_category_tabs_zoom_get(const ScrArea *area)
         const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
         switch (ED_category_tabs_display_mode_get(area)) {
           case USER_CATEGORY_TABS_GLYPHS_ONLY:
-            category_tabs_zoom = v3d->category_tabs_zoom_icon;
+            category_tabs_zoom = v3d->tabs_state.category_tabs_zoom_icon;
             break;
           case USER_CATEGORY_TABS_GLYPHS_TEXT:
-            category_tabs_zoom = v3d->category_tabs_zoom_mixed;
+            category_tabs_zoom = v3d->tabs_state.category_tabs_zoom_mixed;
             break;
           case USER_CATEGORY_TABS_TEXT_ONLY:
           default:
-            category_tabs_zoom = v3d->category_tabs_zoom_text;
+            category_tabs_zoom = v3d->tabs_state.category_tabs_zoom_text;
             break;
         }
         break;
@@ -83,14 +83,14 @@ float ED_category_tabs_zoom_get(const ScrArea *area)
         const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
         switch (ED_category_tabs_display_mode_get(area)) {
           case USER_CATEGORY_TABS_GLYPHS_ONLY:
-            category_tabs_zoom = sbuts->category_tabs_zoom_icon;
+            category_tabs_zoom = sbuts->tabs_state.category_tabs_zoom_icon;
             break;
           case USER_CATEGORY_TABS_GLYPHS_TEXT:
-            category_tabs_zoom = sbuts->category_tabs_zoom_mixed;
+            category_tabs_zoom = sbuts->tabs_state.category_tabs_zoom_mixed;
             break;
           case USER_CATEGORY_TABS_TEXT_ONLY:
           default:
-            category_tabs_zoom = sbuts->category_tabs_zoom_text;
+            category_tabs_zoom = sbuts->tabs_state.category_tabs_zoom_text;
             break;
         }
         break;
@@ -99,14 +99,14 @@ float ED_category_tabs_zoom_get(const ScrArea *area)
         const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
         switch (ED_category_tabs_display_mode_get(area)) {
           case USER_CATEGORY_TABS_GLYPHS_ONLY:
-            category_tabs_zoom = snode->category_tabs_zoom_icon;
+            category_tabs_zoom = snode->tabs_state.category_tabs_zoom_icon;
             break;
           case USER_CATEGORY_TABS_GLYPHS_TEXT:
-            category_tabs_zoom = snode->category_tabs_zoom_mixed;
+            category_tabs_zoom = snode->tabs_state.category_tabs_zoom_mixed;
             break;
           case USER_CATEGORY_TABS_TEXT_ONLY:
           default:
-            category_tabs_zoom = snode->category_tabs_zoom_text;
+            category_tabs_zoom = snode->tabs_state.category_tabs_zoom_text;
             break;
         }
         break;
@@ -115,14 +115,14 @@ float ED_category_tabs_zoom_get(const ScrArea *area)
         const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
         switch (ED_category_tabs_display_mode_get(area)) {
           case USER_CATEGORY_TABS_GLYPHS_ONLY:
-            category_tabs_zoom = sima->category_tabs_zoom_icon;
+            category_tabs_zoom = sima->tabs_state.category_tabs_zoom_icon;
             break;
           case USER_CATEGORY_TABS_GLYPHS_TEXT:
-            category_tabs_zoom = sima->category_tabs_zoom_mixed;
+            category_tabs_zoom = sima->tabs_state.category_tabs_zoom_mixed;
             break;
           case USER_CATEGORY_TABS_TEXT_ONLY:
           default:
-            category_tabs_zoom = sima->category_tabs_zoom_text;
+            category_tabs_zoom = sima->tabs_state.category_tabs_zoom_text;
             break;
         }
         break;

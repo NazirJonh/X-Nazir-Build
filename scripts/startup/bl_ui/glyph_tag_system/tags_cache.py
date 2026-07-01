@@ -191,8 +191,8 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", ico
     category_debug_print(f"[CREATE_TAG] Tag '{tag_name}' added to _all_tags_cache")
 
     if auto_save:
-        from bl_ui import space_userpref as _su
-        _su._auto_save_tags()
+        from bl_ui.glyph_tag_system import handlers as _handlers
+        _handlers._auto_save_tags()
 
     # Immediately sync the new tag to WM so it's visible in UI
     # This is important for preview mode where full sync is skipped
@@ -288,8 +288,8 @@ def update_tag(tag_name, glyph=None, color=None, icon_key=None, icon_source=None
     tag_log(f"Updated tag: {tag_name}")
 
     if auto_save:
-        from bl_ui import space_userpref as _su
-        _su._auto_save_tags()
+        from bl_ui.glyph_tag_system import handlers as _handlers
+        _handlers._auto_save_tags()
 
     return True, f"Tag '{tag_name}' updated"
 
@@ -338,8 +338,8 @@ def rename_tag(old_name, new_name, auto_save=True):
     tag_log(f"Renamed tag: '{old_name}' -> '{new_name}'")
 
     if auto_save:
-        from bl_ui import space_userpref as _su
-        _su._auto_save_tags()
+        from bl_ui.glyph_tag_system import handlers as _handlers
+        _handlers._auto_save_tags()
 
     return True, f"Tag renamed to '{new_name}'"
 
@@ -364,8 +364,8 @@ def delete_tag(tag_name, auto_save=True):
     tag_log(f"Deleted tag: {tag_name}")
 
     if auto_save:
-        from bl_ui import space_userpref as _su
-        _su._auto_save_tags()
+        from bl_ui.glyph_tag_system import handlers as _handlers
+        _handlers._auto_save_tags()
 
     return True, f"Tag '{tag_name}' deleted"
 
@@ -412,12 +412,12 @@ def set_category_tags(category, tags, space_type=-1, auto_save=True, update_wm=T
 
     # Only update WM override if requested (not during preview in edit dialog)
     if update_wm:
-        from bl_ui import space_userpref as _su
-        _su.update_category_tags_in_wm(category, space_type)
+        from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+        _wm_sync.update_category_tags_in_wm(category, space_type)
 
     if auto_save:
-        from bl_ui import space_userpref as _su
-        _su._auto_save_tags()
+        from bl_ui.glyph_tag_system import handlers as _handlers
+        _handlers._auto_save_tags()
 
     return True, f"Tags set for '{category}'"
 
@@ -508,13 +508,13 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1, update_w
 
     # Only update WM override if requested (not during preview in edit dialog)
     if update_wm:
-        from bl_ui import space_userpref as _su
-        _su.update_category_tags_in_wm(category, space_type)
+        from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+        _wm_sync.update_category_tags_in_wm(category, space_type)
 
     if auto_save:
         category_debug_print(f"[ADD_TAG] Calling _auto_save_tags()")
-        from bl_ui import space_userpref as _su
-        _su._auto_save_tags()
+        from bl_ui.glyph_tag_system import handlers as _handlers
+        _handlers._auto_save_tags()
 
     return True, f"Tag '{tag_name}' added to '{category}'"
 
@@ -538,12 +538,12 @@ def remove_category_tag(category, tag_name, auto_save=True, space_type=-1, updat
 
     # Only update WM override if requested (not during preview in edit dialog)
     if update_wm:
-        from bl_ui import space_userpref as _su
-        _su.update_category_tags_in_wm(category, space_type)
+        from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+        _wm_sync.update_category_tags_in_wm(category, space_type)
 
     if auto_save:
-        from bl_ui import space_userpref as _su
-        _su._auto_save_tags()
+        from bl_ui.glyph_tag_system import handlers as _handlers
+        _handlers._auto_save_tags()
 
     return True, f"Tag '{tag_name}' removed from '{category}'"
 

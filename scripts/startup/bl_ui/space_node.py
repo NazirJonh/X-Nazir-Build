@@ -56,16 +56,15 @@ from bl_ui.properties_data_light import (
 from bl_operators.geometry_nodes import geometry_modifier_poll
 
 
-_CATEGORY_TAG_MODE_GEOMETRY_NODES = 1 << 8
-_CATEGORY_TAG_MODE_SHADER_EDITOR = 1 << 9
-
-
 def _node_current_tag_mode_flag(snode):
+    # Resolve the tag-bar mode bit from the single source of truth in
+    # glyph_tag_system.defaults (never hard-code the bit positions here).
+    from bl_ui.glyph_tag_system.api import _CATEGORY_TAG_MODE_NAME_TO_FLAG as _flags
     if snode.tree_type == 'GeometryNodeTree':
-        return _CATEGORY_TAG_MODE_GEOMETRY_NODES
+        return _flags.get("GEOMETRY_NODES", 0)
     if snode.tree_type == 'ShaderNodeTree':
-        return _CATEGORY_TAG_MODE_SHADER_EDITOR
-    return _CATEGORY_TAG_MODE_SHADER_EDITOR
+        return _flags.get("SHADER_EDITOR", 0)
+    return _flags.get("SHADER_EDITOR", 0)
 
 
 def _tag_glyph_display(glyph):
@@ -85,7 +84,7 @@ def _node_visible_tags_for_current_mode(context):
 
     # In preview mode, also include tags from cache that aren't in WM yet
     try:
-        from bl_ui.space_userpref import _all_tags_cache, _preview_mode_active, _CATEGORY_TAG_DEFAULT_MODE_FLAGS
+        from bl_ui.glyph_tag_system.api import _all_tags_cache, _preview_mode_active, _CATEGORY_TAG_DEFAULT_MODE_FLAGS
         
         if _preview_mode_active and _all_tags_cache:
             # Get existing WM tag names to avoid duplicates
@@ -421,7 +420,7 @@ def _get_unassigned_categories_count_for_node_editor(context):
     "New Add-ons!" visibility stay in sync.
     """
     try:
-        from bl_ui.space_userpref import _get_unassigned_categories_count_for_space
+        from bl_ui.glyph_tag_system.api import _get_unassigned_categories_count_for_space
         return _get_unassigned_categories_count_for_space(context, 16, 1 << 11, "NODE:")
     except Exception as e:
         print(f"[NODE_TAG_BAR] Error checking unassigned categories: {e}")

@@ -39,17 +39,15 @@ from bpy.app.translations import (
 )
 
 
-_CATEGORY_TAG_MODE_TEXTURE_PAINT = 1 << 5
-_CATEGORY_TAG_MODE_UV_EDIT = 1 << 6
-_CATEGORY_TAG_MODE_IMAGE_PAINT = 1 << 10
-
-
 def _image_current_tag_mode_flag(sima):
+    # Resolve the tag-bar mode bit from the single source of truth in
+    # glyph_tag_system.defaults (never hard-code the bit positions here).
+    from bl_ui.glyph_tag_system.api import _CATEGORY_TAG_MODE_NAME_TO_FLAG as _flags
     if sima.mode == 'PAINT':
-        return _CATEGORY_TAG_MODE_IMAGE_PAINT
+        return _flags.get("IMAGE_PAINT", 0)
     if sima.mode == 'UV':
-        return _CATEGORY_TAG_MODE_UV_EDIT
-    return _CATEGORY_TAG_MODE_IMAGE_PAINT
+        return _flags.get("UV_EDIT", 0)
+    return _flags.get("IMAGE_PAINT", 0)
 
 
 def _tag_glyph_display(glyph):

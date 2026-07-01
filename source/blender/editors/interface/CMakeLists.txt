@@ -66,6 +66,9 @@ set(SRC
   interface_tab_categories_edit_live.cc
   interface_tab_categories_edit_popups.cc
   interface_tab_categories_intern.hh
+  interface_tab_categories_lookup.cc
+  interface_tab_categories_operators.cc
+  interface_tab_categories_reserved.cc
   interface_tab_utils.cc
   templates/interface_template_asset_shelf_popover.cc
   templates/interface_template_attribute_search.cc

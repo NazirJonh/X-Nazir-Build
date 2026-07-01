@@ -45,14 +45,14 @@ from bl_ui.glyph_tag_system.log import (
 
 def _auto_save_tags():
     """Thin forwarding shim — avoids a circular import at module load time."""
-    import bl_ui.space_userpref as _su
-    _su._auto_save_tags()
+    from bl_ui.glyph_tag_system import handlers as _handlers
+    _handlers._auto_save_tags()
 
 
 def _sync_wm_to_glyph_cache():
     """Thin forwarding shim — avoids a circular import at module load time."""
-    import bl_ui.space_userpref as _su
-    _su.sync_wm_to_glyph_cache()
+    from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+    _wm_sync.sync_wm_to_glyph_cache()
 
 
 # -----------------------------------------------------------------------------

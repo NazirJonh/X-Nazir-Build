@@ -55,6 +55,23 @@ _CATEGORY_TAG_MODE_FLAG_TO_NAME = {(1 << bit): name for name, _id, bit, _label, 
 _CATEGORY_TAG_MODE_ID_TO_BIT = {mode_id: bit for _name, mode_id, bit, _label, _icon in _CATEGORY_TAG_MODES}
 _CATEGORY_TAG_ALL_MODE_FLAGS = sum((1 << bit) for _name, _id, bit, _label, _icon in _CATEGORY_TAG_MODES)
 _CATEGORY_TAG_DEFAULT_MODE_FLAGS = (1 << 0) | (1 << 1) | (1 << 2)
+# Bitmask of every edit-style mode: the generic EDIT plus the per-object-type *_EDIT
+# modes. A tag restricted to EDIT_MODE should stay visible in any detailed edit mode.
+# Currently-hidden detailed modes resolve to 0, so this stays in sync with the table
+# above automatically. Mirrors the C++ EDIT_MODE_MASK in interface_tag_bar.cc.
+_CATEGORY_TAG_EDIT_MODE_MASK = (
+    _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0)
+    | _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("MESH_EDIT", 0)
+    | _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("CURVE_EDIT", 0)
+    | _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("SURFACE_EDIT", 0)
+    | _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("ARMATURE_EDIT", 0)
+    | _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("LATTICE_EDIT", 0)
+    | _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("META_EDIT", 0)
+    | _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("FONT_EDIT", 0)
+    | _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("GREASE_PENCIL_EDIT", 0)
+    | _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("POINTCLOUD_EDIT", 0)
+    | _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("VOLUME_EDIT", 0)
+)
 _CATEGORY_TAG_FILTER_ENUM_TO_FLAG = {
     0: 0,
     "ALL": 0,

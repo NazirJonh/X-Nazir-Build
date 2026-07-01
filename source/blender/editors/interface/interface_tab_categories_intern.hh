@@ -52,6 +52,13 @@
 
 namespace blender::ui {
 
+/* Source of a category's base glyph (used by panel_category_base_source_lookup). */
+enum eCategoryGlyphBaseSource {
+  CATEGORY_GLYPH_BASE_SOURCE_MAPPING,
+  CATEGORY_GLYPH_BASE_SOURCE_PANEL_TYPE,
+  CATEGORY_GLYPH_BASE_SOURCE_FALLBACK,
+};
+
 /* Shared compile-time debug switch (was a file-static constexpr). */
 constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
 
@@ -128,6 +135,16 @@ void register_new_extension_category(const bContext *C, const char *category_id,
 void save_category_order_to_json(const bContext *C, const char *tag_key, const Vector<std::string> &order);
 bool set_glyph_color(const int fontid, const float custom_color[3], const bool is_active, const unsigned char theme_col_text[3], const unsigned char theme_col_text_sel[3], unsigned char r_color[3]);
 void update_insert_zone(const bContext *C, const wmWindowManager * /*wm*/, ARegion *region, CategoryDragState *state);
+/* Lookup helpers kept in interface_tab_categories.cc but also used by the reserved-category
+ * logic in interface_tab_categories_reserved.cc. */
+const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManager *wm, const char *category, int space_type = -1);
+bool category_name_is_glyph(const char *category_id);
+/* Defined in interface_tab_categories_lookup.cc; used from the tag utilities in
+ * interface_tab_categories.cc and from other translation units (edit.cc, interface_template_glyph.cc). */
+const CategoryGlyphItem *category_item_find_overrides(const wmWindowManager *wm, const char *category, int space_type);
+const CategoryGlyphItem *category_item_find_mappings(const wmWindowManager *wm, const char *category, int space_type);
+const char *panel_category_glyph_lookup(const wmWindowManager *wm, const char *category, const PanelType *panel_type, bool *r_is_fallback_letter, float r_color[3], int space_type);
+bool panel_category_first_letter_lookup(const wmWindowManager *wm, const char *category, int space_type, char r_letter[8]);
 
 /* Defined in interface_tab_categories_draw.cc, used by interface_tab_categories.cc. */
 bool category_tab_should_expand_name(const ARegion *region, const char *category_id, const eUserPref_CategoryTabsDisplayMode display_mode, const bool is_active, const bool use_minimized_gate, const bool is_panel_minimized);

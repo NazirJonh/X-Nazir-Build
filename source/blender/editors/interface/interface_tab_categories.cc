@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2026 Nazir Galimov
+﻿/* SPDX-FileCopyrightText: 2026 Nazir Galimov
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -116,11 +116,7 @@ namespace blender::ui {
 /** \} */
 
 /* Forward declarations */
-static bool category_name_is_glyph(const char *category_id);
 static std::string normalize_category_key(const char *category);
-void panel_category_color_lookup(const wmWindowManager *wm,
-                                        const char *category,
-                                        float r_color[3]);
 
 static bool category_item_match_exact(const CategoryGlyphItem *item,
                                       const char *category,
@@ -373,102 +369,74 @@ static bool category_item_override_icon_is_effective(const CategoryGlyphItem *it
   return has_icon_payload || has_explicit_icon_mode;
 }
 
-static const CategoryGlyphItem *category_item_find_with_color_any_space(const ListBase *list,
-                                                                        const char *category)
+/* Two-pass any-space lookup shared by the color/effective-icon helpers below. Pass one matches
+ * the exact category name, pass two falls back to the normalized name; both require `pred(item)`.
+ * Each caller supplies only the payload predicate that distinguishes it. */
+template<typename PredFn>
+static const CategoryGlyphItem *category_item_find_any_space_matching(const ListBase *list,
+                                                                      const char *category,
+                                                                      PredFn &&pred)
 {
-  if (!list || !category_glyph_list_is_valid(list) || !category) {
+  if (!category) {
     return nullptr;
   }
 
-  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
-       item = static_cast<const CategoryGlyphItem *>(item->next))
+  /* First pass: exact category-name match satisfying the predicate, in any space. */
+  if (const CategoryGlyphItem *item = category_glyph_list_find(
+          list, [&](const CategoryGlyphItem *it) {
+            return STREQ(it->category, category) && pred(it);
+          }))
   {
-    if (STREQ(item->category, category) && !is_zero_v3(item->color)) {
-      return item;
-    }
+    return item;
   }
 
+  /* Second pass: normalized-name fallback satisfying the predicate, in any space. */
   const std::string normalized_target = normalize_category_key(category);
   if (normalized_target.empty()) {
     return nullptr;
   }
+  return category_glyph_list_find(list, [&](const CategoryGlyphItem *it) {
+    return pred(it) && category_item_match_normalized(it, normalized_target, it->space_type);
+  });
+}
 
-  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
-       item = static_cast<const CategoryGlyphItem *>(item->next))
-  {
-    if (is_zero_v3(item->color)) {
-      continue;
-    }
-    if (category_item_match_normalized(item, normalized_target, item->space_type)) {
-      return item;
-    }
-  }
-
-  return nullptr;
+static const CategoryGlyphItem *category_item_find_with_color_any_space(const ListBase *list,
+                                                                        const char *category)
+{
+  return category_item_find_any_space_matching(
+      list, category, [](const CategoryGlyphItem *item) { return !is_zero_v3(item->color); });
 }
 
 static const CategoryGlyphItem *category_item_find_with_effective_icon_any_space(
     const ListBase *list, const char *category)
 {
-  if (!list || !category_glyph_list_is_valid(list) || !category) {
-    return nullptr;
-  }
-
-  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
-       item = static_cast<const CategoryGlyphItem *>(item->next))
-  {
-    if (STREQ(item->category, category) && category_item_override_icon_is_effective(item)) {
-      return item;
-    }
-  }
-
-  const std::string normalized_target = normalize_category_key(category);
-  if (normalized_target.empty()) {
-    return nullptr;
-  }
-
-  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
-       item = static_cast<const CategoryGlyphItem *>(item->next))
-  {
-    if (!category_item_override_icon_is_effective(item)) {
-      continue;
-    }
-    if (category_item_match_normalized(item, normalized_target, item->space_type)) {
-      return item;
-    }
-  }
-
-  return nullptr;
+  return category_item_find_any_space_matching(list, category, category_item_override_icon_is_effective);
 }
 
 static const CategoryGlyphItem *category_item_find_override_with_display_name(
     const ListBase *list, const char *category, int space_type)
 {
-  if (!list || !category_glyph_list_is_valid(list) || !category) {
+  if (!category) {
     return nullptr;
   }
 
-  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
-       item = static_cast<const CategoryGlyphItem *>(item->next))
+  /* First pass: exact space-type match that carries a display name. */
+  if (const CategoryGlyphItem *item = category_glyph_list_find(
+          list, [&](const CategoryGlyphItem *it) {
+            return category_item_match_exact(it, category, space_type) && it->display_name[0] != '\0';
+          }))
   {
-    if (category_item_match_exact(item, category, space_type) && item->display_name[0] != '\0') {
-      return item;
-    }
+    return item;
   }
 
   if (space_type == -1) {
     return nullptr;
   }
 
-  for (const CategoryGlyphItem *item = static_cast<const CategoryGlyphItem *>(list->first); item;
-       item = static_cast<const CategoryGlyphItem *>(item->next))
-  {
-    if (category_item_match_exact(item, category, -1) && item->display_name[0] != '\0') {
-      return item;
-    }
-  }
-
-  return nullptr;
+  /* Second pass: global (space_type == -1) fallback that carries a display name. */
+  return category_glyph_list_find(list, [&](const CategoryGlyphItem *it) {
+    return category_item_match_exact(it, category, -1) && it->display_name[0] != '\0';
+  });
 }
 
 static const char *category_item_display_name_or_default_or_category(const CategoryGlyphItem *item,
@@ -1079,19 +1047,6 @@ void category_tabs_setup_viewport_drop_deferred(const bContext *C,
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Enums
- * \{ */
-
-enum eCategoryGlyphBaseSource {
-  CATEGORY_GLYPH_BASE_SOURCE_MAPPING,
-  CATEGORY_GLYPH_BASE_SOURCE_PANEL_TYPE,
-  CATEGORY_GLYPH_BASE_SOURCE_FALLBACK,
-};
-
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
 /** \name List Validation Utilities
  * \{ */
 
@@ -1183,25 +1138,6 @@ static std::string normalize_category_key(const char *category)
   return result;
 }
 
-/**
- * Find category glyph mapping item with canonicalization fallback.
- * First tries exact match, then tries to match by normalized keys if no exact match found.
- */
-static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManager *wm,
-                                                            const char *category,
-                                                            int space_type = -1);
-static const char *panel_category_glyph_lookup_apply_fallback(const wmWindowManager *wm,
-                                                              const char *category,
-                                                              bool *r_is_fallback_letter,
-                                                              int space_type);
-
-static const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManager *wm,
-                                                             const char *category,
-                                                             int space_type)
-{
-  return category_item_find_mappings(wm, category, space_type);
-}
-
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -1245,13 +1181,13 @@ const char *category_active_tag_first_get(const bContext *C)
   if (area->spacetype == SPACE_VIEW3D) {
     const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
     if (v3d) {
-      active_tags = v3d->active_tag_filter_tags;
+      active_tags = v3d->tabs_state.active_tag_filter_tags;
     }
   }
   else if (area->spacetype == SPACE_PROPERTIES) {
     const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
     if (sbuts) {
-      active_tags = sbuts->active_tag_filter_tags;
+      active_tags = sbuts->tabs_state.active_tag_filter_tags;
     }
   }
 
@@ -1317,574 +1253,6 @@ bool tag_glyph_hex_to_utf8(const char *input, char r_utf8[8])
 {
   r_utf8[0] = '\0';
   return hex_codepoint_to_utf8(input, r_utf8, 8);
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Glyph Lookup Functions
- * \{ */
-
-/* Forward declaration for glyph source lookup. */
-const char *panel_category_display_name_lookup(const wmWindowManager *wm,
-                                                      const char *category,
-                                                      int space_type);
-static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
-                                                     const char *category,
-                                                     const PanelType *panel_type,
-                                                     bool *r_is_reserved,
-                                                     eCategoryGlyphBaseSource *r_source_type);
-
-/**
- * Internal helper: Process a single CategoryGlyphItem from overrides.
- * Handles glyph_mode, fallback letter detection, and color extraction.
- */
-static const char *process_override_glyph_item(const CategoryGlyphItem *item,
-                                               const char *category,
-                                               bool *r_is_fallback_letter,
-                                               float r_color[3],
-                                               bool *r_handled,
-                                               const wmWindowManager *wm,
-                                               int space_type)
-{
-  if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
-    if (r_color && !is_zero_v3(item->color)) {
-      copy_v3_v3(r_color, item->color);
-    }
-    if (r_is_fallback_letter) {
-      *r_is_fallback_letter = true;
-    }
-    *r_handled = true;
-    return nullptr;
-  }
-
-  if (item->glyph[0] != '\0') {
-    /* For glyph_only categories (category name is a glyph), skip fallback letter check.
-     * The glyph equals the category name, which would incorrectly be detected as fallback. */
-    const bool is_glyph_only_category = category_name_is_glyph(category);
-    const bool is_fallback_letter = is_glyph_only_category ?
-                                        false :
-                                        category_tab_glyph_is_fallback_letter(item->glyph, category);
-
-    if (is_fallback_letter) {
-      if (r_color && !is_zero_v3(item->color)) {
-        copy_v3_v3(r_color, item->color);
-      }
-      /* Empty override used for tags only, keep searching mapping/defaults. */
-      if (is_zero_v3(item->color) && item->display_name[0] == '\0') {
-        return nullptr; /* Continue searching */
-      }
-      if (r_is_fallback_letter) {
-        *r_is_fallback_letter = true;
-      }
-      *r_handled = true;
-      return nullptr;
-    }
-
-    if (r_color && !is_zero_v3(item->color)) {
-      copy_v3_v3(r_color, item->color);
-    }
-    *r_handled = true;
-    return item->glyph;
-  }
-
-  /* Override has no glyph: may be explicit clear OR tags/color-only carrier.
-   * For text_only/glyph_text categories (default_glyph is empty), this means reset to first letter.
-   * For glyph_only categories (default_glyph is set), continue to mappings to get default.
-   *
-   * Important for glyph-id categories (normalized key can be empty): without this,
-   * color-only overrides are lost in live preview until full restart/resync.
-   */
-  if (r_color && !is_zero_v3(item->color)) {
-    copy_v3_v3(r_color, item->color);
-  }
-
-  /* Check if this is a text_only/glyph_text category by looking at mappings.
-   * If default_glyph is empty, reset should return first letter (nullptr), not mapping glyph. */
-  if (const CategoryGlyphItem *map_item = category_glyph_mapping_find(wm, category, space_type)) {
-    /* Treat as true text-only only when both glyph and default_glyph are empty. */
-    if (map_item->default_glyph[0] == '\0' && map_item->glyph[0] == '\0') {
-      /* Text-based category with empty override glyph = reset to first letter.
-       * Set handled=true to prevent fallback to mappings which would return old glyph.
-       * Set is_fallback_letter=true so draw code knows to use first letter. */
-      if (r_is_fallback_letter) {
-        *r_is_fallback_letter = true;
-      }
-      *r_handled = true;
-      return nullptr;
-    }
-  }
-
-  return nullptr; /* Continue to mappings */
-}
-
-static const char *panel_category_glyph_lookup_override(const wmWindowManager *wm,
-                                                         const char *category,
-                                                         bool *r_is_fallback_letter,
-                                                         float r_color[3],
-                                                         bool *r_handled,
-                                                         int space_type)
-{
-  *r_handled = false;
-
-  if (!wm) {
-    return nullptr;
-  }
-
-  /* First try exact match, then normalized match using unified helper. */
-  if (const CategoryGlyphItem *item = category_item_find_overrides(wm, category, space_type))
-  {
-    const char *result = process_override_glyph_item(
-        item, category, r_is_fallback_letter, r_color, r_handled, wm, space_type);
-    if (*r_handled || result) {
-      return result;
-    }
-    /* Continue searching if process_override_glyph_item returned nullptr without setting handled */
-  }
-
-  return nullptr;
-}
-
-static const char *panel_category_glyph_lookup_mapping(const wmWindowManager *wm,
-                                                       const char *category,
-                                                       bool *r_is_fallback_letter,
-                                                       float r_color[3],
-                                                       bool *r_handled,
-                                                       int space_type)
-{
-  *r_handled = false;
-
-  const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category, space_type);
-  if (!item) {
-    return nullptr;
-  }
-
-  if (r_color && is_zero_v3(r_color) && !is_zero_v3(item->color)) {
-    copy_v3_v3(r_color, item->color);
-  }
-
-  if (item->glyph_mode == CATEGORY_TAB_GLYPH_MODE_FIRST_LETTER) {
-    if (r_is_fallback_letter) {
-      *r_is_fallback_letter = true;
-    }
-    *r_handled = true;
-    static char cached_letter[8];
-    if (item->first_letter[0] != '\0') {
-      STRNCPY(cached_letter, item->first_letter);
-      return cached_letter;
-    }
-    return panel_category_glyph_lookup_apply_fallback(wm, category, r_is_fallback_letter, space_type);
-  }
-
-  /* For glyph_only categories (category name is a glyph), skip fallback letter check.
-   * The glyph equals the category name, which would incorrectly be detected as fallback. */
-  const bool is_glyph_only_category = category_name_is_glyph(category);
-
-  if (item->glyph[0] != '\0') {
-    if (is_glyph_only_category || !category_tab_glyph_is_fallback_letter(item->glyph, category)) {
-      *r_handled = true;
-      return item->glyph;
-    }
-  }
-
-  if (item->default_glyph[0] != '\0') {
-    if (is_glyph_only_category || !category_tab_glyph_is_fallback_letter(item->default_glyph, category)) {
-      *r_handled = true;
-      return item->default_glyph;
-    }
-  }
-
-  return nullptr;
-}
-
-static const char *panel_category_glyph_lookup_apply_fallback(const wmWindowManager *wm,
-                                                              const char *category,
-                                                              bool *r_is_fallback_letter,
-                                                              int space_type)
-{
-  if (r_is_fallback_letter) {
-    /* If category itself is a glyph, don't treat it as fallback letter. */
-    *r_is_fallback_letter = !category_name_is_glyph(category);
-  }
-
-  static char first_char_buf[8];
-  const char *first_letter_source = panel_category_display_name_lookup(wm, category, space_type);
-  if (!first_letter_source || first_letter_source[0] == '\0') {
-    first_letter_source = category;
-  }
-
-  if (category_tab_first_utf8_char_copy(first_letter_source, first_char_buf, sizeof(first_char_buf))) {
-    return first_char_buf;
-  }
-  return first_letter_source;
-}
-
-const char *panel_category_glyph_lookup(const wmWindowManager *wm,
-                                        const char *category,
-                                        const PanelType *panel_type,
-                                        bool *r_is_fallback_letter,
-                                        float r_color[3],
-                                        int space_type)
-{
-  /* Initialize outputs. */
-  if (r_is_fallback_letter) {
-    *r_is_fallback_letter = false;
-  }
-  /* Initialize color to black (use theme). */
-  if (r_color) {
-    zero_v3(r_color);
-  }
-
-  bool handled = false;
-  if (const char *override_glyph = panel_category_glyph_lookup_override(
-          wm, category, r_is_fallback_letter, r_color, &handled, space_type))
-  {
-    return override_glyph;
-  }
-  if (handled) {
-    return nullptr;
-  }
-
-  if (const char *mapping_glyph = panel_category_glyph_lookup_mapping(
-          wm, category, r_is_fallback_letter, r_color, &handled, space_type))
-  {
-    return mapping_glyph;
-  }
-  if (handled) {
-    return nullptr;
-  }
-
-  /* 3. Check PanelType.icon_glyph. */
-  if (panel_type && panel_type->icon_glyph && panel_type->icon_glyph[0]) {
-    if (r_color && is_zero_v3(r_color)) {
-      panel_category_color_lookup(wm, category, r_color);
-    }
-    return panel_type->icon_glyph;
-  }
-
-  return panel_category_glyph_lookup_apply_fallback(wm, category, r_is_fallback_letter, space_type);
-}
-
-bool panel_category_first_letter_lookup(const wmWindowManager *wm,
-                                        const char *category,
-                                        int space_type,
-                                        char r_letter[8])
-{
-  if (!wm || !r_letter) {
-    return false;
-  }
-
-  r_letter[0] = '\0';
-  const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category, space_type);
-  if (!item || item->first_letter[0] == '\0') {
-    return false;
-  }
-
-  BLI_strncpy(r_letter, item->first_letter, 8);
-  return true;
-}
-
-void panel_category_color_lookup(const wmWindowManager *wm,
-                                        const char *category,
-                                        float r_color[3])
-{
-  if (!r_color) {
-    return;
-  }
-
-  zero_v3(r_color);
-
-  if (!wm || !category) {
-    return;
-  }
-
-  if (const CategoryGlyphItem *item = category_item_find_with_color_any_space(
-          &wm->category_glyph_overrides, category))
-  {
-    copy_v3_v3(r_color, item->color);
-    return;
-  }
-
-  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category)) {
-    if (!is_zero_v3(item->color)) {
-      copy_v3_v3(r_color, item->color);
-    }
-  }
-}
-
-bool panel_category_icon_data_lookup(const wmWindowManager *wm,
-                                            const char *category,
-                                            CategoryTabIconResolved *r_icon,
-                                            int space_type = -1)
-{
-  if (!r_icon) {
-    return false;
-  }
-
-  *r_icon = CategoryTabIconResolved{};
-
-  const auto icon_data_copy_from_item = [&](const CategoryGlyphItem *item) {
-    r_icon->source = item->icon_source;
-    r_icon->key = item->icon_key;
-    r_icon->path = item->icon_path;
-    r_icon->provider = item->icon_provider;
-  };
-
-  /* 1) User overrides. */
-  if (wm) {
-    if (const CategoryGlyphItem *item = category_item_find_with_effective_icon_any_space(
-            &wm->category_glyph_overrides, category))
-    {
-      icon_data_copy_from_item(item);
-      return true;
-    }
-  }
-
-  /* 2) Global mappings from Python cache sync. Use space_type for proper space-specific lookup. */
-  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category, space_type)) {
-    icon_data_copy_from_item(item);
-    return true;
-  }
-
-  return false;
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Glyph Base Source Lookup
- * \{ */
-
-static const char *panel_category_base_source_lookup(const wmWindowManager *wm,
-                                                     const char *category,
-                                                     const PanelType *panel_type,
-                                                     bool *r_is_reserved,
-                                                     eCategoryGlyphBaseSource *r_source_type)
-{
-  if (r_is_reserved) {
-    *r_is_reserved = false;
-  }
-  if (r_source_type) {
-    *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_FALLBACK;
-  }
-
-  /* 1. Check global mappings (synced from Python DEFAULT_CATEGORY_GLYPHS). */
-  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category)) {
-    if (r_is_reserved) {
-      *r_is_reserved = (item->is_reserved != 0);
-    }
-    if (r_source_type) {
-      *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_MAPPING;
-    }
-    if (item->glyph[0] != '\0') {
-      return item->glyph;
-    }
-    if (item->default_glyph[0] != '\0') {
-      return item->default_glyph;
-    }
-  }
-
-  /* 2. Check PanelType.icon_glyph. */
-  if (panel_type && panel_type->icon_glyph && panel_type->icon_glyph[0]) {
-    if (r_source_type) {
-      *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_PANEL_TYPE;
-    }
-    return panel_type->icon_glyph;
-  }
-
-  /* 3. Fallback: return first character of category. */
-  if (r_source_type) {
-    *r_source_type = CATEGORY_GLYPH_BASE_SOURCE_FALLBACK;
-  }
-  static char first_char_buf[8];
-  if (category_tab_first_utf8_char_copy(category, first_char_buf, sizeof(first_char_buf))) {
-    return first_char_buf;
-  }
-  return category;
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Display Name Lookup
- * \{ */
-
-const char *panel_category_display_name_lookup(const wmWindowManager *wm,
-                                                      const char *category,
-                                                      int space_type)
-{
-  if (!category) {
-    return "";
-  }
-
-  /* 1. Check user overrides first (prefer requested space, then GLOBAL fallback). */
-  if (wm) {
-    if (const CategoryGlyphItem *item = category_item_find_override_with_display_name(
-            &wm->category_glyph_overrides, category, space_type))
-    {
-      return item->display_name;
-    }
-  }
-
-  /* 2. Check mappings with per-space lookup semantics. */
-  if (wm) {
-    if (const CategoryGlyphItem *mapped = category_glyph_mapping_find(wm, category, space_type)) {
-      if (mapped->display_name[0] != '\0') {
-        return mapped->display_name;
-      }
-    }
-  }
-
-  return category;
-}
-
-const char *category_first_letter_source_name_get(const ARegion *region,
-                                                         const wmWindowManager *wm,
-                                                         const char *category_id,
-                                                         const char *category_id_draw,
-                                                         int space_type)
-{
-  if (category_id_draw && category_id_draw[0] != '\0' && !is_single_glyph_str(category_id_draw)) {
-    return category_id_draw;
-  }
-
-  if (category_id && is_single_glyph_str(category_id) && region && region->runtime &&
-      region->runtime->type)
-  {
-    /* CRITICAL FIX: When multiple extensions use the same tag-category (e.g., "Animation"),
-     * prioritize panels from the specific source_extension over generic panels.
-     * This prevents MPFB "Add walk cycle" from being used for all Animation extensions. */
-    const char *target_source_extension = nullptr;
-    
-    /* Try to get source_extension from category mappings for context-aware panel selection */
-    if (const CategoryGlyphItem *mapping_item = category_item_find_mappings(wm, category_id, space_type)) {
-      if (mapping_item->source_extension[0] != '\0') {
-        target_source_extension = mapping_item->source_extension;
-      }
-    }
-    
-    /* If no mapping found, try overrides */
-    if (!target_source_extension) {
-      if (const CategoryGlyphItem *override_item = category_item_find_overrides(wm, category_id, space_type)) {
-        if (override_item && override_item->source_extension[0] != '\0') {
-          target_source_extension = override_item->source_extension;
-        }
-      }
-    }
-    
-    /* TODO: First pass - find panel from specific extension context
-     * Currently disabled until proper source_extension detection is implemented */
-    /* if (target_source_extension) {
-      for (const PanelType &pt : region->runtime->type->paneltypes) {
-        if (pt.category && STREQ(pt.category, category_id)) {
-          // TODO: Add proper source_extension matching logic here
-          const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-          if (panel_label && panel_label[0] != '\0') {
-            return panel_label;
-          }
-        }
-      }
-    } */
-    
-    /* Second pass: fallback to any panel (original behavior) */
-    for (const PanelType &pt : region->runtime->type->paneltypes) {
-      if (pt.category && STREQ(pt.category, category_id)) {
-        const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-        if (panel_label && panel_label[0] != '\0') {
-          return panel_label;
-        }
-      }
-    }
-  }
-
-  const char *display_name = panel_category_display_name_lookup(wm, category_id, space_type);
-  if (display_name && display_name[0] != '\0' && !is_single_glyph_str(display_name)) {
-    return display_name;
-  }
-
-  return category_id;
-}
-
-const char *panel_category_tooltip_name_get(const ARegion *region,
-                                             const wmWindowManager *wm,
-                                             const char *category_idname)
-{
-  /* 1. Check user overrides first. If category is in overrides and has display_name, use it. */
-  if (wm) {
-    if (const CategoryGlyphItem *item = category_item_find_exact_any_space(
-            &wm->category_glyph_overrides, category_idname))
-    {
-      return category_item_display_name_or_default_or_category(item, category_idname);
-    }
-  }
-
-  /* 2. Check global mappings. If category is in mappings and has display_name, use it. */
-  bool found_in_mappings = false;
-  if (wm) {
-    if (const CategoryGlyphItem *item = category_item_find_exact_any_space(
-            &wm->category_glyph_mappings, category_idname))
-    {
-      found_in_mappings = true;
-      return category_item_display_name_or_default_or_category(item, category_idname);
-    }
-  }
-
-  /* 3. For reserved categories (built-in Blender categories), use category name. */
-  if (category_is_reserved(wm, category_idname)) {
-    return category_idname;
-  }
-
-  /* 4. For categories NOT in mappings (not explicitly configured), look up panel label.
-   * This handles special cases like "Script 3" where category name contains only a glyph. */
-  if (!found_in_mappings) {
-    /* CRITICAL FIX: When multiple extensions use the same tag-category (e.g., "Animation"),
-     * prioritize panels from the specific source_extension over generic panels.
-     * This prevents MPFB "Add walk cycle" from being used for all Animation extensions. */
-    const char *target_source_extension = nullptr;
-    
-    /* Try to get source_extension from category mappings for context-aware panel selection */
-    if (const CategoryGlyphItem *mapping_item = category_item_find_mappings(wm, category_idname, -1)) {
-      if (mapping_item->source_extension[0] != '\0') {
-        target_source_extension = mapping_item->source_extension;
-      }
-    }
-    
-    /* If no mapping found, try overrides */
-    if (!target_source_extension) {
-      if (const CategoryGlyphItem *override_item = category_item_find_overrides(wm, category_idname, -1)) {
-        if (override_item && override_item->source_extension[0] != '\0') {
-          target_source_extension = override_item->source_extension;
-        }
-      }
-    }
-    
-    /* TODO: First pass - find panel from specific extension context
-     * Currently disabled until proper source_extension detection is implemented */
-    /* if (target_source_extension) {
-      for (const PanelType &pt : region->runtime->type->paneltypes) {
-        if (pt.category && STREQ(pt.category, category_idname)) {
-          // TODO: Add proper source_extension matching logic here
-          const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-          if (panel_label && panel_label[0]) {
-            return panel_label;
-          }
-        }
-      }
-    } */
-    
-    /* Second pass: fallback to any panel (original behavior) */
-    for (const PanelType &pt : region->runtime->type->paneltypes) {
-      if (pt.category && STREQ(pt.category, category_idname)) {
-        const char *panel_label = CTX_IFACE_(pt.translation_context, pt.label);
-        if (panel_label && panel_label[0]) {
-          return panel_label;
-        }
-      }
-    }
-  }
-
-  /* 5. Fallback to category name itself */
-  return category_idname;
 }
 
 /** \} */
@@ -2028,7 +1396,7 @@ void draw_category_tab_builtin_icon(const rcti *rct,
 /** \name Reserved Categories
  * \{ */
 
-static bool category_name_is_glyph(const char *category_id)
+bool category_name_is_glyph(const char *category_id)
 {
   if (category_id == nullptr || category_id[0] == '\0') {
     return false;
@@ -2051,81 +1419,6 @@ static bool category_name_is_glyph(const char *category_id)
 
   /* Glyph category names use the Basic Multilingual Plane Private Use Area. */
   return (codepoint >= 0xE000 && codepoint <= 0xF8FF);
-}
-
-bool category_is_reserved(const wmWindowManager *wm, const char *category_id)
-{
-  /* Categories with glyph names (high Unicode) are from addons and NOT reserved */
-  if (category_name_is_glyph(category_id)) {
-    return false;
-  }
-
-  /* Single source of truth: Python marks reserved categories in wm.category_glyph_mappings. */
-  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category_id)) {
-    return (item->is_reserved != 0);
-  }
-
-  return false;
-}
-
-bool category_has_pending_tag_assignment(const wmWindowManager *wm,
-                                          const char *category_id,
-                                          int space_type)
-{
-  if (const CategoryGlyphItem *item = category_glyph_mapping_find(wm, category_id, space_type)) {
-    return (item->pending_tag_assignment != 0);
-  }
-  return false;
-}
-
-bool category_is_reserved_for_reorder(const wmWindowManager *wm, const char *category_id)
-{
-  if (category_name_is_glyph(category_id)) {
-    return false;
-  }
-
-  if (category_is_reserved(wm, category_id)) {
-    return true;
-  }
-
-  auto reserved_name_fallback = [](const char *idname) {
-    static const char *k_reserved_fallback[] = {
-        "Item",        "View",      "Edit",        "Tool",     "Asset",   "Options",
-        "Animation",   "Texture",   "Mesh",        "Object",   "Scene",   "Render",
-        "Node",        "Cache",     "Proxy",       "Metadata",
-        // Reserved categories (disabled, kept for future use):
-        // "Physics", "World", "Material", "Modifiers", "Particles", "Curve",
-        // "Script", "Sound", "Surface", "Volume", "Constraints", "Data",
-    };
-    for (const char *reserved_id : k_reserved_fallback) {
-      if (STREQ(idname, reserved_id)) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  /* If reserved markers were not populated yet (or failed to sync), keep reorder protection
-   * for known built-in categories. */
-  bool has_any_reserved_marker = false;
-  if (wm && category_glyph_list_is_valid(&wm->category_glyph_mappings)) {
-    for (const CategoryGlyphItem *item =
-             static_cast<const CategoryGlyphItem *>(wm->category_glyph_mappings.first);
-         item;
-         item = static_cast<const CategoryGlyphItem *>(item->next))
-    {
-      if (item->is_reserved != 0) {
-        has_any_reserved_marker = true;
-        break;
-      }
-    }
-  }
-
-  if (!has_any_reserved_marker) {
-    return reserved_name_fallback(category_id);
-  }
-
-  return false;
 }
 
 /**
@@ -2288,30 +1581,30 @@ static bool category_passes_tag_filter(const bContext *C, const char *category_i
       /* Tag bar is in View3D */
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
       if (v3d) {
-        STRNCPY(active_tags, v3d->active_tag_filter_tags);
-        filter_enabled = v3d->tag_filter_enabled;
+        STRNCPY(active_tags, v3d->tabs_state.active_tag_filter_tags);
+        filter_enabled = v3d->tabs_state.tag_filter_enabled;
       }
     }
     else if (area->spacetype == SPACE_PROPERTIES) {
       /* Tag bar might also be in Properties (for future use) */
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
       if (sbuts) {
-        STRNCPY(active_tags, sbuts->active_tag_filter_tags);
-        filter_enabled = sbuts->tag_filter_enabled;
+        STRNCPY(active_tags, sbuts->tabs_state.active_tag_filter_tags);
+        filter_enabled = sbuts->tabs_state.tag_filter_enabled;
       }
     }
     else if (area->spacetype == SPACE_NODE) {
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
       if (snode) {
-        STRNCPY(active_tags, snode->active_tag_filter_tags);
-        filter_enabled = snode->tag_filter_enabled;
+        STRNCPY(active_tags, snode->tabs_state.active_tag_filter_tags);
+        filter_enabled = snode->tabs_state.tag_filter_enabled;
       }
     }
     else if (area->spacetype == SPACE_IMAGE) {
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
       if (sima) {
-        STRNCPY(active_tags, sima->active_tag_filter_tags);
-        filter_enabled = sima->tag_filter_enabled;
+        STRNCPY(active_tags, sima->tabs_state.active_tag_filter_tags);
+        filter_enabled = sima->tabs_state.tag_filter_enabled;
       }
     }
   }
@@ -2506,26 +1799,26 @@ static std::string get_tag_combination_key(const wmWindowManager *wm, const bCon
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-      STRNCPY(active_tags_buffer, v3d->active_tag_filter_tags);
-      filter_enabled = v3d->tag_filter_enabled;
+      STRNCPY(active_tags_buffer, v3d->tabs_state.active_tag_filter_tags);
+      filter_enabled = v3d->tabs_state.tag_filter_enabled;
       break;
     }
     case SPACE_PROPERTIES: {
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
-      STRNCPY(active_tags_buffer, sbuts->active_tag_filter_tags);
-      filter_enabled = sbuts->tag_filter_enabled;
+      STRNCPY(active_tags_buffer, sbuts->tabs_state.active_tag_filter_tags);
+      filter_enabled = sbuts->tabs_state.tag_filter_enabled;
       break;
     }
     case SPACE_NODE: {
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
-      STRNCPY(active_tags_buffer, snode->active_tag_filter_tags);
-      filter_enabled = snode->tag_filter_enabled;
+      STRNCPY(active_tags_buffer, snode->tabs_state.active_tag_filter_tags);
+      filter_enabled = snode->tabs_state.tag_filter_enabled;
       break;
     }
     case SPACE_IMAGE: {
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-      STRNCPY(active_tags_buffer, sima->active_tag_filter_tags);
-      filter_enabled = sima->tag_filter_enabled;
+      STRNCPY(active_tags_buffer, sima->tabs_state.active_tag_filter_tags);
+      filter_enabled = sima->tabs_state.tag_filter_enabled;
       break;
     }
     default:
@@ -3340,9 +2633,9 @@ int calculate_insert_index(const bContext *C,
       static double _tab_drag_last_log_time = 0.0;
       static int _tab_drag_last_insert_idx = -999;
       const double now = BLI_time_now_seconds();
+#if TAB_DRAG_DEBUG_ENABLED
       const bool should_log = (now - _tab_drag_last_log_time > 1.0) ||
                               (_tab_drag_last_insert_idx != insert_index);
-#if TAB_DRAG_DEBUG_ENABLED
       if (should_log) {
         printf("[TAB_DRAG_HIT] drag='%s' effective_y=%d tab='%s' tab_center=%d raw_idx=%d insert_idx=%d bounds=[%d,%d]\n",
                state->drag_category_id,
@@ -3367,9 +2660,9 @@ int calculate_insert_index(const bContext *C,
   static double _tab_drag_tail_last_log_time = 0.0;
   static int _tab_drag_tail_last_insert_idx = -999;
   const double tail_now = BLI_time_now_seconds();
+#if TAB_DRAG_DEBUG_ENABLED
   const bool tail_should_log = (tail_now - _tab_drag_tail_last_log_time > 1.0) ||
                                (_tab_drag_tail_last_insert_idx != insert_index);
-#if TAB_DRAG_DEBUG_ENABLED
   if (tail_should_log) {
     printf("[TAB_DRAG_HIT] drag='%s' effective_y=TAIL raw_idx=%d insert_idx=%d bounds=[%d,%d]\n",
            state->drag_category_id,
@@ -4564,264 +3857,8 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
   return state.result;
 }
 
-/* -------------------------------------------------------------------- */
-/** \name Operator: Category Quick Focus
- * \{ */
-
-static constexpr bool CATEGORY_QUICK_FOCUS_DEBUG = true;
-
-/* Recent categories history — stores up to 8 recently used category idnames. */
-static constexpr int QUICK_FOCUS_RECENT_MAX = 8;
-static char g_quick_focus_recent[QUICK_FOCUS_RECENT_MAX][64] = {};
-static int g_quick_focus_recent_count = 0;
-
-static void quick_focus_recent_add(const char *idname)
-{
-  if (!idname || idname[0] == '\0') {
-    return;
-  }
-  /* Remove if already present (move to front). */
-  for (int i = 0; i < g_quick_focus_recent_count; i++) {
-    if (STREQ(g_quick_focus_recent[i], idname)) {
-      for (int j = i; j > 0; j--) {
-        STRNCPY(g_quick_focus_recent[j], g_quick_focus_recent[j - 1]);
-      }
-      STRNCPY(g_quick_focus_recent[0], idname);
-      return;
-    }
-  }
-  /* Shift down and insert at front. */
-  const int new_count = std::min(g_quick_focus_recent_count + 1, QUICK_FOCUS_RECENT_MAX);
-  for (int i = new_count - 1; i > 0; i--) {
-    STRNCPY(g_quick_focus_recent[i], g_quick_focus_recent[i - 1]);
-  }
-  STRNCPY(g_quick_focus_recent[0], idname);
-  g_quick_focus_recent_count = new_count;
-}
-
-static ARegion *category_quick_focus_region_get(const bContext *C)
-{
-  ScrArea *area = CTX_wm_area(C);
-  if (area == nullptr) {
-    return nullptr;
-  }
-  return BKE_area_find_region_type(area, RGN_TYPE_UI);
-}
-
-/** Ensure the UI sidebar is visible. Returns true if it was opened (was hidden before). */
-static bool category_quick_focus_ensure_sidebar_visible(bContext *C,
-                                                         ScrArea *area,
-                                                         ARegion *region_ui)
-{
-  if (!(region_ui->flag & RGN_FLAG_HIDDEN)) {
-    return false;
-  }
-  ED_region_visibility_change_update(C, area, region_ui);
-  return true;
-}
-
-/**
- * Dynamic EnumProperty items callback — builds the category list for the search popup.
- * Recent categories appear first, then all others alphabetically.
- */
-static const EnumPropertyItem *category_quick_focus_enum_items(bContext *C,
-                                                                PointerRNA * /*ptr*/,
-                                                                PropertyRNA * /*prop*/,
-                                                                bool *r_free)
-{
-  *r_free = false;
-
-  if (C == nullptr) {
-    return rna_enum_dummy_NULL_items;
-  }
-
-  ARegion *region_ui = category_quick_focus_region_get(C);
-  if (region_ui == nullptr || region_ui->runtime == nullptr) {
-    return rna_enum_dummy_NULL_items;
-  }
-
-  /* Collect all category idnames. */
-  Vector<std::string> all_cats;
-  for (PanelCategoryDyn *pc_dyn = static_cast<PanelCategoryDyn *>(
-           region_ui->runtime->panels_category.first);
-       pc_dyn != nullptr;
-       pc_dyn = static_cast<PanelCategoryDyn *>(pc_dyn->next))
-  {
-    if (pc_dyn->idname[0] != '\0') {
-      all_cats.append(std::string(pc_dyn->idname));
-    }
-  }
-
-  if (all_cats.is_empty()) {
-    return rna_enum_dummy_NULL_items;
-  }
-
-  /* Build ordered list: recent first, then remaining sorted. */
-  Vector<std::string> ordered;
-  /* Add recent entries that still exist. */
-  for (int i = 0; i < g_quick_focus_recent_count; i++) {
-    for (const std::string &cat : all_cats) {
-      if (cat == g_quick_focus_recent[i]) {
-        ordered.append(cat);
-        break;
-      }
-    }
-  }
-  /* Add remaining categories (not in recent), sorted. */
-  Vector<std::string> rest;
-  for (const std::string &cat : all_cats) {
-    bool in_recent = false;
-    for (const std::string &r : ordered) {
-      if (r == cat) {
-        in_recent = true;
-        break;
-      }
-    }
-    if (!in_recent) {
-      rest.append(cat);
-    }
-  }
-  std::sort(rest.begin(), rest.end(), [](const std::string &a, const std::string &b) {
-    return BLI_strcasecmp(a.c_str(), b.c_str()) < 0;
-  });
-  for (const std::string &cat : rest) {
-    ordered.append(cat);
-  }
-
-  /* Stable storage for identifier/name strings. RNA frees the item array on the free path but
-   * does not free the per-item strings, so they must outlive the returned array. Rebuild this
-   * storage on every call; the previous contents are no longer referenced by RNA at that point. */
-  static Vector<std::string> g_quick_focus_enum_strings;
-  g_quick_focus_enum_strings = ordered;
-
-  const int count = g_quick_focus_enum_strings.size();
-  EnumPropertyItem *items = nullptr;
-  int totitem = 0;
-  for (int i = 0; i < count; i++) {
-    EnumPropertyItem item_tmp = {0, nullptr, 0, nullptr, nullptr};
-    item_tmp.value = i;
-    item_tmp.identifier = g_quick_focus_enum_strings[i].c_str();
-    item_tmp.icon = ICON_NONE;
-    item_tmp.name = g_quick_focus_enum_strings[i].c_str();
-    item_tmp.description = "";
-    RNA_enum_item_add(&items, &totitem, &item_tmp);
-  }
-  RNA_enum_item_end(&items, &totitem);
-
-  *r_free = true;
-  return items;
-}
-
-static bool category_quick_focus_poll(bContext *C)
-{
-  ScrArea *area = CTX_wm_area(C);
-  ARegion *region_ui = category_quick_focus_region_get(C);
-  if (area == nullptr || region_ui == nullptr) {
-    return false;
-  }
-  if (region_ui->runtime == nullptr || region_ui->runtime->type == nullptr) {
-    return false;
-  }
-  if (!BKE_regiontype_uses_category_tabs(region_ui->runtime->type)) {
-    return false;
-  }
-  return true;
-}
-
-static wmOperatorStatus category_quick_focus_exec(bContext *C, wmOperator *op)
-{
-  ScrArea *area = CTX_wm_area(C);
-  ARegion *region_ui = category_quick_focus_region_get(C);
-  if (region_ui == nullptr) {
-    return OPERATOR_CANCELLED;
-  }
-
-  /* Ensure sidebar is visible. */
-  if (area) {
-    category_quick_focus_ensure_sidebar_visible(C, area, region_ui);
-  }
-
-  /* Get selected category identifier from the EnumProperty. */
-  PropertyRNA *prop = RNA_struct_find_property(op->ptr, "category");
-  if (prop == nullptr) {
-    return OPERATOR_CANCELLED;
-  }
-
-  const int enum_val = RNA_property_enum_get(op->ptr, prop);
-  bool r_free = false;
-  const EnumPropertyItem *items = category_quick_focus_enum_items(C, op->ptr, prop, &r_free);
-  if (items == nullptr) {
-    return OPERATOR_CANCELLED;
-  }
-
-  const char *idname = nullptr;
-  for (int i = 0; items[i].identifier != nullptr; i++) {
-    if (items[i].value == enum_val) {
-      idname = items[i].identifier;
-      break;
-    }
-  }
-
-  wmOperatorStatus result = OPERATOR_CANCELLED;
-  if (idname && idname[0] != '\0') {
-    panel_category_active_set_safe(C, region_ui, idname);
-    quick_focus_recent_add(idname);
-    result = OPERATOR_FINISHED;
-    if (CATEGORY_QUICK_FOCUS_DEBUG) {
-      printf("[QuickFocus] exec: activated '%s'\n", idname);
-      fflush(stdout);
-    }
-  }
-
-  if (r_free) {
-    /* Only the item array is owned here; identifier/name strings live in stable storage. */
-    MEM_delete(const_cast<EnumPropertyItem *>(items));
-  }
-
-  return result;
-}
-
-static wmOperatorStatus category_quick_focus_invoke(bContext *C,
-                                                    wmOperator *op,
-                                                    const wmEvent *event)
-{
-  ScrArea *area = CTX_wm_area(C);
-  ARegion *region_ui = category_quick_focus_region_get(C);
-  if (area == nullptr || region_ui == nullptr) {
-    return OPERATOR_CANCELLED;
-  }
-
-  /* Open sidebar if hidden so categories are populated. */
-  category_quick_focus_ensure_sidebar_visible(C, area, region_ui);
-
-  if (CATEGORY_QUICK_FOCUS_DEBUG) {
-    printf("[QuickFocus] invoke: area=%p region_ui=%p\n", (void *)area, (void *)region_ui);
-    fflush(stdout);
-  }
-
-  return WM_enum_search_invoke(C, op, event);
-}
-
-void UI_OT_category_quick_focus(wmOperatorType *ot)
-{
-  ot->name = "Category Quick Focus";
-  ot->idname = "UI_OT_category_quick_focus";
-  ot->description = "Search and switch to a category tab";
-
-  ot->poll = category_quick_focus_poll;
-  ot->invoke = category_quick_focus_invoke;
-  ot->exec = category_quick_focus_exec;
-
-  ot->flag = OPTYPE_REGISTER;
-
-  PropertyRNA *prop = RNA_def_enum(
-      ot->srna, "category", rna_enum_dummy_NULL_items, 0, "Category", "Category to focus");
-  RNA_def_enum_funcs(prop, category_quick_focus_enum_items);
-  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
-  ot->prop = prop;
-}
-
-/** \} */
+/* The `UI_OT_category_quick_focus` operator was split out into
+ * interface_tab_categories_operators.cc (self-contained enum-search popup). */
 
 /** \} */
 

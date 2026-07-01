@@ -1256,7 +1256,7 @@ class VIEW3D_OT_tag_move(Operator):
     )
 
     def execute(self, context):
-        from bl_ui.space_userpref import _tag_order_cache, _save_tag_order_only
+        from bl_ui.glyph_tag_system.api import _tag_order_cache, _save_tag_order_only
 
         wm = context.window_manager
 
@@ -1445,7 +1445,7 @@ class VIEW3D_OT_tag_order_reset(Operator):
 
     def execute(self, context):
         # Clear _tag_order_cache and rebuild WM collection
-        from bl_ui.space_userpref import _tag_order_cache, sync_glyph_mappings_to_wm
+        from bl_ui.glyph_tag_system.api import _tag_order_cache, sync_glyph_mappings_to_wm
 
         _tag_order_cache.clear()
 
@@ -1480,7 +1480,11 @@ def _is_tag_visible_in_mode(tag, context):
     if tag.mode_flags == 0:
         return True
 
-    from bl_ui.space_userpref import get_current_tag_mode_flag, _CATEGORY_TAG_MODE_NAME_TO_FLAG
+    from bl_ui.glyph_tag_system.api import (
+        get_current_tag_mode_flag,
+        _CATEGORY_TAG_MODE_NAME_TO_FLAG,
+        _CATEGORY_TAG_EDIT_MODE_MASK,
+    )
 
     current_mode_flag = get_current_tag_mode_flag(context)
     if current_mode_flag == 0:
@@ -1494,20 +1498,7 @@ def _is_tag_visible_in_mode(tag, context):
     # any detailed edit mode (MESH_EDIT, CURVE_EDIT, etc.), the tag should be visible.
     # This matches the C++ EDIT_MODE_MASK logic in interface_tag_bar.cc.
     EDIT_MODE_FLAG = _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0)
-    EDIT_MODE_MASK = (
-        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("EDIT_MODE", 0) |
-        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("MESH_EDIT", 0) |
-        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("CURVE_EDIT", 0) |
-        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("SURFACE_EDIT", 0) |
-        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("ARMATURE_EDIT", 0) |
-        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("LATTICE_EDIT", 0) |
-        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("META_EDIT", 0) |
-        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("FONT_EDIT", 0) |
-        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("GREASE_PENCIL_EDIT", 0) |
-        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("POINTCLOUD_EDIT", 0) |
-        _CATEGORY_TAG_MODE_NAME_TO_FLAG.get("VOLUME_EDIT", 0)
-    )
-    if (current_mode_flag & EDIT_MODE_MASK) and (tag.mode_flags & EDIT_MODE_FLAG):
+    if (current_mode_flag & _CATEGORY_TAG_EDIT_MODE_MASK) and (tag.mode_flags & EDIT_MODE_FLAG):
         return True
 
     return False
@@ -1660,9 +1651,9 @@ class VIEW3D_OT_tag_move_up(Operator):
         # space_userpref._tag_order_cache directly — that would create a shadow attribute
         # and orphan the single-owner object in bl_ui.glyph_tag_system._state.
         try:
-            from bl_ui import space_userpref
-            space_userpref.set_tag_order(order_cache)
-            space_userpref._save_tag_order_only()
+            from bl_ui.glyph_tag_system import api
+            api.set_tag_order(order_cache)
+            api._save_tag_order_only()
         except Exception:
             pass
 
@@ -1732,9 +1723,9 @@ class VIEW3D_OT_tag_move_down(Operator):
         # space_userpref._tag_order_cache directly — that would create a shadow attribute
         # and orphan the single-owner object in bl_ui.glyph_tag_system._state.
         try:
-            from bl_ui import space_userpref
-            space_userpref.set_tag_order(order_cache)
-            space_userpref._save_tag_order_only()
+            from bl_ui.glyph_tag_system import api
+            api.set_tag_order(order_cache)
+            api._save_tag_order_only()
         except Exception:
             pass
 
@@ -1821,7 +1812,7 @@ class VIEW3D_HT_tag_bar_tags(Header):
 
         # Check for pending (unassigned) categories from new add-ons.
         # Use the shared helper so View3D matches the editor-wide tag-bar rules.
-        from bl_ui.space_userpref import _get_unassigned_categories_count_for_space
+        from bl_ui.glyph_tag_system.api import _get_unassigned_categories_count_for_space
         unassigned_count = _get_unassigned_categories_count_for_space(context, 1, 1 << 0, "VIEW3D:")
 
         # Create a row for tag buttons and filter toggle with compact spacing

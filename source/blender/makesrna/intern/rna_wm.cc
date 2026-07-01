@@ -2423,7 +2423,7 @@ static void rna_CategoryTagDef_update(bContext *C, PointerRNA * /*ptr*/)
 #  ifdef WITH_PYTHON
   const char *imports[] = {"bpy", nullptr};
   const char *save_cmd =
-      "from bl_ui.space_userpref import sync_wm_to_glyph_cache\n"
+      "from bl_ui.glyph_tag_system.api import sync_wm_to_glyph_cache\n"
       "sync_wm_to_glyph_cache()\n";
   BPY_run_string_exec(C, imports, save_cmd);
   /* Notify UI to update after JSON save */

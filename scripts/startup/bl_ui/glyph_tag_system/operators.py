@@ -69,14 +69,18 @@ from bl_ui.glyph_tag_system.properties import (
 
 
 # -----------------------------------------------------------------------------
-# Lazy-import shims (functions not yet extracted from space_userpref.py)
+# Lazy-import shim for the system facade (avoids an import cycle at load time)
 # -----------------------------------------------------------------------------
 
 
 def _get_su():
-    """Return the space_userpref module via lazy import."""
-    import bl_ui.space_userpref as _su
-    return _su
+    """Return the system facade module (``glyph_tag_system.api``) via lazy import.
+
+    Kept named ``_su`` at call sites for historical continuity; it now resolves
+    to the explicit facade instead of ``space_userpref``.
+    """
+    import bl_ui.glyph_tag_system.api as _api
+    return _api
 
 
 # -----------------------------------------------------------------------------

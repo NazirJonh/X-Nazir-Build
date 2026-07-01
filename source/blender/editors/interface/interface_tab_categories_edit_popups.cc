@@ -1278,7 +1278,7 @@ static wmOperatorStatus category_tab_icon_picker_invoke(bContext *C, wmOperator 
         printf("[ICON_PICKER DEBUG] Scanning region_ctx blocks:\n");
         for (Block &block : region_ctx->runtime->uiblocks) {
           printf("[ICON_PICKER DEBUG]   block='%s', ui_operator=%p\n",
-                 block.name, (void*)block.ui_operator);
+                 block.name.c_str(), (void*)block.ui_operator);
           if (block.ui_operator) {
             printf("[ICON_PICKER DEBUG]     -> idname='%s'\n", block.ui_operator->idname);
           }
@@ -1293,7 +1293,7 @@ static wmOperatorStatus category_tab_icon_picker_invoke(bContext *C, wmOperator 
           printf("[ICON_PICKER DEBUG]   popup region regiontype=%d\n", region.regiontype);
           for (Block &block : region.runtime->uiblocks) {
             printf("[ICON_PICKER DEBUG]     block='%s', ui_operator=%p\n",
-                   block.name, (void*)block.ui_operator);
+                   block.name.c_str(), (void*)block.ui_operator);
             if (block.ui_operator) {
               printf("[ICON_PICKER DEBUG]       -> idname='%s'\n", block.ui_operator->idname);
             }

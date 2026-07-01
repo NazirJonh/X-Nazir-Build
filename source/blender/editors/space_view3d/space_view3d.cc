@@ -1120,10 +1120,11 @@ static void view3d_tag_bar_region_listener(const wmRegionListenerParams *params)
 static void view3d_tag_bar_region_draw(const bContext *C, ARegion *region)
 {
   /* Run per-mode tag filter save/restore BEFORE Python draws the header.
-   * Python reads v3d->active_tag_filter_tags directly, so the restore must
+   * Python reads the RNA `active_tag_filter_tags` property (backed by
+   * v3d->tabs_state.active_tag_filter_tags) directly, so the restore must
    * happen here - before ED_region_header() calls the Python Header classes.
    * get_tag_bar_data_global() contains the mode-change detection logic that
-   * writes the restored tag back into v3d->active_tag_filter_tags. */
+   * writes the restored tag back into v3d->tabs_state.active_tag_filter_tags. */
   blender::ui::get_tag_bar_data_global(C);
 
   /* Standard header draw - Python draws everything via Header classes:

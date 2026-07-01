@@ -289,15 +289,15 @@ def tag_enum_items_callback(self, context):
 @bpy.app.handlers.persistent
 def _on_load_post(dummy):
     """Load glyph mappings after file load."""
-    from bl_ui import space_userpref as _su
-    _su.register_category_glyph_mappings()
+    from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+    _wm_sync.register_category_glyph_mappings()
 
 
 @bpy.app.handlers.persistent
 def _on_save_pre(dummy):
     """Sync glyph mappings from WM to JSON before saving preferences."""
-    from bl_ui import space_userpref as _su
-    _su.sync_wm_to_glyph_cache()
+    from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+    _wm_sync.sync_wm_to_glyph_cache()
 
 
 @bpy.app.handlers.persistent
@@ -310,8 +310,9 @@ def _on_extension_repos_update_post(dummy=None):
     category_debug_print(f"[GLYPH EXTENSION UPDATE] Pending extension context: {_pending_extension_context}")
     category_debug_print("=" * 80)
     try:
-        from bl_ui import space_userpref as _su
-        result_before = _su._discover_active_categories()
+        from bl_ui.glyph_tag_system import discovery as _discovery
+        from bl_ui.glyph_tag_system import unassigned as _unassigned
+        result_before = _discovery._discover_active_categories()
         # Handle both old and new return format
         if isinstance(result_before, tuple):
             discovered_before, _ = result_before
@@ -326,10 +327,10 @@ def _on_extension_repos_update_post(dummy=None):
 
         category_debug_print("[GLYPH EXTENSION UPDATE] >>> Calling _merge_discovered_categories()...")
         # Enable icon detection for immediate response in extension updates
-        merge_result = _su._merge_discovered_categories(skip_icon_detection=False)
+        merge_result = _discovery._merge_discovered_categories(skip_icon_detection=False)
         category_debug_print(f"[GLYPH EXTENSION UPDATE] >>> _merge_discovered_categories() returned: {merge_result}")
 
-        result_after = _su._discover_active_categories()
+        result_after = _discovery._discover_active_categories()
         if isinstance(result_after, tuple):
             discovered_after, _ = result_after
         else:
@@ -352,7 +353,7 @@ def _on_extension_repos_update_post(dummy=None):
         if _pending_extension_context and _pending_extension_context.get("extension_id"):
             extension_id = _pending_extension_context["extension_id"]
             wm = bpy.context.window_manager
-            if wm and _su._extension_has_only_reserved_categories(wm, extension_id):
+            if wm and _unassigned._extension_has_only_reserved_categories(wm, extension_id):
                 category_debug_print(f"[GLYPH EXTENSION UPDATE] >>> Reserved-only extension detected: {extension_id}")
                 category_debug_print("[GLYPH EXTENSION UPDATE] >>> Scheduling switch to reserved category...")
                 # Set deferred activation for reserved category.
@@ -395,8 +396,8 @@ def _on_version_update(dummy):
     """Sync category glyphs after Blender version update or addon enable/disable."""
     # Re-discover categories in case new addons were enabled
     try:
-        from bl_ui import space_userpref as _su
-        result_before = _su._discover_active_categories()
+        from bl_ui.glyph_tag_system import discovery as _discovery
+        result_before = _discovery._discover_active_categories()
         # Handle both old and new return format
         if isinstance(result_before, tuple):
             discovered_before, _ = result_before
@@ -410,9 +411,9 @@ def _on_version_update(dummy):
         )
 
         # Enable icon detection for immediate response in version updates
-        merge_result = _su._merge_discovered_categories(skip_icon_detection=False)
+        merge_result = _discovery._merge_discovered_categories(skip_icon_detection=False)
 
-        result_after = _su._discover_active_categories()
+        result_after = _discovery._discover_active_categories()
         if isinstance(result_after, tuple):
             discovered_after, _ = result_after
         else:

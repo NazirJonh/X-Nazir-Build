@@ -397,9 +397,10 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
             f"space_type={space_type}, mode_flag={mode_flag:#010x}")
 
     # Debounced sync and save to prevent lags during rapid discovery
-    from bl_ui import space_userpref as _su
-    _su._auto_sync_to_wm()
-    _su._auto_save_tags()
+    from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+    from bl_ui.glyph_tag_system import handlers as _handlers
+    _wm_sync._auto_sync_to_wm()
+    _handlers._auto_save_tags()
 
 
 def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
@@ -495,9 +496,10 @@ def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
             category_debug_print(f"[ALT_CLICK] Cleared {cleared_count} siblings for '{category_name}'")
 
     if updated or cleared_siblings:
-        from bl_ui import space_userpref as _su
-        _su._auto_sync_to_wm()
-        _su._auto_save_tags()
+        from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+        from bl_ui.glyph_tag_system import handlers as _handlers
+        _wm_sync._auto_sync_to_wm()
+        _handlers._auto_save_tags()
 
     total_cleared = updated + len(cleared_siblings)
     tag_log(f"mark_all_unassigned_categories_as_without_tag: updated={updated}, siblings_cleared={len(cleared_siblings)}, total={total_cleared}")
@@ -616,8 +618,8 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
                 cleared_count += 1
 
     # Sync to window manager (DNA) so the change is reflected in C++ code
-    from bl_ui import space_userpref as _su
-    _su.sync_glyph_mappings_to_wm()
+    from bl_ui.glyph_tag_system import wm_sync as _wm_sync
+    _wm_sync.sync_glyph_mappings_to_wm()
 
     tag_log(f"assign_tag_to_category: category={category_id!r}, tag={tag_name!r}, pending cleared keys={len(matching_keys)}, extension={source_ext!r}, siblings_cleared={cleared_count}")
     return True
@@ -1218,8 +1220,8 @@ def get_category_glyph_data(category, space_type=-1):
             if category_tags:
                 # Get the first tag's glyph
                 first_tag = category_tags[0]
-                from bl_ui import space_userpref as _su
-                tag_data = _su.get_tag_data(first_tag)
+                from bl_ui.glyph_tag_system import tags_cache as _tags_cache
+                tag_data = _tags_cache.get_tag_data(first_tag)
                 category_debug_print(f"[get_category_glyph_data] Trying tag glyph: tag='{first_tag}', tag_data={tag_data}")
                 if tag_data and tag_data.get("glyph"):
                     glyph = tag_data["glyph"]
@@ -1347,8 +1349,8 @@ def is_category_visible_by_tags(category_name, active_filter_tags):
         return True
 
     # Check tag intersection (OR logic)
-    from bl_ui import space_userpref as _su
-    category_tags = set(_su.get_category_tags(category_name))
+    from bl_ui.glyph_tag_system import tags_cache as _tags_cache
+    category_tags = set(_tags_cache.get_category_tags(category_name))
 
     # Categories without tags are only visible with "All" filter
     if not category_tags:
@@ -1459,8 +1461,8 @@ def set_category_glyph(category, glyph, space_type=-1, save=True):
             del _glyph_cache[key]
 
     if save:
-        from bl_ui import space_userpref as _su
-        _su._auto_save_glyph_mappings()
+        from bl_ui.glyph_tag_system import handlers as _handlers
+        _handlers._auto_save_glyph_mappings()
 
 
 def set_category_data(category,
@@ -1930,8 +1932,8 @@ def set_category_data(category,
 
     if save:
         save_start = time.perf_counter()
-        from bl_ui import space_userpref as _su
-        _su._auto_save_glyph_mappings(skip_wm_sync=skip_wm_sync)
+        from bl_ui.glyph_tag_system import handlers as _handlers
+        _handlers._auto_save_glyph_mappings(skip_wm_sync=skip_wm_sync)
         save_end = time.perf_counter()
         category_debug_print(f"[SET_CATEGORY_DATA] Step 4: _auto_save_glyph_mappings() scheduled in {(save_end - save_start)*1000:.2f}ms")
 
@@ -2015,8 +2017,8 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
             global_entry["icon_provider"] = ""
             # If category belongs to an extension, re-detect icon.png
             if global_entry.get("source_extension"):
-                from bl_ui import space_userpref as _su
-                detected_path, detected_provider = _su._auto_detect_extension_icon_path(category)
+                from bl_ui.glyph_tag_system import discovery as _discovery
+                detected_path, detected_provider = _discovery._auto_detect_extension_icon_path(category)
                 if detected_path:
                     global_entry["icon_source"] = "auto"
                     global_entry["icon_path"] = detected_path
@@ -2037,8 +2039,8 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
             cache_entry["icon_provider"] = ""
             # Re-detect extension icon for space-specific entry too
             if cache_entry.get("source_extension"):
-                from bl_ui import space_userpref as _su
-                detected_path, detected_provider = _su._auto_detect_extension_icon_path(category)
+                from bl_ui.glyph_tag_system import discovery as _discovery
+                detected_path, detected_provider = _discovery._auto_detect_extension_icon_path(category)
                 if detected_path:
                     cache_entry["icon_source"] = "auto"
                     cache_entry["icon_path"] = detected_path
@@ -2050,8 +2052,8 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
             category_debug_print(f"  {cache_key}: glyph='{cache_entry.get('glyph', '')}', glyph_mode='{cache_entry.get('glyph_mode', 'auto')}'")
 
     if save:
-        from bl_ui import space_userpref as _su
-        _su._auto_save_glyph_mappings()
+        from bl_ui.glyph_tag_system import handlers as _handlers
+        _handlers._auto_save_glyph_mappings()
 
     return default_glyph, default_display_name
 

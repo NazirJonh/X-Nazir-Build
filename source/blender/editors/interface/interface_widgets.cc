@@ -5386,8 +5386,6 @@ static void widget_draw_tag(const bContext *C,
 
   /* Minimum width for glyph/icon (small square) */
   const int min_glyph_width = UI_UNIT_X * 0.5f;  /* Reduced threshold for compact buttons */
-  /* Threshold for showing text alongside glyph - lower threshold for better UX */
-  const int text_threshold = UI_UNIT_X * 2;  /* Text shows earlier, hides later */
 
   /* Resolve icon_id from icon_path if needed */
   int resolved_icon_id = tag_but->icon_id;

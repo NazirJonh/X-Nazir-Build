@@ -366,30 +366,30 @@ bool tag_filter_state_from_area(const ScrArea *area, TagFilterStateRef *r_state)
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-      r_state->active_tags = v3d->active_tag_filter_tags;
-      r_state->filter_enabled = &v3d->tag_filter_enabled;
-      r_state->scroll_offset = &v3d->tag_bar_scroll_offset;
+      r_state->active_tags = v3d->tabs_state.active_tag_filter_tags;
+      r_state->filter_enabled = &v3d->tabs_state.tag_filter_enabled;
+      r_state->scroll_offset = &v3d->tabs_state.tag_bar_scroll_offset;
       return true;
     }
     case SPACE_PROPERTIES: {
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
-      r_state->active_tags = sbuts->active_tag_filter_tags;
-      r_state->filter_enabled = &sbuts->tag_filter_enabled;
-      r_state->scroll_offset = &sbuts->tag_bar_scroll_offset;
+      r_state->active_tags = sbuts->tabs_state.active_tag_filter_tags;
+      r_state->filter_enabled = &sbuts->tabs_state.tag_filter_enabled;
+      r_state->scroll_offset = &sbuts->tabs_state.tag_bar_scroll_offset;
       return true;
     }
     case SPACE_NODE: {
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
-      r_state->active_tags = snode->active_tag_filter_tags;
-      r_state->filter_enabled = &snode->tag_filter_enabled;
-      r_state->scroll_offset = &snode->tag_bar_scroll_offset;
+      r_state->active_tags = snode->tabs_state.active_tag_filter_tags;
+      r_state->filter_enabled = &snode->tabs_state.tag_filter_enabled;
+      r_state->scroll_offset = &snode->tabs_state.tag_bar_scroll_offset;
       return true;
     }
     case SPACE_IMAGE: {
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-      r_state->active_tags = sima->active_tag_filter_tags;
-      r_state->filter_enabled = &sima->tag_filter_enabled;
-      r_state->scroll_offset = &sima->tag_bar_scroll_offset;
+      r_state->active_tags = sima->tabs_state.active_tag_filter_tags;
+      r_state->filter_enabled = &sima->tabs_state.tag_filter_enabled;
+      r_state->scroll_offset = &sima->tabs_state.tag_bar_scroll_offset;
       return true;
     }
   }
@@ -1271,7 +1271,7 @@ void buttons_tag_bar_region_exit(wmWindowManager * /*wm*/, ARegion * /*region*/)
  * Draw the "New Add-on!" virtual button at the given x position.
  * Returns the width of the drawn button (0 if not drawn).
  */
-static int draw_new_addon_button(const bContext *C,
+static int draw_new_addon_button(const bContext * /*C*/,
                                  Block *block,
                                  TagBarRuntimeData *data,
                                  const ScrArea *area,
@@ -2161,19 +2161,19 @@ static char *tag_last_active_categories_storage_get(const ScrArea *area)
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-      return v3d->tag_last_active_categories;
+      return v3d->tabs_state.tag_last_active_categories;
     }
     case SPACE_PROPERTIES: {
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
-      return sbuts->tag_last_active_categories;
+      return sbuts->tabs_state.tag_last_active_categories;
     }
     case SPACE_NODE: {
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
-      return snode->tag_last_active_categories;
+      return snode->tabs_state.tag_last_active_categories;
     }
     case SPACE_IMAGE: {
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-      return sima->tag_last_active_categories;
+      return sima->tabs_state.tag_last_active_categories;
     }
     default:
       return nullptr;
@@ -2198,19 +2198,19 @@ static char *tag_filter_per_mode_storage_get(const ScrArea *area)
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-      return v3d->tag_filter_state_per_mode;
+      return v3d->tabs_state.tag_filter_state_per_mode;
     }
     case SPACE_PROPERTIES: {
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
-      return sbuts->tag_filter_state_per_mode;
+      return sbuts->tabs_state.tag_filter_state_per_mode;
     }
     case SPACE_NODE: {
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
-      return snode->tag_filter_state_per_mode;
+      return snode->tabs_state.tag_filter_state_per_mode;
     }
     case SPACE_IMAGE: {
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-      return sima->tag_filter_state_per_mode;
+      return sima->tabs_state.tag_filter_state_per_mode;
     }
     default:
       return nullptr;
@@ -2229,19 +2229,19 @@ static uint32_t tag_filter_get_last_mode(const ScrArea *area)
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-      return v3d->tag_filter_last_mode;
+      return v3d->tabs_state.tag_filter_last_mode;
     }
     case SPACE_PROPERTIES: {
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
-      return sbuts->tag_filter_last_mode;
+      return sbuts->tabs_state.tag_filter_last_mode;
     }
     case SPACE_NODE: {
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
-      return snode->tag_filter_last_mode;
+      return snode->tabs_state.tag_filter_last_mode;
     }
     case SPACE_IMAGE: {
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-      return sima->tag_filter_last_mode;
+      return sima->tabs_state.tag_filter_last_mode;
     }
     default:
       return 0;
@@ -2260,22 +2260,22 @@ static void tag_filter_set_last_mode(ScrArea *area, uint32_t mode)
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-      v3d->tag_filter_last_mode = mode;
+      v3d->tabs_state.tag_filter_last_mode = mode;
       break;
     }
     case SPACE_PROPERTIES: {
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
-      sbuts->tag_filter_last_mode = mode;
+      sbuts->tabs_state.tag_filter_last_mode = mode;
       break;
     }
     case SPACE_NODE: {
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
-      snode->tag_filter_last_mode = mode;
+      snode->tabs_state.tag_filter_last_mode = mode;
       break;
     }
     case SPACE_IMAGE: {
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-      sima->tag_filter_last_mode = mode;
+      sima->tabs_state.tag_filter_last_mode = mode;
       break;
     }
   }
@@ -2527,19 +2527,19 @@ bool is_new_addon_filter_active(const ScrArea *area)
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
-      return v3d->new_addon_filter_active != 0;
+      return v3d->tabs_state.new_addon_filter_active != 0;
     }
     case SPACE_PROPERTIES: {
       const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
-      return sbuts->new_addon_filter_active != 0;
+      return sbuts->tabs_state.new_addon_filter_active != 0;
     }
     case SPACE_NODE: {
       const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
-      return snode->new_addon_filter_active != 0;
+      return snode->tabs_state.new_addon_filter_active != 0;
     }
     case SPACE_IMAGE: {
       const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
-      return sima->new_addon_filter_active != 0;
+      return sima->tabs_state.new_addon_filter_active != 0;
     }
   }
 
@@ -2560,26 +2560,26 @@ void set_new_addon_filter_active(ScrArea *area, bool active, bool auto_activated
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-      v3d->new_addon_filter_active = active ? 1 : 0;
-      v3d->new_addon_filter_auto_activated = auto_activated ? 1 : 0;
+      v3d->tabs_state.new_addon_filter_active = active ? 1 : 0;
+      v3d->tabs_state.new_addon_filter_auto_activated = auto_activated ? 1 : 0;
       break;
     }
     case SPACE_PROPERTIES: {
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
-      sbuts->new_addon_filter_active = active ? 1 : 0;
-      sbuts->new_addon_filter_auto_activated = auto_activated ? 1 : 0;
+      sbuts->tabs_state.new_addon_filter_active = active ? 1 : 0;
+      sbuts->tabs_state.new_addon_filter_auto_activated = auto_activated ? 1 : 0;
       break;
     }
     case SPACE_NODE: {
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
-      snode->new_addon_filter_active = active ? 1 : 0;
-      snode->new_addon_filter_auto_activated = auto_activated ? 1 : 0;
+      snode->tabs_state.new_addon_filter_active = active ? 1 : 0;
+      snode->tabs_state.new_addon_filter_auto_activated = auto_activated ? 1 : 0;
       break;
     }
     case SPACE_IMAGE: {
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-      sima->new_addon_filter_active = active ? 1 : 0;
-      sima->new_addon_filter_auto_activated = auto_activated ? 1 : 0;
+      sima->tabs_state.new_addon_filter_active = active ? 1 : 0;
+      sima->tabs_state.new_addon_filter_auto_activated = auto_activated ? 1 : 0;
       break;
     }
   }
@@ -2594,19 +2594,19 @@ bool is_new_addon_filter_auto_activated(const ScrArea *area)
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
-      return v3d->new_addon_filter_auto_activated != 0;
+      return v3d->tabs_state.new_addon_filter_auto_activated != 0;
     }
     case SPACE_PROPERTIES: {
       const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
-      return sbuts->new_addon_filter_auto_activated != 0;
+      return sbuts->tabs_state.new_addon_filter_auto_activated != 0;
     }
     case SPACE_NODE: {
       const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
-      return snode->new_addon_filter_auto_activated != 0;
+      return snode->tabs_state.new_addon_filter_auto_activated != 0;
     }
     case SPACE_IMAGE: {
       const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
-      return sima->new_addon_filter_auto_activated != 0;
+      return sima->tabs_state.new_addon_filter_auto_activated != 0;
     }
   }
 
@@ -2622,19 +2622,19 @@ char *get_saved_tag_filter_tags(const ScrArea *area)
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       const View3D *v3d = static_cast<const View3D *>(area->spacedata.first);
-      return const_cast<char *>(v3d->saved_tag_filter_tags);
+      return const_cast<char *>(v3d->tabs_state.saved_tag_filter_tags);
     }
     case SPACE_PROPERTIES: {
       const SpaceProperties *sbuts = static_cast<const SpaceProperties *>(area->spacedata.first);
-      return const_cast<char *>(sbuts->saved_tag_filter_tags);
+      return const_cast<char *>(sbuts->tabs_state.saved_tag_filter_tags);
     }
     case SPACE_NODE: {
       const SpaceNode *snode = static_cast<const SpaceNode *>(area->spacedata.first);
-      return const_cast<char *>(snode->saved_tag_filter_tags);
+      return const_cast<char *>(snode->tabs_state.saved_tag_filter_tags);
     }
     case SPACE_IMAGE: {
       const SpaceImage *sima = static_cast<const SpaceImage *>(area->spacedata.first);
-      return const_cast<char *>(sima->saved_tag_filter_tags);
+      return const_cast<char *>(sima->tabs_state.saved_tag_filter_tags);
     }
   }
 
@@ -2650,22 +2650,22 @@ void set_saved_tag_filter_tags(ScrArea *area, const char *tags)
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-      STRNCPY(v3d->saved_tag_filter_tags, tags ? tags : "");
+      STRNCPY(v3d->tabs_state.saved_tag_filter_tags, tags ? tags : "");
       break;
     }
     case SPACE_PROPERTIES: {
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
-      STRNCPY(sbuts->saved_tag_filter_tags, tags ? tags : "");
+      STRNCPY(sbuts->tabs_state.saved_tag_filter_tags, tags ? tags : "");
       break;
     }
     case SPACE_NODE: {
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
-      STRNCPY(snode->saved_tag_filter_tags, tags ? tags : "");
+      STRNCPY(snode->tabs_state.saved_tag_filter_tags, tags ? tags : "");
       break;
     }
     case SPACE_IMAGE: {
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-      STRNCPY(sima->saved_tag_filter_tags, tags ? tags : "");
+      STRNCPY(sima->tabs_state.saved_tag_filter_tags, tags ? tags : "");
       break;
     }
   }

@@ -6119,7 +6119,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
 
   /* Active tag filter as comma-separated tag names */
   prop = RNA_def_property(srna, "active_tag_filter_tags", PROP_STRING, PROP_NONE);
-  RNA_def_property_string_sdna(prop, nullptr, "active_tag_filter_tags");
+  RNA_def_property_string_sdna(prop, nullptr, "tabs_state.active_tag_filter_tags");
   RNA_def_property_ui_text(
       prop,
       "Active Tag Filter Tags",
@@ -6129,7 +6129,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
 
   /* Whether tag filtering is enabled */
   prop = RNA_def_property(srna, "tag_filter_enabled", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "tag_filter_enabled", 1);
+  RNA_def_property_boolean_sdna(prop, nullptr, "tabs_state.tag_filter_enabled", 1);
   RNA_def_property_ui_text(
       prop,
       "Tag Filter Enabled",
@@ -6139,7 +6139,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
 
   /* New Add-on filter active state */
   prop = RNA_def_property(srna, "new_addon_filter_active", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "new_addon_filter_active", 1);
+  RNA_def_property_boolean_sdna(prop, nullptr, "tabs_state.new_addon_filter_active", 1);
   RNA_def_property_ui_text(
       prop,
       "New Add-on Filter Active",
@@ -6148,7 +6148,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_display_mode", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_display_mode");
+  RNA_def_property_enum_sdna(prop, nullptr, "tabs_state.category_tabs_display_mode");
   RNA_def_property_enum_items(prop, rna_enum_space_category_tabs_display_mode_items);
   RNA_def_property_ui_text(
       prop, "Category Tabs Display Mode", "How to display category tabs in this editor");
@@ -6156,7 +6156,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_icon", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_icon");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_icon");
   RNA_def_property_ui_text(prop, "Icon Size", "Scale factor for category tabs in Icon mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6164,7 +6164,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_mixed");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_mixed");
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6172,7 +6172,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_text");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_text");
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6180,7 +6180,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "tag_bar_scroll_offset", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "tag_bar_scroll_offset");
+  RNA_def_property_int_sdna(prop, nullptr, "tabs_state.tag_bar_scroll_offset");
   RNA_def_property_ui_text(prop, "Tag Bar Scroll Offset", "Horizontal scroll offset in the tag bar");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
@@ -6456,7 +6456,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
 
   /* Active tag filter as comma-separated tag names */
   prop = RNA_def_property(srna, "active_tag_filter_tags", PROP_STRING, PROP_NONE);
-  RNA_def_property_string_sdna(prop, nullptr, "active_tag_filter_tags");
+  RNA_def_property_string_sdna(prop, nullptr, "tabs_state.active_tag_filter_tags");
   RNA_def_property_ui_text(
       prop,
       "Active Tag Filter Tags",
@@ -6466,7 +6466,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
 
   /* Whether tag filtering is enabled */
   prop = RNA_def_property(srna, "tag_filter_enabled", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "tag_filter_enabled", 1);
+  RNA_def_property_boolean_sdna(prop, nullptr, "tabs_state.tag_filter_enabled", 1);
   RNA_def_property_ui_text(
       prop,
       "Tag Filter Enabled",
@@ -6475,7 +6475,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_display_mode", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_display_mode");
+  RNA_def_property_enum_sdna(prop, nullptr, "tabs_state.category_tabs_display_mode");
   RNA_def_property_enum_items(prop, rna_enum_space_category_tabs_display_mode_items);
   RNA_def_property_ui_text(
       prop, "Category Tabs Display Mode", "How to display category tabs in this editor");
@@ -6483,7 +6483,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_icon", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_icon");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_icon");
   RNA_def_property_ui_text(prop, "Icon Size", "Scale factor for category tabs in Icon mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6491,7 +6491,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_mixed");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_mixed");
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6499,7 +6499,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_text");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_text");
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6507,7 +6507,7 @@ static void rna_def_space_properties(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "tag_bar_scroll_offset", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "tag_bar_scroll_offset");
+  RNA_def_property_int_sdna(prop, nullptr, "tabs_state.tag_bar_scroll_offset");
   RNA_def_property_ui_text(prop, "Tag Bar Scroll Offset", "Horizontal scroll offset in the tag bar");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
@@ -6666,7 +6666,7 @@ static void rna_def_space_image(BlenderRNA *brna)
 
   /* Active tag filter as comma-separated tag names */
   prop = RNA_def_property(srna, "active_tag_filter_tags", PROP_STRING, PROP_NONE);
-  RNA_def_property_string_sdna(prop, nullptr, "active_tag_filter_tags");
+  RNA_def_property_string_sdna(prop, nullptr, "tabs_state.active_tag_filter_tags");
   RNA_def_property_ui_text(
       prop,
       "Active Tag Filter Tags",
@@ -6676,7 +6676,7 @@ static void rna_def_space_image(BlenderRNA *brna)
 
   /* Whether tag filtering is enabled */
   prop = RNA_def_property(srna, "tag_filter_enabled", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "tag_filter_enabled", 1);
+  RNA_def_property_boolean_sdna(prop, nullptr, "tabs_state.tag_filter_enabled", 1);
   RNA_def_property_ui_text(
       prop,
       "Tag Filter Enabled",
@@ -6685,7 +6685,7 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_display_mode", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_display_mode");
+  RNA_def_property_enum_sdna(prop, nullptr, "tabs_state.category_tabs_display_mode");
   RNA_def_property_enum_items(prop, rna_enum_space_category_tabs_display_mode_items);
   RNA_def_property_ui_text(
       prop, "Category Tabs Display Mode", "How to display category tabs in this editor");
@@ -6693,7 +6693,7 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_icon", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_icon");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_icon");
   RNA_def_property_ui_text(prop, "Icon Size", "Scale factor for category tabs in Icon mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6701,7 +6701,7 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_mixed");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_mixed");
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6709,7 +6709,7 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_text");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_text");
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -6717,7 +6717,7 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "tag_bar_scroll_offset", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "tag_bar_scroll_offset");
+  RNA_def_property_int_sdna(prop, nullptr, "tabs_state.tag_bar_scroll_offset");
   RNA_def_property_ui_text(prop, "Tag Bar Scroll Offset", "Horizontal scroll offset in the tag bar");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
@@ -8962,7 +8962,7 @@ static void rna_def_space_node(BlenderRNA *brna)
 
   /* Active tag filter as comma-separated tag names */
   prop = RNA_def_property(srna, "active_tag_filter_tags", PROP_STRING, PROP_NONE);
-  RNA_def_property_string_sdna(prop, nullptr, "active_tag_filter_tags");
+  RNA_def_property_string_sdna(prop, nullptr, "tabs_state.active_tag_filter_tags");
   RNA_def_property_ui_text(
       prop,
       "Active Tag Filter Tags",
@@ -8972,7 +8972,7 @@ static void rna_def_space_node(BlenderRNA *brna)
 
   /* Whether tag filtering is enabled */
   prop = RNA_def_property(srna, "tag_filter_enabled", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "tag_filter_enabled", 1);
+  RNA_def_property_boolean_sdna(prop, nullptr, "tabs_state.tag_filter_enabled", 1);
   RNA_def_property_ui_text(
       prop,
       "Tag Filter Enabled",
@@ -8981,7 +8981,7 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_display_mode", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "category_tabs_display_mode");
+  RNA_def_property_enum_sdna(prop, nullptr, "tabs_state.category_tabs_display_mode");
   RNA_def_property_enum_items(prop, rna_enum_space_category_tabs_display_mode_items);
   RNA_def_property_ui_text(
       prop, "Category Tabs Display Mode", "How to display category tabs in this editor");
@@ -8989,7 +8989,7 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_icon", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_icon");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_icon");
   RNA_def_property_ui_text(prop, "Icon Size", "Scale factor for category tabs in Icon mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -8997,7 +8997,7 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_mixed", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_mixed");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_mixed");
   RNA_def_property_ui_text(prop, "Mixed Size", "Scale factor for category tabs in Mixed mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -9005,7 +9005,7 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "category_tabs_zoom_text", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "category_tabs_zoom_text");
+  RNA_def_property_float_sdna(prop, nullptr, "tabs_state.category_tabs_zoom_text");
   RNA_def_property_ui_text(prop, "Text Size", "Scale factor for category tabs in Text mode");
   RNA_def_property_range(prop, 0.5f, 2.5f);
   RNA_def_property_ui_range(prop, 0.5f, 2.5f, 0.1, 2);
@@ -9013,7 +9013,7 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
   prop = RNA_def_property(srna, "tag_bar_scroll_offset", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "tag_bar_scroll_offset");
+  RNA_def_property_int_sdna(prop, nullptr, "tabs_state.tag_bar_scroll_offset");
   RNA_def_property_ui_text(prop, "Tag Bar Scroll Offset", "Horizontal scroll offset in the tag bar");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);

@@ -274,16 +274,11 @@ void image_grid_state_persist_to_view3d(View3D &v3d,
                                         ImageGridUIState &state,
                                         const bool is_mask_slot)
 {
-  short &library_type = is_mask_slot ? v3d.image_grid_mask_library_type :
-                                       v3d.image_grid_library_type;
-  int &library_custom_index = is_mask_slot ? v3d.image_grid_mask_library_custom_index :
-                                             v3d.image_grid_library_custom_index;
-  ListBaseT<ImageGridLibraryCatalogState> &library_catalog_states =
-      is_mask_slot ? v3d.image_grid_mask_library_catalog_states :
-                     v3d.image_grid_library_catalog_states;
-  ListBaseT<AssetCatalogPathLink> &legacy_enabled_catalog_paths =
-      is_mask_slot ? v3d.image_grid_mask_enabled_catalog_paths :
-                     v3d.image_grid_enabled_catalog_paths;
+  ImageGridSlotDNA &slot = is_mask_slot ? v3d.image_grid_mask : v3d.image_grid;
+  short &library_type = slot.library_type;
+  int &library_custom_index = slot.library_custom_index;
+  ListBaseT<ImageGridLibraryCatalogState> &library_catalog_states = slot.library_catalog_states;
+  ListBaseT<AssetCatalogPathLink> &legacy_enabled_catalog_paths = slot.enabled_catalog_paths_legacy;
 
   library_type = short(state.filter.lib_ref.type);
   library_custom_index = state.filter.lib_ref.custom_library_index;

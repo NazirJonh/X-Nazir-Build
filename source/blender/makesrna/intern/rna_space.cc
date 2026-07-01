@@ -5970,7 +5970,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
   prop = RNA_def_property(srna, "image_grid_rows", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "image_grid_rows");
+  RNA_def_property_int_sdna(prop, nullptr, "image_grid.rows");
   RNA_def_property_range(prop, 0, 16);
   RNA_def_property_ui_text(
       prop,
@@ -5979,7 +5979,7 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   prop = RNA_def_property(srna, "image_grid_mask_rows", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "image_grid_mask_rows");
+  RNA_def_property_int_sdna(prop, nullptr, "image_grid_mask.rows");
   RNA_def_property_range(prop, 0, 16);
   RNA_def_property_ui_text(
       prop,

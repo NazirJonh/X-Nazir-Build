@@ -428,7 +428,7 @@ void template_grid_view_asset(Layout *layout,
                               const char *grid_id,
                               PointerRNA *settings_ptr,
                               const char *activate_operator,
-                              const char * /*drag_operator*/)
+                              const char *drag_operator)
 {
   if (!layout || !C || !grid_id || !grid_id[0] || !settings_ptr || !settings_ptr->data) {
     return;
@@ -438,6 +438,7 @@ void template_grid_view_asset(Layout *layout,
 
   const AssetLibraryReference lib_ref = grid_settings::library_ref_get(*settings_ptr);
   Set<std::string> catalogs = grid_settings::enabled_catalogs_get(*settings_ptr);
+  Set<short> filter_id_types = grid_settings::filter_id_types_get(*settings_ptr);
   const int preview_size = grid_settings::preview_size_get(*settings_ptr);
 
   const int tile_w = preview_tile_size_x(preview_size);
@@ -445,8 +446,11 @@ void template_grid_view_asset(Layout *layout,
   const int panel_width = max_ii(layout->width(), 0);
   const int cols_est = (panel_width > 0) ? max_ii(1, panel_width / max_ii(tile_w, 1)) : 1;
 
-  auto source = std::make_unique<AssetGridDataSource>(
-      lib_ref, std::move(catalogs), activate_operator ? activate_operator : "");
+  auto source = std::make_unique<AssetGridDataSource>(lib_ref,
+                                                      std::move(catalogs),
+                                                      std::move(filter_id_types),
+                                                      activate_operator ? activate_operator : "",
+                                                      drag_operator ? drag_operator : "");
 
   auto view_unique = std::make_unique<GenericGridView>(*C, std::move(source), cols_est);
   GenericGridView *view_ptr = view_unique.get();

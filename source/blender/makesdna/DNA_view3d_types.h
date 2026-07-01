@@ -705,6 +705,27 @@ struct ImageGridLibraryCatalogState {
   ListBaseT<AssetCatalogPathLink> enabled_catalog_paths = {nullptr, nullptr};
 };
 
+/**
+ * Persisted per-slot state for the sculpt/paint brush-texture image grid. #View3D keeps one
+ * instance per independent slot (#View3D::image_grid, #View3D::image_grid_mask) instead of
+ * duplicating each field per slot.
+ */
+struct ImageGridSlotDNA {
+  /** Number of visible rows for the image grid. 0 = use default (1). */
+  short rows = 0;
+  /** Asset library type for the image grid (#eAssetLibraryType). 0 = unset, use current file. */
+  short library_type = 0;
+  /** Custom asset library index for the image grid (used when type is #ASSET_LIBRARY_CUSTOM). */
+  int library_custom_index = 0;
+  /**
+   * Legacy per-view catalog filter (migrated to #library_catalog_states).
+   * Kept for do-version migration from files written before 5.2 subversion 40.
+   */
+  ListBaseT<AssetCatalogPathLink> enabled_catalog_paths_legacy = {nullptr, nullptr};
+  /** Per-asset-library catalog selection for the image grid (empty paths = show all). */
+  ListBaseT<ImageGridLibraryCatalogState> library_catalog_states = {nullptr, nullptr};
+};
+
 struct View3D_Runtime {
   /** Nkey panel stores stuff here. */
   void *properties_storage = nullptr;
@@ -836,36 +857,14 @@ struct View3D {
   /** Path to the viewer node that is currently previewed. This is retrieved from the workspace. */
   ViewerPath viewer_path;
 
-  /** Number of visible rows for the sculpt image grid. 0 = use default (1). */
-  short image_grid_rows = 0;
-  /** Asset library type for the image grid (#eAssetLibraryType). 0 = unset, use current file. */
-  short image_grid_library_type = 0;
-  /** Custom asset library index for the image grid (used when type is #ASSET_LIBRARY_CUSTOM). */
-  int image_grid_library_custom_index = 0;
-  /** Preview thumbnail size in pixels for the image grid. 0 = use default (48). */
+  /** Preview thumbnail size in pixels for the image grid (shared by both slots below). 0 = use
+   * default (48). */
   short image_grid_preview_size = 0;
   char _pad_image_grid[6] = {};
-  /**
-   * Legacy per-view catalog filter (migrated to #image_grid_library_catalog_states).
-   * Kept for do-version migration from files written before 5.2 subversion 40.
-   */
-  ListBaseT<AssetCatalogPathLink> image_grid_enabled_catalog_paths = {nullptr, nullptr};
-  /** Per-asset-library catalog selection for the image grid (empty paths = show all). */
-  ListBaseT<ImageGridLibraryCatalogState> image_grid_library_catalog_states = {nullptr, nullptr};
-
-  /** Mask texture image grid library (#eAssetLibraryType). 0 = unset, use current file. */
-  short image_grid_mask_library_type = 0;
-  /** Number of visible rows for the mask texture image grid. 0 = use default (1). */
-  short image_grid_mask_rows = 0;
-  /** Custom asset library index for the mask image grid. */
-  int image_grid_mask_library_custom_index = 0;
-  /**
-   * Legacy mask catalog filter (migrated to #image_grid_mask_library_catalog_states).
-   */
-  ListBaseT<AssetCatalogPathLink> image_grid_mask_enabled_catalog_paths = {nullptr, nullptr};
-  /** Per-library catalog filter for the mask texture image grid. */
-  ListBaseT<ImageGridLibraryCatalogState> image_grid_mask_library_catalog_states = {nullptr,
-                                                                                    nullptr};
+  /** Brush-texture image grid state. */
+  ImageGridSlotDNA image_grid;
+  /** Mask-texture image grid state (independent library/catalog/row state from #image_grid). */
+  ImageGridSlotDNA image_grid_mask;
 
   /** Runtime evaluation data (keep last). */
   View3D_Runtime runtime;

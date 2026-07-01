@@ -67,16 +67,11 @@ struct ImageGridView3DDNAFields {
 
 static ImageGridView3DDNAFields image_grid_view3d_dna_fields(View3D &v3d, const bool is_mask_slot)
 {
-  if (is_mask_slot) {
-    return {v3d.image_grid_mask_library_type,
-            v3d.image_grid_mask_library_custom_index,
-            v3d.image_grid_mask_enabled_catalog_paths,
-            v3d.image_grid_mask_library_catalog_states};
-  }
-  return {v3d.image_grid_library_type,
-          v3d.image_grid_library_custom_index,
-          v3d.image_grid_enabled_catalog_paths,
-          v3d.image_grid_library_catalog_states};
+  ImageGridSlotDNA &slot = is_mask_slot ? v3d.image_grid_mask : v3d.image_grid;
+  return {slot.library_type,
+          slot.library_custom_index,
+          slot.enabled_catalog_paths_legacy,
+          slot.library_catalog_states};
 }
 
 static int image_grid_library_enum_key(const AssetLibraryReference &lib_ref)

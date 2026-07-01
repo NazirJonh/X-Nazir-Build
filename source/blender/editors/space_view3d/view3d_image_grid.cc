@@ -100,7 +100,7 @@ void image_grid_notify_change(bContext &C, const bool is_mask_slot)
 
 int image_grid_effective_rows(const View3D &v3d, const bool is_mask_slot)
 {
-  const int stored = is_mask_slot ? v3d.image_grid_mask_rows : v3d.image_grid_rows;
+  const int stored = is_mask_slot ? v3d.image_grid_mask.rows : v3d.image_grid.rows;
   return clamp_i(stored ? stored : 1, 1, 16);
 }
 
@@ -116,7 +116,7 @@ int image_grid_preview_size_get(const View3D &v3d)
 /**
  * Visible row count for the *current* drawing context. The popover keeps its own session-only
  * #grip_pixel_height_popover (never written to DNA), so it cannot reuse #image_grid_effective_rows
- * which reads #View3D::image_grid_rows.
+ * which reads #View3D::image_grid.rows.
  */
 static int image_grid_context_effective_rows(const ImageGridUIState &state,
                                              const View3D &v3d,
@@ -789,8 +789,16 @@ static Image *image_grid_resolve_image(bContext &C, wmOperator &op)
   const int lib_enum = RNA_enum_get(op.ptr, "asset_library_reference");
   const AssetLibraryReference lib_ref = ed::asset::library_reference_from_enum_value(lib_enum);
 
+  /* The clicked tile was drawn from this library's asset list, so the list is normally already
+   * loaded. Avoid #storage_fetch_blocking()'s synchronous library scan on the UI thread for the
+   * rare case it isn't: kick off a background fetch instead and let the user retry the click. */
+  if (!ed::asset::list::is_loaded(&lib_ref)) {
+    ed::asset::list::storage_fetch(&lib_ref, &C);
+    BKE_report(op.reports, RPT_WARNING, "Asset library is still loading, try again shortly");
+    return nullptr;
+  }
+
   Image *found_image = nullptr;
-  ed::asset::list::storage_fetch_blocking(lib_ref, C);
   ed::asset::list::iterate(lib_ref, [&](asset_system::AssetRepresentation &asset) {
     if (asset.get_id_type() != ID_IM) {
       return true;

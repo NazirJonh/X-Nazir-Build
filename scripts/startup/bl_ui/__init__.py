@@ -127,9 +127,11 @@ def register():
 
     from bpy.props import (
         EnumProperty,
+        PointerProperty,
         StringProperty,
     )
     from bpy.types import (
+        GridViewSettings,
         WindowManager,
     )
 
@@ -178,6 +180,13 @@ def register():
         options={'ENUM_FLAG'},
     )
     del items
+
+    # Ready-to-use settings storage for `UILayout.template_grid_view_asset()` /
+    # `template_grid_library_selector()` / `template_grid_catalog_selector()` /
+    # `template_grid_preview_size()` / `template_grid_view_custom()`. Add-ons needing an
+    # independent grid instance can attach their own `PointerProperty(type=GridViewSettings)`
+    # elsewhere (e.g. on their own PropertyGroup) instead of sharing this one.
+    WindowManager.grid_view_settings = PointerProperty(type=GridViewSettings)
 
     bpy.app.handlers.translation_update_post.append(translation_update)
 

@@ -1742,8 +1742,8 @@ void image_grid_shelf_sync_register();
  * cleared when the user manually scrolls or the asset is absent from the fully-loaded library.
  *
  * \param effective_rows_hint: Number of visible grid rows, pre-computed by the caller from
- * #grip_pixel_height and tile_h *before* #View3D::image_grid_rows is written for the current
- * frame. This avoids the first-frame case where image_grid_rows is still 0 (DNA default),
+ * #grip_pixel_height and tile_h *before* #View3D::image_grid.rows is written for the current
+ * frame. This avoids the first-frame case where image_grid.rows is still 0 (DNA default),
  * which would otherwise give center_offset = 0 and produce no vertical centering.
  *
  * Returns true when scroll was applied or no focus was requested.

@@ -35,12 +35,21 @@ struct PyGridItemDesc {
   int badge_icon = ICON_NONE;
 };
 
+/** Defined below; calls the Python-registered #UIGrid.draw_context_menu() override, if any. */
+static void pygrid_draw_context_menu(const bContext &C,
+                                     uiGridType *grid_type,
+                                     StringRef identifier,
+                                     Layout &layout);
+
 class PyGridItem : public PreviewGridItem {
+  uiGridType *grid_type_;
   std::string activate_operator_;
 
  public:
-  PyGridItem(StringRef identifier, StringRef label, const int icon, StringRef activate_operator)
-      : PreviewGridItem(identifier, label, icon), activate_operator_(activate_operator)
+  PyGridItem(StringRef identifier, StringRef label, const int icon, uiGridType *grid_type)
+      : PreviewGridItem(identifier, label, icon),
+        grid_type_(grid_type),
+        activate_operator_(grid_type->activate_operator)
   {
   }
 
@@ -59,13 +68,23 @@ class PyGridItem : public PreviewGridItem {
     WM_operator_properties_free(op_props);
     MEM_delete(op_props);
   }
+
+  void build_context_menu(bContext &C, Layout &column) const override
+  {
+    pygrid_draw_context_menu(C, grid_type_, identifier_, column);
+  }
 };
 
-static PointerRNA uigrid_python_pointer(const bContext &C, uiGridType *grid_type)
+/**
+ * \a r_grid_inst is owned by the caller (not a shared static): #uiGrid only stores the
+ * #uiGridType pointer used by #rna_UIGrid_refine() to resolve the registered Python subclass, so
+ * a shared instance would let a reentrant call (e.g. a `get_item()` callback that itself
+ * triggers drawing of another #UIGrid) corrupt an in-flight call's type identity.
+ */
+static PointerRNA uigrid_python_pointer(const bContext &C, uiGridType *grid_type, uiGrid &r_grid_inst)
 {
-  static thread_local uiGrid grid_inst;
-  grid_inst.type = grid_type;
-  return RNA_pointer_create_discrete(&CTX_wm_screen(&C)->id, grid_type->rna_ext.srna, &grid_inst);
+  r_grid_inst.type = grid_type;
+  return RNA_pointer_create_discrete(&CTX_wm_screen(&C)->id, grid_type->rna_ext.srna, &r_grid_inst);
 }
 
 static bool pygrid_get_item_desc(const bContext &C,
@@ -75,7 +94,8 @@ static bool pygrid_get_item_desc(const bContext &C,
                                  const int index,
                                  PyGridItemDesc &r_desc)
 {
-  PointerRNA grid_ptr = uigrid_python_pointer(C, grid_type);
+  uiGrid grid_inst;
+  PointerRNA grid_ptr = uigrid_python_pointer(C, grid_type, grid_inst);
   FunctionRNA *func = RNA_struct_find_function(grid_ptr.type, "get_item");
   if (!func) {
     return false;
@@ -144,6 +164,34 @@ static bool pygrid_get_item_desc(const bContext &C,
   return true;
 }
 
+static void pygrid_draw_context_menu(const bContext &C,
+                                     uiGridType *grid_type,
+                                     StringRef identifier,
+                                     Layout &layout)
+{
+  uiGrid grid_inst;
+  PointerRNA grid_ptr = uigrid_python_pointer(C, grid_type, grid_inst);
+  FunctionRNA *func = RNA_struct_find_function(grid_ptr.type, "draw_context_menu");
+  if (!func) {
+    return;
+  }
+
+  ParameterList list;
+  RNA_parameter_list_create(&list, &grid_ptr, func);
+
+  const bContext *context = &C;
+  RNA_parameter_set_lookup(&list, "context", &context);
+  const std::string identifier_str(identifier);
+  const char *identifier_c = identifier_str.c_str();
+  RNA_parameter_set_lookup(&list, "identifier", &identifier_c);
+  Layout *layout_ptr = &layout;
+  RNA_parameter_set_lookup(&list, "layout", &layout_ptr);
+
+  grid_type->rna_ext.call(const_cast<bContext *>(&C), &grid_ptr, func, &list);
+
+  RNA_parameter_list_free(&list);
+}
+
 }  // namespace
 
 PyCallbackGridDataSource::PyCallbackGridDataSource(uiGridType *grid_type,
@@ -155,7 +203,8 @@ PyCallbackGridDataSource::PyCallbackGridDataSource(uiGridType *grid_type,
 
 int PyCallbackGridDataSource::item_count(const bContext &C) const
 {
-  PointerRNA grid_ptr = uigrid_python_pointer(C, grid_type_);
+  uiGrid grid_inst;
+  PointerRNA grid_ptr = uigrid_python_pointer(C, grid_type_, grid_inst);
   FunctionRNA *func = RNA_struct_find_function(grid_ptr.type, "get_item_count");
   if (!func) {
     return 0;
@@ -189,8 +238,7 @@ void PyCallbackGridDataSource::build_window(const bContext &C,
     if (!pygrid_get_item_desc(C, grid_type_, dataptr_, propname_, index, desc)) {
       continue;
     }
-    view.add_item<PyGridItem>(
-        desc.identifier, desc.label, desc.icon, grid_type_->activate_operator);
+    view.add_item<PyGridItem>(desc.identifier, desc.label, desc.icon, grid_type_);
   }
 }
 

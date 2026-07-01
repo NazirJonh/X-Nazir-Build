@@ -813,7 +813,7 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
             continue;
           }
           View3D *v3d = reinterpret_cast<View3D *>(&sl);
-          v3d->image_grid_rows = 0;
+          v3d->image_grid.rows = 0;
         }
       }
     }
@@ -870,16 +870,17 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
             continue;
           }
           View3D *v3d = reinterpret_cast<View3D *>(&sl);
-          if (!v3d->image_grid_enabled_catalog_paths.is_empty() &&
-              v3d->image_grid_library_catalog_states.is_empty())
+          if (!v3d->image_grid.enabled_catalog_paths_legacy.is_empty() &&
+              v3d->image_grid.library_catalog_states.is_empty())
           {
             ImageGridLibraryCatalogState *libcat_state = MEM_new<ImageGridLibraryCatalogState>(
                 "ImageGridLibraryCatalogState");
-            libcat_state->library_ref.type = eAssetLibraryType(v3d->image_grid_library_type);
-            libcat_state->library_ref.custom_library_index = v3d->image_grid_library_custom_index;
+            libcat_state->library_ref.type = eAssetLibraryType(v3d->image_grid.library_type);
+            libcat_state->library_ref.custom_library_index =
+                v3d->image_grid.library_custom_index;
             BLI_movelisttolist(&libcat_state->enabled_catalog_paths,
-                               &v3d->image_grid_enabled_catalog_paths);
-            BLI_addtail(&v3d->image_grid_library_catalog_states, libcat_state);
+                               &v3d->image_grid.enabled_catalog_paths_legacy);
+            BLI_addtail(&v3d->image_grid.library_catalog_states, libcat_state);
           }
         }
       }
@@ -897,12 +898,12 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
             continue;
           }
           View3D *v3d = reinterpret_cast<View3D *>(&sl);
-          v3d->image_grid_mask_library_type = v3d->image_grid_library_type;
-          v3d->image_grid_mask_library_custom_index = v3d->image_grid_library_custom_index;
+          v3d->image_grid_mask.library_type = v3d->image_grid.library_type;
+          v3d->image_grid_mask.library_custom_index = v3d->image_grid.library_custom_index;
 
           for (ImageGridLibraryCatalogState *libcat_state =
                    static_cast<ImageGridLibraryCatalogState *>(
-                       v3d->image_grid_library_catalog_states.first);
+                       v3d->image_grid.library_catalog_states.first);
                libcat_state;
                libcat_state = libcat_state->next)
           {
@@ -911,12 +912,20 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
             mask_libcat_state->library_ref = libcat_state->library_ref;
             mask_libcat_state->enabled_catalog_paths = BKE_asset_catalog_path_list_duplicate(
                 libcat_state->enabled_catalog_paths);
-            BLI_addtail(&v3d->image_grid_mask_library_catalog_states, mask_libcat_state);
+            BLI_addtail(&v3d->image_grid_mask.library_catalog_states, mask_libcat_state);
           }
         }
       }
     }
   }
+
+  /* Subversion 42: #View3D's per-slot image grid fields (image_grid_rows,
+   * image_grid_library_type, image_grid_library_custom_index, image_grid_enabled_catalog_paths,
+   * image_grid_library_catalog_states, and their image_grid_mask_* counterparts) were consolidated
+   * into #ImageGridSlotDNA (#View3D::image_grid / #View3D::image_grid_mask). This is a pre-release
+   * feature, so files written before subversion 42 simply reset the image grid's persisted
+   * library/catalog/row state to defaults instead of being migrated. */
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

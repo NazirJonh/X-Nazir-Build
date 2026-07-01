@@ -771,6 +771,9 @@ static StructRNA *rna_UIGrid_register(Main *bmain,
   if (!RNA_struct_available_or_report(reports, dummy_ugt.idname)) {
     return nullptr;
   }
+  if (!RNA_struct_bl_idname_ok_or_report(reports, dummy_ugt.idname, "_GT_")) {
+    return nullptr;
+  }
 
   ugt = MEM_new_zeroed<uiGridType>("python uigrid");
   memcpy(ugt, &dummy_ugt, sizeof(dummy_ugt));
@@ -2887,6 +2890,14 @@ static void rna_def_grid_view_settings(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_IDPROPERTY);
   RNA_def_property_ui_text(
       prop, "Enabled Catalogs", "Comma-separated catalog paths shown (empty = all)");
+
+  /* Comma-separated ID-type names to show (e.g. "Image,Material"); empty means show all types. */
+  prop = RNA_def_property(srna, "filter_id_types", PROP_STRING, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(prop,
+                           "Filter by Type",
+                           "Comma-separated ID type names to show, e.g. \"Image,Material\" "
+                           "(empty = show all types)");
 }
 
 void RNA_def_ui(BlenderRNA *brna)

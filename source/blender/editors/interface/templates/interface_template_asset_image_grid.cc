@@ -97,25 +97,6 @@ static int image_grid_asset_preview_icon_id(const asset_system::AssetRepresentat
   return ed::asset::asset_preview_or_icon(asset);
 }
 
-/** Items to build for the current scroll window: all visible grid cells, capped for performance.
- * The caller resolves #grip_pixel_height for the active context (the popover keeps its own
- * #grip_pixel_height_popover), so this must use the passed-in height rather than reading the
- * sidebar height directly — otherwise the popover builds the sidebar's row count.
- */
-static int image_grid_build_item_window_size(const int grip_pixel_height,
-                                             const GridViewStyle &style,
-                                             const int cols)
-{
-  const int safe_cols = max_ii(1, cols);
-  const int tile_h = max_ii(1, style.tile_height);
-  /* #ceil to match #build_image_grid: a partially visible bottom row must be built too. */
-  const int effective_rows = clamp_i(
-      int(divide_ceil_u(uint(grip_pixel_height), uint(tile_h))), 1, 16);
-  /* One extra buffer row so sub-row scrolling can reveal a partial row at the bottom. */
-  const int visible_slots = max_ii(1, (effective_rows + 1) * safe_cols);
-  return min_ii(visible_slots, IMAGE_GRID_MAX_ITEMS);
-}
-
 static void image_grid_block_listener(const wmRegionListenerParams *params)
 {
   const wmNotifier *wmn = params->notifier;
@@ -584,8 +565,8 @@ class ImageAssetGridView : public AbstractGridView {
     const int first_index = state_.viewport.scroll_row * cols;
     const int grip_height = is_popover_ ? state_.viewport.grip_pixel_height_popover :
                                           state_.viewport.grip_pixel_height;
-    const int item_window = image_grid_build_item_window_size(
-        grip_height, this->get_style(), cols);
+    const int item_window = grid_build_window_size(
+        grip_height, this->get_style().tile_height, cols, IMAGE_GRID_MAX_ITEMS);
     const int last_index = first_index + item_window;
 
     const int filtered_count = ed::view3d::image_grid_foreach_filtered_item(
@@ -819,7 +800,12 @@ static void image_grid_header_popover(Layout &row,
   popover_row.emboss_set(EmbossType::Emboss);
   popover_row.ui_units_x_set(1.6f);
   popover_row.context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
+  const int64_t buttons_num_before = block->buttons_ptrs.size();
   popover_row.popover(&C, panel_id, "", icon);
+  /* #Layout::popover() adds no button (and warns) when `panel_id` isn't a registered panel type. */
+  if (block->buttons_ptrs.size() == buttons_num_before) {
+    return;
+  }
   /* #layout_add_but() marks compact icon buttons as fixed width (#UI_UNIT_X); widen for arrow. */
   Button *but = block->buttons_ptrs.last().get();
   but->rect.xmax = but->rect.xmin + short(1.6f * UI_UNIT_X);
@@ -940,10 +926,10 @@ static void build_image_grid(Layout &layout,
     if (grip >= tile_h) {
       const short row_count = short(clamp_i(round_fl_to_int(float(grip) / float(tile_h)), 1, 16));
       if (is_mask_slot) {
-        v3d->image_grid_mask_rows = row_count;
+        v3d->image_grid_mask.rows = row_count;
       }
       else {
-        v3d->image_grid_rows = row_count;
+        v3d->image_grid.rows = row_count;
       }
     }
   }

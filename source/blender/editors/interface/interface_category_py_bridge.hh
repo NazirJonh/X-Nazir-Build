@@ -8,15 +8,13 @@
  * Centralized C++ -> Python bridge for the Category Tabs / Glyph / Tags system.
  *
  * The Category Tabs feature persists most of its state through Python helpers in
- * `scripts/startup/bl_ui/space_userpref.py` (plus `glyph_library.*`). Historically each call site
- * built its own `BPY_run_string_exec()` command string inline, scattering the Python entry-point
- * names and the (already shared) string escaping across six translation units.
+ * `bl_ui.glyph_tag_system.api`. Every wrapper here calls a named function on that module through
+ * #BPY_run_module_func / #BPY_run_module_func_as_intptr / #BPY_run_module_func_as_json
+ * (declared in `BPY_extern_run.hh`): arguments are converted to Python objects through the C-API,
+ * not interpolated into Python source text, so arbitrary user strings (category/tag names, paths,
+ * hex colors) never need escaping.
  *
- * This module is the single place that knows the Python API surface for the write path
- * (state-mutating calls). Every wrapper escapes arbitrary user strings via
- * #category_tab_escape_for_python_literal before interpolation.
- *
- * Python entry points used by the write path (all in `bl_ui.space_userpref` unless noted):
+ * Python entry points used by the write path (all in `bl_ui.glyph_tag_system.api`):
  *   - reset_category_to_defaults              (reset glyph)
  *   - set_category_tags                       (reset tags)
  *   - _save_glyph_mappings_to_file            (save to JSON, background)
@@ -28,9 +26,11 @@
  *   - mark_all_unassigned_categories_as_without_tag (Alt+click on "New Add-on!")
  *   - set_category_order                      (persist drag-reorder)
  *
- * Read-path queries are also routed here: the bridge runs the Python expression and returns the
+ * Read-path queries are also routed here: the bridge calls the Python function and returns the
  * raw value (an int, or a JSON string that the caller parses with its local helpers) -
- * get_reserved_category_priority, get_category_order, glyph search, auto-detect extension icon.
+ * get_reserved_category_priority, get_category_order, search_glyphs_summary (a bridge-facing
+ * trimmed view of `glyph_library.registry.search_glyphs`),
+ * auto_detect_extension_icon_path_normalized (backslash-normalized `_auto_detect_extension_icon_path`).
  *
  * NOT routed here (by design):
  *   - The temporary Popular-Addons-Database lookup in interface_tab_categories_edit.cc: it parses
@@ -63,8 +63,7 @@ void category_py_reset_tags(bContext *C, int space_type);
 void category_py_save_glyph_mappings_to_file(bContext *C);
 
 /* Persist the edited category (display name, glyph, color, icon, glyph mode) and finalize tag
- * changes. `first_letter`, `glyph_hex`, `color_hex`, `icon_source`, `glyph_mode` are non-arbitrary
- * (hex/enum) and are passed through; the remaining string arguments are escaped internally. */
+ * changes. All string arguments are passed as typed Python arguments (no escaping needed). */
 void category_py_save_category_data(bContext *C,
                                     const char *category,
                                     const char *display_name,
@@ -79,7 +78,7 @@ void category_py_save_category_data(bContext *C,
                                     int space_type);
 
 /* Restore tags and glyph snapshot when the edit dialog is cancelled. Reads
- * `wm.category_tab_save_category` and clears it. Arbitrary strings are escaped internally. */
+ * `wm.category_tab_save_category` and clears it. */
 void category_py_restore_on_cancel(bContext *C,
                                    const char *tags,
                                    const char *glyph_hex,
@@ -117,7 +116,7 @@ void category_py_set_category_order(bContext *C,
 void category_py_set_preview_mode(bContext *C, bool active);
 
 /* -------------------------------------------------------------------- */
-/* Read path: query helpers that return values. The bridge runs the Python expression and returns
+/* Read path: query helpers that return values. The bridge calls the Python function and returns
  * the raw result; any JSON parsing stays at the call site (it owns the parse helpers). */
 
 /* Reserved-category priority (lower = earlier). Returns -1 when unknown or on failure. */

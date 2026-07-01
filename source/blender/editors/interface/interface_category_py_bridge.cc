@@ -7,17 +7,26 @@
  *
  * Implementation of the Category Tabs C++ -> Python write-path bridge.
  * See interface_category_py_bridge.hh for the rationale and the Python API surface.
+ *
+ * Every wrapper below calls into `bl_ui.glyph_tag_system.api` through
+ * #BPY_run_module_func and friends: arguments are converted to Python objects through the
+ * C-API (#BPy_CallArg), never interpolated into Python source text. This makes string
+ * escaping unnecessary for the arbitrary user strings passed through (category/tag names,
+ * paths, hex colors): there is no source text for them to break out of.
  */
 
-#include <cstdlib>
 #include <string>
 
 #include "MEM_guardedalloc.h"
 
-#include "BLI_string.h"
 #include "BLI_utildefines.h"
 
-#include "interface_intern.hh"
+#include "BKE_context.hh"
+
+#include "DNA_windowmanager_types.h"
+
+#include "WM_api.hh"
+
 #include "interface_category_py_bridge.hh"
 
 #ifdef WITH_PYTHON
@@ -26,22 +35,29 @@
 
 namespace blender::ui {
 
+#ifdef WITH_PYTHON
+static const char *api_module = "bl_ui.glyph_tag_system.api";
+/* `BPy_CallArg` argument lists below are plain stack arrays; #BPY_run_module_func and friends
+ * take a `Span`, which (unlike `std::array`) has no implicit constructor from a raw C array. */
+#  define AS_SPAN(arr) Span<BPy_CallArg>(arr, ARRAY_SIZE(arr))
+#endif
+
 void category_py_reset_to_defaults(bContext *C, const int space_type)
 {
 #ifdef WITH_PYTHON
-  const char *imports[] = {"bpy", nullptr};
-  char cmd[512];
-  BLI_snprintf(cmd,
-               sizeof(cmd),
-               "from bl_ui.glyph_tag_system.api import reset_category_to_defaults\n"
-               "import bpy\n"
-               "wm = bpy.context.window_manager\n"
-               "category = wm.category_tab_save_category\n"
-               "wm.category_tab_save_category = ''\n"
-               "if category:\n"
-               "    reset_category_to_defaults(category, space_type=%d, save=False)\n",
-               space_type);
-  BPY_run_string_exec(C, imports, cmd);
+  wmWindowManager *wm = CTX_wm_manager(C);
+  const std::string category = wm->category_tab_save_category;
+  wm->category_tab_save_category[0] = '\0';
+  if (category.empty()) {
+    return;
+  }
+
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = category.c_str()},
+      {.keyword = "space_type", .type = BPy_CallArg::Type::INT, .as_int = space_type},
+      {.keyword = "save", .type = BPy_CallArg::Type::BOOL, .as_bool = false},
+  };
+  BPY_run_module_func(C, api_module, "reset_category_to_defaults", AS_SPAN(args));
 #else
   UNUSED_VARS(C, space_type);
 #endif
@@ -50,19 +66,20 @@ void category_py_reset_to_defaults(bContext *C, const int space_type)
 void category_py_reset_tags(bContext *C, const int space_type)
 {
 #ifdef WITH_PYTHON
-  const char *imports[] = {"bpy", nullptr};
-  char cmd[512];
-  BLI_snprintf(cmd,
-               sizeof(cmd),
-               "from bl_ui.glyph_tag_system.api import set_category_tags\n"
-               "import bpy\n"
-               "wm = bpy.context.window_manager\n"
-               "category = wm.category_tab_save_category\n"
-               "wm.category_tab_save_category = ''\n"
-               "if category:\n"
-               "    set_category_tags(category, [], space_type=%d, auto_save=False)\n",
-               space_type);
-  BPY_run_string_exec(C, imports, cmd);
+  wmWindowManager *wm = CTX_wm_manager(C);
+  const std::string category = wm->category_tab_save_category;
+  wm->category_tab_save_category[0] = '\0';
+  if (category.empty()) {
+    return;
+  }
+
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = category.c_str()},
+      {.type = BPy_CallArg::Type::STRING_LIST, .as_string_list = {}},
+      {.keyword = "space_type", .type = BPy_CallArg::Type::INT, .as_int = space_type},
+      {.keyword = "auto_save", .type = BPy_CallArg::Type::BOOL, .as_bool = false},
+  };
+  BPY_run_module_func(C, api_module, "set_category_tags", AS_SPAN(args));
 #else
   UNUSED_VARS(C, space_type);
 #endif
@@ -71,18 +88,17 @@ void category_py_reset_tags(bContext *C, const int space_type)
 void category_py_save_glyph_mappings_to_file(bContext *C)
 {
 #ifdef WITH_PYTHON
-  const char *imports[] = {"bpy", nullptr};
-  char cmd[1024];
-  BLI_snprintf(cmd,
-               sizeof(cmd),
-               "from bl_ui.glyph_tag_system.api import _save_glyph_mappings_to_file\n"
-               "import bpy\n"
-               "wm = bpy.context.window_manager\n"
-               "category = wm.category_tab_save_category\n"
-               "wm.category_tab_save_category = ''\n"
-               "if category:\n"
-               "    _save_glyph_mappings_to_file(force_discovery_skip=False)\n");
-  BPY_run_string_exec(C, imports, cmd);
+  wmWindowManager *wm = CTX_wm_manager(C);
+  const std::string category = wm->category_tab_save_category;
+  wm->category_tab_save_category[0] = '\0';
+  if (category.empty()) {
+    return;
+  }
+
+  const BPy_CallArg args[] = {
+      {.keyword = "force_discovery_skip", .type = BPy_CallArg::Type::BOOL, .as_bool = false},
+  };
+  BPY_run_module_func(C, api_module, "_save_glyph_mappings_to_file", AS_SPAN(args));
 #else
   UNUSED_VARS(C);
 #endif
@@ -102,34 +118,28 @@ void category_py_save_category_data(bContext *C,
                                     const int space_type)
 {
 #ifdef WITH_PYTHON
-  const std::string category_esc = category_tab_escape_for_python_literal(category);
-  const std::string display_name_esc = category_tab_escape_for_python_literal(display_name);
-  const std::string icon_key_esc = category_tab_escape_for_python_literal(icon_key);
-  const std::string icon_path_esc = category_tab_escape_for_python_literal(icon_path);
-  const std::string icon_provider_esc = category_tab_escape_for_python_literal(icon_provider);
+  const BPy_CallArg set_data_args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = category},
+      {.keyword = "display_name", .type = BPy_CallArg::Type::STRING, .as_string = display_name},
+      {.keyword = "first_letter", .type = BPy_CallArg::Type::STRING, .as_string = first_letter},
+      {.keyword = "glyph", .type = BPy_CallArg::Type::STRING, .as_string = glyph_hex},
+      {.keyword = "color", .type = BPy_CallArg::Type::STRING, .as_string = color_hex},
+      {.keyword = "icon_source", .type = BPy_CallArg::Type::STRING, .as_string = icon_source},
+      {.keyword = "icon_key", .type = BPy_CallArg::Type::STRING, .as_string = icon_key},
+      {.keyword = "icon_path", .type = BPy_CallArg::Type::STRING, .as_string = icon_path},
+      {.keyword = "icon_provider", .type = BPy_CallArg::Type::STRING, .as_string = icon_provider},
+      {.keyword = "glyph_mode", .type = BPy_CallArg::Type::STRING, .as_string = glyph_mode},
+      {.keyword = "space_type", .type = BPy_CallArg::Type::INT, .as_int = space_type},
+      {.keyword = "skip_wm_sync", .type = BPy_CallArg::Type::BOOL, .as_bool = true},
+  };
+  BPY_run_module_func(C, api_module, "set_category_data", AS_SPAN(set_data_args));
 
-  char cmd[8192];
-  BLI_snprintf(cmd,
-               sizeof(cmd),
-               "from bl_ui.glyph_tag_system.api import set_category_data, finalize_category_tag_changes\n"
-               "set_category_data('%s', display_name='%s', first_letter='%s', glyph='%s', color='%s', "
-               "icon_source='%s', icon_key='%s', icon_path='%s', icon_provider='%s', glyph_mode='%s', space_type=%d, skip_wm_sync=True)\n"
-               "finalize_category_tag_changes('%s', space_type=%d, sync_wm=False)\n",
-               category_esc.c_str(),
-               display_name_esc.c_str(),
-               first_letter,
-               glyph_hex,
-               color_hex,
-               icon_source,
-               icon_key_esc.c_str(),
-               icon_path_esc.c_str(),
-               icon_provider_esc.c_str(),
-               glyph_mode,
-               space_type,
-               category_esc.c_str(),
-               space_type);
-  const char *imports_none[] = {nullptr};
-  BPY_run_string_exec(C, imports_none, cmd);
+  const BPy_CallArg finalize_args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = category},
+      {.keyword = "space_type", .type = BPy_CallArg::Type::INT, .as_int = space_type},
+      {.keyword = "sync_wm", .type = BPy_CallArg::Type::BOOL, .as_bool = false},
+  };
+  BPY_run_module_func(C, api_module, "finalize_category_tag_changes", AS_SPAN(finalize_args));
 #else
   UNUSED_VARS(C, category, display_name, first_letter, glyph_hex, color_hex,
               icon_source, icon_key, icon_path, icon_provider, glyph_mode, space_type);
@@ -148,38 +158,35 @@ void category_py_restore_on_cancel(bContext *C,
                                    const char *icon_provider)
 {
 #ifdef WITH_PYTHON
-  /* Escape every interpolated user string for Python (paths/tags may contain quotes,
-   * backslashes or newlines). Do not rely on raw r'''...''' literals for arbitrary input. */
-  const std::string tags_esc = category_tab_escape_for_python_literal(tags);
-  const std::string glyph_hex_esc = category_tab_escape_for_python_literal(glyph_hex);
-  const std::string icon_key_esc = category_tab_escape_for_python_literal(icon_key);
-  const std::string icon_path_esc = category_tab_escape_for_python_literal(icon_path);
-  const std::string icon_provider_esc = category_tab_escape_for_python_literal(icon_provider);
+  wmWindowManager *wm = CTX_wm_manager(C);
+  const std::string category = wm->category_tab_save_category;
+  wm->category_tab_save_category[0] = '\0';
+  if (category.empty()) {
+    return;
+  }
 
-  const char *imports[] = {"bpy", nullptr};
-  char cmd[2048];
-  BLI_snprintf(cmd,
-               sizeof(cmd),
-               "from bl_ui.glyph_tag_system.api import restore_category_tags_from_string, restore_category_glyph_from_snapshot\n"
-               "import bpy\n"
-               "wm = bpy.context.window_manager\n"
-               "category = wm.category_tab_save_category\n"
-               "wm.category_tab_save_category = ''\n"
-               "if category:\n"
-               "    restore_category_tags_from_string(category, '%s', space_type=%d)\n"
-               "    restore_category_glyph_from_snapshot(category, '%s', %d, [%f, %f, %f], space_type=%d,\n"
-               "        icon_source=%d, icon_key='%s', icon_path='%s', icon_provider='%s')\n",
-               tags_esc.c_str(),
-               space_type,
-               glyph_hex_esc.c_str(),
-               glyph_mode,
-               color[0], color[1], color[2],
-               space_type,
-               icon_source,
-               icon_key_esc.c_str(),
-               icon_path_esc.c_str(),
-               icon_provider_esc.c_str());
-  BPY_run_string_exec(C, imports, cmd);
+  const BPy_CallArg restore_tags_args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = category.c_str()},
+      {.type = BPy_CallArg::Type::STRING, .as_string = tags},
+      {.keyword = "space_type", .type = BPy_CallArg::Type::INT, .as_int = space_type},
+  };
+  BPY_run_module_func(
+      C, api_module, "restore_category_tags_from_string", AS_SPAN(restore_tags_args));
+
+  const double color_d[3] = {double(color[0]), double(color[1]), double(color[2])};
+  const BPy_CallArg restore_glyph_args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = category.c_str()},
+      {.type = BPy_CallArg::Type::STRING, .as_string = glyph_hex},
+      {.type = BPy_CallArg::Type::INT, .as_int = glyph_mode},
+      {.type = BPy_CallArg::Type::DOUBLE_LIST, .as_double_list = Span<double>(color_d, 3)},
+      {.keyword = "space_type", .type = BPy_CallArg::Type::INT, .as_int = space_type},
+      {.keyword = "icon_source", .type = BPy_CallArg::Type::INT, .as_int = icon_source},
+      {.keyword = "icon_key", .type = BPy_CallArg::Type::STRING, .as_string = icon_key},
+      {.keyword = "icon_path", .type = BPy_CallArg::Type::STRING, .as_string = icon_path},
+      {.keyword = "icon_provider", .type = BPy_CallArg::Type::STRING, .as_string = icon_provider},
+  };
+  BPY_run_module_func(
+      C, api_module, "restore_category_glyph_from_snapshot", AS_SPAN(restore_glyph_args));
 #else
   UNUSED_VARS(C, tags, glyph_hex, glyph_mode, color, space_type, icon_source,
               icon_key, icon_path, icon_provider);
@@ -192,18 +199,13 @@ void category_py_update_tag_icon(bContext *C,
                                  const int icon_source)
 {
 #ifdef WITH_PYTHON
-  const std::string tag_name_esc = category_tab_escape_for_python_literal(tag_name);
-  const std::string icon_key_esc = category_tab_escape_for_python_literal(icon_key);
-  const char *imports[] = {"bpy", nullptr};
-  char cmd[2048];
-  BLI_snprintf(cmd,
-               sizeof(cmd),
-               "from bl_ui.glyph_tag_system.api import update_tag\n"
-               "update_tag(tag_name='%s', icon_key='%s', icon_source=%d, auto_save=True)\n",
-               tag_name_esc.c_str(),
-               icon_key_esc.c_str(),
-               icon_source);
-  BPY_run_string_exec(C, imports, cmd);
+  const BPy_CallArg args[] = {
+      {.keyword = "tag_name", .type = BPy_CallArg::Type::STRING, .as_string = tag_name},
+      {.keyword = "icon_key", .type = BPy_CallArg::Type::STRING, .as_string = icon_key},
+      {.keyword = "icon_source", .type = BPy_CallArg::Type::INT, .as_int = icon_source},
+      {.keyword = "auto_save", .type = BPy_CallArg::Type::BOOL, .as_bool = true},
+  };
+  BPY_run_module_func(C, api_module, "update_tag", AS_SPAN(args));
 #else
   UNUSED_VARS(C, tag_name, icon_key, icon_source);
 #endif
@@ -215,17 +217,12 @@ void category_py_assign_tag(bContext *C,
                             const int space_type)
 {
 #ifdef WITH_PYTHON
-  const std::string cat_esc = category_tab_escape_for_python_literal(category);
-  const std::string tag_esc = category_tab_escape_for_python_literal(tag);
-  char cmd[1280];
-  SNPRINTF(cmd,
-           "__import__('bl_ui.glyph_tag_system.api', fromlist=[''])."
-           "assign_tag_to_category('%s', '%s', %d)",
-           cat_esc.c_str(),
-           tag_esc.c_str(),
-           space_type);
-  const char *imports_none[] = {nullptr};
-  BPY_run_string_exec(C, imports_none, cmd);
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = category},
+      {.type = BPy_CallArg::Type::STRING, .as_string = tag},
+      {.type = BPy_CallArg::Type::INT, .as_int = space_type},
+  };
+  BPY_run_module_func(C, api_module, "assign_tag_to_category", AS_SPAN(args));
 #else
   UNUSED_VARS(C, category, tag, space_type);
 #endif
@@ -236,15 +233,22 @@ bool category_py_mark_all_unassigned_without_tag(bContext *C,
                                                  const uint32_t mode_flag)
 {
 #ifdef WITH_PYTHON
-  char cmd[512];
-  SNPRINTF(cmd,
-           "import bpy; "
-           "updated = __import__('bl_ui.glyph_tag_system.api', fromlist=['']).mark_all_unassigned_categories_as_without_tag(%d, %u); "
-           "bpy.context.window_manager.report({'INFO'}, f'{updated} unassigned categories marked as \"Without Tag\"')",
-           space_type,
-           mode_flag);
-  const char *imports_none[] = {nullptr};
-  return BPY_run_string_exec(C, imports_none, cmd);
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::INT, .as_int = space_type},
+      {.type = BPy_CallArg::Type::INT, .as_int = int64_t(mode_flag)},
+  };
+  intptr_t updated = 0;
+  const bool success = BPY_run_module_func_as_intptr(C,
+                                                     api_module,
+                                                     "mark_all_unassigned_categories_as_without_tag",
+                                                     AS_SPAN(args),
+                                                     nullptr,
+                                                     &updated);
+  if (success) {
+    WM_global_reportf(
+        RPT_INFO, "%d unassigned categories marked as \"Without Tag\"", int(updated));
+  }
+  return success;
 #else
   UNUSED_VARS(C, space_type, mode_flag);
   return false;
@@ -258,18 +262,13 @@ void category_py_mark_from_extension(bContext *C,
                                      const uint32_t mode_flag)
 {
 #ifdef WITH_PYTHON
-  const std::string esc_cat = category_tab_escape_for_python_literal(category);
-  const std::string esc_ext = category_tab_escape_for_python_literal(extension_id);
-  char cmd[1280];
-  SNPRINTF(cmd,
-           "__import__('bl_ui.glyph_tag_system.api', fromlist=[''])."
-           "mark_category_from_extension('%s', '%s', %d, %u)",
-           esc_cat.c_str(),
-           esc_ext.c_str(),
-           space_type,
-           mode_flag);
-  const char *imports_none[] = {nullptr};
-  BPY_run_string_exec(C, imports_none, cmd);
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = category},
+      {.type = BPy_CallArg::Type::STRING, .as_string = extension_id},
+      {.type = BPy_CallArg::Type::INT, .as_int = space_type},
+      {.type = BPy_CallArg::Type::INT, .as_int = int64_t(mode_flag)},
+  };
+  BPY_run_module_func(C, api_module, "mark_category_from_extension", AS_SPAN(args));
 #else
   UNUSED_VARS(C, category, extension_id, space_type, mode_flag);
 #endif
@@ -280,24 +279,17 @@ void category_py_set_category_order(bContext *C,
                                     const Vector<std::string> &order)
 {
 #ifdef WITH_PYTHON
-  /* Build Python list of category IDs. */
-  std::string python_list = "[";
-  for (int i = 0; i < order.size(); i++) {
-    if (i > 0) {
-      python_list += ", ";
-    }
-    python_list += "'" + category_tab_escape_for_python_literal(order[i].c_str()) + "'";
+  Vector<const char *> order_c;
+  order_c.reserve(order.size());
+  for (const std::string &item : order) {
+    order_c.append(item.c_str());
   }
-  python_list += "]";
 
-  const std::string escaped_key = category_tab_escape_for_python_literal(tag_key);
-
-  const std::string cmd = "from bl_ui.glyph_tag_system.api import set_category_order\n"
-                          "set_category_order('" +
-                          escaped_key + "', " + python_list + ")\n";
-
-  const char *imports_none[] = {nullptr};
-  BPY_run_string_exec(C, imports_none, cmd.c_str());
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = tag_key},
+      {.type = BPy_CallArg::Type::STRING_LIST, .as_string_list = order_c},
+  };
+  BPY_run_module_func(C, api_module, "set_category_order", AS_SPAN(args));
 #else
   UNUSED_VARS(C, tag_key, order);
 #endif
@@ -306,14 +298,10 @@ void category_py_set_category_order(bContext *C,
 void category_py_set_preview_mode(bContext *C, const bool active)
 {
 #ifdef WITH_PYTHON
-  char cmd[256];
-  BLI_snprintf(cmd,
-               sizeof(cmd),
-               "from bl_ui.glyph_tag_system.api import set_preview_mode_active\n"
-               "set_preview_mode_active(%s)",
-               active ? "True" : "False");
-  const char *imports_none[] = {nullptr};
-  BPY_run_string_exec(C, imports_none, cmd);
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::BOOL, .as_bool = active},
+  };
+  BPY_run_module_func(C, api_module, "set_preview_mode_active", AS_SPAN(args));
 #else
   UNUSED_VARS(C, active);
 #endif
@@ -331,26 +319,14 @@ int category_py_get_reserved_priority(bContext *C,
     space_type_name = "DEFAULT";
   }
 
-  const std::string escaped_id = category_tab_escape_for_python_literal(category_id);
-  const std::string escaped_space = category_tab_escape_for_python_literal(space_type_name);
-
-  char python_expr[640];
-  SNPRINTF(python_expr,
-           "str(__import__('bl_ui.glyph_tag_system.api', fromlist=[''])."
-           "get_reserved_category_priority('%s', '%s'))",
-           escaped_id.c_str(),
-           escaped_space.c_str());
-
-  char *result_str = nullptr;
-  const char *imports_none[] = {nullptr};
-  const bool success = BPY_run_string_as_string(C, imports_none, python_expr, nullptr, &result_str);
-  if (!success || !result_str) {
-    return -1;
-  }
-
-  const int prio = atoi(result_str);
-  MEM_delete(result_str);
-  return prio;
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = category_id},
+      {.type = BPy_CallArg::Type::STRING, .as_string = space_type_name},
+  };
+  intptr_t prio = -1;
+  const bool success = BPY_run_module_func_as_intptr(
+      C, api_module, "get_reserved_category_priority", AS_SPAN(args), nullptr, &prio);
+  return success ? int(prio) : -1;
 #else
   UNUSED_VARS(C, category_id, space_type_name);
   return -1;
@@ -360,31 +336,22 @@ int category_py_get_reserved_priority(bContext *C,
 std::string category_py_get_category_order_json(bContext *C, const char *tag_key)
 {
 #ifdef WITH_PYTHON
-  const std::string escaped_key = category_tab_escape_for_python_literal(tag_key);
-
-  /* json.dumps converts the Python list to a JSON string for C++ parsing.
-   * ensure_ascii=False preserves Unicode characters (not escaped as \uXXXX). */
-  const std::string python_expr =
-      "json.dumps(__import__('bl_ui.glyph_tag_system.api', fromlist=['']).get_category_order('" +
-      escaped_key + "') or [], ensure_ascii=False)";
-
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = tag_key},
+  };
   char *result_str = nullptr;
-  char *err_msg = nullptr;
-  BPy_RunErrInfo err_info = {false, nullptr, "", &err_msg};
-  const char *imports_json[] = {"json", nullptr};
-  const bool success = BPY_run_string_as_string(
-      C, imports_json, python_expr.c_str(), &err_info, &result_str);
-  if (!success) {
-    if (err_msg) {
-      MEM_delete(err_msg);
-    }
-    return "";
-  }
-  if (!result_str) {
+  const bool success = BPY_run_module_func_as_json(
+      C, api_module, "get_category_order", AS_SPAN(args), nullptr, &result_str);
+  if (!success || !result_str) {
     return "";
   }
   std::string out(result_str);
   MEM_delete(result_str);
+  /* `get_category_order()` returns None for an unknown key; mirror the previous `or []`
+   * fallback so callers keep seeing a JSON array. */
+  if (out == "null") {
+    out = "[]";
+  }
   return out;
 #else
   UNUSED_VARS(C, tag_key);
@@ -398,30 +365,15 @@ std::string category_py_search_glyphs_json(bContext *C,
                                            const int max_results)
 {
 #ifdef WITH_PYTHON
-  const std::string escaped_query = category_tab_escape_for_python_literal(query);
-  const std::string escaped_category = category_tab_escape_for_python_literal(category ? category :
-                                                                                        "");
-  char python_expr[2048];
-  SNPRINTF(python_expr,
-           "json.dumps([{'unicode': g['unicode'], 'name': g['name']} "
-           "for g in __import__('bl_ui.glyph_library.registry', fromlist=['']).search_glyphs('%s', '%s', "
-           "%d)])",
-           escaped_query.c_str(),
-           escaped_category.c_str(),
-           max_results);
-
-  const char *imports[] = {"json", nullptr};
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = query},
+      {.type = BPy_CallArg::Type::STRING, .as_string = category ? category : ""},
+      {.type = BPy_CallArg::Type::INT, .as_int = max_results},
+  };
   char *result_str = nullptr;
-  char *err_msg = nullptr;
-  BPy_RunErrInfo err_info = {false, nullptr, "", &err_msg};
-  const bool success = BPY_run_string_as_string(C, imports, python_expr, &err_info, &result_str);
-  if (!success) {
-    if (err_msg) {
-      MEM_delete(err_msg);
-    }
-    return "";
-  }
-  if (!result_str) {
+  const bool success = BPY_run_module_func_as_json(
+      C, api_module, "search_glyphs_summary", AS_SPAN(args), nullptr, &result_str);
+  if (!success || !result_str) {
     return "";
   }
   std::string out(result_str);
@@ -436,36 +388,30 @@ std::string category_py_search_glyphs_json(bContext *C,
 std::string category_py_auto_detect_extension_icon_json(bContext *C, const char *category)
 {
 #ifdef WITH_PYTHON
-  const std::string escaped_category = category_tab_escape_for_python_literal(category);
-
-  char python_expr[2048];
-  SNPRINTF(python_expr,
-           "(lambda _r: json.dumps([_r[0].replace('\\\\', '/'), _r[1]]))"
-           "(__import__('bl_ui.glyph_tag_system.api', fromlist=[''])"
-           "._auto_detect_extension_icon_path('%s'))",
-           escaped_category.c_str());
-
-  const char *imports[] = {"json", nullptr};
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = category},
+  };
   char *result_str = nullptr;
-  char *err_msg = nullptr;
-  BPy_RunErrInfo err_info = {false, nullptr, "", &err_msg};
-  const bool success = BPY_run_string_as_string(C, imports, python_expr, &err_info, &result_str);
+  const bool success = BPY_run_module_func_as_json(C,
+                                                    api_module,
+                                                    "auto_detect_extension_icon_path_normalized",
+                                                    AS_SPAN(args),
+                                                    nullptr,
+                                                    &result_str);
   if (!success || !result_str) {
-    if (err_msg) {
-      MEM_delete(err_msg);
-    }
     return "";
   }
   std::string out(result_str);
   MEM_delete(result_str);
-  if (err_msg) {
-    MEM_delete(err_msg);
-  }
   return out;
 #else
   UNUSED_VARS(C, category);
   return "";
 #endif
 }
+
+#ifdef WITH_PYTHON
+#  undef AS_SPAN
+#endif
 
 }  // namespace blender::ui

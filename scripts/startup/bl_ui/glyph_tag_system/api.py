@@ -108,6 +108,18 @@ try:
 except ImportError:
     get_glyph_library = None
 
+
+def search_glyphs_summary(query: str, category: str = "", max_results: int = 50):
+    """Trimmed ``search_glyphs`` results (``unicode``/``name`` only).
+
+    Used by the C++ bridge, which forwards the list to ``json.dumps`` as-is.
+    Kept here rather than in ``glyph_library.registry`` since it is a bridge-facing
+    shape, not part of that library's own public API.
+    """
+    from bl_ui.glyph_library.registry import search_glyphs
+    return [{'unicode': g['unicode'], 'name': g['name']}
+            for g in search_glyphs(query, category, max_results)]
+
 # -- Category glyph cache: persistence, data, setters ------------------------
 from .glyph_cache import (
     _ensure_category_panel_label,
@@ -258,6 +270,7 @@ from .discovery import (
     _manifest_field_match_keys,
     _extension_manifest_match_keys,
     _auto_detect_extension_icon_path,
+    auto_detect_extension_icon_path_normalized,
     _discover_active_categories,
     _merge_discovered_categories,
 )

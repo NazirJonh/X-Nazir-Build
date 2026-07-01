@@ -800,6 +800,15 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
     return "", ""
 
 
+def auto_detect_extension_icon_path_normalized(category: str):
+    """As #_auto_detect_extension_icon_path, with backslashes normalized to '/'.
+
+    Used by the C++ bridge, which forwards the tuple to ``json.dumps`` as-is.
+    """
+    icon_path, provider = _auto_detect_extension_icon_path(category)
+    return icon_path.replace("\\", "/"), provider
+
+
 def _discover_active_categories():
     """Discover all active categories from registered panels including addon panels."""
     global _last_discovered_category_sources, _last_discovered_ext_panel_categories

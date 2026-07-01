@@ -896,6 +896,11 @@ def brush_settings(layout, context, brush, popover=False):
         # height
         if capabilities.has_height:
             layout.prop(brush, "height", slider=True, text="Height")
+            # Uniform depth relies on a persistent base, which is not supported by Dyntopo.
+            col = layout.column()
+            if context.sculpt_object and context.sculpt_object.use_dynamic_topology_sculpting:
+                col.enabled = False
+            col.prop(brush, "use_layer_uniform_depth")
 
         if capabilities.has_plane_height:
             layout.prop(brush, "plane_height", slider=True, text="Height")

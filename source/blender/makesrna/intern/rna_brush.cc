@@ -3761,6 +3761,15 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Persistent", "Sculpt on a persistent layer of the mesh");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  prop = RNA_def_property(srna, "use_layer_uniform_depth", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_LAYER_UNIFORM_DEPTH);
+  RNA_def_property_ui_text(
+      prop,
+      "Uniform Depth",
+      "Measure each stroke from a fixed base surface so overlapping strokes reach the same "
+      "depth instead of stacking on top of each other");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   prop = RNA_def_property(srna, "use_bidirectional", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_PROJECT_USE_BIDIRECTIONAL);
   RNA_def_property_ui_text(prop,

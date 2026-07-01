@@ -82,28 +82,20 @@ namespace blender::ed::sculpt_paint {
 /** \name Set Persistent Base Operator
  * \{ */
 
-static wmOperatorStatus set_persistent_base_exec(bContext *C, wmOperator * /*op*/)
+void persistent_base_ensure(const Depsgraph &depsgraph, Object &object, const bool reset)
 {
-  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
-  Object &ob = *CTX_data_active_object(C);
-  SculptSession *ss = ob.runtime->sculpt_session;
-
-  const View3D *v3d = CTX_wm_view3d(C);
-  const Base *base = CTX_data_active_base(C);
-  if (!BKE_base_is_visible(v3d, base)) {
-    return OPERATOR_CANCELLED;
-  }
-
+  SculptSession *ss = object.runtime->sculpt_session;
   if (!ss) {
-    return OPERATOR_CANCELLED;
+    return;
   }
 
-  BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
-
-  switch (bke::object::pbvh_get(ob)->type()) {
+  switch (bke::object::pbvh_get(object)->type()) {
     case bke::pbvh::Type::Mesh: {
-      Mesh &mesh = *id_cast<Mesh *>(ob.data);
+      Mesh &mesh = *id_cast<Mesh *>(object.data);
       bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
+      if (!reset && attributes.contains(".sculpt_persistent_co")) {
+        return;
+      }
       attributes.remove(".sculpt_persistent_co");
       attributes.remove(".sculpt_persistent_no");
       attributes.remove(".sculpt_persistent_disp");
@@ -122,13 +114,16 @@ static wmOperatorStatus set_persistent_base_exec(bContext *C, wmOperator * /*op*
                                bke::AttributeInitVArray(positions.varray));
       }
 
-      const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(*depsgraph, ob);
+      const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, object);
       attributes.add<float3>(".sculpt_persistent_no",
                              bke::AttrDomain::Point,
                              bke::AttributeInitVArray(VArray<float3>::from_span(vert_normals)));
       break;
     }
     case bke::pbvh::Type::Grids: {
+      if (!reset && ss->persistent_multires_data().has_value()) {
+        return;
+      }
       const SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
       ss->persistent.sculpt_persistent_co = subdiv_ccg.positions;
       ss->persistent.sculpt_persistent_no = subdiv_ccg.normals;
@@ -138,9 +133,35 @@ static wmOperatorStatus set_persistent_base_exec(bContext *C, wmOperator * /*op*
       break;
     }
     case bke::pbvh::Type::BMesh: {
-      return OPERATOR_CANCELLED;
+      /* Persistent base is not supported for dynamic topology. */
+      break;
     }
   }
+}
+
+static wmOperatorStatus set_persistent_base_exec(bContext *C, wmOperator * /*op*/)
+{
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  Object &ob = *CTX_data_active_object(C);
+  SculptSession *ss = ob.runtime->sculpt_session;
+
+  const View3D *v3d = CTX_wm_view3d(C);
+  const Base *base = CTX_data_active_base(C);
+  if (!BKE_base_is_visible(v3d, base)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  if (!ss) {
+    return OPERATOR_CANCELLED;
+  }
+
+  BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
+
+  if (bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::BMesh) {
+    return OPERATOR_CANCELLED;
+  }
+
+  persistent_base_ensure(*depsgraph, ob, /*reset=*/true);
 
   return OPERATOR_FINISHED;
 }

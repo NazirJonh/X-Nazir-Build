@@ -127,6 +127,7 @@ static void calc_faces(const Depsgraph &depsgraph,
                        const MeshAttributeData &attribute_data,
                        const Span<float3> vert_normals,
                        const bool use_persistent_base,
+                       const bool invert_resets,
                        const Span<float3> persistent_base_positions,
                        const Span<float3> persistent_base_normals,
                        Object &object,
@@ -176,7 +177,7 @@ static void calc_faces(const Depsgraph &depsgraph,
   gather_data_mesh(layer_displacement_factor.as_span(), verts, displacement_factors);
 
   if (use_persistent_base) {
-    if (cache.toggle_settings.invert) {
+    if (invert_resets && cache.toggle_settings.invert) {
       reset_displacement_factors(displacement_factors, tls.factors, cache.bstrength);
     }
     else {
@@ -226,6 +227,7 @@ static void calc_grids(const Depsgraph &depsgraph,
                        const Brush &brush,
                        Object &object,
                        const bool use_persistent_base,
+                       const bool invert_resets,
                        const Span<float3> persistent_base_positions,
                        const Span<float3> persistent_base_normals,
                        bke::pbvh::GridsNode &node,
@@ -273,7 +275,7 @@ static void calc_grids(const Depsgraph &depsgraph,
       subdiv_ccg, layer_displacement_factor.as_span(), grids, tls.displacement_factors);
 
   if (use_persistent_base) {
-    if (cache.toggle_settings.invert) {
+    if (invert_resets && cache.toggle_settings.invert) {
       reset_displacement_factors(displacement_factors, tls.factors, cache.bstrength);
     }
     else {
@@ -400,8 +402,30 @@ void do_layer_brush(const Depsgraph &depsgraph,
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
       Mesh &mesh = *id_cast<Mesh *>(object.data);
+
+      const bool uniform_depth = brush.flag2 & BRUSH_LAYER_UNIFORM_DEPTH;
+      if (uniform_depth) {
+        /* Lazily capture a persistent base from the current surface so that every stroke is
+         * measured against the same reference and reaches an even depth, instead of stacking
+         * on top of the result of previous strokes.
+         *
+         * This must run before #PositionDeformData is constructed. That constructor calls
+         * #vert_positions_for_write and keeps a raw writable span of the mesh positions. The
+         * captured base (".sculpt_persistent_co") shares that position buffer through
+         * copy-on-write, so it has to be created while the buffer is still shared: taking the
+         * writable span first would let brush deformations mutate the base in lock-step with the
+         * surface during the first stroke, pushing displacement far beyond the set height. */
+        persistent_base_ensure(depsgraph, object, /*reset=*/false);
+      }
+
       const PositionDeformData position_data(depsgraph, object);
       const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, object);
+
+      /* The manual persistent base (Set Persistent Base) uses the Ctrl/invert toggle to erase
+       * layers back to the base. The automatic uniform-depth base keeps the regular layer
+       * behavior where Ctrl simply carves in the opposite direction. */
+      const bool invert_resets = brush.flag & BRUSH_PERSISTENT;
+      const bool use_persistent = (brush.flag & BRUSH_PERSISTENT) || uniform_depth;
 
       const MeshAttributeData attribute_data(mesh);
       bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
@@ -413,7 +437,7 @@ void do_layer_brush(const Depsgraph &depsgraph,
       bke::SpanAttributeWriter<float> persistent_disp_attr;
       bool use_persistent_base = false;
       MutableSpan<float> displacement;
-      if (brush.flag & BRUSH_PERSISTENT) {
+      if (use_persistent) {
         if (!persistent_position.is_empty() && !persistent_normal.is_empty()) {
           persistent_disp_attr = attributes.lookup_or_add_for_write_span<float>(
               ".sculpt_persistent_disp", bke::AttrDomain::Point);
@@ -441,6 +465,7 @@ void do_layer_brush(const Depsgraph &depsgraph,
                        attribute_data,
                        vert_normals,
                        use_persistent_base,
+                       invert_resets,
                        persistent_position,
                        persistent_normal,
                        object,
@@ -458,6 +483,14 @@ void do_layer_brush(const Depsgraph &depsgraph,
       SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
       MutableSpan<float3> positions = subdiv_ccg.positions;
 
+      const bool uniform_depth = brush.flag2 & BRUSH_LAYER_UNIFORM_DEPTH;
+      if (uniform_depth) {
+        /* See the mesh case: capture a stable reference on first use for even-depth strokes. */
+        persistent_base_ensure(depsgraph, object, /*reset=*/false);
+      }
+      const bool invert_resets = brush.flag & BRUSH_PERSISTENT;
+      const bool use_persistent = (brush.flag & BRUSH_PERSISTENT) || uniform_depth;
+
       const std::optional<PersistentMultiresData> persistent_multires_data =
           ss.persistent_multires_data();
 
@@ -466,7 +499,7 @@ void do_layer_brush(const Depsgraph &depsgraph,
 
       bool use_persistent_base = false;
       MutableSpan<float> displacement;
-      if (brush.flag & BRUSH_PERSISTENT) {
+      if (use_persistent) {
         if (persistent_multires_data) {
           use_persistent_base = true;
           persistent_position = persistent_multires_data->positions;
@@ -491,6 +524,7 @@ void do_layer_brush(const Depsgraph &depsgraph,
                        brush,
                        object,
                        use_persistent_base,
+                       invert_resets,
                        persistent_position,
                        persistent_normal,
                        nodes[i],

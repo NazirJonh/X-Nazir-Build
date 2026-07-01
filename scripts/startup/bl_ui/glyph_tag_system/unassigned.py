@@ -6,7 +6,7 @@
 
 Extracted verbatim from ``space_userpref.py`` (no behavioural change). These
 functions mirror the C++ unassigned-category predicate so Python headers stay in
-sync with the shared tag-bar behavior. They read the global ``_glyph_cache``
+sync with the shared tag-bar behavior. They read ``state.glyph_cache``
 (rather than ``wm.category_glyph_mappings``) so that preview mode is respected:
 in preview mode WM may already carry tags while ``pending_tag_assignment`` stays
 True in the cache, keeping categories visible in "New Add-ons!" until Save.
@@ -28,9 +28,8 @@ from .defaults import (
 from .modes import get_current_tag_mode_flag
 from .log import category_debug_print
 
-# In-memory cache of glyph mappings imported by reference from the single owner
-# in ``_state``. Mutations are shared; these predicates only read it.
-from ._state import _glyph_cache as _glyph_cache  # noqa: F401
+# Single owner of shared state; ``state.glyph_cache`` is the live dict (see _state.py).
+from ._state import state
 
 
 def _get_unassigned_categories_count_for_space(context,
@@ -42,11 +41,10 @@ def _get_unassigned_categories_count_for_space(context,
     Mirrors the C++ unassigned-category predicate so Python headers stay in sync
     with the shared tag-bar behavior.
 
-    IMPORTANT: This function checks _glyph_cache instead of wm.category_glyph_mappings
+    IMPORTANT: This function checks state.glyph_cache instead of wm.category_glyph_mappings
     to respect preview mode. In preview mode, WM may have tags but pending_tag_assignment
     stays True in cache, so categories remain visible in "New Add-ons!" until Save.
     """
-    global _glyph_cache
 
     # PERF: Start timing
     _count_start = time.perf_counter()
@@ -65,7 +63,7 @@ def _get_unassigned_categories_count_for_space(context,
 
     # Check cache instead of WM to respect preview mode
     _cache_iterations = 0
-    for cache_key, cat_data in _glyph_cache.items():
+    for cache_key, cat_data in state.glyph_cache.items():
         _cache_iterations += 1
         if not isinstance(cache_key, tuple) or len(cache_key) != 2:
             continue
@@ -177,18 +175,17 @@ def _extension_has_tagged_category(wm, source_extension: str) -> bool:
     This handles the case where an extension creates multiple category aliases
     (e.g., "Texel Density" and "Texel Density Checker") and user processes only one.
 
-    IMPORTANT: This function checks _glyph_cache instead of wm.category_glyph_mappings
+    IMPORTANT: This function checks state.glyph_cache instead of wm.category_glyph_mappings
     because in preview mode, WM is updated for C++ UI visibility but pending_tag_assignment
     remains True in cache. This prevents categories from disappearing from "New Add-ons!"
     before user clicks Save.
     """
-    global _glyph_cache
 
     if not source_extension:
         return False
 
     # Check cache instead of WM to respect preview mode
-    for cache_key, cat_data in _glyph_cache.items():
+    for cache_key, cat_data in state.glyph_cache.items():
         if not isinstance(cache_key, tuple) or len(cache_key) != 2:
             continue
 
@@ -223,10 +220,9 @@ def _extension_has_tagged_category(wm, source_extension: str) -> bool:
 def _extension_has_only_reserved_categories(wm, source_extension: str) -> bool:
     """Check if extension only has reserved categories (with panels) or non-reserved without panels.
 
-    IMPORTANT: This function checks _glyph_cache instead of wm.category_glyph_mappings
+    IMPORTANT: This function checks state.glyph_cache instead of wm.category_glyph_mappings
     to be consistent with _extension_has_tagged_category and respect preview mode.
     """
-    global _glyph_cache
 
     if not source_extension:
         return False
@@ -236,7 +232,7 @@ def _extension_has_only_reserved_categories(wm, source_extension: str) -> bool:
     has_non_reserved_without_panels = False
     has_non_reserved_with_panels = False
 
-    for cache_key, cat_data in _glyph_cache.items():
+    for cache_key, cat_data in state.glyph_cache.items():
         if not isinstance(cache_key, tuple) or len(cache_key) != 2:
             continue
 

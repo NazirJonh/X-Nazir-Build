@@ -24,7 +24,7 @@ from bl_ui.glyph_tag_system.defaults import (
     _CATEGORY_TAG_DEFAULT_MODE_FLAGS,
 )
 from bl_ui.glyph_tag_system._state import (
-    _all_tags_cache,
+    state,
 )
 from bl_ui.glyph_tag_system.conversions import (
     _hex_to_glyph,
@@ -194,7 +194,7 @@ class CategoryTagAssignment(PropertyGroup):
 
 class TagModeItem:
     """Wrapper class for tag mode editing.
-    Provides boolean properties for UI that sync with _all_tags_cache.
+    Provides boolean properties for UI that sync with state.all_tags_cache.
     """
     def __init__(self, tag_name):
         self._tag_name = tag_name
@@ -202,8 +202,7 @@ class TagModeItem:
 
     def _load_from_cache(self):
         """Load mode flags from cache."""
-        global _all_tags_cache
-        tag_data = _all_tags_cache.get(self._tag_name, {})
+        tag_data = state.all_tags_cache.get(self._tag_name, {})
         mode_flags = tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS) if isinstance(tag_data, dict) else _CATEGORY_TAG_DEFAULT_MODE_FLAGS
 
         self._mode_object = bool(mode_flags & (1 << 0))
@@ -220,8 +219,7 @@ class TagModeItem:
 
     def _save_to_cache(self):
         """Save mode flags to cache."""
-        global _all_tags_cache
-        if self._tag_name in _all_tags_cache and isinstance(_all_tags_cache[self._tag_name], dict):
+        if self._tag_name in state.all_tags_cache and isinstance(state.all_tags_cache[self._tag_name], dict):
             flags = 0
             if self._mode_object:
                 flags |= 1 << 0
@@ -245,7 +243,7 @@ class TagModeItem:
                 flags |= 1 << 9
             if self._mode_image_paint:
                 flags |= 1 << 10
-            _all_tags_cache[self._tag_name]["mode_flags"] = flags
+            state.all_tags_cache[self._tag_name]["mode_flags"] = flags
 
     @property
     def mode_object(self):

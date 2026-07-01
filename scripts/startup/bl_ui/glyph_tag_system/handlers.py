@@ -34,9 +34,7 @@ from bl_ui.glyph_tag_system.persistence import (
     create_backup,
 )
 from bl_ui.glyph_tag_system._state import (
-    _all_tags_cache,
-    _glyph_cache,
-    _tag_order_cache,
+    state,
     set_auto_save_pending,
     set_auto_save_glyph_pending,
     set_auto_save_glyph_skip_wm_sync,
@@ -155,8 +153,8 @@ def _process_pending_display_mode_change():
     if _pending_display_mode_change is not None:
         tag_name, icon_source = _pending_display_mode_change
 
-        if tag_name in _all_tags_cache:
-            _all_tags_cache[tag_name]["icon_source"] = icon_source
+        if tag_name in state.all_tags_cache:
+            state.all_tags_cache[tag_name]["icon_source"] = icon_source
             category_debug_print(f"[DISPLAY_MODE_DEBOUNCE] Updated cache: tag='{tag_name}', icon_source={icon_source}")
 
             # Now save to JSON
@@ -174,25 +172,24 @@ def _process_pending_display_mode_change():
 
 
 def _sync_mode_flags_from_wm_to_cache():
-    """Sync mode flags and icon properties from Python CategoryTagItem to _all_tags_cache.
+    """Sync mode flags and icon properties from Python CategoryTagItem to state.all_tags_cache.
     This captures UI changes to mode checkboxes and icon settings before saving."""
-    global _all_tags_cache
     try:
         wm = bpy.context.window_manager
         if not wm or not hasattr(wm, 'category_tags'):
             return
         for tag_item in wm.category_tags:
             tag_name = tag_item.name
-            if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
-                _all_tags_cache[tag_name]["mode_flags"] = tag_item.mode_flags
+            if tag_name in state.all_tags_cache and isinstance(state.all_tags_cache[tag_name], dict):
+                state.all_tags_cache[tag_name]["mode_flags"] = tag_item.mode_flags
                 # Sync icon properties for tags with icons
                 if hasattr(tag_item, 'icon_key'):
                     wm_icon_key = tag_item.icon_key
                     wm_icon_key_type = type(wm_icon_key).__name__
                     category_debug_print(f"[SYNC_WM_CACHE] tag='{tag_name}' WM icon_key='{wm_icon_key}' (type={wm_icon_key_type})")
-                    _all_tags_cache[tag_name]["icon_key"] = wm_icon_key
+                    state.all_tags_cache[tag_name]["icon_key"] = wm_icon_key
                 if hasattr(tag_item, 'icon_source'):
-                    _all_tags_cache[tag_name]["icon_source"] = tag_item.icon_source
+                    state.all_tags_cache[tag_name]["icon_source"] = tag_item.icon_source
     except Exception as e:
         category_debug_print(f"[GLYPH] Error syncing mode flags: {e}")
 
@@ -236,7 +233,6 @@ def _save_tags_to_json():
 def _save_tag_order_only():
     """Save only tag order to JSON without rebuilding WM collection.
     This avoids potential memory issues when moving tags."""
-    global _all_tags_cache, _tag_order_cache, _category_orders_cache
 
     filepath = _get_glyphs_filepath()
     if not filepath:
@@ -255,13 +251,13 @@ def _save_tag_order_only():
         data = {'version': CURRENT_JSON_VERSION}
 
     # Update tag_order from cache
-    data['tag_order'] = list(_tag_order_cache)
+    data['tag_order'] = list(state.tag_order_cache)
 
     # Save back to file
     try:
         with safe_file_write(filepath) as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        category_debug_print(f"[TAG ORDER] Saved order: {_tag_order_cache}")
+        category_debug_print(f"[TAG ORDER] Saved order: {state.tag_order_cache}")
         return True
     except Exception as e:
         category_debug_print(f"[TAG ORDER] Save failed: {e}")
@@ -319,7 +315,7 @@ def _on_extension_repos_update_post(dummy=None):
             discovered_before, _ = result_before
         else:
             discovered_before = result_before
-        cache_before = set(_glyph_cache.keys())
+        cache_before = set(state.glyph_cache.keys())
         category_debug_print(
             f"[GLYPH EXTENSION UPDATE DEBUG] before merge: "
             f"discovered={len(discovered_before)}, cache={len(cache_before)}, "
@@ -336,7 +332,7 @@ def _on_extension_repos_update_post(dummy=None):
             discovered_after, _ = result_after
         else:
             discovered_after = result_after
-        cache_after = set(_glyph_cache.keys())
+        cache_after = set(state.glyph_cache.keys())
         category_debug_print(
             f"[GLYPH EXTENSION UPDATE DEBUG] after merge: "
             f"merge_result={merge_result}, discovered={len(discovered_after)}, cache={len(cache_after)}, "
@@ -405,7 +401,7 @@ def _on_version_update(dummy):
             discovered_before, _ = result_before
         else:
             discovered_before = result_before
-        cache_before = set(_glyph_cache.keys())
+        cache_before = set(state.glyph_cache.keys())
         category_debug_print(
             f"[GLYPH VERSION UPDATE DEBUG] before merge: "
             f"discovered={len(discovered_before)}, cache={len(cache_before)}, "
@@ -420,7 +416,7 @@ def _on_version_update(dummy):
             discovered_after, _ = result_after
         else:
             discovered_after = result_after
-        cache_after = set(_glyph_cache.keys())
+        cache_after = set(state.glyph_cache.keys())
         category_debug_print(
             f"[GLYPH VERSION UPDATE DEBUG] after merge: "
             f"merge_result={merge_result}, discovered={len(discovered_after)}, cache={len(cache_after)}, "

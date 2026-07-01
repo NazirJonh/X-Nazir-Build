@@ -33,7 +33,7 @@ from bl_ui.glyph_tag_system.defaults import (
 )
 from bl_ui.glyph_tag_system.conversions import _hex_to_glyph
 from bl_ui.glyph_tag_system.log import category_debug_print
-from bl_ui.glyph_tag_system._state import _all_tags_cache
+from bl_ui.glyph_tag_system._state import state
 from bl_ui.glyph_tag_system.tags_cache import (
     _get_mode_flags_for_tag,
 )
@@ -308,7 +308,6 @@ class USERPREF_OT_tag_mode_toggle(Operator):
     )
 
     def execute(self, context):
-        global _all_tags_cache
 
         wm = context.window_manager
         idx = wm.category_tags_active_index
@@ -320,10 +319,10 @@ class USERPREF_OT_tag_mode_toggle(Operator):
             return {'CANCELLED'}
 
         tag_name = wm.category_tags[idx].name
-        if tag_name not in _all_tags_cache:
+        if tag_name not in state.all_tags_cache:
             return {'CANCELLED'}
 
-        tag_data = _all_tags_cache[tag_name]
+        tag_data = state.all_tags_cache[tag_name]
         if not isinstance(tag_data, dict):
             return {'CANCELLED'}
 
@@ -346,7 +345,6 @@ class USERPREF_OT_tag_mode_select_all(Operator):
     bl_label = "Select All Modes"
 
     def execute(self, context):
-        global _all_tags_cache
 
         wm = context.window_manager
         idx = wm.category_tags_active_index
@@ -358,8 +356,8 @@ class USERPREF_OT_tag_mode_select_all(Operator):
             return {'CANCELLED'}
 
         tag_name = wm.category_tags[idx].name
-        if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
-            _all_tags_cache[tag_name]["mode_flags"] = _CATEGORY_TAG_ALL_MODE_FLAGS
+        if tag_name in state.all_tags_cache and isinstance(state.all_tags_cache[tag_name], dict):
+            state.all_tags_cache[tag_name]["mode_flags"] = _CATEGORY_TAG_ALL_MODE_FLAGS
             wm.category_tags[idx].mode_flags = _CATEGORY_TAG_ALL_MODE_FLAGS
 
         return {'FINISHED'}
@@ -371,7 +369,6 @@ class USERPREF_OT_tag_mode_select_none(Operator):
     bl_label = "Select None"
 
     def execute(self, context):
-        global _all_tags_cache
 
         wm = context.window_manager
         idx = wm.category_tags_active_index
@@ -383,8 +380,8 @@ class USERPREF_OT_tag_mode_select_none(Operator):
             return {'CANCELLED'}
 
         tag_name = wm.category_tags[idx].name
-        if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
-            _all_tags_cache[tag_name]["mode_flags"] = 0
+        if tag_name in state.all_tags_cache and isinstance(state.all_tags_cache[tag_name], dict):
+            state.all_tags_cache[tag_name]["mode_flags"] = 0
             wm.category_tags[idx].mode_flags = 0
 
         return {'FINISHED'}
@@ -406,7 +403,6 @@ class USERPREF_OT_category_tag_set_display_mode(Operator):
     )
 
     def execute(self, context):
-        global _all_tags_cache
 
         wm = context.window_manager
         idx = wm.category_tags_active_index
@@ -418,7 +414,7 @@ class USERPREF_OT_category_tag_set_display_mode(Operator):
             return {'CANCELLED'}
 
         tag_name = wm.category_tags[idx].name
-        if tag_name not in _all_tags_cache:
+        if tag_name not in state.all_tags_cache:
             return {'CANCELLED'}
 
         # Set icon_source: 0=GLYPH, 1=ICON

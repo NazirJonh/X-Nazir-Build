@@ -62,9 +62,7 @@ from bl_ui.glyph_tag_system.persistence import (
     create_backup,
 )
 from bl_ui.glyph_tag_system._state import (
-    _glyph_cache,
-    _all_tags_cache,
-    _category_orders_cache,
+    state,
     reset_glyph_cache,
     reset_all_tags_cache,
     reset_category_orders_cache,
@@ -224,7 +222,7 @@ def _ensure_category_panel_label(category, space_type, entry):
 
     # Persist the discovered label into the cache for all matching category entries.
     updated_any = False
-    for cache_key, cache_data in list(_glyph_cache.items()):
+    for cache_key, cache_data in list(state.glyph_cache.items()):
         if isinstance(cache_key, tuple) and len(cache_key) >= 2 and cache_key[1] == category:
             if not isinstance(cache_data, dict):
                 cache_data = _normalize_category_data(cache_data, category_name=category)
@@ -244,7 +242,7 @@ def _ensure_category_panel_label(category, space_type, entry):
                 if not cache_data.get("base_type"):
                     cache_data["base_type"] = "glyph_only"
 
-            _glyph_cache[cache_key] = cache_data
+            state.glyph_cache[cache_key] = cache_data
             updated_any = True
 
     if not updated_any:
@@ -252,7 +250,7 @@ def _ensure_category_panel_label(category, space_type, entry):
         # (or global if none specified).
         target_space = space_type if space_type != -1 else -1
         cache_key = _make_cache_key(target_space, category)
-        _glyph_cache[cache_key] = entry
+        state.glyph_cache[cache_key] = entry
 
     return entry
 
@@ -298,8 +296,8 @@ def _get_category_data(category, space_type=-1):
     # Global-First: Always use GLOBAL key (-1, category)
     key = _make_cache_key(space_type, category)  # Returns (-1, category) regardless of space_type
     category_debug_print(f"[_get_category_data] Looking for GLOBAL key={key}, category='{category}'")
-    if key in _glyph_cache:
-        data = _glyph_cache[key]
+    if key in state.glyph_cache:
+        data = state.glyph_cache[key]
         meaningful = has_meaningful_data(data)
         category_debug_print(f"[_get_category_data] FOUND GLOBAL key={key}, has_meaningful={meaningful}")
         if meaningful:
@@ -309,7 +307,7 @@ def _get_category_data(category, space_type=-1):
     # This handles cases where category names have different spellings/unicode
     normalized_target = _normalize_category_key(category)
     if normalized_target:
-        for cache_key, cache_data in _glyph_cache.items():
+        for cache_key, cache_data in state.glyph_cache.items():
             if isinstance(cache_key, tuple) and len(cache_key) >= 2:
                 cache_category = cache_key[1]
                 if _normalize_category_key(cache_category) == normalized_target:
@@ -324,7 +322,7 @@ def _get_category_data(category, space_type=-1):
 def _set_category_data_internal(category, data, space_type=-1):
     """Set category data for specific space_type."""
     key = _make_cache_key(space_type, category)
-    _glyph_cache[key] = data
+    state.glyph_cache[key] = data
 
 
 def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_flag=0):
@@ -343,11 +341,11 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
         return
 
     key = _make_cache_key(space_type, category_id)
-    cat_data = _glyph_cache.get(key)
+    cat_data = state.glyph_cache.get(key)
     if cat_data is None:
         # Also try global key as fallback
         global_key = _make_cache_key(-1, category_id)
-        cat_data = _glyph_cache.get(global_key)
+        cat_data = state.glyph_cache.get(global_key)
         if cat_data is not None:
             key = global_key
         else:
@@ -355,11 +353,11 @@ def mark_category_from_extension(category_id, extension_id, space_type=-1, mode_
             cat_data = _normalize_category_data({})
             # New categories from extensions start as pending tag assignment.
             cat_data["pending_tag_assignment"] = True
-            _glyph_cache[key] = cat_data
+            state.glyph_cache[key] = cat_data
 
     if not isinstance(cat_data, dict):
         cat_data = _normalize_category_data(cat_data)
-        _glyph_cache[key] = cat_data
+        state.glyph_cache[key] = cat_data
 
     cat_data["source_extension"] = extension_id
 
@@ -414,7 +412,7 @@ def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
     categories_to_clear = []  # Collect categories that were cleared for sibling processing
 
     # First pass: mark all unassigned categories as without tag
-    for cache_key, cat_data in list(_glyph_cache.items()):
+    for cache_key, cat_data in list(state.glyph_cache.items()):
         if not (isinstance(cache_key, tuple) and len(cache_key) == 2):
             continue
         cache_space_type, category_name = cache_key
@@ -451,7 +449,7 @@ def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
     cleared_siblings = set()
     for category_name in categories_to_clear:
         key = _make_cache_key(-1, category_name)
-        cat_data = _glyph_cache.get(key)
+        cat_data = state.glyph_cache.get(key)
         if not isinstance(cat_data, dict):
             continue
 
@@ -460,7 +458,7 @@ def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
 
         if source_ext:
             # Primary path: match by source_extension
-            for other_key, other_data in _glyph_cache.items():
+            for other_key, other_data in state.glyph_cache.items():
                 if isinstance(other_data, dict) and other_data.get("source_extension") == source_ext:
                     other_name = other_key[1] if isinstance(other_key, tuple) else other_key
                     if other_name != category_name:  # Skip self
@@ -475,7 +473,7 @@ def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
             if not base_name:
                 base_name = category_name
 
-            for other_key, other_data in _glyph_cache.items():
+            for other_key, other_data in state.glyph_cache.items():
                 if not isinstance(other_data, dict):
                     continue
                 other_name = other_key[1] if isinstance(other_key, tuple) else other_key
@@ -521,22 +519,22 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
         space_type:   Space type to look up first; falls back to global (-1).
     """
     matching_keys = []
-    for cache_key in _glyph_cache.keys():
+    for cache_key in state.glyph_cache.keys():
         if isinstance(cache_key, tuple) and len(cache_key) == 2:
             _st, key_category = cache_key
             if key_category == category_id:
                 matching_keys.append(cache_key)
 
     global_key = _make_cache_key(-1, category_id)
-    if global_key not in _glyph_cache:
+    if global_key not in state.glyph_cache:
         source_data = None
         if matching_keys:
-            source_data = _glyph_cache.get(matching_keys[0])
+            source_data = state.glyph_cache.get(matching_keys[0])
 
         if isinstance(source_data, dict):
-            _glyph_cache[global_key] = _normalize_category_data(dict(source_data), category_id)
+            state.glyph_cache[global_key] = _normalize_category_data(dict(source_data), category_id)
         else:
-            _glyph_cache[global_key] = {
+            state.glyph_cache[global_key] = {
                 "tags": [],
                 "pending_tag_assignment": False,
                 "source_extension": "",
@@ -555,17 +553,17 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
     source_ext = None
     category_name_for_prefix_match = None
     for key in matching_keys:
-        cat_data = _glyph_cache.get(key)
+        cat_data = state.glyph_cache.get(key)
         if isinstance(cat_data, dict):
             source_ext = cat_data.get("source_extension", "")
             category_name_for_prefix_match = key[1]  # Store category name for prefix matching
             break
 
     for key in matching_keys:
-        cat_data = _glyph_cache.get(key)
+        cat_data = state.glyph_cache.get(key)
         if not isinstance(cat_data, dict):
             cat_data = _normalize_category_data(cat_data)
-            _glyph_cache[key] = cat_data
+            state.glyph_cache[key] = cat_data
 
         # CRITICAL: If an entry was NOT in cache and is now being assigned
         # a tag, ensure it starts with pending=True so it can be cleared below.
@@ -584,7 +582,7 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
     cleared_count = 0
     if source_ext:
         # Primary path: match by source_extension
-        for other_key, other_data in _glyph_cache.items():
+        for other_key, other_data in state.glyph_cache.items():
             if isinstance(other_data, dict) and other_data.get("source_extension") == source_ext:
                 other_data["pending_tag_assignment"] = False
                 category_debug_print(f"[ASSIGN TAG] Cleared pending for sibling category: {other_key[1]!r} (extension={source_ext!r})")
@@ -597,7 +595,7 @@ def assign_tag_to_category(category_id, tag_name, space_type=-1):
         if not base_name:
             base_name = category_name_for_prefix_match
 
-        for other_key, other_data in _glyph_cache.items():
+        for other_key, other_data in state.glyph_cache.items():
             if not isinstance(other_data, dict):
                 continue
             other_name = other_key[1]
@@ -683,7 +681,7 @@ def _load_glyph_mappings_from_file():
                     decoded_category = _unicode_escape_to_glyph(category) if '\\u' in category else category
                     cache_key = _make_cache_key(-1, decoded_category)  # Always GLOBAL key
                     normalized_data = _normalize_category_data(cat_data, decoded_category)
-                    _glyph_cache[cache_key] = normalized_data
+                    state.glyph_cache[cache_key] = normalized_data
                     # DEBUG: Log Pivot Tools loading
                     if 'Pivot' in str(category):
                         category_debug_print(f"[GLYPH LOAD DEBUG] Loaded 'Pivot Tools': cache_key={cache_key}, tags={normalized_data.get('tags', [])}")
@@ -702,8 +700,8 @@ def _load_glyph_mappings_from_file():
                         normalized_data = _normalize_category_data(cat_data, decoded_category)
 
                         # If GLOBAL entry already exists, merge customizations
-                        if cache_key in _glyph_cache:
-                            existing = _glyph_cache[cache_key]
+                        if cache_key in state.glyph_cache:
+                            existing = state.glyph_cache[cache_key]
                             # Only overwrite if migrated data has customizations
                             migrated_icon_source = normalized_data.get("icon_source", "auto")
                             migrated_glyph_mode = normalized_data.get("glyph_mode", "auto")
@@ -737,20 +735,20 @@ def _load_glyph_mappings_from_file():
                                     existing["color"] = migrated_color
                         else:
                             # No existing GLOBAL entry, create new one
-                            _glyph_cache[cache_key] = normalized_data
+                            state.glyph_cache[cache_key] = normalized_data
 
             elif key != "GLOBAL" and isinstance(value, (str, dict)):
                 # Very old format: category -> data (migrate to GLOBAL)
                 category = _unicode_escape_to_glyph(key) if '\\u' in key else key
                 cache_key = _make_cache_key(-1, category)  # Always GLOBAL key
-                _glyph_cache[cache_key] = _normalize_category_data(value, category)
+                state.glyph_cache[cache_key] = _normalize_category_data(value, category)
                 category_debug_print(f"[GLYPH LOAD DEBUG] Loaded old-format category: {category}")
 
     # Ensure invalid categories referenced in order lists are kept in cache (as GLOBAL)
     for category in order_categories:
         global_key = _make_cache_key(-1, category)
-        if global_key not in _glyph_cache and not _is_valid_category_name(category):
-            _glyph_cache[global_key] = _normalize_category_data({}, category)
+        if global_key not in state.glyph_cache and not _is_valid_category_name(category):
+            state.glyph_cache[global_key] = _normalize_category_data({}, category)
             category_debug_print(f"[GLYPH] Adding missing invalid category from order list: {repr(category)}")
 
     # Load all_tags cache - convert hex glyphs to Unicode
@@ -761,16 +759,16 @@ def _load_glyph_mappings_from_file():
     for tag_name, tag_data in raw_tags.items():
         category_debug_print(f"[TAGS LOAD] Processing tag '{tag_name}': {tag_data}")
         if isinstance(tag_data, dict):
-            _all_tags_cache[tag_name] = {
+            state.all_tags_cache[tag_name] = {
                 "glyph": _hex_to_glyph(tag_data.get("glyph", "")),
                 "color": tag_data.get("color", [0.0, 0.0, 0.0]),
                 "mode_flags": tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS),
                 "icon_key": tag_data.get("icon_key", ""),
                 "icon_source": tag_data.get("icon_source", 0),
             }
-            category_debug_print(f"[TAGS LOAD] Loaded tag '{tag_name}' -> icon_key='{_all_tags_cache[tag_name]['icon_key']}' icon_source={_all_tags_cache[tag_name]['icon_source']}")
+            category_debug_print(f"[TAGS LOAD] Loaded tag '{tag_name}' -> icon_key='{state.all_tags_cache[tag_name]['icon_key']}' icon_source={state.all_tags_cache[tag_name]['icon_source']}")
         else:
-            _all_tags_cache[tag_name] = tag_data
+            state.all_tags_cache[tag_name] = tag_data
 
     # Load tag order for preserving manual ordering
     set_tag_order(data.get("tag_order", []))
@@ -779,10 +777,10 @@ def _load_glyph_mappings_from_file():
     reset_category_orders_cache()
     for tag_key, category_list in raw_orders.items():
         if isinstance(category_list, list):
-            _category_orders_cache[tag_key] = _category_order_decode(category_list)
+            state.category_orders_cache[tag_key] = _category_order_decode(category_list)
 
     set_glyph_cache_loaded(True)
-    category_debug_print(f"[GLYPH] Loaded {len(_glyph_cache)} GLOBAL mappings, {len(_all_tags_cache)} tags from {filepath}")
+    category_debug_print(f"[GLYPH] Loaded {len(state.glyph_cache)} GLOBAL mappings, {len(state.all_tags_cache)} tags from {filepath}")
     return True
 
 
@@ -800,8 +798,8 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
     # CRITICAL DEBUG: Always log save attempts (even if TAG_DEBUG=False)
     save_debug_print(f"[GLYPH SAVE] >>>>>> START _save_glyph_mappings_to_file <<<<<<")
     save_debug_print(f"[GLYPH SAVE] data={data is not None}, force_discovery_skip={force_discovery_skip}, skip_wm_sync={skip_wm_sync}")
-    save_debug_print(f"[GLYPH SAVE] _glyph_cache entries: {len(_glyph_cache)}")
-    save_debug_print(f"[GLYPH SAVE] _all_tags_cache entries: {len(_all_tags_cache)}")
+    save_debug_print(f"[GLYPH SAVE] state.glyph_cache entries: {len(state.glyph_cache)}")
+    save_debug_print(f"[GLYPH SAVE] state.all_tags_cache entries: {len(state.all_tags_cache)}")
 
     # Prevent parallel saves - if already saving, skip this call
     if is_glyph_save_locked():
@@ -870,7 +868,7 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
         mappings_to_save = {}
         skipped_count = 0
         order_categories = set()
-        for _tag_key, category_list in _category_orders_cache.items():
+        for _tag_key, category_list in state.category_orders_cache.items():
             if isinstance(category_list, list):
                 for category in category_list:
                     if isinstance(category, str):
@@ -878,10 +876,10 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
 
         # DEBUG: Log total cache entries before save with timing
         prepare_start = time.perf_counter()
-        category_debug_print(f"[GLYPH SAVE] Step 1: Building data structure from {len(_glyph_cache)} cache entries...")
+        category_debug_print(f"[GLYPH SAVE] Step 1: Building data structure from {len(state.glyph_cache)} cache entries...")
 
-        # Iterate over tuple keys (space_type, category) from _glyph_cache
-        for cache_key, category_data in _glyph_cache.items():
+        # Iterate over tuple keys (space_type, category) from state.glyph_cache
+        for cache_key, category_data in state.glyph_cache.items():
             # Unpack tuple key: (space_type, category)
             if not isinstance(cache_key, tuple) or len(cache_key) != 2:
                 # Skip invalid keys (shouldn't happen with new cache)
@@ -980,7 +978,7 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
 
         # Convert tag glyphs to hex for storage
         tags_to_save = {}
-        for tag_name, tag_data in _all_tags_cache.items():
+        for tag_name, tag_data in state.all_tags_cache.items():
             if isinstance(tag_data, dict):
                 tags_to_save[tag_name] = {
                     "glyph": _glyph_to_hex(tag_data.get("glyph", "")),
@@ -1008,7 +1006,7 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
             'mappings': mappings_to_save,
             'category_orders': {
                 tag_key: _category_order_encode(category_list)
-                for tag_key, category_list in _category_orders_cache.items()
+                for tag_key, category_list in state.category_orders_cache.items()
             }  # Save category orders (glyphs as \uXXXX)
         }
 
@@ -1016,8 +1014,8 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
         category_debug_print(f"[GLYPH SAVE] Step 1 COMPLETE: Data structure built in {(prepare_end - prepare_start)*1000:.2f}ms")
 
     # SIMPLIFIED: Synchronous save (no background thread)
-    cat_count = len(_glyph_cache)
-    tag_count = len(_all_tags_cache)
+    cat_count = len(state.glyph_cache)
+    tag_count = len(state.all_tags_cache)
 
     try:
         save_debug_print(f"[GLYPH SAVE] Step 2: Serializing JSON data...")
@@ -1078,7 +1076,7 @@ def get_categories_for_tag(tag_name):
         _load_glyph_mappings_from_file()
 
     categories = []
-    for cat_key, cat_data in _glyph_cache.items():
+    for cat_key, cat_data in state.glyph_cache.items():
         if isinstance(cat_data, dict) and tag_name in cat_data.get("tags", []):
             # cat_key is a tuple (space_type, category), extract info
             if isinstance(cat_key, tuple) and len(cat_key) >= 2:
@@ -1236,7 +1234,7 @@ def get_category_glyph_data(category, space_type=-1):
     # If color is still all zeros, try to find a non-zero color from any other mapping
     # for the same category (e.g. a SPACE_VIEW3D-specific entry).
     if not any(c > 0.0 for c in color):
-        for cache_key, cache_data in _glyph_cache.items():
+        for cache_key, cache_data in state.glyph_cache.items():
             if (
                 isinstance(cache_key, tuple)
                 and len(cache_key) >= 2
@@ -1419,8 +1417,8 @@ def get_default_display_name(category, space_type=-1):
 def set_category_glyph(category, glyph, space_type=-1, save=True):
     """Set the glyph for a category name."""
     key = _make_cache_key(space_type, category)
-    if key not in _glyph_cache:
-        _glyph_cache[key] = {
+    if key not in state.glyph_cache:
+        state.glyph_cache[key] = {
             "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
             "default_glyph": "", "default_display_name": "", "base_type": "text_only",
             "first_letter": "",
@@ -1429,7 +1427,7 @@ def set_category_glyph(category, glyph, space_type=-1, save=True):
         }
 
     # Ensure the entry has all required fields
-    entry = _glyph_cache[key]
+    entry = state.glyph_cache[key]
     if "default_glyph" not in entry:
         entry["default_glyph"] = entry.get("glyph", "")
     if "default_display_name" not in entry:
@@ -1445,20 +1443,20 @@ def set_category_glyph(category, glyph, space_type=-1, save=True):
         entry["glyph_mode"] = "auto"
 
     if glyph:
-        _glyph_cache[key]["glyph"] = glyph
+        state.glyph_cache[key]["glyph"] = glyph
         # For glyph_only categories, default_glyph must be the category name (original glyph)
         is_glyph_only = _is_single_glyph(category)
         if is_glyph_only:
-            if not _glyph_cache[key].get("default_glyph"):
-                _glyph_cache[key]["default_glyph"] = category
-            _glyph_cache[key]["base_type"] = "glyph_only"
+            if not state.glyph_cache[key].get("default_glyph"):
+                state.glyph_cache[key]["default_glyph"] = category
+            state.glyph_cache[key]["base_type"] = "glyph_only"
         elif glyph:
             # For non-glyph_only with a glyph set, update base_type
-            _glyph_cache[key]["base_type"] = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
+            state.glyph_cache[key]["base_type"] = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
     else:
         # Remove the category if glyph is empty
-        if key in _glyph_cache:
-            del _glyph_cache[key]
+        if key in state.glyph_cache:
+            del state.glyph_cache[key]
 
     if save:
         from bl_ui.glyph_tag_system import handlers as _handlers
@@ -1491,23 +1489,23 @@ def set_category_data(category,
     category_debug_print(f"[SET_CATEGORY_DATA] PARAMS: tags={repr(tags)}, glyph={repr(glyph)}, display_name={repr(display_name)}, icon_source={repr(icon_source)}, glyph_mode={repr(glyph_mode)}")
 
     # DEBUG: Show current tags BEFORE changes
-    if key in _glyph_cache:
-        current_tags = _glyph_cache[key].get("tags", [])
+    if key in state.glyph_cache:
+        current_tags = state.glyph_cache[key].get("tags", [])
         category_debug_print(f"[SET_CATEGORY_DATA] CURRENT_TAGS in cache: {current_tags}")
     else:
         category_debug_print(f"[SET_CATEGORY_DATA] KEY NOT in cache - will create new entry")
 
-    if key not in _glyph_cache:
+    if key not in state.glyph_cache:
         inherited_data = None
 
         if space_type != -1:
             global_key = _make_cache_key(-1, category)
-            global_data = _glyph_cache.get(global_key)
+            global_data = state.glyph_cache.get(global_key)
             if isinstance(global_data, dict):
                 inherited_data = dict(global_data)
 
         if inherited_data is None:
-            for cache_key, cache_data in _glyph_cache.items():
+            for cache_key, cache_data in state.glyph_cache.items():
                 if not (isinstance(cache_key, tuple) and len(cache_key) >= 2):
                     continue
                 if cache_key[1] != category:
@@ -1517,10 +1515,10 @@ def set_category_data(category,
                     break
 
         if isinstance(inherited_data, dict):
-            _glyph_cache[key] = _normalize_category_data(inherited_data, category)
+            state.glyph_cache[key] = _normalize_category_data(inherited_data, category)
             category_debug_print(f"[SET_CATEGORY_DATA] Initialized key={key} from existing category data")
         else:
-            _glyph_cache[key] = {
+            state.glyph_cache[key] = {
                 "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
                 "default_glyph": "", "default_display_name": "", "base_type": "text_only",
                 "first_letter": "",
@@ -1529,7 +1527,7 @@ def set_category_data(category,
             }
 
     # Ensure the entry has all required fields
-    entry = _glyph_cache[key]
+    entry = state.glyph_cache[key]
     # Note: default_glyph should NOT be set from glyph for text_only/glyph_text categories.
     # For text_only categories, reset should return first letter (nullptr in C++),
     # not a previously assigned glyph. default_glyph is only meaningful for glyph_only categories.
@@ -1559,31 +1557,31 @@ def set_category_data(category,
         if glyph and len(glyph) <= 6 and all(c in '0123456789abcdefABCDEF' for c in glyph):
             # Looks like a hex string, convert to glyph
             glyph = _hex_to_glyph(glyph)
-        _glyph_cache[key]["glyph"] = glyph
+        state.glyph_cache[key]["glyph"] = glyph
         # For glyph_only categories, default_glyph must be the category name (original glyph)
         is_glyph_only = _is_single_glyph(category)
         if is_glyph_only:
             # For glyph_only: default_glyph = category name (the original glyph)
-            _glyph_cache[key]["default_glyph"] = category
-            _glyph_cache[key]["base_type"] = "glyph_only"
+            state.glyph_cache[key]["default_glyph"] = category
+            state.glyph_cache[key]["base_type"] = "glyph_only"
         elif glyph:
             # For text_only categories with a glyph assigned: base_type = glyph_text
             # But default_glyph stays EMPTY - reset should return to first letter
-            _glyph_cache[key]["base_type"] = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
+            state.glyph_cache[key]["base_type"] = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
             # Do NOT set default_glyph for text_only/glyph_text categories
             # Reset should return to first letter (nullptr in C++)
     if display_name is not None:
-        _glyph_cache[key]["display_name"] = display_name
+        state.glyph_cache[key]["display_name"] = display_name
         # NOTE: Do NOT update default_display_name here. It must be set only once
         # during initial category discovery to preserve the original name for Reset.
         # Updating it here causes renamed categories (e.g., "Hyperfy" → "ZZZ") to
         # lose their original name, breaking the Reset functionality.
     # Keep first_letter in sync with display_name when explicit value is not provided.
     if first_letter is not None:
-        _glyph_cache[key]["first_letter"] = first_letter
+        state.glyph_cache[key]["first_letter"] = first_letter
     elif display_name is not None:
         src = display_name if isinstance(display_name, str) else ""
-        _glyph_cache[key]["first_letter"] = src[:1] if src else ""
+        state.glyph_cache[key]["first_letter"] = src[:1] if src else ""
     if color is not None:
         # Ensure color is stored as floats, converting strings if needed
         # Handle hex string format (e.g., "029c05" from C++)
@@ -1593,10 +1591,10 @@ def set_category_data(category,
                 r = int(color[0:2], 16) / 255.0
                 g = int(color[2:4], 16) / 255.0
                 b = int(color[4:6], 16) / 255.0
-                _glyph_cache[key]["color"] = [r, g, b]
+                state.glyph_cache[key]["color"] = [r, g, b]
                 category_debug_print(f"[SET_CATEGORY_DATA] Parsed hex color '{color}' to RGB [{r:.4f}, {g:.4f}, {b:.4f}]")
             except ValueError:
-                _glyph_cache[key]["color"] = [0.0, 0.0, 0.0]
+                state.glyph_cache[key]["color"] = [0.0, 0.0, 0.0]
                 category_debug_print(f"[SET_CATEGORY_DATA] Failed to parse hex color '{color}', using black")
         elif len(color) >= 3:
             color_list = []
@@ -1608,21 +1606,21 @@ def set_category_data(category,
                         color_list.append(0.0)
                 else:
                     color_list.append(float(c) if c is not None else 0.0)
-            _glyph_cache[key]["color"] = color_list
+            state.glyph_cache[key]["color"] = color_list
         else:
-            _glyph_cache[key]["color"] = [0.0, 0.0, 0.0]
+            state.glyph_cache[key]["color"] = [0.0, 0.0, 0.0]
     if tags is not None:
         # DEBUG: Log tags update
-        category_debug_print(f"[SET_CATEGORY_DATA] UPDATING TAGS: old={_glyph_cache[key].get('tags', [])} -> new_param={repr(tags)}")
+        category_debug_print(f"[SET_CATEGORY_DATA] UPDATING TAGS: old={state.glyph_cache[key].get('tags', [])} -> new_param={repr(tags)}")
         # Parse tags string (comma-separated or single tag)
         if isinstance(tags, str):
             if tags:
-                _glyph_cache[key]["tags"] = [t.strip() for t in tags.split(',') if t.strip()]
+                state.glyph_cache[key]["tags"] = [t.strip() for t in tags.split(',') if t.strip()]
             else:
-                _glyph_cache[key]["tags"] = []
+                state.glyph_cache[key]["tags"] = []
         elif isinstance(tags, list):
-            _glyph_cache[key]["tags"] = tags
-        category_debug_print(f"[SET_CATEGORY_DATA] TAGS AFTER UPDATE: {_glyph_cache[key].get('tags', [])}")
+            state.glyph_cache[key]["tags"] = tags
+        category_debug_print(f"[SET_CATEGORY_DATA] TAGS AFTER UPDATE: {state.glyph_cache[key].get('tags', [])}")
     else:
         # DEBUG: tags is None - not updating
         category_debug_print(f"[SET_CATEGORY_DATA] TAGS is None - NOT updating (keeping existing tags)")
@@ -1631,19 +1629,19 @@ def set_category_data(category,
         glyph_mode_norm = str(glyph_mode).lower()
         if glyph_mode_norm not in {"auto", "first_letter"}:
             glyph_mode_norm = "auto"
-        _glyph_cache[key]["glyph_mode"] = glyph_mode_norm
+        state.glyph_cache[key]["glyph_mode"] = glyph_mode_norm
 
     if icon_source is not None:
         icon_source_norm = str(icon_source).lower()
         if icon_source_norm not in {"auto", "manual", "off"}:
             icon_source_norm = "auto"
-        _glyph_cache[key]["icon_source"] = icon_source_norm
+        state.glyph_cache[key]["icon_source"] = icon_source_norm
     if icon_key is not None:
-        _glyph_cache[key]["icon_key"] = str(icon_key)
+        state.glyph_cache[key]["icon_key"] = str(icon_key)
     if icon_path is not None:
-        _glyph_cache[key]["icon_path"] = str(icon_path)
+        state.glyph_cache[key]["icon_path"] = str(icon_path)
     if icon_provider is not None:
-        _glyph_cache[key]["icon_provider"] = str(icon_provider)
+        state.glyph_cache[key]["icon_provider"] = str(icon_provider)
 
     global_key = _make_cache_key(-1, category)
     global_synced_from_space = False
@@ -1657,15 +1655,15 @@ def set_category_data(category,
         display_name is not None or
         first_letter is not None
     ):
-        if global_key not in _glyph_cache:
-            _glyph_cache[global_key] = {
+        if global_key not in state.glyph_cache:
+            state.glyph_cache[global_key] = {
                 "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
                 "default_glyph": "", "default_display_name": "", "base_type": "text_only",
                 "first_letter": "",
                 "glyph_mode": "auto",
                 "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
             }
-        global_entry = _glyph_cache[global_key]
+        global_entry = state.glyph_cache[global_key]
 
         # Determine if we should update global entry
         # Priority: 'manual' > 'off' > 'auto'
@@ -1673,7 +1671,7 @@ def set_category_data(category,
         # - 'off' always updates (explicit glyph/first_letter choice)
         # - 'auto' gets overwritten by anything
         global_icon_source = global_entry.get("icon_source", "auto")
-        space_icon_source = _glyph_cache[key].get("icon_source", "auto")
+        space_icon_source = state.glyph_cache[key].get("icon_source", "auto")
         should_update = (
             global_icon_source == "auto" or
             space_icon_source == "manual" or
@@ -1695,10 +1693,10 @@ def set_category_data(category,
                 global_entry["icon_provider"] = str(icon_provider)
             # Sync color from SPACE to GLOBAL
             if color is not None:
-                global_entry["color"] = _glyph_cache[key]["color"]
+                global_entry["color"] = state.glyph_cache[key]["color"]
                 category_debug_print(f"[SET_CATEGORY_DATA] Propagated color to GLOBAL for '{category}'")
             if display_name is not None:
-                global_entry["display_name"] = _glyph_cache[key].get("display_name", "")
+                global_entry["display_name"] = state.glyph_cache[key].get("display_name", "")
                 if not global_entry.get("default_display_name"):
                     # NEVER use display_name as fallback — it may be a user-renamed value.
                     # Use panel label or category name as the original name for Reset.
@@ -1706,7 +1704,7 @@ def set_category_data(category,
                     global_entry["default_display_name"] = panel_label if panel_label else category
                 category_debug_print(f"[SET_CATEGORY_DATA] Propagated display_name to GLOBAL for '{category}'")
             if first_letter is not None or display_name is not None:
-                global_entry["first_letter"] = _glyph_cache[key].get("first_letter", "")
+                global_entry["first_letter"] = state.glyph_cache[key].get("first_letter", "")
             global_synced_from_space = True
 
     # STEP 2: Sync from GLOBAL to all space-specific entries (consistency)
@@ -1717,11 +1715,11 @@ def set_category_data(category,
         display_name is not None or
         first_letter is not None
     ):
-        for cache_key in list(_glyph_cache.keys()):
+        for cache_key in list(state.glyph_cache.keys()):
             if isinstance(cache_key, tuple) and len(cache_key) >= 2:
                 cache_space_type, cache_category = cache_key
                 if cache_category == category and cache_space_type != -1:
-                    space_entry = _glyph_cache[cache_key]
+                    space_entry = state.glyph_cache[cache_key]
                     if glyph_mode is not None:
                         space_entry["glyph_mode"] = glyph_mode_norm
                         category_debug_print(f"[SET_CATEGORY_DATA] Synced glyph_mode to space_type={cache_space_type} for '{category}'")
@@ -1736,27 +1734,27 @@ def set_category_data(category,
                         space_entry["icon_provider"] = str(icon_provider)
                     # Sync color from GLOBAL to SPACE
                     if color is not None:
-                        space_entry["color"] = _glyph_cache[key]["color"]
+                        space_entry["color"] = state.glyph_cache[key]["color"]
                         category_debug_print(f"[SET_CATEGORY_DATA] Synced color to space_type={cache_space_type} for '{category}'")
                     if display_name is not None:
-                        space_entry["display_name"] = _glyph_cache[key].get("display_name", "")
+                        space_entry["display_name"] = state.glyph_cache[key].get("display_name", "")
                         if not space_entry.get("default_display_name"):
                             # NEVER use display_name — it may be a user-renamed value.
                             panel_label = _find_panel_label_for_category(category)
                             space_entry["default_display_name"] = panel_label if panel_label else category
                         category_debug_print(f"[SET_CATEGORY_DATA] Synced display_name to space_type={cache_space_type} for '{category}'")
                     if first_letter is not None or display_name is not None:
-                        space_entry["first_letter"] = _glyph_cache[key].get("first_letter", "")
+                        space_entry["first_letter"] = state.glyph_cache[key].get("first_letter", "")
 
     # Sync glyph to space-specific entries when saving to GLOBAL
     # This ensures that categories with tags in space-specific entries get the glyph from GLOBAL
     if space_type == -1 and glyph is not None and glyph:
-        for cache_key in list(_glyph_cache.keys()):
+        for cache_key in list(state.glyph_cache.keys()):
             if isinstance(cache_key, tuple) and len(cache_key) >= 2:
                 cache_space_type, cache_category = cache_key
                 if cache_category == category and cache_space_type != -1:
                     # Found a space-specific entry for this category
-                    space_entry = _glyph_cache[cache_key]
+                    space_entry = state.glyph_cache[cache_key]
                     # Only update if the space-specific entry has empty glyph
                     if not space_entry.get("glyph"):
                         space_entry["glyph"] = glyph
@@ -1795,7 +1793,7 @@ def set_category_data(category,
                     override_item.space_type = -1  # Always GLOBAL
 
             # Update override with data from cache
-            entry = _glyph_cache[key]
+            entry = state.glyph_cache[key]
 
             # Convert lowercase values to uppercase for WM enum
             icon_source_val = entry.get("icon_source", "auto").upper()
@@ -1859,8 +1857,8 @@ def set_category_data(category,
                     mapping_item.color = color_val
                 category_debug_print(f"[SET_CATEGORY_DATA] Synced to WM mapping for '{category}' (space_type=-1)")
 
-            if global_synced_from_space and global_key in _glyph_cache:
-                global_entry = _glyph_cache[global_key]
+            if global_synced_from_space and global_key in state.glyph_cache:
+                global_entry = state.glyph_cache[global_key]
 
                 global_override_item = None
                 for item in wm.category_glyph_overrides:
@@ -1956,11 +1954,11 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
         _load_glyph_mappings_from_file()
 
     key = _make_cache_key(space_type, category)
-    if key not in _glyph_cache:
+    if key not in state.glyph_cache:
         category_debug_print(f"[GLYPH RESET] Category '{category}' (space_type={space_type}) not found in cache!")
         return "", ""
 
-    entry = _glyph_cache[key]
+    entry = state.glyph_cache[key]
     category_debug_print(f"[GLYPH RESET] Current entry: {entry}")
 
     default_glyph = entry.get("default_glyph", entry.get("glyph", ""))
@@ -1984,7 +1982,7 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
     # Space-specific entry may have base_type="glyph_only" (set when user assigns glyph),
     # but GLOBAL entry has the original base_type="glyph_text" or "text_only".
     global_key = _make_cache_key(-1, category)
-    global_entry = _glyph_cache.get(global_key, {})
+    global_entry = state.glyph_cache.get(global_key, {})
     # Use GLOBAL base_type if available, otherwise fallback to space-specific entry
     base_type = global_entry.get("base_type", entry.get("base_type", "text_only"))
     category_debug_print(f"[GLYPH RESET] base_type='{base_type}' (from {'GLOBAL' if global_entry else 'space-specific'} entry)")
@@ -2002,8 +2000,8 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
 
         # Clear GLOBAL mappings (space_type=-1) for this category
         global_key = _make_cache_key(-1, category)
-        if global_key in _glyph_cache:
-            global_entry = _glyph_cache[global_key]
+        if global_key in state.glyph_cache:
+            global_entry = state.glyph_cache[global_key]
             category_debug_print(f"[GLYPH RESET] Clearing GLOBAL entry (not glyph_only): {global_entry}")
             # For reserved categories, restore default glyph; for others, clear to empty.
             global_entry["glyph"] = reset_glyph_val
@@ -2027,8 +2025,8 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
             category_debug_print(f"[GLYPH RESET] After clearing GLOBAL entry: {global_entry}")
 
         # Clear only current space-specific mapping (tags are handled separately by reset_tag).
-        if space_type != -1 and key in _glyph_cache:
-            cache_entry = _glyph_cache[key]
+        if space_type != -1 and key in state.glyph_cache:
+            cache_entry = state.glyph_cache[key]
             category_debug_print(f"[GLYPH RESET] Clearing current space-specific entry: space_type={space_type}")
             cache_entry["glyph"] = reset_glyph_val
             cache_entry["color"] = [0.0, 0.0, 0.0]
@@ -2047,7 +2045,7 @@ def reset_category_to_defaults(category, space_type=-1, save=True):
                     cache_entry["icon_provider"] = detected_provider or "extension_auto"
 
     category_debug_print(f"[GLYPH RESET] Final cache state for '{category}':")
-    for cache_key, cache_entry in _glyph_cache.items():
+    for cache_key, cache_entry in state.glyph_cache.items():
         if isinstance(cache_key, tuple) and len(cache_key) >= 2 and cache_key[1] == category:
             category_debug_print(f"  {cache_key}: glyph='{cache_entry.get('glyph', '')}', glyph_mode='{cache_entry.get('glyph_mode', 'auto')}'")
 
@@ -2063,7 +2061,7 @@ def get_all_category_glyphs():
     if not is_glyph_cache_loaded():
         _load_glyph_mappings_from_file()
 
-    return _glyph_cache.copy()
+    return state.glyph_cache.copy()
 
 
 def reset_category_glyphs_to_defaults():

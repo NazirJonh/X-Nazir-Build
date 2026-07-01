@@ -29,9 +29,7 @@ from bl_ui.glyph_tag_system.defaults import (
     _CATEGORY_TAG_DEFAULT_MODE_FLAGS,
 )
 from bl_ui.glyph_tag_system._state import (
-    _all_tags_cache,
-    _glyph_cache,
-    _tag_order_cache,
+    state,
     reset_all_tags_cache,
     set_sync_in_progress,
     is_initial_load_complete,
@@ -49,7 +47,6 @@ def sync_wm_to_glyph_cache():
     This function reads user changes from category_glyph_overrides and
     category_glyph_mappings in WM and saves them to the JSON file.
     """
-    global _glyph_cache, _all_tags_cache
 
     # Don't save during initial load
     if not is_initial_load_complete():
@@ -70,7 +67,6 @@ def sync_wm_to_glyph_cache():
 
 def _sync_wm_to_glyph_cache_impl():
     """Implementation of sync_wm_to_glyph_cache."""
-    global _glyph_cache, _all_tags_cache
 
     try:
         wm = bpy.context.window_manager
@@ -103,15 +99,15 @@ def _sync_wm_to_glyph_cache_impl():
                 cache_key = _make_cache_key(-1, category)
 
                 # Get current cached data or create new entry
-                if cache_key not in _glyph_cache:
-                    _glyph_cache[cache_key] = {
+                if cache_key not in state.glyph_cache:
+                    state.glyph_cache[cache_key] = {
                         "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
                         "default_glyph": "", "default_display_name": "", "base_type": "text_only",
                         "glyph_mode": "auto",
                         "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
                     }
 
-                cached_entry = _glyph_cache[cache_key]
+                cached_entry = state.glyph_cache[cache_key]
 
                 # Check if any values changed
                 if cached_entry.get("glyph", "") != item.glyph:
@@ -140,7 +136,7 @@ def _sync_wm_to_glyph_cache_impl():
                     changes_detected = True
 
                 # Tags are NOT synced from WM to cache to avoid truncation issues
-                # Tags are stored only in _glyph_cache and JSON
+                # Tags are stored only in state.glyph_cache and JSON
 
                 # Also sync default values.
                 # Must sync even when empty string to allow clearing stale values.
@@ -254,15 +250,15 @@ def _sync_wm_to_glyph_cache_impl():
                 )
                 if space_type != -1 and has_customizations:
                     global_cache_key = _make_cache_key(-1, category)
-                    if global_cache_key not in _glyph_cache:
-                        _glyph_cache[global_cache_key] = {
+                    if global_cache_key not in state.glyph_cache:
+                        state.glyph_cache[global_cache_key] = {
                             "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
                             "default_glyph": "", "default_display_name": "", "base_type": "text_only",
                             "glyph_mode": "auto",
                             "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
                         }
 
-                    global_entry = _glyph_cache[global_cache_key]
+                    global_entry = state.glyph_cache[global_cache_key]
                     # Copy glyph data to global entry
                     if item_glyph and global_entry.get("glyph", "") != item_glyph:
                         global_entry["glyph"] = item_glyph
@@ -341,37 +337,37 @@ def _sync_wm_to_glyph_cache_impl():
                     }
 
                 # Only update if WM has tags OR our cache is empty (initial load)
-                if new_tags_cache and _all_tags_cache != new_tags_cache:
-                    # Detect tag renames and update _tag_order_cache before replacing cache.
+                if new_tags_cache and state.all_tags_cache != new_tags_cache:
+                    # Detect tag renames and update state.tag_order_cache before replacing cache.
                     # When name is changed via box.prop(tag, "name"), the RNA update fires
-                    # and rebuilds cache here. Without this, the old name stays in _tag_order_cache
+                    # and rebuilds cache here. Without this, the old name stays in state.tag_order_cache
                     # and the new name gets appended at the end on next WM sync.
-                    if _tag_order_cache:
-                        old_keys = set(_all_tags_cache.keys())
+                    if state.tag_order_cache:
+                        old_keys = set(state.all_tags_cache.keys())
                         new_keys = set(new_tags_cache.keys())
                         disappeared = old_keys - new_keys
                         appeared = new_keys - old_keys
                         # Same count means likely a rename, not add/delete
                         if disappeared and len(disappeared) == len(appeared):
                             for old_name in list(disappeared):
-                                if old_name in _tag_order_cache:
-                                    idx = _tag_order_cache.index(old_name)
+                                if old_name in state.tag_order_cache:
+                                    idx = state.tag_order_cache.index(old_name)
                                     # Pick a new name not already in order cache
                                     for new_name in list(appeared):
-                                        if new_name not in _tag_order_cache:
-                                            _tag_order_cache[idx] = new_name
+                                        if new_name not in state.tag_order_cache:
+                                            state.tag_order_cache[idx] = new_name
                                             appeared.discard(new_name)
                                             break
 
                     reset_all_tags_cache(new_tags_cache)
                     changes_detected = True
-                    category_debug_print(f"[GLYPH] Synced {len(_all_tags_cache)} tag definitions from WM")
-                elif not new_tags_cache and not _all_tags_cache:
+                    category_debug_print(f"[GLYPH] Synced {len(state.all_tags_cache)} tag definitions from WM")
+                elif not new_tags_cache and not state.all_tags_cache:
                     # Both empty, nothing to do
                     pass
-                elif not new_tags_cache and _all_tags_cache:
+                elif not new_tags_cache and state.all_tags_cache:
                     # WM is empty but cache has data - sync cache TO WM instead
-                    category_debug_print(f"[GLYPH] WM category_tags empty, preserving {len(_all_tags_cache)} cached tags")
+                    category_debug_print(f"[GLYPH] WM category_tags empty, preserving {len(state.all_tags_cache)} cached tags")
             except Exception as e:
                 category_debug_print(f"[GLYPH] Error reading from category_tags: {e}")
 
@@ -392,16 +388,16 @@ def _sync_wm_to_glyph_cache_impl():
                     cache_key = _make_cache_key(-1, category)
 
                     # Get current cached data or create new entry
-                    if cache_key not in _glyph_cache:
+                    if cache_key not in state.glyph_cache:
                         # Create initial entry with default base_type (will be updated when glyph is set)
-                        _glyph_cache[cache_key] = {
+                        state.glyph_cache[cache_key] = {
                             "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
                             "default_glyph": "", "default_display_name": "", "base_type": "text_only",
                             "glyph_mode": "auto",
                             "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
                         }
 
-                    cached_entry = _glyph_cache[cache_key]
+                    cached_entry = state.glyph_cache[cache_key]
 
                     # Overrides take precedence
                     if item.glyph:
@@ -436,7 +432,7 @@ def _sync_wm_to_glyph_cache_impl():
                         _pref_log_once(f"[GLYPH SYNC] Updated color for '{category}' to {item_color}")
 
                     # Tags are NOT synced from WM to cache to avoid truncation issues
-                    # Tags are stored only in _glyph_cache and JSON
+                    # Tags are stored only in state.glyph_cache and JSON
 
                     if hasattr(item, 'icon_source'):
                         icon_source_raw = getattr(item, "icon_source", "AUTO")
@@ -495,15 +491,15 @@ def _sync_wm_to_glyph_cache_impl():
                     )
                     if space_type != -1 and has_customizations:
                         global_cache_key = _make_cache_key(-1, category)
-                        if global_cache_key not in _glyph_cache:
-                            _glyph_cache[global_cache_key] = {
+                        if global_cache_key not in state.glyph_cache:
+                            state.glyph_cache[global_cache_key] = {
                                 "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0], "tags": [],
                                 "default_glyph": "", "default_display_name": "", "base_type": "text_only",
                                 "glyph_mode": "auto",
                                 "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
                             }
 
-                        global_entry = _glyph_cache[global_cache_key]
+                        global_entry = state.glyph_cache[global_cache_key]
                         item_glyph = item.glyph or ""
 
                         # Copy glyph data to global entry
@@ -558,7 +554,7 @@ def _sync_wm_to_glyph_cache_impl():
         # STEP 2: Sync from GLOBAL back to all SPACE entries for consistency
         # This ensures all space-specific entries have the same icon/glyph_mode data as GLOBAL
         categories_in_global = set()
-        for cache_key in _glyph_cache.keys():
+        for cache_key in state.glyph_cache.keys():
             if isinstance(cache_key, tuple) and len(cache_key) == 2:
                 space_type_id, category = cache_key
                 if space_type_id == -1:  # GLOBAL entry
@@ -566,9 +562,9 @@ def _sync_wm_to_glyph_cache_impl():
 
         for category in categories_in_global:
             global_cache_key = (-1, category)
-            if global_cache_key not in _glyph_cache:
+            if global_cache_key not in state.glyph_cache:
                 continue
-            global_entry = _glyph_cache[global_cache_key]
+            global_entry = state.glyph_cache[global_cache_key]
 
             # Get global values
             global_glyph_mode = global_entry.get("glyph_mode", "auto")
@@ -578,11 +574,11 @@ def _sync_wm_to_glyph_cache_impl():
             global_icon_provider = global_entry.get("icon_provider", "")
 
             # Sync to all space-specific entries for this category
-            for cache_key in _glyph_cache.keys():
+            for cache_key in state.glyph_cache.keys():
                 if isinstance(cache_key, tuple) and len(cache_key) == 2:
                     space_type_id, cat = cache_key
                     if space_type_id != -1 and cat == category:  # Space-specific entry for this category
-                        space_entry = _glyph_cache[cache_key]
+                        space_entry = state.glyph_cache[cache_key]
 
                         # Sync glyph_mode
                         if space_entry.get("glyph_mode", "auto") != global_glyph_mode:
@@ -608,14 +604,14 @@ def _sync_wm_to_glyph_cache_impl():
         # Save to JSON if changes were detected
         if changes_detected:
             if _save_glyph_mappings_to_file():
-                category_debug_print(f"[GLYPH] Saved {len(_glyph_cache)} category mappings from WM to JSON")
+                category_debug_print(f"[GLYPH] Saved {len(state.glyph_cache)} category mappings from WM to JSON")
             else:
                 category_debug_print("[GLYPH] Failed to save category mappings from WM")
         else:
             # No changes detected, but still save to ensure tags are persisted
             # This is important when Save is clicked after tag changes
             if _save_glyph_mappings_to_file():
-                category_debug_print(f"[GLYPH] Saved {len(_glyph_cache)} category mappings to JSON (no changes detected)")
+                category_debug_print(f"[GLYPH] Saved {len(state.glyph_cache)} category mappings to JSON (no changes detected)")
             else:
                 category_debug_print("[GLYPH] Failed to save category mappings to JSON")
 

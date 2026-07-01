@@ -205,25 +205,13 @@ from .persistence import (
     create_backup,
 )
 
-# -- Shared state objects (imported by reference; single owner is _state) -----
-# Full reassignments MUST go through the _state accessor helpers below.
-from ._state import (
-    _glyph_cache as _glyph_cache,
-    _glyph_cache_loaded as _glyph_cache_loaded,
-    _all_tags_cache as _all_tags_cache,
-    _tag_order_cache as _tag_order_cache,
-    _category_orders_cache as _category_orders_cache,
-    _preview_mode_active as _preview_mode_active,
-    _pending_extension_context as _pending_extension_context,
-    _install_from_disk_just_occurred as _install_from_disk_just_occurred,
-    _merge_discovery_cache as _merge_discovery_cache,
-    _icon_detection_cache as _icon_detection_cache,
-    _icon_detection_session_checked as _icon_detection_session_checked,
-    _discovery_debounce_timer as _discovery_debounce_timer,
-    _in_ui_draw as _in_ui_draw,
-    _extension_manifest_keys_cache as _extension_manifest_keys_cache,
-    _last_discovered_ext_panel_categories as _last_discovered_ext_panel_categories,
-)
+# -- Shared state (single owner instance) ------------------------------------
+# ``state.<field>`` is always the live object/value — see _state.py for why the
+# old pattern of re-exporting bare container/scalar names here was replaced:
+# a bare name captured a snapshot at this module's own import time and any
+# later reassignment (or a scalar's current value) was invisible to callers
+# going through ``api`` only. Access every field through ``state`` instead.
+from ._state import state
 
 # -- State reassignment accessors --------------------------------------------
 from ._state import (
@@ -256,6 +244,17 @@ from ._state import (
     reset_merge_discovery_cache,
     reset_icon_detection_cache,
     is_glyph_system_registered,
+    is_glyph_cache_loaded,
+    is_preview_mode_active,
+    is_sync_in_progress,
+    is_initial_load_complete,
+    is_in_ui_draw,
+    is_install_from_disk_just_occurred,
+    get_pending_extension_context,
+    get_discovery_debounce_timer,
+    get_auto_sync_timer,
+    get_background_sync_timer,
+    get_merge_discovery_cache,
 )
 
 # -- Extension discovery: scan (leaf, no wm_sync dependency) -----------------

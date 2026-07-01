@@ -59,19 +59,8 @@ from bl_ui.glyph_tag_system.discovery_scan import (
     _scan_extension_icon_path,
 )
 
-# State objects — imported by reference so in-place mutations are shared.
-from bl_ui.glyph_tag_system._state import _glyph_cache as _glyph_cache  # noqa: F401
-from bl_ui.glyph_tag_system._state import (
-    _extension_install_icon_cache as _extension_install_icon_cache,  # noqa: F401
-    _extension_manifest_keys_cache as _extension_manifest_keys_cache,  # noqa: F401
-    # State objects read by discovery merge / ordering. Imported by reference so the
-    # shared objects in bl_ui.glyph_tag_system._state are seen here (these are only
-    # read/iterated in-place; reassignment happens via the accessors below).
-    _category_orders_cache as _category_orders_cache,  # noqa: F401
-    _icon_detection_session_checked as _icon_detection_session_checked,  # noqa: F401
-    _last_discovered_category_sources as _last_discovered_category_sources,  # noqa: F401
-    _last_discovered_ext_panel_categories as _last_discovered_ext_panel_categories,  # noqa: F401
-)
+# Single owner of shared state; ``state.<field>`` is always the live object (see _state.py).
+from bl_ui.glyph_tag_system._state import state
 from bl_ui.glyph_tag_system._state import (
     set_extension_install_icon_cache_entry,
     set_pending_extension_context,
@@ -120,12 +109,9 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
         is_install_from_disk: If True, the extension was installed via "Install from Disk" operator.
                               This triggers Python file scanning for bl_category values.
     """
-    global _glyph_cache
-    global _extension_manifest_keys_cache
-
     category_debug_print(f"[EXTENSION POST INSTALL] >>> START handler for {extension_id!r}")
     category_debug_print(f"[EXTENSION POST INSTALL] space_type={space_type}, mode_flag={mode_flag:#010x}, tag_assigned={tag_already_assigned}, from_disk={is_install_from_disk}")
-    category_debug_print(f"[EXTENSION POST INSTALL] Current cache size: {len(_glyph_cache)} categories")
+    category_debug_print(f"[EXTENSION POST INSTALL] Current cache size: {len(state.glyph_cache)} categories")
 
     set_pending_extension_context({
         "extension_id": extension_id,
@@ -154,7 +140,7 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
     # FIX: If pkg_path not found (drag-and-drop), try to discover it from panel discovery
     if not pkg_path:
         # Look for recently discovered categories that might belong to this extension
-        for cache_key, cat_data in _glyph_cache.items():
+        for cache_key, cat_data in state.glyph_cache.items():
             if isinstance(cache_key, tuple) and len(cache_key) == 2:
                 _, cat_name = cache_key
                 if isinstance(cat_data, dict) and cat_data.get("pending_tag_assignment", False):
@@ -254,7 +240,7 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
             # Cache permanently with no expiration (scan only once ever)
             cache_key_ext = extension_id if extension_id else pkg_path
             cache_key = (cache_key_ext, True)  # True = scanned Python files
-            _extension_manifest_keys_cache[cache_key] = {
+            state.extension_manifest_keys_cache[cache_key] = {
                 "keys": manifest_keys,
                 "timestamp": time.time(),
                 "pkg_path": pkg_path,
@@ -270,13 +256,13 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
     # in the current draw/update cycle (for example MPFB-like extensions).
     ext_match_keys = _extension_id_match_keys(extension_id)
     updated_existing = False
-    for cache_key, cat_data in list(_glyph_cache.items()):
+    for cache_key, cat_data in list(state.glyph_cache.items()):
         if not (isinstance(cache_key, tuple) and len(cache_key) == 2):
             continue
         _cache_space_type, category_name = cache_key
         if not isinstance(cat_data, dict):
             cat_data = _normalize_category_data(cat_data, category_name)
-            _glyph_cache[cache_key] = cat_data
+            state.glyph_cache[cache_key] = cat_data
 
         existing_ext = str(cat_data.get("source_extension", "") or "")
         category_key = _normalize_category_key(category_name)
@@ -324,9 +310,9 @@ def extension_post_install_handler(extension_id, space_type=-1, mode_flag=0, tag
         )
 
     if updated_existing:
-        category_debug_print(f"[EXTENSION POST INSTALL] Updated {len([k for k, v in _glyph_cache.items() if isinstance(k, tuple) and v.get('pending_tag_assignment')])} existing categories to pending")
+        category_debug_print(f"[EXTENSION POST INSTALL] Updated {len([k for k, v in state.glyph_cache.items() if isinstance(k, tuple) and v.get('pending_tag_assignment')])} existing categories to pending")
 
-    category_debug_print(f"[EXTENSION POST INSTALL] Final cache state: {len(_glyph_cache)} total categories")
+    category_debug_print(f"[EXTENSION POST INSTALL] Final cache state: {len(state.glyph_cache)} total categories")
     category_debug_print(f"[EXTENSION POST INSTALL] Pending extension context set: {get_pending_extension_context()}")
 
     tag_log(
@@ -352,9 +338,6 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
     OPTIMIZATION: Added caching and debouncing to prevent repeated scanning during UI draws.
     OPTIMIZATION: skip_icon_detection parameter allows deferring icon detection to background sync.
     """
-    global _glyph_cache, _category_orders_cache
-    global _icon_detection_session_checked
-
     # Live reads of reassignable _state names (avoid stale import-time bindings).
     _merge_discovery_cache = get_merge_discovery_cache()
     _pending_extension_context = get_pending_extension_context()
@@ -420,8 +403,8 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
 
     category_debug_print(f"[MERGE DEBUG] _merge_discovered_categories START (force_refresh={force_refresh})")
     category_debug_print(f"[MERGE DEBUG] Pending extension context: {_pending_extension_context}")
-    category_debug_print(f"[MERGE DEBUG] Current cache size before merge: {len(_glyph_cache)} categories")
-    category_debug_print(f"[MERGE DEBUG] Cache keys sample: {list(_glyph_cache.keys())[:10]}")
+    category_debug_print(f"[MERGE DEBUG] Current cache size before merge: {len(state.glyph_cache)} categories")
+    category_debug_print(f"[MERGE DEBUG] Cache keys sample: {list(state.glyph_cache.keys())[:10]}")
 
     # OPTIMIZATION: Clear session-level icon detection tracker for fresh merge
     reset_icon_detection_session_checked()
@@ -486,7 +469,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                 category_to_label[category] = panel_label
                 category_debug_print(f"[GLYPH DISCOVER] Found panel label for glyph_only category: {category!r} -> {panel_label!r}")
 
-    discovered_source_map = dict(_last_discovered_category_sources)
+    discovered_source_map = dict(state.last_discovered_category_sources)
 
     def _clone_category_data(data):
         if not isinstance(data, dict):
@@ -504,7 +487,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
     def _get_category_names_from_cache():
         """Extract unique category names from cache keys (tuples: (space_type, category))."""
         names = set()
-        for key in _glyph_cache.keys():
+        for key in state.glyph_cache.keys():
             if isinstance(key, tuple) and len(key) == 2:
                 names.add(key[1])  # category name
             else:
@@ -520,15 +503,15 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
             return False
         canonical_key = _get_cache_key_for_category(canonical_name)
         alias_key = _get_cache_key_for_category(alias_name)
-        canonical_data = _glyph_cache.get(canonical_key)
-        alias_data = _glyph_cache.get(alias_key)
+        canonical_data = state.glyph_cache.get(canonical_key)
+        alias_data = state.glyph_cache.get(alias_key)
         if alias_data is None:
             return False
 
         changed = False
         if canonical_data is None:
-            _glyph_cache[canonical_key] = _clone_category_data(alias_data)
-            canonical_data = _glyph_cache[canonical_key]
+            state.glyph_cache[canonical_key] = _clone_category_data(alias_data)
+            canonical_data = state.glyph_cache[canonical_key]
             changed = True
 
         # Prefer keeping existing canonical values, but fill missing important fields from alias.
@@ -552,7 +535,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
             changed = True
 
         # Remap category references in persisted category orders.
-        for tag_key, order_list in _category_orders_cache.items():
+        for tag_key, order_list in state.category_orders_cache.items():
             if not isinstance(order_list, list):
                 continue
 
@@ -562,11 +545,11 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                 if category not in deduped:
                     deduped.append(category)
             if deduped != order_list:
-                _category_orders_cache[tag_key] = deduped
+                state.category_orders_cache[tag_key] = deduped
                 changed = True
 
-        if alias_key in _glyph_cache:
-            del _glyph_cache[alias_key]
+        if alias_key in state.glyph_cache:
+            del state.glyph_cache[alias_key]
         _log_once(
             f"[GLYPH DISCOVER DEBUG] canonicalized alias in cache: alias={alias_name!r} -> canonical={canonical_name!r}"
         )
@@ -591,9 +574,9 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
     if 'Brushstroke Tools' in cached_category_names:
         brush_key = _make_cache_key(-1, 'Brushstroke Tools')
         _pref_log_once(f"[GLYPH MERGE DEBUG] Brushstroke cache key: {brush_key}")
-        _pref_log_once(f"[GLYPH MERGE DEBUG] Brushstroke in _glyph_cache: {brush_key in _glyph_cache}")
-        if brush_key in _glyph_cache:
-            _pref_log_once(f"[GLYPH MERGE DEBUG] Brushstroke cached data: {_glyph_cache[brush_key]}")
+        _pref_log_once(f"[GLYPH MERGE DEBUG] Brushstroke in state.glyph_cache: {brush_key in state.glyph_cache}")
+        if brush_key in state.glyph_cache:
+            _pref_log_once(f"[GLYPH MERGE DEBUG] Brushstroke cached data: {state.glyph_cache[brush_key]}")
 
     # Existing cache aliases for active discovered groups are merged into the canonical entry.
     cache_changed = False
@@ -621,7 +604,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
         canonical_name = canonical_by_group[group_key]
         # Check if category exists in cache (using global key)
         canonical_key = _get_cache_key_for_category(canonical_name)
-        if canonical_key not in _glyph_cache:
+        if canonical_key not in state.glyph_cache:
             canonical_new_categories.append(canonical_name)
 
         for candidate in candidates:
@@ -643,21 +626,21 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
     # OPTIMIZATION: Session-level tracking to avoid redundant icon checks
     # OPTIMIZATION: Skip icon detection entirely if skip_icon_detection=True
     existing_categories_needing_icon_update = []
-    icon_cache = _extension_install_icon_cache
+    icon_cache = state.extension_install_icon_cache
 
     if not skip_icon_detection:
         for category in discovered:
             if category in new_categories:
                 continue  # Skip new categories, they are handled below
             cache_key = _get_cache_key_for_category(category)
-            if cache_key in _glyph_cache:
-                cached_data = _glyph_cache[cache_key]
+            if cache_key in state.glyph_cache:
+                cached_data = state.glyph_cache[cache_key]
                 if isinstance(cached_data, dict):
                     icon_source = cached_data.get("icon_source", "auto")
                     icon_path = cached_data.get("icon_path", "")
                     if icon_source == "auto" and not icon_path:
                         # OPTIMIZATION: Skip if already checked in this session
-                        if category in _icon_detection_session_checked:
+                        if category in state.icon_detection_session_checked:
                             category_debug_print(f"[ICON SESSION CACHE] Skipping already-checked category {category!r}")
                             continue
 
@@ -728,7 +711,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                             detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
 
                         # Mark as checked in this session
-                        _icon_detection_session_checked.add(category)
+                        state.icon_detection_session_checked.add(category)
 
                         if detected_icon_path:
                             cached_data["icon_path"] = detected_icon_path
@@ -752,8 +735,8 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
         if category in new_categories:
             continue  # Skip new categories, they are handled below
         cache_key = _get_cache_key_for_category(category)
-        if cache_key in _glyph_cache:
-            cached_data = _glyph_cache[cache_key]
+        if cache_key in state.glyph_cache:
+            cached_data = state.glyph_cache[cache_key]
             if isinstance(cached_data, dict):
                 base_type = cached_data.get("base_type", "text_only")
                 default_display_name = cached_data.get("default_display_name", "")
@@ -781,7 +764,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
         category_debug_print(f"[MERGE DEBUG] Processing pending extension context: extension_id={pending_ext_id!r}")
         if not pending_ext_id:
             # Don't drop pending context for empty extension_id - this happens during drag-and-drop from file explorer
-            # The fallback logic will try to match categories using _last_discovered_ext_panel_categories
+            # The fallback logic will try to match categories using state.last_discovered_ext_panel_categories
             tag_log("_merge_discovered_categories: pending extension context has empty extension_id - will use fallback matching")
 
     # Update existing categories if there is a pending extension context.
@@ -801,8 +784,8 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
             if category in DEFAULT_CATEGORY_GLYPHS:
                 continue
             cache_key = _get_cache_key_for_category(category)
-            if cache_key in _glyph_cache:
-                cat_data = _glyph_cache[cache_key]
+            if cache_key in state.glyph_cache:
+                cat_data = state.glyph_cache[cache_key]
                 if isinstance(cat_data, dict):
                     existing_ext = cat_data.get("source_extension", "")
                     category_key = _normalize_category_key(category)
@@ -826,7 +809,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                         has_tags_current = bool(cat_data.get("tags", []))
                         has_tags_any_space = has_tags_current
                         if not has_tags_any_space:
-                            for check_key, check_data in _glyph_cache.items():
+                            for check_key, check_data in state.glyph_cache.items():
                                 if isinstance(check_key, tuple) and len(check_key) == 2:
                                     check_cat = check_key[1]
                                     if isinstance(check_data, dict):
@@ -909,7 +892,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
     if new_categories or pending_extension_context is None:
         category_debug_print(f"[GLYPH] Found {len(new_categories)} new categories: {sorted(new_categories)}")
         category_debug_print(f"[NEW CATEGORIES DEBUG] Processing new categories with pending_extension_context: {pending_extension_context}")
-        category_debug_print(f"[NEW CATEGORIES DEBUG] Cache state before processing: {len(_glyph_cache)} total categories")
+        category_debug_print(f"[NEW CATEGORIES DEBUG] Cache state before processing: {len(state.glyph_cache)} total categories")
 
         # Auto-detect extension for EACH category individually from enabled extensions.
         # This handles "Install from Disk" and startup discovery where pending_extension_context is not set.
@@ -975,7 +958,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
             prefs = getattr(bpy.context, "preferences", None)
             addons = getattr(prefs, "addons", None) if prefs else None
             if addons and enabled_extensions:
-                category_debug_print(f"[MERGE AUTO-EXT DEBUG] Checking {len(_glyph_cache)} cache entries for extension matching")
+                category_debug_print(f"[MERGE AUTO-EXT DEBUG] Checking {len(state.glyph_cache)} cache entries for extension matching")
                 category_debug_print(f"[MERGE AUTO-EXT DEBUG] enabled_extensions: {list(enabled_extensions.keys())}")
 
                 # CRITICAL OPTIMIZATION: NEVER scan Python files during merge/discovery
@@ -987,8 +970,8 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                     # Use cache key with True (scanned Python files) to get the install-time scan results
                     cache_key = (ext_id, True)
 
-                    if cache_key in _extension_manifest_keys_cache:
-                        cache_entry = _extension_manifest_keys_cache[cache_key]
+                    if cache_key in state.extension_manifest_keys_cache:
+                        cache_entry = state.extension_manifest_keys_cache[cache_key]
                         # Use cached keys regardless of age - they were scanned at install and never change
                         extension_manifest_keys[ext_id] = cache_entry["keys"]
                         category_debug_print(f"[MERGE AUTO-EXT OPTIMIZATION] Using INSTALL-TIME cached manifest keys for {ext_id!r}: {cache_entry['keys']}")
@@ -1013,7 +996,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                             extension_manifest_keys[ext_id] = set()
                             category_debug_print(f"[MERGE AUTO-EXT OPTIMIZATION] Failed to build keys for {ext_id!r}: {e}")
 
-                for cache_key, cat_data in list(_glyph_cache.items()):
+                for cache_key, cat_data in list(state.glyph_cache.items()):
                     if not isinstance(cache_key, tuple) or len(cache_key) != 2:
                         continue
                     space_type_val, category_name = cache_key
@@ -1173,7 +1156,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
             # PRIORITY 1: Use specific extension-panel mapping (most accurate)
             # This handles cases where a category was discovered from a specific extension module
             # (e.g., bl_ext.blender_org.hyperfy_tools) even if pending context is from a different extension.
-            specific_ext_id = _last_discovered_ext_panel_categories.get(category)
+            specific_ext_id = state.last_discovered_ext_panel_categories.get(category)
             if specific_ext_id:
                 ext_id = specific_ext_id
                 # Still use pending context flags if available (for mode_flag etc.)
@@ -1195,27 +1178,27 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                 # Fallback: Try to get extension_id from discovered extension panel categories
                 # This handles cases where extension_post_install_handler was called with empty extension_id
                 # but _discover_active_categories found the mapping between category and extension_id
-                fallback_ext_id = _last_discovered_ext_panel_categories.get(category)
+                fallback_ext_id = state.last_discovered_ext_panel_categories.get(category)
                 if fallback_ext_id:
                     ext_id = fallback_ext_id
                     # If we're in pending context but with empty extension_id, use the pending context flags
                     if is_from_pending_ext:
                         ext_mode = pending_extension_context.get("mode_flag", 0)
                         tag_already_assigned = pending_extension_context.get("tag_already_assigned", False)
-                        category_debug_print(f"[MERGE DEBUG] NEW CATEGORY fallback from pending context: category={category!r}, extension_id={ext_id!r} (from _last_discovered_ext_panel_categories)")
+                        category_debug_print(f"[MERGE DEBUG] NEW CATEGORY fallback from pending context: category={category!r}, extension_id={ext_id!r} (from state.last_discovered_ext_panel_categories)")
                     else:
-                        category_debug_print(f"[MERGE DEBUG] NEW CATEGORY fallback: category={category!r}, extension_id={ext_id!r} (from _last_discovered_ext_panel_categories)")
+                        category_debug_print(f"[MERGE DEBUG] NEW CATEGORY fallback: category={category!r}, extension_id={ext_id!r} (from state.last_discovered_ext_panel_categories)")
                 else:
                     # DEBUG: Log why category didn't get extension
                     if "MPFB" in category or "Mixamo" in category or "Hyperfy" in category:
                         category_debug_print(f"[MERGE DEBUG] NEW CATEGORY WARNING: {category!r} did NOT get source_extension!")
                         category_debug_print(f"[MERGE DEBUG]   is_from_pending_ext={is_from_pending_ext}")
                         category_debug_print(f"[MERGE DEBUG]   in category_to_auto_extension={category in category_to_auto_extension}")
-                        category_debug_print(f"[MERGE DEBUG]   fallback_ext_id from _last_discovered_ext_panel_categories: {fallback_ext_id}")
+                        category_debug_print(f"[MERGE DEBUG]   fallback_ext_id from state.last_discovered_ext_panel_categories: {fallback_ext_id}")
                         if is_from_pending_ext:
                             category_debug_print(f"[MERGE DEBUG]   pending_extension_id: {pending_extension_context.get('extension_id', '')!r}")
 
-            _glyph_cache[cache_key] = {
+            state.glyph_cache[cache_key] = {
                 "glyph": glyph,
                 "display_name": default_display_name,
                 "color": [0.0, 0.0, 0.0],
@@ -1237,12 +1220,12 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
 
             # If an extension was detected (either from pending context or auto-detection), mark as pending.
             if ext_id:
-                _glyph_cache[cache_key]["source_extension"] = ext_id
+                state.glyph_cache[cache_key]["source_extension"] = ext_id
                 # Only set pending_tag_assignment if tag was NOT already assigned via tab drop.
                 # For tab drops, the category will be visible in the general list without filtering,
                 # so we don't need to show "New Add-ons!" button.
                 if not tag_already_assigned:
-                    _glyph_cache[cache_key]["pending_tag_assignment"] = True
+                    state.glyph_cache[cache_key]["pending_tag_assignment"] = True
                     category_debug_print(f"[MERGE DEBUG] SET PENDING: category={category!r}, pending_tag_assignment=True, source_extension={ext_id!r}")
                 else:
                     category_debug_print(f"[MERGE DEBUG] TAB DROP: category={category!r}, tag_already_assigned=True, NOT setting pending_tag_assignment, source_extension={ext_id!r}")
@@ -1256,10 +1239,10 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                     spaces_flags = 0
                     for space_str in category_spaces:
                         spaces_flags |= SPACE_TO_FLAG.get(space_str, 0)
-                    _glyph_cache[cache_key]["discovered_in_spaces"] = flags_to_spaces(spaces_flags)
+                    state.glyph_cache[cache_key]["discovered_in_spaces"] = flags_to_spaces(spaces_flags)
                     tag_log(
                         f"_merge_discovered_categories: set discovered_in_spaces for new category {category!r} "
-                        f"to {_glyph_cache[cache_key]['discovered_in_spaces']} (from panel_samples)"
+                        f"to {state.glyph_cache[cache_key]['discovered_in_spaces']} (from panel_samples)"
                     )
 
                 # Use bl_context from panel_samples to determine mode filtering.
@@ -1270,20 +1253,20 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                     for bl_ctx in category_contexts:
                         modes_flags |= BL_CONTEXT_TO_MODE_FLAG.get(bl_ctx, 0)
                     if modes_flags:
-                        _glyph_cache[cache_key]["discovered_in_modes"] = flags_to_modes(modes_flags)
+                        state.glyph_cache[cache_key]["discovered_in_modes"] = flags_to_modes(modes_flags)
                         tag_log(
                             f"_merge_discovered_categories: set discovered_in_modes for new category {category!r} "
-                            f"to {_glyph_cache[cache_key]['discovered_in_modes']} (from bl_context={category_contexts})"
+                            f"to {state.glyph_cache[cache_key]['discovered_in_modes']} (from bl_context={category_contexts})"
                         )
 
-                if ext_mode and not _glyph_cache[cache_key].get("discovered_in_modes"):
-                    _glyph_cache[cache_key]["discovered_in_modes"] = flags_to_modes(ext_mode)
+                if ext_mode and not state.glyph_cache[cache_key].get("discovered_in_modes"):
+                    state.glyph_cache[cache_key]["discovered_in_modes"] = flags_to_modes(ext_mode)
 
                 # Store the install mode flag for mode-aware filtering of "New Add-ons!" button.
                 # This is used when discovered_in_modes is empty (panels don't specify bl_context).
                 # The category should only show "New Add-ons!" in the mode where it was installed.
                 if ext_mode:
-                    _glyph_cache[cache_key]["install_mode_flag"] = ext_mode
+                    state.glyph_cache[cache_key]["install_mode_flag"] = ext_mode
                     tag_log(
                         f"_merge_discovered_categories: set install_mode_flag={ext_mode:#x} for {category!r}"
                     )
@@ -1302,11 +1285,11 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
 
             if not skip_icon_detection:
                 # Check if already checked in this session
-                if category in _icon_detection_session_checked:
+                if category in state.icon_detection_session_checked:
                     category_debug_print(f"[ICON SESSION CACHE] Skipping already-checked new category {category!r}")
                 else:
                     # Check if we have a cached icon path from Install from Disk
-                    icon_cache = _extension_install_icon_cache
+                    icon_cache = state.extension_install_icon_cache
                     if ext_id and ext_id in icon_cache:
                         detected_icon_path = icon_cache[ext_id]
                         detected_provider = "extension_auto"
@@ -1370,23 +1353,23 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                         detected_icon_path, detected_provider = _auto_detect_extension_icon_path(category)
 
                     # Mark as checked in this session
-                    _icon_detection_session_checked.add(category)
+                    state.icon_detection_session_checked.add(category)
             else:
                 category_debug_print(f"[ICON DETECTION] Skipping icon detection for new category {category!r} (will run in background)")
 
             if detected_icon_path:
-                _glyph_cache[cache_key]["icon_path"] = detected_icon_path
-                _glyph_cache[cache_key]["icon_provider"] = detected_provider or "extension_auto"
+                state.glyph_cache[cache_key]["icon_path"] = detected_icon_path
+                state.glyph_cache[cache_key]["icon_provider"] = detected_provider or "extension_auto"
                 category_debug_print(
                     f"[] merge new category auto-icon: "
-                    f"category={category!r}, path={detected_icon_path!r}, provider={_glyph_cache[cache_key]['icon_provider']!r}"
+                    f"category={category!r}, path={detected_icon_path!r}, provider={state.glyph_cache[cache_key]['icon_provider']!r}"
                 )
             else:
                 category_debug_print(f"[] merge new category no icon: category={category!r}")
 
             category_debug_print(f"[GLYPH] Added new category '{category}' with glyph '{glyph}', base_type={base_type}")
-            category_debug_print(f"[NEW CATEGORY DEBUG] Cache entry for '{category}': source_extension='{ext_id}', pending_tag_assignment={_glyph_cache[cache_key].get('pending_tag_assignment', False)}, discovered_in_spaces={_glyph_cache[cache_key].get('discovered_in_spaces', [])}")
-            category_debug_print(f"[NEW CATEGORY DEBUG] Total cache size after adding '{category}': {len(_glyph_cache)} categories")
+            category_debug_print(f"[NEW CATEGORY DEBUG] Cache entry for '{category}': source_extension='{ext_id}', pending_tag_assignment={state.glyph_cache[cache_key].get('pending_tag_assignment', False)}, discovered_in_spaces={state.glyph_cache[cache_key].get('discovered_in_spaces', [])}")
+            category_debug_print(f"[NEW CATEGORY DEBUG] Total cache size after adding '{category}': {len(state.glyph_cache)} categories")
 
     # Consume the pending extension context now that all categories have been processed
     # IMPORTANT: Only clear by timeout (30 seconds), NOT by finding new categories.

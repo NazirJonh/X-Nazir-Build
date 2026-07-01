@@ -84,14 +84,14 @@ def _node_visible_tags_for_current_mode(context):
 
     # In preview mode, also include tags from cache that aren't in WM yet
     try:
-        from bl_ui.glyph_tag_system.api import _all_tags_cache, _preview_mode_active, _CATEGORY_TAG_DEFAULT_MODE_FLAGS
-        
-        if _preview_mode_active and _all_tags_cache:
+        from bl_ui.glyph_tag_system.api import state, _CATEGORY_TAG_DEFAULT_MODE_FLAGS
+
+        if state.preview_mode_active and state.all_tags_cache:
             # Get existing WM tag names to avoid duplicates
             existing_tag_names = {tag.name for tag in wm.category_tags}
-            
+
             # Create temporary tag objects from cache for preview
-            for tag_name, tag_data in _all_tags_cache.items():
+            for tag_name, tag_data in state.all_tags_cache.items():
                 if tag_name not in existing_tag_names and isinstance(tag_data, dict):
                     glyph = tag_data.get("glyph", "")
                     tag_mode_flags = tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS)

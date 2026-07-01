@@ -1256,7 +1256,7 @@ class VIEW3D_OT_tag_move(Operator):
     )
 
     def execute(self, context):
-        from bl_ui.glyph_tag_system.api import _tag_order_cache, _save_tag_order_only
+        from bl_ui.glyph_tag_system.api import state, _save_tag_order_only
 
         wm = context.window_manager
 
@@ -1280,7 +1280,7 @@ class VIEW3D_OT_tag_move(Operator):
             return {'CANCELLED'}
 
         # Get current tag order from cache (from space_userpref module)
-        tag_order = list(_tag_order_cache)  # Make a copy
+        tag_order = list(state.tag_order_cache)  # Make a copy
         if TAG_DEBUG:
             print(f"DEBUG move: tag_order={tag_order}")
         active_tag = wm.category_tags[actual_index]
@@ -1308,8 +1308,8 @@ class VIEW3D_OT_tag_move(Operator):
             tag_order.insert(new_index, active_tag.name)
 
             # Update the cache in space_userpref module
-            _tag_order_cache.clear()
-            _tag_order_cache.extend(tag_order)
+            state.tag_order_cache.clear()
+            state.tag_order_cache.extend(tag_order)
 
             # Reorder wm.category_tags collection using C++ function
             # This reorders existing items without destroying/recreating them
@@ -1444,10 +1444,10 @@ class VIEW3D_OT_tag_order_reset(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        # Clear _tag_order_cache and rebuild WM collection
-        from bl_ui.glyph_tag_system.api import _tag_order_cache, sync_glyph_mappings_to_wm
+        # Clear state.tag_order_cache and rebuild WM collection
+        from bl_ui.glyph_tag_system.api import state, sync_glyph_mappings_to_wm
 
-        _tag_order_cache.clear()
+        state.tag_order_cache.clear()
 
         # Rebuild WM collection in default order
         sync_glyph_mappings_to_wm()

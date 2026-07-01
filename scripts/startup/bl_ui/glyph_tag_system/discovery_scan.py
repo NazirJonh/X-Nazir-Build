@@ -32,13 +32,8 @@ from bl_ui.glyph_tag_system.log import (
     category_debug_print,
 )
 
-# State objects — imported by reference so in-place mutations are shared.
-from bl_ui.glyph_tag_system._state import (
-    _extension_install_icon_cache as _extension_install_icon_cache,  # noqa: F401
-    _extension_manifest_keys_cache as _extension_manifest_keys_cache,  # noqa: F401
-    _icon_detection_cache as _icon_detection_cache,  # noqa: F401
-    _last_discovered_ext_panel_categories as _last_discovered_ext_panel_categories,  # noqa: F401
-)
+# Single owner of shared state; ``state.<field>`` is always the live object (see _state.py).
+from bl_ui.glyph_tag_system._state import state
 from bl_ui.glyph_tag_system._state import (
     set_extension_install_icon_cache_entry,
     # Reassignment accessors for shared state (call these instead of `name = ...` so
@@ -312,8 +307,6 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
 
     Returns: (icon_path, provider) or ("", "") when not found.
     """
-    global _icon_detection_cache
-    global _last_discovered_ext_panel_categories
 
     # PERF: Start timing
     _icon_detect_start = time.perf_counter()
@@ -321,8 +314,8 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
     # OPTIMIZATION: Check cache first
     current_time = time.time()
 
-    if not force_refresh and category in _icon_detection_cache:
-        cache_entry = _icon_detection_cache[category]
+    if not force_refresh and category in state.icon_detection_cache:
+        cache_entry = state.icon_detection_cache[category]
         cache_age = current_time - cache_entry.get("timestamp", 0)
 
         # Use cache if it's fresh (less than ICON_CACHE_MAX_AGE seconds old)
@@ -338,7 +331,7 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
     except Exception:
         _pref_log_once(f"[] detect abort: category={category!r}, reason=user_resource_exception")
         # Cache the negative result
-        _icon_detection_cache[category] = {
+        state.icon_detection_cache[category] = {
             "icon_path": "",
             "provider": "",
             "timestamp": current_time,
@@ -348,7 +341,7 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
     if not extensions_dir or not os.path.isdir(extensions_dir):
         _pref_log_once(f"[] detect abort: category={category!r}, extensions_dir={extensions_dir!r}, exists=False")
         # Cache the negative result
-        _icon_detection_cache[category] = {
+        state.icon_detection_cache[category] = {
             "icon_path": "",
             "provider": "",
             "timestamp": current_time,
@@ -359,7 +352,7 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
     if not target_key:
         _pref_log_once(f"[] detect abort: category={category!r}, normalized_key is empty")
         # Cache the negative result
-        _icon_detection_cache[category] = {
+        state.icon_detection_cache[category] = {
             "icon_path": "",
             "provider": "",
             "timestamp": current_time,
@@ -375,7 +368,7 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
             icon_path = os.path.join(pkg_path, icon_name)
             if os.path.isfile(icon_path):
                 _pref_log_once(f"[] detect hit: category={category!r}, icon={icon_path!r}, provider='extension_auto'")
-                _icon_detection_cache[category] = {
+                state.icon_detection_cache[category] = {
                     "icon_path": icon_path,
                     "provider": "extension_auto",
                     "timestamp": current_time,
@@ -387,7 +380,7 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
                 return icon_path, "extension_auto"
         return None
 
-    preferred_ext_id = _last_discovered_ext_panel_categories.get(category, "")
+    preferred_ext_id = state.last_discovered_ext_panel_categories.get(category, "")
     if preferred_ext_id:
         preferred_pkg_name = preferred_ext_id[7:] if preferred_ext_id.startswith("add-on-") else preferred_ext_id
         try:
@@ -423,15 +416,15 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
                 ext_id = f"add-on-{pkg_name}"
                 cache_key = (ext_id, True)  # True = scanned Python files at install
 
-                if cache_key in _extension_manifest_keys_cache:
-                    match_keys = _extension_manifest_keys_cache[cache_key]["keys"]
+                if cache_key in state.extension_manifest_keys_cache:
+                    match_keys = state.extension_manifest_keys_cache[cache_key]["keys"]
                     category_debug_print(f"[ICON DETECT OPTIMIZATION] Using cached manifest keys for {pkg_name!r}: {match_keys}")
                 else:
                     # Fallback: scan manifest only (no Python files) if not cached
                     # This should only happen for extensions installed before the optimization
                     match_keys = _extension_manifest_match_keys(pkg_path, pkg_name, scan_python_files=False)
                     # Cache for future use
-                    _extension_manifest_keys_cache[cache_key] = {
+                    state.extension_manifest_keys_cache[cache_key] = {
                         "keys": match_keys,
                         "timestamp": time.time(),
                         "pkg_path": pkg_path,
@@ -483,7 +476,7 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
     except Exception:
         _pref_log_once(f"[] detect abort: category={category!r}, reason=scan_exception")
         # Cache the negative result
-        _icon_detection_cache[category] = {
+        state.icon_detection_cache[category] = {
             "icon_path": "",
             "provider": "",
             "timestamp": current_time,
@@ -492,7 +485,7 @@ def _auto_detect_extension_icon_path(category: str, force_refresh=False):
 
     _pref_log_once(f"[] detect miss: category={category!r}")
     # Cache the negative result
-    _icon_detection_cache[category] = {
+    state.icon_detection_cache[category] = {
         "icon_path": "",
         "provider": "",
         "timestamp": current_time,
@@ -516,7 +509,6 @@ def auto_detect_extension_icon_path_normalized(category: str):
 
 def _discover_active_categories():
     """Discover all active categories from registered panels including addon panels."""
-    global _last_discovered_category_sources, _last_discovered_ext_panel_categories
     discovered_categories = set()
     discovered_sources = {}
     panel_samples = []
@@ -676,7 +668,7 @@ def _discover_active_categories():
                                 # Store category->extension mapping for ALL manifest seeds
                                 # (not just panel bl_category), so merge can find the correct
                                 # source_extension even when category == manifest name.
-                                _last_discovered_ext_panel_categories[seed] = ext_id
+                                state.last_discovered_ext_panel_categories[seed] = ext_id
                                 if key_name == "name":
                                     _record_discovered(seed, "manifest_name")
                                 else:
@@ -708,7 +700,7 @@ def _discover_active_categories():
                                         if panel_category and panel_category not in manifest_names:
                                             _record_discovered(panel_category, "panel_bl_category")
                                             # Store the mapping between discovered extension panel categories and their extension_id
-                                            _last_discovered_ext_panel_categories[panel_category] = ext_id
+                                            state.last_discovered_ext_panel_categories[panel_category] = ext_id
                                             _log_once(
                                                 f"[GLYPH DISCOVER DEBUG] extension panel category: "
                                                 f"module={module_name!r}, category={panel_category!r}, "
@@ -789,7 +781,7 @@ def _discover_active_categories():
                                     seed = value.strip()
                                     manifest_names.add(seed)
                                     # Store category->extension mapping for ALL manifest seeds
-                                    _last_discovered_ext_panel_categories[seed] = ext_id
+                                    state.last_discovered_ext_panel_categories[seed] = ext_id
                                     if key_name == "name":
                                         _record_discovered(seed, "manifest_name")
                                     else:
@@ -821,7 +813,7 @@ def _discover_active_categories():
                                             if panel_category and panel_category not in manifest_names:
                                                 _record_discovered(panel_category, "panel_bl_category")
                                                 # Store the mapping between discovered extension panel categories and their extension_id
-                                                _last_discovered_ext_panel_categories[panel_category] = ext_id
+                                                state.last_discovered_ext_panel_categories[panel_category] = ext_id
                                                 _log_once(
                                                     f"[GLYPH DISCOVER DEBUG] extension panel category: "
                                                     f"repo={repo_name!r}, pkg={pkg_name!r}, category={panel_category!r}, "

@@ -25,8 +25,8 @@ from bl_ui.glyph_tag_system.defaults import (
     _CATEGORY_TAG_MODE_NAME_TO_FLAG,
 )
 from bl_ui.glyph_tag_system._state import (
-    _all_tags_cache,
-    _tag_order_cache,
+    state,
+    set_tag_order,
 )
 from bl_ui.glyph_tag_system.conversions import (
     _glyph_to_hex,
@@ -34,9 +34,7 @@ from bl_ui.glyph_tag_system.conversions import (
     _tag_display_mode_from_data,
     _tag_icon_source_from_display_mode,
 )
-from bl_ui.glyph_tag_system._state import set_tag_order
 from bl_ui.glyph_tag_system.glyph_cache import (
-    _glyph_cache,
     mark_all_unassigned_categories_as_without_tag,
 )
 from bl_ui.glyph_tag_system.tags_cache import (
@@ -112,8 +110,7 @@ class USERPREF_OT_category_tag_remove_from_category(Operator):
                 return {'FINISHED'}
 
             # If direct removal failed, search for category by display_name
-            global _glyph_cache
-            for cat_key, cat_data in _glyph_cache.items():
+            for cat_key, cat_data in state.glyph_cache.items():
                 if isinstance(cat_key, tuple) and len(cat_key) >= 2 and isinstance(cat_data, dict):
                     space_type_id, actual_category = cat_key
                     display_name = cat_data.get("display_name", "")
@@ -900,12 +897,11 @@ class WM_OT_category_tag_set_display_mode(Operator):
         if self.mode == 'GLYPH' and hasattr(tag, 'icon_key'):
             tag.icon_key = ""
 
-        # Update _all_tags_cache
-        global _all_tags_cache
-        if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
-            _all_tags_cache[tag_name]["icon_source"] = icon_source_val
+        # Update state.all_tags_cache
+        if tag_name in state.all_tags_cache and isinstance(state.all_tags_cache[tag_name], dict):
+            state.all_tags_cache[tag_name]["icon_source"] = icon_source_val
             if self.mode == 'GLYPH':
-                _all_tags_cache[tag_name]["icon_key"] = ""
+                state.all_tags_cache[tag_name]["icon_key"] = ""
 
         # Save to JSON
         _get_su()._auto_save_tags()
@@ -946,10 +942,9 @@ class WM_OT_category_tag_pick_icon(Operator):
         if hasattr(tag, 'icon_source'):
             tag.icon_source = 1  # ICON mode
 
-        # Update _all_tags_cache
-        global _all_tags_cache
-        if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
-            _all_tags_cache[tag_name]["icon_source"] = 1
+        # Update state.all_tags_cache
+        if tag_name in state.all_tags_cache and isinstance(state.all_tags_cache[tag_name], dict):
+            state.all_tags_cache[tag_name]["icon_source"] = 1
 
         # Build RNA path for the icon_key property
         target_property = f"category_tags[{active_idx}].icon_key"
@@ -1000,7 +995,7 @@ class USERPREF_OT_category_tag_delete(Operator):
 
         success, message = delete_tag(tag_name, auto_save=True)
         if success:
-            # Tag removed from WM collection automatically via _all_tags_cache deletion
+            # Tag removed from WM collection automatically via state.all_tags_cache deletion
             # Skip full sync_glyph_mappings_to_wm to prevent UI freeze
             category_debug_print(f"[DELETE_TAG] Tag deleted - skipping heavy WM sync")
 
@@ -1113,7 +1108,7 @@ class USERPREF_OT_category_tag_move(Operator):
 
         # Update tag order cache for persistence
         set_tag_order(tag_names)
-        category_debug_print(f"[TAG MOVE] Updated tag_order_cache: {_tag_order_cache}")
+        category_debug_print(f"[TAG MOVE] Updated tag_order_cache: {state.tag_order_cache}")
 
         # Sync mode flags to cache and save ONLY tag order (not full sync which would reset WM)
         _su = _get_su()

@@ -33,9 +33,7 @@ from bl_ui.glyph_tag_system.log import (
 )
 from bl_ui.glyph_tag_system.migrations import _normalize_category_data
 from bl_ui.glyph_tag_system._state import (
-    _all_tags_cache,
-    _glyph_cache,
-    _tag_order_cache,
+    state,
     is_glyph_cache_loaded,
     is_preview_mode_active,
 )
@@ -54,7 +52,7 @@ def get_all_tags():
     if not is_glyph_cache_loaded():
         from bl_ui.glyph_tag_system.glyph_cache import _load_glyph_mappings_from_file
         _load_glyph_mappings_from_file()
-    return _all_tags_cache.copy()
+    return state.all_tags_cache.copy()
 
 
 def get_tags_for_category_ui(wm=None, category="", mode_filter=0, space_type=-1):
@@ -167,7 +165,7 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", ico
     if len(tag_name) > 32:
         return False, "Tag name too long (max 32 chars)"
 
-    if tag_name in _all_tags_cache:
+    if tag_name in state.all_tags_cache:
         return False, f"Tag '{tag_name}' already exists"
 
     # Use default glyph only for GLYPH mode.
@@ -175,7 +173,7 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", ico
     if not glyph and icon_source_int == 0:
         glyph = _hex_to_glyph(DEFAULT_TAG_GLYPH_HEX)
 
-    _all_tags_cache[tag_name] = {
+    state.all_tags_cache[tag_name] = {
         "glyph": glyph,
         "color": list(color) if color else [0.0, 0.0, 0.0],
         "mode_flags": mode_flags if mode_flags is not None else _CATEGORY_TAG_DEFAULT_MODE_FLAGS,
@@ -184,11 +182,11 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", ico
     }
 
     # Always add new tags to the end of the order list
-    if tag_name not in _tag_order_cache:
-        _tag_order_cache.append(tag_name)
+    if tag_name not in state.tag_order_cache:
+        state.tag_order_cache.append(tag_name)
 
     tag_log(f"Created tag: {tag_name}")
-    category_debug_print(f"[CREATE_TAG] Tag '{tag_name}' added to _all_tags_cache")
+    category_debug_print(f"[CREATE_TAG] Tag '{tag_name}' added to state.all_tags_cache")
 
     if auto_save:
         from bl_ui.glyph_tag_system import handlers as _handlers
@@ -210,7 +208,7 @@ def _sync_single_tag_to_wm(tag_name):
     This allows newly created tags to be immediately visible in UI
     even during preview mode where sync_glyph_mappings_to_wm() is skipped.
     """
-    if tag_name not in _all_tags_cache:
+    if tag_name not in state.all_tags_cache:
         category_debug_print(f"[SYNC_SINGLE_TAG] Tag '{tag_name}' not in cache, skipping")
         return False
 
@@ -220,7 +218,7 @@ def _sync_single_tag_to_wm(tag_name):
             category_debug_print(f"[SYNC_SINGLE_TAG] WM or category_tags not available")
             return False
 
-        tag_data = _all_tags_cache[tag_name]
+        tag_data = state.all_tags_cache[tag_name]
         glyph_hex = _glyph_to_hex(tag_data.get("glyph", "")) if isinstance(tag_data, dict) else ""
         color_val = tag_data.get("color", [0.0, 0.0, 0.0]) if isinstance(tag_data, dict) else [0.0, 0.0, 0.0]
         mode_flags_val = tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS) if isinstance(tag_data, dict) else _CATEGORY_TAG_DEFAULT_MODE_FLAGS
@@ -273,17 +271,17 @@ def _sync_single_tag_to_wm(tag_name):
 
 def update_tag(tag_name, glyph=None, color=None, icon_key=None, icon_source=None, auto_save=True):
     """Update an existing tag's glyph, color, icon_key, and/or icon_source."""
-    if tag_name not in _all_tags_cache:
+    if tag_name not in state.all_tags_cache:
         return False, f"Tag '{tag_name}' not found"
 
     if glyph is not None:
-        _all_tags_cache[tag_name]["glyph"] = glyph
+        state.all_tags_cache[tag_name]["glyph"] = glyph
     if color is not None:
-        _all_tags_cache[tag_name]["color"] = list(color)
+        state.all_tags_cache[tag_name]["color"] = list(color)
     if icon_key is not None:
-        _all_tags_cache[tag_name]["icon_key"] = icon_key
+        state.all_tags_cache[tag_name]["icon_key"] = icon_key
     if icon_source is not None:
-        _all_tags_cache[tag_name]["icon_source"] = icon_source
+        state.all_tags_cache[tag_name]["icon_source"] = icon_source
 
     tag_log(f"Updated tag: {tag_name}")
 
@@ -301,25 +299,25 @@ def rename_tag(old_name, new_name, auto_save=True):
 
     new_name = new_name.strip()
 
-    if old_name not in _all_tags_cache:
+    if old_name not in state.all_tags_cache:
         return False, f"Tag '{old_name}' not found"
 
     if old_name == new_name:
         return True, f"Tag name unchanged"
 
-    if new_name in _all_tags_cache:
+    if new_name in state.all_tags_cache:
         return False, f"Tag '{new_name}' already exists"
 
     # Move data to new key
-    _all_tags_cache[new_name] = _all_tags_cache.pop(old_name)
+    state.all_tags_cache[new_name] = state.all_tags_cache.pop(old_name)
 
     # Update order cache
-    if old_name in _tag_order_cache:
-        idx = _tag_order_cache.index(old_name)
-        _tag_order_cache[idx] = new_name
+    if old_name in state.tag_order_cache:
+        idx = state.tag_order_cache.index(old_name)
+        state.tag_order_cache[idx] = new_name
 
     # Update all category assignments
-    for cat_data in _glyph_cache.values():
+    for cat_data in state.glyph_cache.values():
         if "tags" in cat_data and old_name in cat_data["tags"]:
             idx = cat_data["tags"].index(old_name)
             cat_data["tags"][idx] = new_name
@@ -346,17 +344,17 @@ def rename_tag(old_name, new_name, auto_save=True):
 
 def delete_tag(tag_name, auto_save=True):
     """Delete a tag from registry and all category assignments."""
-    if tag_name not in _all_tags_cache:
+    if tag_name not in state.all_tags_cache:
         return False, f"Tag '{tag_name}' not found"
 
-    del _all_tags_cache[tag_name]
+    del state.all_tags_cache[tag_name]
 
     # Remove from order cache
-    if tag_name in _tag_order_cache:
-        _tag_order_cache.remove(tag_name)
+    if tag_name in state.tag_order_cache:
+        state.tag_order_cache.remove(tag_name)
 
     # Remove from all categories
-    for cat_name, cat_data in _glyph_cache.items():
+    for cat_name, cat_data in state.glyph_cache.items():
         if "tags" in cat_data and tag_name in cat_data["tags"]:
             cat_data["tags"].remove(tag_name)
             tag_log(f"Removed '{tag_name}' from category '{cat_name}'")
@@ -391,23 +389,23 @@ def set_category_tags(category, tags, space_type=-1, auto_save=True, update_wm=T
     Global-First: All operations use GLOBAL key (-1, category) regardless of space_type parameter.
     """
     key = _make_cache_key(space_type, category)  # Returns (-1, category)
-    if key not in _glyph_cache:
+    if key not in state.glyph_cache:
         # If we are setting empty tags on a non-existent category, don't create it.
         # This prevents "empty" overrides from being created during cancel/restore.
         if not tags:
             tag_log(f"set_category_tags: No tags to set for new category '{category}', skipping creation")
             return True, "No tags to set"
         # Create entry if not exists
-        _glyph_cache[key] = _normalize_category_data({})
+        state.glyph_cache[key] = _normalize_category_data({})
 
     # Validate tags exist
-    valid_tags = [t for t in tags if t in _all_tags_cache]
+    valid_tags = [t for t in tags if t in state.all_tags_cache]
     invalid_tags = set(tags) - set(valid_tags)
 
     if invalid_tags:
         tag_log(f"Warning: Unknown tags ignored: {invalid_tags}", "WARN")
 
-    _glyph_cache[key]["tags"] = valid_tags
+    state.glyph_cache[key]["tags"] = valid_tags
     tag_log(f"Set tags for '{category}' (GLOBAL): {valid_tags}")
 
     # Only update WM override if requested (not during preview in edit dialog)
@@ -432,35 +430,35 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1, update_w
     # DEBUG
     category_debug_print(f"[ADD_TAG] CALLED: category='{category}', tag='{tag_name}', auto_save={auto_save}, update_wm={update_wm}, preview_mode={is_preview_mode_active()}")
 
-    if tag_name not in _all_tags_cache:
-        category_debug_print(f"[ADD_TAG] FAILED: Tag '{tag_name}' not found in _all_tags_cache")
+    if tag_name not in state.all_tags_cache:
+        category_debug_print(f"[ADD_TAG] FAILED: Tag '{tag_name}' not found in state.all_tags_cache")
         return False, f"Tag '{tag_name}' not found"
 
     # Global-First: Always use GLOBAL key
     key = _make_cache_key(space_type, category)  # Returns (-1, category)
     category_debug_print(f"[ADD_TAG] Cache key (GLOBAL): {key}")
 
-    if key not in _glyph_cache:
-        _glyph_cache[key] = _normalize_category_data({})
+    if key not in state.glyph_cache:
+        state.glyph_cache[key] = _normalize_category_data({})
         category_debug_print(f"[ADD_TAG] Created new GLOBAL cache entry for key {key}")
 
-    if "tags" not in _glyph_cache[key]:
-        _glyph_cache[key]["tags"] = []
+    if "tags" not in state.glyph_cache[key]:
+        state.glyph_cache[key]["tags"] = []
 
     # DEBUG: Show current tags before adding
-    category_debug_print(f"[ADD_TAG] Current tags BEFORE: {_glyph_cache[key]['tags']}")
+    category_debug_print(f"[ADD_TAG] Current tags BEFORE: {state.glyph_cache[key]['tags']}")
 
-    if tag_name in _glyph_cache[key]["tags"]:
+    if tag_name in state.glyph_cache[key]["tags"]:
         category_debug_print(f"[ADD_TAG] Tag already exists - skipping")
         return True, f"Tag '{tag_name}' already assigned to '{category}'"
 
-    _glyph_cache[key]["tags"].append(tag_name)
-    category_debug_print(f"[ADD_TAG] Tags AFTER adding: {_glyph_cache[key]['tags']}")
+    state.glyph_cache[key]["tags"].append(tag_name)
+    category_debug_print(f"[ADD_TAG] Tags AFTER adding: {state.glyph_cache[key]['tags']}")
     tag_log(f"Added tag '{tag_name}' to '{category}' (GLOBAL)")
 
     # Clear pending_tag_assignment for the current category and all sibling categories
     # This ensures "New Add-ons!" button disappears immediately when tag is assigned
-    cat_data = _glyph_cache[key]
+    cat_data = state.glyph_cache[key]
     if isinstance(cat_data, dict):
         source_ext = cat_data.get("source_extension", "")
 
@@ -475,7 +473,7 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1, update_w
         cleared_count = 0
         if source_ext:
             # Primary path: match by source_extension
-            for other_key, other_data in _glyph_cache.items():
+            for other_key, other_data in state.glyph_cache.items():
                 if isinstance(other_data, dict) and other_data.get("source_extension") == source_ext:
                     other_key_name = other_key[1] if isinstance(other_key, tuple) else other_key
                     if other_key_name != category:  # Skip self
@@ -489,7 +487,7 @@ def add_category_tag(category, tag_name, auto_save=True, space_type=-1, update_w
             if not base_name:
                 base_name = category
 
-            for other_key, other_data in _glyph_cache.items():
+            for other_key, other_data in state.glyph_cache.items():
                 if not isinstance(other_data, dict):
                     continue
                 other_name = other_key[1] if isinstance(other_key, tuple) else other_key
@@ -525,10 +523,10 @@ def remove_category_tag(category, tag_name, auto_save=True, space_type=-1, updat
     Global-First: All operations use GLOBAL key (-1, category) regardless of space_type parameter.
     """
     key = _make_cache_key(space_type, category)  # Returns (-1, category)
-    if key not in _glyph_cache:
+    if key not in state.glyph_cache:
         return False, f"Category '{category}' not found"
 
-    cat_tags = _glyph_cache[key].get("tags", [])
+    cat_tags = state.glyph_cache[key].get("tags", [])
 
     if tag_name not in cat_tags:
         return True, f"Tag '{tag_name}' not assigned to '{category}'"
@@ -571,18 +569,18 @@ def get_tag_name_by_index(idx):
 
 
 def _get_mode_flags_for_tag(tag_name):
-    """Get mode flags for a tag from _all_tags_cache."""
-    if tag_name in _all_tags_cache:
-        tag_data = _all_tags_cache[tag_name]
+    """Get mode flags for a tag from state.all_tags_cache."""
+    if tag_name in state.all_tags_cache:
+        tag_data = state.all_tags_cache[tag_name]
         if isinstance(tag_data, dict):
             return tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS)
     return _CATEGORY_TAG_DEFAULT_MODE_FLAGS
 
 
 def _set_mode_flags_for_tag(tag_name, mode_flags):
-    """Set mode flags for a tag in _all_tags_cache."""
-    if tag_name in _all_tags_cache and isinstance(_all_tags_cache[tag_name], dict):
-        _all_tags_cache[tag_name]["mode_flags"] = mode_flags
+    """Set mode flags for a tag in state.all_tags_cache."""
+    if tag_name in state.all_tags_cache and isinstance(state.all_tags_cache[tag_name], dict):
+        state.all_tags_cache[tag_name]["mode_flags"] = mode_flags
 
 
 def _validate_icon_key(icon_key):
@@ -657,7 +655,7 @@ def get_tag_names():
     Returns:
         List of tag name strings
     """
-    return list(_all_tags_cache.keys())
+    return list(state.all_tags_cache.keys())
 
 
 def _generate_unique_tag_name(base_name="New Tag"):

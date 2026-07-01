@@ -231,8 +231,7 @@ bool sample_face_set_color_at_cursor(bContext *C,
     return false;
   }
 
-  CursorGeometryInfo gi;
-  if (!cursor_geometry_info_update(C, &gi, float2(mval[0], mval[1]), false)) {
+  if (!cursor_geometry_info_update(C, float2(mval[0], mval[1]), false)) {
     return false;
   }
 
@@ -2891,7 +2890,7 @@ static bool sample_face_color_rgb(SculptSession &ss,
     if (!sample_face_color_rgb_at_point(ss, brush, point, thread_id, point_rgb)) {
       return;
     }
-    const float weight = max_fff(point_rgb[0], point_rgb[1], point_rgb[2]);
+    const float weight = max_ff(max_ff(point_rgb[0], point_rgb[1]), point_rgb[2]);
     if (weight > best_weight) {
       best_weight = weight;
       copy_v3_v3(best_rgb, point_rgb);
@@ -3196,6 +3195,46 @@ static void calc_texture_data_face_factors(const Depsgraph &depsgraph,
 }
 
 /**
+ * Shared per-node brush factor pipeline for the texture-as-data Face Set modes (Grids #pbvh::Tree).
+ *
+ * Grids-analog of #calc_texture_data_face_factors: works at the granularity of individual grid
+ * elements (not per-face), since #gather_grids_positions already samples at that resolution. See
+ * that function's docs for the meaning of \a apply_strength.
+ */
+static void calc_texture_data_grid_factors(const Depsgraph &depsgraph,
+                                           Object &object,
+                                           const Brush &brush,
+                                           const Span<float3> positions,
+                                           const bke::pbvh::GridsNode &node,
+                                           const Span<int> grids,
+                                           const bool apply_strength,
+                                           const MutableSpan<float> factors)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  const StrokeCache &cache = *ss.cache;
+  const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+
+  factors.fill(1.0f);
+  /* Qualified because #face_set also declares Mesh/BMesh overloads of this name, which would
+   * otherwise hide the #ed::sculpt_paint Grids overload from unqualified lookup. */
+  ed::sculpt_paint::fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
+  filter_region_clip_factors(ss, positions, factors);
+  if (brush.flag & BRUSH_FRONTFACE) {
+    calc_front_face(cache.view_normal_symm, subdiv_ccg, grids, factors);
+  }
+
+  Array<float> distances(positions.size());
+  calc_brush_distances(ss, positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  filter_distances_with_radius(cache.radius, distances, factors);
+  apply_hardness_to_distances(cache, distances);
+  if (apply_strength) {
+    calc_brush_strength_factors(cache, brush, distances, factors);
+  }
+
+  auto_mask::calc_grids_factors(depsgraph, object, cache.automasking.get(), node, grids, factors);
+}
+
+/**
  * Resolve the attribute that texture-sampled values are written into.
  *
  * This is the single seam for routing the sampled data to a destination: it currently always
@@ -3205,6 +3244,175 @@ static void calc_texture_data_face_factors(const Depsgraph &depsgraph,
 static bke::GSpanAttributeWriter texture_data_write_attribute(Mesh &mesh, const Brush & /*brush*/)
 {
   return color::ensure_active_color_attribute_for_write(mesh);
+}
+
+/** A pending per-grid-element texture sample, resolved into a per-face average after the parallel
+ * node loop (grids belonging to the same face may be split across different PBVH nodes). */
+struct FaceTextureAvgWrite {
+  int face_index;
+  float value;
+};
+
+struct FaceTextureAvgAccum {
+  float sum = 0.0f;
+  int count = 0;
+};
+
+static void apply_from_texture_grids(const Depsgraph &depsgraph,
+                                     Object &object,
+                                     const Brush &brush,
+                                     const IndexMask &node_mask)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  const bool write_face_sets = brush_texture_data_writes_face_sets(brush);
+  const bool write_vcol = brush_texture_data_writes_color(brush);
+  if (!write_face_sets && !write_vcol) {
+    return;
+  }
+
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+  SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+
+  bke::GSpanAttributeWriter color_attribute;
+  if (write_vcol) {
+    color_attribute = texture_data_write_attribute(mesh, brush);
+  }
+
+  /* Undo nodes (Position/FaceSet/Color) are pushed once by #push_undo_nodes in #do_brush_action
+   * with the same node mask, before this function runs. Pushing again here with a partial flag set
+   * would register nodes inconsistently within the step and corrupt position undo restoration. */
+
+  bke::SpanAttributeWriter<int> face_sets;
+  if (write_face_sets) {
+    face_sets = ensure_face_sets_mesh(mesh);
+    ensure_stroke_face_set(object, brush);
+  }
+  const int face_set_id = ss.cache->paint_face_set;
+
+  MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+
+  threading::EnumerableThreadSpecific<Vector<FaceTextureAvgWrite>> pending_writes;
+
+  node_mask.foreach_index(
+      [&](const int i) {
+        const Span<int> grids = nodes[i].grids();
+        if (grids.is_empty()) {
+          return;
+        }
+
+        Vector<float3> position_storage;
+        const MutableSpan<float3> positions = gather_grids_positions(
+            subdiv_ccg, grids, position_storage);
+
+        Array<float> factors(positions.size());
+        calc_texture_data_grid_factors(
+            depsgraph, object, brush, positions, nodes[i], grids, /*apply_strength*/ false, factors);
+
+        Array<int> face_indices(positions.size());
+        calc_face_indices_grids(subdiv_ccg, grids, face_indices);
+
+        const int thread_id = BLI_task_parallel_thread_id(nullptr);
+        Vector<FaceTextureAvgWrite> &writes = pending_writes.local();
+        bke::GSpanAttributeWriter *col_attr_ptr = color_attribute ? &color_attribute : nullptr;
+
+        for (const int i_grid : grids.index_range()) {
+          const int node_start = i_grid * key.grid_area;
+          for (const int y : IndexRange(key.grid_size)) {
+            for (const int x : IndexRange(key.grid_size)) {
+              const int offset = CCG_grid_xy_to_index(key.grid_size, x, y);
+              const int i_elem = node_start + offset;
+              if (factors[i_elem] == 0.0f) {
+                continue;
+              }
+
+              float texture_value;
+              float4 texture_rgba;
+              sculpt_apply_texture(
+                  ss, brush, positions[i_elem], thread_id, &texture_value, texture_rgba);
+              if (brush.flag2 & BRUSH_TEXTURE_INVERT_ALPHA) {
+                texture_value = 1.0f - texture_value;
+              }
+
+              if (write_face_sets) {
+                writes.append({face_indices[i_elem], texture_value});
+              }
+
+              if (col_attr_ptr) {
+                SubdivCCGCoord coord{};
+                coord.grid_index = grids[i_grid];
+                coord.x = short(x);
+                coord.y = short(y);
+                int v1, v2;
+                const SubdivCCGAdjacencyType adjacency =
+                    BKE_subdiv_ccg_coarse_mesh_adjacency_info_get(
+                        subdiv_ccg, coord, corner_verts, faces, v1, v2);
+                if (adjacency == SubdivCCGAdjacencyType::Vertex) {
+                  const float value = (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) ?
+                                           ((texture_value > brush.texture_threshold) ? 1.0f :
+                                                                                        0.0f) :
+                                           clamp_f(texture_value, 0.0f, 1.0f);
+                  float4 col = color::color_vert_get(faces,
+                                                     corner_verts,
+                                                     vert_to_face_map,
+                                                     col_attr_ptr->span,
+                                                     col_attr_ptr->domain,
+                                                     v1);
+                  if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
+                    col.x = value;
+                    col.y = value;
+                    col.z = value;
+                  }
+                  else {
+                    col[brush.vcol_channel] = value;
+                  }
+                  color::color_vert_set(faces,
+                                        corner_verts,
+                                        vert_to_face_map,
+                                        col_attr_ptr->domain,
+                                        v1,
+                                        col,
+                                        col_attr_ptr->span);
+                }
+              }
+            }
+          }
+        }
+      },
+      exec_mode::grain_size(1));
+
+  if (write_face_sets) {
+    /* The average is computed across all sampled elements of a face, even when its grids are
+     * split across different PBVH nodes, to match the Mesh path's per-face-corner average. */
+    Map<int, FaceTextureAvgAccum> face_accum;
+    for (Vector<FaceTextureAvgWrite> &writes : pending_writes) {
+      for (const FaceTextureAvgWrite &write : writes) {
+        FaceTextureAvgAccum &accum = face_accum.lookup_or_add_default(write.face_index);
+        accum.sum += write.value;
+        accum.count += 1;
+      }
+    }
+    for (const auto item : face_accum.items()) {
+      const float avg = item.value.sum / float(item.value.count);
+      if (avg > brush.texture_threshold) {
+        face_sets.span[item.key] = face_set_id;
+      }
+    }
+  }
+
+  if (face_sets) {
+    pbvh.tag_face_sets_changed(node_mask);
+    face_sets.finish();
+  }
+
+  if (color_attribute) {
+    pbvh.tag_attribute_changed(node_mask, mesh.active_color_attribute);
+    color_attribute.finish();
+  }
 }
 
 static void apply_from_texture_mesh(const Depsgraph &depsgraph,
@@ -3308,10 +3516,185 @@ void apply_from_texture(const Depsgraph &depsgraph,
       apply_from_texture_mesh(depsgraph, object, brush, node_mask);
       break;
     case bke::pbvh::Type::Grids:
-    case bke::pbvh::Type::BMesh:
-      /* TODO: the texture-as-data Face Set modes are Mesh-only for now. Add Grids/BMesh node
-       * loops here, mirroring #apply_from_texture_mesh. */
+      apply_from_texture_grids(depsgraph, object, brush, node_mask);
       break;
+    case bke::pbvh::Type::BMesh:
+      /* TODO: the texture-as-data Face Set modes are not supported for dyntopo yet. */
+      break;
+  }
+}
+
+static void apply_from_color_texture_grids(const Depsgraph &depsgraph,
+                                           Object &object,
+                                           const Brush &brush,
+                                           const IndexMask &node_mask)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+
+  const bool write_face_sets = brush_texture_data_writes_face_sets(brush);
+  const bool write_vcol = brush_texture_data_writes_color(brush);
+  if (!write_face_sets && !write_vcol) {
+    return;
+  }
+
+  FaceSetColorStrokeCache *color_cache = nullptr;
+  if (write_face_sets) {
+    color_cache = face_set_color_stroke_cache_ensure(*ss.cache, brush, mesh);
+    if (!color_cache || !color_cache->enabled) {
+      return;
+    }
+  }
+
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+
+  if (const MTex *color_mtex = BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT)) {
+    if (color_mtex->tex != nullptr && ss.tex_pool != nullptr) {
+      BKE_texture_fetch_images_for_pool(color_mtex->tex, ss.tex_pool);
+    }
+  }
+
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+  SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+
+  bke::GSpanAttributeWriter color_attribute;
+  if (write_vcol) {
+    color_attribute = texture_data_write_attribute(mesh, brush);
+  }
+
+  /* Undo nodes (Position/FaceSet/Color) are pushed once by #push_undo_nodes in #do_brush_action
+   * with the same node mask, before this function runs. Pushing again here with a partial flag set
+   * would register nodes inconsistently within the step and corrupt position undo restoration. */
+
+  bke::SpanAttributeWriter<int> face_sets;
+  if (write_face_sets) {
+    face_sets = ensure_face_sets_mesh(mesh);
+  }
+
+  MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+
+  threading::EnumerableThreadSpecific<Vector<ColorFaceQuantWrite>> pending_writes;
+
+  node_mask.foreach_index(
+      [&](const int i) {
+        const Span<int> grids = nodes[i].grids();
+        if (grids.is_empty()) {
+          return;
+        }
+
+        Vector<float3> position_storage;
+        const MutableSpan<float3> positions = gather_grids_positions(
+            subdiv_ccg, grids, position_storage);
+
+        Array<float> factors(positions.size());
+        calc_texture_data_grid_factors(
+            depsgraph, object, brush, positions, nodes[i], grids, /*apply_strength*/ true, factors);
+
+        Array<int> face_indices(positions.size());
+        calc_face_indices_grids(subdiv_ccg, grids, face_indices);
+
+        /* The color map itself selects valid regions (non-black samples); the brush alpha texture
+         * is only used for projection here, never as an intensity mask. */
+        const int thread_id = BLI_task_parallel_thread_id(nullptr);
+        Vector<ColorFaceQuantWrite> &writes = pending_writes.local();
+        bke::GSpanAttributeWriter *col_attr_ptr = color_attribute ? &color_attribute : nullptr;
+
+        for (const int i_grid : grids.index_range()) {
+          const int node_start = i_grid * key.grid_area;
+          for (const int y : IndexRange(key.grid_size)) {
+            for (const int x : IndexRange(key.grid_size)) {
+              const int offset = CCG_grid_xy_to_index(key.grid_size, x, y);
+              const int i_elem = node_start + offset;
+              if (factors[i_elem] <= FACE_SET_MIN_FADE) {
+                continue;
+              }
+
+              float rgb[3];
+              if (!sample_face_color_rgb_at_point(ss, brush, positions[i_elem], thread_id, rgb)) {
+                continue;
+              }
+
+              if (write_face_sets) {
+                ColorFaceQuantWrite write;
+                write.face_index = face_indices[i_elem];
+                BKE_paint_face_set_quantize_texture_color(rgb, write.quant);
+                writes.append(write);
+              }
+
+              if (col_attr_ptr) {
+                SubdivCCGCoord coord{};
+                coord.grid_index = grids[i_grid];
+                coord.x = short(x);
+                coord.y = short(y);
+                int v1, v2;
+                const SubdivCCGAdjacencyType adjacency =
+                    BKE_subdiv_ccg_coarse_mesh_adjacency_info_get(
+                        subdiv_ccg, coord, corner_verts, faces, v1, v2);
+                if (adjacency == SubdivCCGAdjacencyType::Vertex) {
+                  float4 col = color::color_vert_get(faces,
+                                                     corner_verts,
+                                                     vert_to_face_map,
+                                                     col_attr_ptr->span,
+                                                     col_attr_ptr->domain,
+                                                     v1);
+                  if (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) {
+                    const float luma = (rgb[0] + rgb[1] + rgb[2]) / 3.0f;
+                    const float value = (luma > brush.texture_threshold) ? 1.0f : 0.0f;
+                    if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
+                      col.x = value;
+                      col.y = value;
+                      col.z = value;
+                    }
+                    else {
+                      col[brush.vcol_channel] = value;
+                    }
+                  }
+                  else {
+                    if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
+                      col.x = rgb[0];
+                      col.y = rgb[1];
+                      col.z = rgb[2];
+                    }
+                    else {
+                      col[brush.vcol_channel] = rgb[brush.vcol_channel];
+                    }
+                  }
+                  color::color_vert_set(faces,
+                                        corner_verts,
+                                        vert_to_face_map,
+                                        col_attr_ptr->domain,
+                                        v1,
+                                        col,
+                                        col_attr_ptr->span);
+                }
+              }
+            }
+          }
+        }
+      },
+      exec_mode::grain_size(1));
+
+  if (write_face_sets) {
+    for (Vector<ColorFaceQuantWrite> &writes : pending_writes) {
+      if (!writes.is_empty()) {
+        apply_color_face_quant_writes(object, *color_cache, writes, face_sets.span);
+        writes.clear();
+      }
+    }
+    face_set_color_deferred_geometry_update(object, *color_cache);
+  }
+
+  if (face_sets) {
+    pbvh.tag_face_sets_changed(node_mask);
+    face_sets.finish();
+  }
+
+  if (color_attribute) {
+    pbvh.tag_attribute_changed(node_mask, mesh.active_color_attribute);
+    color_attribute.finish();
   }
 }
 
@@ -3466,9 +3849,10 @@ void apply_from_color_texture(const Depsgraph &depsgraph,
       apply_from_color_texture_mesh(depsgraph, object, brush, node_mask);
       break;
     case bke::pbvh::Type::Grids:
+      apply_from_color_texture_grids(depsgraph, object, brush, node_mask);
+      break;
     case bke::pbvh::Type::BMesh:
-      /* TODO: color-from-texture is Mesh-only for now. Add Grids/BMesh node loops here,
-       * mirroring #apply_from_color_texture_mesh. */
+      /* TODO: color-from-texture is not supported for dyntopo yet. */
       break;
   }
 }

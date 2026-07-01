@@ -17,6 +17,8 @@
 
 #include "DNA_brush_enums.h"
 
+#include "PRF_profile.hh"
+
 namespace blender {
 
 struct BMVert;

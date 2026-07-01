@@ -2633,7 +2633,7 @@ static void sculpt_sample_brush_mtex_at_screen(const SculptSession &ss,
     {
       copy_v3_v3(&r_rgba[0], image_rgb);
       r_rgba[3] = 1.0f;
-      *r_value = max_fff(image_rgb[0], image_rgb[1], image_rgb[2]);
+      *r_value = max_ff(max_ff(image_rgb[0], image_rgb[1]), image_rgb[2]);
     }
   }
 
@@ -2806,7 +2806,7 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
       {
         copy_v3_v3(&r_rgba[0], image_rgb);
         r_rgba[3] = 1.0f;
-        *r_value = max_fff(image_rgb[0], image_rgb[1], image_rgb[2]);
+        *r_value = max_ff(max_ff(image_rgb[0], image_rgb[1]), image_rgb[2]);
       }
       else {
         const float2 point_2d = ED_view3d_project_float_v2_m4(
@@ -2833,7 +2833,7 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
           {
             copy_v3_v3(&r_rgba[0], image_rgb);
             r_rgba[3] = 1.0f;
-            *r_value = max_fff(image_rgb[0], image_rgb[1], image_rgb[2]);
+            *r_value = max_ff(max_ff(image_rgb[0], image_rgb[1]), image_rgb[2]);
           }
         }
       }
@@ -2859,7 +2859,7 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
       {
         copy_v3_v3(&r_rgba[0], image_rgb);
         r_rgba[3] = 1.0f;
-        *r_value = max_fff(image_rgb[0], image_rgb[1], image_rgb[2]);
+        *r_value = max_ff(max_ff(image_rgb[0], image_rgb[1]), image_rgb[2]);
       }
     }
     return;
@@ -6277,7 +6277,7 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     if (brush && face_set::brush_texture_data_mode_is_active(*brush) &&
         face_set::brush_texture_data_writes_color(*brush) && !ob.runtime->sculpt_session->bm)
     {
-      if (bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Mesh) {
+      if (bke::object::pbvh_get(ob)->type() != bke::pbvh::Type::BMesh) {
         ED_mesh_color_ensure(id_cast<Mesh *>(ob.data), nullptr);
       }
     }

@@ -2959,7 +2959,7 @@ static constexpr float face_set_texture_color_min_luminance = 0.02f;
 
 void BKE_paint_face_set_snap_texture_sample_color(const float color[3], float r_snapped[3])
 {
-  const float max_c = max_fff(color[0], color[1], color[2]);
+  const float max_c = max_ff(max_ff(color[0], color[1]), color[2]);
   if (max_c < face_set_texture_color_min_luminance) {
     zero_v3(r_snapped);
     return;

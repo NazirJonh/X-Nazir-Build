@@ -190,17 +190,6 @@ void WM_toolsystem_ref_properties_ensure_for_tool_ex(bToolRef *tref,
   WM_toolsystem_ref_properties_ensure_for_tool_ex( \
       tref, tool_idname, (ot)->idname, (ot)->srna, r_ptr)
 
-/**
- * Check if a tool exists in the specified workspace and mode.
- * Uses the WM_OT_tool_set_by_id operator to validate tool existence.
- *
- * \return true if the tool exists and can be activated.
- */
-bool WM_toolsystem_tool_exists_in_workspace(bContext *C,
-                                            WorkSpace *workspace,
-                                            const bToolKey *tkey,
-                                            const char *tool_idname);
-
 /** \} */
 
 /**

@@ -95,6 +95,18 @@ AbstractView *block_view_find_by_idname(Block &block, const StringRef idname)
   return nullptr;
 }
 
+AbstractGridView *block_view_find_fixed_viewport_grid(Block &block)
+{
+  for (ViewLink &link : block.views) {
+    if (auto *grid_view = dynamic_cast<AbstractGridView *>(link.view.get())) {
+      if (grid_view->use_fixed_viewport_layout()) {
+        return grid_view;
+      }
+    }
+  }
+  return nullptr;
+}
+
 void ViewLink::views_bounds_calc(const Block &block)
 {
   Map<AbstractView *, rcti> views_bounds;
@@ -275,9 +287,12 @@ void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEven
 
   AbstractView *view = region_view_find_at(region, event->xy, UI_UNIT_Y, &block);
   if (view == nullptr) {
+    /* Fixed-viewport grid views (e.g. the image browser popover) lay out only their visible rows,
+     * so #region_view_find_at may miss them when the cursor is in the scroll-edge band. Fall back
+     * to the block's fixed-viewport grid so drag-auto-scroll still works there. */
     block = static_cast<Block *>(region->runtime->uiblocks.first);
     if (block) {
-      view = block_view_find_by_idname(*block, "image browser view");
+      view = block_view_find_fixed_viewport_grid(*block);
     }
   }
 

@@ -14,6 +14,7 @@
 
 #include "BKE_context.hh"
 #include "BKE_icons.hh"
+#include "BKE_screen.hh"
 
 #include "BLI_rect.h"
 
@@ -24,6 +25,8 @@
 #include "GPU_state.hh"
 
 #include "RNA_access.hh"
+
+#include "ED_screen.hh"
 
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
@@ -386,6 +389,131 @@ void AbstractGridView::draw_overlays(const ARegion &region, const Block &block) 
   }
   GPU_blend(GPU_BLEND_NONE);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Fixed-viewport grid scrolling in popups
+ *
+ * Generic popup/menu event glue driving the fixed-viewport scroll of whichever grid view in the
+ * block opted into it (#AbstractGridView::set_fixed_viewport_layout). Found via
+ * #block_view_find_fixed_viewport_grid, so this knows nothing about the concrete view (e.g. the
+ * image browser) it scrolls.
+ * \{ */
+
+bool popup_block_fixed_grid_autoscroll_at_pointer(Block *block, const int my)
+{
+  if (block == nullptr) {
+    return false;
+  }
+  const AbstractGridView *grid_view = block_view_find_fixed_viewport_grid(*block);
+  if (grid_view == nullptr) {
+    return false;
+  }
+  return grid_view->fixed_viewport_scroll_at_y(*block, float(my)).has_value();
+}
+
+void popup_block_fixed_grid_redraw_for_scroll_overlay(ARegion *region, Block *block)
+{
+  if (region == nullptr || block == nullptr) {
+    return;
+  }
+  const AbstractGridView *grid_view = block_view_find_fixed_viewport_grid(*block);
+  if (grid_view == nullptr || grid_view->is_fully_visible()) {
+    return;
+  }
+  ED_region_tag_redraw(region);
+}
+
+bool popup_block_fixed_grid_scrolltimer_step(bContext * /*C*/,
+                                             PopupBlockHandle *menu,
+                                             Block *block,
+                                             const int my)
+{
+  if (block == nullptr || menu == nullptr || menu->region == nullptr) {
+    return false;
+  }
+  AbstractGridView *grid_view = block_view_find_fixed_viewport_grid(*block);
+  if (grid_view == nullptr) {
+    return false;
+  }
+
+  const std::optional<ViewScrollDirection> scroll_dir = grid_view->fixed_viewport_scroll_at_y(
+      *block, float(my));
+  if (!scroll_dir) {
+    return false;
+  }
+
+  /* The scroll position is a row index stored in the grid view; the rebuild triggered below reads
+   * it to pick the visible rows. */
+  grid_view->scroll(*scroll_dir);
+  ED_region_tag_refresh_ui(menu->region);
+  return true;
+}
+
+bool popup_block_fixed_grid_wheel_scroll(bContext * /*C*/, ARegion *region, const wmEvent *event)
+{
+  if (region == nullptr) {
+    return false;
+  }
+
+  Block *block = static_cast<Block *>(region->runtime->uiblocks.first);
+  if (block == nullptr || (block->flag & BLOCK_POPOVER) == 0) {
+    return false;
+  }
+
+  AbstractGridView *grid_view = block_view_find_fixed_viewport_grid(*block);
+  if (grid_view == nullptr || grid_view->is_fully_visible()) {
+    return false;
+  }
+
+  float mx = float(event->xy[0]);
+  float my = float(event->xy[1]);
+  window_to_block_fl(region, block, &mx, &my);
+
+  /* Don't steal wheel events while hovering the fixed header above the grid; only the grid
+   * scrolls. The grid's own bounds delimit the scrollable area (extended into the ~0.5 #UI_UNIT_Y
+   * separator gap above it where the scroll-up arrow is drawn), so this needs no knowledge of the
+   * popover's header layout. */
+  if (const std::optional<rcti> bounds = grid_view->get_bounds()) {
+    const float gap = (0.5f * UI_UNIT_Y) / block->aspect;
+    if (my > bounds->ymax + gap) {
+      return false;
+    }
+  }
+
+  /* Discretize trackpad pan into whole wheel steps (same accumulation as #view_scroll_invoke);
+   * the row-snapped fixed viewport can only move in whole tile rows. */
+  int type = event->type;
+  bool invert = false;
+  if (type == MOUSEPAN) {
+    int dummy_val;
+    pan_to_scroll(event, &type, &dummy_val);
+    /* #pan_to_scroll gives the absolute direction. */
+    if (event->flag & WM_EVENT_SCROLL_INVERT) {
+      invert = true;
+    }
+  }
+
+  std::optional<ViewScrollDirection> direction;
+  if (type == WHEELUPMOUSE) {
+    direction = invert ? ViewScrollDirection::DOWN : ViewScrollDirection::UP;
+  }
+  else if (type == WHEELDOWNMOUSE) {
+    direction = invert ? ViewScrollDirection::UP : ViewScrollDirection::DOWN;
+  }
+  else {
+    return false;
+  }
+
+  /* The scroll position is a row index stored in the grid view (#scroll_value_), not the region
+   * #View2D. The popup pipeline re-initializes the region #View2D on every refresh, so it can't
+   * hold a stable scroll position. The rebuild triggered below reads the row index to pick the
+   * visible rows. */
+  grid_view->scroll(*direction);
+  ED_region_tag_refresh_ui(region);
+  return true;
+}
+
+/** \} */
 
 static std::optional<int> find_filtered_item_index(const AbstractGridViewItem &item)
 {

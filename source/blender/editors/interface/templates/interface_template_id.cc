@@ -80,6 +80,10 @@ struct TemplateID {
   /* Context for the image-only material/slot-type filters (#TEMPLATE_ID_FILTER_CURRENT_MATERIAL
    * and #TEMPLATE_ID_FILTER_SLOT_TYPE). Set via #template_id_browse_with_context. */
   TemplateIDFilterContext filter_context = {};
+
+  /* Optional script-defined filter applied on top of the above. Set via
+   * #template_id_browse_with_context from a registered #IDFilterType name. */
+  const IDFilterType *custom_filter = nullptr;
 };
 
 /* Search browse menu, assign. */
@@ -108,8 +112,12 @@ static void template_ID_set_int_property_session_uid_exec_fn(bContext * /*C*/,
       &template_ui->ptr, template_ui->prop, int(static_cast<ID *>(item)->session_uid));
 }
 
-static bool id_search_allows_id(
-    Main &bmain, TemplateID *template_ui, const int flag, ID *id, const char *query)
+static bool id_search_allows_id(const bContext &C,
+                                Main &bmain,
+                                TemplateID *template_ui,
+                                const int flag,
+                                ID *id,
+                                const char *query)
 {
   ID *id_from = template_ui->ptr.owner_id;
 
@@ -145,6 +153,13 @@ static bool id_search_allows_id(
     {
       return false;
     }
+  }
+
+  /* Script-defined filter (registered #IDFilterType), applied on top of the built-in filters. */
+  if (template_ui->custom_filter != nullptr &&
+      !id_filter_type_poll(*template_ui->custom_filter, C, *id))
+  {
+    return false;
   }
 
   return true;
@@ -198,7 +213,7 @@ static void id_search_cb(const bContext *C,
 
   /* ID listbase */
   for (ID &id : *lb) {
-    if (id_search_allows_id(bmain, template_ui, flag, &id, str)) {
+    if (id_search_allows_id(*C, bmain, template_ui, flag, &id, str)) {
       search.add(id.name + 2, &id);
     }
   }
@@ -231,7 +246,7 @@ static void id_search_cb_tagged(const bContext *C,
   /* ID listbase */
   for (ID &id : *lb) {
     if (id.tag & ID_TAG_DOIT) {
-      if (id_search_allows_id(bmain, template_ui, flag, &id, str)) {
+      if (id_search_allows_id(*C, bmain, template_ui, flag, &id, str)) {
         search.add(id.name + 2, &id);
       }
       id.tag &= ~ID_TAG_DOIT;
@@ -1825,7 +1840,8 @@ void template_id_browse_with_context(Layout *layout,
                                      int filter,
                                      const char *text,
                                      Material *material,
-                                     char slot_type)
+                                     char slot_type,
+                                     const char *filter_type)
 {
   PropertyRNA *prop = RNA_struct_find_property(ptr, propname.c_str());
 
@@ -1842,6 +1858,9 @@ void template_id_browse_with_context(Layout *layout,
   template_ui.filter = short(filter);
   template_ui.filter_context.material = material;
   template_ui.filter_context.slot_type = slot_type;
+  if (filter_type && filter_type[0] != '\0') {
+    template_ui.custom_filter = id_filter_type_find(filter_type);
+  }
 
   StructRNA *type = RNA_property_pointer_type(ptr, prop);
   const short idcode = RNA_type_to_ID_code(type);

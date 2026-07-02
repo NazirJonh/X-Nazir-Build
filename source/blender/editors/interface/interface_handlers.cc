@@ -11604,8 +11604,8 @@ static int handle_menu_event(bContext *C,
     }
   }
   else if (event->type == TIMER && event->customdata == menu->scrolltimer) {
-    if (popup_image_browser_scrolltimer_step(C, menu, block, my)) {
-      /* Image browser grid edge auto-scroll. */
+    if (popup_block_fixed_grid_scrolltimer_step(C, menu, block, my)) {
+      /* Fixed-viewport grid (e.g. image browser) edge auto-scroll. */
     }
     else if (!menu_scroll_test(block, {mx, my})) {
       WM_event_timer_remove(CTX_wm_manager(C), win, menu->scrolltimer);
@@ -11625,7 +11625,7 @@ static int handle_menu_event(bContext *C,
 
       /* add menu scroll timer, if needed */
       if (menu_scroll_test(block, {mx, my}) ||
-          popup_image_browser_autoscroll_at_pointer(block, my))
+          popup_block_fixed_grid_autoscroll_at_pointer(block, my))
       {
         if (menu->scrolltimer == nullptr) {
           menu->scrolltimer = WM_event_timer_add(
@@ -11638,7 +11638,7 @@ static int handle_menu_event(bContext *C,
       }
 
       if (block->flag & BLOCK_POPOVER) {
-        popup_image_browser_redraw_for_scroll_overlay(region, block);
+        popup_block_fixed_grid_redraw_for_scroll_overlay(region, block);
       }
     }
 
@@ -11719,7 +11719,7 @@ static int handle_menu_event(bContext *C,
             /* pass */
           }
           else if ((block->flag & BLOCK_POPOVER) &&
-                   popup_block_grid_view2d_scroll(C, region, event))
+                   popup_block_fixed_grid_wheel_scroll(C, region, event))
           {
             if (but) {
               but->active->cancel = true;
@@ -11752,7 +11752,7 @@ static int handle_menu_event(bContext *C,
             /* pass */
           }
           else if ((block->flag & BLOCK_POPOVER) &&
-                   popup_block_grid_view2d_scroll(C, region, event))
+                   popup_block_fixed_grid_wheel_scroll(C, region, event))
           {
             if (but) {
               but->active->cancel = true;

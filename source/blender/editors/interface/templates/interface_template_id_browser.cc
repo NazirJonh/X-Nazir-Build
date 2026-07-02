@@ -5,7 +5,12 @@
 /** \file
  * \ingroup edinterface
  *
- * Popover-based Image ID browser with paint-slot filters and a grid/list view.
+ * Popover-based ID browser with a grid/list view, name search and pluggable content filters.
+ *
+ * Built for texture-paint image selection (paint-slot / material filters, see
+ * #image_id_passes_paint_filter) but generic over the browsed ID type: items come from the
+ * data-block list of the target pointer property, and scripts can narrow them further with a
+ * registered #IDFilterType (see #template_id_browser `filter_type`).
  */
 
 #include <algorithm>
@@ -14,6 +19,7 @@
 #include "BKE_image.hh"
 #include "BKE_main.hh"
 #include "BKE_screen.hh"
+#include "BKE_wm_runtime.hh"
 
 #include "BLI_listbase.h"
 #include "BLI_rect.h"
@@ -22,10 +28,12 @@
 
 #include "BLT_translation.hh"
 
+#include "DNA_ID.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 #include "DNA_space_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
@@ -46,37 +54,34 @@
 
 namespace blender::ui {
 
-/* Search string for the popover's semi-modal filter field. Session-only; need not persist. */
-static char g_image_browser_search[256] = "";
-
 /**
  * Height of the scrollable image grid viewport (in #UI_UNIT_Y).
  * Keep header rows + this value within the popover #PopupBlockHandle::max_size_y (~16 units).
  */
-static constexpr float IMAGE_BROWSER_GRID_VIEWPORT_UNITS_Y = 18.0f;
+static constexpr float ID_BROWSER_GRID_VIEWPORT_UNITS_Y = 18.0f;
 /** Popover content width (in #UI_UNIT_X). List rows and grid columns use this. */
-static constexpr float IMAGE_BROWSER_POPOVER_UNITS_X = 15.0f;
+static constexpr float ID_BROWSER_POPOVER_UNITS_X = 15.0f;
 
 /* -------------------------------------------------------------------- */
 /** \name Popover registration
  * \{ */
 
-static void image_browser_popover_draw(const bContext *C, Panel *panel);
-static bool image_browser_popover_poll(const bContext *C, PanelType *panel_type);
-static void build_image_grid(const bContext &C, Layout &layout, float grid_viewport_units);
+static void id_browser_popover_draw(const bContext *C, Panel *panel);
+static bool id_browser_popover_poll(const bContext *C, PanelType *panel_type);
+static void build_id_grid(const bContext &C, Layout &layout, float grid_viewport_units);
 
-static void image_browser_popover_register()
+static void id_browser_popover_register()
 {
-  if (WM_paneltype_find("UI_PT_image_browser", true)) {
+  if (WM_paneltype_find("UI_PT_id_browser", true)) {
     return;
   }
   PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
-  STRNCPY_UTF8(pt->idname, "UI_PT_image_browser");
+  STRNCPY_UTF8(pt->idname, "UI_PT_id_browser");
   STRNCPY_UTF8(pt->label, N_("Image Browser"));
   STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
   pt->description = N_("Browse and assign an image with paint-slot filters");
-  pt->draw = image_browser_popover_draw;
-  pt->poll = image_browser_popover_poll;
+  pt->draw = id_browser_popover_draw;
+  pt->poll = id_browser_popover_poll;
   WM_paneltype_add(pt);
 }
 
@@ -137,8 +142,37 @@ bool image_id_passes_paint_filter(Main &bmain,
   return true;
 }
 
-class ImageBrowserGridItem : public PreviewGridItem {
-  Image *ima_;
+/**
+ * Composable predicate deciding which data-blocks the browser shows. The built-in image paint-slot
+ * filter and an optional script-defined #IDFilterType are combined (an empty filter passes
+ * everything). Generic over ID type, so the same popover serves any pointer property.
+ */
+struct IDBrowserFilter {
+  /** Built-in paint-slot filter mask (#TEMPLATE_ID_FILTER_*); only consulted for #ID_IM. */
+  int paint_mode = TEMPLATE_ID_FILTER_ALL;
+  const Material *material = nullptr;
+  char slot_type = 0;
+  /** Optional script-defined filter, resolved from the popover's `filter_type` context. */
+  const IDFilterType *custom = nullptr;
+
+  bool passes(const bContext &C, Main &bmain, const ID &id) const
+  {
+    if (GS(id.name) == ID_IM) {
+      if (!image_id_passes_paint_filter(
+              bmain, reinterpret_cast<const Image &>(id), paint_mode, material, slot_type))
+      {
+        return false;
+      }
+    }
+    if (custom != nullptr && !id_filter_type_poll(*custom, C, const_cast<ID &>(id))) {
+      return false;
+    }
+    return true;
+  }
+};
+
+class IDBrowserGridItem : public PreviewGridItem {
+  ID *id_;
   bool list_mode_;
 
   void install_id_preview_tooltip() const
@@ -152,14 +186,14 @@ class ImageBrowserGridItem : public PreviewGridItem {
         [](bContext & /*C*/, TooltipData &tip, Button * /*but*/, void *arg) {
           tooltip_from_id(tip, static_cast<ID *>(arg));
         },
-        &ima_->id,
+        id_,
         nullptr);
   }
 
  public:
-  ImageBrowserGridItem(
-      StringRef identifier, StringRef label, int preview_icon_id, Image *ima, const bool list_mode)
-      : PreviewGridItem(identifier, label, preview_icon_id), ima_(ima), list_mode_(list_mode)
+  IDBrowserGridItem(
+      StringRef identifier, StringRef label, int preview_icon_id, ID *id, const bool list_mode)
+      : PreviewGridItem(identifier, label, preview_icon_id), id_(id), list_mode_(list_mode)
   {
   }
 
@@ -225,32 +259,30 @@ class ImageBrowserGridItem : public PreviewGridItem {
   }
 };
 
-class ImageBrowserView : public AbstractGridView {
+class IDBrowserView : public AbstractGridView {
   PointerRNA target_ptr_;
   PropertyRNA *target_prop_;
   Main *bmain_;
   const bContext *context_;
-  int mode_;
-  const Material *material_;
-  char slot_type_;
+  /** Data-block list for the target property's ID type (#which_libbase). */
+  ListBaseT<ID> *idlb_;
+  IDBrowserFilter filter_;
   bool list_mode_;
 
  public:
-  ImageBrowserView(PointerRNA target_ptr,
-                   PropertyRNA *target_prop,
-                   Main *bmain,
-                   const bContext *C,
-                   int mode,
-                   const Material *material,
-                   char slot_type,
-                   const bool list_mode)
+  IDBrowserView(PointerRNA target_ptr,
+                PropertyRNA *target_prop,
+                Main *bmain,
+                const bContext *C,
+                ListBaseT<ID> *idlb,
+                const IDBrowserFilter &filter,
+                const bool list_mode)
       : target_ptr_(target_ptr),
         target_prop_(target_prop),
         bmain_(bmain),
         context_(C),
-        mode_(mode),
-        material_(material),
-        slot_type_(slot_type),
+        idlb_(idlb),
+        filter_(filter),
         list_mode_(list_mode)
   {
   }
@@ -260,157 +292,30 @@ class ImageBrowserView : public AbstractGridView {
     const PointerRNA active_ptr = RNA_property_pointer_get(&target_ptr_, target_prop_);
     const ID *active_id = active_ptr.data ? static_cast<ID *>(active_ptr.data) : nullptr;
 
-    for (Image &ima : bmain_->images) {
-      if (!image_id_passes_paint_filter(*bmain_, ima, mode_, material_, slot_type_)) {
+    for (ID &id : *idlb_) {
+      if (!filter_.passes(*context_, *bmain_, id)) {
         continue;
       }
-      const StringRef name = ima.id.name + 2;
-      const int preview_icon = id_icon_get(context_, &ima.id, !list_mode_);
-      ImageBrowserGridItem &item = this->add_item<ImageBrowserGridItem>(
-          name, name, preview_icon, &ima, list_mode_);
+      const StringRef name = id.name + 2;
+      const int preview_icon = id_icon_get(context_, &id, !list_mode_);
+      IDBrowserGridItem &item = this->add_item<IDBrowserGridItem>(
+          name, name, preview_icon, &id, list_mode_);
 
       PointerRNA target_ptr = target_ptr_;
       PropertyRNA *target_prop = target_prop_;
-      Image *ima_ptr = &ima;
+      ID *id_ptr = &id;
       item.set_on_activate_fn(
-          [target_ptr, target_prop, ima_ptr](bContext &C, PreviewGridItem & /*item*/) {
-            PointerRNA value = RNA_id_pointer_create(&ima_ptr->id);
+          [target_ptr, target_prop, id_ptr](bContext &C, PreviewGridItem & /*item*/) {
+            PointerRNA value = RNA_id_pointer_create(id_ptr);
             PointerRNA ptr = target_ptr;
             RNA_property_pointer_set(&ptr, target_prop, value, nullptr);
             RNA_property_update(&C, &ptr, target_prop);
           });
       item.set_is_active_fn(
-          [active_id, ima_ptr]() { return active_id != nullptr && &ima_ptr->id == active_id; });
+          [active_id, id_ptr]() { return active_id != nullptr && id_ptr == active_id; });
     }
   }
 };
-
-/**
- * Header height in block space (filters+view-mode row, optional slot row, search row, plus the
- * ~0.5 #UI_UNIT_Y gap above the grid). Used by #popup_block_grid_view2d_scroll to keep wheel
- * scrolling out of the fixed header. Filters and the view-mode toggle now share one row, so this
- * is reduced by one row versus the separate-rows layout; includes the half-unit gaps before
- * search and before the grid.
- */
-static constexpr float IMAGE_BROWSER_HEADER_UNITS_Y = 6.0f;
-
-static AbstractGridView *image_browser_grid_view_from_block(Block &block)
-{
-  return dynamic_cast<AbstractGridView *>(
-      block_view_find_by_idname(block, "image browser view"));
-}
-
-bool popup_image_browser_autoscroll_at_pointer(Block *block, const int my)
-{
-  if (block == nullptr) {
-    return false;
-  }
-  const AbstractGridView *grid_view = image_browser_grid_view_from_block(*block);
-  if (grid_view == nullptr) {
-    return false;
-  }
-  return grid_view->fixed_viewport_scroll_at_y(*block, float(my)).has_value();
-}
-
-void popup_image_browser_redraw_for_scroll_overlay(ARegion *region, Block *block)
-{
-  if (region == nullptr || block == nullptr) {
-    return;
-  }
-  const AbstractGridView *grid_view = image_browser_grid_view_from_block(*block);
-  if (grid_view == nullptr || !grid_view->use_fixed_viewport_layout() ||
-      grid_view->is_fully_visible())
-  {
-    return;
-  }
-  ED_region_tag_redraw(region);
-}
-
-bool popup_image_browser_scrolltimer_step(bContext * /*C*/,
-                                          PopupBlockHandle *menu,
-                                          Block *block,
-                                          const int my)
-{
-  if (block == nullptr || menu == nullptr || menu->region == nullptr) {
-    return false;
-  }
-  AbstractGridView *grid_view = image_browser_grid_view_from_block(*block);
-  if (grid_view == nullptr || !grid_view->use_fixed_viewport_layout()) {
-    return false;
-  }
-
-  const std::optional<ViewScrollDirection> scroll_dir = grid_view->fixed_viewport_scroll_at_y(
-      *block, float(my));
-  if (!scroll_dir) {
-    return false;
-  }
-
-  /* The scroll position is a row index stored in the grid view; the rebuild triggered below reads
-   * it to pick the visible rows. */
-  grid_view->scroll(*scroll_dir);
-  ED_region_tag_refresh_ui(menu->region);
-  return true;
-}
-
-bool popup_block_grid_view2d_scroll(bContext * /*C*/, ARegion *region, const wmEvent *event)
-{
-  if (region == nullptr) {
-    return false;
-  }
-
-  Block *block = static_cast<Block *>(region->runtime->uiblocks.first);
-  if (block == nullptr || (block->flag & BLOCK_POPOVER) == 0) {
-    return false;
-  }
-
-  AbstractGridView *grid_view = image_browser_grid_view_from_block(*block);
-  if (grid_view == nullptr || !grid_view->use_fixed_viewport_layout() ||
-      grid_view->is_fully_visible())
-  {
-    return false;
-  }
-
-  /* Don't steal wheel events while hovering the fixed header rows; only the grid scrolls. */
-  float mx = float(event->xy[0]);
-  float my = float(event->xy[1]);
-  window_to_block_fl(region, block, &mx, &my);
-  const float header_bottom = block->rect.ymax - UI_UNIT_Y * IMAGE_BROWSER_HEADER_UNITS_Y;
-  if (my > header_bottom) {
-    return false;
-  }
-
-  /* Discretize trackpad pan into whole wheel steps (same accumulation as #view_scroll_invoke);
-   * the row-snapped fixed viewport can only move in whole tile rows. */
-  int type = event->type;
-  bool invert = false;
-  if (type == MOUSEPAN) {
-    int dummy_val;
-    pan_to_scroll(event, &type, &dummy_val);
-    /* #pan_to_scroll gives the absolute direction. */
-    if (event->flag & WM_EVENT_SCROLL_INVERT) {
-      invert = true;
-    }
-  }
-
-  std::optional<ViewScrollDirection> direction;
-  if (type == WHEELUPMOUSE) {
-    direction = invert ? ViewScrollDirection::DOWN : ViewScrollDirection::UP;
-  }
-  else if (type == WHEELDOWNMOUSE) {
-    direction = invert ? ViewScrollDirection::UP : ViewScrollDirection::DOWN;
-  }
-  else {
-    return false;
-  }
-
-  /* The scroll position is a row index stored in the grid view (#scroll_value_), not the region
-   * #View2D. The popup pipeline re-initializes the region #View2D on every refresh, so it can't
-   * hold a stable scroll position. The rebuild triggered below reads the row index to pick the
-   * visible rows. */
-  grid_view->scroll(*direction);
-  ED_region_tag_refresh_ui(region);
-  return true;
-}
 
 /**
  * Grid viewport height (in #UI_UNIT_Y) for the current popover.
@@ -422,15 +327,15 @@ bool popup_block_grid_view2d_scroll(bContext * /*C*/, ARegion *region, const wmE
  * still fits the available vertical space; the grid keeps its own internal row scrolling.
  *
  * \a non_grid_units: header rows and gaps consumed before/after the grid (kept in sync with the
- * layout in #image_browser_popover_draw). \a tile_units: one tile row height in #UI_UNIT_Y; the
+ * layout in #id_browser_popover_draw). \a tile_units: one tile row height in #UI_UNIT_Y; the
  * result is snapped to whole rows so the viewport shows complete rows with no trailing gap.
  */
-static float image_browser_grid_viewport_units(const bContext *C,
+static float id_browser_grid_viewport_units(const bContext *C,
                                                const Block *block,
                                                const float non_grid_units,
                                                const float tile_units)
 {
-  const float default_units = IMAGE_BROWSER_GRID_VIEWPORT_UNITS_Y;
+  const float default_units = ID_BROWSER_GRID_VIEWPORT_UNITS_Y;
   if (block == nullptr || block->handle == nullptr) {
     return default_units;
   }
@@ -476,46 +381,70 @@ static float image_browser_grid_viewport_units(const bContext *C,
   return std::clamp(float(rows) * tile, tile, default_units);
 }
 
-static void build_image_grid(const bContext &C, Layout &layout, const float grid_viewport_units)
+static void build_id_grid(const bContext &C, Layout &layout, const float grid_viewport_units)
 {
-  PointerRNA target_ptr = CTX_data_pointer_get(&C, "image_browser_ptr");
-  const std::optional<StringRefNull> prop_name = CTX_data_string_get(&C, "image_browser_prop");
+  PointerRNA target_ptr = CTX_data_pointer_get(&C, "id_browser_ptr");
+  const std::optional<StringRefNull> prop_name = CTX_data_string_get(&C, "id_browser_prop");
   if (target_ptr.data == nullptr || !prop_name) {
     return;
   }
   PropertyRNA *target_prop = RNA_struct_find_property(&target_ptr, prop_name->c_str());
-  if (!target_prop) {
+  if (!target_prop || RNA_property_type(target_prop) != PROP_POINTER) {
     return;
   }
 
-  StructRNA *srna = nullptr;
-  SpaceLink *sl = image_browser_active_space(&C, &srna);
-  if (sl == nullptr) {
+  wmWindowManager *wm = CTX_wm_manager(&C);
+  if (wm == nullptr) {
     return;
   }
-  bScreen *screen = CTX_wm_screen(&C);
-  PointerRNA space_ptr = RNA_pointer_create_discrete(&screen->id, srna, sl);
+  PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
 
-  int mode = RNA_enum_get(&space_ptr, "image_filter_mode");
-  char slot_type = char(RNA_enum_get(&space_ptr, "image_filter_slot_type"));
-  const PointerRNA mat_ptr = CTX_data_pointer_get(&C, "image_browser_material");
-  const Material *material = static_cast<const Material *>(mat_ptr.data);
-
-  if (material == nullptr && (mode & TEMPLATE_ID_FILTER_CURRENT_MATERIAL)) {
-    mode = TEMPLATE_ID_FILTER_ALL;
-  }
-
-  const int view_mode = RNA_enum_get(&space_ptr, "image_browser_view_mode");
-  const bool list_mode = view_mode == IMAGE_BROWSER_VIEW_LIST;
-
+  /* The browsed items are the data-blocks of the target property's ID type. */
   Main *bmain = CTX_data_main(&C);
-  std::unique_ptr<ImageBrowserView> view = std::make_unique<ImageBrowserView>(
-      target_ptr, target_prop, bmain, &C, mode, material, slot_type, list_mode);
+  const StructRNA *ptr_type = RNA_property_pointer_type(&target_ptr, target_prop);
+  const short idcode = ptr_type ? RNA_type_to_ID_code(ptr_type) : 0;
+  ListBaseT<ID> *idlb = (idcode != 0) ? which_libbase(bmain, idcode) : nullptr;
+  if (idlb == nullptr) {
+    return;
+  }
+
+  IDBrowserFilter filter;
+  /* Built-in paint-slot filter: only for image targets, and only when an Image/Node editor backs
+   * its state. Read straight from the space data so a refresh sees the current toggle values. */
+  StructRNA *space_srna = nullptr;
+  SpaceLink *sl = (idcode == ID_IM) ? image_browser_active_space(&C, &space_srna) : nullptr;
+  if (sl != nullptr) {
+    bScreen *screen = CTX_wm_screen(&C);
+    if (screen != nullptr) {
+      PointerRNA space_ptr = RNA_pointer_create_discrete(&screen->id, space_srna, sl);
+      int mode = RNA_enum_get(&space_ptr, "image_filter_mode");
+      const PointerRNA mat_ptr = CTX_data_pointer_get(&C, "id_browser_material");
+      const Material *material = static_cast<const Material *>(mat_ptr.data);
+      if (material == nullptr && (mode & TEMPLATE_ID_FILTER_CURRENT_MATERIAL)) {
+        mode = TEMPLATE_ID_FILTER_ALL;
+      }
+      filter.paint_mode = mode;
+      filter.slot_type = char(RNA_enum_get(&space_ptr, "image_filter_slot_type"));
+      filter.material = material;
+    }
+  }
+  /* Optional script-defined filter, referenced by name (see #template_id_browser `filter_type`). */
+  if (const std::optional<StringRefNull> filter_type_idname = CTX_data_string_get(
+          &C, "id_browser_filter_type"))
+  {
+    filter.custom = id_filter_type_find(*filter_type_idname);
+  }
+
+  const bool list_mode = RNA_enum_get(&wm_ptr, "id_browser_view_mode") ==
+                         IMAGE_BROWSER_VIEW_LIST;
+
+  std::unique_ptr<IDBrowserView> view = std::make_unique<IDBrowserView>(
+      target_ptr, target_prop, bmain, &C, idlb, filter, list_mode);
 
   if (list_mode) {
     /* One item per row; width matches the popover so selection covers the full row. */
     const float units_x = layout.ui_units_x() > 0.0f ? layout.ui_units_x() :
-                                                       IMAGE_BROWSER_POPOVER_UNITS_X;
+                                                       ID_BROWSER_POPOVER_UNITS_X;
     view->set_tile_size(int(units_x * UI_UNIT_X), UI_UNIT_X);
   }
   else {
@@ -528,20 +457,21 @@ static void build_image_grid(const bContext &C, Layout &layout, const float grid
   Block *block = layout.block();
 
   std::optional<StringRef> filter_str;
-  if (g_image_browser_search[0] != '\0') {
-    char search[sizeof(g_image_browser_search) + 2];
-    BLI_strncpy_ensure_pad(search, g_image_browser_search, '*', sizeof(search));
-    filter_str = search;
+  char search_pattern[sizeof(wm->runtime->id_browser_search) + 2];
+  if (wm->runtime->id_browser_search[0] != '\0') {
+    BLI_strncpy_ensure_pad(
+        search_pattern, wm->runtime->id_browser_search, '*', sizeof(search_pattern));
+    filter_str = search_pattern;
   }
 
-  AbstractGridView *grid_view = block_add_view(*block, "image browser view", std::move(view));
+  AbstractGridView *grid_view = block_add_view(*block, "id browser view", std::move(view));
 
   /* True only on the popover's initial build. On a refresh (#ED_region_tag_refresh_ui fires on
    * every scroll step) the region already has the old block, so #Block::oldblock is non-null.
    * On first open the region is fresh and #uiblocks is empty → #oldblock is null. */
   const bool first_open = block->oldblock == nullptr;
 
-  /* Scroll the currently assigned image into view only when the popover first opens. The grid
+  /* Scroll the currently assigned data-block into view only when the popover first opens. The grid
    * view defers this until its build (when the column count is known) and applies it as a row
    * offset. A refresh fires on each scroll step; re-centering on every refresh would fight the
    * user's scrolling and clamp the view to the active item's row, making the last rows
@@ -554,52 +484,84 @@ static void build_image_grid(const bContext &C, Layout &layout, const float grid
   builder.build_grid_view(C, *grid_view, layout, filter_str);
 }
 
-static bool image_browser_popover_poll(const bContext *C, PanelType * /*panel_type*/)
+static bool id_browser_popover_poll(const bContext * /*C*/, PanelType * /*panel_type*/)
 {
-  StructRNA *srna = nullptr;
-  return image_browser_active_space(C, &srna) != nullptr;
+  /* Available from any editor: the popover is only ever invoked from #template_id_browser, which
+   * supplies its target via context, and its UI state lives on the window manager (not on a
+   * specific space). The optional paint-slot filters are shown only when an Image/Node editor
+   * provides the relevant space (see #id_browser_popover_draw). */
+  return true;
 }
 
-static void image_browser_popover_draw(const bContext *C, Panel *panel)
+static void id_browser_popover_draw(const bContext *C, Panel *panel)
 {
-  StructRNA *srna = nullptr;
-  SpaceLink *sl = image_browser_active_space(C, &srna);
-  if (sl == nullptr) {
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm == nullptr) {
     return;
   }
+  /* The popover's own UI state (view mode, search) lives on the window manager, so it works in any
+   * editor. */
+  PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
+
+  /* The built-in paint-slot filters need an Image/Node editor's space to store their state; they
+   * are optional. When absent (the popover is used elsewhere) the search, view toggle and any
+   * script-defined filter still work. */
+  StructRNA *space_srna = nullptr;
+  SpaceLink *sl = image_browser_active_space(C, &space_srna);
   bScreen *screen = CTX_wm_screen(C);
-  PointerRNA space_ptr = RNA_pointer_create_discrete(&screen->id, srna, sl);
+  PointerRNA space_ptr = {};
+  if (sl != nullptr && screen != nullptr) {
+    space_ptr = RNA_pointer_create_discrete(&screen->id, space_srna, sl);
+  }
+
+  /* Resolve the target ID type: the paint filters apply to images only. */
+  PointerRNA target_ptr = CTX_data_pointer_get(C, "id_browser_ptr");
+  const std::optional<StringRefNull> prop_name = CTX_data_string_get(C, "id_browser_prop");
+  PropertyRNA *target_prop = (target_ptr.data && prop_name) ?
+                                 RNA_struct_find_property(&target_ptr, prop_name->c_str()) :
+                                 nullptr;
+  bool is_image = false;
+  if (target_prop && RNA_property_type(target_prop) == PROP_POINTER) {
+    const StructRNA *ptr_type = RNA_property_pointer_type(&target_ptr, target_prop);
+    is_image = ptr_type && RNA_type_to_ID_code(ptr_type) == ID_IM;
+  }
+  /* The paint filters need both an image target and a space to back their state. */
+  const bool show_paint_filters = is_image && space_ptr.data != nullptr;
 
   Layout &layout = *panel->layout;
-  layout.ui_units_x_set(IMAGE_BROWSER_POPOVER_UNITS_X);
+  layout.ui_units_x_set(ID_BROWSER_POPOVER_UNITS_X);
 
   Layout &header = layout.column(true);
   header.fixed_size_set(true);
 
-  const bool has_material = CTX_data_pointer_get(C, "image_browser_material").data != nullptr;
+  const bool has_material = CTX_data_pointer_get(C, "id_browser_material").data != nullptr;
 
-  /* Filters on the left, view-mode toggle pushed to the right of the same row (saves one header
-   * row vs. a dedicated view-mode row). #separator_spacer is unsupported in popups, so split the
-   * row and right-align the view-mode group. */
+  /* Paint filters on the left, view-mode toggle pushed to the right of the same row (saves one
+   * header row vs. a dedicated view-mode row). #separator_spacer is unsupported in popups, so split
+   * the row and right-align the view-mode group. The paint filters only make sense for images. */
   Layout &filter_row = header.split(0.6f, false);
   Layout &filters = filter_row.row(true);
-  filters.prop_enum(&space_ptr, "image_filter_mode", "ALL", "", ICON_NONE);
-  Layout &mat_sub = filters.row(true);
-  mat_sub.active_set(has_material);
-  mat_sub.prop_enum(&space_ptr, "image_filter_mode", "CURRENT_MATERIAL", "", ICON_NONE);
-  filters.prop_enum(&space_ptr, "image_filter_mode", "SLOT_TYPE", "", ICON_NONE);
-  Layout &both_sub = filters.row(true);
-  both_sub.active_set(has_material);
-  both_sub.prop_enum(
-      &space_ptr, "image_filter_mode", "CURRENT_MATERIAL_AND_SLOT_TYPE", "", ICON_NONE);
+  if (show_paint_filters) {
+    filters.prop_enum(&space_ptr, "image_filter_mode", "ALL", "", ICON_NONE);
+    Layout &mat_sub = filters.row(true);
+    mat_sub.active_set(has_material);
+    mat_sub.prop_enum(&space_ptr, "image_filter_mode", "CURRENT_MATERIAL", "", ICON_NONE);
+    filters.prop_enum(&space_ptr, "image_filter_mode", "SLOT_TYPE", "", ICON_NONE);
+    Layout &both_sub = filters.row(true);
+    both_sub.active_set(has_material);
+    both_sub.prop_enum(
+        &space_ptr, "image_filter_mode", "CURRENT_MATERIAL_AND_SLOT_TYPE", "", ICON_NONE);
+  }
 
   Layout &view_mode_row = filter_row.row(true);
   view_mode_row.alignment_set(LayoutAlign::Right);
-  view_mode_row.prop_enum(&space_ptr, "image_browser_view_mode", "GRID", "", ICON_NONE);
-  view_mode_row.prop_enum(&space_ptr, "image_browser_view_mode", "LIST", "", ICON_NONE);
+  view_mode_row.prop_enum(&wm_ptr, "id_browser_view_mode", "GRID", "", ICON_NONE);
+  view_mode_row.prop_enum(&wm_ptr, "id_browser_view_mode", "LIST", "", ICON_NONE);
 
-  const int mode = RNA_enum_get(&space_ptr, "image_filter_mode");
-  if (mode & TEMPLATE_ID_FILTER_SLOT_TYPE) {
+  const int mode = show_paint_filters ? RNA_enum_get(&space_ptr, "image_filter_mode") :
+                                        TEMPLATE_ID_FILTER_ALL;
+  const bool slot_row = (mode & TEMPLATE_ID_FILTER_SLOT_TYPE) != 0;
+  if (slot_row) {
     header.prop(&space_ptr, "image_filter_slot_type", eUI_Item_Flag(0), "", ICON_NONE);
   }
 
@@ -607,25 +569,27 @@ static void image_browser_popover_draw(const bContext *C, Panel *panel)
   const float half_unit_gap_factor = (0.5f * UI_UNIT_Y) / (6.0f * UI_SCALE_FAC);
   header.separator(half_unit_gap_factor);
 
-  Layout &search_row = header.row(true);
-  Block *search_block = search_row.block();
-  Button *search_but = uiDefBut(search_block,
-                                ButtonType::Text,
-                                "",
-                                0,
-                                0,
-                                UI_UNIT_X * (IMAGE_BROWSER_POPOVER_UNITS_X - 2.0f),
-                                UI_UNIT_Y,
-                                g_image_browser_search,
-                                0.0f,
-                                float(sizeof(g_image_browser_search)),
-                                TIP_("Filter by name"));
-  button_flag2_enable(search_but, BUT2_FORCE_SEMI_MODAL_ACTIVE);
-  /* Live filter while typing (same as asset shelf search_filter with PROP_TEXTEDIT_UPDATE). */
-  button_flag_enable(search_but, BUT_TEXTEDIT_UPDATE);
-  /* Magnifier on the left, matching standard search fields (e.g. tree-view filter). */
-  def_but_icon(search_but, ICON_VIEWZOOM, UI_HAS_ICON);
-  button_placeholder_set(search_but, IFACE_("Search"));
+  {
+    Layout &search_row = header.row(true);
+    Block *search_block = search_row.block();
+    Button *search_but = uiDefBut(search_block,
+                                  ButtonType::Text,
+                                  "",
+                                  0,
+                                  0,
+                                  UI_UNIT_X * (ID_BROWSER_POPOVER_UNITS_X - 2.0f),
+                                  UI_UNIT_Y,
+                                  wm->runtime->id_browser_search,
+                                  0.0f,
+                                  float(sizeof(wm->runtime->id_browser_search)),
+                                  TIP_("Filter by name"));
+    button_flag2_enable(search_but, BUT2_FORCE_SEMI_MODAL_ACTIVE);
+    /* Live filter while typing (same as asset shelf search_filter with PROP_TEXTEDIT_UPDATE). */
+    button_flag_enable(search_but, BUT_TEXTEDIT_UPDATE);
+    /* Magnifier on the left, matching standard search fields (e.g. tree-view filter). */
+    def_but_icon(search_but, ICON_VIEWZOOM, UI_HAS_ICON);
+    button_placeholder_set(search_but, IFACE_("Search"));
+  }
 
   /* Empty gap (~0.5 #UI_UNIT_Y) between the search field and the grid; the persistent scroll-up
    * arrow (#AbstractGridView::draw_overlays) is drawn here, clear of the top tiles. */
@@ -634,45 +598,52 @@ static void image_browser_popover_draw(const bContext *C, Panel *panel)
   /* Header/gap height consumed before the grid, kept in sync with the layout built above:
    * filters row, optional slot-type row, the 0.5-unit separator, the search row, and the
    * 0.5-unit gaps above and below the grid. */
-  const bool slot_row = (mode & TEMPLATE_ID_FILTER_SLOT_TYPE) != 0;
   const float non_grid_units = 1.0f + (slot_row ? 1.0f : 0.0f) + 0.5f + 1.0f + 0.5f + 0.5f;
-  const bool list_mode = RNA_enum_get(&space_ptr, "image_browser_view_mode") ==
+  const bool list_mode = RNA_enum_get(&wm_ptr, "id_browser_view_mode") ==
                          IMAGE_BROWSER_VIEW_LIST;
   const float tile_units = list_mode ? float(UI_UNIT_X) / float(UI_UNIT_Y) : 3.0f;
 
   /* Shrink the grid when a zoomed popover would otherwise overflow the window (see
-   * #image_browser_grid_viewport_units); keeps the fixed header on screen while scrolling. */
-  const float grid_units = image_browser_grid_viewport_units(
+   * #id_browser_grid_viewport_units); keeps the fixed header on screen while scrolling. */
+  const float grid_units = id_browser_grid_viewport_units(
       C, layout.block(), non_grid_units, tile_units);
 
   Layout &grid_area = layout.column(true);
-  grid_area.ui_units_x_set(IMAGE_BROWSER_POPOVER_UNITS_X);
+  grid_area.ui_units_x_set(ID_BROWSER_POPOVER_UNITS_X);
   grid_area.ui_units_y_set(grid_units);
   grid_area.fixed_size_set(true);
 
-  build_image_grid(*C, grid_area, grid_units);
+  build_id_grid(*C, grid_area, grid_units);
 
   /* Matching gap under the grid for the persistent scroll-down arrow. */
   layout.separator(half_unit_gap_factor);
 }
 
-void image_browser_add_popover_button(
-    Layout &row, const bContext *C, PointerRNA *ptr, const char *propname, Material *material)
+void id_browser_add_popover_button(Layout &row,
+                                      const bContext *C,
+                                      PointerRNA *ptr,
+                                      const char *propname,
+                                      Material *material,
+                                      const char *filter_type)
 {
-  image_browser_popover_register();
+  id_browser_popover_register();
 
-  row.context_ptr_set("image_browser_ptr", ptr);
-  row.context_string_set("image_browser_prop", propname);
+  row.context_ptr_set("id_browser_ptr", ptr);
+  row.context_string_set("id_browser_prop", propname);
   if (material) {
     PointerRNA mat_ptr = RNA_id_pointer_create(&material->id);
-    row.context_ptr_set("image_browser_material", &mat_ptr);
+    row.context_ptr_set("id_browser_material", &mat_ptr);
+  }
+  if (filter_type && filter_type[0] != '\0') {
+    /* Read back in #build_id_grid via #id_filter_type_find. */
+    row.context_string_set("id_browser_filter_type", filter_type);
   }
 
   PropertyRNA *prop = RNA_struct_find_property(ptr, propname);
   const StructRNA *type = RNA_property_pointer_type(ptr, prop);
   const int icon = type ? RNA_struct_ui_icon(type) : ICON_IMAGE_DATA;
 
-  row.popover(C, "UI_PT_image_browser", "", icon, PopupAttachDirection::VerticalAlignLeft);
+  row.popover(C, "UI_PT_id_browser", "", icon, PopupAttachDirection::VerticalAlignLeft);
 }
 
 /** \} */
@@ -681,14 +652,15 @@ void image_browser_add_popover_button(
 /** \name Entry point
  * \{ */
 
-void uiTemplateImageBrowse(Layout *layout,
-                           const bContext *C,
-                           PointerRNA *ptr,
-                           const char *propname,
-                           Material *material,
-                           const char *newop,
-                           const char *openop,
-                           const char *unlinkop)
+void template_id_browser(Layout *layout,
+                         const bContext *C,
+                         PointerRNA *ptr,
+                         const char *propname,
+                         Material *material,
+                         const char *newop,
+                         const char *openop,
+                         const char *unlinkop,
+                         const char *filter_type)
 {
   PropertyRNA *prop = RNA_struct_find_property(ptr, propname);
   if (!prop || RNA_property_type(prop) != PROP_POINTER) {
@@ -697,7 +669,7 @@ void uiTemplateImageBrowse(Layout *layout,
   }
 
   Layout &row = layout->row(true);
-  image_browser_add_popover_button(row, C, ptr, propname, material);
+  id_browser_add_popover_button(row, C, ptr, propname, material, filter_type);
   template_id_image_row_append_standard(C, row, ptr, prop, newop, openop, unlinkop);
 }
 

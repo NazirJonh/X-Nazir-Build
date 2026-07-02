@@ -86,7 +86,7 @@ Block *template_common_search_menu(const bContext *C,
 
 /**
  * Append the standard #template_ID controls (rename, new, open, users, etc.) without the browse
- * search-menu button. Used with #image_browser_add_popover_button for image paint browsing.
+ * search-menu button. Used with #id_browser_add_popover_button for image paint browsing.
  */
 void template_id_image_row_append_standard(const bContext *C,
                                            Layout &layout,
@@ -107,10 +107,17 @@ bool image_id_passes_paint_filter(
     Main &bmain, const Image &image, int filter_mode, const Material *material, char slot_type);
 
 /**
- * Add the image-browser popover button to \a row (replaces the browse search-menu button).
+ * Add the ID-browser popover button to \a row (replaces the browse search-menu button). Named for
+ * its primary use (image paint slots) but generic over the target property's ID type.
+ * \a filter_type optionally names a registered #IDFilterType to narrow the popover's contents
+ * (may be null/empty).
  */
-void image_browser_add_popover_button(
-    Layout &row, const bContext *C, PointerRNA *ptr, const char *propname, Material *material);
+void id_browser_add_popover_button(Layout &row,
+                                      const bContext *C,
+                                      PointerRNA *ptr,
+                                      const char *propname,
+                                      Material *material,
+                                      const char *filter_type);
 
 }  // namespace ui
 }  // namespace blender

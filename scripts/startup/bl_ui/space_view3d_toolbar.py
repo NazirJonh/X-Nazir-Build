@@ -484,7 +484,7 @@ class SelectPaintSlotHelper:
                 mesh = ob.data
                 uv_text = mesh.uv_layers.active.name if mesh.uv_layers.active else ""
                 mat = ob.active_material if ob else None
-                layout.template_image_browse(
+                layout.template_ID_browser(
                     mode_settings, self.canvas_image_attr_name,
                     new="image.new", open="image.open",
                     material=mat,

@@ -504,7 +504,7 @@ class ClonePanel(BrushPanel):
             clone_text = mesh.uv_layer_clone.name if mesh.uv_layer_clone else ""
             col.label(text="Source Clone Image")
             mat = ob.active_material if ob else None
-            col.template_image_browse(
+            col.template_ID_browser(
                 settings, "clone_image",
                 new="image.new", open="image.open",
                 material=mat,

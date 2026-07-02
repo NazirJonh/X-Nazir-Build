@@ -4572,25 +4572,10 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
-  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 42)) {
-    for (bScreen &screen : bmain->screens) {
-      for (ScrArea &area : screen.areabase) {
-        for (SpaceLink &sl : area.spacedata) {
-          if (sl.spacetype == SPACE_IMAGE) {
-            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
-            sima->image_browser_view_mode = IMAGE_BROWSER_VIEW_GRID;
-          }
-          else if (sl.spacetype == SPACE_NODE) {
-            SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
-            snode->image_browser_view_mode = IMAGE_BROWSER_VIEW_GRID;
-          }
-        }
-      }
-    }
-  }
-
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 43)) {
-    /* Initialize SpaceView3D image browser filter fields, mirroring SpaceImage and SpaceNode. */
+    /* Initialize SpaceView3D image browser paint-slot filter fields, mirroring #SpaceImage and
+     * #SpaceNode. The grid/list view mode and search now live on the window manager (see
+     * #wmWindowManager::id_browser_view_mode), so they need no per-space initialization. */
     for (bScreen &screen : bmain->screens) {
       for (ScrArea &area : screen.areabase) {
         for (SpaceLink &sl : area.spacedata) {
@@ -4602,7 +4587,6 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
             if (v3d->image_filter_slot_type == 0) {
               v3d->image_filter_slot_type = NODE_TEX_IMAGE_SLOT_NONE;
             }
-            v3d->image_browser_view_mode = IMAGE_BROWSER_VIEW_GRID;
           }
         }
       }

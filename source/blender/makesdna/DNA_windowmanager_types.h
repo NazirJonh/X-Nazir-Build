@@ -139,7 +139,16 @@ struct wmWindowManager {
   struct wmTimer *autosavetimer = nullptr;
   /** Auto-save timer was up, but it wasn't possible to auto-save in the current mode. */
   char autosave_scheduled = 0;
-  char _pad2[7] = {};
+
+  /**
+   * Persistent grid/list display mode of the ID-browser popover (#UI_PT_id_browser). Kept here,
+   * rather than in a specific editor's space, so the popover and #UILayout.template_ID_browser
+   * work from any editor. Only one such popover is open at a time, so a single shared value is
+   * correct. The transient name-search text is session-only, see
+   * #bke::WindowManagerRuntime::id_browser_search. #eImageBrowserViewMode.
+   */
+  char id_browser_view_mode = 0;
+  char _pad2[6] = {};
 
   // #ifdef WITH_XR_OPENXR
   wmXrData xr;

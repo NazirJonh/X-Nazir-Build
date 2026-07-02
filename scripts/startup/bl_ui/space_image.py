@@ -906,7 +906,7 @@ class IMAGE_HT_header(Header):
         if sima.mode == 'PAINT':
             ob = context.image_paint_object
             mat = ob.active_material if ob else None
-            layout.template_image_browse(
+            layout.template_ID_browser(
                 sima,
                 "image",
                 new="image.new",

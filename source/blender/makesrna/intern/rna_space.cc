@@ -47,16 +47,6 @@
 
 namespace blender {
 
-static const EnumPropertyItem rna_enum_image_browser_view_mode_items[] = {
-    {IMAGE_BROWSER_VIEW_GRID,
-     "GRID",
-     ICON_IMGDISPLAY,
-     "Grid",
-     "Show images as a grid of previews"},
-    {IMAGE_BROWSER_VIEW_LIST, "LIST", ICON_LONGDISPLAY, "List", "Show images as a list"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
 const EnumPropertyItem rna_enum_geometry_component_type_items[] = {
     {int(bke::GeometryComponent::Type::Mesh),
      "MESH",
@@ -6006,13 +5996,6 @@ static void rna_def_space_view3d(BlenderRNA *brna)
     RNA_def_property_ui_text(
         prop, "Image Filter Slot Type", "Paint slot type used when filtering by slot type");
     RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
-
-    prop = RNA_def_property(srna, "image_browser_view_mode", PROP_ENUM, PROP_NONE);
-    RNA_def_property_enum_sdna(prop, nullptr, "image_browser_view_mode");
-    RNA_def_property_enum_items(prop, rna_enum_image_browser_view_mode_items);
-    RNA_def_property_ui_text(
-        prop, "Image Browser View", "How images are listed in the image browser popover");
-    RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
   }
 
   /* Nested Structs */
@@ -6406,13 +6389,6 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, rna_enum_node_tex_image_paint_slot_type_items);
   RNA_def_property_ui_text(
       prop, "Image Filter Slot Type", "Paint slot type used when filtering by slot type");
-
-  prop = RNA_def_property(srna, "image_browser_view_mode", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "image_browser_view_mode");
-  RNA_def_property_enum_items(prop, rna_enum_image_browser_view_mode_items);
-  RNA_def_property_ui_text(
-      prop, "Image Browser View", "How images are listed in the image browser popover");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 
   prop = RNA_def_property(srna, "sample_histogram", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "sample_line_hist");
@@ -8626,13 +8602,6 @@ static void rna_def_space_node(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, rna_enum_node_tex_image_paint_slot_type_items);
   RNA_def_property_ui_text(
       prop, "Image Filter Slot Type", "Paint slot type used when filtering by slot type");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_NODE, nullptr);
-
-  prop = RNA_def_property(srna, "image_browser_view_mode", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "image_browser_view_mode");
-  RNA_def_property_enum_items(prop, rna_enum_image_browser_view_mode_items);
-  RNA_def_property_ui_text(
-      prop, "Image Browser View", "How images are listed in the image browser popover");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_NODE, nullptr);
 
   prop = RNA_def_property(srna, "texture_type", PROP_ENUM, PROP_NONE);

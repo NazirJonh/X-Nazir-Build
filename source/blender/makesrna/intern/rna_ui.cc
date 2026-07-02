@@ -1670,6 +1670,151 @@ static StructRNA *rna_FileHandler_refine(PointerRNA *file_handler_ptr)
              RNA_FileHandler;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name ID Filter
+ *
+ * Script-defined filters (#ui::IDFilterType) for ID-browsing templates. Registration mirrors the
+ * asset-shelf / file-handler model; #id_filter_filter_id bridges a candidate ID to the registered
+ * class's `filter_id` method.
+ * \{ */
+
+static bool id_filter_filter_id(const ui::IDFilterType *filter_type, const bContext *C, ID *id)
+{
+  extern FunctionRNA *rna_IDFilter_filter_id_func;
+
+  PointerRNA ptr = RNA_pointer_create_discrete(
+      nullptr, filter_type->rna_ext.srna, nullptr); /* dummy */
+  FunctionRNA *func = rna_IDFilter_filter_id_func;
+
+  ParameterList list;
+  RNA_parameter_list_create(&list, &ptr, func);
+  RNA_parameter_set_lookup(&list, "context", &C);
+  RNA_parameter_set_lookup(&list, "id", &id);
+  filter_type->rna_ext.call(const_cast<bContext *>(C), &ptr, func, &list);
+
+  void *ret;
+  RNA_parameter_get_lookup(&list, "visible", &ret);
+  /* Get the value before freeing. */
+  const bool is_visible = *static_cast<bool *>(ret);
+
+  RNA_parameter_list_free(&list);
+
+  return is_visible;
+}
+
+static void rna_IDFilter_bl_idname_get(PointerRNA *ptr, char *value)
+{
+  const ui::IDFilterType *filter_type = static_cast<ui::IDFilterType *>(ptr->data);
+  /* The destination buffer is sized from #rna_IDFilter_bl_idname_length, so an exact copy is safe. */
+  StringRef(filter_type->idname).copy_unsafe(value);
+}
+
+static int rna_IDFilter_bl_idname_length(PointerRNA *ptr)
+{
+  const ui::IDFilterType *filter_type = static_cast<ui::IDFilterType *>(ptr->data);
+  return strlen(filter_type->idname);
+}
+
+static void rna_IDFilter_bl_idname_set(PointerRNA *ptr, const char *value)
+{
+  ui::IDFilterType *filter_type = static_cast<ui::IDFilterType *>(ptr->data);
+  STRNCPY(filter_type->idname, value);
+}
+
+static bool rna_IDFilter_unregister(Main * /*bmain*/, StructRNA *type)
+{
+  ui::IDFilterType *filter_type = static_cast<ui::IDFilterType *>(
+      RNA_struct_blender_type_get(type));
+  if (!filter_type) {
+    return false;
+  }
+
+  RNA_struct_free_extension(type, &filter_type->rna_ext);
+  RNA_struct_free(&RNA_blender_rna_get(), type);
+
+  ui::id_filter_type_unregister(*filter_type);
+
+  /* Update while blender is running. */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  return true;
+}
+
+static StructRNA *rna_IDFilter_register(Main *bmain,
+                                        ReportList *reports,
+                                        void *data,
+                                        const char *identifier,
+                                        StructValidateFunc validate,
+                                        StructCallbackFunc call,
+                                        StructFreeFunc free)
+{
+  /* Reuse a single stack instance to receive the class's static properties (e.g. bl_idname). */
+  ui::IDFilterType dummy_filter_type = {};
+  PointerRNA dummy_ptr = RNA_pointer_create_discrete(nullptr, RNA_IDFilter, &dummy_filter_type);
+
+  bool have_function[1];
+
+  /* Validate the python class. */
+  if (validate(&dummy_ptr, data, have_function) != 0) {
+    return nullptr;
+  }
+
+  if (strlen(identifier) >= sizeof(dummy_filter_type.idname)) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Registering ID filter class: '%s' is too long, maximum length is %d",
+                identifier,
+                int(sizeof(dummy_filter_type.idname)));
+    return nullptr;
+  }
+
+  /* Replace a filter of the same name registered earlier. */
+  if (ui::IDFilterType *existing_type = ui::id_filter_type_find(dummy_filter_type.idname)) {
+    if (existing_type->rna_ext.srna) {
+      BKE_reportf(reports,
+                  RPT_INFO,
+                  "Registering ID filter class: '%s' has been registered before, unregistering "
+                  "previous",
+                  dummy_filter_type.idname);
+      rna_IDFilter_unregister(bmain, existing_type->rna_ext.srna);
+    }
+  }
+
+  if (!RNA_struct_available_or_report(reports, dummy_filter_type.idname)) {
+    return nullptr;
+  }
+  if (!RNA_struct_bl_idname_ok_or_report(reports, dummy_filter_type.idname, "_IDF_")) {
+    return nullptr;
+  }
+
+  std::unique_ptr<ui::IDFilterType> filter_type = std::make_unique<ui::IDFilterType>();
+  STRNCPY(filter_type->idname, dummy_filter_type.idname);
+
+  filter_type->rna_ext.srna = RNA_def_struct_ptr(
+      &RNA_blender_rna_get(), filter_type->idname, RNA_IDFilter);
+  filter_type->rna_ext.data = data;
+  filter_type->rna_ext.call = call;
+  filter_type->rna_ext.free = free;
+  RNA_struct_blender_type_set(filter_type->rna_ext.srna, filter_type.get());
+
+  filter_type->filter_id = have_function[0] ? id_filter_filter_id : nullptr;
+
+  StructRNA *srna = filter_type->rna_ext.srna;
+  ui::id_filter_type_register(std::move(filter_type));
+
+  /* Update while blender is running. */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+
+  return srna;
+}
+
+static StructRNA *rna_IDFilter_refine(PointerRNA *ptr)
+{
+  ui::IDFilterType *filter_type = static_cast<ui::IDFilterType *>(ptr->data);
+  return (filter_type && filter_type->rna_ext.srna) ? filter_type->rna_ext.srna : RNA_IDFilter;
+}
+
+/** \} */
+
 }  // namespace blender
 
 #else /* RNA_RUNTIME */
@@ -2332,6 +2477,51 @@ static void rna_def_menu(BlenderRNA *brna)
   RNA_define_verify_sdna(true);
 }
 
+static void rna_def_id_filter(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *parm;
+  FunctionRNA *func;
+
+  srna = RNA_def_struct(brna, "IDFilter", nullptr);
+  RNA_def_struct_ui_text(
+      srna,
+      "ID Filter",
+      "Script-defined filter deciding which data-blocks an ID-browser popover or search offers "
+      "(referenced by name from UILayout.template_ID_browser and "
+      "UILayout.template_ID_with_filter_context)");
+  RNA_def_struct_refine_func(srna, "rna_IDFilter_refine");
+  RNA_def_struct_register_funcs(srna, "rna_IDFilter_register", "rna_IDFilter_unregister", nullptr);
+  RNA_def_struct_translation_context(srna, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  RNA_def_struct_flag(srna, STRUCT_PUBLIC_NAMESPACE_INHERIT);
+
+  /* Registration. */
+  PropertyRNA *prop = RNA_def_property(srna, "bl_idname", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_IDFilter_bl_idname_get",
+                                "rna_IDFilter_bl_idname_length",
+                                "rna_IDFilter_bl_idname_set");
+  RNA_def_property_flag(prop, PROP_REGISTER);
+  RNA_def_property_ui_text(
+      prop,
+      "ID Name",
+      "If this is set, the filter gets a custom ID, otherwise it takes the name of the class used "
+      "to define the filter (for example, if the class name is \"IMAGE_IDF_my_filter\", and "
+      "bl_idname is not set by the script, then bl_idname = \"IMAGE_IDF_my_filter\")");
+
+  /* Filter callback. */
+  func = RNA_def_function(srna, "filter_id", nullptr);
+  RNA_def_function_ui_description(
+      func, "Decide whether a data-block should be shown in the browser. Return true to keep it");
+  RNA_def_function_flag(func, FUNC_NO_SELF | FUNC_REGISTER_OPTIONAL);
+  RNA_def_function_return(
+      func, RNA_def_boolean(func, "visible", true, "", "Whether the data-block passes the filter"));
+  parm = RNA_def_pointer(func, "context", "Context", "", "The context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "id", "ID", "", "The data-block to test");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+}
+
 static void rna_def_asset_shelf(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -2616,6 +2806,7 @@ void RNA_def_ui(BlenderRNA *brna)
   rna_def_uilist(brna);
   rna_def_header(brna);
   rna_def_menu(brna);
+  rna_def_id_filter(brna);
   rna_def_asset_shelf(brna);
   rna_def_file_handler(brna);
   rna_def_layout_panel_state(brna);

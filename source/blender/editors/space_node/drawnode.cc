@@ -379,7 +379,7 @@ static void node_shader_buts_tex_image(ui::Layout &layout, bContext *C, PointerR
     BKE_texpaint_slot_refresh_cache(scene, mat, ob);
   }
 
-  ui::uiTemplateImageBrowse(
+  ui::template_id_browser(
       &layout, C, ptr, "image", mat, "IMAGE_OT_new", "IMAGE_OT_open", nullptr);
 
   layout.prop(ptr, "interpolation", DEFAULT_FLAGS, "", ICON_NONE);

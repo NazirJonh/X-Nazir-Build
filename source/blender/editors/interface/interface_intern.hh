@@ -1238,18 +1238,20 @@ LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int
 void layout_panel_popup_scroll_apply(Panel *panel, const float dy);
 
 /**
- * Scroll a popover region's #View2D when the cursor is over a grid view (e.g. image browser).
+ * Wheel-scroll the fixed-viewport grid view of a popover block (e.g. the image browser) when the
+ * cursor is over the grid rather than the fixed header. Generic: works with any #AbstractGridView
+ * that uses #AbstractGridView::use_fixed_viewport_layout.
  * \return True if the event was handled.
  */
-bool popup_block_grid_view2d_scroll(bContext *C, ARegion *region, const wmEvent *event);
+bool popup_block_fixed_grid_wheel_scroll(bContext *C, ARegion *region, const wmEvent *event);
 
-/** Image browser popover: edge hover auto-scroll (#PopupBlockHandle::scrolltimer). */
-bool popup_image_browser_scrolltimer_step(bContext *C,
-                                          PopupBlockHandle *menu,
-                                          Block *block,
-                                          int my);
-bool popup_image_browser_autoscroll_at_pointer(Block *block, int my);
-void popup_image_browser_redraw_for_scroll_overlay(ARegion *region, Block *block);
+/** Fixed-viewport grid popover: edge hover auto-scroll (#PopupBlockHandle::scrolltimer). */
+bool popup_block_fixed_grid_scrolltimer_step(bContext *C,
+                                             PopupBlockHandle *menu,
+                                             Block *block,
+                                             int my);
+bool popup_block_fixed_grid_autoscroll_at_pointer(Block *block, int my);
+void popup_block_fixed_grid_redraw_for_scroll_overlay(ARegion *region, Block *block);
 
 /**
  * Draws in resolution of 48x4 colors.
@@ -1773,6 +1775,12 @@ void interface_tag_script_reload_queries();
 
 void block_free_views(Block *block);
 AbstractView *block_view_find_by_idname(Block &block, StringRef idname);
+/**
+ * First grid view in \a block that uses a fixed-viewport layout (the popover/menu scroll model).
+ * Lets popup event handling drive grid scrolling without knowing the concrete view, so no caller
+ * needs to match a specific view idname. Returns null if there is no such view.
+ */
+AbstractGridView *block_view_find_fixed_viewport_grid(Block &block);
 void block_views_end(ARegion *region, const Block *block);
 void block_view_persistent_state_restore(const ARegion &region,
                                          const Block &block,

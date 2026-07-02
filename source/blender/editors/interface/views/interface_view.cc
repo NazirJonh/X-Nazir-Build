@@ -200,7 +200,8 @@ void block_views_draw_overlays(const ARegion *region, const Block *block)
 AbstractView *region_view_find_at(const ARegion *region,
                                   const int xy[2],
                                   const int pad,
-                                  Block **r_block)
+                                  Block **r_block,
+                                  StringRef *r_idname)
 {
   /* NOTE: Similar to #but_find_mouse_over_ex(). */
 
@@ -224,6 +225,9 @@ AbstractView *region_view_find_at(const ARegion *region,
       if (BLI_rcti_isect_pt(&padded_bounds, mx, my)) {
         if (r_block != nullptr) {
           *r_block = &block;
+        }
+        if (r_idname != nullptr) {
+          *r_idname = view_link.idname;
         }
         return view_link.view.get();
       }
@@ -285,6 +289,25 @@ bool region_view_item_topmost_at(const ARegion *region,
     return false;
   }
   return block_view_find_idname(*item_but->block, item_but->view_item->get_view()) == idname;
+}
+
+StringRef region_view_item_topmost_idname_at(const ARegion *region,
+                                             const wmEvent *event,
+                                             AbstractView **r_view)
+{
+  const Button *but = but_find_mouse_over(region, event);
+  if (!but || but->type != ButtonType::ViewItem) {
+    return {};
+  }
+  const auto *item_but = static_cast<const ButtonViewItem *>(but);
+  if (!item_but->view_item) {
+    return {};
+  }
+  AbstractView &view = item_but->view_item->get_view();
+  if (r_view != nullptr) {
+    *r_view = &view;
+  }
+  return block_view_find_idname(*item_but->block, view);
 }
 
 bool region_view_idname_has_bounds(const ARegion *region, const StringRef idname)

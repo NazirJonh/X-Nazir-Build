@@ -1989,7 +1989,13 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_function_ui_description(func,
                                   "Reusable asset grid showing a library and catalog filter");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
-  parm = RNA_def_string(func, "grid_id", nullptr, 0, "", "Unique identifier for grid UI state");
+  parm = RNA_def_string(func,
+                        "grid_id",
+                        nullptr,
+                        0,
+                        "",
+                        "Identifier the grid's scroll and resize state is stored under; must be "
+                        "globally unique, as two grids sharing an id share that state");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
@@ -2000,7 +2006,13 @@ void RNA_api_ui_layout(StructRNA *srna)
   func = RNA_def_function(srna, "template_grid_view_custom", "rna_uiTemplateGridViewCustom");
   RNA_def_function_ui_description(func, "Reusable grid driven by a registered Python UIGrid type");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
-  parm = RNA_def_string(func, "grid_id", nullptr, 0, "", "Unique identifier for grid UI state");
+  parm = RNA_def_string(func,
+                        "grid_id",
+                        nullptr,
+                        0,
+                        "",
+                        "Identifier the grid's scroll and resize state is stored under; must be "
+                        "globally unique, as two grids sharing an id share that state");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_string(
       func, "gridtype_name", nullptr, 0, "", "Identifier of the UIGrid type to use");

@@ -2390,9 +2390,18 @@ static void rna_def_uigrid(BlenderRNA *brna)
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_int(func, "index", 0, 0, INT_MAX, "", "Item index", 0, INT_MAX);
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
-  parm = RNA_def_string(func, "identifier", nullptr, 0, "", "Stable item identifier");
+  /* PROP_THICK_WRAP: copy the Python string into a buffer owned by the ParameterList. Without
+   * it the parameter only stores a raw `char *` pointing into the just-returned Python object,
+   * which #bpy_class_call() decrefs before this function's caller gets a chance to read it.
+   * #RNA_DYN_DESCR_MAX is the buffer length the THICK_WRAP copy is bounded by; the C++ reader in
+   * #PyCallbackGridDataSource reads straight out of this same buffer, so there is no second
+   * length to keep in sync. */
+  parm = RNA_def_string(
+      func, "identifier", nullptr, RNA_DYN_DESCR_MAX, "", "Stable item identifier");
+  RNA_def_parameter_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
   RNA_def_function_output(func, parm);
-  parm = RNA_def_string(func, "label", nullptr, 0, "", "Item label");
+  parm = RNA_def_string(func, "label", nullptr, RNA_DYN_DESCR_MAX, "", "Item label");
+  RNA_def_parameter_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
   RNA_def_function_output(func, parm);
   parm = RNA_def_int(func, "icon", 0, 0, INT_MAX, "", "Preview icon", 0, INT_MAX);
   RNA_def_function_output(func, parm);

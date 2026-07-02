@@ -113,54 +113,35 @@ static bool pygrid_get_item_desc(const bContext &C,
   RNA_parameter_set_lookup(&list, "propname", &propname_c);
   RNA_parameter_set_lookup(&list, "index", &index);
 
-  char identifier_buf[1024] = "";
-  char label_buf[1024] = "";
-  int icon = ICON_NONE;
-  int badge_icon = ICON_NONE;
-  RNA_parameter_set_lookup(&list, "identifier", identifier_buf);
-  RNA_parameter_set_lookup(&list, "label", label_buf);
-  RNA_parameter_set_lookup(&list, "icon", &icon);
-  RNA_parameter_set_lookup(&list, "badge_icon", &badge_icon);
-
+  /* Outputs need no pre-initialization: #RNA_parameter_list_create zero-fills the buffer, so the
+   * PROP_THICK_WRAP string slots already read as "" and the int slots as #ICON_NONE (0) even if
+   * the Python call raises before writing them. */
   grid_type->rna_ext.call(const_cast<bContext *>(&C), &grid_ptr, func, &list);
 
-  PropertyRNA *parm;
   void *ret;
 
-  parm = RNA_function_find_parameter(nullptr, func, "identifier");
-  RNA_parameter_get(&list, parm, &ret);
-  if (ret) {
-    STRNCPY(identifier_buf, static_cast<char *>(ret));
-  }
+  /* Read straight out of the ParameterList-owned THICK_WRAP buffers into #std::string (copying
+   * before #RNA_parameter_list_free frees them). No intermediate fixed-size stack buffer, so no
+   * second length to keep in sync with the RNA definition's #RNA_DYN_DESCR_MAX. */
+  RNA_parameter_get(&list, RNA_function_find_parameter(nullptr, func, "identifier"), &ret);
+  const char *identifier = ret ? static_cast<const char *>(ret) : "";
 
-  parm = RNA_function_find_parameter(nullptr, func, "label");
-  RNA_parameter_get(&list, parm, &ret);
-  if (ret) {
-    STRNCPY(label_buf, static_cast<char *>(ret));
-  }
-
-  parm = RNA_function_find_parameter(nullptr, func, "icon");
-  RNA_parameter_get(&list, parm, &ret);
-  if (ret) {
-    icon = *static_cast<int *>(ret);
-  }
-
-  parm = RNA_function_find_parameter(nullptr, func, "badge_icon");
-  RNA_parameter_get(&list, parm, &ret);
-  if (ret) {
-    badge_icon = *static_cast<int *>(ret);
-  }
-
-  RNA_parameter_list_free(&list);
-
-  if (!identifier_buf[0]) {
+  if (!identifier[0]) {
+    RNA_parameter_list_free(&list);
     return false;
   }
+  r_desc.identifier = identifier;
 
-  r_desc.identifier = identifier_buf;
-  r_desc.label = label_buf;
-  r_desc.icon = icon;
-  r_desc.badge_icon = badge_icon;
+  RNA_parameter_get(&list, RNA_function_find_parameter(nullptr, func, "label"), &ret);
+  r_desc.label = ret ? static_cast<const char *>(ret) : "";
+
+  RNA_parameter_get(&list, RNA_function_find_parameter(nullptr, func, "icon"), &ret);
+  r_desc.icon = ret ? *static_cast<int *>(ret) : ICON_NONE;
+
+  RNA_parameter_get(&list, RNA_function_find_parameter(nullptr, func, "badge_icon"), &ret);
+  r_desc.badge_icon = ret ? *static_cast<int *>(ret) : ICON_NONE;
+
+  RNA_parameter_list_free(&list);
   return true;
 }
 

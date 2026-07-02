@@ -3176,11 +3176,15 @@ bool view_item_drag_start(bContext &C, AbstractViewItem &item);
 /**
  * \param xy: Coordinate to find a view item at, in window space.
  * \param pad: Extra padding added to the bounding box of the view.
+ * \param r_idname: When non-null, receives the idname the view was registered under (empty when
+ * no view is found). Lets grid_id-agnostic callers (e.g. the generic grid view's touch/wheel
+ * scroll handler) identify which view they hit without a second lookup.
  */
 AbstractView *region_view_find_at(const ARegion *region,
                                   const int xy[2],
                                   int pad,
-                                  Block **r_block = nullptr);
+                                  Block **r_block = nullptr,
+                                  StringRef *r_idname = nullptr);
 bool region_view_has_idname_at(const ARegion *region, const int xy[2], int pad, StringRef idname);
 /** Like #region_view_has_idname_at, but also matches a #ButtonType::ViewItem under \a xy. */
 bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], StringRef idname);
@@ -3191,6 +3195,15 @@ bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], Stri
  * tell "the press lands on a tile" apart from "a tile happens to be behind another widget".
  */
 bool region_view_item_topmost_at(const ARegion *region, const wmEvent *event, StringRef idname);
+/**
+ * Like #region_view_item_topmost_at, but returns the idname of the topmost
+ * #ButtonType::ViewItem's owning view (empty when none), instead of testing against one
+ * already-known idname. \a r_view optionally receives the view itself so callers needing the
+ * concrete type (e.g. via `dynamic_cast`) do not have to look it up again.
+ */
+StringRef region_view_item_topmost_idname_at(const ARegion *region,
+                                             const wmEvent *event,
+                                             AbstractView **r_view = nullptr);
 /**
  * True when a view registered under \a idname exists in \a region this redraw and has non-empty
  * hit bounds. Unlike #region_view_has_idname_at this ignores the cursor position; it answers "was

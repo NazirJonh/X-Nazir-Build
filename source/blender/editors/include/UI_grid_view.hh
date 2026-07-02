@@ -207,6 +207,13 @@ class GridViewBuilder {
 
 /** \} */
 
+/**
+ * Register the pre-button handler that powers touch/pen drag-scroll and mouse-wheel scroll for
+ * every #AbstractGridView built via #build_grid_view, regardless of grid_id or owning editor.
+ * Called once from #ED_spacetypes_init(); not tied to any space type.
+ */
+void grid_view_register_pre_button_handler();
+
 /* ---------------------------------------------------------------------- */
 /** \name Predefined Grid-View Item Types
  *

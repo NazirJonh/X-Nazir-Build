@@ -16,9 +16,11 @@
 
 #include "DNA_view2d_types.h"
 
+#include "BLI_map.hh"
 #include "BLI_math_base.h"
 #include "BLI_rect.h"
 #include "BLI_string.h"
+#include "BLI_utildefines.h"
 
 #include "BKE_context.hh"
 #include "BKE_screen.hh"
@@ -45,84 +47,97 @@ namespace {
 constexpr int GRID_MAX_ITEMS = 512;
 
 /* -------------------------------------------------------------------- */
-/** \name Generic grid view + session state (uiViewState-backed)
+/** \name Generic grid view + session state (grid_id-keyed, process-lifetime)
  * \{ */
+
+/**
+ * Session state for a #GenericGridView, keyed by its `grid_id`. #GenericGridView itself is
+ * rebuilt from scratch on every redraw like all views, so grip height / scroll position / item
+ * count need to live somewhere that outlives it. #uiViewState (#AbstractView::persistent_state())
+ * doesn't work for this: it only round-trips through #block_views_end() /
+ * #block_view_persistent_state_restore(), which save/restore at the start/end of building a
+ * block's layout — not while a #ButtonType::Grip / #ButtonType::Scroll button is live-dragging
+ * the bound pointer. The block being dragged already finished its own save before the drag
+ * started, so the drag's writes are never captured, and the very next redraw restores the
+ * pre-drag value, making the grip/scrollbar appear unresponsive. Keeping the state in a registry
+ * keyed by grid_id sidesteps the save/restore round-trip entirely: the drag and the next
+ * redraw's read both go through the same storage.
+ *
+ * Keyed by `grid_id`: two draw sites passing the *same* grid_id deliberately share one
+ * scroll/grip state, so callers wanting independent grids must pass distinct, globally-unique
+ * grid_id strings (spelled out in the docstrings of #template_grid_view_asset /
+ * #template_grid_view_custom). Entries persist for the process lifetime — there is no natural
+ * per-grid teardown signal — so the count of distinct grid_ids used in a session is what bounds
+ * the registry's size. See #GenericGridRuntime for the single storage location.
+ */
+struct GenericGridSessionState {
+  int grip_pixel_height = 0;
+  int scroll_row = 0;
+  int scroll_offset_px = 0;
+  int cached_item_count = 0;
+};
+
+/* Defined together with the rest of the process-lifetime grid runtime (#GenericGridRuntime),
+ * once the drag/wheel state types it is grouped with are also declared, below. */
+static GenericGridSessionState &generic_grid_session_state_ensure(StringRef grid_id);
+static Map<std::string, std::unique_ptr<GenericGridSessionState>> &generic_grid_sessions();
 
 class GenericGridView : public AbstractGridView {
   const bContext &context_;
   std::unique_ptr<GridDataSource> source_;
   int cols_hint_ = 1;
-
-  /* Session UI state — persisted via #persistent_state() / #uiViewState. */
-  int grip_pixel_height_ = 0;
-  int scroll_row_ = 0;
-  int scroll_offset_px_ = 0;
-  int cached_item_count_ = 0;
+  GenericGridSessionState &session_;
 
  public:
   GenericGridView(const bContext &context,
                   std::unique_ptr<GridDataSource> source,
-                  const int cols_hint)
-      : context_(context), source_(std::move(source)), cols_hint_(max_ii(1, cols_hint))
+                  const int cols_hint,
+                  const StringRef grid_id)
+      : context_(context),
+        source_(std::move(source)),
+        cols_hint_(max_ii(1, cols_hint)),
+        session_(generic_grid_session_state_ensure(grid_id))
   {
   }
 
   int grip_pixel_height() const
   {
-    return grip_pixel_height_;
+    return session_.grip_pixel_height;
   }
   void grip_pixel_height_set(const int value)
   {
-    grip_pixel_height_ = value;
+    session_.grip_pixel_height = value;
   }
   int &grip_pixel_height_mut()
   {
-    return grip_pixel_height_;
+    return session_.grip_pixel_height;
   }
 
   int scroll_row() const
   {
-    return scroll_row_;
+    return session_.scroll_row;
   }
   void scroll_row_set(const int value)
   {
-    scroll_row_ = value;
+    session_.scroll_row = value;
   }
   int &scroll_row_mut()
   {
-    return scroll_row_;
+    return session_.scroll_row;
   }
 
   int scroll_offset_px() const
   {
-    return scroll_offset_px_;
+    return session_.scroll_offset_px;
   }
   void scroll_offset_px_set(const int value)
   {
-    scroll_offset_px_ = value;
+    session_.scroll_offset_px = value;
   }
 
   int cached_item_count() const
   {
-    return cached_item_count_;
-  }
-
-  std::optional<uiViewState> persistent_state() const override
-  {
-    uiViewState state{};
-    if (grip_pixel_height_ > 0) {
-      state.custom_height = int(round_fl_to_int(float(grip_pixel_height_) * UI_INV_SCALE_FAC));
-    }
-    state.scroll_offset = scroll_row_;
-    return state;
-  }
-
-  void persistent_state_apply(const uiViewState &state) override
-  {
-    if (state.custom_height > 0) {
-      grip_pixel_height_ = int(state.custom_height * UI_SCALE_FAC);
-    }
-    scroll_row_ = state.scroll_offset;
+    return session_.cached_item_count;
   }
 
   void build_items() override
@@ -130,17 +145,17 @@ class GenericGridView : public AbstractGridView {
     const int cols = cols_hint_;
     const int tile_h = max_ii(1, get_style().tile_height);
     const int item_window = grid_build_window_size(
-        grip_pixel_height_, tile_h, cols, GRID_MAX_ITEMS);
-    const int first_index = scroll_row_ * cols;
+        session_.grip_pixel_height, tile_h, cols, GRID_MAX_ITEMS);
+    const int first_index = session_.scroll_row * cols;
     const IndexRange window(first_index, item_window);
 
-    cached_item_count_ = source_->item_count(context_);
+    session_.cached_item_count = source_->item_count(context_);
     source_->build_window(context_, *this, window);
   }
 
   int get_cached_item_count_for_build() const
   {
-    return cached_item_count_;
+    return session_.cached_item_count;
   }
 };
 
@@ -260,6 +275,320 @@ static void grid_view_block_listener(const wmRegionListenerParams *params)
   }
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Touch/pen drag-scroll + mouse-wheel scroll (grid_id-agnostic)
+ * \{ */
+
+/**
+ * Pen/tablet drag-to-scroll gesture state. One physical pointer device drags at most one grid at
+ * a time, so a single process-lifetime instance (not grid_id-keyed) is enough; #grid_id records
+ * which session the active gesture applies to. Mirrors View3D's #ImageGridDragScrollState
+ * (`ED_view3d.hh`), generalized to an arbitrary grid_id instead of a `is_mask_slot` bool.
+ */
+struct GenericGridDragScrollState {
+  bool active = false;
+  bool dragging = false;
+  std::string grid_id;
+  /** Press position; used to re-locate the still-live view on every #MOUSEMOVE without depending
+   * on the current cursor position, which may drift outside the grid's bounds while dragging. */
+  int anchor_xy[2] = {0, 0};
+  int start_y = 0;
+  int last_y = 0;
+};
+
+/**
+ * Latches the last wheel hit-test decision so a transient rebuild does not break a scroll burst.
+ * A grid view's hit bounds span only the tiles built this frame and momentarily vanish during a
+ * fast-scroll rebuild; without this, the wheel event for that frame leaks to the region's own
+ * View2D pan, and every following event leaks too (see project memory
+ * project-image-grid-wheel-cascade — the same failure mode View3D's #ImageGridWheelLatch guards
+ * against). Mirrors that struct, generalized to an arbitrary grid_id.
+ */
+struct GenericGridWheelLatch {
+  bool over = false;
+  std::string grid_id;
+  /** Region the latch belongs to; a stale latch must never consume a wheel event in an unrelated
+   * editor. */
+  const ARegion *region = nullptr;
+  int xy[2] = {0, 0};
+  /** Tile height / column count last seen while #over was true. A vanished-mid-rebuild grid has
+   * no live view to re-read these from, and the column count additionally has no equivalent on
+   * View3D's struct because View3D persists columns in DNA-backed #ImageGridUIState; the generic
+   * session has no such persistent field, so both hints are cached here instead. */
+  int tile_h_hint = 0;
+  int cols_hint = 1;
+};
+
+/**
+ * Single home for all process-lifetime state behind the generic grid views. Grouped so future
+ * additions extend this struct instead of scattering more file-scope statics (the touch/wheel
+ * layer already sits outside the standard #uiViewState view persistence, so keeping its state
+ * contained keeps that departure auditable). Holds:
+ * - #sessions: per-`grid_id` scroll/grip state outliving the per-redraw #GenericGridView
+ *   (see #GenericGridSessionState). A #unique_ptr value keeps each state at a fixed address, so a
+ *   #ButtonType::Grip / #ButtonType::Scroll bound to it from an earlier redraw stays valid even
+ *   when #Map rehashes on inserting a *different* grid_id.
+ * - #drag: the one in-flight touch/pen drag gesture (#GenericGridDragScrollState).
+ * - #wheel: the last wheel hit-test decision (#GenericGridWheelLatch).
+ */
+struct GenericGridRuntime {
+  Map<std::string, std::unique_ptr<GenericGridSessionState>> sessions;
+  GenericGridDragScrollState drag;
+  GenericGridWheelLatch wheel;
+};
+
+static GenericGridRuntime &generic_grid_runtime()
+{
+  static GenericGridRuntime runtime;
+  return runtime;
+}
+
+static Map<std::string, std::unique_ptr<GenericGridSessionState>> &generic_grid_sessions()
+{
+  return generic_grid_runtime().sessions;
+}
+
+static GenericGridSessionState &generic_grid_session_state_ensure(const StringRef grid_id)
+{
+  Map<std::string, std::unique_ptr<GenericGridSessionState>> &sessions = generic_grid_sessions();
+  std::unique_ptr<GenericGridSessionState> &slot = sessions.lookup_or_add_cb(
+      std::string(grid_id), [] { return std::make_unique<GenericGridSessionState>(); });
+  return *slot;
+}
+
+static GenericGridDragScrollState &generic_grid_drag_scroll_state()
+{
+  return generic_grid_runtime().drag;
+}
+
+static GenericGridWheelLatch &generic_grid_wheel_latch()
+{
+  return generic_grid_runtime().wheel;
+}
+
+/** Effective visible row count for a given grip height and tile height — same clamp #build_grid_view()
+ * applies, parameterized so it works whether or not a live #GenericGridView is available. */
+static int generic_grid_effective_rows(const int grip_px, const int tile_h)
+{
+  const int safe_tile_h = max_ii(1, tile_h);
+  return clamp_i(int(divide_ceil_u(uint(max_ii(grip_px, safe_tile_h)), uint(safe_tile_h))), 1, 16);
+}
+
+/** Same max-scroll-row formula #build_grid_view() already uses, not a re-derived copy that could
+ * drift. Takes \a cols / \a tile_h as parameters (rather than reading them off a live view)
+ * because the wheel-latch fallback (see below) has no live #GenericGridView to query. */
+static int generic_grid_max_scroll_row(const GenericGridSessionState &session,
+                                       const int cols,
+                                       const int tile_h)
+{
+  const int effective_rows = generic_grid_effective_rows(session.grip_pixel_height, tile_h);
+  const int total_rows = grid_total_rows(
+      session.cached_item_count, max_ii(1, cols), effective_rows);
+  return max_ii(0, total_rows - effective_rows);
+}
+
+static int generic_grid_handle_drag_scroll_event(bContext * /*C*/,
+                                                 const wmEvent *event,
+                                                 ARegion *region)
+{
+  GenericGridDragScrollState &drag = generic_grid_drag_scroll_state();
+
+  if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
+    /* Reset on any new LMB press so a missed release never leaves stale state. */
+    drag = {};
+    /* Start a touch-drag only when the press lands directly on a grid tile. The window manager's
+     * top-most hit test means a widget drawn over the grid (the overlay scrollbar) or below it
+     * (the resize grip) keeps the press by z-order, so moving the bar or resizing the grid is
+     * never mistaken for a drag-scroll. */
+    AbstractView *hit_view = nullptr;
+    const StringRef idname = region_view_item_topmost_idname_at(region, event, &hit_view);
+    if (GenericGridView *grid_view = dynamic_cast<GenericGridView *>(hit_view)) {
+      GenericGridSessionState &session = generic_grid_session_state_ensure(idname);
+      const int tile_h = max_ii(1, grid_view->get_style().tile_height);
+      const int cols = max_ii(1, grid_view->cols_per_row());
+      if (generic_grid_max_scroll_row(session, cols, tile_h) > 0) {
+        drag.active = true;
+        drag.grid_id = idname;
+        drag.anchor_xy[0] = event->xy[0];
+        drag.anchor_xy[1] = event->xy[1];
+        drag.start_y = event->xy[1];
+        drag.last_y = event->xy[1];
+      }
+    }
+    /* Always continue so grid items still receive the press for click-selection. */
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+    if (drag.active) {
+      const bool was_dragging = drag.dragging;
+      drag = {};
+      /* Consume the release after a drag to prevent item activation. */
+      return was_dragging ? WM_UI_HANDLER_BREAK : WM_UI_HANDLER_CONTINUE;
+    }
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  if (event->type == MOUSEMOVE && drag.active) {
+    const int dy = event->xy[1] - drag.last_y;
+    drag.last_y = event->xy[1];
+
+    if (!drag.dragging && abs(event->xy[1] - drag.start_y) >= 8) {
+      /* Enter drag mode once the cursor travels more than 8 px from the press origin. */
+      drag.dragging = true;
+    }
+
+    if (drag.dragging) {
+      /* Re-locate the view by the press position rather than the current (possibly-drifted)
+       * cursor position: the grid's on-screen bounds do not move while its content scrolls. */
+      AbstractView *view = region_view_find_at(region, drag.anchor_xy, 0, nullptr, nullptr);
+      GenericGridView *grid_view = dynamic_cast<GenericGridView *>(view);
+      if (!grid_view) {
+        /* Mid-rebuild this frame; skip, retry on the next MOUSEMOVE. */
+        return WM_UI_HANDLER_BREAK;
+      }
+
+      GenericGridSessionState &session = generic_grid_session_state_ensure(drag.grid_id);
+      const int tile_h = max_ii(1, grid_view->get_style().tile_height);
+      const int cols = max_ii(1, grid_view->cols_per_row());
+      const int max_scroll_px = generic_grid_max_scroll_row(session, cols, tile_h) * tile_h;
+
+      /* Phone UX: drag up (dy > 0 in Blender Y-up coords) -> content scrolls up -> later rows
+       * appear. Scroll by sub-row pixel amounts for smooth motion: accumulate into a combined
+       * pixel position and split it back into whole rows plus a sub-row offset. */
+      int total_px = session.scroll_row * tile_h + session.scroll_offset_px;
+      total_px = clamp_i(total_px + dy, 0, max_scroll_px);
+      session.scroll_row = total_px / tile_h;
+      session.scroll_offset_px = total_px % tile_h;
+
+      ED_region_tag_redraw(region);
+      ED_region_tag_refresh_ui(region);
+      return WM_UI_HANDLER_BREAK;
+    }
+  }
+
+  return WM_UI_HANDLER_CONTINUE;
+}
+
+static bool generic_grid_wheel_poll(const ARegion *region,
+                                    const wmEvent *event,
+                                    std::string *r_grid_id)
+{
+  if (!ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE) || event->modifier) {
+    return false;
+  }
+
+  GenericGridWheelLatch &latch = generic_grid_wheel_latch();
+
+  StringRef idname;
+  AbstractView *view = region_view_find_at(region, event->xy, 0, nullptr, &idname);
+  GenericGridView *grid_view = dynamic_cast<GenericGridView *>(view);
+
+  std::string grid_id;
+  int tile_h_hint = 0;
+  int cols_hint = 0;
+  bool over = false;
+
+  if (grid_view) {
+    grid_id = idname;
+    tile_h_hint = max_ii(1, grid_view->get_style().tile_height);
+    cols_hint = max_ii(1, grid_view->cols_per_row());
+    over = true;
+  }
+  else {
+    /* Bounds-based lookup missed (cursor may be over the overlay scrollbar, which is drawn
+     * outside the grid's own bounds); iterate live sessions for "over the scrollbar" parity with
+     * View3D's #image_grid_scroll_under_mouse. */
+    for (auto item : generic_grid_sessions().items()) {
+      if (region_scroll_button_under_mouse(region, event->xy, &item.value->scroll_row)) {
+        grid_id = item.key;
+        over = true;
+        /* The scrollbar hit test alone carries no tile/column info. A scrollbar is only ever
+         * drawn when its grid already has scrollable content, so borrow the latch's hint for the
+         * same grid when available; a fresh hit with no prior hint is the rare case of grabbing
+         * the scrollbar before ever hovering a tile. */
+        if (latch.grid_id == grid_id) {
+          tile_h_hint = latch.tile_h_hint;
+          cols_hint = latch.cols_hint;
+        }
+        break;
+      }
+    }
+  }
+
+  if (over) {
+    latch.over = true;
+    latch.grid_id = grid_id;
+    latch.region = region;
+    latch.xy[0] = event->xy[0];
+    latch.xy[1] = event->xy[1];
+    if (tile_h_hint > 0) {
+      latch.tile_h_hint = tile_h_hint;
+      latch.cols_hint = max_ii(1, cols_hint);
+    }
+  }
+  else {
+    /* Live bounds say "not over". Repeat the last consume decision only while the cursor held
+     * still, and only for the region the latch belongs to. */
+    bool consume_via_latch = false;
+    if (latch.region == region && latch.over) {
+      const int tile_h = max_ii(1, latch.tile_h_hint);
+      const bool held_still = abs(event->xy[0] - latch.xy[0]) <= tile_h &&
+                              abs(event->xy[1] - latch.xy[1]) <= tile_h;
+      if (held_still) {
+        consume_via_latch = true;
+      }
+      else {
+        latch.over = false;
+      }
+    }
+    if (!consume_via_latch) {
+      return false;
+    }
+    grid_id = latch.grid_id;
+    tile_h_hint = latch.tile_h_hint;
+    cols_hint = latch.cols_hint;
+  }
+
+  if (grid_id.empty()) {
+    return false;
+  }
+
+  const GenericGridSessionState &session = generic_grid_session_state_ensure(grid_id);
+  if (generic_grid_max_scroll_row(session, max_ii(1, cols_hint), max_ii(1, tile_h_hint)) <= 0) {
+    return false;
+  }
+
+  *r_grid_id = grid_id;
+  return true;
+}
+
+static int generic_grid_handle_wheel_event(bContext * /*C*/, const wmEvent *event, ARegion *region)
+{
+  std::string grid_id;
+  if (!generic_grid_wheel_poll(region, event, &grid_id)) {
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
+  GenericGridSessionState &session = generic_grid_session_state_ensure(grid_id);
+  const int delta = (event->type == WHEELUPMOUSE) ? -1 : 1;
+  session.scroll_row = max_ii(0, session.scroll_row + delta);
+  session.scroll_offset_px = 0;
+
+  ED_region_tag_redraw(region);
+  ED_region_tag_refresh_ui(region);
+  return WM_UI_HANDLER_BREAK;
+}
+
+static int generic_grid_view_pre_button_handler(bContext *C, const wmEvent *event, ARegion *region)
+{
+  const int wheel_retval = generic_grid_handle_wheel_event(C, event, region);
+  if (wheel_retval != WM_UI_HANDLER_CONTINUE) {
+    return wheel_retval;
+  }
+  return generic_grid_handle_drag_scroll_event(C, event, region);
+}
+
 /** \} */
 
 }  // namespace
@@ -364,7 +693,13 @@ void build_grid_view(const bContext &C,
   const int actual_cols = view.cols_per_row();
   state.cached_cols_set(actual_cols);
 
-  const int total_rows_post = grid_total_rows(item_count, actual_cols, effective_rows);
+  /* #item_count is last frame's count, used above before #build_items() (inside
+   * #builder.build_grid_view()) re-affirmed the real, current count. Using the stale parameter
+   * here instead of #state.cached_item_count() would under/over-count on any frame where the
+   * item count actually changed, most visibly as a scrollbar that never appears because the
+   * stale count it starts from (0, for a freshly built view whose GridStateAccess has no prior
+   * frame to read from, e.g. #ViewGridStateAccess) never reflects real content. */
+  const int total_rows_post = grid_total_rows(state.cached_item_count(), actual_cols, effective_rows);
   const int max_scroll_post = max_ii(0, total_rows_post - effective_rows);
   state.scroll_row_set(grid_clamp_scroll_row(state.scroll_row(), max_scroll_post));
   state.store_scroll_for_layout(actual_cols, effective_rows);
@@ -452,7 +787,7 @@ void template_grid_view_asset(Layout *layout,
                                                       activate_operator ? activate_operator : "",
                                                       drag_operator ? drag_operator : "");
 
-  auto view_unique = std::make_unique<GenericGridView>(*C, std::move(source), cols_est);
+  auto view_unique = std::make_unique<GenericGridView>(*C, std::move(source), cols_est, grid_id);
   GenericGridView *view_ptr = view_unique.get();
   view_unique->set_tile_size(tile_w, tile_h);
   view_unique->set_cols_per_row_hint(cols_est);
@@ -511,7 +846,7 @@ void template_grid_view_custom(Layout *layout,
 
   auto source = std::make_unique<PyCallbackGridDataSource>(grid_type, *dataptr, propname);
 
-  auto view_unique = std::make_unique<GenericGridView>(*C, std::move(source), cols_est);
+  auto view_unique = std::make_unique<GenericGridView>(*C, std::move(source), cols_est, grid_id);
   GenericGridView *view_ptr = view_unique.get();
   view_unique->set_tile_size(tile_w, tile_h);
   view_unique->set_cols_per_row_hint(cols_est);
@@ -529,3 +864,8 @@ void template_grid_view_custom(Layout *layout,
 }
 
 } /* namespace blender::ui */
+
+void blender::ui::grid_view_register_pre_button_handler()
+{
+  region_pre_button_handler_add(generic_grid_view_pre_button_handler);
+}

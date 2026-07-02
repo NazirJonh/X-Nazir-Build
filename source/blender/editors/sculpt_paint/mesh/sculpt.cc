@@ -1879,6 +1879,167 @@ static AreaNormalCenterData calc_area_normal_and_center_reduce(const AreaNormalC
   return joined;
 }
 
+/* Accumulate weighted area normal/center samples from every co-sample mesh object into the
+ * reference object's local space. The sampling center, view normal and radii are supplied already
+ * expressed in reference space, so the result is independent of which object asked for it; the
+ * caller converts the returned normal/center back into its own object space. This is the core of
+ * multi-object ("global") sculpt joined-mesh parity for area-/plane-based brushes. Mesh PBVH only;
+ * any non-mesh object in the set is skipped. */
+static AreaNormalCenterData calc_area_sample_multi_object_mesh(const Depsgraph &depsgraph,
+                                                               const Brush &brush,
+                                                               const Object &reference_ob,
+                                                               const Span<Object *> objects,
+                                                               const float3 &ref_location,
+                                                               const float3 &ref_view_normal,
+                                                               const float position_radius,
+                                                               const float normal_radius,
+                                                               const AverageDataFlags flag)
+{
+  const float position_radius_sq = position_radius * position_radius;
+  const float position_radius_inv = math::rcp(position_radius);
+  const float normal_radius_sq = normal_radius * normal_radius;
+  const float normal_radius_inv = math::rcp(normal_radius);
+  const float max_radius = max_ff(position_radius, normal_radius);
+  const float max_radius_sq = max_radius * max_radius;
+  const bool use_tube = eBrushFalloffShape(brush.falloff_shape) == PAINT_FALLOFF_SHAPE_TUBE;
+  float4 tube_plane;
+  if (use_tube) {
+    plane_from_point_normal_v3(tube_plane, ref_location, ref_view_normal);
+  }
+
+  AreaNormalCenterData anctd{};
+
+  for (Object *object_ptr : objects) {
+    Object &ob = *object_ptr;
+    bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+    if (!pbvh || pbvh->type() != bke::pbvh::Type::Mesh) {
+      continue;
+    }
+    const SculptSession &ss = *ob.runtime->sculpt_session;
+    if (!ss.cache) {
+      continue;
+    }
+
+    /* Transforms between this object's local space and the reference local space. */
+    const float4x4 ref_from_obj = reference_ob.world_to_object() * ob.object_to_world();
+    /* Normals use the inverse-transpose to stay perpendicular under non-uniform scale. */
+    const float3x3 ref_from_obj_nor = math::transpose(math::invert(float3x3(ref_from_obj)));
+    const float4x4 obj_from_ref = ob.world_to_object() * reference_ob.object_to_world();
+
+    /* Brush center in this object's local space plus a conservative gather radius. The precise
+     * filtering happens per-vertex in reference space below, so the gather radius only needs to be
+     * an upper bound. */
+    const float3 obj_center = math::transform_point(obj_from_ref, ref_location);
+    const float obj_scale = max_ff(max_ff(math::length(obj_from_ref.x_axis()),
+                                          math::length(obj_from_ref.y_axis())),
+                                   math::length(obj_from_ref.z_axis()));
+    const float gather_radius = max_radius * obj_scale * 1.25f;
+    const float gather_radius_sq = gather_radius * gather_radius;
+
+    const bool use_original = !ss.cache->accum;
+    IndexMaskMemory memory;
+    const IndexMask node_mask = bke::pbvh::search_nodes(
+        *pbvh, memory, [&](const bke::pbvh::Node &node) {
+          return node_in_sphere(node, obj_center, gather_radius_sq, use_original);
+        });
+    if (node_mask.is_empty()) {
+      continue;
+    }
+
+    const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+    const Span<float3> vert_positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
+    const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, ob);
+    const bke::AttributeAccessor attributes = mesh.attributes();
+    const VArraySpan hide_vert = *attributes.lookup<bool>(".hide_vert", bke::AttrDomain::Point);
+    const Span<bke::pbvh::MeshNode> nodes = pbvh->nodes<bke::pbvh::MeshNode>();
+
+    node_mask.foreach_index([&](const int node_index) {
+      const bke::pbvh::MeshNode &node = nodes[node_index];
+      const Span<int> verts = node.verts();
+      std::optional<OrigPositionData> orig_data;
+      if (use_original) {
+        orig_data = orig_position_data_lookup_mesh(ob, node);
+      }
+      for (const int k : verts.index_range()) {
+        const int vert = verts[k];
+        if (!hide_vert.is_empty() && hide_vert[vert]) {
+          continue;
+        }
+        const float3 pos_obj = orig_data ? orig_data->positions[k] : vert_positions[vert];
+        const float3 nor_obj = orig_data ? orig_data->normals[k] : vert_normals[vert];
+        const float3 pos_ref = math::transform_point(ref_from_obj, pos_obj);
+
+        float distance_sq;
+        if (use_tube) {
+          float3 projected;
+          closest_to_plane_normalized_v3(projected, tube_plane, pos_ref);
+          distance_sq = math::distance_squared(projected, ref_location);
+        }
+        else {
+          distance_sq = math::distance_squared(ref_location, pos_ref);
+        }
+        if (distance_sq > max_radius_sq) {
+          continue;
+        }
+        const bool needs_normal = flag_is_set(flag, AverageDataFlags::Normal) &&
+                                  distance_sq <= normal_radius_sq;
+        const bool needs_center = flag_is_set(flag, AverageDataFlags::Position) &&
+                                  distance_sq <= position_radius_sq;
+        if (!needs_normal && !needs_center) {
+          continue;
+        }
+        const float3 normal_ref = math::normalize(ref_from_obj_nor * nor_obj);
+        const float distance = std::sqrt(distance_sq);
+        const int flip_index = math::dot(ref_view_normal, normal_ref) <= 0.0f;
+        if (needs_center) {
+          accumulate_area_center(
+              ref_location, pos_ref, distance, position_radius_inv, flip_index, anctd);
+        }
+        if (needs_normal) {
+          accumulate_area_normal(normal_ref, distance, normal_radius_inv, flip_index, anctd);
+        }
+      }
+    });
+  }
+
+  return anctd;
+}
+
+/* Returns true and fills the reference-space sampling parameters when the requesting object is part
+ * of an active multi-object shared sampling context (see #StrokeCache.multi_object_sample_objects).
+ * The center and view normal are taken from the requesting object's current (per-symmetry-pass)
+ * cache and mapped into the reference object's local space, so sampling stays consistent with the
+ * pass the brush is currently applying. */
+static bool multi_object_area_sample_active(const Object &ob,
+                                            const Brush &brush,
+                                            const bke::pbvh::Tree &pbvh,
+                                            const Object *&r_reference,
+                                            Span<Object *> &r_objects,
+                                            float3 &r_ref_location,
+                                            float3 &r_ref_view_normal,
+                                            float &r_position_radius,
+                                            float &r_normal_radius)
+{
+  const SculptSession &ss = *ob.runtime->sculpt_session;
+  const StrokeCache *cache = ss.cache;
+  if (!cache || !cache->multi_object_sample_reference ||
+      cache->multi_object_sample_objects.size() <= 1 || pbvh.type() != bke::pbvh::Type::Mesh)
+  {
+    return false;
+  }
+  const Object &reference_ob = *cache->multi_object_sample_reference;
+  const float4x4 ref_from_cur = reference_ob.world_to_object() * ob.object_to_world();
+  r_reference = &reference_ob;
+  r_objects = cache->multi_object_sample_objects;
+  r_ref_location = math::transform_point(ref_from_cur, cache->location_symm);
+  r_ref_view_normal = math::normalize(
+      math::transform_direction(ref_from_cur, cache->view_normal_symm));
+  const SculptSession &ref_ss = *reference_ob.runtime->sculpt_session;
+  r_position_radius = area_normal_and_center_get_position_radius(ref_ss, brush);
+  r_normal_radius = area_normal_and_center_get_normal_radius(ref_ss, brush);
+  return true;
+}
+
 void calc_area_center(const Depsgraph &depsgraph,
                       const Brush &brush,
                       const Object &ob,
@@ -1888,6 +2049,48 @@ void calc_area_center(const Depsgraph &depsgraph,
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   const SculptSession &ss = *ob.runtime->sculpt_session;
   int n;
+
+  {
+    const Object *reference = nullptr;
+    Span<Object *> sample_objects;
+    float3 ref_location, ref_view_normal;
+    float position_radius, normal_radius;
+    if (multi_object_area_sample_active(ob,
+                                        brush,
+                                        pbvh,
+                                        reference,
+                                        sample_objects,
+                                        ref_location,
+                                        ref_view_normal,
+                                        position_radius,
+                                        normal_radius))
+    {
+      const AreaNormalCenterData anctd = calc_area_sample_multi_object_mesh(depsgraph,
+                                                                            brush,
+                                                                            *reference,
+                                                                            sample_objects,
+                                                                            ref_location,
+                                                                            ref_view_normal,
+                                                                            position_radius,
+                                                                            normal_radius,
+                                                                            AverageDataFlags::Position);
+      if (anctd.count_co[0] == 0 && anctd.count_co[1] == 0) {
+        copy_v3_v3(r_area_co, ss.cache->location_symm);
+        return;
+      }
+      float3 ref_co(0.0f);
+      for (int i = 0; i < 2; i++) {
+        if (anctd.count_co[i] != 0) {
+          ref_co = anctd.area_cos[i] / float(anctd.count_co[i]);
+          break;
+        }
+      }
+      const float4x4 cur_from_ref = ob.world_to_object() * reference->object_to_world();
+      const float3 co_cur = math::transform_point(cur_from_ref, ref_co);
+      copy_v3_v3(r_area_co, co_cur);
+      return;
+    }
+  }
 
   AreaNormalCenterData anctd;
   threading::EnumerableThreadSpecific<SampleLocalData> all_tls;
@@ -1988,6 +2191,41 @@ std::optional<float3> calc_area_normal(const Depsgraph &depsgraph,
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+
+  {
+    const Object *reference = nullptr;
+    Span<Object *> sample_objects;
+    float3 ref_location, ref_view_normal;
+    float position_radius, normal_radius;
+    if (multi_object_area_sample_active(ob,
+                                        brush,
+                                        pbvh,
+                                        reference,
+                                        sample_objects,
+                                        ref_location,
+                                        ref_view_normal,
+                                        position_radius,
+                                        normal_radius))
+    {
+      const AreaNormalCenterData anctd = calc_area_sample_multi_object_mesh(depsgraph,
+                                                                            brush,
+                                                                            *reference,
+                                                                            sample_objects,
+                                                                            ref_location,
+                                                                            ref_view_normal,
+                                                                            position_radius,
+                                                                            normal_radius,
+                                                                            AverageDataFlags::Normal);
+      for (const int i : {0, 1}) {
+        if (anctd.count_no[i] != 0 && !math::is_zero(anctd.area_nos[i])) {
+          const float4x4 cur_from_ref = ob.world_to_object() * reference->object_to_world();
+          const float3x3 cur_from_ref_nor = math::transpose(math::invert(float3x3(cur_from_ref)));
+          return math::normalize(cur_from_ref_nor * math::normalize(anctd.area_nos[i]));
+        }
+      }
+      return std::nullopt;
+    }
+  }
 
   AreaNormalCenterData anctd;
   threading::EnumerableThreadSpecific<SampleLocalData> all_tls;
@@ -2186,6 +2424,72 @@ void calc_area_normal_and_center(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   int n;
+
+  {
+    const Object *reference = nullptr;
+    Span<Object *> sample_objects;
+    float3 ref_location, ref_view_normal;
+    float position_radius, normal_radius;
+    if (multi_object_area_sample_active(ob,
+                                        brush,
+                                        pbvh,
+                                        reference,
+                                        sample_objects,
+                                        ref_location,
+                                        ref_view_normal,
+                                        position_radius,
+                                        normal_radius))
+    {
+      const AreaNormalCenterData anctd = calc_area_sample_multi_object_mesh(depsgraph,
+                                                                            brush,
+                                                                            *reference,
+                                                                            sample_objects,
+                                                                            ref_location,
+                                                                            ref_view_normal,
+                                                                            position_radius,
+                                                                            normal_radius,
+                                                                            AverageDataFlags::All);
+      const float4x4 cur_from_ref = ob.world_to_object() * reference->object_to_world();
+      const float3x3 cur_from_ref_nor = math::transpose(math::invert(float3x3(cur_from_ref)));
+
+      float3 ref_co(0.0f);
+      bool have_co = false;
+      for (int i = 0; i < 2; i++) {
+        if (anctd.count_co[i] != 0) {
+          ref_co = anctd.area_cos[i] / float(anctd.count_co[i]);
+          have_co = true;
+          break;
+        }
+      }
+      if (have_co) {
+        const float3 co_cur = math::transform_point(cur_from_ref, ref_co);
+        copy_v3_v3(r_area_co, co_cur);
+      }
+      else {
+        copy_v3_v3(r_area_co, ss.cache->location_symm);
+      }
+
+      float3 ref_no(0.0f);
+      for (int i = 0; i < 2; i++) {
+        if (!math::is_zero(anctd.area_nos[i])) {
+          ref_no = math::normalize(anctd.area_nos[i]);
+          break;
+        }
+      }
+      const float3 no_cur = math::normalize(cur_from_ref_nor * ref_no);
+      copy_v3_v3(r_area_no, no_cur);
+
+      if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PLANE) {
+        float3 stabilized_normal;
+        float3 stabilized_center;
+        calc_stabilized_plane(
+            brush, *ss.cache, r_area_no, r_area_co, stabilized_normal, stabilized_center);
+        copy_v3_v3(r_area_no, stabilized_normal);
+        copy_v3_v3(r_area_co, stabilized_center);
+      }
+      return;
+    }
+  }
 
   AreaNormalCenterData anctd;
   threading::EnumerableThreadSpecific<SampleLocalData> all_tls;
@@ -5231,6 +5535,13 @@ struct SculptPaintStroke final : public PaintStroke {
   float3 world_grab_anchor_ = float3(0.0f);
   float3 world_grab_delta_ = float3(0.0f);
 
+  /* Reference object for anchored-origin drag brushes (Grab, Pose, Boundary, Thumb, Elastic Deform,
+   * Cloth-grab). These brushes accumulate the grab delta on a single object across the whole stroke,
+   * so the primary must stay fixed even when the paint-stroke framework switches #this->object to a
+   * different mesh under the cursor mid-drag. Captured on the first #update_step; nullptr means not
+   * yet captured or the brush is not anchored-origin. */
+  Object *anchored_primary_object_ = nullptr;
+
   /* Objects in sculpt mode for the duration of this stroke. The membership is stable while a stroke
    * is modal, so it is captured once in #test_start instead of re-querying the view layer (which
    * allocates a vector and iterates every object base) on every event. */
@@ -6312,14 +6623,46 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   /* ── Phase 1: determine the primary object and its world-space brush center for use by
    *             secondary objects. ──
    *
-   * The paint stroke framework already locked onto the object under the cursor
+   * For tracking brushes the paint stroke framework already locked onto the object under the cursor
    * (#SculptPaintStroke::get_location sets this->object) and stored that object's brush location in
    * the RNA "location" property, in its local space. We reuse that instead of re-raycasting so the
    * primary object behaves exactly as in single-object sculpt mode; re-raycasting here would move
-   * the brush location (and thus the affected region) mid-stroke and break anchored-region brushes
-   * such as Grab. */
-  Object *primary_ob = this->object;
+   * the brush location (and thus the affected region) mid-stroke.
+   *
+   * For anchored-origin drag brushes the brush center is a fixed world-space anchor and the grab
+   * delta is accumulated on the primary object across the whole stroke. #get_location switches
+   * #this->object to whichever mesh is under the cursor, so dragging the grab onto a second mesh
+   * would flip the primary mid-stroke; the newly promoted object has no valid grab baseline
+   * (#StrokeCache.old_grab_location stays zero), so the accumulated delta explodes. Pin the primary
+   * to the object captured on the first step. Tracking brushes keep following the cursor. */
+  Object *primary_ob;
+  if (need_delta_from_anchored_origin(*BKE_paint_brush(&sd.paint))) {
+    if (this->anchored_primary_object_ == nullptr) {
+      this->anchored_primary_object_ = this->object;
+    }
+    primary_ob = this->anchored_primary_object_;
+  }
+  else {
+    primary_ob = this->object;
+  }
   this->primary_object_ = primary_ob;
+
+  /* Publish the shared multi-object surface-sampling context onto every object's cache so the
+   * area/plane sampling helpers (#calc_area_normal, #calc_area_center, #calc_area_normal_and_center)
+   * can pool vertices across all meshes in the reference object's space (joined-mesh parity).
+   * Disabled for single-object strokes. The span is backed by #mode_objects_, which is stable for
+   * the whole stroke. */
+  const Span<Object *> sample_objects = (this->mode_objects_.size() > 1) ?
+                                            this->mode_objects_.as_span() :
+                                            Span<Object *>();
+  for (Object *object_ptr : this->mode_objects_) {
+    SculptSession *ss_iter = object_ptr->runtime->sculpt_session;
+    if (ss_iter && ss_iter->cache) {
+      ss_iter->cache->multi_object_sample_objects = sample_objects;
+      ss_iter->cache->multi_object_sample_reference = sample_objects.is_empty() ? nullptr :
+                                                                                  primary_ob;
+    }
+  }
 
   /* The primary object is the one under the cursor (#this->object), which is NOT necessarily the
    * active object that #sculpt_mode_objects returns first. Process the primary first regardless, so

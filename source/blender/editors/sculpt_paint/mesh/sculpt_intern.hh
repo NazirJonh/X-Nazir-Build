@@ -244,6 +244,18 @@ struct StrokeCache {
   float3 last_location_symm = float3(0);
   float stroke_distance = 0.0f;
 
+  /* Multi-object ("global") sculpt: shared surface sampling for area-/plane-based brushes.
+   *
+   * When a stroke spans more than one mesh object, #calc_area_normal, #calc_area_center and
+   * #calc_area_normal_and_center pool the vertices of every object in #multi_object_sample_objects
+   * into #multi_object_sample_reference's local space and convert the resulting normal/center back
+   * into the requesting object's space. This makes Draw (area), Clay, Clay Strips, Plane, Flatten,
+   * Multiplane Scrape, etc. see one shared surface like a single joined mesh, instead of each object
+   * sampling only itself. Empty / null in single-object mode and only honored for
+   * #bke::pbvh::Type::Mesh. Refreshed every #update_step; the span is owned by the paint stroke. */
+  Span<Object *> multi_object_sample_objects;
+  const Object *multi_object_sample_reference = nullptr;
+
   /**
    * Used for alternating between deformations in brushes that need to apply different ones to
    * achieve certain effects.

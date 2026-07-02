@@ -257,6 +257,14 @@ struct StrokeCache {
   const Object *multi_object_sample_reference = nullptr;
 
   /**
+   * Maps this object's local coordinates into the shared texture-sampling space (the primary
+   * object's local space) so 3D brush textures (#MTEX_MAP_MODE_3D) read the same values across
+   * all objects of a multi-object stroke, like on a joined mesh. Identity in single-object mode
+   * and for the primary object itself.
+   */
+  float4x4 texture_sample_from_object = float4x4::identity();
+
+  /**
    * Used for alternating between deformations in brushes that need to apply different ones to
    * achieve certain effects.
    */

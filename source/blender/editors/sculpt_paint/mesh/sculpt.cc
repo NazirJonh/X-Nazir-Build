@@ -2794,8 +2794,12 @@ void sculpt_apply_texture(const SculptSession &ss,
   sub_v3_v3v3(point, brush_point, cache.plane_offset);
 
   if (mtex->brush_map_mode == MTEX_MAP_MODE_3D) {
-    /* Get strength by feeding the vertex location directly into a texture. */
-    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, mtex, point, r_rgba, 0, ss.tex_pool);
+    /* Get strength by feeding the vertex location directly into a texture. Sample in the shared
+     * multi-object space so all objects of a stroke read the texture like a joined mesh; the
+     * matrix is identity in single-object mode. */
+    const float3 point_3d = math::transform_point(cache.texture_sample_from_object, float3(point));
+    *r_value = BKE_brush_sample_tex_3d(
+        cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool);
   }
   else {
     /* If the active area is being applied for symmetry, flip it
@@ -4515,7 +4519,8 @@ static void brush_delta_update(const Depsgraph &depsgraph,
                                const Object *primary_ob,
                                bool &r_world_grab_state_valid,
                                float3 &r_world_grab_anchor,
-                               float3 &r_world_grab_delta)
+                               float3 &r_world_grab_delta,
+                               std::optional<math::Quaternion> &r_world_rake_rotation)
 {
   bke::PaintRuntime &paint_runtime = *paint.runtime;
   SculptSession &ss = *ob.runtime->sculpt_session;
@@ -4544,8 +4549,19 @@ static void brush_delta_update(const Depsgraph &depsgraph,
       /* Anchored-origin brushes search the affected vertices around the fixed origin. */
       cache->location = cache->orig_grab_location;
     }
+    /* Mirror the primary object's rake rotation instead of dropping it, so rake-driven effects
+     * (e.g. the Snake Hook rake influence) act on every mesh like on a single joined one. The
+     * rotation axis is carried through world space; #cache_calc_brushdata_symm derives the
+     * per-symmetry-pass variant later. */
     cache->rake_rotation = std::nullopt;
     cache->rake_rotation_symm = std::nullopt;
+    if (r_world_rake_rotation) {
+      const math::AxisAngle world_axis_angle = math::to_axis_angle(*r_world_rake_rotation);
+      const float3 axis_obj = math::normalize(
+          math::transform_direction(ob.world_to_object(), world_axis_angle.axis()));
+      cache->rake_rotation = math::to_quaternion(
+          math::AxisAngle(axis_obj, world_axis_angle.angle()));
+    }
     return;
   }
   const float mval[2] = {
@@ -4652,9 +4668,13 @@ static void brush_delta_update(const Depsgraph &depsgraph,
    * Captured for both anchored-origin and tip-orientation drag brushes. The grab delta is already
    * finalized and, for tube falloff, already projected onto the view plane; both transforms preserve
    * that since the view plane is shared in world space. */
-  if ((anchored_origin || tip_orientation) && (primary_ob == nullptr || &ob == primary_ob)) {
+  const bool capture_world_grab_state = (anchored_origin || tip_orientation) &&
+                                        (primary_ob == nullptr || &ob == primary_ob);
+  if (capture_world_grab_state) {
     r_world_grab_anchor = math::transform_point(ob.object_to_world(), cache->orig_grab_location);
     r_world_grab_delta = math::transform_direction(ob.object_to_world(), cache->grab_delta);
+    /* The rake rotation for this step is computed below; captured at the end of this function. */
+    r_world_rake_rotation = std::nullopt;
     r_world_grab_state_valid = true;
   }
 
@@ -4698,6 +4718,17 @@ static void brush_delta_update(const Depsgraph &depsgraph,
     }
   }
   rake_data_update(&cache->rake_data, grab_location);
+
+  /* Capture the primary object's rake rotation in world space so secondary objects can mirror it
+   * (see the multi-object path at the top of this function). Must happen after the rotation for
+   * this step is computed above. */
+  if (capture_world_grab_state && cache->rake_rotation) {
+    const math::AxisAngle obj_axis_angle = math::to_axis_angle(*cache->rake_rotation);
+    const float3 axis_world = math::normalize(
+        math::transform_direction(ob.object_to_world(), obj_axis_angle.axis()));
+    r_world_rake_rotation = math::to_quaternion(
+        math::AxisAngle(axis_world, obj_axis_angle.angle()));
+  }
 }
 
 static void cache_paint_invariants_update(StrokeCache &cache, const Brush &brush)
@@ -5534,6 +5565,9 @@ struct SculptPaintStroke final : public PaintStroke {
   bool world_grab_state_valid_ = false;
   float3 world_grab_anchor_ = float3(0.0f);
   float3 world_grab_delta_ = float3(0.0f);
+  /* World-space rake rotation of the primary object for the current step; mirrored onto secondary
+   * objects in #brush_delta_update. Unset when the brush has no rake or none was computed yet. */
+  std::optional<math::Quaternion> world_rake_rotation_;
 
   /* Reference object for anchored-origin drag brushes (Grab, Pose, Boundary, Thumb, Elastic Deform,
    * Cloth-grab). These brushes accumulate the grab delta on a single object across the whole stroke,
@@ -6190,6 +6224,60 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
    * in its own object space; restore the real active object after the loop. */
   Object *original_obact = this->vc.obact;
 
+  /* Joined-mesh parity: every object shares the stroke-start state of the primary (under-cursor)
+   * object. Raycast the primary once here and propagate its world-space hit location and sampled
+   * normal in the loop below. Independent per-object raycasts (or the stale cursor fallbacks) give
+   * each mesh its own stroke origin, which diverges from a single joined mesh for brushes that
+   * anchor on the initial state (Boundary, Pose, Cloth, Grab in silhouette mode) and for the
+   * "brush normal" auto-masking modes. */
+  /* The multi-object raycast returns the front-most hit across all sculpt-mode objects, matching
+   * the object that #get_location promotes to #this->object on the first stroke step (which has
+   * not happened yet when this runs from #test_start). */
+  Object *primary_ob = this->object;
+  bool primary_hit = false;
+  float3 primary_location_local(0.0f);
+  float3 primary_world_location(0.0f);
+  if (mval) {
+    Object *hit_ob = nullptr;
+    float hit_co[3];
+    if (stroke_get_location_bvh(
+            *this->depsgraph, *vc, sculpt_, brush, hit_co, mval, false, &hit_ob) &&
+        hit_ob)
+    {
+      primary_ob = hit_ob;
+      primary_hit = true;
+      primary_location_local = float3(hit_co);
+      primary_world_location = math::transform_point(primary_ob->object_to_world(),
+                                                     primary_location_local);
+    }
+  }
+  const SculptSession &primary_ss = *primary_ob->runtime->sculpt_session;
+  const float3 primary_normal_local = primary_ss.cursor_sampled_normal.value_or(
+      primary_ss.cursor_normal);
+  const bool primary_normal_valid = math::length_squared(primary_normal_local) > 0.01f;
+  /* Normals use the inverse-transpose to stay perpendicular under non-uniform scale. */
+  const float3 primary_world_normal =
+      primary_normal_valid ?
+          math::normalize(math::transpose(float3x3(primary_ob->world_to_object())) *
+                          primary_normal_local) :
+          float3(0.0f);
+
+  /* brush_stroke_init creates only the active object's cache and stores the stroke toggle settings
+   * (invert, alt-smooth, alt-mask) from the operator in it. Caches created below must inherit the
+   * same settings: they select behavior branches per object (e.g. Smooth vs Enhance Details via
+   * #StrokeCache.initial_direction_flipped) and the end-of-stroke brush restore in #done reads them
+   * from whichever object ends up under the cursor. Defaults would silently disable inverted and
+   * alt-toggled strokes on every object but the active one. The active object is first in
+   * #mode_objects_, so its cache is found before any stale secondary cache. */
+  const StrokeToggleSettings *shared_toggle_settings = nullptr;
+  for (Object *object_ptr : objects) {
+    const SculptSession *ss_iter = object_ptr->runtime->sculpt_session;
+    if (ss_iter && ss_iter->cache) {
+      shared_toggle_settings = &ss_iter->cache->toggle_settings;
+      break;
+    }
+  }
+
   for (Object *object_ptr : objects) {
     Object &ob = *object_ptr;
     SculptSession &ss = *ob.runtime->sculpt_session;
@@ -6197,6 +6285,9 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
 
     if (!ss.cache) {
       ss.cache = MEM_new<StrokeCache>(__func__);
+      if (shared_toggle_settings) {
+        ss.cache->toggle_settings = *shared_toggle_settings;
+      }
     }
     StrokeCache *cache = ss.cache;
 
@@ -6218,19 +6309,13 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
     /* Initial mouse location. */
     cache->initial_mouse = mval ? float2(mval) : float2(0.0f);
 
-    const bool check_closest = brush->falloff_shape == PAINT_FALLOFF_SHAPE_TUBE;
-    float3 object_location;
-    if (mval && stroke_get_location_object(*this->depsgraph,
-                                           *vc,
-                                           *this->paint,
-                                           sculpt_,
-                                           ob,
-                                           object_location,
-                                           float2(mval),
-                                           false,
-                                           check_closest,
-                                           true))
-    {
+    /* Every object anchors on the primary object's stroke-start hit, projected into its own local
+     * space (see the comment above the loop); a joined mesh has exactly one such origin. */
+    if (primary_hit) {
+      const float3 object_location = (&ob == primary_ob) ?
+                                         primary_location_local :
+                                         math::transform_point(ob.world_to_object(),
+                                                               primary_world_location);
       cache->initial_location = object_location;
       cache->initial_location_symm = object_location;
       cache->location = object_location;
@@ -6240,12 +6325,22 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
       cache->initial_location = ss.cursor_location;
     }
 
-    /* cursor_geometry_info_update is only called for the active object (this->object).
-     * For secondary sculpt objects, cursor_normal/cursor_sampled_normal may be stale or
-     * uninitialized. We first store whatever is available; a safe view_normal fallback
-     * is applied below after view_normal is computed. */
-    cache->initial_normal_symm = ss.cursor_sampled_normal.value_or(ss.cursor_normal);
-    cache->initial_normal = ss.cursor_sampled_normal.value_or(ss.cursor_normal);
+    if (&ob == primary_ob || !primary_normal_valid) {
+      /* cursor_geometry_info_update is only called for the active object (this->object).
+       * For secondary sculpt objects, cursor_normal/cursor_sampled_normal may be stale or
+       * uninitialized. We first store whatever is available; a safe view_normal fallback
+       * is applied below after view_normal is computed. */
+      cache->initial_normal_symm = ss.cursor_sampled_normal.value_or(ss.cursor_normal);
+      cache->initial_normal = cache->initial_normal_symm;
+    }
+    else {
+      /* Secondary objects share the primary object's sampled surface normal, carried through
+       * world space with the inverse-transpose transform. */
+      const float3 normal_obj = math::normalize(
+          math::transpose(float3x3(ob.object_to_world())) * primary_world_normal);
+      cache->initial_normal = normal_obj;
+      cache->initial_normal_symm = normal_obj;
+    }
 
     /* Not very nice, but with current events system implementation
      * we can't handle brush appearance inversion hotkey separately (sergey). */
@@ -6278,7 +6373,7 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
     /* Secondary objects: if cursor_normal is zero (cursor was never over this object),
      * fall back to view_normal so that plane-based brushes (Clay, Flatten, Fill, Scrape)
      * have a sensible orientation. The primary object retains its sampled surface normal. */
-    if (&ob != this->object &&
+    if (&ob != primary_ob &&
         math::length_squared(cache->initial_normal) < 0.01f)
     {
       cache->initial_normal = cache->view_normal;
@@ -6466,12 +6561,14 @@ static bool stroke_cache_set_location_from_world_sphere(Object &ob,
   cache_paint_invariants_update(cache, brush);
   cache.radius_squared = cache.radius * cache.radius;
 
+  /* Anchored strokes grow the brush radius with the drag distance (the stroke framework maintains
+   * #paint_runtime.pixel_radius). Mirror #stroke_cache_update, which recomputes the radius for the
+   * primary object on every step; keeping only the initial radius here would freeze the anchored
+   * brush size on secondary meshes while it grows on the primary one. */
   if (brush.stroke_method == BRUSH_STROKE_ANCHORED) {
-    if (brush.flag & BRUSH_EDGE_TO_EDGE) {
-      cache.radius = paint_calc_object_space_radius(
-          *cache.vc, cache.location, paint_runtime.pixel_radius);
-      cache.radius_squared = cache.radius * cache.radius;
-    }
+    cache.radius = paint_calc_object_space_radius(
+        *cache.vc, cache.location, paint_runtime.pixel_radius);
+    cache.radius_squared = cache.radius * cache.radius;
   }
 
   return true;
@@ -6595,7 +6692,8 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
                      this->primary_object_,
                      this->world_grab_state_valid_,
                      this->world_grab_anchor_,
-                     this->world_grab_delta_);
+                     this->world_grab_delta_,
+                     this->world_rake_rotation_);
 
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_ROTATE) {
     cache.vertex_rotation = -BLI_dial_angle(cache.dial, cache.mouse) * cache.bstrength;
@@ -6661,6 +6759,15 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       ss_iter->cache->multi_object_sample_objects = sample_objects;
       ss_iter->cache->multi_object_sample_reference = sample_objects.is_empty() ? nullptr :
                                                                                   primary_ob;
+      /* 3D brush textures must be sampled in one shared space (the primary object's local space)
+       * to match a joined mesh. Identity keeps the single-object path bit-exact. */
+      if (sample_objects.is_empty() || object_ptr == primary_ob) {
+        ss_iter->cache->texture_sample_from_object = float4x4::identity();
+      }
+      else {
+        ss_iter->cache->texture_sample_from_object = primary_ob->world_to_object() *
+                                                     object_ptr->object_to_world();
+      }
     }
   }
 
@@ -6680,6 +6787,7 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   /* Recomputed from the primary object below; brush_delta_update fills it for anchored-origin
    * brushes. */
   this->world_grab_state_valid_ = false;
+  this->world_rake_rotation_.reset();
 
   /* World-space brush center shared with secondary objects. Determined once the primary object has
    * been processed (it is first in #objects). For anchored-origin brushes it is the fixed world
@@ -6728,9 +6836,14 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
         primary_world_center = this->world_grab_anchor_;
       }
       else {
-        float3 primary_loc;
-        RNA_float_get_array(itemptr, "location", primary_loc);
-        primary_world_center = math::transform_point(primary_ob->object_to_world(), primary_loc);
+        /* Use the finalized cache location instead of the raw RNA "location": brushes like Snake
+         * Hook accumulate their own search center (the affected region follows the dragged
+         * geometry) and Rotate keeps it locked at the initial anchor. Deriving the shared center
+         * from the raw cursor hit would make secondary meshes chase the cursor while the primary
+         * mesh deforms around its accumulated/locked center, diverging from a joined mesh. For
+         * regular tracking brushes both values are identical. */
+        primary_world_center = math::transform_point(primary_ob->object_to_world(),
+                                                     cache->location);
       }
       primary_world_center_valid = true;
     }

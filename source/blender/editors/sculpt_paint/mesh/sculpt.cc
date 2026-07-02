@@ -4268,13 +4268,18 @@ static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
 
-  /* With a shared symmetry origin the mirror/radial pass set must be identical for every object in
-   * the stroke, otherwise objects would run a different number of passes and joined-mesh parity is
-   * impossible. Take the symmetry flags and radial counts from the reference (active) object; for
-   * the reference itself this is the object's own mesh, keeping the single-object path unchanged. */
-  const bool shared_origin = (sd.paint.symmetry_flags & PAINT_SYMMETRY_SHARED_ORIGIN) &&
-                             cache.symm_reference_object != nullptr;
-  const Object &symm_ob = shared_origin ? *cache.symm_reference_object : ob;
+  /* The mirror/radial pass set must be identical for every object in a multi-object stroke, else
+   * objects would run a different number of passes. Take the symmetry flags and radial counts from
+   * the reference (active) object whenever it is set (any multi-object stroke), so a non-active mesh
+   * whose own #Mesh.symmetry is unset still mirrors on the active object's axes. Falls back to this
+   * object for single-object strokes, keeping that path unchanged. This is independent of the
+   * shared-ORIGIN option below, which only decides where the mirror plane sits. */
+  /* Multi-object strokes always mirror across the reference (active) object's plane in world space
+   * (see #StrokeCache and the setup in #update_step); the shared-origin transforms carry each mesh's
+   * brush data into that reference space. #symm_reference_object is null only for single-object
+   * strokes, where this collapses to the traditional per-object mirror. */
+  const bool shared_origin = cache.symm_reference_object != nullptr;
+  const Object &symm_ob = cache.symm_reference_object ? *cache.symm_reference_object : ob;
   const Mesh &symm_mesh = *id_cast<const Mesh *>(symm_ob.data);
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(symm_ob);
 
@@ -5309,10 +5314,23 @@ std::optional<ActiveElementInfo> active_element_info_get(ViewContext &vc, const 
   return info;
 }
 
+/* Defined below; used here to resolve the front-most sculpt-mode object under the cursor. */
+static bool stroke_get_location_bvh_ex(Depsgraph &depsgraph,
+                                       ViewContext &vc,
+                                       const Paint &paint,
+                                       const Sculpt *sd,
+                                       float3 &out,
+                                       const float2 &mval,
+                                       bool force_original,
+                                       bool check_closest,
+                                       bool limit_closest_radius,
+                                       Object **r_hit_ob);
+
 bool cursor_geometry_info_update(bContext *C,
                                  CursorGeometryInfo *out,
                                  const float2 &mval,
-                                 const bool use_sampled_normal)
+                                 const bool use_sampled_normal,
+                                 Object **r_hit_ob)
 {
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
   const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
@@ -5320,7 +5338,7 @@ bool cursor_geometry_info_update(bContext *C,
   const Base *base = CTX_data_active_base(C);
 
   return cursor_geometry_info_update(
-      *depsgraph, sd.paint, &sd, vc, base, out, mval, use_sampled_normal);
+      *depsgraph, sd.paint, &sd, vc, base, out, mval, use_sampled_normal, r_hit_ob);
 }
 
 bool cursor_geometry_info_update(Depsgraph &depsgraph,
@@ -5330,17 +5348,40 @@ bool cursor_geometry_info_update(Depsgraph &depsgraph,
                                  const Base *base,
                                  CursorGeometryInfo *out,
                                  const float2 &mval,
-                                 const bool use_sampled_normal)
+                                 const bool use_sampled_normal,
+                                 Object **r_hit_ob)
 {
   const Brush &brush = *BKE_paint_brush_for_read(&paint);
   bool original = false;
 
-  Object &ob = *vc.obact;
+  if (r_hit_ob) {
+    *r_hit_ob = nullptr;
+  }
+
+  /* Resolve the front-most sculpt-mode object under the cursor so the cursor location, normal and
+   * active element are sampled from whichever mesh is actually beneath the pointer, not only the
+   * active object. With a single object in the mode this selects that same object, so behavior is
+   * unchanged. When nothing is hit the active object is kept, preserving the previous
+   * "cursor is not over the mesh" clearing behavior. */
+  ViewContext vc_local = vc;
+  const Base *base_local = base;
+  {
+    Object *hit_ob = nullptr;
+    float3 unused_location;
+    stroke_get_location_bvh_ex(
+        depsgraph, vc, paint, sd, unused_location, mval, original, false, false, &hit_ob);
+    if (hit_ob && hit_ob->runtime->sculpt_session && hit_ob != vc.obact) {
+      vc_local.obact = hit_ob;
+      base_local = BKE_view_layer_base_find(vc.view_layer, hit_ob);
+    }
+  }
+
+  Object &ob = *vc_local.obact;
   SculptSession &ss = *ob.runtime->sculpt_session;
 
   bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
 
-  if (!pbvh || !vc.rv3d || !BKE_base_is_visible(vc.v3d, base)) {
+  if (!pbvh || !vc_local.rv3d || !BKE_base_is_visible(vc_local.v3d, base_local)) {
     out->location = float3(0.0f);
     out->normal = float3(0.0f);
     ss.clear_active_elements(false);
@@ -5351,9 +5392,9 @@ bool cursor_geometry_info_update(Depsgraph &depsgraph,
   float3 ray_start;
   float3 ray_end;
   float3 ray_normal;
-  float depth = raycast_init(&vc, mval, ray_start, ray_end, ray_normal, original);
+  float depth = raycast_init(&vc_local, mval, ray_start, ray_end, ray_normal, original);
   if (sd) {
-    stroke_modifiers_check(depsgraph, vc.rv3d, *sd, ob, &brush);
+    stroke_modifiers_check(depsgraph, vc_local.rv3d, *sd, ob, &brush);
   }
 
   RaycastData srd{};
@@ -5394,6 +5435,10 @@ bool cursor_geometry_info_update(Depsgraph &depsgraph,
     return false;
   }
 
+  if (r_hit_ob) {
+    *r_hit_ob = &ob;
+  }
+
   /* Update the active vertex of the SculptSession. */
   ss.set_active_vert(srd.active_vertex);
 
@@ -5426,13 +5471,13 @@ bool cursor_geometry_info_update(Depsgraph &depsgraph,
   const float3 z_axis = {0.0f, 0.0f, 1.0f};
   ob.runtime->world_to_object = math::invert(ob.object_to_world());
   ss.cursor_view_normal = math::normalize(
-      math::transform_direction(ob.world_to_object() * float4x4(vc.rv3d->viewinv), z_axis));
+      math::transform_direction(ob.world_to_object() * float4x4(vc_local.rv3d->viewinv), z_axis));
   ss.cursor_normal = srd.face_normal;
   ss.cursor_location = out->location;
-  ss.rv3d = vc.rv3d;
-  ss.v3d = vc.v3d;
+  ss.rv3d = vc_local.rv3d;
+  ss.v3d = vc_local.v3d;
 
-  ss.cursor_radius = object_space_radius_get(vc, paint, brush, out->location);
+  ss.cursor_radius = object_space_radius_get(vc_local, paint, brush, out->location);
 
   IndexMaskMemory memory;
   const IndexMask node_mask = pbvh_gather_cursor_update(ob, original, memory);
@@ -5589,7 +5634,7 @@ static bool stroke_get_location_object(Depsgraph &depsgraph,
  * object in the mode at once. The active object is returned first (see
  * #BKE_view_layer_array_from_objects_in_mode_params).
  */
-static Vector<Object *> sculpt_mode_objects(const ViewContext &vc)
+Vector<Object *> sculpt_mode_objects(const ViewContext &vc)
 {
   const ObjectsInModeParams params{OB_MODE_SCULPT, false, nullptr, nullptr};
   return BKE_view_layer_array_from_objects_in_mode_params(
@@ -5627,13 +5672,22 @@ static bool stroke_get_location_bvh_ex(Depsgraph &depsgraph,
   float best_depth = std::numeric_limits<float>::max();
   Object *best_ob = nullptr;
 
+  /* True world-space ray origin, used to compare hit depth across objects that may each have their
+   * own transform. #raycast_init returns the ray in #ViewContext.obact's local space (valid for a
+   * single object only), so it cannot be used for the cross-object depth comparison below. */
   float3 ray_start_world;
   float3 ray_end_world;
-  float3 ray_normal_world;
-  raycast_init(&vc, mval, ray_start_world, ray_end_world, ray_normal_world, force_original);
+  ED_view3d_win_to_segment_clipped(
+      vc.depsgraph, vc.region, vc.v3d, mval, ray_start_world, ray_end_world, true);
+
+  /* #raycast_init (called inside #stroke_get_location_object) transforms the screen ray into
+   * #ViewContext.obact's local space. Redirect it to each object so every object is raycast in its
+   * own space; restored after both loops. */
+  Object *const prev_obact = vc.obact;
 
   for (Object *object_ptr : objects) {
     Object &ob = *object_ptr;
+    vc.obact = &ob;
     float3 object_out;
     if (!stroke_get_location_object(
             depsgraph, vc, paint, sd, ob, object_out, mval, force_original, false, false))
@@ -5651,44 +5705,37 @@ static bool stroke_get_location_bvh_ex(Depsgraph &depsgraph,
     }
   }
 
-  if (best_ob) {
-    out = best_out;
-    if (r_hit_ob) {
-      *r_hit_ob = best_ob;
-    }
-    return true;
-  }
+  if (!best_ob && check_closest) {
+    for (Object *object_ptr : objects) {
+      Object &ob = *object_ptr;
+      vc.obact = &ob;
+      float3 object_out;
+      if (!stroke_get_location_object(depsgraph,
+                                      vc,
+                                      paint,
+                                      sd,
+                                      ob,
+                                      object_out,
+                                      mval,
+                                      force_original,
+                                      true,
+                                      limit_closest_radius))
+      {
+        continue;
+      }
 
-  if (!check_closest) {
-    return false;
-  }
+      const float3 hit_world = math::transform_point(ob.object_to_world(), object_out);
+      const float world_dist_sq = math::distance_squared(ray_start_world, hit_world);
 
-  for (Object *object_ptr : objects) {
-    Object &ob = *object_ptr;
-    float3 object_out;
-    if (!stroke_get_location_object(depsgraph,
-                                    vc,
-                                    paint,
-                                    sd,
-                                    ob,
-                                    object_out,
-                                    mval,
-                                    force_original,
-                                    true,
-                                    limit_closest_radius))
-    {
-      continue;
-    }
-
-    const float3 hit_world = math::transform_point(ob.object_to_world(), object_out);
-    const float world_dist_sq = math::distance_squared(ray_start_world, hit_world);
-
-    if (world_dist_sq < best_depth) {
-      best_depth = world_dist_sq;
-      best_out = object_out;
-      best_ob = &ob;
+      if (world_dist_sq < best_depth) {
+        best_depth = world_dist_sq;
+        best_out = object_out;
+        best_ob = &ob;
+      }
     }
   }
+
+  vc.obact = prev_obact;
 
   if (best_ob) {
     out = best_out;
@@ -7031,18 +7078,20 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
                                             this->mode_objects_.as_span() :
                                             Span<Object *>();
   /* Mirror the brush across a single symmetry plane shared by the whole stroke instead of each
-   * object mirroring around its own origin. Gated behind the option so the traditional per-object
-   * behavior stays the default; identity matrices below keep the disabled path bit-exact.
+   * object mirroring around its own origin. In multi-object sculpt this is always engaged (no
+   * option): it is the only way symmetry stays correct when the objects have different, possibly
+   * unapplied, transforms — every mesh mirrors across the reference plane expressed in world space,
+   * not across its own (rotated/scaled) local axes. Identity matrices below keep single-object
+   * strokes bit-exact.
    *
-   * The shared plane is fixed at the ACTIVE object's origin — the object a #Join would merge
-   * everything into — not at #primary_ob (the object under the cursor). Otherwise the plane would
-   * follow the cursor between meshes and the mirror would land in the wrong place when sculpting a
-   * non-active mesh. #sculpt_mode_objects returns the active object first. */
-  const bool shared_symmetry_origin = (sd.paint.symmetry_flags & PAINT_SYMMETRY_SHARED_ORIGIN) != 0;
+   * The shared plane is fixed at the ACTIVE object's origin and orientation — the object a #Join
+   * would merge everything into — not at #primary_ob (the object under the cursor). Otherwise the
+   * plane would follow the cursor between meshes and the mirror would land in the wrong place when
+   * sculpting a non-active mesh. #sculpt_mode_objects returns the active object first. */
   Object *const symm_reference_ob = this->mode_objects_.is_empty() ? nullptr :
                                                                      this->mode_objects_[0];
-  const bool shared_symmetry_active = shared_symmetry_origin && !sample_objects.is_empty() &&
-                                      symm_reference_ob != nullptr;
+  const bool shared_symmetry_active = !sample_objects.is_empty() && symm_reference_ob != nullptr;
+
   for (Object *object_ptr : this->mode_objects_) {
     SculptSession *ss_iter = object_ptr->runtime->sculpt_session;
     if (ss_iter && ss_iter->cache) {
@@ -7059,9 +7108,16 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
                                                      object_ptr->object_to_world();
       }
 
+      /* The reference (active) object defines the shared symmetry plane (position, orientation) and
+       * supplies the symmetry AXES for every mesh in a multi-object stroke, so all meshes mirror
+       * consistently across the same world-space plane even when they have different, possibly
+       * unapplied, transforms and even when a non-active mesh has no #Mesh.symmetry of its own (the
+       * header X/Y/Z toggles only set it on the active mesh). Null for single-object strokes, where
+       * symmetry collapses to this object's own local plane, staying bit-exact. */
+      ss_iter->cache->symm_reference_object = !sample_objects.is_empty() ? symm_reference_ob :
+                                                                           nullptr;
       /* Reference-space transforms for the shared symmetry plane (see #StrokeCache). Identity for
-       * the reference (active) object, single-object strokes, and when the option is off. */
-      ss_iter->cache->symm_reference_object = shared_symmetry_active ? symm_reference_ob : nullptr;
+       * the reference (active) object itself and for single-object strokes. */
       if (!shared_symmetry_active || object_ptr == symm_reference_ob) {
         ss_iter->cache->symm_ref_from_cur = float4x4::identity();
         ss_iter->cache->symm_cur_from_ref = float4x4::identity();

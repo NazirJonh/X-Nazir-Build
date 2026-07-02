@@ -13,6 +13,7 @@
 #include "BLI_index_mask.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_scene_enums.h"
 #include "DNA_vec_types.h"
@@ -21,6 +22,7 @@
 
 namespace blender {
 
+struct Object;
 struct SculptSession;
 struct wmOperatorType;
 namespace bke::pbvh {
@@ -77,6 +79,12 @@ struct GestureData {
   SculptSession *ss;
   ViewContext vc;
 
+  /* Objects this gesture applies to. Defaults to `{vc.obact}` (set by init_common()); operators
+   * that support multi-object gestures overwrite it with sculpt_mode_objects(vc) right after
+   * init_from_*() returns. apply() loops over this list, recomputing all per-object state (see
+   * init_object_space()) for each entry. */
+  Vector<Object *> objects;
+
   /* Enabled and currently active symmetry. */
   ePaintSymmetryFlags symm;
   ePaintSymmetryFlags symmpass;
@@ -119,6 +127,14 @@ struct GestureData {
   /* Task Callback Data. */
   IndexMaskMemory node_mask_memory;
   IndexMask node_mask;
+
+  /* World-space anchors saved by init_from_box()/init_from_line(), used by init_object_space()
+   * to recompute the per-object true_clip_planes / line.true_plane / line.true_side_plane for
+   * each object in `objects`. Lasso reuses the already-stored `lasso.boundbox` and does not need
+   * a dedicated anchor. */
+  rcti box_rect;
+  std::array<float3, 4> line_plane_points;
+  std::array<float3, 2> line_offset_plane_points;
 
   ~GestureData();
 };

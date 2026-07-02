@@ -601,7 +601,8 @@ bool stroke_get_location_bvh(Depsgraph &depsgraph,
 bool cursor_geometry_info_update(bContext *C,
                                  CursorGeometryInfo *out,
                                  const float2 &mval,
-                                 bool use_sampled_normal);
+                                 bool use_sampled_normal,
+                                 Object **r_hit_ob = nullptr);
 bool cursor_geometry_info_update(Depsgraph &depsgraph,
                                  const Paint &paint,
                                  const Sculpt *sd,
@@ -609,7 +610,8 @@ bool cursor_geometry_info_update(Depsgraph &depsgraph,
                                  const Base *base,
                                  CursorGeometryInfo *out,
                                  const float2 &mval,
-                                 bool use_sampled_normal);
+                                 bool use_sampled_normal,
+                                 Object **r_hit_ob = nullptr);
 
 void geometry_preview_lines_update(Depsgraph &depsgraph,
                                    Object &object,
@@ -656,6 +658,12 @@ float3 grab_delta_get(const Brush &brush, const StrokeCache &cache);
 
 /** Ensure random access; required for bke::pbvh::Type::BMesh */
 void vert_random_access_ensure(Object &object);
+
+/**
+ * Return all mesh objects currently in sculpt mode in the view layer of \a vc, active object
+ * first.
+ */
+Vector<Object *> sculpt_mode_objects(const ViewContext &vc);
 
 int vertex_count_get(const Object &object);
 

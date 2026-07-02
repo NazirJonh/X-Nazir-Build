@@ -88,6 +88,87 @@ static void init_common(bContext *C, const wmOperator *op, GestureData &gesture_
   /* View Origin. */
   gesture_data.world_space_view_origin = gesture_data.vc.rv3d->viewinv[3];
   gesture_data.true_view_origin = gesture_data.vc.rv3d->viewinv[3];
+
+  /* Single-object default. Multi-object gesture operators overwrite this with
+   * sculpt_mode_objects(vc) after init_from_*() returns; apply() then recomputes all per-object
+   * state via init_object_space() for each entry. The object-dependent values computed above are
+   * for the active object and get recomputed per object in init_object_space() — they are still
+   * set here because init_from_line()'s line_calculate_plane_points() reads true_view_normal /
+   * true_view_origin before the per-object loop begins. */
+  gesture_data.objects = {gesture_data.vc.obact};
+}
+
+static void line_plane_from_tri(float *r_plane,
+                                const Object &object,
+                                const bool flip,
+                                const float3 &p1,
+                                const float3 &p2,
+                                const float3 &p3)
+{
+  float3 normal;
+  normal_tri_v3(normal, p1, p2, p3);
+  normal = math::normalize(math::transform_direction(object.world_to_object(), normal));
+  if (flip) {
+    normal *= -1.0f;
+  }
+  const float3 plane_point_object_space = math::transform_point(object.world_to_object(), p1);
+  plane_from_point_normal_v3(r_plane, plane_point_object_space, normal);
+}
+
+/* Recomputes every per-object field of `gesture_data` (SculptSession, symmetry, view normal,
+ * clip/line planes) for `object`, from the object-independent anchors captured by init_common()
+ * and init_from_box()/init_from_lasso()/init_from_line(). Called once per object by apply(). */
+static void init_object_space(GestureData &gesture_data, Object &object)
+{
+  gesture_data.ss = object.runtime->sculpt_session;
+  gesture_data.symm = ePaintSymmetryFlags(mesh_symmetry_xyz_get(object));
+  gesture_data.true_view_normal = math::normalize(
+      math::transform_direction(object.world_to_object(), gesture_data.world_space_view_normal));
+
+  switch (gesture_data.shape_type) {
+    case ShapeType::Box: {
+      BoundBox bb;
+      ED_view3d_clipping_calc(&bb,
+                              gesture_data.true_clip_planes,
+                              gesture_data.vc.region,
+                              &object,
+                              &gesture_data.box_rect);
+      break;
+    }
+    case ShapeType::Lasso: {
+      gesture_data.lasso.projviewobjmat = ED_view3d_ob_project_mat_get(gesture_data.vc.rv3d,
+                                                                       &object);
+      BoundBox bb;
+      ED_view3d_clipping_calc(&bb,
+                              gesture_data.true_clip_planes,
+                              gesture_data.vc.region,
+                              &object,
+                              &gesture_data.lasso.boundbox);
+      break;
+    }
+    case ShapeType::Line: {
+      const bool flip = gesture_data.line.flip ^ (!gesture_data.vc.rv3d->is_persp);
+      line_plane_from_tri(gesture_data.line.true_plane,
+                          object,
+                          flip,
+                          gesture_data.line_plane_points[0],
+                          gesture_data.line_plane_points[1],
+                          gesture_data.line_plane_points[2]);
+      line_plane_from_tri(gesture_data.line.true_side_plane[0],
+                          object,
+                          false,
+                          gesture_data.line_plane_points[1],
+                          gesture_data.line_plane_points[0],
+                          gesture_data.line_offset_plane_points[0]);
+      line_plane_from_tri(gesture_data.line.true_side_plane[1],
+                          object,
+                          false,
+                          gesture_data.line_plane_points[3],
+                          gesture_data.line_plane_points[2],
+                          gesture_data.line_offset_plane_points[1]);
+      break;
+    }
+  }
 }
 
 static void lasso_px_cb(const int x, const int x_end, const int y, void *user_data)
@@ -118,8 +199,6 @@ std::unique_ptr<GestureData> init_from_lasso(bContext *C, wmOperator *op)
 
   init_common(C, op, *gesture_data);
 
-  gesture_data->lasso.projviewobjmat = ED_view3d_ob_project_mat_get(gesture_data->vc.rv3d,
-                                                                    gesture_data->vc.obact);
   BLI_lasso_boundbox(&gesture_data->lasso.boundbox, mcoords);
   const int lasso_width = 1 + gesture_data->lasso.boundbox.xmax -
                           gesture_data->lasso.boundbox.xmin;
@@ -136,18 +215,13 @@ std::unique_ptr<GestureData> init_from_lasso(bContext *C, wmOperator *op)
                                 lasso_px_cb,
                                 gesture_data.get());
 
-  BoundBox bb;
-  ED_view3d_clipping_calc(&bb,
-                          gesture_data->true_clip_planes,
-                          gesture_data->vc.region,
-                          gesture_data->vc.obact,
-                          &gesture_data->lasso.boundbox);
-
   gesture_data->gesture_points.reinitialize(mcoords.size());
   for (const int i : mcoords.index_range()) {
     gesture_data->gesture_points[i][0] = mcoords[i][0];
     gesture_data->gesture_points[i][1] = mcoords[i][1];
   }
+
+  init_object_space(*gesture_data, *gesture_data->vc.obact);
 
   return gesture_data;
 }
@@ -159,46 +233,25 @@ std::unique_ptr<GestureData> init_from_box(bContext *C, wmOperator *op)
 
   init_common(C, op, *gesture_data);
 
-  rcti rect;
-  WM_operator_properties_border_to_rcti(op, &rect);
-
-  BoundBox bb;
-  ED_view3d_clipping_calc(
-      &bb, gesture_data->true_clip_planes, gesture_data->vc.region, gesture_data->vc.obact, &rect);
+  WM_operator_properties_border_to_rcti(op, &gesture_data->box_rect);
 
   gesture_data->gesture_points.reinitialize(4);
 
-  gesture_data->gesture_points[0][0] = rect.xmax;
-  gesture_data->gesture_points[0][1] = rect.ymax;
+  gesture_data->gesture_points[0][0] = gesture_data->box_rect.xmax;
+  gesture_data->gesture_points[0][1] = gesture_data->box_rect.ymax;
 
-  gesture_data->gesture_points[1][0] = rect.xmax;
-  gesture_data->gesture_points[1][1] = rect.ymin;
+  gesture_data->gesture_points[1][0] = gesture_data->box_rect.xmax;
+  gesture_data->gesture_points[1][1] = gesture_data->box_rect.ymin;
 
-  gesture_data->gesture_points[2][0] = rect.xmin;
-  gesture_data->gesture_points[2][1] = rect.ymin;
+  gesture_data->gesture_points[2][0] = gesture_data->box_rect.xmin;
+  gesture_data->gesture_points[2][1] = gesture_data->box_rect.ymin;
 
-  gesture_data->gesture_points[3][0] = rect.xmin;
-  gesture_data->gesture_points[3][1] = rect.ymax;
+  gesture_data->gesture_points[3][0] = gesture_data->box_rect.xmin;
+  gesture_data->gesture_points[3][1] = gesture_data->box_rect.ymax;
+
+  init_object_space(*gesture_data, *gesture_data->vc.obact);
+
   return gesture_data;
-}
-
-static void line_plane_from_tri(float *r_plane,
-                                const GestureData &gesture_data,
-                                const bool flip,
-                                const float3 &p1,
-                                const float3 &p2,
-                                const float3 &p3)
-{
-  float3 normal;
-  normal_tri_v3(normal, p1, p2, p3);
-  normal = math::normalize(
-      math::transform_direction(gesture_data.vc.obact->world_to_object(), normal));
-  if (flip) {
-    normal *= -1.0f;
-  }
-  const float3 plane_point_object_space = math::transform_point(
-      gesture_data.vc.obact->world_to_object(), p1);
-  plane_from_point_normal_v3(r_plane, plane_point_object_space, normal);
 }
 
 /* Creates 4 points in the plane defined by the line and 2 extra points with an offset relative to
@@ -249,33 +302,12 @@ std::unique_ptr<GestureData> init_from_line(bContext *C, const wmOperator *op)
 
   gesture_data->line.flip = RNA_boolean_get(op->ptr, "flip");
 
-  std::array<float3, 4> plane_points;
-  std::array<float3, 2> offset_plane_points;
-  line_calculate_plane_points(
-      *gesture_data, gesture_data->gesture_points, plane_points, offset_plane_points);
+  line_calculate_plane_points(*gesture_data,
+                              gesture_data->gesture_points,
+                              gesture_data->line_plane_points,
+                              gesture_data->line_offset_plane_points);
 
-  /* Calculate line plane and normal. */
-  const bool flip = gesture_data->line.flip ^ (!gesture_data->vc.rv3d->is_persp);
-  line_plane_from_tri(gesture_data->line.true_plane,
-                      *gesture_data,
-                      flip,
-                      plane_points[0],
-                      plane_points[1],
-                      plane_points[2]);
-
-  /* Calculate the side planes. */
-  line_plane_from_tri(gesture_data->line.true_side_plane[0],
-                      *gesture_data,
-                      false,
-                      plane_points[1],
-                      plane_points[0],
-                      offset_plane_points[0]);
-  line_plane_from_tri(gesture_data->line.true_side_plane[1],
-                      *gesture_data,
-                      false,
-                      plane_points[3],
-                      plane_points[2],
-                      offset_plane_points[1]);
+  init_object_space(*gesture_data, *gesture_data->vc.obact);
 
   return gesture_data;
 }
@@ -458,12 +490,17 @@ void apply(bContext &C, GestureData &gesture_data, wmOperator &op)
 
   operation->begin(C, op, gesture_data);
 
-  for (int symmpass = 0; symmpass <= gesture_data.symm; symmpass++) {
-    if (is_symmetry_iteration_valid(symmpass, gesture_data.symm)) {
-      flip_for_symmetry_pass(gesture_data, ePaintSymmetryFlags(symmpass));
-      update_affected_nodes(gesture_data);
+  for (Object *object : gesture_data.objects) {
+    gesture_data.vc.obact = object;
+    init_object_space(gesture_data, *object);
 
-      operation->apply_for_symmetry_pass(C, gesture_data);
+    for (int symmpass = 0; symmpass <= gesture_data.symm; symmpass++) {
+      if (is_symmetry_iteration_valid(symmpass, gesture_data.symm)) {
+        flip_for_symmetry_pass(gesture_data, ePaintSymmetryFlags(symmpass));
+        update_affected_nodes(gesture_data);
+
+        operation->apply_for_symmetry_pass(C, gesture_data);
+      }
     }
   }
 

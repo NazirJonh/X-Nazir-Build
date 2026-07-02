@@ -265,6 +265,29 @@ struct StrokeCache {
   float4x4 texture_sample_from_object = float4x4::identity();
 
   /**
+   * Shared symmetry origin (multi-object sculpt, #PAINT_SYMMETRY_SHARED_ORIGIN).
+   *
+   * When mirroring the brush across a single symmetry plane shared by the whole stroke, the
+   * mirror must happen in the primary (reference) object's local space and the result be brought
+   * back into this object's space. #symm_ref_from_cur maps this object's local coordinates into
+   * the reference object's local space; #symm_cur_from_ref is its inverse. Both are identity for
+   * the primary object, in single-object mode, and when the option is disabled, which keeps the
+   * per-object symmetry path bit-exact.
+   */
+  float4x4 symm_ref_from_cur = float4x4::identity();
+  float4x4 symm_cur_from_ref = float4x4::identity();
+  /* True only for objects other than the symmetry reference in a multi-object stroke while
+   * #PAINT_SYMMETRY_SHARED_ORIGIN is on. When false (reference object, single-object stroke, option
+   * off) brush data is mirrored around this object's own origin exactly as in single-object mode. */
+  bool symm_shared_origin_active = false;
+  /* Reference object whose local space defines the single shared symmetry plane for the whole
+   * stroke (#PAINT_SYMMETRY_SHARED_ORIGIN). This is the active object — the one a #Join would merge
+   * everything into — so the plane stays fixed instead of following the cursor between meshes.
+   * The symmetry flag set and radial counts are read from its mesh. Null when the option is off or
+   * in single-object mode. */
+  const Object *symm_reference_object = nullptr;
+
+  /**
    * Used for alternating between deformations in brushes that need to apply different ones to
    * achieve certain effects.
    */

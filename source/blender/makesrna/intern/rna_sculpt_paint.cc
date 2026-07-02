@@ -773,6 +773,16 @@ static void rna_def_paint(BlenderRNA *brna)
                            "Reduce the strength of the brush where it overlaps symmetrical daubs");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
+  prop = RNA_def_property(srna, "use_symmetry_shared_origin", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "symmetry_flags", PAINT_SYMMETRY_SHARED_ORIGIN);
+  RNA_def_property_ui_text(
+      prop,
+      "Shared Symmetry Origin",
+      "In multi-object sculpt, mirror the brush across a single symmetry plane taken from the "
+      "active object instead of each object mirroring around its own origin, so the result matches "
+      "the same meshes after joining them");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
   prop = RNA_def_property(srna, "cavity_curve", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_NEVER_NULL);
   RNA_def_property_ui_text(prop, "Curve", "Editable cavity curve");

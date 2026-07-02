@@ -1343,12 +1343,13 @@ const float *brush_frontface_normal_from_falloff_shape(const SculptSession &ss, 
 /* ===== Sculpting =====
  */
 
-static float calc_overlap(const StrokeCache &cache,
+static float calc_overlap(const float3 &location,
+                          const float radius,
                           const ePaintSymmetryFlags symm,
                           const char axis,
                           const float angle)
 {
-  float3 mirror = symmetry_flip(cache.location, symm);
+  float3 mirror = symmetry_flip(location, symm);
 
   if (axis != 0) {
     float mat[3][3];
@@ -1356,16 +1357,17 @@ static float calc_overlap(const StrokeCache &cache,
     mul_m3_v3(mat, mirror);
   }
 
-  const float distsq = len_squared_v3v3(mirror, cache.location);
+  const float distsq = len_squared_v3v3(mirror, location);
 
-  if (distsq <= 4.0f * (cache.radius_squared)) {
-    return (2.0f * (cache.radius) - sqrtf(distsq)) / (2.0f * (cache.radius));
+  if (distsq <= 4.0f * (radius * radius)) {
+    return (2.0f * radius - sqrtf(distsq)) / (2.0f * radius);
   }
   return 0.0f;
 }
 
 static float calc_radial_symmetry_feather(const Mesh &mesh,
-                                          const StrokeCache &cache,
+                                          const float3 &location,
+                                          const float radius,
                                           const ePaintSymmetryFlags symm,
                                           const char axis)
 {
@@ -1373,7 +1375,7 @@ static float calc_radial_symmetry_feather(const Mesh &mesh,
 
   for (int i = 1; i < mesh.radial_symmetry[axis - 'X']; i++) {
     const float angle = 2.0f * M_PI * i / mesh.radial_symmetry[axis - 'X'];
-    overlap += calc_overlap(cache, symm, axis, angle);
+    overlap += calc_overlap(location, radius, symm, axis, angle);
   }
 
   return overlap;
@@ -1382,7 +1384,8 @@ static float calc_radial_symmetry_feather(const Mesh &mesh,
 static float calc_symmetry_feather(const Sculpt &sd,
                                    const ePaintSymmetryFlags symm,
                                    const Mesh &mesh,
-                                   const StrokeCache &cache)
+                                   const float3 &location,
+                                   const float radius)
 {
   if (!(sd.paint.symmetry_flags & PAINT_SYMMETRY_FEATHER)) {
     return 1.0f;
@@ -1395,11 +1398,11 @@ static float calc_symmetry_feather(const Sculpt &sd,
       continue;
     }
 
-    overlap += calc_overlap(cache, ePaintSymmetryFlags(i), 0, 0);
+    overlap += calc_overlap(location, radius, ePaintSymmetryFlags(i), 0, 0);
 
-    overlap += calc_radial_symmetry_feather(mesh, cache, ePaintSymmetryFlags(i), 'X');
-    overlap += calc_radial_symmetry_feather(mesh, cache, ePaintSymmetryFlags(i), 'Y');
-    overlap += calc_radial_symmetry_feather(mesh, cache, ePaintSymmetryFlags(i), 'Z');
+    overlap += calc_radial_symmetry_feather(mesh, location, radius, ePaintSymmetryFlags(i), 'X');
+    overlap += calc_radial_symmetry_feather(mesh, location, radius, ePaintSymmetryFlags(i), 'Y');
+    overlap += calc_radial_symmetry_feather(mesh, location, radius, ePaintSymmetryFlags(i), 'Z');
   }
   return 1.0f / overlap;
 }
@@ -2861,10 +2864,24 @@ void calc_vertex_displacement(const SculptSession &ss, const Brush &brush, float
   mul_mat3_m4_v3(ss.cache->brush_local_mat_inv.ptr(), translation);
 
   /* Handle symmetry */
-  if (ss.cache->radial_symmetry_pass) {
-    mul_m4_v3(ss.cache->symm_rot_mat.ptr(), translation);
+  if (ss.cache->symm_shared_origin_active) {
+    /* Shared multi-object symmetry: mirror the displacement in the reference object's space so it
+     * stays consistent with #StrokeCache.location_symm, then bring it back to this object's space.
+     * The original rotate-then-flip order is preserved, just performed in the reference frame. */
+    float3 t = math::transform_direction(ss.cache->symm_ref_from_cur, float3(translation));
+    if (ss.cache->radial_symmetry_pass) {
+      t = math::transform_direction(ss.cache->symm_rot_mat, t);
+    }
+    t = symmetry_flip(t, ss.cache->mirror_symmetry_pass);
+    t = math::transform_direction(ss.cache->symm_cur_from_ref, t);
+    copy_v3_v3(translation, t);
   }
-  copy_v3_v3(translation, symmetry_flip(translation, ss.cache->mirror_symmetry_pass));
+  else {
+    if (ss.cache->radial_symmetry_pass) {
+      mul_m4_v3(ss.cache->symm_rot_mat.ptr(), translation);
+    }
+    copy_v3_v3(translation, symmetry_flip(translation, ss.cache->mirror_symmetry_pass));
+  }
 }
 
 bool node_fully_masked_or_hidden(const bke::pbvh::Node &node)
@@ -3018,6 +3035,38 @@ static float3 calc_sculpt_normal(const Depsgraph &depsgraph,
   return {};
 }
 
+/**
+ * Mirror a point across the current symmetry pass (#StrokeCache.mirror_symmetry_pass, then the
+ * radial #symm_rot_mat). In shared-origin multi-object mode the mirror is performed in the
+ * reference object's space so it matches #cache_calc_brushdata_symm and #StrokeCache.location_symm;
+ * otherwise it happens in this object's own local space. The reference transforms are identity for
+ * the single-object / option-off / reference-object cases, keeping those paths bit-exact.
+ */
+static float3 symm_pass_mirror_point(const StrokeCache &cache, float3 co)
+{
+  if (cache.symm_shared_origin_active) {
+    co = math::transform_point(cache.symm_ref_from_cur, co);
+    co = symmetry_flip(co, cache.mirror_symmetry_pass);
+    co = math::transform_point(cache.symm_rot_mat, co);
+    return math::transform_point(cache.symm_cur_from_ref, co);
+  }
+  co = symmetry_flip(co, cache.mirror_symmetry_pass);
+  return math::transform_point(cache.symm_rot_mat, co);
+}
+
+/** Direction counterpart of #symm_pass_mirror_point (ignores translation). */
+static float3 symm_pass_mirror_direction(const StrokeCache &cache, float3 dir)
+{
+  if (cache.symm_shared_origin_active) {
+    dir = math::transform_direction(cache.symm_ref_from_cur, dir);
+    dir = symmetry_flip(dir, cache.mirror_symmetry_pass);
+    dir = math::transform_direction(cache.symm_rot_mat, dir);
+    return math::transform_direction(cache.symm_cur_from_ref, dir);
+  }
+  dir = symmetry_flip(dir, cache.mirror_symmetry_pass);
+  return math::transform_direction(cache.symm_rot_mat, dir);
+}
+
 static void update_sculpt_normal(const Depsgraph &depsgraph,
                                  const Sculpt &sd,
                                  Object &ob,
@@ -3051,8 +3100,7 @@ static void update_sculpt_normal(const Depsgraph &depsgraph,
     copy_v3_v3(cache.sculpt_normal_symm, cache.sculpt_normal);
   }
   else {
-    cache.sculpt_normal_symm = symmetry_flip(cache.sculpt_normal, cache.mirror_symmetry_pass);
-    mul_m4_v3(cache.symm_rot_mat.ptr(), cache.sculpt_normal_symm);
+    cache.sculpt_normal_symm = symm_pass_mirror_direction(cache, cache.sculpt_normal);
   }
 }
 
@@ -3414,13 +3462,8 @@ void calc_brush_plane(const Depsgraph &depsgraph,
   else {
     BLI_assert(math::is_zero(ss.cache->symm_rot_mat.location().xyz()));
 
-    r_area_no = ss.cache->sculpt_normal;
-    r_area_no = symmetry_flip(r_area_no, ss.cache->mirror_symmetry_pass);
-    r_area_no = math::transform_direction(ss.cache->symm_rot_mat, r_area_no);
-
-    r_area_co = ss.cache->last_center;
-    r_area_co = symmetry_flip(r_area_co, ss.cache->mirror_symmetry_pass);
-    r_area_co = math::transform_point(ss.cache->symm_rot_mat, r_area_co);
+    r_area_no = symm_pass_mirror_direction(*ss.cache, ss.cache->sculpt_normal);
+    r_area_co = symm_pass_mirror_point(*ss.cache, ss.cache->last_center);
 
     /* Shift the plane for the current tile. */
     r_area_co += ss.cache->plane_offset;
@@ -3901,6 +3944,98 @@ void cache_calc_brushdata_symm(StrokeCache &cache,
                                const char axis,
                                const float angle)
 {
+  cache.symm_rot_mat = float4x4::identity();
+  cache.symm_rot_mat_inv = float4x4::identity();
+  zero_v3(cache.plane_offset);
+
+  /* Expects XYZ. */
+  if (axis) {
+    rotate_m4(cache.symm_rot_mat.ptr(), axis, angle);
+    rotate_m4(cache.symm_rot_mat_inv.ptr(), axis, -angle);
+  }
+
+  if (cache.symm_shared_origin_active) {
+    /* Multi-object shared symmetry origin: mirror the brush in the reference (primary) object's
+     * local space so the whole stroke shares a single symmetry plane, then bring each value back
+     * into this object's local space. Radial rotation (#symm_rot_mat) is likewise applied in the
+     * reference space, before the conversion back. Points are transformed as positions, deltas and
+     * normals as directions (normals are re-normalized because the reference transform may carry
+     * non-uniform scale). */
+    const float4x4 &ref_from_cur = cache.symm_ref_from_cur;
+    const float4x4 &cur_from_ref = cache.symm_cur_from_ref;
+
+    auto mirror_point = [&](const float3 &p, const bool radial_rotate) {
+      float3 v = math::transform_point(ref_from_cur, p);
+      v = symmetry_flip(v, symm);
+      if (radial_rotate) {
+        mul_m4_v3(cache.symm_rot_mat.ptr(), v);
+      }
+      return math::transform_point(cur_from_ref, v);
+    };
+    auto mirror_delta = [&](const float3 &d, const bool radial_rotate) {
+      float3 v = math::transform_direction(ref_from_cur, d);
+      v = symmetry_flip(v, symm);
+      if (radial_rotate) {
+        mul_m4_v3(cache.symm_rot_mat.ptr(), v);
+      }
+      return math::transform_direction(cur_from_ref, v);
+    };
+    auto mirror_normal = [&](const float3 &n, const bool radial_rotate) {
+      return math::normalize(mirror_delta(n, radial_rotate));
+    };
+
+    cache.location_symm = mirror_point(cache.location, true);
+    cache.last_location_symm = mirror_point(cache.last_location, false);
+    cache.grab_delta_symm = mirror_delta(cache.grab_delta, true);
+    cache.view_normal_symm = mirror_normal(cache.view_normal, false);
+    cache.view_origin_symm = mirror_point(cache.view_origin, false);
+    cache.initial_location_symm = mirror_point(cache.initial_location, false);
+    cache.initial_normal_symm = mirror_normal(cache.initial_normal, false);
+
+    if (cache.supports_gravity) {
+      cache.gravity_direction_symm = mirror_normal(cache.gravity_direction, true);
+    }
+
+    if (cache.rake_rotation) {
+      /* Mirror the rake rotation across the shared symmetry plane. Express its axis in the reference
+       * space, apply the same per-axis sign flip #flip_qt_qt does (mirroring a rotation reflects its
+       * axis and negates its angle), then bring the axis back into this object's space. The axis is
+       * carried as a direction; a handedness flip from a negative-determinant transform cancels
+       * between the two conversions (#symm_cur_from_ref is the inverse of #symm_ref_from_cur, so
+       * their determinants share sign), leaving only the mirror's own angle inversion — matching a
+       * joined mesh. */
+      const float4 existing(cache.rake_rotation->w,
+                            cache.rake_rotation->x,
+                            cache.rake_rotation->y,
+                            cache.rake_rotation->z);
+      float3 axis;
+      float angle;
+      quat_to_axis_angle(axis, &angle, existing);
+
+      axis = math::normalize(math::transform_direction(ref_from_cur, axis));
+      if (symm & PAINT_SYMM_X) {
+        axis.x *= -1.0f;
+        angle *= -1.0f;
+      }
+      if (symm & PAINT_SYMM_Y) {
+        axis.y *= -1.0f;
+        angle *= -1.0f;
+      }
+      if (symm & PAINT_SYMM_Z) {
+        axis.z *= -1.0f;
+        angle *= -1.0f;
+      }
+      axis = math::normalize(math::transform_direction(cur_from_ref, axis));
+
+      float4 new_quat;
+      axis_angle_normalized_to_quat(new_quat, axis, angle);
+      cache.rake_rotation_symm = math::Quaternion(new_quat);
+    }
+    return;
+  }
+
+  /* Per-object symmetry (default): mirror around this object's own origin and local axes. Kept
+   * verbatim so the single-object and option-off paths stay bit-exact. */
   cache.location_symm = symmetry_flip(cache.location, symm);
   cache.last_location_symm = symmetry_flip(cache.last_location, symm);
   cache.grab_delta_symm = symmetry_flip(cache.grab_delta, symm);
@@ -3924,16 +4059,6 @@ void cache_calc_brushdata_symm(StrokeCache &cache,
     }
   }
 #endif
-
-  cache.symm_rot_mat = float4x4::identity();
-  cache.symm_rot_mat_inv = float4x4::identity();
-  zero_v3(cache.plane_offset);
-
-  /* Expects XYZ. */
-  if (axis) {
-    rotate_m4(cache.symm_rot_mat.ptr(), axis, angle);
-    rotate_m4(cache.symm_rot_mat_inv.ptr(), axis, -angle);
-  }
 
   mul_m4_v3(cache.symm_rot_mat.ptr(), cache.location_symm);
   mul_m4_v3(cache.symm_rot_mat.ptr(), cache.grab_delta_symm);
@@ -3971,10 +4096,6 @@ static void do_tiled(const Depsgraph &depsgraph,
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache *cache = ss.cache;
-  const float radius = cache->radius;
-  const Bounds<float3> bb = *BKE_object_boundbox_get(&ob);
-  const float *bbMin = bb.min;
-  const float *bbMax = bb.max;
   const float *step = sd.paint.tile_offset;
 
   /* These are integer locations, for real location: multiply with step and add orgLoc.
@@ -3988,6 +4109,78 @@ static void do_tiled(const Depsgraph &depsgraph,
   float original_initial_location[3];
   copy_v3_v3(orgLoc, cache->location_symm);
   copy_v3_v3(original_initial_location, cache->initial_location_symm);
+
+  if (cache->symm_shared_origin_active) {
+    /* Build the tile lattice in the reference (active) object's local space so every object of the
+     * stroke tiles on the same grid (shared phase #org_ref and stride #sd.paint.tile_offset) as a
+     * joined mesh, then convert each tiled offset back into this object's local space. The tile
+     * range only has to cover this object's own geometry: a tile that does not reach this mesh is a
+     * no-op for it, so this object's bounds (transformed into the reference space) and this object's
+     * radius are enough — a joined mesh would paint this object's vertices from exactly those same
+     * tiles. */
+    const float radius = cache->radius;
+    const float3 org_ref = math::transform_point(cache->symm_ref_from_cur, float3(orgLoc));
+
+    Bounds<float3> bounds;
+    bounds.min = org_ref;
+    bounds.max = org_ref;
+    if (const std::optional<Bounds<float3>> ob_bb = BKE_object_boundbox_get(&ob)) {
+      for (int corner = 0; corner < 8; corner++) {
+        const float3 local((corner & 1) ? ob_bb->max.x : ob_bb->min.x,
+                           (corner & 2) ? ob_bb->max.y : ob_bb->min.y,
+                           (corner & 4) ? ob_bb->max.z : ob_bb->min.z);
+        const float3 p = math::transform_point(cache->symm_ref_from_cur, local);
+        bounds.min = math::min(bounds.min, p);
+        bounds.max = math::max(bounds.max, p);
+      }
+    }
+
+    for (int dim = 0; dim < 3; dim++) {
+      if ((sd.paint.symmetry_flags & (PAINT_TILE_X << dim)) && step[dim] > 0) {
+        start[dim] = (bounds.min[dim] - org_ref[dim] - radius) / step[dim];
+        end[dim] = (bounds.max[dim] - org_ref[dim] + radius) / step[dim];
+      }
+      else {
+        start[dim] = end[dim] = 0;
+      }
+    }
+
+    /* First do the "un-tiled" position to initialize the stroke for this location. */
+    cache->tile_pass = 0;
+    action(depsgraph, scene, sd, ob, brush, paint_mode_settings);
+
+    copy_v3_v3_int(cur, start);
+    for (cur[0] = start[0]; cur[0] <= end[0]; cur[0]++) {
+      for (cur[1] = start[1]; cur[1] <= end[1]; cur[1]++) {
+        for (cur[2] = start[2]; cur[2] <= end[2]; cur[2]++) {
+          if (!cur[0] && !cur[1] && !cur[2]) {
+            /* Skip tile at orgLoc, this was already handled before all others. */
+            continue;
+          }
+
+          ++cache->tile_pass;
+
+          /* Tile shift in the primary space, converted into this object's local space as a
+           * direction. Applied to #plane_offset too so #sculpt_apply_texture (which subtracts it in
+           * object space, then maps into the shared texture space) tiles the texture consistently. */
+          const float3 step_ref(cur[0] * step[0], cur[1] * step[1], cur[2] * step[2]);
+          const float3 offset = math::transform_direction(cache->symm_cur_from_ref, step_ref);
+          for (int dim = 0; dim < 3; dim++) {
+            cache->location_symm[dim] = orgLoc[dim] + offset[dim];
+            cache->plane_offset[dim] = offset[dim];
+            cache->initial_location_symm[dim] = original_initial_location[dim] + offset[dim];
+          }
+          action(depsgraph, scene, sd, ob, brush, paint_mode_settings);
+        }
+      }
+    }
+    return;
+  }
+
+  const float radius = cache->radius;
+  const Bounds<float3> bb = *BKE_object_boundbox_get(&ob);
+  const float *bbMin = bb.min;
+  const float *bbMax = bb.max;
 
   for (int dim = 0; dim < 3; dim++) {
     if ((sd.paint.symmetry_flags & (PAINT_TILE_X << dim)) && step[dim] > 0) {
@@ -4034,15 +4227,15 @@ static void do_radial_symmetry(const Depsgraph &depsgraph,
                                const Brush &brush,
                                PaintModeSettings &paint_mode_settings,
                                const BrushActionFunc action,
+                               const Mesh &symm_mesh,
                                const ePaintSymmetryFlags symm,
                                const int axis,
                                const float /*feather*/)
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
-  const Mesh &mesh = *id_cast<Mesh *>(ob.data);
 
-  for (int i = 1; i < mesh.radial_symmetry[axis - 'X']; i++) {
-    const float angle = 2.0f * M_PI * i / mesh.radial_symmetry[axis - 'X'];
+  for (int i = 1; i < symm_mesh.radial_symmetry[axis - 'X']; i++) {
+    const float angle = 2.0f * M_PI * i / symm_mesh.radial_symmetry[axis - 'X'];
     ss.cache->radial_symmetry_pass = i;
     cache_calc_brushdata_symm(*ss.cache, symm, axis, angle);
     do_tiled(depsgraph, scene, sd, ob, brush, paint_mode_settings, action);
@@ -4072,12 +4265,29 @@ static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
                                          PaintModeSettings &paint_mode_settings)
 {
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
-  const Mesh &mesh = *id_cast<Mesh *>(ob.data);
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
-  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
 
-  float feather = calc_symmetry_feather(sd, symm, mesh, *ss.cache);
+  /* With a shared symmetry origin the mirror/radial pass set must be identical for every object in
+   * the stroke, otherwise objects would run a different number of passes and joined-mesh parity is
+   * impossible. Take the symmetry flags and radial counts from the reference (active) object; for
+   * the reference itself this is the object's own mesh, keeping the single-object path unchanged. */
+  const bool shared_origin = (sd.paint.symmetry_flags & PAINT_SYMMETRY_SHARED_ORIGIN) &&
+                             cache.symm_reference_object != nullptr;
+  const Object &symm_ob = shared_origin ? *cache.symm_reference_object : ob;
+  const Mesh &symm_mesh = *id_cast<const Mesh *>(symm_ob.data);
+  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(symm_ob);
+
+  /* Overlap feathering measures how much mirror/radial passes overlap; for parity it must be the
+   * same geometric measure for every object, so evaluate it in the reference space. Derive the
+   * brush center there from this object's cache via #symm_ref_from_cur (identity for the reference
+   * object and when the option is off) instead of reading another object's cache, which may not be
+   * processed yet this step. The radius is left in this object's units — exact when the objects
+   * share scale (the parity target). */
+  const float3 feather_location = shared_origin ? math::transform_point(cache.symm_ref_from_cur,
+                                                                        cache.location) :
+                                                  cache.location;
+  float feather = calc_symmetry_feather(sd, symm, symm_mesh, feather_location, cache.radius);
 
   cache.bstrength = brush_strength(sd, cache, feather, paint_mode_settings);
 
@@ -4095,11 +4305,11 @@ static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
     do_tiled(depsgraph, scene, sd, ob, brush, paint_mode_settings, action);
 
     do_radial_symmetry(
-        depsgraph, scene, sd, ob, brush, paint_mode_settings, action, symm, 'X', feather);
+        depsgraph, scene, sd, ob, brush, paint_mode_settings, action, symm_mesh, symm, 'X', feather);
     do_radial_symmetry(
-        depsgraph, scene, sd, ob, brush, paint_mode_settings, action, symm, 'Y', feather);
+        depsgraph, scene, sd, ob, brush, paint_mode_settings, action, symm_mesh, symm, 'Y', feather);
     do_radial_symmetry(
-        depsgraph, scene, sd, ob, brush, paint_mode_settings, action, symm, 'Z', feather);
+        depsgraph, scene, sd, ob, brush, paint_mode_settings, action, symm_mesh, symm, 'Z', feather);
   }
 }
 
@@ -6488,20 +6698,15 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 }
 
 /**
- * Sets the brush location for a secondary sculpt object by projecting the world-space brush
- * center into the object's local space and testing whether any PBVH nodes intersect the brush
- * sphere. Used in multi-object sculpt mode for objects that are NOT directly under the cursor.
- *
- * Unlike the primary object, which keeps the framework-provided RNA "location", this function
- * accepts any object whose geometry overlaps the brush sphere in 3D world space.
- *
- * \return true if any PBVH node of \a ob intersects the brush sphere and the cache was updated.
+ * Test whether any PBVH node of \a ob intersects the brush sphere centered at \a world_center
+ * (given in world space), projecting the center into the object's local space first. Does not
+ * modify the cache.
  */
-static bool stroke_cache_set_location_from_world_sphere(Object &ob,
-                                                        StrokeCache &cache,
-                                                        Paint &paint,
-                                                        const Brush &brush,
-                                                        const float3 &world_center)
+static bool object_geometry_intersects_world_sphere(Object &ob,
+                                                    const StrokeCache &cache,
+                                                    Paint &paint,
+                                                    const Brush &brush,
+                                                    const float3 &world_center)
 {
   bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
   if (!pbvh) {
@@ -6532,9 +6737,22 @@ static bool stroke_cache_set_location_from_world_sphere(Object &ob,
         return node_in_sphere(node, obj_center, obj_radius_sq, use_original);
       });
 
-  if (nodes_in_range.is_empty()) {
-    return false;
-  }
+  return !nodes_in_range.is_empty();
+}
+
+/**
+ * Set a secondary sculpt object's brush location and radius from the world-space brush center,
+ * projecting it into the object's local space. Unconditional: the caller decides whether the
+ * object should be processed at all (see #object_geometry_intersects_world_sphere).
+ */
+static void stroke_cache_apply_world_center(Object &ob,
+                                            StrokeCache &cache,
+                                            Paint &paint,
+                                            const Brush &brush,
+                                            const float3 &world_center)
+{
+  const float3 obj_center = math::transform_point(ob.world_to_object(), world_center);
+  const float obj_radius = object_space_radius_get(*cache.vc, paint, brush, obj_center);
 
   cache.location = obj_center;
 
@@ -6570,8 +6788,67 @@ static bool stroke_cache_set_location_from_world_sphere(Object &ob,
         *cache.vc, cache.location, paint_runtime.pixel_radius);
     cache.radius_squared = cache.radius * cache.radius;
   }
+}
 
+/**
+ * Sets the brush location for a secondary sculpt object by projecting the world-space brush
+ * center into the object's local space and testing whether any PBVH nodes intersect the brush
+ * sphere. Used in multi-object sculpt mode for objects that are NOT directly under the cursor.
+ *
+ * Unlike the primary object, which keeps the framework-provided RNA "location", this function
+ * accepts any object whose geometry overlaps the brush sphere in 3D world space.
+ *
+ * \return true if any PBVH node of \a ob intersects the brush sphere and the cache was updated.
+ */
+static bool stroke_cache_set_location_from_world_sphere(Object &ob,
+                                                        StrokeCache &cache,
+                                                        Paint &paint,
+                                                        const Brush &brush,
+                                                        const float3 &world_center)
+{
+  if (!object_geometry_intersects_world_sphere(ob, cache, paint, brush, world_center)) {
+    return false;
+  }
+  stroke_cache_apply_world_center(ob, cache, paint, brush, world_center);
   return true;
+}
+
+/**
+ * World-space centers of every symmetry pass (mirror reflections and radial copies) of
+ * \a world_center, taken across the reference object's symmetry planes. Used so a multi-object
+ * shared-symmetry stroke also processes objects whose geometry only lies under a mirrored daub —
+ * a joined mesh would deform that geometry, so the separate object must not be skipped. The first
+ * entry is \a world_center itself (the un-mirrored center).
+ */
+static Vector<float3> shared_symmetry_world_centers(const Object &reference_ob,
+                                                    const float3 &world_center)
+{
+  const Mesh &mesh = *id_cast<const Mesh *>(reference_ob.data);
+  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(reference_ob);
+  const float3 center_ref = math::transform_point(reference_ob.world_to_object(), world_center);
+
+  Vector<float3> centers;
+  for (int i = 0; i <= symm; i++) {
+    if (!is_symmetry_iteration_valid(i, symm)) {
+      continue;
+    }
+    const float3 mirrored = symmetry_flip(center_ref, ePaintSymmetryFlags(i));
+    centers.append(math::transform_point(reference_ob.object_to_world(), mirrored));
+
+    /* Radial copies around each axis, matching #do_radial_symmetry (flip, then rotate). */
+    for (int axis = 0; axis < 3; axis++) {
+      const int count = mesh.radial_symmetry[axis];
+      for (int r = 1; r < count; r++) {
+        const float angle = 2.0f * M_PI * r / count;
+        float mat[3][3];
+        axis_angle_to_mat3_single(mat, 'X' + axis, angle);
+        float3 rotated = mirrored;
+        mul_m3_v3(mat, rotated);
+        centers.append(math::transform_point(reference_ob.object_to_world(), rotated));
+      }
+    }
+  }
+  return centers;
 }
 
 /**
@@ -6753,6 +7030,19 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   const Span<Object *> sample_objects = (this->mode_objects_.size() > 1) ?
                                             this->mode_objects_.as_span() :
                                             Span<Object *>();
+  /* Mirror the brush across a single symmetry plane shared by the whole stroke instead of each
+   * object mirroring around its own origin. Gated behind the option so the traditional per-object
+   * behavior stays the default; identity matrices below keep the disabled path bit-exact.
+   *
+   * The shared plane is fixed at the ACTIVE object's origin — the object a #Join would merge
+   * everything into — not at #primary_ob (the object under the cursor). Otherwise the plane would
+   * follow the cursor between meshes and the mirror would land in the wrong place when sculpting a
+   * non-active mesh. #sculpt_mode_objects returns the active object first. */
+  const bool shared_symmetry_origin = (sd.paint.symmetry_flags & PAINT_SYMMETRY_SHARED_ORIGIN) != 0;
+  Object *const symm_reference_ob = this->mode_objects_.is_empty() ? nullptr :
+                                                                     this->mode_objects_[0];
+  const bool shared_symmetry_active = shared_symmetry_origin && !sample_objects.is_empty() &&
+                                      symm_reference_ob != nullptr;
   for (Object *object_ptr : this->mode_objects_) {
     SculptSession *ss_iter = object_ptr->runtime->sculpt_session;
     if (ss_iter && ss_iter->cache) {
@@ -6767,6 +7057,22 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       else {
         ss_iter->cache->texture_sample_from_object = primary_ob->world_to_object() *
                                                      object_ptr->object_to_world();
+      }
+
+      /* Reference-space transforms for the shared symmetry plane (see #StrokeCache). Identity for
+       * the reference (active) object, single-object strokes, and when the option is off. */
+      ss_iter->cache->symm_reference_object = shared_symmetry_active ? symm_reference_ob : nullptr;
+      if (!shared_symmetry_active || object_ptr == symm_reference_ob) {
+        ss_iter->cache->symm_ref_from_cur = float4x4::identity();
+        ss_iter->cache->symm_cur_from_ref = float4x4::identity();
+        ss_iter->cache->symm_shared_origin_active = false;
+      }
+      else {
+        ss_iter->cache->symm_ref_from_cur = symm_reference_ob->world_to_object() *
+                                            object_ptr->object_to_world();
+        ss_iter->cache->symm_cur_from_ref = object_ptr->world_to_object() *
+                                            symm_reference_ob->object_to_world();
+        ss_iter->cache->symm_shared_origin_active = true;
       }
     }
   }
@@ -6794,6 +7100,13 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
    * anchor; for tracking brushes it is the current cursor hit. */
   float3 primary_world_center(0.0f);
   bool primary_world_center_valid = false;
+
+  /* World-space centers of every symmetry pass, taken across the reference (active) object's
+   * planes. A secondary object is processed if its geometry lies under the main daub OR under any
+   * mirrored/radial daub, so shared symmetry reaches objects that only exist on the mirror side
+   * (e.g. two symmetric limbs kept as separate meshes), matching a joined mesh. Filled once the
+   * primary object has established #primary_world_center; empty when the option is off. */
+  Vector<float3> symm_world_centers;
 
   /* ── Phase 2: per-object brush application ── */
   for (Object *object_ptr : objects) {
@@ -6846,6 +7159,12 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
                                                      cache->location);
       }
       primary_world_center_valid = true;
+
+      /* Precompute the mirrored daub centers now that the shared center is known, for the
+       * secondary-object gate below. */
+      if (shared_symmetry_active) {
+        symm_world_centers = shared_symmetry_world_centers(*symm_reference_ob, primary_world_center);
+      }
     }
     else {
       /* Secondary objects: check whether any geometry intersects the world-space brush sphere
@@ -6857,6 +7176,20 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       }
       has_location = stroke_cache_set_location_from_world_sphere(
           ob, *cache, *this->paint, brush, primary_world_center);
+
+      /* Shared symmetry: also process this object if its geometry lies under a mirrored daub, even
+       * though the main daub misses it. The cache is still set up from the main center — the mirror
+       * passes derive their per-object #location_symm from it — so the main pass is simply a no-op
+       * here while the mirror pass that overlaps this object does the work. */
+      if (!has_location && shared_symmetry_active) {
+        for (const float3 &center : symm_world_centers) {
+          if (object_geometry_intersects_world_sphere(ob, *cache, *this->paint, brush, center)) {
+            stroke_cache_apply_world_center(ob, *cache, *this->paint, brush, primary_world_center);
+            has_location = true;
+            break;
+          }
+        }
+      }
     }
 
     if (!has_location) {

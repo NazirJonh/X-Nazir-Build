@@ -5939,7 +5939,10 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
                             !SCULPT_use_image_paint_brush(tool_settings->paint_mode, ob);
 
   if (needs_colors) {
-    BKE_sculpt_color_layer_create_if_needed(&ob);
+    /* Multi-object sculpt paints into one shared color channel: every mesh in the mode gets the
+     * active object's channel (same name/domain/type) set active before the stroke starts. */
+    ViewContext vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
+    color::ensure_shared_color_attributes(ob, sculpt_mode_objects(vc));
   }
 
   /* CTX_data_ensure_evaluated_depsgraph should be used at the end to include the updates of
@@ -7252,6 +7255,18 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       this->object = original_stroke_ob;
       this->vc.obact = original_obact;
       continue;
+    }
+
+    /* The Paint/Blur density seed is lazily initialized per object from a local-space brush
+     * location, which diverges between objects. The primary object is processed first, so its
+     * seed already exists here for every secondary: copy it before the secondary's own brush
+     * action gets a chance to self-initialize, keeping density noise consistent across the
+     * multi-object stroke. */
+    if (&ob != primary_ob && !cache->paint_brush.density_seed && primary_ob != nullptr) {
+      const SculptSession *primary_ss = primary_ob->runtime->sculpt_session;
+      if (primary_ss && primary_ss->cache && primary_ss->cache->paint_brush.density_seed) {
+        cache->paint_brush.density_seed = primary_ss->cache->paint_brush.density_seed;
+      }
     }
 
     restore_from_undo_step_if_necessary(depsgraph, sd, ob);

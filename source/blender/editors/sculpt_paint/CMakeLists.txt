@@ -210,6 +210,7 @@ if(WITH_GTESTS)
     mesh/mesh_brush_common_tests.cc
     mesh/paint_test.cc
     mesh/sculpt_boundary_tests.cc
+    mesh/sculpt_color_test.cc
     mesh/sculpt_detail_test.cc
     mesh/sculpt_face_set_test.cc
     mesh/sculpt_undo_test.cc

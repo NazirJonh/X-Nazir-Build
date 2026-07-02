@@ -8,24 +8,33 @@
 
 #include "DNA_brush_types.h"
 #include "DNA_meshdata_types.h"
+#include "DNA_object_types.h"
 
 #include "BLI_color.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_hash.h"
+#include "BLI_index_mask.hh"
+#include "BLI_math_base.h"
 #include "BLI_math_color_blend.h"
+#include "BLI_math_geom.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_attribute.h"
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
 #include "BKE_customdata.hh"
+#include "BKE_mesh.h"
 #include "BKE_mesh.hh"
+#include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+
+#include "DEG_depsgraph.hh"
 
 #include "IMB_colormanagement.hh"
 
@@ -246,6 +255,69 @@ bke::GSpanAttributeWriter active_color_attribute_for_write(Mesh &mesh)
     return {};
   }
   return colors;
+}
+
+void ensure_shared_color_attributes(Mesh &active_mesh, const Span<Mesh *> other_meshes)
+{
+  const bke::GAttributeReader reference = active_color_attribute(active_mesh);
+  if (!reference) {
+    return;
+  }
+  const StringRef ref_name = active_mesh.active_color_attribute;
+  const bke::AttrDomain ref_domain = reference.domain;
+  const bke::AttrType ref_type = bke::cpp_type_to_attribute_type(reference.varray.type());
+
+  for (Mesh *mesh : other_meshes) {
+    if (mesh == &active_mesh) {
+      continue;
+    }
+    bool created = false;
+    if (const std::optional<bke::AttributeMetaData> meta =
+            mesh->attributes().lookup_meta_data(ref_name))
+    {
+      /* Name collision with a non-color attribute: leave this mesh untouched. Painting skips it
+       * the same way it skips a mesh without a color attribute today. */
+      if (!bke::mesh::is_color_attribute(*meta)) {
+        continue;
+      }
+    }
+    else {
+      if (!mesh->attributes_for_write().add(
+              ref_name, ref_domain, ref_type, bke::AttributeInitDefaultValue()))
+      {
+        continue;
+      }
+      created = true;
+      BKE_mesh_tessface_clear(mesh);
+    }
+
+    const bool was_active = mesh->active_color_attribute &&
+                            StringRef(mesh->active_color_attribute) == ref_name;
+    if (!was_active) {
+      BKE_id_attributes_active_color_set(&mesh->id, ref_name);
+    }
+    if (mesh->default_color_attribute == nullptr) {
+      BKE_id_attributes_default_color_set(&mesh->id, ref_name);
+    }
+    if (created || !was_active) {
+      DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY_ALL_MODES);
+    }
+  }
+}
+
+void ensure_shared_color_attributes(Object &active_object, const Span<Object *> objects)
+{
+  BKE_sculpt_color_layer_create_if_needed(&active_object);
+
+  Mesh &active_mesh = *BKE_object_get_original_mesh(&active_object);
+  Vector<Mesh *> other_meshes;
+  for (Object *object : objects) {
+    if (object == &active_object || object->type != OB_MESH) {
+      continue;
+    }
+    other_meshes.append(BKE_object_get_original_mesh(object));
+  }
+  ensure_shared_color_attributes(active_mesh, other_meshes);
 }
 
 struct ColorPaintLocalData {
@@ -556,6 +628,141 @@ static void do_sample_wet_paint_task(const Depsgraph &depsgraph,
   }
 }
 
+/* Multi-object wet-paint sampling: accumulates weighted color samples from every object in
+ * `objects` around a shared brush center expressed in `reference_ob`'s local space, mirroring
+ * #calc_area_sample_multi_object_mesh. All inputs are reference-space, so every requesting object
+ * computes the identical result and the per-object wet_mix_prev_color states stay in sync without
+ * any shared mutable state. Mesh PBVH only; non-mesh objects and meshes without a valid color
+ * attribute are skipped. */
+static SampleWetPaintData sample_wet_paint_multi_object_mesh(const Depsgraph &depsgraph,
+                                                              const Brush &brush,
+                                                              const Object &reference_ob,
+                                                              const Span<Object *> objects,
+                                                              const float3 &ref_location,
+                                                              const float3 &ref_view_normal,
+                                                              const float ref_radius)
+{
+  const float radius_sq = ref_radius * ref_radius;
+  const bool use_tube = eBrushFalloffShape(brush.falloff_shape) == PAINT_FALLOFF_SHAPE_TUBE;
+  float4 tube_plane;
+  if (use_tube) {
+    plane_from_point_normal_v3(tube_plane, ref_location, ref_view_normal);
+  }
+
+  SampleWetPaintData swptd{};
+
+  for (Object *object_ptr : objects) {
+    Object &ob = *object_ptr;
+    bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+    if (!pbvh || pbvh->type() != bke::pbvh::Type::Mesh) {
+      continue;
+    }
+    SculptSession &ss = *ob.runtime->sculpt_session;
+    if (!ss.cache) {
+      continue;
+    }
+    Mesh &mesh = *id_cast<Mesh *>(ob.data);
+    const bke::GAttributeReader color_attribute = active_color_attribute(mesh);
+    if (!color_attribute) {
+      continue;
+    }
+    const GVArraySpan colors = *color_attribute;
+
+    const float4x4 ref_from_obj = reference_ob.world_to_object() * ob.object_to_world();
+    const float4x4 obj_from_ref = ob.world_to_object() * reference_ob.object_to_world();
+    const float3 obj_center = math::transform_point(obj_from_ref, ref_location);
+    const float3 obj_view_normal = math::normalize(
+        math::transform_direction(obj_from_ref, ref_view_normal));
+    /* Conservative gather radius in this object's local units; the precise filtering happens
+     * per-vertex in reference space below. */
+    const float obj_scale = max_ff(max_ff(math::length(obj_from_ref.x_axis()),
+                                          math::length(obj_from_ref.y_axis())),
+                                   math::length(obj_from_ref.z_axis()));
+    const float gather_radius = ref_radius * obj_scale * 1.25f;
+    const float gather_radius_sq = gather_radius * gather_radius;
+
+    IndexMaskMemory memory;
+    const IndexMask node_mask = bke::pbvh::search_nodes(
+        *pbvh, memory, [&](const bke::pbvh::Node &node) {
+          return node_in_sphere(node, obj_center, gather_radius_sq, false);
+        });
+    if (node_mask.is_empty()) {
+      continue;
+    }
+
+    const OffsetIndices<int> faces = mesh.faces();
+    const Span<int> corner_verts = mesh.corner_verts();
+    const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+    const Span<float3> vert_positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
+    const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, ob);
+    const MeshAttributeData attribute_data(mesh);
+    const Span<bke::pbvh::MeshNode> nodes = pbvh->nodes<bke::pbvh::MeshNode>();
+
+    threading::EnumerableThreadSpecific<ColorPaintLocalData> all_tls;
+    const SampleWetPaintData object_sample = threading::parallel_reduce(
+        node_mask.index_range(),
+        1,
+        SampleWetPaintData{},
+        [&](const IndexRange range, SampleWetPaintData swptd_local) {
+          ColorPaintLocalData &tls = all_tls.local();
+          node_mask.slice(range).foreach_index([&](const int i) {
+            const bke::pbvh::MeshNode &node = nodes[i];
+            const Span<int> verts = node.verts();
+
+            tls.factors.resize(verts.size());
+            const MutableSpan<float> factors = tls.factors;
+            fill_factor_from_hide_and_mask(
+                attribute_data.hide_vert, attribute_data.mask, verts, factors);
+            if (brush.flag & BRUSH_FRONTFACE) {
+              calc_front_face(obj_view_normal, vert_normals, verts, factors);
+            }
+            auto_mask::calc_vert_factors(
+                depsgraph, ob, ss.cache->automasking.get(), node, verts, factors);
+
+            for (const int k : verts.index_range()) {
+              if (factors[k] <= 0.0f) {
+                continue;
+              }
+              const float3 pos_ref = math::transform_point(ref_from_obj,
+                                                            vert_positions[verts[k]]);
+              float distance_sq;
+              if (use_tube) {
+                float3 projected;
+                closest_to_plane_normalized_v3(projected, tube_plane, pos_ref);
+                distance_sq = math::distance_squared(projected, ref_location);
+              }
+              else {
+                distance_sq = math::distance_squared(ref_location, pos_ref);
+              }
+              if (distance_sq > radius_sq) {
+                continue;
+              }
+              swptd_local.color += color_vert_get(faces,
+                                                   corner_verts,
+                                                   vert_to_face_map,
+                                                   colors,
+                                                   color_attribute.domain,
+                                                   verts[k]) *
+                                    factors[k];
+              swptd_local.tot_samples++;
+            }
+          });
+          return swptd_local;
+        },
+        [](const SampleWetPaintData &a, const SampleWetPaintData &b) {
+          SampleWetPaintData joined{};
+          joined.color = a.color + b.color;
+          joined.tot_samples = a.tot_samples + b.tot_samples;
+          return joined;
+        });
+
+    swptd.color += object_sample.color;
+    swptd.tot_samples += object_sample.tot_samples;
+  }
+
+  return swptd;
+}
+
 void do_paint_brush(const Depsgraph &depsgraph,
                     PaintModeSettings &paint_mode_settings,
                     const Sculpt &sd,
@@ -610,8 +817,30 @@ void do_paint_brush(const Depsgraph &depsgraph,
   /* Wet paint color sampling. */
   float4 wet_color(0);
   if (ss.cache->paint_brush.wet_mix > 0.0f) {
-    threading::EnumerableThreadSpecific<ColorPaintLocalData> all_tls;
-    const SampleWetPaintData swptd = threading::parallel_reduce(
+    SampleWetPaintData swptd{};
+    const Span<Object *> sample_objects = ss.cache->multi_object_sample_objects;
+    const Object *reference_ob = ss.cache->multi_object_sample_reference;
+    const SculptSession *ref_ss = reference_ob ? reference_ob->runtime->sculpt_session : nullptr;
+    if (!sample_objects.is_empty() && reference_ob && ref_ss && ref_ss->cache) {
+      /* Multi-object stroke: pool the wet sample across every object so the "wet paint" color
+       * matches a joined mesh at object boundaries. Reference-space inputs keep the result
+       * identical for every requesting object. */
+      const float4x4 ref_from_cur = reference_ob->world_to_object() * ob.object_to_world();
+      const float3 ref_location = math::transform_point(ref_from_cur, ss.cache->location_symm);
+      const float3 ref_view_normal = math::normalize(
+          math::transform_direction(ref_from_cur, ss.cache->view_normal_symm));
+      const float ref_radius = ref_ss->cache->radius * brush.wet_paint_radius_factor;
+      swptd = sample_wet_paint_multi_object_mesh(depsgraph,
+                                                  brush,
+                                                  *reference_ob,
+                                                  sample_objects,
+                                                  ref_location,
+                                                  ref_view_normal,
+                                                  ref_radius);
+    }
+    else {
+      threading::EnumerableThreadSpecific<ColorPaintLocalData> all_tls;
+      swptd = threading::parallel_reduce(
         node_mask.index_range(),
         1,
         SampleWetPaintData{},
@@ -641,6 +870,7 @@ void do_paint_brush(const Depsgraph &depsgraph,
           joined.tot_samples = a.tot_samples + b.tot_samples;
           return joined;
         });
+    }
 
     if (swptd.tot_samples > 0 && is_finite_v4(swptd.color)) {
       wet_color = math::clamp(swptd.color / float(swptd.tot_samples), 0.0f, 1.0f);

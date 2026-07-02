@@ -44,6 +44,7 @@
 
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
+#include "ED_view3d.hh"
 
 #include "../paint_intern.hh"
 #include "paint_mask.hh"
@@ -2916,8 +2917,10 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
 
   if (needs_colors) {
     /* CTX_data_ensure_evaluated_depsgraph should be used at the end to include the updates of
-     * earlier steps modifying the data. */
-    BKE_sculpt_color_layer_create_if_needed(&ob);
+     * earlier steps modifying the data. Expand itself stays single-object, but it writes into the
+     * shared multi-object color channel. */
+    ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+    color::ensure_shared_color_attributes(ob, sculpt_mode_objects(vc));
     depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
   }
 

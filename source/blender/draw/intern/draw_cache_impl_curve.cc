@@ -27,7 +27,6 @@
 #include "BKE_object_types.hh"
 #include "BKE_vfont.hh"
 
-#include "GPU_attribute_convert.hh"
 #include "GPU_batch.hh"
 #include "GPU_capabilities.hh"
 #include "GPU_texture.hh"
@@ -543,9 +542,8 @@ static void curve_create_edit_curves_nor(CurveRenderData *rdata,
   const bool do_hq_normals = (scene->r.perf_flag & SCE_PERF_HQ_NORMALS) != 0 ||
                              GPU_use_hq_normals_workaround();
 
-  /* Use shared vertex format from draw_curves_normals utility. */
-  const GPUVertFormat &format = CurveNormalsFormat::get(do_hq_normals);
-  const CurveNormalsFormat::AttrIds attr_ids = CurveNormalsFormat::get_attr_ids(do_hq_normals);
+  CurvesNormalsAttrIds attr_ids;
+  const GPUVertFormat &format = curves_normals_format_get(do_hq_normals, attr_ids);
 
   int verts_len_capacity = curve_render_data_normal_len_get(rdata) * 2;
   int vbo_len_used = 0;

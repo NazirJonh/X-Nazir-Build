@@ -87,7 +87,8 @@ class Curves : Overlay {
         auto &sub = pass.sub("Normals");
         sub.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS_EQUAL | DRW_STATE_WRITE_DEPTH,
                       state.clipping_plane_count);
-        sub.shader_set(res.shaders->curves_edit_normals.get());
+        /* Shared with legacy curves: the normals overlay is identical for both curve types. */
+        sub.shader_set(res.shaders->legacy_curve_edit_normals.get());
         sub.push_constant("normal_size", state.overlay.normals_length);
         sub.push_constant("use_hq_normals", use_hq_normals);
         edit_curves_normals_ = &sub;

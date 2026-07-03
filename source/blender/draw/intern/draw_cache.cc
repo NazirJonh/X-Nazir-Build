@@ -514,7 +514,7 @@ void drw_batch_cache_generate_requested(Object *ob, TaskGraph &task_graph)
       DRW_curve_batch_cache_create_requested(ob, scene);
       break;
     case OB_CURVES:
-      DRW_curves_batch_cache_create_requested(ob);
+      DRW_curves_batch_cache_create_requested(ob, scene);
       break;
     case OB_POINTCLOUD:
       DRW_pointcloud_batch_cache_create_requested(ob);

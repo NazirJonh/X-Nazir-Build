@@ -559,31 +559,8 @@ GPU_SHADER_CREATE_END()
 
 CREATE_INFO_VARIANT(overlay_edit_curve_wire_clipped, overlay_edit_curve_wire, drw_clipped)
 
-GPU_SHADER_CREATE_INFO(overlay_edit_curve_normals)
-DO_STATIC_COMPILATION()
-STORAGE_BUF_FREQ(0, read, float, pos[], GEOMETRY)
-STORAGE_BUF_FREQ(1, read, float, rad[], GEOMETRY)
-STORAGE_BUF_FREQ(2, read, uint, nor[], GEOMETRY)
-STORAGE_BUF_FREQ(3, read, uint, tangent[], GEOMETRY)
-PUSH_CONSTANT(int2, gpu_attr_0)
-PUSH_CONSTANT(int2, gpu_attr_1)
-PUSH_CONSTANT(int2, gpu_attr_2)
-PUSH_CONSTANT(int2, gpu_attr_3)
-PUSH_CONSTANT(float, normal_size)
-PUSH_CONSTANT(bool, use_hq_normals)
-VERTEX_OUT(overlay_edit_flat_color_iface)
-DEFINE("LINE_OUTPUT")
-FRAGMENT_OUT(0, float4, frag_color)
-FRAGMENT_OUT(1, float4, line_output)
-VERTEX_SOURCE("overlay_edit_curves_normals_vert.glsl")
-FRAGMENT_SOURCE("overlay_varying_color.glsl")
-ADDITIONAL_INFO(draw_view)
-ADDITIONAL_INFO(draw_modelmat)
-ADDITIONAL_INFO(gpu_index_buffer_load)
-ADDITIONAL_INFO(draw_globals)
-GPU_SHADER_CREATE_END()
-
-CREATE_INFO_VARIANT(overlay_edit_curve_normals_clipped, overlay_edit_curve_normals, drw_clipped)
+/* NOTE: `overlay_edit_curve_normals` (shared by legacy and new curves) is defined in BSL, see
+ * `overlay_edit_curve_normals.bsl.hh`. */
 
 /** \} */
 
@@ -646,33 +623,6 @@ ADDITIONAL_INFO(draw_globals)
 GPU_SHADER_CREATE_END()
 
 CREATE_INFO_VARIANT(overlay_edit_curves_point_clipped, overlay_edit_curves_point, drw_clipped)
-
-GPU_SHADER_CREATE_INFO(overlay_edit_curves_normals)
-DO_STATIC_COMPILATION()
-TYPEDEF_SOURCE("overlay_shader_shared.hh")
-STORAGE_BUF_FREQ(0, read, float, pos[], GEOMETRY)
-STORAGE_BUF_FREQ(1, read, float, rad[], GEOMETRY)
-STORAGE_BUF_FREQ(2, read, uint, nor[], GEOMETRY)
-STORAGE_BUF_FREQ(3, read, uint, tangent[], GEOMETRY)
-PUSH_CONSTANT(int2, gpu_attr_0)
-PUSH_CONSTANT(int2, gpu_attr_1)
-PUSH_CONSTANT(int2, gpu_attr_2)
-PUSH_CONSTANT(int2, gpu_attr_3)
-PUSH_CONSTANT(float, normal_size)
-PUSH_CONSTANT(bool, use_hq_normals)
-VERTEX_OUT(overlay_edit_flat_color_iface)
-DEFINE("LINE_OUTPUT")
-FRAGMENT_OUT(0, float4, frag_color)
-FRAGMENT_OUT(1, float4, line_output)
-VERTEX_SOURCE("overlay_edit_curves_normals_vert.glsl")
-FRAGMENT_SOURCE("overlay_varying_color.glsl")
-ADDITIONAL_INFO(draw_view)
-ADDITIONAL_INFO(draw_modelmat)
-ADDITIONAL_INFO(draw_globals)
-ADDITIONAL_INFO(gpu_index_buffer_load)
-GPU_SHADER_CREATE_END()
-
-CREATE_INFO_VARIANT(overlay_edit_curves_normals_clipped, overlay_edit_curves_normals, drw_clipped)
 
 /** \} */
 

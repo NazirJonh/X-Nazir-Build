@@ -461,7 +461,6 @@ class ShaderModule {
   StaticShader curve_edit_points = shader_clippable("overlay_edit_curves_point");
   StaticShader curve_edit_line = shader_clippable("overlay_edit_particle_strand");
   StaticShader curve_edit_handles = shader_clippable("overlay_edit_curves_handle");
-  StaticShader curves_edit_normals = shader_clippable("overlay_edit_curves_normals");
   StaticShader facing = shader_clippable("overlay_facing");
   StaticShader grid = {"overlay_grid_next"};
   StaticShader grid_background = {"overlay_grid_background"};
@@ -707,7 +706,6 @@ struct Resources : public select::SelectMap {
     shaders->attribute_viewer_pointcloud.ensure_compile_async();
     shaders->background_fill.ensure_compile_async();
     shaders->curve_edit_handles.ensure_compile_async();
-    shaders->curves_edit_normals.ensure_compile_async();
     shaders->curve_edit_line.ensure_compile_async();
     shaders->curve_edit_points.ensure_compile_async();
     shaders->depth_curves.ensure_compile_async();

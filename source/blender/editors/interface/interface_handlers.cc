@@ -62,6 +62,7 @@
 #include "ED_undo.hh"
 
 #include "UI_abstract_view.hh"
+#include "UI_grid_view.hh"
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
 #include "UI_string_search.hh"
@@ -5684,6 +5685,26 @@ static void force_activate_view_item_but(bContext *C,
   }
 }
 
+/**
+ * Popover grids (e.g. the ID browser) lay out their items with
+ * #AbstractGridView::set_fixed_viewport_layout, scrolled by row index instead of the region
+ * #View2D. These support touch/pen drag-to-scroll: holding LMB on a tile and dragging past the
+ * click threshold scrolls the grid instead of activating the tile. Returns the grid to scroll,
+ * or null if this button isn't a tile of one (other popup view items keep the existing
+ * immediate-activate-on-press behavior below).
+ */
+static AbstractGridView *view_item_but_scrollable_popup_grid(Button *but)
+{
+  if (!block_is_popup_any(but->block)) {
+    return nullptr;
+  }
+  AbstractGridView *grid_view = block_view_find_fixed_viewport_grid(*but->block);
+  if (!grid_view || !grid_view->supports_scrolling()) {
+    return nullptr;
+  }
+  return grid_view;
+}
+
 static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, const wmEvent *event)
 {
   ButtonViewItem *view_item_but = static_cast<ButtonViewItem *>(but);
@@ -5699,6 +5720,18 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
           }
 
           if (block_is_popup_any(but->block)) {
+            if (view_item_but_scrollable_popup_grid(but)) {
+              /* Defer activation to #KM_RELEASE: a drag past the threshold scrolls the grid
+               * instead of selecting the tile (touch/pen friendly), see #BUTTON_STATE_WAIT_DRAG
+               * below. */
+              button_activate_state(C, but, BUTTON_STATE_WAIT_DRAG);
+              data->dragstartx = event->xy[0];
+              data->dragstarty = event->xy[1];
+              data->dragchange = false;
+              data->dragsel = 0;
+              return WM_UI_HANDLER_CONTINUE;
+            }
+
             /* TODO(!147047): This should be handled in selection operator. */
             force_activate_view_item_but(C, data->region, view_item_but, false);
             return WM_UI_HANDLER_BREAK;
@@ -5727,6 +5760,54 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
     }
   }
   else if (data->state == BUTTON_STATE_WAIT_DRAG) {
+    AbstractGridView *grid_view = view_item_but_scrollable_popup_grid(but);
+    if (grid_view) {
+      if (event->type == MOUSEMOVE) {
+        /* Same click-vs-drag threshold #but_drag_init uses: the OS/user-preference drag
+         * threshold, clamped so a high preference doesn't require dragging more than half a
+         * tile's height. */
+        const int drag_threshold = min_ii(
+            WM_event_drag_threshold(event),
+            int((UI_UNIT_Y / 2) * block_to_window_scale(data->region, but->block)));
+        const int dy_total = event->xy[1] - data->dragstarty;
+
+        if (!data->dragchange && abs(dy_total) >= drag_threshold) {
+          data->dragchange = true;
+        }
+
+        if (data->dragchange) {
+          /* A full tile height per row would need an impractically large drag before the first
+           * visible scroll step (grid tiles are commonly 80-100+ px): the fixed-viewport grid has
+           * no sub-pixel/partial-row rendering to track the cursor 1:1, so use a quarter of the
+           * tile height as the step instead, closer to what a touch-scroll gesture expects. */
+          const int row_step_px = max_ii(1, grid_view->get_style().tile_height / 4);
+          /* #data->dragsel is repurposed here to store the number of rows already scrolled
+           * since the drag started, recomputed from the total drag distance each time (rather
+           * than accumulated per-event) so rounding never drifts. */
+          const int target_row_delta = dy_total / row_step_px;
+          while (data->dragsel != target_row_delta) {
+            const bool scroll_down = target_row_delta > data->dragsel;
+            grid_view->scroll(scroll_down ? ViewScrollDirection::DOWN : ViewScrollDirection::UP);
+            data->dragsel += scroll_down ? 1 : -1;
+          }
+          ED_region_tag_redraw(data->region);
+          ED_region_tag_refresh_ui(data->region);
+        }
+        return WM_UI_HANDLER_BREAK;
+      }
+      if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+        if (!data->dragchange) {
+          /* Genuine tap: the drag threshold was never crossed, so perform the same
+           * immediate-select behavior #KM_PRESS would have done directly for a non-scrollable
+           * popup view item. */
+          force_activate_view_item_but(C, data->region, view_item_but, false);
+        }
+        button_activate_state(C, but, BUTTON_STATE_EXIT);
+        return WM_UI_HANDLER_BREAK;
+      }
+      return WM_UI_HANDLER_BREAK;
+    }
+
     /* Let "default" button handling take care of the drag logic. */
     return do_but_EXIT(C, but, data, event);
   }
@@ -10918,6 +10999,12 @@ static int handle_view_item_event(bContext *C,
                 view_item_find_mouse_over(region, event->xy));
 
         if (view_but) {
+          if (view_item_but_scrollable_popup_grid(view_but)) {
+            /* Activation (tap vs. drag-to-scroll) is handled entirely by
+             * #do_but_VIEW_ITEM's #BUTTON_STATE_WAIT_DRAG handling for these, see there. */
+            break;
+          }
+
           if (view_item_supports_drag(*view_but->view_item)) {
             if (event->val != KM_CLICK) {
               break;

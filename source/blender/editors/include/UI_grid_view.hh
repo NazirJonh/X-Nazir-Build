@@ -217,9 +217,21 @@ class AbstractGridView : public AbstractView {
   struct FixedViewportGeometry {
     int cols;
     int content_rows;
+    /** Whole tile rows that fit fully in the viewport (floor of #viewport_height / tile). */
     int visible_rows;
     /** Highest possible first visible row (0 when everything fits). */
     int max_first_row;
+    /**
+     * Pixel height of the viewport. May exceed #visible_rows * tile_height, in which case a
+     * partial bottom row is drawn clipped (see #GridViewLayoutBuilder::build_from_view).
+     */
+    int viewport_height;
+    /**
+     * Total pixel scroll range: whole content height minus the pixel-exact #viewport_height, so
+     * scrolling stops exactly at the content end (revealing the partial bottom row fully) with no
+     * over- or under-scroll. Decomposed into #max_first_row whole rows plus a sub-row remainder.
+     */
+    int max_scroll_px;
   };
   FixedViewportGeometry fixed_viewport_geometry() const;
   /** First visible row, read (and clamped) from #scroll_value_. */

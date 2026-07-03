@@ -326,10 +326,12 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
   layout.context_ptr_set("asset_shelf", &shelf_ptr);
 
   /* Asset grid viewport height, derived from the window so the popover fits on screen (see
-   * #ui::popup_grid_fixed_viewport_units). Snapped to whole tile rows so the grid fills it exactly
-   * and the catalog tree can be given the same pixel height — otherwise the taller column leaves
-   * dead space below the shorter one. Reused to keep both columns within the window so the sticky
-   * header holds. */
+   * #ui::popup_grid_fixed_viewport_units). The raw pixel height is used (not snapped to whole tile
+   * rows): the grid clips a partial bottom row at the viewport edge, so when the preview size
+   * changes without the popover resizing, the grid still fills the whole height instead of leaving
+   * dead space below the last whole row. The catalog tree is given the same pixel height so the
+   * taller column never leaves dead space below the shorter one. Reused to keep both columns within
+   * the window so the sticky header holds. */
   const int tile_h_px = std::max(1, tile_height(shelf->settings));
   const float tile_units = float(tile_h_px) / float(UI_UNIT_Y);
   /* Header + gap consumed above the grid: the search / preset row (~1 unit) plus the ~1-unit gap
@@ -338,8 +340,7 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
   const float non_grid_units = 2.0f;
   const float grid_units = ui::popup_grid_fixed_viewport_units(
       C, layout.block(), non_grid_units, tile_units, ASSET_SHELF_POPUP_GRID_DEFAULT_UNITS_Y);
-  const int grid_rows = std::max(1, int(grid_units * UI_UNIT_Y) / tile_h_px);
-  const int grid_viewport_px = grid_rows * tile_h_px;
+  const int grid_viewport_px = std::max(tile_h_px, int(grid_units * UI_UNIT_Y));
 
   ui::Layout &row = layout.row(false);
   ui::Layout &catalogs_col = row.column(false);

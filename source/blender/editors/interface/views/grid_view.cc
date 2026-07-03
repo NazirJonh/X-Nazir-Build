@@ -176,8 +176,14 @@ AbstractGridView::FixedViewportGeometry AbstractGridView::fixed_viewport_geometr
    * misuse. */
   const int viewport_h = min_viewport_height_.value_or(int(UI_UNIT_Y * 12));
   const int visible_rows = std::max(viewport_h / tile_height, 1);
-  const int max_first_row = std::max(0, content_rows - visible_rows);
-  return {cols, content_rows, visible_rows, max_first_row};
+  /* Pixel-exact scroll range: the whole content minus the raw pixel viewport, not just the whole
+   * visible rows. When the viewport is taller than #visible_rows whole rows, the extra pixels show
+   * a partial bottom row, so the last scroll position only needs to pull that partial row fully
+   * into view (a fraction of a tile) instead of a whole row. */
+  const int content_height = content_rows * tile_height;
+  const int max_scroll_px = std::max(0, content_height - viewport_h);
+  const int max_first_row = max_scroll_px / tile_height;
+  return {cols, content_rows, visible_rows, max_first_row, viewport_h, max_scroll_px};
 }
 
 int AbstractGridView::fixed_viewport_first_row() const
@@ -193,14 +199,16 @@ IndexRange AbstractGridView::fixed_viewport_visible_range() const
 {
   const FixedViewportGeometry geo = this->fixed_viewport_geometry();
   const int first_idx = this->fixed_viewport_first_row() * geo.cols;
-  /* With a sub-row #scroll_offset_px() the window intersects one more (partial) row at the
-   * bottom; without this buffer row it would fall outside this range and vanish instead of being
-   * drawn clipped. The overflow is cut away by the scroll-clip window (see
-   * #GridViewLayoutBuilder::build_from_view). No permanent buffer row is needed: the clip window
-   * is always an exact multiple of the tile height (#FixedViewportGeometry::visible_rows whole
-   * rows), unlike the arbitrary-height windows the reference implementation covers. */
+  const int tile_height = std::max(style_.tile_height, 1);
+  /* Rows the viewport intersects at a whole-row scroll position. #viewport_height may not be an
+   * exact multiple of the tile height, so round up: the extra pixels show a partial bottom row
+   * that must be built to be drawn clipped (see #GridViewLayoutBuilder::build_from_view). */
+  const int rows_touched = std::max(1, (geo.viewport_height + tile_height - 1) / tile_height);
+  /* A sub-row #scroll_offset_px() shifts content up, so the window intersects one *more* row at
+   * the bottom; without this buffer row it would fall outside this range and vanish instead of
+   * being drawn clipped. The overflow is cut away by the scroll-clip window. */
   const int buffer_rows = (this->scroll_offset_px() > 0) ? 1 : 0;
-  const int count = (geo.visible_rows + buffer_rows) * geo.cols;
+  const int count = (rows_touched + buffer_rows) * geo.cols;
   return IndexRange(first_idx, count);
 }
 
@@ -213,13 +221,17 @@ void AbstractGridView::fixed_viewport_clamp_scroll_value()
     scroll_offset_px_ = std::make_shared<int>(0);
   }
   const FixedViewportGeometry geo = this->fixed_viewport_geometry();
+  const int tile_height = std::max(style_.tile_height, 1);
   *scroll_value_ = std::clamp(*scroll_value_, 0, geo.max_first_row);
-  /* Sub-row offset: pin to a whole-row boundary on the last row (nothing below to reveal). */
+  /* Sub-row offset: on the last row, cap at the pixel remainder of the scroll range so the bottom
+   * edge stops exactly at the content end (the partial bottom row pulled fully into view). This
+   * remainder is 0 when the viewport height is a whole multiple of the tile height, restoring the
+   * old whole-row pin. Otherwise the offset is a full sub-row range. */
   if (*scroll_value_ >= geo.max_first_row) {
-    *scroll_offset_px_ = 0;
+    *scroll_offset_px_ = std::clamp(*scroll_offset_px_, 0, geo.max_scroll_px % tile_height);
   }
   else {
-    *scroll_offset_px_ = std::clamp(*scroll_offset_px_, 0, std::max(style_.tile_height, 1) - 1);
+    *scroll_offset_px_ = std::clamp(*scroll_offset_px_, 0, tile_height - 1);
   }
 }
 
@@ -243,12 +255,13 @@ int AbstractGridView::scroll_offset_px() const
     return 0;
   }
   /* Report the effective offset the next build will apply (#fixed_viewport_clamp_scroll_value):
-   * pinned to a whole-row boundary on the last page, within one tile otherwise. */
+   * capped at the scroll-range pixel remainder on the last page, within one tile otherwise. */
   const FixedViewportGeometry geo = this->fixed_viewport_geometry();
+  const int tile_height = std::max(style_.tile_height, 1);
   if (this->fixed_viewport_first_row() >= geo.max_first_row) {
-    return 0;
+    return std::clamp(*scroll_offset_px_, 0, geo.max_scroll_px % tile_height);
   }
-  return std::clamp(*scroll_offset_px_, 0, std::max(style_.tile_height, 1) - 1);
+  return std::clamp(*scroll_offset_px_, 0, tile_height - 1);
 }
 
 void AbstractGridView::scroll_offset_px_set(const int offset_px)
@@ -261,7 +274,7 @@ void AbstractGridView::scroll_offset_px_set(const int offset_px)
 
 int AbstractGridView::fixed_viewport_max_scroll_px() const
 {
-  return this->fixed_viewport_geometry().max_first_row * style_.tile_height;
+  return this->fixed_viewport_geometry().max_scroll_px;
 }
 
 bool AbstractGridView::supports_scrolling() const
@@ -280,8 +293,10 @@ bool AbstractGridView::is_fully_visible() const
   if (this->get_item_count_filtered() == 0) {
     return true;
   }
-  const FixedViewportGeometry geo = this->fixed_viewport_geometry();
-  return geo.content_rows <= geo.visible_rows;
+  /* Pixel-exact: fully visible when the whole content fits within the raw viewport height. When
+   * the viewport is taller than the whole visible rows, a partial bottom row of the *last* content
+   * row can still make the content overflow, so compare heights rather than row counts. */
+  return this->fixed_viewport_geometry().max_scroll_px == 0;
 }
 
 void AbstractGridView::scroll(const ViewScrollDirection direction)
@@ -486,13 +501,16 @@ void AbstractGridView::draw_overlays(const ARegion &region, const Block &block) 
   {
     const FixedViewportGeometry geo = this->fixed_viewport_geometry();
     const int max_scroll_px = this->fixed_viewport_max_scroll_px();
-    if (geo.content_rows > geo.visible_rows && max_scroll_px > 0) {
+    if (max_scroll_px > 0) {
       const int tile_h = std::max(style_.tile_height, 1);
       const float scroll_px = float(first_row * tile_h + this->scroll_offset_px());
       const float track_h = float(BLI_rcti_size_y(&pixel_bounds));
       const float thumb_w = 4.0f * scale_factor;
       const float min_thumb_h = std::min(float(UI_UNIT_Y) * scale_factor, track_h);
-      const float thumb_h = std::max(track_h * float(geo.visible_rows) / float(geo.content_rows),
+      /* Pixel-exact thumb: viewport-to-content height ratio, so a partial bottom row sizes the
+       * thumb proportionally instead of rounding to whole rows. */
+      const float content_height = float(std::max(geo.content_rows * tile_h, 1));
+      const float thumb_h = std::max(track_h * float(geo.viewport_height) / content_height,
                                      min_thumb_h);
       const float travel = std::max(track_h - thumb_h, 0.0f);
       const float frac = std::clamp(scroll_px / float(max_scroll_px), 0.0f, 1.0f);
@@ -1446,10 +1464,14 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
      * #Layout::view_scroll_clip_set): the buffer/partially scrolled rows built below overflow the
      * window and are cut at its edges instead of growing the popup. #ui_units_y_set fixes the
      * estimated height to the window too, so siblings below the grid are laid out unaffected by
-     * the overflow. Skipped while everything fits: no scrolling, no overflow to clip. */
+     * the overflow. Skipped while everything fits: no scrolling, no overflow to clip.
+     *
+     * The clip window is the raw pixel viewport height, not a whole-row multiple: when it is
+     * taller than the fully visible rows, the extra pixels show a partial bottom row cut at the
+     * window edge (matching the reference image grid), so no dead space is left below the grid when
+     * the tile size changes without the popover resizing. */
     if (!grid_view.is_fully_visible()) {
-      const int visible_height = grid_view.fixed_viewport_geometry().visible_rows *
-                                 style.tile_height;
+      const int visible_height = grid_view.fixed_viewport_geometry().viewport_height;
       layout.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
       layout.view_scroll_clip_set(visible_height, grid_view.scroll_offset_px());
     }
